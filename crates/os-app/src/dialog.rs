@@ -64,6 +64,8 @@ pub enum Then {
     ExportFolder,
     OpenProject,
     LoadTheme,
+    /// The Arpeggiate dialog's folder button (spec: ui/piano-arpeggiate.md §1).
+    ArpPattern,
     PluginFolder,
     /// Save preset as... for the plugin with this key (`plugins::Plugins::hosted`).
     SavePreset(usize),

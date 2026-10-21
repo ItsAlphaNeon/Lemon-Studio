@@ -40,6 +40,8 @@ pub enum Win {
     Touch,
     /// The piano roll's Strum dialog (spec: ui/piano-strum.md).
     Strum,
+    /// The piano roll's Arpeggiate dialog (spec: ui/piano-arpeggiate.md).
+    Arp,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -169,6 +171,8 @@ pub enum Action {
     Touch(crate::touch::TouchAct),
     /// The Strum dialog's switches and buttons (spec: ui/piano-strum.md).
     Strum(crate::strum::Act),
+    /// The Arpeggiate dialog's buttons, switches and menus (spec: ui/piano-arpeggiate.md).
+    Arp(crate::arpeggiate::Act),
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
     MonParam(usize),
     MonReset,
@@ -869,6 +873,8 @@ pub struct State {
     pub touch: crate::touch::TouchUi,
     /// The piano roll's Strum dialog: where it is, its settings and its preview session.
     pub strum: crate::strum::StrumUi,
+    /// The piano roll's Arpeggiate dialog: where it is, its settings and pattern, its preview session.
+    pub arp: crate::arpeggiate::ArpUi,
     pub rec: crate::record::Rec,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
@@ -1286,6 +1292,7 @@ impl App {
                 tapper: Default::default(),
                 touch: Default::default(),
                 strum: Default::default(),
+                arp: Default::default(),
                 rec: Default::default(),
                 toggles: vec!["typing"],
                 clock: crate::clock::Clock::load(),
@@ -1776,6 +1783,11 @@ impl App {
             Then::LoadTheme => {
                 if let Some(p) = file {
                     self.load_theme_file(&p);
+                }
+            }
+            Then::ArpPattern => {
+                if let Some(p) = file {
+                    self.arp_command(crate::arpeggiate::ACmd::Pattern(Some(p)));
                 }
             }
             Then::PluginFolder => {
@@ -2465,7 +2477,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -2489,6 +2501,7 @@ impl App {
             Win::Tapper => Some(views::tapper::rect(s)),
             Win::Touch => Some(views::touch::rect(s)),
             Win::Strum => Some(views::strum::rect(s)),
+            Win::Arp => Some(views::arpeggiate::rect(s)),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -2861,6 +2874,60 @@ impl App {
         self.invalidate();
     }
 
+    // ---------------------------------------------------------------- Arpeggiate dialog (spec: ui/piano-arpeggiate.md)
+
+    /// Tools ▸ Arpeggiate… and Alt+A: open the dialog in front (centred over the main window the first time, then where
+    /// it was left) on the piano roll's notes, previewing the settings last accepted (§1). Open already: to the front.
+    pub(crate) fn open_arp(&mut self) {
+        let s = &mut self.state;
+        if !s.shown(Win::Arp) {
+            if !s.arp.placed {
+                let (w, h) = views::arpeggiate::SIZE;
+                s.arp.pos = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::work_y(s)).round());
+                s.arp.placed = true;
+            }
+            crate::arpeggiate::open(s);
+        }
+        s.raise(Win::Arp);
+        self.invalidate();
+    }
+
+    fn arp_act(&mut self, a: crate::arpeggiate::Act) {
+        use crate::arpeggiate::{self as arp, Act, Menu};
+        let s = &mut self.state;
+        match a {
+            Act::Accept => {
+                s.message = Some(arp::accept(s));
+                s.hide(Win::Arp);
+            }
+            Act::Folder => {
+                let dir = s.arp.pattern.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf)).unwrap_or_else(arp::folder);
+                let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Load arpeggiator pattern", "arpeggiator", crate::dialog::Then::ArpPattern)
+                    .filter("Score", &["fsc"])
+                    .start(Some(&dir));
+                self.file_dialog(dlg);
+            }
+            Act::Menu(m) => {
+                let items = match m {
+                    Menu::Pattern => arp::pattern_menu(&s.arp.pattern, &arp::folder()),
+                    m => arp::option_menu(&s.arp.set, m),
+                };
+                let (x, y) = self.mouse;
+                self.state.playlist.popup = Some(crate::playlist::Popup { x, y, items, sub: None });
+            }
+            a => arp::act(s, a),
+        }
+        self.invalidate();
+    }
+
+    /// A pattern, direction or sync picked for the Arpeggiate dialog (its menus, its file dialog).
+    pub(crate) fn arp_command(&mut self, c: crate::arpeggiate::ACmd) {
+        if let Some(m) = crate::arpeggiate::command(&mut self.state, c) {
+            self.state.message = Some(m);
+        }
+        self.invalidate();
+    }
+
     // ---------------------------------------------------------------- Tempo tapper (spec: ui/tempo-tapper.md)
 
     /// VIEW > Tempo tapper and Ctrl+F5: open it (or bring it to the front), centred over the main window the first
@@ -2956,6 +3023,7 @@ impl App {
             Win::Tapper => self.damage_rect(views::tapper::bounds(&self.state)),
             Win::Touch => self.damage_rect(views::touch::bounds(&self.state)),
             Win::Strum => self.damage_rect(views::strum::bounds(&self.state)),
+            Win::Arp => self.damage_rect(views::arpeggiate::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
             _ => self.invalidate(),
         }
@@ -4915,6 +4983,7 @@ impl App {
             Win::Tapper => views::tapper::bounds(&self.state),
             Win::Touch => views::touch::bounds(&self.state),
             Win::Strum => views::strum::bounds(&self.state),
+            Win::Arp => views::arpeggiate::bounds(&self.state),
             Win::ChannelRack => views::rack::bounds(&self.state),
             w => self.state.win_rect(w).outset(5.0),
         }
@@ -6777,6 +6846,7 @@ impl App {
             Action::Tapper(a) => self.tapper_act(a),
             Action::Touch(a) => self.touch_act(a),
             Action::Strum(a) => self.strum_act(a),
+            Action::Arp(a) => self.arp_act(a),
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
@@ -7032,6 +7102,7 @@ impl App {
                     Win::Tapper => s.tapper.pos,
                     Win::Touch => s.touch.pos,
                     Win::Strum => s.strum.pos,
+                    Win::Arp => s.arp.pos,
                     Win::ChannelRack => s.rack_pos,
                     w => {
                         // Start from the rect as shown (kept on screen), then move it.
@@ -7077,6 +7148,11 @@ impl App {
             Action::CloseWin(Win::Strum) => {
                 crate::strum::cancel(s);
                 s.hide(Win::Strum);
+                self.damage_win(Win::PianoRoll);
+            }
+            Action::CloseWin(Win::Arp) => {
+                crate::arpeggiate::cancel(s);
+                s.hide(Win::Arp);
                 self.damage_win(Win::PianoRoll);
             }
             Action::CloseWin(w) => s.hide(w),
@@ -7579,7 +7655,7 @@ pub(crate) fn lift_windows(s: &mut State, dy: f32) {
     for w in &mut s.wins {
         lift(&mut w.rect.y);
     }
-    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos, &mut s.strum.pos] {
+    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos, &mut s.strum.pos, &mut s.arp.pos] {
         lift(&mut pos.1);
     }
 }
@@ -13780,7 +13856,7 @@ mod tests {
     /// cycling and the wheel zooms, driven through `App::key` / `App::wheel` like the shell does.
     #[test]
     fn piano_shortcuts() {
-        use crate::piano_tools::{Arp, NCmd, Sub};
+        use crate::piano_tools::{NCmd, Sub};
         use crate::playlist::Cmd;
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
@@ -13844,9 +13920,9 @@ mod tests {
         assert_eq!(mine(&app), vec![(96, 72, 62)]);
         assert_eq!(app.state.piano.clipboard.len(), 3);
 
-        // Alt+A / R / Q / U open their preset menus; picking an entry runs it.
+        // Alt+R / Q / U open their preset menus; picking an entry runs it.
         put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
-        for (k, sub) in [("a", Sub::Arpeggiate), ("r", Sub::Randomize), ("q", Sub::Quantize), ("u", Sub::Chop)] {
+        for (k, sub) in [("r", Sub::Randomize), ("q", Sub::Quantize), ("u", Sub::Chop)] {
             key(&mut app, k, false, true, false);
             let pop = app.state.playlist.popup.take().unwrap_or_else(|| panic!("Alt+{k} opens a menu"));
             assert!(pop.items.iter().all(|i| i.sep || matches!(i.cmd, Cmd::Piano(_))), "{sub:?}");
@@ -13890,9 +13966,49 @@ mod tests {
         app.act(Action::Strum(Act::Reset));
         assert_eq!(chord(&app), vec![0, 0, 0]);
         app.act(Action::CloseWin(Win::Strum));
-        put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
-        crate::playlist::run(&mut app, Cmd::Piano(NCmd::Arpeggiate(Arp::Up, 16)));
-        assert_eq!(mine(&app).iter().map(|n| n.2).collect::<Vec<_>>(), vec![60, 64, 67, 60]);
+
+        // Alt+A opens the Arpeggiate dialog (spec: ui/piano-arpeggiate.md): the Default pattern previews at once, ×
+        // puts the notes back, a menu entry changes the preview, Accept is one undo step.
+        {
+            use crate::arpeggiate::{ACmd, Act as AAct, Knob as AKnob, Menu, Sync};
+            put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
+            let keys = |app: &App| mine(app).iter().map(|n| n.2).collect::<Vec<_>>();
+            key(&mut app, "a", false, true, false);
+            assert!(app.state.shown(Win::Arp) && app.state.in_front(Win::Arp));
+            assert_eq!(keys(&app), vec![60, 64, 67, 60], "previewed with the Default pattern");
+            app.act(Action::CloseWin(Win::Arp));
+            assert_eq!(keys(&app), vec![60, 64, 67]);
+            key(&mut app, "a", false, true, false);
+            frame(&mut app, &mut c, None);
+            let range = hit_rect(&app, &Action::Knob(KnobId::Arp(AKnob::Range)));
+            app.mouse_move(range.cx(), range.cy());
+            app.wheel(0.0, 1.0, false, false);
+            assert_eq!(app.state.arp.set.range, 2);
+            assert_eq!(app.hint.as_ref(), "Range: 2");
+            assert_eq!(keys(&app), vec![60, 64, 67, 72], "the second repetition an octave up");
+            app.act(Action::Arp(AAct::Menu(Menu::Sync)));
+            let pop = app.state.playlist.popup.take().expect("Sync opens its menu");
+            assert_eq!(pop.items.iter().map(|i| i.label.as_ref()).collect::<Vec<_>>(), ["Time", "Block", "Chord"]);
+            crate::playlist::run(&mut app, Cmd::Arp(ACmd::Sync(Sync::Block)));
+            assert_eq!(app.state.arp.set.sync, Sync::Block);
+            app.act(Action::Arp(AAct::Menu(Menu::Pattern)));
+            let pop = app.state.playlist.popup.take().expect("the pattern menu");
+            assert_eq!(pop.items[0].label, "Default");
+            frame(&mut app, &mut c, None);
+            let accept = hit_rect(&app, &Action::Arp(AAct::Accept));
+            app.mouse_move(accept.cx(), accept.cy());
+            app.mouse_down();
+            app.mouse_up();
+            assert!(!app.state.shown(Win::Arp));
+            assert_eq!(keys(&app), vec![60, 64, 67, 72]);
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(keys(&app), vec![60, 64, 67], "one undo step");
+            key(&mut app, "a", false, true, false);
+            assert_eq!(app.state.arp.set.range, 2, "reopened on the accepted settings");
+            app.act(Action::Arp(AAct::Reset));
+            assert_eq!(keys(&app), vec![60, 64, 67, 60]);
+            app.act(Action::CloseWin(Win::Arp));
+        }
         frame(&mut app, &mut c, None);
 
         // The toolbar's tools button opens the Tools menu.
