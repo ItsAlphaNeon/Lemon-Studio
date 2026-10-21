@@ -11165,6 +11165,64 @@ mod tests {
         assert_eq!(app.state.pending_open, Some(row), "Lemon Sampler's window opens");
     }
 
+    /// A minute-long audio clip whose file has a `smpl` loop (as FL's exports write), exported as the whole song: the
+    /// clip plays the file through once, frame for frame to its end, without jumping back at the loop's end (FL's
+    /// clip channels never use loop points: sampler flags 258, spec: audio/audio-clips.md). Also for a clip channel
+    /// without sampler flags (made before they were set).
+    #[test]
+    fn a_long_audio_clip_exports_once() {
+        use std::time::Duration;
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::default();
+        a.plugins.available = crate::plugins::builtin();
+        a.plugins.set_rate(48000);
+        let n = 60 * 48000;
+        let level = |f: usize| 0.1 + 0.8 * f as f32 / n as f32;
+        let wav = std::env::temp_dir().join(format!("os-app-long-clip-{}.wav", std::process::id()));
+        let src: Vec<f32> = (0..n).flat_map(|f| [level(f), level(f)]).collect();
+        let mut bytes = Vec::new();
+        os_engine::wav::write_f32_stereo(&mut bytes, 48000, &src).unwrap();
+        // A `smpl` chunk with one loop over the first 50 seconds.
+        let words: [u32; 15] = [0, 0, 20833, 60, 0, 0, 0, 1, 0, 0, 0, 0, 50 * 48000, 0, 0];
+        bytes.extend_from_slice(b"smpl");
+        bytes.extend_from_slice(&60u32.to_le_bytes());
+        bytes.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+        let riff = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+        std::fs::write(&wav, &bytes).unwrap();
+        crate::playlist::add_audio_clip(&mut a.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let ch = a.state.project.channels.last_mut().unwrap();
+        assert_eq!(ch.sound.sampler_flags, Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), "FL's clip channel flags");
+        ch.sound.sampler_flags = None;
+        a.plugin_tick();
+        a.transport.set_instruments(a.plugins.instruments());
+        let p = crate::rack::play_project(&a.state);
+        let out = std::env::temp_dir().join(format!("os-app-long-clip-{}-export.wav", std::process::id()));
+        a.plugins.set_offline(true);
+        a.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
+        let t0 = std::time::Instant::now();
+        loop {
+            match a.transport.export_status() {
+                crate::transport::Export::Done(r) => break assert!(r.is_ok(), "{r:?}"),
+                _ if t0.elapsed() > Duration::from_secs(120) => panic!("export did not finish"),
+                _ => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        let bytes = std::fs::read(&out).expect("file written");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&wav);
+        let left: Vec<f32> = bytes[44..].chunks_exact(8).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        // Every quarter second: the sample's level while it plays, silence after it.
+        let wrong: Vec<(f32, f32, f32)> = (0..left.len())
+            .step_by(12000)
+            .filter_map(|f| {
+                let want = if f < n - 100 { level(f) } else if f > n + 100 { 0.0 } else { return None };
+                ((left[f] - want).abs() > 0.01).then_some((f as f32 / 48000.0, left[f], want))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{} of {} frames: {:?}", wrong.len(), left.len(), &wrong[..wrong.len().min(8)]);
+    }
+
     /// One sample on one playlist track twice, the copy starting half way through the first, with Project ▸ Automatic
     /// crossfades on, exported as FILE ▸ Export audio does it (one audio clip channel, played by Lemon Sampler): the
     /// level stays flat through the overlap and the second clip plays to its own end (spec: audio/audio-clips.md

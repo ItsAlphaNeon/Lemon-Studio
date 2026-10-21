@@ -1879,7 +1879,8 @@ pub fn add_audio_clip_as(s: &mut State, path: &str, track: u16, tick: u32, name:
         mixer_track,
         sample_path: Some(path.to_string()),
         layer_children: Vec::new(),
-        envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+        envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
+        sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
     });
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Audio;

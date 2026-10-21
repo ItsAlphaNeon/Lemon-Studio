@@ -623,6 +623,9 @@ impl ChannelSound {
     pub const KEEP_ON_DISK: u32 = 0x100;
     /// Flags of a channel without event 143 (FL's new sampler channel).
     pub const DEFAULT_FLAGS: u32 = Self::LOAD_REGIONS | Self::USE_LOOP;
+    /// Flags of FL's audio clip channels (258, spec: audio/audio-clips.md): no Use loop points, so a clip plays a
+    /// file's `smpl` loop through once.
+    pub const AUDIO_CLIP_FLAGS: u32 = Self::LOAD_REGIONS | Self::KEEP_ON_DISK;
 
     /// The sample start offset (share of the sample).
     pub fn start_offset(&self) -> f64 {

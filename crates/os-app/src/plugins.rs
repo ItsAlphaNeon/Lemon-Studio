@@ -1179,7 +1179,7 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
             params.push(format!("\"{id}\":{v}"));
         }
     }
-    for (id, v) in sample_params(&ch.sound) {
+    for (id, v) in sample_params(&ch.sound, ch.kind == os_model::ChannelKind::AudioClip) {
         params.push(format!("\"{id}\":{v}"));
     }
     // Factory placeholders (`%FLStudioFactoryData%`...) become real paths: the plugin opens files directly.
@@ -1490,8 +1490,8 @@ fn stretch_params(sound: &os_model::ChannelSound) -> [(&'static str, serde_json:
 /// Lemon Sampler's parameters for a channel's sample settings: start and length, the precomputed effects and the loop
 /// options (spec: audio/precomputed-effects.md "Settings"), the channel filter (audio/channel-filter.md: knob
 /// positions = stored / 256) and the declick mode (audio/declick.md). "Use loop points" only when the file has the
-/// sampler flags (value 8).
-fn sample_params(sound: &os_model::ChannelSound) -> Vec<(&'static str, serde_json::Value)> {
+/// sampler flags (value 8), or off on an audio clip channel (`clip`) without them: FL's clips never loop.
+fn sample_params(sound: &os_model::ChannelSound, clip: bool) -> Vec<(&'static str, serde_json::Value)> {
     use lemon_sampler::params::{unit, Unit};
     use os_model::SampleFx;
     use serde_json::json;
@@ -1532,8 +1532,10 @@ fn sample_params(sound: &os_model::ChannelSound) -> Vec<(&'static str, serde_jso
         // Lemon Sampler's list holds modes 0 to 5: mode 6 (valid only as stored data) plays as mode 0 (Lemon Studio).
         ("declick", json!({ "i32": if sound.declick <= 5 { i32::from(sound.declick) } else { 0 } })),
     ];
-    if let Some(flags) = sound.sampler_flags {
-        out.push(("loop_use", b(flags & os_model::ChannelSound::USE_LOOP != 0)));
+    match sound.sampler_flags {
+        Some(flags) => out.push(("loop_use", b(flags & os_model::ChannelSound::USE_LOOP != 0))),
+        None if clip => out.push(("loop_use", b(false))),
+        None => {}
     }
     out
 }
