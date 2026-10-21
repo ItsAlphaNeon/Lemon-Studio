@@ -137,6 +137,9 @@ fn formats(ui: &mut Ui, f: &ExportForm, g: Rect, boxes: &mut Vec<(u8, Rect)>) {
             combo(ui, f, Rect::new(x, y + 1.0, w, 22.0), k, boxes);
             x += w + 6.0;
         }
+        if i == crate::export::MP3 {
+            check_k(ui, f, x + 4.0, y + 12.0, 11);
+        }
     }
 }
 

@@ -75,6 +75,10 @@ pub struct Options {
     pub tempo: bool,
     /// The file manager opens on the first file when done.
     pub reveal: bool,
+    /// MP3 files start with a LAME / Info frame giving the encoder's delay and padding, so gapless players trim them.
+    /// FL and Lemon Studio play every frame, the Info frame as 1152 frames of silence (audio/sampler.md), so off is
+    /// a file that sits earlier in a DAW and on is one that plays seamlessly elsewhere.
+    pub mp3_gapless: bool,
 }
 
 impl Default for Options {
@@ -101,6 +105,7 @@ impl Default for Options {
             note_markers: false,
             tempo: false,
             reveal: false,
+            mp3_gapless: true,
         }
     }
 }
@@ -118,12 +123,12 @@ const FLAG_KEYS: [&str; 12] = [
     "export_note_markers",
     "export_tempo",
     "export_reveal",
-    "export_unused",
+    "export_mp3_gapless",
 ];
 
 impl Options {
-    /// The switches, in `FLAG_KEYS` order (the last is not used).
-    fn flags(&mut self) -> [&mut bool; 11] {
+    /// The switches, in `FLAG_KEYS` order.
+    fn flags(&mut self) -> [&mut bool; 12] {
         [
             &mut self.dither,
             &mut self.hq,
@@ -136,6 +141,7 @@ impl Options {
             &mut self.note_markers,
             &mut self.tempo,
             &mut self.reveal,
+            &mut self.mp3_gapless,
         ]
     }
 
@@ -472,9 +478,9 @@ fn encode(o: &Options, f: usize, path: &Path, audio: &[f32], rate: u32, meta: &M
             // MP3 goes up to 48 kHz: higher rates are brought down to 48 kHz for it.
             if rate > 48000 {
                 let down = resample(audio, usize::from(ch), rate, 48000, o.points);
-                mp3_bytes(&down, ch, 48000, o.mp3_kbps).map_err(err)?
+                mp3_bytes(&down, ch, 48000, o.mp3_kbps, o.mp3_gapless).map_err(err)?
             } else {
-                mp3_bytes(audio, ch, rate, o.mp3_kbps).map_err(err)?
+                mp3_bytes(audio, ch, rate, o.mp3_kbps, o.mp3_gapless).map_err(err)?
             }
         }
         _ => ogg_bytes(audio, ch, rate, o.ogg_kbps).map_err(err)?,
@@ -615,9 +621,10 @@ fn flac_bytes(audio: &[f32], ch: u16, rate: u32, bits: u32, level: u8, dither: b
     Ok(bytes)
 }
 
-/// An MP3 file at a constant `kbps`, LAME's best quality.
-fn mp3_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32) -> Result<Vec<u8>, String> {
-    use mp3lame_encoder::{Bitrate, Builder, FlushNoGap, InterleavedPcm, MonoPcm, Quality};
+/// An MP3 file at a constant `kbps`, LAME's best quality; `gapless`: with LAME's Info frame first (the encoder's delay
+/// and padding, for players that trim them).
+fn mp3_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32, gapless: bool) -> Result<Vec<u8>, String> {
+    use mp3lame_encoder::{Bitrate, Builder, FlushGap, InterleavedPcm, MonoPcm, Quality};
     let rate_of = |k| match k {
         64 => Bitrate::Kbps64,
         96 => Bitrate::Kbps96,
@@ -633,6 +640,7 @@ fn mp3_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32) -> Result<Vec<u8>, St
     b.set_sample_rate(rate).map_err(|e| format!("MP3: {e:?}"))?;
     b.set_brate(rate_of(kbps)).map_err(|e| format!("MP3: {e:?}"))?;
     b.set_quality(Quality::Best).map_err(|e| format!("MP3: {e:?}"))?;
+    b.set_to_write_vbr_tag(gapless).map_err(|e| format!("MP3: {e:?}"))?;
     let mut enc = b.build().map_err(|e| format!("MP3: {e:?}"))?;
     let mut out = Vec::new();
     let frames = audio.len() / usize::from(ch);
@@ -642,7 +650,15 @@ fn mp3_bytes(audio: &[f32], ch: u16, rate: u32, kbps: u32) -> Result<Vec<u8>, St
     } else {
         enc.encode_to_vec(InterleavedPcm(audio), &mut out).map_err(|e| format!("MP3: {e:?}"))?;
     }
-    enc.flush_to_vec::<FlushNoGap>(&mut out).map_err(|e| format!("MP3: {e:?}"))?;
+    // A full flush: the no-gap one (for joining streams) leaves the last samples unencoded.
+    enc.flush_to_vec::<FlushGap>(&mut out).map_err(|e| format!("MP3: {e:?}"))?;
+    if gapless {
+        // LAME leaves a frame of the tag's size empty at the start; the finished tag goes there.
+        let mut tag = Vec::with_capacity(enc.lame_tag_size());
+        if enc.lame_tag_encode_to_vec(&mut tag).is_some() && tag.len() <= out.len() {
+            out[..tag.len()].copy_from_slice(&tag);
+        }
+    }
     Ok(out)
 }
 
@@ -725,6 +741,31 @@ mod tests {
     }
 
     /// Every format is written and read back by the decoder playback uses (symphonia), at the length written.
+    /// Gapless on: the first frame is LAME's Info frame, with the encoder's delay and padding filled in (the frame
+    /// LAME left empty is overwritten, the stream keeps its length). Off: plain audio frames.
+    #[test]
+    fn gapless_mp3_has_an_info_frame() {
+        let audio: Vec<f32> = (0..44100 * 2).map(|i| ((i / 2) as f32 * 0.05).sin() * 0.5).collect();
+        let on = mp3_bytes(&audio, 2, 44100, 192, true).unwrap();
+        let off = mp3_bytes(&audio, 2, 44100, 192, false).unwrap();
+        let find = |b: &[u8], what: &[u8]| b[..1200].windows(what.len()).position(|w| w == what);
+        let info = find(&on, b"Info").or_else(|| find(&on, b"Xing")).expect("an Info frame");
+        let lame = find(&on, b"LAME").expect("LAME's extension");
+        assert!(lame > info);
+        // The delay and padding: 12 bits each, 21 bytes after "LAME".
+        let d = &on[lame + 21..lame + 24];
+        let (delay, padding) = ((u32::from(d[0]) << 4) | (u32::from(d[1]) >> 4), ((u32::from(d[1]) & 15) << 8) | u32::from(d[2]));
+        assert!((500..=2000).contains(&delay) && padding < 2304, "delay {delay}, padding {padding}");
+        assert!(find(&off, b"Info").is_none() && find(&off, b"Xing").is_none());
+        assert!(on.len() > off.len(), "one frame more");
+        // Nothing is cut off the end: without the tag, every frame decodes, the delay in front of the audio.
+        let path = std::env::temp_dir().join(format!("os-export-gapless-{}.mp3", std::process::id()));
+        std::fs::write(&path, &off).unwrap();
+        let frames = os_engine::sample::load(&path).unwrap().frames();
+        let _ = std::fs::remove_file(&path);
+        assert!(frames >= 44100 + delay as usize, "{frames} frames");
+    }
+
     #[test]
     fn writes_every_format() {
         let dir = std::env::temp_dir().join(format!("lemon-export-test-{}", std::process::id()));

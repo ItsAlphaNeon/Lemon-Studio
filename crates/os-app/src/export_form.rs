@@ -26,7 +26,7 @@ pub const SEG_HINTS: [&str; 3] = [
     "The sound after the end: cut it, let it ring out, or wrap it to the start (a seamless loop)",
 ];
 /// The checks, by `FHit::Check` number.
-pub const CHECKS: [&str; 11] = [
+pub const CHECKS: [&str; 12] = [
     "Dither",
     "HQ for plugins",
     "Split mixer tracks",
@@ -38,8 +38,9 @@ pub const CHECKS: [&str; 11] = [
     "Note markers",
     "Tempo",
     "Open the folder when done",
+    "Gapless",
 ];
-pub const CHECK_HINTS: [&str; 11] = [
+pub const CHECK_HINTS: [&str; 12] = [
     "Triangular dither on 16 and 24-bit files",
     "Hosted plugins render in their high quality (offline) mode",
     "Also write every mixer track alone (WAV and FLAC), into a stems folder",
@@ -51,6 +52,7 @@ pub const CHECK_HINTS: [&str; 11] = [
     "Write each note's start as a marker into WAV files (Pattern)",
     "Write the tempo into WAV files",
     "Show the file in the file manager when the export is done",
+    "An Info frame first, so players that read it skip the encoder's delay (DAWs such as FL still play it as silence)",
 ];
 pub const TILE_HINTS: [&str; 4] =
     ["WAV: uncompressed audio", "FLAC: lossless compressed audio", "MP3: lossy compressed audio", "OGG: Ogg Vorbis lossy compressed audio"];
@@ -131,7 +133,8 @@ impl ExportForm {
             7 => (o.loops, wav),
             8 => (o.note_markers, wav && !self.song),
             9 => (o.tempo, wav),
-            _ => (o.reveal, true),
+            10 => (o.reveal, true),
+            _ => (o.mp3_gapless, o.formats[ex::MP3]),
         }
     }
 
@@ -148,7 +151,8 @@ impl ExportForm {
             7 => &mut o.loops,
             8 => &mut o.note_markers,
             9 => &mut o.tempo,
-            _ => &mut o.reveal,
+            10 => &mut o.reveal,
+            _ => &mut o.mp3_gapless,
         };
         *f = !*f;
     }
