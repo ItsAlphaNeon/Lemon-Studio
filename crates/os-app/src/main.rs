@@ -38,6 +38,7 @@ mod keep_on_disk;
 mod icons;
 mod init;
 mod knobs;
+mod layout;
 mod loading;
 mod logo;
 #[cfg(target_os = "macos")]
@@ -161,6 +162,9 @@ struct Shell {
     watchdog: std::sync::Arc<stall::Watchdog>,
     /// macOS: the left button went down with Control held, which is a right click there; its release is one too.
     ctrl_click: bool,
+    /// The main window's restored frame and whether it is maximized, kept for the next start as the app closes
+    /// (`layout`): the last run's at first, then followed as the window moves and resizes (`follow_frame`).
+    main_win: Option<layout::MainWin>,
 }
 
 /// Frame timing for tuning (`OS_FRAMES=<file>`): per frame the time, what was repainted (`full` or the number of
@@ -336,6 +340,32 @@ fn ui_scale(window: &Window) -> f64 {
     gui_scale(window.scale_factor())
 }
 
+/// Device pixels per unit of the window system's own window places: points on macOS, pixels elsewhere (`layout`).
+fn place_k(scale: f64) -> f64 {
+    if cfg!(target_os = "macos") { scale } else { 1.0 }
+}
+
+/// The main window's outer top-left and inner size in the window system's own units (`place_k`); `None` where a window
+/// has no position (Wayland).
+fn frame_of(window: &Window) -> Option<((i32, i32), (u32, u32))> {
+    let (p, s, k) = (window.outer_position().ok()?, window.inner_size(), place_k(window.scale_factor()));
+    let at = |v: i32| (f64::from(v) / k).round() as i32;
+    let len = |v: u32| (f64::from(v) / k).round() as u32;
+    Some(((at(p.x), at(p.y)), (len(s.width), len(s.height))))
+}
+
+/// The screens ([left, top, right, bottom]) in the window system's own units (`place_k`).
+fn screens(el: &ActiveEventLoop) -> Vec<[i32; 4]> {
+    el.available_monitors()
+        .map(|m| {
+            let (p, s, k) = (m.position(), m.size(), place_k(m.scale_factor()));
+            let at = |v: f64| (v / k).round() as i32;
+            let (x, y) = (at(f64::from(p.x)), at(f64::from(p.y)));
+            [x, y, x + at(f64::from(s.width)), y + at(f64::from(s.height))]
+        })
+        .collect()
+}
+
 fn insets(window: &Window) -> (u32, u32, u32, u32) {
     if is_maximized(window) || window.fullscreen().is_some() {
         return (0, 0, 0, 0);
@@ -464,6 +494,23 @@ impl Shell {
         (((x - f64::from(self.inset.0)) / k) as f32, ((y - f64::from(self.inset.1)) / k) as f32)
     }
 
+    /// Follows the main window for `layout`: its frame while it is neither maximized, minimized nor full screen, and
+    /// whether it is maximized (as it was while minimized).
+    fn follow_frame(&mut self, window: &Window) {
+        if window.is_minimized() == Some(true) || window.fullscreen().is_some() {
+            return;
+        }
+        let max = is_maximized(window);
+        match frame_of(window) {
+            Some((pos, size)) if !max => self.main_win = Some(layout::MainWin { pos, size, max }),
+            _ => {
+                if let Some(m) = &mut self.main_win {
+                    m.max = max;
+                }
+            }
+        }
+    }
+
     /// Ticks the app, asks for a frame when one is due and sets the next wake-up: from `about_to_wait`, or from a
     /// watchdog wake while a modal loop holds up winit's (`held`, see `stall`).
     fn step(&mut self, el: &ActiveEventLoop, held: bool) {
@@ -559,6 +606,23 @@ impl ApplicationHandler for Shell {
             }
             None => attrs,
         };
+        // Where the last run left it (`layout`), its top on the screens there are now. macOS places it at its restored
+        // frame and maximizes it once made (`set_maximized` keeps that frame to restore to).
+        let frame = self.main_win.map(|m| layout::on_screens(m, &screens(el)));
+        self.main_win = frame;
+        let attrs = match frame {
+            #[cfg(target_os = "macos")]
+            Some(m) => attrs
+                .with_position(winit::dpi::LogicalPosition::new(m.pos.0, m.pos.1))
+                .with_inner_size(LogicalSize::new(m.size.0, m.size.1))
+                .with_maximized(false),
+            #[cfg(not(target_os = "macos"))]
+            Some(m) => attrs
+                .with_position(winit::dpi::PhysicalPosition::new(m.pos.0, m.pos.1))
+                .with_inner_size(winit::dpi::PhysicalSize::new(m.size.0, m.size.1))
+                .with_maximized(m.max),
+            None => attrs,
+        };
         // App icon: resource 1, embedded by build.rs from assets/lemonstudio.ico.
         #[cfg(windows)]
         let attrs = {
@@ -579,6 +643,10 @@ impl ApplicationHandler for Shell {
             attrs.with_window_icon(linux_icon())
         };
         let window = Rc::new(el.create_window(attrs).expect("create window"));
+        #[cfg(target_os = "macos")]
+        if frame.is_some_and(|m| m.max) {
+            set_maximized(&window, true);
+        }
         let context = softbuffer::Context::new(window.clone()).expect("graphics context");
         self.surface = Some(softbuffer::Surface::new(&context, window.clone()).expect("surface"));
         // Hosted plugins: windows are owned by the main window; scanning loads the .clap files found.
@@ -636,15 +704,25 @@ impl ApplicationHandler for Shell {
         self.step(el, false);
     }
 
-    /// macOS: a quit the user agreed to (`macos::answer_quit`) ends the process from AppKit, after this: the plugin
-    /// windows close and the instances go as they do when `run_app` returns.
-    #[cfg(target_os = "macos")]
+    /// The app closes: where the windows are is kept for the next start (`layout`). macOS: a quit the user agreed to
+    /// (`macos::answer_quit`) ends the process from AppKit, after this: the plugin windows close and the instances go as
+    /// they do when `run_app` returns.
     fn exiting(&mut self, _el: &ActiveEventLoop) {
-        if os_host::guard::tripped() {
-            return;
+        if let Some(window) = self.window.clone() {
+            self.follow_frame(&window);
         }
-        self.app.plugins.clear();
-        plugins::sweep_retired();
+        if let Some(m) = self.main_win {
+            layout::save_main(m);
+        }
+        layout::save(&self.app.state);
+        #[cfg(target_os = "macos")]
+        {
+            if os_host::guard::tripped() {
+                return;
+            }
+            self.app.plugins.clear();
+            plugins::sweep_retired();
+        }
     }
 
     /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor.
@@ -946,10 +1024,12 @@ impl ApplicationHandler for Shell {
                 window.request_redraw();
             }
             WindowEvent::Resized(_) => {
+                self.follow_frame(&window);
                 self.inset = insets(&window);
                 self.app.invalidate();
                 window.request_redraw();
             }
+            WindowEvent::Moved(_) => self.follow_frame(&window),
             WindowEvent::RedrawRequested => {
                 let size = window.inner_size();
                 let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
@@ -1626,6 +1706,8 @@ fn main() {
         // Ask for data folder "On startup": the New project form over it (spec: ui/data-folder.md §7).
         app.startup_form();
     }
+    // The windows where the last run left them.
+    layout::restore(&mut app.state);
     // MIDI controllers play the selected channel (spec: ui/midi-input.md).
     app.midi = midi_in::MidiIn::open(wake_ui);
     app.state.midi_inputs = app.midi.names.clone();
@@ -1660,6 +1742,7 @@ fn main() {
         frames: FrameLog::open(),
         watchdog,
         ctrl_click: false,
+        main_win: layout::main_win(),
     };
     event_loop.run_app(&mut shell).expect("run");
     // After a contained plugin crash the process ends here, before plugin files are unloaded (a stopped plugin's code
