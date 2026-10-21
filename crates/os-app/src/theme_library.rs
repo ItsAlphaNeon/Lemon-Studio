@@ -509,7 +509,7 @@ impl App {
 }
 
 /// Opens the system file browser at `path`, selected.
-fn show_in_folder(path: &std::path::Path) {
+pub(crate) fn show_in_folder(path: &std::path::Path) {
     #[cfg(windows)]
     let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
     #[cfg(target_os = "macos")]

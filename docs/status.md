@@ -149,10 +149,19 @@ Not yet: Align all channel editors, Arrange windows.
 - A file of 30 s or more loaded into a sampler channel turns its Keep on disk on (General settings ▸
   Advanced ▸ Auto keep long audio on disk)
 
-## 🚧 Exporting audio
+## ✅ Exporting audio
 
-- Song or pattern to a WAV file (32-bit float)
-- Not yet: MP3 or FLAC
+- FILE ▸ Export audio (Ctrl+R) and Export MP3 (Shift+Ctrl+R) open the Export form: a name and folder, then the song
+  or the current pattern, the whole of it or the time selection, and the tail cut, rung out or wrapped to the start
+- Several formats at once: WAV (16 or 24-bit, 32-bit float), FLAC (16 or 24-bit, levels 0-8), MP3 and OGG Vorbis
+  (64-320 kbps)
+- Sample rate (the device's, or 44.1-192 kHz by resampling the mix), stereo or mono (merged, left, right),
+  interpolation from 2-point linear to 512-point sinc, triangular dither on integer formats, plugins' HQ mode
+- Split mixer tracks into a stems folder (WAV and FLAC), with or without the master; insert and master effects can be
+  left out
+- WAV files can carry markers, loop points, note markers and the tempo (`cue `, `smpl`, `acid` chunks)
+- The choices are remembered; the folder can open when the export is done
+- Not on purpose: FL's online and sharing exports
 
 ## 🚧 Note input
 

@@ -60,7 +60,8 @@ pub enum Then {
     Discard(Next),
     /// Where to save the project (Save as, or Save of a project without a file), then `Next` once it is saved.
     SaveProject(Option<Next>),
-    ExportWav,
+    /// The Export form's folder button (`App::export_folder_chosen`).
+    ExportFolder,
     OpenProject,
     LoadTheme,
     PluginFolder,

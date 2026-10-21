@@ -95,7 +95,7 @@ pub struct Shared {
     /// An export is running, its progress in 1/1000 of the song, and its outcome once done.
     exporting: AtomicBool,
     export_permille: AtomicU32,
-    export_result: Mutex<Option<Result<f64, String>>>,
+    export_result: Mutex<Option<Result<(f64, Vec<PathBuf>), String>>>,
     /// Peak of the last block, f32 bits, per side.
     peak_l: AtomicU32,
     peak_r: AtomicU32,
@@ -232,8 +232,8 @@ enum Cmd {
     /// An instrument's editor opened or the last one closed (`Transport::listen`).
     Listen(bool),
     Stop,
-    /// Render to a WAV file with the hosted plugins (FILE > Export): project, mode, sample rate, file.
-    Export(Box<Project>, PlayMode, u32, PathBuf),
+    /// Render with the hosted plugins and write the files (FILE > Export): project, mode, sample rate, the export.
+    Export(Box<Project>, PlayMode, u32, Box<crate::export::Job>),
     /// The audio settings changed: move the playback to a new stream, close the live and preview streams.
     Reopen,
     /// Auto close (`Transport::close_device`): every stream closes; the playback keeps its place for `Open`.
@@ -253,8 +253,8 @@ pub enum Export {
     Idle,
     /// Rendering: 0..1 of the song.
     Running(f32),
-    /// Finished: the length written in seconds, or what went wrong.
-    Done(Result<f64, String>),
+    /// Finished: the length written in seconds and the files, or what went wrong.
+    Done(Result<(f64, Vec<PathBuf>), String>),
 }
 
 /// The Audio > Mixer transport settings a start of playback goes by (Play, and a jump of the position while playing,
@@ -388,15 +388,15 @@ impl Transport {
         let _ = self.tx.send(Cmd::AsioPanel);
     }
 
-    /// Renders `project` offline to a 32-bit float WAV file at `rate`, with the hosted instruments and effects, on the
-    /// audio thread: playback, previews and live notes stop at once and nothing else processes the plugins meanwhile.
-    /// Follow it with `export_status`.
-    pub fn export(&self, project: &Project, mode: PlayMode, rate: u32, path: PathBuf) {
+    /// Renders `project` offline at `rate`, with the hosted instruments and effects, and writes the files of `job`, on
+    /// the audio thread: playback, previews and live notes stop at once and nothing else processes the plugins
+    /// meanwhile. Follow it with `export_status`.
+    pub fn export(&self, project: &Project, mode: PlayMode, rate: u32, job: crate::export::Job) {
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.shared.state.store(STOPPED, Ordering::Release);
         self.shared.export_permille.store(0, Ordering::Relaxed);
         self.shared.exporting.store(true, Ordering::Release);
-        let _ = self.tx.send(Cmd::Export(Box::new(project.clone()), mode, rate, path));
+        let _ = self.tx.send(Cmd::Export(Box::new(project.clone()), mode, rate, Box::new(job)));
     }
 
     /// The running export's progress, or its outcome once (then `Idle` again).
@@ -923,14 +923,22 @@ fn attach(e: &mut Engine, inst: &Instruments) {
     }
 }
 
-/// Renders a whole song (or one pass of a pattern) with the hosted plugins and writes it to `path`; returns its length
-/// in seconds. Runs on the audio thread with no stream open.
+/// Renders a whole song (or one pass of a pattern, or a span of either) with the hosted plugins and writes the files of
+/// `job`; returns the written length in seconds and the files. Runs on the audio thread with no stream open.
 // spec: audio/export.md
-fn export(project: &Project, mode: PlayMode, rate: u32, path: &std::path::Path, library: &mut SampleLibrary, inst: &Instruments, shared: &Shared) -> Result<f64, String> {
+fn export(project: &Project, mode: PlayMode, rate: u32, job: &crate::export::Job, library: &mut SampleLibrary, inst: &Instruments, shared: &Shared) -> Result<(f64, Vec<PathBuf>), String> {
+    let o = &job.options;
     let mut e = Engine::new(project, library, rate, mode);
     attach(&mut e, inst);
-    let len = e.length().max(1);
-    let cap = len + u64::from(rate) * EXPORT_TAIL_MAX_SECS;
+    e.set_interpolation(o.points);
+    e.set_effects(o.insert_fx, o.master_fx);
+    if let Some((a, b)) = job.span {
+        e.set_span(a, b);
+    }
+    e.set_track_capture(o.split);
+    let len = e.frames_left().max(1);
+    // Cut needs nothing past the song's end.
+    let cap = if o.tail == crate::export::Tail::Cut { len } else { len + u64::from(rate) * EXPORT_TAIL_MAX_SECS };
     let mut audio: Vec<f32> = Vec::with_capacity(2 * (len as usize + rate as usize));
     loop {
         let done = e.render_ticks(32, &mut audio);
@@ -940,11 +948,12 @@ fn export(project: &Project, mode: PlayMode, rate: u32, path: &std::path::Path, 
             break;
         }
     }
+    let tracks = e.take_track_audio();
     drop(e);
-    let file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut w = std::io::BufWriter::new(file);
-    os_engine::wav::write_f32_stereo(&mut w, rate, &audio).and_then(|_| std::io::Write::flush(&mut w)).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(audio.len() as f64 / 2.0 / f64::from(rate))
+    // The file's length: the song, plus the tail when it rings out.
+    let frames = if o.tail == crate::export::Tail::Ring { audio.len() as u64 / 2 } else { len };
+    let files = crate::export::write(job, rate, audio, tracks, len)?;
+    Ok((frames as f64 / f64::from(rate), files))
 }
 
 /// Silences every hosted instrument (voices, tails, queued notes) and effect (tails, delay lines). Only called while no
@@ -1331,7 +1340,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             }
             #[cfg(test)]
             Ok(Cmd::FailDevice) => device.fail("test"),
-            Ok(Cmd::Export(project, mode, rate, path)) => {
+            Ok(Cmd::Export(project, mode, rate, job)) => {
                 // Every stream that could process the plugins goes at once (no fade), and they start from silence.
                 session = None;
                 live = None;
@@ -1343,7 +1352,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 reset_instruments(&inst);
                 reset_pending = false;
                 shared.rewind(0.0);
-                let result = export(&project, mode, rate, &path, &mut library, &inst, &shared);
+                let result = export(&project, mode, rate, &job, &mut library, &inst, &shared);
                 reset_instruments(&inst);
                 if let Ok(mut slot) = shared.export_result.lock() {
                     *slot = Some(result);
@@ -1963,12 +1972,12 @@ mod tests {
         let (_, project) = looping_engine();
         let t = Transport::new(None);
         let path = std::env::temp_dir().join(format!("openstudio-export-test-{}.wav", std::process::id()));
-        t.export(&project, PlayMode::Pattern(1), 48000, path.clone());
+        t.export(&project, PlayMode::Pattern(1), 48000, crate::export::Job::wav(&path));
         assert!(matches!(t.export_status(), Export::Running(_) | Export::Done(_)), "running at once");
         let t0 = Instant::now();
         let secs = loop {
             match t.export_status() {
-                Export::Done(r) => break r.expect("export"),
+                Export::Done(r) => break r.expect("export").0,
                 _ if t0.elapsed() > Duration::from_secs(30) => panic!("export did not finish"),
                 _ => std::thread::sleep(Duration::from_millis(5)),
             }

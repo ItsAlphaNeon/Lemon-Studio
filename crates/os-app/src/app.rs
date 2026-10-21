@@ -1180,8 +1180,11 @@ pub struct App {
     pub(crate) native_failed: Vec<usize>,
     /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
     loading: Option<crate::loading::Loading>,
-    /// A WAV export is rendering (FILE > Export): its file name and progress (0..1); the same panel shows, input waits.
-    export: Option<(String, f32)>,
+    /// An export is rendering (FILE > Export): its first file's name and progress (0..1); the same panel shows, input
+    /// waits.
+    pub(crate) export: Option<(String, f32)>,
+    /// The running export opens the file manager on its first file when done (Open the folder when done).
+    export_reveal: bool,
     /// `device::opens` when the hosted plugins last followed the output device's rate (`follow_device`).
     device_opens: u64,
     /// The project and tempo as last opened, saved or created: anything else has unsaved changes.
@@ -1354,6 +1357,7 @@ impl App {
             native_failed: Vec::new(),
             loading: None,
             export: None,
+            export_reveal: false,
             device_opens: 0,
             saved: (Project::default(), 0.0),
             backup: Default::default(),
@@ -1495,46 +1499,22 @@ impl App {
         if self.unsaved() { self.held_back(n) } else { self.go_on(n) }
     }
 
-    /// FILE > Export as WAV (Ctrl+R, the toolbar's render button): renders what Play would play (the playlist in SONG
-    /// mode, one pass of the current pattern in PAT mode) with every hosted instrument and effect to a 32-bit float WAV
-    /// file, at the output device's rate. Playback stops; a progress panel shows until the file is written.
+    /// The Export form's job starts (spec: audio/export.md §4): what plays (`song`, else the current pattern) renders on
+    /// the audio thread at the output device's rate; playback stops and a progress panel shows until the files are
+    /// written.
     // spec: audio/export.md
-    fn export_wav(&mut self) {
+    pub(crate) fn start_export(&mut self, job: crate::export::Job, song: bool) {
         if self.export.is_some() {
             return;
-        }
-        let p = crate::rack::play_project(&self.state);
-        let song = self.state.song_mode;
-        if song && p.arrangement().is_none_or(|a| a.clips.is_empty()) {
-            self.state.message = Some("Export: the playlist is empty (switch to PAT to export the current pattern)".into());
-            return self.invalidate();
-        }
-        if !song && p.patterns.iter().find(|q| q.number == self.state.pattern).is_none_or(|q| q.notes.is_empty()) {
-            self.state.message = Some(format!("Export: {} has no notes", crate::patterns::name_of(&self.state, self.state.pattern)));
-            return self.invalidate();
-        }
-        let stem = self.state.path.as_ref().and_then(|p| p.file_stem()).map_or_else(|| "Untitled".to_string(), |n| n.to_string_lossy().into_owned());
-        let dir = self.state.path.as_ref().and_then(|p| p.parent()).map(std::path::Path::to_path_buf);
-        let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Save, "Export as WAV", "export", crate::dialog::Then::ExportWav)
-            .filter("WAV audio", &["wav"])
-            .start(dir.as_deref())
-            .name(&format!("{stem}.wav"));
-        self.file_dialog(dlg);
-    }
-
-    /// The export's file was chosen: the render starts.
-    fn export_to(&mut self, mut target: PathBuf) {
-        if self.export.is_some() {
-            return;
-        }
-        if target.extension().is_none() {
-            target.set_extension("wav");
         }
         let p = crate::rack::play_project(&self.state);
         let rate = Transport::device_rate().unwrap_or(44100);
-        let name = target.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        self.plugins.set_offline(true);
-        self.transport.export(&p, self.play_mode(), rate, target);
+        let first = job.options.ticked().next().unwrap_or(0);
+        let name = job.file(first).file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let mode = if song { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern) };
+        self.export_reveal = job.options.reveal;
+        self.plugins.set_offline(job.options.hq);
+        self.transport.export(&p, mode, rate, job);
         self.export = Some((name, 0.0));
         self.invalidate();
     }
@@ -1551,7 +1531,15 @@ impl App {
                 self.export = None;
                 self.plugins.set_offline(false);
                 self.state.message = Some(match r {
-                    Ok(secs) => format!("Exported {}:{:02} to {name}", (secs / 60.0) as u32, (secs % 60.0) as u32),
+                    Ok((secs, files)) => {
+                        if self.export_reveal {
+                            if let Some(f) = files.first() {
+                                crate::theme_library::show_in_folder(f);
+                            }
+                        }
+                        let more = if files.len() > 1 { format!(" + {} more", files.len() - 1) } else { String::new() };
+                        format!("Exported {}:{:02} to {name}{more}", (secs / 60.0) as u32, (secs % 60.0) as u32)
+                    }
                     Err(e) => format!("Export failed: {e}"),
                 });
                 self.invalidate();
@@ -1755,9 +1743,9 @@ impl App {
                 (None, Some(n)) => self.held_back(n),
                 (None, None) => {}
             },
-            Then::ExportWav => {
+            Then::ExportFolder => {
                 if let Some(p) = file {
-                    self.export_to(p);
+                    self.export_folder_chosen(p);
                 }
             }
             Then::OpenProject => {
@@ -6126,6 +6114,7 @@ impl App {
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE)),
             Key::Character(c) if ctrl && self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_AS)),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
+            Key::Character(c) if ctrl && self.shift && !alt && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT_MP3)),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
             // TOOLS > Browser find... (spec: ui/browser-commands.md §3).
             Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("f") => self.browser_jump(crate::browser::Jump::Find),
@@ -7366,7 +7355,8 @@ impl App {
             }
             (0, FILE_OPEN) => self.ask_discard("opening another project", crate::dialog::Next::OpenDialog),
             (0, FILE_SAVE) => self.save(false),
-            (0, FILE_EXPORT) => self.export_wav(),
+            (0, FILE_EXPORT) => self.open_export(false),
+            (0, FILE_EXPORT_MP3) => self.open_export(true),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
             (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Sampler") => {
                 if let Some(index) = self.plugins.index_of(crate::plugins::LEMON_SAMPLER) {
@@ -11175,8 +11165,66 @@ mod tests {
         assert_eq!(app.state.pending_open, Some(row), "Lemon Sampler's window opens");
     }
 
+    /// A minute-long audio clip whose file has a `smpl` loop (as FL's exports write), exported as the whole song: the
+    /// clip plays the file through once, frame for frame to its end, without jumping back at the loop's end (FL's
+    /// clip channels never use loop points: sampler flags 258, spec: audio/audio-clips.md). Also for a clip channel
+    /// without sampler flags (made before they were set).
+    #[test]
+    fn a_long_audio_clip_exports_once() {
+        use std::time::Duration;
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::default();
+        a.plugins.available = crate::plugins::builtin();
+        a.plugins.set_rate(48000);
+        let n = 60 * 48000;
+        let level = |f: usize| 0.1 + 0.8 * f as f32 / n as f32;
+        let wav = std::env::temp_dir().join(format!("os-app-long-clip-{}.wav", std::process::id()));
+        let src: Vec<f32> = (0..n).flat_map(|f| [level(f), level(f)]).collect();
+        let mut bytes = Vec::new();
+        os_engine::wav::write_f32_stereo(&mut bytes, 48000, &src).unwrap();
+        // A `smpl` chunk with one loop over the first 50 seconds.
+        let words: [u32; 15] = [0, 0, 20833, 60, 0, 0, 0, 1, 0, 0, 0, 0, 50 * 48000, 0, 0];
+        bytes.extend_from_slice(b"smpl");
+        bytes.extend_from_slice(&60u32.to_le_bytes());
+        bytes.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+        let riff = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff.to_le_bytes());
+        std::fs::write(&wav, &bytes).unwrap();
+        crate::playlist::add_audio_clip(&mut a.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let ch = a.state.project.channels.last_mut().unwrap();
+        assert_eq!(ch.sound.sampler_flags, Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), "FL's clip channel flags");
+        ch.sound.sampler_flags = None;
+        a.plugin_tick();
+        a.transport.set_instruments(a.plugins.instruments());
+        let p = crate::rack::play_project(&a.state);
+        let out = std::env::temp_dir().join(format!("os-app-long-clip-{}-export.wav", std::process::id()));
+        a.plugins.set_offline(true);
+        a.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
+        let t0 = std::time::Instant::now();
+        loop {
+            match a.transport.export_status() {
+                crate::transport::Export::Done(r) => break assert!(r.is_ok(), "{r:?}"),
+                _ if t0.elapsed() > Duration::from_secs(120) => panic!("export did not finish"),
+                _ => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        let bytes = std::fs::read(&out).expect("file written");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&wav);
+        let left: Vec<f32> = bytes[44..].chunks_exact(8).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        // Every quarter second: the sample's level while it plays, silence after it.
+        let wrong: Vec<(f32, f32, f32)> = (0..left.len())
+            .step_by(12000)
+            .filter_map(|f| {
+                let want = if f < n - 100 { level(f) } else if f > n + 100 { 0.0 } else { return None };
+                ((left[f] - want).abs() > 0.01).then_some((f as f32 / 48000.0, left[f], want))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{} of {} frames: {:?}", wrong.len(), left.len(), &wrong[..wrong.len().min(8)]);
+    }
+
     /// One sample on one playlist track twice, the copy starting half way through the first, with Project ▸ Automatic
-    /// crossfades on, exported as FILE ▸ Export as WAV does it (one audio clip channel, played by Lemon Sampler): the
+    /// crossfades on, exported as FILE ▸ Export audio does it (one audio clip channel, played by Lemon Sampler): the
     /// level stays flat through the overlap and the second clip plays to its own end (spec: audio/audio-clips.md
     /// "Automatic crossfades").
     #[test]
@@ -11204,7 +11252,7 @@ mod tests {
         let p = crate::rack::play_project(&a.state);
         let out = std::env::temp_dir().join(format!("os-app-crossfade-{}-export.wav", std::process::id()));
         a.plugins.set_offline(true);
-        a.transport.export(&p, PlayMode::Song, 48000, out.clone());
+        a.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
         let t0 = std::time::Instant::now();
         loop {
             match a.transport.export_status() {
@@ -11611,10 +11659,17 @@ mod tests {
         assert!(other.exists() && !app.unsaved(), "saved to the chosen file");
         assert_eq!(std::fs::read(&song).unwrap(), before, "the old file is left as it was");
 
-        for k in ["O", "R", "N"] {
+        let export_form = |app: &App| {
+            matches!(app.state.dialogs.last().map(|d| &d.body), Some(crate::dialog::Body::Project(crate::project_forms::Form::Export(_))))
+        };
+        let escape = |app: &mut App| app.key(&Key::Named(winit::keyboard::NamedKey::Escape), false, false);
+        for k in ["O", "N"] {
             key(&mut app, k, true);
         }
-        assert_eq!(fake::shown(), (0, 2), "no open or export dialog");
+        key(&mut app, "R", true);
+        assert!(export_form(&app), "Shift+Ctrl+R opens the Export form (MP3)");
+        escape(&mut app);
+        assert_eq!(fake::shown(), (0, 2), "no open or file dialog");
         assert!(app.export.is_none());
         assert!(!dir.join("Other_2.flp").exists(), "no new version");
 
@@ -11625,8 +11680,10 @@ mod tests {
         key(&mut app, "n", false);
         assert!(dir.join("Other_2.flp").exists(), "Ctrl+N still saves a new version");
         key(&mut app, "o", false);
+        assert_eq!(fake::shown(), (1, 2), "Ctrl+O still asks for a file");
         key(&mut app, "r", false);
-        assert_eq!(fake::shown(), (1, 3), "Ctrl+O and Ctrl+R still ask for a file");
+        assert!(export_form(&app), "Ctrl+R opens the Export form");
+        escape(&mut app);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -15480,7 +15537,7 @@ mod tests {
             (Action::Util(Util::Undo), "Undo / Undo history (Ctrl+Z)"),
             (Action::Util(Util::Help), "Help index / About..."),
             (Action::Util(Util::Save), "Save as... / Save new version (Shift+Ctrl+S)"),
-            (Action::MenuItem(0, views::menus::FILE_EXPORT), "Export > Wave file... (Ctrl+R)"),
+            (Action::MenuItem(0, views::menus::FILE_EXPORT), "Export audio... (Ctrl+R)"),
             (Action::MenuItem(views::menus::OPTIONS_MENU, views::menus::OPT_INFO), "Project info (F11)"),
             (Action::ToggleWin(Win::Playlist), "Playlist / Maximize Play list (F5)"),
             (Action::ToggleWin(Win::PianoRoll), "Piano roll / Maximize Piano roll (F7)"),
@@ -16575,11 +16632,11 @@ mod tests {
         let tempo = f64::from(a.state.tempo);
         let export = |a: &mut App, tag: &str| -> Vec<f32> {
             let path = std::env::temp_dir().join(format!("lemon-vst2-{tag}-{}.wav", std::process::id()));
-            a.transport.export(&a.state.project, os_engine::PlayMode::Song, rate, path.clone());
+            a.transport.export(&a.state.project, os_engine::PlayMode::Song, rate, crate::export::Job::wav(&path));
             let t0 = std::time::Instant::now();
             let _secs = loop {
                 match a.transport.export_status() {
-                    crate::transport::Export::Done(r) => break r.expect("export"),
+                    crate::transport::Export::Done(r) => break r.expect("export").0,
                     _ if t0.elapsed() > Duration::from_secs(60) => panic!("export did not finish"),
                     _ => std::thread::sleep(Duration::from_millis(10)),
                 }

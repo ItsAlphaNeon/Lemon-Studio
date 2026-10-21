@@ -20,6 +20,7 @@ pub mod perf;
 pub mod playlist;
 pub mod project_forms;
 pub mod rack;
+pub mod export_form;
 pub mod save_form;
 pub mod tapper;
 pub mod touch;

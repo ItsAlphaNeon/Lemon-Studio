@@ -81,7 +81,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Automation | 🚧 | Clips for channel, mixer and plugin parameters with every curve shape; no recording or clip LFO yet |
 | Project files | 🚧 | Opens and saves projects from FL Studio 24.2 and later; older versions are on the roadmap. Keep backups |
 | Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ |
-| Exporting audio | 🚧 | Song or pattern to a 32-bit float WAV file; no MP3 or FLAC yet |
+| Exporting audio | ✅ | Song, pattern or selection to WAV, FLAC, MP3 and OGG at once; bit depth, sample rate, interpolation, dither, mono, tails, stems and WAV markers |
 | Note input | 🚧 | Mouse, computer keyboard and MIDI controllers; no note recording yet |
 | Undo | 🚧 | One history for the whole project, with redo and the browser's History; not yet for mixer faders, plugin parameters or project settings |
 | Audio drivers | 🚧 | WASAPI (shared and exclusive) and ASIO® (output) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no JACK yet |
@@ -288,7 +288,7 @@ Open a project directly by passing its path:
 cargo run -p os-app --release -- path/to/project.flp
 ```
 
-Use `FILE > Export as WAV` (Ctrl+R) to render the song, or the current pattern in PAT mode, to a file. The same
+Use `FILE > Export audio` (Ctrl+R) to render the song, or the current pattern in PAT mode, to WAV, FLAC, MP3 or OGG files. The same
 render runs without a window, hosting the same plugins the app would and without opening an audio device:
 
 ```bash
