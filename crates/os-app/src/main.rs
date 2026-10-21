@@ -253,8 +253,22 @@ fn screen_state(window: &Window) -> Option<((i32, i32), (i32, i32, i32, i32))> {
 #[cfg(target_os = "macos")]
 use macos::{is_maximized, screen_state, set_maximized, set_rect};
 
+/// Whether the window fills the screen's work area. Windows: asked of the system, since winit hears of a maximize the
+/// system makes (the taskbar, Win+Up, coming back from the taskbar) only after the move that comes with it, which would
+/// be taken for the restored frame (`Shell::follow_frame`).
+#[cfg(windows)]
+fn is_maximized(window: &Window) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsZoomed;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().map(|h| h.as_raw()) {
+        // SAFETY: our own live window.
+        Ok(RawWindowHandle::Win32(h)) => unsafe { IsZoomed(h.hwnd.get() as _) != 0 },
+        _ => window.is_maximized(),
+    }
+}
+
 /// Whether the window fills the screen's work area.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn is_maximized(window: &Window) -> bool {
     window.is_maximized()
 }
