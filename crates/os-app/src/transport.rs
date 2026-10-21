@@ -2001,7 +2001,7 @@ mod tests {
         let t = Transport::new(None);
         t.set_effects(vec![(0, 0, fx.clone())]);
         let path = std::env::temp_dir().join(format!("openstudio-drop-test-{}.wav", std::process::id()));
-        t.export(&project, PlayMode::Pattern(1), 48000, path.clone());
+        t.export(&project, PlayMode::Pattern(1), 48000, crate::export::Job::wav(&path));
         let t0 = Instant::now();
         while !entered.load(Ordering::Acquire) {
             assert!(t0.elapsed() < Duration::from_secs(10), "the export processes the effect");
