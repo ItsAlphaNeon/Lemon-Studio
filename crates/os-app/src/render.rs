@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Renders a project file without a window, the way FILE > Export as WAV does: the project opens as in the app
+//! Renders a project file without a window, the way FILE > Export audio does: the project opens as in the app
 //! (Lemon Sampler on sampler channels, the built-in effects and the plugins of the last plugin scan), the hosted
 //! plugins run offline at the render rate, and the song is written as a 32-bit float WAV. It also prints what plays
 //! each channel and mixer slot. No audio device is opened.

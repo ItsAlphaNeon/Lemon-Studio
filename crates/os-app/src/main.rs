@@ -29,6 +29,8 @@ mod device;
 mod dialog;
 mod filedlg;
 mod enable_groups;
+mod export;
+mod export_form;
 mod high_visibility;
 mod history;
 mod hold;
@@ -1583,7 +1585,7 @@ fn main() {
         std::process::exit(plugins::window_check::run(&args[1..]));
     }
     app::move_old_settings();
-    // A render without a window (FILE > Export as WAV from the command line, `render`).
+    // A render without a window (FILE > Export audio from the command line, `render`).
     if args.first().map(String::as_str) == Some("--render") {
         std::process::exit(render::cli(&args[1..]));
     }

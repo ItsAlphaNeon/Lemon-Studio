@@ -946,6 +946,16 @@ pub struct Engine {
     beats_per_accent: u16,
     /// The Tempo tapper's clicks (`tap_click`), on any live stream.
     tap_clicks: crate::metronome::TapClicks,
+    /// The sampler channels' interpolation window, half its width in source samples (`set_interpolation`; 1 or less:
+    /// linear).
+    sinc_w: f64,
+    /// Whether the insert tracks' slots and the master's run at all (`set_effects`: an export's Insert / Master
+    /// effects switches; spec: audio/export.md §3).
+    insert_fx: bool,
+    master_fx: bool,
+    /// Every mixer track's post-fader output, tick after tick, while capturing (`set_track_capture`; an export's Split
+    /// mixer tracks).
+    capture: Option<Vec<Vec<f32>>>,
     pub report: EngineReport,
 }
 
@@ -1368,6 +1378,10 @@ impl Engine {
             // Accent on every numerator-th beat (spec: ui/metronome.md §4): event 17, beats per bar.
             beats_per_accent: project.bar().0,
             tap_clicks: crate::metronome::TapClicks::new(rate),
+            sinc_w: SINC_W,
+            insert_fx: true,
+            master_fx: true,
+            capture: None,
             report,
         }
     }
@@ -1474,6 +1488,33 @@ impl Engine {
 
     /// Loop the scheduled material: on reaching its end, playback continues from tick 0 (ringing voices carry on).
     /// Used for pattern playback.
+    /// The sampler channels' interpolation: a windowed sinc `points` source samples wide (27: playback's), 2 or less:
+    /// linear (spec: audio/export.md §3 "Resampling").
+    pub fn set_interpolation(&mut self, points: u32) {
+        self.sinc_w = f64::from(points) / 2.0;
+    }
+
+    /// Runs the insert tracks' effect slots (`insert`) and the master's (`master`), or skips them.
+    pub fn set_effects(&mut self, insert: bool, master: bool) {
+        (self.insert_fx, self.master_fx) = (insert, master);
+    }
+
+    /// Keeps every mixer track's post-fader output (before its sends) from now on: `take_track_audio` hands it over.
+    pub fn set_track_capture(&mut self, on: bool) {
+        self.capture = on.then(|| vec![Vec::new(); self.tracks.len()]);
+    }
+
+    /// The tracks' output kept since `set_track_capture` (interleaved L/R per track, master first), emptied.
+    pub fn take_track_audio(&mut self) -> Vec<Vec<f32>> {
+        self.capture.as_mut().map(|c| c.iter_mut().map(std::mem::take).collect()).unwrap_or_default()
+    }
+
+    /// Renders ticks `from` to `to` only: playback starts at `from` (`seek_tick`) and the song ends at `to`.
+    pub fn set_span(&mut self, from: u64, to: u64) {
+        self.end_tick = to.max(from + 1);
+        self.seek_tick(from);
+    }
+
     pub fn set_looping(&mut self, on: bool) {
         self.looping = on;
     }
@@ -1651,6 +1692,11 @@ impl Engine {
     /// The song's end in frames at the project tempo (voices may ring past it).
     pub fn length(&self) -> u64 {
         Clock::frame_of_tick(self.rate, self.ppq, self.tick_tempo(), self.end_tick)
+    }
+
+    /// Frames from where playback starts (`seek_tick`, `set_span`) to the song's end (voices may ring past it).
+    pub fn frames_left(&self) -> u64 {
+        self.length().saturating_sub(self.frame)
     }
 
     /// The tempo the ticks run at, in quarter notes a minute (`Project::tick_tempo`).
@@ -2167,9 +2213,9 @@ impl Engine {
         let song_end = !self.looping && !self.live_only && self.end_tick > 0 && tick + 1 == self.end_tick;
         self.release_notes(tick, song_end);
         self.start_notes(tick);
-        let channels = &self.channels;
+        let (channels, w) = (&self.channels, self.sinc_w);
         let bus = &mut self.bus;
-        self.voices.retain_mut(|v| render_voice(v, channels, bus, 0, 0, len));
+        self.voices.retain_mut(|v| render_voice(v, channels, bus, 0, 0, len, w));
         self.render_instruments(len, &song);
         for ch in &mut self.channels {
             ch.advance(len as u32);
@@ -2251,9 +2297,9 @@ impl Engine {
             b.clear();
             b.resize(len * 2, 0.0);
         }
-        let channels = &self.channels;
+        let (channels, w) = (&self.channels, self.sinc_w);
         let bus = &mut self.bus;
-        self.voices.retain_mut(|v| render_voice(v, channels, bus, 0, 0, len));
+        self.voices.retain_mut(|v| render_voice(v, channels, bus, 0, 0, len, w));
         self.render_instruments(len, &song);
         for ch in &mut self.channels {
             ch.advance(len as u32);
@@ -2734,7 +2780,7 @@ impl Engine {
             let busy = (&mut self.busy_until, self.busy_wait, self.exporting, &mut self.missed);
             let track = &mut self.tracks[t];
             // A slot runs when its own switch is on and the track's slots are enabled (spec: audio/mixer.md).
-            if track.slots_enabled {
+            if track.slots_enabled && if t == 0 { self.master_fx } else { self.insert_fx } {
                 for fx in &mut track.effects {
                     run_slot(fx, &mut buf, rate, limit, song, dry, l, r, (&mut *busy.0, busy.1, busy.2, &mut *busy.3));
                 }
@@ -2766,6 +2812,9 @@ impl Engine {
             for f in buf.chunks_exact(2) {
                 pk[0] = pk[0].max(f[0].abs());
                 pk[1] = pk[1].max(f[1].abs());
+            }
+            if let Some(c) = self.capture.as_mut().and_then(|c| c.get_mut(t)) {
+                c.extend_from_slice(&buf[..frames * 2]);
             }
             // Sends glide like the matrix gains; a route at 0 passes nothing.
             let (tracks, bus) = (&mut self.tracks, &mut self.bus);
@@ -2956,7 +3005,7 @@ fn keyed_copy(ch: &mut ChannelState, library: &mut SampleLibrary, key: u16) -> O
     })
 }
 
-fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], span: usize, offset: usize, end: usize) -> bool {
+fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], span: usize, offset: usize, end: usize, w: f64) -> bool {
     let ch = &channels[v.channel];
     let Some(s) = ch.buffer(v.buf) else { return false };
     let n = s.frames();
@@ -3020,15 +3069,20 @@ fn render_voice(v: &mut Voice, channels: &[ChannelState], bus: &mut [Vec<f32>], 
         let (l, r) = if exact {
             let i = pos as usize;
             (s.left[i], s.right[i])
+        } else if w <= 1.0 {
+            // Linear (an export's 2-point resampling).
+            let i = pos as usize;
+            let (j, x) = ((i + 1).min(n - 1), (pos - i as f64) as f32);
+            (s.left[i] + (s.left[j] - s.left[i]) * x, s.right[i] + (s.right[j] - s.right[i]) * x)
         } else {
-            let i0 = (pos - SINC_W).ceil().max(0.0) as usize;
-            let i1 = ((pos + SINC_W).floor() as usize).min(n - 1);
+            let i0 = (pos - w).ceil().max(0.0) as usize;
+            let i1 = ((pos + w).floor() as usize).min(n - 1);
             let (mut l, mut r) = (0.0f64, 0.0f64);
             for i in i0..=i1 {
                 let t = i as f64 - pos;
-                let w = sinc(t / scale) / scale * blackman(t);
-                l += f64::from(s.left[i]) * w;
-                r += f64::from(s.right[i]) * w;
+                let k = sinc(t / scale) / scale * blackman(t, w);
+                l += f64::from(s.left[i]) * k;
+                r += f64::from(s.right[i]) * k;
             }
             (l as f32, r as f32)
         };
@@ -3071,11 +3125,11 @@ fn sinc(x: f64) -> f64 {
     }
 }
 
-fn blackman(t: f64) -> f64 {
-    if t.abs() >= SINC_W {
+fn blackman(t: f64, w: f64) -> f64 {
+    if t.abs() >= w {
         return 0.0;
     }
-    let x = std::f64::consts::PI * t / SINC_W;
+    let x = std::f64::consts::PI * t / w;
     0.42 + 0.5 * x.cos() + 0.08 * (2.0 * x).cos()
 }
 

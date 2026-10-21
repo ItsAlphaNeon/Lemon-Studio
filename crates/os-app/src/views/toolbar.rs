@@ -475,7 +475,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         (Icon::Mic, "One-click audio recording"),
         (Icon::Help, "Help index / About..."),
         (Icon::Save, "Save as... / Save new version (Shift+Ctrl+S)"),
-        (Icon::SaveRender, "Export > Wave file... (Ctrl+R)"),
+        (Icon::SaveRender, "Export audio... (Ctrl+R)"),
         (Icon::Info, "Project info (F11)"),
     ];
     for (i, (icon, hint)) in utils.into_iter().enumerate() {

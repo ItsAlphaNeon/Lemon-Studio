@@ -76,9 +76,11 @@ pub const FILE_OPEN: usize = 2;
 pub const FILE_SAVE: usize = 4;
 pub const FILE_SAVE_AS: usize = 5;
 pub const FILE_SAVE_VERSION: usize = 6;
-/// FILE > Export as WAV (Ctrl+R; the toolbar's render button).
+/// FILE > Export audio (Ctrl+R; the toolbar's render button) and Export MP3 (Shift+Ctrl+R): the Export form (spec:
+/// audio/export.md §2).
 pub const FILE_EXPORT: usize = 12;
-pub const FILE_EXIT: usize = 16;
+pub const FILE_EXPORT_MP3: usize = 13;
+pub const FILE_EXIT: usize = 17;
 /// OPTIONS > Theme settings (flat index: header counts).
 #[cfg(test)]
 pub const OPT_THEME: usize = 5;
@@ -140,7 +142,8 @@ const FILE: &[Item] = &[
     it("Delete unused files and save project", ""),
     SEP,
     it("Import", "").sub(),
-    it("Export as WAV...", "Ctrl+R").on(),
+    it("Export audio...", "Ctrl+R").on(),
+    it("Export MP3...", "Shift+Ctrl+R").on(),
     SEP,
     it("Revert to last backup", ""),
     SEP,
@@ -760,7 +763,8 @@ mod tests {
         assert_eq!(l(FILE_OPEN), Some("Open..."));
         assert_eq!(l(FILE_SAVE), Some("Save"));
         assert_eq!(l(FILE_SAVE_AS), Some("Save as..."));
-        assert_eq!(l(FILE_EXPORT), Some("Export as WAV..."));
+        assert_eq!(l(FILE_EXPORT), Some("Export audio..."));
+        assert_eq!(l(FILE_EXPORT_MP3), Some("Export MP3..."));
         assert_eq!(l(FILE_SAVE_VERSION), Some("Save new version"));
         assert_eq!(item_at(OPTIONS_MENU, OPT_INFO).map(|it| it.label), Some("Project info"));
         assert_eq!(item_at(HELP_MENU, HELP_ABOUT).map(|it| it.label), Some("About..."));

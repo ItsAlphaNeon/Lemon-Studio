@@ -3112,11 +3112,11 @@ mod tests {
         let channel = a.state.project.channels[row].index;
         a.state.project.patterns[0].notes = vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(channel, 0) }];
         let path = std::env::temp_dir().join(format!("openstudio-native-gen-{}.wav", std::process::id()));
-        a.transport.export(&a.state.project, os_engine::PlayMode::Pattern(1), 48000, path.clone());
+        a.transport.export(&a.state.project, os_engine::PlayMode::Pattern(1), 48000, crate::export::Job::wav(&path));
         let t0 = std::time::Instant::now();
         let secs = loop {
             match a.transport.export_status() {
-                crate::transport::Export::Done(r) => break r.expect("export"),
+                crate::transport::Export::Done(r) => break r.expect("export").0,
                 _ if t0.elapsed() > Duration::from_secs(60) => panic!("export did not finish"),
                 _ => std::thread::sleep(Duration::from_millis(10)),
             }
