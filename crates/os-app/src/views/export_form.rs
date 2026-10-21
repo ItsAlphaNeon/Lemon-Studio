@@ -83,8 +83,13 @@ fn source(ui: &mut Ui, f: &ExportForm, g: Rect) {
         let chosen = f.seg(row as u8);
         for (i, seg) in segs.iter().enumerate() {
             let b = Rect::new((strip.x + i as f32 * sw).round(), strip.y, sw.round(), strip.h);
-            let enabled = !(row == 1 && i == 1 && !f.has_selection());
-            let hint = if enabled { ef::SEG_HINTS[row] } else { "There is no time selection" };
+            let (enabled, off) = match (row, i) {
+                (0, 0) => (f.song_ok, "The playlist is empty"),
+                (0, _) => (f.pat_ok, "The pattern has no notes"),
+                (1, 1) => (f.has_selection(), "There is no time selection"),
+                _ => (true, ""),
+            };
+            let hint = if enabled { ef::SEG_HINTS[row] } else { off };
             let hov = enabled && hit(ui, b, DHit::Form(FHit::Seg(row as u8, i as u8)), hint);
             kit::pill(ui.c, t, b, seg, font, kit::State::new(hov, false, i == chosen));
             if !enabled {

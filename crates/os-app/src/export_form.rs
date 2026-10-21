@@ -73,6 +73,10 @@ pub struct ExportForm {
     pub folder: PathBuf,
     /// Play: the playlist (true) or the current pattern.
     pub song: bool,
+    /// Whether the playlist (has clips) and the current pattern (has notes) have anything to render; Play cannot pick
+    /// one without.
+    pub song_ok: bool,
+    pub pat_ok: bool,
     /// Range: the time selection, while there is one for what plays.
     pub selection: bool,
     /// The time selections (start, end ticks): the playlist's and the piano roll's.
@@ -256,14 +260,16 @@ impl App {
         let s = &self.state;
         let p = crate::rack::play_project(s);
         let song = s.song_mode;
-        // A warning box: a hint-bar message is lost under the menu's own hint at once.
-        if song && p.arrangement().is_none_or(|a| a.clips.is_empty()) {
-            return self.tell(Kind::Warning, TITLE, spans(&["The playlist is empty. Switch to PAT to export the current pattern."]));
-        }
-        if !song && p.patterns.iter().find(|q| q.number == s.pattern).is_none_or(|q| q.notes.is_empty()) {
-            let text = format!("{} has no notes. Add some notes, or switch to SONG to export the playlist.", crate::patterns::name_of(s, s.pattern));
+        // Play starts on the app's mode, else on whichever of the two has something to render (as FL: PAT with an
+        // empty pattern still exports the playlist). Only with neither is it refused, in a warning box: a hint-bar
+        // message is lost under the menu's own hint at once.
+        let song_ok = p.arrangement().is_some_and(|a| !a.clips.is_empty());
+        let pat_ok = p.patterns.iter().find(|q| q.number == s.pattern).is_some_and(|q| !q.notes.is_empty());
+        if !song_ok && !pat_ok {
+            let text = format!("Nothing to export: the playlist is empty and {} has no notes.", crate::patterns::name_of(s, s.pattern));
             return self.tell(Kind::Warning, TITLE, spans(&[&text]));
         }
+        let song = if song { song_ok } else { !pat_ok };
         let mut o = Options::load();
         if mp3 {
             o.formats = [false, false, true, false];
@@ -288,6 +294,8 @@ impl App {
             name: name_field,
             folder,
             song,
+            song_ok,
+            pat_ok,
             selection: false,
             song_sel: sel(s.playlist.range),
             pat_sel: sel(s.piano.range),
@@ -313,7 +321,7 @@ impl App {
             return None;
         }
         match h {
-            FHit::Seg(0, i) => {
+            FHit::Seg(0, i) if (if i == 0 { f.song_ok } else { f.pat_ok }) => {
                 f.song = i == 0;
                 f.selection &= f.has_selection();
             }
@@ -485,6 +493,14 @@ mod tests {
         empty.act(crate::app::Action::MenuItem(0, FILE_EXPORT));
         assert!(form(&empty).is_none());
         assert_eq!(empty.state.dialogs.len(), 1, "a warning says why");
+        // PAT with an empty pattern still exports the playlist (and SONG with an empty playlist the pattern).
+        empty.state.dialogs.clear();
+        crate::playlist::arr_mut(&mut empty.state).clips.push(os_model::Clip::new(0, 96, 0, os_model::ClipSource::Pattern(1)));
+        empty.act(crate::app::Action::MenuItem(0, FILE_EXPORT));
+        let f = form(&empty).expect("the Export form");
+        assert!(f.song && f.song_ok && !f.pat_ok, "Play starts on Song");
+        click(&mut empty, FHit::Seg(0, 1));
+        assert!(form(&empty).unwrap().song, "Pattern has nothing to render");
 
         let mut app = app();
         app.act(crate::app::Action::MenuItem(0, FILE_EXPORT_MP3));
@@ -520,6 +536,7 @@ mod tests {
     fn the_parts_change_the_choices() {
         let mut app = app();
         app.state.piano.range = Some((0, 96));
+        crate::playlist::arr_mut(&mut app.state).clips.push(os_model::Clip::new(0, 96, 0, os_model::ClipSource::Pattern(1)));
         app.act(crate::app::Action::MenuItem(0, FILE_EXPORT_MP3));
         click(&mut app, FHit::Seg(1, 1));
         assert_eq!(form(&app).unwrap().span(), Some((0, 96)), "the piano roll's selection");
