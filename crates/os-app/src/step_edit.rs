@@ -48,6 +48,8 @@ pub enum Src {
     Typing(KeyCode),
     /// A MIDI keyboard's key.
     Midi(u8),
+    /// A MIDI key on the Omni preview MIDI channel (spec: ui/midi-settings.md §3).
+    Omni(u8),
     /// A Touch controller pad or key (spec: ui/touch-controller.md §2).
     Touch(u8),
 }
@@ -102,16 +104,26 @@ impl App {
 
     /// A note started sounding (typing keyboard or MIDI): collected while step editing takes notes.
     pub(crate) fn step_edit_down(&mut self, src: Src, key: u16, velocity: u8) {
+        self.step_edit_down_with(src, key, velocity, crate::record::Extra::default());
+    }
+
+    /// `step_edit_down` for a note with more than a key and velocity (a MIDI note's Mod X / Y, another channel).
+    pub(crate) fn step_edit_down_with(&mut self, src: Src, key: u16, velocity: u8, extra: crate::record::Extra) {
         // While playing, Record takes the note instead (spec: ui/recording.md §2 Taking notes).
-        self.record_down(src, key, velocity);
-        if self.step_edit_live() {
+        self.record_down_with(src, key, velocity, extra);
+        if self.step_edit_live() && extra.channel.is_none() {
             self.step_chord.down(src, key, velocity);
         }
     }
 
     /// A note was released: the release of the last held one writes the chord.
     pub(crate) fn step_edit_up(&mut self, src: Src) {
-        self.record_up(src);
+        self.step_edit_up_with(src, None);
+    }
+
+    /// `step_edit_up` with the note's release velocity, when it has one.
+    pub(crate) fn step_edit_up_with(&mut self, src: Src, release: Option<u8>) {
+        self.record_up_with(src, release);
         let Some(keys) = self.step_chord.up(src) else { return };
         if self.step_edit_live() && !keys.is_empty() {
             self.step_edit_write(&keys);
@@ -285,12 +297,12 @@ mod tests {
         typed(&mut app, KeyCode::KeyC, true);
         typed(&mut app, KeyCode::KeyZ, false);
         assert!(notes(&app).is_empty(), "a key is still held");
-        app.midi_notes(vec![Msg::On(67, 90)]);
+        app.midi_notes(vec![Msg::On { ch: 0, key: 67, vel: 90 }]);
         typed(&mut app, KeyCode::KeyV, true);
         typed(&mut app, KeyCode::KeyC, false);
         typed(&mut app, KeyCode::KeyV, false);
         assert!(notes(&app).is_empty(), "the MIDI key is still held");
-        app.midi_notes(vec![Msg::Off(67)]);
+        app.midi_notes(vec![Msg::Off { ch: 0, key: 67, vel: 64 }]);
         assert_eq!(notes(&app), [(0, st, 48, 100), (0, st, 52, 100), (0, st, 67, 90), (0, st, 53, 100)]);
         assert_eq!((app.state.piano.marker, selected(&app)), (st, vec![0, 1, 2, 3]));
         let h = &app.state.history;

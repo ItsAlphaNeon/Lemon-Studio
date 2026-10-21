@@ -11,6 +11,7 @@ pub mod channel_win;
 pub mod data_folder;
 pub mod dialog;
 pub mod menus;
+pub mod midi_page;
 pub mod mondebug;
 pub mod settings;
 pub mod mixer;
@@ -20,6 +21,7 @@ pub mod perf;
 pub mod playlist;
 pub mod project_forms;
 pub mod rack;
+pub mod remote_box;
 pub mod export_form;
 pub mod save_form;
 pub mod tapper;
@@ -209,6 +211,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     // The Song info box of a project opened with "Show info on opening" (spec: flp/events/project-info.md).
     crate::project_info::paint_song_info(ui, s);
+    // The Remote control settings box (spec: ui/remote-control.md §2).
+    if let Some(b) = &s.link_box {
+        remote_box::paint(ui, s, b);
+    }
     // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
     dialog::paint(ui, s);
     if over_dialog {

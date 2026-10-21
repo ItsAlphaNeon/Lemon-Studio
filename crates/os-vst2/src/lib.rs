@@ -369,6 +369,8 @@ enum NoteKind {
     Off,
     /// A controller change: `key` is the controller.
     Control,
+    /// Another short message as a controller sent it, this status byte (pitch bend, pressure, program change).
+    Raw(u8),
 }
 
 /// A MIDI event waiting for its process call.
@@ -387,6 +389,7 @@ impl Note {
             NoteKind::On => [0x90, self.key, self.value],
             NoteKind::Off => [0x80, self.key, self.value],
             NoteKind::Control => [0xB0, self.key, self.value],
+            NoteKind::Raw(status) => [status, self.key, self.value],
         }
     }
 }
@@ -628,7 +631,7 @@ impl Plugin {
                 match e.kind {
                     NoteKind::On => self.ledger.start(e.key, -1),
                     NoteKind::Off => self.ledger.release(e.key),
-                    NoteKind::Control => {}
+                    NoteKind::Control | NoteKind::Raw(_) => {}
                 }
             } else {
                 self.queue[kept] = e;
@@ -1068,6 +1071,12 @@ impl os_engine::Instrument for Plugin {
 
     fn param(&mut self, offset: u32, index: u32, value: f64) {
         self.automate(offset, index, value);
+    }
+
+    fn midi(&mut self, offset: u32, bytes: [u8; 3]) {
+        let (key, value) = (bytes[1] & 0x7F, bytes[2] & 0x7F);
+        let kind = if bytes[0] & 0xF0 == 0xB0 { NoteKind::Control } else { NoteKind::Raw(bytes[0]) };
+        self.queue(Note { time: offset, kind, key, value });
     }
 
     fn transport(&mut self, info: &os_engine::TransportInfo) {

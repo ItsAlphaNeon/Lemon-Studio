@@ -156,6 +156,18 @@ struct Held {
     channel: u16,
     start: f64,
     at: f64,
+    extra: Extra,
+    release: Option<u8>,
+}
+
+/// What a MIDI note brings besides its key and velocity (spec: ui/midi-settings.md §3): the channel it plays when not
+/// the selected one (omni preview), its Mod X / Mod Y (velocity linked to them).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Extra {
+    /// Channel index (`os_model::Channel::index`).
+    pub channel: Option<u16>,
+    pub mod_x: Option<u8>,
+    pub mod_y: Option<u8>,
 }
 
 /// The take being recorded: the pattern's notes as they were before it, the channels it recorded, the span from its
@@ -512,33 +524,35 @@ impl App {
 
     /// A note went down (typing keyboard, MIDI, Touch controller): recorded from the playback position while
     /// recording (spec §2 Taking notes).
-    pub(crate) fn record_down(&mut self, src: Src, key: u16, velocity: u8) {
-        if let Some(channel) = crate::piano::channel(&self.state) {
+    pub(crate) fn record_down_with(&mut self, src: Src, key: u16, velocity: u8, extra: Extra) {
+        let target = extra.channel.or_else(|| crate::piano::channel(&self.state));
+        if let Some(channel) = target {
             self.state.rec.log.down(src, key, velocity, channel, std::time::Instant::now());
         }
         self.start_on_input(Opt::Notes);
         if !self.rec_live(Opt::Notes) {
             return;
         }
-        let Some(channel) = crate::piano::channel(&self.state) else { return };
+        let Some(channel) = target else { return };
         let song = self.transport.song();
         let start = self.transport.tick();
         self.open_take(song);
         let Some(at) = self.rec_pattern_tick(start, song) else { return };
         let r = &mut self.state.rec;
         r.held.retain(|h| h.src != src);
-        r.held.push(Held { src, key, velocity, channel, start, at });
+        r.held.push(Held { src, key, velocity, channel, start, at, extra, release: None });
         if let Some(t) = r.take.as_mut().filter(|t| !t.channels.contains(&channel)) {
             t.channels.push(channel);
         }
     }
 
     /// A note went up: written when it was being recorded.
-    pub(crate) fn record_up(&mut self, src: Src) {
+    pub(crate) fn record_up_with(&mut self, src: Src, release: Option<u8>) {
         self.state.rec.log.up(src, std::time::Instant::now());
         let r = &mut self.state.rec;
         let Some(i) = r.held.iter().position(|h| h.src == src) else { return };
-        let h = r.held.remove(i);
+        let mut h = r.held.remove(i);
+        h.release = release;
         let now = if self.transport.playing() && !self.transport.paused() { Some(self.transport.tick()) } else { r.last };
         self.write_held(h, now);
     }
@@ -622,7 +636,10 @@ impl App {
         let pattern = take.pattern;
         let (a, b) = quantized(s, start, end);
         let take = s.rec.take.as_mut().expect("checked");
-        let note = Note { length: b - a, key: h.key, velocity: h.velocity, ..Note::step(h.channel, a) };
+        let mut note = Note { length: b - a, key: h.key, velocity: h.velocity, ..Note::step(h.channel, a) };
+        note.mod_x = h.extra.mod_x.unwrap_or(note.mod_x);
+        note.mod_y = h.extra.mod_y.unwrap_or(note.mod_y);
+        note.release = h.release.unwrap_or(note.release);
         take.new.push(note);
         let (lo, hi) = take.span.map_or((a, b), |(lo, hi)| (lo.min(a), hi.max(b)));
         take.span = Some((lo, hi));

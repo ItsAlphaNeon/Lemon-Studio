@@ -455,6 +455,54 @@ pub const ASK_DATA_FOLDER: Combo = Combo {
 /// not the project's. Spec: ui/data-folder.md §4.
 pub const COPY_USED_SAMPLES: Check = Check { key: "copy_used_samples", label: "Copy used samples to the project folder", default: false };
 
+/// MIDI ▸ Input: a linked controller does nothing after its knob changed another way until its value reaches or
+/// crosses the knob's (`crate::remote`). Spec: ui/remote-control.md §5.
+pub const PICKUP: Check = Check { key: "midi_pickup", label: "Pickup (takeover mode)", default: false };
+
+/// MIDI ▸ Input: the Remote control settings box accepts the first controller it detects and closes (`crate::remote`).
+/// Spec: ui/remote-control.md §2.
+pub const AUTO_ACCEPT: Check = Check { key: "midi_auto_accept", label: "Auto accept detected controller", default: true };
+
+/// MIDI ▸ Input: controller 64 holds released keys until the pedal comes up; off, it goes to the instrument
+/// (`crate::midi_play`). Spec: ui/midi-settings.md §3.
+pub const FOOT_PEDAL: Check = Check { key: "midi_foot_pedal", label: "Foot pedal controls note off", default: true };
+
+/// MIDI ▸ Input: the generator muting keys mute while held (`crate::midi_play`). Spec: ui/midi-settings.md §3.
+pub const TOGGLE_ON_RELEASE: Check = Check { key: "midi_toggle_on_release", label: "Toggle on release", default: false };
+
+/// MIDI ▸ Input: what a note's velocity becomes (`crate::midi_play`). Spec: ui/midi-settings.md §3.
+pub const VELOCITY_LINK: Combo =
+    Combo { key: "midi_velocity_link", label: "Link note on velocity to", choices: &["(none)", "Velocity", "Mod X", "Mod Y"], default: 1 };
+
+/// MIDI ▸ Input: what a note's release velocity becomes. Spec: as above.
+pub const RELEASE_LINK: Combo = Combo { key: "midi_release_link", label: "Link release velocity to", choices: &["(none)", "Release"], default: 1 };
+
+/// MIDI ▸ Input: Lemon Studio runs no device scripts, so every device is a generic controller. Spec:
+/// ui/midi-settings.md §1.
+pub const CONTROLLER_TYPE: Combo = Combo { key: "midi_controller_type", label: "Controller type", choices: &["(generic controller)"], default: 0 };
+
+/// MIDI ▸ Output: what master sync sends (`crate::midi_out::SyncKind::of`, by index). Spec: ui/midi-settings.md §7.
+pub const SYNC_TYPE: Combo = Combo {
+    key: "midi_sync_type",
+    label: "Synchronization type",
+    choices: &[
+        "MIDI clock",
+        "MTC 24 fps",
+        "MTC 25 fps",
+        "MTC 30 fps (drop)",
+        "MTC 30 fps (non-drop)",
+        "MTC 29.97 fps (drop)",
+        "MTC 29.97 fps (non-drop)",
+    ],
+    default: 0,
+};
+
+/// MIDI ▸ Input: the MIDI channels (1..16; 0, "---", none) whose white keys preview rack channels, jump to the song's
+/// markers and mute rack channels (`crate::midi_play`). Spec: ui/midi-settings.md §3.
+pub const OMNI_CHANNEL: Number = Number { key: "midi_omni_channel", label: "Omni preview MIDI channel", min: 0, max: 16, default: 0 };
+pub const MARKER_CHANNEL: Number = Number { key: "midi_marker_channel", label: "Song marker jump MIDI channel", min: 0, max: 16, default: 0 };
+pub const MUTING_CHANNEL: Number = Number { key: "midi_muting_channel", label: "Generator muting MIDI channel", min: 0, max: 16, default: 0 };
+
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
     &RESTORE_AFTER_SOLO,
@@ -501,16 +549,20 @@ pub const CHECKS: &[&Check] = &[
     &ALIGN_TICK_LENGTHS,
     &INVERT_PENCIL_BUTTONS,
     &COPY_USED_SAMPLES,
+    &PICKUP,
+    &AUTO_ACCEPT,
+    &FOOT_PEDAL,
+    &TOGGLE_ON_RELEASE,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &TRANSPARENT_WINDOWS, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING, &TOOLBARS_SCALING, &ASK_DATA_FOLDER];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &TRANSPARENT_WINDOWS, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING, &TOOLBARS_SCALING, &ASK_DATA_FOLDER, &VELOCITY_LINK, &RELEASE_LINK, &CONTROLLER_TYPE, &SYNC_TYPE];
 /// The declared combos no settings page shows (a window of their own does): General ▸ Input ▸ Manage shortcuts' rows
 /// (`crate::shortcuts`). Read by the declaration tests.
 #[cfg_attr(not(test), allow(dead_code))]
 pub const OFF_PAGE_COMBOS: &[&Combo] = &crate::shortcuts::ROWS;
 
 /// The declared value boxes.
-pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BROWSER_PREVIEW_TRACK];
+pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BROWSER_PREVIEW_TRACK, &OMNI_CHANNEL, &MARKER_CHANNEL, &MUTING_CHANNEL];
 
 /// General ▸ Input: the editors scroll by the vertical wheel's steps times value / 256 (`crate::scroll_speed`);
 /// Shift+wheel keeps its own step. Spec: ui/settings-choices.md "Input: Vertical and Horizontal scrolling speed".
@@ -785,7 +837,8 @@ main_gui_scaling = 200%
                 Row::Check(k, _) => checks.push(*k),
                 Row::Check2(a, _, b, _) => checks.extend([*a, *b]),
                 Row::Combo(_, _, l) => combos.push(*l),
-                Row::Value(_, l) => numbers.push(*l),
+                Row::Value(_, l) | Row::ValueR(l, _) => numbers.push(*l),
+                Row::Midi(m) => combos.extend(m.combo()),
                 Row::Pair(a, b) => {
                     walk(a, checks, combos, numbers);
                     walk(b, checks, combos, numbers);

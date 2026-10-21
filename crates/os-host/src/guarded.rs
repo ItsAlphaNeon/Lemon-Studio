@@ -136,6 +136,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn transport(&mut self, info: &TransportInfo) {
         self.run((), |p| p.transport(info))
     }
+    fn midi(&mut self, offset: u32, bytes: [u8; 3]) {
+        self.run((), |p| p.midi(offset, bytes))
+    }
     fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
         self.run(false, |p| p.channel_levels(levels))
     }

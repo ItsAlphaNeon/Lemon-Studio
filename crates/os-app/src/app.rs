@@ -144,6 +144,8 @@ pub enum Action {
     AutoScroll,
     /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G).
     EnableGroups,
+    /// Multilink to controllers (toolbar button; spec: ui/remote-control.md §4).
+    Multilink,
     /// Step edit switch (toolbar, OPTIONS menu, Ctrl+E; spec: ui/step-edit.md).
     StepEdit,
     /// The toolbar's song position slider (spec: ui/song-position-slider.md).
@@ -241,6 +243,8 @@ pub enum Action {
     Swallow,
     /// The value box of "Type in value..." (spec: ui/type-in-value.md).
     TypeIn(crate::typein::TiAct),
+    /// The Remote control settings box (spec: ui/remote-control.md).
+    Remote(crate::remote::RAct),
     /// Piano roll: empty grid, a note (index into the pattern's notes), keyboard, velocity panel.
     PianoGrid,
     PianoNote(usize),
@@ -749,6 +753,12 @@ const PLUGIN_POPUPS: &str = "Menus of detached plugin windows on Linux (dock the
 
 #[derive(Debug, Clone)]
 pub enum Drag {
+    /// Settings > MIDI: a handle of the mapping curve window (0 start, 1 middle, 2 end).
+    MidiCurve(u8),
+    /// Settings > MIDI: a Port or offset box, a step per 8 px up or down (`steps` taken so far).
+    MidiBox { part: crate::views::midi_page::MAct, y0: f32, steps: i32 },
+    /// A value box of the Remote control settings box: a step per 8 px up or down (`steps` taken so far).
+    LinkBox { part: crate::remote::RAct, y0: f32, steps: i32 },
     /// A Touch controller pad or key held: the note follows the mouse (spec: ui/touch-controller.md §2).
     Touch,
     /// Vertical drag on the pattern name box steps the number (spec: ui/pattern-menu.md §1).
@@ -950,8 +960,11 @@ pub struct State {
     pub toolbar: views::toolbar::Opts,
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
-    /// MIDI input devices that are open (their notes play the selected channel; spec: ui/midi-input.md).
-    pub midi_inputs: Vec<String>,
+    /// Settings > MIDI's devices and status (`crate::midi_play`; spec: ui/midi-settings.md).
+    pub midi: crate::midi_play::Page,
+    /// The Remote control settings box, while open, and Multilink to controllers (`crate::remote`).
+    pub link_box: Option<crate::remote::LinkBox>,
+    pub multilink: crate::remote::Multi,
     pub maximized: bool,
     pub piano: PianoState,
     pub playlist: crate::playlist::PlaylistState,
@@ -1103,7 +1116,9 @@ pub struct App {
     key_velocity: u8,
     /// MIDI controller input, and its held notes: (key, rack row they started on).
     pub midi: crate::midi_in::MidiIn,
-    midi_held: Vec<(u8, usize)>,
+    pub(crate) midi_play: crate::midi_play::Play,
+    pub midi_out: crate::midi_out::MidiOut,
+    pub(crate) remote: crate::remote::Remote,
     /// Step edit's chord being collected from the typing keyboard and MIDI notes (`crate::step_edit`).
     pub(crate) step_chord: crate::step_edit::Chord,
     /// Last title-bar press (window, time, position), for double-click maximize / restore.
@@ -1270,7 +1285,9 @@ impl App {
                 toggles: vec!["typing"],
                 clock: crate::clock::Clock::load(),
                 toolbar: views::toolbar::Opts::load(),
-                midi_inputs: Vec::new(),
+                midi: Default::default(),
+                link_box: None,
+                multilink: Default::default(),
                 maximized: true,
                 piano: PianoState::default(),
                 playlist: crate::playlist::PlaylistState::default(),
@@ -1312,7 +1329,9 @@ impl App {
             cables_at: None,
             key_velocity: TYPING_VELOCITY,
             midi: crate::midi_in::MidiIn::none(),
-            midi_held: Vec::new(),
+            midi_play: Default::default(),
+            midi_out: crate::midi_out::MidiOut::none(),
+            remote: Default::default(),
             step_chord: crate::step_edit::Chord::default(),
             title_click: None,
             rack_click: None,
@@ -1529,6 +1548,7 @@ impl App {
             }
             crate::transport::Export::Done(r) => {
                 self.export = None;
+                self.midi_after_export();
                 self.plugins.set_offline(false);
                 self.state.message = Some(match r {
                     Ok((secs, files)) => {
@@ -2869,7 +2889,7 @@ impl App {
     }
 
     /// A key on a MIDI keyboard taps while the tapper is open (its pad's hint, §1); the keys of a chord tap once.
-    fn midi_tap(&mut self) {
+    pub(crate) fn midi_tap(&mut self) {
         let t = self.state.tapper.clock();
         if !self.state.tapper.count.last().is_some_and(|l| t - l < crate::tapper::MIDI_CHORD) {
             self.tap(t);
@@ -2878,7 +2898,7 @@ impl App {
 
     /// Sets the project tempo, kept in the tempo box's range (10-522 BPM): playback follows from the next tick, the
     /// toolbar shows it. Returns the tempo set.
-    fn set_tempo(&mut self, bpm: f64) -> f64 {
+    pub(crate) fn set_tempo(&mut self, bpm: f64) -> f64 {
         let t = bpm.clamp(10.0, 522.0);
         if self.state.tempo != t {
             self.state.tempo = t;
@@ -3060,6 +3080,8 @@ impl App {
             || self.state.cables.borrow().moving()
             || self.hold.is_some()
             || self.smooth.running()
+            || self.midi_play.busy()
+            || self.remote.busy()
     }
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
@@ -3646,6 +3668,9 @@ impl App {
         st.picker = None;
         st.tab = tab;
         self.audio_page();
+        if tab == views::settings::MIDI {
+            self.midi_page_opened();
+        }
         // General ▸ System's association check shows what Windows says now (`crate::file_assoc`).
         #[cfg(windows)]
         self.assoc_read();
@@ -4027,6 +4052,8 @@ impl App {
             SAct::Combo(label, x, y) if crate::prefs::find_combo(label).is_some() => return self.pref_menu(label, x, y),
             SAct::Combo(label, x, y) => return self.audio_menu(label, x, y),
             SAct::Slider(label, x, w) => return self.pref_slider_press(label, x, w),
+            SAct::Midi(m) => return self.midi_page_act(m),
+            SAct::Button(views::settings::REFRESH_MIDI) => self.midi_refresh(true),
             SAct::Ppi => return self.ppi_press(),
             SAct::Tab(i) => {
                 st.tab = i;
@@ -4036,6 +4063,9 @@ impl App {
                 #[cfg(windows)]
                 if i == views::settings::GENERAL {
                     self.assoc_read();
+                }
+                if i == views::settings::MIDI {
+                    self.midi_page_opened();
                 }
             }
             // Opt in / out of the experimental native host and scan again so the effect lists follow (spec
@@ -4471,6 +4501,7 @@ impl App {
                 Drag::Knob { id, y0, v0 } => {
                     self.state.set_knob(id, v0 - (y - y0) * id.drag_rate());
                     self.record_knob(id);
+                    self.multilink_knob(crate::typein::Target::Knob(id));
                     self.hint = Cow::Owned(self.state.knob_text(id));
                     match self.hits.iter().rev().find(|h| h.action == Action::Knob(id)).map(|h| h.rect) {
                         Some(r) => self.damage_rect(r.outset(6.0)),
@@ -4489,6 +4520,26 @@ impl App {
                 }
                 Drag::MonParam(i) => {
                     self.set_mon_param(i, x);
+                    return true;
+                }
+                Drag::MidiCurve(i) => {
+                    self.midi_curve_drag(i, y);
+                    return true;
+                }
+                Drag::MidiBox { part, y0, steps } => {
+                    let now = ((y0 - y) / 8.0) as i32;
+                    if now != steps {
+                        self.drag = Some(Drag::MidiBox { part, y0, steps: now });
+                        self.midi_page_wheel(part, now - steps);
+                    }
+                    return true;
+                }
+                Drag::LinkBox { part, y0, steps } => {
+                    let now = ((y0 - y) / 8.0) as i32;
+                    if now != steps {
+                        self.drag = Some(Drag::LinkBox { part, y0, steps: now });
+                        self.link_box_step(part, now - steps);
+                    }
                     return true;
                 }
                 Drag::CableParam(i) => {
@@ -4757,6 +4808,17 @@ impl App {
             }
             return;
         }
+        // So is the Remote control settings box; a press on one of its value boxes starts a vertical drag of it.
+        if crate::remote::is_open(&self.state) {
+            if let Some(Action::Remote(r)) = action {
+                if r.is_value() {
+                    self.drag = Some(Drag::LinkBox { part: r, y0: self.mouse.1, steps: 0 });
+                } else {
+                    self.link_box_act(r);
+                }
+            }
+            return;
+        }
         // The value box is modal: only its own parts take clicks (spec: ui/type-in-value.md §1).
         if crate::typein::is_open(&self.state) {
             if let Some(a @ Action::TypeIn(_)) = action {
@@ -5011,7 +5073,7 @@ impl App {
     /// both directions).
     pub fn mouse_down_middle(&mut self) {
         self.close_song_info();
-        if crate::typein::is_open(&self.state) || self.modal_open() {
+        if crate::typein::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
             return;
         }
         self.smooth.stop();
@@ -5052,7 +5114,7 @@ impl App {
     /// a scroll bar scrolls.
     pub fn mouse_down_right(&mut self) {
         self.close_song_info();
-        if crate::typein::is_open(&self.state) || self.modal_open() {
+        if crate::typein::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
             return;
         }
         self.smooth.stop();
@@ -5073,6 +5135,8 @@ impl App {
         // Pattern selector (spec: ui/pattern-menu.md §1): box = menu at the mouse, "+" = find next empty.
         match &action {
             Some(Action::Settings(views::settings::SAct::Preset(i))) => return self.theme_menu(*i, x, y),
+            // Settings > MIDI's Port and offset boxes: right-click resets (spec: ui/midi-settings.md §1).
+            Some(Action::Settings(views::settings::SAct::Midi(m))) if m.is_value() => return self.midi_page_reset(*m),
             Some(Action::PatternNext) => {
                 self.state.pat_ui.menu_at = Some((x, y));
                 self.state.menu_open = Some(views::menus::PATTERNS);
@@ -5754,6 +5818,18 @@ impl App {
         }
         // Project ▸ a time division's value box: one per notch, up for more (spec: ui/settings-choices.md "Set as time
         // division").
+        if let Some(Action::Remote(r)) = area {
+            if dy + dx != 0.0 && r.is_value() {
+                self.link_box_step(r, if dy + dx > 0.0 { 1 } else { -1 });
+            }
+            return None;
+        }
+        if let Some(Action::Settings(views::settings::SAct::Midi(m))) = area {
+            if dy + dx != 0.0 {
+                self.midi_page_wheel(m, if dy + dx > 0.0 { 1 } else { -1 });
+            }
+            return None;
+        }
         if let Some(Action::Settings(views::settings::SAct::Number(label))) = area {
             if dy + dx != 0.0 {
                 if let Some(m) = self.settings_number(label, if dy + dx > 0.0 { 1 } else { -1 }) {
@@ -5842,6 +5918,7 @@ impl App {
             }
             self.state.set_knob(id, v);
             self.record_knob(id);
+            self.multilink_knob(crate::typein::Target::Knob(id));
             self.hint = Cow::Owned(self.state.knob_text(id));
             return None;
         }
@@ -5939,12 +6016,30 @@ impl App {
         if self.info_key(key, ctrl, alt) || self.folder_cell_key(key, ctrl, alt) || self.name_key(key, ctrl, alt) {
             return;
         }
+        use winit::keyboard::{Key, NamedKey};
+        // The Remote control settings box takes Esc (drops it) and Enter (accepts).
+        if crate::remote::is_open(&self.state) {
+            match key {
+                Key::Named(NamedKey::Escape) => self.state.link_box = None,
+                Key::Named(NamedKey::Enter) => self.link_accept(),
+                _ => {}
+            }
+            return;
+        }
+        // Ctrl+J: Multilink to controllers (spec: ui/remote-control.md §4).
+        if let Key::Character(c) = key
+            && ctrl
+            && !alt
+            && !self.shift
+            && c.eq_ignore_ascii_case("j")
+        {
+            return self.toggle_multilink();
+        }
         // A held key repeats only the piano roll's moving and copying keys; every other key acts on its first press
         // (switches would flicker on and off; spec: ui/piano-keys.md §4 rule 1).
         if self.repeat && !(self.piano_keys() && crate::piano_tools::repeats(key, ctrl, alt, self.shift)) {
             return;
         }
-        use winit::keyboard::{Key, NamedKey};
         // Shift+Alt+G: Enable groups (spec: ui/enable-groups.md §1), everywhere the main window has the keyboard.
         if let Key::Character(c) = key
             && alt
@@ -6271,49 +6366,10 @@ impl App {
         self.typing_lit_changed();
     }
 
-    /// MIDI controller notes (spec: ui/midi-input.md): note on plays the selected channel, like a typing-keyboard key;
-    /// note off releases the key on the channel it started on.
-    fn midi_tick(&mut self) {
-        let msgs = self.midi.poll();
-        self.midi_notes(msgs);
-    }
-
-    /// MIDI notes received, oldest first.
-    pub(crate) fn midi_notes(&mut self, msgs: Vec<crate::midi_in::Msg>) {
-        if msgs.is_empty() {
-            return;
-        }
-        for m in msgs {
-            match m {
-                crate::midi_in::Msg::On(key, velocity) => {
-                    if self.state.shown(Win::Tapper) {
-                        self.midi_tap();
-                    }
-                    let row = self.state.selected_channel;
-                    if row >= self.state.project.channels.len() {
-                        continue;
-                    }
-                    self.sync_live();
-                    self.transport.note_on(row, u16::from(key), velocity);
-                    self.midi_held.push((key, row));
-                    self.step_edit_down(crate::step_edit::Src::Midi(key), u16::from(key), velocity);
-                }
-                crate::midi_in::Msg::Off(key) => {
-                    while let Some(i) = self.midi_held.iter().position(|h| h.0 == key) {
-                        let (_, row) = self.midi_held.remove(i);
-                        self.transport.note_off(row, u16::from(key));
-                    }
-                    self.step_edit_up(crate::step_edit::Src::Midi(key));
-                }
-            }
-        }
-        self.typing_lit_changed();
-    }
-
     /// Held typing-keyboard keys and MIDI notes light on the piano roll's keyboard (§4).
     pub(crate) fn typing_lit_changed(&mut self) {
         let channels = &self.state.project.channels;
-        let midi = self.midi_held.iter().chain(self.state.touch.held.as_ref()).map(|&(key, row)| (row, u16::from(key)));
+        let midi = self.midi_play.lit().chain(self.state.touch.held.map(|(key, row)| (row, u16::from(key))));
         self.state.piano.typed = self.typing_held.iter().map(|&(_, row, key)| (row, key)).chain(midi).filter_map(|(row, key)| Some((channels.get(row)?.index, i32::from(key)))).collect();
         match self.piano_grid {
             Some(g) => self.damage_rect(Rect::new(g.x - 73.0, g.y, 73.0, g.h)),
@@ -6696,6 +6752,8 @@ impl App {
             Action::OneClick => self.one_click_button(),
             Action::AutoScroll => self.toggle_autoscroll(),
             Action::EnableGroups => self.toggle_groups(),
+            Action::Multilink => self.toggle_multilink(),
+            Action::Remote(r) => self.link_box_act(r),
             Action::StepEdit => self.toggle_step_edit(),
             // spec: ui/main-window.md §13: a double click opens the Plugin performance monitor; one click does nothing.
             Action::CpuPanel => {
@@ -7439,6 +7497,8 @@ impl App {
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::AUTOSCROLL_LABEL) => self.toggle_autoscroll(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::GROUPS_LABEL) => self.toggle_groups(),
             (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::STEP_EDIT_LABEL) => self.toggle_step_edit(),
+            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::MULTILINK_LABEL) => self.toggle_multilink(),
+            (m, i) if let Some(sw) = item_at(m, i).and_then(|it| crate::midi_cfg::Switch::from_label(it.label)) => self.toggle_midi_switch(sw),
             (m, i) if item_at(m, i).is_some_and(|it| crate::params::menu_handles(it.label)) => {
                 let label = item_at(m, i).map_or("", |it| it.label);
                 if let Some(msg) = self.params_menu(label) {
@@ -9998,11 +10058,13 @@ mod tests {
         }
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(MIDI)));
         click(&mut app, &mut c, r);
-        // Controls that do not work yet are greyed out: no toggling, the click only says so.
-        assert!(!app.hits.iter().any(|h| h.action == Action::Settings(SAct::Check("Send master sync"))));
-        let r = hit_rect(&app, &Action::Placeholder("Send master sync"));
+        // The MIDI page works (spec: ui/midi-settings.md §1): its checks toggle; what Lemon Studio has no use for is
+        // greyed with its reason.
+        let r = hit_rect(&app, &Action::Settings(SAct::Check("Pickup (takeover mode)")));
         click(&mut app, &mut c, r);
-        assert_eq!(app.state.message.as_deref(), Some("Send master sync: not available yet"));
+        assert_eq!(app.state.message.as_deref(), Some("Pickup (takeover mode): on"));
+        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Lemon Studio has no MIDI scripts"));
+        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Lemon Studio has no playlist performance mode"));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(PROJECT)));
         click(&mut app, &mut c, r);
         assert!(app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo("Ask for data folder", ..)))), "Ask for data folder works");
@@ -17032,6 +17094,42 @@ mod tests {
         let r = combo(&app, BUFFER_LENGTH);
         click(&mut app, &mut c, r);
         c.pixmap.save_png(out.join("09_shared_buffer_length_menu.png")).unwrap();
+    }
+
+    /// Settings > MIDI with this PC's devices, its curve window, the OPTIONS menu and the Remote control box, as
+    /// pictures, for looking (not an assertion): `OS_MIDI_SHOT=<folder>`.
+    #[test]
+    fn midi_shot() {
+        use crate::views::midi_page::MAct;
+        use crate::views::settings::{SAct, MIDI};
+        let Some(out) = std::env::var_os("OS_MIDI_SHOT") else { return };
+        let out = std::path::PathBuf::from(out);
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.midi = crate::midi_in::MidiIn::open(|| {});
+        app.open_settings(MIDI);
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(out.join("01_midi_page.png")).unwrap();
+        if let Some(r) = app.hits.iter().find(|h| matches!(h.action, Action::Settings(SAct::Midi(MAct::Input(0))))).map(|h| h.rect) {
+            click(&mut app, &mut c, r);
+            c.pixmap.save_png(out.join("02_input_selected.png")).unwrap();
+        }
+        if let Some(r) = app.hits.iter().find(|h| matches!(h.action, Action::Settings(SAct::Midi(MAct::Curve(_))))).map(|h| h.rect) {
+            click(&mut app, &mut c, r);
+            c.pixmap.save_png(out.join("03_curve.png")).unwrap();
+        }
+        app.state.settings.open = false;
+        app.state.midi.curve = None;
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Menu(crate::views::menus::OPTIONS_MENU));
+        click(&mut app, &mut c, r);
+        c.pixmap.save_png(out.join("04_options_menu.png")).unwrap();
+        app.state.menu_open = None;
+        app.remote_cmd(crate::remote::RCmd::Link(crate::typein::Target::Knob(crate::knobs::KnobId::ChanVol(0))));
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        c.pixmap.save_png(out.join("05_link_box.png")).unwrap();
     }
 
     /// The header's menus and switches as pictures, for looking (not an assertion): `OS_HEADER_SHOT=<folder>`.

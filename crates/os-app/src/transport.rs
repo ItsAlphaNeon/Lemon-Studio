@@ -209,6 +209,36 @@ impl Shared {
     }
 }
 
+/// What another thread can see of the playback (`Transport::watch`).
+#[derive(Clone)]
+pub struct Watch(Arc<Shared>);
+
+impl Watch {
+    pub fn state(&self) -> State {
+        match self.0.state.load(Ordering::Acquire) {
+            PLAYING => State::Playing,
+            PAUSED => State::Paused,
+            _ => State::Stopped,
+        }
+    }
+
+    /// Counts play and stop requests: a new value while playing is a new start (a jump of the position).
+    pub fn generation(&self) -> u64 {
+        self.0.generation.load(Ordering::Acquire)
+    }
+
+    /// The position in ticks (`Transport::tick`).
+    pub fn tick(&self) -> f64 {
+        f64::from_bits(self.0.tick.load(Ordering::Relaxed))
+    }
+
+    /// The tempo playback plays at, `None` before its first tick (`Transport::tempo`).
+    pub fn tempo(&self) -> Option<f64> {
+        let t = f64::from_bits(self.0.tempo.load(Ordering::Relaxed));
+        (self.state() != State::Stopped && t > 0.0).then_some(t)
+    }
+}
+
 enum Cmd {
     /// Project, mode, start tick (the piano roll's play-start marker in pattern mode), request generation, and the
     /// transport settings as they were asked for.
@@ -227,6 +257,8 @@ enum Cmd {
     /// Live note (typing keyboard): channel (rack position), key, velocity; `NoteOff` releases.
     NoteOn(usize, u16, u8),
     NoteOff(usize, u16),
+    /// A controller message for a channel (rack position): message, pitch bend range in cents (`Engine::midi`).
+    Midi(usize, [u8; 3], f64),
     /// A tap on the Tempo tapper: a click, accented or not, like a live note.
     TapClick(bool),
     /// An instrument's editor opened or the last one closed (`Transport::listen`).
@@ -473,6 +505,13 @@ impl Transport {
         let _ = self.tx.send(Cmd::NoteOff(channel, key));
     }
 
+    /// A controller message (not a note) for the channel at rack position `channel`, where a live note would go: a
+    /// hosted instrument gets it as it is, another channel bends by pitch bend over ±`bend_cents` (spec:
+    /// ui/midi-settings.md §4).
+    pub fn midi(&self, channel: usize, bytes: [u8; 3], bend_cents: f64) {
+        let _ = self.tx.send(Cmd::Midi(channel, bytes, bend_cents));
+    }
+
     /// A tap on the Tempo tapper (spec: ui/tempo-tapper.md §8): the metronome's Tick, accented or not, where a live
     /// note would play (into playback while playing, else on the live stream).
     pub fn tap_click(&self, accent: bool) {
@@ -511,6 +550,11 @@ impl Transport {
         self.shared.state.store(STOPPED, Ordering::Release);
         self.shared.rewind(0.0);
         let _ = self.tx.send(Cmd::Stop);
+    }
+
+    /// A view of the playback's state, position and tempo for another thread (the MIDI master clock, `crate::midi_out`).
+    pub fn watch(&self) -> Watch {
+        Watch(self.shared.clone())
     }
 
     pub fn state(&self) -> State {
@@ -1066,7 +1110,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         match rx.recv_timeout(Duration::from_millis(10)) {
             // The output is closed by Auto close: previews and live notes find no stream and open none.
             // So is a device that failed, until it opens again.
-            Ok(Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::TapClick(_)) if closed || lost.is_some() => {}
+            Ok(Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(_)) if closed || lost.is_some() => {}
             Ok(Cmd::Update) => {
                 if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
                     for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
@@ -1094,7 +1138,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     s.feed.wake();
                 }
             }
-            Ok(cmd @ (Cmd::NoteOn(..) | Cmd::TapClick(_))) => {
+            Ok(cmd @ (Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(_))) => {
                 // A click needs no channel: it also opens the live stream before any project was sent.
                 let empty = Project::default();
                 let project = live_project.as_ref().or(matches!(cmd, Cmd::TapClick(_)).then_some(&empty));
@@ -1117,6 +1161,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     if let Ok(mut e) = s.engine.lock() {
                         match cmd {
                             Cmd::NoteOn(ch, key, vel) => e.note_on(ch, key, vel),
+                            Cmd::Midi(ch, bytes, bend) => e.midi(ch, bytes, bend),
                             Cmd::TapClick(accent) => e.tap_click(accent),
                             _ => {}
                         }

@@ -666,7 +666,8 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
     }
 
     // Mode buttons (spec: ui/main-window.md §3). Typing keyboard, auto scrolling (spec: ui/auto-scrolling.md), step
-    // edit (spec: ui/step-edit.md) and enable groups (spec: ui/enable-groups.md) work.
+    // edit (spec: ui/step-edit.md), enable groups (spec: ui/enable-groups.md) and multilink (spec:
+    // ui/remote-control.md §4) work.
     for (i, (icon, hint)) in [
         (Icon::TypingKeyboard, "Typing keyboard to piano keyboard (Ctrl+T)"),
         (Icon::AutoScroll, "Auto scrolling - right-click for continuous scrolling"),
@@ -685,7 +686,7 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
             1 => (crate::autoscroll::on(), Action::AutoScroll),
             2 => (crate::step_edit::on(), Action::StepEdit),
             3 => (crate::enable_groups::on(), Action::EnableGroups),
-            _ => (false, Action::Placeholder(hint)),
+            _ => (s.multilink.on, Action::Multilink),
         };
         tool_button(ui, btn(580.0 + 33.0 * i as f32, 45.0), icon, on, action, hint);
     }

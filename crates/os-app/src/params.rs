@@ -199,7 +199,7 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         Some((key, index)) => PItem::new(crate::playlist::paste_label(s), Cmd::Param(PCmd::Paste(key, index))),
         None => PItem::new("Paste value", Cmd::Nothing).off(),
     };
-    vec![
+    let mut v = vec![
         PItem::not_yet("Edit events"),
         PItem::not_yet("Edit events in new window"),
         PItem::not_yet("Edit events in piano roll"),
@@ -208,9 +208,9 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         PItem::sep(),
         create,
         PItem::not_yet("Edit automation clip..."),
-        PItem::head("Remote control"),
-        PItem::not_yet("Link to controller..."),
-        PItem::not_yet("Override global link..."),
+    ];
+    v.extend(crate::remote::menu_items(param.map(|(key, index)| crate::typein::Target::Param(key, index))));
+    v.extend([
         PItem::head("Value"),
         copy,
         paste,
@@ -220,7 +220,8 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
             None => PItem::not_yet("Type in value..."),
         },
         PItem::not_yet("Set..."),
-    ]
+    ]);
+    v
 }
 
 /// The menu of a parameter row (browser right-click, spec §6).

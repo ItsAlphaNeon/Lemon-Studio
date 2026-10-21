@@ -47,7 +47,10 @@ mod menu_bar;
 mod messages;
 mod meters;
 mod metronome;
+mod midi_cfg;
 mod midi_in;
+mod midi_out;
+mod midi_play;
 mod mixer;
 mod osc3;
 mod monitor;
@@ -57,6 +60,7 @@ mod piano_snap;
 mod piano_split;
 mod piano_tools;
 mod rack;
+mod remote;
 mod render;
 mod patterns;
 mod perf;
@@ -1626,11 +1630,13 @@ fn main() {
         // Ask for data folder "On startup": the New project form over it (spec: ui/data-folder.md §7).
         app.startup_form();
     }
-    // MIDI controllers play the selected channel (spec: ui/midi-input.md).
+    // MIDI devices (spec: ui/midi-settings.md §2): the enabled inputs play the selected channel; master sync goes out.
     app.midi = midi_in::MidiIn::open(wake_ui);
-    app.state.midi_inputs = app.midi.names.clone();
-    if !app.state.midi_inputs.is_empty() && app.state.message.is_none() {
-        app.state.message = Some(format!("MIDI input: {}", app.state.midi_inputs.join(", ")));
+    app.midi_out = midi_out::MidiOut::start(app.transport.watch());
+    let message = app.state.message.clone();
+    app.midi_refresh(false);
+    if message.is_some() {
+        app.state.message = message;
     }
     // Plugin menus and dialogs run modal loops on this thread on Windows (elsewhere Lemon plugins' editors have threads
     // of their own).

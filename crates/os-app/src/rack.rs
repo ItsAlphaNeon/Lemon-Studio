@@ -1370,11 +1370,9 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
     });
     v.extend([
         PItem::new("Edit automation clip...", Cmd::Nothing).off(),
-        PItem::head("Remote control"),
-        PItem::not_yet("Link to controller..."),
-        PItem::not_yet("Override global link..."),
-        PItem::head("Value"),
     ]);
+    v.extend(crate::remote::menu_items(knob.map(crate::typein::Target::Knob)));
+    v.push(PItem::head("Value"));
     match knob {
         Some(k) => {
             v.push(it("Copy value", RCmd::CopyValue(k)));

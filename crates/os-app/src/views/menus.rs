@@ -109,6 +109,8 @@ pub const AUTOSCROLL_LABEL: &str = "Auto scrolling";
 pub const GROUPS_LABEL: &str = "Enable groups";
 /// OPTIONS > Step edit (spec: ui/step-edit.md).
 pub const STEP_EDIT_LABEL: &str = "Step edit";
+/// OPTIONS ▸ Switches: Multilink to controllers (spec: ui/remote-control.md §4).
+pub const MULTILINK_LABEL: &str = "Multilink to controllers";
 /// VIEW > Into workspace: windows partly outside the workspace move fully back in (`App::move_into_workspace`). A plain
 /// entry after "Arrange windows", whose submenu isn't built (spec: ui/settings-choices.md "Advanced: Don't limit
 /// windows to screen (2026-10-16)").
@@ -259,9 +261,9 @@ const OPTIONS: &[Item] = &[
     head("Info"),
     it("Debugging log", ""),
     head("MIDI"),
-    it("Enable MIDI remote control", "").tick(),
-    it("Enable MIDI output", "").tick(),
-    it("Enable MIDI master sync", "").tick(),
+    it("Enable MIDI remote control", "").on().tick(),
+    it("Enable MIDI output", "").on().tick(),
+    it("Enable MIDI master sync", "").on().tick(),
     head("Switches"),
     it("Typing keyboard to piano", "Ctrl+T").on().tick(),
     it(METRONOME_LABEL, "Ctrl+M").on().tick(),
@@ -272,7 +274,7 @@ const OPTIONS: &[Item] = &[
     it(LOOP_LABEL, "").on().tick(),
     it(AUTOSCROLL_LABEL, "").on().tick(),
     it(GROUPS_LABEL, "Shift+Alt+G").on().tick(),
-    it("Multilink to controllers", "Ctrl+J").tick(),
+    it(MULTILINK_LABEL, "Ctrl+J").on().tick(),
 ];
 
 const TOOLS_A: &[Item] = &[
@@ -506,6 +508,8 @@ fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
         (Mark::Check(_), _) if item.label == AUTOSCROLL_LABEL => Mark::Check(crate::autoscroll::on()),
         (Mark::Check(_), _) if item.label == GROUPS_LABEL => Mark::Check(crate::enable_groups::on()),
         (Mark::Check(_), _) if item.label == STEP_EDIT_LABEL => Mark::Check(crate::step_edit::on()),
+        (Mark::Check(_), _) if item.label == MULTILINK_LABEL => Mark::Check(s.multilink.on),
+        (Mark::Check(_), _) if let Some(sw) = crate::midi_cfg::Switch::from_label(item.label) => Mark::Check(sw.on()),
         (mk, _) => mk,
     }
 }
