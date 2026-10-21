@@ -256,13 +256,13 @@ impl App {
         let s = &self.state;
         let p = crate::rack::play_project(s);
         let song = s.song_mode;
+        // A warning box: a hint-bar message is lost under the menu's own hint at once.
         if song && p.arrangement().is_none_or(|a| a.clips.is_empty()) {
-            self.state.message = Some("Export: the playlist is empty (switch to PAT to export the current pattern)".into());
-            return self.invalidate();
+            return self.tell(Kind::Warning, TITLE, spans(&["The playlist is empty. Switch to PAT to export the current pattern."]));
         }
         if !song && p.patterns.iter().find(|q| q.number == s.pattern).is_none_or(|q| q.notes.is_empty()) {
-            self.state.message = Some(format!("Export: {} has no notes", crate::patterns::name_of(s, s.pattern)));
-            return self.invalidate();
+            let text = format!("{} has no notes. Add some notes, or switch to SONG to export the playlist.", crate::patterns::name_of(s, s.pattern));
+            return self.tell(Kind::Warning, TITLE, spans(&[&text]));
         }
         let mut o = Options::load();
         if mp3 {
@@ -484,7 +484,7 @@ mod tests {
         empty.state.song_mode = false;
         empty.act(crate::app::Action::MenuItem(0, FILE_EXPORT));
         assert!(form(&empty).is_none());
-        assert!(empty.state.message.as_deref().is_some_and(|m| m.contains("no notes")), "{:?}", empty.state.message);
+        assert_eq!(empty.state.dialogs.len(), 1, "a warning says why");
 
         let mut app = app();
         app.act(crate::app::Action::MenuItem(0, FILE_EXPORT_MP3));
