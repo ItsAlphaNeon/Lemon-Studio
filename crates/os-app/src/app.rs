@@ -235,6 +235,8 @@ pub enum Action {
     BrowserMenu,
     /// The search field (focus it, §5).
     BrowserSearch,
+    /// The splitter right of the browser: drag to resize it, double-click for the default width (§9).
+    BrowserSplitter,
     PlaylistArea,
     MixerArea,
     RackArea,
@@ -775,6 +777,8 @@ pub enum Drag {
     /// The piano roll's grid / event panel splitter: `dy` = grab offset from the band's top, `top` = the grid's top,
     /// `h` = the height the grid and the panel share.
     PianoSplit { dy: f32, top: f32, h: f32 },
+    /// The browser's splitter: `dx` = grab offset from the browser's right edge (spec: ui/browser.md §9).
+    BrowserSplit { dx: f32 },
     /// Monitor debug panel slider.
     MonParam(usize),
     /// Cable physics debug panel slider.
@@ -935,6 +939,12 @@ pub struct State {
     /// Navigation history of selected row keys and the position in it.
     pub browser_hist: Vec<String>,
     pub browser_hist_pos: usize,
+    /// Width of the docked browser incl. its splitter, as dragged (`views::browser_w` keeps it in range), kept between
+    /// runs, and the last press on the splitter, for its double click (spec: ui/browser.md §9).
+    pub browser_w: f32,
+    pub browser_split_click: Option<std::time::Instant>,
+    /// The hovered row whose label is scrolling, as last painted (spec: ui/browser.md §9).
+    pub browser_marquee: std::cell::RefCell<Option<views::browser::Marquee>>,
     /// Plugin parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
     /// "Copy value": a normalized value for "Paste value", one for every control and automation point, as in FL
@@ -1002,7 +1012,7 @@ impl State {
 
     /// The workspace: right of the browser, below the toolbar.
     pub fn work_rect(&self) -> Rect {
-        let left = if self.show_browser { views::BROWSER_W } else { 0.0 };
+        let left = if self.show_browser { views::browser_w(self) } else { 0.0 };
         let top = views::work_y(self);
         Rect::new(left, top, (self.screen.0 - left).max(0.0), (self.screen.1 - top).max(0.0))
     }
@@ -1258,6 +1268,9 @@ impl App {
                 browser_opts: views::browser::DEFAULT_OPTS.iter().copied().collect(),
                 browser_hist: Vec::new(),
                 browser_hist_pos: 0,
+                browser_w: crate::browser::load_width(),
+                browser_split_click: None,
+                browser_marquee: Default::default(),
                 tempo: 130.0,
                 tempo_digits: std::cell::Cell::new([f32::INFINITY; 3]),
                 message: None,
@@ -3060,6 +3073,7 @@ impl App {
             || self.state.cables.borrow().moving()
             || self.hold.is_some()
             || self.smooth.running()
+            || self.state.browser_marquee.borrow().is_some()
     }
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
@@ -3150,6 +3164,7 @@ impl App {
         self.hold_tick(now);
         self.ease_tick(now);
         self.cables_tick(now);
+        self.marquee_tick(now);
         self.backup_tick(now);
         self.work_tick(now);
         self.song_info_tick(now);
@@ -3449,11 +3464,19 @@ impl App {
     /// file. Either channel reads the file's root note and beats (`rack::read_tags`). One history step, "Load channel
     /// sample(s)" (`history::load_sample`).
     pub(crate) fn sample_to_rack(&mut self, path: String, y: f32) {
+        let s = &self.state;
+        let row = views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind.is_sampler());
+        self.sample_to_channel(path, row);
+    }
+
+    /// Sample `path` into sampler row `row`, or into a new Lemon Sampler channel at the bottom of the rack (`None`), named
+    /// after the file; that channel is selected.
+    pub(crate) fn sample_to_channel(&mut self, path: String, row: Option<usize>) {
         let s = &mut self.state;
         let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
         // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
         let path = crate::data_folder::adopt(s, &path);
-        let row = match views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind.is_sampler()) {
+        let row = match row {
             Some(r) => {
                 crate::history::load_sample(s, r);
                 s.sample_loads.push((r, path.clone()));
@@ -4503,6 +4526,7 @@ impl App {
                         self.damage_piano();
                     }
                 }
+                Drag::BrowserSplit { dx } => self.browser_split_drag(x - dx),
                 Drag::SongPosHold { .. } => {}
                 Drag::PrefSlider { label, x: x0, w } => self.pref_slider_drag(label, x0, w),
                 Drag::Ppi { x0, n0 } => self.ppi_set(crate::ppi::dragged(n0, x - x0, self.px_scale)),
@@ -4875,6 +4899,9 @@ impl App {
         if matches!((&self.drag, &self.hover), (Some(Drag::PianoSplit { .. }), _) | (None, Some(Action::PianoSplitter))) {
             return Cursor::NsResize;
         }
+        if matches!((&self.drag, &self.hover), (Some(Drag::BrowserSplit { .. }), _) | (None, Some(Action::BrowserSplitter))) {
+            return Cursor::EwResize;
+        }
         let edges = match (&self.drag, &self.hover) {
             (Some(Drag::RackResize { edges, .. }), _) => *edges,
             (None, Some(Action::RackResize(e))) => *e,
@@ -5134,7 +5161,7 @@ impl App {
                 return self.invalidate();
             }
             Some(Action::BrowserRow(i)) => {
-                if self.browser_remove_root(*i) || self.params_browser_right(*i, x, y) {
+                if self.params_browser_right(*i, x, y) || self.browser_row_menu(*i, x, y) {
                     return;
                 }
             }
@@ -5297,6 +5324,7 @@ impl App {
             Some(Drag::ZoomBox { x0, y0 }) => self.zoom_to(x0, y0),
             Some(Drag::SongPos { .. }) => self.song_pos_release(),
             Some(Drag::PianoSplit { .. }) => crate::piano_split::save(self.state.piano.split),
+            Some(Drag::BrowserSplit { .. }) => crate::browser::save_width(self.state.browser_w),
             Some(Drag::Marker) if self.transport.playing() && !self.transport.song() => {
                 self.start_playback();
             }
@@ -7006,7 +7034,7 @@ impl App {
             Action::Util(Util::Save) => self.menu_item(0, views::menus::FILE_SAVE_AS),
             Action::CloseWin(Win::Perf) => self.close_perf(),
             Action::CloseWin(w) => s.hide(w),
-            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch => {}
+            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserSplitter => {}
             Action::TypeIn(t) => crate::typein::click(s, t),
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
             Action::PlTool(_)
@@ -11764,12 +11792,166 @@ mod tests {
         assert_eq!(r[i + 2].label, "Kick 01");
         assert!(matches!(r[i + 2].item, Item::Sample(_)));
         assert_eq!(r[i + 2].depth, 2);
-        // Right-click the root removes it.
+        // The root's right-click menu removes it (§8).
         frame(&mut app, &mut c, None);
         let root = hit_rect(&app, &Action::BrowserRow(i));
         app.mouse_move(root.cx(), root.cy());
         app.mouse_down_right();
+        pick(&mut app, &mut c, "Remove from browser");
         assert!(app.state.browser_folders.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Clicks entry `label` of the open popup.
+    fn pick(app: &mut App, c: &mut Canvas, label: &str) {
+        frame(app, c, None);
+        let items = &app.state.playlist.popup.as_ref().expect("a menu").items;
+        let k = items.iter().position(|i| i.label == label).unwrap_or_else(|| panic!("no \"{label}\" in the menu"));
+        let r = hit_rect(app, &Action::PlPopup(k));
+        click(app, c, r);
+    }
+
+    /// A right click on a browser row selects it and opens its menu (spec: ui/browser.md §8): Open / Close for a node,
+    /// what the row's kind offers, the file manager for disk entries, the structure commands last.
+    #[test]
+    fn browser_row_menu() {
+        use crate::views::browser::{disk_key, rows, Item, Row};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("os_browser_menu_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(dir.join("Snare 01.wav")).unwrap(), 44100, &[0.0; 8]).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.patterns.push(os_model::Pattern { number: 2, name: Some("Verse".into()), ..Default::default() });
+        app.state.z = vec![Win::Playlist];
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(disk_key(&dir));
+        /// Right-clicks the first row `find` accepts: the row is selected; the menu's labels.
+        fn right(app: &mut App, c: &mut Canvas, find: impl Fn(&Row) -> bool) -> Vec<String> {
+            frame(app, c, None);
+            let i = rows(&app.state).iter().position(find).expect("the row");
+            let r = hit_rect(app, &Action::BrowserRow(i));
+            app.mouse_move(r.cx(), r.cy());
+            app.mouse_down_right();
+            assert_eq!(app.state.browser_sel.as_ref(), Some(&rows(&app.state)[i].key), "the right click selects the row");
+            app.state.playlist.popup.as_ref().expect("a menu").items.iter().map(|i| i.label.to_string()).collect()
+        }
+        // A sample in a dropped folder: preview, send, a new channel, its folder; the structure commands last.
+        let labels = right(&mut app, &mut c, |r| r.label == "Snare 01");
+        assert_eq!(labels[..3], ["Preview", "Send to selected channel", "Add to channel rack"]);
+        assert!(labels.iter().any(|l| l.starts_with("Show in ")));
+        assert_eq!(labels[labels.len() - 2..], ["Collapse structure", "Reread structure"]);
+        let n = app.state.project.channels.len();
+        pick(&mut app, &mut c, "Add to channel rack");
+        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.project.channels[app.state.selected_channel].name.as_deref(), Some("Snare 01"));
+        // The dropped root: Close / Open, then Remove from browser.
+        let labels = right(&mut app, &mut c, |r| r.key == disk_key(&dir));
+        assert_eq!(labels[0], "Close");
+        assert!(labels.iter().any(|l| l == "Rename...") && labels.iter().any(|l| l.starts_with("Open in ")));
+        pick(&mut app, &mut c, "Close");
+        assert!(!app.state.browser_open.contains(&disk_key(&dir)));
+        assert_eq!(right(&mut app, &mut c, |r| r.key == disk_key(&dir))[0], "Open");
+        pick(&mut app, &mut c, "Remove from browser");
+        assert!(app.state.browser_folders.is_empty());
+        // A pattern: its commands act on that pattern.
+        app.state.browser_tab = crate::views::browser::PROJECT_TAB;
+        let labels = right(&mut app, &mut c, |r| r.item == Item::Pattern(2));
+        assert!(labels.iter().any(|l| l == "Rename and color..."));
+        pick(&mut app, &mut c, "Select pattern");
+        assert_eq!(app.state.pattern, 2);
+        app.state.pattern = 1;
+        let n = app.state.project.patterns.len();
+        right(&mut app, &mut c, |r| r.item == Item::Pattern(2));
+        pick(&mut app, &mut c, "Clone");
+        assert_eq!(app.state.project.patterns.len(), n + 1);
+        let copy = app.state.project.pattern(3).and_then(|p| p.name.clone()).unwrap_or_default();
+        assert!(app.state.pattern == 3 && copy.starts_with("Verse"), "pattern 2 cloned, not the current one: {copy}");
+        // A channel under Generators: selected from its menu.
+        app.state.browser_open.insert(crate::views::browser::section_key("Generators").unwrap());
+        right(&mut app, &mut c, |r| r.item == Item::Channel(1));
+        pick(&mut app, &mut c, "Select channel");
+        assert_eq!(app.state.selected_channel, 1);
+        // Collapse structure closes every node of the tab.
+        right(&mut app, &mut c, |r| r.item == Item::Channel(1));
+        pick(&mut app, &mut c, "Collapse structure");
+        assert!(!app.state.browser_open.iter().any(|k| k.starts_with("1:")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The browser's splitter (spec: ui/browser.md §9): a drag widens the browser and the workspace starts right of it,
+    /// from the default width to half the window; a double click gives the default width back.
+    #[test]
+    fn browser_splitter_resizes_the_browser() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let split = hit_rect(&app, &Action::BrowserSplitter);
+        assert_eq!((split.x, split.right()), (201.0, 209.0), "the measured splitter");
+        let drag = |app: &mut App, c: &mut Canvas, dx: f32| {
+            let s = hit_rect(app, &Action::BrowserSplitter);
+            app.mouse_move(s.cx(), s.cy());
+            assert_eq!(app.cursor(), Cursor::EwResize);
+            app.mouse_down();
+            app.mouse_move(s.cx() + dx, s.cy());
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        drag(&mut app, &mut c, 150.0);
+        assert_eq!(app.state.browser_w, 359.0);
+        assert_eq!(app.state.work_rect().x, 359.0);
+        assert_eq!(hit_rect(&app, &Action::BrowserSplitter).x, 351.0);
+        assert_eq!(hit_rect(&app, &Action::BrowserRow(0)).right(), 351.0, "rows span the wider list");
+        drag(&mut app, &mut c, -500.0);
+        assert_eq!(app.state.browser_w, 209.0, "not narrower than the default");
+        drag(&mut app, &mut c, 2000.0);
+        assert_eq!(app.state.browser_w, 960.0, "at most half the window");
+        let s = hit_rect(&app, &Action::BrowserSplitter);
+        app.mouse_move(s.cx(), s.cy());
+        for _ in 0..2 {
+            app.mouse_down();
+            app.mouse_up();
+        }
+        assert_eq!(app.state.browser_w, 209.0, "a double click: the default width");
+    }
+
+    /// A hovered row whose label does not fit scrolls it (spec: ui/browser.md §9): still at first, then moving while the
+    /// mouse stays; a label that fits does not.
+    #[test]
+    fn browser_long_labels_scroll_while_hovered() {
+        use crate::views::browser::{disk_key, rows};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("os_browser_marquee_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("A very long file name that does not fit in the browser.txt"), b"x").unwrap();
+        std::fs::write(dir.join("Short.txt"), b"x").unwrap();
+        let mut app = App::new(None);
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(disk_key(&dir));
+        frame(&mut app, &mut c, None);
+        let at = |app: &App, label: &str| {
+            let i = rows(&app.state).iter().position(|r| r.label.starts_with(label)).expect("the row");
+            hit_rect(app, &Action::BrowserRow(i))
+        };
+        let long = at(&app, "A very long");
+        app.mouse_move(long.cx(), long.cy());
+        frame(&mut app, &mut c, None);
+        let m = app.state.browser_marquee.borrow().clone().expect("scrolling");
+        assert!(m.over > 0.0 && m.off == 0.0, "still at first: {m:?}");
+        assert!(app.animating());
+        // Two seconds on, its rect is repainted and the label has moved.
+        app.state.browser_marquee.get_mut().as_mut().unwrap().since -= std::time::Duration::from_secs(2);
+        app.take_damage();
+        app.marquee_tick(std::time::Instant::now());
+        assert!(app.has_damage());
+        frame(&mut app, &mut c, None);
+        assert!(app.state.browser_marquee.borrow().as_ref().unwrap().off > 0.0);
+        let short = at(&app, "Short");
+        app.mouse_move(short.cx(), short.cy());
+        frame(&mut app, &mut c, None);
+        assert!(app.state.browser_marquee.borrow().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

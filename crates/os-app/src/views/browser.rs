@@ -550,13 +550,43 @@ pub fn max_scroll(s: &State) -> f32 {
     (rows(s).len() as f32 * ROW_H - list_h(s)).max(0.0)
 }
 
+/// A hovered row whose label does not fit scrolls it slowly to its end and back (spec §9): the row, when the hover
+/// began, the label's rect, how much of the label is cut and the offset last painted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Marquee {
+    pub key: String,
+    pub since: std::time::Instant,
+    pub rect: Rect,
+    pub over: f32,
+    pub off: f32,
+}
+
+/// The scroll's pause at either end (s) and speed (px/s).
+const MARQUEE_WAIT: f32 = 1.0;
+const MARQUEE_SPEED: f32 = 30.0;
+
+/// How far a label cut by `over` px is scrolled `t` s into the hover: still, to its end, still, back to its start, and
+/// again; whole px.
+pub fn marquee_offset(t: f32, over: f32) -> f32 {
+    if over <= 0.0 {
+        return 0.0;
+    }
+    let run = over / MARQUEE_SPEED;
+    let p = t.max(0.0) % (2.0 * (MARQUEE_WAIT + run));
+    let out = (p - MARQUEE_WAIT).clamp(0.0, run);
+    let back = (p - 2.0 * MARQUEE_WAIT - run).clamp(0.0, run);
+    ((out - back) * MARQUEE_SPEED).round()
+}
+
 pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     let t = ui.t;
     // Measured with the browser top at `WORK_Y`; it moves up with a hidden toolbar (spec: ui/toolbar-menu.md §5).
     let dy = r.y - super::WORK_Y;
+    // The panel left of the splitter: 201 px measured, wider as the splitter is dragged (§9).
+    let bw = r.w - SPLITTER;
     ui.hit(r, Action::Swallow, "");
     // Title bar.
-    ui.c.fill_rect(Rect::span(0.0, 200.0, 83.0 + dy, 105.0 + dy), t.browser_title);
+    ui.c.fill_rect(Rect::span(0.0, bw - 1.0, 83.0 + dy, 105.0 + dy), t.browser_title);
     let at = menu_at(s);
     let menu_open = s.playlist.popup.as_ref().is_some_and(|p| p.x == at.0 && p.y == at.1);
     let mhov = ui.hit(Rect::new(2.0, 85.0 + dy, 16.0, 18.0), Action::BrowserMenu, "Browser options");
@@ -577,7 +607,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     }
     ui.c.text(os_ui::Font::new(14), 52.0, 85.0 + dy, t.text_dim, "Browser");
     // Tabs (spec ui/browser.md §1): FL's five without Online content, sharing the strip.
-    ui.c.fill_rect(Rect::span(0.0, 200.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
+    ui.c.fill_rect(Rect::span(0.0, bw - 1.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
     const TIPS: [&str; 4] = ["All", "Current project", "Plugin database", "Favorites"];
     for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Star].into_iter().enumerate() {
         let cx = 25.0 + 50.0 * i as f32;
@@ -599,27 +629,28 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     let top = list_top(s);
     let search_on_top = opt(s, OPT_TOP);
     if search_on_top {
-        ui.c.fill_rect(Rect::new(0.0, LIST_Y + dy, 201.0, SEARCH_ROW), t.browser_footer);
-        search_box(ui, s, Rect::new(13.0, LIST_Y + dy + 4.0, 163.0, 20.0));
+        ui.c.fill_rect(Rect::new(0.0, LIST_Y + dy, bw, SEARCH_ROW), t.browser_footer);
+        search_box(ui, s, Rect::new(13.0, LIST_Y + dy + 4.0, bw - 38.0, 20.0));
     }
     let rows = rows(s);
     let info = info_path(&rows, s);
     let ih = if info.is_some() { INFO_H } else { 0.0 };
-    let list = Rect::span(13.0, 200.0, top, r.bottom() - FOOTER_H - ih);
+    let list = Rect::span(13.0, bw - 1.0, top, r.bottom() - FOOTER_H - ih);
     ui.c.fill_rect(Rect::new(0.0, top, 13.0, list.h), t.browser_tabs.shade(0.02));
     ui.c.fill_rect(list, t.browser_list);
-    ui.hit(Rect::new(0.0, top, 201.0, list.h), Action::BrowserList, "");
-    ui.c.push_clip(Rect::new(0.0, top, 201.0, list.h));
+    ui.hit(Rect::new(0.0, top, bw, list.h), Action::BrowserList, "");
+    ui.c.push_clip(Rect::new(0.0, top, bw, list.h));
     let cats: [Color; 2] = [t.cat_project, t.cat_plugin_db];
     let scroll = s.browser_scroll.min((rows.len() as f32 * ROW_H - list.h).max(0.0)).max(0.0);
     let sel = s.browser_sel.as_deref();
+    let mut marquee = None;
     for (i, row) in rows.iter().enumerate() {
         let y = top + ROW_H * i as f32 - scroll;
         if y + ROW_H < list.y || y > list.bottom() {
             continue;
         }
         let x = 13.0 + INDENT * f32::from(row.depth);
-        let rect = Rect::new(13.0, y, 188.0, ROW_H);
+        let rect = Rect::new(13.0, y, bw - 13.0, ROW_H);
         // A parameter row's hint carries its value (spec: plugins/plugin-parameters.md §6); read for the hovered row only.
         let hint = match row.item {
             Item::Param(key, index) if ui.hovering(rect) => crate::params::row_hint(s, key, index),
@@ -651,40 +682,59 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             _ => c,
         };
         icons::draw(ui.c, row.icon, Rect::new(x + 6.0, y + 3.0, 17.0, 17.0), ic);
-        let (f, w) = (os_ui::Font::new(17), 200.0 - x - 27.0);
+        let (f, w) = (os_ui::Font::new(17), bw - 1.0 - x - 27.0);
+        let over = ui.c.text_width(f, &row.label) - w;
+        // Hovered, a label that does not fit scrolls (§9) rather than being cut.
+        if hov && over > 0.0 {
+            let now = std::time::Instant::now();
+            let since = s.browser_marquee.borrow().as_ref().filter(|m| m.key == row.key).map_or(now, |m| m.since);
+            let off = marquee_offset(now.duration_since(since).as_secs_f32(), over);
+            let lr = Rect::new(x + 25.0, y, w, ROW_H);
+            ui.c.push_clip(lr);
+            ui.c.text(f, lr.x - off, y, c, &row.label);
+            ui.c.pop_clip();
+            marquee = Some(Marquee { key: row.key.clone(), since, rect: lr, over, off });
+            continue;
+        }
         let label = if row.path.is_some() { middle_cut(ui, f, &row.label, w) } else { row.label.clone() };
         ui.c.text_clip(f, x + 25.0, y, w, c, &label);
     }
+    *s.browser_marquee.borrow_mut() = marquee;
     let empty = if !s.browser_search.is_empty() { "No matches" } else { "No favorites yet" };
     if rows.is_empty() && (s.browser_tab >= 3 || !s.browser_search.is_empty()) {
         ui.c.text(os_ui::Font::new(14).italic(), 22.0, top + 6.0, t.text_faint, empty);
     }
     ui.c.pop_clip();
     if let Some(p) = &info {
-        paint_info(ui, s, p, Rect::new(0.0, list.bottom(), 201.0, ih));
+        paint_info(ui, s, p, Rect::new(0.0, list.bottom(), bw, ih));
     }
-    // Footer.
+    // Footer: the search field takes the width the splitter adds.
     let fy = r.bottom() - 27.0;
-    ui.c.fill_rect(Rect::new(0.0, fy, 201.0, 27.0), t.browser_footer);
+    ui.c.fill_rect(Rect::new(0.0, fy, bw, 27.0), t.browser_footer);
     // Tags: not available yet, greyed out.
     let tags = Rect::new(13.0, fy + 4.0, 41.0, 20.0);
     ui.off(tags, "Tags");
     ui.c.fill_rrect(tags, 3.0, t.sunken);
     ui.c.text_center(os_ui::Font::condensed(11, 6).bold(), tags, ui.t.tx(0xc0c8cc), "TAGS");
     ui.veil(tags, t.browser_footer);
+    let field = Rect::new(57.0, fy + 4.0, bw - 82.0, 20.0);
     if !search_on_top {
-        search_box(ui, s, Rect::new(57.0, fy + 4.0, 119.0, 20.0));
+        search_box(ui, s, field);
     } else {
-        ui.c.fill_rrect(Rect::new(57.0, fy + 4.0, 119.0, 20.0), 3.0, t.sunken);
+        ui.c.fill_rrect(field, 3.0, t.sunken);
     }
-    icons::draw(ui.c, Icon::Folder, Rect::new(158.0, fy + 7.0, 14.0, 14.0), t.text_faint);
-    let glass = Rect::new(178.0, fy + 3.0, 21.0, 21.0);
+    icons::draw(ui.c, Icon::Folder, Rect::new(field.right() - 18.0, fy + 7.0, 14.0, 14.0), t.text_faint);
+    let glass = Rect::new(bw - 23.0, fy + 3.0, 21.0, 21.0);
     let hov = ui.hit(glass, Action::BrowserSearch, "Search the browser (Enter = find next, Esc = clear)");
-    icons::draw(ui.c, Icon::Search, Rect::new(180.0, fy + 5.0, 17.0, 17.0), if hov { t.browser_search.shade(0.2) } else { t.browser_search });
-    // Splitter.
-    ui.c.fill_rect(Rect::new(201.0, r.y, 6.0, r.h), t.splitter);
-    ui.c.fill_rect(Rect::new(207.0, r.y, 2.0, r.h), t.splitter_dark);
+    icons::draw(ui.c, Icon::Search, Rect::new(glass.x + 2.0, fy + 5.0, 17.0, 17.0), if hov { t.browser_search.shade(0.2) } else { t.browser_search });
+    // Splitter: drags the browser's width (§9).
+    ui.c.fill_rect(Rect::new(bw, r.y, 6.0, r.h), t.splitter);
+    ui.c.fill_rect(Rect::new(bw + 6.0, r.y, 2.0, r.h), t.splitter_dark);
+    ui.hit(Rect::new(bw, r.y, SPLITTER, r.h), Action::BrowserSplitter, "Browser: drag to resize, double-click for the default width");
 }
+
+/// The splitter's width right of the browser panel.
+const SPLITTER: f32 = 8.0;
 
 /// A long disk name shortened in the middle with ".." to fit `w` (FL screenshots, spec §6).
 fn middle_cut(ui: &mut Ui, f: os_ui::Font, text: &str, w: f32) -> String {
@@ -763,5 +813,14 @@ mod tests {
         assert!(text.contains("/2023 ") && (text.starts_with("11/14/") || text.starts_with("11/15/")), "{text}");
         assert!(text.ends_with(" AM") || text.ends_with(" PM"), "{text}");
         assert_eq!(size_text(1536), "1.50 KB");
+    }
+
+    /// A long label's scroll (§9): still for a second, 30 px/s to its end, still, back to its start, and again.
+    #[test]
+    fn long_labels_scroll_to_the_end_and_back() {
+        let over = 60.0;
+        let at = |t: f32| marquee_offset(t, over);
+        assert_eq!([at(0.5), at(2.0), at(3.5), at(5.0), at(6.0), at(8.0)], [0.0, 30.0, 60.0, 30.0, 0.0, 30.0]);
+        assert_eq!(marquee_offset(3.0, 0.0), 0.0, "a label that fits stays");
     }
 }
