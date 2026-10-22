@@ -225,8 +225,9 @@ pub fn bits(x: f32) -> f32 {
     (1.0 - q) * 14.0 + 2.0
 }
 
+/// `10^(db / 20)`, the division in single.
 fn pow10_20(db: f32) -> f32 {
-    10f64.powf(f64::from(db) / 20.0) as f32
+    10f64.powf(f64::from(db / 20.0)) as f32
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -839,7 +840,8 @@ impl Delay {
         };
         let hz = hz.min((0.49 * self.rate) as f32);
         let w = (3.1415 / self.rate) as f32;
-        let g = (f64::from(hz) * f64::from(w)).tan() as f32;
+        // The product in single, the tangent in double.
+        let g = f64::from(hz * w).tan() as f32;
         let a1 = 1.0 / ((g + k) * g + 1.0);
         let a2 = a1 * g;
         self.svf_k = SvfCoefs { a1, a2, a3: a2 * g, m, off: false };
@@ -1028,7 +1030,8 @@ impl Delay {
         let old = self.phase;
         let p = old + self.lfo_step;
         self.phase = p - p.trunc();
-        self.lfo = ((f64::from(old * 6.283_185_5)).sin() as f32 + 1.0) * 0.5;
+        // FL's single-precision sine: on Windows `f32::sin` is the C runtime's `sinf`, which gives FL's values.
+        self.lfo = ((old * 6.283_185_5).sin() + 1.0) * 0.5;
         if self.kind != OFF {
             let half = 0.5 * self.rate as f32;
             self.depth = ftz(((self.depth_setting * half) * self.lfo_scale - self.depth) * self.depth_c + self.depth);
