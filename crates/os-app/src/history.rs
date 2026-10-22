@@ -243,6 +243,8 @@ fn knob_name(id: KnobId) -> &'static str {
         KnobId::Send(..) => "Send level",
         KnobId::Swing => "Main swing",
         KnobId::Eq(..) => "Mixer track equalizer",
+        KnobId::Strum(_) => "Piano roll strum",
+        KnobId::Arp(_) => "Piano roll arpeggiate",
     }
 }
 
@@ -371,7 +373,8 @@ pub fn load_sample(s: &mut State, row: usize) {
 /// Before knob `id` turns: a step unless Undo knob tweaks is off. `wheel`: a mouse-wheel notch, which joins the step
 /// of the notches just before it on the same knob.
 pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
-    if !prefs::check(&prefs::UNDO_KNOB_TWEAKS) {
+    // The Strum and Arpeggiate dialogs' knobs only preview; their Accept is the step (spec: ui/piano-strum.md §1).
+    if !prefs::check(&prefs::UNDO_KNOB_TWEAKS) || matches!(id, KnobId::Strum(_) | KnobId::Arp(_)) {
         return;
     }
     let h = &s.history;

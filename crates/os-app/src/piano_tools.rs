@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Piano-roll editing commands: quantize, legato, chop, glue, discard lengths, strum, arpeggiate, randomize,
+//! Piano-roll editing commands: quantize, legato, chop, glue, discard lengths, randomize, the Strum and Arpeggiate dialogs,
 //! duplicate, mute, ghost channels, time markers, channel cycling and the selection keys, with the Tools menu that
 //! lists them.
 // spec: ui/piano-roll.md §3a, §10a, §11; ui/piano-keys.md
@@ -12,14 +12,6 @@ use os_model::Note;
 use crate::app::{App, State};
 use crate::piano::{self, Lane};
 use crate::playlist::{Cmd, Mark, PItem, Popup};
-
-/// Arpeggio order (§11).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Arp {
-    Up,
-    Down,
-    UpDown,
-}
 
 /// What the Randomize presets change (§11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,15 +38,15 @@ pub enum NCmd {
     Glue,
     DiscardLengths,
     Duplicate,
-    /// Spread chord notes `1/n` note apart, lowest key first (`up`) or highest first.
-    Strum { up: bool, n: u32 },
-    /// Turn chords into `1/n` note arpeggios.
-    Arpeggiate(Arp, u32),
+    /// Open the Strum dialog (spec: ui/piano-strum.md).
+    Strum,
+    /// Open the Arpeggiate dialog (spec: ui/piano-arpeggiate.md).
+    Arpeggiate,
     /// Randomize by up to `pct` percent of the range.
     Randomize(Rand, u8),
     Ghosts,
     AddMarker,
-    /// Open one of the tool submenus at the mouse (Alt+Q / U / S / A / R).
+    /// Open one of the tool submenus at the mouse (Alt+Q / U / R).
     Menu(Sub),
     /// The magnet button's menus (spec: ui/piano-snap.md): the snap setting, a stock length for new notes.
     Snap(crate::snap::EditorSnap),
@@ -67,8 +59,6 @@ pub enum NCmd {
 pub enum Sub {
     Quantize,
     Chop,
-    Strum,
-    Arpeggiate,
     Randomize,
 }
 
@@ -94,24 +84,6 @@ fn sub_items(sub: Sub) -> Vec<PItem> {
             item("1/8 note", Chop(8)),
             item("1/4 note (beat)", Chop(4)),
             item("1/2 note", Chop(2)),
-        ],
-        Sub::Strum => vec![
-            item("Low to high, tight (1/128)", Strum { up: true, n: 128 }),
-            item("Low to high (1/64)", Strum { up: true, n: 64 }),
-            item("Low to high, slow (1/32)", Strum { up: true, n: 32 }),
-            PItem::sep(),
-            item("High to low, tight (1/128)", Strum { up: false, n: 128 }),
-            item("High to low (1/64)", Strum { up: false, n: 64 }),
-            item("High to low, slow (1/32)", Strum { up: false, n: 32 }),
-        ],
-        Sub::Arpeggiate => vec![
-            item("Up, 1/16", Arpeggiate(Arp::Up, 16)),
-            item("Up, 1/32", Arpeggiate(Arp::Up, 32)),
-            item("Up, 1/8", Arpeggiate(Arp::Up, 8)),
-            item("Down, 1/16", Arpeggiate(Arp::Down, 16)),
-            item("Down, 1/32", Arpeggiate(Arp::Down, 32)),
-            item("Up and down, 1/16", Arpeggiate(Arp::UpDown, 16)),
-            item("Up and down, 1/32", Arpeggiate(Arp::UpDown, 32)),
         ],
         Sub::Randomize => vec![
             item("Velocity, a little (10 %)", Randomize(Rand::Prop(Lane::Velocity), 10)),
@@ -140,8 +112,8 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Quick legato", Legato).key("Ctrl+L"),
         item("Quick chop", QuickChop).key("Ctrl+U"),
         PItem::sub("Chop", sub_items(Sub::Chop)).key("Alt+U"),
-        PItem::sub("Strum", sub_items(Sub::Strum)).key("Alt+S"),
-        PItem::sub("Arpeggiate", sub_items(Sub::Arpeggiate)).key("Alt+A"),
+        item("Strum...", Strum).key("Alt+S"),
+        item("Arpeggiate...", Arpeggiate).key("Alt+A"),
         PItem::sub("Randomize", sub_items(Sub::Randomize)).key("Alt+R"),
         PItem::head("View"),
         item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
@@ -180,8 +152,8 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && is(c, "m") => NCmd::Mute(!shift),
         Key::Character(c) if alt && !ctrl && is(c, "q") => NCmd::Menu(Sub::Quantize),
         Key::Character(c) if alt && !ctrl && is(c, "u") => NCmd::Menu(Sub::Chop),
-        Key::Character(c) if alt && !ctrl && is(c, "s") => NCmd::Menu(Sub::Strum),
-        Key::Character(c) if alt && !ctrl && is(c, "a") => NCmd::Menu(Sub::Arpeggiate),
+        Key::Character(c) if alt && !ctrl && is(c, "s") => NCmd::Strum,
+        Key::Character(c) if alt && !ctrl && is(c, "a") => NCmd::Arpeggiate,
         Key::Character(c) if alt && !ctrl && is(c, "r") => NCmd::Menu(Sub::Randomize),
         Key::Character(c) if alt && !ctrl && is(c, "v") => NCmd::Ghosts,
         Key::Character(c) if alt && !ctrl && !shift && is(c, "t") => NCmd::AddMarker,
@@ -388,8 +360,14 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             duplicate(s);
             return None;
         }
-        NCmd::Strum { up, n } => done(apply(s, |_, ns| strum(ns, up, ticks(n))), "strummed"),
-        NCmd::Arpeggiate(mode, n) => done(apply(s, |_, ns| arpeggiate(ns, mode, ticks(n), step)), "arpeggiated"),
+        NCmd::Strum => {
+            app.open_strum();
+            return None;
+        }
+        NCmd::Arpeggiate => {
+            app.open_arp();
+            return None;
+        }
         NCmd::Randomize(what, pct) => {
             let mut rng = s.piano.rng;
             let ch = apply(s, |_, ns| randomize(ns, what, pct, step, &mut rng));
@@ -467,6 +445,11 @@ pub fn duplicate(s: &mut State) {
 /// Replace the target notes (the selection, or every note of the channel) with `f(state, targets)`, as one undo
 /// step; a selection then holds the resulting notes. Returns false when nothing changed.
 fn apply(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<Note>) -> bool {
+    apply_as(s, f, Some("Piano roll edit"))
+}
+
+/// `apply`, its undo step named `step`; none for a tool's preview (spec: ui/piano-strum.md §1).
+pub(crate) fn apply_as(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<Note>, step: Option<&'static str>) -> bool {
     let Some(ch) = piano::channel(s) else { return false };
     let idx = piano::targets(s);
     if idx.is_empty() {
@@ -479,7 +462,9 @@ fn apply(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<Note>) -> bool 
     if out == picked {
         return false;
     }
-    piano::snapshot(s);
+    if let Some(name) = step {
+        piano::snapshot_as(s, name);
+    }
     let p = piano::pattern_mut(s);
     let mut notes: Vec<Note> = p.notes.iter().enumerate().filter(|(i, _)| !idx.contains(i)).map(|(_, n)| *n).collect();
     let start = notes.len();
@@ -583,67 +568,6 @@ pub fn glue(mut notes: Vec<Note>) -> Vec<Note> {
     out
 }
 
-/// Notes starting together (two or more): a chord, lowest key first.
-fn chords(notes: Vec<Note>) -> Vec<Vec<Note>> {
-    let mut sorted = notes;
-    sorted.sort_by_key(|n| (n.position, n.key));
-    let mut out: Vec<Vec<Note>> = Vec::new();
-    for n in sorted {
-        match out.last_mut() {
-            Some(c) if c[0].position == n.position => c.push(n),
-            _ => out.push(vec![n]),
-        }
-    }
-    out
-}
-
-/// Spread each chord `spread` ticks per note (the end stays), each later note 6 % softer.
-pub fn strum(notes: Vec<Note>, up: bool, spread: u32) -> Vec<Note> {
-    let mut out = Vec::new();
-    for mut c in chords(notes) {
-        if !up {
-            c.reverse();
-        }
-        for (i, mut n) in c.into_iter().enumerate() {
-            let d = spread * i as u32;
-            n.position += d;
-            if n.length > 0 {
-                n.length = n.length.saturating_sub(d).max(1);
-            }
-            n.velocity = (f32::from(n.velocity) * (1.0 - 0.06 * i as f32)).round().max(1.0) as u8;
-            out.push(n);
-        }
-    }
-    out
-}
-
-/// Replace each chord by its keys played one after another, `rate` ticks each, over the chord's longest length.
-pub fn arpeggiate(notes: Vec<Note>, mode: Arp, rate: u32, step: u32) -> Vec<Note> {
-    let mut out = Vec::new();
-    for c in chords(notes) {
-        if c.len() < 2 {
-            out.extend(c);
-            continue;
-        }
-        let start = c[0].position;
-        let end = start + c.iter().map(|n| len_of(n, step)).max().unwrap_or(step);
-        let order: Vec<&Note> = match mode {
-            Arp::Up => c.iter().collect(),
-            Arp::Down => c.iter().rev().collect(),
-            Arp::UpDown => c.iter().chain(c.iter().rev().skip(1).take(c.len() - 2)).collect(),
-        };
-        let mut at = start;
-        let mut i = 0;
-        while at < end {
-            let src = order[i % order.len()];
-            out.push(Note { position: at, length: rate.min(end - at), ..*src });
-            at += rate;
-            i += 1;
-        }
-    }
-    out
-}
-
 /// splitmix64: a small, good-enough generator for humanizing.
 fn next(rng: &mut u64) -> u64 {
     *rng = rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -724,21 +648,6 @@ mod tests {
         slide.set_slide(true);
         let l = legato(vec![note(0, 96, 60), slide, note(384, 48, 72), note(800, 48, 60)], 1152);
         assert_eq!(spans(&l), vec![(0, 384, 60), (96, 24, 64), (384, 416, 72), (800, 352, 60)]);
-    }
-
-    #[test]
-    fn strum_and_arpeggiate_chords() {
-        let chord = vec![note(0, 96, 64), note(0, 96, 60), note(0, 96, 67), note(192, 24, 50)];
-        let s = strum(chord.clone(), true, 6);
-        assert_eq!(spans(&s), vec![(0, 96, 60), (6, 90, 64), (12, 84, 67), (192, 24, 50)]);
-        assert!(s[2].velocity < s[0].velocity);
-        let s = strum(chord.clone(), false, 6);
-        assert_eq!(s[0].key, 67);
-        let a = arpeggiate(chord.clone(), Arp::Up, 24, 24);
-        assert_eq!(a.iter().map(|n| n.key).collect::<Vec<_>>(), vec![60, 64, 67, 60, 50]);
-        assert_eq!(a[3].position, 72);
-        let a = arpeggiate(chord, Arp::UpDown, 12, 24);
-        assert_eq!(a.iter().take(6).map(|n| n.key).collect::<Vec<_>>(), vec![60, 64, 67, 64, 60, 64]);
     }
 
     #[test]

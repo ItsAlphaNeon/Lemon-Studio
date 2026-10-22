@@ -319,6 +319,8 @@ pub enum Cmd {
     Misc(usize, crate::misc_page::M, f32),
     /// Piano roll Tools menu (spec: ui/piano-roll.md §11).
     Piano(crate::piano_tools::NCmd),
+    /// The Arpeggiate dialog's menus (spec: ui/piano-arpeggiate.md §1).
+    Arp(crate::arpeggiate::ACmd),
     /// Settings > Audio menus: device, sample rate, buffer length (spec: ui/settings.md "Audio").
     Audio(crate::audio_cfg::Set),
     /// The toolbar CPU panel's menu (spec: ui/main-window.md §13).
@@ -414,7 +416,7 @@ impl PItem {
     pub fn col() -> Self {
         PItem { col: true, ..PItem::new("", Cmd::Nothing) }
     }
-    pub fn sub(label: &'static str, children: Vec<PItem>) -> Self {
+    pub fn sub(label: impl Into<Cow<'static, str>>, children: Vec<PItem>) -> Self {
         PItem { children, ..PItem::new(label, Cmd::Nothing) }
     }
     pub fn not_yet(label: &'static str) -> Self {
@@ -3451,6 +3453,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return m;
         }
+        Cmd::Arp(c) => {
+            app.arp_command(c);
+            return None;
+        }
         Cmd::Misc(row, m, v) => {
             crate::misc::set(app, row, m, v);
             return None;
@@ -3958,6 +3964,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Genre(_) => None,
         Cmd::Theme(_) => None,
         Cmd::Template(_) => None,
+        Cmd::Arp(_) => None,
         Cmd::Messages(_) => None,
         Cmd::DataFolder(_) => None,
     };

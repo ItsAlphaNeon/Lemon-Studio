@@ -338,6 +338,8 @@ pub struct Transport {
     latest: Arc<Mutex<Option<Project>>>,
     instruments: Instruments,
     shared: Arc<Shared>,
+    /// The audio thread: joined when the transport goes (see `Drop`).
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Transport {
@@ -347,7 +349,7 @@ impl Transport {
         let instruments: Instruments = Arc::new(Mutex::new(Hosts::default()));
         let shared = Arc::new(Shared { sounding: Mutex::new(Vec::with_capacity(256)), ..Shared::default() });
         let s = shared.clone();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("openstudio-audio".into())
             .spawn({
                 let latest = latest.clone();
@@ -361,7 +363,7 @@ impl Transport {
                 }
             })
             .expect("spawn audio thread");
-        Transport { tx, latest, instruments, shared }
+        Transport { tx, latest, instruments, shared, thread: Some(thread) }
     }
 
     /// Hosted generator plugins by rack row; playing engines pick them up at once.
@@ -881,6 +883,20 @@ impl Feeder {
                     v.extend(e.sounding().map(|(c, k)| (c as u16, k)));
                 }
             }
+        }
+    }
+}
+
+/// The audio thread ends with the transport: its streams, feeder threads and engines are gone, and it has let go of
+/// the hosted plugins, before the app destroys them. Left running at exit, it still held the plugins of a playing or
+/// paused stream; those were then destroyed as the process ended, after their plugin files had shut down, and the
+/// app crashed on close.
+impl Drop for Transport {
+    fn drop(&mut self) {
+        // The audio thread ends when its command channel closes.
+        drop(std::mem::replace(&mut self.tx, mpsc::channel().0));
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
         }
     }
 }
@@ -2009,6 +2025,36 @@ mod tests {
         r.render(&mut block);
         assert!(block.iter().all(|v| *v == 0.0));
         assert_eq!(shared.underruns.load(Ordering::Relaxed), 1);
+    }
+
+    /// Dropping the transport waits for the audio thread: once it is gone, nothing but the app holds a hosted effect,
+    /// even one the thread was processing (here in an export) as the transport went. At exit the app then destroys
+    /// every instance itself, while the plugin files are still loaded.
+    #[test]
+    fn dropping_the_transport_lets_go_of_hosted_plugins() {
+        struct Slow(Arc<AtomicBool>);
+        impl os_engine::HostedEffect for Slow {
+            fn process_fx(&mut self, _rate: u32, _left: &mut [f32], _right: &mut [f32]) {
+                if !self.0.swap(true, Ordering::AcqRel) {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        }
+        let (_, project) = looping_engine();
+        let entered = Arc::new(AtomicBool::new(false));
+        let fx: SharedEffect = Arc::new(Mutex::new(Slow(entered.clone())));
+        let t = Transport::new(None);
+        t.set_effects(vec![(0, 0, fx.clone())]);
+        let path = std::env::temp_dir().join(format!("openstudio-drop-test-{}.wav", std::process::id()));
+        t.export(&project, PlayMode::Pattern(1), 48000, crate::export::Job::wav(&path));
+        let t0 = Instant::now();
+        while !entered.load(Ordering::Acquire) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "the export processes the effect");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(t);
+        assert_eq!(Arc::strong_count(&fx), 1, "the audio thread let go of the effect");
+        let _ = std::fs::remove_file(path);
     }
 
     /// An export renders one pass of the pattern (not a loop) on the audio thread, with progress, into a WAV file.

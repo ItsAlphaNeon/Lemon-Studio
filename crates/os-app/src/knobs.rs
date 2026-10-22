@@ -35,6 +35,10 @@ pub enum KnobId {
     /// Mixer track `.0`'s equaliser: band `.1` (0 low shelf, 1 peaking, 2 high shelf), setting `.2` (0 gain, the
     /// band's fader; 1 frequency; 2 width) (model `MixerTrack::eq`; spec: ui/mixer.md §8, audio/mixer.md "Equaliser").
     Eq(u16, u8, u8),
+    /// A knob of the piano roll's Strum dialog (dialog state, not project data; spec: ui/piano-strum.md §1).
+    Strum(crate::strum::Knob),
+    /// A knob (or the Range box) of the piano roll's Arpeggiate dialog (dialog state; spec: ui/piano-arpeggiate.md §1).
+    Arp(crate::arpeggiate::Knob),
 }
 
 /// The equaliser's band names as its hints give them (spec: ui/mixer.md §8).
@@ -58,6 +62,8 @@ impl KnobId {
             KnobId::ChanVol(_) => 0.03,
             KnobId::ChanPan(_) => 0.015,
             KnobId::Swing => 0.045,
+            KnobId::Strum(k) => k.notch(),
+            KnobId::Arp(k) => k.notch(),
             _ => PER_NOTCH,
         }
     }
@@ -70,6 +76,10 @@ impl KnobId {
             KnobId::Swing => 0.17 / 30.0,
             // A band's gain fader: its handle about follows the mouse over the graph's height.
             KnobId::Eq(_, _, 0) => 1.0 / 160.0,
+            // A tension's side is half as many notches as a strength's (spec: ui/piano-strum.md §1).
+            KnobId::Strum(k) if k.tension() => 2.0 * PER_PX,
+            // The stepped controls move one value per 12 px.
+            KnobId::Arp(k @ (crate::arpeggiate::Knob::TimeMul | crate::arpeggiate::Knob::Range)) => k.notch() / 12.0,
             _ => PER_PX,
         }
     }
@@ -81,6 +91,7 @@ impl KnobId {
             KnobId::ChanVol(_) => 0.78125,
             KnobId::SlotMix(..) => 1.0,
             KnobId::Swing => 0.0,
+            KnobId::Arp(k) => crate::arpeggiate::Settings::default().get(k),
             KnobId::Eq(_, b, f) => eq_pos(f, os_model::EQ_DEFAULT[usize::from(b.min(2))][usize::from(f.min(2))]),
             _ => 0.5,
         }
@@ -123,6 +134,8 @@ impl State {
                 let eq = self.project.mixer.iter().find(|m| m.index == t).map_or(os_model::EQ_DEFAULT, |m| m.eq);
                 eq_pos(f as u8, eq[b][f])
             }
+            KnobId::Strum(k) => (self.strum.set.get(k) + 1.0) / 2.0,
+            KnobId::Arp(k) => self.arp.set.get(k),
         }
     }
 
@@ -193,6 +206,18 @@ impl State {
                     self.piano.dirty = true;
                 }
             }
+            // The notes follow at once (the dialog previews, §1).
+            KnobId::Strum(k) => {
+                self.strum.set.set(k, v * 2.0 - 1.0);
+                crate::strum::preview(self);
+            }
+            KnobId::Arp(k) => {
+                let before = self.arp.set;
+                self.arp.set.set(k, v);
+                if self.arp.set != before {
+                    crate::arpeggiate::preview(self);
+                }
+            }
         }
     }
 
@@ -233,6 +258,8 @@ impl State {
                     _ => format!("{band} width: {n:.2}"),
                 }
             }
+            KnobId::Strum(k) => self.strum.set.text(k, u32::from(self.project.ppq.max(4))),
+            KnobId::Arp(k) => self.arp.set.text(k),
         }
     }
 }

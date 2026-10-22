@@ -21,6 +21,10 @@ const PREVIEW_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 impl App {
     /// Browser actions; returns whether `a` was one.
     pub(crate) fn browser_act(&mut self, a: &Action) -> bool {
+        if *a == Action::BrowserSplitter {
+            self.browser_split_press();
+            return true;
+        }
         let s = &mut self.state;
         match *a {
             Action::BrowserTab(i) => {
@@ -111,6 +115,7 @@ impl App {
             BCmd::Reread => reread(s),
             // A background scan (spec: ui/plugin-manager.md §4); plugins in use stay where they are.
             BCmd::Rescan => self.start_scan(crate::plugin_db::Mode::Changed),
+            BCmd::Row(c) => return self.browser_row_cmd(c),
         }
         None
     }
@@ -171,7 +176,7 @@ impl App {
     /// Whether the mouse is over the docked browser.
     pub(crate) fn over_browser(&self) -> bool {
         let (x, y) = self.mouse;
-        self.state.show_browser && x < crate::views::BROWSER_W && y >= crate::views::work_y(&self.state)
+        self.state.show_browser && x < crate::views::browser_w(&self.state) && y >= crate::views::work_y(&self.state)
     }
 
     /// Whether typed letters belong to the browser search (the typing keyboard leaves them alone).
@@ -235,6 +240,46 @@ impl App {
             }
         }
         false
+    }
+
+    /// A press on the browser's splitter: drags it; a double click gives the browser its default width (spec §9).
+    fn browser_split_press(&mut self) {
+        let now = std::time::Instant::now();
+        let s = &mut self.state;
+        let double = s.browser_split_click.is_some_and(|t| now.duration_since(t).as_millis() < 400);
+        s.browser_split_click = if double { None } else { Some(now) };
+        if double {
+            s.browser_w = crate::views::BROWSER_W;
+            save_width(s.browser_w);
+            return self.invalidate();
+        }
+        self.drag = Some(Drag::BrowserSplit { dx: self.mouse.0 - crate::views::browser_w(&self.state) });
+    }
+
+    /// The splitter dragged so that the browser (its splitter included) ends at `right`: whole px, from its default width
+    /// to half the window. Everything right of it moves, so the whole frame is repainted.
+    pub(crate) fn browser_split_drag(&mut self, right: f32) {
+        let s = &mut self.state;
+        let w = right.min(s.screen.0 / 2.0).max(crate::views::BROWSER_W).round();
+        if w != s.browser_w {
+            s.browser_w = w;
+            self.invalidate();
+        }
+    }
+
+    /// A hovered row's scrolling label (spec §9): repainted whenever its offset moves; the scroll ends with the hover.
+    pub(crate) fn marquee_tick(&mut self, now: std::time::Instant) {
+        let hovered = self.state.show_browser && matches!(self.hover, Some(Action::BrowserRow(_)));
+        let m = self.state.browser_marquee.get_mut();
+        let Some(mq) = m.as_ref() else { return };
+        if !hovered {
+            *m = None;
+            return;
+        }
+        let r = mq.rect;
+        if view::marquee_offset(now.duration_since(mq.since).as_secs_f32(), mq.over) != mq.off {
+            self.damage_rect(r);
+        }
     }
 
     /// Wheel over the browser list.
@@ -373,20 +418,121 @@ impl App {
         self.invalidate();
     }
 
-    /// Right-click on a dropped folder root removes it from the browser (spec §6); returns whether it was one.
-    pub(crate) fn browser_remove_root(&mut self, i: usize) -> bool {
+    /// Right click on row `i` (spec §8): selects it and opens its menu at the mouse; returns whether there was a row.
+    pub(crate) fn browser_row_menu(&mut self, i: usize, x: f32, y: f32) -> bool {
         let s = &mut self.state;
         let Some(row) = view::rows(s).into_iter().nth(i) else { return false };
-        let Some(path) = row.path.filter(|_| row.depth == 0) else { return false };
-        s.browser_folders.retain(|f| *f != path);
-        s.browser_names.remove(&path);
-        save_folders(s);
-        s.browser_open.retain(|k| !k.starts_with(&row.key));
-        s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
-        s.message = Some(format!("Removed {} from the browser", path.display()));
+        select(s, &row.key);
+        s.playlist.popup = Some(Popup { x, y, items: row_menu(s, &row), sub: None });
         self.invalidate();
         true
     }
+
+    /// A row menu command on the selected row (spec §8); returns a message.
+    fn browser_row_cmd(&mut self, c: RowCmd) -> Option<String> {
+        let s = &mut self.state;
+        let row = view::rows(s).into_iter().find(|r| s.browser_sel.as_ref() == Some(&r.key))?;
+        let sample = match &row.item {
+            Item::Sample(p) => Some(p.clone()),
+            _ => None,
+        };
+        match c {
+            RowCmd::Toggle => {
+                if !s.browser_open.remove(&row.key) {
+                    s.browser_open.insert(row.key);
+                }
+                s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
+            }
+            // What a click on the row does, without the click's open / close.
+            RowCmd::Activate => match row.item {
+                Item::Pattern(n) => s.pattern = n,
+                Item::Channel(c) => {
+                    s.selected_channel = c;
+                    s.rack.select_only(c);
+                }
+                Item::History(e) => return crate::history::go_to(s, e),
+                _ => {}
+            },
+            RowCmd::Pattern(pc) => {
+                let Item::Pattern(n) = row.item else { return None };
+                s.pattern = n;
+                return self.pattern_cmd(pc);
+            }
+            RowCmd::ChannelWindow => {
+                let Item::Channel(i) = row.item else { return None };
+                if s.hosted_rows.contains(&i) {
+                    s.pending_open = Some(i);
+                } else {
+                    self.open_channel_window(i);
+                }
+            }
+            RowCmd::Preview => self.preview_sample(&sample?),
+            RowCmd::Send => return send_sample(s, &sample?, &row.label),
+            RowCmd::NewChannel => self.sample_to_channel(sample?, None),
+            RowCmd::OpenFolder => open_folder(&row.path?),
+            RowCmd::ShowInFolder => crate::theme_library::show_in_folder(&row.path?),
+            // File ▸ Browser extra search folders, the root's Browser name selected for typing.
+            RowCmd::Rename => {
+                let i = s.browser_folders.iter().position(|f| Some(f) == row.path.as_ref())?;
+                self.open_settings(crate::views::settings::FILE);
+                self.search_folder_cell(i, crate::search_folders::Col::Name);
+            }
+            RowCmd::Remove => return Some(remove_root(s, &row.path?)),
+        }
+        None
+    }
+}
+
+/// A dropped folder root out of the browser (spec §6, §8), with its Browser name and its open nodes.
+fn remove_root(s: &mut crate::app::State, path: &std::path::Path) -> String {
+    let key = view::disk_key(path);
+    s.browser_folders.retain(|f| f != path);
+    s.browser_names.remove(path);
+    save_folders(s);
+    let below = format!("{key}/");
+    s.browser_open.retain(|k| *k != key && !k.starts_with(&below));
+    s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
+    format!("Removed {} from the browser", path.display())
+}
+
+/// Opens folder `dir` in the system's file manager (tests: nothing).
+fn open_folder(dir: &std::path::Path) {
+    if cfg!(test) {
+        return;
+    }
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(dir).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(dir).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+}
+
+/// `browser.txt` in the user folder: `width=` the browser's width in px (anything else, or missing, = the default).
+fn width_file() -> Option<std::path::PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    os_paths::user_file("browser.txt")
+}
+
+fn parse_width(text: &str) -> f32 {
+    let w = text.lines().filter_map(|l| l.split_once('=')).find(|(k, _)| k.trim() == "width").and_then(|(_, v)| v.trim().parse::<f32>().ok());
+    w.filter(|w| w.is_finite()).map_or(crate::views::BROWSER_W, |w| w.max(crate::views::BROWSER_W))
+}
+
+/// The browser's width kept from the last run (spec §9; tests: the default).
+pub(crate) fn load_width() -> f32 {
+    width_file().and_then(|p| std::fs::read_to_string(p).ok()).map_or(crate::views::BROWSER_W, |t| parse_width(&t))
+}
+
+/// Keeps the browser's width for the next run.
+pub(crate) fn save_width(w: f32) {
+    let Some(p) = width_file() else { return };
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(p, format!("width={w}\n"));
 }
 
 /// `browser_folders.txt` in the user folder (`os_paths::user_dir`): one dropped folder per line (spec §6), its Browser
@@ -469,6 +615,108 @@ pub enum BCmd {
     Collapse,
     Reread,
     Rescan,
+    /// A row menu command (spec §8), on the selected row (the right click selected it).
+    Row(RowCmd),
+}
+
+/// What a row menu entry does (spec §8).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RowCmd {
+    /// Open / close the node.
+    Toggle,
+    /// What a click on the row does: the pattern or channel selected, the project taken to the history step.
+    Activate,
+    /// The row's pattern made current, then this PATTERNS command.
+    Pattern(crate::patterns::Cmd),
+    /// The channel's window (its plugin's, Lemon Sampler's, or the channel settings).
+    ChannelWindow,
+    /// A sample played (§7), loaded into the selected channel, or into a new Lemon Sampler channel.
+    Preview,
+    Send,
+    NewChannel,
+    /// A disk folder opened in the system's file manager; a disk file shown there, selected in its folder.
+    OpenFolder,
+    ShowInFolder,
+    /// A dropped folder root: its Browser name typed in File ▸ Browser extra search folders; out of the browser.
+    Rename,
+    Remove,
+}
+
+/// The row menu's way to the system's file manager: a folder, a file.
+#[cfg(windows)]
+const FILE_MANAGER: [&str; 2] = ["Open in Explorer", "Show in Explorer"];
+#[cfg(target_os = "macos")]
+const FILE_MANAGER: [&str; 2] = ["Open in Finder", "Show in Finder"];
+#[cfg(all(unix, not(target_os = "macos")))]
+const FILE_MANAGER: [&str; 2] = ["Open in file manager", "Show in file manager"];
+
+/// A row's menu (spec §8): Open / Close for a node, what the row's kind offers, the file manager for a disk entry, then
+/// the structure commands every row has.
+pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
+    use crate::patterns::Cmd as P;
+    use crate::rack::RCmd;
+    let r = |label: &'static str, c: RowCmd| PItem::new(label, Cmd::Browser(BCmd::Row(c)));
+    let sep = |items: &mut Vec<PItem>| {
+        if items.last().is_some_and(|i| !i.sep) {
+            items.push(PItem::sep());
+        }
+    };
+    let mut items = Vec::new();
+    if let Some(open) = row.open {
+        // While searching every node shows open.
+        let it = r(if open { "Close" } else { "Open" }, RowCmd::Toggle);
+        items.push(if s.browser_search.is_empty() { it } else { it.off() });
+    }
+    match row.item {
+        Item::Pattern(_) => {
+            let p = |label: &'static str, c: P| r(label, RowCmd::Pattern(c));
+            items.extend([
+                r("Select pattern", RowCmd::Activate),
+                PItem::sep(),
+                p("Rename and color...", P::Rename),
+                p("Change color...", P::ChangeColor),
+                p("Clone", P::Clone),
+                p("Delete", P::Delete),
+                PItem::sep(),
+                p("Select in playlist", P::SelectInPlaylist),
+                p("Split by channel", P::SplitByChannel),
+            ]);
+        }
+        Item::Channel(c) => {
+            let k = |label: &'static str, rc: RCmd| PItem::new(label, Cmd::Rack(rc));
+            items.extend([
+                r("Select channel", RowCmd::Activate),
+                r("Show window", RowCmd::ChannelWindow),
+                k("Piano roll", RCmd::PianoRoll(c)),
+                PItem::sep(),
+                k("Rename, color and icon...", RCmd::Rename(c)),
+                k("Clone", RCmd::Clone(c)),
+                k("Delete...", RCmd::Delete(c)),
+            ]);
+        }
+        Item::Sample(_) => {
+            let send = r("Send to selected channel", RowCmd::Send);
+            let sampler = s.project.channels.get(s.selected_channel).is_some_and(|c| c.kind.is_sampler());
+            items.extend([r("Preview", RowCmd::Preview), if sampler { send } else { send.off() }, r("Add to channel rack", RowCmd::NewChannel)]);
+        }
+        Item::Generator(index) => items.push(PItem::new("Add to channel rack", Cmd::Plugin(crate::plugin_menu::PlugCmd::Generator { index, after: None }))),
+        Item::Effect(index) => items.push(PItem::new("Add to selected mixer track", Cmd::Plugin(crate::plugin_menu::PlugCmd::Effect { index, slot: None }))),
+        Item::History(_) => items.push(r("Go to this step", RowCmd::Activate)),
+        Item::None | Item::File(_) | Item::Param(..) => {}
+    }
+    if let Some(path) = &row.path {
+        sep(&mut items);
+        items.push(if row.open.is_some() { r(FILE_MANAGER[0], RowCmd::OpenFolder) } else { r(FILE_MANAGER[1], RowCmd::ShowInFolder) });
+        if s.browser_folders.contains(path) && row.key == view::disk_key(path) {
+            items.extend([r("Rename...", RowCmd::Rename), r("Remove from browser", RowCmd::Remove)]);
+        }
+    }
+    sep(&mut items);
+    items.extend([
+        PItem::new("Collapse structure", Cmd::Browser(BCmd::Collapse)).key("Ctrl+Up"),
+        PItem::new("Reread structure", Cmd::Browser(BCmd::Reread)).key("Ctrl+R"),
+    ]);
+    items
 }
 
 /// The browser options menu, from the FL screenshot (spec §4).
@@ -586,8 +834,7 @@ fn find(s: &mut crate::app::State, dir: isize) -> Option<String> {
     None
 }
 
-/// Send the previous / next sample row to the selected channel, which takes the file's name while "Auto name
-/// channels" is on (`rack::auto_name`). One history step (`history::load_sample`).
+/// Send the previous / next sample row to the selected channel (`send_sample`).
 fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     let rows = view::rows(s);
     let Some(i) = step(s, &rows, dir, |r| matches!(r.item, Item::Sample(_))) else {
@@ -597,12 +844,18 @@ fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     let key = rows[i].key.clone();
     select(s, &key);
     reveal(s);
+    send_sample(s, &path, &rows[i].label)
+}
+
+/// Sample `path` (shown as `label`) into the selected channel, which takes the file's name while "Auto name channels"
+/// is on (`rack::auto_name`). One history step (`history::load_sample`).
+fn send_sample(s: &mut crate::app::State, path: &str, label: &str) -> Option<String> {
     let row = s.selected_channel;
     if !s.project.channels.get(row)?.kind.is_sampler() {
         return Some("The selected channel is not a sampler".into());
     }
     // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
-    let path = crate::data_folder::adopt(s, &path);
+    let path = crate::data_folder::adopt(s, path);
     crate::history::load_sample(s, row);
     let ch = &mut s.project.channels[row];
     crate::rack::auto_name(ch, std::path::Path::new(&path));
@@ -610,5 +863,19 @@ fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     ch.sample_path = Some(path.clone());
     s.sample_loads.push((row, path));
     s.piano.dirty = true;
-    Some(format!("Sent {} to the selected channel", rows[i].label))
+    Some(format!("Sent {label} to the selected channel"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `browser.txt` (spec: ui/browser.md §9): the dragged width, never below the default; anything else is the default.
+    #[test]
+    fn kept_width() {
+        assert_eq!(parse_width("width=359\n"), 359.0);
+        assert_eq!(parse_width("width=120"), crate::views::BROWSER_W);
+        assert_eq!(parse_width("width=wide\n"), crate::views::BROWSER_W);
+        assert_eq!(parse_width(""), crate::views::BROWSER_W);
+    }
 }

@@ -24,6 +24,8 @@ pub mod rack;
 pub mod remote_box;
 pub mod export_form;
 pub mod save_form;
+pub mod arpeggiate;
+pub mod strum;
 pub mod tapper;
 pub mod touch;
 pub mod theme_preview;
@@ -106,8 +108,14 @@ pub fn band_rect(s: &State, r: Rect) -> Rect {
     let k = band_k(s);
     Rect::new(r.x * k, r.y * k, r.w * k, r.h * k)
 }
-/// Width of the docked browser incl. the splitter (§4).
+/// Width of the docked browser incl. the splitter (§4): the default, and the least its splitter drags it to.
 pub const BROWSER_W: f32 = 209.0;
+
+/// Width of the docked browser incl. the splitter, as dragged (`State::browser_w`), at most half the window (spec:
+/// ui/browser.md §9).
+pub fn browser_w(s: &State) -> f32 {
+    s.browser_w.min(s.screen.0 / 2.0).max(BROWSER_W)
+}
 
 /// Paints the frame; returns the number of hits registered before the overlays (menus, popups, picker...), which cover
 /// docked plugin windows.
@@ -120,7 +128,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     ui.c.set_cover(None);
 
     // Workspace (§9): watermark, then docked windows on top.
-    let left = if s.show_browser { BROWSER_W } else { 0.0 };
+    let left = if s.show_browser { browser_w(s) } else { 0.0 };
     let top = work_y(s);
     let work = Rect::new(left, top, w - left, h - top);
     let docked = s.docked();
@@ -138,7 +146,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     let docked_at = s.z.iter().rposition(|&w| s.is_max(w));
     // Each part is skipped by a repaint that misses it (`Ui::part`).
     if s.show_browser {
-        let r = Rect::new(0.0, top, BROWSER_W, h - top);
+        let r = Rect::new(0.0, top, browser_w(s), h - top);
         ui.part(Seg::Browser, r, |ui| browser::paint(ui, s, r));
     }
     let _ = work;
@@ -169,6 +177,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::Perf => ui.part(Seg::Win(win), a, |ui| perf::paint(ui, s, f)),
             Win::Tapper => ui.part(Seg::Win(win), a, |ui| tapper::paint(ui, s, f)),
             Win::Touch => ui.part(Seg::Win(win), a, |ui| touch::paint(ui, s, f)),
+            Win::Strum => ui.part(Seg::Win(win), a, |ui| strum::paint(ui, s, f)),
+            Win::Arp => ui.part(Seg::Win(win), a, |ui| arpeggiate::paint(ui, s, f)),
             _ => {}
         }
         ui.c.pop_clip();
@@ -232,6 +242,8 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
         Win::Perf => perf::bounds(s),
         Win::Tapper => tapper::bounds(s),
         Win::Touch => touch::bounds(s),
+        Win::Strum => strum::bounds(s),
+        Win::Arp => arpeggiate::bounds(s),
         w => s.win_rect(w),
     }
 }

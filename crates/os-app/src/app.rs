@@ -38,6 +38,10 @@ pub enum Win {
     Tapper,
     /// The Touch controller (spec: ui/touch-controller.md).
     Touch,
+    /// The piano roll's Strum dialog (spec: ui/piano-strum.md).
+    Strum,
+    /// The piano roll's Arpeggiate dialog (spec: ui/piano-arpeggiate.md).
+    Arp,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -167,6 +171,10 @@ pub enum Action {
     Tapper(crate::tapper::TapAct),
     /// The Touch controller's controls (spec: ui/touch-controller.md).
     Touch(crate::touch::TouchAct),
+    /// The Strum dialog's switches and buttons (spec: ui/piano-strum.md).
+    Strum(crate::strum::Act),
+    /// The Arpeggiate dialog's buttons, switches and menus (spec: ui/piano-arpeggiate.md).
+    Arp(crate::arpeggiate::Act),
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
     MonParam(usize),
     MonReset,
@@ -237,6 +245,8 @@ pub enum Action {
     BrowserMenu,
     /// The search field (focus it, §5).
     BrowserSearch,
+    /// The splitter right of the browser: drag to resize it, double-click for the default width (§9).
+    BrowserSplitter,
     PlaylistArea,
     MixerArea,
     RackArea,
@@ -785,6 +795,8 @@ pub enum Drag {
     /// The piano roll's grid / event panel splitter: `dy` = grab offset from the band's top, `top` = the grid's top,
     /// `h` = the height the grid and the panel share.
     PianoSplit { dy: f32, top: f32, h: f32 },
+    /// The browser's splitter: `dx` = grab offset from the browser's right edge (spec: ui/browser.md §9).
+    BrowserSplit { dx: f32 },
     /// Monitor debug panel slider.
     MonParam(usize),
     /// Cable physics debug panel slider.
@@ -869,6 +881,10 @@ pub struct State {
     /// The Tempo tapper: where it is, the count of taps, the pad's flash.
     pub tapper: crate::tapper::TapperUi,
     pub touch: crate::touch::TouchUi,
+    /// The piano roll's Strum dialog: where it is, its settings and its preview session.
+    pub strum: crate::strum::StrumUi,
+    /// The piano roll's Arpeggiate dialog: where it is, its settings and pattern, its preview session.
+    pub arp: crate::arpeggiate::ArpUi,
     pub rec: crate::record::Rec,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
@@ -945,6 +961,12 @@ pub struct State {
     /// Navigation history of selected row keys and the position in it.
     pub browser_hist: Vec<String>,
     pub browser_hist_pos: usize,
+    /// Width of the docked browser incl. its splitter, as dragged (`views::browser_w` keeps it in range), kept between
+    /// runs, and the last press on the splitter, for its double click (spec: ui/browser.md §9).
+    pub browser_w: f32,
+    pub browser_split_click: Option<std::time::Instant>,
+    /// The hovered row whose label is scrolling, as last painted (spec: ui/browser.md §9).
+    pub browser_marquee: std::cell::RefCell<Option<views::browser::Marquee>>,
     /// Plugin parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
     /// "Copy value": a normalized value for "Paste value", one for every control and automation point, as in FL
@@ -1015,7 +1037,7 @@ impl State {
 
     /// The workspace: right of the browser, below the toolbar.
     pub fn work_rect(&self) -> Rect {
-        let left = if self.show_browser { views::BROWSER_W } else { 0.0 };
+        let left = if self.show_browser { views::browser_w(self) } else { 0.0 };
         let top = views::work_y(self);
         Rect::new(left, top, (self.screen.0 - left).max(0.0), (self.screen.1 - top).max(0.0))
     }
@@ -1273,6 +1295,9 @@ impl App {
                 browser_opts: views::browser::DEFAULT_OPTS.iter().copied().collect(),
                 browser_hist: Vec::new(),
                 browser_hist_pos: 0,
+                browser_w: crate::browser::load_width(),
+                browser_split_click: None,
+                browser_marquee: Default::default(),
                 tempo: 130.0,
                 tempo_digits: std::cell::Cell::new([f32::INFINITY; 3]),
                 message: None,
@@ -1281,6 +1306,8 @@ impl App {
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
                 touch: Default::default(),
+                strum: Default::default(),
+                arp: Default::default(),
                 rec: Default::default(),
                 toggles: vec!["typing"],
                 clock: crate::clock::Clock::load(),
@@ -1776,6 +1803,11 @@ impl App {
             Then::LoadTheme => {
                 if let Some(p) = file {
                     self.load_theme_file(&p);
+                }
+            }
+            Then::ArpPattern => {
+                if let Some(p) = file {
+                    self.arp_command(crate::arpeggiate::ACmd::Pattern(Some(p)));
                 }
             }
             Then::PluginFolder => {
@@ -2465,7 +2497,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -2488,6 +2520,8 @@ impl App {
             Win::Perf => Some(views::perf::rect(s)),
             Win::Tapper => Some(views::tapper::rect(s)),
             Win::Touch => Some(views::touch::rect(s)),
+            Win::Strum => Some(views::strum::rect(s)),
+            Win::Arp => Some(views::arpeggiate::rect(s)),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -2831,10 +2865,93 @@ impl App {
         }
     }
 
+    // ---------------------------------------------------------------- Strum dialog (spec: ui/piano-strum.md)
+
+    /// Tools ▸ Strum… and Alt+S: open the dialog in front (centred over the main window the first time, then where it
+    /// was left) on the piano roll's notes, previewing the settings last accepted (§1). Open already: to the front.
+    pub(crate) fn open_strum(&mut self) {
+        let s = &mut self.state;
+        if !s.shown(Win::Strum) {
+            if !s.strum.placed {
+                let (w, h) = views::strum::SIZE;
+                s.strum.pos = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::work_y(s)).round());
+                s.strum.placed = true;
+            }
+            crate::strum::open(s);
+        }
+        s.raise(Win::Strum);
+        self.invalidate();
+    }
+
+    fn strum_act(&mut self, a: crate::strum::Act) {
+        let s = &mut self.state;
+        if a == crate::strum::Act::Accept {
+            s.message = Some(crate::strum::accept(s));
+            s.hide(Win::Strum);
+        } else {
+            crate::strum::act(s, a);
+        }
+        self.invalidate();
+    }
+
+    // ---------------------------------------------------------------- Arpeggiate dialog (spec: ui/piano-arpeggiate.md)
+
+    /// Tools ▸ Arpeggiate… and Alt+A: open the dialog in front (centred over the main window the first time, then where
+    /// it was left) on the piano roll's notes, previewing the settings last accepted (§1). Open already: to the front.
+    pub(crate) fn open_arp(&mut self) {
+        let s = &mut self.state;
+        if !s.shown(Win::Arp) {
+            if !s.arp.placed {
+                let (w, h) = views::arpeggiate::SIZE;
+                s.arp.pos = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::work_y(s)).round());
+                s.arp.placed = true;
+            }
+            crate::arpeggiate::open(s);
+        }
+        s.raise(Win::Arp);
+        self.invalidate();
+    }
+
+    fn arp_act(&mut self, a: crate::arpeggiate::Act) {
+        use crate::arpeggiate::{self as arp, Act, Menu};
+        let s = &mut self.state;
+        match a {
+            Act::Accept => {
+                s.message = Some(arp::accept(s));
+                s.hide(Win::Arp);
+            }
+            Act::Folder => {
+                let dir = s.arp.pattern.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf)).unwrap_or_else(arp::folder);
+                let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Load arpeggiator pattern", "arpeggiator", crate::dialog::Then::ArpPattern)
+                    .filter("Score", &["fsc"])
+                    .start(Some(&dir));
+                self.file_dialog(dlg);
+            }
+            Act::Menu(m) => {
+                let items = match m {
+                    Menu::Pattern => arp::pattern_menu(&s.arp.pattern, &arp::folder()),
+                    m => arp::option_menu(&s.arp.set, m),
+                };
+                let (x, y) = self.mouse;
+                self.state.playlist.popup = Some(crate::playlist::Popup { x, y, items, sub: None });
+            }
+            a => arp::act(s, a),
+        }
+        self.invalidate();
+    }
+
+    /// A pattern, direction or sync picked for the Arpeggiate dialog (its menus, its file dialog).
+    pub(crate) fn arp_command(&mut self, c: crate::arpeggiate::ACmd) {
+        if let Some(m) = crate::arpeggiate::command(&mut self.state, c) {
+            self.state.message = Some(m);
+        }
+        self.invalidate();
+    }
+
     // ---------------------------------------------------------------- Tempo tapper (spec: ui/tempo-tapper.md)
 
     /// VIEW > Tempo tapper and Ctrl+F5: open it (or bring it to the front), centred over the main window the first
-    /// time in a run and then where it was left; close it when it is in front (§1, §8).
+    /// time and then where it was left, also in later runs (`layout`); close it when it is in front (§1, §8).
     fn toggle_tapper(&mut self) {
         let s = &mut self.state;
         if s.shown(Win::Tapper) && s.in_front(Win::Tapper) {
@@ -2925,6 +3042,8 @@ impl App {
             Win::Perf => self.damage_rect(views::perf::bounds(&self.state)),
             Win::Tapper => self.damage_rect(views::tapper::bounds(&self.state)),
             Win::Touch => self.damage_rect(views::touch::bounds(&self.state)),
+            Win::Strum => self.damage_rect(views::strum::bounds(&self.state)),
+            Win::Arp => self.damage_rect(views::arpeggiate::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
             _ => self.invalidate(),
         }
@@ -3082,6 +3201,7 @@ impl App {
             || self.smooth.running()
             || self.midi_play.busy()
             || self.remote.busy()
+            || self.state.browser_marquee.borrow().is_some()
     }
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
@@ -3172,6 +3292,7 @@ impl App {
         self.hold_tick(now);
         self.ease_tick(now);
         self.cables_tick(now);
+        self.marquee_tick(now);
         self.backup_tick(now);
         self.work_tick(now);
         self.song_info_tick(now);
@@ -3471,11 +3592,19 @@ impl App {
     /// file. Either channel reads the file's root note and beats (`rack::read_tags`). One history step, "Load channel
     /// sample(s)" (`history::load_sample`).
     pub(crate) fn sample_to_rack(&mut self, path: String, y: f32) {
+        let s = &self.state;
+        let row = views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind.is_sampler());
+        self.sample_to_channel(path, row);
+    }
+
+    /// Sample `path` into sampler row `row`, or into a new Lemon Sampler channel at the bottom of the rack (`None`), named
+    /// after the file; that channel is selected.
+    pub(crate) fn sample_to_channel(&mut self, path: String, row: Option<usize>) {
         let s = &mut self.state;
         let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned());
         // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
         let path = crate::data_folder::adopt(s, &path);
-        let row = match views::rack::row_at(s, y).filter(|&r| s.project.channels[r].kind.is_sampler()) {
+        let row = match row {
             Some(r) => {
                 crate::history::load_sample(s, r);
                 s.sample_loads.push((r, path.clone()));
@@ -4469,7 +4598,8 @@ impl App {
                 Drag::PatternBox { y0, p0 } => {
                     let (y0, p0): (f32, u16) = (y0.to_owned(), p0.to_owned());
                     let steps = ((y0 - y) / crate::patterns::DRAG_STEP).trunc() as i32;
-                    self.state.pattern = (i32::from(p0) + steps).clamp(1, i32::from(crate::patterns::MAX)) as u16;
+                    let n = (i32::from(p0) + steps).clamp(1, i32::from(crate::patterns::MAX)) as u16;
+                    crate::patterns::select(&mut self.state, n);
                     self.invalidate();
                 }
                 Drag::MixSelect => {
@@ -4554,6 +4684,7 @@ impl App {
                         self.damage_piano();
                     }
                 }
+                Drag::BrowserSplit { dx } => self.browser_split_drag(x - dx),
                 Drag::SongPosHold { .. } => {}
                 Drag::PrefSlider { label, x: x0, w } => self.pref_slider_drag(label, x0, w),
                 Drag::Ppi { x0, n0 } => self.ppi_set(crate::ppi::dragged(n0, x - x0, self.px_scale)),
@@ -4914,6 +5045,8 @@ impl App {
             Win::Perf => views::perf::bounds(&self.state),
             Win::Tapper => views::tapper::bounds(&self.state),
             Win::Touch => views::touch::bounds(&self.state),
+            Win::Strum => views::strum::bounds(&self.state),
+            Win::Arp => views::arpeggiate::bounds(&self.state),
             Win::ChannelRack => views::rack::bounds(&self.state),
             w => self.state.win_rect(w).outset(5.0),
         }
@@ -4936,6 +5069,9 @@ impl App {
         }
         if matches!((&self.drag, &self.hover), (Some(Drag::PianoSplit { .. }), _) | (None, Some(Action::PianoSplitter))) {
             return Cursor::NsResize;
+        }
+        if matches!((&self.drag, &self.hover), (Some(Drag::BrowserSplit { .. }), _) | (None, Some(Action::BrowserSplitter))) {
+            return Cursor::EwResize;
         }
         let edges = match (&self.drag, &self.hover) {
             (Some(Drag::RackResize { edges, .. }), _) => *edges,
@@ -5198,7 +5334,7 @@ impl App {
                 return self.invalidate();
             }
             Some(Action::BrowserRow(i)) => {
-                if self.browser_remove_root(*i) || self.params_browser_right(*i, x, y) {
+                if self.params_browser_right(*i, x, y) || self.browser_row_menu(*i, x, y) {
                     return;
                 }
             }
@@ -5361,6 +5497,7 @@ impl App {
             Some(Drag::ZoomBox { x0, y0 }) => self.zoom_to(x0, y0),
             Some(Drag::SongPos { .. }) => self.song_pos_release(),
             Some(Drag::PianoSplit { .. }) => crate::piano_split::save(self.state.piano.split),
+            Some(Drag::BrowserSplit { .. }) => crate::browser::save_width(self.state.browser_w),
             Some(Drag::Marker) if self.transport.playing() && !self.transport.song() => {
                 self.start_playback();
             }
@@ -5870,7 +6007,8 @@ impl App {
         }
         if matches!(area, Some(Action::PatternNext)) {
             let d = if dy + dx > 0.0 { 1 } else { -1 };
-            self.state.pattern = (i32::from(self.state.pattern.max(1)) + d).clamp(1, i32::from(crate::patterns::MAX)) as u16;
+            let n = (i32::from(self.state.pattern.max(1)) + d).clamp(1, i32::from(crate::patterns::MAX)) as u16;
+            crate::patterns::select(&mut self.state, n);
             return None;
         }
         if let Some(Action::Scrollbar(t)) = area {
@@ -6767,6 +6905,8 @@ impl App {
             Action::Perf(p) => self.perf_act(p),
             Action::Tapper(a) => self.tapper_act(a),
             Action::Touch(a) => self.touch_act(a),
+            Action::Strum(a) => self.strum_act(a),
+            Action::Arp(a) => self.arp_act(a),
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
@@ -7021,6 +7161,8 @@ impl App {
                     Win::Perf => s.perf.pos,
                     Win::Tapper => s.tapper.pos,
                     Win::Touch => s.touch.pos,
+                    Win::Strum => s.strum.pos,
+                    Win::Arp => s.arp.pos,
                     Win::ChannelRack => s.rack_pos,
                     w => {
                         // Start from the rect as shown (kept on screen), then move it.
@@ -7063,8 +7205,18 @@ impl App {
             Action::Util(Util::Help) => {}
             Action::Util(Util::Save) => self.menu_item(0, views::menus::FILE_SAVE_AS),
             Action::CloseWin(Win::Perf) => self.close_perf(),
+            Action::CloseWin(Win::Strum) => {
+                crate::strum::cancel(s);
+                s.hide(Win::Strum);
+                self.damage_win(Win::PianoRoll);
+            }
+            Action::CloseWin(Win::Arp) => {
+                crate::arpeggiate::cancel(s);
+                s.hide(Win::Arp);
+                self.damage_win(Win::PianoRoll);
+            }
             Action::CloseWin(w) => s.hide(w),
-            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch => {}
+            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserSplitter => {}
             Action::TypeIn(t) => crate::typein::click(s, t),
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
             Action::PlTool(_)
@@ -7474,7 +7626,7 @@ impl App {
                 let at = self.mouse;
                 self.open_plugin_menu(crate::plugin_menu::Target::All, at);
             }
-            (PATTERNS, i) if i >= PATTERN_PICK => self.state.pattern = (i - PATTERN_PICK) as u16,
+            (PATTERNS, i) if i >= PATTERN_PICK => crate::patterns::select(&mut self.state, (i - PATTERN_PICK) as u16),
             (PATTERNS, i) if item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).is_some() => {
                 let cmd = item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).expect("checked");
                 if let Some(m) = self.pattern_cmd(cmd) {
@@ -7565,7 +7717,7 @@ pub(crate) fn lift_windows(s: &mut State, dy: f32) {
     for w in &mut s.wins {
         lift(&mut w.rect.y);
     }
-    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos] {
+    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos, &mut s.strum.pos, &mut s.arp.pos] {
         lift(&mut pos.1);
     }
 }
@@ -11826,12 +11978,166 @@ mod tests {
         assert_eq!(r[i + 2].label, "Kick 01");
         assert!(matches!(r[i + 2].item, Item::Sample(_)));
         assert_eq!(r[i + 2].depth, 2);
-        // Right-click the root removes it.
+        // The root's right-click menu removes it (§8).
         frame(&mut app, &mut c, None);
         let root = hit_rect(&app, &Action::BrowserRow(i));
         app.mouse_move(root.cx(), root.cy());
         app.mouse_down_right();
+        pick(&mut app, &mut c, "Remove from browser");
         assert!(app.state.browser_folders.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Clicks entry `label` of the open popup.
+    fn pick(app: &mut App, c: &mut Canvas, label: &str) {
+        frame(app, c, None);
+        let items = &app.state.playlist.popup.as_ref().expect("a menu").items;
+        let k = items.iter().position(|i| i.label == label).unwrap_or_else(|| panic!("no \"{label}\" in the menu"));
+        let r = hit_rect(app, &Action::PlPopup(k));
+        click(app, c, r);
+    }
+
+    /// A right click on a browser row selects it and opens its menu (spec: ui/browser.md §8): Open / Close for a node,
+    /// what the row's kind offers, the file manager for disk entries, the structure commands last.
+    #[test]
+    fn browser_row_menu() {
+        use crate::views::browser::{disk_key, rows, Item, Row};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("os_browser_menu_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(dir.join("Snare 01.wav")).unwrap(), 44100, &[0.0; 8]).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.patterns.push(os_model::Pattern { number: 2, name: Some("Verse".into()), ..Default::default() });
+        app.state.z = vec![Win::Playlist];
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(disk_key(&dir));
+        /// Right-clicks the first row `find` accepts: the row is selected; the menu's labels.
+        fn right(app: &mut App, c: &mut Canvas, find: impl Fn(&Row) -> bool) -> Vec<String> {
+            frame(app, c, None);
+            let i = rows(&app.state).iter().position(find).expect("the row");
+            let r = hit_rect(app, &Action::BrowserRow(i));
+            app.mouse_move(r.cx(), r.cy());
+            app.mouse_down_right();
+            assert_eq!(app.state.browser_sel.as_ref(), Some(&rows(&app.state)[i].key), "the right click selects the row");
+            app.state.playlist.popup.as_ref().expect("a menu").items.iter().map(|i| i.label.to_string()).collect()
+        }
+        // A sample in a dropped folder: preview, send, a new channel, its folder; the structure commands last.
+        let labels = right(&mut app, &mut c, |r| r.label == "Snare 01");
+        assert_eq!(labels[..3], ["Preview", "Send to selected channel", "Add to channel rack"]);
+        assert!(labels.iter().any(|l| l.starts_with("Show in ")));
+        assert_eq!(labels[labels.len() - 2..], ["Collapse structure", "Reread structure"]);
+        let n = app.state.project.channels.len();
+        pick(&mut app, &mut c, "Add to channel rack");
+        assert_eq!(app.state.project.channels.len(), n + 1);
+        assert_eq!(app.state.project.channels[app.state.selected_channel].name.as_deref(), Some("Snare 01"));
+        // The dropped root: Close / Open, then Remove from browser.
+        let labels = right(&mut app, &mut c, |r| r.key == disk_key(&dir));
+        assert_eq!(labels[0], "Close");
+        assert!(labels.iter().any(|l| l == "Rename...") && labels.iter().any(|l| l.starts_with("Open in ")));
+        pick(&mut app, &mut c, "Close");
+        assert!(!app.state.browser_open.contains(&disk_key(&dir)));
+        assert_eq!(right(&mut app, &mut c, |r| r.key == disk_key(&dir))[0], "Open");
+        pick(&mut app, &mut c, "Remove from browser");
+        assert!(app.state.browser_folders.is_empty());
+        // A pattern: its commands act on that pattern.
+        app.state.browser_tab = crate::views::browser::PROJECT_TAB;
+        let labels = right(&mut app, &mut c, |r| r.item == Item::Pattern(2));
+        assert!(labels.iter().any(|l| l == "Rename and color..."));
+        pick(&mut app, &mut c, "Select pattern");
+        assert_eq!(app.state.pattern, 2);
+        app.state.pattern = 1;
+        let n = app.state.project.patterns.len();
+        right(&mut app, &mut c, |r| r.item == Item::Pattern(2));
+        pick(&mut app, &mut c, "Clone");
+        assert_eq!(app.state.project.patterns.len(), n + 1);
+        let copy = app.state.project.pattern(3).and_then(|p| p.name.clone()).unwrap_or_default();
+        assert!(app.state.pattern == 3 && copy.starts_with("Verse"), "pattern 2 cloned, not the current one: {copy}");
+        // A channel under Generators: selected from its menu.
+        app.state.browser_open.insert(crate::views::browser::section_key("Generators").unwrap());
+        right(&mut app, &mut c, |r| r.item == Item::Channel(1));
+        pick(&mut app, &mut c, "Select channel");
+        assert_eq!(app.state.selected_channel, 1);
+        // Collapse structure closes every node of the tab.
+        right(&mut app, &mut c, |r| r.item == Item::Channel(1));
+        pick(&mut app, &mut c, "Collapse structure");
+        assert!(!app.state.browser_open.iter().any(|k| k.starts_with("1:")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The browser's splitter (spec: ui/browser.md §9): a drag widens the browser and the workspace starts right of it,
+    /// from the default width to half the window; a double click gives the default width back.
+    #[test]
+    fn browser_splitter_resizes_the_browser() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let split = hit_rect(&app, &Action::BrowserSplitter);
+        assert_eq!((split.x, split.right()), (201.0, 209.0), "the measured splitter");
+        let drag = |app: &mut App, c: &mut Canvas, dx: f32| {
+            let s = hit_rect(app, &Action::BrowserSplitter);
+            app.mouse_move(s.cx(), s.cy());
+            assert_eq!(app.cursor(), Cursor::EwResize);
+            app.mouse_down();
+            app.mouse_move(s.cx() + dx, s.cy());
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        drag(&mut app, &mut c, 150.0);
+        assert_eq!(app.state.browser_w, 359.0);
+        assert_eq!(app.state.work_rect().x, 359.0);
+        assert_eq!(hit_rect(&app, &Action::BrowserSplitter).x, 351.0);
+        assert_eq!(hit_rect(&app, &Action::BrowserRow(0)).right(), 351.0, "rows span the wider list");
+        drag(&mut app, &mut c, -500.0);
+        assert_eq!(app.state.browser_w, 209.0, "not narrower than the default");
+        drag(&mut app, &mut c, 2000.0);
+        assert_eq!(app.state.browser_w, 960.0, "at most half the window");
+        let s = hit_rect(&app, &Action::BrowserSplitter);
+        app.mouse_move(s.cx(), s.cy());
+        for _ in 0..2 {
+            app.mouse_down();
+            app.mouse_up();
+        }
+        assert_eq!(app.state.browser_w, 209.0, "a double click: the default width");
+    }
+
+    /// A hovered row whose label does not fit scrolls it (spec: ui/browser.md §9): still at first, then moving while the
+    /// mouse stays; a label that fits does not.
+    #[test]
+    fn browser_long_labels_scroll_while_hovered() {
+        use crate::views::browser::{disk_key, rows};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("os_browser_marquee_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("A very long file name that does not fit in the browser.txt"), b"x").unwrap();
+        std::fs::write(dir.join("Short.txt"), b"x").unwrap();
+        let mut app = App::new(None);
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(disk_key(&dir));
+        frame(&mut app, &mut c, None);
+        let at = |app: &App, label: &str| {
+            let i = rows(&app.state).iter().position(|r| r.label.starts_with(label)).expect("the row");
+            hit_rect(app, &Action::BrowserRow(i))
+        };
+        let long = at(&app, "A very long");
+        app.mouse_move(long.cx(), long.cy());
+        frame(&mut app, &mut c, None);
+        let m = app.state.browser_marquee.borrow().clone().expect("scrolling");
+        assert!(m.over > 0.0 && m.off == 0.0, "still at first: {m:?}");
+        assert!(app.animating());
+        // Two seconds on, its rect is repainted and the label has moved.
+        app.state.browser_marquee.get_mut().as_mut().unwrap().since -= std::time::Duration::from_secs(2);
+        app.take_damage();
+        app.marquee_tick(std::time::Instant::now());
+        assert!(app.has_damage());
+        frame(&mut app, &mut c, None);
+        assert!(app.state.browser_marquee.borrow().as_ref().unwrap().off > 0.0);
+        let short = at(&app, "Short");
+        app.mouse_move(short.cx(), short.cy());
+        frame(&mut app, &mut c, None);
+        assert!(app.state.browser_marquee.borrow().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -13614,7 +13920,7 @@ mod tests {
     /// cycling and the wheel zooms, driven through `App::key` / `App::wheel` like the shell does.
     #[test]
     fn piano_shortcuts() {
-        use crate::piano_tools::{Arp, NCmd, Sub};
+        use crate::piano_tools::{NCmd, Sub};
         use crate::playlist::Cmd;
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
@@ -13678,18 +13984,95 @@ mod tests {
         assert_eq!(mine(&app), vec![(96, 72, 62)]);
         assert_eq!(app.state.piano.clipboard.len(), 3);
 
-        // Alt+S / A / R / Q / U open their preset menus; picking an entry runs it.
+        // Alt+R / Q / U open their preset menus; picking an entry runs it.
         put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
-        for (k, sub) in [("s", Sub::Strum), ("a", Sub::Arpeggiate), ("r", Sub::Randomize), ("q", Sub::Quantize), ("u", Sub::Chop)] {
+        for (k, sub) in [("r", Sub::Randomize), ("q", Sub::Quantize), ("u", Sub::Chop)] {
             key(&mut app, k, false, true, false);
             let pop = app.state.playlist.popup.take().unwrap_or_else(|| panic!("Alt+{k} opens a menu"));
             assert!(pop.items.iter().all(|i| i.sep || matches!(i.cmd, Cmd::Piano(_))), "{sub:?}");
         }
-        crate::playlist::run(&mut app, Cmd::Piano(NCmd::Strum { up: true, n: 64 }));
-        assert_eq!(mine(&app).iter().map(|n| n.0).collect::<Vec<_>>(), vec![0, 6, 12]);
-        put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
-        crate::playlist::run(&mut app, Cmd::Piano(NCmd::Arpeggiate(Arp::Up, 16)));
-        assert_eq!(mine(&app).iter().map(|n| n.2).collect::<Vec<_>>(), vec![60, 64, 67, 60]);
+
+        // Alt+S opens the Strum dialog (spec: ui/piano-strum.md): it previews, × puts the notes back, Accept is one
+        // undo step and the next opening starts from the accepted settings.
+        use crate::knobs::KnobId;
+        use crate::strum::{Act, Knob};
+        let chord = |app: &App| mine(app).iter().map(|n| n.0).collect::<Vec<_>>();
+        key(&mut app, "s", false, true, false);
+        assert!(app.state.shown(Win::Strum) && app.state.in_front(Win::Strum));
+        frame(&mut app, &mut c, None);
+        let time = hit_rect(&app, &Action::Knob(KnobId::Strum(Knob::Time)));
+        app.mouse_move(time.cx(), time.cy());
+        for _ in 0..29 {
+            app.wheel(0.0, 1.0, false, false);
+        }
+        assert_eq!(chord(&app), vec![0, 22, 44], "29 notches: FL's 0:22 per note, previewed at once");
+        assert_eq!(app.hint.as_ref(), "Start strength: 0:22");
+        let close = hit_rect(&app, &Action::CloseWin(Win::Strum));
+        app.mouse_move(close.cx(), close.cy());
+        app.mouse_down();
+        app.mouse_up();
+        assert!(!app.state.shown(Win::Strum));
+        assert_eq!(chord(&app), vec![0, 0, 0], "× puts the notes back");
+        key(&mut app, "s", false, true, false);
+        assert_eq!(chord(&app), vec![0, 0, 0], "× forgot the change");
+        app.state.set_knob(KnobId::Strum(Knob::Time), 0.5 + 29.0 / 64.0);
+        frame(&mut app, &mut c, None);
+        let accept = hit_rect(&app, &Action::Strum(Act::Accept));
+        app.mouse_move(accept.cx(), accept.cy());
+        app.mouse_down();
+        app.mouse_up();
+        assert!(!app.state.shown(Win::Strum));
+        assert_eq!(chord(&app), vec![0, 22, 44]);
+        assert!(piano::undo(&mut app.state));
+        assert_eq!(chord(&app), vec![0, 0, 0], "one undo step");
+        key(&mut app, "s", false, true, false);
+        assert_eq!(chord(&app), vec![0, 22, 44], "reopened on the accepted settings");
+        app.act(Action::Strum(Act::Reset));
+        assert_eq!(chord(&app), vec![0, 0, 0]);
+        app.act(Action::CloseWin(Win::Strum));
+
+        // Alt+A opens the Arpeggiate dialog (spec: ui/piano-arpeggiate.md): the Default pattern previews at once, ×
+        // puts the notes back, a menu entry changes the preview, Accept is one undo step.
+        {
+            use crate::arpeggiate::{ACmd, Act as AAct, Knob as AKnob, Menu, Sync};
+            put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
+            let keys = |app: &App| mine(app).iter().map(|n| n.2).collect::<Vec<_>>();
+            key(&mut app, "a", false, true, false);
+            assert!(app.state.shown(Win::Arp) && app.state.in_front(Win::Arp));
+            assert_eq!(keys(&app), vec![60, 64, 67, 60], "previewed with the Default pattern");
+            app.act(Action::CloseWin(Win::Arp));
+            assert_eq!(keys(&app), vec![60, 64, 67]);
+            key(&mut app, "a", false, true, false);
+            frame(&mut app, &mut c, None);
+            let range = hit_rect(&app, &Action::Knob(KnobId::Arp(AKnob::Range)));
+            app.mouse_move(range.cx(), range.cy());
+            app.wheel(0.0, 1.0, false, false);
+            assert_eq!(app.state.arp.set.range, 2);
+            assert_eq!(app.hint.as_ref(), "Range: 2");
+            assert_eq!(keys(&app), vec![60, 64, 67, 72], "the second repetition an octave up");
+            app.act(Action::Arp(AAct::Menu(Menu::Sync)));
+            let pop = app.state.playlist.popup.take().expect("Sync opens its menu");
+            assert_eq!(pop.items.iter().map(|i| i.label.as_ref()).collect::<Vec<_>>(), ["Time", "Block", "Chord"]);
+            crate::playlist::run(&mut app, Cmd::Arp(ACmd::Sync(Sync::Block)));
+            assert_eq!(app.state.arp.set.sync, Sync::Block);
+            app.act(Action::Arp(AAct::Menu(Menu::Pattern)));
+            let pop = app.state.playlist.popup.take().expect("the pattern menu");
+            assert_eq!(pop.items[0].label, "Default");
+            frame(&mut app, &mut c, None);
+            let accept = hit_rect(&app, &Action::Arp(AAct::Accept));
+            app.mouse_move(accept.cx(), accept.cy());
+            app.mouse_down();
+            app.mouse_up();
+            assert!(!app.state.shown(Win::Arp));
+            assert_eq!(keys(&app), vec![60, 64, 67, 72]);
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(keys(&app), vec![60, 64, 67], "one undo step");
+            key(&mut app, "a", false, true, false);
+            assert_eq!(app.state.arp.set.range, 2, "reopened on the accepted settings");
+            app.act(Action::Arp(AAct::Reset));
+            assert_eq!(keys(&app), vec![60, 64, 67, 60]);
+            app.act(Action::CloseWin(Win::Arp));
+        }
         frame(&mut app, &mut c, None);
 
         // The toolbar's tools button opens the Tools menu.
@@ -14460,6 +14843,21 @@ mod tests {
         assert_eq!(app.state.pending_open, None, "a pattern clip opens no sampler");
         assert!(app.state.shown(Win::PianoRoll) && app.state.pattern == 1, "it opens its pattern in the piano roll");
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// A pattern picked in the pattern selector becomes the playlist's clip source even after a click on a clip made
+    /// another pattern the source, so a new pattern is what Draw places (issue #94).
+    #[test]
+    fn pattern_selector_sets_the_clip_source() {
+        use crate::views::menus::{PATTERNS, PATTERN_PICK};
+        use os_model::ClipSource;
+        let mut app = App::new(None);
+        app.state.playlist.source = Some(ClipSource::Pattern(1));
+        app.menu_item(PATTERNS, PATTERN_PICK + 2);
+        assert_eq!(app.state.pattern, 2);
+        assert_eq!(crate::playlist::source(&app.state), ClipSource::Pattern(2));
+        crate::playlist::place(&mut app.state, 0, 0);
+        assert_eq!(crate::playlist::clips(&app.state).last().map(|c| c.source), Some(ClipSource::Pattern(2)));
     }
 
     /// Double-click on audio clips follows General ▸ Input ▸ Manage shortcuts: the row whose modifier is held wins,

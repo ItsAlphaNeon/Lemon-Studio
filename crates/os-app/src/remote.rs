@@ -121,7 +121,12 @@ impl Link {
     }
 }
 
-/// A target as `settings.txt` keeps it.
+/// Whether `t` can be linked: the Strum and Arpeggiate dialogs' knobs live only while their dialog is open.
+fn linkable(t: Target) -> bool {
+    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_)))
+}
+
+/// A target as `settings.txt` keeps it (`none` for one that is not linkable, which reads back as nothing).
 fn target_text(t: Target) -> String {
     match t {
         Target::Knob(k) => match k {
@@ -135,6 +140,7 @@ fn target_text(t: Target) -> String {
             KnobId::ChanPan(r) => format!("chanpan:{r}"),
             KnobId::Swing => "swing".into(),
             KnobId::Eq(m, b, f) => format!("eq:{m}:{b}:{f}"),
+            KnobId::Strum(_) | KnobId::Arp(_) => "none".into(),
         },
         Target::Fader(m) => format!("fader:{m}"),
         Target::Param(key, i) => format!("param:{key}:{i}"),
@@ -221,6 +227,7 @@ pub fn remove(t: Target) {
 /// The menu's Remote control part (spec §1): Link to controller..., Override global link... (greyed), and Remove link
 /// for a linked target.
 pub fn menu_items(t: Option<Target>) -> Vec<PItem> {
+    let t = t.filter(|&t| linkable(t));
     let mut v = vec![
         PItem::head("Remote control"),
         match t {

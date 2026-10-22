@@ -299,6 +299,13 @@ pub fn box_at_mouse(mouse: (f32, f32)) -> (f32, f32) {
     ((mouse.0 - 241.0).max(0.0), (mouse.1 - 41.0).max(0.0))
 }
 
+/// Pattern `n` picked in the pattern selector (its menu, a drag or the wheel): it becomes the current pattern and the
+/// playlist's clip source, so Draw and Paint place it, as FL does (issue #94).
+pub fn select(s: &mut State, n: u16) {
+    s.pattern = n;
+    s.playlist.source = Some(ClipSource::Pattern(n));
+}
+
 /// Box position for "+" (§4).
 pub const PLUS_BOX_AT: (f32, f32) = (949.0, 46.0);
 
