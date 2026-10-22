@@ -413,6 +413,8 @@ enum Drag {
     Slider { id: String, track: Rect },
     KeyScroll { x0: f32, s0: f32, ratio: f32 },
     Keys,
+    /// The sample sounding at its root note while the waveform is held (`held`).
+    Wave,
     Ruler { from: i32 },
     Overview { track: Rect, grab: f64 },
     Loop { which: u8, both: bool, x0: f32, s0: f32, e0: f32 },
@@ -652,6 +654,12 @@ impl Logic {
                 if double {
                     self.view.wave_start = 0.0;
                     self.view.wave_len = 1.0;
+                } else {
+                    // A press plays the sample at its own pitch (the root note) until the button is let go.
+                    let root = (self.vals.plain("root") as i32).clamp(0, 127) as u8;
+                    self.held = Some((root, 100));
+                    self.drag = Some(Drag::Wave);
+                    return vec![Act::Note(root, 100, true), Act::Repaint];
                 }
             }
             Target::Overview(track) => {
@@ -807,7 +815,7 @@ impl Logic {
                 self.hint_for(&ids[0]);
                 vec![Act::Repaint]
             }
-            Some(Drag::Knob { .. }) => vec![],
+            Some(Drag::Knob { .. } | Drag::Wave) => vec![],
             None => {
                 let h = self.hover_hint(x, y);
                 let changed = h != self.hint;
@@ -843,7 +851,7 @@ impl Logic {
         let mut acts = vec![Act::Repaint];
         match self.drag.take() {
             Some(Drag::Knob { id } | Drag::Slider { id, .. }) => self.end(&id),
-            Some(Drag::Keys) => {
+            Some(Drag::Keys | Drag::Wave) => {
                 if let Some((k, _)) = self.held.take() {
                     acts.push(Act::Note(k, 0, false));
                 }
@@ -2971,6 +2979,23 @@ mod tests {
         assert!(acts.iter().any(|a| matches!(a, Act::Note(_, _, false))));
         l.down(r.cx(), r.bottom() - 2.0, Btn::Right, Mods::default(), false);
         assert_eq!(l.vals.plain("root") as i32, k);
+    }
+
+    /// A press on the waveform plays the sample at its root note until the button is let go (issue #93); a double
+    /// click still zooms out.
+    #[test]
+    fn waveform_press_previews_the_sample() {
+        let mut l = logic(0);
+        l.typed("root", "C4");
+        let (x, y) = centre(&l, &Target::Wave(view::wave_area()));
+        let acts = l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(acts.contains(&Act::Note(48, 100, true)), "{acts:?}");
+        l.moved(x + 30.0, y, Mods::default());
+        assert!(l.up(Btn::Left).contains(&Act::Note(48, 0, false)));
+        l.view.wave_len = 0.5;
+        let acts = l.down(x, y, Btn::Left, Mods::default(), true);
+        assert!(!acts.iter().any(|a| matches!(a, Act::Note(..))));
+        assert_eq!(l.view.wave_len, 1.0);
     }
 
     #[test]
