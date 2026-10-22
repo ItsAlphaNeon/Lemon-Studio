@@ -747,7 +747,8 @@ impl Delay {
                 self.lfo_speed = x * 0.99f32;
                 let period = lfo_period(self.lfo_speed);
                 self.lfo_step = 1.0 / (self.rate as f32 * period);
-                self.lfo_scale = (f64::from(period) / 8.872).sqrt() as f32;
+                // Over the slowest period as stored (single): 8.872 in double is a step off at some speeds.
+                self.lfo_scale = (period / LFO_PERIODS[0]).sqrt();
             }
             MOD_TIME => self.depth_setting = (f64::from(x) * f64::from(x)) as f32 * 0.1,
             MOD_CUTOFF => self.filter_sway = x * 0.5,
