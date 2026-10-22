@@ -195,6 +195,8 @@ pub struct Layout {
     pub name: usize,
     /// Per module: its header, its operator or filter block, and each articulator's start.
     pub modules: Vec<ModuleLayout>,
+    /// Where module 10 ends (`None` when the stream ended before).
+    pub end: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -449,7 +451,122 @@ impl State {
             self.modules[m] = module;
             self.layout.modules.push(ml);
         }
+        self.layout.end = Some(r.at);
         Some(())
+    }
+
+    /// The state as an edited state is saved (spec plugins/citrus.md §4): version 25, every setting from `self`, and
+    /// from `body` (the unpacked stream `self` was read from, `None` for none) what the reader does not keep: the
+    /// articulators' and shapers' curve bytes, the filter blocks' other bytes and the bytes after module 10.
+    pub fn to_bytes(&self, body: Option<&[u8]>) -> Vec<u8> {
+        let mut w = Vec::with_capacity(64 * 1024);
+        let int = |w: &mut Vec<u8>, v: i32| w.extend_from_slice(&v.to_le_bytes());
+        for v in [self.main_volume, self.master_lfo, self.main_pitch].iter().chain(&self.matrix).chain(&self.ring).chain(&self.s) {
+            int(&mut w, *v);
+        }
+        w.extend_from_slice(&self.cell_off);
+        int(&mut w, self.soften);
+        w.extend_from_slice(&self.switches);
+        for d in &self.delays {
+            for v in [d.feedback, d.time, d.stereo, d.level, d.mode] {
+                int(&mut w, v);
+            }
+            w.extend_from_slice(&[u8::from(d.synced), u8::from(d.serial), u8::from(d.on)]);
+        }
+        for v in self.reverb.knobs {
+            int(&mut w, v);
+        }
+        w.extend_from_slice(&[u8::from(self.reverb.on), u8::from(self.reverb.tempo)]);
+        int(&mut w, self.eq.mode);
+        for v in self.eq.bands.iter().flatten() {
+            int(&mut w, *v);
+        }
+        let name: Vec<u16> = self.name.encode_utf16().collect();
+        if name.len() < 255 {
+            w.push(name.len() as u8);
+        } else {
+            w.push(255);
+            int(&mut w, name.len() as i32);
+        }
+        for c in name {
+            w.extend_from_slice(&c.to_le_bytes());
+        }
+        let ml = &self.layout.modules;
+        // The bytes of `body` from `at` to where the next part starts, when both are known.
+        let span = |at: Option<usize>, to: Option<usize>| -> Option<&[u8]> { body?.get(at?..to?) };
+        for (m, module) in self.modules.iter().enumerate() {
+            let lay = ml.get(m);
+            for v in module.header {
+                int(&mut w, v);
+            }
+            if m < OPERATORS {
+                let o = &module.op;
+                for v in [o.ratio, o.offset, o.noise] {
+                    int(&mut w, v);
+                }
+                for v in o.levels.iter().chain(&o.phases) {
+                    w.extend_from_slice(&v.to_le_bytes());
+                }
+                for v in o.shape {
+                    int(&mut w, v);
+                }
+                w.extend_from_slice(&o.flags);
+            } else if m < OPERATORS + FILTERS {
+                let f = &module.filter;
+                let n = if self.version >= 9 { 48 } else { 41 };
+                let block = lay.map(|l| l.block);
+                let mut b = [0u8; 48];
+                if let Some(old) = span(block, block.map(|x| x + n)) {
+                    b[..n].copy_from_slice(old);
+                }
+                (b[0], b[1], b[40], b[44]) = (u8::from(f.oversample), u8::from(f.track), u8::from(f.shaper_on), f.kind);
+                w.extend_from_slice(&b);
+                let shaper_end = lay.and_then(|l| l.arts.first()).map(|a| a - usize::from(self.version >= 12));
+                match span(block.map(|x| x + n), shaper_end) {
+                    Some(old) => w.extend_from_slice(old),
+                    None => f.shaper.write(&mut w),
+                }
+                w.push(u8::from(f.bipolar));
+            }
+            for (a, art) in module.arts.iter().enumerate() {
+                let at = lay.and_then(|l| l.arts.get(a)).copied();
+                let next = lay
+                    .and_then(|l| l.arts.get(a + 1))
+                    .copied()
+                    .or_else(|| ml.get(m + 1).map(|l| l.header))
+                    .or(if m + 1 == MODULES { self.layout.end } else { None });
+                match span(at, next).filter(|old| old.len() >= 16) {
+                    Some(old) => {
+                        let k = w.len();
+                        w.extend_from_slice(old);
+                        w[k + 4..k + 8].copy_from_slice(&art.base.to_le_bytes());
+                        w[k + 8..k + 12].copy_from_slice(&art.env_amount.to_le_bytes());
+                    }
+                    None => art.write(&mut w),
+                }
+            }
+        }
+        match span(self.layout.end, body.map(<[u8]>::len)) {
+            Some(rest) => w.extend_from_slice(rest),
+            None => w.extend_from_slice(&[1, 0]),
+        }
+        State::pack(0x0019_0003, &w)
+    }
+}
+
+impl Articulator {
+    /// Writes the articulator (spec plugins/citrus.md §4): its kind int 3, base, envelope amount, LFO amount 0, then
+    /// its curves.
+    fn write(&self, w: &mut Vec<u8>) {
+        w.extend_from_slice(&3i32.to_le_bytes());
+        for v in [self.base, self.env_amount, 0.0] {
+            w.extend_from_slice(&v.to_le_bytes());
+        }
+        self.env.write(w);
+        self.lfo.write(w);
+        for m in &self.maps {
+            m.write(w);
+        }
     }
 }
 
@@ -509,6 +626,71 @@ fn read_articulator(r: &mut Reader) -> Option<Articulator> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FL's Sytrus factory presets (FL's install, when present).
+    fn factory_states() -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("fst")) {
+                    if let Some(fl) = std::fs::read(&p).ok().and_then(|b| crate::preset::state_from_fst(&b)) {
+                        out.push((p, fl));
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(std::path::Path::new(r"C:\Program Files\Image-Line\FL Studio 2026\Data\Patches\Plugin presets\Generators\Sytrus"), &mut out);
+        out
+    }
+
+    /// A state read back from what it writes, its version and layout aside.
+    fn reread(st: &State, body: Option<&[u8]>) -> (Vec<u8>, State) {
+        let out = st.to_bytes(body);
+        let mut back = State::from_bytes(&out).expect("written state reads");
+        assert_eq!(back.version, 25);
+        (back.version, back.layout) = (st.version, st.layout.clone());
+        (out, back)
+    }
+
+    /// Every factory preset written as an edited state reads back to the same patch; the version 25 ones come back
+    /// byte for byte.
+    #[test]
+    fn factory_presets_write_back() {
+        let states = factory_states();
+        let mut exact = 0;
+        for (path, fl) in &states {
+            let Some(st) = State::from_bytes(fl) else { continue };
+            let (stored, body) = State::unpack(fl).unwrap();
+            let (out, back) = reread(&st, Some(&body));
+            assert!(back == st, "{} (version {}) reads back otherwise", path.display(), st.version);
+            if stored == 0x0019_0003 {
+                assert!(State::unpack(&out).unwrap().1 == body, "{} is not written back byte for byte", path.display());
+                exact += 1;
+            }
+        }
+        assert!(states.is_empty() || exact > 100, "{exact} version 25 presets");
+    }
+
+    /// The default patch, with nothing to carry over, writes a state that reads back to the same sound, and writing
+    /// that again gives the same bytes; an edit shows in the bytes.
+    #[test]
+    fn the_default_patch_writes_a_state() {
+        let mut st = crate::preset::default_patch();
+        let (out, back) = reread(&st, None);
+        assert_eq!((back.matrix, back.modules[0].header, back.name.as_str()), (st.matrix, st.modules[0].header, "Init"));
+        assert_eq!(back.modules[0].op, st.modules[0].op);
+        let (_, body) = State::unpack(&out).unwrap();
+        let again = State::from_bytes(&out).unwrap();
+        assert!(State::unpack(&again.to_bytes(Some(&body))).unwrap().1 == body);
+        st.s[8] = 3;
+        st.cell_off[8] = 1;
+        let edited = State::from_bytes(&st.to_bytes(None)).unwrap();
+        assert_eq!((edited.s[8], edited.cell(0, COL_OUT)), (3, 0));
+    }
 
     /// The factory Default preset (FL's install, when present) reads to its last module.
     #[test]

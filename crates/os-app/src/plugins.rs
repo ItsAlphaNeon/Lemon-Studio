@@ -1862,6 +1862,46 @@ mod tests {
         assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "the editor redrew");
     }
 
+    /// The built-in Citrus's editor in its window: the wheel on SOFTEN and a right click on a matrix cell edit the
+    /// Sytrus state the channel saves (spec: plugins/citrus.md §6).
+    /// `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio citrus_window_edits -- --ignored`
+    #[test]
+    #[ignore]
+    fn citrus_window_edits() {
+        let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        let index = pl.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
+        pl.create_with(0, index, None).unwrap();
+        let info = ChannelInfo { name: crate::citrus::CITRUS.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 400);
+        let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
+        let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) } as isize;
+        assert!(editor != 0, "the editor is a child of the frame");
+        let mut er: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetWindowRect(editor as HWND, &mut er) };
+        assert_eq!((er.right - er.left, er.bottom - er.top), (citrus::view::W as i32, citrus::view::H as i32));
+        let (a, b) = (dir.join("citrus_before.bmp"), dir.join("citrus_after.bmp"));
+        capture(frame, &a);
+        // The default patch saves no state until it is edited.
+        assert_eq!(pl.sytrus_file_state(0), Some(Vec::new()));
+        for _ in 0..3 {
+            let (sx, sy) = (er.left + 524, er.top + 261);
+            unsafe { SendMessageW(editor as HWND, WM_MOUSEWHEEL, (120usize) << 16, ((sx & 0xffff) | (sy << 16)) as isize) };
+            pump(&mut pl, 60);
+        }
+        let (cx, cy) = citrus::view::cell_centre(0, citrus::state::COL_OUT);
+        unsafe { SendMessageW(editor as HWND, WM_RBUTTONDOWN, 0, ((cx as isize) | ((cy as isize) << 16)) as isize) };
+        unsafe { SendMessageW(editor as HWND, WM_RBUTTONUP, 0, ((cx as isize) | ((cy as isize) << 16)) as isize) };
+        pump(&mut pl, 300);
+        capture(frame, &b);
+        let st = citrus::state::State::from_bytes(&pl.sytrus_file_state(0).expect("a Sytrus state")).expect("an edited state");
+        assert_eq!(st.soften, 12, "three wheel notches of 4");
+        assert_eq!(st.cell_off[citrus::state::COL_OUT], 1, "the output cell turned off");
+        assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "the editor redrew");
+    }
+
     /// Random clicks, drags and wheel turns on the editor; a probe toggle must keep changing the plugin state.
     /// `OS_SHOT_DIR=.. OS_CLAP=.. cargo test -p os-app plugin_editor_stress -- --ignored --nocapture`
     #[test]

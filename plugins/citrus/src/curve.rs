@@ -146,6 +146,31 @@ impl Curve {
         Some(c)
     }
 
+    /// Writes the curve as curve version 3, the layout [`Curve::read`] reads (spec plugins/citrus.md §4).
+    pub fn write(&self, w: &mut Vec<u8>) {
+        let int = |w: &mut Vec<u8>, v: i32| w.extend_from_slice(&v.to_le_bytes());
+        int(w, self.kind);
+        int(w, 3);
+        int(w, self.points.len() as i32);
+        for p in &self.points {
+            w.extend_from_slice(&f64::from(p.dist).to_le_bytes());
+            w.extend_from_slice(&f64::from(p.level).to_le_bytes());
+            w.extend_from_slice(&p.tension.to_le_bytes());
+            w.extend_from_slice(&[p.mode, p.step, 0, 0]);
+        }
+        for v in [i32::from(self.flags), i32::from(self.enabled), self.decay, self.loop_start, self.sustain] {
+            int(w, v);
+        }
+        let tail: &[i32] = match self.kind {
+            ENVELOPE => &self.scales,
+            LFO => &self.lfo,
+            _ => &[],
+        };
+        for &v in tail {
+            int(w, v);
+        }
+    }
+
     /// What Sytrus keeps of a curve when it is loaded (spec "What the owner keeps", "Fitting a map"), then the
     /// preparation.
     pub fn keep_sytrus(&mut self) {

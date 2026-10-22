@@ -8,7 +8,9 @@
 // spec: plugins/citrus.md, plugins/sytrus.md, plugins/sytrus-effects.md, plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
+pub mod ctl;
 pub mod curve;
+pub mod editor;
 pub mod engine;
 pub mod filter;
 pub mod fx;
@@ -16,12 +18,13 @@ pub mod num;
 pub mod patch;
 pub mod preset;
 pub mod state;
+pub mod view;
 pub mod voice;
 pub mod wave;
 
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use nih_plug::prelude::*;
 
@@ -83,8 +86,12 @@ pub struct CitrusParams {
     /// The Sytrus state in use (event 213's bytes), as loaded; empty for the default patch.
     #[persist = "sytrus-state"]
     pub state: Arc<RwLock<StateBytes>>,
-    /// Bumped whenever `state` is replaced.
+    /// Bumped whenever `state` is replaced (not when the editor edits it).
     pub state_version: AtomicU64,
+    /// The editor's latest edit for the audio thread: the patch, and the state version it edits.
+    pub edit: Mutex<Option<(u64, patch::Patch)>>,
+    /// Notes the editor's testing keyboard plays itself (key, on).
+    pub previews: Mutex<Vec<(u8, bool)>>,
     #[id = "modx"]
     pub mod_x: FloatParam,
     #[id = "mody"]
@@ -96,6 +103,8 @@ impl Default for CitrusParams {
         CitrusParams {
             state: Arc::new(RwLock::new(StateBytes::default())),
             state_version: AtomicU64::new(1),
+            edit: Mutex::new(None),
+            previews: Mutex::new(Vec::new()),
             mod_x: FloatParam::new("Mod X", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }),
             mod_y: FloatParam::new("Mod Y", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }),
         }
@@ -105,12 +114,32 @@ impl Default for CitrusParams {
 impl CitrusParams {
     /// Replaces the state (a preset or a project's channel); the audio thread picks it up at its next block.
     pub fn set_state(&self, bytes: Vec<u8>) {
-        if let Ok(mut s) = self.state.write() {
+        // The version moves while the state is locked, so an edit of the state it replaces cannot land after it.
+        let s = self.state.write();
+        if let Ok(mut s) = s {
             *s = StateBytes(bytes);
         }
         self.state_version.fetch_add(1, Ordering::AcqRel);
     }
+
+    /// An edit from the editor (spec plugins/citrus.md §6): `bytes` become the state the host saves and the audio
+    /// thread plays `patch` from its next block. The state version stays (the audio thread does not load the bytes
+    /// again). False, and nothing changes, when the state was replaced since version `version` was read.
+    pub fn edited(&self, version: u64, bytes: Vec<u8>, patch: patch::Patch) -> bool {
+        let Ok(mut s) = self.state.write() else { return false };
+        if self.state_version.load(Ordering::Acquire) != version {
+            return false;
+        }
+        *s = StateBytes(bytes);
+        if let Ok(mut e) = self.edit.lock() {
+            *e = Some((version, patch));
+        }
+        true
+    }
 }
+
+/// The channel the testing keyboard's notes are held on (no MIDI channel goes past 15).
+const PREVIEW: u8 = 255;
 
 #[derive(Clone, Copy)]
 struct Held {
@@ -151,6 +180,32 @@ impl CitrusPlugin {
         }
     }
 
+    /// The editor's latest edit of the state in use, and the notes its keyboard plays.
+    fn pick_up_edits(&mut self) {
+        if let Ok(mut e) = self.params.edit.try_lock() {
+            if let Some((v, p)) = e.take() {
+                if v == self.seen {
+                    self.engine.edit(p);
+                    if self.engine.voices() == 0 {
+                        self.held.clear();
+                    }
+                }
+            }
+        }
+        if let Ok(mut q) = self.params.previews.try_lock() {
+            for (note, on) in q.drain(..) {
+                if on {
+                    let velocity = 100.0 / 128.0;
+                    let id = self.engine.note_on(NoteOn { levels: self.levels(note, velocity), velocity, release: 0.5 });
+                    self.held.push(Held { note, channel: PREVIEW, voice_id: None, id });
+                } else if let Some(i) = self.held.iter().position(|h| h.note == note && h.channel == PREVIEW) {
+                    let h = self.held.remove(i);
+                    self.engine.note_off(h.id);
+                }
+            }
+        }
+    }
+
     /// A note's levels. The host sends FL's velocity byte / 128; the channel's volume is the host's to apply (after the
     /// plugin, as for Lemon Studio's other instruments), so the voice takes the velocity's level alone.
     fn levels(&self, note: u8, velocity: f32) -> Levels {
@@ -188,9 +243,14 @@ impl Plugin for CitrusPlugin {
     fn initialize(&mut self, _layout: &AudioIOLayout, config: &BufferConfig, _ctx: &mut impl InitContext<Self>) -> bool {
         self.engine.set_rate(config.sample_rate.round() as u32);
         self.engine.set_offline(config.process_mode == ProcessMode::Offline);
-        self.seen = 0;
+        // nih-plug initializes the plugin again after the host loads a state: the editor reads it again too.
+        self.params.state_version.fetch_add(1, Ordering::AcqRel);
         self.pick_up_state();
         true
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        Some(Box::new(editor::CitrusEditor::new(self.params.clone())))
     }
 
     fn reset(&mut self) {
@@ -200,6 +260,7 @@ impl Plugin for CitrusPlugin {
 
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
         self.pick_up_state();
+        self.pick_up_edits();
         if let Some(bpm) = ctx.transport().tempo {
             self.engine.set_tempo(bpm);
         }

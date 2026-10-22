@@ -111,6 +111,26 @@ impl Citrus {
         self.setup();
     }
 
+    /// Plays an edited patch (spec plugins/citrus.md §6, "Edits"). Notes keep playing on it, unless the edit changes
+    /// which modules are used, how the operators run or the quality settings: then they stop, as when a state is
+    /// loaded. The effects section is rebuilt only when an effects setting changes.
+    pub fn edit(&mut self, p: Patch) {
+        let Some(old) = &self.patch else { return self.set_state(p.st) };
+        let keep = old.used == p.used && old.per_sample == p.per_sample && old.st.s[28..32] == p.st.s[28..32];
+        let fx_same = fx_settings(&old.st) == fx_settings(&p.st);
+        self.patch = Some(p);
+        if !keep {
+            self.notes.clear();
+            self.setup();
+            return;
+        }
+        if !fx_same {
+            let st = &self.patch.as_ref().unwrap().st;
+            self.section = Some(Section::new(st, self.host_rate, self.v, self.tempo as f32));
+        }
+        self.ranks_dirty = true;
+    }
+
     pub fn set_offline(&mut self, offline: bool) {
         if offline != self.offline {
             self.offline = offline;
@@ -349,5 +369,54 @@ impl Citrus {
                 }
             }
         }
+    }
+}
+
+/// What the effects section is built from: the chorus, the send target, the delays, the reverb, the equaliser and the
+/// DC removal.
+fn fx_settings(st: &State) -> ([i32; 8], [crate::state::Delay; 3], crate::state::ReverbSettings, crate::state::EqSettings, u8) {
+    let mut s = [0; 8];
+    s[..7].copy_from_slice(&st.s[16..23]);
+    s[7] = st.s[24];
+    (s, st.delays, st.reverb, st.eq, st.switch(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::preset::default_patch;
+
+    fn note(c: &mut Citrus) {
+        let levels = Levels { vol: 1.0, pan: 0.0, pitch: 0.0, mod_x: 0.0, mod_y: 0.0 };
+        c.note_on(NoteOn { levels, velocity: 100.0 / 128.0, release: 0.5 });
+    }
+
+    fn peak(c: &mut Citrus) -> f32 {
+        let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+        c.render(&mut l, &mut r);
+        l.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+    }
+
+    /// An edit is heard on the playing note; one that uses another module stops it.
+    #[test]
+    fn edits_keep_notes_unless_the_modules_change() {
+        let mut c = Citrus::new(48000);
+        c.set_state(default_patch());
+        note(&mut c);
+        let loud = (0..10).map(|_| peak(&mut c)).fold(0.0, f32::max);
+        let mut st = default_patch();
+        st.main_volume = 32;
+        c.edit(Patch::new(st.clone()));
+        assert_eq!(c.voices(), 1);
+        // The output gain glides to its new value.
+        for _ in 0..40 {
+            peak(&mut c);
+        }
+        let quiet = (0..10).map(|_| peak(&mut c)).fold(0.0, f32::max);
+        assert!(quiet < loud * 0.5 && quiet > 0.0, "{quiet} {loud}");
+        // Operator 2 to the output: another module is used.
+        st.matrix[9 + 8] = 256;
+        c.edit(Patch::new(st));
+        assert_eq!(c.voices(), 0);
     }
 }

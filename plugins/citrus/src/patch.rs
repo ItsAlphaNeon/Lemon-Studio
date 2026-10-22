@@ -58,33 +58,50 @@ pub struct Patch {
     pub sends: bool,
 }
 
+/// The matrix gains `g(cell)` and ring gains of a state, per row and column.
+fn gains(st: &State) -> ([[f32; 9]; 9], [[f32; 9]; 9]) {
+    let mut g = [[0f32; 9]; 9];
+    let mut ring = [[0f32; 9]; 9];
+    for r in 0..9 {
+        for c in 0..9 {
+            g[r][c] = cell_gain(st.cell(r, c));
+            ring[r][c] = cell_gain(st.ring_cell(r, c));
+        }
+    }
+    (g, ring)
+}
+
+/// Which modules a state uses, and which operators run per sample.
+pub fn usage(st: &State) -> ([bool; 9], [bool; 6]) {
+    let (g, ring) = gains(st);
+    usage_of(st, &g, &ring)
+}
+
+fn usage_of(st: &State, g: &[[f32; 9]; 9], ring: &[[f32; 9]; 9]) -> ([bool; 9], [bool; 6]) {
+    let mut used = [false; 9];
+    let mut per_sample = [false; 6];
+    for o in 0..OPERATORS {
+        let sends_op = (0..OPERATORS).any(|d| d != o && (g[d][o] != 0.0 || ring[d][o] != 0.0));
+        let sends_filter = (OPERATORS..9).any(|f| g[f][o] != 0.0);
+        used[o] = g[o][COL_OUT] != 0.0 || g[o][COL_SEND] != 0.0 || sends_op || sends_filter;
+        let modulated = (0..OPERATORS).any(|c| g[o][c] != 0.0 || ring[o][c] != 0.0);
+        let modulates = (0..OPERATORS).any(|d| g[d][o] != 0.0 || ring[d][o] != 0.0);
+        let op = &st.modules[o].op;
+        per_sample[o] = modulated || modulates || op.noise != 0 || op.flags[PLUCKED] != 0;
+    }
+    for f in 0..FILTERS {
+        let row = OPERATORS + f;
+        let from_ops = (0..OPERATORS).any(|o| used[o] && g[row][o] != 0.0);
+        let from_prev = f > 0 && used[row - 1] && st.modules[row - 1].header[9] != 0;
+        used[row] = from_ops || from_prev;
+    }
+    (used, per_sample)
+}
+
 impl Patch {
     pub fn new(st: State) -> Patch {
-        let mut g = [[0f32; 9]; 9];
-        let mut ring = [[0f32; 9]; 9];
-        for r in 0..9 {
-            for c in 0..9 {
-                g[r][c] = cell_gain(st.cell(r, c));
-                ring[r][c] = cell_gain(st.ring_cell(r, c));
-            }
-        }
-        let mut used = [false; 9];
-        let mut per_sample = [false; 6];
-        for o in 0..OPERATORS {
-            let sends_op = (0..OPERATORS).any(|d| d != o && (g[d][o] != 0.0 || ring[d][o] != 0.0));
-            let sends_filter = (OPERATORS..9).any(|f| g[f][o] != 0.0);
-            used[o] = g[o][COL_OUT] != 0.0 || g[o][COL_SEND] != 0.0 || sends_op || sends_filter;
-            let modulated = (0..OPERATORS).any(|c| g[o][c] != 0.0 || ring[o][c] != 0.0);
-            let modulates = (0..OPERATORS).any(|d| g[d][o] != 0.0 || ring[d][o] != 0.0);
-            let op = &st.modules[o].op;
-            per_sample[o] = modulated || modulates || op.noise != 0 || op.flags[PLUCKED] != 0;
-        }
-        for f in 0..FILTERS {
-            let row = OPERATORS + f;
-            let from_ops = (0..OPERATORS).any(|o| used[o] && g[row][o] != 0.0);
-            let from_prev = f > 0 && used[row - 1] && st.modules[row - 1].header[9] != 0;
-            used[row] = from_ops || from_prev;
-        }
+        let (g, ring) = gains(&st);
+        let (used, per_sample) = usage_of(&st, &g, &ring);
         let smooth = st.switch(2) != 0;
         let tables = (0..OPERATORS).map(|o| used[o].then(|| wave::build(&st.modules[o].op, smooth))).collect();
         let shapers = (0..FILTERS)
