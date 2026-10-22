@@ -117,6 +117,12 @@ pub trait Instrument: Send {
     fn transport(&mut self, info: &TransportInfo) {
         let _ = info;
     }
+    /// A short MIDI message other than a note, as a controller sent it (status, data 1, data 2; MIDI channel 1):
+    /// controller (0xB0), pitch bend (0xE0), channel and key pressure (0xD0, 0xA0), program change (0xC0), `offset`
+    /// frames into the next `process` call (spec: ui/midi-settings.md §4). Default: ignored.
+    fn midi(&mut self, offset: u32, bytes: [u8; 3]) {
+        let _ = (offset, bytes);
+    }
 }
 
 /// A channel's levels as its instrument gets them (spec: audio/voice-levels.md "The channel's levels").

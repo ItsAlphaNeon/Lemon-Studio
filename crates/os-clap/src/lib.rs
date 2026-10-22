@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex};
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
-    clap_event_header, clap_event_note, clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value,
+    clap_event_header, clap_event_midi, clap_event_note, clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value,
     clap_event_transport, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_EXPRESSION,
-    CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_TUNING, CLAP_NOTE_EXPRESSION_VOLUME, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
+    CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_TUNING, CLAP_NOTE_EXPRESSION_VOLUME, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
     CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE,
     CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE, CLAP_TRANSPORT_IS_PLAYING,
 };
@@ -499,6 +499,7 @@ enum Seq {
     Note(usize),
     Mod(usize),
     Expr(usize),
+    Midi(usize),
 }
 
 /// One queued note event.
@@ -593,6 +594,10 @@ pub struct Plugin {
     notes: Vec<clap_event_note>,
     mods: Vec<clap_event_param_mod>,
     exprs: Vec<clap_event_note_expression>,
+    /// Controller messages waiting for their block (frame, message) and those of the block being sent
+    /// (`Instrument::midi`, as CLAP MIDI events on note port 0).
+    midi_queue: Vec<(u32, [u8; 3])>,
+    midis: Vec<clap_event_midi>,
     /// This chunk's events in time order (pointers into `notes` / `mods`).
     order: Vec<*const clap_event_header>,
     /// Parameter that takes a note's sample start as per-note modulation (`use_start_param`).
@@ -794,6 +799,8 @@ impl Plugin {
                 notes: Vec::with_capacity(256),
                 mods: Vec::with_capacity(64),
                 exprs: Vec::with_capacity(64),
+                midi_queue: Vec::new(),
+                midis: Vec::with_capacity(16),
                 order: Vec::with_capacity(320),
                 start_param: None,
                 note_levels: None,
@@ -1246,6 +1253,7 @@ impl Plugin {
             && !self.editor
             && !self.host_data.process.load(Ordering::Acquire)
             && self.queue.is_empty() && self.param_queue.is_empty() && self.auto.is_empty() && self.mod_resend.is_empty()
+            && self.midi_queue.is_empty()
     }
 
     /// `process_chunk` with an audio input (effects): `input` holds the frames to process, `left` / `right` receive
@@ -1257,9 +1265,31 @@ impl Plugin {
         self.notes.clear();
         self.mods.clear();
         self.exprs.clear();
+        self.midis.clear();
         let mut rest = Vec::new();
         // Event order; a note's modulation follows its note on at the same time.
         let mut seq: Vec<Seq> = Vec::new();
+        // Controller messages go before the block's notes (their frames are where the controller moved).
+        let mut later = Vec::new();
+        for &(time, data) in &self.midi_queue {
+            if time < n {
+                self.midis.push(clap_event_midi {
+                    header: clap_event_header {
+                        size: std::mem::size_of::<clap_event_midi>() as u32,
+                        time,
+                        space_id: CLAP_CORE_EVENT_SPACE_ID,
+                        type_: CLAP_EVENT_MIDI,
+                        flags: 0,
+                    },
+                    port_index: 0,
+                    data,
+                });
+                seq.push(Seq::Midi(self.midis.len() - 1));
+            } else {
+                later.push((time - n, data));
+            }
+        }
+        self.midi_queue = later;
         // Sounding voices' new mod amounts (the channel's mods changed) go first.
         for (id, key, param, amount) in self.mod_resend.drain(..) {
             self.mods.push(param_mod(0, param, id, key, amount));
@@ -1400,6 +1430,16 @@ impl Plugin {
         // in time order; parameter values go before the notes at the same frame.
         self.fill_param_events();
         self.take_automation(n);
+        // Controller messages were put first: a stable sort keeps every frame's order otherwise.
+        if !self.midis.is_empty() {
+            let time = |s: &Seq| match *s {
+                Seq::Mod(m) => self.mods[m].header.time,
+                Seq::Note(i) => self.notes[i].header.time,
+                Seq::Expr(x) => self.exprs[x].header.time,
+                Seq::Midi(m) => self.midis[m].header.time,
+            };
+            seq.sort_by_key(time);
+        }
         self.order.clear();
         let mut pi = 0;
         for &s in &seq {
@@ -1407,6 +1447,7 @@ impl Plugin {
                 Seq::Mod(m) => &self.mods[m].header as *const clap_event_header,
                 Seq::Note(i) => &self.notes[i].header as *const clap_event_header,
                 Seq::Expr(x) => &self.exprs[x].header as *const clap_event_header,
+                Seq::Midi(m) => &self.midis[m].header as *const clap_event_header,
             };
             let t = unsafe { (*h).time };
             while pi < self.pvals.len() && self.pvals[pi].header.time <= t {
@@ -1687,6 +1728,10 @@ impl os_engine::Instrument for Plugin {
 
     fn note_off(&mut self, offset: u32, key: u8) {
         self.queue.push(Ev::new(offset, Kind::Off, key, 0.0));
+    }
+
+    fn midi(&mut self, offset: u32, bytes: [u8; 3]) {
+        self.midi_queue.push((offset, bytes));
     }
 
     fn note_on_from(&mut self, offset: u32, key: u8, velocity: f32, start: f32) {

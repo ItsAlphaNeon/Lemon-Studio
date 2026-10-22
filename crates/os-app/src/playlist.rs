@@ -203,6 +203,10 @@ pub enum Mark {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
     Nothing,
+    /// A knob menu's Remote control part (spec: ui/remote-control.md §1).
+    Remote(crate::remote::RCmd),
+    /// Settings > MIDI ▸ External clock sync: the device chosen (`None` = Off).
+    MidiExt(Option<String>),
     /// Plugin window menu > Detached: rack row, new state (spec: ui/plugin-window.md "Docking and the window menu").
     #[cfg_attr(not(windows), allow(dead_code))]
     PluginDetach(usize, bool),
@@ -2305,8 +2309,10 @@ pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<cra
             init,
             delete,
             PItem::not_yet("Edit events"),
-            PItem::not_yet("Link to controller..."),
         ]);
+    }
+    if typein.is_some() {
+        items.extend(crate::remote::menu_items(typein));
     }
     if let Some(t) = typein {
         items.extend([PItem::head("Value"), PItem::new("Type in value...", Cmd::TypeIn(t))]);
@@ -3430,6 +3436,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.sig_pick(den, v);
             return None;
         }
+        Cmd::Remote(c) => {
+            app.remote_cmd(c);
+            return None;
+        }
+        Cmd::MidiExt(d) => return app.set_ext_sync(d),
         Cmd::TypeIn(t) => {
             let at = app.mouse;
             crate::typein::open(&mut app.state, t, at);
@@ -3650,7 +3661,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot(s);
             (!delete_space(s)).then(|| "Delete space: make a time selection first (right-drag the ruler)".into())
         }
-        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) => None,
+        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) | Cmd::Remote(_) | Cmd::MidiExt(_) => None,
         Cmd::StretchMode => {
             s.playlist.stretch = !s.playlist.stretch;
             Some(if s.playlist.stretch { "Stretch mode on: resizing an audio clip stretches it".into() } else { "Stretch mode off".into() })

@@ -82,12 +82,13 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Project files | 🚧 | Opens and saves projects from FL Studio 24.2 and later; older versions are on the roadmap. Keep backups |
 | Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ |
 | Exporting audio | ✅ | Song, pattern or selection to WAV, FLAC, MP3 and OGG at once; bit depth, sample rate, interpolation, dither, mono, tails, stems and WAV markers |
-| Note input | 🚧 | Mouse, computer keyboard and MIDI controllers; no note recording yet |
+| Note input | 🚧 | Mouse, computer keyboard and MIDI controllers (velocity curves, sustain pedal, pitch bend, aftertouch); no note recording yet |
+| MIDI controllers and sync | ✅ | Link any knob, fader or plugin parameter to a controller (or many at once with Multilink); MIDI clock and time code out, external clock in |
 | Undo | 🚧 | One history for the whole project, with redo and the browser's History; not yet for mixer faders, plugin parameters or project settings |
 | Audio drivers | 🚧 | WASAPI (shared and exclusive) and ASIO® (output) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no JACK yet |
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
 | Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; Lemon plugin editors in the Lemon design only |
-| Settings | 🚧 | The General, Audio, File, Theme, Project and Info pages work; not yet the MIDI page or the recording settings |
+| Settings | 🚧 | The General, Audio, MIDI, File, Theme, Project and Info pages work; not yet the recording settings |
 | Audio recording | 🚧 | One-click audio recording into the playlist, from ASIO or system inputs |
 | MIDI file import / export | ❌ | |
 | Audio editing | ❌ | |
@@ -357,8 +358,8 @@ Lemon Studio is a Cargo workspace of focused crates:
 
 The roadmap is kept on the [Lemon Studio Discord server](https://discord.gg/yC2uCuGs3M), where every item is
 marked as complete, in progress or not started. The broad next steps are the engine rework (sampler voice,
-automation, delay compensation), opening projects from older FL Studio versions, audio and note recording, MIDI
-settings, more built-in instruments and effects, and the rest of the plugin window features on Linux.
+automation, delay compensation), opening projects from older FL Studio versions, audio and note recording, more
+built-in instruments and effects, and the rest of the plugin window features on Linux.
 
 ## Development approach
 

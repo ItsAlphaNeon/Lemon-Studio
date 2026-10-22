@@ -210,6 +210,9 @@ struct ChannelState {
     /// stretch method, whose pitch is in `keyed` (spec: audio/time-stretch.md).
     knob: f64,
     init_knob: f64,
+    /// A controller's pitch bend in cents on top of the knob, while its wheel is off centre (never saved; spec:
+    /// ui/midi-settings.md §4).
+    bend: f64,
     fine: i32,
     root: u8,
     main: Option<i32>,
@@ -480,7 +483,7 @@ impl ChannelState {
 
     /// The channel's pitch in cents from key 60.
     fn pitch_from_60(&self) -> f64 {
-        f64::from(laws::channel_pitch(self.knob, self.fine, self.root, self.main)) + 6000.0
+        f64::from(laws::channel_pitch(self.knob, self.fine, self.root, self.main)) + self.bend + 6000.0
     }
 
     /// The tuning (semitones) a hosted instrument hears with each note: the channel's pitch, without the root note and
@@ -903,6 +906,8 @@ pub struct Engine {
     /// The name the next audio clip voice on an instrument gets (`Instrument::voice_start`).
     next_voice: u32,
     inst_live: Vec<(usize, u8, f32)>,
+    /// Controller messages for instrument channels waiting for the next tick (channel, message; `Engine::midi`).
+    inst_midi: Vec<(usize, [u8; 3])>,
     inst_events: Vec<notes::Event>,
     /// Per instrument channel: the tuning its notes were last given (`InstTuning`).
     inst_tuning: Vec<InstTuning>,
@@ -1061,6 +1066,7 @@ impl Engine {
                     src_ratio,
                     knob,
                     init_knob: knob,
+                    bend: 0.0,
                     fine: ch.misc.fine,
                     root: ch.misc.root,
                     main,
@@ -1361,6 +1367,7 @@ impl Engine {
             inst_shapes: Vec::new(),
             next_voice: 0,
             inst_live: Vec::with_capacity(64),
+            inst_midi: Vec::with_capacity(64),
             inst_events: Vec::with_capacity(64),
             inst_tuning: Vec::new(),
             inst_notes: Vec::with_capacity(64),
@@ -1469,6 +1476,23 @@ impl Engine {
     }
 
     /// True when the channel is played by an attached instrument.
+    /// A controller message for `channel` (spec: ui/midi-settings.md §4): an instrument channel's plugin gets it on the
+    /// next tick as it came; a channel without one takes pitch bend (0xE0) as a bend of ±`bend_cents` from the centre
+    /// on top of its pitch, and ignores the rest.
+    pub fn midi(&mut self, channel: usize, bytes: [u8; 3], bend_cents: f64) {
+        let Some(ch) = self.channels.get_mut(channel) else { return };
+        if ch.instrument.0.is_some() {
+            self.tail_done = false;
+            self.inst_midi.push((channel, bytes));
+            return;
+        }
+        if bytes[0] & 0xF0 == 0xE0 {
+            let v = i32::from(bytes[1] & 0x7F) | i32::from(bytes[2] & 0x7F) << 7;
+            ch.bend = f64::from(v - 8192) / if v >= 8192 { 8191.0 } else { 8192.0 } * bend_cents;
+            ch.retune(ch.knob);
+        }
+    }
+
     pub fn has_instrument(&self, channel: usize) -> bool {
         self.channels.get(channel).is_some_and(|c| c.instrument.0.is_some())
     }
@@ -1725,7 +1749,7 @@ impl Engine {
             }
             // Quiet, not exact zeros: an effect's tail may never reach zero.
             let rest_silent = self.out[self.out_pos.min(self.out.len())..].iter().all(|&s| s.abs() < QUIET);
-            return rest_silent && self.voices.is_empty() && self.inst_tail == 0 && self.inst_live.is_empty() && !self.tap_clicks.sounding();
+            return rest_silent && self.voices.is_empty() && self.inst_tail == 0 && self.inst_live.is_empty() && self.inst_midi.is_empty() && !self.tap_clicks.sounding();
         }
         !self.looping && !self.paused() && drained && self.tail_done && self.inst_live.is_empty() && !self.tap_clicks.sounding()
     }
@@ -1905,6 +1929,14 @@ impl Engine {
         }
         self.sounding = std::mem::take(&mut old.sounding);
         self.inst_live = std::mem::take(&mut old.inst_live);
+        self.inst_midi = std::mem::take(&mut old.inst_midi);
+        // A controller's pitch bend stays on its channel.
+        for (new, o) in self.channels.iter_mut().zip(&old.channels) {
+            if o.bend != 0.0 {
+                new.bend = o.bend;
+                new.retune(new.knob);
+            }
+        }
         // Notes held at the instruments (mono / polyphony / glide state) carry over.
         self.note_voices = std::mem::take(&mut old.note_voices);
         self.note_voices.resize(n, notes::Voices::default());
@@ -2681,6 +2713,13 @@ impl Engine {
                 }
             }
             inst.transport(song);
+            // Controller messages before this tick's notes.
+            if self.inst_midi.iter().any(|m| m.0 == c) {
+                for &(_, bytes) in self.inst_midi.iter().filter(|m| m.0 == c) {
+                    inst.midi(0, bytes);
+                }
+                self.inst_midi.retain(|m| m.0 != c);
+            }
             // The layer whose notes it plays adds its levels to the channel's.
             let layer = ch.via.and_then(|w| self.channels.get(w.layer).map(|l| (l.layer_adds(), w.gain)));
             let mut levels = ch.levels();
@@ -4090,6 +4129,30 @@ mod tests {
         drop(e);
         let offs = probe.lock().unwrap().log.iter().filter(|l| !l.1).count();
         assert_eq!(offs, 1, "one note off");
+    }
+
+    /// A controller's pitch bend (spec: ui/midi-settings.md §4): a native channel bends ±200 cents linearly; an
+    /// instrument channel's plugin gets the message on the next tick instead.
+    #[test]
+    fn pitch_bend_from_a_controller() {
+        let mut p = project(vec![], vec![]);
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let base = e.channels[0].pitch_from_60();
+        for (bytes, cents) in [([0xe0, 0x7f, 0x7f], 200.0), ([0xe0, 0, 0], -200.0), ([0xe0, 0, 0x60], 100.0), ([0xe0, 0, 0x40], 0.0)] {
+            e.midi(0, bytes, 200.0);
+            let got = e.channels[0].pitch_from_60() - base;
+            assert!((got - cents).abs() < 0.1, "{bytes:?}: {got} cents, not {cents}");
+        }
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        e.midi(0, [0xe0, 0x7f, 0x7f], 200.0);
+        assert_eq!((e.inst_midi.len(), e.channels[0].bend), (1, 0.0), "queued for the plugin");
+        let mut out = vec![0.0f32; 256];
+        e.process(&mut out);
+        assert!(e.inst_midi.is_empty(), "delivered");
     }
 
     #[test]

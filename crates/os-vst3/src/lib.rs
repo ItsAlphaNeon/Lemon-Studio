@@ -26,7 +26,7 @@ use vst3_sys::base::{kResultOk, kResultTrue, IPluginBase, IPluginFactory, IPlugi
 use vst3_sys::gui::{IPlugView, IPlugViewContentScaleSupport, ViewRect};
 use vst3_sys::utils::SharedVstPtr;
 use vst3_sys::vst::{
-    AudioBusBuffers, BusInfo, Event, EventData, IAudioProcessor, IComponent, IConnectionPoint, IEditController, IUnitInfo,
+    AudioBusBuffers, BusInfo, Event, EventData, IAudioProcessor, IComponent, IConnectionPoint, IEditController, IMidiMapping, IUnitInfo,
     NoteExpressionValueEvent, NoteOffEvent, NoteOnEvent, ParameterInfo, ProcessContext, ProcessData, ProcessSetup, UnitInfo,
 };
 use vst3_sys::{c_void, ComInterface, VstPtr, IID};
@@ -506,6 +506,9 @@ pub struct Plugin {
     /// (id, step count) of each parameter in list order: the position is the automation index. A parameter whose
     /// info could not be read keeps its place with id `u32::MAX` (VST 3's "no parameter").
     param_ids: Vec<(u32, i32)>,
+    /// The parameter the controller maps each MIDI controller to (IMidiMapping, MIDI channel 1): controllers 0..127,
+    /// then channel pressure (128) and pitch bend (129); `u32::MAX` = none (spec: ui/midi-settings.md §4).
+    midi_map: Vec<u32>,
     /// Automation values (frame offset, id, normalized) for the next process call.
     auto: Vec<(u32, u32, f64)>,
     /// Unit id -> group path (IUnitInfo).
@@ -591,6 +594,7 @@ impl Plugin {
                 from_processor: Vec::with_capacity(256),
                 pending_since: None,
                 param_ids: Vec::new(),
+                midi_map: Vec::new(),
                 auto: Vec::with_capacity(MAX_AUTO),
                 units: Vec::new(),
                 latency: 0,
@@ -731,6 +735,14 @@ impl Plugin {
                 let mut info: ParameterInfo = std::mem::zeroed();
                 let ok = c.get_parameter_info(i, &mut info) == kResultOk;
                 self.param_ids.push(if ok { (info.id, info.step_count.max(0)) } else { (u32::MAX, 0) });
+            }
+        }
+        self.midi_map.clear();
+        if let Some(m) = c.cast::<dyn IMidiMapping>() {
+            for cc in 0..130i16 {
+                let mut id = u32::MAX;
+                let ok = unsafe { m.get_midi_controller_assignment(0, 0, cc, &mut id) } == kResultOk;
+                self.midi_map.push(if ok { id } else { u32::MAX });
             }
         }
     }
@@ -1383,6 +1395,25 @@ impl os_engine::Instrument for Plugin {
 
     fn note_off(&mut self, offset: u32, key: u8) {
         self.queue.push(Note { time: offset, kind: NoteKind::Off, key, velocity: 0.0 });
+    }
+
+    /// A controller message (spec: ui/midi-settings.md §4): VST3 takes controllers, channel pressure and pitch bend as
+    /// the parameters its controller maps them to (IMidiMapping); other messages, and controllers it maps nowhere, are
+    /// dropped.
+    fn midi(&mut self, offset: u32, bytes: [u8; 3]) {
+        let (d1, d2) = (bytes[1] & 0x7F, bytes[2] & 0x7F);
+        let (cc, v) = match bytes[0] & 0xF0 {
+            0xB0 => (usize::from(d1), f64::from(d2) / 127.0),
+            0xD0 => (128, f64::from(d1) / 127.0),
+            0xE0 => (129, f64::from(u16::from(d1) | u16::from(d2) << 7) / 16383.0),
+            _ => return,
+        };
+        let Some(&id) = self.midi_map.get(cc) else { return };
+        if id == u32::MAX || self.auto.len() >= MAX_AUTO {
+            return;
+        }
+        self.auto.push((offset, id, v));
+        self.shared.attention.raise();
     }
 
     /// Portamento glides (spec: audio/channel-voices.md): the tuning note expression of the key's sounding note.
