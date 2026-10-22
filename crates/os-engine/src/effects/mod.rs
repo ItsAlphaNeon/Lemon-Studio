@@ -6,6 +6,7 @@
 //! plugin state.
 
 mod biquad;
+pub mod delay;
 pub mod dynamics;
 pub mod eq;
 pub mod limiter;
@@ -30,6 +31,7 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
         "Fruity Parametric EQ 2" => eq::ParametricEq::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Limiter" => limiter::Limiter::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Reeverb 2" => reverb::Reverb::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Delay 3" => delay::Delay::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         _ => None,
     }
 }
