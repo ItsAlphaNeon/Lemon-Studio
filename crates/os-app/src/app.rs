@@ -1928,6 +1928,7 @@ impl App {
             }
         }
         crate::osc3::store(&mut self.state.project, &self.plugins);
+        crate::citrus::store(&mut self.state.project, &self.plugins);
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
@@ -2061,6 +2062,7 @@ impl App {
         if self.loading.is_none() {
             self.sync_wrapped();
             self.sync_osc3();
+            self.sync_citrus();
             self.sync_native();
         }
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
@@ -7830,7 +7832,7 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
     let row = add_channel(p);
     let ch = &mut p.channels[row];
     ch.kind = ChannelKind::Plugin;
-    // The built-in Lemon Trio is stored as the file's own 3x Osc.
+    // The built-in Lemon Trio is stored as the file's own 3x Osc, Citrus as its Sytrus.
     ch.plugin = Some(crate::osc3::file_name(name).to_string());
     ch.name = Some(name.to_string());
     row

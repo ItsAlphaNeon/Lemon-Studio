@@ -47,9 +47,10 @@ pub fn native_first() -> bool {
     os_native::prefer_native()
 }
 
-/// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, the parametric EQ).
+/// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, Sytrus, the
+/// parametric EQ).
 pub fn has_recreation(id: &str) -> bool {
-    id.eq_ignore_ascii_case(crate::osc3::FILE_NAME) || id.eq_ignore_ascii_case(crate::plugins::EQ_FILE_NAME)
+    [crate::osc3::FILE_NAME, crate::citrus::FILE_NAME, crate::plugins::EQ_FILE_NAME].iter().any(|n| id.eq_ignore_ascii_case(n))
 }
 
 /// Whether a hosted plugin is saved inside the wrapper: CLAP, VST3 and VST2 plugins from plugin files.

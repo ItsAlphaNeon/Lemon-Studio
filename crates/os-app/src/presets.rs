@@ -103,9 +103,11 @@ pub fn list_in(dir: &Path) -> Vec<Preset> {
     out
 }
 
-/// The presets of `plugin`.
+/// The presets of `plugin`: its folder's, then (for Citrus) FL's factory ones.
 pub fn list(plugin: &str) -> Vec<Preset> {
-    dir_for(plugin).map(|d| list_in(&d)).unwrap_or_default()
+    let mut v = dir_for(plugin).map(|d| list_in(&d)).unwrap_or_default();
+    v.extend(crate::citrus::more_presets(plugin));
+    v
 }
 
 /// A preset file's bytes: magic line, one header line (`key=value` pairs separated by tabs), then the state.
@@ -272,8 +274,10 @@ pub fn run(app: &mut App, c: PCmd) -> Option<String> {
 
 fn load_into(app: &mut App, key: usize, path: &Path) -> Option<String> {
     let h = header(app, key)?;
-    Some(match load(path, &h.id) {
-        Ok((_, state)) if app.plugins.set_state(key, &state) => {
+    // An FL preset file (Citrus's factory presets) holds the original's state.
+    let loaded = crate::citrus::fst_state(path).unwrap_or_else(|| load(path, &h.id).map(|(_, s)| s));
+    Some(match loaded {
+        Ok(state) if app.plugins.set_state(key, &state) => {
             app.plugins.mark_edited(key);
             app.plugins.set_preset(key, Some(path.to_path_buf()));
             auto_name(app, key, path);

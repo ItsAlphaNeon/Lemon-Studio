@@ -634,6 +634,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "citrus"
+version = "0.0.1"
+dependencies = [
+ "miniz_oxide 0.8.9",
+ "nih_plug",
+ "os-dsp",
+ "os-engine",
+ "os-hostlink",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "serde",
+ "serde_json",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "clang-sys"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2640,6 +2658,7 @@ dependencies = [
  "asio-sys",
  "block2 0.6.2",
  "chrono",
+ "citrus",
  "cpal",
  "crossbeam-queue",
  "flacenc",

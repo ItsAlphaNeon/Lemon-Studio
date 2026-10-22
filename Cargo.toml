@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "crates/os-dsp", "tools/flp-dump", "tools/os-render", "tools/os-play", "tools/bundle-app", "crates/os-native", "tools/os-native-probe", "crates/os-theme", "crates/os-ui", "crates/os-app", "plugins/lemon-sampler", "tools/bundle-plugins", "crates/os-clap", "crates/os-hostlink", "crates/os-plugkit", "plugins/lemon-parametric-eq-2", "crates/os-host", "crates/os-vst3", "crates/os-vst2", "plugins/lemon-3x-osc", "plugins/lemon-limiter", "plugins/lemon-reverb", "crates/os-paths", "tools/watermark"]
+members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "crates/os-dsp", "tools/flp-dump", "tools/os-render", "tools/os-play", "tools/bundle-app", "crates/os-native", "tools/os-native-probe", "crates/os-theme", "crates/os-ui", "crates/os-app", "plugins/lemon-sampler", "tools/bundle-plugins", "crates/os-clap", "crates/os-hostlink", "crates/os-plugkit", "plugins/lemon-parametric-eq-2", "crates/os-host", "crates/os-vst3", "crates/os-vst2", "plugins/lemon-3x-osc", "plugins/lemon-limiter", "plugins/lemon-reverb", "plugins/citrus", "crates/os-paths", "tools/watermark"]
 
 [workspace.package]
 version = "0.0.1"

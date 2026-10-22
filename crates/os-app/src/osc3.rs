@@ -22,14 +22,22 @@ pub fn is_osc3(ch: &Channel) -> bool {
     ch.kind == ChannelKind::Plugin && ch.plugin.as_deref() == Some(FILE_NAME)
 }
 
-/// The plugin id a new channel of picker plugin `name` stores.
+/// The plugin id a new channel of picker plugin `name` stores (the built-in recreations store the original's id).
 pub fn file_name(name: &str) -> &str {
-    if name == LEMON_TRIO { FILE_NAME } else { name }
+    match name {
+        LEMON_TRIO => FILE_NAME,
+        crate::citrus::CITRUS => crate::citrus::FILE_NAME,
+        _ => name,
+    }
 }
 
-/// What the UI calls a channel's plugin `name` (the file id of the built-in plugin shows as the built-in plugin).
+/// What the UI calls a channel's plugin `name` (the file id of a built-in recreation shows as the built-in plugin).
 pub fn label(name: &str) -> &str {
-    if name == FILE_NAME { LEMON_TRIO } else { name }
+    match name {
+        FILE_NAME => LEMON_TRIO,
+        crate::citrus::FILE_NAME => crate::citrus::CITRUS,
+        _ => name,
+    }
 }
 
 impl Plugins {
