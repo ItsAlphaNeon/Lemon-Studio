@@ -38,6 +38,8 @@ pub enum Win {
     Tapper,
     /// The Touch controller (spec: ui/touch-controller.md).
     Touch,
+    /// The piano roll's Strum dialog (spec: ui/piano-strum.md).
+    Strum,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -165,6 +167,8 @@ pub enum Action {
     Tapper(crate::tapper::TapAct),
     /// The Touch controller's controls (spec: ui/touch-controller.md).
     Touch(crate::touch::TouchAct),
+    /// The Strum dialog's switches and buttons (spec: ui/piano-strum.md).
+    Strum(crate::strum::Act),
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
     MonParam(usize),
     MonReset,
@@ -863,6 +867,8 @@ pub struct State {
     /// The Tempo tapper: where it is, the count of taps, the pad's flash.
     pub tapper: crate::tapper::TapperUi,
     pub touch: crate::touch::TouchUi,
+    /// The piano roll's Strum dialog: where it is, its settings and its preview session.
+    pub strum: crate::strum::StrumUi,
     pub rec: crate::record::Rec,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
@@ -1279,6 +1285,7 @@ impl App {
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
                 touch: Default::default(),
+                strum: Default::default(),
                 rec: Default::default(),
                 toggles: vec!["typing"],
                 clock: crate::clock::Clock::load(),
@@ -2458,7 +2465,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -2481,6 +2488,7 @@ impl App {
             Win::Perf => Some(views::perf::rect(s)),
             Win::Tapper => Some(views::tapper::rect(s)),
             Win::Touch => Some(views::touch::rect(s)),
+            Win::Strum => Some(views::strum::rect(s)),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -2824,6 +2832,35 @@ impl App {
         }
     }
 
+    // ---------------------------------------------------------------- Strum dialog (spec: ui/piano-strum.md)
+
+    /// Tools ▸ Strum… and Alt+S: open the dialog in front (centred over the main window the first time, then where it
+    /// was left) on the piano roll's notes, previewing the settings last accepted (§1). Open already: to the front.
+    pub(crate) fn open_strum(&mut self) {
+        let s = &mut self.state;
+        if !s.shown(Win::Strum) {
+            if !s.strum.placed {
+                let (w, h) = views::strum::SIZE;
+                s.strum.pos = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::work_y(s)).round());
+                s.strum.placed = true;
+            }
+            crate::strum::open(s);
+        }
+        s.raise(Win::Strum);
+        self.invalidate();
+    }
+
+    fn strum_act(&mut self, a: crate::strum::Act) {
+        let s = &mut self.state;
+        if a == crate::strum::Act::Accept {
+            s.message = Some(crate::strum::accept(s));
+            s.hide(Win::Strum);
+        } else {
+            crate::strum::act(s, a);
+        }
+        self.invalidate();
+    }
+
     // ---------------------------------------------------------------- Tempo tapper (spec: ui/tempo-tapper.md)
 
     /// VIEW > Tempo tapper and Ctrl+F5: open it (or bring it to the front), centred over the main window the first
@@ -2918,6 +2955,7 @@ impl App {
             Win::Perf => self.damage_rect(views::perf::bounds(&self.state)),
             Win::Tapper => self.damage_rect(views::tapper::bounds(&self.state)),
             Win::Touch => self.damage_rect(views::touch::bounds(&self.state)),
+            Win::Strum => self.damage_rect(views::strum::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
             _ => self.invalidate(),
         }
@@ -4876,6 +4914,7 @@ impl App {
             Win::Perf => views::perf::bounds(&self.state),
             Win::Tapper => views::tapper::bounds(&self.state),
             Win::Touch => views::touch::bounds(&self.state),
+            Win::Strum => views::strum::bounds(&self.state),
             Win::ChannelRack => views::rack::bounds(&self.state),
             w => self.state.win_rect(w).outset(5.0),
         }
@@ -6737,6 +6776,7 @@ impl App {
             Action::Perf(p) => self.perf_act(p),
             Action::Tapper(a) => self.tapper_act(a),
             Action::Touch(a) => self.touch_act(a),
+            Action::Strum(a) => self.strum_act(a),
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
@@ -6991,6 +7031,7 @@ impl App {
                     Win::Perf => s.perf.pos,
                     Win::Tapper => s.tapper.pos,
                     Win::Touch => s.touch.pos,
+                    Win::Strum => s.strum.pos,
                     Win::ChannelRack => s.rack_pos,
                     w => {
                         // Start from the rect as shown (kept on screen), then move it.
@@ -7033,6 +7074,11 @@ impl App {
             Action::Util(Util::Help) => {}
             Action::Util(Util::Save) => self.menu_item(0, views::menus::FILE_SAVE_AS),
             Action::CloseWin(Win::Perf) => self.close_perf(),
+            Action::CloseWin(Win::Strum) => {
+                crate::strum::cancel(s);
+                s.hide(Win::Strum);
+                self.damage_win(Win::PianoRoll);
+            }
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserSplitter => {}
             Action::TypeIn(t) => crate::typein::click(s, t),
@@ -7533,7 +7579,7 @@ pub(crate) fn lift_windows(s: &mut State, dy: f32) {
     for w in &mut s.wins {
         lift(&mut w.rect.y);
     }
-    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos] {
+    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos, &mut s.strum.pos] {
         lift(&mut pos.1);
     }
 }
@@ -13798,15 +13844,52 @@ mod tests {
         assert_eq!(mine(&app), vec![(96, 72, 62)]);
         assert_eq!(app.state.piano.clipboard.len(), 3);
 
-        // Alt+S / A / R / Q / U open their preset menus; picking an entry runs it.
+        // Alt+A / R / Q / U open their preset menus; picking an entry runs it.
         put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
-        for (k, sub) in [("s", Sub::Strum), ("a", Sub::Arpeggiate), ("r", Sub::Randomize), ("q", Sub::Quantize), ("u", Sub::Chop)] {
+        for (k, sub) in [("a", Sub::Arpeggiate), ("r", Sub::Randomize), ("q", Sub::Quantize), ("u", Sub::Chop)] {
             key(&mut app, k, false, true, false);
             let pop = app.state.playlist.popup.take().unwrap_or_else(|| panic!("Alt+{k} opens a menu"));
             assert!(pop.items.iter().all(|i| i.sep || matches!(i.cmd, Cmd::Piano(_))), "{sub:?}");
         }
-        crate::playlist::run(&mut app, Cmd::Piano(NCmd::Strum { up: true, n: 64 }));
-        assert_eq!(mine(&app).iter().map(|n| n.0).collect::<Vec<_>>(), vec![0, 6, 12]);
+
+        // Alt+S opens the Strum dialog (spec: ui/piano-strum.md): it previews, × puts the notes back, Accept is one
+        // undo step and the next opening starts from the accepted settings.
+        use crate::knobs::KnobId;
+        use crate::strum::{Act, Knob};
+        let chord = |app: &App| mine(app).iter().map(|n| n.0).collect::<Vec<_>>();
+        key(&mut app, "s", false, true, false);
+        assert!(app.state.shown(Win::Strum) && app.state.in_front(Win::Strum));
+        frame(&mut app, &mut c, None);
+        let time = hit_rect(&app, &Action::Knob(KnobId::Strum(Knob::Time)));
+        app.mouse_move(time.cx(), time.cy());
+        for _ in 0..29 {
+            app.wheel(0.0, 1.0, false, false);
+        }
+        assert_eq!(chord(&app), vec![0, 22, 44], "29 notches: FL's 0:22 per note, previewed at once");
+        assert_eq!(app.hint.as_ref(), "Start strength: 0:22");
+        let close = hit_rect(&app, &Action::CloseWin(Win::Strum));
+        app.mouse_move(close.cx(), close.cy());
+        app.mouse_down();
+        app.mouse_up();
+        assert!(!app.state.shown(Win::Strum));
+        assert_eq!(chord(&app), vec![0, 0, 0], "× puts the notes back");
+        key(&mut app, "s", false, true, false);
+        assert_eq!(chord(&app), vec![0, 0, 0], "× forgot the change");
+        app.state.set_knob(KnobId::Strum(Knob::Time), 0.5 + 29.0 / 64.0);
+        frame(&mut app, &mut c, None);
+        let accept = hit_rect(&app, &Action::Strum(Act::Accept));
+        app.mouse_move(accept.cx(), accept.cy());
+        app.mouse_down();
+        app.mouse_up();
+        assert!(!app.state.shown(Win::Strum));
+        assert_eq!(chord(&app), vec![0, 22, 44]);
+        assert!(piano::undo(&mut app.state));
+        assert_eq!(chord(&app), vec![0, 0, 0], "one undo step");
+        key(&mut app, "s", false, true, false);
+        assert_eq!(chord(&app), vec![0, 22, 44], "reopened on the accepted settings");
+        app.act(Action::Strum(Act::Reset));
+        assert_eq!(chord(&app), vec![0, 0, 0]);
+        app.act(Action::CloseWin(Win::Strum));
         put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
         crate::playlist::run(&mut app, Cmd::Piano(NCmd::Arpeggiate(Arp::Up, 16)));
         assert_eq!(mine(&app).iter().map(|n| n.2).collect::<Vec<_>>(), vec![60, 64, 67, 60]);
