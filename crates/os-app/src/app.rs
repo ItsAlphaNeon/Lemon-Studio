@@ -4568,7 +4568,8 @@ impl App {
                 Drag::PatternBox { y0, p0 } => {
                     let (y0, p0): (f32, u16) = (y0.to_owned(), p0.to_owned());
                     let steps = ((y0 - y) / crate::patterns::DRAG_STEP).trunc() as i32;
-                    self.state.pattern = (i32::from(p0) + steps).clamp(1, i32::from(crate::patterns::MAX)) as u16;
+                    let n = (i32::from(p0) + steps).clamp(1, i32::from(crate::patterns::MAX)) as u16;
+                    crate::patterns::select(&mut self.state, n);
                     self.invalidate();
                 }
                 Drag::MixSelect => {
@@ -5930,7 +5931,8 @@ impl App {
         }
         if matches!(area, Some(Action::PatternNext)) {
             let d = if dy + dx > 0.0 { 1 } else { -1 };
-            self.state.pattern = (i32::from(self.state.pattern.max(1)) + d).clamp(1, i32::from(crate::patterns::MAX)) as u16;
+            let n = (i32::from(self.state.pattern.max(1)) + d).clamp(1, i32::from(crate::patterns::MAX)) as u16;
+            crate::patterns::select(&mut self.state, n);
             return None;
         }
         if let Some(Action::Scrollbar(t)) = area {
@@ -7566,7 +7568,7 @@ impl App {
                 let at = self.mouse;
                 self.open_plugin_menu(crate::plugin_menu::Target::All, at);
             }
-            (PATTERNS, i) if i >= PATTERN_PICK => self.state.pattern = (i - PATTERN_PICK) as u16,
+            (PATTERNS, i) if i >= PATTERN_PICK => crate::patterns::select(&mut self.state, (i - PATTERN_PICK) as u16),
             (PATTERNS, i) if item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).is_some() => {
                 let cmd = item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).expect("checked");
                 if let Some(m) = self.pattern_cmd(cmd) {
@@ -14779,6 +14781,21 @@ mod tests {
         assert_eq!(app.state.pending_open, None, "a pattern clip opens no sampler");
         assert!(app.state.shown(Win::PianoRoll) && app.state.pattern == 1, "it opens its pattern in the piano roll");
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// A pattern picked in the pattern selector becomes the playlist's clip source even after a click on a clip made
+    /// another pattern the source, so a new pattern is what Draw places (issue #94).
+    #[test]
+    fn pattern_selector_sets_the_clip_source() {
+        use crate::views::menus::{PATTERNS, PATTERN_PICK};
+        use os_model::ClipSource;
+        let mut app = App::new(None);
+        app.state.playlist.source = Some(ClipSource::Pattern(1));
+        app.menu_item(PATTERNS, PATTERN_PICK + 2);
+        assert_eq!(app.state.pattern, 2);
+        assert_eq!(crate::playlist::source(&app.state), ClipSource::Pattern(2));
+        crate::playlist::place(&mut app.state, 0, 0);
+        assert_eq!(crate::playlist::clips(&app.state).last().map(|c| c.source), Some(ClipSource::Pattern(2)));
     }
 
     /// Double-click on audio clips follows General ▸ Input ▸ Manage shortcuts: the row whose modifier is held wins,
