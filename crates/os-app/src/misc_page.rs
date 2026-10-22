@@ -234,7 +234,7 @@ pub fn off_name(h: Hit, v: &MiscVals) -> Option<&'static str> {
         Hit::ArpDir(_) => Some("Arpeggiator"),
         Hit::TrackTab(_) => Some("Tracking"),
         Hit::Touch => Some("Multi-touch keyboard"),
-        Hit::CutSelf | Hit::Reset | Hit::Key(_) | Hit::Keyboard => None,
+        Hit::CutSelf | Hit::Reset | Hit::Key(_) | Hit::Keyboard | Hit::ScrollBar => None,
     }
 }
 
@@ -473,8 +473,10 @@ pub enum Hit {
     Touch,
     /// A keyboard key.
     Key(u8),
-    /// The keyboard's ruler or scroll bar (wheel scrolls).
+    /// The keyboard's ruler (wheel scrolls).
     Keyboard,
+    /// The keyboard's scroll bar (drag the thumb; wheel scrolls).
+    ScrollBar,
 }
 
 /// Page UI state kept by the frame.
@@ -486,6 +488,8 @@ pub struct MiscUi {
     pub kb_scroll: f32,
     /// Drag in progress: value, start y (or x for sliders), start value.
     pub drag: Option<(M, f32, f32)>,
+    /// Scroll bar thumb drag in progress: start FL x, start scroll (`bar_press`).
+    pub bar_drag: Option<(f32, f32)>,
     pub hover: Option<Hit>,
     /// Key held by a left press on the keyboard.
     pub held: Option<u8>,
@@ -495,7 +499,7 @@ pub struct MiscUi {
 
 impl Default for MiscUi {
     fn default() -> Self {
-        MiscUi { track_key: true, kb_scroll: 96.0 - 3.0 * OCTAVE, drag: None, hover: None, held: None, hint: String::new() }
+        MiscUi { track_key: true, kb_scroll: 96.0 - 3.0 * OCTAVE, drag: None, bar_drag: None, hover: None, held: None, hint: String::new() }
     }
 }
 
@@ -560,7 +564,7 @@ pub fn hit(ui: &MiscUi, x: f32, y: f32) -> Option<Hit> {
                 return Some(Hit::Key(k));
             }
         }
-        return Some(Hit::Keyboard);
+        return Some(if fy > KB_BOTTOM { Hit::ScrollBar } else { Hit::Keyboard });
     }
     None
 }
@@ -950,12 +954,9 @@ fn keyboard(c: &mut Canvas, t: &Palette, root: u8, ui: &MiscUi) {
     // Scroll bar.
     let bar = Rect::new(area.x, KB_BOTTOM + 1.0 + dy(), area.w, KB_BAR - KB_BOTTOM);
     c.fill_rect(bar, t.s(0x1b1d1e));
-    let total = 11.0 * OCTAVE;
-    let view = KB_X1 - KB_X0;
-    let start = (KB_X0 - ui.kb_scroll).clamp(0.0, total - view);
-    let tw = bar.w * view / total;
-    let tx = bar.x + (bar.w - tw) * start / (total - view);
-    c.fill_rrect(Rect::new(tx, bar.y + 4.0, tw, bar.h - 8.0), 2.0, t.s(0x313334));
+    let (tx, tw) = thumb(ui);
+    let lit = ui.bar_drag.is_some() || ui.hover == Some(Hit::ScrollBar);
+    c.fill_rrect(Rect::new(tx + dx(), bar.y + 4.0, tw, bar.h - 8.0), 2.0, if lit { t.s(0x3c3e40) } else { t.s(0x313334) });
     c.pop_clip();
 }
 
@@ -969,6 +970,43 @@ fn key_colour(t: &Palette, k: i32, root: u8, held: Option<u8>) -> Option<Color> 
     }
 }
 
+/// How far the keyboard scrolls (FL px) and the scroll bar's width.
+const KB_TOTAL: f32 = 11.0 * OCTAVE;
+const KB_VIEW: f32 = KB_X1 - KB_X0;
+const BAR_W: f32 = KB_X1 - KB_X0 + 1.0;
+
+/// The scroll bar thumb: its left edge (FL x) and width.
+fn thumb(ui: &MiscUi) -> (f32, f32) {
+    let start = (KB_X0 - ui.kb_scroll).clamp(0.0, KB_TOTAL - KB_VIEW);
+    let tw = BAR_W * KB_VIEW / KB_TOTAL;
+    (KB_X0 + (BAR_W - tw) * start / (KB_TOTAL - KB_VIEW), tw)
+}
+
+/// A left press on the scroll bar at page x: a press beside the thumb first centres the thumb there (Lemon Studio
+/// choice), then the thumb follows the mouse (`bar_drag_to`).
+pub fn bar_press(ui: &mut MiscUi, x: f32) {
+    let fx = x + OX;
+    let (tx, tw) = thumb(ui);
+    if fx < tx || fx > tx + tw {
+        set_start(ui, (fx - tw / 2.0 - KB_X0) / (BAR_W - tw) * (KB_TOTAL - KB_VIEW));
+    }
+    ui.bar_drag = Some((fx, KB_X0 - ui.kb_scroll));
+}
+
+/// The scroll bar's thumb dragged to page x.
+pub fn bar_drag_to(ui: &mut MiscUi, x: f32) -> bool {
+    let Some((fx0, start)) = ui.bar_drag else { return false };
+    let tw = thumb(ui).1;
+    let was = ui.kb_scroll;
+    set_start(ui, start + (x + OX - fx0) / (BAR_W - tw) * (KB_TOTAL - KB_VIEW));
+    ui.kb_scroll != was
+}
+
+/// Scrolls so the keyboard shows from `start` FL px past C0, kept in range.
+fn set_start(ui: &mut MiscUi, start: f32) {
+    ui.kb_scroll = KB_X0 - start.clamp(0.0, KB_TOTAL - KB_VIEW);
+}
+
 /// Keyboard scroll after `notches` of the wheel (34 px per notch), kept in range.
 pub fn scroll_keyboard(ui: &mut MiscUi, notches: f32) {
     let total = 11.0 * OCTAVE;
@@ -979,6 +1017,30 @@ pub fn scroll_keyboard(ui: &mut MiscUi, notches: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The keyboard's scroll bar drags (issue #91): the thumb follows the mouse, a press beside it centres it there,
+    /// and the keyboard stays in range.
+    #[test]
+    fn keyboard_scroll_bar_drags() {
+        let mut ui = MiscUi::default();
+        let at = |ui: &MiscUi, fx: f32, fy: f32| hit(ui, fx - OX, fy - OY);
+        let (tx, tw) = thumb(&ui);
+        let y = (KB_BOTTOM + KB_BAR) / 2.0;
+        assert_eq!(at(&ui, tx + tw / 2.0, y), Some(Hit::ScrollBar));
+        assert_eq!(at(&ui, tx + tw / 2.0, KB_RULER + 3.0), Some(Hit::Keyboard), "the ruler is not the bar");
+        let s0 = ui.kb_scroll;
+        bar_press(&mut ui, tx + tw / 2.0 - OX);
+        assert_eq!(ui.kb_scroll, s0, "a press on the thumb does not move it");
+        assert!(bar_drag_to(&mut ui, tx + tw / 2.0 + 40.0 - OX));
+        assert!(ui.kb_scroll < s0, "dragging right shows higher keys");
+        assert!((thumb(&ui).0 - (tx + 40.0)).abs() < 0.01, "the thumb follows the mouse");
+        bar_drag_to(&mut ui, 10_000.0);
+        assert_eq!(ui.kb_scroll, KB_X0 - (KB_TOTAL - KB_VIEW), "kept in range");
+        // A press at the bar's left end jumps there.
+        let mut ui = MiscUi::default();
+        bar_press(&mut ui, KB_X0 + 1.0 - OX);
+        assert_eq!(ui.kb_scroll, KB_X0);
+    }
 
     #[test]
     fn hits_find_the_controls() {

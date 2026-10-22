@@ -836,6 +836,10 @@ impl State {
     fn motion(&mut self, x: f32, y: f32, fine: bool) -> Reply {
         let mut hover = false;
         if self.misc {
+            if self.misc_ui.bar_drag.is_some() {
+                let moved = crate::misc_page::bar_drag_to(&mut self.misc_ui, x - BORDER);
+                return if moved { Reply::Repaint } else { Reply::None };
+            }
             if self.misc_ui.drag.is_some() {
                 let ay = self.area_y();
                 if let Some((m, v)) = crate::misc_page::drag_value(&self.misc_ui, x - BORDER, y - ay, fine) {
@@ -918,6 +922,7 @@ impl State {
         self.drag = None;
         self.moving = None;
         self.misc_ui.drag = None;
+        self.misc_ui.bar_drag = None;
         if let Some(k) = self.misc_ui.held.take() {
             self.events.push(FrameEvent::Note(k, 0, false));
             os_clap::wake();
@@ -1004,6 +1009,10 @@ impl State {
                 misc_set(self, M::Root, 60.0);
                 misc_set(self, M::Fine, 0.0);
             }
+            (Btn::Left, Hit::ScrollBar) => {
+                mp::bar_press(&mut self.misc_ui, x - BORDER);
+                reply = Reply::Capture;
+            }
             (Btn::Left, Hit::Key(k)) => {
                 self.misc_ui.held = Some(k);
                 self.events.push(FrameEvent::Note(k, 100, true));
@@ -1030,7 +1039,7 @@ impl State {
                     os_clap::wake();
                 }
             }
-            Hit::Key(_) | Hit::Keyboard => mp::scroll_keyboard(&mut self.misc_ui, notches),
+            Hit::Key(_) | Hit::Keyboard | Hit::ScrollBar => mp::scroll_keyboard(&mut self.misc_ui, notches),
             _ => {}
         }
         Some(Reply::Repaint)
