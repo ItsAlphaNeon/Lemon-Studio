@@ -42,6 +42,9 @@ pub enum Win {
     Strum,
     /// The piano roll's Arpeggiate dialog (spec: ui/piano-arpeggiate.md).
     Arp,
+    /// The piano roll's Flam, Flip and Scale levels dialogs, one at a time (spec: ui/piano-flam.md, ui/piano-flip.md,
+    /// ui/piano-level-scaling.md).
+    PianoDlg,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -175,6 +178,8 @@ pub enum Action {
     Strum(crate::strum::Act),
     /// The Arpeggiate dialog's buttons, switches and menus (spec: ui/piano-arpeggiate.md).
     Arp(crate::arpeggiate::Act),
+    /// The Flam, Flip and Scale levels dialogs' switches and buttons (spec: as `Win::PianoDlg`).
+    PianoDlg(crate::piano_dlg::Act),
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
     MonParam(usize),
     MonReset,
@@ -885,6 +890,8 @@ pub struct State {
     pub strum: crate::strum::StrumUi,
     /// The piano roll's Arpeggiate dialog: where it is, its settings and pattern, its preview session.
     pub arp: crate::arpeggiate::ArpUi,
+    /// The piano roll's Flam, Flip and Scale levels dialogs: where each was, their settings, the preview session.
+    pub piano_dlg: crate::piano_dlg::Ui,
     pub rec: crate::record::Rec,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
@@ -1308,6 +1315,7 @@ impl App {
                 touch: Default::default(),
                 strum: Default::default(),
                 arp: Default::default(),
+                piano_dlg: Default::default(),
                 rec: Default::default(),
                 toggles: vec!["typing"],
                 clock: crate::clock::Clock::load(),
@@ -2539,7 +2547,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -2564,6 +2572,7 @@ impl App {
             Win::Touch => Some(views::touch::rect(s)),
             Win::Strum => Some(views::strum::rect(s)),
             Win::Arp => Some(views::arpeggiate::rect(s)),
+            Win::PianoDlg => Some(views::piano_dlg::rect(s)),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -2990,6 +2999,55 @@ impl App {
         self.invalidate();
     }
 
+    // ---------------------------------------------------------------- Flam, Flip and Scale levels dialogs
+
+    /// Tools ▸ Flam… (Alt+F), Flip… (Alt+Y) and Scale levels… (Alt+X): open the dialog in front (centred over the main
+    /// window the first time, then where it was left) on the piano roll's notes, previewing the settings last accepted.
+    /// Another of these dialogs open: its preview is put back and the window shows this one. Scale levels does not open
+    /// on a channel control lane (spec: ui/piano-level-scaling.md §4).
+    pub(crate) fn open_piano_tool(&mut self, tool: crate::piano_dlg::Tool) {
+        let s = &mut self.state;
+        if tool == crate::piano_dlg::Tool::Levels && s.piano.lane.is_channel() {
+            s.message = Some("Scale levels: show a note property in the Control lane first".into());
+            self.invalidate();
+            return;
+        }
+        if !(s.shown(Win::PianoDlg) && s.piano_dlg.tool == tool) {
+            let i = tool.index();
+            if !s.piano_dlg.placed[i] {
+                let (w, h) = views::piano_dlg::size(tool);
+                s.piano_dlg.pos[i] = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::work_y(s)).round());
+                s.piano_dlg.placed[i] = true;
+            }
+            crate::piano_dlg::open(s, tool);
+        }
+        s.raise(Win::PianoDlg);
+        self.invalidate();
+    }
+
+    fn piano_dlg_act(&mut self, a: crate::piano_dlg::Act) {
+        use crate::piano_dlg::{self as dlg, Act};
+        let s = &mut self.state;
+        match a {
+            Act::Accept => {
+                s.message = Some(dlg::accept(s));
+                s.hide(Win::PianoDlg);
+            }
+            Act::Options => {
+                let (x, y) = self.mouse;
+                s.playlist.popup = Some(crate::playlist::Popup { x, y, items: dlg::options_menu(), sub: None });
+            }
+            a => dlg::act(s, a),
+        }
+        self.invalidate();
+    }
+
+    /// A preset picked from the Flam dialog's Options ▸ menu (spec: ui/piano-flam.md §5).
+    pub(crate) fn flam_preset(&mut self, p: crate::flam::Preset) {
+        crate::piano_dlg::preset(&mut self.state, p);
+        self.invalidate();
+    }
+
     // ---------------------------------------------------------------- Tempo tapper (spec: ui/tempo-tapper.md)
 
     /// VIEW > Tempo tapper and Ctrl+F5: open it (or bring it to the front), centred over the main window the first
@@ -3086,6 +3144,7 @@ impl App {
             Win::Touch => self.damage_rect(views::touch::bounds(&self.state)),
             Win::Strum => self.damage_rect(views::strum::bounds(&self.state)),
             Win::Arp => self.damage_rect(views::arpeggiate::bounds(&self.state)),
+            Win::PianoDlg => self.damage_rect(views::piano_dlg::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
             _ => self.invalidate(),
         }
@@ -5134,6 +5193,7 @@ impl App {
             Win::Touch => views::touch::bounds(&self.state),
             Win::Strum => views::strum::bounds(&self.state),
             Win::Arp => views::arpeggiate::bounds(&self.state),
+            Win::PianoDlg => views::piano_dlg::bounds(&self.state),
             Win::ChannelRack => views::rack::bounds(&self.state),
             w => self.state.win_rect(w).outset(5.0),
         }
@@ -7004,6 +7064,7 @@ impl App {
             Action::Touch(a) => self.touch_act(a),
             Action::Strum(a) => self.strum_act(a),
             Action::Arp(a) => self.arp_act(a),
+            Action::PianoDlg(a) => self.piano_dlg_act(a),
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
@@ -7260,6 +7321,7 @@ impl App {
                     Win::Touch => s.touch.pos,
                     Win::Strum => s.strum.pos,
                     Win::Arp => s.arp.pos,
+                    Win::PianoDlg => s.piano_dlg.pos[s.piano_dlg.tool.index()],
                     Win::ChannelRack => s.rack_pos,
                     w => {
                         // Start from the rect as shown (kept on screen), then move it.
@@ -7310,6 +7372,11 @@ impl App {
             Action::CloseWin(Win::Arp) => {
                 crate::arpeggiate::cancel(s);
                 s.hide(Win::Arp);
+                self.damage_win(Win::PianoRoll);
+            }
+            Action::CloseWin(Win::PianoDlg) => {
+                crate::piano_dlg::cancel(s);
+                s.hide(Win::PianoDlg);
                 self.damage_win(Win::PianoRoll);
             }
             Action::CloseWin(w) => s.hide(w),
@@ -7817,6 +7884,9 @@ pub(crate) fn lift_windows(s: &mut State, dy: f32) {
         lift(&mut w.rect.y);
     }
     for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos, &mut s.strum.pos, &mut s.arp.pos] {
+        lift(&mut pos.1);
+    }
+    for pos in &mut s.piano_dlg.pos {
         lift(&mut pos.1);
     }
 }
@@ -14176,6 +14246,67 @@ mod tests {
             app.act(Action::Arp(AAct::Reset));
             assert_eq!(keys(&app), vec![60, 64, 67, 60]);
             app.act(Action::CloseWin(Win::Arp));
+        }
+
+        // Alt+F, Alt+Y and Alt+X open the Flam, Flip and Scale levels dialogs in one tool window (spec:
+        // ui/piano-flam.md, ui/piano-flip.md, ui/piano-level-scaling.md): each previews, × puts the notes back, Accept
+        // is one undo step, and opening another puts the first one's preview back.
+        {
+            use crate::flam::Preset;
+            use crate::piano_dlg::{Act as DAct, Knob as DKnob, Tool};
+            let click = |app: &mut App, a: Action| {
+                let r = hit_rect(app, &a);
+                app.mouse_move(r.cx(), r.cy());
+                app.mouse_down();
+                app.mouse_up();
+            };
+            put(&mut app, &[(0, 96, 60), (96, 48, 64)]);
+            let ppq = u32::from(app.state.project.ppq);
+            key(&mut app, "f", false, true, false);
+            assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Flam);
+            let d = app.state.piano_dlg.flam.offset(ppq, app.state.tempo).unsigned_abs() as u32;
+            assert!(d > 0);
+            assert_eq!(mine(&app), vec![(0, d, 60), (d, 96, 60), (96, d, 64), (96 + d, 48, 64)], "leading flams, previewed");
+            app.act(Action::PianoDlg(DAct::Options));
+            let pop = app.state.playlist.popup.take().expect("Options opens the presets");
+            assert_eq!(pop.items.iter().map(|i| i.label.as_ref()).collect::<Vec<_>>(), ["Flam", "Early flam", "Double stroke", "Early double stroke"]);
+            crate::playlist::run(&mut app, Cmd::FlamPreset(Preset::DoubleStroke));
+            let st = ppq / 4;
+            assert_eq!(mine(&app), vec![(0, 96, 60), (st, 96, 60), (96, 48, 64), (96 + st, 48, 64)], "a copy a step later");
+            // Alt+Y: the flam goes back, the window shows Flip.
+            key(&mut app, "y", false, true, false);
+            assert_eq!(app.state.piano_dlg.tool, Tool::Flip);
+            assert_eq!(mine(&app), vec![(0, 48, 64), (96, 96, 60)], "mirrored in time, start spacing kept");
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Vertical));
+            assert_eq!(mine(&app), vec![(0, 48, 60), (96, 96, 64)], "and in pitch");
+            click(&mut app, Action::CloseWin(Win::PianoDlg));
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert_eq!(mine(&app), vec![(0, 96, 60), (96, 48, 64)], "× puts the notes back");
+            // Alt+X on the velocity lane: Multiply 5 notches down.
+            app.state.piano.lane = piano::Lane::Velocity;
+            key(&mut app, "x", false, true, false);
+            assert_eq!(app.state.piano_dlg.tool, Tool::Levels);
+            frame(&mut app, &mut c, None);
+            let m = hit_rect(&app, &Action::Knob(KnobId::PianoDlg(DKnob::Mult)));
+            app.mouse_move(m.cx(), m.cy());
+            for _ in 0..5 {
+                app.wheel(0.0, -1.0, false, false);
+            }
+            assert_eq!(app.hint.as_ref(), "Multiplier: 69%");
+            let vels = |app: &App| piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| n.velocity).collect::<Vec<_>>();
+            assert_eq!(vels(&app), vec![69, 69], "FL: 100 × 68.75 % = 69");
+            click(&mut app, Action::PianoDlg(DAct::Accept));
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert_eq!(vels(&app), vec![69, 69]);
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(vels(&app), vec![100, 100], "one undo step");
+            // A channel control lane: Scale levels does not open.
+            app.state.piano.lane = piano::Lane::ChanVolume;
+            key(&mut app, "x", false, true, false);
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert!(app.state.message.as_deref().is_some_and(|m| m.contains("note property")));
+            app.state.piano.lane = piano::Lane::Velocity;
         }
         frame(&mut app, &mut c, None);
 

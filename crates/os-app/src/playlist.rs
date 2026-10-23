@@ -346,6 +346,8 @@ pub enum Cmd {
     Arp(crate::arpeggiate::ACmd),
     /// FILE ▸ Recent projects ▸ More: open recent project `n` (spec: ui/recent-projects.md §2).
     OpenRecent(usize),
+    /// The Flam dialog's Options ▸ presets (spec: ui/piano-flam.md §5).
+    FlamPreset(crate::flam::Preset),
     /// Settings > Audio menus: device, sample rate, buffer length (spec: ui/settings.md "Audio").
     Audio(crate::audio_cfg::Set),
     /// The toolbar CPU panel's menu (spec: ui/main-window.md §13).
@@ -3724,6 +3726,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.export_midi_dialog(piano);
             return None;
         }
+        Cmd::FlamPreset(p) => {
+            app.flam_preset(p);
+            return None;
+        }
         Cmd::Misc(row, m, v) => {
             crate::misc::set(app, row, m, v);
             return None;
@@ -4283,6 +4289,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Theme(_) => None,
         Cmd::Template(_) => None,
         Cmd::Arp(_) | Cmd::MidiImport(_) | Cmd::MidiExport(_) | Cmd::OpenRecent(_) => None,
+        Cmd::FlamPreset(_) => None,
         Cmd::Messages(_) => None,
         Cmd::DataFolder(_) => None,
     };
