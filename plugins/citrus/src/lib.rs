@@ -10,6 +10,7 @@
 
 pub mod ctl;
 pub mod curve;
+pub mod edit;
 pub mod editor;
 pub mod engine;
 pub mod filter;

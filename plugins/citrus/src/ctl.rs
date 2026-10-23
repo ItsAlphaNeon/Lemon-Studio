@@ -54,7 +54,7 @@ pub fn part(st: &State, m: usize, a: usize, p: usize) -> &crate::curve::Curve {
     }
 }
 
-fn part_mut(st: &mut State, m: usize, a: usize, p: usize) -> &mut crate::curve::Curve {
+pub fn part_mut(st: &mut State, m: usize, a: usize, p: usize) -> &mut crate::curve::Curve {
     let art = &mut st.modules[m].arts[a];
     match p {
         0 => &mut art.env,

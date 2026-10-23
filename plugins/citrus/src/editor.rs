@@ -18,6 +18,8 @@ use os_plugkit::MenuDef;
 use os_ui::kit::menu::{Mark, MenuItem, MenuStyle};
 
 use crate::ctl::{self, Field};
+use crate::curve::{Curve, MAP};
+use crate::edit;
 use crate::patch::{self, Patch};
 use crate::state::*;
 use crate::view::{self, Cover, Target, ViewState};
@@ -100,6 +102,30 @@ pub const BOX_PX: f32 = 8.0;
 pub const DIGIT_PX: f32 = 10.0;
 /// Points of the operator page's drawn wave.
 const WAVE_POINTS: usize = 160;
+/// Pixels of drag per unit of a segment's tension (-1 .. 1).
+pub const TENSION_PX: f32 = 100.0;
+/// The snap tool's grid: the view's span in 32 steps, levels in 16.
+const SNAP_T: f64 = 32.0;
+const SNAP_L: f32 = 16.0;
+/// Harmonics the wheel scrolls per notch.
+const HARM_WHEEL: i32 = 8;
+
+/// The point menu's modes in FL's order, with their codes (plugins/image-line-curves.md).
+const POINT_MODES: [(&str, u8); 13] = [
+    ("Hold", 2),
+    ("Smooth", 10),
+    ("Single curve", 0),
+    ("Single curve 2", 7),
+    ("Single curve 3", 11),
+    ("Double curve", 1),
+    ("Double curve 2", 8),
+    ("Double curve 3", 12),
+    ("Half sine", 9),
+    ("Stairs", 3),
+    ("Smooth stairs", 4),
+    ("Pulse", 5),
+    ("Wave", 6),
+];
 
 // ---------------------------------------------------------------------------------------------------------------
 // Menus
@@ -113,6 +139,59 @@ pub enum Cmd {
     TypeIn(Field),
     /// Sets a setting (the Options menu's items).
     Set(Field, i32),
+    /// A curve edit (the point menu, the curve view's Options menu).
+    Curve(CurveId, CurveCmd),
+    /// A harmonics tool on operator `m`.
+    Harm(usize, HarmCmd),
+}
+
+/// The curve the curve view edits: an articulator's part (module, articulator, part) or a filter's shaper.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurveId {
+    Part(usize, usize, usize),
+    Shaper(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurveCmd {
+    Delete(usize),
+    Mode(usize, u8),
+    Break(usize, u8),
+    /// Marker 0 decay, 1 loop start, 2 sustain / loop end at the point (or off).
+    Marker(usize, usize),
+    CopyLevel(usize),
+    PasteLevel(usize),
+    CopyState,
+    PasteState,
+    AllLoop,
+    Flip,
+    Normalize,
+    AllSmooth,
+}
+
+impl CurveCmd {
+    /// The point the command is about.
+    fn point(self) -> Option<usize> {
+        match self {
+            CurveCmd::Delete(i) | CurveCmd::Mode(i, _) | CurveCmd::Break(i, _) | CurveCmd::Marker(i, _) | CurveCmd::CopyLevel(i) | CurveCmd::PasteLevel(i) => {
+                Some(i)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HarmCmd {
+    Convert,
+    Transpose,
+    /// Shift right (true) or left.
+    Shift(bool),
+    Gibbs,
+    ResetPhases,
+    RandomPhases,
+    Copy,
+    Paste,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -121,6 +200,11 @@ pub enum MenuReq {
     Options,
     /// Operator `m`'s waveform.
     Wave(usize),
+    /// A point of the curve view.
+    Point(CurveId, usize),
+    /// The curve view's Options arrow, the harmonics editor's (operator `m`).
+    Curve(CurveId),
+    Harm(usize),
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -164,6 +248,13 @@ enum Drag {
     Steps(Field, f32),
     /// A digit of a numeric display: its step and the pixels moved since the last step.
     Digit(Field, i32, f32),
+    /// A point of the curve view (absolute), with the view's time span when the drag began.
+    Point(usize, f64),
+    /// A segment's tension handle: which way up bends it (1 or -1).
+    Tension(usize, f32),
+    /// Painting harmonics' levels: the last harmonic painted and its level.
+    Harm(usize, f32),
+    HarmScroll,
     Pad,
     Key,
 }
@@ -187,6 +278,12 @@ pub struct Logic {
     no_keys: Arc<AtomicBool>,
     /// The operator page's wave and what it was drawn from (the block, band-limit smoothing).
     wave: Option<(OpBlock, bool, Vec<f32>)>,
+    /// The editor's clipboards: a point's level, a curve, an operator's harmonics.
+    level_clip: Option<f32>,
+    curve_clip: Option<Curve>,
+    harm_clip: Option<(Vec<f32>, Vec<f32>)>,
+    /// Randomize phases' seed (moved on by each use).
+    seed: u32,
 }
 
 impl Logic {
@@ -207,6 +304,10 @@ impl Logic {
             hosted: false,
             no_keys,
             wave: None,
+            level_clip: None,
+            curve_clip: None,
+            harm_clip: None,
+            seed: 1,
         };
         l.reload();
         l
@@ -264,6 +365,97 @@ impl Logic {
         self.set(f, ctl::default(f));
     }
 
+    /// The curve the curve view shows (none on the main page and the harmonics editor).
+    fn curve_id(&self) -> Option<CurveId> {
+        let page = self.view.page;
+        if page == 0 {
+            return None;
+        }
+        let m = view::module_of(page);
+        match view::shown(&self.view) {
+            view::Shown::Art(a) => Some(CurveId::Part(m, a, self.view.part[page].min(7))),
+            view::Shown::Shaper => Some(CurveId::Shaper(m)),
+            view::Shown::Harmonics => None,
+        }
+    }
+
+    fn curve(&self, id: CurveId) -> &Curve {
+        match id {
+            CurveId::Part(m, a, p) => ctl::part(&self.st, m, a, p),
+            CurveId::Shaper(m) => &self.st.modules[m].filter.shaper,
+        }
+    }
+
+    fn curve_mut(&mut self, id: CurveId) -> &mut Curve {
+        match id {
+            CurveId::Part(m, a, p) => ctl::part_mut(&mut self.st, m, a, p),
+            CurveId::Shaper(m) => &mut self.st.modules[m].filter.shaper,
+        }
+    }
+
+    /// Edits a curve; a change is committed.
+    fn edit_curve(&mut self, id: CurveId, f: impl FnOnce(&mut Curve)) {
+        let c = self.curve_mut(id);
+        let before = c.clone();
+        f(c);
+        if *c != before {
+            self.commit();
+        }
+    }
+
+    /// A time and level on the snap tool's grid (when it is on).
+    fn snapped(&self, t: f64, l: f32, span: f64) -> (f64, f32) {
+        if self.view.tools[2] {
+            ((t / span * SNAP_T).round() * span / SNAP_T, (l * SNAP_L).round() / SNAP_L)
+        } else {
+            (t, l)
+        }
+    }
+
+    /// `Point 5/7:2:517`, the level as the right part. Times are half seconds (`s:ms`), beats when tempo-based
+    /// (`steps:ticks`); a map's positions are shown as percent.
+    fn point_hint(&self, i: usize) -> String {
+        let Some(id) = self.curve_id() else { return String::new() };
+        let c = self.curve(id);
+        let Some(p) = c.points.get(i) else { return String::new() };
+        let t = edit::times(c)[i];
+        let time = if c.kind == MAP {
+            format!("{}%", (t * 100.0).round())
+        } else if c.flags & crate::curve::SYNCED != 0 {
+            let ticks = (t * 96.0).round() as i64;
+            format!("{}:{:02}", ticks / 24, ticks % 24)
+        } else {
+            let ms = (t * 500.0).round() as i64;
+            format!("{}:{:03}", ms / 1000, ms % 1000)
+        };
+        format!("Point {}/{}:{time}\t{}%", i + 1, c.points.len(), (p.level * 100.0).round())
+    }
+
+    fn tension_hint(&self, i: usize) -> String {
+        let Some(c) = self.curve_id().map(|id| self.curve(id)) else { return String::new() };
+        let t = c.points.get(i).map_or(0.0, |p| p.tension);
+        format!("Point {} to {} tension\t{:.2}%", i, i + 1, t * 100.0)
+    }
+
+    fn harm_hint(&self, h: usize) -> String {
+        let m = view::module_of(self.view.page);
+        let l = self.st.modules[m].op.levels.get(h).copied().unwrap_or(0.0);
+        format!("Harmonic {} magnitude: {}%\t+{}oct", h + 1, (l * 100.0).round(), (h + 1).ilog2())
+    }
+
+    /// Sets harmonics `a` ..= `b` of operator `m`, their levels on a line from `la` to `lb`.
+    fn paint_harmonics(&mut self, m: usize, (a, la): (usize, f32), (b, lb): (usize, f32)) {
+        let levels = &mut self.st.modules[m].op.levels;
+        let before = levels.clone();
+        for h in a.min(b)..=a.max(b).min(levels.len() - 1) {
+            let x = if a == b { 1.0 } else { (h as f32 - a as f32) / (b as f32 - a as f32) };
+            levels[h] = la + (lb - la) * x;
+        }
+        if *levels != before {
+            self.commit();
+        }
+    }
+
     fn hit(&self, x: f32, y: f32) -> Option<Target> {
         self.hits.iter().rev().find(|h| h.r.contains(x, y)).map(|h| h.t.clone())
     }
@@ -308,6 +500,13 @@ impl Logic {
             Some(Target::FxUnit(k)) if *k < 3 => format!("Effect: delay unit {}", k + 1),
             Some(Target::FxUnit(_)) => "Effect: reverb unit".into(),
             Some(Target::Wave(_)) => "Waveform".into(),
+            Some(Target::Point(i)) => self.point_hint(*i),
+            Some(Target::Tension(i)) => self.tension_hint(*i),
+            Some(Target::CurveArea) => String::new(),
+            Some(Target::Tool(k)) => view::TOOL_NAMES[*k].into(),
+            Some(Target::CurveOptions | Target::HarmOptions) => "Options".into(),
+            Some(Target::Harm(h)) => self.harm_hint(*h),
+            Some(Target::HarmScroll) => "Scroll harmonics".into(),
             Some(Target::Cover) => String::new(),
             Some(t) => Self::field(t).map(|f| ctl::hint(&self.st, f, dragging)).unwrap_or_default(),
         }
@@ -334,6 +533,69 @@ impl Logic {
             (Target::PartTab(i), Btn::Left | Btn::Right) => self.view.part[self.view.page] = *i,
             (Target::FxUnit(k), Btn::Left | Btn::Right) => self.view.fx_unit = *k,
             (Target::Wave(m), Btn::Right) => acts.push(Act::Menu(MenuReq::Wave(*m), x, y)),
+            (Target::Point(i), Btn::Left) => {
+                if let Some(id) = self.curve_id() {
+                    let span = view::curve_span(self.curve(id));
+                    self.drag = Some(Drag::Point(*i, span));
+                    self.view.span = Some(span);
+                    self.view.pressed = Some(t.clone());
+                    acts.push(Act::Capture);
+                }
+            }
+            (Target::Point(i), Btn::Right) => {
+                if let Some(id) = self.curve_id() {
+                    acts.push(Act::Menu(MenuReq::Point(id, *i), x, y));
+                }
+            }
+            (Target::Tension(i), Btn::Left) => {
+                if let Some(id) = self.curve_id() {
+                    // Up raises the segment's middle, whichever way a tension bends it.
+                    let mut c = self.curve(id).clone();
+                    let mut mid = |t: f32| {
+                        edit::set_tension(&mut c, *i, t);
+                        edit::segment_level(&c, *i, 0.5)
+                    };
+                    let sign = if mid(0.5) >= mid(-0.5) { 1.0 } else { -1.0 };
+                    self.drag = Some(Drag::Tension(*i, sign));
+                    self.view.pressed = Some(t.clone());
+                    acts.push(Act::Lock);
+                }
+            }
+            (Target::Tension(i), Btn::Middle) => {
+                if let Some(id) = self.curve_id() {
+                    self.edit_curve(id, |c| edit::set_tension(c, *i, 0.0));
+                }
+            }
+            // A right click on empty space adds a point there.
+            (Target::CurveArea, Btn::Right) if !self.view.tools[0] => {
+                if let Some(id) = self.curve_id() {
+                    let span = view::curve_span(self.curve(id));
+                    let (t, l) = self.snapped(view::x_to_t(x, span).min(span), view::y_to_level(y), span);
+                    self.edit_curve(id, |c| {
+                        edit::insert_point(c, if c.kind == MAP { t.min(1.0 - 1e-3) } else { t }, l);
+                    });
+                }
+            }
+            // Step editing: not done.
+            (Target::Tool(1), _) => {}
+            (Target::Tool(k), Btn::Left) => self.view.tools[*k] = !self.view.tools[*k],
+            (Target::CurveOptions, Btn::Left) => {
+                if let Some(id) = self.curve_id() {
+                    acts.push(Act::Menu(MenuReq::Curve(id), x, y));
+                }
+            }
+            (Target::HarmOptions, Btn::Left) => acts.push(Act::Menu(MenuReq::Harm(view::module_of(self.view.page)), x, y)),
+            (Target::Harm(h), Btn::Left) => {
+                let (m, l) = (view::module_of(self.view.page), view::harm_level(y));
+                self.paint_harmonics(m, (*h, l), (*h, l));
+                self.drag = Some(Drag::Harm(*h, l));
+                acts.push(Act::Capture);
+            }
+            (Target::HarmScroll, Btn::Left) => {
+                self.view.harm_scroll = view::harm_scroll_at(x);
+                self.drag = Some(Drag::HarmScroll);
+                acts.push(Act::Capture);
+            }
             (Target::Header(0), Btn::Left) => acts.push(Act::Menu(MenuReq::Options, x, y)),
             (Target::Header(1), Btn::Left) | (Target::Logo, Btn::Left) => self.view.cover = Cover::Info,
             (Target::Header(2), Btn::Left) => self.view.cover = Cover::Diagram,
@@ -434,6 +696,12 @@ impl Logic {
                 self.drag = Some(Drag::Digit(f, step, moved));
                 self.set(f, v);
             }
+            Some(Drag::Tension(i, sign)) => {
+                let Some(id) = self.curve_id() else { return vec![] };
+                let k = if m.ctrl { FINE } else { 1.0 };
+                let t = self.curve(id).points.get(i).map_or(0.0, |p| p.tension) - sign * dy * k / TENSION_PX;
+                self.edit_curve(id, |c| edit::set_tension(c, i, t));
+            }
             _ => return vec![],
         }
         let t = self.view.pressed.clone();
@@ -444,6 +712,7 @@ impl Logic {
     pub fn up(&mut self, _btn: Btn) -> Vec<Act> {
         let Some(d) = self.drag.take() else { return vec![] };
         self.view.pressed = None;
+        self.view.span = None;
         let mut acts = vec![Act::Repaint];
         if let (Drag::Key, Some(k)) = (d, self.view.key.take()) {
             acts.push(Act::Note(k, false));
@@ -457,6 +726,23 @@ impl Logic {
         self.view.mouse = Some((x, y));
         match self.drag {
             Some(Drag::Pad) => self.pad_to(x, y),
+            Some(Drag::Point(i, span)) => {
+                if let Some(id) = self.curve_id() {
+                    let (t, l) = self.snapped(view::x_to_t(x, span), view::y_to_level(y), span);
+                    let slide = self.view.tools[3];
+                    self.edit_curve(id, |c| edit::move_point(c, i, t, l, slide));
+                    self.hint = self.point_hint(i);
+                }
+            }
+            // Bars skipped between two moves are painted on the line between them.
+            Some(Drag::Harm(h0, l0)) => {
+                let m = view::module_of(self.view.page);
+                let (h, l) = (view::harm_at(x, self.view.harm_scroll.min(256 - view::HARM_VISIBLE)), view::harm_level(y));
+                self.paint_harmonics(m, (h0, l0), (h, l));
+                self.drag = Some(Drag::Harm(h, l));
+                self.hint = self.harm_hint(h);
+            }
+            Some(Drag::HarmScroll) => self.view.harm_scroll = view::harm_scroll_at(x),
             // The held key follows the cursor along the keyboard.
             Some(Drag::Key) => {
                 if let Some(Target::Key(k)) = self.hit(x, y) {
@@ -495,6 +781,10 @@ impl Logic {
             Target::Box(f) | Target::Cycle(f) => self.set(*f, self.shown(*f) + d),
             Target::Digit(f, step) => self.set(*f, self.shown(*f) + d * step),
             Target::Switch(f) => self.set(*f, i32::from(d > 0)),
+            Target::Harm(_) | Target::HarmScroll => {
+                let s = self.view.harm_scroll.min(256 - view::HARM_VISIBLE) as i32 - d * HARM_WHEEL;
+                self.view.harm_scroll = s.clamp(0, (256 - view::HARM_VISIBLE) as i32) as usize;
+            }
             _ => return vec![],
         }
         self.hint = self.hint_for(Some(&t));
@@ -521,9 +811,171 @@ impl Logic {
                     w.add(MenuItem::item(l), Cmd::Set(Field::Op(*m, 3), v));
                 }
                 w.sep(Cmd::None);
-                w.add(MenuItem::item("Convert shape to sine harmonics").enabled(false), Cmd::None);
+                w.add(MenuItem::item("Convert shape to sine harmonics"), Cmd::Harm(*m, HarmCmd::Convert));
                 w
             }
+            MenuReq::Point(id, i) => self.point_menu(*id, *i),
+            MenuReq::Curve(id) => self.curve_menu(*id),
+            MenuReq::Harm(m) => self.harm_menu(*m),
+        }
+    }
+
+    /// A point's menu (plugins/sytrus-editor.md §3).
+    fn point_menu(&self, id: CurveId, i: usize) -> MenuDef<Cmd> {
+        let c = self.curve(id);
+        let p = c.points.get(i).copied().unwrap_or_default();
+        let cmd = |k| Cmd::Curve(id, k);
+        let mut m = MenuDef::new(MenuStyle::Context);
+        m.head(&format!("Point {}/{}", i + 1, c.points.len()), Cmd::None);
+        m.add(MenuItem::item("Delete").enabled(i > 0 && c.points.len() > 2), cmd(CurveCmd::Delete(i)));
+        m.head("Mode", Cmd::None);
+        for (l, v) in POINT_MODES {
+            m.add(MenuItem::item(l).mark(Mark::Radio(p.mode == v)), cmd(CurveCmd::Mode(i, v)));
+        }
+        if c.kind != MAP {
+            m.head("Arpeggiator break", Cmd::None);
+            for (v, l) in ["None", "Previous", "Same", "Next"].into_iter().enumerate() {
+                m.add(MenuItem::item(l).mark(Mark::Radio(p.step == v as u8)), cmd(CurveCmd::Break(i, v as u8)));
+            }
+        }
+        let marks = [("Decay", c.decay), ("Loop start", c.loop_start), ("Sustain / loop end", c.sustain)];
+        if (0..3).any(|k| edit::keeps_marker(c, k)) {
+            m.head("ADSR section", Cmd::None);
+            for (k, (l, at)) in marks.into_iter().enumerate().filter(|(k, _)| edit::keeps_marker(c, *k)) {
+                m.add(MenuItem::item(l).mark(Mark::Check(at == i as i32)), cmd(CurveCmd::Marker(i, k)));
+            }
+        }
+        m.sep(Cmd::None);
+        m.add(MenuItem::item("Copy value"), cmd(CurveCmd::CopyLevel(i)));
+        m.add(MenuItem::item("Paste value").enabled(self.level_clip.is_some()), cmd(CurveCmd::PasteLevel(i)));
+        m.add(MenuItem::item("Type in value...").enabled(false), Cmd::None);
+        m
+    }
+
+    /// The curve view's Options menu (plugins/sytrus-editor.md §3); the items not done are disabled.
+    fn curve_menu(&self, id: CurveId) -> MenuDef<Cmd> {
+        let c = self.curve(id);
+        let cmd = |k| Cmd::Curve(id, k);
+        let off = |m: &mut MenuDef<Cmd>, labels: &[&str]| {
+            for l in labels {
+                m.add(MenuItem::item(l).enabled(false), Cmd::None);
+            }
+        };
+        let mut m = MenuDef::new(MenuStyle::Context);
+        m.head("State", Cmd::None);
+        off(&mut m, &["Presets", "Open state file...", "Save state file..."]);
+        m.add(MenuItem::item("Copy state"), cmd(CurveCmd::CopyState));
+        m.add(MenuItem::item("Paste state").enabled(self.curve_clip.as_ref().is_some_and(|s| s.kind == c.kind)), cmd(CurveCmd::PasteState));
+        m.head("Points selection", Cmd::None);
+        off(&mut m, &["Select all", "Deselect all", "Invert", "Cut", "Copy", "Paste (insert)", "Paste (replace)", "Duplicate", "Delete"]);
+        m.head("Tools", Cmd::None);
+        m.add(MenuItem::item("Make all loop").enabled(edit::keeps_marker(c, 1)), cmd(CurveCmd::AllLoop));
+        off(&mut m, &["Insert point at locator"]);
+        m.add(MenuItem::item("Flip vertically"), cmd(CurveCmd::Flip));
+        off(&mut m, &["Scale levels..."]);
+        m.add(MenuItem::item("Normalize levels"), cmd(CurveCmd::Normalize));
+        off(&mut m, &["Decimate points...", "Filter...", "Smooth up...", "Smooth up abrupt changes"]);
+        m.add(MenuItem::item("Turn all points smooth"), cmd(CurveCmd::AllSmooth));
+        off(&mut m, &["Create sequence...", "Analyze audio file..."]);
+        m.head("Options", Cmd::None);
+        off(&mut m, &["Focus on click"]);
+        m.head("View", Cmd::None);
+        off(&mut m, &["Background gradient", "Invert grid"]);
+        m
+    }
+
+    /// The harmonics editor's Options menu (plugins/sytrus-editor.md §4.2); the items not done are disabled.
+    fn harm_menu(&self, op: usize) -> MenuDef<Cmd> {
+        let cmd = |k| Cmd::Harm(op, k);
+        let mut m = MenuDef::new(MenuStyle::Context);
+        let add = |m: &mut MenuDef<Cmd>, l: &str, k: Option<HarmCmd>| {
+            m.add(MenuItem::item(l).enabled(k.is_some()), k.map_or(Cmd::None, cmd));
+        };
+        add(&mut m, "Convert shape to sine harmonics", Some(HarmCmd::Convert));
+        add(&mut m, "Analyze single-cycle waveform...", None);
+        add(&mut m, "Export single-cycle waveform...", None);
+        add(&mut m, "Lock harmonics", None);
+        m.sep(Cmd::None);
+        add(&mut m, "Transpose one octave up", Some(HarmCmd::Transpose));
+        add(&mut m, "Shift left", Some(HarmCmd::Shift(false)));
+        add(&mut m, "Shift right", Some(HarmCmd::Shift(true)));
+        add(&mut m, "Smooth up (soft)", None);
+        add(&mut m, "Smooth up (hard)", None);
+        add(&mut m, "Attenuate Gibbs phenomenon", Some(HarmCmd::Gibbs));
+        add(&mut m, "Remove Gibbs phenomenon", None);
+        m.sep(Cmd::None);
+        add(&mut m, "Reset phases", Some(HarmCmd::ResetPhases));
+        add(&mut m, "Randomize phases", Some(HarmCmd::RandomPhases));
+        m.sep(Cmd::None);
+        add(&mut m, "Copy", Some(HarmCmd::Copy));
+        m.add(MenuItem::item("Paste").enabled(self.harm_clip.is_some()), cmd(HarmCmd::Paste));
+        m
+    }
+
+    fn curve_cmd(&mut self, id: CurveId, k: CurveCmd) {
+        if k.point().is_some_and(|i| i >= self.curve(id).points.len()) {
+            return;
+        }
+        match k {
+            CurveCmd::CopyLevel(i) => self.level_clip = Some(self.curve(id).points[i].level),
+            CurveCmd::CopyState => self.curve_clip = Some(self.curve(id).clone()),
+            k => {
+                let (level, clip) = (self.level_clip, self.curve_clip.clone());
+                self.edit_curve(id, |c| match k {
+                    CurveCmd::Delete(i) => {
+                        edit::delete_point(c, i);
+                    }
+                    CurveCmd::Mode(i, v) => edit::set_mode(c, i, v),
+                    CurveCmd::Break(i, v) => edit::set_break(c, i, v),
+                    CurveCmd::Marker(i, m) => edit::toggle_marker(c, i, m),
+                    CurveCmd::PasteLevel(i) => {
+                        if let Some(l) = level {
+                            let t = edit::times(c)[i];
+                            edit::move_point(c, i, t, l, false);
+                        }
+                    }
+                    CurveCmd::PasteState => {
+                        if let Some(s) = clip.filter(|s| s.kind == c.kind) {
+                            *c = s;
+                        }
+                    }
+                    CurveCmd::AllLoop => edit::make_all_loop(c),
+                    CurveCmd::Flip => edit::flip(c),
+                    CurveCmd::Normalize => edit::normalize(c),
+                    CurveCmd::AllSmooth => edit::all_smooth(c),
+                    CurveCmd::CopyLevel(_) | CurveCmd::CopyState => {}
+                });
+            }
+        }
+    }
+
+    fn harm_cmd(&mut self, m: usize, k: HarmCmd) {
+        if k == HarmCmd::Copy {
+            let op = &self.st.modules[m].op;
+            self.harm_clip = Some((op.levels.clone(), op.phases.clone()));
+            return;
+        }
+        let smooth = self.st.switch(2) != 0;
+        self.seed = self.seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        let (seed, clip) = (self.seed, self.harm_clip.clone());
+        let op = &mut self.st.modules[m].op;
+        let before = op.clone();
+        match k {
+            HarmCmd::Convert => edit::convert_to_harmonics(op, smooth),
+            HarmCmd::Transpose => edit::transpose_up(op),
+            HarmCmd::Shift(right) => edit::shift(op, right),
+            HarmCmd::Gibbs => edit::attenuate_gibbs(op),
+            HarmCmd::ResetPhases => edit::reset_phases(op),
+            HarmCmd::RandomPhases => edit::randomize_phases(op, seed),
+            HarmCmd::Paste => {
+                if let Some((l, p)) = clip {
+                    (op.levels, op.phases) = (l, p);
+                }
+            }
+            HarmCmd::Copy => {}
+        }
+        if *op != before {
+            self.commit();
         }
     }
 
@@ -578,6 +1030,8 @@ impl Logic {
             }
             Cmd::TypeIn(f) => return vec![Act::TypeIn(f, x, y)],
             Cmd::Set(f, v) => self.set(f, v),
+            Cmd::Curve(id, k) => self.curve_cmd(id, k),
+            Cmd::Harm(m, k) => self.harm_cmd(m, k),
         }
         vec![Act::Repaint]
     }
@@ -1355,14 +1809,28 @@ mod tests {
             l.view.ring = false;
             l.view.page = 1;
             save(&mut l, "citrus_deep_op1", 1.0);
+            // A point hovered, the snap and slide tools on.
+            paint(&mut l);
+            if let Some(h) = l.hits.iter().find(|h| h.t == Target::Point(1)) {
+                l.view.mouse = Some((h.r.cx(), h.r.cy()));
+            }
+            l.view.tools = [false, false, true, true];
+            save(&mut l, "citrus_deep_op1_point", 1.0);
+            l.view.tools = [false; 4];
+            l.view.mouse = None;
             l.view.target[1] = 6;
             save(&mut l, "citrus_deep_op1_osc", 1.0);
+            l.view.harm_scroll = 40;
+            save(&mut l, "citrus_deep_op1_osc_scrolled", 1.0);
+            l.view.harm_scroll = 0;
             l.view.target[1] = 1;
             l.view.part[1] = 1;
             save(&mut l, "citrus_deep_op1_lfo", 1.0);
             l.view.page = 7;
             l.view.target[7] = 2;
             save(&mut l, "citrus_deep_filter1", 1.0);
+            l.view.target[7] = 7;
+            save(&mut l, "citrus_deep_filter1_ws", 1.0);
             l.view.page = view::PAGE_FX;
             save(&mut l, "citrus_deep_fx", 1.0);
             l.view.fx_unit = 3;
@@ -1536,5 +2004,146 @@ mod tests {
         let (x, y) = centre(&l, &Target::Box(Field::S(24)));
         l.wheel(x, y, 1.0, Mods::default());
         assert_eq!(saved(&l).s[24], ctl::get(&crate::preset::default_patch(), Field::S(24)) + 1);
+    }
+
+    /// The curve view: a right click on empty space adds a point, a drag moves it, its menu sets its mode and a
+    /// marker, a tension handle bends its segment, snap lands it on the grid, freeze hides the points, and the
+    /// Options menu's state copy and tools work.
+    #[test]
+    fn curve_view_edits_points() {
+        let mut l = logic();
+        l.view.page = 1;
+        paint(&mut l);
+        let env = |l: &Logic| saved(l).modules[0].arts[OP_VOLUME].env.clone();
+        let id = CurveId::Part(0, OP_VOLUME, 0);
+        let n = l.st.modules[0].arts[OP_VOLUME].env.points.len();
+        let inner = view::curve_inner();
+        // Right of the last point (the view spans the curve and a tenth more).
+        l.down(inner.right() - 4.0, inner.y + inner.h * 0.25, Btn::Right, Mods::default(), false);
+        let c = env(&l);
+        assert_eq!(c.points.len(), n + 1);
+        assert!((c.points[n].level - 0.75).abs() < 0.01, "{}", c.points[n].level);
+        // Drag it to the top.
+        paint(&mut l);
+        let (px, py) = centre(&l, &Target::Point(n));
+        let acts = l.down(px, py, Btn::Left, Mods::default(), false);
+        assert!(acts.contains(&Act::Capture));
+        assert!(l.hint.starts_with(&format!("Point {}/{}:", n + 1, n + 1)), "{}", l.hint);
+        l.moved(px, inner.y - 10.0, Mods::default());
+        assert!(l.hint.ends_with("\t100%"), "{}", l.hint);
+        l.up(Btn::Left);
+        let c = env(&l);
+        assert_eq!(c.points[n].level, 1.0);
+        assert!((edit::times(&c)[n] - edit::times(&l.st.modules[0].arts[OP_VOLUME].env)[n]).abs() < 1e-9);
+        // Its menu.
+        paint(&mut l);
+        let (px, py) = centre(&l, &Target::Point(n));
+        let acts = l.down(px, py, Btn::Right, Mods::default(), false);
+        let req = MenuReq::Point(id, n);
+        assert!(acts.contains(&Act::Menu(req.clone(), px, py)));
+        let _ = l.menu(&req);
+        l.pick(&req, Cmd::Curve(id, CurveCmd::Mode(n, 10)), px, py);
+        l.pick(&req, Cmd::Curve(id, CurveCmd::Marker(n, 2)), px, py);
+        let c = env(&l);
+        assert_eq!((c.points[n].mode, c.sustain), (10, n as i32));
+        // A tension handle: up raises the segment's middle.
+        l.pick(&req, Cmd::Curve(id, CurveCmd::Mode(n, 0)), px, py);
+        paint(&mut l);
+        let before = edit::segment_level(&l.st.modules[0].arts[OP_VOLUME].env, n, 0.5);
+        let (tx, ty) = centre(&l, &Target::Tension(n));
+        let acts = l.down(tx, ty, Btn::Left, Mods::default(), false);
+        assert!(acts.contains(&Act::Lock));
+        l.delta(0.0, -30.0, Mods::default());
+        assert!(l.hint.starts_with(&format!("Point {} to {} tension\t", n, n + 1)), "{}", l.hint);
+        l.up(Btn::Left);
+        let c = env(&l);
+        assert!(edit::segment_level(&c, n, 0.5) > before);
+        assert!(c.points[n].tension != 0.0);
+        // Snap: the level lands on a sixteenth.
+        let (sx, sy) = centre(&l, &Target::Tool(2));
+        l.down(sx, sy, Btn::Left, Mods::default(), false);
+        assert_eq!(l.hint, "Snap to grid");
+        paint(&mut l);
+        let (px, py) = centre(&l, &Target::Point(n));
+        l.down(px, py, Btn::Left, Mods::default(), false);
+        l.moved(px, inner.bottom() - inner.h * 0.53, Mods::default());
+        l.up(Btn::Left);
+        assert_eq!(env(&l).points[n].level, 0.5);
+        // The Options menu: copy the state, paste it into the LFO, flip it.
+        let (ox, oy) = centre(&l, &Target::CurveOptions);
+        let acts = l.down(ox, oy, Btn::Left, Mods::default(), false);
+        assert!(acts.contains(&Act::Menu(MenuReq::Curve(id), ox, oy)));
+        let _ = l.menu(&MenuReq::Curve(id));
+        l.pick(&MenuReq::Curve(id), Cmd::Curve(id, CurveCmd::CopyState), ox, oy);
+        l.pick(&MenuReq::Curve(id), Cmd::Curve(id, CurveCmd::Flip), ox, oy);
+        assert_eq!(env(&l).points[n].level, 0.5);
+        assert_eq!(env(&l).points[0].level, 1.0 - c.points[0].level);
+        let lfo = CurveId::Part(0, OP_VOLUME, 1);
+        let lfo_before = l.st.modules[0].arts[OP_VOLUME].lfo.clone();
+        l.pick(&MenuReq::Curve(lfo), Cmd::Curve(lfo, CurveCmd::PasteState), ox, oy);
+        assert_eq!(l.st.modules[0].arts[OP_VOLUME].lfo, lfo_before, "a state pastes into a curve of its kind only");
+        // Freeze hides the points.
+        let (fx, fy) = centre(&l, &Target::Tool(0));
+        l.down(fx, fy, Btn::Left, Mods::default(), false);
+        paint(&mut l);
+        assert!(!l.hits.iter().any(|h| matches!(h.t, Target::Point(_) | Target::Tension(_))));
+        // A filter's wave shaper: a map, its ends kept.
+        l.view.tools = [false; 4];
+        l.view.page = 7;
+        l.view.target[7] = 7;
+        paint(&mut l);
+        let ws = l.st.modules[6].filter.shaper.points.len();
+        l.down(inner.x + inner.w * 0.5, inner.y + inner.h * 0.5, Btn::Right, Mods::default(), false);
+        let s = saved(&l).modules[6].filter.shaper.clone();
+        assert_eq!(s.points.len(), ws + 1);
+        assert!((edit::times(&s).last().unwrap() - 1.0).abs() < 1e-6);
+    }
+
+    /// The harmonics editor: a drag paints the bars it passes, the wheel scrolls, the Options menu's tools and the
+    /// waveform menu's conversion edit the operator.
+    #[test]
+    fn harmonics_editor_paints_levels() {
+        let mut l = logic();
+        l.view.page = 1;
+        l.view.target[1] = 6;
+        paint(&mut l);
+        let b = view::harm_bars();
+        let (x0, _) = centre(&l, &Target::Harm(0));
+        let (x4, _) = centre(&l, &Target::Harm(4));
+        let acts = l.down(x0, b.bottom() - b.h * 0.5, Btn::Left, Mods::default(), false);
+        assert!(acts.contains(&Act::Capture));
+        l.moved(x4, b.y - 5.0, Mods::default());
+        assert_eq!(l.hint, "Harmonic 5 magnitude: 100%\t+2oct");
+        l.up(Btn::Left);
+        let levels = saved(&l).modules[0].op.levels.clone();
+        for (h, want) in [0.5, 0.625, 0.75, 0.875, 1.0].into_iter().enumerate() {
+            assert!((levels[h] - want).abs() < 0.01, "harmonic {h}: {}", levels[h]);
+        }
+        l.wheel(x0, b.cy(), -1.0, Mods::default());
+        paint(&mut l);
+        let first = l.hits.iter().find(|h| matches!(h.t, Target::Harm(_))).unwrap();
+        assert_eq!(first.t, Target::Harm(8));
+        let (ox, oy) = centre(&l, &Target::HarmOptions);
+        let acts = l.down(ox, oy, Btn::Left, Mods::default(), false);
+        assert!(acts.contains(&Act::Menu(MenuReq::Harm(0), ox, oy)));
+        let _ = l.menu(&MenuReq::Harm(0));
+        l.pick(&MenuReq::Harm(0), Cmd::Harm(0, HarmCmd::Shift(true)), ox, oy);
+        assert!((saved(&l).modules[0].op.levels[1] - 0.5).abs() < 0.01);
+        l.pick(&MenuReq::Harm(0), Cmd::Harm(0, HarmCmd::RandomPhases), ox, oy);
+        assert!(saved(&l).modules[0].op.phases.iter().any(|&p| p != 0.0));
+        // The waveform menu: a saw over the painted harmonics, converted, plays the same cycle (normalised again: the
+        // pre-filter had lowered its peak).
+        l.pick(&MenuReq::Wave(0), Cmd::Set(Field::Op(0, 3), 256), ox, oy);
+        let smooth = l.st.switch(2) != 0;
+        let before = crate::wave::build(&l.st.modules[0].op, smooth).t;
+        l.pick(&MenuReq::Wave(0), Cmd::Harm(0, HarmCmd::Convert), ox, oy);
+        let op = saved(&l).modules[0].op.clone();
+        assert_eq!(op.shape[0], 0);
+        let after = crate::wave::build(&op, smooth).t;
+        let n = crate::wave::N;
+        let peak = |t: &[f32]| t[..n].iter().fold(0f32, |m, x| m.max(x.abs()));
+        let (pb, pa) = (peak(&before), peak(&after));
+        let rms = (before[..n].iter().zip(&after[..n]).map(|(a, b)| f64::from(a / pb - b / pa).powi(2)).sum::<f64>() / n as f64).sqrt();
+        assert!(rms < 0.02, "rms difference {rms}");
     }
 }

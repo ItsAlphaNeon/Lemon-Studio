@@ -522,7 +522,13 @@ impl State {
                 (b[0], b[1], b[40], b[44]) = (u8::from(f.oversample), u8::from(f.track), u8::from(f.shaper_on), f.kind);
                 w.extend_from_slice(&b);
                 let shaper_end = lay.and_then(|l| l.arts.first()).map(|a| a - usize::from(self.version >= 12));
-                match span(block.map(|x| x + n), shaper_end) {
+                // The shaper as it was stored unless it was edited.
+                let unedited = |old: &&[u8]| {
+                    let mut c = Curve::read(&mut Reader::new(old), MAP);
+                    c.as_mut().map(Curve::keep_sytrus);
+                    c.as_ref() == Some(&f.shaper)
+                };
+                match span(block.map(|x| x + n), shaper_end).filter(unedited) {
                     Some(old) => w.extend_from_slice(old),
                     None => f.shaper.write(&mut w),
                 }

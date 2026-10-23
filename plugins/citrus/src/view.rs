@@ -5,13 +5,14 @@
 //! Citrus editor: painting and hit regions (platform independent). Sytrus's layout at its Small size, every control
 //! where FL has it, unstyled: flat placeholder colours, no artwork (the Lemon design comes later). The page tabs,
 //! the header buttons, the main page, the operator, filter and FX pages' controls with their articulators' tabs and
-//! bars, the matrix and the testing keyboard. The curve view shows its curve (editing it comes in stage 3).
+//! bars with the curve view and the harmonics editor, the matrix and the testing keyboard.
 //!
 // spec: plugins/sytrus-editor.md (§1 .. §7), plugins/citrus.md §6
 
 use os_ui::{Canvas, Color, Font, Rect};
 
 use crate::ctl::{self, Field};
+use crate::edit;
 use crate::state::*;
 
 /// Editor size in logical pixels, with the testing keyboard and without it.
@@ -98,6 +99,19 @@ pub enum Target {
     Digit(Field, i32),
     /// An operator's waveform: its menu on right click.
     Wave(usize),
+    /// The curve view: a point (drag, its menu on right click), a segment's tension handle (drag), empty space (a
+    /// right click adds a point).
+    Point(usize),
+    Tension(usize),
+    CurveArea,
+    /// The curve tools: freeze, step, snap, slide.
+    Tool(usize),
+    /// The Options arrows of the curve view and of the harmonics editor.
+    CurveOptions,
+    HarmOptions,
+    /// A harmonic's bar (drag paints levels) and the harmonics' scroll bar.
+    Harm(usize),
+    HarmScroll,
     /// A control whose setting was not identified: it shows its hint and does nothing.
     Inert(&'static str),
     /// The info page or the block diagram: a click returns.
@@ -128,6 +142,12 @@ pub struct ViewState {
     pub part: [usize; PAGES],
     /// The FX page's unit (delays 0 .. 2, 3 the reverb).
     pub fx_unit: usize,
+    /// The curve view's time span while a point is dragged (it would follow the point otherwise).
+    pub span: Option<f64>,
+    /// The curve tools that are on (freeze, step, snap, slide).
+    pub tools: [bool; 4],
+    /// The first harmonic the harmonics editor shows.
+    pub harm_scroll: usize,
 }
 
 /// What a paint shows of the patch.
@@ -775,11 +795,9 @@ fn articulators(ui: &mut Ui, m: usize) {
             let c = &ui.m.st.modules[m].filter.shaper;
             curve_view(ui, c);
             panel(ui, BAR);
+            tools(ui);
         }
-        Shown::Harmonics => {
-            harmonics(ui, m);
-            panel(ui, BAR);
-        }
+        Shown::Harmonics => harmonics(ui, m),
     }
 }
 
@@ -793,25 +811,43 @@ fn tab(ui: &mut Ui, r: Rect, t: Target, label: &str, sel: bool, on: bool) {
     ui.hit(r, t);
 }
 
-/// The curve's points over the view: x by the points' times (maps over 0 .. 1), y by their levels.
-pub fn curve_points(c: &crate::curve::Curve, r: Rect) -> Vec<(f32, f32)> {
-    let mut t = 0f32;
-    let times: Vec<f32> = c
-        .points
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            if i > 0 {
-                t += p.dist.max(0.0);
-            }
-            t
-        })
-        .collect();
-    let span = if c.kind == crate::curve::MAP { 1.0 } else { t.max(1e-3) * 1.05 };
-    c.points.iter().zip(times).map(|(p, t)| (r.x + r.w * (t / span).min(1.0), r.bottom() - r.h * p.level.clamp(0.0, 1.0))).collect()
+/// Where the curve view draws its curve.
+pub fn curve_inner() -> Rect {
+    CURVE.inset(6.0)
 }
 
-/// The curve view: a grid, the curve with the area below it tinted, its points and markers (read only for now).
+/// The time the curve view spans: a map 0 .. 1, an envelope or LFO its length and a tenth more (at least one unit,
+/// half a second or a beat).
+pub fn curve_span(c: &crate::curve::Curve) -> f64 {
+    if c.kind == crate::curve::MAP {
+        1.0
+    } else {
+        (edit::times(c).last().copied().unwrap_or(0.0) * 1.1).max(1.0)
+    }
+}
+
+pub fn t_to_x(t: f64, span: f64) -> f32 {
+    let r = curve_inner();
+    r.x + r.w * (t / span) as f32
+}
+
+pub fn x_to_t(x: f32, span: f64) -> f64 {
+    let r = curve_inner();
+    f64::from((x - r.x) / r.w).max(0.0) * span
+}
+
+pub fn level_to_y(l: f32) -> f32 {
+    let r = curve_inner();
+    r.bottom() - r.h * l.clamp(0.0, 1.0)
+}
+
+pub fn y_to_level(y: f32) -> f32 {
+    let r = curve_inner();
+    ((r.bottom() - y) / r.h).clamp(0.0, 1.0)
+}
+
+/// The curve view: a grid, the curve with the area below it tinted, its points (filled), its tension handles
+/// (hollow, halfway along their segments) and its markers.
 fn curve_view(ui: &mut Ui, c: &crate::curve::Curve) {
     let r = CURVE;
     let map = c.kind == crate::curve::MAP;
@@ -824,30 +860,94 @@ fn curve_view(ui: &mut Ui, c: &crate::curve::Curve) {
         let y = (r.y + r.h * k as f32 / 4.0).round();
         ui.c.fill_rect(Rect::new(r.x, y, r.w, 1.0), BG);
     }
-    let inner = r.inset(6.0);
-    let pts = curve_points(c, inner);
-    if pts.is_empty() {
+    let inner = curve_inner();
+    let span = ui.st.span.unwrap_or_else(|| curve_span(c));
+    let ts = edit::times(c);
+    let n = ts.len();
+    if n == 0 {
         return;
     }
-    let ink = if c.enabled { ACCENT } else { DIM };
-    let mut area = pts.clone();
-    area.push((pts.last().unwrap().0, inner.bottom()));
-    area.push((pts[0].0, inner.bottom()));
-    ui.c.fill_polygon(&area, ink.with_alpha(40));
-    ui.c.polyline(&pts, 1.5, ink);
-    for &(x, y) in &pts {
-        ui.c.fill_circle(x, y, 2.5, ink);
+    let mut line = vec![(t_to_x(0.0, span), level_to_y(c.points[0].level))];
+    for i in 1..n {
+        let (x0, x1) = (t_to_x(ts[i - 1], span), t_to_x(ts[i], span));
+        let steps = ((x1 - x0) / 2.0).ceil().clamp(1.0, 200.0) as usize;
+        for s in 1..=steps {
+            let x = s as f64 / steps as f64;
+            line.push((x0 + (x1 - x0) * x as f32, level_to_y(edit::segment_level(c, i, x))));
+        }
+        line.push((x1, level_to_y(c.points[i].level)));
     }
+    let ink = if c.enabled || map { ACCENT } else { DIM };
+    let mut area = line.clone();
+    area.push((line.last().unwrap().0, inner.bottom()));
+    area.push((line[0].0, inner.bottom()));
+    ui.c.fill_polygon(&area, ink.with_alpha(40));
+    ui.c.polyline(&line, 1.5, ink);
     for (i, tag) in [(c.decay, "D"), (c.sustain, "S"), (c.loop_start, "L")] {
-        if let Some(&(x, _)) = usize::try_from(i).ok().and_then(|i| pts.get(i)) {
-            ui.c.fill_rect(Rect::new(x.round(), r.y, 1.0, r.h), DIM);
-            ui.c.text(SMALL, x + 2.0, r.bottom() - 12.0, DIM, tag);
+        if let Some(&t) = usize::try_from(i).ok().and_then(|i| ts.get(i)) {
+            let x = t_to_x(t, span).round();
+            ui.c.fill_rect(Rect::new(x, r.y, 1.0, r.h), DIM);
+            let tag_r = Rect::new(x - 5.0, r.bottom() - 13.0, 10.0, 11.0);
+            ui.c.fill_rect(tag_r, EDGE);
+            ui.c.text_center(SMALL, tag_r, TEXT, tag);
         }
     }
-    ui.hit(r, Target::Inert("Curve editing comes in a later stage"));
+    ui.hit(r, Target::CurveArea);
+    // Freeze editing / hide points.
+    if ui.st.tools[0] {
+        return;
+    }
+    for i in 1..n {
+        if c.points[i].mode == 2 {
+            continue;
+        }
+        let (x0, x1) = (t_to_x(ts[i - 1], span), t_to_x(ts[i], span));
+        let (x, y) = ((x0 + x1) / 2.0, level_to_y(edit::segment_level(c, i, 0.5)));
+        let t = Target::Tension(i);
+        let hr = Rect::new(x - 4.0, y - 4.0, 8.0, 8.0);
+        let hot = ui.hot(hr, &t);
+        ui.c.stroke_circle(x, y, 3.0, 1.0, if hot { TEXT } else { ink });
+        ui.hit(hr, t);
+    }
+    for (i, &t) in ts.iter().enumerate() {
+        let (x, y) = (t_to_x(t, span), level_to_y(c.points[i].level));
+        let tg = Target::Point(i);
+        let hr = Rect::new(x - 5.0, y - 5.0, 10.0, 10.0);
+        let hot = ui.hot(hr, &tg);
+        ui.c.fill_circle(x, y, if hot { 4.0 } else { 3.0 }, if hot { TEXT } else { ink });
+        ui.hit(hr, tg);
+    }
 }
 
-/// The OSC target: the cycle on top, the harmonics' levels below (the first 88).
+/// Harmonics shown at once (FL: 88) and the bars' area.
+pub const HARM_VISIBLE: usize = 88;
+pub fn harm_bars() -> Rect {
+    Rect::span(CURVE.x + 4.0, CURVE.right() - 4.0, CURVE.y + 64.0, CURVE.bottom() - 2.0)
+}
+
+/// The harmonic under `x` (scrolled by `scroll`).
+pub fn harm_at(x: f32, scroll: usize) -> usize {
+    let b = harm_bars();
+    let k = ((x - b.x) / (b.w / HARM_VISIBLE as f32)).floor().clamp(0.0, (HARM_VISIBLE - 1) as f32) as usize;
+    (scroll + k).min(255)
+}
+
+/// The level a harmonic's bar shows at `y`.
+pub fn harm_level(y: f32) -> f32 {
+    let b = harm_bars();
+    ((b.bottom() - y) / b.h).clamp(0.0, 1.0)
+}
+
+/// The harmonics' scroll bar.
+pub const HARM_SCROLL: Rect = Rect::new(160.0, 312.0, 385.0, 12.0);
+
+/// The scroll a click on the scroll bar at `x` gives.
+pub fn harm_scroll_at(x: f32) -> usize {
+    let n = 256 - HARM_VISIBLE;
+    (((x - HARM_SCROLL.x) / HARM_SCROLL.w).clamp(0.0, 1.0) * n as f32).round() as usize
+}
+
+/// The OSC target: the cycle on top, the harmonics' levels below as bars.
 fn harmonics(ui: &mut Ui, m: usize) {
     let r = CURVE;
     ui.c.fill_rect(r, WELL);
@@ -859,16 +959,44 @@ fn harmonics(ui: &mut Ui, m: usize) {
         ui.c.polyline(&pts, 1.2, ACCENT);
     }
     let levels = &ui.m.st.modules[m].op.levels;
-    let bars = Rect::span(r.x + 4.0, r.right() - 4.0, top.bottom() + 4.0, r.bottom() - 2.0);
-    for (h, &l) in levels.iter().take(88).enumerate() {
-        let x = bars.x + h as f32 * bars.w / 88.0;
+    let bars = harm_bars();
+    let scroll = ui.st.harm_scroll.min(256 - HARM_VISIBLE);
+    let bw = bars.w / HARM_VISIBLE as f32;
+    let hot = ui.st.mouse.filter(|&(x, y)| bars.contains(x, y)).map(|(x, _)| harm_at(x, scroll));
+    for k in 0..HARM_VISIBLE {
+        let h = scroll + k;
+        let l = levels.get(h).copied().unwrap_or(0.0);
+        let x = bars.x + k as f32 * bw;
         let y = bars.bottom() - bars.h * l.clamp(0.0, 1.0);
-        ui.c.fill_rect(Rect::span(x, x + 5.0, y, bars.bottom()), if l > 0.0 { ACCENT } else { FAINT });
+        let fill = if hot == Some(h) { TEXT } else if l > 0.0 { ACCENT } else { FAINT };
+        ui.c.fill_rect(Rect::span(x + 0.5, x + bw - 0.5, y.min(bars.bottom() - 1.0), bars.bottom()), fill);
+        ui.hit(Rect::new(x, bars.y, bw, bars.h), Target::Harm(h));
     }
-    ui.hit(r, Target::Inert("Harmonics editing comes in a later stage"));
+    panel(ui, BAR);
+    // The scroll bar.
+    ui.c.fill_rect(HARM_SCROLL, WELL);
+    let tw = HARM_SCROLL.w * HARM_VISIBLE as f32 / 256.0;
+    let tx = HARM_SCROLL.x + (HARM_SCROLL.w - tw) * scroll as f32 / (256 - HARM_VISIBLE) as f32;
+    ui.c.fill_rect(Rect::new(tx, HARM_SCROLL.y + 2.0, tw, HARM_SCROLL.h - 4.0), EDGE);
+    ui.hit(HARM_SCROLL, Target::HarmScroll);
+    options_arrow(ui, Target::HarmOptions);
+    lamp(ui, Target::Inert("Smooth"), false, 190.0, 336.0, "SMOOTH", false);
 }
 
-/// The bar under the curve view: the part's switch, the envelope's or LFO's knobs and switches, the tools.
+/// The Options arrow under the view (167, 335).
+fn options_arrow(ui: &mut Ui, t: Target) {
+    let r = Rect::new(160.0, 328.0, 14.0, 14.0);
+    let hot = ui.hot(r, &t);
+    ui.c.fill_polygon(&[(163.0, 333.0), (171.0, 333.0), (167.0, 338.0)], if hot { TEXT } else { DIM });
+    ui.hit(r, t);
+}
+
+pub const TOOL_X: [f32; 4] = [458.0, 482.0, 505.0, 529.0];
+pub const TOOL_NAMES: [&str; 4] = ["Freeze editing / hide points", "Step editing", "Snap to grid", "Slide succeeding points / regions"];
+const TOOL_LABELS: [&str; 4] = ["FRZ", "STP", "SNP", "SLD"];
+
+/// The bar under the curve view: the part's switch, the envelope's or LFO's knobs and switches, the Options arrow
+/// and the tools.
 fn bar(ui: &mut Ui, m: usize, a: usize, p: usize) {
     panel(ui, BAR);
     switch(ui, Field::Part(m, a, p, 0), 15.0, 320.0, "");
@@ -880,10 +1008,19 @@ fn bar(ui: &mut Ui, m: usize, a: usize, p: usize) {
         switch(ui, Field::Part(m, a, p, 5), 123.0, 319.0, "TEMPO");
         switch(ui, Field::Part(m, a, p, 6), 123.0, 335.0, "GLOBAL");
     }
-    for (x, h) in [(458.0, "Freeze editing / hide points"), (482.0, "Step editing"), (505.0, "Snap to grid"), (529.0, "Slide succeeding points / regions")] {
+    tools(ui);
+}
+
+fn tools(ui: &mut Ui) {
+    options_arrow(ui, Target::CurveOptions);
+    for (k, x) in TOOL_X.into_iter().enumerate() {
         let r = Rect::new(x - 10.0, 327.0, 20.0, 16.0);
-        ui.c.fill_rect(r, WELL);
-        ui.hit(r, Target::Inert(h));
+        let t = Target::Tool(k);
+        let hot = ui.hot(r, &t);
+        let on = ui.st.tools[k];
+        ui.c.fill_rect(r, if on { ACCENT } else if hot { EDGE } else { WELL });
+        ui.c.text_center(SMALL, r, if on { BG } else { DIM }, TOOL_LABELS[k]);
+        ui.hit(r, t);
     }
 }
 
