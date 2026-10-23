@@ -15,6 +15,7 @@ pub mod limiter;
 pub mod reverb;
 pub mod soft_clipper;
 pub mod stereo_enhancer;
+pub mod transient_processor;
 
 pub use biquad::Biquad;
 
@@ -40,6 +41,9 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
         "Fruity Fast Dist" => fast_dist::FastDist::from_state(state).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Balance" => balance::Balance::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Stereo Enhancer" => stereo_enhancer::StereoEnhancer::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Transient Processor" => {
+            transient_processor::TransientProcessor::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
+        }
         _ => None,
     }
 }
