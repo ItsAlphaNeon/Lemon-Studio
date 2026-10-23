@@ -200,6 +200,55 @@ pub fn read(left: &[f32], right: &[f32], pos: f64, ratio: f64, quality: Quality)
     (l, r)
 }
 
+/// The frames a [`read`] at `pos` and `ratio` of a sample of `len` frames uses: the first and the last (inclusive).
+pub fn reach(len: usize, pos: f64, ratio: f64) -> (usize, usize) {
+    if len == 0 {
+        return (0, 0);
+    }
+    let k0 = pos.max(0.0).floor();
+    let f = pos.max(0.0) - k0;
+    let last = len as i64 - 1;
+    let k0 = k0 as i64;
+    if f == 0.0 && ratio.abs() == 1.0 {
+        let i = k0.min(last) as usize;
+        return (i, i);
+    }
+    let n = half_width(ratio) as i64;
+    ((k0 - n + 1).clamp(0, last) as usize, (k0 + n).clamp(0, last) as usize)
+}
+
+/// [`read`] of a sample of `len` frames that are not in one slice: `at(i)` gives frame `i` (both sides), for `i` in
+/// [`reach`]. The same arithmetic in the same order, so the same frames give the same result to the bit.
+pub fn read_by(len: usize, pos: f64, ratio: f64, quality: Quality, at: impl Fn(usize) -> (f32, f32)) -> (f32, f32) {
+    if len == 0 {
+        return (0.0, 0.0);
+    }
+    let k0 = pos.max(0.0).floor();
+    let f = pos.max(0.0) - k0;
+    let k0 = k0 as i64;
+    if f == 0.0 && ratio.abs() == 1.0 {
+        return at((k0 as usize).min(len - 1));
+    }
+    let n = half_width(ratio);
+    let mut small = [0.0f32; 2 * N_MIN];
+    let mut big;
+    let w: &mut [f32] = if n == N_MIN {
+        &mut small
+    } else {
+        big = [0.0f32; 2 * N_MAX];
+        &mut big[..2 * n]
+    };
+    weights(f, ratio, n, quality, w);
+    let first = k0 - n as i64 + 1;
+    let (mut l, mut r) = (0.0f32, 0.0f32);
+    for (t, &w) in w.iter().enumerate() {
+        let (a, b) = at((first + t as i64).clamp(0, len as i64 - 1) as usize);
+        l += a * w;
+        r += b * w;
+    }
+    (l, r)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +318,26 @@ mod tests {
         let x: Vec<f32> = (0..100).map(|i| i as f32 * 0.01).collect();
         assert_eq!(read(&x, &x, 42.0, 1.0, Quality::Table), (0.42, 0.42));
         assert_eq!(read(&x, &x, 42.0, 1.0, Quality::Exact), (0.42, 0.42));
+    }
+
+    // A read through a frame function is the slice read to the bit, and touches only the frames `reach` names.
+    #[test]
+    fn a_read_by_frames_is_the_slice_read() {
+        let left: Vec<f32> = (0..3000).map(|i| ((i * 7919) % 1000) as f32 / 1000.0 - 0.5).collect();
+        let right: Vec<f32> = left.iter().rev().copied().collect();
+        for q in [Quality::Table, Quality::Exact] {
+            for &ratio in &[0.5, 1.0, 1.0884, 3.0, 17.0, 40.0, 900.0] {
+                for &pos in &[0.0, 0.25, 7.0, 15.5, 1000.0, 1000.3, 2990.7, 2999.0, 3200.5] {
+                    let (lo, hi) = reach(left.len(), pos, ratio);
+                    let at = |i: usize| {
+                        assert!(i >= lo && i <= hi, "{i} outside {lo}..={hi}");
+                        (left[i], right[i])
+                    };
+                    let a = read(&left, &right, pos, ratio, q);
+                    let b = read_by(left.len(), pos, ratio, q, at);
+                    assert_eq!((a.0.to_bits(), a.1.to_bits()), (b.0.to_bits(), b.1.to_bits()), "{q:?} {ratio} {pos}");
+                }
+            }
+        }
     }
 }

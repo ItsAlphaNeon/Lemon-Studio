@@ -1560,6 +1560,8 @@ impl App {
         let mode = if song { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern) };
         self.export_reveal = job.options.reveal;
         self.plugins.set_offline(job.options.hq);
+        // Lemon Sampler voices playing from disk wait for their frames in every export, high quality or not.
+        lemon_sampler::stream::set_exporting(true);
         self.transport.export(&p, mode, rate, job);
         self.export = Some((name, 0.0));
         self.invalidate();
@@ -1577,6 +1579,7 @@ impl App {
                 self.export = None;
                 self.midi_after_export();
                 self.plugins.set_offline(false);
+                lemon_sampler::stream::set_exporting(false);
                 self.state.message = Some(match r {
                     Ok((secs, files)) => {
                         if self.export_reveal {
@@ -11492,6 +11495,71 @@ mod tests {
             })
             .collect();
         assert!(wrong.is_empty(), "{} of {} frames: {:?}", wrong.len(), left.len(), &wrong[..wrong.len().min(8)]);
+    }
+
+    /// Lemon Sampler's Keep on disk (spec: plugins/lemon-sampler.md "Keep on disk (Lemon Studio)"): an export, high
+    /// quality off (the instances stay in realtime mode), of an audio clip playing from disk and a copy trimmed to start
+    /// half way into the file is the export with the sample in memory, to the bit.
+    #[test]
+    fn an_export_playing_from_disk_is_the_one_from_memory() {
+        use serde_json::json;
+        use std::time::Duration;
+        // 20 seconds of two tones and their overtones at 44100 Hz (the sampler resamples it to 48 kHz).
+        let wav = std::env::temp_dir().join(format!("os-app-keep-on-disk-{}.wav", std::process::id()));
+        let src: Vec<f32> = (0..20 * 44100)
+            .flat_map(|f| {
+                let t = f as f32 / 44100.0;
+                let tone = |hz: f32| (std::f32::consts::TAU * hz * t).sin();
+                [0.3 * tone(220.0) + 0.1 * tone(661.0), 0.3 * tone(331.0) + 0.1 * tone(997.0)]
+            })
+            .collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &src).unwrap();
+        let export = |keep: bool| -> Vec<u8> {
+            let mut a = App::new(None);
+            a.plugins = crate::plugins::Plugins::default();
+            a.plugins.available = crate::plugins::builtin();
+            a.plugins.set_rate(48000);
+            crate::playlist::add_audio_clip(&mut a.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+            let row = a.state.project.channels.len() - 1;
+            a.plugin_tick();
+            assert!(a.state.hosted_rows.contains(&row), "Lemon Sampler hosts the audio clip channel");
+            let st = crate::plugins::with_params(&a.plugins.state(row).unwrap(), &[("keep_disk", json!({ "bool": keep }))]).unwrap();
+            assert!(a.plugins.set_state(row, &st));
+            if keep {
+                assert!(lemon_sampler::stream::open_files() > 0, "the sample plays from disk");
+            }
+            a.transport.set_instruments(a.plugins.instruments());
+            let first = *crate::playlist::arr_mut(&mut a.state).clips.last().unwrap();
+            let second = os_model::Clip { position: first.position + first.length, length: first.length / 2, window: Some((10_000.0, 20_000.0)), ..first };
+            crate::playlist::arr_mut(&mut a.state).clips.push(second);
+            let p = crate::rack::play_project(&a.state);
+            let out = std::env::temp_dir().join(format!("os-app-keep-on-disk-{}-{keep}.wav", std::process::id()));
+            // As `start_export` does with high quality off.
+            a.plugins.set_offline(false);
+            lemon_sampler::stream::set_exporting(true);
+            a.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
+            let t0 = std::time::Instant::now();
+            loop {
+                match a.transport.export_status() {
+                    crate::transport::Export::Done(r) => break assert!(r.is_ok(), "{r:?}"),
+                    _ if t0.elapsed() > Duration::from_secs(120) => panic!("export did not finish"),
+                    _ => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+            lemon_sampler::stream::set_exporting(false);
+            let bytes = std::fs::read(&out).expect("file written");
+            let _ = std::fs::remove_file(&out);
+            bytes
+        };
+        let (ram, disk) = (export(false), export(true));
+        let _ = std::fs::remove_file(&wav);
+        assert_eq!(ram.len(), disk.len());
+        let frames = |b: &[u8]| b[44..].chunks_exact(4).map(|v| f32::from_le_bytes([v[0], v[1], v[2], v[3]])).collect::<Vec<f32>>();
+        let (a, b) = (frames(&ram), frames(&disk));
+        // Sound all the way through both clips (30 seconds).
+        assert!(a.len() >= 2 * 29 * 48000 && a[..2 * 29 * 48000].chunks(2 * 4800).all(|c| c.iter().any(|v| v.abs() > 0.05)));
+        let first = a.iter().zip(&b).position(|(x, y)| x.to_bits() != y.to_bits());
+        assert_eq!(first, None, "{:?}", first.map(|i| (i / 2, a[i], b[i])));
     }
 
     /// One sample on one playlist track twice, the copy starting half way through the first, with Project ▸ Automatic
