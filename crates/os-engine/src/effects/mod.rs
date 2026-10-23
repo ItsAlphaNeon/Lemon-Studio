@@ -6,7 +6,6 @@
 //! plugin state.
 
 pub mod balance;
-mod biquad;
 pub mod chorus;
 pub mod delay;
 pub mod dynamics;
@@ -19,8 +18,6 @@ pub mod stereo_enhancer;
 pub mod stereo_shaper;
 pub mod transient_processor;
 
-pub use biquad::Biquad;
-
 /// An insert effect processing interleaved stereo in place.
 pub trait Effect: Send {
     fn process(&mut self, buf: &mut [f32]);
@@ -29,6 +26,11 @@ pub trait Effect: Send {
     fn reset(&mut self) {}
     /// The song's tempo in BPM (effects with tempo-based times).
     fn set_tempo(&mut self, _bpm: f64) {}
+    /// The delay the effect puts its output out late by, in samples (a look-ahead; spec: audio/delay-compensation.md).
+    /// The engine reads it after every `process` and delays the other paths to match. Default: none.
+    fn latency(&self) -> usize {
+        0
+    }
     /// An extra output (Fruity Stereo Shaper's difference output): the number of the track's output it goes to,
     /// counted from 1, and what the block processed last put out on it, interleaved like the block (spec:
     /// audio/sidechain.md "Extra output").

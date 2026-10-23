@@ -71,7 +71,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Area | Status | Notes |
 |---|:---:|---|
 | Step sequencing and patterns | ✅ | Channel rack with steps, mini piano rolls, swing and per-channel loops |
-| Piano roll | ✅ | Full tool set, velocity and event lanes, quantize, chop, strum, arpeggiate and more |
+| Piano roll | ✅ | Full tool set, velocity and event lanes, quantize (FL's templates), chop (FL's patterns), strum, arpeggiate, flam, claw machine, flip, level scaling, limit, LFO and more |
 | Song arrangement | ✅ | Playlist with pattern, audio and automation clips, clip groups, markers and several arrangements |
 | Mixing and routing | ✅ | Mixer tracks, sends, effect slots and meters; no sidechain inputs yet |
 | Plugin hosting | ✅ | CLAP, VST3 and VST2 instruments and effects with their editors; on Windows a crashing plugin is stopped instead of closing Lemon Studio; no 32-bit plugins |
@@ -80,7 +80,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Playback engine | 🚧 | Renders ahead of the audio device so edits do not cause dropouts; voice limits, cut groups, glides, layer channels; one audio thread for now |
 | Automation | 🚧 | Clips for channel, mixer and plugin parameters with every curve shape; no recording or clip LFO yet |
 | Project files | 🚧 | Opens and saves projects from FL Studio 24.2 and later; older versions are on the roadmap. Keep backups |
-| Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ |
+| Built-in instruments and effects | 🚧 | A sampler (long samples can play straight from disk), a three-oscillator synth and a parametric EQ with all of FL's quality modes (HQ+, HQ Enhanced, linear phase) |
 | Exporting audio | ✅ | Song, pattern or selection to WAV, FLAC, MP3 and OGG at once; bit depth, sample rate, interpolation, dither, mono, tails, stems and WAV markers |
 | Note input | 🚧 | Mouse, computer keyboard and MIDI controllers (velocity curves, sustain pedal, pitch bend, aftertouch); no note recording yet |
 | MIDI controllers and sync | ✅ | Link any knob, fader or plugin parameter to a controller (or many at once with Multilink); MIDI clock and time code out, external clock in |
@@ -92,7 +92,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Audio recording | 🚧 | One-click audio recording into the playlist, from ASIO or system inputs |
 | MIDI file import / export | ❌ | |
 | Audio editing | ❌ | |
-| Plugin delay compensation | ❌ | |
+| Plugin delay compensation | 🚧 | Plugins' reported delays and the mixer tracks' latency settings, in playback and exports; the settings can't be edited yet |
 
 ✅ usable · 🚧 partial · ❌ not available yet
 
@@ -370,7 +370,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 
 The roadmap is kept on the [Lemon Studio Discord server](https://discord.gg/yC2uCuGs3M), where every item is
 marked as complete, in progress or not started. The broad next steps are the engine rework (sampler voice,
-automation, delay compensation), opening projects from older FL Studio versions, audio and note recording, more
+automation), opening projects from older FL Studio versions, audio and note recording, more
 built-in instruments and effects, and the rest of the plugin window features on Linux.
 
 ## Development approach

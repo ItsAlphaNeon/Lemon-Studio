@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Lemon Parametric EQ: Lemon Studio's 7-band parametric EQ as a VST3 / CLAP plugin (nih-plug).
+//! Lemon Parametric EQ: Lemon Studio's 7-band parametric EQ as a VST3 / CLAP plugin (nih-plug). The sound is the
+//! original's in every mode (`os_engine::effects::eq::Equalizer`); the plugin reports LIN's and HQ Enhanced's delay.
 //!
-// spec: plugins/lemon-parametric-eq-2.md, plugins/parametric-eq-2.md, plugins/plugin-formats.md
+// spec: plugins/lemon-parametric-eq-2.md, plugins/fruity-parametric-eq-2.md, plugins/parametric-eq-2.md,
+// plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod analyzer;
@@ -17,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nih_plug::prelude::*;
-use os_engine::effects::eq::{Band, Sections, Settings, BANDS};
+use os_engine::effects::eq::{Equalizer, Options, PARAMS};
 
 use params::EqParams;
 
@@ -57,48 +59,17 @@ impl Scope {
     }
 }
 
-/// Parameter changes glide over this many seconds (no zipper noise while dragging).
-const GLIDE: f64 = 0.008;
-/// Filters are redesigned at most every this many samples while gliding.
-const CHUNK: usize = 32;
-
-/// One band's filter sections and the settings they were designed for.
-#[derive(Clone, Copy, Default)]
-struct BandDsp {
-    secs: Sections,
-    designed: Option<Band>,
-}
-
-impl BandDsp {
-    fn design(&mut self, b: &Band, sr: f64) {
-        if self.designed.as_ref() == Some(b) {
-            return;
-        }
-        let new = b.sections(sr);
-        // Keep the filters' memory for sections that stay (a glide, not a restart).
-        for i in 0..new.n {
-            if i < self.secs.n {
-                self.secs.s[i].set_coefs(&new.s[i]);
-            } else {
-                self.secs.s[i] = new.s[i];
-                self.secs.s[i].reset();
-            }
-        }
-        self.secs.n = new.n;
-        self.designed = Some(*b);
-    }
-}
-
 pub struct LemonEq {
     params: Arc<EqParams>,
     shared: Arc<Shared>,
     sr: f64,
-    bands: [BandDsp; BANDS],
-    /// Settings the filters glide toward / are at.
-    cur: Option<Settings>,
-    gain: f64,
-    mask: u8,
-    /// Monitor (0 off, 1 input, 2 output) and input (1 Mid, 2 Side, 3 Left, 4 Right), read with the mask.
+    /// The original's processing (every mode), and the parameters it was last given as stored values.
+    eq: Equalizer,
+    applied: [i32; PARAMS],
+    /// The options read from the state image, and the delay last reported to the host.
+    opts: Options,
+    latency: u32,
+    /// Monitor (0 off, 1 input, 2 output) and input (1 Mid, 2 Side, 3 Left, 4 Right), read with the options.
     monitor: (u8, i32),
     extra_seen: u64,
     feed: Vec<f32>,
@@ -106,24 +77,22 @@ pub struct LemonEq {
 
 impl Default for LemonEq {
     fn default() -> Self {
+        let params = Arc::new(EqParams::default());
+        let opts = Options::from_image(&params::default_state());
+        let applied = params.settings(opts.mask).params();
         LemonEq {
-            params: Arc::new(EqParams::default()),
+            params,
             shared: Arc::new(Shared::default()),
             sr: 44100.0,
-            bands: [BandDsp::default(); BANDS],
-            cur: None,
-            gain: 1.0,
-            mask: 0x7f,
+            eq: Equalizer::new(44100.0, &applied, opts),
+            applied,
+            opts,
+            latency: 0,
             monitor: (2, 1),
             extra_seen: u64::MAX,
             feed: Vec::new(),
         }
     }
-}
-
-fn glide(cur: f64, to: f64, a: f64) -> f64 {
-    let v = cur + (to - cur) * a;
-    if (to - v).abs() < 1e-5 { to } else { v }
 }
 
 impl LemonEq {
@@ -134,29 +103,24 @@ impl LemonEq {
             return;
         }
         if let Ok(b) = self.params.extra.try_read() {
-            self.mask = params::mask(&b);
+            self.opts = Options::from_image(&b);
             self.monitor = (params::byte(&b, params::MONITOR_BYTE), params::opt(&b, params::Opt::MonitorInput));
             self.extra_seen = v;
         }
     }
 
-    /// Moves the current settings a step toward `t` and redesigns the bands that changed.
-    fn step(&mut self, t: &Settings, a: f64) {
-        let cur = self.cur.get_or_insert(*t);
-        for (c, t) in cur.bands.iter_mut().zip(&t.bands) {
-            c.kind = t.kind;
-            c.order = t.order;
-            c.db = glide(c.db, t.db, a);
-            c.freq = glide(c.freq, t.freq, a);
-            c.width = glide(c.width, t.width, a);
+    /// The parameters and options as they stand, handed to the processing: a changed value counts as an automation
+    /// value (coefficients anew from this block on, no smoothing, spec: "State and timing").
+    fn apply(&mut self) {
+        self.read_extra();
+        self.eq.set_options(self.opts);
+        let p = self.params.settings(self.opts.mask).params();
+        for (i, (&new, old)) in p.iter().zip(self.applied.iter_mut()).enumerate() {
+            if new != *old {
+                *old = new;
+                self.eq.set_param(i, new);
+            }
         }
-        cur.main_db = glide(cur.main_db, t.main_db, a);
-        cur.mask = t.mask;
-        let cur = *cur;
-        for (d, b) in self.bands.iter_mut().zip(&cur.bands) {
-            d.design(b, self.sr);
-        }
-        self.gain = 10f64.powf(cur.main_db / 20.0);
     }
 
     fn feed_scope(&mut self, l: &[f32], r: &[f32]) {
@@ -205,29 +169,33 @@ impl Plugin for LemonEq {
         Some(Box::new(editor::EqEditor::new(self.params.clone(), self.shared.clone())))
     }
 
-    fn initialize(&mut self, _layout: &AudioIOLayout, config: &BufferConfig, _ctx: &mut impl InitContext<Self>) -> bool {
+    fn initialize(&mut self, _layout: &AudioIOLayout, config: &BufferConfig, ctx: &mut impl InitContext<Self>) -> bool {
         self.sr = f64::from(config.sample_rate);
         self.shared.rate.store(config.sample_rate as u32, Ordering::Relaxed);
-        self.bands = [BandDsp::default(); BANDS];
-        self.cur = None;
         self.extra_seen = u64::MAX;
+        self.read_extra();
+        self.applied = self.params.settings(self.opts.mask).params();
+        self.eq = Equalizer::new(self.sr, &self.applied, self.opts);
+        self.latency = self.eq.latency() as u32;
+        ctx.set_latency_samples(self.latency);
         self.feed = Vec::with_capacity(config.max_buffer_size as usize);
         true
     }
 
+    /// A new instance's state, with FL's silent buffers before a render already run (LIN starts at full level).
     fn reset(&mut self) {
-        for b in &mut self.bands {
-            for s in &mut b.secs.s {
-                s.reset();
-            }
-        }
-        self.cur = None;
+        self.eq.reset();
+        self.eq.preroll();
     }
 
-    fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, _ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
-        self.read_extra();
-        let target = self.params.settings(self.mask);
-        let a = 1.0 - (-(CHUNK as f64) / (GLIDE * self.sr)).exp();
+    fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
+        self.apply();
+        // The delay is looked at every block and reported when it has changed (LIN on or off, its size, HQ Enhanced).
+        let latency = self.eq.latency() as u32;
+        if latency != self.latency {
+            self.latency = latency;
+            ctx.set_latency_samples(latency);
+        }
         let len = buffer.samples();
         let out = buffer.as_slice();
         if out.len() < 2 {
@@ -237,28 +205,8 @@ impl Plugin for LemonEq {
         if watch && self.monitor.0 == 1 {
             self.feed_scope(&out[0][..len], &out[1][..len]);
         }
-        let mut at = 0;
-        while at < len {
-            let end = (at + CHUNK).min(len);
-            self.step(&target, a);
-            let mask = self.mask;
-            let (left, right) = out.split_at_mut(1);
-            for i in at..end {
-                let (mut l, mut r) = (f64::from(left[0][i]), f64::from(right[0][i]));
-                for (k, b) in self.bands.iter_mut().enumerate() {
-                    if mask & (1 << k) == 0 {
-                        continue;
-                    }
-                    for s in &mut b.secs.s[..b.secs.n] {
-                        l = s.tick(0, l);
-                        r = s.tick(1, r);
-                    }
-                }
-                left[0][i] = (l * self.gain) as f32;
-                right[0][i] = (r * self.gain) as f32;
-            }
-            at = end;
-        }
+        let (left, right) = out.split_at_mut(1);
+        self.eq.process(&mut left[0][..len], &mut right[0][..len]);
         if watch && self.monitor.0 == 2 {
             self.feed_scope(&out[0][..len], &out[1][..len]);
         }

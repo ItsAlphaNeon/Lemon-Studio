@@ -17,6 +17,8 @@ use os_dsp::stretch::Stream;
 use os_engine::instrument::VOICE_GAIN_FRAMES;
 use os_engine::{envelope, laws, Sample};
 
+use crate::stream::{Feed, Played};
+
 /// Time stretch to `ratio` × the length, the pitch moved by the factor `shift` (spec §5.6: Signalsmith Stretch).
 pub fn stretch(s: &Sample, ratio: f64, shift: f64) -> Sample {
     let frames = (s.frames() as f64 * ratio).round().max(1.0) as usize;
@@ -286,6 +288,9 @@ struct Voice {
     xf: u32,
     /// The host's gain on the voice (CLAP volume expression: an audio clip's fades and gain), once it gives one.
     vol: Option<HostGain>,
+    /// Where it reads a sample kept on disk, and frames left of its fade back in after its frames came late.
+    feed: Feed,
+    gap: u32,
 }
 
 /// The gain the host gives a voice (`Engine::volume`): where it stands, where it glides to, the step per frame and the
@@ -322,6 +327,31 @@ const NEAR: f64 = 0.003;
 /// Frames of the crossfade from the plain reading to the stretcher when a voice starts stretching while it plays.
 /// **(OS)**
 const SWITCH: u32 = 256;
+
+/// **(Lemon Studio)** Frames of a voice's fade back in after its frames from disk came late (live playback only).
+const GAP: u32 = 64;
+
+/// The played sample a block renders: in memory, or kept on disk.
+enum Src {
+    Ram(Arc<Sample>),
+    Disk(Arc<Played>),
+}
+
+impl Src {
+    fn frames(&self) -> usize {
+        match self {
+            Src::Ram(s) => s.frames(),
+            Src::Disk(d) => d.frames(),
+        }
+    }
+
+    fn rate(&self) -> u32 {
+        match self {
+            Src::Ram(s) => s.rate,
+            Src::Disk(d) => d.rate(),
+        }
+    }
+}
 
 /// Nothing to stretch: `frames` of sample last about as long read at `step` (its pitch) as at `speed` (the stretch).
 fn nothing_to_stretch(frames: f64, step: f64, speed: f64, rate: f64) -> bool {
@@ -451,6 +481,11 @@ impl Rt {
 
 pub struct Engine {
     pub sample: Option<Arc<Sample>>,
+    /// **(Lemon Studio)** The played sample kept on disk (Keep on disk), played in place of `sample` (`set_disk`).
+    disk: Option<Arc<Played>>,
+    /// Voices wait for frames from disk that are not in yet, instead of playing silence until they are: an offline
+    /// render or an export.
+    pub wait: bool,
     /// The played sample's loop (start and end frame, both inclusive), whether or not voices use it.
     pub looped: Option<(usize, usize)>,
     /// Frames of the played sample that the whole loaded file stands for: per-note starts from a host are fractions of
@@ -474,6 +509,8 @@ impl Engine {
     pub fn new(rate: f32) -> Self {
         Engine {
             sample: None,
+            disk: None,
+            wait: false,
             looped: None,
             file_frames: 0.0,
             quality: Quality::Table,
@@ -487,6 +524,7 @@ impl Engine {
 
     pub fn set_rate(&mut self, rate: f32) {
         if rate != self.rate {
+            self.release_feeds();
             self.voices.clear();
             self.streams.clear();
             self.ended.clear();
@@ -496,6 +534,7 @@ impl Engine {
 
     /// Drops every voice. Not reported: a host resetting the instrument forgets its voices itself.
     pub fn reset(&mut self) {
+        self.release_feeds();
         self.voices.clear();
         self.streams.iter_mut().for_each(|r| r.busy = false);
         self.ended.clear();
@@ -506,9 +545,44 @@ impl Engine {
         self.ended.drain(..)
     }
 
-    /// A voice is over: its stretcher is free and a host voice's end is noted.
+    /// Plays `disk` (a played sample kept on disk) from now on, or `sample` when `None`. Voices reading another file
+    /// let go of their rings.
+    pub fn set_disk(&mut self, disk: Option<Arc<Played>>) {
+        let same = matches!((&self.disk, &disk), (Some(a), Some(b)) if Arc::ptr_eq(a.disk(), b.disk()));
+        if !same {
+            self.release_feeds();
+        }
+        self.disk = disk;
+    }
+
+    pub fn disk(&self) -> Option<&Arc<Played>> {
+        self.disk.as_ref()
+    }
+
+    /// Every voice lets go of its ring.
+    fn release_feeds(&mut self) {
+        if let Some(d) = self.disk.clone() {
+            for v in self.voices.iter_mut() {
+                d.release(&mut v.feed);
+            }
+        }
+    }
+
+    /// Length and rate of the played sample.
+    fn shape(&self) -> Option<(usize, u32)> {
+        match (&self.disk, &self.sample) {
+            (Some(d), _) => Some((d.frames(), d.rate())),
+            (None, Some(s)) => Some((s.frames(), s.rate)),
+            _ => None,
+        }
+    }
+
+    /// A voice is over: its stretcher and its ring are free and a host voice's end is noted.
     fn end(&mut self, v: &Voice) {
         self.free(v);
+        if let Some(d) = &self.disk {
+            d.release(&mut v.feed.clone());
+        }
         if v.host {
             self.ended.push((v.key, v.id));
         }
@@ -567,9 +641,9 @@ impl Engine {
 
     /// How many times its length the current sample lasts in Resample or a realtime method: TIME's length when set,
     /// else MUL (spec §5.6).
-    fn stretch_factor(b: &Block, s: &Sample) -> f64 {
+    fn stretch_factor(b: &Block, (frames, rate): (usize, u32)) -> f64 {
         let ratio = match b.ts_time {
-            Some(t) if s.frames() > 0 => t / (s.frames() as f64 / f64::from(s.rate.max(1))),
+            Some(t) if frames > 0 => t / (frames as f64 / f64::from(rate.max(1))),
             _ => b.ts_ratio,
         };
         ratio.max(1e-3)
@@ -588,8 +662,8 @@ impl Engine {
 
     fn start(&mut self, key: u8, velocity: f32, id: Option<i32>, host: bool, b: &Block) {
         let zkey = if b.add_key { i32::from(key) - (b.root - 60) } else { i32::from(key) };
-        let s = match self.sample.clone() {
-            Some(s) if zkey >= b.zone.0 && zkey <= b.zone.1 && s.frames() > 0 => s,
+        let (frames, rate) = match self.shape() {
+            Some((n, rate)) if zkey >= b.zone.0 && zkey <= b.zone.1 && n > 0 => (n, rate),
             _ => {
                 if host {
                     self.ended.push((key, id));
@@ -603,11 +677,11 @@ impl Engine {
             let v = self.voices.remove(0);
             self.end(&v);
         }
-        let ratio = f64::from(s.rate) / f64::from(self.rate);
+        let ratio = f64::from(rate) / f64::from(self.rate);
         let key_step = 2f64.powf((f64::from(key) - f64::from(b.root)) / 12.0) * ratio;
         // FL velocity byte = plugin velocity × 128; 100 = unity (spec: audio/sampler-playback.md).
         let vel = laws::velocity_gain((velocity.clamp(0.0, 1.0) * 128.0).round() as u8) as f32;
-        let pos = (b.start_offset.clamp(0.0, 1.0) * s.frames() as f64).floor();
+        let pos = (b.start_offset.clamp(0.0, 1.0) * frames as f64).floor();
         let open = if pos > 0.0 { fade_len(declick(b.declick).open_ms, f64::from(self.rate)) } else { 0 };
         let mut phase = [0.0; 5];
         for (i, t) in b.targets.iter().enumerate() {
@@ -615,7 +689,13 @@ impl Engine {
                 phase[i] = self.global_phase[i];
             }
         }
-        let rt = if b.realtime { self.take_stream() } else { None };
+        // The realtime methods stretch a sample in memory (one kept on disk is decoded for them).
+        let rt = if b.realtime && self.disk.is_none() { self.take_stream() } else { None };
+        // From disk: START OFFSET's frames are held, unless the knob just moved (the frames there start coming now).
+        let mut feed = Feed::default();
+        if let Some(d) = &self.disk {
+            d.start_at(&mut feed, pos, false);
+        }
         self.voices.push(Voice {
             key,
             host,
@@ -638,13 +718,15 @@ impl Engine {
             rt,
             xf: 0,
             vol: None,
+            feed,
+            gap: 0,
         });
     }
 
     pub fn note_off(&mut self, key: u8, b: &Block) {
         let close = Close::new(&declick(b.declick), f64::from(self.rate));
         let vol_env = b.targets[VOL].env.is_some();
-        let looped = self.sample.as_ref().is_some_and(|s| self.loop_frames(b, s.frames()).1.is_some());
+        let looped = self.shape().is_some_and(|(n, _)| self.loop_frames(b, n).1.is_some());
         for v in self.voices.iter_mut().filter(|v| v.key == key && v.off.is_none()) {
             v.off = Some(v.age);
             // A looping voice without a volume envelope closes at the note's end; a one-shot voice without one
@@ -659,14 +741,19 @@ impl Engine {
     /// counted in the played sample's frames (spec §7: a trimmed audio clip; audio/precomputed-effects.md "Audio
     /// clips": a trim selects frames of the processed sample by the file's rate).
     pub fn start_later(&mut self, id: i32, extra: f32, b: &Block) {
-        let Some(s) = &self.sample else { return };
-        let n = s.frames() as f64;
+        let Some((n, _)) = self.shape() else { return };
+        let n = n as f64;
         let file = if self.file_frames > 0.0 { self.file_frames } else { n };
         let open = fade_len(declick(b.declick).open_ms, f64::from(self.rate));
         for v in self.voices.iter_mut().filter(|v| v.id == Some(id) && v.age == 0) {
             let at = b.start_offset.clamp(0.0, 1.0) * n + f64::from(extra.max(0.0)) * file;
             v.pos = at.min(n).floor();
             v.open = if v.pos > 0.0 { open } else { 0 };
+            // From disk: the frames there start coming now, when they are not held, and are held from the next
+            // played sample on.
+            if let Some(d) = &self.disk {
+                d.start_at(&mut v.feed, v.pos, true);
+            }
         }
     }
 
@@ -742,9 +829,13 @@ impl Engine {
         for (i, t) in b.targets.iter().enumerate() {
             self.global_phase[i] = (self.global_phase[i] + t.lfo.hz * len as f64 / rate).fract();
         }
-        let Some(s) = self.sample.clone() else {
-            self.end_all();
-            return;
+        let s = match (&self.disk, &self.sample) {
+            (Some(d), _) => Src::Disk(d.clone()),
+            (None, Some(s)) => Src::Ram(s.clone()),
+            _ => {
+                self.end_all();
+                return;
+            }
         };
         let n = s.frames();
         if n == 0 {
@@ -753,20 +844,29 @@ impl Engine {
         }
         // Resample plays the sample faster or slower; a realtime voice reads `speed` input frames per output frame
         // and its stretcher keeps the pitch.
-        let factor = Self::stretch_factor(b, &s);
+        let factor = Self::stretch_factor(b, (n, s.rate()));
         let rs = if b.realtime { 1.0 } else { 1.0 / factor };
-        let speed = f64::from(s.rate) / rate / factor;
+        let speed = f64::from(s.rate()) / rate / factor;
         let lp = self.loop_frames(b, n);
         let mut i = 0;
         while i < self.voices.len() {
             let v = &mut self.voices[i];
-            let rt = v.rt.and_then(|k| self.streams.get_mut(usize::from(k)));
-            let alive = render_voice(v, rt, &s, b, (rs, speed), lp, rate, self.quality, out_l, out_r);
+            let rt = match s {
+                Src::Ram(_) => v.rt.and_then(|k| self.streams.get_mut(usize::from(k))),
+                Src::Disk(_) => None,
+            };
+            let alive = render_voice(v, rt, &s, b, (rs, speed), lp, rate, (self.quality, self.wait), out_l, out_r);
             if alive {
                 i += 1;
             } else {
                 let v = self.voices.swap_remove(i);
                 self.end(&v);
+            }
+        }
+        // The reader tops up the rings the block read from.
+        if let Src::Disk(d) = &s {
+            if self.voices.iter().any(|v| v.feed.active()) {
+                d.disk().wake();
             }
         }
     }
@@ -818,17 +918,17 @@ fn mods(v: &Voice, b: &Block, t: f64, off: Option<f64>) -> Option<Mods> {
 fn render_voice(
     v: &mut Voice,
     mut rt: Option<&mut Rt>,
-    s: &Sample,
+    src: &Src,
     b: &Block,
     (rs, speed): (f64, f64),
     (ls, le): (f64, Option<f64>),
     rate: f64,
-    quality: Quality,
+    (quality, wait): (Quality, bool),
     out_l: &mut [f32],
     out_r: &mut [f32],
 ) -> bool {
     let len = out_l.len();
-    let n = s.frames() as f64;
+    let n = src.frames() as f64;
     let dc = declick(b.declick);
     let frame_s = 1.0 / rate;
     let mut f = 0;
@@ -855,7 +955,7 @@ fn render_voice(
         let step = v.key_step * 2f64.powf((b.cents + m0.cents + v.tune * 100.0 + b.ts_cents) / 1200.0) * rs;
         // A realtime voice plays the sample by resampling while there is nothing to stretch (the root key, no PITCH,
         // MUL 1 or TIME the sample's own duration); its stretcher starts the first time there is, and stays. **(OS)**
-        if let Some(x) = rt.as_mut() {
+        if let (Some(x), Src::Ram(s)) = (rt.as_mut(), src) {
             if !x.started && !nothing_to_stretch(n, step, speed, rate) {
                 x.start(s, v.pos, step, speed, (ls, le));
                 v.xf = if v.age > 0 { SWITCH } else { 0 };
@@ -880,8 +980,8 @@ fn render_voice(
             if v.pos >= n && v.close.is_none() {
                 v.close = Some(Close::new(&dc, rate));
             }
-            let (mut l, mut r) = match rt.as_mut() {
-                Some(x) if stretching => {
+            let (mut l, mut r) = match (rt.as_mut(), src) {
+                (Some(x), Src::Ram(s)) if stretching => {
                     let (a, b) = x.frame(s, step, speed, (ls, le));
                     if v.xf > 0 {
                         let (pa, pb) = resample::read(&s.left, &s.right, v.pos, speed, quality);
@@ -892,7 +992,21 @@ fn render_voice(
                         (a, b)
                     }
                 }
-                _ => resample::read(&s.left, &s.right, v.pos, step.abs(), quality),
+                (_, Src::Ram(s)) => resample::read(&s.left, &s.right, v.pos, step.abs(), quality),
+                // From disk: the same frames read the same way. While its frames are late (live playback) the voice
+                // is silent and keeps time (the frames are skipped); it fades back in once they are there.
+                (_, Src::Disk(d)) => match d.read(&mut v.feed, v.pos, step.abs(), quality, wait) {
+                    Some((a, b)) if v.gap > 0 => {
+                        let g = 1.0 - v.gap as f32 / GAP as f32;
+                        v.gap -= 1;
+                        (a * g, b * g)
+                    }
+                    Some(x) => x,
+                    None => {
+                        v.gap = GAP;
+                        (0.0, 0.0)
+                    }
+                },
             };
             l = v.filt.run(0, j, l);
             r = v.filt.run(1, j, r);

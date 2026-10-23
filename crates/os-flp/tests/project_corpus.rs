@@ -670,6 +670,118 @@ fn added_mixer_tracks_survive() {
     assert!(checked > 100, "only {checked} files checked");
 }
 
+/// The mixer's slot window records (event 212, after the first track record 236): the track and slot they name,
+/// and the rest of the record, sorted.
+fn slot_records(file: &FlpFile) -> Vec<((u32, u32), Vec<u8>)> {
+    let le = |d: &[u8], at: usize| u32::from_le_bytes(d[at..at + 4].try_into().unwrap());
+    let events = file.chunks.iter().find_map(|c| match &c.body {
+        os_flp::ChunkBody::Events(e) => Some(e),
+        _ => None,
+    });
+    let Some(ev) = events else { return Vec::new() };
+    let first = ev.iter().position(|e| e.id == 236).unwrap_or(ev.len());
+    let mut out: Vec<_> = ev[first..]
+        .iter()
+        .filter(|e| e.id == 212)
+        .filter_map(|e| e.data())
+        .filter(|d| d.len() >= 8)
+        .map(|d| ((le(d, 0), le(d, 4)), d[8..].to_vec()))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Mixer tracks moved and deleted as the Mixer window does it take their effect slots with them: each slot's window
+/// record follows its track with the new track number, a deleted track's go, and the current track keeps its own as
+/// track 501 (spec: flp/events/mixer.md "Removing tracks", "The last track").
+#[test]
+fn renumbered_mixer_tracks_survive() {
+    use os_model::MixerTrack;
+    let Some(paths) = corpus() else { return };
+    let mut checked = 0;
+    for path in &paths {
+        let bytes = std::fs::read(path).unwrap();
+        let Ok(project) = load(&FlpFile::parse(&bytes).unwrap()) else { continue };
+        let n = project.mixer.len();
+        if n < 4 || n > 200 {
+            continue;
+        }
+        // An insert with effects, and another insert to swap it with.
+        let Some(a) = (1..n - 1).find(|&t| project.mixer[t].slots.iter().any(Option::is_some)) else { continue };
+        let b = (1..n - 1).rfind(|&t| t != a && project.mixer[t].slots.iter().any(Option::is_some)).unwrap_or(if a + 1 < n - 1 { a + 1 } else { a - 1 });
+        if b == 0 {
+            continue;
+        }
+        let original = slot_records(&FlpFile::parse(&bytes).unwrap());
+        // The records expected when old track `t` becomes `new_of(t)` (`None` = deleted); 501 stays.
+        let expect = |new_of: &dyn Fn(u32) -> Option<u32>| {
+            let mut v: Vec<_> = original
+                .iter()
+                .filter_map(|((t, k), d)| Some(((if *t == 501 || *t as usize >= n - 1 { *t } else { new_of(*t)? }, *k), d.clone())))
+                .collect();
+            v.sort();
+            v
+        };
+        // Tracks renumbered as the Mixer window does it: indices are positions, routes and sends follow (`None` = to a
+        // deleted track); both read back in track order.
+        let renumber = |mixer: &mut Vec<MixerTrack>, new_of: &dyn Fn(usize) -> Option<usize>| {
+            for (i, m) in mixer.iter_mut().enumerate() {
+                m.index = i as u16;
+                m.routes = m.routes.iter().filter_map(|&r| new_of(r.into()).map(|r| r as u16)).filter(|&r| r != m.index).collect();
+                m.routes.sort_unstable();
+                m.send_levels = m.send_levels.iter().filter_map(|&(d, v)| new_of(d.into()).map(|d| (d as u16, v))).collect();
+                m.send_levels.sort_by_key(|s| s.0);
+            }
+        };
+        // Track EQ is not written by `apply` yet: it stays with the file's track positions.
+        let no_eq = |mixer: &[MixerTrack]| mixer.iter().map(|m| MixerTrack { eq: os_model::EQ_DEFAULT, ..m.clone() }).collect::<Vec<_>>();
+        let swap = |t: usize| Some(if t == a { b } else if t == b { a } else { t });
+
+        // Moved: a and b swap places.
+        let mut moved = project.clone();
+        moved.mixer.swap(a, b);
+        renumber(&mut moved.mixer, &swap);
+        let mut file = FlpFile::parse(&bytes).unwrap();
+        apply(&moved, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(no_eq(&back.mixer), no_eq(&moved.mixer), "{path}");
+        let (a32, b32) = (a as u32, b as u32);
+        assert_eq!(slot_records(&file), expect(&|t| Some(if t == a32 { b32 } else if t == b32 { a32 } else { t })), "{path}: moved");
+        // Moved back from the saved file: the original records.
+        let mut back_again = back.clone();
+        back_again.mixer.swap(a, b);
+        renumber(&mut back_again.mixer, &swap);
+        let mut file2 = file.clone();
+        apply(&back_again, &mut file2).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert_eq!(no_eq(&load(&file2).unwrap().mixer), no_eq(&project.mixer), "{path}");
+        assert_eq!(slot_records(&file2), original, "{path}: moved back");
+
+        // Deleted: a goes, the later inserts move one down and a default insert comes before the current track.
+        let mut fewer = project.clone();
+        fewer.mixer.remove(a);
+        fewer.mixer.insert(n - 2, MixerTrack::new((n - 2) as u16));
+        renumber(&mut fewer.mixer, &|t| match t {
+            t if t == a => None,
+            t if t > a && t < n - 1 => Some(t - 1),
+            t => Some(t),
+        });
+        let mut file = FlpFile::parse(&bytes).unwrap();
+        apply(&fewer, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(no_eq(&load(&file).unwrap().mixer), no_eq(&fewer.mixer), "{path}");
+        let new_of = |t: u32| match t.cmp(&a32) {
+            std::cmp::Ordering::Less => Some(t),
+            std::cmp::Ordering::Equal => None,
+            std::cmp::Ordering::Greater => Some(t - 1),
+        };
+        assert_eq!(slot_records(&file), expect(&new_of), "{path}: deleted");
+        checked += 1;
+    }
+    eprintln!("{checked} files: mixer tracks moved and deleted");
+    assert!(checked > 5, "only {checked} files checked");
+}
+
 /// Every automation link (event 227 with a zero first field) is read into its clip's targets in file order, and a
 /// changed order is written over the same links (spec: flp/events/automation.md "Event 227").
 #[test]

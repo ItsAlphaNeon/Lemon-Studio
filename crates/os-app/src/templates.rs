@@ -147,10 +147,12 @@ impl App {
     /// False for Empty and when the template does not load: the caller makes the built-in project then.
     pub(crate) fn new_from_template(&mut self) -> bool {
         let Some(path) = file() else { return false };
-        let kept = last_kept();
+        // A template is not a recent project either (spec: ui/recent-projects.md §2).
+        let (kept, recent) = (last_kept(), crate::recent::list());
         self.state.path = None;
         self.open(path.clone());
         restore_last(kept);
+        crate::recent::restore(&recent);
         if self.state.path.as_deref() != Some(path.as_path()) {
             return false;
         }

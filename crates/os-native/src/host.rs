@@ -80,6 +80,8 @@ pub struct HostContext {
     pub lock: PluginLock,
     /// The parameter count the plugin set with host dispatcher 27 SetNumParams; -1 until it does.
     pub num_params: AtomicIsize,
+    /// The plugin's delay in samples, from host dispatcher 30 SetLatency; 0 until it sends one.
+    pub latency: AtomicIsize,
     _wavetables: Vec<Vec<f32>>,
     _temp: Vec<f32>,
 }
@@ -138,6 +140,7 @@ impl HostObject {
             unhandled: BTreeMap::new(),
             lock: PluginLock::new(),
             num_params: AtomicIsize::new(-1),
+            latency: AtomicIsize::new(0),
             _wavetables: tables,
             _temp: temp,
         }));
@@ -166,6 +169,12 @@ impl HostObject {
     pub fn num_params(&self) -> Option<i32> {
         let n = unsafe { &(*self.ctx).num_params }.load(Ordering::Relaxed);
         (n >= 0).then(|| n.min(i32::MAX as isize) as i32)
+    }
+
+    /// The delay the plugin last reported with host dispatcher 30 SetLatency, in samples.
+    pub fn latency(&self) -> u32 {
+        let n = unsafe { &(*self.ctx).latency }.load(Ordering::Relaxed);
+        n.clamp(0, u32::MAX as isize) as u32
     }
 
     /// The voice requests and facts (lives as long as the host object).
@@ -215,10 +224,18 @@ unsafe extern "system" fn dispatcher(this: *mut HostObject, _sender: IntPtr, id:
             }
             0
         }
+        // SetLatency: the plugin's delay in samples from now on, for delay compensation (spec: "Host dispatcher IDs",
+        // audio/delay-compensation.md); answered 0 as before.
+        30 => {
+            if let Some(c) = ctx(this) {
+                c.latency.store(value.max(0), Ordering::Relaxed);
+            }
+            0
+        }
         // Harmless notifications observed from FL 26 plugins (answered 0 with no ill effect).
         // 2 EditorResized: the host polls the editor's size on its UI tick instead.
         // 22 OnHint_Direct, 24 GetInstance (none).
-        2 | 3 | 5 | 10 | 13 | 22 | 23 | 24 | 30 | 33 | 35 | 46 | 48 | 50 | 72 | 86 => 0,
+        2 | 3 | 5 | 10 | 13 | 22 | 23 | 24 | 33 | 35 | 46 | 48 | 50 | 72 | 86 => 0,
         _ => {
             log_once(format!("host dispatcher id {id} (index {index}, value {value})"));
             if let Some(c) = ctx(this) {

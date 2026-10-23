@@ -148,28 +148,39 @@ impl Engine {
             return;
         }
         let (now, len, ppq) = (self.tick as f64, frames.max(1) as f64, f64::from(self.ppq));
-        let pa = &mut self.params;
+        // A slot's parameters wait the whole ticks that fit into the lateness of the audio reaching the slot: its curve
+        // is read that much earlier. Playback's first tick waits for nothing, so the curve holds where that tick left
+        // it until the rest arrives (spec: audio/delay-compensation.md "Automation waits for late audio").
+        let (first, from, tick_len) = (self.tick == self.auto_from, self.auto_from as f64, self.tick_len());
+        let (pa, pdc) = (&mut self.params, &self.pdc);
         for step in (0..frames).step_by(PARAM_STEP) {
             // The position in ticks: the tick plus the share of it the step has reached.
             let f = now + step as f64 / len;
             pa.done.clear();
             // Later clips win where clips on the same target overlap (as for the other targets).
             for a in self.autos.iter().rev() {
-                if f < a.start as f64 || f >= a.end as f64 {
-                    continue;
-                }
-                // One tick ahead, as every automation target (spec: audio/automation.md "When a clip acts").
-                let beat = a.from_beat + (f + 1.0 - a.start as f64) / ppq;
-                let mut value = None;
+                // The curve's value at the position last read, for the clip's targets that wait alike.
+                let mut value: Option<(f64, Option<f64>)> = None;
                 for &target in &a.targets {
                     if !is_param(target) || pa.done.contains(&target) {
                         continue;
                     }
-                    pa.done.push(target);
-                    if value.is_none() {
-                        value = self.curves[a.curve].value_at(beat).map(|v| v.clamp(0.0, 1.0));
+                    let wait = if first { 0 } else { pdc.wait(target, tick_len) };
+                    let g = if wait == 0 { f } else { (f - wait as f64).max(from + 1.0) };
+                    if g < a.start as f64 || g >= a.end as f64 {
+                        continue;
                     }
-                    let Some(v) = value else { break };
+                    pa.done.push(target);
+                    // One tick ahead, as every automation target (spec: audio/automation.md "When a clip acts").
+                    let v = match value {
+                        Some((at, v)) if at == g => v,
+                        _ => {
+                            let v = self.curves[a.curve].value_at(a.from_beat + (g + 1.0 - a.start as f64) / ppq).map(|v| v.clamp(0.0, 1.0));
+                            value = Some((g, v));
+                            v
+                        }
+                    };
+                    let Some(v) = v else { continue };
                     match pa.last.iter_mut().find(|(t, _)| *t == target) {
                         Some((_, last)) if (*last - v).abs() < 1e-7 => continue,
                         Some((_, last)) => *last = v,
@@ -341,6 +352,43 @@ mod tests {
         let seen = probe.lock().unwrap().seen.clone();
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert!((seen[0].2 - 0.25).abs() < 1e-9);
+    }
+
+    /// Passes the sound through and reports a delay.
+    struct Reports(u32);
+
+    impl HostedEffect for Reports {
+        fn process_fx(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        fn reported_delay_fx(&self) -> u32 {
+            self.0
+        }
+    }
+
+    /// A slot behind one that reports 500 frames (two ticks): its parameter's values wait two ticks, so the curve is
+    /// read two ticks earlier; the first tick waits for nothing (spec: audio/delay-compensation.md "Automation waits
+    /// for late audio").
+    #[test]
+    fn a_slot_behind_late_audio_reads_its_curve_whole_ticks_earlier() {
+        let p = project(os_model::target::slot_param(1, 3, 12));
+        let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+        let probe = Arc::new(Mutex::new(Probe::default()));
+        e.set_effect(1, 0, Arc::new(Mutex::new(Reports(500))));
+        e.set_effect(1, 3, probe.clone());
+        run(&mut e, 48000 * 3, 1000);
+        let seen = probe.lock().unwrap().seen.clone();
+        assert_eq!(seen[0].0, 0);
+        assert!(!seen.iter().any(|&(f, ..)| f > 250 && f <= 750), "the curve holds for two ticks");
+        for &(f, _, v) in &seen {
+            let want = match f {
+                // The first tick, then where it left the curve, then the rest two ticks later.
+                f if f < 250 => (f + 250) as f64 / 96000.0,
+                250 => 500.0 / 96000.0,
+                f => ((f - 250) as f64 / 96000.0).min(1.0),
+            };
+            assert!((v - want).abs() < 1e-6, "frame {f}: {v} vs {want}");
+        }
+        let last = seen.last().unwrap().0;
+        assert!((96000..96500).contains(&last), "the clip ends two ticks later: {last}");
     }
 
     /// A plugin that takes one value per tick gets the value the clip hands on for that tick, at the tick start, only
