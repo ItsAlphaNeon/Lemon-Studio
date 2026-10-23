@@ -1826,6 +1826,7 @@ dependencies = [
  "os-plugkit",
  "os-theme",
  "os-ui",
+ "rfd",
  "serde_json",
  "tiny-skia",
  "windows-sys 0.61.2",
