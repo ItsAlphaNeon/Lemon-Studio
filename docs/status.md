@@ -88,6 +88,10 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   cannot take Lemon Studio down
 - Favourites and hidden plugins
 - One menu entry per plugin installed in several formats (VST3, CLAP, VST2: your preferred format wins)
+- Presets in the plugin window's title bar: your own presets, then factory presets (compiled in for Lemon Studio's
+  own plugins), stepped with the arrows or the wheel; Save preset as..., Rename, Delete and Browse presets
+- Import of `.ospreset`, `.vstpreset` and VST2 `.fxp` / `.fxb` files (a bank goes into a folder of its own); a preset
+  file dropped onto a plugin window, rack row or mixer slot loads there, and anywhere else adds its plugin
 
 ## ✅ Time-stretching
 
@@ -176,6 +180,12 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 
 - Lemon Sampler, Lemon Trio (a three-oscillator synth) and Lemon Parametric EQ, also available as VST3
   and CLAP bundles for other hosts
+- Citrus, a six-operator synthesizer (a recreation of Sytrus) with its editor: it plays every Sytrus channel of a
+  project and Sytrus patches, keeping their state byte for byte; also a VST3 and CLAP plugin
+- Lemon Limiter (Fruity Limiter: limiter, compressor and noise gate), Lemon Reverb (Fruity Reeverb 2) and Lemon
+  Delay (Fruity Delay 3), also VST3 and CLAP plugins. A project's Fruity Reeverb 2 and Fruity Delay 3 slots play
+  through the same sound; its Fruity Limiter slots still play a simpler limiter (gain and a peak limiter, no
+  compressor or gate yet)
 - Every Lemon plugin is built into Lemon Studio, so none needs a plugin file; the VST3 and CLAP bundles are for other
   hosts. A project stores the built-in effects other than the EQ as wrapped CLAP plugins, as it stored their bundles
 - Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon
@@ -296,9 +306,10 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 ## 🚧 Look and themes
 
-- The Lemon design (lemon on neutral greys, rounded-square controls) and the Classic look, switched with
-  Ctrl+Shift+D
-- Theme files apply to the Classic look
+- Two skins, picked in Settings ▸ Theme: Lemon (lemon on neutral greys, rounded-square controls) and Citrus (the
+  look formerly called Classic)
+- 25 built-in themes, your own themes and `.flstheme` files colour either skin; Settings ▸ Theme ▸ Adjustments edits
+  the applied theme live with five knobs and eight colour circles, each with a colour picker
 - A theme file's workspace picture (PNG or JPEG, on either design) and its playlist and piano roll grid line
   strength; not yet the HTML background, the event editor grid and the Option colour
 - Lemon Studio's own plugin editors are drawn in the Lemon design only, whatever design the app shows
@@ -307,7 +318,7 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 ## 🚧 Settings
 
-- The General, Audio, File, Theme, Project and Info pages work: the controls that are not greyed out act, but for
+- The General, Audio, MIDI, File, Theme, Project and Info pages work: the controls that are not greyed out act, but for
   a few that are only kept for now (Smart disable, Resampling quality and others Lemon Studio has nothing to change
   with yet); the program's choices are kept in `settings.txt` in the user folder
 - General ▸ Input ▸ Manage shortcuts: the F8 keys (browser, plugin picker, plugin database) and the audio clip
@@ -318,7 +329,7 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
   leave an arrow
 - General ▸ System ▸ Associate project files (Windows): `.flp` files open with Lemon Studio, for your user
   only, and unticking puts the previous program back
-- Not yet: the MIDI page, the recording settings and the theme adjustments (the themes are being redone)
+- Not yet: the recording settings
 
 ## ❌ Not available yet
 
