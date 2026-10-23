@@ -97,6 +97,8 @@ pub enum Then {
     MidiImport(bool),
     /// Where to export a MIDI file; true: the piano roll's channel.
     MidiExport(bool),
+    /// File ▸ FL Studio factory content folder: the folder picked (`App::set_factory_folder`).
+    FactoryFolder,
 }
 
 /// What waits for the save-changes question.

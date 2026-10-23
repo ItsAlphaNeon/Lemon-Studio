@@ -1240,7 +1240,7 @@ pub struct App {
 /// Window-level requests the shell must carry out after an event.
 impl App {
     pub fn new(path: Option<PathBuf>) -> App {
-        let transport = Transport::new(os_engine::SampleLibrary::default_factory_dir());
+        let transport = Transport::new(crate::factory_folder::dir());
         // Tests keep the old five-channel template; a new session starts with one Lemon Sampler channel.
         #[cfg(test)]
         let project = test_project();
@@ -1629,7 +1629,12 @@ impl App {
                     if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
                         continue;
                     }
-                    ch.sample_path = (!p.is_empty()).then_some(p);
+                    // An empty path: the sample was taken out (spec: flp/events/channels.md "Loop points (event 251)").
+                    if !p.is_empty() {
+                        ch.sample_path = Some(p);
+                    } else if ch.sample_path.is_some() {
+                        ch.clear_sample();
+                    }
                 }
             }
         }
@@ -1647,10 +1652,8 @@ impl App {
             && !s.project.arrangements.is_empty();
         // A project that was not opened from a file gets a new FLP built from the model.
         let mut file = if s.file.is_none() || lacks_playlist {
-            // The new file's blocks are the model's channels in order.
-            for (i, c) in s.project.channels.iter_mut().enumerate() {
-                c.rack.origin = Some(i as u16);
-            }
+            // The new file's blocks are the model's channels and mixer tracks in order.
+            settle_origins(&mut s.project);
             // FL's files always have a playlist, and the mixer is stored after it (spec: flp/events/mixer.md).
             if s.project.arrangements.is_empty() {
                 s.project.arrangements.push(os_flp::project::default_arrangement());
@@ -1687,10 +1690,8 @@ impl App {
             Err(e) => format!("Save failed: {e}"),
         });
         if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
-            // The saved file now holds the channels in model order, and the plugins as written.
-            for (i, c) in s.project.channels.iter_mut().enumerate() {
-                c.rack.origin = Some(i as u16);
-            }
+            // The saved file now holds the channels and mixer tracks in model order, and the plugins as written.
+            settle_origins(&mut s.project);
             crate::project_plugins::adopt_saved(&mut s.project, &proj);
             s.file = Some(file);
             crate::templates::remember(&target);
@@ -1831,6 +1832,11 @@ impl App {
             Then::BrowserFolder(row) => {
                 if let Some(p) = file {
                     self.search_folder_chosen(row, p);
+                }
+            }
+            Then::FactoryFolder => {
+                if let Some(p) = file {
+                    self.set_factory_folder(Some(p));
                 }
             }
             Then::SavePreset(key) => {
@@ -4435,6 +4441,8 @@ impl App {
             SAct::Button(views::settings::MANAGE_SHORTCUTS) => return self.open_shortcuts(),
             SAct::Button(crate::data_folder::RENAME) => self.open_rename(),
             SAct::Button(crate::data_folder::SET_FOLDER) => self.data_folder_pick(),
+            SAct::Button(crate::factory_folder::SET_FOLDER) => self.factory_folder_pick(),
+            SAct::Button(crate::factory_folder::RESET) => self.set_factory_folder(None),
             SAct::Button(b) => self.state.message = Some(off_text(b)),
             // The Info page's boxes (spec: ui/settings.md "Info").
             SAct::Info(f) => return self.info_act(f),
@@ -7945,6 +7953,17 @@ fn typing_semitone(code: KeyCode) -> Option<i32> {
         KeyO => 26, Digit0 => 27, KeyP => 28, BracketLeft => 29, Equal => 30, BracketRight => 31,
         _ => return None,
     })
+}
+
+/// The file just written holds the model's channels and mixer tracks in order: each one's file block is its position
+/// (os-flp `apply` follows moved channels and the effect slots of moved mixer tracks by these).
+fn settle_origins(p: &mut Project) {
+    for (i, c) in p.channels.iter_mut().enumerate() {
+        c.rack.origin = Some(i as u16);
+    }
+    for (i, m) in p.mixer.iter_mut().enumerate() {
+        m.origin = Some(i as u16);
+    }
 }
 
 /// An empty sampler channel at rack position `i`.

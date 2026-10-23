@@ -4358,7 +4358,7 @@ pub fn export_tracks(app: &mut App) -> String {
         return format!("Export tracks: {e}");
     }
     let rate = 44100;
-    let mut lib = os_engine::SampleLibrary::new(os_engine::SampleLibrary::default_factory_dir());
+    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
     let song_frames = os_engine::laws::tick_to_frame(f64::from(end), s.project.ppq, s.project.tick_tempo(s.tempo), rate) as usize;
     let mut written = 0;
     for &t in &tracks {
@@ -4432,7 +4432,7 @@ pub fn consolidate(app: &mut App) -> String {
         }
     }
     let rate = 44100;
-    let mut lib = os_engine::SampleLibrary::new(os_engine::SampleLibrary::default_factory_dir());
+    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
     let mut e = os_engine::Engine::new(&p, &mut lib, rate, os_engine::PlayMode::Song);
     let mut audio = e.render_all(512);
     let want = (os_engine::laws::tick_to_frame(f64::from(b - a), p.ppq, p.tick_tempo(s.tempo), rate) as usize) * 2;

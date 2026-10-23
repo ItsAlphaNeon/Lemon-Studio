@@ -238,7 +238,7 @@ pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<Stri
     if sampler {
         ch.kind = os_model::ChannelKind::Sampler;
         ch.plugin = None;
-        ch.sample_path = None;
+        ch.clear_sample();
         ch.name = Some(d.name.clone());
         s.pending_open = Some(row);
     } else {

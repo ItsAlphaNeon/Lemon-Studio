@@ -278,6 +278,8 @@ enum Cmd {
     Open,
     /// Opens the ASIO driver's own settings window (`Transport::asio_panel`).
     AsioPanel,
+    /// The FL Studio factory content folder changed (`Transport::set_factory`).
+    Factory(Option<PathBuf>),
     /// Tests: the open device fails as if it went away.
     #[cfg(test)]
     FailDevice,
@@ -424,6 +426,12 @@ impl Transport {
     /// it is closed: on the audio thread, which drives the driver. What went wrong comes back as an error.
     pub fn asio_panel(&self) {
         let _ = self.tx.send(Cmd::AsioPanel);
+    }
+
+    /// The FL Studio install folder that sample paths' placeholders point into is now `dir` (`crate::factory_folder`):
+    /// the playing engines take their factory samples from there.
+    pub fn set_factory(&self, dir: Option<PathBuf>) {
+        let _ = self.tx.send(Cmd::Factory(dir));
     }
 
     /// Renders `project` offline at `rate`, with the hosted instruments and effects, and writes the files of `job`, on
@@ -1385,6 +1393,12 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 reset_pending = true;
                 reset_fx_pending = true;
                 listen_retry = true;
+            }
+            Ok(Cmd::Factory(dir)) => {
+                library.set_factory_dir(dir);
+                for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
+                    swap(s, &mut library);
+                }
             }
             Ok(Cmd::AsioPanel) if closed => report(&shared, "the output is let go of (Auto close)".into()),
             Ok(Cmd::AsioPanel) => {
