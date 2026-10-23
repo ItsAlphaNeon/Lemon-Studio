@@ -1347,6 +1347,7 @@ mod win32 {
     use std::time::Instant;
 
     use nih_plug::prelude::GuiContext;
+    use os_plugkit::Opener;
     use os_theme::Palette;
     use os_ui::kit::menu::{self as kmenu, MenuStyle};
     use os_ui::Canvas;
@@ -2046,7 +2047,7 @@ mod win32 {
         std::env::var_os("LEMONSAMPLER_NO_MODAL").is_some()
     }
 
-    fn popup_at(owner: HWND, x: i32, y: i32, def: &MenuDef, pal: &Palette, scale: f32, parent: Option<RECT>) -> PopRes {
+    fn popup_at(owner: HWND, x: i32, y: i32, def: &MenuDef, pal: &Palette, scale: f32, parent: Option<Opener>) -> PopRes {
         if no_modal() {
             return PopRes::Cancel;
         }
@@ -2060,7 +2061,7 @@ mod win32 {
             let mut py = y;
             if px + w > wa.right {
                 px = match parent {
-                    Some(p) => p.left - w,
+                    Some(p) => p.menu[0] - w,
                     None => wa.right - w,
                 };
             }
@@ -2098,11 +2099,11 @@ mod win32 {
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             SetCapture(hwnd);
             let rect = RECT { left: px, top: py, right: px + w, bottom: py + h };
+            let menu = [px, py, px + w, py + h];
             let opened = Instant::now();
             let mut start = POINT { x: 0, y: 0 };
             GetCursorPos(&mut start);
             let mut moved = false;
-            let mut sub_open: Option<usize> = None;
             let item_at = |pop: &Pop, sx: i32, sy: i32| -> Option<usize> {
                 let (lx, ly) = ((sx - px) as f32 / scale, (sy - py) as f32 / scale);
                 pop.layout.item_at(&pop.items, lx, ly)
@@ -2124,12 +2125,8 @@ mod win32 {
                         if (cur.x - start.x).abs() + (cur.y - start.y).abs() > 2 {
                             moved = true;
                         }
-                        if !inside(&rect, cur.x, cur.y) {
-                            if let Some(pr) = parent {
-                                if inside(&pr, cur.x, cur.y) {
-                                    break 'run PopRes::Back;
-                                }
-                            }
+                        if parent.is_some_and(|p| p.takes_back(menu, (cur.x, cur.y))) {
+                            break 'run PopRes::Back;
                         }
                         let hov = if inside(&rect, cur.x, cur.y) { item_at(&*pop, cur.x, cur.y) } else { None };
                         let hov = hov.filter(|&i| def.items[i].clickable());
@@ -2138,25 +2135,18 @@ mod win32 {
                             InvalidateRect(hwnd, std::ptr::null(), 0);
                             UpdateWindow(hwnd);
                         }
-                        // Submenu: opens while its row is hovered.
-                        if let Some(i) = hov {
-                            if sub_open != Some(i) {
-                                if let Some(sub) = def.sub(i) {
-                                    sub_open = Some(i);
-                                    let row = (&(*pop).layout.rows)[i];
-                                    let sx = px + ((row.x + row.w) * scale) as i32 - 2;
-                                    let sy = py + (row.y * scale) as i32 - 2;
-                                    match popup_at(owner, sx, sy, sub, pal, scale, Some(rect)) {
-                                        PopRes::Pick(c) => break 'run PopRes::Pick(c),
-                                        PopRes::Cancel => break 'run PopRes::Cancel,
-                                        PopRes::Back => {
-                                            SetCapture(hwnd);
-                                        }
-                                    }
+                        // Submenu: opens while its row is hovered, until the pointer moves on to another row of this menu.
+                        if let Some((i, sub)) = hov.and_then(|i| Some((i, def.sub(i)?))) {
+                            let row = (&(*pop).layout.rows)[i];
+                            let sx = px + ((row.x + row.w) * scale) as i32 - 2;
+                            let sy = py + (row.y * scale) as i32 - 2;
+                            match popup_at(owner, sx, sy, sub, pal, scale, Some(Opener::new(menu, row, scale))) {
+                                PopRes::Pick(c) => break 'run PopRes::Pick(c),
+                                PopRes::Cancel => break 'run PopRes::Cancel,
+                                PopRes::Back => {
+                                    SetCapture(hwnd);
                                 }
                             }
-                        } else {
-                            sub_open = None;
                         }
                     }
                     WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN => {
