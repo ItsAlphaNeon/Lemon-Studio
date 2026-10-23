@@ -3738,6 +3738,13 @@ impl App {
         let fl = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme"));
         let loaded = if fl {
             std::fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()).map_err(|e| e.to_string()).map(|text| {
+                // A picture named relative to the theme file stays found once the theme is kept elsewhere
+                // (`wallpaper::absolute_names`).
+                let dir = std::path::absolute(path).ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+                let text = match dir {
+                    Some(d) => crate::wallpaper::absolute_names(&text, &d),
+                    None => text,
+                };
                 let t = skin_theme(self.design(), &name, Some(&text));
                 (t, Some(text))
             })
@@ -3754,16 +3761,16 @@ impl App {
                 self.state.theme_base = text.clone();
                 self.state.fl_text = text;
                 os_theme::set_current(&self.theme.colors);
+                crate::wallpaper::forget();
                 if remember && to_citrus {
                     save_design(Design::Citrus);
                 }
-                if remember && fl {
-                    if let Some(d) = os_paths::user_dir() {
-                        let _ = std::fs::create_dir_all(&d);
-                        let keep = d.join("current.flstheme");
-                        if keep.as_path() != path {
-                            let _ = std::fs::copy(path, keep);
-                        }
+                // Kept as the text taken in: its picture names made absolute.
+                if remember && fl && let (Some(d), Some(text)) = (os_paths::user_dir(), &self.state.fl_text) {
+                    let _ = std::fs::create_dir_all(&d);
+                    let keep = d.join("current.flstheme");
+                    if keep.as_path() != path {
+                        let _ = std::fs::write(keep, text);
                     }
                 }
                 self.sync_preset();
@@ -8376,6 +8383,51 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!((again.state.project.bar, again.state.project.play_truncated), (Some((7, 1)), false));
         assert_eq!(again.state.project.signature(), Some((7, 16)));
+    }
+
+    /// A theme's workspace picture (spec: ui/flstheme.md §3, BackPicFilename): named relative to the theme file, it is
+    /// made absolute when the theme is taken in and covers the workspace right of the browser, without the watermark
+    /// or the version line; the solid colour mode (BackMode=1) leaves the plain workspace. A temp user folder, never
+    /// the real one.
+    #[test]
+    fn theme_picture_covers_the_workspace() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("lemon-theme-picture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("pics")).unwrap();
+        THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let mut pm = tiny_skia::Pixmap::new(4, 2).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(0x7a, 0x3c, 0x91, 0xff));
+        std::fs::write(dir.join("pics").join("wall.png"), pm.encode_png().unwrap()).unwrap();
+        let file = dir.join("Wall.flstheme");
+        std::fs::write(&file, format!("{}BackPicFilename=pics\\wall.png\n", os_theme::fl::DARK_TEXT)).unwrap();
+        let mut app = App::new(None);
+        // No windows: the whole workspace shows.
+        app.state.z.clear();
+        // The workspace's pixels, right of the browser and below the toolbar.
+        let work = |app: &mut App, c: &mut Canvas| -> Vec<u32> {
+            frame(app, c, None);
+            let (left, top) = (views::browser_w(&app.state) as usize, views::work_y(&app.state) as usize);
+            let mut out = vec![0u32; 1920 * 1080];
+            c.copy_to_xrgb(&mut out);
+            (top..1080).flat_map(|y| out[y * 1920 + left..(y + 1) * 1920].to_vec()).collect()
+        };
+        let plain = work(&mut app, &mut c);
+        let ws = os_theme::Palette::default().workspace;
+        let ws = u32::from(ws.r) << 16 | u32::from(ws.g) << 8 | u32::from(ws.b);
+        assert!(plain.iter().any(|&p| p != ws), "the logo and the version line on the plain workspace");
+        app.load_theme_file_ex(&file, false);
+        let kept = app.state.fl_text.as_deref().and_then(|t| os_theme::fl::get_key(t, "BackPicFilename")).map(std::path::PathBuf::from);
+        assert_eq!(kept, Some(dir.join("pics").join("wall.png")), "made absolute against the theme file's folder");
+        let pic = work(&mut app, &mut c);
+        let off = pic.iter().filter(|&&p| p != 0x7a3c91).count();
+        assert_eq!(off, 0, "the picture everywhere, no logo or version line");
+        // The solid colour mode: the plain workspace again.
+        std::fs::write(&file, format!("{}BackPicFilename=pics\\wall.png\nBackMode=1\n", os_theme::fl::DARK_TEXT)).unwrap();
+        app.load_theme_file_ex(&file, false);
+        assert!(work(&mut app, &mut c) == plain);
+        THEME_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Theme ▸ Options (spec: ui/settings-choices.md "Light mode and clip note colours"): the clip note colours check

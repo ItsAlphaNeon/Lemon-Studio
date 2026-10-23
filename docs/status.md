@@ -238,6 +238,8 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 - The Lemon design (lemon on neutral greys, rounded-square controls) and the Classic look, switched with
   Ctrl+Shift+D
 - Theme files apply to the Classic look
+- A theme file's workspace picture (PNG or JPEG, on either design) and its playlist and piano roll grid line
+  strength; not yet the HTML background, the event editor grid and the Option colour
 - Lemon Studio's own plugin editors are drawn in the Lemon design only, whatever design the app shows
 - Smooth scrolling: the wheel and the scroll bars' arrows ease the editors' views (General settings ▸ Display ▸
   Smoothing, and Animation refresh rate for how often animations redraw)

@@ -161,11 +161,18 @@ macro_rules! tokens {
             /// `WaveSpc0..5` (spec: ui/flstheme.md §3). Empty without one; colourful waveforms then use
             /// `waves::STOCK`.
             pub waves: Vec<(f32, Color)>,
+            /// The workspace picture: a `.flstheme`'s `BackPicFilename` while its `BackMode` shows one (0, 2 or 3), as
+            /// the file writes it (a relative path is the theme file's folder's; spec: ui/flstheme.md §1, §3). `None`:
+            /// the plain `workspace` colour.
+            pub wallpaper: Option<String>,
+            /// Piano roll grid line strength, a `.flstheme`'s `PRGridContrast` / 100 (spec: ui/flstheme.md §3): the
+            /// beat, step and key row lines differ from their row by this share of their measured difference.
+            pub pr_lines: f32,
         }
 
         impl Default for Palette {
             fn default() -> Self {
-                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default(), style: Style::CITRUS, waves: Vec::new() }
+                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default(), style: Style::CITRUS, waves: Vec::new(), wallpaper: None, pr_lines: 1.0 }
             }
         }
 
@@ -188,7 +195,8 @@ macro_rules! tokens {
             }
 
             fn map(&self, f: impl Fn(Color) -> Color) -> Palette {
-                Palette { $($name: f(self.$name),)* xf: self.xf.clone(), style: self.style, waves: self.waves.clone() }
+                let (xf, style, waves, wallpaper, pr_lines) = (self.xf.clone(), self.style, self.waves.clone(), self.wallpaper.clone(), self.pr_lines);
+                Palette { $($name: f(self.$name),)* xf, style, waves, wallpaper, pr_lines }
             }
         }
     };

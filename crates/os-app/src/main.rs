@@ -109,6 +109,7 @@ mod timesig;
 mod transport;
 mod typein;
 mod views;
+mod wallpaper;
 mod waves;
 mod win_clamp;
 #[cfg(windows)]
