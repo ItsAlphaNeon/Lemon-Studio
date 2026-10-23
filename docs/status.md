@@ -18,9 +18,10 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 ## ✅ Piano roll
 
 - Full tool set, with velocity and event lanes
-- Quantize, chop, glue, legato, strum, arpeggiate, flam, claw machine (trash, stretch, time distribution), flip, scale
-  levels, limit (key / scale, range, transpose), LFO (sine, triangle or square into any event lane, Start to End
-  ramps, a channel lane's control points) and randomize
+- Quantize (FL's templates and Snap grids, sensitivity, four duration modes, levels), chop, glue, legato, strum,
+  arpeggiate, flam, claw machine (trash, stretch, time distribution), flip, scale levels, limit (key / scale, range,
+  transpose), LFO (sine, triangle or square into any event lane, Start to End ramps, a channel lane's control points)
+  and randomize
 - Vertical zoom and ghost channels
 - Resizable event panel: drag the splitter, double-click it to hide or show the panel (remembered)
 - Pattern time markers, saved with the project

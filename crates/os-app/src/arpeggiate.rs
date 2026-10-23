@@ -234,7 +234,8 @@ impl Default for Pattern {
     }
 }
 
-/// The rows and PPQ of a pattern file: 20-byte records for a version string starting with `4.`, else 24-byte ones.
+/// The rows and PPQ of a pattern file: 20-byte records for a version string starting with `3.` or `4.`, else 24-byte
+/// ones.
 pub fn parse(bytes: &[u8]) -> Option<(u32, Vec<Row>)> {
     let f = os_flp::FlpFile::parse(bytes).ok()?;
     let mut ppq = 96;
@@ -245,7 +246,7 @@ pub fn parse(bytes: &[u8]) -> Option<(u32, Vec<Row>)> {
             os_flp::ChunkBody::Events(evs) => {
                 for e in evs {
                     match (e.id, e.data()) {
-                        (199, Some(d)) => old = d.starts_with(b"4."),
+                        (199, Some(d)) => old = d.starts_with(b"3.") || d.starts_with(b"4."),
                         (224, Some(d)) => data = Some(d.to_vec()),
                         _ => {}
                     }
@@ -342,7 +343,7 @@ fn natural(a: &str, b: &str) -> Ordering {
 }
 
 /// The pattern files and sub-folders of `dir`, each sorted naturally.
-fn listing(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+pub(crate) fn listing(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let (mut files, mut dirs) = (Vec::new(), Vec::new());
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let p = e.path();

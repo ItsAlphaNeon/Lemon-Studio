@@ -60,7 +60,6 @@ pub enum NCmd {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sub {
-    Quantize,
     Chop,
     Randomize,
 }
@@ -72,15 +71,6 @@ fn item(label: &'static str, c: NCmd) -> PItem {
 fn sub_items(sub: Sub) -> Vec<PItem> {
     use NCmd::*;
     match sub {
-        Sub::Quantize => vec![
-            item("Start times, 100 %", Quantize { strength: 100, starts_only: true }),
-            item("Start times, 75 %", Quantize { strength: 75, starts_only: true }),
-            item("Start times, 50 %", Quantize { strength: 50, starts_only: true }),
-            item("Start times, 25 %", Quantize { strength: 25, starts_only: true }),
-            PItem::sep(),
-            item("Start times and lengths, 100 %", Quantize { strength: 100, starts_only: false }),
-            item("Start times and lengths, 50 %", Quantize { strength: 50, starts_only: false }),
-        ],
         Sub::Chop => vec![
             item("1/32 note", Chop(32)),
             item("1/16 note (step)", Chop(16)),
@@ -115,7 +105,7 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::head("Tools"),
         item("Quick quantize", Quantize { strength: 100, starts_only: false }).key("Ctrl+Q"),
         item("Quick quantize start times", Quantize { strength: 100, starts_only: true }).key("Shift+Q"),
-        PItem::sub("Quantize", sub_items(Sub::Quantize)).key("Alt+Q"),
+        item("Quantize...", Dialog(Tool::Quantize)).key("Alt+Q"),
         item("Quick legato", Legato).key("Ctrl+L"),
         item("Quick chop", QuickChop).key("Ctrl+U"),
         PItem::sub("Chop", sub_items(Sub::Chop)).key("Alt+U"),
@@ -163,7 +153,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if ctrl && !alt && is(c, "b") => NCmd::Duplicate,
         Key::Character(c) if shift && !ctrl && !alt && is(c, "d") => NCmd::DiscardLengths,
         Key::Character(c) if alt && !ctrl && is(c, "m") => NCmd::Mute(!shift),
-        Key::Character(c) if alt && !ctrl && is(c, "q") => NCmd::Menu(Sub::Quantize),
+        Key::Character(c) if alt && !ctrl && is(c, "q") => NCmd::Dialog(crate::piano_dlg::Tool::Quantize),
         Key::Character(c) if alt && !ctrl && is(c, "u") => NCmd::Menu(Sub::Chop),
         Key::Character(c) if alt && !ctrl && is(c, "s") => NCmd::Strum,
         Key::Character(c) if alt && !ctrl && is(c, "a") => NCmd::Arpeggiate,

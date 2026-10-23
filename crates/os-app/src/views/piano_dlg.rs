@@ -4,10 +4,11 @@
 
 //! The piano roll's small tool dialogs, laid out as FL's: Flam ("Piano roll - flamer", 198 × 241), Flip ("Piano roll -
 //! score flipper", 162 × 160), Scale levels ("Piano roll - level scaling", 172 × 277), Limit ("Piano roll - limiter /
-//! transposer", 432 × 295), Claw machine ("Piano roll - claw machine", 172 × 245) and LFO ("Piano roll - LFO",
-//! 212 × 323). One window shows whichever is open (`piano_dlg::Ui::tool`).
+//! transposer", 432 × 295), Claw machine ("Piano roll - claw machine", 172 × 245), LFO ("Piano roll - LFO",
+//! 212 × 323) and Quantize ("Piano roll - quantizer", 281 × 309). One window shows whichever is open
+//! (`piano_dlg::Ui::tool`).
 // spec: ui/piano-flam.md §1, ui/piano-flip.md §1, ui/piano-level-scaling.md §1, ui/piano-limit.md §1, ui/piano-claw.md §1,
-// ui/piano-lfo.md §1
+// ui/piano-lfo.md §1, ui/piano-quantize.md §1
 
 use os_ui::kit::{self, Dir, lemon as lk};
 use os_ui::{Font, Glyph, Rect};
@@ -21,7 +22,7 @@ use crate::piano_dlg::{self as dlg, Act, KB_W, KEY_W, Knob, Tool};
 use crate::views::piano::{TOP_KEY, is_black, key_name};
 
 /// Each dialog's size, by `Tool::index`; Limit's with both sections open.
-const SIZES: [(f32, f32); Tool::COUNT] = [(198.0, 241.0), (162.0, 160.0), (172.0, 277.0), (432.0, 295.0), (172.0, 245.0), (212.0, 323.0)];
+const SIZES: [(f32, f32); Tool::COUNT] = [(198.0, 241.0), (162.0, 160.0), (172.0, 277.0), (432.0, 295.0), (172.0, 245.0), (212.0, 323.0), (281.0, 309.0)];
 
 /// The panel heights under Limit's two section headers (piano-limit.md §1): a collapsed section's comes off the window.
 const PANELS: [f32; 2] = [67.0, 110.0];
@@ -72,9 +73,9 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     let hov = ui.hit(close.outset(4.0), Action::CloseWin(Win::PianoDlg), "Close (puts the notes back)");
     icons::draw(ui.c, Icon::Close, close.outset(1.0), if hov { t.tx(0xffffff) } else { t.glyph });
 
-    // Limit and LFO draw their own panels.
+    // Limit, LFO and Quantize draw their own panels.
     let body = at(7.0, 28.0, w - 14.0, h - 71.0);
-    if !matches!(d.tool, Tool::Limit | Tool::Lfo) {
+    if !matches!(d.tool, Tool::Limit | Tool::Lfo | Tool::Quantize) {
         if lemon {
             ui.c.stroke_rrect(body, lk::r_small(t), 1.0, line);
         } else {
@@ -89,6 +90,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         Tool::Limit => limit(ui, s, x0, y0),
         Tool::Claw => claw(ui, s, x0, y0),
         Tool::Lfo => lfo(ui, s, x0, y0),
+        Tool::Quantize => quant(ui, s, x0, y0),
     }
 
     // Reset, Accept.
@@ -273,7 +275,68 @@ fn lfo(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
     lfo_knob(ui, s, x0 + 155.0, y0 + 245.0, 19.0, Knob::LfoPhase, false, kit::KnobLook::Ball, false);
 }
 
-/// One of LFO's knobs at screen (`cx`, `cy`); a grey one takes no clicks.
+/// Quantize (piano-quantize.md §1): the Template box (its name, the folder button, the ▸ menu) and the Strength panel
+/// with the Start time, Sensitivity and Duration knobs, the duration mode box and the six Levels knobs.
+fn quant(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
+    let t = ui.t;
+    let lemon = super::lemon(ui);
+    let lf = Font::new(15);
+    let (line, panel) = (t.s(0x16191a), t.s(0x272b2d));
+    let d = &s.piano_dlg;
+    for (x, y, w, h) in [(7.0, 28.0, 267.0, 28.0), (7.0, 63.0, 266.0, 204.0)] {
+        let r = Rect::new(x0 + x, y0 + y, w, h);
+        if lemon {
+            ui.c.stroke_rrect(r, lk::r_small(t), 1.0, line);
+        } else {
+            ui.c.fill_rect(r, line);
+            ui.c.fill_rect(r.inset(1.0), panel);
+        }
+    }
+
+    // Template: its name, the folder button, the ▸ menu.
+    label(ui, lf, x0 + 16.0, y0 + 42.0, -1, t.text_dim, "Template");
+    let name = ui.c.fit_font(lf, &d.quant_tpl.0.name, 140.0);
+    label(ui, name, x0 + 70.0, y0 + 42.0, -1, t.text, &d.quant_tpl.0.name);
+    for (r, act, hint) in [
+        (Rect::new(x0 + 220.0, y0 + 31.0, 29.0, 22.0), Act::TemplateFolder, "Load a quantize template"),
+        (Rect::new(x0 + 251.0, y0 + 31.0, 19.0, 22.0), Act::TemplateMenu, "Pick a template"),
+    ] {
+        let hov = ui.hit(r, Action::PianoDlg(act), hint);
+        super::button_face(ui, r, if hov { Look::Hover } else { Look::Off });
+        let ink = if hov { t.tx(0xffffff) } else { t.glyph };
+        if act == Act::TemplateFolder {
+            icons::draw(ui.c, Icon::Folder, Rect::new(r.cx() - 8.0, r.cy() - 8.0, 16.0, 16.0), ink);
+        } else {
+            icons::draw(ui.c, Icon::ArrowRight, Rect::new(r.cx() - 6.0, r.cy() - 6.0, 12.0, 12.0), ink);
+        }
+    }
+
+    // Strength: Start time, Sensitivity, Duration and its mode box.
+    label(ui, lf, x0 + 12.0, y0 + 73.0, -1, t.text, "Strength");
+    label(ui, lf, x0 + 69.0, y0 + 105.0, 1, t.text, "Start time");
+    lfo_knob(ui, s, x0 + 90.0, y0 + 105.0, 14.0, Knob::QStart, false, kit::KnobLook::Ring, false);
+    label(ui, lf, x0 + 206.0, y0 + 108.0, 1, t.text, "Sensitivity");
+    lfo_knob(ui, s, x0 + 232.0, y0 + 108.0, 10.0, Knob::QSens, false, kit::KnobLook::Ball, false);
+    label(ui, lf, x0 + 69.0, y0 + 155.0, 1, t.text, "Duration");
+    lfo_knob(ui, s, x0 + 90.0, y0 + 155.0, 14.0, Knob::QDur, false, kit::KnobLook::Ring, false);
+    let r = Rect::new(x0 + 117.0, y0 + 146.0, 119.0, 19.0);
+    let hov = ui.hit(r, Action::PianoDlg(Act::DurMenu), "What happens to the note lengths");
+    kit::combo(ui.c, t, r, d.quant.mode.name(), Font::new(13), kit::State::hover(hov));
+
+    // Levels: knobs ringed in FL's colours, their names under them.
+    label(ui, lf, x0 + 46.0, y0 + 218.0, 1, t.text, "Levels");
+    for (i, (&cx, &(name, _))) in [68.0, 103.0, 137.0, 175.0, 211.0, 249.0].iter().zip(crate::quantize::LEVELS.iter()).enumerate() {
+        let k = Knob::QLevel(i as u8);
+        let id = KnobId::PianoDlg(k);
+        let (cx, cy) = (x0 + cx, y0 + 218.0);
+        ui.hit(Rect::new(cx - 15.0, cy - 15.0, 30.0, 30.0), Action::Knob(id), s.knob_text(id));
+        super::knob(ui, cx, cy, 13.0, s.knob(id), false, t.text, t.text_dim);
+        ui.c.stroke_circle(cx, cy, 14.5, 1.5, t.h(super::arpeggiate::LEVEL_COLOURS[i]));
+        label(ui, Font::new(9), cx, y0 + 241.0, 0, t.text_dim, name);
+    }
+}
+
+/// One of LFO's or Quantize's knobs at screen (`cx`, `cy`); a grey one takes no clicks.
 #[allow(clippy::too_many_arguments)]
 fn lfo_knob(ui: &mut Ui, s: &State, cx: f32, cy: f32, r: f32, k: Knob, bipolar: bool, look: kit::KnobLook, dim: bool) {
     let id = KnobId::PianoDlg(k);
