@@ -176,6 +176,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 
 - Lemon Sampler, Lemon Trio (a three-oscillator synth) and Lemon Parametric EQ, also available as VST3
   and CLAP bundles for other hosts
+- Every Lemon plugin is built into Lemon Studio, so none needs a plugin file; the VST3 and CLAP bundles are for other
+  hosts. A project stores the built-in effects other than the EQ as wrapped CLAP plugins, as it stored their bundles
 - Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon
   Chorus and Lemon Stereo Shaper as VST3 and CLAP plugins; a project's Fruity Soft Clipper, Fruity Fast Dist, Fruity
   Balance, Fruity Stereo Enhancer, Transient Processor, Fruity Chorus and Fruity Stereo Shaper play through the same

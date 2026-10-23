@@ -129,8 +129,9 @@ cd Lemon-Studio
 Studio's own plugins (Lemon Sampler, Lemon Trio, Lemon Parametric EQ, Lemon Limiter, Lemon Reverb, Lemon Delay, Lemon
 Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus,
 Lemon Stereo Shaper and Citrus) and
-installs the ones that changed as VST3 and CLAP plugins, in the folders where Lemon Studio and other DAWs find them. A
-plugin that is new or updated in the repository shows up at the next run. The first run builds every plugin, which takes
+installs the ones that changed as VST3 and CLAP plugins, in the folders where other DAWs find them. Lemon Studio itself
+has every one of them built in and needs no plugin files. A plugin that is new or updated in the repository shows up
+in other DAWs at the next run. The first run builds every plugin, which takes
 a few minutes more; later runs rebuild only what changed. Set `OPENSTUDIO_NO_PLUGIN_BUILD=1` to skip the plugin build. A
 Lemon Studio installed as below builds nothing: after pulling changes, either run the command above once, or build and
 install only the plugins with `cargo run -p bundle-plugins -- --install`.

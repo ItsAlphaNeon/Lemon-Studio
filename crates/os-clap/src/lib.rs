@@ -653,11 +653,18 @@ pub struct Plugin {
     /// audio-ports extension is taken as stereo in and out.
     ins: usize,
     outs: usize,
-    /// Buffers for channels the host has no audio for (a mono input's mix of both sides, channels beyond two), and the
-    /// channel pointers of the current process call: sized at activation, so the audio thread never allocates.
+    /// Channels of the ports after the main ones (a sidechain input, extra outputs). CLAP wants a buffer for every
+    /// port it declares: these get silence (Lemon Studio routes no sidechain yet) and unheard scratch.
+    aux_ins: Vec<usize>,
+    aux_outs: Vec<usize>,
+    /// Buffers for channels the host has no audio for (a mono input's mix of both sides, channels beyond two, the
+    /// other ports), the channel pointers and the port buffers of the current process call: sized at activation, so
+    /// the audio thread never allocates.
     scratch: Vec<f32>,
     in_ptrs: Vec<*mut f32>,
     out_ptrs: Vec<*mut f32>,
+    in_bufs: Vec<clap_audio_buffer>,
+    out_bufs: Vec<clap_audio_buffer>,
     /// Parameter ranges in list order (id, min, max, stepped), read after init and on a rescan (values cross the
     /// hosting layer normalized).
     ranges: Vec<params::Range>,
@@ -849,9 +856,13 @@ impl Plugin {
                 audio_ports,
                 ins: 2,
                 outs: 2,
+                aux_ins: Vec::new(),
+                aux_outs: Vec::new(),
                 scratch: Vec::new(),
                 in_ptrs: Vec::new(),
                 out_ptrs: Vec::new(),
+                in_bufs: Vec::new(),
+                out_bufs: Vec::new(),
                 latency,
                 latency_now: 0,
                 render,
@@ -913,23 +924,33 @@ impl Plugin {
         };
     }
 
-    /// The channels of the plugin's main input and output ports (main thread, inactive: ports only change then), and
-    /// buffers for them. Without the audio-ports extension the plugin is taken as stereo in and out.
+    /// The channels of the plugin's input and output ports, the main one first (main thread, inactive: ports only
+    /// change then), and buffers for them. Without the audio-ports extension the plugin is taken as stereo in and out.
     fn read_ports(&mut self) {
-        let main = |is_input: bool| -> Option<usize> {
+        let ports = |is_input: bool| -> Option<Vec<usize>> {
             let ports = unsafe { self.audio_ports.as_ref() }?;
-            if unsafe { ports.count.map_or(0, |c| c(self.plugin, is_input)) } == 0 {
-                return Some(0);
-            }
-            // SAFETY: plain data the plugin fills.
-            let mut info: clap_audio_port_info = unsafe { std::mem::zeroed() };
-            let ok = unsafe { ports.get.is_some_and(|g| g(self.plugin, 0, is_input, &mut info)) };
-            Some(if ok { (info.channel_count as usize).min(64) } else { 2 })
+            let count = unsafe { ports.count.map_or(0, |c| c(self.plugin, is_input)) }.min(16);
+            Some(
+                (0..count)
+                    .map(|i| {
+                        // SAFETY: plain data the plugin fills.
+                        let mut info: clap_audio_port_info = unsafe { std::mem::zeroed() };
+                        let ok = unsafe { ports.get.is_some_and(|g| g(self.plugin, i, is_input, &mut info)) };
+                        if ok { (info.channel_count as usize).min(64) } else { 2 }
+                    })
+                    .collect(),
+            )
         };
-        (self.ins, self.outs) = (main(true).unwrap_or(2), main(false).unwrap_or(2));
-        self.scratch = vec![0.0; (self.ins + self.outs) * self.max_frames as usize];
-        self.in_ptrs = Vec::with_capacity(self.ins);
-        self.out_ptrs = Vec::with_capacity(self.outs);
+        let (ins, outs) = (ports(true).unwrap_or_else(|| vec![2]), ports(false).unwrap_or_else(|| vec![2]));
+        (self.ins, self.outs) = (ins.first().copied().unwrap_or(0), outs.first().copied().unwrap_or(0));
+        self.aux_ins = ins.get(1..).unwrap_or_default().to_vec();
+        self.aux_outs = outs.get(1..).unwrap_or_default().to_vec();
+        let (aux_in, aux_out): (usize, usize) = (self.aux_ins.iter().sum(), self.aux_outs.iter().sum());
+        self.scratch = vec![0.0; (self.ins + self.outs + aux_in + aux_out) * self.max_frames as usize];
+        self.in_ptrs = Vec::with_capacity(self.ins + aux_in);
+        self.out_ptrs = Vec::with_capacity(self.outs + aux_out);
+        self.in_bufs = Vec::with_capacity(ins.len());
+        self.out_bufs = Vec::with_capacity(outs.len());
     }
 
     /// The voice list's limit from the plugin's voice info (main thread, active): the voices its patch can use.
@@ -1500,6 +1521,9 @@ impl Plugin {
             std::ptr::write_bytes(s, 0, frames);
             s
         };
+        // The other ports' channels come after the main ports' in scratch: the inputs', then the outputs'.
+        let aux_in_at = self.ins + self.outs;
+        let aux_out_at = aux_in_at + self.aux_ins.iter().sum::<usize>();
         self.out_ptrs.clear();
         for c in 0..self.outs {
             self.out_ptrs.push(match c {
@@ -1508,6 +1532,7 @@ impl Plugin {
                 _ => spare(self.ins + c),
             });
         }
+        self.out_ptrs.extend((0..self.aux_outs.iter().sum::<usize>()).map(|c| spare(aux_out_at + c)));
         self.in_ptrs.clear();
         let has_in = input.is_some() && self.ins > 0;
         if let Some((l, r)) = input.filter(|_| self.ins > 0) {
@@ -1524,9 +1549,29 @@ impl Plugin {
                     self.in_ptrs.push(spare(c));
                 }
             }
+            self.in_ptrs.extend((0..self.aux_ins.iter().sum::<usize>()).map(|c| spare(aux_in_at + c)));
         }
-        let mut buf = clap_audio_buffer { data32: self.out_ptrs.as_mut_ptr(), data64: ptr::null_mut(), channel_count: self.outs as u32, latency: 0, constant_mask: 0 };
-        let in_buf = clap_audio_buffer { data32: self.in_ptrs.as_mut_ptr(), data64: ptr::null_mut(), channel_count: self.ins as u32, latency: 0, constant_mask: 0 };
+        // One buffer per port, as CLAP requires: a plugin reads its sidechain port's buffer even when the host has
+        // nothing for it (nih-plug reads one past a short list, and crashes on what it finds there).
+        let port = |data32: *mut *mut f32, channels: usize| clap_audio_buffer { data32, data64: ptr::null_mut(), channel_count: channels as u32, latency: 0, constant_mask: 0 };
+        self.out_bufs.clear();
+        if self.outs > 0 {
+            let mut at = 0;
+            for ch in std::iter::once(self.outs).chain(self.aux_outs.iter().copied()) {
+                // SAFETY: `out_ptrs` holds the main port's channels, then every other port's.
+                self.out_bufs.push(port(unsafe { self.out_ptrs.as_mut_ptr().add(at) }, ch));
+                at += ch;
+            }
+        }
+        self.in_bufs.clear();
+        if has_in {
+            let mut at = 0;
+            for ch in std::iter::once(self.ins).chain(self.aux_ins.iter().copied()) {
+                // SAFETY: `in_ptrs` holds the main port's channels, then every other port's.
+                self.in_bufs.push(port(unsafe { self.in_ptrs.as_mut_ptr().add(at) }, ch));
+                at += ch;
+            }
+        }
         // The engine's transport while playing; without one the host is free running (spec: plugins/vst3-hosting.md §1).
         let transport = match self.chunk_song {
             Some(t) => {
@@ -1539,10 +1584,10 @@ impl Plugin {
             steady_time: self.steady,
             frames_count: n,
             transport,
-            audio_inputs: if has_in { &in_buf } else { ptr::null() },
-            audio_outputs: if self.outs > 0 { &mut buf } else { ptr::null_mut() },
-            audio_inputs_count: u32::from(has_in),
-            audio_outputs_count: u32::from(self.outs > 0),
+            audio_inputs: if self.in_bufs.is_empty() { ptr::null() } else { self.in_bufs.as_ptr() },
+            audio_outputs: if self.out_bufs.is_empty() { ptr::null_mut() } else { self.out_bufs.as_mut_ptr() },
+            audio_inputs_count: self.in_bufs.len() as u32,
+            audio_outputs_count: self.out_bufs.len() as u32,
             in_events: &ins,
             out_events: &outs,
         };
@@ -2011,6 +2056,27 @@ mod tests {
         p.audio_ports = ptr::null();
         p.read_ports();
         assert_eq!((p.ins, p.outs), (2, 2));
+    }
+
+    /// A plugin with ports besides its main ones (Lemon Limiter's sidechain input) gets a buffer for every port, as
+    /// CLAP requires: given only the main input, nih-plug read a second buffer past the list and crashed.
+    #[test]
+    fn every_port_gets_a_buffer() {
+        use os_engine::HostedEffect as _;
+        let entry = &lemon_limiter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Limiter.clap")) }.expect("linked limiter");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 48000));
+        assert_eq!((p.ins, p.outs, p.aux_ins.as_slice(), p.aux_outs.as_slice()), (2, 2, &[2][..], &[][..]));
+        let (mut l, mut r) = (vec![0.25f32; 256], vec![-0.25f32; 256]);
+        for _ in 0..8 {
+            p.process_fx(48000, &mut l, &mut r);
+        }
+        assert_eq!((p.in_bufs.len(), p.in_bufs[1].channel_count, p.out_bufs.len()), (2, 2, 1));
+        assert!(l.iter().chain(&r).all(|v| v.is_finite()));
+        // An instrument's call has no inputs at all.
+        p.process(48000, &mut l, &mut r);
+        assert!(p.in_bufs.is_empty());
     }
 
     /// Loads the bundled Lemon Sampler (built by `cargo run -p bundle-plugins`) when it is there.

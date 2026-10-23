@@ -28,6 +28,16 @@ lemon-sampler = { path = "../../plugins/lemon-sampler", features = ["linked"] }
 lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", features = ["linked"] }
 lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", features = ["linked"] }
 citrus = { path = "../../plugins/citrus", features = ["linked"] }
+lemon-limiter = { path = "../../plugins/lemon-limiter", features = ["linked"] }
+lemon-reverb = { path = "../../plugins/lemon-reverb", features = ["linked"] }
+lemon-delay = { path = "../../plugins/lemon-delay", features = ["linked"] }
+lemon-soft-clipper = { path = "../../plugins/lemon-soft-clipper", features = ["linked"] }
+lemon-fast-distortion = { path = "../../plugins/lemon-fast-distortion", features = ["linked"] }
+lemon-balance = { path = "../../plugins/lemon-balance", features = ["linked"] }
+lemon-stereo-enhancer = { path = "../../plugins/lemon-stereo-enhancer", features = ["linked"] }
+lemon-transient-processor = { path = "../../plugins/lemon-transient-processor", features = ["linked"] }
+lemon-chorus = { path = "../../plugins/lemon-chorus", features = ["linked"] }
+lemon-stereo-shaper = { path = "../../plugins/lemon-stereo-shaper", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"

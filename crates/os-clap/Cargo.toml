@@ -18,3 +18,5 @@ os-model.workspace = true
 lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", features = ["linked"] }
 # The built-in Lemon Sampler, linked, for the portamento test.
 lemon-sampler = { path = "../../plugins/lemon-sampler", features = ["linked"] }
+# The built-in Lemon Limiter, linked: a plugin with a sidechain input port.
+lemon-limiter = { path = "../../plugins/lemon-limiter", features = ["linked"] }
