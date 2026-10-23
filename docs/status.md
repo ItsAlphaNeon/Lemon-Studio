@@ -149,6 +149,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 
 - Lemon Sampler, Lemon Trio (a three-oscillator synth) and Lemon Parametric EQ, also available as VST3
   and CLAP bundles for other hosts
+- Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance and Lemon Stereo Enhancer as VST3 and CLAP plugins; a
+  project's Fruity Soft Clipper, Fruity Fast Dist, Fruity Balance and Fruity Stereo Enhancer play through the same
+  sound in the mixer, matching FL Studio 2026's exports sample for sample in the tests
 - The sampler plays a project's sample settings (start and length, the sample file's loop, the sample
   effects, the channel filter, declicking) and each note's own pan and filter offsets
 - A file of 30 s or more loaded into a sampler channel turns its Keep on disk on (General settings ▸

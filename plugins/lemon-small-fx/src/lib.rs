@@ -1,0 +1,365 @@
+// Copyright (C) 2026 ItsAlphaNeon
+// SPDX-License-Identifier: GPL-3.0-or-later
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+
+//! Lemon Studio's small effects as VST3 / CLAP plugins (nih-plug): Lemon Soft Clipper, Lemon Fast Distortion, Lemon
+//! Balance and Lemon Stereo Enhancer. Each is a handful of settings over a sound of `os_engine::effects`, so they share
+//! everything but their description: the plugin, its parameters and saved state ([`params`]), the Pith editor
+//! ([`editor`], [`view`]). A description ([`Spec`]) gives the settings, their value texts, the editor's cards and
+//! controls, and the sound. The plugin modules (`plugins/lemon-soft-clipper` and the others) export one each.
+//!
+// spec: plugins/lemon-small-effects.md (§1 how the four are built, §5 parameters and state), the four plugin pages
+// (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md),
+// plugins/plugin-formats.md
+#![allow(semicolon_in_expressions_from_non_local_macros)]
+
+pub mod balance;
+pub mod editor;
+pub mod fast_distortion;
+pub mod params;
+pub mod soft_clipper;
+pub mod stereo_enhancer;
+pub mod view;
+
+use std::marker::PhantomData;
+use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
+
+use nih_plug::prelude::*;
+use os_ui::{Canvas, Rect};
+
+use params::FxParams;
+
+/// The most settings an effect here has.
+pub const MAX: usize = 8;
+
+/// One setting: the original's saved state holds it as int `k` (its place in [`Spec::settings`]).
+pub struct Setting {
+    /// The parameter's id (host automation and saved sessions).
+    pub id: &'static str,
+    /// The name hosts and the hint show.
+    pub name: &'static str,
+    /// The stored range, also the knob's.
+    pub range: (i32, i32),
+    /// A new instance's value.
+    pub start: i32,
+    /// Where a drag lands when it comes near and a wheel step stops (the centre of a bipolar knob, unity gain).
+    pub magnet: Option<i32>,
+}
+
+/// A control of the editor.
+pub enum Control {
+    /// A Pith dial of radius `r` centred at (`cx`, `cy`), its caption under it.
+    Knob { id: &'static str, cx: f32, cy: f32, r: f32, caption: &'static str, bipolar: bool },
+    /// A selector: one row per value from the range's minimum, 16 px apart from `top`, between `x0` and `x1`.
+    Choice { id: &'static str, x0: f32, x1: f32, top: f32, names: &'static [&'static str] },
+}
+
+impl Control {
+    pub fn id(&self) -> &'static str {
+        match self {
+            Control::Knob { id, .. } | Control::Choice { id, .. } => id,
+        }
+    }
+}
+
+/// An outlined card under a ruled heading.
+pub struct Card {
+    pub x0: f32,
+    pub x1: f32,
+    pub y0: f32,
+    pub y1: f32,
+    pub heading: &'static str,
+}
+
+/// A well that pictures the settings (a transfer curve, the output balance).
+pub struct Display {
+    pub r: Rect,
+    pub draw: fn(&mut Canvas, Rect, &[i32]),
+}
+
+/// The sound of an effect, made for a sample rate from the settings in the original's order.
+pub trait Sound: Send {
+    /// New settings: they act from this block on (gains glide where the original's do).
+    fn set(&mut self, v: &[i32]);
+    fn set_sample_rate(&mut self, rate: u32);
+    /// Forgets what the sound holds (a delay line), as at the start of a song.
+    fn reset(&mut self);
+    fn process(&mut self, left: &mut [f32], right: &mut [f32]);
+}
+
+/// Everything that makes one of the effects.
+pub struct Spec {
+    /// "Lemon Soft Clipper": the plugin's name.
+    pub name: &'static str,
+    /// The wordmark's word: "SOFT CLIPPER".
+    pub word: &'static str,
+    /// The About menu's line: "Lemon Studio's soft clipper".
+    pub about: &'static str,
+    /// The settings in the original's saved order.
+    pub settings: &'static [Setting],
+    /// Editor size in logical pixels.
+    pub size: (u32, u32),
+    pub cards: &'static [Card],
+    pub controls: &'static [Control],
+    pub display: Option<Display>,
+    /// A setting's value text.
+    pub text: fn(usize, i32) -> String,
+    /// A typed value for a setting.
+    pub parse: fn(usize, &str) -> Option<i32>,
+    pub sound: fn(u32, &[i32]) -> Box<dyn Sound>,
+    /// The sound rings on after the input stops (a delay line).
+    pub rings: bool,
+}
+
+impl Spec {
+    /// Setting index of an id.
+    pub fn index(&self, id: &str) -> Option<usize> {
+        self.settings.iter().position(|s| s.id == id)
+    }
+
+    /// The settings a new instance starts on.
+    pub fn start(&self) -> Vec<i32> {
+        self.settings.iter().map(|s| s.start).collect()
+    }
+}
+
+/// What makes a plugin type of one of the effects: its description and its ids.
+pub trait Kind: 'static + Send + Sync {
+    const SPEC: &'static Spec;
+    const CLAP_ID: &'static str;
+    const CLAP_DESCRIPTION: &'static str;
+    const CLAP_FEATURES: &'static [ClapFeature];
+    const VST3_CLASS_ID: [u8; 16];
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory];
+}
+
+/// What the audio thread and the editor share.
+pub struct Shared {
+    pub rate: AtomicU32,
+    /// Set while an editor is open.
+    pub editor_open: AtomicBool,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Shared { rate: AtomicU32::new(44100), editor_open: AtomicBool::new(false) }
+    }
+}
+
+/// One of the effects as a plugin.
+pub struct SmallFx<K: Kind> {
+    params: Arc<FxParams>,
+    shared: Arc<Shared>,
+    /// Made in `initialize` (for the sample rate).
+    dsp: Option<Box<dyn Sound>>,
+    raw: Vec<u8>,
+    raw_seen: u64,
+    kind: PhantomData<K>,
+}
+
+impl<K: Kind> Default for SmallFx<K> {
+    fn default() -> Self {
+        SmallFx {
+            params: Arc::new(FxParams::new(K::SPEC)),
+            shared: Arc::new(Shared::default()),
+            dsp: None,
+            raw: params::default_state(K::SPEC),
+            raw_seen: u64::MAX,
+            kind: PhantomData,
+        }
+    }
+}
+
+impl<K: Kind> SmallFx<K> {
+    /// The saved state's copy (never blocks: keeps the last one while the editor writes).
+    fn read_raw(&mut self) {
+        let v = self.params.raw_version.load(Ordering::Acquire);
+        if v == self.raw_seen {
+            return;
+        }
+        if let Ok(b) = self.params.raw.try_read() {
+            self.raw.clone_from(&b);
+            self.raw_seen = v;
+        }
+    }
+
+    /// The settings the sound plays (the first `n` values; no allocation).
+    fn settings(&mut self) -> [i32; MAX] {
+        self.read_raw();
+        self.params.settings(&self.raw)
+    }
+}
+
+impl<K: Kind> Plugin for SmallFx<K> {
+    const NAME: &'static str = K::SPEC.name;
+    const VENDOR: &'static str = "Lemon Studio";
+    const URL: &'static str = "";
+    const EMAIL: &'static str = "";
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] =
+        &[AudioIOLayout { main_input_channels: NonZeroU32::new(2), main_output_channels: NonZeroU32::new(2), ..AudioIOLayout::const_default() }];
+    const SAMPLE_ACCURATE_AUTOMATION: bool = false;
+
+    type SysExMessage = ();
+    type BackgroundTask = ();
+
+    fn params(&self) -> Arc<dyn Params> {
+        self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        Some(Box::new(editor::FxEditor::new(K::SPEC, self.params.clone(), self.shared.clone())))
+    }
+
+    fn initialize(&mut self, _layout: &AudioIOLayout, config: &BufferConfig, _ctx: &mut impl InitContext<Self>) -> bool {
+        let rate = config.sample_rate.round() as u32;
+        self.shared.rate.store(rate, Ordering::Relaxed);
+        self.raw_seen = u64::MAX;
+        let s = self.settings();
+        let v = &s[..K::SPEC.settings.len()];
+        match &mut self.dsp {
+            Some(d) => {
+                d.set_sample_rate(rate);
+                d.set(v);
+            }
+            None => self.dsp = Some((K::SPEC.sound)(rate, v)),
+        }
+        true
+    }
+
+    fn reset(&mut self) {
+        if let Some(d) = &mut self.dsp {
+            d.reset();
+        }
+    }
+
+    fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, _ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
+        let s = self.settings();
+        let Some(dsp) = &mut self.dsp else { return ProcessStatus::Normal };
+        dsp.set(&s[..K::SPEC.settings.len()]);
+        let out = buffer.as_slice();
+        if out.len() < 2 {
+            return ProcessStatus::Normal;
+        }
+        let (left, right) = out.split_at_mut(1);
+        dsp.process(left[0], right[0]);
+        if K::SPEC.rings { ProcessStatus::KeepAlive } else { ProcessStatus::Normal }
+    }
+}
+
+impl<K: Kind> ClapPlugin for SmallFx<K> {
+    const CLAP_ID: &'static str = K::CLAP_ID;
+    const CLAP_DESCRIPTION: Option<&'static str> = Some(K::CLAP_DESCRIPTION);
+    const CLAP_MANUAL_URL: Option<&'static str> = None;
+    const CLAP_SUPPORT_URL: Option<&'static str> = None;
+    const CLAP_FEATURES: &'static [ClapFeature] = K::CLAP_FEATURES;
+}
+
+impl<K: Kind> Vst3Plugin for SmallFx<K> {
+    const VST3_CLASS_ID: [u8; 16] = K::VST3_CLASS_ID;
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = K::VST3_SUBCATEGORIES;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every effect: ids unique, starts inside the ranges, a control per setting, the plugin ids distinct.
+    #[test]
+    fn the_four_effects_are_described_whole() {
+        let specs = [soft_clipper::SPEC, fast_distortion::SPEC, balance::SPEC, stereo_enhancer::SPEC];
+        for s in specs {
+            assert!(s.settings.len() <= MAX, "{}", s.name);
+            for (k, set) in s.settings.iter().enumerate() {
+                assert_eq!(s.index(set.id), Some(k), "{} {}", s.name, set.id);
+                assert!((set.range.0..=set.range.1).contains(&set.start), "{} {}", s.name, set.id);
+                if let Some(m) = set.magnet {
+                    assert!((set.range.0..=set.range.1).contains(&m), "{} {}", s.name, set.id);
+                }
+                assert_eq!(s.controls.iter().filter(|c| c.id() == set.id).count(), 1, "{} {}", s.name, set.id);
+                // Every value has a text, and typing it in gives a value with the same text.
+                for v in set.range.0..=set.range.1 {
+                    let t = (s.text)(k, v);
+                    let back = (s.parse)(k, &t).unwrap_or_else(|| panic!("{} {} {v}: {t}", s.name, set.id));
+                    assert_eq!((s.text)(k, back), t, "{} {} {v}", s.name, set.id);
+                }
+            }
+            assert!(s.name.starts_with("Lemon "));
+        }
+        let ids = [
+            <soft_clipper::LemonSoftClipper as ClapPlugin>::CLAP_ID,
+            <fast_distortion::LemonFastDistortion as ClapPlugin>::CLAP_ID,
+            <balance::LemonBalance as ClapPlugin>::CLAP_ID,
+            <stereo_enhancer::LemonStereoEnhancer as ClapPlugin>::CLAP_ID,
+        ];
+        let classes = [
+            <soft_clipper::LemonSoftClipper as Vst3Plugin>::VST3_CLASS_ID,
+            <fast_distortion::LemonFastDistortion as Vst3Plugin>::VST3_CLASS_ID,
+            <balance::LemonBalance as Vst3Plugin>::VST3_CLASS_ID,
+            <stereo_enhancer::LemonStereoEnhancer as Vst3Plugin>::VST3_CLASS_ID,
+        ];
+        for i in 0..4 {
+            for j in i + 1..4 {
+                assert_ne!(ids[i], ids[j]);
+                assert_ne!(classes[i], classes[j]);
+            }
+        }
+        assert_eq!(<balance::LemonBalance as Plugin>::NAME, "Lemon Balance");
+    }
+
+    #[test]
+    fn editor_edits_reach_the_sound_and_stored_bytes_play_as_stored() {
+        let mut p = soft_clipper::LemonSoftClipper::default();
+        assert_eq!(&p.settings()[..2], &[100, 128]);
+        let id = p.params.p[0].as_ptr();
+        p.params.live.set(id, 0.5);
+        assert_eq!(p.settings()[0], 64);
+        // A stored threshold of 0 (below the knob's 1) plays as stored while the knob is not moved.
+        let q = FxParams::new(soft_clipper::SPEC);
+        q.set_raw(vec![0, 0, 0, 0, 128, 0, 0, 0]);
+        let mut p = soft_clipper::LemonSoftClipper { params: Arc::new(q), ..Default::default() };
+        // The parameter is at its start (100), the stored field (0) differs: the parameter wins (it was edited).
+        assert_eq!(p.settings()[0], 100);
+        let id = p.params.p[0].as_ptr();
+        p.params.live.set(id, 0.0);
+        assert_eq!(p.settings()[0], 0);
+    }
+
+    /// The factory presets (`crates/os-app/factory-presets/<name>/`) list every parameter by its name, as its step
+    /// count from the minimum, and hold FL's presets (spec plugins/factory-presets.md).
+    #[test]
+    fn factory_presets_list_every_parameter_and_hold_fls_states() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets");
+        let read = |spec: &Spec, preset: &str| -> Vec<i32> {
+            let text = std::fs::read_to_string(root.join(spec.name).join(format!("{preset}.ospreset"))).unwrap();
+            let mut lines = text.lines();
+            assert_eq!(lines.next(), Some("OSPRESET 1"));
+            let head = lines.next().unwrap();
+            assert!(head.starts_with(&format!("plugin={}	", spec.name)), "{head}");
+            let mut v: Vec<Option<i32>> = vec![None; spec.settings.len()];
+            for l in lines.filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+                let (name, steps) = l.split_once(" = ").unwrap();
+                let k = spec.settings.iter().position(|s| s.name == name).unwrap_or_else(|| panic!("{}: {name}", spec.name));
+                let (min, max) = spec.settings[k].range;
+                let steps: i32 = steps.parse().unwrap();
+                assert!((0..=max - min).contains(&steps), "{} {preset}: {name} = {steps}", spec.name);
+                v[k] = Some(min + steps);
+            }
+            v.into_iter().map(|x| x.expect("every parameter listed")).collect()
+        };
+        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC] {
+            for e in std::fs::read_dir(root.join(spec.name)).unwrap() {
+                let name = e.unwrap().file_name().into_string().unwrap();
+                read(spec, name.strip_suffix(".ospreset").unwrap());
+            }
+            assert_eq!(read(spec, "Default"), spec.start(), "{}", spec.name);
+        }
+        assert_eq!(read(fast_distortion::SPEC, "Compressor"), [192, 1, 0, 104, 93]);
+        assert_eq!(read(fast_distortion::SPEC, "Warmth"), [82, 7, 0, 128, 128]);
+        assert_eq!(read(stereo_enhancer::SPEC, "For strings"), [-18, 256, -54, -248, 1, 0]);
+        assert_eq!(read(stereo_enhancer::SPEC, "Subtle"), [0, 256, -40, -24, 1, 0]);
+    }
+}

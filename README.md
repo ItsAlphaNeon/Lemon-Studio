@@ -126,7 +126,8 @@ cd Lemon-Studio
 ```
 
 `cargo run -p os-app --release` builds and runs Lemon Studio. Before Lemon Studio starts, it also rebuilds Lemon
-Studio's own plugins (Lemon Sampler, Lemon Trio, Lemon Parametric EQ, Lemon Limiter, Lemon Reverb and Citrus) and
+Studio's own plugins (Lemon Sampler, Lemon Trio, Lemon Parametric EQ, Lemon Limiter, Lemon Reverb, Lemon Delay, Lemon
+Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer and Citrus) and
 installs the ones that changed as VST3 and CLAP plugins, in the folders where Lemon Studio and other DAWs find them. A
 plugin that is new or updated in the repository shows up at the next run. The first run builds every plugin, which takes
 a few minutes more; later runs rebuild only what changed. Set `OPENSTUDIO_NO_PLUGIN_BUILD=1` to skip the plugin build. A
@@ -354,6 +355,11 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`lemon-limiter`](plugins/lemon-limiter) | Lemon Limiter effect (VST3 + CLAP) |
 | [`lemon-reverb`](plugins/lemon-reverb) | Lemon Reverb effect (VST3 + CLAP) |
 | [`lemon-delay`](plugins/lemon-delay) | Lemon Delay effect (VST3 + CLAP) |
+| [`lemon-small-fx`](plugins/lemon-small-fx) | What the four small Lemon effects share: the plugin, its state, the editor and each effect's description |
+| [`lemon-soft-clipper`](plugins/lemon-soft-clipper) | Lemon Soft Clipper effect (VST3 + CLAP) |
+| [`lemon-fast-distortion`](plugins/lemon-fast-distortion) | Lemon Fast Distortion effect (VST3 + CLAP) |
+| [`lemon-balance`](plugins/lemon-balance) | Lemon Balance effect (VST3 + CLAP) |
+| [`lemon-stereo-enhancer`](plugins/lemon-stereo-enhancer) | Lemon Stereo Enhancer effect (VST3 + CLAP) |
 | [`citrus`](plugins/citrus) | Citrus instrument, a six-operator synthesizer (VST3 + CLAP) |
 
 ## Roadmap
