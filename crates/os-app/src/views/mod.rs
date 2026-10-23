@@ -11,6 +11,7 @@ pub mod channel_win;
 pub mod data_folder;
 pub mod dialog;
 pub mod menus;
+pub mod midi_form;
 pub mod midi_page;
 pub mod mondebug;
 pub mod settings;

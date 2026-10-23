@@ -778,7 +778,10 @@ pub fn remap_project(p: &mut Project, map: &[Option<usize>]) {
         .collect();
     for pat in &mut p.patterns {
         pat.notes.retain_mut(|n| idx.get(&n.channel).map(|&m| n.channel = m).is_some());
-        pat.controls.retain_mut(|c| idx.get(&c.channel()).map(|&m| *c = os_model::ControlPoint::new(c.position, m, c.param(), c.value)).is_some());
+        // Points of no channel (the tempo's, channel 0x4000) stay as they are.
+        pat.controls.retain_mut(|c| {
+            c.channel() >= 0x4000 || idx.get(&c.channel()).map(|&m| *c = os_model::ControlPoint::new(c.position, m, c.param(), c.value)).is_some()
+        });
     }
     p.automations.retain_mut(|a| {
         let Some(&m) = idx.get(&a.channel) else { return false };
@@ -2183,6 +2186,16 @@ mod tests {
             let text = c.text_width(os_ui::Font::new(14), crate::plugins::LEMON_SAMPLER);
             assert!(text <= w - 8.0, "{text} px at scale {scale}");
         }
+    }
+
+    /// Deleting a channel keeps the tempo's control points (channel 0x4000), which belong to no channel.
+    #[test]
+    fn restructuring_keeps_tempo_points() {
+        let mut p = crate::app::test_project();
+        let tempo = os_model::ControlPoint::new(96, 0x4000, 5, 140_000);
+        p.patterns[0].controls = vec![os_model::ControlPoint::new(0, 1, os_model::ControlPoint::VOLUME, 6400), tempo];
+        remap_project(&mut p, &[Some(0), None, Some(1), Some(2), Some(3)]);
+        assert_eq!(p.patterns[0].controls, [tempo]);
     }
 
     /// Clone, move and delete renumber the channels' notes so each note keeps its channel (§17-18).

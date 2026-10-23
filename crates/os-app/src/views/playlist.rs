@@ -204,7 +204,12 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         let c = if g.rows.strip(row) { c.mix(t.grid_gap, 0.5) } else { c };
         ui.c.fill_rect(Rect::new(grid_x, y, grid_w, h - gap_of(row)), c);
     }
-    grid_lines(ui, &g, bar_w);
+    let start = pl::start_marker(s);
+    if let Some(p) = start {
+        let x = g.x_of(p as f32).clamp(grid_x, grid.right());
+        ui.c.fill_rect(Rect::span(grid_x, x, grid.y, grid.bottom()), t.s(0x000000).with_alpha(70));
+    }
+    grid_lines(ui, &g, bar_w, start_bar(&g, start));
     for &row in &visible {
         let (y, h) = (g.y_of(row), g.rows.height(row));
         ui.c.fill_rect(Rect::new(grid_x, y + h - gap_of(row), grid_w, gap_of(row)), t.grid_gap);
@@ -495,19 +500,38 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect) {
 /// Miniature of the arrangement inside the overview bar (§1).
 fn overview(ui: &mut Ui, s: &State, over: Rect, total_ticks: f32) {
     let cs = pl::clips(s);
-    if cs.is_empty() {
-        return;
-    }
-    let top = cs.iter().map(|c| c.track).min().unwrap_or(0);
-    let bottom = cs.iter().map(|c| c.track).max().unwrap_or(0);
-    let span = f32::from(bottom - top + 1).max(1.0);
     let k = over.w / total_ticks.max(1.0);
-    let row_h = ((over.h - 6.0) / span).clamp(1.0, 3.0);
-    for c in cs {
-        let col = pl::source_color(s, c.source).map(rgb).unwrap_or(ui.t.clip).shade(0.2);
-        let y = over.y + 3.0 + f32::from(c.track - top) / span * (over.h - 6.0);
-        ui.c.fill_rect(Rect::new(over.x + c.position as f32 * k, y, (c.length as f32 * k).max(1.0), row_h), col.with_alpha(170));
+    if !cs.is_empty() {
+        let top = cs.iter().map(|c| c.track).min().unwrap_or(0);
+        let bottom = cs.iter().map(|c| c.track).max().unwrap_or(0);
+        let span = f32::from(bottom - top + 1).max(1.0);
+        let row_h = ((over.h - 6.0) / span).clamp(1.0, 3.0);
+        for c in cs {
+            let col = pl::source_color(s, c.source).map(rgb).unwrap_or(ui.t.clip).shade(0.2);
+            let y = over.y + 3.0 + f32::from(c.track - top) / span * (over.h - 6.0);
+            ui.c.fill_rect(Rect::new(over.x + c.position as f32 * k, y, (c.length as f32 * k).max(1.0), row_h), col.with_alpha(170));
+        }
     }
+    // A flag per time marker (§7a "Look"): a 5 x 5 px right triangle with its upright edge on the marker's place, in its
+    // action's colour, the edge a darker shade.
+    for m in pl::markers(s) {
+        let x = (over.x + m.position as f32 * k).round();
+        let col = Color::rgb(match m.kind {
+            TimeMarker::PLAIN | TimeMarker::LOOP | TimeMarker::SKIP => 0xffffa9,
+            TimeMarker::MARKER_LOOP => 0xa9ffff,
+            TimeMarker::PAUSE => 0xffa9ff,
+            TimeMarker::START => 0xff0000,
+            _ => 0xffffff,
+        });
+        let y = over.y + 1.0;
+        ui.c.fill_polygon(&[(x, y), (x + 6.0, y), (x, y + 6.0)], col.shade(-0.4));
+        ui.c.fill_polygon(&[(x, y), (x + 5.0, y), (x, y + 5.0)], col);
+    }
+}
+
+/// The bar the Start marker is in (0 without one): bars count from it (§7a).
+fn start_bar(g: &PGeom, start: Option<u32>) -> i32 {
+    start.map_or(0, |p| (p / (g.ppq * 4).max(1)) as i32)
 }
 
 /// Bar numbers, time selection, song position (§7).
@@ -519,20 +543,29 @@ fn ruler_paint(ui: &mut Ui, s: &State, g: &PGeom, ruler: Rect, f: &FrameInfo) {
     if let Some((a, b)) = s.playlist.range {
         ui.c.fill_rect(Rect::span(g.x_of(a as f32), g.x_of(b as f32), ruler.y, ruler.bottom()), t.playhead.with_alpha(60));
     }
+    // Bars count from the Start marker (§7a): "1" on its bar; before it the ruler is darker and the bars have no
+    // numbers.
+    let start = pl::start_marker(s);
+    let sb = start_bar(g, start);
+    if let Some(p) = start {
+        let x = g.x_of(p as f32).clamp(ruler.x, ruler.right());
+        ui.c.fill_rect(Rect::span(ruler.x, x, ruler.y, ruler.bottom()), offset(t.ruler, -8));
+    }
     let bar_w = g.bar_w;
     let every = label_step(bar_w);
     // From the bars whose numbers still reach into view (a number is up to ~40 px wide): which labels are drawn must
     // not depend on the scroll position, or a scrolled ruler would differ from a repainted one.
     let first_bar = ((g.scroll_x - 48.0) / bar_w).floor().max(0.0) as i32;
     let last_bar = ((g.scroll_x + ruler.w) / bar_w).ceil() as i32 + 1;
-    for b in first_bar..last_bar {
-        if b % every != 0 {
+    for b in first_bar.max(sb)..last_bar {
+        let n = b - sb;
+        if n % every != 0 {
             continue;
         }
         let x = g.xs(f64::from(b) * f64::from(bar_w));
-        let size = if b % (every * 4) == 0 { 15.0 } else { 13.0 };
+        let size = if n % (every * 4) == 0 { 15.0 } else { 13.0 };
         // Along the ruler's bottom 17 px (all of it unless thin scroll bars made it taller).
-        ui.c.text(super::fnt(size), x + 2.0, ruler.bottom() - 17.0 + (16.0 - size), t.ruler_text, &format!("{}", b + 1));
+        ui.c.text(super::fnt(size), x + 2.0, ruler.bottom() - 17.0 + (16.0 - size), t.ruler_text, &format!("{}", n + 1));
     }
     // Song position: a flag ◤ on the playhead while playing the song, else on the start position (§7: its left edge
     // on the position, its top along the ruler's top).
@@ -556,9 +589,10 @@ fn label_step(bar_w: f32) -> i32 {
 fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
     let t = ui.t;
     ui.c.fill_rect(lane, t.ruler.shade(0.03));
-    ui.hit(lane, Action::PlMarkers, "Time marker (drag moves, right-click: menu)");
+    ui.hit(lane, Action::PlMarkers, "Time marker (click: song position, drag moves, right-click: menu)");
     ui.c.push_clip(lane);
-    // A tab per marker (§7): flat left edge on its position, rounded top-right corner, slanted right edge.
+    // A tab per marker (§7a): flat left edge on its position, rounded top-right corner, slanted right edge; its action's
+    // icon, then its name.
     for m in pl::markers(s) {
         let x64 = g.x64(f64::from(m.position));
         let x = x64 as f32;
@@ -580,9 +614,60 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
             (at(w), bottom),
         ];
         ui.c.fill_polygon(&tab, t.ruler.mix(t.track_header, 0.55));
-        ui.c.text_clip(Font::new(12), x + 3.0, lane.y + 1.0, right - x - 3.0, t.text, &marker_label(m));
+        marker_glyph(ui, m.kind, x, top + 8.0);
+        let tx = x + 3.0 + pl::marker_icon(m.kind).0;
+        ui.c.text_clip(Font::new(12), tx, lane.y + 1.0, right - tx, t.text, &marker_label(m));
     }
     ui.c.pop_clip();
+}
+
+/// A time marker's action icon (§7a "Look"), Lemon Studio's own drawing at FL's measured sizes: light grey, the
+/// recording markers' dot red; none for a plain marker. `x` is the marker's place, `cy` the middle of its tab.
+fn marker_glyph(ui: &mut Ui, kind: u8, x: f32, cy: f32) {
+    let grey = ui.t.s(0xa8abae);
+    // Points on an ellipse around (cx, cy) from angle a0 to a1 (degrees, clockwise from the right).
+    let arc = |cx: f32, cy: f32, rx: f32, ry: f32, a0: f32, a1: f32, n: usize| -> Vec<(f32, f32)> {
+        (0..=n).map(|i| (a0 + (a1 - a0) * i as f32 / n as f32).to_radians()).map(|a| (cx + rx * a.cos(), cy + ry * a.sin())).collect()
+    };
+    match kind {
+        // A "(" 5 x 13 px.
+        TimeMarker::START => ui.c.polyline(&arc(x + 9.5, cy, 8.0, 8.0, 125.0, 235.0, 10), 1.5, grey),
+        // A thick arrow down, its tip on the tick: 3 px stem, 9 px head.
+        TimeMarker::LOOP => {
+            ui.c.fill_rect(Rect::new(x - 1.5, cy - 6.5, 3.0, 6.5), grey);
+            ui.c.fill_polygon(&[(x - 4.5, cy), (x + 4.5, cy), (x, cy + 6.0)], grey);
+        }
+        // An arrow turning back (↶), about 12 x 12 px from 5 px left of the tick.
+        TimeMarker::MARKER_LOOP => {
+            let mut pts = vec![(x + 6.0, cy + 6.5)];
+            pts.extend(arc(x + 1.5, cy - 0.5, 4.5, 4.5, 0.0, -180.0, 12));
+            ui.c.polyline(&pts, 1.5, grey);
+            ui.c.fill_polygon(&[(x - 5.5, cy - 1.0), (x - 0.5, cy - 1.0), (x - 3.0, cy + 3.5)], grey);
+        }
+        // A filled ▶, 6 x 9 px.
+        TimeMarker::SKIP => ui.c.fill_polygon(&[(x + 3.0, cy - 4.5), (x + 9.0, cy), (x + 3.0, cy + 4.5)], grey),
+        // Two bars 2 x 7 px, 1 px apart.
+        TimeMarker::PAUSE => {
+            ui.c.fill_rect(Rect::new(x + 3.0, cy - 3.5, 2.0, 7.0), grey);
+            ui.c.fill_rect(Rect::new(x + 6.0, cy - 3.5, 2.0, 7.0), grey);
+        }
+        // A red dot, 11 x 9 px.
+        TimeMarker::PUNCH_IN | TimeMarker::PUNCH_OUT => ui.c.fill_polygon(&arc(x + 8.5, cy, 5.5, 4.5, 0.0, 360.0, 24), Color::rgb(0xf86159)),
+        // A clock outline, 11 px.
+        TimeMarker::SIGNATURE => {
+            let cx = x + 8.5;
+            ui.c.stroke_circle(cx, cy, 5.0, 1.0, grey);
+            ui.c.line(cx, cy, cx, cy - 3.5, 1.0, grey);
+            ui.c.line(cx, cy, cx + 2.5, cy, 1.0, grey);
+        }
+        // An eighth note.
+        TimeMarker::KEY => {
+            ui.c.fill_polygon(&arc(x + 5.5, cy + 3.5, 2.6, 2.0, 0.0, 360.0, 16), grey);
+            ui.c.line(x + 7.6, cy + 3.5, x + 7.6, cy - 6.0, 1.2, grey);
+            ui.c.polyline(&[(x + 7.6, cy - 6.0), (x + 10.5, cy - 3.0), (x + 10.0, cy - 0.5)], 1.2, grey);
+        }
+        _ => {}
+    }
 }
 
 /// A marker's label: its name; a time signature first shows the signature (spec: ui/pattern-time-signature.md §2).
@@ -596,8 +681,9 @@ pub(crate) fn marker_label(m: &TimeMarker) -> String {
     }
 }
 
-/// Vertical lines: grid units (dim), beats, bars (bright); every fourth bar group tinted.
-fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32) {
+/// Vertical lines: grid units (dim), beats, bars (bright); every fourth bar group tinted, counted from bar `sb` (the
+/// Start marker's, §7a).
+fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32, sb: i32) {
     let t = ui.t;
     let grid = g.grid;
     let mut bar_step = 1;
@@ -614,7 +700,7 @@ fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32) {
     let mut b = first_bar;
     while b < first_bar + n {
         let x = bar_x(b, 0.0);
-        if (b / 4) % 2 == 1 {
+        if (b - sb).div_euclid(4).rem_euclid(2) == 1 {
             ui.c.fill_rect(Rect::new(x, grid.y, bar_x(b + bar_step, 0.0) - x, grid.h), t.grid_alt.with_alpha(160));
         }
         if bar_step == 1 && per_bar > 1 {

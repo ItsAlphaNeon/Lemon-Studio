@@ -104,6 +104,9 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
     use crate::piano_dlg::Tool;
     use NCmd::*;
     let items = vec![
+        PItem::head("File"),
+        PItem::new("Import MIDI file...", Cmd::MidiImport(true)),
+        PItem::new("Export as MIDI file...", Cmd::MidiExport(true)),
         PItem::head("Edit"),
         item("Duplicate", Duplicate).key("Ctrl+B"),
         item("Glue", Glue).key("Ctrl+G"),
