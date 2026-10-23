@@ -3,19 +3,19 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The piano roll's Flam (Alt+F), Claw machine (Alt+W), Flip (Alt+Y), Scale levels (Alt+X), Limit (Alt+K), LFO
-//! (Alt+O), Quantize (Alt+Q) and Chop (Alt+U) dialogs: one tool window shows whichever is open. As with Strum, its
-//! session previews every change on the notes (and LFO's on a channel lane's control points), Accept keeps the result
-//! as one undo step and × puts the notes back. The tools are `flam.rs`, `claw.rs`, `flip.rs`, `levels.rs`, `limit.rs`,
-//! `lfo.rs`, `quantize.rs` and `chop.rs`; the window is `views/piano_dlg.rs`.
+//! (Alt+O), Quantize (Alt+Q), Chop (Alt+U) and Randomize (Alt+R) dialogs: one tool window shows whichever is open. As
+//! with Strum, its session previews every change on the notes (and LFO's on a channel lane's control points), Accept
+//! keeps the result as one undo step and × puts the notes back. The tools are `flam.rs`, `claw.rs`, `flip.rs`,
+//! `levels.rs`, `limit.rs`, `lfo.rs`, `quantize.rs`, `chop.rs` and `randomize.rs`; the window is `views/piano_dlg.rs`.
 // spec: ui/piano-flam.md, ui/piano-claw.md, ui/piano-flip.md, ui/piano-level-scaling.md, ui/piano-limit.md, ui/piano-lfo.md,
-// ui/piano-quantize.md, ui/piano-chop.md
+// ui/piano-quantize.md, ui/piano-chop.md, ui/piano-randomize.md
 
 use os_model::{ControlPoint, Note};
 
 use crate::app::State;
 use crate::piano::{self, Lane};
 use crate::playlist::{Cmd, Mark, PItem};
-use crate::{chop, chords, claw, flam, flip, levels, lfo, limit, quantize};
+use crate::{chop, chords, claw, flam, flip, levels, lfo, limit, quantize, randomize};
 
 /// Which dialog the window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -29,11 +29,12 @@ pub enum Tool {
     Lfo,
     Quantize,
     Chop,
+    Randomize,
 }
 
 impl Tool {
     /// How many there are (`Ui::pos`).
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
 
     pub fn title(self) -> &'static str {
         match self {
@@ -45,6 +46,7 @@ impl Tool {
             Tool::Lfo => "Piano roll - LFO",
             Tool::Quantize => "Piano roll - quantizer",
             Tool::Chop => "Piano roll - chopper",
+            Tool::Randomize => "Piano roll - randomizer",
         }
     }
 
@@ -64,6 +66,7 @@ impl Tool {
             Tool::Lfo => "Piano roll LFO",
             Tool::Quantize => "Piano roll quantize",
             Tool::Chop => "Piano roll chop",
+            Tool::Randomize => "Piano roll randomize",
         }
     }
 
@@ -77,6 +80,7 @@ impl Tool {
             Tool::Lfo => "LFO applied",
             Tool::Quantize => "quantized",
             Tool::Chop => "chopped",
+            Tool::Randomize => "randomized",
         }
     }
 
@@ -111,11 +115,20 @@ pub enum Knob {
     /// Chop's Time mul and its Levels (an index into `quantize::LEVELS`).
     ChopTimeMul,
     ChopLevel(u8),
+    /// Randomize's Octave, Range and Stack boxes (they turn like knobs), its Length, Variation and Population knobs
+    /// and its Levels (an index into `quantize::LEVELS`).
+    RandOctave,
+    RandRange,
+    RandStack,
+    RandLength,
+    RandVariation,
+    RandPopulation,
+    RandLevel(u8),
 }
 
 impl Knob {
     /// Change of the 0..1 position per wheel notch (piano-flam.md §1, piano-level-scaling.md §1, piano-claw.md §1,
-    /// piano-lfo.md §1, piano-quantize.md §1, piano-chop.md §1).
+    /// piano-lfo.md §1, piano-quantize.md §1, piano-chop.md §1, piano-randomize.md §1).
     pub fn notch(self) -> f32 {
         match self {
             Knob::FlamTime => flam::TIME_NOTCH,
@@ -132,6 +145,12 @@ impl Knob {
             Knob::QLevel(_) => quantize::LEVEL_NOTCH,
             Knob::ChopTimeMul => chop::TIME_MUL_NOTCH,
             Knob::ChopLevel(_) => chop::LEVEL_NOTCH,
+            Knob::RandOctave => randomize::OCTAVE_NOTCH,
+            Knob::RandRange | Knob::RandStack => randomize::COUNT_NOTCH,
+            Knob::RandLength => randomize::LENGTH_NOTCH,
+            Knob::RandVariation => randomize::VARIATION_NOTCH,
+            Knob::RandPopulation => randomize::POPULATION_NOTCH,
+            Knob::RandLevel(_) => randomize::LEVEL_NOTCH,
         }
     }
 
@@ -147,7 +166,7 @@ impl Knob {
     /// Position after Reset; Center's is on the velocity lane.
     pub fn default_pos(self) -> f32 {
         let (f, l, c) = (flam::Settings::default(), levels::Settings::default(), claw::Settings::default());
-        Ui::pos_of(self, &f, &l, &c, &lfo::Settings::default(), &quantize::Settings::default(), &chop::Settings::default())
+        Ui::pos_of(self, &f, &l, &c, &lfo::Settings::default(), &quantize::Settings::default(), &chop::Settings::default(), &randomize::Settings::default())
     }
 }
 
@@ -183,6 +202,14 @@ pub enum Act {
     DurMenu,
     /// Limit's section header arrows: 0 = Key / scale restriction, 1 = Keyboard range.
     Collapse(u8),
+    /// Randomize's section switches, its four switches and its seed arrows (`levels`: the Levels section's; `up`: ›).
+    RandPattern,
+    RandLevels,
+    Porta,
+    Glue,
+    ResetBefore,
+    Bipolar,
+    Seed { levels: bool, up: bool },
     /// A press on Limit's keys (the green key follows), its name strip (the nearer range end follows) or its scroll
     /// bar's handle.
     Keys,
@@ -225,6 +252,7 @@ pub struct Ui {
     pub quant_tpl: quantize::Template,
     pub chop: chop::Settings,
     pub chop_pat: chop::ChopPattern,
+    pub rand: randomize::Settings,
     /// Limit's collapsed sections (`Act::Collapse`); a view setting, kept as it is.
     pub collapsed: [bool; 2],
     /// Limit's keyboard view: px from C0's left edge to the view's.
@@ -239,6 +267,7 @@ pub struct Ui {
     kept_quant_tpl: quantize::Template,
     kept_chop: chop::Settings,
     kept_chop_pat: chop::ChopPattern,
+    kept_rand: randomize::Settings,
     /// The Control lane Scale levels was last accepted on (its Center follows a new lane).
     kept_lane: Option<Lane>,
     session: Option<Session>,
@@ -263,7 +292,7 @@ fn pct(v: f32) -> i64 {
 
 impl Ui {
     #[allow(clippy::too_many_arguments)]
-    fn pos_of(k: Knob, f: &flam::Settings, l: &levels::Settings, c: &claw::Settings, o: &lfo::Settings, q: &quantize::Settings, ch: &chop::Settings) -> f32 {
+    fn pos_of(k: Knob, f: &flam::Settings, l: &levels::Settings, c: &claw::Settings, o: &lfo::Settings, q: &quantize::Settings, ch: &chop::Settings, r: &randomize::Settings) -> f32 {
         match k {
             Knob::FlamTime => f.time,
             Knob::FlamVel => f.vel,
@@ -285,12 +314,19 @@ impl Ui {
             Knob::QLevel(i) => q.levels[usize::from(i.min(5))],
             Knob::ChopTimeMul => ch.time_mul_pos(),
             Knob::ChopLevel(i) => ch.levels[usize::from(i.min(5))],
+            Knob::RandOctave => f32::from(r.octave.min(9)) / 9.0,
+            Knob::RandRange => f32::from(r.range.clamp(1, 6) - 1) / 5.0,
+            Knob::RandStack => f32::from(r.stack.clamp(1, 6) - 1) / 5.0,
+            Knob::RandLength => r.length_pos(),
+            Knob::RandVariation => r.variation_pos(),
+            Knob::RandPopulation => r.population,
+            Knob::RandLevel(i) => (r.amounts[usize::from(i.min(5))] + 1.0) / 2.0,
         }
     }
 
     /// The 0..1 position of knob `k`.
     pub fn get(&self, k: Knob) -> f32 {
-        Self::pos_of(k, &self.flam, &self.levels, &self.claw, &self.lfo, &self.quant, &self.chop)
+        Self::pos_of(k, &self.flam, &self.levels, &self.claw, &self.lfo, &self.quant, &self.chop, &self.rand)
     }
 
     pub fn set(&mut self, k: Knob, v: f32) {
@@ -316,13 +352,20 @@ impl Ui {
             Knob::QLevel(i) => self.quant.levels[usize::from(i.min(5))] = v,
             Knob::ChopTimeMul => self.chop.set_time_mul_pos(v),
             Knob::ChopLevel(i) => self.chop.levels[usize::from(i.min(5))] = v,
+            Knob::RandOctave => self.rand.octave = (v * 9.0).round() as u8,
+            Knob::RandRange => self.rand.range = 1 + (v * 5.0).round() as u8,
+            Knob::RandStack => self.rand.stack = 1 + (v * 5.0).round() as u8,
+            Knob::RandLength => self.rand.set_length_pos(v),
+            Knob::RandVariation => self.rand.set_variation_pos(v),
+            Knob::RandPopulation => self.rand.population = v,
+            Knob::RandLevel(i) => self.rand.amounts[usize::from(i.min(5))] = v * 2.0 - 1.0,
         }
     }
 
     /// The hint-bar text of a knob (piano-flam.md §1, piano-level-scaling.md §1, piano-claw.md §5, piano-lfo.md §1,
-    /// piano-quantize.md §1, piano-chop.md §1).
+    /// piano-quantize.md §1, piano-chop.md §1, piano-randomize.md §6).
     pub fn text(&self, k: Knob, ppq: u32) -> String {
-        let (l, o) = (&self.levels, &self.lfo);
+        let (l, o, r) = (&self.levels, &self.lfo, &self.rand);
         match k {
             Knob::FlamTime => self.flam.time_text(ppq),
             Knob::FlamVel => self.flam.vel_text(),
@@ -344,13 +387,27 @@ impl Ui {
             Knob::QLevel(i) => quantize::Settings::pct_text(self.quant.levels[usize::from(i.min(5))]),
             Knob::ChopTimeMul => self.chop.time_mul_text(),
             Knob::ChopLevel(i) => quantize::Settings::pct_text(self.chop.levels[usize::from(i.min(5))]),
+            Knob::RandOctave => format!("Octave: {}", r.octave),
+            Knob::RandRange => format!("Range: {} octave{}", r.range, if r.range == 1 { "" } else { "s" }),
+            Knob::RandStack => format!("Stack: {}", r.stack),
+            Knob::RandLength => r.length_text(),
+            Knob::RandVariation => r.variation_text(),
+            Knob::RandPopulation => r.population_text(),
+            Knob::RandLevel(i) => format!("{}: {}", quantize::LEVELS[usize::from(i.min(5))].1, r.amount_text(usize::from(i))),
         }
     }
 
     /// Whether `a` is a switch that is on.
     pub fn on(&self, a: Act) -> bool {
         let chop = self.tool == Tool::Chop;
+        let r = &self.rand;
         match a {
+            Act::RandPattern => r.pattern,
+            Act::RandLevels => r.levels,
+            Act::Porta => r.porta,
+            Act::Glue => r.glue,
+            Act::ResetBefore => r.reset_before,
+            Act::Bipolar => r.bipolar,
             Act::Absolute if chop => self.chop.absolute,
             Act::Group if chop => self.chop.group,
             Act::Absolute => self.flam.absolute,
@@ -403,6 +460,8 @@ pub fn open(s: &mut State, tool: Tool) {
         Tool::Lfo => d.lfo = d.kept_lfo,
         Tool::Quantize => (d.quant, d.quant_tpl) = (d.kept_quant, d.kept_quant_tpl.clone()),
         Tool::Chop => (d.chop, d.chop_pat) = (d.kept_chop, d.kept_chop_pat.clone()),
+        // The seeds go on from where they are (piano-randomize.md §2).
+        Tool::Randomize => d.rand = randomize::Settings { pattern_seed: d.rand.pattern_seed, levels_seed: d.rand.levels_seed, ..d.kept_rand },
     }
     preview(s);
 }
@@ -522,7 +581,38 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
             used.dedup();
             crate::piano_tools::apply_as(s, |_, ns| chop::chop(ns, &pat.0, &set, ppq, &used), step)
         }
+        Tool::Randomize => randomize_notes(s, step),
     }
+}
+
+/// Randomize (piano-randomize.md §3, §4): with Pattern on every note of the channel gives way to new ones over the
+/// pattern's whole bars, on the piano roll's snap grid (one tick without a unit), and they end up selected, as FL leaves
+/// them; with Pattern off the Levels section works on the targets.
+fn randomize_notes(s: &mut State, step: Option<&'static str>) -> bool {
+    let set = s.piano_dlg.rand;
+    if !set.pattern {
+        return crate::piano_tools::apply_as(s, |_, ns| randomize::levels(ns, &set), step);
+    }
+    let Some(ch) = piano::channel(s) else { return false };
+    let (grid, end) = (crate::piano_snap::unit(s).unwrap_or(1), piano::pattern_end(s));
+    let mine: Vec<Note> = piano::notes(s).iter().filter(|n| n.channel == ch).copied().collect();
+    let out = randomize::randomize(mine.clone(), &set, ch, grid, end);
+    if out == mine {
+        return false;
+    }
+    if let Some(name) = step {
+        piano::snapshot_as(s, name);
+    }
+    let p = piano::pattern_mut(s);
+    let mut notes: Vec<Note> = p.notes.iter().filter(|n| n.channel != ch).copied().collect();
+    let start = notes.len();
+    notes.extend(out);
+    let end = notes.len();
+    p.notes = notes;
+    s.piano.select(s.pattern, ch, (start..end).collect());
+    piano::finish_edit(s);
+    s.piano.dirty = true;
+    true
 }
 
 /// LFO on a channel lane: the lane's control points in the pattern become the wave's (piano-lfo.md §5); the other
@@ -603,6 +693,7 @@ pub fn accept(s: &mut State) -> String {
         Tool::Lfo => d.kept_lfo = d.lfo,
         Tool::Quantize => (d.kept_quant, d.kept_quant_tpl) = (d.quant, d.quant_tpl.clone()),
         Tool::Chop => (d.kept_chop, d.kept_chop_pat) = (d.chop, d.chop_pat.clone()),
+        Tool::Randomize => d.kept_rand = d.rand,
     }
     if run(s, Some(tool.step())) {
         format!("Piano roll: {}", tool.done())
@@ -635,7 +726,18 @@ pub fn act(s: &mut State, a: Act) {
             Tool::Lfo => d.lfo = lfo::Settings::default(),
             Tool::Quantize => (d.quant, d.quant_tpl) = (quantize::Settings::default(), quantize::Template::default()),
             Tool::Chop => (d.chop, d.chop_pat) = (chop::Settings::default(), chop::ChopPattern::default()),
+            Tool::Randomize => d.rand = d.rand.reset(),
         },
+        Act::RandPattern => d.rand.pattern = !d.rand.pattern,
+        Act::RandLevels => d.rand.levels = !d.rand.levels,
+        Act::Porta => d.rand.porta = !d.rand.porta,
+        Act::Glue => d.rand.glue = !d.rand.glue,
+        Act::ResetBefore => d.rand.reset_before = !d.rand.reset_before,
+        Act::Bipolar => d.rand.bipolar = !d.rand.bipolar,
+        Act::Seed { levels, up } => {
+            let seed = if levels { &mut d.rand.levels_seed } else { &mut d.rand.pattern_seed };
+            *seed = if up { seed.wrapping_add(1) } else { seed.wrapping_sub(1) };
+        }
         Act::Absolute if d.tool == Tool::Chop => d.chop.absolute = !d.chop.absolute,
         Act::Group if d.tool == Tool::Chop => d.chop.group = !d.chop.group,
         Act::Absolute => d.flam.absolute = !d.flam.absolute,
@@ -659,14 +761,20 @@ pub fn act(s: &mut State, a: Act) {
     preview(s);
 }
 
-/// Limit's Key ▸ menu (piano-limit.md §1).
-pub fn key_menu(set: &limit::Settings) -> Vec<PItem> {
-    limit::KEYS.iter().enumerate().map(|(i, &n)| PItem::new(n, Cmd::Limit(LCmd::Key(i as u8))).mark(Mark::Radio(usize::from(set.key) == i))).collect()
+/// The open dialog's key and scale: Randomize's, else Limit's.
+pub fn key_scale(d: &Ui) -> (u8, usize) {
+    if d.tool == Tool::Randomize { (d.rand.key, d.rand.scale) } else { (d.limit.key, d.limit.scale) }
 }
 
-/// Limit's scale ▸ menu: "(none)", then the chords file in two columns with its headings and separators (§1).
-pub fn scale_menu(set: &limit::Settings) -> Vec<PItem> {
-    let pick = |k: usize, label: &'static str| PItem::new(label, Cmd::Limit(LCmd::Scale(k))).mark(Mark::Radio(set.scale == k));
+/// Limit's Key ▸ menu (piano-limit.md §1), also Randomize's (piano-randomize.md §1), `key` ticked.
+pub fn key_menu(key: u8) -> Vec<PItem> {
+    limit::KEYS.iter().enumerate().map(|(i, &n)| PItem::new(n, Cmd::Limit(LCmd::Key(i as u8))).mark(Mark::Radio(usize::from(key) == i))).collect()
+}
+
+/// Limit's scale ▸ menu, also Randomize's: "(none)", then the chords file in two columns with its headings and
+/// separators (§1), `scale` ticked.
+pub fn scale_menu(scale: usize) -> Vec<PItem> {
+    let pick = |k: usize, label: &'static str| PItem::new(label, Cmd::Limit(LCmd::Scale(k))).mark(Mark::Radio(scale == k));
     let mut items = vec![pick(0, "(none)"), PItem::head("Chords")];
     for k in 1..=chords::ENTRIES.len() {
         if chords::SEPARATED.contains(&k) {
@@ -688,9 +796,19 @@ pub fn snap_menu(set: &limit::Settings) -> Vec<PItem> {
     limit::Snap::ALL.iter().map(|&m| PItem::new(m.name(), Cmd::Limit(LCmd::Snap(m))).mark(Mark::Radio(set.snap == m))).collect()
 }
 
-/// A pick from Limit's menus: it previews at once.
+/// A pick from Limit's menus, or Randomize's Key and scale: it previews at once.
 pub fn limit_cmd(s: &mut State, c: LCmd) {
-    let set = &mut s.piano_dlg.limit;
+    let d = &mut s.piano_dlg;
+    if d.tool == Tool::Randomize {
+        match c {
+            LCmd::Key(k) => d.rand.key = k % 12,
+            LCmd::Scale(k) => d.rand.scale = k.min(chords::ENTRIES.len()),
+            LCmd::Snap(_) => return,
+        }
+        preview(s);
+        return;
+    }
+    let set = &mut d.limit;
     match c {
         LCmd::Key(k) => set.key = k % 12,
         LCmd::Scale(k) => set.scale = k.min(chords::ENTRIES.len()),

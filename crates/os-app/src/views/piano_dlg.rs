@@ -5,10 +5,10 @@
 //! The piano roll's small tool dialogs, laid out as FL's: Flam ("Piano roll - flamer", 198 × 241), Flip ("Piano roll -
 //! score flipper", 162 × 160), Scale levels ("Piano roll - level scaling", 172 × 277), Limit ("Piano roll - limiter /
 //! transposer", 432 × 295), Claw machine ("Piano roll - claw machine", 172 × 245), LFO ("Piano roll - LFO",
-//! 212 × 323), Quantize ("Piano roll - quantizer", 281 × 309) and Chop ("Piano roll - chopper", 281 × 296). One window
-//! shows whichever is open (`piano_dlg::Ui::tool`).
+//! 212 × 323), Quantize ("Piano roll - quantizer", 281 × 309), Chop ("Piano roll - chopper", 281 × 296) and Randomize
+//! ("Piano roll - randomizer", 281 × 439). One window shows whichever is open (`piano_dlg::Ui::tool`).
 // spec: ui/piano-flam.md §1, ui/piano-flip.md §1, ui/piano-level-scaling.md §1, ui/piano-limit.md §1, ui/piano-claw.md §1,
-// ui/piano-lfo.md §1, ui/piano-quantize.md §1, ui/piano-chop.md §1
+// ui/piano-lfo.md §1, ui/piano-quantize.md §1, ui/piano-chop.md §1, ui/piano-randomize.md §1
 
 use os_ui::kit::{self, Dir, lemon as lk};
 use os_ui::{Font, Glyph, Rect};
@@ -22,7 +22,7 @@ use crate::piano_dlg::{self as dlg, Act, KB_W, KEY_W, Knob, Tool};
 use crate::views::piano::{TOP_KEY, is_black, key_name};
 
 /// Each dialog's size, by `Tool::index`; Limit's with both sections open.
-const SIZES: [(f32, f32); Tool::COUNT] = [(198.0, 241.0), (162.0, 160.0), (172.0, 277.0), (432.0, 295.0), (172.0, 245.0), (212.0, 323.0), (281.0, 309.0), (281.0, 296.0)];
+const SIZES: [(f32, f32); Tool::COUNT] = [(198.0, 241.0), (162.0, 160.0), (172.0, 277.0), (432.0, 295.0), (172.0, 245.0), (212.0, 323.0), (281.0, 309.0), (281.0, 296.0), (281.0, 439.0)];
 
 /// The panel heights under Limit's two section headers (piano-limit.md §1): a collapsed section's comes off the window.
 const PANELS: [f32; 2] = [67.0, 110.0];
@@ -73,9 +73,9 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     let hov = ui.hit(close.outset(4.0), Action::CloseWin(Win::PianoDlg), "Close (puts the notes back)");
     icons::draw(ui.c, Icon::Close, close.outset(1.0), if hov { t.tx(0xffffff) } else { t.glyph });
 
-    // Limit, LFO, Quantize and Chop draw their own panels.
+    // Limit, LFO, Quantize, Chop and Randomize draw their own panels.
     let body = at(7.0, 28.0, w - 14.0, h - 71.0);
-    if !matches!(d.tool, Tool::Limit | Tool::Lfo | Tool::Quantize | Tool::Chop) {
+    if !matches!(d.tool, Tool::Limit | Tool::Lfo | Tool::Quantize | Tool::Chop | Tool::Randomize) {
         if lemon {
             ui.c.stroke_rrect(body, lk::r_small(t), 1.0, line);
         } else {
@@ -92,6 +92,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         Tool::Lfo => lfo(ui, s, x0, y0),
         Tool::Quantize => quant(ui, s, x0, y0),
         Tool::Chop => chop(ui, s, x0, y0),
+        Tool::Randomize => rand(ui, s, x0, y0),
     }
 
     // Reset, Accept.
@@ -308,7 +309,7 @@ fn quant(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
     kit::combo(ui.c, t, r, d.quant.mode.name(), Font::new(13), kit::State::hover(hov));
 
     label(ui, lf, x0 + 46.0, y0 + 218.0, 1, t.text, "Levels");
-    level_knobs(ui, s, x0, y0, 218.0, Knob::QLevel);
+    level_knobs(ui, s, x0, y0, 218.0, Knob::QLevel, false, false);
 }
 
 /// Quantize's Template box and Chop's Pattern box: the title, the file's name (from `name_x`, or past a wider title),
@@ -335,17 +336,24 @@ fn score_box(ui: &mut Ui, x0: f32, y0: f32, title: &str, name_x: f32, name: &str
     }
 }
 
-/// The six Levels knobs of Quantize and Chop, their centres at window-relative `cy`: ringed in FL's colours, their names
-/// under them.
-fn level_knobs(ui: &mut Ui, s: &State, x0: f32, y0: f32, cy: f32, knob: fn(u8) -> Knob) {
+/// The six Levels knobs of Quantize, Chop and Randomize, their centres at window-relative `cy`: ringed in FL's colours,
+/// their names under them; Randomize's are centred (`bipolar`) and greyed with their section (`dim`).
+#[allow(clippy::too_many_arguments)]
+fn level_knobs(ui: &mut Ui, s: &State, x0: f32, y0: f32, cy: f32, knob: fn(u8) -> Knob, bipolar: bool, dim: bool) {
     let t = ui.t;
     for (i, (&cx, &(name, _))) in [68.0, 103.0, 137.0, 175.0, 211.0, 249.0].iter().zip(crate::quantize::LEVELS.iter()).enumerate() {
         let id = KnobId::PianoDlg(knob(i as u8));
         let (cx, cy) = (x0 + cx, y0 + cy);
-        ui.hit(Rect::new(cx - 15.0, cy - 15.0, 30.0, 30.0), Action::Knob(id), s.knob_text(id));
-        super::knob(ui, cx, cy, 13.0, s.knob(id), false, t.text, t.text_dim);
-        ui.c.stroke_circle(cx, cy, 14.5, 1.5, t.h(super::arpeggiate::LEVEL_COLOURS[i]));
-        label(ui, Font::new(9), cx, cy + 23.0, 0, t.text_dim, name);
+        if !dim {
+            ui.hit(Rect::new(cx - 15.0, cy - 15.0, 30.0, 30.0), Action::Knob(id), s.knob_text(id));
+        }
+        if dim {
+            kit::knob(ui.c, t, cx, cy, 13.0, s.knob(id), bipolar, kit::KnobLook::Ring, kit::State::hover(false).with_disabled(true));
+        } else {
+            super::knob(ui, cx, cy, 13.0, s.knob(id), bipolar, t.text, t.text_dim);
+        }
+        ui.c.stroke_circle(cx, cy, 14.5, 1.5, if dim { t.text_faint } else { t.h(super::arpeggiate::LEVEL_COLOURS[i]) });
+        label(ui, Font::new(9), cx, cy + 23.0, 0, if dim { t.text_faint } else { t.text_dim }, name);
     }
 }
 
@@ -388,9 +396,110 @@ fn chop(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
     lfo_knob(ui, s, cx, cy, 14.0, Knob::ChopTimeMul, false, kit::KnobLook::Ball, false);
 
     label(ui, lf, x0 + 16.0, y0 + 160.0, -1, t.text, "Levels");
-    level_knobs(ui, s, x0, y0, 160.0, Knob::ChopLevel);
+    level_knobs(ui, s, x0, y0, 160.0, Knob::ChopLevel, false, false);
     switch(ui, s, x0, y0, 21.0, 214.0, Act::Absolute, "Absolute pattern", "Repeat the pattern from the song's start (off: from each note's start)", lf, false);
     switch(ui, s, x0, y0, 23.0, 238.0, Act::Group, "Group notes", "Group the pieces of each note", Font::new(13), false);
+}
+
+/// Randomize (piano-randomize.md §1): the Pattern section (Octave, Range, Key / scale, Length, Variation, Population,
+/// Stack, Random portamento, Glue same notes, Seed) and the Levels section (six centred knobs, Reset before processing,
+/// Bipolar, Seed), each switched in its heading; a section switched off is greyed and takes no clicks.
+fn rand(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
+    let t = ui.t;
+    let (lf, sf) = (Font::new(15), Font::new(13));
+    let set = &s.piano_dlg.rand;
+    let (p_off, l_off) = (!set.pattern, !set.levels);
+    let ink = |off: bool| if off { t.text_faint } else { t.text };
+    rand_section(ui, s, x0, y0, 28.0, 240.0, Act::RandPattern, "Pattern", "Pattern: write new notes over the pattern");
+    rand_section(ui, s, x0, y0, 276.0, 121.0, Act::RandLevels, "Levels", "Levels: randomize the notes' levels");
+
+    label(ui, lf, x0 + 72.0, y0 + 65.0, 1, ink(p_off), "Octave");
+    spin(ui, s, x0 + 90.0, y0 + 65.0, Knob::RandOctave, set.octave, p_off);
+    label(ui, lf, x0 + 193.0, y0 + 65.0, 1, ink(p_off), "Range");
+    spin(ui, s, x0 + 211.0, y0 + 65.0, Knob::RandRange, set.range, p_off);
+    label(ui, lf, x0 + 16.0, y0 + 95.0, -1, ink(p_off), "Key / scale");
+    for (x, w, act, text, hint) in [
+        (78.0, 34.0, Act::KeyMenu, crate::limit::KEYS[usize::from(set.key % 12)], "Key: the lowest key's name"),
+        (114.0, 121.0, Act::ScaleMenu, set.scale_name(), "Scale: the keys the new notes take"),
+    ] {
+        let r = Rect::new(x0 + x, y0 + 86.0, w, 19.0);
+        let hov = !p_off && ui.hit(r, Action::PianoDlg(act), hint);
+        kit::combo(ui.c, t, r, text, sf, kit::State::hover(hov).with_disabled(p_off));
+    }
+    label(ui, lf, x0 + 72.0, y0 + 141.0, 1, ink(p_off), "Length");
+    lfo_knob(ui, s, x0 + 93.0, y0 + 141.0, 13.0, Knob::RandLength, false, kit::KnobLook::Ball, p_off);
+    label(ui, lf, x0 + 193.0, y0 + 141.0, 1, ink(p_off), "Variation");
+    lfo_knob(ui, s, x0 + 216.0, y0 + 141.0, 13.0, Knob::RandVariation, true, kit::KnobLook::Ball, p_off);
+    label(ui, lf, x0 + 72.0, y0 + 187.0, 1, ink(p_off), "Population");
+    lfo_knob(ui, s, x0 + 93.0, y0 + 187.0, 14.0, Knob::RandPopulation, false, kit::KnobLook::Ring, p_off);
+    label(ui, lf, x0 + 193.0, y0 + 187.0, 1, ink(p_off), "Stack");
+    spin(ui, s, x0 + 211.0, y0 + 187.0, Knob::RandStack, set.stack, p_off);
+    switch(ui, s, x0, y0, 21.0, 230.0, Act::Porta, "Random portamento", "Random portamento: some new notes get their portamento switch", sf, p_off);
+    switch(ui, s, x0, y0, 21.0, 248.0, Act::Glue, "Glue same notes", "Glue same notes: touching notes of one key become one", sf, p_off);
+    seeds(ui, x0, y0, 240.0, false, set.pattern_seed, p_off);
+
+    label(ui, lf, x0 + 16.0, y0 + 322.0, -1, ink(l_off), "Levels");
+    level_knobs(ui, s, x0, y0, 322.0, Knob::RandLevel, true, l_off);
+    switch(ui, s, x0, y0, 21.0, 362.0, Act::ResetBefore, "Reset before processing", "Reset before processing: start from a new note's levels", sf, l_off);
+    switch(ui, s, x0, y0, 21.0, 381.0, Act::Bipolar, "Bipolar", "Bipolar: move the levels both ways (off: one way, the knob's)", sf, l_off);
+    seeds(ui, x0, y0, 371.0, true, set.levels_seed, l_off);
+}
+
+/// One of Randomize's sections: its panel from window-relative `y`, `h` high, and its heading band with the section's
+/// switch and name, and FL's ^ (drawn only: the sections do not collapse, piano-randomize.md §6).
+#[allow(clippy::too_many_arguments)]
+fn rand_section(ui: &mut Ui, s: &State, x0: f32, y0: f32, y: f32, h: f32, act: Act, name: &str, hint: &'static str) {
+    let t = ui.t;
+    let full = Rect::new(x0 + 7.0, y0 + y, 267.0, h);
+    let head = Rect::new(full.x, full.y, full.w, 20.0);
+    if super::lemon(ui) {
+        ui.c.fill_rrect(full, lk::r_small(t), t.s(0x272b2d));
+        ui.c.fill_rrect(head, lk::r_small(t), t.s(0x232628));
+    } else {
+        ui.c.fill_rect(full, t.s(0x25272a));
+        ui.c.fill_rect(head, t.s(0x232427));
+    }
+    let f = Font::new(14).bold();
+    let w = ui.c.text_width(f, name) + 30.0;
+    let hov = ui.hit(Rect::new(head.x, head.y, w, head.h), Action::PianoDlg(act), hint);
+    led(ui, x0 + 16.0, head.cy(), s.piano_dlg.on(act), hov, false);
+    label(ui, f, x0 + 27.0, head.cy(), -1, if hov { t.tx(0xffffff) } else { t.text }, name);
+    kit::chevron(ui.c, head.right() - 10.0, head.cy(), 4.5, Dir::Up, t.text_faint);
+}
+
+/// One of Randomize's number boxes (Octave, Range, Stack) centred at screen (`cx`, `cy`): it turns like a knob, by the
+/// wheel or a drag.
+fn spin(ui: &mut Ui, s: &State, cx: f32, cy: f32, k: Knob, value: u8, dim: bool) {
+    let t = ui.t;
+    let id = KnobId::PianoDlg(k);
+    let r = Rect::new(cx - 11.0, cy - 10.0, 22.0, 20.0);
+    let hov = !dim && ui.hit(r, Action::Knob(id), s.knob_text(id));
+    let (line, face) = (t.s(0x161819), if hov { t.s(0x2a2e31) } else { t.s(0x1e2022) });
+    if super::lemon(ui) {
+        lk::outlined(ui.c, r, lk::r_small(t), line, face);
+    } else {
+        ui.c.fill_rect(r, line);
+        ui.c.fill_rect(r.inset(1.0), face);
+    }
+    let ink = if dim { t.text_faint } else if hov { t.tx(0xffffff) } else { t.text };
+    label(ui, Font::new(15), r.x + 8.0, r.cy(), 0, ink, &value.to_string());
+    kit::chevron(ui.c, r.right() - 5.0, r.cy() - 3.5, 2.5, Dir::Up, ink);
+    kit::chevron(ui.c, r.right() - 5.0, r.cy() + 3.5, 2.5, Dir::Down, ink);
+}
+
+/// A Randomize section's Seed label and ‹ › buttons, centred on window-relative `cy`.
+#[allow(clippy::too_many_arguments)]
+fn seeds(ui: &mut Ui, x0: f32, y0: f32, cy: f32, levels: bool, seed: u32, dim: bool) {
+    let t = ui.t;
+    label(ui, Font::new(15), x0 + 224.0, y0 + cy, 1, if dim { t.text_faint } else { t.text }, "Seed");
+    for (x, up) in [(228.0, false), (249.0, true)] {
+        let r = Rect::new(x0 + x, y0 + cy - 11.0, 19.0, 22.0);
+        let hint = format!("{} seed (now {seed})", if up { "Next" } else { "Previous" });
+        let hov = !dim && ui.hit(r, Action::PianoDlg(Act::Seed { levels, up }), hint);
+        super::button_face(ui, r, if hov { Look::Hover } else { Look::Off });
+        let ink = if dim { t.text_faint } else if hov { t.tx(0xffffff) } else { t.glyph };
+        kit::chevron(ui.c, r.cx(), r.cy(), 4.0, if up { Dir::Right } else { Dir::Left }, ink);
+    }
 }
 
 /// One of LFO's or Quantize's knobs at screen (`cx`, `cy`); a grey one takes no clicks.

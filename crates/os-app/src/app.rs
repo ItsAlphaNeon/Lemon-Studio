@@ -3052,8 +3052,8 @@ impl App {
             Act::Options | Act::KeyMenu | Act::ScaleMenu | Act::SnapMenu | Act::PeriodMenu | Act::TrashMenu | Act::ShapeMenu | Act::TemplateMenu | Act::DurMenu => {
                 let (x, y) = self.mouse;
                 let items = match a {
-                    Act::KeyMenu => dlg::key_menu(&s.piano_dlg.limit),
-                    Act::ScaleMenu => dlg::scale_menu(&s.piano_dlg.limit),
+                    Act::KeyMenu => dlg::key_menu(dlg::key_scale(&s.piano_dlg).0),
+                    Act::ScaleMenu => dlg::scale_menu(dlg::key_scale(&s.piano_dlg).1),
                     Act::SnapMenu => dlg::snap_menu(&s.piano_dlg.limit),
                     Act::PeriodMenu => dlg::period_menu(&s.piano_dlg.claw),
                     Act::TrashMenu => dlg::trash_menu(&s.piano_dlg.claw),
@@ -14150,7 +14150,7 @@ mod tests {
     /// cycling and the wheel zooms, driven through `App::key` / `App::wheel` like the shell does.
     #[test]
     fn piano_shortcuts() {
-        use crate::piano_tools::{NCmd, Sub};
+        use crate::piano_tools::NCmd;
         use crate::playlist::Cmd;
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
@@ -14214,11 +14214,59 @@ mod tests {
         assert_eq!(mine(&app), vec![(96, 72, 62)]);
         assert_eq!(app.state.piano.clipboard.len(), 3);
 
-        // Alt+R opens its preset menu; picking an entry runs it.
+        // Alt+R opens Randomize (spec: ui/piano-randomize.md): Reset's settings write a new melody over the pattern's
+        // bars, a note a step from C4 to B6, glued and selected; a notch of Octave moves it an octave up, the seed arrows
+        // give another melody and back, the scale menu keeps the keys on the scale; with Pattern off VEL moves the
+        // notes' velocities; Accept is one undo step, the settings are kept and × puts the notes back.
+        {
+            use crate::piano_dlg::{Act as DAct, Knob as DKnob, LCmd, Tool};
+            put(&mut app, &[(0, 96, 60), (96, 48, 62)]);
+            let before = mine(&app);
+            let (grid, end) = (crate::piano_snap::unit(&app.state).unwrap_or(1), piano::pattern_end(&app.state));
+            key(&mut app, "r", false, true, false);
+            assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Randomize);
+            let first = mine(&app);
+            assert!(first.iter().all(|&(p, _, k)| p % grid == 0 && (48..84).contains(&k)), "{first:?}");
+            assert_eq!(first.iter().map(|n| n.1).sum::<u32>(), end, "the steps tile the pattern");
+            assert_eq!(app.state.piano.selection(app.state.pattern, Some(ch)).len(), first.len(), "the new notes are selected");
+            frame(&mut app, &mut c, None);
+            let k = hit_rect(&app, &Action::Knob(KnobId::PianoDlg(DKnob::RandOctave)));
+            app.mouse_move(k.cx(), k.cy());
+            app.wheel(0.0, 1.0, false, false);
+            assert_eq!(app.hint.as_ref(), "Octave: 5");
+            let up: Vec<_> = first.iter().map(|&(p, l, k)| (p, l, k + 12)).collect();
+            assert_eq!(mine(&app), up, "the same draws an octave up");
+            app.act(Action::PianoDlg(DAct::Seed { levels: false, up: true }));
+            assert_ne!(mine(&app), up);
+            app.act(Action::PianoDlg(DAct::Seed { levels: false, up: false }));
+            assert_eq!(mine(&app), up, "‹ undoes ›");
+            app.act(Action::PianoDlg(DAct::ScaleMenu));
+            let pop = app.state.playlist.popup.take().expect("the scale box opens its menu");
+            assert_eq!(pop.items.iter().filter(|i| matches!(i.cmd, Cmd::Limit(LCmd::Scale(_)))).count(), 89, "(none) and 88 entries");
+            crate::playlist::run(&mut app, Cmd::Limit(LCmd::Scale(crate::chords::FIRST_SCALE)));
+            assert!(mine(&app).iter().all(|n| [0, 2, 4, 5, 7, 9, 11].contains(&(n.2 % 12))), "on C major");
+            frame(&mut app, &mut c, None);
+            let k = hit_rect(&app, &Action::Knob(KnobId::PianoDlg(DKnob::RandLevel(1))));
+            app.mouse_move(k.cx(), k.cy());
+            (0..11).for_each(|_| app.wheel(0.0, 1.0, false, false));
+            assert_eq!(app.hint.as_ref(), "Velocity: +100%");
+            app.act(Action::PianoDlg(DAct::RandPattern));
+            assert_eq!(mine(&app), before, "Pattern off: the notes stay");
+            assert!(piano::notes(&app.state).iter().any(|n| n.channel == ch && n.velocity != 100), "VEL moved them");
+            app.act(Action::PianoDlg(DAct::RandPattern));
+            frame(&mut app, &mut c, None);
+            app.act(Action::PianoDlg(DAct::Accept));
+            assert!(!app.state.shown(Win::PianoDlg));
+            let kept = mine(&app);
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(mine(&app), before, "one undo step");
+            key(&mut app, "r", false, true, false);
+            assert_eq!((app.state.piano_dlg.rand.octave, app.state.piano_dlg.rand.scale), (5, crate::chords::FIRST_SCALE), "kept");
+            assert_eq!(mine(&app), kept, "the same seed and settings, the same notes");
+            app.act(Action::CloseWin(Win::PianoDlg));
+            assert_eq!(mine(&app), before, "× puts the notes back");
+        }
         put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
-        key(&mut app, "r", false, true, false);
-        let pop = app.state.playlist.popup.take().expect("Alt+R opens a menu");
-        assert!(pop.items.iter().all(|i| i.sep || matches!(i.cmd, Cmd::Piano(_))), "{:?}", Sub::Randomize);
 
         // Alt+S opens the Strum dialog (spec: ui/piano-strum.md): it previews, × puts the notes back, Accept is one
         // undo step and the next opening starts from the accepted settings.
