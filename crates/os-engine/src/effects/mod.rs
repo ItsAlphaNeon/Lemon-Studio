@@ -5,11 +5,16 @@
 //! Mixer-slot effects: Lemon Studio's own recreations, configured from a project's saved
 //! plugin state.
 
+pub mod balance;
 pub mod delay;
 pub mod dynamics;
 pub mod eq;
+pub mod fast_dist;
 pub mod limiter;
 pub mod reverb;
+pub mod soft_clipper;
+pub mod stereo_enhancer;
+pub mod transient_processor;
 
 /// An insert effect processing interleaved stereo in place.
 pub trait Effect: Send {
@@ -29,6 +34,13 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
         "Fruity Limiter" => limiter::Limiter::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Reeverb 2" => reverb::Reverb::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Delay 3" => delay::Delay::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Soft Clipper" => soft_clipper::SoftClipper::from_state(state).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Fast Dist" => fast_dist::FastDist::from_state(state).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Balance" => balance::Balance::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Stereo Enhancer" => stereo_enhancer::StereoEnhancer::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Transient Processor" => {
+            transient_processor::TransientProcessor::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
+        }
         _ => None,
     }
 }
@@ -37,3 +49,18 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
 pub(crate) fn field(state: &[u8], k: usize) -> Option<i32> {
     state.get(4 * k..4 * k + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()))
 }
+
+/// `N` little-endian int32 fields of a saved state from field `first` on; `None` when the state is shorter.
+pub(crate) fn ints<const N: usize>(state: &[u8], first: usize) -> Option<[i32; N]> {
+    let mut v = [0; N];
+    for (k, x) in v.iter_mut().enumerate() {
+        *x = field(state, first + k)?;
+    }
+    Some(v)
+}
+
+/// Values as a saved state of little-endian int32 fields.
+pub(crate) fn state_of(v: &[i32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+

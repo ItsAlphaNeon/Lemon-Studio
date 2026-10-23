@@ -486,6 +486,8 @@ pub enum Row {
     Ppi,
     /// Project ▸ Data folder's Rename button, folder button and path (`super::data_folder`).
     DataFolder,
+    /// File ▸ FL Studio factory content folder's Reset button, folder button and path (`super::factory_folder`).
+    FactoryFolder,
     /// A row of Settings > MIDI drawn by `super::midi_page`.
     Midi(super::midi_page::MRow),
     /// The ASIO Compatible Logo with Steinberg's trademark notice to its right (`asio_logo`), on Windows, whose build
@@ -760,6 +762,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     Text(format!("{} instruments, {} effects", s.plugdb.lists.gens.len(), s.plugdb.lists.fx.len()), true),
                 ]),
                 g("User data folder", vec![txt(user)]),
+                g(crate::factory_folder::GROUP, vec![FactoryFolder]),
                 g("Browser extra search folders", vec![SearchFolders(crate::search_folders::shown_rows(s))]),
                 g("External tools", vec![
                     dim("External tools", List(vec![("File", 30.0), ("Name", 320.0)], vec![], 4)),
@@ -955,6 +958,7 @@ fn row_h(r: &Row) -> f32 {
         Row::Edit(f, _) => if f.multiline() { COMMENT_LINE_H * COMMENT_LINES as f32 + 12.0 } else { 28.0 },
         Row::InfoFooter(lines) => (lines.len() as f32 * FOOTER_LINE_H + 8.0).max(36.0),
         Row::DataFolder => super::data_folder::FOLDER_ROW_H,
+        Row::FactoryFolder => super::factory_folder::ROW_H,
         Row::AsioLogo => ASIO_LOGO_H + 4.0,
         Row::Midi(m) => m.height(),
     }
@@ -1682,6 +1686,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             paint_row_at(ui, s, group, &Row::Buttons(vec![(RESET_WORK_TIME, 150.0)]), g, by, 36.0, bx - g.x - 12.0);
         }
         Row::DataFolder => super::data_folder::paint_row(ui, s, row, g, x0, y, h),
+        Row::FactoryFolder => super::factory_folder::paint_row(ui, g, x0, y, h),
         Row::Midi(m) => super::midi_page::paint_row(ui, s, *m, g, x0, y, h),
         // As Steinberg provides it, with the notice beside it in the page's own font (its usage guidelines §14).
         Row::AsioLogo => {

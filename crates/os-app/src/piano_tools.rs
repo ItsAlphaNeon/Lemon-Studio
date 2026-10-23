@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Piano-roll editing commands: quantize, legato, chop, glue, discard lengths, randomize, the Strum and Arpeggiate dialogs,
-//! duplicate, mute, ghost channels, time markers, channel cycling and the selection keys, with the Tools menu that
-//! lists them.
+//! Piano-roll editing commands: quantize, legato, chop, glue, discard lengths, randomize, the Strum, Arpeggiate, Flam,
+//! Claw machine, Limit, Flip and Scale levels dialogs, duplicate, mute, ghost channels, time markers, channel cycling and the
+//! selection keys, with the Tools menu that lists them.
 // spec: ui/piano-roll.md §3a, §10a, §11; ui/piano-keys.md
 
 use os_model::Note;
@@ -42,6 +42,9 @@ pub enum NCmd {
     Strum,
     /// Open the Arpeggiate dialog (spec: ui/piano-arpeggiate.md).
     Arpeggiate,
+    /// Open the Flam, Flip, Scale levels or Limit dialog (spec: ui/piano-flam.md, ui/piano-flip.md,
+    /// ui/piano-level-scaling.md, ui/piano-limit.md).
+    Dialog(crate::piano_dlg::Tool),
     /// Randomize by up to `pct` percent of the range.
     Randomize(Rand, u8),
     Ghosts,
@@ -99,8 +102,12 @@ fn sub_items(sub: Sub) -> Vec<PItem> {
 
 /// The toolbar's Tools menu (§11).
 pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
+    use crate::piano_dlg::Tool;
     use NCmd::*;
     let items = vec![
+        PItem::head("File"),
+        PItem::new("Import MIDI file...", Cmd::MidiImport(true)),
+        PItem::new("Export as MIDI file...", Cmd::MidiExport(true)),
         PItem::head("Edit"),
         item("Duplicate", Duplicate).key("Ctrl+B"),
         item("Glue", Glue).key("Ctrl+G"),
@@ -114,7 +121,12 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sub("Chop", sub_items(Sub::Chop)).key("Alt+U"),
         item("Strum...", Strum).key("Alt+S"),
         item("Arpeggiate...", Arpeggiate).key("Alt+A"),
+        item("Flam...", Dialog(Tool::Flam)).key("Alt+F"),
+        item("Claw machine...", Dialog(Tool::Claw)).key("Alt+W"),
+        item("Limit...", Dialog(Tool::Limit)).key("Alt+K"),
+        item("Flip...", Dialog(Tool::Flip)).key("Alt+Y"),
         PItem::sub("Randomize", sub_items(Sub::Randomize)).key("Alt+R"),
+        item("Scale levels...", Dialog(Tool::Levels)).key("Alt+X"),
         PItem::head("View"),
         item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
         item("Add time marker", AddMarker).key("Alt+T"),
@@ -154,6 +166,11 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && is(c, "u") => NCmd::Menu(Sub::Chop),
         Key::Character(c) if alt && !ctrl && is(c, "s") => NCmd::Strum,
         Key::Character(c) if alt && !ctrl && is(c, "a") => NCmd::Arpeggiate,
+        Key::Character(c) if alt && !ctrl && is(c, "f") => NCmd::Dialog(crate::piano_dlg::Tool::Flam),
+        Key::Character(c) if alt && !ctrl && is(c, "w") => NCmd::Dialog(crate::piano_dlg::Tool::Claw),
+        Key::Character(c) if alt && !ctrl && is(c, "k") => NCmd::Dialog(crate::piano_dlg::Tool::Limit),
+        Key::Character(c) if alt && !ctrl && is(c, "y") => NCmd::Dialog(crate::piano_dlg::Tool::Flip),
+        Key::Character(c) if alt && !ctrl && is(c, "x") => NCmd::Dialog(crate::piano_dlg::Tool::Levels),
         Key::Character(c) if alt && !ctrl && is(c, "r") => NCmd::Menu(Sub::Randomize),
         Key::Character(c) if alt && !ctrl && is(c, "v") => NCmd::Ghosts,
         Key::Character(c) if alt && !ctrl && !shift && is(c, "t") => NCmd::AddMarker,
@@ -366,6 +383,10 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
         }
         NCmd::Arpeggiate => {
             app.open_arp();
+            return None;
+        }
+        NCmd::Dialog(tool) => {
+            app.open_piano_tool(tool);
             return None;
         }
         NCmd::Randomize(what, pct) => {

@@ -29,9 +29,16 @@ pub fn is_black(key: i32) -> bool {
     matches!(key.rem_euclid(12), 1 | 3 | 6 | 8 | 10)
 }
 
-/// `c` minus `d` on every channel (the grid's line colors are the row fill minus a constant, §3).
-fn sub(c: Color, d: u8) -> Color {
+/// `c` minus `d` on every channel (the grid's line colors are the row fill minus a constant, §3), the constant scaled by
+/// the theme's grid line strength (`PRGridContrast`, spec: ui/flstheme.md §3).
+fn sub(t: &os_theme::Palette, c: Color, d: u8) -> Color {
+    let d = (f32::from(d) * t.pr_lines).round().clamp(0.0, 255.0) as u8;
     Color { r: c.r.saturating_sub(d), g: c.g.saturating_sub(d), b: c.b.saturating_sub(d), a: c.a }
+}
+
+/// The bar line colour at the theme's grid line strength (spec: ui/flstheme.md §3, PRGridContrast).
+fn bar_line(t: &os_theme::Palette) -> Color {
+    t.pr_line(t.pr_bar)
 }
 
 /// The regions of the window for a given window rect `r` (§1; offsets from the client corner at
@@ -549,11 +556,11 @@ fn columns(ui: &mut Ui, g: &Geom, area: Rect, bands: &[(f32, f32, Color)], bar: 
             ui.c.fill_rect(Rect::new(x, area.y, 1.0, area.h), bar);
         } else if on_beat && beat_px >= 4.0 {
             for &(y, h, c) in bands {
-                ui.c.fill_rect(Rect::new(x, y, 1.0, h), sub(c, 0x12));
+                ui.c.fill_rect(Rect::new(x, y, 1.0, h), sub(ui.t, c, 0x12));
             }
         } else if show_steps {
             for &(y, h, c) in bands {
-                ui.c.fill_rect(Rect::new(x, y, 1.0, h), sub(c, 0x0a));
+                ui.c.fill_rect(Rect::new(x, y, 1.0, h), sub(ui.t, c, 0x0a));
             }
         }
     }
@@ -581,10 +588,10 @@ fn grid_rows(ui: &mut Ui, l: &Layout, g: &Geom, clip: Rect, selecting: bool) {
         let y = g.y_of(key);
         let fill = if is_black(key) { black } else { white };
         ui.c.fill_rect(Rect::new(gr.x, y, gr.w, g.row - 1.0), fill);
-        ui.c.fill_rect(Rect::new(gr.x, y + g.row - 1.0, gr.w, 1.0), sub(white, 0x0a));
+        ui.c.fill_rect(Rect::new(gr.x, y + g.row - 1.0, gr.w, 1.0), sub(t, white, 0x0a));
         bands.push((y, g.row - 1.0, fill));
     }
-    let bar = if selecting { ui.t.s(0x0e080c) } else { t.pr_bar };
+    let bar = if selecting { ui.t.s(0x0e080c) } else { bar_line(t) };
     columns(ui, g, gr, &bands, bar);
     ui.c.pop_clip();
 }
@@ -630,12 +637,12 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
         let h = 21.0f32.min(p.bottom() - y);
         bands.push((y, h, t.pr_row));
         if y + 21.0 < p.bottom() {
-            ui.c.fill_rect(Rect::new(p.x, y + 21.0, p.w, 1.0), sub(t.pr_row, if i % 2 == 1 { 0x12 } else { 0x0a }));
+            ui.c.fill_rect(Rect::new(p.x, y + 21.0, p.w, 1.0), sub(t, t.pr_row, if i % 2 == 1 { 0x12 } else { 0x0a }));
         }
         y += 22.0;
         i += 1;
     }
-    columns(ui, g, p, &bands, t.pr_bar);
+    columns(ui, g, p, &bands, bar_line(t));
     ui.c.text(Font::new(16), p.x + 7.0, p.y + 2.0, t.text_faint.shade(-0.35), lane.name());
 
     if lane.is_channel() {

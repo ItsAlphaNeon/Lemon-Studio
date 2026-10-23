@@ -4,10 +4,10 @@
 
 //! The plugin editor: a child of the host's window (Win32, X11 on Linux, an NSView on macOS) that paints `view` with
 //! the os-ui canvas, and the editor logic (platform independent): knob / fader drags with the cursor held in place,
-//! envelope node drags, wheel and reset gestures, shape buttons and switches, the parameter menus. Edits show and sound
-//! at once (`os_plugkit::vals`).
+//! envelope node drags, wheel and reset gestures, shape buttons and switches, the parameter menus, the custom shape's
+//! file dialog. Edits show and sound at once (`os_plugkit::vals`).
 //!
-// spec: plugins/lemon-3x-osc.md (§4 hints, §5 interaction), plugins/host-link.md
+// spec: plugins/lemon-3x-osc.md (§4 hints, §5 interaction, §6 custom shape), plugins/host-link.md
 
 use std::any::Any;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
@@ -141,6 +141,8 @@ pub enum Act {
     TypeIn(String, f32, f32),
     /// Ask the host for an automation clip of parameter `index` (host link).
     Automate(usize),
+    /// Open the file dialog for the custom shape's sample (`Logic::load` takes the pick).
+    OpenDialog,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -193,7 +195,27 @@ fn env_point_ids(p: &str, i: u8) -> Vec<String> {
 impl Logic {
     pub fn new(params: Arc<Osc3Params>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         let vals = Vals::new(&*params, params.live.clone(), ctx);
-        Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false }
+        let mut l = Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false };
+        l.sync_sample();
+        l
+    }
+
+    /// Takes the custom shape's sample from the shared state when it changed (a load here, a restored state).
+    pub fn sync_sample(&mut self) {
+        let v = self.shared.custom_version.load(Ordering::Acquire);
+        if v != self.view.sample.version {
+            self.view.sample = view::SampleView { path: self.shared.loaded_path(), wave: self.shared.wave(), version: v };
+        }
+    }
+
+    /// Loads `path` as the custom shape's sample (the file dialog's pick); the hint says how it went.
+    pub fn load(&mut self, path: &str) {
+        let name = view::file_name(path).to_string();
+        self.hint = match self.shared.load(path, &self.params) {
+            Ok(()) => format!("Custom shape sample: {name}"),
+            Err(_) => format!("Custom shape sample: {name} could not be read"),
+        };
+        self.sync_sample();
     }
 
     pub fn dragging(&self) -> bool {
@@ -210,7 +232,7 @@ impl Logic {
 
     fn hint_for(&self, t: Option<&Target>) -> String {
         match t {
-            Some(t) => view::hint(t, &self.vals, &|id| self.name(id)),
+            Some(t) => view::hint(t, &self.vals, &self.view, &|id| self.name(id)),
             None => String::new(),
         }
     }
@@ -253,7 +275,15 @@ impl Logic {
                 let on = self.vals.plain(id) > 0.5;
                 self.vals.edit_plain(id, if on { 0.0 } else { 1.0 });
             }
-            (Target::Set(id, v), Btn::Left) => self.vals.edit_plain(id, *v),
+            (Target::Set(id, v), Btn::Left) => {
+                self.vals.edit_plain(id, *v);
+                // Choosing the custom shape opens a file dialog for its sample (spec: plugins/3x-osc.md §1); cancelled,
+                // the shape stays chosen with the sample it had.
+                if view::is_osc_shape(id) && *v as u8 == crate::dsp::CUSTOM {
+                    acts.push(Act::OpenDialog);
+                }
+            }
+            (Target::LoadSample, Btn::Left) => acts.push(Act::OpenDialog),
             (Target::Flag(b), Btn::Left) => self.toggle_flag(*b),
             (Target::Tab(i), Btn::Left) => self.view.tab = *i,
             (Target::SubTab(i), Btn::Left) => self.view.sub = *i,
@@ -343,8 +373,6 @@ impl Logic {
         match &t {
             Target::Knob(id) | Target::List(id) | Target::Set(id, _) => {
                 let (lo, hi) = self.range(id);
-                // The wheel stops short of the Custom shape (greyed out).
-                let hi = if view::is_osc_shape(id) { hi.min(i32::from(crate::dsp::NOISE)) } else { hi };
                 let steps = (hi - lo) as f32;
                 let step = if steps > WHEEL_STEPS { (steps / WHEEL_STEPS).round() } else { 1.0 };
                 let plain = (self.vals.plain(id) + notches.signum() * step).clamp(lo as f32, hi as f32);
@@ -436,6 +464,7 @@ mod win32 {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OPENFILENAMEW};
     use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -687,6 +716,7 @@ mod win32 {
         /// Timer / parameter change: expire confirmed overlay values, repaint when anything shown changed.
         fn poll(&mut self) {
             let dirty = self.logic.vals.expire();
+            self.logic.sync_sample();
             let sig = self.logic.vals.signature();
             let rv = self.params.raw_version.load(Ordering::Acquire);
             if dirty || sig != self.last_sig || rv != self.last_raw || self.logic.view != self.last_view || self.logic.hint != self.last_hint {
@@ -726,6 +756,12 @@ mod win32 {
                     Act::Automate(i) => {
                         os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Automate, i as isize);
                     }
+                    Act::OpenDialog => {
+                        if let Some(path) = file_dialog(self.hwnd) {
+                            self.logic.load(&path);
+                        }
+                        repaint = true;
+                    }
                 }
             }
             if repaint {
@@ -733,7 +769,7 @@ mod win32 {
             }
         }
 
-        /// Answers the host (spec `plugins/host-link.md`): two pages (oscillators, envelopes), the hint line.
+        /// Answers the host (spec `plugins/host-link.md`): three pages (oscillators, envelopes, sample), the hint line.
         unsafe fn host_link(&mut self, wp: WPARAM, lp: LPARAM) -> LRESULT {
             use os_hostlink::{Cmd, PageIcon};
             let Some(cmd) = Cmd::from_usize(wp) else { return 0 };
@@ -751,14 +787,15 @@ mod win32 {
                     }
                     os_hostlink::VERSION as LRESULT
                 }
-                Cmd::PageCount => 2,
+                Cmd::PageCount => LRESULT::from(view::PAGES),
                 Cmd::PageIcon => match lp {
                     0 => PageIcon::Plugin as LRESULT,
-                    _ => PageIcon::Envelope as LRESULT,
+                    1 => PageIcon::Envelope as LRESULT,
+                    _ => PageIcon::Sample as LRESULT,
                 },
                 Cmd::GetPage => LRESULT::from(self.logic.view.tab),
                 Cmd::SetPage => {
-                    self.logic.view.tab = if lp <= 0 { 0 } else { 1 };
+                    self.logic.view.tab = lp.clamp(0, LRESULT::from(view::PAGES) - 1) as u8;
                     self.invalidate();
                     LRESULT::from(self.logic.view.tab)
                 }
@@ -800,6 +837,31 @@ mod win32 {
             pw::blit(hdc, &self.crop, w, h);
             pw::end_paint(self.hwnd, &ps);
         }
+    }
+
+    /// The open sample dialog (as Lemon Sampler's); `None` when cancelled or in tests that allow no modal loops.
+    fn file_dialog(owner: HWND) -> Option<String> {
+        if os_plugkit::no_modal() {
+            return None;
+        }
+        let mut file = vec![0u16; 1024];
+        let filter: Vec<u16> = "Audio files\0*.wav;*.flac;*.ogg;*.wv;*.aif;*.aiff;*.mp3\0All files\0*.*\0\0".encode_utf16().collect();
+        let title = pw::wide("Sample for the custom shape");
+        unsafe {
+            let mut ofn: OPENFILENAMEW = std::mem::zeroed();
+            ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+            ofn.hwndOwner = owner;
+            ofn.lpstrFilter = filter.as_ptr();
+            ofn.lpstrFile = file.as_mut_ptr();
+            ofn.nMaxFile = file.len() as u32;
+            ofn.lpstrTitle = title.as_ptr();
+            ofn.Flags = OFN_NOCHANGEDIR | OFN_FILEMUSTEXIST;
+            if GetOpenFileNameW(&mut ofn) == 0 {
+                return None;
+            }
+        }
+        let end = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+        Some(String::from_utf16_lossy(&file[..end]))
     }
 }
 
@@ -845,9 +907,10 @@ mod gui {
     pub fn open(parent: px::Parent, scale: f32, params: Arc<Osc3Params>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Option<px::EditorThread> {
         let scale = if scale > 0.0 { scale } else { 1.0 };
         let px = move |v: u32| (v as f32 * scale).round() as u32;
-        // Two pages (oscillators, envelopes); joined, the editor is what lies below the strip row.
+        // Three pages (oscillators, envelopes, sample); joined, the editor is what lies below the strip row.
         let wake = slot.clone();
-        let link = Peer::register(parent as u64, vec![PageIcon::Plugin, PageIcon::Envelope], (view::EDITOR_W, view::HOSTED_EDITOR_H), move || px::notify(&wake));
+        let pages = vec![PageIcon::Plugin, PageIcon::Envelope, PageIcon::Sample];
+        let link = Peer::register(parent as u64, pages, (view::EDITOR_W, view::HOSTED_EDITOR_H), move || px::notify(&wake));
         let peer = link.clone();
         let thread = px::spawn(parent, (px(view::EDITOR_W), px(view::EDITOR_H)), slot, move |win| {
             let full = (px(view::W), px(view::H));
@@ -968,6 +1031,7 @@ mod gui {
         /// Timer / parameter change: expire confirmed overlay values, repaint when anything shown changed.
         fn poll(&mut self) {
             let dirty = self.logic.vals.expire();
+            self.logic.sync_sample();
             let sig = self.logic.vals.signature();
             let rv = self.params.raw_version.load(Ordering::Acquire);
             if dirty || sig != self.last_sig || rv != self.last_raw || self.logic.view != self.last_view || self.logic.hint != self.last_hint {
@@ -994,7 +1058,7 @@ mod gui {
             }
             let page = self.link.page();
             if page != self.last_page {
-                self.logic.view.tab = u8::from(page > 0);
+                self.logic.view.tab = page.min(usize::from(view::PAGES) - 1) as u8;
                 self.last_page = page;
                 self.dirty = true;
             } else if usize::from(self.logic.view.tab) != page {
@@ -1030,6 +1094,12 @@ mod gui {
                     Act::Automate(i) => {
                         self.link.to_host(Cmd::Automate, i as isize);
                     }
+                    Act::OpenDialog => {
+                        if let Some(path) = file_dialog(&self.win) {
+                            self.logic.load(&path);
+                        }
+                        self.dirty = true;
+                    }
                 }
             }
         }
@@ -1056,6 +1126,21 @@ mod gui {
             }
             self.win.blit(&self.crop, w, h);
         }
+    }
+
+    /// The open sample dialog: the desktop's own (through its portal on Linux; on macOS AppKit's, run on the main
+    /// thread), as Lemon Sampler's.
+    fn file_dialog(win: &Window) -> Option<String> {
+        if os_plugkit::no_modal() {
+            return None;
+        }
+        let path = win.dialog(move || {
+            rfd::FileDialog::new()
+                .set_title("Sample for the custom shape")
+                .add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3"])
+                .pick_file()
+        });
+        path.flatten().map(|p| p.to_string_lossy().into_owned())
     }
 }
 
@@ -1224,21 +1309,95 @@ mod tests {
         centre(&l, &Target::Knob("pan_lfo_amt".into()));
     }
 
+    /// A 16-bit mono WAV of `pts` in a temp folder of the test's own.
+    fn wav(name: &str, pts: &[i16]) -> String {
+        let dir = std::env::temp_dir().join(format!("lemon-trio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let data: Vec<u8> = pts.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut b = b"RIFF".to_vec();
+        b.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        for v in [16u32, 1 | 1 << 16, 44100, 88200, 2 | 16 << 16] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        b.extend_from_slice(&data);
+        let path = dir.join(name);
+        std::fs::write(&path, b).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Choosing the custom shape asks for its sample; the pick becomes the wave the sound plays and the state keeps
+    /// (spec: plugins/3x-osc.md §1, plugins/lemon-3x-osc.md §6).
     #[test]
-    fn greyed_out_controls_only_say_so() {
+    fn custom_shape_asks_for_its_sample() {
         let mut l = logic();
-        // The Custom shape plays silence: its button does not pick it.
-        let s0 = l.vals.plain("o1_shape");
         let (x, y) = centre(&l, &Target::Set("o1_shape".into(), 6.0));
-        l.down(x, y, Btn::Left, Mods::default(), false);
-        assert_eq!(l.vals.plain("o1_shape"), s0);
-        assert_eq!(l.hint, "Osc 1 custom shape: not available yet");
-        // The wheel over a shape stops short of it.
-        let (x, y) = centre(&l, &Target::Set("o1_shape".into(), 0.0));
+        assert_eq!(l.down(x, y, Btn::Left, Mods::default(), false), vec![Act::Repaint, Act::OpenDialog]);
+        assert_eq!(l.params.v(osc(0) + SHAPE), 6, "chosen even before (or without) a sample");
+        assert_eq!(l.hint, "Osc 1 shape");
+        // The dialog's pick: a period of a square, 8 points.
+        let path = wav("square.wav", &[16384, 16384, 16384, 16384, -16384, -16384, -16384, -16384]);
+        l.load(&path);
+        assert_eq!(l.hint, "Custom shape sample: square.wav");
+        assert_eq!(*l.params.sample_path.read().unwrap(), path);
+        assert_eq!(l.view.sample.path, path);
+        let w = l.shared.wave().expect("the wave");
+        assert_eq!(w.points(), &[0.5, 0.5, 0.5, 0.5, -0.5, -0.5, -0.5, -0.5]);
+        // A file that is not a sample leaves the wave as it was.
+        l.load(&format!("{path}.missing"));
+        assert_eq!(l.hint, "Custom shape sample: square.wav.missing could not be read");
+        assert_eq!(l.shared.loaded_path(), path);
+        // The other shapes do not ask; the wheel reaches the custom shape without a dialog.
+        let (x, y) = centre(&l, &Target::Set("o2_shape".into(), 3.0));
+        assert_eq!(l.down(x, y, Btn::Left, Mods::default(), false), vec![Act::Repaint]);
         for _ in 0..8 {
             l.wheel(x, y, 1.0, Mods::default());
         }
-        assert_eq!(l.vals.plain("o1_shape") as u8, crate::dsp::NOISE);
+        assert_eq!(l.params.v(osc(1) + SHAPE), 6);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The sample page shows the custom shape's sample and loads another on a click.
+    #[test]
+    fn sample_page_shows_and_loads_the_sample() {
+        let mut l = logic();
+        let (x, y) = centre(&l, &Target::Tab(2));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.view.tab, 2);
+        paint(&mut l);
+        let (x, y) = centre(&l, &Target::LoadSample);
+        l.moved(x, y, Mods::default());
+        assert_eq!(l.hint, "Custom shape sample: none (click to load one)");
+        assert_eq!(l.down(x, y, Btn::Left, Mods::default(), false), vec![Act::Repaint, Act::OpenDialog]);
+        // A sample loaded elsewhere (a restored state) reaches the page on the next poll.
+        let w = crate::dsp::Wave::new(&[0.0, 1.0, 0.0, -1.0]).map(Arc::new);
+        l.shared.set_custom(w, "C:/samples/Cycle.wav", &l.params);
+        l.sync_sample();
+        assert_eq!(l.view.sample.path, "C:/samples/Cycle.wav");
+        l.moved(x, y, Mods::default());
+        assert_eq!(l.hint, "Custom shape sample: Cycle.wav (click to load another)");
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+        l.hits = view::paint(&mut c, &os_plugkit::palette(), &l.vals, &l.view, "", true);
+        // Hosted: every control lies inside the area shown.
+        assert!(l.hits.iter().all(|h| h.r.y >= view::HOSTED_CROP_Y as f32));
+        // The wave is drawn in the brand colour inside the graph.
+        let mut px = vec![0u32; (view::W * view::H) as usize];
+        c.copy_to_xrgb(&mut px);
+        let g = view::sample_graph();
+        let main = os_theme::design::lemon::MAIN;
+        let near = |p: u32| [(p >> 16) as u8, (p >> 8) as u8, p as u8].iter().zip([main.r, main.g, main.b]).all(|(a, b)| a.abs_diff(b) <= 80);
+        let lit = (g.y as usize..(g.y + g.h) as usize)
+            .flat_map(|yy| (g.x as usize..(g.x + g.w) as usize).map(move |xx| (xx, yy)))
+            .filter(|&(xx, yy)| near(px[yy * view::W as usize + xx]))
+            .count();
+        assert!(lit > 300, "{lit} wave pixels");
+    }
+
+    #[test]
+    fn greyed_out_controls_only_say_so() {
+        let mut l = logic();
         // The Panning LFO is not played: no drag, wheel, reset or menu.
         l.view.tab = 1;
         l.view.sub = 0;

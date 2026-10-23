@@ -50,6 +50,9 @@ fn run() -> Result<(), String> {
     let mut library = SampleLibrary::new(factory);
     let started = std::time::Instant::now();
     let mut engine = Engine::new(&project, &mut library, rate, mode);
+    // A song renders from its start marker and jumps at skips, as the app's export (spec: audio/song-structure.md
+    // "Time markers").
+    engine.follow_markers();
     let audio = engine.render_all(512);
     let secs = audio.len() as f64 / 2.0 / f64::from(rate);
 

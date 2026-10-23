@@ -89,8 +89,16 @@ pub enum Then {
     ReplaceSignature(u16),
     /// The time signature dialog: Accept (Ok) puts numerator / denominator at the start of this pattern (§2).
     Signature(u16, u8, u8),
+    /// The same for a song time marker (spec: ui/playlist.md §7a).
+    SongSignature(crate::timesig::SongSig, u8, u8),
     /// The project's data folder: its questions and folder pickers (`crate::data_folder`).
     DataFolder(crate::data_folder::DThen),
+    /// The MIDI file to import (`crate::midi_file`); true: from the piano roll.
+    MidiImport(bool),
+    /// Where to export a MIDI file; true: the piano roll's channel.
+    MidiExport(bool),
+    /// File ▸ FL Studio factory content folder: the folder picked (`App::set_factory_folder`).
+    FactoryFolder,
 }
 
 /// What waits for the save-changes question.
@@ -106,6 +114,8 @@ pub enum Next {
     OpenDialog,
     /// A project dropped on the window.
     Open(PathBuf),
+    /// FILE ▸ Import ▸ MIDI file with Start new project: the import of this file (`crate::midi_file`).
+    ImportMidi(PathBuf),
 }
 
 /// A dialog's answer.
@@ -444,7 +454,10 @@ impl App {
             Body::TimeSig(f) => {
                 // Its value list goes with it.
                 self.state.playlist.popup = None;
-                Then::Signature(f.pattern, f.num, f.den)
+                match f.song {
+                    Some(at) => Then::SongSignature(at, f.num, f.den),
+                    None => Then::Signature(f.pattern, f.num, f.den),
+                }
             }
         };
         // The replace question answers the Save dialog under it.

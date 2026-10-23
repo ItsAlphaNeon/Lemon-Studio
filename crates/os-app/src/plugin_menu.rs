@@ -238,13 +238,18 @@ pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<Stri
     if sampler {
         ch.kind = os_model::ChannelKind::Sampler;
         ch.plugin = None;
-        ch.sample_path = None;
+        ch.clear_sample();
         ch.name = Some(d.name.clone());
         s.pending_open = Some(row);
     } else {
         ch.kind = os_model::ChannelKind::Plugin;
         ch.plugin = Some(crate::osc3::file_name(&d.name).to_string());
         ch.name = Some(d.name.clone());
+        // A Lemon Trio channel's sample is its custom shape's (spec: plugins/lemon-3x-osc.md §6): the new instance has
+        // none, so neither does the channel.
+        if crate::osc3::is_osc3(ch) {
+            ch.sample_path = None;
+        }
         s.pending_plugin = Some((row, index));
     }
     s.piano.dirty = true;
