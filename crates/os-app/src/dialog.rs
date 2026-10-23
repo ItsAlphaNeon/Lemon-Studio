@@ -69,6 +69,12 @@ pub enum Then {
     PluginFolder,
     /// Save preset as... for the plugin with this key (`plugins::Plugins::hosted`).
     SavePreset(usize),
+    /// Import preset... for the plugin with this key.
+    ImportPreset(usize),
+    /// Rename preset... for the plugin with this key: its current preset file.
+    RenamePreset(usize, PathBuf),
+    /// The delete question for this preset file of the plugin with this key: Yes deletes it.
+    DeletePreset(usize, PathBuf),
     /// Load sample... for this rack row.
     RackSample(usize),
     /// The replace question of the Save dialog under it: Yes answers that dialog with this path.

@@ -165,6 +165,9 @@ pub enum Request {
     Presets(usize, i32, i32),
     /// The Presets box arrows: next (+1) / previous (-1) preset.
     PresetStep(usize, i32),
+    /// A file dropped on the window's frame.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    DropFile(usize, PathBuf),
     /// A Misc tab value changed (spec: ui/plugin-window.md "Misc tab").
     Misc(usize, crate::misc_page::M, f32),
     /// A Misc tab list asks for its menu at this screen point.
@@ -215,6 +218,8 @@ pub struct Plugins {
     opens: u64,
     /// The preset file each instance last loaded or saved (spec: plugins/presets.md), by `hosted` key.
     pub presets: BTreeMap<usize, PathBuf>,
+    /// Presets dropped where a new instance is being made: they load once it is hosted (`presets::pending_tick`).
+    pub preset_waits: Vec<(usize, PathBuf, std::time::Instant)>,
     /// Plugins (uids) whose file the last scan no longer found: not listed, kept so indices stay valid.
     pub missing: HashSet<String>,
     /// The file and stamp each found plugin was listed from (uid -> path, size, time): an unchanged file keeps its
@@ -599,6 +604,42 @@ impl Plugins {
         p.set_param(info.id, n.clamp(0.0, 1.0))
     }
 
+    /// The parameters of the instance under `key`, in the plugin's order.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn param_infos(&self, key: usize) -> Vec<os_host::ParamInfo> {
+        let Some(p) = self.hosted.get(&key).and_then(|h| h.plugin.lock().ok()) else { return Vec::new() };
+        (0..p.param_count()).filter_map(|i| p.param_info(i)).collect()
+    }
+
+    /// The normalized value of parameter `id` of the instance under `key`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn param_value(&self, key: usize, id: u32) -> Option<f64> {
+        self.hosted.get(&key)?.plugin.lock().ok()?.param_value(id)
+    }
+
+    /// A parameter-list preset (spec: plugins/presets.md "File format"): every parameter that is not read-only or the
+    /// bypass (hidden ones too, which a preset may also list) goes to its default, then each listed one (by name, case ignored where no exact match) to its plain value. Returns the
+    /// listed names the plugin does not have; `None` when nothing is hosted under `key`.
+    pub fn apply_params(&self, key: usize, list: &[(String, f64)]) -> Option<Vec<String>> {
+        let mut p = self.hosted.get(&key)?.plugin.lock().ok()?;
+        let infos: Vec<os_host::ParamInfo> = (0..p.param_count()).filter_map(|i| p.param_info(i)).collect();
+        for i in infos.iter().filter(|i| !i.read_only && !i.bypass) {
+            p.set_param(i.id, i.default);
+        }
+        let mut missing = Vec::new();
+        for (name, plain) in list {
+            let found = infos.iter().find(|i| &i.name == name).or_else(|| infos.iter().find(|i| i.name.eq_ignore_ascii_case(name)));
+            match found {
+                Some(i) => {
+                    let n = if i.max > i.min { (plain - i.min) / (i.max - i.min) } else { 0.0 };
+                    p.set_param(i.id, n.clamp(0.0, 1.0));
+                }
+                None => missing.push(name.clone()),
+            }
+        }
+        Some(missing)
+    }
+
     /// The project-file state of the Lemon Parametric EQ in mixer slot `key` (its plugin state converted back),
     /// `None` when the slot hosts something else.
     pub fn eq_file_state(&self, key: usize) -> Option<Vec<u8>> {
@@ -688,6 +729,7 @@ impl Plugins {
         }
         self.hosted.clear();
         self.presets.clear();
+        self.preset_waits.clear();
     }
 
     /// The sample file a Lemon Sampler instance holds (its persisted `sample-path`), `Some("")` when it has none.
@@ -1008,6 +1050,7 @@ impl Plugins {
                         FrameEvent::Menu(x, y) => Request::Menu(row, x, y),
                         FrameEvent::Presets(x, y) => Request::Presets(row, x, y),
                         FrameEvent::PresetStep(d) => Request::PresetStep(row, d),
+                        FrameEvent::DropFile(p) => Request::DropFile(row, p),
                         FrameEvent::Misc(m, v) => Request::Misc(row, m, v),
                         FrameEvent::MiscMenu(m, x, y) => Request::MiscMenu(row, m, x, y),
                         FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
@@ -1604,9 +1647,13 @@ fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
     unsafe {
         let mut w = WindowFromPoint(POINT { x, y });
-        while !w.is_null() && GetWindowLongW(w, GWL_EXSTYLE) as u32 & WS_EX_ACCEPTFILES == 0 {
+        while !w.is_null() {
+            // The frame takes files itself (presets); it is not where a sample for the plugin goes.
             if w as isize == frame {
                 return false;
+            }
+            if GetWindowLongW(w, GWL_EXSTYLE) as u32 & WS_EX_ACCEPTFILES != 0 {
+                break;
             }
             w = GetAncestor(w, GA_PARENT);
             if w == GetDesktopWindow() {

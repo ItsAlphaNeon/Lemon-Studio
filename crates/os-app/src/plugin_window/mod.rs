@@ -213,6 +213,10 @@ pub enum FrameEvent {
     Dpi(f32),
     /// A greyed-out control was clicked: the app says it is not available yet.
     NotAvailable(&'static str),
+    /// A file was dropped on the frame (from the desktop): a preset loads, a sample goes to a sampler (spec:
+    /// plugins/presets.md "Drag and drop").
+    #[cfg_attr(not(windows), allow(dead_code))]
+    DropFile(std::path::PathBuf),
 }
 
 #[derive(Clone, Copy, PartialEq)]

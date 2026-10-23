@@ -70,7 +70,7 @@ pub fn fst_presets_in(dir: &Path) -> Vec<crate::presets::Preset> {
             } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("fst")) {
                 let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 let name = if rel.is_empty() { stem } else { format!("{}/{stem}", rel.join(" - ")) };
-                out.push(crate::presets::Preset { name, path: p });
+                out.push(crate::presets::Preset { name, path: p, factory: false });
             }
         }
     }

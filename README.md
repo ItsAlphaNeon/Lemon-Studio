@@ -353,6 +353,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`lemon-parametric-eq-2`](plugins/lemon-parametric-eq-2) | Lemon Parametric EQ effect (VST3 + CLAP) |
 | [`lemon-limiter`](plugins/lemon-limiter) | Lemon Limiter effect (VST3 + CLAP) |
 | [`lemon-reverb`](plugins/lemon-reverb) | Lemon Reverb effect (VST3 + CLAP) |
+| [`lemon-delay`](plugins/lemon-delay) | Lemon Delay effect (VST3 + CLAP) |
 | [`citrus`](plugins/citrus) | Citrus instrument, a six-operator synthesizer (VST3 + CLAP) |
 
 ## Roadmap
