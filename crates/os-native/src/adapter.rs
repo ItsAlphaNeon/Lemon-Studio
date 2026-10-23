@@ -544,6 +544,10 @@ impl Instrument for NativePlugin {
         }
         self.art_to_tick = 0.0;
     }
+
+    fn reported_delay(&self) -> u32 {
+        self.plugin.latency()
+    }
 }
 
 impl Drop for NativePlugin {
@@ -593,11 +597,19 @@ impl HostedEffect for NativePlugin {
     fn tick_params_fx(&self) -> bool {
         true
     }
+
+    fn reported_delay_fx(&self) -> u32 {
+        self.plugin.latency()
+    }
 }
 
 impl os_host::Plugin for NativePlugin {
     fn desc(&self) -> &Descriptor {
         &self.desc
+    }
+
+    fn latency(&self) -> u32 {
+        self.plugin.latency()
     }
 
     fn activate(&mut self, rate: u32) -> bool {

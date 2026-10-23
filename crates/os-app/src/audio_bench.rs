@@ -72,6 +72,9 @@ impl Instrument for TimedInst {
     fn transport(&mut self, info: &TransportInfo) {
         self.0.lock().unwrap().transport(info)
     }
+    fn reported_delay(&self) -> u32 {
+        self.0.lock().unwrap().reported_delay()
+    }
 }
 
 /// [`TimedInst`] for effects.
@@ -88,6 +91,9 @@ impl HostedEffect for TimedFx {
     }
     fn transport_fx(&mut self, info: &TransportInfo) {
         self.0.lock().unwrap().transport_fx(info)
+    }
+    fn reported_delay_fx(&self) -> u32 {
+        self.0.lock().unwrap().reported_delay_fx()
     }
 }
 

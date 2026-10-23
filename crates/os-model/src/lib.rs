@@ -1312,6 +1312,10 @@ pub struct MixerTrack {
     /// The three-band equaliser as stored, per band `[gain, frequency, width]`: gain -1800..=1800 in 0.01 dB,
     /// frequency and width 0..=65536 (spec: audio/mixer.md "Equaliser"). Band 1 low shelf, 2 peaking, 3 high shelf.
     pub eq: [[i32; 3]; 3],
+    /// The track's output and input latency settings in milliseconds, either sign, 0 = none (event 236; spec:
+    /// flp/layouts.md "A mixer track's record", audio/delay-compensation.md "Settings").
+    pub latency_out: f32,
+    pub latency_in: f32,
 }
 
 /// A new track's equaliser: flat, at the default frequencies and widths.
@@ -1337,6 +1341,8 @@ impl MixerTrack {
             slot_on: [true; 10],
             slot_mix: [1.0; 10],
             eq: EQ_DEFAULT,
+            latency_out: 0.0,
+            latency_in: 0.0,
         }
     }
 }

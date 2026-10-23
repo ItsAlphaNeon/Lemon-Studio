@@ -53,6 +53,18 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   Lemon Studio
 - Not yet: 32-bit plugins, and Intel-only plugins on Apple silicon (they need a bridge)
 
+## 🚧 Plugin delay compensation
+
+- The delay a plugin reports (CLAP, VST3, VST2 and FL Studio's native plugins), as an instrument or in a mixer
+  slot, is made up on every other path through the mixer, sends and a slot's dry part included, so everything
+  meets in time
+- An export starts late by the whole delay, so the file shows none and keeps its length; live playback skips the
+  same amount, and the playhead follows what is heard
+- The mixer tracks' input and output latency settings are read from projects, count as FL Studio counts them, and
+  are saved back
+- Automation of a mixer track or slot behind late audio waits for it, as in FL Studio
+- Not yet: editing the latency settings, and sidechain paths (there are no sidechain inputs yet)
+
 ## ✅ Plugin management
 
 - Plugin menus everywhere a plugin is added. F8 lists instruments and effects: an effect goes to the
@@ -261,4 +273,3 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 - MIDI file import / export
 - Audio editing
-- Plugin delay compensation
