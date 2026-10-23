@@ -168,9 +168,11 @@ fn factory_in(files: &[(&str, &[u8])], plugin: &str) -> Vec<Preset> {
     sorted(loose, nested)
 }
 
-/// The factory presets of `plugin`.
+/// The factory presets of `plugin`: Lemon Studio's, then (for Citrus) the `.fst` files of an installed copy.
 pub fn factory(plugin: &str) -> Vec<Preset> {
-    factory_in(FACTORY, plugin)
+    let mut v = factory_in(FACTORY, plugin);
+    v.extend(crate::citrus::more_presets(plugin));
+    v
 }
 
 /// The plugin folders that have factory presets.
@@ -195,11 +197,10 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// The presets of `plugin`: the user's, then the factory ones, then (for Citrus) the `.fst` files of an FL install.
+/// The presets of `plugin`: the user's, then the factory ones.
 pub fn list(plugin: &str) -> Vec<Preset> {
     let mut v = user(plugin);
     v.extend(factory(plugin));
-    v.extend(crate::citrus::more_presets(plugin));
     v
 }
 
@@ -926,7 +927,7 @@ mod tests {
         for key in keys {
             let d = pl.descriptor(key).unwrap();
             let infos = pl.param_infos(key);
-            for p in factory(&d.name) {
+            for p in factory_in(FACTORY, &d.name) {
                 let Ok((h, Body::Params(list))) = load(&p.path, &d.uid()) else { panic!("{} does not load for {}", p.name, d.name) };
                 assert_eq!(h.plugin, d.name);
                 for (name, v) in list {
