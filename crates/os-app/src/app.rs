@@ -2987,7 +2987,8 @@ impl App {
 
     // ---------------------------------------------------------------- Flam, Flip and Scale levels dialogs
 
-    /// Tools ▸ Flam… (Alt+F), Claw machine… (Alt+W), Flip… (Alt+Y), Scale levels… (Alt+X) and Limit… (Alt+K): open
+    /// Tools ▸ Flam… (Alt+F), Claw machine… (Alt+W), Flip… (Alt+Y), Scale levels… (Alt+X), Limit… (Alt+K) and LFO…
+    /// (Alt+O): open
     /// the dialog in front (centred over the main
     /// window the first time, then where it was left) on the piano roll's notes, previewing the settings last accepted.
     /// Another of these dialogs open: its preview is put back and the window shows this one. Scale levels does not open
@@ -3023,7 +3024,7 @@ impl App {
                 s.message = Some(dlg::accept(s));
                 s.hide(Win::PianoDlg);
             }
-            Act::Options | Act::KeyMenu | Act::ScaleMenu | Act::SnapMenu | Act::PeriodMenu | Act::TrashMenu => {
+            Act::Options | Act::KeyMenu | Act::ScaleMenu | Act::SnapMenu | Act::PeriodMenu | Act::TrashMenu | Act::ShapeMenu => {
                 let (x, y) = self.mouse;
                 let items = match a {
                     Act::KeyMenu => dlg::key_menu(&s.piano_dlg.limit),
@@ -3031,6 +3032,7 @@ impl App {
                     Act::SnapMenu => dlg::snap_menu(&s.piano_dlg.limit),
                     Act::PeriodMenu => dlg::period_menu(&s.piano_dlg.claw),
                     Act::TrashMenu => dlg::trash_menu(&s.piano_dlg.claw),
+                    Act::ShapeMenu => dlg::shape_menu(&s.piano_dlg.lfo),
                     _ => dlg::options_menu(),
                 };
                 s.playlist.popup = Some(crate::playlist::Popup { x, y, items, sub: None });
@@ -14448,6 +14450,67 @@ mod tests {
             assert_ne!(mine(&app), steps);
             app.act(Action::CloseWin(Win::PianoDlg));
             assert_eq!(mine(&app), steps, "× puts the notes back");
+        }
+        frame(&mut app, &mut c, None);
+
+        // Alt+O opens LFO (spec: ui/piano-lfo.md): a sine on the velocities at once, "52%" after a notch of Value, End
+        // copies Start, the Shape menu; Accept is one undo step. On a channel lane it writes the lane's control points
+        // instead, and × takes them back.
+        {
+            use crate::lfo::Shape;
+            use crate::piano_dlg::{Act as DAct, Knob as DKnob, Tool};
+            use os_model::ControlPoint;
+            let click = |app: &mut App, a: Action| {
+                let r = hit_rect(app, &a);
+                app.mouse_move(r.cx(), r.cy());
+                app.mouse_down();
+                app.mouse_up();
+            };
+            let vels = |app: &App| piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| n.velocity).collect::<Vec<_>>();
+            let vol = |app: &App| piano::controls(&app.state).iter().filter(|c| c.channel() == ch && c.param() == ControlPoint::VOLUME).map(|c| (c.position, c.value)).collect::<Vec<_>>();
+            let st = u32::from(app.state.project.ppq) / 4;
+            put(&mut app, &(0..16).map(|i| (i * st, st, 60)).collect::<Vec<_>>());
+            app.state.piano.lane = piano::Lane::Velocity;
+            let before = vels(&app);
+            key(&mut app, "o", false, true, false);
+            assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Lfo);
+            assert_eq!(vels(&app)[..9], [64, 76, 87, 94, 96, 94, 87, 76, 64], "Reset's sine, a bar long");
+            frame(&mut app, &mut c, None);
+            let k = hit_rect(&app, &Action::Knob(KnobId::PianoDlg(DKnob::LfoValue)));
+            app.mouse_move(k.cx(), k.cy());
+            app.wheel(0.0, 1.0, false, false);
+            assert_eq!(app.hint.as_ref(), "52%");
+            click(&mut app, Action::PianoDlg(DAct::LfoEnd));
+            assert!(app.state.piano_dlg.lfo.end_on && app.state.piano_dlg.lfo.end == app.state.piano_dlg.lfo.start, "End takes Start's values");
+            frame(&mut app, &mut c, None);
+            app.act(Action::PianoDlg(DAct::ShapeMenu));
+            let pop = app.state.playlist.popup.take().expect("the shape box opens its menu");
+            assert_eq!(pop.items.iter().filter(|i| matches!(i.cmd, Cmd::LfoShape(_))).count(), 3);
+            crate::playlist::run(&mut app, Cmd::LfoShape(Shape::Square));
+            assert_eq!(vels(&app)[..9], [98, 98, 98, 98, 98, 98, 98, 98, 34]);
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Accept));
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(vels(&app), before, "one undo step");
+
+            app.state.piano.lane = piano::Lane::ChanVolume;
+            key(&mut app, "o", false, true, false);
+            assert_eq!(app.state.piano_dlg.tool.title_on(app.state.piano.lane), "Events - LFO");
+            assert_eq!(vels(&app), before, "the notes stay");
+            let pts = vol(&app);
+            assert_eq!(pts.first(), Some(&(0, 9800)), "the settings kept: the square from 76.5 %");
+            assert!(pts.iter().all(|p| p.1 == 9800 || p.1 == 3400) && pts.windows(2).all(|w| w[0].1 != w[1].1), "its edges alone");
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Accept));
+            assert_eq!(vol(&app), pts);
+            assert!(piano::undo(&mut app.state));
+            assert!(vol(&app).is_empty(), "one undo step");
+            key(&mut app, "o", false, true, false);
+            assert!(!vol(&app).is_empty());
+            app.act(Action::CloseWin(Win::PianoDlg));
+            assert!(vol(&app).is_empty(), "× takes the points back");
+            app.state.piano.lane = piano::Lane::Velocity;
         }
         frame(&mut app, &mut c, None);
 

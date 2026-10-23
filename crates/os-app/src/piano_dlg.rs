@@ -2,18 +2,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The piano roll's Flam (Alt+F), Claw machine (Alt+W), Flip (Alt+Y), Scale levels (Alt+X) and Limit (Alt+K) dialogs:
-//! one tool window shows whichever is open. As with Strum, its session previews every change on the notes, Accept keeps
-//! the result as one undo step and × puts the notes back. The tools are `flam.rs`, `claw.rs`, `flip.rs`, `levels.rs` and
-//! `limit.rs`; the window is `views/piano_dlg.rs`.
-// spec: ui/piano-flam.md, ui/piano-claw.md, ui/piano-flip.md, ui/piano-level-scaling.md, ui/piano-limit.md
+//! The piano roll's Flam (Alt+F), Claw machine (Alt+W), Flip (Alt+Y), Scale levels (Alt+X), Limit (Alt+K) and LFO
+//! (Alt+O) dialogs: one tool window shows whichever is open. As with Strum, its session previews every change on the
+//! notes (and LFO's on a channel lane's control points), Accept keeps the result as one undo step and × puts the notes
+//! back. The tools are `flam.rs`, `claw.rs`, `flip.rs`, `levels.rs`, `limit.rs` and `lfo.rs`; the window is
+//! `views/piano_dlg.rs`.
+// spec: ui/piano-flam.md, ui/piano-claw.md, ui/piano-flip.md, ui/piano-level-scaling.md, ui/piano-limit.md, ui/piano-lfo.md
 
-use os_model::Note;
+use os_model::{ControlPoint, Note};
 
 use crate::app::State;
 use crate::piano::{self, Lane};
 use crate::playlist::{Cmd, Mark, PItem};
-use crate::{chords, claw, flam, flip, levels, limit};
+use crate::{chords, claw, flam, flip, levels, lfo, limit};
 
 /// Which dialog the window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -24,9 +25,13 @@ pub enum Tool {
     Levels,
     Limit,
     Claw,
+    Lfo,
 }
 
 impl Tool {
+    /// How many there are (`Ui::pos`).
+    pub const COUNT: usize = 6;
+
     pub fn title(self) -> &'static str {
         match self {
             Tool::Flam => "Piano roll - flamer",
@@ -34,7 +39,13 @@ impl Tool {
             Tool::Levels => "Piano roll - level scaling",
             Tool::Limit => "Piano roll - limiter / transposer",
             Tool::Claw => "Piano roll - claw machine",
+            Tool::Lfo => "Piano roll - LFO",
         }
+    }
+
+    /// The title over the Control lane `lane`: LFO's says "Events" on a channel lane (piano-lfo.md §1).
+    pub fn title_on(self, lane: Lane) -> &'static str {
+        if self == Tool::Lfo && lane.is_channel() { "Events - LFO" } else { self.title() }
     }
 
     /// The undo step an Accept makes.
@@ -45,6 +56,7 @@ impl Tool {
             Tool::Levels => "Piano roll level scaling",
             Tool::Limit => "Piano roll limit",
             Tool::Claw => "Piano roll claw machine",
+            Tool::Lfo => "Piano roll LFO",
         }
     }
 
@@ -55,6 +67,7 @@ impl Tool {
             Tool::Levels => "levels scaled",
             Tool::Limit => "limited",
             Tool::Claw => "claw machine applied",
+            Tool::Lfo => "LFO applied",
         }
     }
 
@@ -73,10 +86,19 @@ pub enum Knob {
     Offset,
     Tension,
     ClawTime,
+    /// LFO's Start and End columns (Value, Range, Speed) and its Phase.
+    LfoValue,
+    LfoRange,
+    LfoSpeed,
+    LfoEndValue,
+    LfoEndRange,
+    LfoEndSpeed,
+    LfoPhase,
 }
 
 impl Knob {
-    /// Change of the 0..1 position per wheel notch (piano-flam.md §1, piano-level-scaling.md §1, piano-claw.md §1).
+    /// Change of the 0..1 position per wheel notch (piano-flam.md §1, piano-level-scaling.md §1, piano-claw.md §1,
+    /// piano-lfo.md §1).
     pub fn notch(self) -> f32 {
         match self {
             Knob::FlamTime => flam::TIME_NOTCH,
@@ -84,6 +106,10 @@ impl Knob {
             Knob::Center => 1.0 / 32.0,
             Knob::Mult | Knob::Offset | Knob::Tension => 1.0 / 64.0,
             Knob::ClawTime => claw::TIME_NOTCH,
+            Knob::LfoValue | Knob::LfoEndValue => lfo::VALUE_NOTCH,
+            Knob::LfoRange | Knob::LfoEndRange => lfo::RANGE_NOTCH,
+            Knob::LfoSpeed | Knob::LfoEndSpeed => lfo::SPEED_NOTCH,
+            Knob::LfoPhase => lfo::PHASE_NOTCH,
         }
     }
 
@@ -99,7 +125,7 @@ impl Knob {
     /// Position after Reset; Center's is on the velocity lane.
     pub fn default_pos(self) -> f32 {
         let (f, l, c) = (flam::Settings::default(), levels::Settings::default(), claw::Settings::default());
-        Ui::pos_of(self, &f, &l, &c)
+        Ui::pos_of(self, &f, &l, &c, &lfo::Settings::default())
     }
 }
 
@@ -124,6 +150,10 @@ pub enum Act {
     TrashMenu,
     Stretch,
     Short,
+    /// LFO's End and log switches and its Shape ▸ menu.
+    LfoEnd,
+    LfoLog,
+    ShapeMenu,
     /// Limit's section header arrows: 0 = Key / scale restriction, 1 = Keyboard range.
     Collapse(u8),
     /// A press on Limit's keys (the green key follows), its name strip (the nearer range end follows) or its scroll
@@ -156,13 +186,14 @@ pub enum LCmd {
 pub struct Ui {
     pub tool: Tool,
     /// Top-left corner (logical px) of each dialog, by `Tool::index`.
-    pub pos: [(f32, f32); 5],
-    pub placed: [bool; 5],
+    pub pos: [(f32, f32); Tool::COUNT],
+    pub placed: [bool; Tool::COUNT],
     pub flam: flam::Settings,
     pub flip: flip::Settings,
     pub levels: levels::Settings,
     pub limit: limit::Settings,
     pub claw: claw::Settings,
+    pub lfo: lfo::Settings,
     /// Limit's collapsed sections (`Act::Collapse`); a view setting, kept as it is.
     pub collapsed: [bool; 2],
     /// Limit's keyboard view: px from C0's left edge to the view's.
@@ -172,18 +203,23 @@ pub struct Ui {
     kept_levels: levels::Settings,
     kept_limit: limit::Settings,
     kept_claw: claw::Settings,
+    kept_lfo: lfo::Settings,
     /// The Control lane Scale levels was last accepted on (its Center follows a new lane).
     kept_lane: Option<Lane>,
     session: Option<Session>,
 }
 
-/// What an open dialog previews on: the pattern's notes and selection as they were, and what the last preview left.
+/// What an open dialog previews on: the pattern's notes, selection and control points as they were, and what the last
+/// preview left (`shown`: once one has run).
 struct Session {
     pattern: u16,
     channel: u16,
     base: Vec<Note>,
     base_sel: Vec<usize>,
+    base_ctl: Vec<ControlPoint>,
     last: Vec<Note>,
+    last_ctl: Vec<ControlPoint>,
+    shown: bool,
 }
 
 fn pct(v: f32) -> i64 {
@@ -191,7 +227,7 @@ fn pct(v: f32) -> i64 {
 }
 
 impl Ui {
-    fn pos_of(k: Knob, f: &flam::Settings, l: &levels::Settings, c: &claw::Settings) -> f32 {
+    fn pos_of(k: Knob, f: &flam::Settings, l: &levels::Settings, c: &claw::Settings, o: &lfo::Settings) -> f32 {
         match k {
             Knob::FlamTime => f.time,
             Knob::FlamVel => f.vel,
@@ -200,12 +236,19 @@ impl Ui {
             Knob::Offset => (l.offset + 1.0) / 2.0,
             Knob::Tension => (l.tension + 1.0) / 2.0,
             Knob::ClawTime => c.time,
+            Knob::LfoValue => o.start.value,
+            Knob::LfoRange => lfo::range_pos(o.start.range),
+            Knob::LfoSpeed => lfo::speed_pos(o.start.speed),
+            Knob::LfoEndValue => o.end.value,
+            Knob::LfoEndRange => lfo::range_pos(o.end.range),
+            Knob::LfoEndSpeed => lfo::speed_pos(o.end.speed),
+            Knob::LfoPhase => lfo::phase_pos(o.phase),
         }
     }
 
     /// The 0..1 position of knob `k`.
     pub fn get(&self, k: Knob) -> f32 {
-        Self::pos_of(k, &self.flam, &self.levels, &self.claw)
+        Self::pos_of(k, &self.flam, &self.levels, &self.claw, &self.lfo)
     }
 
     pub fn set(&mut self, k: Knob, v: f32) {
@@ -218,12 +261,19 @@ impl Ui {
             Knob::Offset => self.levels.offset = v * 2.0 - 1.0,
             Knob::Tension => self.levels.tension = v * 2.0 - 1.0,
             Knob::ClawTime => self.claw.time = v,
+            Knob::LfoValue => self.lfo.start.value = v,
+            Knob::LfoRange => self.lfo.start.range = lfo::range_of(v),
+            Knob::LfoSpeed => self.lfo.start.speed = lfo::speed_of(v),
+            Knob::LfoEndValue => self.lfo.end.value = v,
+            Knob::LfoEndRange => self.lfo.end.range = lfo::range_of(v),
+            Knob::LfoEndSpeed => self.lfo.end.speed = lfo::speed_of(v),
+            Knob::LfoPhase => self.lfo.phase = lfo::phase_of(v),
         }
     }
 
-    /// The hint-bar text of a knob (piano-flam.md §1, piano-level-scaling.md §1, piano-claw.md §5).
+    /// The hint-bar text of a knob (piano-flam.md §1, piano-level-scaling.md §1, piano-claw.md §5, piano-lfo.md §1).
     pub fn text(&self, k: Knob, ppq: u32) -> String {
-        let l = &self.levels;
+        let (l, o) = (&self.levels, &self.lfo);
         match k {
             Knob::FlamTime => self.flam.time_text(ppq),
             Knob::FlamVel => self.flam.vel_text(),
@@ -232,6 +282,13 @@ impl Ui {
             Knob::Offset => format!("Offset: {}%", pct(l.offset)),
             Knob::Tension => format!("Tension: {}%", pct(l.tension)),
             Knob::ClawTime => self.claw.time_text(),
+            Knob::LfoValue => o.start.value_text(),
+            Knob::LfoRange => o.start.range_text(),
+            Knob::LfoSpeed => o.start.speed_text(ppq),
+            Knob::LfoEndValue => o.end.value_text(),
+            Knob::LfoEndRange => o.end.range_text(),
+            Knob::LfoEndSpeed => o.end.speed_text(ppq),
+            Knob::LfoPhase => o.phase_text(),
         }
     }
 
@@ -247,6 +304,8 @@ impl Ui {
             Act::Wrap => self.limit.wrap,
             Act::Stretch => self.claw.stretch,
             Act::Short => self.claw.short,
+            Act::LfoEnd => self.lfo.end_on,
+            Act::LfoLog => self.lfo.log,
             _ => false,
         }
     }
@@ -283,6 +342,7 @@ pub fn open(s: &mut State, tool: Tool) {
             show_range(s);
         }
         Tool::Claw => d.claw = d.kept_claw,
+        Tool::Lfo => d.lfo = d.kept_lfo,
     }
     preview(s);
 }
@@ -366,39 +426,84 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
             let (set, ppq) = (d.claw, u32::from(s.project.ppq.max(4)));
             crate::piano_tools::apply_as(s, |_, ns| claw::claw(ns, &set, ppq), step)
         }
+        Tool::Lfo => {
+            let (set, lane, ppq) = (d.lfo, s.piano.lane, u32::from(s.project.ppq.max(4)));
+            let len = piano::pattern_length(s, s.pattern);
+            if lane.is_channel() {
+                return lfo_points(s, &set, lane, ppq, len, step);
+            }
+            // With a selection the time starts at its first note and End is reached a tick before its end
+            // (piano-lfo.md §3).
+            let sel = piano::channel(s).is_some_and(|ch| !s.piano.selection(s.pattern, Some(ch)).is_empty());
+            crate::piano_tools::apply_as(
+                s,
+                |_, ns| {
+                    let (origin, l) = match (sel, ns.iter().map(|n| n.position).min()) {
+                        (true, Some(a)) => {
+                            let b = ns.iter().map(|n| n.position + n.length.max(1)).max().unwrap_or(a + 1);
+                            (a, (b - a).saturating_sub(1))
+                        }
+                        _ => (0, len),
+                    };
+                    lfo::lfo(ns, lane, &set, ppq, origin, l)
+                },
+                step,
+            )
+        }
     }
 }
 
-/// Put the notes back to the session's start and apply the dialog to them, without an undo step. Notes changed by
-/// something else since the last preview (another pattern or channel, an edit, an undo) start the session again from
-/// them.
+/// LFO on a channel lane: the lane's control points in the pattern become the wave's (piano-lfo.md §5); the other
+/// lanes' stay.
+fn lfo_points(s: &mut State, set: &lfo::Settings, lane: Lane, ppq: u32, len: u32, step: Option<&'static str>) -> bool {
+    let (Some(ch), Some(param)) = (piano::channel(s), lane.param()) else { return false };
+    let kind = ControlPoint::new(0, ch, param, 0).kind;
+    let mut ctl: Vec<ControlPoint> = piano::controls(s).iter().filter(|c| c.kind != kind).copied().collect();
+    ctl.extend(lfo::points(set, lane, ppq, len).into_iter().map(|(t, v)| ControlPoint::new(t, ch, param, v)));
+    ctl.sort_by_key(|c| c.position);
+    if ctl == piano::controls(s) {
+        return false;
+    }
+    if let Some(name) = step {
+        piano::snapshot_as(s, name);
+    }
+    piano::pattern_mut(s).controls = ctl;
+    s.piano.dirty = true;
+    true
+}
+
+/// Put the notes back to the session's start and apply the dialog to them, without an undo step. Notes or control
+/// points changed by something else since the last preview (another pattern or channel, an edit, an undo) start the
+/// session again from them.
 pub fn preview(s: &mut State) {
     let Some(ch) = piano::channel(s) else { return };
-    let now = piano::notes(s).to_vec();
+    let (now, now_ctl) = (piano::notes(s).to_vec(), piano::controls(s).to_vec());
     let fresh = match &s.piano_dlg.session {
-        Some(se) => se.pattern != s.pattern || se.channel != ch || se.last != now,
+        Some(se) => se.pattern != s.pattern || se.channel != ch || se.last != now || se.last_ctl != now_ctl,
         None => true,
     };
     if fresh {
         let base_sel = s.piano.selection(s.pattern, Some(ch));
-        s.piano_dlg.session = Some(Session { pattern: s.pattern, channel: ch, base: now, base_sel, last: Vec::new() });
+        let se = Session { pattern: s.pattern, channel: ch, base: now, base_sel, base_ctl: now_ctl, last: Vec::new(), last_ctl: Vec::new(), shown: false };
+        s.piano_dlg.session = Some(se);
     }
     restore(s);
     run(s, None);
-    let last = piano::notes(s).to_vec();
+    let (last, last_ctl) = (piano::notes(s).to_vec(), piano::controls(s).to_vec());
     if let Some(se) = &mut s.piano_dlg.session {
-        se.last = last;
+        (se.last, se.last_ctl, se.shown) = (last, last_ctl, true);
     }
 }
 
-/// The session's notes and selection back, when the notes are still what its last preview left.
+/// The session's notes, selection and control points back, when they are still what its last preview left.
 fn restore(s: &mut State) -> bool {
     let Some(se) = &s.piano_dlg.session else { return false };
-    if se.pattern != s.pattern || piano::notes(s) != se.last.as_slice() && !se.last.is_empty() {
+    if se.pattern != s.pattern || se.shown && (piano::notes(s) != se.last.as_slice() || piano::controls(s) != se.last_ctl.as_slice()) {
         return false;
     }
-    let (base, sel, ch) = (se.base.clone(), se.base_sel.clone(), se.channel);
-    piano::pattern_mut(s).notes = base;
+    let (base, base_ctl, sel, ch) = (se.base.clone(), se.base_ctl.clone(), se.base_sel.clone(), se.channel);
+    let p = piano::pattern_mut(s);
+    (p.notes, p.controls) = (base, base_ctl);
     if sel.is_empty() {
         s.piano.clear_selection();
     } else {
@@ -423,6 +528,7 @@ pub fn accept(s: &mut State) -> String {
         Tool::Levels => (d.kept_levels, d.kept_lane) = (d.levels, Some(s.piano.lane)),
         Tool::Limit => d.kept_limit = d.limit,
         Tool::Claw => d.kept_claw = d.claw,
+        Tool::Lfo => d.kept_lfo = d.lfo,
     }
     if run(s, Some(tool.step())) {
         format!("Piano roll: {}", tool.done())
@@ -452,6 +558,7 @@ pub fn act(s: &mut State, a: Act) {
                 show_range(s);
             }
             Tool::Claw => d.claw = claw::Settings::default(),
+            Tool::Lfo => d.lfo = lfo::Settings::default(),
         },
         Act::Absolute => d.flam.absolute = !d.flam.absolute,
         Act::Before => d.flam.before = !d.flam.before,
@@ -462,6 +569,9 @@ pub fn act(s: &mut State, a: Act) {
         Act::Wrap => d.limit.wrap = !d.limit.wrap,
         Act::Stretch => d.claw.stretch = !d.claw.stretch,
         Act::Short => d.claw.short = !d.claw.short,
+        Act::LfoEnd => d.lfo.toggle_end(),
+        // log only bends End's speed: it does nothing while End is off.
+        Act::LfoLog if d.lfo.end_on => d.lfo.log = !d.lfo.log,
         Act::Collapse(i) => {
             d.collapsed[usize::from(i & 1)] ^= true;
             return;
@@ -562,6 +672,17 @@ pub fn claw_cmd(s: &mut State, c: CCmd) {
         CCmd::Period(i) => set.period = i.min(claw::PERIODS.len() - 1),
         CCmd::Trash(i) => set.trash = i.min(claw::TRASH.len() - 1),
     }
+    preview(s);
+}
+
+/// LFO's Shape ▸ menu (piano-lfo.md §1).
+pub fn shape_menu(set: &lfo::Settings) -> Vec<PItem> {
+    lfo::Shape::ALL.iter().map(|&w| PItem::new(w.name(), Cmd::LfoShape(w)).mark(Mark::Radio(set.shape == w))).collect()
+}
+
+/// A shape picked: it previews at once.
+pub fn lfo_shape(s: &mut State, w: lfo::Shape) {
+    s.piano_dlg.lfo.shape = w;
     preview(s);
 }
 
