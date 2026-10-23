@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use nih_plug::prelude::*;
-use os_engine::effects::delay::{self as dsp, Settings, DEFAULTS, PARAMS, RANGES, STATE_LEN, VERSION};
+use os_engine::effects::delay::{self as dsp, Settings, PARAMS, RANGES, STATE_LEN, VERSION};
 use os_plugkit::live::LiveEdits;
 
 /// How a setting's value reads (spec §3).
@@ -89,6 +89,12 @@ pub const PAN_NAME: &str = "Delay time R/L pan";
 
 pub const TYPE_NAMES: [&str; 4] = ["Fake Stereo", "True Stereo", "Ping Pong", "OFF"];
 pub const FILTER_NAMES: [&str; 4] = ["LP", "HP", "BP", "OFF"];
+
+/// What a new Lemon Delay starts on: FL's "Default" preset, the one FL loads when the effect is added (True stereo,
+/// tempo sync on at 4:0, Saturate, the low pass open, no resonance or diffusion spread). It is not the fresh instance's
+/// settings (`dsp::DEFAULTS`), which are where the sound stands before a state arrives (spec §5).
+pub const START: [i32; PARAMS] =
+    [6000, 1, 1, 0, 192, 3000, 500, 6000, 3000, 0, 0, 0, 0, 1, 3000, 0, 6000, 0, 0, 0, 0, 60000, 6000, 6000, 0, 6000];
 
 /// Setting index of an id.
 pub fn index(id: &str) -> Option<usize> {
@@ -266,14 +272,14 @@ pub struct DelayParams {
 
 impl Default for DelayParams {
     fn default() -> Self {
-        let shown = Arc::new(Shown { sync: AtomicBool::new(DEFAULTS[dsp::SYNC] != 0), filter: AtomicI32::new(DEFAULTS[dsp::FILTER]) });
+        let shown = Arc::new(Shown { sync: AtomicBool::new(START[dsp::SYNC] != 0), filter: AtomicI32::new(START[dsp::FILTER]) });
         let p = DEFS
             .iter()
             .enumerate()
             .map(|(k, d)| {
                 let (min, max) = RANGES[k];
                 let (a, b) = (shown.clone(), shown.clone());
-                let mut param = IntParam::new(d.name, DEFAULTS[k], IntRange::Linear { min, max })
+                let mut param = IntParam::new(d.name, START[k], IntRange::Linear { min, max })
                     .with_value_to_string(Arc::new(move |v| {
                         let (sync, filter) = a.get();
                         value_text(k, v, sync, filter)
@@ -359,7 +365,7 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// Any readable saved state (version 0 or 1) in the version-1 layout; unreadable ones give the defaults.
+/// Any readable saved state (version 0 or 1) in the version-1 layout; unreadable ones give the start (`START`).
 pub fn normalized(b: Vec<u8>) -> Vec<u8> {
     match Settings::from_state(&b) {
         Some(_) if b.len() >= STATE_LEN && field(&b, 0) == VERSION => b,
@@ -379,9 +385,9 @@ pub fn set_field(b: &mut [u8], k: usize, v: i32) {
     }
 }
 
-/// A fresh instance's saved state.
+/// A new Lemon Delay's saved state (`START`).
 pub fn default_state() -> Vec<u8> {
-    Settings::default().to_state()
+    Settings { v: START }.to_state()
 }
 
 /// Setting `k`'s parameter value for a stored field value.
@@ -573,15 +579,24 @@ mod tests {
     }
 
     #[test]
-    fn fresh_state_is_the_default() {
+    fn a_new_instance_starts_on_fls_default_preset() {
         let b = default_state();
         assert_eq!(b.len(), STATE_LEN);
         assert_eq!(field(&b, 0), VERSION);
-        assert_eq!(values_of(&b), DEFAULTS.to_vec());
+        assert_eq!(values_of(&b), START.to_vec());
+        // FL's "Default" preset (spec plugins/fruity-delay-3.md, "Presets"), as FL shows it.
+        let shown = |k: usize| value_text(k, START[k], true, START[dsp::FILTER]);
+        assert_eq!(shown(dsp::TYPE), "True Stereo");
+        assert_eq!(shown(dsp::SYNC), "On");
+        assert_eq!(shown(dsp::TIME), "4:0");
+        assert_eq!(shown(dsp::DIST_TYPE), "Saturate");
+        assert_eq!(shown(dsp::FEEDBACK), "62.5%");
+        assert_eq!(shown(dsp::CUTOFF), "21985.0Hz");
+        assert_eq!(shown(dsp::MOD_RATE), "1.1Hz");
         let p = DelayParams::default();
         assert_eq!(p.p.len(), PARAMS);
         assert_eq!(p.p[FILTER].name(), "Filter mode");
-        assert_eq!(p.settings(&b), Settings::default());
+        assert_eq!(p.settings(&b), Settings { v: START });
         assert_eq!(p.param_map().len(), PARAMS);
     }
 

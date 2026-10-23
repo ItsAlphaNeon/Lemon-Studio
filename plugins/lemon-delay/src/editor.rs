@@ -993,18 +993,22 @@ mod tests {
         let (ox, oy) = centre(&l, &Target::Knob("offset".into()));
         l.moved(ox, oy, Mods::default());
         assert_eq!(l.hint, "Delay time R/L pan: 0.0%");
+        // FL's Default preset starts synced at 4:0; unsynced, the same setting reads in ms.
         let (tx, ty) = centre(&l, &Target::Knob("time".into()));
         l.moved(tx, ty, Mods::default());
-        assert_eq!(l.hint, "Time: 4.6ms");
+        assert_eq!(l.hint, "Time: 4:0");
         let (x, y) = centre(&l, &Target::Switch("sync".into()));
         l.down(x, y, Btn::Left, Mods::default(), false);
-        assert_eq!(l.params.v(SYNC), 1);
-        assert_eq!(l.hint, "Tempo sync: On");
+        assert_eq!(l.params.v(SYNC), 0);
+        assert_eq!(l.hint, "Tempo sync: Off");
         l.moved(tx, ty, Mods::default());
-        assert_eq!(l.hint, "Time: 1:32");
-        l.typed("time", "4:0");
-        assert_eq!(l.vals.plain("time"), 192.0);
+        assert_eq!(l.hint, "Time: 26.2ms");
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.params.v(SYNC), 1);
+        l.typed("time", "1:32");
+        assert_eq!(l.vals.plain("time"), 80.0);
         // The cutoff's text follows the filter mode.
+        l.vals.edit_plain("cutoff", 3000.0);
         let (x, y) = centre(&l, &Target::Choice("filter".into(), 1));
         l.down(x, y, Btn::Left, Mods::default(), false);
         assert_eq!(l.params.v(FILTER), 1);
@@ -1048,7 +1052,7 @@ mod tests {
             pm.save_png(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
         };
         let mut l = logic();
-        l.hint = "Time: 4.6ms".into();
+        l.hint = "Time: 4:0".into();
         save(&mut l, "delay_default", 1.0);
         save(&mut l, "delay_default_x2", 2.0);
         for (id, v) in [("type", 2), ("sync", 1), ("time", 191), ("mtime", 2000), ("mcut", 1500), ("dtype", 1), ("drive", 4000), ("knee", 3000), ("sym", 4500), ("filter", 2)] {
