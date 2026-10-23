@@ -3,14 +3,15 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Lemon Studio's small effects as VST3 / CLAP plugins (nih-plug): Lemon Soft Clipper, Lemon Fast Distortion, Lemon
-//! Balance and Lemon Stereo Enhancer. Each is a handful of settings over a sound of `os_engine::effects`, so they share
+//! Balance, Lemon Stereo Enhancer and Lemon Transient Processor. Each is a handful of settings over a sound of
+//! `os_engine::effects`, so they share
 //! everything but their description: the plugin, its parameters and saved state ([`params`]), the Pith editor
 //! ([`editor`], [`view`]). A description ([`Spec`]) gives the settings, their value texts, the editor's cards and
 //! controls, and the sound. The plugin modules (`plugins/lemon-soft-clipper` and the others) export one each.
 //!
-// spec: plugins/lemon-small-effects.md (§1 how the four are built, §5 parameters and state), the four plugin pages
-// (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md),
-// plugins/plugin-formats.md
+// spec: plugins/lemon-small-effects.md (§1 how they are built, §5 parameters and state), the plugin pages
+// (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md,
+// lemon-transient-processor.md), plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod balance;
@@ -19,6 +20,7 @@ pub mod fast_distortion;
 pub mod params;
 pub mod soft_clipper;
 pub mod stereo_enhancer;
+pub mod transient_processor;
 pub mod view;
 
 use std::marker::PhantomData;
@@ -32,7 +34,7 @@ use os_ui::{Canvas, Rect};
 use params::FxParams;
 
 /// The most settings an effect here has.
-pub const MAX: usize = 8;
+pub const MAX: usize = 9;
 
 /// One setting: the original's saved state holds it as int `k` (its place in [`Spec::settings`]).
 pub struct Setting {
@@ -99,6 +101,11 @@ pub struct Spec {
     pub about: &'static str,
     /// The settings in the original's saved order.
     pub settings: &'static [Setting],
+    /// The version the original's saved state starts with (an int before the settings), if it has one. A stored
+    /// state with a higher version is not read (spec §5).
+    pub version: Option<i32>,
+    /// The bytes a new instance's saved state has after the settings (kept as stored otherwise).
+    pub tail: &'static [u8],
     /// Editor size in logical pixels.
     pub size: (u32, u32),
     pub cards: &'static [Card],
@@ -267,11 +274,13 @@ impl<K: Kind> Vst3Plugin for SmallFx<K> {
 mod tests {
     use super::*;
 
+    pub const SPECS: [&Spec; 5] =
+        [soft_clipper::SPEC, fast_distortion::SPEC, balance::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC];
+
     /// Every effect: ids unique, starts inside the ranges, a control per setting, the plugin ids distinct.
     #[test]
-    fn the_four_effects_are_described_whole() {
-        let specs = [soft_clipper::SPEC, fast_distortion::SPEC, balance::SPEC, stereo_enhancer::SPEC];
-        for s in specs {
+    fn the_effects_are_described_whole() {
+        for s in SPECS {
             assert!(s.settings.len() <= MAX, "{}", s.name);
             for (k, set) in s.settings.iter().enumerate() {
                 assert_eq!(s.index(set.id), Some(k), "{} {}", s.name, set.id);
@@ -294,15 +303,17 @@ mod tests {
             <fast_distortion::LemonFastDistortion as ClapPlugin>::CLAP_ID,
             <balance::LemonBalance as ClapPlugin>::CLAP_ID,
             <stereo_enhancer::LemonStereoEnhancer as ClapPlugin>::CLAP_ID,
+            <transient_processor::LemonTransientProcessor as ClapPlugin>::CLAP_ID,
         ];
         let classes = [
             <soft_clipper::LemonSoftClipper as Vst3Plugin>::VST3_CLASS_ID,
             <fast_distortion::LemonFastDistortion as Vst3Plugin>::VST3_CLASS_ID,
             <balance::LemonBalance as Vst3Plugin>::VST3_CLASS_ID,
             <stereo_enhancer::LemonStereoEnhancer as Vst3Plugin>::VST3_CLASS_ID,
+            <transient_processor::LemonTransientProcessor as Vst3Plugin>::VST3_CLASS_ID,
         ];
-        for i in 0..4 {
-            for j in i + 1..4 {
+        for i in 0..ids.len() {
+            for j in i + 1..ids.len() {
                 assert_ne!(ids[i], ids[j]);
                 assert_ne!(classes[i], classes[j]);
             }
@@ -350,7 +361,7 @@ mod tests {
             }
             v.into_iter().map(|x| x.expect("every parameter listed")).collect()
         };
-        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC] {
+        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC] {
             for e in std::fs::read_dir(root.join(spec.name)).unwrap() {
                 let name = e.unwrap().file_name().into_string().unwrap();
                 read(spec, name.strip_suffix(".ospreset").unwrap());
@@ -361,5 +372,8 @@ mod tests {
         assert_eq!(read(fast_distortion::SPEC, "Warmth"), [82, 7, 0, 128, 128]);
         assert_eq!(read(stereo_enhancer::SPEC, "For strings"), [-18, 256, -54, -248, 1, 0]);
         assert_eq!(read(stereo_enhancer::SPEC, "Subtle"), [0, 256, -40, -24, 1, 0]);
+        assert_eq!(read(transient_processor::SPEC, "Overdriven"), [120, 110, 160, 53, 2, 1, 50, 80, 1]);
+        assert_eq!(read(transient_processor::SPEC, "Subtle attack"), [132, 0, 80, 80, 0, 1, 0, 80, 1]);
+        assert_eq!(std::fs::read_dir(root.join(transient_processor::SPEC.name)).unwrap().count(), 10);
     }
 }

@@ -7,9 +7,9 @@
 //! selectors, wheel and reset gestures, the parameter menus. Edits show and sound at once (`os_plugkit::vals`). Lemon
 //! Delay's editor, with the effect's description (`Spec`) for its controls.
 //!
-// spec: plugins/lemon-small-effects.md (§2 the frame, §4 interaction), the four plugin pages
-// (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md; each §2
-// controls, §4 magnets), plugins/host-link.md
+// spec: plugins/lemon-small-effects.md (§2 the frame, §4 interaction), the plugin pages
+// (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md,
+// lemon-transient-processor.md; each §2 controls, §4 magnets), plugins/host-link.md
 
 use std::any::Any;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
@@ -451,7 +451,7 @@ mod win32 {
         let size = (px(spec.size.0), px(spec.size.1));
         shared.editor_open.store(true, Ordering::Relaxed);
         unsafe {
-            // One window procedure for the four effects; `register` names the class after it, so each plugin module
+            // One window procedure for all the effects; `register` names the class after it, so each plugin module
             // has its own.
             let class = pw::register("LemonSmallFxView", Some(wndproc));
             let win = Box::new(Win {
@@ -891,9 +891,8 @@ mod gui {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{balance, fast_distortion, soft_clipper, stereo_enhancer};
-
-    const SPECS: [&Spec; 4] = [soft_clipper::SPEC, fast_distortion::SPEC, balance::SPEC, stereo_enhancer::SPEC];
+    use crate::tests::SPECS;
+    use crate::{balance, fast_distortion, soft_clipper, stereo_enhancer, transient_processor};
 
     fn logic(spec: &'static Spec) -> Logic {
         let mut l = Logic::new(spec, Arc::new(FxParams::new(spec)), Arc::new(Shared::default()), None);
@@ -1026,7 +1025,7 @@ mod tests {
         assert_eq!(about.find("Lemon Studio's soft clipper"), Some(Cmd::None));
     }
 
-    /// `SMALLFX_PNG=<dir> cargo test -p lemon-small-fx -- --ignored`: the four editors at a few settings, as PNGs.
+    /// `SMALLFX_PNG=<dir> cargo test -p lemon-small-fx -- --ignored`: the editors at a few settings, as PNGs.
     #[test]
     #[ignore]
     fn render_editor() {
@@ -1043,11 +1042,16 @@ mod tests {
             }
             pm.save_png(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
         };
-        let settings: [(&Spec, &str, &[(&str, i32)]); 4] = [
+        let settings: [(&Spec, &str, &[(&str, i32)]); 5] = [
             (soft_clipper::SPEC, "soft_clipper", &[("threshold", 64), ("post", 150)]),
             (fast_distortion::SPEC, "fast_distortion", &[("pre", 192), ("threshold", 3), ("type", 1), ("mix", 100), ("post", 110)]),
             (balance::SPEC, "balance", &[("balance", -70), ("volume", 220)]),
             (stereo_enhancer::SPEC, "stereo_enhancer", &[("separation", -54), ("phase", -248), ("pan", -18), ("invert", 1)]),
+            (
+                transient_processor::SPEC,
+                "transient_processor",
+                &[("attack", 160), ("drive", 38), ("release", 120), ("attack_shape", 2), ("split", 30), ("balance", 50), ("on", 0)],
+            ),
         ];
         for (spec, name, values) in settings {
             let mut l = logic(spec);

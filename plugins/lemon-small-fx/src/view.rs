@@ -6,8 +6,9 @@
 //! Delay's: one row of outlined cards under ruled headings holding the dials and selectors, a well that pictures the
 //! settings, and the hint well and the wordmark on one line along the foot.
 //!
-// spec: plugins/lemon-small-effects.md (§2 the frame, §3 hints), the four plugin pages (plugins/lemon-soft-clipper.md,
-// lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md; each §2 controls); ui/lemon-design.md §11.1
+// spec: plugins/lemon-small-effects.md (§2 the frame, §3 hints), the plugin pages (plugins/lemon-soft-clipper.md,
+// lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md, lemon-transient-processor.md; each §2
+// controls); ui/lemon-design.md §11.1
 
 use os_theme::design::lemon as brand;
 use os_theme::Palette;

@@ -8,9 +8,9 @@
 //! ranges. A copy of the whole saved state is persisted next to them (`state`): stored values outside a setting's
 //! range keep their bytes and play as stored (the originals use stored values as they are).
 //!
-// spec: plugins/lemon-small-effects.md (§4 magnets and typed values, §5 parameters and state), the four plugin
-// pages (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md; each
-// §3 value texts, §5)
+// spec: plugins/lemon-small-effects.md (§4 magnets and typed values, §5 parameters and state), the plugin pages
+// (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md,
+// lemon-transient-processor.md; each §3 value texts, §5)
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,7 +65,7 @@ impl FxParams {
                 return 0;
             }
             let v = self.v(k);
-            let s = field(raw, k);
+            let s = setting(self.spec, raw, k);
             if decode(self.spec, k, s) == v { s } else { v }
         })
     }
@@ -117,17 +117,33 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// The saved state's length: one int per setting, no version field.
+/// The int the first setting is (1 after a version field, else 0).
+pub fn first(spec: &Spec) -> usize {
+    usize::from(spec.version.is_some())
+}
+
+/// The shortest readable saved state: the version field, if any, and one int per setting.
 pub fn state_len(spec: &Spec) -> usize {
-    4 * spec.settings.len()
+    4 * (first(spec) + spec.settings.len())
 }
 
-/// A readable saved state as it is (longer ones keep their tail); a short one gives the start.
+/// A readable saved state as it is (longer ones keep their tail); a short one, or one of a later version, gives the
+/// start.
 pub fn normalized(spec: &Spec, b: Vec<u8>) -> Vec<u8> {
-    if b.len() >= state_len(spec) { b } else { default_state(spec) }
+    let version_read = spec.version.is_none_or(|v| field(&b, 0) <= v);
+    if b.len() >= state_len(spec) && version_read { b } else { default_state(spec) }
 }
 
-/// Little-endian int32 field `k` (setting k).
+/// Setting `k`'s stored value.
+pub fn setting(spec: &Spec, b: &[u8], k: usize) -> i32 {
+    field(b, first(spec) + k)
+}
+
+pub fn set_setting(spec: &Spec, b: &mut [u8], k: usize, v: i32) {
+    set_field(b, first(spec) + k, v);
+}
+
+/// Little-endian int32 field `k`.
 pub fn field(b: &[u8], k: usize) -> i32 {
     b.get(4 * k..4 * k + 4).map_or(0, |s| i32::from_le_bytes(s.try_into().unwrap()))
 }
@@ -138,9 +154,10 @@ pub fn set_field(b: &mut [u8], k: usize, v: i32) {
     }
 }
 
-/// A new instance's saved state (every setting at its start).
+/// A new instance's saved state (the version, every setting at its start, the tail).
 pub fn default_state(spec: &Spec) -> Vec<u8> {
-    spec.settings.iter().flat_map(|s| s.start.to_le_bytes()).collect()
+    let starts = spec.settings.iter().flat_map(|s| s.start.to_le_bytes());
+    spec.version.iter().flat_map(|v| v.to_le_bytes()).chain(starts).chain(spec.tail.iter().copied()).collect()
 }
 
 /// Setting `k`'s parameter value for a stored field value.
@@ -154,8 +171,8 @@ pub fn decode(spec: &Spec, k: usize, s: i32) -> i32 {
 pub fn to_fl(spec: &Spec, vals: &[i32], raw: &[u8]) -> Vec<u8> {
     let mut b = normalized(spec, raw.to_vec());
     for (k, &v) in vals.iter().enumerate().take(spec.settings.len()) {
-        if decode(spec, k, field(&b, k)) != v {
-            set_field(&mut b, k, v);
+        if decode(spec, k, setting(spec, &b, k)) != v {
+            set_setting(spec, &mut b, k, v);
         }
     }
     b
@@ -163,7 +180,7 @@ pub fn to_fl(spec: &Spec, vals: &[i32], raw: &[u8]) -> Vec<u8> {
 
 /// Parameter values of a saved state.
 pub fn values_of(spec: &Spec, fl: &[u8]) -> Vec<i32> {
-    (0..spec.settings.len()).map(|k| decode(spec, k, field(fl, k))).collect()
+    (0..spec.settings.len()).map(|k| decode(spec, k, setting(spec, fl, k))).collect()
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -258,13 +275,13 @@ pub fn fl_from_plugin_state(spec: &Spec, blob: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{balance, fast_distortion, soft_clipper, stereo_enhancer};
+    use crate::{balance, fast_distortion, soft_clipper, stereo_enhancer, transient_processor};
 
     #[test]
     fn a_new_instance_starts_on_the_originals_default_and_its_state_reads_back() {
-        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, balance::SPEC, stereo_enhancer::SPEC] {
+        for spec in crate::tests::SPECS {
             let b = default_state(spec);
-            assert_eq!(b.len(), state_len(spec));
+            assert_eq!(b.len(), state_len(spec) + spec.tail.len());
             assert_eq!(values_of(spec, &b), spec.start());
             let p = FxParams::new(spec);
             assert_eq!(p.param_map().len(), spec.settings.len());
@@ -276,6 +293,36 @@ mod tests {
         assert_eq!(default_state(fast_distortion::SPEC), os_engine::effects::fast_dist::Settings::default().to_state());
         assert_eq!(default_state(balance::SPEC), os_engine::effects::balance::Settings::default().to_state());
         assert_eq!(default_state(stereo_enhancer::SPEC), os_engine::effects::stereo_enhancer::Settings::default().to_state());
+        assert_eq!(
+            default_state(transient_processor::SPEC),
+            os_engine::effects::transient_processor::Settings::default().to_state()
+        );
+    }
+
+    /// Transient Processor's state: a version first, display bytes after; versions 0 and 1 read, 2 not (spec
+    /// plugins/lemon-transient-processor.md §5).
+    #[test]
+    fn a_versioned_state_reads_after_its_version_and_keeps_its_tail() {
+        let spec = transient_processor::SPEC;
+        let mut fl = default_state(spec);
+        assert_eq!(fl.len(), 49);
+        set_setting(spec, &mut fl, 0, 200); // attack above the range: kept
+        fl[45] = 77; // the display's scroll speed: kept
+        let mut vals = values_of(spec, &fl);
+        assert_eq!(vals[0], 160);
+        vals[1] = 40;
+        let b = to_fl(spec, &vals, &fl);
+        assert_eq!((field(&b, 0), field(&b, 1), field(&b, 2)), (1, 200, 40));
+        assert_eq!(b[45], 77);
+        let mut v0 = fl.clone();
+        set_field(&mut v0, 0, 0);
+        assert_eq!(normalized(spec, v0.clone()), v0);
+        let mut v2 = fl.clone();
+        set_field(&mut v2, 0, 2);
+        assert_eq!(normalized(spec, v2), default_state(spec));
+        // The settings without the display bytes read; fewer do not.
+        assert_eq!(normalized(spec, fl[..40].to_vec()), fl[..40].to_vec());
+        assert_eq!(normalized(spec, fl[..39].to_vec()), default_state(spec));
     }
 
     #[test]
