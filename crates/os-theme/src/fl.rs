@@ -484,13 +484,10 @@ pub(crate) fn finish(out: &mut Palette, th: &FlTheme, note_from: Color, guard: b
         out.pr_row_black_sel = out.pr_row_black.mix(Color::rgb(0x3a2a30), 0.3);
         out.pr_bar = g.shade(-0.85);
     }
-    // Grid line strength (§3, `PLGridContrast` / `PRGridContrast`, percent): the lines stand off their grid by that share
-    // of their usual difference, 0 gone into it, 200 twice as far (custom grid or not).
-    let k = (th.pl_grid.2 / 100.0).clamp(0.0, 2.0);
-    out.grid_gap = out.grid.mix(out.grid_gap, k);
-    out.grid_bar = out.grid.mix(out.grid_bar, k);
+    // Grid line strength (§3, `PLGridContrast` / `PRGridContrast`, percent): the playlist and piano roll draw their lines
+    // that share of their usual difference off the grid, 0 gone into it, 200 twice as far (custom grid or not).
+    out.pl_lines = (th.pl_grid.2 / 100.0).clamp(0.0, 2.0);
     out.pr_lines = (th.pr_grid.2 / 100.0).clamp(0.0, 2.0);
-    out.pr_bar = out.pr_row.mix(out.pr_bar, out.pr_lines);
     if let (1, Some(bc)) = (th.back_mode, th.back_color) {
         out.workspace = bc;
         out.watermark = bc.shade(if bc.hsl().2 > 0.5 { -0.06 } else { 0.06 });
@@ -616,28 +613,29 @@ WaveClr3=65280
     }
 
     // spec: ui/flstheme.md §3 (PLGridContrast, PRGridContrast)
-    /// Grid line strength: at 100 the lines are the usual ones, at 0 they melt into their grid, at 200 they stand twice
-    /// as far off it; the piano roll keeps the factor for the lines it shades from its rows.
+    /// Grid line strength: the factors the playlist and piano roll draw their lines at, 1 at 100 (the usual lines), held
+    /// to 0..2; the colours stay. Below 100 a line is laid over the grid at that share of its opacity (0: none), above
+    /// it stands up to twice as far off the grid.
     #[test]
     fn grid_contrast_sets_the_line_strength() {
         let base = Palette::default();
         // The keys on top of the stock Dark theme.
         let p = |keys: &str| palette(&FlTheme::parse(&format!("{DARK_TEXT}{keys}")));
         assert_eq!(p("PLGridContrast=100\nPRGridContrast=100\n"), base);
-        let flat = p("PLGridContrast=0\nPRGridContrast=0\n");
-        assert_eq!((flat.grid_gap, flat.grid_bar), (base.grid, base.grid));
-        assert_eq!((flat.pr_bar, flat.pr_lines), (base.pr_row, 0.0));
-        let strong = p("PLGridContrast=200\nPRGridContrast=200\n");
-        assert_eq!(strong.grid_gap, base.grid.mix(base.grid_gap, 2.0));
-        assert_eq!(strong.grid_bar, base.grid.mix(base.grid_bar, 2.0));
-        assert_eq!(strong.pr_lines, 2.0);
-        let dist = |a: Color, b: Color| u32::from(a.r.abs_diff(b.r)) + u32::from(a.g.abs_diff(b.g)) + u32::from(a.b.abs_diff(b.b));
-        assert!(dist(strong.grid_bar, base.grid) > dist(base.grid_bar, base.grid));
-        let over = p("PLGridContrast=900\nPRGridContrast=900\n");
-        assert_eq!((over.grid_gap, over.grid_bar, over.pr_lines), (strong.grid_gap, strong.grid_bar, 2.0), "clamped at 200");
-        // A custom grid back gets the same strength.
-        let custom = p("PLGridCustom=1\nPLGridback=-13884384\nPLGridContrast=50\n");
-        assert_eq!(custom.grid_gap, custom.grid.mix(custom.grid.shade(-0.25), 0.5));
+        assert_eq!((base.pl_lines, base.pr_lines), (1.0, 1.0));
+        let lines = |keys: &str| {
+            let t = p(keys);
+            (t.pl_lines, t.pr_lines)
+        };
+        assert_eq!(lines("PLGridContrast=0\nPRGridContrast=50\n"), (0.0, 0.5));
+        assert_eq!(lines("PLGridContrast=200\nPRGridContrast=900\n"), (2.0, 2.0));
+        assert_eq!(lines("PLGridContrast=-20\n"), (0.0, 1.0));
+        let strong = p("PLGridContrast=200\nPLGridCustom=1\nPLGridback=-13884384\n");
+        assert_eq!((strong.grid_gap, strong.grid_bar), (strong.grid.shade(-0.25), strong.grid.shade(-0.6)), "the tokens stay");
+        assert_eq!(strong.pl_line(strong.grid_bar), strong.grid.mix(strong.grid_bar, 2.0));
+        assert_eq!(p("PLGridContrast=0\n").pl_line(base.grid_bar), base.grid_bar.with_alpha(0));
+        assert_eq!(p("PRGridContrast=50\n").pr_line(base.pr_bar), base.pr_bar.with_alpha(128));
+        assert_eq!((base.pl_line(base.grid_bar), base.pr_line(base.pr_bar)), (base.grid_bar, base.pr_bar));
     }
 
     // spec: ui/flstheme.md §3 (BackMode, BackPicFilename)

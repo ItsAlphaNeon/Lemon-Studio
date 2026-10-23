@@ -36,6 +36,11 @@ fn sub(t: &os_theme::Palette, c: Color, d: u8) -> Color {
     Color { r: c.r.saturating_sub(d), g: c.g.saturating_sub(d), b: c.b.saturating_sub(d), a: c.a }
 }
 
+/// The bar line colour at the theme's grid line strength (spec: ui/flstheme.md §3, PRGridContrast).
+fn bar_line(t: &os_theme::Palette) -> Color {
+    t.pr_line(t.pr_bar)
+}
+
 /// The regions of the window for a given window rect `r` (§1; offsets from the client corner at
 /// x 209, y 83).
 pub struct Layout {
@@ -586,7 +591,7 @@ fn grid_rows(ui: &mut Ui, l: &Layout, g: &Geom, clip: Rect, selecting: bool) {
         ui.c.fill_rect(Rect::new(gr.x, y + g.row - 1.0, gr.w, 1.0), sub(t, white, 0x0a));
         bands.push((y, g.row - 1.0, fill));
     }
-    let bar = if selecting { ui.t.s(0x0e080c) } else { t.pr_bar };
+    let bar = if selecting { ui.t.s(0x0e080c) } else { bar_line(t) };
     columns(ui, g, gr, &bands, bar);
     ui.c.pop_clip();
 }
@@ -637,7 +642,7 @@ fn velocity_panel(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], 
         y += 22.0;
         i += 1;
     }
-    columns(ui, g, p, &bands, t.pr_bar);
+    columns(ui, g, p, &bands, bar_line(t));
     ui.c.text(Font::new(16), p.x + 7.0, p.y + 2.0, t.text_faint.shade(-0.35), lane.name());
 
     if lane.is_channel() {
