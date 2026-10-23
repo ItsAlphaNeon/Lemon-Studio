@@ -696,6 +696,291 @@ mod separate {
         assert_eq!(queued, [(true, 60), (true, 62)], "only the note offs are kept, each once");
         assert!(p.queue.iter().all(|n| n.time == 0));
     }
+
+    /// Context menus (spec §9): the plug-in's side of `IComponentHandler3` and `IContextMenu`, as the test plug-in's
+    /// editor would call them.
+    mod menus {
+        use super::*;
+        use crate::mock::MenuTarget;
+        use os_host::{Menu, MenuItem};
+        use vst3_sys::base::{kInvalidArgument, kResultFalse, IUnknown};
+        use vst3_sys::vst::{IContextMenu, IContextMenuItem, IContextMenuTarget};
+
+        // Item flags.
+        const SEPARATOR: i32 = 1;
+        const DISABLED: i32 = 2;
+        const CHECKED: i32 = 4;
+        const GROUP_START: i32 = 8 | DISABLED;
+        const GROUP_END: i32 = 16 | SEPARATOR;
+
+        /// The references an object has, by an `addRef` / `release` pair (the binding's `release` gives the count from
+        /// before it).
+        fn refs<T: ComInterface + ?Sized>(p: &VstPtr<T>) -> u32 {
+            unsafe {
+                p.add_ref();
+                p.release() - 1
+            }
+        }
+
+        fn item(name: &str, tag: i32, flags: i32) -> IContextMenuItem {
+            let mut it = IContextMenuItem { name: [0; 128], tag, flags };
+            unsafe { host::write_str128(it.name.as_mut_ptr() as *mut u16, name) };
+            it
+        }
+
+        fn ptr(t: Option<&VstPtr<dyn IContextMenuTarget>>) -> *mut c_void {
+            t.map_or(std::ptr::null_mut(), |t| t.as_ptr() as *mut c_void)
+        }
+
+        fn add(menu: &VstPtr<dyn IContextMenu>, name: &str, tag: i32, flags: i32, t: Option<&VstPtr<dyn IContextMenuTarget>>) {
+            assert_eq!(unsafe { menu.add_item(&mut item(name, tag, flags), ptr(t)) }, kResultOk);
+        }
+
+        /// Every entry: name, tag, flags, its target.
+        fn entries(menu: &VstPtr<dyn IContextMenu>) -> Vec<(String, i32, i32, *mut c_void)> {
+            (0..unsafe { menu.get_item_count() })
+                .map(|i| {
+                    let mut it = item("", -1, -1);
+                    let mut t: *mut c_void = std::ptr::null_mut();
+                    assert_eq!(unsafe { menu.get_item(i, &mut it, &mut t) }, kResultOk);
+                    (from_utf16(&it.name), it.tag, it.flags, t)
+                })
+                .collect()
+        }
+
+        fn entry(label: &str, pick: usize) -> MenuItem {
+            MenuItem::Entry { label: label.into(), pick, enabled: true, checked: false }
+        }
+
+        /// The plug-in pops `menu` up at (x, y) and lets go of it, as plug-ins do; the app takes what it asked for.
+        fn pop(p: &mut Plugin, menu: VstPtr<dyn IContextMenu>, x: i32, y: i32) -> Menu {
+            assert_eq!(unsafe { menu.popup(x, y) }, kResultOk);
+            drop(menu);
+            let m = p.take_menu().expect("the popup reaches the app");
+            assert!(p.take_menu().is_none(), "handed over once");
+            m
+        }
+
+        /// The handler answers `IComponentHandler3`; an automatable parameter's menu starts with the host's separator
+        /// and "Create automation clip", other menus have no host entries.
+        #[test]
+        fn the_host_entries_of_a_parameter_menu() {
+            let probe = Arc::new(Probe::default());
+            let (_m, mut p) = instance(&probe);
+            let live = probe.live.load(Ordering::Acquire);
+            let ctrl = probe.controller();
+            let h3 = ctrl.handler3().expect("the component handler is an IComponentHandler3");
+            assert!(h3.cast::<dyn IContextMenu>().is_none());
+            let menu = ctrl.context_menu(Some(GAIN));
+            assert_eq!(refs(&menu), 1, "the plug-in's reference only");
+            let e = entries(&menu);
+            assert_eq!(e.iter().map(|e| (e.0.as_str(), e.1, e.2)).collect::<Vec<_>>(), [("", 0, SEPARATOR), ("Create automation clip", 1, 0)]);
+            assert!(!e[1].3.is_null() && e[0].3 == e[1].3, "the host's own target");
+            // The plug-in shows the host entries in a menu of its own: a pick calls their target.
+            let target = unsafe { VstPtr::<dyn IContextMenuTarget>::shared(e[1].3 as *mut *mut _) }.unwrap();
+            assert_eq!(refs(&target), 3, "the menu's two entries and the pointer just taken");
+            let attention = os_host::Plugin::attention(&p).unwrap();
+            let before = attention.count();
+            assert_eq!(unsafe { target.execute_menu_item(e[1].1) }, kResultOk);
+            assert_eq!(unsafe { target.execute_menu_item(99) }, kResultFalse);
+            assert!(attention.count() > before, "the pick reaches the UI without it polling");
+            assert_eq!(p.take_automation_requests(), [GAIN]);
+            assert!(p.take_automation_requests().is_empty());
+            drop(target);
+            // No parameter, one that cannot be automated (the read-only peak), an unknown one: no host entries.
+            for id in [None, Some(PEAK), Some(999)] {
+                assert_eq!(unsafe { ctrl.context_menu(id).get_item_count() }, 0, "{id:?}");
+            }
+            let mut it = item("", 0, 0);
+            assert_eq!(unsafe { menu.get_item(2, &mut it, std::ptr::null_mut()) }, kInvalidArgument);
+            assert_eq!(unsafe { menu.get_item(-1, &mut it, std::ptr::null_mut()) }, kInvalidArgument);
+            assert_eq!(refs(&menu), 1, "getItem took no reference");
+            drop(menu);
+            assert_eq!(probe.live.load(Ordering::Acquire), live);
+        }
+
+        /// `addItem` takes a reference to the target, `getItem` does not, `removeItem` and the menu's release give it
+        /// back.
+        #[test]
+        fn plugin_entries_and_their_references() {
+            let probe = Arc::new(Probe::default());
+            let (_m, _p) = instance(&probe);
+            let live = probe.live.load(Ordering::Acquire);
+            let ctrl = probe.controller();
+            let t = MenuTarget::create(&probe, "target.free");
+            assert_eq!(refs(&t), 1);
+            let menu = ctrl.context_menu(Some(MODE));
+            add(&menu, "Soft", 11, CHECKED, Some(&t));
+            add(&menu, "Hard", 12, 0, Some(&t));
+            add(&menu, "", 0, SEPARATOR, None);
+            assert_eq!(refs(&t), 3);
+            let e = entries(&menu);
+            assert_eq!(e.len(), 5, "after the host's two");
+            assert_eq!((e[2].0.as_str(), e[2].1, e[2].2, e[2].3), ("Soft", 11, CHECKED, ptr(Some(&t))));
+            assert!(e[4].3.is_null());
+            assert_eq!(refs(&t), 3, "getItem hands the target out without a reference");
+            // Removed by tag and target.
+            assert_eq!(unsafe { menu.remove_item(&mut item("", 12, 0), ptr(None)) }, kResultFalse);
+            assert_eq!(unsafe { menu.remove_item(&mut item("Hard", 12, 0), ptr(Some(&t))) }, kResultOk);
+            assert_eq!(refs(&t), 2);
+            assert_eq!(entries(&menu).iter().map(|e| e.1).collect::<Vec<_>>(), [0, 1, 11, 0]);
+            assert_eq!(unsafe { menu.remove_item(&mut item("Hard", 12, 0), ptr(Some(&t))) }, kResultFalse);
+            assert_eq!(unsafe { menu.add_item(std::ptr::null_mut(), ptr(Some(&t))) }, kInvalidArgument);
+            assert_eq!(refs(&t), 2);
+            // The host's entries can go too.
+            let host = entries(&menu)[1].3;
+            assert_eq!(unsafe { menu.remove_item(&mut item("", 1, 0), host) }, kResultOk);
+            drop(menu);
+            assert_eq!(refs(&t), 1, "the menu let go of its references");
+            drop(t);
+            assert_eq!(probe.logged("target.free").len(), 1);
+            assert!(probe.logged("target.execute").is_empty());
+            assert_eq!(probe.live.load(Ordering::Acquire), live);
+        }
+
+        /// `popup` hands the menu to the app and returns: the plug-in's entries first (submenus, separators, disabled
+        /// and checked), then the host's. A pick runs the entry's target when the app reports it, on its thread; the
+        /// host's references go then.
+        #[test]
+        fn a_popup_is_picked_later() {
+            let probe = Arc::new(Probe::default());
+            let (_m, mut p) = instance(&probe);
+            let live = probe.live.load(Ordering::Acquire);
+            let ctrl = probe.controller();
+            let t = MenuTarget::create(&probe, "target.free");
+            let menu = ctrl.context_menu(Some(GAIN));
+            add(&menu, "Soft", 11, CHECKED, Some(&t));
+            add(&menu, "More", 0, GROUP_START, Some(&t));
+            add(&menu, "Deep", 12, 0, Some(&t));
+            add(&menu, "Deeper", 0, GROUP_START, Some(&t));
+            add(&menu, "Deepest", 13, 0, Some(&t));
+            add(&menu, "", 0, GROUP_END, Some(&t));
+            add(&menu, "", 0, GROUP_END, Some(&t));
+            add(&menu, "", 0, SEPARATOR, None);
+            add(&menu, "Off", 14, DISABLED, Some(&t));
+            assert!(p.take_menu().is_none(), "nothing before popup");
+            let m = pop(&mut p, menu, 10, 20);
+            assert!(probe.logged("target.execute").is_empty(), "popup returns without a pick");
+            assert_eq!(refs(&t), 9, "the host keeps a reference per entry until the menu closes");
+            assert_eq!(m.at, (10, 20));
+            let sub = |label: &str, items: Vec<MenuItem>| MenuItem::Sub { label: label.into(), items };
+            assert_eq!(
+                m.items,
+                [
+                    MenuItem::Entry { label: "Soft".into(), pick: 0, enabled: true, checked: true },
+                    sub("More", vec![entry("Deep", 2), sub("Deeper", vec![entry("Deepest", 4)])]),
+                    MenuItem::Separator,
+                    MenuItem::Entry { label: "Off".into(), pick: 8, enabled: false, checked: false },
+                    MenuItem::Separator,
+                    entry("Create automation clip", 10),
+                ]
+            );
+            // A disabled entry, a submenu's title and a row that is not there do nothing.
+            for pick in [0, 1, 5] {
+                let again = ctrl.context_menu(None);
+                add(&again, "Off", 14, DISABLED, Some(&t));
+                add(&again, "More", 0, GROUP_START, Some(&t));
+                let m2 = pop(&mut p, again, 0, 0);
+                p.menu_done(m2.id, Some(pick));
+            }
+            assert!(probe.logged("target.execute").is_empty());
+            assert_eq!(refs(&t), 1, "newer popups replaced the first, and closed");
+            p.menu_done(m.id, Some(4));
+            assert!(probe.logged("target.execute").is_empty(), "a replaced menu is not picked from");
+            // A pick: the entry's target with its tag, now, on this thread.
+            let menu = ctrl.context_menu(Some(GAIN));
+            add(&menu, "Deep", 12, 0, Some(&t));
+            let m = pop(&mut p, menu, 0, 0);
+            assert_eq!(m.items, [entry("Deep", 0), MenuItem::Separator, entry("Create automation clip", 2)]);
+            p.menu_done(m.id, Some(0));
+            assert_eq!(probe.logged("target.execute"), ["target.execute 12"]);
+            assert_eq!(refs(&t), 1, "the host's references went with the pick");
+            p.menu_done(m.id, Some(0));
+            assert_eq!(probe.logged("target.execute").len(), 1, "once");
+            // The host's own entry from the popup: an automation request for the parameter.
+            let m = pop(&mut p, ctrl.context_menu(Some(GAIN)), 0, 0);
+            assert_eq!(m.items, [entry("Create automation clip", 1)], "no separator before the first row");
+            p.menu_done(m.id, Some(1));
+            assert_eq!(p.take_automation_requests(), [GAIN]);
+            // Closed without a pick: nothing is called, the references go.
+            let menu = ctrl.context_menu(None);
+            add(&menu, "Soft", 11, 0, Some(&t));
+            let m = pop(&mut p, menu, 0, 0);
+            assert_eq!(refs(&t), 2);
+            p.menu_done(m.id, None);
+            assert_eq!(refs(&t), 1);
+            assert_eq!(probe.logged("target.execute").len(), 1);
+            assert!(p.take_automation_requests().is_empty());
+            drop(t);
+            assert_eq!(probe.live.load(Ordering::Acquire), live);
+        }
+
+        /// A newer popup replaces one the app has not closed yet, shown or not.
+        #[test]
+        fn a_newer_popup_replaces_an_open_one() {
+            let probe = Arc::new(Probe::default());
+            let (_m, mut p) = instance(&probe);
+            let ctrl = probe.controller();
+            let (a, b) = (MenuTarget::create(&probe, "a.free"), MenuTarget::create(&probe, "b.free"));
+            let menu = ctrl.context_menu(None);
+            add(&menu, "A", 1, 0, Some(&a));
+            let shown = pop(&mut p, menu, 0, 0);
+            let menu = ctrl.context_menu(None);
+            add(&menu, "B", 2, 0, Some(&b));
+            assert_eq!(unsafe { menu.popup(5, 5) }, kResultOk);
+            drop(menu);
+            assert_eq!((refs(&a), refs(&b)), (1, 2), "the shown menu's references went");
+            let menu = ctrl.context_menu(None);
+            add(&menu, "A", 3, 0, Some(&a));
+            assert_eq!(unsafe { menu.popup(7, 7) }, kResultOk);
+            drop(menu);
+            assert_eq!((refs(&a), refs(&b)), (2, 1), "so did the waiting one's");
+            p.menu_done(shown.id, Some(0));
+            let m = p.take_menu().unwrap();
+            assert_ne!(m.id, shown.id);
+            assert_eq!((m.at, m.items.clone()), ((7, 7), vec![entry("A", 0)]));
+            p.menu_done(m.id, Some(0));
+            assert_eq!(probe.logged("target.execute"), ["target.execute 3"]);
+        }
+
+        /// The host's references to a popup's targets go before the instance is torn down (spec §4.7).
+        #[test]
+        fn references_go_before_teardown() {
+            let probe = Arc::new(Probe::default());
+            {
+                let (_m, mut p) = instance(&probe);
+                assert!(p.activate(48000));
+                let t = MenuTarget::create(&probe, "target.free");
+                let menu = probe.controller().context_menu(Some(GAIN));
+                add(&menu, "Soft", 11, 0, Some(&t));
+                assert_eq!(unsafe { menu.popup(0, 0) }, kResultOk);
+                drop(menu);
+                drop(t);
+                assert!(probe.logged("target.free").is_empty(), "the host still holds it");
+            }
+            let log = probe.log.lock().unwrap().clone();
+            let at = |s: &str| log.iter().position(|l| l == s).unwrap_or_else(|| panic!("{s} missing in {log:?}"));
+            assert!(at("target.free") < at("comp.set_active 0"));
+            assert!(at("comp.set_active 0") < at("ctrl.terminate"));
+            assert!(probe.logged("target.execute").is_empty());
+            assert_eq!(probe.live.load(Ordering::Acquire), 0, "every plug-in object was released");
+        }
+
+        /// View coordinates become editor pixels (on macOS editors measure in points); closing the editor closes its
+        /// menu.
+        #[test]
+        fn the_popup_point_is_in_editor_pixels() {
+            let probe = Arc::new(Probe::default());
+            let (_m, mut p) = instance(&probe);
+            p.editor_scale = 2.0;
+            let m = pop(&mut p, probe.controller().context_menu(Some(GAIN)), 10, 21);
+            assert_eq!(m.at, (20, 42));
+            p.close_editor();
+            assert!(p.take_menu().is_none());
+            p.menu_done(m.id, Some(1));
+            assert!(p.take_automation_requests().is_empty(), "the menu closed with the editor");
+        }
+    }
 }
 
 #[cfg(windows)]

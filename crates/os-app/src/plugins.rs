@@ -174,6 +174,9 @@ pub enum Request {
     MiscMenu(usize, crate::misc_page::M, i32, i32),
     /// A greyed-out control of the window was clicked: the app says it is not available yet.
     NotAvailable(&'static str),
+    /// The plugin asked for a menu over its editor (VST 3 context menu): shown at this screen point (spec:
+    /// plugins/vst3-hosting.md §9).
+    PluginMenu(usize, os_host::Menu, (i32, i32)),
     /// The instance stopped after a crash (its window is closed): what to tell the user.
     Stopped(usize, String),
 }
@@ -774,6 +777,14 @@ impl Plugins {
         self.hosted.range(..FX_KEY).map(|(&r, h)| (r, h.plugin.clone() as SharedInstrument)).collect()
     }
 
+    /// Tells instance `key` that its menu `id` closed, with the entry picked: a pick runs now, on this (the UI) thread
+    /// (spec: plugins/vst3-hosting.md §9).
+    pub fn menu_done(&self, key: usize, id: u64, pick: Option<usize>) {
+        if let Some(Ok(mut p)) = self.hosted.get(&key).map(|h| h.plugin.lock()) {
+            p.menu_done(id, pick);
+        }
+    }
+
     /// Whether an instrument's editor is open: its own keyboard plays it without the host, so the transport keeps it
     /// processed while nothing plays (`Transport::listen`).
     pub fn editor_open(&self) -> bool {
@@ -1001,6 +1012,7 @@ impl Plugins {
         }
         for (&row, h) in &mut self.hosted {
             let look = h.due(h.seen);
+            let mut menu: Option<(os_host::Menu, (i32, i32))> = None;
             if let Some(mut p) = look.and_then(|_| h.plugin.try_lock().ok()) {
                 h.seen = look.unwrap_or(h.seen);
                 // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
@@ -1010,6 +1022,21 @@ impl Plugins {
                     close.push(row);
                 }
                 p.idle();
+                // A menu the plugin asked to pop up over its editor: at its point on the screen, or closed at once
+                // without a window to show it over (spec: plugins/vst3-hosting.md §9).
+                if let Some(m) = p.take_menu() {
+                    #[cfg(plugin_windows)]
+                    let at = h.window.as_ref().map(|w| {
+                        let k = w.scale();
+                        w.editor_to_screen(m.at.0 as f32 / k, m.at.1 as f32 / k)
+                    });
+                    #[cfg(not(plugin_windows))]
+                    let at: Option<(i32, i32)> = None;
+                    match at {
+                        Some(at) => menu = Some((m, at)),
+                        None => p.menu_done(m.id, None),
+                    }
+                }
                 #[cfg(plugin_windows)]
                 if let (Some(w), false, Some((ew, eh))) = (&h.window, h.linked(), p.editor_size()) {
                     let k = w.scale();
@@ -1065,6 +1092,11 @@ impl Plugins {
                         }
                     });
                 }
+            }
+            // After the window's events: the click in the editor that opened the menu raised the window, which closes
+            // open popups.
+            if let Some((m, at)) = menu {
+                out.push(Request::PluginMenu(row, m, at));
             }
         }
         #[cfg(plugin_windows)]

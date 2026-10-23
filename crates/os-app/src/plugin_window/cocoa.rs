@@ -557,6 +557,13 @@ impl FrameWindow {
         self.f.scale.get()
     }
 
+    /// A point of the editor (logical px from its top-left) on the screen (screen px): where a menu the plugin asked
+    /// for opens (spec: plugins/vst3-hosting.md §9).
+    pub fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32) {
+        let ay = self.f.state.borrow().area_y();
+        self.f.to_screen(BORDER + x, ay + y)
+    }
+
     /// Redraws the frame at another backing scale (same size in points). The editor inside is the caller's: it reopens
     /// it, so that its sizes are measured at the new scale (spec: ui/ui-scaling.md §3).
     pub fn set_scale(&self, scale: f32) {

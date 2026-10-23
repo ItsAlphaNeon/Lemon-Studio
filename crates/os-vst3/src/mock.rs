@@ -5,7 +5,7 @@
 //! A test plug-in built into the test binary: a gain effect whose edit controller is a separate class, the layout most
 //! VST 3 plug-ins use (Lemon Studio's own bundles are single-component). It covers what those bundles do not reach:
 //! a separate controller (connection points, setComponentState, its own state), messages created by the host,
-//! parameter output of the processor, restart requests and the teardown order.
+//! parameter output of the processor, restart requests, context menus and the teardown order.
 // spec: plugins/vst3-hosting.md
 // The binding's COM macros end statements with `;` inside expressions.
 #![allow(semicolon_in_expressions_from_non_local_macros)]
@@ -22,10 +22,13 @@ use vst3_sys::base::{
 };
 use vst3_sys::utils::SharedVstPtr;
 use vst3_sys::vst::{
-    BusDirection, BusInfo, IAttributeList, IAudioProcessor, IComponent, IComponentHandler, IConnectionPoint, IEditController, IHostApplication,
-    IMessage, IParamValueQueue, IParameterChanges, IoMode, MediaType, ParameterInfo, ProcessData, ProcessSetup, RoutingInfo, SpeakerArrangement, TChar,
+    BusDirection, BusInfo, IAttributeList, IAudioProcessor, IComponent, IComponentHandler, IConnectionPoint, IContextMenu, IContextMenuTarget, IEditController,
+    IHostApplication, IMessage, IParamValueQueue, IParameterChanges, IoMode, MediaType, ParameterInfo, ProcessData, ProcessSetup, RoutingInfo,
+    SpeakerArrangement, TChar,
 };
 use vst3_sys::{c_void, ComInterface, VstPtr, IID, VST3};
+
+use crate::context_menu::IComponentHandler3;
 
 pub const COMPONENT_CID: IID = IID { data: *b"OSTestGainComp\0\x01" };
 pub const CONTROLLER_CID: IID = IID { data: *b"OSTestGainCtrl\0\x02" };
@@ -86,6 +89,15 @@ impl Live { // This code is a part of L e m o n S t u d i o.
 impl Drop for Live {
     fn drop(&mut self) {
         self.0.live.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Logs a line when its object is freed.
+pub struct Freed(Arc<Probe>, &'static str);
+
+impl Drop for Freed {
+    fn drop(&mut self) {
+        self.0.log(self.1);
     }
 }
 
@@ -469,6 +481,45 @@ impl Controller {
     pub fn restart(&self, flags: i32) {
         let h = self.handler.borrow().clone().expect("a component handler");
         unsafe { h.restart_component(flags) };
+    }
+
+    /// The component handler as `IComponentHandler3` (spec §9).
+    pub fn handler3(&self) -> Option<VstPtr<dyn IComponentHandler3>> {
+        self.handler.borrow().as_ref()?.cast::<dyn IComponentHandler3>()
+    }
+
+    /// A right-click in the editor: the host's menu for parameter `id` (`None`: not on a parameter), with the
+    /// plug-in's reference.
+    pub fn context_menu(&self, id: Option<u32>) -> VstPtr<dyn IContextMenu> {
+        let h = self.handler3().expect("IComponentHandler3");
+        let param = id.as_ref().map_or(std::ptr::null(), |i| i as *const u32);
+        let menu = unsafe { h.create_context_menu(std::ptr::null_mut(), param) };
+        unsafe { VstPtr::<dyn IContextMenu>::owned(menu as *mut *mut _) }.expect("a menu")
+    }
+}
+
+// ---- the plug-in's context-menu target ----
+
+/// What the plug-in's own menu entries call: logs each executed tag, and its freeing.
+#[VST3(implements(IContextMenuTarget))]
+pub struct MenuTarget {
+    probe: Arc<Probe>,
+    _freed: Freed,
+    _live: Live,
+}
+
+impl MenuTarget {
+    /// A new target with the plug-in's one reference.
+    pub fn create(probe: &Arc<Probe>, name: &'static str) -> VstPtr<dyn IContextMenuTarget> {
+        let t = MenuTarget::allocate(probe.clone(), Freed(probe.clone(), name), Live::new(probe));
+        unsafe { VstPtr::<dyn IContextMenuTarget>::owned(Box::into_raw(t) as *mut *mut _) }.expect("a target")
+    }
+}
+
+impl IContextMenuTarget for MenuTarget {
+    unsafe fn execute_menu_item(&self, tag: i32) -> tresult {
+        self.probe.log(format!("target.execute {tag}"));
+        kResultOk
     }
 }
 
