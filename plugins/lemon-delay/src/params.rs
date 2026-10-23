@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use nih_plug::prelude::*;
-use os_engine::effects::delay::{self as dsp, Settings, DEFAULTS, PARAMS, RANGES, STATE_LEN, VERSION};
+use os_engine::effects::delay::{self as dsp, Settings, PARAMS, RANGES, STATE_LEN, VERSION};
 use os_plugkit::live::LiveEdits;
 
 /// How a setting's value reads (spec §3).
@@ -90,9 +90,70 @@ pub const PAN_NAME: &str = "Delay time R/L pan";
 pub const TYPE_NAMES: [&str; 4] = ["Fake Stereo", "True Stereo", "Ping Pong", "OFF"];
 pub const FILTER_NAMES: [&str; 4] = ["LP", "HP", "BP", "OFF"];
 
+/// What a new Lemon Delay starts on: FL's "Default" preset, the one FL loads when the effect is added (True stereo,
+/// tempo sync on at 4:0, Saturate, the low pass open, no resonance or diffusion spread). It is not the fresh instance's
+/// settings (`dsp::DEFAULTS`), which are where the sound stands before a state arrives (spec §5).
+pub const START: [i32; PARAMS] =
+    [6000, 1, 1, 0, 192, 3000, 500, 6000, 3000, 0, 0, 0, 0, 1, 3000, 0, 6000, 0, 0, 0, 0, 60000, 6000, 6000, 0, 6000];
+
 /// Setting index of an id.
 pub fn index(id: &str) -> Option<usize> {
     DEFS.iter().position(|d| d.id == id)
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Snapping (Lemon Studio choice, spec §4)
+
+/// How near (a share of the range) a drag has to come to a magnet to land on it.
+pub const MAGNET_ZONE: f32 = 0.015;
+
+/// A knob's magnet: the R/L offset's and the tone's centre, the feedback's 100 %.
+pub fn magnet(k: usize) -> Option<i32> {
+    match k {
+        dsp::OFFSET => Some(3000),
+        dsp::TONE => Some(0),
+        dsp::FEEDBACK => Some(4800),
+        _ => None,
+    }
+}
+
+/// A musical synced time (48 per step): a multiple of a quarter step or of a third of one.
+pub fn musical(n: i32) -> bool {
+    n % 12 == 0 || n % 16 == 0
+}
+
+/// Where a drag at the stored value `plain` lands: a synced time on the nearest musical time, a knob with a magnet
+/// on it when within `MAGNET_ZONE` of its range; `None` = where the drag is.
+pub fn snap(k: usize, plain: f32, sync: bool) -> Option<i32> {
+    let (min, max) = dsp::RANGES[k];
+    if k == dsp::TIME && sync {
+        let r = plain.round() as i32;
+        return (0..=16).flat_map(|d| [r - d, r + d]).find(|&n| (12..=max).contains(&n) && musical(n));
+    }
+    let m = magnet(k)?;
+    ((plain - m as f32).abs() <= MAGNET_ZONE * (max - min) as f32).then_some(m)
+}
+
+/// The wheel's next stored value from `v` (`up` or down) for a setting that snaps, given the plain step `next`: a
+/// synced time goes to the next musical time, a knob with a magnet stops on it when the step would pass it.
+pub fn snap_step(k: usize, v: i32, next: i32, up: bool, sync: bool) -> i32 {
+    let (min, max) = dsp::RANGES[k];
+    if k == dsp::TIME && sync {
+        let mut n = v;
+        loop {
+            n += if up { 1 } else { -1 };
+            if !(min..=max).contains(&n) {
+                return v;
+            }
+            if n >= 12 && musical(n) {
+                return n;
+            }
+        }
+    }
+    match magnet(k) {
+        Some(m) if (v < m && m <= next) || (next <= m && m < v) => m,
+        _ => next,
+    }
 }
 
 /// What other settings a value text depends on: the time's sync and the cutoff's filter mode.
@@ -211,14 +272,14 @@ pub struct DelayParams {
 
 impl Default for DelayParams {
     fn default() -> Self {
-        let shown = Arc::new(Shown { sync: AtomicBool::new(DEFAULTS[dsp::SYNC] != 0), filter: AtomicI32::new(DEFAULTS[dsp::FILTER]) });
+        let shown = Arc::new(Shown { sync: AtomicBool::new(START[dsp::SYNC] != 0), filter: AtomicI32::new(START[dsp::FILTER]) });
         let p = DEFS
             .iter()
             .enumerate()
             .map(|(k, d)| {
                 let (min, max) = RANGES[k];
                 let (a, b) = (shown.clone(), shown.clone());
-                let mut param = IntParam::new(d.name, DEFAULTS[k], IntRange::Linear { min, max })
+                let mut param = IntParam::new(d.name, START[k], IntRange::Linear { min, max })
                     .with_value_to_string(Arc::new(move |v| {
                         let (sync, filter) = a.get();
                         value_text(k, v, sync, filter)
@@ -304,7 +365,7 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// Any readable saved state (version 0 or 1) in the version-1 layout; unreadable ones give the defaults.
+/// Any readable saved state (version 0 or 1) in the version-1 layout; unreadable ones give the start (`START`).
 pub fn normalized(b: Vec<u8>) -> Vec<u8> {
     match Settings::from_state(&b) {
         Some(_) if b.len() >= STATE_LEN && field(&b, 0) == VERSION => b,
@@ -324,9 +385,9 @@ pub fn set_field(b: &mut [u8], k: usize, v: i32) {
     }
 }
 
-/// A fresh instance's saved state.
+/// A new Lemon Delay's saved state (`START`).
 pub fn default_state() -> Vec<u8> {
-    Settings::default().to_state()
+    Settings { v: START }.to_state()
 }
 
 /// Setting `k`'s parameter value for a stored field value.
@@ -477,6 +538,29 @@ mod tests {
     }
 
     #[test]
+    fn knobs_snap_to_their_magnets_and_synced_times_to_musical_ones() {
+        // Within 1.5 % of the range (90 of 6000), the offset and tone land on the centre, the feedback on 100 %.
+        assert_eq!(snap(dsp::OFFSET, 3080.0, false), Some(3000));
+        assert_eq!(snap(dsp::OFFSET, 3100.0, false), None);
+        assert_eq!(snap(dsp::TONE, -60.0, false), Some(0));
+        assert_eq!(snap(dsp::FEEDBACK, 4750.0, false), Some(4800));
+        assert_eq!(value_text(dsp::FEEDBACK, 4800, false, 0), "100.0%");
+        assert_eq!(snap(dsp::SYMMETRY, 3000.0, false), None);
+        // A synced time lands on quarter and third steps; unsynced it is free.
+        assert_eq!(snap(dsp::TIME, 83.0, true), Some(84));
+        assert_eq!(snap(dsp::TIME, 81.0, true), Some(80));
+        assert_eq!(snap(dsp::TIME, 3.0, true), Some(12));
+        assert_eq!(snap(dsp::TIME, 83.0, false), None);
+        // The wheel: the next musical time; a magnet stops a step that would pass it.
+        assert_eq!(snap_step(dsp::TIME, 80, 86, true, true), 84);
+        assert_eq!(snap_step(dsp::TIME, 80, 74, false, true), 72);
+        assert_eq!(snap_step(dsp::TIME, 768, 768, true, true), 768);
+        assert_eq!(snap_step(dsp::OFFSET, 2980, 3027, true, false), 3000);
+        assert_eq!(snap_step(dsp::OFFSET, 3000, 3047, true, false), 3047);
+        assert_eq!(snap_step(dsp::DRIVE, 2980, 3027, true, false), 3027);
+    }
+
+    #[test]
     fn typed_values_find_the_nearest_setting() {
         let p = |id: &str, s: &str| parse_text(index(id).unwrap(), s, false, LOW_PASS);
         assert_eq!(p("type", "ping pong"), Some(2));
@@ -495,15 +579,24 @@ mod tests {
     }
 
     #[test]
-    fn fresh_state_is_the_default() {
+    fn a_new_instance_starts_on_fls_default_preset() {
         let b = default_state();
         assert_eq!(b.len(), STATE_LEN);
         assert_eq!(field(&b, 0), VERSION);
-        assert_eq!(values_of(&b), DEFAULTS.to_vec());
+        assert_eq!(values_of(&b), START.to_vec());
+        // FL's "Default" preset (spec plugins/fruity-delay-3.md, "Presets"), as FL shows it.
+        let shown = |k: usize| value_text(k, START[k], true, START[dsp::FILTER]);
+        assert_eq!(shown(dsp::TYPE), "True Stereo");
+        assert_eq!(shown(dsp::SYNC), "On");
+        assert_eq!(shown(dsp::TIME), "4:0");
+        assert_eq!(shown(dsp::DIST_TYPE), "Saturate");
+        assert_eq!(shown(dsp::FEEDBACK), "62.5%");
+        assert_eq!(shown(dsp::CUTOFF), "21985.0Hz");
+        assert_eq!(shown(dsp::MOD_RATE), "1.1Hz");
         let p = DelayParams::default();
         assert_eq!(p.p.len(), PARAMS);
         assert_eq!(p.p[FILTER].name(), "Filter mode");
-        assert_eq!(p.settings(&b), Settings::default());
+        assert_eq!(p.settings(&b), Settings { v: START });
         assert_eq!(p.param_map().len(), PARAMS);
     }
 

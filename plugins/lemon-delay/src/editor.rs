@@ -223,6 +223,17 @@ impl Logic {
         self.sync_shown();
     }
 
+    /// A drag position `v` (normalised) moved onto its snap, if it has one (spec §4).
+    fn snapped(&self, id: &str, v: f32) -> f32 {
+        let Some(k) = params::index(id) else { return v };
+        let (lo, hi) = Self::range(id);
+        let plain = lo as f32 + v * (hi - lo) as f32;
+        match params::snap(k, plain, self.vals.plain("sync") > 0.5) {
+            Some(p) => self.vals.plain_to_norm(id, p as f32),
+            None => v,
+        }
+    }
+
     fn reset(&mut self, id: &str) {
         let d = self.vals.default_norm(id);
         self.edit(id, d);
@@ -268,7 +279,9 @@ impl Logic {
         let f = if m.ctrl { FINE } else { 1.0 };
         let moved = if across { dx } else { -dy };
         let v = (v + moved * f / px).clamp(0.0, 1.0);
-        self.vals.set(&id, v);
+        // The drag keeps its own position; the setting lands on a snap (Shift drags freely).
+        let shown = if m.shift { v } else { self.snapped(&id, v) };
+        self.vals.set(&id, shown);
         self.drag = Some(Drag { id, v, px, across });
         let t = self.view.pressed.clone();
         self.hint = self.hint_for(t.as_ref());
@@ -298,13 +311,18 @@ impl Logic {
     }
 
     /// Wheel: one step per notch (1/128 of the range for the settings with many steps).
-    pub fn wheel(&mut self, x: f32, y: f32, notches: f32, _m: Mods) -> Vec<Act> {
+    pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
         let Some((t, _)) = self.hit(x, y).filter(|(t, _)| *t != Target::Logo) else { return vec![] };
         let id = t.id().to_string();
         let (lo, hi) = Self::range(&id);
         let steps = (hi - lo) as f32;
         let step = if steps > WHEEL_STEPS { (steps / WHEEL_STEPS).round() } else { 1.0 };
-        let plain = (self.vals.plain(&id) + notches.signum() * step).clamp(lo as f32, hi as f32);
+        let cur = self.vals.plain(&id);
+        let mut plain = (cur + notches.signum() * step).clamp(lo as f32, hi as f32);
+        if let (Some(k), false) = (params::index(&id), m.shift) {
+            let sync = self.vals.plain("sync") > 0.5;
+            plain = params::snap_step(k, cur.round() as i32, plain.round() as i32, notches > 0.0, sync) as f32;
+        }
         self.vals.edit_plain(&id, plain);
         self.sync_shown();
         self.hint = self.hint_for(Some(&t));
@@ -935,6 +953,16 @@ mod tests {
         assert_eq!(l.vals.plain("fb"), DEFAULTS[FEEDBACK] as f32);
         let acts = l.down(x, y, Btn::Right, Mods::default(), false);
         assert!(matches!(acts.last(), Some(Act::Menu(MenuReq::Param(id), _, _)) if id == "fb"));
+        // From 50 % (2400), 78 px up is 4740: within the magnet of 100 % (4800); Shift lets the drag sit there.
+        l.vals.edit_plain("fb", 2400.0);
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        for _ in 0..78 {
+            l.delta(0.0, -1.0, Mods::default());
+        }
+        assert_eq!(l.vals.plain("fb"), 4800.0);
+        l.delta(0.0, 0.0, Mods { shift: true, ..Mods::default() });
+        assert_eq!(l.vals.plain("fb"), 4740.0);
+        l.up(Btn::Left);
     }
 
     #[test]
@@ -965,18 +993,22 @@ mod tests {
         let (ox, oy) = centre(&l, &Target::Knob("offset".into()));
         l.moved(ox, oy, Mods::default());
         assert_eq!(l.hint, "Delay time R/L pan: 0.0%");
+        // FL's Default preset starts synced at 4:0; unsynced, the same setting reads in ms.
         let (tx, ty) = centre(&l, &Target::Knob("time".into()));
         l.moved(tx, ty, Mods::default());
-        assert_eq!(l.hint, "Time: 4.6ms");
+        assert_eq!(l.hint, "Time: 4:0");
         let (x, y) = centre(&l, &Target::Switch("sync".into()));
         l.down(x, y, Btn::Left, Mods::default(), false);
-        assert_eq!(l.params.v(SYNC), 1);
-        assert_eq!(l.hint, "Tempo sync: On");
+        assert_eq!(l.params.v(SYNC), 0);
+        assert_eq!(l.hint, "Tempo sync: Off");
         l.moved(tx, ty, Mods::default());
-        assert_eq!(l.hint, "Time: 1:32");
-        l.typed("time", "4:0");
-        assert_eq!(l.vals.plain("time"), 192.0);
+        assert_eq!(l.hint, "Time: 26.2ms");
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.params.v(SYNC), 1);
+        l.typed("time", "1:32");
+        assert_eq!(l.vals.plain("time"), 80.0);
         // The cutoff's text follows the filter mode.
+        l.vals.edit_plain("cutoff", 3000.0);
         let (x, y) = centre(&l, &Target::Choice("filter".into(), 1));
         l.down(x, y, Btn::Left, Mods::default(), false);
         assert_eq!(l.params.v(FILTER), 1);
@@ -1020,7 +1052,7 @@ mod tests {
             pm.save_png(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
         };
         let mut l = logic();
-        l.hint = "Time: 4.6ms".into();
+        l.hint = "Time: 4:0".into();
         save(&mut l, "delay_default", 1.0);
         save(&mut l, "delay_default_x2", 2.0);
         for (id, v) in [("type", 2), ("sync", 1), ("time", 191), ("mtime", 2000), ("mcut", 1500), ("dtype", 1), ("drive", 4000), ("knee", 3000), ("sym", 4500), ("filter", 2)] {

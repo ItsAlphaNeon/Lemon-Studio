@@ -153,12 +153,12 @@ os_plugkit::linked_clap_entry!(LemonDelay);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use os_engine::effects::delay::{DEFAULTS, TIME, WET};
+    use os_engine::effects::delay::{TIME, WET};
 
     #[test]
     fn editor_edits_reach_the_sound_and_stored_bytes_play_as_stored() {
         let mut d = LemonDelay::default();
-        assert_eq!(d.settings(), Settings::default());
+        assert_eq!(d.settings(), Settings { v: params::START });
         d.params.live.set(d.params.p[WET].as_ptr(), 0.0);
         assert_eq!(d.settings().v[WET], 0);
         // FL's Chorus preset stores Time 0, below the knob's range: it plays as stored while the knob is not moved.
@@ -168,7 +168,7 @@ mod tests {
         p.set_raw(fl.clone());
         let mut d = LemonDelay { params: Arc::new(p), ..LemonDelay::default() };
         // The parameter is at its default, the stored field differs: the parameter wins (it was edited).
-        assert_eq!(d.settings().v[TIME], DEFAULTS[TIME]);
+        assert_eq!(d.settings().v[TIME], params::START[TIME]);
         // Once the parameter shows the stored value's knob position, the stored value plays.
         d.params.live.set(d.params.p[TIME].as_ptr(), 0.0);
         assert_eq!(d.settings().v[TIME], 0);
