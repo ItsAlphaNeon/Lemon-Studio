@@ -537,10 +537,32 @@ impl State {
                     .or(if m + 1 == MODULES { self.layout.end } else { None });
                 match span(at, next).filter(|old| old.len() >= 16) {
                     Some(old) => {
-                        let k = w.len();
-                        w.extend_from_slice(old);
-                        w[k + 4..k + 8].copy_from_slice(&art.base.to_le_bytes());
-                        w[k + 8..k + 12].copy_from_slice(&art.env_amount.to_le_bytes());
+                        w.extend_from_slice(&old[..4]);
+                        w.extend_from_slice(&art.base.to_le_bytes());
+                        w.extend_from_slice(&art.env_amount.to_le_bytes());
+                        w.extend_from_slice(&old[12..16]);
+                        // Each curve as it was stored unless it was edited (then as a fresh one), and what
+                        // follows them.
+                        let mut r = Reader::new(old);
+                        r.at = 16;
+                        let mut readable = true;
+                        for (c, kind) in art.curves().zip([ENVELOPE, LFO, MAP, MAP, MAP, MAP, MAP, MAP]) {
+                            let from = r.at;
+                            let was = if readable { Curve::read(&mut r, kind) } else { None };
+                            match was {
+                                Some(mut x) if r.at <= old.len() => {
+                                    x.keep_sytrus();
+                                    if x == *c { w.extend_from_slice(&old[from..r.at]) } else { c.write(&mut w) }
+                                }
+                                _ => {
+                                    readable = false;
+                                    c.write(&mut w);
+                                }
+                            }
+                        }
+                        if readable {
+                            w.extend_from_slice(&old[r.at.min(old.len())..]);
+                        }
                     }
                     None => art.write(&mut w),
                 }
@@ -562,11 +584,14 @@ impl Articulator {
         for v in [self.base, self.env_amount, 0.0] {
             w.extend_from_slice(&v.to_le_bytes());
         }
-        self.env.write(w);
-        self.lfo.write(w);
-        for m in &self.maps {
-            m.write(w);
+        for c in self.curves() {
+            c.write(w);
         }
+    }
+
+    /// The envelope, the LFO and the six maps, in their stream order.
+    pub fn curves(&self) -> impl Iterator<Item = &Curve> {
+        [&self.env, &self.lfo].into_iter().chain(&self.maps)
     }
 }
 
@@ -673,6 +698,23 @@ mod tests {
             }
         }
         assert!(states.is_empty() || exact > 100, "{exact} version 25 presets");
+    }
+
+    /// An edited curve is written fresh and the others as they were stored: every factory preset with its first
+    /// operator's volume envelope and LFO edited reads back with the edits and the rest unchanged.
+    #[test]
+    fn edited_curves_write_back() {
+        let states = factory_states();
+        for (path, fl) in states.iter().step_by(7) {
+            let Some(mut st) = State::from_bytes(fl) else { continue };
+            let (_, body) = State::unpack(fl).unwrap();
+            crate::ctl::set(&mut st, crate::ctl::Field::Part(0, OP_VOLUME, 0, 1), 77);
+            crate::ctl::set(&mut st, crate::ctl::Field::Part(0, OP_VOLUME, 1, 6), 1);
+            crate::ctl::set(&mut st, crate::ctl::Field::Part(7, F_CUTOFF, 4, 0), 1);
+            let (_, back) = reread(&st, Some(&body));
+            assert!(back == st, "{} (version {}) reads back otherwise", path.display(), st.version);
+            assert_eq!(back.modules[0].arts[OP_VOLUME].env.scales[0], 77);
+        }
     }
 
     /// The default patch, with nothing to carry over, writes a state that reads back to the same sound, and writing

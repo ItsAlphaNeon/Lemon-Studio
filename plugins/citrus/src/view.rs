@@ -3,10 +3,11 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Citrus editor: painting and hit regions (platform independent). Sytrus's layout at its Small size, every control
-//! where FL has it, unstyled: flat placeholder colours, no artwork (the Lemon design comes later). Stage 1: the page
-//! tabs, the header buttons, the main page, the matrix and the testing keyboard; the other pages show their name.
+//! where FL has it, unstyled: flat placeholder colours, no artwork (the Lemon design comes later). The page tabs,
+//! the header buttons, the main page, the operator, filter and FX pages' controls with their articulators' tabs and
+//! bars, the matrix and the testing keyboard. The curve view shows its curve (editing it comes in stage 3).
 //!
-// spec: plugins/sytrus-editor.md (§1 surface, §2 main page, §6 matrix, §7 header buttons), plugins/citrus.md §6
+// spec: plugins/sytrus-editor.md (§1 .. §7), plugins/citrus.md §6
 
 use os_ui::{Canvas, Color, Font, Rect};
 
@@ -88,6 +89,15 @@ pub enum Target {
     Key(u8),
     PatchText,
     Logo,
+    /// An articulator page's target tab and source tab.
+    ArtTab(usize),
+    PartTab(usize),
+    /// The FX page's effect unit: delays 1 .. 3, the reverb.
+    FxUnit(usize),
+    /// A digit of a numeric display: a vertical drag moves the setting by `step` per 10 px.
+    Digit(Field, i32),
+    /// An operator's waveform: its menu on right click.
+    Wave(usize),
     /// A control whose setting was not identified: it shows its hint and does nothing.
     Inert(&'static str),
     /// The info page or the block diagram: a click returns.
@@ -113,6 +123,11 @@ pub struct ViewState {
     pub cover: Cover,
     /// The key the testing keyboard holds.
     pub key: Option<u8>,
+    /// Per page: the articulator page's target tab and source tab.
+    pub target: [usize; PAGES],
+    pub part: [usize; PAGES],
+    /// The FX page's unit (delays 0 .. 2, 3 the reverb).
+    pub fx_unit: usize,
 }
 
 /// What a paint shows of the patch.
@@ -121,6 +136,8 @@ pub struct Model<'a> {
     /// Modules in use (the tabs' marker bars).
     pub used: [bool; 9],
     pub version: &'a str,
+    /// The operator page's wave, one cycle.
+    pub wave: Option<&'a [f32]>,
 }
 
 struct Ui<'a> {
@@ -169,7 +186,7 @@ pub fn paint(c: &mut Canvas, m: &Model, st: &ViewState, hint: &str) -> Vec<Hit> 
             if st.page == 0 {
                 main_page(&mut ui, hint);
             } else {
-                other_page(&mut ui);
+                module_page(&mut ui);
             }
             matrix(&mut ui);
             if !st.no_keys {
@@ -487,17 +504,387 @@ fn patch_text(ui: &mut Ui, hint: &str) {
     ui.hit(PATCH_TEXT, Target::PatchText);
 }
 
-/// The pages of stage 2 and 3: their module's name for now.
-fn other_page(ui: &mut Ui) {
-    let r = PAGE.inset(4.0);
-    panel(ui, r);
-    let name = match ui.st.page {
-        p @ 1..=6 => format!("Operator {p}"),
-        p @ 7..=9 => format!("Filter {}", p - 6),
-        _ => "Effects".into(),
-    };
-    ui.c.text_center(Font::new(14).bold(), Rect::new(r.x, r.y + 20.0, r.w, 20.0), TEXT, &name);
-    ui.c.text_center(LABEL, Rect::new(r.x, r.y + 44.0, r.w, 16.0), DIM, "This page's controls come in a later stage.");
+// ---------------------------------------------------------------------------------------------------------------
+// The operator, filter and FX pages (§3 .. §5)
+
+/// The module a page shows (FX: module 10, the effects bus's articulators).
+pub fn module_of(page: usize) -> usize {
+    if page == PAGE_FX { MODULES - 1 } else { page - 1 }
+}
+
+/// What a target tab shows: an articulator, the operator's harmonics or the filter's wave shaper curve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shown {
+    Art(usize),
+    Harmonics,
+    Shaper,
+}
+
+/// A page's target tabs: their labels, their hint names and what each shows.
+pub fn targets(page: usize) -> &'static [(&'static str, &'static str, Shown)] {
+    use Shown::*;
+    const OP: [(&str, &str, Shown); 7] = [
+        ("PAN", "panning", Art(OP_PAN)),
+        ("VOL", "volume", Art(OP_VOLUME)),
+        ("MOD", "input modulation", Art(OP_MOD)),
+        ("PITCH", "pitch", Art(OP_PITCH)),
+        ("PHASE", "phase", Art(OP_PHASE)),
+        ("DAMP", "plucked damp", Art(OP_DAMP)),
+        ("OSC", "oscillator harmonics", Harmonics),
+    ];
+    const FILTER: [(&str, &str, Shown); 9] = [
+        ("PAN", "panning", Art(F_PAN)),
+        ("VOL", "volume", Art(F_VOLUME)),
+        ("CUT", "filter cutoff frequency", Art(F_CUTOFF)),
+        ("RES", "filter resonance / bw / feedback", Art(F_RES)),
+        ("LOW", "filter low / gain / drive", Art(F_LOW)),
+        ("BAND", "filter band", Art(F_BAND)),
+        ("HIGH", "filter high", Art(F_HIGH)),
+        ("WS", "waveshaper", Shaper),
+        ("WMIX", "waveshaper mix", Art(F_SHAPER)),
+    ];
+    const FX: [(&str, &str, Shown); 2] = [("PAN", "panning", Art(0)), ("VOL", "volume", Art(1))];
+    match page {
+        1..=6 => &OP,
+        7..=9 => &FILTER,
+        _ => &FX,
+    }
+}
+
+pub const PART_LABELS: [&str; 8] = ["ENV", "LFO", "KEY M", "VEL M", "MOD X", "MOD Y", "RAND", "UNI"];
+
+/// The articulator editor's parts.
+pub const TARGET_TABS: Rect = Rect::new(6.0, 129.0, 540.0, 18.0);
+pub const PART_TABS: Rect = Rect::new(6.0, 148.0, 540.0, 18.0);
+pub const CURVE: Rect = Rect::new(6.0, 166.0, 540.0, 146.0);
+pub const BAR: Rect = Rect::new(6.0, 312.0, 540.0, 34.0);
+
+/// Tab `i` of `n` across `r`.
+pub fn tab_rect(r: Rect, i: usize, n: usize) -> Rect {
+    let w = r.w / n as f32;
+    Rect::new((r.x + w * i as f32).round(), r.y, w.round() - 1.0, r.h)
+}
+
+/// The shown target of the page (clamped to its tabs).
+pub fn shown(st: &ViewState) -> Shown {
+    let t = targets(st.page);
+    t[st.target[st.page].min(t.len() - 1)].2
+}
+
+fn module_page(ui: &mut Ui) {
+    let page = ui.st.page;
+    let m = module_of(page);
+    panel(ui, Rect::new(6.0, 30.0, 540.0, 96.0));
+    match page {
+        1..=6 => operator(ui, m),
+        7..=9 => filter(ui, m),
+        _ => effects(ui),
+    }
+    articulators(ui, m);
+}
+
+/// A small toggle button with its text.
+fn toggle(ui: &mut Ui, f: Field, r: Rect, label: &str) {
+    let t = Target::Switch(f);
+    let hot = ui.hot(r, &t);
+    let on = ui.get(f) != 0;
+    ui.c.fill_rect(r, if on { ACCENT } else if hot { EDGE } else { WELL });
+    ui.c.text_center(SMALL, r, if on { BG } else { DIM }, label);
+    ui.hit(r, t);
+}
+
+/// A numeric display: the value with `decimals` decimals; each digit is a drag target.
+fn digits(ui: &mut Ui, f: Field, r: Rect, decimals: i32, unit: &str) {
+    let v = ui.get(f);
+    let scale = 10f64.powi(decimals);
+    let s = format!("{:.*}", decimals as usize, v as f64 / scale);
+    ui.c.fill_rect(r, WELL);
+    let pressed = matches!(&ui.st.pressed, Some(Target::Digit(p, _)) if *p == f);
+    ui.c.stroke_rrect(r.inset(0.5), 0.0, 1.0, if pressed { DIM } else { EDGE });
+    let uw = ui.c.text_width(SMALL, unit);
+    let w = ui.c.text_width(LABEL, &s);
+    let x0 = (r.right() - 6.0 - uw - 4.0 - w).round();
+    let lh = ui.c.line_height(LABEL);
+    let y = (r.cy() - lh / 2.0).round();
+    ui.c.text(LABEL, x0, y, TEXT, &s);
+    let lh2 = ui.c.line_height(SMALL);
+    ui.c.text(SMALL, r.right() - 6.0 - uw, (r.cy() - lh2 / 2.0).round(), DIM, unit);
+    // The digits' places: ones at the point's left.
+    let point = s.find('.').unwrap_or(s.len());
+    for (i, ch) in s.char_indices() {
+        if !ch.is_ascii_digit() {
+            continue;
+        }
+        let place = if i < point { (point - i - 1) as i32 } else { -((i - point) as i32) };
+        let a = x0 + ui.c.text_width(LABEL, &s[..i]);
+        let b = x0 + ui.c.text_width(LABEL, &s[..i + ch.len_utf8()]);
+        let step = 10f64.powi(decimals + place).round() as i32;
+        ui.hit(Rect::span(a, b, r.y, r.bottom()), Target::Digit(f, step.max(1)));
+    }
+}
+
+/// The operator page's controls (§4).
+fn operator(ui: &mut Ui, m: usize) {
+    // The waveform: one cycle.
+    let r = Rect::new(8.0, 33.0, 80.0, 65.0);
+    ui.c.fill_rect(r, WELL);
+    ui.c.fill_rect(Rect::new(r.x, r.cy(), r.w, 1.0), FAINT);
+    if let Some(w) = ui.m.wave {
+        let n = w.len().max(2);
+        let pts: Vec<(f32, f32)> =
+            w.iter().enumerate().map(|(i, &v)| (r.x + 2.0 + (r.w - 4.0) * i as f32 / (n - 1) as f32, r.cy() - (r.h / 2.0 - 4.0) * v.clamp(-1.0, 1.0))).collect();
+        ui.c.polyline(&pts, 1.2, ACCENT);
+    }
+    ui.hit(r, Target::Wave(m));
+    for (k, x, l) in [(0, 20.0, "HALF"), (1, 49.0, "EVEN"), (2, 77.0, "ABS")] {
+        toggle(ui, Field::Op(m, 8 + k), Rect::new(x - 12.0, 106.0, 24.0, 14.0), l);
+    }
+    for (k, x, l) in [(3, 106.0, "SH"), (4, 135.0, "TN"), (5, 161.0, "SK"), (6, 187.0, "SN"), (7, 213.0, "FL"), (2, 239.0, "NS")] {
+        slider(ui, Field::Op(m, k), x, 56.0, 111.0, l);
+    }
+    switch(ui, Field::Op(m, 12), 267.0, 42.0, "CENTER");
+    switch(ui, Field::Op(m, 13), 267.0, 57.0, "DECLICK");
+    switch(ui, Field::Op(m, 15), 267.0, 73.0, "BAND LIMIT");
+    switch(ui, Field::Op(m, 14), 267.0, 114.0, "PLUCK");
+    digits(ui, Field::Op(m, 1), Rect::new(335.0, 37.0, 98.0, 20.0), 2, "Hz");
+    digits(ui, Field::Op(m, 0), Rect::new(440.0, 37.0, 98.0, 20.0), 4, "x");
+    ui.label(SMALL, 384.0, 64.0, DIM, "OFFSET");
+    ui.label(SMALL, 489.0, 64.0, DIM, "RATIO");
+    knob(ui, Field::Head(m, 0), 355.0, 92.0, 11.0, "PHASE");
+    switch(ui, Field::Op(m, 11), 398.0, 90.0, "GLOBAL");
+    knob(ui, Field::Head(m, 1), 476.0, 92.0, 11.0, "VOL");
+    knob(ui, Field::Head(m, 2), 513.0, 92.0, 11.0, "PE");
+}
+
+/// A filter page's controls (§5).
+fn filter(ui: &mut Ui, m: usize) {
+    let f = Field::Filt(m, 3);
+    let kind = ui.get(f).clamp(0, 12) as usize;
+    value_box(ui, f, Rect::new(20.0, 36.0, 38.0, 25.0), ctl::FILTER_ABBR[kind]);
+    ui.c.fill_polygon(&[(60.0, 45.0), (66.0, 45.0), (63.0, 50.0)], DIM);
+    ui.hit(Rect::new(58.0, 36.0, 10.0, 25.0), Target::Box(f));
+    let stages = ui.get(Field::Head(m, 0));
+    for (k, (y, l)) in [42.0, 57.0, 71.0, 85.0, 99.0, 113.0].into_iter().zip(ctl::STAGE_LABELS).enumerate() {
+        lamp(ui, Target::Choice(Field::Head(m, 0), k as i32), stages == k as i32, 86.0, y, l, false);
+    }
+    switch(ui, Field::Filt(m, 1), 30.0, 96.0, "FLAT");
+    switch(ui, Field::Filt(m, 0), 30.0, 112.0, "HQ");
+    for (k, x, l) in [(1, 153.0, "ENV"), (2, 198.0, "CUT"), (3, 245.0, "RES"), (7, 424.0, "AMP"), (8, 471.0, "MIX"), (9, 516.0, "NEXT")] {
+        knob(ui, Field::Head(m, k), x, 56.0, 14.0, l);
+    }
+    // MODE: FL's "+" button, whose setting was not identified.
+    let r = Rect::new(380.0, 49.0, 20.0, 20.0);
+    ui.c.fill_rect(r, WELL);
+    ui.c.text_center(LABEL, r, DIM, "+");
+    ui.label(SMALL, 390.0, 77.0, DIM, "MODE");
+    ui.hit(r, Target::Inert("Filter mode: off"));
+    switch(ui, Field::Filt(m, 2), 481.0, 112.0, "WS");
+    ui.label(SMALL, 470.0, 95.0, FAINT, "WAVESHAPER");
+}
+
+pub const FX_UNIT_Y: [f32; 4] = [48.0, 66.0, 83.0, 101.0];
+
+/// The FX page's controls (§5).
+fn effects(ui: &mut Ui) {
+    knob(ui, Field::S(15), 21.0, 56.0, 12.0, "PAN");
+    ui.label(SMALL, 67.0, 47.0, DIM, "ORD");
+    let ord = ui.get(Field::S(16)).to_string();
+    value_box(ui, Field::S(16), Rect::new(55.0, 56.0, 24.0, 20.0), &ord);
+    lamp(ui, Target::Inert("Chorus"), false, 78.0, 113.0, "CHR", false);
+    for (k, x, l) in [(17, 96.0, "DP"), (18, 118.0, "SP"), (19, 139.0, "DL"), (20, 162.0, "SR"), (21, 184.0, "CR"), (22, 206.0, "VL")] {
+        slider(ui, Field::S(k), x, 54.0, 113.0, l);
+    }
+    ui.label(SMALL, 150.0, 121.0, FAINT, "CHORUS");
+    // The send.
+    let send = ctl::text(Field::S(24), ui.get(Field::S(24)));
+    value_box(ui, Field::S(24), Rect::new(227.0, 41.0, 28.0, 23.0), &send);
+    knob(ui, Field::S(23), 276.0, 54.0, 11.0, "VOL");
+    ui.label(SMALL, 250.0, 90.0, FAINT, "SEND");
+    // The unit tabs.
+    let unit = ui.st.fx_unit.min(3);
+    for (k, y) in FX_UNIT_Y.into_iter().enumerate() {
+        let r = Rect::span(300.0, 318.0, y - 8.0, y + 8.0);
+        let t = Target::FxUnit(k);
+        let hot = ui.hot(r, &t);
+        let sel = unit == k;
+        ui.c.fill_rect(r, if sel { ACCENT } else if hot { EDGE } else { WELL });
+        let on = if k < 3 { ui.m.st.delays[k].on } else { ui.m.st.reverb.on };
+        let s = ["D1", "D2", "D3", "R"][k];
+        ui.c.text_center(SMALL, r, if sel { BG } else if on { TEXT } else { DIM }, s);
+        ui.hit(r, t);
+    }
+    if unit < 3 {
+        let d = unit;
+        switch(ui, Field::Delay(d, 6), 345.0, 80.0, "SERIAL");
+        switch(ui, Field::Delay(d, 5), 345.0, 95.0, "TEMPO");
+        switch(ui, Field::Delay(d, 7), 345.0, 110.0, "ON");
+        for (k, x, l) in [(0, 385.0, "FB"), (1, 412.0, "TM"), (2, 438.0, "SO"), (3, 464.0, "VL")] {
+            slider(ui, Field::Delay(d, k), x, 54.0, 113.0, l);
+        }
+        let mode = ui.get(Field::Delay(d, 4));
+        for (k, (y, l)) in [47.0, 62.0, 79.0].into_iter().zip(["NORM", "INV", "PONG"]).enumerate() {
+            lamp(ui, Target::Choice(Field::Delay(d, 4), k as i32), mode == k as i32, 498.0, y, l, false);
+        }
+        ui.label(SMALL, 425.0, 121.0, FAINT, &format!("DELAY {}", d + 1));
+    } else {
+        let f = Field::Reverb(7);
+        let c = (ui.get(f) + 1).to_string();
+        value_box(ui, f, Rect::new(329.0, 54.0, 24.0, 22.0), &c);
+        ui.label(SMALL, 341.0, 45.0, DIM, "COLOR");
+        switch(ui, Field::Reverb(10), 333.0, 96.0, "TEMPO");
+        switch(ui, Field::Reverb(9), 333.0, 111.0, "ON");
+        for (k, x, l) in [(0, 374.0, "LC"), (1, 395.0, "HC"), (2, 415.0, "PD"), (3, 436.0, "RS"), (4, 457.0, "DF"), (5, 478.0, "DE"), (6, 499.0, "HD"), (8, 520.0, "VL")] {
+            slider(ui, Field::Reverb(k), x, 54.0, 113.0, l);
+        }
+        ui.label(SMALL, 447.0, 121.0, FAINT, "REVERB");
+    }
+}
+
+/// Whether articulator `a` has a part on.
+fn art_on(st: &State, m: usize, a: usize) -> bool {
+    st.modules[m].arts[a].curves().any(|c| c.enabled)
+}
+
+/// The articulator editor: target tabs, source tabs, the curve view and the bar (§3).
+fn articulators(ui: &mut Ui, m: usize) {
+    let page = ui.st.page;
+    let tabs = targets(page);
+    let sel = ui.st.target[page].min(tabs.len() - 1);
+    for (i, (label, _, what)) in tabs.iter().enumerate() {
+        let r = tab_rect(TARGET_TABS, i, tabs.len());
+        let on = match what {
+            Shown::Art(a) => art_on(ui.m.st, m, *a),
+            Shown::Shaper => ui.m.st.modules[m].filter.shaper_on,
+            Shown::Harmonics => false,
+        };
+        tab(ui, r, Target::ArtTab(i), label, i == sel, on);
+    }
+    match tabs[sel].2 {
+        Shown::Art(a) => {
+            let p = ui.st.part[page].min(7);
+            for (i, label) in PART_LABELS.iter().enumerate() {
+                let r = tab_rect(PART_TABS, i, 8);
+                let on = ctl::part(ui.m.st, m, a, i).enabled;
+                tab(ui, r, Target::PartTab(i), label, i == p, on);
+            }
+            let c = ctl::part(ui.m.st, m, a, p);
+            curve_view(ui, c);
+            bar(ui, m, a, p);
+        }
+        Shown::Shaper => {
+            let c = &ui.m.st.modules[m].filter.shaper;
+            curve_view(ui, c);
+            panel(ui, BAR);
+        }
+        Shown::Harmonics => {
+            harmonics(ui, m);
+            panel(ui, BAR);
+        }
+    }
+}
+
+fn tab(ui: &mut Ui, r: Rect, t: Target, label: &str, sel: bool, on: bool) {
+    let hot = ui.hot(r, &t);
+    ui.c.fill_rect(r, if sel { ACCENT } else if hot { EDGE } else { PANEL });
+    ui.c.text_center(SMALL, r, if sel { BG } else { TEXT }, label);
+    if on {
+        ui.c.fill_rect(Rect::new(r.x + 3.0, r.y + 4.0, 2.0, r.h - 8.0), if sel { BG } else { ACCENT });
+    }
+    ui.hit(r, t);
+}
+
+/// The curve's points over the view: x by the points' times (maps over 0 .. 1), y by their levels.
+pub fn curve_points(c: &crate::curve::Curve, r: Rect) -> Vec<(f32, f32)> {
+    let mut t = 0f32;
+    let times: Vec<f32> = c
+        .points
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            if i > 0 {
+                t += p.dist.max(0.0);
+            }
+            t
+        })
+        .collect();
+    let span = if c.kind == crate::curve::MAP { 1.0 } else { t.max(1e-3) * 1.05 };
+    c.points.iter().zip(times).map(|(p, t)| (r.x + r.w * (t / span).min(1.0), r.bottom() - r.h * p.level.clamp(0.0, 1.0))).collect()
+}
+
+/// The curve view: a grid, the curve with the area below it tinted, its points and markers (read only for now).
+fn curve_view(ui: &mut Ui, c: &crate::curve::Curve) {
+    let r = CURVE;
+    let map = c.kind == crate::curve::MAP;
+    ui.c.fill_rect(r, if map { WELL.shade(-0.2) } else { WELL });
+    for k in 1..8 {
+        let x = (r.x + r.w * k as f32 / 8.0).round();
+        ui.c.fill_rect(Rect::new(x, r.y, 1.0, r.h), BG);
+    }
+    for k in 1..4 {
+        let y = (r.y + r.h * k as f32 / 4.0).round();
+        ui.c.fill_rect(Rect::new(r.x, y, r.w, 1.0), BG);
+    }
+    let inner = r.inset(6.0);
+    let pts = curve_points(c, inner);
+    if pts.is_empty() {
+        return;
+    }
+    let ink = if c.enabled { ACCENT } else { DIM };
+    let mut area = pts.clone();
+    area.push((pts.last().unwrap().0, inner.bottom()));
+    area.push((pts[0].0, inner.bottom()));
+    ui.c.fill_polygon(&area, ink.with_alpha(40));
+    ui.c.polyline(&pts, 1.5, ink);
+    for &(x, y) in &pts {
+        ui.c.fill_circle(x, y, 2.5, ink);
+    }
+    for (i, tag) in [(c.decay, "D"), (c.sustain, "S"), (c.loop_start, "L")] {
+        if let Some(&(x, _)) = usize::try_from(i).ok().and_then(|i| pts.get(i)) {
+            ui.c.fill_rect(Rect::new(x.round(), r.y, 1.0, r.h), DIM);
+            ui.c.text(SMALL, x + 2.0, r.bottom() - 12.0, DIM, tag);
+        }
+    }
+    ui.hit(r, Target::Inert("Curve editing comes in a later stage"));
+}
+
+/// The OSC target: the cycle on top, the harmonics' levels below (the first 88).
+fn harmonics(ui: &mut Ui, m: usize) {
+    let r = CURVE;
+    ui.c.fill_rect(r, WELL);
+    let top = Rect::new(r.x, r.y, r.w, 60.0);
+    ui.c.fill_rect(Rect::new(r.x, top.bottom(), r.w, 1.0), BG);
+    if let Some(w) = ui.m.wave {
+        let n = w.len().max(2);
+        let pts: Vec<(f32, f32)> = w.iter().enumerate().map(|(i, &v)| (top.x + top.w * i as f32 / (n - 1) as f32, top.cy() - 26.0 * v.clamp(-1.0, 1.0))).collect();
+        ui.c.polyline(&pts, 1.2, ACCENT);
+    }
+    let levels = &ui.m.st.modules[m].op.levels;
+    let bars = Rect::span(r.x + 4.0, r.right() - 4.0, top.bottom() + 4.0, r.bottom() - 2.0);
+    for (h, &l) in levels.iter().take(88).enumerate() {
+        let x = bars.x + h as f32 * bars.w / 88.0;
+        let y = bars.bottom() - bars.h * l.clamp(0.0, 1.0);
+        ui.c.fill_rect(Rect::span(x, x + 5.0, y, bars.bottom()), if l > 0.0 { ACCENT } else { FAINT });
+    }
+    ui.hit(r, Target::Inert("Harmonics editing comes in a later stage"));
+}
+
+/// The bar under the curve view: the part's switch, the envelope's or LFO's knobs and switches, the tools.
+fn bar(ui: &mut Ui, m: usize, a: usize, p: usize) {
+    panel(ui, BAR);
+    switch(ui, Field::Part(m, a, p, 0), 15.0, 320.0, "");
+    if p < 2 {
+        let labels = if p == 0 { ["ATT", "DEC", "SUS", "REL"] } else { ["SPD", "TNS", "SKEW", "PW"] };
+        for (k, (x, l)) in [35.0, 58.0, 81.0, 104.0].into_iter().zip(labels).enumerate() {
+            knob(ui, Field::Part(m, a, p, k + 1), x, 323.0, 8.0, l);
+        }
+        switch(ui, Field::Part(m, a, p, 5), 123.0, 319.0, "TEMPO");
+        switch(ui, Field::Part(m, a, p, 6), 123.0, 335.0, "GLOBAL");
+    }
+    for (x, h) in [(458.0, "Freeze editing / hide points"), (482.0, "Step editing"), (505.0, "Snap to grid"), (529.0, "Slide succeeding points / regions")] {
+        let r = Rect::new(x - 10.0, 327.0, 20.0, 16.0);
+        ui.c.fill_rect(r, WELL);
+        ui.hit(r, Target::Inert(h));
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------

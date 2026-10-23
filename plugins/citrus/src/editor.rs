@@ -96,6 +96,10 @@ const FINE: f32 = 1.0 / 20.0;
 const WHEEL_PART: f32 = 1.0 / 32.0;
 /// Pixels of drag per step of a box.
 pub const BOX_PX: f32 = 8.0;
+/// Pixels of drag per step of a numeric display's digit.
+pub const DIGIT_PX: f32 = 10.0;
+/// Points of the operator page's drawn wave.
+const WAVE_POINTS: usize = 160;
 
 // ---------------------------------------------------------------------------------------------------------------
 // Menus
@@ -115,6 +119,8 @@ pub enum Cmd {
 pub enum MenuReq {
     Param(Field),
     Options,
+    /// Operator `m`'s waveform.
+    Wave(usize),
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -156,6 +162,8 @@ enum Drag {
     Value(Field, f32),
     /// A box: `v` likewise, in steps.
     Steps(Field, f32),
+    /// A digit of a numeric display: its step and the pixels moved since the last step.
+    Digit(Field, i32, f32),
     Pad,
     Key,
 }
@@ -177,11 +185,14 @@ pub struct Logic {
     copied: Option<i32>,
     pub hosted: bool,
     no_keys: Arc<AtomicBool>,
+    /// The operator page's wave and what it was drawn from (the block, band-limit smoothing).
+    wave: Option<(OpBlock, bool, Vec<f32>)>,
 }
 
 impl Logic {
     pub fn new(params: Arc<CitrusParams>, no_keys: Arc<AtomicBool>) -> Self {
-        let view = ViewState { no_keys: no_keys.load(Ordering::Relaxed), ..ViewState::default() };
+        // FL opens each page on its VOL target.
+        let view = ViewState { no_keys: no_keys.load(Ordering::Relaxed), target: [1; view::PAGES], ..ViewState::default() };
         let mut l = Logic {
             params,
             st: crate::preset::default_patch(),
@@ -195,6 +206,7 @@ impl Logic {
             copied: None,
             hosted: false,
             no_keys,
+            wave: None,
         };
         l.reload();
         l
@@ -259,7 +271,9 @@ impl Logic {
     /// The setting a target edits with drags, the wheel and its menu.
     fn field(t: &Target) -> Option<Field> {
         match t {
-            Target::Slider(f) | Target::Knob(f) | Target::Box(f) | Target::Cell(f) | Target::Cycle(f) | Target::Switch(f) => Some(*f),
+            Target::Slider(f) | Target::Knob(f) | Target::Box(f) | Target::Cell(f) | Target::Cycle(f) | Target::Switch(f) | Target::Digit(f, _) => {
+                Some(*f)
+            }
             _ => None,
         }
     }
@@ -286,6 +300,14 @@ impl Logic {
             Some(Target::PatchText) => "Info / comments".into(),
             Some(Target::Logo) => "Citrus".into(),
             Some(Target::Inert(s)) => (*s).into(),
+            Some(Target::ArtTab(i)) => {
+                let t = view::targets(self.view.page);
+                format!("Editor target: {}", t[(*i).min(t.len() - 1)].1)
+            }
+            Some(Target::PartTab(i)) => format!("Articulator part: {}", ctl::PART_NAMES[*i]),
+            Some(Target::FxUnit(k)) if *k < 3 => format!("Effect: delay unit {}", k + 1),
+            Some(Target::FxUnit(_)) => "Effect: reverb unit".into(),
+            Some(Target::Wave(_)) => "Waveform".into(),
             Some(Target::Cover) => String::new(),
             Some(t) => Self::field(t).map(|f| ctl::hint(&self.st, f, dragging)).unwrap_or_default(),
         }
@@ -308,6 +330,10 @@ impl Logic {
         match (&t, btn) {
             (Target::Cover, _) => self.view.cover = Cover::None,
             (Target::Tab(i), Btn::Left | Btn::Right) => self.view.page = *i,
+            (Target::ArtTab(i), Btn::Left | Btn::Right) => self.view.target[self.view.page] = *i,
+            (Target::PartTab(i), Btn::Left | Btn::Right) => self.view.part[self.view.page] = *i,
+            (Target::FxUnit(k), Btn::Left | Btn::Right) => self.view.fx_unit = *k,
+            (Target::Wave(m), Btn::Right) => acts.push(Act::Menu(MenuReq::Wave(*m), x, y)),
             (Target::Header(0), Btn::Left) => acts.push(Act::Menu(MenuReq::Options, x, y)),
             (Target::Header(1), Btn::Left) | (Target::Logo, Btn::Left) => self.view.cover = Cover::Info,
             (Target::Header(2), Btn::Left) => self.view.cover = Cover::Diagram,
@@ -325,6 +351,11 @@ impl Logic {
             }
             (Target::Box(f), Btn::Left) => {
                 self.drag = Some(Drag::Steps(*f, self.shown(*f) as f32));
+                self.view.pressed = Some(t.clone());
+                acts.push(Act::Lock);
+            }
+            (Target::Digit(f, step), Btn::Left) => {
+                self.drag = Some(Drag::Digit(*f, *step, 0.0));
                 self.view.pressed = Some(t.clone());
                 acts.push(Act::Lock);
             }
@@ -354,7 +385,9 @@ impl Logic {
                 self.st.cell_off[k] = u8::from(self.st.cell_off[k] == 0);
                 self.commit();
             }
-            (Target::Slider(f) | Target::Knob(f) | Target::Box(f) | Target::Cycle(f), Btn::Right) => acts.push(Act::Menu(MenuReq::Param(*f), x, y)),
+            (Target::Slider(f) | Target::Knob(f) | Target::Box(f) | Target::Cycle(f) | Target::Digit(f, _), Btn::Right) => {
+                acts.push(Act::Menu(MenuReq::Param(*f), x, y))
+            }
             (Target::Row(i), Btn::Left) => self.view.page = view::label_page(true, *i).unwrap_or(self.view.page),
             (Target::Col(i), Btn::Left) => self.view.page = view::label_page(false, *i).unwrap_or(self.view.page),
             (Target::MatrixTab(ring), Btn::Left) => self.view.ring = *ring,
@@ -385,6 +418,21 @@ impl Logic {
                 let v = (v - dy / BOX_PX).clamp(lo as f32, hi as f32);
                 self.drag = Some(Drag::Steps(f, v));
                 self.set(f, v.round() as i32);
+            }
+            // One step of the digit per 10 px, up raising it.
+            Some(Drag::Digit(f, step, moved)) => {
+                let mut moved = moved - dy;
+                let mut v = self.shown(f);
+                while moved >= DIGIT_PX {
+                    moved -= DIGIT_PX;
+                    v += step;
+                }
+                while moved <= -DIGIT_PX {
+                    moved += DIGIT_PX;
+                    v -= step;
+                }
+                self.drag = Some(Drag::Digit(f, step, moved));
+                self.set(f, v);
             }
             _ => return vec![],
         }
@@ -442,9 +490,10 @@ impl Logic {
             Target::Slider(f) | Target::Knob(f) | Target::Cell(f) => {
                 let (lo, hi) = ctl::range(*f);
                 let step = (((hi - lo) as f32 * WHEEL_PART).round() as i32).max(1);
-                self.set(*f, ctl::get(&self.st, *f) + d * step);
+                self.set(*f, self.shown(*f) + d * step);
             }
-            Target::Box(f) | Target::Cycle(f) => self.set(*f, ctl::get(&self.st, *f) + d),
+            Target::Box(f) | Target::Cycle(f) => self.set(*f, self.shown(*f) + d),
+            Target::Digit(f, step) => self.set(*f, self.shown(*f) + d * step),
             Target::Switch(f) => self.set(*f, i32::from(d > 0)),
             _ => return vec![],
         }
@@ -465,6 +514,16 @@ impl Logic {
                 m
             }
             MenuReq::Options => self.options(),
+            // The shape's corners (plugins/sytrus.md, "Shape"); converting to harmonics comes with the harmonics editor.
+            MenuReq::Wave(m) => {
+                let mut w = MenuDef::new(MenuStyle::Context);
+                for (l, v) in [("Square", 384), ("Saw", 256), ("Triangle", 128), ("Sine", 0)] {
+                    w.add(MenuItem::item(l), Cmd::Set(Field::Op(*m, 3), v));
+                }
+                w.sep(Cmd::None);
+                w.add(MenuItem::item("Convert shape to sine harmonics").enabled(false), Cmd::None);
+                w
+            }
         }
     }
 
@@ -543,7 +602,18 @@ impl Logic {
     /// Paints the editor; `hint` is drawn when the host does not show it.
     pub fn paint(&mut self, c: &mut os_ui::Canvas) {
         let hint = if self.hosted { String::new() } else { self.hint.clone() };
-        let model = view::Model { st: &self.st, used: self.used, version: env!("CARGO_PKG_VERSION") };
+        if (1..=OPERATORS).contains(&self.view.page) {
+            let op = &self.st.modules[self.view.page - 1].op;
+            let smooth = self.st.switch(2) != 0;
+            if !self.wave.as_ref().is_some_and(|(o, s, _)| o == op && *s == smooth) {
+                let t = crate::wave::build(op, smooth).t;
+                let n = crate::wave::N;
+                let w = (0..WAVE_POINTS).map(|i| t[i * n / (WAVE_POINTS - 1)]).collect();
+                self.wave = Some((op.clone(), smooth, w));
+            }
+        }
+        let wave = self.wave.as_ref().filter(|_| (1..=OPERATORS).contains(&self.view.page)).map(|w| w.2.as_slice());
+        let model = view::Model { st: &self.st, used: self.used, version: env!("CARGO_PKG_VERSION"), wave };
         self.hits = view::paint(c, &model, &self.view, &hint);
     }
 }
@@ -1285,6 +1355,18 @@ mod tests {
             l.view.ring = false;
             l.view.page = 1;
             save(&mut l, "citrus_deep_op1", 1.0);
+            l.view.target[1] = 6;
+            save(&mut l, "citrus_deep_op1_osc", 1.0);
+            l.view.target[1] = 1;
+            l.view.part[1] = 1;
+            save(&mut l, "citrus_deep_op1_lfo", 1.0);
+            l.view.page = 7;
+            l.view.target[7] = 2;
+            save(&mut l, "citrus_deep_filter1", 1.0);
+            l.view.page = view::PAGE_FX;
+            save(&mut l, "citrus_deep_fx", 1.0);
+            l.view.fx_unit = 3;
+            save(&mut l, "citrus_deep_fx_reverb", 1.0);
             l.view.page = 0;
             save(&mut l, "citrus_deep_x2", 2.0);
         }
@@ -1292,5 +1374,167 @@ mod tests {
         save(&mut l, "citrus_diagram", 1.0);
         l.view.cover = Cover::Info;
         save(&mut l, "citrus_info", 1.0);
+    }
+
+    /// The module pages' controls sit where FL has them (plugins/sytrus-editor.md §3 .. §5).
+    #[test]
+    fn module_pages_sit_where_fl_has_them() {
+        let mut l = logic();
+        let at = |l: &Logic, t: Target, x: f32, y: f32| {
+            let h = l.hits.iter().find(|h| h.t == t).unwrap_or_else(|| panic!("{t:?}"));
+            assert!(h.r.contains(x, y), "{t:?} at {:?}", h.r);
+        };
+        l.view.page = 2;
+        paint(&mut l);
+        for (t, x, y) in [
+            (Target::Slider(Field::Op(1, 3)), 106.0, 84.0),
+            (Target::Slider(Field::Op(1, 2)), 239.0, 84.0),
+            (Target::Switch(Field::Op(1, 8)), 20.0, 113.0),
+            (Target::Switch(Field::Op(1, 14)), 267.0, 114.0),
+            (Target::Knob(Field::Head(1, 0)), 355.0, 92.0),
+            (Target::Knob(Field::Head(1, 2)), 513.0, 92.0),
+            (Target::Wave(1), 40.0, 60.0),
+            (Target::ArtTab(6), 520.0, 138.0),
+            (Target::PartTab(0), 30.0, 157.0),
+            (Target::Switch(Field::Part(1, OP_VOLUME, 0, 0)), 15.0, 320.0),
+            (Target::Knob(Field::Part(1, OP_VOLUME, 0, 4)), 104.0, 323.0),
+            (Target::Switch(Field::Part(1, OP_VOLUME, 0, 6)), 123.0, 335.0),
+        ] {
+            at(&l, t, x, y);
+        }
+        assert!(l.hits.iter().any(|h| matches!(h.t, Target::Digit(Field::Op(1, 0), 1)) && h.r.x > 440.0));
+        l.view.page = 8;
+        paint(&mut l);
+        for (t, x, y) in [
+            (Target::Box(Field::Filt(7, 3)), 39.0, 48.0),
+            (Target::Choice(Field::Head(7, 0), 2), 86.0, 71.0),
+            (Target::Knob(Field::Head(7, 2)), 198.0, 56.0),
+            (Target::Knob(Field::Head(7, 9)), 516.0, 56.0),
+            (Target::Switch(Field::Filt(7, 2)), 481.0, 112.0),
+            (Target::ArtTab(8), 520.0, 138.0),
+        ] {
+            at(&l, t, x, y);
+        }
+        l.view.page = view::PAGE_FX;
+        paint(&mut l);
+        for (t, x, y) in [
+            (Target::Knob(Field::S(15)), 21.0, 56.0),
+            (Target::Slider(Field::S(22)), 206.0, 84.0),
+            (Target::Box(Field::S(24)), 240.0, 52.0),
+            (Target::FxUnit(3), 309.0, 101.0),
+            (Target::Slider(Field::Delay(0, 1)), 412.0, 84.0),
+            (Target::Choice(Field::Delay(0, 4), 2), 498.0, 79.0),
+            (Target::Switch(Field::Delay(0, 7)), 345.0, 110.0),
+            (Target::ArtTab(1), 400.0, 138.0),
+        ] {
+            at(&l, t, x, y);
+        }
+        let (x, y) = centre(&l, &Target::FxUnit(3));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.hint, "Effect: reverb unit");
+        paint(&mut l);
+        at(&l, Target::Slider(Field::Reverb(8)), 520.0, 84.0);
+        at(&l, Target::Box(Field::Reverb(7)), 341.0, 65.0);
+    }
+
+    /// Operator controls: the digits of the ratio, the shape slider, the waveform menu, the target and part tabs
+    /// and the envelope bar edit the saved state.
+    #[test]
+    fn operator_controls_edit_the_saved_state() {
+        let mut l = logic();
+        l.view.page = 1;
+        paint(&mut l);
+        // The ratio's first decimal (1000 = 0.1 x): 30 px up = three steps.
+        let h = l.hits.iter().find(|h| h.t == Target::Digit(Field::Op(0, 0), 1000)).expect("the ratio's first decimal").r;
+        l.down(h.cx(), h.cy(), Btn::Left, Mods::default(), false);
+        for _ in 0..30 {
+            l.delta(0.0, -1.0, Mods::default());
+        }
+        l.up(Btn::Left);
+        assert_eq!(saved(&l).modules[0].op.ratio, 13000);
+        l.moved(h.cx(), h.cy(), Mods::default());
+        assert_eq!(l.hint, "Freq ratio: 1.3000 x");
+        let (x, y) = centre(&l, &Target::Wave(0));
+        let acts = l.down(x, y, Btn::Right, Mods::default(), false);
+        assert!(acts.contains(&Act::Menu(MenuReq::Wave(0), x, y)));
+        l.pick(&MenuReq::Wave(0), Cmd::Set(Field::Op(0, 3), 256), x, y);
+        assert_eq!(saved(&l).modules[0].op.shape[0], 256);
+        let (x, y) = centre(&l, &Target::Switch(Field::Op(0, 14)));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(saved(&l).modules[0].op.flags[PLUCKED], 1);
+        // VOL, then its envelope: on, its attack scale, tempo.
+        let (x, y) = centre(&l, &Target::ArtTab(1));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.hint, "Editor target: volume");
+        paint(&mut l);
+        let (x, y) = centre(&l, &Target::Switch(Field::Part(0, OP_VOLUME, 0, 0)));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        let (x, y) = centre(&l, &Target::Knob(Field::Part(0, OP_VOLUME, 0, 1)));
+        l.wheel(x, y, -1.0, Mods::default());
+        assert_eq!(l.hint, "Attack time scale: 94%");
+        let (x, y) = centre(&l, &Target::Switch(Field::Part(0, OP_VOLUME, 0, 5)));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        let env = &saved(&l).modules[0].arts[OP_VOLUME].env;
+        assert!(env.enabled);
+        assert_eq!((env.scales[0], env.flags & crate::curve::SYNCED), (120, crate::curve::SYNCED));
+        // The LFO's part tab and its speed.
+        let (x, y) = centre(&l, &Target::PartTab(1));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.hint, "Articulator part: LFO");
+        paint(&mut l);
+        let (x, y) = centre(&l, &Target::Knob(Field::Part(0, OP_VOLUME, 1, 1)));
+        l.wheel(x, y, 1.0, Mods::default());
+        assert_eq!(saved(&l).modules[0].arts[OP_VOLUME].lfo.lfo[0], 512 + 2032);
+    }
+
+    /// Filter and FX controls: the type box, the stages, a knob, the delay and reverb units.
+    #[test]
+    fn filter_and_fx_controls_edit_the_saved_state() {
+        let mut l = logic();
+        l.view.page = 7;
+        paint(&mut l);
+        let (x, y) = centre(&l, &Target::Box(Field::Filt(6, 3)));
+        l.wheel(x, y, 1.0, Mods::default());
+        assert_eq!(l.hint, "Filter type: Lime low pass");
+        let (x, y) = centre(&l, &Target::Choice(Field::Head(6, 0), 2));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.hint, "Filter mode: dual");
+        let (x, y) = centre(&l, &Target::Knob(Field::Head(6, 2)));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        for _ in 0..125 {
+            l.delta(0.0, -1.0, Mods::default());
+        }
+        l.up(Btn::Left);
+        let st = saved(&l);
+        assert_eq!((st.modules[6].filter.kind, st.modules[6].header[0], st.modules[6].header[2]), (1, 2, 128));
+        assert_eq!(l.hint, "Cutoff frequency: 50%");
+        l.view.page = view::PAGE_FX;
+        paint(&mut l);
+        let (x, y) = centre(&l, &Target::FxUnit(1));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        paint(&mut l);
+        let (x, y) = centre(&l, &Target::Switch(Field::Delay(1, 7)));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        let (x, y) = centre(&l, &Target::Choice(Field::Delay(1, 4), 2));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.hint, "Delay feedback mode: ping-pong");
+        let (x, y) = centre(&l, &Target::Switch(Field::Delay(1, 5)));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        let st = saved(&l);
+        assert!(st.delays[1].on && st.delays[1].synced && !st.delays[0].on);
+        assert_eq!(st.delays[1].mode, 2);
+        ctl::set(&mut l.st, Field::Delay(1, 1), 144);
+        assert_eq!(ctl::hint(&l.st, Field::Delay(1, 1), false), "Delay time: 3:00");
+        let (x, y) = centre(&l, &Target::FxUnit(3));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        paint(&mut l);
+        let (x, y) = centre(&l, &Target::Slider(Field::Reverb(5)));
+        l.moved(x, y, Mods::default());
+        assert_eq!(l.hint, "Reverb decay");
+        l.wheel(x, y, 1.0, Mods::default());
+        assert!(l.hint.starts_with("Reverb decay"), "{}", l.hint);
+        let (x, y) = centre(&l, &Target::Box(Field::S(24)));
+        l.wheel(x, y, 1.0, Mods::default());
+        assert_eq!(saved(&l).s[24], ctl::get(&crate::preset::default_patch(), Field::S(24)) + 1);
     }
 }
