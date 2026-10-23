@@ -363,11 +363,13 @@ mod tests {
     }
 
     /// Replace ▸ (channel menu): the channel keeps its row, notes, mixer track and levels, and takes the new generator.
+    /// A sample the channel had goes: it would be the new Lemon Trio's custom shape sample.
     #[test]
     fn replace_puts_another_generator_on_a_channel() {
         use crate::plugin_menu::Target;
         let mut a = App::new(None);
         a.state.project = crate::app::test_project();
+        a.state.project.channels[2].sample_path = Some("C:/Samples/Kick.wav".into());
         a.plugins.available = crate::plugins::builtin();
         a.state.plugdb.rebuild(&a.plugins);
         let index = a.plugins.index_of(LEMON_TRIO).unwrap();
@@ -379,6 +381,7 @@ mod tests {
         assert!(is_osc3(after));
         assert_eq!(after.name.as_deref(), Some(LEMON_TRIO));
         assert_eq!((after.index, after.mixer_track, after.volume, after.pan), (before.index, before.mixer_track, before.volume, before.pan));
+        assert_eq!(after.sample_path, None, "the new instance starts without a sample");
         assert_eq!(a.state.pending_plugin, Some((2, index)));
         assert!(!a.state.hosted_rows.contains(&2), "the old instance is gone");
     }
