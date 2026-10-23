@@ -2234,6 +2234,22 @@ fn pick(app: &mut App, c: PickCmd, ch: u16) -> Option<String> {
     None
 }
 
+/// "Edit automation clip..." of a parameter menu (spec: plugins/plugin-parameters.md §5.2, a Lemon Studio choice): the
+/// playlist comes to the front with automation clip channel `ch` as the current clip source, its clips in the shown
+/// arrangement selected, and the first of them in view (its start at the left edge, its track at the top). Whether the
+/// arrangement has one.
+pub fn reveal_source(s: &mut State, ch: u16) -> bool {
+    let src = ClipSource::Channel(ch);
+    s.playlist.source = Some(src);
+    s.playlist.picker = PickKind::Automation;
+    s.playlist.sel = clips(s).iter().enumerate().filter(|(_, c)| c.source == src).map(|(i, _)| i).collect();
+    s.raise(crate::app::Win::Playlist);
+    let Some(first) = clips(s).iter().filter(|c| c.source == src).min_by_key(|c| (c.position, c.track)).copied() else { return false };
+    s.playlist_scroll.0 = first.position as f32 / bar(s) as f32 * s.playlist_bar_w;
+    s.playlist_scroll.1 = Rows::new(s).top(first.track);
+    true
+}
+
 pub fn point_menu(s: &State, ch: u16, i: usize, x: f32, y: f32) -> Popup {
     let a = s.project.automation(ch);
     let n = a.map_or(0, |a| a.points.len());

@@ -3,10 +3,11 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Plugin parameters in the app: the parameter lists of hosted instances (shown in the browser, "Browse parameters"),
-//! the last tweaked parameter (Tools / Add menus), and automation clips on plugin parameters (targets, names, value
-//! texts).
+//! the last tweaked parameter (Tools / Add menus), the parameter menu, and automation clips on plugin parameters
+//! (targets, names, value texts).
 //!
-// spec: plugins/plugin-parameters.md §3 (targets), §4 (clip names), §5 (last tweaked), §6 (browse parameters)
+// spec: plugins/plugin-parameters.md §3 (targets), §4 (clip names), §5 (last tweaked; §5.1, §5.2 the parameter
+// menu), §6 (browse parameters)
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -14,7 +15,7 @@ use std::sync::{Arc, Mutex, Weak};
 use os_model::target::{self, Target};
 
 use crate::app::{Action, App, State};
-use crate::playlist::{Cmd, PItem, Popup};
+use crate::playlist::{Cmd, Mark, PItem, Popup};
 use crate::plugins::{fx_key, fx_of};
 
 /// Browser tab of the project tree, and the sections plugin nodes live in (spec: ui/browser.md §2).
@@ -28,6 +29,9 @@ pub struct Entry {
     pub name: String,
     /// Hidden parameters keep their index but are not listed (spec §1).
     pub hidden: bool,
+    /// The default value (normalized) and the number of steps (0 = continuous), for "Set..." (§5.2).
+    pub default: f64,
+    pub steps: u32,
 }
 
 /// A hosted instance's parameter list in plugin order (position = automation index k).
@@ -90,6 +94,10 @@ pub enum PCmd {
     /// "Copy value" / "Paste value" of parameter (hosted key, index).
     Copy(usize, usize),
     Paste(usize, usize),
+    /// A value of the "Set..." submenu: parameter (hosted key, index), normalized value.
+    Set(usize, usize, f64),
+    /// "Edit automation clip...": the automation clip channel (its index) that drives the parameter.
+    EditClip(u16),
 }
 
 /// The hosted key of the instance an automation target points at, and the parameter index.
@@ -181,12 +189,46 @@ pub fn row_hint(s: &State, key: usize, index: usize) -> String {
     }
 }
 
-/// The parameter menu FL shows on a parameter row and in TOOLS ▸ Last tweaked (FL observed, spec §5, §6): automation,
-/// remote control and value entries. `param` = (hosted key, index) of a plugin parameter; `create` = what "Create
-/// automation clip" makes (`None` = disabled).
+/// The automation clip channel that drives target `t`: the first in rack order whose clip is linked to it.
+pub(crate) fn driving_clip(s: &State, t: u32) -> Option<u16> {
+    s.project.channels.iter().map(|c| c.index).find(|&ch| s.project.automation(ch).is_some_and(|a| a.targets.contains(&t)))
+}
+
+/// Stepped parameters with up to this many steps list every value under "Set..." (a Lemon Studio choice).
+const SET_STEPS: u32 = 32;
+
+/// The values "Set..." offers for parameter `index` of instance `key` (§5.2, a Lemon Studio choice): every value of a
+/// stepped parameter with up to `SET_STEPS` steps, named by the plugin's text; otherwise the default, then minimum,
+/// 25 %, 50 %, 75 % and maximum with the plugin's text after them. The current value has the radio mark.
+fn set_items(s: &State, key: usize, index: usize) -> Vec<PItem> {
+    let Some(e) = s.params.lists.get(&key).and_then(|l| l.params.get(index)) else { return Vec::new() };
+    let plugin = s.params.plugin(key);
+    let p = plugin.as_ref().and_then(|p| p.lock().ok());
+    let now = p.as_ref().and_then(|p| p.param_value(e.id));
+    let text = |v: f64| p.as_ref().and_then(|p| p.param_text(e.id, v)).filter(|t| !t.trim().is_empty());
+    let item = |label: String, v: f64| PItem::new(label, Cmd::Param(PCmd::Set(key, index, v))).mark(Mark::Radio(now.is_some_and(|n| (n - v).abs() < 1e-6)));
+    if (1..=SET_STEPS).contains(&e.steps) {
+        let n = f64::from(e.steps);
+        return (0..=e.steps).map(|k| f64::from(k) / n).map(|v| item(text(v).unwrap_or_else(|| format!("{:.0}%", v * 100.0)), v)).collect();
+    }
+    let named = |name: &str, v: f64| item(text(v).map_or_else(|| name.to_string(), |t| format!("{name} ({t})")), v);
+    let mut v = vec![named("Default", e.default.clamp(0.0, 1.0)), PItem::sep()];
+    v.extend([("Minimum", 0.0), ("25%", 0.25), ("50%", 0.5), ("75%", 0.75), ("Maximum", 1.0)].map(|(name, x)| named(name, x)));
+    v
+}
+
+/// The parameter menu FL shows on a parameter row and in TOOLS ▸ Last tweaked (FL observed, spec §5, §5.1, §6):
+/// automation, remote control and value entries. `param` = (hosted key, index) of a plugin parameter; `create` = what
+/// "Create automation clip" makes (`None` = disabled).
 fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32, String, f64)>) -> Vec<PItem> {
     // spec: ui/settings-choices.md "Advanced: Initialize controls automatically"
     let [init, delete] = crate::init::items(s, create.as_ref().map(|c| (c.0, c.2)));
+    // Enabled only while a clip drives the parameter (FL observed); it shows that clip in the playlist (§5.2).
+    let driven = create.as_ref().and_then(|c| driving_clip(s, c.0));
+    let edit = match driven {
+        Some(ch) => PItem::new("Edit automation clip...", Cmd::Param(PCmd::EditClip(ch))),
+        None => PItem::new("Edit automation clip...", Cmd::Nothing).off(),
+    };
     let create = match create {
         Some((tgt, name, v)) => PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, v)),
         None => PItem::new("Create automation clip", Cmd::Nothing).off(),
@@ -199,17 +241,27 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         Some((key, index)) => PItem::new(crate::playlist::paste_label(s), Cmd::Param(PCmd::Paste(key, index))),
         None => PItem::new("Paste value", Cmd::Nothing).off(),
     };
+    let set = param.map(|(key, index)| set_items(s, key, index)).filter(|v| !v.is_empty());
     let mut v = vec![
+        // Lemon Studio has no event editor yet; FL showed the other two disabled.
         PItem::not_yet("Edit events"),
-        PItem::not_yet("Edit events in new window"),
-        PItem::not_yet("Edit events in piano roll"),
+        PItem::new("Edit events in new window", Cmd::Nothing).off(),
+        PItem::new("Edit events in piano roll", Cmd::Nothing).off(),
         init,
         delete,
         PItem::sep(),
         create,
-        PItem::not_yet("Edit automation clip..."),
+        edit,
     ];
-    v.extend(crate::remote::menu_items(param.map(|(key, index)| crate::typein::Target::Param(key, index))));
+    // spec: ui/remote-control.md §1. Ticked on a parameter an automation clip drives (FL observed) or a controller
+    // is linked to.
+    let target = param.map(|(key, index)| crate::typein::Target::Param(key, index));
+    let linked = driven.is_some() || target.is_some_and(|t| crate::remote::link_of(t).is_some());
+    let mut remote = crate::remote::menu_items(target);
+    if let Some(link) = remote.iter_mut().find(|i| i.label == "Link to controller...") {
+        link.mark = Mark::Check(linked);
+    }
+    v.extend(remote);
     v.extend([
         PItem::head("Value"),
         copy,
@@ -219,7 +271,10 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
             Some((key, index)) => PItem::new("Type in value...", Cmd::TypeIn(crate::typein::Target::Param(key, index))),
             None => PItem::not_yet("Type in value..."),
         },
-        PItem::not_yet("Set..."),
+        match set {
+            Some(values) => PItem::sub("Set...", values),
+            None => PItem::not_yet("Set..."),
+        },
     ]);
     v
 }
@@ -272,8 +327,8 @@ impl App {
             if stale {
                 let params = (0..count)
                     .map(|i| match p.param_info(i) {
-                        Some(info) => Entry { id: info.id, name: info.name, hidden: info.hidden },
-                        None => Entry { id: u32::MAX, name: String::new(), hidden: true },
+                        Some(info) => Entry { id: info.id, name: info.name, hidden: info.hidden, default: info.default, steps: info.steps },
+                        None => Entry { id: u32::MAX, name: String::new(), hidden: true, default: 0.0, steps: 0 },
                     })
                     .collect();
                 ui.lists.insert(key, List { plugin: weak, params, seen: look });
@@ -402,16 +457,27 @@ impl App {
                 None
             }
             PCmd::Paste(key, index) => {
-                let id = self.state.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id);
-                let (Some(v), Some(id)) = (self.state.value_clip, id) else { return None };
-                let p = self.state.params.plugin(key)?;
-                let ok = p.lock().ok()?.set_param(id, v);
-                if ok {
-                    self.plugins.mark_edited(key);
-                }
-                (!ok).then(|| "The plugin did not take the value".to_string())
+                let v = self.state.value_clip?;
+                self.params_set(key, index, v)
+            }
+            PCmd::Set(key, index, v) => self.params_set(key, index, v),
+            PCmd::EditClip(ch) => {
+                let found = crate::playlist::reveal_source(&mut self.state, ch);
+                self.invalidate();
+                let name = self.state.project.channel(ch).and_then(|c| c.name.clone()).unwrap_or_else(|| "the automation clip".into());
+                (!found).then(|| format!("No clip of \"{name}\" in this arrangement"))
             }
         }
+    }
+
+    /// Parameter `index` of instance `key` set to `v` from a menu (Paste value, Set...): a host edit (spec §2) that
+    /// counts as the user's edit of the plugin; no undo step. Returns a message when the plugin did not take it.
+    fn params_set(&mut self, key: usize, index: usize, v: f64) -> Option<String> {
+        let ok = set_param_value(&self.state, key, index, v);
+        if ok {
+            self.plugins.mark_edited(key);
+        }
+        (!ok).then(|| "The plugin did not take the value".to_string())
     }
 
     /// "Browse parameters" (spec §6): the browser shows the instance's parameters in the Current project tab.
@@ -473,7 +539,8 @@ mod tests {
         assert_eq!(target_of(s, fx_key(2, 3), 35), Some(target::slot_param(2, 3, 35)));
         assert_eq!(key_of(s, Target::ChannelParam(ch, 7)), Some((0, 7)));
         assert_eq!(key_of(s, Target::SlotParam(2, 3, 35)), Some((fx_key(2, 3), 35)));
-        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![Entry { id: 9, name: "Cutoff".into(), hidden: false }], seen: crate::plugins::Look::never() });
+        let cutoff = Entry { id: 9, name: "Cutoff".into(), hidden: false, default: 1.0, steps: 0 };
+        s.params.lists.insert(0, List { plugin: Weak::<Mutex<Dummy>>::new(), params: vec![cutoff], seen: crate::plugins::Look::never() });
         assert_eq!(clip_name(s, 0, 0), "Lead - Cutoff");
         // Last tweaked keeps the two newest, newest first, without repeats.
         let p = &mut s.params;
@@ -554,6 +621,130 @@ mod tests {
         assert_eq!(a.params_menu(TOOLS_NEXT), None);
         let menu = a.state.playlist.popup.take().unwrap();
         assert!(menu.items.iter().any(|i| matches!(&i.cmd, Cmd::CreateAutomation(t, _, _) if *t == tgt)));
+    }
+
+    /// The app with the built-in EQ hosted in mixer track 2's slot 2, its parameters listed in the browser.
+    fn eq_app() -> (App, usize) {
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let eq = os_model::SlotPlugin { name: crate::plugins::EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() };
+        a.state.project.mixer[2].slots[1] = Some(eq);
+        a.sync_effects();
+        let key = fx_key(2, 1);
+        assert_eq!(a.browse_params(key), None);
+        (a, key)
+    }
+
+    /// The parameter menu of a browser parameter row (right-click).
+    fn row_menu(a: &mut App, key: usize, index: usize) -> Popup {
+        use crate::views::browser::{rows, Item};
+        let row = rows(&a.state).iter().position(|r| r.item == Item::Param(key, index)).unwrap();
+        assert!(a.params_browser_right(row, 10.0, 10.0));
+        a.state.playlist.popup.take().unwrap()
+    }
+
+    fn entry(m: &Popup, label: &str) -> PItem {
+        m.items.iter().find(|i| i.label == label).cloned().unwrap_or_else(|| panic!("no {label:?}"))
+    }
+
+    /// The parameter menu's entries past "Create automation clip" (spec §5.1, §5.2): the event entries greyed (Edit
+    /// events "not yet", the other two disabled as FL shows them); "Set..." lists a stepped parameter's values by the
+    /// plugin's text and a continuous one's default and quarter values, the current one marked, and a pick sets the
+    /// parameter; "Edit automation clip..." is enabled once a clip drives the parameter and shows that clip in the
+    /// playlist; "Link to controller..." is ticked while a clip drives the parameter or a controller is linked to it.
+    #[test]
+    fn parameter_menu_set_edit_clip_and_link() {
+        let (mut a, key) = eq_app();
+        let m = row_menu(&mut a, key, 35);
+        let ev = entry(&m, "Edit events");
+        assert!(!ev.enabled && matches!(ev.cmd, Cmd::NotYet(_)));
+        for label in ["Edit events in new window", "Edit events in piano roll"] {
+            let i = entry(&m, label);
+            assert!(!i.enabled && i.cmd == Cmd::Nothing, "{label}");
+        }
+        assert!(!entry(&m, "Edit automation clip...").enabled);
+        assert!(!entry(&m, "Override global link...").enabled);
+        assert_eq!(entry(&m, "Link to controller...").mark, Mark::Check(false));
+
+        // Set... on Main level (continuous, at its default 0.5): default, then the quarters, with the plugin's text.
+        let set = entry(&m, "Set...");
+        assert!(set.enabled);
+        let labels: Vec<&str> = set.children.iter().map(|i| i.label.as_ref()).collect();
+        assert_eq!(labels.len(), 7);
+        assert!(labels[0].starts_with("Default (") && labels[2].starts_with("Minimum (") && labels[6].starts_with("Maximum ("), "{labels:?}");
+        assert!(set.children[1].sep);
+        let marked: Vec<&str> = set.children.iter().filter(|i| i.mark == Mark::Radio(true)).map(|i| i.label.as_ref()).collect();
+        assert_eq!(marked.len(), 2, "the default and 50%: {labels:?}");
+        let max = set.children[6].cmd.clone();
+        assert_eq!(max, Cmd::Param(PCmd::Set(key, 35, 1.0)));
+        assert_eq!(crate::playlist::run(&mut a, max), None);
+        a.plugins.hosted[&key].plugin.lock().unwrap().idle();
+        assert!((value_of(&a.state, key, 35).unwrap() - 1.0).abs() < 1e-6);
+        let set = entry(&row_menu(&mut a, key, 35), "Set...");
+        assert_eq!(set.children.iter().position(|i| i.mark == Mark::Radio(true)), Some(6), "Maximum is marked now");
+
+        // A stepped parameter (Band 1 type): one entry per value, named by the plugin.
+        let steps = a.state.params.lists[&key].params[21].steps;
+        assert!((1..=SET_STEPS).contains(&steps), "{steps}");
+        let set = entry(&row_menu(&mut a, key, 21), "Set...");
+        assert_eq!(set.children.len(), steps as usize + 1);
+        let last = set.children.last().unwrap();
+        let text = param_text_of(&a, key, 21, 1.0);
+        assert_eq!(last.label.as_ref(), text);
+        crate::playlist::run(&mut a, last.cmd.clone());
+        a.plugins.hosted[&key].plugin.lock().unwrap().idle();
+        assert!((value_of(&a.state, key, 21).unwrap() - 1.0).abs() < 1e-6);
+
+        // A clip on Main level: Edit automation clip... is enabled and Link to controller... ticked.
+        let (tgt, name, v) = automation(&a.state, key, 35).unwrap();
+        crate::playlist::run(&mut a, Cmd::CreateAutomation(tgt, name, v));
+        let ch = a.state.project.channels.last().unwrap().index;
+        let m = row_menu(&mut a, key, 35);
+        assert_eq!(entry(&m, "Link to controller...").mark, Mark::Check(true));
+        let edit = entry(&m, "Edit automation clip...");
+        assert_eq!((edit.enabled, &edit.cmd), (true, &Cmd::Param(PCmd::EditClip(ch))));
+        // Picked: the clip is the current source, selected and in view, the playlist in front.
+        let clip = crate::playlist::clips(&a.state).iter().position(|c| c.source == os_model::ClipSource::Channel(ch)).unwrap();
+        let first = crate::playlist::clips(&a.state)[clip];
+        a.state.playlist.sel.clear();
+        a.state.playlist_scroll = (5000.0, 900.0);
+        a.state.raise(crate::app::Win::Mixer);
+        assert_eq!(crate::playlist::run(&mut a, edit.cmd), None);
+        let s = &a.state;
+        assert_eq!((s.playlist.source, s.playlist.picker), (Some(os_model::ClipSource::Channel(ch)), crate::playlist::PickKind::Automation));
+        assert_eq!(s.playlist.sel, vec![clip]);
+        assert_eq!(s.playlist_scroll.1, crate::playlist::Rows::new(s).top(first.track));
+        assert!(s.playlist_scroll.0 < 5000.0);
+        assert_eq!(s.z.last(), Some(&crate::app::Win::Playlist));
+        // Its clips gone from the arrangement: a message, the source still picked.
+        crate::playlist::arr_mut(&mut a.state).clips.retain(|c| c.source != os_model::ClipSource::Channel(ch));
+        let msg = crate::playlist::run(&mut a, Cmd::Param(PCmd::EditClip(ch)));
+        assert!(msg.is_some_and(|m| m.starts_with("No clip of")));
+        // Another parameter: no clip, not linked; a controller linked to it ticks Link to controller... too.
+        let m = row_menu(&mut a, key, 0);
+        assert!(!entry(&m, "Edit automation clip...").enabled);
+        assert_eq!(entry(&m, "Link to controller...").mark, Mark::Check(false));
+        crate::remote::add(crate::remote::Link::new(0, 7, crate::typein::Target::Param(key, 0)), true);
+        assert_eq!(entry(&row_menu(&mut a, key, 0), "Link to controller...").mark, Mark::Check(true));
+        crate::remote::remove(crate::typein::Target::Param(key, 0));
+
+        // TOOLS ▸ Last tweaked on the tempo (a host control): Edit automation clip... follows a tempo clip too.
+        a.note_host_tweak(&Action::Tempo);
+        let (tgt, name, v) = a.automation_target(&Action::Tempo).unwrap();
+        crate::playlist::run(&mut a, Cmd::CreateAutomation(tgt, name, v));
+        assert_eq!(a.params_menu(TOOLS_LAST), None);
+        let m = a.state.playlist.popup.take().unwrap();
+        let tempo = a.state.project.channels.last().unwrap().index;
+        assert_eq!(entry(&m, "Edit automation clip...").cmd, Cmd::Param(PCmd::EditClip(tempo)));
+        assert!(!entry(&m, "Set...").enabled, "no plugin parameter");
+    }
+
+    /// The plugin's text for value `v` of parameter `index` of instance `key`.
+    fn param_text_of(a: &App, key: usize, index: usize, v: f64) -> String {
+        let id = a.state.params.lists[&key].params[index].id;
+        a.state.params.plugin(key).unwrap().lock().unwrap().param_text(id, v).unwrap()
     }
 
     /// Corpus check (OPENSTUDIO_FLP_CORPUS): automation clips made on Parametric EQ 2 slot parameters load as slot

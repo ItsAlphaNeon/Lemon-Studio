@@ -50,6 +50,10 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - CLAP, VST3 and VST2 instruments and effects, with their editors and saved state
 - A plugin's right-click menu on a parameter offers "Create automation clip" (CLAP and VST3); a VST3 plugin that asks
   the host to show its menu gets one of Lemon Studio's own menus, docked or detached
+- The parameter menu (a parameter in the browser after "Browse parameters", TOOLS ▸ Last tweaked): create or edit
+  the parameter's automation clip, link a controller, copy, paste, type in or set a value (a submenu of its steps, or
+  its default and minimum to maximum), remove an initial value read from a file
+- Not yet in the parameter menu: Edit events, and Init song with this position on a plugin parameter
 - VST2 shells (one file offering several plugins); a VST2 plugin's state is saved in the layout FL Studio's projects use
 - On Windows, a plugin that crashes is stopped (its slot passes the sound through) instead of closing
   Lemon Studio
