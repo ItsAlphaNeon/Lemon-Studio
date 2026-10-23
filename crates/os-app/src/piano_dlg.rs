@@ -3,19 +3,19 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The piano roll's Flam (Alt+F), Claw machine (Alt+W), Flip (Alt+Y), Scale levels (Alt+X), Limit (Alt+K), LFO
-//! (Alt+O) and Quantize (Alt+Q) dialogs: one tool window shows whichever is open. As with Strum, its session previews
-//! every change on the notes (and LFO's on a channel lane's control points), Accept keeps the result as one undo step
-//! and × puts the notes back. The tools are `flam.rs`, `claw.rs`, `flip.rs`, `levels.rs`, `limit.rs`, `lfo.rs` and
-//! `quantize.rs`; the window is `views/piano_dlg.rs`.
+//! (Alt+O), Quantize (Alt+Q) and Chop (Alt+U) dialogs: one tool window shows whichever is open. As with Strum, its
+//! session previews every change on the notes (and LFO's on a channel lane's control points), Accept keeps the result
+//! as one undo step and × puts the notes back. The tools are `flam.rs`, `claw.rs`, `flip.rs`, `levels.rs`, `limit.rs`,
+//! `lfo.rs`, `quantize.rs` and `chop.rs`; the window is `views/piano_dlg.rs`.
 // spec: ui/piano-flam.md, ui/piano-claw.md, ui/piano-flip.md, ui/piano-level-scaling.md, ui/piano-limit.md, ui/piano-lfo.md,
-// ui/piano-quantize.md
+// ui/piano-quantize.md, ui/piano-chop.md
 
 use os_model::{ControlPoint, Note};
 
 use crate::app::State;
 use crate::piano::{self, Lane};
 use crate::playlist::{Cmd, Mark, PItem};
-use crate::{chords, claw, flam, flip, levels, lfo, limit, quantize};
+use crate::{chop, chords, claw, flam, flip, levels, lfo, limit, quantize};
 
 /// Which dialog the window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -28,11 +28,12 @@ pub enum Tool {
     Claw,
     Lfo,
     Quantize,
+    Chop,
 }
 
 impl Tool {
     /// How many there are (`Ui::pos`).
-    pub const COUNT: usize = 7;
+    pub const COUNT: usize = 8;
 
     pub fn title(self) -> &'static str {
         match self {
@@ -43,6 +44,7 @@ impl Tool {
             Tool::Claw => "Piano roll - claw machine",
             Tool::Lfo => "Piano roll - LFO",
             Tool::Quantize => "Piano roll - quantizer",
+            Tool::Chop => "Piano roll - chopper",
         }
     }
 
@@ -61,6 +63,7 @@ impl Tool {
             Tool::Claw => "Piano roll claw machine",
             Tool::Lfo => "Piano roll LFO",
             Tool::Quantize => "Piano roll quantize",
+            Tool::Chop => "Piano roll chop",
         }
     }
 
@@ -73,6 +76,7 @@ impl Tool {
             Tool::Claw => "claw machine applied",
             Tool::Lfo => "LFO applied",
             Tool::Quantize => "quantized",
+            Tool::Chop => "chopped",
         }
     }
 
@@ -104,11 +108,14 @@ pub enum Knob {
     QSens,
     QDur,
     QLevel(u8),
+    /// Chop's Time mul and its Levels (an index into `quantize::LEVELS`).
+    ChopTimeMul,
+    ChopLevel(u8),
 }
 
 impl Knob {
     /// Change of the 0..1 position per wheel notch (piano-flam.md §1, piano-level-scaling.md §1, piano-claw.md §1,
-    /// piano-lfo.md §1, piano-quantize.md §1).
+    /// piano-lfo.md §1, piano-quantize.md §1, piano-chop.md §1).
     pub fn notch(self) -> f32 {
         match self {
             Knob::FlamTime => flam::TIME_NOTCH,
@@ -123,6 +130,8 @@ impl Knob {
             Knob::QStart | Knob::QDur => quantize::STRENGTH_NOTCH,
             Knob::QSens => quantize::SENS_NOTCH,
             Knob::QLevel(_) => quantize::LEVEL_NOTCH,
+            Knob::ChopTimeMul => chop::TIME_MUL_NOTCH,
+            Knob::ChopLevel(_) => chop::LEVEL_NOTCH,
         }
     }
 
@@ -138,7 +147,7 @@ impl Knob {
     /// Position after Reset; Center's is on the velocity lane.
     pub fn default_pos(self) -> f32 {
         let (f, l, c) = (flam::Settings::default(), levels::Settings::default(), claw::Settings::default());
-        Ui::pos_of(self, &f, &l, &c, &lfo::Settings::default(), &quantize::Settings::default())
+        Ui::pos_of(self, &f, &l, &c, &lfo::Settings::default(), &quantize::Settings::default(), &chop::Settings::default())
     }
 }
 
@@ -167,7 +176,8 @@ pub enum Act {
     LfoEnd,
     LfoLog,
     ShapeMenu,
-    /// Quantize's template folder button (a file dialog) and ▸ menu, and its duration menu.
+    /// Quantize's template folder button (a file dialog) and ▸ menu, and its duration menu; Chop's pattern folder
+    /// button and ▸ menu are the first two.
     TemplateFolder,
     TemplateMenu,
     DurMenu,
@@ -213,6 +223,8 @@ pub struct Ui {
     pub lfo: lfo::Settings,
     pub quant: quantize::Settings,
     pub quant_tpl: quantize::Template,
+    pub chop: chop::Settings,
+    pub chop_pat: chop::ChopPattern,
     /// Limit's collapsed sections (`Act::Collapse`); a view setting, kept as it is.
     pub collapsed: [bool; 2],
     /// Limit's keyboard view: px from C0's left edge to the view's.
@@ -225,6 +237,8 @@ pub struct Ui {
     kept_lfo: lfo::Settings,
     kept_quant: quantize::Settings,
     kept_quant_tpl: quantize::Template,
+    kept_chop: chop::Settings,
+    kept_chop_pat: chop::ChopPattern,
     /// The Control lane Scale levels was last accepted on (its Center follows a new lane).
     kept_lane: Option<Lane>,
     session: Option<Session>,
@@ -248,7 +262,8 @@ fn pct(v: f32) -> i64 {
 }
 
 impl Ui {
-    fn pos_of(k: Knob, f: &flam::Settings, l: &levels::Settings, c: &claw::Settings, o: &lfo::Settings, q: &quantize::Settings) -> f32 {
+    #[allow(clippy::too_many_arguments)]
+    fn pos_of(k: Knob, f: &flam::Settings, l: &levels::Settings, c: &claw::Settings, o: &lfo::Settings, q: &quantize::Settings, ch: &chop::Settings) -> f32 {
         match k {
             Knob::FlamTime => f.time,
             Knob::FlamVel => f.vel,
@@ -268,12 +283,14 @@ impl Ui {
             Knob::QSens => q.sens_pos(),
             Knob::QDur => q.dur,
             Knob::QLevel(i) => q.levels[usize::from(i.min(5))],
+            Knob::ChopTimeMul => ch.time_mul_pos(),
+            Knob::ChopLevel(i) => ch.levels[usize::from(i.min(5))],
         }
     }
 
     /// The 0..1 position of knob `k`.
     pub fn get(&self, k: Knob) -> f32 {
-        Self::pos_of(k, &self.flam, &self.levels, &self.claw, &self.lfo, &self.quant)
+        Self::pos_of(k, &self.flam, &self.levels, &self.claw, &self.lfo, &self.quant, &self.chop)
     }
 
     pub fn set(&mut self, k: Knob, v: f32) {
@@ -297,11 +314,13 @@ impl Ui {
             Knob::QSens => self.quant.set_sens_pos(v),
             Knob::QDur => self.quant.dur = v,
             Knob::QLevel(i) => self.quant.levels[usize::from(i.min(5))] = v,
+            Knob::ChopTimeMul => self.chop.set_time_mul_pos(v),
+            Knob::ChopLevel(i) => self.chop.levels[usize::from(i.min(5))] = v,
         }
     }
 
     /// The hint-bar text of a knob (piano-flam.md §1, piano-level-scaling.md §1, piano-claw.md §5, piano-lfo.md §1,
-    /// piano-quantize.md §1).
+    /// piano-quantize.md §1, piano-chop.md §1).
     pub fn text(&self, k: Knob, ppq: u32) -> String {
         let (l, o) = (&self.levels, &self.lfo);
         match k {
@@ -323,12 +342,17 @@ impl Ui {
             Knob::QSens => self.quant.sens_text(ppq),
             Knob::QDur => quantize::Settings::pct_text(self.quant.dur),
             Knob::QLevel(i) => quantize::Settings::pct_text(self.quant.levels[usize::from(i.min(5))]),
+            Knob::ChopTimeMul => self.chop.time_mul_text(),
+            Knob::ChopLevel(i) => quantize::Settings::pct_text(self.chop.levels[usize::from(i.min(5))]),
         }
     }
 
     /// Whether `a` is a switch that is on.
     pub fn on(&self, a: Act) -> bool {
+        let chop = self.tool == Tool::Chop;
         match a {
+            Act::Absolute if chop => self.chop.absolute,
+            Act::Group if chop => self.chop.group,
             Act::Absolute => self.flam.absolute,
             Act::Before => self.flam.before,
             Act::Group => self.flam.group,
@@ -378,6 +402,7 @@ pub fn open(s: &mut State, tool: Tool) {
         Tool::Claw => d.claw = d.kept_claw,
         Tool::Lfo => d.lfo = d.kept_lfo,
         Tool::Quantize => (d.quant, d.quant_tpl) = (d.kept_quant, d.kept_quant_tpl.clone()),
+        Tool::Chop => (d.chop, d.chop_pat) = (d.kept_chop, d.kept_chop_pat.clone()),
     }
     preview(s);
 }
@@ -489,6 +514,14 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
             let (set, tpl, ppq) = (d.quant, d.quant_tpl.clone(), u32::from(s.project.ppq.max(4)));
             crate::piano_tools::apply_as(s, |_, ns| quantize::quantize(ns, &tpl.0, &set, ppq), step)
         }
+        // The new groups skip the numbers in use (piano-chop.md §6).
+        Tool::Chop => {
+            let (set, pat, ppq) = (d.chop, d.chop_pat.clone(), u32::from(s.project.ppq.max(4)));
+            let mut used: Vec<u16> = piano::notes(s).iter().map(|n| n.unk14).filter(|&g| g != 0).collect();
+            used.sort_unstable();
+            used.dedup();
+            crate::piano_tools::apply_as(s, |_, ns| chop::chop(ns, &pat.0, &set, ppq, &used), step)
+        }
     }
 }
 
@@ -569,6 +602,7 @@ pub fn accept(s: &mut State) -> String {
         Tool::Claw => d.kept_claw = d.claw,
         Tool::Lfo => d.kept_lfo = d.lfo,
         Tool::Quantize => (d.kept_quant, d.kept_quant_tpl) = (d.quant, d.quant_tpl.clone()),
+        Tool::Chop => (d.kept_chop, d.kept_chop_pat) = (d.chop, d.chop_pat.clone()),
     }
     if run(s, Some(tool.step())) {
         format!("Piano roll: {}", tool.done())
@@ -600,7 +634,10 @@ pub fn act(s: &mut State, a: Act) {
             Tool::Claw => d.claw = claw::Settings::default(),
             Tool::Lfo => d.lfo = lfo::Settings::default(),
             Tool::Quantize => (d.quant, d.quant_tpl) = (quantize::Settings::default(), quantize::Template::default()),
+            Tool::Chop => (d.chop, d.chop_pat) = (chop::Settings::default(), chop::ChopPattern::default()),
         },
+        Act::Absolute if d.tool == Tool::Chop => d.chop.absolute = !d.chop.absolute,
+        Act::Group if d.tool == Tool::Chop => d.chop.group = !d.chop.group,
         Act::Absolute => d.flam.absolute = !d.flam.absolute,
         Act::Before => d.flam.before = !d.flam.before,
         Act::Group => d.flam.group = !d.flam.group,
@@ -739,6 +776,21 @@ pub fn quant_cmd(s: &mut State, c: quantize::QCmd) -> Option<String> {
         },
         quantize::QCmd::Snap(i) => s.piano_dlg.quant_tpl = quantize::Template::snap(usize::from(i)),
         quantize::QCmd::Mode(m) => s.piano_dlg.quant.mode = m,
+    }
+    preview(s);
+    msg
+}
+
+/// A pattern picked from Chop's ▸ menu or its folder button's file dialog (None: the built-in Default): it previews at
+/// once. Returns a message for a file that could not be read.
+pub fn chop_cmd(s: &mut State, p: Option<std::path::PathBuf>) -> Option<String> {
+    let mut msg = None;
+    match p {
+        None => s.piano_dlg.chop_pat = chop::ChopPattern::default(),
+        Some(p) => match crate::arpeggiate::load(&p) {
+            Ok(pat) => s.piano_dlg.chop_pat = chop::ChopPattern(pat),
+            Err(e) => msg = Some(format!("Chopper: {e}")),
+        },
     }
     preview(s);
     msg

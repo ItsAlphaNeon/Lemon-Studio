@@ -5,10 +5,10 @@
 //! The piano roll's small tool dialogs, laid out as FL's: Flam ("Piano roll - flamer", 198 × 241), Flip ("Piano roll -
 //! score flipper", 162 × 160), Scale levels ("Piano roll - level scaling", 172 × 277), Limit ("Piano roll - limiter /
 //! transposer", 432 × 295), Claw machine ("Piano roll - claw machine", 172 × 245), LFO ("Piano roll - LFO",
-//! 212 × 323) and Quantize ("Piano roll - quantizer", 281 × 309). One window shows whichever is open
-//! (`piano_dlg::Ui::tool`).
+//! 212 × 323), Quantize ("Piano roll - quantizer", 281 × 309) and Chop ("Piano roll - chopper", 281 × 296). One window
+//! shows whichever is open (`piano_dlg::Ui::tool`).
 // spec: ui/piano-flam.md §1, ui/piano-flip.md §1, ui/piano-level-scaling.md §1, ui/piano-limit.md §1, ui/piano-claw.md §1,
-// ui/piano-lfo.md §1, ui/piano-quantize.md §1
+// ui/piano-lfo.md §1, ui/piano-quantize.md §1, ui/piano-chop.md §1
 
 use os_ui::kit::{self, Dir, lemon as lk};
 use os_ui::{Font, Glyph, Rect};
@@ -22,7 +22,7 @@ use crate::piano_dlg::{self as dlg, Act, KB_W, KEY_W, Knob, Tool};
 use crate::views::piano::{TOP_KEY, is_black, key_name};
 
 /// Each dialog's size, by `Tool::index`; Limit's with both sections open.
-const SIZES: [(f32, f32); Tool::COUNT] = [(198.0, 241.0), (162.0, 160.0), (172.0, 277.0), (432.0, 295.0), (172.0, 245.0), (212.0, 323.0), (281.0, 309.0)];
+const SIZES: [(f32, f32); Tool::COUNT] = [(198.0, 241.0), (162.0, 160.0), (172.0, 277.0), (432.0, 295.0), (172.0, 245.0), (212.0, 323.0), (281.0, 309.0), (281.0, 296.0)];
 
 /// The panel heights under Limit's two section headers (piano-limit.md §1): a collapsed section's comes off the window.
 const PANELS: [f32; 2] = [67.0, 110.0];
@@ -73,9 +73,9 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     let hov = ui.hit(close.outset(4.0), Action::CloseWin(Win::PianoDlg), "Close (puts the notes back)");
     icons::draw(ui.c, Icon::Close, close.outset(1.0), if hov { t.tx(0xffffff) } else { t.glyph });
 
-    // Limit, LFO and Quantize draw their own panels.
+    // Limit, LFO, Quantize and Chop draw their own panels.
     let body = at(7.0, 28.0, w - 14.0, h - 71.0);
-    if !matches!(d.tool, Tool::Limit | Tool::Lfo | Tool::Quantize) {
+    if !matches!(d.tool, Tool::Limit | Tool::Lfo | Tool::Quantize | Tool::Chop) {
         if lemon {
             ui.c.stroke_rrect(body, lk::r_small(t), 1.0, line);
         } else {
@@ -91,6 +91,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         Tool::Claw => claw(ui, s, x0, y0),
         Tool::Lfo => lfo(ui, s, x0, y0),
         Tool::Quantize => quant(ui, s, x0, y0),
+        Tool::Chop => chop(ui, s, x0, y0),
     }
 
     // Reset, Accept.
@@ -292,24 +293,7 @@ fn quant(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
             ui.c.fill_rect(r.inset(1.0), panel);
         }
     }
-
-    // Template: its name, the folder button, the ▸ menu.
-    label(ui, lf, x0 + 16.0, y0 + 42.0, -1, t.text_dim, "Template");
-    let name = ui.c.fit_font(lf, &d.quant_tpl.0.name, 140.0);
-    label(ui, name, x0 + 70.0, y0 + 42.0, -1, t.text, &d.quant_tpl.0.name);
-    for (r, act, hint) in [
-        (Rect::new(x0 + 220.0, y0 + 31.0, 29.0, 22.0), Act::TemplateFolder, "Load a quantize template"),
-        (Rect::new(x0 + 251.0, y0 + 31.0, 19.0, 22.0), Act::TemplateMenu, "Pick a template"),
-    ] {
-        let hov = ui.hit(r, Action::PianoDlg(act), hint);
-        super::button_face(ui, r, if hov { Look::Hover } else { Look::Off });
-        let ink = if hov { t.tx(0xffffff) } else { t.glyph };
-        if act == Act::TemplateFolder {
-            icons::draw(ui.c, Icon::Folder, Rect::new(r.cx() - 8.0, r.cy() - 8.0, 16.0, 16.0), ink);
-        } else {
-            icons::draw(ui.c, Icon::ArrowRight, Rect::new(r.cx() - 6.0, r.cy() - 6.0, 12.0, 12.0), ink);
-        }
-    }
+    score_box(ui, x0, y0, "Template", 70.0, &d.quant_tpl.0.name, ["Load a quantize template", "Pick a template"]);
 
     // Strength: Start time, Sensitivity, Duration and its mode box.
     label(ui, lf, x0 + 12.0, y0 + 73.0, -1, t.text, "Strength");
@@ -323,17 +307,90 @@ fn quant(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
     let hov = ui.hit(r, Action::PianoDlg(Act::DurMenu), "What happens to the note lengths");
     kit::combo(ui.c, t, r, d.quant.mode.name(), Font::new(13), kit::State::hover(hov));
 
-    // Levels: knobs ringed in FL's colours, their names under them.
     label(ui, lf, x0 + 46.0, y0 + 218.0, 1, t.text, "Levels");
+    level_knobs(ui, s, x0, y0, 218.0, Knob::QLevel);
+}
+
+/// Quantize's Template box and Chop's Pattern box: the title, the file's name (from `name_x`, or past a wider title),
+/// the folder button (a file dialog) and ▸ (the folder's menu).
+fn score_box(ui: &mut Ui, x0: f32, y0: f32, title: &str, name_x: f32, name: &str, hints: [&'static str; 2]) {
+    let t = ui.t;
+    let lf = Font::new(15);
+    label(ui, lf, x0 + 16.0, y0 + 42.0, -1, t.text_dim, title);
+    let name_x = name_x.max(22.0 + ui.c.text_width(lf, title));
+    let f = ui.c.fit_font(lf, name, 210.0 - name_x);
+    label(ui, f, x0 + name_x, y0 + 42.0, -1, t.text, name);
+    for (r, act, hint) in [
+        (Rect::new(x0 + 220.0, y0 + 31.0, 29.0, 22.0), Act::TemplateFolder, hints[0]),
+        (Rect::new(x0 + 251.0, y0 + 31.0, 19.0, 22.0), Act::TemplateMenu, hints[1]),
+    ] {
+        let hov = ui.hit(r, Action::PianoDlg(act), hint);
+        super::button_face(ui, r, if hov { Look::Hover } else { Look::Off });
+        let ink = if hov { t.tx(0xffffff) } else { t.glyph };
+        if act == Act::TemplateFolder {
+            icons::draw(ui.c, Icon::Folder, Rect::new(r.cx() - 8.0, r.cy() - 8.0, 16.0, 16.0), ink);
+        } else {
+            icons::draw(ui.c, Icon::ArrowRight, Rect::new(r.cx() - 6.0, r.cy() - 6.0, 12.0, 12.0), ink);
+        }
+    }
+}
+
+/// The six Levels knobs of Quantize and Chop, their centres at window-relative `cy`: ringed in FL's colours, their names
+/// under them.
+fn level_knobs(ui: &mut Ui, s: &State, x0: f32, y0: f32, cy: f32, knob: fn(u8) -> Knob) {
+    let t = ui.t;
     for (i, (&cx, &(name, _))) in [68.0, 103.0, 137.0, 175.0, 211.0, 249.0].iter().zip(crate::quantize::LEVELS.iter()).enumerate() {
-        let k = Knob::QLevel(i as u8);
-        let id = KnobId::PianoDlg(k);
-        let (cx, cy) = (x0 + cx, y0 + 218.0);
+        let id = KnobId::PianoDlg(knob(i as u8));
+        let (cx, cy) = (x0 + cx, y0 + cy);
         ui.hit(Rect::new(cx - 15.0, cy - 15.0, 30.0, 30.0), Action::Knob(id), s.knob_text(id));
         super::knob(ui, cx, cy, 13.0, s.knob(id), false, t.text, t.text_dim);
         ui.c.stroke_circle(cx, cy, 14.5, 1.5, t.h(super::arpeggiate::LEVEL_COLOURS[i]));
-        label(ui, Font::new(9), cx, y0 + 241.0, 0, t.text_dim, name);
+        label(ui, Font::new(9), cx, cy + 23.0, 0, t.text_dim, name);
     }
+}
+
+/// Chop (piano-chop.md §1): the Pattern box and the Options panel with the Time mul knob (a step per tick), the six
+/// Levels knobs and the Absolute pattern and Group notes switches.
+fn chop(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
+    let t = ui.t;
+    let lemon = super::lemon(ui);
+    let lf = Font::new(15);
+    let (line, panel) = (t.s(0x16191a), t.s(0x272b2d));
+    for (x, y, w, h) in [(7.0, 28.0, 267.0, 28.0), (7.0, 63.0, 267.0, 191.0)] {
+        let r = Rect::new(x0 + x, y0 + y, w, h);
+        if lemon {
+            ui.c.stroke_rrect(r, lk::r_small(t), 1.0, line);
+        } else {
+            ui.c.fill_rect(r, line);
+            ui.c.fill_rect(r.inset(1.0), panel);
+        }
+    }
+    score_box(ui, x0, y0, "Pattern", 59.0, &s.piano_dlg.chop_pat.0.name, ["Load a chopping pattern", "Pick a pattern"]);
+
+    // The Options header: a tab with a slanted right edge.
+    let f = Font::new(14).bold();
+    let head = Rect::new(x0 + 8.0, y0 + 64.0, 265.0, 19.0);
+    ui.c.fill_rect(head, t.s(0x232427));
+    let right = head.x + ui.c.text_width(f, "Options") + 16.0;
+    let mut g = Glyph::new();
+    g.polygon(&[(head.x, head.y), (right, head.y), (right - 6.0, head.bottom()), (head.x, head.bottom())]);
+    ui.c.glyph(t.s(0x1e2023), &g);
+    label(ui, f, head.x + 5.0, head.cy(), -1, t.text, "Options");
+
+    // Time mul: a ticked knob, one tick per step.
+    label(ui, lf, x0 + 16.0, y0 + 103.0, -1, t.text, "Time mul");
+    let (cx, cy) = (x0 + 88.0, y0 + 103.0);
+    for i in 0..7 {
+        let a = (-135.0 + 45.0 * i as f32).to_radians();
+        let (sx, sy) = (a.sin(), -a.cos());
+        ui.c.line(cx + sx * 17.0, cy + sy * 17.0, cx + sx * 20.0, cy + sy * 20.0, 1.0, t.text_dim);
+    }
+    lfo_knob(ui, s, cx, cy, 14.0, Knob::ChopTimeMul, false, kit::KnobLook::Ball, false);
+
+    label(ui, lf, x0 + 16.0, y0 + 160.0, -1, t.text, "Levels");
+    level_knobs(ui, s, x0, y0, 160.0, Knob::ChopLevel);
+    switch(ui, s, x0, y0, 21.0, 214.0, Act::Absolute, "Absolute pattern", "Repeat the pattern from the song's start (off: from each note's start)", lf, false);
+    switch(ui, s, x0, y0, 23.0, 238.0, Act::Group, "Group notes", "Group the pieces of each note", Font::new(13), false);
 }
 
 /// One of LFO's or Quantize's knobs at screen (`cx`, `cy`); a grey one takes no clicks.
