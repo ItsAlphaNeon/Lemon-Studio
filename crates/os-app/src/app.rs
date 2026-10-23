@@ -1863,6 +1863,11 @@ impl App {
                     crate::timesig::set_start(&mut self.state, n, num, den);
                 }
             }
+            Then::SongSignature(at, num, den) => {
+                if reply == Reply::Button(Answer::Ok) {
+                    crate::timesig::set_song(&mut self.state, at, num, den);
+                }
+            }
             Then::DataFolder(d) => self.data_folder_done(d, reply),
         }
         self.invalidate();
@@ -16756,7 +16761,7 @@ mod tests {
         let start = |app: &App| app.state.project.pattern(1).unwrap().markers.iter().find(|m| m.position == 0 && m.kind == TimeMarker::SIGNATURE).cloned();
         // The dialog, at 4/4.
         app.menu_item(PATTERNS, entry);
-        assert_eq!(form(&app), Some(SigForm { pattern: 1, num: 4, den: 4 }));
+        assert_eq!(form(&app), Some(SigForm { pattern: 1, num: 4, den: 4, song: None }));
         frame(&mut app, &mut c, None);
         // Numerator: 1..16 under the box, 4 marked; 3 picked.
         let num_box = hit_rect(&app, &Action::Dlg(DHit::SigValue(false)));
@@ -16820,7 +16825,7 @@ mod tests {
         // Yes: the marker goes at once and the dialog opens at 4/4; closed with its × it leaves no start marker.
         app.menu_item(PATTERNS, entry);
         app.key(&Key::Character("y".into()), false, false);
-        assert_eq!(form(&app), Some(SigForm { pattern: 1, num: 4, den: 4 }));
+        assert_eq!(form(&app), Some(SigForm { pattern: 1, num: 4, den: 4, song: None }));
         assert!(start(&app).is_none());
         frame(&mut app, &mut c, None);
         let close = hit_rect(&app, &Action::Dlg(DHit::Close));
@@ -16830,7 +16835,7 @@ mod tests {
         // No marker: straight to the dialog; Enter accepts. Another pattern gets its own.
         app.state.pattern = 2;
         app.menu_item(PATTERNS, entry);
-        assert_eq!(form(&app), Some(SigForm { pattern: 2, num: 4, den: 4 }));
+        assert_eq!(form(&app), Some(SigForm { pattern: 2, num: 4, den: 4, song: None }));
         app.key(&Key::Named(NamedKey::Enter), false, false);
         assert!(!app.modal_open());
         let four = TimeMarker { kind: TimeMarker::SIGNATURE, ..TimeMarker::new(0, "4/4") };
@@ -16933,8 +16938,11 @@ mod tests {
         assert!(!app.modal_open() && app.state.project.pattern(1).unwrap().markers.is_empty());
         assert_eq!(len(&app), 384);
         assert_eq!(lengths(&app), [vec![384, 768, 384, 384], vec![384]]);
-        // The playlist's own time-signature markers ("4/4") are shown once too; they leave the pattern's length alone.
+        // The playlist's own time-signature markers ("4/4", from the same dialog) are shown once too; they leave the
+        // pattern's length alone.
         pl::run(&mut app, Cmd::AddSignature);
+        assert!(crate::timesig::form_open(&app.state));
+        app.key(&Key::Named(NamedKey::Enter), false, false);
         let m = pl::arr_mut(&mut app.state).markers.last().cloned().unwrap();
         assert_eq!((m.name.as_str(), marker_label(&m).as_str()), ("4/4", "4/4"));
         assert_eq!(len(&app), 384);
@@ -16943,6 +16951,155 @@ mod tests {
         // The piano roll draws the 3/8 grid.
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         crate::timesig::set_start(&mut app.state, 1, 3, 8);
+        frame(&mut app, &mut c, None);
+    }
+
+    /// The playlist's time markers (spec: ui/playlist.md §7a): the ▸ menu's Time markers items and the marker menus,
+    /// what they add, Move content (FL's measured case), the actions and the time signature dialog, Delete in the
+    /// time selection, undo, position order, the song position on a click and on opening.
+    #[test]
+    fn playlist_time_markers() {
+        use crate::playlist::{self as pl, Cmd, Mark, PlDrag};
+        use os_model::{Arrangement, Clip, ClipSource, TimeMarker as M};
+        use winit::keyboard::{Key, NamedKey};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.arrangements = vec![Arrangement { clips: (0..5).map(|i| Clip::new(384 * i, 384, 0, ClipSource::Pattern(1))).collect(), ..Default::default() }];
+        pl::arr_mut(&mut app.state);
+        let marks = |app: &App| pl::markers(&app.state).iter().map(|m| (m.position, m.kind, m.name.clone())).collect::<Vec<_>>();
+        let mk = |p: u32, k: u8, n: &str| (p, k, n.to_string());
+        let set = |app: &mut App, list: &[(u32, u8, &str)]| {
+            pl::arr_mut(&mut app.state).markers = list.iter().map(|&(p, k, n)| M { kind: k, ..M::new(p, n) }).collect();
+        };
+
+        // The ▸ menu's submenu in FL's order; what is not built is greyed, Quantize song jumps too.
+        let menu = pl::options_menu(&app.state, 0.0, 0.0);
+        let sub = &menu.items.iter().find(|it| it.label == "Time markers").expect("Time markers").children;
+        let want = [
+            ("Add one...", true),
+            ("Add auto", true),
+            ("Add two...", false),
+            ("Add one every", true),
+            ("Add jump to next bar", true),
+            ("Add time signature change...", true),
+            ("Add key marker", false),
+            ("Place loop", true),
+            ("Delete", true),
+            ("Change to marker loop", true),
+        ];
+        assert_eq!(sub.iter().map(|it| (&*it.label, it.enabled)).collect::<Vec<_>>(), want);
+        assert!(menu.items.iter().any(|it| it.label == "Quantize song jumps" && !it.enabled && it.children.len() == 6));
+        pl::run(&mut app, Cmd::MarkerEveryMenu);
+        let every = app.state.playlist.popup.take().expect("its list");
+        assert_eq!(every.items.iter().map(|it| it.cmd.clone()).collect::<Vec<_>>(), [1, 2, 4, 8].map(Cmd::MarkerEvery));
+
+        // Add auto and Add jump to next bar, at the song position, kept in position order; each one undo step.
+        let steps = app.state.history.len();
+        app.state.playlist.pos = 768;
+        pl::run(&mut app, Cmd::AddAutoMarker);
+        app.state.playlist.pos = 384;
+        pl::run(&mut app, Cmd::AddJumpMarker);
+        assert_eq!(marks(&app), [mk(384, M::SKIP, " "), mk(768, M::PLAIN, "Auto"), mk(768, M::PLAIN, " ")]);
+        assert_eq!(app.state.history.len(), steps + 2);
+        pl::run(&mut app, Cmd::Undo);
+        assert_eq!(marks(&app), [mk(768, M::PLAIN, "Auto")]);
+
+        // Place loop: at the time selection's start, at 0 without one; a second time takes it away.
+        set(&mut app, &[]);
+        pl::run(&mut app, Cmd::PlaceLoop);
+        assert_eq!(marks(&app), [mk(0, M::LOOP, " ")]);
+        pl::run(&mut app, Cmd::PlaceLoop);
+        assert_eq!(marks(&app), []);
+        app.state.playlist.range = Some((792, 1560));
+        pl::run(&mut app, Cmd::PlaceLoop);
+        assert_eq!(marks(&app), [mk(792, M::LOOP, " ")]);
+
+        // Add one every bar over the selection, as FL measured: "Part #1" at 792, "Part #2" at 1176.
+        set(&mut app, &[]);
+        pl::run(&mut app, Cmd::MarkerEvery(1));
+        app.state.playlist.edit.as_mut().expect("the base name box").text = "Part".into();
+        pl::commit_edit(&mut app.state);
+        assert_eq!(marks(&app), [mk(792, M::PLAIN, "Part #1"), mk(1176, M::PLAIN, "Part #2")]);
+
+        // Delete and Change to marker loop: the markers in the selection (start in, end out); all without one.
+        set(&mut app, &[(384, M::PLAIN, "A"), (768, M::START, "B"), (1536, M::PLAIN, "C")]);
+        app.state.playlist.range = Some((384, 1536));
+        pl::run(&mut app, Cmd::DeleteMarkers);
+        assert_eq!(marks(&app), [mk(1536, M::PLAIN, "C")]);
+        set(&mut app, &[(384, M::PLAIN, "A"), (768, M::START, "B")]);
+        app.state.playlist.range = None;
+        pl::run(&mut app, Cmd::ToMarkerLoop);
+        assert_eq!(marks(&app), [mk(384, M::MARKER_LOOP, "A"), mk(768, M::MARKER_LOOP, "B")]);
+
+        // Move content right on B (FL: A 384, B 768, C 1536, clips to 1920): B's section and C's trade places.
+        set(&mut app, &[(384, M::PLAIN, "A"), (768, M::PLAIN, "B"), (1536, M::PLAIN, "C")]);
+        let before = app.state.project.arrangements[0].clone();
+        pl::run(&mut app, Cmd::MoveContent(1, true));
+        let starts = |app: &App| pl::clips(&app.state).iter().map(|c| c.position).collect::<Vec<_>>();
+        assert_eq!(starts(&app), [0, 384, 1152, 1536, 768]);
+        assert_eq!(marks(&app), [mk(384, M::PLAIN, "A"), mk(768, M::PLAIN, "C"), mk(1152, M::PLAIN, "B")]);
+        // Move content left on B is its mirror: everything is back.
+        pl::run(&mut app, Cmd::MoveContent(2, false));
+        assert_eq!(app.state.project.arrangements[0], before);
+        // Nothing to trade with: no change, no undo step.
+        let steps = app.state.history.len();
+        pl::run(&mut app, Cmd::MoveContent(2, true));
+        pl::run(&mut app, Cmd::MoveContent(0, false));
+        assert_eq!((&app.state.project.arrangements[0], app.state.history.len()), (&before, steps));
+        // One undo step takes a move back.
+        pl::run(&mut app, Cmd::MoveContent(1, true));
+        pl::run(&mut app, Cmd::Undo);
+        assert_eq!(app.state.project.arrangements[0], before);
+
+        // The marker menu: the row's items at the clicked tick, the header, then the actions with the marker's own.
+        let m = pl::marker_menu(&app.state, 0, 400, 0.0, 0.0);
+        let labels: Vec<&str> = m.items.iter().map(|it| &*it.label).collect();
+        assert_eq!(labels[..10], ["Add marker...", "Add time signature...", "Place loop", "A at 2:01:00", "Delete", "Rename...", "", "Move content left", "Move content right", "Action"]);
+        assert_eq!(labels[10..], ["None", "Start", "Loop", "Marker loop", "Marker skip", "Marker pause", "Time signature", "Start recording", "Stop recording"]);
+        assert!(m.items[3].head && m.items[2].cmd == Cmd::PlaceLoopAt(400));
+        assert_eq!(m.items[10..].iter().filter(|it| it.mark == Mark::Radio(true)).count(), 1);
+        assert_eq!(m.items[10].mark, Mark::Radio(true), "A is a plain marker");
+        assert_eq!(pl::lane_menu(400, 0.0, 0.0).items.len(), 3);
+
+        // An action changes the kind only; Time signature asks first and names the marker after the signature.
+        pl::run(&mut app, Cmd::MarkerAction(1, M::SKIP));
+        assert_eq!(marks(&app)[1], mk(768, M::SKIP, "B"));
+        pl::run(&mut app, Cmd::MarkerAction(1, M::SIGNATURE));
+        assert!(crate::timesig::form_open(&app.state));
+        assert_eq!(marks(&app)[1].1, M::SKIP, "not before Accept");
+        app.key(&Key::Named(NamedKey::Enter), false, false);
+        assert_eq!(marks(&app)[1], mk(768, M::SIGNATURE, "4/4"));
+        // Add time signature... from the row's menu: a new one at its tick.
+        pl::run(&mut app, Cmd::MarkerSigAt(1152));
+        app.key(&Key::Named(NamedKey::Enter), false, false);
+        assert_eq!(marks(&app)[2], mk(1152, M::SIGNATURE, "4/4"));
+
+        // A click on a marker moves the song position to it, and leaves no undo step.
+        set(&mut app, &[(384, M::PLAIN, "A"), (768, M::START, "B")]);
+        app.state.playlist.pos = 0;
+        let grid = Rect::new(300.0, 200.0, 1200.0, 600.0);
+        let g = pl::PGeom::new(&app.state, grid);
+        app.mouse = (g.x_of(768.0) + 4.0, 190.0);
+        let steps = app.state.history.len();
+        pl::press_markers(&mut app, grid, false);
+        assert_eq!(app.state.playlist.pos, 768);
+        let Some(Drag::Pl(d @ PlDrag::Marker { .. })) = app.drag.take() else { panic!("a marker drag") };
+        pl::drag_end(&mut app, d, grid);
+        assert_eq!(app.state.history.len(), steps);
+        // A right click away from the markers: the row's menu at the snapped tick.
+        app.mouse = (g.x_of(1100.0), 190.0);
+        pl::press_markers(&mut app, grid, true);
+        assert!(app.state.playlist.popup.take().is_some_and(|p| p.items.len() == 3));
+
+        // An opened project's song position is at its Start marker.
+        app.state.playlist.pos = 0;
+        pl::load_view(&mut app.state);
+        assert_eq!(app.state.playlist.pos, 768);
+
+        // Every kind's tab paints, with the Start marker's darker pre-roll.
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let kinds = [M::PLAIN, M::MARKER_LOOP, M::SKIP, M::PAUSE, M::LOOP, M::START, M::SIGNATURE, M::PUNCH_IN, M::PUNCH_OUT, M::KEY];
+        pl::arr_mut(&mut app.state).markers = kinds.iter().enumerate().map(|(i, &k)| M { kind: k, ..M::new(192 * i as u32, "Name") }).collect();
         frame(&mut app, &mut c, None);
     }
 
