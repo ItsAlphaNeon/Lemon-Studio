@@ -1,0 +1,22 @@
+OSPRESET 1
+plugin=Lemon Limiter	id=clap:org.openstudio.lemon-limiter	format=clap	body=params
+# Values: OpenStudio-specs plugins/factory-presets.md.
+# Ducks only when the effect is keyed from the voice's track (route a sidechain to it).
+Gain = 1000
+Soft saturation threshold = 1000
+Limiter ceiling = 1000
+Limiter attack time = 7547
+Limiter attack curve = 1
+Limiter release time = 8968
+Limiter release curve = 1
+Limiter peak window = 7547
+Comp threshold = 1000
+Comp ratio = 1000
+Comp knee = 1000
+Comp attack time = 0
+Comp release time = 6666
+Comp curve = 0
+Comp RMS window = 650
+Noise gain = 1000
+Noise threshold = 0
+Noise release time = 4187

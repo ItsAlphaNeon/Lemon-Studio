@@ -1,0 +1,3 @@
+OSPRESET 1
+plugin=Lemon Sampler	id=clap:org.openstudio.open-sampler	format=clap	body=params
+# The original preset Default: every setting at its default. The loaded sample is kept.

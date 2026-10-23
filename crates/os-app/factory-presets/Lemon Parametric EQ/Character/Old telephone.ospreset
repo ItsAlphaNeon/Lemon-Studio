@@ -1,0 +1,40 @@
+OSPRESET 1
+plugin=Lemon Parametric EQ	id=clap:org.openstudio.open-parametric-eq-2	format=clap	body=params
+# Values: OpenStudio-specs plugins/factory-presets.md.
+# The original preset selects processing mode HQ+; the mode is not a parameter and is left as it is.
+Band 1 level = 0
+Band 1 freq = 0.477218628
+Band 1 width = 0.194274902
+Band 1 type = 5
+Band 1 order = 3
+Band 2 level = 0
+Band 2 freq = 0.242614746
+Band 2 width = 0.387756348
+Band 2 type = 6
+Band 2 order = 3
+Band 3 level = 0
+Band 3 freq = 0.347869873
+Band 3 width = 0.387756348
+Band 3 type = 6
+Band 3 order = 3
+Band 4 level = 0
+Band 4 freq = 0.970703125
+Band 4 width = 0.387756348
+Band 4 type = 6
+Band 4 order = 3
+Band 5 level = 0.74444443
+Band 5 freq = 0.683380127
+Band 5 width = 0.387756348
+Band 5 type = 6
+Band 5 order = 3
+Band 6 level = 0.5
+Band 6 freq = 0.722229004
+Band 6 width = 0.387756348
+Band 6 type = 0
+Band 6 order = 3
+Band 7 level = 0
+Band 7 freq = 0.845046997
+Band 7 width = 0.225524902
+Band 7 type = 7
+Band 7 order = 3
+Main level = 0.5

@@ -1,0 +1,20 @@
+OSPRESET 1
+plugin=Lemon Reverb	id=clap:org.openstudio.lemon-reverb	format=clap	body=params
+# Values: OpenStudio-specs plugins/factory-presets.md.
+Low cut = 381
+High cut = 55
+Predelay = 31
+Room size = 59
+Diffusion = 65
+Decay time = 22
+High damping = 32
+Bass multiplier = 50
+Crossover = 305
+Stereo separation = 64
+Dry level = 128
+Early reflection level = 128
+Wet level = 102
+Mod Speed = 684
+Mod Depth = 0
+Tempo-based predelay = 0
+Mid / side input = 0

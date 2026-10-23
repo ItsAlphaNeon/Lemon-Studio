@@ -219,6 +219,8 @@ impl FrameWindow {
             if hwnd.is_null() {
                 return Err("could not create the plugin window".into());
             }
+            // Files dropped on the frame from the desktop (spec: plugins/presets.md "Drag and drop").
+            windows_sys::Win32::UI::Shell::DragAcceptFiles(hwnd, 1);
             let ay = state.borrow().area_y();
             let area = CreateWindowExW(
                 0,
@@ -753,6 +755,21 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             }
             WM_CLOSE => {
                 w.state.borrow_mut().events.push(FrameEvent::Close);
+                0
+            }
+            WM_DROPFILES => {
+                use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
+                let drop = wp as HDROP;
+                let n = DragQueryFileW(drop, u32::MAX, std::ptr::null_mut(), 0);
+                for i in 0..n {
+                    let len = DragQueryFileW(drop, i, std::ptr::null_mut(), 0) as usize;
+                    let mut buf = vec![0u16; len + 1];
+                    DragQueryFileW(drop, i, buf.as_mut_ptr(), buf.len() as u32);
+                    let path = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len]));
+                    w.state.borrow_mut().events.push(FrameEvent::DropFile(path));
+                }
+                DragFinish(drop);
+                os_clap::wake();
                 0
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),

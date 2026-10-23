@@ -28,9 +28,16 @@ const FILE: u8 = 254;
 /// Height of the info panel above the footer (spec §6).
 pub const INFO_H: f32 = 84.0;
 
-/// (label, icon, category colour index). Only the roots with content: FL's disk-folder roots (Recent files, presets,
-/// Packs...) are left out until Lemon Studio has content for them (owner decision); dropped folders follow these.
-const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin database", Icon::Speaker, 1)];
+/// (label, icon, category colour index). Only the roots with content: FL's other disk-folder roots (Recent files,
+/// Channel presets, Packs...) are left out until Lemon Studio has content for them (owner decision); dropped folders
+/// follow these. Plugin presets: the preset store, user and factory (spec: plugins/presets.md "Browser").
+const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin database", Icon::Speaker, 1), (PLUGIN_PRESETS, Icon::FilePreset, 1)];
+pub const PLUGIN_PRESETS: &str = "Plugin presets";
+
+/// Tree key of the All tab's Plugin presets root; a plugin's node is `<this>/<plugin folder name>`.
+pub fn presets_key() -> String {
+    format!("0:{PLUGIN_PRESETS}")
+}
 
 /// The "Current project" tree's sections, in screenshot order (spec §2), without the one nothing is tracked in yet
 /// (Remote control). History: the undo history (spec: ui/settings-choices.md "Undo history: the four checks
@@ -89,6 +96,9 @@ pub enum Item {
     /// An entry of the undo history, 0 = "Last reset" (`History::entries`): a click goes back or forward to it; not
     /// draggable.
     History(usize),
+    /// A plugin preset file (any `presets::IMPORT_EXTS` type) or factory preset path: dropped, it loads (spec:
+    /// plugins/presets.md "Drag and drop").
+    Preset(String),
 }
 
 #[derive(Debug, Clone)]
@@ -218,7 +228,8 @@ fn tree(s: &State) -> Vec<Row> {
         }
         match r {
             0 => project_rows(s, &key, cat, &mut out),
-            _ => plugin_rows(s, &key, cat, &mut out),
+            1 => plugin_rows(s, &key, cat, &mut out),
+            _ => preset_rows(s, &key, cat, &mut out),
         }
     }
     out
@@ -304,7 +315,7 @@ pub fn file_icon(name: &str) -> Icon {
         "mid" | "midi" => Icon::PianoRoll,
         "flp" => Icon::FileProject,
         "txt" | "url" | "pdf" | "nfo" | "rtf" | "htm" | "html" | "md" => Icon::FileText,
-        "fxp" | "fxb" | "fst" | "vstpreset" | "nmsv" | "spf" | "h2p" | "clap-preset" => Icon::FilePreset,
+        "fxp" | "fxb" | "fst" | "vstpreset" | "nmsv" | "spf" | "h2p" | "clap-preset" | "ospreset" => Icon::FilePreset,
         "zip" | "rar" | "7z" => Icon::FileZip,
         _ => Icon::FileBlank,
     }
@@ -324,8 +335,11 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
         } else {
             let icon = file_icon(&e.name);
             let p = e.path.to_string_lossy().into_owned();
+            let stem = || e.name.rsplit_once('.').map_or(e.name.as_str(), |(a, _)| a).to_string();
             let (label, item) = if icon == Icon::FileAudio {
-                (e.name.rsplit_once('.').map_or(e.name.as_str(), |(a, _)| a).to_string(), Item::Sample(p))
+                (stem(), Item::Sample(p))
+            } else if crate::presets::is_preset_file(&e.path) {
+                (stem(), Item::Preset(p))
             } else {
                 (e.name.clone(), Item::File(p))
             };
@@ -430,6 +444,59 @@ fn plugin_node(s: &State, out: &mut Vec<Row>, parent: &str, label: String, icon:
     if open {
         for (index, e) in s.params.visible(key) {
             out.push(Row { key: format!("{k}/{index}"), depth: 3, label: e.name.clone(), icon: Icon::Slide, cat, open: None, bright: false, item: Item::Param(key, index), path: None });
+        }
+    }
+}
+
+/// Plugin presets: a folder per plugin with presets (the user's preset folders and the factory presets' plugins, by
+/// name), each listing the user's presets (sub-folders as folders), then a "Factory" folder with the factory ones.
+fn preset_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
+    let user_root = crate::presets::root();
+    let mut plugins: Vec<String> = user_root.as_deref().map(|r| list_dir(s, r).iter().filter(|e| e.dir).map(|e| e.name.clone()).collect()).unwrap_or_default();
+    for f in crate::presets::factory_plugins() {
+        if !plugins.iter().any(|p| p == f) {
+            plugins.push(f.to_string());
+        }
+    }
+    plugins.sort_by_key(|p| p.to_lowercase());
+    let preset = |out: &mut Vec<Row>, parent: &str, depth: u8, label: String, path: &Path| {
+        let disk = (!crate::presets::is_factory(path)).then(|| path.to_path_buf());
+        out.push(Row { key: format!("{parent}/{label}"), depth, label, icon: Icon::FilePreset, cat, open: None, bright: false, item: Item::Preset(path.to_string_lossy().into_owned()), path: disk });
+    };
+    let folder = |out: &mut Vec<Row>, key: &str, depth: u8, label: &str| -> bool {
+        let open = is_open(s, key);
+        let icon = if open { Icon::FolderOpen } else { Icon::Folder };
+        out.push(Row { key: key.to_string(), depth, label: label.into(), icon, cat: FOLDER, open: Some(open), bright: open, item: Item::None, path: None });
+        open
+    };
+    for plugin in plugins {
+        let pk = format!("{root}/{plugin}");
+        if !folder(out, &pk, 1, &plugin) {
+            continue;
+        }
+        if let Some(dir) = user_root.as_ref().map(|r| r.join(&plugin)) {
+            let entries = list_dir(s, &dir);
+            for e in entries.iter().filter(|e| e.dir) {
+                let k = format!("{pk}/{}", e.name);
+                if folder(out, &k, 2, &e.name) {
+                    for f in list_dir(s, &e.path).iter().filter(|f| !f.dir && crate::presets::is_preset_file(&f.path)) {
+                        preset(out, &k, 3, crate::presets::shown_name(&f.path), &f.path);
+                    }
+                }
+            }
+            for e in entries.iter().filter(|e| !e.dir && crate::presets::is_preset_file(&e.path)) {
+                preset(out, &pk, 2, crate::presets::shown_name(&e.path), &e.path);
+            }
+        }
+        let fac = crate::presets::factory(&plugin);
+        if fac.is_empty() {
+            continue;
+        }
+        let fk = format!("{pk}/<factory>");
+        if folder(out, &fk, 2, "Factory") {
+            for p in &fac {
+                preset(out, &fk, 3, p.name.clone(), &p.path);
+            }
         }
     }
 }
