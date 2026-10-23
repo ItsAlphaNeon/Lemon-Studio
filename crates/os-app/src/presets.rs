@@ -240,9 +240,10 @@ pub fn encode_params(h: &Header, params: &[(String, f64)]) -> Vec<u8> {
 
 /// Splits a preset file into its header and what follows; `None` when it is not a preset file.
 pub fn decode(bytes: &[u8]) -> Option<(Header, &[u8])> {
-    let rest = bytes.strip_prefix(MAGIC)?;
+    // A hand-edited file may have Windows line ends: the first two lines may end in "\r\n".
+    let rest = bytes.strip_prefix(MAGIC).or_else(|| bytes.strip_prefix(b"OSPRESET 1\r\n"))?;
     let nl = rest.iter().position(|&c| c == b'\n')?;
-    let line = std::str::from_utf8(&rest[..nl]).ok()?;
+    let line = std::str::from_utf8(&rest[..nl]).ok()?.trim_end_matches('\r');
     let mut h = Header::default();
     for kv in line.split('\t') {
         match kv.split_once('=') {
@@ -844,8 +845,13 @@ mod tests {
         let dir = tmp("params");
         let p = dir.join("Hall.ospreset");
         std::fs::write(&p, &b).unwrap();
-        assert_eq!(load(&p, "clap:x").unwrap().1, Body::Params(params));
+        assert_eq!(load(&p, "clap:x").unwrap().1, Body::Params(params.clone()));
         assert_eq!(parse_params("# a comment\n\n  Mix = 1e2 \r\n").unwrap(), [("Mix".to_string(), 100.0)]);
+        // Windows line ends, as a text editor (or a Git checkout) may leave them.
+        let crlf = String::from_utf8(b.clone()).unwrap().replace('\n', "\r\n");
+        let (h2, rest) = decode(crlf.as_bytes()).unwrap();
+        assert_eq!((h2.plugin.as_str(), h2.body.as_str()), ("Lemon Reverb", PARAMS_BODY));
+        assert_eq!(parse_params(std::str::from_utf8(rest).unwrap()).unwrap(), params);
         assert!(parse_params("Mix: 1").is_err());
         assert!(parse_params("= 1").is_err());
         assert!(parse_params("Mix = loud").is_err());

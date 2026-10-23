@@ -1,0 +1,2 @@
+# Preset files are read byte for byte (a saved state is binary): no line-end conversion on checkout.
+*.ospreset -text
