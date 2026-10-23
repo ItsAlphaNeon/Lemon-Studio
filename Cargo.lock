@@ -2815,6 +2815,7 @@ name = "os-clap"
 version = "0.0.1"
 dependencies = [
  "clap-sys 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lemon-limiter",
  "lemon-parametric-eq-2",
  "lemon-sampler",
  "libloading 0.8.9",
