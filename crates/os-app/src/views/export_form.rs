@@ -64,7 +64,8 @@ pub fn paint(ui: &mut Ui, s: &State, m: &Modal, f: &ExportForm) {
     extras(ui, f, Rect::new(rx, y2, cw, LOWER_H));
     bottom(ui, r, f);
     if let Some(&(k, b)) = boxes.iter().find(|(k, _)| f.list == Some(*k)) {
-        list(ui, s, f, k, b);
+        let (items, now) = f.list_items(k);
+        list(ui, s, &items, now, b);
     }
 }
 
@@ -195,12 +196,11 @@ fn combo(ui: &mut Ui, f: &ExportForm, b: Rect, k: u8, boxes: &mut Vec<(u8, Rect)
     boxes.push((k, b));
 }
 
-/// Combo `k`'s open list under its box `b` (above it when the window has no room below), the chosen entry marked. A
-/// click anywhere else only closes it.
-fn list(ui: &mut Ui, s: &State, f: &ExportForm, k: u8, b: Rect) {
+/// A combo's open list of `items` under its box `b` (above it when the window has no room below), entry `now` marked.
+/// A click anywhere else only closes it. The MIDI import form's combos use it too.
+pub(super) fn list<S: AsRef<str>>(ui: &mut Ui, s: &State, items: &[S], now: usize, b: Rect) {
     let t = ui.t;
     hit(ui, Rect::new(0.0, 0.0, s.screen.0, s.screen.1), DHit::Form(FHit::Shut), "");
-    let (items, now) = f.list_items(k);
     let h = items.len() as f32 * ITEM_H + 6.0;
     let below = Rect::new(b.x, b.bottom() + 2.0, b.w.max(120.0), h);
     let p = if below.bottom() > s.screen.1 - 4.0 { Rect::new(below.x, (b.y - 2.0 - h).max(0.0), below.w, h) } else { below };
@@ -224,6 +224,6 @@ fn list(ui: &mut Ui, s: &State, f: &ExportForm, k: u8, b: Rect) {
             }
         }
         let col = if i == now { if lemon { t.brand_sel(brand::MAIN) } else { t.glyph } } else { t.text };
-        ui.c.text_clip(font, row.x + 10.0, (row.cy() - lh / 2.0).round(), row.w - 16.0, col, text);
+        ui.c.text_clip(font, row.x + 10.0, (row.cy() - lh / 2.0).round(), row.w - 16.0, col, text.as_ref());
     }
 }

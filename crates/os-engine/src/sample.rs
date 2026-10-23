@@ -301,6 +301,46 @@ fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<Sample, String> {
     Ok(Sample { rate, left, right })
 }
 
+/// The placeholders of sample paths: the FL Studio install folder and its `Data` folder (spec: flp/sample-paths.md).
+const FACTORY: &str = "%FLStudioFactoryData%";
+const DATA: &str = "%FLStudioData%";
+
+/// `text` without `prefix`, compared without regard to ASCII case.
+fn strip_prefix_ignoring_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then(|| &text[prefix.len()..])
+}
+
+/// `path` as it is on disk when its parts match existing ones without regard to case (an exact match first): `None`
+/// when a part is not found.
+fn match_case(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        let Component::Normal(name) = part else {
+            out.push(part.as_os_str());
+            continue;
+        };
+        let want = name.to_string_lossy().to_lowercase();
+        let mut found = None;
+        let dir = if out.as_os_str().is_empty() { Path::new(".") } else { &out };
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let n = e.file_name();
+            if n == name {
+                found = Some(n);
+                break;
+            }
+            if found.is_none() && n.to_string_lossy().to_lowercase() == want {
+                found = Some(n);
+            }
+        }
+        // A name the folder's listing does not show (a short 8.3 name on Windows) that opens all the same.
+        let found = found.or_else(|| out.join(name).exists().then(|| name.to_os_string()))?;
+        out.push(found);
+    }
+    Some(out)
+}
+
 /// Resolves project sample paths (with `%FLStudioFactoryData%` / `%FLStudioData%`
 /// placeholders) and caches decoded samples.
 #[derive(Debug, Default)]
@@ -374,17 +414,38 @@ impl SampleLibrary {
         found.pop()
     }
 
+    /// The file a project's sample path names: a placeholder resolved against the install folder (`None` while it is
+    /// not set), else the path itself. Paths are matched without regard to case and take either slash as a separator
+    /// (spec: flp/layouts.md "Older files", flp/sample-paths.md): where the path as written does not exist, each part
+    /// is looked for ignoring case.
     pub fn resolve(&self, project_path: &str) -> Option<PathBuf> {
-        const FACTORY: &str = "%FLStudioFactoryData%";
-        const DATA: &str = "%FLStudioData%";
-        let rel = |rest: &str| rest.trim_start_matches(['\\', '/']).replace('\\', std::path::MAIN_SEPARATOR_STR);
-        if let Some(rest) = project_path.strip_prefix(FACTORY) {
-            Some(self.factory_dir.as_ref()?.join(rel(rest)))
-        } else if let Some(rest) = project_path.strip_prefix(DATA) {
-            Some(self.factory_dir.as_ref()?.join("Data").join(rel(rest)))
+        let rel = |rest: &str| rest.trim_start_matches(['\\', '/']).replace(['\\', '/'], std::path::MAIN_SEPARATOR_STR);
+        let path = if let Some(rest) = strip_prefix_ignoring_case(project_path, FACTORY) {
+            self.factory_dir.as_ref()?.join(rel(rest))
+        } else if let Some(rest) = strip_prefix_ignoring_case(project_path, DATA) {
+            self.factory_dir.as_ref()?.join("Data").join(rel(rest))
         } else {
-            Some(Self::local_path(project_path))
+            Self::local_path(project_path)
+        };
+        if path.exists() {
+            return Some(path);
         }
+        Some(match_case(&path).unwrap_or(path))
+    }
+
+    /// Whether a project's sample path starts with one of the install folder's placeholders (in any case).
+    pub fn has_placeholder(project_path: &str) -> bool {
+        [FACTORY, DATA].iter().any(|p| strip_prefix_ignoring_case(project_path, p).is_some())
+    }
+
+    /// The install folder becomes `dir`: samples found through the old one are looked for again.
+    pub fn set_factory_dir(&mut self, dir: Option<PathBuf>) {
+        if dir == self.factory_dir {
+            return;
+        }
+        self.factory_dir = dir;
+        self.cache.retain(|k, _| !Self::has_placeholder(k));
+        self.failures.retain(|(k, _)| !Self::has_placeholder(k));
     }
 
     /// An absolute path as stored in a project. Projects store Windows paths; off Windows a path on drive Z:
@@ -612,5 +673,52 @@ mod tests {
         assert_eq!(wav_tags(&path), WavTags { unity_note: Some(67), beats: Some(4) });
         let _ = std::fs::remove_file(&path);
         assert_eq!(wav_tags(&path), none);
+    }
+
+    /// Sample paths are matched without regard to case, placeholders included, and take either slash (spec:
+    /// flp/layouts.md "Older files", flp/sample-paths.md); a changed install folder finds its samples again.
+    #[test]
+    fn sample_paths_ignore_case() {
+        let root = std::env::temp_dir().join(format!("os_engine_case_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (one, two) = (root.join("FL One"), root.join("FL Two"));
+        for d in [&one, &two] {
+            std::fs::create_dir_all(d.join("Data").join("Patches").join("Packs")).unwrap();
+            std::fs::write(d.join("Data").join("Patches").join("Packs").join("Kick.WAV"), wav(&[])).unwrap();
+        }
+        let file = one.join("Data").join("Patches").join("Packs").join("Kick.WAV");
+        // Each part found as it is on disk, the exact name first.
+        let asked = one.join("data").join("PATCHES").join("packs").join("kick.wav");
+        let tail = Path::new("FL One").join("Data").join("Patches").join("Packs").join("Kick.WAV");
+        assert!(match_case(&asked).is_some_and(|p| p.ends_with(&tail)), "{:?}", match_case(&asked));
+        assert_eq!(match_case(&one.join("Data").join("nothing.wav")), None);
+        let mut lib = SampleLibrary::new(Some(one.clone()));
+        for path in [
+            r"%FLStudioFactoryData%\Data\Patches\Packs\Kick.wav",
+            r"%flstudiofactorydata%\data\patches\packs\KICK.WAV",
+            "%FLStudioFactoryData%/Data/Patches/Packs/Kick.WAV",
+            r"%FLSTUDIODATA%\Patches\packs\kick.wav",
+        ] {
+            assert!(SampleLibrary::has_placeholder(path), "{path}");
+            assert!(lib.resolve(path).is_some_and(|p| p.is_file()), "{path}");
+        }
+        assert!(!SampleLibrary::has_placeholder(&file.to_string_lossy()));
+        let asked = asked.to_string_lossy().into_owned();
+        assert!(lib.resolve(&asked).is_some_and(|p| p.is_file()), "an absolute path too");
+        // A missing file keeps the path as written, for the message that names it.
+        assert_eq!(lib.resolve("%FLStudioFactoryData%/Data/x.wav"), Some(one.join("Data").join("x.wav")));
+        // Another install folder: the placeholders' samples are looked for there, the other paths stay cached.
+        let placeholder = r"%FLStudioFactoryData%\Data\Patches\Packs\Kick.wav";
+        let first = lib.get(placeholder).unwrap();
+        let direct = lib.get(&asked).unwrap();
+        lib.set_factory_dir(Some(two.clone()));
+        assert_eq!(lib.resolve(placeholder).and_then(|p| p.parent().map(Path::to_path_buf)), Some(two.join("Data").join("Patches").join("Packs")));
+        assert!(Arc::ptr_eq(&lib.get(&asked).unwrap(), &direct), "kept");
+        assert!(lib.get(placeholder).is_some());
+        assert!(lib.cache.contains_key(placeholder));
+        lib.set_factory_dir(None);
+        assert!(lib.get(placeholder).is_none() && lib.failures.iter().any(|(k, _)| k == placeholder), "no folder: not found");
+        drop(first);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

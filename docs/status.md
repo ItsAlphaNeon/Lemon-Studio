@@ -18,7 +18,10 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 ## ✅ Piano roll
 
 - Full tool set, with velocity and event lanes
-- Quantize, chop, glue, legato, strum, arpeggiate and randomize
+- Quantize (FL's templates and Snap grids, sensitivity, four duration modes, levels), chop, glue, legato, strum,
+  arpeggiate, flam, claw machine (trash, stretch, time distribution), flip, scale levels, limit (key / scale, range,
+  transpose), LFO (sine, triangle or square into any event lane, Start to End ramps, a channel lane's control points)
+  and randomize
 - Vertical zoom and ghost channels
 - Resizable event panel: drag the splitter, double-click it to hide or show the panel (remembered)
 - Pattern time markers, saved with the project
@@ -30,6 +33,11 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 - Playlist with pattern, audio and automation clips
 - Clip groups, markers and several arrangements
+- Time markers with FL's actions (right-click a marker): Start, Loop, Marker loop, Marker skip and Marker pause
+  play in SONG mode; exports start at the Start marker and jump at skips. Move content left / right, Place loop
+  (Shift+T), Add auto, Add one every, Add jump to next bar, time signature markers, and Delete or Change to marker
+  loop in the time selection. A click on a marker moves the song position there. Not yet: Add two..., key
+  markers, quantized song jumps, the Start / Stop recording markers' punch
 - Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
 - Track height, zoom and scroll saved with the project
 - Project picker (VIEW, Ctrl+F8 or the toolbar's project button): a menu of the patterns and channels; picking a
@@ -155,16 +163,34 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   samples, Rename (the folder and the file), and the browser's Project data. The first save of a new project
   opens a Save as form that can make that folder (General ▸ Ask for data folder decides when; File ▸ New can
   open a New project form)
+- FILE lists the ten projects last opened or saved (Alt+1 .. Alt+0), More ▸ the older ones, fifty in all
 - Still early: always work on copies and keep backups
 
 ## 🚧 Built-in instruments and effects
 
 - Lemon Sampler, Lemon Trio (a three-oscillator synth) and Lemon Parametric EQ, also available as VST3
   and CLAP bundles for other hosts
+- Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer and Lemon Transient Processor as
+  VST3 and CLAP plugins; a project's Fruity Soft Clipper, Fruity Fast Dist, Fruity Balance, Fruity Stereo Enhancer and
+  Transient Processor play through the same sound in the mixer. The first four match FL Studio 2026's exports sample
+  for sample in the tests; Transient Processor has not been compared with FL 2026's exports yet
+- Lemon Parametric EQ plays FL's Parametric EQ 2 in every quality mode, in a project's mixer slots and as a plugin:
+  plain, HQ Legacy, HQ+, HQ Enhanced and linear phase (LIN) with its sizes and crossfade speeds. The plugin tells the
+  host LIN's and HQ Enhanced's delay; Lemon Studio does not compensate it yet, so in a project those two modes come
+  out late
 - The sampler plays a project's sample settings (start and length, the sample file's loop, the sample
   effects, the channel filter, declicking) and each note's own pan and filter offsets
 - A file of 30 s or more loaded into a sampler channel turns its Keep on disk on (General settings ▸
   Advanced ▸ Auto keep long audio on disk)
+- Lemon Trio's custom shape plays a sample as one period of the oscillator: choosing it opens a file dialog, and
+  its sample page shows the wave and loads another. The sample is the channel's (saved with the project, and the
+  channel is named after it while Auto name channels is on). Not yet: dropping a file on the sample page
+- Keep on disk streams the sample from its file while it plays: only the first moments after each start point and a
+  small buffer per voice stay in memory. It applies to uncompressed WAV and AIFF files played as they are; compressed
+  files, the sample tools and effects, reverse and the Stretch / Stretch Pro methods keep the sample in memory, and
+  the sampler says which ("in RAM" or "on disk"). Exports wait for the disk, so they sound exactly as from memory
+- Lemon Studio's own playback engine still keeps a decoded copy of every sampler channel's file, so the memory
+  saving shows in other hosts for now, not yet inside Lemon Studio
 
 ## ✅ Exporting audio
 
@@ -179,6 +205,18 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - WAV files can carry markers, loop points, note markers and the tempo (`cue `, `smpl`, `acid` chunks)
 - The choices are remembered; the folder can open when the export is done
 - Not on purpose: FL's online and sharing exports
+
+## ✅ MIDI files
+
+- FILE ▸ Import ▸ MIDI file... (or a .mid dropped on the window): the Import MIDI data form picks the tracks, the
+  MIDI channels, the instrument (Lemon Trio, Citrus or Lemon Sampler) and the options; a new project, or the file
+  added to this one as one undo step. A channel per track (or per MIDI channel) with its notes, volume, pan and pitch
+  bends, the tempo changes, time signatures and markers, in a channel group named after the file
+- The modifier held while choosing the file picks whether the form shows (General ▸ Input ▸ Manage shortcuts, MIDI
+  import window)
+- FILE ▸ Export MIDI... (Shift+Ctrl+M): the current pattern, or the song's pattern clips, with a track per channel
+- The piano roll's Tools menu: Import MIDI file... into its channel (replacing or blending), Export as MIDI file...
+- Not yet: FL's FLEX mapping of the mod wheel and sustain pedal
 
 ## 🚧 Note input
 
@@ -250,6 +288,8 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 - The Lemon design (lemon on neutral greys, rounded-square controls) and the Classic look, switched with
   Ctrl+Shift+D
 - Theme files apply to the Classic look
+- A theme file's workspace picture (PNG or JPEG, on either design) and its playlist and piano roll grid line
+  strength; not yet the HTML background, the event editor grid and the Option colour
 - Lemon Studio's own plugin editors are drawn in the Lemon design only, whatever design the app shows
 - Smooth scrolling: the wheel and the scroll bars' arrows ease the editors' views (General settings ▸ Display ▸
   Smoothing, and Animation refresh rate for how often animations redraw)
@@ -271,5 +311,4 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 ## ❌ Not available yet
 
-- MIDI file import / export
 - Audio editing

@@ -13,7 +13,8 @@
 //!
 //! Keys so far: `toolbar_separators`, `toolbar_flat_buttons`, `toolbar_hint_bar` (`views::toolbar::Opts`),
 //! `clock_mode`, `clock_middle_unit` (`clock::Clock`), `step_edit` (`crate::step_edit`), the `window_*` positions
-//! (`crate::layout`), and the settings window's declared controls (`crate::prefs`).
+//! (`crate::layout`), `factory_folder` (`crate::factory_folder`), the settings window's declared controls
+//! (`crate::prefs`), and `recent_project_1` .. `recent_project_50` (`crate::recent`).
 
 use std::sync::{Mutex, OnceLock}; // This code is a part of L e m o n S t u d i o.
 
@@ -85,6 +86,31 @@ pub(crate) fn write(key: &str, value: &str) {
         let mut s = STORE.get_or_init(|| Mutex::new(load())).lock().unwrap_or_else(|e| e.into_inner());
         if s.get(key) != Some(value.as_str()) {
             s.set(key, &value);
+            save(&s);
+        }
+    }
+}
+
+/// Sets each key to its value as `write` does, keeping the file once. A key without a line stays without one when its
+/// value is empty.
+pub(crate) fn write_all(pairs: &[(String, String)]) {
+    let set = |s: &mut Store| {
+        let mut changed = false;
+        for (key, value) in pairs {
+            let value = value.replace(['\r', '\n'], " ");
+            if s.get(key).unwrap_or("") != value {
+                s.set(key, &value);
+                changed = true;
+            }
+        }
+        changed
+    };
+    #[cfg(test)]
+    TEST.with(|s| set(&mut s.borrow_mut()));
+    #[cfg(not(test))]
+    {
+        let mut s = STORE.get_or_init(|| Mutex::new(load())).lock().unwrap_or_else(|e| e.into_inner());
+        if set(&mut s) {
             save(&s);
         }
     }

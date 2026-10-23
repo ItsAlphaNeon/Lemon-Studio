@@ -154,12 +154,12 @@ pub struct Hit {
     pub t: Target,
 }
 
-/// The name of a control that does nothing yet, `None` for the ones that work: the Content toggles (keep on disk,
-/// resample, load regions, load slice markers: nothing reads them) and the envelope presets menu (no presets yet).
+/// The name of a control that does nothing yet, `None` for the ones that work: the Content toggles (resample, load
+/// regions, load slice markers: nothing reads them) and the envelope presets menu (no presets yet).
 /// Greyed-out controls draw their disabled look and the editor only names them.
 pub fn off_name(t: &Target) -> Option<&'static str> {
     match t {
-        Target::Toggle(id) if matches!(id.as_str(), "keep_disk" | "resample" | "load_regions" | "load_slices") => {
+        Target::Toggle(id) if matches!(id.as_str(), "resample" | "load_regions" | "load_slices") => {
             Some(hint_text(id).unwrap_or("This option"))
         }
         Target::EnvMenu => Some("Channel envelope presets"),
@@ -220,9 +220,57 @@ impl Default for ViewState {
     }
 }
 
+/// Frames of a sample the waveform panel draws: `left[i]`, `right[i]` are frame `first + i * step`.
+#[derive(Clone, Copy)]
+pub struct Frames<'a> {
+    pub left: &'a [f32],
+    pub right: &'a [f32],
+    pub first: usize,
+    pub step: usize,
+}
+
+impl<'a> Frames<'a> {
+    pub fn all(s: &'a Sample) -> Frames<'a> {
+        Frames { left: &s.left, right: &s.right, first: 0, step: 1 }
+    }
+
+    pub const NONE: Frames<'static> = Frames { left: &[], right: &[], first: 0, step: 1 };
+
+    /// Frame `j` (or the one before it that is kept), both sides.
+    fn at(&self, j: usize) -> Option<(f32, f32)> {
+        let i = j.checked_sub(self.first)? / self.step.max(1);
+        Some((*self.left.get(i)?, *self.right.get(i)?))
+    }
+}
+
+/// The shown sample: its length and rate, and what the panel draws of it. A sample in memory draws its frames; one
+/// that plays from disk (Keep on disk) draws a summary (every few frames) and, zoomed in, the frames themselves.
+#[derive(Clone, Copy)]
+pub struct Wave<'a> {
+    pub frames: usize,
+    pub rate: u32,
+    /// Whether the sides differ (`None`: compare them).
+    pub stereo: Option<bool>,
+    pub on_disk: bool,
+    /// Frames of the visible range, and of the whole sample (the overview strip).
+    pub near: Frames<'a>,
+    pub whole: Frames<'a>,
+}
+
+impl<'a> Wave<'a> {
+    /// A sample in memory.
+    pub fn of(s: &'a Sample) -> Wave<'a> {
+        Wave { frames: s.frames(), rate: s.rate, stereo: None, on_disk: false, near: Frames::all(s), whole: Frames::all(s) }
+    }
+
+    fn stereo(&self) -> bool {
+        self.stereo.unwrap_or_else(|| self.whole.left != self.whole.right)
+    }
+}
+
 /// What the waveform panel shows.
 pub struct SampleView<'a> {
-    pub sample: Option<&'a Sample>,
+    pub sample: Option<Wave<'a>>,
     pub path: &'a str,
     /// Bits of the source file (32 once processed).
     pub bits: u16,
@@ -599,7 +647,7 @@ fn waveform(ui: &mut Ui, sv: &SampleView) {
         ui.c.fill_rect(Rect::new(area.x + 1.0, area.cy().round(), area.w - 2.0, 1.0), Color::rgb(0x3a3a3a));
         return;
     };
-    let n = s.frames();
+    let n = s.frames;
     let (v0, vl) = wave_range(ui.st, n);
     let fx = |f: f64| area.x + ((f - v0) / vl) as f32 * area.w;
     let looped = ui.on("loop_use") && (ui.m.norm("loop_start") > 0.0 || ui.m.norm("loop_end") < 1.0);
@@ -618,10 +666,10 @@ fn waveform(ui: &mut Ui, sv: &SampleView) {
         let top = Rect::new(area.x, area.y, area.w, area.h / 2.0);
         let bot = Rect::new(area.x, area.y + area.h / 2.0, area.w, area.h / 2.0);
         ui.c.fill_rect(Rect::new(area.x, bot.y.round(), area.w, 1.0), plug::WELL_LINE);
-        wave_line(ui.c, &s.left, None, top, v0, vl, top.h * 0.5, wave, 1.4, sv.tones);
-        wave_line(ui.c, &s.right, None, bot, v0, vl, bot.h * 0.5, wave, 1.4, sv.tones);
+        wave_line(ui.c, &s.near, Side::Left, n, top, (v0, vl), top.h * 0.5, wave, 1.4, sv.tones);
+        wave_line(ui.c, &s.near, Side::Right, n, bot, (v0, vl), bot.h * 0.5, wave, 1.4, sv.tones);
     } else {
-        wave_line(ui.c, &s.left, Some(&s.right), area, v0, vl, area.h * 0.5, wave, 1.8, sv.tones);
+        wave_line(ui.c, &s.near, Side::Mid, n, area, (v0, vl), area.h * 0.5, wave, 1.8, sv.tones);
     }
     let off = f64::from(ui.m.norm("start_offset")) * n as f64;
     if off > 0.0 {
@@ -649,7 +697,7 @@ fn waveform(ui: &mut Ui, sv: &SampleView) {
         }
     }
     let inner = Rect::new(ov.x + 1.0, ov.y, ov.w - 2.0, ov.h);
-    wave_line(ui.c, &s.left, Some(&s.right), inner, 0.0, n as f64, ov.h * 0.42, Color::rgb(0x9a9a9a), 1.3, sv.tones);
+    wave_line(ui.c, &s.whole, Side::Mid, n, inner, (0.0, n as f64), ov.h * 0.42, Color::rgb(0x9a9a9a), 1.3, sv.tones);
     // Bit depth and channel readout on a dark chip.
     let bits = format!("{}", sv.bits & 0xff);
     let zw = ui.c.text_width(LABEL, &bits);
@@ -663,20 +711,31 @@ fn waveform(ui: &mut Ui, sv: &SampleView) {
     ui.hit(info, Target::WaveInfo);
 }
 
-/// One channel (or the mid of two) as a line through the visible range: one point per half pixel when zoomed out,
-/// the samples themselves when zoomed in. With `tones` (colourful waveforms) each device-pixel column of the line takes
-/// the colour of the frames it shows; silence keeps `col` (spec: ui/settings-choices.md "Display: Colorful
-/// waveforms (2026-10-16)").
+/// Which side a line draws.
+#[derive(Clone, Copy)]
+enum Side {
+    Left,
+    Right,
+    /// The mid of the two.
+    Mid,
+}
+
+/// One channel (or the mid of two) of a sample of `n` frames as a line through the visible range `v0 .. v0 + vl`: one
+/// point per half pixel when zoomed out, the samples themselves when zoomed in. With `tones` (colourful waveforms) each
+/// device-pixel column of the line takes the colour of the frames it shows; silence keeps `col` (spec:
+/// ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)").
 #[allow(clippy::too_many_arguments)]
-fn wave_line(c: &mut Canvas, a: &[f32], b: Option<&[f32]>, area: Rect, v0: f64, vl: f64, amp: f32, col: Color, width: f32, tones: Option<(&Tones, &Waves)>) {
-    let n = a.len();
-    if n == 0 || vl <= 0.0 {
+fn wave_line(c: &mut Canvas, fr: &Frames, side: Side, n: usize, area: Rect, (v0, vl): (f64, f64), amp: f32, col: Color, width: f32, tones: Option<(&Tones, &Waves)>) {
+    if n == 0 || vl <= 0.0 || fr.left.is_empty() {
         return;
     }
     let cy = area.y + (area.h / 2.0).floor() + 0.5;
-    let at = |j: usize| match b {
-        Some(b) => 0.5 * (a[j] + b[j]),
-        None => a[j],
+    let at = |j: usize| {
+        fr.at(j).map(|(a, b)| match side {
+            Side::Left => a,
+            Side::Right => b,
+            Side::Mid => 0.5 * (a + b),
+        })
     };
     let cols = (area.w.max(1.0) * 2.0) as usize;
     let per = vl / cols as f64;
@@ -687,14 +746,18 @@ fn wave_line(c: &mut Canvas, a: &[f32], b: Option<&[f32]>, area: Rect, v0: f64, 
             if j >= n {
                 break;
             }
-            pts.push((area.x + i as f32 * 0.5, cy - at(j) * amp));
+            if let Some(y) = at(j) {
+                pts.push((area.x + i as f32 * 0.5, cy - y * amp));
+            }
         }
     } else {
         let j0 = v0.floor().max(0.0) as usize;
         let j1 = ((v0 + vl).ceil() as usize + 1).min(n);
         for j in j0..j1 {
-            let x = area.x + ((j as f64 - v0) / vl) as f32 * area.w;
-            pts.push((x, cy - at(j) * amp));
+            if let Some(y) = at(j) {
+                let x = area.x + ((j as f64 - v0) / vl) as f32 * area.w;
+                pts.push((x, cy - y * amp));
+            }
         }
     }
     c.push_clip(area);
@@ -712,25 +775,41 @@ fn wave_line(c: &mut Canvas, a: &[f32], b: Option<&[f32]>, area: Rect, v0: f64, 
     c.pop_clip();
 }
 
+/// Frames in each column of [`spectrogram`].
+pub const SPECTRUM_N: usize = 512;
+
 /// A spectrum picture (`w` x `h`, 0x00RRGGBB) of frames `v0 .. v0 + vl` of the mid signal: Hann-windowed 512-point
 /// FFTs, log frequency axis, magnitude in dB coloured dark blue -> orange -> white.
 pub fn spectrogram(s: &Sample, v0: f64, vl: f64, w: usize, h: usize) -> Vec<u32> {
-    const N: usize = 512;
     let n = s.frames();
+    spectrogram_by(n, s.rate, v0, vl, w, h, |start, mid| {
+        for (i, m) in mid.iter_mut().enumerate() {
+            let j = start + i as i64;
+            *m = if j >= 0 && (j as usize) < n { 0.5 * (s.left[j as usize] + s.right[j as usize]) } else { 0.0 };
+        }
+    })
+}
+
+/// [`spectrogram`] of a sample of `n` frames at `rate` whose frames `mid` gives: the mid of [`SPECTRUM_N`] frames from
+/// `start` (silence outside the sample). A sample that plays from disk reads them from its file.
+#[allow(clippy::too_many_arguments)]
+pub fn spectrogram_by(n: usize, rate: u32, v0: f64, vl: f64, w: usize, h: usize, mut mid: impl FnMut(i64, &mut [f32])) -> Vec<u32> {
+    const N: usize = SPECTRUM_N;
     let mut out = vec![0u32; w * h];
     if n == 0 || w == 0 || h == 0 {
         return out;
     }
     let hann: Vec<f32> = (0..N).map(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / N as f32).cos()).collect();
+    let mut frames = vec![0f32; N];
     let mut re = vec![0f32; N];
     let mut im = vec![0f32; N];
-    let nyq = s.rate as f32 / 2.0;
+    let nyq = rate as f32 / 2.0;
     for x in 0..w {
         let centre = v0 + (x as f64 + 0.5) / w as f64 * vl;
         let start = centre as i64 - N as i64 / 2;
+        mid(start, &mut frames);
         for i in 0..N {
-            let j = start + i as i64;
-            re[i] = if j >= 0 && (j as usize) < n { 0.5 * (s.left[j as usize] + s.right[j as usize]) * hann[i] } else { 0.0 };
+            re[i] = frames[i] * hann[i];
             im[i] = 0.0;
         }
         fft(&mut re, &mut im);
@@ -1496,7 +1575,7 @@ pub fn hint(t: &Target, m: &dyn Model, st: &ViewState, sv: &SampleView, x: f32, 
         Target::LoopHandle(i) => param_hint(m, if *i == 0 { "loop_start" } else { "loop_end" }),
         Target::Wave(area) => match sv.sample {
             Some(s) => {
-                let n = s.frames();
+                let n = s.frames;
                 let (v0, vl) = wave_range(st, n);
                 let f = v0 + f64::from((x - area.x) / area.w) * vl;
                 let (cy, amp) = if st.multichannel {
@@ -1511,11 +1590,14 @@ pub fn hint(t: &Target, m: &dyn Model, st: &ViewState, sv: &SampleView, x: f32, 
             }
             None => String::new(),
         },
+        // **(Lemon Studio)** Where the played sample is: in memory, or read from its file while it plays (Keep on
+        // disk).
         Target::Overview(_) | Target::WaveArrow(_) | Target::WaveInfo => match sv.sample {
             Some(s) => {
-                let stereo = s.left != s.right;
                 let kind = if sv.bits & 0x100 != 0 { "float" } else { "int" };
-                format!("{}Hz, {}Bit {kind} {}, {}, in RAM", s.rate, sv.bits & 0xff, if stereo { "stereo" } else { "mono" }, time_ms(s.frames() as f64, s.rate))
+                let sides = if s.stereo() { "stereo" } else { "mono" };
+                let place = if s.on_disk { "on disk" } else { "in RAM" };
+                format!("{}Hz, {}Bit {kind} {sides}, {}, {place}", s.rate, sv.bits & 0xff, time_ms(s.frames as f64, s.rate))
             }
             None => String::new(),
         },

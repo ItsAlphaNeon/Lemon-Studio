@@ -141,7 +141,7 @@ pub fn render(o: &Opts) -> Result<(), String> {
 
     app.plugins.set_offline(true);
     let project = crate::rack::play_project(&app.state);
-    let mut library = SampleLibrary::new(SampleLibrary::default_factory_dir());
+    let mut library = SampleLibrary::new(crate::factory_folder::dir());
     library.resample_stretches = true;
     let mut e = Engine::new(&project, &mut library, o.rate, PlayMode::Song);
     for (row, i) in app.plugins.instruments() {
@@ -152,6 +152,9 @@ pub fn render(o: &Opts) -> Result<(), String> {
     }
     if o.from > 0 {
         e.seek_tick(o.from);
+    } else {
+        // As the export: from the start marker, jumping at skips (spec: audio/song-structure.md "Time markers").
+        e.follow_markers();
     }
     let rate = u64::from(o.rate);
     let len = e.length().max(1);

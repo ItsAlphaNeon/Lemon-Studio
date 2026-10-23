@@ -21,6 +21,8 @@ pub enum Form {
     Save(Box<crate::save_form::SaveForm>),
     /// FILE > Export audio (`crate::export_form`).
     Export(Box<crate::export_form::ExportForm>),
+    /// Import MIDI data (`crate::midi_file`).
+    Midi(Box<crate::midi_file::MidiForm>),
 }
 
 /// The parts of a form that take clicks (`dialog::DHit::Form`); Cancel and the caption's × are the dialog's own.
@@ -41,7 +43,7 @@ pub enum FHit {
     Item(u8),
     Fold,
     Shut,
-    /// Export: a segment (row, segment) of a segmented row, a format's tile.
+    /// Export: a segment (row, segment) of a segmented row, a format's tile (Import MIDI data: a MIDI channel's).
     Seg(u8, u8),
     Tile(u8),
 }
@@ -121,6 +123,9 @@ impl App {
         if matches!(top(self), Some(Form::Export(_))) {
             return self.export_form_click(h);
         }
+        if matches!(top(self), Some(Form::Midi(_))) {
+            return self.midi_form_click(h);
+        }
         let Some(Form::Rename(f)) = top(self) else { return None };
         match h {
             FHit::Field(0) => f.focus = 0,
@@ -165,6 +170,9 @@ impl App {
         if matches!(top(self), Some(Form::Export(_))) {
             return self.export_form_key(key, ctrl, alt);
         }
+        if matches!(top(self), Some(Form::Midi(_))) {
+            return self.midi_form_key(key);
+        }
         match key {
             Key::Named(NamedKey::Escape) => return Some(Reply::Button(Answer::Cancel)),
             Key::Named(NamedKey::Enter) => return self.form_accept(),
@@ -192,6 +200,7 @@ impl App {
         match f {
             Form::Save(f) => self.save_form_closed(*f, reply),
             Form::Export(f) => self.export_form_closed(*f, reply),
+            Form::Midi(f) => self.midi_form_closed(*f, reply),
             Form::Rename(f) => {
                 if reply != Reply::Button(Answer::Ok) {
                     return;
