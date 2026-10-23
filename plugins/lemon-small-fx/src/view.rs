@@ -3,12 +3,12 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! A small effect's editor: painting and hit regions (platform independent). The Lemon "Pith" plugin look, as Lemon
-//! Delay's: one row of outlined cards under ruled headings holding the dials and selectors, a well that pictures the
-//! settings, and the hint well and the wordmark on one line along the foot.
+//! Delay's: rows of outlined cards under ruled headings holding the dials and selectors (one row; Lemon Chorus has
+//! two), a well that pictures the settings, and the hint well and the wordmark on one line along the foot.
 //!
 // spec: plugins/lemon-small-effects.md (§2 the frame, §3 hints), the plugin pages (plugins/lemon-soft-clipper.md,
-// lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md, lemon-transient-processor.md; each §2
-// controls); ui/lemon-design.md §11.1
+// lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md, lemon-transient-processor.md, lemon-chorus.md,
+// lemon-stereo-shaper.md; each §2 controls); ui/lemon-design.md §11.1
 
 use os_theme::design::lemon as brand;
 use os_theme::Palette;
@@ -29,7 +29,7 @@ const MARK_BIG: Font = Font::condensed(22, 0).bold();
 const MARK_SMALL: Font = Font::condensed(10, 0).bold();
 
 /// The foot's centre line: the hint well at the left and the wordmark at the right are centred on it, 8 px under the
-/// cards and 8 px over the edge.
+/// (last row of) cards and 8 px over the edge.
 pub fn foot(spec: &Spec) -> f32 {
     spec.size.1 as f32 - 19.0
 }
@@ -127,6 +127,7 @@ pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewS
                 let min = spec.index(id).map_or(0, |k| spec.settings[k].range.0);
                 choices(&mut ui, id, x0, x1, top, min, names);
             }
+            Control::Pick { id, x0, x1, top, rows } => pick(&mut ui, spec, id, x0, x1, top, rows),
         }
     }
     if let Some(d) = &spec.display {
@@ -179,6 +180,27 @@ fn choices(ui: &mut Ui, id: &str, x0: f32, x1: f32, top: f32, min: i32, names: &
         let r = Rect::span(x0, x1, top + 16.0 * i as f32, top + 16.0 * i as f32 + 15.0);
         let st = ui.state(r, &target);
         let ink = lemon::choice_button(ui.c, r, chosen == v, brand::MAIN, st);
+        ui.c.text_center(LABEL, r, ink, name);
+        ui.hit(r, target);
+    }
+}
+
+/// The row of a pick whose value has the current value's text (`None` when none has).
+pub fn picked(spec: &Spec, id: &str, v: i32, rows: &[(&str, i32)]) -> Option<usize> {
+    let k = spec.index(id)?;
+    let t = (spec.text)(k, v);
+    rows.iter().position(|&(_, r)| (spec.text)(k, r) == t)
+}
+
+/// A selector over a long range (as [`choices`]): one row per named value, the row with the current value's text
+/// chosen.
+fn pick(ui: &mut Ui, spec: &Spec, id: &str, x0: f32, x1: f32, top: f32, rows: &[(&str, i32)]) {
+    let chosen = picked(spec, id, ui.m.plain(id).round() as i32, rows);
+    for (i, &(name, v)) in rows.iter().enumerate() {
+        let target = Target::Choice(id.into(), v);
+        let r = Rect::span(x0, x1, top + 16.0 * i as f32, top + 16.0 * i as f32 + 15.0);
+        let st = ui.state(r, &target);
+        let ink = lemon::choice_button(ui.c, r, chosen == Some(i), brand::MAIN, st);
         ui.c.text_center(LABEL, r, ink, name);
         ui.hit(r, target);
     }

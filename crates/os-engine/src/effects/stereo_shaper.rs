@@ -108,6 +108,14 @@ fn side(k: i32) -> usize {
     usize::from(k >= 0)
 }
 
+/// The all-pass's frequency for setting `k` (not 0) before the rate's limit: `single(single(exp(u * ln 5001) - 1) *
+/// 4.398 + 10)` with `u = single(1 - |k| / 4096)`, 22 kHz just off the centre to 10 Hz at either end.
+pub fn phase_hz(k: i32) -> f32 {
+    let u = (1.0 - f64::from(k.unsigned_abs()) / 4096.0) as f32;
+    let e = ((f64::from(u) * 5001f64.ln()).exp() - 1.0) as f32;
+    (f64::from(e) * 4.398 + 10.0) as f32
+}
+
 /// The all-pass's frequency and coefficients (spec "Phase").
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AllPass {
@@ -122,9 +130,7 @@ impl AllPass {
         if k == 0 {
             return None;
         }
-        let u = (1.0 - f64::from(k.unsigned_abs()) / 4096.0) as f32;
-        let e = ((f64::from(u) * 5001f64.ln()).exp() - 1.0) as f32;
-        let hz = ((f64::from(e) * 4.398 + 10.0) as f32).min((f64::from(rate) * 0.4999) as f32);
+        let hz = phase_hz(k).min((f64::from(rate) * 0.4999) as f32);
         let w = f64::from(hz) * ((2.0 * std::f64::consts::PI) / f64::from(rate));
         let k = 1.0 / (w.sin() + 1.0);
         Some(AllPass { hz, a1: -2.0 * k * w.cos(), a2: k * (1.0 - w.sin()) })

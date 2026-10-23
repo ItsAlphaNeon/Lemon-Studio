@@ -48,6 +48,8 @@ pub const SPEC: &Spec = &Spec {
     about: "Lemon Studio's stereo enhancer",
     settings: &SETTINGS,
     version: None,
+    any_version: false,
+    fields: &[],
     tail: &[],
     size: (472, 154),
     cards: &CARDS,

@@ -37,6 +37,8 @@ pub const SPEC: &Spec = &Spec {
     about: "Lemon Studio's soft clipper",
     settings: &SETTINGS,
     version: None,
+    any_version: false,
+    fields: &[],
     tail: &[],
     size: (400, 154),
     cards: &CARDS,

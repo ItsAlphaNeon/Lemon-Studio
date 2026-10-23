@@ -1841,6 +1841,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-chorus"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
 name = "lemon-delay"
 version = "0.0.1"
 dependencies = [
@@ -1953,6 +1962,15 @@ dependencies = [
 
 [[package]]
 name = "lemon-stereo-enhancer"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
+name = "lemon-stereo-shaper"
 version = "0.0.1"
 dependencies = [
  "lemon-small-fx",

@@ -1,0 +1,10 @@
+OSPRESET 1
+plugin=Lemon Stereo Shaper	id=clap:org.openstudio.lemon-stereo-shaper	format=clap	body=params
+# Values: OpenStudio-specs plugins/factory-presets.md.
+Right into left = 25600
+Left = 38400
+Right = 38400
+Left into right = 25600
+Delay = 6512
+Phase = 4096
+Effects position = 2

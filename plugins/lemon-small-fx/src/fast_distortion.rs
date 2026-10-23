@@ -46,6 +46,8 @@ pub const SPEC: &Spec = &Spec {
     about: "Lemon Studio's fast distortion",
     settings: &SETTINGS,
     version: None,
+    any_version: false,
+    fields: &[],
     tail: &[],
     size: (484, 154),
     cards: &CARDS,

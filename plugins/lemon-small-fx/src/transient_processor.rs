@@ -69,6 +69,8 @@ pub const SPEC: &Spec = &Spec {
     about: "Lemon Studio's transient processor",
     settings: &SETTINGS,
     version: Some(dsp::VERSION),
+    any_version: false,
+    fields: &[],
     tail: &dsp::DISPLAY,
     size: (686, 154),
     cards: &CARDS,

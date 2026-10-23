@@ -149,13 +149,13 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 
 - Lemon Sampler, Lemon Trio (a three-oscillator synth) and Lemon Parametric EQ, also available as VST3
   and CLAP bundles for other hosts
-- Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer and Lemon Transient Processor as
-  VST3 and CLAP plugins; a project's Fruity Soft Clipper, Fruity Fast Dist, Fruity Balance, Fruity Stereo Enhancer and
-  Transient Processor play through the same sound in the mixer. The first four match FL Studio 2026's exports sample
-  for sample in the tests; Transient Processor has not been compared with FL 2026's exports yet
-- A project's Fruity Chorus and Fruity Stereo Shaper play in the mixer through Lemon Studio's recreations, the
-  Stereo Shaper's difference output included (added to the track it names, on time, as Lemon Studio has no delay
-  compensation yet). Neither has been compared with FL Studio 2026's exports yet
+- Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon
+  Chorus and Lemon Stereo Shaper as VST3 and CLAP plugins; a project's Fruity Soft Clipper, Fruity Fast Dist, Fruity
+  Balance, Fruity Stereo Enhancer, Transient Processor, Fruity Chorus and Fruity Stereo Shaper play through the same
+  sound in the mixer. The first four match FL Studio 2026's exports sample for sample in the tests; Transient
+  Processor, Chorus and Stereo Shaper have not been compared with FL 2026's exports yet
+- The Stereo Shaper's difference output plays in the mixer (added to the track it names, on time, as Lemon Studio has
+  no delay compensation yet); Lemon Stereo Shaper as a plugin keeps the setting but has no output for it
 - The sampler plays a project's sample settings (start and length, the sample file's loop, the sample
   effects, the channel filter, declicking) and each note's own pan and filter offsets
 - A file of 30 s or more loaded into a sampler channel turns its Keep on disk on (General settings ▸
