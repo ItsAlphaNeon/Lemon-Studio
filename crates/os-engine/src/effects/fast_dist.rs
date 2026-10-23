@@ -22,8 +22,8 @@ pub const TYPE: usize = 2;
 pub const MIX: usize = 3;
 pub const POST: usize = 4;
 
-/// The settings' ranges. Stored values outside them: the threshold is kept within 1..10, any type but 0 is B, pre
-/// amp, mix and post gain are used as they are.
+/// The settings' ranges. Stored values outside them: the threshold and the type pick a curve together ([`curve`]);
+/// pre amp, mix and post gain are used as they are.
 pub const RANGES: [(i32, i32); PARAMS] = [(64, 192), (1, 10), (0, 1), (0, 128), (0, 128)];
 
 /// FL's `Default` preset: unity pre amp, threshold 10, type A, full mix and post gain.
@@ -94,11 +94,20 @@ pub fn level(i: usize, step: i32, kind: i32) -> f64 {
     (10f64.powf(shaped / 20.0) * 32767.0).round_ties_even()
 }
 
+/// The curve a stored threshold and type pick, as (threshold 1..10, type): one of 20, A at thresholds 1..10 and then
+/// B at 1..10, number `type * 10 + threshold - 1`. So a stored threshold of 0 with type B is A at 10, and 11 with type
+/// A is B at 1 (spec "Values outside the ranges"). Beyond the 20, FL reads memory that holds no curve; Lemon Studio
+/// takes the nearest end (A at 1 below, B at 10 above).
+pub fn curve(threshold: i32, kind: i32) -> (i32, i32) {
+    let n = (i64::from(kind) * 10 + i64::from(threshold) - 1).clamp(0, 19) as i32;
+    (n % 10 + 1, n / 10)
+}
+
 /// The curve table, times `wet`: `single(value / 32768) * wet` per entry, the product not rounded to single, and an
 /// 8193rd entry equal to the last.
 pub fn table(threshold: i32, kind: i32, wet: f32) -> Vec<f64> {
-    let step = 10 - threshold.clamp(1, 10);
-    let kind = if kind == 0 { TYPE_A } else { TYPE_B };
+    let (threshold, kind) = curve(threshold, kind);
+    let step = 10 - threshold;
     // `value / 32768` is exact as a single (a whole number below 2^15 over 2^15).
     let mut t: Vec<f64> = (0..TABLE).map(|i| level(i, step, kind) / 32768.0 * f64::from(wet)).collect();
     t.push(t[TABLE - 1]);
@@ -247,9 +256,16 @@ mod tests {
         let b = table(1, TYPE_B, 1.0);
         assert_eq!(b[8191], 32767.0 / 32768.0);
         assert!(b[4096] > 0.5 && b[4096] < 0.53, "{}", b[4096]);
-        // Out of range: threshold kept within 1..10, any type but 0 is B.
-        assert_eq!(table(0, 7, 1.0), b);
-        assert_eq!(table(20, 0, 1.0), t);
+        // Out of range: threshold and type pick one of the 20 curves together (FL 2026's renders of threshold 0 with
+        // type B and 11 with type A); beyond them, the nearest end.
+        assert_eq!(curve(0, TYPE_B), (10, TYPE_A));
+        assert_eq!(curve(11, TYPE_A), (1, TYPE_B));
+        assert_eq!(table(0, TYPE_B, 1.0), t);
+        assert_eq!(table(11, TYPE_A, 1.0), b);
+        assert_eq!(curve(5, 2), (10, TYPE_B));
+        assert_eq!(curve(5, -1), (1, TYPE_A));
+        assert_eq!(curve(i32::MAX, i32::MAX), (10, TYPE_B));
+        assert_eq!(curve(i32::MIN, 0), (1, TYPE_A));
     }
 
     #[test]
@@ -286,7 +302,7 @@ mod tests {
     /// Samples of FL's renders of the null test's probe (spec "Checked against FL").
     #[test]
     fn known_samples_from_fl() {
-        let cases: [([i32; PARAMS], f32, f32); 7] = [
+        let cases: [([i32; PARAMS], f32, f32); 11] = [
             // Type A, threshold 1.
             ([128, 1, 0, 128, 128], 0.021931838, 0.02192916),
             ([128, 1, 0, 128, 128], 0.0591505, 0.059143275),
@@ -299,6 +315,11 @@ mod tests {
             // Pre amp, mix and post gain above their ranges.
             ([300, 6, 0, 140, 140], 0.021931838, 0.4818168),
             ([300, 6, 0, 140, 140], 0.043841213, 0.42654645),
+            // Threshold 0 with type B plays A at 10; 11 with type A plays B at 1.
+            ([128, 0, 1, 128, 128], 0.021931838, 0.115097575),
+            ([128, 0, 1, 128, 128], -0.3715333, -0.3564453),
+            ([128, 11, 0, 128, 128], 0.021931838, 0.028388012),
+            ([128, 11, 0, 128, 128], -0.23921305, -0.2566399),
         ];
         for (v, x, want) in cases {
             assert_eq!(FastDist::with_settings(&Settings { v }).sample(x), want, "{v:?} {x}");
