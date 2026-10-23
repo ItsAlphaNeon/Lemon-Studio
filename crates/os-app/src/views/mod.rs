@@ -130,12 +130,13 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     ui.c.clear(ui.t.workspace);
     ui.c.set_cover(None);
 
-    // Workspace (§9): watermark, then docked windows on top.
+    // Workspace (§9): the theme's picture or the watermark, then docked windows on top.
     let left = if s.show_browser { browser_w(s) } else { 0.0 };
     let top = work_y(s);
     let work = Rect::new(left, top, w - left, h - top);
     let docked = s.docked();
-    if docked.is_none() {
+    // spec: ui/flstheme.md §3 (BackMode, BackPicFilename); no watermark over a picture (`wallpaper`).
+    if docked.is_none() && !crate::wallpaper::paint(ui, work) {
         let wm = ui.t.watermark;
         icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
         let version = concat!("Lemon Studio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");

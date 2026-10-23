@@ -203,6 +203,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         let c = if pl::track_on(s, row) { t.grid } else { t.grid.mix(t.grid_gap, 0.5) };
         let c = if g.rows.strip(row) { c.mix(t.grid_gap, 0.5) } else { c };
         ui.c.fill_rect(Rect::new(grid_x, y, grid_w, h - gap_of(row)), c);
+        // Under the gap line, which a theme's line strength may make see-through.
+        ui.c.fill_rect(Rect::new(grid_x, y + h - gap_of(row), grid_w, gap_of(row)), t.grid);
     }
     let start = pl::start_marker(s);
     if let Some(p) = start {
@@ -212,7 +214,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     grid_lines(ui, &g, bar_w, start_bar(&g, start));
     for &row in &visible {
         let (y, h) = (g.y_of(row), g.rows.height(row));
-        ui.c.fill_rect(Rect::new(grid_x, y + h - gap_of(row), grid_w, gap_of(row)), t.grid_gap);
+        // The gap line at the theme's line strength (spec: ui/flstheme.md §3, PLGridContrast).
+        ui.c.fill_rect(Rect::new(grid_x, y + h - gap_of(row), grid_w, gap_of(row)), t.pl_line(t.grid_gap));
     }
     // Time selection (§7).
     if let Some((a, b)) = s.playlist.range {
@@ -692,7 +695,9 @@ fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32, sb: i32) {
     }
     let first_bar = ((g.scroll_x / bar_w) as i32 / bar_step) * bar_step;
     let n = (grid.w / bar_w).ceil() as i32 + bar_step + 1;
-    let beat = t.grid_gap.mix(t.grid, 0.4);
+    // Lines at the theme's line strength (spec: ui/flstheme.md §3, PLGridContrast).
+    let beat = t.pl_line(t.grid_gap.mix(t.grid, 0.4));
+    let bar_line = t.pl_line(t.grid_bar);
     let unit = pl::grid_ticks(g.ppq, bar_w) as f32 * g.ppt;
     let per_bar = ((bar_w / unit).round() as i32).max(1);
     // Bar b's x on the drawing grid (`PGeom::xs`), plus `d` content pixels.
@@ -709,7 +714,7 @@ fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32, sb: i32) {
                 ui.c.fill_rect(Rect::new(bar_x(b, q as f32 * unit), grid.y, 1.0, grid.h), c);
             }
         }
-        ui.c.fill_rect(Rect::new(x, grid.y, if bar_step == 1 { 2.0 } else { 1.0 }, grid.h), t.grid_bar);
+        ui.c.fill_rect(Rect::new(x, grid.y, if bar_step == 1 { 2.0 } else { 1.0 }, grid.h), bar_line);
         b += bar_step;
     }
 }

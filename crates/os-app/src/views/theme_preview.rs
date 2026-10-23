@@ -108,12 +108,13 @@ fn layout(c: &mut Canvas, p: &Palette, r: Rect) {
         bar(c, pl.x + 4.0, y + row_h / 2.0 - 1.0, 11.0, p.text_faint);
         for b in 0..8 {
             let col = if (b / 4) % 2 == 1 { p.grid_alt } else { p.grid };
-            c.fill_rect(Rect::new(grid.x + b as f32 * bar_w, y, bar_w, row_h - 1.0), col);
+            // Under the row line too: a theme's line strength may make it see-through.
+            c.fill_rect(Rect::new(grid.x + b as f32 * bar_w, y, bar_w, row_h), col);
         }
-        c.fill_rect(Rect::new(grid.x, y + row_h - 1.0, grid.w, 1.0), p.grid_gap);
+        c.fill_rect(Rect::new(grid.x, y + row_h - 1.0, grid.w, 1.0), p.pl_line(p.grid_gap));
     }
     for b in 1..8 {
-        c.fill_rect(Rect::new(grid.x + b as f32 * bar_w, grid.y, 1.0, grid.h), if b % 4 == 0 { p.grid_bar } else { p.grid_gap });
+        c.fill_rect(Rect::new(grid.x + b as f32 * bar_w, grid.y, 1.0, grid.h), p.pl_line(if b % 4 == 0 { p.grid_bar } else { p.grid_gap }));
     }
     for (row, from, len) in [(0, 0.0, 4.0), (1, 2.0, 2.0), (1, 4.0, 3.0), (2, 1.0, 6.0), (3, 4.0, 4.0)] {
         let clip = Rect::new(grid.x + from * bar_w + 0.5, grid.y + row as f32 * row_h + 0.5, len * bar_w - 1.0, row_h - 2.0);

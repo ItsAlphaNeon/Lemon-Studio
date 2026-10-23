@@ -1083,6 +1083,23 @@ impl Canvas {
         }
         self.mark(x0, y0, x1, y1);
         let (rw, rh) = ((r.w * k).max(1.0), (r.h * k).max(1.0));
+        let (ox, oy) = (r.x * k, r.y * k);
+        if (rw, rh) == (w as f32, h as f32) && ox.fract() == 0.0 && oy.fract() == 0.0 {
+            // Pixel for pixel on whole device pixels: what the filter gives, copied without it (a workspace picture
+            // drawn behind the windows with every repaint).
+            let (ox, oy) = (ox as i32, oy as i32);
+            let pw = self.pixmap.width() as usize;
+            let pixels = self.pixmap.pixels_mut();
+            for y in y0..y1 {
+                let src = &px[(y - oy) as usize * w..][..w];
+                for x in x0..x1 {
+                    let v = src[(x - ox) as usize];
+                    pixels[y as usize * pw + x as usize] =
+                        PremultipliedColorU8::from_rgba((v >> 16) as u8, (v >> 8) as u8, v as u8, 255).expect("opaque");
+                }
+            }
+            return;
+        }
         // Source pixels per device pixel, and the source span (start, weights) each device column / row reads.
         let (fx, fy) = (w as f32 / rw, h as f32 / rh);
         let xs: Vec<Vec<(usize, f32)>> = (x0..x1).map(|x| taps(x as f32 + 0.5 - r.x * k, fx, w)).collect();
@@ -1336,6 +1353,34 @@ pub fn shift_pixels<T: Copy>(data: &mut [T], stride: usize, (x0, y0, x1, y1): (i
             data[at..at + w].copy_from_slice(row);
         }
     }
+}
+
+/// A `w` x `h` image of `0x00RRGGBB` pixels resized to `dw` x `dh` with [`Canvas::image`]'s filter: drawn once at a
+/// size that then copies pixel for pixel (a workspace picture, redrawn with every repaint behind the windows).
+pub fn resample(w: usize, h: usize, px: &[u32], dw: usize, dh: usize) -> Vec<u32> {
+    if w == 0 || h == 0 || px.len() < w * h || dw == 0 || dh == 0 {
+        return vec![0; dw * dh];
+    }
+    let xs: Vec<Vec<(usize, f32)>> = (0..dw).map(|x| taps(x as f32 + 0.5, w as f32 / dw as f32, w)).collect();
+    let mut out = Vec::with_capacity(dw * dh);
+    for y in 0..dh {
+        let ty = taps(y as f32 + 0.5, h as f32 / dh as f32, h);
+        for tx in &xs {
+            let mut acc = [0.0f32; 3];
+            for &(sy, wy) in &ty {
+                for &(sx, wx) in tx {
+                    let v = px[sy * w + sx];
+                    let wgt = wx * wy;
+                    acc[0] += ((v >> 16) & 0xff) as f32 * wgt;
+                    acc[1] += ((v >> 8) & 0xff) as f32 * wgt;
+                    acc[2] += (v & 0xff) as f32 * wgt;
+                }
+            }
+            let ch = |a: f32| u32::from(a.round().clamp(0.0, 255.0) as u8);
+            out.push(ch(acc[0]) << 16 | ch(acc[1]) << 8 | ch(acc[2]));
+        }
+    }
+    out
 }
 
 /// Source pixels (index, weight; weights sum to 1) that the device pixel centred at `d` (device px from the image's
@@ -1709,6 +1754,13 @@ mod tests {
         c.image(Rect::new(0.0, 0.0, 16.0, 1.0), 16, 1, &px);
         let got: Vec<u8> = c.pixmap.pixels().iter().map(|p| p.red()).collect();
         assert_eq!(got, (0..16).map(|i| if i % 2 == 0 { 0 } else { 255 }).collect::<Vec<_>>(), "1:1 copies");
+        // At a whole-pixel offset, cut by the canvas edges: still a copy.
+        let Ok(mut c) = Canvas::new(8, 2, 1.0) else { return };
+        let grid: Vec<u32> = (0..12).map(|i| i * 0x0a0b0c).collect();
+        c.image(Rect::new(5.0, -1.0, 4.0, 3.0), 4, 3, &grid);
+        let mut out = vec![0u32; 16];
+        c.copy_to_xrgb(&mut out);
+        assert_eq!((out[5], out[7], out[8 + 6]), (grid[4], grid[6], grid[9]));
         // Half size: each device pixel averages a black and a white source pixel.
         let Ok(mut c) = Canvas::new(8, 1, 0.5) else { return };
         c.image(Rect::new(0.0, 0.0, 16.0, 2.0), 16, 1, &px);
@@ -1717,6 +1769,16 @@ mod tests {
         let Ok(mut c) = Canvas::new(24, 1, 1.5) else { return };
         c.image(Rect::new(0.0, 0.0, 16.0, 1.0), 16, 1, &px);
         assert!(c.pixmap.pixels().iter().any(|p| p.red() > 20 && p.red() < 235), "linear when enlarging");
+    }
+
+    /// `resample` is `image`'s filter into a buffer: the same size copies, half size averages pairs.
+    #[test]
+    fn resample_filters_like_image() {
+        let px: Vec<u32> = (0..16).map(|i| if i % 2 == 0 { 0x000000 } else { 0xffffff }).collect();
+        assert_eq!(resample(16, 1, &px, 16, 1), px);
+        assert!(resample(16, 1, &px, 8, 1).iter().all(|&v| v == 0x808080 || v == 0x7f7f7f), "box average");
+        assert_eq!(resample(1, 1, &[0x102030], 3, 2), vec![0x102030; 6]);
+        assert_eq!(resample(0, 0, &[], 2, 1), vec![0, 0]);
     }
 
     #[test]
