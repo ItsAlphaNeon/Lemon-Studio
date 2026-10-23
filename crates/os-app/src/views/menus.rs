@@ -710,10 +710,14 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
             (false, false) => col_h(items),
         })
         .fold(0.0, f32::max);
-    // Under its title in the menu bar, which is drawn at Toolbars scaling (`super::band_k`; spec: ui/ui-scaling.md §1).
+    // Under its title in the menu bar, wherever the toolbar's layout puts it, at Toolbars scaling (`super::band_rect`;
+    // spec: ui/ui-scaling.md §1, ui/toolbar-menu.md §8).
     let (ax, ay) = match (menu == PATTERNS, s.pat_ui.menu_at) {
         (true, Some(at)) => at,
-        _ => ((x0 - 4.0) * super::band_k(s), 78.0 * super::band_k(s)),
+        _ => {
+            let at = super::band_rect(s, Rect::new(x0 - 4.0, 78.0, 0.0, 0.0));
+            (at.x, at.y)
+        }
     };
     let r = Rect::new((ax / k).min(s.screen.0 / k - width).max(0.0), ay / k, width, body_h + border * 2.0);
     let away = !r.contains(ui.mouse.0, ui.mouse.1);
@@ -1033,17 +1037,17 @@ pub fn hint_popup(s: &State, x: f32, y: f32) -> crate::playlist::Popup {
     crate::playlist::Popup { x, y, items: toolbar_items(s), sub: None }
 }
 
-/// The Toolbars menu's entries, also VIEW > Toolbars ▸ (spec: ui/toolbar-menu.md §1, §8): Separators, Flat buttons,
-/// Hint bar and Hide work; the toolbar editor, the MIDI chords and every layout but ours (checked) stay greyed out.
+/// The Toolbars menu's entries, also VIEW > Toolbars ▸ (spec: ui/toolbar-menu.md §1, §8): Edit (the toolbar editor),
+/// Separators, Flat buttons, Hint bar and Hide; the presets, the factory ones then the user's, the current layout's
+/// checked. The MIDI chords stay greyed out.
 pub fn toolbar_items(s: &State) -> Vec<crate::playlist::PItem> {
     use crate::playlist::{Cmd, Mark, PItem};
     use crate::views::toolbar::Switch;
     let o = s.toolbar;
     let switch = |label: &'static str, sw: Switch, on: bool| PItem::new(label, Cmd::Toolbar(sw)).mark(Mark::Check(on));
-    let radio = |label: &'static str, on: bool| PItem::not_yet(label).mark(Mark::Radio(on));
-    vec![
+    let mut items = vec![
         PItem::head("Toolbars"),
-        PItem::not_yet("Edit").mark(Mark::Check(false)),
+        switch("Edit", Switch::Edit, s.bar.editing),
         switch("Separators", Switch::Separators, o.separators),
         switch("Flat buttons", Switch::Flat, o.flat),
         PItem::not_yet("Show detected MIDI chords near the hint bar").mark(Mark::Check(false)),
@@ -1052,17 +1056,40 @@ pub fn toolbar_items(s: &State) -> Vec<crate::playlist::PItem> {
         // A command: always the dim mark (§1).
         switch("Hide", Switch::Hide, false).key("Ctrl+F11"),
         PItem::col(),
-        PItem::head("Presets"),
-        radio("Compact", false),
-        radio("Default (hint above menu)", false),
-        radio("Default (macOS)", false),
-        radio("Default", false),
-        radio("Classic", true),
-        radio("Modern (macOS)", false),
-        radio("Modern (Windows)", false),
-        radio("Single line centered", false),
-        radio("Single line", false),
-    ]
+    ];
+    items.extend(preset_items(s));
+    items
+}
+
+/// The toolbar presets as menu entries (spec: ui/toolbar-menu.md §8): "Presets" with the factory ones, then "User
+/// presets" with the user's when there are any; the first one with the current layout checked.
+pub fn preset_items(s: &State) -> Vec<crate::playlist::PItem> {
+    use crate::playlist::{Cmd, Mark, PItem};
+    use crate::toolbar::{PresetId, PRESETS};
+    let factory = s.bar.layout.factory();
+    let user = if factory.is_none() { s.bar.user_current().map(|p| p.name.clone()) } else { None };
+    let mut items = vec![PItem::head("Presets")];
+    items.extend(PRESETS.iter().enumerate().map(|(i, p)| PItem::new(p.name, Cmd::ToolbarPreset(PresetId::Factory(i))).mark(Mark::Radio(factory == Some(i)))));
+    if !s.bar.user.is_empty() {
+        items.push(PItem::head("User presets"));
+        items.extend(s.bar.user.iter().map(|p| {
+            let on = user.as_deref() == Some(p.name.as_str());
+            PItem::new(p.name.clone(), Cmd::ToolbarPreset(PresetId::User(p.path.clone()))).mark(Mark::Radio(on))
+        }));
+    }
+    items
+}
+
+/// The toolbar editor's preset menu (spec: ui/toolbar-menu.md §8): Save preset as..., Delete preset (the current
+/// layout's user preset only), then the presets.
+pub fn editor_presets_popup(s: &State, x: f32, y: f32) -> crate::playlist::Popup {
+    use crate::playlist::{Cmd, PItem};
+    let mut items = vec![PItem::new("Save preset as...", Cmd::ToolbarSave)];
+    let delete = PItem::new("Delete preset", Cmd::ToolbarDelete);
+    items.push(if s.bar.layout.factory().is_none() && s.bar.user_current().is_some() { delete } else { delete.off() });
+    items.push(PItem::sep());
+    items.extend(preset_items(s));
+    crate::playlist::Popup { x, y, items, sub: None }
 }
 
 /// The time display's right-click menu: Mode and Middle unit, one dot each (spec: ui/time-display.md §1).

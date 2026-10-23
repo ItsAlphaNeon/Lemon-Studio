@@ -94,7 +94,7 @@ impl App {
             s.piano.marker_placed = true;
         }
         self.hint = Cow::Owned(hint(&self.state, t));
-        self.damage_rect(HINT_RECT);
+        self.damage_band(HINT_RECT);
         if restart {
             self.song_pos_restart();
         }
@@ -125,8 +125,8 @@ impl App {
     /// held, see `song_pos_tick`).
     pub(crate) fn song_pos_press(&mut self) {
         let Some(range) = range(&self.state) else { return };
-        // The slider is laid out in the top band's px (Toolbars scaling).
-        let x = self.band_mouse().0;
+        // The slider is laid out in its panel's home px (Toolbars scaling, the toolbar layout).
+        let x = self.panel_mouse(crate::toolbar::Panel::SongPos).0;
         let hx = handle_x(self.song_pos_now(), range);
         if (x - hx).abs() <= GRAB {
             self.drag = Some(Drag::SongPos { dx: x - hx });
@@ -140,7 +140,7 @@ impl App {
     fn song_pos_step(&mut self) {
         let Some(range) = range(&self.state) else { return };
         let now = self.song_pos_now();
-        let target = tick_at(self.band_mouse().0, range);
+        let target = tick_at(self.panel_mouse(crate::toolbar::Panel::SongPos).0, range);
         let step = click_step(range, self.state.project.ppq);
         let next = if target > now { (now + step).min(target) } else { now.saturating_sub(step).max(target) };
         if next != now {
@@ -151,7 +151,7 @@ impl App {
     /// Dragging the handle: the position follows the pointer (minus the grab offset).
     pub(crate) fn song_pos_drag(&mut self, dx: f32) {
         if let Some(range) = range(&self.state) {
-            self.set_song_pos(tick_at(self.band_mouse().0 - dx, range), false);
+            self.set_song_pos(tick_at(self.panel_mouse(crate::toolbar::Panel::SongPos).0 - dx, range), false);
         }
     }
 
@@ -163,7 +163,7 @@ impl App {
     /// Right click on the slider: straight to the pointer (§3).
     pub(crate) fn song_pos_jump(&mut self) {
         if let Some(range) = range(&self.state) {
-            self.set_song_pos(tick_at(self.band_mouse().0, range), true);
+            self.set_song_pos(tick_at(self.panel_mouse(crate::toolbar::Panel::SongPos).0, range), true);
         }
     }
 

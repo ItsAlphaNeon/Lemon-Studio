@@ -60,6 +60,8 @@ pub struct FrameInfo {
     pub sounding: Vec<(u16, u16)>,
     /// The song position slider's handle is being dragged (it shows the dragged position, not the playhead).
     pub song_pos_drag: bool,
+    /// What the toolbar editor's drag carries (spec: ui/toolbar-menu.md §8).
+    pub bar_drag: Option<crate::toolbar::BarDrag>,
 }
 
 /// UI text at a nominal size (Cuprum; spec §10).
@@ -79,7 +81,7 @@ pub fn popup_scale(main: f32) -> f32 {
     pct.map_or(main, |p| p / 100.0)
 }
 
-/// Top of the workspace (§1) below the toolbar.
+/// Top of the workspace (§1) below the toolbar of two rows (the classic layout).
 pub const WORK_Y: f32 = 83.0;
 
 /// Top of the workspace and the browser now: the window's top while the toolbar is hidden (spec: ui/toolbar-menu.md
@@ -88,7 +90,7 @@ pub fn work_y(s: &State) -> f32 {
     if s.toolbar.hidden { 0.0 } else { band_h(s) }
 }
 
-/// Display scale of the main window's top band (the toolbar rows with the menu bar, `WORK_Y` tall in its own px) for a
+/// Display scale of the main window's top band (the toolbar rows, `WORK_Y` tall in its own px for two rows) for a
 /// window at scale `main`: General ▸ Display ▸ Toolbars scaling (Main = `main`). Spec: ui/ui-scaling.md §1.
 pub fn toolbar_scale(main: f32) -> f32 {
     let pct = crate::prefs::choice(&crate::prefs::TOOLBARS_SCALING).strip_suffix('%').and_then(|p| p.parse::<f32>().ok());
@@ -101,15 +103,55 @@ pub fn band_k(s: &State) -> f32 {
     toolbar_scale(main) / main
 }
 
-/// Height of the top band in the window's px (shown or not): `WORK_Y` at its scale.
+/// Height of the top band in the window's px (shown or not): its rows' (`toolbar::Layout::band_h`, `WORK_Y` for two)
+/// at its scale.
 pub fn band_h(s: &State) -> f32 {
-    WORK_Y * band_k(s)
+    s.bar.layout.band_h() * band_k(s)
 }
 
-/// Rect `r` of the top band, in the band's own px (`toolbar`, `app::HINT_RECT`...), in the window's px.
-pub fn band_rect(s: &State, r: Rect) -> Rect {
-    let k = band_k(s);
+/// `r` in px `k` times as big.
+pub fn scale_rect(r: Rect, k: f32) -> Rect {
     Rect::new(r.x * k, r.y * k, r.w * k, r.h * k)
+}
+
+/// The top band's toolbar panels as laid out now, in the band's own px.
+fn placed(s: &State) -> Vec<crate::toolbar::Placed> {
+    crate::toolbar::place(&s.bar.layout, s.screen.0 / band_k(s), s.bar.editing)
+}
+
+/// How far toolbar panel `p` is from its home (`toolbar::Panel::home`); `None` when it is not on the toolbar.
+pub fn panel_at(s: &State, p: crate::toolbar::Panel) -> Option<crate::toolbar::At> {
+    placed(s).into_iter().find(|q| q.panel == p).map(|q| q.at())
+}
+
+/// Rect `r` of the top band, given in the home px of the panel whose slot holds its top-left (`toolbar::Panel`,
+/// `app::HINT_RECT`, `patterns::PLUS_BOX_AT`...), in the window's px where that panel is drawn now. A panel that is not
+/// on the toolbar leaves `r` where it is (scaled).
+pub fn band_rect(s: &State, r: Rect) -> Rect {
+    let a = crate::toolbar::Panel::at_home(r.x, r.y).and_then(|p| panel_at(s, p)).unwrap_or_default();
+    scale_rect(a.r(r), band_k(s))
+}
+
+/// The parts of rect `r` of the top band, given in its panels' home px (`band_rect`), in the window's px where each of
+/// those panels is drawn now: to repaint them (`App::damage_band`). Panels that are not on the toolbar give none.
+pub fn band_rects(s: &State, r: Rect) -> Vec<Rect> {
+    let k = band_k(s);
+    placed(s)
+        .into_iter()
+        .filter(|p| !p.panel.repeats())
+        .filter_map(|p| {
+            let (row, x0, x1) = p.panel.home();
+            let slot = Rect::new(x0, crate::toolbar::ROW_H * row as f32, x1 - x0, crate::toolbar::ROW_H + 1.0);
+            let part = slot.intersect(&r);
+            (!part.is_empty()).then(|| scale_rect(p.at().r(part), k))
+        })
+        .collect()
+}
+
+/// The toolbar editor's palette in the window's px, while it is open (spec: ui/toolbar-menu.md §8).
+pub fn palette_rect(s: &State) -> Option<Rect> {
+    let k = band_k(s);
+    (s.bar.editing && !s.toolbar.hidden).then(|| scale_rect(toolbar::palette(s, s.screen.0 / k).rect, k))
 }
 /// Width of the docked browser incl. the splitter (§4): the default, and the least its splitter drags it to.
 pub const BROWSER_W: f32 = 209.0;
@@ -200,6 +242,12 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         toolbar::paint_hint_bar(ui, s, f);
     }
     let overlays = ui.hit_count();
+    // The toolbar editor's palette goes over the windows, which docked plugin windows leave free like any overlay (spec:
+    // ui/toolbar-menu.md §8).
+    if s.bar.editing && !s.toolbar.hidden {
+        let scale = toolbar_scale(ui.c.scale);
+        ui.scaled(scale, |ui, k| toolbar::paint_palette(ui, s, f, w / k));
+    }
     if let Some(m) = s.menu_open {
         ui.scaled(popup_scale(ui.c.scale), |ui, k| menus::paint_dropdown(ui, s, m, k));
     }
