@@ -3363,6 +3363,12 @@ impl App {
             }
         }
         crate::playlist::follow_crossfades(self);
+        // Resumed from a Marker pause: playback counts as started on the marker, so Stop returns there (spec:
+        // audio/transport.md "Time markers in SONG mode").
+        if let Some(t) = self.transport.take_marker_resumed() {
+            self.state.playlist.pos = t;
+            self.damage_win(Win::Playlist);
+        }
         // Edits (notes, steps, mixer, channel volume / pan / mute, tempo) reach playback right away,
         // also during a drag (at most once per tick).
         if self.state.piano.dirty {
