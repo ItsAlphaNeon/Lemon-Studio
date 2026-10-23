@@ -4,14 +4,15 @@
 
 //! The piano roll's small tool dialogs, laid out as FL's: Flam ("Piano roll - flamer", 198 × 241), Flip ("Piano roll -
 //! score flipper", 162 × 160), Scale levels ("Piano roll - level scaling", 172 × 277), Limit ("Piano roll - limiter /
-//! transposer", 432 × 295) and Claw machine ("Piano roll - claw machine", 172 × 245). One window shows whichever is
-//! open (`piano_dlg::Ui::tool`).
-// spec: ui/piano-flam.md §1, ui/piano-flip.md §1, ui/piano-level-scaling.md §1, ui/piano-limit.md §1, ui/piano-claw.md §1
+//! transposer", 432 × 295), Claw machine ("Piano roll - claw machine", 172 × 245) and LFO ("Piano roll - LFO",
+//! 212 × 323). One window shows whichever is open (`piano_dlg::Ui::tool`).
+// spec: ui/piano-flam.md §1, ui/piano-flip.md §1, ui/piano-level-scaling.md §1, ui/piano-limit.md §1, ui/piano-claw.md §1,
+// ui/piano-lfo.md §1
 
 use os_ui::kit::{self, Dir, lemon as lk};
 use os_ui::{Font, Glyph, Rect};
 
-use super::strum::{label, led};
+use super::strum::{label, led, led_r};
 use super::{FrameInfo, Look};
 use crate::app::{Action, State, Ui, Win};
 use crate::icons::{self, Icon};
@@ -20,7 +21,7 @@ use crate::piano_dlg::{self as dlg, Act, KB_W, KEY_W, Knob, Tool};
 use crate::views::piano::{TOP_KEY, is_black, key_name};
 
 /// Each dialog's size, by `Tool::index`; Limit's with both sections open.
-const SIZES: [(f32, f32); 5] = [(198.0, 241.0), (162.0, 160.0), (172.0, 277.0), (432.0, 295.0), (172.0, 245.0)];
+const SIZES: [(f32, f32); Tool::COUNT] = [(198.0, 241.0), (162.0, 160.0), (172.0, 277.0), (432.0, 295.0), (172.0, 245.0), (212.0, 323.0)];
 
 /// The panel heights under Limit's two section headers (piano-limit.md §1): a collapsed section's comes off the window.
 const PANELS: [f32; 2] = [67.0, 110.0];
@@ -64,15 +65,16 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     ui.hit(win, Action::Swallow, "");
     ui.hit(at(1.0, 1.0, w - 30.0, 26.0), Action::WinDrag(Win::PianoDlg), "");
     // FL's narrow dialogs: the title condensed to end before ×.
-    let title = ui.c.fit_font(Font::new(17), d.tool.title(), w - 31.0);
-    label(ui, title, x0 + 7.0, y0 + 15.0, -1, t.text, d.tool.title());
+    let name = d.tool.title_on(s.piano.lane);
+    let title = ui.c.fit_font(Font::new(17), name, w - 31.0);
+    label(ui, title, x0 + 7.0, y0 + 15.0, -1, t.text, name);
     let close = at(w - 20.0, 10.0, 10.0, 10.0);
     let hov = ui.hit(close.outset(4.0), Action::CloseWin(Win::PianoDlg), "Close (puts the notes back)");
     icons::draw(ui.c, Icon::Close, close.outset(1.0), if hov { t.tx(0xffffff) } else { t.glyph });
 
-    // Limit draws its own section panels.
+    // Limit and LFO draw their own panels.
     let body = at(7.0, 28.0, w - 14.0, h - 71.0);
-    if d.tool != Tool::Limit {
+    if !matches!(d.tool, Tool::Limit | Tool::Lfo) {
         if lemon {
             ui.c.stroke_rrect(body, lk::r_small(t), 1.0, line);
         } else {
@@ -86,6 +88,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         Tool::Levels => levels(ui, s, x0, y0),
         Tool::Limit => limit(ui, s, x0, y0),
         Tool::Claw => claw(ui, s, x0, y0),
+        Tool::Lfo => lfo(ui, s, x0, y0),
     }
 
     // Reset, Accept.
@@ -222,6 +225,72 @@ fn claw(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
     // FL's switch names are narrower than our 15 px: a size down keeps them inside the panel.
     switch(ui, s, x0, y0, 21.0, 164.0, Act::Stretch, "Stretch to compensate", "Stretch the rest of each period over the cut", Font::new(14), false);
     switch(ui, s, x0, y0, 22.0, 186.0, Act::Short, "Remove short notes", "Remove notes left shorter than a 24th of a beat", Font::new(12), false);
+}
+
+/// LFO (piano-lfo.md §1): the Start and End panels of Value, Range and Speed knobs (End's grey while its switch is off,
+/// Speed's log switch under it), and the Shape panel with the shape box and the Phase knob.
+fn lfo(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
+    let t = ui.t;
+    let lemon = super::lemon(ui);
+    let (lf, nf) = (Font::new(15), Font::new(13));
+    let set = &s.piano_dlg.lfo;
+    let off = !set.end_on;
+    let (line, panel) = (t.s(0x16191a), t.s(0x272b2d));
+    for (x, y, w, h) in [(8.0, 29.0, 93.0, 167.0), (110.0, 29.0, 93.0, 167.0), (8.0, 205.0, 195.0, 74.0)] {
+        let r = Rect::new(x0 + x, y0 + y, w, h);
+        if lemon {
+            ui.c.fill_rrect(r, lk::r_small(t), panel);
+            ui.c.stroke_rrect(r, lk::r_small(t), 1.0, line);
+        } else {
+            ui.c.fill_rect(r, line);
+            ui.c.fill_rect(r.inset(1.0), panel);
+        }
+    }
+    label(ui, lf, x0 + 15.0, y0 + 40.0, -1, t.text, "Start");
+    switch(ui, s, x0, y0, 121.0, 40.0, Act::LfoEnd, "End", "End: the values reached at the end of the pattern", lf, false);
+    let columns = [(70.0, [Knob::LfoValue, Knob::LfoRange, Knob::LfoSpeed], false), (159.0, [Knob::LfoEndValue, Knob::LfoEndRange, Knob::LfoEndSpeed], off)];
+    for (cx, knobs, dim) in columns {
+        for (cy, k, name) in [(72.0, knobs[0], "Value"), (120.0, knobs[1], "Range"), (165.0, knobs[2], "Speed")] {
+            let ink = if dim { t.text_faint } else { t.text };
+            label(ui, nf, x0 + cx - 19.0, y0 + cy, 1, ink, name);
+            // Value's arc from the bottom left, Range's from the top; Speed has a pointer only.
+            let look = if name == "Speed" { kit::KnobLook::Ball } else { kit::KnobLook::Ring };
+            lfo_knob(ui, s, x0 + cx, y0 + cy, 15.0, k, name == "Range", look, dim);
+        }
+    }
+    // log, small, under End's Speed, its name left of it.
+    let hov = !off && ui.hit(Rect::new(x0 + 120.0, y0 + 176.0, 30.0, 12.0), Action::PianoDlg(Act::LfoLog), "log: End's speed reached along an exponential curve");
+    label(ui, Font::new(12), x0 + 137.0, y0 + 182.0, 1, if off { t.text_faint } else if hov { t.tx(0xffffff) } else { t.text }, "log");
+    led_r(ui, x0 + 144.0, y0 + 182.0, 5.0, set.log, hov, off);
+
+    // The shape box: the wave's picture and ▸, a menu.
+    label(ui, lf, x0 + 15.0, y0 + 216.0, -1, t.text, "Shape");
+    let r = Rect::new(x0 + 17.0, y0 + 238.0, 51.0, 24.0);
+    let hov = ui.hit(r, Action::PianoDlg(Act::ShapeMenu), "Shape");
+    kit::combo(ui.c, t, r, "", lf, kit::State::hover(hov));
+    wave(ui, Rect::new(r.x + 6.0, r.y + 6.0, 24.0, 12.0), set.shape, if hov { t.tx(0xffffff) } else { t.text });
+    label(ui, lf, x0 + 132.0, y0 + 245.0, 1, t.text, "Phase");
+    lfo_knob(ui, s, x0 + 155.0, y0 + 245.0, 19.0, Knob::LfoPhase, false, kit::KnobLook::Ball, false);
+}
+
+/// One of LFO's knobs at screen (`cx`, `cy`); a grey one takes no clicks.
+#[allow(clippy::too_many_arguments)]
+fn lfo_knob(ui: &mut Ui, s: &State, cx: f32, cy: f32, r: f32, k: Knob, bipolar: bool, look: kit::KnobLook, dim: bool) {
+    let id = KnobId::PianoDlg(k);
+    let area = Rect::new(cx - r - 2.0, cy - r - 2.0, 2.0 * r + 4.0, 2.0 * r + 4.0);
+    let hov = !dim && ui.hit(area, Action::Knob(id), s.knob_text(id));
+    kit::knob(ui.c, ui.t, cx, cy, r, s.knob(id), bipolar, look, kit::State::hover(hov).with_disabled(dim));
+}
+
+/// One cycle of `shape` drawn into `r`.
+fn wave(ui: &mut Ui, r: Rect, shape: crate::lfo::Shape, ink: os_ui::Color) {
+    let pts: Vec<(f32, f32)> = match shape {
+        crate::lfo::Shape::Square => vec![(0.0, 0.0), (0.0, 1.0), (0.5, 1.0), (0.5, -1.0), (1.0, -1.0), (1.0, 0.0)],
+        crate::lfo::Shape::Triangle => vec![(0.0, 0.0), (0.25, 1.0), (0.75, -1.0), (1.0, 0.0)],
+        crate::lfo::Shape::Sine => (0..=24).map(|i| i as f32 / 24.0).map(|f| (f, (std::f32::consts::TAU * f).sin())).collect(),
+    };
+    let pts: Vec<(f32, f32)> = pts.into_iter().map(|(f, y)| (r.x + f * r.w, r.cy() - y * r.h / 2.0)).collect();
+    ui.c.polyline(&pts, 1.5, ink);
 }
 
 /// Limit's keyboard (piano-limit.md §1), window-relative: its left edge; below its section's header top, the name

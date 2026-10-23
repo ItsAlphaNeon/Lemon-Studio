@@ -106,6 +106,7 @@ mod levels;
 mod chords;
 mod claw;
 mod limit;
+mod lfo;
 mod piano_dlg;
 mod arpeggiate;
 mod tapper;
