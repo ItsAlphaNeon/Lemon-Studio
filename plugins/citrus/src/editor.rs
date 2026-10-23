@@ -320,6 +320,8 @@ pub struct Logic {
     no_keys: Arc<AtomicBool>,
     /// The operator page's wave and what it was drawn from (the block, band-limit smoothing).
     wave: Option<(OpBlock, bool, Vec<f32>)>,
+    /// The operators' tables of the last edit, reused by the next one.
+    tables: patch::Tables,
     /// The editor's clipboards: a point's level, a curve, an operator's harmonics.
     level_clip: Option<f32>,
     curve_clip: Option<Curve>,
@@ -357,6 +359,7 @@ impl Logic {
             hosted: false,
             no_keys,
             wave: None,
+            tables: patch::Tables::default(),
             level_clip: None,
             curve_clip: None,
             harm_clip: None,
@@ -401,7 +404,8 @@ impl Logic {
     fn commit(&mut self) {
         self.used = patch::usage(&self.st).0;
         let bytes = self.st.to_bytes(self.body.as_deref());
-        if !self.params.edited(self.version, bytes, Patch::new(self.st.clone())) {
+        let p = Patch::with_tables(self.st.clone(), &mut self.tables);
+        if !self.params.edited(self.version, bytes, p) {
             // The state was replaced meanwhile: show that one.
             self.reload();
         }

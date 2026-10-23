@@ -7,6 +7,8 @@
 //
 // spec: plugins/sytrus.md ("The matrix", "Maps", "The wave table", "The operators, per sample", "Filter modules")
 
+use std::sync::Arc;
+
 use crate::curve::{Curve, MapWalk};
 use crate::filter::Shaper;
 use crate::num::{cell_gain, s, signed_curve128};
@@ -40,8 +42,8 @@ fn mod_table(c: &Curve, centre: f64) -> Option<Vec<f32>> {
 #[derive(Debug, Clone)]
 pub struct Patch {
     pub st: State,
-    /// Per operator: its table (operators that are used).
-    pub tables: Vec<Option<Table>>,
+    /// Per operator: its table (operators that are used), shared with the editor's [`Tables`].
+    pub tables: Vec<Option<Arc<Table>>>,
     pub shapers: Vec<Option<Shaper>>,
     /// Per module and articulator: the mod X and mod Y tables.
     pub mods: Vec<Vec<[Option<Vec<f32>>; 2]>>,
@@ -98,12 +100,36 @@ fn usage_of(st: &State, g: &[[f32; 9]; 9], ring: &[[f32; 9]; 9]) -> ([bool; 9], 
     (used, per_sample)
 }
 
+/// The operators' tables an editor made last, kept so an edit that leaves an operator's waveform settings alone
+/// does not build its table again (a table is 16384 points and its spectrum; six of them took up to 7 ms an edit).
+#[derive(Default)]
+pub struct Tables([Option<(OpBlock, bool, Arc<Table>)>; OPERATORS]);
+
+impl Tables {
+    /// Operator `o`'s table for its settings `op` and smoothing `smooth`: the kept one when they are the same.
+    fn get(&mut self, o: usize, op: &OpBlock, smooth: bool) -> Arc<Table> {
+        match &self.0[o] {
+            Some((kept, s, t)) if kept == op && *s == smooth => t.clone(),
+            _ => {
+                let t = Arc::new(wave::build(op, smooth));
+                self.0[o] = Some((op.clone(), smooth, t.clone()));
+                t
+            }
+        }
+    }
+}
+
 impl Patch {
     pub fn new(st: State) -> Patch {
+        Patch::with_tables(st, &mut Tables::default())
+    }
+
+    /// The patch of `st`, its operators' tables taken from `kept` where their settings did not change.
+    pub fn with_tables(st: State, kept: &mut Tables) -> Patch {
         let (g, ring) = gains(&st);
         let (used, per_sample) = usage_of(&st, &g, &ring);
         let smooth = st.switch(2) != 0;
-        let tables = (0..OPERATORS).map(|o| used[o].then(|| wave::build(&st.modules[o].op, smooth))).collect();
+        let tables = (0..OPERATORS).map(|o| used[o].then(|| kept.get(o, &st.modules[o].op, smooth))).collect();
         let shapers = (0..FILTERS)
             .map(|f| {
                 let m = &st.modules[OPERATORS + f];
@@ -135,5 +161,28 @@ impl Patch {
     /// Whether an operator plays a plucked string.
     pub fn plucked(&self, o: usize) -> bool {
         self.st.modules[o].op.flags[PLUCKED] != 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An edit reuses the tables of operators whose waveform settings stayed and builds the changed one's again.
+    #[test]
+    fn edits_reuse_unchanged_tables() {
+        let mut st = crate::preset::default_patch();
+        st.matrix[9 + COL_OUT] = 256;
+        let mut kept = Tables::default();
+        let a = Patch::with_tables(st.clone(), &mut kept);
+        assert!(a.used[0] && a.used[1]);
+        st.main_volume += 1;
+        let b = Patch::with_tables(st.clone(), &mut kept);
+        let same = |x: &Patch, y: &Patch, o: usize| Arc::ptr_eq(x.tables[o].as_ref().unwrap(), y.tables[o].as_ref().unwrap());
+        assert!(same(&a, &b, 0) && same(&a, &b, 1));
+        st.modules[1].op.shape[0] += 64;
+        let c = Patch::with_tables(st.clone(), &mut kept);
+        assert!(same(&b, &c, 0) && !same(&b, &c, 1));
+        assert_eq!(c.tables[1].as_ref().unwrap().t, wave::build(&st.modules[1].op, st.switch(2) != 0).t);
     }
 }
