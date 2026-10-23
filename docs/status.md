@@ -30,6 +30,11 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 - Playlist with pattern, audio and automation clips
 - Clip groups, markers and several arrangements
+- Time markers with FL's actions (right-click a marker): Start, Loop, Marker loop, Marker skip and Marker pause
+  play in SONG mode; exports start at the Start marker and jump at skips. Move content left / right, Place loop
+  (Shift+T), Add auto, Add one every, Add jump to next bar, time signature markers, and Delete or Change to marker
+  loop in the time selection. A click on a marker moves the song position there. Not yet: Add two..., key
+  markers, quantized song jumps, the Start / Stop recording markers' punch
 - Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
 - Track height, zoom and scroll saved with the project
 - Project picker (VIEW, Ctrl+F8 or the toolbar's project button): a menu of the patterns and channels; picking a
