@@ -14397,8 +14397,9 @@ mod tests {
         }
         frame(&mut app, &mut c, None);
 
-        // Alt+W opens Claw machine (spec: ui/piano-claw.md): every note of the channel, selected or not, previews at
-        // once, the menus and the knob too; Accept is one undo step that leaves nothing selected, and the settings stay.
+        // Alt+W opens Claw machine (spec: ui/piano-claw.md): the selected notes alone, periods still counted from tick 0,
+        // preview at once, the menus and the knob too; Accept is one undo step, the selection holds the result, and the
+        // settings stay.
         {
             use crate::piano_dlg::{Act as DAct, CCmd, Knob as DKnob, Tool};
             let keys = |app: &App| mine(app).iter().map(|n| n.2).collect::<Vec<_>>();
@@ -14411,11 +14412,17 @@ mod tests {
             let st = u32::from(app.state.project.ppq) / 4;
             let steps: Vec<(u32, u32, u16)> = (0..8).map(|i| (i * st, st, 60 + i as u16)).collect();
             put(&mut app, &steps);
-            let first = piano::notes(&app.state).iter().position(|n| n.channel == ch && n.position == 0).unwrap();
-            app.state.piano.select(app.state.pattern, ch, vec![first]);
+            let first4: Vec<usize> = piano::notes(&app.state)
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| n.channel == ch && n.position < 4 * st)
+                .map(|(i, _)| i)
+                .collect();
+            app.state.piano.select(app.state.pattern, ch, first4);
             key(&mut app, "w", false, true, false);
             assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Claw);
-            assert_eq!(keys(&app), vec![60, 61, 62, 64, 65, 66], "each beat's last quarter trashed, from every note");
+            assert_eq!(keys(&app), vec![60, 61, 62, 64, 65, 66, 67], "the first beat's last quarter trashed, the selection alone");
+            assert!(mine(&app).iter().any(|n| *n == (4 * st, st, 64)), "the notes after it stay");
             frame(&mut app, &mut c, None);
             app.act(Action::PianoDlg(DAct::TrashMenu));
             let pop = app.state.playlist.popup.take().expect("Trash every opens its menu");
@@ -14433,7 +14440,7 @@ mod tests {
             frame(&mut app, &mut c, None);
             click(&mut app, Action::PianoDlg(DAct::Accept));
             assert!(!app.state.shown(Win::PianoDlg));
-            assert!(app.state.piano.selection(app.state.pattern, Some(ch)).is_empty(), "nothing selected afterwards");
+            assert_eq!(app.state.piano.selection(app.state.pattern, Some(ch)).len(), 4, "the selection holds the result");
             assert!(piano::undo(&mut app.state));
             assert_eq!(mine(&app), steps, "one undo step");
             key(&mut app, "w", false, true, false);

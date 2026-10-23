@@ -361,17 +361,10 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
                 step,
             )
         }
-        // Every note of the channel, the selection or not; nothing is selected afterwards (piano-claw.md §2).
+        // The periods count from tick 0 with a selection too (piano-claw.md §2).
         Tool::Claw => {
             let (set, ppq) = (d.claw, u32::from(s.project.ppq.max(4)));
-            let ch = piano::channel(s);
-            let sel = s.piano.selection(s.pattern, ch);
-            s.piano.clear_selection();
-            let changed = crate::piano_tools::apply_as(s, |_, ns| claw::claw(ns, &set, ppq), step);
-            if let (false, Some(ch), false) = (changed, ch, sel.is_empty()) {
-                s.piano.select(s.pattern, ch, sel);
-            }
-            changed
+            crate::piano_tools::apply_as(s, |_, ns| claw::claw(ns, &set, ppq), step)
         }
     }
 }
