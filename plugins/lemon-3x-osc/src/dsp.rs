@@ -5,9 +5,10 @@
 //! Lemon Trio sound: three oscillators, their stereo spread, mixing or amplitude modulation, the five envelope / LFO
 //! targets, the voice filter and the voices.
 //!
-// spec: plugins/3x-osc.md §2
+// spec: plugins/3x-osc.md §2, plugins/lemon-3x-osc.md §6 (custom shape)
 
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 use os_engine::{envelope, laws};
 
@@ -270,6 +271,95 @@ pub fn hq(shape: u8, u: f64, dt: f64) -> f64 {
     }
 }
 
+/// Points a custom shape's period holds at most: a longer sample is averaged down to this many.
+pub const WAVE_POINTS: usize = 4096;
+
+/// The custom shape's wave: the channel's sample as one period of the oscillator, both sides mixed, at the sample's
+/// own level (Lemon Studio choice, spec: plugins/lemon-3x-osc.md §6; how FL plays it is not measured). Straight lines
+/// join the points, the last one runs back to the first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wave {
+    pts: Vec<f32>,
+    /// `sum[i]`: the integral of the period from 0 to phase `i / n` (n + 1 entries).
+    sum: Vec<f64>,
+}
+
+impl Wave {
+    /// One period of the points `pts` (mono); `None` when there are none.
+    pub fn new(pts: &[f32]) -> Option<Wave> {
+        let n = pts.len();
+        if n == 0 {
+            return None;
+        }
+        let pts: Vec<f32> = if n > WAVE_POINTS {
+            // Each point the average of its share of the sample.
+            (0..WAVE_POINTS)
+                .map(|i| {
+                    let part = &pts[i * n / WAVE_POINTS..(i + 1) * n / WAVE_POINTS];
+                    (part.iter().map(|&x| f64::from(x)).sum::<f64>() / part.len() as f64) as f32
+                })
+                .collect()
+        } else {
+            pts.to_vec()
+        };
+        let n = pts.len();
+        let mut sum = Vec::with_capacity(n + 1);
+        let mut acc = 0.0;
+        sum.push(acc);
+        for (i, &a) in pts.iter().enumerate() {
+            acc += (f64::from(a) + f64::from(pts[(i + 1) % n])) / 2.0 / n as f64;
+            sum.push(acc);
+        }
+        Some(Wave { pts, sum })
+    }
+
+    /// The period of a sample: its two sides mixed (a right side of another length is left out).
+    pub fn from_sample(left: &[f32], right: &[f32]) -> Option<Wave> {
+        if right.len() == left.len() {
+            let mono: Vec<f32> = left.iter().zip(right).map(|(l, r)| (l + r) * 0.5).collect();
+            Wave::new(&mono)
+        } else {
+            Wave::new(left)
+        }
+    }
+
+    /// The period's points.
+    pub fn points(&self) -> &[f32] {
+        &self.pts
+    }
+
+    /// The segment at phase `u` (0..=1): its index, the position in it and its two ends.
+    fn seg(&self, u: f64) -> (usize, f64, f64, f64) {
+        let n = self.pts.len();
+        let x = u * n as f64;
+        let i = (x as usize).min(n - 1);
+        (i, x - i as f64, f64::from(self.pts[i]), f64::from(self.pts[(i + 1) % n]))
+    }
+
+    /// The wave at phase `u`.
+    pub fn at(&self, u: f64) -> f64 {
+        let (_, f, a, b) = self.seg(u.rem_euclid(1.0));
+        a + (b - a) * f
+    }
+
+    /// The integral of the periodic wave from 0 to `x` (x ≥ 0).
+    fn prim(&self, x: f64) -> f64 {
+        let k = x.floor();
+        let (i, f, a, b) = self.seg(x - k);
+        let n = self.pts.len();
+        k * self.sum[n] + self.sum[i] + (a * f + (b - a) * f * f / 2.0) / n as f64
+    }
+
+    /// The wave's average over the next sample interval (phase `u` .. `u + dt`), as the plain shapes (`boxed`); HQ
+    /// plays it the same way.
+    pub fn boxed(&self, u: f64, dt: f64) -> f64 {
+        if dt < 1e-9 {
+            return self.at(u);
+        }
+        (self.prim(u + dt) - self.prim(u)) / dt
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Filter (spec §2.7)
 
@@ -446,11 +536,19 @@ pub struct Engine {
     rng: u64,
     /// Host voices that ended since the last `take_ended`: (key, host note id).
     ended: Vec<(u8, Option<i32>)>,
+    /// The custom shape's wave; without one the custom shape is silent.
+    pub custom: Option<Arc<Wave>>,
 }
 
 impl Engine {
     pub fn new(rate: f32) -> Self {
-        Engine { rate: f64::from(rate), voices: Vec::with_capacity(MAX_VOICES), rng: 0x9e37_79b9_7f4a_7c15, ended: Vec::with_capacity(MAX_VOICES * 2) }
+        Engine {
+            rate: f64::from(rate),
+            voices: Vec::with_capacity(MAX_VOICES),
+            rng: 0x9e37_79b9_7f4a_7c15,
+            ended: Vec::with_capacity(MAX_VOICES * 2),
+            custom: None,
+        }
     }
 
     pub fn set_rate(&mut self, rate: f32) {
@@ -624,6 +722,7 @@ impl Engine {
         let (use1, use2) = (w[0] != 0.0, w[1] != 0.0);
         let use3 = b.m3 != 0.0;
         let filter_off = b.filter_off();
+        let custom = self.custom.take();
         let mut voices = std::mem::take(&mut self.voices);
         for v in voices.iter_mut().filter(|v| !v.done) {
             let t0 = v.n as f64 / sr;
@@ -669,7 +768,7 @@ impl Engine {
                         if used {
                             let x = match os.shape {
                                 NOISE => self.noise(),
-                                CUSTOM => 0.0,
+                                CUSTOM => custom.as_deref().map_or(0.0, |c| c.boxed(u, dt)),
                                 sh if b.hq => hq(sh, u, dt),
                                 sh => boxed(sh, u, dt),
                             };
@@ -688,6 +787,7 @@ impl Engine {
             v.n += len as u64;
         }
         self.voices = voices;
+        self.custom = custom;
     }
 }
 
@@ -924,6 +1024,50 @@ mod tests {
         // HP passes the top; BS notches f0.
         assert!(gain(3, 128.0, 128.0, 12000.0).abs() < 0.5);
         assert!(gain(4, 128.0, 128.0, 2727.0) < -20.0);
+    }
+
+    /// The custom shape plays its wave as one period at the oscillator's pitch, averaged over each sample like the
+    /// plain shapes; without a wave it is silent.
+    #[test]
+    fn custom_shape_plays_its_wave_as_one_period() {
+        let b = solo(CUSTOM);
+        let (l, r) = render(&b, 60, 100.0 / 128.0, 4410, None);
+        assert!(peak(&l) == 0.0 && peak(&r) == 0.0, "no wave: silence");
+        // One cycle of a sine in 1000 points.
+        let cycle: Vec<f32> = (0..1000).map(|i| (2.0 * PI * i as f64 / 1000.0).sin() as f32).collect();
+        let mut e = Engine::new(SR);
+        e.custom = Wave::new(&cycle).map(Arc::new);
+        e.note_on(60, 100.0 / 128.0, None, &b);
+        let (mut l, mut r) = (vec![0.0; 44100], vec![0.0; 44100]);
+        e.render(&mut l, &mut r, &b);
+        assert!((freq(&l) - 523.25).abs() < 0.05, "{}", freq(&l));
+        assert!((peak(&l) - 0.70711).abs() < 2e-3, "{}", peak(&l));
+        let dt = KEY60_HZ / 44100.0;
+        for (i, x) in l.iter().enumerate().take(200) {
+            let want = boxed(SINE, (i as f64 * dt).fract(), dt) * 0.70711;
+            assert!((f64::from(*x) - want).abs() < 1e-3, "sample {i}: {x} vs {want}");
+        }
+        // The average over an interval is the integral of the joined points.
+        let w = Wave::new(&[0.0, 1.0, 0.0, -1.0]).unwrap();
+        assert_eq!(w.at(0.125), 0.5);
+        assert!((w.boxed(0.0, 0.25) - 0.5).abs() < 1e-12);
+        assert!((w.boxed(0.75, 0.5) - (-0.5 + 0.5) / 2.0).abs() < 1e-12, "across the end of the period");
+        assert!(w.boxed(0.1, 1.0).abs() < 1e-12, "a whole period averages to the mean");
+    }
+
+    #[test]
+    fn custom_wave_mixes_and_shortens_a_long_sample() {
+        assert_eq!(Wave::new(&[]), None);
+        // Both sides mixed.
+        let w = Wave::from_sample(&[1.0, 0.0], &[0.0, 0.0]).unwrap();
+        assert_eq!(w.points(), &[0.5, 0.0]);
+        // A right side of another length is not used.
+        assert_eq!(Wave::from_sample(&[0.25; 3], &[]).unwrap().points(), &[0.25; 3]);
+        // A long sample: WAVE_POINTS averages of equal shares.
+        let long: Vec<f32> = (0..WAVE_POINTS * 3).map(|i| if i % 3 == 0 { 0.9 } else { 0.0 }).collect();
+        let w = Wave::new(&long).unwrap();
+        assert_eq!(w.points().len(), WAVE_POINTS);
+        assert!(w.points().iter().all(|&p| (p - 0.3).abs() < 1e-6));
     }
 
     #[test]

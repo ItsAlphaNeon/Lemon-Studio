@@ -1688,8 +1688,8 @@ fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
     }
 }
 
-/// The `sample-path` field of a Lemon Sampler state blob.
-fn sample_path_of(blob: &[u8]) -> Option<String> {
+/// The `sample-path` field of a Lemon Sampler (or Lemon Trio) state blob.
+pub(crate) fn sample_path_of(blob: &[u8]) -> Option<String> {
     let json = blob.get(8..).filter(|_| blob.len() > 8 && blob[0] != b'{').unwrap_or(blob);
     let v: serde_json::Value = serde_json::from_slice(json).ok()?;
     let field = v.get("fields")?.get("sample-path")?.as_str()?;

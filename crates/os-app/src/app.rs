@@ -1225,6 +1225,8 @@ pub struct App {
     pub(crate) scan_queued: Option<crate::plugin_db::Mode>,
     /// Wrapped plugin channels (rows) and slots (`fx_key`) whose plugin was not found or did not start (not retried).
     pub(crate) wrap_failed: Vec<usize>,
+    /// When the Lemon Trio instances were last looked at for a sample they loaded (`follow_osc3_samples`).
+    pub(crate) osc3_look: Option<std::time::Instant>,
     /// Plugin channels (rows) and slots (`fx_key`) naming a native plugin that is not installed or did not start
     /// (not retried; spec: plugins/fruity-abi.md "Opened projects").
     pub(crate) native_failed: Vec<usize>,
@@ -1414,6 +1416,7 @@ impl App {
             sweep: None,
             scan_queued: None,
             wrap_failed: Vec::new(),
+            osc3_look: None,
             native_failed: Vec::new(),
             loading: None,
             export: None,
@@ -2118,6 +2121,7 @@ impl App {
         if self.loading.is_none() {
             self.sync_wrapped();
             self.sync_osc3();
+            self.follow_osc3_samples();
             self.sync_citrus();
             self.sync_native();
         }

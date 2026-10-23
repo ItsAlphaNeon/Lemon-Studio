@@ -164,6 +164,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   effects, the channel filter, declicking) and each note's own pan and filter offsets
 - A file of 30 s or more loaded into a sampler channel turns its Keep on disk on (General settings ▸
   Advanced ▸ Auto keep long audio on disk)
+- Lemon Trio's custom shape plays a sample as one period of the oscillator: choosing it opens a file dialog, and
+  its sample page shows the wave and loads another. The sample is the channel's (saved with the project, and the
+  channel is named after it while Auto name channels is on). Not yet: dropping a file on the sample page
 
 ## ✅ Exporting audio
 
