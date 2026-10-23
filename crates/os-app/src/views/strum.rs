@@ -26,7 +26,7 @@ pub fn bounds(s: &State) -> Rect {
 }
 
 /// A round switch (FL: dark, red-orange when on; Lemon: the kit's LED, an outline when greyed out).
-fn led(ui: &mut Ui, cx: f32, cy: f32, on: bool, hover: bool, off: bool) {
+pub(super) fn led(ui: &mut Ui, cx: f32, cy: f32, on: bool, hover: bool, off: bool) {
     let t = ui.t;
     if super::lemon(ui) {
         if off {
@@ -49,7 +49,7 @@ fn led(ui: &mut Ui, cx: f32, cy: f32, on: bool, hover: bool, off: bool) {
 }
 
 /// Text vertically centred on `cy`, from `x` (left), centred on it or ending at it (`align` -1, 0, 1).
-fn label(ui: &mut Ui, f: Font, x: f32, cy: f32, align: i8, col: Color, s: &str) {
+pub(super) fn label(ui: &mut Ui, f: Font, x: f32, cy: f32, align: i8, col: Color, s: &str) {
     let lh = ui.c.line_height(f);
     let w = ui.c.text_width(f, s);
     let x = match align {

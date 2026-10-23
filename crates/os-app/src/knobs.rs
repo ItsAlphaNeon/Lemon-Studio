@@ -39,6 +39,9 @@ pub enum KnobId {
     Strum(crate::strum::Knob),
     /// A knob (or the Range box) of the piano roll's Arpeggiate dialog (dialog state; spec: ui/piano-arpeggiate.md §1).
     Arp(crate::arpeggiate::Knob),
+    /// A knob or fader of the piano roll's Flam or Scale levels dialog (dialog state; spec: ui/piano-flam.md §1,
+    /// ui/piano-level-scaling.md §1).
+    PianoDlg(crate::piano_dlg::Knob),
 }
 
 /// The equaliser's band names as its hints give them (spec: ui/mixer.md §8).
@@ -64,6 +67,7 @@ impl KnobId {
             KnobId::Swing => 0.045,
             KnobId::Strum(k) => k.notch(),
             KnobId::Arp(k) => k.notch(),
+            KnobId::PianoDlg(k) => k.notch(),
             _ => PER_NOTCH,
         }
     }
@@ -80,6 +84,8 @@ impl KnobId {
             KnobId::Strum(k) if k.tension() => 2.0 * PER_PX,
             // The stepped controls move one value per 12 px.
             KnobId::Arp(k @ (crate::arpeggiate::Knob::TimeMul | crate::arpeggiate::Knob::Range)) => k.notch() / 12.0,
+            // The level faders' handles follow the mouse.
+            KnobId::PianoDlg(k) => k.travel().map_or(PER_PX, |t| 1.0 / t),
             _ => PER_PX,
         }
     }
@@ -92,6 +98,7 @@ impl KnobId {
             KnobId::SlotMix(..) => 1.0,
             KnobId::Swing => 0.0,
             KnobId::Arp(k) => crate::arpeggiate::Settings::default().get(k),
+            KnobId::PianoDlg(k) => k.default_pos(),
             KnobId::Eq(_, b, f) => eq_pos(f, os_model::EQ_DEFAULT[usize::from(b.min(2))][usize::from(f.min(2))]),
             _ => 0.5,
         }
@@ -136,6 +143,7 @@ impl State {
             }
             KnobId::Strum(k) => (self.strum.set.get(k) + 1.0) / 2.0,
             KnobId::Arp(k) => self.arp.set.get(k),
+            KnobId::PianoDlg(k) => self.piano_dlg.get(k),
         }
     }
 
@@ -218,6 +226,13 @@ impl State {
                     crate::arpeggiate::preview(self);
                 }
             }
+            KnobId::PianoDlg(k) => {
+                let before = self.piano_dlg.get(k);
+                self.piano_dlg.set(k, v);
+                if self.piano_dlg.get(k) != before {
+                    crate::piano_dlg::preview(self);
+                }
+            }
         }
     }
 
@@ -260,6 +275,7 @@ impl State {
             }
             KnobId::Strum(k) => self.strum.set.text(k, u32::from(self.project.ppq.max(4))),
             KnobId::Arp(k) => self.arp.set.text(k),
+            KnobId::PianoDlg(k) => self.piano_dlg.text(k, u32::from(self.project.ppq.max(4))),
         }
     }
 }
