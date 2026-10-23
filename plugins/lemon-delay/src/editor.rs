@@ -241,6 +241,8 @@ impl Logic {
         let id = t.id().to_string();
         let mut acts = vec![Act::Repaint];
         match (&t, btn) {
+            (Target::Logo, Btn::Left | Btn::Right) => acts.push(Act::Menu(MenuReq::About, x, y)),
+            (Target::Logo, _) => {}
             (_, Btn::Left) if m.alt => self.reset(&id),
             (_, Btn::Middle) => self.reset(&id),
             (_, Btn::Right) => acts.push(Act::Menu(MenuReq::Param(id), x, y)),
@@ -297,7 +299,7 @@ impl Logic {
 
     /// Wheel: one step per notch (1/128 of the range for the settings with many steps).
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, _m: Mods) -> Vec<Act> {
-        let Some((t, _)) = self.hit(x, y) else { return vec![] };
+        let Some((t, _)) = self.hit(x, y).filter(|(t, _)| *t != Target::Logo) else { return vec![] };
         let id = t.id().to_string();
         let (lo, hi) = Self::range(&id);
         let steps = (hi - lo) as f32;
@@ -994,6 +996,10 @@ mod tests {
         assert_eq!(l.vals.plain("bits"), 6000.0);
         assert_eq!(l.pick(&MenuReq::Param("dry".into()), Cmd::Automate("dry".into()), 0.0, 0.0), vec![Act::Automate(25)]);
         assert!(matches!(l.pick(&MenuReq::Param("dry".into()), Cmd::About, 1.0, 2.0).last(), Some(Act::Menu(MenuReq::About, _, _))));
+        let (x, y) = centre(&l, &Target::Logo);
+        assert!(matches!(l.down(x, y, Btn::Left, Mods::default(), false).last(), Some(Act::Menu(MenuReq::About, _, _))));
+        assert_eq!(l.hint, "Lemon Delay");
+        assert!(l.wheel(x, y, 1.0, Mods::default()).is_empty());
     }
 
     /// `DELAY_PNG=<dir> cargo test -p lemon-delay -- --ignored`: the editor at a few settings, as PNGs.

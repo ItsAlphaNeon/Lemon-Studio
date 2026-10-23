@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Lemon Delay editor: painting and hit regions (platform independent). A plain first look (not yet the "Pith"
-//! plugin look): the original's sections as outlined boxes in its places, INPUT and OUTPUT as columns at the edges,
-//! DELAY TIME, DELAY MODEL and FEEDBACK over MODULATION, DIFFUSION and FEEDBACK DISTORTION, and a hint strip at the
-//! foot.
+//! Lemon Delay editor: painting and hit regions (platform independent). The Lemon "Pith" plugin look: the original's
+//! sections as outlined cards under ruled headings, INPUT and OUTPUT as columns at the edges, DELAY TIME, DELAY MODEL
+//! and FEEDBACK over MODULATION, DIFFUSION and FEEDBACK DISTORTION; the hint well and the wordmark along the foot.
 //!
 // spec: plugins/lemon-delay.md (§1 window, §2 controls, §3 hints)
 
@@ -14,51 +13,59 @@ use os_theme::design::lemon as brand;
 use os_theme::Palette;
 use os_ui::kit::lemon::{self, plug};
 use os_ui::kit::{eq as keq, inst, State};
-use os_ui::{Canvas, Font, Rect};
+use os_ui::{Canvas, Color, Font, Rect};
 
 use crate::params::{self, DEFS};
 
 /// Editor size in logical pixels.
-pub const W: u32 = 744;
-pub const H: u32 = 236;
+pub const W: u32 = 784;
+pub const H: u32 = 280;
 
-/// The hint strip at the foot.
-pub const STRIP: Rect = Rect::span(4.0, 740.0, 218.0, 234.0);
+/// The two rows of cards (top, bottom); a heading's rule runs 12 px above its card.
+const CARD1: (f32, f32) = (28.0, 116.0);
+const CARD2: (f32, f32) = (142.0, 234.0);
 
-/// Sections: (left, right, top, bottom, heading).
-const SECTIONS: [(f32, f32, f32, f32, &str); 8] = [
-    (4.0, 52.0, 4.0, 214.0, "INPUT"),
-    (56.0, 250.0, 4.0, 112.0, "DELAY TIME"),
-    (254.0, 374.0, 4.0, 112.0, "DELAY MODEL"),
-    (378.0, 686.0, 4.0, 112.0, "FEEDBACK"),
-    (690.0, 740.0, 4.0, 214.0, "OUTPUT"),
-    (56.0, 250.0, 116.0, 214.0, "MODULATION"),
-    (254.0, 374.0, 116.0, 214.0, "DIFFUSION"),
-    (378.0, 686.0, 116.0, 214.0, "FEEDBACK DISTORTION"),
+/// Cards: (left, right, top, bottom, heading).
+const CARDS: [(f32, f32, f32, f32, &str); 8] = [
+    (8.0, 66.0, CARD1.0, CARD2.1, "INPUT"),
+    (72.0, 266.0, CARD1.0, CARD1.1, "DELAY TIME"),
+    (272.0, 400.0, CARD1.0, CARD1.1, "DELAY MODEL"),
+    (406.0, 712.0, CARD1.0, CARD1.1, "FEEDBACK"),
+    (718.0, 776.0, CARD1.0, CARD2.1, "OUTPUT"),
+    (72.0, 266.0, CARD2.0, CARD2.1, "MODULATION"),
+    (272.0, 400.0, CARD2.0, CARD2.1, "DIFFUSION"),
+    (406.0, 712.0, CARD2.0, CARD2.1, "FEEDBACK DISTORTION"),
 ];
 
 /// Knob centres of the two rows.
-const ROW1: f32 = 58.0;
-const ROW2: f32 = 164.0;
-const BIG: f32 = 20.0;
-const SMALL_R: f32 = 14.0;
+const ROW1: f32 = 64.0;
+const ROW2: f32 = 178.0;
+/// Knob radii: TIME and the feedback LEVEL are bigger (and 3 px higher, so the row's captions line up).
+const BIG: f32 = 22.0;
+const SMALL: f32 = 19.0;
 
 /// The input fader's travel (top = the maximum).
-pub const FADER_X: f32 = 28.0;
-pub const FADER_TOP: f32 = 36.0;
-pub const FADER_BOT: f32 = 184.0;
+pub const FADER_X: f32 = 37.0;
+pub const FADER_TOP: f32 = 52.0;
+pub const FADER_BOT: f32 = 198.0;
 
 /// The time smoothing slider's travel.
-pub const SLIDER_X0: f32 = 138.0;
-pub const SLIDER_X1: f32 = 196.0;
-const SLIDER_Y: f32 = 88.0;
+pub const SLIDER_X0: f32 = 140.0;
+pub const SLIDER_X1: f32 = 200.0;
+const SLIDER_Y: f32 = 92.0;
 
-/// The distortion curve's box.
-pub const CURVE: Rect = Rect::new(592.0, 128.0, 80.0, 80.0);
+/// The distortion curve's well.
+pub const CURVE: Rect = Rect::new(622.0, 148.0, 80.0, 80.0);
 
-const HEADING: Font = Font::condensed(10, 0).bold();
+/// The foot: the hint well at the left, the wordmark at the right (`FOOT` = the top of its "LEMON").
+const FOOT: f32 = 242.0;
+
+const RULE: Color = Color::rgb(0x3c3c3c);
+const HEADING: Font = Font::condensed(11, 0).bold();
 const LABEL: Font = Font::new(10).bold();
 const HINT: Font = Font::new(11);
+const MARK_BIG: Font = Font::condensed(20, 0).bold();
+const MARK_SMALL: Font = Font::condensed(10, 0).bold();
 
 /// Read access to parameter values by id.
 pub trait Model {
@@ -92,12 +99,16 @@ pub enum Target {
     Switch(String),
     /// One position of a selector (click picks it).
     Choice(String, i32),
+    /// The wordmark (the About menu).
+    Logo,
 }
 
 impl Target {
+    /// The setting's id ("" for the wordmark).
     pub fn id(&self) -> &str {
         match self {
             Target::Knob(id) | Target::Fader(id) | Target::Slider(id) | Target::Switch(id) | Target::Choice(id, _) => id,
+            Target::Logo => "",
         }
     }
 }
@@ -147,15 +158,14 @@ pub fn values(m: &dyn Model) -> [i32; PARAMS] {
     std::array::from_fn(|k| m.plain(DEFS[k].id).round() as i32)
 }
 
-/// Paints the editor; `hint` (empty when the host shows it) goes in the strip at the foot.
+/// Paints the editor; `hint` (empty when the host shows it) goes in the well at the foot.
 pub fn paint(c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, hint: &str) -> Vec<Hit> {
     let mut ui = Ui { c, t, m, st, hits: Vec::new() };
     ui.c.begin_frame(None);
     ui.c.clear(plug::BG);
-    for (x0, x1, y0, y1, s) in SECTIONS {
-        lemon::outlined(ui.c, Rect::span(x0, x1, y0, y1), 4.0, plug::PANEL_LINE, plug::PANEL);
-        let lh = ui.c.line_height(HEADING);
-        ui.c.text_center(HEADING, Rect::span(x0, x1, y0 + 3.0, y0 + 3.0 + lh), plug::DIM, s);
+    for (x0, x1, y0, y1, s) in CARDS {
+        lemon::plug_panel(ui.c, Rect::span(x0, x1, y0, y1));
+        heading(&mut ui, x0, x1, y0 - 12.0, s);
     }
     let v = values(m);
     let off = v[dsp::TYPE] == dsp::OFF;
@@ -166,86 +176,101 @@ pub fn paint(c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, hint: &
     // INPUT
     fader(&mut ui, "in", "WET");
     // DELAY TIME
-    knob(&mut ui, "time", 90.0, ROW1, BIG, "TIME", false, off, mod_time);
-    switch(&mut ui, "sync", 120.0, 34.0, "TEMPO SYNC", off);
-    switch(&mut ui, "keep", 120.0, 54.0, "KEEP PITCH", off);
+    knob(&mut ui, "time", 102.0, ROW1 - 3.0, BIG, "TIME", false, off, mod_time);
+    switch(&mut ui, "sync", 132.0, 46.0, "TEMPO SYNC", off);
+    switch(&mut ui, "keep", 132.0, 66.0, "KEEP PITCH", off);
     slider(&mut ui, "smooth", "SMOOTHING", off);
     let pan = v[dsp::TYPE] == dsp::PING_PONG;
-    knob(&mut ui, "offset", 226.0, ROW1, SMALL_R, if pan { "PAN" } else { "OFFSET" }, true, off, false);
+    knob(&mut ui, "offset", 240.0, ROW1, SMALL, if pan { "PAN" } else { "OFFSET" }, true, off, false);
     // DELAY MODEL
-    choices(&mut ui, "type", 262.0, 322.0, 26.0, &["MONO", "STEREO", "PING PONG", "OFF"], false);
-    knob(&mut ui, "spread", 348.0, ROW1, SMALL_R, "STEREO", false, off, false);
+    choices(&mut ui, "type", 282.0, 346.0, ROW1 - 24.0, &["MONO", "STEREO", "PING PONG", "OFF"], false);
+    knob(&mut ui, "spread", 372.0, ROW1, SMALL, "STEREO", false, off, false);
     // FEEDBACK
-    knob(&mut ui, "fb", 414.0, ROW1, BIG, "LEVEL", false, false, false);
-    knob(&mut ui, "cutoff", 464.0, ROW1, SMALL_R, "CUTOFF", false, no_filter, mod_cut);
-    knob(&mut ui, "res", 506.0, ROW1, SMALL_R, "RES", false, no_filter, false);
-    choices(&mut ui, "filter", 530.0, 566.0, 26.0, &["LP", "HP", "BP", "OFF"], false);
-    knob(&mut ui, "srate", 606.0, ROW1, SMALL_R, "SMP RATE", false, false, false);
-    knob(&mut ui, "bits", 654.0, ROW1, SMALL_R, "BITS", false, false, false);
+    knob(&mut ui, "fb", 438.0, ROW1 - 3.0, BIG, "LEVEL", false, false, false);
+    knob(&mut ui, "cutoff", 490.0, ROW1, SMALL, "CUTOFF", false, no_filter, mod_cut);
+    knob(&mut ui, "res", 538.0, ROW1, SMALL, "RES", false, no_filter, false);
+    choices(&mut ui, "filter", 568.0, 608.0, ROW1 - 24.0, &["LP", "HP", "BP", "OFF"], false);
+    knob(&mut ui, "srate", 636.0, ROW1, SMALL, "SMP RATE", false, false, false);
+    knob(&mut ui, "bits", 684.0, ROW1, SMALL, "BITS", false, false, false);
     // OUTPUT
-    knob(&mut ui, "wet", 715.0, 46.0, SMALL_R, "WET", false, false, false);
-    knob(&mut ui, "tone", 715.0, 108.0, SMALL_R, "TONE", true, false, false);
-    knob(&mut ui, "dry", 715.0, 170.0, SMALL_R, "DRY", false, false, false);
+    knob(&mut ui, "wet", 747.0, 58.0, SMALL, "WET", false, false, false);
+    knob(&mut ui, "tone", 747.0, 126.0, SMALL, "TONE", true, false, false);
+    knob(&mut ui, "dry", 747.0, 194.0, SMALL, "DRY", false, false, false);
     // MODULATION: the rate drives the time and the cutoff (the arrow).
-    knob(&mut ui, "mrate", 88.0, ROW2, SMALL_R, "RATE", false, false, false);
-    let ax = 118.0;
+    knob(&mut ui, "mrate", 104.0, ROW2, SMALL, "RATE", false, false, false);
+    let ax = 134.0;
     ui.c.polyline(&[(ax, ROW2 - 5.0), (ax + 6.0, ROW2), (ax, ROW2 + 5.0)], 1.5, plug::FAINT);
-    knob(&mut ui, "mtime", 152.0, ROW2, SMALL_R, "TIME", false, false, mod_time);
-    knob(&mut ui, "mcut", 204.0, ROW2, SMALL_R, "CUTOFF", false, false, mod_cut);
+    knob(&mut ui, "mtime", 170.0, ROW2, SMALL, "TIME", false, false, mod_time);
+    knob(&mut ui, "mcut", 230.0, ROW2, SMALL, "CUTOFF", false, false, mod_cut);
     // DIFFUSION
-    knob(&mut ui, "dlevel", 290.0, ROW2, SMALL_R, "LEVEL", false, false, false);
-    knob(&mut ui, "dspread", 340.0, ROW2, SMALL_R, "SPREAD", false, false, false);
+    knob(&mut ui, "dlevel", 308.0, ROW2, SMALL, "LEVEL", false, false, false);
+    knob(&mut ui, "dspread", 364.0, ROW2, SMALL, "SPREAD", false, false, false);
     // FEEDBACK DISTORTION
-    choices(&mut ui, "dtype", 386.0, 428.0, 140.0, &["LIMIT", "SAT"], false);
-    knob(&mut ui, "drive", 456.0, ROW2, SMALL_R, "LEVEL", false, false, false);
-    knob(&mut ui, "knee", 504.0, ROW2, SMALL_R, "KNEE", false, limit, false);
-    knob(&mut ui, "sym", 552.0, ROW2, SMALL_R, "SYMMETRY", true, limit, false);
+    choices(&mut ui, "dtype", 416.0, 460.0, ROW2 - 16.0, &["LIMIT", "SAT"], false);
+    knob(&mut ui, "drive", 490.0, ROW2, SMALL, "LEVEL", false, false, false);
+    knob(&mut ui, "knee", 538.0, ROW2, SMALL, "KNEE", false, limit, false);
+    knob(&mut ui, "sym", 586.0, ROW2, SMALL, "SYMMETRY", true, limit, false);
     curve(&mut ui, &v);
-    // The hint strip.
-    lemon::outlined(ui.c, STRIP, 3.0, plug::WELL_LINE, plug::WELL);
+    // The foot.
+    let mark_left = logo(&mut ui);
+    let well = Rect::span(8.0, mark_left - 20.0, FOOT + 9.0, FOOT + 29.0);
+    lemon::plug_well(ui.c, well, 6.0);
     if !hint.is_empty() {
         let lh = ui.c.line_height(HINT);
-        ui.c.text_clip(HINT, STRIP.x + 6.0, (STRIP.cy() - lh / 2.0).round(), STRIP.w - 12.0, brand::TEXT, hint);
+        ui.c.text_clip(HINT, well.x + 8.0, (well.cy() - lh / 2.0).round(), well.w - 16.0, brand::TEXT, hint);
     }
     ui.hits
+}
+
+/// A card's heading (as Lemon Limiter's and Lemon Reverb's): letter-spaced caps centred on a hairline rule at `y`,
+/// the rule stopping 7 px short of the text (none where the card is too narrow for it).
+fn heading(ui: &mut Ui, x0: f32, x1: f32, y: f32, s: &str) {
+    let lh = ui.c.line_height(HEADING);
+    let w = lemon::spaced_width(ui.c, HEADING, s, 2.0);
+    let tx = ((x0 + x1 + 1.0) / 2.0 - w / 2.0).round();
+    lemon::spaced(ui.c, HEADING, tx, (y - lh / 2.0).round(), plug::DIM, s, 2.0);
+    if tx - 7.0 > x0 + 8.0 {
+        ui.c.fill_rect(Rect::span(x0 + 4.0, tx - 7.0, y, y + 1.0), RULE);
+        ui.c.fill_rect(Rect::span((tx + w + 6.0).round(), x1 - 4.0, y, y + 1.0), RULE);
+    }
 }
 
 /// A caption under a control; boxed when the modulation moves it.
 fn caption(ui: &mut Ui, cx: f32, y: f32, s: &str, disabled: bool, boxed: bool) {
     inst::caption(ui.c, ui.t, cx, y, s, disabled);
     if boxed {
-        let w = inst::caption_width(ui.c, s, 1.0) + 8.0;
-        ui.c.stroke_rrect(Rect::new((cx - w / 2.0).round() + 0.5, y - 2.5, w.round(), 13.0), 2.0, 1.0, plug::FAINT);
+        let w = inst::caption_width(ui.c, s, 1.0) + 10.0;
+        ui.c.stroke_rrect(Rect::new((cx - w / 2.0).round() + 0.5, y - 2.5, w.round(), 14.0), 4.0, 1.0, plug::FAINT);
     }
 }
 
-/// A knob of radius `r`, caption under it.
+/// A pith dial of radius `r` (hit area 3 px around it), caption under it.
 #[allow(clippy::too_many_arguments)]
 fn knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, r: f32, cap: &str, bipolar: bool, disabled: bool, boxed: bool) {
     let target = Target::Knob(id.into());
     let hr = Rect::new(cx - r - 3.0, cy - r - 3.0, 2.0 * r + 6.0, 2.0 * r + 6.0);
     let st = ui.state(hr, &target, disabled);
-    let arc = if disabled { plug::OFF } else { brand::MAIN };
-    lemon::dial(ui.c, cx, cy, r, if r > 16.0 { 2.8 } else { 2.2 }, ui.m.norm(id), bipolar, arc, st);
-    caption(ui, cx, cy + r + 6.0, cap, disabled, boxed);
+    lemon::dial(ui.c, cx, cy, r, if r > SMALL { 3.2 } else { 2.8 }, ui.m.norm(id), bipolar, brand::MAIN, st);
+    caption(ui, cx, cy + r + 7.0, cap, disabled, boxed);
     ui.hit(hr, target);
 }
 
-/// An on / off switch with its label at the right.
+/// An on / off switch: the Pith toggle (a rounded square, lemon when on) with its label at the right.
 fn switch(ui: &mut Ui, id: &str, x: f32, cy: f32, label: &str, disabled: bool) {
     let target = Target::Switch(id.into());
     let w = ui.c.text_width(LABEL, label);
-    let hr = Rect::new(x - 2.0, cy - 8.0, w + 22.0, 16.0);
+    let hr = Rect::new(x - 2.0, cy - 8.0, w + 24.0, 16.0);
     let mut st = ui.state(hr, &target, disabled);
     let on = ui.plain(id) != 0;
     st.on = on;
     lemon::toggle(ui.c, x + 6.0, cy, on, st);
     let lh = ui.c.line_height(LABEL);
-    ui.c.text(LABEL, x + 16.0, (cy - lh / 2.0).round(), if disabled { plug::OFF } else { plug::DIM }, label);
+    let ink = if disabled { plug::OFF } else if st.hover { brand::TEXT } else { plug::DIM };
+    ui.c.text(LABEL, x + 18.0, (cy - lh / 2.0).round(), ink, label);
     ui.hit(hr, target);
 }
 
-/// A selector: one row per position from `top`, the chosen one lit.
+/// A selector: one row per position from `top`, the chosen one on a dark pill in lemon.
 fn choices(ui: &mut Ui, id: &str, x0: f32, x1: f32, top: f32, names: &[&str], disabled: bool) {
     let chosen = ui.plain(id);
     for (i, name) in names.iter().enumerate() {
@@ -258,7 +283,7 @@ fn choices(ui: &mut Ui, id: &str, x0: f32, x1: f32, top: f32, names: &[&str], di
     }
 }
 
-/// The input fader: a slot, the lemon fill up to the handle, the caption under the travel.
+/// The input fader: the EQ's slot and handle, the lemon fill up to the handle, the caption under the travel.
 fn fader(ui: &mut Ui, id: &str, cap: &str) {
     let target = Target::Fader(id.into());
     let cx = FADER_X;
@@ -270,32 +295,46 @@ fn fader(ui: &mut Ui, id: &str, cap: &str) {
         ui.c.fill_rrect(Rect::span(cx - 1.0, cx + 1.0, y, FADER_BOT), 1.0, brand::MAIN.with_alpha(170));
     }
     keq::handle(ui.c, cx, y.round(), brand::MAIN, st);
-    caption(ui, cx, FADER_BOT + 12.0, cap, false, false);
+    caption(ui, cx, FADER_BOT + 14.0, cap, false, false);
     ui.hit(hr, target);
 }
 
-/// The time smoothing slider: a horizontal slot, the fill up to the handle, the caption under it.
+/// The time smoothing slider: a horizontal slot, the fill up to the handle (the fader's cap stood upright), the
+/// caption under it.
 fn slider(ui: &mut Ui, id: &str, cap: &str, disabled: bool) {
     let target = Target::Slider(id.into());
     let hr = Rect::span(SLIDER_X0 - 6.0, SLIDER_X1 + 6.0, SLIDER_Y - 8.0, SLIDER_Y + 8.0);
     let st = ui.state(hr, &target, disabled);
     keq::slot(ui.c, Rect::span(SLIDER_X0 - 4.0, SLIDER_X1 + 4.0, SLIDER_Y - 3.0, SLIDER_Y + 3.0), st);
     let x = SLIDER_X0 + (SLIDER_X1 - SLIDER_X0) * ui.m.norm(id).clamp(0.0, 1.0);
-    let col = if disabled { plug::OFF } else { brand::MAIN };
+    let line = if disabled { plug::OFF } else { brand::MAIN };
     if x - SLIDER_X0 > 1.0 {
-        ui.c.fill_rrect(Rect::span(SLIDER_X0, x, SLIDER_Y - 1.0, SLIDER_Y + 1.0), 1.0, col.with_alpha(170));
+        ui.c.fill_rrect(Rect::span(SLIDER_X0, x, SLIDER_Y - 1.0, SLIDER_Y + 1.0), 1.0, line.with_alpha(170));
     }
-    ui.c.fill_rrect(Rect::new(x.round() - 3.0, SLIDER_Y - 6.0, 6.0, 12.0), 2.0, if st.hover || st.pressed { brand::TEXT } else { col });
-    caption(ui, (SLIDER_X0 + SLIDER_X1) / 2.0, SLIDER_Y + 9.0, cap, disabled, false);
+    let x = x.round();
+    ui.c.fill_rrect(Rect::new(x - 5.0, SLIDER_Y - 6.5, 10.0, 13.0), 3.5, Color::rgb(0x151515));
+    let (a, b) = if (st.hover || st.pressed) && !disabled { (0x7d7d7d, 0x575757) } else { (0x6f6f6f, 0x4c4c4c) };
+    ui.c.fill_rect_gradient(Rect::new(x - 4.0, SLIDER_Y - 5.5, 8.0, 11.0), Color::rgb(a), Color::rgb(b), 2.5);
+    ui.c.fill_rect(Rect::new(x - 0.5, SLIDER_Y - 3.5, 1.2, 7.0), line);
+    caption(ui, (SLIDER_X0 + SLIDER_X1) / 2.0, SLIDER_Y + 11.0, cap, disabled, false);
     ui.hit(hr, target);
+}
+
+/// The wordmark at the foot's right (the lemon and "LEMON" over a large "DELAY"); returns its left edge.
+fn logo(ui: &mut Ui) -> f32 {
+    let right = W as f32 - 10.0;
+    let left = right - lemon::spaced_width(ui.c, MARK_BIG, "DELAY", 3.0);
+    lemon::wordmark(ui.c, right, FOOT, false, "DELAY", MARK_BIG, MARK_SMALL);
+    ui.hit(Rect::span(left - 6.0, right + 4.0, FOOT - 2.0, H as f32 - 2.0), Target::Logo);
+    left
 }
 
 /// The distortion's transfer curve (input -1..1 across, output -1..1 up): the limiter's clip or the saturator.
 fn curve(ui: &mut Ui, v: &[i32; PARAMS]) {
-    lemon::outlined(ui.c, CURVE, 3.0, plug::WELL_LINE, plug::WELL);
-    let (cx, cy, half) = (CURVE.cx(), CURVE.cy(), CURVE.w / 2.0 - 4.0);
-    ui.c.fill_rect(Rect::new(CURVE.x + 4.0, cy.round(), CURVE.w - 8.0, 1.0), plug::GRID);
-    ui.c.fill_rect(Rect::new(cx.round(), CURVE.y + 4.0, 1.0, CURVE.h - 8.0), plug::GRID);
+    lemon::plug_well(ui.c, CURVE, 6.0);
+    let (cx, cy, half) = (CURVE.cx(), CURVE.cy(), CURVE.w / 2.0 - 6.0);
+    ui.c.fill_rect(Rect::new(CURVE.x + 6.0, cy.round(), CURVE.w - 12.0, 1.0), plug::GRID);
+    ui.c.fill_rect(Rect::new(cx.round(), CURVE.y + 6.0, 1.0, CURVE.h - 12.0), plug::GRID);
     let d = Distortion::of(v);
     let saturate = v[dsp::DIST_TYPE] != 0;
     let pts: Vec<(f32, f32)> = (0..=64)
@@ -321,6 +360,8 @@ pub fn name(id: &str, m: &dyn Model) -> String {
 
 /// The hint line for a target.
 pub fn hint(t: &Target, m: &dyn Model) -> String {
-    let id = t.id();
-    format!("{}: {}", name(id, m), m.text(id))
+    match t {
+        Target::Logo => "Lemon Delay".into(),
+        t => format!("{}: {}", name(t.id(), m), m.text(t.id())),
+    }
 }
