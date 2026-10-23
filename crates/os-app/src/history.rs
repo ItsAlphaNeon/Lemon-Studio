@@ -55,6 +55,8 @@ pub enum Snap {
     Patterns { patterns: Vec<os_model::Pattern>, current: u16 },
     /// What ADD > Audio clip / Automation clip changes in the rack (`RackSide`).
     Rack(Box<RackSide>),
+    /// The rack's rows from a row on, with its groups, filter and selection (`Tail`).
+    Tail(Box<Tail>),
     /// Several of these in one step, put back last first ("Create automation clip": the playlist and the initial
     /// value).
     Several(Vec<Snap>),
@@ -74,6 +76,35 @@ pub struct RackSide {
     pub selected: usize,
     pub source: Option<os_model::ClipSource>,
     pub picker: crate::playlist::PickKind,
+}
+
+/// The rack's last rows, from row `from` on, with its filter groups, filter and selection: what FILE ▸ Import ▸ MIDI
+/// file adds to the open project (spec: ui/midi-files.md §10.7). Rows only come and go at the end.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tail {
+    pub from: usize,
+    pub chans: Vec<os_model::Channel>,
+    pub groups: Vec<crate::rack::Group>,
+    pub filter: crate::rack::Filter,
+    pub unsorted_at: Option<usize>,
+    pub sel: std::collections::BTreeSet<usize>,
+    pub selected: usize,
+}
+
+impl Tail {
+    /// The rows from `from` on as the rack has them now.
+    pub fn now(s: &State, from: usize) -> Tail {
+        let r = &s.rack;
+        Tail {
+            from,
+            chans: s.project.channels.get(from..).map(<[os_model::Channel]>::to_vec).unwrap_or_default(),
+            groups: r.groups.clone(),
+            filter: r.filter,
+            unsorted_at: r.unsorted_at,
+            sel: r.sel.clone(),
+            selected: s.selected_channel,
+        }
+    }
 }
 
 impl RackSide {
@@ -125,6 +156,7 @@ impl Snap {
             Snap::Init(t, _) => Snap::Init(*t, crate::init::entry(s, *t)),
             Snap::Patterns { .. } => Snap::Patterns { patterns: s.project.patterns.clone(), current: s.pattern },
             Snap::Rack(r) => Snap::Rack(Box::new(RackSide::now(s, r.row))),
+            Snap::Tail(t) => Snap::Tail(Box::new(Tail::now(s, t.from))),
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
         }
     }
@@ -160,7 +192,7 @@ impl Snap {
             }
             Snap::Several(v) => v.iter_mut().for_each(|x| x.rescale(from, to)),
             // A channel or an initial value holds no ticks.
-            Snap::Knob(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) => {}
+            Snap::Knob(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) | Snap::Tail(_) => {}
         }
     }
 
@@ -206,6 +238,18 @@ impl Snap {
                 (s.rack.groups, s.rack.filter, s.rack.unsorted_at) = (groups, filter, unsorted_at);
                 (s.rack.sel, s.selected_channel) = (sel, selected);
                 (s.playlist.source, s.playlist.picker) = (source, picker);
+            }
+            // Rows past `from` go, then the step's own rows come back (the rack never goes empty).
+            Snap::Tail(t) => {
+                let Tail { from, chans, groups, filter, unsorted_at, sel, selected } = *t;
+                while s.project.channels.len() > from.max(1) {
+                    crate::rack::remove_last(s);
+                }
+                if s.project.channels.len() == from {
+                    chans.into_iter().for_each(|c| crate::rack::push_channel(s, c));
+                }
+                (s.rack.groups, s.rack.filter, s.rack.unsorted_at) = (groups, filter, unsorted_at);
+                (s.rack.sel, s.selected_channel) = (sel, selected);
             }
             Snap::Several(v) => v.into_iter().rev().for_each(|x| x.put(s)),
         }
