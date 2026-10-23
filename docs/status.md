@@ -21,7 +21,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Quantize (FL's templates and Snap grids, sensitivity, four duration modes, levels), chop (FL's patterns, tied rows, levels, groups), glue, legato, strum,
   arpeggiate, flam, claw machine (trash, stretch, time distribution), flip, scale levels, limit (key / scale, range,
   transpose), LFO (sine, triangle or square into any event lane, Start to End ramps, a channel lane's control points)
-  and randomize
+  and randomize (a new melody from a key or scale, or random levels, each with its own seed)
 - Vertical zoom and ghost channels
 - Resizable event panel: drag the splitter, double-click it to hide or show the panel (remembered)
 - Pattern time markers, saved with the project

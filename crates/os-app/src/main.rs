@@ -109,6 +109,7 @@ mod claw;
 mod limit;
 mod lfo;
 mod quantize;
+mod randomize;
 mod chop;
 mod piano_dlg;
 mod arpeggiate;
