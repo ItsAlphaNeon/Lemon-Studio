@@ -789,6 +789,12 @@ pub enum Drag {
     Fader { track: u16, y0: f32, v0: f64 },
     /// A press on a track's equaliser graph `g`: band `band` follows the cursor.
     EqGraph { track: u16, band: u8, g: Rect },
+    /// The Limit dialog's keys held (either button): the key under the mouse becomes the green key; its name strip held:
+    /// range end `high` (else the low one) follows; its scroll bar's handle held `dx` px right of its left edge (spec:
+    /// ui/piano-limit.md §1, §5).
+    LimitKeys,
+    LimitEnd { high: bool },
+    LimitScroll { dx: f32 },
     /// A plain press on a mixer strip, held: the strip under the cursor is selected as it slides across, to preview
     /// tracks one after another.
     MixSelect,
@@ -3021,9 +3027,12 @@ impl App {
         if !(s.shown(Win::PianoDlg) && s.piano_dlg.tool == tool) {
             let i = tool.index();
             if !s.piano_dlg.placed[i] {
-                let (w, h) = views::piano_dlg::size(tool);
+                let (w, h) = views::piano_dlg::size(&s.piano_dlg, tool);
                 s.piano_dlg.pos[i] = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::work_y(s)).round());
                 s.piano_dlg.placed[i] = true;
+                if tool == crate::piano_dlg::Tool::Limit {
+                    s.piano_dlg.kb_scroll = crate::piano_dlg::KB_HOME;
+                }
             }
             crate::piano_dlg::open(s, tool);
         }
@@ -3039,12 +3048,45 @@ impl App {
                 s.message = Some(dlg::accept(s));
                 s.hide(Win::PianoDlg);
             }
-            Act::Options => {
+            Act::Options | Act::KeyMenu | Act::ScaleMenu | Act::SnapMenu => {
                 let (x, y) = self.mouse;
-                s.playlist.popup = Some(crate::playlist::Popup { x, y, items: dlg::options_menu(), sub: None });
+                let items = match a {
+                    Act::KeyMenu => dlg::key_menu(&s.piano_dlg.limit),
+                    Act::ScaleMenu => dlg::scale_menu(&s.piano_dlg.limit),
+                    Act::SnapMenu => dlg::snap_menu(&s.piano_dlg.limit),
+                    _ => dlg::options_menu(),
+                };
+                s.playlist.popup = Some(crate::playlist::Popup { x, y, items, sub: None });
+            }
+            Act::Keys => {
+                let k = views::piano_dlg::kb_key(s, self.mouse.0, self.mouse.1, false);
+                dlg::set_green(s, k);
+                self.drag = Some(Drag::LimitKeys);
+            }
+            Act::Ruler => {
+                let k = views::piano_dlg::kb_key(s, self.mouse.0, self.mouse.1, true);
+                let high = dlg::nearer_end(s, k);
+                dlg::set_end(s, high, k);
+                self.drag = Some(Drag::LimitEnd { high });
+            }
+            // A press beside the handle brings its middle under the mouse first.
+            Act::Scroll => {
+                let h = views::piano_dlg::kb_handle(s);
+                let dx = if h.outset(2.0).contains(self.mouse.0, self.mouse.1) { self.mouse.0 - h.x } else { h.w / 2.0 };
+                self.limit_scroll_handle(self.mouse.0 - dx);
+                self.drag = Some(Drag::LimitScroll { dx });
             }
             a => dlg::act(s, a),
         }
+        self.invalidate();
+    }
+
+    /// Scroll the Limit dialog's keyboard so its scroll bar's handle starts at screen `x`.
+    fn limit_scroll_handle(&mut self, x: f32) {
+        let s = &mut self.state;
+        let h = views::piano_dlg::kb_handle(s);
+        let to = s.piano_dlg.kb_scroll + (x - h.x) * views::piano_dlg::kb_scroll_per_px();
+        s.piano_dlg.kb_scroll = to.clamp(0.0, crate::piano_dlg::kb_max()).round();
         self.invalidate();
     }
 
@@ -4796,6 +4838,17 @@ impl App {
                     }
                     self.damage_rect(HINT_RECT);
                 }
+                Drag::LimitKeys => {
+                    let k = views::piano_dlg::kb_key(&self.state, x, y, false);
+                    crate::piano_dlg::set_green(&mut self.state, k);
+                    self.invalidate();
+                }
+                Drag::LimitEnd { high } => {
+                    let k = views::piano_dlg::kb_key(&self.state, x, y, true);
+                    crate::piano_dlg::set_end(&mut self.state, high, k);
+                    self.invalidate();
+                }
+                Drag::LimitScroll { dx } => self.limit_scroll_handle(x - dx),
                 Drag::EqGraph { track, band, g } => {
                     crate::mixer::eq_graph_drag(&mut self.state, track, band, g, (x, y));
                     self.hint = Cow::Owned(crate::mixer::eq_graph_hint(&self.state, g, x));
@@ -5454,6 +5507,8 @@ impl App {
                 self.record_option_menu(*o, x, y);
                 return self.invalidate();
             }
+            // The Limit dialog's keys take the right button too (spec: ui/piano-limit.md §1).
+            Some(Action::PianoDlg(crate::piano_dlg::Act::Keys)) => return self.piano_dlg_act(crate::piano_dlg::Act::Keys),
             Some(Action::PianoTarget) => {
                 // spec: ui/piano-target-channel.md §4
                 let row = self.state.selected_channel;
@@ -6077,6 +6132,13 @@ impl App {
         let area = self.top_hit(x, y).map(|h| h.action.clone());
         if matches!(area, Some(Action::BrowserList | Action::BrowserRow(_) | Action::BrowserTab(_))) {
             self.browser_wheel(dy + dx);
+            return None;
+        }
+        // The Limit dialog's keyboard: a white key a notch, up toward the high keys (spec: ui/piano-limit.md §5).
+        if let Some(Action::PianoDlg(crate::piano_dlg::Act::Keys | crate::piano_dlg::Act::Ruler | crate::piano_dlg::Act::Scroll)) = area {
+            let d = &mut self.state.piano_dlg;
+            d.kb_scroll = (d.kb_scroll + (dy + dx) * crate::piano_dlg::KEY_W).round().clamp(0.0, crate::piano_dlg::kb_max());
+            self.invalidate();
             return None;
         }
         if matches!(area, Some(Action::Settings(views::settings::SAct::Plug(views::settings::Plug::Table | views::settings::Plug::Row(_) | views::settings::Plug::Star(_) | views::settings::Plug::Show(_)))) | Some(Action::Scrollbar(Scroll::PlugTable))) {
@@ -14326,6 +14388,75 @@ mod tests {
             assert!(!app.state.shown(Win::PianoDlg));
             assert!(app.state.message.as_deref().is_some_and(|m| m.contains("note property")));
             app.state.piano.lane = piano::Lane::Velocity;
+        }
+        frame(&mut app, &mut c, None);
+
+        // Alt+K opens Limit (spec: ui/piano-limit.md): the range starts as the notes' own, the menus and the keyboard
+        // preview at once, a collapsed section still applies, Accept is one undo step and the settings stay.
+        {
+            use crate::piano_dlg::{Act as DAct, LCmd, Tool};
+            let keys = |app: &App| mine(app).iter().map(|n| n.2).collect::<Vec<_>>();
+            let press = |app: &mut App, x: f32, y: f32| {
+                app.mouse_move(x, y);
+                app.mouse_down();
+                app.mouse_up();
+            };
+            let click = |app: &mut App, a: Action| {
+                let r = hit_rect(app, &a);
+                press(app, r.cx(), r.cy());
+            };
+            put(&mut app, &[(0, 24, 61), (24, 24, 63), (48, 24, 66), (72, 24, 70)]);
+            key(&mut app, "k", false, true, false);
+            assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Limit);
+            assert_eq!(app.state.piano_dlg.limit.range, Some((61, 70)), "the targets' span");
+            assert_eq!(keys(&app), vec![61, 63, 66, 70], "nothing to change yet");
+            frame(&mut app, &mut c, None);
+            app.act(Action::PianoDlg(DAct::ScaleMenu));
+            let pop = app.state.playlist.popup.take().expect("the scale box opens the chords file");
+            assert_eq!(pop.items.iter().filter(|i| matches!(i.cmd, Cmd::Limit(LCmd::Scale(_)))).count(), 89, "(none) and 88 entries");
+            crate::playlist::run(&mut app, Cmd::Limit(LCmd::Scale(crate::chords::FIRST_SCALE)));
+            assert_eq!(keys(&app), vec![62, 64, 67, 61], "C major, ties up; B folds down an octave and stops at the range");
+            // A press on A4 makes it the green key: +3.
+            frame(&mut app, &mut c, None);
+            let (win, kb) = (views::piano_dlg::rect(&app.state), hit_rect(&app, &Action::PianoDlg(DAct::Keys)));
+            let at = |app: &App, k: i32| win.x + 8.0 + crate::piano_dlg::white_x(k) - app.state.piano_dlg.kb_scroll + 6.0;
+            assert_eq!(views::piano_dlg::kb_key(&app.state, at(&app, 57), kb.bottom() - 4.0, false), 57);
+            let x = at(&app, 57);
+            press(&mut app, x, kb.bottom() - 4.0);
+            assert_eq!(app.state.piano_dlg.limit.transpose, 3);
+            assert_eq!(keys(&app), vec![65, 67, 70, 64]);
+            // The name strip at C5: the low end is nearer and follows.
+            let strip = hit_rect(&app, &Action::PianoDlg(DAct::Ruler));
+            let x = at(&app, 60);
+            press(&mut app, x, strip.cy());
+            assert_eq!(app.state.piano_dlg.limit.range, Some((60, 70)));
+            assert_eq!(keys(&app), vec![65, 67, 70, 63]);
+            // The right button on C5: no transposition. The wheel scrolls a white key.
+            app.mouse_move(at(&app, 60), kb.bottom() - 4.0);
+            app.mouse_down_right();
+            app.mouse_up();
+            assert_eq!(app.state.piano_dlg.limit.transpose, 0);
+            let s0 = app.state.piano_dlg.kb_scroll;
+            app.wheel(0.0, -1.0, false, false);
+            assert_eq!(app.state.piano_dlg.kb_scroll, s0 - 13.0);
+            // Collapsed, the key / scale section still applies; the window is 67 px shorter.
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Collapse(0)));
+            assert_eq!(views::piano_dlg::rect(&app.state).h, 228.0);
+            assert_eq!(keys(&app), vec![62, 64, 67, 60]);
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Accept));
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert_eq!(keys(&app), vec![62, 64, 67, 60]);
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(keys(&app), vec![61, 63, 66, 70], "one undo step");
+            key(&mut app, "k", false, true, false);
+            let d = &app.state.piano_dlg;
+            assert_eq!((d.limit.scale, d.limit.range, d.collapsed), (crate::chords::FIRST_SCALE, Some((60, 70)), [true, false]), "kept");
+            assert_eq!(keys(&app), vec![62, 64, 67, 60]);
+            app.act(Action::CloseWin(Win::PianoDlg));
+            assert_eq!(keys(&app), vec![61, 63, 66, 70], "× puts the notes back");
+            app.state.piano_dlg.collapsed = [false; 2];
         }
         frame(&mut app, &mut c, None);
 

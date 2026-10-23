@@ -103,6 +103,8 @@ mod strum;
 mod flam;
 mod flip;
 mod levels;
+mod chords;
+mod limit;
 mod piano_dlg;
 mod arpeggiate;
 mod tapper;
