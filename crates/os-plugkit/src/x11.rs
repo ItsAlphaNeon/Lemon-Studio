@@ -27,7 +27,7 @@ use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
 pub use crate::input::{keysym, keysym_char, Button, Input};
-use crate::MenuDef;
+use crate::{MenuDef, Opener};
 
 /// The host's window: an X11 window id.
 pub type Parent = u32;
@@ -558,14 +558,14 @@ impl Window {
         r
     }
 
-    fn popup_at<C: Clone>(&mut self, x: i32, y: i32, def: &MenuDef<C>, pal: &Palette, scale: f32, parent: Option<[i32; 4]>) -> PopRes<C> {
+    fn popup_at<C: Clone>(&mut self, x: i32, y: i32, def: &MenuDef<C>, pal: &Palette, scale: f32, parent: Option<Opener>) -> PopRes<C> {
         let Ok(mut measure) = Canvas::new(8, 8, scale) else { return PopRes::Cancel };
         let layout = kmenu::layout(&mut measure, &def.items, def.style);
         let (w, h) = ((layout.w * scale).ceil() as i32, (layout.h * scale).ceil() as i32);
         let (mut px, mut py) = (x, y);
         if px + w > self.root_size.0 {
             px = match parent {
-                Some(p) => p[0] - w,
+                Some(p) => p.menu[0] - w,
                 None => self.root_size.0 - w,
             };
         }
@@ -588,7 +588,6 @@ impl Window {
         let opened = Instant::now();
         let start = (i32::from(self.pointer.0), i32::from(self.pointer.1));
         let mut moved = false;
-        let mut sub_open: Option<usize> = None;
         let result = loop {
             let Some(e) = self.event() else { break PopRes::Cancel };
             match e {
@@ -599,7 +598,7 @@ impl Window {
                     if (cur.0 - start.0).abs() + (cur.1 - start.1).abs() > 2 {
                         moved = true;
                     }
-                    if !inside(&rect, cur) && parent.is_some_and(|p| inside(&p, cur)) {
+                    if parent.is_some_and(|p| p.takes_back(rect, cur)) {
                         break PopRes::Back;
                     }
                     let hov = if inside(&rect, cur) { item_at(cur) } else { None }.filter(|&i| def.items[i].clickable());
@@ -608,23 +607,16 @@ impl Window {
                         paint(&mut canvas, hover);
                         self.show(pop, &canvas);
                     }
-                    // Submenu: opens while its row is hovered.
-                    match hov {
-                        Some(i) if sub_open != Some(i) => {
-                            if let Some(sub) = def.sub(i) {
-                                sub_open = Some(i);
-                                let row = layout.rows[i];
-                                let sx = px + ((row.x + row.w) * scale) as i32 - 2;
-                                let sy = py + (row.y * scale) as i32 - 2;
-                                match self.popup_at(sx, sy, sub, pal, scale, Some(rect)) {
-                                    PopRes::Pick(c) => break PopRes::Pick(c),
-                                    PopRes::Cancel => break PopRes::Cancel,
-                                    PopRes::Back => self.grab(pop.0),
-                                }
-                            }
+                    // Submenu: opens while its row is hovered, until the pointer moves on to another row of this menu.
+                    if let Some((i, sub)) = hov.and_then(|i| Some((i, def.sub(i)?))) {
+                        let row = layout.rows[i];
+                        let sx = px + ((row.x + row.w) * scale) as i32 - 2;
+                        let sy = py + (row.y * scale) as i32 - 2;
+                        match self.popup_at(sx, sy, sub, pal, scale, Some(Opener::new(rect, row, scale))) {
+                            PopRes::Pick(c) => break PopRes::Pick(c),
+                            PopRes::Cancel => break PopRes::Cancel,
+                            PopRes::Back => self.grab(pop.0),
                         }
-                        Some(_) => {}
-                        None => sub_open = None,
                     }
                 }
                 Event::ButtonPress(e) => {
