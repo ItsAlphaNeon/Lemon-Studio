@@ -102,6 +102,7 @@ mod flam;
 mod flip;
 mod levels;
 mod chords;
+mod claw;
 mod limit;
 mod piano_dlg;
 mod arpeggiate;

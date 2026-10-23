@@ -2987,7 +2987,8 @@ impl App {
 
     // ---------------------------------------------------------------- Flam, Flip and Scale levels dialogs
 
-    /// Tools ▸ Flam… (Alt+F), Flip… (Alt+Y) and Scale levels… (Alt+X): open the dialog in front (centred over the main
+    /// Tools ▸ Flam… (Alt+F), Claw machine… (Alt+W), Flip… (Alt+Y), Scale levels… (Alt+X) and Limit… (Alt+K): open
+    /// the dialog in front (centred over the main
     /// window the first time, then where it was left) on the piano roll's notes, previewing the settings last accepted.
     /// Another of these dialogs open: its preview is put back and the window shows this one. Scale levels does not open
     /// on a channel control lane (spec: ui/piano-level-scaling.md §4).
@@ -3022,12 +3023,14 @@ impl App {
                 s.message = Some(dlg::accept(s));
                 s.hide(Win::PianoDlg);
             }
-            Act::Options | Act::KeyMenu | Act::ScaleMenu | Act::SnapMenu => {
+            Act::Options | Act::KeyMenu | Act::ScaleMenu | Act::SnapMenu | Act::PeriodMenu | Act::TrashMenu => {
                 let (x, y) = self.mouse;
                 let items = match a {
                     Act::KeyMenu => dlg::key_menu(&s.piano_dlg.limit),
                     Act::ScaleMenu => dlg::scale_menu(&s.piano_dlg.limit),
                     Act::SnapMenu => dlg::snap_menu(&s.piano_dlg.limit),
+                    Act::PeriodMenu => dlg::period_menu(&s.piano_dlg.claw),
+                    Act::TrashMenu => dlg::trash_menu(&s.piano_dlg.claw),
                     _ => dlg::options_menu(),
                 };
                 s.playlist.popup = Some(crate::playlist::Popup { x, y, items, sub: None });
@@ -14391,6 +14394,53 @@ mod tests {
             app.act(Action::CloseWin(Win::PianoDlg));
             assert_eq!(keys(&app), vec![61, 63, 66, 70], "× puts the notes back");
             app.state.piano_dlg.collapsed = [false; 2];
+        }
+        frame(&mut app, &mut c, None);
+
+        // Alt+W opens Claw machine (spec: ui/piano-claw.md): every note of the channel, selected or not, previews at
+        // once, the menus and the knob too; Accept is one undo step that leaves nothing selected, and the settings stay.
+        {
+            use crate::piano_dlg::{Act as DAct, CCmd, Knob as DKnob, Tool};
+            let keys = |app: &App| mine(app).iter().map(|n| n.2).collect::<Vec<_>>();
+            let click = |app: &mut App, a: Action| {
+                let r = hit_rect(app, &a);
+                app.mouse_move(r.cx(), r.cy());
+                app.mouse_down();
+                app.mouse_up();
+            };
+            let st = u32::from(app.state.project.ppq) / 4;
+            let steps: Vec<(u32, u32, u16)> = (0..8).map(|i| (i * st, st, 60 + i as u16)).collect();
+            put(&mut app, &steps);
+            let first = piano::notes(&app.state).iter().position(|n| n.channel == ch && n.position == 0).unwrap();
+            app.state.piano.select(app.state.pattern, ch, vec![first]);
+            key(&mut app, "w", false, true, false);
+            assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Claw);
+            assert_eq!(keys(&app), vec![60, 61, 62, 64, 65, 66], "each beat's last quarter trashed, from every note");
+            frame(&mut app, &mut c, None);
+            app.act(Action::PianoDlg(DAct::TrashMenu));
+            let pop = app.state.playlist.popup.take().expect("Trash every opens its menu");
+            assert_eq!(pop.items.iter().filter(|i| matches!(i.cmd, Cmd::Claw(CCmd::Trash(_)))).count(), 10);
+            crate::playlist::run(&mut app, Cmd::Claw(CCmd::Trash(9)));
+            assert_eq!(mine(&app), steps, "(none), Time dist at the centre: unchanged");
+            frame(&mut app, &mut c, None);
+            let k = hit_rect(&app, &Action::Knob(KnobId::PianoDlg(DKnob::ClawTime)));
+            app.mouse_move(k.cx(), k.cy());
+            for _ in 0..8 {
+                app.wheel(0.0, 1.0, false, false);
+            }
+            assert_eq!(app.hint.as_ref(), "Time distribution: +25%");
+            assert!(mine(&app)[0].1 > st && mine(&app)[3].1 < st, "early notes longer, late ones shorter");
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Accept));
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert!(app.state.piano.selection(app.state.pattern, Some(ch)).is_empty(), "nothing selected afterwards");
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(mine(&app), steps, "one undo step");
+            key(&mut app, "w", false, true, false);
+            assert_eq!(app.state.piano_dlg.claw.trash, 9, "kept");
+            assert_ne!(mine(&app), steps);
+            app.act(Action::CloseWin(Win::PianoDlg));
+            assert_eq!(mine(&app), steps, "× puts the notes back");
         }
         frame(&mut app, &mut c, None);
 

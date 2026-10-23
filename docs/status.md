@@ -18,8 +18,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 ## ✅ Piano roll
 
 - Full tool set, with velocity and event lanes
-- Quantize, chop, glue, legato, strum, arpeggiate, flam, flip, scale levels, limit (key / scale, range, transpose) and
-  randomize
+- Quantize, chop, glue, legato, strum, arpeggiate, flam, claw machine (trash, stretch, time distribution), flip, scale
+  levels, limit (key / scale, range, transpose) and randomize
 - Vertical zoom and ghost channels
 - Resizable event panel: drag the splitter, double-click it to hide or show the panel (remembered)
 - Pattern time markers, saved with the project

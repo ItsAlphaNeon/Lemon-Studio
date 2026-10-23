@@ -325,6 +325,8 @@ pub enum Cmd {
     FlamPreset(crate::flam::Preset),
     /// The Limit dialog's Key, scale and Snap ▸ menus (spec: ui/piano-limit.md §1).
     Limit(crate::piano_dlg::LCmd),
+    /// The Claw machine dialog's Period and Trash every ▸ menus (spec: ui/piano-claw.md §1).
+    Claw(crate::piano_dlg::CCmd),
     /// Settings > Audio menus: device, sample rate, buffer length (spec: ui/settings.md "Audio").
     Audio(crate::audio_cfg::Set),
     /// The toolbar CPU panel's menu (spec: ui/main-window.md §13).
@@ -3470,6 +3472,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return None;
         }
+        Cmd::Claw(c) => {
+            crate::piano_dlg::claw_cmd(&mut app.state, c);
+            app.invalidate();
+            return None;
+        }
         Cmd::Misc(row, m, v) => {
             crate::misc::set(app, row, m, v);
             return None;
@@ -3980,6 +3987,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Arp(_) => None,
         Cmd::FlamPreset(_) => None,
         Cmd::Limit(_) => None,
+        Cmd::Claw(_) => None,
         Cmd::Messages(_) => None,
         Cmd::DataFolder(_) => None,
     };
