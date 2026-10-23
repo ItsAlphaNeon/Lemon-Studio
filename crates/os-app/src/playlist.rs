@@ -325,6 +325,8 @@ pub enum Cmd {
     MidiExport(bool),
     /// The Arpeggiate dialog's menus (spec: ui/piano-arpeggiate.md §1).
     Arp(crate::arpeggiate::ACmd),
+    /// FILE ▸ Recent projects ▸ More: open recent project `n` (spec: ui/recent-projects.md §2).
+    OpenRecent(usize),
     /// Settings > Audio menus: device, sample rate, buffer length (spec: ui/settings.md "Audio").
     Audio(crate::audio_cfg::Set),
     /// The toolbar CPU panel's menu (spec: ui/main-window.md §13).
@@ -3461,6 +3463,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.arp_command(c);
             return None;
         }
+        Cmd::OpenRecent(n) => {
+            app.open_recent(n);
+            return None;
+        }
         Cmd::MidiImport(piano) => {
             app.import_midi_dialog(piano);
             return None;
@@ -3976,7 +3982,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Genre(_) => None,
         Cmd::Theme(_) => None,
         Cmd::Template(_) => None,
-        Cmd::Arp(_) | Cmd::MidiImport(_) | Cmd::MidiExport(_) => None,
+        Cmd::Arp(_) | Cmd::MidiImport(_) | Cmd::MidiExport(_) | Cmd::OpenRecent(_) => None,
         Cmd::Messages(_) => None,
         Cmd::DataFolder(_) => None,
     };

@@ -143,6 +143,7 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   samples, Rename (the folder and the file), and the browser's Project data. The first save of a new project
   opens a Save as form that can make that folder (General ▸ Ask for data folder decides when; File ▸ New can
   open a New project form)
+- FILE lists the ten projects last opened or saved (Alt+1 .. Alt+0), More ▸ the older ones, fifty in all
 - Still early: always work on copies and keep backups
 
 ## 🚧 Built-in instruments and effects
