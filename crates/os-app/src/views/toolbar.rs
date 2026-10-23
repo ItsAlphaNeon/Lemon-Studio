@@ -546,18 +546,23 @@ fn monitor(ui: &mut Ui, s: &State) {
         ui.c.fill_rect(Rect::new(968.0, 4.0, 77.0, 23.0), edge);
         ui.c.fill_rect(Rect::new(969.0, 5.0, 75.0, 21.0), fill);
     }
+    // Classic: both ends follow the theme's highlight key. Lemon: the displays' digit colour (like the scope's ink),
+    // dimmed toward the panel at the left and full at the tip. The held peak takes the tip colour.
+    let (a, b) = if lemon {
+        (ui.t.pill.mix(ui.t.time_panel, 0.45), ui.t.pill)
+    } else {
+        (ui.t.h(0xc8ced1), ui.t.h(0xcdc7a8))
+    };
     for i in 0..2 {
         let y = 5.0 + 11.0 * i as f32;
         let hold = (m.meter_pos(m.hold[i].0) * 75.0).round();
         if m.hold[i].1.is_some() && hold >= 1.0 {
-            ui.c.fill_rect(Rect::new(969.0 + hold - 1.0, y, 1.0, 10.0), ui.t.h(0xcdc7a8));
+            ui.c.fill_rect(Rect::new(969.0 + hold - 1.0, y, 1.0, 10.0), b);
         }
         let len = (m.meter_pos(m.meter_db[i]) * 75.0).round();
         if len < 1.0 {
             continue;
         }
-        // Both ends follow the theme's highlight key, like the held peak.
-        let (a, b) = if lemon { (ui.t.h(0xc9a92c), ui.t.h(0xfff1b8)) } else { (ui.t.h(0xc8ced1), ui.t.h(0xcdc7a8)) };
         let mix = |k: f32, shade: f32| {
             let l = |u: u8, v: u8| (((u as f32 + (v as f32 - u as f32) * k) * shade).round() as u32).min(255);
             os_ui::Color::rgb((l(a.r, b.r) << 16) | (l(a.g, b.g) << 8) | l(a.b, b.b))
