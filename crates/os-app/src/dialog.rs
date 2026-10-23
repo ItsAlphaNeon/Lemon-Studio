@@ -91,6 +91,8 @@ pub enum Then {
     Signature(u16, u8, u8),
     /// The project's data folder: its questions and folder pickers (`crate::data_folder`).
     DataFolder(crate::data_folder::DThen),
+    /// File ▸ FL Studio factory content folder: the folder picked (`App::set_factory_folder`).
+    FactoryFolder,
 }
 
 /// What waits for the save-changes question.

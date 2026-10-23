@@ -588,6 +588,17 @@ pub struct Channel {
     pub sound: ChannelSound,
 }
 
+impl Channel {
+    /// Takes the channel's sample out, as the Sampler window's file box X does in FL: no sample path (event 196), no
+    /// loop points (event 251), and Resample off among the sampler flags; the other flags stay (spec:
+    /// flp/events/channels.md "Loop points (event 251)", "Sampler flags (event 143)").
+    pub fn clear_sample(&mut self) {
+        self.sample_path = None;
+        self.sound.loop_points = None;
+        self.sound.sampler_flags = self.sound.sampler_flags.map(|f| f & !ChannelSound::RESAMPLE);
+    }
+}
+
 /// A channel's filter, sampler and declick settings as stored (spec: flp/engine-events.md "A channel",
 /// audio/channel-filter.md, audio/sampler.md, audio/declick.md, audio/audio-clips.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1281,7 +1292,7 @@ impl Note {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct MixerTrack {
     /// 0 = Master.
     pub index: u16,
@@ -1312,6 +1323,57 @@ pub struct MixerTrack {
     /// The three-band equaliser as stored, per band `[gain, frequency, width]`: gain -1800..=1800 in 0.01 dB,
     /// frequency and width 0..=65536 (spec: audio/mixer.md "Equaliser"). Band 1 low shelf, 2 peaking, 3 high shelf.
     pub eq: [[i32; 3]; 3],
+    /// The track's icon (event 95) as the file numbers it; `None` = no icon (spec: flp/events/mixer.md "Track blocks",
+    /// flp/engine-events.md "The mixer"). It stays with its track; Lemon Studio does not draw it.
+    pub icon: Option<u16>,
+    /// Position of the file's track block this track was loaded from (`None` = made in Lemon Studio). When tracks are
+    /// moved, deleted or trimmed, the writer takes the track's effect-slot events from that block (spec:
+    /// flp/events/mixer.md "Removing tracks"). Bookkeeping, not part of the track: tracks that differ only here are
+    /// equal.
+    pub origin: Option<u16>,
+}
+
+impl PartialEq for MixerTrack {
+    fn eq(&self, o: &Self) -> bool {
+        // Every field but `origin`, named so that a new field is not left out.
+        let MixerTrack {
+            index,
+            name,
+            color,
+            enabled,
+            slots,
+            routes,
+            send_levels,
+            volume,
+            pan,
+            stereo_separation,
+            polarity,
+            swap,
+            slots_enabled,
+            slot_on,
+            slot_mix,
+            eq,
+            icon,
+            origin: _,
+        } = self;
+        *index == o.index
+            && *name == o.name
+            && *color == o.color
+            && *enabled == o.enabled
+            && *slots == o.slots
+            && *routes == o.routes
+            && *send_levels == o.send_levels
+            && *volume == o.volume
+            && *pan == o.pan
+            && *stereo_separation == o.stereo_separation
+            && *polarity == o.polarity
+            && *swap == o.swap
+            && *slots_enabled == o.slots_enabled
+            && *slot_on == o.slot_on
+            && *slot_mix == o.slot_mix
+            && *eq == o.eq
+            && *icon == o.icon
+    }
 }
 
 /// A new track's equaliser: flat, at the default frequencies and widths.
@@ -1337,6 +1399,8 @@ impl MixerTrack {
             slot_on: [true; 10],
             slot_mix: [1.0; 10],
             eq: EQ_DEFAULT,
+            icon: None,
+            origin: None,
         }
     }
 }

@@ -31,6 +31,7 @@ mod filedlg;
 mod enable_groups;
 mod export;
 mod export_form;
+mod factory_folder;
 mod high_visibility;
 mod history;
 mod hold;

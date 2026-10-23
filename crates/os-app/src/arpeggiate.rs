@@ -302,7 +302,8 @@ pub fn load(path: &Path) -> Result<Pattern, String> {
 
 /// FL's Arpeggiator folder (read in place when FL Studio is installed; §9).
 pub fn folder() -> PathBuf {
-    os_native::default_fl_dir().join("Data").join("Patches").join("Scores").join("Arpeggiator")
+    let fl = crate::factory_folder::dir().unwrap_or_else(os_native::default_fl_dir);
+    fl.join("Data").join("Patches").join("Scores").join("Arpeggiator")
 }
 
 /// Names compared with their digit runs by value ("2 notes" before "10 notes").
