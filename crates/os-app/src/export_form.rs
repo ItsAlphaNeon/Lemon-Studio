@@ -52,7 +52,7 @@ pub const CHECK_HINTS: [&str; 12] = [
     "Write each note's start as a marker into WAV files (Pattern)",
     "Write the tempo into WAV files",
     "Show the file in the file manager when the export is done",
-    "An Info frame first, so players that read it skip the encoder's delay (DAWs such as FL still play it as silence)",
+    "An Info frame first, so players that read it skip the encoder's delay (some DAWs still play it as silence)",
 ];
 pub const TILE_HINTS: [&str; 4] =
     ["WAV: uncompressed audio", "FLAC: lossless compressed audio", "MP3: lossy compressed audio", "OGG: Ogg Vorbis lossy compressed audio"];

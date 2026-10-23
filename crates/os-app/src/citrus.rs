@@ -55,8 +55,8 @@ fn factory_dir() -> PathBuf {
     os_native::default_fl_dir().join("Data").join("Patches").join("Plugin presets").join("Generators").join("Sytrus")
 }
 
-/// The `.fst` presets under `dir` (any depth), shown as "FL - Folder - Sub/Name" (one submenu per folder path) and
-/// sorted by that name.
+/// The `.fst` presets under `dir` (any depth), shown as "Folder - Sub/Name" (one submenu per folder path; the ones at
+/// the top by their name alone) and sorted by that name. No source is named.
 pub fn fst_presets_in(dir: &Path) -> Vec<crate::presets::Preset> {
     fn walk(dir: &Path, rel: &mut Vec<String>, out: &mut Vec<crate::presets::Preset>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -69,8 +69,8 @@ pub fn fst_presets_in(dir: &Path) -> Vec<crate::presets::Preset> {
                 rel.pop();
             } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("fst")) {
                 let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                let folder = std::iter::once("FL").chain(rel.iter().map(String::as_str)).collect::<Vec<_>>().join(" - ");
-                out.push(crate::presets::Preset { name: format!("{folder}/{stem}"), path: p });
+                let name = if rel.is_empty() { stem } else { format!("{}/{stem}", rel.join(" - ")) };
+                out.push(crate::presets::Preset { name, path: p });
             }
         }
     }
@@ -94,7 +94,7 @@ pub fn fst_state(path: &Path) -> Option<Result<Vec<u8>, String>> {
     Some(
         std::fs::read(path)
             .map_err(|e| format!("{}: {e}", path.display()))
-            .and_then(|b| citrus::preset::state_from_fst(&b).ok_or_else(|| format!("{} holds no Sytrus patch", path.display())))
+            .and_then(|b| citrus::preset::state_from_fst(&b).ok_or_else(|| format!("{} holds no patch Citrus can read", path.display())))
             .map(|fl| citrus::plugin_state_from_fl(&fl)),
     )
 }
@@ -239,7 +239,7 @@ mod tests {
         std::fs::write(dir.join("Bass").join("notes.txt"), b"x").unwrap();
         let l = fst_presets_in(&dir);
         let names: Vec<&str> = l.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, vec!["FL - Bass - Deep/Sub", "FL/Default"]);
+        assert_eq!(names, vec!["Bass - Deep/Sub", "Default"]);
         let st = fst_state(&l[0].path).unwrap().unwrap();
         assert_eq!(citrus::fl_from_plugin_state(&st), Some(fl));
         assert!(fst_state(&dir.join("Bass").join("notes.txt")).is_none());

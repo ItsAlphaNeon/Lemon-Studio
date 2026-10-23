@@ -782,7 +782,7 @@ fn operator(ui: &mut Ui, m: usize) {
     for (k, x, l) in [(0, 20.0, "HALF"), (1, 49.0, "EVEN"), (2, 77.0, "ABS")] {
         toggle(ui, Field::Op(m, 8 + k), Rect::new(x - 12.0, 106.0, 24.0, 14.0), l);
     }
-    for (k, x, l) in [(3, 106.0, "SH"), (4, 135.0, "TN"), (5, 161.0, "SK"), (6, 187.0, "SN"), (7, 213.0, "FL"), (2, 239.0, "NS")] {
+    for (k, x, l) in [(3, 106.0, "SH"), (4, 135.0, "TN"), (5, 161.0, "SK"), (6, 187.0, "SN"), (7, 213.0, "PF"), (2, 239.0, "NS")] {
         slider(ui, Field::Op(m, k), x, 56.0, 111.0, l);
     }
     switch(ui, Field::Op(m, 12), 267.0, 42.0, "CENTER");
@@ -1394,7 +1394,7 @@ fn info(ui: &mut Ui) {
     name(ui, mid, Font::condensed(32, 0).bold());
     let v = format!("Version {}", ui.m.version);
     ui.c.text_center(LABEL, Rect::new(0.0, mid.bottom() + 8.0, w, 16.0), DIM, &v);
-    ui.c.text_center(LABEL, Rect::new(0.0, mid.bottom() + 26.0, w, 16.0), DIM, "Lemon Studio's recreation of FL's Sytrus");
+    ui.c.text_center(LABEL, Rect::new(0.0, mid.bottom() + 26.0, w, 16.0), DIM, "Lemon Studio's six-operator synthesizer");
     ui.c.text_center(SMALL, Rect::new(0.0, h - 30.0, w, 16.0), FAINT, "Click to return");
     ui.hit(Rect::new(0.0, 0.0, w, h), Target::Cover);
 }

@@ -1,6 +1,6 @@
 [package]
 name = "citrus"
-description = "Citrus: Lemon Studio's six-operator synthesizer (a recreation of FL's Sytrus) as a VST3 / CLAP plugin"
+description = "Citrus: Lemon Studio's six-operator synthesizer as a VST3 / CLAP plugin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
