@@ -95,6 +95,61 @@ pub fn index(id: &str) -> Option<usize> {
     DEFS.iter().position(|d| d.id == id)
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Snapping (Lemon Studio choice, spec §4)
+
+/// How near (a share of the range) a drag has to come to a magnet to land on it.
+pub const MAGNET_ZONE: f32 = 0.015;
+
+/// A knob's magnet: the R/L offset's and the tone's centre, the feedback's 100 %.
+pub fn magnet(k: usize) -> Option<i32> {
+    match k {
+        dsp::OFFSET => Some(3000),
+        dsp::TONE => Some(0),
+        dsp::FEEDBACK => Some(4800),
+        _ => None,
+    }
+}
+
+/// A musical synced time (48 per step): a multiple of a quarter step or of a third of one.
+pub fn musical(n: i32) -> bool {
+    n % 12 == 0 || n % 16 == 0
+}
+
+/// Where a drag at the stored value `plain` lands: a synced time on the nearest musical time, a knob with a magnet
+/// on it when within `MAGNET_ZONE` of its range; `None` = where the drag is.
+pub fn snap(k: usize, plain: f32, sync: bool) -> Option<i32> {
+    let (min, max) = dsp::RANGES[k];
+    if k == dsp::TIME && sync {
+        let r = plain.round() as i32;
+        return (0..=16).flat_map(|d| [r - d, r + d]).find(|&n| (12..=max).contains(&n) && musical(n));
+    }
+    let m = magnet(k)?;
+    ((plain - m as f32).abs() <= MAGNET_ZONE * (max - min) as f32).then_some(m)
+}
+
+/// The wheel's next stored value from `v` (`up` or down) for a setting that snaps, given the plain step `next`: a
+/// synced time goes to the next musical time, a knob with a magnet stops on it when the step would pass it.
+pub fn snap_step(k: usize, v: i32, next: i32, up: bool, sync: bool) -> i32 {
+    let (min, max) = dsp::RANGES[k];
+    if k == dsp::TIME && sync {
+        let mut n = v;
+        loop {
+            n += if up { 1 } else { -1 };
+            if !(min..=max).contains(&n) {
+                return v;
+            }
+            if n >= 12 && musical(n) {
+                return n;
+            }
+        }
+    }
+    match magnet(k) {
+        Some(m) if (v < m && m <= next) || (next <= m && m < v) => m,
+        _ => next,
+    }
+}
+
 /// What other settings a value text depends on: the time's sync and the cutoff's filter mode.
 #[derive(Debug, Default)]
 pub struct Shown {
@@ -474,6 +529,29 @@ mod tests {
         for (v, s) in [(0, "0.1Hz"), (3000, "1.1Hz"), (6000, "20.0Hz"), (1500, "0.4Hz"), (4500, "3.6Hz"), (1000, "0.3Hz"), (2000, "0.5Hz"), (5000, "6.7Hz"), (5999, "19.9Hz"), (500, "0.2Hz"), (3500, "1.6Hz"), (5500, "10.0Hz"), (200, "0.1Hz")] {
             assert_eq!(txt("mrate", v), s);
         }
+    }
+
+    #[test]
+    fn knobs_snap_to_their_magnets_and_synced_times_to_musical_ones() {
+        // Within 1.5 % of the range (90 of 6000), the offset and tone land on the centre, the feedback on 100 %.
+        assert_eq!(snap(dsp::OFFSET, 3080.0, false), Some(3000));
+        assert_eq!(snap(dsp::OFFSET, 3100.0, false), None);
+        assert_eq!(snap(dsp::TONE, -60.0, false), Some(0));
+        assert_eq!(snap(dsp::FEEDBACK, 4750.0, false), Some(4800));
+        assert_eq!(value_text(dsp::FEEDBACK, 4800, false, 0), "100.0%");
+        assert_eq!(snap(dsp::SYMMETRY, 3000.0, false), None);
+        // A synced time lands on quarter and third steps; unsynced it is free.
+        assert_eq!(snap(dsp::TIME, 83.0, true), Some(84));
+        assert_eq!(snap(dsp::TIME, 81.0, true), Some(80));
+        assert_eq!(snap(dsp::TIME, 3.0, true), Some(12));
+        assert_eq!(snap(dsp::TIME, 83.0, false), None);
+        // The wheel: the next musical time; a magnet stops a step that would pass it.
+        assert_eq!(snap_step(dsp::TIME, 80, 86, true, true), 84);
+        assert_eq!(snap_step(dsp::TIME, 80, 74, false, true), 72);
+        assert_eq!(snap_step(dsp::TIME, 768, 768, true, true), 768);
+        assert_eq!(snap_step(dsp::OFFSET, 2980, 3027, true, false), 3000);
+        assert_eq!(snap_step(dsp::OFFSET, 3000, 3047, true, false), 3047);
+        assert_eq!(snap_step(dsp::DRIVE, 2980, 3027, true, false), 3027);
     }
 
     #[test]

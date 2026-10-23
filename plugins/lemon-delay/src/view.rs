@@ -19,7 +19,7 @@ use crate::params::{self, DEFS};
 
 /// Editor size in logical pixels.
 pub const W: u32 = 784;
-pub const H: u32 = 280;
+pub const H: u32 = 272;
 
 /// The two rows of cards (top, bottom); a heading's rule runs 12 px above its card.
 const CARD1: (f32, f32) = (28.0, 116.0);
@@ -57,14 +57,17 @@ const SLIDER_Y: f32 = 92.0;
 /// The distortion curve's well.
 pub const CURVE: Rect = Rect::new(622.0, 148.0, 80.0, 80.0);
 
-/// The foot: the hint well at the left, the wordmark at the right (`FOOT` = the top of its "LEMON").
-const FOOT: f32 = 242.0;
+/// The foot's centre line: the hint well at the left and the wordmark at the right are centred on it, 8 px under the
+/// cards and 8 px over the edge.
+const FOOT: f32 = 253.0;
+/// The right edge of the cards (and of the wordmark).
+const RIGHT: f32 = 776.0;
 
 const RULE: Color = Color::rgb(0x3c3c3c);
 const HEADING: Font = Font::condensed(11, 0).bold();
 const LABEL: Font = Font::new(10).bold();
 const HINT: Font = Font::new(11);
-const MARK_BIG: Font = Font::condensed(20, 0).bold();
+const MARK_BIG: Font = Font::condensed(22, 0).bold();
 const MARK_SMALL: Font = Font::condensed(10, 0).bold();
 
 /// Read access to parameter values by id.
@@ -209,11 +212,11 @@ pub fn paint(c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, hint: &
     choices(&mut ui, "dtype", 416.0, 460.0, ROW2 - 16.0, &["LIMIT", "SAT"], false);
     knob(&mut ui, "drive", 490.0, ROW2, SMALL, "LEVEL", false, false, false);
     knob(&mut ui, "knee", 538.0, ROW2, SMALL, "KNEE", false, limit, false);
-    knob(&mut ui, "sym", 586.0, ROW2, SMALL, "SYMMETRY", true, limit, false);
+    knob(&mut ui, "sym", 586.0, ROW2, SMALL, "SYMMETRY", false, limit, false);
     curve(&mut ui, &v);
     // The foot.
     let mark_left = logo(&mut ui);
-    let well = Rect::span(8.0, mark_left - 20.0, FOOT + 9.0, FOOT + 29.0);
+    let well = Rect::span(8.0, mark_left - 16.0, FOOT - 11.0, FOOT + 11.0);
     lemon::plug_well(ui.c, well, 6.0);
     if !hint.is_empty() {
         let lh = ui.c.line_height(HINT);
@@ -320,12 +323,19 @@ fn slider(ui: &mut Ui, id: &str, cap: &str, disabled: bool) {
     ui.hit(hr, target);
 }
 
-/// The wordmark at the foot's right (the lemon and "LEMON" over a large "DELAY"); returns its left edge.
+/// The wordmark on the foot's line (as Lemon Limiter's and Lemon Sampler's): the lemon mark and "LEMON" in lemon
+/// beside a large grey "DELAY", right edge on the cards'; returns its left edge.
 fn logo(ui: &mut Ui) -> f32 {
-    let right = W as f32 - 10.0;
-    let left = right - lemon::spaced_width(ui.c, MARK_BIG, "DELAY", 3.0);
-    lemon::wordmark(ui.c, right, FOOT, false, "DELAY", MARK_BIG, MARK_SMALL);
-    ui.hit(Rect::span(left - 6.0, right + 4.0, FOOT - 2.0, H as f32 - 2.0), Target::Logo);
+    let wb = lemon::spaced_width(ui.c, MARK_BIG, "DELAY", 2.0);
+    let ws = lemon::spaced_width(ui.c, MARK_SMALL, "LEMON", 2.5);
+    let (lh_b, lh_s) = (ui.c.line_height(MARK_BIG), ui.c.line_height(MARK_SMALL));
+    let bx = (RIGHT - wb).round();
+    lemon::spaced(ui.c, MARK_BIG, bx, (FOOT - lh_b / 2.0).round(), plug::WORDMARK, "DELAY", 2.0);
+    let sx = (bx - 8.0 - ws).round();
+    lemon::spaced(ui.c, MARK_SMALL, sx, (FOOT - lh_s / 2.0).round() + 1.0, brand::MAIN, "LEMON", 2.5);
+    let left = sx - 14.0;
+    lemon::lemon_mark(ui.c, left + 5.0, FOOT, 4.0, brand::MAIN);
+    ui.hit(Rect::span(left - 2.0, RIGHT, FOOT - 12.0, FOOT + 12.0), Target::Logo);
     left
 }
 
