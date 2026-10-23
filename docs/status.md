@@ -172,6 +172,12 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Lemon Trio's custom shape plays a sample as one period of the oscillator: choosing it opens a file dialog, and
   its sample page shows the wave and loads another. The sample is the channel's (saved with the project, and the
   channel is named after it while Auto name channels is on). Not yet: dropping a file on the sample page
+- Keep on disk streams the sample from its file while it plays: only the first moments after each start point and a
+  small buffer per voice stay in memory. It applies to uncompressed WAV and AIFF files played as they are; compressed
+  files, the sample tools and effects, reverse and the Stretch / Stretch Pro methods keep the sample in memory, and
+  the sampler says which ("in RAM" or "on disk"). Exports wait for the disk, so they sound exactly as from memory
+- Lemon Studio's own playback engine still keeps a decoded copy of every sampler channel's file, so the memory
+  saving shows in other hosts for now, not yet inside Lemon Studio
 
 ## ✅ Exporting audio
 

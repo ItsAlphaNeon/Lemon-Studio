@@ -112,6 +112,53 @@ pub fn build(raw: &Sample, src: &Source, k: &FxKey) -> Built {
     Built { sample: Sample { rate: rate as u32, left, right }, looped: lp, per_file_frame }
 }
 
+/// **(Lemon Studio)** When the played sample is the file's own frames as they are (no step of [`build`] changes them;
+/// a file of `frames` frames at `rate` Hz): its loop, as `build` makes it. `None` when a step changes the frames (Keep
+/// on disk then plays the sample from memory). Erring towards `None` is safe: it only keeps a sample in memory.
+pub fn as_is(src: &Source, k: &FxKey, rate: u32, frames: usize) -> Option<Option<(usize, usize)>> {
+    let fx = &k.fx;
+    if frames == 0 || fx.start() != 0.0 || fx.length() != 1.0 || rate < 8000 {
+        return None;
+    }
+    if k.stretch {
+        let ratio = k.ratio_for(frames as f64 / f64::from(rate));
+        let shift = 2f64.powf(f64::from(k.shift) / 1200.0);
+        if (ratio - 1.0).abs() > 1e-4 || (shift - 1.0).abs() > 1e-4 {
+            return None;
+        }
+    }
+    let changes = fx.stereo_delay != 2048
+        || fx.flags & (SampleFx::REVERSE | SampleFx::CLIP | SampleFx::FADE_STEREO | SampleFx::SWAP) != 0
+        || fx.pogo != 256
+        || fx.ring_mix > 0
+        || fx.cutoff < 1024
+        || fx.resonance > 0
+        || fx.fade_in > 0
+        || fx.fade_out > 0
+        || fx.boost > 0
+        || fx.feedback != 128
+        || fx.remove_dc
+        || fx.polarity
+        || fx.normalize
+        || fx.crossfade > 0
+        || fx.reverb > 0
+        || fx.trim > 0;
+    if changes {
+        return None;
+    }
+    let mut lp = limit(src.file_loop.map(|(a, b)| (a as usize, b as usize)), frames);
+    if let Some((ks, ke)) = k.knob_loop {
+        let n = frames as f64;
+        let a = (f64::from(ks.clamp(0.0, 1.0)) * n).floor() as usize;
+        let e = (f64::from(ke.clamp(0.0, 1.0)) * n).floor() as usize;
+        lp = (e >= a + 2).then(|| (a, e - 1));
+    }
+    if fx.ping_pong && lp.is_some_and(|(a, b)| a + 1 < b) {
+        return None;
+    }
+    Some(lp)
+}
+
 /// `end = min(end, N - 1)`, then `start = min(start, end)`; no loop in an empty sample.
 fn limit(lp: Option<(usize, usize)>, n: usize) -> Option<(usize, usize)> {
     let (a, b) = lp?;
@@ -600,6 +647,47 @@ mod tests {
 
     fn plain(s: &Sample) -> Built {
         build(s, &Source::default(), &key(SampleFx::default()))
+    }
+
+    // Keep on disk streams a file only when `build` would play its frames as they are, with the loop `as_is` gives.
+    #[test]
+    fn as_is_names_exactly_the_files_build_leaves_alone() {
+        let s = noise(2000, 44100);
+        let src = Source { int16_mono: false, file_loop: Some((300, 1500)) };
+        let with = |f: &dyn Fn(&mut SampleFx)| {
+            let mut fx = SampleFx::default();
+            f(&mut fx);
+            key(fx)
+        };
+        let keys = [
+            key(SampleFx::default()),
+            FxKey { knob_loop: Some((0.25, 0.75)), ..key(SampleFx::default()) },
+            FxKey { knob_loop: Some((0.5, 0.5)), ..key(SampleFx::default()) },
+            FxKey { stretch: true, ..key(SampleFx::default()) },
+            FxKey { stretch: true, ratio: 1.5, ..key(SampleFx::default()) },
+            FxKey { stretch: true, shift: 100.0, ..key(SampleFx::default()) },
+            with(&|f| f.flags |= SampleFx::REVERSE),
+            with(&|f| f.flags |= SampleFx::SWAP),
+            with(&|f| f.normalize = true),
+            with(&|f| f.crossfade = 100),
+            with(&|f| f.ping_pong = true),
+            with(&|f| f.stereo_delay = 2100),
+            with(&|f| f.fade_in = 10),
+            with(&|f| f.reverb = 40),
+            with(&|f| f.trim = 5),
+            with(&|f| f.start_bits = 0.25f64.to_bits()),
+        ];
+        let mut kept = 0;
+        for k in &keys {
+            if let Some(lp) = as_is(&src, k, s.rate, s.frames()) {
+                kept += 1;
+                let b = build(&s, &src, k);
+                assert_eq!((&b.sample, b.looped, b.per_file_frame), (&s, lp, 1.0), "{k:?}");
+            }
+        }
+        assert_eq!(kept, 4, "the neutral key, the loop knobs and a stretch that does nothing");
+        // A file below 8000 Hz is converted.
+        assert_eq!(as_is(&src, &keys[0], 6000, 2000), None);
     }
 
     #[test]
