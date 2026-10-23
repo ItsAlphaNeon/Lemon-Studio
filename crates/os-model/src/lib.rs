@@ -1652,18 +1652,32 @@ pub fn fade_curve(x: f64, tension: f64) -> f64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimeMarker {
     pub position: u32,
-    /// High byte of the stored position: 0 = plain marker, 8 = time signature, others kept as read.
+    /// High byte of the stored position: the marker's action (the constants below; spec: flp/events/playlist.md
+    /// "Marker kinds"). Kinds not listed there (6, 0xB) are kept as read.
     pub kind: u8,
     pub name: String,
     pub numerator: u8,
     pub denominator: u8,
+    /// Event 101: a key marker's scale, kept as read (0 for the other kinds).
+    pub scale: u16,
 }
 
 impl TimeMarker {
+    /// None: a plain marker.
+    pub const PLAIN: u8 = 0;
+    pub const MARKER_LOOP: u8 = 1;
+    pub const SKIP: u8 = 2;
+    pub const PAUSE: u8 = 3;
+    pub const LOOP: u8 = 4;
+    pub const START: u8 = 5;
     pub const SIGNATURE: u8 = 8;
+    /// Start recording (punch in) and Stop recording (punch out).
+    pub const PUNCH_IN: u8 = 9;
+    pub const PUNCH_OUT: u8 = 10;
+    pub const KEY: u8 = 12;
 
     pub fn new(position: u32, name: &str) -> Self {
-        TimeMarker { position, kind: 0, name: name.into(), numerator: 4, denominator: 4 }
+        TimeMarker { position, kind: Self::PLAIN, name: name.into(), numerator: 4, denominator: 4, scale: 0 }
     }
 
     /// The marker at timebase `to` instead of `from` ([`Project::set_ppq`]).

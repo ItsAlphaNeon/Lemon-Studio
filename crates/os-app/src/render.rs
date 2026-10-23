@@ -152,6 +152,9 @@ pub fn render(o: &Opts) -> Result<(), String> {
     }
     if o.from > 0 {
         e.seek_tick(o.from);
+    } else {
+        // As the export: from the start marker, jumping at skips (spec: audio/song-structure.md "Time markers").
+        e.follow_markers();
     }
     let rate = u64::from(o.rate);
     let len = e.length().max(1);

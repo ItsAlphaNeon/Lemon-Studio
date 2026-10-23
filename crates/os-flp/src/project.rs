@@ -150,6 +150,8 @@ mod id {
     pub const MARKER_NUM: u8 = 33;
     pub const MARKER_DEN: u8 = 34;
     pub const MARKER_NAME: u8 = 205;
+    /// A key marker's scale (spec: flp/events/playlist.md "Time markers").
+    pub const MARKER_SCALE: u8 = 101;
     pub const MARKER_IDS: [u8; 8] = [148, 33, 34, 46, 45, 168, 101, 205];
     /// Automation clip points (in the channel block) and links (before the first channel)
     /// (spec: flp/events/automation.md).
@@ -1502,9 +1504,10 @@ fn decode_markers(events: &[Event], idx: &[usize], enc: TextEnc) -> Vec<TimeMark
         match e.id {
             id::MARKER_POS => {
                 let v = int(e);
-                out.push(TimeMarker { position: v & 0x00FF_FFFF, kind: (v >> 24) as u8, name: String::new(), numerator: 4, denominator: 4 });
+                out.push(TimeMarker { kind: (v >> 24) as u8, ..TimeMarker::new(v & 0x00FF_FFFF, "") });
             }
             id::MARKER_NUM => out.last_mut().into_iter().for_each(|m| m.numerator = int(e) as u8),
+            id::MARKER_SCALE => out.last_mut().into_iter().for_each(|m| m.scale = int(e) as u16),
             id::MARKER_DEN => out.last_mut().into_iter().for_each(|m| m.denominator = int(e) as u8),
             id::MARKER_NAME => {
                 let name = e.data().map(|d| decode_text(d, enc)).unwrap_or_default();
@@ -1524,7 +1527,7 @@ fn marker_events(m: &TimeMarker, enc: TextEnc) -> Vec<Event> {
         Event::new(46, Value::U8(0)),
         Event::new(45, Value::U8(0)),
         Event::new(168, Value::U32(0)),
-        Event::new(101, Value::U16(0)),
+        Event::new(id::MARKER_SCALE, Value::U16(m.scale)),
         Event::new(id::MARKER_NAME, Value::var(encode_text(&m.name, enc))),
     ]
 }
@@ -3428,13 +3431,7 @@ fn meta_length_events(pat: &Pattern, enc: TextEnc) -> Vec<Event> {
     }
     let mut markers: Vec<TimeMarker> = pat.markers.clone();
     if let Some(len) = pat.length {
-        markers.push(TimeMarker {
-            position: len,
-            kind: LENGTH_MARKER_KIND as u8,
-            name: LENGTH_MARKER_NAME.into(),
-            numerator: 4,
-            denominator: 4,
-        });
+        markers.push(TimeMarker { kind: LENGTH_MARKER_KIND as u8, ..TimeMarker::new(len, LENGTH_MARKER_NAME) });
     }
     markers.sort_by_key(|m| m.position);
     for m in &markers {
@@ -5907,6 +5904,41 @@ mod tests {
         let at = ids.iter().position(|&i| i == id::SHOW_INFO).unwrap();
         assert_eq!(ids[at - 1..at + 7], [id::PLAY_TRUNCATED, id::SHOW_INFO, id::TITLE, id::GENRE, id::AUTHOR, id::COMMENTS, id::URL, id::WORK_TIME]);
         assert_eq!(load(&f3).unwrap(), m3);
+    }
+
+    /// Every marker action is the high byte of event 148, and a key marker's scale is event 101 (spec:
+    /// flp/events/playlist.md "Marker kinds"): they survive a save, also when another marker changes and the group is
+    /// written again; kinds the Action menu does not list are kept.
+    #[test]
+    fn arrangement_marker_kinds_and_scale_round_trip() {
+        let mut p = new_project();
+        let mut arr = default_arrangement();
+        arr.clips.push(Clip::new(0, 1920, 0, ClipSource::Pattern(1)));
+        let kinds = [0u8, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12];
+        for (i, &k) in kinds.iter().enumerate() {
+            arr.markers.push(TimeMarker { kind: k, ..TimeMarker::new(96 * i as u32, &format!("K{k}")) });
+        }
+        arr.markers[2].name = " ".into();
+        let key = arr.markers.iter_mut().find(|m| m.kind == TimeMarker::KEY).unwrap();
+        key.name = "C Major (Ionian)".into();
+        key.scale = 0x52A;
+        p.arrangements.push(arr);
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.arrangements[0].markers, p.arrangements[0].markers);
+        let ev = events_of(&file).unwrap();
+        let scales: Vec<u32> = ev.iter().filter(|e| e.id == id::MARKER_SCALE).map(int).collect();
+        assert_eq!(scales.iter().filter(|&&v| v == 0x52A).count(), 1);
+        let pos: Vec<u32> = ev.iter().filter(|e| e.id == id::MARKER_POS).map(int).collect();
+        assert!(pos.contains(&(u32::from(TimeMarker::PUNCH_OUT) << 24 | 96 * 9)), "{pos:x?}");
+
+        // A changed action rewrites every group; the key marker keeps its scale.
+        let mut edited = back.clone();
+        edited.arrangements[0].markers[0].kind = TimeMarker::START;
+        apply(&edited, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(again.arrangements[0].markers, edited.arrangements[0].markers);
+        assert_eq!(again.arrangements[0].markers.iter().find(|m| m.kind == TimeMarker::KEY).map(|m| m.scale), Some(0x52A));
     }
 
     /// A pattern's own time markers (piano-roll Alt+T) are marker groups in its metadata block, sorted by position

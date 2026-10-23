@@ -27,6 +27,7 @@ use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
 
 mod layers;
+mod marks;
 mod notes;
 mod param_auto;
 pub use param_auto::PARAM_STEP;
@@ -38,6 +39,14 @@ pub enum PlayMode {
     Song,
     /// One pattern (1-based), from its start.
     Pattern(u16),
+}
+
+/// The spans of ticks a whole-song render of a song ending at `end` plays, in order (`Engine::follow_markers`; spec:
+/// audio/song-structure.md "Time markers"): from the Start marker (or 0), broken at skip markers.
+pub fn rendered_spans(markers: &[os_model::TimeMarker], end: u64) -> Vec<(u64, u64)> {
+    let m = marks::Marks::new(markers);
+    let start = m.start().filter(|&s| s < end).unwrap_or(0);
+    m.rendered(start, end)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -880,6 +889,19 @@ pub struct Engine {
     /// Recording with Loop record off (`set_run_on`): while the flag is set, a looping playback runs on past its end
     /// instead of going back to the start (spec: ui/recording.md §4).
     run_on: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The arrangement's time markers (song mode with clips; spec: audio/transport.md "Time markers in SONG mode").
+    marks: marks::Marks,
+    /// The next tick was arrived at by a start or a jump: markers on it do not act.
+    landed: bool,
+    /// A Start recording marker was passed: the song runs on past its end.
+    punched: bool,
+    /// The Marker pause the channels are fading out toward, and the one playback holds on until it is taken
+    /// (`take_marker_pause`).
+    pause_at: Option<u64>,
+    marker_paused: Option<u64>,
+    /// A render that follows the markers (`follow_markers`): the spans of ticks it plays, in order (empty: the song
+    /// from where it starts).
+    spans: Vec<(u64, u64)>,
     tempo: f64,
     ppq: u16,
     /// Steps per beat (event 18): the tempo counts beats of this many sixteenths, so the ticks run at `tempo × steps /
@@ -1307,6 +1329,11 @@ impl Engine {
         };
 
         let main_gain = os_dsp::level::curve(f32::from(project.main_volume.unwrap_or(os_model::Project::MAIN_VOLUME_DEFAULT)) * os_dsp::level::R12800);
+        // The markers act on a song played from the playlist (an empty playlist plays a pattern).
+        let marks = match project.arrangement().filter(|a| mode == PlayMode::Song && !a.clips.is_empty()) {
+            Some(a) => marks::Marks::new(&a.markers),
+            None => marks::Marks::default(),
+        };
         Engine {
             main_gain,
             main_glide: os_dsp::glide::Glide::new(main_gain),
@@ -1348,6 +1375,12 @@ impl Engine {
             count_in: 0,
             count_in_len: 0,
             run_on: None,
+            marks,
+            landed: true,
+            punched: false,
+            pause_at: None,
+            marker_paused: None,
+            spans: Vec::new(),
             fade_out: 0,
             fade_in: 0,
             fade_len: 0,
@@ -1539,6 +1572,38 @@ impl Engine {
         self.seek_tick(from);
     }
 
+    /// A whole-song render follows the time markers (spec: audio/song-structure.md "Time markers"): it starts at the
+    /// Start marker, with the tick clock at 0 there, and at a skip marker goes on at the next marker with the clock
+    /// running on; a skip whose goal is at or past the song's end ends the song there. Call it before rendering, in
+    /// place of `seek_tick` / `set_span`.
+    pub fn follow_markers(&mut self) {
+        if self.marks.is_empty() || self.end_tick == 0 {
+            return;
+        }
+        let end = self.end_tick;
+        let start = self.marks.start().filter(|&s| s < end).unwrap_or(0);
+        let spans = self.marks.rendered(start, end);
+        if start > 0 {
+            self.seek_tick(start);
+            self.clock.restart();
+            self.frame = 0;
+            self.out_frame = 0;
+        }
+        self.end_tick = spans.last().map_or(end, |s| s.1);
+        // A song that ends at a skip starts nothing after it (its tail still rings out).
+        if self.end_tick < end {
+            let n = self.triggers.partition_point(|t| t.tick < self.end_tick);
+            self.triggers.truncate(n);
+            self.next_trigger = self.next_trigger.min(n);
+        }
+        self.spans = spans;
+    }
+
+    /// The marker playback has just come to hold on (a Marker pause), once: the transport shows it as paused.
+    pub fn take_marker_pause(&mut self) -> Option<u64> {
+        self.marker_paused.take()
+    }
+
     pub fn set_looping(&mut self, on: bool) {
         self.looping = on;
     }
@@ -1565,6 +1630,7 @@ impl Engine {
         self.late.clear();
         self.end_tick = 0;
         self.live_only = true;
+        self.marks = marks::Marks::default();
     }
 
     /// Pause in place (spec: audio/transport.md "Pause"): the channels (voices, audio clips, hosted instruments) fade
@@ -1718,9 +1784,19 @@ impl Engine {
         Clock::frame_of_tick(self.rate, self.ppq, self.tick_tempo(), self.end_tick)
     }
 
-    /// Frames from where playback starts (`seek_tick`, `set_span`) to the song's end (voices may ring past it).
+    /// Frames from where playback starts (`seek_tick`, `set_span`, `follow_markers`) to the song's end (voices may ring
+    /// past it); a render that follows the markers counts the ticks it plays.
     pub fn frames_left(&self) -> u64 {
-        self.length().saturating_sub(self.frame)
+        if self.spans.is_empty() {
+            return self.length().saturating_sub(self.frame);
+        }
+        let ticks: u64 = self.spans.iter().enumerate().map(|(i, &(a, b))| if i == 0 { b.saturating_sub(self.tick.max(a)) } else { b - a }).sum();
+        let mut c = self.clock;
+        let from = c.next_start();
+        for _ in 0..ticks {
+            c.advance();
+        }
+        c.next_start() - from
     }
 
     /// The tempo the ticks run at, in quarter notes a minute (`Project::tick_tempo`).
@@ -1767,6 +1843,8 @@ impl Engine {
     pub fn seek_tick(&mut self, tick: u64) {
         self.clock = Clock::at_tick(self.rate, self.ppq, self.tick_tempo(), tick);
         self.tick = tick;
+        self.landed = true;
+        self.pause_at = None;
         self.frame = self.clock.next_start();
         self.next_trigger = self.triggers.partition_point(|t| t.tick < tick);
         for t in &mut self.tracks {
@@ -1945,6 +2023,8 @@ impl Engine {
         (self.held, self.fade_out, self.fade_in, self.fade_len) = (old.held, old.fade_out, old.fade_in, old.fade_len);
         (self.count_in, self.count_in_len) = (old.count_in, old.count_in_len);
         self.run_on = old.run_on.take();
+        (self.landed, self.punched, self.pause_at, self.marker_paused) = (old.landed, old.punched, old.pause_at, old.marker_paused.take());
+        self.spans = std::mem::take(&mut old.spans);
         self.inst_offs = std::mem::take(&mut old.inst_offs);
         self.inst_offs.retain(|o| o.1 < n);
         self.inst_shapes = std::mem::take(&mut old.inst_shapes);
@@ -2219,14 +2299,45 @@ impl Engine {
         if self.count_in > 0 {
             return self.render_count_in();
         }
-        // A looping engine starts again at tick 0 when the pattern is over, or at its loop points' start on reaching
-        // their end; voices and effects carry on. Recording with Loop record off, it runs on.
-        let run_on = self.run_on.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+        // A render that follows the markers goes on at the next span's start, the tick clock running on.
+        if self.spans.len() > 1 && self.tick == self.spans[0].1 {
+            self.spans.remove(0);
+            self.jump_to(self.spans[0].0, true);
+        }
+        // Time markers in live song playback (spec: audio/transport.md "Time markers in SONG mode"): they act on the
+        // tick playback reaches by playing, not while the time selection loops.
+        let landed = std::mem::replace(&mut self.landed, false);
+        let marks_on = self.looping && !self.live_only && !self.marks.is_empty() && self.loop_range.is_none();
+        if marks_on && !landed {
+            match self.marks.live(self.tick, self.end_tick) {
+                Some(marks::Act::Jump(to)) => self.jump_to(to, false),
+                Some(marks::Act::PunchIn) => self.punched = true,
+                // The hold is here already (the fade started early, below).
+                Some(marks::Act::Pause) | None => {}
+            }
+        }
+        // A Marker pause coming: the channels' fade starts so that it ends on the marker, where playback then holds.
+        if marks_on && self.pause_at.is_none() && self.fade_out == 0 && self.fade_in == 0 {
+            if let Some(p) = self.marks.pause_ahead(self.tick).filter(|&p| p < self.end_tick) {
+                let fade = f64::from(self.rate) * PAUSE_FADE_SECONDS;
+                if ((p - self.tick - 1) as f64) * self.clock.samples_per_tick() < fade {
+                    let mut c = self.clock;
+                    let frames: usize = (self.tick..p).map(|_| c.advance().1).sum();
+                    self.fade_len = (frames as u32).max(1);
+                    self.fade_out = self.fade_len;
+                    self.pause_at = Some(p);
+                }
+            }
+        }
+        // A looping engine starts again at tick 0 when the pattern is over (a song: at its Loop or Start marker), or
+        // at its loop points' start on reaching their end; voices and effects carry on. Recording with Loop record
+        // off, or past a Start recording marker, it runs on.
+        let run_on = self.run_on.as_ref().is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed)) || self.punched;
         if self.looping && !run_on {
             match self.loop_range.filter(|_| !self.live_only) {
-                Some((a, b)) if self.tick == b => self.wrap_to(a),
-                Some((a, b)) if self.end_tick > 0 && self.tick >= self.end_tick && self.tick > b => self.wrap_to(a),
-                None if self.end_tick > 0 && self.tick >= self.end_tick => self.wrap_to(0),
+                Some((a, b)) if self.tick == b => self.jump_to(a, false),
+                Some((a, b)) if self.end_tick > 0 && self.tick >= self.end_tick && self.tick > b => self.jump_to(a, false),
+                None if self.end_tick > 0 && self.tick >= self.end_tick => self.jump_to(self.marks.end_target(self.end_tick), false),
                 _ => {}
             }
         }
@@ -2277,6 +2388,9 @@ impl Engine {
             if out {
                 self.fade_out = self.fade_out.saturating_sub(len as u32);
                 self.held = self.fade_out == 0;
+                if self.held {
+                    self.marker_paused = self.pause_at.take().or(self.marker_paused);
+                }
             } else {
                 self.fade_in = self.fade_in.saturating_sub(len as u32);
             }
@@ -2903,10 +3017,14 @@ impl Engine {
         start.advanced(frame, self.rate)
     }
 
-    /// Loop point: back to tick `to` (sounding notes keep their remaining length). Away from tick 0 it lands as a
-    /// seek does: control points before it applied, audio clips under way started from where they have got to.
-    fn wrap_to(&mut self, to: u64) {
-        let at = self.tick - to;
+    /// Loop point or marker jump: on to tick `to`, back or forward (sounding notes keep their remaining length). Away
+    /// from tick 0 it lands as a seek does: control points before it applied, audio clips under way started from where
+    /// they have got to. With `keep_clock` (a render's skip, spec: audio/song-structure.md "Time markers") the tick
+    /// clock and the sample count run on; else the clock is the one of tick `to`.
+    fn jump_to(&mut self, to: u64, keep_clock: bool) {
+        // Scheduled ends move with the position: `back` ticks earlier (negative: later).
+        let back = self.tick as i64 - to as i64;
+        let shift = |t: u64| (t as i64 - back).max(0) as u64;
         // Audio clips end at the loop point: the replay starts them again (from the top, or where they are under way
         // at `to`), so one running on past the loop's end would sound twice, and once more every loop.
         self.voices.retain(|v| v.cut.is_none());
@@ -2918,16 +3036,18 @@ impl Engine {
             false
         });
         for o in &mut self.inst_offs {
-            o.0 = o.0.saturating_sub(at);
+            o.0 = shift(o.0);
         }
         for v in &mut self.voices {
-            v.cut = v.cut.map(|c| c.saturating_sub(at));
-            v.release_at = v.release_at.map(|r| r.saturating_sub(at));
+            v.cut = v.cut.map(shift);
+            v.release_at = v.release_at.map(shift);
         }
-        if to == 0 {
-            self.clock.restart();
-        } else {
-            self.clock = Clock::at_tick(self.rate, self.ppq, self.tick_tempo(), to);
+        if !keep_clock {
+            if to == 0 {
+                self.clock.restart();
+            } else {
+                self.clock = Clock::at_tick(self.rate, self.ppq, self.tick_tempo(), to);
+            }
         }
         self.tick = to;
         self.frame = self.clock.next_start();
@@ -2948,7 +3068,7 @@ impl Engine {
         }
         for s in &mut self.sounding {
             if s.2 != u64::MAX {
-                s.2 = s.2.saturating_sub(at);
+                s.2 = shift(s.2);
             }
         }
         self.sounding.retain(|&(_, _, end)| end > 0);
@@ -4343,7 +4463,7 @@ mod tests {
     #[test]
     fn pattern_length_follows_the_patterns_own_time_signature() {
         use os_model::{Clip, TimeMarker};
-        let sig = |position: u32, n: u8, d: u8| TimeMarker { position, kind: TimeMarker::SIGNATURE, name: format!("{n}/{d}"), numerator: n, denominator: d };
+        let sig = |position: u32, n: u8, d: u8| TimeMarker { kind: TimeMarker::SIGNATURE, numerator: n, denominator: d, ..TimeMarker::new(position, &format!("{n}/{d}")) };
         let ending = |end: u32| vec![Note { length: end - 192, ..Note::step(0, 192) }];
         let len = |p: &Project| Engine::new(p, &mut SampleLibrary::new(None), 48000, PlayMode::Pattern(1)).end_tick();
         // The arrangement has a clip of the pattern at bar 3.
@@ -5762,6 +5882,151 @@ mod tests {
         e.next_tick();
         assert!(e.channels[0].ramp.is_none());
         assert_eq!(e.channels[0].vol_v, 0.5);
+    }
+
+    /// A five-bar song (one clip to tick 1920, a note every beat) with time markers (tick, kind), at 125 BPM and 48 kHz,
+    /// where a tick is exactly 240 samples.
+    fn marker_song(markers: &[(u32, u8)]) -> Project {
+        use os_model::{Clip, ClipSource, TimeMarker};
+        let notes = (0..20).map(|i| Note { key: 48 + i as u16, ..long_note(96 * i, 48, 0) }).collect();
+        let mut p = song(notes, vec![Clip::new(0, 1920, 0, ClipSource::Pattern(1))]);
+        p.tempo = Some(125.0);
+        p.arrangements[0].markers = markers.iter().map(|&(t, k)| TimeMarker { kind: k, ..TimeMarker::new(t, "") }).collect();
+        p
+    }
+
+    /// The ticks live song playback hands out from `from`, `n` of them, with whether each is held.
+    fn live_ticks(p: &Project, from: u64, n: usize) -> Vec<(u64, bool)> {
+        let mut e = Engine::new(p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+        e.set_looping(true);
+        if from > 0 {
+            e.seek_tick(from);
+        }
+        (0..n).map(|_| e.next_tick().map(|t| (t.1, t.3)).unwrap()).collect()
+    }
+
+    fn ticks_only(v: &[(u64, bool)]) -> Vec<u64> {
+        v.iter().map(|t| t.0).collect()
+    }
+
+    /// spec: audio/transport.md "Time markers in SONG mode": the song's end goes on at the Loop marker, else the Start
+    /// marker, else tick 0; playback started before a Start marker plays through what lies before it.
+    #[test]
+    fn the_song_end_goes_on_at_the_loop_or_start_marker() {
+        use os_model::TimeMarker as M;
+        let at_end = |markers: &[(u32, u8)]| ticks_only(&live_ticks(&marker_song(markers), 0, 1922))[1918..].to_vec();
+        assert_eq!(at_end(&[]), [1918, 1919, 0, 1]);
+        assert_eq!(at_end(&[(768, M::START)]), [1918, 1919, 768, 769]);
+        assert_eq!(at_end(&[(384, M::START), (1152, M::LOOP)]), [1918, 1919, 1152, 1153]);
+        assert_eq!(at_end(&[(384, M::LOOP), (1152, M::LOOP)]), [1918, 1919, 1152, 1153]);
+        assert_eq!(ticks_only(&live_ticks(&marker_song(&[(768, M::START)]), 0, 3)), [0, 1, 2], "the pre-roll plays");
+    }
+
+    /// A skip jumps to the next marker when it is reached, not when playback starts on it; a marker loop goes back at
+    /// its section's end, also when playback started inside it.
+    #[test]
+    fn skips_and_marker_loops_jump_when_reached() {
+        use os_model::TimeMarker as M;
+        let skip = marker_song(&[(384, M::SKIP), (1152, M::PLAIN)]);
+        let t = ticks_only(&live_ticks(&skip, 0, 400));
+        assert_eq!(&t[382..386], &[382, 383, 1152, 1153]);
+        assert_eq!(&ticks_only(&live_ticks(&skip, 384, 2)), &[384, 385], "started on the skip");
+        // After the song's end, it acts again.
+        let round = ticks_only(&live_ticks(&skip, 1900, 420));
+        assert_eq!(&round[18..22], &[1918, 1919, 0, 1]);
+        assert_eq!(&round[402..406], &[382, 383, 1152, 1153]);
+
+        let mloop = marker_song(&[(768, M::MARKER_LOOP), (1152, M::PLAIN)]);
+        let t = ticks_only(&live_ticks(&mloop, 0, 1152 + 384 + 2));
+        assert_eq!(&t[1150..1154], &[1150, 1151, 768, 769]);
+        assert_eq!(&t[1150 + 384..1154 + 384], &[1150, 1151, 768, 769], "over and over");
+        let inside = ticks_only(&live_ticks(&mloop, 900, 255));
+        assert_eq!(&inside[250..254], &[1150, 1151, 768, 769]);
+        // The time selection loops instead: no marker acts.
+        let mut e = Engine::new(&skip, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+        e.set_looping(true);
+        e.set_loop_range(Some((0, 960)));
+        let t: Vec<u64> = (0..400).map(|_| e.next_tick().unwrap().1).collect();
+        assert_eq!(&t[382..386], &[382, 383, 384, 385]);
+    }
+
+    /// A Marker pause holds playback on the marker (the fade ends there), once; Resume plays on from it. A Start
+    /// recording marker makes the song run on past its end.
+    #[test]
+    fn a_pause_marker_holds_and_a_punch_in_runs_on() {
+        use os_model::TimeMarker as M;
+        let p = marker_song(&[(768, M::PAUSE)]);
+        let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+        e.set_looping(true);
+        let mut last = Vec::new();
+        let mut held_at = None;
+        for _ in 0..800 {
+            let (s, tick, _, held) = e.next_tick().unwrap();
+            if held {
+                held_at = Some(tick);
+                break;
+            }
+            assert!(tick < 768);
+            last = s.to_vec();
+        }
+        assert_eq!(held_at, Some(768));
+        assert_eq!(e.take_marker_pause(), Some(768));
+        assert_eq!(e.take_marker_pause(), None);
+        assert!(e.paused());
+        // The tick before the marker fades to silence at its end.
+        assert!(last[last.len() - 2..].iter().all(|v| v.abs() < 1e-3), "{:?}", &last[last.len() - 2..]);
+        e.resume();
+        let after: Vec<(u64, bool)> = (0..3).map(|_| e.next_tick().map(|t| (t.1, t.3)).unwrap()).collect();
+        assert_eq!(after, [(768, false), (769, false), (770, false)]);
+        assert_eq!(e.take_marker_pause(), None);
+
+        let punch = marker_song(&[(384, M::PUNCH_IN), (1152, M::PUNCH_OUT)]);
+        assert_eq!(&ticks_only(&live_ticks(&punch, 0, 1922))[1918..], &[1918, 1919, 1920, 1921]);
+        let out_only = marker_song(&[(1152, M::PUNCH_OUT)]);
+        assert_eq!(&ticks_only(&live_ticks(&out_only, 0, 1922))[1918..], &[1918, 1919, 0, 1]);
+    }
+
+    /// spec: audio/song-structure.md "Time markers": a render starts at the Start marker with its clock at 0 there,
+    /// and a skip goes on at the next marker with the clock running on; both files are the distance shorter, and
+    /// after the jump they are the plain render's samples.
+    #[test]
+    fn a_render_starts_at_the_start_marker_and_jumps_at_skips() {
+        use os_model::TimeMarker as M;
+        const T: u64 = 240;
+        // Renders on an instrument that logs its notes: (sample, key) of every note start, the file's length in
+        // frames, and the frames the render said were left before it began.
+        let render = |markers: &[(u32, u8)]| {
+            let mut p = marker_song(markers);
+            p.channels[0].kind = ChannelKind::Plugin;
+            let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+            let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+            e.set_instrument(0, probe.clone());
+            e.follow_markers();
+            let left = e.frames_left();
+            let len = e.render_all(512).len() as u64 / 2;
+            let ons: Vec<(u64, u8)> = probe.lock().unwrap().log.iter().filter(|l| l.1).map(|l| (l.0, l.2)).collect();
+            (ons, len, left)
+        };
+        let note = |i: u64, shift: u64| ((96 * i - shift) * T, 48 + i as u8);
+        let (plain, plain_len, plain_left) = render(&[]);
+        assert_eq!(plain, (0..20).map(|i| note(i, 0)).collect::<Vec<_>>());
+        assert_eq!(plain_left, 1920 * T);
+
+        let (start, start_len, start_left) = render(&[(768, M::START)]);
+        assert_eq!(start, (8..20).map(|i| note(i, 768)).collect::<Vec<_>>(), "from the marker, its clock at 0 there");
+        assert_eq!((start_left, start_len), ((1920 - 768) * T, plain_len - 768 * T));
+
+        let (skip, skip_len, skip_left) = render(&[(384, M::SKIP), (1152, M::PLAIN)]);
+        let want: Vec<_> = (0..4).map(|i| note(i, 0)).chain((12..20).map(|i| note(i, 768))).collect();
+        assert_eq!(skip, want, "the goal's note starts on the jump's sample");
+        assert_eq!((skip_left, skip_len), ((1920 - 768) * T, plain_len - 768 * T));
+
+        // A goal at or past the song's end ends the song at the skip; a skip back is passed over.
+        let (ends, _, ends_left) = render(&[(384, M::SKIP), (2304, M::PLAIN)]);
+        assert_eq!(ends, (0..4).map(|i| note(i, 0)).collect::<Vec<_>>());
+        assert_eq!(ends_left, 384 * T);
+        let (back, back_len, _) = render(&[(384, M::PLAIN), (1152, M::SKIP)]);
+        assert_eq!((back, back_len), (plain, plain_len));
     }
 
     /// A looping song with loop points plays them over and over: from before the range it runs on to the range's end,

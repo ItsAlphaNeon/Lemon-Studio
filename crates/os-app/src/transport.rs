@@ -85,6 +85,10 @@ pub struct Shared {
     song: AtomicBool,
     /// The song's loop points, start << 32 | end in ticks (0 = the whole song): the playlist's time selection.
     loop_range: AtomicU64,
+    /// Paused by a Marker pause: its tick + 1 (0 = not); after Resume, the same for the app to take as the playback's
+    /// start (spec: audio/transport.md "Time markers in SONG mode").
+    marker_hold: AtomicU64,
+    marker_resumed: AtomicU64,
     /// Playback position in frames of the output stream.
     position: AtomicU64,
     /// Playback position in ticks (f64 bits): what every playhead and the time display show. A pattern wraps.
@@ -465,6 +469,7 @@ impl Transport {
             *slot = None;
         }
         let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.shared.marker_hold.store(0, Ordering::Relaxed);
         self.shared.song.store(matches!(mode, PlayMode::Song), Ordering::Relaxed);
         self.shared.rewind(start_tick);
         self.shared.state.store(PLAYING, Ordering::Release);
@@ -549,14 +554,28 @@ impl Transport {
 
     pub fn resume(&self) {
         if self.shared.state.compare_exchange(PAUSED, PLAYING, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            // Resumed from a Marker pause: the playback now counts as started there.
+            let held = self.shared.marker_hold.swap(0, Ordering::AcqRel);
+            if held != 0 {
+                self.shared.marker_resumed.store(held, Ordering::Release);
+            }
             let _ = self.tx.send(Cmd::Resume);
         }
+    }
+
+    /// The Marker pause playback was resumed from since the last call, once (spec: audio/transport.md "Time markers in
+    /// SONG mode"): Stop then returns there.
+    pub fn take_marker_resumed(&self) -> Option<u32> {
+        let t = self.shared.marker_resumed.swap(0, Ordering::AcqRel);
+        (t != 0).then(|| (t - 1).min(u64::from(u32::MAX)) as u32)
     }
 
     /// Stop everything: playback rewinds, hosted instruments fall silent, live notes and previews end. Also works
     /// when already stopped (it silences notes still ringing from the typing keyboard or a preview).
     pub fn stop(&self) {
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
+        self.shared.marker_hold.store(0, Ordering::Relaxed);
+        self.shared.marker_resumed.store(0, Ordering::Relaxed);
         self.shared.state.store(STOPPED, Ordering::Release);
         self.shared.rewind(0.0);
         let _ = self.tx.send(Cmd::Stop);
@@ -860,6 +879,17 @@ impl Feeder {
                     self.queue.ended.store(e.finished(), Ordering::Release);
                 }
             }
+            // The song came to a Marker pause: the transport is paused there, as by the Play button (spec:
+            // audio/transport.md "Time markers in SONG mode").
+            if let Some(t) = e.take_marker_pause() {
+                if self.ctl.report.load(Ordering::Relaxed) && self.shared.state.compare_exchange(PLAYING, PAUSED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                    self.ctl.held.store(true, Ordering::Relaxed);
+                    self.shared.marker_hold.store(t + 1, Ordering::Release);
+                    if let Ok(mut v) = self.shared.sounding.lock() {
+                        v.clear();
+                    }
+                }
+            }
         }
         self.voices.store(e.voice_count() as u32, Ordering::Relaxed);
         // A hosted plugin that missed a tick (busy elsewhere) is heard as a gap: a dropout like an empty block.
@@ -1000,8 +1030,11 @@ fn export(project: &Project, mode: PlayMode, rate: u32, job: &crate::export::Job
     attach(&mut e, inst);
     e.set_interpolation(o.points);
     e.set_effects(o.insert_fx, o.master_fx);
-    if let Some((a, b)) = job.span {
-        e.set_span(a, b);
+    match job.span {
+        Some((a, b)) => e.set_span(a, b),
+        // A whole song follows its start and skip markers (spec: audio/song-structure.md "Time markers").
+        None if mode == PlayMode::Song => e.follow_markers(),
+        None => {}
     }
     e.set_track_capture(o.split);
     let len = e.frames_left().max(1);

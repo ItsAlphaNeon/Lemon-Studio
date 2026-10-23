@@ -12,6 +12,7 @@ pub mod data_folder;
 pub mod factory_folder;
 pub mod dialog;
 pub mod menus;
+pub mod midi_form;
 pub mod midi_page;
 pub mod mondebug;
 pub mod settings;
@@ -27,6 +28,7 @@ pub mod export_form;
 pub mod save_form;
 pub mod arpeggiate;
 pub mod strum;
+pub mod piano_dlg;
 pub mod tapper;
 pub mod touch;
 pub mod theme_preview;
@@ -180,6 +182,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::Touch => ui.part(Seg::Win(win), a, |ui| touch::paint(ui, s, f)),
             Win::Strum => ui.part(Seg::Win(win), a, |ui| strum::paint(ui, s, f)),
             Win::Arp => ui.part(Seg::Win(win), a, |ui| arpeggiate::paint(ui, s, f)),
+            Win::PianoDlg => ui.part(Seg::Win(win), a, |ui| piano_dlg::paint(ui, s, f)),
             _ => {}
         }
         ui.c.pop_clip();
@@ -245,6 +248,7 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
         Win::Touch => touch::bounds(s),
         Win::Strum => strum::bounds(s),
         Win::Arp => arpeggiate::bounds(s),
+        Win::PianoDlg => piano_dlg::bounds(s),
         w => s.win_rect(w),
     }
 }
