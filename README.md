@@ -75,22 +75,22 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Song arrangement | ✅ | Playlist with pattern, audio and automation clips, clip groups, markers and several arrangements |
 | Mixing and routing | ✅ | Mixer tracks, sends, effect slots and meters; no sidechain inputs yet |
 | Plugin hosting | ✅ | CLAP, VST3 and VST2 instruments and effects with their editors; "Create automation clip" in CLAP and VST3 plugins' own parameter menus; a parameter menu for every plugin parameter (automation clips, controller links, typed and set values); on Windows a crashing plugin is stopped instead of closing Lemon Studio; no 32-bit plugins |
-| Plugin management | ✅ | Plugin manager with your own search folders, a crash-safe background scan, favourites and hidden plugins |
+| Plugin management | ✅ | Plugin manager with your own search folders, a crash-safe background scan, favourites and hidden plugins; presets of your own and factory presets, import of `.vstpreset`, `.fxp` and `.fxb` files, and preset files dropped onto a plugin |
 | Time-stretching | ✅ | All twelve stretch methods for samples and audio clips, played by one open-source stretcher |
 | Playback engine | 🚧 | Renders ahead of the audio device so edits do not cause dropouts; voice limits, cut groups, glides, layer channels; one audio thread for now |
-| Automation | 🚧 | Clips for channel, mixer and plugin parameters with every curve shape; no recording or clip LFO yet |
+| Automation | 🚧 | Clips for channel, mixer and plugin parameters with every curve shape; channel volume and pan moves record into a pattern; not yet recording into automation clips, or clip LFO |
 | Project files | 🚧 | Opens and saves projects from FL Studio 24.2 and later; older versions are on the roadmap. Keep backups |
-| Built-in instruments and effects | 🚧 | A sampler (long samples can play straight from disk), a three-oscillator synth and a parametric EQ with all of FL's quality modes (HQ+, HQ Enhanced, linear phase) |
+| Built-in instruments and effects | 🚧 | Instruments: Lemon Sampler (long samples can play straight from disk), Lemon Trio (three oscillators) and Citrus (a six-operator synth that plays Sytrus patches). Effects: Lemon Parametric EQ (all of FL's quality modes: HQ+, HQ Enhanced, linear phase), Limiter, Reverb, Delay, Chorus, Stereo Shaper, Stereo Enhancer, Balance, Soft Clipper, Fast Distortion and Transient Processor. All built in, and also VST3 and CLAP plugins for other DAWs; a project's Fruity Limiter slots still play a simpler limiter |
 | Exporting audio | ✅ | Song, pattern or selection to WAV, FLAC, MP3 and OGG at once; bit depth, sample rate, interpolation, dither, mono, tails, stems and WAV markers |
-| Note input | 🚧 | Mouse, computer keyboard and MIDI controllers (velocity curves, sustain pedal, pitch bend, aftertouch); no note recording yet |
+| MIDI file import / export | ✅ | Import into a new project, the open one or a piano roll channel (tracks, channels, tempo changes, time signatures, markers); export a pattern or the song's patterns |
+| Note input | 🚧 | Mouse, computer keyboard, MIDI controllers (velocity curves, sustain pedal, pitch bend, aftertouch) and the touch controller; note recording into patterns with loop record, precount and Start on input; step edit |
 | MIDI controllers and sync | ✅ | Link any knob, fader or plugin parameter to a controller (or many at once with Multilink); MIDI clock and time code out, external clock in |
 | Undo | 🚧 | One history for the whole project, with redo and the browser's History; not yet for mixer faders, plugin parameters or project settings |
-| Audio drivers | 🚧 | WASAPI (shared and exclusive) and ASIO® (output) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no JACK yet |
+| Audio drivers | 🚧 | WASAPI (shared and exclusive) and ASIO® (output, and inputs for audio recording) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no JACK yet |
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
-| Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; Lemon plugin editors in the Lemon design only |
+| Look and themes | 🚧 | Lemon and Citrus (formerly Classic) skins; 25 built-in themes, your own themes and `.flstheme` files colour either skin, with live adjustments and a colour picker; Lemon plugin editors in the Lemon design only |
 | Settings | 🚧 | The General, Audio, MIDI, File, Theme, Project and Info pages work; not yet the recording settings |
 | Audio recording | 🚧 | One-click audio recording into the playlist, from ASIO or system inputs |
-| MIDI file import / export | ❌ | |
 | Audio editing | ❌ | |
 | Plugin delay compensation | 🚧 | Plugins' reported delays and the mixer tracks' latency settings, in playback and exports; the settings can't be edited yet |
 
@@ -269,7 +269,7 @@ Plugin windows dock inside the main window as on Windows, or detach (from their 
 that stay above Lemon Studio while it is the active application. A few things differ from Windows and Linux:
 
 - **Menu bar:** the window's menus (FILE … HELP) are also in the macOS menu bar, with the same entries.
-- **Keys:** Command stands in for Ctrl in every shortcut (Command+S saves, Command+Shift+D switches the design), and
+- **Keys:** Command stands in for Ctrl in every shortcut (Command+S saves), and
   Control+click is a right click. Quit (Command+Q, the menu bar, the Dock) asks about unsaved changes like closing the
   window does.
 - **Plugin windows:** a minimized detached window is hidden rather than sent to the Dock; its channel's button brings
@@ -300,8 +300,8 @@ cargo run -p os-app --release -- --render path/to/project.flp out.wav [--rate 48
 ```
 
 `--builtin-only` hosts only Lemon Studio's own plugins, for a render that is the same on every machine.
-Ctrl+Shift+D switches between the Lemon and Classic designs (the choice is remembered). On macOS, Command stands in for
-Ctrl.
+Settings > Theme picks the skin (Lemon, or Citrus, the look formerly called Classic) and the theme; the choice is
+remembered.
 
 Lemon Trio and Lemon Parametric EQ were called Lemon 3x Osc and Lemon Parametric EQ 2 before, and earlier all three
 plugins were called Open Sampler, Open 3x Osc and Open Parametric EQ 2. They keep their plugin IDs, so sessions saved
@@ -341,7 +341,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-flp`](crates/os-flp) | Lossless `.flp` event-stream reader/writer and model mapping |
 | [`os-engine`](crates/os-engine) | Audio engine: sampler, mixer, routing, effects, envelopes, automation |
 | [`os-dsp`](crates/os-dsp) | DSP building blocks: level curve, pan split, gain glides, mixer matrix and equaliser |
-| [`os-theme`](crates/os-theme) | Colour palette, designs (Lemon, Classic), theme files and the HSL adjustment model |
+| [`os-theme`](crates/os-theme) | Colour palette, skins (Lemon, Citrus), theme files and the HSL adjustment model |
 | [`os-ui`](crates/os-ui) | CPU canvas, text rendering and the shared widget kit |
 | [`os-app`](crates/os-app) | The `lemonstudio` application: windows, editors, transport |
 | [`os-host`](crates/os-host) | Format-neutral plugin hosting layer (CLAP, VST3, VST2) |
@@ -371,7 +371,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 
 The roadmap is kept on the [Lemon Studio Discord server](https://discord.gg/yC2uCuGs3M), where every item is
 marked as complete, in progress or not started. The broad next steps are the engine rework (sampler voice,
-automation), opening projects from older FL Studio versions, audio and note recording, more
+automation), opening projects from older FL Studio versions, audio recording into mixer tracks, more
 built-in instruments and effects, and the rest of the plugin window features on Linux.
 
 ## Development approach
