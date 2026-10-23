@@ -141,12 +141,8 @@ pub fn render(o: &Opts) -> Result<(), String> {
 
     app.plugins.set_offline(true);
     let project = crate::rack::play_project(&app.state);
-    let mut library = SampleLibrary::new(SampleLibrary::default_factory_dir());
-    library.resample_stretches = true;
-    let mut e = Engine::new(&project, &mut library, o.rate, PlayMode::Song);
-    for (row, i) in app.plugins.instruments() {
-        e.set_instrument(row, i);
-    }
+    let mut library = crate::transport::host_library(SampleLibrary::default_factory_dir());
+    let mut e = Engine::with_instruments(&project, &mut library, o.rate, PlayMode::Song, &app.plugins.instruments());
     for (t, s, f) in app.plugins.effects() {
         e.set_effect(t, s, f);
     }

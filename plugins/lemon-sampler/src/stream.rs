@@ -269,6 +269,13 @@ fn aiff(f: &mut File, aifc: bool) -> Option<Layout> {
     }
 }
 
+/// The length in frames and the rate of a file that can play from disk ([`Layout::of`]), from its headers: the frames
+/// and rate decoding it gives. Lemon Studio's engine keeps only these of a sample Lemon Sampler plays, not its decoded
+/// frames (`os_engine::SampleLibrary::length_reader`).
+pub fn length(path: &Path) -> Option<(usize, u32)> {
+    Layout::of(path).map(|l| (l.frames, l.rate))
+}
+
 /// An 80-bit IEEE extended number (AIFF's sample rate).
 fn extended(b: &[u8]) -> f64 {
     let exp = (i32::from(b[0] & 0x7f) << 8 | i32::from(b[1])) - 16383 - 63;
@@ -913,6 +920,8 @@ mod tests {
             let want = os_engine::sample::load(&p).unwrap_or_else(|e| panic!("{what}: {e}"));
             let l = Layout::of(&p).unwrap_or_else(|| panic!("{what}: streams"));
             assert_eq!((l.frames, l.rate), (want.frames(), want.rate), "{what}");
+            // What Lemon Studio's engine keeps in place of the decode.
+            assert_eq!(length(&p), Some((want.frames(), want.rate)), "{what}");
             let disk = Disk::open(&p, l).unwrap();
             let (mut a, mut b) = (vec![0.0; l.frames], vec![0.0; l.frames]);
             disk.read_frames(0, &mut a, &mut b);
@@ -943,6 +952,7 @@ mod tests {
         for (what, bytes) in cases {
             std::fs::write(&p, &bytes).unwrap();
             assert_eq!(Layout::of(&p), None, "{what}");
+            assert_eq!(length(&p), None, "{what}: decoded for its length");
         }
         std::fs::remove_dir_all(&d).ok();
     }

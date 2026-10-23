@@ -11499,7 +11499,8 @@ mod tests {
 
     /// Lemon Sampler's Keep on disk (spec: plugins/lemon-sampler.md "Keep on disk (Lemon Studio)"): an export, high
     /// quality off (the instances stay in realtime mode), of an audio clip playing from disk and a copy trimmed to start
-    /// half way into the file is the export with the sample in memory, to the bit.
+    /// half way into the file is the export with the sample in memory, to the bit, and no decoded copy of the file is
+    /// held while it plays from disk (the host's engine keeps only its length).
     #[test]
     fn an_export_playing_from_disk_is_the_one_from_memory() {
         use serde_json::json;
@@ -11547,6 +11548,9 @@ mod tests {
                 }
             }
             lemon_sampler::stream::set_exporting(false);
+            // Playing from disk, nothing holds the decoded file: the engine that rendered the export (and its sample
+            // library, which plays on) kept only the length. From memory, the instance holds it.
+            assert_eq!(os_engine::sample::held(&wav), !keep, "the decoded file is held: keep on disk {keep}");
             let bytes = std::fs::read(&out).expect("file written");
             let _ = std::fs::remove_file(&out);
             bytes

@@ -190,7 +190,11 @@ impl ClipFx {
 
 #[derive(Debug, Clone)]
 struct ChannelState {
+    /// The frames the channel's voices play (`None` for a sample that only `length` stands for).
     sample: Option<Arc<Sample>>,
+    /// A channel its hosted instrument plays from the start (`Engine::with_instruments`): the length in frames and the
+    /// rate of its sample in place of the decoded frames, which the engine never plays (`played`).
+    length: Option<(usize, u32)>,
     /// Channel volume gain (0 when the channel is muted).
     volume: f64,
     /// Channel pan, −1..=1.
@@ -347,9 +351,9 @@ struct CtlEvent {
     value: i32,
 }
 
-/// Frames of a sample stretched to `factor` times its length.
-fn stretched_frames(s: &Sample, factor: f64) -> usize {
-    (s.frames() as f64 * factor).round().max(1.0) as usize
+/// Frames of a sample of `frames` frames stretched to `factor` times its length.
+fn stretched_frames(frames: usize, factor: f64) -> usize {
+    (frames as f64 * factor).round().max(1.0) as usize
 }
 
 impl ChannelState {
@@ -358,6 +362,19 @@ impl ChannelState {
         match buf {
             0 => self.sample.as_ref(),
             b => self.keyed.get(usize::from(b) - 1).map(|k| &k.1),
+        }
+    }
+
+    /// The length in frames and the rate of what the channel plays: its sample, or the length that stands for it.
+    fn played(&self) -> Option<(usize, u32)> {
+        self.sample.as_ref().map(|s| (s.frames(), s.rate)).or(self.length)
+    }
+
+    /// Frames of the buffer `buf` (`buffer`; the sample's length for a channel that only has that).
+    fn frames(&self, buf: u16) -> Option<usize> {
+        match buf {
+            0 => self.played().map(|p| p.0),
+            b => self.buffer(b).map(|s| s.frames()),
         }
     }
 
@@ -983,6 +1000,24 @@ const TAIL_LIMIT_SECONDS: f64 = 600.0;
 
 impl Engine {
     pub fn new(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayMode) -> Self {
+        Self::build(project, library, rate, mode, &[])
+    }
+
+    /// `new` with hosted instruments on channels (rack rows) from the start, each attached as `set_instrument` does.
+    /// The engine never plays the sample of a sampler or audio clip channel among them: of it, it keeps only the length
+    /// and the rate (trims, stretching, how long a one-shot note rings) where the library reads them without decoding
+    /// the file (`SampleLibrary::length`), not the decoded frames (spec: plugins/lemon-sampler.md "Keep on disk (Lemon
+    /// Studio)"). A channel whose instrument comes later (`set_instrument`) keeps its decoded sample, as before.
+    pub fn with_instruments(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayMode, instruments: &[(usize, SharedInstrument)]) -> Self {
+        let hosted: Vec<usize> = instruments.iter().map(|(row, _)| *row).collect();
+        let mut e = Self::build(project, library, rate, mode, &hosted);
+        for (row, inst) in instruments {
+            e.set_instrument(*row, inst.clone());
+        }
+        e
+    }
+
+    fn build(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayMode, hosted: &[usize]) -> Self {
         let mut report = EngineReport::default();
         let tempo = project.tempo.unwrap_or(140.0);
         let ppq = project.ppq.max(1);
@@ -997,12 +1032,15 @@ impl Engine {
         let mut channels: Vec<ChannelState> = project
             .channels
             .iter()
-            .map(|ch| {
+            .enumerate()
+            .map(|(row, ch)| {
                 let plays_sample = matches!(ch.kind, ChannelKind::Sampler | ChannelKind::AudioClip);
                 if ch.kind == ChannelKind::Plugin {
                     report.plugin_channels_silent += 1;
                 }
-                let sample = if plays_sample {
+                // A channel its hosted instrument plays: the length and rate of its sample are all it needs.
+                let length = ch.sample_path.as_deref().filter(|_| plays_sample && hosted.contains(&row)).and_then(|p| library.length(p));
+                let sample = if plays_sample && length.is_none() {
                     match ch.sample_path.as_deref() {
                         Some(p) => {
                             let s = library.get(p);
@@ -1028,22 +1066,24 @@ impl Engine {
                 // play a stretched copy, made once per library (the realtime ones one copy per key, made below). A
                 // library that leaves stretching to the host's sampler plugin plays them by resampling instead, at the
                 // stretched length.
-                let mut how = sample
-                    .as_ref()
+                let played = sample.as_ref().map(|s| (s.frames(), s.rate)).or(length);
+                let mut how = played
                     .filter(|_| plays_sample)
-                    .map_or(Stretching::None, |s| ch.sound.stretching(s.frames() as f64 / f64::from(s.rate.max(1)), tick_tempo));
+                    .map_or(Stretching::None, |(frames, r)| ch.sound.stretching(frames as f64 / f64::from(r.max(1)), tick_tempo));
                 if library.resample_stretches {
                     if let Stretching::Whole { factor, .. } | Stretching::Realtime { factor, .. } = how {
                         how = Stretching::Resample { speed: 1.0 / factor };
                     }
                 }
-                let (mut sample, mut speed, mut from_scale, mut realtime) = (sample, 1.0, 1.0, None);
+                let (mut sample, mut length, mut speed, mut from_scale, mut realtime) = (sample, length, 1.0, 1.0, None);
                 match how {
                     Stretching::None => {}
                     Stretching::Resample { speed: s } => speed = s,
                     Stretching::Whole { factor, cents } => {
                         from_scale = factor;
-                        sample = sample.map(|s| library.stretched(&s, stretched_frames(&s, factor), 2f64.powf(cents / 1200.0)));
+                        sample = sample.map(|s| library.stretched(&s, stretched_frames(s.frames(), factor), 2f64.powf(cents / 1200.0)));
+                        // The instrument plays it: the stretched copy's length is all the trims need.
+                        length = length.map(|(frames, r)| (stretched_frames(frames, factor), r));
                     }
                     Stretching::Realtime { factor, cents } => {
                         from_scale = factor;
@@ -1051,12 +1091,13 @@ impl Engine {
                     }
                 }
                 let pitched = ch.sound.channel_pitch_applies() && realtime.is_none();
-                let src_ratio = sample.as_ref().map_or(1.0, |s| f64::from(s.rate) / f64::from(rate)) * speed;
+                let src_ratio = played.map_or(1.0, |(_, r)| f64::from(r) / f64::from(rate)) * speed;
                 let insert = usize::from(ch.mixer_track).min(n_tracks - 1);
                 let knob = f64::from(ch.pitch_cents);
                 let main = ch.misc.main_pitch.then(|| i32::from(project.main_pitch.unwrap_or(0)));
                 let mut state = ChannelState {
                     sample,
+                    length,
                     volume,
                     pan: ch.pan,
                     pan_law,
@@ -1096,13 +1137,14 @@ impl Engine {
                 state.retune(knob);
                 state.init.2 = state.base_rate;
                 // What the note rules need to know of the channel's voices (spec: audio/note-rules.md).
+                let played = state.played();
                 let r = &mut state.rules;
                 r.plugin = ch.kind == ChannelKind::Plugin;
                 r.one_shot = ch.kind.is_sampler() && state.vol_env.is_none();
                 r.root = ch.misc.root;
                 r.close = notes::closing_frames(ch.sound.declick, rate);
-                r.ring = match (&state.sample, r.plugin) {
-                    (Some(s), false) if s.frames() > 0 => s.frames() as f64 / state.src_ratio.max(1e-9) * state.realtime.map_or(1.0, |t| t.0.max(1e-9)),
+                r.ring = match (played, r.plugin) {
+                    (Some((frames, _)), false) if frames > 0 => frames as f64 / state.src_ratio.max(1e-9) * state.realtime.map_or(1.0, |t| t.0.max(1e-9)),
                     _ => f64::INFINITY,
                 };
                 state
@@ -1180,15 +1222,15 @@ impl Engine {
             .into_iter()
             .filter_map(|n: Sched| {
                 let state = channels.get(n.channel)?;
-                if state.sample.is_none() && !state.plugin && state.layer.is_none() {
+                if state.played().is_none() && !state.plugin && state.layer.is_none() {
                     return None;
                 }
-                let (from, start) = match state.sample.as_ref() {
+                let (from, start) = match state.played() {
                     // Trims are source time: in a stretched copy they come `from_scale` times later (spec:
                     // audio/time-stretch.md "Trims").
-                    Some(s) if s.frames() > 0 => {
-                        let from = n.from_s * f64::from(s.rate) * state.from_scale;
-                        let played = s.frames() as f64 * if state.realtime.is_some() { state.from_scale } else { 1.0 };
+                    Some((frames, r)) if frames > 0 => {
+                        let from = n.from_s * f64::from(r) * state.from_scale;
+                        let played = frames as f64 * if state.realtime.is_some() { state.from_scale } else { 1.0 };
                         (from, (from / played) as f32)
                     }
                     _ => (0.0, 0.0),
@@ -1798,7 +1840,7 @@ impl Engine {
             .filter(|t| t.cut.is_some_and(|c| c > tick))
             .filter_map(|t| {
                 let ch = self.channels.get(t.channel)?;
-                let frames = ch.buffer(t.buf)?.frames() as f64;
+                let frames = ch.frames(t.buf)? as f64;
                 let since = at - frame(t.tick);
                 let from = t.from + since as f64 * t.rate * ch.base_rate;
                 let total = t.cut.map_or(u64::MAX, |c| frame(c) - frame(t.tick));
@@ -2619,7 +2661,7 @@ impl Engine {
             if r.one_shot && (r.cut > 0 || r.cut_by > 0) {
                 cuts = (r.cut, r.cut_by);
             }
-            if ch.sample.is_none() && !ch.plugin {
+            if ch.played().is_none() && !ch.plugin {
                 continue;
             }
             // A hosted instrument hears the layer's pitch as part of the note's tuning (the engine's voices follow
@@ -3038,7 +3080,7 @@ fn keyed_copy(ch: &mut ChannelState, library: &mut SampleLibrary, key: u16) -> O
         Some(i) => i,
         None => {
             let transpose = laws::playback_rate(key, 0) * laws::cents_rate(ch.pitch_from_60()) * 2f64.powf(cents / 1200.0);
-            ch.keyed.push((key, library.stretched(&s, stretched_frames(&s, factor), transpose)));
+            ch.keyed.push((key, library.stretched(&s, stretched_frames(s.frames(), factor), transpose)));
             ch.keyed.len() - 1
         }
     })
@@ -4472,6 +4514,141 @@ mod tests {
         let f = |t: f64| laws::tick_to_frame(t, 96, 130.0, 48000);
         let got = log.lock().unwrap().0.clone();
         assert_eq!(got, vec![(0, "from", 0.25), (f(96.0), "choke", 0.0), (f(384.0), "on", 0.0), (f(480.0), "choke", 0.0)]);
+    }
+
+    // spec: plugins/lemon-sampler.md "Keep on disk (Lemon Studio)"
+    /// A channel its hosted instrument plays from the start keeps only its sample's length and rate, not the decoded
+    /// frames, where the library's reader gives them. The instrument is told the same notes at the same frames and the
+    /// same places in the sample as when the engine holds the decode (trimmed clips, playback started inside a clip, a
+    /// file at another rate than the output, a stretch time the instrument makes or the engine would), and the render
+    /// is the same to the bit. The library lets go of a decode it held, and reads a file again when it changes. A
+    /// channel without an instrument still decodes its sample, and so does every channel when there is no reader.
+    #[test]
+    fn hosted_samples_keep_only_their_length() {
+        use os_model::{stretch_mode, Clip, ClipSource};
+        #[derive(Default)]
+        struct Log(Vec<(u64, &'static str, u8, f32)>, u64);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, o: u32, k: u8, _v: f32) {
+                self.0.push((self.1 + u64::from(o), "on", k, 0.0));
+            }
+            fn note_off(&mut self, o: u32, k: u8) {
+                self.0.push((self.1 + u64::from(o), "off", k, 0.0));
+            }
+            fn note_on_from(&mut self, o: u32, k: u8, _v: f32, start: f32) {
+                self.0.push((self.1 + u64::from(o), "from", k, start));
+            }
+            fn choke(&mut self, o: u32, k: u8) {
+                self.0.push((self.1 + u64::from(o), "choke", k, 0.0));
+            }
+            fn process(&mut self, _rate: u32, l: &mut [f32], _r: &mut [f32]) {
+                self.1 += l.len() as u64;
+            }
+        }
+        fn read(path: &std::path::Path) -> Option<(usize, u32)> {
+            crate::sample::length(path).map(|(n, r)| (n as usize, r))
+        }
+        // `frames` frames of a ramp at `rate`.
+        let write = |wav: &std::path::Path, rate: u32, frames: u32| {
+            let ramp: Vec<f32> = (0..frames).flat_map(|i| [i as f32 / frames as f32; 2]).collect();
+            crate::wav::write_f32_stereo(&mut std::fs::File::create(wav).unwrap(), rate, &ramp).unwrap();
+        };
+        // The hosted channels' file: one second at 44.1 kHz (the output runs at 48 kHz). The channel without an
+        // instrument has a file of its own.
+        let hosted_wav = std::env::temp_dir().join(format!("os-engine-hosted-length-{}.wav", std::process::id()));
+        let own_wav = std::env::temp_dir().join(format!("os-engine-hosted-own-{}.wav", std::process::id()));
+        write(&hosted_wav, 44100, 44100);
+        write(&own_wav, 48000, 48000);
+        // Channel 0 plays audio clips: one trimmed 250 ms in, one from the top. Channel 1 is a sampler whose notes are
+        // fitted to two beats, channel 2 one without an instrument.
+        let mut trimmed = Clip::new(0, 96, 0, ClipSource::Channel(0));
+        trimmed.window = Some((250.0, 711.0));
+        let notes = vec![Note { channel: 1, ..long_note(0, 96, 0) }, Note { channel: 2, key: 64, ..long_note(96, 96, 0) }];
+        let mut p = song(notes, vec![trimmed, Clip::new(192, 192, 0, ClipSource::Channel(0)), Clip::new(0, 384, 1, ClipSource::Pattern(1))]);
+        p.channels = (0..3u16).map(|i| Channel { index: i, ..channel() }).collect();
+        p.channels[0].kind = ChannelKind::AudioClip;
+        for (c, wav) in [(0, &hosted_wav), (1, &hosted_wav), (2, &own_wav)] {
+            p.channels[c].sample_path = Some(wav.to_string_lossy().into_owned());
+        }
+        p.channels[1].sound.stretch[0] = (2.0f32 * 192.0).to_bits();
+        let logs = || [Arc::new(std::sync::Mutex::new(Log::default())), Arc::new(std::sync::Mutex::new(Log::default()))];
+        // The engine with the decode (the instruments attached once it is built, as before) or with the length alone.
+        let build = |p: &Project, lib: &mut SampleLibrary, hosted: bool, logs: &[Arc<std::sync::Mutex<Log>>; 2]| -> Engine {
+            let list: Vec<(usize, SharedInstrument)> = logs.iter().enumerate().map(|(row, l)| (row, l.clone() as SharedInstrument)).collect();
+            if hosted {
+                return Engine::with_instruments(p, lib, 48000, PlayMode::Song, &list);
+            }
+            let mut e = Engine::new(p, lib, 48000, PlayMode::Song);
+            for (row, i) in list {
+                e.set_instrument(row, i);
+            }
+            e
+        };
+        // What the channels' lengths decide, and the notes' places in their samples.
+        let shape = |e: &Engine| {
+            let channels: Vec<_> = e.channels.iter().map(|c| (c.played(), c.src_ratio, c.base_rate, c.from_scale, c.rules.ring)).collect();
+            let triggers: Vec<_> = e.triggers.iter().map(|t| (t.tick, t.channel, t.from, t.start)).collect();
+            (channels, triggers)
+        };
+        let bits = |a: &[f32], b: &[f32]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+        // A realtime method the instrument plays (the host's library resamples it), and the same with the engine making
+        // its copies, a method that stretches the whole sample, and resampling.
+        for (mode, resample) in [(stretch_mode::STRETCH, true), (stretch_mode::STRETCH, false), (stretch_mode::E3_GENERIC, false), (stretch_mode::RESAMPLE, false)] {
+            p.channels[1].sound.stretch[3] = mode as u32;
+            let what = format!("mode {mode}, resampled {resample}");
+            let mut runs = Vec::new();
+            for hosted in [false, true] {
+                let mut lib = SampleLibrary::new(None);
+                lib.resample_stretches = resample;
+                lib.length_reader = Some(read);
+                let (top, inside) = (logs(), logs());
+                let mut e = build(&p, &mut lib, hosted, &top);
+                let summary = shape(&e);
+                if hosted {
+                    assert!(e.channels[..2].iter().all(|c| c.sample.is_none() && c.keyed.is_empty()), "{what}: no frames held");
+                } else {
+                    assert!(e.channels[..2].iter().all(|c| c.sample.is_some()), "{what}");
+                }
+                assert!(e.channels[2].sample.is_some(), "{what}: the channel without an instrument decodes its sample");
+                let out = e.render_all(480);
+                // Started inside the second clip (ticks 192 to 384).
+                let mut e = build(&p, &mut lib, hosted, &inside);
+                e.seek_tick(240);
+                let late = e.render_all(480);
+                let events = |l: &[Arc<std::sync::Mutex<Log>>; 2]| l.iter().map(|l| l.lock().unwrap().0.clone()).collect::<Vec<_>>();
+                runs.push((summary, out, late, events(&top), events(&inside)));
+            }
+            let (memory, length) = (&runs[0], &runs[1]);
+            assert_eq!(memory.0, length.0, "{what}: lengths, rates, trims");
+            assert!(bits(&memory.1, &length.1) && bits(&memory.2, &length.2), "{what}: the same render");
+            assert_eq!(memory.3, length.3, "{what}: the notes from the top");
+            assert_eq!(memory.4, length.4, "{what}: the notes started inside a clip");
+            assert_eq!(length.3[0][0], (0, "from", 60, 0.25), "{what}: the trimmed clip starts 250 ms in");
+            assert!(length.4[0].iter().any(|n| n.1 == "from" && n.3 > 0.0), "{what}: the clip under way starts where it has got to");
+            assert!(length.3[1].iter().any(|n| n.1 == "on"), "{what}: the sampler's note");
+        }
+
+        // The library lets go of the decode it held once a hosted channel needs only the length.
+        let mut lib = SampleLibrary::new(None);
+        lib.resample_stretches = true;
+        lib.length_reader = Some(read);
+        let e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        let decode = Arc::downgrade(e.channels[0].sample.as_ref().unwrap());
+        drop(e);
+        assert!(decode.upgrade().is_some() && crate::sample::held(&hosted_wav), "the library keeps what it decoded");
+        let e = build(&p, &mut lib, true, &logs());
+        assert!(decode.upgrade().is_none() && !crate::sample::held(&hosted_wav), "nothing holds the decode any more");
+        assert_eq!(e.channels[0].played(), Some((44100, 44100)));
+        // A changed file is read again.
+        write(&hosted_wav, 44100, 22050);
+        let e = build(&p, &mut lib, true, &logs());
+        assert_eq!(e.channels[0].played(), Some((22050, 44100)));
+        // Without a reader, hosted channels decode their sample.
+        let e = build(&p, &mut SampleLibrary::new(None), true, &logs());
+        assert!(e.channels.iter().all(|c| c.sample.is_some() && c.length.is_none()));
+        for wav in [hosted_wav, own_wav] {
+            let _ = std::fs::remove_file(wav);
+        }
     }
 
     /// A paused playback whose hosted instruments another stream processes lets go of them: an audio clip's voice is

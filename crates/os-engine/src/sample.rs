@@ -69,12 +69,23 @@ fn stamp(path: &Path) -> Option<Stamp> {
     std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()))
 }
 
+/// The decodes `load_shared` handed out, by file, with the stamp of the file they were made from.
+fn live() -> &'static std::sync::Mutex<HashMap<PathBuf, (std::sync::Weak<Sample>, Stamp)>> {
+    static LIVE: OnceLock<std::sync::Mutex<HashMap<PathBuf, (std::sync::Weak<Sample>, Stamp)>>> = OnceLock::new();
+    LIVE.get_or_init(Default::default)
+}
+
+/// Whether the last decode `load_shared` made of the file at `path` is still held anywhere (a sampler, the engine's
+/// library, a project loading).
+pub fn held(path: &Path) -> bool {
+    live().lock().is_ok_and(|map| map.get(path).is_some_and(|(w, _)| w.strong_count() > 0))
+}
+
 /// `load`, shared: while any holder keeps a decoded file alive, loading the same unchanged file again returns that
 /// copy instead of decoding it again. Project loading decodes samples on worker threads this way so that the plugin
 /// instances made afterwards on the UI thread find them ready (spec: ui/project-loading.md).
 pub fn load_shared(path: &Path) -> Result<Arc<Sample>, SampleError> {
-    static LIVE: OnceLock<std::sync::Mutex<HashMap<PathBuf, (std::sync::Weak<Sample>, Stamp)>>> = OnceLock::new();
-    let live = LIVE.get_or_init(Default::default);
+    let live = live();
     let st = stamp(path);
     if let (Some(st), Ok(map)) = (st, live.lock()) {
         if let Some(s) = map.get(path).filter(|(_, s)| *s == st).and_then(|(w, _)| w.upgrade()) {
@@ -317,6 +328,14 @@ pub struct SampleLibrary {
     /// Engines built from this library play every stretch method by resampling, at the stretched length: for a host
     /// whose sampler plugin stretches for itself (spec: audio/time-stretch.md "Lemon Studio").
     pub resample_stretches: bool,
+    /// Reads a file's length in frames and its rate from its headers, the frames exactly those decoding gives, for the
+    /// files it knows (`None` for the others): for a host whose sampler plugin plays the channels' samples itself
+    /// (Lemon Studio gives Lemon Sampler's, which knows the files it can play from disk). Engines built with hosted
+    /// instruments then keep only that of a sample one of them plays, not its decoded frames (`length`,
+    /// `Engine::with_instruments`).
+    pub length_reader: Option<fn(&Path) -> Option<(usize, u32)>>,
+    /// Lengths read so far, by project path, with the stamp of the file they were read from.
+    lengths: HashMap<String, (Stamp, Option<(usize, u32)>)>,
 }
 
 impl SampleLibrary {
@@ -422,6 +441,29 @@ impl SampleLibrary {
         };
         self.cache.insert(project_path.into(), loaded.clone());
         loaded
+    }
+
+    /// The length in frames and the rate of the sample at `project_path`, read by `length_reader` without decoding
+    /// the file: all an engine needs of a sample a hosted instrument plays (spec: plugins/lemon-sampler.md "Keep on
+    /// disk (Lemon Studio)"). The library lets go of its own decode of the file, if it made one (an engine that still
+    /// plays it keeps its copy until it goes). `None` without a reader, or for a file the reader does not know: the
+    /// file is decoded then (`get`).
+    pub fn length(&mut self, project_path: &str) -> Option<(usize, u32)> {
+        let read = self.length_reader?;
+        let path = self.resolve(project_path)?;
+        let st = stamp(&path)?;
+        let n = match self.lengths.get(project_path) {
+            Some(&(s, n)) if s == st => n,
+            _ => {
+                let n = read(&path);
+                self.lengths.insert(project_path.into(), (st, n));
+                n
+            }
+        };
+        if n.is_some() {
+            self.cache.remove(project_path);
+        }
+        n
     }
 
     /// `raw` stretched to `frames` frames with its pitch multiplied by `transpose` (spec: audio/time-stretch.md), made

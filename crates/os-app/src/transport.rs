@@ -356,10 +356,7 @@ impl Transport {
                 let inst = instruments.clone();
                 move || {
                     crate::device::init_thread();
-                    // The channels' Lemon Sampler instances stretch for themselves (spec: audio/time-stretch.md).
-                    let mut library = SampleLibrary::new(factory);
-                    library.resample_stretches = true;
-                    audio_thread(rx, s, latest, inst, library)
+                    audio_thread(rx, s, latest, inst, host_library(factory))
                 }
             })
             .expect("spawn audio thread");
@@ -969,18 +966,30 @@ fn raise_priority() {
 #[cfg(not(any(windows, target_os = "macos")))]
 fn raise_priority() {}
 
-fn attach(e: &mut Engine, inst: &Instruments) {
-    if let Ok(list) = inst.lock() {
-        if std::env::var_os("OS_DEBUG").is_some() {
-            eprintln!("[transport] attach {} instrument(s), {} effect(s)", list.inst.len(), list.fx.len());
-        }
-        for (row, i) in list.inst.iter() {
-            e.set_instrument(*row, i.clone());
-        }
-        for (track, slot, fx) in list.fx.iter() {
-            e.set_effect(*track, *slot, fx.clone());
-        }
+/// The sample library for engines whose sampler channels Lemon Sampler instances play. They stretch for themselves
+/// (spec: audio/time-stretch.md), and of a sample one of them plays the engine keeps only the length and rate Lemon
+/// Sampler reads from the file's headers, for the files it can play from disk (spec: plugins/lemon-sampler.md "Keep on
+/// disk (Lemon Studio)"); other files are decoded, a copy shared with the instance playing it.
+pub fn host_library(factory: Option<PathBuf>) -> SampleLibrary {
+    let mut library = SampleLibrary::new(factory);
+    library.resample_stretches = true;
+    library.length_reader = Some(lemon_sampler::stream::length);
+    library
+}
+
+/// An engine for `project` with the hosted plugins attached (`plugins`; a preview plays its channels itself), all from
+/// one look at the list. The instruments come with the engine (`Engine::with_instruments`), so it keeps no decoded copy
+/// of the samples they play from their files.
+fn engine(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayMode, inst: &Instruments, plugins: bool) -> Engine {
+    let (list, fx) = inst.lock().ok().filter(|_| plugins).map(|l| (l.inst.clone(), l.fx.clone())).unwrap_or_default();
+    if plugins && std::env::var_os("OS_DEBUG").is_some() {
+        eprintln!("[transport] attach {} instrument(s), {} effect(s)", list.len(), fx.len());
     }
+    let mut e = Engine::with_instruments(project, library, rate, mode, &list);
+    for (track, slot, fx) in fx {
+        e.set_effect(track, slot, fx);
+    }
+    e
 }
 
 /// Renders a whole song (or one pass of a pattern, or a span of either) with the hosted plugins and writes the files of
@@ -988,8 +997,7 @@ fn attach(e: &mut Engine, inst: &Instruments) {
 // spec: audio/export.md
 fn export(project: &Project, mode: PlayMode, rate: u32, job: &crate::export::Job, library: &mut SampleLibrary, inst: &Instruments, shared: &Shared) -> Result<(f64, Vec<PathBuf>), String> {
     let o = &job.options;
-    let mut e = Engine::new(project, library, rate, mode);
-    attach(&mut e, inst);
+    let mut e = engine(project, library, rate, mode, inst, true);
     e.set_interpolation(o.points);
     e.set_effects(o.insert_fx, o.master_fx);
     if let Some((a, b)) = job.span {
@@ -1081,11 +1089,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     let mut logged = Instant::now();
     let swap = |s: &mut Session, library: &mut SampleLibrary| {
         // Build outside the lock, then swap at the playing position.
-        let mut e = Engine::new(&s.project, library, s.rate, s.mode);
+        let mut e = engine(&s.project, library, s.rate, s.mode, &inst, true);
         if s.kind == Kind::Live {
             e.clear_schedule();
         }
-        attach(&mut e, &inst);
         let old = s.engine.lock().map(|mut slot| {
             e.continue_from(&mut slot);
             std::mem::replace(&mut *slot, e)
@@ -1697,14 +1704,11 @@ impl Session {
         let song = kind == Kind::Song;
         let out = device.open()?;
         let (rate, fixed, info) = (out.info.rate, out.info.fixed, out.info.clone());
-        let mut e = Engine::new(project, library, rate, mode);
+        let mut e = engine(project, library, rate, mode, inst, kind != Kind::Preview);
         // Playback loops: a pattern on its bar line, the song at its end (back to the start).
         e.set_looping(song);
         if kind == Kind::Live {
             e.clear_schedule();
-        }
-        if kind != Kind::Preview {
-            attach(&mut e, inst);
         }
         // Playback clicks with the metronome switch; live notes and previews never do (spec: ui/metronome.md §4).
         if song {

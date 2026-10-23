@@ -157,8 +157,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   small buffer per voice stay in memory. It applies to uncompressed WAV and AIFF files played as they are; compressed
   files, the sample tools and effects, reverse and the Stretch / Stretch Pro methods keep the sample in memory, and
   the sampler says which ("in RAM" or "on disk"). Exports wait for the disk, so they sound exactly as from memory
-- Lemon Studio's own playback engine still keeps a decoded copy of every sampler channel's file, so the memory
-  saving shows in other hosts for now, not yet inside Lemon Studio
+- Inside Lemon Studio the playback engine keeps only the length of a WAV or AIFF sample that the sampler plays, not
+  a decoded copy of its own, so a sample playing from disk takes no memory for its file there either. Opening a project still decodes each
+  sampler file once while it loads; that copy is let go when loading ends
 
 ## ✅ Exporting audio
 
