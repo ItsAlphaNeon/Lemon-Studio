@@ -1829,6 +1829,11 @@ impl App {
                     self.quant_command(crate::quantize::QCmd::Template(Some(p)));
                 }
             }
+            Then::ChopPattern => {
+                if let Some(p) = file {
+                    self.chop_command(Some(p));
+                }
+            }
             Then::PluginFolder => {
                 if let Some(p) = file {
                     self.plugin_folder_chosen(p);
@@ -2990,6 +2995,14 @@ impl App {
         self.invalidate();
     }
 
+    /// A pattern picked for the Chop dialog (its ▸ menu, its file dialog); None is the built-in Default.
+    pub(crate) fn chop_command(&mut self, p: Option<std::path::PathBuf>) {
+        if let Some(m) = crate::piano_dlg::chop_cmd(&mut self.state, p) {
+            self.state.message = Some(m);
+        }
+        self.invalidate();
+    }
+
     /// A pattern, direction or sync picked for the Arpeggiate dialog (its menus, its file dialog).
     pub(crate) fn arp_command(&mut self, c: crate::arpeggiate::ACmd) {
         if let Some(m) = crate::arpeggiate::command(&mut self.state, c) {
@@ -3001,7 +3014,7 @@ impl App {
     // ---------------------------------------------------------------- Flam, Flip and Scale levels dialogs
 
     /// Tools ▸ Flam… (Alt+F), Claw machine… (Alt+W), Flip… (Alt+Y), Scale levels… (Alt+X), Limit… (Alt+K), LFO…
-    /// (Alt+O) and Quantize… (Alt+Q): open the dialog in front (centred over the main
+    /// (Alt+O), Quantize… (Alt+Q) and Chop… (Alt+U): open the dialog in front (centred over the main
     /// window the first time, then where it was left) on the piano roll's notes, previewing the settings last accepted.
     /// Another of these dialogs open: its preview is put back and the window shows this one. Scale levels does not open
     /// on a channel control lane (spec: ui/piano-level-scaling.md §4).
@@ -3045,6 +3058,7 @@ impl App {
                     Act::PeriodMenu => dlg::period_menu(&s.piano_dlg.claw),
                     Act::TrashMenu => dlg::trash_menu(&s.piano_dlg.claw),
                     Act::ShapeMenu => dlg::shape_menu(&s.piano_dlg.lfo),
+                    Act::TemplateMenu if s.piano_dlg.tool == dlg::Tool::Chop => crate::chop::pattern_menu(&s.piano_dlg.chop_pat.0, &crate::chop::folder()),
                     Act::TemplateMenu => crate::quantize::template_menu(&s.piano_dlg.quant_tpl.0, &crate::quantize::folder()),
                     Act::DurMenu => crate::quantize::mode_menu(&s.piano_dlg.quant),
                     _ => dlg::options_menu(),
@@ -3052,10 +3066,11 @@ impl App {
                 s.playlist.popup = Some(crate::playlist::Popup { x, y, items, sub: None });
             }
             Act::TemplateFolder => {
-                let dir = s.piano_dlg.quant_tpl.0.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf)).unwrap_or_else(crate::quantize::folder);
-                let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Load quantize template", "quantizer", crate::dialog::Then::QuantTemplate)
-                    .filter("Score", &["fsc"])
-                    .start(Some(&dir));
+                let chop = s.piano_dlg.tool == dlg::Tool::Chop;
+                let (cur, home) = if chop { (&s.piano_dlg.chop_pat.0, crate::chop::folder()) } else { (&s.piano_dlg.quant_tpl.0, crate::quantize::folder()) };
+                let dir = cur.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf)).unwrap_or(home);
+                let (title, key, then) = if chop { ("Load chopping pattern", "chopper", crate::dialog::Then::ChopPattern) } else { ("Load quantize template", "quantizer", crate::dialog::Then::QuantTemplate) };
+                let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, title, key, then).filter("Score", &["fsc"]).start(Some(&dir));
                 self.file_dialog(dlg);
             }
             Act::Keys => {
@@ -14199,13 +14214,11 @@ mod tests {
         assert_eq!(mine(&app), vec![(96, 72, 62)]);
         assert_eq!(app.state.piano.clipboard.len(), 3);
 
-        // Alt+R / U open their preset menus; picking an entry runs it.
+        // Alt+R opens its preset menu; picking an entry runs it.
         put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
-        for (k, sub) in [("r", Sub::Randomize), ("u", Sub::Chop)] {
-            key(&mut app, k, false, true, false);
-            let pop = app.state.playlist.popup.take().unwrap_or_else(|| panic!("Alt+{k} opens a menu"));
-            assert!(pop.items.iter().all(|i| i.sep || matches!(i.cmd, Cmd::Piano(_))), "{sub:?}");
-        }
+        key(&mut app, "r", false, true, false);
+        let pop = app.state.playlist.popup.take().expect("Alt+R opens a menu");
+        assert!(pop.items.iter().all(|i| i.sep || matches!(i.cmd, Cmd::Piano(_))), "{:?}", Sub::Randomize);
 
         // Alt+S opens the Strum dialog (spec: ui/piano-strum.md): it previews, × puts the notes back, Accept is one
         // undo step and the next opening starts from the accepted settings.
@@ -14578,6 +14591,44 @@ mod tests {
             assert_eq!(mine(&app), before, "one undo step");
             key(&mut app, "q", false, true, false);
             assert_eq!((app.state.piano_dlg.quant.mode, app.state.piano_dlg.quant_tpl.0.name.as_str()), (Mode::LeaveDuration, "Beat"), "kept");
+            assert_ne!(mine(&app), before);
+            app.act(Action::CloseWin(Win::PianoDlg));
+            assert_eq!(mine(&app), before, "× puts the notes back");
+        }
+        frame(&mut app, &mut c, None);
+
+        // Alt+U opens Chop (spec: ui/piano-chop.md): Reset's settings cut the notes into steps at once, a notch of Time
+        // mul doubles them, the ▸ menu ticks Default; Accept is one undo step, the settings are kept for the next
+        // opening and × puts the notes back.
+        {
+            use crate::piano_dlg::{Act as DAct, Knob as DKnob, Tool};
+            let mine = |app: &App| piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length, n.unk14)).collect::<Vec<_>>();
+            put(&mut app, &[(0, 96, 60), (96, 48, 62)]);
+            let before = mine(&app);
+            key(&mut app, "u", false, true, false);
+            assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Chop);
+            assert_eq!(mine(&app), [(0, 24, 1), (24, 24, 1), (48, 24, 1), (72, 24, 1), (96, 24, 2), (120, 24, 2)], "Default, grouped by note");
+            frame(&mut app, &mut c, None);
+            let k = hit_rect(&app, &Action::Knob(KnobId::PianoDlg(DKnob::ChopTimeMul)));
+            app.mouse_move(k.cx(), k.cy());
+            app.wheel(0.0, 1.0, false, false);
+            assert_eq!(app.hint.as_ref(), "Time multiplicator: x2");
+            assert_eq!(mine(&app), [(0, 48, 1), (48, 48, 1), (96, 48, 2)]);
+            frame(&mut app, &mut c, None);
+            app.act(Action::PianoDlg(DAct::TemplateMenu));
+            let pop = app.state.playlist.popup.take().expect("the ▸ opens the pattern menu");
+            assert!(pop.items.iter().any(|i| i.label == "Default" && i.mark == crate::playlist::Mark::Radio(true)), "Default ticked");
+            assert!(pop.items.iter().all(|i| i.sep || i.head || i.col || matches!(i.cmd, Cmd::ChopPattern(_)) || !i.children.is_empty()));
+            crate::playlist::run(&mut app, Cmd::ChopPattern(None));
+            app.act(Action::PianoDlg(DAct::Group));
+            assert_eq!(mine(&app), [(0, 48, 0), (48, 48, 0), (96, 48, 0)], "Group notes off");
+            frame(&mut app, &mut c, None);
+            app.act(Action::PianoDlg(DAct::Accept));
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(mine(&app), before, "one undo step");
+            key(&mut app, "u", false, true, false);
+            assert_eq!((app.state.piano_dlg.chop.time_mul, app.state.piano_dlg.chop.group), (4, false), "kept");
             assert_ne!(mine(&app), before);
             app.act(Action::CloseWin(Win::PianoDlg));
             assert_eq!(mine(&app), before, "× puts the notes back");

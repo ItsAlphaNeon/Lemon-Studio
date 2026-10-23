@@ -331,6 +331,8 @@ pub enum Cmd {
     LfoShape(crate::lfo::Shape),
     /// The Quantize dialog's template ▸ and duration menus (spec: ui/piano-quantize.md §1, §2).
     Quant(crate::quantize::QCmd),
+    /// The Chop dialog's pattern ▸ menu (spec: ui/piano-chop.md §1): a pattern file, None for the built-in Default.
+    ChopPattern(Option<std::path::PathBuf>),
     /// Settings > Audio menus: device, sample rate, buffer length (spec: ui/settings.md "Audio").
     Audio(crate::audio_cfg::Set),
     /// The toolbar CPU panel's menu (spec: ui/main-window.md §13).
@@ -3490,6 +3492,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.quant_command(c);
             return None;
         }
+        Cmd::ChopPattern(p) => {
+            app.chop_command(p);
+            return None;
+        }
         Cmd::Misc(row, m, v) => {
             crate::misc::set(app, row, m, v);
             return None;
@@ -4003,6 +4009,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Claw(_) => None,
         Cmd::LfoShape(_) => None,
         Cmd::Quant(_) => None,
+        Cmd::ChopPattern(_) => None,
         Cmd::Messages(_) => None,
         Cmd::DataFolder(_) => None,
     };

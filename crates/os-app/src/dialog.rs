@@ -68,6 +68,8 @@ pub enum Then {
     ArpPattern,
     /// The Quantize dialog's folder button (spec: ui/piano-quantize.md §1).
     QuantTemplate,
+    /// The Chop dialog's folder button (spec: ui/piano-chop.md §1).
+    ChopPattern,
     PluginFolder,
     /// Save preset as... for the plugin with this key (`plugins::Plugins::hosted`).
     SavePreset(usize),

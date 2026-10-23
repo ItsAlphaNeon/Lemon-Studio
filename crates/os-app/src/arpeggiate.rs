@@ -59,7 +59,7 @@ impl Sync {
 
 /// Time mul's seven values (§1) as (numerator, denominator); index 3 is ×1.
 pub const TIME_MUL: [(u32, u32); 7] = [(1, 8), (1, 4), (1, 2), (1, 1), (2, 1), (3, 1), (4, 1)];
-const TIME_MUL_NAMES: [&str; 7] = ["1/8", "1/4", "1/2", "x1", "x2", "x3", "x4"];
+pub(crate) const TIME_MUL_NAMES: [&str; 7] = ["1/8", "1/4", "1/2", "x1", "x2", "x3", "x4"];
 
 /// The highest Range; 0 is `---`.
 pub const RANGE_MAX: u8 = 6;
@@ -212,7 +212,7 @@ impl Row {
         Row { pos, len, key, colour: 0, slide: false, fine: 120, rel: 64, pan: 64, vel: 100, mod_x: 128, mod_y: 128 }
     }
 
-    fn level(&self, i: usize) -> u8 {
+    pub(crate) fn level(&self, i: usize) -> u8 {
         [self.pan, self.vel, self.rel, self.mod_x, self.mod_y, self.fine][i]
     }
 }
@@ -264,7 +264,7 @@ pub fn parse(bytes: &[u8]) -> Option<(u32, Vec<Row>)> {
                 len: u32_at(r, 8),
                 key: u16::from(r[12]),
                 colour: (r[15] & 15) * 4,
-                slide: false,
+                slide: u16::from_le_bytes([r[4], r[5]]) & 0x0008 != 0,
                 fine: r[13],
                 rel: 64,
                 pan: r[16],
@@ -873,10 +873,12 @@ mod tests {
             out
         }
         let mut old = vec![0u8; 20];
+        old[4] = 0x08;
         old[8] = 24;
         (old[12], old[13], old[15], old[16], old[17], old[18], old[19]) = (61, 120, 0x13, 64, 90, 128, 128);
         let (ppq, rows) = parse(&file(b"4.5.2\0", &old)).unwrap();
         assert_eq!((ppq, rows.len(), rows[0].key, rows[0].colour, rows[0].vel, rows[0].len), (96, 1, 61, 12, 90, 24));
+        assert!(rows[0].slide, "20-byte rows keep the slide flag too");
         let mut new = vec![0u8; 24];
         new[4] = 0x08;
         new[8] = 48;

@@ -159,9 +159,23 @@ pub enum QCmd {
 /// folders as submenus, then the Snap grids under their heading. Entries named as the current template are ticked (FL
 /// marks every "Default" when it is current). Without a Default file in the folder the built-in one comes first.
 pub fn template_menu(cur: &Pattern, root: &Path) -> Vec<PItem> {
+    let mut items = score_items(cur, root, |p| Cmd::Quant(QCmd::Template(p)));
+    items.push(PItem::head("Snap"));
+    for (i, &(name, _)) in SNAPS.iter().enumerate() {
+        let on = cur.path.is_none() && cur.name == name;
+        items.push(PItem::new(name, Cmd::Quant(QCmd::Snap(i as u8))).mark(Mark::Radio(on)));
+    }
+    columns(&mut items);
+    items
+}
+
+/// A score folder as FL's Quantize and Chop menus list it (§2): its files, then each sub-folder under its name as a
+/// heading with its files, deeper folders as submenus. `pick` makes an entry's command (None: the built-in Default,
+/// listed first when the folder has no Default file). Entries named as the current pattern are ticked.
+pub fn score_items(cur: &Pattern, root: &Path, pick: impl Fn(Option<PathBuf>) -> Cmd) -> Vec<PItem> {
     let item = |name: String, path: Option<PathBuf>| {
         let on = cur.name == name;
-        PItem::new(name, Cmd::Quant(QCmd::Template(path))).mark(Mark::Radio(on))
+        PItem::new(name, pick(path)).mark(Mark::Radio(on))
     };
     let stem = |p: &Path| p.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let name = |p: &Path| p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -185,16 +199,14 @@ pub fn template_menu(cur: &Pattern, root: &Path) -> Vec<PItem> {
             items.extend(part);
         }
     }
-    items.push(PItem::head("Snap"));
-    for (i, &(name, _)) in SNAPS.iter().enumerate() {
-        let on = cur.path.is_none() && cur.name == name;
-        items.push(PItem::new(name, Cmd::Quant(QCmd::Snap(i as u8))).mark(Mark::Radio(on)));
-    }
-    // A long menu goes on in further columns (FL's own breaks where the screen ends).
+    items
+}
+
+/// A long menu goes on in further columns (FL's own breaks where the screen ends).
+pub fn columns(items: &mut [PItem]) {
     for i in (MENU_COLUMN..items.len()).step_by(MENU_COLUMN) {
         items[i - 1].col = true;
     }
-    items
 }
 
 /// The template menu's entries a column.
@@ -248,8 +260,9 @@ fn toward(x: i64, target: f64, k: f32) -> i64 {
 }
 
 /// A level moved toward the template row's (§6): velocity scales by the row's / 100 (the product truncated), the others
-/// add the row's offset from its centre; the result is clamped to the level's range.
-fn level(x: u8, row: u8, i: usize, k: f32) -> u8 {
+/// add the row's offset from its centre; the result is clamped to the level's range. Chop weighs its pieces the same
+/// way (piano-chop.md §5).
+pub(crate) fn level(x: u8, row: u8, i: usize, k: f32) -> u8 {
     let (centre, top) = [(64.0, 128), (100.0, 128), (64.0, 128), (128.0, 255), (128.0, 255), (120.0, 240)][i];
     let x64 = f64::from(x);
     let target = if i == 1 { (x64 * f64::from(row) / 100.0).trunc() } else { x64 + f64::from(row) - centre };
