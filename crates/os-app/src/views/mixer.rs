@@ -279,7 +279,8 @@ fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
     let hov = ui.hit(ob, Action::Mix(MHit::Options), "Mixer options");
     chevron(ui, r.x + 11.0, y, true, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
     // View buttons (multi-touch, waveforms, extra properties, track inspector): not available yet, greyed out (drawn
-    // in their colours faded into the title bar, like `Ui::veil`; a veil would show over the bar's gradient).
+    // in their colours faded into the title bar, like `Ui::veil`; a veil would show over the bar's gradient). Lemon
+    // centres them and the "+" 24 px apart: its inspector sits 10 px further right, the "+" and the combo 16 px.
     let bg = ui.t.window_title;
     let dim = |c: Color| c.mix(bg, f32::from(crate::app::OFF_VEIL) / 255.0);
     for (icon, dx, name) in [(Icon::Touch, 37.0, "Multi-touch control"), (Icon::Plug, 61.0, "View waveforms")] {
@@ -287,8 +288,9 @@ fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
         ui.off(b, name);
         icons::draw(ui.c, icon, b.inset(1.0), dim(ui.t.tx(0xc4ccd0)));
     }
+    let (ix, px) = if super::lemon(ui) { (10.0, 16.0) } else { (0.0, 0.0) };
     ui.off(Rect::new(r.x + 76.0, y - 9.0, 16.0, 18.0), "Extra volume / stereo properties");
-    ui.off(Rect::new(r.x + 92.0, y - 9.0, 15.0, 18.0), "Track inspector");
+    ui.off(Rect::new(r.x + 92.0 + ix, y - 9.0, 15.0, 18.0), "Track inspector");
     // Bow-tie (stereo) in blue, layout square in orange, then "+" and the view combo.
     let mut g = Glyph::new();
     let cx = r.x + 85.0;
@@ -296,16 +298,16 @@ fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
     g.rect(cx - 8.5, y - 6.0, 1.5, 12.0);
     ui.c.glyph(dim(Color::rgb(0x5fb6f0)), &g);
     let mut g = Glyph::new();
-    g.frame(Rect::new(r.x + 93.0, y - 6.0, 12.0, 12.0), 1.6);
+    g.frame(Rect::new(r.x + 93.0 + ix, y - 6.0, 12.0, 12.0), 1.6);
     ui.c.glyph(dim(ui.t.h(0xf3b234)), &g);
-    ui.c.fill_rect(Rect::new(r.x + 101.5, y - 4.5, 2.0, 9.0), dim(Color::rgb(0xd03a2a)));
-    let pb = Rect::new(r.x + 109.0, y - 8.0, 16.0, 16.0);
+    ui.c.fill_rect(Rect::new(r.x + 101.5 + ix, y - 4.5, 2.0, 9.0), dim(Color::rgb(0xd03a2a)));
+    let pb = Rect::new(r.x + 109.0 + px, y - 8.0, 16.0, 16.0);
     let hov = ui.hit(pb, Action::Mix(MHit::AddAfter), "Add a new track after the selected track");
-    icons::draw(ui.c, Icon::Plus, Rect::new(r.x + 110.0, y - 7.0, 14.0, 14.0), if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
-    let lb = Rect::new(r.x + 130.0, r.y + 2.0, 50.0, 20.0);
+    icons::draw(ui.c, Icon::Plus, Rect::new(r.x + 110.0 + px, y - 7.0, 14.0, 14.0), if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
+    let lb = Rect::new(r.x + 130.0 + px, r.y + 2.0, 50.0, 20.0);
     let hov = ui.hit(lb, Action::Mix(MHit::Layout), "Mixer layout");
     let _ = s;
-    ui.c.text(Font::new(17), r.x + 134.0, r.y + 2.0, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xb8c4cb) }, "Wide");
+    ui.c.text(Font::new(17), r.x + 134.0 + px, r.y + 2.0, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xb8c4cb) }, "Wide");
 }
 
 fn mix(a: Color, b: Color, t: f32) -> Color {
@@ -674,10 +676,15 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
             ui.c.fill_rect(row.inset(1.0), if hov { ui.t.s(0x2f3335) } else { ui.t.s(0x2a2d2f) });
         }
         chevron(ui, row.x + 10.0, row.cy(), true, if ha { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
-        match &plugin {
-            Some(p) => ui.c.text_clip(Font::new(fs), row.x + 19.0, row.y + 4.0 * kp, 140.0, ui.t.tx(0xc9d0d4), p),
-            None => ui.c.text_clip(Font::new(fs).italic(), row.x + 19.0, row.y + 4.0 * kp, 140.0, ui.t.s(0x50575b), &format!("Slot {}", i + 1)),
-        }
+        let (f, name, ink) = match &plugin {
+            Some(p) => (Font::new(fs), p.to_string(), ui.t.tx(0xc9d0d4)),
+            None => (Font::new(fs).italic(), format!("Slot {}", i + 1), ui.t.s(0x50575b)),
+        };
+        // Lemon centres the name's capitals on the row, level with the chevron, knob and LED: the baseline sits half a
+        // cap height (the face's is about 0.72 of its size) under the middle, measured on the face drawn (the italic
+        // one has its own ascent). Classic keeps FL's place.
+        let ty = if super::lemon(ui) { (row.cy() + 0.36 * f32::from(fs) - ui.c.ascent(f)).round() } else { row.y + 4.0 * kp };
+        ui.c.text_clip(f, row.x + 19.0, ty, 140.0, ink, &name);
         let mix = KnobId::SlotMix(n, k);
         ui.hit(Rect::new(row.right() - 46.0, row.y, 26.0, row.h), Action::Knob(mix), s.knob_text(mix));
         mixer_knob(ui, row.right() - 33.0, row.cy(), 10.5 * q, 12.0 * q, s.knob(mix), Some(false));

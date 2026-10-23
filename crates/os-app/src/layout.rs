@@ -66,7 +66,7 @@ pub fn restore(s: &mut State) {
     if let Some([x, y, w, h]) = numbers(RACK) {
         s.rack_pos = (x, y);
         // Not below the smallest size a resize leaves it (`views::rack::snap_size`).
-        s.rack_size = (w.max(views::rack::base_w(s) + 3.0 * views::rack::STEP_W), h.max(views::rack::MIN_H));
+        s.rack_size = (w.max(views::rack::min_w(s)), h.max(views::rack::MIN_H));
     }
     // Placed: they open there, not centred.
     for (key, pos, placed) in [(PERF, &mut s.perf.pos, &mut s.perf.placed), (TAPPER, &mut s.tapper.pos, &mut s.tapper.placed), (TOUCH, &mut s.touch.pos, &mut s.touch.placed)] {
@@ -171,7 +171,7 @@ mod tests {
         let after: Vec<_> = app.state.wins.iter().map(|w| (w.rect, w.maxed, w.mini)).collect();
         assert_eq!(after, before);
         assert!(!app.state.tapper.placed);
-        let min_w = views::rack::base_w(&app.state) + 3.0 * views::rack::STEP_W;
+        let min_w = views::rack::min_w(&app.state);
         assert_eq!((app.state.rack_pos, app.state.rack_size), ((100.0, 120.0), (min_w, views::rack::MIN_H)));
         assert_eq!(main_win(), None);
     }

@@ -4647,12 +4647,16 @@ impl App {
                     self.damage_scroll(t);
                 }
                 Drag::BarRows { t, last, row } => {
+                    // The picker's bar resizes its previews either way, down / right = taller, as FL's resizes them
+                    // (spec: ui/scroll-bars.md §3); the others scroll up/down.
+                    let picker = t == Scroll::PlPick;
                     // Only when it moved up/down: the clamp uses last frame's bar, stale once the rows were resized.
-                    if let Some(b) = self.bar(t).filter(|_| y != last.1) {
+                    if let Some(b) = self.bar(t).filter(|_| y != last.1 && !picker) {
                         self.scroll_set(t, self.scroll_get(t) + (y - last.1) * b.ratio());
                     }
+                    let moved = if picker { x - last.0 + y - last.1 } else { x - last.0 };
                     let row = row.map(|r| {
-                        let r = r * BAR_ROW_STEP.powf((x - last.0) / BAR_ROW_PX);
+                        let r = r * BAR_ROW_STEP.powf(moved / BAR_ROW_PX);
                         self.set_rows(t, r);
                         r
                     });
@@ -5445,6 +5449,7 @@ impl App {
         match t {
             Scroll::PianoY => Some(self.state.piano.row_h),
             Scroll::PlaylistY => Some(self.state.playlist.row_h),
+            Scroll::PlPick => Some(self.state.playlist.pick_row()),
             _ => None,
         }
     }
@@ -5462,6 +5467,11 @@ impl App {
             Scroll::PlaylistY => {
                 if let Some(g) = self.pl_grid {
                     crate::playlist::set_row_h(&mut self.state, g, g.cy(), row);
+                }
+            }
+            Scroll::PlPick => {
+                if let Some(b) = self.bar(t) {
+                    crate::playlist::set_pick_row(&mut self.state, b.view, row);
                 }
             }
             _ => {}
@@ -6298,7 +6308,7 @@ impl App {
             return None;
         }
         if matches!(area, Some(Action::PlPick(_) | Action::PlPickList)) {
-            self.scroll_set(Scroll::PlPick, self.scroll_get(Scroll::PlPick) - (dy + dx) * 31.0);
+            self.scroll_set(Scroll::PlPick, self.scroll_get(Scroll::PlPick) - (dy + dx) * self.state.playlist.pick_row());
             return Some(Win::Playlist);
         }
         if matches!(area, Some(Action::PatternNext)) {
@@ -12715,14 +12725,21 @@ mod tests {
         click(&mut app, &mut a, hr);
         assert_eq!(crate::rack::pattern_steps(&app.state), 32);
 
-        // Sizes snap to whole steps / rows, down to 4 steps and one row (FL's widths plus the wider name button).
+        // Sizes snap to whole steps / rows (FL's widths plus the wider name button), down to four beats of the
+        // project's signature but never under 16 steps (the title bar's buttons would collide), and one row.
         let d = crate::rack::NAME_W - crate::rack::FL_NAME_W;
         assert_eq!(views::rack::snap_size(&app.state, 822.0 + d, 300.0), (819.0 + d, 306.0));
-        assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (307.0 + d, 126.0));
+        assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (499.0 + d, 126.0));
         let keep = app.state.rack_size;
-        app.state.rack_size = (307.0 + d, 126.0);
-        assert_eq!(views::rack::visible_steps(&app.state), 4);
+        app.state.rack_size = (499.0 + d, 126.0);
+        assert_eq!(views::rack::visible_steps(&app.state), 16);
         app.state.rack_size = keep;
+        let bar = app.state.project.bar;
+        app.state.project.bar = Some((2, 8));
+        assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (499.0 + d + 16.0 * views::rack::STEP_W, 126.0));
+        app.state.project.bar = Some((6, 2));
+        assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (499.0 + d, 126.0));
+        app.state.project.bar = bar;
 
         // Piano-roll view toggle: rows become mini rolls; clicking one opens the Piano roll.
         assert!(!app.hits.iter().any(|h| matches!(h.action, Action::RackRoll(_))));
@@ -16364,6 +16381,24 @@ mod tests {
             frame(&mut app, &mut c, None);
             c.pixmap.save_png(dir.join(name)).unwrap();
         }
+        // The picker's three lists with tall items (a right-drag on its scroll bar, ui/scroll-bars.md §3), in both
+        // designs. The audio clip's waveform is made up.
+        app.state.playlist.row_h = pl::ROW_H;
+        app.add_clip_channel(ChannelKind::AudioClip);
+        let audio = app.state.project.channels.iter_mut().rfind(|c| c.kind == ChannelKind::AudioClip).unwrap();
+        audio.sample_path = Some("shot.wav".into());
+        let peaks = (0..400).map(|i| (i as f32 / 9.0).sin().abs() * (1.0 - i as f32 / 400.0)).map(|a| (-a, a)).collect();
+        let wave = pl::Wave { rate: 44100, frames: 400 * 64, per: 64, peaks };
+        app.state.playlist.waves.borrow_mut().insert("shot.wav".into(), Some(std::rc::Rc::new(wave)));
+        for design in [Design::Citrus, Design::Lemon] {
+            app.set_design(design, false);
+            for (kind, list) in [(pl::PickKind::Pattern, "patterns"), (pl::PickKind::Audio, "audio"), (pl::PickKind::Automation, "automation")] {
+                app.state.playlist.picker = kind;
+                app.state.playlist.pick_rows[kind as usize] = 90.0;
+                frame(&mut app, &mut c, None);
+                c.pixmap.save_png(dir.join(format!("pl_pick_{list}_{}.png", format!("{design:?}").to_lowercase()))).unwrap();
+            }
+        }
     }
 
     /// Look check for the piano roll's vertical zoom, time markers, Tools menu and snap menus (spec: ui/piano-roll.md
@@ -16837,10 +16872,11 @@ mod tests {
         // Greyed out.
         for name in [
             "Open audio editor / New audio editor",
-            "Plugin repository",
         ] {
             assert_eq!(hint(&app, &Action::Placeholder(name)), format!("{name}: not available yet"));
         }
+        // Hidden until it has a shop icon of its own.
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder("Plugin repository")));
         // Help: the left click does nothing; the right click is About, on the release over the button only.
         let help = hit_rect(&app, &Action::Util(Util::Help));
         app.state.message = None;

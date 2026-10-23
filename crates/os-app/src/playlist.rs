@@ -21,6 +21,10 @@ use crate::snap::EditorSnap;
 
 /// Track row pitch at the default size (spec: ui/main-window.md §6); a clip fills its row less the 3 px gap.
 pub const ROW_H: f32 = 48.0;
+/// Picker item pitch: FL's measured 30 px rows (§1), the smallest; a right-drag on the picker's scroll bar makes the
+/// items up to [`PICK_ROW_MAX`] tall, previews of their contents (spec: ui/scroll-bars.md §3).
+pub const PICK_ROW: f32 = 31.0;
+pub const PICK_ROW_MAX: f32 = 200.0;
 /// Track heights Alt+wheel can reach, and the step per wheel notch (§6; FL's `16 + 2 × h`, h = 0..=132, 3 per notch).
 pub const ROW_MIN: f32 = 16.0;
 pub const ROW_MAX: f32 = 280.0;
@@ -540,6 +544,9 @@ pub struct PlaylistState {
     pub picker: PickKind,
     /// Picker list scroll, pixels.
     pub pick_scroll: f32,
+    /// Picker item pitch of each list (patterns, audio clips, automation clips), pixels: a right-drag on the picker's
+    /// scroll bar resizes the shown list's (`set_pick_row`).
+    pub pick_rows: [f32; 3],
     /// Selected clips (indices into the first arrangement's clips).
     pub sel: Vec<usize>,
     /// Selected track (Ctrl+Up / Down, header click).
@@ -595,6 +602,7 @@ impl Default for PlaylistState {
             source: None,
             picker: PickKind::Pattern,
             pick_scroll: 0.0,
+            pick_rows: [PICK_ROW; 3],
             sel: Vec::new(),
             track: 0,
             pos: 0,
@@ -624,11 +632,16 @@ impl Default for PlaylistState {
 }
 
 impl PlaylistState {
-    /// Forget everything tied to the previous project (keeps tool and snap; the track height comes with the
-    /// project, `load_view`).
+    /// Forget everything tied to the previous project (keeps tool, snap and the picker's item sizes; the track height
+    /// comes with the project, `load_view`).
     pub fn reset(&mut self) {
-        let (tool, snap) = (self.tool, self.snap);
-        *self = PlaylistState { tool, snap, ..PlaylistState::default() };
+        let (tool, snap, pick_rows) = (self.tool, self.snap, self.pick_rows);
+        *self = PlaylistState { tool, snap, pick_rows, ..PlaylistState::default() };
+    }
+
+    /// The shown picker list's item pitch.
+    pub fn pick_row(&self) -> f32 {
+        self.pick_rows[self.picker as usize]
     }
 
     /// The waveform of a sample path (loaded and summarised once).
@@ -1474,6 +1487,20 @@ pub fn set_row_h(s: &mut State, grid: Rect, y: f32, row: f32) {
     s.playlist.row_h = ((row / 2.0).round() * 2.0).clamp(ROW_MIN, ROW_MAX);
     let rows = Rows::new(s);
     s.playlist_scroll.1 = (rows.top(t) + frac * rows.height(t) - (y - grid.y)).max(0.0);
+}
+
+/// Set the shown picker list's item pitch (clamped to [`PICK_ROW`]..[`PICK_ROW_MAX`], whole pixels), keeping the item at
+/// the middle of the list's `view` (its height) in place.
+pub fn set_pick_row(s: &mut State, view: f32, row: f32) {
+    // The list's content: 3 px down, the items, 1 px under them (`views::playlist::picker`).
+    let n = crate::views::playlist::pick_items(s).len() as f32;
+    let max = |pitch: f32| (n * pitch + 4.0 - view).max(0.0);
+    let old = s.playlist.pick_row();
+    let scroll = s.playlist.pick_scroll.min(max(old));
+    let mid = ((scroll + view / 2.0 - 3.0) / old).clamp(0.0, n);
+    let new = row.round().clamp(PICK_ROW, PICK_ROW_MAX);
+    s.playlist.pick_rows[s.playlist.picker as usize] = new;
+    s.playlist.pick_scroll = (3.0 + mid * new - view / 2.0).clamp(0.0, max(new));
 }
 
 /// Take the project's stored playlist view (event 242): track height, time zoom and scroll (spec:

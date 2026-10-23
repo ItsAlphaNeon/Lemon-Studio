@@ -773,8 +773,8 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo, fit: f32) {
         (Icon::Plug, Action::PickerOpen, false, "Plugin picker (F8)"),
         (Icon::Kick, Action::ToggleWin(Win::Tapper), s.shown(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
         (Icon::Touch, Action::ToggleWin(Win::Touch), s.shown(Win::Touch), "Touch controller (Alt+F7)"),
-        // FL's store: kept, greyed, for a repository of free and open-source plugins (spec: ui/main-window.md §3).
-        (Icon::Plug, Action::Placeholder("Plugin repository"), false, "Plugin repository"),
+        // FL's store button is hidden: its stand-in, a repository of free and open-source plugins (spec:
+        // ui/main-window.md §3), had the plugin picker's icon. It is to come back with a shop icon.
     ];
     for (i, (icon, action, open, hint)) in wins.into_iter().enumerate() {
         let r = btn(973.0 + 33.0 * i as f32, 45.0);
