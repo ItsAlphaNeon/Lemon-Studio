@@ -54,6 +54,7 @@ mod midi_out;
 mod midi_play;
 mod mixer;
 mod osc3;
+mod citrus;
 mod monitor;
 mod params;
 mod piano;

@@ -168,9 +168,11 @@ fn factory_in(files: &[(&str, &[u8])], plugin: &str) -> Vec<Preset> {
     sorted(loose, nested)
 }
 
-/// The factory presets of `plugin`.
+/// The factory presets of `plugin`: Lemon Studio's, then (for Citrus) the `.fst` files of an installed copy.
 pub fn factory(plugin: &str) -> Vec<Preset> {
-    factory_in(FACTORY, plugin)
+    let mut v = factory_in(FACTORY, plugin);
+    v.extend(crate::citrus::more_presets(plugin));
+    v
 }
 
 /// The plugin folders that have factory presets.
@@ -564,7 +566,11 @@ pub fn run(app: &mut App, c: PCmd) -> Option<String> {
 /// status message.
 pub fn load_into(app: &mut App, key: usize, path: &Path) -> Option<String> {
     let d = app.plugins.descriptor(key)?;
-    let first = read_any(path, &d).and_then(|v| v.into_iter().next().ok_or_else(|| format!("{} holds no preset", shown_name(path))));
+    let first = match crate::citrus::fst_state(path) {
+        // An FL preset file (Citrus's list of an FL install's presets) holds the original's state.
+        Some(state) => state.map(|s| (shown_name(path), Body::State(s))),
+        None => read_any(path, &d).and_then(|v| v.into_iter().next().ok_or_else(|| format!("{} holds no preset", shown_name(path)))),
+    };
     Some(match first {
         Ok((_, body)) => match apply(app, key, &body) {
             Some(missing) => {
@@ -921,7 +927,7 @@ mod tests {
         for key in keys {
             let d = pl.descriptor(key).unwrap();
             let infos = pl.param_infos(key);
-            for p in factory(&d.name) {
+            for p in factory_in(FACTORY, &d.name) {
                 let Ok((h, Body::Params(list))) = load(&p.path, &d.uid()) else { panic!("{} does not load for {}", p.name, d.name) };
                 assert_eq!(h.plugin, d.name);
                 for (name, v) in list {
