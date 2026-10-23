@@ -34,7 +34,8 @@ pub const TOGGLE_PROJECT_PICKER: Combo =
 /// Shows the plugin database: the browser on its Plugin database tab (`App::show_plugin_database`).
 pub const SHOW_PLUGIN_DATABASE: Combo =
     Combo { key: "shortcut_show_plugin_database", label: "Show plugin database", choices: F8_KEYS, default: 1 };
-/// MIDI import window: kept only, Lemon Studio has no MIDI import window yet.
+/// MIDI import window: the modifier held while a MIDI file is chosen or dropped picks the row whose behaviour applies
+/// (`midi_file::show_for`; spec: ui/midi-files.md §10.5).
 pub const MIDI_WHEN_NECESSARY: Combo =
     Combo { key: "midi_import_window_when_necessary", label: "Show when necessary", choices: MIDI_MODS, default: 0 };
 pub const MIDI_EVERY_TIME: Combo =

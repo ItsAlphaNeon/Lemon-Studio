@@ -2758,6 +2758,7 @@ dependencies = [
  "os-model",
  "os-native",
  "os-paths",
+ "os-smf",
  "os-theme",
  "os-ui",
  "os-vst2",
@@ -2897,6 +2898,10 @@ dependencies = [
  "os-flp",
  "os-model",
 ]
+
+[[package]]
+name = "os-smf"
+version = "0.0.1"
 
 [[package]]
 name = "os-theme"
