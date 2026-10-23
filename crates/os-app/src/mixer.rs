@@ -852,7 +852,7 @@ const COLORS: [(&str, u32); 8] = [
 
 /// Track menu (right click on a strip), §6.1.
 pub fn track_menu(s: &State, n: u16, x: f32, y: f32) -> Popup {
-    let mut items = vec![PItem::head(Box::leak(format!("Mixer track ({})", name(s, n)).into_boxed_str()))];
+    let mut items = vec![PItem::head(format!("Mixer track ({})", name(s, n)))];
     items.extend(track_items(n));
     Popup { x, y, items, sub: None }
 }
@@ -952,7 +952,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::not_yet("Remove all (audio editor) instances"),
         // The cable physics debug panel, hidden from users; uncomment to tune the cables again.
         // PItem::new("Cable physics (debug)...", Cmd::Mixer(MCmd::CablePhysics)).mark(Mark::Check(s.cables.borrow().debug)),
-        PItem::head(Box::leak(format!("Mixer track ({})", name(s, s.selected_mixer)).into_boxed_str())),
+        PItem::head(format!("Mixer track ({})", name(s, s.selected_mixer))),
     ];
     items.extend(track_items(s.selected_mixer));
     Popup { x, y, items, sub: None }

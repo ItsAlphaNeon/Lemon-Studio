@@ -329,6 +329,8 @@ pub enum Cmd {
     Claw(crate::piano_dlg::CCmd),
     /// The LFO dialog's Shape ▸ menu (spec: ui/piano-lfo.md §1).
     LfoShape(crate::lfo::Shape),
+    /// The Quantize dialog's template ▸ and duration menus (spec: ui/piano-quantize.md §1, §2).
+    Quant(crate::quantize::QCmd),
     /// Settings > Audio menus: device, sample rate, buffer length (spec: ui/settings.md "Audio").
     Audio(crate::audio_cfg::Set),
     /// The toolbar CPU panel's menu (spec: ui/main-window.md §13).
@@ -415,7 +417,7 @@ impl PItem {
         self.dim = on;
         self
     }
-    pub fn head(label: &'static str) -> Self {
+    pub fn head(label: impl Into<Cow<'static, str>>) -> Self {
         PItem { head: true, ..PItem::new(label, Cmd::Nothing) }
     }
     pub fn sep() -> Self {
@@ -3484,6 +3486,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return None;
         }
+        Cmd::Quant(c) => {
+            app.quant_command(c);
+            return None;
+        }
         Cmd::Misc(row, m, v) => {
             crate::misc::set(app, row, m, v);
             return None;
@@ -3996,6 +4002,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Limit(_) => None,
         Cmd::Claw(_) => None,
         Cmd::LfoShape(_) => None,
+        Cmd::Quant(_) => None,
         Cmd::Messages(_) => None,
         Cmd::DataFolder(_) => None,
     };

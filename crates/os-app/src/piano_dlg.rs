@@ -2,19 +2,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The piano roll's Flam (Alt+F), Claw machine (Alt+W), Flip (Alt+Y), Scale levels (Alt+X), Limit (Alt+K) and LFO
-//! (Alt+O) dialogs: one tool window shows whichever is open. As with Strum, its session previews every change on the
-//! notes (and LFO's on a channel lane's control points), Accept keeps the result as one undo step and × puts the notes
-//! back. The tools are `flam.rs`, `claw.rs`, `flip.rs`, `levels.rs`, `limit.rs` and `lfo.rs`; the window is
-//! `views/piano_dlg.rs`.
-// spec: ui/piano-flam.md, ui/piano-claw.md, ui/piano-flip.md, ui/piano-level-scaling.md, ui/piano-limit.md, ui/piano-lfo.md
+//! The piano roll's Flam (Alt+F), Claw machine (Alt+W), Flip (Alt+Y), Scale levels (Alt+X), Limit (Alt+K), LFO
+//! (Alt+O) and Quantize (Alt+Q) dialogs: one tool window shows whichever is open. As with Strum, its session previews
+//! every change on the notes (and LFO's on a channel lane's control points), Accept keeps the result as one undo step
+//! and × puts the notes back. The tools are `flam.rs`, `claw.rs`, `flip.rs`, `levels.rs`, `limit.rs`, `lfo.rs` and
+//! `quantize.rs`; the window is `views/piano_dlg.rs`.
+// spec: ui/piano-flam.md, ui/piano-claw.md, ui/piano-flip.md, ui/piano-level-scaling.md, ui/piano-limit.md, ui/piano-lfo.md,
+// ui/piano-quantize.md
 
 use os_model::{ControlPoint, Note};
 
 use crate::app::State;
 use crate::piano::{self, Lane};
 use crate::playlist::{Cmd, Mark, PItem};
-use crate::{chords, claw, flam, flip, levels, lfo, limit};
+use crate::{chords, claw, flam, flip, levels, lfo, limit, quantize};
 
 /// Which dialog the window shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -26,11 +27,12 @@ pub enum Tool {
     Limit,
     Claw,
     Lfo,
+    Quantize,
 }
 
 impl Tool {
     /// How many there are (`Ui::pos`).
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 7;
 
     pub fn title(self) -> &'static str {
         match self {
@@ -40,6 +42,7 @@ impl Tool {
             Tool::Limit => "Piano roll - limiter / transposer",
             Tool::Claw => "Piano roll - claw machine",
             Tool::Lfo => "Piano roll - LFO",
+            Tool::Quantize => "Piano roll - quantizer",
         }
     }
 
@@ -57,6 +60,7 @@ impl Tool {
             Tool::Limit => "Piano roll limit",
             Tool::Claw => "Piano roll claw machine",
             Tool::Lfo => "Piano roll LFO",
+            Tool::Quantize => "Piano roll quantize",
         }
     }
 
@@ -68,6 +72,7 @@ impl Tool {
             Tool::Limit => "limited",
             Tool::Claw => "claw machine applied",
             Tool::Lfo => "LFO applied",
+            Tool::Quantize => "quantized",
         }
     }
 
@@ -94,11 +99,16 @@ pub enum Knob {
     LfoEndRange,
     LfoEndSpeed,
     LfoPhase,
+    /// Quantize's Start time, Sensitivity and Duration, and its Levels (an index into `quantize::LEVELS`).
+    QStart,
+    QSens,
+    QDur,
+    QLevel(u8),
 }
 
 impl Knob {
     /// Change of the 0..1 position per wheel notch (piano-flam.md §1, piano-level-scaling.md §1, piano-claw.md §1,
-    /// piano-lfo.md §1).
+    /// piano-lfo.md §1, piano-quantize.md §1).
     pub fn notch(self) -> f32 {
         match self {
             Knob::FlamTime => flam::TIME_NOTCH,
@@ -110,6 +120,9 @@ impl Knob {
             Knob::LfoRange | Knob::LfoEndRange => lfo::RANGE_NOTCH,
             Knob::LfoSpeed | Knob::LfoEndSpeed => lfo::SPEED_NOTCH,
             Knob::LfoPhase => lfo::PHASE_NOTCH,
+            Knob::QStart | Knob::QDur => quantize::STRENGTH_NOTCH,
+            Knob::QSens => quantize::SENS_NOTCH,
+            Knob::QLevel(_) => quantize::LEVEL_NOTCH,
         }
     }
 
@@ -125,7 +138,7 @@ impl Knob {
     /// Position after Reset; Center's is on the velocity lane.
     pub fn default_pos(self) -> f32 {
         let (f, l, c) = (flam::Settings::default(), levels::Settings::default(), claw::Settings::default());
-        Ui::pos_of(self, &f, &l, &c, &lfo::Settings::default())
+        Ui::pos_of(self, &f, &l, &c, &lfo::Settings::default(), &quantize::Settings::default())
     }
 }
 
@@ -154,6 +167,10 @@ pub enum Act {
     LfoEnd,
     LfoLog,
     ShapeMenu,
+    /// Quantize's template folder button (a file dialog) and ▸ menu, and its duration menu.
+    TemplateFolder,
+    TemplateMenu,
+    DurMenu,
     /// Limit's section header arrows: 0 = Key / scale restriction, 1 = Keyboard range.
     Collapse(u8),
     /// A press on Limit's keys (the green key follows), its name strip (the nearer range end follows) or its scroll
@@ -194,6 +211,8 @@ pub struct Ui {
     pub limit: limit::Settings,
     pub claw: claw::Settings,
     pub lfo: lfo::Settings,
+    pub quant: quantize::Settings,
+    pub quant_tpl: quantize::Template,
     /// Limit's collapsed sections (`Act::Collapse`); a view setting, kept as it is.
     pub collapsed: [bool; 2],
     /// Limit's keyboard view: px from C0's left edge to the view's.
@@ -204,6 +223,8 @@ pub struct Ui {
     kept_limit: limit::Settings,
     kept_claw: claw::Settings,
     kept_lfo: lfo::Settings,
+    kept_quant: quantize::Settings,
+    kept_quant_tpl: quantize::Template,
     /// The Control lane Scale levels was last accepted on (its Center follows a new lane).
     kept_lane: Option<Lane>,
     session: Option<Session>,
@@ -227,7 +248,7 @@ fn pct(v: f32) -> i64 {
 }
 
 impl Ui {
-    fn pos_of(k: Knob, f: &flam::Settings, l: &levels::Settings, c: &claw::Settings, o: &lfo::Settings) -> f32 {
+    fn pos_of(k: Knob, f: &flam::Settings, l: &levels::Settings, c: &claw::Settings, o: &lfo::Settings, q: &quantize::Settings) -> f32 {
         match k {
             Knob::FlamTime => f.time,
             Knob::FlamVel => f.vel,
@@ -243,12 +264,16 @@ impl Ui {
             Knob::LfoEndRange => lfo::range_pos(o.end.range),
             Knob::LfoEndSpeed => lfo::speed_pos(o.end.speed),
             Knob::LfoPhase => lfo::phase_pos(o.phase),
+            Knob::QStart => q.start,
+            Knob::QSens => q.sens_pos(),
+            Knob::QDur => q.dur,
+            Knob::QLevel(i) => q.levels[usize::from(i.min(5))],
         }
     }
 
     /// The 0..1 position of knob `k`.
     pub fn get(&self, k: Knob) -> f32 {
-        Self::pos_of(k, &self.flam, &self.levels, &self.claw, &self.lfo)
+        Self::pos_of(k, &self.flam, &self.levels, &self.claw, &self.lfo, &self.quant)
     }
 
     pub fn set(&mut self, k: Knob, v: f32) {
@@ -268,10 +293,15 @@ impl Ui {
             Knob::LfoEndRange => self.lfo.end.range = lfo::range_of(v),
             Knob::LfoEndSpeed => self.lfo.end.speed = lfo::speed_of(v),
             Knob::LfoPhase => self.lfo.phase = lfo::phase_of(v),
+            Knob::QStart => self.quant.start = v,
+            Knob::QSens => self.quant.set_sens_pos(v),
+            Knob::QDur => self.quant.dur = v,
+            Knob::QLevel(i) => self.quant.levels[usize::from(i.min(5))] = v,
         }
     }
 
-    /// The hint-bar text of a knob (piano-flam.md §1, piano-level-scaling.md §1, piano-claw.md §5, piano-lfo.md §1).
+    /// The hint-bar text of a knob (piano-flam.md §1, piano-level-scaling.md §1, piano-claw.md §5, piano-lfo.md §1,
+    /// piano-quantize.md §1).
     pub fn text(&self, k: Knob, ppq: u32) -> String {
         let (l, o) = (&self.levels, &self.lfo);
         match k {
@@ -289,6 +319,10 @@ impl Ui {
             Knob::LfoEndRange => o.end.range_text(),
             Knob::LfoEndSpeed => o.end.speed_text(ppq),
             Knob::LfoPhase => o.phase_text(),
+            Knob::QStart => quantize::Settings::pct_text(self.quant.start),
+            Knob::QSens => self.quant.sens_text(ppq),
+            Knob::QDur => quantize::Settings::pct_text(self.quant.dur),
+            Knob::QLevel(i) => quantize::Settings::pct_text(self.quant.levels[usize::from(i.min(5))]),
         }
     }
 
@@ -343,6 +377,7 @@ pub fn open(s: &mut State, tool: Tool) {
         }
         Tool::Claw => d.claw = d.kept_claw,
         Tool::Lfo => d.lfo = d.kept_lfo,
+        Tool::Quantize => (d.quant, d.quant_tpl) = (d.kept_quant, d.kept_quant_tpl.clone()),
     }
     preview(s);
 }
@@ -450,6 +485,10 @@ fn run(s: &mut State, step: Option<&'static str>) -> bool {
                 step,
             )
         }
+        Tool::Quantize => {
+            let (set, tpl, ppq) = (d.quant, d.quant_tpl.clone(), u32::from(s.project.ppq.max(4)));
+            crate::piano_tools::apply_as(s, |_, ns| quantize::quantize(ns, &tpl.0, &set, ppq), step)
+        }
     }
 }
 
@@ -529,6 +568,7 @@ pub fn accept(s: &mut State) -> String {
         Tool::Limit => d.kept_limit = d.limit,
         Tool::Claw => d.kept_claw = d.claw,
         Tool::Lfo => d.kept_lfo = d.lfo,
+        Tool::Quantize => (d.kept_quant, d.kept_quant_tpl) = (d.quant, d.quant_tpl.clone()),
     }
     if run(s, Some(tool.step())) {
         format!("Piano roll: {}", tool.done())
@@ -559,6 +599,7 @@ pub fn act(s: &mut State, a: Act) {
             }
             Tool::Claw => d.claw = claw::Settings::default(),
             Tool::Lfo => d.lfo = lfo::Settings::default(),
+            Tool::Quantize => (d.quant, d.quant_tpl) = (quantize::Settings::default(), quantize::Template::default()),
         },
         Act::Absolute => d.flam.absolute = !d.flam.absolute,
         Act::Before => d.flam.before = !d.flam.before,
@@ -684,6 +725,23 @@ pub fn shape_menu(set: &lfo::Settings) -> Vec<PItem> {
 pub fn lfo_shape(s: &mut State, w: lfo::Shape) {
     s.piano_dlg.lfo.shape = w;
     preview(s);
+}
+
+/// A pick from Quantize's menus or its folder button's file dialog: it previews at once. Returns a message for a
+/// template file that could not be read.
+pub fn quant_cmd(s: &mut State, c: quantize::QCmd) -> Option<String> {
+    let mut msg = None;
+    match c {
+        quantize::QCmd::Template(None) => s.piano_dlg.quant_tpl = quantize::Template::default(),
+        quantize::QCmd::Template(Some(p)) => match crate::arpeggiate::load(&p) {
+            Ok(pat) => s.piano_dlg.quant_tpl = quantize::Template(pat),
+            Err(e) => msg = Some(format!("Quantizer: {e}")),
+        },
+        quantize::QCmd::Snap(i) => s.piano_dlg.quant_tpl = quantize::Template::snap(usize::from(i)),
+        quantize::QCmd::Mode(m) => s.piano_dlg.quant.mode = m,
+    }
+    preview(s);
+    msg
 }
 
 /// An Options ▸ preset picked: it previews at once (piano-flam.md §5).

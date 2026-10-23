@@ -105,6 +105,7 @@ mod chords;
 mod claw;
 mod limit;
 mod lfo;
+mod quantize;
 mod piano_dlg;
 mod arpeggiate;
 mod tapper;

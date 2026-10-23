@@ -66,6 +66,8 @@ pub enum Then {
     LoadTheme,
     /// The Arpeggiate dialog's folder button (spec: ui/piano-arpeggiate.md §1).
     ArpPattern,
+    /// The Quantize dialog's folder button (spec: ui/piano-quantize.md §1).
+    QuantTemplate,
     PluginFolder,
     /// Save preset as... for the plugin with this key (`plugins::Plugins::hosted`).
     SavePreset(usize),

@@ -1824,6 +1824,11 @@ impl App {
                     self.arp_command(crate::arpeggiate::ACmd::Pattern(Some(p)));
                 }
             }
+            Then::QuantTemplate => {
+                if let Some(p) = file {
+                    self.quant_command(crate::quantize::QCmd::Template(Some(p)));
+                }
+            }
             Then::PluginFolder => {
                 if let Some(p) = file {
                     self.plugin_folder_chosen(p);
@@ -2977,6 +2982,14 @@ impl App {
         self.invalidate();
     }
 
+    /// A template or duration mode picked for the Quantize dialog (its menus, its file dialog).
+    pub(crate) fn quant_command(&mut self, c: crate::quantize::QCmd) {
+        if let Some(m) = crate::piano_dlg::quant_cmd(&mut self.state, c) {
+            self.state.message = Some(m);
+        }
+        self.invalidate();
+    }
+
     /// A pattern, direction or sync picked for the Arpeggiate dialog (its menus, its file dialog).
     pub(crate) fn arp_command(&mut self, c: crate::arpeggiate::ACmd) {
         if let Some(m) = crate::arpeggiate::command(&mut self.state, c) {
@@ -2987,9 +3000,8 @@ impl App {
 
     // ---------------------------------------------------------------- Flam, Flip and Scale levels dialogs
 
-    /// Tools ▸ Flam… (Alt+F), Claw machine… (Alt+W), Flip… (Alt+Y), Scale levels… (Alt+X), Limit… (Alt+K) and LFO…
-    /// (Alt+O): open
-    /// the dialog in front (centred over the main
+    /// Tools ▸ Flam… (Alt+F), Claw machine… (Alt+W), Flip… (Alt+Y), Scale levels… (Alt+X), Limit… (Alt+K), LFO…
+    /// (Alt+O) and Quantize… (Alt+Q): open the dialog in front (centred over the main
     /// window the first time, then where it was left) on the piano roll's notes, previewing the settings last accepted.
     /// Another of these dialogs open: its preview is put back and the window shows this one. Scale levels does not open
     /// on a channel control lane (spec: ui/piano-level-scaling.md §4).
@@ -3024,7 +3036,7 @@ impl App {
                 s.message = Some(dlg::accept(s));
                 s.hide(Win::PianoDlg);
             }
-            Act::Options | Act::KeyMenu | Act::ScaleMenu | Act::SnapMenu | Act::PeriodMenu | Act::TrashMenu | Act::ShapeMenu => {
+            Act::Options | Act::KeyMenu | Act::ScaleMenu | Act::SnapMenu | Act::PeriodMenu | Act::TrashMenu | Act::ShapeMenu | Act::TemplateMenu | Act::DurMenu => {
                 let (x, y) = self.mouse;
                 let items = match a {
                     Act::KeyMenu => dlg::key_menu(&s.piano_dlg.limit),
@@ -3033,9 +3045,18 @@ impl App {
                     Act::PeriodMenu => dlg::period_menu(&s.piano_dlg.claw),
                     Act::TrashMenu => dlg::trash_menu(&s.piano_dlg.claw),
                     Act::ShapeMenu => dlg::shape_menu(&s.piano_dlg.lfo),
+                    Act::TemplateMenu => crate::quantize::template_menu(&s.piano_dlg.quant_tpl.0, &crate::quantize::folder()),
+                    Act::DurMenu => crate::quantize::mode_menu(&s.piano_dlg.quant),
                     _ => dlg::options_menu(),
                 };
                 s.playlist.popup = Some(crate::playlist::Popup { x, y, items, sub: None });
+            }
+            Act::TemplateFolder => {
+                let dir = s.piano_dlg.quant_tpl.0.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf)).unwrap_or_else(crate::quantize::folder);
+                let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Load quantize template", "quantizer", crate::dialog::Then::QuantTemplate)
+                    .filter("Score", &["fsc"])
+                    .start(Some(&dir));
+                self.file_dialog(dlg);
             }
             Act::Keys => {
                 let k = views::piano_dlg::kb_key(s, self.mouse.0, self.mouse.1, false);
@@ -14178,9 +14199,9 @@ mod tests {
         assert_eq!(mine(&app), vec![(96, 72, 62)]);
         assert_eq!(app.state.piano.clipboard.len(), 3);
 
-        // Alt+R / Q / U open their preset menus; picking an entry runs it.
+        // Alt+R / U open their preset menus; picking an entry runs it.
         put(&mut app, &[(0, 96, 60), (0, 96, 64), (0, 96, 67)]);
-        for (k, sub) in [("r", Sub::Randomize), ("q", Sub::Quantize), ("u", Sub::Chop)] {
+        for (k, sub) in [("r", Sub::Randomize), ("u", Sub::Chop)] {
             key(&mut app, k, false, true, false);
             let pop = app.state.playlist.popup.take().unwrap_or_else(|| panic!("Alt+{k} opens a menu"));
             assert!(pop.items.iter().all(|i| i.sep || matches!(i.cmd, Cmd::Piano(_))), "{sub:?}");
@@ -14511,6 +14532,55 @@ mod tests {
             app.act(Action::CloseWin(Win::PianoDlg));
             assert!(vol(&app).is_empty(), "× takes the points back");
             app.state.piano.lane = piano::Lane::Velocity;
+        }
+        frame(&mut app, &mut c, None);
+
+        // Alt+Q opens Quantize (spec: ui/piano-quantize.md): Reset's settings on the Default template at once, "53%"
+        // after a notch of Start time, the duration and template menus; Accept is one undo step, the settings and the
+        // template are kept for the next opening and × puts the notes back.
+        {
+            use crate::piano_dlg::{Act as DAct, Knob as DKnob, Tool};
+            use crate::quantize::{Mode, QCmd};
+            let click = |app: &mut App, a: Action| {
+                let r = hit_rect(app, &a);
+                app.mouse_move(r.cx(), r.cy());
+                app.mouse_down();
+                app.mouse_up();
+            };
+            let mine = |app: &App| piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| (n.position, n.length)).collect::<Vec<_>>();
+            assert_eq!(app.state.project.ppq, 96);
+            put(&mut app, &[(5, 20, 60), (30, 30, 62), (50, 10, 64), (70, 40, 65)]);
+            let before = mine(&app);
+            key(&mut app, "q", false, true, false);
+            assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Quantize);
+            assert_eq!(mine(&app), [(3, 22), (27, 27), (49, 5), (71, 44)], "Reset's settings, as FL's");
+            frame(&mut app, &mut c, None);
+            let k = hit_rect(&app, &Action::Knob(KnobId::PianoDlg(DKnob::QStart)));
+            app.mouse_move(k.cx(), k.cy());
+            app.wheel(0.0, 1.0, false, false);
+            assert_eq!(app.hint.as_ref(), "53%");
+            frame(&mut app, &mut c, None);
+            app.act(Action::PianoDlg(DAct::DurMenu));
+            let pop = app.state.playlist.popup.take().expect("the duration box opens its menu");
+            assert_eq!(pop.items.iter().filter(|i| matches!(i.cmd, Cmd::Quant(QCmd::Mode(_)))).count(), 4);
+            crate::playlist::run(&mut app, Cmd::Quant(QCmd::Mode(Mode::LeaveDuration)));
+            assert_eq!(mine(&app).iter().map(|n| n.1).collect::<Vec<_>>(), [20, 30, 10, 40], "Leave duration keeps the lengths");
+            app.act(Action::PianoDlg(DAct::TemplateMenu));
+            let pop = app.state.playlist.popup.take().expect("the ▸ opens the template menu");
+            assert!(pop.items.iter().any(|i| i.label == "Default" && i.mark == crate::playlist::Mark::Radio(true)), "Default ticked");
+            assert!(matches!(pop.items.last().map(|i| &i.cmd), Some(Cmd::Quant(QCmd::Snap(7)))), "the Snap grids last");
+            crate::playlist::run(&mut app, Cmd::Quant(QCmd::Snap(1)));
+            assert_eq!(app.state.piano_dlg.quant_tpl.0.name, "Beat");
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Accept));
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(mine(&app), before, "one undo step");
+            key(&mut app, "q", false, true, false);
+            assert_eq!((app.state.piano_dlg.quant.mode, app.state.piano_dlg.quant_tpl.0.name.as_str()), (Mode::LeaveDuration, "Beat"), "kept");
+            assert_ne!(mine(&app), before);
+            app.act(Action::CloseWin(Win::PianoDlg));
+            assert_eq!(mine(&app), before, "× puts the notes back");
         }
         frame(&mut app, &mut c, None);
 
