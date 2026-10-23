@@ -754,7 +754,7 @@ pub fn relayout(s: &mut State, f: impl FnOnce(&mut State)) {
     let before = crate::views::rack::base_w(s);
     f(s);
     let after = crate::views::rack::base_w(s);
-    s.rack_size.0 = (s.rack_size.0 + after - before).max(after + 3.0 * crate::views::rack::STEP_W);
+    s.rack_size.0 = (s.rack_size.0 + after - before).max(crate::views::rack::min_w(s));
 }
 
 // ---------------------------------------------------------------------------------------------------------

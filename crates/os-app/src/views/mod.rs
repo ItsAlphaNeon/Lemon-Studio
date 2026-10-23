@@ -377,6 +377,9 @@ pub fn small_scrollbars() -> bool {
     crate::prefs::check(&crate::prefs::SMALL_SCROLLBARS)
 }
 
+/// The Playlist picker's scroll bar hint (its right-drag resizes the previews, spec: ui/scroll-bars.md §3).
+pub const PICK_BAR_HINT: &str = "Drag to scroll - right-drag resizes the previews";
+
 /// A scroll bar over `track`: thumb sized `view / total`, positioned by `pos` (content pixels).
 /// Registers the bar for dragging (see `App::scrollbar_press`).
 pub fn scrollbar(ui: &mut Ui, track: Rect, vertical: bool, pos: f32, view: f32, total: f32, target: Scroll) {
@@ -384,8 +387,11 @@ pub fn scrollbar(ui: &mut Ui, track: Rect, vertical: bool, pos: f32, view: f32, 
     let total = total.max(view).max(1.0);
     let max = (total - view).max(0.0);
     let (_, thumb) = os_ui::kit::thumb(len, pos, view, total);
-    let zooms = matches!(target, Scroll::PianoX | Scroll::PlaylistX);
-    let hint = if zooms { "Drag to scroll - right-drag: left/right scrolls, up/down zooms" } else { "Drag to scroll" };
+    let hint = match target {
+        Scroll::PianoX | Scroll::PlaylistX => "Drag to scroll - right-drag: left/right scrolls, up/down zooms",
+        Scroll::PlPick => PICK_BAR_HINT,
+        _ => "Drag to scroll",
+    };
     let act = Action::Scrollbar(target);
     let hov = ui.hit(track, act.clone(), hint);
     let st = kit::State::new(hov, ui.down(track, &act), false);
