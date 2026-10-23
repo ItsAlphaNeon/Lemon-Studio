@@ -121,9 +121,9 @@ impl Link {
     }
 }
 
-/// Whether `t` can be linked: the Strum and Arpeggiate dialogs' knobs live only while their dialog is open.
+/// Whether `t` can be linked: the piano roll tool dialogs' knobs live only while their dialog is open.
 fn linkable(t: Target) -> bool {
-    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_)))
+    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_)))
 }
 
 /// A target as `settings.txt` keeps it (`none` for one that is not linkable, which reads back as nothing).
@@ -140,7 +140,7 @@ fn target_text(t: Target) -> String {
             KnobId::ChanPan(r) => format!("chanpan:{r}"),
             KnobId::Swing => "swing".into(),
             KnobId::Eq(m, b, f) => format!("eq:{m}:{b}:{f}"),
-            KnobId::Strum(_) | KnobId::Arp(_) => "none".into(),
+            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) => "none".into(),
         },
         Target::Fader(m) => format!("fader:{m}"),
         Target::Param(key, i) => format!("param:{key}:{i}"),

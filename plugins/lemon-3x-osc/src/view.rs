@@ -8,9 +8,11 @@
 //! Coordinates are FL window pixels from the spec tables; the editor is the window minus its 24 px title bar, so
 //! every y is drawn at `y - OY`. It is drawn in the Lemon design only (`kit::lemon::plug`; the plugins have no Classic
 //! look): each oscillator a card, lemon for the chosen shape and the values.
-// spec: plugins/lemon-3x-osc.md (§1 window, §2 oscillator page, §3 envelope page, §4 hints); ui/lemon-design.md §11
+// spec: plugins/lemon-3x-osc.md (§1 window, §2 oscillator page, §3 envelope page, §4 hints, §6 sample page);
+// ui/lemon-design.md §11
 
 use std::f32::consts::{PI, TAU};
+use std::sync::Arc;
 
 use os_theme::design::lemon as brand;
 use os_theme::Palette;
@@ -36,6 +38,8 @@ pub const HOSTED_CROP_Y: u32 = CROP_Y + STRIP_ROWS;
 pub const HOSTED_EDITOR_H: u32 = EDITOR_H - STRIP_ROWS;
 /// Height of the original's title bar (the host draws its own).
 pub const OY: f32 = 24.0;
+/// Pages: oscillators, envelopes, the custom shape's sample (the original's strip order).
+pub const PAGES: u8 = 3;
 
 /// Envelope targets: knob ring, sub-tab text, graph line (as Lemon Sampler).
 pub const TARGET_COLORS: [(u32, u32, u32); 5] = [
@@ -121,6 +125,8 @@ pub enum Target {
     SubTab(u8),
     /// Envelope graph node: 0 delay end, 1 attack end, 2 hold end, 3 decay end (sustain), 4 release end.
     EnvPoint(u8),
+    /// The sample page: opens the file dialog for the custom shape's sample.
+    LoadSample,
 }
 
 impl Target {
@@ -145,31 +151,52 @@ pub fn is_osc_shape(id: &str) -> bool {
     id.starts_with('o') && id.ends_with("_shape")
 }
 
-/// Whether target `t` changes the sound today. Greyed out: the Custom shape (it plays silence: no shape can be loaded
-/// yet) and the Panning LFO (the panning record is not played, spec §2.6). Greyed-out controls draw their disabled
-/// look and the editor only names them.
+/// Whether target `t` changes the sound today. Greyed out: the Panning LFO (the panning record is not played, spec
+/// §2.6). Greyed-out controls draw their disabled look and the editor only names them.
 pub fn works(t: &Target) -> bool {
     match t {
-        Target::Set(id, v) if is_osc_shape(id) => *v as u8 != dsp::CUSTOM,
         Target::Knob(id) | Target::Set(id, _) => !id.starts_with("pan_lfo_"),
         _ => true,
+    }
+}
+
+/// The file name in `path` (either separator).
+pub fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// The custom shape's sample as the sample page shows it (taken from `Shared` when its version moves).
+#[derive(Clone, Debug, Default)]
+pub struct SampleView {
+    /// The file ("" = none).
+    pub path: String,
+    /// Its wave; `None` with a path: the file could not be read.
+    pub wave: Option<Arc<dsp::Wave>>,
+    /// `Shared::custom_version` it was taken at.
+    pub version: u64,
+}
+
+impl PartialEq for SampleView {
+    fn eq(&self, o: &SampleView) -> bool {
+        self.version == o.version && self.path == o.path
     }
 }
 
 /// Editor-only state (not saved).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewState {
-    /// 0 oscillators, 1 envelopes.
+    /// 0 oscillators, 1 envelopes, 2 the custom shape's sample.
     pub tab: u8,
     /// Envelope target: 0 Panning, 1 Volume, 2 Mod X, 3 Mod Y, 4 Pitch.
     pub sub: u8,
     pub mouse: Option<(f32, f32)>,
     pub pressed: Option<Target>,
+    pub sample: SampleView,
 }
 
 impl Default for ViewState {
     fn default() -> Self {
-        ViewState { tab: 0, sub: 1, mouse: None, pressed: None }
+        ViewState { tab: 0, sub: 1, mouse: None, pressed: None, sample: SampleView::default() }
     }
 }
 
@@ -203,7 +230,7 @@ impl Ui<'_> {
 }
 
 /// Paints the editor. `hosted` = the host's strip row carries the page tabs and the hint line (host link); otherwise
-/// the plugin draws its own two tabs and `hint` in the strip row.
+/// the plugin draws its own three tabs and `hint` in the strip row.
 pub fn paint(c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, hint: &str, hosted: bool) -> Vec<Hit> {
     let mut ui = Ui { c, t, m, st, hits: Vec::new() };
     ui.c.begin_frame(None);
@@ -213,7 +240,10 @@ pub fn paint(c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, hint: &
         if !hint.is_empty() {
             let lh = ui.c.line_height(LABEL);
             let (left, right) = hint.split_once('\t').unwrap_or((hint, ""));
-            ui.c.text_clip(LABEL, 100.0, (y(48.0) - lh / 2.0).round(), 300.0, plug::DIM, left);
+            // Right of the tabs, up to the right-aligned part when there is one.
+            let x = 17.0 + 43.0 * f32::from(PAGES);
+            let room = if right.is_empty() { 556.0 - x } else { 400.0 - x };
+            ui.c.text_clip(LABEL, x, (y(48.0) - lh / 2.0).round(), room, plug::DIM, left);
             if !right.is_empty() {
                 ui.c.text_right(LABEL, 556.0, (y(48.0) - lh / 2.0).round(), plug::DIM, right);
             }
@@ -221,7 +251,8 @@ pub fn paint(c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, hint: &
     }
     match st.tab {
         0 => osc_page(&mut ui),
-        _ => envelope_page(&mut ui),
+        1 => envelope_page(&mut ui),
+        _ => sample_page(&mut ui),
     }
     ui.hits
 }
@@ -230,18 +261,19 @@ fn icon(c: &mut Canvas, t: &tb::TablerIcon, cx: f32, cy: f32, size: f32, col: Co
     c.icon(t, Rect::new(cx - size / 2.0, cy - size / 2.0, size, size), col);
 }
 
-/// The page icons the host draws in its strip (same ids as `os_hostlink::PageIcon`: plugin, envelope).
+/// The page icons (the host draws the same for `os_hostlink::PageIcon` plugin, envelope, sample).
 pub fn page_icon(c: &mut Canvas, page: u8, cx: f32, cy: f32, col: Color) {
     match page {
         0 => icon(c, &tb::PLUG, cx, cy, 26.0, col),
-        _ => icon(c, &tb::TIMELINE, cx, cy, 26.0, col),
+        1 => icon(c, &tb::TIMELINE, cx, cy, 26.0, col),
+        _ => icon(c, &tb::WAVE_SINE, cx, cy, 26.0, col),
     }
 }
 
 fn tab_strip(ui: &mut Ui) {
-    let hover = (0..2u8).find(|&i| ui.state(rr(5.0 + 43.0 * f32::from(i), 49.0 + 43.0 * f32::from(i), 26.0, 71.0), &Target::Tab(i)).hover);
-    lemon::page_strip(ui.c, rr(4.0, 563.0, 25.0, 71.0), 2, ui.st.tab, hover, &|i| 5.0 + 43.0 * f32::from(i), &mut |c, i, x, yy, col| page_icon(c, i, x, yy, col));
-    for i in 0..2u8 {
+    let hover = (0..PAGES).find(|&i| ui.state(rr(5.0 + 43.0 * f32::from(i), 49.0 + 43.0 * f32::from(i), 26.0, 71.0), &Target::Tab(i)).hover);
+    lemon::page_strip(ui.c, rr(4.0, 563.0, 25.0, 71.0), PAGES, ui.st.tab, hover, &|i| 5.0 + 43.0 * f32::from(i), &mut |c, i, x, yy, col| page_icon(c, i, x, yy, col));
+    for i in 0..PAGES {
         let x0 = 5.0 + 43.0 * f32::from(i);
         ui.hit(rr(x0, x0 + 44.0, 26.0, 71.0), Target::Tab(i));
     }
@@ -393,12 +425,6 @@ fn osc_page(ui: &mut Ui) {
             if s == INVERT {
                 let col = if sel { brand::MAIN } else if st.hover { brand::TEXT } else { Color::rgb(0x8a8a8a) };
                 invert_glyph(ui.c, x, cyy + 2.0, col);
-            } else if st.disabled {
-                // Greyed out (Custom): a faint glyph, outlined when it is the chosen shape.
-                if sel {
-                    ui.c.stroke_rrect(Rect::new(x - 15.5, cyy - 14.5, 31.0, 29.0), 8.0, 1.0, plug::OFF);
-                }
-                shape_glyph(ui.c, s, x, cyy, plug::OFF, plug::PANEL);
             } else {
                 if sel {
                     lemon::lit(ui.c, Rect::new(x - 16.0, cyy - 15.0, 32.0, 30.0), 8.0, st.hover);
@@ -751,16 +777,81 @@ fn lfo_graph(ui: &mut Ui, g: Rect, p: &str, col: Color) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Sample page (spec §6: Lemon Studio's own page; the original's was not measured)
+
+/// The sample page's card and its wave graph (FL px).
+pub fn sample_card() -> Rect {
+    rr(6.0, 561.0, 79.0, 454.0)
+}
+
+pub fn sample_graph() -> Rect {
+    rr(16.0, 551.0, 110.0, 400.0)
+}
+
+/// The custom shape's sample: its wave as one period, its file name; a click anywhere on the card loads another.
+fn sample_page(ui: &mut Ui) {
+    ui.c.fill_rect(rr(4.0, 563.0, 72.0, 461.0), plug::BG);
+    let card = sample_card();
+    let st = ui.state(card, &Target::LoadSample);
+    lemon::plug_panel(ui.c, card);
+    let s = &ui.st.sample;
+    let lh = ui.c.line_height(MOD_CAP);
+    ui.c.text(MOD_CAP, 18.0, (y(96.0) - lh / 2.0).round(), plug::DIM, "CUSTOM SHAPE");
+    let lh = ui.c.line_height(CAP);
+    ui.c.text_right(CAP, 549.0, (y(96.0) - lh / 2.0).round(), plug::DIM, "Played as one period of the oscillator");
+    let g = sample_graph();
+    inst::graph_bg(ui.c, g);
+    let cy = g.y + ((g.h - 1.0) / 2.0).floor() + 0.5;
+    ui.c.push_clip(g);
+    ui.c.fill_rect(Rect::new(g.x, cy - 0.5, g.w, 1.0), ui.t.s(0x232628));
+    match &s.wave {
+        Some(w) => wave_graph(ui.c, g, cy, w, brand::MAIN),
+        None => {
+            let text = if s.path.is_empty() { "No sample: click to load one".to_string() } else { format!("{} could not be read", file_name(&s.path)) };
+            ui.c.text_center(LABEL, Rect::new(g.x, g.y, g.w, g.h * 0.5), plug::DIM, &text);
+        }
+    }
+    ui.c.pop_clip();
+    // The file line: a folder (lit on hover), the name, the points the period holds.
+    let fy = y(427.0);
+    icon(ui.c, &tb::FOLDER_OPEN, 30.0, fy, 18.0, if st.hover { brand::MAIN } else { plug::DIM });
+    let lh = ui.c.line_height(LABEL);
+    let (name, col) = if s.path.is_empty() { ("Load a sample...", plug::DIM) } else { (file_name(&s.path), brand::TEXT) };
+    ui.c.text_clip(LABEL, 46.0, (fy - lh / 2.0).round(), 380.0, col, name);
+    if let Some(w) = &s.wave {
+        ui.c.text_right(LABEL, 549.0, (fy - lh / 2.0).round(), plug::DIM, &format!("{} points", w.points().len()));
+    }
+    ui.hit(card, Target::LoadSample);
+}
+
+/// One period of `w` across `g`, centred on `cy`: a line through the points, or each column's lowest to highest point
+/// when there are more points than pixels.
+fn wave_graph(c: &mut Canvas, g: Rect, cy: f32, w: &dsp::Wave, col: Color) {
+    let a = g.h / 2.0 - 4.0;
+    let pts = w.points();
+    let cols = g.w.max(1.0) as usize;
+    let level = |v: f32| cy - a * v.clamp(-1.0, 1.0);
+    if pts.len() <= cols * 2 {
+        let line: Vec<(f32, f32)> = (0..=cols).map(|i| (g.x + i as f32, level(w.at(i as f64 / cols as f64) as f32))).collect();
+        c.polyline(&line, 1.5, col);
+        return;
+    }
+    for i in 0..cols {
+        let part = &pts[i * pts.len() / cols..(i + 1) * pts.len() / cols];
+        let (lo, hi) = part.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        let (top, bot) = (level(hi), level(lo));
+        c.fill_rect(Rect::new(g.x + i as f32, top, 1.0, (bot - top).max(1.0)), col);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Hints (spec §4)
 
 /// The hint line for a target: the parameter's name and value as the original words them; a greyed-out control
 /// (`works`) is named as not available yet.
-pub fn hint(t: &Target, m: &dyn Model, names: &dyn Fn(&str) -> String) -> String {
+pub fn hint(t: &Target, m: &dyn Model, st: &ViewState, names: &dyn Fn(&str) -> String) -> String {
     if !works(t) {
-        let name = match t {
-            Target::Set(id, _) if is_osc_shape(id) => format!("Osc {} custom shape", &id[1..2]),
-            _ => t.param().map(|id| names(id)).unwrap_or_default(),
-        };
+        let name = t.param().map(|id| names(id)).unwrap_or_default();
         return format!("{name}: not available yet");
     }
     match t {
@@ -776,8 +867,19 @@ pub fn hint(t: &Target, m: &dyn Model, names: &dyn Fn(&str) -> String) -> String
         Target::Flag(AM_BYTE) => "Oscillator 3 = amplitude modulation".into(),
         Target::Flag(n) => format!("Invert osc {}", n + 1),
         Target::Tab(0) => "Oscillators".into(),
-        Target::Tab(_) => "Envelopes, LFOs and filter".into(),
+        Target::Tab(1) => "Envelopes, LFOs and filter".into(),
+        Target::Tab(_) => "Custom shape sample".into(),
         Target::SubTab(i) => format!("{} envelope / LFO", TARGET_NAMES[usize::from(*i).min(4)]),
         Target::EnvPoint(_) => String::new(),
+        Target::LoadSample => sample_hint(&st.sample),
+    }
+}
+
+/// The sample page's hint (Lemon Studio wording).
+pub fn sample_hint(s: &SampleView) -> String {
+    match (&s.wave, s.path.is_empty()) {
+        (_, true) => "Custom shape sample: none (click to load one)".into(),
+        (Some(_), false) => format!("Custom shape sample: {} (click to load another)", file_name(&s.path)),
+        (None, false) => format!("Custom shape sample: {} could not be read", file_name(&s.path)),
     }
 }

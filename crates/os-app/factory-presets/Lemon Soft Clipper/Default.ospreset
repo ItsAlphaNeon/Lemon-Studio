@@ -1,0 +1,5 @@
+OSPRESET 1
+plugin=Lemon Soft Clipper	id=clap:org.openstudio.lemon-soft-clipper	format=clap	body=params
+# Values: OpenStudio-specs plugins/factory-presets.md.
+Threshold = 99
+Post gain = 128

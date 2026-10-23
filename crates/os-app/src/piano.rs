@@ -432,8 +432,8 @@ impl Lane {
             _ => {}
         }
     }
-    /// Value at the top of the panel.
-    fn scale(self) -> f32 {
+    /// Value at the top of the panel: the property's full scale.
+    pub fn scale(self) -> f32 {
         match self {
             Lane::Velocity | Lane::Pan | Lane::Release => 128.0,
             Lane::Cutoff | Lane::Resonance => 256.0,

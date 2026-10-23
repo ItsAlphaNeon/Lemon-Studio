@@ -320,18 +320,9 @@ impl EqParams {
     }
 }
 
-/// Stored parameter values (fields 1..36) of `s`'s bands and main level.
+/// Stored parameter values (fields 1..36) of `s`'s bands and main level (rounded as FL rounds automation values).
 pub fn fields_of(s: &Settings) -> [i32; 36] {
-    let mut f = [0; 36];
-    for (k, b) in s.bands.iter().enumerate() {
-        f[k] = (b.db * 100.0).round() as i32;
-        f[7 + k] = (b.freq * 65536.0).round() as i32;
-        f[14 + k] = (b.width * 65536.0).round() as i32;
-        f[21 + k] = b.kind;
-        f[28 + k] = b.order;
-    }
-    f[35] = (s.main_db * 100.0).round() as i32;
-    f
+    s.params()
 }
 
 /// The band settings stored in fields `first..first + 36` of a state image (1 = main bank, 37 = spare bank).

@@ -1,0 +1,9 @@
+OSPRESET 1
+plugin=Lemon Stereo Enhancer	id=clap:org.openstudio.lemon-stereo-enhancer	format=clap	body=params
+# Values: OpenStudio-specs plugins/factory-presets.md.
+Pan = 110
+Volume = 256
+Stereo separation = 42
+Phase offset = 264
+Phase offset placement = 1
+Inversion = 0

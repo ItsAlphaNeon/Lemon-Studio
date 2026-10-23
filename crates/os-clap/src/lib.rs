@@ -28,7 +28,7 @@ use clap_sys::events::{
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::ext::audio_ports::{clap_audio_port_info, clap_plugin_audio_ports, CLAP_EXT_AUDIO_PORTS};
 use clap_sys::ext::gui::{clap_host_gui, clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_COCOA, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11};
-use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
+use clap_sys::ext::latency::{clap_host_latency, clap_plugin_latency, CLAP_EXT_LATENCY};
 use clap_sys::ext::params::{
     clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS,
     CLAP_PARAM_IS_ENUM, CLAP_PARAM_IS_HIDDEN, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED,
@@ -276,6 +276,8 @@ struct HostData {
     resize: Mutex<Option<(u32, u32)>>,
     /// The plugin's voice count changed (`clap_host_voice_info.changed`): read again on the UI tick.
     voice_info: AtomicBool,
+    /// The plugin's delay changed (`clap_host_latency.changed`): read again on the UI tick.
+    latency: AtomicBool,
     /// The plugin asked to be processed (`clap_host.request_process`), e.g. a note from its editor's keyboard: a
     /// sleeping instance runs the next block.
     process: AtomicBool,
@@ -304,6 +306,9 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
     }
     if id == CLAP_EXT_VOICE_INFO {
         return &HOST_VOICE_INFO as *const clap_host_voice_info as *const c_void;
+    }
+    if id == CLAP_EXT_LATENCY {
+        return &HOST_LATENCY as *const clap_host_latency as *const c_void;
     }
     if id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU || id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU_COMPAT {
         return &context_menu::HOST_CONTEXT_MENU as *const clap_sys::ext::context_menu::clap_host_context_menu as *const c_void;
@@ -461,6 +466,13 @@ unsafe extern "C" fn host_voice_info_changed(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).voice_info.store(true, Ordering::Release) };
     unsafe { attend(host) };
 }
+/// The plugin's delay changed: read again on the UI tick, where `latency.get` may be called (spec:
+/// audio/delay-compensation.md "Lemon Studio").
+static HOST_LATENCY: clap_host_latency = clap_host_latency { changed: Some(host_latency_changed) };
+unsafe extern "C" fn host_latency_changed(host: *const clap_host) {
+    unsafe { (*((*host).host_data as *const HostData)).latency.store(true, Ordering::Release) };
+    unsafe { attend(host) };
+}
 unsafe extern "C" fn host_request_restart(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).restart.store(true, Ordering::Release) };
     unsafe { attend(host) };
@@ -574,6 +586,9 @@ pub struct Plugin {
     state: *const clap_plugin_state,
     params: *const clap_plugin_params,
     latency: *const clap_plugin_latency,
+    /// The delay it reports, read on the UI thread after each activation and when it says it changed (the extension
+    /// is main-thread only): the engine reads this copy after each block.
+    latency_now: u32,
     /// The render extension (offline or realtime), if the plugin has one.
     render: *const clap_plugin_render,
     offline: bool,
@@ -739,6 +754,7 @@ impl Plugin {
             automate: Mutex::new(Vec::new()),
             resize: Mutex::new(None),
             voice_info: AtomicBool::new(false),
+            latency: AtomicBool::new(false),
             process: AtomicBool::new(false),
             #[cfg(all(unix, not(target_os = "macos")))]
             plugin: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
@@ -837,6 +853,7 @@ impl Plugin {
                 in_ptrs: Vec::new(),
                 out_ptrs: Vec::new(),
                 latency,
+                latency_now: 0,
                 render,
                 offline: false,
                 voice_info,
@@ -883,8 +900,17 @@ impl Plugin {
         if ok {
             self.rate = rate;
             self.read_voice_info();
+            self.read_latency();
         }
         ok
+    }
+
+    /// The delay the plugin reports, in frames (main thread, active).
+    fn read_latency(&mut self) {
+        self.latency_now = match self.latency.is_null() {
+            true => 0,
+            false => unsafe { (*self.latency).get.map_or(0, |g| g(self.plugin)) },
+        };
     }
 
     /// The channels of the plugin's main input and output ports (main thread, inactive: ports only change then), and
@@ -1123,6 +1149,9 @@ impl Plugin {
         }
         if self.host_data.voice_info.swap(false, Ordering::AcqRel) && self.rate != 0 {
             self.read_voice_info();
+        }
+        if self.host_data.latency.swap(false, Ordering::AcqRel) && self.rate != 0 {
+            self.read_latency();
         }
         let wanted = self.wanted_rate.swap(0, Ordering::AcqRel);
         let restart = self.host_data.restart.swap(false, Ordering::AcqRel);
@@ -1578,11 +1607,9 @@ impl os_host::Plugin for Plugin {
         Plugin::load_state(self, data)
     }
 
+    /// What the plugin last reported (`read_latency`): the audio thread may ask.
     fn latency(&self) -> u32 {
-        if self.latency.is_null() || self.rate == 0 {
-            return 0;
-        }
-        unsafe { (*self.latency).get.map_or(0, |g| g(self.plugin)) }
+        if self.rate == 0 { 0 } else { self.latency_now }
     }
 
     fn use_start_param(&mut self, name: &str) -> bool {

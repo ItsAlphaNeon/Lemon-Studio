@@ -1522,12 +1522,13 @@ pub fn misc_param(name: &str, norm: f64, misc: &mut os_model::ChannelMisc) -> bo
     true
 }
 
-/// A project sample path as a file path (placeholders resolved against the install folder, else unchanged).
+/// A project sample path as a file path (placeholders resolved against the factory content folder, `crate::factory_folder`;
+/// parts matched ignoring case where the path as written is not found; else unchanged).
 pub fn resolve_sample(path: &str) -> String {
     if path.is_empty() {
         return String::new();
     }
-    os_engine::SampleLibrary::new(os_engine::SampleLibrary::default_factory_dir())
+    os_engine::SampleLibrary::new(crate::factory_folder::dir())
         .resolve(path)
         .map_or_else(|| path.to_string(), |p| p.to_string_lossy().into_owned())
 }
@@ -1719,8 +1720,8 @@ fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
     }
 }
 
-/// The `sample-path` field of a Lemon Sampler state blob.
-fn sample_path_of(blob: &[u8]) -> Option<String> {
+/// The `sample-path` field of a Lemon Sampler (or Lemon Trio) state blob.
+pub(crate) fn sample_path_of(blob: &[u8]) -> Option<String> {
     let json = blob.get(8..).filter(|_| blob.len() > 8 && blob[0] != b'{').unwrap_or(blob);
     let v: serde_json::Value = serde_json::from_slice(json).ok()?;
     let field = v.get("fields")?.get("sample-path")?.as_str()?;

@@ -145,6 +145,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn channel_voicing(&mut self, voicing: &ChannelVoicing) {
         self.run((), |p| p.channel_voicing(voicing))
     }
+    fn reported_delay(&self) -> u32 {
+        self.look(0, |p| p.latency())
+    }
 }
 
 impl<P: Plugin> HostedEffect for Guarded<P> {
@@ -165,6 +168,9 @@ impl<P: Plugin> HostedEffect for Guarded<P> {
     }
     fn transport_fx(&mut self, info: &TransportInfo) {
         self.run((), |p| p.transport_fx(info))
+    }
+    fn reported_delay_fx(&self) -> u32 {
+        self.look(0, |p| p.latency())
     }
 }
 

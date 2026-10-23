@@ -1799,6 +1799,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1826,9 +1832,28 @@ dependencies = [
  "os-plugkit",
  "os-theme",
  "os-ui",
+ "rfd",
  "serde_json",
  "tiny-skia",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "lemon-balance"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
+name = "lemon-chorus"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
 ]
 
 [[package]]
@@ -1844,6 +1869,15 @@ dependencies = [
  "serde_json",
  "tiny-skia",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "lemon-fast-distortion"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
 ]
 
 [[package]]
@@ -1907,6 +1941,57 @@ dependencies = [
  "rfd",
  "tiny-skia",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "lemon-small-fx"
+version = "0.0.1"
+dependencies = [
+ "nih_plug",
+ "os-engine",
+ "os-hostlink",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "serde_json",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "lemon-soft-clipper"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
+name = "lemon-stereo-enhancer"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
+name = "lemon-stereo-shaper"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
+name = "lemon-transient-processor"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
 ]
 
 [[package]]
@@ -2677,6 +2762,7 @@ dependencies = [
  "cpal",
  "crossbeam-queue",
  "flacenc",
+ "jpeg-decoder",
  "lemon-3x-osc",
  "lemon-parametric-eq-2",
  "lemon-sampler",
@@ -2698,6 +2784,7 @@ dependencies = [
  "os-model",
  "os-native",
  "os-paths",
+ "os-smf",
  "os-theme",
  "os-ui",
  "os-vst2",
@@ -2837,6 +2924,10 @@ dependencies = [
  "os-flp",
  "os-model",
 ]
+
+[[package]]
+name = "os-smf"
+version = "0.0.1"
 
 [[package]]
 name = "os-theme"
