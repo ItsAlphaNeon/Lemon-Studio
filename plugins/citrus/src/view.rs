@@ -3,12 +3,16 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Citrus editor: painting and hit regions (platform independent). Sytrus's layout at its Small size, every control
-//! where FL has it, unstyled: flat placeholder colours, no artwork (the Lemon design comes later). The page tabs,
-//! the header buttons, the main page, the operator, filter and FX pages' controls with their articulators' tabs and
-//! bars with the curve view and the harmonics editor, the matrix and the testing keyboard.
+//! where FL has it, in the Lemon "Pith" plugin look: outlined grey cards, dark wells, lemon for what is on. The page
+//! tabs, the header buttons, the main page, the operator, filter and FX pages' controls with their articulators' tabs
+//! and bars with the curve view and the harmonics editor, the matrix and the testing keyboard. Controls that do
+//! nothing yet are greyed out.
 //!
-// spec: plugins/sytrus-editor.md (§1 .. §7), plugins/citrus.md §6
+// spec: plugins/sytrus-editor.md (§1 .. §7), plugins/citrus.md §6, ui/lemon-design.md §11.1
 
+use os_theme::design::lemon as brand;
+use os_ui::kit::lemon::{self, plug};
+use os_ui::kit::{eq as keq, State as Look};
 use os_ui::{Canvas, Color, Font, Rect};
 
 use crate::ctl::{self, Field};
@@ -20,17 +24,20 @@ pub const W: u32 = 850;
 pub const H: u32 = 450;
 pub const H_NO_KEYS: u32 = 348;
 
-/// Placeholder colours (unstyled).
-pub const BG: Color = Color::rgb(0x2a2c2e);
-pub const PANEL: Color = Color::rgb(0x383b3e);
-const WELL: Color = Color::rgb(0x1e2022);
-const EDGE: Color = Color::rgb(0x4c5054);
-pub const TEXT: Color = Color::rgb(0xd8d8d8);
-const DIM: Color = Color::rgb(0x8a8d90);
-const FAINT: Color = Color::rgb(0x5a5e62);
-pub const ACCENT: Color = Color::rgb(0x6aa8e0);
-/// The matrix's accent while the ring-modulation matrix is shown (FL draws it yellow).
-pub const RING: Color = Color::rgb(0xe0c040);
+/// The Pith colours (`ui/lemon-design.md` §11.1).
+pub const BG: Color = plug::BG;
+pub const PANEL: Color = plug::PANEL;
+const WELL: Color = plug::WELL;
+/// Raised faces (handles, buttons, marker tags).
+const EDGE: Color = plug::FACE;
+pub const TEXT: Color = brand::TEXT;
+const DIM: Color = plug::DIM;
+const FAINT: Color = plug::FAINT;
+/// Captions of controls that do nothing yet.
+const OFF: Color = plug::OFF;
+pub const ACCENT: Color = brand::MAIN;
+/// The matrix's accent while the ring-modulation matrix is shown (FL draws it in another colour than FM's).
+pub const RING: Color = Color::rgb(0xbcb4e8);
 
 const LABEL: Font = Font::new(10);
 const SMALL: Font = Font::new(9);
@@ -42,14 +49,18 @@ const TAB_NAMES: [&str; PAGES] = ["MAIN", "OP 1", "OP 2", "OP 3", "OP 4", "OP 5"
 
 /// The page area and the matrix panel.
 pub const PAGE: Rect = Rect::new(0.0, 26.0, 546.0, 320.0);
-pub const MATRIX: Rect = Rect::new(547.0, 26.0, 299.0, 320.0);
+pub const MATRIX: Rect = Rect::new(550.0, 31.0, 296.0, 315.0);
+/// The matrix's cell pitch (FL's is 31 px; Pith's card padding takes the rest) and its first cell's corner.
+const PITCH: f32 = 29.0;
+const GRID_X: f32 = 577.0;
+const GRID_Y: f32 = 52.0;
 pub const KEYS: Rect = Rect::new(4.0, 355.0, 842.0, 95.0);
 /// The testing keyboard's keys: C3 .. B7 (FL's names, key 60 = C5).
 pub const FIRST_KEY: u8 = 36;
 pub const LAST_KEY: u8 = 95;
 /// The XY pad.
 pub const PAD: Rect = Rect::span(14.0, 142.0, 166.0, 293.0);
-pub const PATCH_TEXT: Rect = Rect::new(10.0, 302.0, 341.0, 40.0);
+pub const PATCH_TEXT: Rect = Rect::new(10.0, 305.0, 341.0, 37.0);
 
 /// What covers the whole surface instead of the pages (header buttons 2 and 3).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -185,6 +196,10 @@ impl Ui<'_> {
     fn hot(&self, r: Rect, t: &Target) -> bool {
         self.st.pressed.as_ref() == Some(t) || (self.st.pressed.is_none() && self.st.mouse.is_some_and(|(x, y)| r.contains(x, y)))
     }
+    /// The kit's state for a control: hovered (or held), pressed.
+    fn state(&self, r: Rect, t: &Target) -> Look {
+        Look { hover: self.hot(r, t), pressed: self.st.pressed.as_ref() == Some(t), on: false, disabled: false }
+    }
     fn get(&self, f: Field) -> i32 {
         ctl::get(self.m.st, f)
     }
@@ -235,43 +250,37 @@ pub fn paint(c: &mut Canvas, m: &Model, st: &ViewState, hint: &str) -> Vec<Hit> 
 // Widgets
 
 fn panel(ui: &mut Ui, r: Rect) {
-    ui.c.fill_rect(r, PANEL);
-    ui.c.stroke_rrect(r.inset(0.5), 0.0, 1.0, EDGE);
+    lemon::plug_panel(ui.c, r);
+}
+
+/// A fader's groove from `top` to `bot` at `x`: the value filled in lemon from `zero`, the cap at `y`.
+fn fader(ui: &mut Ui, x: f32, top: f32, bot: f32, y: f32, zero: f32, st: Look) {
+    keq::slot(ui.c, Rect::new(x - 3.0, top - 4.0, 6.0, bot - top + 8.0), st);
+    if (y - zero).abs() > 1.0 {
+        ui.c.fill_rrect(Rect::span(x - 1.0, x + 1.0, y.min(zero), y.max(zero)), 1.0, ACCENT.with_alpha(170));
+    }
+    keq::handle(ui.c, x, y.round(), ACCENT, st);
 }
 
 /// A vertical fader centred on `x`, its track from `top` to `bot`, the label above it.
 fn slider(ui: &mut Ui, f: Field, x: f32, top: f32, bot: f32, label: &str) {
     let t = Target::Slider(f);
     let hr = Rect::span(x - 10.0, x + 10.0, top - 8.0, bot + 8.0);
-    let hot = ui.hot(hr, &t);
-    ui.c.fill_rect(Rect::span(x - 1.0, x + 1.0, top, bot), WELL);
+    let st = ui.state(hr, &t);
     let (lo, hi) = ctl::range(f);
     let y_of = |n: f32| bot - (bot - top) * n.clamp(0.0, 1.0);
     let y = y_of(ui.norm(f));
     let zero = if lo < 0 { y_of(-lo as f32 / (hi - lo) as f32) } else { bot };
-    ui.c.fill_rect(Rect::span(x - 1.0, x + 1.0, y.min(zero), y.max(zero)), ACCENT);
-    let handle = Rect::new(x - 9.0, (y - 6.0).round(), 18.0, 12.0);
-    ui.c.fill_rect(handle, if hot { EDGE.shade(0.15) } else { EDGE });
-    ui.c.fill_rect(Rect::new(x - 7.0, y.round(), 14.0, 1.0), TEXT);
+    fader(ui, x, top, bot, y, zero, st);
     if !label.is_empty() {
-        ui.label(SMALL, x, top - 9.0, DIM, label);
+        ui.label(SMALL, x, top - 11.0, DIM, label);
     }
     ui.hit(hr, t);
 }
 
-/// A knob of radius `r`: a ring, the value's arc in `accent` (from the top for bipolar ranges) and a pointer.
+/// A knob of radius `r`: the kit's plugin dial, the value's arc in `accent` (from the top for bipolar ranges).
 fn dial(ui: &mut Ui, cx: f32, cy: f32, r: f32, norm: f32, bipolar: bool, accent: Color, hot: bool) {
-    use std::f32::consts::PI;
-    let start = 0.75 * PI;
-    let sweep = 1.5 * PI;
-    ui.c.fill_circle(cx, cy, r, if hot { WELL.shade(0.1) } else { WELL });
-    ui.c.arc(cx, cy, r - 1.5, start, sweep, 2.0, FAINT);
-    let a = start + sweep * norm.clamp(0.0, 1.0);
-    let from = if bipolar { 1.5 * PI } else { start };
-    if (a - from).abs() > 0.01 {
-        ui.c.arc(cx, cy, r - 1.5, from.min(a), (a - from).abs(), 2.0, accent);
-    }
-    ui.c.line(cx + 0.35 * r * a.cos(), cy + 0.35 * r * a.sin(), cx + (r - 3.0) * a.cos(), cy + (r - 3.0) * a.sin(), 1.5, TEXT);
+    lemon::dial(ui.c, cx, cy, r, (r * 0.2).clamp(1.8, 2.8), norm, bipolar, accent, Look::hover(hot));
 }
 
 fn knob(ui: &mut Ui, f: Field, cx: f32, cy: f32, r: f32, label: &str) {
@@ -290,25 +299,26 @@ fn knob(ui: &mut Ui, f: Field, cx: f32, cy: f32, r: f32, label: &str) {
 /// A box showing its value's text.
 fn value_box(ui: &mut Ui, f: Field, r: Rect, text: &str) {
     let t = Target::Box(f);
-    let hot = ui.hot(r, &t);
-    ui.c.fill_rect(r, WELL);
-    ui.c.stroke_rrect(r.inset(0.5), 0.0, 1.0, if hot { DIM } else { EDGE });
+    let st = ui.state(r, &t);
+    lemon::field(ui.c, r, st);
     ui.c.text_center(LABEL, r, TEXT, text);
     ui.hit(r, t);
 }
 
-/// A lamp switch at (cx, cy), its label to the right (or under it).
+/// A switch at (cx, cy): the kit's rounded-square toggle, lemon when on, its label to the right (or under it). A
+/// control whose setting was not identified (`Target::Inert`) is greyed out.
 fn lamp(ui: &mut Ui, t: Target, on: bool, cx: f32, cy: f32, label: &str, under: bool) {
     let w = ui.c.text_width(SMALL, label);
     let hr = if under { Rect::new(cx - 10.0, cy - 7.0, 20.0, 22.0) } else { Rect::new(cx - 7.0, cy - 7.0, w + 18.0, 14.0) };
-    let hot = ui.hot(hr, &t);
-    ui.c.fill_circle(cx, cy, 4.5, if on { ACCENT } else { WELL });
-    ui.c.stroke_circle(cx, cy, 4.5, 1.0, if hot { TEXT } else { EDGE });
+    let mut st = ui.state(hr, &t);
+    st.disabled = matches!(t, Target::Inert(_));
+    lemon::toggle(ui.c, cx, cy, on, st);
+    let ink = if st.disabled { OFF } else { DIM };
     if under {
-        ui.label(SMALL, cx, cy + 10.0, DIM, label);
+        ui.label(SMALL, cx, cy + 11.0, ink, label);
     } else {
         let lh = ui.c.line_height(SMALL);
-        ui.c.text(SMALL, cx + 8.0, (cy - lh / 2.0).round(), DIM, label);
+        ui.c.text(SMALL, cx + 10.0, (cy - lh / 2.0).round(), ink, label);
     }
     ui.hit(hr, t);
 }
@@ -331,22 +341,31 @@ pub fn page_of_row(r: usize) -> usize {
     r + 1
 }
 
+/// The page tabs on the Pith page strip: the chosen page lit lemon, a lemon dot on the modules in use.
 fn tabs(ui: &mut Ui) {
+    ui.c.fill_rect(Rect::new(0.0, 0.0, W as f32, 28.0), plug::STRIP);
+    ui.c.fill_rect(Rect::new(0.0, 28.0, W as f32, 1.0), plug::STRIP_LINE);
     let fx_used = (0..9).any(|r| ui.m.used[r] && ui.m.st.cell(r, COL_SEND) != 0);
     for (i, name) in TAB_NAMES.iter().enumerate() {
         let r = Rect::new(6.0 + 68.0 * i as f32, 4.0, 66.0, 22.0);
         let t = Target::Tab(i);
         let hot = ui.hot(r, &t);
         let sel = ui.st.page == i;
-        ui.c.fill_rect(r, if sel { ACCENT } else if hot { EDGE } else { PANEL });
-        ui.c.text_center(LABEL, r, if sel { BG } else { TEXT }, name);
+        let cell = r.inset(1.0);
+        if sel {
+            lemon::lit(ui.c, cell, 7.0, hot);
+        } else if hot {
+            ui.c.fill_rrect(cell, 7.0, Color::rgb(0x333333));
+        }
+        let ink = if sel { brand::COLORED_DARK } else if hot { TEXT } else { DIM };
+        ui.c.text_center(LABEL.bold(), r, ink, name);
         let used = match i {
             1..=9 => ui.m.used[i - 1],
             PAGE_FX => fx_used,
             _ => false,
         };
         if used {
-            ui.c.fill_rect(Rect::new(r.right() - 6.0, r.y + 5.0, 2.0, 12.0), if sel { BG } else { ACCENT });
+            ui.c.fill_circle(r.right() - 7.0, r.cy(), 2.0, if sel { brand::COLORED_DARK } else { ACCENT });
         }
         ui.hit(r, t);
     }
@@ -359,10 +378,9 @@ fn header(ui: &mut Ui) {
         let (y, rad) = (14.0, 9.0);
         let t = Target::Header(i);
         let r = Rect::new(x - rad, y - rad, 2.0 * rad, 2.0 * rad);
-        let hot = ui.hot(r, &t);
-        let on = i == 3 && !ui.st.no_keys;
-        ui.c.fill_circle(x, y, rad, if on { ACCENT } else if hot { EDGE } else { PANEL });
-        let ink = if on { BG } else { TEXT };
+        let mut st = ui.state(r, &t);
+        st.on = i == 3 && !ui.st.no_keys;
+        let ink = lemon::plug_button(ui.c, r, 5.0, st);
         match i {
             // Options: three lines.
             0 => {
@@ -433,11 +451,11 @@ fn main_page(ui: &mut Ui, hint: &str) {
     switch(ui, Field::Switch(1), 448.0, 245.0, "CENTER");
     switch(ui, Field::Switch(2), 448.0, 264.0, "GIBBS OFF");
     switch(ui, Field::Switch(4), 448.0, 283.0, "PORTA");
-    knob(ui, Field::Soften, 524.0, 261.0, 10.0, "SOFTEN");
+    knob(ui, Field::Soften, 520.0, 261.0, 10.0, "SOFTEN");
     patch_text(ui, hint);
-    // The logo.
+    // The name where FL has its logo (Citrus has no Lemon wordmark).
     let r = Rect::new(356.0, 298.0, 182.0, 44.0);
-    ui.c.text_center(Font::new(20).bold(), r, DIM, "Citrus");
+    name(ui, r, Font::condensed(24, 0).bold());
     ui.hit(r, Target::Logo);
 }
 
@@ -445,11 +463,12 @@ fn modulation(ui: &mut Ui) {
     panel(ui, Rect::new(10.0, 140.0, 166.0, 159.0));
     ui.label(SMALL, 40.0, 151.0, DIM, "X / Y");
     switch(ui, Field::S32(0), 124.0, 150.0, "SMOOTH");
-    ui.c.fill_rect(PAD, WELL);
-    ui.c.fill_rect(Rect::span(PAD.cx(), PAD.cx() + 1.0, PAD.y, PAD.bottom()), FAINT);
-    ui.c.fill_rect(Rect::span(PAD.x, PAD.right(), PAD.cy(), PAD.cy() + 1.0), FAINT);
+    lemon::plug_well(ui.c, PAD, 6.0);
+    ui.c.fill_rect(Rect::span(PAD.cx(), PAD.cx(), PAD.y + 2.0, PAD.bottom() - 3.0), plug::TICK);
+    ui.c.fill_rect(Rect::span(PAD.x + 2.0, PAD.right() - 3.0, PAD.cy(), PAD.cy()), plug::TICK);
     let (x, y) = pad_point(ui.get(Field::S(25)), ui.get(Field::S(26)));
-    ui.c.fill_circle(x, y, 4.0, ACCENT);
+    ui.c.fill_circle(x, y, 5.5, ACCENT.with_alpha(60));
+    ui.c.fill_circle(x, y, 3.5, ACCENT);
     ui.hit(PAD, Target::Pad);
     for (k, y, l) in [(25, 192.0, "X"), (26, 222.0, "Y")] {
         knob(ui, Field::S(k), 162.0, y, 10.0, "");
@@ -479,8 +498,8 @@ fn equaliser(ui: &mut Ui) {
         let f = Field::Eq(b, 3);
         let r = Rect::new(x - 13.0, 143.0, 26.0, 14.0);
         let t = Target::Cycle(f);
-        let hot = ui.hot(r, &t);
-        ui.c.fill_rect(r, if hot { EDGE } else { WELL });
+        let st = ui.state(r, &t);
+        lemon::field(ui.c, r, st);
         let (l, m, h) = match ui.get(f) {
             0 => (-3.0, 2.0, 2.0),
             1 => (2.0, -3.0, 2.0),
@@ -517,16 +536,28 @@ fn quality(ui: &mut Ui) {
         let s = ctl::text(f, ui.get(f));
         value_box(ui, f, Rect::new(x - 15.0, 200.0, 30.0, 20.0), &s);
     }
-    caption(ui, r, "QUALITY");
+    ui.c.text(SMALL, 364.0, 146.0, DIM, "QUALITY");
+}
+
+/// "CITRUS" in the wordmark's grey condensed caps, centred in `r`.
+fn name(ui: &mut Ui, r: Rect, f: Font) {
+    let wn = lemon::spaced_width(ui.c, f, "CITRUS", 3.0);
+    let y = (r.cy() - ui.c.line_height(f) / 2.0).round();
+    lemon::spaced(ui.c, f, (r.cx() - wn / 2.0).round(), y, plug::WORDMARK, "CITRUS", 3.0);
 }
 
 fn patch_text(ui: &mut Ui, hint: &str) {
-    ui.c.fill_rect(PATCH_TEXT, WELL);
+    lemon::plug_well(ui.c, PATCH_TEXT, 6.0);
     let lh = ui.c.line_height(LABEL);
     let (x, w) = (PATCH_TEXT.x + 6.0, PATCH_TEXT.w - 12.0);
     if hint.is_empty() {
-        let name = if ui.m.st.name.is_empty() { "(no name)" } else { ui.m.st.name.as_str() };
+        let text = plain_text(&ui.m.st.name);
+        let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+        let name = lines.next().unwrap_or("(no name)");
         ui.c.text_clip(LABEL, x, PATCH_TEXT.y + 4.0, w, TEXT, name);
+        if let Some(more) = lines.next() {
+            ui.c.text_clip(SMALL, x, PATCH_TEXT.y + 5.0 + lh, w, DIM, more);
+        }
     } else {
         let (left, right) = hint.split_once('\t').unwrap_or((hint, ""));
         ui.c.text_clip(LABEL, x, PATCH_TEXT.y + 4.0, w, ACCENT, left);
@@ -534,8 +565,86 @@ fn patch_text(ui: &mut Ui, hint: &str) {
             ui.c.text_right(LABEL, PATCH_TEXT.right() - 6.0, PATCH_TEXT.y + 4.0, DIM, right);
         }
     }
-    let _ = lh;
     ui.hit(PATCH_TEXT, Target::PatchText);
+}
+
+/// A patch text's plain text: RTF (`{\rtf1 ...}`) without its control words and its font, colour and style tables,
+/// `\par` and `\line` as line breaks, `\'hh` as Windows-1252 (Latin-1 here); other text unchanged.
+pub fn plain_text(s: &str) -> String {
+    if !s.starts_with("{\\rtf") {
+        return s.to_string();
+    }
+    const SKIP: [&str; 6] = ["fonttbl", "colortbl", "stylesheet", "info", "pict", "generator"];
+    let ch: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    // Per group: whether its text is skipped.
+    let mut stack = vec![false];
+    let mut i = 0;
+    while i < ch.len() {
+        let skip = *stack.last().unwrap_or(&false);
+        match ch[i] {
+            '{' => {
+                stack.push(skip);
+                i += 1;
+            }
+            '}' => {
+                stack.pop();
+                i += 1;
+            }
+            '\\' if i + 1 < ch.len() => {
+                let n = ch[i + 1];
+                if n == '\\' || n == '{' || n == '}' {
+                    if !skip {
+                        out.push(n);
+                    }
+                    i += 2;
+                } else if n == '\'' {
+                    let hex: String = ch.iter().skip(i + 2).take(2).collect();
+                    if let (false, Ok(v)) = (skip, u8::from_str_radix(&hex, 16)) {
+                        out.push(v as char);
+                    }
+                    i += 4;
+                } else if n == '*' {
+                    if let Some(top) = stack.last_mut() {
+                        *top = true;
+                    }
+                    i += 2;
+                } else if n.is_ascii_alphabetic() {
+                    let mut j = i + 1;
+                    while j < ch.len() && ch[j].is_ascii_alphabetic() {
+                        j += 1;
+                    }
+                    let word: String = ch[i + 1..j].iter().collect();
+                    while j < ch.len() && (ch[j] == '-' || ch[j].is_ascii_digit()) {
+                        j += 1;
+                    }
+                    if j < ch.len() && ch[j] == ' ' {
+                        j += 1;
+                    }
+                    if SKIP.contains(&word.as_str()) {
+                        if let Some(top) = stack.last_mut() {
+                            *top = true;
+                        }
+                    } else if !skip && (word == "par" || word == "line") {
+                        out.push('\n');
+                    } else if !skip && word == "tab" {
+                        out.push(' ');
+                    }
+                    i = j;
+                } else {
+                    i += 2;
+                }
+            }
+            '\r' | '\n' => i += 1,
+            c => {
+                if !skip {
+                    out.push(c);
+                }
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -620,10 +729,10 @@ fn module_page(ui: &mut Ui) {
 /// A small toggle button with its text.
 fn toggle(ui: &mut Ui, f: Field, r: Rect, label: &str) {
     let t = Target::Switch(f);
-    let hot = ui.hot(r, &t);
-    let on = ui.get(f) != 0;
-    ui.c.fill_rect(r, if on { ACCENT } else if hot { EDGE } else { WELL });
-    ui.c.text_center(SMALL, r, if on { BG } else { DIM }, label);
+    let mut st = ui.state(r, &t);
+    st.on = ui.get(f) != 0;
+    let ink = lemon::plug_button(ui.c, r, 4.0, st);
+    ui.c.text_center(SMALL.bold(), r, ink, label);
     ui.hit(r, t);
 }
 
@@ -632,9 +741,9 @@ fn digits(ui: &mut Ui, f: Field, r: Rect, decimals: i32, unit: &str) {
     let v = ui.get(f);
     let scale = 10f64.powi(decimals);
     let s = format!("{:.*}", decimals as usize, v as f64 / scale);
-    ui.c.fill_rect(r, WELL);
     let pressed = matches!(&ui.st.pressed, Some(Target::Digit(p, _)) if *p == f);
-    ui.c.stroke_rrect(r.inset(0.5), 0.0, 1.0, if pressed { DIM } else { EDGE });
+    let hover = ui.st.pressed.is_none() && ui.st.mouse.is_some_and(|(x, y)| r.contains(x, y));
+    lemon::field(ui.c, r, Look { hover, pressed, on: false, disabled: false });
     let uw = ui.c.text_width(SMALL, unit);
     let w = ui.c.text_width(LABEL, &s);
     let x0 = (r.right() - 6.0 - uw - 4.0 - w).round();
@@ -661,8 +770,8 @@ fn digits(ui: &mut Ui, f: Field, r: Rect, decimals: i32, unit: &str) {
 fn operator(ui: &mut Ui, m: usize) {
     // The waveform: one cycle.
     let r = Rect::new(8.0, 33.0, 80.0, 65.0);
-    ui.c.fill_rect(r, WELL);
-    ui.c.fill_rect(Rect::new(r.x, r.cy(), r.w, 1.0), FAINT);
+    lemon::plug_well(ui.c, r, 6.0);
+    ui.c.fill_rect(Rect::new(r.x + 2.0, r.cy(), r.w - 4.0, 1.0), plug::TICK);
     if let Some(w) = ui.m.wave {
         let n = w.len().max(2);
         let pts: Vec<(f32, f32)> =
@@ -706,11 +815,11 @@ fn filter(ui: &mut Ui, m: usize) {
     for (k, x, l) in [(1, 153.0, "ENV"), (2, 198.0, "CUT"), (3, 245.0, "RES"), (7, 424.0, "AMP"), (8, 471.0, "MIX"), (9, 516.0, "NEXT")] {
         knob(ui, Field::Head(m, k), x, 56.0, 14.0, l);
     }
-    // MODE: FL's "+" button, whose setting was not identified.
+    // MODE: FL's "+" button, whose setting was not identified: greyed out.
     let r = Rect::new(380.0, 49.0, 20.0, 20.0);
-    ui.c.fill_rect(r, WELL);
-    ui.c.text_center(LABEL, r, DIM, "+");
-    ui.label(SMALL, 390.0, 77.0, DIM, "MODE");
+    let ink = lemon::plug_button(ui.c, r, 5.0, Look { disabled: true, ..Look::NORMAL });
+    ui.c.text_center(LABEL, r, ink, "+");
+    ui.label(SMALL, 390.0, 77.0, OFF, "MODE");
     ui.hit(r, Target::Inert("Filter mode: off"));
     switch(ui, Field::Filt(m, 2), 481.0, 112.0, "WS");
     ui.label(SMALL, 470.0, 95.0, FAINT, "WAVESHAPER");
@@ -724,7 +833,9 @@ fn effects(ui: &mut Ui) {
     ui.label(SMALL, 67.0, 47.0, DIM, "ORD");
     let ord = ui.get(Field::S(16)).to_string();
     value_box(ui, Field::S(16), Rect::new(55.0, 56.0, 24.0, 20.0), &ord);
-    lamp(ui, Target::Inert("Chorus"), false, 78.0, 113.0, "CHR", false);
+    lamp(ui, Target::Inert("Chorus"), false, 78.0, 113.0, "", false);
+    let lh = ui.c.line_height(SMALL);
+    ui.c.text_right(SMALL, 68.0, (113.0 - lh / 2.0).round(), OFF, "CHR");
     for (k, x, l) in [(17, 96.0, "DP"), (18, 118.0, "SP"), (19, 139.0, "DL"), (20, 162.0, "SR"), (21, 184.0, "CR"), (22, 206.0, "VL")] {
         slider(ui, Field::S(k), x, 54.0, 113.0, l);
     }
@@ -739,12 +850,12 @@ fn effects(ui: &mut Ui) {
     for (k, y) in FX_UNIT_Y.into_iter().enumerate() {
         let r = Rect::span(300.0, 318.0, y - 8.0, y + 8.0);
         let t = Target::FxUnit(k);
-        let hot = ui.hot(r, &t);
+        let st = ui.state(r, &t);
         let sel = unit == k;
-        ui.c.fill_rect(r, if sel { ACCENT } else if hot { EDGE } else { WELL });
         let on = if k < 3 { ui.m.st.delays[k].on } else { ui.m.st.reverb.on };
+        let ink = lemon::choice_button(ui.c, r, sel, ACCENT, st);
         let s = ["D1", "D2", "D3", "R"][k];
-        ui.c.text_center(SMALL, r, if sel { BG } else if on { TEXT } else { DIM }, s);
+        ui.c.text_center(SMALL.bold(), r, if !sel && on { TEXT } else { ink }, s);
         ui.hit(r, t);
     }
     if unit < 3 {
@@ -815,12 +926,20 @@ fn articulators(ui: &mut Ui, m: usize) {
     }
 }
 
+/// A target or source tab: the chosen one a dark rounded pill with its name in lemon (Pith's sets of choices), a
+/// lemon dot when its part is on.
 fn tab(ui: &mut Ui, r: Rect, t: Target, label: &str, sel: bool, on: bool) {
     let hot = ui.hot(r, &t);
-    ui.c.fill_rect(r, if sel { ACCENT } else if hot { EDGE } else { PANEL });
-    ui.c.text_center(SMALL, r, if sel { BG } else { TEXT }, label);
+    let pill = r.inset(1.0);
+    if sel {
+        lemon::outlined(ui.c, pill, 6.0, plug::FIELD_LINE, plug::FIELD);
+    } else if hot {
+        ui.c.fill_rrect(pill, 6.0, Color::rgb(0x333333));
+    }
+    let ink = if sel { ACCENT } else if hot { TEXT } else { DIM };
+    ui.c.text_center(SMALL.bold(), r, ink, label);
     if on {
-        ui.c.fill_rect(Rect::new(r.x + 3.0, r.y + 4.0, 2.0, r.h - 8.0), if sel { BG } else { ACCENT });
+        ui.c.fill_circle(r.x + 7.0, r.cy(), 2.0, ACCENT);
     }
     ui.hit(r, t);
 }
@@ -866,14 +985,17 @@ pub fn y_to_level(y: f32) -> f32 {
 fn curve_view(ui: &mut Ui, c: &crate::curve::Curve) {
     let r = CURVE;
     let map = c.kind == crate::curve::MAP;
-    ui.c.fill_rect(r, if map { WELL.shade(-0.2) } else { WELL });
+    lemon::plug_well(ui.c, r, 6.0);
+    if map {
+        ui.c.fill_rrect(r.inset(1.0), 5.0, Color::rgb(0x1a1a1a));
+    }
     for k in 1..8 {
         let x = (r.x + r.w * k as f32 / 8.0).round();
-        ui.c.fill_rect(Rect::new(x, r.y, 1.0, r.h), BG);
+        ui.c.fill_rect(Rect::new(x, r.y + 1.0, 1.0, r.h - 2.0), plug::GRID);
     }
     for k in 1..4 {
         let y = (r.y + r.h * k as f32 / 4.0).round();
-        ui.c.fill_rect(Rect::new(r.x, y, r.w, 1.0), BG);
+        ui.c.fill_rect(Rect::new(r.x + 1.0, y, r.w - 2.0, 1.0), plug::GRID);
     }
     let inner = curve_inner();
     let span = ui.st.span.unwrap_or_else(|| curve_span(c));
@@ -892,7 +1014,7 @@ fn curve_view(ui: &mut Ui, c: &crate::curve::Curve) {
         }
         line.push((x1, level_to_y(c.points[i].level)));
     }
-    let ink = if c.enabled || map { ACCENT } else { DIM };
+    let ink = if c.enabled || map { ACCENT } else { FAINT };
     let mut area = line.clone();
     area.push((line.last().unwrap().0, inner.bottom()));
     area.push((line[0].0, inner.bottom()));
@@ -901,10 +1023,10 @@ fn curve_view(ui: &mut Ui, c: &crate::curve::Curve) {
     for (i, tag) in [(c.decay, "D"), (c.sustain, "S"), (c.loop_start, "L")] {
         if let Some(&t) = usize::try_from(i).ok().and_then(|i| ts.get(i)) {
             let x = t_to_x(t, span).round();
-            ui.c.fill_rect(Rect::new(x, r.y, 1.0, r.h), DIM);
-            let tag_r = Rect::new(x - 5.0, r.bottom() - 13.0, 10.0, 11.0);
-            ui.c.fill_rect(tag_r, EDGE);
-            ui.c.text_center(SMALL, tag_r, TEXT, tag);
+            ui.c.fill_rect(Rect::new(x, r.y + 1.0, 1.0, r.h - 2.0), plug::TICK);
+            let tag_r = Rect::new(x - 5.0, r.bottom() - 14.0, 11.0, 11.0);
+            ui.c.fill_rrect(tag_r, 3.0, EDGE);
+            ui.c.text_center(SMALL.bold(), tag_r, TEXT, tag);
         }
     }
     ui.hit(r, Target::CurveArea);
@@ -929,12 +1051,15 @@ fn curve_view(ui: &mut Ui, c: &crate::curve::Curve) {
         let tg = Target::Point(i);
         let hr = Rect::new(x - 5.0, y - 5.0, 10.0, 10.0);
         let hot = ui.hot(hr, &tg);
-        let fill = if hot { TEXT } else if ui.st.selected.get(i) == Some(&true) { SELECTED } else { ink };
-        ui.c.fill_circle(x, y, if hot { 4.0 } else { 3.0 }, fill);
+        let fill = if hot { brand::HIGHLIGHT } else if ui.st.selected.get(i) == Some(&true) { SELECTED } else { ink };
+        let rad = if hot { 4.0 } else { 3.0 };
+        ui.c.fill_circle(x, y, rad + 1.0, WELL);
+        ui.c.fill_circle(x, y, rad, fill);
         ui.hit(hr, tg);
     }
     if let Some(b) = ui.st.band {
-        ui.c.stroke_rrect(b, 0.0, 1.0, TEXT);
+        ui.c.fill_rect(b, ACCENT.with_alpha(25));
+        ui.c.stroke_rrect(b, 0.0, 1.0, ACCENT);
     }
 }
 
@@ -968,8 +1093,9 @@ pub fn scale_btn(k: usize) -> Rect {
 /// The Level scaling dialog: a panel blocking the surface, three faders, a knob and its buttons.
 fn scale_dialog(ui: &mut Ui, v: [f32; 4]) {
     ui.hit(Rect::new(0.0, 0.0, W as f32, H as f32), Target::Dialog);
+    ui.c.fill_rect(Rect::new(0.0, 0.0, W as f32, H as f32), BG.with_alpha(110));
     panel(ui, SCALE_DLG);
-    ui.c.text(LABEL, SCALE_DLG.x + 8.0, SCALE_DLG.y + 5.0, TEXT, "Level scaling");
+    ui.c.text(LABEL.bold(), SCALE_DLG.x + 10.0, SCALE_DLG.y + 6.0, TEXT, "Level scaling");
     for k in 0..4 {
         let (lo, hi) = SCALE_RANGE[k];
         let n = (v[k] - lo) / (hi - lo);
@@ -981,10 +1107,10 @@ fn scale_dialog(ui: &mut Ui, v: [f32; 4]) {
             ui.label(SMALL, r.cx(), r.bottom() + 6.0, DIM, SCALE_NAMES[k]);
         } else {
             let (top, bot) = (r.y + 6.0, r.bottom() - 6.0);
-            ui.c.fill_rect(Rect::span(r.cx() - 1.0, r.cx() + 1.0, top, bot), WELL);
-            let y = bot - (bot - top) * n.clamp(0.0, 1.0);
-            ui.c.fill_rect(Rect::new(r.cx() - 9.0, (y - 6.0).round(), 18.0, 12.0), if hot { EDGE.shade(0.15) } else { EDGE });
-            ui.c.fill_rect(Rect::new(r.cx() - 7.0, y.round(), 14.0, 1.0), TEXT);
+            let y_of = |n: f32| bot - (bot - top) * n.clamp(0.0, 1.0);
+            let zero = y_of(-lo / (hi - lo));
+            let st = Look { hover: hot, pressed: ui.st.pressed.as_ref() == Some(&t), on: false, disabled: false };
+            fader(ui, r.cx(), top, bot, y_of(n), zero, st);
             ui.label(SMALL, r.cx(), r.y - 6.0, DIM, SCALE_NAMES[k]);
         }
         ui.hit(r, t);
@@ -992,9 +1118,10 @@ fn scale_dialog(ui: &mut Ui, v: [f32; 4]) {
     for (k, l) in SCALE_BTNS.into_iter().enumerate() {
         let r = scale_btn(k);
         let t = Target::ScaleBtn(k);
-        let hot = ui.hot(r, &t);
-        ui.c.fill_rect(r, if hot { EDGE } else { WELL });
-        ui.c.text_center(SMALL, r, TEXT, if k == 2 { "x" } else { l });
+        let mut st = ui.state(r, &t);
+        st.on = k == 1;
+        let ink = lemon::plug_button(ui.c, r, 5.0, st);
+        ui.c.text_center(SMALL.bold(), r, ink, if k == 2 { "x" } else { l });
         ui.hit(r, t);
     }
 }
@@ -1030,9 +1157,9 @@ pub fn harm_scroll_at(x: f32) -> usize {
 /// The OSC target: the cycle on top, the harmonics' levels below as bars.
 fn harmonics(ui: &mut Ui, m: usize) {
     let r = CURVE;
-    ui.c.fill_rect(r, WELL);
+    lemon::plug_well(ui.c, r, 6.0);
     let top = Rect::new(r.x, r.y, r.w, 60.0);
-    ui.c.fill_rect(Rect::new(r.x, top.bottom(), r.w, 1.0), BG);
+    ui.c.fill_rect(Rect::new(r.x + 1.0, top.bottom(), r.w - 2.0, 1.0), plug::GRID);
     if let Some(w) = ui.m.wave {
         let n = w.len().max(2);
         let pts: Vec<(f32, f32)> = w.iter().enumerate().map(|(i, &v)| (top.x + top.w * i as f32 / (n - 1) as f32, top.cy() - 26.0 * v.clamp(-1.0, 1.0))).collect();
@@ -1048,16 +1175,17 @@ fn harmonics(ui: &mut Ui, m: usize) {
         let l = levels.get(h).copied().unwrap_or(0.0);
         let x = bars.x + k as f32 * bw;
         let y = bars.bottom() - bars.h * l.clamp(0.0, 1.0);
-        let fill = if hot == Some(h) { TEXT } else if l > 0.0 { ACCENT } else { FAINT };
+        let fill = if hot == Some(h) { brand::HIGHLIGHT } else if l > 0.0 { ACCENT } else { plug::TICK };
         ui.c.fill_rect(Rect::span(x + 0.5, x + bw - 0.5, y.min(bars.bottom() - 1.0), bars.bottom()), fill);
         ui.hit(Rect::new(x, bars.y, bw, bars.h), Target::Harm(h));
     }
     panel(ui, BAR);
     // The scroll bar.
-    ui.c.fill_rect(HARM_SCROLL, WELL);
+    let hover = ui.st.mouse.is_some_and(|(x, y)| HARM_SCROLL.contains(x, y)) || ui.st.pressed == Some(Target::HarmScroll);
+    lemon::field(ui.c, HARM_SCROLL, Look::hover(hover));
     let tw = HARM_SCROLL.w * HARM_VISIBLE as f32 / 256.0;
     let tx = HARM_SCROLL.x + (HARM_SCROLL.w - tw) * scroll as f32 / (256 - HARM_VISIBLE) as f32;
-    ui.c.fill_rect(Rect::new(tx, HARM_SCROLL.y + 2.0, tw, HARM_SCROLL.h - 4.0), EDGE);
+    ui.c.fill_rrect(Rect::new(tx + 1.0, HARM_SCROLL.y + 2.0, tw - 2.0, HARM_SCROLL.h - 4.0), 3.0, if hover { Color::rgb(0x666666) } else { EDGE });
     ui.hit(HARM_SCROLL, Target::HarmScroll);
     options_arrow(ui, Target::HarmOptions);
     lamp(ui, Target::Inert("Smooth"), false, 190.0, 336.0, "SMOOTH", false);
@@ -1096,10 +1224,12 @@ fn tools(ui: &mut Ui) {
     for (k, x) in TOOL_X.into_iter().enumerate() {
         let r = Rect::new(x - 10.0, 327.0, 20.0, 16.0);
         let t = Target::Tool(k);
-        let hot = ui.hot(r, &t);
-        let on = ui.st.tools[k];
-        ui.c.fill_rect(r, if on { ACCENT } else if hot { EDGE } else { WELL });
-        ui.c.text_center(SMALL, r, if on { BG } else { DIM }, TOOL_LABELS[k]);
+        let mut st = ui.state(r, &t);
+        st.on = ui.st.tools[k];
+        // Step editing does nothing yet.
+        st.disabled = k == 1;
+        let ink = lemon::plug_button(ui.c, r, 4.0, st);
+        ui.c.text_center(SMALL, r, ink, TOOL_LABELS[k]);
         ui.hit(r, t);
     }
 }
@@ -1109,7 +1239,7 @@ fn tools(ui: &mut Ui) {
 
 /// Cell (r, c)'s centre.
 pub fn cell_centre(r: usize, c: usize) -> (f32, f32) {
-    (567.0 + 31.0 * c as f32 + 15.0, 48.0 + 31.0 * r as f32 + 15.0)
+    (GRID_X + PITCH * c as f32 + PITCH / 2.0, GRID_Y + PITCH * r as f32 + PITCH / 2.0)
 }
 
 /// The page a matrix row or column label selects (`None` for PAN and OUT).
@@ -1130,24 +1260,24 @@ fn matrix(ui: &mut Ui) {
     let rows = ["1", "2", "3", "4", "5", "6", "F1", "F2", "F3"];
     for (c, s) in cols.into_iter().enumerate() {
         let (x, _) = cell_centre(0, c);
-        let r = Rect::new(x - 15.0, 30.0, 30.0, 17.0);
+        let r = Rect::new(x - PITCH / 2.0, GRID_Y - 15.0, PITCH, 14.0);
         let sel = label_page(false, c) == Some(ui.st.page);
         if sel {
-            ui.c.fill_rect(r, accent);
+            ui.c.fill_rrect(r.inset(1.0), 5.0, accent);
         }
-        ui.c.text_center(SMALL, r, if sel { BG } else { DIM }, s);
+        ui.c.text_center(SMALL.bold(), r, if sel { brand::COLORED_DARK } else { DIM }, s);
         if label_page(false, c).is_some() {
             ui.hit(r, Target::Col(c));
         }
     }
     for (row, s) in rows.into_iter().enumerate() {
         let (_, y) = cell_centre(row, 0);
-        let r = Rect::new(547.0, y - 15.0, 19.0, 30.0);
+        let r = Rect::new(GRID_X - 20.0, y - PITCH / 2.0, 18.0, PITCH);
         let sel = label_page(true, row) == Some(ui.st.page);
         if sel {
-            ui.c.fill_rect(r, accent);
+            ui.c.fill_rrect(r.inset(1.0), 5.0, accent);
         }
-        ui.c.text_center(SMALL, r, if sel { BG } else { DIM }, s);
+        ui.c.text_center(SMALL.bold(), r, if sel { brand::COLORED_DARK } else { DIM }, s);
         ui.hit(r, Target::Row(row));
     }
     for row in 0..9 {
@@ -1156,7 +1286,7 @@ fn matrix(ui: &mut Ui) {
             let f = if ring_cell { Field::Ring(row, c) } else { Field::Cell(row, c) };
             let off = ui.m.st.cell_off[if ring_cell { 81 } else { 0 } + row * 9 + c] != 0;
             let (cx, cy) = cell_centre(row, c);
-            let hr = Rect::new(cx - 15.0, cy - 15.0, 30.0, 30.0);
+            let hr = Rect::new(cx - PITCH / 2.0, cy - PITCH / 2.0, PITCH, PITCH);
             let t = Target::Cell(f);
             let hot = ui.hot(hr, &t);
             if off {
@@ -1169,16 +1299,27 @@ fn matrix(ui: &mut Ui) {
             ui.hit(hr, t);
         }
     }
-    for (k, (x, s)) in [(548.0, "FM"), (594.0, "RM")].into_iter().enumerate() {
-        let r = Rect::new(x, 327.0, 44.0, 17.0);
+    let bar_y = GRID_Y + 9.0 * PITCH + 6.0;
+    for (k, (x, s)) in [(GRID_X - 20.0, "FM"), (GRID_X + 28.0, "RM")].into_iter().enumerate() {
+        let r = Rect::new(x, bar_y, 44.0, 18.0);
         let t = Target::MatrixTab(k == 1);
         let sel = ring == (k == 1);
-        let hot = ui.hot(r, &t);
-        ui.c.fill_rect(r, if sel { accent } else if hot { EDGE } else { WELL });
-        ui.c.text_center(SMALL, r, if sel { BG } else { TEXT }, s);
+        let mut st = ui.state(r, &t);
+        st.on = sel;
+        let ink = if sel && k == 1 {
+            ui.c.fill_rrect(r, 5.0, RING);
+            brand::COLORED_DARK
+        } else {
+            lemon::plug_button(ui.c, r, 5.0, st)
+        };
+        ui.c.text_center(SMALL.bold(), r, ink, s);
         ui.hit(r, t);
     }
-    ui.c.text_right(LABEL, 840.0, 329.0, DIM, "MATRIX");
+    let f = Font::condensed(11, 0).bold();
+    let right = GRID_X + 9.0 * PITCH;
+    let y = (bar_y + 9.0 - ui.c.line_height(f) / 2.0).round();
+    let wm = lemon::spaced_width(ui.c, f, "MATRIX", 2.0);
+    lemon::spaced(ui.c, f, right - wm, y, DIM, "MATRIX", 2.0);
 }
 
 /// An off cell: a muted speaker.
@@ -1230,13 +1371,14 @@ fn keyboard(ui: &mut Ui) {
             let r = key_rect(k);
             let held = ui.st.key == Some(k);
             let fill = match (black, held) {
-                (_, true) => ACCENT,
-                (false, _) => Color::rgb(0xe4e4e4),
-                (true, _) => Color::rgb(0x202020),
+                (false, true) => ACCENT,
+                (true, true) => brand::DEEP,
+                (false, _) => Color::rgb(0xdcdcdc),
+                (true, _) => Color::rgb(0x1f1f1f),
             };
-            ui.c.fill_rect(Rect::new(r.x + 0.5, r.y, r.w - 1.0, r.h), fill);
+            ui.c.fill_rrect(Rect::new(r.x + 0.5, r.y - 3.0, r.w - 1.0, r.h + 3.0), 3.0, fill);
             if k % 12 == 0 {
-                ui.label(SMALL, r.cx(), r.bottom() - 9.0, Color::rgb(0x606060), &key_name(k));
+                ui.label(SMALL, r.cx(), r.bottom() - 9.0, Color::rgb(0x7a7a7a), &key_name(k));
             }
             ui.hit(r, Target::Key(k));
         }
@@ -1249,7 +1391,7 @@ fn keyboard(ui: &mut Ui) {
 fn info(ui: &mut Ui) {
     let (w, h) = ui.c.size();
     let mid = Rect::new(0.0, h / 2.0 - 60.0, w, 30.0);
-    ui.c.text_center(Font::new(26).bold(), mid, TEXT, "Citrus");
+    name(ui, mid, Font::condensed(32, 0).bold());
     let v = format!("Version {}", ui.m.version);
     ui.c.text_center(LABEL, Rect::new(0.0, mid.bottom() + 8.0, w, 16.0), DIM, &v);
     ui.c.text_center(LABEL, Rect::new(0.0, mid.bottom() + 26.0, w, 16.0), DIM, "Lemon Studio's recreation of FL's Sytrus");
@@ -1260,8 +1402,7 @@ fn info(ui: &mut Ui) {
 /// A box of the diagram with its name; returns its rect.
 fn block(ui: &mut Ui, x: f32, y: f32, w: f32, s: &str) -> Rect {
     let r = Rect::new(x, y, w, 24.0);
-    ui.c.fill_rect(r, PANEL);
-    ui.c.stroke_rrect(r.inset(0.5), 0.0, 1.0, DIM);
+    lemon::outlined(ui.c, r, 6.0, plug::PANEL_LINE, PANEL);
     ui.c.text_center(SMALL, r, TEXT, s);
     r
 }
@@ -1310,4 +1451,16 @@ fn diagram(ui: &mut Ui) {
     arrow(ui, eq.right(), eq.cy(), main.x, main.cy());
     ui.c.text_center(SMALL, Rect::new(0.0, h - 30.0, w, 16.0), FAINT, "Click to return");
     ui.hit(Rect::new(0.0, 0.0, w, h), Target::Cover);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patch_text_rtf_shown_plain() {
+        let rtf = "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0\\fswiss Arial;}}{\\colortbl ;\\red255\\green0\\blue0;}\\f0\\fs20 Deep \\'e9t\\'e9\\par\\cf1 by \\{me\\}\\par}";
+        assert_eq!(plain_text(rtf), "Deep \u{e9}t\u{e9}\nby {me}\n");
+        assert_eq!(plain_text("Init"), "Init");
+    }
 }
