@@ -3,9 +3,10 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The piano roll's small tool dialogs, laid out as FL's: Flam ("Piano roll - flamer", 198 × 241), Flip ("Piano roll -
-//! score flipper", 162 × 160), Scale levels ("Piano roll - level scaling", 172 × 277) and Limit ("Piano roll - limiter /
-//! transposer", 432 × 295). One window shows whichever is open (`piano_dlg::Ui::tool`).
-// spec: ui/piano-flam.md §1, ui/piano-flip.md §1, ui/piano-level-scaling.md §1, ui/piano-limit.md §1
+//! score flipper", 162 × 160), Scale levels ("Piano roll - level scaling", 172 × 277), Limit ("Piano roll - limiter /
+//! transposer", 432 × 295) and Claw machine ("Piano roll - claw machine", 172 × 245). One window shows whichever is
+//! open (`piano_dlg::Ui::tool`).
+// spec: ui/piano-flam.md §1, ui/piano-flip.md §1, ui/piano-level-scaling.md §1, ui/piano-limit.md §1, ui/piano-claw.md §1
 
 use os_ui::kit::{self, Dir, lemon as lk};
 use os_ui::{Font, Glyph, Rect};
@@ -19,7 +20,7 @@ use crate::piano_dlg::{self as dlg, Act, KB_W, KEY_W, Knob, Tool};
 use crate::views::piano::{TOP_KEY, is_black, key_name};
 
 /// Each dialog's size, by `Tool::index`; Limit's with both sections open.
-const SIZES: [(f32, f32); 4] = [(198.0, 241.0), (162.0, 160.0), (172.0, 277.0), (432.0, 295.0)];
+const SIZES: [(f32, f32); 5] = [(198.0, 241.0), (162.0, 160.0), (172.0, 277.0), (432.0, 295.0), (172.0, 245.0)];
 
 /// The panel heights under Limit's two section headers (piano-limit.md §1): a collapsed section's comes off the window.
 const PANELS: [f32; 2] = [67.0, 110.0];
@@ -84,6 +85,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         Tool::Flip => flip(ui, s, x0, y0),
         Tool::Levels => levels(ui, s, x0, y0),
         Tool::Limit => limit(ui, s, x0, y0),
+        Tool::Claw => claw(ui, s, x0, y0),
     }
 
     // Reset, Accept.
@@ -196,6 +198,30 @@ fn levels(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
     }
     knob(ui, s, x0, y0, 38.0, 190.0, Knob::Tension, true);
     label(ui, lf, x0 + 38.0, y0 + 221.0, 0, t.text, "Tension");
+}
+
+/// Claw machine (piano-claw.md §1): the Period and Trash every boxes, the Time dist knob and its centre mark, the
+/// two switches.
+fn claw(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
+    let t = ui.t;
+    let lf = Font::new(15);
+    let set = &s.piano_dlg.claw;
+    for (y, act, name, text, hint) in [
+        (39.0, Act::PeriodMenu, "Period", set.period_name(), "Period: the stretch of time each cut repeats over"),
+        (70.0, Act::TrashMenu, "Trash every", set.trash_name(), "Trash every: the part of each period cut out"),
+    ] {
+        label(ui, lf, x0 + 75.0, y0 + y + 11.5, 1, t.text, name);
+        let r = Rect::new(x0 + 81.0, y0 + y, 74.0, 23.0);
+        let hov = ui.hit(r, Action::PianoDlg(act), hint);
+        kit::combo(ui.c, t, r, text, lf, kit::State::hover(hov));
+    }
+    label(ui, lf, x0 + 75.0, y0 + 124.0, 1, t.text, "Time dist");
+    let mark = if super::lemon(ui) { t.accent } else { t.h(0xc8872e) };
+    ui.c.fill_rect(Rect::new(x0 + 95.0, y0 + 103.0, 2.0, 4.0), mark);
+    knob(ui, s, x0, y0, 96.0, 124.0, Knob::ClawTime, true);
+    // FL's switch names are narrower than our 15 px: a size down keeps them inside the panel.
+    switch(ui, s, x0, y0, 21.0, 164.0, Act::Stretch, "Stretch to compensate", "Stretch the rest of each period over the cut", Font::new(14), false);
+    switch(ui, s, x0, y0, 22.0, 186.0, Act::Short, "Remove short notes", "Remove notes left shorter than a 24th of a beat", Font::new(12), false);
 }
 
 /// Limit's keyboard (piano-limit.md §1), window-relative: its left edge; below its section's header top, the name

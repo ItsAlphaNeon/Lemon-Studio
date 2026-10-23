@@ -3,7 +3,7 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Piano-roll editing commands: quantize, legato, chop, glue, discard lengths, randomize, the Strum, Arpeggiate, Flam,
-//! Limit, Flip and Scale levels dialogs, duplicate, mute, ghost channels, time markers, channel cycling and the
+//! Claw machine, Limit, Flip and Scale levels dialogs, duplicate, mute, ghost channels, time markers, channel cycling and the
 //! selection keys, with the Tools menu that lists them.
 // spec: ui/piano-roll.md §3a, §10a, §11; ui/piano-keys.md
 
@@ -122,6 +122,7 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Strum...", Strum).key("Alt+S"),
         item("Arpeggiate...", Arpeggiate).key("Alt+A"),
         item("Flam...", Dialog(Tool::Flam)).key("Alt+F"),
+        item("Claw machine...", Dialog(Tool::Claw)).key("Alt+W"),
         item("Limit...", Dialog(Tool::Limit)).key("Alt+K"),
         item("Flip...", Dialog(Tool::Flip)).key("Alt+Y"),
         PItem::sub("Randomize", sub_items(Sub::Randomize)).key("Alt+R"),
@@ -166,6 +167,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && is(c, "s") => NCmd::Strum,
         Key::Character(c) if alt && !ctrl && is(c, "a") => NCmd::Arpeggiate,
         Key::Character(c) if alt && !ctrl && is(c, "f") => NCmd::Dialog(crate::piano_dlg::Tool::Flam),
+        Key::Character(c) if alt && !ctrl && is(c, "w") => NCmd::Dialog(crate::piano_dlg::Tool::Claw),
         Key::Character(c) if alt && !ctrl && is(c, "k") => NCmd::Dialog(crate::piano_dlg::Tool::Limit),
         Key::Character(c) if alt && !ctrl && is(c, "y") => NCmd::Dialog(crate::piano_dlg::Tool::Flip),
         Key::Character(c) if alt && !ctrl && is(c, "x") => NCmd::Dialog(crate::piano_dlg::Tool::Levels),

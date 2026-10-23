@@ -71,7 +71,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Area | Status | Notes |
 |---|:---:|---|
 | Step sequencing and patterns | ✅ | Channel rack with steps, mini piano rolls, swing and per-channel loops |
-| Piano roll | ✅ | Full tool set, velocity and event lanes, quantize, chop, strum, arpeggiate, flam, flip, level scaling, limit and more |
+| Piano roll | ✅ | Full tool set, velocity and event lanes, quantize, chop, strum, arpeggiate, flam, claw machine, flip, level scaling, limit and more |
 | Song arrangement | ✅ | Playlist with pattern, audio and automation clips, clip groups, markers and several arrangements |
 | Mixing and routing | ✅ | Mixer tracks, sends, effect slots and meters; no sidechain inputs yet |
 | Plugin hosting | ✅ | CLAP, VST3 and VST2 instruments and effects with their editors; on Windows a crashing plugin is stopped instead of closing Lemon Studio; no 32-bit plugins |
