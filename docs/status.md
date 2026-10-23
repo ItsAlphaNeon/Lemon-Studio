@@ -160,6 +160,10 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   VST3 and CLAP plugins; a project's Fruity Soft Clipper, Fruity Fast Dist, Fruity Balance, Fruity Stereo Enhancer and
   Transient Processor play through the same sound in the mixer. The first four match FL Studio 2026's exports sample
   for sample in the tests; Transient Processor has not been compared with FL 2026's exports yet
+- Lemon Parametric EQ plays FL's Parametric EQ 2 in every quality mode, in a project's mixer slots and as a plugin:
+  plain, HQ Legacy, HQ+, HQ Enhanced and linear phase (LIN) with its sizes and crossfade speeds. The plugin tells the
+  host LIN's and HQ Enhanced's delay; Lemon Studio does not compensate it yet, so in a project those two modes come
+  out late
 - The sampler plays a project's sample settings (start and length, the sample file's loop, the sample
   effects, the channel filter, declicking) and each note's own pan and filter offsets
 - A file of 30 s or more loaded into a sampler channel turns its Keep on disk on (General settings ▸

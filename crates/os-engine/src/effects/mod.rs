@@ -6,7 +6,6 @@
 //! plugin state.
 
 pub mod balance;
-mod biquad;
 pub mod delay;
 pub mod dynamics;
 pub mod eq;
@@ -16,8 +15,6 @@ pub mod reverb;
 pub mod soft_clipper;
 pub mod stereo_enhancer;
 pub mod transient_processor;
-
-pub use biquad::Biquad;
 
 /// An insert effect processing interleaved stereo in place.
 pub trait Effect: Send {
