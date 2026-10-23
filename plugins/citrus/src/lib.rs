@@ -123,6 +123,31 @@ impl CitrusParams {
         self.state_version.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// An edit's state without its patch yet (during a drag the editor makes the patch once a repaint): `bytes`
+    /// become the state the host saves. False, and nothing changes, when the state was replaced since version `version`
+    /// was read.
+    pub fn stored(&self, version: u64, bytes: Vec<u8>) -> bool {
+        let Ok(mut s) = self.state.write() else { return false };
+        if self.state_version.load(Ordering::Acquire) != version {
+            return false;
+        }
+        *s = StateBytes(bytes);
+        true
+    }
+
+    /// The patch of the edited state: the audio thread plays it from its next block. False, and nothing changes, when
+    /// the state was replaced since version `version` was read.
+    pub fn play(&self, version: u64, patch: patch::Patch) -> bool {
+        let Ok(_s) = self.state.read() else { return false };
+        if self.state_version.load(Ordering::Acquire) != version {
+            return false;
+        }
+        if let Ok(mut e) = self.edit.lock() {
+            *e = Some((version, patch));
+        }
+        true
+    }
+
     /// An edit from the editor (spec plugins/citrus.md §6): `bytes` become the state the host saves and the audio
     /// thread plays `patch` from its next block. The state version stays (the audio thread does not load the bytes
     /// again). False, and nothing changes, when the state was replaced since version `version` was read.

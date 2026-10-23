@@ -320,8 +320,10 @@ pub struct Logic {
     no_keys: Arc<AtomicBool>,
     /// The operator page's wave and what it was drawn from (the block, band-limit smoothing).
     wave: Option<(OpBlock, bool, Vec<f32>)>,
-    /// The operators' tables of the last edit, reused by the next one.
+    /// The operators' tables of the last edit, reused by the next one and by the waveform preview.
     tables: patch::Tables,
+    /// An edit whose patch the audio thread has not got yet (see [`Logic::flush`]).
+    pending: bool,
     /// The editor's clipboards: a point's level, a curve, an operator's harmonics.
     level_clip: Option<f32>,
     curve_clip: Option<Curve>,
@@ -360,6 +362,7 @@ impl Logic {
             no_keys,
             wave: None,
             tables: patch::Tables::default(),
+            pending: false,
             level_clip: None,
             curve_clip: None,
             harm_clip: None,
@@ -391,8 +394,10 @@ impl Logic {
         self.used = patch::usage(&self.st).0;
     }
 
-    /// Timer: a state replaced from outside is read again. True when the editor has to repaint.
+    /// Timer: a drag's edit reaches the audio thread, a state replaced from outside is read again. True when the editor
+    /// has to repaint.
     pub fn poll(&mut self) -> bool {
+        self.flush();
         if self.params.state_version.load(Ordering::Acquire) != self.version {
             self.reload();
             return true;
@@ -400,13 +405,31 @@ impl Logic {
         false
     }
 
-    /// An edit: the edited state becomes the plugin's and the audio thread plays it.
+    /// An edit: the edited state becomes the plugin's at once and the audio thread plays it. During a drag its patch
+    /// waits for the next repaint or timer tick ([`Logic::flush`]): a waveform setting builds a wave table (up to some
+    /// milliseconds), and mouse moves come faster than the editor repaints.
     fn commit(&mut self) {
         self.used = patch::usage(&self.st).0;
         let bytes = self.st.to_bytes(self.body.as_deref());
-        let p = Patch::with_tables(self.st.clone(), &mut self.tables);
-        if !self.params.edited(self.version, bytes, p) {
+        if !self.params.stored(self.version, bytes) {
             // The state was replaced meanwhile: show that one.
+            self.pending = false;
+            self.reload();
+            return;
+        }
+        self.pending = true;
+        if self.drag.is_none() {
+            self.flush();
+        }
+    }
+
+    /// The audio thread gets the patch of the last edit, if it has not yet.
+    pub fn flush(&mut self) {
+        if !std::mem::take(&mut self.pending) {
+            return;
+        }
+        let p = Patch::with_tables(self.st.clone(), &mut self.tables);
+        if !self.params.play(self.version, p) {
             self.reload();
         }
     }
@@ -946,6 +969,7 @@ impl Logic {
 
     pub fn up(&mut self, _btn: Btn) -> Vec<Act> {
         let Some(d) = self.drag.take() else { return vec![] };
+        self.flush();
         self.view.pressed = None;
         self.view.span = None;
         let mut acts = vec![Act::Repaint];
@@ -1434,12 +1458,16 @@ impl Logic {
 
     /// Paints the editor; `hint` is drawn when the host does not show it.
     pub fn paint(&mut self, c: &mut os_ui::Canvas) {
+        self.flush();
         let hint = if self.hosted { String::new() } else { self.hint.clone() };
         if (1..=OPERATORS).contains(&self.view.page) {
-            let op = &self.st.modules[self.view.page - 1].op;
+            let o = self.view.page - 1;
+            let op = &self.st.modules[o].op;
             let smooth = self.st.switch(2) != 0;
-            if !self.wave.as_ref().is_some_and(|(o, s, _)| o == op && *s == smooth) {
-                let t = crate::wave::build(op, smooth).t;
+            if !self.wave.as_ref().is_some_and(|(k, s, _)| k == op && *s == smooth) {
+                // The patch's own table (flushed just above), not a second build.
+                let table = self.tables.get(o, op, smooth);
+                let t = &table.t;
                 let n = crate::wave::N;
                 let w = (0..WAVE_POINTS).map(|i| t[i * n / (WAVE_POINTS - 1)]).collect();
                 self.wave = Some((op.clone(), smooth, w));
@@ -2036,6 +2064,31 @@ mod tests {
             assert!(h.r.contains(x, y), "{t:?} at {:?}", h.r);
         }
         assert!(l.hits.iter().any(|h| h.t == Target::Key(60)));
+    }
+
+    /// During a drag each step's state is saved at once and its patch reaches the audio thread once a repaint (or
+    /// timer tick) and when the drag ends, not once a mouse move.
+    #[test]
+    fn drag_patches_wait_for_a_repaint() {
+        let mut l = logic();
+        let edit = |l: &Logic| l.params.edit.lock().unwrap().take();
+        let (x, y) = centre(&l, &Target::Knob(Field::Soften));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        edit(&l);
+        for _ in 0..40 {
+            l.delta(0.0, -1.0, Mods::default());
+        }
+        assert_eq!(saved(&l).soften, 20);
+        assert!(edit(&l).is_none(), "no patch per mouse move");
+        paint(&mut l);
+        assert_eq!(edit(&l).map(|(_, p)| p.st.soften), Some(20));
+        l.delta(0.0, -2.0, Mods::default());
+        assert!(edit(&l).is_none());
+        l.up(Btn::Left);
+        assert_eq!(edit(&l).map(|(_, p)| p.st.soften), Some(saved(&l).soften));
+        // Outside a drag an edit plays at once.
+        l.wheel(x, y, 1.0, Mods::default());
+        assert!(edit(&l).is_some());
     }
 
     /// A knob drag: 250 px for the range, Ctrl 20 times finer; the wheel 1/32; Alt resets; each edit is saved.

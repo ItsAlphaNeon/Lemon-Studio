@@ -107,7 +107,7 @@ pub struct Tables([Option<(OpBlock, bool, Arc<Table>)>; OPERATORS]);
 
 impl Tables {
     /// Operator `o`'s table for its settings `op` and smoothing `smooth`: the kept one when they are the same.
-    fn get(&mut self, o: usize, op: &OpBlock, smooth: bool) -> Arc<Table> {
+    pub fn get(&mut self, o: usize, op: &OpBlock, smooth: bool) -> Arc<Table> {
         match &self.0[o] {
             Some((kept, s, t)) if kept == op && *s == smooth => t.clone(),
             _ => {
