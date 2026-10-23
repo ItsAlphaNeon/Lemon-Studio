@@ -80,7 +80,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Playback engine | 🚧 | Renders ahead of the audio device so edits do not cause dropouts; voice limits, cut groups, glides, layer channels; one audio thread for now |
 | Automation | 🚧 | Clips for channel, mixer and plugin parameters with every curve shape; no recording or clip LFO yet |
 | Project files | 🚧 | Opens and saves projects from FL Studio 24.2 and later; older versions are on the roadmap. Keep backups |
-| Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ |
+| Built-in instruments and effects | 🚧 | A sampler, a three-oscillator synth and a parametric EQ with all of FL's quality modes (HQ+, HQ Enhanced, linear phase) |
 | Exporting audio | ✅ | Song, pattern or selection to WAV, FLAC, MP3 and OGG at once; bit depth, sample rate, interpolation, dither, mono, tails, stems and WAV markers |
 | Note input | 🚧 | Mouse, computer keyboard and MIDI controllers (velocity curves, sustain pedal, pitch bend, aftertouch); no note recording yet |
 | MIDI controllers and sync | ✅ | Link any knob, fader or plugin parameter to a controller (or many at once with Multilink); MIDI clock and time code out, external clock in |
