@@ -1,0 +1,8 @@
+OSPRESET 1
+plugin=Lemon Fast Distortion	id=clap:org.openstudio.lemon-fast-distortion	format=clap	body=params
+# Values: OpenStudio-specs plugins/factory-presets.md.
+Pre amp = 18
+Threshold = 6
+Type = 0
+Mix = 128
+Post gain = 128
