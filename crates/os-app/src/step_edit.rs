@@ -168,7 +168,7 @@ impl App {
             s.piano.marker = to;
         }
         self.hint = Cow::Owned(crate::song_pos::hint(&self.state, to));
-        self.damage_rect(HINT_RECT);
+        self.damage_band(HINT_RECT);
         self.invalidate();
     }
 }

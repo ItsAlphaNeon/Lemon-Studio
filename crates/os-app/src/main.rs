@@ -97,6 +97,7 @@ mod shortcuts;
 mod smooth;
 mod snap;
 mod song_pos;
+mod toolbar;
 mod splash;
 mod stall;
 mod step_edit;

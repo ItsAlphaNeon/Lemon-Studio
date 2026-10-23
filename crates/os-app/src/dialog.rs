@@ -79,6 +79,10 @@ pub enum Then {
     RenamePreset(usize, PathBuf),
     /// The delete question for this preset file of the plugin with this key: Yes deletes it.
     DeletePreset(usize, PathBuf),
+    /// Where to save the toolbar's layout as a preset (spec: ui/toolbar-menu.md §8).
+    SaveToolbarPreset,
+    /// The delete question for this toolbar preset file: Yes deletes it.
+    DeleteToolbarPreset(PathBuf),
     /// Load sample... for this rack row.
     RackSample(usize),
     /// The replace question of the Save dialog under it: Yes answers that dialog with this path.

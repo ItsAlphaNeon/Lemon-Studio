@@ -408,7 +408,7 @@ impl App {
         let Some(id) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
         let text = s.params.plugin(key).and_then(|p| p.lock().ok()?.param_text(id, v)).unwrap_or_else(|| format!("{:.0}%", v * 100.0));
         self.hint = std::borrow::Cow::Owned(format!("{}: {text}", clip_name(s, key, index)));
-        self.damage_rect(crate::app::HINT_RECT);
+        self.damage_band(crate::app::HINT_RECT);
     }
 
     /// ADD / TOOLS menu entries for the last tweaked parameters (spec §5); returns a message.

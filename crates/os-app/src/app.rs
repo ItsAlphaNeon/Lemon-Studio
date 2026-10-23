@@ -191,6 +191,8 @@ pub enum Action {
     Maximize,
     Close,
     DragWindow,
+    /// The toolbar editor's panels, grips, palette tiles and buttons (spec: ui/toolbar-menu.md §8).
+    Bar(crate::toolbar::BarHit),
     Play,
     Stop,
     PatSong(bool),
@@ -717,6 +719,18 @@ impl Ui<'_> {
         self.hits.len()
     }
 
+    /// Where the hits and live regions stand now, for `forget`.
+    pub fn mark(&self) -> (usize, usize) {
+        (self.hits.len(), self.live.len())
+    }
+
+    /// Drops the hits and live regions registered since `mark`: a picture of controls that must not answer (the
+    /// toolbar editor's panels and palette tiles, spec: ui/toolbar-menu.md §8).
+    pub fn forget(&mut self, (hits, live): (usize, usize)) {
+        self.hits.truncate(hits);
+        self.live.truncate(live);
+    }
+
     /// Register a hit region; returns whether it is hovered (topmost last frame).
     pub fn hit(&mut self, rect: Rect, action: Action, hint: impl Into<Cow<'static, str>>) -> bool {
         let hovered = self.hover.as_ref() == Some(&action) && rect.contains(self.mouse.0, self.mouse.1);
@@ -780,6 +794,8 @@ pub enum Drag {
     PatternBox { y0: f32, p0: u16 },
     /// Move a floating window (offset of the mouse from its top-left).
     Window { win: Win, dx: f32, dy: f32 },
+    /// The toolbar editor: a panel, a palette tile, the logo or a row carried (spec: ui/toolbar-menu.md §8).
+    Bar(crate::toolbar::BarDrag),
     /// Resize a Playlist / Mixer / Piano roll window (`r0` = its rect when the drag began).
     WinResize { win: Win, edges: u8, m0: (f32, f32), r0: Rect },
     /// Resize the channel rack from its right / bottom edges.
@@ -993,6 +1009,8 @@ pub struct State {
     pub clock: crate::clock::Clock,
     /// The Toolbars menu's switches (spec: ui/toolbar-menu.md §8): app-wide, for the session.
     pub toolbar: views::toolbar::Opts,
+    /// The toolbar's layout, its editor and the user's presets (spec: ui/toolbar-menu.md §8).
+    pub bar: crate::toolbar::Bar,
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
     /// Settings > MIDI's devices and status (`crate::midi_play`; spec: ui/midi-settings.md).
@@ -1331,6 +1349,7 @@ impl App {
                 toggles: vec!["typing"],
                 clock: crate::clock::Clock::load(),
                 toolbar: views::toolbar::Opts::load(),
+                bar: crate::toolbar::Bar::load(),
                 midi: Default::default(),
                 link_box: None,
                 multilink: Default::default(),
@@ -1883,6 +1902,16 @@ impl App {
             Then::DeletePreset(key, path) => {
                 if reply == Reply::Button(Answer::Yes) {
                     self.state.message = crate::presets::delete_chosen(self, key, path);
+                }
+            }
+            Then::SaveToolbarPreset => {
+                if let Some(p) = file {
+                    self.toolbar_saved(p);
+                }
+            }
+            Then::DeleteToolbarPreset(path) => {
+                if reply == Reply::Button(Answer::Yes) {
+                    self.toolbar_deleted(path);
                 }
             }
             Then::RackSample(row) => {
@@ -2498,6 +2527,26 @@ impl App {
         (self.mouse.0 / k, self.mouse.1 / k)
     }
 
+    /// The mouse in the home px of toolbar panel `p` (`toolbar::Panel::home`), wherever the layout puts it: for what
+    /// is laid out there (the song position slider, the monitor's columns).
+    pub(crate) fn panel_mouse(&self, p: crate::toolbar::Panel) -> (f32, f32) {
+        let (x, y) = self.band_mouse();
+        let a = views::panel_at(&self.state, p).unwrap_or_default();
+        (x - a.dx, y - a.dy)
+    }
+
+    /// Damage rect `r` of the top band, given in the home px of its panels (`HINT_RECT`, `TEMPO_RECT`, `CPU_RECT`, ...):
+    /// repainted where the layout and Toolbars scaling put those panels (spec: ui/toolbar-menu.md §8, ui/ui-scaling.md
+    /// §1). The floating hint bar repeats the hint panel.
+    pub(crate) fn damage_band(&mut self, r: Rect) {
+        for d in views::band_rects(&self.state, r) {
+            self.damage_rect(d);
+        }
+        if self.state.toolbar.hint_bar && !r.intersect(&HINT_RECT).is_empty() {
+            self.damage_rect(views::toolbar::hint_bar_rect(&self.state));
+        }
+    }
+
     /// Whether a paint is due: damage, or a playlist scroll waiting to move its pixels (`playlist_scrolled` adds no
     /// damage of its own; without this a scroll-bar drag or middle-drag grab showed nothing until the release).
     pub fn has_damage(&self) -> bool {
@@ -2516,26 +2565,14 @@ impl App {
             Damage::None => None,
             Damage::Full => Some(None),
             Damage::Rects(mut v) => {
-                // The Toolbars menu (spec: ui/toolbar-menu.md §2, §4): without separators the rows' pixels move after
-                // painting, so the toolbar repaints whole; the floating hint bar repeats the hint panel.
+                // The Toolbars menu (spec: ui/toolbar-menu.md §2): without separators the rows' pixels move after
+                // painting, so the toolbar repaints whole. The band's parts damage themselves where they are drawn
+                // (`damage_band`).
                 let o = self.state.toolbar;
-                // The top band at another Toolbars scale (spec: ui/ui-scaling.md §1): its parts damage themselves in
-                // the band's own px (`HINT_RECT`, `TEMPO_RECT`, `CPU_RECT`, ...), so what lies within its height at
-                // 1:1 is damaged where the band draws it too (damage given in the window's px only repaints a little
-                // more).
                 let k = views::band_k(&self.state);
-                if !o.hidden && (k - 1.0).abs() > 1e-4 {
-                    let up: Vec<Rect> = v.iter().filter(|r| r.y < views::WORK_Y).map(|&r| views::band_rect(&self.state, r)).collect();
-                    for r in up {
-                        add_damage(&mut v, r);
-                    }
-                }
-                let band = views::band_rect(&self.state, views::toolbar::band(self.state.screen.0 / k));
+                let band = views::scale_rect(views::toolbar::band(&self.state, self.state.screen.0 / k), k);
                 if !o.separators && !o.hidden && v.iter().any(|r| !r.intersect(&band).is_empty()) {
                     add_damage(&mut v, band);
-                }
-                if o.hint_bar && v.iter().any(|r| !r.intersect(&HINT_RECT).is_empty()) {
-                    add_damage(&mut v, views::toolbar::hint_bar_rect(&self.state));
                 }
                 Some(Some(v))
             }
@@ -2605,6 +2642,10 @@ impl App {
             .collect();
         if !s.toolbar.hidden {
             v.push(Cover { bounds: Rect::new(0.0, 0.0, s.screen.0, views::work_y(s) + 1.0), win: None, solid: None });
+        }
+        // The toolbar editor's palette (spec: ui/toolbar-menu.md §8).
+        if let Some(p) = views::palette_rect(s) {
+            v.push(Cover { bounds: p.outset(1.0), win: None, solid: None });
         }
         // The floating hint bar (spec: ui/toolbar-menu.md §4).
         if s.toolbar.hint_bar {
@@ -3240,7 +3281,7 @@ impl App {
         if self.state.tempo != t {
             self.state.tempo = t;
             self.state.piano.dirty = true;
-            self.damage_rect(TEMPO_RECT);
+            self.damage_band(TEMPO_RECT);
         }
         t
     }
@@ -3314,7 +3355,7 @@ impl App {
             return self.invalidate();
         }
         if now.tempo != old.tempo {
-            self.damage_rect(TEMPO_RECT);
+            self.damage_band(TEMPO_RECT);
         }
         if !now.playing {
             return;
@@ -3364,8 +3405,8 @@ impl App {
         self.state.monitor.cfg.set(i, p.min + (p.max - p.min) * k);
         self.hint = Cow::Owned(format!("{}: {}", p.name, self.state.monitor.cfg.text(i)));
         self.damage_rect(views::mondebug::PANEL);
-        self.damage_rect(MONITOR_RECT);
-        self.damage_rect(HINT_RECT);
+        self.damage_band(MONITOR_RECT);
+        self.damage_band(HINT_RECT);
     }
 
     /// The cable physics panel's controls (views/cabledebug.rs).
@@ -3403,7 +3444,7 @@ impl App {
         c.set(i, p.min + (p.max - p.min) * k);
         self.hint = Cow::Owned(format!("{}: {}", p.name, c.tuning.text(i)));
         self.damage_rect(views::cabledebug::PANEL);
-        self.damage_rect(HINT_RECT);
+        self.damage_band(HINT_RECT);
         self.damage_win(Win::Mixer);
     }
 
@@ -3497,7 +3538,7 @@ impl App {
             // The monitor advances at its own refresh rate, however often we tick.
             let (tp, rate) = (&self.transport, self.transport.sample_rate());
             if self.state.monitor.update(std::time::Instant::now(), rate, || tp.take_peaks(), |b| tp.tap(b)) {
-                self.damage_rect(MONITOR_RECT);
+                self.damage_band(MONITOR_RECT);
             }
         }
         if let Some(e) = self.transport.take_error() {
@@ -3532,11 +3573,11 @@ impl App {
                 }
             }
             if self.state.cpu.update(now, load, voices, dropouts) {
-                self.damage_rect(CPU_RECT);
+                self.damage_band(CPU_RECT);
                 let (x, y) = self.mouse;
                 if self.top_hit(x, y).is_some_and(|h| h.action == Action::CpuPanel) {
                     self.hint = Cow::Owned(self.state.cpu.hint());
-                    self.damage_rect(HINT_RECT);
+                    self.damage_band(HINT_RECT);
                 }
                 if self.state.settings.open && self.state.settings.tab == views::settings::AUDIO && self.audio_status() {
                     self.invalidate();
@@ -3654,6 +3695,10 @@ impl App {
             peaks: self.transport.peaks(),
             sounding: self.shown.sounding.clone(),
             song_pos_drag: matches!(self.drag, Some(Drag::SongPos { .. })),
+            bar_drag: match self.drag {
+                Some(Drag::Bar(d)) => Some(d),
+                _ => None,
+            },
         };
         let overlays = views::paint(&mut ui, &self.state, &info);
         if self.state.cables.get_mut().take_slowed() {
@@ -3693,7 +3738,7 @@ impl App {
         }
         // In PAT mode the song position slider shows the play-start marker within the pattern's length.
         if !self.state.song_mode {
-            self.damage_rect(crate::song_pos::PANEL);
+            self.damage_band(crate::song_pos::PANEL);
         }
     }
 
@@ -4772,6 +4817,7 @@ impl App {
                         }
                     }
                 }
+                Drag::Bar(_) => self.invalidate(),
                 Drag::Window { win, dx, dy } => {
                     let old = self.win_bounds(win);
                     // The window keeps its part in the workspace, whatever "Don't limit windows to screen" says.
@@ -4829,7 +4875,7 @@ impl App {
                         Some(r) => self.damage_rect(r.outset(2.0)),
                         None => self.invalidate(),
                     }
-                    self.damage_rect(HINT_RECT);
+                    self.damage_band(HINT_RECT);
                 }
                 Drag::RackPaint { row, on, last } => {
                     if let Some(k) = views::rack::step_at(&self.state, x) {
@@ -4905,7 +4951,7 @@ impl App {
                         Some(r) => self.damage_rect(r.outset(10.0)),
                         None => self.invalidate(),
                     }
-                    self.damage_rect(HINT_RECT);
+                    self.damage_band(HINT_RECT);
                 }
                 Drag::Knob { id, y0, v0 } => {
                     self.state.set_knob(id, v0 - (y - y0) * id.drag_rate());
@@ -4919,7 +4965,7 @@ impl App {
                     if let crate::knobs::KnobId::Eq(..) = id {
                         self.damage_eq();
                     }
-                    self.damage_rect(HINT_RECT);
+                    self.damage_band(HINT_RECT);
                 }
                 Drag::LimitKeys => {
                     let k = views::piano_dlg::kb_key(&self.state, x, y, false);
@@ -4936,7 +4982,7 @@ impl App {
                     crate::mixer::eq_graph_drag(&mut self.state, track, band, g, (x, y));
                     self.hint = Cow::Owned(crate::mixer::eq_graph_hint(&self.state, g, x));
                     self.damage_eq();
-                    self.damage_rect(HINT_RECT);
+                    self.damage_band(HINT_RECT);
                 }
                 Drag::MonParam(i) => {
                     self.set_mon_param(i, x);
@@ -4985,8 +5031,8 @@ impl App {
                     // Rounded to the box's thousandths, so repeated steps don't drift.
                     let t = self.set_tempo(((t0 + f64::from(y0 - y).round() * step) * 1000.0).round() / 1000.0);
                     self.hint = Cow::Owned(format!("Tempo {t:.3} BPM"));
-                    self.damage_rect(TEMPO_RECT);
-                    self.damage_rect(HINT_RECT);
+                    self.damage_band(TEMPO_RECT);
+                    self.damage_band(HINT_RECT);
                 }
             }
             return true;
@@ -4997,7 +5043,8 @@ impl App {
         };
         if hover == Some(Action::Monitor) {
             // Reading under the cursor: frequency and level of the analyzer column.
-            hint = Cow::Owned(self.state.monitor.hint((x / views::band_k(&self.state) - MONITOR_RECT.x - 1.0).max(0.0) as usize));
+            let x = self.panel_mouse(crate::toolbar::Panel::Monitor).0;
+            hint = Cow::Owned(self.state.monitor.hint((x - MONITOR_RECT.x - 1.0).max(0.0) as usize));
         }
         if hover == Some(Action::CpuPanel) {
             hint = Cow::Owned(self.state.cpu.hint());
@@ -5073,7 +5120,7 @@ impl App {
                 self.damage_rect(r);
             }
             if hint != self.hint {
-                self.damage_rect(HINT_RECT);
+                self.damage_band(HINT_RECT);
             }
         }
         self.hover = hover;
@@ -5138,6 +5185,7 @@ impl App {
                 matches!(h, Hit::Accept | Hit::Cancel | Hit::Suggest(..) | Hit::Swatch(_) | Hit::ConfirmOk | Hit::ConfirmCancel | Hit::ConfirmRemember)
             }
             Action::RackFill(h) => !matches!(h, crate::rack::FillHit::Inside),
+            Action::Bar(h) => matches!(h, crate::toolbar::BarHit::Rows(_) | crate::toolbar::BarHit::Done),
             _ => matches!(
                 a,
                 Action::Placeholder(_)
@@ -5622,7 +5670,8 @@ impl App {
                 return self.invalidate();
             }
             // The Toolbars menu: on the hint panel and on bare toolbar background (spec: ui/toolbar-menu.md §1).
-            Some(Action::DragWindow) => {
+            Some(Action::DragWindow | Action::Bar(crate::toolbar::BarHit::Item(..) | crate::toolbar::BarHit::Grip(_))) => {
+                self.state.bar.user = crate::toolbar::user_presets();
                 self.state.playlist.popup = Some(views::menus::hint_popup(&self.state, x, y));
                 return self.invalidate();
             }
@@ -5795,6 +5844,7 @@ impl App {
             }
             Some(Drag::ZoomBox { x0, y0 }) => self.zoom_to(x0, y0),
             Some(Drag::SongPos { .. }) => self.song_pos_release(),
+            Some(Drag::Bar(d)) => self.bar_drop(d),
             Some(Drag::PianoSplit { .. }) => crate::piano_split::save(self.state.piano.split),
             Some(Drag::BrowserSplit { .. }) => crate::browser::save_width(self.state.browser_w),
             Some(Drag::Marker) if self.transport.playing() && !self.transport.song() => {
@@ -7227,16 +7277,17 @@ impl App {
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
-                self.damage_rect(MONITOR_RECT);
+                self.damage_band(MONITOR_RECT);
                 // The hint (frequency read-out) follows the new mode.
-                let (x, _) = self.band_mouse();
+                let (x, _) = self.panel_mouse(crate::toolbar::Panel::Monitor);
                 self.hint = Cow::Owned(self.state.monitor.hint((x - MONITOR_RECT.x - 1.0).max(0.0) as usize));
-                self.damage_rect(HINT_RECT);
+                self.damage_band(HINT_RECT);
             }
             Action::Minimize => self.want_minimize = true,
             Action::Maximize => self.want_maximize = true,
             Action::Close => self.want_close = true,
             Action::DragWindow => self.want_drag_window = true,
+            Action::Bar(h) => self.bar_hit(h),
             Action::Play => {
                 self.perf_transport();
                 match self.transport.state() {
@@ -7347,8 +7398,8 @@ impl App {
             }
             // spec: ui/pattern-menu.md §1
             Action::PatternPrev => {
-                let k = views::band_k(s);
-                s.pat_ui.menu_at = Some((837.0 * k, 75.0 * k));
+                let at = views::band_rect(s, Rect::new(837.0, 75.0, 0.0, 0.0));
+                s.pat_ui.menu_at = Some((at.x, at.y));
                 s.menu_open = Some(views::menus::PATTERNS);
             }
             Action::PatternNext => self.drag = Some(Drag::PatternBox { y0: self.mouse.1, p0: s.pattern.max(1) }),
@@ -7620,7 +7671,7 @@ impl App {
     pub(crate) fn say(&mut self, m: String) {
         self.hint = Cow::Owned(m.clone());
         self.state.message = Some(m);
-        self.damage_rect(HINT_RECT);
+        self.damage_band(HINT_RECT);
     }
 
     /// ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the channel goes last in the rack (kept
@@ -8016,11 +8067,16 @@ impl App {
         use views::toolbar::Switch;
         let s = &mut self.state;
         match sw {
+            Switch::Edit => {
+                let on = !s.bar.editing;
+                return self.toolbar_edit(on);
+            }
             Switch::Separators => s.toolbar.separators = !s.toolbar.separators,
             Switch::Flat => s.toolbar.flat = !s.toolbar.flat,
             Switch::HintBar => s.toolbar.hint_bar = !s.toolbar.hint_bar,
             Switch::Hide => {
                 s.toolbar.hidden = !s.toolbar.hidden;
+                s.bar.editing = false;
                 s.menu_open = None;
                 s.menu_sub = None;
                 let h = views::band_h(s);
@@ -8030,6 +8086,145 @@ impl App {
         if sw != Switch::Hide {
             s.toolbar.save();
         }
+        self.invalidate();
+    }
+
+    /// The toolbar editor on or off (spec: ui/toolbar-menu.md §8): Toolbars ▸ Edit, the palette's Done. While it is on,
+    /// each row starts with a grip, each panel is one thing to drag, and the palette lies under the band, over the
+    /// windows. A hidden toolbar comes back for it.
+    pub(crate) fn toolbar_edit(&mut self, on: bool) {
+        if on && self.state.toolbar.hidden {
+            self.toolbar_switch(views::toolbar::Switch::Hide);
+        }
+        let s = &mut self.state;
+        s.bar.editing = on;
+        if on {
+            s.bar.user = crate::toolbar::user_presets();
+        }
+        s.menu_open = None;
+        s.menu_sub = None;
+        self.invalidate();
+    }
+
+    /// Puts layout `l` on the toolbar and keeps it (`settings.txt`). When the band's height changes (one row or two),
+    /// the workspace's top moves with it, the floating windows too.
+    fn set_toolbar_layout(&mut self, l: crate::toolbar::Layout) {
+        let s = &mut self.state;
+        let before = views::band_h(s);
+        s.bar.layout = l;
+        s.bar.layout.save();
+        let dy = views::band_h(s) - before;
+        if !s.toolbar.hidden && dy != 0.0 {
+            lift_windows(s, dy);
+        }
+        self.invalidate();
+    }
+
+    /// A press on the toolbar editor (a click for the rows and Done, `acts_on_release`): a panel, a tile, the logo or a
+    /// grip starts a drag (`bar_drop` lands it); the preset name opens the preset menu.
+    fn bar_hit(&mut self, h: crate::toolbar::BarHit) {
+        use crate::toolbar::{BarDrag, BarHit, Moving};
+        let (x, y) = self.mouse;
+        let r = self.top_hit(x, y).map_or(Rect::new(x, y, 0.0, 0.0), |h| h.rect);
+        let k = views::band_k(&self.state);
+        let moving = match h {
+            BarHit::Item(row, i) => Moving::Item(row, i),
+            BarHit::Tile(t) => Moving::Tile(t),
+            BarHit::Logo => Moving::Logo,
+            BarHit::Grip(row) => Moving::Row(row),
+            BarHit::Presets => {
+                self.state.bar.user = crate::toolbar::user_presets();
+                self.state.playlist.popup = Some(views::menus::editor_presets_popup(&self.state, r.x, r.bottom()));
+                return self.invalidate();
+            }
+            BarHit::Rows(n) => {
+                let mut l = self.state.bar.layout.clone();
+                l.set_rows(n);
+                return self.set_toolbar_layout(l);
+            }
+            BarHit::Done => return self.toolbar_edit(false),
+            BarHit::Palette => return,
+        };
+        self.drag = Some(Drag::Bar(BarDrag { moving, grab: ((x - r.x) / k, (y - r.y) / k) }));
+        self.invalidate();
+    }
+
+    /// An editor drag let go: the panel moves, comes off onto the palette or goes onto the toolbar; a row swaps places
+    /// with the other (spec: ui/toolbar-menu.md §8).
+    fn bar_drop(&mut self, d: crate::toolbar::BarDrag) {
+        let width = self.state.screen.0 / views::band_k(&self.state);
+        let p = views::toolbar::palette(&self.state, width).rect;
+        let to = crate::toolbar::drop_at(&self.state.bar, width, &d, self.band_mouse(), (p.y, p.bottom()));
+        let mut l = self.state.bar.layout.clone();
+        if crate::toolbar::apply(&mut l, &d, to) {
+            self.set_toolbar_layout(l);
+        }
+        self.invalidate();
+    }
+
+    /// A toolbar preset picked in the Toolbars menu or the editor's preset menu: its layout goes on the toolbar.
+    pub(crate) fn toolbar_preset(&mut self, id: crate::toolbar::PresetId) {
+        use crate::toolbar::{Layout, PresetId, PRESETS};
+        let l = match &id {
+            PresetId::Factory(i) => PRESETS.get(*i).map(|p| p.layout()),
+            PresetId::User(path) => std::fs::read_to_string(path).ok().and_then(|t| Layout::parse(&t)),
+        };
+        match l {
+            Some(l) => {
+                self.set_toolbar_layout(l);
+                self.state.message = Some(format!("Toolbar preset: {}", self.state.bar.name()));
+            }
+            None => self.state.message = Some("The toolbar preset could not be read".into()),
+        }
+        self.invalidate();
+    }
+
+    /// The editor's Save preset as...: the save dialog in the user folder's `Toolbar presets` (`toolbar_saved` writes
+    /// the file).
+    pub(crate) fn toolbar_save_as(&mut self) {
+        use crate::filedlg::{FileDlg, Mode};
+        use crate::toolbar::EXT;
+        let Some(dir) = crate::toolbar::user_dir() else {
+            self.state.message = Some("Toolbar presets need a user folder".into());
+            return;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let start = self.state.bar.user_current().map_or_else(|| "My toolbar".to_string(), |p| p.name.clone());
+        let dlg = FileDlg::new(Mode::Save, "Save toolbar preset as", "toolbar preset", crate::dialog::Then::SaveToolbarPreset)
+            .filter("Lemon Studio toolbar preset", &[EXT])
+            .start(Some(&dir))
+            .name(&format!("{start}.{EXT}"));
+        self.file_dialog(dlg);
+    }
+
+    /// The toolbar's layout written to `path`, chosen in the save dialog; it is then listed with the user's presets.
+    fn toolbar_saved(&mut self, path: PathBuf) {
+        self.state.message = Some(match crate::toolbar::write_preset(&path, &self.state.bar.layout) {
+            Ok(p) => format!("Toolbar preset saved: {}", crate::toolbar::preset_name(&p)),
+            Err(e) => format!("Toolbar preset not saved: {e}"),
+        });
+        self.state.bar.user = crate::toolbar::user_presets();
+        self.invalidate();
+    }
+
+    /// The editor's Delete preset: asks first. Only a user preset with the current layout can go.
+    pub(crate) fn toolbar_delete(&mut self) {
+        use crate::dialog::{Answer, Kind, Msg, Then};
+        if self.state.bar.layout.factory().is_some() {
+            return;
+        }
+        let Some(p) = self.state.bar.user_current().cloned() else { return };
+        let text = vec![("Delete the toolbar preset ".to_string(), false), (p.name, true), ("?".to_string(), false)];
+        self.show_msg(Msg::new(Kind::Question, "Delete preset", text, &[Answer::Yes, Answer::No], Then::DeleteToolbarPreset(p.path)));
+    }
+
+    /// The delete question answered Yes: the preset's file goes. The layout stays on the toolbar.
+    fn toolbar_deleted(&mut self, path: PathBuf) {
+        self.state.message = Some(match std::fs::remove_file(&path) {
+            Ok(()) => format!("Toolbar preset deleted: {}", crate::toolbar::preset_name(&path)),
+            Err(e) => format!("Toolbar preset not deleted: {e}"),
+        });
+        self.state.bar.user = crate::toolbar::user_presets();
         self.invalidate();
     }
 }
@@ -17155,7 +17350,7 @@ mod tests {
         let items = toolbar_items(&app.state);
         let row = |label: &str| items.iter().find(|i| i.label == label).unwrap_or_else(|| panic!("{label}"));
         for (label, enabled, mark) in [
-            ("Edit", false, Mark::Check(false)),
+            ("Edit", true, Mark::Check(false)),
             ("Separators", true, Mark::Check(true)),
             ("Flat buttons", true, Mark::Check(false)),
             ("Show detected MIDI chords near the hint bar", false, Mark::Check(false)),
@@ -17165,8 +17360,9 @@ mod tests {
             assert_eq!((row(label).enabled, row(label).mark), (enabled, mark), "{label}");
         }
         assert_eq!(row("Hide").key, "Ctrl+F11");
+        // The factory presets (no user ones here), the classic layout's checked.
         let presets: Vec<_> = items.iter().skip_while(|i| i.label != "Presets").skip(1).collect();
-        assert!(presets.len() == 9 && presets.iter().all(|i| !i.enabled));
+        assert!(presets.len() == crate::toolbar::PRESETS.len() && presets.iter().all(|i| i.enabled));
         assert_eq!(presets.iter().filter(|i| i.mark == Mark::Radio(true)).map(|i| i.label.as_ref()).collect::<Vec<&str>>(), ["Classic"]);
         // VIEW > Toolbars ▸ is the same menu.
         let entry = MENUS[VIEW].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == "Toolbars").unwrap();
@@ -17194,8 +17390,8 @@ mod tests {
         assert_eq!(s2[41..80], r2[42..81]);
         // A partial repaint of the toolbar repaints it whole, so the pixels move once.
         app.damage = Damage::None;
-        app.damage_rect(CPU_RECT);
-        let (d, b) = (app.take_damage(), band(1920.0));
+        app.damage_band(CPU_RECT);
+        let (d, b) = (app.take_damage(), band(&app.state, 1920.0));
         assert!(matches!(&d, Some(Some(v)) if v.iter().any(|r| r.contains(b.x, b.y) && r.contains(b.right() - 1.0, b.bottom() - 1.0))), "{d:?}");
         frame_damage(&mut app, &mut c, d);
         assert_eq!((column(&c, 595), column(&c, 990)), (s1, s2));
@@ -17215,7 +17411,7 @@ mod tests {
         let p = px(&c, 2, hb.y as u32 + 2);
         assert!(p.red() < 0x20 && p.green() < 0x20 && p.blue() < 0x20, "{p:?}");
         app.damage = Damage::None;
-        app.damage_rect(HINT_RECT);
+        app.damage_band(HINT_RECT);
         assert!(matches!(app.take_damage(), Some(Some(v)) if v.iter().any(|r| r.contains(hb.x, hb.y) && r.contains(hb.right() - 1.0, hb.bottom() - 1.0))));
         pick(&mut app, &mut c, "Hint bar");
         assert!(!app.state.toolbar.hint_bar);
@@ -17245,6 +17441,186 @@ mod tests {
         app.key(&Key::Named(NamedKey::F11), true, false);
         app.key(&Key::Named(NamedKey::F11), false, false);
         assert!(!app.state.toolbar.hidden && app.state.settings.open);
+    }
+
+    /// Opens the Toolbars menu on the hint panel and clicks its entry `label`.
+    fn toolbars_pick(app: &mut App, c: &mut Canvas, label: &str) {
+        let at = hit_rect(app, &Action::DragWindow);
+        app.mouse_move(at.x + 200.0, 20.0);
+        app.mouse_down_right();
+        app.mouse_up();
+        frame(app, c, None);
+        let i = app.state.playlist.popup.as_ref().expect("the Toolbars menu").items.iter().position(|it| it.label == label).unwrap_or_else(|| panic!("{label}"));
+        click(app, c, hit_rect(app, &Action::PlPopup(i)));
+    }
+
+    /// Press at `from`, move half way (painted) and on to `to`, release there.
+    fn drag_to(app: &mut App, c: &mut Canvas, from: (f32, f32), to: (f32, f32)) {
+        app.mouse_move(from.0, from.1);
+        app.mouse_down();
+        app.mouse_move((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0);
+        frame(app, c, None);
+        app.mouse_move(to.0, to.1);
+        app.mouse_up();
+        frame(app, c, None);
+    }
+
+    /// A toolbar panel paints the same wherever the layout puts it in its row (spec: ui/toolbar-menu.md §8): the
+    /// transport moved from x 379 to the row's start is the same pixels, and its controls answer there, the tempo's
+    /// digits too.
+    #[test]
+    fn moved_panels_paint_the_same() {
+        use crate::toolbar::{Layout, Panel};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.mouse_move(1300.0, 600.0);
+        frame(&mut app, &mut c, None);
+        let block = |c: &Canvas, x0: u32| (0..40).flat_map(|y| (0..192).map(move |x| (x, y))).map(|(x, y)| c.pixmap.pixel(x0 + x, y).unwrap()).collect::<Vec<_>>();
+        let home = block(&c, 383);
+        let (play, tempo) = (hit_rect(&app, &Action::Play), hit_rect(&app, &Action::Tempo));
+        let digits = app.state.tempo_digits.get();
+        let mut l = Layout::classic();
+        l.rows[0].retain(|&p| p != Panel::Transport);
+        l.rows[0].insert(0, Panel::Transport);
+        app.set_toolbar_layout(l);
+        frame(&mut app, &mut c, None);
+        assert!(block(&c, 4) == home, "the transport's pixels moved with it");
+        assert_eq!(hit_rect(&app, &Action::Play), Rect { x: play.x - 379.0, ..play });
+        assert_eq!(hit_rect(&app, &Action::Tempo), Rect { x: tempo.x - 379.0, ..tempo });
+        assert_eq!(app.state.tempo_digits.get(), digits.map(|d| d - 379.0));
+        // The hint panel went right by the transport's width: its repaints follow it.
+        let _ = app.take_damage();
+        app.damage_band(HINT_RECT);
+        let panel = views::band_rect(&app.state, HINT_RECT);
+        assert_eq!(panel, Rect { x: HINT_RECT.x + 196.0, ..HINT_RECT });
+        let damage = app.take_damage().flatten().expect("rects");
+        assert!(damage.iter().any(|r| r.contains(panel.x, panel.y) && r.contains(panel.right() - 1.0, panel.bottom() - 1.0)), "{damage:?}");
+    }
+
+    /// The toolbar editor (spec: ui/toolbar-menu.md §8): Toolbars ▸ Edit puts grips and the palette up; a panel dragged
+    /// onto the palette comes off the toolbar, its tile dragged back puts it on again, a row's grip swaps the rows, the
+    /// palette's rows switch makes one row of two (the workspace and its windows move up with the band), Done ends it.
+    /// The layout is kept in settings.txt.
+    #[test]
+    fn toolbar_editor_moves_panels() {
+        use crate::toolbar::{BarHit, Layout, Panel, Tile};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.wins[0].maxed = false;
+        app.state.wins[0].rect = Rect::new(400.0, 300.0, 900.0, 500.0);
+        app.state.raise(Win::Playlist);
+        frame(&mut app, &mut c, None);
+        toolbars_pick(&mut app, &mut c, "Edit");
+        assert!(app.state.bar.editing);
+        let pal = views::palette_rect(&app.state).expect("the palette");
+        assert_eq!((pal.x, pal.y, pal.w), (0.0, 83.0, 1920.0));
+        assert_eq!(app.top_hit(600.0, pal.y + 2.0).map(|h| h.action.clone()), Some(Action::Bar(BarHit::Palette)));
+        // A panel's controls give way to the panel itself: no Play hit, the hint panel one thing to drag.
+        assert!(!app.hits.iter().any(|h| h.action == Action::Play));
+        let hint = hit_rect(&app, &Action::Bar(BarHit::Item(0, 1)));
+        assert_eq!(app.top_hit(hint.cx(), hint.cy()).map(|h| h.hint.to_string()).as_deref(), Some("Hint panel - drag to move it, onto the palette to take it off"));
+        // Dragged onto the palette: off the toolbar, which keeps the layout in settings.txt.
+        drag_to(&mut app, &mut c, (hint.cx(), hint.cy()), (600.0, pal.y + 40.0));
+        assert!(!app.state.bar.layout.has(Panel::Hint));
+        assert!(!crate::settings_file::get("toolbar_layout").expect("kept").contains("hint"));
+        // Its tile, bright again, back at row 1's start; a tile of a panel on the toolbar is dimmed and does not drag.
+        let tile = hit_rect(&app, &Action::Bar(BarHit::Tile(Tile::Panel(Panel::Hint))));
+        drag_to(&mut app, &mut c, (tile.x + 5.0, tile.cy()), (14.0, 20.0));
+        assert_eq!(app.state.bar.layout.rows[0][0], Panel::Hint);
+        assert!(!app.hits.iter().any(|h| h.action == Action::Bar(BarHit::Tile(Tile::Panel(Panel::Hint)))));
+        // Row 1's grip dropped on row 2: the rows swap.
+        let top = app.state.bar.layout.rows[0].clone();
+        let grip = hit_rect(&app, &Action::Bar(BarHit::Grip(0)));
+        drag_to(&mut app, &mut c, (grip.cx(), grip.cy()), (grip.cx(), 60.0));
+        assert_eq!(app.state.bar.layout.rows[1], top);
+        // One row: the band 42 px tall, the workspace, the palette and the floating playlist 41 px up.
+        let r = hit_rect(&app, &Action::Bar(BarHit::Rows(1)));
+        click(&mut app, &mut c, r);
+        assert_eq!(app.state.bar.layout.rows.len(), 1);
+        assert_eq!((views::band_h(&app.state), app.state.work_rect().y, app.state.win_rect(Win::Playlist).y), (42.0, 42.0, 259.0));
+        assert_eq!(views::palette_rect(&app.state).map(|p| p.y), Some(42.0));
+        // Done: the controls answer again; the layout is the one the next start loads.
+        let r = hit_rect(&app, &Action::Bar(BarHit::Done));
+        click(&mut app, &mut c, r);
+        assert!(!app.state.bar.editing && views::palette_rect(&app.state).is_none());
+        assert!(app.hits.iter().any(|h| h.action == Action::Play));
+        assert_eq!(Layout::load(), app.state.bar.layout);
+    }
+
+    /// Toolbar presets (spec: ui/toolbar-menu.md §8): a factory one from the Toolbars menu lays the toolbar out at once
+    /// (One row: the menu bar in the one row, its menus opening under it); the editor's Save preset as... writes the
+    /// layout to the user folder's Toolbar presets, where the menus list it under "User presets", checked; Delete
+    /// preset asks, then removes the file.
+    #[test]
+    fn toolbar_presets() {
+        use crate::dialog::DHit;
+        use crate::playlist::Mark;
+        use crate::toolbar::{BarHit, Layout, Panel, PRESETS};
+        use views::menus::{pick, FILE_SAVE};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("lemon-toolbar-presets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let r = hit_rect(&app, &Action::Menu(0));
+        click(&mut app, &mut c, r);
+        let save = hit_rect(&app, &pick(0, FILE_SAVE));
+        app.state.menu_open = None;
+        // One row, from the Toolbars menu: the menu bar 41 px up, FILE opening 41 px higher.
+        toolbars_pick(&mut app, &mut c, "One row");
+        let one = PRESETS.iter().position(|p| p.name == "One row").unwrap();
+        assert_eq!(app.state.bar.layout, PRESETS[one].layout());
+        assert_eq!((views::band_h(&app.state), app.state.work_rect().y), (42.0, 42.0));
+        let file = hit_rect(&app, &Action::Menu(0));
+        assert!(file.bottom() <= 40.0, "{file:?}");
+        click(&mut app, &mut c, file);
+        assert_eq!(hit_rect(&app, &pick(0, FILE_SAVE)), Rect { y: save.y - 41.0, ..save });
+        app.state.menu_open = None;
+        frame(&mut app, &mut c, None);
+
+        // A layout of one's own, saved from the editor.
+        let mut mine = PRESETS[one].layout();
+        mine.rows[0].retain(|&p| p != Panel::Snap);
+        app.set_toolbar_layout(mine.clone());
+        app.toolbar_edit(true);
+        frame(&mut app, &mut c, None);
+        let path = dir.join("Toolbar presets").join("Mine.lstoolbar");
+        crate::dialog::fake::answer(Some(path.clone()));
+        let editor_pick = |app: &mut App, c: &mut Canvas, label: &str| {
+            click(app, c, hit_rect(app, &Action::Bar(BarHit::Presets)));
+            let items = app.state.playlist.popup.as_ref().expect("the preset menu").items.clone();
+            let i = items.iter().position(|it| it.label == label).unwrap_or_else(|| panic!("{label}"));
+            assert!(items[i].enabled, "{label}");
+            click(app, c, hit_rect(app, &Action::PlPopup(i)));
+        };
+        editor_pick(&mut app, &mut c, "Save preset as...");
+        assert_eq!(std::fs::read_to_string(&path).ok().and_then(|t| Layout::parse(&t)), Some(mine.clone()));
+        assert_eq!(app.state.bar.name(), "Mine");
+        let items = views::menus::toolbar_items(&app.state);
+        let user: Vec<_> = items.iter().skip_while(|i| i.label != "User presets").skip(1).map(|i| (i.label.to_string(), i.mark)).collect();
+        assert_eq!(user, [("Mine".to_string(), Mark::Radio(true))]);
+        assert!(items.iter().filter(|i| i.mark == Mark::Radio(true)).count() == 1);
+        // Classic, then Mine again from its menu entry.
+        editor_pick(&mut app, &mut c, "Classic");
+        assert_eq!((app.state.bar.layout.clone(), views::band_h(&app.state)), (Layout::classic(), 83.0));
+        let r = hit_rect(&app, &Action::Bar(BarHit::Presets));
+        click(&mut app, &mut c, r);
+        assert!(!app.state.playlist.popup.as_ref().unwrap().items.iter().any(|i| i.label == "Delete preset" && i.enabled), "a factory preset stays");
+        app.state.playlist.popup = None;
+        editor_pick(&mut app, &mut c, "Mine");
+        assert_eq!(app.state.bar.layout, mine);
+        // Delete preset: asked first; Yes removes the file, the layout stays.
+        editor_pick(&mut app, &mut c, "Delete preset");
+        assert!(app.modal_open() && path.exists());
+        let r = hit_rect(&app, &Action::Dlg(DHit::Button(0)));
+        click(&mut app, &mut c, r);
+        assert!(!path.exists() && app.state.bar.user.is_empty());
+        assert_eq!((app.state.bar.layout.clone(), app.state.bar.name()), (mine, "Custom".to_string()));
+        THEME_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the channel goes last, named and routed to

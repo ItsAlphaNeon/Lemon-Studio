@@ -397,6 +397,11 @@ pub enum Cmd {
     ClockBeat(bool),
     /// A Toolbars menu switch (spec: ui/toolbar-menu.md §8).
     Toolbar(crate::views::toolbar::Switch),
+    /// A toolbar preset picked (spec: ui/toolbar-menu.md §8).
+    ToolbarPreset(crate::toolbar::PresetId),
+    /// The toolbar editor's Save preset as... and Delete preset.
+    ToolbarSave,
+    ToolbarDelete,
     /// A value picked in a list of the time signature dialog: denominator (true) or numerator (spec:
     /// ui/pattern-time-signature.md §1).
     TimeSig(bool, u8),
@@ -3306,13 +3311,14 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
     match (moved, before) {
         (Some(idx), Some(mut dirty)) => {
             dirty.extend(rects(&app.state, &idx));
-            if handle {
-                dirty.push(crate::app::HINT_RECT);
-            } else {
+            if !handle {
                 dirty.push(crate::views::playlist::overview_rect(&app.state, grid).outset(1.0));
             }
             for r in dirty {
                 app.damage_rect(r);
+            }
+            if handle {
+                app.damage_band(crate::app::HINT_RECT);
             }
         }
         _ if inside || stretching => app.damage_win(crate::app::Win::Playlist),
@@ -3723,6 +3729,18 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.toolbar_switch(sw);
             return None;
         }
+        Cmd::ToolbarPreset(id) => {
+            app.toolbar_preset(id);
+            return None;
+        }
+        Cmd::ToolbarSave => {
+            app.toolbar_save_as();
+            return None;
+        }
+        Cmd::ToolbarDelete => {
+            app.toolbar_delete();
+            return None;
+        }
         Cmd::ClockBeat(on) => {
             app.state.clock.beat = on;
             app.state.clock.save();
@@ -3905,7 +3923,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(_) | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(_) | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
