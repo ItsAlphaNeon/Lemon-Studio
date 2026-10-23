@@ -6,6 +6,7 @@
 //! plugin state.
 
 pub mod balance;
+pub mod chorus;
 pub mod delay;
 pub mod dynamics;
 pub mod eq;
@@ -14,6 +15,7 @@ pub mod limiter;
 pub mod reverb;
 pub mod soft_clipper;
 pub mod stereo_enhancer;
+pub mod stereo_shaper;
 pub mod transient_processor;
 
 /// An insert effect processing interleaved stereo in place.
@@ -29,6 +31,12 @@ pub trait Effect: Send {
     fn latency(&self) -> usize {
         0
     }
+    /// An extra output (Fruity Stereo Shaper's difference output): the number of the track's output it goes to,
+    /// counted from 1, and what the block processed last put out on it, interleaved like the block (spec:
+    /// audio/sidechain.md "Extra output").
+    fn extra(&self) -> Option<(usize, &[f32])> {
+        None
+    }
 }
 
 /// Creates a Lemon Studio effect for a slot plugin, if one exists for that plugin.
@@ -43,6 +51,8 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
         "Fruity Fast Dist" => fast_dist::FastDist::from_state(state).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Balance" => balance::Balance::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Stereo Enhancer" => stereo_enhancer::StereoEnhancer::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Chorus" => chorus::Chorus::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Stereo Shaper" => stereo_shaper::StereoShaper::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Transient Processor" => {
             transient_processor::TransientProcessor::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
         }

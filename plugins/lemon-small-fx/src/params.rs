@@ -4,13 +4,13 @@
 
 //! The parameters and saved state of a small effect.
 //!
-//! The settings come in the original's order (setting k = int k of its saved state) with the original's editor
-//! ranges. A copy of the whole saved state is persisted next to them (`state`): stored values outside a setting's
+//! The settings come in the original's order (setting k = int k of its saved state, unless the description maps them:
+//! [`Spec::fields`]) with the original's editor ranges. A copy of the whole saved state is persisted next to them (`state`): stored values outside a setting's
 //! range keep their bytes and play as stored (the originals use stored values as they are).
 //!
 // spec: plugins/lemon-small-effects.md (§4 magnets and typed values, §5 parameters and state), the plugin pages
 // (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md,
-// lemon-transient-processor.md; each §3 value texts, §5)
+// lemon-transient-processor.md, lemon-chorus.md, lemon-stereo-shaper.md; each §3 value texts, §5)
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -122,25 +122,36 @@ pub fn first(spec: &Spec) -> usize {
     usize::from(spec.version.is_some())
 }
 
-/// The shortest readable saved state: the version field, if any, and one int per setting.
-pub fn state_len(spec: &Spec) -> usize {
-    4 * (first(spec) + spec.settings.len())
+/// The int (after the version field) setting `k` is.
+pub fn int_of(spec: &Spec, k: usize) -> usize {
+    spec.fields.get(k).copied().unwrap_or(k)
 }
 
-/// A readable saved state as it is (longer ones keep their tail); a short one, or one of a later version, gives the
-/// start.
+/// The ints the saved state has for its settings (after the version field): one per setting, and those the
+/// description leaves out.
+pub fn ints(spec: &Spec) -> usize {
+    spec.fields.iter().map(|&i| i + 1).max().unwrap_or(0).max(spec.settings.len())
+}
+
+/// The shortest readable saved state: the version field, if any, and the settings' ints.
+pub fn state_len(spec: &Spec) -> usize {
+    4 * (first(spec) + ints(spec))
+}
+
+/// A readable saved state as it is (longer ones keep their tail); a short one, or one of a later version (unless every
+/// version is read), gives the start.
 pub fn normalized(spec: &Spec, b: Vec<u8>) -> Vec<u8> {
-    let version_read = spec.version.is_none_or(|v| field(&b, 0) <= v);
+    let version_read = spec.any_version || spec.version.is_none_or(|v| field(&b, 0) <= v);
     if b.len() >= state_len(spec) && version_read { b } else { default_state(spec) }
 }
 
 /// Setting `k`'s stored value.
 pub fn setting(spec: &Spec, b: &[u8], k: usize) -> i32 {
-    field(b, first(spec) + k)
+    field(b, first(spec) + int_of(spec, k))
 }
 
 pub fn set_setting(spec: &Spec, b: &mut [u8], k: usize, v: i32) {
-    set_field(b, first(spec) + k, v);
+    set_field(b, first(spec) + int_of(spec, k), v);
 }
 
 /// Little-endian int32 field `k`.
@@ -154,9 +165,10 @@ pub fn set_field(b: &mut [u8], k: usize, v: i32) {
     }
 }
 
-/// A new instance's saved state (the version, every setting at its start, the tail).
+/// A new instance's saved state (the version, every setting at its start, an int left out at 0, the tail).
 pub fn default_state(spec: &Spec) -> Vec<u8> {
-    let starts = spec.settings.iter().flat_map(|s| s.start.to_le_bytes());
+    let start = |i: usize| (0..spec.settings.len()).find(|&k| int_of(spec, k) == i).map_or(0, |k| spec.settings[k].start);
+    let starts = (0..ints(spec)).flat_map(|i| start(i).to_le_bytes());
     spec.version.iter().flat_map(|v| v.to_le_bytes()).chain(starts).chain(spec.tail.iter().copied()).collect()
 }
 
@@ -225,6 +237,18 @@ pub fn nearest(range: (i32, i32), x: f64, number: impl Fn(i32) -> Option<f64>) -
         .map(|(v, _)| v)
 }
 
+/// The value in `range` whose number is nearest to `x`, for a `number` that never falls as the value rises (a binary
+/// search: for the long ranges).
+pub fn nearest_rising(range: (i32, i32), x: f64, number: impl Fn(i32) -> f64) -> i32 {
+    let (mut lo, mut hi) = range;
+    // The first value whose number reaches x.
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if number(mid) < x { lo = mid + 1 } else { hi = mid }
+    }
+    if lo > range.0 && (x - number(lo - 1)).abs() <= (number(lo) - x).abs() { lo - 1 } else { lo }
+}
+
 /// A typed gain: `-inf` (or `off`) gives the value of silence, a number of dB the nearest value.
 pub fn parse_db(range: (i32, i32), s: &str, gain: impl Fn(i32) -> f32) -> Option<i32> {
     let s = s.trim().to_ascii_lowercase();
@@ -275,7 +299,7 @@ pub fn fl_from_plugin_state(spec: &Spec, blob: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{balance, fast_distortion, soft_clipper, stereo_enhancer, transient_processor};
+    use crate::{balance, chorus, fast_distortion, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor};
 
     #[test]
     fn a_new_instance_starts_on_the_originals_default_and_its_state_reads_back() {
@@ -297,6 +321,41 @@ mod tests {
             default_state(transient_processor::SPEC),
             os_engine::effects::transient_processor::Settings::default().to_state()
         );
+        assert_eq!(default_state(chorus::SPEC), os_engine::effects::chorus::Settings::default().to_state());
+        assert_eq!(default_state(stereo_shaper::SPEC), os_engine::effects::stereo_shaper::Settings::default().to_state());
+    }
+
+    /// Lemon Stereo Shaper leaves the difference output (int 6 after the version) out of its settings: it is kept as
+    /// stored; any version is read (spec plugins/lemon-stereo-shaper.md §5).
+    #[test]
+    fn a_mapped_state_keeps_the_ints_it_leaves_out() {
+        let spec = stereo_shaper::SPEC;
+        assert_eq!((ints(spec), state_len(spec)), (8, 36));
+        // FL's "Mid - aSide splitter": difference output 2.
+        let fl = os_engine::effects::stereo_shaper::Settings { v: [8076, 8076, 8076, 8076, 0, 0, 2, 1] }.to_state();
+        let mut vals = values_of(spec, &fl);
+        assert_eq!(vals, [8076, 8076, 8076, 8076, 0, 0, 1]);
+        vals[6] = -1;
+        vals[0] = 12800;
+        let b = to_fl(spec, &vals, &fl);
+        assert_eq!((field(&b, 1), field(&b, 7), field(&b, 8)), (12800, 2, -1));
+        let mut v9 = b.clone();
+        set_field(&mut v9, 0, 9);
+        assert_eq!(normalized(spec, v9.clone()), v9);
+        assert_eq!(normalized(spec, b[..32].to_vec()), default_state(spec));
+        let blob = plugin_state_from_fl(spec, &b);
+        assert_eq!(fl_from_plugin_state(spec, &blob), Some(b));
+    }
+
+    #[test]
+    fn the_binary_search_finds_the_nearest() {
+        let sq = |v: i32| f64::from(v) * f64::from(v);
+        assert_eq!(nearest_rising((0, 100), 50.0, sq), 7);
+        assert_eq!(nearest_rising((0, 100), 56.0, sq), 7);
+        assert_eq!(nearest_rising((0, 100), 57.0, sq), 8);
+        assert_eq!(nearest_rising((0, 100), -3.0, sq), 0);
+        assert_eq!(nearest_rising((0, 100), 1e9, sq), 100);
+        assert_eq!(nearest_rising((-5, 5), 0.2, f64::from), 0);
     }
 
     /// Transient Processor's state: a version first, display bytes after; versions 0 and 1 read, 2 not (spec

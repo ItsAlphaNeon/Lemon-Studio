@@ -22,7 +22,7 @@ use os_ui::kit::menu::{MenuItem, MenuStyle};
 
 use crate::params::{self, FxParams};
 use crate::view::{self, Target, ViewState};
-use crate::{Shared, Spec};
+use crate::{Control, Shared, Spec};
 
 pub struct FxEditor {
     pub spec: &'static Spec,
@@ -290,10 +290,22 @@ impl Logic {
         vec![Act::Repaint]
     }
 
-    /// Wheel: one step per notch (1/128 of the range for the settings with many steps).
+    /// Wheel: one step per notch (1/128 of the range for the settings with many steps; the next row on a pick).
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
         let Some((t, _)) = self.hit(x, y).filter(|(t, _)| *t != Target::Logo) else { return vec![] };
         let id = t.id().to_string();
+        let rows = self.spec.controls.iter().find_map(|c| match c {
+            Control::Pick { id: p, rows, .. } if *p == id => Some(*rows),
+            _ => None,
+        });
+        if let Some(rows) = rows {
+            let cur = self.vals.plain(&id).round() as i32;
+            let at = view::picked(self.spec, &id, cur, rows).unwrap_or(0) as i32;
+            let next = (at + notches.signum() as i32).clamp(0, rows.len() as i32 - 1);
+            self.vals.edit_plain(&id, rows[next as usize].1 as f32);
+            self.hint = self.hint_for(Some(&t));
+            return vec![Act::Repaint];
+        }
         let (lo, hi) = self.range(&id);
         let steps = (hi - lo) as f32;
         let step = if steps > WHEEL_STEPS { (steps / WHEEL_STEPS).round() } else { 1.0 };
@@ -892,7 +904,7 @@ mod gui {
 mod tests {
     use super::*;
     use crate::tests::SPECS;
-    use crate::{balance, fast_distortion, soft_clipper, stereo_enhancer, transient_processor};
+    use crate::{balance, chorus, fast_distortion, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor};
 
     fn logic(spec: &'static Spec) -> Logic {
         let mut l = Logic::new(spec, Arc::new(FxParams::new(spec)), Arc::new(Shared::default()), None);
@@ -937,9 +949,11 @@ mod tests {
                 let inside = spec.cards.iter().any(|k| d.r.x >= k.x0 && d.r.x + d.r.w <= k.x1 && d.r.y >= k.y0 && d.r.y + d.r.h <= k.y1);
                 assert!(inside, "{} display", spec.name);
             }
-            // The cards end 19 px over the foot's line.
+            // The (last row of) cards end 19 px over the foot's line; a row above leaves 28 px for the heading below.
+            let bottom = spec.cards.iter().map(|k| k.y1).fold(0.0f32, f32::max);
+            assert_eq!(bottom, view::foot(spec) - 19.0, "{}", spec.name);
             for k in spec.cards {
-                assert_eq!(k.y1, view::foot(spec) - 19.0, "{} {}", spec.name, k.heading);
+                assert!(k.y1 == bottom || spec.cards.iter().filter(|b| b.y1 == bottom).all(|b| b.y0 - k.y1 >= 28.0), "{} {}", spec.name, k.heading);
             }
         }
     }
@@ -997,6 +1011,38 @@ mod tests {
         l.down(x, y, Btn::Left, Mods::default(), false);
         assert_eq!(l.params.v(os_engine::effects::fast_dist::TYPE), 1);
         assert_eq!(l.hint, "Type: B");
+        let mut l = logic(stereo_shaper::SPEC);
+        let (x, y) = centre(&l, &Target::Choice("position".into(), -1));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.params.v(6), -1);
+        assert_eq!(l.hint, "Effects position: Off");
+    }
+
+    /// A pick's rows stand for ranges of values: the row with the current value's text is chosen; a click sets the
+    /// row's value; a wheel moves a row.
+    #[test]
+    fn picks_choose_rows_by_their_text() {
+        use os_engine::effects::chorus as dsp;
+        let mut l = logic(chorus::SPEC);
+        let rows = chorus::WAVES;
+        // LFO 1 starts at 23: "Arc".
+        assert_eq!(view::picked(chorus::SPEC, "wave1", 23, rows), Some(0));
+        assert_eq!(view::picked(chorus::SPEC, "wave1", 700, rows), Some(2));
+        let (x, y) = centre(&l, &Target::Choice("wave1".into(), 683));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.params.v(dsp::WAVE[0]), 683);
+        assert_eq!(l.hint, "LFO 1 wave: Sines");
+        l.wheel(x, y, 1.0, Mods::default());
+        assert_eq!(l.params.v(dsp::WAVE[0]), 1024);
+        l.wheel(x, y, 1.0, Mods::default());
+        assert_eq!(l.params.v(dsp::WAVE[0]), 1024);
+        l.wheel(x, y, -1.0, Mods::default());
+        l.wheel(x, y, -1.0, Mods::default());
+        assert_eq!(l.params.v(dsp::WAVE[0]), 342);
+        let (x, y) = centre(&l, &Target::Choice("wet".into(), 1024));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.params.v(dsp::WET_ONLY), 1024);
+        assert_eq!(l.hint, "Wet only: On");
     }
 
     #[test]
@@ -1042,7 +1088,7 @@ mod tests {
             }
             pm.save_png(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
         };
-        let settings: [(&Spec, &str, &[(&str, i32)]); 5] = [
+        let settings: [(&Spec, &str, &[(&str, i32)]); 7] = [
             (soft_clipper::SPEC, "soft_clipper", &[("threshold", 64), ("post", 150)]),
             (fast_distortion::SPEC, "fast_distortion", &[("pre", 192), ("threshold", 3), ("type", 1), ("mix", 100), ("post", 110)]),
             (balance::SPEC, "balance", &[("balance", -70), ("volume", 220)]),
@@ -1052,6 +1098,8 @@ mod tests {
                 "transient_processor",
                 &[("attack", 160), ("drive", 38), ("release", 120), ("attack_shape", 2), ("split", 30), ("balance", 50), ("on", 0)],
             ),
+            (chorus::SPEC, "chorus", &[("delay", 40), ("depth", 4375), ("stereo", 149), ("speed1", 3229), ("wave1", 587), ("wave3", 1024), ("cross", 65), ("cutoff", 4531), ("wet", 491)]),
+            (stereo_shaper::SPEC, "stereo_shaper", &[("rl", 8076), ("left", 8076), ("right", -8076), ("lr", 8076), ("delay", 1408), ("phase", -2496), ("position", 0)]),
         ];
         for (spec, name, values) in settings {
             let mut l = logic(spec);

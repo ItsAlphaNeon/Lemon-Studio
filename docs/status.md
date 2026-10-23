@@ -170,10 +170,13 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 
 - Lemon Sampler, Lemon Trio (a three-oscillator synth) and Lemon Parametric EQ, also available as VST3
   and CLAP bundles for other hosts
-- Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer and Lemon Transient Processor as
-  VST3 and CLAP plugins; a project's Fruity Soft Clipper, Fruity Fast Dist, Fruity Balance, Fruity Stereo Enhancer and
-  Transient Processor play through the same sound in the mixer. The first four match FL Studio 2026's exports sample
-  for sample in the tests; Transient Processor has not been compared with FL 2026's exports yet
+- Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon
+  Chorus and Lemon Stereo Shaper as VST3 and CLAP plugins; a project's Fruity Soft Clipper, Fruity Fast Dist, Fruity
+  Balance, Fruity Stereo Enhancer, Transient Processor, Fruity Chorus and Fruity Stereo Shaper play through the same
+  sound in the mixer. The first four match FL Studio 2026's exports sample for sample in the tests; Transient
+  Processor, Chorus and Stereo Shaper have not been compared with FL 2026's exports yet
+- The Stereo Shaper's difference output plays in the mixer (added to the track it names, from the first tick, without
+  delay compensation); Lemon Stereo Shaper as a plugin keeps the setting but has no output for it
 - Lemon Parametric EQ plays FL's Parametric EQ 2 in every quality mode, in a project's mixer slots and as a plugin:
   plain, HQ Legacy, HQ+, HQ Enhanced and linear phase (LIN) with its sizes and crossfade speeds. The plugin tells the
   host LIN's and HQ Enhanced's delay, and Lemon Studio compensates it in a project's mixer slots as for any plugin

@@ -37,6 +37,8 @@ pub const SPEC: &Spec = &Spec {
     about: "Lemon Studio's balance",
     settings: &SETTINGS,
     version: None,
+    any_version: false,
+    fields: &[],
     tail: &[],
     size: (320, 154),
     cards: &CARDS,
