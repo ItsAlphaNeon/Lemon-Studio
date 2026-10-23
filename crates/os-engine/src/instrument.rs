@@ -123,6 +123,12 @@ pub trait Instrument: Send {
     fn midi(&mut self, offset: u32, bytes: [u8; 3]) {
         let _ = (offset, bytes);
     }
+    /// The delay the instrument puts its output out late by, in samples, as it reports it (a hosted plugin's latency).
+    /// The engine reads it right after `process` and delays the channel's other paths to match (spec:
+    /// audio/delay-compensation.md). Default: none.
+    fn reported_delay(&self) -> u32 {
+        0
+    }
 }
 
 /// A channel's levels as its instrument gets them (spec: audio/voice-levels.md "The channel's levels").
@@ -291,6 +297,11 @@ pub trait HostedEffect: Send {
     /// [`Instrument::transport`] for effects: the song position during the next `process_fx` call.
     fn transport_fx(&mut self, info: &TransportInfo) {
         let _ = info;
+    }
+    /// [`Instrument::reported_delay`] for effects: the samples the effect puts its output out late by, read right
+    /// after `process_fx` (spec: audio/delay-compensation.md).
+    fn reported_delay_fx(&self) -> u32 {
+        0
     }
 }
 

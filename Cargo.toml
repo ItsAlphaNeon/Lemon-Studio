@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "crates/os-dsp", "tools/flp-dump", "tools/os-render", "tools/os-play", "tools/bundle-app", "crates/os-native", "tools/os-native-probe", "crates/os-theme", "crates/os-ui", "crates/os-app", "plugins/lemon-sampler", "tools/bundle-plugins", "crates/os-clap", "crates/os-hostlink", "crates/os-plugkit", "plugins/lemon-parametric-eq-2", "crates/os-host", "crates/os-vst3", "crates/os-vst2", "plugins/lemon-3x-osc", "plugins/lemon-limiter", "plugins/lemon-reverb", "plugins/lemon-delay", "plugins/citrus", "crates/os-paths", "tools/watermark"]
+members = ["crates/os-model", "crates/os-flp", "crates/os-engine", "crates/os-dsp", "tools/flp-dump", "tools/os-render", "tools/os-play", "tools/bundle-app", "crates/os-native", "tools/os-native-probe", "crates/os-theme", "crates/os-ui", "crates/os-app", "plugins/lemon-sampler", "tools/bundle-plugins", "crates/os-clap", "crates/os-hostlink", "crates/os-plugkit", "plugins/lemon-parametric-eq-2", "crates/os-host", "crates/os-vst3", "crates/os-vst2", "plugins/lemon-3x-osc", "plugins/lemon-limiter", "plugins/lemon-reverb", "plugins/lemon-delay", "plugins/lemon-small-fx", "plugins/lemon-soft-clipper", "plugins/lemon-fast-distortion", "plugins/lemon-balance", "plugins/lemon-stereo-enhancer", "plugins/lemon-transient-processor", "plugins/citrus", "crates/os-paths", "tools/watermark", "crates/os-smf"]
 
 [workspace.package]
 version = "0.0.1"
@@ -17,6 +17,7 @@ os-host = { path = "crates/os-host" }
 os-vst3 = { path = "crates/os-vst3" }
 os-vst2 = { path = "crates/os-vst2" }
 os-paths = { path = "crates/os-paths" }
+os-smf = { path = "crates/os-smf" }
 thiserror = "2"
 
 [profile.dev]

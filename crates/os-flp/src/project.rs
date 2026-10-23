@@ -150,6 +150,8 @@ mod id {
     pub const MARKER_NUM: u8 = 33;
     pub const MARKER_DEN: u8 = 34;
     pub const MARKER_NAME: u8 = 205;
+    /// A key marker's scale (spec: flp/events/playlist.md "Time markers").
+    pub const MARKER_SCALE: u8 = 101;
     pub const MARKER_IDS: [u8; 8] = [148, 33, 34, 46, 45, 168, 101, 205];
     /// Automation clip points (in the channel block) and links (before the first channel)
     /// (spec: flp/events/automation.md).
@@ -158,6 +160,8 @@ mod id {
 
     pub const MX_COLOR: u8 = 149;
     pub const MX_COLOR_FLAG: u8 = 42;
+    /// The track's icon, after the colour flag and before the name (spec: flp/events/mixer.md "Track blocks").
+    pub const MX_ICON: u8 = 95;
     pub const MX_NAME: u8 = 204;
     pub const MX_FLAGS: u8 = 236;
     pub const MX_SLOT: u8 = 98;
@@ -347,6 +351,7 @@ struct ArrangementLoc {
 struct MixerLoc {
     color: Option<usize>,
     color_flag: Option<usize>,
+    icon: Option<usize>,
     name: Option<usize>,
     flags: Option<usize>,
     routes: Option<usize>,
@@ -613,6 +618,12 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                     m.color_flag = Some(i);
                 }
             }
+            // The icon belongs to the header, before the track's flags (spec: flp/events/mixer.md "Track blocks").
+            (Region::Mixer, id::MX_ICON) => {
+                if let Some(m) = l.mixer.last_mut().filter(|m| m.flags.is_none()) {
+                    m.icon = Some(i);
+                }
+            }
             (Region::Mixer, id::MX_NAME) => {
                 if let Some(m) = l.mixer.last_mut() {
                     m.name = Some(i);
@@ -669,6 +680,16 @@ fn major_version(events: &[Event], version: Option<usize>) -> u32 {
         .map(|d| decode_text(d, TextEnc::Ansi))
         .and_then(|s| s.split('.').next().and_then(|m| m.parse::<u32>().ok()))
         .unwrap_or(26)
+}
+
+/// True when the program that saved the file is older than FL 12.8 (a file that does not say is not).
+fn before_12_8(events: &[Event], version: Option<usize>) -> bool {
+    let text = version.and_then(|i| events[i].data()).map(|d| decode_text(d, TextEnc::Ansi)).unwrap_or_default();
+    let mut parts = text.split('.').map(|p| p.trim_matches(char::from(0)).parse::<u32>().ok());
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(major), minor) => (major, minor.unwrap_or(0)) < (12, 8),
+        _ => false,
+    }
 }
 
 fn text_enc(events: &[Event], version: Option<usize>) -> TextEnc {
@@ -1493,9 +1514,10 @@ fn decode_markers(events: &[Event], idx: &[usize], enc: TextEnc) -> Vec<TimeMark
         match e.id {
             id::MARKER_POS => {
                 let v = int(e);
-                out.push(TimeMarker { position: v & 0x00FF_FFFF, kind: (v >> 24) as u8, name: String::new(), numerator: 4, denominator: 4 });
+                out.push(TimeMarker { kind: (v >> 24) as u8, ..TimeMarker::new(v & 0x00FF_FFFF, "") });
             }
             id::MARKER_NUM => out.last_mut().into_iter().for_each(|m| m.numerator = int(e) as u8),
+            id::MARKER_SCALE => out.last_mut().into_iter().for_each(|m| m.scale = int(e) as u16),
             id::MARKER_DEN => out.last_mut().into_iter().for_each(|m| m.denominator = int(e) as u8),
             id::MARKER_NAME => {
                 let name = e.data().map(|d| decode_text(d, enc)).unwrap_or_default();
@@ -1515,7 +1537,7 @@ fn marker_events(m: &TimeMarker, enc: TextEnc) -> Vec<Event> {
         Event::new(46, Value::U8(0)),
         Event::new(45, Value::U8(0)),
         Event::new(168, Value::U32(0)),
-        Event::new(101, Value::U16(0)),
+        Event::new(id::MARKER_SCALE, Value::U16(m.scale)),
         Event::new(id::MARKER_NAME, Value::var(encode_text(&m.name, enc))),
     ]
 }
@@ -1763,6 +1785,53 @@ fn track_flags(d: Option<&[u8]>) -> Option<u8> {
     d.filter(|d| d.len() >= 8).map(|d| d[4])
 }
 
+/// Flag 0x20 of a record written before FL 12.8: its one latency value is the output setting.
+const MX_FLAG_LATE_OUT: u8 = 0x20;
+
+/// A track record's output and input latency settings in milliseconds (spec: flp/layouts.md "A mixer track's record
+/// (event 236)"): at bytes 0..3 and 8..11 of a 12-byte record, the output setting alone at 0..3 of an 8-byte one. A
+/// record written before FL 12.8 (5 or 8 bytes) holds one value, with the other sign: the output setting when flag
+/// 0x20 is set (in a 5-byte record: its fifth byte is not 0), else the input setting.
+fn track_latency(d: &[u8], old: bool) -> (f32, f32) {
+    let single = |at: usize| d.get(at..at + 4).map_or(0.0, |b| f32::from_le_bytes(b.try_into().expect("four bytes")));
+    match d.len() {
+        n if n >= 12 => (single(0), single(8)),
+        n if n >= 8 && !old => (single(0), 0.0),
+        n if n >= 5 => {
+            let v = 0.0 - single(0);
+            let out = if n >= 8 { d[4] & MX_FLAG_LATE_OUT != 0 } else { d[4] != 0 };
+            if out { (v, 0.0) } else { (0.0, v) }
+        }
+        _ => (0.0, 0.0),
+    }
+}
+
+/// Record `d` (8 bytes or more) with the latency settings `(out, in)`: in its own form where that holds them (the one
+/// value of a record written before FL 12.8 when the other setting is 0, flag 0x20 left as it was when both are; the
+/// output setting alone in a later 8-byte record), else grown to the 12-byte record, its flags kept (a Lemon Studio
+/// choice: spec audio/delay-compensation.md "Lemon Studio").
+fn with_latency(d: &[u8], old: bool, (out, inp): (f32, f32)) -> Vec<u8> {
+    let mut r = d.to_vec();
+    if r.len() < 12 {
+        if !old && inp == 0.0 {
+            r[..4].copy_from_slice(&out.to_le_bytes());
+            return r;
+        }
+        if old && (out == 0.0 || inp == 0.0) {
+            r[..4].copy_from_slice(&(0.0 - out - inp).to_le_bytes());
+            if out != 0.0 || inp != 0.0 {
+                r[4] = (r[4] & !MX_FLAG_LATE_OUT) | if inp == 0.0 { MX_FLAG_LATE_OUT } else { 0 };
+            }
+            return r;
+        }
+        r.resize(12, 0);
+        r[4] &= !MX_FLAG_LATE_OUT;
+    }
+    r[..4].copy_from_slice(&out.to_le_bytes());
+    r[8..12].copy_from_slice(&inp.to_le_bytes());
+    r
+}
+
 fn with_flags(b: u8, m: &MixerTrack) -> u8 {
     let mut b = b & !(MX_FLAG_POLARITY | MX_FLAG_SWAP | MX_FLAG_SLOTS | MX_FLAG_ON);
     for (on, f) in [(m.polarity, MX_FLAG_POLARITY), (m.swap, MX_FLAG_SWAP), (m.slots_enabled, MX_FLAG_SLOTS), (m.enabled, MX_FLAG_ON)] {
@@ -1816,20 +1885,51 @@ struct SlotRun {
     used: bool,
 }
 
-/// The file events of the plugin the model has at (`track`, `slot`): the same plugin in the same slot, else the same
-/// plugin (name and state) moved from another slot or track, else a plugin of that name moved within the track.
-fn take_run(pool: &mut [SlotRun], track: usize, slot: usize, p: &SlotPlugin) -> Option<Vec<Event>> {
-    let pick = [
-        pool.iter().position(|r| !r.used && r.track == track && r.slot == slot && r.plugin.name == p.name),
-        pool.iter().position(|r| !r.used && r.track == track && r.plugin == *p),
-        pool.iter().position(|r| !r.used && r.plugin == *p),
-        pool.iter().position(|r| !r.used && r.track == track && r.plugin.name == p.name),
-    ]
-    .into_iter()
-    .flatten()
-    .next()?;
-    pool[pick].used = true;
-    Some(pool[pick].events.clone())
+/// Every filled slot of the file with its plugin and events, by track position (spec: flp/events/mixer.md "Slot
+/// sub-block"), and the number of stored tracks.
+fn file_slot_runs(file: &FlpFile) -> Result<(Vec<SlotRun>, usize), ProjectError> {
+    let events = events_of(file)?;
+    let l = scan(events)?;
+    let enc = text_enc(events, l.version);
+    let mut out = Vec::new();
+    for (track, area) in slot_areas(events, &l).iter().enumerate() {
+        for (slot, run) in area.iter().flat_map(|a| a.runs.iter().enumerate()) {
+            let Some((s, e)) = *run else { continue };
+            let run = &events[s..e];
+            let name = run[0].data().map(|d| decode_text(d, enc)).unwrap_or_default();
+            let state = run.iter().find(|e| e.id == id::PLUGIN_STATE).and_then(Event::data).map(<[u8]>::to_vec).unwrap_or_default();
+            out.push(SlotRun { track, slot, plugin: SlotPlugin { name, state }, events: run.to_vec(), used: false });
+        }
+    }
+    Ok((out, l.mixer.len()))
+}
+
+/// The file events of each wanted slot plugin, given as (slot, the file track its track came from, the plugin). Rounds
+/// of matching, a closer match first for every slot: a plugin of that name in the same slot of the track it came from;
+/// the same plugin (name and state) moved within that track; the same plugin moved from another track; a plugin of that
+/// name moved within the track it came from. A track made in Lemon Studio (no file track) only finds the same plugin
+/// moved from another track.
+fn take_runs(pool: &mut [SlotRun], wanted: &[(usize, Option<usize>, &SlotPlugin)]) -> Vec<Option<Vec<Event>>> {
+    type Rule = fn(&SlotRun, usize, Option<usize>, &SlotPlugin) -> bool;
+    let rounds: [Rule; 4] = [
+        |r, k, from, p| Some(r.track) == from && r.slot == k && r.plugin.name == p.name,
+        |r, _, from, p| Some(r.track) == from && r.plugin == *p,
+        |r, _, _, p| r.plugin == *p,
+        |r, _, from, p| Some(r.track) == from && r.plugin.name == p.name,
+    ];
+    let mut out: Vec<Option<Vec<Event>>> = vec![None; wanted.len()];
+    for rule in rounds {
+        for (w, &(k, from, p)) in wanted.iter().enumerate() {
+            if out[w].is_some() {
+                continue;
+            }
+            if let Some(r) = pool.iter_mut().find(|r| !r.used && rule(r, k, from, p)) {
+                r.used = true;
+                out[w] = Some(r.events.clone());
+            }
+        }
+    }
+    out
 }
 
 /// A slot plugin's events (spec: flp/events/plugins.md §2): the file's own events when it had the plugin (window
@@ -1887,6 +1987,7 @@ fn plugin_record(slot: Option<(u16, u8)>) -> Vec<u8> {
 
 fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
     let params = l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[]);
+    let old = before_12_8(events, l.version);
     let mut out = Vec::new();
     // Track boundaries: header start of track n .. header start of track n+1.
     let starts: Vec<usize> = l
@@ -1964,6 +2065,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         }
         let flags = track_flags(m.flags.and_then(|i| events[i].data()));
         let flag = |f: u8, default: bool| flags.map_or(default, |b| b & f != 0);
+        let (latency_out, latency_in) = m.flags.and_then(|i| events[i].data()).map_or((0.0, 0.0), |d| track_latency(d, old));
         out.push(MixerTrack {
             index,
             name: m.name.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)),
@@ -1984,6 +2086,10 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             slot_on,
             slot_mix,
             eq,
+            latency_out,
+            latency_in,
+            icon: m.icon.map(|i| int(&events[i]) as u16),
+            origin: Some(index),
             ..MixerTrack::new(index)
         });
     }
@@ -2090,7 +2196,14 @@ fn sample_settings_fields(ch: &Channel) -> [(usize, Vec<u8>); 10] {
 /// `sample_settings_fields`, and the precomputed effects' own events (audio/precomputed-effects.md "Settings"). Events
 /// the block holds are patched; a value the block lacks is added before its end event when it differs from what reading
 /// the block without it gives. Root note, fine tune and the rest of the Misc tab are `write_misc`'s.
-fn write_sampler(events: &mut [Event], loc: &ChannelLoc, ch: &Channel, old: &Channel, inserts: &mut Vec<(usize, Event)>) {
+fn write_sampler(
+    events: &mut [Event],
+    loc: &ChannelLoc,
+    ch: &Channel,
+    old: &Channel,
+    inserts: &mut Vec<(usize, Event)>,
+    removals: &mut Vec<usize>,
+) {
     let find = |events: &[Event], id: u8| (loc.start + 1..loc.end).find(|&k| events[k].id == id);
     let mut add = Vec::new();
     if ch.envelopes != old.envelopes {
@@ -2128,10 +2241,14 @@ fn write_sampler(events: &mut [Event], loc: &ChannelLoc, ch: &Channel, old: &Cha
         }
     }
     if s.loop_points != o.loop_points {
-        // A record can't be taken out in place: without loop points it holds the sample's ends.
+        // Without loop points the record holds the sample's ends; removing the sample (the Sampler window's file box
+        // X) removes it, as in FL (spec: flp/events/channels.md "Loop points (event 251)").
         let points = s.loop_points.unwrap_or([-1, i64::MAX]);
+        let removed = s.loop_points.is_none() && ch.sample_path.is_none() && old.sample_path.is_some();
         match find(events, id::CH_LOOP_POINTS) {
+            Some(i) if removed => removals.push(i),
             Some(i) => patch_bytes(&mut events[i], 4, &[points[0].to_le_bytes(), points[1].to_le_bytes()].concat()),
+            None if removed => {}
             None => add.push(Event::new(id::CH_LOOP_POINTS, Value::var(loop_points_251(points)))),
         }
     }
@@ -2184,6 +2301,8 @@ fn write_sampler(events: &mut [Event], loc: &ChannelLoc, ch: &Channel, old: &Cha
 /// removing objects isn't supported yet.
 pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> {
     restructure(project, file)?;
+    // The file's effect slots as they are before inserts are added or removed: a renumbered track takes its own.
+    let (file_slots, file_tracks) = file_slot_runs(file)?;
     grow_mixer(project, file)?;
     shrink_mixer(project, file)?;
     let current = load(file)?;
@@ -2191,6 +2310,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     let l = scan(events)?;
     let enc = text_enc(events, l.version);
     let clen = clip_len(events, l.version);
+    let old_file = before_12_8(events, l.version);
     let mismatch = |what: &str, a: usize, b: usize| {
         ProjectError::Mismatch(format!("{what}: model has {a}, file has {b}"))
     };
@@ -2497,7 +2617,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             }
         }
         if ch.kind.is_sampler() {
-            write_sampler(events, loc, ch, old, &mut inserts);
+            write_sampler(events, loc, ch, old, &mut inserts, &mut removals);
         }
         // The Misc tab's values, for every kind of channel.
         let add = write_misc(&mut events[loc.start..=loc.end], ch, &old.misc);
@@ -2575,14 +2695,15 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             }
         }
         // A sampler's sample (Lemon Sampler loads one): event 196 replaced, or added right after event 20 where FL
-        // writes it (spec: flp/events/channels.md). Clearing a sample is not written yet (the old path stays).
+        // writes it; a sample taken out takes its event with it (spec: flp/events/channels.md, block layout and "Loop
+        // points (event 251)").
         if ch.sample_path != old.sample_path {
-            if let Some(p) = &ch.sample_path {
-                match (loc.sample, loc.ev20) {
-                    (Some(i), _) => set_data(&mut events[i], encode_text(p, enc)),
-                    (None, Some(i)) => inserts.push((i + 1, Event::new(id::SAMPLE_PATH, Value::var(encode_text(p, enc))))),
-                    (None, None) => inserts.push((loc.end, Event::new(id::SAMPLE_PATH, Value::var(encode_text(p, enc))))),
-                }
+            match (&ch.sample_path, loc.sample, loc.ev20) {
+                (Some(p), Some(i), _) => set_data(&mut events[i], encode_text(p, enc)),
+                (Some(p), None, Some(i)) => inserts.push((i + 1, Event::new(id::SAMPLE_PATH, Value::var(encode_text(p, enc))))),
+                (Some(p), None, None) => inserts.push((loc.end, Event::new(id::SAMPLE_PATH, Value::var(encode_text(p, enc))))),
+                (None, Some(i), _) => removals.push(i),
+                (None, None, _) => {}
             }
         }
         // A plugin channel's plugin (201) and state (213) (spec: flp/events/plugins.md §1-2). A state for a channel
@@ -2872,30 +2993,49 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     // Mixer tracks.
     let mut params = l.mixer_params.and_then(|i| events[i].data()).map(<[u8]>::to_vec);
     let slot_states = if skip_mixer { Vec::new() } else { slot_state_events(events, &l) };
+    // The file track each block now stands for: inserts are added or removed just before the last track
+    // (`grow_mixer`, `shrink_mixer`), so a block keeps its position, the last one was the file's last, and an added one
+    // has none.
+    let n = project.mixer.len();
+    let file_track = |t: usize| -> Option<u16> {
+        let from = if t + 1 == n { file_tracks.checked_sub(1) } else { (t + 1 < file_tracks).then_some(t) };
+        from.map(|f| f as u16)
+    };
     // Tracks whose slots gained, lost or swapped plugins get their whole slot area rewritten (spec:
-    // flp/events/plugins.md §2-3); a plugin that stays (or moves) keeps its own events.
+    // flp/events/plugins.md §2-3), and so do tracks holding plugins that came from another block (moved, deleted or
+    // trimmed tracks: their slots follow them, spec: flp/events/mixer.md "Removing tracks"). A plugin that stays (or
+    // moves) keeps its own events.
     let slot_names = |t: &MixerTrack| t.slots.iter().map(|s| s.as_ref().map(|s| s.name.clone())).collect::<Vec<_>>();
-    let rewrite: Vec<bool> = project.mixer.iter().zip(&current.mixer).map(|(m, old)| slot_names(m) != slot_names(old)).collect();
+    let rewrite: Vec<bool> = project
+        .mixer
+        .iter()
+        .zip(&current.mixer)
+        .enumerate()
+        .map(|(t, (m, old))| slot_names(m) != slot_names(old) || (m.slots.iter().any(Option::is_some) && m.origin != file_track(t)))
+        .collect();
     if !skip_mixer && rewrite.iter().any(|&r| r) {
         let areas = slot_areas(events, &l);
-        let mut pool: Vec<SlotRun> = Vec::new();
-        for (t, old) in current.mixer.iter().enumerate().filter(|&(t, _)| rewrite[t]) {
-            let Some(area) = areas.get(t).and_then(Option::as_ref) else {
-                return Err(ProjectError::Structure(format!("mixer track {t} has no slot area")));
-            };
-            for (k, (slot, run)) in old.slots.iter().zip(&area.runs).enumerate() {
-                if let (Some(p), Some((s, e))) = (slot, run) {
-                    pool.push(SlotRun { track: t, slot: k, plugin: p.clone(), events: events[*s..*e].to_vec(), used: false });
-                }
-            }
+        if let Some(t) = (0..n).find(|&t| rewrite[t] && areas.get(t).is_none_or(Option::is_none)) {
+            return Err(ProjectError::Structure(format!("mixer track {t} has no slot area")));
         }
+        // The file's plugins other than those of the blocks kept as they are.
+        let kept: Vec<usize> = (0..n).filter(|&t| !rewrite[t]).filter_map(file_track).map(usize::from).collect();
+        let mut pool: Vec<SlotRun> = file_slots.into_iter().filter(|r| !kept.contains(&r.track)).collect();
+        let wanted: Vec<(usize, Option<usize>, &SlotPlugin)> = project
+            .mixer
+            .iter()
+            .enumerate()
+            .filter(|&(t, _)| rewrite[t])
+            .flat_map(|(_, m)| m.slots.iter().enumerate().filter_map(move |(k, s)| Some((k, m.origin.map(usize::from), s.as_ref()?))))
+            .collect();
+        let mut runs = take_runs(&mut pool, &wanted).into_iter();
         for (t, m) in project.mixer.iter().enumerate().filter(|&(t, _)| rewrite[t]) {
             let area = areas[t].as_ref().expect("checked above");
             let mut block = Vec::new();
             for (k, slot) in m.slots.iter().enumerate() {
                 if let Some(p) = slot {
-                    let rt = record_track(t as u16, project.mixer.len());
-                    block.extend(slot_plugin_events(p, rt, k as u8, take_run(&mut pool, t, k, p), enc));
+                    let rt = record_track(t as u16, n);
+                    block.extend(slot_plugin_events(p, rt, k as u8, runs.next().flatten(), enc));
                 }
                 block.push(Event::new(id::MX_SLOT, Value::U16(k as u16)));
             }
@@ -2932,20 +3072,28 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 }
             }
         }
-        if (m.enabled, m.polarity, m.swap, m.slots_enabled) != (old.enabled, old.polarity, old.swap, old.slots_enabled) {
+        let latency = (m.latency_out, m.latency_in);
+        let relatency = latency != (old.latency_out, old.latency_in);
+        if relatency || (m.enabled, m.polarity, m.swap, m.slots_enabled) != (old.enabled, old.polarity, old.swap, old.slots_enabled) {
             if let Some(i) = ml.flags {
                 match track_flags(events[i].data()) {
-                    Some(b) => patch_bytes(&mut events[i], 4, &[with_flags(b, m)]),
-                    // A 5-byte record (FL 10 / 11) has no flags: it becomes the 8-byte record of FL 12, its latency kept
-                    // (spec: flp/layouts.md "A mixer track's record (event 236)").
+                    Some(b) if !relatency => patch_bytes(&mut events[i], 4, &[with_flags(b, m)]),
+                    Some(_) => {
+                        let mut r = with_latency(events[i].data().unwrap_or(&[]), old_file, latency);
+                        r[4] = with_flags(r[4], m);
+                        set_data(&mut events[i], r);
+                    }
+                    // A 5-byte record (FL 10 / 11) has no flags: it becomes the 8-byte record of FL 12, its latency kept in
+                    // the form the file's version reads (spec: flp/layouts.md "A mixer track's record (event 236)").
                     None => {
                         let d = events[i].data().unwrap_or(&[]);
-                        let mut r = [0u8; 8];
-                        let late = d.get(4).is_some_and(|&b| b != 0);
-                        r[..d.len().min(4)].copy_from_slice(&d[..d.len().min(4)]);
+                        let late = old_file && d.get(4).is_some_and(|&b| b != 0);
                         let base = if m.index == 0 { MX_FLAGS_MASTER } else { MX_FLAGS_INSERT };
-                        r[4] = with_flags(base | if late { 0x20 } else { 0 }, m);
-                        set_data(&mut events[i], r.to_vec());
+                        let mut r = vec![0u8; 8];
+                        r[4] = base | if late { MX_FLAG_LATE_OUT } else { 0 };
+                        let mut r = with_latency(&r, old_file, latency);
+                        r[4] = with_flags(r[4], m);
+                        set_data(&mut events[i], r);
                     }
                 }
             }
@@ -2958,6 +3106,19 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                     inserts.push((at, Event::new(id::MX_NAME, Value::var(encode_text(n, enc)))));
                 }
                 // Back to the default name ("Insert N"): the name event goes.
+                (Some(i), None) => removals.push(i),
+                (None, None) => {}
+            }
+        }
+        // The icon (event 95) stands right after the colour flag (spec: flp/events/mixer.md "Track blocks"). This comes
+        // after the name: inserted at the same place as a new name (a header of 42 and 236 alone), it lands before it.
+        if m.icon != old.icon {
+            match (ml.icon, m.icon) {
+                (Some(i), Some(v)) => set_int(&mut events[i], v.into()),
+                (None, Some(v)) => {
+                    let at = ml.color_flag.ok_or_else(|| ProjectError::Structure("mixer track without color flag".into()))?;
+                    inserts.push((at + 1, Event::new(id::MX_ICON, Value::U16(v))));
+                }
                 (Some(i), None) => removals.push(i),
                 (None, None) => {}
             }
@@ -3340,13 +3501,7 @@ fn meta_length_events(pat: &Pattern, enc: TextEnc) -> Vec<Event> {
     }
     let mut markers: Vec<TimeMarker> = pat.markers.clone();
     if let Some(len) = pat.length {
-        markers.push(TimeMarker {
-            position: len,
-            kind: LENGTH_MARKER_KIND as u8,
-            name: LENGTH_MARKER_NAME.into(),
-            numerator: 4,
-            denominator: 4,
-        });
+        markers.push(TimeMarker { kind: LENGTH_MARKER_KIND as u8, ..TimeMarker::new(len, LENGTH_MARKER_NAME) });
     }
     markers.sort_by_key(|m| m.position);
     for m in &markers {
@@ -3708,18 +3863,23 @@ fn route_bytes(routes: &[u16]) -> Vec<u8> {
     bytes
 }
 
-/// One mixer track block (spec: flp/events/mixer.md "Track blocks"): colour, name, flags, the ten slots, routing and
-/// the trailing events with the values untouched tracks have.
+/// One mixer track block (spec: flp/events/mixer.md "Track blocks"): colour, icon, name, flags, the ten slots, routing
+/// and the trailing events with the values untouched tracks have.
 fn track_block_events(m: &MixerTrack, last: bool, enc: TextEnc) -> Vec<Event> {
     let mut ev = Vec::new();
     if let Some(c) = m.color {
         ev.push(Event::new(id::MX_COLOR, Value::U32(bgr_from_rgb(c, 0xFF))));
     }
     ev.push(Event::new(id::MX_COLOR_FLAG, Value::U8(u8::from(m.color.is_some()))));
+    if let Some(i) = m.icon {
+        ev.push(Event::new(id::MX_ICON, Value::U16(i)));
+    }
     if let Some(n) = m.name.as_ref().filter(|n| !n.is_empty()) {
         ev.push(Event::new(id::MX_NAME, Value::var(encode_text(n, enc))));
     }
     let mut flags = [0u8; 12];
+    flags[..4].copy_from_slice(&m.latency_out.to_le_bytes());
+    flags[8..].copy_from_slice(&m.latency_in.to_le_bytes());
     flags[4] = if m.index == 0 || last { MX_FLAGS_MASTER } else { MX_FLAGS_INSERT };
     let rt = if last && m.index > 0 { MX_SPECIAL_TRACK } else { m.index };
     flags[4] = with_flags(flags[4], m);
@@ -3808,6 +3968,8 @@ fn mixer_is_default(mixer: &[MixerTrack]) -> bool {
             && t.pan.is_none_or(|v| v == 0.0)
             && t.stereo_separation.is_none_or(|v| v == 0.0)
             && t.routes == if t.index == 0 { Vec::<u16>::new() } else { vec![0] }
+            && t.latency_out == 0.0
+            && t.latency_in == 0.0
     })
 }
 
@@ -3973,6 +4135,38 @@ mod tests {
         // Loop points taken away stay as a record holding the sample's ends.
         assert_eq!(back.channels[0].sound, ChannelSound { loop_points: Some([-1, i64::MAX]), ..p.channels[0].sound });
         assert_eq!(back.channels[0].misc, p.channels[0].misc);
+    }
+
+    /// A sample taken out (the Sampler window's file box X) takes its path (event 196) and loop points (event 251) out
+    /// of the channel's block and turns Resample off; the other flags stay (spec: flp/events/channels.md "Loop points
+    /// (event 251)", "Sampler flags (event 143)").
+    #[test]
+    fn cleared_sample_leaves_the_block() {
+        let mut p = settled(new_project());
+        p.channels[1].sound.loop_points = Some([694, 18000]);
+        p.channels[1].sound.sampler_flags = Some(ChannelSound::RESAMPLE | ChannelSound::DEFAULT_FLAGS);
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        apply(&p, &mut file).unwrap();
+        let has = |f: &FlpFile, eid: u8| events_of(f).unwrap().iter().any(|e| e.id == eid);
+        assert!(has(&file, id::SAMPLE_PATH) && has(&file, id::CH_LOOP_POINTS));
+        let mut p = load(&file).unwrap();
+        assert_eq!(p.channels[1].sound.loop_points, Some([694, 18000]));
+        let other = p.channels[0].clone();
+        p.channels[1].clear_sample();
+        assert_eq!(p.channels[1].sound.sampler_flags, Some(ChannelSound::DEFAULT_FLAGS));
+        apply(&p, &mut file).unwrap();
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        assert!(!has(&file, id::SAMPLE_PATH) && !has(&file, id::CH_LOOP_POINTS), "the only sample's events are gone");
+        let back = load(&file).unwrap();
+        assert_eq!(back.channels[1], p.channels[1]);
+        assert_eq!(back.channels[0], other);
+        // Writing the cleared channel again changes nothing; loading a new sample brings the path back.
+        let mut again = file.clone();
+        apply(&p, &mut again).unwrap();
+        assert_eq!(again, file);
+        p.channels[1].sample_path = Some("C:/samples/bass3.wav".into());
+        apply(&p, &mut again).unwrap();
+        assert_eq!(load(&again).unwrap().channels[1].sample_path.as_deref(), Some("C:/samples/bass3.wav"));
     }
 
     /// The events the engine reads beyond the editable settings (spec: flp/engine-events.md): time signature,
@@ -4905,13 +5099,69 @@ mod tests {
         let back = load(&file).unwrap();
         let t = &back.mixer[2];
         assert_eq!((t.enabled, t.polarity, t.swap, t.slots_enabled), (true, false, false, true));
+        assert_eq!((t.latency_out, t.latency_in), (-5.0, 0.0));
         let mut edited = back.clone();
         edited.mixer[2].polarity = true;
         apply(&edited, &mut file).unwrap();
         let ev = events_of(&file).unwrap();
         let d = ev.iter().filter(|e| e.id == id::MX_FLAGS).nth(2).unwrap().data().unwrap();
-        assert_eq!(d, &[0x00, 0x00, 0xa0, 0x40, 0x4C | 0x20 | 0x01, 0, 0, 0]);
+        // The file says it is from a later FL: the latency is written in that version's form, the output setting as is.
+        assert_eq!(d, &[0x00, 0x00, 0xa0, 0xc0, 0x4C | 0x01, 0, 0, 0]);
         assert_eq!(load(&file).unwrap().mixer, edited.mixer);
+        // In a file from before FL 12.8 the record keeps its one value, flag 0x20 standing for the fifth byte.
+        let mut r = vec![0u8; 8];
+        r[4] = 0x4C | 0x20;
+        assert_eq!(with_latency(&r, true, (-5.0, 0.0))[..5], [0x00, 0x00, 0xa0, 0x40, 0x4C | 0x20]);
+        r[4] = 0x4C;
+        assert_eq!(with_latency(&r, true, (0.0, 0.0))[4], 0x4C);
+    }
+
+    /// The two latency settings (spec: flp/layouts.md "A mixer track's record (event 236)"): written with new tracks,
+    /// read back, and written again where an edit changes them.
+    #[test]
+    fn track_latency_settings_round_trip() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..18).map(MixerTrack::new).collect();
+        p.mixer[17].routes.clear();
+        (p.mixer[3].latency_out, p.mixer[3].latency_in) = (-3.49, 5.0);
+        let mut file = create(&p).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!((back.mixer[3].latency_out, back.mixer[3].latency_in), (-3.49, 5.0));
+        assert_eq!((back.mixer[2].latency_out, back.mixer[2].latency_in), (0.0, 0.0));
+        let mut edited = back.clone();
+        edited.mixer[3].latency_out = 0.0;
+        (edited.mixer[4].latency_in, edited.mixer[4].polarity) = (-2.0, true);
+        apply(&edited, &mut file).unwrap();
+        assert_eq!(load(&file).unwrap().mixer, edited.mixer);
+        let ev = events_of(&file).unwrap();
+        let d = ev.iter().filter(|e| e.id == id::MX_FLAGS).nth(4).unwrap().data().unwrap();
+        assert_eq!((&d[..4], d[4] & 0x01, &d[8..]), (&0f32.to_le_bytes()[..], 0x01, &(-2f32).to_le_bytes()[..]));
+    }
+
+    /// The record forms before FL 12.9: an 8-byte record of FL 12.8 or later holds the output setting; one written
+    /// earlier, and a 5-byte record, hold one value with the other sign, the output setting when flag 0x20 (the
+    /// 5-byte record's fifth byte) is set. Writing keeps the form where it holds the settings.
+    #[test]
+    fn older_track_latency_records() {
+        let five = 5f32.to_le_bytes();
+        let rec = |tail: &[u8]| [&five[..], tail].concat();
+        assert_eq!(track_latency(&rec(&[0x2C, 0, 0, 0]), true), (-5.0, 0.0));
+        assert_eq!(track_latency(&rec(&[0x0C, 0, 0, 0]), true), (0.0, -5.0));
+        assert_eq!(track_latency(&rec(&[0x0C, 0, 0, 0]), false), (5.0, 0.0));
+        assert_eq!(track_latency(&rec(&[1]), true), (-5.0, 0.0));
+        assert_eq!(track_latency(&rec(&[0]), true), (0.0, -5.0));
+        assert_eq!(track_latency(&rec(&[0x0C, 0, 0, 0, 0, 0, 0xA0, 0xC0]), true), (5.0, -5.0));
+        // Written back.
+        let old = rec(&[0x0C, 0, 0, 0]);
+        assert_eq!(with_latency(&old, true, (-2.0, 0.0)), [&2f32.to_le_bytes()[..], &[0x2C, 0, 0, 0]].concat());
+        assert_eq!(with_latency(&old, true, (0.0, -2.0)), [&2f32.to_le_bytes()[..], &[0x0C, 0, 0, 0]].concat());
+        assert_eq!(with_latency(&old, false, (-2.0, 0.0)), [&(-2f32).to_le_bytes()[..], &[0x0C, 0, 0, 0]].concat());
+        let both = with_latency(&rec(&[0x2C, 0, 0, 0]), true, (-2.0, 1.0));
+        assert_eq!(both.len(), 12);
+        assert_eq!(track_latency(&both, true), (-2.0, 1.0));
+        assert_eq!(both[4], 0x0C);
     }
 
     /// Sends stored the old way (FL 24.1 and before: kind 0x1F, id 64 + destination) are read, and edits keep that
@@ -5073,6 +5323,137 @@ mod tests {
         let tracks: std::collections::BTreeSet<u16> =
             mixer_param_records(params).filter(|r| r.3 >= 0x7000).map(|r| (r.3 - 0x7000) / 64).collect();
         assert_eq!(tracks, (0..18).chain([501]).collect());
+    }
+
+    /// A project of 18 tracks with effects whose window records (event 212) carry a marker byte naming the track that
+    /// made them: tracks 3 and 4 hold the same plugin with different states, track 5 another, the current track one more.
+    fn marked_mixer() -> (Project, FlpFile) {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..18).map(MixerTrack::new).collect();
+        p.mixer[17].routes.clear();
+        let fx = |name: &str, state: u8| Some(SlotPlugin { name: name.into(), state: vec![state; 4] });
+        p.mixer[3].slots[0] = fx("Fruity Limiter", 3);
+        p.mixer[4].slots[0] = fx("Fruity Limiter", 4);
+        p.mixer[5].slots[2] = fx("Fruity Delay 3", 5);
+        p.mixer[17].slots[9] = fx("Fruity Limiter", 17);
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        for e in events_of_mut(&mut file).unwrap().iter_mut().filter(|e| e.id == id::PLUGIN_REC) {
+            let track = e.data().unwrap()[0];
+            patch_bytes(e, MARK, &[if track == 0xF5 { 17 } else { track }]);
+        }
+        let p = load(&file).unwrap();
+        (p, file)
+    }
+
+    /// Byte of the slot window record that the tests mark (one Lemon Studio does not read).
+    const MARK: usize = 40;
+
+    /// The slot window records in file order: (track, slot, marker).
+    fn slot_records(file: &FlpFile) -> Vec<(u32, u32, u8)> {
+        let le = |d: &[u8], at: usize| u32::from_le_bytes(d[at..at + 4].try_into().unwrap());
+        events_of(file).unwrap().iter().filter(|e| e.id == id::PLUGIN_REC).map(|e| e.data().unwrap()).map(|d| (le(d, 0), le(d, 4), d[MARK])).collect()
+    }
+
+    /// The model's tracks given new numbers in their new order.
+    fn renumbered(mut mixer: Vec<os_model::MixerTrack>) -> Vec<os_model::MixerTrack> {
+        for (i, m) in mixer.iter_mut().enumerate() {
+            m.index = i as u16;
+        }
+        mixer
+    }
+
+    /// Moved tracks take their effect slots with them, events and all: two tracks holding the same plugin swap places,
+    /// and the window records follow with their new track numbers (spec: flp/events/mixer.md "Removing tracks", "Slot
+    /// sub-block").
+    #[test]
+    fn moved_mixer_tracks_take_their_effect_slots() {
+        let (p, mut file) = marked_mixer();
+        assert_eq!(slot_records(&file), vec![(3, 0, 3), (4, 0, 4), (5, 2, 5), (501, 9, 17)]);
+        let mut moved = p.clone();
+        moved.mixer.swap(3, 4);
+        moved.mixer = renumbered(moved.mixer);
+        moved.mixer[4].name = Some("Was 3".into());
+        apply(&moved, &mut file).unwrap();
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(slot_records(&file), vec![(3, 0, 4), (4, 0, 3), (5, 2, 5), (501, 9, 17)]);
+        let back = load(&file).unwrap();
+        assert_eq!(back.mixer, moved.mixer);
+        // Saved and loaded again, the tracks are the file's own: writing them again changes nothing.
+        let mut again = file.clone();
+        apply(&back, &mut again).unwrap();
+        assert_eq!(again, file);
+    }
+
+    /// A deleted track's effects go with it and the tracks after it take theirs to their new numbers; the current track
+    /// keeps its own as track 501 (spec: flp/events/mixer.md "Removing tracks", "The last track").
+    #[test]
+    fn deleted_mixer_track_takes_its_effect_slots() {
+        let (p, mut file) = marked_mixer();
+        let mut fewer = p.clone();
+        fewer.mixer.remove(3);
+        fewer.mixer = renumbered(fewer.mixer);
+        apply(&fewer, &mut file).unwrap();
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(slot_records(&file), vec![(3, 0, 4), (4, 2, 5), (501, 9, 17)]);
+        let back = load(&file).unwrap();
+        assert_eq!(back.mixer, fewer.mixer);
+        assert_eq!(events_of(&file).unwrap().iter().find(|e| e.id == id::MX_COUNT).map(int), Some(17));
+    }
+
+    /// Trimmed tracks (the inserts before the current track taken off the end) lose their effects; a track moved from
+    /// there to an earlier place first keeps its own (spec: flp/events/mixer.md "Removing tracks").
+    #[test]
+    fn trimmed_mixer_tracks_take_their_effect_slots() {
+        let (p, mut file) = marked_mixer();
+        let mut trimmed = p.clone();
+        let current = trimmed.mixer.pop().unwrap();
+        let five = trimmed.mixer[5].clone();
+        trimmed.mixer.truncate(3);
+        trimmed.mixer.push(five);
+        trimmed.mixer.push(current);
+        trimmed.mixer = renumbered(trimmed.mixer);
+        apply(&trimmed, &mut file).unwrap();
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(slot_records(&file), vec![(3, 2, 5), (501, 9, 17)]);
+        let back = load(&file).unwrap();
+        assert_eq!(back.mixer, trimmed.mixer);
+        assert_eq!(events_of(&file).unwrap().iter().find(|e| e.id == id::MX_COUNT).map(int), Some(5));
+    }
+
+    /// A track's icon (event 95) is read, written after the colour flag, changed, taken off, and follows its track
+    /// when tracks move (spec: flp/events/mixer.md "Track blocks").
+    #[test]
+    fn mixer_track_icon_round_trips() {
+        let (mut p, mut file) = marked_mixer();
+        assert!(p.mixer.iter().all(|m| m.icon.is_none()));
+        p.mixer[2].icon = Some(42);
+        p.mixer[3].icon = Some(7);
+        p.mixer[3].name = Some("Drums".into());
+        apply(&p, &mut file).unwrap();
+        let file2 = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        let back = load(&file2).unwrap();
+        assert_eq!(back.mixer, p.mixer);
+        let ev = events_of(&file2).unwrap();
+        let after = |eid: u8| ev.iter().position(|e| e.id == id::MX_ICON).map(|i| ev[i - 1].id == eid);
+        assert_eq!(after(id::MX_COLOR_FLAG), Some(true), "the icon follows the colour flag");
+        let icon_then_name = ev.windows(2).any(|w| w[0].id == id::MX_ICON && int(&w[0]) == 7 && w[1].id == id::MX_NAME);
+        assert!(icon_then_name, "an icon added with a name goes before it");
+        // A track made with an icon reads it back too.
+        assert_eq!(load(&create(&p).unwrap()).unwrap().mixer, p.mixer);
+        // Changed, taken off, and moved with its track.
+        let mut edited = back.clone();
+        edited.mixer[2].icon = Some(43);
+        edited.mixer[3].icon = None;
+        edited.mixer.swap(2, 4);
+        edited.mixer = renumbered(edited.mixer);
+        let mut file = file2.clone();
+        apply(&edited, &mut file).unwrap();
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back.mixer, edited.mixer);
+        assert_eq!(back.mixer[4].icon, Some(43));
+        assert_eq!(events_of(&file).unwrap().iter().filter(|e| e.id == id::MX_ICON).count(), 1);
     }
 
     #[test]
@@ -5653,6 +6034,41 @@ mod tests {
         let at = ids.iter().position(|&i| i == id::SHOW_INFO).unwrap();
         assert_eq!(ids[at - 1..at + 7], [id::PLAY_TRUNCATED, id::SHOW_INFO, id::TITLE, id::GENRE, id::AUTHOR, id::COMMENTS, id::URL, id::WORK_TIME]);
         assert_eq!(load(&f3).unwrap(), m3);
+    }
+
+    /// Every marker action is the high byte of event 148, and a key marker's scale is event 101 (spec:
+    /// flp/events/playlist.md "Marker kinds"): they survive a save, also when another marker changes and the group is
+    /// written again; kinds the Action menu does not list are kept.
+    #[test]
+    fn arrangement_marker_kinds_and_scale_round_trip() {
+        let mut p = new_project();
+        let mut arr = default_arrangement();
+        arr.clips.push(Clip::new(0, 1920, 0, ClipSource::Pattern(1)));
+        let kinds = [0u8, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12];
+        for (i, &k) in kinds.iter().enumerate() {
+            arr.markers.push(TimeMarker { kind: k, ..TimeMarker::new(96 * i as u32, &format!("K{k}")) });
+        }
+        arr.markers[2].name = " ".into();
+        let key = arr.markers.iter_mut().find(|m| m.kind == TimeMarker::KEY).unwrap();
+        key.name = "C Major (Ionian)".into();
+        key.scale = 0x52A;
+        p.arrangements.push(arr);
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.arrangements[0].markers, p.arrangements[0].markers);
+        let ev = events_of(&file).unwrap();
+        let scales: Vec<u32> = ev.iter().filter(|e| e.id == id::MARKER_SCALE).map(int).collect();
+        assert_eq!(scales.iter().filter(|&&v| v == 0x52A).count(), 1);
+        let pos: Vec<u32> = ev.iter().filter(|e| e.id == id::MARKER_POS).map(int).collect();
+        assert!(pos.contains(&(u32::from(TimeMarker::PUNCH_OUT) << 24 | 96 * 9)), "{pos:x?}");
+
+        // A changed action rewrites every group; the key marker keeps its scale.
+        let mut edited = back.clone();
+        edited.arrangements[0].markers[0].kind = TimeMarker::START;
+        apply(&edited, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(again.arrangements[0].markers, edited.arrangements[0].markers);
+        assert_eq!(again.arrangements[0].markers.iter().find(|m| m.kind == TimeMarker::KEY).map(|m| m.scale), Some(0x52A));
     }
 
     /// A pattern's own time markers (piano-roll Alt+T) are marker groups in its metadata block, sorted by position

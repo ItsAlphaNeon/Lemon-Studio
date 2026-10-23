@@ -2,12 +2,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Lemon Studio's 7-band parametric EQ: the band filter designs (shared by the engine's own slot effect and the Open
-//! Parametric EQ 2 plugin) and the effect built from a project's Parametric EQ 2 saved state.
+//! Lemon Studio's 7-band parametric EQ: the processing of the original's every mode (plain, HQ Legacy, HQ+, HQ
+//! Enhanced and LIN), shared by the engine's own slot effect and the Lemon Parametric EQ plugin, the editor's settings
+//! and curves, and the effect built from a project's Parametric EQ 2 saved state.
 //!
-// spec: plugins/parametric-eq-2.md
+// spec: plugins/fruity-parametric-eq-2.md, plugins/parametric-eq-2.md (the state's option table)
 
-use super::{field, Biquad, Effect};
+pub mod design;
+mod equalizer;
+mod fft;
+mod hq;
+pub mod lin;
+mod matched;
+
+use std::f64::consts::TAU;
+
+pub use design::{BandCoefs, Coefs, Design, Stored};
+pub use equalizer::{Equalizer, Mode, Options, MAIN, PARAMS};
+
+use super::Effect;
 
 pub const BANDS: usize = 7;
 /// Saved-state size and version (spec: "Saved state").
@@ -61,26 +74,12 @@ pub fn has_level(kind: i32) -> bool {
     matches!(kind, LOW_SHELF | PEAKING | HIGH_SHELF)
 }
 
-/// Pass filters: (sections, Q of each at width 50 %, frequency factor) per order -3..=3 (spec: fit table).
-fn pass_shape(order: i32) -> (usize, f64, f64) {
-    match order {
-        -3 => (4, 0.94, 1.0),
-        -2 => (3, 0.895, 1.0),
-        -1 => (2, 0.96, 1.0),
-        1 => (2, 0.825, 1.0),
-        2 => (3, 0.78, 1.0),
-        3 => (4, 0.77, 1.0),
-        _ => (1, 0.80, 1.11), // "2": one 12 dB/oct section
-    }
+/// A stored value from an editor value: `Round(v * scale)`, halves to even.
+fn stored_of(v: f64, scale: f64) -> i32 {
+    (v * scale).round_ties_even() as i32
 }
 
-/// The Steep 4 width law `ln Q = 1.046 - 1.495 w - 1.36 w²`, applied to every order relative to width 50 %.
-fn width_factor(w: f64) -> f64 {
-    let q4 = |w: f64| (1.046 - 1.495 * w - 1.36 * w * w).exp();
-    q4(w) / q4(0.5)
-}
-
-/// One EQ band's settings.
+/// One EQ band's settings as the editor shows them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Band {
     /// Level in dB (shelves and peaking).
@@ -104,59 +103,32 @@ impl Band {
         freq_hz(self.freq)
     }
 
-    /// The band's biquad sections at `sr` (none when it is transparent).
-    pub fn sections(&self, sr: f64) -> Sections {
-        let mut out = Sections::default();
-        let f0 = self.hz();
-        let w = self.width.clamp(0.01, 1.0);
-        let q = 0.36 / w;
-        let db = self.db.clamp(-MAX_DB, MAX_DB);
-        match self.kind {
-            LOW_PASS | HIGH_PASS => {
-                let (n, q50, fm) = pass_shape(self.order);
-                let pq = (q50 * width_factor(w)).max(0.05);
-                for _ in 0..n {
-                    out.push(if self.kind == LOW_PASS { Biquad::low_pass(f0 * fm, pq, sr) } else { Biquad::high_pass(f0 / fm, pq, sr) });
-                }
-            }
-            BAND_PASS => out.push(Biquad::band_pass(f0, q, sr)),
-            BAND_STOP => out.push(Biquad::notch(f0, q, sr)),
-            LOW_SHELF if db != 0.0 => out.push(Biquad::low_shelf(f0, 0.575 / w, db, sr)),
-            PEAKING if db != 0.0 => out.push(Biquad::peaking(f0, q, db, sr)),
-            HIGH_SHELF if db != 0.0 => out.push(Biquad::high_shelf(f0, 0.575 / w, db, sr)),
-            _ => {} // disabled, or a shelf/peak at 0 dB (transparent)
+    /// The values the state stores (each within its range).
+    pub fn stored(&self) -> Stored {
+        Stored {
+            level: stored_of(self.db, 100.0),
+            freq: stored_of(self.freq, 65536.0),
+            width: stored_of(self.width, 65536.0),
+            kind: self.kind,
+            order: self.order,
         }
-        out
+        .clamped()
+    }
+
+    /// The band's sections as `design` gives them.
+    pub fn coefs(&self, design: Design) -> BandCoefs {
+        design::band(&self.stored(), design)
     }
 
     /// The band's response at `hz` in dB.
-    pub fn response_db(&self, hz: f64, sr: f64) -> f64 {
-        self.sections(sr).response_db(hz, sr)
+    pub fn response_db(&self, hz: f64, design: Design) -> f64 {
+        sections_db(&self.coefs(design), hz, design.rate())
     }
 }
 
-/// Up to four biquad sections of one band.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Sections {
-    pub s: [Biquad; 4],
-    pub n: usize,
-}
-
-impl Sections {
-    fn push(&mut self, b: Biquad) {
-        if self.n < 4 {
-            self.s[self.n] = b;
-            self.n += 1;
-        }
-    }
-
-    pub fn as_slice(&self) -> &[Biquad] {
-        &self.s[..self.n]
-    }
-
-    pub fn response_db(&self, hz: f64, sr: f64) -> f64 {
-        self.as_slice().iter().map(|b| 20.0 * b.magnitude(hz, sr).max(1e-12).log10()).sum()
-    }
+/// The response of a band's sections at `hz` in dB.
+pub fn sections_db(c: &BandCoefs, hz: f64, rate: f64) -> f64 {
+    c.as_slice().iter().map(|s| 10.0 * s.power(TAU * hz / rate).max(1e-24).log10()).sum()
 }
 
 /// The settings that shape the sound: seven bands, the main level and the band enable mask.
@@ -174,67 +146,93 @@ impl Default for Settings {
     }
 }
 
-impl Settings {
-    /// From a saved state (fields 1..36 = parameters 0..35, byte 318 = enable mask).
-    pub fn from_state(state: &[u8]) -> Option<Settings> {
-        let param = |k: usize| field(state, k + 1);
-        let mut bands = [Band::default_for(0); BANDS];
-        for (b, band) in bands.iter_mut().enumerate() {
-            *band = Band {
-                db: f64::from(param(b)?) / 100.0,
-                freq: f64::from(param(7 + b)?) / 65536.0,
-                width: f64::from(param(14 + b)?) / 65536.0,
-                kind: param(21 + b)?,
-                order: param(28 + b)?,
-            };
-        }
-        let main_db = f64::from(param(35)?) / 100.0;
-        let mask = state.get(MASK_BYTE).copied().unwrap_or(0x7f);
-        Some(Settings { bands, main_db, mask })
-    }
+/// The audible bands' sections and the main level, worked out once for drawing a curve.
+pub struct Curve {
+    bands: Vec<BandCoefs>,
+    main_db: f64,
+    rate: f64,
+}
 
+impl Curve {
+    /// The response at `hz` in dB.
+    pub fn db(&self, hz: f64) -> f64 {
+        self.main_db + self.bands.iter().map(|c| sections_db(c, hz, self.rate)).sum::<f64>()
+    }
+}
+
+impl Settings {
     pub fn audible(&self, k: usize) -> bool {
         self.mask & (1 << k) != 0
     }
 
-    /// The total response at `hz` in dB (audible bands and the main level).
-    pub fn response_db(&self, hz: f64, sr: f64) -> f64 {
-        self.main_db + (0..BANDS).filter(|&k| self.audible(k)).map(|k| self.bands[k].response_db(hz, sr)).sum::<f64>()
+    /// The 36 parameters as the state stores them (fields 1..36).
+    pub fn params(&self) -> [i32; PARAMS] {
+        let mut p = [0; PARAMS];
+        for (k, b) in self.bands.iter().enumerate() {
+            let s = b.stored();
+            [p[k], p[BANDS + k], p[2 * BANDS + k], p[3 * BANDS + k], p[4 * BANDS + k]] = [s.level, s.freq, s.width, s.kind, s.order];
+        }
+        p[MAIN] = stored_of(self.main_db, 100.0).clamp(-1800, 1800);
+        p
+    }
+
+    /// The total response (audible bands and the main level) for `design`.
+    pub fn curve(&self, design: Design) -> Curve {
+        let bands = (0..BANDS).filter(|&k| self.audible(k)).map(|k| self.bands[k].coefs(design)).collect();
+        Curve { bands, main_db: self.main_db, rate: design.rate() }
+    }
+
+    /// The total response at `hz` in dB.
+    pub fn response_db(&self, hz: f64, design: Design) -> f64 {
+        self.curve(design).db(hz)
     }
 }
 
+/// The engine's own slot effect: the original's processing for a project's saved state, with the buffers of silence FL
+/// runs before a render already run (so LIN starts at full level, as in FL's exports).
 pub struct ParametricEq {
-    sections: Vec<Biquad>,
-    main_gain: f32,
+    eq: Equalizer,
+    l: Vec<f32>,
+    r: Vec<f32>,
 }
 
 impl ParametricEq {
     pub fn from_state(state: &[u8], sample_rate: u32) -> Option<Self> {
-        Some(Self::new(&Settings::from_state(state)?, sample_rate))
+        let mut eq = Equalizer::from_state(state, f64::from(sample_rate))?;
+        eq.preroll();
+        Some(ParametricEq { eq, l: Vec::new(), r: Vec::new() })
     }
 
-    pub fn new(s: &Settings, sample_rate: u32) -> Self {
-        let sr = f64::from(sample_rate);
-        let sections = (0..BANDS).filter(|&k| s.audible(k)).flat_map(|k| s.bands[k].sections(sr).as_slice().to_vec()).collect();
-        ParametricEq { sections, main_gain: 10f64.powf(s.main_db / 20.0) as f32 }
+    pub fn equalizer(&self) -> &Equalizer {
+        &self.eq
+    }
+
+    /// The delay the original reports, in frames: `3 N / 4` in LIN, 44 in HQ Enhanced, 0 otherwise. The engine
+    /// compensates it through `Effect::latency`.
+    pub fn latency(&self) -> usize {
+        self.eq.latency()
     }
 }
 
 impl Effect for ParametricEq {
     fn reset(&mut self) {
-        for s in &mut self.sections {
-            s.reset();
-        }
+        self.eq.reset();
+        self.eq.preroll();
+    }
+
+    fn latency(&self) -> usize {
+        self.eq.latency()
     }
 
     fn process(&mut self, buf: &mut [f32]) {
-        for s in &mut self.sections {
-            s.process(buf);
-        }
-        if self.main_gain != 1.0 {
-            for x in buf.iter_mut() {
-                *x *= self.main_gain;
-            }
+        self.l.clear();
+        self.r.clear();
+        self.l.extend(buf.chunks_exact(2).map(|f| f[0]));
+        self.r.extend(buf.chunks_exact(2).map(|f| f[1]));
+        self.eq.process(&mut self.l, &mut self.r);
+        for (f, (&l, &r)) in buf.chunks_exact_mut(2).zip(self.l.iter().zip(&self.r)) {
+            f[0] = l;
+            f[1] = r;
         }
     }
 }
@@ -248,40 +246,65 @@ mod tests {
         assert!((freq_hz(0.0) - 20.0).abs() < 1e-9 && (freq_hz(1.0) - 20000.0).abs() < 1e-6);
         assert!((freq_pos(440.0) - (22.0f64.ln() / 1000f64.ln())).abs() < 1e-12);
         // Stored default frequencies 10923 .. 54613.
-        let stored: Vec<i32> = (0..BANDS).map(|k| (default_freq(k) * 65536.0).round() as i32).collect();
+        let stored: Vec<i32> = (0..BANDS).map(|k| Band::default_for(k).stored().freq).collect();
         assert_eq!(stored, vec![10923, 18204, 25486, 32768, 40050, 47332, 54613]);
+        assert_eq!(Settings::default().params()[2 * BANDS], 40124);
+        // Editor values round to the stored ones, halves to even.
+        let b = Band { db: 0.125, ..Band::default_for(0) };
+        assert_eq!(b.stored().level, 12);
+        assert_eq!(Band { db: 30.0, ..b }.stored().level, 1800);
     }
 
     #[test]
-    fn band_shapes_follow_the_fits() {
-        let sr = 44100.0;
-        // Peaking +12 dB peaks at +12 dB.
+    fn curves_follow_the_design() {
+        let rate = 44100.0;
         let b = Band { db: 12.0, freq: freq_pos(1000.0), width: 0.5, kind: PEAKING, order: 0 };
-        assert!((b.response_db(1000.0, sr) - 12.0).abs() < 0.05);
-        // Steep 4 low pass at width 50 %: ~0 dB at the cutoff (two Q 0.96 sections), -24 dB/oct beyond.
-        let lp = Band { db: 0.0, freq: freq_pos(1000.0), width: 0.5, kind: LOW_PASS, order: -1 };
-        assert!(lp.response_db(1000.0, sr).abs() < 1.0, "{}", lp.response_db(1000.0, sr));
-        assert!(lp.response_db(4000.0, sr) < -40.0);
-        // A narrow width makes it resonant, a wide one dull.
-        let narrow = Band { width: 0.2, ..lp };
-        let wide = Band { width: 0.8, ..lp };
-        assert!(narrow.response_db(1000.0, sr) > 9.0);
-        assert!(wide.response_db(1000.0, sr) < -12.0);
-        // Order "2" is one 12 dB/oct section.
-        let two = Band { order: 0, ..lp };
-        assert_eq!(two.sections(sr).n, 1);
-        assert_eq!(Band { order: -2, ..lp }.sections(sr).n, 3);
-        // A shelf at 0 dB is transparent.
-        assert_eq!(Band::default_for(0).sections(sr).n, 0);
+        let hz = f64::from(design::freq_hz(b.stored().freq));
+        assert!((b.response_db(hz, Design::Ordinary(rate)) - 12.0).abs() < 1e-3);
+        assert!((b.response_db(hz, Design::Matched(rate)) - 12.0).abs() < 1e-3);
+        // Near the top the matched design keeps the prototype's shape (about +10 dB at the Nyquist frequency here),
+        // where the bilinear one comes back to 0 dB.
+        let top = Band { freq: freq_pos(15000.0), ..b };
+        let f = 22049.0;
+        assert!(top.response_db(f, Design::Matched(rate)) > 8.0, "{}", top.response_db(f, Design::Matched(rate)));
+        assert!(top.response_db(f, Design::Ordinary(rate)).abs() < 0.1);
+        // A shelf at 0 dB is (very nearly) flat.
+        assert!(Band::default_for(0).response_db(50.0, Design::Ordinary(rate)).abs() < 1e-9);
     }
 
     #[test]
     fn mask_leaves_bands_out() {
         let mut s = Settings::default();
         s.bands[3].db = 6.0;
-        let f = s.bands[3].hz();
-        assert!((s.response_db(f, 48000.0) - 6.0).abs() < 0.05);
+        let f = f64::from(design::freq_hz(s.bands[3].stored().freq));
+        let d = Design::Ordinary(96000.0);
+        assert!((s.response_db(f, d) - 6.0).abs() < 0.01);
         s.mask = 0x7f & !(1 << 3);
-        assert!(s.response_db(f, 48000.0).abs() < 1e-9);
+        assert!(s.response_db(f, d).abs() < 1e-6);
+    }
+
+    /// The slot effect plays the state's mode: HQ Enhanced is the input 44 frames late, scaled by the decimator's
+    /// centre tap.
+    #[test]
+    fn slot_effect_plays_the_state() {
+        let mut st = vec![0u8; STATE_LEN];
+        let set = |b: &mut [u8], at: usize, v: i32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        set(&mut st, 0, 8);
+        for k in 0..BANDS {
+            set(&mut st, 4 * (1 + BANDS + k), 32768);
+        }
+        set(&mut st, 292, 1);
+        st[317] = 0x02;
+        st[MASK_BYTE] = 0x7f;
+        let mut fx = ParametricEq::from_state(&st, 44100).expect("state");
+        assert_eq!(fx.latency(), 44);
+        assert_eq!(fx.equalizer().mode(), Mode::HqEnhanced);
+        let x: Vec<f32> = (0..1000).map(|i| ((i as f32) * 0.01).sin() * 0.3).collect();
+        let mut buf: Vec<f32> = x.iter().flat_map(|&v| [v, -v]).collect();
+        fx.process(&mut buf);
+        for i in 44..1000 {
+            assert!((buf[2 * i] - x[i - 44]).abs() < 1e-3 && (buf[2 * i + 1] + x[i - 44]).abs() < 1e-3, "{i}");
+        }
+        assert!(ParametricEq::from_state(&st[..100], 44100).is_none());
     }
 }

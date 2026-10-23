@@ -85,6 +85,10 @@ pub struct Shared {
     song: AtomicBool,
     /// The song's loop points, start << 32 | end in ticks (0 = the whole song): the playlist's time selection.
     loop_range: AtomicU64,
+    /// Paused by a Marker pause: its tick + 1 (0 = not); after Resume, the same for the app to take as the playback's
+    /// start (spec: audio/transport.md "Time markers in SONG mode").
+    marker_hold: AtomicU64,
+    marker_resumed: AtomicU64,
     /// Playback position in frames of the output stream.
     position: AtomicU64,
     /// Playback position in ticks (f64 bits): what every playhead and the time display show. A pattern wraps.
@@ -274,6 +278,8 @@ enum Cmd {
     Open,
     /// Opens the ASIO driver's own settings window (`Transport::asio_panel`).
     AsioPanel,
+    /// The FL Studio factory content folder changed (`Transport::set_factory`).
+    Factory(Option<PathBuf>),
     /// Tests: the open device fails as if it went away.
     #[cfg(test)]
     FailDevice,
@@ -419,6 +425,12 @@ impl Transport {
         let _ = self.tx.send(Cmd::AsioPanel);
     }
 
+    /// The FL Studio install folder that sample paths' placeholders point into is now `dir` (`crate::factory_folder`):
+    /// the playing engines take their factory samples from there.
+    pub fn set_factory(&self, dir: Option<PathBuf>) {
+        let _ = self.tx.send(Cmd::Factory(dir));
+    }
+
     /// Renders `project` offline at `rate`, with the hosted instruments and effects, and writes the files of `job`, on
     /// the audio thread: playback, previews and live notes stop at once and nothing else processes the plugins
     /// meanwhile. Follow it with `export_status`.
@@ -454,6 +466,7 @@ impl Transport {
             *slot = None;
         }
         let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.shared.marker_hold.store(0, Ordering::Relaxed);
         self.shared.song.store(matches!(mode, PlayMode::Song), Ordering::Relaxed);
         self.shared.rewind(start_tick);
         self.shared.state.store(PLAYING, Ordering::Release);
@@ -538,14 +551,28 @@ impl Transport {
 
     pub fn resume(&self) {
         if self.shared.state.compare_exchange(PAUSED, PLAYING, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            // Resumed from a Marker pause: the playback now counts as started there.
+            let held = self.shared.marker_hold.swap(0, Ordering::AcqRel);
+            if held != 0 {
+                self.shared.marker_resumed.store(held, Ordering::Release);
+            }
             let _ = self.tx.send(Cmd::Resume);
         }
+    }
+
+    /// The Marker pause playback was resumed from since the last call, once (spec: audio/transport.md "Time markers in
+    /// SONG mode"): Stop then returns there.
+    pub fn take_marker_resumed(&self) -> Option<u32> {
+        let t = self.shared.marker_resumed.swap(0, Ordering::AcqRel);
+        (t != 0).then(|| (t - 1).min(u64::from(u32::MAX)) as u32)
     }
 
     /// Stop everything: playback rewinds, hosted instruments fall silent, live notes and previews end. Also works
     /// when already stopped (it silences notes still ringing from the typing keyboard or a preview).
     pub fn stop(&self) {
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
+        self.shared.marker_hold.store(0, Ordering::Relaxed);
+        self.shared.marker_resumed.store(0, Ordering::Relaxed);
         self.shared.state.store(STOPPED, Ordering::Release);
         self.shared.rewind(0.0);
         let _ = self.tx.send(Cmd::Stop);
@@ -711,7 +738,7 @@ struct Queue {
     read: AtomicU64,
     /// Per tick: first sample, length in samples, tick (f64 bits), engine frame, and 1 for a held tick (paused: the
     /// position does not move through it).
-    ticks: Box<[[AtomicU64; 5]]>,
+    ticks: Box<[[AtomicU64; 6]]>,
     ticks_written: AtomicU64,
     /// The tick record the reader is in.
     ticks_read: AtomicU64,
@@ -747,7 +774,7 @@ impl Queue {
     }
 
     /// Feeder: appends one tick (call `has_room` first).
-    fn push(&self, s: &[f32], tick: u64, frame: u64, held: bool) {
+    fn push(&self, s: &[f32], tick: f64, frame: u64, held: bool, tick_frames: u64) {
         let w = self.written.load(Ordering::Relaxed);
         for (i, &v) in s.iter().enumerate() {
             self.samples[(w as usize + i) % QUEUE_SAMPLES].store(v.to_bits(), Ordering::Relaxed);
@@ -756,9 +783,10 @@ impl Queue {
         let rec = &self.ticks[tw as usize % QUEUE_TICKS];
         rec[0].store(w, Ordering::Relaxed);
         rec[1].store(s.len() as u64, Ordering::Relaxed);
-        rec[2].store((tick as f64).to_bits(), Ordering::Relaxed);
+        rec[2].store(tick.to_bits(), Ordering::Relaxed);
         rec[3].store(frame, Ordering::Relaxed);
         rec[4].store(u64::from(held), Ordering::Relaxed);
+        rec[5].store(tick_frames, Ordering::Relaxed);
         self.ticks_written.store(tw + 1, Ordering::Release);
         self.written.store(w + s.len() as u64, Ordering::Release);
     }
@@ -788,7 +816,8 @@ impl Queue {
             return None;
         }
         let rec = &self.ticks[at as usize % QUEUE_TICKS];
-        let (start, len) = (rec[0].load(Ordering::Relaxed), rec[1].load(Ordering::Relaxed).max(1));
+        // The samples a whole tick lasts: a block delay compensation cut short still moves at the song's pace.
+        let (start, len) = (rec[0].load(Ordering::Relaxed), 2 * rec[5].load(Ordering::Relaxed).max(1));
         // A held tick is heard at its start all through (the paused position stays put).
         let into = if rec[4].load(Ordering::Relaxed) != 0 { 0 } else { r.saturating_sub(start) };
         Some((rec[3].load(Ordering::Relaxed) + into / 2, f64::from_bits(rec[2].load(Ordering::Relaxed)) + into as f64 / len as f64))
@@ -843,10 +872,21 @@ impl Feeder {
                     self.queue.ended.store(true, Ordering::Release);
                     break;
                 }
-                Some((s, tick, frame, held)) => {
+                Some((s, tick, frame, held, tick_frames)) => {
                     frames += s.len() as u64 / 2;
-                    self.queue.push(s, tick, frame, held);
+                    self.queue.push(s, tick, frame, held, tick_frames);
                     self.queue.ended.store(e.finished(), Ordering::Release);
+                }
+            }
+            // The song came to a Marker pause: the transport is paused there, as by the Play button (spec:
+            // audio/transport.md "Time markers in SONG mode").
+            if let Some(t) = e.take_marker_pause() {
+                if self.ctl.report.load(Ordering::Relaxed) && self.shared.state.compare_exchange(PLAYING, PAUSED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                    self.ctl.held.store(true, Ordering::Relaxed);
+                    self.shared.marker_hold.store(t + 1, Ordering::Release);
+                    if let Ok(mut v) = self.shared.sounding.lock() {
+                        v.clear();
+                    }
                 }
             }
         }
@@ -1000,8 +1040,11 @@ fn export(project: &Project, mode: PlayMode, rate: u32, job: &crate::export::Job
     let mut e = engine(project, library, rate, mode, inst, true);
     e.set_interpolation(o.points);
     e.set_effects(o.insert_fx, o.master_fx);
-    if let Some((a, b)) = job.span {
-        e.set_span(a, b);
+    match job.span {
+        Some((a, b)) => e.set_span(a, b),
+        // A whole song follows its start and skip markers (spec: audio/song-structure.md "Time markers").
+        None if mode == PlayMode::Song => e.follow_markers(),
+        None => {}
     }
     e.set_track_capture(o.split);
     let len = e.frames_left().max(1);
@@ -1359,6 +1402,12 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 reset_pending = true;
                 reset_fx_pending = true;
                 listen_retry = true;
+            }
+            Ok(Cmd::Factory(dir)) => {
+                library.set_factory_dir(dir);
+                for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
+                    swap(s, &mut library);
+                }
             }
             Ok(Cmd::AsioPanel) if closed => report(&shared, "the output is let go of (Auto close)".into()),
             Ok(Cmd::AsioPanel) => {

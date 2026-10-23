@@ -7,9 +7,10 @@
 //! The 114 parameters come in the original's order (parameter k = field k + 1 of its saved state = automation index
 //! k), each with the original's stored range, so a project's automation reaches the same control. A copy of the whole
 //! 460-byte saved state is persisted next to them (`state`): fields whose meaning Lemon Studio does not change come back
-//! out byte for byte (spec: plugins/3x-osc.md §1).
+//! out byte for byte (spec: plugins/3x-osc.md §1). The custom shape's sample file is persisted as `sample-path`, as
+//! Lemon Sampler's (the original keeps it as the channel's sample, outside its state).
 //!
-// spec: plugins/3x-osc.md §1, plugins/lemon-3x-osc.md §4 (hint texts)
+// spec: plugins/3x-osc.md §1, plugins/lemon-3x-osc.md §4 (hint texts), §6 (custom shape)
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -256,6 +257,8 @@ pub struct Osc3Params {
     pub raw_version: AtomicU64,
     /// Editor edits the host has not confirmed yet (the sound hears them at once).
     pub live: Arc<LiveEdits>,
+    /// The custom shape's sample file ("" = none), persisted as `sample-path`.
+    pub sample_path: RwLock<String>,
 }
 
 impl Default for Osc3Params {
@@ -274,12 +277,14 @@ impl Default for Osc3Params {
                 ip
             })
             .collect();
-        Osc3Params { p, defs, raw: RwLock::new(default_state()), raw_version: AtomicU64::new(0), live: Arc::default() }
+        Osc3Params { p, defs, raw: RwLock::new(default_state()), raw_version: AtomicU64::new(0), live: Arc::default(), sample_path: RwLock::default() }
     }
 }
 
 /// The persisted field holding `raw`.
 pub const STATE_FIELD: &str = "state";
+/// The persisted field holding `sample_path` (a JSON string, the same field as Lemon Sampler's).
+pub const SAMPLE_FIELD: &str = "sample-path";
 
 unsafe impl Params for Osc3Params {
     fn param_map(&self) -> Vec<(String, ParamPtr, String)> {
@@ -288,12 +293,17 @@ unsafe impl Params for Osc3Params {
 
     fn serialize_fields(&self) -> BTreeMap<String, String> {
         let hex: String = self.raw.read().map(|b| b.iter().map(|x| format!("{x:02x}")).collect()).unwrap_or_default();
-        BTreeMap::from([(STATE_FIELD.to_string(), format!("\"{hex}\""))])
+        let path = self.sample_path.read().map(|p| serde_json::to_string(&*p).unwrap_or_default()).unwrap_or_default();
+        BTreeMap::from([(STATE_FIELD.to_string(), format!("\"{hex}\"")), (SAMPLE_FIELD.to_string(), path)])
     }
 
     fn deserialize_fields(&self, serialized: &BTreeMap<String, String>) {
         if let Some(bytes) = serialized.get(STATE_FIELD).and_then(|s| from_hex(s.trim_matches('"'))) {
             self.set_raw(normalized(bytes));
+        }
+        // A state without the field (a channel's 3x Osc state) keeps the sample.
+        if let (Some(p), Ok(mut sp)) = (serialized.get(SAMPLE_FIELD).and_then(|s| serde_json::from_str::<String>(s).ok()), self.sample_path.write()) {
+            *sp = p;
         }
     }
 }
@@ -532,6 +542,23 @@ mod tests {
         p.deserialize_fields(&fields);
         assert_eq!(*p.raw.read().unwrap(), fl);
         assert_eq!(to_fl(&values_of(&fl), &fl), fl);
+    }
+
+    /// The custom shape's sample is persisted as a JSON string next to the state; a state without it keeps the
+    /// sample.
+    #[test]
+    fn sample_path_is_persisted() {
+        let p = Osc3Params::default();
+        assert_eq!(p.serialize_fields()[SAMPLE_FIELD], "\"\"");
+        *p.sample_path.write().unwrap() = "C:\\samples\\Cycle \"A\".wav".into();
+        let fields = p.serialize_fields();
+        let q = Osc3Params::default();
+        q.deserialize_fields(&fields);
+        assert_eq!(*q.sample_path.read().unwrap(), "C:\\samples\\Cycle \"A\".wav");
+        q.deserialize_fields(&BTreeMap::from([(STATE_FIELD.to_string(), format!("\"{}\"", hex(&default_state())))]));
+        assert_eq!(*q.sample_path.read().unwrap(), "C:\\samples\\Cycle \"A\".wav");
+        // The original's state does not hold it.
+        assert_eq!(fl_from_plugin_state(&plugin_state_from_fl(&default_state())), Some(default_state()));
     }
 
     #[test]

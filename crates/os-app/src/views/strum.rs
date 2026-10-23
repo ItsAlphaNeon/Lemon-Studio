@@ -26,30 +26,36 @@ pub fn bounds(s: &State) -> Rect {
 }
 
 /// A round switch (FL: dark, red-orange when on; Lemon: the kit's LED, an outline when greyed out).
-fn led(ui: &mut Ui, cx: f32, cy: f32, on: bool, hover: bool, off: bool) {
+pub(super) fn led(ui: &mut Ui, cx: f32, cy: f32, on: bool, hover: bool, off: bool) {
+    led_r(ui, cx, cy, 7.0, on, hover, off);
+}
+
+/// `led` of radius `r` (7 for the usual size).
+pub(super) fn led_r(ui: &mut Ui, cx: f32, cy: f32, r: f32, on: bool, hover: bool, off: bool) {
     let t = ui.t;
+    let k = r / 7.0;
     if super::lemon(ui) {
         if off {
-            let h = 6.5;
-            ui.c.stroke_rrect(Rect::new(cx - h, cy - h, 2.0 * h, 2.0 * h), 3.0, 1.0, t.s(0x34383a));
+            let h = 6.5 * k;
+            ui.c.stroke_rrect(Rect::new(cx - h, cy - h, 2.0 * h, 2.0 * h), 3.0 * k, 1.0, t.s(0x34383a));
         } else {
-            lk::led(ui.c, t, cx, cy, 7.0, os_ui::kit::State::new(hover, false, on));
+            lk::led(ui.c, t, cx, cy, r, os_ui::kit::State::new(hover, false, on));
         }
         return;
     }
-    ui.c.fill_circle(cx, cy, 7.0, t.s(0x16191a));
+    ui.c.fill_circle(cx, cy, r, t.s(0x16191a));
     if on && !off {
-        ui.c.fill_circle(cx, cy, 6.0, t.h(0xe8461c));
-        ui.c.fill_circle(cx, cy, 4.0, t.h(0xff6a35));
-        ui.c.fill_circle(cx - 1.4, cy - 1.6, 1.8, t.h(0xffc2a0));
+        ui.c.fill_circle(cx, cy, 6.0 * k, t.h(0xe8461c));
+        ui.c.fill_circle(cx, cy, 4.0 * k, t.h(0xff6a35));
+        ui.c.fill_circle(cx - 1.4 * k, cy - 1.6 * k, 1.8 * k, t.h(0xffc2a0));
     } else {
-        ui.c.fill_circle(cx, cy, 6.0, if hover && !off { t.s(0x464a4d) } else { t.s(0x33373a) });
-        ui.c.fill_circle(cx, cy, 4.0, t.s(0x2a2d30));
+        ui.c.fill_circle(cx, cy, 6.0 * k, if hover && !off { t.s(0x464a4d) } else { t.s(0x33373a) });
+        ui.c.fill_circle(cx, cy, 4.0 * k, t.s(0x2a2d30));
     }
 }
 
 /// Text vertically centred on `cy`, from `x` (left), centred on it or ending at it (`align` -1, 0, 1).
-fn label(ui: &mut Ui, f: Font, x: f32, cy: f32, align: i8, col: Color, s: &str) {
+pub(super) fn label(ui: &mut Ui, f: Font, x: f32, cy: f32, align: i8, col: Color, s: &str) {
     let lh = ui.c.line_height(f);
     let w = ui.c.text_width(f, s);
     let x = match align {

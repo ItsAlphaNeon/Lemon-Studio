@@ -9,8 +9,10 @@ pub mod browser;
 pub mod cabledebug;
 pub mod channel_win;
 pub mod data_folder;
+pub mod factory_folder;
 pub mod dialog;
 pub mod menus;
+pub mod midi_form;
 pub mod midi_page;
 pub mod mondebug;
 pub mod settings;
@@ -26,6 +28,7 @@ pub mod export_form;
 pub mod save_form;
 pub mod arpeggiate;
 pub mod strum;
+pub mod piano_dlg;
 pub mod tapper;
 pub mod touch;
 pub mod theme_preview;
@@ -127,12 +130,13 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     ui.c.clear(ui.t.workspace);
     ui.c.set_cover(None);
 
-    // Workspace (§9): watermark, then docked windows on top.
+    // Workspace (§9): the theme's picture or the watermark, then docked windows on top.
     let left = if s.show_browser { browser_w(s) } else { 0.0 };
     let top = work_y(s);
     let work = Rect::new(left, top, w - left, h - top);
     let docked = s.docked();
-    if docked.is_none() {
+    // spec: ui/flstheme.md §3 (BackMode, BackPicFilename); no watermark over a picture (`wallpaper`).
+    if docked.is_none() && !crate::wallpaper::paint(ui, work) {
         let wm = ui.t.watermark;
         icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
         let version = concat!("Lemon Studio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");
@@ -179,6 +183,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::Touch => ui.part(Seg::Win(win), a, |ui| touch::paint(ui, s, f)),
             Win::Strum => ui.part(Seg::Win(win), a, |ui| strum::paint(ui, s, f)),
             Win::Arp => ui.part(Seg::Win(win), a, |ui| arpeggiate::paint(ui, s, f)),
+            Win::PianoDlg => ui.part(Seg::Win(win), a, |ui| piano_dlg::paint(ui, s, f)),
             _ => {}
         }
         ui.c.pop_clip();
@@ -244,6 +249,7 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
         Win::Touch => touch::bounds(s),
         Win::Strum => strum::bounds(s),
         Win::Arp => arpeggiate::bounds(s),
+        Win::PianoDlg => piano_dlg::bounds(s),
         w => s.win_rect(w),
     }
 }
