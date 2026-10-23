@@ -161,11 +161,22 @@ macro_rules! tokens {
             /// `WaveSpc0..5` (spec: ui/flstheme.md §3). Empty without one; colourful waveforms then use
             /// `waves::STOCK`.
             pub waves: Vec<(f32, Color)>,
+            /// The workspace picture: a `.flstheme`'s `BackPicFilename` while its `BackMode` shows one (0, 2 or 3), as
+            /// the file writes it (a relative path is the theme file's folder's; spec: ui/flstheme.md §1, §3). `None`:
+            /// the plain `workspace` colour.
+            pub wallpaper: Option<String>,
+            /// Playlist grid line strength, a `.flstheme`'s `PLGridContrast` / 100 (spec: ui/flstheme.md §3): the
+            /// beat, bar and track gap lines differ from the grid by this share of their usual difference
+            /// (`Palette::pl_line`).
+            pub pl_lines: f32,
+            /// Piano roll grid line strength, a `.flstheme`'s `PRGridContrast` / 100 (spec: ui/flstheme.md §3): the
+            /// beat, step, bar and key row lines differ from their row by this share of their usual difference.
+            pub pr_lines: f32,
         }
 
         impl Default for Palette {
             fn default() -> Self {
-                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default(), style: Style::CITRUS, waves: Vec::new() }
+                Palette { $($name: Color::rgb($hex),)* xf: fl::Xform::default(), style: Style::CITRUS, waves: Vec::new(), wallpaper: None, pl_lines: 1.0, pr_lines: 1.0 }
             }
         }
 
@@ -188,10 +199,33 @@ macro_rules! tokens {
             }
 
             fn map(&self, f: impl Fn(Color) -> Color) -> Palette {
-                Palette { $($name: f(self.$name),)* xf: self.xf.clone(), style: self.style, waves: self.waves.clone() }
+                let (xf, style, waves, wallpaper) = (self.xf.clone(), self.style, self.waves.clone(), self.wallpaper.clone());
+                Palette { $($name: f(self.$name),)* xf, style, waves, wallpaper, pl_lines: self.pl_lines, pr_lines: self.pr_lines }
+            }
+
+            /// Playlist line colour `c` at the theme's line strength (`line_at` over `grid`; spec: ui/flstheme.md §3,
+            /// §7).
+            pub fn pl_line(&self, c: Color) -> Color {
+                line_at(self.grid, c, self.pl_lines)
+            }
+
+            /// Piano roll line colour `c` at the theme's line strength (`line_at` over `pr_row`).
+            pub fn pr_line(&self, c: Color) -> Color {
+                line_at(self.pr_row, c, self.pr_lines)
             }
         }
     };
+}
+
+/// Grid line colour `c` at strength `k` (a theme's `*GridContrast` / 100) over a grid of colour `grid`: up to 1 the line
+/// is laid over what is under it at `k` of its opacity (on the plain grid that is `grid.mix(c, k)`; 0 leaves no line),
+/// above 1 it is drawn opaque, `k` times its difference off `grid`.
+fn line_at(grid: Color, c: Color, k: f32) -> Color {
+    if k <= 1.0 {
+        c.with_alpha((f32::from(c.a) * k).round() as u8)
+    } else {
+        grid.mix(c, k).with_alpha(c.a)
+    }
 }
 
 tokens! {

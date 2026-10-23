@@ -830,8 +830,8 @@ fn delete_track(s: &mut State, n: u16) -> Option<String> {
 /// Back to a fresh track (name, colour, levels, slots kept out), routed to the master (§6.1 Reset).
 fn reset_track(s: &mut State, n: u16) {
     if let Some(m) = track_mut(s, n) {
-        let slots = m.slots.clone();
-        *m = MixerTrack { slots, ..MixerTrack::new(n) };
+        let (slots, origin) = (m.slots.clone(), m.origin);
+        *m = MixerTrack { slots, origin, ..MixerTrack::new(n) };
     }
     changed(s);
 }
@@ -1694,5 +1694,66 @@ mod tests {
         assert!(key(&mut a, &Key::Character("s".into()), false, true));
         assert!(!track(&a.state, 7).unwrap().enabled, "Alt+S");
         assert!(!key(&mut a, &Key::Character("q".into()), true, false));
+    }
+
+    /// Moved and deleted tracks take their effects to their new numbers through saves (spec: flp/events/mixer.md
+    /// "Removing tracks"): each slot's window record (event 212), marked here in the saved file with the track it was
+    /// saved on, follows its track, and the slots read back where the tracks went.
+    #[test]
+    fn moved_tracks_keep_their_effects_in_the_file() {
+        use os_flp::{ChunkBody, FlpFile, Value};
+        use os_model::SlotPlugin;
+        let mut a = app();
+        (a.state.file, a.state.path) = (None, None);
+        let fx = |name: &str, s: u8| Some(SlotPlugin { name: name.into(), state: vec![s; 4] });
+        track_mut(&mut a.state, 2).unwrap().slots[0] = fx("Test FX", 2);
+        track_mut(&mut a.state, 3).unwrap().slots[0] = fx("Test FX", 3);
+        track_mut(&mut a.state, 4).unwrap().slots[1] = fx("Other FX", 4);
+        let path = std::env::temp_dir().join(format!("lemon-mixer-moves-{}.flp", std::process::id()));
+        let saved = |a: &mut App| {
+            a.save_to(path.clone());
+            assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        };
+        // The mixer's slot records (after the first track record, event 236): track, slot and mark (byte 40, which
+        // Lemon Studio does not read).
+        let records = || {
+            let file = FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
+            let ev = file.chunks.into_iter().find_map(|c| match c.body {
+                ChunkBody::Events(e) => Some(e),
+                _ => None,
+            });
+            let ev = ev.unwrap();
+            let first = ev.iter().position(|e| e.id == 236).unwrap();
+            let le = |d: &[u8], at: usize| u32::from_le_bytes(d[at..at + 4].try_into().unwrap());
+            ev[first..].iter().filter(|e| e.id == 212).filter_map(|e| e.data()).map(|d| (le(d, 0), le(d, 4), d[40])).collect::<Vec<_>>()
+        };
+        saved(&mut a);
+        let mut file = FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
+        for c in &mut file.chunks {
+            if let ChunkBody::Events(ev) = &mut c.body {
+                for e in ev.iter_mut().filter(|e| e.id == 212) {
+                    if let Value::Var { data, .. } = &mut e.value {
+                        data[40] = data[0];
+                    }
+                }
+            }
+        }
+        std::fs::write(&path, file.to_bytes().unwrap()).unwrap();
+        assert_eq!(records(), vec![(2, 0, 2), (3, 0, 3), (4, 1, 4)]);
+        let mut a = App::new(None);
+        a.open(path.clone());
+        run(&mut a, MCmd::MoveRight(2));
+        saved(&mut a);
+        assert_eq!(records(), vec![(2, 0, 3), (3, 0, 2), (4, 1, 4)], "2 and 3 swap places with their effects");
+        // Saved over again (the file holds the tracks in their new order now): deleting 2 moves the later ones left.
+        run(&mut a, MCmd::Delete(2));
+        saved(&mut a);
+        assert_eq!(records(), vec![(2, 0, 2), (3, 1, 4)]);
+        let mut opened = App::new(None);
+        opened.open(path.clone());
+        let _ = std::fs::remove_file(&path);
+        let slots = |t: u16| track(&opened.state, t).unwrap().slots.clone();
+        assert_eq!((slots(2)[0].clone(), slots(3)[1].clone()), (fx("Test FX", 2), fx("Other FX", 4)));
+        assert!(slots(4).iter().all(Option::is_none));
     }
 }

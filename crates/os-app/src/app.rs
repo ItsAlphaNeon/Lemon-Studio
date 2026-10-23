@@ -42,6 +42,9 @@ pub enum Win {
     Strum,
     /// The piano roll's Arpeggiate dialog (spec: ui/piano-arpeggiate.md).
     Arp,
+    /// The piano roll's Flam, Flip and Scale levels dialogs, one at a time (spec: ui/piano-flam.md, ui/piano-flip.md,
+    /// ui/piano-level-scaling.md).
+    PianoDlg,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -175,6 +178,8 @@ pub enum Action {
     Strum(crate::strum::Act),
     /// The Arpeggiate dialog's buttons, switches and menus (spec: ui/piano-arpeggiate.md).
     Arp(crate::arpeggiate::Act),
+    /// The Flam, Flip and Scale levels dialogs' switches and buttons (spec: as `Win::PianoDlg`).
+    PianoDlg(crate::piano_dlg::Act),
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
     MonParam(usize),
     MonReset,
@@ -784,6 +789,12 @@ pub enum Drag {
     Fader { track: u16, y0: f32, v0: f64 },
     /// A press on a track's equaliser graph `g`: band `band` follows the cursor.
     EqGraph { track: u16, band: u8, g: Rect },
+    /// The Limit dialog's keys held (either button): the key under the mouse becomes the green key; its name strip held:
+    /// range end `high` (else the low one) follows; its scroll bar's handle held `dx` px right of its left edge (spec:
+    /// ui/piano-limit.md §1, §5).
+    LimitKeys,
+    LimitEnd { high: bool },
+    LimitScroll { dx: f32 },
     /// A plain press on a mixer strip, held: the strip under the cursor is selected as it slides across, to preview
     /// tracks one after another.
     MixSelect,
@@ -885,6 +896,8 @@ pub struct State {
     pub strum: crate::strum::StrumUi,
     /// The piano roll's Arpeggiate dialog: where it is, its settings and pattern, its preview session.
     pub arp: crate::arpeggiate::ArpUi,
+    /// The piano roll's Flam, Flip and Scale levels dialogs: where each was, their settings, the preview session.
+    pub piano_dlg: crate::piano_dlg::Ui,
     pub rec: crate::record::Rec,
     /// Mixer selection, slot requests, meters (spec: ui/mixer.md).
     pub mixer: crate::mixer::MixerUi,
@@ -1212,6 +1225,8 @@ pub struct App {
     pub(crate) scan_queued: Option<crate::plugin_db::Mode>,
     /// Wrapped plugin channels (rows) and slots (`fx_key`) whose plugin was not found or did not start (not retried).
     pub(crate) wrap_failed: Vec<usize>,
+    /// When the Lemon Trio instances were last looked at for a sample they loaded (`follow_osc3_samples`).
+    pub(crate) osc3_look: Option<std::time::Instant>,
     /// Plugin channels (rows) and slots (`fx_key`) naming a native plugin that is not installed or did not start
     /// (not retried; spec: plugins/fruity-abi.md "Opened projects").
     pub(crate) native_failed: Vec<usize>,
@@ -1233,7 +1248,7 @@ pub struct App {
 /// Window-level requests the shell must carry out after an event.
 impl App {
     pub fn new(path: Option<PathBuf>) -> App {
-        let transport = Transport::new(os_engine::SampleLibrary::default_factory_dir());
+        let transport = Transport::new(crate::factory_folder::dir());
         // Tests keep the old five-channel template; a new session starts with one Lemon Sampler channel.
         #[cfg(test)]
         let project = test_project();
@@ -1308,6 +1323,7 @@ impl App {
                 touch: Default::default(),
                 strum: Default::default(),
                 arp: Default::default(),
+                piano_dlg: Default::default(),
                 rec: Default::default(),
                 toggles: vec!["typing"],
                 clock: crate::clock::Clock::load(),
@@ -1400,6 +1416,7 @@ impl App {
             sweep: None,
             scan_queued: None,
             wrap_failed: Vec::new(),
+            osc3_look: None,
             native_failed: Vec::new(),
             loading: None,
             export: None,
@@ -1486,6 +1503,7 @@ impl App {
                 s.file = Some(file);
                 s.message = Some(format!("Opened {}", path.display()));
                 crate::templates::remember(&path);
+                crate::recent::add(&path);
                 s.path = Some(path);
                 s.piano.reset();
                 s.playlist.reset();
@@ -1623,7 +1641,12 @@ impl App {
                     if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
                         continue;
                     }
-                    ch.sample_path = (!p.is_empty()).then_some(p);
+                    // An empty path: the sample was taken out (spec: flp/events/channels.md "Loop points (event 251)").
+                    if !p.is_empty() {
+                        ch.sample_path = Some(p);
+                    } else if ch.sample_path.is_some() {
+                        ch.clear_sample();
+                    }
                 }
             }
         }
@@ -1641,10 +1664,8 @@ impl App {
             && !s.project.arrangements.is_empty();
         // A project that was not opened from a file gets a new FLP built from the model.
         let mut file = if s.file.is_none() || lacks_playlist {
-            // The new file's blocks are the model's channels in order.
-            for (i, c) in s.project.channels.iter_mut().enumerate() {
-                c.rack.origin = Some(i as u16);
-            }
+            // The new file's blocks are the model's channels and mixer tracks in order.
+            settle_origins(&mut s.project);
             // FL's files always have a playlist, and the mixer is stored after it (spec: flp/events/mixer.md).
             if s.project.arrangements.is_empty() {
                 s.project.arrangements.push(os_flp::project::default_arrangement());
@@ -1681,13 +1702,12 @@ impl App {
             Err(e) => format!("Save failed: {e}"),
         });
         if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
-            // The saved file now holds the channels in model order, and the plugins as written.
-            for (i, c) in s.project.channels.iter_mut().enumerate() {
-                c.rack.origin = Some(i as u16);
-            }
+            // The saved file now holds the channels and mixer tracks in model order, and the plugins as written.
+            settle_origins(&mut s.project);
             crate::project_plugins::adopt_saved(&mut s.project, &proj);
             s.file = Some(file);
             crate::templates::remember(&target);
+            crate::recent::add(&target);
             s.path = Some(target);
             self.mark_saved();
         }
@@ -1702,11 +1722,13 @@ impl App {
         }
         let s = &mut self.state;
         let keep = (s.project.clone(), s.path.clone(), s.file.clone(), s.message.take(), self.saved.clone());
-        // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project").
-        let last = crate::templates::last_kept();
+        // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project"), nor a
+        // recent one (spec: ui/recent-projects.md §2).
+        let (last, recent) = (crate::templates::last_kept(), crate::recent::list());
         // A copy never warns about its size.
         self.write_project(target);
         crate::templates::restore_last(last);
+        crate::recent::restore(&recent);
         let s = &mut self.state;
         let done = match s.message.take() {
             Some(m) if m.starts_with("Saved") => Ok(()),
@@ -1758,6 +1780,7 @@ impl App {
             }
             Next::OpenDialog => self.open_dialog(),
             Next::Open(p) => self.open(p),
+            Next::ImportMidi(p) => self.import_pending(p),
         }
         self.invalidate();
     }
@@ -1823,6 +1846,11 @@ impl App {
                     self.search_folder_chosen(row, p);
                 }
             }
+            Then::FactoryFolder => {
+                if let Some(p) = file {
+                    self.set_factory_folder(Some(p));
+                }
+            }
             Then::SavePreset(key) => {
                 if let Some(p) = file {
                     self.state.message = crate::presets::save_chosen(self, key, p);
@@ -1866,7 +1894,22 @@ impl App {
                     crate::timesig::set_start(&mut self.state, n, num, den);
                 }
             }
+            Then::SongSignature(at, num, den) => {
+                if reply == Reply::Button(Answer::Ok) {
+                    crate::timesig::set_song(&mut self.state, at, num, den);
+                }
+            }
             Then::DataFolder(d) => self.data_folder_done(d, reply),
+            Then::MidiImport(piano) => {
+                if let Some(p) = file {
+                    self.midi_file_chosen(p, piano);
+                }
+            }
+            Then::MidiExport(piano) => {
+                if let Some(p) = file {
+                    self.midi_export_chosen(p, piano);
+                }
+            }
         }
         self.invalidate();
     }
@@ -2081,6 +2124,7 @@ impl App {
         if self.loading.is_none() {
             self.sync_wrapped();
             self.sync_osc3();
+            self.follow_osc3_samples();
             self.sync_citrus();
             self.sync_native();
         }
@@ -2522,7 +2566,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -2547,6 +2591,7 @@ impl App {
             Win::Touch => Some(views::touch::rect(s)),
             Win::Strum => Some(views::strum::rect(s)),
             Win::Arp => Some(views::arpeggiate::rect(s)),
+            Win::PianoDlg => Some(views::piano_dlg::rect(s)),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -2973,6 +3018,96 @@ impl App {
         self.invalidate();
     }
 
+    // ---------------------------------------------------------------- Flam, Flip and Scale levels dialogs
+
+    /// Tools ▸ Flam… (Alt+F), Claw machine… (Alt+W), Flip… (Alt+Y), Scale levels… (Alt+X), Limit… (Alt+K) and LFO…
+    /// (Alt+O): open
+    /// the dialog in front (centred over the main
+    /// window the first time, then where it was left) on the piano roll's notes, previewing the settings last accepted.
+    /// Another of these dialogs open: its preview is put back and the window shows this one. Scale levels does not open
+    /// on a channel control lane (spec: ui/piano-level-scaling.md §4).
+    pub(crate) fn open_piano_tool(&mut self, tool: crate::piano_dlg::Tool) {
+        let s = &mut self.state;
+        if tool == crate::piano_dlg::Tool::Levels && s.piano.lane.is_channel() {
+            s.message = Some("Scale levels: show a note property in the Control lane first".into());
+            self.invalidate();
+            return;
+        }
+        if !(s.shown(Win::PianoDlg) && s.piano_dlg.tool == tool) {
+            let i = tool.index();
+            if !s.piano_dlg.placed[i] {
+                let (w, h) = views::piano_dlg::size(&s.piano_dlg, tool);
+                s.piano_dlg.pos[i] = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(views::work_y(s)).round());
+                s.piano_dlg.placed[i] = true;
+                if tool == crate::piano_dlg::Tool::Limit {
+                    s.piano_dlg.kb_scroll = crate::piano_dlg::KB_HOME;
+                }
+            }
+            crate::piano_dlg::open(s, tool);
+        }
+        s.raise(Win::PianoDlg);
+        self.invalidate();
+    }
+
+    fn piano_dlg_act(&mut self, a: crate::piano_dlg::Act) {
+        use crate::piano_dlg::{self as dlg, Act};
+        let s = &mut self.state;
+        match a {
+            Act::Accept => {
+                s.message = Some(dlg::accept(s));
+                s.hide(Win::PianoDlg);
+            }
+            Act::Options | Act::KeyMenu | Act::ScaleMenu | Act::SnapMenu | Act::PeriodMenu | Act::TrashMenu | Act::ShapeMenu => {
+                let (x, y) = self.mouse;
+                let items = match a {
+                    Act::KeyMenu => dlg::key_menu(&s.piano_dlg.limit),
+                    Act::ScaleMenu => dlg::scale_menu(&s.piano_dlg.limit),
+                    Act::SnapMenu => dlg::snap_menu(&s.piano_dlg.limit),
+                    Act::PeriodMenu => dlg::period_menu(&s.piano_dlg.claw),
+                    Act::TrashMenu => dlg::trash_menu(&s.piano_dlg.claw),
+                    Act::ShapeMenu => dlg::shape_menu(&s.piano_dlg.lfo),
+                    _ => dlg::options_menu(),
+                };
+                s.playlist.popup = Some(crate::playlist::Popup { x, y, items, sub: None });
+            }
+            Act::Keys => {
+                let k = views::piano_dlg::kb_key(s, self.mouse.0, self.mouse.1, false);
+                dlg::set_green(s, k);
+                self.drag = Some(Drag::LimitKeys);
+            }
+            Act::Ruler => {
+                let k = views::piano_dlg::kb_key(s, self.mouse.0, self.mouse.1, true);
+                let high = dlg::nearer_end(s, k);
+                dlg::set_end(s, high, k);
+                self.drag = Some(Drag::LimitEnd { high });
+            }
+            // A press beside the handle brings its middle under the mouse first.
+            Act::Scroll => {
+                let h = views::piano_dlg::kb_handle(s);
+                let dx = if h.outset(2.0).contains(self.mouse.0, self.mouse.1) { self.mouse.0 - h.x } else { h.w / 2.0 };
+                self.limit_scroll_handle(self.mouse.0 - dx);
+                self.drag = Some(Drag::LimitScroll { dx });
+            }
+            a => dlg::act(s, a),
+        }
+        self.invalidate();
+    }
+
+    /// Scroll the Limit dialog's keyboard so its scroll bar's handle starts at screen `x`.
+    fn limit_scroll_handle(&mut self, x: f32) {
+        let s = &mut self.state;
+        let h = views::piano_dlg::kb_handle(s);
+        let to = s.piano_dlg.kb_scroll + (x - h.x) * views::piano_dlg::kb_scroll_per_px();
+        s.piano_dlg.kb_scroll = to.clamp(0.0, crate::piano_dlg::kb_max()).round();
+        self.invalidate();
+    }
+
+    /// A preset picked from the Flam dialog's Options ▸ menu (spec: ui/piano-flam.md §5).
+    pub(crate) fn flam_preset(&mut self, p: crate::flam::Preset) {
+        crate::piano_dlg::preset(&mut self.state, p);
+        self.invalidate();
+    }
+
     // ---------------------------------------------------------------- Tempo tapper (spec: ui/tempo-tapper.md)
 
     /// VIEW > Tempo tapper and Ctrl+F5: open it (or bring it to the front), centred over the main window the first
@@ -3069,6 +3204,7 @@ impl App {
             Win::Touch => self.damage_rect(views::touch::bounds(&self.state)),
             Win::Strum => self.damage_rect(views::strum::bounds(&self.state)),
             Win::Arp => self.damage_rect(views::arpeggiate::bounds(&self.state)),
+            Win::PianoDlg => self.damage_rect(views::piano_dlg::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
             _ => self.invalidate(),
         }
@@ -3366,6 +3502,12 @@ impl App {
             }
         }
         crate::playlist::follow_crossfades(self);
+        // Resumed from a Marker pause: playback counts as started on the marker, so Stop returns there (spec:
+        // audio/transport.md "Time markers in SONG mode").
+        if let Some(t) = self.transport.take_marker_resumed() {
+            self.state.playlist.pos = t;
+            self.damage_win(Win::Playlist);
+        }
         // Edits (notes, steps, mixer, channel volume / pan / mute, tempo) reach playback right away,
         // also during a drag (at most once per tick).
         if self.state.piano.dirty {
@@ -3583,6 +3725,10 @@ impl App {
         if ext == "flp" {
             return self.ask_discard("opening another project", crate::dialog::Next::Open(path));
         }
+        // A MIDI file is imported as FILE ▸ Import ▸ MIDI file does (spec: ui/midi-files.md §10.6).
+        if ext == "mid" || ext == "midi" {
+            return self.midi_file_chosen(path, false);
+        }
         // A preset goes into the plugin under the mouse, or a new instance of its plugin (spec: plugins/presets.md).
         if crate::presets::is_preset_file(&path) {
             self.state.message = crate::presets::dropped(self, &path);
@@ -3741,6 +3887,13 @@ impl App {
         let fl = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme"));
         let loaded = if fl {
             std::fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()).map_err(|e| e.to_string()).map(|text| {
+                // A picture named relative to the theme file stays found once the theme is kept elsewhere
+                // (`wallpaper::absolute_names`).
+                let dir = std::path::absolute(path).ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+                let text = match dir {
+                    Some(d) => crate::wallpaper::absolute_names(&text, &d),
+                    None => text,
+                };
                 let t = skin_theme(self.design(), &name, Some(&text));
                 (t, Some(text))
             })
@@ -3757,16 +3910,16 @@ impl App {
                 self.state.theme_base = text.clone();
                 self.state.fl_text = text;
                 os_theme::set_current(&self.theme.colors);
+                crate::wallpaper::forget();
                 if remember && to_citrus {
                     save_design(Design::Citrus);
                 }
-                if remember && fl {
-                    if let Some(d) = os_paths::user_dir() {
-                        let _ = std::fs::create_dir_all(&d);
-                        let keep = d.join("current.flstheme");
-                        if keep.as_path() != path {
-                            let _ = std::fs::copy(path, keep);
-                        }
+                // Kept as the text taken in: its picture names made absolute.
+                if remember && fl && let (Some(d), Some(text)) = (os_paths::user_dir(), &self.state.fl_text) {
+                    let _ = std::fs::create_dir_all(&d);
+                    let keep = d.join("current.flstheme");
+                    if keep.as_path() != path {
+                        let _ = std::fs::write(keep, text);
                     }
                 }
                 self.sync_preset();
@@ -4349,6 +4502,8 @@ impl App {
             SAct::Button(views::settings::MANAGE_SHORTCUTS) => return self.open_shortcuts(),
             SAct::Button(crate::data_folder::RENAME) => self.open_rename(),
             SAct::Button(crate::data_folder::SET_FOLDER) => self.data_folder_pick(),
+            SAct::Button(crate::factory_folder::SET_FOLDER) => self.factory_folder_pick(),
+            SAct::Button(crate::factory_folder::RESET) => self.set_factory_folder(None),
             SAct::Button(b) => self.state.message = Some(off_text(b)),
             // The Info page's boxes (spec: ui/settings.md "Info").
             SAct::Info(f) => return self.info_act(f),
@@ -4702,6 +4857,17 @@ impl App {
                     }
                     self.damage_rect(HINT_RECT);
                 }
+                Drag::LimitKeys => {
+                    let k = views::piano_dlg::kb_key(&self.state, x, y, false);
+                    crate::piano_dlg::set_green(&mut self.state, k);
+                    self.invalidate();
+                }
+                Drag::LimitEnd { high } => {
+                    let k = views::piano_dlg::kb_key(&self.state, x, y, true);
+                    crate::piano_dlg::set_end(&mut self.state, high, k);
+                    self.invalidate();
+                }
+                Drag::LimitScroll { dx } => self.limit_scroll_handle(x - dx),
                 Drag::EqGraph { track, band, g } => {
                     crate::mixer::eq_graph_drag(&mut self.state, track, band, g, (x, y));
                     self.hint = Cow::Owned(crate::mixer::eq_graph_hint(&self.state, g, x));
@@ -5107,6 +5273,7 @@ impl App {
             Win::Touch => views::touch::bounds(&self.state),
             Win::Strum => views::strum::bounds(&self.state),
             Win::Arp => views::arpeggiate::bounds(&self.state),
+            Win::PianoDlg => views::piano_dlg::bounds(&self.state),
             Win::ChannelRack => views::rack::bounds(&self.state),
             w => self.state.win_rect(w).outset(5.0),
         }
@@ -5359,6 +5526,8 @@ impl App {
                 self.record_option_menu(*o, x, y);
                 return self.invalidate();
             }
+            // The Limit dialog's keys take the right button too (spec: ui/piano-limit.md §1).
+            Some(Action::PianoDlg(crate::piano_dlg::Act::Keys)) => return self.piano_dlg_act(crate::piano_dlg::Act::Keys),
             Some(Action::PianoTarget) => {
                 // spec: ui/piano-target-channel.md §4
                 let row = self.state.selected_channel;
@@ -5984,6 +6153,13 @@ impl App {
             self.browser_wheel(dy + dx);
             return None;
         }
+        // The Limit dialog's keyboard: a white key a notch, up toward the high keys (spec: ui/piano-limit.md §5).
+        if let Some(Action::PianoDlg(crate::piano_dlg::Act::Keys | crate::piano_dlg::Act::Ruler | crate::piano_dlg::Act::Scroll)) = area {
+            let d = &mut self.state.piano_dlg;
+            d.kb_scroll = (d.kb_scroll + (dy + dx) * crate::piano_dlg::KEY_W).round().clamp(0.0, crate::piano_dlg::kb_max());
+            self.invalidate();
+            return None;
+        }
         if matches!(area, Some(Action::Settings(views::settings::SAct::Plug(views::settings::Plug::Table | views::settings::Plug::Row(_) | views::settings::Plug::Star(_) | views::settings::Plug::Show(_)))) | Some(Action::Scrollbar(Scroll::PlugTable))) {
             let n = self.state.plugdb.rows.len();
             let top = self.state.plugdb.top as f32 - (dy + dx) * 3.0;
@@ -6247,6 +6423,15 @@ impl App {
         {
             return self.toggle_groups();
         }
+        // Alt+1 .. Alt+9, Alt+0: FILE's recent projects (spec: ui/recent-projects.md §2).
+        if let Key::Character(c) = key
+            && alt
+            && !ctrl
+            && !self.shift
+            && let Some(n) = crate::recent::alt_digit(c)
+        {
+            return self.act(Action::MenuItem(0, views::menus::RECENT_PICK + n));
+        }
         if self.plugin_find_key(key, ctrl) {
             return;
         }
@@ -6358,7 +6543,8 @@ impl App {
                 }
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("t") => self.toggle_typing(),
-            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("m") => self.toggle_metronome(),
+            Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("m") => self.toggle_metronome(),
+            Key::Character(c) if ctrl && !alt && self.shift && c.eq_ignore_ascii_case("m") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT_MIDI)),
             // The record options (spec: ui/recording.md §3); a focused playlist or the piano roll took Ctrl+B / Ctrl+P
             // before this.
             Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("i") => self.toggle_record_option(crate::record::Opt::Wait),
@@ -6967,6 +7153,7 @@ impl App {
             Action::Touch(a) => self.touch_act(a),
             Action::Strum(a) => self.strum_act(a),
             Action::Arp(a) => self.arp_act(a),
+            Action::PianoDlg(a) => self.piano_dlg_act(a),
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
@@ -7223,6 +7410,7 @@ impl App {
                     Win::Touch => s.touch.pos,
                     Win::Strum => s.strum.pos,
                     Win::Arp => s.arp.pos,
+                    Win::PianoDlg => s.piano_dlg.pos[s.piano_dlg.tool.index()],
                     Win::ChannelRack => s.rack_pos,
                     w => {
                         // Start from the rect as shown (kept on screen), then move it.
@@ -7273,6 +7461,11 @@ impl App {
             Action::CloseWin(Win::Arp) => {
                 crate::arpeggiate::cancel(s);
                 s.hide(Win::Arp);
+                self.damage_win(Win::PianoRoll);
+            }
+            Action::CloseWin(Win::PianoDlg) => {
+                crate::piano_dlg::cancel(s);
+                s.hide(Win::PianoDlg);
                 self.damage_win(Win::PianoRoll);
             }
             Action::CloseWin(w) => s.hide(w),
@@ -7627,6 +7820,7 @@ impl App {
             (0, FILE_SAVE) => self.save(false),
             (0, FILE_EXPORT) => self.open_export(false),
             (0, FILE_EXPORT_MP3) => self.open_export(true),
+            (0, FILE_EXPORT_MIDI) => self.export_midi_dialog(false),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
             (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Sampler") => {
                 if let Some(index) = self.plugins.index_of(crate::plugins::LEMON_SAMPLER) {
@@ -7687,6 +7881,7 @@ impl App {
                 self.open_plugin_menu(crate::plugin_menu::Target::All, at);
             }
             (PATTERNS, i) if i >= PATTERN_PICK => crate::patterns::select(&mut self.state, (i - PATTERN_PICK) as u16),
+            (0, i) if i >= RECENT_PICK => self.open_recent(i - RECENT_PICK),
             (PATTERNS, i) if item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).is_some() => {
                 let cmd = item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).expect("checked");
                 if let Some(m) = self.pattern_cmd(cmd) {
@@ -7735,7 +7930,7 @@ impl App {
     /// A ▸ entry of the open dropdown (spec: ui/menus.md "Look"): its submenu, the app's own popup, opens to the right
     /// of the row as the popups' submenus do (kept on screen); the dropdown stays open under it.
     fn open_menu_sub(&mut self, menu: usize, i: usize) {
-        let Some(fill) = views::menus::item_at(menu, i).and_then(|it| views::menus::submenu(menu, it.label)) else { return };
+        let Some(fill) = views::menus::sub_at(menu, i) else { return };
         let at = self.hits.iter().rev().find(|h| h.action == Action::MenuSub(menu, i)).map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
         let items = fill(&self.state);
         self.state.playlist.popup = Some(crate::playlist::Popup { x: at.right(), y: at.y - 2.0, items, sub: None });
@@ -7778,6 +7973,9 @@ pub(crate) fn lift_windows(s: &mut State, dy: f32) {
         lift(&mut w.rect.y);
     }
     for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos, &mut s.strum.pos, &mut s.arp.pos] {
+        lift(&mut pos.1);
+    }
+    for pos in &mut s.piano_dlg.pos {
         lift(&mut pos.1);
     }
 }
@@ -7836,6 +8034,17 @@ fn typing_semitone(code: KeyCode) -> Option<i32> {
         KeyO => 26, Digit0 => 27, KeyP => 28, BracketLeft => 29, Equal => 30, BracketRight => 31,
         _ => return None,
     })
+}
+
+/// The file just written holds the model's channels and mixer tracks in order: each one's file block is its position
+/// (os-flp `apply` follows moved channels and the effect slots of moved mixer tracks by these).
+fn settle_origins(p: &mut Project) {
+    for (i, c) in p.channels.iter_mut().enumerate() {
+        c.rack.origin = Some(i as u16);
+    }
+    for (i, m) in p.mixer.iter_mut().enumerate() {
+        m.origin = Some(i as u16);
+    }
 }
 
 /// An empty sampler channel at rack position `i`.
@@ -7928,6 +8137,11 @@ pub(crate) fn preview_project(path: &str) -> Project {
     p.patterns = vec![Pattern { number: 1, notes: vec![Note { length: u32::from(p.ppq.max(4)), ..Note::step(0, 0) }], ..Pattern::default() }];
     p.arrangements.clear();
     p
+}
+
+/// A project with no channels: the mixer and pattern 1 of a new one (FILE ▸ Import ▸ MIDI file adds its channels).
+pub(crate) fn empty_project() -> Project {
+    template_project(&[])
 }
 
 /// The old five-channel template (tests that need several channels).
@@ -8379,6 +8593,51 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!((again.state.project.bar, again.state.project.play_truncated), (Some((7, 1)), false));
         assert_eq!(again.state.project.signature(), Some((7, 16)));
+    }
+
+    /// A theme's workspace picture (spec: ui/flstheme.md §3, BackPicFilename): named relative to the theme file, it is
+    /// made absolute when the theme is taken in and covers the workspace right of the browser, without the watermark
+    /// or the version line; the solid colour mode (BackMode=1) leaves the plain workspace. A temp user folder, never
+    /// the real one.
+    #[test]
+    fn theme_picture_covers_the_workspace() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("lemon-theme-picture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("pics")).unwrap();
+        THEME_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        let mut pm = tiny_skia::Pixmap::new(4, 2).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(0x7a, 0x3c, 0x91, 0xff));
+        std::fs::write(dir.join("pics").join("wall.png"), pm.encode_png().unwrap()).unwrap();
+        let file = dir.join("Wall.flstheme");
+        std::fs::write(&file, format!("{}BackPicFilename=pics\\wall.png\n", os_theme::fl::DARK_TEXT)).unwrap();
+        let mut app = App::new(None);
+        // No windows: the whole workspace shows.
+        app.state.z.clear();
+        // The workspace's pixels, right of the browser and below the toolbar.
+        let work = |app: &mut App, c: &mut Canvas| -> Vec<u32> {
+            frame(app, c, None);
+            let (left, top) = (views::browser_w(&app.state) as usize, views::work_y(&app.state) as usize);
+            let mut out = vec![0u32; 1920 * 1080];
+            c.copy_to_xrgb(&mut out);
+            (top..1080).flat_map(|y| out[y * 1920 + left..(y + 1) * 1920].to_vec()).collect()
+        };
+        let plain = work(&mut app, &mut c);
+        let ws = os_theme::Palette::default().workspace;
+        let ws = u32::from(ws.r) << 16 | u32::from(ws.g) << 8 | u32::from(ws.b);
+        assert!(plain.iter().any(|&p| p != ws), "the logo and the version line on the plain workspace");
+        app.load_theme_file_ex(&file, false);
+        let kept = app.state.fl_text.as_deref().and_then(|t| os_theme::fl::get_key(t, "BackPicFilename")).map(std::path::PathBuf::from);
+        assert_eq!(kept, Some(dir.join("pics").join("wall.png")), "made absolute against the theme file's folder");
+        let pic = work(&mut app, &mut c);
+        let off = pic.iter().filter(|&&p| p != 0x7a3c91).count();
+        assert_eq!(off, 0, "the picture everywhere, no logo or version line");
+        // The solid colour mode: the plain workspace again.
+        std::fs::write(&file, format!("{}BackPicFilename=pics\\wall.png\nBackMode=1\n", os_theme::fl::DARK_TEXT)).unwrap();
+        app.load_theme_file_ex(&file, false);
+        assert!(work(&mut app, &mut c) == plain);
+        THEME_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Theme ▸ Options (spec: ui/settings-choices.md "Light mode and clip note colours"): the clip note colours check
@@ -14198,6 +14457,251 @@ mod tests {
             assert_eq!(keys(&app), vec![60, 64, 67, 60]);
             app.act(Action::CloseWin(Win::Arp));
         }
+
+        // Alt+F, Alt+Y and Alt+X open the Flam, Flip and Scale levels dialogs in one tool window (spec:
+        // ui/piano-flam.md, ui/piano-flip.md, ui/piano-level-scaling.md): each previews, × puts the notes back, Accept
+        // is one undo step, and opening another puts the first one's preview back.
+        {
+            use crate::flam::Preset;
+            use crate::piano_dlg::{Act as DAct, Knob as DKnob, Tool};
+            let click = |app: &mut App, a: Action| {
+                let r = hit_rect(app, &a);
+                app.mouse_move(r.cx(), r.cy());
+                app.mouse_down();
+                app.mouse_up();
+            };
+            put(&mut app, &[(0, 96, 60), (96, 48, 64)]);
+            let ppq = u32::from(app.state.project.ppq);
+            key(&mut app, "f", false, true, false);
+            assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Flam);
+            let d = app.state.piano_dlg.flam.offset(ppq, app.state.tempo).unsigned_abs() as u32;
+            assert!(d > 0);
+            assert_eq!(mine(&app), vec![(0, d, 60), (d, 96, 60), (96, d, 64), (96 + d, 48, 64)], "leading flams, previewed");
+            app.act(Action::PianoDlg(DAct::Options));
+            let pop = app.state.playlist.popup.take().expect("Options opens the presets");
+            assert_eq!(pop.items.iter().map(|i| i.label.as_ref()).collect::<Vec<_>>(), ["Flam", "Early flam", "Double stroke", "Early double stroke"]);
+            crate::playlist::run(&mut app, Cmd::FlamPreset(Preset::DoubleStroke));
+            let st = ppq / 4;
+            assert_eq!(mine(&app), vec![(0, 96, 60), (st, 96, 60), (96, 48, 64), (96 + st, 48, 64)], "a copy a step later");
+            // Alt+Y: the flam goes back, the window shows Flip.
+            key(&mut app, "y", false, true, false);
+            assert_eq!(app.state.piano_dlg.tool, Tool::Flip);
+            assert_eq!(mine(&app), vec![(0, 48, 64), (96, 96, 60)], "mirrored in time, start spacing kept");
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Vertical));
+            assert_eq!(mine(&app), vec![(0, 48, 60), (96, 96, 64)], "and in pitch");
+            click(&mut app, Action::CloseWin(Win::PianoDlg));
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert_eq!(mine(&app), vec![(0, 96, 60), (96, 48, 64)], "× puts the notes back");
+            // Alt+X on the velocity lane: Multiply 5 notches down.
+            app.state.piano.lane = piano::Lane::Velocity;
+            key(&mut app, "x", false, true, false);
+            assert_eq!(app.state.piano_dlg.tool, Tool::Levels);
+            frame(&mut app, &mut c, None);
+            let m = hit_rect(&app, &Action::Knob(KnobId::PianoDlg(DKnob::Mult)));
+            app.mouse_move(m.cx(), m.cy());
+            for _ in 0..5 {
+                app.wheel(0.0, -1.0, false, false);
+            }
+            assert_eq!(app.hint.as_ref(), "Multiplier: 69%");
+            let vels = |app: &App| piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| n.velocity).collect::<Vec<_>>();
+            assert_eq!(vels(&app), vec![69, 69], "FL: 100 × 68.75 % = 69");
+            click(&mut app, Action::PianoDlg(DAct::Accept));
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert_eq!(vels(&app), vec![69, 69]);
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(vels(&app), vec![100, 100], "one undo step");
+            // A channel control lane: Scale levels does not open.
+            app.state.piano.lane = piano::Lane::ChanVolume;
+            key(&mut app, "x", false, true, false);
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert!(app.state.message.as_deref().is_some_and(|m| m.contains("note property")));
+            app.state.piano.lane = piano::Lane::Velocity;
+        }
+        frame(&mut app, &mut c, None);
+
+        // Alt+K opens Limit (spec: ui/piano-limit.md): the range starts as the notes' own, the menus and the keyboard
+        // preview at once, a collapsed section still applies, Accept is one undo step and the settings stay.
+        {
+            use crate::piano_dlg::{Act as DAct, LCmd, Tool};
+            let keys = |app: &App| mine(app).iter().map(|n| n.2).collect::<Vec<_>>();
+            let press = |app: &mut App, x: f32, y: f32| {
+                app.mouse_move(x, y);
+                app.mouse_down();
+                app.mouse_up();
+            };
+            let click = |app: &mut App, a: Action| {
+                let r = hit_rect(app, &a);
+                press(app, r.cx(), r.cy());
+            };
+            put(&mut app, &[(0, 24, 61), (24, 24, 63), (48, 24, 66), (72, 24, 70)]);
+            key(&mut app, "k", false, true, false);
+            assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Limit);
+            assert_eq!(app.state.piano_dlg.limit.range, Some((61, 70)), "the targets' span");
+            assert_eq!(keys(&app), vec![61, 63, 66, 70], "nothing to change yet");
+            frame(&mut app, &mut c, None);
+            app.act(Action::PianoDlg(DAct::ScaleMenu));
+            let pop = app.state.playlist.popup.take().expect("the scale box opens the chords file");
+            assert_eq!(pop.items.iter().filter(|i| matches!(i.cmd, Cmd::Limit(LCmd::Scale(_)))).count(), 89, "(none) and 88 entries");
+            crate::playlist::run(&mut app, Cmd::Limit(LCmd::Scale(crate::chords::FIRST_SCALE)));
+            assert_eq!(keys(&app), vec![62, 64, 67, 61], "C major, ties up; B folds down an octave and stops at the range");
+            // A press on A4 makes it the green key: +3.
+            frame(&mut app, &mut c, None);
+            let (win, kb) = (views::piano_dlg::rect(&app.state), hit_rect(&app, &Action::PianoDlg(DAct::Keys)));
+            let at = |app: &App, k: i32| win.x + 8.0 + crate::piano_dlg::white_x(k) - app.state.piano_dlg.kb_scroll + 6.0;
+            assert_eq!(views::piano_dlg::kb_key(&app.state, at(&app, 57), kb.bottom() - 4.0, false), 57);
+            let x = at(&app, 57);
+            press(&mut app, x, kb.bottom() - 4.0);
+            assert_eq!(app.state.piano_dlg.limit.transpose, 3);
+            assert_eq!(keys(&app), vec![65, 67, 70, 64]);
+            // The name strip at C5: the low end is nearer and follows.
+            let strip = hit_rect(&app, &Action::PianoDlg(DAct::Ruler));
+            let x = at(&app, 60);
+            press(&mut app, x, strip.cy());
+            assert_eq!(app.state.piano_dlg.limit.range, Some((60, 70)));
+            assert_eq!(keys(&app), vec![65, 67, 70, 63]);
+            // The right button on C5: no transposition. The wheel scrolls a white key.
+            app.mouse_move(at(&app, 60), kb.bottom() - 4.0);
+            app.mouse_down_right();
+            app.mouse_up();
+            assert_eq!(app.state.piano_dlg.limit.transpose, 0);
+            let s0 = app.state.piano_dlg.kb_scroll;
+            app.wheel(0.0, -1.0, false, false);
+            assert_eq!(app.state.piano_dlg.kb_scroll, s0 - 13.0);
+            // Collapsed, the key / scale section still applies; the window is 67 px shorter.
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Collapse(0)));
+            assert_eq!(views::piano_dlg::rect(&app.state).h, 228.0);
+            assert_eq!(keys(&app), vec![62, 64, 67, 60]);
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Accept));
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert_eq!(keys(&app), vec![62, 64, 67, 60]);
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(keys(&app), vec![61, 63, 66, 70], "one undo step");
+            key(&mut app, "k", false, true, false);
+            let d = &app.state.piano_dlg;
+            assert_eq!((d.limit.scale, d.limit.range, d.collapsed), (crate::chords::FIRST_SCALE, Some((60, 70)), [true, false]), "kept");
+            assert_eq!(keys(&app), vec![62, 64, 67, 60]);
+            app.act(Action::CloseWin(Win::PianoDlg));
+            assert_eq!(keys(&app), vec![61, 63, 66, 70], "× puts the notes back");
+            app.state.piano_dlg.collapsed = [false; 2];
+        }
+        frame(&mut app, &mut c, None);
+
+        // Alt+W opens Claw machine (spec: ui/piano-claw.md): the selected notes alone, periods still counted from tick 0,
+        // preview at once, the menus and the knob too; Accept is one undo step, the selection holds the result, and the
+        // settings stay.
+        {
+            use crate::piano_dlg::{Act as DAct, CCmd, Knob as DKnob, Tool};
+            let keys = |app: &App| mine(app).iter().map(|n| n.2).collect::<Vec<_>>();
+            let click = |app: &mut App, a: Action| {
+                let r = hit_rect(app, &a);
+                app.mouse_move(r.cx(), r.cy());
+                app.mouse_down();
+                app.mouse_up();
+            };
+            let st = u32::from(app.state.project.ppq) / 4;
+            let steps: Vec<(u32, u32, u16)> = (0..8).map(|i| (i * st, st, 60 + i as u16)).collect();
+            put(&mut app, &steps);
+            let first4: Vec<usize> = piano::notes(&app.state)
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| n.channel == ch && n.position < 4 * st)
+                .map(|(i, _)| i)
+                .collect();
+            app.state.piano.select(app.state.pattern, ch, first4);
+            key(&mut app, "w", false, true, false);
+            assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Claw);
+            assert_eq!(keys(&app), vec![60, 61, 62, 64, 65, 66, 67], "the first beat's last quarter trashed, the selection alone");
+            assert!(mine(&app).iter().any(|n| *n == (4 * st, st, 64)), "the notes after it stay");
+            frame(&mut app, &mut c, None);
+            app.act(Action::PianoDlg(DAct::TrashMenu));
+            let pop = app.state.playlist.popup.take().expect("Trash every opens its menu");
+            assert_eq!(pop.items.iter().filter(|i| matches!(i.cmd, Cmd::Claw(CCmd::Trash(_)))).count(), 10);
+            crate::playlist::run(&mut app, Cmd::Claw(CCmd::Trash(9)));
+            assert_eq!(mine(&app), steps, "(none), Time dist at the centre: unchanged");
+            frame(&mut app, &mut c, None);
+            let k = hit_rect(&app, &Action::Knob(KnobId::PianoDlg(DKnob::ClawTime)));
+            app.mouse_move(k.cx(), k.cy());
+            for _ in 0..8 {
+                app.wheel(0.0, 1.0, false, false);
+            }
+            assert_eq!(app.hint.as_ref(), "Time distribution: +25%");
+            assert!(mine(&app)[0].1 > st && mine(&app)[3].1 < st, "early notes longer, late ones shorter");
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Accept));
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert_eq!(app.state.piano.selection(app.state.pattern, Some(ch)).len(), 4, "the selection holds the result");
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(mine(&app), steps, "one undo step");
+            key(&mut app, "w", false, true, false);
+            assert_eq!(app.state.piano_dlg.claw.trash, 9, "kept");
+            assert_ne!(mine(&app), steps);
+            app.act(Action::CloseWin(Win::PianoDlg));
+            assert_eq!(mine(&app), steps, "× puts the notes back");
+        }
+        frame(&mut app, &mut c, None);
+
+        // Alt+O opens LFO (spec: ui/piano-lfo.md): a sine on the velocities at once, "52%" after a notch of Value, End
+        // copies Start, the Shape menu; Accept is one undo step. On a channel lane it writes the lane's control points
+        // instead, and × takes them back.
+        {
+            use crate::lfo::Shape;
+            use crate::piano_dlg::{Act as DAct, Knob as DKnob, Tool};
+            use os_model::ControlPoint;
+            let click = |app: &mut App, a: Action| {
+                let r = hit_rect(app, &a);
+                app.mouse_move(r.cx(), r.cy());
+                app.mouse_down();
+                app.mouse_up();
+            };
+            let vels = |app: &App| piano::notes(&app.state).iter().filter(|n| n.channel == ch).map(|n| n.velocity).collect::<Vec<_>>();
+            let vol = |app: &App| piano::controls(&app.state).iter().filter(|c| c.channel() == ch && c.param() == ControlPoint::VOLUME).map(|c| (c.position, c.value)).collect::<Vec<_>>();
+            let st = u32::from(app.state.project.ppq) / 4;
+            put(&mut app, &(0..16).map(|i| (i * st, st, 60)).collect::<Vec<_>>());
+            app.state.piano.lane = piano::Lane::Velocity;
+            let before = vels(&app);
+            key(&mut app, "o", false, true, false);
+            assert!(app.state.shown(Win::PianoDlg) && app.state.piano_dlg.tool == Tool::Lfo);
+            assert_eq!(vels(&app)[..9], [64, 76, 87, 94, 96, 94, 87, 76, 64], "Reset's sine, a bar long");
+            frame(&mut app, &mut c, None);
+            let k = hit_rect(&app, &Action::Knob(KnobId::PianoDlg(DKnob::LfoValue)));
+            app.mouse_move(k.cx(), k.cy());
+            app.wheel(0.0, 1.0, false, false);
+            assert_eq!(app.hint.as_ref(), "52%");
+            click(&mut app, Action::PianoDlg(DAct::LfoEnd));
+            assert!(app.state.piano_dlg.lfo.end_on && app.state.piano_dlg.lfo.end == app.state.piano_dlg.lfo.start, "End takes Start's values");
+            frame(&mut app, &mut c, None);
+            app.act(Action::PianoDlg(DAct::ShapeMenu));
+            let pop = app.state.playlist.popup.take().expect("the shape box opens its menu");
+            assert_eq!(pop.items.iter().filter(|i| matches!(i.cmd, Cmd::LfoShape(_))).count(), 3);
+            crate::playlist::run(&mut app, Cmd::LfoShape(Shape::Square));
+            assert_eq!(vels(&app)[..9], [98, 98, 98, 98, 98, 98, 98, 98, 34]);
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Accept));
+            assert!(!app.state.shown(Win::PianoDlg));
+            assert!(piano::undo(&mut app.state));
+            assert_eq!(vels(&app), before, "one undo step");
+
+            app.state.piano.lane = piano::Lane::ChanVolume;
+            key(&mut app, "o", false, true, false);
+            assert_eq!(app.state.piano_dlg.tool.title_on(app.state.piano.lane), "Events - LFO");
+            assert_eq!(vels(&app), before, "the notes stay");
+            let pts = vol(&app);
+            assert_eq!(pts.first(), Some(&(0, 9800)), "the settings kept: the square from 76.5 %");
+            assert!(pts.iter().all(|p| p.1 == 9800 || p.1 == 3400) && pts.windows(2).all(|w| w[0].1 != w[1].1), "its edges alone");
+            frame(&mut app, &mut c, None);
+            click(&mut app, Action::PianoDlg(DAct::Accept));
+            assert_eq!(vol(&app), pts);
+            assert!(piano::undo(&mut app.state));
+            assert!(vol(&app).is_empty(), "one undo step");
+            key(&mut app, "o", false, true, false);
+            assert!(!vol(&app).is_empty());
+            app.act(Action::CloseWin(Win::PianoDlg));
+            assert!(vol(&app).is_empty(), "× takes the points back");
+            app.state.piano.lane = piano::Lane::Velocity;
+        }
         frame(&mut app, &mut c, None);
 
         // The toolbar's tools button opens the Tools menu.
@@ -16818,7 +17322,7 @@ mod tests {
         let start = |app: &App| app.state.project.pattern(1).unwrap().markers.iter().find(|m| m.position == 0 && m.kind == TimeMarker::SIGNATURE).cloned();
         // The dialog, at 4/4.
         app.menu_item(PATTERNS, entry);
-        assert_eq!(form(&app), Some(SigForm { pattern: 1, num: 4, den: 4 }));
+        assert_eq!(form(&app), Some(SigForm { pattern: 1, num: 4, den: 4, song: None }));
         frame(&mut app, &mut c, None);
         // Numerator: 1..16 under the box, 4 marked; 3 picked.
         let num_box = hit_rect(&app, &Action::Dlg(DHit::SigValue(false)));
@@ -16882,7 +17386,7 @@ mod tests {
         // Yes: the marker goes at once and the dialog opens at 4/4; closed with its × it leaves no start marker.
         app.menu_item(PATTERNS, entry);
         app.key(&Key::Character("y".into()), false, false);
-        assert_eq!(form(&app), Some(SigForm { pattern: 1, num: 4, den: 4 }));
+        assert_eq!(form(&app), Some(SigForm { pattern: 1, num: 4, den: 4, song: None }));
         assert!(start(&app).is_none());
         frame(&mut app, &mut c, None);
         let close = hit_rect(&app, &Action::Dlg(DHit::Close));
@@ -16892,7 +17396,7 @@ mod tests {
         // No marker: straight to the dialog; Enter accepts. Another pattern gets its own.
         app.state.pattern = 2;
         app.menu_item(PATTERNS, entry);
-        assert_eq!(form(&app), Some(SigForm { pattern: 2, num: 4, den: 4 }));
+        assert_eq!(form(&app), Some(SigForm { pattern: 2, num: 4, den: 4, song: None }));
         app.key(&Key::Named(NamedKey::Enter), false, false);
         assert!(!app.modal_open());
         let four = TimeMarker { kind: TimeMarker::SIGNATURE, ..TimeMarker::new(0, "4/4") };
@@ -16995,8 +17499,11 @@ mod tests {
         assert!(!app.modal_open() && app.state.project.pattern(1).unwrap().markers.is_empty());
         assert_eq!(len(&app), 384);
         assert_eq!(lengths(&app), [vec![384, 768, 384, 384], vec![384]]);
-        // The playlist's own time-signature markers ("4/4") are shown once too; they leave the pattern's length alone.
+        // The playlist's own time-signature markers ("4/4", from the same dialog) are shown once too; they leave the
+        // pattern's length alone.
         pl::run(&mut app, Cmd::AddSignature);
+        assert!(crate::timesig::form_open(&app.state));
+        app.key(&Key::Named(NamedKey::Enter), false, false);
         let m = pl::arr_mut(&mut app.state).markers.last().cloned().unwrap();
         assert_eq!((m.name.as_str(), marker_label(&m).as_str()), ("4/4", "4/4"));
         assert_eq!(len(&app), 384);
@@ -17005,6 +17512,155 @@ mod tests {
         // The piano roll draws the 3/8 grid.
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         crate::timesig::set_start(&mut app.state, 1, 3, 8);
+        frame(&mut app, &mut c, None);
+    }
+
+    /// The playlist's time markers (spec: ui/playlist.md §7a): the ▸ menu's Time markers items and the marker menus,
+    /// what they add, Move content (FL's measured case), the actions and the time signature dialog, Delete in the
+    /// time selection, undo, position order, the song position on a click and on opening.
+    #[test]
+    fn playlist_time_markers() {
+        use crate::playlist::{self as pl, Cmd, Mark, PlDrag};
+        use os_model::{Arrangement, Clip, ClipSource, TimeMarker as M};
+        use winit::keyboard::{Key, NamedKey};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.arrangements = vec![Arrangement { clips: (0..5).map(|i| Clip::new(384 * i, 384, 0, ClipSource::Pattern(1))).collect(), ..Default::default() }];
+        pl::arr_mut(&mut app.state);
+        let marks = |app: &App| pl::markers(&app.state).iter().map(|m| (m.position, m.kind, m.name.clone())).collect::<Vec<_>>();
+        let mk = |p: u32, k: u8, n: &str| (p, k, n.to_string());
+        let set = |app: &mut App, list: &[(u32, u8, &str)]| {
+            pl::arr_mut(&mut app.state).markers = list.iter().map(|&(p, k, n)| M { kind: k, ..M::new(p, n) }).collect();
+        };
+
+        // The ▸ menu's submenu in FL's order; what is not built is greyed, Quantize song jumps too.
+        let menu = pl::options_menu(&app.state, 0.0, 0.0);
+        let sub = &menu.items.iter().find(|it| it.label == "Time markers").expect("Time markers").children;
+        let want = [
+            ("Add one...", true),
+            ("Add auto", true),
+            ("Add two...", false),
+            ("Add one every", true),
+            ("Add jump to next bar", true),
+            ("Add time signature change...", true),
+            ("Add key marker", false),
+            ("Place loop", true),
+            ("Delete", true),
+            ("Change to marker loop", true),
+        ];
+        assert_eq!(sub.iter().map(|it| (&*it.label, it.enabled)).collect::<Vec<_>>(), want);
+        assert!(menu.items.iter().any(|it| it.label == "Quantize song jumps" && !it.enabled && it.children.len() == 6));
+        pl::run(&mut app, Cmd::MarkerEveryMenu);
+        let every = app.state.playlist.popup.take().expect("its list");
+        assert_eq!(every.items.iter().map(|it| it.cmd.clone()).collect::<Vec<_>>(), [1, 2, 4, 8].map(Cmd::MarkerEvery));
+
+        // Add auto and Add jump to next bar, at the song position, kept in position order; each one undo step.
+        let steps = app.state.history.len();
+        app.state.playlist.pos = 768;
+        pl::run(&mut app, Cmd::AddAutoMarker);
+        app.state.playlist.pos = 384;
+        pl::run(&mut app, Cmd::AddJumpMarker);
+        assert_eq!(marks(&app), [mk(384, M::SKIP, " "), mk(768, M::PLAIN, "Auto"), mk(768, M::PLAIN, " ")]);
+        assert_eq!(app.state.history.len(), steps + 2);
+        pl::run(&mut app, Cmd::Undo);
+        assert_eq!(marks(&app), [mk(768, M::PLAIN, "Auto")]);
+
+        // Place loop: at the time selection's start, at 0 without one; a second time takes it away.
+        set(&mut app, &[]);
+        pl::run(&mut app, Cmd::PlaceLoop);
+        assert_eq!(marks(&app), [mk(0, M::LOOP, " ")]);
+        pl::run(&mut app, Cmd::PlaceLoop);
+        assert_eq!(marks(&app), []);
+        app.state.playlist.range = Some((792, 1560));
+        pl::run(&mut app, Cmd::PlaceLoop);
+        assert_eq!(marks(&app), [mk(792, M::LOOP, " ")]);
+
+        // Add one every bar over the selection, as FL measured: "Part #1" at 792, "Part #2" at 1176.
+        set(&mut app, &[]);
+        pl::run(&mut app, Cmd::MarkerEvery(1));
+        app.state.playlist.edit.as_mut().expect("the base name box").text = "Part".into();
+        pl::commit_edit(&mut app.state);
+        assert_eq!(marks(&app), [mk(792, M::PLAIN, "Part #1"), mk(1176, M::PLAIN, "Part #2")]);
+
+        // Delete and Change to marker loop: the markers in the selection (start in, end out); all without one.
+        set(&mut app, &[(384, M::PLAIN, "A"), (768, M::START, "B"), (1536, M::PLAIN, "C")]);
+        app.state.playlist.range = Some((384, 1536));
+        pl::run(&mut app, Cmd::DeleteMarkers);
+        assert_eq!(marks(&app), [mk(1536, M::PLAIN, "C")]);
+        set(&mut app, &[(384, M::PLAIN, "A"), (768, M::START, "B")]);
+        app.state.playlist.range = None;
+        pl::run(&mut app, Cmd::ToMarkerLoop);
+        assert_eq!(marks(&app), [mk(384, M::MARKER_LOOP, "A"), mk(768, M::MARKER_LOOP, "B")]);
+
+        // Move content right on B (FL: A 384, B 768, C 1536, clips to 1920): B's section and C's trade places.
+        set(&mut app, &[(384, M::PLAIN, "A"), (768, M::PLAIN, "B"), (1536, M::PLAIN, "C")]);
+        let before = app.state.project.arrangements[0].clone();
+        pl::run(&mut app, Cmd::MoveContent(1, true));
+        let starts = |app: &App| pl::clips(&app.state).iter().map(|c| c.position).collect::<Vec<_>>();
+        assert_eq!(starts(&app), [0, 384, 1152, 1536, 768]);
+        assert_eq!(marks(&app), [mk(384, M::PLAIN, "A"), mk(768, M::PLAIN, "C"), mk(1152, M::PLAIN, "B")]);
+        // Move content left on B is its mirror: everything is back.
+        pl::run(&mut app, Cmd::MoveContent(2, false));
+        assert_eq!(app.state.project.arrangements[0], before);
+        // Nothing to trade with: no change, no undo step.
+        let steps = app.state.history.len();
+        pl::run(&mut app, Cmd::MoveContent(2, true));
+        pl::run(&mut app, Cmd::MoveContent(0, false));
+        assert_eq!((&app.state.project.arrangements[0], app.state.history.len()), (&before, steps));
+        // One undo step takes a move back.
+        pl::run(&mut app, Cmd::MoveContent(1, true));
+        pl::run(&mut app, Cmd::Undo);
+        assert_eq!(app.state.project.arrangements[0], before);
+
+        // The marker menu: the row's items at the clicked tick, the header, then the actions with the marker's own.
+        let m = pl::marker_menu(&app.state, 0, 400, 0.0, 0.0);
+        let labels: Vec<&str> = m.items.iter().map(|it| &*it.label).collect();
+        assert_eq!(labels[..10], ["Add marker...", "Add time signature...", "Place loop", "A at 2:01:00", "Delete", "Rename...", "", "Move content left", "Move content right", "Action"]);
+        assert_eq!(labels[10..], ["None", "Start", "Loop", "Marker loop", "Marker skip", "Marker pause", "Time signature", "Start recording", "Stop recording"]);
+        assert!(m.items[3].head && m.items[2].cmd == Cmd::PlaceLoopAt(400));
+        assert_eq!(m.items[10..].iter().filter(|it| it.mark == Mark::Radio(true)).count(), 1);
+        assert_eq!(m.items[10].mark, Mark::Radio(true), "A is a plain marker");
+        assert_eq!(pl::lane_menu(400, 0.0, 0.0).items.len(), 3);
+
+        // An action changes the kind only; Time signature asks first and names the marker after the signature.
+        pl::run(&mut app, Cmd::MarkerAction(1, M::SKIP));
+        assert_eq!(marks(&app)[1], mk(768, M::SKIP, "B"));
+        pl::run(&mut app, Cmd::MarkerAction(1, M::SIGNATURE));
+        assert!(crate::timesig::form_open(&app.state));
+        assert_eq!(marks(&app)[1].1, M::SKIP, "not before Accept");
+        app.key(&Key::Named(NamedKey::Enter), false, false);
+        assert_eq!(marks(&app)[1], mk(768, M::SIGNATURE, "4/4"));
+        // Add time signature... from the row's menu: a new one at its tick.
+        pl::run(&mut app, Cmd::MarkerSigAt(1152));
+        app.key(&Key::Named(NamedKey::Enter), false, false);
+        assert_eq!(marks(&app)[2], mk(1152, M::SIGNATURE, "4/4"));
+
+        // A click on a marker moves the song position to it, and leaves no undo step.
+        set(&mut app, &[(384, M::PLAIN, "A"), (768, M::START, "B")]);
+        app.state.playlist.pos = 0;
+        let grid = Rect::new(300.0, 200.0, 1200.0, 600.0);
+        let g = pl::PGeom::new(&app.state, grid);
+        app.mouse = (g.x_of(768.0) + 4.0, 190.0);
+        let steps = app.state.history.len();
+        pl::press_markers(&mut app, grid, false);
+        assert_eq!(app.state.playlist.pos, 768);
+        let Some(Drag::Pl(d @ PlDrag::Marker { .. })) = app.drag.take() else { panic!("a marker drag") };
+        pl::drag_end(&mut app, d, grid);
+        assert_eq!(app.state.history.len(), steps);
+        // A right click away from the markers: the row's menu at the snapped tick.
+        app.mouse = (g.x_of(1100.0), 190.0);
+        pl::press_markers(&mut app, grid, true);
+        assert!(app.state.playlist.popup.take().is_some_and(|p| p.items.len() == 3));
+
+        // An opened project's song position is at its Start marker.
+        app.state.playlist.pos = 0;
+        pl::load_view(&mut app.state);
+        assert_eq!(app.state.playlist.pos, 768);
+
+        // Every kind's tab paints, with the Start marker's darker pre-roll.
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let kinds = [M::PLAIN, M::MARKER_LOOP, M::SKIP, M::PAUSE, M::LOOP, M::START, M::SIGNATURE, M::PUNCH_IN, M::PUNCH_OUT, M::KEY];
+        pl::arr_mut(&mut app.state).markers = kinds.iter().enumerate().map(|(i, &k)| M { kind: k, ..M::new(192 * i as u32, "Name") }).collect();
         frame(&mut app, &mut c, None);
     }
 

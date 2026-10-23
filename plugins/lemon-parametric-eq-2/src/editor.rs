@@ -264,14 +264,12 @@ pub struct Logic {
     pub hint: String,
     copied: Option<f32>,
     pub hosted: bool,
-    /// HQ mode to turn back on (the HQ button toggles off and back).
-    last_hq: u8,
 }
 
 impl Logic {
     pub fn new(params: Arc<EqParams>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         let vals = Vals::new(&*params, params.live.clone(), ctx);
-        Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, last_hq: 1 }
+        Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false }
     }
 
     pub fn dragging(&self) -> bool {
@@ -323,9 +321,8 @@ impl Logic {
             }
             Some(Target::Graph) => format!("{}Hz {:.1}dB", eq::freq_hz(view::n_of(x)).round(), view::db_of(y)),
             Some(Target::Options) => "Options".into(),
-            // Greyed out (`view::works`).
-            Some(Target::Lin) => "Linear phase: not available yet".into(),
-            Some(Target::Hq) => "High quality (oversampling): not available yet".into(),
+            Some(Target::Lin) => "Linear phase".into(),
+            Some(Target::Hq) => "High quality (oversampling)".into(),
             Some(Target::Tokens) => "View band tokens".into(),
             Some(Target::Phones) => "Band solo on shift".into(),
             Some(Target::Monitor(m)) => format!("Monitor: {}", ["off", "input", "output"][usize::from(m.min(2))]),
@@ -404,11 +401,6 @@ impl Logic {
     pub fn down(&mut self, x: f32, y: f32, btn: Btn, m: Mods, _dbl: bool) -> Vec<Act> {
         self.view.mouse = Some((x, y));
         let Some(t) = self.hit(x, y) else { return vec![] };
-        if !view::works(t) {
-            // Greyed-out controls only say so.
-            self.hint = self.hint_for(Some(t), x, y);
-            return vec![Act::Repaint];
-        }
         let extra = self.params.extra_copy();
         let mut acts = vec![Act::Repaint];
         let lock = |l: &mut Logic, d: Drag, ids: &[String]| {
@@ -478,14 +470,11 @@ impl Logic {
             (Target::Options, Btn::Left) => acts.push(Act::Menu(MenuReq::Options, x, y)),
             (Target::Lin, Btn::Left) => self.params.edit_extra(|b| toggle(b, params::F_LIN)),
             (Target::Lin, Btn::Right) => acts.push(Act::Menu(MenuReq::Lin, x, y)),
-            (Target::Hq, Btn::Left) => {
-                let cur = byte(&extra, params::HQ_BYTE);
-                if cur != 0 {
-                    self.last_hq = cur;
-                }
-                let next = if cur != 0 { 0 } else { self.last_hq.max(1) };
-                self.params.edit_extra(|b| set_byte(b, params::HQ_BYTE, next));
-            }
+            // HQ on / off: bit 0; the mode in the other bits stays for the next time it is switched on.
+            (Target::Hq, Btn::Left) => self.params.edit_extra(|b| {
+                let cur = byte(b, params::HQ_BYTE);
+                set_byte(b, params::HQ_BYTE, cur ^ 1);
+            }),
             (Target::Hq, Btn::Right) => acts.push(Act::Menu(MenuReq::Hq, x, y)),
             (Target::Tokens, Btn::Left) => self.params.edit_extra(|b| {
                 let v = byte(b, params::TOKENS_BYTE);
@@ -644,14 +633,14 @@ impl Logic {
                 m.head("Options", Cmd::None);
                 check(&mut m, "Lock spare state", LOCK_SPARE.load(Ordering::Relaxed), Cmd::LockSpare);
                 m.submenu("Band solo on Shift", self.solo_menu(&extra), Cmd::None);
-                // Greyed out: nothing reads the mod speeds, phase rotation or the heatmap's enhanced frequency and high
-                // precision yet.
+                // Greyed out: nothing reads the minimum phase mod speed (parameter smoothing), phase rotation or the
+                // heatmap's enhanced frequency and high precision yet. The linear phase mod speed is LIN's crossfade time.
                 m.submenu("Minimum phase mod speed", greyed(opt_menu(&extra, Opt::MinPhaseSpeed, &["Off", "Medium", "Smooth"], 0)), Cmd::None);
                 let mut lin = MenuDef::new(MenuStyle::Context);
                 for (i, n) in ["Normal", "Fast", "Faster", "Ultra"].iter().enumerate() {
                     radio(&mut lin, n, byte(&extra, params::LIN_SPEED_BYTE) == i as u8, Cmd::Byte(params::LIN_SPEED_BYTE, i as u8));
                 }
-                m.submenu("Linear phase mod speed", greyed(lin), Cmd::None);
+                m.submenu("Linear phase mod speed", lin, Cmd::None);
                 m.head("Visualization", Cmd::None);
                 check_off(&mut m, "Phase rotation", flag(&extra, params::F_PHASE_ROTATION));
                 m.submenu("Monitor input", opt_menu(&extra, Opt::MonitorInput, &["Mid", "Side", "Left", "Right"], 1), Cmd::None);
@@ -681,11 +670,12 @@ impl Logic {
                 }
             }
             MenuReq::Hq => {
-                let hq = byte(&extra, params::HQ_BYTE);
+                // The mode, whether HQ is on or not (the toggle keeps it).
+                let mode = byte(&extra, params::HQ_BYTE) >> 1;
                 let enh = flag(&extra, params::F_HQ_ENHANCED);
-                radio(&mut m, "HQ+", hq & 2 != 0, Cmd::Hq(3));
-                radio(&mut m, "HQ Legacy", hq & 2 == 0 && !enh && hq != 0, Cmd::Hq(1));
-                radio(&mut m, "HQ Enhanced", hq & 2 == 0 && enh && hq != 0, Cmd::Hq(2));
+                radio(&mut m, "HQ+", mode == 1, Cmd::Hq(3));
+                radio(&mut m, "HQ Legacy", mode == 0 && !enh, Cmd::Hq(1));
+                radio(&mut m, "HQ Enhanced", mode == 0 && enh, Cmd::Hq(2));
             }
             MenuReq::Phones => m = self.solo_menu(&extra),
         }
@@ -1448,24 +1438,47 @@ mod tests {
         it.clone().find(|it| matches!(it, MenuItem::Item { label: l, .. } if l == label)).unwrap_or_else(|| panic!("no {label}")).clickable()
     }
 
+    /// LIN and HQ switch the processing (spec: plugins/lemon-parametric-eq-2.md §4, §5; plugins/fruity-parametric-eq-2.md
+    /// "Which processing a state selects").
     #[test]
-    fn greyed_out_controls_only_say_so() {
+    fn lin_and_hq_switch_the_processing() {
         let mut l = logic();
-        let extra = l.params.extra_copy();
-        for t in [Target::Lin, Target::Hq] {
+        let hq = |l: &Logic| byte(&l.params.extra_copy(), params::HQ_BYTE);
+        let opts = |l: &Logic| eq::Options::from_image(&l.params.extra_copy());
+        assert_eq!(hq(&l), 1, "a new instance: HQ Legacy");
+        assert_eq!(opts(&l).mode(), eq::Mode::HqLegacy);
+        for (t, hint) in [(Target::Lin, "Linear phase"), (Target::Hq, "High quality (oversampling)")] {
             let (x, y) = centre(&l, t);
-            for btn in [Btn::Left, Btn::Right] {
-                assert_eq!(l.down(x, y, btn, Mods::default(), false), vec![Act::Repaint], "{t:?}");
-            }
-            assert!(l.hint.ends_with(": not available yet"), "{}", l.hint);
+            l.moved(x, y, Mods::default());
+            assert_eq!(l.hint, hint);
         }
-        assert_eq!(l.params.extra_copy(), extra, "LIN and HQ left alone");
-        // Options nothing reads yet are greyed out; the analyzer's are not.
+        // LIN on and off.
+        let (x, y) = centre(&l, Target::Lin);
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(opts(&l).mode(), eq::Mode::Lin);
+        assert_eq!(opts(&l).latency(44100.0), 1536);
+        l.pick(&MenuReq::Lin, Cmd::Byte(params::LIN_PRECISION_BYTE, 4), 0.0, 0.0);
+        assert_eq!(opts(&l).latency(44100.0), 6144);
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(opts(&l).mode(), eq::Mode::HqLegacy);
+        // HQ+ from the menu; the toggle switches bit 0 and keeps the mode.
+        let (x, y) = centre(&l, Target::Hq);
+        assert!(l.down(x, y, Btn::Right, Mods::default(), false).iter().any(|a| matches!(a, Act::Menu(MenuReq::Hq, ..))));
+        l.pick(&MenuReq::Hq, Cmd::Hq(3), 0.0, 0.0);
+        assert_eq!((hq(&l), opts(&l).mode()), (3, eq::Mode::HqPlus));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!((hq(&l), opts(&l).mode()), (2, eq::Mode::Plain));
+        assert!(clickable(&l.menu(&MenuReq::Hq), "HQ+"));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!((hq(&l), opts(&l).mode()), (3, eq::Mode::HqPlus));
+        l.pick(&MenuReq::Hq, Cmd::Hq(2), 0.0, 0.0);
+        assert_eq!((hq(&l), opts(&l).mode(), opts(&l).latency(44100.0)), (1, eq::Mode::HqEnhanced, 44));
+        // Options nothing reads yet are greyed out; LIN's crossfade ("Linear phase mod speed") and the analyzer's are not.
         let o = l.menu(&MenuReq::Options);
-        for label in ["Phase rotation", "Enhanced frequency", "High precision", "Smooth", "Ultra", "Adaptive", "Inherit bandwidth"] {
+        for label in ["Phase rotation", "Enhanced frequency", "High precision", "Smooth", "Adaptive", "Inherit bandwidth"] {
             assert!(!clickable(&o, label), "{label}");
         }
-        for label in ["Lock spare state", "-120dB", "Average mode", "Highest"] {
+        for label in ["Lock spare state", "-120dB", "Average mode", "Highest", "Ultra"] {
             assert!(clickable(&o, label), "{label}");
         }
         assert!(l.menu(&MenuReq::Phones).items.iter().all(|it| !it.clickable()));
