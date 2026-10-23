@@ -13,6 +13,7 @@
 
 pub mod abi;
 mod files;
+pub mod fxp;
 mod host;
 pub mod state;
 

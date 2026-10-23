@@ -1825,6 +1825,21 @@ impl App {
                     self.state.message = crate::presets::save_chosen(self, key, p);
                 }
             }
+            Then::ImportPreset(key) => {
+                if let Some(p) = file {
+                    self.state.message = crate::presets::import_chosen(self, key, p);
+                }
+            }
+            Then::RenamePreset(key, old) => {
+                if let Some(p) = file {
+                    self.state.message = crate::presets::rename_chosen(self, key, old, p);
+                }
+            }
+            Then::DeletePreset(key, path) => {
+                if reply == Reply::Button(Answer::Yes) {
+                    self.state.message = crate::presets::delete_chosen(self, key, path);
+                }
+            }
             Then::RackSample(row) => {
                 if let Some(p) = file {
                     crate::rack::sample_chosen(self, row, p);
@@ -2057,6 +2072,7 @@ impl App {
         self.midi_tick();
         self.mixer_tick();
         self.sync_effects();
+        crate::presets::pending_tick(self);
         self.params_tick();
         if self.loading.is_none() {
             self.sync_wrapped();
@@ -2201,6 +2217,10 @@ impl App {
                     }
                     Request::PresetStep(row, d) => {
                         self.state.message = crate::presets::run(self, crate::presets::PCmd::Step(row, d));
+                        continue;
+                    }
+                    Request::DropFile(row, path) => {
+                        self.file_on_plugin_window(row, path);
                         continue;
                     }
                     Request::Misc(row, m, v) => {
@@ -3558,6 +3578,11 @@ impl App {
         if ext == "flp" {
             return self.ask_discard("opening another project", crate::dialog::Next::Open(path));
         }
+        // A preset goes into the plugin under the mouse, or a new instance of its plugin (spec: plugins/presets.md).
+        if crate::presets::is_preset_file(&path) {
+            self.state.message = crate::presets::dropped(self, &path);
+            return self.invalidate();
+        }
         if path.is_dir() {
             return self.add_browser_folder(path);
         }
@@ -3629,26 +3654,43 @@ impl App {
         self.invalidate();
     }
 
+    /// The mouse pointer's screen position (physical px).
+    #[cfg(any(windows, target_os = "macos"))]
+    fn pointer_on_screen() -> Option<(i32, i32)> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::POINT;
+            let mut pt = POINT { x: 0, y: 0 };
+            (unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt) } != 0).then_some((pt.x, pt.y))
+        }
+        #[cfg(target_os = "macos")]
+        crate::plugin_window::pointer()
+    }
+
+    /// The hosted key whose plugin window is under the mouse pointer (docked or detached).
+    #[cfg(any(windows, target_os = "macos"))]
+    pub(crate) fn plugin_window_under_cursor(&self) -> Option<usize> {
+        let (x, y) = Self::pointer_on_screen()?;
+        self.plugins.row_at_screen(x, y)
+    }
+
     /// A browser sample released over a hosted plugin window (it sits above the main window, which keeps the mouse
     /// capture during the drag): the plugin gets the file as if it came from Explorer (on macOS only Lemon Sampler takes
     /// it, through its state). Returns whether it was one.
     #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn sample_to_plugin_window(&mut self, path: &str) -> bool {
-        #[cfg(windows)]
-        let (x, y) = {
-            use windows_sys::Win32::Foundation::POINT;
-            let mut pt = POINT { x: 0, y: 0 };
-            if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt) } == 0 {
-                return false;
-            }
-            (pt.x, pt.y)
-        };
-        #[cfg(target_os = "macos")]
-        let Some((x, y)) = crate::plugin_window::pointer() else { return false };
+        let Some((x, y)) = Self::pointer_on_screen() else { return false };
         let Some(row) = self.plugins.row_at_screen(x, y) else { return false };
         let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
+        let taken = self.plugins.drop_file(row, x, y, path, sampler);
+        self.sample_taken(row, path, sampler, taken);
+        true
+    }
+
+    /// Sample `path` went into row `row`'s plugin (`taken`) or not: a sampler channel takes its name, tags and path.
+    fn sample_taken(&mut self, row: usize, path: &str, sampler: bool, taken: bool) {
         let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned());
-        if self.plugins.drop_file(row, x, y, path, sampler) {
+        if taken {
             if sampler && row < self.state.project.channels.len() {
                 crate::history::load_sample(&mut self.state, row);
             }
@@ -3665,7 +3707,20 @@ impl App {
             self.state.message = Some("This plugin does not take dropped files".into());
         }
         self.invalidate();
-        true
+    }
+
+    /// A file dropped on a plugin window's frame (its title bar or strip, or an editor that takes no files; spec:
+    /// plugins/presets.md "Drag and drop"): a preset loads into the plugin, a sample into a sampler channel's.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn file_on_plugin_window(&mut self, row: usize, path: PathBuf) {
+        if crate::presets::is_preset_file(&path) {
+            self.state.message = crate::presets::load_into(self, row, &path);
+            return self.invalidate();
+        }
+        let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
+        let p = path.to_string_lossy().into_owned();
+        let taken = sampler && self.plugins.load_sample(row, &p);
+        self.sample_taken(row, &p, sampler, taken);
     }
 
     /// Load a theme: a `.flstheme` (spec ui/flstheme.md) or a Lemon Studio `theme.txt`. A `.flstheme` is also
@@ -11262,9 +11317,9 @@ mod tests {
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
-        // The all tab lists the roots with content, all closed.
+        // The all tab lists the roots with content and the preset store, all closed.
         let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
-        assert_eq!(labels, ["Current project", "Plugin database"]);
+        assert_eq!(labels, ["Current project", "Plugin database", "Plugin presets"]);
         // Project tab: Current project opened with its patterns (default like the screenshot), History above them.
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
         click(&mut app, &mut c, r0);
@@ -12195,7 +12250,7 @@ mod tests {
         // Esc clears the search and leaves the box.
         app.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(app.state.browser_search.is_empty() && !app.state.browser_search_focus);
-        assert_eq!(rows(&app.state).len(), 2);
+        assert_eq!(rows(&app.state).len(), 3);
         // Search box on top moves the list down.
         app.browser_cmd(crate::browser::BCmd::Toggle("top"));
         frame(&mut app, &mut c, None);
