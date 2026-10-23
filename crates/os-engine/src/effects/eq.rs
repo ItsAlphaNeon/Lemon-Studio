@@ -207,8 +207,8 @@ impl ParametricEq {
         &self.eq
     }
 
-    /// The delay the original reports, in frames: `3 N / 4` in LIN, 44 in HQ Enhanced, 0 otherwise. The engine has no
-    /// delay compensation yet, so the output comes this much late.
+    /// The delay the original reports, in frames: `3 N / 4` in LIN, 44 in HQ Enhanced, 0 otherwise. The engine
+    /// compensates it through `Effect::latency`.
     pub fn latency(&self) -> usize {
         self.eq.latency()
     }
@@ -218,6 +218,10 @@ impl Effect for ParametricEq {
     fn reset(&mut self) {
         self.eq.reset();
         self.eq.preroll();
+    }
+
+    fn latency(&self) -> usize {
+        self.eq.latency()
     }
 
     fn process(&mut self, buf: &mut [f32]) {
