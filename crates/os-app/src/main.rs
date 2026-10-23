@@ -103,6 +103,7 @@ mod arpeggiate;
 mod tapper;
 mod touch;
 mod record;
+mod recent;
 mod theme_adjust;
 mod theme_library;
 mod templates;

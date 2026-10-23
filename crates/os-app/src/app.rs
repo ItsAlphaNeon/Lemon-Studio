@@ -1486,6 +1486,7 @@ impl App {
                 s.file = Some(file);
                 s.message = Some(format!("Opened {}", path.display()));
                 crate::templates::remember(&path);
+                crate::recent::add(&path);
                 s.path = Some(path);
                 s.piano.reset();
                 s.playlist.reset();
@@ -1685,6 +1686,7 @@ impl App {
             crate::project_plugins::adopt_saved(&mut s.project, &proj);
             s.file = Some(file);
             crate::templates::remember(&target);
+            crate::recent::add(&target);
             s.path = Some(target);
             self.mark_saved();
         }
@@ -1699,11 +1701,13 @@ impl App {
         }
         let s = &mut self.state;
         let keep = (s.project.clone(), s.path.clone(), s.file.clone(), s.message.take(), self.saved.clone());
-        // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project").
-        let last = crate::templates::last_kept();
+        // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project"), nor a
+        // recent one (spec: ui/recent-projects.md §2).
+        let (last, recent) = (crate::templates::last_kept(), crate::recent::list());
         // A copy never warns about its size.
         self.write_project(target);
         crate::templates::restore_last(last);
+        crate::recent::restore(&recent);
         let s = &mut self.state;
         let done = match s.message.take() {
             Some(m) if m.starts_with("Saved") => Ok(()),
@@ -6259,6 +6263,15 @@ impl App {
         {
             return self.toggle_groups();
         }
+        // Alt+1 .. Alt+9, Alt+0: FILE's recent projects (spec: ui/recent-projects.md §2).
+        if let Key::Character(c) = key
+            && alt
+            && !ctrl
+            && !self.shift
+            && let Some(n) = crate::recent::alt_digit(c)
+        {
+            return self.act(Action::MenuItem(0, views::menus::RECENT_PICK + n));
+        }
         if self.plugin_find_key(key, ctrl) {
             return;
         }
@@ -7701,6 +7714,7 @@ impl App {
                 self.open_plugin_menu(crate::plugin_menu::Target::All, at);
             }
             (PATTERNS, i) if i >= PATTERN_PICK => crate::patterns::select(&mut self.state, (i - PATTERN_PICK) as u16),
+            (0, i) if i >= RECENT_PICK => self.open_recent(i - RECENT_PICK),
             (PATTERNS, i) if item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).is_some() => {
                 let cmd = item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).expect("checked");
                 if let Some(m) = self.pattern_cmd(cmd) {
@@ -7749,7 +7763,7 @@ impl App {
     /// A ▸ entry of the open dropdown (spec: ui/menus.md "Look"): its submenu, the app's own popup, opens to the right
     /// of the row as the popups' submenus do (kept on screen); the dropdown stays open under it.
     fn open_menu_sub(&mut self, menu: usize, i: usize) {
-        let Some(fill) = views::menus::item_at(menu, i).and_then(|it| views::menus::submenu(menu, it.label)) else { return };
+        let Some(fill) = views::menus::sub_at(menu, i) else { return };
         let at = self.hits.iter().rev().find(|h| h.action == Action::MenuSub(menu, i)).map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
         let items = fill(&self.state);
         self.state.playlist.popup = Some(crate::playlist::Popup { x: at.right(), y: at.y - 2.0, items, sub: None });
