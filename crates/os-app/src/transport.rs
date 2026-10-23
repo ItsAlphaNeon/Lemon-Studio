@@ -741,7 +741,7 @@ struct Queue {
     read: AtomicU64,
     /// Per tick: first sample, length in samples, tick (f64 bits), engine frame, and 1 for a held tick (paused: the
     /// position does not move through it).
-    ticks: Box<[[AtomicU64; 5]]>,
+    ticks: Box<[[AtomicU64; 6]]>,
     ticks_written: AtomicU64,
     /// The tick record the reader is in.
     ticks_read: AtomicU64,
@@ -777,7 +777,7 @@ impl Queue {
     }
 
     /// Feeder: appends one tick (call `has_room` first).
-    fn push(&self, s: &[f32], tick: u64, frame: u64, held: bool) {
+    fn push(&self, s: &[f32], tick: f64, frame: u64, held: bool, tick_frames: u64) {
         let w = self.written.load(Ordering::Relaxed);
         for (i, &v) in s.iter().enumerate() {
             self.samples[(w as usize + i) % QUEUE_SAMPLES].store(v.to_bits(), Ordering::Relaxed);
@@ -786,9 +786,10 @@ impl Queue {
         let rec = &self.ticks[tw as usize % QUEUE_TICKS];
         rec[0].store(w, Ordering::Relaxed);
         rec[1].store(s.len() as u64, Ordering::Relaxed);
-        rec[2].store((tick as f64).to_bits(), Ordering::Relaxed);
+        rec[2].store(tick.to_bits(), Ordering::Relaxed);
         rec[3].store(frame, Ordering::Relaxed);
         rec[4].store(u64::from(held), Ordering::Relaxed);
+        rec[5].store(tick_frames, Ordering::Relaxed);
         self.ticks_written.store(tw + 1, Ordering::Release);
         self.written.store(w + s.len() as u64, Ordering::Release);
     }
@@ -818,7 +819,8 @@ impl Queue {
             return None;
         }
         let rec = &self.ticks[at as usize % QUEUE_TICKS];
-        let (start, len) = (rec[0].load(Ordering::Relaxed), rec[1].load(Ordering::Relaxed).max(1));
+        // The samples a whole tick lasts: a block delay compensation cut short still moves at the song's pace.
+        let (start, len) = (rec[0].load(Ordering::Relaxed), 2 * rec[5].load(Ordering::Relaxed).max(1));
         // A held tick is heard at its start all through (the paused position stays put).
         let into = if rec[4].load(Ordering::Relaxed) != 0 { 0 } else { r.saturating_sub(start) };
         Some((rec[3].load(Ordering::Relaxed) + into / 2, f64::from_bits(rec[2].load(Ordering::Relaxed)) + into as f64 / len as f64))
@@ -873,9 +875,9 @@ impl Feeder {
                     self.queue.ended.store(true, Ordering::Release);
                     break;
                 }
-                Some((s, tick, frame, held)) => {
+                Some((s, tick, frame, held, tick_frames)) => {
                     frames += s.len() as u64 / 2;
-                    self.queue.push(s, tick, frame, held);
+                    self.queue.push(s, tick, frame, held, tick_frames);
                     self.queue.ended.store(e.finished(), Ordering::Release);
                 }
             }

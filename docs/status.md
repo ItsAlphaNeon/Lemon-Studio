@@ -61,6 +61,18 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   Lemon Studio
 - Not yet: 32-bit plugins, and Intel-only plugins on Apple silicon (they need a bridge)
 
+## 🚧 Plugin delay compensation
+
+- The delay a plugin reports (CLAP, VST3, VST2 and FL Studio's native plugins), as an instrument or in a mixer
+  slot, is made up on every other path through the mixer, sends and a slot's dry part included, so everything
+  meets in time
+- An export starts late by the whole delay, so the file shows none and keeps its length; live playback skips the
+  same amount, and the playhead follows what is heard
+- The mixer tracks' input and output latency settings are read from projects, count as FL Studio counts them, and
+  are saved back
+- Automation of a mixer track or slot behind late audio waits for it, as in FL Studio
+- Not yet: editing the latency settings, and sidechain paths (there are no sidechain inputs yet)
+
 ## ✅ Plugin management
 
 - Plugin menus everywhere a plugin is added. F8 lists instruments and effects: an effect goes to the
@@ -164,8 +176,7 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   for sample in the tests; Transient Processor has not been compared with FL 2026's exports yet
 - Lemon Parametric EQ plays FL's Parametric EQ 2 in every quality mode, in a project's mixer slots and as a plugin:
   plain, HQ Legacy, HQ+, HQ Enhanced and linear phase (LIN) with its sizes and crossfade speeds. The plugin tells the
-  host LIN's and HQ Enhanced's delay; Lemon Studio does not compensate it yet, so in a project those two modes come
-  out late
+  host LIN's and HQ Enhanced's delay, and Lemon Studio compensates it in a project's mixer slots as for any plugin
 - The sampler plays a project's sample settings (start and length, the sample file's loop, the sample
   effects, the channel filter, declicking) and each note's own pan and filter offsets
 - A file of 30 s or more loaded into a sampler channel turns its Keep on disk on (General settings ▸
@@ -300,4 +311,3 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 ## ❌ Not available yet
 
 - Audio editing
-- Plugin delay compensation

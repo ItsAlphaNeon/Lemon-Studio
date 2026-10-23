@@ -24,6 +24,11 @@ pub trait Effect: Send {
     fn reset(&mut self) {}
     /// The song's tempo in BPM (effects with tempo-based times).
     fn set_tempo(&mut self, _bpm: f64) {}
+    /// The delay the effect puts its output out late by, in samples (a look-ahead; spec: audio/delay-compensation.md).
+    /// The engine reads it after every `process` and delays the other paths to match. Default: none.
+    fn latency(&self) -> usize {
+        0
+    }
 }
 
 /// Creates a Lemon Studio effect for a slot plugin, if one exists for that plugin.

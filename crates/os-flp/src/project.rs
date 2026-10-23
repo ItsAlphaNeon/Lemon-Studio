@@ -682,6 +682,16 @@ fn major_version(events: &[Event], version: Option<usize>) -> u32 {
         .unwrap_or(26)
 }
 
+/// True when the program that saved the file is older than FL 12.8 (a file that does not say is not).
+fn before_12_8(events: &[Event], version: Option<usize>) -> bool {
+    let text = version.and_then(|i| events[i].data()).map(|d| decode_text(d, TextEnc::Ansi)).unwrap_or_default();
+    let mut parts = text.split('.').map(|p| p.trim_matches(char::from(0)).parse::<u32>().ok());
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(major), minor) => (major, minor.unwrap_or(0)) < (12, 8),
+        _ => false,
+    }
+}
+
 fn text_enc(events: &[Event], version: Option<usize>) -> TextEnc {
     if major_version(events, version) <= 11 { TextEnc::Ansi } else { TextEnc::Utf16 }
 }
@@ -1775,6 +1785,53 @@ fn track_flags(d: Option<&[u8]>) -> Option<u8> {
     d.filter(|d| d.len() >= 8).map(|d| d[4])
 }
 
+/// Flag 0x20 of a record written before FL 12.8: its one latency value is the output setting.
+const MX_FLAG_LATE_OUT: u8 = 0x20;
+
+/// A track record's output and input latency settings in milliseconds (spec: flp/layouts.md "A mixer track's record
+/// (event 236)"): at bytes 0..3 and 8..11 of a 12-byte record, the output setting alone at 0..3 of an 8-byte one. A
+/// record written before FL 12.8 (5 or 8 bytes) holds one value, with the other sign: the output setting when flag
+/// 0x20 is set (in a 5-byte record: its fifth byte is not 0), else the input setting.
+fn track_latency(d: &[u8], old: bool) -> (f32, f32) {
+    let single = |at: usize| d.get(at..at + 4).map_or(0.0, |b| f32::from_le_bytes(b.try_into().expect("four bytes")));
+    match d.len() {
+        n if n >= 12 => (single(0), single(8)),
+        n if n >= 8 && !old => (single(0), 0.0),
+        n if n >= 5 => {
+            let v = 0.0 - single(0);
+            let out = if n >= 8 { d[4] & MX_FLAG_LATE_OUT != 0 } else { d[4] != 0 };
+            if out { (v, 0.0) } else { (0.0, v) }
+        }
+        _ => (0.0, 0.0),
+    }
+}
+
+/// Record `d` (8 bytes or more) with the latency settings `(out, in)`: in its own form where that holds them (the one
+/// value of a record written before FL 12.8 when the other setting is 0, flag 0x20 left as it was when both are; the
+/// output setting alone in a later 8-byte record), else grown to the 12-byte record, its flags kept (a Lemon Studio
+/// choice: spec audio/delay-compensation.md "Lemon Studio").
+fn with_latency(d: &[u8], old: bool, (out, inp): (f32, f32)) -> Vec<u8> {
+    let mut r = d.to_vec();
+    if r.len() < 12 {
+        if !old && inp == 0.0 {
+            r[..4].copy_from_slice(&out.to_le_bytes());
+            return r;
+        }
+        if old && (out == 0.0 || inp == 0.0) {
+            r[..4].copy_from_slice(&(0.0 - out - inp).to_le_bytes());
+            if out != 0.0 || inp != 0.0 {
+                r[4] = (r[4] & !MX_FLAG_LATE_OUT) | if inp == 0.0 { MX_FLAG_LATE_OUT } else { 0 };
+            }
+            return r;
+        }
+        r.resize(12, 0);
+        r[4] &= !MX_FLAG_LATE_OUT;
+    }
+    r[..4].copy_from_slice(&out.to_le_bytes());
+    r[8..12].copy_from_slice(&inp.to_le_bytes());
+    r
+}
+
 fn with_flags(b: u8, m: &MixerTrack) -> u8 {
     let mut b = b & !(MX_FLAG_POLARITY | MX_FLAG_SWAP | MX_FLAG_SLOTS | MX_FLAG_ON);
     for (on, f) in [(m.polarity, MX_FLAG_POLARITY), (m.swap, MX_FLAG_SWAP), (m.slots_enabled, MX_FLAG_SLOTS), (m.enabled, MX_FLAG_ON)] {
@@ -1930,6 +1987,7 @@ fn plugin_record(slot: Option<(u16, u8)>) -> Vec<u8> {
 
 fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
     let params = l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[]);
+    let old = before_12_8(events, l.version);
     let mut out = Vec::new();
     // Track boundaries: header start of track n .. header start of track n+1.
     let starts: Vec<usize> = l
@@ -2007,6 +2065,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         }
         let flags = track_flags(m.flags.and_then(|i| events[i].data()));
         let flag = |f: u8, default: bool| flags.map_or(default, |b| b & f != 0);
+        let (latency_out, latency_in) = m.flags.and_then(|i| events[i].data()).map_or((0.0, 0.0), |d| track_latency(d, old));
         out.push(MixerTrack {
             index,
             name: m.name.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)),
@@ -2027,6 +2086,8 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             slot_on,
             slot_mix,
             eq,
+            latency_out,
+            latency_in,
             icon: m.icon.map(|i| int(&events[i]) as u16),
             origin: Some(index),
             ..MixerTrack::new(index)
@@ -2249,6 +2310,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     let l = scan(events)?;
     let enc = text_enc(events, l.version);
     let clen = clip_len(events, l.version);
+    let old_file = before_12_8(events, l.version);
     let mismatch = |what: &str, a: usize, b: usize| {
         ProjectError::Mismatch(format!("{what}: model has {a}, file has {b}"))
     };
@@ -3010,20 +3072,28 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 }
             }
         }
-        if (m.enabled, m.polarity, m.swap, m.slots_enabled) != (old.enabled, old.polarity, old.swap, old.slots_enabled) {
+        let latency = (m.latency_out, m.latency_in);
+        let relatency = latency != (old.latency_out, old.latency_in);
+        if relatency || (m.enabled, m.polarity, m.swap, m.slots_enabled) != (old.enabled, old.polarity, old.swap, old.slots_enabled) {
             if let Some(i) = ml.flags {
                 match track_flags(events[i].data()) {
-                    Some(b) => patch_bytes(&mut events[i], 4, &[with_flags(b, m)]),
-                    // A 5-byte record (FL 10 / 11) has no flags: it becomes the 8-byte record of FL 12, its latency kept
-                    // (spec: flp/layouts.md "A mixer track's record (event 236)").
+                    Some(b) if !relatency => patch_bytes(&mut events[i], 4, &[with_flags(b, m)]),
+                    Some(_) => {
+                        let mut r = with_latency(events[i].data().unwrap_or(&[]), old_file, latency);
+                        r[4] = with_flags(r[4], m);
+                        set_data(&mut events[i], r);
+                    }
+                    // A 5-byte record (FL 10 / 11) has no flags: it becomes the 8-byte record of FL 12, its latency kept in
+                    // the form the file's version reads (spec: flp/layouts.md "A mixer track's record (event 236)").
                     None => {
                         let d = events[i].data().unwrap_or(&[]);
-                        let mut r = [0u8; 8];
-                        let late = d.get(4).is_some_and(|&b| b != 0);
-                        r[..d.len().min(4)].copy_from_slice(&d[..d.len().min(4)]);
+                        let late = old_file && d.get(4).is_some_and(|&b| b != 0);
                         let base = if m.index == 0 { MX_FLAGS_MASTER } else { MX_FLAGS_INSERT };
-                        r[4] = with_flags(base | if late { 0x20 } else { 0 }, m);
-                        set_data(&mut events[i], r.to_vec());
+                        let mut r = vec![0u8; 8];
+                        r[4] = base | if late { MX_FLAG_LATE_OUT } else { 0 };
+                        let mut r = with_latency(&r, old_file, latency);
+                        r[4] = with_flags(r[4], m);
+                        set_data(&mut events[i], r);
                     }
                 }
             }
@@ -3808,6 +3878,8 @@ fn track_block_events(m: &MixerTrack, last: bool, enc: TextEnc) -> Vec<Event> {
         ev.push(Event::new(id::MX_NAME, Value::var(encode_text(n, enc))));
     }
     let mut flags = [0u8; 12];
+    flags[..4].copy_from_slice(&m.latency_out.to_le_bytes());
+    flags[8..].copy_from_slice(&m.latency_in.to_le_bytes());
     flags[4] = if m.index == 0 || last { MX_FLAGS_MASTER } else { MX_FLAGS_INSERT };
     let rt = if last && m.index > 0 { MX_SPECIAL_TRACK } else { m.index };
     flags[4] = with_flags(flags[4], m);
@@ -3896,6 +3968,8 @@ fn mixer_is_default(mixer: &[MixerTrack]) -> bool {
             && t.pan.is_none_or(|v| v == 0.0)
             && t.stereo_separation.is_none_or(|v| v == 0.0)
             && t.routes == if t.index == 0 { Vec::<u16>::new() } else { vec![0] }
+            && t.latency_out == 0.0
+            && t.latency_in == 0.0
     })
 }
 
@@ -5025,13 +5099,69 @@ mod tests {
         let back = load(&file).unwrap();
         let t = &back.mixer[2];
         assert_eq!((t.enabled, t.polarity, t.swap, t.slots_enabled), (true, false, false, true));
+        assert_eq!((t.latency_out, t.latency_in), (-5.0, 0.0));
         let mut edited = back.clone();
         edited.mixer[2].polarity = true;
         apply(&edited, &mut file).unwrap();
         let ev = events_of(&file).unwrap();
         let d = ev.iter().filter(|e| e.id == id::MX_FLAGS).nth(2).unwrap().data().unwrap();
-        assert_eq!(d, &[0x00, 0x00, 0xa0, 0x40, 0x4C | 0x20 | 0x01, 0, 0, 0]);
+        // The file says it is from a later FL: the latency is written in that version's form, the output setting as is.
+        assert_eq!(d, &[0x00, 0x00, 0xa0, 0xc0, 0x4C | 0x01, 0, 0, 0]);
         assert_eq!(load(&file).unwrap().mixer, edited.mixer);
+        // In a file from before FL 12.8 the record keeps its one value, flag 0x20 standing for the fifth byte.
+        let mut r = vec![0u8; 8];
+        r[4] = 0x4C | 0x20;
+        assert_eq!(with_latency(&r, true, (-5.0, 0.0))[..5], [0x00, 0x00, 0xa0, 0x40, 0x4C | 0x20]);
+        r[4] = 0x4C;
+        assert_eq!(with_latency(&r, true, (0.0, 0.0))[4], 0x4C);
+    }
+
+    /// The two latency settings (spec: flp/layouts.md "A mixer track's record (event 236)"): written with new tracks,
+    /// read back, and written again where an edit changes them.
+    #[test]
+    fn track_latency_settings_round_trip() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..18).map(MixerTrack::new).collect();
+        p.mixer[17].routes.clear();
+        (p.mixer[3].latency_out, p.mixer[3].latency_in) = (-3.49, 5.0);
+        let mut file = create(&p).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!((back.mixer[3].latency_out, back.mixer[3].latency_in), (-3.49, 5.0));
+        assert_eq!((back.mixer[2].latency_out, back.mixer[2].latency_in), (0.0, 0.0));
+        let mut edited = back.clone();
+        edited.mixer[3].latency_out = 0.0;
+        (edited.mixer[4].latency_in, edited.mixer[4].polarity) = (-2.0, true);
+        apply(&edited, &mut file).unwrap();
+        assert_eq!(load(&file).unwrap().mixer, edited.mixer);
+        let ev = events_of(&file).unwrap();
+        let d = ev.iter().filter(|e| e.id == id::MX_FLAGS).nth(4).unwrap().data().unwrap();
+        assert_eq!((&d[..4], d[4] & 0x01, &d[8..]), (&0f32.to_le_bytes()[..], 0x01, &(-2f32).to_le_bytes()[..]));
+    }
+
+    /// The record forms before FL 12.9: an 8-byte record of FL 12.8 or later holds the output setting; one written
+    /// earlier, and a 5-byte record, hold one value with the other sign, the output setting when flag 0x20 (the
+    /// 5-byte record's fifth byte) is set. Writing keeps the form where it holds the settings.
+    #[test]
+    fn older_track_latency_records() {
+        let five = 5f32.to_le_bytes();
+        let rec = |tail: &[u8]| [&five[..], tail].concat();
+        assert_eq!(track_latency(&rec(&[0x2C, 0, 0, 0]), true), (-5.0, 0.0));
+        assert_eq!(track_latency(&rec(&[0x0C, 0, 0, 0]), true), (0.0, -5.0));
+        assert_eq!(track_latency(&rec(&[0x0C, 0, 0, 0]), false), (5.0, 0.0));
+        assert_eq!(track_latency(&rec(&[1]), true), (-5.0, 0.0));
+        assert_eq!(track_latency(&rec(&[0]), true), (0.0, -5.0));
+        assert_eq!(track_latency(&rec(&[0x0C, 0, 0, 0, 0, 0, 0xA0, 0xC0]), true), (5.0, -5.0));
+        // Written back.
+        let old = rec(&[0x0C, 0, 0, 0]);
+        assert_eq!(with_latency(&old, true, (-2.0, 0.0)), [&2f32.to_le_bytes()[..], &[0x2C, 0, 0, 0]].concat());
+        assert_eq!(with_latency(&old, true, (0.0, -2.0)), [&2f32.to_le_bytes()[..], &[0x0C, 0, 0, 0]].concat());
+        assert_eq!(with_latency(&old, false, (-2.0, 0.0)), [&(-2f32).to_le_bytes()[..], &[0x0C, 0, 0, 0]].concat());
+        let both = with_latency(&rec(&[0x2C, 0, 0, 0]), true, (-2.0, 1.0));
+        assert_eq!(both.len(), 12);
+        assert_eq!(track_latency(&both, true), (-2.0, 1.0));
+        assert_eq!(both[4], 0x0C);
     }
 
     /// Sends stored the old way (FL 24.1 and before: kind 0x1F, id 64 + destination) are read, and edits keep that

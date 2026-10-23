@@ -76,23 +76,21 @@ fn parametric_eq_matches_fl_exports() {
         let fl = os_engine::sample::load(&path.with_extension("wav")).unwrap();
         let in_16_bit = fl.left.iter().chain(&fl.right).all(|&v| (f64::from(v) / STEP_16).fract() == 0.0);
         let limit = if in_16_bit { 20.0 * STEP_16.log10() + 1e-9 } else { LIMIT_DB };
-        // The engine has no delay compensation yet: a delaying mode leaves its output late by its delay, which FL's
-        // export has skipped.
-        let late = eqs.iter().map(|o| o.latency(f64::from(fl.rate))).max().unwrap_or(0);
         let mut library = SampleLibrary::new(SampleLibrary::default_factory_dir());
         let ours = Engine::new(&project, &mut library, fl.rate, PlayMode::Song).render_all(512);
-        let frames = (ours.len() / 2).saturating_sub(late).min(fl.frames());
+        // The render skips the slots' delay as FL's export does (spec: audio/delay-compensation.md).
+        let frames = (ours.len() / 2).min(fl.frames());
         let mut worst = [0.0f64; 2];
         for i in 0..frames {
             for (c, theirs) in [&fl.left, &fl.right].into_iter().enumerate() {
-                let d = (f64::from(ours[2 * (i + late) + c]) - f64::from(theirs[i])).abs();
+                let d = (f64::from(ours[2 * i + c]) - f64::from(theirs[i])).abs();
                 worst[c] = worst[c].max(d);
             }
         }
         let db = worst.map(|d| if d > 0.0 { 20.0 * d.log10() } else { f64::NEG_INFINITY });
         let modes: Vec<Mode> = eqs.iter().map(|o| o.mode()).collect();
         eprintln!(
-            "{name}: {modes:?}, {} Hz{}, {frames} frames (FL {}, ours {}, late {late}): {:.1} / {:.1} dB",
+            "{name}: {modes:?}, {} Hz{}, {frames} frames (FL {}, ours {}): {:.1} / {:.1} dB",
             fl.rate,
             if in_16_bit { ", 16-bit" } else { "" },
             fl.frames(),

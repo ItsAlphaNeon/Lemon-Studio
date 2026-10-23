@@ -1323,6 +1323,10 @@ pub struct MixerTrack {
     /// The three-band equaliser as stored, per band `[gain, frequency, width]`: gain -1800..=1800 in 0.01 dB,
     /// frequency and width 0..=65536 (spec: audio/mixer.md "Equaliser"). Band 1 low shelf, 2 peaking, 3 high shelf.
     pub eq: [[i32; 3]; 3],
+    /// The track's output and input latency settings in milliseconds, either sign, 0 = none (event 236; spec:
+    /// flp/layouts.md "A mixer track's record", audio/delay-compensation.md "Settings").
+    pub latency_out: f32,
+    pub latency_in: f32,
     /// The track's icon (event 95) as the file numbers it; `None` = no icon (spec: flp/events/mixer.md "Track blocks",
     /// flp/engine-events.md "The mixer"). It stays with its track; Lemon Studio does not draw it.
     pub icon: Option<u16>,
@@ -1353,6 +1357,8 @@ impl PartialEq for MixerTrack {
             slot_on,
             slot_mix,
             eq,
+            latency_out,
+            latency_in,
             icon,
             origin: _,
         } = self;
@@ -1372,6 +1378,8 @@ impl PartialEq for MixerTrack {
             && *slot_on == o.slot_on
             && *slot_mix == o.slot_mix
             && *eq == o.eq
+            && *latency_out == o.latency_out
+            && *latency_in == o.latency_in
             && *icon == o.icon
     }
 }
@@ -1399,6 +1407,8 @@ impl MixerTrack {
             slot_on: [true; 10],
             slot_mix: [1.0; 10],
             eq: EQ_DEFAULT,
+            latency_out: 0.0,
+            latency_in: 0.0,
             icon: None,
             origin: None,
         }
