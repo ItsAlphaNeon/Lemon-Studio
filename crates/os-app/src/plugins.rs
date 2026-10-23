@@ -248,10 +248,25 @@ pub fn builtin() -> Vec<Available> {
 }
 
 /// Lemon Parametric EQ, compiled in the same way: offered for every mixer slot, and it plays the slots a project
-/// saved with the original EQ (spec: plugins/lemon-parametric-eq-2.md §8).
+/// saved with the original EQ (spec: plugins/lemon-parametric-eq-2.md §8). Then Lemon Studio's other effects
+/// (`LINKED_EFFECTS`), compiled in too, so they need no plugin file either.
 pub fn builtin_effects() -> Vec<Available> {
-    static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
-    linked(&LIB, &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_EQ)
+    static LIBS: [OnceLock<Option<Arc<os_clap::Library>>>; 1 + LINKED_EFFECTS.len()] = [const { OnceLock::new() }; 1 + LINKED_EFFECTS.len()];
+    let entries: [*const std::ffi::c_void; 1 + LINKED_EFFECTS.len()] = [
+        &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_limiter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_reverb::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_delay::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_soft_clipper::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_fast_distortion::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_balance::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_stereo_enhancer::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_transient_processor::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_chorus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_stereo_shaper::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+    ];
+    let names = std::iter::once(LEMON_EQ).chain(LINKED_EFFECTS);
+    LIBS.iter().zip(entries).zip(names).flat_map(|((lib, entry), name)| linked(lib, entry, name)).collect()
 }
 
 /// The plugins of a CLAP entry table linked into this program.
@@ -1183,6 +1198,21 @@ pub fn retired_count() -> usize {
 pub const LEMON_SAMPLER: &str = "Lemon Sampler";
 /// Name of Lemon Studio's parametric EQ plugin.
 pub const LEMON_EQ: &str = "Lemon Parametric EQ";
+/// Lemon Studio's effects compiled in besides the EQ (`builtin_effects`, in this order). They have no file plugin of
+/// their own to be stored as, so a project stores them wrapped, as it stored their plugin files
+/// (`project_plugins::is_wrapped`).
+pub const LINKED_EFFECTS: [&str; 10] = [
+    "Lemon Limiter",
+    "Lemon Reverb",
+    "Lemon Delay",
+    "Lemon Soft Clipper",
+    "Lemon Fast Distortion",
+    "Lemon Balance",
+    "Lemon Stereo Enhancer",
+    "Lemon Transient Processor",
+    "Lemon Chorus",
+    "Lemon Stereo Shaper",
+];
 /// The plugin name a project file stores for the parametric EQ (file-format identifier, kept for interop): slots
 /// with it are played by Lemon Parametric EQ (spec: plugins/lemon-parametric-eq-2.md §8).
 pub const EQ_FILE_NAME: &str = "Fruity Parametric EQ 2";
