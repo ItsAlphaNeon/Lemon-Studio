@@ -153,6 +153,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   VST3 and CLAP plugins; a project's Fruity Soft Clipper, Fruity Fast Dist, Fruity Balance, Fruity Stereo Enhancer and
   Transient Processor play through the same sound in the mixer. The first four match FL Studio 2026's exports sample
   for sample in the tests; Transient Processor has not been compared with FL 2026's exports yet
+- A project's Fruity Chorus and Fruity Stereo Shaper play in the mixer through Lemon Studio's recreations, the
+  Stereo Shaper's difference output included (added to the track it names, on time, as Lemon Studio has no delay
+  compensation yet). Neither has been compared with FL Studio 2026's exports yet
 - The sampler plays a project's sample settings (start and length, the sample file's loop, the sample
   effects, the channel filter, declicking) and each note's own pan and filter offsets
 - A file of 30 s or more loaded into a sampler channel turns its Keep on disk on (General settings ▸

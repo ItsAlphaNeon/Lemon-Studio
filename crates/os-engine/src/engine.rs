@@ -2817,11 +2817,13 @@ impl Engine {
             let rate = self.rate;
             let (dry, l, r) = (&mut self.fx_dry, &mut self.scratch.0, &mut self.scratch.1);
             let busy = (&mut self.busy_until, self.busy_wait, self.exporting, &mut self.missed);
+            let bus = &mut self.bus;
             let track = &mut self.tracks[t];
             // A slot runs when its own switch is on and the track's slots are enabled (spec: audio/mixer.md).
             if track.slots_enabled && if t == 0 { self.master_fx } else { self.insert_fx } {
                 for fx in &mut track.effects {
-                    run_slot(fx, &mut buf, rate, limit, song, dry, l, r, (&mut *busy.0, busy.1, busy.2, &mut *busy.3));
+                    let extra = (t, &track.routes[..], &mut bus[..]);
+                    run_slot(fx, &mut buf, rate, limit, song, dry, l, r, (&mut *busy.0, busy.1, busy.2, &mut *busy.3), extra);
                 }
             }
             track.eq.process(&mut buf);
@@ -3175,6 +3177,11 @@ fn blackman(t: f64, w: f64) -> f64 {
 /// One tick of a mixer slot over interleaved `buf`: skipped when its switch is off, blended with the dry signal by its
 /// dry level, which glides to its mix level by at most `limit` a sample (spec: audio/mixer.md "An effect slot", "A
 /// slot's mix level while it moves"). A slot at mix 0 still runs its effect.
+///
+/// `(t, routes, bus)`: the slot's track, its routes and the tracks' inputs, for an own effect's extra output, which is
+/// added to the input of one of the track's outputs (spec: audio/sidechain.md "Extra output"). Lemon Studio has no
+/// delay compensation, so it is not delayed; it is connected from the first tick (the cleaner choice of
+/// audio/quirks.md for FL's late connection).
 #[allow(clippy::too_many_arguments)]
 fn run_slot(
     fx: &mut FxSlot,
@@ -3186,6 +3193,7 @@ fn run_slot(
     l: &mut Vec<f32>,
     r: &mut Vec<f32>,
     (until, wait, export, missed): (&mut Option<Instant>, Duration, bool, &mut u64),
+    (t, routes, bus): (usize, &[Route], &mut [Vec<f32>]),
 ) {
     let n = buf.len() / 2;
     let ramp = fx.dry.block(os_dsp::mixer::dry_level(fx.mix), n, limit);
@@ -3203,7 +3211,22 @@ fn run_slot(
             if fresh {
                 e.reset();
             }
-            e.process(buf)
+            e.process(buf);
+            if let Some((k, signal)) = e.extra() {
+                // On a track routed nowhere the extra output joins the track's own audio behind the effect, or the dry
+                // part when the slot's mix level is below 100 %.
+                let dest = output(routes, t, k);
+                let into: &mut [f32] = if dest != t {
+                    &mut bus[dest][..]
+                } else if blend {
+                    &mut dry[..]
+                } else {
+                    &mut *buf
+                };
+                for (d, s) in into.iter_mut().zip(signal) {
+                    *d += *s;
+                }
+            }
         }
         Fx::Hosted(h) => {
             // An instance still busy elsewhere after the tick's wait passes the sound through for this tick (a
@@ -3231,6 +3254,19 @@ fn run_slot(
     if blend {
         os_dsp::mixer::slot_blend(buf, dry, ramp);
     }
+}
+
+/// Output `k` (from 1) of track `t`: the tracks it is routed to in track order, a number past the end meaning the last
+/// one; a track routed nowhere (the master) is its own only output (spec: audio/sidechain.md "Settings").
+fn output(routes: &[Route], t: usize, k: usize) -> usize {
+    let mut at = None;
+    for _ in 0..k.max(1) {
+        match routes.iter().map(|r| r.dest).filter(|&d| at.is_none_or(|a| d > a)).min() {
+            Some(d) => at = Some(d),
+            None => break,
+        }
+    }
+    at.unwrap_or(t)
 }
 
 /// Hands one note event to an instrument at frame `off` of its next block. `shift`: the channel's pitch in semitones;
@@ -5917,6 +5953,40 @@ mod tests {
         let mut peaks = Vec::new();
         e.take_track_peaks(&mut peaks);
         assert!(peaks[1][0] > 0.0 && peaks[0][0] > 0.0 && peaks[2][0] == 0.0, "track meters: {peaks:?}");
+    }
+
+    /// spec: audio/sidechain.md "Extra output", plugins/fruity-stereo-shaper.md "Difference output": a Stereo Shaper's
+    /// difference goes to the n-th track its track is routed to (in track order, a number past the end meaning the
+    /// last); on the master, which is routed nowhere, it joins the master's own audio, or the dry part below 100 % mix.
+    #[test]
+    fn a_stereo_shapers_difference_output_reaches_its_track() {
+        use crate::effects::stereo_shaper::Settings;
+        let plain = render_with(&insert_project(), false);
+        assert!(peak(&plain, 0) > 0.01);
+        let same = |a: &[f32], b: &[f32], k: f32| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - k * y).abs() < 1e-6);
+        // The matrix at zero: what is heard is the difference (the whole input), wherever it goes.
+        let shaper = |difference: i32| os_model::SlotPlugin {
+            name: "Fruity Stereo Shaper".into(),
+            state: Settings { v: [0, 0, 0, 0, 0, 0, difference, 1] }.to_state(),
+        };
+        let mut p = insert_project();
+        p.mixer[1].routes = vec![2, 0];
+        p.mixer[1].send_levels = vec![(2, 0.0)];
+        p.mixer[1].slots[0] = Some(shaper(0));
+        assert_eq!(peak(&render_with(&p, false), 0), 0.0, "no difference output");
+        // Output 1 is the master, 2 is track 2 (at level 0, so only the difference reaches it), 3 and on also track 2.
+        for k in [1, 2, 3, 50] {
+            p.mixer[1].slots[0] = Some(shaper(k));
+            assert!(same(&render_with(&p, false), &plain, 1.0), "difference output {k}");
+        }
+        p.mixer[1].slot_on[0] = false;
+        assert!(same(&render_with(&p, false), &plain, 1.0), "a slot that is off passes its input and nothing else");
+        // On the master: behind the effect, or in the dry part at mix 0 (the input twice).
+        let mut p = insert_project();
+        p.mixer[0].slots[0] = Some(shaper(1));
+        assert!(same(&render_with(&p, false), &plain, 1.0));
+        p.mixer[0].slot_mix[0] = 0.0;
+        assert!(same(&render_with(&p, false), &plain, 2.0));
     }
 
     /// spec: audio/gain-laws.md "Panning law: Triangular": event 23 = 2 changes the channel pan and the mixer track
