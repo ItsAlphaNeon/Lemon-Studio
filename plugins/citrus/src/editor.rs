@@ -394,15 +394,17 @@ impl Logic {
         self.used = patch::usage(&self.st).0;
     }
 
-    /// Timer: a drag's edit reaches the audio thread, a state replaced from outside is read again. True when the editor
-    /// has to repaint.
+    /// Timer: a drag's edit reaches the audio thread, a state replaced from outside is read again, the keyboard follows
+    /// the notes playing. True when the editor has to repaint.
     pub fn poll(&mut self) -> bool {
         self.flush();
+        let playing = self.params.playing.each_ref().map(|a| a.load(Ordering::Relaxed));
+        let keys = std::mem::replace(&mut self.view.playing, playing) != playing && !self.view.no_keys;
         if self.params.state_version.load(Ordering::Acquire) != self.version {
             self.reload();
             return true;
         }
-        false
+        keys
     }
 
     /// An edit: the edited state becomes the plugin's at once and the audio thread plays it. During a drag its patch
@@ -2210,6 +2212,20 @@ mod tests {
         let v = l.params.state_version.load(Ordering::Acquire);
         assert!(!l.params.edited(v - 1, Vec::new(), Patch::new(st)));
         assert_eq!(saved(&l).name, "Loaded");
+    }
+
+    /// The keyboard shows the notes the host plays.
+    #[test]
+    fn keyboard_shows_host_notes() {
+        let mut l = logic();
+        assert!(!l.poll());
+        l.params.playing[0].store(1 << 60, Ordering::Relaxed);
+        assert!(l.poll(), "a note on repaints");
+        assert!(!l.poll());
+        assert_eq!(l.view.playing, [1 << 60, 0]);
+        l.params.playing[0].store(0, Ordering::Relaxed);
+        assert!(l.poll(), "a note off repaints");
+        assert_eq!(l.view.playing, [0, 0]);
     }
 
     /// The keyboard plays notes and hides; the header opens the info page.

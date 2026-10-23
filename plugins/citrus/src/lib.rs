@@ -93,6 +93,9 @@ pub struct CitrusParams {
     pub edit: Mutex<Option<(u64, patch::Patch)>>,
     /// Notes the editor's testing keyboard plays itself (key, on).
     pub previews: Mutex<Vec<(u8, bool)>>,
+    /// The keys held down, the host's notes and the testing keyboard's (bit `k % 64` of word `k / 64` for key `k`),
+    /// as of the audio thread's last block: the editor's keyboard shows them.
+    pub playing: [AtomicU64; 2],
     #[id = "modx"]
     pub mod_x: FloatParam,
     #[id = "mody"]
@@ -106,6 +109,7 @@ impl Default for CitrusParams {
             state_version: AtomicU64::new(1),
             edit: Mutex::new(None),
             previews: Mutex::new(Vec::new()),
+            playing: [AtomicU64::new(0), AtomicU64::new(0)],
             mod_x: FloatParam::new("Mod X", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }),
             mod_y: FloatParam::new("Mod Y", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }),
         }
@@ -232,6 +236,14 @@ impl CitrusPlugin {
         }
     }
 
+    /// The held keys for the editor.
+    fn show_playing(&self) {
+        let bits = playing_bits(self.held.iter().map(|h| h.note));
+        for (a, b) in self.params.playing.iter().zip(bits) {
+            a.store(b, Ordering::Relaxed);
+        }
+    }
+
     /// A note's levels. The host sends FL's velocity byte / 128; the channel's volume is the host's to apply (after the
     /// plugin, as for Lemon Studio's other instruments), so the voice takes the velocity's level alone.
     fn levels(&self, note: u8, velocity: f32) -> Levels {
@@ -282,6 +294,7 @@ impl Plugin for CitrusPlugin {
     fn reset(&mut self) {
         self.engine.panic();
         self.held.clear();
+        self.show_playing();
     }
 
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
@@ -331,7 +344,10 @@ impl Plugin for CitrusPlugin {
                         self.engine.bend(h.id, l.pitch);
                     }
                 }
-                NoteEvent::MidiCC { cc: 120 | 123, .. } => self.engine.all_off(),
+                NoteEvent::MidiCC { cc: 120 | 123, .. } => {
+                    self.engine.all_off();
+                    self.held.clear();
+                }
                 _ => {}
             }
         }
@@ -339,6 +355,7 @@ impl Plugin for CitrusPlugin {
             let (left, right) = out.split_at_mut(1);
             self.engine.render(&mut left[0][at..len], &mut right[0][at..len]);
         }
+        self.show_playing();
         if self.engine.voices() > 0 { ProcessStatus::KeepAlive } else { ProcessStatus::Normal }
     }
 }
@@ -364,9 +381,24 @@ nih_export_clap!(CitrusPlugin);
 nih_export_vst3!(CitrusPlugin);
 os_plugkit::linked_clap_entry!(CitrusPlugin);
 
+/// Keys as [`CitrusParams::playing`] holds them.
+fn playing_bits(notes: impl Iterator<Item = u8>) -> [u64; 2] {
+    let mut bits = [0; 2];
+    for k in notes.filter(|&k| k < 128) {
+        bits[usize::from(k / 64)] |= 1 << (k % 64);
+    }
+    bits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_keys_as_bits() {
+        assert_eq!(playing_bits([].into_iter()), [0, 0]);
+        assert_eq!(playing_bits([0, 63, 64, 127, 60, 60].into_iter()), [1 | 1 << 63 | 1 << 60, 1 | 1 << 63]);
+    }
 
     /// A Sytrus state goes into a plugin state and comes back byte for byte; an empty one stands for the default patch.
     #[test]

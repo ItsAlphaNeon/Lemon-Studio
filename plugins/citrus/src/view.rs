@@ -153,6 +153,8 @@ pub struct ViewState {
     pub cover: Cover,
     /// The key the testing keyboard holds.
     pub key: Option<u8>,
+    /// The keys playing, the host's notes too (as [`crate::CitrusParams::playing`]).
+    pub playing: [u64; 2],
     /// Per page: the articulator page's target tab and source tab.
     pub target: [usize; PAGES],
     pub part: [usize; PAGES],
@@ -1369,7 +1371,7 @@ fn keyboard(ui: &mut Ui) {
     for black in [false, true] {
         for k in (FIRST_KEY..=LAST_KEY).filter(|&k| is_black(k) == black) {
             let r = key_rect(k);
-            let held = ui.st.key == Some(k);
+            let held = ui.st.key == Some(k) || ui.st.playing[usize::from(k / 64)] >> (k % 64) & 1 != 0;
             let fill = match (black, held) {
                 (false, true) => ACCENT,
                 (true, true) => brand::DEEP,
