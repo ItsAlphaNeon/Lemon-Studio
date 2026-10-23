@@ -6,7 +6,8 @@
 //! for the plug-in), component handler, plug frame, memory stream, event list and parameter changes.
 //!
 //! Each object implements one interface (its first vtable), so a pointer to the object is that interface's pointer.
-// spec: plugins/vst3-hosting.md (§4 setup, §5 processing, §6 editor, §7 parameters, §8 state)
+//! The context menus the component handler makes are in `context_menu`.
+// spec: plugins/vst3-hosting.md (§4 setup, §5 processing, §6 editor, §7 parameters, §8 state, §9 context menus)
 // The binding's COM macros end statements with `;` inside expressions.
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
@@ -26,6 +27,8 @@ use vst3_sys::vst::{
     Event, IAttributeList, IComponentHandler, IEventList, IHostApplication, IMessage, IParamValueQueue, IParameterChanges,
 };
 use vst3_sys::{c_void, ComInterface, IID, VST3};
+
+use crate::context_menu::IComponentHandler3;
 
 /// One reference to a host object we created: released when dropped.
 pub struct Com<T: IUnknown> {
@@ -107,6 +110,13 @@ pub struct Shared {
     pub restart: AtomicI32,
     /// Size the editor asked for (`resizeView`).
     pub size: Mutex<Option<(i32, i32)>>,
+    /// Ids of the parameters that can be automated (`kCanAutomate`): their context menus get the host's entries.
+    pub automatable: Mutex<Vec<u32>>,
+    /// Parameters the host's "Create automation clip" entry was picked for, for the app.
+    pub automate: Mutex<Vec<u32>>,
+    /// The menu the plug-in asked the host to pop up (spec §9), with the host's references to its targets. Plug-in
+    /// objects: used on the UI thread only.
+    pub menu: Mutex<Option<crate::context_menu::Popup>>,
     /// Raised with everything above and when the audio thread leaves work for the UI thread.
     pub attention: Arc<os_host::Attention>,
 }
@@ -323,9 +333,10 @@ impl IAttributeList for AttributeList {
 
 // ---- component handler ----
 
-#[VST3(implements(IComponentHandler))]
+/// Also `IComponentHandler3`: context menus (`context_menu`).
+#[VST3(implements(IComponentHandler, IComponentHandler3))]
 pub struct Handler {
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
 }
 
 impl Handler {

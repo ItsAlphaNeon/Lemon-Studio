@@ -10,6 +10,7 @@
 //! methods, under the instance's mutex.
 // spec: plugins/vst3-hosting.md
 
+mod context_menu;
 mod host;
 pub mod preset;
 
@@ -730,12 +731,20 @@ impl Plugin {
     fn refresh_param_ids(&mut self) {
         self.param_ids.clear();
         let Some(c) = &self.controller else { return };
+        // The parameters whose context menus get "Create automation clip" (spec §9).
+        let mut automatable = Vec::new();
         unsafe {
             for i in 0..c.get_parameter_count() {
                 let mut info: ParameterInfo = std::mem::zeroed();
                 let ok = c.get_parameter_info(i, &mut info) == kResultOk;
                 self.param_ids.push(if ok { (info.id, info.step_count.max(0)) } else { (u32::MAX, 0) });
+                if ok && info.flags & CAN_AUTOMATE != 0 {
+                    automatable.push(info.id);
+                }
             }
+        }
+        if let Ok(mut a) = self.shared.automatable.lock() {
+            *a = automatable;
         }
         self.midi_map.clear();
         if let Some(m) = c.cast::<dyn IMidiMapping>() {
@@ -1012,6 +1021,8 @@ impl Plugin {
     }
 
     pub fn close_editor(&mut self) {
+        // A menu the editor asked the host to pop up goes first: its targets are the editor's (spec §9).
+        context_menu::drop_popup(&self.shared);
         if let Some(v) = self.view.take() {
             unsafe {
                 v.removed();
@@ -1349,6 +1360,20 @@ impl os_host::Plugin for Plugin {
         self.shared.events.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
     }
 
+    /// "Create automation clip" picked in a context menu, from the plug-in's own menu or the host's popup (spec §9).
+    fn take_automation_requests(&mut self) -> Vec<u32> {
+        self.shared.automate.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    }
+
+    /// The menu the plug-in asked the host to pop up (spec §9), at its view point in pixels.
+    fn take_menu(&mut self) -> Option<os_host::Menu> {
+        context_menu::take(&self.shared, self.editor_scale)
+    }
+
+    fn menu_done(&mut self, id: u64, pick: Option<usize>) {
+        context_menu::done(&self.shared, id, pick);
+    }
+
     fn attention(&self) -> Option<Arc<os_host::Attention>> {
         Some(self.shared.attention.clone())
     }
@@ -1497,7 +1522,8 @@ impl os_engine::HostedEffect for Plugin {
 }
 
 impl Drop for Plugin {
-    /// Teardown in the documented order (spec §4.7).
+    /// Teardown in the documented order (spec §4.7). Closing the editor first also drops the host's references to a
+    /// popup menu's targets (spec §9).
     fn drop(&mut self) {
         self.close_editor();
         self.deactivate();

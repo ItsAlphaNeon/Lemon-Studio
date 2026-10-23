@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::guard::{self, Module};
-use crate::{Attention, Descriptor, HostedEffect, Instrument, Meter, ParamEvent, ParamInfo, Plugin, SharedPlugin};
+use crate::{Attention, Descriptor, HostedEffect, Instrument, Menu, Meter, ParamEvent, ParamInfo, Plugin, SharedPlugin};
 use os_engine::{ChannelLevels, ChannelVoicing, TransportInfo};
 
 /// A plugin instance of any format, called through the crash guard. Once its code crashed (this instance, or another
@@ -255,6 +255,12 @@ impl<P: Plugin> Plugin for Guarded<P> {
     }
     fn take_automation_requests(&mut self) -> Vec<u32> {
         self.run(Vec::new(), |p| p.take_automation_requests())
+    }
+    fn take_menu(&mut self) -> Option<Menu> {
+        self.run(None, |p| p.take_menu())
+    }
+    fn menu_done(&mut self, id: u64, pick: Option<usize>) {
+        self.run((), |p| p.menu_done(id, pick))
     }
     /// Its module's crash, else a stop the instance reports itself (a native plugin stops one instance when it raises
     /// an error it does not handle: spec plugins/fruity-abi.md, "Crash containment").

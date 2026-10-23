@@ -1127,6 +1127,9 @@ pub struct App {
     /// The open popup belongs to this row's detached plugin window: it is shown lifted above that window.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
     popup_lift: Option<usize>,
+    /// The open popup is a menu a hosted plugin asked for (`hosted` key, menu id): closed without a pick, the plugin is
+    /// told (`plugin_popup`).
+    pub(crate) plugin_menu: Option<(usize, u64)>,
     pub bars: Vec<Bar>,
     pub hover: Option<Action>,
     /// Action under the cursor while the left button is held (pressed look of buttons).
@@ -1358,6 +1361,7 @@ impl App {
             overlays: Vec::new(),
             canvas_off: (0, 0),
             popup_lift: None,
+            plugin_menu: None,
             bars: Vec::new(),
             hover: None,
             pressed: None,
@@ -2224,6 +2228,8 @@ impl App {
                 }
             }
         }
+        // A plugin's menu closed without a pick since the last tick.
+        self.plugin_menu_tick();
         #[cfg(plugin_windows)]
         {
             for r in requests {
@@ -2246,6 +2252,24 @@ impl App {
                     #[cfg(not(windows))]
                     Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) if self.plugins.owner == 0 => {
                         self.state.message = Some(off_text(PLUGIN_POPUPS));
+                        self.invalidate();
+                        continue;
+                    }
+                    #[cfg(not(windows))]
+                    Request::PluginMenu(row, m, _) if self.plugins.owner == 0 => {
+                        self.plugins.menu_done(row, m.id, None);
+                        self.state.message = Some(off_text(PLUGIN_POPUPS));
+                        self.invalidate();
+                        continue;
+                    }
+                    Request::PluginMenu(row, m, (x, y)) => {
+                        // The plugin's own menu (VST 3 context menu) as the app's popup, over its window docked or
+                        // detached (spec: plugins/vst3-hosting.md §9).
+                        let detached = self.plugins.window_of(row).is_some_and(|(_, d)| d);
+                        let at = self.screen_to_canvas(x, y);
+                        if self.show_plugin_menu(row, &m, at) {
+                            self.popup_lift = detached.then_some(row);
+                        }
                         self.invalidate();
                         continue;
                     }

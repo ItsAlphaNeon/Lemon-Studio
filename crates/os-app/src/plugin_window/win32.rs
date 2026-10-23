@@ -398,6 +398,13 @@ impl FrameWindow {
         unsafe { win_of(self.hwnd) }.map_or(1.0, |w| w.scale)
     }
 
+    /// A point of the editor (logical px from its top-left) on the screen (screen px): where a menu the plugin asked
+    /// for opens (spec: plugins/vst3-hosting.md §9).
+    pub fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32) {
+        let ay = self.state.borrow().area_y();
+        to_screen(self.hwnd, self.scale())(BORDER + x, ay + y)
+    }
+
     /// Redraws the frame at another DPI scale (same logical size). The editor inside is the caller's: plugins take
     /// their scale when the editor opens (spec: ui/ui-scaling.md §3).
     pub fn set_scale(&self, scale: f32) {
