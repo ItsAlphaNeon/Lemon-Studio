@@ -112,6 +112,11 @@ pub enum Target {
     /// A harmonic's bar (drag paints levels) and the harmonics' scroll bar.
     Harm(usize),
     HarmScroll,
+    /// The Level scaling dialog: its controls (centre, multiplier, offset, tension: vertical drag), its buttons
+    /// (Reset, Accept, close) and the rest of the surface, which it blocks.
+    ScaleCtl(usize),
+    ScaleBtn(usize),
+    Dialog,
     /// A control whose setting was not identified: it shows its hint and does nothing.
     Inert(&'static str),
     /// The info page or the block diagram: a click returns.
@@ -148,6 +153,12 @@ pub struct ViewState {
     pub tools: [bool; 4],
     /// The first harmonic the harmonics editor shows.
     pub harm_scroll: usize,
+    /// The curve view's selected points, by index.
+    pub selected: Vec<bool>,
+    /// The rubber band a Ctrl + drag on empty space draws.
+    pub band: Option<Rect>,
+    /// The Level scaling dialog, while it is open: centre, multiplier, offset, tension.
+    pub scale: Option<[f32; 4]>,
 }
 
 /// What a paint shows of the patch.
@@ -211,6 +222,9 @@ pub fn paint(c: &mut Canvas, m: &Model, st: &ViewState, hint: &str) -> Vec<Hit> 
             matrix(&mut ui);
             if !st.no_keys {
                 keyboard(&mut ui);
+            }
+            if let Some(v) = st.scale {
+                scale_dialog(&mut ui, v);
             }
         }
     }
@@ -811,9 +825,10 @@ fn tab(ui: &mut Ui, r: Rect, t: Target, label: &str, sel: bool, on: bool) {
     ui.hit(r, t);
 }
 
-/// Where the curve view draws its curve.
+/// Where the curve view draws its curve: time 0 half a pixel in, level 1 on the top edge, level 0 3.5 px above the
+/// bottom (FL's points, measured).
 pub fn curve_inner() -> Rect {
-    CURVE.inset(6.0)
+    Rect::new(CURVE.x + 0.5, CURVE.y, CURVE.w - 1.0, CURVE.h - 3.5)
 }
 
 /// The time the curve view spans: a map 0 .. 1, an envelope or LFO its length and a tenth more (at least one unit,
@@ -914,8 +929,73 @@ fn curve_view(ui: &mut Ui, c: &crate::curve::Curve) {
         let tg = Target::Point(i);
         let hr = Rect::new(x - 5.0, y - 5.0, 10.0, 10.0);
         let hot = ui.hot(hr, &tg);
-        ui.c.fill_circle(x, y, if hot { 4.0 } else { 3.0 }, if hot { TEXT } else { ink });
+        let fill = if hot { TEXT } else if ui.st.selected.get(i) == Some(&true) { SELECTED } else { ink };
+        ui.c.fill_circle(x, y, if hot { 4.0 } else { 3.0 }, fill);
         ui.hit(hr, tg);
+    }
+    if let Some(b) = ui.st.band {
+        ui.c.stroke_rrect(b, 0.0, 1.0, TEXT);
+    }
+}
+
+/// Where point `i` of `c` sits in the curve view.
+pub fn point_xy(c: &crate::curve::Curve, i: usize, span: f64) -> (f32, f32) {
+    (t_to_x(edit::times(c)[i], span), level_to_y(c.points[i].level))
+}
+
+/// A selected point's fill (FL's green, measured).
+const SELECTED: Color = Color::rgb(0xa8e44a);
+
+/// The Level scaling dialog over the page (FL's at 187, 40, 172 x 277) and its controls' ranges and defaults.
+pub const SCALE_DLG: Rect = Rect::new(187.0, 40.0, 172.0, 277.0);
+pub const SCALE_RANGE: [(f32, f32); 4] = [(0.0, 1.0), (-2.0, 2.0), (-1.0, 1.0), (-1.0, 1.0)];
+pub const SCALE_DEFAULT: [f32; 4] = [0.0, 1.0, 0.0, 0.0];
+pub const SCALE_NAMES: [&str; 4] = ["Center", "Multiplier", "Offset", "Tension"];
+const SCALE_BTNS: [&str; 3] = ["Reset", "Accept", "Close"];
+
+/// Its controls' centres and its buttons' rects, in surface px.
+pub fn scale_ctl(k: usize) -> Rect {
+    let (dx, dy) = [(40.0, 135.0), (91.0, 98.0), (130.0, 135.0), (40.0, 190.0)][k];
+    let (x, y) = (SCALE_DLG.x + dx, SCALE_DLG.y + dy);
+    if k == 3 { Rect::new(x - 14.0, y - 14.0, 28.0, 28.0) } else { Rect::new(x - 10.0, y - 45.0, 20.0, 90.0) }
+}
+
+pub fn scale_btn(k: usize) -> Rect {
+    let (dx, dy, w) = [(35.0, 255.0, 50.0), (135.0, 255.0, 50.0), (160.0, 12.0, 14.0)][k];
+    Rect::new(SCALE_DLG.x + dx - w / 2.0, SCALE_DLG.y + dy - 8.0, w, if k == 2 { 14.0 } else { 16.0 })
+}
+
+/// The Level scaling dialog: a panel blocking the surface, three faders, a knob and its buttons.
+fn scale_dialog(ui: &mut Ui, v: [f32; 4]) {
+    ui.hit(Rect::new(0.0, 0.0, W as f32, H as f32), Target::Dialog);
+    panel(ui, SCALE_DLG);
+    ui.c.text(LABEL, SCALE_DLG.x + 8.0, SCALE_DLG.y + 5.0, TEXT, "Level scaling");
+    for k in 0..4 {
+        let (lo, hi) = SCALE_RANGE[k];
+        let n = (v[k] - lo) / (hi - lo);
+        let r = scale_ctl(k);
+        let t = Target::ScaleCtl(k);
+        let hot = ui.hot(r, &t);
+        if k == 3 {
+            dial(ui, r.cx(), r.cy(), 12.0, n, true, ACCENT, hot);
+            ui.label(SMALL, r.cx(), r.bottom() + 6.0, DIM, SCALE_NAMES[k]);
+        } else {
+            let (top, bot) = (r.y + 6.0, r.bottom() - 6.0);
+            ui.c.fill_rect(Rect::span(r.cx() - 1.0, r.cx() + 1.0, top, bot), WELL);
+            let y = bot - (bot - top) * n.clamp(0.0, 1.0);
+            ui.c.fill_rect(Rect::new(r.cx() - 9.0, (y - 6.0).round(), 18.0, 12.0), if hot { EDGE.shade(0.15) } else { EDGE });
+            ui.c.fill_rect(Rect::new(r.cx() - 7.0, y.round(), 14.0, 1.0), TEXT);
+            ui.label(SMALL, r.cx(), r.y - 6.0, DIM, SCALE_NAMES[k]);
+        }
+        ui.hit(r, t);
+    }
+    for (k, l) in SCALE_BTNS.into_iter().enumerate() {
+        let r = scale_btn(k);
+        let t = Target::ScaleBtn(k);
+        let hot = ui.hot(r, &t);
+        ui.c.fill_rect(r, if hot { EDGE } else { WELL });
+        ui.c.text_center(SMALL, r, TEXT, if k == 2 { "x" } else { l });
+        ui.hit(r, t);
     }
 }
 

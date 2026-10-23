@@ -160,6 +160,219 @@ pub fn all_smooth(c: &mut Curve) {
     c.prepare();
 }
 
+/// Scale levels (FL's `Level scaling`): about centre `center`, the tension `tension` (-1 .. 1) bends the levels away
+/// from it (or towards it), then `mul` stretches them about it and `offset` moves them; clamped to 0 .. 1.
+pub fn scale_levels(c: &mut Curve, center: f32, mul: f32, offset: f32, tension: f32) {
+    let k = 1000f64.ln() * f64::from(tension);
+    let bend = |z: f64| if k.abs() < 1e-9 { z } else { (1.0 - (-k * z).exp()) / (1.0 - (-k).exp()) };
+    let cen = f64::from(center);
+    for p in c.points.iter_mut() {
+        let d = f64::from(p.level) - cen;
+        let room = 1.0 - cen;
+        let x1 = if room < 1e-9 { f64::from(p.level) } else { cen + d.signum() * room * bend(d.abs() / room) };
+        let x2 = cen + (x1 - cen) * f64::from(mul);
+        p.level = ((x2 + f64::from(offset)) as f32).clamp(0.0, 1.0);
+    }
+    c.prepare();
+}
+
+/// Smooth up abrupt changes: a zero-length segment (not the first) gets 0.04 time units from the segment before it
+/// (less when that one is shorter).
+pub fn smooth_abrupt(c: &mut Curve) {
+    for i in 2..c.points.len() {
+        if c.points[i].dist <= 0.0 && c.points[i - 1].dist > 0.0 {
+            let take = c.points[i - 1].dist.min(ABRUPT);
+            c.points[i - 1].dist -= take;
+            c.points[i].dist = take;
+        }
+    }
+    c.prepare();
+}
+
+/// The length Smooth up abrupt changes gives a jump.
+const ABRUPT: f32 = 0.04;
+
+/// A point's level as Type in value shows it: the double with 15 significant digits.
+pub fn level_text(l: f32) -> String {
+    let v = f64::from(l);
+    if v == 0.0 {
+        return "0".into();
+    }
+    let decimals = (14 - v.abs().log10().floor() as i32).max(0) as usize;
+    let s = format!("{v:.decimals$}");
+    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').into() } else { s }
+}
+
+/// A typed level: up to 1 the level, above 1 (or with `%`) a percentage; clamped to 0 .. 1. None when it does not
+/// read as a number.
+pub fn parse_level(text: &str) -> Option<f32> {
+    let t = text.trim();
+    let (num, pct) = match t.strip_suffix('%') {
+        Some(n) => (n.trim(), true),
+        None => (t, false),
+    };
+    let v: f64 = num.parse().ok().filter(|v: &f64| v.is_finite())?;
+    let v = if pct || v > 1.0 { v / 100.0 } else { v };
+    Some((v as f32).clamp(0.0, 1.0))
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Points selection (plugins/sytrus-editor.md §3.1). The first point is never removed or moved in time.
+
+/// The selection's stretches of neighbouring points, (first, last), the first point left out.
+fn runs(sel: &[bool]) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for (i, _) in sel.iter().enumerate().skip(1).filter(|(_, s)| **s) {
+        match out.last_mut() {
+            Some(r) if r.1 + 1 == i => r.1 = i,
+            _ => out.push((i, i)),
+        }
+    }
+    out
+}
+
+/// Removes points `a ..= b` with the markers on them; the markers after move back.
+fn remove_run(c: &mut Curve, a: usize, b: usize) {
+    c.points.drain(a..=b);
+    let k = (b - a + 1) as i32;
+    for m in [&mut c.decay, &mut c.loop_start, &mut c.sustain] {
+        if (a as i32..=b as i32).contains(m) {
+            *m = -1;
+        } else if *m > b as i32 {
+            *m -= k;
+        }
+    }
+}
+
+/// Inserts `pts` at index `i`; the markers from there on move along.
+fn insert_run(c: &mut Curve, i: usize, pts: &[Point]) {
+    c.points.splice(i..i, pts.iter().copied());
+    for m in [&mut c.decay, &mut c.loop_start, &mut c.sustain] {
+        if *m >= i as i32 {
+            *m += pts.len() as i32;
+        }
+    }
+}
+
+/// A map still ends at 1: the segments from point `from` on are shrunk to fit (Lemon Studio's choice).
+fn fit_map(c: &mut Curve, from: usize) {
+    if c.kind != MAP {
+        return;
+    }
+    let ts = times(c);
+    let (start, end) = (ts[from.min(ts.len() - 1)], ts.last().copied().unwrap_or(0.0));
+    if end > 1.0 && end > start {
+        let k = ((1.0 - start) / (end - start)) as f32;
+        for p in c.points.iter_mut().skip(from + 1) {
+            p.dist *= k;
+        }
+    }
+}
+
+/// How many points are selected.
+pub fn count(sel: &[bool]) -> usize {
+    sel.iter().filter(|s| **s).count()
+}
+
+/// The selected points, each with its own segment length.
+pub fn copy_points(c: &Curve, sel: &[bool]) -> Vec<Point> {
+    c.points.iter().zip(sel).filter(|(_, s)| **s).map(|(p, _)| *p).collect()
+}
+
+/// Deletes the selected points; the points after keep their times. Not when fewer than two points would be left.
+pub fn delete_points(c: &mut Curve, sel: &[bool]) -> bool {
+    let rs = runs(sel);
+    let gone: usize = rs.iter().map(|(a, b)| b - a + 1).sum();
+    if rs.is_empty() || c.points.len() - gone < 2 {
+        return false;
+    }
+    for &(a, b) in rs.iter().rev() {
+        let d: f32 = c.points[a..=b].iter().map(|p| p.dist).sum();
+        if let Some(next) = c.points.get_mut(b + 1) {
+            next.dist += d;
+        }
+        remove_run(c, a, b);
+    }
+    c.prepare();
+    true
+}
+
+/// Cut's removal: the selected points and the time they spanned go (the point after each stretch lands on the
+/// point before it).
+pub fn cut_points(c: &mut Curve, sel: &[bool]) -> bool {
+    let rs = runs(sel);
+    let gone: usize = rs.iter().map(|(a, b)| b - a + 1).sum();
+    if rs.is_empty() || c.points.len() - gone < 2 {
+        return false;
+    }
+    for &(a, b) in rs.iter().rev() {
+        if let Some(next) = c.points.get_mut(b + 1) {
+            next.dist = 0.0;
+        }
+        remove_run(c, a, b);
+    }
+    c.prepare();
+    true
+}
+
+/// Paste (insert): `pts` right after point `after`, the first at zero length; returns the pasted points' indices.
+pub fn paste_insert(c: &mut Curve, after: usize, pts: &[Point]) -> std::ops::Range<usize> {
+    let mut pts = pts.to_vec();
+    let Some(first) = pts.first_mut() else { return 0..0 };
+    first.dist = 0.0;
+    let at = (after + 1).min(c.points.len());
+    insert_run(c, at, &pts);
+    fit_map(c, at);
+    c.prepare();
+    at..at + pts.len()
+}
+
+/// Paste (replace): the selected points (from the first to the last selected) give way to `pts`, put where the first
+/// of them was; the point after keeps its length. Returns the pasted points' indices.
+pub fn paste_replace(c: &mut Curve, sel: &[bool], pts: &[Point]) -> Option<std::ops::Range<usize>> {
+    let rs = runs(sel);
+    let (a, b) = (rs.first()?.0, rs.last()?.1);
+    if pts.is_empty() || c.points.len() - (b - a + 1) + pts.len() < 2 {
+        return None;
+    }
+    let d = c.points[a].dist;
+    remove_run(c, a, b);
+    let mut pts = pts.to_vec();
+    pts[0].dist = d;
+    insert_run(c, a, &pts);
+    fit_map(c, a);
+    c.prepare();
+    Some(a..a + pts.len())
+}
+
+/// Moves the selected points of `orig` by `dt` in time and `dl` in level: the time offset is held so no stretch
+/// passes its neighbours (none with the first point, or a map's last, selected); each level is clamped.
+pub fn move_points(c: &mut Curve, orig: &Curve, sel: &[bool], dt: f64, dl: f32) {
+    let ts = times(orig);
+    let n = ts.len();
+    let fixed = sel.first() == Some(&true) || (orig.kind == MAP && sel.get(n - 1) == Some(&true));
+    let mut dt = if fixed { 0.0 } else { dt };
+    for (a, b) in runs(sel) {
+        dt = dt.max(ts[a - 1] - ts[a]);
+        if b + 1 < n {
+            dt = dt.min(ts[b + 1] - ts[b]);
+        } else if orig.kind == MAP {
+            dt = dt.min(1.0 - ts[b]);
+        }
+    }
+    let new: Vec<f64> = ts.iter().zip(sel).map(|(&t, &s)| if s { t + dt } else { t }).collect();
+    *c = orig.clone();
+    for (i, p) in c.points.iter_mut().enumerate() {
+        if sel.get(i) == Some(&true) {
+            p.level = (p.level + dl).clamp(0.0, 1.0);
+        }
+        if i > 0 {
+            p.dist = (new[i] - new[i - 1]).max(0.0) as f32;
+        }
+    }
+    c.prepare();
+}
+
 /// The level on the curve at `x` (0 .. 1) of the segment that ends on point `i`.
 pub fn segment_level(c: &Curve, i: usize, x: f64) -> f32 {
     let (y0, y1) = (c.points[i - 1].level, c.points[i].level);
@@ -192,7 +405,8 @@ pub fn harmonics_of(op: &OpBlock, smooth: bool) -> (Vec<f32>, Vec<f32>) {
         ph[k] = (re.atan2(im) / std::f64::consts::TAU).rem_euclid(1.0) as f32;
     }
     let top = mag.iter().copied().fold(0.0, f64::max);
-    let levels = mag.iter().map(|&m| if top > 0.0 && m / top > 1e-4 { (m / top) as f32 } else { 0.0 }).collect();
+    // FL keeps the smallest levels too (1e-6 of the largest seen).
+    let levels = mag.iter().map(|&m| if top > 0.0 { (m / top) as f32 } else { 0.0 }).collect();
     (levels, ph)
 }
 
@@ -255,6 +469,57 @@ pub fn randomize_phases(op: &mut OpBlock, seed: u32) {
     for p in op.phases.iter_mut() {
         s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         *p = (s >> 8) as f32 / (1u32 << 24) as f32;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The header's waveform items (plugins/sytrus-editor.md §7)
+
+/// Reset waveform settings: harmonic 1 alone, phases 0, the shape settings 0 and the pre-filter 128.
+pub fn reset_waveform(op: &mut OpBlock) {
+    op.levels.iter_mut().for_each(|l| *l = 0.0);
+    op.levels[0] = 1.0;
+    reset_phases(op);
+    op.shape = [0, 0, 0, 0, 128];
+}
+
+/// Randomize waveform settings: a few harmonics at random levels and phases, a random shape and skew, sometimes a
+/// sine shaper and a pre-filter. Lemon Studio's generator (FL's was not studied), from `seed`.
+pub fn randomize_waveform(op: &mut OpBlock, seed: u32) {
+    let mut s = seed | 1;
+    let mut next = |n: u32| {
+        s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (s >> 8) % n
+    };
+    reset_waveform(op);
+    for _ in 0..2 + next(3) {
+        let h = 1 + next(15) as usize;
+        op.levels[h] = (32 + next(225)) as f32 / 256.0;
+        op.phases[h] = next(256) as f32 / 256.0;
+    }
+    op.shape[0] = next(513) as i32;
+    op.shape[2] = next(129) as i32;
+    if next(2) == 0 {
+        op.shape[3] = next(129) as i32;
+        op.shape[4] = next(129) as i32;
+    }
+}
+
+/// Morph oscillators 1 to 5: operators 1 .. 5 converted to harmonics, then 2, 3 and 4 mixed between 1 and 5 at
+/// 1/4, 2/4 and 3/4: the levels straight, the phases (fractions of a turn) the shorter way round.
+pub fn morph_operators(ops: &mut [&mut OpBlock; 5], smooth: bool) {
+    for op in ops.iter_mut() {
+        convert_to_harmonics(op, smooth);
+    }
+    let (a, b) = ((ops[0].levels.clone(), ops[0].phases.clone()), (ops[4].levels.clone(), ops[4].phases.clone()));
+    for (k, op) in ops.iter_mut().enumerate().take(4).skip(1) {
+        let x = k as f32 / 4.0;
+        for h in 0..op.levels.len() {
+            op.levels[h] = a.0[h] + (b.0[h] - a.0[h]) * x;
+            let mut d = b.1[h] - a.1[h];
+            d -= d.round();
+            op.phases[h] = (a.1[h] + d * x).rem_euclid(1.0);
+        }
     }
 }
 
@@ -333,5 +598,124 @@ mod tests {
         assert_eq!(op.levels[0], 1.0);
         shift(&mut op, true);
         assert_eq!((op.levels[0], op.levels[1]), (0.0, 1.0));
+    }
+
+    fn levels(c: &Curve) -> Vec<f32> {
+        c.points.iter().map(|p| p.level).collect()
+    }
+
+    fn close(a: &[f32], b: &[f32]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 2e-5)
+    }
+
+    /// Scale levels against FL's saves (scaleG to scaleH: every control off its default, both sides of the centre).
+    #[test]
+    fn levels_scale_as_fl() {
+        let mut c = env();
+        c.points.truncate(3);
+        for (p, l) in c.points.iter_mut().zip([0.21704, 0.78303, 0.59068]) {
+            p.level = l;
+        }
+        let t = 30.0 / 256.0;
+        scale_levels(&mut c, t, 98.0 / 128.0, t, t);
+        assert!(close(&levels(&c), &[0.34095, 0.79095, 0.66337]), "{:?}", levels(&c));
+        let mut c = env();
+        scale_levels(&mut c, 0.0, 1.0, 0.0, 0.0);
+        assert_eq!(levels(&c), levels(&env()), "the defaults change nothing");
+        scale_levels(&mut c, 0.5, 2.0, 0.25, 0.0);
+        assert_eq!(levels(&c), vec![0.0, 1.0, 0.75, 0.0], "clamped");
+    }
+
+    /// Smooth up abrupt changes: jumps (but the first segment) get 0.04; a second run changes nothing.
+    #[test]
+    fn abrupt_changes_smoothed() {
+        let mut c = env();
+        c.points[2].dist = 0.0;
+        c.points[1].dist = 0.0;
+        c.points.push(Point { dist: 0.0, level: 0.3, ..Point::default() });
+        c.prepare();
+        smooth_abrupt(&mut c);
+        let ts = times(&c);
+        assert_eq!(ts.len(), 5);
+        assert!(ts[1] == 0.0 && ts[2] == 0.0, "the first jump and a jump after a jump stay: {ts:?}");
+        assert!((ts[3] - 0.96).abs() < 1e-6 && (ts[4] - 1.0).abs() < 1e-6, "{ts:?}");
+        let before = times(&c);
+        smooth_abrupt(&mut c);
+        assert_eq!(times(&c), before);
+    }
+
+    /// Type in value: the level's text and what typing gives (FL's examples).
+    #[test]
+    fn levels_typed_as_fl() {
+        assert_eq!(level_text(0.576_388_9), "0.576388895511627");
+        assert_eq!(level_text(1.0), "1");
+        assert_eq!(level_text(0.0), "0");
+        let cases = [("0.25", Some(0.25)), ("50", Some(0.5)), ("1.7", Some(0.017)), ("150", Some(1.0))];
+        for (t, v) in cases.into_iter().chain([("0.5%", Some(0.005)), ("-3", Some(0.0)), ("abc", None), ("1,5", None)]) {
+            assert_eq!(parse_level(t), v, "{t}");
+        }
+    }
+
+    /// The selection operations (FL's saves sel*): times kept or closed up, markers along, the first point kept.
+    #[test]
+    fn selection_operations() {
+        let sel = |v: &[usize], n: usize| (0..n).map(|i| v.contains(&i)).collect::<Vec<_>>();
+        // Delete: the next point keeps its time.
+        let mut c = env();
+        assert!(delete_points(&mut c, &sel(&[1, 2], 4)));
+        assert_eq!((times(&c), c.sustain), (vec![0.0, 4.0], -1));
+        let mut c = env();
+        assert!(!delete_points(&mut c, &sel(&[1, 2, 3], 4)), "two points stay");
+        // Cut: the time goes too.
+        let mut c = env();
+        let copied = copy_points(&c, &sel(&[1], 4));
+        assert!(cut_points(&mut c, &sel(&[1], 4)));
+        assert_eq!((times(&c), c.sustain), (vec![0.0, 0.0, 1.0], 1));
+        // Paste (insert) after the last selected, its first point at zero length.
+        let r = paste_insert(&mut c, 1, &copied);
+        assert_eq!(r, 2..3);
+        assert_eq!((times(&c), levels(&c), c.sustain), (vec![0.0, 0.0, 0.0, 1.0], vec![0.0, 0.5, 1.0, 0.0], 1));
+        // Duplicate of two points.
+        let mut c = env();
+        let two = copy_points(&c, &sel(&[1, 2], 4));
+        let r = paste_insert(&mut c, 2, &two);
+        assert_eq!((r, times(&c)), (3..5, vec![0.0, 1.0, 3.0, 3.0, 5.0, 6.0]));
+        // Paste (replace): where the first selected was, the next point keeps its length.
+        let mut c = env();
+        let r = paste_replace(&mut c, &sel(&[2], 4), &two).unwrap();
+        assert_eq!((r, times(&c), levels(&c)), (2..4, vec![0.0, 1.0, 3.0, 5.0, 6.0], vec![0.0, 1.0, 1.0, 0.5, 0.0]));
+    }
+
+    /// A group drag moves the selected points together, held between the others.
+    #[test]
+    fn selected_points_move_together() {
+        let orig = env();
+        let sel = vec![false, true, true, false];
+        let mut c = orig.clone();
+        move_points(&mut c, &orig, &sel, 0.5, -0.25);
+        assert_eq!((times(&c), levels(&c)), (vec![0.0, 1.5, 3.5, 4.0], vec![0.0, 0.75, 0.25, 0.0]));
+        move_points(&mut c, &orig, &sel, 5.0, 0.0);
+        assert_eq!(times(&c), vec![0.0, 2.0, 4.0, 4.0], "not past the next point");
+        move_points(&mut c, &orig, &[true, true, false, false], 1.0, 0.0);
+        assert_eq!(times(&c), times(&orig), "the first point holds the time");
+    }
+
+    /// Morph: 2 .. 4 between 1 and 5, the phases the short way round.
+    #[test]
+    fn operators_morph() {
+        let base = crate::preset::default_patch().modules[0].op.clone();
+        let mut o: [OpBlock; 5] = std::array::from_fn(|_| base.clone());
+        o[0].levels[1] = 0.2;
+        o[4].levels[1] = 0.6;
+        o[0].phases[1] = 0.9;
+        o[4].phases[1] = 0.1;
+        let [a, b, c, d, e] = &mut o;
+        morph_operators(&mut [a, b, c, d, e], false);
+        assert!((o[1].levels[1] - 0.3).abs() < 1e-3 && (o[2].levels[1] - 0.4).abs() < 1e-3, "{}", o[1].levels[1]);
+        assert!((o[2].phases[1] - 0.0).abs() < 1e-3 || (o[2].phases[1] - 1.0).abs() < 1e-3, "{}", o[2].phases[1]);
+        let mut r = base.clone();
+        randomize_waveform(&mut r, 7);
+        reset_waveform(&mut r);
+        assert_eq!((r.levels[0], r.levels[1], r.phases[1], r.shape), (1.0, 0.0, 0.0, [0, 0, 0, 0, 128]));
     }
 }

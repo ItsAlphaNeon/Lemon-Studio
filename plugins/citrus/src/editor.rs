@@ -18,7 +18,7 @@ use os_plugkit::MenuDef;
 use os_ui::kit::menu::{Mark, MenuItem, MenuStyle};
 
 use crate::ctl::{self, Field};
-use crate::curve::{Curve, MAP};
+use crate::curve::{Curve, Point, MAP};
 use crate::edit;
 use crate::patch::{self, Patch};
 use crate::state::*;
@@ -143,6 +143,20 @@ pub enum Cmd {
     Curve(CurveId, CurveCmd),
     /// A harmonics tool on operator `m`.
     Harm(usize, HarmCmd),
+    /// The Options menu's oscillator items.
+    Osc(OscCmd),
+    /// Unison › Default.
+    UnisonDefault,
+}
+
+/// The Options menu's oscillator items, on operator `m` (the page's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OscCmd {
+    Copy(usize),
+    Paste(usize),
+    Reset(usize),
+    Randomize(usize),
+    Morph,
 }
 
 /// The curve the curve view edits: an articulator's part (module, articulator, part) or a filter's shaper.
@@ -167,13 +181,28 @@ pub enum CurveCmd {
     Flip,
     Normalize,
     AllSmooth,
+    /// Type in value for point `i`.
+    TypeIn(usize),
+    /// Points selection.
+    SelectAll,
+    SelectNone,
+    Invert,
+    Cut,
+    Copy,
+    PasteInsert,
+    PasteReplace,
+    Duplicate,
+    DeleteSel,
+    /// Scale levels... (opens the dialog), Smooth up abrupt changes.
+    Scale,
+    SmoothAbrupt,
 }
 
 impl CurveCmd {
     /// The point the command is about.
     fn point(self) -> Option<usize> {
         match self {
-            CurveCmd::Delete(i) | CurveCmd::Mode(i, _) | CurveCmd::Break(i, _) | CurveCmd::Marker(i, _) | CurveCmd::CopyLevel(i) | CurveCmd::PasteLevel(i) => {
+            CurveCmd::Delete(i) | CurveCmd::Mode(i, _) | CurveCmd::Break(i, _) | CurveCmd::Marker(i, _) | CurveCmd::CopyLevel(i) | CurveCmd::PasteLevel(i) | CurveCmd::TypeIn(i) => {
                 Some(i)
             }
             _ => None,
@@ -219,11 +248,18 @@ pub enum Act {
     /// Keep the mouse while the button is down (the X / Y pad, the keyboard).
     Capture,
     Menu(MenuReq, f32, f32),
-    TypeIn(Field, f32, f32),
+    TypeIn(TypeTarget, f32, f32),
     /// A testing keyboard note (key, on).
     Note(u8, bool),
     /// The surface's height changed (the keyboard was shown or hidden).
     Resize,
+}
+
+/// What a type-in box sets: a setting, or a point's level.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TypeTarget {
+    Field(Field),
+    Point(CurveId, usize),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -250,6 +286,12 @@ enum Drag {
     Digit(Field, i32, f32),
     /// A point of the curve view (absolute), with the view's time span when the drag began.
     Point(usize, f64),
+    /// The selected points, by the one grabbed (`orig` holds the curve as it was): where the drag began, the span.
+    Group(usize, f32, f32, f64),
+    /// A rubber band from (x, y).
+    Band(f32, f32),
+    /// A Level scaling control.
+    Scale(usize),
     /// A segment's tension handle: which way up bends it (1 or -1).
     Tension(usize, f32),
     /// Painting harmonics' levels: the last harmonic painted and its level.
@@ -284,6 +326,17 @@ pub struct Logic {
     harm_clip: Option<(Vec<f32>, Vec<f32>)>,
     /// Randomize phases' seed (moved on by each use).
     seed: u32,
+    /// The curve view's selection and the curve it was made on.
+    sel: Vec<bool>,
+    sel_of: Option<CurveId>,
+    /// The points Copy and Cut took.
+    points_clip: Option<Vec<Point>>,
+    /// A group drag's curve as it was when the drag began.
+    orig: Option<Curve>,
+    /// The Level scaling dialog's curve and that curve as it was when the dialog opened.
+    scaling: Option<(CurveId, Curve)>,
+    /// Copy oscillator settings' operator block.
+    op_clip: Option<OpBlock>,
 }
 
 impl Logic {
@@ -308,6 +361,12 @@ impl Logic {
             curve_clip: None,
             harm_clip: None,
             seed: 1,
+            sel: Vec::new(),
+            sel_of: None,
+            points_clip: None,
+            orig: None,
+            scaling: None,
+            op_clip: None,
         };
         l.reload();
         l
@@ -412,8 +471,9 @@ impl Logic {
         }
     }
 
-    /// `Point 5/7:2:517`, the level as the right part. Times are half seconds (`s:ms`), beats when tempo-based
-    /// (`steps:ticks`); a map's positions are shown as percent.
+    /// `Point 5/7:2:517`, the level in its target's form as the right part (plugins/sytrus-editor.md §3.1). Times
+    /// are half seconds (`s:ms`, the milliseconds truncated), `bar:beat:tick` when tempo-based; a map's positions
+    /// are shown as percent (KEY M too: FL's note names were not measured).
     fn point_hint(&self, i: usize) -> String {
         let Some(id) = self.curve_id() else { return String::new() };
         let c = self.curve(id);
@@ -423,12 +483,147 @@ impl Logic {
             format!("{}%", (t * 100.0).round())
         } else if c.flags & crate::curve::SYNCED != 0 {
             let ticks = (t * 96.0).round() as i64;
-            format!("{}:{:02}", ticks / 24, ticks % 24)
+            format!("{:03}:{:02}:{:03}", ticks / 384 + 1, ticks / 96 % 4 + 1, ticks % 96)
         } else {
-            let ms = (t * 500.0).round() as i64;
+            // FL's sum is single precision.
+            let ms = (t as f32 * 500.0).floor() as i64;
             format!("{}:{:03}", ms / 1000, ms % 1000)
         };
-        format!("Point {}/{}:{time}\t{}%", i + 1, c.points.len(), (p.level * 100.0).round())
+        format!("Point {}/{}:{time}\t{}", i + 1, c.points.len(), Self::level_hint(id, p.level))
+    }
+
+    /// A point's level as its target shows it: a pan as left / right, a bipolar target (and every LFO) signed.
+    fn level_hint(id: CurveId, l: f32) -> String {
+        let (pan, signed) = match id {
+            CurveId::Part(m, a, p) => {
+                let bipolar = if m < OPERATORS {
+                    a == OP_PITCH || a == OP_PHASE
+                } else {
+                    m < OPERATORS + FILTERS && (a == F_CUTOFF || a == F_RES)
+                };
+                (a == 0, bipolar || p == 1)
+            }
+            CurveId::Shaper(_) => (false, false),
+        };
+        if pan {
+            let v = ((l - 0.5) * 200.0).round() as i32;
+            match v {
+                0 => "Centered".into(),
+                v if v < 0 => format!("{} left", -v),
+                v => format!("{v} right"),
+            }
+        } else if signed {
+            format!("{}%", ((2.0 * l - 1.0) * 100.0).round() as i32)
+        } else {
+            format!("{}%", (l * 100.0).round() as i32)
+        }
+    }
+
+    /// The selection on curve `id`: none when it was made on another curve or the points changed since.
+    fn selection(&self, id: CurveId) -> Vec<bool> {
+        let n = self.curve(id).points.len();
+        if self.sel_of == Some(id) && self.sel.len() == n { self.sel.clone() } else { vec![false; n] }
+    }
+
+    fn select(&mut self, id: CurveId, sel: Vec<bool>) {
+        (self.sel, self.sel_of) = (sel, Some(id));
+    }
+
+    /// Whether a selection command applies (FL: Copy and Delete need a selected point, Cut, Paste (replace) and
+    /// Duplicate two).
+    fn sel_enabled(&self, id: CurveId, k: CurveCmd) -> bool {
+        let n = edit::count(&self.selection(id));
+        match k {
+            CurveCmd::Copy | CurveCmd::DeleteSel => n >= 1,
+            CurveCmd::Cut | CurveCmd::PasteReplace | CurveCmd::Duplicate => n >= 2,
+            _ => true,
+        }
+    }
+
+    /// The Points selection commands.
+    fn sel_cmd(&mut self, id: CurveId, k: CurveCmd) {
+        if !self.sel_enabled(id, k) {
+            return;
+        }
+        let sel = self.selection(id);
+        let n = sel.len();
+        if matches!(k, CurveCmd::Copy | CurveCmd::Cut | CurveCmd::Duplicate) {
+            self.points_clip = Some(edit::copy_points(self.curve(id), &sel));
+        }
+        let clip = self.points_clip.clone().unwrap_or_default();
+        let last = sel.iter().rposition(|&s| s);
+        let mut pasted = None;
+        match k {
+            CurveCmd::SelectAll => self.select(id, vec![true; n]),
+            CurveCmd::SelectNone => self.select(id, vec![false; n]),
+            CurveCmd::Invert => self.select(id, sel.iter().map(|s| !s).collect()),
+            CurveCmd::Cut => self.edit_curve(id, |c| {
+                edit::cut_points(c, &sel);
+            }),
+            CurveCmd::DeleteSel => self.edit_curve(id, |c| {
+                edit::delete_points(c, &sel);
+            }),
+            // Paste (insert) does nothing without a selection.
+            CurveCmd::PasteInsert | CurveCmd::Duplicate if last.is_some() && !clip.is_empty() => {
+                self.edit_curve(id, |c| pasted = Some(edit::paste_insert(c, last.unwrap(), &clip)));
+            }
+            CurveCmd::PasteReplace if !clip.is_empty() => self.edit_curve(id, |c| pasted = edit::paste_replace(c, &sel, &clip)),
+            _ => {}
+        }
+        if let Some(r) = pasted {
+            let n = self.curve(id).points.len();
+            self.select(id, (0..n).map(|i| r.contains(&i)).collect());
+        }
+    }
+
+    /// Scale levels...: the dialog opens reset, over the curve as it is.
+    fn open_scaling(&mut self, id: CurveId) {
+        self.scaling = Some((id, self.curve(id).clone()));
+        self.view.scale = Some(view::SCALE_DEFAULT);
+    }
+
+    /// Sets a Level scaling control; the curve follows.
+    fn scale_set(&mut self, k: usize, v: f32) {
+        let Some(mut vals) = self.view.scale else { return };
+        let (lo, hi) = view::SCALE_RANGE[k];
+        vals[k] = v.clamp(lo, hi);
+        self.view.scale = Some(vals);
+        let Some((id, base)) = self.scaling.clone() else { return };
+        let mut c = base;
+        edit::scale_levels(&mut c, vals[0], vals[1], vals[2], vals[3]);
+        self.edit_curve(id, |cur| *cur = c);
+    }
+
+    /// Reset (the controls to their defaults), Accept (the curve stays), close (the curve as it was).
+    fn scale_button(&mut self, k: usize) {
+        if k != 1 {
+            for (j, d) in view::SCALE_DEFAULT.into_iter().enumerate() {
+                self.scale_set(j, d);
+            }
+        }
+        if k != 0 {
+            self.view.scale = None;
+            self.scaling = None;
+        }
+    }
+
+    /// A key (Windows key codes: letters as their upper case, 0x2E Delete): the curve view's selection shortcuts.
+    pub fn key(&mut self, vk: u32, m: Mods) -> Vec<Act> {
+        let Some(id) = self.curve_id().filter(|_| self.view.scale.is_none() && self.view.cover == Cover::None) else { return vec![] };
+        let k = match (vk, m.ctrl) {
+            (0x41, true) => CurveCmd::SelectAll,
+            (0x44, true) => CurveCmd::SelectNone,
+            (0x49, true) => CurveCmd::Invert,
+            (0x58, true) => CurveCmd::Cut,
+            (0x43, true) => CurveCmd::Copy,
+            (0x56, true) => CurveCmd::PasteInsert,
+            (0x52, true) => CurveCmd::PasteReplace,
+            (0x42, true) => CurveCmd::Duplicate,
+            (0x2E, false) => CurveCmd::DeleteSel,
+            _ => return vec![],
+        };
+        self.curve_cmd(id, k);
+        vec![Act::Repaint]
     }
 
     fn tension_hint(&self, i: usize) -> String {
@@ -507,7 +702,12 @@ impl Logic {
             Some(Target::CurveOptions | Target::HarmOptions) => "Options".into(),
             Some(Target::Harm(h)) => self.harm_hint(*h),
             Some(Target::HarmScroll) => "Scroll harmonics".into(),
-            Some(Target::Cover) => String::new(),
+            Some(Target::Cover | Target::Dialog) => String::new(),
+            Some(Target::ScaleCtl(k)) => {
+                let v = self.view.scale.map_or(0.0, |v| v[*k]);
+                format!("{}: {}%", view::SCALE_NAMES[*k], (v * 100.0).round() as i32)
+            }
+            Some(Target::ScaleBtn(k)) => ["Reset", "Accept", "Close"][*k].into(),
             Some(t) => Self::field(t).map(|f| ctl::hint(&self.st, f, dragging)).unwrap_or_default(),
         }
     }
@@ -528,15 +728,32 @@ impl Logic {
         let resettable = Self::field(&t);
         match (&t, btn) {
             (Target::Cover, _) => self.view.cover = Cover::None,
+            (Target::Dialog, _) => {}
+            (Target::ScaleCtl(k), Btn::Left) if m.alt => self.scale_set(*k, view::SCALE_DEFAULT[*k]),
+            (Target::ScaleCtl(k), Btn::Middle) => self.scale_set(*k, view::SCALE_DEFAULT[*k]),
+            (Target::ScaleCtl(k), Btn::Left) => {
+                self.drag = Some(Drag::Scale(*k));
+                self.view.pressed = Some(t.clone());
+                acts.push(Act::Lock);
+            }
+            (Target::ScaleBtn(k), Btn::Left) => self.scale_button(*k),
             (Target::Tab(i), Btn::Left | Btn::Right) => self.view.page = *i,
             (Target::ArtTab(i), Btn::Left | Btn::Right) => self.view.target[self.view.page] = *i,
             (Target::PartTab(i), Btn::Left | Btn::Right) => self.view.part[self.view.page] = *i,
             (Target::FxUnit(k), Btn::Left | Btn::Right) => self.view.fx_unit = *k,
             (Target::Wave(m), Btn::Right) => acts.push(Act::Menu(MenuReq::Wave(*m), x, y)),
+            // A click on a point selects it alone; on one of a selection it drags them all.
             (Target::Point(i), Btn::Left) => {
                 if let Some(id) = self.curve_id() {
                     let span = view::curve_span(self.curve(id));
-                    self.drag = Some(Drag::Point(*i, span));
+                    let sel = self.selection(id);
+                    if sel.get(*i) == Some(&true) && edit::count(&sel) > 1 {
+                        self.orig = Some(self.curve(id).clone());
+                        self.drag = Some(Drag::Group(*i, x, y, span));
+                    } else {
+                        self.select(id, (0..sel.len()).map(|k| k == *i).collect());
+                        self.drag = Some(Drag::Point(*i, span));
+                    }
                     self.view.span = Some(span);
                     self.view.pressed = Some(t.clone());
                     acts.push(Act::Capture);
@@ -564,6 +781,14 @@ impl Logic {
             (Target::Tension(i), Btn::Middle) => {
                 if let Some(id) = self.curve_id() {
                     self.edit_curve(id, |c| edit::set_tension(c, *i, 0.0));
+                }
+            }
+            // Ctrl + drag on empty space: a rubber band.
+            (Target::CurveArea, Btn::Left) if m.ctrl => {
+                if self.curve_id().is_some() {
+                    self.drag = Some(Drag::Band(x, y));
+                    self.view.band = Some(os_ui::Rect::new(x, y, 0.0, 0.0));
+                    acts.push(Act::Capture);
                 }
             }
             // A right click on empty space adds a point there.
@@ -696,6 +921,12 @@ impl Logic {
                 self.drag = Some(Drag::Digit(f, step, moved));
                 self.set(f, v);
             }
+            Some(Drag::Scale(k)) => {
+                let Some(v) = self.view.scale else { return vec![] };
+                let per = if k == 1 { 1.0 / 128.0 } else { 1.0 / 256.0 };
+                let f = if m.ctrl { FINE } else { 1.0 };
+                self.scale_set(k, v[k] - dy * per * f);
+            }
             Some(Drag::Tension(i, sign)) => {
                 let Some(id) = self.curve_id() else { return vec![] };
                 let k = if m.ctrl { FINE } else { 1.0 };
@@ -717,6 +948,19 @@ impl Logic {
         if let (Drag::Key, Some(k)) = (d, self.view.key.take()) {
             acts.push(Act::Note(k, false));
         }
+        self.orig = None;
+        // The rubber band selects the points inside it.
+        if let (Drag::Band(..), Some(b), Some(id)) = (d, self.view.band.take(), self.curve_id()) {
+            let c = self.curve(id);
+            let span = view::curve_span(c);
+            let sel = (0..c.points.len())
+                .map(|i| {
+                    let (px, py) = view::point_xy(c, i, span);
+                    b.contains(px, py)
+                })
+                .collect();
+            self.select(id, sel);
+        }
         let t = self.view.mouse.and_then(|(x, y)| self.hit(x, y));
         self.hint = self.hint_for(t.as_ref());
         acts
@@ -733,6 +977,19 @@ impl Logic {
                     self.edit_curve(id, |c| edit::move_point(c, i, t, l, slide));
                     self.hint = self.point_hint(i);
                 }
+            }
+            Some(Drag::Group(i, x0, y0, span)) => {
+                if let (Some(id), Some(orig)) = (self.curve_id(), self.orig.clone()) {
+                    let inner = view::curve_inner();
+                    let dt = f64::from((x - x0) / inner.w) * span;
+                    let dl = (y0 - y) / inner.h;
+                    let sel = self.selection(id);
+                    self.edit_curve(id, |c| edit::move_points(c, &orig, &sel, dt, dl));
+                    self.hint = self.point_hint(i);
+                }
+            }
+            Some(Drag::Band(x0, y0)) => {
+                self.view.band = Some(os_ui::Rect::new(x0.min(x), y0.min(y), (x - x0).abs(), (y - y0).abs()));
             }
             // Bars skipped between two moves are painted on the line between them.
             Some(Drag::Harm(h0, l0)) => {
@@ -848,7 +1105,7 @@ impl Logic {
         m.sep(Cmd::None);
         m.add(MenuItem::item("Copy value"), cmd(CurveCmd::CopyLevel(i)));
         m.add(MenuItem::item("Paste value").enabled(self.level_clip.is_some()), cmd(CurveCmd::PasteLevel(i)));
-        m.add(MenuItem::item("Type in value...").enabled(false), Cmd::None);
+        m.add(MenuItem::item("Type in value..."), cmd(CurveCmd::TypeIn(i)));
         m
     }
 
@@ -867,14 +1124,27 @@ impl Logic {
         m.add(MenuItem::item("Copy state"), cmd(CurveCmd::CopyState));
         m.add(MenuItem::item("Paste state").enabled(self.curve_clip.as_ref().is_some_and(|s| s.kind == c.kind)), cmd(CurveCmd::PasteState));
         m.head("Points selection", Cmd::None);
-        off(&mut m, &["Select all", "Deselect all", "Invert", "Cut", "Copy", "Paste (insert)", "Paste (replace)", "Duplicate", "Delete"]);
+        for (l, key, k) in [
+            ("Select all", "Ctrl+A", CurveCmd::SelectAll),
+            ("Deselect all", "Ctrl+D", CurveCmd::SelectNone),
+            ("Invert", "Ctrl+I", CurveCmd::Invert),
+            ("Cut", "Ctrl+X", CurveCmd::Cut),
+            ("Copy", "Ctrl+C", CurveCmd::Copy),
+            ("Paste (insert)", "Ctrl+V", CurveCmd::PasteInsert),
+            ("Paste (replace)", "Ctrl+R", CurveCmd::PasteReplace),
+            ("Duplicate", "Ctrl+B", CurveCmd::Duplicate),
+            ("Delete", "Del", CurveCmd::DeleteSel),
+        ] {
+            m.add(MenuItem::item(l).shortcut(key).enabled(self.sel_enabled(id, k)), cmd(k));
+        }
         m.head("Tools", Cmd::None);
         m.add(MenuItem::item("Make all loop").enabled(edit::keeps_marker(c, 1)), cmd(CurveCmd::AllLoop));
         off(&mut m, &["Insert point at locator"]);
         m.add(MenuItem::item("Flip vertically"), cmd(CurveCmd::Flip));
-        off(&mut m, &["Scale levels..."]);
+        m.add(MenuItem::item("Scale levels..."), cmd(CurveCmd::Scale));
         m.add(MenuItem::item("Normalize levels"), cmd(CurveCmd::Normalize));
-        off(&mut m, &["Decimate points...", "Filter...", "Smooth up...", "Smooth up abrupt changes"]);
+        off(&mut m, &["Decimate points...", "Filter...", "Smooth up..."]);
+        m.add(MenuItem::item("Smooth up abrupt changes"), cmd(CurveCmd::SmoothAbrupt));
         m.add(MenuItem::item("Turn all points smooth"), cmd(CurveCmd::AllSmooth));
         off(&mut m, &["Create sequence...", "Analyze audio file..."]);
         m.head("Options", Cmd::None);
@@ -917,6 +1187,17 @@ impl Logic {
             return;
         }
         match k {
+            CurveCmd::SelectAll
+            | CurveCmd::SelectNone
+            | CurveCmd::Invert
+            | CurveCmd::Cut
+            | CurveCmd::Copy
+            | CurveCmd::PasteInsert
+            | CurveCmd::PasteReplace
+            | CurveCmd::Duplicate
+            | CurveCmd::DeleteSel => self.sel_cmd(id, k),
+            CurveCmd::Scale => self.open_scaling(id),
+            CurveCmd::TypeIn(_) => {}
             CurveCmd::CopyLevel(i) => self.level_clip = Some(self.curve(id).points[i].level),
             CurveCmd::CopyState => self.curve_clip = Some(self.curve(id).clone()),
             k => {
@@ -943,7 +1224,8 @@ impl Logic {
                     CurveCmd::Flip => edit::flip(c),
                     CurveCmd::Normalize => edit::normalize(c),
                     CurveCmd::AllSmooth => edit::all_smooth(c),
-                    CurveCmd::CopyLevel(_) | CurveCmd::CopyState => {}
+                    CurveCmd::SmoothAbrupt => edit::smooth_abrupt(c),
+                    _ => {}
                 });
             }
         }
@@ -992,8 +1274,31 @@ impl Logic {
         };
         let mut dist = MenuDef::new(MenuStyle::Context);
         radios(&mut dist, &["Original", "Improved", "Uniform", "Blurred"], 11);
+        // Presets: only Unison's Default was measured; the others are shown disabled.
+        let presets = |labels: &[&str], first: Cmd| {
+            let mut p = MenuDef::new(MenuStyle::Context);
+            for (k, l) in labels.iter().enumerate() {
+                let cmd = if k == 0 { first.clone() } else { Cmd::None };
+                p.add(MenuItem::item(l).enabled(cmd != Cmd::None), cmd);
+            }
+            p
+        };
         let mut unison = MenuDef::new(MenuStyle::Context);
         unison.submenu("Distribution", dist, Cmd::None);
+        unison.sep(Cmd::None);
+        for (k, l) in ["Default", "Detuned", "Flanged", "Sub", "Stereoized", "Fat", "None"].into_iter().enumerate() {
+            let cmd = if k == 0 { Cmd::UnisonDefault } else { Cmd::None };
+            unison.add(MenuItem::item(l).enabled(k == 0), cmd);
+        }
+        let chorus = presets(
+            &["Default", "Deep chorus", "Fast flanger", "Flanger", "Alt flanger", "Modulation", "Stereoized", "Surround flanger", "Vibration", "None"],
+            Cmd::None,
+        );
+        let reverb = presets(&["Default", "Drum room", "The venue", "Cathedral", "Large hall", "Small studio", "None"], Cmd::None);
+        let mut size = MenuDef::new(MenuStyle::Context);
+        for (k, l) in ["Small", "Medium", "Large", "XL"].into_iter().enumerate() {
+            size.add(MenuItem::item(l).mark(Mark::Radio(k == 0)).enabled(k == 0), Cmd::None);
+        }
         let mut arp = MenuDef::new(MenuStyle::Context);
         check(&mut arp, "Invert", Field::Switch(3), sw(3) != 0, i32::from(sw(3) == 0));
         let mut porta = MenuDef::new(MenuStyle::Context);
@@ -1009,13 +1314,58 @@ impl Logic {
         }
         check(&mut vel, "Link release to release length", Field::Switch(10), sw(10) != 0, i32::from(sw(10) == 0));
         let mut m = MenuDef::new(MenuStyle::Context);
+        // The oscillator items work on the operator page shown.
+        let op = (1..=OPERATORS).contains(&self.view.page).then(|| self.view.page - 1);
+        m.head("Oscillators", Cmd::None);
+        for (l, k, on) in [
+            ("Copy oscillator settings", op.map(OscCmd::Copy), true),
+            ("Paste oscillator settings", op.map(OscCmd::Paste), self.op_clip.is_some()),
+            ("Reset waveform settings", op.map(OscCmd::Reset), true),
+            ("Randomize waveform settings", op.map(OscCmd::Randomize), true),
+            ("Morph oscillators 1 to 5", Some(OscCmd::Morph), true),
+        ] {
+            m.add(MenuItem::item(l).enabled(on && k.is_some()), k.map_or(Cmd::None, Cmd::Osc));
+        }
         m.head("Effects", Cmd::None);
         m.submenu("Unison", unison, Cmd::None);
+        m.submenu("Chorus", chorus, Cmd::None);
+        m.submenu("Reverb", reverb, Cmd::None);
         m.head("Tone", Cmd::None);
         m.submenu("Arpeggiator", arp, Cmd::None);
         m.submenu("Portamento", porta, Cmd::None);
         m.submenu("Velocity", vel, Cmd::None);
+        m.head("Options", Cmd::None);
+        m.submenu("Size", size, Cmd::None);
+        m.add(MenuItem::item("HQ WaveShaper").mark(Mark::Check(true)).enabled(false), Cmd::None);
         m
+    }
+
+    /// The Options menu's oscillator items (plugins/sytrus-editor.md §7).
+    fn osc_cmd(&mut self, k: OscCmd) {
+        if let OscCmd::Copy(m) = k {
+            self.op_clip = Some(self.st.modules[m].op.clone());
+            return;
+        }
+        let before: Vec<OpBlock> = self.st.modules[..OPERATORS].iter().map(|m| m.op.clone()).collect();
+        let smooth = self.st.switch(2) != 0;
+        self.seed = self.seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        match k {
+            OscCmd::Paste(m) => {
+                if let Some(op) = self.op_clip.clone() {
+                    self.st.modules[m].op = op;
+                }
+            }
+            OscCmd::Reset(m) => edit::reset_waveform(&mut self.st.modules[m].op),
+            OscCmd::Randomize(m) => edit::randomize_waveform(&mut self.st.modules[m].op, self.seed),
+            OscCmd::Morph => {
+                let [a, b, c, d, e, ..] = &mut self.st.modules[..] else { return };
+                edit::morph_operators(&mut [&mut a.op, &mut b.op, &mut c.op, &mut d.op, &mut e.op], smooth);
+            }
+            OscCmd::Copy(_) => {}
+        }
+        if before.iter().zip(&self.st.modules).any(|(b, m)| *b != m.op) {
+            self.commit();
+        }
     }
 
     pub fn pick(&mut self, _req: &MenuReq, cmd: Cmd, x: f32, y: f32) -> Vec<Act> {
@@ -1028,23 +1378,48 @@ impl Logic {
                     self.set(f, v);
                 }
             }
-            Cmd::TypeIn(f) => return vec![Act::TypeIn(f, x, y)],
+            Cmd::TypeIn(f) => return vec![Act::TypeIn(TypeTarget::Field(f), x, y)],
+            Cmd::Curve(id, CurveCmd::TypeIn(i)) => return vec![Act::TypeIn(TypeTarget::Point(id, i), x, y)],
             Cmd::Set(f, v) => self.set(f, v),
             Cmd::Curve(id, k) => self.curve_cmd(id, k),
             Cmd::Harm(m, k) => self.harm_cmd(m, k),
+            Cmd::Osc(k) => self.osc_cmd(k),
+            // FL's measured Default: unison order 4, the other unison settings as they were in its test.
+            Cmd::UnisonDefault => {
+                let before = self.st.s;
+                self.st.s[8..=14].copy_from_slice(&[4, 128, 100, 128, 0, 16, 0]);
+                if self.st.s != before {
+                    self.commit();
+                }
+            }
         }
         vec![Act::Repaint]
     }
 
-    /// The value text a type-in box starts with.
-    pub fn value_text(&self, f: Field) -> String {
-        ctl::text(f, ctl::get(&self.st, f))
+    /// The value text a type-in box starts with: a point's level with 15 significant digits.
+    pub fn value_text(&self, t: &TypeTarget) -> String {
+        match *t {
+            TypeTarget::Field(f) => ctl::text(f, ctl::get(&self.st, f)),
+            TypeTarget::Point(id, i) => self.curve(id).points.get(i).map(|p| edit::level_text(p.level)).unwrap_or_default(),
+        }
     }
 
-    /// Applies a typed value.
-    pub fn typed(&mut self, f: Field, text: &str) {
-        if let Some(v) = ctl::parse(f, text) {
-            self.set(f, v);
+    /// Applies a typed value; text that does not read leaves it as it was.
+    pub fn typed(&mut self, t: &TypeTarget, text: &str) {
+        match *t {
+            TypeTarget::Field(f) => {
+                if let Some(v) = ctl::parse(f, text) {
+                    self.set(f, v);
+                }
+            }
+            TypeTarget::Point(id, i) => {
+                if let Some(l) = edit::parse_level(text).filter(|_| i < self.curve(id).points.len()) {
+                    self.edit_curve(id, |c| {
+                        c.points[i].level = l;
+                        c.prepare();
+                    });
+                }
+            }
         }
     }
 
@@ -1066,6 +1441,7 @@ impl Logic {
                 self.wave = Some((op.clone(), smooth, w));
             }
         }
+        self.view.selected = self.curve_id().map(|id| self.selection(id)).unwrap_or_default();
         let wave = self.wave.as_ref().filter(|_| (1..=OPERATORS).contains(&self.view.page)).map(|w| w.2.as_slice());
         let model = view::Model { st: &self.st, used: self.used, version: env!("CARGO_PKG_VERSION"), wave };
         self.hits = view::paint(c, &model, &self.view, &hint);
@@ -1276,6 +1652,14 @@ mod win32 {
                     w.run(acts);
                     0
                 }
+                WM_KEYDOWN => {
+                    let acts = w.logic.key(wp as u32, mods());
+                    if acts.is_empty() {
+                        return DefWindowProcW(hwnd, msg, wp, lp);
+                    }
+                    w.run(acts);
+                    0
+                }
                 WM_DESTROY => {
                     KillTimer(hwnd, TIMER);
                     w.lock.unlock();
@@ -1333,9 +1717,9 @@ mod win32 {
                     }
                     Act::TypeIn(f, x, y) => {
                         let (sx, sy) = self.screen(x, y);
-                        let cur = self.logic.value_text(f);
+                        let cur = self.logic.value_text(&f);
                         if let Some(t) = pw::type_in(self.hwnd, sx, sy, &cur, self.scale) {
-                            self.logic.typed(f, &t);
+                            self.logic.typed(&f, &t);
                         }
                         repaint = true;
                     }
@@ -1509,7 +1893,20 @@ mod gui {
                         let acts = self.logic.wheel(x / self.scale, y / self.scale, notches, self.mods());
                         self.act(acts);
                     }
-                    Input::Key { .. } | Input::Drop { .. } => {}
+                    // The logic takes Windows key codes: letters as their upper case, Delete 0x2E.
+                    Input::Key { sym, .. } => {
+                        let vk = match sym {
+                            0x61..=0x7a => sym - 0x20,
+                            0x41..=0x5a => sym,
+                            0xffff => 0x2E,
+                            _ => 0,
+                        };
+                        if vk != 0 {
+                            let acts = self.logic.key(vk, self.mods());
+                            self.act(acts);
+                        }
+                    }
+                    Input::Drop { .. } => {}
                 }
                 if self.dirty && self.win.idle() {
                     self.paint();
@@ -1558,9 +1955,9 @@ mod gui {
                     }
                     Act::TypeIn(f, x, y) => {
                         let (sx, sy) = self.screen(x, y);
-                        let cur = self.logic.value_text(f);
+                        let cur = self.logic.value_text(&f);
                         if let Some(t) = self.win.type_in(sx, sy, &cur, self.scale) {
-                            self.logic.typed(f, &t);
+                            self.logic.typed(&f, &t);
                         }
                         self.dirty = true;
                     }
@@ -1737,7 +2134,7 @@ mod tests {
         assert_eq!(saved(&l).switch(3), 1);
         let m = l.menu(&MenuReq::Param(Field::Main(0)));
         assert_eq!(m.find("Type in value..."), Some(Cmd::TypeIn(Field::Main(0))));
-        l.typed(Field::Main(0), "50%");
+        l.typed(&TypeTarget::Field(Field::Main(0)), "50%");
         assert_eq!(saved(&l).main_volume, 64);
         l.pick(&MenuReq::Param(Field::Main(0)), Cmd::Reset(Field::Main(0)), 0.0, 0.0);
         assert_eq!(saved(&l).main_volume, 128);
@@ -1818,6 +2215,15 @@ mod tests {
             save(&mut l, "citrus_deep_op1_point", 1.0);
             l.view.tools = [false; 4];
             l.view.mouse = None;
+            // Every point selected, then the Level scaling dialog.
+            l.key(0x41, Mods { ctrl: true, ..Mods::default() });
+            save(&mut l, "citrus_deep_op1_sel", 1.0);
+            if let Some(id) = l.curve_id() {
+                l.open_scaling(id);
+                l.scale_set(1, 0.5);
+                save(&mut l, "citrus_deep_op1_scale", 1.0);
+                l.scale_button(2);
+            }
             l.view.target[1] = 6;
             save(&mut l, "citrus_deep_op1_osc", 1.0);
             l.view.harm_scroll = 40;
@@ -2097,6 +2503,157 @@ mod tests {
         let s = saved(&l).modules[6].filter.shaper.clone();
         assert_eq!(s.points.len(), ws + 1);
         assert!((edit::times(&s).last().unwrap() - 1.0).abs() < 1e-6);
+    }
+
+    /// The curve view's points selection: keys, a click, the rubber band, a group drag, the menu's enabling, Cut and
+    /// Paste; a point's Type in value; the hint's forms.
+    #[test]
+    fn curve_points_selection() {
+        let mut l = logic();
+        l.view.page = 1;
+        paint(&mut l);
+        let id = CurveId::Part(0, OP_VOLUME, 0);
+        let env = |l: &Logic| l.st.modules[0].arts[OP_VOLUME].env.clone();
+        // Four points to work on.
+        let inner = view::curve_inner();
+        for k in 1..=3 {
+            let x = inner.right() - 40.0 + 10.0 * k as f32;
+            l.down(x, inner.y + inner.h * 0.5, Btn::Right, Mods::default(), false);
+        }
+        let n = env(&l).points.len();
+        assert!(n >= 4);
+        let ctrl = Mods { ctrl: true, ..Mods::default() };
+        let enabled = |l: &Logic, label: &str| {
+            let m = l.menu(&MenuReq::Curve(id));
+            m.items.iter().any(|it| it.clickable() && matches!(it, MenuItem::Item { label: s, .. } if s == label))
+        };
+        assert!(!enabled(&l, "Copy") && enabled(&l, "Paste (insert)"), "nothing selected");
+        assert_eq!(l.key(0x41, ctrl), vec![Act::Repaint]);
+        paint(&mut l);
+        assert!(l.view.selected.iter().all(|&s| s) && l.view.selected.len() == n);
+        assert!(enabled(&l, "Duplicate") && enabled(&l, "Cut"));
+        l.key(0x49, ctrl);
+        paint(&mut l);
+        assert!(l.view.selected.iter().all(|&s| !s), "inverted");
+        // A click selects one point; Copy is on, Duplicate needs two.
+        let (px, py) = centre(&l, &Target::Point(n - 1));
+        l.down(px, py, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(edit::count(&l.selection(id)), 1);
+        assert!(enabled(&l, "Copy") && !enabled(&l, "Duplicate"));
+        // The rubber band over the last three points, then a group drag down.
+        paint(&mut l);
+        let (ax, _) = centre(&l, &Target::Point(n - 3));
+        l.down(ax - 3.0, inner.y + 1.0, Btn::Left, ctrl, false);
+        l.moved(inner.right() - 1.0, inner.bottom() - 1.0, ctrl);
+        paint(&mut l);
+        assert!(l.view.band.is_some());
+        l.up(Btn::Left);
+        let sel = l.selection(id);
+        assert_eq!((edit::count(&sel), sel[n - 3], sel[n - 4]), (3, true, false));
+        paint(&mut l);
+        let before = env(&l);
+        let (px, py) = centre(&l, &Target::Point(n - 2));
+        l.down(px, py, Btn::Left, Mods::default(), false);
+        l.moved(px, py + inner.h * 0.25, Mods::default());
+        l.up(Btn::Left);
+        let after = env(&l);
+        for i in n - 3..n {
+            assert!((after.points[i].level - (before.points[i].level - 0.25).max(0.0)).abs() < 1e-4, "point {i}");
+        }
+        assert_eq!(after.points[n - 4].level, before.points[n - 4].level);
+        // Duplicate: three more points, selected; Delete removes them.
+        l.key(0x42, ctrl);
+        assert_eq!(env(&l).points.len(), n + 3);
+        assert_eq!(edit::count(&l.selection(id)), 3);
+        assert_eq!(l.selection(id)[n], true);
+        l.key(0x2E, Mods::default());
+        assert_eq!(env(&l).points.len(), n);
+        assert_eq!(saved(&l).modules[0].arts[OP_VOLUME].env.points.len(), n);
+        // Type in value: the level's text, a percentage typed.
+        let acts = l.pick(&MenuReq::Point(id, 1), Cmd::Curve(id, CurveCmd::TypeIn(1)), 5.0, 6.0);
+        let t = TypeTarget::Point(id, 1);
+        assert_eq!(acts, vec![Act::TypeIn(t, 5.0, 6.0)]);
+        l.typed(&t, "50");
+        assert_eq!(env(&l).points[1].level, 0.5);
+        assert_eq!(l.value_text(&t), "0.5");
+        l.typed(&t, "1,5");
+        assert_eq!(env(&l).points[1].level, 0.5);
+        // The hint's right part: VOL unsigned, an LFO signed, PAN as left / right.
+        assert!(l.point_hint(1).ends_with("\t50%"), "{}", l.point_hint(1));
+        assert_eq!(Logic::level_hint(CurveId::Part(0, OP_VOLUME, 1), 0.5), "0%");
+        assert_eq!(Logic::level_hint(CurveId::Part(0, OP_PAN, 0), 0.0), "100 left");
+        assert_eq!(Logic::level_hint(CurveId::Part(6, F_CUTOFF, 0), 1.0), "100%");
+        assert_eq!(Logic::level_hint(CurveId::Part(0, OP_PITCH, 2), 0.25), "-50%");
+    }
+
+    /// Scale levels...: the dialog blocks the editor, its controls move the curve, close reverts, Accept keeps.
+    #[test]
+    fn scale_levels_dialog() {
+        let mut l = logic();
+        l.view.page = 1;
+        paint(&mut l);
+        let id = CurveId::Part(0, OP_VOLUME, 0);
+        let env = |l: &Logic| l.st.modules[0].arts[OP_VOLUME].env.clone();
+        let orig = env(&l);
+        let (ox, oy) = centre(&l, &Target::CurveOptions);
+        let m = l.menu(&MenuReq::Curve(id));
+        assert_eq!(m.find("Scale levels..."), Some(Cmd::Curve(id, CurveCmd::Scale)));
+        l.pick(&MenuReq::Curve(id), Cmd::Curve(id, CurveCmd::Scale), ox, oy);
+        paint(&mut l);
+        assert_eq!(l.hit(10.0, 10.0), Some(Target::Dialog), "the dialog blocks the rest");
+        // The offset fader: 64 px up = +0.25.
+        let (x, y) = centre(&l, &Target::ScaleCtl(2));
+        assert!(l.down(x, y, Btn::Left, Mods::default(), false).contains(&Act::Lock));
+        for _ in 0..64 {
+            l.delta(0.0, -1.0, Mods::default());
+        }
+        assert_eq!(l.hint, "Offset: 25%");
+        l.up(Btn::Left);
+        let raised = env(&l);
+        for (a, b) in raised.points.iter().zip(&orig.points) {
+            assert!((a.level - (b.level + 0.25).min(1.0)).abs() < 1e-5);
+        }
+        let (x, y) = centre(&l, &Target::ScaleBtn(2));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!((env(&l), l.view.scale), (orig.clone(), None), "closing reverts");
+        l.pick(&MenuReq::Curve(id), Cmd::Curve(id, CurveCmd::Scale), ox, oy);
+        paint(&mut l);
+        let (x, y) = centre(&l, &Target::ScaleCtl(1));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        l.delta(0.0, 64.0, Mods::default());
+        l.up(Btn::Left);
+        let (x, y) = centre(&l, &Target::ScaleBtn(1));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.view.scale, None);
+        let kept = saved(&l).modules[0].arts[OP_VOLUME].env.clone();
+        for (a, b) in kept.points.iter().zip(&orig.points) {
+            assert!((a.level - b.level * 0.5).abs() < 1e-5, "multiplier 0.5 kept");
+        }
+    }
+
+    /// The Options menu's oscillator items and Unison › Default.
+    #[test]
+    fn options_oscillator_items() {
+        let mut l = logic();
+        let m = l.menu(&MenuReq::Options);
+        assert_eq!(m.find("Copy oscillator settings"), Some(Cmd::None), "not on the main page");
+        assert_eq!(m.find("Morph oscillators 1 to 5"), Some(Cmd::Osc(OscCmd::Morph)));
+        l.view.page = 2;
+        let m = l.menu(&MenuReq::Options);
+        assert_eq!(m.find("Randomize waveform settings"), Some(Cmd::Osc(OscCmd::Randomize(1))));
+        l.pick(&MenuReq::Options, Cmd::Osc(OscCmd::Randomize(1)), 0.0, 0.0);
+        let op = saved(&l).modules[1].op.clone();
+        assert!(op.levels.iter().skip(1).any(|&v| v > 0.0));
+        l.pick(&MenuReq::Options, Cmd::Osc(OscCmd::Copy(1)), 0.0, 0.0);
+        l.pick(&MenuReq::Options, Cmd::Osc(OscCmd::Paste(2)), 0.0, 0.0);
+        assert_eq!(saved(&l).modules[2].op, op);
+        l.pick(&MenuReq::Options, Cmd::Osc(OscCmd::Reset(1)), 0.0, 0.0);
+        let r = saved(&l).modules[1].op.clone();
+        assert_eq!((r.levels[0], r.levels.iter().skip(1).any(|&v| v != 0.0), r.shape), (1.0, false, [0, 0, 0, 0, 128]));
+        assert_eq!(l.menu(&MenuReq::Options).find("Default"), Some(Cmd::UnisonDefault));
+        l.pick(&MenuReq::Options, Cmd::UnisonDefault, 0.0, 0.0);
+        assert_eq!(saved(&l).s[8..=14], [4, 128, 100, 128, 0, 16, 0]);
     }
 
     /// The harmonics editor: a drag paints the bars it passes, the wheel scrolls, the Options menu's tools and the
