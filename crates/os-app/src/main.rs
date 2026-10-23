@@ -49,6 +49,7 @@ mod messages;
 mod meters;
 mod metronome;
 mod midi_cfg;
+mod midi_file;
 mod midi_in;
 mod midi_out;
 mod midi_play;
@@ -1248,6 +1249,7 @@ fn screenshot(args: &[String]) {
     let mut browser_folder: Option<String> = None;
     let mut menu: Option<usize> = None;
     let mut plugin_menu: Option<plugin_menu::Target> = None;
+    let mut import_midi: Option<(String, bool)> = None;
     let mut settings: Option<usize> = None;
     let mut info_edit: Option<usize> = None;
     let mut clicks: Vec<(f32, f32, bool)> = Vec::new();
@@ -1301,6 +1303,9 @@ fn screenshot(args: &[String]) {
                     _ => plugin_menu::Target::All,
                 })
             }
+            // A MIDI file through FILE ▸ Import ▸ MIDI file (`--import-midi-piano`: the piano roll's import): the Import
+            // MIDI data form, shown every time (spec: ui/midi-files.md §2).
+            a @ ("--import-midi" | "--import-midi-piano") => import_midi = it.next().map(|p| (p.clone(), a == "--import-midi-piano")),
             // Hover at x,y before the frame is captured.
             "--mouse" => {
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
@@ -1481,6 +1486,12 @@ fn screenshot(args: &[String]) {
     if let Some(target) = plugin_menu {
         let (w, h) = app.state.screen;
         app.open_plugin_menu(target, ((w / 2.0).round(), (h / 3.0).round()));
+    }
+    if let Some((p, piano)) = import_midi {
+        // Alt: the MIDI import window's "Show every time" row as it comes.
+        app.alt = true;
+        app.midi_file_chosen(p.into(), piano);
+        app.alt = false;
     }
     if let Some(w) = rack_w {
         app.state.rack_size.0 = w;

@@ -80,7 +80,9 @@ pub const FILE_SAVE_VERSION: usize = 6;
 /// audio/export.md §2).
 pub const FILE_EXPORT: usize = 12;
 pub const FILE_EXPORT_MP3: usize = 13;
-pub const FILE_EXIT: usize = 17;
+/// FILE > Export MIDI... (Shift+Ctrl+M; spec: ui/midi-files.md §10.1).
+pub const FILE_EXPORT_MIDI: usize = 14;
+pub const FILE_EXIT: usize = 18;
 /// OPTIONS > Theme settings (flat index: header counts).
 #[cfg(test)]
 pub const OPT_THEME: usize = 5;
@@ -146,6 +148,7 @@ const FILE: &[Item] = &[
     it("Import", "").sub(),
     it("Export audio...", "Ctrl+R").on(),
     it("Export MP3...", "Shift+Ctrl+R").on(),
+    it("Export MIDI...", "Shift+Ctrl+M").on(),
     SEP,
     it("Revert to last backup", ""),
     SEP,
@@ -470,6 +473,8 @@ pub const CLIPS_SEL_LABEL: &str = "Switch selected audio clip channels to";
 /// out. The dropdown opens it to the right of the row (`App::open_menu_sub`).
 pub fn submenu(menu: usize, label: &str) -> Option<fn(&State) -> Vec<crate::playlist::PItem>> {
     match (menu, label) {
+        // spec: ui/midi-files.md §1: FL's Import holds only MIDI file...
+        (0, "Import") => Some(|_| vec![crate::playlist::PItem::new("MIDI file...", crate::playlist::Cmd::MidiImport(false))]),
         // spec: ui/plugin-menu.md §1: the effects, a pick into the selected mixer track's first empty slot as from F8.
         (ADD_MENU, "Effect") => Some(|s| crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(None), true)),
         (TOOLS_MENU, EDITORS_LABEL) => Some(|_| crate::rack::editor_items()),
@@ -769,6 +774,7 @@ mod tests {
         assert_eq!(l(FILE_SAVE_AS), Some("Save as..."));
         assert_eq!(l(FILE_EXPORT), Some("Export audio..."));
         assert_eq!(l(FILE_EXPORT_MP3), Some("Export MP3..."));
+        assert_eq!(l(FILE_EXPORT_MIDI), Some("Export MIDI..."));
         assert_eq!(l(FILE_SAVE_VERSION), Some("Save new version"));
         assert_eq!(item_at(OPTIONS_MENU, OPT_INFO).map(|it| it.label), Some("Project info"));
         assert_eq!(item_at(HELP_MENU, HELP_ABOUT).map(|it| it.label), Some("About..."));
@@ -836,7 +842,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["Import", "Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");
@@ -844,7 +850,7 @@ mod tests {
         // ADD > Effect: the effect plugin menu as a submenu (spec: ui/plugin-menu.md §1-2).
         let fx = submenu(ADD_MENU, "Effect").unwrap()(&app.state);
         assert_eq!(fx, crate::plugin_menu::items(&app.state, crate::plugin_menu::Target::Fx(None), true));
-        for label in ["New from template", "Import", "Set keyboard focus for all plugins to"] {
+        for label in ["New from template", "Set keyboard focus for all plugins to"] {
             let (mi, it) = MENUS.iter().enumerate().find_map(|(mi, m)| m.cols.iter().flat_map(|(_, items)| items.iter()).find(|it| it.label == label).map(|it| (mi, it))).unwrap();
             assert!(!works(mi, it), "{label} stays greyed out");
         }

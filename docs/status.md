@@ -168,6 +168,18 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - The choices are remembered; the folder can open when the export is done
 - Not on purpose: FL's online and sharing exports
 
+## ✅ MIDI files
+
+- FILE ▸ Import ▸ MIDI file... (or a .mid dropped on the window): the Import MIDI data form picks the tracks, the
+  MIDI channels, the instrument (Lemon Trio, Citrus or Lemon Sampler) and the options; a new project, or the file
+  added to this one as one undo step. A channel per track (or per MIDI channel) with its notes, volume, pan and pitch
+  bends, the tempo changes, time signatures and markers, in a channel group named after the file
+- The modifier held while choosing the file picks whether the form shows (General ▸ Input ▸ Manage shortcuts, MIDI
+  import window)
+- FILE ▸ Export MIDI... (Shift+Ctrl+M): the current pattern, or the song's pattern clips, with a track per channel
+- The piano roll's Tools menu: Import MIDI file... into its channel (replacing or blending), Export as MIDI file...
+- Not yet: FL's FLEX mapping of the mod wheel and sustain pedal
+
 ## 🚧 Note input
 
 - Mouse, computer keyboard and MIDI controllers; notes play the selected channel
@@ -259,6 +271,5 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 ## ❌ Not available yet
 
-- MIDI file import / export
 - Audio editing
 - Plugin delay compensation
