@@ -227,8 +227,8 @@ pub struct RackUi {
     pub loop_type: u8,
     /// Position of "Unsorted" in the file's group list (`None` = last; see [`to_model`]).
     pub unsorted_at: Option<usize>,
-    /// Steps copied by Cut / Copy (the channel's notes of the pattern).
-    pub clipboard: Option<Vec<Note>>,
+    /// Steps copied by Cut / Copy: the copied channels' notes of the pattern, a row each (§11).
+    pub clipboard: Option<Vec<Vec<Note>>>,
     /// Copied knob value (knob menu, §19).
     /// Menu checkboxes that have no effect yet (greyed out): their default ticks.
     pub opts: BTreeSet<&'static str>,
@@ -482,6 +482,37 @@ fn set_row_notes(s: &mut State, r: usize, notes: Vec<Note>) {
     p.notes.extend(notes.into_iter().map(|x| Note { channel: ch, ..x }));
     p.notes.sort_by_key(|x| (x.position, x.channel));
     s.piano.dirty = true;
+}
+
+/// Cut / Copy (§11): rows `rows`' notes of the pattern go to the clipboard, a row each, in rack order.
+fn copy_rows(s: &mut State, rows: &[usize]) {
+    if !rows.is_empty() {
+        s.rack.clipboard = Some(rows.iter().map(|&r| row_notes(s, r)).collect());
+    }
+}
+
+/// Cut (§11): copies rows `rows`, then clears their notes of the pattern (one undo step).
+fn cut_rows(s: &mut State, rows: &[usize]) {
+    if rows.is_empty() {
+        return;
+    }
+    copy_rows(s, rows);
+    snapshot(s);
+    for &r in rows {
+        set_row_notes(s, r, Vec::new());
+    }
+}
+
+/// Paste (§11): the clipboard's first row replaces row `r`'s notes of the pattern, the next ones those of the rows shown
+/// below it, in order; rows past the last one shown are left out (one undo step).
+fn paste_at(s: &mut State, r: usize) {
+    let Some(rows) = s.rack.clipboard.clone() else { return };
+    let shown = shown(s);
+    let below = shown.iter().position(|&x| x == r).map_or(vec![r], |i| shown[i..].to_vec());
+    snapshot(s);
+    for (to, notes) in below.into_iter().zip(rows) {
+        set_row_notes(s, to, notes);
+    }
 }
 
 /// Turn step `k` of row `r` on or off.
@@ -1078,6 +1109,10 @@ pub enum RCmd {
     Cut(usize),
     Copy(usize),
     Paste(usize),
+    /// Ctrl+X / Ctrl+C / Ctrl+V: the selected channels' steps (§20).
+    CutSel,
+    CopySel,
+    PasteSel,
     Fill(usize, u32),
     AdvancedFill(usize),
     Rotate(usize, i32),
@@ -1596,20 +1631,27 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::Cut(r) => {
-            s.rack.clipboard = Some(row_notes(s, r));
-            snapshot(s);
-            set_row_notes(s, r, Vec::new());
+            cut_rows(s, &[r]);
             None
         }
         RCmd::Copy(r) => {
-            s.rack.clipboard = Some(row_notes(s, r));
+            copy_rows(s, &[r]);
             None
         }
         RCmd::Paste(r) => {
-            if let Some(n) = s.rack.clipboard.clone() {
-                snapshot(s);
-                set_row_notes(s, r, n);
-            }
+            paste_at(s, r);
+            None
+        }
+        RCmd::CutSel => {
+            cut_rows(s, &sel);
+            None
+        }
+        RCmd::CopySel => {
+            copy_rows(s, &sel);
+            None
+        }
+        RCmd::PasteSel => {
+            paste_at(s, sel.first().copied().unwrap_or(s.selected_channel));
             None
         }
         RCmd::Fill(r, n) => {
@@ -1937,6 +1979,9 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && letter(c, "u") => RCmd::UnzipAll,
         Key::Character(c) if alt && !ctrl && letter(c, "m") => RCmd::ShowMixer,
         Key::Character(c) if ctrl && !alt && letter(c, "l") => RCmd::AssignFreeSel,
+        Key::Character(c) if ctrl && !alt && !shift && letter(c, "x") => RCmd::CutSel,
+        Key::Character(c) if ctrl && !alt && !shift && letter(c, "c") => RCmd::CopySel,
+        Key::Character(c) if ctrl && !alt && !shift && letter(c, "v") => RCmd::PasteSel,
         Key::Character(c) if ctrl && !alt && letter(c, "k") => {
             s.rack.graph_open = !s.rack.graph_open;
             app.invalidate();
@@ -2177,6 +2222,40 @@ pub fn to_model(s: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ctrl+C / Ctrl+X / Ctrl+V with the rack in front (§11, §20): copy takes the selected channels' steps, a row each;
+    /// paste puts the first row into the first selected channel and the next rows into the rows below it, whatever else
+    /// is selected; cut copies and clears. Each change is one undo step.
+    #[test]
+    fn clipboard_keys_copy_cut_and_paste_steps() {
+        use winit::keyboard::Key;
+        let mut app = App::new(None);
+        app.state.z = vec![Win::ChannelRack];
+        assert!(app.state.project.channels.len() >= 5);
+        for r in 0..5 {
+            set_row_notes(&mut app.state, r, Vec::new());
+        }
+        let ps = per_step(&app.state);
+        set_step(&mut app.state, 0, 0, true);
+        set_step(&mut app.state, 0, 4, true);
+        set_step(&mut app.state, 1, 2, true);
+        let steps = |app: &App, r: usize| row_notes(&app.state, r).iter().map(|n| n.position / ps).collect::<Vec<_>>();
+        let key = |app: &mut App, k: &str| app.key(&Key::Character(k.into()), true, false);
+        app.state.rack.sel = BTreeSet::from([0, 1]);
+        key(&mut app, "c");
+        assert_eq!(steps(&app, 0), [0, 4], "copy leaves the steps");
+        app.state.rack.sel = BTreeSet::from([2, 4]);
+        key(&mut app, "v");
+        assert_eq!((steps(&app, 2), steps(&app, 3), steps(&app, 4)), (vec![0, 4], vec![2], vec![]), "rows 2 and 3");
+        key(&mut app, "z");
+        assert!(steps(&app, 2).is_empty() && steps(&app, 3).is_empty(), "one undo step");
+        app.state.rack.sel = BTreeSet::from([1]);
+        key(&mut app, "x");
+        assert!(steps(&app, 1).is_empty(), "cut clears");
+        app.state.rack.sel = BTreeSet::from([4]);
+        key(&mut app, "v");
+        assert_eq!(steps(&app, 4), [2], "and pastes elsewhere");
+    }
 
     /// A new project's channel name, "Lemon Sampler", fits the 100 % name button at every UI scale: the label keeps
     /// 4 px on each side (§17). Runs with the platform's text engine (GDI's Cuprum on Windows, Barlow on Linux).
