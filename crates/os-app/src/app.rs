@@ -1804,6 +1804,8 @@ impl App {
             Next::OpenDialog => self.open_dialog(),
             Next::Open(p) => self.open(p),
             Next::ImportMidi(p) => self.import_pending(p),
+            Next::Revert(b) => self.revert_from(b),
+            Next::Template(f) => self.new_from_pick(f),
         }
         self.invalidate();
     }
@@ -1884,6 +1886,17 @@ impl App {
                     self.set_factory_folder(Some(p));
                 }
             }
+            Then::SaveTemplate => {
+                if let Some(p) = file {
+                    self.template_chosen(p);
+                }
+            }
+            Then::NewProjectFolder => {
+                if let Some(p) = file {
+                    self.new_folder_chosen(p);
+                }
+            }
+            Then::DeleteUnused(files) => self.delete_unused_done(files, &reply),
             Then::SavePreset(key) => {
                 if let Some(p) = file {
                     self.state.message = crate::presets::save_chosen(self, key, p);
@@ -1975,6 +1988,11 @@ impl App {
         if self.new_from_template() {
             return;
         }
+        self.empty_project();
+    }
+
+    /// The built-in new project (FILE ▸ New with Empty, New from template ▸ Empty).
+    pub(crate) fn empty_project(&mut self) {
         self.transport.stop();
         self.reset_hosted();
         let s = &mut self.state;
@@ -7991,6 +8009,11 @@ impl App {
                 }
             }
             (0, FILE_SAVE_AS) => self.save(true),
+            // spec: ui/project-templates.md
+            (0, i) if item_at(0, i).is_some_and(|it| it.label == "Revert to last backup") => self.revert_to_backup(),
+            (0, i) if item_at(0, i).is_some_and(|it| it.label == "Save as template...") => self.save_template_dialog(),
+            (0, i) if item_at(0, i).is_some_and(|it| it.label == "Save to new project folder...") => self.new_folder_dialog(),
+            (0 | TOOLS_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == DELETE_UNUSED_LABEL) => self.delete_unused_ask(),
             (0, FILE_SAVE_VERSION) => self.save_new_version(),
             (0, FILE_EXIT) => self.want_close = true,
             (VIEW, i) if item_at(menu, i).is_some_and(|it| it.label == "Project picker") => {

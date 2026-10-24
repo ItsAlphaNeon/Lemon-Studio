@@ -107,6 +107,12 @@ pub enum Then {
     MidiExport(bool),
     /// File ▸ FL Studio factory content folder: the folder picked (`App::set_factory_folder`).
     FactoryFolder,
+    /// FILE ▸ Save as template...: the template's name, from the save dialog (`crate::project_files`).
+    SaveTemplate,
+    /// FILE ▸ Save to new project folder...: the folder the new project folder goes in.
+    NewProjectFolder,
+    /// The Delete unused files question: Yes deletes these files, then saves the project.
+    DeleteUnused(Vec<PathBuf>),
 }
 
 /// What waits for the save-changes question.
@@ -124,6 +130,10 @@ pub enum Next {
     Open(PathBuf),
     /// FILE ▸ Import ▸ MIDI file with Start new project: the import of this file (`crate::midi_file`).
     ImportMidi(PathBuf),
+    /// FILE ▸ Revert to last backup: this backup opened as the project (`crate::project_files`).
+    Revert(PathBuf),
+    /// FILE ▸ New from template ▸: a new project from this template file (None: Empty).
+    Template(Option<PathBuf>),
 }
 
 /// A dialog's answer.
