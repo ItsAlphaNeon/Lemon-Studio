@@ -4471,8 +4471,8 @@ impl App {
             crate::piano::rescale(s, from, to);
             crate::playlist::rescale(s, from, to);
             crate::history::rescale(s, from, to);
-            if let Some(notes) = &mut s.rack.clipboard {
-                notes.iter_mut().for_each(|n| n.rescale(from, to));
+            if let Some(rows) = &mut s.rack.clipboard {
+                rows.iter_mut().flatten().for_each(|n| n.rescale(from, to));
             }
             s.piano.dirty = true;
         }
