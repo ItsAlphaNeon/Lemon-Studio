@@ -471,10 +471,13 @@ impl App {
     }
 
     /// Parameter `index` of instance `key` set to `v` from a menu (Paste value, Set...): a host edit (spec §2) that
-    /// counts as the user's edit of the plugin; no undo step. Returns a message when the plugin did not take it.
+    /// counts as the user's edit of the plugin; one undo step, "Plugin parameter" (`history::param`). Returns a message
+    /// when the plugin did not take it.
     fn params_set(&mut self, key: usize, index: usize, v: f64) -> Option<String> {
+        let before = param_value(&self.state, key, index);
         let ok = set_param_value(&self.state, key, index, v);
         if ok {
+            crate::history::param(&mut self.state, key, index, before, v);
             self.plugins.mark_edited(key);
         }
         (!ok).then(|| "The plugin did not take the value".to_string())
@@ -654,6 +657,28 @@ mod tests {
     /// plugin's text and a continuous one's default and quarter values, the current one marked, and a pick sets the
     /// parameter; "Edit automation clip..." is enabled once a clip drives the parameter and shows that clip in the
     /// playlist; "Link to controller..." is ticked while a clip drives the parameter or a controller is linked to it.
+    /// Set... is one undo step, "Plugin parameter": Ctrl+Z puts the parameter back, redo sets it again; a pick of the
+    /// value it has makes none (OS, `history::param`).
+    #[test]
+    fn parameter_set_is_an_undo_step() {
+        let (mut a, key) = eq_app();
+        let idle = |a: &App| a.plugins.hosted[&key].plugin.lock().unwrap().idle();
+        let v0 = value_of(&a.state, key, 35).unwrap();
+        a.state.history.reset();
+        crate::playlist::run(&mut a, Cmd::Param(PCmd::Set(key, 35, 1.0)));
+        idle(&a);
+        assert!((value_of(&a.state, key, 35).unwrap() - 1.0).abs() < 1e-6);
+        assert_eq!(a.state.history.entries().last().map(|e| e.1), Some(crate::history::PLUGIN_PARAMETER));
+        assert_eq!(crate::history::undo(&mut a.state), Some(crate::history::PLUGIN_PARAMETER));
+        idle(&a);
+        assert!((value_of(&a.state, key, 35).unwrap() - v0).abs() < 1e-6, "back");
+        assert_eq!(crate::history::redo(&mut a.state), Some(crate::history::PLUGIN_PARAMETER));
+        idle(&a);
+        assert!((value_of(&a.state, key, 35).unwrap() - 1.0).abs() < 1e-6, "redone");
+        crate::playlist::run(&mut a, Cmd::Param(PCmd::Set(key, 35, 1.0)));
+        assert_eq!(a.state.history.len(), 1, "the same value again");
+    }
+
     #[test]
     fn parameter_menu_set_edit_clip_and_link() {
         let (mut a, key) = eq_app();
