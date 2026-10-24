@@ -264,6 +264,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - One-click audio recording (the toolbar's microphone, TOOLS): pick an input (an ASIO driver's inputs, else the
   system's input devices), the song plays with Record armed and precount, and on stop the take becomes a 32-bit WAV
   in the data folder's `Recorded` folder plus a new audio clip channel and clip where playback started
+- TOOLS ▸ Cancel recording: while recording, playback stops and the takes of that playback are undone (Redo brings
+  them back)
 - Not yet: audio recording into mixer tracks, input monitoring, the audio editor
 
 ## 🚧 Undo

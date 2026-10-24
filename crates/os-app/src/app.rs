@@ -7982,6 +7982,10 @@ impl App {
                     self.state.message = Some(m);
                 }
             }
+            // spec: ui/cancel-recording.md
+            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Cancel recording") => {
+                self.state.message = Some(self.cancel_recording());
+            }
             (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Stop sound") => {
                 self.transport.stop();
                 self.state.message = Some("Sound stopped".into());

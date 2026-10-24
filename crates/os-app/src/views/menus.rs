@@ -306,7 +306,7 @@ const TOOLS_A: &[Item] = &[
 const TOOLS_B: &[Item] = &[
     head("Macros"),
     it("Stop sound", "Ctrl+H").on(),
-    it("Cancel recording", ""),
+    it("Cancel recording", "").on(),
     SEP,
     it("Prepare for performance mode", ""),
     it("Prepare for MIDI export", ""),
