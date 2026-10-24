@@ -1213,6 +1213,8 @@ pub struct App {
     pub(crate) audio_rec: Option<crate::one_click::AudioRec>,
     /// Wheel movement in an open menu short of a whole notch (trackpads).
     menu_notch: f32,
+    /// A Shift+press grabbed piano-roll notes: the drag's first move picks up copies of them (`App::pick_up_notes`).
+    shift_clone: bool,
     /// Audio ▸ Auto close: whether the output is closed while another program is in front (`crate::auto_close`).
     pub(crate) auto_close: crate::auto_close::AutoClose,
     pub want_minimize: bool,
@@ -1431,6 +1433,7 @@ impl App {
             warp: None,
             audio_rec: None,
             menu_notch: 0.0,
+            shift_clone: false,
             auto_close: Default::default(),
             want_minimize: false,
             want_maximize: false,
@@ -4804,7 +4807,11 @@ impl App {
                     }
                 }
                 Drag::NoteMove { x0, y0, orig } => {
-                    self.drag_notes(x0, y0, &orig, false);
+                    if std::mem::take(&mut self.shift_clone) {
+                        self.pick_up_notes(false);
+                    } else {
+                        self.drag_notes(x0, y0, &orig, false);
+                    }
                     self.state.piano.dirty = true;
                 }
                 Drag::NoteResize { x0, orig } => {
@@ -5862,6 +5869,7 @@ impl App {
 
     pub fn mouse_up(&mut self) {
         self.hold = None;
+        self.shift_clone = false;
         self.release();
         // An undo step whose press changed nothing goes (spec: ui/settings-choices.md "Undo history").
         crate::history::settle(&mut self.state);
@@ -5989,7 +5997,8 @@ impl App {
                 s.piano.last_len = len;
             }
         } else {
-            let dk = (g.key_at(y) - g.key_at(y0)).clamp(-131, 131);
+            // Shift held keeps the notes on their keys (spec: ui/piano-roll.md §8).
+            let dk = if self.shift { 0 } else { (g.key_at(y) - g.key_at(y0)).clamp(-131, 131) };
             // Keep every note at or after tick 0 and inside the key range.
             let min_pos = orig.iter().map(|(_, o)| i64::from(o.position)).min().unwrap_or(0);
             dt = dt.max(-min_pos);
@@ -7190,8 +7199,10 @@ impl App {
                     self.hold_key(Some(i32::from(n.key)), play);
                     Drag::NoteMove { x0: x, y0: y, orig }
                 });
-                // Held without a move, the notes are cloned (Click-and-hold & special gesture functions).
-                if matches!(self.drag, Some(Drag::NoteMove { .. })) {
+                // Shift+drag drags copies of the notes (§8); held without a move, the notes are cloned (Click-and-hold &
+                // special gesture functions).
+                self.shift_clone = self.shift && matches!(self.drag, Some(Drag::NoteMove { .. }));
+                if matches!(self.drag, Some(Drag::NoteMove { .. })) && !self.shift_clone {
                     self.hold_start(crate::hold::Kind::Notes);
                 }
             }

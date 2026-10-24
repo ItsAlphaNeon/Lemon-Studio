@@ -125,7 +125,7 @@ impl App {
             }
             Kind::Notes => {
                 self.hold = None;
-                self.pick_up_notes();
+                self.pick_up_notes(true);
             }
             Kind::Clips => {
                 self.hold = None;
@@ -135,8 +135,9 @@ impl App {
     }
 
     /// The moved notes are copied: the originals go back to where they were, the copies (selected when the
-    /// originals were) are dragged from here on, starting one snap step later (a step without a snap).
-    fn pick_up_notes(&mut self) {
+    /// originals were) are dragged from here on, starting one snap step later (a step without a snap) when `step`.
+    /// A Shift+drag picks them up on its first move, without the step (spec: ui/piano-roll.md §8).
+    pub(crate) fn pick_up_notes(&mut self, step: bool) {
         let Some(Drag::NoteMove { x0, y0, orig }) = self.drag.clone() else { return };
         let (Some(g), Some(ch)) = (self.piano_geom(), piano::channel(&self.state)) else { return };
         let s = &mut self.state;
@@ -156,7 +157,7 @@ impl App {
             s.piano.select(s.pattern, ch, (first..first + copies.len()).collect());
         }
         let unit = crate::piano_snap::unit(s).unwrap_or(u32::from(s.project.ppq.max(4)) / 4);
-        let x0 = x0 - unit as f32 * g.ppt;
+        let x0 = if step { x0 - unit as f32 * g.ppt } else { x0 };
         s.piano.dirty = true;
         self.drag = Some(Drag::NoteMove { x0, y0, orig: copies.clone() });
         self.drag_notes(x0, y0, &copies, false);
@@ -340,6 +341,71 @@ mod tests {
         assert_eq!(copy.position, orig.position + 4 * unit);
         assert!(notes(&app).contains(&orig));
         set_check(&CLICK_AND_HOLD, false);
+    }
+
+    // spec: ui/piano-roll.md §8
+    /// Shift+drag on a note drags a copy of it: the original stays, the copy keeps its key while Shift is held, and undo
+    /// takes the copy away in one step. A Shift+click without a move copies nothing. On a selected note the whole
+    /// selection is copied and the copies become the selection. Shift pressed during a plain drag keeps the notes on
+    /// their keys and copies nothing.
+    #[test]
+    fn shift_drag_clones_notes() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = piano_app(&mut c);
+        let k = mid_key(&app);
+        let (x, y) = grid_point(&app, 2, k);
+        press(&mut app, x, y);
+        app.mouse_up();
+        let a = notes(&app)[0];
+        app.paint(&mut c, None);
+        let g = app.piano_geom().unwrap();
+        let unit = crate::piano_snap::unit(&app.state).expect("a snap");
+        let step = unit as f32 * g.ppt;
+        app.shift = true;
+        press(&mut app, x, y);
+        app.mouse_up();
+        assert_eq!(notes(&app), vec![a], "a Shift+click copies nothing");
+        let steps = app.state.history.len();
+        press(&mut app, x, y);
+        app.mouse_move(x + 4.0 * step, y + 2.0 * g.row);
+        app.mouse_up();
+        app.shift = false;
+        assert_eq!(notes(&app), vec![a, Note { position: a.position + 4 * unit, ..a }], "a copy, on the original's key");
+        assert_eq!(app.state.history.len(), steps + 1, "one step");
+        assert_eq!(app.state.history.entries().last().map(|e| e.1), Some("Piano roll clone note"));
+        undo(&mut app);
+        assert_eq!(notes(&app), vec![a], "one undo step");
+        // Two notes selected: both are copied, and the copies are the selection.
+        let (x2, y2) = grid_point(&app, 6, k + 3);
+        press(&mut app, x2, y2);
+        app.mouse_up();
+        let b = *notes(&app).iter().find(|n| *n != &a).unwrap();
+        let ch = piano::channel(&app.state).unwrap();
+        app.state.piano.select(app.state.pattern, ch, vec![0, 1]);
+        app.paint(&mut c, None);
+        app.shift = true;
+        press(&mut app, x, y);
+        app.mouse_move(x + 8.0 * step, y - g.row);
+        app.mouse_up();
+        app.shift = false;
+        let ns = notes(&app);
+        let moved = |n: Note| Note { position: n.position + 8 * unit, ..n };
+        assert_eq!(ns.len(), 4);
+        assert!([a, b, moved(a), moved(b)].iter().all(|n| ns.contains(n)), "{ns:?}");
+        let sel: Vec<Note> = app.state.piano.selection(app.state.pattern, Some(ch)).iter().map(|&i| ns[i]).collect();
+        assert!(sel.len() == 2 && sel.contains(&moved(a)) && sel.contains(&moved(b)), "the copies are selected");
+        undo(&mut app);
+        // Shift pressed during a plain drag: the note stays on its key, nothing is copied.
+        app.state.piano.clear_selection();
+        app.paint(&mut c, None);
+        press(&mut app, x, y);
+        app.shift = true;
+        app.mouse_move(x + step, y + 2.0 * g.row);
+        app.mouse_up();
+        app.shift = false;
+        let ns = notes(&app);
+        assert_eq!(ns.len(), 2, "no copy");
+        assert!(ns.contains(&Note { position: a.position + unit, ..a }), "moved in time only: {ns:?}");
     }
 
     // spec: ui/settings-choices.md "Input: Click-and-hold and both mouse buttons (2026-10-16)"
