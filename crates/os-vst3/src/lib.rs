@@ -648,7 +648,8 @@ impl Plugin {
         &self.desc
     }
 
-    /// Bus arrangements and activation (spec §4.5): stereo main buses, the first event input.
+    /// Bus arrangements and activation (spec §4.5): stereo main buses, the first auxiliary audio input (a sidechain,
+    /// spec: audio/sidechain.md "Hosted plugins' input buses"), the first event input.
     fn setup_buses(&mut self) {
         unsafe {
             let c = &self.component;
@@ -668,8 +669,8 @@ impl Plugin {
             if debug() && r != kResultOk {
                 eprintln!("[os-vst3] {} keeps its own bus arrangement", self.desc.name);
             }
-            if n_in > 0 {
-                c.activate_bus(AUDIO, INPUT, 0, 1);
+            for b in 0..n_in.min(2) {
+                c.activate_bus(AUDIO, INPUT, b as i32, 1);
             }
             if n_out > 0 {
                 c.activate_bus(AUDIO, OUTPUT, 0, 1);
@@ -1131,8 +1132,9 @@ impl Plugin {
         }
     }
 
-    /// Processes up to `max_frames` frames: queued notes inside them, waiting parameter changes, the given audio.
-    fn process_chunk(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>) {
+    /// Processes up to `max_frames` frames: queued notes inside them, waiting parameter changes, the given audio, and
+    /// `key` in the first auxiliary input bus.
+    fn process_chunk(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>, key: Option<(&[f32], &[f32])>) {
         let n = left.len();
         let max = self.max_frames as usize;
         // Notes of this chunk; later ones move on.
@@ -1179,6 +1181,17 @@ impl Plugin {
                     // SAFETY: scratch holds max_frames frames for every channel.
                     let s = unsafe { base.add(k * max) };
                     unsafe { std::ptr::write_bytes(s, 0, n) };
+                    // The sidechain: the key's two sides, a mono bus their average.
+                    if let Some((kl, kr)) = key.filter(|_| b == 1) {
+                        // SAFETY: as above, `n` frames.
+                        let d = unsafe { std::slice::from_raw_parts_mut(s, n) };
+                        match (ch, c) {
+                            (1, _) => d.iter_mut().zip(kl.iter().zip(kr)).for_each(|(m, (a, b))| *m = (a + b) * 0.5),
+                            (_, 0) => d.copy_from_slice(&kl[..n]),
+                            (_, 1) => d.copy_from_slice(&kr[..n]),
+                            _ => {}
+                        }
+                    }
                     s
                 });
                 k += 1;
@@ -1513,7 +1526,7 @@ impl os_engine::Instrument for Plugin {
         while at < left.len() {
             let n = (left.len() - at).min(max);
             self.set_context(song.map(|s| s.advanced(at as u64, rate)));
-            self.process_chunk(&mut left[at..at + n], &mut right[at..at + n], None);
+            self.process_chunk(&mut left[at..at + n], &mut right[at..at + n], None, None);
             at += n;
         }
         self.debug_level(rate, left, right);
@@ -1524,6 +1537,29 @@ impl os_engine::Instrument for Plugin {
 // passes through unchanged.
 impl os_engine::HostedEffect for Plugin {
     fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
+        self.effect(rate, left, right, None);
+    }
+
+    fn process_fx_keyed(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: (&[f32], &[f32])) {
+        self.effect(rate, left, right, Some(key));
+    }
+
+    fn reset_fx(&mut self) {
+        os_engine::Instrument::reset(self);
+    }
+
+    fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
+        self.automate(offset, index, value);
+    }
+
+    fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
+        self.song = Some(*info);
+    }
+}
+
+impl Plugin {
+    /// An effect's block: `left` / `right` processed in place, `key` for its first auxiliary input bus.
+    fn effect(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: Option<(&[f32], &[f32])>) {
         if self.rate != rate {
             self.wanted_rate.store(rate, Ordering::Release);
             self.shared.attention.raise();
@@ -1542,22 +1578,11 @@ impl os_engine::HostedEffect for Plugin {
             ir.clear();
             il.extend_from_slice(&left[at..at + n]);
             ir.extend_from_slice(&right[at..at + n]);
-            self.process_chunk(&mut left[at..at + n], &mut right[at..at + n], Some((&mut il[..], &mut ir[..])));
+            let key = key.map(|(a, b)| (&a[at..at + n], &b[at..at + n]));
+            self.process_chunk(&mut left[at..at + n], &mut right[at..at + n], Some((&mut il[..], &mut ir[..])), key);
             at += n;
         }
         self.fx_in = (il, ir);
-    }
-
-    fn reset_fx(&mut self) {
-        os_engine::Instrument::reset(self);
-    }
-
-    fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
-        self.automate(offset, index, value);
-    }
-
-    fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
-        self.song = Some(*info);
     }
 }
 

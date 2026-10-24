@@ -59,7 +59,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Polarity and stereo swap, main volume and main pitch
 - Sidechain inputs: a project's Fruity Limiter slot listens to the track routed into its track that its sidechain
   number names (Sidechain to this track routes count), heard after that track's fader and delayed to line up
-- Not yet: sidechain inputs of CLAP and VST3 plugins
+- CLAP and VST3 effects get a sidechain input too: pick it in the slot menu's Sidechain input submenu, which lists
+  the tracks routed into the track. The choice is saved where FL saves it, and projects saved by FL play their
+  plugins' sidechain and input choices as FL plays them
 
 ## ✅ Plugin hosting
 

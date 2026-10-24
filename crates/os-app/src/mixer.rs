@@ -83,6 +83,9 @@ pub enum MCmd {
     SlotMove(u8, i8),
     SlotRename(u8),
     SlotView(u8),
+    /// Sidechain input ▸ (Lemon Studio's own): the input of the current track a hosted plugin's sidechain bus hears,
+    /// counted from 1, 0 for none (spec: audio/sidechain.md "Hosted plugins' input buses").
+    SlotSidechain(u8, usize),
 }
 
 /// What the plugin host does next tick for a mixer slot (`App::mixer_tick`).
@@ -1024,6 +1027,7 @@ pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
         PItem::head("Parameters"),
         PItem::not_yet("Link all parameters..."),
         PItem::new("Browse parameters", Cmd::Param(crate::params::PCmd::Browse(crate::plugins::fx_key(s.selected_mixer, slot)))),
+        PItem::sub("Sidechain input", sidechain_items(s, slot)),
         PItem::head("CPU"),
         PItem::not_yet("Allow threaded processing").mark(Mark::Check(true)),
         PItem::not_yet("Smart disable"),
@@ -1041,6 +1045,26 @@ pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
         PItem::not_yet("Help"),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// The tracks routed into track `n`, in track order: its inputs, numbered from 1 (spec: audio/sidechain.md "Settings").
+pub fn inputs(s: &State, n: u16) -> Vec<u16> {
+    let mut ins: Vec<u16> = s.project.mixer.iter().filter(|m| m.index != 0 && m.index != n && m.routes.contains(&n)).map(|m| m.index).collect();
+    ins.sort_unstable();
+    ins
+}
+
+/// Sidechain input ▸: "None" and the current track's inputs by name, the slot's choice marked.
+fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
+    let t = s.selected_mixer;
+    let now = track(s, t).and_then(|m| m.slots.get(usize::from(slot))?.as_ref()).filter(|p| p.name == os_flp::wrapper::WRAPPER).map_or(0, |p| {
+        os_flp::wrapper::input_ports(&p.state).get(1).map_or(0, |&p| p.max(0) as usize)
+    });
+    let mut items = vec![PItem::new("None", Cmd::Mixer(MCmd::SlotSidechain(slot, 0))).mark(Mark::Radio(now == 0))];
+    for (i, n) in inputs(s, t).into_iter().enumerate() {
+        items.push(PItem::new(format!("{}. {}", i + 1, name(s, n)), Cmd::Mixer(MCmd::SlotSidechain(slot, i + 1))).mark(Mark::Radio(now == i + 1)));
+    }
+    items
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1200,6 +1224,15 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
             let t = s.selected_mixer;
             s.mixer.pending.push(FxReq::Toggle { track: t, slot });
             None
+        }
+        MCmd::SlotSidechain(slot, port) => {
+            let t = s.selected_mixer;
+            if crate::project_plugins::set_slot_sidechain(&mut s.project, &app.plugins, t, slot, port) {
+                changed(s);
+                None
+            } else {
+                Some("This effect has no sidechain input".into())
+            }
         }
     };
     app.invalidate();
@@ -1580,6 +1613,32 @@ mod tests {
         run(&mut a, MCmd::SlotDelete(1));
         assert_eq!(slot_name(&a.state, 2, 1), None);
         assert!(a.state.mixer.pending.iter().any(|r| matches!(r, FxReq::Create { track: 2, slot: 0, index: 0 })));
+    }
+
+    /// spec: audio/sidechain.md "Hosted plugins' input buses": Sidechain input ▸ lists None and the tracks routed into
+    /// the track, in track order, and writes the pick into the slot's wrapper state as FL does; an effect that is not
+    /// a wrapped plugin says so.
+    #[test]
+    fn sidechain_input_submenu() {
+        use os_flp::wrapper;
+        let mut a = app();
+        select(&mut a.state, 1, false);
+        track_mut(&mut a.state, 3).unwrap().routes = vec![1];
+        track_mut(&mut a.state, 2).unwrap().routes = vec![1, 0];
+        track_mut(&mut a.state, 2).unwrap().name = Some("Kick".into());
+        assert_eq!(inputs(&a.state, 1), [2, 3]);
+        let plugin = os_model::PluginRef { format: "clap".into(), name: "Comp".into(), path: "C:/Comp.clap".into(), ..Default::default() };
+        track_mut(&mut a.state, 1).unwrap().slots[0] = Some(os_model::SlotPlugin { name: wrapper::WRAPPER.into(), state: wrapper::encode(None, &plugin) });
+        let labels = |a: &App| sidechain_items(&a.state, 0).iter().map(|i| (i.label.to_string(), i.mark == Mark::Radio(true))).collect::<Vec<_>>();
+        assert_eq!(labels(&a), [("None".into(), true), ("1. Kick".into(), false), ("2. Insert 3".into(), false)]);
+        assert_eq!(run(&mut a, MCmd::SlotSidechain(0, 2)), None);
+        let state = |a: &App| track(&a.state, 1).unwrap().slots[0].as_ref().unwrap().state.clone();
+        assert_eq!(wrapper::input_ports(&state(&a)), [0, 2]);
+        assert_eq!(wrapper::decode(&state(&a)), Some(plugin));
+        assert_eq!(labels(&a)[2].1, true);
+        assert_eq!(crate::project_plugins::slot_ports(&a.state.project, 1, 0), (0, 2));
+        track_mut(&mut a.state, 1).unwrap().slots[1] = Some(os_model::SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
+        assert!(run(&mut a, MCmd::SlotSidechain(1, 1)).is_some());
     }
 
     // spec: ui/mixer-track-commands.md §1

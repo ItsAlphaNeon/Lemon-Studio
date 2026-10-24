@@ -658,7 +658,8 @@ pub struct Plugin {
     ins: usize,
     outs: usize,
     /// Channels of the ports after the main ones (a sidechain input, extra outputs). CLAP wants a buffer for every
-    /// port it declares: these get silence (Lemon Studio routes no sidechain yet) and unheard scratch.
+    /// port it declares: the first extra input gets the slot's sidechain input when it has one, the others silence;
+    /// extra outputs get unheard scratch (spec: audio/sidechain.md "Hosted plugins' input buses").
     aux_ins: Vec<usize>,
     aux_outs: Vec<usize>,
     /// Buffers for channels the host has no audio for (a mono input's mix of both sides, channels beyond two, the
@@ -1321,7 +1322,7 @@ impl Plugin {
 
     /// Processes `n` frames (≤ max) with the queued events whose time falls inside them.
     fn process_chunk(&mut self, left: &mut [f32], right: &mut [f32]) {
-        self.process_chunk_in(left, right, None);
+        self.process_chunk_in(left, right, None, None);
     }
 
     /// The plugin reported that it is done (no CONTINUE / TAIL, and quiet output with CONTINUE_IF_NOT_QUIET) and
@@ -1338,8 +1339,8 @@ impl Plugin {
     }
 
     /// `process_chunk` with an audio input (effects): `input` holds the frames to process, `left` / `right` receive
-    /// the output.
-    fn process_chunk_in(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>) {
+    /// the output, `key` the sidechain input's frames for the first extra input port.
+    fn process_chunk_in(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>, key: Option<(&[f32], &[f32])>) {
         let n = left.len() as u32;
         // This block answers a request to be processed; one made while it runs asks for the next.
         self.host_data.process.store(false, Ordering::Release);
@@ -1581,6 +1582,19 @@ impl Plugin {
                 }
             }
             self.in_ptrs.extend((0..self.aux_ins.iter().sum::<usize>()).map(|c| spare(aux_in_at + c)));
+            // The sidechain input in the first extra port: its two sides, a mono port their average.
+            if let (Some((kl, kr)), Some(&ch)) = (key, self.aux_ins.first()) {
+                for c in 0..ch {
+                    // SAFETY: the port's channels are `spare` buffers of `frames` frames (above).
+                    let d = unsafe { std::slice::from_raw_parts_mut(base.add((aux_in_at + c) * max), frames) };
+                    match (ch, c) {
+                        (1, _) => d.iter_mut().zip(kl.iter().zip(kr)).for_each(|(m, (a, b))| *m = (a + b) * 0.5),
+                        (_, 0) => d.copy_from_slice(&kl[..frames]),
+                        (_, 1) => d.copy_from_slice(&kr[..frames]),
+                        _ => {}
+                    }
+                }
+            }
         }
         // One buffer per port, as CLAP requires: a plugin reads its sidechain port's buffer even when the host has
         // nothing for it (nih-plug reads one past a short list, and crashes on what it finds there).
@@ -1971,6 +1985,29 @@ impl os_engine::Instrument for Plugin {
 // activated it at the stream's rate the sound passes through unchanged.
 impl os_engine::HostedEffect for Plugin {
     fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
+        self.effect(rate, left, right, None);
+    }
+
+    fn process_fx_keyed(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: (&[f32], &[f32])) {
+        self.effect(rate, left, right, Some(key));
+    }
+
+    fn reset_fx(&mut self) {
+        os_engine::Instrument::reset(self);
+    }
+
+    fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
+        self.automate(offset, index, value);
+    }
+
+    fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
+        self.song = Some(*info);
+    }
+}
+
+impl Plugin {
+    /// An effect's block: `left` / `right` processed in place, `key` for its sidechain port.
+    fn effect(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: Option<(&[f32], &[f32])>) {
         if self.rate != rate {
             self.wanted_rate.store(rate, Ordering::Release);
             self.host_data.attention.raise();
@@ -1982,8 +2019,9 @@ impl os_engine::HostedEffect for Plugin {
                 return;
             }
         }
-        // Quiet input to a sleeping effect passes through as it is.
-        if self.asleep() && left.iter().chain(right.iter()).all(|v| v.abs() <= QUIET) {
+        // Quiet input (and a quiet sidechain) to a sleeping effect passes through as it is.
+        let quiet = |s: &[f32]| s.iter().all(|v| v.abs() <= QUIET);
+        if self.asleep() && quiet(left) && quiet(right) && key.is_none_or(|(a, b)| quiet(a) && quiet(b)) {
             self.song = None;
             self.steady += left.len() as i64;
             return;
@@ -1999,22 +2037,11 @@ impl os_engine::HostedEffect for Plugin {
             ir.clear();
             il.extend_from_slice(&left[at..at + n]);
             ir.extend_from_slice(&right[at..at + n]);
-            self.process_chunk_in(&mut left[at..at + n], &mut right[at..at + n], Some((&mut il[..], &mut ir[..])));
+            let key = key.map(|(a, b)| (&a[at..at + n], &b[at..at + n]));
+            self.process_chunk_in(&mut left[at..at + n], &mut right[at..at + n], Some((&mut il[..], &mut ir[..])), key);
             at += n;
         }
         self.fx_in = (il, ir);
-    }
-
-    fn reset_fx(&mut self) {
-        os_engine::Instrument::reset(self);
-    }
-
-    fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
-        self.automate(offset, index, value);
-    }
-
-    fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
-        self.song = Some(*info);
     }
 }
 

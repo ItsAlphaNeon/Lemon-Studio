@@ -359,6 +359,12 @@ impl fmt::Debug for Slot {
 pub trait HostedEffect: Send {
     /// Processes `left.len()` frames at `rate` in place.
     fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]);
+    /// `process_fx` with the slot's sidechain input `key` (left, right; as long as `left`) for the plugin's first
+    /// auxiliary input bus (spec: audio/sidechain.md "Hosted plugins' input buses"). A plugin without one ignores it.
+    fn process_fx_keyed(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: (&[f32], &[f32])) {
+        let _ = key;
+        self.process_fx(rate, left, right);
+    }
     /// Drops tails and delay lines (Stop).
     fn reset_fx(&mut self) {}
     /// [`Instrument::param`] for effects: parameter `index` to normalized `value`, `offset` frames into the next

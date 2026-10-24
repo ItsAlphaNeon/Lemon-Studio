@@ -369,15 +369,23 @@ impl Engine {
         for t in 0..n {
             for i in 0..self.tracks[t].effects.len() {
                 let fx = &self.tracks[t].effects[i];
-                let src = match fx.key_input() {
+                // A hosted plugin's port past the last input is no input (spec: audio/sidechain.md "Hosted plugins'
+                // input buses").
+                let hosted = matches!(fx.fx, super::Fx::Hosted(_));
+                let pick = |k: usize| match k {
                     0 => None,
+                    k if hosted => super::input_at(&self.tracks, t, k),
                     k => super::input(&self.tracks, t, k),
                 };
-                let len = src.map_or(0, |s| (self.pdc.slot_late[t][fx.slot] - l.leaving[s]).max(0) as usize);
+                let (src, main) = (pick(fx.key_input()), pick(if hosted { fx.ports[0] } else { 0 }));
+                let late = |s: Option<usize>| s.map_or(0, |s| (self.pdc.slot_late[t][fx.slot] - l.leaving[s]).max(0) as usize);
+                let (len, main_len) = (late(src), late(main));
                 let fx = &mut self.tracks[t].effects[i];
                 fx.key = src;
                 fx.key_pad.set_len(len);
-                if let Some(s) = src {
+                fx.main = main;
+                fx.main_pad.set_len(main_len);
+                for s in [src, main].into_iter().flatten() {
                     keyed[s] = true;
                 }
             }

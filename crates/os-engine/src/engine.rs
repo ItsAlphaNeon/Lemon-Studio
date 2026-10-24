@@ -749,6 +749,12 @@ struct FxSlot {
     /// output to the lateness at the slot (spec: audio/sidechain.md "Sidechain input").
     key: Option<usize>,
     key_pad: pdc::Pad,
+    /// A hosted plugin's input ports, main and first auxiliary bus (0 = none), and the track its main bus takes instead
+    /// of the track's own audio, with the pad that delays it like a sidechain input (spec: audio/sidechain.md "Hosted
+    /// plugins' input buses").
+    ports: [usize; 2],
+    main: Option<usize>,
+    main_pad: pdc::Pad,
 }
 
 impl FxSlot {
@@ -768,6 +774,9 @@ impl FxSlot {
             dry_pad: pdc::Pad::default(),
             key: None,
             key_pad: pdc::Pad::default(),
+            ports: [0; 2],
+            main: None,
+            main_pad: pdc::Pad::default(),
         }
     }
 
@@ -775,7 +784,7 @@ impl FxSlot {
     fn key_input(&self) -> usize {
         match &self.fx {
             Fx::Own(e) => e.key_input(),
-            Fx::Hosted(_) => 0,
+            Fx::Hosted(_) => self.ports[1],
         }
     }
 }
@@ -1050,6 +1059,7 @@ pub struct Engine {
     /// after its pad.
     key_out: Vec<Option<Vec<f32>>>,
     key_buf: Vec<f32>,
+    main_buf: Vec<f32>,
     /// Frames instruments keep being processed after their last held note (their release / tail is not known).
     inst_tail: u64,
     /// A hosted instrument reported sound still to come during the last tick.
@@ -1558,6 +1568,7 @@ impl Engine {
             fx_dry: Vec::new(),
             key_out: Vec::new(),
             key_buf: Vec::new(),
+            main_buf: Vec::new(),
             inst_tail: 0,
             inst_active: false,
             metronome: None,
@@ -1649,6 +1660,19 @@ impl Engine {
         let at = t.effects.partition_point(|e| e.slot < slot);
         t.effects.insert(at, FxSlot::new(slot, t.slot_on[slot], t.slot_mix[slot], Fx::Hosted(fx)));
         self.pdc.due = true;
+    }
+
+    /// The input ports of the hosted plugin in `slot` of mixer track `track`: `main` for its main input bus, `aux` for
+    /// its first auxiliary one, each the number of a track's input counted from 1, or 0 for none (spec:
+    /// audio/sidechain.md "Hosted plugins' input buses").
+    pub fn set_effect_ports(&mut self, track: usize, slot: usize, main: usize, aux: usize) {
+        let Some(fx) = self.tracks.get_mut(track).and_then(|t| t.effects.iter_mut().find(|e| e.slot == slot)) else { return };
+        if let Fx::Hosted(_) = fx.fx {
+            if fx.ports != [main, aux] {
+                fx.ports = [main, aux];
+                self.pdc.due = true;
+            }
+        }
     }
 
     /// Ticks hosted plugins missed since the last call (each one still busy elsewhere after the tick's wait), heard as
@@ -2053,6 +2077,7 @@ impl Engine {
             for fx in &mut t.effects {
                 fx.dry_pad.clear();
                 fx.key_pad.clear();
+                fx.main_pad.clear();
             }
         }
     }
@@ -2263,6 +2288,7 @@ impl Engine {
                         a.dry = b.dry;
                         a.dry_pad = std::mem::take(&mut b.dry_pad);
                         a.key_pad = std::mem::take(&mut b.key_pad);
+                        a.main_pad = std::mem::take(&mut b.main_pad);
                         if let (Fx::Own(_), Fx::Own(_)) = (&a.fx, &b.fx) {
                             std::mem::swap(&mut a.fx, &mut b.fx);
                         }
@@ -3214,13 +3240,15 @@ impl Engine {
             let busy = (&mut self.busy_until, self.busy_wait, self.exporting, &mut self.missed);
             let bus = &mut self.bus;
             let track = &mut self.tracks[t];
-            let (keys, key_buf) = (&self.key_out, &mut self.key_buf);
+            let (keys, key_buf, main_buf) = (&self.key_out, &mut self.key_buf, &mut self.main_buf);
             // A slot runs when its own switch is on and the track's slots are enabled (spec: audio/mixer.md).
             if track.slots_enabled && if t == 0 { self.master_fx } else { self.insert_fx } {
                 for fx in &mut track.effects {
-                    let key = fx.key.and_then(|s| keys.get(s)?.as_deref()).filter(|k| k.len() == buf.len()).map(|k| (k, &mut *key_buf));
+                    let feed = |s: Option<usize>| s.and_then(|s| keys.get(s)?.as_deref()).filter(|k| k.len() == buf.len());
+                    let key = feed(fx.key).map(|k| (k, &mut *key_buf));
+                    let main = feed(fx.main).map(|k| (k, &mut *main_buf));
                     let extra = (t, &track.routes[..], &mut bus[..]);
-                    run_slot(fx, &mut buf, rate, limit, song, dry, l, r, (&mut *busy.0, busy.1, busy.2, &mut *busy.3), &mut moved, extra, key);
+                    run_slot(fx, &mut buf, rate, limit, song, dry, l, r, (&mut *busy.0, busy.1, busy.2, &mut *busy.3), &mut moved, extra, (key, main));
                 }
             }
             track.eq.process(&mut buf);
@@ -3640,15 +3668,22 @@ fn run_slot(
     (until, wait, export, missed): (&mut Option<Instant>, Duration, bool, &mut u64),
     moved: &mut bool,
     (t, routes, bus): (usize, &[Route], &mut [Vec<f32>]),
-    key: Option<(&[f32], &mut Vec<f32>)>,
+    (key, main): (Option<(&[f32], &mut Vec<f32>)>, Option<(&[f32], &mut Vec<f32>)>),
 ) {
     let n = buf.len() / 2;
     let ramp = fx.dry.block(os_dsp::mixer::dry_level(fx.mix), n, limit);
-    let key = key.map(|(src, padded)| {
+    let fill = |(src, padded): (&[f32], &mut Vec<f32>), pad: &mut pdc::Pad| {
         padded.clear();
         padded.extend_from_slice(src);
-        fx.key_pad.run(padded);
-        &padded[..]
+        pad.run(padded);
+    };
+    let key = key.map(|k| {
+        fill((k.0, &mut *k.1), &mut fx.key_pad);
+        &k.1[..]
+    });
+    let main = main.map(|m| {
+        fill((m.0, &mut *m.1), &mut fx.main_pad);
+        &m.1[..]
     });
     if !fx.on {
         return;
@@ -3704,12 +3739,27 @@ fn run_slot(
             if fresh {
                 h.reset_fx();
             }
+            // A main port takes another input instead of the track's own audio; an auxiliary port without an input hears
+            // the track's own audio too (spec: audio/sidechain.md "Hosted plugins' input buses").
+            let src: &[f32] = main.unwrap_or(buf);
             l.clear();
             r.clear();
-            l.extend(buf.chunks_exact(2).map(|f| f[0]));
-            r.extend(buf.chunks_exact(2).map(|f| f[1]));
+            l.extend(src.chunks_exact(2).map(|f| f[0]));
+            r.extend(src.chunks_exact(2).map(|f| f[1]));
             h.transport_fx(song);
-            h.process_fx(rate, &mut l[..n], &mut r[..n]);
+            // The key's two sides go behind the input's in `l` and `r`.
+            match key {
+                Some(k) => {
+                    l.extend(k.chunks_exact(2).map(|f| f[0]));
+                    r.extend(k.chunks_exact(2).map(|f| f[1]));
+                }
+                None => {
+                    l.extend_from_within(..n);
+                    r.extend_from_within(..n);
+                }
+            }
+            let ((il, kl), (ir, kr)) = (l.split_at_mut(n), r.split_at_mut(n));
+            h.process_fx_keyed(rate, il, ir, (kl, kr));
             for (i, f) in buf.chunks_exact_mut(2).enumerate() {
                 f[0] = l[i];
                 f[1] = r[i];
@@ -3732,6 +3782,12 @@ fn input(tracks: &[MixTrack], t: usize, k: usize) -> Option<usize> {
     let mut ins = (0..tracks.len()).filter(|&s| s != t && tracks[s].routes.iter().any(|r| r.dest == t));
     let last = ins.clone().last();
     ins.nth(k.max(1) - 1).or(last)
+}
+
+/// Input `k` (from 1) of track `t` with no stand-in: `None` past the last input, as for a hosted plugin's port (spec:
+/// audio/sidechain.md "Hosted plugins' input buses").
+fn input_at(tracks: &[MixTrack], t: usize, k: usize) -> Option<usize> {
+    (0..tracks.len()).filter(|&s| s != t && tracks[s].routes.iter().any(|r| r.dest == t)).nth(k.checked_sub(1)?)
 }
 
 /// Output `k` (from 1) of track `t`: the tracks it is routed to in track order, a number past the end meaning the last
@@ -6812,6 +6868,63 @@ mod tests {
         assert!(same(&render_with(&p, false), &plain, 1.0));
         p.mixer[0].slot_mix[0] = 0.0;
         assert!(same(&render_with(&p, false), &plain, 2.0));
+    }
+
+    /// A hosted effect that puts out its sidechain bus, or with `own` its main input.
+    struct KeyOut {
+        own: bool,
+    }
+
+    impl crate::instrument::HostedEffect for KeyOut {
+        fn process_fx(&mut self, _rate: u32, _left: &mut [f32], _right: &mut [f32]) {
+            unreachable!("hosted slots always get a sidechain bus");
+        }
+
+        fn process_fx_keyed(&mut self, _rate: u32, left: &mut [f32], right: &mut [f32], key: (&[f32], &[f32])) {
+            if !self.own {
+                left.copy_from_slice(key.0);
+                right.copy_from_slice(key.1);
+            }
+        }
+    }
+
+    /// spec: audio/sidechain.md "Hosted plugins' input buses": on insert 1, which plays in both beats, a hosted plugin's
+    /// auxiliary port N hears the track's N-th input (insert 2 plays in the first beat, insert 3 in the second, both
+    /// routed in at level 0), port 0 or one past the last input the track's own audio; a main port takes that input
+    /// instead of the track's own audio (the auxiliary port 0 then hears it too), and past the last input leaves the
+    /// track's own.
+    #[test]
+    fn hosted_ports_pick_the_tracks_inputs() {
+        let mut p = insert_project();
+        p.mixer.push(os_model::MixerTrack::new(3));
+        p.patterns[0].notes = vec![long_note(0, 96, 0), long_note(96, 96, 0), Note { channel: 1, ..long_note(0, 96, 0) }, Note { channel: 2, ..long_note(96, 96, 0) }];
+        p.channels.push(Channel { index: 1, mixer_track: 2, ..channel() });
+        p.channels.push(Channel { index: 2, mixer_track: 3, ..channel() });
+        for t in [2, 3] {
+            p.mixer[t].routes = vec![1];
+            p.mixer[t].send_levels = vec![(1, 0.0)];
+        }
+        let render = |own: bool, main: usize, aux: usize| {
+            let mut lib = SampleLibrary::new(None);
+            let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+            e.set_effect(1, 0, std::sync::Arc::new(std::sync::Mutex::new(KeyOut { own })));
+            e.set_effect_ports(1, 0, main, aux);
+            e.render_all(512)
+        };
+        // Each beat's sound, away from the notes' ends.
+        let beat = (44100.0 * 60.0 / 130.0) as usize;
+        let halves = |x: &[f32]| (peak(&x[2000..12000], 0), peak(&x[2 * beat + 2000..2 * beat + 12000], 0));
+        // The first beat's release still sounds early in the second, below a tenth of the notes.
+        let heard = |(a, b): (f32, f32)| (a > 0.1, b > 0.1);
+        assert_eq!(heard(halves(&render(false, 0, 0))), (true, true), "no port: the track's own audio");
+        assert_eq!(heard(halves(&render(false, 0, 1))), (true, false), "input 1");
+        assert_eq!(heard(halves(&render(false, 0, 2))), (false, true), "input 2");
+        assert_eq!(heard(halves(&render(false, 0, 3))), (true, true), "past the last input");
+        assert_eq!(heard(halves(&render(false, 1, 0))), (true, false), "the main bus's input");
+        assert_eq!(heard(halves(&render(true, 0, 0))), (true, true), "the track's own audio");
+        assert_eq!(heard(halves(&render(true, 1, 0))), (true, false), "main port 1");
+        assert_eq!(heard(halves(&render(true, 2, 0))), (false, true), "main port 2");
+        assert_eq!(heard(halves(&render(true, 3, 0))), (true, true), "main port past the last input");
     }
 
     /// A version 7 Fruity Limiter state: `p`, the spare bank, editor bytes, sidechain input `key`, no flags.

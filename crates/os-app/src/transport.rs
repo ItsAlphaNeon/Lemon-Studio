@@ -1026,9 +1026,7 @@ fn engine(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayM
         eprintln!("[transport] attach {} instrument(s), {} effect(s)", list.len(), fx.len());
     }
     let mut e = Engine::with_instruments(project, library, rate, mode, &list);
-    for (track, slot, fx) in fx {
-        e.set_effect(track, slot, fx);
-    }
+    crate::project_plugins::attach_effects(&mut e, project, fx);
     e
 }
 
