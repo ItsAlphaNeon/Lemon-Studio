@@ -433,6 +433,19 @@ impl App {
         true
     }
 
+    /// Middle click on row `i` (spec §7): selects it, and a sample goes into the selected channel as the row menu's
+    /// "Send to selected channel" sends it (§8). Returns whether there was a row.
+    pub(crate) fn browser_row_middle(&mut self, i: usize) -> bool {
+        let s = &mut self.state;
+        let Some(row) = view::rows(s).into_iter().nth(i) else { return false };
+        select(s, &row.key);
+        if let Item::Sample(path) = &row.item {
+            s.message = send_sample(s, path, &row.label);
+        }
+        self.invalidate();
+        true
+    }
+
     /// A row menu command on the selected row (spec §8); returns a message.
     fn browser_row_cmd(&mut self, c: RowCmd) -> Option<String> {
         let s = &mut self.state;
