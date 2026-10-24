@@ -413,6 +413,8 @@ pub enum Cmd {
     Theme(ThemeCmd),
     /// Settings > General ▸ Default template: "Empty" or "<category>/<template>" (`crate::templates`).
     Template(String),
+    /// FILE ▸ New from template ▸: "Empty" or "<category>/<template>" (`crate::project_files`).
+    NewTemplate(String),
     /// Settings > General ▸ Hints and warnings ▸ the Manage messages menu (`crate::messages`).
     Messages(crate::messages::Pick),
     /// Settings > Project ▸ Data folder's menus and the forms' lists (`crate::data_folder`).
@@ -3847,6 +3849,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Genre(g) => return app.set_genre(g),
         Cmd::Theme(c) => return app.theme_cmd(c),
         Cmd::Template(t) => return app.set_template(&t),
+        Cmd::NewTemplate(t) => {
+            app.pick_new_template(&t);
+            return None;
+        }
         Cmd::Messages(p) => {
             app.invalidate();
             return Some(crate::messages::pick(p));
@@ -4391,7 +4397,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Pref(..) => None,
         Cmd::Genre(_) => None,
         Cmd::Theme(_) => None,
-        Cmd::Template(_) => None,
+        Cmd::Template(_) | Cmd::NewTemplate(_) => None,
         Cmd::Arp(_) | Cmd::MidiImport(_) | Cmd::MidiExport(_) | Cmd::OpenRecent(_) => None,
         Cmd::FlamPreset(_) => None,
         Cmd::Limit(_) => None,

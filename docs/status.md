@@ -179,6 +179,11 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   opens a Save as form that can make that folder (General ▸ Ask for data folder decides when; File ▸ New can
   open a New project form)
 - FILE lists the ten projects last opened or saved (Alt+1 .. Alt+0), More ▸ the older ones, fifty in all
+- FILE ▸ Revert to last backup opens the project's newest backup (asking about unsaved changes first, as Open
+  does); Save as template... keeps a copy in the user folder's `Templates`, and New from template ▸ starts an
+  untitled project from one (or Empty); Save to new project folder... saves into a folder named after the project,
+  which becomes its data folder; Delete unused files and save project (FILE and TOOLS) asks, then deletes the data
+  folder's unused samples, recordings and renders and saves
 - Still early: always work on copies and keep backups
 
 ## 🚧 Built-in instruments and effects

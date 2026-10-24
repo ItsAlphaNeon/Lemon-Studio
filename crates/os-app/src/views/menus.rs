@@ -145,16 +145,16 @@ const FILE: &[Item] = &[
     it("Save", "Ctrl+S").on(),
     it("Save as...", "Shift+Ctrl+S").on(),
     it("Save new version", "Ctrl+N").on(),
-    it("Save to new project folder...", ""),
-    it("Save as template...", ""),
-    it("Delete unused files and save project", ""),
+    it("Save to new project folder...", "").on(),
+    it("Save as template...", "").on(),
+    it(DELETE_UNUSED_LABEL, "").on(),
     SEP,
     it("Import", "").sub(),
     it("Export audio...", "Ctrl+R").on(),
     it("Export MP3...", "Shift+Ctrl+R").on(),
     it("Export MIDI...", "Shift+Ctrl+M").on(),
     SEP,
-    it("Revert to last backup", ""),
+    it("Revert to last backup", "").on(),
     SEP,
     it("Exit", "").on(),
 ];
@@ -319,7 +319,7 @@ const TOOLS_B: &[Item] = &[
     it("Lock all playlist tracks to content", ""),
     it("Unlock all playlist tracks from content", ""),
     it("Reset empty playlist tracks", "").on(),
-    it("Delete unused files and save project", ""),
+    it(DELETE_UNUSED_LABEL, "").on(),
     it(EDITORS_LABEL, "").sub(),
     it("Set keyboard focus for all plugins to", "").sub(),
     it(DECLICK_LABEL, "").sub(),
@@ -438,9 +438,24 @@ pub fn in_menu(s: &State, menu: usize, item: &Item) -> bool {
     !(menu == EDIT_MENU && item.label == "Redo") || crate::history::redo_shown(s)
 }
 
-/// Whether an entry can be chosen now: it works (`works`), and EDIT's have a step to act on.
+/// Whether an entry can be chosen now: it works (`works`), EDIT's have a step to act on, and the project file rows
+/// that need a saved project have one (`needs_file`).
 pub fn active(s: &State, menu: usize, item: &Item) -> bool {
-    works(menu, item) && (menu != EDIT_MENU || crate::history::edit_enabled(s, item.label == "Redo"))
+    works(menu, item) && (menu != EDIT_MENU || crate::history::edit_enabled(s, item.label == "Redo")) && (s.path.is_some() || !needs_file(menu, item.label))
+}
+
+/// FILE / TOOLS ▸ Delete unused files and save project.
+pub const DELETE_UNUSED_LABEL: &str = "Delete unused files and save project";
+
+/// The rows greyed out for a project that was never saved (spec: ui/menu-submenus.md §1): Save to new project
+/// folder..., Delete unused files and save project, and Revert to last backup (Lemon Studio rule: a project never
+/// saved has no backups of its own; "untitled" ones may be any other's).
+pub fn needs_file(menu: usize, label: &str) -> bool {
+    match menu {
+        0 => matches!(label, "Save to new project folder..." | DELETE_UNUSED_LABEL | "Revert to last backup"),
+        TOOLS_MENU => label == DELETE_UNUSED_LABEL,
+        _ => false,
+    }
 }
 
 fn item_action(menu: usize, i: usize, item: &Item) -> Action {
@@ -480,6 +495,8 @@ pub fn submenu(menu: usize, label: &str) -> Option<fn(&State) -> Vec<crate::play
     match (menu, label) {
         // spec: ui/midi-files.md §1: FL's Import holds only MIDI file...
         (0, "Import") => Some(|_| vec![crate::playlist::PItem::new("MIDI file...", crate::playlist::Cmd::MidiImport(false))]),
+        // spec: ui/project-templates.md
+        (0, "New from template") => Some(crate::project_files::template_items),
         // spec: ui/plugin-menu.md §1: the effects, a pick into the selected mixer track's first empty slot as from F8.
         (ADD_MENU, "Effect") => Some(|s| crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(None), true)),
         (TOOLS_MENU, EDITORS_LABEL) => Some(|_| crate::rack::editor_items()),
@@ -975,7 +992,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["Import", "Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");
@@ -983,7 +1000,7 @@ mod tests {
         // ADD > Effect: the effect plugin menu as a submenu (spec: ui/plugin-menu.md §1-2).
         let fx = submenu(ADD_MENU, "Effect").unwrap()(&app.state);
         assert_eq!(fx, crate::plugin_menu::items(&app.state, crate::plugin_menu::Target::Fx(None), true));
-        for label in ["New from template", "Set keyboard focus for all plugins to"] {
+        for label in ["Set keyboard focus for all plugins to"] {
             let (mi, it) = MENUS.iter().enumerate().find_map(|(mi, m)| m.cols.iter().flat_map(|(_, items)| items.iter()).find(|it| it.label == label).map(|it| (mi, it))).unwrap();
             assert!(!works(mi, it), "{label} stays greyed out");
         }
