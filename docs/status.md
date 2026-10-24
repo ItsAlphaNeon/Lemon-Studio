@@ -14,6 +14,10 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)
 - Deleting channels or a pattern asks first, unless the box's Remember my choice was ticked or the question
   is turned off in General settings ▸ Hints and warnings ▸ Manage messages
+- PATTERNS ▸ Quick render as audio clip: the current pattern rendered (as the export renders a pattern, with its
+  progress panel) to a WAV in the data folder's `Rendered` folder and made a new audio clip channel named after it;
+  Render and replace... also covers every clip of the pattern in the playlist with a clip of it and mutes the
+  pattern clips. One undo step each. Not yet: Render as audio clip... (its options form)
 
 ## ✅ Piano roll
 
