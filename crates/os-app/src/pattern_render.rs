@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! PATTERNS > Quick render as audio clip and Render and replace (spec: ui/pattern-render.md): the current pattern
-//! rendered as the Export form renders a pattern, into a WAV in the data folder's Rendered folder, then a new audio
-//! clip channel for it, named after the pattern; Render and replace also puts a clip of it over every clip of the
-//! pattern in the playlist and mutes those.
+//! PATTERNS > Quick render as audio clip, Render as audio clip... and Render and replace (spec: ui/pattern-render.md):
+//! the current pattern rendered as the Export form renders a pattern, into a WAV in the data folder's Rendered folder,
+//! then a new audio clip channel for it, named after the pattern; Render as audio clip... shows the Export form first;
+//! Render and replace also puts a clip of it over every clip of the pattern in the playlist and mutes those.
 // spec: ui/pattern-render.md
 
 use std::path::{Path, PathBuf};
@@ -200,6 +200,44 @@ impl App {
         self.start_export(job, false);
     }
 
+    /// PATTERNS > Render as audio clip... (§1): the Export form in its render mode: Play fixed on the current
+    /// pattern, the Rendered folder, the pattern's file name and the quick render's choices, changeable before the
+    /// render; Export renders and makes the channel as Quick render does.
+    pub(crate) fn open_render_form(&mut self) {
+        if self.export.is_some() {
+            return;
+        }
+        let s = &self.state;
+        let pattern = s.pattern.max(1);
+        if !s.project.pattern(pattern).is_some_and(|p| !p.notes.is_empty()) {
+            let text = format!("Nothing to render: {} has no notes.", crate::patterns::name_of(s, pattern));
+            return self.tell(crate::dialog::Kind::Warning, TITLE, crate::dialog::spans(&[&text]));
+        }
+        let dir = folder(s);
+        let stem = file_stem(&dir, &crate::patterns::name_of(s, pattern));
+        let o = job(s, &dir, &stem).options;
+        self.open_export(false);
+        let Some(crate::dialog::Modal { body: crate::dialog::Body::Project(crate::project_forms::Form::Export(f)), .. }) = self.state.dialogs.last_mut() else {
+            return;
+        };
+        (f.song, f.song_ok, f.selection, f.to_clip) = (false, false, false, true);
+        f.folder = dir;
+        f.o = o;
+        f.name.set(&stem);
+        f.name.select_all();
+    }
+
+    /// The render mode's Export (§1): the form's choices for the current pattern into its folder, then the channel.
+    pub(crate) fn render_pattern_with(&mut self, f: &crate::export_form::ExportForm) {
+        if let Err(e) = std::fs::create_dir_all(&f.folder) {
+            self.state.message = Some(format!("Render failed: {}: {e}", f.folder.display()));
+            return self.invalidate();
+        }
+        let job = self.export_job(f);
+        self.pattern_render = Some(Pending { pattern: self.state.pattern.max(1), replace: false });
+        self.start_export(job, false);
+    }
+
     /// A render has finished (`App::export_tick`): the channel and clips for its file, or what went wrong.
     pub(crate) fn pattern_render_done(&mut self, p: Pending, r: Result<(f64, Vec<PathBuf>), String>) {
         self.state.message = Some(match r {
@@ -356,6 +394,31 @@ mod tests {
         app.state.pattern = 2;
         app.pattern_cmd(crate::patterns::Cmd::QuickRender);
         assert!(app.export.is_none() && app.pattern_render.is_none() && !app.state.dialogs.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Render as audio clip...: the Export form on the current pattern with the Rendered folder, the pattern's name and
+    /// the render's choices; Export makes the channel and keeps no choices (§1).
+    #[test]
+    fn render_form() {
+        let mut app = app();
+        let d = temp("form");
+        with_data_folder(&mut app, &d);
+        app.state.song_mode = true;
+        let channels = app.state.project.channels.len();
+        app.pattern_cmd(crate::patterns::Cmd::RenderAsClip);
+        let Some(crate::dialog::Modal { body: crate::dialog::Body::Project(crate::project_forms::Form::Export(f)), .. }) = app.state.dialogs.last() else {
+            panic!("the form opens")
+        };
+        assert!(f.to_clip && !f.song && !f.song_ok && f.o.formats == [true, false, false, false] && !f.o.master_fx);
+        assert_eq!((f.folder.clone(), f.name.text.as_str()), (d.join("Rendered"), "Pattern 1"));
+        app.dialog_click(crate::dialog::DHit::Form(crate::project_forms::FHit::Main));
+        assert!(app.state.dialogs.is_empty() && app.pattern_render.is_some());
+        finish(&mut app);
+        assert_eq!(app.state.project.channels.len(), channels + 1, "{:?}", app.state.message);
+        let ch = app.state.project.channels.last().unwrap();
+        assert_eq!(ch.sample_path.as_deref().map(PathBuf::from), Some(d.join("Rendered").join("Pattern 1.wav")));
+        assert!(crate::playlist::clips(&app.state).is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -7933,6 +7933,10 @@ impl App {
                 self.render_pattern(cmd == crate::patterns::Cmd::RenderReplace);
                 None
             }
+            crate::patterns::Cmd::RenderAsClip => {
+                self.open_render_form();
+                None
+            }
             _ => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
                 crate::patterns::run(&mut self.state, cmd, at)

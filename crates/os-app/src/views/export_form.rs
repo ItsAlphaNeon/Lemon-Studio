@@ -34,7 +34,7 @@ const ITEM_H: f32 = 20.0;
 /// Paints form `f` of dialog `m`.
 pub fn paint(ui: &mut Ui, s: &State, m: &Modal, f: &ExportForm) {
     let r = place(s, m, W, H);
-    frame(ui, r, ef::TITLE);
+    frame(ui, r, if f.to_clip { crate::pattern_render::TITLE } else { ef::TITLE });
     let t = ui.t;
     let font = Font::new(13);
     let lh = ui.c.line_height(font);
