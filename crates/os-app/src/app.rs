@@ -6823,9 +6823,10 @@ impl App {
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("e") => self.toggle_step_edit(),
             // Record (spec: ui/recording.md §2): R, when the typing keyboard has not taken it as a note.
             Key::Character(c) if !ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::Record),
-            // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch
-            // tools (until a typing keyboard exists, which will take them).
-            Key::Character(c) if !ctrl && !alt && !self.shift && self.state.shown(Win::PianoRoll) && Tool::from_letter(c).is_some() => {
+            // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch tools; with Shift too,
+            // which the typing keyboard leaves alone (Shift+C and Shift+D were taken above; spec: ui/piano-keys.md §4
+            // rule 16).
+            Key::Character(c) if !ctrl && !alt && self.state.shown(Win::PianoRoll) && Tool::from_letter(c).is_some() => {
                 if let Some(t) = Tool::from_letter(c) {
                     self.act(Action::PianoTool(t));
                 }
@@ -14224,11 +14225,13 @@ mod tests {
                 'b' => KeyCode::KeyB,
                 'c' => KeyCode::KeyC,
                 'd' => KeyCode::KeyD,
+                'e' => KeyCode::KeyE,
                 'h' => KeyCode::KeyH,
                 'i' => KeyCode::KeyI,
                 'k' => KeyCode::KeyK,
                 'l' => KeyCode::KeyL,
                 'm' => KeyCode::KeyM,
+                'p' => KeyCode::KeyP,
                 'r' => KeyCode::KeyR,
                 'u' => KeyCode::KeyU,
                 'v' => KeyCode::KeyV,
@@ -14384,6 +14387,42 @@ mod tests {
             app.state.piano.marker_placed = true;
             letter(&mut app, 'v', CTRL, 1);
             assert_eq!(selected(&app), [(480, 60)]);
+        }
+
+        /// Shift+E / Shift+P and the other tool letters switch tools with or without the typing keyboard, which takes the
+        /// plain letters as notes; Shift+C and Shift+D keep their editing commands (§4 rule 16).
+        #[test]
+        fn shift_letters_switch_tools() {
+            let Some((mut app, _c)) = setup() else { return };
+            letter(&mut app, 'e', 0, 1);
+            assert_eq!(app.state.piano.tool, Tool::Select, "typing keyboard off: E");
+            letter(&mut app, 'p', 0, 1);
+            assert_eq!(app.state.piano.tool, Tool::Draw, "typing keyboard off: P");
+            letter(&mut app, 'e', SHIFT, 1);
+            assert_eq!(app.state.piano.tool, Tool::Select, "typing keyboard off: Shift+E");
+            letter(&mut app, 'p', SHIFT, 1);
+            assert_eq!(app.state.piano.tool, Tool::Draw, "typing keyboard off: Shift+P");
+
+            app.toggle_typing();
+            assert!(app.typing_on());
+            letter(&mut app, 'e', 0, 1);
+            assert_eq!(app.state.piano.tool, Tool::Draw, "typing keyboard on: E plays a note");
+            letter(&mut app, 'e', SHIFT, 1);
+            assert_eq!(app.state.piano.tool, Tool::Select, "typing keyboard on: Shift+E");
+            letter(&mut app, 'p', SHIFT, 1);
+            assert_eq!(app.state.piano.tool, Tool::Draw, "typing keyboard on: Shift+P");
+            letter(&mut app, 'b', SHIFT, 1);
+            assert_eq!(app.state.piano.tool, Tool::Paint);
+            letter(&mut app, 'z', SHIFT, 1);
+            assert_eq!(app.state.piano.tool, Tool::Zoom);
+
+            letter(&mut app, 'p', SHIFT, 1);
+            letter(&mut app, 'd', SHIFT, 1);
+            assert_eq!(app.state.piano.tool, Tool::Draw, "Shift+D discards lengths");
+            assert!(spans(&app).iter().all(|&(_, l, _)| l == 24), "one snap unit long: {:?}", spans(&app));
+            letter(&mut app, 'c', SHIFT, 1);
+            assert_eq!(app.state.piano.tool, Tool::Draw, "Shift+C selects a colour");
+            assert_eq!(selected(&app).len(), 10);
         }
 
         /// Alt+arrows, rotation, mute, the selection keys and Shift+K / Shift+H (§4 rules 8 to 11, 13, 14).
