@@ -415,6 +415,11 @@ impl Instrument for NativePlugin {
         self.events.push((offset, Ev::Tune(key, semitones)));
     }
 
+    /// A tuning moves its voice's pitch (`Ev::Tune`), which the generator reads while the voice sounds.
+    fn takes_tuning(&self) -> bool {
+        true
+    }
+
     /// Automated values arrive once per tick, at its start (spec: "Parameters").
     fn param(&mut self, offset: u32, index: u32, value: f64) {
         self.events.push((offset, Ev::Param(index, midi_value(value))));
