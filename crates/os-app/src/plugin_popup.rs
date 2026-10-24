@@ -16,7 +16,7 @@ use os_host::{Menu, MenuItem};
 /// inside a submenu is shown inline in it, under a header with its title.
 #[cfg_attr(not(plugin_windows), allow(dead_code))]
 pub fn popup(key: usize, m: &Menu, x: f32, y: f32) -> Popup {
-    Popup { x, y, items: rows(key, m.id, &m.items, 0), sub: None }
+    Popup { x, y, items: rows(key, m.id, &m.items, 0), sub: None, scroll: [0; 2] }
 }
 
 fn rows(key: usize, id: u64, items: &[MenuItem], depth: usize) -> Vec<PItem> {

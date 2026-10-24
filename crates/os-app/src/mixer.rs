@@ -380,7 +380,7 @@ pub fn right(app: &mut App, h: MHit) -> bool {
                 PItem::new("Sidechain to this track", Cmd::Mixer(MCmd::Route { dst, only: false, side: true })),
                 PItem::new("Sidechain to this track only", Cmd::Mixer(MCmd::Route { dst, only: true, side: true })),
             ];
-            s.playlist.popup = Some(Popup { x: at.0, y: at.1, items, sub: None });
+            s.playlist.popup = Some(Popup { x: at.0, y: at.1, items, sub: None, scroll: [0; 2] });
         }
         // The slot's plugin menu, like a left click (spec: ui/plugin-menu.md §1).
         MHit::SlotArrow(i) => {
@@ -854,7 +854,7 @@ const COLORS: [(&str, u32); 8] = [
 pub fn track_menu(s: &State, n: u16, x: f32, y: f32) -> Popup {
     let mut items = vec![PItem::head(format!("Mixer track ({})", name(s, n)))];
     items.extend(track_items(n));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 fn track_items(n: u16) -> Vec<PItem> {
@@ -955,7 +955,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::head(format!("Mixer track ({})", name(s, s.selected_mixer))),
     ];
     items.extend(track_items(s.selected_mixer));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Layout combo menu (§6.4): only Wide is drawn, the other layouts are greyed out.
@@ -968,14 +968,14 @@ pub fn layout_menu(s: &State, x: f32, y: f32) -> Popup {
         let on = Mark::Radio(s.mixer.layout == i as u8);
         items.push(if i as u8 == WIDE { PItem::new(l, Cmd::Mixer(MCmd::Layout(i as u8))) } else { PItem::not_yet(l) }.mark(on));
     }
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Empty slot: the effect list (§7.1), the plugin menu for this slot (spec: ui/plugin-menu.md).
 pub fn effect_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
     let mut items = vec![PItem::not_yet("Plugin database").key(crate::shortcuts::menu_key("Plugin database", "Shift+F8")), PItem::sep()];
     items.extend(crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), false));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Filled slot ▸ (§7.2).
@@ -1016,7 +1016,7 @@ pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
         PItem::sub("Scaling", vec![PItem::not_yet("100%")]),
         PItem::not_yet("Help"),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 // ---------------------------------------------------------------------------------------------------------

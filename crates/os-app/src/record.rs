@@ -278,7 +278,7 @@ impl App {
             PItem::new("Don't ask again", Cmd::Rec(RecCmd::AskOff)),
         ];
         let (x, y) = self.hits.iter().find(|h| h.action == crate::app::Action::Record).map_or((486.0, 35.0), |h| (h.rect.x, h.rect.bottom() + 2.0));
-        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
     }
 
     /// A record popup's command (`Cmd::Rec`); returns the message to show.
@@ -341,7 +341,7 @@ impl App {
                     PItem::new("Replace", Cmd::Rec(RecCmd::DumpAs(minutes, true))),
                     PItem::new("Cancel", Cmd::Nothing),
                 ];
-                self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+                self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
                 return None;
             }
             None => false,
@@ -439,7 +439,7 @@ impl App {
             }
             _ => return,
         };
-        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
     }
 
     /// An option switch (the buttons, OPTIONS menu, Ctrl+I / Ctrl+P / Ctrl+B); turning Start on input off ends a wait.
@@ -477,7 +477,7 @@ impl App {
             it("Note start time", Opt::QuantizeStart),
             it("Note end time", Opt::QuantizeEnd),
         ];
-        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
     }
 
     /// Whether something played now is recorded: armed, `what` on in the filter, playing and not paused.

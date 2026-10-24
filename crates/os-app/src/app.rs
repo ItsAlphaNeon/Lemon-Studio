@@ -353,6 +353,10 @@ pub enum Scroll {
     Settings,
     /// Settings ▸ Plugins: the plugin table (whole rows).
     PlugTable,
+    /// A popup menu wider than the window, and its open submenu (whole columns; spec: ui/menus.md "Menus wider than
+    /// the window").
+    Popup,
+    PopupSub,
 }
 
 /// A scroll bar painted this frame.
@@ -403,7 +407,7 @@ pub(crate) fn scroll_win(t: Scroll) -> Option<Win> {
         Scroll::PlaylistX | Scroll::PlaylistY | Scroll::PlPick => Some(Win::Playlist),
         Scroll::MixerX => Some(Win::Mixer),
         Scroll::RackX | Scroll::RackY => Some(Win::ChannelRack),
-        Scroll::Settings | Scroll::PlugTable => None,
+        Scroll::Settings | Scroll::PlugTable | Scroll::Popup | Scroll::PopupSub => None,
     }
 }
 
@@ -571,6 +575,8 @@ pub struct Hit {
     pub win: Option<Win>,
     /// A menu row the wheel steps to (`App::menu_wheel`): which menu it is in, 0 = not a menu row.
     pub menu: u8,
+    /// A menu row in a column scrolled out of view (`Ui::hidden_menu_row`): the menu's scroll that shows it.
+    pub reveal: Option<usize>,
 }
 
 /// A part of the frame that paints independently: skipped by a repaint whose damage misses where it drew.
@@ -626,7 +632,7 @@ impl Ui<'_> { // This code is a part of L e m o n S t u d i o.
                     let p = &self.keep.parts[i];
                     (p.hits.clone(), p.bars.clone(), p.live.clone(), p.area)
                 };
-                let dummy = || Hit { rect: Rect::default(), action: Action::Swallow, hint: Cow::Borrowed(""), win: None, menu: 0 };
+                let dummy = || Hit { rect: Rect::default(), action: Action::Swallow, hint: Cow::Borrowed(""), win: None, menu: 0, reveal: None };
                 let prev = &mut self.keep.prev;
                 self.hits.extend(hits.map(|k| std::mem::replace(&mut prev[k], dummy())));
                 self.bars.extend_from_slice(&self.keep.prev_bars[bars]);
@@ -734,7 +740,7 @@ impl Ui<'_> {
     /// Register a hit region; returns whether it is hovered (topmost last frame).
     pub fn hit(&mut self, rect: Rect, action: Action, hint: impl Into<Cow<'static, str>>) -> bool {
         let hovered = self.hover.as_ref() == Some(&action) && rect.contains(self.mouse.0, self.mouse.1);
-        self.hits.push(Hit { rect, action, hint: hint.into(), win: self.win, menu: 0 });
+        self.hits.push(Hit { rect, action, hint: hint.into(), win: self.win, menu: 0, reveal: None });
         hovered
     }
 
@@ -745,10 +751,17 @@ impl Ui<'_> {
         }
     }
 
+    /// A row of menu `menu` in a column scrolled out of view, for the wheel to step to: the menu's scroll `reveal` shows
+    /// it at `rect`. Its hit has no height, so the pointer never finds it.
+    pub fn hidden_menu_row(&mut self, rect: Rect, action: Action, menu: u8, reveal: usize) {
+        let rect = Rect::new(rect.x, rect.cy(), rect.w, 0.0);
+        self.hits.push(Hit { rect, action, hint: Cow::Borrowed(""), win: self.win, menu, reveal: Some(reveal) });
+    }
+
     /// A control that is drawn but does nothing yet: its hit only explains that (hint and click message), so it never
     /// lights up, toggles or acts. Draw the control greyed out: `kit::State::disabled`, `menu_pop_dim` text, or `veil`.
     pub fn off(&mut self, rect: Rect, name: &'static str) {
-        self.hits.push(Hit { rect, action: Action::Placeholder(name), hint: Cow::Owned(off_text(name)), win: self.win, menu: 0 });
+        self.hits.push(Hit { rect, action: Action::Placeholder(name), hint: Cow::Owned(off_text(name)), win: self.win, menu: 0, reveal: None });
     }
 
     /// Greys out what was just drawn in `rect` (a disabled control without a disabled look of its own): a veil of the
@@ -2783,7 +2796,7 @@ impl App {
             PItem::new("Plugin performance monitor", Cmd::Cpu(CpuCmd::Monitor)).mark(Mark::Check(self.state.shown(Win::Perf))),
             PItem::new("Audio settings", Cmd::Cpu(CpuCmd::AudioSettings)),
         ];
-        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
     }
 
     /// The metronome button's right-click menu: the sound (spec: ui/metronome.md §2), and Recording precount (spec:
@@ -2800,7 +2813,7 @@ impl App {
         for (label, n) in [("Off", 0), ("1 bar", 1), ("2 bars", 2)] {
             items.push(PItem::new(label, Cmd::Rec(RecCmd::Precount(n))).mark(Mark::Radio(bars == n)));
         }
-        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
     }
 
     /// Metronome switch (toolbar, OPTIONS menu, Ctrl+M): heard from the next beat, also while playing.
@@ -2814,7 +2827,7 @@ impl App {
     fn autoscroll_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let items = vec![PItem::new("Continuous scrolling", Cmd::ContinuousScrolling).mark(Mark::Check(crate::autoscroll::continuous()))];
-        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
     }
 
     /// Auto scrolling switch (toolbar, OPTIONS menu): followed from the next move of the playhead.
@@ -3078,7 +3091,7 @@ impl App {
                     m => arp::option_menu(&s.arp.set, m),
                 };
                 let (x, y) = self.mouse;
-                self.state.playlist.popup = Some(crate::playlist::Popup { x, y, items, sub: None });
+                self.state.playlist.popup = Some(crate::playlist::Popup { x, y, items, sub: None, scroll: [0; 2] });
             }
             a => arp::act(s, a),
         }
@@ -3161,7 +3174,7 @@ impl App {
                     Act::DurMenu => crate::quantize::mode_menu(&s.piano_dlg.quant),
                     _ => dlg::options_menu(),
                 };
-                s.playlist.popup = Some(crate::playlist::Popup { x, y, items, sub: None });
+                s.playlist.popup = Some(crate::playlist::Popup { x, y, items, sub: None, scroll: [0; 2] });
             }
             Act::TemplateFolder => {
                 let chop = s.piano_dlg.tool == dlg::Tool::Chop;
@@ -4306,7 +4319,7 @@ impl App {
             }
             _ => return,
         };
-        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None, scroll: [0; 2] });
         self.invalidate();
     }
 
@@ -5299,8 +5312,9 @@ impl App {
             }
             return;
         }
-        // Playlist popup menus close on any click outside them; a click elsewhere accepts an open text box.
-        if self.state.playlist.popup.is_some() && !matches!(action, Some(Action::PlPopup(_) | Action::PlPopupSub(_))) {
+        // Playlist popup menus close on any click outside them (their scroll bars are in them); a click elsewhere
+        // accepts an open text box.
+        if self.state.playlist.popup.is_some() && !matches!(action, Some(Action::PlPopup(_) | Action::PlPopupSub(_) | Action::Scrollbar(Scroll::Popup | Scroll::PopupSub))) {
             self.state.playlist.popup = None;
             // A dropdown's submenu: the click goes on to the dropdown (below), but one on the submenu's own ▸ entry only
             // closes it.
@@ -5345,7 +5359,9 @@ impl App {
         }
         // Any click outside an open menu closes it. VIEW's window entries are window toggles: one clicked in the menu
         // closes the menu and toggles its window. Its open submenu takes its own clicks.
-        if self.state.menu_open.is_some() && !matches!(action, Some(Action::MenuItem(..) | Action::MenuSub(..) | Action::Menu(_) | Action::PlPopup(_) | Action::PlPopupSub(_))) {
+        if self.state.menu_open.is_some()
+            && !matches!(action, Some(Action::MenuItem(..) | Action::MenuSub(..) | Action::Menu(_) | Action::PlPopup(_) | Action::PlPopupSub(_) | Action::Scrollbar(Scroll::Popup | Scroll::PopupSub)))
+        {
             self.state.menu_open = None;
             if !(matches!(action, Some(Action::ToggleWin(_))) && self.overlays.iter().any(|r| r.contains(x, y))) {
                 return;
@@ -5451,6 +5467,7 @@ impl App {
             Scroll::PlPick => s.playlist.pick_scroll,
             Scroll::Settings => s.settings.scroll,
             Scroll::PlugTable => s.plugdb.top as f32 * views::settings::TABLE_ROW_H,
+            Scroll::Popup | Scroll::PopupSub => s.playlist.popup.as_ref().map_or(0.0, |p| p.scroll[usize::from(t == Scroll::PopupSub)] as f32),
         }
     }
 
@@ -5472,6 +5489,16 @@ impl App {
             Scroll::PlPick => s.playlist.pick_scroll = v,
             Scroll::Settings => s.settings.scroll = v,
             Scroll::PlugTable => s.plugdb.top = (v / views::settings::TABLE_ROW_H).round() as usize,
+            Scroll::Popup | Scroll::PopupSub => {
+                let Some(p) = s.playlist.popup.as_mut() else { return };
+                let (k, col) = (usize::from(t == Scroll::PopupSub), v.round() as usize);
+                // Scrolling the list closes its submenu (its row may go out of view).
+                if k == 0 && p.scroll[0] != col {
+                    p.sub = None;
+                    p.scroll[1] = 0;
+                }
+                p.scroll[k] = col;
+            }
         }
     }
 
@@ -6209,7 +6236,7 @@ impl App {
         if self.modal_open() {
             return self.dialog_wheel(dy);
         }
-        if self.menu_wheel(dy + dx) {
+        if self.menu_wheel(dx, dy, shift) {
             return;
         }
         // Scrolling or zooming one window repaints just that window; scrolling the playlist moves its pixels.
@@ -6233,21 +6260,44 @@ impl App {
     /// down (or up) that can be picked, skipping separators, headings and greyed-out rows, on into the next column and
     /// round from the last row to the first; the cursor moves to the row's middle. Returns whether a menu was open (it
     /// takes the wheel).
-    fn menu_wheel(&mut self, d: f32) -> bool {
+    ///
+    /// A popup list wider than the window (spec: ui/menus.md "Menus wider than the window") scrolls to show the row lit
+    /// in a column out of view; sideways (Shift, a sideways wheel) or over its scroll bar, the wheel scrolls it a column
+    /// a notch instead.
+    fn menu_wheel(&mut self, dx: f32, dy: f32, shift: bool) -> bool {
         if self.state.playlist.popup.is_none() && self.state.menu_open.is_none() {
             self.menu_notch = 0.0;
             return false;
         }
-        self.menu_notch += d;
+        self.menu_notch += dy + dx;
         let notches = self.menu_notch.trunc();
         self.menu_notch -= notches;
         let (x, y) = self.mouse;
+        let bar = match self.top_hit(x, y).map(|h| &h.action) {
+            Some(Action::Scrollbar(t @ (Scroll::Popup | Scroll::PopupSub))) => Some(*t),
+            _ => None,
+        };
         // The menu under the cursor; else the popup, else the dropdown (a submenu only under the cursor).
         let under = self.hits.iter().rev().find(|h| h.menu > 0 && h.rect.contains(x, y)).map(|h| h.menu);
         let Some(menu) = under.or_else(|| self.hits.iter().map(|h| h.menu).filter(|&m| m > 0 && m != MENU_SUB).max()) else { return true };
-        let rows: Vec<Rect> = self.hits.iter().filter(|h| h.menu == menu).map(|h| h.rect).collect();
+        // The list's scroll, when it is wider than the window.
+        let list = bar
+            .or(match menu {
+                MENU_POPUP => Some(Scroll::Popup),
+                MENU_SUB => Some(Scroll::PopupSub),
+                _ => None,
+            })
+            .filter(|&t| self.bar(t).is_some_and(|b| b.max > 0.0));
+        if let Some(t) = list.filter(|_| bar.is_some() || shift || dx.abs() > dy.abs()) {
+            if notches != 0.0 {
+                self.scroll_set(t, self.scroll_get(t) - notches);
+                self.invalidate();
+            }
+            return true;
+        }
+        let rows: Vec<(Rect, Option<usize>, &Action)> = self.hits.iter().filter(|h| h.menu == menu).map(|h| (h.rect, h.reveal, &h.action)).collect();
         let n = rows.len();
-        let mut at = rows.iter().position(|r| r.contains(x, y));
+        let mut at = rows.iter().position(|(r, ..)| r.contains(x, y));
         for _ in 0..notches.abs() as usize {
             // Up is positive; from off the rows the first notch down lights the first row, up the last.
             at = Some(match (at, notches < 0.0) {
@@ -6257,11 +6307,21 @@ impl App {
                 (None, false) => n - 1,
             });
         }
-        let Some(r) = at.map(|i| rows[i]).filter(|_| notches != 0.0) else { return true };
+        let Some((r, reveal, action)) = at.map(|i| rows[i]).filter(|_| notches != 0.0) else { return true };
+        let action = action.clone();
         // The cursor keeps its x over the row's column, else goes three quarters of the way across it.
         let to = (if x > r.x && x < r.right() { x } else { r.x + r.w * 0.75 }, r.y + r.h / 2.0);
         self.warp = Some(to);
+        let reveal = reveal.zip(list);
+        if let Some((v, t)) = reveal {
+            self.scroll_set(t, v as f32);
+            self.invalidate();
+        }
         self.mouse_move(to.0, to.1);
+        if reveal.is_some() {
+            // Its column scrolled into view: the row is under the cursor from the next frame on (these hits are stale).
+            self.hover = Some(action);
+        }
         true
     }
 
@@ -7168,6 +7228,7 @@ impl App {
                 let Some(item) = p.items.get(i).cloned() else { return true };
                 if !item.children.is_empty() {
                     p.sub = if p.sub == Some(i) { None } else { Some(i) };
+                    p.scroll[1] = 0;
                 } else if item.enabled && !item.head {
                     if let Some(m) = pl::run(self, item.cmd) {
                         self.state.message = Some(m);
@@ -8054,7 +8115,7 @@ impl App {
         let Some(fill) = views::menus::sub_at(menu, i) else { return };
         let at = self.hits.iter().rev().find(|h| h.action == Action::MenuSub(menu, i)).map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
         let items = fill(&self.state);
-        self.state.playlist.popup = Some(crate::playlist::Popup { x: at.right(), y: at.y - 2.0, items, sub: None });
+        self.state.playlist.popup = Some(crate::playlist::Popup { x: at.right(), y: at.y - 2.0, items, sub: None, scroll: [0; 2] });
         self.state.menu_sub = Some(i);
     }
 }
@@ -11140,7 +11201,7 @@ mod tests {
             PItem::col(),
             PItem::new("C", Cmd::Nothing),
         ];
-        app.state.playlist.popup = Some(Popup { x: 300.0, y: 200.0, items, sub: None });
+        app.state.playlist.popup = Some(Popup { x: 300.0, y: 200.0, items, sub: None, scroll: [0; 2] });
         frame(&mut app, &mut c, None);
         let (a, b, cc) = (hit_rect(&app, &Action::PlPopup(0)), hit_rect(&app, &Action::PlPopup(4)), hit_rect(&app, &Action::PlPopup(6)));
         let lit = |app: &App| app.top_hit(app.mouse.0, app.mouse.1).map(|h| h.action.clone());
@@ -11182,6 +11243,132 @@ mod tests {
         frame(&mut app, &mut c, None);
         app.wheel(0.0, -1.0, false, false);
         assert_eq!(app.warp, None);
+    }
+
+    /// A popup wider than the window (spec: ui/menus.md "Menus wider than the window"): the columns that fit and a scroll
+    /// bar; the wheel steps on into the columns out of view, scrolling them in, and round to either end; sideways or over
+    /// the bar it scrolls a column a notch; a press on the bar keeps the menu open; scrolling closes the open submenu. A
+    /// menu that fits has no bar.
+    #[test]
+    fn wide_menus_scroll_sideways() {
+        use crate::playlist::{Cmd, PItem, Popup};
+        let Ok(mut c) = Canvas::new(800, 600, 1.0) else { return };
+        let mut app = App::new(None);
+        let mut items: Vec<PItem> = (0..300).map(|i| PItem::new(format!("Entry {i}"), Cmd::Nothing)).collect();
+        items[0] = PItem::sub("More", vec![PItem::new("Inner", Cmd::Nothing)]);
+        app.state.playlist.popup = Some(Popup { x: 300.0, y: 200.0, items, sub: None, scroll: [0; 2] });
+        frame(&mut app, &mut c, None);
+        let max = app.bar(Scroll::Popup).expect("a scroll bar").max as usize;
+        assert!(max > 0);
+        // The rows that can be clicked are all in the window; the others are out of view.
+        let shown = |app: &App| -> Vec<usize> {
+            let rows = app.hits.iter().filter(|h| h.rect.h > 0.0);
+            rows.filter_map(|h| match h.action {
+                Action::PlPopup(i) => {
+                    assert!(h.rect.x >= 0.0 && h.rect.right() <= 800.0 && h.rect.bottom() <= 600.0, "row {i} in the window");
+                    Some(i)
+                }
+                _ => None,
+            })
+            .collect()
+        };
+        let scroll = |app: &App| app.state.playlist.popup.as_ref().map(|p| p.scroll[0]);
+        let k = *shown(&app).iter().max().unwrap();
+        assert!(k < 299 && !shown(&app).contains(&299));
+        // Down from the last row shown: one column on, the first row of the column that came into view under the cursor.
+        let r = hit_rect(&app, &Action::PlPopup(k));
+        app.mouse_move(r.cx(), r.cy());
+        app.wheel(0.0, -1.0, false, false);
+        let to = app.warp.take().expect("the cursor moves");
+        assert_eq!((scroll(&app), app.hover.clone()), (Some(1), Some(Action::PlPopup(k + 1))));
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.top_hit(to.0, to.1).map(|h| h.action.clone()), Some(Action::PlPopup(k + 1)));
+        assert!(shown(&app).contains(&(k + 1)) && !shown(&app).contains(&1));
+        // Back up to a row in view: no scroll.
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!((scroll(&app), app.hover.clone()), (Some(1), Some(Action::PlPopup(k))));
+        // From off the menu, up lights the last row: scrolled to the end; down from it goes round to the start.
+        app.mouse_move(10.0, 10.0);
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!((scroll(&app), app.hover.clone()), (Some(max), Some(Action::PlPopup(299))));
+        frame(&mut app, &mut c, None);
+        assert!(shown(&app).contains(&299));
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!((scroll(&app), app.hover.clone()), (Some(0), Some(Action::PlPopup(0))));
+        frame(&mut app, &mut c, None);
+        // Shift+wheel, a sideways wheel, and the wheel over the bar scroll a column a notch; nothing lights.
+        app.warp = None;
+        app.wheel(0.0, -2.0, true, false);
+        assert_eq!(scroll(&app), Some(2));
+        app.wheel(1.0, 0.0, false, false);
+        assert_eq!(scroll(&app), Some(1));
+        frame(&mut app, &mut c, None);
+        let track = app.bar(Scroll::Popup).unwrap().track;
+        app.mouse_move(track.cx(), track.cy());
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!((scroll(&app), app.warp), (Some(2), None));
+        // A press on the bar's track jumps there and keeps the menu open.
+        frame(&mut app, &mut c, None);
+        click(&mut app, &mut c, Rect::new(track.right() - 2.0, track.y, 1.0, track.h));
+        assert_eq!(scroll(&app), Some(max));
+        click(&mut app, &mut c, Rect::new(track.x, track.y, 1.0, track.h));
+        assert_eq!(scroll(&app), Some(0));
+        // Scrolling closes the open submenu (it fits: no bar of its own).
+        let more = hit_rect(&app, &Action::PlPopup(0));
+        click(&mut app, &mut c, more);
+        assert_eq!(app.state.playlist.popup.as_ref().and_then(|p| p.sub), Some(0));
+        assert!(app.bar(Scroll::PopupSub).is_none());
+        app.mouse_move(more.cx(), more.cy());
+        app.wheel(0.0, -1.0, true, false);
+        assert_eq!(app.state.playlist.popup.as_ref().map(|p| (p.sub, p.scroll)), Some((None, [1, 0])));
+        // A menu that fits is drawn as before.
+        app.state.playlist.popup = Some(Popup { x: 300.0, y: 200.0, items: vec![PItem::new("A", Cmd::Nothing)], sub: None, scroll: [0; 2] });
+        frame(&mut app, &mut c, None);
+        assert!(app.bar(Scroll::Popup).is_none());
+        // A wide submenu scrolls on its own: the wheel steps on into its next column, and over its bar scrolls it.
+        let inner = (0..300).map(|i| PItem::new(format!("Inner {i}"), Cmd::Nothing)).collect();
+        app.state.playlist.popup = Some(Popup { x: 0.0, y: 0.0, items: vec![PItem::sub("Big", inner)], sub: Some(0), scroll: [0; 2] });
+        frame(&mut app, &mut c, None);
+        assert!(app.bar(Scroll::Popup).is_none());
+        let track = app.bar(Scroll::PopupSub).expect("the submenu's own bar").track;
+        let k = (0..300).rev().find(|&i| app.hits.iter().any(|h| h.action == Action::PlPopupSub(i) && h.rect.h > 0.0)).unwrap();
+        let r = hit_rect(&app, &Action::PlPopupSub(k));
+        app.mouse_move(r.cx(), r.cy());
+        app.wheel(0.0, -1.0, false, false);
+        let sub = |app: &App| app.state.playlist.popup.as_ref().map(|p| (p.sub, p.scroll));
+        assert_eq!((sub(&app), app.hover.clone()), (Some((Some(0), [0, 1])), Some(Action::PlPopupSub(k + 1))));
+        frame(&mut app, &mut c, None);
+        app.mouse_move(track.cx(), track.cy());
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(sub(&app), Some((Some(0), [0, 2])));
+    }
+
+    /// With hundreds of plugins (issue #134) the F8 menu is wider than the window: its footer is out of view at first;
+    /// the scroll bar brings it in, and Manage plugins... works there (spec: ui/menus.md "Menus wider than the window").
+    #[test]
+    fn plugin_menu_with_many_plugins_scrolls_to_its_footer() {
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1366, 768, 1.0) else { return };
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::builtins();
+        for i in 0..300 {
+            app.plugins.available.push(crate::plugin_db::fake(&format!("Test Synth {i}"), os_host::Kind::Instrument));
+            app.plugins.effects.push(crate::plugin_db::fake(&format!("Test FX {i}"), os_host::Kind::Effect));
+        }
+        app.state.plugdb.rebuild(&app.plugins);
+        frame(&mut app, &mut c, None);
+        app.key(&Key::Named(NamedKey::F8), false, false);
+        frame(&mut app, &mut c, None);
+        let manage = app.state.playlist.popup.as_ref().and_then(|p| p.items.iter().position(|i| i.label == "Manage plugins...")).expect("the F8 menu");
+        let row = |app: &App| app.hits.iter().find(|h| h.action == Action::PlPopup(manage) && h.rect.h > 0.0).map(|h| h.rect);
+        assert_eq!(row(&app), None, "out of view at first");
+        let track = app.bar(Scroll::Popup).expect("a scroll bar").track;
+        click(&mut app, &mut c, Rect::new(track.right() - 2.0, track.y, 1.0, track.h));
+        assert!(crate::plugin_menu::is_open(&app.state), "the bar keeps the menu open");
+        let r = row(&app).expect("in view at the end");
+        assert!(r.x >= 0.0 && r.right() <= 1366.0);
+        click(&mut app, &mut c, r);
+        assert!(app.state.settings.open && app.state.settings.tab == views::settings::PLUGINS);
     }
 
     /// The automation point menu's Copy value / Paste value (spec: ui/playlist.md §8 "Point menu"): one clipboard with

@@ -1029,12 +1029,12 @@ pub fn pattern_popup(x: f32, y: f32) -> crate::playlist::Popup {
             },
         })
         .collect();
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The Toolbars menu: the hint panel's and the bare toolbar's right-click menu (spec: ui/toolbar-menu.md §8).
 pub fn hint_popup(s: &State, x: f32, y: f32) -> crate::playlist::Popup {
-    crate::playlist::Popup { x, y, items: toolbar_items(s), sub: None }
+    crate::playlist::Popup { x, y, items: toolbar_items(s), sub: None, scroll: [0; 2] }
 }
 
 /// The Toolbars menu's entries, also VIEW > Toolbars ▸ (spec: ui/toolbar-menu.md §1, §8): Edit (the toolbar editor),
@@ -1089,7 +1089,7 @@ pub fn editor_presets_popup(s: &State, x: f32, y: f32) -> crate::playlist::Popup
     items.push(if s.bar.layout.factory().is_none() && s.bar.user_current().is_some() { delete } else { delete.off() });
     items.push(PItem::sep());
     items.extend(preset_items(s));
-    crate::playlist::Popup { x, y, items, sub: None }
+    crate::playlist::Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The time display's right-click menu: Mode and Middle unit, one dot each (spec: ui/time-display.md §1).
@@ -1103,5 +1103,5 @@ pub fn clock_popup(s: &State, x: f32, y: f32) -> crate::playlist::Popup {
     items.push(PItem::head("Middle unit"));
     items.push(PItem::new("Step", Cmd::ClockBeat(false)).mark(Mark::Radio(!c.beat)));
     items.push(PItem::new("Beat", Cmd::ClockBeat(true)).mark(Mark::Radio(c.beat)));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }

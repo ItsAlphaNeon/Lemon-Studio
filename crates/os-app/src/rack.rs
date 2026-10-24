@@ -1217,7 +1217,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sub(crate::views::menus::CLIPS_SEL_LABEL, stretch_items(false)),
         PItem::sub(crate::views::menus::EDITORS_LABEL, editor_items()),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Add one ▸: the generator menu, a pick goes to the bottom of the rack (spec: ui/plugin-menu.md §1).
@@ -1351,7 +1351,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         PItem::not_yet("Create instrument..."),
         PItem::sub("Burn MIDI to", vec![PItem::not_yet("Current pattern"), PItem::not_yet("New pattern")]),
     ]);
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The Automation / Remote control / Value groups shared by knob and LED menus (§19).
@@ -1397,7 +1397,7 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
 pub fn knob_menu(s: &State, k: KnobId, auto: Option<(u32, String, f64)>, x: f32, y: f32) -> Popup {
     let mut items = vec![it("Reset", RCmd::Reset(k))];
     items.extend(value_groups(s, Some(k), auto));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Right click on the mixer box (§12).
@@ -1406,7 +1406,7 @@ pub fn mixer_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
     items.extend(value_groups(s, None, None));
     items.push(PItem::sep());
     items.push(it("Assign to free mixer track", RCmd::AssignFree(r)));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Right click on a LED (§10).
@@ -1417,7 +1417,7 @@ pub fn led_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("Lock active/mute state", RCmd::Lock(r)).mark(Mark::Check(s.rack.locked.contains(&r))),
     ];
     items.extend(value_groups(s, None, None));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Group combo (§7): left click lists the filters.
@@ -1426,7 +1426,7 @@ pub fn filter_menu(s: &State, x: f32, y: f32) -> Popup {
     let mut items = vec![it("All", RCmd::SetFilter(Filter::All)).mark(Mark::Radio(f == Filter::All))];
     items.extend(s.rack.groups.iter().enumerate().map(|(i, g)| it(g.name.clone(), RCmd::SetFilter(Filter::Group(i))).mark(Mark::Radio(f == Filter::Group(i)))));
     items.push(it("Unsorted", RCmd::SetFilter(Filter::Unsorted)).mark(Mark::Radio(f == Filter::Unsorted)));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Group combo right click (§7).
@@ -1434,7 +1434,7 @@ pub fn filter_edit_menu(s: &State, x: f32, y: f32) -> Popup {
     let group = matches!(s.rack.filter, Filter::Group(_));
     let del = it("Delete filter group", RCmd::DeleteGroup);
     let ren = it("Rename filter group", RCmd::RenameGroup);
-    Popup { x, y, items: vec![it("Add filter group", RCmd::AddGroup), if group { del } else { del.off() }, if group { ren } else { ren.off() }], sub: None }
+    Popup { x, y, items: vec![it("Add filter group", RCmd::AddGroup), if group { del } else { del.off() }, if group { ren } else { ren.off() }], sub: None, scroll: [0; 2] }
 }
 
 /// Pattern length box right click (§7).
@@ -1445,7 +1445,7 @@ pub fn length_menu(s: &State, x: f32, y: f32) -> Popup {
         let label = if bars == 1 { "1 bar".to_string() } else { format!("{bars} bars") };
         items.push(it(label, RCmd::SetLen(Some(bars * bar))).mark(Mark::Radio(cur == Some(bars * bar))));
     }
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Loop button right click (§7).
@@ -1464,7 +1464,7 @@ pub fn loop_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::head("Options"),
         opt(s, "Always show advanced controls"),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 // ---------------------------------------------------------------------------------------------------------
