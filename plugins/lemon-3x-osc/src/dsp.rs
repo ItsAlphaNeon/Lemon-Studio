@@ -513,6 +513,8 @@ struct Voice {
     off: Option<u64>,
     /// Cut by the host (choke) at this sample: the 10 ms fade.
     cut: Option<u64>,
+    /// The host's tuning of the voice in semitones (portamento and slide notes: a note expression).
+    tune: f64,
     /// Phase per oscillator and side (cycles, 0..1).
     ph: [[f64; 2]; 3],
     filt: [Filter; 2],
@@ -625,6 +627,7 @@ impl Engine {
             n: 0,
             off: None,
             cut: None,
+            tune: 0.0,
             ph,
             filt: [Filter::default(); 2],
             done: false,
@@ -646,6 +649,21 @@ impl Engine {
             }
         }
         self.note_off(key);
+    }
+
+    /// Tunes the voices of `key` to `semitones` from the key's own pitch (a host's tuning expression: portamento and
+    /// slide notes). With a host id only that voice is tuned; without one (or when no voice has it) every voice of the
+    /// key, released ones too.
+    pub fn tune(&mut self, key: u8, id: Option<i32>, semitones: f64) {
+        if let Some(i) = id
+            && let Some(v) = self.voices.iter_mut().find(|v| v.id == Some(i))
+        {
+            v.tune = semitones;
+            return;
+        }
+        for v in self.voices.iter_mut().filter(|v| v.key == key) {
+            v.tune = semitones;
+        }
     }
 
     /// Cuts the voices of `key` with the short fade.
@@ -736,8 +754,8 @@ impl Engine {
                 v.done = true;
                 0.0
             });
-            // Pitch: envelope (cents) + LFO (cents) + bend.
-            let cents = b.targets[T_PITCH].mod_at(t0, off) + b.bend;
+            // Pitch: envelope (cents) + LFO (cents) + bend + the host's tuning.
+            let cents = b.targets[T_PITCH].mod_at(t0, off) + b.bend + v.tune * 100.0;
             let base = KEY60_HZ * 2f64.powf((f64::from(v.key) - 60.0) / 12.0 + cents / 1200.0);
             let inc: [[f64; 2]; 3] = std::array::from_fn(|n| {
                 let f = base * 2f64.powf(b.osc[n].semis / 12.0) / sr;
@@ -992,6 +1010,30 @@ mod tests {
         assert!((lfo_hz(32950) - 0.505).abs() < 1e-9);
         let lfo = Lfo { shape: 0, amount: 100.0, hz: 0.505, ..Lfo::default() };
         assert!((lfo.value(0.495) - 100.0).abs() < 0.1, "a quarter period after the start: the top");
+    }
+
+    /// The host's tuning moves the voices of its key (all of them without an id, one with), released ones too.
+    #[test]
+    fn host_tuning_moves_the_key_voices() {
+        let b = solo(SINE);
+        let mut e = Engine::new(SR);
+        e.note_on(60, 0.78, Some(1), &b);
+        e.note_on(60, 0.78, Some(2), &b);
+        e.note_on(64, 0.78, Some(3), &b);
+        e.note_off_id(60, Some(1));
+        e.tune(60, None, 7.0);
+        assert!(e.voices.iter().filter(|v| v.key == 60).all(|v| v.tune == 7.0));
+        e.tune(60, Some(2), -2.0);
+        let tunes: Vec<f64> = e.voices.iter().map(|v| v.tune).collect();
+        assert_eq!(tunes, vec![7.0, -2.0, 0.0]);
+        // Key 60 a fifth up sounds at the pitch of key 67.
+        let mut e = Engine::new(SR);
+        e.note_on(60, 0.78, None, &b);
+        e.tune(60, None, 7.0);
+        let (mut l, mut r) = (vec![0.0; 22050], vec![0.0; 22050]);
+        e.render(&mut l, &mut r, &b);
+        let want = KEY60_HZ * 2f64.powf(7.0 / 12.0);
+        assert!((freq(&l[2205..]) - want).abs() < 0.5, "{}", freq(&l[2205..]));
     }
 
     #[test]

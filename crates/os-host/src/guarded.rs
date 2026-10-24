@@ -102,6 +102,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn takes_tuning(&self) -> bool {
         self.look(false, |p| p.takes_tuning())
     }
+    fn set_bend_range(&mut self, semitones: u32) {
+        self.run((), |p| p.set_bend_range(semitones))
+    }
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         let t0 = Instant::now();
         let voices = self.run(None, |p| {

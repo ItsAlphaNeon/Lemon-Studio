@@ -472,6 +472,14 @@ impl Plugins {
         Ok(a.desc.name)
     }
 
+    /// The pitch-bend range (semitones) instrument `row` takes glides over when it has no tuning of a note (spec:
+    /// audio/channel-voices.md).
+    pub fn set_bend_range(&self, row: usize, semitones: u32) {
+        if let Some(Ok(mut p)) = self.hosted.get(&row).map(|h| h.plugin.lock()) {
+            p.set_bend_range(semitones);
+        }
+    }
+
     /// Creates effect `index` (of `effects`) in mixer track `track`'s slot `slot`, replacing what was there.
     pub fn create_effect(&mut self, track: u16, slot: u8, index: usize, state: Option<&[u8]>) -> Result<String, String> {
         let a = self.effects.get(index).ok_or("no such effect")?.clone();
@@ -2563,6 +2571,80 @@ mod tests {
         }
         // The 0.5 s volume attack kept from the channel still fades the click (0.9 at 0.1 s) in.
         assert!(peak > 0.01 && peak < 0.3, "the mp3 plays through the kept envelope (peak {peak})");
+    }
+
+    /// Portamento and slide notes reach the built-in synths through the CLAP host as a key's tuning (spec:
+    /// audio/channel-voices.md): a note tuned an octave up sounds twice as high, and back at 0 as it started.
+    #[test]
+    fn builtin_synths_follow_the_hosts_tuning() {
+        for name in [crate::osc3::LEMON_TRIO, crate::citrus::CITRUS] {
+            let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+            let index = pl.index_of(name).unwrap();
+            pl.create_with(0, index, None).unwrap();
+            let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
+            let mut i = inst.lock().unwrap();
+            // Rising zero crossings per second over 0.2 s.
+            let rate = |i: &mut dyn os_engine::Instrument| {
+                let mut all = Vec::new();
+                for _ in 0..20 {
+                    let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+                    i.process(48000, &mut l, &mut r);
+                    all.extend(l);
+                }
+                all.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f64 / 0.2
+            };
+            i.note_on(0, 60, 0.8);
+            rate(&mut *i);
+            let plain = rate(&mut *i);
+            i.tune(0, 60, 12.0);
+            rate(&mut *i);
+            let up = rate(&mut *i);
+            i.tune(0, 60, 0.0);
+            rate(&mut *i);
+            let back = rate(&mut *i);
+            assert!(plain > 50.0, "{name} sounds ({plain} Hz)");
+            assert!((up / plain - 2.0).abs() < 0.1, "{name}: an octave up ({plain} -> {up})");
+            assert!((back / plain - 1.0).abs() < 0.05, "{name}: back ({plain} -> {back})");
+        }
+    }
+
+    /// A mono + portamento channel played by Lemon Trio (Phanty's leads): the engine's glide steps reach the synth, so
+    /// an overlapping note an octave up moves the sounding voice there over the slide time.
+    // spec: audio/note-rules.md "Portamento", audio/channel-voices.md
+    #[test]
+    fn lemon_trio_glides_on_a_mono_portamento_channel() {
+        let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
+        pl.create_with(0, pl.index_of(crate::osc3::LEMON_TRIO).unwrap(), None).unwrap();
+        let inst = pl.hosted[&0].plugin.clone() as SharedInstrument;
+        let misc = os_model::ChannelMisc { mono: true, porta: true, slide: 1.0, ..Default::default() };
+        let mut ch = crate::app::test_project().channels.remove(0);
+        (ch.kind, ch.plugin, ch.misc, ch.sample_path) = (os_model::ChannelKind::Plugin, Some(crate::osc3::FILE_NAME.into()), misc, None);
+        let project = os_model::Project { ppq: 96, tempo: Some(130.0), channels: vec![ch], ..Default::default() };
+        let mut slib = os_engine::SampleLibrary::default();
+        let mut e = os_engine::Engine::new(&project, &mut slib, 48000, os_engine::PlayMode::Pattern(1));
+        e.clear_schedule();
+        e.set_instrument(0, inst);
+        let block = 480;
+        let mut out = Vec::new();
+        for b in 0..(48000 * 3 / block) {
+            match b {
+                10 => e.note_on(0, 48, 100),
+                100 => e.note_on(0, 60, 100),
+                _ => {}
+            }
+            let mut buf = vec![0.0f32; block * 2];
+            e.process(&mut buf);
+            out.extend(buf.chunks_exact(2).map(|f| f[0]));
+        }
+        let rate = |from: f32, to: f32| {
+            let w = &out[(from * 48000.0) as usize..(to * 48000.0) as usize];
+            w.windows(2).filter(|p| p[0] <= 0.0 && p[1] > 0.0).count() as f32 / (to - from)
+        };
+        let glide_s = (os_engine::laws::glide_ticks(1.0, 96) + 1) as f32 * 60.0 / (130.0 * 96.0);
+        let (before, mid, after) = (rate(0.5, 0.95), rate(1.0 + glide_s * 0.4, 1.0 + glide_s * 0.6), rate(1.0 + glide_s + 0.05, 2.0));
+        assert!(before > 50.0, "sounds: {before}");
+        assert!((after / before - 2.0).abs() < 0.05, "glides to the octave: {before} -> {after}");
+        assert!(mid / before > 1.15 && mid / before < 1.85, "between the keys mid-glide: {before} -> {mid}");
     }
 
     /// Hosted instruments' voices (spec: audio/voices.md §2-§5): Lemon Sampler counts a voice until its sample ends (the

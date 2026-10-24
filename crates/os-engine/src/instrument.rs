@@ -72,6 +72,12 @@ pub trait Instrument: Send {
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
         let _ = (offset, key, semitones);
     }
+    /// The pitch-bend range (semitones) the plugin wrapper keeps for the plugin (spec: flp/events/plugins.md, record
+    /// 1): an instrument that cannot take a note's tuning plays `tune` as MIDI pitch bend scaled by it ([`TuningBend`]).
+    /// Default: ignored.
+    fn set_bend_range(&mut self, semitones: u32) {
+        let _ = semitones;
+    }
     /// True for an instrument that plays every `tune` it is given: a plugin channel's pitch (root note, fine tune,
     /// pitch knob, main pitch) reaches its notes as their tuning alone. Default false: the engine moves the keys it
     /// plays by the channel pitch's whole semitones and tunes only what is left, as most VST and CLAP instruments
@@ -271,6 +277,69 @@ impl TransportInfo {
     }
 }
 
+/// The pitch-bend range a plugin is given when its wrapper keeps none: 12 semitones, what FL Studio's wrapper stores
+/// for new plugins.
+pub const DEFAULT_BEND_RANGE: u32 = 12;
+
+/// Glides for an instrument that cannot take a note's tuning (a VST 2 plugin, a CLAP plugin that reads MIDI only, a
+/// VST 3 plugin without a tuning note expression): the keys' tunings become one MIDI pitch bend, ±`range` semitones
+/// over the full wheel. A Lemon Studio choice (spec: audio/channel-voices.md, "Plugins that cannot take a tuning"). A
+/// bend moves every note of the channel, so it follows the key tuned or started last: right for a mono or portamento
+/// line and for slide notes, which move all voices by the same amount; a glide under a held chord moves the chord too.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TuningBend {
+    range: u32,
+    /// The bend last sent (14 bits, 8192 = centre).
+    sent: u16,
+    /// The key the bend follows and its tuning in semitones.
+    key: Option<u8>,
+    tune: f32,
+}
+
+impl Default for TuningBend {
+    fn default() -> Self {
+        TuningBend { range: DEFAULT_BEND_RANGE, sent: 8192, key: None, tune: 0.0 }
+    }
+}
+
+impl TuningBend {
+    /// The range in semitones (1..=48; others are taken as the default).
+    pub fn set_range(&mut self, semitones: u32) {
+        self.range = if (1..=48).contains(&semitones) { semitones } else { DEFAULT_BEND_RANGE };
+    }
+
+    /// A note of `key` starts: the bend follows it, untuned until its `tune`. The pitch-bend message to send before
+    /// the note, if the bend moves.
+    pub fn note_on(&mut self, key: u8) -> Option<[u8; 3]> {
+        self.key = Some(key);
+        self.tune = 0.0;
+        self.bend()
+    }
+
+    /// Key `key` is tuned to `semitones`: the message to send, if the bend moves.
+    pub fn tune(&mut self, key: u8, semitones: f32) -> Option<[u8; 3]> {
+        self.key = Some(key);
+        self.tune = semitones;
+        self.bend()
+    }
+
+    /// Stop: the bend is centred; the message to send if it was not.
+    pub fn reset(&mut self) -> Option<[u8; 3]> {
+        self.key = None;
+        self.tune = 0.0;
+        self.bend()
+    }
+
+    fn bend(&mut self) -> Option<[u8; 3]> {
+        let v = (8192.0 + f64::from(self.tune) / f64::from(self.range) * 8192.0).round().clamp(0.0, 16383.0) as u16;
+        if v == self.sent {
+            return None;
+        }
+        self.sent = v;
+        Some([0xE0, (v & 0x7F) as u8, (v >> 7) as u8])
+    }
+}
+
 pub type SharedInstrument = Arc<Mutex<dyn Instrument>>;
 
 /// A channel's instrument, if it has one.
@@ -313,3 +382,26 @@ pub trait HostedEffect: Send {
 }
 
 pub type SharedEffect = Arc<Mutex<dyn HostedEffect>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tunings become a pitch bend over the range, centred again for a new note; nothing is sent while it stays.
+    #[test]
+    fn tunings_as_a_pitch_bend() {
+        let mut b = TuningBend::default();
+        assert_eq!(b.note_on(60), None, "centred already");
+        assert_eq!(b.tune(60, 6.0), Some([0xE0, 0x00, 0x60]), "half the range up: 12288");
+        assert_eq!(b.tune(60, 6.0), None);
+        assert_eq!(b.tune(60, -12.0), Some([0xE0, 0x00, 0x00]));
+        assert_eq!(b.tune(60, -30.0), None, "clamped at the bottom");
+        assert_eq!(b.tune(60, 12.0), Some([0xE0, 0x7F, 0x7F]), "the top is 16383");
+        assert_eq!(b.note_on(64), Some([0xE0, 0x00, 0x40]), "a new note starts centred");
+        b.set_range(2);
+        assert_eq!(b.tune(64, 1.0), Some([0xE0, 0x00, 0x60]));
+        b.set_range(0);
+        assert_eq!(b.tune(64, 3.0), Some([0xE0, 0x00, 0x50]), "an unusable range is the default 12: 10240");
+        assert_eq!(b.reset(), Some([0xE0, 0x00, 0x40]));
+    }
+}
