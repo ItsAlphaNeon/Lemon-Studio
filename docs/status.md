@@ -11,6 +11,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 - Channel rack with steps and mini piano rolls
 - Swing and per-channel loops
+- ADD ▸ Layer: a layer channel whose children are the channels selected in the rack
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)
 - Deleting channels or a pattern asks first, unless the box's Remember my choice was ticked or the question
   is turned off in General settings ▸ Hints and warnings ▸ Manage messages
@@ -137,14 +138,15 @@ and voices, with sorting, find and freeze.
 
 **Metronome.** The toolbar button, OPTIONS > Metronome or Ctrl+M: a click on every quarter note while playing,
 accented as FL does (the first beat of each bar in 4/4 and 3/4), through the master track. Right-click the
-button for five sounds. It is never in an export, and it is remembered between sessions. Not yet: the
-"Metronome track" setting, and following time-signature markers (it follows the project's signature).
+button for five sounds and the volume (-12 to +12 dB; above 0 dB the click is soft-limited, not clipped). It is never in an export, and it is remembered between sessions. It follows the time-signature markers: the
+arrangement's in SONG mode, the current pattern's in PAT mode, each marker starting a bar of its own beats. Not yet:
+the "Metronome track" setting.
 
 **Tempo tapper.** VIEW > Tempo tapper, Ctrl+F5 or the kick drum button on the toolbar: click the pad (or press
-a key on a MIDI keyboard) in time. The average of the taps, in whole BPM, becomes the project tempo while Apply
+a key on a MIDI keyboard, play a note on the typing keyboard, or press a Touch controller pad or key) in time. The average of the taps, in whole BPM, becomes the project tempo while Apply
 tempo is on; the beat bar counts the taps in groups of four. Each tap clicks with the metronome's Tick sound,
-the first of each four accented. Apply tempo is remembered between sessions. Not yet: nudge, Sync, Mute and now
-(drawn greyed out).
+the first of each four accented. Apply tempo is remembered between sessions. − nudge / nudge +, held while playing, run playback 2 % slower / faster
+until let go (the tempo stays). Not yet: Sync, Mute and now (drawn greyed out), nudging with the arrow keys.
 
 **Closing windows.** VIEW > Close all windows (F12), Close all unfocused windows (Ctrl+F12: all but the one
 in front) and Close all plugin windows (Alt+F12: channel settings and plugin editors); the browser stays.
@@ -272,6 +274,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - One-click audio recording (the toolbar's microphone, TOOLS): pick an input (an ASIO driver's inputs, else the
   system's input devices), the song plays with Record armed and precount, and on stop the take becomes a 32-bit WAV
   in the data folder's `Recorded` folder plus a new audio clip channel and clip where playback started
+- TOOLS ▸ Cancel recording: while recording, playback stops and the takes of that playback are undone (Redo brings
+  them back)
 - Not yet: audio recording into mixer tracks, input monitoring, the audio editor
 
 ## 🚧 Undo

@@ -371,6 +371,8 @@ pub enum Cmd {
     Cpu(crate::cpu::CpuCmd),
     /// The metronome button's menu: the click sound (spec: ui/metronome.md §2).
     MetronomeSound(os_engine::metronome::Sound),
+    /// The metronome button's menu: the volume in dB (spec: ui/metronome.md §2).
+    MetronomeVolume(i8),
     /// The Record button's menu checks (spec: ui/recording.md §2).
     Record(crate::record::Opt),
     /// Recording precount's length in bars (spec: ui/recording.md §3).
@@ -2027,6 +2029,39 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
     crate::rack::join_group(s, row, if audio { "Audio" } else { "Automation" });
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = if audio { PickKind::Audio } else { PickKind::Automation };
+    s.piano.dirty = true;
+    row
+}
+
+/// ADD > Layer (spec: ui/add-clip-channels.md §4, Lemon Studio's design): a layer channel at the end of the rack named
+/// "Layer" (made unique), on the master, at full volume so its children keep their levels; its children are the
+/// channels selected in the rack, in rack order (FL's Set children, done at once). It becomes the only selected
+/// channel. One undo step. Returns the rack row.
+pub fn add_layer_channel(s: &mut State) -> usize {
+    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    let children: Vec<u16> = s.rack.sel.iter().filter_map(|&r| s.project.channels.get(r)).map(|c| c.index).collect();
+    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    snapshot_with(s, "Add layer", before);
+    let name = unique_channel_name(s, "Layer");
+    s.project.channels.push(Channel {
+        index,
+        kind: ChannelKind::Layer,
+        name: Some(name),
+        plugin: None,
+        plugin_state: None,
+        color: None,
+        enabled: true,
+        volume: 1.0,
+        pan: 0.0,
+        pitch_cents: 0,
+        mixer_track: 0,
+        sample_path: None,
+        layer_children: children,
+        envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+    });
+    let row = s.project.channels.len() - 1;
+    s.selected_channel = row;
+    s.rack.select_only(row);
     s.piano.dirty = true;
     row
 }
@@ -3878,6 +3913,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return Some(format!("Metronome sound: {}", sound.label()));
         }
+        Cmd::MetronomeVolume(db) => {
+            crate::metronome::set_volume(db);
+            app.invalidate();
+            return Some(format!("Metronome volume: {}", os_engine::metronome::volume_label(db)));
+        }
         Cmd::Bar(beats, steps) => return app.set_bar(beats, steps),
         Cmd::TimeMode(signature) => return app.set_time_mode(signature),
         Cmd::Timebase(ppq) => return app.set_timebase(ppq),
@@ -3932,7 +3972,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(_) | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(_) | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

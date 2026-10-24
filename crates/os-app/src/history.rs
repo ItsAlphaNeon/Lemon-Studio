@@ -499,6 +499,16 @@ impl History {
         self.steps.len()
     }
 
+    /// How many steps are done (undone ones not counted).
+    pub fn done(&self) -> usize {
+        self.done
+    }
+
+    /// The name of the newest done step.
+    pub fn newest_done(&self) -> Option<&'static str> {
+        self.done.checked_sub(1).map(|i| self.steps[i].name)
+    }
+
     /// Forgets every step: the project was opened or made ("Last reset").
     pub fn reset(&mut self) {
         *self = History::default();

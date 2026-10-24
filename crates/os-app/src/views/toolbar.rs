@@ -437,7 +437,7 @@ fn recording(ui: &mut Ui, c: &Ctx) -> bool {
     if m.right() > c.fit {
         return false;
     }
-    tool_button(ui, m, Icon::Metronome, crate::metronome::on(), Action::Metronome, "Metronome (Ctrl+M) - right-click for the sound");
+    tool_button(ui, m, Icon::Metronome, crate::metronome::on(), Action::Metronome, "Metronome (Ctrl+M) - right-click for the sound and volume");
     // Start on input, Recording precount, Blend, Loop record (spec: ui/recording.md §3-4).
     use crate::record::Opt;
     let opts = [(Icon::WaitInput, Opt::Wait), (Icon::Countdown, Opt::Precount), (Icon::Blend, Opt::Blend), (Icon::LoopRecord, Opt::Loop)];

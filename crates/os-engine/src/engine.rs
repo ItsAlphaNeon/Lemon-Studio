@@ -42,6 +42,21 @@ pub enum PlayMode {
     Pattern(u16),
 }
 
+/// How much a nudge of the Tempo tapper speeds playback up or slows it down (spec: ui/tempo-tapper.md §6: about 2 %).
+const NUDGE: f64 = 0.02;
+
+/// The metronome's regions for `mode` (`Engine::click_bars`): the song's arrangement when it has clips (an empty
+/// playlist plays a pattern, which counts in the project's bar), the pattern's own markers in pattern mode. A region's
+/// beat is its bar over its numerator: `PPQ * 4 / denominator` ticks, one step-per-beat for the project's bar.
+fn click_bars(project: &Project, mode: PlayMode) -> Vec<(u64, u32, u16)> {
+    let markers = match mode {
+        PlayMode::Song => project.arrangement().filter(|a| !a.clips.is_empty()).map_or(&[][..], |a| &a.markers),
+        PlayMode::Pattern(n) => project.pattern(n).map_or(&[][..], |p| &p.markers),
+    };
+    let beats = |sig: (u16, u16)| sig.0.max(1);
+    project.marker_bars(markers).into_iter().map(|(start, bar, sig)| (u64::from(start), (bar / u32::from(beats(sig))).max(1), beats(sig))).collect()
+}
+
 /// The spans of ticks a whole-song render of a song ending at `end` plays, in order (`Engine::follow_markers`; spec:
 /// audio/song-structure.md "Time markers"): from the Start marker (or 0), broken at skip markers.
 pub fn rendered_spans(markers: &[os_model::TimeMarker], end: u64) -> Vec<(u64, u64)> {
@@ -924,6 +939,9 @@ pub struct Engine {
     /// Recording with Loop record off (`set_run_on`): while the flag is set, a looping playback runs on past its end
     /// instead of going back to the start (spec: ui/recording.md §4).
     run_on: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The Tempo tapper's nudge (`set_nudge`): -1, 0 or +1, and the one the clock runs at now.
+    nudge: Option<std::sync::Arc<std::sync::atomic::AtomicI8>>,
+    nudged: i8,
     /// The arrangement's time markers (song mode with clips; spec: audio/transport.md "Time markers in SONG mode").
     marks: marks::Marks,
     /// The next tick was arrived at by a start or a jump: markers on it do not act.
@@ -1009,6 +1027,10 @@ pub struct Engine {
     /// signature's numerator (spec: ui/metronome.md §4).
     metronome: Option<crate::metronome::Metronome>,
     beats_per_accent: u16,
+    /// Where the metronome counts from (spec: ui/metronome.md §4, audio/song-structure.md "Time signatures and a
+    /// pattern's length"): `(start tick, beat ticks, beats per bar)` per time-signature region, the arrangement's
+    /// markers in song mode and the pattern's in pattern mode, the project's bar from 0 until the first one.
+    click_bars: Vec<(u64, u32, u16)>,
     /// The Tempo tapper's clicks (`tap_click`), on any live stream.
     tap_clicks: crate::metronome::TapClicks,
     /// The sampler channels' interpolation window, half its width in source samples (`set_interpolation`; 1 or less:
@@ -1448,6 +1470,8 @@ impl Engine {
             held: false,
             count_in: 0,
             count_in_len: 0,
+            nudge: None,
+            nudged: 0,
             run_on: None,
             marks,
             landed: true,
@@ -1492,6 +1516,7 @@ impl Engine {
             metronome: None,
             // Accent on every numerator-th beat (spec: ui/metronome.md §4): event 17, beats per bar.
             beats_per_accent: project.bar().0,
+            click_bars: click_bars(project, mode),
             tap_clicks: crate::metronome::TapClicks::new(rate),
             sinc_w: SINC_W,
             insert_fx: true,
@@ -1524,6 +1549,12 @@ impl Engine {
         self.run_on = Some(flag);
     }
 
+    /// The Tempo tapper's nudge buttons (spec: ui/tempo-tapper.md §6): while `flag` is -1 (+1), playback runs 2 % slower
+    /// (faster) from the next tick on; the tempo itself stays. An export never nudges.
+    pub fn set_nudge(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicI8>) {
+        self.nudge = Some(flag);
+    }
+
     /// Ticks of the count-in left to render (0: none, or over).
     pub fn counting_in(&self) -> u64 {
         self.count_in
@@ -1534,9 +1565,10 @@ impl Engine {
     }
 
     /// A click from the next tick, for a tap on the Tempo tapper (spec: ui/tempo-tapper.md §8): the metronome's Tick,
-    /// accented or not, into the master track like the metronome's clicks; also on a stream of live notes.
-    pub fn tap_click(&mut self, accent: bool) {
-        self.tap_clicks.start(accent);
+    /// accented or not, at the metronome's volume `db`, into the master track like the metronome's clicks; also on a
+    /// stream of live notes.
+    pub fn tap_click(&mut self, accent: bool, db: i8) {
+        self.tap_clicks.start(accent, db);
         self.tail_done = false;
     }
 
@@ -1889,6 +1921,11 @@ impl Engine {
     /// The tempo the ticks run at, in quarter notes a minute (`Project::tick_tempo`).
     fn tick_tempo(&self) -> f64 {
         self.tempo * f64::from(self.steps) / 4.0
+    }
+
+    /// The tempo the clock runs the ticks at: `tick_tempo` with the nudge.
+    fn clock_tempo(&self) -> f64 {
+        self.tick_tempo() * (1.0 + NUDGE * f64::from(self.nudged))
     }
 
     /// The song's end in ticks.
@@ -2382,7 +2419,7 @@ impl Engine {
                 let bpm = (10000.0 + (f64::from(v as f32) * 512000.0).round_ties_even()) / 1000.0;
                 if bpm != self.tempo {
                     self.tempo = bpm;
-                    self.clock.set_tempo(self.rate, self.ppq, self.tick_tempo());
+                    self.clock.set_tempo(self.rate, self.ppq, self.clock_tempo());
                 }
             }
             Target::ChannelParam(..) | Target::SlotParam(..) | Target::Other(_) => {}
@@ -2513,10 +2550,11 @@ impl Engine {
         self.voices.retain_mut(|v| render_voice(v, channels, bus, 0, 0, len, w));
         // The metronome's click enters the master track (spec: ui/metronome.md §4): live playback only, and no new
         // click once a song is over.
-        let beat = self.beat_ticks();
+        // Counted from the start of the time-signature region the tick is in, so the accent is on its bar lines.
+        let (from, beat, beats) = self.click_bars.iter().rev().find(|r| r.0 <= tick).copied().unwrap_or((0, self.beat_ticks(), self.beats_per_accent));
         if let Some(m) = self.metronome.as_mut().filter(|_| !self.exporting && !self.live_only) {
             let start = self.looping || tick < self.end_tick;
-            m.tick(tick, beat, self.beats_per_accent, start, &mut self.bus[0][..len * 2]);
+            m.tick(tick - from, beat, beats, start, &mut self.bus[0][..len * 2]);
         }
         if !self.exporting {
             self.tap_clicks.mix(&mut self.bus[0][..len * 2]);
@@ -2549,6 +2587,12 @@ impl Engine {
             }
         }
         self.tick = tick + 1;
+        // A nudge pressed or let go changes the ticks after this one, as a tempo change does.
+        let nudge = self.nudge.as_ref().filter(|_| !self.exporting).map_or(0, |n| n.load(std::sync::atomic::Ordering::Relaxed).signum());
+        if nudge != self.nudged {
+            self.nudged = nudge;
+            self.clock.set_tempo(self.rate, self.ppq, self.clock_tempo());
+        }
         self.frame = start + len as u64;
         self.mix(len, &song);
         self.out.clear();
@@ -6806,6 +6850,81 @@ mod tests {
         assert_eq!(accented, [true, false, false, true, false, false, true]);
     }
 
+    // spec: ui/tempo-tapper.md §6
+    #[test]
+    fn a_held_nudge_runs_playback_two_percent_slower_or_faster() {
+        use std::sync::atomic::{AtomicI8, Ordering};
+        // A pattern long enough not to end or loop (a note at bar 6 on a channel switched off).
+        let mut p = project(vec![Note { length: 96, ..Note::step(0, 1904) }], vec![]);
+        p.channels[0].enabled = false;
+        let ticks = |n: i8| {
+            let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Pattern(1));
+            let flag = std::sync::Arc::new(AtomicI8::new(n));
+            e.set_nudge(flag.clone());
+            let mut out = vec![0.0; 2 * 48000 * 4];
+            e.process(&mut out);
+            let held = e.tick_position();
+            // Let go: the ticks after run at the tempo again.
+            flag.store(0, Ordering::Relaxed);
+            e.process(&mut out);
+            (held, e.tick_position() - held)
+        };
+        // Four seconds at 130 BPM, PPQ 96: 832 ticks; 2 % fewer or more while nudged (the first tick runs before the
+        // nudge takes hold), then 832 again.
+        let ((slow, slow_after), (plain, _), (fast, fast_after)) = (ticks(-1), ticks(0), ticks(1));
+        assert!((plain - 832.0).abs() < 2.0, "{plain}");
+        assert!((slow / plain - 0.98).abs() < 0.003 && (fast / plain - 1.02).abs() < 0.003, "{slow} {plain} {fast}");
+        assert!((slow_after - plain).abs() < 2.0 && (fast_after - plain).abs() < 2.0, "{slow_after} {fast_after}");
+    }
+
+    /// The clicks of three seconds of `p`'s pattern 1, looping, and which of them are accented.
+    fn pattern_clicks(p: &Project, rate: u32) -> (Vec<(u64, f32)>, Vec<bool>) {
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(p, &mut lib, rate, PlayMode::Pattern(1));
+        e.set_looping(true);
+        e.set_metronome(metronome_on());
+        let mut out = vec![0.0; 2 * rate as usize * 3];
+        e.process(&mut out);
+        let on = click_onsets(&out, rate);
+        let accented = on.iter().map(|o| o.1 > on[1].1 * 1.3).collect();
+        (on, accented)
+    }
+
+    // spec: ui/metronome.md §4, audio/song-structure.md "Time signatures and a pattern's length"
+    #[test]
+    fn metronome_follows_the_patterns_time_signature_markers() {
+        use os_model::TimeMarker;
+        let sig = |position: u32, n: u8, d: u8| TimeMarker { kind: TimeMarker::SIGNATURE, numerator: n, denominator: d, ..TimeMarker::new(position, &format!("{n}/{d}")) };
+        let rate = 48000;
+        let mut p = project(vec![], vec![]);
+        p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
+        // A 4/4 project whose pattern is in 3/4: the accent comes every third beat, as in a 3/4 project.
+        p.patterns[0].markers = vec![sig(0, 3, 4)];
+        let (on, accented) = pattern_clicks(&p, rate);
+        assert_eq!(on.len(), 7, "{on:?}");
+        assert_eq!(accented, [true, false, false, true, false, false, true]);
+        // 6/8: a click every eighth (48 ticks at 130 quarters a minute), accented every sixth; its bar loops.
+        p.patterns[0].markers = vec![sig(0, 6, 8)];
+        let (on, accented) = pattern_clicks(&p, rate);
+        let beats: Vec<u64> = (0..13).map(|b| crate::clock::Clock::frame_of_tick(rate, 96, 130.0, 48 * b)).collect();
+        assert_eq!(on.len(), beats.len(), "{on:?}");
+        for ((f, _), b) in on.iter().zip(&beats) {
+            assert!(f.abs_diff(*b) <= 3, "{f} vs beat {b}");
+        }
+        assert_eq!(accented, (0..13).map(|b| b % 6 == 0).collect::<Vec<_>>());
+        // A marker later in the pattern starts a bar there: 4/4 for a bar, then 2/4 (a note to 2:3 on a channel switched off makes it six beats).
+        p.patterns[0].markers = vec![sig(384, 2, 4)];
+        p.patterns[0].notes = vec![Note { length: 96, ..Note::step(0, 480) }];
+        p.channels[0].enabled = false;
+        let (_, accented) = pattern_clicks(&p, rate);
+        assert_eq!(&accented[..6], [true, false, false, false, true, false]);
+        // Arrangement markers play no part in pattern mode.
+        p.patterns[0].markers.clear();
+        p.arrangements = vec![os_model::Arrangement { markers: vec![sig(0, 3, 4)], ..Default::default() }];
+        let (_, accented) = pattern_clicks(&p, rate);
+        assert_eq!(&accented[..5], [true, false, false, false, true]);
+    }
+
     // spec: ui/recording.md §3
     #[test]
     fn a_count_in_holds_the_position_and_clicks_with_the_metronome_off() {
@@ -6935,7 +7054,7 @@ mod tests {
         let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
         e.clear_schedule();
         assert!(e.finished());
-        e.tap_click(true);
+        e.tap_click(true, 0);
         assert!(!e.finished(), "a click keeps a stream of live notes going");
         let mut out = vec![0.0; 2 * 240];
         e.process(&mut out);

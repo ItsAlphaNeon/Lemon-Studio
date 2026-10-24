@@ -204,6 +204,8 @@ pub struct Rec {
     shown: u32,
     /// The score logger (spec §6).
     pub log: crate::score_log::Log,
+    /// The history's done steps when the playback that is recording started: TOOLS ▸ Cancel recording goes back to it.
+    since: Option<usize>,
 }
 
 impl Rec {
@@ -734,7 +736,39 @@ impl App {
         if !live {
             self.state.rec.last = None;
         }
+        if live && !self.state.rec.was_live {
+            self.state.rec.since = self.state.rec.armed.then(|| self.state.history.done());
+        }
         self.state.rec.was_live = live;
+    }
+
+    /// TOOLS ▸ Cancel recording (spec: ui/cancel-recording.md §2): while Record is armed
+    /// and playing (or counting in, or waiting for input), playback stops and every take recorded since it started is
+    /// undone; notes still held are dropped. The undone takes can be redone.
+    pub(crate) fn cancel_recording(&mut self) -> String {
+        let r = &self.state.rec;
+        if !r.armed || !(self.transport.playing() || r.count.is_some() || r.waiting) {
+            return "Nothing is being recorded".into();
+        }
+        let since = r.since;
+        self.state.rec.held.clear();
+        self.state.rec.take = None;
+        self.state.rec.waiting = false;
+        self.state.rec.count = None;
+        self.act(crate::app::Action::Stop);
+        let mut undone = 0;
+        while since.is_some_and(|k| self.state.history.done() > k) && self.state.history.newest_done() == Some(RECORDED) {
+            crate::history::undo(&mut self.state);
+            undone += 1;
+        }
+        self.state.rec.since = None;
+        self.state.piano.dirty = true;
+        self.invalidate();
+        match undone {
+            0 => "Recording canceled".into(),
+            1 => "Recording canceled: 1 take undone".into(),
+            n => format!("Recording canceled: {n} takes undone"),
+        }
     }
 }
 
@@ -1213,6 +1247,34 @@ mod tests {
         assert_eq!(app.state.history.len(), steps + 2, "one undo step per pass");
         crate::history::undo(&mut app.state);
         assert_eq!(notes(&app), [(48, 48, 0), (l - 24, 24, 0)]);
+    }
+
+    /// TOOLS ▸ Cancel recording: the takes of the playback that is recording are undone and playback stops; a take
+    /// of an earlier playback stays; not recording, nothing happens.
+    #[test]
+    fn cancel_recording_undoes_this_playbacks_takes() {
+        let mut app = app();
+        app.toggle_record();
+        // An earlier playback's take stays.
+        key(&mut app, KeyCode::KeyZ, true, 30.0, false);
+        key(&mut app, KeyCode::KeyZ, false, 100.0, false);
+        stop(&mut app);
+        assert_eq!(notes(&app), [(24, 72, 0)]);
+        assert_eq!(app.cancel_recording(), "Nothing is being recorded");
+        assert_eq!(notes(&app), [(24, 72, 0)]);
+        // This playback: two takes (the pattern loops back between them), and a note still held.
+        app.state.global_snap.now = Snap::Line;
+        key(&mut app, KeyCode::KeyX, true, 190.0, false);
+        key(&mut app, KeyCode::KeyX, false, 210.0, false);
+        key(&mut app, KeyCode::KeyC, true, 20.0, false);
+        key(&mut app, KeyCode::KeyC, false, 40.0, false);
+        key(&mut app, KeyCode::KeyV, true, 300.0, false);
+        assert!(notes(&app).len() > 1, "{:?}", notes(&app));
+        assert_eq!(app.cancel_recording(), "Recording canceled: 2 takes undone");
+        app.record_tick();
+        assert_eq!(notes(&app), [(24, 72, 0)]);
+        assert!(!app.transport.playing() && !app.state.rec.recording() && app.state.rec.armed);
+        assert_eq!(app.state.history.newest_done(), Some(RECORDED), "the earlier take is still in the history");
     }
 
     /// Blend recorded notes: a second take keeps the notes it overlaps (spec §3).
