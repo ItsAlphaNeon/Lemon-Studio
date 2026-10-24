@@ -80,7 +80,7 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
         item("Add time marker", AddMarker).key("Alt+T"),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The keys a held key repeats in the piano roll (spec: ui/piano-keys.md §4 rule 1): Shift / Ctrl / Alt + arrows (not
@@ -290,7 +290,7 @@ pub fn target_menu(s: &State, x: f32, y: f32) -> Popup {
     }
     items.push(PItem::sep());
     items.push(PItem::not_yet("Auto locate"));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Run a command; returns a status message.

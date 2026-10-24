@@ -184,7 +184,7 @@ pub fn menu(app: &crate::app::App, row: usize, m: M, x: f32, y: f32) -> crate::p
         .into_iter()
         .map(|(label, v)| PItem::new(label, Cmd::Misc(row, m, v)).mark(Mark::Radio((v - cur).abs() < 0.5)))
         .collect();
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 #[cfg(test)]

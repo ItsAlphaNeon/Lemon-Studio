@@ -97,7 +97,7 @@ impl App {
         }
         let (x, y) = self.mouse;
         let (x, y) = self.top_hit(x, y).map_or((x, y), |h| (h.rect.x, h.rect.bottom() + 2.0));
-        self.state.playlist.popup = Some(Popup { x, y, items: items(&self.state), sub: None });
+        self.state.playlist.popup = Some(Popup { x, y, items: items(&self.state), sub: None, scroll: [0; 2] });
         self.invalidate();
     }
 

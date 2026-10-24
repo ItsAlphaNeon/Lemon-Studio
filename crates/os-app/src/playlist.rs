@@ -481,6 +481,9 @@ pub struct Popup {
     pub items: Vec<PItem>,
     /// Open submenu: index of its parent item.
     pub sub: Option<usize>,
+    /// The first column shown of the list and of its open submenu, when they are wider than the window (spec:
+    /// ui/menus.md "Menus wider than the window"; `views::playlist::popup_list`).
+    pub scroll: [usize; 2],
 }
 
 /// A Themes tile's menu (Settings > Theme; `App::theme_cmd`): the tile's index in `SettingsUi::themes`.
@@ -2286,7 +2289,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sep(),
         PItem::new("Reset empty playlist tracks", Cmd::ResetEmptyTracks),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The ▸ menu's Time markers submenu (§7a), in FL's order. FL's Ctrl+T for Add auto is not bound: in Lemon Studio
@@ -2324,7 +2327,7 @@ fn snap_items(s: &State) -> Vec<PItem> {
 }
 
 pub fn snap_menu(s: &State, x: f32, y: f32) -> Popup {
-    Popup { x, y, items: snap_items(s), sub: None }
+    Popup { x, y, items: snap_items(s), sub: None, scroll: [0; 2] }
 }
 
 pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
@@ -2350,7 +2353,7 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
     }
     items.push(PItem::new("Select all similar clips", Cmd::ClipSelectSimilar(i)));
     items.push(PItem::new("Delete", Cmd::ClipDelete(i)));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The commands of a picker item's menu (§10a).
@@ -2393,7 +2396,7 @@ pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
         items.push(it("Clone with links", PickCmd::Clone));
     }
     items.push(it("Delete...", PickCmd::Delete));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Runs a picker item's command on the channel with index `ch` (§10a).
@@ -2459,7 +2462,7 @@ pub fn point_menu(s: &State, ch: u16, i: usize, x: f32, y: f32) -> Popup {
     items.push(PItem::new("Copy value", Cmd::PointCopy(ch, i)));
     items.push(if s.value_clip.is_some() { PItem::new(paste_label(s), Cmd::PointPaste(ch, i)) } else { PItem::new("Paste value", Cmd::Nothing).off() });
     items.push(PItem::new("Type in value...", Cmd::PointValue(ch, i)));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// "Paste value" with the copied value as a percentage, as FL writes it ("Paste value (23%)").
@@ -2503,7 +2506,7 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         PItem::new("Move up", Cmd::TrackUp(t)),
         PItem::new("Move down", Cmd::TrackDown(t)),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The actions a time marker can take, as its menu lists them (§7a), with their kinds (spec: flp/events/playlist.md
@@ -2530,7 +2533,7 @@ fn lane_items(tick: u32) -> Vec<PItem> {
 }
 
 pub fn lane_menu(tick: u32, x: f32, y: f32) -> Popup {
-    Popup { x, y, items: lane_items(tick), sub: None }
+    Popup { x, y, items: lane_items(tick), sub: None, scroll: [0; 2] }
 }
 
 /// Marker `i`'s menu (§7a): the row's items at `tick`, a header "<name> at <bar>:<step>:<tick>", Delete, Rename...,
@@ -2549,7 +2552,7 @@ pub fn marker_menu(s: &State, i: usize, tick: u32, x: f32, y: f32) -> Popup {
         PItem::head("Action"),
     ]);
     items.extend(MARKER_ACTIONS.iter().map(|&(l, k)| PItem::new(l, Cmd::MarkerAction(i, k)).mark(Mark::Radio(m.kind == k))));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The short right-click menu of the toolbar's and the mixer's knobs, faders and the tempo: "Create automation clip"
@@ -2573,7 +2576,7 @@ pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<cra
     if let Some(t) = typein {
         items.extend([PItem::head("Value"), PItem::new("Type in value...", Cmd::TypeIn(t))]);
     }
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -3489,7 +3492,7 @@ pub fn arrangement_menu(s: &State, x: f32, y: f32) -> Popup {
     items.push(if others.is_empty() { PItem::new("Merge with...", Cmd::Nothing).off() } else { PItem::sub("Merge with...", others) });
     items.push(PItem::sep());
     items.push(PItem::new("Add one...", Cmd::ArrAdd));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Collapses or expands the group led by track `t` or by `t`'s group track (§6a); no-op for an ungrouped track
@@ -3763,7 +3766,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::MarkerEveryMenu => {
             let (x, y) = app.mouse;
-            app.state.playlist.popup = Some(Popup { x, y, items: every_items(), sub: None });
+            app.state.playlist.popup = Some(Popup { x, y, items: every_items(), sub: None, scroll: [0; 2] });
             app.invalidate();
             return None;
         }
@@ -4737,5 +4740,5 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::sep(),
         PItem::new("Route to free mixer track", Cmd::Rack(crate::rack::RCmd::AssignFree(row))).key("Ctrl+L"),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }

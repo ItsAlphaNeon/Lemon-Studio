@@ -735,7 +735,7 @@ impl App {
             items.extend(headings(c).iter().filter(|h| h.0 == i).map(|h| PItem::head(h.1)));
             items.push(PItem::new(ch, Cmd::Pref(c, i)).mark(Mark::Radio(i == now)));
         }
-        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None, scroll: [0; 2] });
         self.invalidate();
     }
 
