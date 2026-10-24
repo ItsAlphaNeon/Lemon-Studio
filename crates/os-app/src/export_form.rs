@@ -93,6 +93,9 @@ pub struct ExportForm {
     pub device_rate: u32,
     /// The combo whose list is open.
     pub list: Option<u8>,
+    /// PATTERNS > Render as audio clip...: the current pattern only, and the file becomes an audio clip channel
+    /// (spec: ui/pattern-render.md §1); the choices are not kept for the next export.
+    pub to_clip: bool,
 }
 
 impl ExportForm {
@@ -309,6 +312,7 @@ impl App {
             o,
             device_rate,
             list: None,
+            to_clip: false,
         };
         self.show_form(Body::Project(Form::Export(Box::new(f))));
     }
@@ -401,6 +405,9 @@ impl App {
         if reply != Reply::Button(Answer::Ok) {
             return;
         }
+        if f.to_clip {
+            return self.render_pattern_with(&f);
+        }
         f.o.save();
         crate::settings_file::write("export_folder", &f.folder.to_string_lossy());
         let job = self.export_job(&f);
@@ -409,7 +416,7 @@ impl App {
 
     /// What the audio thread needs for form `f`: the span, the markers, loop and tempo at the device's rate, the
     /// mixer tracks' names.
-    fn export_job(&self, f: &ExportForm) -> ex::Job {
+    pub(crate) fn export_job(&self, f: &ExportForm) -> ex::Job {
         let s = &self.state;
         let o = f.o.clone();
         let rate = f.device_rate;

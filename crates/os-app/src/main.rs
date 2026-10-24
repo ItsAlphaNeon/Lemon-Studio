@@ -66,6 +66,7 @@ mod piano_tools;
 mod rack;
 mod remote;
 mod render;
+mod pattern_render;
 mod patterns;
 mod perf;
 mod playlist;
