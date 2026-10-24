@@ -5651,6 +5651,11 @@ impl App {
                 return self.invalidate();
             }
         }
+        if let Some(Action::BrowserRow(i)) = action {
+            if self.browser_row_middle(i) {
+                return;
+            }
+        }
         if let Some(Action::Settings(views::settings::SAct::ThemeKnob(i))) = action {
             return self.theme_knob_reset(usize::from(i));
         }
@@ -9883,6 +9888,36 @@ mod tests {
         app.sample_to_rack(kick12.clone(), views::rack::rect(&app.state).bottom() + 40.0);
         assert_eq!(app.state.project.channels.len(), n + 1);
         assert_eq!(app.state.project.channels[app.state.selected_channel].name.as_deref(), Some("Grv Kick 12"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A middle click on a browser sample selects its row and loads the sample into the selected channel, as "Send to
+    /// selected channel" does (spec: ui/browser.md §7); undo puts the old sample back.
+    #[test]
+    fn browser_middle_click_sends_a_sample() {
+        use crate::views::browser::{rows, Item};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("os_middle_send_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("Grv Clap 03.wav");
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&p).unwrap(), 44100, &[0.0; 8]).unwrap();
+        let path = p.to_string_lossy().into_owned();
+        let mut app = App::new(None);
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(crate::views::browser::disk_key(&dir));
+        let r = (0..app.state.project.channels.len()).find(|&r| app.state.project.channels[r].kind.is_sampler()).unwrap();
+        app.state.selected_channel = r;
+        let before = app.state.project.channels[r].sample_path.clone();
+        frame(&mut app, &mut c, None);
+        let i = rows(&app.state).iter().position(|row| row.item == Item::Sample(path.clone())).expect("sample row");
+        let at = hit_rect(&app, &Action::BrowserRow(i));
+        app.mouse_move(at.cx(), at.cy());
+        app.mouse_down_middle();
+        assert_eq!(app.state.project.channels[r].sample_path.as_deref(), Some(path.as_str()));
+        assert_eq!(app.state.browser_sel.as_ref(), Some(&rows(&app.state)[i].key), "the row is selected");
+        app.key(&winit::keyboard::Key::Character("z".into()), true, false);
+        assert_eq!(app.state.project.channels[r].sample_path, before, "one undo step");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
