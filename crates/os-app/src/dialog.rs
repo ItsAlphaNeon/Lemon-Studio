@@ -109,7 +109,7 @@ pub enum Then {
     FactoryFolder,
     /// FILE ▸ Save as template...: the template's name, from the save dialog (`crate::project_files`).
     SaveTemplate,
-    /// FILE ▸ Save to new project folder...: the new folder's name, from the save dialog.
+    /// FILE ▸ Save to new project folder...: the folder the new project folder goes in.
     NewProjectFolder,
     /// The Delete unused files question: Yes deletes these files, then saves the project.
     DeleteUnused(Vec<PathBuf>),

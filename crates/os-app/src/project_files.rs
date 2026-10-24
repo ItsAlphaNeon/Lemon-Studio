@@ -10,8 +10,9 @@
 //! next save. Lemon Studio has no factory templates: Save as template... writes a copy of the project into the
 //! Templates folder of the user folder (`crate::templates`, category `User` unless a category folder was picked), and
 //! New from template ▸ lists the templates there by category, then Empty. Save to new project folder... saves into a
-//! new folder named after the project, which becomes its data folder. Delete unused files looks only in the data
-//! folder's Samples, Recorded and Rendered folders, and only when no other project file lies in the data folder.
+//! new folder named after the project, in the folder picked, which becomes its data folder. Delete unused files looks
+//! only in the data folder's Samples, Recorded and Rendered folders, and only when no other project file lies in the
+//! data folder.
 // spec: ui/project-templates.md, ui/menu-submenus.md §1, §4, ui/data-folder.md
 
 use std::path::{Path, PathBuf};
@@ -47,8 +48,8 @@ pub fn newest_backup(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     best.map(|(_, _, p)| p)
 }
 
-/// Where Save as template... writes the template picked in the save dialog as `chosen`: `<root>/<category>/<name>/<name>.flp`,
-/// the category being the folder picked when it is one directly in `root` (or the template's own folder in one),
+/// Where Save as template... writes the template picked in the save dialog as `chosen`:
+/// `<root>/<category>/<name>/<name>.flp`, the category being the folder picked when it is one directly in `root` (or the template's own folder in one),
 /// else `User`.
 pub fn template_target(root: &Path, chosen: &Path) -> PathBuf {
     let name = chosen.file_stem().map_or_else(|| "Template".to_string(), |n| n.to_string_lossy().into_owned());
@@ -204,22 +205,22 @@ impl App {
         self.offer_new_form();
     }
 
-    /// FILE ▸ Save to new project folder...: the save dialog, in the project's folder, for the new folder's name.
+    /// FILE ▸ Save to new project folder...: a folder picker, starting in the project's folder, for where the new
+    /// folder goes.
     pub(crate) fn new_folder_dialog(&mut self) {
         use crate::filedlg::{FileDlg, Mode};
         let Some(path) = self.state.path.clone() else { return };
-        let name = format!("{}.flp", crate::backup::project_name(Some(&path)));
-        let dlg = FileDlg::new(Mode::Save, "Save to new project folder", "project", Then::NewProjectFolder).filter("FLP project", &["flp"]).start(path.parent()).name(&name);
+        let dlg = FileDlg::new(Mode::Folder, "Save to new project folder", "project folder", Then::NewProjectFolder).start(path.parent());
         self.file_dialog(dlg);
     }
 
-    /// The name was given (`chosen`: `<folder>/<name>.flp`): the project is saved as `<folder>/<name>/<name>.flp`, that
+    /// The place was picked (`root`): the project is saved as `<root>/<name>/<name>.flp`, named after the project, that
     /// new folder its data folder (the used samples copied there while Copy used samples to the project folder is on). A
     /// project file already there is refused.
-    pub(crate) fn new_folder_chosen(&mut self, chosen: PathBuf) {
+    pub(crate) fn new_folder_chosen(&mut self, root: PathBuf) {
         const TITLE: &str = "Save to new project folder";
-        let name = chosen.file_stem().map_or_else(|| "untitled".to_string(), |n| n.to_string_lossy().into_owned());
-        let dir = chosen.parent().map_or_else(|| PathBuf::from(&name), |p| p.join(&name));
+        let name = crate::backup::project_name(self.state.path.as_deref());
+        let dir = root.join(&name);
         let file = dir.join(format!("{name}.flp"));
         if file.exists() {
             return self.tell(Kind::Warning, TITLE, spans(&["", &file.display().to_string(), " already exists. Nothing was saved."]));
@@ -404,18 +405,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&work);
     }
 
-    /// Save to new project folder: `<name>/<name>.flp`, the data folder there; one already there is refused.
+    /// Save to new project folder: `<name>/<name>.flp` in the folder picked, the data folder there; one already there
+    /// is refused.
     #[test]
     fn new_project_folder() {
         let dir = scratch("newdir");
         let mut app = App::new(None);
-        app.save_to(dir.join("a.flp"));
-        app.new_folder_chosen(dir.join("Tune.flp"));
+        app.save_to(dir.join("Tune.flp"));
+        app.new_folder_chosen(dir.clone());
         let file = dir.join("Tune").join("Tune.flp");
         assert_eq!(app.state.path.as_deref(), Some(file.as_path()), "{:?}", app.state.message);
         assert!(file.is_file());
         assert_eq!(crate::data_folder::folder(&app.state), Some(dir.join("Tune")));
-        app.new_folder_chosen(dir.join("Tune.flp"));
+        app.new_folder_chosen(dir.clone());
         assert!(app.modal_open(), "already there: refused");
         let _ = std::fs::remove_dir_all(&dir);
     }
