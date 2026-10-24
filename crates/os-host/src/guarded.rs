@@ -99,6 +99,9 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
         self.run((), |p| p.tune(offset, key, semitones))
     }
+    fn takes_tuning(&self) -> bool {
+        self.look(false, |p| p.takes_tuning())
+    }
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         let t0 = Instant::now();
         let voices = self.run(None, |p| {

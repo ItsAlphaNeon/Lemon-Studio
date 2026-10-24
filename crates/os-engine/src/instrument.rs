@@ -72,6 +72,13 @@ pub trait Instrument: Send {
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
         let _ = (offset, key, semitones);
     }
+    /// True for an instrument that plays every `tune` it is given: a plugin channel's pitch (root note, fine tune,
+    /// pitch knob, main pitch) reaches its notes as their tuning alone. Default false: the engine moves the keys it
+    /// plays by the channel pitch's whole semitones and tunes only what is left, as most VST and CLAP instruments
+    /// ignore a note's tuning (a VST 2 instrument has no way to take one).
+    fn takes_tuning(&self) -> bool {
+        false
+    }
     /// Renders `left.len()` frames at `rate`, overwriting both buffers.
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]);
     /// True while the instrument still has sound to deliver (ringing voices, a long sample): the engine keeps
