@@ -2026,6 +2026,39 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
     row
 }
 
+/// ADD > Layer (spec: ui/add-clip-channels.md §4, Lemon Studio's design): a layer channel at the end of the rack named
+/// "Layer" (made unique), on the master, at full volume so its children keep their levels; its children are the
+/// channels selected in the rack, in rack order (FL's Set children, done at once). It becomes the only selected
+/// channel. One undo step. Returns the rack row.
+pub fn add_layer_channel(s: &mut State) -> usize {
+    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    let children: Vec<u16> = s.rack.sel.iter().filter_map(|&r| s.project.channels.get(r)).map(|c| c.index).collect();
+    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    snapshot_with(s, "Add layer", before);
+    let name = unique_channel_name(s, "Layer");
+    s.project.channels.push(Channel {
+        index,
+        kind: ChannelKind::Layer,
+        name: Some(name),
+        plugin: None,
+        plugin_state: None,
+        color: None,
+        enabled: true,
+        volume: 1.0,
+        pan: 0.0,
+        pitch_cents: 0,
+        mixer_track: 0,
+        sample_path: None,
+        layer_children: children,
+        envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+    });
+    let row = s.project.channels.len() - 1;
+    s.selected_channel = row;
+    s.rack.select_only(row);
+    s.piano.dirty = true;
+    row
+}
+
 /// Add an audio clip channel for a sample file and place it at `tick` on `track` (§9). The channel's colour comes from
 /// `State::clip_colors`.
 pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Option<usize> {

@@ -381,11 +381,16 @@ impl Project {
     /// region per time-signature marker of the pattern, `(start, bar, signature)`, the project's bar ([`Project::bar`])
     /// from 0 until the first one. A region starts a bar at its marker. Markers of the arrangements play no part.
     pub fn pattern_bars(&self, number: u16) -> Vec<(u32, u32, (u16, u16))> {
+        self.marker_bars(self.pattern(number).map_or(&[][..], |p| &p.markers))
+    }
+
+    /// The bar grid of a list of time markers (a pattern's or an arrangement's): one region per time-signature marker,
+    /// `(start, bar, signature)`, the project's bar from 0 until the first one. A region starts a bar at its marker.
+    pub fn marker_bars(&self, markers: &[TimeMarker]) -> Vec<(u32, u32, (u16, u16))> {
         // A bar that makes no signature (3 steps per beat) keeps its beats.
         let sig = self.signature().unwrap_or((self.bar().0, 4));
         let mut regions = vec![(0, self.bar_ticks(), sig)];
-        let mut marks: Vec<&TimeMarker> =
-            self.pattern(number).map(|p| p.markers.iter().filter(|m| m.kind == TimeMarker::SIGNATURE).collect()).unwrap_or_default();
+        let mut marks: Vec<&TimeMarker> = markers.iter().filter(|m| m.kind == TimeMarker::SIGNATURE).collect();
         marks.sort_by_key(|m| m.position);
         for m in marks {
             let sig = (u16::from(m.numerator), u16::from(m.denominator));

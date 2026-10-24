@@ -172,7 +172,7 @@ const ADD_PLUGINS: &[Item] = &[
     head("Misc"),
     it("Audio clip", "").on(),
     it("Automation clip", "").on(),
-    it("Layer", ""),
+    it("Layer", "").on(),
     SEP,
     // The plugin menus' display mode (spec: ui/plugin-menu.md §2-3; `mark_of` puts the dot).
     it("Categories", "").radio(true).on(),

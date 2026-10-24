@@ -7953,6 +7953,14 @@ impl App {
                 let audio = item_at(ADD_MENU, i).is_some_and(|it| it.label == "Audio clip");
                 self.add_clip_channel(if audio { ChannelKind::AudioClip } else { ChannelKind::Automation });
             }
+            // ADD > Layer (spec: ui/add-clip-channels.md §4): the rack keeps the new row in view.
+            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Layer") => {
+                crate::playlist::add_layer_channel(&mut self.state);
+                let s = &mut self.state;
+                let view_h = views::rack::panel(views::rack::rect(s)).h;
+                s.rack_scroll = (views::rack::content_h(s) - view_h).max(0.0);
+                self.invalidate();
+            }
             (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "More plugins...") => {
                 let at = self.mouse;
                 self.open_plugin_menu(crate::plugin_menu::Target::Gen(None), at);
@@ -17632,7 +17640,7 @@ mod tests {
         use crate::playlist::{self as pl, PickKind};
         use crate::rack::{Filter, Group};
         use os_model::{AutoMode, ClipSource};
-        use views::menus::{item_at, works, ADD_MENU};
+        use views::menus::{item_at, ADD_MENU};
         let entry = |label: &str| (0..).find(|&i| item_at(ADD_MENU, i).is_some_and(|it| it.label == label)).unwrap();
         let mut app = App::new(None);
         app.state.project = test_project();
@@ -17702,7 +17710,39 @@ mod tests {
         assert_eq!((names(&app), app.state.rack.unsorted_at, app.state.rack.filter), (vec!["Drums".into()], Some(1), Filter::All));
         let s = &app.state;
         assert_eq!((s.rack.sel.iter().copied().collect::<Vec<_>>(), s.selected_channel, (s.playlist.source, s.playlist.picker)), (vec![1], 1, before));
-        assert!(!works(ADD_MENU, item_at(ADD_MENU, entry("Layer")).unwrap()), "Layer stays greyed out");
+    }
+
+    /// ADD > Layer (spec: ui/add-clip-channels.md §4): a layer channel last in the rack whose children are the selected
+    /// channels; it is the only one selected after; saved as a layer and its children; one undo step.
+    #[test]
+    fn add_layer_channel_with_the_selected_channels_as_children() {
+        use views::menus::{item_at, works, ADD_MENU};
+        let entry = |label: &str| (0..).find(|&i| item_at(ADD_MENU, i).is_some_and(|it| it.label == label)).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        assert!(works(ADD_MENU, item_at(ADD_MENU, entry("Layer")).unwrap()));
+        let n = app.state.project.channels.len();
+        app.state.rack.select_only(1);
+        app.state.rack.sel.insert(3);
+        let wanted = vec![app.state.project.channels[1].index, app.state.project.channels[3].index];
+        app.menu_item(ADD_MENU, entry("Layer"));
+        let s = &app.state;
+        let ch = s.project.channels.last().unwrap();
+        assert_eq!((s.project.channels.len(), ch.kind, ch.name.as_deref(), ch.volume), (n + 1, ChannelKind::Layer, Some("Layer"), 1.0));
+        assert_eq!(ch.layer_children, wanted);
+        assert_eq!((s.selected_channel, s.rack.sel.iter().copied().collect::<Vec<_>>()), (n, vec![n]));
+        // A second one is named apart; with nothing else selected it has the first layer as its only child.
+        app.menu_item(ADD_MENU, entry("Layer"));
+        let ch = app.state.project.channels.last().unwrap();
+        assert_eq!((ch.name.as_deref(), ch.layer_children.clone()), (Some("Layer #2"), vec![app.state.project.channels[n].index]));
+        // The writer keeps it a layer with its children.
+        let back = os_flp::project::load(&os_flp::project::create(&app.state.project).unwrap()).unwrap();
+        let saved = back.channels.iter().find(|c| c.name.as_deref() == Some("Layer")).unwrap();
+        assert_eq!((saved.kind, saved.layer_children.clone()), (ChannelKind::Layer, wanted));
+        let undo = |app: &mut App| crate::playlist::run(app, crate::playlist::Cmd::Undo);
+        assert_eq!(undo(&mut app).as_deref(), Some("Undo: add layer"));
+        undo(&mut app);
+        assert_eq!(app.state.project.channels.len(), n);
     }
 
     /// PATTERNS > Split by channel (spec: ui/split-by-channel.md §2): rack order; the pattern keeps the first

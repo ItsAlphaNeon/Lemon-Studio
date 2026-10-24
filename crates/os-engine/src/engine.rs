@@ -42,6 +42,18 @@ pub enum PlayMode {
     Pattern(u16),
 }
 
+/// The metronome's regions for `mode` (`Engine::click_bars`): the song's arrangement when it has clips (an empty
+/// playlist plays a pattern, which counts in the project's bar), the pattern's own markers in pattern mode. A region's
+/// beat is its bar over its numerator: `PPQ * 4 / denominator` ticks, one step-per-beat for the project's bar.
+fn click_bars(project: &Project, mode: PlayMode) -> Vec<(u64, u32, u16)> {
+    let markers = match mode {
+        PlayMode::Song => project.arrangement().filter(|a| !a.clips.is_empty()).map_or(&[][..], |a| &a.markers),
+        PlayMode::Pattern(n) => project.pattern(n).map_or(&[][..], |p| &p.markers),
+    };
+    let beats = |sig: (u16, u16)| sig.0.max(1);
+    project.marker_bars(markers).into_iter().map(|(start, bar, sig)| (u64::from(start), (bar / u32::from(beats(sig))).max(1), beats(sig))).collect()
+}
+
 /// The spans of ticks a whole-song render of a song ending at `end` plays, in order (`Engine::follow_markers`; spec:
 /// audio/song-structure.md "Time markers"): from the Start marker (or 0), broken at skip markers.
 pub fn rendered_spans(markers: &[os_model::TimeMarker], end: u64) -> Vec<(u64, u64)> {
@@ -1009,6 +1021,10 @@ pub struct Engine {
     /// signature's numerator (spec: ui/metronome.md §4).
     metronome: Option<crate::metronome::Metronome>,
     beats_per_accent: u16,
+    /// Where the metronome counts from (spec: ui/metronome.md §4, audio/song-structure.md "Time signatures and a
+    /// pattern's length"): `(start tick, beat ticks, beats per bar)` per time-signature region, the arrangement's
+    /// markers in song mode and the pattern's in pattern mode, the project's bar from 0 until the first one.
+    click_bars: Vec<(u64, u32, u16)>,
     /// The Tempo tapper's clicks (`tap_click`), on any live stream.
     tap_clicks: crate::metronome::TapClicks,
     /// The sampler channels' interpolation window, half its width in source samples (`set_interpolation`; 1 or less:
@@ -1492,6 +1508,7 @@ impl Engine {
             metronome: None,
             // Accent on every numerator-th beat (spec: ui/metronome.md §4): event 17, beats per bar.
             beats_per_accent: project.bar().0,
+            click_bars: click_bars(project, mode),
             tap_clicks: crate::metronome::TapClicks::new(rate),
             sinc_w: SINC_W,
             insert_fx: true,
@@ -2513,10 +2530,11 @@ impl Engine {
         self.voices.retain_mut(|v| render_voice(v, channels, bus, 0, 0, len, w));
         // The metronome's click enters the master track (spec: ui/metronome.md §4): live playback only, and no new
         // click once a song is over.
-        let beat = self.beat_ticks();
+        // Counted from the start of the time-signature region the tick is in, so the accent is on its bar lines.
+        let (from, beat, beats) = self.click_bars.iter().rev().find(|r| r.0 <= tick).copied().unwrap_or((0, self.beat_ticks(), self.beats_per_accent));
         if let Some(m) = self.metronome.as_mut().filter(|_| !self.exporting && !self.live_only) {
             let start = self.looping || tick < self.end_tick;
-            m.tick(tick, beat, self.beats_per_accent, start, &mut self.bus[0][..len * 2]);
+            m.tick(tick - from, beat, beats, start, &mut self.bus[0][..len * 2]);
         }
         if !self.exporting {
             self.tap_clicks.mix(&mut self.bus[0][..len * 2]);
@@ -6804,6 +6822,54 @@ mod tests {
         }
         let accented: Vec<bool> = on.iter().map(|o| o.1 > on[1].1 * 1.3).collect();
         assert_eq!(accented, [true, false, false, true, false, false, true]);
+    }
+
+    /// The clicks of three seconds of `p`'s pattern 1, looping, and which of them are accented.
+    fn pattern_clicks(p: &Project, rate: u32) -> (Vec<(u64, f32)>, Vec<bool>) {
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(p, &mut lib, rate, PlayMode::Pattern(1));
+        e.set_looping(true);
+        e.set_metronome(metronome_on());
+        let mut out = vec![0.0; 2 * rate as usize * 3];
+        e.process(&mut out);
+        let on = click_onsets(&out, rate);
+        let accented = on.iter().map(|o| o.1 > on[1].1 * 1.3).collect();
+        (on, accented)
+    }
+
+    // spec: ui/metronome.md §4, audio/song-structure.md "Time signatures and a pattern's length"
+    #[test]
+    fn metronome_follows_the_patterns_time_signature_markers() {
+        use os_model::TimeMarker;
+        let sig = |position: u32, n: u8, d: u8| TimeMarker { kind: TimeMarker::SIGNATURE, numerator: n, denominator: d, ..TimeMarker::new(position, &format!("{n}/{d}")) };
+        let rate = 48000;
+        let mut p = project(vec![], vec![]);
+        p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
+        // A 4/4 project whose pattern is in 3/4: the accent comes every third beat, as in a 3/4 project.
+        p.patterns[0].markers = vec![sig(0, 3, 4)];
+        let (on, accented) = pattern_clicks(&p, rate);
+        assert_eq!(on.len(), 7, "{on:?}");
+        assert_eq!(accented, [true, false, false, true, false, false, true]);
+        // 6/8: a click every eighth (48 ticks at 130 quarters a minute), accented every sixth; its bar loops.
+        p.patterns[0].markers = vec![sig(0, 6, 8)];
+        let (on, accented) = pattern_clicks(&p, rate);
+        let beats: Vec<u64> = (0..13).map(|b| crate::clock::Clock::frame_of_tick(rate, 96, 130.0, 48 * b)).collect();
+        assert_eq!(on.len(), beats.len(), "{on:?}");
+        for ((f, _), b) in on.iter().zip(&beats) {
+            assert!(f.abs_diff(*b) <= 3, "{f} vs beat {b}");
+        }
+        assert_eq!(accented, (0..13).map(|b| b % 6 == 0).collect::<Vec<_>>());
+        // A marker later in the pattern starts a bar there: 4/4 for a bar, then 2/4 (a note to 2:3 on a channel switched off makes it six beats).
+        p.patterns[0].markers = vec![sig(384, 2, 4)];
+        p.patterns[0].notes = vec![Note { length: 96, ..Note::step(0, 480) }];
+        p.channels[0].enabled = false;
+        let (_, accented) = pattern_clicks(&p, rate);
+        assert_eq!(&accented[..6], [true, false, false, false, true, false]);
+        // Arrangement markers play no part in pattern mode.
+        p.patterns[0].markers.clear();
+        p.arrangements = vec![os_model::Arrangement { markers: vec![sig(0, 3, 4)], ..Default::default() }];
+        let (_, accented) = pattern_clicks(&p, rate);
+        assert_eq!(&accented[..5], [true, false, false, false, true]);
     }
 
     // spec: ui/recording.md §3

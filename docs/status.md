@@ -11,6 +11,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 - Channel rack with steps and mini piano rolls
 - Swing and per-channel loops
+- ADD ▸ Layer: a layer channel whose children are the channels selected in the rack
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)
 - Deleting channels or a pattern asks first, unless the box's Remember my choice was ticked or the question
   is turned off in General settings ▸ Hints and warnings ▸ Manage messages
@@ -132,8 +133,9 @@ and voices, with sorting, find and freeze.
 
 **Metronome.** The toolbar button, OPTIONS > Metronome or Ctrl+M: a click on every quarter note while playing,
 accented as FL does (the first beat of each bar in 4/4 and 3/4), through the master track. Right-click the
-button for five sounds. It is never in an export, and it is remembered between sessions. Not yet: the
-"Metronome track" setting, and following time-signature markers (it follows the project's signature).
+button for five sounds. It is never in an export, and it is remembered between sessions. It follows the time-signature markers: the
+arrangement's in SONG mode, the current pattern's in PAT mode, each marker starting a bar of its own beats. Not yet:
+the "Metronome track" setting.
 
 **Tempo tapper.** VIEW > Tempo tapper, Ctrl+F5 or the kick drum button on the toolbar: click the pad (or press
 a key on a MIDI keyboard) in time. The average of the taps, in whole BPM, becomes the project tempo while Apply
