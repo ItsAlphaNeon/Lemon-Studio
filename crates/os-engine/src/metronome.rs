@@ -8,7 +8,7 @@
 // spec: ui/metronome.md
 
 use std::f64::consts::TAU;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// The sound of the clicks (spec §2, §5).
@@ -52,17 +52,30 @@ impl Sound {
     }
 }
 
-/// The switch and the sound, shared by the interface and every playing engine: a change is heard from the next beat.
+/// The volume rows of the sound menu, in dB (spec §2, Lemon Studio's own).
+pub const VOLUMES: [i8; 7] = [-12, -6, 0, 3, 6, 9, 12];
+/// The volumes the settings file may hold (spec §3).
+pub const VOLUME_MIN: i8 = -24;
+pub const VOLUME_MAX: i8 = 12;
+
+/// A volume's menu row: "-6 dB", "0 dB", "+3 dB".
+pub fn volume_label(db: i8) -> String {
+    if db > 0 { format!("+{db} dB") } else { format!("{db} dB") }
+}
+
+/// The switch, the sound and the volume, shared by the interface and every playing engine: a change is heard from the
+/// next beat.
 #[derive(Debug)]
 pub struct Switch {
     on: AtomicBool,
     sound: AtomicU8,
+    volume: AtomicI8,
 }
 
 impl Default for Switch {
-    /// Off, Tick (spec §3).
+    /// Off, Tick, 0 dB (spec §3).
     fn default() -> Switch {
-        Switch { on: AtomicBool::new(false), sound: AtomicU8::new(1) }
+        Switch { on: AtomicBool::new(false), sound: AtomicU8::new(1), volume: AtomicI8::new(0) }
     }
 }
 
@@ -82,6 +95,15 @@ impl Switch {
     pub fn set_sound(&self, s: Sound) {
         let i = Sound::ALL.iter().position(|&x| x == s).unwrap_or(1);
         self.sound.store(i as u8, Ordering::Relaxed);
+    }
+
+    /// The volume in whole dB, 0 the level of spec §5.
+    pub fn volume(&self) -> i8 {
+        self.volume.load(Ordering::Relaxed)
+    }
+
+    pub fn set_volume(&self, db: i8) {
+        self.volume.store(db.clamp(VOLUME_MIN, VOLUME_MAX), Ordering::Relaxed);
     }
 }
 
@@ -158,12 +180,34 @@ pub fn render(sound: Sound, accent: bool, rate: u32) -> Vec<f32> {
     out.iter().map(|v| (v / peak) as f32 * level).collect()
 }
 
+/// `render` at a volume of `db` (spec §5 "Volume"): every sample times `10^(db / 20)`; above 0 dB then soft-limited,
+/// so that a louder click keeps more of its decay near full scale instead of passing it.
+pub fn render_at(sound: Sound, accent: bool, rate: u32, db: i8) -> Vec<f32> {
+    let click = render(sound, accent, rate);
+    if db == 0 {
+        return click;
+    }
+    let g = 10f32.powf(f32::from(db) / 20.0);
+    click.into_iter().map(|v| if db > 0 { limit(v * g) } else { v * g }).collect()
+}
+
+/// Linear up to 0.8, then bending towards 1.0 (spec §5 "Volume").
+fn limit(v: f32) -> f32 {
+    const KNEE: f32 = 0.8;
+    let a = v.abs();
+    if a <= KNEE {
+        v
+    } else {
+        v.signum() * (KNEE + (1.0 - KNEE) * ((a - KNEE) / (1.0 - KNEE)).tanh())
+    }
+}
+
 /// One engine's metronome: the shared switch, the clicks rendered at the engine's rate, and the click sounding.
 pub struct Metronome {
     switch: Arc<Switch>,
     rate: u32,
-    /// The sound the clicks were rendered for: plain, accented.
-    clicks: Option<(Sound, [Vec<f32>; 2])>,
+    /// The sound and volume the clicks were rendered for: plain, accented.
+    clicks: Option<((Sound, i8), [Vec<f32>; 2])>,
     /// The click sounding: accented, next sample.
     playing: Option<(bool, usize)>,
 }
@@ -199,9 +243,9 @@ impl Metronome {
     fn click(&mut self, tick: u64, beat: u32, numerator: u16, on: bool, out: &mut [f32]) {
         let ppq = u64::from(beat.max(1));
         if on && tick % ppq == 0 {
-            let sound = self.switch.sound();
-            if self.clicks.as_ref().is_none_or(|(s, _)| *s != sound) {
-                self.clicks = Some((sound, [render(sound, false, self.rate), render(sound, true, self.rate)]));
+            let (sound, db) = (self.switch.sound(), self.switch.volume());
+            if self.clicks.as_ref().is_none_or(|(k, _)| *k != (sound, db)) {
+                self.clicks = Some(((sound, db), [render_at(sound, false, self.rate, db), render_at(sound, true, self.rate, db)]));
             }
             let accent = (tick / ppq) % u64::from(numerator.max(1)) == 0;
             self.playing = Some((accent, 0));
@@ -226,11 +270,12 @@ fn add(buf: &[f32], pos: &mut usize, out: &mut [f32]) -> bool {
 }
 
 /// Clicks started on demand rather than on the beat: the Tempo tapper's taps (spec: ui/tempo-tapper.md §8). Always
-/// Tick, the metronome's default sound, whatever the switch is set to; a new click cuts the one before.
+/// Tick, the metronome's default sound, whatever the switch is set to, at the metronome's volume; a new click cuts the
+/// one before.
 pub struct TapClicks {
     rate: u32,
-    /// Plain, accented: rendered at the first click.
-    clicks: Option<[Vec<f32>; 2]>,
+    /// The volume, then plain, accented: rendered at the first click and when the volume changes.
+    clicks: Option<(i8, [Vec<f32>; 2])>,
     /// The click sounding: accented, next sample.
     playing: Option<(bool, usize)>,
 }
@@ -244,10 +289,11 @@ impl TapClicks {
         self.rate
     }
 
-    /// A click from the next sample `mix` adds.
-    pub fn start(&mut self, accent: bool) {
-        let rate = self.rate;
-        self.clicks.get_or_insert_with(|| [render(Sound::Tick, false, rate), render(Sound::Tick, true, rate)]);
+    /// A click at `db` from the next sample `mix` adds.
+    pub fn start(&mut self, accent: bool, db: i8) {
+        if self.clicks.as_ref().is_none_or(|(v, _)| *v != db) {
+            self.clicks = Some((db, [render_at(Sound::Tick, false, self.rate, db), render_at(Sound::Tick, true, self.rate, db)]));
+        }
         self.playing = Some((accent, 0));
     }
 
@@ -257,7 +303,7 @@ impl TapClicks {
 
     /// Adds the click sounding to `out` (interleaved stereo).
     pub fn mix(&mut self, out: &mut [f32]) {
-        let (Some((accent, pos)), Some(clicks)) = (self.playing.as_mut(), self.clicks.as_ref()) else { return };
+        let (Some((accent, pos)), Some((_, clicks))) = (self.playing.as_mut(), self.clicks.as_ref()) else { return };
         if add(&clicks[usize::from(*accent)], pos, out) {
             self.playing = None;
         }
@@ -342,7 +388,7 @@ mod tests {
         c.mix(&mut buf);
         assert!(buf.iter().all(|&s| s == 0.0) && !c.sounding(), "nothing before a tap");
         for accent in [false, true] {
-            c.start(accent);
+            c.start(accent, 0);
             let tick = render(Sound::Tick, accent, 48000);
             let mut out = vec![0.0; tick.len() * 2 + 200];
             // Over two blocks, the second one ending past the click.
@@ -354,6 +400,53 @@ mod tests {
             let left: Vec<f32> = out.chunks_exact(2).map(|f| f[0]).collect();
             assert_eq!(&left[..tick.len()], &tick[..], "accent {accent}");
             assert!(out.chunks_exact(2).all(|f| f[0] == f[1]) && left[tick.len()..].iter().all(|&s| s == 0.0));
+        }
+    }
+
+    /// Spec §5 "Volume": below 0 dB the click is scaled; above it gets louder (more energy) without passing full scale.
+    #[test]
+    fn the_volume_scales_the_click_and_above_0_db_stays_below_full_scale() {
+        let pk = |v: &[f32]| v.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        let energy = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>();
+        for s in Sound::ALL {
+            for accent in [false, true] {
+                let base = render(s, accent, 48000);
+                assert_eq!(render_at(s, accent, 48000, 0), base);
+                let quiet = render_at(s, accent, 48000, -6);
+                assert!((pk(&quiet) / pk(&base) - 0.501).abs() < 1e-3, "{s:?}");
+                let mut last = energy(&base);
+                for db in [3, 6, 9, 12] {
+                    let loud = render_at(s, accent, 48000, db);
+                    assert!(pk(&loud) <= 1.0 && energy(&loud) > last, "{s:?} {accent} {db} dB");
+                    last = energy(&loud);
+                }
+            }
+        }
+        assert_eq!(VOLUMES.map(volume_label), ["-12 dB", "-6 dB", "0 dB", "+3 dB", "+6 dB", "+9 dB", "+12 dB"]);
+        let sw = Switch::default();
+        assert_eq!(sw.volume(), 0);
+        sw.set_volume(40);
+        assert_eq!(sw.volume(), VOLUME_MAX);
+        sw.set_volume(-100);
+        assert_eq!(sw.volume(), VOLUME_MIN);
+    }
+
+    /// The switch's volume reaches the beat clicks from the next click, and a tap click takes its own.
+    #[test]
+    fn beat_and_tap_clicks_follow_the_volume() {
+        let sw = Arc::new(Switch::default());
+        sw.set_on(true);
+        let mut m = Metronome::new(sw.clone(), 48000);
+        let first = onsets(&run(&mut m, 4, 1200, 4))[0].1;
+        sw.set_volume(-12);
+        let quiet = onsets(&run(&mut m, 4, 1200, 4))[0].1;
+        assert!((quiet / first - 0.251).abs() < 0.01, "{first} {quiet}");
+        let mut c = TapClicks::new(48000);
+        for db in [0, -6] {
+            c.start(false, db);
+            let mut out = vec![0.0; 2000];
+            c.mix(&mut out);
+            assert_eq!(out.iter().step_by(2).copied().collect::<Vec<_>>()[..600], render_at(Sound::Tick, false, 48000, db)[..600]);
         }
     }
 

@@ -2786,8 +2786,8 @@ impl App {
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
     }
 
-    /// The metronome button's right-click menu: the sound (spec: ui/metronome.md §2), and Recording precount (spec:
-    /// ui/recording.md §3 "The metronome's menu").
+    /// The metronome button's right-click menu: the sound and the volume (spec: ui/metronome.md §2), and Recording
+    /// precount (spec: ui/recording.md §3 "The metronome's menu").
     pub(crate) fn metronome_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         use crate::record::{Opt, RecCmd};
@@ -2795,6 +2795,11 @@ impl App {
         let now = crate::metronome::sound();
         let mut items = vec![PItem::head("Metronome sound")];
         items.extend(Sound::ALL.iter().map(|&s| PItem::new(s.label(), Cmd::MetronomeSound(s)).mark(Mark::Radio(s == now))));
+        let db = crate::metronome::volume();
+        items.push(PItem::head("Metronome volume"));
+        for v in os_engine::metronome::VOLUMES {
+            items.push(PItem::new(os_engine::metronome::volume_label(v), Cmd::MetronomeVolume(v)).mark(Mark::Radio(v == db)));
+        }
         let bars = if Opt::Precount.on() { crate::record::precount_bars() } else { 0 };
         items.push(PItem::head("Recording precount"));
         for (label, n) in [("Off", 0), ("1 bar", 1), ("2 bars", 2)] {
@@ -3243,6 +3248,12 @@ impl App {
                     }
                 }
             }
+            // Held while playing (§6): the engine runs 2 % slower / faster until the release; stopped, it does nothing.
+            TapAct::Nudge(n) => {
+                if self.transport.playing() && !self.transport.paused() {
+                    crate::tapper::nudge_flag().store(n.signum(), std::sync::atomic::Ordering::Relaxed);
+                }
+            }
         }
         self.damage_win(Win::Tapper);
     }
@@ -3266,8 +3277,12 @@ impl App {
         self.damage_win(Win::Tapper);
     }
 
-    /// A key on a MIDI keyboard taps while the tapper is open (its pad's hint, §1); the keys of a chord tap once.
-    pub(crate) fn midi_tap(&mut self) {
+    /// A key on a MIDI keyboard taps while the tapper is open (its pad's hint, §1), and so do a typing-keyboard note
+    /// and a Touch controller press (§8); the keys of a chord tap once.
+    pub(crate) fn key_tap(&mut self) {
+        if !self.state.shown(Win::Tapper) {
+            return;
+        }
         let t = self.state.tapper.clock();
         if !self.state.tapper.count.last().is_some_and(|l| t - l < crate::tapper::MIDI_CHORD) {
             self.tap(t);
@@ -5783,6 +5798,10 @@ impl App {
     }
 
     fn release(&mut self) {
+        // A held nudge ends with the button (spec: ui/tempo-tapper.md §6).
+        if crate::tapper::nudge_flag().swap(0, std::sync::atomic::Ordering::Relaxed) != 0 {
+            self.damage_win(Win::Tapper);
+        }
         // An armed button acts if the release is over it (`acts_on_release`).
         if let Some(a) = self.armed.take() {
             let (x, y) = self.mouse;
@@ -6843,6 +6862,7 @@ impl App {
         self.typing_held.push((code, row, key));
         self.step_edit_down(crate::step_edit::Src::Typing(code), key, TYPING_VELOCITY);
         self.typing_lit_changed();
+        self.key_tap(); // spec: ui/tempo-tapper.md §8
         true
     }
 
@@ -7953,6 +7973,14 @@ impl App {
                 let audio = item_at(ADD_MENU, i).is_some_and(|it| it.label == "Audio clip");
                 self.add_clip_channel(if audio { ChannelKind::AudioClip } else { ChannelKind::Automation });
             }
+            // ADD > Layer (spec: ui/add-clip-channels.md §4): the rack keeps the new row in view.
+            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Layer") => {
+                crate::playlist::add_layer_channel(&mut self.state);
+                let s = &mut self.state;
+                let view_h = views::rack::panel(views::rack::rect(s)).h;
+                s.rack_scroll = (views::rack::content_h(s) - view_h).max(0.0);
+                self.invalidate();
+            }
             (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "More plugins...") => {
                 let at = self.mouse;
                 self.open_plugin_menu(crate::plugin_menu::Target::Gen(None), at);
@@ -7973,6 +8001,10 @@ impl App {
                 if let Some(m) = crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindFirst, at) {
                     self.state.message = Some(m);
                 }
+            }
+            // spec: ui/cancel-recording.md
+            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Cancel recording") => {
+                self.state.message = Some(self.cancel_recording());
             }
             (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Stop sound") => {
                 self.transport.stop();
@@ -11295,13 +11327,31 @@ mod tests {
         app.mouse_down_right();
         frame(&mut app, &mut c, None);
         let labels: Vec<String> = app.state.playlist.popup.as_ref().unwrap().items.iter().map(|it| it.label.to_string()).collect();
-        assert_eq!(labels, ["Metronome sound", "Hi-hat", "Tick", "Beep", "Cowbell", "Pulse", "Recording precount", "Off", "1 bar", "2 bars"]);
+        let volumes = ["Metronome volume", "-12 dB", "-6 dB", "0 dB", "+3 dB", "+6 dB", "+9 dB", "+12 dB"];
+        let sounds = ["Metronome sound", "Hi-hat", "Tick", "Beep", "Cowbell", "Pulse"];
+        assert_eq!(labels, [&sounds[..], &volumes[..], &["Recording precount", "Off", "1 bar", "2 bars"][..]].concat());
         let before = crate::metronome::sound();
         let i = labels.iter().position(|x| x == "Cowbell").unwrap();
         let item = hit_rect(&app, &Action::PlPopup(i));
         click(&mut app, &mut c, item);
         assert_eq!((crate::metronome::sound(), crate::metronome::on()), (Sound::Cowbell, was));
         crate::metronome::set_sound(before);
+        // The volume (spec §2): 0 dB marked at first; a pick keeps the switch and the sound and says so.
+        let marked = |app: &App| app.state.playlist.popup.as_ref().unwrap().items.iter().filter(|it| it.mark == crate::playlist::Mark::Radio(true)).map(|it| it.label.to_string()).collect::<Vec<_>>();
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        frame(&mut app, &mut c, None);
+        assert_eq!(marked(&app), [before.label(), "0 dB", "Off"]);
+        let i = labels.iter().position(|x| x == "+6 dB").unwrap();
+        let item = hit_rect(&app, &Action::PlPopup(i));
+        click(&mut app, &mut c, item);
+        assert_eq!((crate::metronome::volume(), crate::metronome::sound(), crate::metronome::on()), (6, before, was));
+        assert_eq!(app.state.message.as_deref(), Some("Metronome volume: +6 dB"));
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        frame(&mut app, &mut c, None);
+        assert_eq!(marked(&app), [before.label(), "+6 dB", "Off"]);
+        crate::metronome::set_volume(0);
     }
 
     /// Auto scrolling (spec: ui/auto-scrolling.md §1-2): the toolbar button and OPTIONS > Auto scrolling toggle the
@@ -11527,9 +11577,18 @@ mod tests {
         // The hints; the controls that do nothing yet only say so.
         let hint = |app: &App, a: &Action| app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.hint.to_string()).unwrap();
         assert_eq!(hint(&app, &Action::Tapper(TapAct::Pad)), "Tap me, or press any key on your MIDI keyboard");
+        assert_eq!(hint(&app, &Action::Tapper(TapAct::Nudge(-1))), "Nudge tempo to align time (Left / pitch bend)");
+        assert_eq!(hint(&app, &Action::Tapper(TapAct::Nudge(1))), "Nudge tempo to align time (Right / pitch bend)");
+        // A nudge is held while playing only, and any release lets it go (spec §6).
+        app.act(Action::Tapper(TapAct::Nudge(1)));
+        assert_eq!(crate::tapper::nudging(), 0, "stopped: nothing");
+        app.transport.pretend_at(0.0, false);
+        app.act(Action::Tapper(TapAct::Nudge(-1)));
+        assert_eq!(crate::tapper::nudging(), -1);
+        app.release();
+        assert_eq!(crate::tapper::nudging(), 0);
+        app.transport.stop();
         for name in [
-            "Nudge tempo to align time (Left / pitch bend)",
-            "Nudge tempo to align time (Right / pitch bend)",
             "Resynchronize to taps",
             "Mute all audio during first taps (during playback)",
             "Mute now, for a few bars (during playback)",
@@ -11571,7 +11630,7 @@ mod tests {
         // MIDI keys tap while the window is open; a chord's keys are one tap.
         for t in [30.0, 30.03, 30.5] {
             app.state.tapper.test_time = Some(t);
-            app.midi_tap();
+            app.key_tap();
         }
         assert_eq!(app.state.tempo, 120.0);
         // Every tap clicked, accented on the first of each four of a count (§8); the chord's second key did not.
@@ -11606,6 +11665,45 @@ mod tests {
         assert!(app.state.shown(Win::Tapper) && app.state.in_front(Win::Tapper));
         click(&mut app, &mut c, b);
         assert!(!app.state.shown(Win::Tapper));
+    }
+
+    /// While the tapper is open, typing-keyboard notes and Touch controller presses tap like MIDI keys, a chord once
+    /// (spec: ui/tempo-tapper.md §8); auto-repeat, the other keys and a glissando do not, and a closed tapper ignores them.
+    #[test]
+    fn tempo_tapper_typing_and_touch_keys_tap() {
+        use crate::touch::TouchAct;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.selected_channel = 1;
+        app.state.toggles.push("typing");
+        let key = |app: &mut App, t: f64, code: KeyCode| {
+            app.state.tapper.test_time = Some(t);
+            app.typing_key(code, true, false, false)
+        };
+        assert!(key(&mut app, 1.0, KeyCode::KeyZ));
+        app.typing_key(KeyCode::KeyZ, false, false, false);
+        assert!(app.state.tapper.test_clicks.is_empty(), "the tapper is closed");
+
+        app.act(Action::ToggleWin(Win::Tapper));
+        assert!(key(&mut app, 10.0, KeyCode::KeyZ));
+        assert!(key(&mut app, 10.03, KeyCode::KeyX), "a chord's second key plays");
+        assert!(key(&mut app, 10.2, KeyCode::KeyZ), "auto-repeat");
+        assert_eq!(app.typing_held.len(), 2);
+        app.typing_key(KeyCode::KeyZ, false, false, false);
+        app.typing_key(KeyCode::KeyX, false, false, false);
+        assert!(!key(&mut app, 10.3, KeyCode::F1), "not a note key");
+        assert!(key(&mut app, 10.5, KeyCode::KeyC));
+        app.typing_key(KeyCode::KeyC, false, false, false);
+        assert_eq!((app.state.tapper.count.taps(), app.state.tempo), (2, 120.0));
+
+        app.state.tapper.test_time = Some(11.0);
+        app.act(Action::Touch(TouchAct::Note(56)));
+        assert_eq!(app.state.touch.held, Some((56, 1)), "the pad plays");
+        app.state.tapper.test_time = Some(11.2);
+        app.touch_hold(Some(57));
+        app.touch_hold(None);
+        let (t, f) = (true, false);
+        assert_eq!((app.state.tapper.test_clicks.as_slice(), app.state.tempo), ([t, f, f].as_slice(), 120.0));
     }
 
     /// The tapper's flash fades on the ticks (spec: ui/tempo-tapper.md §4, §8): each repaints just the pad, which shows
@@ -17632,7 +17730,7 @@ mod tests {
         use crate::playlist::{self as pl, PickKind};
         use crate::rack::{Filter, Group};
         use os_model::{AutoMode, ClipSource};
-        use views::menus::{item_at, works, ADD_MENU};
+        use views::menus::{item_at, ADD_MENU};
         let entry = |label: &str| (0..).find(|&i| item_at(ADD_MENU, i).is_some_and(|it| it.label == label)).unwrap();
         let mut app = App::new(None);
         app.state.project = test_project();
@@ -17702,7 +17800,39 @@ mod tests {
         assert_eq!((names(&app), app.state.rack.unsorted_at, app.state.rack.filter), (vec!["Drums".into()], Some(1), Filter::All));
         let s = &app.state;
         assert_eq!((s.rack.sel.iter().copied().collect::<Vec<_>>(), s.selected_channel, (s.playlist.source, s.playlist.picker)), (vec![1], 1, before));
-        assert!(!works(ADD_MENU, item_at(ADD_MENU, entry("Layer")).unwrap()), "Layer stays greyed out");
+    }
+
+    /// ADD > Layer (spec: ui/add-clip-channels.md §4): a layer channel last in the rack whose children are the selected
+    /// channels; it is the only one selected after; saved as a layer and its children; one undo step.
+    #[test]
+    fn add_layer_channel_with_the_selected_channels_as_children() {
+        use views::menus::{item_at, works, ADD_MENU};
+        let entry = |label: &str| (0..).find(|&i| item_at(ADD_MENU, i).is_some_and(|it| it.label == label)).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        assert!(works(ADD_MENU, item_at(ADD_MENU, entry("Layer")).unwrap()));
+        let n = app.state.project.channels.len();
+        app.state.rack.select_only(1);
+        app.state.rack.sel.insert(3);
+        let wanted = vec![app.state.project.channels[1].index, app.state.project.channels[3].index];
+        app.menu_item(ADD_MENU, entry("Layer"));
+        let s = &app.state;
+        let ch = s.project.channels.last().unwrap();
+        assert_eq!((s.project.channels.len(), ch.kind, ch.name.as_deref(), ch.volume), (n + 1, ChannelKind::Layer, Some("Layer"), 1.0));
+        assert_eq!(ch.layer_children, wanted);
+        assert_eq!((s.selected_channel, s.rack.sel.iter().copied().collect::<Vec<_>>()), (n, vec![n]));
+        // A second one is named apart; with nothing else selected it has the first layer as its only child.
+        app.menu_item(ADD_MENU, entry("Layer"));
+        let ch = app.state.project.channels.last().unwrap();
+        assert_eq!((ch.name.as_deref(), ch.layer_children.clone()), (Some("Layer #2"), vec![app.state.project.channels[n].index]));
+        // The writer keeps it a layer with its children.
+        let back = os_flp::project::load(&os_flp::project::create(&app.state.project).unwrap()).unwrap();
+        let saved = back.channels.iter().find(|c| c.name.as_deref() == Some("Layer")).unwrap();
+        assert_eq!((saved.kind, saved.layer_children.clone()), (ChannelKind::Layer, wanted));
+        let undo = |app: &mut App| crate::playlist::run(app, crate::playlist::Cmd::Undo);
+        assert_eq!(undo(&mut app).as_deref(), Some("Undo: add layer"));
+        undo(&mut app);
+        assert_eq!(app.state.project.channels.len(), n);
     }
 
     /// PATTERNS > Split by channel (spec: ui/split-by-channel.md §2): rack order; the pattern keeps the first

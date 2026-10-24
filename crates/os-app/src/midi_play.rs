@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::app::{App, Win};
+use crate::app::App;
 use crate::midi_cfg::{self as cfg, CurveOf, Offset, Switch};
 use crate::midi_in::{Ev, InPort, Msg};
 use crate::prefs;
@@ -256,9 +256,7 @@ impl App {
     }
 
     fn midi_note_on(&mut self, ch: u8, key: u8, vel: u8) {
-        if self.state.shown(Win::Tapper) {
-            self.midi_tap();
-        }
+        self.key_tap();
         let n = self.state.project.channels.len();
         let (vel, mut extra) = linked(vel);
         // The channels set on Settings > MIDI (spec §3): their notes are not played on the selected channel.

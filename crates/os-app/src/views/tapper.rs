@@ -131,26 +131,28 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         }
     }
 
-    // − nudge / nudge + (§1, §6): not available yet, drawn greyed out.
+    // − nudge / nudge + (§1, §6): held while playing, playback runs slower / faster; the held one is lit.
     let dim = if lemon { t.text_faint } else { t.tx(0x9a9fa2) };
     let (left, right) = (at(20.0, 167.0, 57.0, 38.0), at(78.0, 167.0, 58.0, 38.0));
-    ui.off(left, "Nudge tempo to align time (Left / pitch bend)");
-    ui.off(right, "Nudge tempo to align time (Right / pitch bend)");
+    let held = crate::tapper::nudging();
+    let hov_l = ui.hit(left, Action::Tapper(TapAct::Nudge(-1)), "Nudge tempo to align time (Left / pitch bend)");
+    let hov_r = ui.hit(right, Action::Tapper(TapAct::Nudge(1)), "Nudge tempo to align time (Right / pitch bend)");
+    let text = |hov: bool, on: bool| if on { t.pill } else if hov { t.tx(0xe2e6e8) } else { t.tx(0xb4b9bc) };
     if lemon {
-        // Lemon's greyed-out rule: an outline only, no fill.
-        for r in [left, right] {
-            ui.c.stroke_rrect(r, lk::r_btn(t), 1.0, t.s(0x34383a));
+        for (r, on) in [(left, held < 0), (right, held > 0)] {
+            ui.c.fill_rrect(r, lk::r_btn(t), if on { t.s(0x2c3032) } else { t.s(0x232628) });
+            ui.c.stroke_rrect(r, lk::r_btn(t), 1.0, t.s(0x3c4042));
         }
     } else {
         let (top, bot) = (left.y, left.bottom());
-        let face = t.s(0x1e2122);
-        ui.c.fill_polygon(&[(left.x, top), (left.right(), top), (left.right(), bot), (left.x + 7.0, bot)], face);
-        ui.c.fill_polygon(&[(right.x, top), (right.right(), top), (right.right() - 7.0, bot), (right.x, bot)], face);
+        let face = |on: bool| if on { t.s(0x2a2e30) } else { t.s(0x1e2122) };
+        ui.c.fill_polygon(&[(left.x, top), (left.right(), top), (left.right(), bot), (left.x + 7.0, bot)], face(held < 0));
+        ui.c.fill_polygon(&[(right.x, top), (right.right(), top), (right.right() - 7.0, bot), (right.x, bot)], face(held > 0));
         ui.c.fill_rect(Rect::new(left.right(), top, 1.0, bot - top), line);
     }
     let nf = Font::new(15);
-    label(ui, nf, left.cx() + 2.0, left.cy(), true, dim, "- nudge");
-    label(ui, nf, right.cx() - 2.0, right.cy(), true, dim, "nudge +");
+    label(ui, nf, left.cx() + 2.0, left.cy(), true, text(hov_l, held < 0), "- nudge");
+    label(ui, nf, right.cx() - 2.0, right.cy(), true, text(hov_r, held > 0), "nudge +");
 
     // Sync, Mute (switches) and now (a button): not available yet (§6, §8); with Apply tempo off FL greys them too.
     let lf = Font::new(14);
