@@ -6543,6 +6543,14 @@ impl App {
             self.hint = Cow::Owned(self.state.knob_text(id));
             return None;
         }
+        // The wheel over a mixer effect slot moves its effect up or down the track's chain (spec: ui/mixer.md §7).
+        if let Some(Action::Mix(crate::mixer::MHit::SlotName(k) | crate::mixer::MHit::SlotArrow(k))) = area
+            && dy + dx != 0.0
+        {
+            let notches = (dy + dx).round() as i32;
+            crate::mixer::slot_wheel(self, k, if notches == 0 { (dy + dx).signum() as i32 } else { notches });
+            return None;
+        }
         // Channel rack value boxes (spec: ui/channel-rack.md §7, §12, §15): one per notch.
         let d = if dy + dx > 0.0 { 1 } else { -1 };
         match area {
@@ -12961,6 +12969,37 @@ mod tests {
         app.mouse_up();
         let t = app.state.selected_mixer;
         assert_eq!(crate::mixer::slot_name(&app.state, t, 0).as_deref(), Some("Test FX"));
+    }
+
+    /// The wheel over a mixer effect slot moves the effect a slot a notch, up for wheel up, trading places with its
+    /// neighbour (spec: ui/mixer.md §7). With the mouse still, more notches move the same effect, which has left the
+    /// cursor; the first and last slots are the ends.
+    #[test]
+    fn wheel_moves_a_mixer_effect() {
+        use crate::mixer::{run, slot_name, MCmd, MHit};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.plugins.effects = vec![crate::plugin_db::fake("FX A", os_host::Kind::Effect), crate::plugin_db::fake("FX B", os_host::Kind::Effect)];
+        app.state.z = vec![Win::Mixer];
+        run(&mut app, MCmd::AddEffect(0, 0));
+        run(&mut app, MCmd::AddEffect(3, 1));
+        frame(&mut app, &mut c, None);
+        let t = app.state.selected_mixer;
+        let slots = |app: &App| (0..10).map(|k| slot_name(&app.state, t, k).unwrap_or_default()).collect::<Vec<_>>();
+        let at = |app: &App, k: u8| hit_rect(app, &Action::Mix(MHit::SlotName(k)));
+        let r = at(&app, 0);
+        app.mouse_move(r.cx(), r.cy());
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(slots(&app)[..4], ["", "FX A", "", "FX B"], "down a slot");
+        app.wheel(0.0, -1.0, false, false);
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(slots(&app)[..4], ["", "", "FX B", "FX A"], "the same effect, past the other one");
+        frame(&mut app, &mut c, None);
+        let r = at(&app, 2);
+        app.mouse_move(r.cx(), r.cy());
+        app.wheel(0.0, 3.0, false, false);
+        assert_eq!(slots(&app)[..4], ["FX B", "", "", "FX A"], "up, and no further than the first slot");
     }
 
     /// The piano roll's scroll-bar arrows step their axis (spec: ui/piano-roll.md §1a).

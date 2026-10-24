@@ -117,12 +117,14 @@ pub struct MixerUi {
     /// The last solo: the tracks it kept on and the states (track, enabled) from before the first solo, put back by
     /// unsolo when "Restore previous state after solo" is on.
     pub solo: Option<(Vec<u16>, Vec<(u16, bool)>)>,
+    /// The track and effect slot the wheel last moved, and where the mouse was then (`slot_wheel`).
+    pub wheel_grab: Option<(u16, u8, (f32, f32))>,
 }
 
 impl Default for MixerUi {
     fn default() -> Self {
         MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), pending: Vec::new(), meters: Vec::new(),
-            meter_cfg: Default::default(), meter_at: None, solo: None }
+            meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None }
     }
 }
 
@@ -423,6 +425,28 @@ pub fn middle(app: &mut App, h: MHit) -> bool {
         }
     }
     false
+}
+
+/// The wheel over effect slot `slot` of the current track (§7): what the slot holds, an effect or nothing, trades places
+/// with its neighbour, one slot per notch, up for `notches` > 0. While the mouse stays still, more notches move the
+/// same slot, which has left the cursor.
+pub fn slot_wheel(app: &mut App, slot: u8, notches: i32) {
+    let at = app.mouse;
+    let t = app.state.selected_mixer;
+    let mut slot = match app.state.mixer.wheel_grab {
+        Some((gt, g, m)) if gt == t && m == at => g,
+        _ => slot,
+    };
+    let d: i8 = if notches > 0 { -1 } else { 1 };
+    for _ in 0..notches.unsigned_abs() {
+        let to = i32::from(slot) + i32::from(d);
+        if !(0..10).contains(&to) {
+            break;
+        }
+        run(app, MCmd::SlotMove(slot, d));
+        slot = to as u8;
+    }
+    app.state.mixer.wheel_grab = Some((t, slot, at));
 }
 
 fn start_rename(s: &mut State, n: u16, at: (f32, f32)) {
