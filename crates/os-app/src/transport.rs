@@ -1777,6 +1777,7 @@ impl Session {
         }
         if song {
             e.set_run_on(crate::record::run_on_flag());
+            e.set_nudge(crate::tapper::nudge_flag());
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));

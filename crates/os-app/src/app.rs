@@ -3243,6 +3243,12 @@ impl App {
                     }
                 }
             }
+            // Held while playing (§6): the engine runs 2 % slower / faster until the release; stopped, it does nothing.
+            TapAct::Nudge(n) => {
+                if self.transport.playing() && !self.transport.paused() {
+                    crate::tapper::nudge_flag().store(n.signum(), std::sync::atomic::Ordering::Relaxed);
+                }
+            }
         }
         self.damage_win(Win::Tapper);
     }
@@ -5783,6 +5789,10 @@ impl App {
     }
 
     fn release(&mut self) {
+        // A held nudge ends with the button (spec: ui/tempo-tapper.md §6).
+        if crate::tapper::nudge_flag().swap(0, std::sync::atomic::Ordering::Relaxed) != 0 {
+            self.damage_win(Win::Tapper);
+        }
         // An armed button acts if the release is over it (`acts_on_release`).
         if let Some(a) = self.armed.take() {
             let (x, y) = self.mouse;
@@ -11539,9 +11549,18 @@ mod tests {
         // The hints; the controls that do nothing yet only say so.
         let hint = |app: &App, a: &Action| app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.hint.to_string()).unwrap();
         assert_eq!(hint(&app, &Action::Tapper(TapAct::Pad)), "Tap me, or press any key on your MIDI keyboard");
+        assert_eq!(hint(&app, &Action::Tapper(TapAct::Nudge(-1))), "Nudge tempo to align time (Left / pitch bend)");
+        assert_eq!(hint(&app, &Action::Tapper(TapAct::Nudge(1))), "Nudge tempo to align time (Right / pitch bend)");
+        // A nudge is held while playing only, and any release lets it go (spec §6).
+        app.act(Action::Tapper(TapAct::Nudge(1)));
+        assert_eq!(crate::tapper::nudging(), 0, "stopped: nothing");
+        app.transport.pretend_at(0.0, false);
+        app.act(Action::Tapper(TapAct::Nudge(-1)));
+        assert_eq!(crate::tapper::nudging(), -1);
+        app.release();
+        assert_eq!(crate::tapper::nudging(), 0);
+        app.transport.stop();
         for name in [
-            "Nudge tempo to align time (Left / pitch bend)",
-            "Nudge tempo to align time (Right / pitch bend)",
             "Resynchronize to taps",
             "Mute all audio during first taps (during playback)",
             "Mute now, for a few bars (during playback)",

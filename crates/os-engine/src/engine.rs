@@ -42,6 +42,9 @@ pub enum PlayMode {
     Pattern(u16),
 }
 
+/// How much a nudge of the Tempo tapper speeds playback up or slows it down (spec: ui/tempo-tapper.md §6: about 2 %).
+const NUDGE: f64 = 0.02;
+
 /// The metronome's regions for `mode` (`Engine::click_bars`): the song's arrangement when it has clips (an empty
 /// playlist plays a pattern, which counts in the project's bar), the pattern's own markers in pattern mode. A region's
 /// beat is its bar over its numerator: `PPQ * 4 / denominator` ticks, one step-per-beat for the project's bar.
@@ -936,6 +939,9 @@ pub struct Engine {
     /// Recording with Loop record off (`set_run_on`): while the flag is set, a looping playback runs on past its end
     /// instead of going back to the start (spec: ui/recording.md §4).
     run_on: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The Tempo tapper's nudge (`set_nudge`): -1, 0 or +1, and the one the clock runs at now.
+    nudge: Option<std::sync::Arc<std::sync::atomic::AtomicI8>>,
+    nudged: i8,
     /// The arrangement's time markers (song mode with clips; spec: audio/transport.md "Time markers in SONG mode").
     marks: marks::Marks,
     /// The next tick was arrived at by a start or a jump: markers on it do not act.
@@ -1464,6 +1470,8 @@ impl Engine {
             held: false,
             count_in: 0,
             count_in_len: 0,
+            nudge: None,
+            nudged: 0,
             run_on: None,
             marks,
             landed: true,
@@ -1539,6 +1547,12 @@ impl Engine {
     /// While `flag` is set, a looping playback runs on past its end (spec: ui/recording.md §4); it is read every tick.
     pub fn set_run_on(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
         self.run_on = Some(flag);
+    }
+
+    /// The Tempo tapper's nudge buttons (spec: ui/tempo-tapper.md §6): while `flag` is -1 (+1), playback runs 2 % slower
+    /// (faster) from the next tick on; the tempo itself stays. An export never nudges.
+    pub fn set_nudge(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicI8>) {
+        self.nudge = Some(flag);
     }
 
     /// Ticks of the count-in left to render (0: none, or over).
@@ -1906,6 +1920,11 @@ impl Engine {
     /// The tempo the ticks run at, in quarter notes a minute (`Project::tick_tempo`).
     fn tick_tempo(&self) -> f64 {
         self.tempo * f64::from(self.steps) / 4.0
+    }
+
+    /// The tempo the clock runs the ticks at: `tick_tempo` with the nudge.
+    fn clock_tempo(&self) -> f64 {
+        self.tick_tempo() * (1.0 + NUDGE * f64::from(self.nudged))
     }
 
     /// The song's end in ticks.
@@ -2399,7 +2418,7 @@ impl Engine {
                 let bpm = (10000.0 + (f64::from(v as f32) * 512000.0).round_ties_even()) / 1000.0;
                 if bpm != self.tempo {
                     self.tempo = bpm;
-                    self.clock.set_tempo(self.rate, self.ppq, self.tick_tempo());
+                    self.clock.set_tempo(self.rate, self.ppq, self.clock_tempo());
                 }
             }
             Target::ChannelParam(..) | Target::SlotParam(..) | Target::Other(_) => {}
@@ -2567,6 +2586,12 @@ impl Engine {
             }
         }
         self.tick = tick + 1;
+        // A nudge pressed or let go changes the ticks after this one, as a tempo change does.
+        let nudge = self.nudge.as_ref().filter(|_| !self.exporting).map_or(0, |n| n.load(std::sync::atomic::Ordering::Relaxed).signum());
+        if nudge != self.nudged {
+            self.nudged = nudge;
+            self.clock.set_tempo(self.rate, self.ppq, self.clock_tempo());
+        }
         self.frame = start + len as u64;
         self.mix(len, &song);
         self.out.clear();
@@ -6822,6 +6847,33 @@ mod tests {
         }
         let accented: Vec<bool> = on.iter().map(|o| o.1 > on[1].1 * 1.3).collect();
         assert_eq!(accented, [true, false, false, true, false, false, true]);
+    }
+
+    // spec: ui/tempo-tapper.md §6
+    #[test]
+    fn a_held_nudge_runs_playback_two_percent_slower_or_faster() {
+        use std::sync::atomic::{AtomicI8, Ordering};
+        // A pattern long enough not to end or loop (a note at bar 6 on a channel switched off).
+        let mut p = project(vec![Note { length: 96, ..Note::step(0, 1904) }], vec![]);
+        p.channels[0].enabled = false;
+        let ticks = |n: i8| {
+            let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Pattern(1));
+            let flag = std::sync::Arc::new(AtomicI8::new(n));
+            e.set_nudge(flag.clone());
+            let mut out = vec![0.0; 2 * 48000 * 4];
+            e.process(&mut out);
+            let held = e.tick_position();
+            // Let go: the ticks after run at the tempo again.
+            flag.store(0, Ordering::Relaxed);
+            e.process(&mut out);
+            (held, e.tick_position() - held)
+        };
+        // Four seconds at 130 BPM, PPQ 96: 832 ticks; 2 % fewer or more while nudged (the first tick runs before the
+        // nudge takes hold), then 832 again.
+        let ((slow, slow_after), (plain, _), (fast, fast_after)) = (ticks(-1), ticks(0), ticks(1));
+        assert!((plain - 832.0).abs() < 2.0, "{plain}");
+        assert!((slow / plain - 0.98).abs() < 0.003 && (fast / plain - 1.02).abs() < 0.003, "{slow} {plain} {fast}");
+        assert!((slow_after - plain).abs() < 2.0 && (fast_after - plain).abs() < 2.0, "{slow_after} {fast_after}");
     }
 
     /// The clicks of three seconds of `p`'s pattern 1, looping, and which of them are accented.
