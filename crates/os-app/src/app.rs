@@ -6562,6 +6562,12 @@ impl App {
                 self.state.piano.dirty = true;
                 return None;
             }
+            // Shift+wheel over a channel's name button moves the channel (spec: ui/channel-rack.md §13).
+            Some(Action::ChannelSelect(i)) if shift && dy + dx != 0.0 => {
+                let notches = (dy + dx).round() as i32;
+                crate::rack::wheel_move(self, i, if notches == 0 { d } else { notches });
+                return None;
+            }
             _ => {}
         }
         let rack_area = self.top_hit(x, y).is_some_and(|h| h.win == Some(Win::ChannelRack));
@@ -13195,6 +13201,39 @@ mod tests {
         app.browser_cmd(crate::browser::BCmd::Toggle("top"));
         frame(&mut app, &mut c, None);
         assert!(app.hits.iter().any(|h| h.action == Action::BrowserSearch && h.rect.y < 200.0));
+    }
+
+    /// Shift+wheel over a channel's name button (spec: ui/channel-rack.md §13): the channel moves a row a notch, up for
+    /// wheel up, and is the only one selected. With the mouse still, more notches move the same channel, which has left
+    /// the cursor. Without Shift, or over the steps, no channel moves.
+    #[test]
+    fn shift_wheel_moves_a_channel() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let order = |app: &App| (0..app.state.project.channels.len()).map(|r| crate::rack::channel_name(&app.state, r)).collect::<Vec<_>>();
+        let b = order(&app);
+        assert!(b.len() >= 5);
+        let rows = |ix: [usize; 5]| ix.map(|i| b[i].clone());
+        let name = hit_rect(&app, &Action::ChannelSelect(2));
+        app.mouse_move(name.cx(), name.cy());
+        app.wheel(0.0, -1.0, true, false);
+        assert_eq!(order(&app)[..5], rows([0, 1, 3, 2, 4]), "down a row");
+        assert_eq!(app.state.rack.sel, std::collections::BTreeSet::from([3]));
+        frame(&mut app, &mut c, None);
+        app.wheel(0.0, 1.0, true, false);
+        app.wheel(0.0, 1.0, true, false);
+        assert_eq!(order(&app)[..5], rows([0, 2, 1, 3, 4]), "the same channel, two rows up");
+        assert_eq!(app.state.rack.sel, std::collections::BTreeSet::from([1]));
+        frame(&mut app, &mut c, None);
+        let moved = order(&app);
+        let name = hit_rect(&app, &Action::ChannelSelect(4));
+        app.mouse_move(name.cx(), name.cy());
+        app.wheel(0.0, 1.0, false, false);
+        let step = hit_rect(&app, &Action::Step(4, 2));
+        app.mouse_move(step.cx(), step.cy());
+        app.wheel(0.0, 1.0, true, false);
+        assert_eq!(order(&app), moved, "no Shift, or over the steps");
     }
 
     /// Channel rack (spec: ui/channel-rack.md §5): stacking with other windows, name button opens

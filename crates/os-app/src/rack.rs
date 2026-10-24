@@ -240,6 +240,8 @@ pub struct RackUi {
     pub delete_now: Option<Vec<usize>>,
     /// Advanced fill dialog (§22).
     pub fill: Option<FillDlg>,
+    /// The channel Shift+wheel last moved and where the mouse was then (`wheel_move`).
+    pub wheel_grab: Option<(usize, (f32, f32))>,
 }
 
 impl Default for RackUi {
@@ -270,6 +272,7 @@ impl Default for RackUi {
             purging: false,
             delete_now: None,
             fill: None,
+            wheel_grab: None,
         }
     }
 }
@@ -985,6 +988,22 @@ pub fn move_selected(app: &mut App, dir: i32) {
         }
     }
     reorder(app, &order);
+}
+
+/// Shift+wheel over channel `r`'s name button (§13): it becomes the only selected channel and moves one row per notch,
+/// up for `notches` > 0. While the mouse stays still, more notches move the same channel, which has left the cursor.
+pub fn wheel_move(app: &mut App, r: usize, notches: i32) {
+    let at = app.mouse;
+    let r = match app.state.rack.wheel_grab {
+        Some((g, m)) if m == at && g < app.state.project.channels.len() => g,
+        _ => r,
+    };
+    app.state.rack.select_only(r);
+    for _ in 0..notches.unsigned_abs() {
+        move_selected(app, -notches.signum());
+    }
+    let now = app.state.rack.sel.first().copied().unwrap_or(r);
+    app.state.rack.wheel_grab = Some((now, at));
 }
 
 pub fn sort(app: &mut App, by: SortBy) {
