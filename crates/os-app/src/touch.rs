@@ -116,6 +116,7 @@ impl App {
             TouchAct::Note(k) => {
                 self.drag = Some(crate::app::Drag::Touch);
                 self.touch_hold(Some(k));
+                self.key_tap(); // a press taps, a glissando does not (spec: ui/tempo-tapper.md §8)
             }
         }
         self.damage_win(Win::Touch);

@@ -3272,8 +3272,12 @@ impl App {
         self.damage_win(Win::Tapper);
     }
 
-    /// A key on a MIDI keyboard taps while the tapper is open (its pad's hint, §1); the keys of a chord tap once.
-    pub(crate) fn midi_tap(&mut self) {
+    /// A key on a MIDI keyboard taps while the tapper is open (its pad's hint, §1), and so do a typing-keyboard note
+    /// and a Touch controller press (§8); the keys of a chord tap once.
+    pub(crate) fn key_tap(&mut self) {
+        if !self.state.shown(Win::Tapper) {
+            return;
+        }
         let t = self.state.tapper.clock();
         if !self.state.tapper.count.last().is_some_and(|l| t - l < crate::tapper::MIDI_CHORD) {
             self.tap(t);
@@ -6853,6 +6857,7 @@ impl App {
         self.typing_held.push((code, row, key));
         self.step_edit_down(crate::step_edit::Src::Typing(code), key, TYPING_VELOCITY);
         self.typing_lit_changed();
+        self.key_tap(); // spec: ui/tempo-tapper.md §8
         true
     }
 
@@ -11602,7 +11607,7 @@ mod tests {
         // MIDI keys tap while the window is open; a chord's keys are one tap.
         for t in [30.0, 30.03, 30.5] {
             app.state.tapper.test_time = Some(t);
-            app.midi_tap();
+            app.key_tap();
         }
         assert_eq!(app.state.tempo, 120.0);
         // Every tap clicked, accented on the first of each four of a count (§8); the chord's second key did not.
@@ -11637,6 +11642,45 @@ mod tests {
         assert!(app.state.shown(Win::Tapper) && app.state.in_front(Win::Tapper));
         click(&mut app, &mut c, b);
         assert!(!app.state.shown(Win::Tapper));
+    }
+
+    /// While the tapper is open, typing-keyboard notes and Touch controller presses tap like MIDI keys, a chord once
+    /// (spec: ui/tempo-tapper.md §8); auto-repeat, the other keys and a glissando do not, and a closed tapper ignores them.
+    #[test]
+    fn tempo_tapper_typing_and_touch_keys_tap() {
+        use crate::touch::TouchAct;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.selected_channel = 1;
+        app.state.toggles.push("typing");
+        let key = |app: &mut App, t: f64, code: KeyCode| {
+            app.state.tapper.test_time = Some(t);
+            app.typing_key(code, true, false, false)
+        };
+        assert!(key(&mut app, 1.0, KeyCode::KeyZ));
+        app.typing_key(KeyCode::KeyZ, false, false, false);
+        assert!(app.state.tapper.test_clicks.is_empty(), "the tapper is closed");
+
+        app.act(Action::ToggleWin(Win::Tapper));
+        assert!(key(&mut app, 10.0, KeyCode::KeyZ));
+        assert!(key(&mut app, 10.03, KeyCode::KeyX), "a chord's second key plays");
+        assert!(key(&mut app, 10.2, KeyCode::KeyZ), "auto-repeat");
+        assert_eq!(app.typing_held.len(), 2);
+        app.typing_key(KeyCode::KeyZ, false, false, false);
+        app.typing_key(KeyCode::KeyX, false, false, false);
+        assert!(!key(&mut app, 10.3, KeyCode::F1), "not a note key");
+        assert!(key(&mut app, 10.5, KeyCode::KeyC));
+        app.typing_key(KeyCode::KeyC, false, false, false);
+        assert_eq!((app.state.tapper.count.taps(), app.state.tempo), (2, 120.0));
+
+        app.state.tapper.test_time = Some(11.0);
+        app.act(Action::Touch(TouchAct::Note(56)));
+        assert_eq!(app.state.touch.held, Some((56, 1)), "the pad plays");
+        app.state.tapper.test_time = Some(11.2);
+        app.touch_hold(Some(57));
+        app.touch_hold(None);
+        let (t, f) = (true, false);
+        assert_eq!((app.state.tapper.test_clicks.as_slice(), app.state.tempo), ([t, f, f].as_slice(), 120.0));
     }
 
     /// The tapper's flash fades on the ticks (spec: ui/tempo-tapper.md §4, §8): each repaints just the pad, which shows

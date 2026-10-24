@@ -138,7 +138,7 @@ arrangement's in SONG mode, the current pattern's in PAT mode, each marker start
 the "Metronome track" setting.
 
 **Tempo tapper.** VIEW > Tempo tapper, Ctrl+F5 or the kick drum button on the toolbar: click the pad (or press
-a key on a MIDI keyboard) in time. The average of the taps, in whole BPM, becomes the project tempo while Apply
+a key on a MIDI keyboard, play a note on the typing keyboard, or press a Touch controller pad or key) in time. The average of the taps, in whole BPM, becomes the project tempo while Apply
 tempo is on; the beat bar counts the taps in groups of four. Each tap clicks with the metronome's Tick sound,
 the first of each four accented. Apply tempo is remembered between sessions. − nudge / nudge +, held while playing, run playback 2 % slower / faster
 until let go (the tempo stays). Not yet: Sync, Mute and now (drawn greyed out), nudging with the arrow keys.
