@@ -15,6 +15,8 @@ pub const WRAPPER: &str = "Fruity Wrapper";
 
 /// Record ids (spec: flp/events/plugins.md §4).
 pub mod rec {
+    /// MIDI settings: i32 input port, i32 output port, u32 pitch-bend range in semitones, ...
+    pub const MIDI: u32 = 1;
     pub const INFO: u32 = 50;
     pub const FOURCC: u32 = 51;
     pub const GUID: u32 = 52;
@@ -124,6 +126,13 @@ fn vst2_id(b: &[u8]) -> Option<String> {
     Some(format!("{:08X}", u32::from_le_bytes(b.try_into().ok()?)))
 }
 
+/// The pitch-bend range (semitones) a wrapper state keeps for its plugin (record 1, the third field). `None` when
+/// `data` is not a wrapper state or has no such record.
+pub fn bend_range(data: &[u8]) -> Option<u32> {
+    let r = Records::parse(data)?;
+    Some(u32::from_le_bytes(r.get(rec::MIDI)?.get(8..12)?.try_into().ok()?))
+}
+
 /// The plugin a wrapper state names. `None` when `data` is not a wrapper state.
 pub fn decode(data: &[u8]) -> Option<PluginRef> {
     let r = Records::parse(data)?;
@@ -216,6 +225,16 @@ mod tests {
         let b = encode(None, &v);
         assert_eq!(Records::parse(&b).unwrap().get(rec::GUID), Some(&(0u8..16).collect::<Vec<_>>()[..]));
         assert_eq!(decode(&b), Some(v));
+    }
+
+    /// The pitch-bend range is the MIDI record's third field (FL Studio's states hold 12 or 2).
+    #[test]
+    fn bend_range_from_the_midi_record() {
+        let midi = [(-1i32).to_le_bytes(), (-1i32).to_le_bytes(), 12u32.to_le_bytes(), [0; 4], [0; 4]].concat();
+        let r = Records { kind: 10, records: vec![(rec::MIDI, midi), (rec::NAME, b"Synth".to_vec())] };
+        assert_eq!(bend_range(&r.to_bytes()), Some(12));
+        assert_eq!(bend_range(&encode(None, &clap())), None, "no MIDI record");
+        assert_eq!(bend_range(&[1, 2]), None);
     }
 
     #[test]

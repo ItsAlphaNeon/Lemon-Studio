@@ -29,6 +29,7 @@ use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::ext::audio_ports::{clap_audio_port_info, clap_plugin_audio_ports, CLAP_EXT_AUDIO_PORTS};
 use clap_sys::ext::gui::{clap_host_gui, clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_COCOA, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11};
 use clap_sys::ext::latency::{clap_host_latency, clap_plugin_latency, CLAP_EXT_LATENCY};
+use clap_sys::ext::note_ports::{clap_note_port_info, clap_plugin_note_ports, CLAP_EXT_NOTE_PORTS, CLAP_NOTE_DIALECT_CLAP};
 use clap_sys::ext::params::{
     clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS,
     CLAP_PARAM_IS_ENUM, CLAP_PARAM_IS_HIDDEN, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED,
@@ -596,6 +597,9 @@ pub struct Plugin {
     voice_info: *const clap_plugin_voice_info,
     /// The voices it plays, from the notes sent and the voice ends it reports (spec: audio/voices.md §2).
     ledger: VoiceLedger,
+    /// Glides as MIDI pitch bend, for a plugin whose note inputs take MIDI only (no tuning expression; spec:
+    /// audio/channel-voices.md). `None`: glides are tuning expressions.
+    bend: Option<os_engine::TuningBend>,
     /// Kept alive for the plugin, which holds a pointer to it.
     _host: Box<clap_host>,
     host_data: Box<HostData>,
@@ -743,6 +747,23 @@ pub type SharedPlugin = Arc<Mutex<Plugin>>;
 
 const MAX_FRAMES: u32 = 4096;
 
+/// True when the plugin's note inputs take CLAP note events, and with them tuning expressions (or it declares no note
+/// ports: it is sent CLAP events as before). False for a plugin whose note inputs speak MIDI only. Main thread.
+unsafe fn takes_clap_notes(ports: *const clap_plugin_note_ports, plugin: *const clap_plugin) -> bool {
+    unsafe {
+        let Some(ports) = ports.as_ref() else { return true };
+        let (Some(count), Some(get)) = (ports.count, ports.get) else { return true };
+        let n = count(plugin, true);
+        if n == 0 {
+            return true;
+        }
+        (0..n).any(|i| {
+            let mut info: clap_note_port_info = std::mem::zeroed();
+            get(plugin, i, true, &mut info) && info.supported_dialects & CLAP_NOTE_DIALECT_CLAP != 0
+        })
+    }
+}
+
 fn debug() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("OS_DEBUG").is_some())
@@ -805,6 +826,7 @@ impl Plugin {
             let render = ext(CLAP_EXT_RENDER) as *const clap_plugin_render;
             let voice_info = ext(CLAP_EXT_VOICE_INFO) as *const clap_plugin_voice_info;
             let audio_ports = ext(CLAP_EXT_AUDIO_PORTS) as *const clap_plugin_audio_ports;
+            let bend = (!takes_clap_notes(ext(CLAP_EXT_NOTE_PORTS) as *const clap_plugin_note_ports, plugin)).then(os_engine::TuningBend::default);
             let ranges = params::read_ranges(params, plugin);
             Ok(Plugin {
                 desc,
@@ -869,6 +891,7 @@ impl Plugin {
                 offline: false,
                 voice_info,
                 ledger: VoiceLedger::new(),
+                bend,
                 ranges,
                 param_queue: Vec::new(),
                 auto: Vec::with_capacity(params::MAX_AUTO),
@@ -878,6 +901,14 @@ impl Plugin {
                 _lib: lib.clone(),
             })
         }
+    }
+
+    /// Queues a note's start; a plugin glided by pitch bend first has the bend centred for it.
+    fn start_note(&mut self, e: Ev) {
+        if let Some(m) = self.bend.as_mut().and_then(|b| b.note_on(e.key)) {
+            self.midi_queue.push((e.time, m));
+        }
+        self.queue.push(e);
     }
 
     /// Switches the plugin between offline rendering (an export) and live playback through the CLAP render extension
@@ -1774,6 +1805,9 @@ impl os_engine::Instrument for Plugin {
         self.queue.clear();
         self.sounding = false;
         self.ledger.clear();
+        if let Some(m) = self.bend.as_mut().and_then(|b| b.reset()) {
+            self.midi_queue.push((0, m));
+        }
         self.level_voices.clear();
         self.mod_resend.clear();
         self.named.clear();
@@ -1795,7 +1829,7 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
-        self.queue.push(Ev::new(offset, Kind::On, key, velocity));
+        self.start_note(Ev::new(offset, Kind::On, key, velocity));
     }
 
     fn note_off(&mut self, offset: u32, key: u8) {
@@ -1807,11 +1841,11 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn note_on_from(&mut self, offset: u32, key: u8, velocity: f32, start: f32) {
-        self.queue.push(Ev { start: start.clamp(0.0, 1.0), ..Ev::new(offset, Kind::On, key, velocity) });
+        self.start_note(Ev { start: start.clamp(0.0, 1.0), ..Ev::new(offset, Kind::On, key, velocity) });
     }
 
     fn note_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels) {
-        self.queue.push(Ev { start: start.clamp(0.0, 1.0), levels, ..Ev::new(offset, Kind::On, key, velocity) });
+        self.start_note(Ev { start: start.clamp(0.0, 1.0), levels, ..Ev::new(offset, Kind::On, key, velocity) });
     }
 
     fn choke(&mut self, offset: u32, key: u8) {
@@ -1819,7 +1853,7 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32) {
-        self.queue.push(Ev { start: start.clamp(0.0, 1.0), levels, voice: Some(voice), ..Ev::new(offset, Kind::On, key, velocity) });
+        self.start_note(Ev { start: start.clamp(0.0, 1.0), levels, voice: Some(voice), ..Ev::new(offset, Kind::On, key, velocity) });
     }
 
     fn voice_gains(&self) -> bool {
@@ -1837,7 +1871,20 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
-        self.queue.push(Ev::new(offset, Kind::Tune, key, semitones));
+        match &mut self.bend {
+            Some(b) => {
+                if let Some(m) = b.tune(key, semitones) {
+                    self.midi_queue.push((offset, m));
+                }
+            }
+            None => self.queue.push(Ev::new(offset, Kind::Tune, key, semitones)),
+        }
+    }
+
+    fn set_bend_range(&mut self, semitones: u32) {
+        if let Some(b) = &mut self.bend {
+            b.set_range(semitones);
+        }
     }
 
     /// The engine still applies the channel's volume and pan to the output (false); the channel's mod X / Y join each
@@ -2721,6 +2768,35 @@ mod tests {
         assert!(p.load_state(&blob));
         assert!(p.activate(48000));
         p
+    }
+
+    /// Glides (spec: audio/channel-voices.md): a plugin whose note port takes CLAP notes (Lemon Sampler) gets tuning
+    /// expressions; one that reads MIDI only gets them as pitch bend over its range, centred before each new note.
+    #[test]
+    fn glides_are_tuning_expressions_or_pitch_bend() {
+        use os_engine::Instrument as _;
+        let wav = dc_wav("bend");
+        let mut p = sampler_of(&wav);
+        assert!(p.bend.is_none(), "Lemon Sampler takes CLAP notes");
+        let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        p.note_on(0, 60, 0.8);
+        p.tune(4, 60, 2.0);
+        p.process(48000, &mut l, &mut r);
+        assert_eq!(p.midis.len(), 0);
+        assert_eq!(p.exprs.iter().map(|x| (x.expression_id, x.key, x.header.time, x.value)).collect::<Vec<_>>(), vec![(CLAP_NOTE_EXPRESSION_TUNING, 60, 4, 2.0)]);
+        // As a MIDI-only plugin at a range of 2 semitones.
+        p.bend = Some(os_engine::TuningBend::default());
+        p.set_bend_range(2);
+        p.tune(4, 60, 1.0);
+        p.note_on(10, 64, 0.8);
+        p.process(48000, &mut l, &mut r);
+        assert!(p.exprs.is_empty());
+        let midis: Vec<(u32, [u8; 3])> = p.midis.iter().map(|m| (m.header.time, m.data)).collect();
+        assert_eq!(midis, vec![(4, [0xE0, 0x00, 0x60]), (10, [0xE0, 0x00, 0x40])], "half up, then centred for the new note");
+        // In the event order the centring comes before the note it is for.
+        let at = |h: *const clap_event_header| p.order.iter().position(|&o| o == h).unwrap();
+        assert!(at(&p.midis[1].header) < at(&p.notes[0].header));
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// Voices the engine names (`use_voice_gains`): each note gets its own id, the voice's gains go to it as volume

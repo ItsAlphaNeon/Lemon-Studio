@@ -27,8 +27,8 @@ use vst3_sys::base::{kResultOk, kResultTrue, IPluginBase, IPluginFactory, IPlugi
 use vst3_sys::gui::{IPlugView, IPlugViewContentScaleSupport, ViewRect};
 use vst3_sys::utils::SharedVstPtr;
 use vst3_sys::vst::{
-    AudioBusBuffers, BusInfo, Event, EventData, IAudioProcessor, IComponent, IConnectionPoint, IEditController, IMidiMapping, IUnitInfo,
-    NoteExpressionValueEvent, NoteOffEvent, NoteOnEvent, ParameterInfo, ProcessContext, ProcessData, ProcessSetup, UnitInfo,
+    AudioBusBuffers, BusInfo, Event, EventData, IAudioProcessor, IComponent, IConnectionPoint, IEditController, IMidiMapping, INoteExpressionController,
+    IUnitInfo, NoteExpressionTypeInfo, NoteExpressionValueEvent, NoteOffEvent, NoteOnEvent, ParameterInfo, ProcessContext, ProcessData, ProcessSetup, UnitInfo,
 };
 use vst3_sys::{c_void, ComInterface, VstPtr, IID};
 
@@ -510,6 +510,10 @@ pub struct Plugin {
     /// The parameter the controller maps each MIDI controller to (IMidiMapping, MIDI channel 1): controllers 0..127,
     /// then channel pressure (128) and pitch bend (129); `u32::MAX` = none (spec: ui/midi-settings.md §4).
     midi_map: Vec<u32>,
+    /// Glides as pitch bend (through `midi_map`) for a plug-in whose controller lists no tuning note expression (spec:
+    /// audio/channel-voices.md); `None`: glides are tuning expressions. `bend_range` survives a new reading.
+    bend: Option<os_engine::TuningBend>,
+    bend_range: u32,
     /// Automation values (frame offset, id, normalized) for the next process call.
     auto: Vec<(u32, u32, f64)>,
     /// Unit id -> group path (IUnitInfo).
@@ -596,6 +600,8 @@ impl Plugin {
                 pending_since: None,
                 param_ids: Vec::new(),
                 midi_map: Vec::new(),
+                bend: None,
+                bend_range: os_engine::instrument::DEFAULT_BEND_RANGE,
                 auto: Vec::with_capacity(MAX_AUTO),
                 units: Vec::new(),
                 latency: 0,
@@ -754,6 +760,19 @@ impl Plugin {
                 self.midi_map.push(if ok { id } else { u32::MAX });
             }
         }
+        // A plug-in that lists the tuning expression takes glides as one; another glides by pitch bend when it maps
+        // pitch bend to a parameter, else not at all.
+        let tuning = c.cast::<dyn INoteExpressionController>().is_some_and(|x| unsafe {
+            (0..x.get_note_expression_count(0, 0)).any(|i| {
+                let mut info: NoteExpressionTypeInfo = std::mem::zeroed();
+                x.get_note_expression_info(0, 0, i, &mut info) == kResultOk && info.type_id == TUNING_TYPE_ID
+            })
+        });
+        self.bend = (!tuning && self.midi_map.get(129).is_some_and(|&id| id != u32::MAX)).then(|| {
+            let mut b = os_engine::TuningBend::default();
+            b.set_range(self.bend_range);
+            b
+        });
     }
 
     /// Activates at `rate` (UI thread; spec §4.5); reactivates when the rate changes.
@@ -1407,6 +1426,9 @@ impl os_engine::Instrument for Plugin {
             }
         }
         self.ledger.clear();
+        if let Some(m) = self.bend.as_mut().and_then(|b| b.reset()) {
+            os_engine::Instrument::midi(self, 0, m);
+        }
         // Automation still waiting is a value the parameter should have: it is kept for the next block / flush.
         if self.processing {
             unsafe { self.processor.set_processing(0) };
@@ -1415,6 +1437,9 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
+        if let Some(m) = self.bend.as_mut().and_then(|b| b.note_on(key)) {
+            os_engine::Instrument::midi(self, offset, m);
+        }
         self.queue.push(Note { time: offset, kind: NoteKind::On, key, velocity: velocity.clamp(0.0, 1.0) });
     }
 
@@ -1441,9 +1466,24 @@ impl os_engine::Instrument for Plugin {
         self.shared.attention.raise();
     }
 
-    /// Portamento glides (spec: audio/channel-voices.md): the tuning note expression of the key's sounding note.
+    /// Portamento glides (spec: audio/channel-voices.md): the tuning note expression of the key's sounding note, or
+    /// pitch bend for a plug-in without one.
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
-        self.queue.push(Note { time: offset, kind: NoteKind::Tune, key, velocity: semitones });
+        match &mut self.bend {
+            Some(b) => {
+                if let Some(m) = b.tune(key, semitones) {
+                    os_engine::Instrument::midi(self, offset, m);
+                }
+            }
+            None => self.queue.push(Note { time: offset, kind: NoteKind::Tune, key, velocity: semitones }),
+        }
+    }
+
+    fn set_bend_range(&mut self, semitones: u32) {
+        self.bend_range = semitones;
+        if let Some(b) = &mut self.bend {
+            b.set_range(semitones);
+        }
     }
 
     fn param(&mut self, offset: u32, index: u32, value: f64) {

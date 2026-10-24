@@ -275,6 +275,10 @@ impl crate::app::App {
                 Some((other, Ok(_))) => {
                     self.state.hosted_rows.push(row);
                     added.0 = true;
+                    // Glides reach a plugin without note tuning as pitch bend over the wrapper's range.
+                    if let Some(n) = self.state.project.channels[row].plugin_state.as_deref().and_then(wrapper::bend_range) {
+                        self.plugins.set_bend_range(row, n);
+                    }
                     if other.is_some() {
                         self.plugins.mark_stand_in(row);
                     }

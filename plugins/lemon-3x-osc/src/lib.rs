@@ -264,6 +264,8 @@ impl Plugin for LemonTrio {
                 NoteEvent::NoteOn { note, velocity, voice_id, .. } => self.engine.host_note_on(note, velocity, voice_id, &blk),
                 NoteEvent::NoteOff { note, voice_id, .. } => self.engine.note_off_id(note, voice_id),
                 NoteEvent::Choke { note, .. } => self.engine.choke(note),
+                // Portamento and slide notes (spec: audio/channel-voices.md): the host's tuning of a key's voices.
+                NoteEvent::PolyTuning { note, voice_id, tuning, .. } => self.engine.tune(note, voice_id, f64::from(tuning)),
                 NoteEvent::MidiPitchBend { value, .. } => {
                     // ±2 semitones, as Lemon Sampler.
                     self.bend = f64::from(value * 2.0 - 1.0) * 200.0;

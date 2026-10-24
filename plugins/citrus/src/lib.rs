@@ -177,19 +177,31 @@ struct Held {
     channel: u8,
     voice_id: Option<i32>,
     id: u64,
+    /// The host's tuning of the note in cents (portamento and slide notes: a note expression).
+    tune: f32,
 }
+
+/// A note's pitch in cents from key 60: its key, the pitch bend and the host's tuning.
+fn note_pitch(h: &Held, bend: f32) -> f32 {
+    (f32::from(h.note) - 60.0) * 100.0 + bend + h.tune
+}
+
+/// Released notes kept for the host's tunings (a glide goes on while a note rings out); the oldest goes first.
+const RINGING: usize = 64;
 
 pub struct CitrusPlugin {
     params: Arc<CitrusParams>,
     engine: Citrus,
     seen: u64,
     held: Vec<Held>,
+    /// Notes ended by the host, newest last: a tuning still moves them while they ring.
+    ringing: Vec<Held>,
     bend: f32,
 }
 
 impl Default for CitrusPlugin {
     fn default() -> Self {
-        CitrusPlugin { params: Arc::new(CitrusParams::default()), engine: Citrus::new(44100), seen: 0, held: Vec::new(), bend: 0.0 }
+        CitrusPlugin { params: Arc::new(CitrusParams::default()), engine: Citrus::new(44100), seen: 0, held: Vec::new(), ringing: Vec::new(), bend: 0.0 }
     }
 }
 
@@ -207,6 +219,7 @@ impl CitrusPlugin {
             }
             self.seen = v;
             self.held.clear();
+            self.ringing.clear();
         }
     }
 
@@ -218,6 +231,7 @@ impl CitrusPlugin {
                     self.engine.edit(p);
                     if self.engine.voices() == 0 {
                         self.held.clear();
+                        self.ringing.clear();
                     }
                 }
             }
@@ -227,7 +241,7 @@ impl CitrusPlugin {
                 if on {
                     let velocity = 100.0 / 128.0;
                     let id = self.engine.note_on(NoteOn { levels: self.levels(note, velocity), velocity, release: 0.5 });
-                    self.held.push(Held { note, channel: PREVIEW, voice_id: None, id });
+                    self.held.push(Held { note, channel: PREVIEW, voice_id: None, id, tune: 0.0 });
                 } else if let Some(i) = self.held.iter().position(|h| h.note == note && h.channel == PREVIEW) {
                     let h = self.held.remove(i);
                     self.engine.note_off(h.id);
@@ -252,7 +266,7 @@ impl CitrusPlugin {
         Levels {
             vol: os_dsp::level::curve(v),
             pan: 0.0,
-            pitch: (f32::from(note) - 60.0) * 100.0 + self.bend,
+            pitch: note_pitch(&Held { note, channel: 0, voice_id: None, id: 0, tune: 0.0 }, self.bend),
             mod_x: self.params.mod_x.value(),
             mod_y: self.params.mod_y.value(),
         }
@@ -294,6 +308,7 @@ impl Plugin for CitrusPlugin {
     fn reset(&mut self) {
         self.engine.panic();
         self.held.clear();
+        self.ringing.clear();
         self.show_playing();
     }
 
@@ -320,7 +335,7 @@ impl Plugin for CitrusPlugin {
                 NoteEvent::NoteOn { note, velocity, voice_id, channel, .. } => {
                     let levels = self.levels(note, velocity);
                     let id = self.engine.note_on(NoteOn { levels, velocity, release: 0.5 });
-                    self.held.push(Held { note, channel, voice_id, id });
+                    self.held.push(Held { note, channel, voice_id, id, tune: 0.0 });
                 }
                 NoteEvent::NoteOff { note, voice_id, channel, velocity, .. } => {
                     let _ = velocity;
@@ -330,23 +345,41 @@ impl Plugin for CitrusPlugin {
                     }) {
                         let h = self.held.remove(i);
                         self.engine.note_off(h.id);
+                        if self.ringing.len() >= RINGING {
+                            self.ringing.remove(0);
+                        }
+                        self.ringing.push(h);
                     }
                 }
                 NoteEvent::Choke { .. } => {
                     self.engine.panic();
                     self.held.clear();
+                    self.ringing.clear();
+                }
+                // Portamento and slide notes (spec: audio/channel-voices.md): the host's tuning of a key's notes, the
+                // one its id names or else every note of the key, ringing ones too.
+                NoteEvent::PolyTuning { note, voice_id, channel, tuning, .. } => {
+                    let named = voice_id.is_some_and(|v| self.held.iter().chain(&self.ringing).any(|h| h.voice_id == Some(v)));
+                    let bend = self.bend;
+                    for h in self.held.iter_mut().chain(self.ringing.iter_mut()) {
+                        let hit = if named { h.voice_id == voice_id } else { h.note == note && h.channel == channel };
+                        if hit {
+                            h.tune = tuning * 100.0;
+                            self.engine.bend(h.id, note_pitch(h, bend));
+                        }
+                    }
                 }
                 NoteEvent::MidiPitchBend { value, .. } => {
                     // ±2 semitones, as the other Lemon instruments.
                     self.bend = (value * 2.0 - 1.0) * 200.0;
-                    for h in self.held.clone() {
-                        let l = self.levels(h.note, 1.0);
-                        self.engine.bend(h.id, l.pitch);
+                    for h in self.held.iter().chain(&self.ringing) {
+                        self.engine.bend(h.id, note_pitch(h, self.bend));
                     }
                 }
                 NoteEvent::MidiCC { cc: 120 | 123, .. } => {
                     self.engine.all_off();
                     self.held.clear();
+                    self.ringing.clear();
                 }
                 _ => {}
             }
