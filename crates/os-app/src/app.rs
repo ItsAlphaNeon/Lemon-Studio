@@ -937,6 +937,10 @@ pub struct State {
     pub pending_open: Option<usize>,
     /// Samples to load into rows' Lemon Sampler instances on the next tick (browser send, drops on a rack row).
     pub sample_loads: Vec<(usize, String)>,
+    /// Rack rows moved by an undo or redo of a channel delete (`history::Rows`), for the plugin host on the next tick, in
+    /// order: each row's new row (`None`: its instance goes), then the instances to host again (row, `Plugins::available`
+    /// index, saved state).
+    pub rows_moved: Vec<(Vec<Option<usize>>, Vec<(usize, usize, Vec<u8>)>)>,
     pub file: Option<os_flp::FlpFile>,
     pub path: Option<PathBuf>,
     /// Open child windows, bottom to top.
@@ -1300,6 +1304,7 @@ impl App {
                 pending_plugin: None,
                 pending_open: None,
                 sample_loads: Vec::new(),
+                rows_moved: Vec::new(),
                 file: None,
                 path: None,
                 z: vec![Win::Playlist, Win::ChannelRack],
@@ -2172,6 +2177,13 @@ impl App {
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     pub(crate) fn plugin_tick(&mut self) {
+        // Rows moved by an undone or redone channel delete: the instruments follow, the deleted ones come back.
+        for (map, back) in std::mem::take(&mut self.state.rows_moved) {
+            self.remap_rows(&|r| map.get(r).copied().flatten());
+            for (row, index, blob) in back {
+                self.plugin_paste(row, index, &blob);
+            }
+        }
         // Rows gone without the app (an undone drop that made a channel, `rack::remove_last`): their instruments go.
         let len = self.state.project.channels.len();
         if self.plugins.hosted.range(len..crate::plugins::FX_KEY).next().is_some() {
@@ -4363,6 +4375,7 @@ impl App {
     pub fn set_bar(&mut self, beats: u16, steps: u16) -> Option<String> {
         let bar = (beats.max(1), steps.max(1));
         if self.state.project.bar() != bar {
+            crate::history::project_settings(&mut self.state, false);
             self.state.project.bar = Some(bar);
             self.state.piano.dirty = true;
         }
@@ -4377,6 +4390,7 @@ impl App {
         let s = &mut self.state;
         let now = s.project.bar_is_signature();
         if now != signature {
+            crate::history::project_settings(s, false);
             let memory = &mut s.settings.bar_memory;
             memory[usize::from(now)] = Some(s.project.bar());
             s.project.bar = Some(memory[usize::from(signature)].unwrap_or(Project::BAR_DEFAULT));
@@ -4438,6 +4452,7 @@ impl App {
     /// for any pan edit; the project counts as changed. A file without the event is Circular.
     pub fn set_panning_law(&mut self, law: u8) -> Option<String> {
         if self.state.project.panning_law.unwrap_or(0) != law {
+            crate::history::project_settings(&mut self.state, false);
             self.state.project.panning_law = Some(law);
             self.state.piano.dirty = true;
         }
@@ -4449,6 +4464,7 @@ impl App {
     /// notes"): switched for the project, and playback follows at once. Off when the file does not say.
     fn toggle_play_truncated(&mut self) {
         let on = !self.state.project.play_truncated;
+        crate::history::project_settings(&mut self.state, false);
         self.state.project.play_truncated = on;
         self.state.piano.dirty = true;
         self.state.message = Some(format!("Play truncated notes in clips: {}", if on { "on" } else { "off" }));
@@ -4460,6 +4476,7 @@ impl App {
     /// crossfades").
     fn toggle_auto_crossfades(&mut self) {
         let on = !self.state.project.auto_crossfades.unwrap_or(false);
+        crate::history::project_settings(&mut self.state, true);
         self.state.project.auto_crossfades = Some(on);
         crate::playlist::crossfades_switched(&mut self.state);
         self.state.message = Some(format!("Automatic crossfades: {}", if on { "on" } else { "off" }));
@@ -7504,6 +7521,7 @@ impl App {
             }
             Action::Fader(t) => {
                 crate::mixer::select(s, t, self.ctrl);
+                crate::history::fader(s, t);
                 let v0 = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
                 self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0 });
             }
