@@ -135,7 +135,7 @@ impl App {
         let Some(r) = self.hits.iter().rev().find(|h| h.action == Action::Dlg(DHit::SigValue(den))).map(|h| h.rect) else { return };
         let (cur, values): (u8, Vec<u8>) = if den { (f.den, DENOMINATORS.to_vec()) } else { (f.num, NUMERATORS.collect()) };
         let items = values.into_iter().map(|v| PItem::new(v.to_string(), Cmd::TimeSig(den, v)).mark(Mark::Radio(v == cur))).collect();
-        self.state.playlist.popup = Some(Popup { x: r.x, y: r.bottom() + 1.0, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x: r.x, y: r.bottom() + 1.0, items, sub: None, scroll: [0; 2] });
         self.invalidate();
     }
 

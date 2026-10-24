@@ -41,7 +41,7 @@ impl App {
             Action::BrowserMenu => {
                 let (x, y) = view::menu_at(s);
                 let open = s.playlist.popup.as_ref().is_some_and(|p| p.x == x && p.y == y);
-                s.playlist.popup = if open { None } else { Some(Popup { x, y, items: options_menu(s), sub: None }) };
+                s.playlist.popup = if open { None } else { Some(Popup { x, y, items: options_menu(s), sub: None, scroll: [0; 2] }) };
             }
             Action::BrowserSearch => s.browser_search_focus = true,
             Action::BrowserRow(i) => {
@@ -428,7 +428,7 @@ impl App {
         let s = &mut self.state;
         let Some(row) = view::rows(s).into_iter().nth(i) else { return false };
         select(s, &row.key);
-        s.playlist.popup = Some(Popup { x, y, items: row_menu(s, &row), sub: None });
+        s.playlist.popup = Some(Popup { x, y, items: row_menu(s, &row), sub: None, scroll: [0; 2] });
         self.invalidate();
         true
     }

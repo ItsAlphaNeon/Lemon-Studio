@@ -132,7 +132,7 @@ impl App {
                 .collect();
             items.push(PItem { children, ..PItem::new(c.name, Cmd::Nothing) });
         }
-        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None, scroll: [0; 2] });
         self.invalidate();
     }
 

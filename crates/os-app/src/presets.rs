@@ -516,7 +516,7 @@ pub fn popup(app: &App, key: usize, x: f32, y: f32) -> Popup {
     items.push(on(PItem::new("Delete preset...", Cmd::Preset(PCmd::Delete(key))), own));
     items.push(PItem::sep());
     items.push(PItem::new("Browse presets", Cmd::Preset(PCmd::Browse(key))));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Runs a preset command; returns the status message.

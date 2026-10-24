@@ -328,7 +328,7 @@ impl App {
             items.push(PItem::new("Delete...", Cmd::Theme(ThemeCmd::Delete(i))));
             items.push(PItem::new("Show in folder", Cmd::Theme(ThemeCmd::Show(i))));
         }
-        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
         self.invalidate();
     }
 

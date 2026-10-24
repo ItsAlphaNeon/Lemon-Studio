@@ -1340,10 +1340,10 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
         // At the Pop-ups scaling (spec: ui/ui-scaling.md §1).
         ui.scaled(super::popup_scale(ui.c.scale), |ui, k| {
             let (w, h) = ui.c.size();
-            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, false);
+            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, false, p.scroll[0]);
             if let Some(i) = p.sub {
                 if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
-                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true);
+                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true, p.scroll[1]);
                 }
             }
         });
@@ -1392,8 +1392,11 @@ fn any_enabled(items: &[pl::PItem]) -> bool {
     items.iter().any(|c| !c.head && !c.sep && !c.col && c.enabled && (c.children.is_empty() || any_enabled(&c.children)))
 }
 
-/// Draw a popup list at (x, y) kept on screen; returns its rect and each item's row rect.
-fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, sub: bool) -> (Rect, Vec<Rect>) {
+/// Draw a popup list at (x, y) kept on screen; returns its rect and each item's row rect. Columns wider than the
+/// screen: the ones that fit from column `scroll` on, and a scroll bar under them (spec: ui/menus.md "Menus wider than
+/// the window").
+#[allow(clippy::too_many_arguments)]
+fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, sub: bool, scroll: usize) -> (Rect, Vec<Rect>) {
     let t = ui.t;
     let font = Font::new(14);
     let mut lw: f32 = 80.0;
@@ -1408,11 +1411,21 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     let m = os_ui::kit::menu::metrics(ui.c.scale);
     // Text sits where it does at 100 %, moved by half of what the row lost.
     let dy = (m.row - os_ui::kit::menu::ROW) / 2.0;
-    let (layout, cols, body_h) = popup_layout(&m, items, (screen.1 - 8.0).max(m.row));
-    let (w, h) = (cw * cols as f32, body_h + 2.0 * m.border);
+    let max_h = (screen.1 - 8.0).max(m.row);
+    let (mut layout, mut cols, mut body_h) = popup_layout(&m, items, max_h);
+    // Wider than the screen: the columns wrap a scroll bar's height sooner, and as many as fit are shown.
+    let room = screen.0 - 2.0;
+    let bar_h = if cols > 1 && cw * cols as f32 > room { os_ui::kit::METRICS.scrollbar + 4.0 } else { 0.0 };
+    if bar_h > 0.0 {
+        (layout, cols, body_h) = popup_layout(&m, items, (max_h - bar_h).max(m.row));
+    }
+    let shown = if bar_h > 0.0 { ((room / cw) as usize).clamp(1, cols) } else { cols };
+    let first = scroll.min(cols - shown);
+    let (w, h) = (cw * shown as f32, body_h + 2.0 * m.border + bar_h);
     let x = x.min(screen.0 - w - 2.0).max(0.0);
     let y = y.min(screen.1 - h - 2.0).max(0.0);
     let r = Rect::new(x, y, w, h);
+    let menu = if sub { crate::app::MENU_SUB } else { crate::app::MENU_POPUP };
     let mut rows = Vec::with_capacity(items.len());
     let lemon = super::lemon(ui);
     if lemon {
@@ -1424,10 +1437,21 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     ui.hit(r, Action::Swallow, "");
     for (i, it) in items.iter().enumerate() {
         let (col, off) = layout[i];
-        let rr = Rect::new(r.x + m.border + col as f32 * cw, r.y + m.border + off, cw - 2.0 * m.border, item_h(&m, it));
+        // A column out of view is placed beside the shown ones.
+        let at = |col: usize| r.x + m.border + (col as f32 - first as f32) * cw;
+        let rr = Rect::new(at(col), r.y + m.border + off, cw - 2.0 * m.border, item_h(&m, it));
         rows.push(rr);
-        if col > 0 && (i == 0 || layout[i - 1].0 != col) {
-            ui.c.fill_rect(Rect::new(rr.x - m.border, r.y + m.border, 1.0, r.h - 2.0 * m.border), t.menu_pop_head);
+        let action = if sub { Action::PlPopupSub(i) } else { Action::PlPopup(i) };
+        if col < first || col >= first + shown {
+            // The wheel still steps to its rows: where the scroll that shows the column puts them.
+            if it.enabled && !it.head && !it.sep && !it.col {
+                let reveal = if col < first { col } else { col + 1 - shown };
+                ui.hidden_menu_row(Rect { x: at(col + first - reveal), ..rr }, action, menu, reveal);
+            }
+            continue;
+        }
+        if col > first && (i == 0 || layout[i - 1].0 != col) {
+            ui.c.fill_rect(Rect::new(rr.x - m.border, r.y + m.border, 1.0, r.h - 2.0 * m.border - bar_h), t.menu_pop_head);
         }
         if it.col {
             continue;
@@ -1445,13 +1469,12 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             ui.c.text(Font::new(12), rr.x + 4.0, rr.y + 1.0 + (rr.h - os_ui::kit::menu::HEAD) / 2.0, t.menu_pop_head_text, &it.label);
             continue;
         }
-        let action = if sub { Action::PlPopupSub(i) } else { Action::PlPopup(i) };
         // Greyed out: a disabled entry, or a submenu with nothing available in it (it still opens, to show what is
         // planned). Disabled entries never light up.
         let live = it.enabled && (it.children.is_empty() || any_enabled(&it.children));
         if it.enabled {
             let lit = ui.hit(rr, action, it.label.to_string()) || open == Some(i);
-            ui.menu_row(if sub { crate::app::MENU_SUB } else { crate::app::MENU_POPUP });
+            ui.menu_row(menu);
             if lit && lemon {
                 os_ui::kit::row_highlight(ui.c, t, rr);
             } else if lit {
@@ -1492,6 +1515,12 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             ui.c.line(ax, my - 3.5, ax + 3.5, my, 1.2, t.menu_pop_dim);
             ui.c.line(ax + 3.5, my, ax, my + 3.5, 1.2, t.menu_pop_dim);
         }
+    }
+    if bar_h > 0.0 {
+        // In whole columns.
+        let track = Rect::new(r.x + m.border + 2.0, r.bottom() - m.border - bar_h + 2.0, r.w - 2.0 * m.border - 4.0, bar_h - 4.0);
+        let target = if sub { crate::app::Scroll::PopupSub } else { crate::app::Scroll::Popup };
+        super::scrollbar(ui, track, false, first as f32, shown as f32, cols as f32, target);
     }
     (r, rows)
 }

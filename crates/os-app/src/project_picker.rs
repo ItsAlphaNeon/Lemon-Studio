@@ -55,7 +55,7 @@ impl App {
     /// Opens the project picker at (x, y).
     pub fn open_project_picker(&mut self, at: (f32, f32)) {
         self.state.menu_open = None;
-        self.state.playlist.popup = Some(Popup { x: at.0, y: at.1, items: items(&self.state), sub: None });
+        self.state.playlist.popup = Some(Popup { x: at.0, y: at.1, items: items(&self.state), sub: None, scroll: [0; 2] });
         self.invalidate();
     }
 

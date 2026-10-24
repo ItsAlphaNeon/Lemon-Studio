@@ -138,7 +138,7 @@ pub fn items(s: &State, target: Target, nested: bool) -> Vec<PItem> {
 
 /// A plugin menu for `target` at (x, y).
 pub fn menu(s: &State, target: Target, x: f32, y: f32) -> Popup {
-    Popup { x, y, items: items(s, target, false), sub: None }
+    Popup { x, y, items: items(s, target, false), sub: None, scroll: [0; 2] }
 }
 
 /// Whether the open popup is a plugin menu (F8 closes it).
