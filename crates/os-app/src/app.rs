@@ -924,6 +924,10 @@ pub struct State {
     pub pending_open: Option<usize>,
     /// Samples to load into rows' Lemon Sampler instances on the next tick (browser send, drops on a rack row).
     pub sample_loads: Vec<(usize, String)>,
+    /// Rack rows moved by an undo or redo of a channel delete (`history::Rows`), for the plugin host on the next tick, in
+    /// order: each row's new row (`None`: its instance goes), then the instances to host again (row, `Plugins::available`
+    /// index, saved state).
+    pub rows_moved: Vec<(Vec<Option<usize>>, Vec<(usize, usize, Vec<u8>)>)>,
     pub file: Option<os_flp::FlpFile>,
     pub path: Option<PathBuf>,
     /// Open child windows, bottom to top.
@@ -1284,6 +1288,7 @@ impl App {
                 pending_plugin: None,
                 pending_open: None,
                 sample_loads: Vec::new(),
+                rows_moved: Vec::new(),
                 file: None,
                 path: None,
                 z: vec![Win::Playlist, Win::ChannelRack],
@@ -2151,6 +2156,13 @@ impl App {
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     pub(crate) fn plugin_tick(&mut self) {
+        // Rows moved by an undone or redone channel delete: the instruments follow, the deleted ones come back.
+        for (map, back) in std::mem::take(&mut self.state.rows_moved) {
+            self.remap_rows(&|r| map.get(r).copied().flatten());
+            for (row, index, blob) in back {
+                self.plugin_paste(row, index, &blob);
+            }
+        }
         // Rows gone without the app (an undone drop that made a channel, `rack::remove_last`): their instruments go.
         let len = self.state.project.channels.len();
         if self.plugins.hosted.range(len..crate::plugins::FX_KEY).next().is_some() {

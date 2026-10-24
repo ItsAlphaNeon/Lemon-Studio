@@ -934,8 +934,8 @@ pub fn ask_delete(s: &mut State, rows: Vec<usize>) {
     crate::patterns::open_confirm(s);
 }
 
-/// Purge unused audio clips: the unused audio-clip channels go, after the delete confirmation (Lemon Studio cannot
-/// undo a channel deletion yet; spec: ui/unused-channels.md §4).
+/// Purge unused audio clips: the unused audio-clip channels go, after the delete confirmation; one undo step
+/// (`delete_rows`; spec: ui/unused-channels.md §4).
 pub fn ask_purge(s: &mut State) -> Option<String> {
     let rows: Vec<usize> = unused(s).into_iter().filter(|&r| s.project.channels[r].kind == ChannelKind::AudioClip).collect();
     if rows.is_empty() {
@@ -946,9 +946,13 @@ pub fn ask_purge(s: &mut State) -> Option<String> {
     None
 }
 
-/// Delete rows now: the channels, their notes and clips go.
+/// Delete rows now: the channels, their notes and clips go. One undo step, with the rows' instruments
+/// (`history::delete_channels`).
 pub fn delete_rows(app: &mut App, rows: &[usize]) {
     let n = app.state.project.channels.len();
+    let gone: Vec<usize> = rows.iter().copied().filter(|&r| r < n).collect();
+    let back = gone.iter().filter_map(|&r| app.plugin_copy(r).map(|(i, blob)| (r, i, blob))).collect();
+    crate::history::delete_channels(&mut app.state, gone, back);
     let order: Vec<usize> = (0..n).filter(|r| !rows.contains(r)).collect();
     let first = rows.iter().copied().min().unwrap_or(0);
     reorder(app, &order);

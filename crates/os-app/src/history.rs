@@ -38,6 +38,8 @@ pub const MIXER_VOLUME: &str = "Mixer track volume";
 pub const PLUGIN_PARAMETER: &str = "Plugin parameter";
 /// A generator added to the rack (`add_channel`).
 pub const ADD_CHANNEL: &str = "Add channel";
+/// Channels deleted from the rack (`delete_channels`).
+pub const DELETE_CHANNEL: &str = "Delete channel";
 /// A value of Settings > Project changed (`project_settings`).
 pub const PROJECT_SETTINGS: &str = "Project settings";
 
@@ -75,6 +77,8 @@ pub enum Snap {
     Generator(Box<RackSide>, Option<usize>),
     /// The values of Settings > Project's Time settings, Advanced and Playlist groups (`Settings`).
     Settings(Settings),
+    /// The rack on one side of a channel delete (`Rows`).
+    Rows(Box<Rows>),
     /// Several of these in one step, put back last first ("Create automation clip": the playlist and the initial
     /// value).
     Several(Vec<Snap>),
@@ -119,6 +123,87 @@ pub struct Settings {
     pub panning_law: Option<u8>,
     pub play_truncated: bool,
     pub auto_crossfades: Option<bool>,
+}
+
+/// The rack on one side of a channel delete (`crate::rack::delete_rows`): the channels and everything that refers to
+/// them (notes, control points, automation clips, playlist clips, initial values), the rack's groups, filter and
+/// selection. `full`: this side has the deleted rows, `gone` (rows of the full rack). `back`: the deleted rows'
+/// instruments as the delete found them (row, `Plugins::available` index, saved state), hosted again by an undo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rows {
+    pub full: bool,
+    pub gone: Vec<usize>,
+    pub back: Vec<(usize, usize, Vec<u8>)>,
+    pub channels: Vec<os_model::Channel>,
+    pub patterns: Vec<os_model::Pattern>,
+    pub automations: Vec<os_model::Automation>,
+    pub arrangements: Vec<os_model::Arrangement>,
+    pub init_controls: Vec<os_model::InitControl>,
+    pub groups: Vec<crate::rack::Group>,
+    pub filter: crate::rack::Filter,
+    pub unsorted_at: Option<usize>,
+    pub sel: std::collections::BTreeSet<usize>,
+    pub selected: usize,
+}
+
+impl Rows {
+    /// The rack as it is now, `full` or not.
+    pub fn now(s: &State, full: bool, gone: Vec<usize>, back: Vec<(usize, usize, Vec<u8>)>) -> Rows {
+        let (p, r) = (&s.project, &s.rack);
+        Rows {
+            full,
+            gone,
+            back,
+            channels: p.channels.clone(),
+            patterns: p.patterns.clone(),
+            automations: p.automations.clone(),
+            arrangements: p.arrangements.clone(),
+            init_controls: p.init_controls.clone(),
+            groups: r.groups.clone(),
+            filter: r.filter,
+            unsorted_at: r.unsorted_at,
+            sel: r.sel.clone(),
+            selected: s.selected_channel,
+        }
+    }
+
+    /// Puts this side back: the rack's rows now go to this side's (`State::rows_moved` takes the instruments along).
+    fn put(self, s: &mut State) {
+        let map: Vec<Option<usize>> = if self.full {
+            (0..self.channels.len()).filter(|r| !self.gone.contains(r)).map(Some).collect()
+        } else {
+            let mut k = 0;
+            (0..s.project.channels.len())
+                .map(|r| {
+                    if self.gone.contains(&r) {
+                        return None;
+                    }
+                    k += 1;
+                    Some(k - 1)
+                })
+                .collect()
+        };
+        let m = |r: usize| map.get(r).copied().flatten();
+        let p = &mut s.project;
+        (p.channels, p.patterns, p.automations) = (self.channels, self.patterns, self.automations);
+        (p.arrangements, p.init_controls) = (self.arrangements, self.init_controls);
+        (s.rack.groups, s.rack.filter, s.rack.unsorted_at) = (self.groups, self.filter, self.unsorted_at);
+        (s.rack.sel, s.selected_channel) = (self.sel, self.selected);
+        if m(s.plugin_channel).is_none() {
+            s.hide(crate::app::Win::Plugin);
+        }
+        s.plugin_channel = m(s.plugin_channel).unwrap_or(s.selected_channel);
+        s.hosted_rows = s.hosted_rows.iter().filter_map(|&r| m(r)).collect();
+        s.sample_loads = std::mem::take(&mut s.sample_loads).into_iter().filter_map(|(r, p)| m(r).map(|r| (r, p))).collect();
+        s.pending_open = s.pending_open.and_then(m);
+        s.pending_plugin = s.pending_plugin.and_then(|(r, i)| m(r).map(|r| (r, i)));
+        s.piano.clear_selection();
+        s.playlist.sel.clear();
+        s.playlist.hover_clip = None;
+        let back = if self.full { self.back } else { Vec::new() };
+        s.rows_moved.push((map, back));
+        crate::rack::autosize(s);
+    }
 }
 
 impl Settings {
@@ -206,6 +291,8 @@ impl Snap {
             Snap::Tail(t) => Snap::Tail(Box::new(Tail::now(s, t.from))),
             Snap::Generator(r, g) => Snap::Generator(Box::new(RackSide::now(s, r.row)), *g),
             Snap::Settings(_) => Snap::Settings(Settings::now(s)),
+            // The other side of the delete, with the instruments kept for the next undo.
+            Snap::Rows(r) => Snap::Rows(Box::new(Rows::now(s, !r.full, r.gone.clone(), r.back.clone()))),
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
         }
     }
@@ -242,6 +329,18 @@ impl Snap {
             Snap::Several(v) => v.iter_mut().for_each(|x| x.rescale(from, to)),
             // A channel or an initial value holds no ticks.
             Snap::Knob(..) | Snap::Fader(..) | Snap::Param(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) | Snap::Tail(_) | Snap::Generator(..) | Snap::Settings(_) => {}
+            Snap::Rows(r) => {
+                for p in &mut r.patterns {
+                    p.notes.iter_mut().for_each(|n| n.rescale(from, to));
+                    p.controls.iter_mut().for_each(|c| c.rescale(from, to));
+                    p.markers.iter_mut().for_each(|m| m.rescale(from, to));
+                    p.length = p.length.map(|l| os_model::rescale_length(l, from, to));
+                }
+                for a in &mut r.arrangements {
+                    a.clips.iter_mut().for_each(|c| c.rescale(from, to));
+                    a.markers.iter_mut().for_each(|m| m.rescale(from, to));
+                }
+            }
         }
     }
 
@@ -294,6 +393,7 @@ impl Snap {
                     s.pending_plugin = Some((row, index));
                 }
             }
+            Snap::Rows(r) => r.put(s),
             Snap::Settings(v) => {
                 let p = &mut s.project;
                 let crossfades = p.auto_crossfades != v.auto_crossfades;
@@ -497,6 +597,16 @@ pub fn load_sample(s: &mut State, row: usize) {
 pub fn add_channel(s: &mut State, plugin: Option<usize>) {
     let side = RackSide::now(s, s.project.channels.len());
     record(s, ADD_CHANNEL, Snap::Generator(Box::new(side), plugin));
+}
+
+/// Before channel rows `gone` are deleted (the channel menu's Delete..., Delete on the rack, Purge unused audio
+/// clips): one step, "Delete channel", holding the rack and `back`, the rows' instruments (row, `Plugins::available`
+/// index, saved state); undone, the channels, their notes and clips and their instruments come back.
+pub fn delete_channels(s: &mut State, mut gone: Vec<usize>, back: Vec<(usize, usize, Vec<u8>)>) {
+    gone.sort_unstable();
+    gone.dedup();
+    let snap = Snap::Rows(Box::new(Rows::now(s, true, gone, back)));
+    record(s, DELETE_CHANNEL, snap);
 }
 
 /// Before Settings > Project changes a value (`Settings`): one step, "Project settings". With Automatic crossfades,
@@ -1105,6 +1215,31 @@ mod tests {
         undo(&mut a.state);
         assert_eq!(a.state.project.channels.len(), n, "both gone");
         assert_eq!(a.state.pending_plugin, None);
+    }
+
+    /// A channel delete is one step, "Delete channel": undone, the channel is back in its row with its notes and the
+    /// rows below move back down, and the plugin host is told (rows moved, instruments to host again); redone, it goes
+    /// again (OS).
+    #[test]
+    fn a_channel_delete_is_one_step() {
+        let mut app = App::new(None);
+        assert!(app.state.project.channels.len() >= 3);
+        app.state.project.patterns[0].notes = vec![os_model::Note::step(1, 0), os_model::Note::step(2, 4)];
+        let (chans, pats) = (app.state.project.channels.clone(), app.state.project.patterns.clone());
+        crate::rack::delete_rows(&mut app, &[1]);
+        let (gone_chans, gone_pats) = (app.state.project.channels.clone(), app.state.project.patterns.clone());
+        assert_eq!(gone_chans.len(), chans.len() - 1);
+        assert_eq!(names(&app.state), [LAST_RESET, DELETE_CHANNEL]);
+        app.state.rows_moved.clear();
+        ctrl_z(&mut app);
+        assert_eq!((&app.state.project.channels, &app.state.project.patterns), (&chans, &pats), "all back");
+        let (map, _) = app.state.rows_moved.last().expect("the host is told");
+        assert_eq!(map[..2], [Some(0), Some(2)], "row 1 moved back down to 2");
+        ctrl_alt_z(&mut app);
+        assert_eq!((&app.state.project.channels, &app.state.project.patterns), (&gone_chans, &gone_pats), "deleted again");
+        assert_eq!(app.state.rows_moved.last().unwrap().0[..3], [Some(0), None, Some(1)]);
+        app.plugin_tick();
+        assert!(app.state.rows_moved.is_empty(), "the host took the moves");
     }
 
     /// Settings > Project: the bar, its mode and the panning law are steps, "Project settings", put back by Ctrl+Z (OS).
