@@ -51,6 +51,11 @@ pub enum Cmd {
     OpenInBrowser,
     /// Split by channel: one pattern per channel with notes (spec: ui/split-by-channel.md §2).
     SplitByChannel,
+    /// Quick render as audio clip and Render and replace: run by `App::pattern_cmd` (spec: ui/pattern-render.md).
+    QuickRender,
+    RenderReplace,
+    /// Render as audio clip...: the Export form in its render mode first.
+    RenderAsClip,
 }
 
 impl Cmd {
@@ -73,6 +78,9 @@ impl Cmd {
             "Set time signature..." => Cmd::TimeSignature,
             "Open in project browser" => Cmd::OpenInBrowser,
             "Split by channel" => Cmd::SplitByChannel,
+            "Quick render as audio clip" => Cmd::QuickRender,
+            "Render as audio clip..." => Cmd::RenderAsClip,
+            "Render and replace..." => Cmd::RenderReplace,
             _ => return None,
         })
     }
@@ -383,8 +391,8 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
         }
         Cmd::MoveUp | Cmd::MoveDown => {}
         Cmd::SplitByChannel => split_by_channel(s),
-        // Dialogs and the browser: `App::pattern_cmd` runs them.
-        Cmd::TimeSignature | Cmd::OpenInBrowser => {}
+        // Dialogs, the browser and the renders: `App::pattern_cmd` runs them.
+        Cmd::TimeSignature | Cmd::OpenInBrowser | Cmd::QuickRender | Cmd::RenderReplace | Cmd::RenderAsClip => {}
     }
     None
 }

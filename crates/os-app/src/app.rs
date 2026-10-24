@@ -1271,6 +1271,9 @@ pub struct App {
     pub(crate) export: Option<(String, f32)>,
     /// The running export opens the file manager on its first file when done (Open the folder when done).
     export_reveal: bool,
+    /// The running export is PATTERNS > Quick render as audio clip / Render and replace's (spec: ui/pattern-render.md):
+    /// what to do with its file.
+    pub(crate) pattern_render: Option<crate::pattern_render::Pending>,
     /// `device::opens` when the hosted plugins last followed the output device's rate (`follow_device`).
     device_opens: u64,
     /// The project and tempo as last opened, saved or created: anything else has unsaved changes.
@@ -1457,6 +1460,7 @@ impl App {
             loading: None,
             export: None,
             export_reveal: false,
+            pattern_render: None,
             device_opens: 0,
             saved: (Project::default(), 0.0),
             backup: Default::default(),
@@ -1621,8 +1625,9 @@ impl App {
         self.invalidate();
     }
 
-    /// Follows a running export: moves the progress bar, then reports the result.
-    fn export_tick(&mut self) {
+    /// Follows a running export: moves the progress bar, then reports the result (a pattern render's goes to
+    /// `pattern_render_done`).
+    pub(crate) fn export_tick(&mut self) {
         let Some((name, _)) = self.export.clone() else { return };
         match self.transport.export_status() {
             crate::transport::Export::Running(p) => {
@@ -1634,6 +1639,9 @@ impl App {
                 self.midi_after_export();
                 self.plugins.set_offline(false);
                 lemon_sampler::stream::set_exporting(false);
+                if let Some(p) = self.pattern_render.take() {
+                    return self.pattern_render_done(p, r);
+                }
                 self.state.message = Some(match r {
                     Ok((secs, files)) => {
                         if self.export_reveal {
@@ -7980,6 +7988,14 @@ impl App {
             }
             crate::patterns::Cmd::OpenInBrowser => {
                 self.browser_jump(crate::browser::Jump::Patterns);
+                None
+            }
+            crate::patterns::Cmd::QuickRender | crate::patterns::Cmd::RenderReplace => {
+                self.render_pattern(cmd == crate::patterns::Cmd::RenderReplace);
+                None
+            }
+            crate::patterns::Cmd::RenderAsClip => {
+                self.open_render_form();
                 None
             }
             _ => {

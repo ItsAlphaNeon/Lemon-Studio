@@ -218,9 +218,10 @@ const PAT_CMDS: &[Item] = &[
     it("Move down", "Shift+Ctrl+Down").on(),
     SEP,
     it("Split by channel", "").on(),
-    it("Quick render as audio clip", ""),
-    it("Render as audio clip...", ""),
-    it("Render and replace...", ""),
+    // Spec: ui/pattern-render.md.
+    it("Quick render as audio clip", "").on(),
+    it("Render as audio clip...", "").on(),
+    it("Render and replace...", "").on(),
 ];
 
 const VIEW_ITEMS: &[Item] = &[
