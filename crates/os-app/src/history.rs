@@ -8,7 +8,9 @@
 //! done, the state after it while it is undone. Covered: a pattern's notes, control points and length (the piano roll
 //! and the step sequencer), the playlist (`playlist::snapshot`), knob turns, sample loads (`load_sample`), the
 //! project's initial values (`crate::init`), and with the playlist, PATTERNS > Split by channel's patterns and ADD's
-//! clip channels (`playlist::snapshot_with`).
+//! clip channels (`playlist::snapshot_with`). Also mixer volume faders (`fader`), generators added at the bottom of the
+//! rack (`add_channel`), channel deletes (`delete_channels`), Settings > Project's values (`project_settings`) and the
+//! plugin parameters Lemon Studio sets (`param`).
 //!
 //! The settings of General ▸ Undo history (`crate::prefs`): Maximum undo levels (past it the oldest step goes), Undo
 //! knob tweaks, Alternate undo mode (what Ctrl+Z and Ctrl+Alt+Z do), Show undo history in the browser when undoing
