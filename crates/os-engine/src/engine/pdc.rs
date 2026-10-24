@@ -363,6 +363,31 @@ impl Engine {
                 }
             }
         }
+        // Sidechain inputs: the track each slot listens to, its output delayed to be as late as the audio at the slot
+        // (spec: audio/sidechain.md "Sidechain input").
+        let mut keyed = vec![false; n];
+        for t in 0..n {
+            for i in 0..self.tracks[t].effects.len() {
+                let fx = &self.tracks[t].effects[i];
+                let src = match fx.key_input() {
+                    0 => None,
+                    k => super::input(&self.tracks, t, k),
+                };
+                let len = src.map_or(0, |s| (self.pdc.slot_late[t][fx.slot] - l.leaving[s]).max(0) as usize);
+                let fx = &mut self.tracks[t].effects[i];
+                fx.key = src;
+                fx.key_pad.set_len(len);
+                if let Some(s) = src {
+                    keyed[s] = true;
+                }
+            }
+        }
+        self.key_out.resize_with(n, || None);
+        for (out, keyed) in self.key_out.iter_mut().zip(keyed) {
+            if keyed != out.is_some() {
+                *out = keyed.then(Vec::new);
+            }
+        }
         for (c, ch) in self.channels.iter().enumerate() {
             let len = if ch.instrument.0.is_some() { l.channel_pad(ch.insert, self.pdc.chan_delay.get(c).copied().unwrap_or(0)) } else { 0 };
             if let Some(p) = self.pdc.chan_pad.get_mut(c) {

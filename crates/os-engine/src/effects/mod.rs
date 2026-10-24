@@ -37,6 +37,16 @@ pub trait Effect: Send {
     fn extra(&self) -> Option<(usize, &[f32])> {
         None
     }
+    /// A sidechain input (Fruity Limiter's): the number of the track's input it listens to, counted from 1, 0 = none
+    /// (spec: audio/sidechain.md "Sidechain input").
+    fn key_input(&self) -> usize {
+        0
+    }
+    /// Processes one block with its sidechain input `key`, interleaved like the block. Called instead of `process`
+    /// when `key_input` names an input and the track has one.
+    fn process_keyed(&mut self, buf: &mut [f32], _key: &[f32]) {
+        self.process(buf);
+    }
 }
 
 /// Creates a Lemon Studio effect for a slot plugin, if one exists for that plugin.
