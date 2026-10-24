@@ -1565,9 +1565,10 @@ impl Engine {
     }
 
     /// A click from the next tick, for a tap on the Tempo tapper (spec: ui/tempo-tapper.md §8): the metronome's Tick,
-    /// accented or not, into the master track like the metronome's clicks; also on a stream of live notes.
-    pub fn tap_click(&mut self, accent: bool) {
-        self.tap_clicks.start(accent);
+    /// accented or not, at the metronome's volume `db`, into the master track like the metronome's clicks; also on a
+    /// stream of live notes.
+    pub fn tap_click(&mut self, accent: bool, db: i8) {
+        self.tap_clicks.start(accent, db);
         self.tail_done = false;
     }
 
@@ -7053,7 +7054,7 @@ mod tests {
         let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
         e.clear_schedule();
         assert!(e.finished());
-        e.tap_click(true);
+        e.tap_click(true, 0);
         assert!(!e.finished(), "a click keeps a stream of live notes going");
         let mut out = vec![0.0; 2 * 240];
         e.process(&mut out);

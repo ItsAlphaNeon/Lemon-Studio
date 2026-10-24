@@ -2786,8 +2786,8 @@ impl App {
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
     }
 
-    /// The metronome button's right-click menu: the sound (spec: ui/metronome.md §2), and Recording precount (spec:
-    /// ui/recording.md §3 "The metronome's menu").
+    /// The metronome button's right-click menu: the sound and the volume (spec: ui/metronome.md §2), and Recording
+    /// precount (spec: ui/recording.md §3 "The metronome's menu").
     pub(crate) fn metronome_menu(&mut self, x: f32, y: f32) {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         use crate::record::{Opt, RecCmd};
@@ -2795,6 +2795,11 @@ impl App {
         let now = crate::metronome::sound();
         let mut items = vec![PItem::head("Metronome sound")];
         items.extend(Sound::ALL.iter().map(|&s| PItem::new(s.label(), Cmd::MetronomeSound(s)).mark(Mark::Radio(s == now))));
+        let db = crate::metronome::volume();
+        items.push(PItem::head("Metronome volume"));
+        for v in os_engine::metronome::VOLUMES {
+            items.push(PItem::new(os_engine::metronome::volume_label(v), Cmd::MetronomeVolume(v)).mark(Mark::Radio(v == db)));
+        }
         let bars = if Opt::Precount.on() { crate::record::precount_bars() } else { 0 };
         items.push(PItem::head("Recording precount"));
         for (label, n) in [("Off", 0), ("1 bar", 1), ("2 bars", 2)] {
@@ -11322,13 +11327,31 @@ mod tests {
         app.mouse_down_right();
         frame(&mut app, &mut c, None);
         let labels: Vec<String> = app.state.playlist.popup.as_ref().unwrap().items.iter().map(|it| it.label.to_string()).collect();
-        assert_eq!(labels, ["Metronome sound", "Hi-hat", "Tick", "Beep", "Cowbell", "Pulse", "Recording precount", "Off", "1 bar", "2 bars"]);
+        let volumes = ["Metronome volume", "-12 dB", "-6 dB", "0 dB", "+3 dB", "+6 dB", "+9 dB", "+12 dB"];
+        let sounds = ["Metronome sound", "Hi-hat", "Tick", "Beep", "Cowbell", "Pulse"];
+        assert_eq!(labels, [&sounds[..], &volumes[..], &["Recording precount", "Off", "1 bar", "2 bars"][..]].concat());
         let before = crate::metronome::sound();
         let i = labels.iter().position(|x| x == "Cowbell").unwrap();
         let item = hit_rect(&app, &Action::PlPopup(i));
         click(&mut app, &mut c, item);
         assert_eq!((crate::metronome::sound(), crate::metronome::on()), (Sound::Cowbell, was));
         crate::metronome::set_sound(before);
+        // The volume (spec §2): 0 dB marked at first; a pick keeps the switch and the sound and says so.
+        let marked = |app: &App| app.state.playlist.popup.as_ref().unwrap().items.iter().filter(|it| it.mark == crate::playlist::Mark::Radio(true)).map(|it| it.label.to_string()).collect::<Vec<_>>();
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        frame(&mut app, &mut c, None);
+        assert_eq!(marked(&app), [before.label(), "0 dB", "Off"]);
+        let i = labels.iter().position(|x| x == "+6 dB").unwrap();
+        let item = hit_rect(&app, &Action::PlPopup(i));
+        click(&mut app, &mut c, item);
+        assert_eq!((crate::metronome::volume(), crate::metronome::sound(), crate::metronome::on()), (6, before, was));
+        assert_eq!(app.state.message.as_deref(), Some("Metronome volume: +6 dB"));
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        frame(&mut app, &mut c, None);
+        assert_eq!(marked(&app), [before.label(), "+6 dB", "Off"]);
+        crate::metronome::set_volume(0);
     }
 
     /// Auto scrolling (spec: ui/auto-scrolling.md §1-2): the toolbar button and OPTIONS > Auto scrolling toggle the

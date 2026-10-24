@@ -371,6 +371,8 @@ pub enum Cmd {
     Cpu(crate::cpu::CpuCmd),
     /// The metronome button's menu: the click sound (spec: ui/metronome.md §2).
     MetronomeSound(os_engine::metronome::Sound),
+    /// The metronome button's menu: the volume in dB (spec: ui/metronome.md §2).
+    MetronomeVolume(i8),
     /// The Record button's menu checks (spec: ui/recording.md §2).
     Record(crate::record::Opt),
     /// Recording precount's length in bars (spec: ui/recording.md §3).
@@ -3902,6 +3904,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return Some(format!("Metronome sound: {}", sound.label()));
         }
+        Cmd::MetronomeVolume(db) => {
+            crate::metronome::set_volume(db);
+            app.invalidate();
+            return Some(format!("Metronome volume: {}", os_engine::metronome::volume_label(db)));
+        }
         Cmd::Bar(beats, steps) => return app.set_bar(beats, steps),
         Cmd::TimeMode(signature) => return app.set_time_mode(signature),
         Cmd::Timebase(ppq) => return app.set_timebase(ppq),
@@ -3956,7 +3963,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(_) | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(_) | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

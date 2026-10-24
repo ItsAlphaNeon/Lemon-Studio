@@ -263,8 +263,8 @@ enum Cmd {
     NoteOff(usize, u16),
     /// A controller message for a channel (rack position): message, pitch bend range in cents (`Engine::midi`).
     Midi(usize, [u8; 3], f64),
-    /// A tap on the Tempo tapper: a click, accented or not, like a live note.
-    TapClick(bool),
+    /// A tap on the Tempo tapper: a click, accented or not, at the metronome's volume (dB), like a live note.
+    TapClick(bool, i8),
     /// An instrument's editor opened or the last one closed (`Transport::listen`).
     Listen(bool),
     Stop,
@@ -525,9 +525,9 @@ impl Transport {
     }
 
     /// A tap on the Tempo tapper (spec: ui/tempo-tapper.md §8): the metronome's Tick, accented or not, where a live
-    /// note would play (into playback while playing, else on the live stream).
+    /// note would play (into playback while playing, else on the live stream), at the metronome's volume.
     pub fn tap_click(&self, accent: bool) {
-        let _ = self.tx.send(Cmd::TapClick(accent));
+        let _ = self.tx.send(Cmd::TapClick(accent, crate::metronome::volume()));
     }
 
     /// An instrument's editor is open (or the last one closed). Its own keyboard plays notes the host never sees, which
@@ -1176,7 +1176,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         match rx.recv_timeout(Duration::from_millis(10)) {
             // The output is closed by Auto close: previews and live notes find no stream and open none.
             // So is a device that failed, until it opens again.
-            Ok(Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(_)) if closed || lost.is_some() => {}
+            Ok(Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(..)) if closed || lost.is_some() => {}
             Ok(Cmd::Update) => {
                 if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
                     for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
@@ -1204,10 +1204,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     s.feed.wake();
                 }
             }
-            Ok(cmd @ (Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(_))) => {
+            Ok(cmd @ (Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(..))) => {
                 // A click needs no channel: it also opens the live stream before any project was sent.
                 let empty = Project::default();
-                let project = live_project.as_ref().or(matches!(cmd, Cmd::TapClick(_)).then_some(&empty));
+                let project = live_project.as_ref().or(matches!(cmd, Cmd::TapClick(..)).then_some(&empty));
                 let target = match session.as_ref() {
                     Some(s) if !s.paused() => Some(s),
                     _ => {
@@ -1228,7 +1228,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                         match cmd {
                             Cmd::NoteOn(ch, key, vel) => e.note_on(ch, key, vel),
                             Cmd::Midi(ch, bytes, bend) => e.midi(ch, bytes, bend),
-                            Cmd::TapClick(accent) => e.tap_click(accent),
+                            Cmd::TapClick(accent, db) => e.tap_click(accent, db),
                             _ => {}
                         }
                     }

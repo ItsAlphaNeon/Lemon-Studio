@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The metronome switch and sound (toolbar, OPTIONS > Metronome, Ctrl+M, the button's right-click menu). A program
+//! The metronome switch, sound and volume (toolbar, OPTIONS > Metronome, Ctrl+M, the button's right-click menu). A
+//! program
 //! setting, not part of the project: kept in the user folder (`metronome.txt`) and shared with every playing engine,
 //! which hears a change from its next beat.
 // spec: ui/metronome.md §1-3
@@ -49,7 +50,19 @@ pub fn set_sound(sound: Sound) {
     save(&s);
 }
 
-/// `key=value` lines: `on` (0 / 1) and `sound` (`Sound::key`); anything else is ignored.
+/// The volume in whole dB (spec §2 "Metronome volume").
+pub fn volume() -> i8 {
+    switch().volume()
+}
+
+/// Picks the volume (clamped to -24..=12 dB; the switch and the sound stay as they are) and keeps it.
+pub fn set_volume(db: i8) {
+    let s = switch();
+    s.set_volume(db);
+    save(&s);
+}
+
+/// `key=value` lines: `on` (0 / 1), `sound` (`Sound::key`) and `volume` (whole dB); anything else is ignored.
 pub fn parse(text: &str) -> Switch {
     let s = Switch::default();
     for line in text.lines() {
@@ -61,6 +74,11 @@ pub fn parse(text: &str) -> Switch {
                     s.set_sound(sound);
                 }
             }
+            ("volume", v) => {
+                if let Ok(db) = v.parse::<i32>() {
+                    s.set_volume(db.clamp(i32::from(i8::MIN), i32::from(i8::MAX)) as i8);
+                }
+            }
             _ => {}
         }
     }
@@ -68,7 +86,7 @@ pub fn parse(text: &str) -> Switch {
 }
 
 pub fn text(s: &Switch) -> String {
-    format!("on={}\nsound={}\n", u8::from(s.on()), s.sound().key())
+    format!("on={}\nsound={}\nvolume={}\n", u8::from(s.on()), s.sound().key(), s.volume())
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -93,10 +111,13 @@ mod tests {
     #[test]
     fn settings_file_round_trips_and_defaults_to_off_tick() {
         let d = parse("");
-        assert!(!d.on() && d.sound() == Sound::Tick);
-        let s = parse("on=1\nsound=cowbell\njunk\nother=3\n");
-        assert!(s.on() && s.sound() == Sound::Cowbell);
-        assert_eq!(text(&s), "on=1\nsound=cowbell\n");
+        assert!(!d.on() && d.sound() == Sound::Tick && d.volume() == 0);
+        let s = parse("on=1\nsound=cowbell\njunk\nother=3\nvolume=+6\n");
+        assert!(s.on() && s.sound() == Sound::Cowbell && s.volume() == 6);
+        assert_eq!(text(&s), "on=1\nsound=cowbell\nvolume=6\n");
         assert_eq!(parse("sound=nope").sound(), Sound::Tick);
+        // Volumes are clamped to -24..=12 dB; one that is not a whole number is ignored.
+        let v = ["volume=99", "volume=-400", "volume=-18", "volume=3.5"].map(|t| parse(t).volume());
+        assert_eq!(v, [12, -24, -18, 0]);
     }
 }

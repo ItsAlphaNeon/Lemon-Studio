@@ -133,7 +133,7 @@ and voices, with sorting, find and freeze.
 
 **Metronome.** The toolbar button, OPTIONS > Metronome or Ctrl+M: a click on every quarter note while playing,
 accented as FL does (the first beat of each bar in 4/4 and 3/4), through the master track. Right-click the
-button for five sounds. It is never in an export, and it is remembered between sessions. It follows the time-signature markers: the
+button for five sounds and the volume (-12 to +12 dB; above 0 dB the click is soft-limited, not clipped). It is never in an export, and it is remembered between sessions. It follows the time-signature markers: the
 arrangement's in SONG mode, the current pattern's in PAT mode, each marker starting a bar of its own beats. Not yet:
 the "Metronome track" setting.
 
