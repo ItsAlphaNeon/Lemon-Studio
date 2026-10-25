@@ -1,4 +1,8 @@
 #!/bin/sh
+# Copyright (C) 2026 thacer13
+# SPDX-License-Identifier: GPL-3.0-or-later
+# This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+
 # Merges main into the cutting-edge branch.
 #
 # This branch keeps its own README.md, and under docs/ only its own files: whatever main changes in those, or adds
