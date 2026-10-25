@@ -1,2 +1,5 @@
 # Preset files are read byte for byte (a saved state is binary): no line-end conversion on checkout.
 *.ospreset -text
+
+# cutting-edge keeps its own README when main is merged in (needs: git config merge.ours.driver true).
+README.md merge=ours
