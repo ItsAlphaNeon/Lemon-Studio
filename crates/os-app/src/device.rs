@@ -9,8 +9,9 @@
 //! so the callback never locks, allocates or frees memory; a source let go of (`Source::detached`) is handed back and
 //! freed on the audio thread (`OutputDevice::collect`).
 //!
-//! The device opens with the audio settings (`audio_cfg`) when first needed: a Windows (or ALSA, Core Audio) device
-//! through cpal, an ASIO driver through `asio`, and a Windows device in exclusive mode, or in shared mode at a period
+//! The device opens with the audio settings (`audio_cfg`) when first needed: a Windows (or Linux, Core Audio) device
+//! through cpal (on Linux the sound server's in shared mode, ALSA's in exclusive mode: `audio_cfg::host`), an ASIO
+//! driver through `asio`, and a Windows device in exclusive mode, or in shared mode at a period
 //! shorter than its default, through `wasapi`. A Windows device closes again once nothing plays (`close_idle`), as the
 //! streams did when each sound had its own: an open stream keeps the computer from sleeping (and in exclusive mode
 //! silences every other program). An ASIO driver stays open (another program could take it meanwhile) until Auto close
@@ -33,10 +34,28 @@ use crate::audio_cfg::{self, AudioCfg, BUFFERS};
 mod asio;
 #[cfg(windows)]
 mod wasapi;
+#[cfg(target_os = "linux")]
+mod sound_server;
+
+/// Tests leave the sound server's cards alone, but for the one that checks they are given back.
+static HEAL_IN_TESTS: AtomicBool = AtomicBool::new(false);
+
+/// Linux: the sound server opens again the cards it gave up on while Lemon Studio (this run, or one that crashed) had
+/// them through ALSA (`sound_server`); elsewhere nothing. It waits on the server: not for the audio callback.
+pub(crate) fn heal_sound_server() {
+    #[cfg(target_os = "linux")]
+    if !cfg!(test) || HEAL_IN_TESTS.load(Ordering::Relaxed) {
+        for card in sound_server::heal() {
+            eprintln!("sound server: opened {card} again (it gave up while Lemon Studio had it through ALSA)");
+        }
+    }
+}
 
 /// `DeviceInfo::host` of an ASIO driver, and of a Windows device in exclusive mode.
 pub const ASIO: &str = "ASIO";
 pub const WASAPI_EXCLUSIVE: &str = "WASAPI exclusive";
+/// `DeviceInfo::host` of a Linux device opened directly (exclusive mode), cpal's name for it.
+const ALSA: &str = "ALSA";
 
 /// The installed ASIO drivers' names (none off Windows). None is loaded to list them, so any thread may ask.
 pub fn asio_drivers() -> Vec<String> {
@@ -130,6 +149,14 @@ pub(crate) trait Source: Send {
     fn detached(&self) -> bool;
 }
 
+/// Counts the device's blocks (0: none yet), so the sources of one block can tell they share it (`blocks`).
+static BLOCKS: AtomicU64 = AtomicU64::new(0);
+
+/// The device block being played now (sources asked within one block see the same count).
+pub(crate) fn blocks() -> u64 {
+    BLOCKS.load(Ordering::Relaxed)
+}
+
 /// Sources the device mixes at once (playback, live notes, a preview and the stopped ones still fading out).
 const MAX_SOURCES: usize = 64;
 /// Frames the mix holds without growing: twice the longest buffer length the settings offer.
@@ -154,6 +181,7 @@ impl Mix {
 
     /// The next `frames` frames of every source, summed (interleaved stereo, not clipped).
     fn block(&mut self, frames: usize) -> &[f32] {
+        BLOCKS.fetch_add(1, Ordering::Relaxed);
         while self.sources.len() < MAX_SOURCES {
             match self.inbox.pop() {
                 Some(s) => self.sources.push(s),
@@ -288,7 +316,8 @@ pub(crate) struct Open {
     fault: Arc<Mutex<Option<String>>>,
 }
 
-/// The one output stream (closed until first needed).
+/// The one output stream (closed until first needed). Dropped (the audio thread ends as the app exits), it lets go of
+/// the device as `close` does.
 #[derive(Default)]
 pub(crate) struct OutputDevice {
     open: Option<Open>,
@@ -299,11 +328,17 @@ pub(crate) struct OutputDevice {
     pub(crate) wait: bool,
 }
 
+impl Drop for OutputDevice {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 impl OutputDevice {
     /// The open stream, opening it with the audio settings first if it is closed or has failed.
     pub(crate) fn open(&mut self) -> Result<&Open, String> {
         if self.open.as_ref().is_some_and(|o| o.failed.load(Ordering::Acquire)) {
-            self.open = None;
+            self.close();
         }
         if self.open.is_none() {
             let cfg = AudioCfg::current();
@@ -328,9 +363,13 @@ impl OutputDevice {
         }
     }
 
-    /// Lets go of the device; every source still in it goes with it.
+    /// Lets go of the device; every source still in it goes with it. An ALSA device goes back to the sound server.
     pub(crate) fn close(&mut self) {
+        let alsa = self.open.as_ref().is_some_and(|o| o.info.host == ALSA);
         self.open = None;
+        if alsa {
+            heal_sound_server();
+        }
     }
 
     /// Nothing plays any more: lets go of a Windows device (an ASIO driver stays open).
@@ -747,12 +786,50 @@ mod tests {
         assert_eq!(even.sizes(true, 48000), [256, 1024, 2048, 4096, 8192]);
     }
 
+    /// Linux: shared mode plays through the sound server, exclusive mode on ALSA; once exclusive mode lets go, the
+    /// sound server has the card again (`sound_server`). Needs a sound server and an audio card.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn linux_modes_and_the_card_given_back() {
+        HEAL_IN_TESTS.store(true, Ordering::Relaxed);
+        let xruns = Arc::new(AtomicU64::new(0));
+        let o = open(&AudioCfg::default(), &xruns, false).expect("opens");
+        assert_eq!(o.info.host, "PulseAudio", "shared mode: {:?}", o.info);
+        drop(o);
+        let mut d = OutputDevice::default();
+        let cfg = AudioCfg::default().with(audio_cfg::Set::Mode(true));
+        use cpal::traits::HostTrait;
+        let card = |d: &cpal::Device| d.id().is_ok_and(|i| i.id().starts_with("hw:CARD="));
+        let hw = audio_cfg::host(&cfg).output_devices().expect("ALSA's devices").find(card).map(|d| audio_cfg::device_name(&d)).expect("an audio card");
+        AudioCfg { device: Some(hw), ..cfg }.apply();
+        let (src, _, blocks) = level(0.0);
+        // The sound server lets go of an idle card after some seconds (it is busy until then).
+        let mut src = Some(src);
+        let t0 = std::time::Instant::now();
+        while let Err(e) = d.open() {
+            assert!(t0.elapsed() < std::time::Duration::from_secs(15), "opens on ALSA: {e}");
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        d.add(src.take().expect("once")).expect("opens on ALSA");
+        assert_eq!(d.open.as_ref().map(|o| o.info.host), Some(ALSA));
+        // The sound server tries the card meanwhile (and fails: Lemon Studio has it).
+        let busy = std::process::Command::new("pw-play").arg("--volume=0").arg("/usr/share/sounds/freedesktop/stereo/bell.oga").spawn();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(blocks.load(Ordering::Relaxed) > 0, "it plays");
+        let _ = busy.map(|mut c| c.kill());
+        d.close();
+        AudioCfg::default().apply();
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        assert_eq!(sound_server::heal(), Vec::<String>::new(), "every card is back with the sound server");
+    }
+
     /// What the Windows devices here offer for short buffers (`--nocapture` prints it). Needs an audio device.
     #[cfg(windows)]
     #[test]
     #[ignore]
     fn periods_of_the_windows_devices() {
-        let (devices, _) = audio_cfg::devices();
+        let (devices, _) = audio_cfg::devices(&AudioCfg::default());
         let p = periods(None).expect("the default device says");
         assert!(p.rate >= 8000 && p.exclusive.1 > 0 && p.exclusive.1 <= p.exclusive.0, "{p:?}");
         for d in devices {
@@ -764,7 +841,7 @@ mod tests {
     /// The first Windows device here that takes exclusive mode (Windows' sound settings allow it, `Periods`).
     #[cfg(windows)]
     fn exclusive_device() -> Option<String> {
-        audio_cfg::devices().0.into_iter().find(|d| periods(Some(d)).is_some_and(|p| !p.exclusive_rates.is_empty()))
+        audio_cfg::devices(&AudioCfg::default()).0.into_iter().find(|d| periods(Some(d)).is_some_and(|p| !p.exclusive_rates.is_empty()))
     }
 
     /// Exclusive mode plays on a device that takes it, at its default period, its smallest or a length asked; while

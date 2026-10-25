@@ -199,12 +199,13 @@ pub fn devices() -> Vec<(String, bool, u16)> {
     system_inputs()
 }
 
-/// The system's input devices and their channels.
+/// The system's input devices and their channels (on Linux the sound server's, or ALSA's in exclusive mode, as the
+/// output).
 fn system_inputs() -> Vec<(String, bool, u16)> {
     use cpal::traits::{DeviceTrait, HostTrait};
-    let host = cpal::default_host();
+    let host = crate::audio_cfg::host(&crate::audio_cfg::AudioCfg::current());
     let Ok(list) = host.input_devices() else { return Vec::new() };
-    list.filter_map(|d| {
+    list.filter(crate::audio_cfg::listed).filter_map(|d| {
         let c = d.default_input_config().ok()?;
         Some((crate::audio_cfg::device_name(&d), false, c.channels()))
     })
@@ -213,20 +214,27 @@ fn system_inputs() -> Vec<(String, bool, u16)> {
 
 /// A system input device's stream, recording while it is held.
 pub struct InputStream {
-    _stream: cpal::Stream,
+    /// Taken when dropped: an ALSA device is let go of before the sound server is given it back.
+    stream: Option<cpal::Stream>,
+    alsa: bool,
     pub rate: u32,
+}
+
+impl Drop for InputStream {
+    fn drop(&mut self) {
+        drop(self.stream.take());
+        if self.alsa {
+            crate::device::heal_sound_server();
+        }
+    }
 }
 
 /// Opens system input device `name` in shared mode at its own rate, pushing into `capture`.
 pub fn open_input(name: &str) -> Result<InputStream, String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use cpal::SampleFormat;
-    let host = cpal::default_host();
-    let device = host
-        .input_devices()
-        .map_err(|e| e.to_string())?
-        .find(|d| crate::audio_cfg::device_name(d) == name)
-        .ok_or_else(|| format!("{name} is not there"))?;
+    let host = crate::audio_cfg::host(&crate::audio_cfg::AudioCfg::current());
+    let device = crate::audio_cfg::find(host.input_devices().map_err(|e| e.to_string())?, name).ok_or_else(|| format!("{name} is not there"))?;
     let supported = device.default_input_config().map_err(|e| e.to_string())?;
     let format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
@@ -240,7 +248,8 @@ pub fn open_input(name: &str) -> Result<InputStream, String> {
         other => Err(format!("unsupported input sample format {other:?}")),
     }?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok(InputStream { _stream: stream, rate: config.sample_rate })
+    let alsa = host.id().name() == "ALSA";
+    Ok(InputStream { stream: Some(stream), alsa, rate: config.sample_rate })
 }
 
 fn build<T>(device: &cpal::Device, config: &cpal::StreamConfig) -> Result<cpal::Stream, String>
