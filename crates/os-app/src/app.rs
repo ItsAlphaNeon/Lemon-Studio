@@ -16592,6 +16592,59 @@ mod tests {
         assert_eq!(back.automation(ch).map(|a| a.points.len()), Some(n + 1));
     }
 
+    /// The playlist's tool letters switch its tools with Shift too, typing keyboard on or off (it takes the plain letters
+    /// as notes); Shift+T and Shift+Z keep Place loop and Zoom to selection (as the piano roll's, spec: ui/piano-keys.md
+    /// §4 rule 16).
+    #[test]
+    fn playlist_shift_letters_switch_tools() {
+        use crate::playlist::PlTool;
+        use winit::keyboard::{Key, KeyCode};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.playlist.reset();
+        // The piano roll behind: a letter the playlist leaves goes on to the piano roll's tools.
+        app.state.z = vec![Win::PianoRoll, Win::Playlist];
+        assert!(app.pl_focus());
+        // One key press the way main.rs delivers it.
+        let press = |app: &mut App, code: KeyCode, l: &str, shift: bool| {
+            app.shift = shift;
+            if !app.typing_key(code, true, false, false) {
+                app.key(&Key::Character(l.into()), false, false);
+            }
+            app.typing_key(code, false, false, false);
+            app.shift = false;
+        };
+        if app.typing_on() {
+            app.toggle_typing();
+        }
+        press(&mut app, KeyCode::KeyE, "e", false);
+        assert_eq!(app.state.playlist.tool, PlTool::Select, "typing keyboard off: E");
+        press(&mut app, KeyCode::KeyP, "P", true);
+        assert_eq!(app.state.playlist.tool, PlTool::Draw, "typing keyboard off: Shift+P");
+
+        app.toggle_typing();
+        assert!(app.typing_on());
+        let piano = app.state.piano.tool;
+        press(&mut app, KeyCode::KeyE, "e", false);
+        assert_eq!(app.state.playlist.tool, PlTool::Draw, "typing keyboard on: E plays a note");
+        for (code, l, t) in [
+            (KeyCode::KeyE, "E", PlTool::Select),
+            (KeyCode::KeyB, "B", PlTool::Paint),
+            (KeyCode::KeyS, "S", PlTool::Slip),
+            (KeyCode::KeyC, "C", PlTool::Slice),
+            (KeyCode::KeyD, "D", PlTool::Delete),
+            (KeyCode::KeyY, "Y", PlTool::Playback),
+            (KeyCode::KeyP, "P", PlTool::Draw),
+        ] {
+            press(&mut app, code, l, true);
+            assert_eq!(app.state.playlist.tool, t, "typing keyboard on: Shift+{l}");
+        }
+        assert_eq!(app.state.piano.tool, piano, "the piano roll's tool stays");
+        press(&mut app, KeyCode::KeyZ, "Z", true);
+        press(&mut app, KeyCode::KeyT, "T", true);
+        assert_eq!(app.state.playlist.tool, PlTool::Draw, "Shift+Z zooms, Shift+T places a loop");
+    }
+
     /// Enable groups (spec: ui/enable-groups.md): the toolbar button, OPTIONS > Enable groups and Shift+Alt+G toggle it
     /// and deselect the clips; while off, a grouped clip selects and moves alone and Shift+G groups only the selection;
     /// the groups themselves are kept.

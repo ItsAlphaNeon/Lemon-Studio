@@ -2006,8 +2006,9 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
             app.invalidate();
             return true;
         }
-        // (shift / ctrl +) 0..9: mute / solo channels 1..10 when the typing keyboard does not take the digits (§10).
-        Key::Character(c) if !alt && !app.typing_on() && c.len() == 1 && c.chars().all(|d| d.is_ascii_digit()) => {
+        // (shift / ctrl +) 0..9: mute / solo channels 1..10 when the typing keyboard does not take the digits (§10); it
+        // takes the plain ones only, so Ctrl + a digit solos with it on too.
+        Key::Character(c) if !alt && (ctrl || !app.typing_on()) && c.len() == 1 && c.chars().all(|d| d.is_ascii_digit()) => {
             let d = c.parse::<usize>().unwrap_or(0);
             let r = if d == 0 { 9 } else { d - 1 };
             let s = &mut app.state;
@@ -2274,6 +2275,40 @@ mod tests {
         app.state.rack.sel = BTreeSet::from([4]);
         key(&mut app, "v");
         assert_eq!(steps(&app, 4), [2], "and pastes elsewhere");
+    }
+
+    /// 1..9, 0 mute channels 1..10 and Ctrl + a digit solos one (§10); with the typing keyboard on, the plain digits play
+    /// notes and Ctrl + a digit still solos.
+    #[test]
+    fn digit_keys_mute_and_solo_with_the_typing_keyboard() {
+        use winit::keyboard::{Key, KeyCode};
+        let mut app = App::new(None);
+        app.state.z = vec![Win::ChannelRack];
+        assert!(app.state.project.channels.len() >= 3);
+        // One key press the way main.rs delivers it.
+        let press = |app: &mut App, code: KeyCode, d: &str, ctrl: bool| {
+            if !app.typing_key(code, true, ctrl, false) {
+                app.key(&Key::Character(d.into()), ctrl, false);
+            }
+            app.typing_key(code, false, ctrl, false);
+        };
+        let on = |app: &App| app.state.project.channels.iter().map(|c| c.enabled).collect::<Vec<_>>();
+        if app.typing_on() {
+            app.toggle_typing();
+        }
+        assert!(on(&app).iter().all(|&e| e));
+        press(&mut app, KeyCode::Digit2, "2", false);
+        assert!(!on(&app)[1], "typing keyboard off: 2 mutes channel 2");
+        press(&mut app, KeyCode::Digit2, "2", false);
+        assert!(on(&app)[1], "and unmutes it");
+
+        app.toggle_typing();
+        assert!(app.typing_on());
+        press(&mut app, KeyCode::Digit2, "2", false);
+        assert!(on(&app)[1], "typing keyboard on: 2 plays a note");
+        press(&mut app, KeyCode::Digit3, "3", true);
+        assert_eq!(on(&app).iter().filter(|&&e| e).count(), 1, "typing keyboard on: Ctrl+3 solos channel 3: {:?}", on(&app));
+        assert!(on(&app)[2]);
     }
 
     /// A new project's channel name, "Lemon Sampler", fits the 100 % name button at every UI scale: the label keeps
