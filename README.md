@@ -3,7 +3,8 @@
 This is the `cutting-edge` branch of Lemon Studio. It is [`main`](https://github.com/ItsAlphaNeon/Lemon-Studio/tree/main)
 plus what is listed here. For everything else (building, using, contributing, license), read `main`'s README.
 
-`main` is merged into this branch regularly. Side branches are named `cutting-edge-<topic>`.
+`main` is merged into this branch with `tools/merge-main.sh`, which keeps this README and `docs/` to this branch's
+own content. Side branches are named `cutting-edge-<topic>`.
 
 ## What this branch adds
 

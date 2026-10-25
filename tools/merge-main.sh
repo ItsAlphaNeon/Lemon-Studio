@@ -29,4 +29,4 @@ done
 if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
   echo "conflicts left for a person:"; git diff --name-only --diff-filter=U; exit 1
 fi
-git commit -q --no-edit && echo "merged origin/main $(git rev-parse --short MERGE_HEAD 2>/dev/null || git rev-parse --short origin/main)"
+git commit -q --no-edit --cleanup=strip && echo "merged origin/main $(git rev-parse --short MERGE_HEAD 2>/dev/null || git rev-parse --short origin/main)"
