@@ -823,11 +823,12 @@ impl Plugins {
         }
     }
 
-    /// Whether an instrument's editor is open: its own keyboard plays it without the host, so the transport keeps it
-    /// processed while nothing plays (`Transport::listen`).
+    /// Whether a plugin's editor is open, so the transport keeps the plugins processed while nothing plays
+    /// (`Transport::listen`): an instrument's own keyboard plays it without the host, and an effect may make sound of
+    /// its own (Tesla plays its sample) or show what it hears.
     pub fn editor_open(&self) -> bool {
         #[cfg(plugin_windows)]
-        return self.hosted.range(..FX_KEY).any(|(_, h)| h.window.is_some());
+        return self.hosted.values().any(|h| h.window.is_some());
         #[cfg(not(plugin_windows))]
         false
     }

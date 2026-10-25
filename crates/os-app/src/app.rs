@@ -2310,7 +2310,8 @@ impl App {
         // No plugin windows here, so no requests.
         #[cfg(not(plugin_windows))]
         self.plugins.idle(|_| None);
-        // An open instrument editor is processed while nothing plays, so notes from its own keyboard sound.
+        // Open plugin editors are processed while nothing plays: notes from an instrument's own keyboard sound, and an
+        // effect's own playback (Tesla) too.
         let listen = self.plugins.editor_open();
         if listen {
             self.sync_live();
