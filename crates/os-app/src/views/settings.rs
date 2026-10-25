@@ -666,7 +666,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 g("Mixer", vec![
                     combo("24-point sinc", 122.0, "Resampling quality"),
                     Value(crate::prefs::number_text(&crate::prefs::BROWSER_PREVIEW_TRACK), "Browser preview track"),
-                    Value("---".into(), "Metronome track"),
+                    Value(crate::prefs::number_text(&crate::prefs::METRONOME_TRACK), "Metronome track"),
                     Check("Play truncated notes on transport", true),
                     Check("Reset plugins on transport", false),
                 ]),
@@ -767,7 +767,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             let user = os_paths::user_dir().map(|d| format!("{}{}", d.display(), std::path::MAIN_SEPARATOR)).unwrap_or_default();
             vec![
                 g("Backup", vec![
-                    pair(combo("Occasionally (every 10 minutes)", 336.0, "Autosave"), ValueR("Maximum", "100".into())),
+                    pair(combo("Occasionally (every 10 minutes)", 336.0, "Autosave"), ValueR(crate::prefs::BACKUP_MAXIMUM.label, crate::prefs::number_text(&crate::prefs::BACKUP_MAXIMUM))),
                     combo("Save to the project data folder if there is one", 336.0, "Location"),
                 ]),
                 g("Plugins", vec![

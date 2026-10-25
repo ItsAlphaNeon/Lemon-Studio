@@ -8,7 +8,7 @@
 // spec: ui/metronome.md
 
 use std::f64::consts::TAU;
-use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU16, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// The sound of the clicks (spec §2, §5).
@@ -63,19 +63,20 @@ pub fn volume_label(db: i8) -> String {
     if db > 0 { format!("+{db} dB") } else { format!("{db} dB") }
 }
 
-/// The switch, the sound and the volume, shared by the interface and every playing engine: a change is heard from the
-/// next beat.
+/// The switch, the sound, the volume and the mixer track, shared by the interface and every playing engine: a change is
+/// heard from the next beat (the track's from the next tick).
 #[derive(Debug)]
 pub struct Switch {
     on: AtomicBool,
     sound: AtomicU8,
     volume: AtomicI8,
+    track: AtomicU16,
 }
 
 impl Default for Switch {
-    /// Off, Tick, 0 dB (spec §3).
+    /// Off, Tick, 0 dB (spec §3), into the master track.
     fn default() -> Switch {
-        Switch { on: AtomicBool::new(false), sound: AtomicU8::new(1), volume: AtomicI8::new(0) }
+        Switch { on: AtomicBool::new(false), sound: AtomicU8::new(1), volume: AtomicI8::new(0), track: AtomicU16::new(0) }
     }
 }
 
@@ -104,6 +105,16 @@ impl Switch {
 
     pub fn set_volume(&self, db: i8) {
         self.volume.store(db.clamp(VOLUME_MIN, VOLUME_MAX), Ordering::Relaxed);
+    }
+
+    /// The mixer track the clicks enter (Settings > Audio "Metronome track", spec §4): 0 the master, else an insert
+    /// track; one the project does not have is the master.
+    pub fn track(&self) -> u16 {
+        self.track.load(Ordering::Relaxed)
+    }
+
+    pub fn set_track(&self, track: u16) {
+        self.track.store(track, Ordering::Relaxed);
     }
 }
 
