@@ -129,7 +129,7 @@ mod tests {
     fn shipped() -> Vec<String> {
         let out = cargo()
             .current_dir(root())
-            .args(["tree", "--workspace", "--locked", "--offline", "--target", "all", "-e", "normal,no-proc-macro"])
+            .args(["tree", "--workspace", "--locked", "--offline", "--color", "never", "--target", "all", "-e", "normal,no-proc-macro"])
             .args(["--prefix", "none", "--format", "{p}"])
             .output()
             .expect("cargo tree runs");
