@@ -163,6 +163,11 @@ impl<P: Plugin> HostedEffect for Guarded<P> {
         self.run((), |p| p.process_fx(rate, left, right));
         self.meter.add(t0.elapsed());
     }
+    fn process_fx_keyed(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: (&[f32], &[f32])) {
+        let t0 = Instant::now();
+        self.run((), |p| p.process_fx_keyed(rate, left, right, key));
+        self.meter.add(t0.elapsed());
+    }
     fn reset_fx(&mut self) {
         self.run((), |p| p.reset_fx())
     }

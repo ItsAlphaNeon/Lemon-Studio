@@ -17,6 +17,12 @@ pub const WRAPPER: &str = "Fruity Wrapper";
 pub mod rec {
     /// MIDI settings: i32 input port, i32 output port, u32 pitch-bend range in semitones, ...
     pub const MIDI: u32 = 1;
+    /// Audio ports: u32 number of input buses, u32 number of output buses, two u32 0.
+    pub const IO: u32 = 30;
+    /// One 12-byte entry per input bus: i32 port, u32 active, u32 0.
+    pub const INPUTS: u32 = 31;
+    /// The same per output bus.
+    pub const OUTPUTS: u32 = 32;
     pub const INFO: u32 = 50;
     pub const FOURCC: u32 = 51;
     pub const GUID: u32 = 52;
@@ -192,6 +198,44 @@ pub fn encode(base: Option<&[u8]>, p: &PluginRef) -> Vec<u8> {
     }
 }
 
+/// The port of each input bus (record 31) in the plugin's bus order: the number of a track's input counted from 1, 0
+/// for none (spec: flp/events/plugins.md "FL 26's own VST3 wrapper"). Empty when the state has no audio ports.
+pub fn input_ports(data: &[u8]) -> Vec<i32> {
+    let Some(r) = Records::parse(data) else { return Vec::new() };
+    r.get(rec::INPUTS).unwrap_or(&[]).chunks_exact(12).map(|e| i32::from_le_bytes([e[0], e[1], e[2], e[3]])).collect()
+}
+
+/// `data` with input bus `bus`'s port set to `port`; `None` when `data` is not a wrapper state. A state without audio
+/// ports gets them as FL lays them out (the bus counts, then each bus with port 0 and active 1; Lemon Studio writes
+/// `bus + 1` input buses and one output bus), unless the port is 0, which every bus has already.
+pub fn set_input_port(data: &[u8], bus: usize, port: i32) -> Option<Vec<u8>> {
+    let mut r = Records::parse(data)?;
+    let entry = |port: i32| [port.to_le_bytes(), 1u32.to_le_bytes(), [0; 4]].concat();
+    let Some(ins) = r.get(rec::INPUTS) else {
+        if port == 0 {
+            return Some(data.to_vec());
+        }
+        let ins = bus as u32 + 1;
+        r.set(rec::IO, [ins.to_le_bytes(), 1u32.to_le_bytes(), [0; 4], [0; 4]].concat());
+        r.set(rec::INPUTS, (0..=bus).flat_map(|b| entry(if b == bus { port } else { 0 })).collect());
+        r.set(rec::OUTPUTS, entry(0));
+        return Some(r.to_bytes());
+    };
+    let mut ins = ins.to_vec();
+    while ins.len() / 12 <= bus {
+        ins.extend(entry(0));
+    }
+    ins[bus * 12..bus * 12 + 4].copy_from_slice(&port.to_le_bytes());
+    if let Some(io) = r.get(rec::IO).filter(|io| io.len() >= 4) {
+        let mut io = io.to_vec();
+        let n = u32::from_le_bytes([io[0], io[1], io[2], io[3]]).max((ins.len() / 12) as u32);
+        io[0..4].copy_from_slice(&n.to_le_bytes());
+        r.set(rec::IO, io);
+    }
+    r.set(rec::INPUTS, ins);
+    Some(r.to_bytes())
+}
+
 /// The name a wrapper state shows for its plugin (record 54), if `data` is one.
 pub fn plugin_name(data: &[u8]) -> Option<String> {
     Records::parse(data).map(|r| text(r.get(rec::NAME))).filter(|n| !n.is_empty())
@@ -304,6 +348,38 @@ mod tests {
         r.remove(rec::FOURCC);
         r.remove(rec::PATH);
         assert_eq!(decode(&r.to_bytes()).unwrap().format, "vst3");
+    }
+
+    /// Ports read from record 31 and set the FL way; a state without audio ports gets them only for a port that is not
+    /// 0, before record 50 as FL orders them.
+    #[test]
+    fn input_ports_round_trip() {
+        let b = encode(None, &clap());
+        assert!(input_ports(&b).is_empty());
+        assert_eq!(set_input_port(&b, 1, 0).unwrap(), b);
+        let s = set_input_port(&b, 1, 2).unwrap();
+        assert_eq!(input_ports(&s), [0, 2]);
+        let r = Records::parse(&s).unwrap();
+        assert_eq!(r.records.iter().map(|x| x.0).take(4).collect::<Vec<_>>(), [30, 31, 32, 50]);
+        assert_eq!(r.get(rec::IO).unwrap(), [2u32.to_le_bytes(), 1u32.to_le_bytes(), [0; 4], [0; 4]].concat());
+        assert_eq!(r.get(rec::OUTPUTS).unwrap(), [0i32.to_le_bytes(), 1u32.to_le_bytes(), [0; 4]].concat());
+        assert_eq!(decode(&s), Some(clap()));
+        // A state FL wrote: only the port changes, the active flag and the rest stay.
+        let fl = Records {
+            kind: 12,
+            records: vec![
+                (rec::IO, [2u32.to_le_bytes(), 1u32.to_le_bytes(), [0; 4], [0; 4]].concat()),
+                (rec::INPUTS, [[0; 4], 1u32.to_le_bytes(), [0; 4], 1i32.to_le_bytes(), 0u32.to_le_bytes(), [0; 4]].concat()),
+                (rec::OUTPUTS, [[0; 4], 1u32.to_le_bytes(), [0; 4]].concat()),
+                (rec::NAME, b"Synth".to_vec()),
+            ],
+        };
+        let s = set_input_port(&fl.to_bytes(), 1, 3).unwrap();
+        let r = Records::parse(&s).unwrap();
+        assert_eq!(input_ports(&s), [0, 3]);
+        assert_eq!(&r.get(rec::INPUTS).unwrap()[16..20], &0u32.to_le_bytes());
+        assert_eq!(r.records.len(), 4);
+        assert_eq!(set_input_port(&[1, 2], 1, 1), None);
     }
 
     #[test]

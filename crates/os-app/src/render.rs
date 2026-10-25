@@ -143,9 +143,7 @@ pub fn render(o: &Opts) -> Result<(), String> {
     let project = crate::rack::play_project(&app.state);
     let mut library = crate::transport::host_library(crate::factory_folder::dir());
     let mut e = Engine::with_instruments(&project, &mut library, o.rate, PlayMode::Song, &app.plugins.instruments());
-    for (t, s, f) in app.plugins.effects() {
-        e.set_effect(t, s, f);
-    }
+    crate::project_plugins::attach_effects(&mut e, &project, app.plugins.effects());
     if o.from > 0 {
         e.seek_tick(o.from);
     } else {

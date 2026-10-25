@@ -57,7 +57,11 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 - Mixer tracks, sends, effect slots and meters
 - Polarity and stereo swap, main volume and main pitch
-- Not yet: sidechain inputs
+- Sidechain inputs: a project's Fruity Limiter slot listens to the track routed into its track that its sidechain
+  number names (Sidechain to this track routes count), heard after that track's fader and delayed to line up
+- CLAP and VST3 effects get a sidechain input too: pick it in the slot menu's Sidechain input submenu, which lists
+  the tracks routed into the track. The choice is saved where FL saves it, and projects saved by FL play their
+  plugins' sidechain and input choices as FL plays them
 
 ## ✅ Plugin hosting
 
@@ -83,7 +87,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The mixer tracks' input and output latency settings are read from projects, count as FL Studio counts them, and
   are saved back
 - Automation of a mixer track or slot behind late audio waits for it, as in FL Studio
-- Not yet: editing the latency settings, and sidechain paths (there are no sidechain inputs yet)
+- A sidechain input waits for the slot it feeds, so it lines up with the audio there
+- Not yet: editing the latency settings
 
 ## ✅ Plugin management
 
@@ -195,9 +200,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Citrus, a six-operator synthesizer (a recreation of Sytrus) with its editor: it plays every Sytrus channel of a
   project and Sytrus patches, keeping their state byte for byte; also a VST3 and CLAP plugin
 - Lemon Limiter (Fruity Limiter: limiter, compressor and noise gate), Lemon Reverb (Fruity Reeverb 2) and Lemon
-  Delay (Fruity Delay 3), also VST3 and CLAP plugins. A project's Fruity Reeverb 2 and Fruity Delay 3 slots play
-  through the same sound; its Fruity Limiter slots still play a simpler limiter (gain and a peak limiter, no
-  compressor or gate yet)
+  Delay (Fruity Delay 3), also VST3 and CLAP plugins. A project's Fruity Reeverb 2, Fruity Delay 3 and Fruity Limiter
+  slots play through the same sound (the Limiter's compressor, gate, look-ahead and sidechain included)
 - Every Lemon plugin is built into Lemon Studio, so none needs a plugin file; the VST3 and CLAP bundles are for other
   hosts. A project stores the built-in effects other than the EQ as wrapped CLAP plugins, as it stored their bundles
 - Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon
