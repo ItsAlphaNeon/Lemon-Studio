@@ -3,8 +3,9 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! PATTERNS > Set time signature...: the current pattern's own time signature, a time-signature marker at its start,
-//! chosen in the "Time signature change" dialog (a `dialog` body), after the conflict question when it has one.
-// spec: ui/pattern-time-signature.md
+//! chosen in the "Time signature change" dialog (a `dialog` body), after the conflict question when it has one. The
+//! playlist's time signature markers are chosen in the same dialog.
+// spec: ui/pattern-time-signature.md; ui/playlist.md §7a
 
 use os_model::TimeMarker;
 
@@ -16,12 +17,39 @@ use crate::playlist::{Cmd, Mark, PItem, Popup};
 pub const NUMERATORS: std::ops::RangeInclusive<u8> = 1..=16;
 pub const DENOMINATORS: [u8; 4] = [2, 4, 8, 16];
 
-/// The "Time signature change" dialog: the pattern it is for and the signature chosen so far.
+/// The "Time signature change" dialog: the pattern it is for and the signature chosen so far; or the song time marker
+/// it is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SigForm {
     pub pattern: u16,
     pub num: u8,
     pub den: u8,
+    pub song: Option<SongSig>,
+}
+
+/// A song time signature marker the dialog is for (spec: ui/playlist.md §7a): a new one at a tick, or marker `i`
+/// taking the Time signature action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SongSig {
+    At(u32),
+    Marker(usize),
+}
+
+/// Accept on a song marker: a time signature marker named after its signature ("3/4"), one undo step.
+pub fn set_song(s: &mut State, at: SongSig, num: u8, den: u8) {
+    crate::playlist::snapshot(s);
+    let name = format!("{num}/{den}");
+    match at {
+        SongSig::At(t) => {
+            crate::playlist::add_marker(s, TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, ..TimeMarker::new(t, &name) });
+        }
+        SongSig::Marker(i) => {
+            if let Some(m) = crate::playlist::arr_mut(s).markers.get_mut(i) {
+                *m = TimeMarker { kind: TimeMarker::SIGNATURE, numerator: num, denominator: den, name, ..m.clone() };
+            }
+        }
+    }
+    s.piano.dirty = true;
 }
 
 /// Index of pattern `n`'s time-signature marker at its start.
@@ -91,7 +119,14 @@ impl App {
     /// The dialog for pattern `n`, at 4 / 4 whatever the pattern had (§1).
     fn open_time_signature(&mut self, n: u16) {
         self.state.playlist.popup = None;
-        self.show_form(Body::TimeSig(SigForm { pattern: n, num: 4, den: 4 }));
+        self.show_form(Body::TimeSig(SigForm { pattern: n, num: 4, den: 4, song: None }));
+    }
+
+    /// The dialog for a song time signature marker, at 4 / 4 (spec: ui/playlist.md §7a).
+    pub(crate) fn open_song_signature(&mut self, at: SongSig) {
+        self.state.playlist.popup = None;
+        let n = self.state.pattern.max(1);
+        self.show_form(Body::TimeSig(SigForm { pattern: n, num: 4, den: 4, song: Some(at) }));
     }
 
     /// A click on a value box: its list, the app's popup, under the box, the current value marked (§1).
@@ -100,7 +135,7 @@ impl App {
         let Some(r) = self.hits.iter().rev().find(|h| h.action == Action::Dlg(DHit::SigValue(den))).map(|h| h.rect) else { return };
         let (cur, values): (u8, Vec<u8>) = if den { (f.den, DENOMINATORS.to_vec()) } else { (f.num, NUMERATORS.collect()) };
         let items = values.into_iter().map(|v| PItem::new(v.to_string(), Cmd::TimeSig(den, v)).mark(Mark::Radio(v == cur))).collect();
-        self.state.playlist.popup = Some(Popup { x: r.x, y: r.bottom() + 1.0, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x: r.x, y: r.bottom() + 1.0, items, sub: None, scroll: [0; 2] });
         self.invalidate();
     }
 

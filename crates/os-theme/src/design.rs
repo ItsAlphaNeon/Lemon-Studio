@@ -368,8 +368,15 @@ fn overrides(d: Design) -> Vec<(&'static str, Color)> {
 
 /// The palette of skin `design` coloured by `theme` (a `.flstheme`). The stock Dark theme (whatever its options), or
 /// none, leaves a skin its own colours: Citrus the measured look, Lemon the brand palette; any other theme colours
-/// Citrus through `fl::palette` and is laid over Lemon's colours by a `Retint`.
+/// Citrus through `fl::palette` and is laid over Lemon's colours by a `Retint`. The theme's workspace picture goes with
+/// it on either skin, also where it keeps the skin's own colours (spec: ui/flstheme.md §3).
 pub fn palette(design: Design, theme: Option<&FlTheme>) -> Palette {
+    let mut p = skin_palette(design, theme);
+    p.wallpaper = theme.and_then(fl::wallpaper);
+    p
+}
+
+fn skin_palette(design: Design, theme: Option<&FlTheme>) -> Palette {
     // The Lemon and Citrus themes (`skin_text`): the Lemon theme on Citrus is Lemon's colours with Citrus's shapes; the
     // Citrus theme on Lemon is the stock Dark theme laid over Lemon (stock Dark without the key counts as Lemon's own);
     // Citrus with the Citrus theme is the stock Dark theme, as usual.

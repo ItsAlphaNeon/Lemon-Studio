@@ -827,7 +827,38 @@ impl FxKey {
     }
 }
 
+/// **(Lemon Studio)** What else decides how the played sample is held: nothing while Keep on disk is off (the default
+/// key); with it on, whether a realtime stretch method plays it (from memory), and START OFFSET and Use loop points,
+/// whose frames are held in memory when it plays from disk (spec: plugins/lemon-sampler.md "Keep on disk (Lemon
+/// Studio)").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DiskKey {
+    pub keep: bool,
+    pub realtime: bool,
+    /// START OFFSET (`f32` bits).
+    pub start: u32,
+    pub loop_on: bool,
+}
+
+impl DiskKey {
+    pub fn start_offset(&self) -> f64 {
+        f64::from(f32::from_bits(self.start)).clamp(0.0, 1.0)
+    }
+}
+
 impl SamplerParams {
+    pub fn disk_key(&self) -> DiskKey {
+        if !self.keep_disk.live() {
+            return DiskKey::default();
+        }
+        DiskKey {
+            keep: true,
+            realtime: stretch_realtime(self.ts_mode.live()),
+            start: self.start_offset.live().to_bits(),
+            loop_on: self.loop_use.live(),
+        }
+    }
+
     /// TIME's target length in seconds at `tempo` BPM (`None` when TIME is off).
     pub fn ts_seconds(&self, tempo: f64) -> Option<f64> {
         let steps = time_steps(self.ts_time.live());

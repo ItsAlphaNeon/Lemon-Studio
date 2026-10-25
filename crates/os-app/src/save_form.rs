@@ -293,7 +293,7 @@ impl App {
         }
         match h {
             FHit::Field(i) if i == 0 || (f.info_open && i <= 4) => f.focus = i,
-            FHit::Field(_) | FHit::Item(_) | FHit::Shut => {}
+            FHit::Field(_) | FHit::Item(_) | FHit::Shut | FHit::Seg(..) | FHit::Tile(_) => {}
             FHit::Check(0) => f.new_folder = !f.new_folder,
             FHit::Check(1) => f.copy = !f.copy,
             FHit::Check(_) => f.dont_show = !f.dont_show,

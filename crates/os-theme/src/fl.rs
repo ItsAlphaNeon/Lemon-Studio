@@ -434,9 +434,16 @@ pub fn palette(th: &FlTheme) -> Palette {
     out
 }
 
+/// The workspace picture theme `th` shows (spec §3): its `BackPicFilename` while `BackMode` is a picture mode (0, 2 and,
+/// its gradient part not being known, 3), `None` with the solid colour (1) or no file name.
+pub fn wallpaper(th: &FlTheme) -> Option<String> {
+    let name = th.back_picture.trim();
+    (matches!(th.back_mode, 0 | 2 | 3) && !name.is_empty()).then(|| name.to_string())
+}
+
 /// What a theme colours directly whatever the skin (spec §3): browser text brightness, the readability guard (`guard`),
-/// custom grids, the solid workspace colour, note colours (re-keyed from `note_from`, the skin's note body), meters and
-/// the Waves gradient.
+/// custom grids and their line strength, the solid workspace colour or picture, note colours (re-keyed from
+/// `note_from`, the skin's note body), meters and the Waves gradient.
 pub(crate) fn finish(out: &mut Palette, th: &FlTheme, note_from: Color, guard: bool) {
     // Text: browser text brightness, -255 darker .. +255 brighter (spec §3). On light themes darker = more contrast.
     if th.text != 0.0 {
@@ -477,10 +484,15 @@ pub(crate) fn finish(out: &mut Palette, th: &FlTheme, note_from: Color, guard: b
         out.pr_row_black_sel = out.pr_row_black.mix(Color::rgb(0x3a2a30), 0.3);
         out.pr_bar = g.shade(-0.85);
     }
+    // Grid line strength (§3, `PLGridContrast` / `PRGridContrast`, percent): the playlist and piano roll draw their lines
+    // that share of their usual difference off the grid, 0 gone into it, 200 twice as far (custom grid or not).
+    out.pl_lines = (th.pl_grid.2 / 100.0).clamp(0.0, 2.0);
+    out.pr_lines = (th.pr_grid.2 / 100.0).clamp(0.0, 2.0);
     if let (1, Some(bc)) = (th.back_mode, th.back_color) {
         out.workspace = bc;
         out.watermark = bc.shade(if bc.hsl().2 > 0.5 { -0.06 } else { 0.06 });
     }
+    out.wallpaper = wallpaper(th);
     if let Some(n) = th.note_colors.first() {
         let from = note_from;
         for slot in [&mut out.note_top, &mut out.note_bottom, &mut out.note_rim, &mut out.note_text, &mut out.velocity, &mut out.velocity_dot] {
@@ -598,6 +610,49 @@ WaveClr3=65280
         assert_eq!(set_key(text, "OverrideClips", "1"), "\u{feff}Lightmode=1\r\nHue=4\r\nOverrideClips=1\r\n");
         assert_eq!(set_key("Hue=4", "lightmode", "0"), "Hue=4\nlightmode=0");
         assert_eq!(set_key("", "Lightmode", "0"), "Lightmode=0\n");
+    }
+
+    // spec: ui/flstheme.md §3 (PLGridContrast, PRGridContrast)
+    /// Grid line strength: the factors the playlist and piano roll draw their lines at, 1 at 100 (the usual lines), held
+    /// to 0..2; the colours stay. Below 100 a line is laid over the grid at that share of its opacity (0: none), above
+    /// it stands up to twice as far off the grid.
+    #[test]
+    fn grid_contrast_sets_the_line_strength() {
+        let base = Palette::default();
+        // The keys on top of the stock Dark theme.
+        let p = |keys: &str| palette(&FlTheme::parse(&format!("{DARK_TEXT}{keys}")));
+        assert_eq!(p("PLGridContrast=100\nPRGridContrast=100\n"), base);
+        assert_eq!((base.pl_lines, base.pr_lines), (1.0, 1.0));
+        let lines = |keys: &str| {
+            let t = p(keys);
+            (t.pl_lines, t.pr_lines)
+        };
+        assert_eq!(lines("PLGridContrast=0\nPRGridContrast=50\n"), (0.0, 0.5));
+        assert_eq!(lines("PLGridContrast=200\nPRGridContrast=900\n"), (2.0, 2.0));
+        assert_eq!(lines("PLGridContrast=-20\n"), (0.0, 1.0));
+        let strong = p("PLGridContrast=200\nPLGridCustom=1\nPLGridback=-13884384\n");
+        assert_eq!((strong.grid_gap, strong.grid_bar), (strong.grid.shade(-0.25), strong.grid.shade(-0.6)), "the tokens stay");
+        assert_eq!(strong.pl_line(strong.grid_bar), strong.grid.mix(strong.grid_bar, 2.0));
+        assert_eq!(p("PLGridContrast=0\n").pl_line(base.grid_bar), base.grid_bar.with_alpha(0));
+        assert_eq!(p("PRGridContrast=50\n").pr_line(base.pr_bar), base.pr_bar.with_alpha(128));
+        assert_eq!((base.pl_line(base.grid_bar), base.pr_line(base.pr_bar)), (base.grid_bar, base.pr_bar));
+    }
+
+    // spec: ui/flstheme.md §3 (BackMode, BackPicFilename)
+    /// The workspace picture: the file name while BackMode shows a picture (0, 2, 3; 2 when the key is missing), none
+    /// with the solid colour or no name.
+    #[test]
+    fn the_workspace_picture_follows_the_back_mode() {
+        let pic = |text: &str| palette(&FlTheme::parse(text)).wallpaper;
+        assert_eq!(pic("BackPicFilename= C:\\Pictures\\wall.jpg \n"), Some("C:\\Pictures\\wall.jpg".to_string()));
+        for mode in ["0", "2", "3"] {
+            assert_eq!(pic(&format!("BackMode={mode}\nBackPicFilename=wall.png\n")), Some("wall.png".to_string()), "BackMode={mode}");
+        }
+        assert_eq!(pic("BackMode=1\nBackColor=255\nBackPicFilename=wall.png\n"), None);
+        assert_eq!(pic("BackMode=2\nBackPicFilename=\n"), None);
+        assert_eq!(Palette::default().wallpaper, None);
+        let lemon = crate::design::palette(crate::Design::Lemon, Some(&FlTheme::parse("BackPicFilename=wall.png\n")));
+        assert_eq!(lemon.wallpaper.as_deref(), Some("wall.png"), "either skin");
     }
 
     #[test]

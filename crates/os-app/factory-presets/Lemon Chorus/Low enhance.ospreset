@@ -1,0 +1,15 @@
+OSPRESET 1
+plugin=Lemon Chorus	id=clap:org.openstudio.lemon-chorus	format=clap	body=params
+# Values: OpenStudio-specs plugins/factory-presets.md.
+Delay = 243
+Depth = 4336
+Stereo = 416
+LFO 1 speed = 0
+LFO 2 speed = 0
+LFO 3 speed = 781
+LFO 1 wave = 0
+LFO 2 wave = 0
+LFO 3 wave = 1024
+Cross type = 65
+Cross cutoff = 4635
+Wet only = 96

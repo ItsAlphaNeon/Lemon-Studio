@@ -31,6 +31,7 @@ pub use mac as gui;
 use os_theme::design::Design;
 use os_theme::Palette;
 use os_ui::kit::menu::{MenuItem, MenuStyle};
+use os_ui::Rect;
 
 /// The palette Lemon Studio's plugin editors draw with: always the Lemon design's, whatever design the app or a saved
 /// setting names (the plugins' Classic look is retired, spec ui/lemon-design.md §11.1). Their menus use it too.
@@ -89,6 +90,31 @@ impl<C: Clone> MenuDef<C> {
     }
 }
 
+/// An open submenu's parent menu, in screen px (left, top, right, bottom): the parent's panel, and the band across it
+/// of the row that opened the submenu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Opener {
+    pub menu: [i32; 4],
+    pub row: [i32; 4],
+}
+
+impl Opener {
+    /// The parent panel `menu` and its row `row` (menu-local, unscaled, as `MenuLayout::rows` holds it).
+    pub fn new(menu: [i32; 4], row: Rect, scale: f32) -> Self {
+        let top = menu[1] + (row.y * scale).floor() as i32;
+        let bottom = menu[1] + ((row.y + row.h) * scale).ceil() as i32;
+        Opener { menu, row: [menu[0], top, menu[2], bottom] }
+    }
+
+    /// Whether the pointer at screen `at` leaves the submenu at `rect` for the parent: it is over the parent, off the
+    /// submenu and off the row that opened it. The pointer crosses that row on its way into the submenu, so there the
+    /// submenu stays open.
+    pub fn takes_back(&self, rect: [i32; 4], at: (i32, i32)) -> bool {
+        let inside = |r: [i32; 4]| at.0 >= r[0] && at.0 < r[2] && at.1 >= r[1] && at.1 < r[3];
+        inside(self.menu) && !inside(rect) && !inside(self.row)
+    }
+}
+
 /// True when `OS_DEBUG` is set (editor logging).
 pub fn debug() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -99,4 +125,47 @@ pub fn debug() -> bool {
 /// type-in boxes then return nothing instead of running a modal loop.
 pub fn no_modal() -> bool {
     std::env::var_os("OPENSTUDIO_PLUGIN_NO_MODAL").is_some() || std::env::var_os("LEMONSAMPLER_NO_MODAL").is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 200 × 200 menu at (100, 100) whose row at y 40, 20 high, opened a submenu placed the way the popups place it:
+    /// at the row's right end less 2 px (`left` true: flipped to the left of the menu).
+    fn menus(left: bool) -> (Opener, [i32; 4]) {
+        let opener = Opener::new([100, 100, 300, 300], Rect::new(4.0, 40.0, 192.0, 20.0), 1.0);
+        let x = if left { 100 - 150 } else { 100 + 196 - 2 };
+        (opener, [x, 138, x + 150, 238])
+    }
+
+    #[test]
+    fn crossing_the_row_reaches_the_submenu() {
+        for left in [false, true] {
+            let (o, sub) = menus(left);
+            assert_eq!(o.row, [100, 140, 300, 160], "the row's band spans the menu");
+            // From the middle of the row, one pixel at a time into the submenu (across the menu's padding too).
+            let path: Vec<i32> = if left { (60..=200).rev().collect() } else { (200..=320).collect() };
+            for x in path {
+                assert!(!o.takes_back(sub, (x, 150)), "left {left}: at x {x} the submenu stays");
+            }
+        }
+    }
+
+    #[test]
+    fn another_row_of_the_parent_takes_the_pointer_back() {
+        let (o, sub) = menus(false);
+        assert!(o.takes_back(sub, (200, 170)), "the row below");
+        assert!(o.takes_back(sub, (200, 139)), "just above the row");
+        assert!(o.takes_back(sub, (200, 101)), "the menu's top padding");
+        assert!(!o.takes_back(sub, (296, 200)), "the submenu covers the menu's edge");
+        assert!(!o.takes_back(sub, (500, 150)), "off both menus");
+        assert!(!o.takes_back(sub, (200, 320)), "below the menu");
+    }
+
+    #[test]
+    fn the_row_band_rounds_outward_when_scaled() {
+        let o = Opener::new([10, 20, 310, 320], Rect::new(4.0, 40.5, 192.0, 20.25), 1.5);
+        assert_eq!(o.row, [10, 20 + 60, 310, 20 + 92]);
+    }
 }

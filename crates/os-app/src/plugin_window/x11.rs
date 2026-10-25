@@ -416,6 +416,13 @@ impl FrameWindow {
         self.f.scale
     }
 
+    /// A point of the editor (logical px from its top-left) on the screen (screen px): where a menu the plugin asked
+    /// for opens (spec: plugins/vst3-hosting.md §9).
+    pub fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32) {
+        let ay = self.f.state.borrow().area_y();
+        self.f.to_screen(BORDER + x, ay + y)
+    }
+
     /// Follows a new editor size (plugins may resize).
     pub fn set_editor_size(&self, editor: (f32, f32)) {
         if self.f.state.borrow().editor != editor {
@@ -582,7 +589,7 @@ impl Frame {
         match r {
             Reply::None => {}
             // The press grabs the pointer until the release: drags keep their motion without more.
-            Reply::Repaint | Reply::Capture => self.dirty.set(true),
+            Reply::Repaint | Reply::Capture | Reply::Hold => self.dirty.set(true),
             Reply::Relayout => self.layout(),
             Reply::Move if !self.state.borrow().detached => {
                 // Docked: moved by hand within the main window (the press's grab brings the motion here).

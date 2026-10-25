@@ -72,7 +72,13 @@ pub fn project_name(path: Option<&Path>) -> String {
 
 /// When file `file` was autosaved, if it is an autosave of `name`: (year, month, day, hour, minute).
 fn autosaved_at(file: &str, name: &str) -> Option<(u32, u32, u32, u32, u32)> {
-    let rest = file.strip_prefix(name)?.strip_prefix(" (autosaved on ")?.strip_suffix(").flp")?;
+    saved_at(file, name, "autosaved")
+}
+
+/// When backup `file` of `name` was written, if it is one of kind `what` ("autosaved" or "overwritten"): (year,
+/// month, day, hour, minute).
+pub(crate) fn saved_at(file: &str, name: &str, what: &str) -> Option<(u32, u32, u32, u32, u32)> {
+    let rest = file.strip_prefix(name)?.strip_prefix(" (")?.strip_prefix(what)?.strip_prefix(" on ")?.strip_suffix(").flp")?;
     let (date, time) = rest.split_once(" at ")?;
     let mut d = date.split('-').map(str::parse::<u32>);
     let (Some(Ok(m)), Some(Ok(day)), Some(Ok(y)), None) = (d.next(), d.next(), d.next(), d.next()) else { return None };

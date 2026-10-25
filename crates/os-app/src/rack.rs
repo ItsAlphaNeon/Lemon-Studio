@@ -227,8 +227,8 @@ pub struct RackUi {
     pub loop_type: u8,
     /// Position of "Unsorted" in the file's group list (`None` = last; see [`to_model`]).
     pub unsorted_at: Option<usize>,
-    /// Steps copied by Cut / Copy (the channel's notes of the pattern).
-    pub clipboard: Option<Vec<Note>>,
+    /// Steps copied by Cut / Copy: the copied channels' notes of the pattern, a row each (§11).
+    pub clipboard: Option<Vec<Vec<Note>>>,
     /// Copied knob value (knob menu, §19).
     /// Menu checkboxes that have no effect yet (greyed out): their default ticks.
     pub opts: BTreeSet<&'static str>,
@@ -240,6 +240,8 @@ pub struct RackUi {
     pub delete_now: Option<Vec<usize>>,
     /// Advanced fill dialog (§22).
     pub fill: Option<FillDlg>,
+    /// The channel Shift+wheel last moved and where the mouse was then (`wheel_move`).
+    pub wheel_grab: Option<(usize, (f32, f32))>,
 }
 
 impl Default for RackUi {
@@ -270,6 +272,7 @@ impl Default for RackUi {
             purging: false,
             delete_now: None,
             fill: None,
+            wheel_grab: None,
         }
     }
 }
@@ -482,6 +485,37 @@ fn set_row_notes(s: &mut State, r: usize, notes: Vec<Note>) {
     p.notes.extend(notes.into_iter().map(|x| Note { channel: ch, ..x }));
     p.notes.sort_by_key(|x| (x.position, x.channel));
     s.piano.dirty = true;
+}
+
+/// Cut / Copy (§11): rows `rows`' notes of the pattern go to the clipboard, a row each, in rack order.
+fn copy_rows(s: &mut State, rows: &[usize]) {
+    if !rows.is_empty() {
+        s.rack.clipboard = Some(rows.iter().map(|&r| row_notes(s, r)).collect());
+    }
+}
+
+/// Cut (§11): copies rows `rows`, then clears their notes of the pattern (one undo step).
+fn cut_rows(s: &mut State, rows: &[usize]) {
+    if rows.is_empty() {
+        return;
+    }
+    copy_rows(s, rows);
+    snapshot(s);
+    for &r in rows {
+        set_row_notes(s, r, Vec::new());
+    }
+}
+
+/// Paste (§11): the clipboard's first row replaces row `r`'s notes of the pattern, the next ones those of the rows shown
+/// below it, in order; rows past the last one shown are left out (one undo step).
+fn paste_at(s: &mut State, r: usize) {
+    let Some(rows) = s.rack.clipboard.clone() else { return };
+    let shown = shown(s);
+    let below = shown.iter().position(|&x| x == r).map_or(vec![r], |i| shown[i..].to_vec());
+    snapshot(s);
+    for (to, notes) in below.into_iter().zip(rows) {
+        set_row_notes(s, to, notes);
+    }
 }
 
 /// Turn step `k` of row `r` on or off.
@@ -754,7 +788,7 @@ pub fn relayout(s: &mut State, f: impl FnOnce(&mut State)) {
     let before = crate::views::rack::base_w(s);
     f(s);
     let after = crate::views::rack::base_w(s);
-    s.rack_size.0 = (s.rack_size.0 + after - before).max(after + 3.0 * crate::views::rack::STEP_W);
+    s.rack_size.0 = (s.rack_size.0 + after - before).max(crate::views::rack::min_w(s));
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -778,7 +812,10 @@ pub fn remap_project(p: &mut Project, map: &[Option<usize>]) {
         .collect();
     for pat in &mut p.patterns {
         pat.notes.retain_mut(|n| idx.get(&n.channel).map(|&m| n.channel = m).is_some());
-        pat.controls.retain_mut(|c| idx.get(&c.channel()).map(|&m| *c = os_model::ControlPoint::new(c.position, m, c.param(), c.value)).is_some());
+        // Points of no channel (the tempo's, channel 0x4000) stay as they are.
+        pat.controls.retain_mut(|c| {
+            c.channel() >= 0x4000 || idx.get(&c.channel()).map(|&m| *c = os_model::ControlPoint::new(c.position, m, c.param(), c.value)).is_some()
+        });
     }
     p.automations.retain_mut(|a| {
         let Some(&m) = idx.get(&a.channel) else { return false };
@@ -931,8 +968,8 @@ pub fn ask_delete(s: &mut State, rows: Vec<usize>) {
     crate::patterns::open_confirm(s);
 }
 
-/// Purge unused audio clips: the unused audio-clip channels go, after the delete confirmation (Lemon Studio cannot
-/// undo a channel deletion yet; spec: ui/unused-channels.md §4).
+/// Purge unused audio clips: the unused audio-clip channels go, after the delete confirmation; one undo step
+/// (`delete_rows`; spec: ui/unused-channels.md §4).
 pub fn ask_purge(s: &mut State) -> Option<String> {
     let rows: Vec<usize> = unused(s).into_iter().filter(|&r| s.project.channels[r].kind == ChannelKind::AudioClip).collect();
     if rows.is_empty() {
@@ -943,9 +980,13 @@ pub fn ask_purge(s: &mut State) -> Option<String> {
     None
 }
 
-/// Delete rows now: the channels, their notes and clips go.
+/// Delete rows now: the channels, their notes and clips go. One undo step, with the rows' instruments
+/// (`history::delete_channels`).
 pub fn delete_rows(app: &mut App, rows: &[usize]) {
     let n = app.state.project.channels.len();
+    let gone: Vec<usize> = rows.iter().copied().filter(|&r| r < n).collect();
+    let back = gone.iter().filter_map(|&r| app.plugin_copy(r).map(|(i, blob)| (r, i, blob))).collect();
+    crate::history::delete_channels(&mut app.state, gone, back);
     let order: Vec<usize> = (0..n).filter(|r| !rows.contains(r)).collect();
     let first = rows.iter().copied().min().unwrap_or(0);
     reorder(app, &order);
@@ -978,6 +1019,22 @@ pub fn move_selected(app: &mut App, dir: i32) {
         }
     }
     reorder(app, &order);
+}
+
+/// Shift+wheel over channel `r`'s name button (§13): it becomes the only selected channel and moves one row per notch,
+/// up for `notches` > 0. While the mouse stays still, more notches move the same channel, which has left the cursor.
+pub fn wheel_move(app: &mut App, r: usize, notches: i32) {
+    let at = app.mouse;
+    let r = match app.state.rack.wheel_grab {
+        Some((g, m)) if m == at && g < app.state.project.channels.len() => g,
+        _ => r,
+    };
+    app.state.rack.select_only(r);
+    for _ in 0..notches.unsigned_abs() {
+        move_selected(app, -notches.signum());
+    }
+    let now = app.state.rack.sel.first().copied().unwrap_or(r);
+    app.state.rack.wheel_grab = Some((now, at));
 }
 
 pub fn sort(app: &mut App, by: SortBy) {
@@ -1071,6 +1128,10 @@ pub enum RCmd {
     Cut(usize),
     Copy(usize),
     Paste(usize),
+    /// Ctrl+X / Ctrl+C / Ctrl+V: the selected channels' steps (§20).
+    CutSel,
+    CopySel,
+    PasteSel,
     Fill(usize, u32),
     AdvancedFill(usize),
     Rotate(usize, i32),
@@ -1214,7 +1275,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sub(crate::views::menus::CLIPS_SEL_LABEL, stretch_items(false)),
         PItem::sub(crate::views::menus::EDITORS_LABEL, editor_items()),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Add one ▸: the generator menu, a pick goes to the bottom of the rack (spec: ui/plugin-menu.md §1).
@@ -1348,7 +1409,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         PItem::not_yet("Create instrument..."),
         PItem::sub("Burn MIDI to", vec![PItem::not_yet("Current pattern"), PItem::not_yet("New pattern")]),
     ]);
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The Automation / Remote control / Value groups shared by knob and LED menus (§19).
@@ -1370,11 +1431,9 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
     });
     v.extend([
         PItem::new("Edit automation clip...", Cmd::Nothing).off(),
-        PItem::head("Remote control"),
-        PItem::not_yet("Link to controller..."),
-        PItem::not_yet("Override global link..."),
-        PItem::head("Value"),
     ]);
+    v.extend(crate::remote::menu_items(knob.map(crate::typein::Target::Knob)));
+    v.push(PItem::head("Value"));
     match knob {
         Some(k) => {
             v.push(it("Copy value", RCmd::CopyValue(k)));
@@ -1396,7 +1455,7 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
 pub fn knob_menu(s: &State, k: KnobId, auto: Option<(u32, String, f64)>, x: f32, y: f32) -> Popup {
     let mut items = vec![it("Reset", RCmd::Reset(k))];
     items.extend(value_groups(s, Some(k), auto));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Right click on the mixer box (§12).
@@ -1405,7 +1464,7 @@ pub fn mixer_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
     items.extend(value_groups(s, None, None));
     items.push(PItem::sep());
     items.push(it("Assign to free mixer track", RCmd::AssignFree(r)));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Right click on a LED (§10).
@@ -1416,7 +1475,7 @@ pub fn led_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("Lock active/mute state", RCmd::Lock(r)).mark(Mark::Check(s.rack.locked.contains(&r))),
     ];
     items.extend(value_groups(s, None, None));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Group combo (§7): left click lists the filters.
@@ -1425,7 +1484,7 @@ pub fn filter_menu(s: &State, x: f32, y: f32) -> Popup {
     let mut items = vec![it("All", RCmd::SetFilter(Filter::All)).mark(Mark::Radio(f == Filter::All))];
     items.extend(s.rack.groups.iter().enumerate().map(|(i, g)| it(g.name.clone(), RCmd::SetFilter(Filter::Group(i))).mark(Mark::Radio(f == Filter::Group(i)))));
     items.push(it("Unsorted", RCmd::SetFilter(Filter::Unsorted)).mark(Mark::Radio(f == Filter::Unsorted)));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Group combo right click (§7).
@@ -1433,7 +1492,7 @@ pub fn filter_edit_menu(s: &State, x: f32, y: f32) -> Popup {
     let group = matches!(s.rack.filter, Filter::Group(_));
     let del = it("Delete filter group", RCmd::DeleteGroup);
     let ren = it("Rename filter group", RCmd::RenameGroup);
-    Popup { x, y, items: vec![it("Add filter group", RCmd::AddGroup), if group { del } else { del.off() }, if group { ren } else { ren.off() }], sub: None }
+    Popup { x, y, items: vec![it("Add filter group", RCmd::AddGroup), if group { del } else { del.off() }, if group { ren } else { ren.off() }], sub: None, scroll: [0; 2] }
 }
 
 /// Pattern length box right click (§7).
@@ -1444,7 +1503,7 @@ pub fn length_menu(s: &State, x: f32, y: f32) -> Popup {
         let label = if bars == 1 { "1 bar".to_string() } else { format!("{bars} bars") };
         items.push(it(label, RCmd::SetLen(Some(bars * bar))).mark(Mark::Radio(cur == Some(bars * bar))));
     }
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Loop button right click (§7).
@@ -1463,7 +1522,7 @@ pub fn loop_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::head("Options"),
         opt(s, "Always show advanced controls"),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1591,20 +1650,27 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::Cut(r) => {
-            s.rack.clipboard = Some(row_notes(s, r));
-            snapshot(s);
-            set_row_notes(s, r, Vec::new());
+            cut_rows(s, &[r]);
             None
         }
         RCmd::Copy(r) => {
-            s.rack.clipboard = Some(row_notes(s, r));
+            copy_rows(s, &[r]);
             None
         }
         RCmd::Paste(r) => {
-            if let Some(n) = s.rack.clipboard.clone() {
-                snapshot(s);
-                set_row_notes(s, r, n);
-            }
+            paste_at(s, r);
+            None
+        }
+        RCmd::CutSel => {
+            cut_rows(s, &sel);
+            None
+        }
+        RCmd::CopySel => {
+            copy_rows(s, &sel);
+            None
+        }
+        RCmd::PasteSel => {
+            paste_at(s, sel.first().copied().unwrap_or(s.selected_channel));
             None
         }
         RCmd::Fill(r, n) => {
@@ -1932,13 +1998,17 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && letter(c, "u") => RCmd::UnzipAll,
         Key::Character(c) if alt && !ctrl && letter(c, "m") => RCmd::ShowMixer,
         Key::Character(c) if ctrl && !alt && letter(c, "l") => RCmd::AssignFreeSel,
+        Key::Character(c) if ctrl && !alt && !shift && letter(c, "x") => RCmd::CutSel,
+        Key::Character(c) if ctrl && !alt && !shift && letter(c, "c") => RCmd::CopySel,
+        Key::Character(c) if ctrl && !alt && !shift && letter(c, "v") => RCmd::PasteSel,
         Key::Character(c) if ctrl && !alt && letter(c, "k") => {
             s.rack.graph_open = !s.rack.graph_open;
             app.invalidate();
             return true;
         }
-        // (shift / ctrl +) 0..9: mute / solo channels 1..10 when the typing keyboard does not take the digits (§10).
-        Key::Character(c) if !alt && !app.typing_on() && c.len() == 1 && c.chars().all(|d| d.is_ascii_digit()) => {
+        // (shift / ctrl +) 0..9: mute / solo channels 1..10 when the typing keyboard does not take the digits (§10); it
+        // takes the plain ones only, so Ctrl + a digit solos with it on too.
+        Key::Character(c) if !alt && (ctrl || !app.typing_on()) && c.len() == 1 && c.chars().all(|d| d.is_ascii_digit()) => {
             let d = c.parse::<usize>().unwrap_or(0);
             let r = if d == 0 { 9 } else { d - 1 };
             let s = &mut app.state;
@@ -2173,6 +2243,74 @@ pub fn to_model(s: &mut State) {
 mod tests {
     use super::*;
 
+    /// Ctrl+C / Ctrl+X / Ctrl+V with the rack in front (§11, §20): copy takes the selected channels' steps, a row each;
+    /// paste puts the first row into the first selected channel and the next rows into the rows below it, whatever else
+    /// is selected; cut copies and clears. Each change is one undo step.
+    #[test]
+    fn clipboard_keys_copy_cut_and_paste_steps() {
+        use winit::keyboard::Key;
+        let mut app = App::new(None);
+        app.state.z = vec![Win::ChannelRack];
+        assert!(app.state.project.channels.len() >= 5);
+        for r in 0..5 {
+            set_row_notes(&mut app.state, r, Vec::new());
+        }
+        let ps = per_step(&app.state);
+        set_step(&mut app.state, 0, 0, true);
+        set_step(&mut app.state, 0, 4, true);
+        set_step(&mut app.state, 1, 2, true);
+        let steps = |app: &App, r: usize| row_notes(&app.state, r).iter().map(|n| n.position / ps).collect::<Vec<_>>();
+        let key = |app: &mut App, k: &str| app.key(&Key::Character(k.into()), true, false);
+        app.state.rack.sel = BTreeSet::from([0, 1]);
+        key(&mut app, "c");
+        assert_eq!(steps(&app, 0), [0, 4], "copy leaves the steps");
+        app.state.rack.sel = BTreeSet::from([2, 4]);
+        key(&mut app, "v");
+        assert_eq!((steps(&app, 2), steps(&app, 3), steps(&app, 4)), (vec![0, 4], vec![2], vec![]), "rows 2 and 3");
+        key(&mut app, "z");
+        assert!(steps(&app, 2).is_empty() && steps(&app, 3).is_empty(), "one undo step");
+        app.state.rack.sel = BTreeSet::from([1]);
+        key(&mut app, "x");
+        assert!(steps(&app, 1).is_empty(), "cut clears");
+        app.state.rack.sel = BTreeSet::from([4]);
+        key(&mut app, "v");
+        assert_eq!(steps(&app, 4), [2], "and pastes elsewhere");
+    }
+
+    /// 1..9, 0 mute channels 1..10 and Ctrl + a digit solos one (§10); with the typing keyboard on, the plain digits play
+    /// notes and Ctrl + a digit still solos.
+    #[test]
+    fn digit_keys_mute_and_solo_with_the_typing_keyboard() {
+        use winit::keyboard::{Key, KeyCode};
+        let mut app = App::new(None);
+        app.state.z = vec![Win::ChannelRack];
+        assert!(app.state.project.channels.len() >= 3);
+        // One key press the way main.rs delivers it.
+        let press = |app: &mut App, code: KeyCode, d: &str, ctrl: bool| {
+            if !app.typing_key(code, true, ctrl, false) {
+                app.key(&Key::Character(d.into()), ctrl, false);
+            }
+            app.typing_key(code, false, ctrl, false);
+        };
+        let on = |app: &App| app.state.project.channels.iter().map(|c| c.enabled).collect::<Vec<_>>();
+        if app.typing_on() {
+            app.toggle_typing();
+        }
+        assert!(on(&app).iter().all(|&e| e));
+        press(&mut app, KeyCode::Digit2, "2", false);
+        assert!(!on(&app)[1], "typing keyboard off: 2 mutes channel 2");
+        press(&mut app, KeyCode::Digit2, "2", false);
+        assert!(on(&app)[1], "and unmutes it");
+
+        app.toggle_typing();
+        assert!(app.typing_on());
+        press(&mut app, KeyCode::Digit2, "2", false);
+        assert!(on(&app)[1], "typing keyboard on: 2 plays a note");
+        press(&mut app, KeyCode::Digit3, "3", true);
+        assert_eq!(on(&app).iter().filter(|&&e| e).count(), 1, "typing keyboard on: Ctrl+3 solos channel 3: {:?}", on(&app));
+        assert!(on(&app)[2]);
+    }
+
     /// A new project's channel name, "Lemon Sampler", fits the 100 % name button at every UI scale: the label keeps
     /// 4 px on each side (§17). Runs with the platform's text engine (GDI's Cuprum on Windows, Barlow on Linux).
     #[test]
@@ -2185,6 +2323,16 @@ mod tests {
             let text = c.text_width(os_ui::Font::new(14), crate::plugins::LEMON_SAMPLER);
             assert!(text <= w - 8.0, "{text} px at scale {scale}");
         }
+    }
+
+    /// Deleting a channel keeps the tempo's control points (channel 0x4000), which belong to no channel.
+    #[test]
+    fn restructuring_keeps_tempo_points() {
+        let mut p = crate::app::test_project();
+        let tempo = os_model::ControlPoint::new(96, 0x4000, 5, 140_000);
+        p.patterns[0].controls = vec![os_model::ControlPoint::new(0, 1, os_model::ControlPoint::VOLUME, 6400), tempo];
+        remap_project(&mut p, &[Some(0), None, Some(1), Some(2), Some(3)]);
+        assert_eq!(p.patterns[0].controls, [tempo]);
     }
 
     /// Clone, move and delete renumber the channels' notes so each note keeps its channel (§17-18).

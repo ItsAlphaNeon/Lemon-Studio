@@ -121,14 +121,14 @@ pub fn snap_menu(s: &State, x: f32, y: f32) -> Popup {
     let mut items = vec![radio(EditorSnap::Main), PItem::sep(), radio(EditorSnap::Grid(Snap::Line)), radio(EditorSnap::Grid(Snap::Cell)), PItem::sep()];
     items.extend(Snap::MENU.iter().filter(|sn| !matches!(sn, Snap::Line | Snap::Cell)).map(|&sn| radio(EditorSnap::Grid(sn))));
     items.extend([PItem::sep(), radio(EditorSnap::Events), radio(EditorSnap::Markers)]);
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The right-click menu (§7): the length of the next notes drawn.
 pub fn lengths_menu(x: f32, y: f32) -> Popup {
     let mut items = vec![PItem::head("Stock note lengths")];
     items.extend(Snap::MENU.iter().filter(|sn| !matches!(sn, Snap::Line | Snap::Cell | Snap::None)).map(|&sn| PItem::new(sn.label(), Cmd::Piano(NCmd::StockLength(sn)))));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Pick a Snap menu entry (kept in the user folder, §8).

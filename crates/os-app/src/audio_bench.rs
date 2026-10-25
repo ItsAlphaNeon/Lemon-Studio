@@ -72,6 +72,9 @@ impl Instrument for TimedInst {
     fn transport(&mut self, info: &TransportInfo) {
         self.0.lock().unwrap().transport(info)
     }
+    fn reported_delay(&self) -> u32 {
+        self.0.lock().unwrap().reported_delay()
+    }
 }
 
 /// [`TimedInst`] for effects.
@@ -88,6 +91,9 @@ impl HostedEffect for TimedFx {
     }
     fn transport_fx(&mut self, info: &TransportInfo) {
         self.0.lock().unwrap().transport_fx(info)
+    }
+    fn reported_delay_fx(&self) -> u32 {
+        self.0.lock().unwrap().reported_delay_fx()
     }
 }
 
@@ -118,7 +124,7 @@ fn audio_load() {
     eprintln!("loaded in {:.1} s", t0.elapsed().as_secs_f64());
     let rate = crate::transport::Transport::device_rate().unwrap_or(48000);
     let project = crate::rack::play_project(&app.state);
-    let mut library = SampleLibrary::new(SampleLibrary::default_factory_dir());
+    let mut library = SampleLibrary::new(crate::factory_folder::dir());
     library.resample_stretches = true;
     let mut e = Engine::new(&project, &mut library, rate, PlayMode::Song);
     let inst = app.plugins.instruments();

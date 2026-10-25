@@ -204,6 +204,9 @@ pub struct DeviceInfo {
     pub buffers: Option<(u32, u32)>,
     /// Output channels open (the master plays on the first two).
     pub channels: u16,
+    /// An ASIO driver's inputs open with its outputs (One-click audio recording), and its input latency, frames.
+    pub inputs: u16,
+    pub input_latency: Option<u32>,
     /// An ASIO driver's: the rates of `audio_cfg::RATES` and the lengths of `audio_cfg::BUFFERS` it takes (empty for
     /// a Windows device, which is not asked).
     pub rates: Vec<u32>,
@@ -495,7 +498,7 @@ fn open_small(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, Option<Str
 fn wasapi_open(w: wasapi::Opened, host: &'static str, inbox: Arc<Queue>, outbox: Arc<Queue>, errors: Errors) -> Open {
     let i = w.info;
     let fixed = Some(if host == WASAPI_EXCLUSIVE { i.period } else { i.buffer });
-    let info = DeviceInfo { host, name: i.name, rate: i.rate, fixed, buffers: Some(i.range), channels: i.channels, rates: Vec::new(), sizes: Vec::new(), latency: i.latency, instead: None };
+    let info = DeviceInfo { host, name: i.name, rate: i.rate, fixed, buffers: Some(i.range), channels: i.channels, inputs: 0, input_latency: None, rates: Vec::new(), sizes: Vec::new(), latency: i.latency, instead: None };
     Open { _stream: Stream::Wasapi(w.out), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault }
 }
 
@@ -511,7 +514,7 @@ fn open_asio(name: &str, cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open,
     let (inbox, outbox, errors) = queues(xruns);
     let a = asio::open(name, cfg.rate, cfg.buffer, Mix::new(inbox.clone(), outbox.clone()), errors.clone())?;
     let (fixed, buffers) = (Some(a.frames), Some(a.buffers));
-    let info = DeviceInfo { host: ASIO, name: name.to_string(), rate: a.rate, fixed, buffers, channels: a.channels, rates: a.rates, sizes: a.sizes, latency: a.latency, instead: None };
+    let info = DeviceInfo { host: ASIO, name: name.to_string(), rate: a.rate, fixed, buffers, channels: a.channels, inputs: a.inputs, input_latency: a.input_latency, rates: a.rates, sizes: a.sizes, latency: a.latency, instead: None };
     Ok(Open { _stream: Stream::Asio(a.out), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault })
 }
 
@@ -536,7 +539,7 @@ fn open_system(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
     }
     let stream = stream?;
     stream.play().map_err(|e| e.to_string())?;
-    let info = DeviceInfo { host, name: out.name, rate: config.sample_rate, fixed, buffers, channels: config.channels, rates: Vec::new(), sizes: Vec::new(), latency: None, instead: None };
+    let info = DeviceInfo { host, name: out.name, rate: config.sample_rate, fixed, buffers, channels: config.channels, inputs: 0, input_latency: None, rates: Vec::new(), sizes: Vec::new(), latency: None, instead: None };
     Ok(Open { _stream: Stream::Cpal(stream), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault })
 }
 

@@ -47,29 +47,39 @@ pub fn native_first() -> bool {
     os_native::prefer_native()
 }
 
-/// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, the parametric EQ).
+/// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, Sytrus, the
+/// parametric EQ).
 pub fn has_recreation(id: &str) -> bool {
-    id.eq_ignore_ascii_case(crate::osc3::FILE_NAME) || id.eq_ignore_ascii_case(crate::plugins::EQ_FILE_NAME)
+    [crate::osc3::FILE_NAME, crate::citrus::FILE_NAME, crate::plugins::EQ_FILE_NAME].iter().any(|n| id.eq_ignore_ascii_case(n))
 }
 
-/// Whether a hosted plugin is saved inside the wrapper: CLAP, VST3 and VST2 plugins from plugin files.
+/// Whether a hosted plugin is saved inside the wrapper: CLAP, VST3 and VST2 plugins from plugin files, and the built-in
+/// effects that have no file plugin of their own to be saved as (`plugins::LINKED_EFFECTS`).
 pub fn is_wrapped(d: &Descriptor) -> bool {
     #[cfg(test)]
     if WRAP_BUILTINS.with(|w| w.get()) {
         return matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2);
     }
-    matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2) && !is_builtin(d)
+    matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2) && (!is_builtin(d) || crate::plugins::LINKED_EFFECTS.contains(&d.name.as_str()))
 }
 
-/// The project-file identity of a hosted plugin with its saved state.
+/// The project-file identity of a hosted plugin with its saved state. A built-in effect with no file plugin of its own
+/// (`plugins::LINKED_EFFECTS`) names its CLAP bundle in the per-user CLAP folder, where `bundle-plugins --install` puts
+/// it: the wrapper takes the format from the file's extension, and another host can find the bundle there.
 pub fn plugin_ref(d: &Descriptor, state: Vec<u8>) -> PluginRef {
+    let path = if is_builtin(d) && crate::plugins::LINKED_EFFECTS.contains(&d.name.as_str()) {
+        let file = format!("{}.clap", d.name);
+        os_clap::standard_dirs().into_iter().next().map_or_else(|| file.clone().into(), |dir| dir.join(&file))
+    } else {
+        d.path.clone()
+    };
     PluginRef {
         format: d.format.as_str().into(),
         // A CLAP id has no place in the wrapper state (spec §4): such plugins are found by file and name.
         id: if matches!(d.format, Format::Vst3 | Format::Vst2) { d.id.clone() } else { String::new() },
         name: d.name.clone(),
         vendor: d.vendor.clone(),
-        path: d.path.to_string_lossy().into_owned(),
+        path: path.to_string_lossy().into_owned(),
         state,
     }
 }
@@ -180,6 +190,48 @@ pub fn wrapped_slot(s: &SlotPlugin) -> Option<PluginRef> {
     (s.name == WRAPPER).then(|| wrapper::decode(&s.state)).flatten()
 }
 
+/// The input ports a mixer slot's wrapped plugin is saved with: its main and first auxiliary input bus, each the number
+/// of a track's input counted from 1, 0 for none (spec: audio/sidechain.md "Hosted plugins' input buses").
+pub fn slot_ports(project: &Project, track: usize, slot: usize) -> (usize, usize) {
+    let Some(s) = project.mixer.iter().find(|m| usize::from(m.index) == track).and_then(|m| m.slots.get(slot)?.as_ref()) else {
+        return (0, 0);
+    };
+    if s.name != WRAPPER {
+        return (0, 0);
+    }
+    let ports = wrapper::input_ports(&s.state);
+    let port = |b: usize| ports.get(b).map_or(0, |&p| p.max(0) as usize);
+    (port(0), port(1))
+}
+
+/// Sets the sidechain port (the first auxiliary input bus) of the hosted plugin in mixer slot `slot` of track `track`:
+/// the number of the track's input it listens to, 0 for none. A slot that does not hold a wrapped plugin yet becomes
+/// one, as a save makes it. `false` when the slot holds no wrapped plugin (spec: audio/sidechain.md "Hosted plugins'
+/// input buses").
+pub fn set_slot_sidechain(proj: &mut Project, plugins: &Plugins, track: u16, slot: u8, port: usize) -> bool {
+    let key = crate::plugins::fx_key(track, slot);
+    let Some(s) = proj.mixer.iter_mut().find(|m| m.index == track).and_then(|m| m.slots.get_mut(usize::from(slot))?.as_mut()) else {
+        return false;
+    };
+    if s.name != WRAPPER {
+        let Some(d) = plugins.descriptor(key).filter(is_wrapped) else { return false };
+        s.state = wrapper::encode(None, &plugin_ref(&d, plugins.state(key).unwrap_or_default()));
+        s.name = WRAPPER.into();
+    }
+    let Some(state) = wrapper::set_input_port(&s.state, 1, i32::try_from(port).unwrap_or(0)) else { return false };
+    s.state = state;
+    true
+}
+
+/// Attaches hosted effects to `e`, each with the input ports its slot is saved with in `project`.
+pub fn attach_effects(e: &mut os_engine::Engine, project: &Project, fx: impl IntoIterator<Item = (usize, usize, os_engine::SharedEffect)>) {
+    for (t, s, f) in fx {
+        e.set_effect(t, s, f);
+        let (main, aux) = slot_ports(project, t, s);
+        e.set_effect_ports(t, s, main, aux);
+    }
+}
+
 fn same_file(a: &std::path::Path, b: &str) -> bool {
     let b = b.rsplit(['\\', '/']).next().unwrap_or(b);
     a.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(b))
@@ -265,6 +317,10 @@ impl crate::app::App {
                 Some((other, Ok(_))) => {
                     self.state.hosted_rows.push(row);
                     added.0 = true;
+                    // Glides reach a plugin without note tuning as pitch bend over the wrapper's range.
+                    if let Some(n) = self.state.project.channels[row].plugin_state.as_deref().and_then(wrapper::bend_range) {
+                        self.plugins.set_bend_range(row, n);
+                    }
                     if other.is_some() {
                         self.plugins.mark_stand_in(row);
                     }
@@ -584,6 +640,69 @@ mod tests {
         let r2 = wrapped_channel(&again.channels[row]).unwrap();
         assert_eq!(Some(r2.state), b.plugins.state(row));
         assert_eq!(again.mixer[3].slots[2], saved.mixer[3].slots[2]);
+    }
+
+    /// Every Lemon effect is compiled in: the EQ, then `LINKED_EFFECTS` in that order, each an effect from this program.
+    #[test]
+    fn every_lemon_effect_is_built_in() {
+        let fx = crate::plugins::builtin_effects();
+        let names: Vec<&str> = fx.iter().map(|a| a.desc.name.as_str()).collect();
+        let want: Vec<&str> = std::iter::once(LEMON_EQ).chain(crate::plugins::LINKED_EFFECTS).collect();
+        assert_eq!(names, want);
+        for a in &fx {
+            assert!(is_builtin(&a.desc), "{}", a.desc.name);
+            assert_eq!(a.desc.kind, os_host::Kind::Effect, "{}", a.desc.name);
+        }
+    }
+
+    /// Lemon Studio's other effects are compiled in like the EQ but have no file plugin of their own to be saved as: a
+    /// slot hosting one is saved wrapped with its state, and the reopened project hosts the built-in copy again with
+    /// that state.
+    #[test]
+    fn linked_effects_save_wrapped_and_reopen() {
+        use crate::plugins::LINKED_EFFECTS;
+        let path = std::env::temp_dir().join(format!("openstudio-linked-fx-{}.flp", std::process::id()));
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let key = |k: usize| fx_key(3, k as u8);
+        let mut set = Vec::new();
+        for (k, name) in LINKED_EFFECTS.iter().enumerate() {
+            a.state.project.mixer[3].slots[k] = Some(crate::plugins::new_slot(name));
+            a.plugins.create_effect(3, k as u8, a.plugins.effect_index(name).unwrap(), None).unwrap();
+            // One setting away from its default.
+            let p = a.plugins.param_infos(key(k)).into_iter().find(|p| !p.read_only && !p.bypass).unwrap();
+            let n = if (p.default - 0.3).abs() > 0.1 { 0.3 } else { 0.8 };
+            assert!(a.plugins.set_param_named(key(k), &p.name, p.min + n * (p.max - p.min)), "{name}");
+            // The edit reaches the plugin at its next idle (the app idles its plugins every tick).
+            a.plugins.hosted[&key(k)].plugin.lock().unwrap().idle();
+            let v = a.plugins.param_value(key(k), p.id).unwrap();
+            assert_ne!(v, p.default, "{name}: {}", p.name);
+            set.push((p.id, v));
+        }
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved") && !m.contains("not stored")), "{:?}", a.state.message);
+
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        for (k, name) in LINKED_EFFECTS.iter().enumerate() {
+            let r = wrapped_slot(saved.mixer[3].slots[k].as_ref().unwrap()).unwrap_or_else(|| panic!("{name} wrapped"));
+            assert_eq!((Format::parse(&r.format), r.name.as_str()), (Some(Format::Clap), *name));
+            assert!(r.path.ends_with(&format!("{name}.clap")), "{}", r.path);
+        }
+
+        let mut b = App::new(None);
+        b.plugins.available = crate::plugins::builtin();
+        b.plugins.effects = crate::plugins::builtin_effects();
+        b.open(path.clone());
+        b.sync_wrapped();
+        let _ = std::fs::remove_file(&path);
+        for (k, name) in LINKED_EFFECTS.iter().enumerate() {
+            assert_eq!(crate::mixer::slot_name(&b.state, 3, k as u8).as_deref(), Some(*name));
+            assert!(b.plugins.descriptor(key(k)).is_some_and(|d| is_builtin(&d)), "{name} hosted, built in");
+            assert_eq!(b.plugins.param_value(key(k), set[k].0), Some(set[k].1), "{name} kept its setting");
+        }
     }
 
     /// Mixer tracks added in the app are saved (before the hidden last track) and come back on reopening; deleting a

@@ -29,7 +29,8 @@ pub fn user_themes() -> Vec<(String, String)> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("flstheme")))
-        .filter_map(|p| Some((p.file_stem()?.to_string_lossy().into_owned(), String::from_utf8_lossy(&std::fs::read(&p).ok()?).into_owned())))
+        // Picture names relative to the theme file are this folder's (`wallpaper::absolute_names`).
+        .filter_map(|p| Some((p.file_stem()?.to_string_lossy().into_owned(), crate::wallpaper::absolute_names(&String::from_utf8_lossy(&std::fs::read(&p).ok()?), &d))))
         .collect();
     v.sort_by_key(|(n, _)| n.to_lowercase());
     v
@@ -327,7 +328,7 @@ impl App {
             items.push(PItem::new("Delete...", Cmd::Theme(ThemeCmd::Delete(i))));
             items.push(PItem::new("Show in folder", Cmd::Theme(ThemeCmd::Show(i))));
         }
-        self.state.playlist.popup = Some(Popup { x, y, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
         self.invalidate();
     }
 
@@ -509,7 +510,7 @@ impl App {
 }
 
 /// Opens the system file browser at `path`, selected.
-fn show_in_folder(path: &std::path::Path) {
+pub(crate) fn show_in_folder(path: &std::path::Path) {
     #[cfg(windows)]
     let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
     #[cfg(target_os = "macos")]

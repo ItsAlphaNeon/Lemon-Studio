@@ -148,6 +148,28 @@ fn notes_reach_the_plugin_at_their_frames() {
     assert_eq!(probe(|p| p.midi[2..].iter().map(|m| m.3).collect::<Vec<_>>()), [1, 64]);
 }
 
+/// Glides (spec: audio/channel-voices.md): VST 2 has no tuning of a note, so a key's tuning is a pitch bend over the
+/// wrapper's range, centred again before the next note; a stop centres it too.
+#[test]
+fn glides_are_pitch_bend() {
+    let (_m, mut p) = synth();
+    p.activate(48000);
+    p.set_bend_range(2);
+    p.note_on(0, 60, 1.0);
+    p.tune(4, 60, 1.0);
+    p.tune(6, 60, 1.0);
+    p.tune(8, 60, -2.0);
+    p.note_on(12, 64, 1.0);
+    let (mut l, mut r) = (vec![0.0; 16], vec![0.0; 16]);
+    p.process(48000, &mut l, &mut r);
+    assert_eq!(probe(|p| p.midi.clone()), [(0, 0x90, 60, 127), (4, 0xE0, 0, 0x60), (8, 0xE0, 0, 0), (12, 0xE0, 0, 0x40), (12, 0x90, 64, 127)]);
+    p.tune(0, 64, 2.0);
+    p.process(48000, &mut l, &mut r);
+    p.reset();
+    p.process(48000, &mut l, &mut r);
+    assert!(probe(|p| p.midi.contains(&(0, 0xE0, 0, 0x40))), "a stop centres the bend");
+}
+
 #[test]
 fn a_stop_ends_held_notes_and_all_sound() {
     let (_m, mut p) = synth();

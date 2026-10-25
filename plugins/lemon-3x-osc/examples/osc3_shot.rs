@@ -3,10 +3,11 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Renders the Lemon Trio editor offscreen:
-//! `cargo run -p lemon-3x-osc --example osc3_shot -- out.png [osc|env|pan|custom|demo] [x,y] [crop]`.
+//! `cargo run -p lemon-3x-osc --example osc3_shot -- out.png [osc|env|pan|custom|sample|nosample|demo] [x,y] [crop]`.
 //! `env` shows the envelope page (volume), `pan` its Panning page (LFO greyed out); `custom` puts osc 1 on the Custom
-//! shape (greyed out); `demo` sets a few oscillator controls; `x,y` = mouse position (hover looks,
-//! `OS_PRESS` presses); `crop` saves only the editor area the host shows (560 x 437).
+//! shape; `sample` shows the sample page with a drawn wave (`nosample`: without one); `demo` sets a few oscillator
+//! controls; `x,y` = mouse position (hover looks, `OS_PRESS` presses); `crop` saves only the editor area the host shows
+//! (560 x 437).
 use std::sync::Arc;
 
 use lemon_3x_osc::editor::{Btn, Logic, Mods};
@@ -29,6 +30,19 @@ fn main() {
             l.view.sub = 0;
         }
         Some("custom") => l.vals.edit_plain("o1_shape", 6.0),
+        Some("sample") => {
+            l.view.tab = 2;
+            // A period with a few harmonics, as a single-cycle file would give.
+            let pts: Vec<f32> = (0..600)
+                .map(|i| {
+                    let u = std::f32::consts::TAU * i as f32 / 600.0;
+                    0.6 * u.sin() + 0.25 * (3.0 * u).sin() + 0.1 * (7.0 * u).cos()
+                })
+                .collect();
+            l.shared.set_custom(lemon_3x_osc::dsp::Wave::new(&pts).map(Arc::new), "C:/Samples/Single cycle/Bright 01.wav", &l.params);
+            l.sync_sample();
+        }
+        Some("nosample") => l.view.tab = 2,
         Some("demo") => {
             l.vals.edit_plain("o1_shape", 3.0);
             l.vals.edit_plain("o2_shape", 2.0);

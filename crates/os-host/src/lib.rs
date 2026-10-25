@@ -147,6 +147,28 @@ pub enum ParamEvent {
     End(u32),
 }
 
+/// A menu a plugin asked the host to pop up over its editor (VST 3 `IContextMenu::popup`), shown as one of the host's
+/// own popups. A newer one replaces it.
+// spec: plugins/vst3-hosting.md §9
+#[derive(Debug, Clone, PartialEq)]
+pub struct Menu {
+    /// Which menu this is, for [`Plugin::menu_done`] (unique across instances).
+    pub id: u64,
+    /// Where, in the editor's pixels from its top-left (what [`Plugin::editor_size`] measures in).
+    pub at: (i32, i32),
+    pub items: Vec<MenuItem>,
+}
+
+/// One row of a plugin [`Menu`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum MenuItem {
+    /// `pick` is what [`Plugin::menu_done`] takes when the row is picked.
+    Entry { label: String, pick: usize, enabled: bool, checked: bool },
+    Separator,
+    /// A submenu (its rows may hold submenus of their own).
+    Sub { label: String, items: Vec<MenuItem> },
+}
+
 /// A loaded plugin file of any format.
 pub trait Library: Send + Sync {
     /// The file it was loaded from.
@@ -257,9 +279,20 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         Vec::new()
     }
     /// Parameters the plugin's own menus asked the host to automate since the last call ("Create automation clip",
-    /// CLAP context-menu host entries), by parameter id. Plugins without such menus return nothing.
+    /// CLAP context-menu host entries, VST 3 context-menu host entries), by parameter id. Plugins without such menus
+    /// return nothing.
     fn take_automation_requests(&mut self) -> Vec<u32> {
         Vec::new()
+    }
+    /// A menu the plugin asked the host to pop up over its editor since the last call (UI thread). The host shows it
+    /// and reports how it ended with [`Plugin::menu_done`].
+    fn take_menu(&mut self) -> Option<Menu> {
+        None
+    }
+    /// Menu `id` ([`Plugin::take_menu`]) closed: with `pick`, the user picked that entry and the plugin runs it now (UI
+    /// thread); without, it closed with no pick. A menu a newer one replaced is ignored.
+    fn menu_done(&mut self, id: u64, pick: Option<usize>) {
+        let _ = (id, pick);
     }
 
     /// The exception code of the crash that stopped the instance ([`Guarded`]), or of the error it stopped itself after,

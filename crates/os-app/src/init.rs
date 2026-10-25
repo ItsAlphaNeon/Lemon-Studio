@@ -365,13 +365,13 @@ mod tests {
         a.state.song_mode = true;
         a.set_song_pos(192, false);
         assert_eq!(controls(&a), INIT);
-        // Playback start, then Stop (the position goes back to the start).
+        // Playback start, then Stop (the position goes back to where playback started).
         moved(&mut a);
         a.start_playback();
         assert_eq!(controls(&a), INIT);
         moved(&mut a);
         a.act(Action::Stop);
-        assert_eq!((controls(&a), a.state.playlist.pos), (INIT, 0));
+        assert_eq!((controls(&a), a.state.playlist.pos), (INIT, 192));
         // The song looping back to its start.
         moved(&mut a);
         a.show_playback(Shown { playing: true, song: true, tick: 900.0, ..Shown::default() });

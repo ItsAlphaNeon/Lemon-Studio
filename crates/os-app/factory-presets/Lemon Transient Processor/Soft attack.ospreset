@@ -1,0 +1,12 @@
+OSPRESET 1
+plugin=Lemon Transient Processor	id=clap:org.openstudio.lemon-transient-processor	format=clap	body=params
+# Values: OpenStudio-specs plugins/factory-presets.md.
+Attack = 40
+Drive = 0
+Release = 80
+Gain = 80
+Attack shape = 2
+Release shape = 1
+Split frequency = 80
+Split balance = 80
+Processing = 1

@@ -342,6 +342,11 @@ impl Plugin {
         self.host.num_params().unwrap_or(self.info.num_params).max(0) as usize
     }
 
+    /// The delay the plugin reports with host dispatcher 30 SetLatency, in samples (spec: "Host dispatcher IDs").
+    pub fn latency(&self) -> u32 {
+        self.host.latency()
+    }
+
     /// The name of parameter `index` (GetName section 0).
     pub fn param_name(&self, index: i32) -> String {
         self.get_name(abi::name::PARAM, index)

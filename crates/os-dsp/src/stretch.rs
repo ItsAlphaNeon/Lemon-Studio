@@ -33,11 +33,41 @@ pub fn whole(left: &[f32], right: &[f32], rate: u32, frames: usize, transpose: f
         input[2 * i + 1] = right[i];
     }
     let mut out = vec![0.0f32; out_n * 2];
-    let done = st.exact(&input, &mut out);
-    debug_assert!(done, "the output is at least twice the latency");
+    exact(&mut st, &input, &mut out);
     let l = out.iter().step_by(2).take(frames).copied().collect();
     let r = out.iter().skip(1).step_by(2).take(frames).copied().collect();
     (l, r)
+}
+
+/// Signalsmith Stretch's `exact` (the whole of `input` into the whole of `out`, latency taken out; interleaved
+/// stereo; `out` at least twice the output latency), step by step as the library does it, but with the first input
+/// latency's worth of input it seeks on zero-padded: the library reads that many frames whatever the input's length,
+/// so a sample shorter than it (a one-shot of a few ms) was read past its end, heard as garbage on every hit or a
+/// crash.
+fn exact(st: &mut Stretch, input: &[f32], out: &mut [f32]) {
+    let (n, frames) = (input.len() / 2, out.len() / 2);
+    let (lat_in, lat_out) = (st.input_latency(), st.output_latency());
+    debug_assert!(frames >= 2 * lat_out, "the output is at least twice the latency");
+    // Start positioned on the centre of the input.
+    let mut head = vec![0.0f32; lat_in * 2];
+    let m = n.min(lat_in) * 2;
+    head[..m].copy_from_slice(&input[..m]);
+    st.seek(&head, n as f64 / frames as f64);
+    // Then the input after that, `n` frames of it, silence past its end.
+    let mut rest = vec![0.0f32; n * 2];
+    if n > lat_in {
+        rest[..(n - lat_in) * 2].copy_from_slice(&input[lat_in * 2..]);
+    }
+    st.process(&rest, &mut *out);
+    // Fold the first bit of the output back onto itself, then shift everything along by the output latency.
+    for i in 0..(frames - lat_out).min(lat_out) {
+        for c in 0..2 {
+            out[(i + lat_out) * 2 + c] -= out[(lat_out - 1 - i) * 2 + c];
+        }
+    }
+    out.copy_within(lat_out * 2.., 0);
+    // The final chunk.
+    st.flush(&mut out[(frames - lat_out) * 2..]);
 }
 
 /// A stretch that runs while a voice plays: stereo frames in, stereo frames out, in any amounts per call, the pitch
@@ -162,6 +192,54 @@ mod tests {
         assert!(rms(&l[1000..3000]) > 0.1, "the sound is there");
         let (l, _) = whole(&s, &s, rate, 0, 1.0);
         assert!(l.is_empty());
+    }
+
+    /// `exact` gives the library's own result wherever that one is safe (an input at least its input latency long).
+    #[test]
+    fn exact_matches_the_library_on_long_inputs() {
+        for (rate, n, frames, t) in [(44100u32, 44100usize, 88200usize, 1.0f32), (48000, 30000, 12000, 1.3), (22050, 9000, 9000, 0.8)] {
+            let s = sine(330.0, n as f64 / f64::from(rate), rate);
+            let input: Vec<f32> = s.iter().flat_map(|&v| [v, -v]).collect();
+            let run = |ours: bool| {
+                let mut st = Stretch::preset_default(2, rate);
+                st.set_transpose_factor(t, None);
+                assert!(n >= st.input_latency());
+                let mut out = vec![0.0f32; frames * 2];
+                if ours {
+                    exact(&mut st, &input, &mut out);
+                } else {
+                    assert!(st.exact(&input, &mut out));
+                }
+                out
+            };
+            // The library is not bit-exact from run to run, and differs more on some platforms (a single sample up to
+            // about 0.006 on Linux): the difference's RMS against the signal's.
+            let (a, b) = (run(true), run(false));
+            let rms = |v: &mut dyn Iterator<Item = f32>| {
+                let (sum, n) = v.fold((0.0f64, 0usize), |(s, n), x| (s + f64::from(x) * f64::from(x), n + 1));
+                (sum / n.max(1) as f64).sqrt()
+            };
+            let d = rms(&mut a.iter().zip(&b).map(|(p, q)| p - q)) / rms(&mut b.iter().copied());
+            assert!(d < 0.01, "rate {rate}, {n} -> {frames}: relative RMS difference {d}");
+        }
+    }
+
+    /// A sample shorter than the stretcher's input latency, stretched long (a one-shot of a few ms fitted to a beat):
+    /// the stretcher used to read past the sample's end (garbage on every hit, or a crash). Many times over, so a read
+    /// past the end would show.
+    #[test]
+    fn whole_handles_samples_shorter_than_its_input_latency() {
+        for rate in [22050, 44100, 48000] {
+            for n in [1usize, 8, 100, 480, 2000] {
+                let s: Vec<f32> = sine(220.0, n as f64 / f64::from(rate), rate).into_iter().chain(std::iter::repeat(0.25)).take(n).collect();
+                for frames in [n, 4 * n, 22150, 88600] {
+                    let (l, r) = whole(&s, &s, rate, frames, 1.0);
+                    assert_eq!((l.len(), r.len()), (frames, frames));
+                    let peak = l.iter().chain(&r).fold(0.0f32, |m, v| if v.is_finite() { m.max(v.abs()) } else { f32::INFINITY });
+                    assert!(peak < 2.0, "rate {rate}, {n} frames to {frames}: peak {peak}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -11,7 +11,9 @@
 //! same frame of reference as Lemon Sampler's pages: the page's top-left is FL (4, 72).
 // spec: ui/plugin-window.md (Misc tab), plugins/lemon-sampler.md §9 (Misc page layout)
 
+use os_theme::design::lemon as brand;
 use os_theme::{Color, Palette};
+use os_ui::kit::lemon::{self as lk, plug};
 use os_ui::kit::{inst, State as KS};
 use os_ui::tabler as tb;
 use os_ui::{Canvas, Font, Glyph, Rect};
@@ -234,7 +236,7 @@ pub fn off_name(h: Hit, v: &MiscVals) -> Option<&'static str> {
         Hit::ArpDir(_) => Some("Arpeggiator"),
         Hit::TrackTab(_) => Some("Tracking"),
         Hit::Touch => Some("Multi-touch keyboard"),
-        Hit::CutSelf | Hit::Reset | Hit::Key(_) | Hit::Keyboard => None,
+        Hit::CutSelf | Hit::Reset | Hit::Key(_) | Hit::Keyboard | Hit::ScrollBar => None,
     }
 }
 
@@ -473,8 +475,10 @@ pub enum Hit {
     Touch,
     /// A keyboard key.
     Key(u8),
-    /// The keyboard's ruler or scroll bar (wheel scrolls).
+    /// The keyboard's ruler (wheel scrolls).
     Keyboard,
+    /// The keyboard's scroll bar (drag the thumb; wheel scrolls).
+    ScrollBar,
 }
 
 /// Page UI state kept by the frame.
@@ -486,6 +490,8 @@ pub struct MiscUi {
     pub kb_scroll: f32,
     /// Drag in progress: value, start y (or x for sliders), start value.
     pub drag: Option<(M, f32, f32)>,
+    /// Scroll bar thumb drag in progress: start FL x, start scroll (`bar_press`).
+    pub bar_drag: Option<(f32, f32)>,
     pub hover: Option<Hit>,
     /// Key held by a left press on the keyboard.
     pub held: Option<u8>,
@@ -495,7 +501,7 @@ pub struct MiscUi {
 
 impl Default for MiscUi {
     fn default() -> Self {
-        MiscUi { track_key: true, kb_scroll: 96.0 - 3.0 * OCTAVE, drag: None, hover: None, held: None, hint: String::new() }
+        MiscUi { track_key: true, kb_scroll: 96.0 - 3.0 * OCTAVE, drag: None, bar_drag: None, hover: None, held: None, hint: String::new() }
     }
 }
 
@@ -560,7 +566,7 @@ pub fn hit(ui: &MiscUi, x: f32, y: f32) -> Option<Hit> {
                 return Some(Hit::Key(k));
             }
         }
-        return Some(Hit::Keyboard);
+        return Some(if fy > KB_BOTTOM { Hit::ScrollBar } else { Hit::Keyboard });
     }
     None
 }
@@ -662,8 +668,23 @@ fn state_of(ui: &MiscUi, v: &MiscVals, h: Hit) -> KS {
     KS::hover(ui.hover == Some(h) && !off).with_disabled(off)
 }
 
-/// Veils over what is greyed out: whole panels with nothing working, rounded like the panel in the Lemon design. The
-/// single controls (`works`) draw their disabled look; Classic veils them too (FL px rects).
+/// A highlight colour of the page: FL's orange accent and the root key's blues. The Lemon design draws them in its
+/// yellow (through the theme), as Lemon Sampler's pages do.
+fn hi(t: &Palette, hex: u32) -> Color {
+    if !t.style.lemon() {
+        return t.a(hex);
+    }
+    match hex {
+        0xffa830 | 0x77a9e6 => t.brand_lit(brand::MAIN),
+        0x235fc3 => t.brand_lit(brand::DEEP),
+        0x5785d2 => t.brand_lit(brand::DEEP.mix(brand::MAIN, 0.5)),
+        0x225cc3 => t.brand_lit(brand::COLORED_DARK),
+        _ => t.a(hex),
+    }
+}
+
+/// Veils over what is greyed out: whole panels with nothing working, as Lemon Sampler greys out its panels in the
+/// Lemon design. The single controls (`works`) draw their disabled look; Classic veils them too (FL px rects).
 fn veil_off(c: &mut Canvas, t: &Palette, v: &MiscVals) {
     let veil = t.s(0x222525).with_alpha(crate::app::OFF_VEIL);
     let lemon = t.style.lemon();
@@ -671,8 +692,7 @@ fn veil_off(c: &mut Canvas, t: &Palette, v: &MiscVals) {
     for i in [3, 5, 6] {
         let (x0, x1, y0, y1, _, _) = PANELS[i];
         if lemon {
-            // The corners of the Lemon panel (`inst::panel`).
-            c.fill_rrect(rect(x0, x1, y0, y1), 10.0, veil);
+            lk::plug_veil(c, rect(x0, x1, y0, y1));
         } else {
             c.fill_rect(rect(x0, x1, y0, y1), veil);
         }
@@ -693,15 +713,17 @@ fn veil_off(c: &mut Canvas, t: &Palette, v: &MiscVals) {
 /// Paints the page with its top-left at (ax, ay) of the frame (frame px).
 pub fn paint(c: &mut Canvas, t: &Palette, ax: f32, ay: f32, v: &MiscVals, ui: &MiscUi) {
     ORG.with(|o| o.set((ax, ay)));
+    let lemon = t.style.lemon();
     c.push_clip(Rect::new(ax, ay, PAGE_W, PAGE_H));
-    c.fill_rect(Rect::new(ax, ay, PAGE_W, PAGE_H), t.s(0x202324));
+    // The Lemon design: Lemon Sampler's editor background around the panels.
+    c.fill_rect(Rect::new(ax, ay, PAGE_W, PAGE_H), if lemon { plug::BG } else { t.s(0x202324) });
     for &(x0, x1, y0, y1, tw, title) in &PANELS {
         let r = rect(x0, x1, y0, y1);
         inst::panel(c, t, r);
         inst::panel_tab(c, t, r, tw, title);
     }
     headers(c, t, v, ui);
-    let accent = t.a(0xffa830);
+    let accent = hi(t, 0xffa830);
     for &(m, cx, cy, r, ring, dot, cap, capy) in &KNOBS {
         if r <= 0.0 {
             continue;
@@ -754,9 +776,9 @@ pub fn paint(c: &mut Canvas, t: &Palette, ax: f32, ay: f32, v: &MiscVals, ui: &M
     inst::list_box(c, t, cr, &chord, st);
     // Buttons.
     let (x0, x1, y0, y1) = CUT_SELF;
-    dark_button(c, t, rect(x0, x1, y0, y1), "Cut self", state_of(ui, v, Hit::CutSelf).hover);
+    dark_button(c, t, rect(x0, x1, y0, y1), "Cut self", state_of(ui, v, Hit::CutSelf));
     let (x0, x1, y0, y1) = RESET;
-    dark_button(c, t, rect(x0, x1, y0, y1), "Reset", state_of(ui, v, Hit::Reset).hover);
+    dark_button(c, t, rect(x0, x1, y0, y1), "Reset", state_of(ui, v, Hit::Reset));
     // Tracking Mid slider: orange from the left end to the thumb.
     let mid = track_m(M::VolMid, ui.track_key);
     let (mx0, mx1, mcy) = MID_SLIDER;
@@ -767,47 +789,80 @@ pub fn paint(c: &mut Canvas, t: &Palette, ax: f32, ay: f32, v: &MiscVals, ui: &M
     let (lo, hi) = range_of(mid);
     let track = slider_track(c, t, sx0, sx1, scy, (v.get(mid) - lo) / (hi - lo), st, (!st.disabled).then_some(accent));
     let _ = track;
-    // Root note row.
+    // Root note row: the title is the panel's in the Lemon design (Lemon Sampler's root note panel).
     let root = v.get(M::Root).round() as i32;
-    let lh = c.line_height(inst::LABEL);
-    c.text(inst::LABEL, 15.0 + dx(), (326.0 + dy() - lh / 2.0).round(), t.tx(0xd2d8dc), &format!("Root note: {}", note_name(root)));
+    let title = format!("Root note: {}", note_name(root));
+    if lemon {
+        let (x0, x1, y0, y1, _, _) = PANELS[7];
+        inst::panel_tab(c, t, rect(x0, x1, y0, y1), 0.0, &title);
+    } else {
+        let lh = c.line_height(inst::LABEL);
+        c.text(inst::LABEL, 15.0 + dx(), (326.0 + dy() - lh / 2.0).round(), t.tx(0xd2d8dc), &title);
+    }
     inst::label(c, t, 279.0 + dx(), 350.0 + dy(), "Fine tune", false);
     let (fx0, fx1, fcy) = FINE_SLIDER;
     inst::hslider(c, t, fx0 + dx(), fx1 + dx(), fcy + dy(), (v.get(M::Fine) + 100.0) / 200.0, state_of(ui, v, Hit::Value(M::Fine)));
     let (hx, hy) = p(TOUCH.0, TOUCH.1);
-    let hand = if state_of(ui, v, Hit::Touch).disabled { t.text_faint } else { t.tx(0xd2d8dc) };
+    let st = state_of(ui, v, Hit::Touch);
+    // The Lemon design boxes the hand like Lemon Sampler's multi-touch button.
+    let hand = if lemon {
+        lk::plug_button(c, rect(522.0, 555.0, 337.0, 362.0).inset(1.0), 6.0, st)
+    } else if st.disabled {
+        t.text_faint
+    } else {
+        t.tx(0xd2d8dc)
+    };
     c.icon(&tb::HAND_FINGER, Rect::new(hx - 9.0, hy - 9.0, 18.0, 18.0), hand);
-    keyboard(c, t, root as u8, ui);
+    if lemon {
+        keyboard_lemon(c, t, root as u8, ui);
+    } else {
+        keyboard(c, t, root as u8, ui);
+    }
     veil_off(c, t, v);
     c.pop_clip();
 }
 
 /// Header contents that are not plain titles: tracking Vol / Key words, arpeggiator direction marks, echo ▸.
 fn headers(c: &mut Canvas, t: &Palette, v: &MiscVals, ui: &MiscUi) {
+    let lemon = t.style.lemon();
+    // Titles: bold in the Lemon design, like the panels' own (`inst::panel_tab`).
+    let (tf, title_col) = if lemon { (inst::LABEL.bold(), brand::TEXT) } else { (inst::LABEL, t.tx(0xd2d8dc)) };
     let lh = c.line_height(inst::LABEL);
     let ty = (88.5 + dy() - lh / 2.0).round();
-    // Tracking: "Vol" and "Key" are tabs; the active one is orange on a dark cell.
+    // Tracking: "Vol" and "Key" are tabs; the active one is orange on a dark cell (Lemon: Lemon Sampler's tabs).
     for (i, &(x0, x1)) in TRACK_TABS.iter().enumerate() {
         let on = ui.track_key == (i == 1);
+        let st = state_of(ui, v, Hit::TrackTab(i == 1));
+        let s = if i == 0 { "Vol" } else { "Key" };
+        let w = c.text_width(inst::LABEL, s);
+        let x = ((x0 + x1) / 2.0 + dx() - w / 2.0).round();
+        if lemon {
+            lk::text_tab(c, rect(x0, x1, 77.0, 99.0), x, s, inst::LABEL, hi(t, 0xffa830), on, st);
+            continue;
+        }
         if on {
             c.fill_rect(rect(x0, x1, 80.0, 97.0), t.s(0x1b1d1e));
         }
-        let col = if on { t.a(0xffa830) } else if state_of(ui, v, Hit::TrackTab(i == 1)).hover { t.tx(0xffffff) } else { t.tx(0xd2d8dc) };
-        let s = if i == 0 { "Vol" } else { "Key" };
-        let w = c.text_width(inst::LABEL, s);
-        c.text(inst::LABEL, ((x0 + x1) / 2.0 + dx() - w / 2.0).round(), ty, col, s);
+        let col = if on { t.a(0xffa830) } else if st.hover { t.tx(0xffffff) } else { t.tx(0xd2d8dc) };
+        c.text(inst::LABEL, x, ty, col, s);
     }
-    c.text(inst::LABEL, 497.0 + dx(), ty, t.tx(0xd2d8dc), "Tracking");
-    // Arpeggiator: direction marks, the active one on a darker cell.
+    c.text(tf, 497.0 + dx(), ty, title_col, "Tracking");
+    // Arpeggiator: direction marks, the active one on a darker cell (Lemon: Lemon Sampler's LFO shape buttons).
     let dir = v.get(M::ArpDir).round() as usize;
     let my = 196.5 + dy();
     let ty2 = (196.5 + dy() - lh / 2.0).round();
     for (i, &cx) in ARP_DIRS.iter().enumerate() {
         let x = cx + dx();
-        if i == dir {
-            c.fill_rect(Rect::new(x - 9.5, 187.0 + dy(), 19.0, 19.0), t.s(0x1b1d1e));
-        }
-        let col = if state_of(ui, v, Hit::ArpDir(i as u8)).hover { t.tx(0xffffff) } else { t.tx(0xd2d8dc) };
+        let cell = Rect::new(x - 9.5, 187.0 + dy(), 19.0, 19.0);
+        let st = state_of(ui, v, Hit::ArpDir(i as u8));
+        let col = if lemon {
+            lk::choice_button(c, cell, i == dir, hi(t, 0xffa830), st)
+        } else {
+            if i == dir {
+                c.fill_rect(cell, t.s(0x1b1d1e));
+            }
+            if st.hover { t.tx(0xffffff) } else { t.tx(0xd2d8dc) }
+        };
         let tri = |c: &mut Canvas, up: bool, cy: f32, h: f32| {
             let mut g = Glyph::new();
             let s = if up { -1.0 } else { 1.0 };
@@ -835,18 +890,37 @@ fn headers(c: &mut Canvas, t: &Palette, v: &MiscVals, ui: &MiscUi) {
             }
         }
     }
-    c.text(inst::LABEL, 205.0 + dx(), ty2, t.tx(0xd2d8dc), "Arpeggiator");
+    c.text(tf, 205.0 + dx(), ty2, title_col, "Arpeggiator");
     // Echo delay: ▸ then the title.
     let mut g = Glyph::new();
     let (ax, ay) = (330.0 + dx(), 196.5 + dy());
     g.polygon(&[(ax - 2.0, ay - 4.0), (ax + 2.5, ay), (ax - 2.0, ay + 4.0)]);
-    c.glyph(t.tx(0xb4bfc7), &g);
-    c.text(inst::LABEL, 338.0 + dx(), ty2, t.tx(0xd2d8dc), "Echo delay / fat mode");
+    c.glyph(if lemon { plug::DIM } else { t.tx(0xb4bfc7) }, &g);
+    c.text(tf, 338.0 + dx(), ty2, title_col, "Echo delay / fat mode");
 }
 
 /// FL's number box: a rounded grey block, brightest across its middle, with the value right-aligned (or `---`) and
-/// small up / down arrows at its right edge; a disabled box has a faint value.
+/// small up / down arrows at its right edge; a disabled box has a faint value. The Lemon design draws it as a field
+/// (Lemon Sampler's list boxes).
 fn spin_box(c: &mut Canvas, t: &Palette, r: Rect, text: Option<&str>, st: KS) {
+    if t.style.lemon() {
+        lk::field(c, r, st);
+        let (ax, cy) = (r.right() - 7.0, r.cy());
+        let mut g = Glyph::new();
+        g.polygon(&[(ax - 2.5, cy - 2.0), (ax + 2.5, cy - 2.0), (ax, cy - 5.0)]);
+        g.polygon(&[(ax - 2.5, cy + 2.0), (ax + 2.5, cy + 2.0), (ax, cy + 5.0)]);
+        c.glyph(if st.disabled { plug::OFF } else if st.hover { brand::MAIN } else { plug::DIM }, &g);
+        let ink = if st.disabled { plug::FAINT } else if st.hover { Color::rgb(0xffffff) } else { brand::TEXT };
+        match text {
+            None => c.fill_rect(Rect::new((r.x + r.w / 2.0 - 7.0).round(), cy.round(), 8.0, 1.0), ink),
+            Some(s) => {
+                let w = c.text_width(inst::LABEL, s);
+                let lh = c.line_height(inst::LABEL);
+                c.text(inst::LABEL, (r.right() - 13.0 - w).round(), (cy - lh / 2.0).round(), ink, s);
+            }
+        }
+        return;
+    }
     c.fill_rrect(Rect::new(r.x + 1.0, r.y + 1.5, r.w - 1.0, r.h), 3.0, t.s(0x353a3d).with_alpha(160));
     let lift = if st.hover { 0x0a } else { 0 };
     let (edge, mid) = (t.s(0x4e5356 + lift * 0x010101), t.s(0x5f6467 + lift * 0x010101));
@@ -871,13 +945,17 @@ fn spin_box(c: &mut Canvas, t: &Palette, r: Rect, text: Option<&str>, st: KS) {
     }
 }
 
-/// FL's dark push button (Cut self, Reset).
-fn dark_button(c: &mut Canvas, t: &Palette, r: Rect, s: &str, hover: bool) {
+/// FL's dark push button (Cut self, Reset); the Lemon design's is Lemon Sampler's (`inst::text_button`).
+fn dark_button(c: &mut Canvas, t: &Palette, r: Rect, s: &str, st: KS) {
+    if t.style.lemon() {
+        inst::text_button(c, r, s, st);
+        return;
+    }
     c.fill_rrect(r, 2.0, t.s(0x161718));
-    let (a, b) = if hover { (t.s(0x2a2b2d), t.s(0x1f2022)) } else { (t.s(0x202123), t.s(0x18191b)) };
+    let (a, b) = if st.hover { (t.s(0x2a2b2d), t.s(0x1f2022)) } else { (t.s(0x202123), t.s(0x18191b)) };
     c.fill_rect_gradient(r.inset(1.0), a, b, 1.5);
     c.fill_rect(Rect::new(r.x + 2.0, r.y + 1.0, r.w - 4.0, 1.0), t.s(0x27282a));
-    c.text_center(inst::LABEL, r, if hover { t.tx(0xffffff) } else { t.tx(0xd2d8dc) }, s);
+    c.text_center(inst::LABEL, r, if st.hover { t.tx(0xffffff) } else { t.tx(0xd2d8dc) }, s);
 }
 
 /// The kit slider with an optional fill colour from the left end to the thumb, and the thumb line in that colour.
@@ -950,12 +1028,82 @@ fn keyboard(c: &mut Canvas, t: &Palette, root: u8, ui: &MiscUi) {
     // Scroll bar.
     let bar = Rect::new(area.x, KB_BOTTOM + 1.0 + dy(), area.w, KB_BAR - KB_BOTTOM);
     c.fill_rect(bar, t.s(0x1b1d1e));
-    let total = 11.0 * OCTAVE;
-    let view = KB_X1 - KB_X0;
-    let start = (KB_X0 - ui.kb_scroll).clamp(0.0, total - view);
-    let tw = bar.w * view / total;
-    let tx = bar.x + (bar.w - tw) * start / (total - view);
-    c.fill_rrect(Rect::new(tx, bar.y + 4.0, tw, bar.h - 8.0), 2.0, t.s(0x313334));
+    let (tx, tw) = thumb(ui);
+    let lit = ui.bar_drag.is_some() || ui.hover == Some(Hit::ScrollBar);
+    c.fill_rrect(Rect::new(tx + dx(), bar.y + 4.0, tw, bar.h - 8.0), 2.0, if lit { t.s(0x3c3e40) } else { t.s(0x313334) });
+    c.pop_clip();
+}
+
+/// The root-note keyboard in the Lemon design, drawn by Lemon Sampler's rules (spec: plugins/lemon-sampler.md §3.1): a
+/// light ruler, C keys flat and the other white keys a gradient, the root key and its ruler column in the brand
+/// yellow with its octave label dark, a held key orange; the scroll bar a grey strip with a thin thumb.
+fn keyboard_lemon(c: &mut Canvas, t: &Palette, root: u8, ui: &MiscUi) {
+    let root = i32::from(root);
+    let held = |k: i32| ui.held.is_some_and(|h| i32::from(h) == k);
+    let (lt, kt, bb, kb) = (KB_RULER + dy(), KB_KEYS + dy(), KB_BLACK + 1.0 + dy(), KB_BOTTOM + 1.0 + dy());
+    let area = rect(KB_X0, KB_X1, KB_RULER, KB_BAR);
+    let ruler = t.tx(0xbabec5);
+    c.push_clip(area);
+    c.fill_rect(Rect::new(area.x, lt - 1.0, area.w, 1.0), t.s(0x1c1e21));
+    c.fill_rect(Rect::new(area.x, lt, area.w, kb - lt), ruler);
+    let f = Font::new(12);
+    let ly = (lt + (kt - lt) / 2.0 - c.line_height(f) / 2.0).round();
+    const WHITE_N: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
+    for oct in 0..11 {
+        let ox = ui.kb_scroll + oct as f32 * OCTAVE + dx();
+        if ox > area.right() || ox + OCTAVE < area.x {
+            continue;
+        }
+        for (i, &n) in WHITE_N.iter().enumerate() {
+            let k = oct * 12 + n;
+            if k > 131 {
+                break;
+            }
+            let x = (ox + i as f32 * WHITE).round();
+            let r = Rect::new(x, kt, (ox + (i + 1) as f32 * WHITE).round() - x, kb - kt);
+            let (a, b) = if k == root {
+                (hi(t, 0x77a9e6), hi(t, 0x77a9e6))
+            } else if held(k) {
+                (t.h(0xeca449), t.h(0xfeb65b))
+            } else if n == 0 {
+                (ruler, ruler)
+            } else {
+                (ruler, t.tx(0xced3da))
+            };
+            c.fill_rect_gradient(r, a, b, 0.0);
+            if k == root {
+                // The root's column runs through the ruler.
+                c.fill_rect(Rect::new(r.x, lt, r.w, kt - lt), hi(t, 0x77a9e6));
+            }
+        }
+        for &(n, off) in &BLACK_OFF {
+            let k = oct * 12 + n;
+            if k > 131 {
+                break;
+            }
+            let x = (ox + off).round();
+            c.fill_rect(Rect::new(x, kt, BLACK_W, bb - kt), if k == root { hi(t, 0x235fc3) } else { t.s(0x2f3031) });
+            let (top, bot) = if k == root {
+                (hi(t, 0x5785d2), hi(t, 0x77a9e6))
+            } else if held(k) {
+                (t.h(0xc9832f), t.h(0xeca449))
+            } else {
+                (t.s(0x3a3b3c), t.s(0x555657))
+            };
+            c.fill_rect_gradient(Rect::new(x + 1.0, kt + 1.0, BLACK_W - 3.0, 24.0), top, bot, 0.0);
+            c.fill_rect(Rect::new(x + 1.0, kt + 1.0, 1.0, bb - kt - 4.0), t.s(0x404142));
+            c.fill_rect(Rect::new(x + 1.0, kt + 36.0, BLACK_W - 3.0, 1.0), t.s(0x575859));
+            c.fill_rect(Rect::new(x, bb, BLACK_W + 1.0, 1.0), t.tx(0xa2a5ab));
+        }
+        let col = if oct * 12 == root { hi(t, 0x225cc3) } else { t.s(0x6a6e74) };
+        c.text(f, ox.round() + 2.0, ly, col, &format!("C{oct}"));
+    }
+    // Scroll bar.
+    let bar = Rect::new(area.x, kb, area.w, KB_BAR + 1.0 + dy() - kb);
+    c.fill_rect(bar, t.s(0x3f4042));
+    let (tx, tw) = thumb(ui);
+    let lit = ui.bar_drag.is_some() || ui.hover == Some(Hit::ScrollBar);
+    c.fill_rrect(Rect::new(tx + dx(), bar.cy() - 1.5, tw, 3.0), 1.5, if lit { t.s(0x161718) } else { t.s(0x252628) });
     c.pop_clip();
 }
 
@@ -969,6 +1117,43 @@ fn key_colour(t: &Palette, k: i32, root: u8, held: Option<u8>) -> Option<Color> 
     }
 }
 
+/// How far the keyboard scrolls (FL px) and the scroll bar's width.
+const KB_TOTAL: f32 = 11.0 * OCTAVE;
+const KB_VIEW: f32 = KB_X1 - KB_X0;
+const BAR_W: f32 = KB_X1 - KB_X0 + 1.0;
+
+/// The scroll bar thumb: its left edge (FL x) and width.
+fn thumb(ui: &MiscUi) -> (f32, f32) {
+    let start = (KB_X0 - ui.kb_scroll).clamp(0.0, KB_TOTAL - KB_VIEW);
+    let tw = BAR_W * KB_VIEW / KB_TOTAL;
+    (KB_X0 + (BAR_W - tw) * start / (KB_TOTAL - KB_VIEW), tw)
+}
+
+/// A left press on the scroll bar at page x: a press beside the thumb first centres the thumb there (Lemon Studio
+/// choice), then the thumb follows the mouse (`bar_drag_to`).
+pub fn bar_press(ui: &mut MiscUi, x: f32) {
+    let fx = x + OX;
+    let (tx, tw) = thumb(ui);
+    if fx < tx || fx > tx + tw {
+        set_start(ui, (fx - tw / 2.0 - KB_X0) / (BAR_W - tw) * (KB_TOTAL - KB_VIEW));
+    }
+    ui.bar_drag = Some((fx, KB_X0 - ui.kb_scroll));
+}
+
+/// The scroll bar's thumb dragged to page x.
+pub fn bar_drag_to(ui: &mut MiscUi, x: f32) -> bool {
+    let Some((fx0, start)) = ui.bar_drag else { return false };
+    let tw = thumb(ui).1;
+    let was = ui.kb_scroll;
+    set_start(ui, start + (x + OX - fx0) / (BAR_W - tw) * (KB_TOTAL - KB_VIEW));
+    ui.kb_scroll != was
+}
+
+/// Scrolls so the keyboard shows from `start` FL px past C0, kept in range.
+fn set_start(ui: &mut MiscUi, start: f32) {
+    ui.kb_scroll = KB_X0 - start.clamp(0.0, KB_TOTAL - KB_VIEW);
+}
+
 /// Keyboard scroll after `notches` of the wheel (34 px per notch), kept in range.
 pub fn scroll_keyboard(ui: &mut MiscUi, notches: f32) {
     let total = 11.0 * OCTAVE;
@@ -979,6 +1164,30 @@ pub fn scroll_keyboard(ui: &mut MiscUi, notches: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The keyboard's scroll bar drags (issue #91): the thumb follows the mouse, a press beside it centres it there,
+    /// and the keyboard stays in range.
+    #[test]
+    fn keyboard_scroll_bar_drags() {
+        let mut ui = MiscUi::default();
+        let at = |ui: &MiscUi, fx: f32, fy: f32| hit(ui, fx - OX, fy - OY);
+        let (tx, tw) = thumb(&ui);
+        let y = (KB_BOTTOM + KB_BAR) / 2.0;
+        assert_eq!(at(&ui, tx + tw / 2.0, y), Some(Hit::ScrollBar));
+        assert_eq!(at(&ui, tx + tw / 2.0, KB_RULER + 3.0), Some(Hit::Keyboard), "the ruler is not the bar");
+        let s0 = ui.kb_scroll;
+        bar_press(&mut ui, tx + tw / 2.0 - OX);
+        assert_eq!(ui.kb_scroll, s0, "a press on the thumb does not move it");
+        assert!(bar_drag_to(&mut ui, tx + tw / 2.0 + 40.0 - OX));
+        assert!(ui.kb_scroll < s0, "dragging right shows higher keys");
+        assert!((thumb(&ui).0 - (tx + 40.0)).abs() < 0.01, "the thumb follows the mouse");
+        bar_drag_to(&mut ui, 10_000.0);
+        assert_eq!(ui.kb_scroll, KB_X0 - (KB_TOTAL - KB_VIEW), "kept in range");
+        // A press at the bar's left end jumps there.
+        let mut ui = MiscUi::default();
+        bar_press(&mut ui, KB_X0 + 1.0 - OX);
+        assert_eq!(ui.kb_scroll, KB_X0);
+    }
 
     #[test]
     fn hits_find_the_controls() {

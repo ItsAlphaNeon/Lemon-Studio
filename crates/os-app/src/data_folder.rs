@@ -223,7 +223,7 @@ impl App {
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         let now = choice(&self.state.project);
         let items = (0..CHOICES.len() as u32).map(|i| PItem::new(CHOICES[i as usize], Cmd::DataFolder(DCmd::Choice(i))).mark(Mark::Radio(i == now))).collect();
-        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None, scroll: [0; 2] });
         self.invalidate();
     }
 

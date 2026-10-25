@@ -92,6 +92,9 @@ pub struct PianoState {
     pub zoom_back: Option<(f32, f32, f32)>,
     /// Play-start marker in the ruler (ticks; pattern playback starts here, §10).
     pub marker: u32,
+    /// The user put the play-start marker somewhere (a click or drag in the ruler, the song position slider in pattern
+    /// mode) since the project opened: Ctrl+V pastes there (spec: ui/piano-keys.md §4 rule 7).
+    pub marker_placed: bool,
     /// Time selection made by right-dragging the ruler (ticks, start..end); the only selection
     /// that shades the grid (§10).
     pub range: Option<(u32, u32)>,
@@ -131,6 +134,7 @@ impl Default for PianoState {
             clipboard: Vec::new(),
             zoom_back: None,
             marker: 0,
+            marker_placed: false,
             range: None,
             row_h: ROW,
             ghosts: true,
@@ -428,8 +432,8 @@ impl Lane {
             _ => {}
         }
     }
-    /// Value at the top of the panel.
-    fn scale(self) -> f32 {
+    /// Value at the top of the panel: the property's full scale.
+    pub fn scale(self) -> f32 {
         match self {
             Lane::Velocity | Lane::Pan | Lane::Release => 128.0,
             Lane::Cutoff | Lane::Resonance => 256.0,
@@ -751,6 +755,50 @@ pub fn slice(s: &mut State, tick: u32) -> usize {
     s.piano.clear_selection();
     finish_edit(s);
     cut.len()
+}
+
+/// The end of the current pattern: its length rounded up to whole bars of its own grid, at least one bar. Ctrl+A's
+/// time selection, Ctrl+L's last notes and Ctrl+Shift+Left / Right's rotation stop there (spec: ui/piano-keys.md §4).
+pub fn pattern_end(s: &State) -> u32 {
+    s.project.pattern_bar_end(s.pattern, pattern_length(s, s.pattern))
+}
+
+/// Where the bar holding `tick` starts, on the current pattern's own bar grid.
+pub fn bar_start(s: &State, tick: u32) -> u32 {
+    let regions = s.project.pattern_bars(s.pattern);
+    let (start, bar, _) = regions.iter().rev().find(|r| r.0 <= tick).copied().unwrap_or(regions[0]);
+    start + (tick.saturating_sub(start) / bar.max(1)) * bar.max(1)
+}
+
+/// Where Ctrl+V puts the earliest note of `clip` (spec: ui/piano-keys.md §2 "Paste", §4 rule 7): at the play-start
+/// marker once the user has placed it, else at that note's own place inside its bar, in bar 1. When a pasted note would
+/// then start on or inside an unselected note of the same key, the whole paste goes one snap unit later (once).
+pub fn paste_tick(s: &State, clip: &[Note]) -> u32 {
+    let Some(first) = clip.iter().map(|n| n.position).min() else { return 0 };
+    let at = if s.piano.marker_placed { s.piano.marker } else { first - bar_start(s, first) };
+    let ch = channel(s);
+    let sel = s.piano.selection(s.pattern, ch);
+    let lands_on = |m: &Note| clip.iter().any(|n| n.key == m.key && (m.position..m.position + shown_len(s, m)).contains(&(n.position - first + at)));
+    let hit = notes(s).iter().enumerate().any(|(i, m)| Some(m.channel) == ch && !sel.contains(&i) && lands_on(m));
+    if hit { at + crate::piano_snap::unit(s).unwrap_or(1) } else { at }
+}
+
+/// Move notes `dt` ticks inside 0 .. [`pattern_end`], a start that leaves it coming back in at the other end
+/// (Ctrl+Shift+Left / Right, spec: ui/piano-keys.md §4 rule 9). False when there is nothing to move.
+pub fn rotate(s: &mut State, idx: &[usize], dt: i64) -> bool {
+    if idx.is_empty() || dt == 0 {
+        return false;
+    }
+    let end = i64::from(pattern_end(s));
+    snapshot(s);
+    let p = pattern_mut(s);
+    for &i in idx {
+        if let Some(n) = p.notes.get_mut(i) {
+            n.position = (i64::from(n.position) + dt).rem_euclid(end) as u32;
+        }
+    }
+    finish_edit(s);
+    true
 }
 
 /// Paste `notes` so the earliest starts at `at`, on this channel; the pasted notes become the selection.

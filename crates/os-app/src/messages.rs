@@ -152,7 +152,7 @@ impl App {
     pub(crate) fn messages_menu(&mut self) {
         let button = Action::Settings(SAct::Button("Manage messages"));
         let (x, y) = self.hits.iter().rev().find(|h| h.action == button).map_or(self.mouse, |h| (h.rect.x, h.rect.bottom()));
-        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items: menu(), sub: None });
+        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items: menu(), sub: None, scroll: [0; 2] });
         self.invalidate();
     }
 

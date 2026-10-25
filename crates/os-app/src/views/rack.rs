@@ -63,12 +63,19 @@ pub fn base_w(s: &State) -> f32 {
     259.0 + c.dx + c.loop_w
 }
 
-/// Snap a dragged size so whole steps and rows appear (§5), at least 4 steps and one row.
+/// Smallest width (Lemon Studio's; FL's is 4 steps, §5): four beats of the project's signature, and never under the
+/// default 16 steps, below which the title bar's right group runs into the speaker and the "Channel rack" title.
+pub fn min_w(s: &State) -> f32 {
+    let steps = (4 * rk::beat_steps(s)).max(16);
+    base_w(s) + STEP_W * (steps - 1) as f32
+}
+
+/// Snap a dragged size so whole steps and rows appear (§5), at least [`min_w`] and one row.
 pub fn snap_size(s: &State, w: f32, h: f32) -> (f32, f32) {
     let b = base_w(s);
     let w = b + STEP_W * ((w - b) / STEP_W).round();
     let h = 96.0 + ROW_H * ((h - 96.0) / ROW_H).round();
-    (w.max(b + 3.0 * STEP_W), h.max(MIN_H))
+    (w.max(min_w(s)), h.max(MIN_H))
 }
 
 /// Whether every note of channel `ch` in the pattern is a plain step (§6: otherwise the row shows

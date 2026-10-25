@@ -16,10 +16,11 @@ mod autoscroll;
 mod backup;
 #[cfg(test)]
 mod audio_bench;
-#[cfg(test)]
-mod render_check;
 mod browser;
 mod cable;
+mod capture;
+mod one_click;
+mod score_log;
 mod clip_colors;
 mod clock;
 mod cpu;
@@ -28,6 +29,9 @@ mod device;
 mod dialog;
 mod filedlg;
 mod enable_groups;
+mod export;
+mod export_form;
+mod factory_folder;
 mod high_visibility;
 mod history;
 mod hold;
@@ -35,6 +39,7 @@ mod keep_on_disk;
 mod icons;
 mod init;
 mod knobs;
+mod layout;
 mod loading;
 mod logo;
 #[cfg(target_os = "macos")]
@@ -44,9 +49,14 @@ mod menu_bar;
 mod messages;
 mod meters;
 mod metronome;
+mod midi_cfg;
+mod midi_file;
 mod midi_in;
+mod midi_out;
+mod midi_play;
 mod mixer;
 mod osc3;
+mod citrus;
 mod monitor;
 mod params;
 mod piano;
@@ -54,12 +64,16 @@ mod piano_snap;
 mod piano_split;
 mod piano_tools;
 mod rack;
+mod remote;
+mod render;
+mod pattern_render;
 mod patterns;
 mod perf;
 mod playlist;
 mod plugin_db;
 mod plugin_manager;
 mod plugin_menu;
+mod plugin_popup;
 mod plugin_rebuild;
 mod plugin_scan;
 #[cfg(plugin_windows)]
@@ -68,8 +82,10 @@ mod plugins;
 mod ppi;
 mod prefs;
 mod preview_track;
+mod project_files;
 mod project_forms;
 mod project_info;
+mod project_picker;
 mod project_plugins;
 mod presets;
 mod misc;
@@ -83,10 +99,27 @@ mod shortcuts;
 mod smooth;
 mod snap;
 mod song_pos;
+mod toolbar;
 mod splash;
 mod stall;
 mod step_edit;
+mod strum;
+mod flam;
+mod flip;
+mod levels;
+mod chords;
+mod claw;
+mod limit;
+mod lfo;
+mod quantize;
+mod randomize;
+mod chop;
+mod piano_dlg;
+mod arpeggiate;
 mod tapper;
+mod touch;
+mod record;
+mod recent;
 mod theme_adjust;
 mod theme_library;
 mod templates;
@@ -94,6 +127,7 @@ mod timesig;
 mod transport;
 mod typein;
 mod views;
+mod wallpaper;
 mod waves;
 mod win_clamp;
 #[cfg(windows)]
@@ -154,6 +188,9 @@ struct Shell {
     watchdog: std::sync::Arc<stall::Watchdog>,
     /// macOS: the left button went down with Control held, which is a right click there; its release is one too.
     ctrl_click: bool,
+    /// The main window's restored frame and whether it is maximized, kept for the next start as the app closes
+    /// (`layout`): the last run's at first, then followed as the window moves and resizes (`follow_frame`).
+    main_win: Option<layout::MainWin>,
 }
 
 /// Frame timing for tuning (`OS_FRAMES=<file>`): per frame the time, what was repainted (`full` or the number of
@@ -242,8 +279,22 @@ fn screen_state(window: &Window) -> Option<((i32, i32), (i32, i32, i32, i32))> {
 #[cfg(target_os = "macos")]
 use macos::{is_maximized, screen_state, set_maximized, set_rect};
 
+/// Whether the window fills the screen's work area. Windows: asked of the system, since winit hears of a maximize the
+/// system makes (the taskbar, Win+Up, coming back from the taskbar) only after the move that comes with it, which would
+/// be taken for the restored frame (`Shell::follow_frame`).
+#[cfg(windows)]
+fn is_maximized(window: &Window) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsZoomed;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().map(|h| h.as_raw()) {
+        // SAFETY: our own live window.
+        Ok(RawWindowHandle::Win32(h)) => unsafe { IsZoomed(h.hwnd.get() as _) != 0 },
+        _ => window.is_maximized(),
+    }
+}
+
 /// Whether the window fills the screen's work area.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn is_maximized(window: &Window) -> bool {
     window.is_maximized()
 }
@@ -327,6 +378,32 @@ pub(crate) fn gui_scale(system: f64) -> f64 {
 /// choice applies at once, as a change of the monitor's scale does.
 fn ui_scale(window: &Window) -> f64 {
     gui_scale(window.scale_factor())
+}
+
+/// Device pixels per unit of the window system's own window places: points on macOS, pixels elsewhere (`layout`).
+fn place_k(scale: f64) -> f64 {
+    if cfg!(target_os = "macos") { scale } else { 1.0 }
+}
+
+/// The main window's outer top-left and inner size in the window system's own units (`place_k`); `None` where a window
+/// has no position (Wayland).
+fn frame_of(window: &Window) -> Option<((i32, i32), (u32, u32))> {
+    let (p, s, k) = (window.outer_position().ok()?, window.inner_size(), place_k(window.scale_factor()));
+    let at = |v: i32| (f64::from(v) / k).round() as i32;
+    let len = |v: u32| (f64::from(v) / k).round() as u32;
+    Some(((at(p.x), at(p.y)), (len(s.width), len(s.height))))
+}
+
+/// The screens ([left, top, right, bottom]) in the window system's own units (`place_k`).
+fn screens(el: &ActiveEventLoop) -> Vec<[i32; 4]> {
+    el.available_monitors()
+        .map(|m| {
+            let (p, s, k) = (m.position(), m.size(), place_k(m.scale_factor()));
+            let at = |v: f64| (v / k).round() as i32;
+            let (x, y) = (at(f64::from(p.x)), at(f64::from(p.y)));
+            [x, y, x + at(f64::from(s.width)), y + at(f64::from(s.height))]
+        })
+        .collect()
 }
 
 fn insets(window: &Window) -> (u32, u32, u32, u32) {
@@ -457,6 +534,23 @@ impl Shell {
         (((x - f64::from(self.inset.0)) / k) as f32, ((y - f64::from(self.inset.1)) / k) as f32)
     }
 
+    /// Follows the main window for `layout`: its frame while it is neither maximized, minimized nor full screen, and
+    /// whether it is maximized (as it was while minimized).
+    fn follow_frame(&mut self, window: &Window) {
+        if window.is_minimized() == Some(true) || window.fullscreen().is_some() {
+            return;
+        }
+        let max = is_maximized(window);
+        match frame_of(window) {
+            Some((pos, size)) if !max => self.main_win = Some(layout::MainWin { pos, size, max }),
+            _ => {
+                if let Some(m) = &mut self.main_win {
+                    m.max = max;
+                }
+            }
+        }
+    }
+
     /// Ticks the app, asks for a frame when one is due and sets the next wake-up: from `about_to_wait`, or from a
     /// watchdog wake while a modal loop holds up winit's (`held`, see `stall`).
     fn step(&mut self, el: &ActiveEventLoop, held: bool) {
@@ -552,6 +646,23 @@ impl ApplicationHandler for Shell {
             }
             None => attrs,
         };
+        // Where the last run left it (`layout`), its top on the screens there are now. macOS places it at its restored
+        // frame and maximizes it once made (`set_maximized` keeps that frame to restore to).
+        let frame = self.main_win.map(|m| layout::on_screens(m, &screens(el)));
+        self.main_win = frame;
+        let attrs = match frame {
+            #[cfg(target_os = "macos")]
+            Some(m) => attrs
+                .with_position(winit::dpi::LogicalPosition::new(m.pos.0, m.pos.1))
+                .with_inner_size(LogicalSize::new(m.size.0, m.size.1))
+                .with_maximized(false),
+            #[cfg(not(target_os = "macos"))]
+            Some(m) => attrs
+                .with_position(winit::dpi::PhysicalPosition::new(m.pos.0, m.pos.1))
+                .with_inner_size(winit::dpi::PhysicalSize::new(m.size.0, m.size.1))
+                .with_maximized(m.max),
+            None => attrs,
+        };
         // App icon: resource 1, embedded by build.rs from assets/lemonstudio.ico.
         #[cfg(windows)]
         let attrs = {
@@ -572,6 +683,10 @@ impl ApplicationHandler for Shell {
             attrs.with_window_icon(linux_icon())
         };
         let window = Rc::new(el.create_window(attrs).expect("create window"));
+        #[cfg(target_os = "macos")]
+        if frame.is_some_and(|m| m.max) {
+            set_maximized(&window, true);
+        }
         let context = softbuffer::Context::new(window.clone()).expect("graphics context");
         self.surface = Some(softbuffer::Surface::new(&context, window.clone()).expect("surface"));
         // Hosted plugins: windows are owned by the main window; scanning loads the .clap files found.
@@ -629,15 +744,25 @@ impl ApplicationHandler for Shell {
         self.step(el, false);
     }
 
-    /// macOS: a quit the user agreed to (`macos::answer_quit`) ends the process from AppKit, after this: the plugin
-    /// windows close and the instances go as they do when `run_app` returns.
-    #[cfg(target_os = "macos")]
+    /// The app closes: where the windows are is kept for the next start (`layout`). macOS: a quit the user agreed to
+    /// (`macos::answer_quit`) ends the process from AppKit, after this: the plugin windows close and the instances go as
+    /// they do when `run_app` returns.
     fn exiting(&mut self, _el: &ActiveEventLoop) {
-        if os_host::guard::tripped() {
-            return;
+        if let Some(window) = self.window.clone() {
+            self.follow_frame(&window);
         }
-        self.app.plugins.clear();
-        plugins::sweep_retired();
+        if let Some(m) = self.main_win {
+            layout::save_main(m);
+        }
+        layout::save(&self.app.state);
+        #[cfg(target_os = "macos")]
+        {
+            if os_host::guard::tripped() {
+                return;
+            }
+            self.app.plugins.clear();
+            plugins::sweep_retired();
+        }
     }
 
     /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor.
@@ -675,9 +800,10 @@ impl ApplicationHandler for Shell {
         if matches!(event, WindowEvent::MouseWheel { .. }) && crate::plugin_window::pointer_in_docked() {
             return;
         }
-        // Linux: a click in the main window takes the keyboard back from a plugin editor that holds it (X11 leaves it
-        // there), so the typing keyboard plays again.
-        #[cfg(target_os = "linux")]
+        // Linux and Windows: a click in the main window takes the keyboard back from a plugin editor that holds it (X11
+        // leaves it there, and so does Windows for a docked editor, a child window of this one), so the shortcuts and
+        // the typing keyboard work again (spec: ui/piano-keys.md §4 rule 2).
+        #[cfg(any(target_os = "linux", windows))]
         if matches!(event, WindowEvent::MouseInput { state: ElementState::Pressed, .. }) {
             crate::plugin_window::focus_main();
         }
@@ -856,9 +982,10 @@ impl ApplicationHandler for Shell {
                         return;
                     }
                 }
-                // A dialog takes repeats too (typing, moving through its list), and so does an Info box or a browser
-                // folder cell being edited.
-                if pressed && (!event.repeat || self.app.modal_open() || self.app.info_editing() || self.app.folder_cell_editing() || self.app.name_editing()) {
+                // Repeats go on too: a dialog, an Info box or a browser folder cell takes them (typing, moving through a
+                // list), and `App::key` keeps those of the piano roll's moving and copying keys (spec: ui/piano-keys.md
+                // §4 rule 1).
+                if pressed {
                     // macOS: Option and Command change the character a key types (Option+S is "ß"); shortcuts go by the
                     // key itself.
                     #[cfg(target_os = "macos")]
@@ -892,7 +1019,9 @@ impl ApplicationHandler for Shell {
                         }
                         event
                     };
+                    self.app.repeat = event.repeat;
                     self.app.key(&event.logical_key, ctrl(self.mods), self.mods.alt_key());
+                    self.app.repeat = false;
                     window.request_redraw();
                 }
             }
@@ -935,10 +1064,12 @@ impl ApplicationHandler for Shell {
                 window.request_redraw();
             }
             WindowEvent::Resized(_) => {
+                self.follow_frame(&window);
                 self.inset = insets(&window);
                 self.app.invalidate();
                 window.request_redraw();
             }
+            WindowEvent::Moved(_) => self.follow_frame(&window),
             WindowEvent::RedrawRequested => {
                 let size = window.inner_size();
                 let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
@@ -1119,7 +1250,7 @@ fn linux_icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(rgba, w, h).ok()
 }
 
-/// `lemonstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-menu] [--browser-search TEXT] [--browser-folder DIR[|SUB]] [project.flp]`:
+/// `lemonstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-width PX] [--browser-menu] [--browser-search TEXT] [--browser-folder DIR[|SUB]] [project.flp]`:
 /// paint one 1920×1080 frame offscreen (used to compare with reference measurements, and for the README's screenshots
 /// with `--float`, `--rack-pos`, `--rack-all`, `--rack-scroll` and `--insert`).
 fn screenshot(args: &[String]) {
@@ -1130,14 +1261,16 @@ fn screenshot(args: &[String]) {
     let mut rack_w: Option<f32> = None;
     let mut rack_roll = false;
     let mut browser_tab: Option<usize> = None;
+    let mut browser_w: Option<f32> = None;
     let mut browser_menu = false;
     let mut browser_search: Option<String> = None;
     let mut browser_folder: Option<String> = None;
     let mut menu: Option<usize> = None;
     let mut plugin_menu: Option<plugin_menu::Target> = None;
+    let mut import_midi: Option<(String, bool)> = None;
     let mut settings: Option<usize> = None;
     let mut info_edit: Option<usize> = None;
-    let mut clicks: Vec<(f32, f32)> = Vec::new();
+    let mut clicks: Vec<(f32, f32, bool)> = Vec::new();
     let mut wheels: Vec<(f32, f32, f32)> = Vec::new();
     let mut lane: Option<usize> = None;
     let mut lane_menu = false;
@@ -1178,6 +1311,8 @@ fn screenshot(args: &[String]) {
             "--browser-search" => browser_search = it.next().cloned(),
             "--browser-folder" => browser_folder = it.next().cloned(),
             "--browser-tab" => browser_tab = it.next().and_then(|v| v.parse().ok()),
+            // The browser's width incl. its splitter, as dragged (spec: ui/browser.md §9).
+            "--browser-width" => browser_w = it.next().and_then(|v| v.parse().ok()),
             // "all" / "gen" / "fx": that plugin menu at the window's centre (spec: ui/plugin-menu.md §5).
             "--plugin-menu" => {
                 plugin_menu = Some(match it.next().map(String::as_str) {
@@ -1186,6 +1321,9 @@ fn screenshot(args: &[String]) {
                     _ => plugin_menu::Target::All,
                 })
             }
+            // A MIDI file through FILE ▸ Import ▸ MIDI file (`--import-midi-piano`: the piano roll's import): the Import
+            // MIDI data form, shown every time (spec: ui/midi-files.md §2).
+            a @ ("--import-midi" | "--import-midi-piano") => import_midi = it.next().map(|p| (p.clone(), a == "--import-midi-piano")),
             // Hover at x,y before the frame is captured.
             "--mouse" => {
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
@@ -1193,11 +1331,13 @@ fn screenshot(args: &[String]) {
                     mouse = Some((x, y));
                 }
             }
-            // Click at x,y (left button) before the frame is captured; may be given more than once, done in order.
-            "--click" => {
+            // Click at x,y (left button; `--rclick`: the right one) before the frame is captured; may be given more than
+            // once, done in order.
+            a @ ("--click" | "--rclick") => {
+                let right = a == "--rclick";
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
                 if let [x, y] = v[..] {
-                    clicks.push((x, y));
+                    clicks.push((x, y, right));
                 }
             }
             // The wheel turned `dy` notches at x,y after the first paint, before the clicks (scrolls a page, e.g.
@@ -1302,6 +1442,9 @@ fn screenshot(args: &[String]) {
     if let Some(t) = browser_tab {
         app.state.browser_tab = t.min(3);
     }
+    if let Some(w) = browser_w {
+        app.state.browser_w = w;
+    }
     // A dropped folder (spec: ui/browser.md §6), opened; not remembered. `--browser-folder DIR[|sub/path]` opens a subfolder and selects it.
     if let Some(f) = browser_folder {
         let (dir, sub) = f.split_once('|').unwrap_or((&f, ""));
@@ -1361,6 +1504,12 @@ fn screenshot(args: &[String]) {
     if let Some(target) = plugin_menu {
         let (w, h) = app.state.screen;
         app.open_plugin_menu(target, ((w / 2.0).round(), (h / 3.0).round()));
+    }
+    if let Some((p, piano)) = import_midi {
+        // Alt: the MIDI import window's "Show every time" row as it comes.
+        app.alt = true;
+        app.midi_file_chosen(p.into(), piano);
+        app.alt = false;
     }
     if let Some(w) = rack_w {
         app.state.rack_size.0 = w;
@@ -1428,9 +1577,13 @@ fn screenshot(args: &[String]) {
         app.wheel(0.0, dy, false, false);
         app.paint(&mut canvas, None);
     }
-    for (x, y) in clicks {
+    for (x, y, right) in clicks {
         app.mouse_move(x, y);
-        app.mouse_down();
+        if right {
+            app.mouse_down_right();
+        } else {
+            app.mouse_down();
+        }
         app.mouse_up();
         app.paint(&mut canvas, None);
     }
@@ -1568,6 +1721,10 @@ fn main() {
         std::process::exit(plugins::window_check::run(&args[1..]));
     }
     app::move_old_settings();
+    // A render without a window (FILE > Export audio from the command line, `render`).
+    if args.first().map(String::as_str) == Some("--render") {
+        std::process::exit(render::cli(&args[1..]));
+    }
     if args.iter().any(|a| a == "--screenshot") {
         screenshot(&args);
         return;
@@ -1605,11 +1762,15 @@ fn main() {
         // Ask for data folder "On startup": the New project form over it (spec: ui/data-folder.md §7).
         app.startup_form();
     }
-    // MIDI controllers play the selected channel (spec: ui/midi-input.md).
+    // The windows where the last run left them.
+    layout::restore(&mut app.state);
+    // MIDI devices (spec: ui/midi-settings.md §2): the enabled inputs play the selected channel; master sync goes out.
     app.midi = midi_in::MidiIn::open(wake_ui);
-    app.state.midi_inputs = app.midi.names.clone();
-    if !app.state.midi_inputs.is_empty() && app.state.message.is_none() {
-        app.state.message = Some(format!("MIDI input: {}", app.state.midi_inputs.join(", ")));
+    app.midi_out = midi_out::MidiOut::start(app.transport.watch());
+    let message = app.state.message.clone();
+    app.midi_refresh(false);
+    if message.is_some() {
+        app.state.message = message;
     }
     // Plugin menus and dialogs run modal loops on this thread on Windows (elsewhere Lemon plugins' editors have threads
     // of their own).
@@ -1639,6 +1800,7 @@ fn main() {
         frames: FrameLog::open(),
         watchdog,
         ctrl_click: false,
+        main_win: layout::main_win(),
     };
     event_loop.run_app(&mut shell).expect("run");
     // After a contained plugin crash the process ends here, before plugin files are unloaded (a stopped plugin's code

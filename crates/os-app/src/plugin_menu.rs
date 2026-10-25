@@ -138,7 +138,7 @@ pub fn items(s: &State, target: Target, nested: bool) -> Vec<PItem> {
 
 /// A plugin menu for `target` at (x, y).
 pub fn menu(s: &State, target: Target, x: f32, y: f32) -> Popup {
-    Popup { x, y, items: items(s, target, false), sub: None }
+    Popup { x, y, items: items(s, target, false), sub: None, scroll: [0; 2] }
 }
 
 /// Whether the open popup is a plugin menu (F8 closes it).
@@ -196,6 +196,10 @@ pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Optio
     let d = app.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
+    // One step when the channel goes at the bottom (`history::add_channel`); one inserted higher up is not undoable yet.
+    if after.is_none_or(|r| r + 1 >= s.project.channels.len()) {
+        crate::history::add_channel(s, (!sampler).then_some(index));
+    }
     let mut ch = if sampler { crate::app::add_channel(&mut s.project) } else { crate::app::add_plugin_channel(&mut s.project, &d.name) };
     if sampler {
         s.pending_open = Some(ch);
@@ -238,13 +242,18 @@ pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<Stri
     if sampler {
         ch.kind = os_model::ChannelKind::Sampler;
         ch.plugin = None;
-        ch.sample_path = None;
+        ch.clear_sample();
         ch.name = Some(d.name.clone());
         s.pending_open = Some(row);
     } else {
         ch.kind = os_model::ChannelKind::Plugin;
         ch.plugin = Some(crate::osc3::file_name(&d.name).to_string());
         ch.name = Some(d.name.clone());
+        // A Lemon Trio channel's sample is its custom shape's (spec: plugins/lemon-3x-osc.md §6): the new instance has
+        // none, so neither does the channel.
+        if crate::osc3::is_osc3(ch) {
+            ch.sample_path = None;
+        }
         s.pending_plugin = Some((row, index));
     }
     s.piano.dirty = true;

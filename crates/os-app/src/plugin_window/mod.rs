@@ -28,7 +28,7 @@ use os_ui::{Canvas, Color, Font, Rect};
 #[cfg(windows)]
 mod win32;
 #[cfg(windows)]
-pub use win32::{default_position, first_position, lift_hide, lift_show, stack, take_exposed, take_keys, take_link, FrameWindow};
+pub use win32::{default_position, first_position, focus_main, lift_hide, lift_show, stack, take_exposed, take_keys, take_link, FrameWindow};
 
 #[cfg(target_os = "linux")]
 mod x11;
@@ -170,6 +170,8 @@ pub struct ChannelInfo {
     pub range: i32,
     /// Insert number, 0 = master.
     pub track: u16,
+    /// The highest insert the TRACK box goes to.
+    pub max_track: u16,
     /// The channel's Misc tab values (`None`: no channel behind the window, e.g. mixer effects: no Misc tab, and the
     /// strip's ON / PAN / VOL do nothing).
     pub misc: Option<crate::misc_page::MiscVals>,
@@ -185,6 +187,12 @@ pub enum FrameEvent {
     Volume(f64),
     Pan(f64),
     PitchCents(i32),
+    /// The RANGE box: the pitch knob's range, semitones.
+    PitchRange(i32),
+    /// The TRACK box: the channel's target mixer track (0 = master).
+    Track(u16),
+    /// The TRACK box was double-clicked: the app shows the mixer at the channel's track.
+    ShowTrack,
     /// The window was clicked: it comes to the front of the app's window stack (docked windows, Windows).
     #[cfg_attr(not(windows), allow(dead_code))]
     Raise,
@@ -205,6 +213,10 @@ pub enum FrameEvent {
     Dpi(f32),
     /// A greyed-out control was clicked: the app says it is not available yet.
     NotAvailable(&'static str),
+    /// A file was dropped on the frame (from the desktop): a preset loads, a sample goes to a sampler (spec:
+    /// plugins/presets.md "Drag and drop").
+    #[cfg_attr(not(windows), allow(dead_code))]
+    DropFile(std::path::PathBuf),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -212,7 +224,21 @@ enum Knob {
     Pan,
     Vol,
     Pitch,
+    /// The RANGE and TRACK value boxes: whole numbers, one step per [`BOX_DRAG`] px.
+    Range,
+    Track,
 }
+
+impl Knob {
+    fn stepped(self) -> bool {
+        matches!(self, Knob::Range | Knob::Track)
+    }
+}
+
+/// Drag length of one RANGE / TRACK step (the channel rack's mixer box: 10 px, spec: ui/channel-rack.md §12).
+const BOX_DRAG: f32 = 10.0;
+/// The RANGE box's limit, semitones.
+const RANGE_MAX: i32 = 48;
 
 struct State {
     info: ChannelInfo,
@@ -227,6 +253,8 @@ struct State {
     hint: String,
     /// A greyed-out frame control under the mouse: its "not available yet" hint replaces the plugin's.
     off_hint: Option<&'static str>,
+    /// The strip's RANGE / TRACK box under the mouse (or being dragged): its value replaces the plugin's hint.
+    box_hint: Option<Knob>,
     /// The loaded preset's name, shown in the Presets box ("Presets" without one).
     preset: Option<String>,
     /// Misc tab page state (tracking page, keyboard scroll, drag, hover).
@@ -262,6 +290,7 @@ impl State {
             misc: false,
             hint: String::new(),
             off_hint: None,
+            box_hint: None,
             preset: None,
             misc_ui: Default::default(),
             editor,
@@ -282,22 +311,45 @@ impl State {
             Knob::Pan => (i.pan as f32 + 1.0) / 2.0,
             Knob::Vol => i.volume as f32,
             Knob::Pitch => 0.5 + i.pitch_cents as f32 / (i.range.max(1) as f32 * 100.0) / 2.0,
+            Knob::Range => i.range as f32,
+            Knob::Track => f32::from(i.track),
         }
     }
+    /// Sets a knob (0..1) or a value box (its whole number) and tells the app; an unchanged box says nothing.
     fn set_knob(&mut self, k: Knob, v: f32) {
-        let v = v.clamp(0.0, 1.0);
         let e = match k {
-            Knob::Pan => FrameEvent::Pan(f64::from(v) * 2.0 - 1.0),
-            Knob::Vol => FrameEvent::Volume(f64::from(v)),
-            Knob::Pitch => FrameEvent::PitchCents(((v - 0.5) * 2.0 * self.info.range.max(1) as f32 * 100.0).round() as i32),
+            Knob::Pan => FrameEvent::Pan(f64::from(v.clamp(0.0, 1.0)) * 2.0 - 1.0),
+            Knob::Vol => FrameEvent::Volume(f64::from(v.clamp(0.0, 1.0))),
+            Knob::Pitch => FrameEvent::PitchCents(((v.clamp(0.0, 1.0) - 0.5) * 2.0 * self.info.range.max(1) as f32 * 100.0).round() as i32),
+            Knob::Range => FrameEvent::PitchRange((v.round() as i32).clamp(1, RANGE_MAX)),
+            Knob::Track => FrameEvent::Track((v.round() as i32).clamp(0, i32::from(self.info.max_track)) as u16),
         };
         match e {
             FrameEvent::Pan(p) => self.info.pan = p,
             FrameEvent::Volume(x) => self.info.volume = x,
             FrameEvent::PitchCents(c) => self.info.pitch_cents = c,
+            FrameEvent::PitchRange(r) if r == self.info.range => return,
+            FrameEvent::PitchRange(r) => {
+                // A narrower range takes the pitch knob with it (the app does the same to the channel).
+                self.info.range = r;
+                self.info.pitch_cents = self.info.pitch_cents.clamp(-100 * r, 100 * r);
+            }
+            FrameEvent::Track(t) if t == self.info.track => return,
+            FrameEvent::Track(t) => {
+                self.info.track = t;
+                self.info.target = track_name(t);
+            }
             _ => {}
         }
         self.events.push(e);
+        os_clap::wake();
+    }
+    /// The title bar's hint for a strip value box.
+    fn box_text(&self, k: Knob) -> String {
+        match k {
+            Knob::Range => format!("Pitch range: \u{b1}{} semitones", self.info.range),
+            _ => format!("Target mixer track: {}  (double-click)", track_name(self.info.track)),
+        }
     }
     fn size(&self) -> (f32, f32) {
         (self.editor.0 + 2.0 * BORDER, self.area_y() + self.editor.1 + BORDER)
@@ -324,6 +376,9 @@ enum Part {
     Tab(usize),
     On,
     Knob(u8),
+    /// The RANGE and TRACK value boxes.
+    Range,
+    Track,
     /// A strip control that is not available yet (drawn greyed out): its name for the hint.
     Off(&'static str),
     Caption,
@@ -336,8 +391,30 @@ impl State {
     }
 }
 
-/// Strip controls that do nothing yet, with their rects: the pitch range and mixer track boxes (no editing); ON, PAN, VOL
-/// and PITCH too in an effect's window (there is no channel).
+/// "Insert 3" / "Master", as the title bar names the target.
+fn track_name(t: u16) -> String {
+    if t == 0 { "Master".into() } else { format!("Insert {t}") }
+}
+
+/// The RANGE box's live part and the TRACK box (window coordinates). Classic: FL's measured places, the PITCH knob
+/// covering the RANGE box's left end. Lemon: RANGE gets its own place right of the knob, both boxes centred over their
+/// captions (spec: ui/plugin-window.md "OpenStudio").
+fn range_rect(dx: f32) -> Rect {
+    if lemon_look() { Rect::new(474.0 + dx, 35.0, 34.0, 23.0) } else { Rect::new(470.0 + dx, 35.0, 28.0, 23.0) }
+}
+fn track_rect(dx: f32) -> Rect {
+    if lemon_look() { Rect::new(516.0 + dx, 35.0, 42.0, 23.0) } else { Rect::new(517.0 + dx, 35.0, 41.0, 23.0) }
+}
+/// The whole RANGE box as drawn (classic: it runs on under the PITCH knob).
+fn range_box(dx: f32) -> Rect {
+    if lemon_look() { range_rect(dx) } else { Rect::new(455.0 + dx, 35.0, 43.0, 23.0) }
+}
+fn lemon_look() -> bool {
+    os_ui::kit::lemon::on(&os_theme::current())
+}
+
+/// Strip controls that do nothing, with their rects: in an effect's window (there is no channel) ON, PAN, VOL, PITCH,
+/// RANGE and TRACK.
 fn strip_off(st: &State, w: f32) -> Vec<(Rect, &'static str)> {
     let dx = w - STRIP_RIGHT;
     let mut v = Vec::new();
@@ -346,9 +423,9 @@ fn strip_off(st: &State, w: f32) -> Vec<(Rect, &'static str)> {
         v.push((Rect::new(383.0 + dx - 14.0, 33.0, 28.0, 28.0), "Panning"));
         v.push((Rect::new(417.0 + dx - 14.0, 33.0, 28.0, 28.0), "Volume"));
         v.push((Rect::new(455.0 + dx - 14.0, 33.0, 28.0, 28.0), "Channel pitch"));
+        v.push((range_rect(dx), "Pitch range"));
+        v.push((track_rect(dx), "Mixer track number"));
     }
-    v.push((Rect::new(470.0 + dx, 35.0, 28.0, 23.0), "Pitch range"));
-    v.push((Rect::new(517.0 + dx, 35.0, 41.0, 23.0), "Mixer track number"));
     v
 }
 
@@ -375,6 +452,8 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
             for (i, x) in [383.0, 417.0, 455.0].into_iter().enumerate() {
                 v.push((Rect::new(x + dx - 14.0, 33.0, 28.0, 28.0), Part::Knob(i as u8)));
             }
+            v.push((range_rect(dx), Part::Range));
+            v.push((track_rect(dx), Part::Track));
         }
     }
     v.push((Rect::new(0.0, 0.0, w, TITLE_H), Part::Caption));
@@ -473,7 +552,7 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     let troom = (p.x - 8.0 - tx).max(0.0);
     c.text_clip(f, tx, ty, troom, c_grey(), &target);
     let tw = c.text_width(f, &target).min(troom);
-    let off = st.off_hint.map(crate::app::off_text);
+    let off = st.off_hint.map(crate::app::off_text).or_else(|| st.box_hint.map(|k| st.box_text(k)));
     let hint = if let Some(o) = &off { o } else if st.misc { &st.misc_ui.hint } else { &st.hint };
     if !hint.is_empty() {
         let hx = tx + tw + 14.0;
@@ -520,20 +599,23 @@ fn strip(c: &mut Canvas, st: &State, w: f32) {
     let (lx, ly) = (349.0 + dx, 43.0 + dy);
     os_ui::kit::led(c, &os_theme::current(), lx, ly, 7.5, os_ui::kit::State::NORMAL.with_on(st.info.enabled));
     caption(c, lx, "ON");
-    value_box(c, Rect::new(455.0 + dx, 32.0 + dy, 43.0, 23.0), &st.info.range.to_string());
+    let at = |r: Rect| Rect::new(r.x, r.y - 35.0 + 32.0 + dy, r.w, r.h);
+    value_box(c, at(range_box(dx)), &st.info.range.to_string());
     for (k, x, cap) in [(Knob::Pan, 383.0, "PAN"), (Knob::Vol, 417.0, "VOL"), (Knob::Pitch, 455.0, "PITCH")] {
         // Indicator dots: pan teal, volume green, pitch red.
-        let dot = os_theme::current().a(match k { Knob::Pan => 0x43aebd, Knob::Vol => 0x47f49a, Knob::Pitch => 0xbb465f });
+        let dot = os_theme::current().a(match k { Knob::Pan => 0x43aebd, Knob::Vol => 0x47f49a, _ => 0xbb465f });
         knob(c, x + dx, 43.0 + dy, st.knob_value(k), k != Knob::Vol, dot);
         caption(c, if k == Knob::Pitch { x + dx - 3.0 } else { x + dx }, cap);
     }
-    caption(c, 484.0 + dx, "RANGE");
+    let lemon = lemon_look();
+    caption(c, if lemon { range_rect(dx).cx() } else { 484.0 + dx }, "RANGE");
     let track = if st.info.track == 0 { "---".to_string() } else { st.info.track.to_string() };
-    value_box(c, Rect::new(517.0 + dx, 32.0 + dy, 41.0, 23.0), &track);
-    caption(c, 537.0 + dx, "TRACK");
-    // Greyed out (`strip_off`): RANGE and TRACK; from ON on in an effect's window.
-    let x0 = if st.channel() { 470.0 } else { 334.0 };
-    c.fill_rect(Rect::span(x0 + dx, 561.0 + dx, TITLE_H + 2.0, TITLE_H + STRIP_H - 1.0), c_strip().with_alpha(crate::app::OFF_VEIL));
+    value_box(c, at(track_rect(dx)), &track);
+    caption(c, if lemon { track_rect(dx).cx() } else { 537.0 + dx }, "TRACK");
+    // Greyed out (`strip_off`): from ON on in an effect's window.
+    if !st.channel() {
+        c.fill_rect(Rect::span(334.0 + dx, 561.0 + dx, TITLE_H + 2.0, TITLE_H + STRIP_H - 1.0), c_strip().with_alpha(crate::app::OFF_VEIL));
+    }
 }
 
 fn caption(c: &mut Canvas, cx: f32, s: &str) {
@@ -575,11 +657,13 @@ fn value_box(c: &mut Canvas, r: Rect, s: &str) {
         c.fill_rrect(r, 4.0, Color::rgb(0x631d25));
         c.fill_rect_gradient(r.inset(1.0), Color::rgb(0x8d434b), Color::rgb(0x833941), 3.0);
     }
-    let f = Font::light(22, 0);
+    // Classic: FL's large digits, right-aligned; Lemon: smaller digits centred in the box.
+    let f = if lemon { Font::light(18, 0) } else { Font::light(22, 0) };
     let w = c.text_width(f, s);
     let lh = c.line_height(f);
     let ink = if lemon { p.brand_lit(os_theme::design::lemon::HIGHLIGHT) } else { Color::rgb(0xe8dfe2) };
-    c.text(f, r.right() - 11.0 - w, (r.cy() - lh / 2.0).round(), ink, s);
+    let x = if lemon { (r.cx() - w / 2.0).round() } else { r.right() - 11.0 - w };
+    c.text(f, x, (r.cy() - lh / 2.0).round(), ink, s);
 }
 
 /// `rect` minus `cut`: up to four rects (left, right, top, bottom of the hole), each [left, top, right, bottom].
@@ -616,8 +700,12 @@ enum Reply {
     Repaint,
     /// Lay the frame out again (its size, the editor area shown or hidden), then repaint.
     Relayout,
-    /// Repaint, and keep the mouse until the button is released (a knob or Misc drag, a held Misc key).
+    /// Repaint, and keep the mouse until the button is released (a Misc drag, a held Misc key).
     Capture,
+    /// As `Capture`, with the cursor hidden and held where it was pressed: moves arrive as a virtual point that moves
+    /// from the press by the mouse's motion, and the cursor shows again where it was (a strip knob or value box drag,
+    /// as the main window's knobs; spec: ui/knobs.md). Off Windows: as `Capture`.
+    Hold,
     /// Start moving the window by its title bar.
     Move,
     /// Minimize the window (a docked one hides).
@@ -698,7 +786,19 @@ impl State {
             Some(Part::Knob(i)) => {
                 let k = KNOBS[usize::from(i)];
                 self.drag = Some((k, y, self.knob_value(k)));
-                Reply::Capture
+                Reply::Hold
+            }
+            Some(Part::Track) if double => {
+                self.drag = None;
+                self.events.push(FrameEvent::ShowTrack);
+                os_clap::wake();
+                Reply::Repaint
+            }
+            Some(Part::Range | Part::Track) => {
+                let k = if part == Some(Part::Range) { Knob::Range } else { Knob::Track };
+                self.drag = Some((k, y, self.knob_value(k)));
+                self.box_hint = Some(k);
+                Reply::Hold
             }
             Some(Part::Off(name)) => {
                 self.events.push(FrameEvent::NotAvailable(name));
@@ -721,19 +821,29 @@ impl State {
         if let Some(r) = self.misc_button(x, y, Btn::Middle, screen) {
             return r;
         }
-        if let Some(Part::Knob(i)) = part_at(self, x, y) {
-            let k = KNOBS[usize::from(i)];
-            let d = if k == Knob::Vol { 0.78125 } else { 0.5 };
-            self.set_knob(k, d);
-            return Reply::Repaint;
+        match part_at(self, x, y) {
+            Some(Part::Knob(i)) => {
+                let k = KNOBS[usize::from(i)];
+                let d = if k == Knob::Vol { 0.78125 } else { 0.5 };
+                self.set_knob(k, d);
+                Reply::Repaint
+            }
+            Some(Part::Range) => {
+                self.set_knob(Knob::Range, 2.0);
+                Reply::Repaint
+            }
+            _ => Reply::None,
         }
-        Reply::None
     }
 
     /// The mouse moved to (x, y) (a window move by the title bar is the native window's). `fine`: Ctrl is held.
     fn motion(&mut self, x: f32, y: f32, fine: bool) -> Reply {
         let mut hover = false;
         if self.misc {
+            if self.misc_ui.bar_drag.is_some() {
+                let moved = crate::misc_page::bar_drag_to(&mut self.misc_ui, x - BORDER);
+                return if moved { Reply::Repaint } else { Reply::None };
+            }
             if self.misc_ui.drag.is_some() {
                 let ay = self.area_y();
                 if let Some((m, v)) = crate::misc_page::drag_value(&self.misc_ui, x - BORDER, y - ay, fine) {
@@ -768,16 +878,25 @@ impl State {
             }
         }
         if let Some((k, y0, v0)) = self.drag {
-            self.set_knob(k, v0 + (y0 - y) / 1024.0);
+            // Value boxes: one step per BOX_DRAG px, up = higher.
+            let v = if k.stepped() { v0 + ((y0 - y) / BOX_DRAG).round() } else { v0 + (y0 - y) / 1024.0 };
+            self.set_knob(k, v);
             return Reply::Repaint;
         }
-        // Over a greyed-out control the title bar says it is not available yet.
-        let off = match part_at(self, x, y) {
+        // Over a greyed-out control the title bar says it is not available yet; over a value box, its value.
+        let part = part_at(self, x, y);
+        let off = match part {
             Some(Part::Off(name)) => Some(name),
             _ => None,
         };
-        if off != self.off_hint {
+        let boxed = match part {
+            Some(Part::Range) => Some(Knob::Range),
+            Some(Part::Track) => Some(Knob::Track),
+            _ => None,
+        };
+        if off != self.off_hint || boxed != self.box_hint {
             self.off_hint = off;
+            self.box_hint = boxed;
             return Reply::Repaint;
         }
         if hover { Reply::Repaint } else { Reply::None }
@@ -807,6 +926,7 @@ impl State {
         self.drag = None;
         self.moving = None;
         self.misc_ui.drag = None;
+        self.misc_ui.bar_drag = None;
         if let Some(k) = self.misc_ui.held.take() {
             self.events.push(FrameEvent::Note(k, 0, false));
             os_clap::wake();
@@ -831,6 +951,13 @@ impl State {
             let k = KNOBS[usize::from(i)];
             let v = self.knob_value(k) + notches / 64.0;
             self.set_knob(k, v);
+            return Reply::Repaint;
+        }
+        if matches!(part, Some(Part::Range | Part::Track)) && notches != 0.0 {
+            // One step per notch, up = higher.
+            let k = if part == Some(Part::Range) { Knob::Range } else { Knob::Track };
+            self.set_knob(k, self.knob_value(k) + notches.signum());
+            self.box_hint = Some(k);
             return Reply::Repaint;
         }
         Reply::None
@@ -886,6 +1013,10 @@ impl State {
                 misc_set(self, M::Root, 60.0);
                 misc_set(self, M::Fine, 0.0);
             }
+            (Btn::Left, Hit::ScrollBar) => {
+                mp::bar_press(&mut self.misc_ui, x - BORDER);
+                reply = Reply::Capture;
+            }
             (Btn::Left, Hit::Key(k)) => {
                 self.misc_ui.held = Some(k);
                 self.events.push(FrameEvent::Note(k, 100, true));
@@ -912,7 +1043,7 @@ impl State {
                     os_clap::wake();
                 }
             }
-            Hit::Key(_) | Hit::Keyboard => mp::scroll_keyboard(&mut self.misc_ui, notches),
+            Hit::Key(_) | Hit::Keyboard | Hit::ScrollBar => mp::scroll_keyboard(&mut self.misc_ui, notches),
             _ => {}
         }
         Some(Reply::Repaint)
@@ -959,7 +1090,7 @@ mod tests {
     use super::*;
 
     fn state(strip: bool, target: &str) -> State {
-        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, misc: Some(Default::default()) };
+        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: Some(Default::default()) };
         State { strip, ..State::new(info, (480.0, 270.0), false) }
     }
 
@@ -1047,7 +1178,18 @@ mod tests {
         }
         // The Misc page again in the Lemon design.
         os_theme::set_current(&os_theme::design::palette(os_theme::Design::Lemon, None));
-        for (name, st) in [("frame_misc_lemon.png", misc(true)), ("frame_misc_plugin_lemon.png", misc(false))] {
+        let boxes = |range: i32, track: u16| {
+            let mut st = state(true, "Insert 1");
+            (st.info.range, st.info.track) = (range, track);
+            st
+        };
+        for (name, st) in [
+            ("frame_misc_lemon.png", misc(true)),
+            ("frame_misc_plugin_lemon.png", misc(false)),
+            ("frame_strip_lemon.png", boxes(48, 1)),
+            ("frame_strip_lemon2.png", boxes(2, 0)),
+            ("frame_strip_lemon3.png", boxes(12, 107)),
+        ] {
             let (w, h) = st.size();
             let mut c = Canvas::new(w as u32, h as u32, 1.0).unwrap();
             paint(&mut c, &st);
@@ -1066,12 +1208,69 @@ mod tests {
         assert_eq!(part_at(&st, 417.0 + dx, 47.0), Some(Part::Knob(1)), "VOL works");
         assert_eq!(part_at(&st, 349.0 + dx, 47.0), Some(Part::On));
         assert_eq!(part_at(&st, 455.0 + dx, 47.0), Some(Part::Knob(2)), "PITCH works");
-        assert_eq!(part_at(&st, 485.0 + dx, 47.0), Some(Part::Off("Pitch range")));
-        assert_eq!(part_at(&st, 537.0 + dx, 47.0), Some(Part::Off("Mixer track number")));
+        assert_eq!(part_at(&st, 485.0 + dx, 47.0), Some(Part::Range), "RANGE works");
+        assert_eq!(part_at(&st, 537.0 + dx, 47.0), Some(Part::Track), "TRACK works");
         let mut fx = state(true, "Master");
         fx.info.misc = None;
         assert_eq!(part_at(&fx, 383.0 + dx, 47.0), Some(Part::Off("Panning")));
         assert_eq!(part_at(&fx, 349.0 + dx, 47.0), Some(Part::Off("Effect on / off")));
+        assert_eq!(part_at(&fx, 485.0 + dx, 47.0), Some(Part::Off("Pitch range")));
+        assert_eq!(part_at(&fx, 537.0 + dx, 47.0), Some(Part::Off("Mixer track number")));
+    }
+
+    /// RANGE and TRACK: a held drag steps one per 10 px (up = higher) within their limits, the wheel one per notch,
+    /// a narrower range pulls the pitch knob in, middle click resets the range, a double click on TRACK shows the mixer.
+    #[test]
+    fn range_and_track_boxes_edit_the_channel() {
+        let screen = |x: f32, y: f32| (x as i32, y as i32);
+        let mut st = state(true, "Master");
+        st.info.max_track = 20;
+        let (w, _) = st.size();
+        let dx = w - STRIP_RIGHT;
+        let (rx, tx, y) = (485.0 + dx, 537.0 + dx, 47.0);
+        // Knobs and boxes hold the cursor.
+        assert_eq!(st.left_down(417.0 + dx, y, false, &screen), Reply::Hold);
+        st.left_up(417.0 + dx, y);
+        st.events.clear();
+        assert_eq!(st.left_down(rx, y, false, &screen), Reply::Hold);
+        st.motion(rx, y - 4.0, false);
+        assert!(st.events.is_empty(), "less than half a step does nothing");
+        st.motion(rx, y - 30.0, false);
+        assert_eq!(st.info.range, 5);
+        assert_eq!(st.events, vec![FrameEvent::PitchRange(5)]);
+        st.motion(rx, y - 10_000.0, false);
+        assert_eq!(st.info.range, RANGE_MAX);
+        st.motion(rx, y + 10_000.0, false);
+        assert_eq!(st.info.range, 1, "never below 1 semitone");
+        st.left_up(rx, y);
+        assert!(st.box_text(Knob::Range).contains("1 semitones"));
+        // A narrower range pulls the pitch in.
+        st.wheel(rx, y, 1.0);
+        assert_eq!(st.info.range, 2);
+        st.info.pitch_cents = 200;
+        st.wheel(rx, y, -1.0);
+        assert_eq!((st.info.range, st.info.pitch_cents), (1, 100));
+        st.middle_down(rx, y, &screen);
+        assert_eq!(st.info.range, 2);
+        // TRACK.
+        st.events.clear();
+        st.left_down(tx, y, false, &screen);
+        st.motion(tx, y - 30.0, false);
+        st.left_up(tx, y - 30.0);
+        assert_eq!((st.info.track, st.info.target.as_str()), (3, "Insert 3"));
+        st.wheel(tx, y, 100.0);
+        assert_eq!(st.info.track, 4, "one per notch");
+        st.left_down(tx, y, false, &screen);
+        st.motion(tx, y - 10_000.0, false);
+        st.left_up(tx, y);
+        assert_eq!(st.info.track, 20, "the highest insert");
+        st.wheel(tx, y, 1.0);
+        assert_eq!(st.events.last(), Some(&FrameEvent::Track(20)), "no event at the limit");
+        st.motion(tx, y, false);
+        assert!(st.box_text(Knob::Track).starts_with("Target mixer track: Insert 20"));
+        st.left_down(tx, y, true, &screen);
+        assert_eq!(st.events.last(), Some(&FrameEvent::ShowTrack));
+        assert!(st.drag.is_none());
     }
 
     /// A Misc keyboard key sounds while the button is held: sliding to the next key lets go of it and sounds that one,
