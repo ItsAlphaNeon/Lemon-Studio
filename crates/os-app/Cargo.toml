@@ -64,6 +64,12 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Diagnostics_Debug", "Win32_UI_HiDpi", "Win32_System_Registry"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Shared mode plays through the sound server (PulseAudio, or PipeWire's pipewire-pulse) as other programs do; the
+# PulseAudio host speaks the protocol in Rust, so no system library is linked. Exclusive mode opens ALSA directly.
+cpal = { version = "0.18", features = ["pulseaudio"] }
+# The cards the sound server gave up on while Lemon Studio had them through ALSA (`device::sound_server`): the
+# protocol crate cpal's PulseAudio host is built on.
+pulseaudio = "0.3"
 x11rb = { version = "0.13", features = ["randr", "resource_manager", "shape"] }
 
 # The main window's chrome (`macos`), plugin windows (`plugin_window::cocoa`) and the startup splash (`splash`): the

@@ -1775,6 +1775,10 @@ fn main() {
     // Lemon plugins' editors run on threads of their own off Windows and wake the app when they send something.
     #[cfg(not(windows))]
     os_hostlink::set_host_waker(wake_ui);
+    // Linux: the cards the sound server gave up on while a run before this one had them through ALSA (one that
+    // crashed, or ended with a plugin) are given back (`device::heal_sound_server`).
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(device::heal_sound_server);
     let start = path.is_none();
     splash::step(&splash, splash::SETTINGS, if start { "Reading settings" } else { "Opening project" });
     let mut app = App::new(path);

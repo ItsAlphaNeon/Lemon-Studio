@@ -4258,9 +4258,9 @@ impl App {
 
     /// Fills the Audio page: the output devices, the audio settings and the status (spec: ui/settings.md "Audio").
     fn audio_page(&mut self) {
-        let (devices, default) = crate::audio_cfg::devices();
-        let drivers = crate::device::asio_drivers();
         let cfg = crate::audio_cfg::AudioCfg::current();
+        let (devices, default) = crate::audio_cfg::devices(&cfg);
+        let drivers = crate::device::asio_drivers();
         let st = &mut self.state.settings;
         let listed = if cfg.asio_driver().is_some() { &drivers } else { &devices };
         st.device = match &cfg.device {
@@ -4306,10 +4306,10 @@ impl App {
                 let cfg = &self.state.settings.audio;
                 let host = if cfg.asio_driver().is_some() {
                     ASIO
-                } else if cfg.exclusive() {
+                } else if cfg!(windows) && cfg.exclusive() {
                     WASAPI_EXCLUSIVE
                 } else {
-                    cpal::default_host().id().name()
+                    crate::audio_cfg::host_name(cfg)
                 };
                 format!("Status: opens with the first note or Play ({host})")
             }
@@ -4381,7 +4381,8 @@ impl App {
                     .chain(st.asio_drivers.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Asio(d.clone()))).mark(on(d, true))))
                     .collect()
             }
-            // Windows devices: shared or exclusive mode (spec: audio/wasapi-low-latency.md 4.2).
+            // Windows devices: shared or exclusive mode (spec: audio/wasapi-low-latency.md 4.2). Linux: the sound server,
+            // or an ALSA device directly.
             MODE => vec![
                 PItem::new(MODE_SHARED, Cmd::Audio(Set::Mode(false))).mark(Mark::Radio(!cfg.exclusive)),
                 PItem::new(MODE_EXCLUSIVE, Cmd::Audio(Set::Mode(true))).mark(Mark::Radio(cfg.exclusive)),
@@ -11732,7 +11733,7 @@ mod tests {
         let devices = if cfg!(windows) { "Windows devices" } else { "Default device" };
         // The buffer lengths start with the device's own ("Device default", or its period where Windows says it).
         let mut menus = vec![(OUTPUT_DEVICE, devices), (SAMPLE_RATE, "Device rate"), (BUFFER_LENGTH, "Device")];
-        if cfg!(windows) {
+        if cfg!(windows) || cfg!(target_os = "linux") {
             menus.push((views::settings::MODE, views::settings::MODE_SHARED));
         }
         for (label, first) in menus {
@@ -19496,7 +19497,7 @@ mod tests {
 
     /// Windows devices have a Mode combo (spec: audio/wasapi-low-latency.md 4.2): in exclusive mode a line says other
     /// programs can't play on the device, and its buffer lengths are the device's periods; under an ASIO driver the
-    /// combo is greyed. Elsewhere there is none.
+    /// combo is greyed. Linux devices have one too (the sound server, or ALSA directly). Elsewhere there is none.
     #[test]
     fn the_mode_combo_on_windows_devices() {
         use crate::audio_cfg::{AudioCfg, Set, SMALLEST};
@@ -19508,7 +19509,12 @@ mod tests {
         let rows = |app: &App| page(AUDIO, &app.state).into_iter().flat_map(|g| g.rows).collect::<Vec<_>>();
         let mode = |app: &App| rows(app).iter().find_map(|r| match r { Row::Combo(v, _, l) if *l == MODE => Some(v.clone()), _ => None });
         let alone = |app: &App| rows(app).iter().any(|r| matches!(r, Row::Text(t, _) if t.starts_with("Other programs can't play on")));
-        assert_eq!((mode(&app), alone(&app)), (cfg!(windows).then(|| "Shared".to_string()), false));
+        let has_mode = cfg!(windows) || cfg!(target_os = "linux");
+        assert_eq!((mode(&app), alone(&app)), (has_mode.then(|| "Shared".to_string()), false));
+        if cfg!(target_os = "linux") {
+            app.state.settings.audio = AudioCfg::default().with(Set::Mode(true));
+            assert_eq!((mode(&app).as_deref(), alone(&app)), (Some("Exclusive"), true));
+        }
         if !cfg!(windows) {
             return;
         }

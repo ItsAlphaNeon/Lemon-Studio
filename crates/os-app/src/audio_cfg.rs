@@ -7,7 +7,9 @@
 //! offer or a buffer length it refuses falls back to the system's default device and that device's own rate and buffer.
 //! The device is a Windows (ALSA, Core Audio) one or, on Windows, an ASIO driver (`asio`): for a driver, `None` and a
 //! rate or buffer length it does not take mean the driver's own (its buffer length is set in its own panel). A Windows
-//! device plays in shared mode, or in exclusive mode (`exclusive`, `device::wasapi`) with the device to itself.
+//! device plays in shared mode, or in exclusive mode (`exclusive`, `device::wasapi`) with the device to itself. On
+//! Linux shared mode plays through the sound server (PulseAudio, or PipeWire through pipewire-pulse) as other programs
+//! do, and exclusive mode opens an ALSA device directly, the sound server's hold on it or not (`host`).
 // spec: ui/settings.md "Audio", audio/wasapi-low-latency.md
 
 use std::sync::Mutex;
@@ -26,7 +28,8 @@ pub struct AudioCfg {
     pub rate: Option<u32>,
     /// Buffer length, frames (`SMALLEST`: the device's smallest period, in exclusive mode).
     pub buffer: Option<u32>,
-    /// A Windows device in exclusive mode (Lemon Studio alone on it); ignored for an ASIO driver and off Windows.
+    /// A Windows device in exclusive mode (Lemon Studio alone on it), on Linux an ALSA device opened directly; ignored
+    /// for an ASIO driver and on macOS.
     pub exclusive: bool,
 }
 
@@ -53,7 +56,7 @@ pub enum Set {
     Asio(String),
     Rate(Option<u32>),
     Buffer(Option<u32>),
-    /// Exclusive (`true`) or shared mode for Windows devices.
+    /// Exclusive (`true`) or shared mode for Windows devices (Linux: ALSA, or the sound server).
     Mode(bool),
 }
 
@@ -83,14 +86,20 @@ impl AudioCfg {
             Set::Asio(d) => (self.asio, self.device) = (true, Some(d)),
             Set::Rate(r) => self.rate = r,
             Set::Buffer(b) => self.buffer = b,
-            Set::Mode(on) => self.exclusive = on,
+            Set::Mode(on) => {
+                // Linux: the sound server's devices are not ALSA's; the new mode starts on its default.
+                if cfg!(target_os = "linux") && on != self.exclusive {
+                    self.device = None;
+                }
+                self.exclusive = on;
+            }
         }
         self
     }
 
-    /// A Windows device chosen in exclusive mode (not an ASIO driver; never off Windows).
+    /// A Windows device chosen in exclusive mode, or on Linux an ALSA device (not an ASIO driver; never on macOS).
     pub fn exclusive(&self) -> bool {
-        self.exclusive && !self.asio && cfg!(windows)
+        self.exclusive && !self.asio && (cfg!(windows) || cfg!(target_os = "linux"))
     }
 
     /// The ASIO driver chosen (Windows; elsewhere the name is looked for among the devices and not found).
@@ -161,15 +170,87 @@ fn save(c: &AudioCfg) {
     }
 }
 
-/// A device's name as the settings show and keep it.
+/// The audio system `cfg` plays on. Linux: in shared mode the sound server (cpal's PulseAudio host, which PipeWire
+/// serves too), else ALSA (also when no sound server is running); elsewhere the system's own.
+pub fn host(cfg: &AudioCfg) -> cpal::Host {
+    #[cfg(target_os = "linux")]
+    {
+        if server(cfg) {
+            if let Ok(h) = cpal::host_from_id(cpal::HostId::PulseAudio) {
+                return h;
+            }
+        }
+        if let Ok(h) = cpal::host_from_id(cpal::HostId::Alsa) {
+            return h;
+        }
+    }
+    cpal::default_host()
+}
+
+/// Linux, shared mode, with a sound server to play through (it is not asked: only whether its socket is there).
+#[cfg(target_os = "linux")]
+fn server(cfg: &AudioCfg) -> bool {
+    !cfg.exclusive() && cpal::available_hosts().contains(&cpal::HostId::PulseAudio)
+}
+
+/// The name of `host(cfg)`, without connecting to it.
+pub fn host_name(cfg: &AudioCfg) -> &'static str {
+    #[cfg(target_os = "linux")]
+    return if server(cfg) { cpal::HostId::PulseAudio.name() } else { cpal::HostId::Alsa.name() };
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = cfg;
+        cpal::default_host().id().name()
+    }
+}
+
+/// A device's name as the settings show and keep it. ALSA names one card's many PCMs alike (`default:`, `front:`,
+/// `hw:`, `plughw:`, ...): there the PCM follows, "HDA Intel PCH, ALC257 Analog (hw:CARD=0,DEV=0)".
 pub fn device_name(d: &cpal::Device) -> String {
+    let name = plain_name(d);
+    match alsa_pcm(d) {
+        Some(pcm) if pcm != "default" => named(&name, &pcm),
+        _ => name,
+    }
+}
+
+/// The device's own description, as names were kept before ALSA's had their PCM (a name saved then still finds its
+/// device: `find`).
+fn plain_name(d: &cpal::Device) -> String {
     d.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "(unknown device)".into())
 }
 
-/// The output devices' names, and the system default's.
-pub fn devices() -> (Vec<String>, Option<String>) {
-    let host = cpal::default_host();
-    let list = host.output_devices().map(|ds| ds.map(|d| device_name(&d)).collect()).unwrap_or_default();
+fn named(name: &str, pcm: &str) -> String {
+    format!("{name} ({pcm})")
+}
+
+/// An ALSA device's PCM name ("hw:CARD=0,DEV=0"); `None` on another host.
+fn alsa_pcm(d: &cpal::Device) -> Option<String> {
+    let id = d.id().ok()?;
+    (id.host().name() == "ALSA").then(|| id.id().to_string())
+}
+
+/// ALSA PCMs that are no device to play on or record from: plugins that only convert (rates, channels, Speex's
+/// processing), throw the sound away (`null`) or stream raw USB (`usbstream`).
+const NOT_DEVICES: [&str; 9] = ["null", "lavrate", "samplerate", "speexrate", "speex", "upmix", "vdownmix", "usbstream", "a52"];
+
+/// A device the settings list (every one off ALSA).
+pub fn listed(d: &cpal::Device) -> bool {
+    alsa_pcm(d).is_none_or(|pcm| !NOT_DEVICES.contains(&pcm.split(':').next().unwrap_or("")))
+}
+
+/// The device named `want` among `devices`: by its name, else (a name saved before ALSA's had their PCM) the first
+/// whose own description it is.
+pub fn find(devices: impl Iterator<Item = cpal::Device>, want: &str) -> Option<cpal::Device> {
+    let devices: Vec<cpal::Device> = devices.collect();
+    let i = devices.iter().position(|d| device_name(d) == want).or_else(|| devices.iter().position(|d| plain_name(d) == want))?;
+    devices.into_iter().nth(i)
+}
+
+/// The output devices' names for `cfg` (on Linux the sound server's or ALSA's, by mode), and the default's.
+pub fn devices(cfg: &AudioCfg) -> (Vec<String>, Option<String>) {
+    let host = host(cfg);
+    let list = host.output_devices().map(|ds| ds.filter(listed).map(|d| device_name(&d)).collect()).unwrap_or_default();
     (list, host.default_output_device().map(|d| device_name(&d)))
 }
 
@@ -188,8 +269,8 @@ pub struct Output {
 /// The output for `cfg`: its device (else the system default), its rate when the device offers it (else the
 /// device's own) and its buffer length when the device takes it (else the device's default).
 pub fn output(cfg: &AudioCfg) -> Result<Output, String> {
-    let host = cpal::default_host();
-    let chosen = cfg.device.as_ref().and_then(|want| host.output_devices().ok()?.find(|d| device_name(d) == *want));
+    let host = host(cfg);
+    let chosen = cfg.device.as_ref().and_then(|want| find(host.output_devices().ok()?, want));
     let device = match chosen {
         Some(d) => d,
         None => host.default_output_device().ok_or("no audio output device")?,
@@ -228,14 +309,14 @@ pub fn output(cfg: &AudioCfg) -> Result<Output, String> {
 }
 
 /// The sample rate the settings' device would open at now, asking the device (`device::rate` knows it once the device
-/// opened). An ASIO driver is not asked (that would load it): the rate chosen, else unknown until it opens. A device in
-/// exclusive mode runs at the rate chosen when it takes it, else (and until one is chosen) at its own.
+/// opened). An ASIO driver is not asked (that would load it): the rate chosen, else unknown until it opens. A Windows
+/// device in exclusive mode runs at the rate chosen when it takes it, else (and until one is chosen) at its own.
 pub fn rate() -> Option<u32> {
     let cfg = AudioCfg::current();
     if cfg.asio_driver().is_some() {
         return cfg.rate;
     }
-    if let Some(r) = cfg.rate.filter(|_| cfg.exclusive()) {
+    if let Some(r) = cfg.rate.filter(|_| cfg!(windows) && cfg.exclusive()) {
         return Some(r);
     }
     output(&cfg).ok().map(|o| o.config.sample_rate)
@@ -250,10 +331,10 @@ mod tests {
         let c = AudioCfg { asio: false, device: Some("Speakers (USB Audio)".into()), rate: Some(48000), buffer: Some(256), exclusive: false };
         assert_eq!(AudioCfg::parse(&c.text()), c);
         // Exclusive mode and its smallest period; a file without `mode` is shared.
-        let x = c.clone().with(Set::Mode(true)).with(Set::Buffer(Some(SMALLEST)));
+        let x = c.clone().with(Set::Mode(true)).with(Set::Device(c.device.clone())).with(Set::Buffer(Some(SMALLEST)));
         assert_eq!(x.text(), "mode=exclusive\ndevice=Speakers (USB Audio)\nrate=48000\nbuffer=smallest\n");
         assert_eq!(AudioCfg::parse(&x.text()), x);
-        assert_eq!(x.exclusive(), cfg!(windows));
+        assert_eq!(x.exclusive(), cfg!(windows) || cfg!(target_os = "linux"));
         assert!(!AudioCfg::parse("mode=shared\n").exclusive);
         assert!(!x.clone().with(Set::Asio("FL Studio ASIO".into())).exclusive(), "not for an ASIO driver");
         // An ASIO driver; a file from before there were drivers (no `host`) is a Windows device.
@@ -271,6 +352,50 @@ mod tests {
         // The device's own buffer length is kept as chosen, also where the default is another.
         let own = AudioCfg::default().with(Set::Buffer(None));
         assert_eq!(AudioCfg::parse(&own.text()), own);
+    }
+
+    /// On Linux the sound server's devices and ALSA's are not the same: changing mode starts on the default device
+    /// (elsewhere the device stays). Shared mode is the default, on the sound server when one runs.
+    #[test]
+    fn changing_mode_keeps_the_device_where_it_is_the_same() {
+        let c = AudioCfg { device: Some("Speakers".into()), ..AudioCfg::default() };
+        let x = c.clone().with(Set::Mode(true));
+        assert!(x.exclusive);
+        assert_eq!(x.device.is_none(), cfg!(target_os = "linux"));
+        assert_eq!(c.clone().with(Set::Mode(false)).device, c.device, "the same mode again");
+        assert!(!AudioCfg::default().exclusive);
+        #[cfg(target_os = "linux")]
+        assert_eq!(host_name(&x), "ALSA");
+    }
+
+    /// ALSA's PCMs of one card are told apart by their PCM; converting plugins are not listed.
+    #[test]
+    fn alsa_names_say_the_pcm() {
+        let name = "HDA Intel PCH, ALC257 Analog";
+        assert_eq!(named(name, "hw:CARD=0,DEV=0"), "HDA Intel PCH, ALC257 Analog (hw:CARD=0,DEV=0)");
+        assert_ne!(named(name, "hw:CARD=0,DEV=0"), named(name, "front:CARD=PCH,DEV=0"));
+        assert!(NOT_DEVICES.contains(&"usbstream:CARD=PCH".split(':').next().unwrap()));
+    }
+
+    /// The ALSA devices here have a name each, and a name saved before they had their PCM still finds a device. Needs
+    /// an audio card.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn alsa_devices_here_are_told_apart() {
+        use cpal::traits::HostTrait;
+        let alsa = cpal::host_from_id(cpal::HostId::Alsa).expect("ALSA");
+        let devices: Vec<cpal::Device> = alsa.output_devices().expect("devices").filter(listed).collect();
+        let names: Vec<String> = devices.iter().map(device_name).collect();
+        println!("{names:#?}");
+        let unique: std::collections::HashSet<&String> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "no two alike");
+        assert!(!names.iter().any(|n| n.ends_with("(null)") || n.contains("(samplerate)")), "no converting plugins");
+        let card = devices.iter().find(|d| alsa_pcm(d).is_some_and(|p| p.starts_with("hw:"))).expect("a card");
+        let found = find(alsa.output_devices().expect("devices"), &plain_name(card)).expect("an old name finds a device");
+        assert_eq!(plain_name(&found), plain_name(card));
+        let exact = find(alsa.output_devices().expect("devices"), &device_name(card)).expect("its name finds it");
+        assert_eq!(alsa_pcm(&exact), alsa_pcm(card));
     }
 
     /// Linux starts at 512 frames (the devices' own lengths popped); elsewhere at the device's own.
