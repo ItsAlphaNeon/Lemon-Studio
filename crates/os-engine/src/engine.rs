@@ -1618,6 +1618,13 @@ impl Engine {
         self.count_in
     }
 
+    /// The mixer track the metronome's clicks and the Tempo tapper's enter (spec: ui/metronome.md §4): the switch's
+    /// track when the project has that insert track (not the master, not the hidden last track), else the master.
+    fn click_track(&self) -> usize {
+        let t = self.metronome.as_ref().map_or(0, |m| usize::from(m.switch().track()));
+        if t + 1 < self.bus.len() { t } else { 0 }
+    }
+
     fn beat_ticks(&self) -> u32 {
         (u32::from(self.ppq) * u32::from(self.steps) / 4).max(1)
     }
@@ -2623,16 +2630,17 @@ impl Engine {
         let (channels, w) = (&self.channels, self.sinc_w);
         let bus = &mut self.bus;
         self.voices.retain_mut(|v| render_voice(v, channels, bus, 0, 0, len, w));
-        // The metronome's click enters the master track (spec: ui/metronome.md §4): live playback only, and no new
+        // The metronome's click enters its mixer track (spec: ui/metronome.md §4): live playback only, and no new
         // click once a song is over.
         // Counted from the start of the time-signature region the tick is in, so the accent is on its bar lines.
         let (from, beat, beats) = self.click_bars.iter().rev().find(|r| r.0 <= tick).copied().unwrap_or((0, self.beat_ticks(), self.beats_per_accent));
+        let click = self.click_track();
         if let Some(m) = self.metronome.as_mut().filter(|_| !self.exporting && !self.live_only) {
             let start = self.looping || tick < self.end_tick;
-            m.tick(tick - from, beat, beats, start, &mut self.bus[0][..len * 2]);
+            m.tick(tick - from, beat, beats, start, &mut self.bus[click][..len * 2]);
         }
         if !self.exporting {
-            self.tap_clicks.mix(&mut self.bus[0][..len * 2]);
+            self.tap_clicks.mix(&mut self.bus[click][..len * 2]);
         }
         self.pad_voices(len);
         self.render_instruments(len, &song);
@@ -2734,8 +2742,9 @@ impl Engine {
         let bus = &mut self.bus;
         self.voices.retain_mut(|v| render_voice(v, channels, bus, 0, 0, len, w));
         let beat = self.beat_ticks();
+        let click = self.click_track();
         if let Some(m) = self.metronome.as_mut() {
-            m.count_in(done, beat, self.beats_per_accent, &mut self.bus[0][..len * 2]);
+            m.count_in(done, beat, self.beats_per_accent, &mut self.bus[click][..len * 2]);
         }
         self.pad_voices(len);
         self.render_instruments(len, &song);
@@ -7395,6 +7404,57 @@ mod tests {
         let mut out = vec![0.0; 2 * 48000];
         e.process(&mut out);
         assert!(out.iter().all(|&s| s == 0.0), "muted master");
+    }
+
+    /// Settings > Audio "Metronome track": the clicks enter that insert track, so muting it silences them; a track the
+    /// project does not have (or the hidden last one) is the master. The count-in and a tap go the same way.
+    #[test]
+    fn metronome_enters_its_mixer_track() {
+        let mut p = project(vec![], vec![]);
+        p.mixer = (0..4).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::new(None);
+        let play = |p: &Project, lib: &mut SampleLibrary, track: u16| {
+            let sw = metronome_on();
+            sw.set_track(track);
+            let mut e = Engine::new(p, lib, 48000, PlayMode::Pattern(1));
+            e.set_looping(true);
+            e.set_metronome(sw);
+            let mut out = vec![0.0; 2 * 48000];
+            e.process(&mut out);
+            out
+        };
+        assert!(play(&p, &mut lib, 2).iter().any(|&s| s != 0.0), "insert 2 goes on to the master");
+        p.mixer[2].enabled = false;
+        assert!(play(&p, &mut lib, 2).iter().all(|&s| s == 0.0), "insert 2 muted");
+        assert!(play(&p, &mut lib, 1).iter().any(|&s| s != 0.0), "another track");
+        for missing in [3, 9] {
+            assert!(play(&p, &mut lib, missing).iter().any(|&s| s != 0.0), "track {missing}: the master");
+        }
+        // The count-in (the switch off: it clicks anyway) and a tap.
+        for (track, heard) in [(2, false), (0, true)] {
+            let sw = metronome_on();
+            sw.set_on(false);
+            sw.set_track(track);
+            let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+            e.set_metronome(sw);
+            e.set_count_in(1);
+            let mut out = vec![0.0; 2 * 48000];
+            e.process(&mut out);
+            assert_eq!(out.iter().any(|&s| s != 0.0), heard, "count-in into track {track}");
+        }
+        let sw = metronome_on();
+        sw.set_track(2);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_metronome(sw.clone());
+        e.clear_schedule();
+        e.tap_click(true, 0);
+        let mut out = vec![0.0; 2 * 2000];
+        e.process(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0), "a tap into muted insert 2");
+        sw.set_track(0);
+        e.tap_click(true, 0);
+        e.process(&mut out);
+        assert!(out.iter().any(|&s| s != 0.0), "a tap into the master");
     }
 
     // spec: ui/tempo-tapper.md §8

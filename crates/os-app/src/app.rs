@@ -4501,13 +4501,19 @@ impl App {
     /// Settings > Project ▸ a time division's value box (`label`, `settings::LIVE_NUMBERS`) moved by `delta` (the
     /// mouse wheel). It stays in its range; a file's value outside it can only move toward it.
     fn settings_number(&mut self, label: &str, delta: i32) -> Option<String> {
-        // The value boxes declared in `crate::prefs` (General ▸ Undo history ▸ Maximum undo levels).
+        // The value boxes declared in `crate::prefs` (General ▸ Undo history ▸ Maximum undo levels, File ▸ Backup ▸
+        // Maximum).
         if let Some(n) = crate::prefs::find_number(label) {
-            // Audio ▸ Browser preview track offers "---" and the open project's insert tracks; one past them comes
-            // back in range (spec: ui/settings-choices.md "Mixer: Browser preview track").
-            let max = if n == &crate::prefs::BROWSER_PREVIEW_TRACK { n.max.min(crate::mixer::inserts(&self.state)) } else { n.max };
+            // Audio ▸ Browser preview track and Metronome track offer "---" and the open project's insert tracks; one
+            // past them comes back in range (spec: ui/settings-choices.md "Mixer: Browser preview track").
+            let track = n == &crate::prefs::BROWSER_PREVIEW_TRACK || n == &crate::prefs::METRONOME_TRACK;
+            let max = if track { n.max.min(crate::mixer::inserts(&self.state)) } else { n.max };
             let v = (i32::from(crate::prefs::number(n)) + delta).clamp(i32::from(n.min), i32::from(max.max(n.min))) as u16;
             crate::prefs::set_number(n, v);
+            if n == &crate::prefs::METRONOME_TRACK {
+                // The playing engines hear it from their next tick.
+                crate::metronome::switch().set_track(v);
+            }
             crate::history::trim(&mut self.state);
             self.invalidate();
             return Some(format!("{}: {}", n.label, crate::prefs::number_text(n)));

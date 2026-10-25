@@ -142,10 +142,10 @@ counts. Double-clicking it opens the plugin performance monitor: each plugin's p
 and voices, with sorting, find and freeze.
 
 **Metronome.** The toolbar button, OPTIONS > Metronome or Ctrl+M: a click on every quarter note while playing,
-accented as FL does (the first beat of each bar in 4/4 and 3/4), through the master track. Right-click the
+accented as FL does (the first beat of each bar in 4/4 and 3/4), through the master track or the insert track that
+Audio settings ▸ Mixer ▸ Metronome track picks (the count-in and the Tempo tapper's clicks too). Right-click the
 button for five sounds and the volume (-12 to +12 dB; above 0 dB the click is soft-limited, not clipped). It is never in an export, and it is remembered between sessions. It follows the time-signature markers: the
-arrangement's in SONG mode, the current pattern's in PAT mode, each marker starting a bar of its own beats. Not yet:
-the "Metronome track" setting.
+arrangement's in SONG mode, the current pattern's in PAT mode, each marker starting a bar of its own beats.
 
 **Tempo tapper.** VIEW > Tempo tapper, Ctrl+F5 or the kick drum button on the toolbar: click the pad (or press
 a key on a MIDI keyboard, play a note on the typing keyboard, or press a Touch controller pad or key) in time. The average of the taps, in whole BPM, becomes the project tempo while Apply
@@ -186,6 +186,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   opens a Save as form that can make that folder (General ▸ Ask for data folder decides when; File ▸ New can
   open a New project form)
 - FILE lists the ten projects last opened or saved (Alt+1 .. Alt+0), More ▸ the older ones, fifty in all
+- File settings ▸ Backup: Autosave backs a changed project up at its interval into the user folder's
+  `Projects/Backup` (or the data folder's `Backup`), keeping the newest Maximum (100 unless changed) per project;
+  saving over a file keeps a copy of the old one there
 - FILE ▸ Revert to last backup opens the project's newest backup (asking about unsaved changes first, as Open
   does); Save as template... keeps a copy in the user folder's `Templates`, and New from template ▸ starts an
   untitled project from one (or Empty); Save to new project folder... saves into a folder named after the project,
