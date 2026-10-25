@@ -6,6 +6,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches-ignore: [cutting-edge, 'cutting-edge-*']
   workflow_dispatch:
 
 concurrency:

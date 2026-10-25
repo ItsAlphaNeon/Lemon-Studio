@@ -1685,12 +1685,14 @@ fn screenshot(args: &[String]) {
 static PROXY: std::sync::Mutex<Option<EventLoopProxy<()>>> = std::sync::Mutex::new(None);
 static WAKE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Linux: the main window goes on X11 (XWayland under Wayland) so plugin windows can dock in it: plugin editors on Linux
-/// are X11 windows, and an X11 window cannot be a child of a Wayland one. Native Wayland when there is no X server, or
-/// when `OPENSTUDIO_WAYLAND=1` asks for it; plugin windows are then always detached.
+/// Linux: native Wayland in a Wayland session, X11 otherwise. `OPENSTUDIO_WAYLAND=0` puts the main window on X11
+/// (XWayland) instead, where plugin windows can dock in it: plugin editors on Linux are X11 windows, and an X11 window
+/// cannot be a child of a Wayland one. On Wayland plugin windows are always detached.
 #[cfg(target_os = "linux")]
 fn use_x11() -> bool {
-    if std::env::var_os("OPENSTUDIO_WAYLAND").is_some_and(|v| v == "1") {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty());
+    let forced_x11 = std::env::var_os("OPENSTUDIO_WAYLAND").is_some_and(|v| v == "0");
+    if wayland && !forced_x11 {
         return false;
     }
     std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) && x11rb::rust_connection::RustConnection::connect(None).is_ok()

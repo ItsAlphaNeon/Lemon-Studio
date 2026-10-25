@@ -13,6 +13,10 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **Older FL projects open.** Projects saved by FL 20 to 24.1 are converted to the newer layout as they are read.
   Save asks for a new file.
 
+- **Wayland first.** On Linux the main window is native Wayland in a Wayland session; plugin windows open detached.
+  `OPENSTUDIO_WAYLAND=0` brings back the X11 window, where plugin windows dock. CI runs on Linux only
+  (`.github/workflows/cutting-edge.yml`); Windows and macOS are not tested on every push.
+
 ## What this branch removes
 
 Nothing yet.
