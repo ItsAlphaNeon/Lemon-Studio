@@ -28,7 +28,7 @@ use os_ui::{Canvas, Color, Font, Rect};
 #[cfg(windows)]
 mod win32;
 #[cfg(windows)]
-pub use win32::{default_position, first_position, lift_hide, lift_show, stack, take_exposed, take_keys, take_link, FrameWindow};
+pub use win32::{default_position, first_position, focus_main, lift_hide, lift_show, stack, take_exposed, take_keys, take_link, FrameWindow};
 
 #[cfg(target_os = "linux")]
 mod x11;
@@ -213,6 +213,10 @@ pub enum FrameEvent {
     Dpi(f32),
     /// A greyed-out control was clicked: the app says it is not available yet.
     NotAvailable(&'static str),
+    /// A file was dropped on the frame (from the desktop): a preset loads, a sample goes to a sampler (spec:
+    /// plugins/presets.md "Drag and drop").
+    #[cfg_attr(not(windows), allow(dead_code))]
+    DropFile(std::path::PathBuf),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -836,6 +840,10 @@ impl State {
     fn motion(&mut self, x: f32, y: f32, fine: bool) -> Reply {
         let mut hover = false;
         if self.misc {
+            if self.misc_ui.bar_drag.is_some() {
+                let moved = crate::misc_page::bar_drag_to(&mut self.misc_ui, x - BORDER);
+                return if moved { Reply::Repaint } else { Reply::None };
+            }
             if self.misc_ui.drag.is_some() {
                 let ay = self.area_y();
                 if let Some((m, v)) = crate::misc_page::drag_value(&self.misc_ui, x - BORDER, y - ay, fine) {
@@ -918,6 +926,7 @@ impl State {
         self.drag = None;
         self.moving = None;
         self.misc_ui.drag = None;
+        self.misc_ui.bar_drag = None;
         if let Some(k) = self.misc_ui.held.take() {
             self.events.push(FrameEvent::Note(k, 0, false));
             os_clap::wake();
@@ -1004,6 +1013,10 @@ impl State {
                 misc_set(self, M::Root, 60.0);
                 misc_set(self, M::Fine, 0.0);
             }
+            (Btn::Left, Hit::ScrollBar) => {
+                mp::bar_press(&mut self.misc_ui, x - BORDER);
+                reply = Reply::Capture;
+            }
             (Btn::Left, Hit::Key(k)) => {
                 self.misc_ui.held = Some(k);
                 self.events.push(FrameEvent::Note(k, 100, true));
@@ -1030,7 +1043,7 @@ impl State {
                     os_clap::wake();
                 }
             }
-            Hit::Key(_) | Hit::Keyboard => mp::scroll_keyboard(&mut self.misc_ui, notches),
+            Hit::Key(_) | Hit::Keyboard | Hit::ScrollBar => mp::scroll_keyboard(&mut self.misc_ui, notches),
             _ => {}
         }
         Some(Reply::Repaint)

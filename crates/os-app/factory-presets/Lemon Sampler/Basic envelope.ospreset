@@ -1,0 +1,11 @@
+OSPRESET 1
+plugin=Lemon Sampler	id=clap:org.openstudio.open-sampler	format=clap	body=params
+# The original preset Basic envelope: the volume envelope on, short times. The loaded sample is kept.
+Volume envelope = 1
+Volume delay = 0.001525879
+Volume attack = 0.001525879
+Volume hold = 0.001525879
+Volume decay = 0.001525879
+Volume sustain = 1
+Volume release = 0.001525879
+Volume release tension = 0.10546875

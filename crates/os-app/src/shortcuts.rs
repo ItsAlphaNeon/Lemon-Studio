@@ -28,13 +28,14 @@ pub const TOGGLE_BROWSER: Combo = Combo { key: "shortcut_toggle_browser", label:
 /// Opens or closes the plugin menu (`App::toggle_plugin_menu`).
 pub const TOGGLE_PLUGIN_PICKER: Combo =
     Combo { key: "shortcut_toggle_plugin_picker", label: "Toggle plugin picker", choices: F8_KEYS, default: 0 };
-/// Lemon Studio has no project picker yet: its key does nothing for now.
+/// Opens or closes the project picker (`App::toggle_project_picker`).
 pub const TOGGLE_PROJECT_PICKER: Combo =
     Combo { key: "shortcut_toggle_project_picker", label: "Toggle project picker", choices: F8_KEYS, default: 2 };
 /// Shows the plugin database: the browser on its Plugin database tab (`App::show_plugin_database`).
 pub const SHOW_PLUGIN_DATABASE: Combo =
     Combo { key: "shortcut_show_plugin_database", label: "Show plugin database", choices: F8_KEYS, default: 1 };
-/// MIDI import window: kept only, Lemon Studio has no MIDI import window yet.
+/// MIDI import window: the modifier held while a MIDI file is chosen or dropped picks the row whose behaviour applies
+/// (`midi_file::show_for`; spec: ui/midi-files.md §10.5).
 pub const MIDI_WHEN_NECESSARY: Combo =
     Combo { key: "midi_import_window_when_necessary", label: "Show when necessary", choices: MIDI_MODS, default: 0 };
 pub const MIDI_EVERY_TIME: Combo =
@@ -205,7 +206,8 @@ impl App {
             Some(F8::Browser) => self.act(Action::ToggleWin(Win::Browser)),
             Some(F8::PluginPicker) => self.toggle_plugin_menu(),
             Some(F8::PluginDatabase) => self.show_plugin_database(),
-            Some(F8::ProjectPicker) | None => {}
+            Some(F8::ProjectPicker) => self.toggle_project_picker(),
+            None => {}
         }
     }
 

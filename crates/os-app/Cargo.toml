@@ -23,18 +23,37 @@ os-host.workspace = true
 os-vst3.workspace = true
 os-vst2.workspace = true
 os-paths.workspace = true
+os-smf.workspace = true
 lemon-sampler = { path = "../../plugins/lemon-sampler", features = ["linked"] }
 lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", features = ["linked"] }
 lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", features = ["linked"] }
+citrus = { path = "../../plugins/citrus", features = ["linked"] }
+lemon-limiter = { path = "../../plugins/lemon-limiter", features = ["linked"] }
+lemon-reverb = { path = "../../plugins/lemon-reverb", features = ["linked"] }
+lemon-delay = { path = "../../plugins/lemon-delay", features = ["linked"] }
+lemon-soft-clipper = { path = "../../plugins/lemon-soft-clipper", features = ["linked"] }
+lemon-fast-distortion = { path = "../../plugins/lemon-fast-distortion", features = ["linked"] }
+lemon-balance = { path = "../../plugins/lemon-balance", features = ["linked"] }
+lemon-stereo-enhancer = { path = "../../plugins/lemon-stereo-enhancer", features = ["linked"] }
+lemon-transient-processor = { path = "../../plugins/lemon-transient-processor", features = ["linked"] }
+lemon-chorus = { path = "../../plugins/lemon-chorus", features = ["linked"] }
+lemon-stereo-shaper = { path = "../../plugins/lemon-stereo-shaper", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"
 crossbeam-queue = "0.3"
 midir = "0.11"
 tiny-skia = "0.11"
+# JPEG workspace pictures of theme files (`wallpaper`; PNG goes through tiny-skia). Pure Rust, no threads.
+jpeg-decoder = { version = "0.3", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
+# Export encoders (`export::encode`): FLAC (pure Rust), MP3 (LAME, built from source) and Ogg Vorbis (libvorbis, built
+# from source).
+flacenc = "0.5"
+mp3lame-encoder = "0.2"
+vorbis_rs = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 # ASIO output (`device::asio`), built from the ASIO SDK's host files in `asiosdk` (`.cargo/config.toml`).

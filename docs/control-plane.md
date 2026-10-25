@@ -115,11 +115,14 @@ default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre).
 
 - Every `apply` is one step in the project's undo history, named after the client ("Beat bot: build a beat"). The
   user can undo it like any other step, and Ctrl+Z after it works as usual.
-- The interface's own edits use the same path: mixer edits (faders, mute, polarity, routing, colours, names, effect
-  slots, adding, moving and deleting tracks), channel colours, names, cloning, moving and deleting, and pattern
-  colours, names, inserting, cloning, moving and deleting are undo steps too, as are the tempo, the project settings
-  and parameters changed in a plugin's own window. A change has the same step name whichever made it ("Tempo",
-  "Time signature", "Song info", "Plugin parameter").
+- The interface's own edits use the same path: mixer edits (faders dragged or typed, mute, polarity, routing,
+  colours, names, effect slots and their sidechain input, adding, moving and deleting tracks), channels added (the
+  plugin picker, F8, ADD, a browser drop), coloured, named, cloned, moved and deleted, FILE ▸ Import ▸ MIDI file into
+  the open project, and pattern colours, names, inserting, cloning, moving and deleting are undo steps too, as are the
+  tempo, the project settings and plugin parameters, whether Lemon Studio sets them (Type in value, Set..., Paste
+  value) or they change in the plugin's own window. Faders and parameters follow "Undo knob tweaks". A change has the
+  same step name whichever made it ("Tempo", "Time signature", "Song info", "Plugin parameter").
+- An undone channel or effect keeps its plugin instance's state: a redo hosts it again from that state.
 - A proposal is applied to see what it changes and taken back at once; with a window the app asks the user to Apply
   or Discard it. Accepted, it is one undo step named after its client.
 - `events` lists each change: `apply`, `undo`, `redo`, `proposal`, `accepted`, `discarded`, `opened` (a project was

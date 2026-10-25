@@ -47,7 +47,7 @@ pub struct Category {
 }
 
 /// Template `name`'s file in category `cat`.
-fn file_in(root: &Path, cat: &str, name: &str) -> PathBuf {
+pub(crate) fn file_in(root: &Path, cat: &str, name: &str) -> PathBuf {
     root.join(cat).join(name).join(format!("{name}.flp"))
 }
 
@@ -132,7 +132,7 @@ impl App {
                 .collect();
             items.push(PItem { children, ..PItem::new(c.name, Cmd::Nothing) });
         }
-        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None });
+        self.state.playlist.popup = Some(Popup { x, y: y + 1.0, items, sub: None, scroll: [0; 2] });
         self.invalidate();
     }
 
@@ -147,17 +147,26 @@ impl App {
     /// False for Empty and when the template does not load: the caller makes the built-in project then.
     pub(crate) fn new_from_template(&mut self) -> bool {
         let Some(path) = file() else { return false };
-        let kept = last_kept();
+        self.new_from_file(&path, &name())
+    }
+
+    /// The template file `path` (named `name`) opened as an untitled project (FILE ▸ New, New from template ▸). False
+    /// when it does not load.
+    pub(crate) fn new_from_file(&mut self, path: &Path, name: &str) -> bool {
+        let path = path.to_path_buf();
+        // A template is not a recent project either (spec: ui/recent-projects.md §2).
+        let (kept, recent) = (last_kept(), crate::recent::list());
         self.state.path = None;
         self.open(path.clone());
         restore_last(kept);
+        crate::recent::restore(&recent);
         if self.state.path.as_deref() != Some(path.as_path()) {
             return false;
         }
         let s = &mut self.state;
         s.path = None;
         crate::project_info::created(s);
-        s.message = Some(format!("New project from the template {}", name()));
+        s.message = Some(format!("New project from the template {name}"));
         self.mark_saved();
         true
     }

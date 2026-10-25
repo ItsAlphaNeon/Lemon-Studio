@@ -60,8 +60,10 @@ fn cc(t: &os_theme::Palette, v: u32) -> Color {
 const TOOL_X: [f32; 9] = [66.0, 86.0, 108.0, 129.0, 150.0, 171.0, 192.0, 213.0, 233.0];
 const TOOL_ICONS: [Icon; 9] =
     [Icon::Pencil, Icon::Brush, Icon::Delete, Icon::Mute, Icon::Slip, Icon::Slice, Icon::Select, Icon::Zoom, Icon::Speaker];
-/// Picker list row pitch (§1).
-const PICK_ROW: f32 = 31.0; // pitch of the measured 30 px rows
+/// Picker item pitch (§1): the measured 30 px rows; taller items show a title strip of this height over their
+/// preview.
+const PICK_ROW: f32 = pl::PICK_ROW;
+const PICK_TITLE: f32 = 26.0;
 
 pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let t = ui.t;
@@ -203,11 +205,19 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         let c = if pl::track_on(s, row) { t.grid } else { t.grid.mix(t.grid_gap, 0.5) };
         let c = if g.rows.strip(row) { c.mix(t.grid_gap, 0.5) } else { c };
         ui.c.fill_rect(Rect::new(grid_x, y, grid_w, h - gap_of(row)), c);
+        // Under the gap line, which a theme's line strength may make see-through.
+        ui.c.fill_rect(Rect::new(grid_x, y + h - gap_of(row), grid_w, gap_of(row)), t.grid);
     }
-    grid_lines(ui, &g, bar_w);
+    let start = pl::start_marker(s);
+    if let Some(p) = start {
+        let x = g.x_of(p as f32).clamp(grid_x, grid.right());
+        ui.c.fill_rect(Rect::span(grid_x, x, grid.y, grid.bottom()), t.s(0x000000).with_alpha(70));
+    }
+    grid_lines(ui, &g, bar_w, start_bar(&g, start));
     for &row in &visible {
         let (y, h) = (g.y_of(row), g.rows.height(row));
-        ui.c.fill_rect(Rect::new(grid_x, y + h - gap_of(row), grid_w, gap_of(row)), t.grid_gap);
+        // The gap line at the theme's line strength (spec: ui/flstheme.md §3, PLGridContrast).
+        ui.c.fill_rect(Rect::new(grid_x, y + h - gap_of(row), grid_w, gap_of(row)), t.pl_line(t.grid_gap));
     }
     // Time selection (§7).
     if let Some((a, b)) = s.playlist.range {
@@ -352,7 +362,9 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
     let list = Rect::span(bx.x + 1.0, bx.right() - 16.0, bx.y + 1.0, bx.bottom() - 1.0);
     ui.c.fill_rect(list, ui.t.s(0x202527));
     ui.hit(list, Action::PlPickList, "");
-    let total = items.len() as f32 * PICK_ROW + 4.0;
+    // Each list keeps its own item size (a right-drag on the scroll bar, spec: ui/scroll-bars.md §3).
+    let pitch = s.playlist.pick_row();
+    let total = items.len() as f32 * pitch + 4.0;
     let scroll = s.playlist.pick_scroll.min((total - list.h).max(0.0)).max(0.0);
     ui.c.push_clip(list);
     let mut y = list.y + 3.0 - scroll;
@@ -360,11 +372,15 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
         if y > list.bottom() {
             break;
         }
-        if y + PICK_ROW < list.y {
-            y += PICK_ROW;
+        if y + pitch < list.y {
+            y += pitch;
             continue;
         }
-        let row = Rect::new(list.x + 2.0, y, list.w - 4.0, PICK_ROW - 1.0);
+        let row = Rect::new(list.x + 2.0, y, list.w - 4.0, pitch - 1.0);
+        // A taller item: the name in a title strip, its contents previewed under it (FL's resized picker).
+        let tall = pitch > PICK_ROW;
+        let title = if tall { Rect::new(row.x, row.y, row.w, PICK_TITLE) } else { row };
+        let body = if tall { Rect::span(row.x + 3.0, row.right() - 3.0, title.bottom(), row.bottom() - 3.0) } else { row.inset(3.0) };
         let hov = ui.hit(row, Action::PlPick(src), "Select clip source (right-click for its menu)");
         let filled = pick_used(s, src);
         let k = if hov { 0.05 } else { 0.0 };
@@ -385,12 +401,12 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
         let face = face.shade(k);
         if filled && lemon {
             lk::outlined(ui.c, row, lk::r_btn(ui.t), edge, face);
-            preview(ui, s, src, row.inset(3.0));
+            preview(ui, s, src, body, tall, face);
         } else if filled {
             // Used source: a button with a faint preview of its contents (pl_asher.png).
             ui.c.fill_rect(row, edge);
             ui.c.fill_rect(row.inset(1.0), face);
-            preview(ui, s, src, row.inset(3.0));
+            preview(ui, s, src, body, tall, face);
         } else if lemon {
             ui.c.fill_rrect(row, lk::r_btn(ui.t), face);
         } else if tint.is_some() {
@@ -404,30 +420,47 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             ui.c.stroke_rrect(row.inset(0.5), if lemon { lk::r_btn(ui.t) } else { 0.0 }, 1.0, ui.t.a(0xa8e44a));
         }
         let ic = Color::rgb(if filled { TITLE_TEXT } else { 0xa6aaab });
-        icons::draw(ui.c, kind_icon(pl::source_kind(s, src)), Rect::new(row.x + 4.0, row.cy() - 6.0, 12.0, 12.0), ic);
-        ui.c.text_clip(Font::new(14), row.x + 20.0, row.cy() - 8.0, row.w - 23.0, ic, &pl::source_name(s, src));
+        icons::draw(ui.c, kind_icon(pl::source_kind(s, src)), Rect::new(row.x + 4.0, title.cy() - 6.0, 12.0, 12.0), ic);
+        ui.c.text_clip(Font::new(14), row.x + 20.0, title.cy() - 8.0, row.w - 23.0, ic, &pl::source_name(s, src));
         if src == cur {
             let ax = list.x - 1.0;
             let mark = if lemon { ui.t.accent } else { Color::rgb(0xe64363) };
             ui.c.fill_polygon(&[(ax, row.cy() - 5.0), (ax + 6.0, row.cy()), (ax, row.cy() + 5.0)], mark);
         }
-        y += PICK_ROW;
+        y += pitch;
     }
     ui.c.pop_clip();
-    // Scroll bar: bordered dithered track, raised thumb with a dark grip.
     let track = Rect::span(list.right(), bx.right() - 1.0, list.y, list.bottom());
     ui.c.fill_rect(Rect::new(track.x, track.y, 1.0, track.h), ui.t.s(0x131718));
     let tr = Rect::span(track.x + 1.0, track.right(), track.y, track.bottom());
+    if super::lemon(ui) {
+        // The Lemon design's scroll bar, as the other views' (spec: ui/lemon-design.md).
+        super::scrollbar(ui, tr, true, scroll, list.h, total, crate::app::Scroll::PlPick);
+    } else {
+        classic_pick_bar(ui, tr, scroll, list.h, total);
+    }
+    // Footer "+": new pattern (find first empty).
+    let foot = Rect::new(p.x, bottom, bx.w, FOOT_H);
+    let hov = ui.hit(foot, Action::PlPickAdd, "New pattern (find first empty)");
+    let pc = if hov { ui.t.tx(0xa0a4a6) } else { ui.t.s(0x545657) };
+    let (cx, cy) = ((list.x + list.right()) / 2.0, foot.y + FOOT_H / 2.0);
+    ui.c.fill_rect(Rect::new(cx - 3.5, cy - 0.5, 8.0, 2.0), pc);
+    ui.c.fill_rect(Rect::new(cx - 0.5, cy - 3.5, 2.0, 8.0), pc);
+}
+
+/// The picker's scroll bar in the Classic design (§1a, measured from FL): bordered dithered track, raised thumb with
+/// a dark grip.
+fn classic_pick_bar(ui: &mut Ui, tr: Rect, scroll: f32, view: f32, total: f32) {
     ui.c.fill_rect(tr, ui.t.s(0x212426));
     let mut yy = tr.y;
     while yy < tr.bottom() {
         ui.c.fill_rect(Rect::new(tr.x, yy, tr.w, 1.0), ui.t.s(0x23272a));
         yy += 2.0;
     }
-    let max = (total - list.h).max(0.0);
-    let thumb = if max > 0.0 { (list.h / total * tr.h).max(14.0) } else { 14.0 };
+    let max = (total - view).max(0.0);
+    let thumb = if max > 0.0 { (view / total * tr.h).max(14.0) } else { 14.0 };
     let off = if max > 0.0 { scroll / max * (tr.h - thumb) } else { 0.0 };
-    let hov = ui.hit(tr, Action::Scrollbar(crate::app::Scroll::PlPick), "Drag to scroll");
+    let hov = ui.hit(tr, Action::Scrollbar(crate::app::Scroll::PlPick), super::PICK_BAR_HINT);
     let th = Rect::new(tr.x, tr.y + off, tr.w, thumb);
     ui.c.fill_rect(th, ui.t.s(0x36383a));
     // A light thumb under High visibility (`os_ui::kit::scroll_thumb`).
@@ -438,14 +471,7 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
     };
     ui.c.fill_rect(th.inset(1.0), face);
     ui.c.fill_rect(Rect::new(th.cx() - 1.0, th.cy() - 2.5, 2.0, 5.0), ui.t.s(0x000000));
-    ui.bars.push(crate::app::Bar { target: crate::app::Scroll::PlPick, track: tr, vertical: true, max, view: list.h, thumb });
-    // Footer "+": new pattern (find first empty).
-    let foot = Rect::new(p.x, bottom, bx.w, FOOT_H);
-    let hov = ui.hit(foot, Action::PlPickAdd, "New pattern (find first empty)");
-    let pc = if hov { ui.t.tx(0xa0a4a6) } else { ui.t.s(0x545657) };
-    let (cx, cy) = ((list.x + list.right()) / 2.0, foot.y + FOOT_H / 2.0);
-    ui.c.fill_rect(Rect::new(cx - 3.5, cy - 0.5, 8.0, 2.0), pc);
-    ui.c.fill_rect(Rect::new(cx - 0.5, cy - 3.5, 2.0, 8.0), pc);
+    ui.bars.push(crate::app::Bar { target: crate::app::Scroll::PlPick, track: tr, vertical: true, max, view, thumb });
 }
 
 const FOOT_H: f32 = 19.0;
@@ -475,39 +501,108 @@ fn pick_used(s: &State, src: ClipSource) -> bool {
     }
 }
 
-/// Faint note preview inside a picker button.
-fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect) {
-    let ClipSource::Pattern(n) = src else { return };
-    let Some(p) = s.project.pattern(n) else { return };
-    let len = crate::piano::pattern_length(s, n).max(1) as f32;
-    let lo = p.notes.iter().map(|n| n.key).min().unwrap_or(0);
-    let hi = p.notes.iter().map(|n| n.key).max().unwrap_or(0);
-    let span = f32::from(hi - lo + 1).max(6.0);
-    let c = ui.t.s(0x5a6268);
-    for note in &p.notes {
-        let x = r.x + note.position as f32 / len * r.w;
-        let w = (note.length.max(s.project.ppq as u32 / 4) as f32 / len * r.w).max(2.0);
-        let y = r.bottom() - 2.0 - f32::from(note.key - lo + 1) / span * (r.h - 2.0);
-        ui.c.fill_rect(Rect::new(x, y, w.min(r.right() - x).max(0.0), 2.0), c);
+/// Preview of a picker item's contents in `r`: a pattern's notes, faint behind the name of an item at the measured
+/// size; a `tall` item (resized, spec: ui/scroll-bars.md §3) shows them, an audio clip's waveform or an automation
+/// clip's curve under its title strip, as a clip's body shows them (§2). `face`: the item's colour.
+fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: Color) {
+    if r.h < 4.0 {
+        return;
+    }
+    let t = ui.t;
+    match (pl::source_kind(s, src), src) {
+        (PickKind::Pattern, ClipSource::Pattern(n)) => {
+            let Some(p) = s.project.pattern(n) else { return };
+            let len = crate::piano::pattern_length(s, n).max(1) as f32;
+            let lo = p.notes.iter().map(|n| n.key).min().unwrap_or(0);
+            let hi = p.notes.iter().map(|n| n.key).max().unwrap_or(0);
+            let span = f32::from(hi - lo + 1).max(6.0);
+            let c = if tall { cc(t, NOTE) } else { t.s(0x5a6268) };
+            for note in &p.notes {
+                let x = r.x + note.position as f32 / len * r.w;
+                let w = (note.length.max(s.project.ppq as u32 / 4) as f32 / len * r.w).max(2.0);
+                let y = r.bottom() - 2.0 - f32::from(note.key - lo + 1) / span * (r.h - 2.0);
+                ui.c.fill_rect(Rect::new(x, y, w.min(r.right() - x).max(0.0), 2.0), c);
+            }
+        }
+        (PickKind::Audio, ClipSource::Channel(ch)) if tall => {
+            let Some(path) = s.project.channel(ch).and_then(|c| c.sample_path.clone()) else { return };
+            let Some(w) = s.playlist.wave(&path) else { return };
+            if w.peaks.is_empty() {
+                return;
+            }
+            // The whole sample: each pixel column spans its peaks' minimum to maximum.
+            let wave = pl::clip_tint(s, src).map(rgb).map_or(cc(t, WAVE), |c| offset(c, 80));
+            let (mid, amp) = (r.cy(), r.h / 2.0 - 1.0);
+            let n = r.w.floor().max(1.0) as usize;
+            let per = w.peaks.len() as f32 / n as f32;
+            let (mut top, mut bottom) = (Vec::with_capacity(n), Vec::with_capacity(n));
+            for i in 0..n {
+                let a = (i as f32 * per) as usize;
+                let b = (((i + 1) as f32 * per) as usize).clamp(a + 1, w.peaks.len());
+                let (lo, hi) = w.peaks[a.min(w.peaks.len() - 1)..b].iter().fold((f32::MAX, f32::MIN), |(lo, hi), &(x, y)| (lo.min(x), hi.max(y)));
+                let x = r.x + i as f32 + 0.5;
+                top.push((x, mid - hi.clamp(-1.0, 1.0) * amp - 0.35));
+                bottom.push((x, mid - lo.clamp(-1.0, 1.0) * amp + 0.35));
+            }
+            top.extend(bottom.into_iter().rev());
+            ui.c.fill_polygon(&top, wave);
+        }
+        (PickKind::Automation, ClipSource::Channel(ch)) if tall => {
+            let Some(a) = s.project.automation(ch) else { return };
+            // Over its points' span.
+            let Some(end) = a.points.last().map(|p| p.beat).filter(|&b| b > 0.0) else { return };
+            let pts: Vec<(f32, f32)> = (0..=(r.w / 2.0).ceil() as usize)
+                .map(|k| {
+                    let x = (r.x + 2.0 * k as f32).min(r.right());
+                    let beat = f64::from((x - r.x) / r.w) * end;
+                    (x, pl::value_y(r, a.value_at(beat).unwrap_or(0.0)))
+                })
+                .collect();
+            let mut area = pts.clone();
+            area.push((r.right(), r.bottom()));
+            area.push((r.x, r.bottom()));
+            ui.c.fill_polygon(&area, face.shade(0.07));
+            ui.c.polyline(&pts, 1.5, cc(t, CURVE));
+        }
+        _ => {}
     }
 }
 
 /// Miniature of the arrangement inside the overview bar (§1).
 fn overview(ui: &mut Ui, s: &State, over: Rect, total_ticks: f32) {
     let cs = pl::clips(s);
-    if cs.is_empty() {
-        return;
-    }
-    let top = cs.iter().map(|c| c.track).min().unwrap_or(0);
-    let bottom = cs.iter().map(|c| c.track).max().unwrap_or(0);
-    let span = f32::from(bottom - top + 1).max(1.0);
     let k = over.w / total_ticks.max(1.0);
-    let row_h = ((over.h - 6.0) / span).clamp(1.0, 3.0);
-    for c in cs {
-        let col = pl::source_color(s, c.source).map(rgb).unwrap_or(ui.t.clip).shade(0.2);
-        let y = over.y + 3.0 + f32::from(c.track - top) / span * (over.h - 6.0);
-        ui.c.fill_rect(Rect::new(over.x + c.position as f32 * k, y, (c.length as f32 * k).max(1.0), row_h), col.with_alpha(170));
+    if !cs.is_empty() {
+        let top = cs.iter().map(|c| c.track).min().unwrap_or(0);
+        let bottom = cs.iter().map(|c| c.track).max().unwrap_or(0);
+        let span = f32::from(bottom - top + 1).max(1.0);
+        let row_h = ((over.h - 6.0) / span).clamp(1.0, 3.0);
+        for c in cs {
+            let col = pl::source_color(s, c.source).map(rgb).unwrap_or(ui.t.clip).shade(0.2);
+            let y = over.y + 3.0 + f32::from(c.track - top) / span * (over.h - 6.0);
+            ui.c.fill_rect(Rect::new(over.x + c.position as f32 * k, y, (c.length as f32 * k).max(1.0), row_h), col.with_alpha(170));
+        }
     }
+    // A flag per time marker (§7a "Look"): a 5 x 5 px right triangle with its upright edge on the marker's place, in its
+    // action's colour, the edge a darker shade.
+    for m in pl::markers(s) {
+        let x = (over.x + m.position as f32 * k).round();
+        let col = Color::rgb(match m.kind {
+            TimeMarker::PLAIN | TimeMarker::LOOP | TimeMarker::SKIP => 0xffffa9,
+            TimeMarker::MARKER_LOOP => 0xa9ffff,
+            TimeMarker::PAUSE => 0xffa9ff,
+            TimeMarker::START => 0xff0000,
+            _ => 0xffffff,
+        });
+        let y = over.y + 1.0;
+        ui.c.fill_polygon(&[(x, y), (x + 6.0, y), (x, y + 6.0)], col.shade(-0.4));
+        ui.c.fill_polygon(&[(x, y), (x + 5.0, y), (x, y + 5.0)], col);
+    }
+}
+
+/// The bar the Start marker is in (0 without one): bars count from it (§7a).
+fn start_bar(g: &PGeom, start: Option<u32>) -> i32 {
+    start.map_or(0, |p| (p / (g.ppq * 4).max(1)) as i32)
 }
 
 /// Bar numbers, time selection, song position (§7).
@@ -519,20 +614,29 @@ fn ruler_paint(ui: &mut Ui, s: &State, g: &PGeom, ruler: Rect, f: &FrameInfo) {
     if let Some((a, b)) = s.playlist.range {
         ui.c.fill_rect(Rect::span(g.x_of(a as f32), g.x_of(b as f32), ruler.y, ruler.bottom()), t.playhead.with_alpha(60));
     }
+    // Bars count from the Start marker (§7a): "1" on its bar; before it the ruler is darker and the bars have no
+    // numbers.
+    let start = pl::start_marker(s);
+    let sb = start_bar(g, start);
+    if let Some(p) = start {
+        let x = g.x_of(p as f32).clamp(ruler.x, ruler.right());
+        ui.c.fill_rect(Rect::span(ruler.x, x, ruler.y, ruler.bottom()), offset(t.ruler, -8));
+    }
     let bar_w = g.bar_w;
     let every = label_step(bar_w);
     // From the bars whose numbers still reach into view (a number is up to ~40 px wide): which labels are drawn must
     // not depend on the scroll position, or a scrolled ruler would differ from a repainted one.
     let first_bar = ((g.scroll_x - 48.0) / bar_w).floor().max(0.0) as i32;
     let last_bar = ((g.scroll_x + ruler.w) / bar_w).ceil() as i32 + 1;
-    for b in first_bar..last_bar {
-        if b % every != 0 {
+    for b in first_bar.max(sb)..last_bar {
+        let n = b - sb;
+        if n % every != 0 {
             continue;
         }
         let x = g.xs(f64::from(b) * f64::from(bar_w));
-        let size = if b % (every * 4) == 0 { 15.0 } else { 13.0 };
+        let size = if n % (every * 4) == 0 { 15.0 } else { 13.0 };
         // Along the ruler's bottom 17 px (all of it unless thin scroll bars made it taller).
-        ui.c.text(super::fnt(size), x + 2.0, ruler.bottom() - 17.0 + (16.0 - size), t.ruler_text, &format!("{}", b + 1));
+        ui.c.text(super::fnt(size), x + 2.0, ruler.bottom() - 17.0 + (16.0 - size), t.ruler_text, &format!("{}", n + 1));
     }
     // Song position: a flag ◤ on the playhead while playing the song, else on the start position (§7: its left edge
     // on the position, its top along the ruler's top).
@@ -556,9 +660,10 @@ fn label_step(bar_w: f32) -> i32 {
 fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
     let t = ui.t;
     ui.c.fill_rect(lane, t.ruler.shade(0.03));
-    ui.hit(lane, Action::PlMarkers, "Time marker (drag moves, right-click: menu)");
+    ui.hit(lane, Action::PlMarkers, "Time marker (click: song position, drag moves, right-click: menu)");
     ui.c.push_clip(lane);
-    // A tab per marker (§7): flat left edge on its position, rounded top-right corner, slanted right edge.
+    // A tab per marker (§7a): flat left edge on its position, rounded top-right corner, slanted right edge; its action's
+    // icon, then its name.
     for m in pl::markers(s) {
         let x64 = g.x64(f64::from(m.position));
         let x = x64 as f32;
@@ -580,9 +685,60 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
             (at(w), bottom),
         ];
         ui.c.fill_polygon(&tab, t.ruler.mix(t.track_header, 0.55));
-        ui.c.text_clip(Font::new(12), x + 3.0, lane.y + 1.0, right - x - 3.0, t.text, &marker_label(m));
+        marker_glyph(ui, m.kind, x, top + 8.0);
+        let tx = x + 3.0 + pl::marker_icon(m.kind).0;
+        ui.c.text_clip(Font::new(12), tx, lane.y + 1.0, right - tx, t.text, &marker_label(m));
     }
     ui.c.pop_clip();
+}
+
+/// A time marker's action icon (§7a "Look"), Lemon Studio's own drawing at FL's measured sizes: light grey, the
+/// recording markers' dot red; none for a plain marker. `x` is the marker's place, `cy` the middle of its tab.
+fn marker_glyph(ui: &mut Ui, kind: u8, x: f32, cy: f32) {
+    let grey = ui.t.s(0xa8abae);
+    // Points on an ellipse around (cx, cy) from angle a0 to a1 (degrees, clockwise from the right).
+    let arc = |cx: f32, cy: f32, rx: f32, ry: f32, a0: f32, a1: f32, n: usize| -> Vec<(f32, f32)> {
+        (0..=n).map(|i| (a0 + (a1 - a0) * i as f32 / n as f32).to_radians()).map(|a| (cx + rx * a.cos(), cy + ry * a.sin())).collect()
+    };
+    match kind {
+        // A "(" 5 x 13 px.
+        TimeMarker::START => ui.c.polyline(&arc(x + 9.5, cy, 8.0, 8.0, 125.0, 235.0, 10), 1.5, grey),
+        // A thick arrow down, its tip on the tick: 3 px stem, 9 px head.
+        TimeMarker::LOOP => {
+            ui.c.fill_rect(Rect::new(x - 1.5, cy - 6.5, 3.0, 6.5), grey);
+            ui.c.fill_polygon(&[(x - 4.5, cy), (x + 4.5, cy), (x, cy + 6.0)], grey);
+        }
+        // An arrow turning back (↶), about 12 x 12 px from 5 px left of the tick.
+        TimeMarker::MARKER_LOOP => {
+            let mut pts = vec![(x + 6.0, cy + 6.5)];
+            pts.extend(arc(x + 1.5, cy - 0.5, 4.5, 4.5, 0.0, -180.0, 12));
+            ui.c.polyline(&pts, 1.5, grey);
+            ui.c.fill_polygon(&[(x - 5.5, cy - 1.0), (x - 0.5, cy - 1.0), (x - 3.0, cy + 3.5)], grey);
+        }
+        // A filled ▶, 6 x 9 px.
+        TimeMarker::SKIP => ui.c.fill_polygon(&[(x + 3.0, cy - 4.5), (x + 9.0, cy), (x + 3.0, cy + 4.5)], grey),
+        // Two bars 2 x 7 px, 1 px apart.
+        TimeMarker::PAUSE => {
+            ui.c.fill_rect(Rect::new(x + 3.0, cy - 3.5, 2.0, 7.0), grey);
+            ui.c.fill_rect(Rect::new(x + 6.0, cy - 3.5, 2.0, 7.0), grey);
+        }
+        // A red dot, 11 x 9 px.
+        TimeMarker::PUNCH_IN | TimeMarker::PUNCH_OUT => ui.c.fill_polygon(&arc(x + 8.5, cy, 5.5, 4.5, 0.0, 360.0, 24), Color::rgb(0xf86159)),
+        // A clock outline, 11 px.
+        TimeMarker::SIGNATURE => {
+            let cx = x + 8.5;
+            ui.c.stroke_circle(cx, cy, 5.0, 1.0, grey);
+            ui.c.line(cx, cy, cx, cy - 3.5, 1.0, grey);
+            ui.c.line(cx, cy, cx + 2.5, cy, 1.0, grey);
+        }
+        // An eighth note.
+        TimeMarker::KEY => {
+            ui.c.fill_polygon(&arc(x + 5.5, cy + 3.5, 2.6, 2.0, 0.0, 360.0, 16), grey);
+            ui.c.line(x + 7.6, cy + 3.5, x + 7.6, cy - 6.0, 1.2, grey);
+            ui.c.polyline(&[(x + 7.6, cy - 6.0), (x + 10.5, cy - 3.0), (x + 10.0, cy - 0.5)], 1.2, grey);
+        }
+        _ => {}
+    }
 }
 
 /// A marker's label: its name; a time signature first shows the signature (spec: ui/pattern-time-signature.md §2).
@@ -596,8 +752,9 @@ pub(crate) fn marker_label(m: &TimeMarker) -> String {
     }
 }
 
-/// Vertical lines: grid units (dim), beats, bars (bright); every fourth bar group tinted.
-fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32) {
+/// Vertical lines: grid units (dim), beats, bars (bright); every fourth bar group tinted, counted from bar `sb` (the
+/// Start marker's, §7a).
+fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32, sb: i32) {
     let t = ui.t;
     let grid = g.grid;
     let mut bar_step = 1;
@@ -606,7 +763,9 @@ fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32) {
     }
     let first_bar = ((g.scroll_x / bar_w) as i32 / bar_step) * bar_step;
     let n = (grid.w / bar_w).ceil() as i32 + bar_step + 1;
-    let beat = t.grid_gap.mix(t.grid, 0.4);
+    // Lines at the theme's line strength (spec: ui/flstheme.md §3, PLGridContrast).
+    let beat = t.pl_line(t.grid_gap.mix(t.grid, 0.4));
+    let bar_line = t.pl_line(t.grid_bar);
     let unit = pl::grid_ticks(g.ppq, bar_w) as f32 * g.ppt;
     let per_bar = ((bar_w / unit).round() as i32).max(1);
     // Bar b's x on the drawing grid (`PGeom::xs`), plus `d` content pixels.
@@ -614,7 +773,7 @@ fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32) {
     let mut b = first_bar;
     while b < first_bar + n {
         let x = bar_x(b, 0.0);
-        if (b / 4) % 2 == 1 {
+        if (b - sb).div_euclid(4).rem_euclid(2) == 1 {
             ui.c.fill_rect(Rect::new(x, grid.y, bar_x(b + bar_step, 0.0) - x, grid.h), t.grid_alt.with_alpha(160));
         }
         if bar_step == 1 && per_bar > 1 {
@@ -623,7 +782,7 @@ fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32) {
                 ui.c.fill_rect(Rect::new(bar_x(b, q as f32 * unit), grid.y, 1.0, grid.h), c);
             }
         }
-        ui.c.fill_rect(Rect::new(x, grid.y, if bar_step == 1 { 2.0 } else { 1.0 }, grid.h), t.grid_bar);
+        ui.c.fill_rect(Rect::new(x, grid.y, if bar_step == 1 { 2.0 } else { 1.0 }, grid.h), bar_line);
         b += bar_step;
     }
 }
@@ -1181,10 +1340,10 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
         // At the Pop-ups scaling (spec: ui/ui-scaling.md §1).
         ui.scaled(super::popup_scale(ui.c.scale), |ui, k| {
             let (w, h) = ui.c.size();
-            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, false);
+            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, false, p.scroll[0]);
             if let Some(i) = p.sub {
                 if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
-                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true);
+                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true, p.scroll[1]);
                 }
             }
         });
@@ -1233,8 +1392,11 @@ fn any_enabled(items: &[pl::PItem]) -> bool {
     items.iter().any(|c| !c.head && !c.sep && !c.col && c.enabled && (c.children.is_empty() || any_enabled(&c.children)))
 }
 
-/// Draw a popup list at (x, y) kept on screen; returns its rect and each item's row rect.
-fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, sub: bool) -> (Rect, Vec<Rect>) {
+/// Draw a popup list at (x, y) kept on screen; returns its rect and each item's row rect. Columns wider than the
+/// screen: the ones that fit from column `scroll` on, and a scroll bar under them (spec: ui/menus.md "Menus wider than
+/// the window").
+#[allow(clippy::too_many_arguments)]
+fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, sub: bool, scroll: usize) -> (Rect, Vec<Rect>) {
     let t = ui.t;
     let font = Font::new(14);
     let mut lw: f32 = 80.0;
@@ -1249,11 +1411,21 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     let m = os_ui::kit::menu::metrics(ui.c.scale);
     // Text sits where it does at 100 %, moved by half of what the row lost.
     let dy = (m.row - os_ui::kit::menu::ROW) / 2.0;
-    let (layout, cols, body_h) = popup_layout(&m, items, (screen.1 - 8.0).max(m.row));
-    let (w, h) = (cw * cols as f32, body_h + 2.0 * m.border);
+    let max_h = (screen.1 - 8.0).max(m.row);
+    let (mut layout, mut cols, mut body_h) = popup_layout(&m, items, max_h);
+    // Wider than the screen: the columns wrap a scroll bar's height sooner, and as many as fit are shown.
+    let room = screen.0 - 2.0;
+    let bar_h = if cols > 1 && cw * cols as f32 > room { os_ui::kit::METRICS.scrollbar + 4.0 } else { 0.0 };
+    if bar_h > 0.0 {
+        (layout, cols, body_h) = popup_layout(&m, items, (max_h - bar_h).max(m.row));
+    }
+    let shown = if bar_h > 0.0 { ((room / cw) as usize).clamp(1, cols) } else { cols };
+    let first = scroll.min(cols - shown);
+    let (w, h) = (cw * shown as f32, body_h + 2.0 * m.border + bar_h);
     let x = x.min(screen.0 - w - 2.0).max(0.0);
     let y = y.min(screen.1 - h - 2.0).max(0.0);
     let r = Rect::new(x, y, w, h);
+    let menu = if sub { crate::app::MENU_SUB } else { crate::app::MENU_POPUP };
     let mut rows = Vec::with_capacity(items.len());
     let lemon = super::lemon(ui);
     if lemon {
@@ -1265,10 +1437,21 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     ui.hit(r, Action::Swallow, "");
     for (i, it) in items.iter().enumerate() {
         let (col, off) = layout[i];
-        let rr = Rect::new(r.x + m.border + col as f32 * cw, r.y + m.border + off, cw - 2.0 * m.border, item_h(&m, it));
+        // A column out of view is placed beside the shown ones.
+        let at = |col: usize| r.x + m.border + (col as f32 - first as f32) * cw;
+        let rr = Rect::new(at(col), r.y + m.border + off, cw - 2.0 * m.border, item_h(&m, it));
         rows.push(rr);
-        if col > 0 && (i == 0 || layout[i - 1].0 != col) {
-            ui.c.fill_rect(Rect::new(rr.x - m.border, r.y + m.border, 1.0, r.h - 2.0 * m.border), t.menu_pop_head);
+        let action = if sub { Action::PlPopupSub(i) } else { Action::PlPopup(i) };
+        if col < first || col >= first + shown {
+            // The wheel still steps to its rows: where the scroll that shows the column puts them.
+            if it.enabled && !it.head && !it.sep && !it.col {
+                let reveal = if col < first { col } else { col + 1 - shown };
+                ui.hidden_menu_row(Rect { x: at(col + first - reveal), ..rr }, action, menu, reveal);
+            }
+            continue;
+        }
+        if col > first && (i == 0 || layout[i - 1].0 != col) {
+            ui.c.fill_rect(Rect::new(rr.x - m.border, r.y + m.border, 1.0, r.h - 2.0 * m.border - bar_h), t.menu_pop_head);
         }
         if it.col {
             continue;
@@ -1286,13 +1469,12 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             ui.c.text(Font::new(12), rr.x + 4.0, rr.y + 1.0 + (rr.h - os_ui::kit::menu::HEAD) / 2.0, t.menu_pop_head_text, &it.label);
             continue;
         }
-        let action = if sub { Action::PlPopupSub(i) } else { Action::PlPopup(i) };
         // Greyed out: a disabled entry, or a submenu with nothing available in it (it still opens, to show what is
         // planned). Disabled entries never light up.
         let live = it.enabled && (it.children.is_empty() || any_enabled(&it.children));
         if it.enabled {
             let lit = ui.hit(rr, action, it.label.to_string()) || open == Some(i);
-            ui.menu_row(if sub { crate::app::MENU_SUB } else { crate::app::MENU_POPUP });
+            ui.menu_row(menu);
             if lit && lemon {
                 os_ui::kit::row_highlight(ui.c, t, rr);
             } else if lit {
@@ -1333,6 +1515,12 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             ui.c.line(ax, my - 3.5, ax + 3.5, my, 1.2, t.menu_pop_dim);
             ui.c.line(ax + 3.5, my, ax, my + 3.5, 1.2, t.menu_pop_dim);
         }
+    }
+    if bar_h > 0.0 {
+        // In whole columns.
+        let track = Rect::new(r.x + m.border + 2.0, r.bottom() - m.border - bar_h + 2.0, r.w - 2.0 * m.border - 4.0, bar_h - 4.0);
+        let target = if sub { crate::app::Scroll::PopupSub } else { crate::app::Scroll::Popup };
+        super::scrollbar(ui, track, false, first as f32, shown as f32, cols as f32, target);
     }
     (r, rows)
 }

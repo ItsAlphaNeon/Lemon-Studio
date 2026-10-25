@@ -1,0 +1,21 @@
+OSPRESET 1
+plugin=Lemon Limiter	id=clap:org.openstudio.lemon-limiter	format=clap	body=params
+# Values: OpenStudio-specs plugins/factory-presets.md.
+Gain = 1764
+Soft saturation threshold = 1000
+Limiter ceiling = 1000
+Limiter attack time = 0
+Limiter attack curve = 2
+Limiter release time = 0
+Limiter release curve = 2
+Limiter peak window = 1008
+Comp threshold = 200
+Comp ratio = 2000
+Comp knee = 1644
+Comp attack time = 3936
+Comp release time = 7178
+Comp curve = 1
+Comp RMS window = 650
+Noise gain = 1000
+Noise threshold = 0
+Noise release time = 4187

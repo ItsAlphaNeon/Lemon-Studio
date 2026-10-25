@@ -13,6 +13,7 @@ pub mod params;
 pub mod view;
 
 use std::num::NonZeroU32;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -28,9 +29,46 @@ pub struct Shared {
     pub previews: Mutex<Vec<(u8, f32, bool)>>,
     /// Keys sounding (bit per key).
     pub sounding: [AtomicU64; 2],
+    /// The custom shape's wave (spec: plugins/lemon-3x-osc.md §6); `custom_version` moves on every change.
+    pub custom: Mutex<Option<Arc<dsp::Wave>>>,
+    pub custom_version: AtomicU64,
+    /// The file `custom` came from (also kept when it could not be read).
+    loaded_path: Mutex<String>,
 }
 
 impl Shared {
+    /// Loads sample file `path` as the custom shape's wave (UI or initialize thread); the state remembers it.
+    pub fn load(&self, path: &str, params: &Osc3Params) -> Result<(), String> {
+        let s = os_engine::sample::load_shared(Path::new(path)).map_err(|e| e.to_string())?;
+        let w = dsp::Wave::from_sample(&s.left, &s.right).ok_or_else(|| format!("{path}: no sound in it"))?;
+        self.set_custom(Some(Arc::new(w)), path, params);
+        Ok(())
+    }
+
+    /// Replaces the custom shape's wave; `path` is what the state remembers ("" = no sample).
+    pub fn set_custom(&self, w: Option<Arc<dsp::Wave>>, path: &str, params: &Osc3Params) {
+        if let Ok(mut c) = self.custom.lock() {
+            *c = w;
+        }
+        if let Ok(mut p) = self.loaded_path.lock() {
+            *p = path.to_string();
+        }
+        if let Ok(mut p) = params.sample_path.write() {
+            *p = path.to_string();
+        }
+        self.custom_version.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// The custom shape's sample file ("" = none).
+    pub fn loaded_path(&self) -> String {
+        self.loaded_path.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    /// The custom shape's wave.
+    pub fn wave(&self) -> Option<Arc<dsp::Wave>> {
+        self.custom.lock().ok().and_then(|c| c.clone())
+    }
+
     pub fn sounding_keys(&self) -> Vec<i32> {
         let mut out = Vec::new();
         for (w, a) in self.sounding.iter().enumerate() {
@@ -112,15 +150,28 @@ pub struct LemonTrio {
     engine: dsp::Engine,
     /// Pitch bend in cents.
     bend: f64,
+    /// `Shared::custom_version` the engine's custom wave is from.
+    custom_seen: u64,
 }
 
 impl Default for LemonTrio {
     fn default() -> Self {
-        LemonTrio { params: Arc::new(Osc3Params::default()), shared: Arc::new(Shared::default()), engine: dsp::Engine::new(44100.0), bend: 0.0 }
+        LemonTrio { params: Arc::new(Osc3Params::default()), shared: Arc::new(Shared::default()), engine: dsp::Engine::new(44100.0), bend: 0.0, custom_seen: 0 }
     }
 }
 
 impl LemonTrio {
+    /// The engine takes the custom wave last loaded (never waits: a busy lock is tried again next block).
+    fn take_custom(&mut self) {
+        let v = self.shared.custom_version.load(Ordering::Acquire);
+        if v != self.custom_seen
+            && let Ok(w) = self.shared.custom.try_lock()
+        {
+            self.engine.custom = w.clone();
+            self.custom_seen = v;
+        }
+    }
+
     fn publish_sounding(&self) {
         let mut bits = [0u64; 2];
         for k in self.engine.sounding() {
@@ -161,6 +212,18 @@ impl Plugin for LemonTrio {
 
     fn initialize(&mut self, _layout: &AudioIOLayout, config: &BufferConfig, _ctx: &mut impl InitContext<Self>) -> bool {
         self.engine.set_rate(config.sample_rate);
+        // A restored state names the custom shape's sample: load it now (initialize may block). One that cannot be read
+        // stays named, so the state keeps it, and plays silence.
+        let path = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
+        if path != self.shared.loaded_path() {
+            if path.is_empty() {
+                self.shared.set_custom(None, "", &self.params);
+            } else if let Err(e) = self.shared.load(&path, &self.params) {
+                nih_log!("Lemon Trio: {e}");
+                self.shared.set_custom(None, &path, &self.params);
+            }
+        }
+        self.take_custom();
         true
     }
 
@@ -170,6 +233,7 @@ impl Plugin for LemonTrio {
     }
 
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
+        self.take_custom();
         let mut blk = block(&self.params, self.bend);
         if let Ok(mut q) = self.shared.previews.try_lock() {
             for (key, vel, on) in q.drain(..) {
@@ -200,6 +264,8 @@ impl Plugin for LemonTrio {
                 NoteEvent::NoteOn { note, velocity, voice_id, .. } => self.engine.host_note_on(note, velocity, voice_id, &blk),
                 NoteEvent::NoteOff { note, voice_id, .. } => self.engine.note_off_id(note, voice_id),
                 NoteEvent::Choke { note, .. } => self.engine.choke(note),
+                // Portamento and slide notes (spec: audio/channel-voices.md): the host's tuning of a key's voices.
+                NoteEvent::PolyTuning { note, voice_id, tuning, .. } => self.engine.tune(note, voice_id, f64::from(tuning)),
                 NoteEvent::MidiPitchBend { value, .. } => {
                     // ±2 semitones, as Lemon Sampler.
                     self.bend = f64::from(value * 2.0 - 1.0) * 200.0;

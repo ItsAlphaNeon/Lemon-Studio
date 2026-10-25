@@ -100,7 +100,7 @@ pub fn paint_row(ui: &mut Ui, s: &State, row: &Row, g: Rect, x0: f32, y: f32, h:
 }
 
 /// A push button's face in `b` (the settings page's buttons).
-fn button_face(ui: &mut Ui, b: Rect, hov: bool) {
+pub(super) fn button_face(ui: &mut Ui, b: Rect, hov: bool) {
     let t = ui.t;
     if super::lemon(ui) {
         lk::outlined(ui.c, b, lk::r_btn(t), t.s(0x161819), lk::face(t.s(0x2a2d2f), kit::State::hover(hov)));

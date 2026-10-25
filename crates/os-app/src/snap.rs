@@ -101,7 +101,7 @@ pub fn menu(s: &State, x: f32, y: f32) -> Popup {
     let radio = |sn: Snap| PItem::new(sn.label(), Cmd::GlobalSnap(sn)).mark(Mark::Radio(s.global_snap.now == sn));
     let mut items = vec![radio(Snap::Line), radio(Snap::Cell), PItem::sep()];
     items.extend(Snap::MENU.iter().filter(|sn| !matches!(sn, Snap::Line | Snap::Cell)).map(|&sn| radio(sn)));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 fn changed(s: &State) -> String {

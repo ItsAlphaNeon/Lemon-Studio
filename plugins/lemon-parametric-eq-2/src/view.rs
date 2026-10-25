@@ -11,7 +11,7 @@
 
 use std::f32::consts::PI;
 
-use os_engine::effects::eq::{self, freq_hz, has_level, Settings, BANDS};
+use os_engine::effects::eq::{self, freq_hz, has_level, Options, Settings, BANDS};
 use os_theme::design::lemon as brand;
 use os_theme::Color;
 use os_ui::kit::lemon::{self, plug};
@@ -126,18 +126,8 @@ pub fn token_pos(s: &Settings, k: usize) -> (f32, f32) {
     (x_of(b.freq), y_of(db))
 }
 
-/// Whether target `t` does anything today. Greyed out: LIN and HQ (the EQ runs plain biquads: no linear phase, no
-/// oversampling); the editor also greys out the menu entries nothing reads yet. Greyed-out controls draw their
-/// disabled look and the editor only names them.
-pub fn works(t: Target) -> bool {
-    !matches!(t, Target::Lin | Target::Hq)
-}
-
-/// Hover / pressed look of a control; greyed-out controls (`works`) are disabled and never light up.
+/// Hover / pressed look of a control.
 fn st(vs: &ViewState, r: Rect, t: Target) -> State {
-    if !works(t) {
-        return State { disabled: true, ..State::NORMAL };
-    }
     let hover = vs.pressed.is_none() && vs.mouse.is_some_and(|(x, y)| r.contains(x, y));
     State::new(hover, vs.pressed == Some(t), false)
 }
@@ -246,10 +236,11 @@ pub fn paint(c: &mut Canvas, look: &Look, vs: &ViewState) -> Vec<Hit> {
             })
             .collect()
     };
-    let rate = look.rate.max(22050.0);
+    // The bands' magnitude as the state's mode designs them (LIN plays the same magnitude, linear phase).
+    let design = Options::from_image(look.extra).design(look.rate.max(22050.0));
     if let Some(k) = vs.active.filter(|&k| s.bands[k].kind != eq::DISABLED) {
-        let band = s.bands[k];
-        let pts = curve_of(&|hz| band.response_db(hz, rate));
+        let band = s.bands[k].coefs(design);
+        let pts = curve_of(&|hz| eq::sections_db(&band, hz, design.rate()));
         let col = band_color(k);
         // Filled to the 0 dB line.
         let mut fill = pts.clone();
@@ -260,7 +251,8 @@ pub fn paint(c: &mut Canvas, look: &Look, vs: &ViewState) -> Vec<Hit> {
         c.polyline(&pts, 1.2, col.with_alpha(230));
         c.pop_clip();
     }
-    let total = curve_of(&|hz| s.response_db(hz, rate));
+    let total = s.curve(design);
+    let total = curve_of(&|hz| total.db(hz));
     let mut fill = total.clone();
     fill.push((PLOT.right(), ZERO_Y));
     fill.push((PLOT.x, ZERO_Y));
@@ -382,9 +374,15 @@ pub fn paint(c: &mut Canvas, look: &Look, vs: &ViewState) -> Vec<Hit> {
     let lin = flag(look.extra, params::F_LIN);
     let s2 = button(c, 298.0, 328.0, 15.0, Target::Lin, lin);
     c.text_center(Font::condensed(13, 0).bold(), Rect::new(283.0, 320.0, 30.0, 16.0), keq::ink(s2), "LIN");
+    // Bit 0 = on; the mode (bits 1..8) stays while it is off: 1 HQ+, 0 Legacy or Enhanced (flag 0x02).
     let hq = byte(look.extra, params::HQ_BYTE);
-    let s3 = button(c, 337.0, 328.0, 15.0, Target::Hq, hq != 0);
-    let sub = if hq & 2 != 0 { "+" } else if flag(look.extra, params::F_HQ_ENHANCED) { "E" } else { "L" };
+    let s3 = button(c, 337.0, 328.0, 15.0, Target::Hq, hq & 1 != 0);
+    let sub = match hq >> 1 {
+        1 => "+",
+        0 if flag(look.extra, params::F_HQ_ENHANCED) => "E",
+        0 => "L",
+        _ => "",
+    };
     let hx = c.text(Font::condensed(13, 0).bold(), 326.0, 319.0, keq::ink(s3), "HQ");
     c.text(Font::new(8).bold(), 326.0 + hx, 327.0, keq::ink(s3), sub);
     let tok = byte(look.extra, params::TOKENS_BYTE) != 0;

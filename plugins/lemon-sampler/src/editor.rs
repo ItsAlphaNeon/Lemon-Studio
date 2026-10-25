@@ -22,7 +22,8 @@ use os_ui::kit::menu::{Mark, MenuItem, MenuStyle};
 use os_ui::Rect;
 
 use crate::params::{self, SamplerParams};
-use crate::view::{self, Hit, Model, SampleView, Target, ViewState};
+use crate::stream::{Played, Summary};
+use crate::view::{self, Frames, Hit, Model, SampleView, Target, ViewState, Wave};
 use crate::Shared;
 
 pub struct SamplerEditor {
@@ -413,6 +414,8 @@ enum Drag {
     Slider { id: String, track: Rect },
     KeyScroll { x0: f32, s0: f32, ratio: f32 },
     Keys,
+    /// The sample sounding at its root note while the waveform is held (`held`).
+    Wave,
     Ruler { from: i32 },
     Overview { track: Rect, grab: f64 },
     Loop { which: u8, both: bool, x0: f32, s0: f32, e0: f32 },
@@ -511,7 +514,7 @@ impl Logic {
         if params::time_file(params::time_steps(self.vals.norm("ts_time"))) >= 1.0 {
             return;
         }
-        let secs = self.shared.raw.lock().ok().and_then(|r| r.as_ref().map(|s| s.frames() as f64 / f64::from(s.rate.max(1)))).unwrap_or(0.0);
+        let secs = self.shared.secs().unwrap_or(0.0);
         let units = (secs * self.shared.tempo() / 60.0 * 192.0).round();
         if units >= 1.0 {
             self.edit("ts_time", params::time_norm(units / 48.0));
@@ -527,8 +530,7 @@ impl Logic {
         let mut h = view::param_hint(&self.vals, id);
         if id == "ts_time" {
             let steps = params::time_steps(self.vals.norm(id));
-            let raw = self.shared.raw.lock().ok().and_then(|r| r.as_ref().map(|s| s.frames() as f64 / f64::from(s.rate.max(1))));
-            if let (true, Some(secs)) = (params::time_file(steps) >= 1.0, raw) {
+            if let (true, Some(secs)) = (params::time_file(steps) >= 1.0, self.shared.secs()) {
                 if secs > 0.0 {
                     let bpm = steps / 4.0 * 60.0 / secs;
                     h.push_str(&format!("  Clip tempo is {bpm:.0} BPM"));
@@ -540,10 +542,9 @@ impl Logic {
 
     fn with_sample<R>(&self, f: impl FnOnce(&SampleView) -> R) -> R {
         let path = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
-        let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
-        let s = s.or_else(|| self.shared.raw.lock().ok().and_then(|r| r.clone()));
+        let shown = Shown::of(&self.shared, &self.view, None);
         let bits = (self.shared.bits.load(Ordering::Relaxed) & 0x1ff) as u16;
-        f(&SampleView { sample: s.as_deref(), path: &path, bits, spectrum: None, tones: None })
+        f(&SampleView { sample: shown.wave(), path: &path, bits, spectrum: None, tones: None })
     }
 
     fn hover_hint(&self, x: f32, y: f32) -> String {
@@ -652,6 +653,12 @@ impl Logic {
                 if double {
                     self.view.wave_start = 0.0;
                     self.view.wave_len = 1.0;
+                } else {
+                    // A press plays the sample at its own pitch (the root note) until the button is let go.
+                    let root = (self.vals.plain("root") as i32).clamp(0, 127) as u8;
+                    self.held = Some((root, 100));
+                    self.drag = Some(Drag::Wave);
+                    return vec![Act::Note(root, 100, true), Act::Repaint];
                 }
             }
             Target::Overview(track) => {
@@ -807,7 +814,7 @@ impl Logic {
                 self.hint_for(&ids[0]);
                 vec![Act::Repaint]
             }
-            Some(Drag::Knob { .. }) => vec![],
+            Some(Drag::Knob { .. } | Drag::Wave) => vec![],
             None => {
                 let h = self.hover_hint(x, y);
                 let changed = h != self.hint;
@@ -843,7 +850,7 @@ impl Logic {
         let mut acts = vec![Act::Repaint];
         match self.drag.take() {
             Some(Drag::Knob { id } | Drag::Slider { id, .. }) => self.end(&id),
-            Some(Drag::Keys) => {
+            Some(Drag::Keys | Drag::Wave) => {
                 if let Some((k, _)) = self.held.take() {
                     acts.push(Act::Note(k, 0, false));
                 }
@@ -1004,7 +1011,7 @@ impl Logic {
             }
             MenuReq::Wave => {
                 let mut m = MenuDef::new(MenuStyle::Context);
-                let has = self.shared.raw.lock().map(|r| r.is_some()).unwrap_or(false);
+                let has = self.shared.has_sample();
                 let has_path = !self.params.sample_path.read().map(|p| p.is_empty()).unwrap_or(true);
                 m.add(MenuItem::item("Reload").enabled(has_path), Cmd::Reload);
                 m.add(MenuItem::item("Save as...").enabled(has), Cmd::SaveAs);
@@ -1053,7 +1060,7 @@ impl Logic {
             let cur = params::time_steps(self.vals.norm(id));
             let on = |s: i32| (cur - f64::from(s)).abs() < 1e-3;
             m.add(MenuItem::item("(none)").mark(Mark::Radio(on(0))), Cmd::Time(0));
-            let has = self.shared.raw.lock().map(|r| r.is_some()).unwrap_or(false);
+            let has = self.shared.has_sample();
             m.add(MenuItem::item("Autodetect...").enabled(has), Cmd::Time(-1));
             m.add(MenuItem::item("Project tempo").enabled(has), Cmd::Time(-1));
             m.sep();
@@ -1136,7 +1143,7 @@ impl Logic {
             Cmd::PasteAudio => return vec![Act::PasteAudio],
             Cmd::DetectTempo => {
                 let beats = self.detect_beats();
-                let secs = self.shared.raw.lock().ok().and_then(|r| r.as_ref().map(|s| s.frames() as f64 / f64::from(s.rate.max(1)))).unwrap_or(0.0);
+                let secs = self.shared.secs().unwrap_or(0.0);
                 if secs > 0.0 {
                     self.hint = format!("Tempo: {:.2} BPM ({beats} beats)", f64::from(beats) * 60.0 / secs);
                 }
@@ -1154,7 +1161,7 @@ impl Logic {
 
     /// Whole beats the loaded sample lasts at the host tempo (at least 1).
     fn detect_beats(&self) -> i32 {
-        let secs = self.shared.raw.lock().ok().and_then(|r| r.as_ref().map(|s| s.frames() as f64 / f64::from(s.rate.max(1)))).unwrap_or(0.0);
+        let secs = self.shared.secs().unwrap_or(0.0);
         ((secs * self.shared.tempo() / 60.0).round() as i32).clamp(1, (params::TIME_BARS * 4.0) as i32)
     }
 
@@ -1287,6 +1294,114 @@ pub fn paste_path() -> Option<PathBuf> {
     Some(d.join(format!("Pasted audio {t}.wav")))
 }
 
+/// The shown sample, held for one paint or hint: the played sample in memory (else the loaded file decoded), or the
+/// played sample on disk (Keep on disk) with the editor's summary of it and the frames of a zoomed-in view.
+pub enum Shown {
+    None,
+    Ram(Arc<os_engine::Sample>),
+    Disk { played: Arc<Played>, summary: Option<Arc<Summary>>, near: Option<Arc<Near>> },
+}
+
+impl Shown {
+    /// What `shared` shows in view `st`; `near` keeps a zoomed-in view's frames of a sample on disk between paints
+    /// (`None`: the summary only).
+    pub fn of(shared: &Arc<Shared>, st: &ViewState, near: Option<&mut NearCache>) -> Shown {
+        if let Some(played) = shared.on_disk() {
+            let summary = shared.summary();
+            let near = near.and_then(|c| c.get(shared.raw_version.load(Ordering::Acquire), st, &played));
+            return Shown::Disk { played, summary, near };
+        }
+        let s = shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
+        match s.or_else(|| shared.raw.lock().ok().and_then(|r| r.clone())) {
+            Some(s) => Shown::Ram(s),
+            None => Shown::None,
+        }
+    }
+
+    pub fn wave(&self) -> Option<Wave<'_>> {
+        match self {
+            Shown::None => None,
+            Shown::Ram(s) => Some(Wave::of(s)),
+            Shown::Disk { played, summary, near } => {
+                let whole = summary.as_ref().map_or(Frames::NONE, |s| Frames { left: &s.left, right: &s.right, first: 0, step: s.step });
+                let near = near.as_ref().map_or(whole, |n| Frames { left: &n.left, right: &n.right, first: n.first, step: 1 });
+                let stereo = summary.as_ref().map_or(played.disk().layout().channels > 1, |s| s.stereo);
+                Some(Wave { frames: played.frames(), rate: played.rate(), stereo: Some(stereo), on_disk: true, near, whole })
+            }
+        }
+    }
+
+    /// The spectrum picture of the visible range (a sample on disk: read from its file).
+    pub fn spectrum<'c>(&self, cache: &'c mut SpectrumCache, version: u64, st: &ViewState) -> Option<(usize, usize, &'c [u32])> {
+        match self {
+            Shown::None => None,
+            Shown::Ram(s) => Some(cache.get(version, st, s)),
+            Shown::Disk { played, .. } => {
+                let (n, rate) = (played.frames(), played.rate());
+                Some(cache.get_with(version, st, n, |v0, vl, w, h| view::spectrogram_by(n, rate, v0, vl, w, h, |start, mid| disk_mid(played, start, mid))))
+            }
+        }
+    }
+
+    /// The tones of colourful waveforms (a sample on disk: from its summary, once made).
+    pub fn tones<'c>(&'c self, cache: &'c mut ToneCache, version: u64) -> Option<&'c os_dsp::tone::Tones> {
+        match self {
+            Shown::None => None,
+            Shown::Ram(s) => Some(cache.get(version, s)),
+            Shown::Disk { summary, .. } => summary.as_ref().map(|s| &s.tones),
+        }
+    }
+}
+
+/// The mid of frames `start ..` of a sample on disk (silence outside it).
+fn disk_mid(p: &Played, start: i64, mid: &mut [f32]) {
+    let k = mid.len();
+    let skip = usize::try_from(-start).unwrap_or(0).min(k);
+    let (mut l, mut r) = (vec![0.0f32; k], vec![0.0f32; k]);
+    p.disk().read_frames(start.max(0) as usize, &mut l[skip..], &mut r[skip..]);
+    for (i, m) in mid.iter_mut().enumerate() {
+        *m = if i < skip { 0.0 } else { 0.5 * (l[i] + r[i]) };
+    }
+}
+
+/// Frames of a zoomed-in view of a sample on disk: `left[i]` is frame `first + i`.
+pub struct Near {
+    first: usize,
+    left: Vec<f32>,
+    right: Vec<f32>,
+}
+
+/// The zoomed-in view's frames of a sample on disk, read from its file when the view moves.
+#[derive(Default)]
+pub struct NearCache {
+    key: Option<(u64, usize, usize)>,
+    near: Option<Arc<Near>>,
+}
+
+impl NearCache {
+    /// The widest view whose frames are read: wider views draw the summary.
+    pub const MAX: usize = 1 << 16;
+
+    fn get(&mut self, version: u64, st: &ViewState, played: &Played) -> Option<Arc<Near>> {
+        let n = played.frames();
+        let (v0, vl) = view::wave_range(st, n);
+        if vl > Self::MAX as f64 {
+            return None;
+        }
+        let first = (v0.floor().max(0.0) as usize).min(n);
+        let end = ((v0 + vl).ceil().max(0.0) as usize + 2).min(n);
+        let key = (version, first, end);
+        if self.key != Some(key) {
+            let k = end.saturating_sub(first);
+            let (mut left, mut right) = (vec![0.0; k], vec![0.0; k]);
+            played.disk().read_frames(first, &mut left, &mut right);
+            self.near = Some(Arc::new(Near { first, left, right }));
+            self.key = Some(key);
+        }
+        self.near.clone()
+    }
+}
+
 /// Cached spectrum picture of the waveform panel.
 #[derive(Default)]
 pub struct SpectrumCache {
@@ -1298,13 +1413,17 @@ pub struct SpectrumCache {
 
 impl SpectrumCache {
     pub fn get(&mut self, version: u64, st: &ViewState, s: &os_engine::Sample) -> (usize, usize, &[u32]) {
+        self.get_with(version, st, s.frames(), |v0, vl, w, h| view::spectrogram(s, v0, vl, w, h))
+    }
+
+    /// The picture of a sample of `n` frames, `make` drawing frames `v0 .. v0 + vl` at `w` x `h` when the view moved.
+    pub fn get_with(&mut self, version: u64, st: &ViewState, n: usize, make: impl FnOnce(f64, f64, usize, usize) -> Vec<u32>) -> (usize, usize, &[u32]) {
         let key = (version, st.wave_start.to_bits(), st.wave_len.to_bits());
         if self.key != Some(key) {
             let area = view::wave_area();
             let (w, h) = ((area.w as usize / 2).max(1), (area.h as usize / 2).max(1));
-            let n = s.frames();
             let (v0, vl) = view::wave_range(st, n);
-            self.px = view::spectrogram(s, v0, vl, w, h);
+            self.px = make(v0, vl, w, h);
             self.w = w;
             self.h = h;
             self.key = Some(key);
@@ -1339,6 +1458,7 @@ mod win32 {
     use std::time::Instant;
 
     use nih_plug::prelude::GuiContext;
+    use os_plugkit::Opener;
     use os_theme::Palette;
     use os_ui::kit::menu::{self as kmenu, MenuStyle};
     use os_ui::Canvas;
@@ -1359,7 +1479,7 @@ mod win32 {
     use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, ShellExecuteW, HDROP};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-    use super::{Act, Btn, Cmd, Logic, MenuDef, Mods, SpectrumCache, ToneCache};
+    use super::{Act, Btn, Cmd, Logic, MenuDef, Mods, NearCache, Shown, SpectrumCache, ToneCache};
     use crate::params::SamplerParams;
     use crate::view::{self, SampleView, ViewState};
     use crate::Shared;
@@ -1380,6 +1500,7 @@ mod win32 {
         palette: Palette,
         spectrum: SpectrumCache,
         tones: ToneCache,
+        near: NearCache,
         /// `os_theme::waves::generation()` at the last paint: the host's colourful waveforms setting changed since.
         last_waves: u64,
         last_sig: u64,
@@ -1460,6 +1581,7 @@ mod win32 {
                 palette: os_plugkit::palette(),
                 spectrum: SpectrumCache::default(),
                 tones: ToneCache::default(),
+                near: NearCache::default(),
                 last_waves: 0,
                 last_sig: 0,
                 last_view: ViewState::default(),
@@ -1800,7 +1922,7 @@ mod win32 {
                         repaint = true;
                     }
                     Act::SaveAs => {
-                        let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
+                        let s = self.shared.whole();
                         if let (Some(s), Some(path)) = (s, file_dialog(self.hwnd, true)) {
                             let path = if path.to_ascii_lowercase().ends_with(".wav") { path } else { format!("{path}.wav") };
                             self.logic.hint = match std::fs::write(&path, super::wav_bytes(&s, true)) {
@@ -1820,8 +1942,7 @@ mod win32 {
                         }
                     }
                     Act::CopyAudio => {
-                        let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
-                        if let Some(s) = s {
+                        if let Some(s) = self.shared.whole() {
                             set_clipboard_wave(self.hwnd, &super::wav_bytes(&s, false));
                             self.logic.hint = "Audio copied to the clipboard".into();
                             repaint = true;
@@ -1903,22 +2024,15 @@ mod win32 {
                 let mut ps: PAINTSTRUCT = std::mem::zeroed();
                 let hdc = BeginPaint(self.hwnd, &mut ps);
                 let path = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
-                let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
-                let s = s.or_else(|| self.shared.raw.lock().ok().and_then(|r| r.clone()));
+                let shown = Shown::of(&self.shared, &self.logic.view, Some(&mut self.near));
                 let bits = (self.shared.bits.load(Ordering::Relaxed) & 0x1ff) as u16;
                 let ver = self.shared.version();
-                let spectrum = match (&s, self.logic.view.spectrum) {
-                    (Some(s), true) => Some(self.spectrum.get(ver, &self.logic.view, s)),
-                    _ => None,
-                };
+                let spectrum = if self.logic.view.spectrum { shown.spectrum(&mut self.spectrum, ver, &self.logic.view) } else { None };
                 // Colourful waveforms, as the host has them.
                 self.last_waves = os_theme::waves::generation();
                 let waves = os_theme::waves::current();
-                let tones = match &s {
-                    Some(s) if waves.on() => Some(self.tones.get(ver, s)),
-                    _ => None,
-                };
-                let sv = SampleView { sample: s.as_deref(), path: &path, bits, spectrum, tones: tones.map(|t| (t, &*waves)) };
+                let tones = if waves.on() { shown.tones(&mut self.tones, ver) } else { None };
+                let sv = SampleView { sample: shown.wave(), path: &path, bits, spectrum, tones: tones.map(|t| (t, &*waves)) };
                 let hint = if self.logic.hosted { String::new() } else { self.logic.hint.clone() };
                 let hits = view::paint(&mut self.canvas, &self.palette, &self.logic.vals, &self.logic.view, &sv, &hint, self.logic.hosted);
                 self.logic.hits = hits;
@@ -2038,7 +2152,7 @@ mod win32 {
         std::env::var_os("LEMONSAMPLER_NO_MODAL").is_some()
     }
 
-    fn popup_at(owner: HWND, x: i32, y: i32, def: &MenuDef, pal: &Palette, scale: f32, parent: Option<RECT>) -> PopRes {
+    fn popup_at(owner: HWND, x: i32, y: i32, def: &MenuDef, pal: &Palette, scale: f32, parent: Option<Opener>) -> PopRes {
         if no_modal() {
             return PopRes::Cancel;
         }
@@ -2052,7 +2166,7 @@ mod win32 {
             let mut py = y;
             if px + w > wa.right {
                 px = match parent {
-                    Some(p) => p.left - w,
+                    Some(p) => p.menu[0] - w,
                     None => wa.right - w,
                 };
             }
@@ -2090,11 +2204,11 @@ mod win32 {
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             SetCapture(hwnd);
             let rect = RECT { left: px, top: py, right: px + w, bottom: py + h };
+            let menu = [px, py, px + w, py + h];
             let opened = Instant::now();
             let mut start = POINT { x: 0, y: 0 };
             GetCursorPos(&mut start);
             let mut moved = false;
-            let mut sub_open: Option<usize> = None;
             let item_at = |pop: &Pop, sx: i32, sy: i32| -> Option<usize> {
                 let (lx, ly) = ((sx - px) as f32 / scale, (sy - py) as f32 / scale);
                 pop.layout.item_at(&pop.items, lx, ly)
@@ -2116,12 +2230,8 @@ mod win32 {
                         if (cur.x - start.x).abs() + (cur.y - start.y).abs() > 2 {
                             moved = true;
                         }
-                        if !inside(&rect, cur.x, cur.y) {
-                            if let Some(pr) = parent {
-                                if inside(&pr, cur.x, cur.y) {
-                                    break 'run PopRes::Back;
-                                }
-                            }
+                        if parent.is_some_and(|p| p.takes_back(menu, (cur.x, cur.y))) {
+                            break 'run PopRes::Back;
                         }
                         let hov = if inside(&rect, cur.x, cur.y) { item_at(&*pop, cur.x, cur.y) } else { None };
                         let hov = hov.filter(|&i| def.items[i].clickable());
@@ -2130,25 +2240,18 @@ mod win32 {
                             InvalidateRect(hwnd, std::ptr::null(), 0);
                             UpdateWindow(hwnd);
                         }
-                        // Submenu: opens while its row is hovered.
-                        if let Some(i) = hov {
-                            if sub_open != Some(i) {
-                                if let Some(sub) = def.sub(i) {
-                                    sub_open = Some(i);
-                                    let row = (&(*pop).layout.rows)[i];
-                                    let sx = px + ((row.x + row.w) * scale) as i32 - 2;
-                                    let sy = py + (row.y * scale) as i32 - 2;
-                                    match popup_at(owner, sx, sy, sub, pal, scale, Some(rect)) {
-                                        PopRes::Pick(c) => break 'run PopRes::Pick(c),
-                                        PopRes::Cancel => break 'run PopRes::Cancel,
-                                        PopRes::Back => {
-                                            SetCapture(hwnd);
-                                        }
-                                    }
+                        // Submenu: opens while its row is hovered, until the pointer moves on to another row of this menu.
+                        if let Some((i, sub)) = hov.and_then(|i| Some((i, def.sub(i)?))) {
+                            let row = (&(*pop).layout.rows)[i];
+                            let sx = px + ((row.x + row.w) * scale) as i32 - 2;
+                            let sy = py + (row.y * scale) as i32 - 2;
+                            match popup_at(owner, sx, sy, sub, pal, scale, Some(Opener::new(menu, row, scale))) {
+                                PopRes::Pick(c) => break 'run PopRes::Pick(c),
+                                PopRes::Cancel => break 'run PopRes::Cancel,
+                                PopRes::Back => {
+                                    SetCapture(hwnd);
                                 }
                             }
-                        } else {
-                            sub_open = None;
                         }
                     }
                     WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN => {
@@ -2352,7 +2455,7 @@ mod gui {
     use os_theme::Palette;
     use os_ui::Canvas;
 
-    use super::{Act, Btn, Logic, Mods, SpectrumCache, ToneCache};
+    use super::{Act, Btn, Logic, Mods, NearCache, Shown, SpectrumCache, ToneCache};
     use crate::params::SamplerParams;
     use crate::view::{self, SampleView, ViewState};
     use crate::Shared;
@@ -2375,6 +2478,7 @@ mod gui {
         palette: Palette,
         spectrum: SpectrumCache,
         tones: ToneCache,
+        near: NearCache,
         /// `os_theme::waves::generation()` at the last paint: the host's colourful waveforms setting changed since.
         last_waves: u64,
         last_sig: u64,
@@ -2412,6 +2516,7 @@ mod gui {
                 palette: os_plugkit::palette(),
                 spectrum: SpectrumCache::default(),
                 tones: ToneCache::default(),
+                near: NearCache::default(),
                 last_waves: 0,
                 last_sig: 0,
                 last_view: ViewState::default(),
@@ -2646,7 +2751,7 @@ mod gui {
                         self.dirty = true;
                     }
                     Act::SaveAs => {
-                        let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
+                        let s = self.shared.whole();
                         if let (Some(s), Some(path)) = (s, file_dialog(&self.win, true)) {
                             let path = if path.to_ascii_lowercase().ends_with(".wav") { path } else { format!("{path}.wav") };
                             self.logic.hint = match std::fs::write(&path, super::wav_bytes(&s, true)) {
@@ -2668,8 +2773,7 @@ mod gui {
                     }
                     #[cfg(target_os = "macos")]
                     Act::CopyAudio => {
-                        let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
-                        if let Some(s) = s {
+                        if let Some(s) = self.shared.whole() {
                             if self.win.copy_audio(super::wav_bytes(&s, false)) {
                                 self.logic.hint = "Audio copied to the clipboard".into();
                             }
@@ -2709,22 +2813,15 @@ mod gui {
         fn paint(&mut self) {
             self.dirty = false;
             let path = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
-            let s = self.shared.processed.lock().ok().and_then(|p| p.as_ref().and_then(|p| p.sample.clone()));
-            let s = s.or_else(|| self.shared.raw.lock().ok().and_then(|r| r.clone()));
+            let shown = Shown::of(&self.shared, &self.logic.view, Some(&mut self.near));
             let bits = (self.shared.bits.load(Ordering::Relaxed) & 0x1ff) as u16;
             let ver = self.shared.version();
-            let spectrum = match (&s, self.logic.view.spectrum) {
-                (Some(s), true) => Some(self.spectrum.get(ver, &self.logic.view, s)),
-                _ => None,
-            };
+            let spectrum = if self.logic.view.spectrum { shown.spectrum(&mut self.spectrum, ver, &self.logic.view) } else { None };
             // Colourful waveforms, as the host has them.
             self.last_waves = os_theme::waves::generation();
             let waves = os_theme::waves::current();
-            let tones = match &s {
-                Some(s) if waves.on() => Some(self.tones.get(ver, s)),
-                _ => None,
-            };
-            let sv = SampleView { sample: s.as_deref(), path: &path, bits, spectrum, tones: tones.map(|t| (t, &*waves)) };
+            let tones = if waves.on() { shown.tones(&mut self.tones, ver) } else { None };
+            let sv = SampleView { sample: shown.wave(), path: &path, bits, spectrum, tones: tones.map(|t| (t, &*waves)) };
             let hint = if self.logic.hosted { String::new() } else { self.logic.hint.clone() };
             self.logic.hits = view::paint(&mut self.canvas, &self.palette, &self.logic.vals, &self.logic.view, &sv, &hint, self.logic.hosted);
             self.last_sig = self.logic.vals.signature();
@@ -2797,7 +2894,7 @@ mod tests {
         let waves = Waves::new(Mode::Multiband, &[]);
         let draw = |tones: Option<(&os_dsp::tone::Tones, &Waves)>| {
             let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
-            let sv = SampleView { sample: Some(&s), path: "sine.wav", bits: 16, spectrum: None, tones };
+            let sv = SampleView { sample: Some(Wave::of(&s)), path: "sine.wav", bits: 16, spectrum: None, tones };
             view::paint(&mut c, &os_plugkit::palette(), &l.vals, &l.view, &sv, "", false);
             let mut px = vec![0u32; (view::W * view::H) as usize];
             c.copy_to_xrgb(&mut px);
@@ -2852,7 +2949,7 @@ mod tests {
     #[test]
     fn greyed_out_controls_only_say_so() {
         let mut l = logic(0);
-        for id in ["keep_disk", "resample", "load_regions", "load_slices"] {
+        for id in ["resample", "load_regions", "load_slices"] {
             let t = Target::Toggle(id.into());
             let v0 = l.vals.plain(id);
             let (x, y) = centre(&l, &t);
@@ -2863,6 +2960,12 @@ mod tests {
             assert!(l.hint.ends_with(": not available yet"), "{}", l.hint);
         }
         assert!(view::works(&Target::Toggle("loop_use".into())));
+        // Keep on disk works (Lemon Studio): a click turns it on.
+        let t = Target::Toggle("keep_disk".into());
+        assert!(view::works(&t));
+        let (x, y) = centre(&l, &t);
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.vals.plain("keep_disk"), 1.0);
         // The envelope presets menu has no presets yet.
         let mut l = logic(1);
         let (x, y) = centre(&l, &Target::EnvMenu);
@@ -2971,6 +3074,23 @@ mod tests {
         assert!(acts.iter().any(|a| matches!(a, Act::Note(_, _, false))));
         l.down(r.cx(), r.bottom() - 2.0, Btn::Right, Mods::default(), false);
         assert_eq!(l.vals.plain("root") as i32, k);
+    }
+
+    /// A press on the waveform plays the sample at its root note until the button is let go (issue #93); a double
+    /// click still zooms out.
+    #[test]
+    fn waveform_press_previews_the_sample() {
+        let mut l = logic(0);
+        l.typed("root", "C4");
+        let (x, y) = centre(&l, &Target::Wave(view::wave_area()));
+        let acts = l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(acts.contains(&Act::Note(48, 100, true)), "{acts:?}");
+        l.moved(x + 30.0, y, Mods::default());
+        assert!(l.up(Btn::Left).contains(&Act::Note(48, 0, false)));
+        l.view.wave_len = 0.5;
+        let acts = l.down(x, y, Btn::Left, Mods::default(), true);
+        assert!(!acts.iter().any(|a| matches!(a, Act::Note(..))));
+        assert_eq!(l.view.wave_len, 1.0);
     }
 
     #[test]

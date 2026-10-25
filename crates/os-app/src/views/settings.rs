@@ -69,6 +69,8 @@ pub enum SAct {
     /// General ▸ Display's PPI ruler: a press starts a drag of its end (`App::ppi_press`), the wheel steps it
     /// (`App::ppi_wheel`).
     Ppi,
+    /// Settings > MIDI's own controls (`super::midi_page`, `App::midi_page_act`).
+    Midi(super::midi_page::MAct),
     /// File ▸ Browser extra search folders: row i's folder button (`App::search_folder_pick`).
     FolderPick(usize),
     /// Row i's Folder or Browser name cell: a click selects it for typing (`App::search_folder_cell`).
@@ -278,6 +280,7 @@ pub const LIVE: &[&str] = &[
     MANAGE_SHORTCUTS,
     "Manage plugins",
     "Manage messages",
+    REFRESH_MIDI,
     "Add folder...",
     "Find new plugins",
     "Rescan all",
@@ -286,6 +289,14 @@ pub const LIVE: &[&str] = &[
     ASSOCIATE_CHECK,
     SHOW_ASIO_PANEL,
 ];
+
+/// MIDI: lists the devices again (`App::midi_refresh`); Update MIDI scripts stays greyed with its reason.
+pub const REFRESH_MIDI: &str = "Refresh device list";
+pub const UPDATE_SCRIPTS: &str = "Update MIDI scripts";
+const NO_SCRIPTS: &str = "Lemon Studio has no MIDI scripts";
+/// MIDI: Performance mode MIDI channel stays greyed with its reason.
+pub const PERFORMANCE_CHANNEL: &str = "Performance mode MIDI channel";
+const NO_PERFORMANCE: &str = "Lemon Studio has no playlist performance mode";
 
 /// `LIVE`, and the checks declared in `crate::prefs`.
 fn live(key: &str) -> bool {
@@ -475,6 +486,10 @@ pub enum Row {
     Ppi,
     /// Project ▸ Data folder's Rename button, folder button and path (`super::data_folder`).
     DataFolder,
+    /// File ▸ FL Studio factory content folder's Reset button, folder button and path (`super::factory_folder`).
+    FactoryFolder,
+    /// A row of Settings > MIDI drawn by `super::midi_page`.
+    Midi(super::midi_page::MRow),
     /// The ASIO Compatible Logo with Steinberg's trademark notice to its right (`asio_logo`), on Windows, whose build
     /// includes the ASIO SDK: the SDK's usage guidelines ask for it in the About box and where ASIO is switched on.
     AsioLogo,
@@ -536,29 +551,32 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
     use Row::*;
     let st = &s.settings;
     match tab {
-        MIDI => vec![
-            g("Output", vec![
-                dim("MIDI output devices", List(vec![("", 0.0)], vec![], 8)),
-                pair(Check2("Send master sync", false, "Send all notes off", true), ValueR("Port", "---".into())),
-                pair(Value("0".into(), "Master sync offset (milliseconds)"), combo("MIDI clock", 168.0, "Synchronization type")),
-            ]),
-            g("Input", vec![
-                // The devices that are open: their notes play the selected channel (spec: ui/midi-input.md).
-                List(vec![("Open input devices (notes play the selected channel)", 0.0)], s.midi_inputs.iter().map(|d| vec![d.clone()]).collect(), 9),
-                pair(Check("Enable", true), ValueR("Port", "---".into())),
-                combo("(generic controller)", 250.0, "Controller type"),
-                pair(combo("Velocity", 100.0, "Link note on velocity to"), ValueR("Omni preview MIDI channel", "---".into())),
-                pair(combo("Release", 100.0, "Link release velocity to"), ValueR("Song marker jump MIDI channel", "---".into())),
-                pair(Check("Pickup (takeover mode)", false), ValueR("Performance mode MIDI channel", "---".into())),
-                pair(Check("Auto accept detected controller", true), ValueR("Generator muting MIDI channel", "---".into())),
-                pair(Check("Foot pedal controls note off", true), Check("Toggle on release", false)),
-            ]),
-            g("External sync", vec![
-                pair(combo("Off", 168.0, "External clock sync"), ValueR("External sync offset (milliseconds)", "0".into())),
-                txt("Status: off"),
-            ]),
-            g("", vec![Buttons(vec![("Refresh device list", 136.0), ("Update MIDI scripts", 136.0)])]),
-        ],
+        // spec: ui/midi-settings.md §1. The device rows are `super::midi_page`'s; the checks, link combos, sync type and
+        // channel boxes are `crate::prefs` declarations.
+        MIDI => {
+            use super::midi_page::MRow;
+            use crate::midi_cfg::{CurveOf, Offset};
+            use crate::prefs::{self as p, number_text};
+            vec![
+                g("Output", vec![
+                    Midi(MRow::Outputs),
+                    Midi(MRow::OutOptions),
+                    pair(Midi(MRow::Offset(Offset::MasterSync)), combo(p::choice(&p::SYNC_TYPE), 168.0, p::SYNC_TYPE.label)),
+                ]),
+                g("Input", vec![
+                    Midi(MRow::Inputs),
+                    Midi(MRow::InOptions),
+                    combo(p::choice(&p::CONTROLLER_TYPE), 250.0, p::CONTROLLER_TYPE.label),
+                    pair(Midi(MRow::Link(CurveOf::Velocity)), ValueR(p::OMNI_CHANNEL.label, number_text(&p::OMNI_CHANNEL))),
+                    pair(Midi(MRow::Link(CurveOf::Release)), ValueR(p::MARKER_CHANNEL.label, number_text(&p::MARKER_CHANNEL))),
+                    pair(Check(p::PICKUP.label, false), ValueR(PERFORMANCE_CHANNEL, "---".into())),
+                    pair(Check(p::AUTO_ACCEPT.label, true), ValueR(p::MUTING_CHANNEL.label, number_text(&p::MUTING_CHANNEL))),
+                    pair(Check(p::FOOT_PEDAL.label, true), Check(p::TOGGLE_ON_RELEASE.label, false)),
+                ]),
+                g("External sync", vec![pair(Midi(MRow::ExtSync), Midi(MRow::Offset(Offset::External))), Midi(MRow::Status)]),
+                g("", vec![Buttons(vec![(REFRESH_MIDI, 136.0), (UPDATE_SCRIPTS, 136.0)])]),
+            ]
+        }
         AUDIO => {
             // Device, rate and buffer length work (spec: ui/settings.md "Audio"); a choice of "the device's own" shows
             // what that is.
@@ -744,6 +762,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     Text(format!("{} instruments, {} effects", s.plugdb.lists.gens.len(), s.plugdb.lists.fx.len()), true),
                 ]),
                 g("User data folder", vec![txt(user)]),
+                g(crate::factory_folder::GROUP, vec![FactoryFolder]),
                 g("Browser extra search folders", vec![SearchFolders(crate::search_folders::shown_rows(s))]),
                 g("External tools", vec![
                     dim("External tools", List(vec![("File", 30.0), ("Name", 320.0)], vec![], 4)),
@@ -939,7 +958,9 @@ fn row_h(r: &Row) -> f32 {
         Row::Edit(f, _) => if f.multiline() { COMMENT_LINE_H * COMMENT_LINES as f32 + 12.0 } else { 28.0 },
         Row::InfoFooter(lines) => (lines.len() as f32 * FOOTER_LINE_H + 8.0).max(36.0),
         Row::DataFolder => super::data_folder::FOLDER_ROW_H,
+        Row::FactoryFolder => super::factory_folder::ROW_H,
         Row::AsioLogo => ASIO_LOGO_H + 4.0,
+        Row::Midi(m) => m.height(),
     }
 }
 
@@ -1055,6 +1076,9 @@ pub fn paint(ui: &mut Ui, s: &State) {
     }
     if let Some(e) = st.name_edit.as_ref().filter(|_| st.tab == THEME) {
         name_panel(ui, s, e, r);
+    }
+    if let Some(e) = s.midi.curve.as_ref().filter(|_| st.tab == MIDI) {
+        super::midi_page::paint_curve(ui, e, r);
     }
 }
 
@@ -1426,9 +1450,19 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             let lw = ui.c.text(f, b.right() + 8.0, ty, t.text, label);
             grey(ui, Rect::new(b.x, b.y, b.w + 8.0 + lw, b.h));
         }
+        Row::ValueR(label, v) if number_range(label).is_some() => {
+            let b = Rect::new(g.right() - 52.0, y + 3.0, 42.0, 21.0);
+            let hov = ui.hit(b, Action::Settings(SAct::Number(label)), "");
+            value_red(ui, b, v);
+            ui.c.text_right(f, b.x - 8.0, ty, if hov { t.glyph } else { t.text }, label);
+        }
         Row::ValueR(label, v) => {
             let b = Rect::new(g.right() - 52.0, y + 3.0, 42.0, 21.0);
-            ui.off(b, name_of(label, group));
+            if *label == PERFORMANCE_CHANNEL {
+                ui.hit(b, Action::Settings(SAct::Body), NO_PERFORMANCE);
+            } else {
+                ui.off(b, name_of(label, group));
+            }
             value_red(ui, b, v);
             ui.c.text_right(f, b.x - 8.0, ty, t.text, label);
             let lw = ui.c.text_width(f, label);
@@ -1444,6 +1478,8 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
                 let hov = on && ui.hit(b, Action::Settings(SAct::Button(label)), "");
                 if waits {
                     ui.hit(b, Action::Settings(SAct::Body), PANEL_WAITS);
+                } else if label == UPDATE_SCRIPTS {
+                    ui.hit(b, Action::Settings(SAct::Body), NO_SCRIPTS);
                 } else if !on {
                     ui.off(b, label);
                 }
@@ -1650,6 +1686,8 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             paint_row_at(ui, s, group, &Row::Buttons(vec![(RESET_WORK_TIME, 150.0)]), g, by, 36.0, bx - g.x - 12.0);
         }
         Row::DataFolder => super::data_folder::paint_row(ui, s, row, g, x0, y, h),
+        Row::FactoryFolder => super::factory_folder::paint_row(ui, g, x0, y, h),
+        Row::Midi(m) => super::midi_page::paint_row(ui, s, *m, g, x0, y, h),
         // As Steinberg provides it, with the notice beside it in the page's own font (its usage guidelines §14).
         Row::AsioLogo => {
             let Some((iw, ih, px)) = asio_logo() else { return };
@@ -2078,7 +2116,7 @@ fn slider_track(ui: &mut Ui, tr: Rect, cy: f32, v: f32) {
     ui.c.fill_rect(Rect::new(hx - 0.5, cy - 6.0, 1.0, 5.0), t.s(0x1a1b1c));
 }
 
-fn value_red(ui: &mut Ui, b: Rect, v: &str) {
+pub(super) fn value_red(ui: &mut Ui, b: Rect, v: &str) {
     let t = ui.t;
     if super::lemon(ui) {
         // Lemon: number fields are the coloured dark with lemon digits.

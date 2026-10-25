@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::guard::{self, Module};
-use crate::{Attention, Descriptor, HostedEffect, Instrument, Meter, ParamEvent, ParamInfo, Plugin, SharedPlugin};
+use crate::{Attention, Descriptor, HostedEffect, Instrument, Menu, Meter, ParamEvent, ParamInfo, Plugin, SharedPlugin};
 use os_engine::{ChannelLevels, ChannelVoicing, TransportInfo};
 
 /// A plugin instance of any format, called through the crash guard. Once its code crashed (this instance, or another
@@ -99,6 +99,12 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
         self.run((), |p| p.tune(offset, key, semitones))
     }
+    fn takes_tuning(&self) -> bool {
+        self.look(false, |p| p.takes_tuning())
+    }
+    fn set_bend_range(&mut self, semitones: u32) {
+        self.run((), |p| p.set_bend_range(semitones))
+    }
     fn process(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         let t0 = Instant::now();
         let voices = self.run(None, |p| {
@@ -136,11 +142,17 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn transport(&mut self, info: &TransportInfo) {
         self.run((), |p| p.transport(info))
     }
+    fn midi(&mut self, offset: u32, bytes: [u8; 3]) {
+        self.run((), |p| p.midi(offset, bytes))
+    }
     fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
         self.run(false, |p| p.channel_levels(levels))
     }
     fn channel_voicing(&mut self, voicing: &ChannelVoicing) {
         self.run((), |p| p.channel_voicing(voicing))
+    }
+    fn reported_delay(&self) -> u32 {
+        self.look(0, |p| p.latency())
     }
 }
 
@@ -149,6 +161,11 @@ impl<P: Plugin> HostedEffect for Guarded<P> {
         // A crash midway leaves the block as far as the plugin got; later blocks pass through untouched.
         let t0 = Instant::now();
         self.run((), |p| p.process_fx(rate, left, right));
+        self.meter.add(t0.elapsed());
+    }
+    fn process_fx_keyed(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: (&[f32], &[f32])) {
+        let t0 = Instant::now();
+        self.run((), |p| p.process_fx_keyed(rate, left, right, key));
         self.meter.add(t0.elapsed());
     }
     fn reset_fx(&mut self) {
@@ -162,6 +179,9 @@ impl<P: Plugin> HostedEffect for Guarded<P> {
     }
     fn transport_fx(&mut self, info: &TransportInfo) {
         self.run((), |p| p.transport_fx(info))
+    }
+    fn reported_delay_fx(&self) -> u32 {
+        self.look(0, |p| p.latency())
     }
 }
 
@@ -246,6 +266,12 @@ impl<P: Plugin> Plugin for Guarded<P> {
     }
     fn take_automation_requests(&mut self) -> Vec<u32> {
         self.run(Vec::new(), |p| p.take_automation_requests())
+    }
+    fn take_menu(&mut self) -> Option<Menu> {
+        self.run(None, |p| p.take_menu())
+    }
+    fn menu_done(&mut self, id: u64, pick: Option<usize>) {
+        self.run((), |p| p.menu_done(id, pick))
     }
     /// Its module's crash, else a stop the instance reports itself (a native plugin stops one instance when it raises
     /// an error it does not handle: spec plugins/fruity-abi.md, "Crash containment").

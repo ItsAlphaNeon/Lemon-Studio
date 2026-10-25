@@ -4,9 +4,12 @@
 
 //! Lemon Trio in Lemon Studio: compiled in like Lemon Sampler, it plays every 3x Osc channel of a project (started from
 //! the state the file holds) and every one added from the picker, the browser or the channel rack; saving writes its
-//! settings back as the file's 3x Osc state, so the file keeps its own plugin.
+//! settings back as the file's 3x Osc state, so the file keeps its own plugin. The channel's sample is the custom
+//! shape's: the plugin starts with it, and one the plugin loads becomes the channel's.
 //!
-// spec: plugins/lemon-3x-osc.md §6 (app integration), plugins/3x-osc.md §1 (saved state)
+// spec: plugins/lemon-3x-osc.md §6 (app integration), plugins/3x-osc.md §1 (saved state, custom shape)
+
+use std::time::{Duration, Instant};
 
 use os_model::{Channel, ChannelKind, Project};
 
@@ -22,14 +25,22 @@ pub fn is_osc3(ch: &Channel) -> bool {
     ch.kind == ChannelKind::Plugin && ch.plugin.as_deref() == Some(FILE_NAME)
 }
 
-/// The plugin id a new channel of picker plugin `name` stores.
+/// The plugin id a new channel of picker plugin `name` stores (the built-in recreations store the original's id).
 pub fn file_name(name: &str) -> &str {
-    if name == LEMON_TRIO { FILE_NAME } else { name }
+    match name {
+        LEMON_TRIO => FILE_NAME,
+        crate::citrus::CITRUS => crate::citrus::FILE_NAME,
+        _ => name,
+    }
 }
 
-/// What the UI calls a channel's plugin `name` (the file id of the built-in plugin shows as the built-in plugin).
+/// What the UI calls a channel's plugin `name` (the file id of a built-in recreation shows as the built-in plugin).
 pub fn label(name: &str) -> &str {
-    if name == FILE_NAME { LEMON_TRIO } else { name }
+    match name {
+        FILE_NAME => LEMON_TRIO,
+        crate::citrus::FILE_NAME => crate::citrus::CITRUS,
+        _ => name,
+    }
 }
 
 impl Plugins {
@@ -43,9 +54,21 @@ impl Plugins {
         }
         lemon_3x_osc::params::fl_from_plugin_state(&p.save_state()?)
     }
+
+    /// The custom shape's sample file of the Lemon Trio on rack row `row` ("" = none); `None` when the row hosts
+    /// something else, or the instance is busy and `wait` is false.
+    pub fn osc3_sample(&self, row: usize, wait: bool) -> Option<String> {
+        let h = self.hosted.get(&row)?;
+        let p = if wait { h.plugin.lock().ok()? } else { h.plugin.try_lock().ok()? };
+        if p.desc().name != LEMON_TRIO || !crate::project_plugins::is_builtin(p.desc()) {
+            return None;
+        }
+        crate::plugins::sample_path_of(&p.save_state()?)
+    }
 }
 
-/// Before a save: every hosted Lemon Trio writes its settings into its channel as the file's 3x Osc.
+/// Before a save: every hosted Lemon Trio writes its settings into its channel as the file's 3x Osc, and its custom
+/// shape's sample as the channel's.
 pub fn store(proj: &mut Project, plugins: &Plugins) {
     for row in plugins.hosted.range(..FX_KEY).map(|(&k, _)| k).collect::<Vec<_>>() {
         let Some(st) = plugins.osc3_file_state(row) else { continue };
@@ -53,7 +76,29 @@ pub fn store(proj: &mut Project, plugins: &Plugins) {
             ch.plugin = Some(FILE_NAME.into());
             ch.plugin_state = Some(st);
         }
+        follow_sample(proj, plugins, row, true);
     }
+}
+
+/// How often the app looks for a sample a Lemon Trio loaded by itself.
+const LOOK_EVERY: Duration = Duration::from_millis(500);
+
+/// The custom shape's sample of the Lemon Trio on 3x Osc channel `row` becomes the channel's sample (event 196) and,
+/// while Auto name channels is on, its name, unless the channel names that file already (spec: plugins/3x-osc.md §1).
+/// Whether the channel changed. `wait`: lock an instance the audio thread is rendering (a save) or leave it.
+fn follow_sample(proj: &mut Project, plugins: &Plugins, row: usize, wait: bool) -> bool {
+    if !proj.channels.get(row).is_some_and(is_osc3) {
+        return false;
+    }
+    let Some(p) = plugins.osc3_sample(row, wait).filter(|p| !p.is_empty()) else { return false };
+    let ch = &mut proj.channels[row];
+    // A placeholder path (`%FLStudioFactoryData%`...) that still names the same file is kept as the project wrote it.
+    if ch.sample_path.as_deref().is_some_and(|old| crate::plugins::resolve_sample(old) == p) {
+        return false;
+    }
+    crate::rack::auto_name(ch, std::path::Path::new(&p));
+    ch.sample_path = Some(p);
+    true
 }
 
 impl crate::app::App {
@@ -76,8 +121,17 @@ impl crate::app::App {
         }
         let mut added = false;
         for row in rows {
-            let fl = self.state.project.channels[row].plugin_state.clone().unwrap_or_else(lemon_3x_osc::params::default_state);
-            let st = lemon_3x_osc::params::plugin_state_from_fl(&fl);
+            let ch = &self.state.project.channels[row];
+            let fl = ch.plugin_state.clone().unwrap_or_else(lemon_3x_osc::params::default_state);
+            let mut st = lemon_3x_osc::params::plugin_state_from_fl(&fl);
+            // The channel's sample is the custom shape's (spec: plugins/3x-osc.md §1); the plugin opens the file
+            // directly, so factory placeholders become real paths.
+            let sample = crate::plugins::resolve_sample(ch.sample_path.as_deref().unwrap_or(""));
+            if !sample.is_empty()
+                && let Some(b) = crate::plugins::with_sample_path(&st, &sample)
+            {
+                st = b;
+            }
             match self.plugins.create_with(row, index, Some(&st)) {
                 Ok(_) => {
                     self.state.hosted_rows.push(row);
@@ -94,6 +148,23 @@ impl crate::app::App {
             self.state.piano.dirty = true;
         }
         self.invalidate();
+    }
+
+    /// Every half second: a sample a hosted Lemon Trio loaded for its custom shape (its own file dialog) becomes its
+    /// channel's (`follow_sample`). The instances the audio thread is rendering are looked at next time.
+    pub(crate) fn follow_osc3_samples(&mut self) {
+        let now = Instant::now();
+        if self.osc3_look.is_some_and(|t| now.duration_since(t) < LOOK_EVERY) {
+            return;
+        }
+        self.osc3_look = Some(now);
+        let mut changed = false;
+        for row in self.state.hosted_rows.clone() {
+            changed |= follow_sample(&mut self.state.project, &self.plugins, row, false);
+        }
+        if changed {
+            self.invalidate();
+        }
     }
 }
 
@@ -186,6 +257,78 @@ mod tests {
         assert_eq!(again.channels[row], saved.channels[row]);
     }
 
+    /// A 3x Osc channel's sample is the custom shape's: Lemon Trio starts with it and plays it as one period; a sample
+    /// the plugin loads itself becomes the channel's (path and name) and is saved as the channel's sample, the 3x Osc
+    /// state staying 460 bytes (spec: plugins/3x-osc.md §1, plugins/lemon-3x-osc.md §6).
+    #[test]
+    fn osc3_custom_shape_plays_the_channel_sample() {
+        let dir = std::env::temp_dir().join(format!("openstudio-osc3-custom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // One period of a square, and of a saw.
+        let wav = |name: &str, pts: &[f32]| {
+            let p = dir.join(format!("{name}.wav"));
+            let both: Vec<f32> = pts.iter().flat_map(|&v| [v, v]).collect();
+            os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&p).unwrap(), 44100, &both).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let square = wav("Square cycle", &[0.9, 0.9, 0.9, 0.9, -0.9, -0.9, -0.9, -0.9]);
+        let saw = wav("Saw cycle", &[-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75]);
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.plugins.available = crate::plugins::builtin();
+        let row = crate::app::add_plugin_channel(&mut a.state.project, LEMON_TRIO);
+        let mut fl = default_state();
+        set_field(&mut fl, op::osc(0) + op::SHAPE + 1, 6); // osc 1: custom
+        set_field(&mut fl, op::MIX2 + 1, 0); // osc 2 and 3 silent
+        set_field(&mut fl, op::MIX3 + 1, 0);
+        let ch = &mut a.state.project.channels[row];
+        (ch.plugin_state, ch.sample_path) = (Some(fl.clone()), Some(square.clone()));
+        a.sync_osc3();
+        assert!(a.state.hosted_rows.contains(&row), "{:?}", a.state.message);
+        // The plugin opens the file itself: placeholders resolved.
+        assert_eq!(a.plugins.osc3_sample(row, true), Some(crate::plugins::resolve_sample(&square)));
+        assert_eq!(a.plugins.osc3_file_state(row), Some(fl.clone()));
+        // It sounds: the square at 880 Hz (key 69), one period per cycle.
+        let inst = instance(&a.plugins, row);
+        let mut i = inst.lock().unwrap();
+        i.note_on(0, 69, 100.0 / 127.0);
+        let (mut l, mut r) = (vec![0.0f32; 4800], vec![0.0f32; 4800]);
+        i.process(48000, &mut l, &mut r);
+        let peak = l.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.5 && peak < 0.9, "peak {peak}");
+        let crossings = l[480..].windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+        assert!((77..=89).contains(&crossings), "{crossings} rising crossings in 4320 samples");
+        i.note_off(0, 69);
+        drop(i);
+        // Nothing to follow while the channel names the plugin's sample.
+        a.follow_osc3_samples();
+        assert_eq!(a.state.project.channels[row].name.as_deref(), Some(LEMON_TRIO));
+        // A sample the plugin loads itself (its file dialog): the channel takes its path and its name.
+        assert!(a.plugins.load_sample(row, &saw));
+        a.osc3_look = None;
+        a.follow_osc3_samples();
+        let ch = &a.state.project.channels[row];
+        assert_eq!((ch.sample_path.as_deref(), ch.name.as_deref()), (Some(saw.as_str()), Some("Saw cycle")));
+        // Saved as the channel's sample; reopened, the plugin starts with it.
+        let path = dir.join("custom.flp");
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let ch = &saved.channels[row];
+        assert_eq!((ch.plugin.as_deref(), ch.sample_path.as_deref()), (Some(FILE_NAME), Some(saw.as_str())));
+        assert_eq!(ch.plugin_state.as_ref().map(Vec::len), Some(op::STATE_LEN));
+        let mut b = App::new(None);
+        b.plugins.available = crate::plugins::builtin();
+        b.open(path.clone());
+        b.sync_osc3();
+        assert_eq!(b.plugins.osc3_sample(row, true), Some(crate::plugins::resolve_sample(&saw)));
+        drop(b);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The rack's Add one ▸ and Insert ▸ menus add a Lemon Trio channel and ask for the built-in plugin (the
     /// instance itself is made on the next tick, which also opens its window: done by hand here).
     #[test]
@@ -220,11 +363,13 @@ mod tests {
     }
 
     /// Replace ▸ (channel menu): the channel keeps its row, notes, mixer track and levels, and takes the new generator.
+    /// A sample the channel had goes: it would be the new Lemon Trio's custom shape sample.
     #[test]
     fn replace_puts_another_generator_on_a_channel() {
         use crate::plugin_menu::Target;
         let mut a = App::new(None);
         a.state.project = crate::app::test_project();
+        a.state.project.channels[2].sample_path = Some("C:/Samples/Kick.wav".into());
         a.plugins.available = crate::plugins::builtin();
         a.state.plugdb.rebuild(&a.plugins);
         let index = a.plugins.index_of(LEMON_TRIO).unwrap();
@@ -236,6 +381,7 @@ mod tests {
         assert!(is_osc3(after));
         assert_eq!(after.name.as_deref(), Some(LEMON_TRIO));
         assert_eq!((after.index, after.mixer_track, after.volume, after.pan), (before.index, before.mixer_track, before.volume, before.pan));
+        assert_eq!(after.sample_path, None, "the new instance starts without a sample");
         assert_eq!(a.state.pending_plugin, Some((2, index)));
         assert!(!a.state.hosted_rows.contains(&2), "the old instance is gone");
     }

@@ -121,6 +121,8 @@ fn idle_count(rate: u32) -> i64 {
 struct Band {
     /// Gain (0.01 dB), frequency and width positions as stored.
     settings: [i32; 3],
+    /// The band's type: 0 low shelf, 1 peaking, 2 high shelf.
+    kind: usize,
     /// b0, b1, b2, a1, a2.
     coef: [f64; 5],
     /// Per side: x1, x2, y1, y2.
@@ -168,7 +170,20 @@ impl TrackEq { // This code is a part of L e m o n S t u d i o.
     pub fn new(settings: [[i32; 3]; 3], rate: u32) -> Self {
         let band = |k: usize| {
             let s = settings[k];
-            Band { settings: s, coef: design(k, s, rate), state: [[0.0; 4]; 2], running: s[0] != 0, dirty: false, count: None }
+            Band { settings: s, kind: k, coef: design(k, s, rate), state: [[0.0; 4]; 2], running: s[0] != 0, dirty: false, count: None }
+        };
+        TrackEq { bands: [band(0), band(1), band(2)], rate }
+    }
+
+    /// An equaliser whose bands take their type from `kinds` (0 low shelf, 1 peaking, 2 high shelf) and where every
+    /// band runs from the start, a band at gain 0 for `rate div 5` samples (Sytrus's equaliser, spec:
+    /// plugins/sytrus-effects.md "Equaliser").
+    pub fn typed(settings: [[i32; 3]; 3], kinds: [usize; 3], rate: u32) -> Self {
+        let band = |k: usize| {
+            let s = settings[k];
+            let kind = kinds[k].min(2);
+            let count = (s[0] == 0).then(|| idle_count(rate));
+            Band { settings: s, kind, coef: design(kind, s, rate), state: [[0.0; 4]; 2], running: true, dirty: false, count }
         };
         TrackEq { bands: [band(0), band(1), band(2)], rate }
     }
@@ -200,12 +215,12 @@ impl TrackEq { // This code is a part of L e m o n S t u d i o.
     pub fn process(&mut self, buf: &mut [f32]) {
         let n = (buf.len() / 2) as i64;
         let rate = self.rate;
-        for (k, band) in self.bands.iter_mut().enumerate() {
+        for band in self.bands.iter_mut() {
             if !band.running {
                 continue;
             }
             if band.dirty {
-                band.coef = design(k, band.settings, rate);
+                band.coef = design(band.kind, band.settings, rate);
                 band.dirty = false;
             }
             for f in buf.chunks_exact_mut(2) {

@@ -421,6 +421,14 @@ pub fn owner_key(p: &Project, owner: u32) -> Option<usize> {
     })
 }
 
+/// The id of the channel or slot plugin hosted under `Plugins::hosted` key `key` (`owner_key`'s other way).
+pub fn key_owner(p: &Project, key: usize) -> Option<u32> {
+    match crate::plugins::fx_of(key) {
+        None => p.channels.get(key).map(|c| c.id.0),
+        Some((t, k)) => p.mixer.iter().find(|m| m.index == t)?.slots.get(usize::from(k))?.as_ref().map(|s| s.id.0),
+    }
+}
+
 /// `#rrggbb` (empty: `None`, the default colour).
 pub fn parse_color(text: &str) -> Result<Option<Rgb>, Error> {
     let t = text.trim().trim_start_matches('#');

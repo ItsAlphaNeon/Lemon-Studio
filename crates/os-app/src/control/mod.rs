@@ -320,6 +320,15 @@ pub fn edit<R>(s: &mut State, name: &'static str, region: command::Region, f: im
     r
 }
 
+/// `edit` for a knob-like control (a mixer fader's typed value): no step while Undo knob tweaks is off.
+pub fn knob_edit<R>(s: &mut State, name: &'static str, region: command::Region, f: impl FnOnce(&mut State) -> R) -> R {
+    if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
+        edit(s, name, region, f)
+    } else {
+        f(s)
+    }
+}
+
 /// Records an interface edit's step. A step of the same press that changed nothing goes first (a text box's playlist
 /// step when the box named a mixer track), as the press's release would have dropped it.
 fn record_edit(s: &mut State, name: &'static str, before: command::Taken) {
@@ -367,6 +376,25 @@ pub fn param_edit(s: &mut State, owner: u32, before: &[(u32, f64)], run: bool) {
     if run {
         s.history.set_run(r);
     }
+}
+
+/// Lemon Studio set parameter `index` of plugin instance `key` from `before` to `to` (Type in value, the parameter
+/// menu's Set... and Paste value): one step, "Plugin parameter", as a client's `set_param` makes, unless Undo knob
+/// tweaks is off or the value stays. The step comes from no change the release could judge: a plugin may take the
+/// value on its next idle.
+pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, to: f64) {
+    let Some(param) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
+    // The owner's id (one hosted since the last settle has none yet).
+    if command::key_owner(&s.project, key) == Some(0) {
+        s.control.settle(&mut s.project);
+    }
+    let Some(owner) = command::key_owner(&s.project, key) else { return };
+    // Known for the undo's other side (`Command::apply`).
+    s.control.saw_param(owner, param, to);
+    let Some(v) = before.filter(|&v| v != to && crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) else { return };
+    let put = Command::Put(Box::new(command::Taken::Param(owner, param, v)));
+    crate::history::record(s, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(vec![put]));
+    crate::history::done_with(s);
 }
 
 /// `edit_app` for a run of changes that make one step (the tempo tapper's taps, wheel notches on a value box): a change

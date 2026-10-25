@@ -9,10 +9,11 @@
 //! done, the state after it while it is undone. Covered: a pattern's notes, control points and length (the piano roll
 //! and the step sequencer), the playlist (`playlist::snapshot`), knob turns, sample loads (`load_sample`), the
 //! project's initial values (`crate::init`), and with the playlist, PATTERNS > Split by channel's patterns and ADD's
-//! clip channels (`playlist::snapshot_with`), and everything the control plane's commands change (`crate::control`):
-//! their steps hold the commands that undo them (`Snap::Commands`), as do the interface's edits that go through
-//! `control::edit` (the mixer, the rack, the project settings) and parameters moved in a plugin's own window
-//! (`control::param_edit`).
+//! clip channels (`playlist::snapshot_with`). Everything the control plane's commands change (`crate::control`) is
+//! covered too: their steps hold the commands that undo them (`Snap::Commands`), as do the interface's edits that go
+//! through `control::edit` (the mixer and its faders; the rack's channels added, moved and deleted, FILE ▸ Import ▸
+//! MIDI file into the open project among them; the tempo and Settings > Project's values), the plugin parameters
+//! Lemon Studio sets (`control::param_set`) and those moved in a plugin's own window (`control::param_edit`).
 //!
 //! The settings of General ▸ Undo history (`crate::prefs`): Maximum undo levels (past it the oldest step goes), Undo
 //! knob tweaks, Alternate undo mode (what Ctrl+Z and Ctrl+Alt+Z do), Show undo history in the browser when undoing
@@ -38,6 +39,12 @@ pub const LOAD_SAMPLE: &str = "Load channel sample(s)";
 pub const CREATE_AUTOMATION: &str = "Create automation clip";
 /// A chord written by step edit (spec: ui/step-edit.md).
 pub const STEP_EDIT: &str = "Step edit";
+/// A mixer track's volume fader moved (named like the knobs' steps, "Mixer track panning"; `control::edit_press`).
+pub const MIXER_VOLUME: &str = "Mixer track volume";
+/// A generator added to the rack (`plugin_menu::add_generator`).
+pub const ADD_CHANNEL: &str = "Add channel";
+/// Channels deleted from the rack (`rack::delete_step`).
+pub const DELETE_CHANNEL: &str = "Delete channel";
 
 /// What a step changes, as it is on the other side of the step.
 #[derive(Debug, Clone, PartialEq)]
@@ -208,17 +215,7 @@ impl Snap {
                 s.pattern = current;
                 s.piano.clear_selection();
             }
-            Snap::Rack(r) => {
-                let RackSide { row, ch, groups, filter, unsorted_at, sel, selected, source, picker } = *r;
-                match ch {
-                    None if row + 1 == s.project.channels.len() => crate::rack::remove_last(s),
-                    Some(c) if row == s.project.channels.len() => crate::rack::push_channel(s, c),
-                    _ => {}
-                }
-                (s.rack.groups, s.rack.filter, s.rack.unsorted_at) = (groups, filter, unsorted_at);
-                (s.rack.sel, s.selected_channel) = (sel, selected);
-                (s.playlist.source, s.playlist.picker) = (source, picker);
-            }
+            Snap::Rack(r) => put_rack(s, *r),
             Snap::Several(v) => v.into_iter().rev().for_each(|x| x.put(s)),
             Snap::Commands(v) => {
                 crate::control::take_back(s, v);
@@ -226,6 +223,19 @@ impl Snap {
         }
         s.piano.dirty = true;
     }
+}
+
+/// Puts the rack's side `r` back (`Snap::Rack`).
+fn put_rack(s: &mut State, r: RackSide) {
+    let RackSide { row, ch, groups, filter, unsorted_at, sel, selected, source, picker } = r;
+    match ch {
+        None if row + 1 == s.project.channels.len() => crate::rack::remove_last(s),
+        Some(c) if row == s.project.channels.len() => crate::rack::push_channel(s, c),
+        _ => {}
+    }
+    (s.rack.groups, s.rack.filter, s.rack.unsorted_at) = (groups, filter, unsorted_at);
+    (s.rack.sel, s.selected_channel) = (sel, selected);
+    (s.playlist.source, s.playlist.picker) = (source, picker);
 }
 
 /// The model's value of a knob: the channels' volume and pan as stored (exact), the others as the knob reads them.
@@ -258,6 +268,9 @@ fn knob_name(id: KnobId) -> &'static str {
         KnobId::Send(..) => "Send level",
         KnobId::Swing => "Main swing",
         KnobId::Eq(..) => "Mixer track equalizer",
+        KnobId::Strum(_) => "Piano roll strum",
+        KnobId::Arp(_) => "Piano roll arpeggiate",
+        KnobId::PianoDlg(_) => "Piano roll tool",
     }
 }
 
@@ -313,6 +326,16 @@ impl History {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.steps.len()
+    }
+
+    /// How many steps are done (undone ones not counted).
+    pub fn done(&self) -> usize {
+        self.done
+    }
+
+    /// The name of the newest done step.
+    pub fn newest_done(&self) -> Option<&str> {
+        self.done.checked_sub(1).map(|i| &*self.steps[i].name)
     }
 
     /// Forgets every step: the project was opened or made ("Last reset").
@@ -434,7 +457,8 @@ pub fn load_sample(s: &mut State, row: usize) {
 /// Before knob `id` turns: a step unless Undo knob tweaks is off. `wheel`: a mouse-wheel notch, which joins the step
 /// of the notches just before it on the same knob.
 pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
-    if !prefs::check(&prefs::UNDO_KNOB_TWEAKS) {
+    // The piano roll tool dialogs' knobs only preview; their Accept is the step (spec: ui/piano-strum.md §1).
+    if !prefs::check(&prefs::UNDO_KNOB_TWEAKS) || matches!(id, KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_)) {
         return;
     }
     let h = &s.history;
@@ -946,6 +970,119 @@ mod tests {
         assert_eq!(now[..2], start[..2].iter().map(|b| !b).collect::<Vec<_>>()[..], "the two oldest clicks can no longer be undone");
         assert_eq!(now[2..], start[2..]);
         prefs::set_number(&prefs::MAX_UNDO_LEVELS, prefs::MAX_UNDO_LEVELS.default);
+    }
+
+    /// A drag on mixer track `t`'s volume fader, `dy` pixels down.
+    fn fade(app: &mut App, t: u16, dy: f32) {
+        app.mouse_move(100.0, 300.0);
+        app.act(Action::Fader(t));
+        app.mouse_move(100.0, 300.0 + dy);
+        app.mouse_up();
+    }
+
+    fn names(s: &State) -> Vec<&str> {
+        s.history.entries().into_iter().map(|e| e.1).collect()
+    }
+
+    /// A mixer fader drag is one step, "Mixer track volume", as EDIT names it; Ctrl+Z puts the fader back exactly and
+    /// Ctrl+Alt+Z redoes it. A click without a move makes none, and with Undo knob tweaks off nor does a drag (OS).
+    #[test]
+    fn mixer_fader_drag_is_one_step() {
+        let mut app = App::new(None);
+        let vol = |app: &App| crate::mixer::track(&app.state, 1).map(|m| m.volume);
+        let v0 = vol(&app);
+        assert!(v0.is_some(), "insert 1 exists");
+        fade(&mut app, 1, -30.0);
+        let v1 = vol(&app);
+        assert_ne!(v1, v0, "the fader moved");
+        assert_eq!(names(&app.state), [LAST_RESET, MIXER_VOLUME]);
+        assert_eq!(edit_menu(&app)[0], entry("Undo mixer track volume", "Ctrl+Z", true));
+        ctrl_z(&mut app);
+        assert_eq!(vol(&app), v0, "exactly back");
+        ctrl_alt_z(&mut app);
+        assert_eq!(vol(&app), v1, "redone");
+        fade(&mut app, 1, 0.0);
+        assert_eq!(app.state.history.len(), 1, "a click without a move");
+        prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, false);
+        fade(&mut app, 1, 20.0);
+        assert_ne!(vol(&app), v1);
+        assert_eq!(app.state.history.len(), 1, "Undo knob tweaks off");
+        prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
+    }
+
+    /// A generator added to the rack is one step, "Add channel" (`control::edit_app`): undone, the channel goes and its
+    /// instance is kept; redone, the channel comes back with it (`control::host`).
+    #[test]
+    fn an_added_generator_is_one_step() {
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::default();
+        a.plugins.available = crate::plugins::builtin();
+        let n = a.state.project.channels.len();
+        let sampler = a.plugins.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
+        let trio = a.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
+        crate::plugin_menu::add_generator(&mut a, sampler, None);
+        crate::plugin_menu::add_generator(&mut a, trio, None);
+        assert_eq!(a.state.project.channels.len(), n + 2);
+        assert_eq!(names(&a.state), [LAST_RESET, ADD_CHANNEL, ADD_CHANNEL]);
+        a.plugin_tick();
+        assert!(a.plugins.hosted.contains_key(&(n + 1)), "the Trio is hosted");
+        assert_eq!(undo(&mut a.state).as_deref(), Some(ADD_CHANNEL));
+        a.plugin_tick();
+        assert_eq!((a.state.project.channels.len(), a.state.selected_channel), (n + 1, n), "the Trio channel went");
+        assert!(!a.plugins.hosted.contains_key(&(n + 1)), "and its instance");
+        assert_eq!(redo(&mut a.state).as_deref(), Some(ADD_CHANNEL));
+        a.plugin_tick();
+        assert_eq!(a.state.project.channels.len(), n + 2);
+        assert!(a.plugins.hosted.contains_key(&(n + 1)), "its instance is back");
+        assert_eq!(a.state.project.channels[n + 1].plugin, Some(crate::osc3::file_name(crate::osc3::LEMON_TRIO).to_string()));
+        undo(&mut a.state);
+        undo(&mut a.state);
+        assert_eq!(a.state.project.channels.len(), n, "both gone");
+    }
+
+    /// A channel delete is one step, "Delete channel": undone, the channel is back in its row with its notes and the
+    /// rows below move back down; redone, it goes again (OS). Its instrument follows (`control::host`).
+    #[test]
+    fn a_channel_delete_is_one_step() {
+        let mut app = App::new(None);
+        assert!(app.state.project.channels.len() >= 3);
+        app.state.project.patterns[0].notes = vec![os_model::Note::step(1, 0), os_model::Note::step(2, 4)];
+        let (chans, pats) = (app.state.project.channels.clone(), app.state.project.patterns.clone());
+        crate::rack::delete_step(&mut app, &[1]);
+        let (gone_chans, gone_pats) = (app.state.project.channels.clone(), app.state.project.patterns.clone());
+        assert_eq!(gone_chans.len(), chans.len() - 1);
+        assert_eq!(names(&app.state), [LAST_RESET, DELETE_CHANNEL]);
+        ctrl_z(&mut app);
+        assert_eq!((&app.state.project.channels, &app.state.project.patterns), (&chans, &pats), "all back");
+        ctrl_alt_z(&mut app);
+        assert_eq!((&app.state.project.channels, &app.state.project.patterns), (&gone_chans, &gone_pats), "deleted again");
+    }
+
+    /// Settings > Project: the bar, its mode and the panning law are steps, named as the control plane's commands
+    /// name them ("Time signature"), put back by Ctrl+Z (OS).
+    #[test]
+    fn project_settings_are_steps() {
+        let mut app = App::new(None);
+        let now = |app: &App| {
+            let p = &app.state.project;
+            (p.bar, p.bar_as_signature, p.panning_law)
+        };
+        let start = now(&app);
+        app.set_panning_law(2);
+        app.set_bar(3, 4);
+        app.set_time_mode(!app.state.project.bar_is_signature());
+        let sig = crate::control::command::TIME_SIGNATURE;
+        assert_eq!(names(&app.state), [LAST_RESET, "Panning law", sig, sig]);
+        app.set_panning_law(2);
+        assert_eq!(app.state.history.len(), 3, "the same value again makes no step");
+        assert_eq!(edit_menu(&app)[0], entry("Undo time signature", "Ctrl+Z", true));
+        ctrl_z(&mut app);
+        assert_eq!(app.state.project.bar(), (3, 4), "the mode back");
+        ctrl_z(&mut app);
+        ctrl_z(&mut app);
+        assert_eq!(now(&app), start);
+        ctrl_alt_z(&mut app);
+        assert_eq!(app.state.project.panning_law, Some(2));
     }
 
     /// Put undone recordings in the recycle bin: stored and shown, on by default; Lemon Studio does not record yet

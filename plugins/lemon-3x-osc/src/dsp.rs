@@ -5,9 +5,10 @@
 //! Lemon Trio sound: three oscillators, their stereo spread, mixing or amplitude modulation, the five envelope / LFO
 //! targets, the voice filter and the voices.
 //!
-// spec: plugins/3x-osc.md §2
+// spec: plugins/3x-osc.md §2, plugins/lemon-3x-osc.md §6 (custom shape)
 
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 use os_engine::{envelope, laws};
 
@@ -270,6 +271,95 @@ pub fn hq(shape: u8, u: f64, dt: f64) -> f64 {
     }
 }
 
+/// Points a custom shape's period holds at most: a longer sample is averaged down to this many.
+pub const WAVE_POINTS: usize = 4096;
+
+/// The custom shape's wave: the channel's sample as one period of the oscillator, both sides mixed, at the sample's
+/// own level (Lemon Studio choice, spec: plugins/lemon-3x-osc.md §6; how FL plays it is not measured). Straight lines
+/// join the points, the last one runs back to the first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wave {
+    pts: Vec<f32>,
+    /// `sum[i]`: the integral of the period from 0 to phase `i / n` (n + 1 entries).
+    sum: Vec<f64>,
+}
+
+impl Wave {
+    /// One period of the points `pts` (mono); `None` when there are none.
+    pub fn new(pts: &[f32]) -> Option<Wave> {
+        let n = pts.len();
+        if n == 0 {
+            return None;
+        }
+        let pts: Vec<f32> = if n > WAVE_POINTS {
+            // Each point the average of its share of the sample.
+            (0..WAVE_POINTS)
+                .map(|i| {
+                    let part = &pts[i * n / WAVE_POINTS..(i + 1) * n / WAVE_POINTS];
+                    (part.iter().map(|&x| f64::from(x)).sum::<f64>() / part.len() as f64) as f32
+                })
+                .collect()
+        } else {
+            pts.to_vec()
+        };
+        let n = pts.len();
+        let mut sum = Vec::with_capacity(n + 1);
+        let mut acc = 0.0;
+        sum.push(acc);
+        for (i, &a) in pts.iter().enumerate() {
+            acc += (f64::from(a) + f64::from(pts[(i + 1) % n])) / 2.0 / n as f64;
+            sum.push(acc);
+        }
+        Some(Wave { pts, sum })
+    }
+
+    /// The period of a sample: its two sides mixed (a right side of another length is left out).
+    pub fn from_sample(left: &[f32], right: &[f32]) -> Option<Wave> {
+        if right.len() == left.len() {
+            let mono: Vec<f32> = left.iter().zip(right).map(|(l, r)| (l + r) * 0.5).collect();
+            Wave::new(&mono)
+        } else {
+            Wave::new(left)
+        }
+    }
+
+    /// The period's points.
+    pub fn points(&self) -> &[f32] {
+        &self.pts
+    }
+
+    /// The segment at phase `u` (0..=1): its index, the position in it and its two ends.
+    fn seg(&self, u: f64) -> (usize, f64, f64, f64) {
+        let n = self.pts.len();
+        let x = u * n as f64;
+        let i = (x as usize).min(n - 1);
+        (i, x - i as f64, f64::from(self.pts[i]), f64::from(self.pts[(i + 1) % n]))
+    }
+
+    /// The wave at phase `u`.
+    pub fn at(&self, u: f64) -> f64 {
+        let (_, f, a, b) = self.seg(u.rem_euclid(1.0));
+        a + (b - a) * f
+    }
+
+    /// The integral of the periodic wave from 0 to `x` (x ≥ 0).
+    fn prim(&self, x: f64) -> f64 {
+        let k = x.floor();
+        let (i, f, a, b) = self.seg(x - k);
+        let n = self.pts.len();
+        k * self.sum[n] + self.sum[i] + (a * f + (b - a) * f * f / 2.0) / n as f64
+    }
+
+    /// The wave's average over the next sample interval (phase `u` .. `u + dt`), as the plain shapes (`boxed`); HQ
+    /// plays it the same way.
+    pub fn boxed(&self, u: f64, dt: f64) -> f64 {
+        if dt < 1e-9 {
+            return self.at(u);
+        }
+        (self.prim(u + dt) - self.prim(u)) / dt
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Filter (spec §2.7)
 
@@ -423,6 +513,8 @@ struct Voice {
     off: Option<u64>,
     /// Cut by the host (choke) at this sample: the 10 ms fade.
     cut: Option<u64>,
+    /// The host's tuning of the voice in semitones (portamento and slide notes: a note expression).
+    tune: f64,
     /// Phase per oscillator and side (cycles, 0..1).
     ph: [[f64; 2]; 3],
     filt: [Filter; 2],
@@ -446,11 +538,19 @@ pub struct Engine {
     rng: u64,
     /// Host voices that ended since the last `take_ended`: (key, host note id).
     ended: Vec<(u8, Option<i32>)>,
+    /// The custom shape's wave; without one the custom shape is silent.
+    pub custom: Option<Arc<Wave>>,
 }
 
 impl Engine {
     pub fn new(rate: f32) -> Self {
-        Engine { rate: f64::from(rate), voices: Vec::with_capacity(MAX_VOICES), rng: 0x9e37_79b9_7f4a_7c15, ended: Vec::with_capacity(MAX_VOICES * 2) }
+        Engine {
+            rate: f64::from(rate),
+            voices: Vec::with_capacity(MAX_VOICES),
+            rng: 0x9e37_79b9_7f4a_7c15,
+            ended: Vec::with_capacity(MAX_VOICES * 2),
+            custom: None,
+        }
     }
 
     pub fn set_rate(&mut self, rate: f32) {
@@ -527,6 +627,7 @@ impl Engine {
             n: 0,
             off: None,
             cut: None,
+            tune: 0.0,
             ph,
             filt: [Filter::default(); 2],
             done: false,
@@ -548,6 +649,21 @@ impl Engine {
             }
         }
         self.note_off(key);
+    }
+
+    /// Tunes the voices of `key` to `semitones` from the key's own pitch (a host's tuning expression: portamento and
+    /// slide notes). With a host id only that voice is tuned; without one (or when no voice has it) every voice of the
+    /// key, released ones too.
+    pub fn tune(&mut self, key: u8, id: Option<i32>, semitones: f64) {
+        if let Some(i) = id
+            && let Some(v) = self.voices.iter_mut().find(|v| v.id == Some(i))
+        {
+            v.tune = semitones;
+            return;
+        }
+        for v in self.voices.iter_mut().filter(|v| v.key == key) {
+            v.tune = semitones;
+        }
     }
 
     /// Cuts the voices of `key` with the short fade.
@@ -624,6 +740,7 @@ impl Engine {
         let (use1, use2) = (w[0] != 0.0, w[1] != 0.0);
         let use3 = b.m3 != 0.0;
         let filter_off = b.filter_off();
+        let custom = self.custom.take();
         let mut voices = std::mem::take(&mut self.voices);
         for v in voices.iter_mut().filter(|v| !v.done) {
             let t0 = v.n as f64 / sr;
@@ -637,8 +754,8 @@ impl Engine {
                 v.done = true;
                 0.0
             });
-            // Pitch: envelope (cents) + LFO (cents) + bend.
-            let cents = b.targets[T_PITCH].mod_at(t0, off) + b.bend;
+            // Pitch: envelope (cents) + LFO (cents) + bend + the host's tuning.
+            let cents = b.targets[T_PITCH].mod_at(t0, off) + b.bend + v.tune * 100.0;
             let base = KEY60_HZ * 2f64.powf((f64::from(v.key) - 60.0) / 12.0 + cents / 1200.0);
             let inc: [[f64; 2]; 3] = std::array::from_fn(|n| {
                 let f = base * 2f64.powf(b.osc[n].semis / 12.0) / sr;
@@ -669,7 +786,7 @@ impl Engine {
                         if used {
                             let x = match os.shape {
                                 NOISE => self.noise(),
-                                CUSTOM => 0.0,
+                                CUSTOM => custom.as_deref().map_or(0.0, |c| c.boxed(u, dt)),
                                 sh if b.hq => hq(sh, u, dt),
                                 sh => boxed(sh, u, dt),
                             };
@@ -688,6 +805,7 @@ impl Engine {
             v.n += len as u64;
         }
         self.voices = voices;
+        self.custom = custom;
     }
 }
 
@@ -894,6 +1012,30 @@ mod tests {
         assert!((lfo.value(0.495) - 100.0).abs() < 0.1, "a quarter period after the start: the top");
     }
 
+    /// The host's tuning moves the voices of its key (all of them without an id, one with), released ones too.
+    #[test]
+    fn host_tuning_moves_the_key_voices() {
+        let b = solo(SINE);
+        let mut e = Engine::new(SR);
+        e.note_on(60, 0.78, Some(1), &b);
+        e.note_on(60, 0.78, Some(2), &b);
+        e.note_on(64, 0.78, Some(3), &b);
+        e.note_off_id(60, Some(1));
+        e.tune(60, None, 7.0);
+        assert!(e.voices.iter().filter(|v| v.key == 60).all(|v| v.tune == 7.0));
+        e.tune(60, Some(2), -2.0);
+        let tunes: Vec<f64> = e.voices.iter().map(|v| v.tune).collect();
+        assert_eq!(tunes, vec![7.0, -2.0, 0.0]);
+        // Key 60 a fifth up sounds at the pitch of key 67.
+        let mut e = Engine::new(SR);
+        e.note_on(60, 0.78, None, &b);
+        e.tune(60, None, 7.0);
+        let (mut l, mut r) = (vec![0.0; 22050], vec![0.0; 22050]);
+        e.render(&mut l, &mut r, &b);
+        let want = KEY60_HZ * 2f64.powf(7.0 / 12.0);
+        assert!((freq(&l[2205..]) - want).abs() < 0.5, "{}", freq(&l[2205..]));
+    }
+
     #[test]
     fn filter_fits_the_measured_points() {
         assert!((lp_hz(64.0) - 837.0).abs() < 1e-6 && (lp_hz(160.0) - (2727.0f64 * 8203.0).sqrt()).abs() < 1.0);
@@ -924,6 +1066,50 @@ mod tests {
         // HP passes the top; BS notches f0.
         assert!(gain(3, 128.0, 128.0, 12000.0).abs() < 0.5);
         assert!(gain(4, 128.0, 128.0, 2727.0) < -20.0);
+    }
+
+    /// The custom shape plays its wave as one period at the oscillator's pitch, averaged over each sample like the
+    /// plain shapes; without a wave it is silent.
+    #[test]
+    fn custom_shape_plays_its_wave_as_one_period() {
+        let b = solo(CUSTOM);
+        let (l, r) = render(&b, 60, 100.0 / 128.0, 4410, None);
+        assert!(peak(&l) == 0.0 && peak(&r) == 0.0, "no wave: silence");
+        // One cycle of a sine in 1000 points.
+        let cycle: Vec<f32> = (0..1000).map(|i| (2.0 * PI * i as f64 / 1000.0).sin() as f32).collect();
+        let mut e = Engine::new(SR);
+        e.custom = Wave::new(&cycle).map(Arc::new);
+        e.note_on(60, 100.0 / 128.0, None, &b);
+        let (mut l, mut r) = (vec![0.0; 44100], vec![0.0; 44100]);
+        e.render(&mut l, &mut r, &b);
+        assert!((freq(&l) - 523.25).abs() < 0.05, "{}", freq(&l));
+        assert!((peak(&l) - 0.70711).abs() < 2e-3, "{}", peak(&l));
+        let dt = KEY60_HZ / 44100.0;
+        for (i, x) in l.iter().enumerate().take(200) {
+            let want = boxed(SINE, (i as f64 * dt).fract(), dt) * 0.70711;
+            assert!((f64::from(*x) - want).abs() < 1e-3, "sample {i}: {x} vs {want}");
+        }
+        // The average over an interval is the integral of the joined points.
+        let w = Wave::new(&[0.0, 1.0, 0.0, -1.0]).unwrap();
+        assert_eq!(w.at(0.125), 0.5);
+        assert!((w.boxed(0.0, 0.25) - 0.5).abs() < 1e-12);
+        assert!((w.boxed(0.75, 0.5) - (-0.5 + 0.5) / 2.0).abs() < 1e-12, "across the end of the period");
+        assert!(w.boxed(0.1, 1.0).abs() < 1e-12, "a whole period averages to the mean");
+    }
+
+    #[test]
+    fn custom_wave_mixes_and_shortens_a_long_sample() {
+        assert_eq!(Wave::new(&[]), None);
+        // Both sides mixed.
+        let w = Wave::from_sample(&[1.0, 0.0], &[0.0, 0.0]).unwrap();
+        assert_eq!(w.points(), &[0.5, 0.0]);
+        // A right side of another length is not used.
+        assert_eq!(Wave::from_sample(&[0.25; 3], &[]).unwrap().points(), &[0.25; 3]);
+        // A long sample: WAVE_POINTS averages of equal shares.
+        let long: Vec<f32> = (0..WAVE_POINTS * 3).map(|i| if i % 3 == 0 { 0.9 } else { 0.0 }).collect();
+        let w = Wave::new(&long).unwrap();
+        assert_eq!(w.points().len(), WAVE_POINTS);
+        assert!(w.points().iter().all(|&p| (p - 0.3).abs() < 1e-6));
     }
 
     #[test]

@@ -20,16 +20,17 @@ use std::sync::{Arc, Mutex};
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
-    clap_event_header, clap_event_note, clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value,
+    clap_event_header, clap_event_midi, clap_event_note, clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value,
     clap_event_transport, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_EXPRESSION,
-    CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_TUNING, CLAP_NOTE_EXPRESSION_VOLUME, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
+    CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_TUNING, CLAP_NOTE_EXPRESSION_VOLUME, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
     CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE,
     CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE, CLAP_TRANSPORT_IS_PLAYING,
 };
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::ext::audio_ports::{clap_audio_port_info, clap_plugin_audio_ports, CLAP_EXT_AUDIO_PORTS};
 use clap_sys::ext::gui::{clap_host_gui, clap_plugin_gui, clap_window, clap_window_handle, CLAP_EXT_GUI, CLAP_WINDOW_API_COCOA, CLAP_WINDOW_API_WIN32, CLAP_WINDOW_API_X11};
-use clap_sys::ext::latency::{clap_plugin_latency, CLAP_EXT_LATENCY};
+use clap_sys::ext::latency::{clap_host_latency, clap_plugin_latency, CLAP_EXT_LATENCY};
+use clap_sys::ext::note_ports::{clap_note_port_info, clap_plugin_note_ports, CLAP_EXT_NOTE_PORTS, CLAP_NOTE_DIALECT_CLAP};
 use clap_sys::ext::params::{
     clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS, CLAP_PARAM_IS_AUTOMATABLE, CLAP_PARAM_IS_BYPASS,
     CLAP_PARAM_IS_ENUM, CLAP_PARAM_IS_HIDDEN, CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID, CLAP_PARAM_IS_READONLY, CLAP_PARAM_IS_STEPPED,
@@ -277,6 +278,8 @@ struct HostData {
     resize: Mutex<Option<(u32, u32)>>,
     /// The plugin's voice count changed (`clap_host_voice_info.changed`): read again on the UI tick.
     voice_info: AtomicBool,
+    /// The plugin's delay changed (`clap_host_latency.changed`): read again on the UI tick.
+    latency: AtomicBool,
     /// The plugin asked to be processed (`clap_host.request_process`), e.g. a note from its editor's keyboard: a
     /// sleeping instance runs the next block.
     process: AtomicBool,
@@ -305,6 +308,9 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
     }
     if id == CLAP_EXT_VOICE_INFO {
         return &HOST_VOICE_INFO as *const clap_host_voice_info as *const c_void;
+    }
+    if id == CLAP_EXT_LATENCY {
+        return &HOST_LATENCY as *const clap_host_latency as *const c_void;
     }
     if id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU || id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU_COMPAT {
         return &context_menu::HOST_CONTEXT_MENU as *const clap_sys::ext::context_menu::clap_host_context_menu as *const c_void;
@@ -462,6 +468,13 @@ unsafe extern "C" fn host_voice_info_changed(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).voice_info.store(true, Ordering::Release) };
     unsafe { attend(host) };
 }
+/// The plugin's delay changed: read again on the UI tick, where `latency.get` may be called (spec:
+/// audio/delay-compensation.md "Lemon Studio").
+static HOST_LATENCY: clap_host_latency = clap_host_latency { changed: Some(host_latency_changed) };
+unsafe extern "C" fn host_latency_changed(host: *const clap_host) {
+    unsafe { (*((*host).host_data as *const HostData)).latency.store(true, Ordering::Release) };
+    unsafe { attend(host) };
+}
 unsafe extern "C" fn host_request_restart(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).restart.store(true, Ordering::Release) };
     unsafe { attend(host) };
@@ -500,6 +513,7 @@ enum Seq {
     Note(usize),
     Mod(usize),
     Expr(usize),
+    Midi(usize),
 }
 
 /// One queued note event.
@@ -574,6 +588,9 @@ pub struct Plugin {
     state: *const clap_plugin_state,
     params: *const clap_plugin_params,
     latency: *const clap_plugin_latency,
+    /// The delay it reports, read on the UI thread after each activation and when it says it changed (the extension
+    /// is main-thread only): the engine reads this copy after each block.
+    latency_now: u32,
     /// The render extension (offline or realtime), if the plugin has one.
     render: *const clap_plugin_render,
     offline: bool,
@@ -581,6 +598,9 @@ pub struct Plugin {
     voice_info: *const clap_plugin_voice_info,
     /// The voices it plays, from the notes sent and the voice ends it reports (spec: audio/voices.md §2).
     ledger: VoiceLedger,
+    /// Glides as MIDI pitch bend, for a plugin whose note inputs take MIDI only (no tuning expression; spec:
+    /// audio/channel-voices.md). `None`: glides are tuning expressions.
+    bend: Option<os_engine::TuningBend>,
     /// Kept alive for the plugin, which holds a pointer to it.
     _host: Box<clap_host>,
     host_data: Box<HostData>,
@@ -594,6 +614,10 @@ pub struct Plugin {
     notes: Vec<clap_event_note>,
     mods: Vec<clap_event_param_mod>,
     exprs: Vec<clap_event_note_expression>,
+    /// Controller messages waiting for their block (frame, message) and those of the block being sent
+    /// (`Instrument::midi`, as CLAP MIDI events on note port 0).
+    midi_queue: Vec<(u32, [u8; 3])>,
+    midis: Vec<clap_event_midi>,
     /// This chunk's events in time order (pointers into `notes` / `mods`).
     order: Vec<*const clap_event_header>,
     /// Parameter that takes a note's sample start as per-note modulation (`use_start_param`).
@@ -634,11 +658,19 @@ pub struct Plugin {
     /// audio-ports extension is taken as stereo in and out.
     ins: usize,
     outs: usize,
-    /// Buffers for channels the host has no audio for (a mono input's mix of both sides, channels beyond two), and the
-    /// channel pointers of the current process call: sized at activation, so the audio thread never allocates.
+    /// Channels of the ports after the main ones (a sidechain input, extra outputs). CLAP wants a buffer for every
+    /// port it declares: the first extra input gets the slot's sidechain input when it has one, the others silence;
+    /// extra outputs get unheard scratch (spec: audio/sidechain.md "Hosted plugins' input buses").
+    aux_ins: Vec<usize>,
+    aux_outs: Vec<usize>,
+    /// Buffers for channels the host has no audio for (a mono input's mix of both sides, channels beyond two, the
+    /// other ports), the channel pointers and the port buffers of the current process call: sized at activation, so
+    /// the audio thread never allocates.
     scratch: Vec<f32>,
     in_ptrs: Vec<*mut f32>,
     out_ptrs: Vec<*mut f32>,
+    in_bufs: Vec<clap_audio_buffer>,
+    out_bufs: Vec<clap_audio_buffer>,
     /// Parameter ranges in list order (id, min, max, stepped), read after init and on a rescan (values cross the
     /// hosting layer normalized).
     ranges: Vec<params::Range>,
@@ -717,6 +749,23 @@ pub type SharedPlugin = Arc<Mutex<Plugin>>;
 
 const MAX_FRAMES: u32 = 4096;
 
+/// True when the plugin's note inputs take CLAP note events, and with them tuning expressions (or it declares no note
+/// ports: it is sent CLAP events as before). False for a plugin whose note inputs speak MIDI only. Main thread.
+unsafe fn takes_clap_notes(ports: *const clap_plugin_note_ports, plugin: *const clap_plugin) -> bool {
+    unsafe {
+        let Some(ports) = ports.as_ref() else { return true };
+        let (Some(count), Some(get)) = (ports.count, ports.get) else { return true };
+        let n = count(plugin, true);
+        if n == 0 {
+            return true;
+        }
+        (0..n).any(|i| {
+            let mut info: clap_note_port_info = std::mem::zeroed();
+            get(plugin, i, true, &mut info) && info.supported_dialects & CLAP_NOTE_DIALECT_CLAP != 0
+        })
+    }
+}
+
 fn debug() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("OS_DEBUG").is_some())
@@ -735,6 +784,7 @@ impl Plugin {
             automate: Mutex::new(Vec::new()),
             resize: Mutex::new(None),
             voice_info: AtomicBool::new(false),
+            latency: AtomicBool::new(false),
             process: AtomicBool::new(false),
             #[cfg(all(unix, not(target_os = "macos")))]
             plugin: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
@@ -778,6 +828,7 @@ impl Plugin {
             let render = ext(CLAP_EXT_RENDER) as *const clap_plugin_render;
             let voice_info = ext(CLAP_EXT_VOICE_INFO) as *const clap_plugin_voice_info;
             let audio_ports = ext(CLAP_EXT_AUDIO_PORTS) as *const clap_plugin_audio_ports;
+            let bend = (!takes_clap_notes(ext(CLAP_EXT_NOTE_PORTS) as *const clap_plugin_note_ports, plugin)).then(os_engine::TuningBend::default);
             let ranges = params::read_ranges(params, plugin);
             Ok(Plugin {
                 desc,
@@ -795,6 +846,8 @@ impl Plugin {
                 notes: Vec::with_capacity(256),
                 mods: Vec::with_capacity(64),
                 exprs: Vec::with_capacity(64),
+                midi_queue: Vec::new(),
+                midis: Vec::with_capacity(16),
                 order: Vec::with_capacity(320),
                 start_param: None,
                 note_levels: None,
@@ -827,14 +880,20 @@ impl Plugin {
                 audio_ports,
                 ins: 2,
                 outs: 2,
+                aux_ins: Vec::new(),
+                aux_outs: Vec::new(),
                 scratch: Vec::new(),
                 in_ptrs: Vec::new(),
                 out_ptrs: Vec::new(),
+                in_bufs: Vec::new(),
+                out_bufs: Vec::new(),
                 latency,
+                latency_now: 0,
                 render,
                 offline: false,
                 voice_info,
                 ledger: VoiceLedger::new(),
+                bend,
                 ranges,
                 param_queue: Vec::new(),
                 auto: Vec::with_capacity(params::MAX_AUTO),
@@ -844,6 +903,14 @@ impl Plugin {
                 _lib: lib.clone(),
             })
         }
+    }
+
+    /// Queues a note's start; a plugin glided by pitch bend first has the bend centred for it.
+    fn start_note(&mut self, e: Ev) {
+        if let Some(m) = self.bend.as_mut().and_then(|b| b.note_on(e.key)) {
+            self.midi_queue.push((e.time, m));
+        }
+        self.queue.push(e);
     }
 
     /// Switches the plugin between offline rendering (an export) and live playback through the CLAP render extension
@@ -877,27 +944,46 @@ impl Plugin {
         if ok {
             self.rate = rate;
             self.read_voice_info();
+            self.read_latency();
         }
         ok
     }
 
-    /// The channels of the plugin's main input and output ports (main thread, inactive: ports only change then), and
-    /// buffers for them. Without the audio-ports extension the plugin is taken as stereo in and out.
-    fn read_ports(&mut self) {
-        let main = |is_input: bool| -> Option<usize> {
-            let ports = unsafe { self.audio_ports.as_ref() }?;
-            if unsafe { ports.count.map_or(0, |c| c(self.plugin, is_input)) } == 0 {
-                return Some(0);
-            }
-            // SAFETY: plain data the plugin fills.
-            let mut info: clap_audio_port_info = unsafe { std::mem::zeroed() };
-            let ok = unsafe { ports.get.is_some_and(|g| g(self.plugin, 0, is_input, &mut info)) };
-            Some(if ok { (info.channel_count as usize).min(64) } else { 2 })
+    /// The delay the plugin reports, in frames (main thread, active).
+    fn read_latency(&mut self) {
+        self.latency_now = match self.latency.is_null() {
+            true => 0,
+            false => unsafe { (*self.latency).get.map_or(0, |g| g(self.plugin)) },
         };
-        (self.ins, self.outs) = (main(true).unwrap_or(2), main(false).unwrap_or(2));
-        self.scratch = vec![0.0; (self.ins + self.outs) * self.max_frames as usize];
-        self.in_ptrs = Vec::with_capacity(self.ins);
-        self.out_ptrs = Vec::with_capacity(self.outs);
+    }
+
+    /// The channels of the plugin's input and output ports, the main one first (main thread, inactive: ports only
+    /// change then), and buffers for them. Without the audio-ports extension the plugin is taken as stereo in and out.
+    fn read_ports(&mut self) {
+        let ports = |is_input: bool| -> Option<Vec<usize>> {
+            let ports = unsafe { self.audio_ports.as_ref() }?;
+            let count = unsafe { ports.count.map_or(0, |c| c(self.plugin, is_input)) }.min(16);
+            Some(
+                (0..count)
+                    .map(|i| {
+                        // SAFETY: plain data the plugin fills.
+                        let mut info: clap_audio_port_info = unsafe { std::mem::zeroed() };
+                        let ok = unsafe { ports.get.is_some_and(|g| g(self.plugin, i, is_input, &mut info)) };
+                        if ok { (info.channel_count as usize).min(64) } else { 2 }
+                    })
+                    .collect(),
+            )
+        };
+        let (ins, outs) = (ports(true).unwrap_or_else(|| vec![2]), ports(false).unwrap_or_else(|| vec![2]));
+        (self.ins, self.outs) = (ins.first().copied().unwrap_or(0), outs.first().copied().unwrap_or(0));
+        self.aux_ins = ins.get(1..).unwrap_or_default().to_vec();
+        self.aux_outs = outs.get(1..).unwrap_or_default().to_vec();
+        let (aux_in, aux_out): (usize, usize) = (self.aux_ins.iter().sum(), self.aux_outs.iter().sum());
+        self.scratch = vec![0.0; (self.ins + self.outs + aux_in + aux_out) * self.max_frames as usize];
+        self.in_ptrs = Vec::with_capacity(self.ins + aux_in);
+        self.out_ptrs = Vec::with_capacity(self.outs + aux_out);
+        self.in_bufs = Vec::with_capacity(ins.len());
+        self.out_bufs = Vec::with_capacity(outs.len());
     }
 
     /// The voice list's limit from the plugin's voice info (main thread, active): the voices its patch can use.
@@ -1118,6 +1204,9 @@ impl Plugin {
         if self.host_data.voice_info.swap(false, Ordering::AcqRel) && self.rate != 0 {
             self.read_voice_info();
         }
+        if self.host_data.latency.swap(false, Ordering::AcqRel) && self.rate != 0 {
+            self.read_latency();
+        }
         let wanted = self.wanted_rate.swap(0, Ordering::AcqRel);
         let restart = self.host_data.restart.swap(false, Ordering::AcqRel);
         if wanted != 0 && wanted != self.rate {
@@ -1234,7 +1323,7 @@ impl Plugin {
 
     /// Processes `n` frames (≤ max) with the queued events whose time falls inside them.
     fn process_chunk(&mut self, left: &mut [f32], right: &mut [f32]) {
-        self.process_chunk_in(left, right, None);
+        self.process_chunk_in(left, right, None, None);
     }
 
     /// The plugin reported that it is done (no CONTINUE / TAIL, and quiet output with CONTINUE_IF_NOT_QUIET) and
@@ -1247,20 +1336,43 @@ impl Plugin {
             && !self.editor
             && !self.host_data.process.load(Ordering::Acquire)
             && self.queue.is_empty() && self.param_queue.is_empty() && self.auto.is_empty() && self.mod_resend.is_empty()
+            && self.midi_queue.is_empty()
     }
 
     /// `process_chunk` with an audio input (effects): `input` holds the frames to process, `left` / `right` receive
-    /// the output.
-    fn process_chunk_in(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>) {
+    /// the output, `key` the sidechain input's frames for the first extra input port.
+    fn process_chunk_in(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>, key: Option<(&[f32], &[f32])>) {
         let n = left.len() as u32;
         // This block answers a request to be processed; one made while it runs asks for the next.
         self.host_data.process.store(false, Ordering::Release);
         self.notes.clear();
         self.mods.clear();
         self.exprs.clear();
+        self.midis.clear();
         let mut rest = Vec::new();
         // Event order; a note's modulation follows its note on at the same time.
         let mut seq: Vec<Seq> = Vec::new();
+        // Controller messages go before the block's notes (their frames are where the controller moved).
+        let mut later = Vec::new();
+        for &(time, data) in &self.midi_queue {
+            if time < n {
+                self.midis.push(clap_event_midi {
+                    header: clap_event_header {
+                        size: std::mem::size_of::<clap_event_midi>() as u32,
+                        time,
+                        space_id: CLAP_CORE_EVENT_SPACE_ID,
+                        type_: CLAP_EVENT_MIDI,
+                        flags: 0,
+                    },
+                    port_index: 0,
+                    data,
+                });
+                seq.push(Seq::Midi(self.midis.len() - 1));
+            } else {
+                later.push((time - n, data));
+            }
+        }
+        self.midi_queue = later;
         // Sounding voices' new mod amounts (the channel's mods changed) go first.
         for (id, key, param, amount) in self.mod_resend.drain(..) {
             self.mods.push(param_mod(0, param, id, key, amount));
@@ -1401,6 +1513,16 @@ impl Plugin {
         // in time order; parameter values go before the notes at the same frame.
         self.fill_param_events();
         self.take_automation(n);
+        // Controller messages were put first: a stable sort keeps every frame's order otherwise.
+        if !self.midis.is_empty() {
+            let time = |s: &Seq| match *s {
+                Seq::Mod(m) => self.mods[m].header.time,
+                Seq::Note(i) => self.notes[i].header.time,
+                Seq::Expr(x) => self.exprs[x].header.time,
+                Seq::Midi(m) => self.midis[m].header.time,
+            };
+            seq.sort_by_key(time);
+        }
         self.order.clear();
         let mut pi = 0;
         for &s in &seq {
@@ -1408,6 +1530,7 @@ impl Plugin {
                 Seq::Mod(m) => &self.mods[m].header as *const clap_event_header,
                 Seq::Note(i) => &self.notes[i].header as *const clap_event_header,
                 Seq::Expr(x) => &self.exprs[x].header as *const clap_event_header,
+                Seq::Midi(m) => &self.midis[m].header as *const clap_event_header,
             };
             let t = unsafe { (*h).time };
             while pi < self.pvals.len() && self.pvals[pi].header.time <= t {
@@ -1431,6 +1554,9 @@ impl Plugin {
             std::ptr::write_bytes(s, 0, frames);
             s
         };
+        // The other ports' channels come after the main ports' in scratch: the inputs', then the outputs'.
+        let aux_in_at = self.ins + self.outs;
+        let aux_out_at = aux_in_at + self.aux_ins.iter().sum::<usize>();
         self.out_ptrs.clear();
         for c in 0..self.outs {
             self.out_ptrs.push(match c {
@@ -1439,6 +1565,7 @@ impl Plugin {
                 _ => spare(self.ins + c),
             });
         }
+        self.out_ptrs.extend((0..self.aux_outs.iter().sum::<usize>()).map(|c| spare(aux_out_at + c)));
         self.in_ptrs.clear();
         let has_in = input.is_some() && self.ins > 0;
         if let Some((l, r)) = input.filter(|_| self.ins > 0) {
@@ -1455,9 +1582,42 @@ impl Plugin {
                     self.in_ptrs.push(spare(c));
                 }
             }
+            self.in_ptrs.extend((0..self.aux_ins.iter().sum::<usize>()).map(|c| spare(aux_in_at + c)));
+            // The sidechain input in the first extra port: its two sides, a mono port their average.
+            if let (Some((kl, kr)), Some(&ch)) = (key, self.aux_ins.first()) {
+                for c in 0..ch {
+                    // SAFETY: the port's channels are `spare` buffers of `frames` frames (above).
+                    let d = unsafe { std::slice::from_raw_parts_mut(base.add((aux_in_at + c) * max), frames) };
+                    match (ch, c) {
+                        (1, _) => d.iter_mut().zip(kl.iter().zip(kr)).for_each(|(m, (a, b))| *m = (a + b) * 0.5),
+                        (_, 0) => d.copy_from_slice(&kl[..frames]),
+                        (_, 1) => d.copy_from_slice(&kr[..frames]),
+                        _ => {}
+                    }
+                }
+            }
         }
-        let mut buf = clap_audio_buffer { data32: self.out_ptrs.as_mut_ptr(), data64: ptr::null_mut(), channel_count: self.outs as u32, latency: 0, constant_mask: 0 };
-        let in_buf = clap_audio_buffer { data32: self.in_ptrs.as_mut_ptr(), data64: ptr::null_mut(), channel_count: self.ins as u32, latency: 0, constant_mask: 0 };
+        // One buffer per port, as CLAP requires: a plugin reads its sidechain port's buffer even when the host has
+        // nothing for it (nih-plug reads one past a short list, and crashes on what it finds there).
+        let port = |data32: *mut *mut f32, channels: usize| clap_audio_buffer { data32, data64: ptr::null_mut(), channel_count: channels as u32, latency: 0, constant_mask: 0 };
+        self.out_bufs.clear();
+        if self.outs > 0 {
+            let mut at = 0;
+            for ch in std::iter::once(self.outs).chain(self.aux_outs.iter().copied()) {
+                // SAFETY: `out_ptrs` holds the main port's channels, then every other port's.
+                self.out_bufs.push(port(unsafe { self.out_ptrs.as_mut_ptr().add(at) }, ch));
+                at += ch;
+            }
+        }
+        self.in_bufs.clear();
+        if has_in {
+            let mut at = 0;
+            for ch in std::iter::once(self.ins).chain(self.aux_ins.iter().copied()) {
+                // SAFETY: `in_ptrs` holds the main port's channels, then every other port's.
+                self.in_bufs.push(port(unsafe { self.in_ptrs.as_mut_ptr().add(at) }, ch));
+                at += ch;
+            }
+        }
         // The engine's transport while playing; without one the host is free running (spec: plugins/vst3-hosting.md §1).
         let transport = match self.chunk_song {
             Some(t) => {
@@ -1470,10 +1630,10 @@ impl Plugin {
             steady_time: self.steady,
             frames_count: n,
             transport,
-            audio_inputs: if has_in { &in_buf } else { ptr::null() },
-            audio_outputs: if self.outs > 0 { &mut buf } else { ptr::null_mut() },
-            audio_inputs_count: u32::from(has_in),
-            audio_outputs_count: u32::from(self.outs > 0),
+            audio_inputs: if self.in_bufs.is_empty() { ptr::null() } else { self.in_bufs.as_ptr() },
+            audio_outputs: if self.out_bufs.is_empty() { ptr::null_mut() } else { self.out_bufs.as_mut_ptr() },
+            audio_inputs_count: self.in_bufs.len() as u32,
+            audio_outputs_count: self.out_bufs.len() as u32,
             in_events: &ins,
             out_events: &outs,
         };
@@ -1538,11 +1698,9 @@ impl os_host::Plugin for Plugin {
         Plugin::load_state(self, data)
     }
 
+    /// What the plugin last reported (`read_latency`): the audio thread may ask.
     fn latency(&self) -> u32 {
-        if self.latency.is_null() || self.rate == 0 {
-            return 0;
-        }
-        unsafe { (*self.latency).get.map_or(0, |g| g(self.plugin)) }
+        if self.rate == 0 { 0 } else { self.latency_now }
     }
 
     fn use_start_param(&mut self, name: &str) -> bool {
@@ -1662,6 +1820,9 @@ impl os_engine::Instrument for Plugin {
         self.queue.clear();
         self.sounding = false;
         self.ledger.clear();
+        if let Some(m) = self.bend.as_mut().and_then(|b| b.reset()) {
+            self.midi_queue.push((0, m));
+        }
         self.level_voices.clear();
         self.mod_resend.clear();
         self.named.clear();
@@ -1683,19 +1844,23 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
-        self.queue.push(Ev::new(offset, Kind::On, key, velocity));
+        self.start_note(Ev::new(offset, Kind::On, key, velocity));
     }
 
     fn note_off(&mut self, offset: u32, key: u8) {
         self.queue.push(Ev::new(offset, Kind::Off, key, 0.0));
     }
 
+    fn midi(&mut self, offset: u32, bytes: [u8; 3]) {
+        self.midi_queue.push((offset, bytes));
+    }
+
     fn note_on_from(&mut self, offset: u32, key: u8, velocity: f32, start: f32) {
-        self.queue.push(Ev { start: start.clamp(0.0, 1.0), ..Ev::new(offset, Kind::On, key, velocity) });
+        self.start_note(Ev { start: start.clamp(0.0, 1.0), ..Ev::new(offset, Kind::On, key, velocity) });
     }
 
     fn note_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels) {
-        self.queue.push(Ev { start: start.clamp(0.0, 1.0), levels, ..Ev::new(offset, Kind::On, key, velocity) });
+        self.start_note(Ev { start: start.clamp(0.0, 1.0), levels, ..Ev::new(offset, Kind::On, key, velocity) });
     }
 
     fn choke(&mut self, offset: u32, key: u8) {
@@ -1703,7 +1868,7 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32) {
-        self.queue.push(Ev { start: start.clamp(0.0, 1.0), levels, voice: Some(voice), ..Ev::new(offset, Kind::On, key, velocity) });
+        self.start_note(Ev { start: start.clamp(0.0, 1.0), levels, voice: Some(voice), ..Ev::new(offset, Kind::On, key, velocity) });
     }
 
     fn voice_gains(&self) -> bool {
@@ -1721,7 +1886,20 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
-        self.queue.push(Ev::new(offset, Kind::Tune, key, semitones));
+        match &mut self.bend {
+            Some(b) => {
+                if let Some(m) = b.tune(key, semitones) {
+                    self.midi_queue.push((offset, m));
+                }
+            }
+            None => self.queue.push(Ev::new(offset, Kind::Tune, key, semitones)),
+        }
+    }
+
+    fn set_bend_range(&mut self, semitones: u32) {
+        if let Some(b) = &mut self.bend {
+            b.set_range(semitones);
+        }
     }
 
     /// The engine still applies the channel's volume and pan to the output (false); the channel's mod X / Y join each
@@ -1808,6 +1986,29 @@ impl os_engine::Instrument for Plugin {
 // activated it at the stream's rate the sound passes through unchanged.
 impl os_engine::HostedEffect for Plugin {
     fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
+        self.effect(rate, left, right, None);
+    }
+
+    fn process_fx_keyed(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: (&[f32], &[f32])) {
+        self.effect(rate, left, right, Some(key));
+    }
+
+    fn reset_fx(&mut self) {
+        os_engine::Instrument::reset(self);
+    }
+
+    fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
+        self.automate(offset, index, value);
+    }
+
+    fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
+        self.song = Some(*info);
+    }
+}
+
+impl Plugin {
+    /// An effect's block: `left` / `right` processed in place, `key` for its sidechain port.
+    fn effect(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: Option<(&[f32], &[f32])>) {
         if self.rate != rate {
             self.wanted_rate.store(rate, Ordering::Release);
             self.host_data.attention.raise();
@@ -1819,8 +2020,9 @@ impl os_engine::HostedEffect for Plugin {
                 return;
             }
         }
-        // Quiet input to a sleeping effect passes through as it is.
-        if self.asleep() && left.iter().chain(right.iter()).all(|v| v.abs() <= QUIET) {
+        // Quiet input (and a quiet sidechain) to a sleeping effect passes through as it is.
+        let quiet = |s: &[f32]| s.iter().all(|v| v.abs() <= QUIET);
+        if self.asleep() && quiet(left) && quiet(right) && key.is_none_or(|(a, b)| quiet(a) && quiet(b)) {
             self.song = None;
             self.steady += left.len() as i64;
             return;
@@ -1836,22 +2038,11 @@ impl os_engine::HostedEffect for Plugin {
             ir.clear();
             il.extend_from_slice(&left[at..at + n]);
             ir.extend_from_slice(&right[at..at + n]);
-            self.process_chunk_in(&mut left[at..at + n], &mut right[at..at + n], Some((&mut il[..], &mut ir[..])));
+            let key = key.map(|(a, b)| (&a[at..at + n], &b[at..at + n]));
+            self.process_chunk_in(&mut left[at..at + n], &mut right[at..at + n], Some((&mut il[..], &mut ir[..])), key);
             at += n;
         }
         self.fx_in = (il, ir);
-    }
-
-    fn reset_fx(&mut self) {
-        os_engine::Instrument::reset(self);
-    }
-
-    fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
-        self.automate(offset, index, value);
-    }
-
-    fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
-        self.song = Some(*info);
     }
 }
 
@@ -1940,6 +2131,27 @@ mod tests {
         p.audio_ports = ptr::null();
         p.read_ports();
         assert_eq!((p.ins, p.outs), (2, 2));
+    }
+
+    /// A plugin with ports besides its main ones (Lemon Limiter's sidechain input) gets a buffer for every port, as
+    /// CLAP requires: given only the main input, nih-plug read a second buffer past the list and crashed.
+    #[test]
+    fn every_port_gets_a_buffer() {
+        use os_engine::HostedEffect as _;
+        let entry = &lemon_limiter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Limiter.clap")) }.expect("linked limiter");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 48000));
+        assert_eq!((p.ins, p.outs, p.aux_ins.as_slice(), p.aux_outs.as_slice()), (2, 2, &[2][..], &[][..]));
+        let (mut l, mut r) = (vec![0.25f32; 256], vec![-0.25f32; 256]);
+        for _ in 0..8 {
+            p.process_fx(48000, &mut l, &mut r);
+        }
+        assert_eq!((p.in_bufs.len(), p.in_bufs[1].channel_count, p.out_bufs.len()), (2, 2, 1));
+        assert!(l.iter().chain(&r).all(|v| v.is_finite()));
+        // An instrument's call has no inputs at all.
+        p.process(48000, &mut l, &mut r);
+        assert!(p.in_bufs.is_empty());
     }
 
     /// Loads the bundled Lemon Sampler (built by `cargo run -p bundle-plugins`) when it is there.
@@ -2590,6 +2802,35 @@ mod tests {
         assert!(p.load_state(&blob));
         assert!(p.activate(48000));
         p
+    }
+
+    /// Glides (spec: audio/channel-voices.md): a plugin whose note port takes CLAP notes (Lemon Sampler) gets tuning
+    /// expressions; one that reads MIDI only gets them as pitch bend over its range, centred before each new note.
+    #[test]
+    fn glides_are_tuning_expressions_or_pitch_bend() {
+        use os_engine::Instrument as _;
+        let wav = dc_wav("bend");
+        let mut p = sampler_of(&wav);
+        assert!(p.bend.is_none(), "Lemon Sampler takes CLAP notes");
+        let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        p.note_on(0, 60, 0.8);
+        p.tune(4, 60, 2.0);
+        p.process(48000, &mut l, &mut r);
+        assert_eq!(p.midis.len(), 0);
+        assert_eq!(p.exprs.iter().map(|x| (x.expression_id, x.key, x.header.time, x.value)).collect::<Vec<_>>(), vec![(CLAP_NOTE_EXPRESSION_TUNING, 60, 4, 2.0)]);
+        // As a MIDI-only plugin at a range of 2 semitones.
+        p.bend = Some(os_engine::TuningBend::default());
+        p.set_bend_range(2);
+        p.tune(4, 60, 1.0);
+        p.note_on(10, 64, 0.8);
+        p.process(48000, &mut l, &mut r);
+        assert!(p.exprs.is_empty());
+        let midis: Vec<(u32, [u8; 3])> = p.midis.iter().map(|m| (m.header.time, m.data)).collect();
+        assert_eq!(midis, vec![(4, [0xE0, 0x00, 0x60]), (10, [0xE0, 0x00, 0x40])], "half up, then centred for the new note");
+        // In the event order the centring comes before the note it is for.
+        let at = |h: *const clap_event_header| p.order.iter().position(|&o| o == h).unwrap();
+        assert!(at(&p.midis[1].header) < at(&p.notes[0].header));
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// Voices the engine names (`use_voice_gains`): each note gets its own id, the voice's gains go to it as volume

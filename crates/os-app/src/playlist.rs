@@ -21,6 +21,10 @@ use crate::snap::EditorSnap;
 
 /// Track row pitch at the default size (spec: ui/main-window.md §6); a clip fills its row less the 3 px gap.
 pub const ROW_H: f32 = 48.0;
+/// Picker item pitch: FL's measured 30 px rows (§1), the smallest; a right-drag on the picker's scroll bar makes the
+/// items up to [`PICK_ROW_MAX`] tall, previews of their contents (spec: ui/scroll-bars.md §3).
+pub const PICK_ROW: f32 = 31.0;
+pub const PICK_ROW_MAX: f32 = 200.0;
 /// Track heights Alt+wheel can reach, and the step per wheel notch (§6; FL's `16 + 2 × h`, h = 0..=132, 3 per notch).
 pub const ROW_MIN: f32 = 16.0;
 pub const ROW_MAX: f32 = 280.0;
@@ -203,6 +207,10 @@ pub enum Mark {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
     Nothing,
+    /// A knob menu's Remote control part (spec: ui/remote-control.md §1).
+    Remote(crate::remote::RCmd),
+    /// Settings > MIDI ▸ External clock sync: the device chosen (`None` = Off).
+    MidiExt(Option<String>),
     /// Plugin window menu > Detached: rack row, new state (spec: ui/plugin-window.md "Docking and the window menu").
     #[cfg_attr(not(windows), allow(dead_code))]
     PluginDetach(usize, bool),
@@ -240,10 +248,29 @@ pub enum Cmd {
     ZoomOut,
     ZoomAll,
     ZoomSelection,
+    /// Time markers (§7a). The ▸ menu's Time markers items: Add one... (the name box at the song position), Add auto,
+    /// Add jump to next bar, Add one every ▸ (its list, then the base-name box for every n bars), Add time signature
+    /// change... (the dialog), Place loop (a Loop marker on or off), Delete (in the time selection), Change to marker
+    /// loop.
     AddMarker,
+    AddAutoMarker,
+    AddJumpMarker,
+    MarkerEveryMenu,
+    MarkerEvery(u32),
     AddSignature,
+    PlaceLoop,
+    DeleteMarkers,
+    ToMarkerLoop,
+    /// The marker row's menus, at the clicked tick: Add marker..., Add time signature..., Place loop.
+    MarkerAddAt(u32),
+    MarkerSigAt(u32),
+    PlaceLoopAt(u32),
     DeleteMarker(usize),
     RenameMarker(usize),
+    /// Move content left (false) or right (true) of a marker's section.
+    MoveContent(usize, bool),
+    /// A marker's action: its kind (`TimeMarker::PLAIN` …); Time signature asks for the signature first.
+    MarkerAction(usize, u8),
     ClipMute(usize),
     ClipDelete(usize),
     ClipUnique(usize),
@@ -297,6 +324,8 @@ pub enum Cmd {
     Browser(crate::browser::BCmd),
     /// Plugin menus (spec: ui/plugin-menu.md).
     Plugin(crate::plugin_menu::PlugCmd),
+    /// The project picker (spec: ui/project-picker.md).
+    Project(crate::project_picker::ProjCmd),
     /// Channel rack menus (spec: ui/channel-rack.md §17-21).
     Rack(crate::rack::RCmd),
     /// Mixer menus (spec: ui/mixer.md §6-7).
@@ -311,14 +340,47 @@ pub enum Cmd {
     /// A Misc tab list entry: rack row, value, new value (spec: ui/plugin-window.md "Misc tab").
     #[cfg_attr(not(windows), allow(dead_code))]
     Misc(usize, crate::misc_page::M, f32),
+    /// An entry of a menu a hosted plugin asked the host to pop up (VST 3 context menu): its `hosted` key, the menu,
+    /// the entry (spec: plugins/vst3-hosting.md §9).
+    PluginMenu(usize, u64, usize),
     /// Piano roll Tools menu (spec: ui/piano-roll.md §11).
     Piano(crate::piano_tools::NCmd),
+    /// FILE ▸ Import ▸ MIDI file... and the piano roll's Import MIDI file... (true), Export MIDI... and Export as MIDI
+    /// file... (spec: ui/midi-files.md §1).
+    MidiImport(bool),
+    MidiExport(bool),
+    /// The Arpeggiate dialog's menus (spec: ui/piano-arpeggiate.md §1).
+    Arp(crate::arpeggiate::ACmd),
+    /// FILE ▸ Recent projects ▸ More: open recent project `n` (spec: ui/recent-projects.md §2).
+    OpenRecent(usize),
+    /// The Flam dialog's Options ▸ presets (spec: ui/piano-flam.md §5).
+    FlamPreset(crate::flam::Preset),
+    /// The Limit dialog's Key, scale and Snap ▸ menus (spec: ui/piano-limit.md §1).
+    Limit(crate::piano_dlg::LCmd),
+    /// The Claw machine dialog's Period and Trash every ▸ menus (spec: ui/piano-claw.md §1).
+    Claw(crate::piano_dlg::CCmd),
+    /// The LFO dialog's Shape ▸ menu (spec: ui/piano-lfo.md §1).
+    LfoShape(crate::lfo::Shape),
+    /// The Quantize dialog's template ▸ and duration menus (spec: ui/piano-quantize.md §1, §2).
+    Quant(crate::quantize::QCmd),
+    /// The Chop dialog's pattern ▸ menu (spec: ui/piano-chop.md §1): a pattern file, None for the built-in Default.
+    ChopPattern(Option<std::path::PathBuf>),
     /// Settings > Audio menus: device, sample rate, buffer length (spec: ui/settings.md "Audio").
     Audio(crate::audio_cfg::Set),
     /// The toolbar CPU panel's menu (spec: ui/main-window.md §13).
     Cpu(crate::cpu::CpuCmd),
     /// The metronome button's menu: the click sound (spec: ui/metronome.md §2).
     MetronomeSound(os_engine::metronome::Sound),
+    /// The metronome button's menu: the volume in dB (spec: ui/metronome.md §2).
+    MetronomeVolume(i8),
+    /// The Record button's menu checks (spec: ui/recording.md §2).
+    Record(crate::record::Opt),
+    /// Recording precount's length in bars (spec: ui/recording.md §3).
+    RecPrecountBars(u32),
+    /// One-click audio recording's input (spec: ui/one-click-recording.md §2).
+    OneClick(crate::capture::Input),
+    /// The record popups: what to record, the metronome menu's precount, the score logger (spec: ui/recording.md).
+    Rec(crate::record::RecCmd),
     /// Settings > Project ▸ Numerator / Denominator: the project's bar, beats per bar and steps per beat (events 17,
     /// 18; spec: ui/settings-choices.md "Project").
     Bar(u16, u16),
@@ -337,6 +399,11 @@ pub enum Cmd {
     ClockBeat(bool),
     /// A Toolbars menu switch (spec: ui/toolbar-menu.md §8).
     Toolbar(crate::views::toolbar::Switch),
+    /// A toolbar preset picked (spec: ui/toolbar-menu.md §8).
+    ToolbarPreset(crate::toolbar::PresetId),
+    /// The toolbar editor's Save preset as... and Delete preset.
+    ToolbarSave,
+    ToolbarDelete,
     /// A value picked in a list of the time signature dialog: denominator (true) or numerator (spec:
     /// ui/pattern-time-signature.md §1).
     TimeSig(bool, u8),
@@ -348,6 +415,8 @@ pub enum Cmd {
     Theme(ThemeCmd),
     /// Settings > General ▸ Default template: "Empty" or "<category>/<template>" (`crate::templates`).
     Template(String),
+    /// FILE ▸ New from template ▸: "Empty" or "<category>/<template>" (`crate::project_files`).
+    NewTemplate(String),
     /// Settings > General ▸ Hints and warnings ▸ the Manage messages menu (`crate::messages`).
     Messages(crate::messages::Pick),
     /// Settings > Project ▸ Data folder's menus and the forms' lists (`crate::data_folder`).
@@ -391,7 +460,7 @@ impl PItem {
         self.dim = on;
         self
     }
-    pub fn head(label: &'static str) -> Self {
+    pub fn head(label: impl Into<Cow<'static, str>>) -> Self {
         PItem { head: true, ..PItem::new(label, Cmd::Nothing) }
     }
     pub fn sep() -> Self {
@@ -400,7 +469,7 @@ impl PItem {
     pub fn col() -> Self {
         PItem { col: true, ..PItem::new("", Cmd::Nothing) }
     }
-    pub fn sub(label: &'static str, children: Vec<PItem>) -> Self {
+    pub fn sub(label: impl Into<Cow<'static, str>>, children: Vec<PItem>) -> Self {
         PItem { children, ..PItem::new(label, Cmd::Nothing) }
     }
     pub fn not_yet(label: &'static str) -> Self {
@@ -416,6 +485,9 @@ pub struct Popup {
     pub items: Vec<PItem>,
     /// Open submenu: index of its parent item.
     pub sub: Option<usize>,
+    /// The first column shown of the list and of its open submenu, when they are wider than the window (spec:
+    /// ui/menus.md "Menus wider than the window"; `views::playlist::popup_list`).
+    pub scroll: [usize; 2],
 }
 
 /// A Themes tile's menu (Settings > Theme; `App::theme_cmd`): the tile's index in `SettingsUi::themes`.
@@ -433,6 +505,8 @@ pub enum EditTarget {
     TrackName(u16),
     MarkerName(usize),
     NewMarker(u32),
+    /// Add one every n bars: the base name of "<base> #1", "<base> #2" … (§7a).
+    MarkerBase(u32),
     PointValue(u16, usize),
     PatternName(u16),
     /// Mixer track name (spec: ui/mixer.md §2) and a mixer slot's plugin name (§7).
@@ -482,6 +556,9 @@ pub struct PlaylistState {
     pub picker: PickKind,
     /// Picker list scroll, pixels.
     pub pick_scroll: f32,
+    /// Picker item pitch of each list (patterns, audio clips, automation clips), pixels: a right-drag on the picker's
+    /// scroll bar resizes the shown list's (`set_pick_row`).
+    pub pick_rows: [f32; 3],
     /// Selected clips (indices into the first arrangement's clips).
     pub sel: Vec<usize>,
     /// Selected track (Ctrl+Up / Down, header click).
@@ -537,6 +614,7 @@ impl Default for PlaylistState {
             source: None,
             picker: PickKind::Pattern,
             pick_scroll: 0.0,
+            pick_rows: [PICK_ROW; 3],
             sel: Vec::new(),
             track: 0,
             pos: 0,
@@ -566,11 +644,16 @@ impl Default for PlaylistState {
 }
 
 impl PlaylistState {
-    /// Forget everything tied to the previous project (keeps tool and snap; the track height comes with the
-    /// project, `load_view`).
+    /// Forget everything tied to the previous project (keeps tool, snap and the picker's item sizes; the track height
+    /// comes with the project, `load_view`).
     pub fn reset(&mut self) {
-        let (tool, snap) = (self.tool, self.snap);
-        *self = PlaylistState { tool, snap, ..PlaylistState::default() };
+        let (tool, snap, pick_rows) = (self.tool, self.snap, self.pick_rows);
+        *self = PlaylistState { tool, snap, pick_rows, ..PlaylistState::default() };
+    }
+
+    /// The shown picker list's item pitch.
+    pub fn pick_row(&self) -> f32 {
+        self.pick_rows[self.picker as usize]
     }
 
     /// The waveform of a sample path (loaded and summarised once).
@@ -802,6 +885,99 @@ pub fn clips(s: &State) -> &[Clip] {
 
 pub fn markers(s: &State) -> &[TimeMarker] {
     s.project.arrangement().map(|a| a.markers.as_slice()).unwrap_or(&[])
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Time markers (§7a)
+
+/// Adds a marker among the others, which stay in position order as FL saves them (spec: flp/events/playlist.md
+/// "Marker kinds"); returns its index.
+pub fn add_marker(s: &mut State, m: TimeMarker) -> usize {
+    sort_markers(s);
+    let list = &mut arr_mut(s).markers;
+    let i = list.partition_point(|o| o.position <= m.position);
+    list.insert(i, m);
+    s.piano.dirty = true;
+    i
+}
+
+/// Puts the markers in position order (markers on one tick keep theirs).
+pub fn sort_markers(s: &mut State) {
+    if let Some(a) = s.project.arrangement_mut() {
+        a.markers.sort_by_key(|m| m.position);
+    }
+}
+
+/// The Start marker's tick, the later one of two (§7a; spec: audio/transport.md "Time markers in SONG mode").
+pub fn start_marker(s: &State) -> Option<u32> {
+    markers(s).iter().filter(|m| m.kind == TimeMarker::START).map(|m| m.position).max()
+}
+
+/// Place loop (§7a): a Loop marker named with one space at `tick`; one already there goes instead.
+fn place_loop(s: &mut State, tick: u32) {
+    let list = &mut arr_mut(s).markers;
+    let before = list.len();
+    list.retain(|m| !(m.kind == TimeMarker::LOOP && m.position == tick));
+    if list.len() == before {
+        add_marker(s, TimeMarker { kind: TimeMarker::LOOP, ..TimeMarker::new(tick, " ") });
+    }
+    s.piano.dirty = true;
+}
+
+/// Add one every `n` bars (§7a): "<base> #1", "<base> #2" … every `n` bars from the time selection's start until its
+/// end, over the whole song without one (OS).
+fn add_every(s: &mut State, n: u32, base: &str) {
+    let end = clips(s).iter().map(|c| c.end()).max().unwrap_or(0);
+    let (a, b) = s.playlist.range.unwrap_or((0, end));
+    let step = (bar(s) * n).max(1);
+    for (k, t) in (a..b).step_by(step as usize).enumerate() {
+        add_marker(s, TimeMarker::new(t, &format!("{base} #{}", k + 1)));
+    }
+}
+
+/// Move content right / left (§7a): marker `i`'s section (from it to the next marker) trades places with the section
+/// after it (to the marker after that, or the song's end), or with the one before it (from the previous marker). The
+/// clips that start in the two sections move, automation clips too, and so do the markers at their starts. False
+/// when there is no section to trade with.
+pub fn move_content(s: &mut State, i: usize, right: bool) -> bool {
+    let Some(here) = markers(s).get(i).map(|m| m.position) else { return false };
+    let mut cuts: Vec<u32> = markers(s).iter().map(|m| m.position).collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let end = clips(s).iter().map(|c| c.end()).max().unwrap_or(0);
+    let k = cuts.partition_point(|&p| p < here);
+    // Where the section from cut j ends: the next cut, else the song's end.
+    let after = |j: usize| cuts.get(j + 1).copied().unwrap_or(end);
+    let (a, b, c) = if right {
+        let Some(&b) = cuts.get(k + 1) else { return false };
+        (here, b, after(k + 1))
+    } else {
+        let Some(&a) = k.checked_sub(1).and_then(|j| cuts.get(j)) else { return false };
+        (a, here, after(k))
+    };
+    if !(a < b && b < c) {
+        return false;
+    }
+    let (first, second) = (b - a, c - b);
+    let to = |t: u32| match t {
+        _ if t >= a && t < b => Some(t + second),
+        _ if t >= b && t < c => Some(t - first),
+        _ => None,
+    };
+    let arr = arr_mut(s);
+    for cl in &mut arr.clips {
+        if let Some(t) = to(cl.position) {
+            cl.position = t;
+        }
+    }
+    for m in &mut arr.markers {
+        if let Some(t) = to(m.position) {
+            m.position = t;
+        }
+    }
+    sort_markers(s);
+    s.piano.dirty = true;
+    true
 }
 
 /// The group track leading track `t`'s group (§6a): the nearest ungrouped track above a grouped track.
@@ -1325,9 +1501,25 @@ pub fn set_row_h(s: &mut State, grid: Rect, y: f32, row: f32) {
     s.playlist_scroll.1 = (rows.top(t) + frac * rows.height(t) - (y - grid.y)).max(0.0);
 }
 
+/// Set the shown picker list's item pitch (clamped to [`PICK_ROW`]..[`PICK_ROW_MAX`], whole pixels), keeping the item at
+/// the middle of the list's `view` (its height) in place.
+pub fn set_pick_row(s: &mut State, view: f32, row: f32) {
+    // The list's content: 3 px down, the items, 1 px under them (`views::playlist::picker`).
+    let n = crate::views::playlist::pick_items(s).len() as f32;
+    let max = |pitch: f32| (n * pitch + 4.0 - view).max(0.0);
+    let old = s.playlist.pick_row();
+    let scroll = s.playlist.pick_scroll.min(max(old));
+    let mid = ((scroll + view / 2.0 - 3.0) / old).clamp(0.0, n);
+    let new = row.round().clamp(PICK_ROW, PICK_ROW_MAX);
+    s.playlist.pick_rows[s.playlist.picker as usize] = new;
+    s.playlist.pick_scroll = (3.0 + mid * new - view / 2.0).clamp(0.0, max(new));
+}
+
 /// Take the project's stored playlist view (event 242): track height, time zoom and scroll (spec:
-/// flp/events/playlist.md "Playlist view"). A project without one gets the default height.
+/// flp/events/playlist.md "Playlist view"). A project without one gets the default height. The song position starts
+/// at the Start marker (§7a).
 pub fn load_view(s: &mut State) {
+    s.playlist.pos = start_marker(s).unwrap_or(0);
     s.playlist.row_h = ROW_H;
     let Some(v) = s.project.playlist_view else { return };
     s.playlist.row_h = (v.row_px() as f32).clamp(ROW_MIN, ROW_MAX);
@@ -1843,11 +2035,50 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
     row
 }
 
+/// ADD > Layer (spec: ui/add-clip-channels.md §4, Lemon Studio's design): a layer channel at the end of the rack named
+/// "Layer" (made unique), on the master, at full volume so its children keep their levels; its children are the
+/// channels selected in the rack, in rack order (FL's Set children, done at once). It becomes the only selected
+/// channel. One undo step. Returns the rack row.
+pub fn add_layer_channel(s: &mut State) -> usize {
+    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    let children: Vec<u16> = s.rack.sel.iter().filter_map(|&r| s.project.channels.get(r)).map(|c| c.index).collect();
+    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    snapshot_with(s, "Add layer", before);
+    let name = unique_channel_name(s, "Layer");
+    s.project.channels.push(Channel {
+        id: os_model::Id::NONE,
+        index,
+        kind: ChannelKind::Layer,
+        name: Some(name),
+        plugin: None,
+        plugin_state: None,
+        color: None,
+        enabled: true,
+        volume: 1.0,
+        pan: 0.0,
+        pitch_cents: 0,
+        mixer_track: 0,
+        sample_path: None,
+        layer_children: children,
+        envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+    });
+    let row = s.project.channels.len() - 1;
+    s.selected_channel = row;
+    s.rack.select_only(row);
+    s.piano.dirty = true;
+    row
+}
+
 /// Add an audio clip channel for a sample file and place it at `tick` on `track` (§9). The channel's colour comes from
 /// `State::clip_colors`.
 pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Option<usize> {
+    add_audio_clip_as(s, path, track, tick, "Playlist edit")
+}
+
+/// `add_audio_clip` as the undo step `name` (One-click audio recording's "Recorded items").
+pub fn add_audio_clip_as(s: &mut State, path: &str, track: u16, tick: u32, name: &'static str) -> Option<usize> {
     s.playlist.wave(path)?;
-    snapshot(s);
+    snapshot_as(s, name);
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
     let mixer_track = (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project));
@@ -1867,7 +2098,8 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
         mixer_track,
         sample_path: Some(path.to_string()),
         layer_children: Vec::new(),
-        envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+        envelopes: Default::default(), rack: Default::default(), misc: Default::default(),
+        sound: os_model::ChannelSound { sampler_flags: Some(os_model::ChannelSound::AUDIO_CLIP_FLAGS), ..Default::default() },
     });
     s.playlist.source = Some(ClipSource::Channel(index));
     s.playlist.picker = PickKind::Audio;
@@ -2082,17 +2314,46 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Zoom on selection", Cmd::ZoomSelection).key("Shift+5"),
             ],
         ),
-        PItem::sub(
-            "Time markers",
-            vec![
-                PItem::new("Add one...", Cmd::AddMarker).key("Alt+T"),
-                PItem::new("Add time signature change...", Cmd::AddSignature).key("Shift+Alt+T"),
+        PItem::sub("Time markers", time_marker_items()),
+        // Not built yet: it opens to show its list (§7a).
+        PItem {
+            children: vec![
+                PItem::not_yet("Off").mark(Mark::Radio(true)),
+                PItem::not_yet("Beats"),
+                PItem::not_yet("Bars"),
+                PItem::not_yet("2 bars"),
+                PItem::not_yet("4 bars"),
+                PItem::not_yet("8 bars"),
             ],
-        ),
+            ..PItem::not_yet("Quantize song jumps")
+        },
         PItem::sep(),
         PItem::new("Reset empty playlist tracks", Cmd::ResetEmptyTracks),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// The ▸ menu's Time markers submenu (§7a), in FL's order. FL's Ctrl+T for Add auto is not bound: in Lemon Studio
+/// Ctrl+T switches the typing keyboard. Add two... and Add key marker are not built yet. Add one every opens its list
+/// as a menu of its own (a submenu holds no submenus here).
+fn time_marker_items() -> Vec<PItem> {
+    vec![
+        PItem::new("Add one...", Cmd::AddMarker).key("Alt+T"),
+        PItem::new("Add auto", Cmd::AddAutoMarker),
+        PItem::not_yet("Add two..."),
+        PItem { children: every_items(), ..PItem::new("Add one every", Cmd::MarkerEveryMenu) },
+        PItem::new("Add jump to next bar", Cmd::AddJumpMarker),
+        PItem::new("Add time signature change...", Cmd::AddSignature).key("Shift+Alt+T"),
+        PItem { children: vec![PItem::not_yet("Root note"), PItem::not_yet("Scale")], ..PItem::not_yet("Add key marker") },
+        PItem::new("Place loop", Cmd::PlaceLoop).key("Shift+T"),
+        PItem::new("Delete", Cmd::DeleteMarkers),
+        PItem::new("Change to marker loop", Cmd::ToMarkerLoop),
+    ]
+}
+
+/// Add one every ▸ (§7a): every bar, 2, 4 or 8 bars.
+fn every_items() -> Vec<PItem> {
+    [(1, "Bar"), (2, "2 bars"), (4, "4 bars"), (8, "8 bars")].into_iter().map(|(n, l)| PItem::new(l, Cmd::MarkerEvery(n))).collect()
 }
 
 /// The magnet's Snap menu and the ▸ menu's Snap submenu (§4): Main, Line, Cell, (none) to Bar; Events and Markers
@@ -2107,7 +2368,7 @@ fn snap_items(s: &State) -> Vec<PItem> {
 }
 
 pub fn snap_menu(s: &State, x: f32, y: f32) -> Popup {
-    Popup { x, y, items: snap_items(s), sub: None }
+    Popup { x, y, items: snap_items(s), sub: None, scroll: [0; 2] }
 }
 
 pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
@@ -2133,7 +2394,7 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
     }
     items.push(PItem::new("Select all similar clips", Cmd::ClipSelectSimilar(i)));
     items.push(PItem::new("Delete", Cmd::ClipDelete(i)));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The commands of a picker item's menu (§10a).
@@ -2176,7 +2437,7 @@ pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
         items.push(it("Clone with links", PickCmd::Clone));
     }
     items.push(it("Delete...", PickCmd::Delete));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Runs a picker item's command on the channel with index `ch` (§10a).
@@ -2212,6 +2473,22 @@ fn pick(app: &mut App, c: PickCmd, ch: u16) -> Option<String> {
     None
 }
 
+/// "Edit automation clip..." of a parameter menu (spec: plugins/plugin-parameters.md §5.2, a Lemon Studio choice): the
+/// playlist comes to the front with automation clip channel `ch` as the current clip source, its clips in the shown
+/// arrangement selected, and the first of them in view (its start at the left edge, its track at the top). Whether the
+/// arrangement has one.
+pub fn reveal_source(s: &mut State, ch: u16) -> bool {
+    let src = ClipSource::Channel(ch);
+    s.playlist.source = Some(src);
+    s.playlist.picker = PickKind::Automation;
+    s.playlist.sel = clips(s).iter().enumerate().filter(|(_, c)| c.source == src).map(|(i, _)| i).collect();
+    s.raise(crate::app::Win::Playlist);
+    let Some(first) = clips(s).iter().filter(|c| c.source == src).min_by_key(|c| (c.position, c.track)).copied() else { return false };
+    s.playlist_scroll.0 = first.position as f32 / bar(s) as f32 * s.playlist_bar_w;
+    s.playlist_scroll.1 = Rows::new(s).top(first.track);
+    true
+}
+
 pub fn point_menu(s: &State, ch: u16, i: usize, x: f32, y: f32) -> Popup {
     let a = s.project.automation(ch);
     let n = a.map_or(0, |a| a.points.len());
@@ -2226,7 +2503,7 @@ pub fn point_menu(s: &State, ch: u16, i: usize, x: f32, y: f32) -> Popup {
     items.push(PItem::new("Copy value", Cmd::PointCopy(ch, i)));
     items.push(if s.value_clip.is_some() { PItem::new(paste_label(s), Cmd::PointPaste(ch, i)) } else { PItem::new("Paste value", Cmd::Nothing).off() });
     items.push(PItem::new("Type in value...", Cmd::PointValue(ch, i)));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// "Paste value" with the copied value as a percentage, as FL writes it ("Paste value (23%)").
@@ -2270,11 +2547,53 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         PItem::new("Move up", Cmd::TrackUp(t)),
         PItem::new("Move down", Cmd::TrackDown(t)),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-pub fn marker_menu(i: usize, x: f32, y: f32) -> Popup {
-    Popup { x, y, items: vec![PItem::head("Time marker"), PItem::new("Rename...", Cmd::RenameMarker(i)), PItem::new("Delete", Cmd::DeleteMarker(i))], sub: None }
+/// The actions a time marker can take, as its menu lists them (§7a), with their kinds (spec: flp/events/playlist.md
+/// "Marker kinds").
+pub const MARKER_ACTIONS: [(&str, u8); 9] = [
+    ("None", TimeMarker::PLAIN),
+    ("Start", TimeMarker::START),
+    ("Loop", TimeMarker::LOOP),
+    ("Marker loop", TimeMarker::MARKER_LOOP),
+    ("Marker skip", TimeMarker::SKIP),
+    ("Marker pause", TimeMarker::PAUSE),
+    ("Time signature", TimeMarker::SIGNATURE),
+    ("Start recording", TimeMarker::PUNCH_IN),
+    ("Stop recording", TimeMarker::PUNCH_OUT),
+];
+
+/// The marker row's own items (§7a), acting at `tick`: away from the markers they are its whole menu.
+fn lane_items(tick: u32) -> Vec<PItem> {
+    vec![
+        PItem::new("Add marker...", Cmd::MarkerAddAt(tick)),
+        PItem::new("Add time signature...", Cmd::MarkerSigAt(tick)),
+        PItem::new("Place loop", Cmd::PlaceLoopAt(tick)),
+    ]
+}
+
+pub fn lane_menu(tick: u32, x: f32, y: f32) -> Popup {
+    Popup { x, y, items: lane_items(tick), sub: None, scroll: [0; 2] }
+}
+
+/// Marker `i`'s menu (§7a): the row's items at `tick`, a header "<name> at <bar>:<step>:<tick>", Delete, Rename...,
+/// Move content left / right, then its action.
+pub fn marker_menu(s: &State, i: usize, tick: u32, x: f32, y: f32) -> Popup {
+    let Some(m) = markers(s).get(i) else { return lane_menu(tick, x, y) };
+    let (b, st, t) = crate::views::toolbar::bst_ticks(f64::from(m.position) * 96.0 / f64::from(ppq(s)));
+    let mut items = lane_items(tick);
+    items.extend([
+        PItem { head: true, ..PItem::new(format!("{} at {b}:{st:02}:{t:02}", m.name), Cmd::Nothing) },
+        PItem::new("Delete", Cmd::DeleteMarker(i)),
+        PItem::new("Rename...", Cmd::RenameMarker(i)),
+        PItem::sep(),
+        PItem::new("Move content left", Cmd::MoveContent(i, false)),
+        PItem::new("Move content right", Cmd::MoveContent(i, true)),
+        PItem::head("Action"),
+    ]);
+    items.extend(MARKER_ACTIONS.iter().map(|&(l, k)| PItem::new(l, Cmd::MarkerAction(i, k)).mark(Mark::Radio(m.kind == k))));
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The short right-click menu of the toolbar's and the mixer's knobs, faders and the tempo: "Create automation clip"
@@ -2290,13 +2609,15 @@ pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<cra
             init,
             delete,
             PItem::not_yet("Edit events"),
-            PItem::not_yet("Link to controller..."),
         ]);
+    }
+    if typein.is_some() {
+        items.extend(crate::remote::menu_items(typein));
     }
     if let Some(t) = typein {
         items.extend([PItem::head("Value"), PItem::new("Type in value...", Cmd::TypeIn(t))]);
     }
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -3034,13 +3355,14 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
     match (moved, before) {
         (Some(idx), Some(mut dirty)) => {
             dirty.extend(rects(&app.state, &idx));
-            if handle {
-                dirty.push(crate::app::HINT_RECT);
-            } else {
+            if !handle {
                 dirty.push(crate::views::playlist::overview_rect(&app.state, grid).outset(1.0));
             }
             for r in dirty {
                 app.damage_rect(r);
+            }
+            if handle {
+                app.damage_band(crate::app::HINT_RECT);
             }
         }
         _ if inside || stretching => app.damage_win(crate::app::Win::Playlist),
@@ -3087,6 +3409,20 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
             for (ch, _) in std::mem::take(&mut s.playlist.stretch_base) {
                 let Some(row) = s.project.channels.iter().position(|c| c.index == ch) else { continue };
                 app.plugins.set_sampler_stretch(row, &s.project.channels[row].sound);
+            }
+        }
+        PlDrag::Marker { i, t0, .. } => {
+            // A click leaves no undo step; a moved marker goes back in position order.
+            if markers(s).get(i).is_none_or(|m| m.position == t0) {
+                crate::history::unrecord(s);
+            } else {
+                sort_markers(s);
+                s.piano.dirty = true;
+            }
+            // The song position went to the marker: playback follows, as from the ruler (§7a).
+            if app.transport.playing() && (app.transport.song() || !app.transport.paused()) {
+                let p = app.state.playlist.pos;
+                app.play_song_from(p);
             }
         }
         PlDrag::Move { orig, fresh: false, .. } | PlDrag::ResizeL { orig, .. } | PlDrag::ResizeR { orig, .. } => {
@@ -3197,7 +3533,7 @@ pub fn arrangement_menu(s: &State, x: f32, y: f32) -> Popup {
     items.push(if others.is_empty() { PItem::new("Merge with...", Cmd::Nothing).off() } else { PItem::sub("Merge with...", others) });
     items.push(PItem::sep());
     items.push(PItem::new("Add one...", Cmd::ArrAdd));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Collapses or expands the group led by track `t` or by `t`'s group track (§6a); no-op for an ungrouped track
@@ -3243,26 +3579,54 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
 pub fn marker_at(s: &State, g: &PGeom, x: f32) -> Option<usize> {
     markers(s).iter().enumerate().rev().find(|(_, m)| {
         let mx = g.x_of(m.position as f32);
-        x >= mx - 2.0 && x <= mx + marker_w(m)
+        x >= mx - marker_icon(m.kind).1.max(2.0) && x <= mx + marker_w(m)
     }).map(|(i, _)| i)
 }
 
-/// Width of a marker tab.
+/// Width of a marker tab: its action's icon and its name.
 pub fn marker_w(m: &TimeMarker) -> f32 {
-    (m.name.chars().count() as f32 * 7.0 + 18.0).max(24.0)
+    (m.name.chars().count() as f32 * 7.0 + 18.0 + marker_icon(m.kind).0).max(24.0)
 }
 
+/// How far a marker's name sits right of where it would without an action icon, and how far the icon reaches left of
+/// the marker's tick, in pixels (§7a "Look"): the Start bracket moves the name 8 px; the Loop arrow's tip and the
+/// Marker loop arrow stand on the tick, half of them left of it.
+pub fn marker_icon(kind: u8) -> (f32, f32) {
+    match kind {
+        TimeMarker::START => (8.0, 0.0),
+        TimeMarker::LOOP => (3.0, 5.0),
+        TimeMarker::MARKER_LOOP => (4.0, 5.0),
+        TimeMarker::SKIP => (9.0, 0.0),
+        TimeMarker::PAUSE => (8.0, 0.0),
+        TimeMarker::PUNCH_IN | TimeMarker::PUNCH_OUT => (14.0, 0.0),
+        TimeMarker::SIGNATURE => (14.0, 0.0),
+        TimeMarker::KEY => (10.0, 0.0),
+        _ => (0.0, 0.0),
+    }
+}
+
+/// Marker row press (§7a): left on a marker moves the song position to it and drags it; right opens its menu, or
+/// away from the markers the row's menu, whose items act at the clicked tick (snapped).
 pub fn press_markers(app: &mut App, grid: Rect, right: bool) {
-    let x = app.mouse.0;
+    let (x, y) = app.mouse;
+    let alt = app.alt;
     let s = &mut app.state;
     s.playlist.popup = None;
     let g = PGeom::new(s, grid);
-    let Some(i) = marker_at(s, &g, x) else { return };
+    let hit = marker_at(s, &g, x);
     if right {
-        s.playlist.popup = Some(marker_menu(i, x, app.mouse.1));
-    } else {
+        let tick = snap_round(s, &g, g.tick_at(x), alt);
+        s.playlist.popup = Some(match hit {
+            Some(i) => marker_menu(s, i, tick, x, y),
+            None => lane_menu(tick, x, y),
+        });
+    } else if let Some(i) = hit {
         snapshot(s);
         let t0 = markers(s)[i].position;
+        // As a click on the ruler: SONG mode, the initial values follow (§7).
+        s.playlist.pos = t0;
+        s.song_mode = true;
+        crate::init::apply(s);
         app.drag = Some(Drag::Pl(PlDrag::Marker { i, dt: 0, t0 }));
     }
     app.invalidate();
@@ -3302,7 +3666,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::TrackName(t) => track_name(s, t),
         EditTarget::ArrangementName => arrangement_name(s),
         EditTarget::MarkerName(i) => markers(s).get(i).map(|m| m.name.clone()).unwrap_or_default(),
-        EditTarget::NewMarker(_) => String::new(),
+        EditTarget::NewMarker(_) | EditTarget::MarkerBase(_) => String::new(),
         EditTarget::PointValue(ch, i) => {
             let v = s.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.value);
             match s.project.automation(ch).and_then(|a| a.target()).map(target::decode) {
@@ -3342,7 +3706,11 @@ pub fn commit_edit(s: &mut State) {
         }
         EditTarget::NewMarker(pos) => {
             let name = if text.is_empty() { format!("Marker {}", markers(s).len() + 1) } else { text };
-            arr_mut(s).markers.push(TimeMarker::new(pos, &name));
+            add_marker(s, TimeMarker::new(pos, &name));
+        }
+        EditTarget::MarkerBase(n) => {
+            let base = if text.is_empty() { "Marker".to_string() } else { text };
+            add_every(s, n, &base);
         }
         EditTarget::PointValue(ch, i) => {
             if let Some(v) = parse_value(s, ch, &text) {
@@ -3388,6 +3756,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     match cmd {
         Cmd::Browser(b) => return app.browser_cmd(b),
         Cmd::Plugin(c) => return crate::plugin_menu::run(app, c),
+        Cmd::Project(c) => return crate::project_picker::run(app, c),
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
         Cmd::Param(c) => return app.params_cmd(c),
@@ -3406,6 +3775,18 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.toolbar_switch(sw);
             return None;
         }
+        Cmd::ToolbarPreset(id) => {
+            app.toolbar_preset(id);
+            return None;
+        }
+        Cmd::ToolbarSave => {
+            app.toolbar_save_as();
+            return None;
+        }
+        Cmd::ToolbarDelete => {
+            app.toolbar_delete();
+            return None;
+        }
         Cmd::ClockBeat(on) => {
             app.state.clock.beat = on;
             app.state.clock.save();
@@ -3416,6 +3797,27 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.sig_pick(den, v);
             return None;
         }
+        // Time signature markers ask for their signature (§7a).
+        Cmd::AddSignature | Cmd::MarkerSigAt(_) => {
+            let pos = if let Cmd::MarkerSigAt(t) = cmd { t } else { app.state.playlist.pos };
+            app.open_song_signature(crate::timesig::SongSig::At(pos));
+            return None;
+        }
+        Cmd::MarkerAction(i, TimeMarker::SIGNATURE) => {
+            app.open_song_signature(crate::timesig::SongSig::Marker(i));
+            return None;
+        }
+        Cmd::MarkerEveryMenu => {
+            let (x, y) = app.mouse;
+            app.state.playlist.popup = Some(Popup { x, y, items: every_items(), sub: None, scroll: [0; 2] });
+            app.invalidate();
+            return None;
+        }
+        Cmd::Remote(c) => {
+            app.remote_cmd(c);
+            return None;
+        }
+        Cmd::MidiExt(d) => return app.set_ext_sync(d),
         Cmd::TypeIn(t) => {
             let at = app.mouse;
             crate::typein::open(&mut app.state, t, at);
@@ -3428,8 +3830,55 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return m;
         }
+        Cmd::Arp(c) => {
+            app.arp_command(c);
+            return None;
+        }
+        Cmd::OpenRecent(n) => {
+            app.open_recent(n);
+            return None;
+        }
+        Cmd::MidiImport(piano) => {
+            app.import_midi_dialog(piano);
+            return None;
+        }
+        Cmd::MidiExport(piano) => {
+            app.export_midi_dialog(piano);
+            return None;
+        }
+        Cmd::FlamPreset(p) => {
+            app.flam_preset(p);
+            return None;
+        }
+        Cmd::Limit(c) => {
+            crate::piano_dlg::limit_cmd(&mut app.state, c);
+            app.invalidate();
+            return None;
+        }
+        Cmd::Claw(c) => {
+            crate::piano_dlg::claw_cmd(&mut app.state, c);
+            app.invalidate();
+            return None;
+        }
+        Cmd::LfoShape(w) => {
+            crate::piano_dlg::lfo_shape(&mut app.state, w);
+            app.invalidate();
+            return None;
+        }
+        Cmd::Quant(c) => {
+            app.quant_command(c);
+            return None;
+        }
+        Cmd::ChopPattern(p) => {
+            app.chop_command(p);
+            return None;
+        }
         Cmd::Misc(row, m, v) => {
             crate::misc::set(app, row, m, v);
+            return None;
+        }
+        Cmd::PluginMenu(key, id, pick) => {
+            app.plugin_menu_pick(key, id, pick);
             return None;
         }
         Cmd::Audio(a) => {
@@ -3441,15 +3890,39 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Genre(g) => return app.set_genre(g),
         Cmd::Theme(c) => return app.theme_cmd(c),
         Cmd::Template(t) => return app.set_template(&t),
+        Cmd::NewTemplate(t) => {
+            app.pick_new_template(&t);
+            return None;
+        }
         Cmd::Messages(p) => {
             app.invalidate();
             return Some(crate::messages::pick(p));
         }
         Cmd::DataFolder(c) => return app.data_folder_cmd(c),
+        Cmd::Record(o) => {
+            o.toggle();
+            app.invalidate();
+            return None;
+        }
+        Cmd::OneClick(input) => {
+            app.one_click_start(input);
+            return None;
+        }
+        Cmd::Rec(c) => return app.rec_cmd(c),
+        Cmd::RecPrecountBars(bars) => {
+            crate::record::set_precount_bars(bars);
+            app.invalidate();
+            return None;
+        }
         Cmd::MetronomeSound(sound) => {
             crate::metronome::set_sound(sound);
             app.invalidate();
             return Some(format!("Metronome sound: {}", sound.label()));
+        }
+        Cmd::MetronomeVolume(db) => {
+            crate::metronome::set_volume(db);
+            app.invalidate();
+            return Some(format!("Metronome volume: {}", os_engine::metronome::volume_label(db)));
         }
         Cmd::Bar(beats, steps) => return app.set_bar(beats, steps),
         Cmd::TimeMode(signature) => return app.set_time_mode(signature),
@@ -3505,7 +3978,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(_) | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -3617,7 +4090,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot(s);
             (!delete_space(s)).then(|| "Delete space: make a time selection first (right-drag the ruler)".into())
         }
-        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) => None,
+        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) | Cmd::Remote(_) | Cmd::MidiExt(_) => None,
         Cmd::StretchMode => {
             s.playlist.stretch = !s.playlist.stretch;
             Some(if s.playlist.stretch { "Stretch mode on: resizing an audio clip stretches it".into() } else { "Stretch mode off".into() })
@@ -3669,15 +4142,66 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             zoom_on(s, grid_wh, &idx);
             None
         }
-        Cmd::AddMarker | Cmd::AddSignature => {
-            let pos = s.playlist.pos;
+        Cmd::AddMarker | Cmd::MarkerAddAt(_) => {
+            let pos = if let Cmd::MarkerAddAt(t) = cmd { t } else { s.playlist.pos };
             let at = grid.map_or((600.0, 200.0), |g| (PGeom::new(s, g).x_of(pos as f32), g.y));
-            if cmd == Cmd::AddSignature {
-                snapshot(s);
-                arr_mut(s).markers.push(TimeMarker { kind: TimeMarker::SIGNATURE, ..TimeMarker::new(pos, "4/4") });
-                s.piano.dirty = true;
+            start_edit(s, EditTarget::NewMarker(pos), at);
+            None
+        }
+        Cmd::AddAutoMarker => {
+            snapshot(s);
+            let pos = s.playlist.pos;
+            add_marker(s, TimeMarker::new(pos, "Auto"));
+            None
+        }
+        Cmd::AddJumpMarker => {
+            // A Marker skip at the song position and its goal one bar later, both named with one space (§7a).
+            snapshot(s);
+            let (pos, bar) = (s.playlist.pos, bar(s));
+            add_marker(s, TimeMarker { kind: TimeMarker::SKIP, ..TimeMarker::new(pos, " ") });
+            add_marker(s, TimeMarker::new(pos + bar, " "));
+            None
+        }
+        Cmd::MarkerEvery(n) => {
+            let at = grid.map_or((600.0, 200.0), |g| (g.x + 40.0, g.y));
+            start_edit(s, EditTarget::MarkerBase(n), at);
+            None
+        }
+        Cmd::PlaceLoop | Cmd::PlaceLoopAt(_) => {
+            let pos = if let Cmd::PlaceLoopAt(t) = cmd { t } else { s.playlist.range.map_or(0, |(a, _)| a) };
+            snapshot(s);
+            place_loop(s, pos);
+            None
+        }
+        Cmd::DeleteMarkers | Cmd::ToMarkerLoop => {
+            // The markers in the time selection (its start included, its end not); all of them without one.
+            let range = s.playlist.range;
+            let inside = |m: &TimeMarker| range.is_none_or(|(a, b)| m.position >= a && m.position < b);
+            if !markers(s).iter().any(inside) {
+                return None;
+            }
+            snapshot(s);
+            let arr = arr_mut(s);
+            if cmd == Cmd::DeleteMarkers {
+                arr.markers.retain(|m| !inside(m));
             } else {
-                start_edit(s, EditTarget::NewMarker(pos), at);
+                arr.markers.iter_mut().filter(|m| inside(m)).for_each(|m| m.kind = TimeMarker::MARKER_LOOP);
+            }
+            s.piano.dirty = true;
+            None
+        }
+        Cmd::MoveContent(i, right) => {
+            snapshot(s);
+            if !move_content(s, i, right) {
+                crate::history::unrecord(s);
+            }
+            None
+        }
+        Cmd::MarkerAction(i, kind) => {
+            if markers(s).get(i).is_some_and(|m| m.kind != kind) {
+                snapshot(s);
+                arr_mut(s).markers[i].kind = kind;
+                s.piano.dirty = true;
             }
             None
         }
@@ -3919,7 +4443,14 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Pref(..) => None,
         Cmd::Genre(_) => None,
         Cmd::Theme(_) => None,
-        Cmd::Template(_) => None,
+        Cmd::Template(_) | Cmd::NewTemplate(_) => None,
+        Cmd::Arp(_) | Cmd::MidiImport(_) | Cmd::MidiExport(_) | Cmd::OpenRecent(_) => None,
+        Cmd::FlamPreset(_) => None,
+        Cmd::Limit(_) => None,
+        Cmd::Claw(_) => None,
+        Cmd::LfoShape(_) => None,
+        Cmd::Quant(_) => None,
+        Cmd::ChopPattern(_) => None,
         Cmd::Messages(_) => None,
         Cmd::DataFolder(_) => None,
     };
@@ -3988,7 +4519,7 @@ pub fn export_tracks(app: &mut App) -> String {
         return format!("Export tracks: {e}");
     }
     let rate = 44100;
-    let mut lib = os_engine::SampleLibrary::new(os_engine::SampleLibrary::default_factory_dir());
+    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
     let song_frames = os_engine::laws::tick_to_frame(f64::from(end), s.project.ppq, s.project.tick_tempo(s.tempo), rate) as usize;
     let mut written = 0;
     for &t in &tracks {
@@ -4062,7 +4593,7 @@ pub fn consolidate(app: &mut App) -> String {
         }
     }
     let rate = 44100;
-    let mut lib = os_engine::SampleLibrary::new(os_engine::SampleLibrary::default_factory_dir());
+    let mut lib = os_engine::SampleLibrary::new(crate::factory_folder::dir());
     let mut e = os_engine::Engine::new(&p, &mut lib, rate, os_engine::PlayMode::Song);
     let mut audio = e.render_all(512);
     let want = (os_engine::laws::tick_to_frame(f64::from(b - a), p.ppq, p.tick_tempo(s.tempo), rate) as usize) * 2;
@@ -4151,6 +4682,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("m") => Cmd::Mute(!shift),
         Key::Character(c) if alt && !ctrl && shift && c.eq_ignore_ascii_case("t") => Cmd::AddSignature,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("t") => Cmd::AddMarker,
+        Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("t") => Cmd::PlaceLoop,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("z") => Cmd::ZoomSelection,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("m") => Cmd::StretchMode,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("i") => Cmd::InvertSelection,
@@ -4166,7 +4698,9 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
             app.invalidate();
             return true;
         }
-        Key::Character(c) if !ctrl && !alt && !app.typing_on() && PlTool::from_letter(c).is_some() => {
+        // Tool letters; with Shift too, which the typing keyboard leaves alone (it takes the plain letters as notes).
+        // Shift+T and Shift+Z were taken above (as in the piano roll, spec: ui/piano-keys.md §4 rule 16).
+        Key::Character(c) if !ctrl && !alt && (shift || !app.typing_on()) && PlTool::from_letter(c).is_some() => {
             Cmd::Tool(PlTool::from_letter(c).expect("checked"))
         }
         Key::Named(NamedKey::Delete) if ctrl => Cmd::DeleteSpace,
@@ -4260,5 +4794,5 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::sep(),
         PItem::new("Route to free mixer track", Cmd::Rack(crate::rack::RCmd::AssignFree(row))).key("Ctrl+L"),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }

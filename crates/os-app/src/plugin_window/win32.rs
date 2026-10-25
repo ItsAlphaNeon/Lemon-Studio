@@ -16,12 +16,12 @@ use std::sync::{Mutex, Once};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, ClientToScreen, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, GetWindowRgn, InvalidateRect, RedrawWindow, ScreenToClient, SetWindowRgn, RDW_ALLCHILDREN, RDW_INVALIDATE,
+    BeginPaint, ClientToScreen, CombineRgn, CreateRectRgn, DeleteObject, EndPaint, GetWindowRgn, InvalidateRect, RedrawWindow, ScreenToClient, SetWindowRgn, NULLREGION, RDW_ALLCHILDREN, RDW_INVALIDATE,
     RDW_UPDATENOW, RGN_AND, RGN_COPY, RGN_DIFF, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetActiveWindow, GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_MENU};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use super::*;
@@ -45,11 +45,12 @@ static LINK: Mutex<Vec<(isize, LinkMsg)>> = Mutex::new(Vec::new());
 pub fn take_link() -> Vec<(isize, LinkMsg)> {
     LINK.lock().map(|mut k| std::mem::take(&mut *k)).unwrap_or_default()
 }
-/// A docked window moved, shrank or went: part of the main window was uncovered (`take_exposed`).
+/// A docked window moved, shrank, was clipped smaller or went: part of the main window was uncovered (`take_exposed`).
 static EXPOSED: AtomicBool = AtomicBool::new(false);
 
 /// Whether a docked plugin window uncovered part of the main window since the last call (moved, shrank, hid, was
-/// detached or closed): the next present must show the whole canvas, not only the app's own damage (UI thread).
+/// clipped under a popup, detached or closed): the next present must show the whole canvas, not only the app's own
+/// damage (UI thread).
 pub fn take_exposed() -> bool {
     EXPOSED.swap(false, Ordering::Relaxed)
 }
@@ -74,15 +75,7 @@ unsafe extern "system" fn key_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
         if code == 0 {
             let focus = GetFocus();
             if !focus.is_null() {
-                // Inside a plugin frame: docked frames are children of the main window, so walk up to the frame.
-                let mut w = focus;
-                let mut in_frame = false;
-                while !w.is_null() && !in_frame {
-                    let mut name = [0u16; 64];
-                    let n = GetClassNameW(w, name.as_mut_ptr(), 64) as usize;
-                    in_frame = String::from_utf16_lossy(&name[..n]) == FRAME_CLASS;
-                    w = GetAncestor(w, GA_PARENT);
-                }
+                let in_frame = frame_of(focus).is_some();
                 let up = lp & (1 << 31) != 0;
                 let repeat = !up && lp & (1 << 30) != 0;
                 if in_frame && !repeat {
@@ -98,6 +91,47 @@ unsafe extern "system" fn key_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
             }
         }
         CallNextHookEx(std::ptr::null_mut(), code, wp, lp)
+    }
+}
+
+/// The plugin frame `w` is or lies inside: docked frames are children of the main window, so walk up to the frame.
+unsafe fn frame_of(mut w: HWND) -> Option<HWND> {
+    unsafe {
+        while !w.is_null() {
+            let mut name = [0u16; 64];
+            let n = GetClassNameW(w, name.as_mut_ptr(), 64) as usize;
+            if String::from_utf16_lossy(&name[..n]) == FRAME_CLASS {
+                return Some(w);
+            }
+            w = GetAncestor(w, GA_PARENT);
+        }
+        None
+    }
+}
+
+/// Gives the keyboard back to the main window when a docked plugin editor holds it, or nobody does. A plugin takes it
+/// with a click (for its text fields) and keeps it: a docked frame is a child of the main window, so a click elsewhere
+/// in the main window leaves the window active and Windows leaves the focus where it was; only the typing keyboard
+/// (`key_hook`) would still work. When the focused editor closes, the focus goes to nobody. A detached frame needs
+/// nothing: clicking the main window activates it, which moves the focus. Called on clicks in the main window.
+pub fn focus_main() {
+    unsafe {
+        let focus = GetFocus();
+        if focus.is_null() {
+            let active = GetActiveWindow();
+            if !active.is_null() {
+                SetFocus(active);
+            }
+            return;
+        }
+        let Some(frame) = frame_of(focus) else { return };
+        if GetWindowLongPtrW(frame, GWL_STYLE) as u32 & WS_CHILD == 0 {
+            return;
+        }
+        let main = GetAncestor(frame, GA_ROOT);
+        if !main.is_null() {
+            SetFocus(main);
+        }
     }
 }
 
@@ -186,6 +220,8 @@ impl FrameWindow {
             if hwnd.is_null() {
                 return Err("could not create the plugin window".into());
             }
+            // Files dropped on the frame from the desktop (spec: plugins/presets.md "Drag and drop").
+            windows_sys::Win32::UI::Shell::DragAcceptFiles(hwnd, 1);
             let ay = state.borrow().area_y();
             let area = CreateWindowExW(
                 0,
@@ -363,6 +399,13 @@ impl FrameWindow {
         unsafe { win_of(self.hwnd) }.map_or(1.0, |w| w.scale)
     }
 
+    /// A point of the editor (logical px from its top-left) on the screen (screen px): where a menu the plugin asked
+    /// for opens (spec: plugins/vst3-hosting.md §9).
+    pub fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32) {
+        let ay = self.state.borrow().area_y();
+        to_screen(self.hwnd, self.scale())(BORDER + x, ay + y)
+    }
+
     /// Redraws the frame at another DPI scale (same logical size). The editor inside is the caller's: plugins take
     /// their scale when the editor opens (spec: ui/ui-scaling.md §3).
     pub fn set_scale(&self, scale: f32) {
@@ -452,7 +495,7 @@ unsafe fn parent_rect(hwnd: HWND) -> [i32; 4] {
 
 /// Sets a docked window's region for its current position from `State::clip`. The parts that come into view are
 /// repainted, the plugin's editor included: the system redraws only the frame itself, and an editor left alone keeps
-/// showing whatever was seen through the old region.
+/// showing whatever was seen through the old region. The parts that go out of view uncover the main window (`expose`).
 unsafe fn apply_clip(hwnd: HWND, state: &RefCell<State>) {
     let (me, work, covers) = {
         let mut st = state.borrow_mut();
@@ -494,9 +537,16 @@ unsafe fn apply_clip(hwnd: HWND, state: &RefCell<State>) {
         }
         let gained = CreateRectRgn(0, 0, 0, 0);
         CombineRgn(gained, if rgn.is_null() { whole } else { rgn }, old, RGN_DIFF);
+        // What the old region showed that the new one hides: the main window there comes into view (a popup opened
+        // over this window). While the app has damage of its own (meters moving during playback) it would present
+        // only that, and the uncovered part would keep showing this window over the popup.
+        let lost = CreateRectRgn(0, 0, 0, 0);
+        if CombineRgn(lost, old, if rgn.is_null() { whole } else { rgn }, RGN_DIFF) > NULLREGION {
+            expose();
+        }
         SetWindowRgn(hwnd, rgn, 1); // the system owns `rgn` now
         RedrawWindow(hwnd, std::ptr::null(), gained, RDW_INVALIDATE | RDW_ALLCHILDREN);
-        for r in [whole, old, gained] {
+        for r in [whole, old, gained, lost] {
             DeleteObject(r);
         }
     }
@@ -720,6 +770,21 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             }
             WM_CLOSE => {
                 w.state.borrow_mut().events.push(FrameEvent::Close);
+                0
+            }
+            WM_DROPFILES => {
+                use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
+                let drop = wp as HDROP;
+                let n = DragQueryFileW(drop, u32::MAX, std::ptr::null_mut(), 0);
+                for i in 0..n {
+                    let len = DragQueryFileW(drop, i, std::ptr::null_mut(), 0) as usize;
+                    let mut buf = vec![0u16; len + 1];
+                    DragQueryFileW(drop, i, buf.as_mut_ptr(), buf.len() as u32);
+                    let path = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len]));
+                    w.state.borrow_mut().events.push(FrameEvent::DropFile(path));
+                }
+                DragFinish(drop);
+                os_clap::wake();
                 0
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -1036,10 +1101,11 @@ mod tests {
         f.set_strip(true);
         assert!(!take_exposed(), "growing uncovers nothing");
 
-        // The title bar's minimize button hides a docked window.
+        // The title bar's minimize button hides a docked window (on the release over it).
         let (w, _) = f.state.borrow().size();
         let at = ((w - 33.0) as isize) | (15 << 16);
         unsafe { SendMessageW(f.hwnd, WM_LBUTTONDOWN, 1, at) };
+        unsafe { SendMessageW(f.hwnd, WM_LBUTTONUP, 0, at) };
         assert_eq!(unsafe { IsWindowVisible(f.hwnd) }, 0);
         assert!(take_exposed(), "hiding");
 
@@ -1050,6 +1116,22 @@ mod tests {
 
         drop(docked());
         assert!(take_exposed(), "closing");
+
+        // A popup opening over a docked window clips it smaller, which uncovers the main window under the popup; the
+        // popup closing gives the window its part back, which uncovers nothing.
+        let f = docked();
+        let me = unsafe { parent_rect(f.hwnd) };
+        let work = [me[0] - 100, me[1] - 100, me[2] + 100, me[3] + 100];
+        let popup = [me[2] - 60, me[1] + 10, me[2] + 40, me[1] + 150];
+        f.clip_to(work, &[]);
+        take_exposed();
+        f.clip_to(work, &[popup]);
+        assert!(take_exposed(), "clipped under a popup");
+        f.clip_to(work, &[popup]);
+        assert!(!take_exposed(), "the same clip again");
+        f.clip_to(work, &[]);
+        assert!(!take_exposed(), "the popup closing uncovers nothing");
+        drop(f);
         unsafe { DestroyWindow(owner) };
     }
 

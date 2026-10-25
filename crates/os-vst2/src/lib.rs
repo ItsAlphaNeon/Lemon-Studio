@@ -13,6 +13,7 @@
 
 pub mod abi;
 mod files;
+pub mod fxp;
 mod host;
 pub mod state;
 
@@ -369,6 +370,8 @@ enum NoteKind {
     Off,
     /// A controller change: `key` is the controller.
     Control,
+    /// Another short message as a controller sent it, this status byte (pitch bend, pressure, program change).
+    Raw(u8),
 }
 
 /// A MIDI event waiting for its process call.
@@ -387,6 +390,7 @@ impl Note {
             NoteKind::On => [0x90, self.key, self.value],
             NoteKind::Off => [0x80, self.key, self.value],
             NoteKind::Control => [0xB0, self.key, self.value],
+            NoteKind::Raw(status) => [status, self.key, self.value],
         }
     }
 }
@@ -430,6 +434,8 @@ pub struct Plugin {
     /// The voices it plays as far as the host can tell: a released voice lasts the stated tail or until the output is
     /// quiet (spec: audio/voices.md §2.5-2.6).
     ledger: os_engine::voices::VoiceLedger,
+    /// Glides as pitch bend: VST 2 has no tuning of a note (spec: audio/channel-voices.md).
+    bend: os_engine::TuningBend,
     /// Frames processed since activation.
     steady: u64,
     /// The song position for the next process call (the engine gives it while playing).
@@ -483,6 +489,7 @@ impl Plugin {
             tail: 0,
             sounding: false,
             ledger: os_engine::voices::VoiceLedger::new(),
+            bend: os_engine::TuningBend::default(),
             steady: 0,
             song: None,
             restarted: false,
@@ -628,7 +635,7 @@ impl Plugin {
                 match e.kind {
                     NoteKind::On => self.ledger.start(e.key, -1),
                     NoteKind::Off => self.ledger.release(e.key),
-                    NoteKind::Control => {}
+                    NoteKind::Control | NoteKind::Raw(_) => {}
                 }
             } else {
                 self.queue[kept] = e;
@@ -1050,6 +1057,9 @@ impl os_engine::Instrument for Plugin {
             self.queue(Note { time: 0, kind: NoteKind::Control, key: c, value: 0 });
         }
         self.ledger.clear();
+        if let Some(m) = self.bend.reset() {
+            os_engine::Instrument::midi(self, 0, m);
+        }
         // Automation still waiting is a value the parameter should have: it is kept for the next block.
         if self.processing {
             self.inst.dispatch(op::PROCESS_END, 0, 0, std::ptr::null_mut(), 0.0);
@@ -1059,6 +1069,10 @@ impl os_engine::Instrument for Plugin {
 
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
         let v = (velocity.clamp(0.0, 1.0) * 127.0).round().max(1.0) as u8;
+        // The bend is centred for the new note first (it may still hold the last glide's end).
+        if let Some(m) = self.bend.note_on(key.min(127)) {
+            os_engine::Instrument::midi(self, offset, m);
+        }
         self.queue(Note { time: offset, kind: NoteKind::On, key: key.min(127), value: v });
     }
 
@@ -1066,8 +1080,25 @@ impl os_engine::Instrument for Plugin {
         self.queue(Note { time: offset, kind: NoteKind::Off, key: key.min(127), value: 64 });
     }
 
+    /// A glide step as pitch bend (`TuningBend`).
+    fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
+        if let Some(m) = self.bend.tune(key, semitones) {
+            os_engine::Instrument::midi(self, offset, m);
+        }
+    }
+
+    fn set_bend_range(&mut self, semitones: u32) {
+        self.bend.set_range(semitones);
+    }
+
     fn param(&mut self, offset: u32, index: u32, value: f64) {
         self.automate(offset, index, value);
+    }
+
+    fn midi(&mut self, offset: u32, bytes: [u8; 3]) {
+        let (key, value) = (bytes[1] & 0x7F, bytes[2] & 0x7F);
+        let kind = if bytes[0] & 0xF0 == 0xB0 { NoteKind::Control } else { NoteKind::Raw(bytes[0]) };
+        self.queue(Note { time: offset, kind, key, value });
     }
 
     fn transport(&mut self, info: &os_engine::TransportInfo) {

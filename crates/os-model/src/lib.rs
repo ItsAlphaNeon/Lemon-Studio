@@ -409,11 +409,16 @@ impl Project {
     /// region per time-signature marker of the pattern, `(start, bar, signature)`, the project's bar ([`Project::bar`])
     /// from 0 until the first one. A region starts a bar at its marker. Markers of the arrangements play no part.
     pub fn pattern_bars(&self, number: u16) -> Vec<(u32, u32, (u16, u16))> {
+        self.marker_bars(self.pattern(number).map_or(&[][..], |p| &p.markers))
+    }
+
+    /// The bar grid of a list of time markers (a pattern's or an arrangement's): one region per time-signature marker,
+    /// `(start, bar, signature)`, the project's bar from 0 until the first one. A region starts a bar at its marker.
+    pub fn marker_bars(&self, markers: &[TimeMarker]) -> Vec<(u32, u32, (u16, u16))> {
         // A bar that makes no signature (3 steps per beat) keeps its beats.
         let sig = self.signature().unwrap_or((self.bar().0, 4));
         let mut regions = vec![(0, self.bar_ticks(), sig)];
-        let mut marks: Vec<&TimeMarker> =
-            self.pattern(number).map(|p| p.markers.iter().filter(|m| m.kind == TimeMarker::SIGNATURE).collect()).unwrap_or_default();
+        let mut marks: Vec<&TimeMarker> = markers.iter().filter(|m| m.kind == TimeMarker::SIGNATURE).collect();
         marks.sort_by_key(|m| m.position);
         for m in marks {
             let sig = (u16::from(m.numerator), u16::from(m.denominator));
@@ -618,6 +623,17 @@ pub struct Channel {
     pub sound: ChannelSound,
 }
 
+impl Channel {
+    /// Takes the channel's sample out, as the Sampler window's file box X does in FL: no sample path (event 196), no
+    /// loop points (event 251), and Resample off among the sampler flags; the other flags stay (spec:
+    /// flp/events/channels.md "Loop points (event 251)", "Sampler flags (event 143)").
+    pub fn clear_sample(&mut self) {
+        self.sample_path = None;
+        self.sound.loop_points = None;
+        self.sound.sampler_flags = self.sound.sampler_flags.map(|f| f & !ChannelSound::RESAMPLE);
+    }
+}
+
 /// A channel's filter, sampler and declick settings as stored (spec: flp/engine-events.md "A channel",
 /// audio/channel-filter.md, audio/sampler.md, audio/declick.md, audio/audio-clips.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -653,6 +669,9 @@ impl ChannelSound {
     pub const KEEP_ON_DISK: u32 = 0x100;
     /// Flags of a channel without event 143 (FL's new sampler channel).
     pub const DEFAULT_FLAGS: u32 = Self::LOAD_REGIONS | Self::USE_LOOP;
+    /// Flags of FL's audio clip channels (258, spec: audio/audio-clips.md): no Use loop points, so a clip plays a
+    /// file's `smpl` loop through once.
+    pub const AUDIO_CLIP_FLAGS: u32 = Self::LOAD_REGIONS | Self::KEEP_ON_DISK;
 
     /// The sample start offset (share of the sample).
     pub fn start_offset(&self) -> f64 {
@@ -1310,7 +1329,7 @@ impl Note {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct MixerTrack {
     /// The track's stable identity ([`Id`]).
     pub id: Id,
@@ -1343,6 +1362,66 @@ pub struct MixerTrack {
     /// The three-band equaliser as stored, per band `[gain, frequency, width]`: gain -1800..=1800 in 0.01 dB,
     /// frequency and width 0..=65536 (spec: audio/mixer.md "Equaliser"). Band 1 low shelf, 2 peaking, 3 high shelf.
     pub eq: [[i32; 3]; 3],
+    /// The track's output and input latency settings in milliseconds, either sign, 0 = none (event 236; spec:
+    /// flp/layouts.md "A mixer track's record", audio/delay-compensation.md "Settings").
+    pub latency_out: f32,
+    pub latency_in: f32,
+    /// The track's icon (event 95) as the file numbers it; `None` = no icon (spec: flp/events/mixer.md "Track blocks",
+    /// flp/engine-events.md "The mixer"). It stays with its track; Lemon Studio does not draw it.
+    pub icon: Option<u16>,
+    /// Position of the file's track block this track was loaded from (`None` = made in Lemon Studio). When tracks are
+    /// moved, deleted or trimmed, the writer takes the track's effect-slot events from that block (spec:
+    /// flp/events/mixer.md "Removing tracks"). Bookkeeping, not part of the track: tracks that differ only here are
+    /// equal.
+    pub origin: Option<u16>,
+}
+
+impl PartialEq for MixerTrack {
+    fn eq(&self, o: &Self) -> bool {
+        // Every field but `origin` (and `id`, which compares equal anyway), named so that a new field is not left out.
+        let MixerTrack {
+            id: _,
+            index,
+            name,
+            color,
+            enabled,
+            slots,
+            routes,
+            send_levels,
+            volume,
+            pan,
+            stereo_separation,
+            polarity,
+            swap,
+            slots_enabled,
+            slot_on,
+            slot_mix,
+            eq,
+            latency_out,
+            latency_in,
+            icon,
+            origin: _,
+        } = self;
+        *index == o.index
+            && *name == o.name
+            && *color == o.color
+            && *enabled == o.enabled
+            && *slots == o.slots
+            && *routes == o.routes
+            && *send_levels == o.send_levels
+            && *volume == o.volume
+            && *pan == o.pan
+            && *stereo_separation == o.stereo_separation
+            && *polarity == o.polarity
+            && *swap == o.swap
+            && *slots_enabled == o.slots_enabled
+            && *slot_on == o.slot_on
+            && *slot_mix == o.slot_mix
+            && *eq == o.eq
+            && *latency_out == o.latency_out
+            && *latency_in == o.latency_in
+            && *icon == o.icon
+    }
 }
 
 /// A new track's equaliser: flat, at the default frequencies and widths.
@@ -1369,6 +1448,10 @@ impl MixerTrack {
             slot_on: [true; 10],
             slot_mix: [1.0; 10],
             eq: EQ_DEFAULT,
+            latency_out: 0.0,
+            latency_in: 0.0,
+            icon: None,
+            origin: None,
         }
     }
 }
@@ -1626,18 +1709,32 @@ pub fn fade_curve(x: f64, tension: f64) -> f64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimeMarker {
     pub position: u32,
-    /// High byte of the stored position: 0 = plain marker, 8 = time signature, others kept as read.
+    /// High byte of the stored position: the marker's action (the constants below; spec: flp/events/playlist.md
+    /// "Marker kinds"). Kinds not listed there (6, 0xB) are kept as read.
     pub kind: u8,
     pub name: String,
     pub numerator: u8,
     pub denominator: u8,
+    /// Event 101: a key marker's scale, kept as read (0 for the other kinds).
+    pub scale: u16,
 }
 
 impl TimeMarker {
+    /// None: a plain marker.
+    pub const PLAIN: u8 = 0;
+    pub const MARKER_LOOP: u8 = 1;
+    pub const SKIP: u8 = 2;
+    pub const PAUSE: u8 = 3;
+    pub const LOOP: u8 = 4;
+    pub const START: u8 = 5;
     pub const SIGNATURE: u8 = 8;
+    /// Start recording (punch in) and Stop recording (punch out).
+    pub const PUNCH_IN: u8 = 9;
+    pub const PUNCH_OUT: u8 = 10;
+    pub const KEY: u8 = 12;
 
     pub fn new(position: u32, name: &str) -> Self {
-        TimeMarker { position, kind: 0, name: name.into(), numerator: 4, denominator: 4 }
+        TimeMarker { position, kind: Self::PLAIN, name: name.into(), numerator: 4, denominator: 4, scale: 0 }
     }
 
     /// The marker at timebase `to` instead of `from` ([`Project::set_ppq`]).

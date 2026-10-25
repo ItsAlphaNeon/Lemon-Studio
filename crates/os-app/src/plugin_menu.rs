@@ -138,7 +138,7 @@ pub fn items(s: &State, target: Target, nested: bool) -> Vec<PItem> {
 
 /// A plugin menu for `target` at (x, y).
 pub fn menu(s: &State, target: Target, x: f32, y: f32) -> Popup {
-    Popup { x, y, items: items(s, target, false), sub: None }
+    Popup { x, y, items: items(s, target, false), sub: None, scroll: [0; 2] }
 }
 
 /// Whether the open popup is a plugin menu (F8 closes it).
@@ -191,8 +191,13 @@ pub fn run(app: &mut App, c: PlugCmd) -> Option<String> {
 
 /// A new channel for generator `index` (spec §1): at the bottom of the rack, or right below row `after`; selected and
 /// in view. Lemon Sampler makes an empty sampler channel (hosted on the next tick); any other generator a plugin
-/// channel hosting it. Its plugin window opens once it is hosted.
+/// channel hosting it. Its plugin window opens once it is hosted. One undo step, "Add channel" (`control::edit_app`):
+/// undone, the channel goes and its instance is kept; redone, it comes back with it (`control::host`).
 pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
+    crate::control::edit_app(app, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| add_generator_now(app, index, after))
+}
+
+fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
     let d = app.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
@@ -238,13 +243,18 @@ pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<Stri
     if sampler {
         ch.kind = os_model::ChannelKind::Sampler;
         ch.plugin = None;
-        ch.sample_path = None;
+        ch.clear_sample();
         ch.name = Some(d.name.clone());
         s.pending_open = Some(row);
     } else {
         ch.kind = os_model::ChannelKind::Plugin;
         ch.plugin = Some(crate::osc3::file_name(&d.name).to_string());
         ch.name = Some(d.name.clone());
+        // A Lemon Trio channel's sample is its custom shape's (spec: plugins/lemon-3x-osc.md §6): the new instance has
+        // none, so neither does the channel.
+        if crate::osc3::is_osc3(ch) {
+            ch.sample_path = None;
+        }
         s.pending_plugin = Some((row, index));
     }
     s.piano.dirty = true;

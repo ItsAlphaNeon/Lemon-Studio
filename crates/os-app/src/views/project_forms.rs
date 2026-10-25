@@ -18,6 +18,8 @@ pub fn paint(ui: &mut Ui, s: &State, m: &Modal, f: &Form) {
     match f {
         Form::Rename(f) => rename(ui, s, m, f),
         Form::Save(f) => super::save_form::paint(ui, s, m, f),
+        Form::Export(f) => super::export_form::paint(ui, s, m, f),
+        Form::Midi(f) => super::midi_form::paint(ui, s, m, f),
     }
 }
 
