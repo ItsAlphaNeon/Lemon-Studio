@@ -14,9 +14,11 @@
 use nih_plug::prelude::*;
 
 use os_engine::effects::stereo_shaper::{self as dsp, Settings, StereoShaper};
+use os_theme::design::lemon as brand;
+use os_ui::{Color, Rect};
 
 use crate::params::{leading_number, nearest_rising};
-use crate::{Card, Control, Kind, Setting, SmallFx, Sound, Spec};
+use crate::{Card, Control, Kind, Mark, Setting, SmallFx, Sound, Spec};
 
 /// The engine's settings the plugin has, in order: all but the difference output.
 pub const FIELDS: [usize; 7] = [
@@ -49,21 +51,31 @@ const DELAY: usize = 4;
 const PHASE: usize = 5;
 const POSITION: usize = 6;
 
-/// Editor layout (spec §2).
-const CARDS: [Card; 3] = [
-    Card { x0: 8.0, x1: 156.0, y0: 28.0, y1: 116.0, heading: "LEFT OUT" },
-    Card { x0: 162.0, x1: 310.0, y0: 28.0, y1: 116.0, heading: "RIGHT OUT" },
-    Card { x0: 316.0, x1: 538.0, y0: 28.0, y1: 116.0, heading: "EFFECTS" },
+/// Editor layout (spec §2), as the original's: the four level faders of the matrix (what reaches the left output, then
+/// the right), and the effects: the position, the delay and the phase.
+const CARDS: [Card; 2] = [
+    Card { x0: 8.0, x1: 216.0, y0: 28.0, y1: 306.0, heading: "MIXER MATRIX" },
+    Card { x0: 222.0, x1: 352.0, y0: 28.0, y1: 306.0, heading: "EFFECTS" },
 ];
 
+/// A fader carrying the right input (the left's are lemon).
+const FROM_RIGHT: Color = Color::rgb(0xcfcfcf);
+/// -100 %, 0 and 100 %.
+const MARKS: &[f32] = &[0.25, 0.5, 0.75];
+
+const fn level(id: &'static str, x: f32, right: bool) -> Control {
+    let (label, col) = if right { ("R", FROM_RIGHT) } else { ("L", brand::MAIN) };
+    Control::Fader { id, x, top: 66.0, bot: 270.0, label, col, bipolar: true, marks: MARKS }
+}
+
 const CONTROLS: [Control; 7] = [
-    Control::Knob { id: "left", cx: 45.0, cy: 61.0, r: 22.0, caption: "FROM LEFT", bipolar: true },
-    Control::Knob { id: "rl", cx: 119.0, cy: 61.0, r: 22.0, caption: "FROM RIGHT", bipolar: true },
-    Control::Knob { id: "lr", cx: 199.0, cy: 61.0, r: 22.0, caption: "FROM LEFT", bipolar: true },
-    Control::Knob { id: "right", cx: 273.0, cy: 61.0, r: 22.0, caption: "FROM RIGHT", bipolar: true },
-    Control::Knob { id: "delay", cx: 353.0, cy: 61.0, r: 22.0, caption: "DELAY", bipolar: true },
-    Control::Knob { id: "phase", cx: 427.0, cy: 61.0, r: 22.0, caption: "PHASE", bipolar: true },
-    Control::Choice { id: "position", x0: 470.0, x1: 530.0, top: 37.0, names: &["OFF", "PRE", "POST"] },
+    level("rl", 50.0, true),
+    level("left", 88.0, false),
+    level("right", 136.0, true),
+    level("lr", 174.0, false),
+    Control::Choice { id: "position", x: 260.0, top: 42.0, names: &["OFF", "PRE", "POST"] },
+    Control::Knob { id: "delay", cx: 287.0, cy: 140.0, r: 24.0, caption: "DELAY", bipolar: true },
+    Control::Knob { id: "phase", cx: 287.0, cy: 226.0, r: 24.0, caption: "PHASE", bipolar: true },
 ];
 
 pub const SPEC: &Spec = &Spec {
@@ -75,10 +87,13 @@ pub const SPEC: &Spec = &Spec {
     any_version: true,
     fields: &FIELDS,
     tail: &[],
-    size: (546, 154),
+    size: (360, 372),
     cards: &CARDS,
     controls: &CONTROLS,
     display: None,
+    mark: Mark { x: 352.0, y: 353.0, anchor: 1.0, stacked: false },
+    hint: Some(Rect::new(8.0, 314.0, 344.0, 22.0)),
+    labels: &[(69.0, 286.0, "LEFT OUT"), (155.0, 286.0, "RIGHT OUT")],
     text,
     parse,
     sound,

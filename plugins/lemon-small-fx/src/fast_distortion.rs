@@ -13,7 +13,7 @@ use os_engine::effects::fast_dist::{self as dsp, FastDist, Settings};
 use os_ui::{Canvas, Rect};
 
 use crate::params::{db_text, leading_number, nearest, parse_db};
-use crate::{view, Card, Control, Display, Kind, Setting, SmallFx, Sound, Spec};
+use crate::{view, Card, Control, Display, Kind, Mark, Setting, SmallFx, Sound, Spec};
 
 /// The settings in the original's order (spec §5).
 pub const SETTINGS: [Setting; dsp::PARAMS] = [
@@ -24,20 +24,19 @@ pub const SETTINGS: [Setting; dsp::PARAMS] = [
     Setting { id: "post", name: "Post gain", range: dsp::RANGES[dsp::POST], start: dsp::DEFAULTS[dsp::POST], magnet: None },
 ];
 
-/// Editor layout (spec §2).
-const CARDS: [Card; 4] = [
-    Card { x0: 8.0, x1: 72.0, y0: 28.0, y1: 116.0, heading: "INPUT" },
-    Card { x0: 78.0, x1: 230.0, y0: 28.0, y1: 116.0, heading: "DISTORTION" },
-    Card { x0: 236.0, x1: 346.0, y0: 28.0, y1: 116.0, heading: "CURVE" },
-    Card { x0: 352.0, x1: 476.0, y0: 28.0, y1: 116.0, heading: "OUTPUT" },
+/// Editor layout (spec §2), as the original's: the knobs and the type switch in a row over the wordmark, the curve at
+/// the right.
+const CARDS: [Card; 2] = [
+    Card { x0: 8.0, x1: 312.0, y0: 28.0, y1: 116.0, heading: "DISTORTION" },
+    Card { x0: 318.0, x1: 468.0, y0: 28.0, y1: 146.0, heading: "CURVE" },
 ];
 
 const CONTROLS: [Control; 5] = [
-    Control::Knob { id: "pre", cx: 40.0, cy: 61.0, r: 22.0, caption: "PRE AMP", bipolar: false },
-    Control::Knob { id: "threshold", cx: 124.0, cy: 61.0, r: 22.0, caption: "THRESHOLD", bipolar: false },
-    Control::Choice { id: "type", x0: 178.0, x1: 220.0, top: 45.0, names: &["A", "B"] },
-    Control::Knob { id: "mix", cx: 384.0, cy: 61.0, r: 22.0, caption: "MIX", bipolar: false },
-    Control::Knob { id: "post", cx: 444.0, cy: 61.0, r: 22.0, caption: "POST GAIN", bipolar: false },
+    Control::Knob { id: "pre", cx: 44.0, cy: 64.0, r: 20.0, caption: "PRE AMP", bipolar: false },
+    Control::Knob { id: "threshold", cx: 108.0, cy: 64.0, r: 20.0, caption: "THRESHOLD", bipolar: false },
+    Control::Choice { id: "type", x: 146.0, top: 49.0, names: &["A", "B"] },
+    Control::Knob { id: "mix", cx: 212.0, cy: 64.0, r: 20.0, caption: "MIX", bipolar: false },
+    Control::Knob { id: "post", cx: 276.0, cy: 64.0, r: 20.0, caption: "POST GAIN", bipolar: false },
 ];
 
 pub const SPEC: &Spec = &Spec {
@@ -49,10 +48,13 @@ pub const SPEC: &Spec = &Spec {
     any_version: false,
     fields: &[],
     tail: &[],
-    size: (484, 154),
+    size: (476, 154),
     cards: &CARDS,
     controls: &CONTROLS,
-    display: Some(Display { r: Rect::new(244.0, 36.0, 94.0, 72.0), draw: curve }),
+    display: Some(Display { r: Rect::new(326.0, 36.0, 134.0, 102.0), draw: curve }),
+    mark: Mark { x: 312.0, y: 135.0, anchor: 1.0, stacked: false },
+    hint: None,
+    labels: &[],
     text,
     parse,
     sound,

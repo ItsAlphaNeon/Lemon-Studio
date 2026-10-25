@@ -11,9 +11,10 @@
 use nih_plug::prelude::*;
 
 use os_engine::effects::chorus::{self as dsp, Chorus, Settings};
+use os_ui::Rect;
 
 use crate::params::{leading_number, nearest_rising};
-use crate::{Card, Control, Kind, Setting, SmallFx, Sound, Spec};
+use crate::{Control, Kind, Mark, Setting, SmallFx, Sound, Spec};
 
 const fn setting(id: &'static str, name: &'static str, k: usize) -> Setting {
     Setting { id, name, range: dsp::RANGES[k], start: dsp::DEFAULTS[k], magnet: None }
@@ -35,31 +36,28 @@ pub const SETTINGS: [Setting; dsp::PARAMS] = [
     setting("wet", "Wet only", dsp::WET_ONLY),
 ];
 
-/// Editor layout (spec §2): two rows of cards.
-const CARDS: [Card; 5] = [
-    Card { x0: 8.0, x1: 310.0, y0: 28.0, y1: 116.0, heading: "CHORUS" },
-    Card { x0: 316.0, x1: 464.0, y0: 28.0, y1: 116.0, heading: "CROSSOVER" },
-    Card { x0: 8.0, x1: 156.0, y0: 144.0, y1: 232.0, heading: "LFO 1" },
-    Card { x0: 162.0, x1: 310.0, y0: 144.0, y1: 232.0, heading: "LFO 2" },
-    Card { x0: 316.0, x1: 464.0, y0: 144.0, y1: 232.0, heading: "LFO 3" },
-];
+/// Editor layout (spec §2), as the original's: a grid of tiles, three across and four down.
+const fn tile(id: &'static str, col: usize, row: usize, caption: &'static str) -> Control {
+    let (x0, y0) = (8.0 + 164.0 * col as f32, 8.0 + 52.0 * row as f32);
+    Control::Tile { id, x0, y0, x1: x0 + 158.0, y1: y0 + 46.0, caption }
+}
 
-/// The wave rows: a value for each of the four shapes (`Trunc(single(x * 3))`).
+/// The stored value of each wave's lowest setting, and the top for the last (the typed-in names).
 pub const WAVES: &[(&str, i32)] = &[("ARC", 0), ("SHARP ARC", 342), ("SINES", 683), ("SHARP SINES", 1024)];
 
 const CONTROLS: [Control; 12] = [
-    Control::Knob { id: "delay", cx: 45.0, cy: 61.0, r: 22.0, caption: "DELAY", bipolar: false },
-    Control::Knob { id: "depth", cx: 119.0, cy: 61.0, r: 22.0, caption: "DEPTH", bipolar: false },
-    Control::Knob { id: "stereo", cx: 193.0, cy: 61.0, r: 22.0, caption: "STEREO", bipolar: false },
-    Control::Pick { id: "wet", x0: 236.0, x1: 302.0, top: 45.0, rows: &[("DRY + WET", 0), ("WET ONLY", 1024)] },
-    Control::Knob { id: "cutoff", cx: 358.0, cy: 61.0, r: 22.0, caption: "CUTOFF", bipolar: false },
-    Control::Pick { id: "cross", x0: 402.0, x1: 456.0, top: 45.0, rows: &[("HIGHS", 0), ("LOWS", 100)] },
-    Control::Knob { id: "speed1", cx: 44.0, cy: 177.0, r: 22.0, caption: "SPEED", bipolar: false },
-    Control::Pick { id: "wave1", x0: 76.0, x1: 150.0, top: 153.0, rows: WAVES },
-    Control::Knob { id: "speed2", cx: 198.0, cy: 177.0, r: 22.0, caption: "SPEED", bipolar: false },
-    Control::Pick { id: "wave2", x0: 230.0, x1: 304.0, top: 153.0, rows: WAVES },
-    Control::Knob { id: "speed3", cx: 352.0, cy: 177.0, r: 22.0, caption: "SPEED", bipolar: false },
-    Control::Pick { id: "wave3", x0: 384.0, x1: 458.0, top: 153.0, rows: WAVES },
+    tile("delay", 0, 0, "DELAY"),
+    tile("depth", 1, 0, "DEPTH"),
+    tile("stereo", 2, 0, "STEREO"),
+    tile("speed1", 0, 1, "LFO 1 FREQ"),
+    tile("speed2", 1, 1, "LFO 2 FREQ"),
+    tile("speed3", 2, 1, "LFO 3 FREQ"),
+    tile("wave1", 0, 2, "LFO 1 WAVE"),
+    tile("wave2", 1, 2, "LFO 2 WAVE"),
+    tile("wave3", 2, 2, "LFO 3 WAVE"),
+    tile("cross", 0, 3, "CROSS TYPE"),
+    tile("cutoff", 1, 3, "CROSS CUTOFF"),
+    tile("wet", 2, 3, "WET ONLY"),
 ];
 
 pub const SPEC: &Spec = &Spec {
@@ -71,10 +69,13 @@ pub const SPEC: &Spec = &Spec {
     any_version: false,
     fields: &[],
     tail: &[],
-    size: (472, 270),
-    cards: &CARDS,
+    size: (502, 248),
+    cards: &[],
     controls: &CONTROLS,
     display: None,
+    mark: Mark { x: 494.0, y: 229.0, anchor: 1.0, stacked: false },
+    hint: Some(Rect::new(8.0, 218.0, 486.0, 22.0)),
+    labels: &[],
     text,
     parse,
     sound,

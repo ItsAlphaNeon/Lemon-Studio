@@ -12,9 +12,10 @@
 use nih_plug::prelude::*;
 
 use os_engine::effects::transient_processor::{self as dsp, Settings, TransientProcessor};
+use os_ui::Rect;
 
 use crate::params::{db_text, leading_number, nearest, parse_db};
-use crate::{Card, Control, Kind, Setting, SmallFx, Sound, Spec};
+use crate::{Card, Control, Kind, Mark, Setting, SmallFx, Sound, Spec};
 
 /// The settings in the original's order (spec §5).
 pub const SETTINGS: [Setting; dsp::PARAMS] = [
@@ -41,26 +42,27 @@ pub const SETTINGS: [Setting; dsp::PARAMS] = [
     Setting { id: "on", name: "Processing", range: dsp::RANGES[dsp::ON], start: dsp::DEFAULTS[dsp::ON], magnet: None },
 ];
 
-/// Editor layout (spec §2).
-const CARDS: [Card; 4] = [
-    Card { x0: 8.0, x1: 156.0, y0: 28.0, y1: 116.0, heading: "ATTACK" },
-    Card { x0: 162.0, x1: 310.0, y0: 28.0, y1: 116.0, heading: "RELEASE" },
-    Card { x0: 316.0, x1: 464.0, y0: 28.0, y1: 116.0, heading: "SPLIT" },
-    Card { x0: 470.0, x1: 678.0, y0: 28.0, y1: 116.0, heading: "OUTPUT" },
+/// Editor layout (spec §2), as the original's: the wordmark on top; the split frequency over the processing switch,
+/// the large attack knob over its shape button, the drive over the split balance, the large release knob over its
+/// shape button and the gain; the hint well along the foot.
+const CARDS: [Card; 5] = [
+    Card { x0: 8.0, x1: 100.0, y0: 34.0, y1: 162.0, heading: "" },
+    Card { x0: 106.0, x1: 226.0, y0: 34.0, y1: 162.0, heading: "" },
+    Card { x0: 232.0, x1: 328.0, y0: 34.0, y1: 162.0, heading: "" },
+    Card { x0: 334.0, x1: 454.0, y0: 34.0, y1: 162.0, heading: "" },
+    Card { x0: 460.0, x1: 552.0, y0: 34.0, y1: 162.0, heading: "" },
 ];
 
-const SHAPES: &[&str] = &["SHARP", "MID", "SLOW"];
-
 const CONTROLS: [Control; 9] = [
-    Control::Knob { id: "attack", cx: 50.0, cy: 61.0, r: 22.0, caption: "AMOUNT", bipolar: true },
-    Control::Choice { id: "attack_shape", x0: 96.0, x1: 148.0, top: 37.0, names: SHAPES },
-    Control::Knob { id: "release", cx: 204.0, cy: 61.0, r: 22.0, caption: "AMOUNT", bipolar: true },
-    Control::Choice { id: "release_shape", x0: 250.0, x1: 302.0, top: 37.0, names: SHAPES },
-    Control::Knob { id: "split", cx: 353.0, cy: 61.0, r: 22.0, caption: "FREQUENCY", bipolar: false },
-    Control::Knob { id: "balance", cx: 427.0, cy: 61.0, r: 22.0, caption: "BALANCE", bipolar: true },
-    Control::Knob { id: "drive", cx: 507.0, cy: 61.0, r: 22.0, caption: "DRIVE", bipolar: false },
-    Control::Knob { id: "gain", cx: 581.0, cy: 61.0, r: 22.0, caption: "GAIN", bipolar: true },
-    Control::Choice { id: "on", x0: 622.0, x1: 670.0, top: 45.0, names: &["OFF", "ON"] },
+    Control::Knob { id: "split", cx: 54.0, cy: 68.0, r: 18.0, caption: "SPLIT FREQ", bipolar: false },
+    Control::Choice { id: "on", x: 32.0, top: 118.0, names: &["OFF", "ON"] },
+    Control::Knob { id: "attack", cx: 166.0, cy: 80.0, r: 30.0, caption: "ATTACK", bipolar: true },
+    Control::Shape { id: "attack_shape", cx: 166.0, cy: 144.0 },
+    Control::Knob { id: "drive", cx: 280.0, cy: 66.0, r: 18.0, caption: "DRIVE", bipolar: false },
+    Control::Knob { id: "balance", cx: 280.0, cy: 122.0, r: 16.0, caption: "SPLIT BALANCE", bipolar: true },
+    Control::Knob { id: "release", cx: 394.0, cy: 80.0, r: 30.0, caption: "RELEASE", bipolar: true },
+    Control::Shape { id: "release_shape", cx: 394.0, cy: 144.0 },
+    Control::Knob { id: "gain", cx: 506.0, cy: 68.0, r: 18.0, caption: "GAIN", bipolar: true },
 ];
 
 pub const SPEC: &Spec = &Spec {
@@ -72,10 +74,13 @@ pub const SPEC: &Spec = &Spec {
     any_version: false,
     fields: &[],
     tail: &dsp::DISPLAY,
-    size: (686, 154),
+    size: (560, 200),
     cards: &CARDS,
     controls: &CONTROLS,
     display: None,
+    mark: Mark { x: 280.0, y: 17.0, anchor: 0.5, stacked: false },
+    hint: Some(Rect::new(8.0, 170.0, 544.0, 22.0)),
+    labels: &[],
     text,
     parse,
     sound,

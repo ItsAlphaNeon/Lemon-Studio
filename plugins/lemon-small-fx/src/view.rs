@@ -3,8 +3,9 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! A small effect's editor: painting and hit regions (platform independent). The Lemon "Pith" plugin look, as Lemon
-//! Delay's: rows of outlined cards under ruled headings holding the dials and selectors (one row; Lemon Chorus has
-//! two), a well that pictures the settings, and the hint well and the wordmark on one line along the foot.
+//! Delay's, laid out as the original's editor: outlined cards under ruled headings holding knobs where the original
+//! has knobs, faders where it has sliders and radio lists where it has radio buttons, a well that pictures the
+//! settings, the hint well and the wordmark.
 //!
 // spec: plugins/lemon-small-effects.md (§2 the frame, §3 hints), the plugin pages (plugins/lemon-soft-clipper.md,
 // lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md, lemon-transient-processor.md, lemon-chorus.md,
@@ -12,11 +13,12 @@
 
 use os_theme::design::lemon as brand;
 use os_theme::Palette;
+use os_ui::kit::eq as keq;
 use os_ui::kit::lemon::{self, plug};
 use os_ui::kit::{inst, State};
 use os_ui::{Canvas, Color, Font, Rect};
 
-use crate::{Control, Spec, MAX};
+use crate::{Control, Mark, Spec, MAX};
 
 /// Dials bigger than this get the thicker arc.
 const SMALL: f32 = 19.0;
@@ -25,14 +27,9 @@ const RULE: Color = Color::rgb(0x3c3c3c);
 const HEADING: Font = Font::condensed(11, 0).bold();
 const LABEL: Font = Font::new(10).bold();
 const HINT: Font = Font::new(11);
+const VALUE: Font = Font::new(11).bold();
 const MARK_BIG: Font = Font::condensed(22, 0).bold();
 const MARK_SMALL: Font = Font::condensed(10, 0).bold();
-
-/// The foot's centre line: the hint well at the left and the wordmark at the right are centred on it, 8 px under the
-/// (last row of) cards and 8 px over the edge.
-pub fn foot(spec: &Spec) -> f32 {
-    spec.size.1 as f32 - 19.0
-}
 
 /// Read access to parameter values by id.
 pub trait Model {
@@ -58,6 +55,8 @@ impl Model for os_plugkit::vals::Vals {
 pub enum Target {
     /// Vertical drag / wheel; menu on right click.
     Knob(String),
+    /// As a knob, the drag over the fader's travel (px).
+    Fader(String, f32),
     /// One position of a selector (click picks it).
     Choice(String, i32),
     /// The wordmark (the About menu).
@@ -68,7 +67,7 @@ impl Target {
     /// The setting's id ("" for the wordmark).
     pub fn id(&self) -> &str {
         match self {
-            Target::Knob(id) | Target::Choice(id, _) => id,
+            Target::Knob(id) | Target::Fader(id, _) | Target::Choice(id, _) => id,
             Target::Logo => "",
         }
     }
@@ -111,23 +110,31 @@ pub fn values(spec: &Spec, m: &dyn Model) -> [i32; MAX] {
     std::array::from_fn(|k| spec.settings.get(k).map_or(0, |s| m.plain(s.id).round() as i32))
 }
 
-/// Paints the editor; `hint` (empty when the host shows it) goes in the well at the foot.
+/// Paints the editor; `hint` (empty when the host shows it) goes in the hint well, or over the display's top-left
+/// corner.
 pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, hint: &str) -> Vec<Hit> {
     let mut ui = Ui { c, t, m, st, hits: Vec::new() };
     ui.c.begin_frame(None);
     ui.c.clear(plug::BG);
     for card in spec.cards {
         lemon::plug_panel(ui.c, Rect::span(card.x0, card.x1, card.y0, card.y1));
-        heading(&mut ui, card.x0, card.x1, card.y0 - 12.0, card.heading);
+        if !card.heading.is_empty() {
+            heading(&mut ui, card.x0, card.x1, card.y0 - 12.0, card.heading);
+        }
     }
     for control in spec.controls {
         match *control {
             Control::Knob { id, cx, cy, r, caption, bipolar } => knob(&mut ui, id, cx, cy, r, caption, bipolar),
-            Control::Choice { id, x0, x1, top, names } => {
+            Control::Choice { id, x, top, names } => {
                 let min = spec.index(id).map_or(0, |k| spec.settings[k].range.0);
-                choices(&mut ui, id, x0, x1, top, min, names);
+                choices(&mut ui, id, x, top, min, names);
             }
-            Control::Pick { id, x0, x1, top, rows } => pick(&mut ui, spec, id, x0, x1, top, rows),
+            Control::Fader { id, x, top, bot, label, col, bipolar, marks } => fader(&mut ui, id, x, top, bot, label, col, bipolar, marks),
+            Control::Shape { id, cx, cy } => {
+                let range = spec.index(id).map_or((0, 1), |k| spec.settings[k].range);
+                shape(&mut ui, id, cx, cy, range);
+            }
+            Control::Tile { id, x0, y0, x1, y1, caption } => tile(&mut ui, id, Rect::span(x0, x1, y0, y1), caption),
         }
     }
     if let Some(d) = &spec.display {
@@ -135,14 +142,28 @@ pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewS
         let v = values(spec, m);
         (d.draw)(ui.c, d.r, &v[..spec.settings.len()]);
     }
-    // The foot.
-    let y = foot(spec);
-    let mark_left = logo(&mut ui, spec);
-    let well = Rect::span(8.0, mark_left - 16.0, y - 11.0, y + 11.0);
-    lemon::plug_well(ui.c, well, 6.0);
-    if !hint.is_empty() {
-        let lh = ui.c.line_height(HINT);
-        ui.c.text_clip(HINT, well.x + 8.0, (well.cy() - lh / 2.0).round(), well.w - 16.0, brand::TEXT, hint);
+    for &(cx, top, s) in spec.labels {
+        inst::caption(ui.c, ui.t, cx, top, s, false);
+    }
+    let mark = logo(&mut ui, spec);
+    let lh = ui.c.line_height(HINT);
+    match (spec.hint, &spec.display) {
+        (Some(mut well), _) => {
+            if well.y < mark.bottom() && mark.y < well.bottom() && well.right() > mark.x - 16.0 {
+                well = Rect::span(well.x, mark.x - 16.0, well.y, well.bottom());
+            }
+            lemon::plug_well(ui.c, well, 6.0);
+            if !hint.is_empty() {
+                ui.c.text_clip(HINT, well.x + 8.0, (well.cy() - lh / 2.0).round(), well.w - 16.0, brand::TEXT, hint);
+            }
+        }
+        (None, Some(d)) if !hint.is_empty() => {
+            let w = (ui.c.text_width(HINT, hint) + 12.0).min(d.r.w - 8.0);
+            let r = Rect::new(d.r.x + 4.0, d.r.y + 4.0, w, lh + 6.0);
+            ui.c.fill_rrect(r, 4.0, plug::WELL.with_alpha(220));
+            ui.c.text_clip(HINT, r.x + 6.0, r.y + 3.0, r.w - 12.0, brand::TEXT, hint);
+        }
+        _ => {}
     }
     ui.hits
 }
@@ -160,67 +181,145 @@ fn heading(ui: &mut Ui, x0: f32, x1: f32, y: f32, s: &str) {
     }
 }
 
-/// A pith dial of radius `r` (hit area 3 px around it), caption under it.
+/// A pith dial of radius `r` (hit area 3 px around it), caption (or the value text) under it.
 fn knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, r: f32, cap: &str, bipolar: bool) {
     let target = Target::Knob(id.into());
     let hr = Rect::new(cx - r - 3.0, cy - r - 3.0, 2.0 * r + 6.0, 2.0 * r + 6.0);
     let st = ui.state(hr, &target);
     lemon::dial(ui.c, cx, cy, r, if r > SMALL { 3.2 } else { 2.8 }, ui.m.norm(id), bipolar, brand::MAIN, st);
-    inst::caption(ui.c, ui.t, cx, cy + r + 7.0, cap, false);
+    if cap.is_empty() {
+        let lh = ui.c.line_height(LABEL);
+        let text = ui.m.text(id);
+        ui.c.text_center(LABEL, Rect::new(cx - 50.0, cy + r + 6.0, 100.0, lh), brand::MAIN, &text);
+    } else {
+        inst::caption(ui.c, ui.t, cx, cy + r + 7.0, cap, false);
+    }
     ui.hit(hr, target);
 }
 
-/// A selector: one row per position from `top` (the first is the range's minimum), the chosen one on a dark pill in
-/// lemon.
-fn choices(ui: &mut Ui, id: &str, x0: f32, x1: f32, top: f32, min: i32, names: &[&str]) {
+/// A radio list (as the original's): one row per position from `top` (the first is the range's minimum), a toggle
+/// lit lemon on the chosen one and the name beside it, in lemon when chosen.
+fn choices(ui: &mut Ui, id: &str, x: f32, top: f32, min: i32, names: &[&str]) {
     let chosen = ui.m.plain(id).round() as i32;
+    let lh = ui.c.line_height(LABEL);
     for (i, name) in names.iter().enumerate() {
         let v = min + i as i32;
         let target = Target::Choice(id.into(), v);
-        let r = Rect::span(x0, x1, top + 16.0 * i as f32, top + 16.0 * i as f32 + 15.0);
+        let y = top + 16.0 * i as f32;
+        let w = ui.c.text_width(LABEL, name);
+        let r = Rect::span(x - 2.0, (x + 20.0 + w).ceil(), y, y + 15.0);
         let st = ui.state(r, &target);
-        let ink = lemon::choice_button(ui.c, r, chosen == v, brand::MAIN, st);
-        ui.c.text_center(LABEL, r, ink, name);
+        lemon::toggle(ui.c, x + 6.0, y + 7.5, chosen == v, st);
+        let ink = if chosen == v { brand::MAIN } else if st.hover { brand::TEXT } else { plug::DIM };
+        ui.c.text(LABEL, x + 17.0, (y + 7.5 - lh / 2.0).round(), ink, name);
         ui.hit(r, target);
     }
 }
 
-/// The row of a pick whose value has the current value's text (`None` when none has).
-pub fn picked(spec: &Spec, id: &str, v: i32, rows: &[(&str, i32)]) -> Option<usize> {
-    let k = spec.index(id)?;
-    let t = (spec.text)(k, v);
-    rows.iter().position(|&(_, r)| (spec.text)(k, r) == t)
-}
-
-/// A selector over a long range (as [`choices`]): one row per named value, the row with the current value's text
-/// chosen.
-fn pick(ui: &mut Ui, spec: &Spec, id: &str, x0: f32, x1: f32, top: f32, rows: &[(&str, i32)]) {
-    let chosen = picked(spec, id, ui.m.plain(id).round() as i32, rows);
-    for (i, &(name, v)) in rows.iter().enumerate() {
-        let target = Target::Choice(id.into(), v);
-        let r = Rect::span(x0, x1, top + 16.0 * i as f32, top + 16.0 * i as f32 + 15.0);
-        let st = ui.state(r, &target);
-        let ink = lemon::choice_button(ui.c, r, chosen == Some(i), brand::MAIN, st);
-        ui.c.text_center(LABEL, r, ink, name);
-        ui.hit(r, target);
+/// A fader (as Lemon Reverb's): a slot over `top..bot`, ticks at `marks`, a fill in `col` up to the handle (from the
+/// middle when `bipolar`), `label` over it in `col`.
+#[allow(clippy::too_many_arguments)]
+fn fader(ui: &mut Ui, id: &str, x: f32, top: f32, bot: f32, label: &str, col: Color, bipolar: bool, marks: &[f32]) {
+    let target = Target::Fader(id.into(), bot - top);
+    let hr = Rect::new(x - 11.0, top - 8.0, 22.0, bot - top + 16.0);
+    let st = ui.state(hr, &target);
+    keq::slot(ui.c, Rect::new(x - 3.0, top - 4.0, 6.0, bot - top + 8.0), st);
+    let at = |n: f32| bot - (bot - top) * n.clamp(0.0, 1.0);
+    for &n in marks {
+        let y = at(n).round();
+        ui.c.fill_rect(Rect::new(x - 9.0, y, 3.0, 1.0), plug::FAINT);
+        ui.c.fill_rect(Rect::new(x + 6.0, y, 3.0, 1.0), plug::FAINT);
     }
+    let y = at(ui.m.norm(id));
+    let from = if bipolar { at(0.5) } else { bot };
+    if (from - y).abs() > 1.0 {
+        ui.c.fill_rrect(Rect::span(x - 1.0, x + 1.0, y.min(from), y.max(from)), 1.0, col.with_alpha(190));
+    }
+    keq::handle(ui.c, x, y.round(), col, st);
+    let lh = ui.c.line_height(LABEL);
+    ui.c.text_center(LABEL, Rect::new(x - 12.0, top - 10.0 - lh, 24.0, lh), col, label);
+    ui.hit(hr, target);
 }
 
-/// The wordmark on the foot's line (as Lemon Delay's): the lemon mark and "LEMON" in lemon beside the effect's name
-/// in large grey capitals, right edge on the cards'; returns its left edge.
-fn logo(ui: &mut Ui, spec: &Spec) -> f32 {
-    let (y, right) = (foot(spec), spec.size.0 as f32 - 8.0);
-    let wb = lemon::spaced_width(ui.c, MARK_BIG, spec.word, 2.0);
+/// An envelope shape button (as the original's): a raised button showing a rise, a hold and a fall, the rise sharper
+/// for the lower values; a click steps to the next value (back to the first after the last).
+fn shape(ui: &mut Ui, id: &str, cx: f32, cy: f32, (lo, hi): (i32, i32)) {
+    let v = ui.m.plain(id).round() as i32;
+    let next = if v >= hi || v < lo { lo } else { v + 1 };
+    let target = Target::Choice(id.into(), next);
+    let r = Rect::new(cx - 20.0, cy - 10.0, 40.0, 20.0);
+    let st = ui.state(r, &target);
+    lemon::plug_button(ui.c, r, 5.0, st);
+    let n = if hi > lo { (v - lo).clamp(0, hi - lo) as f32 / (hi - lo) as f32 } else { 0.0 };
+    // The rise's curve: t^p, p from 0.35 (sharp) to 2.8 (slow); the fall mirrors it.
+    let p = 0.35 * 8.0f32.powf(n);
+    let (x0, x1, y0, y1) = (cx - 13.0, cx + 13.0, cy + 5.0, cy - 5.0);
+    let mut pts = Vec::new();
+    for i in 0..=10 {
+        let t = i as f32 / 10.0;
+        pts.push((x0 + 9.0 * t, y0 + (y1 - y0) * t.powf(p)));
+    }
+    for i in 0..=10 {
+        let t = i as f32 / 10.0;
+        pts.push((x1 - 9.0 + 9.0 * t, y1 + (y0 - y1) * t.powf(1.0 / p)));
+    }
+    ui.c.polyline(&pts, 1.5, brand::MAIN);
+    ui.hit(r, target);
+}
+
+/// A tile of a grid (Lemon Chorus's, as the original's): a card, a small dial at the left, the caption on a field at
+/// the top right and the value text under it. The whole tile turns the dial.
+fn tile(ui: &mut Ui, id: &str, r: Rect, caption: &str) {
+    lemon::plug_panel(ui.c, r);
+    let rad = ((r.h - 14.0) / 2.0).min(17.0);
+    let (cx, cy) = (r.x + 8.0 + rad, r.cy());
+    let target = Target::Knob(id.into());
+    let hr = Rect::span(r.x + 2.0, r.right() - 2.0, r.y + 2.0, r.bottom() - 2.0);
+    let st = ui.state(hr, &target);
+    lemon::dial(ui.c, cx, cy, rad, 2.8, ui.m.norm(id), false, brand::MAIN, st);
+    let x = cx + rad + 10.0;
+    let band = Rect::span(x, r.right() - 7.0, r.y + 6.0, r.y + 21.0);
+    lemon::field(ui.c, band, State::NORMAL);
+    let lh = ui.c.line_height(LABEL);
+    let w = lemon::spaced_width(ui.c, LABEL, caption, 1.0);
+    lemon::spaced(ui.c, LABEL, (band.cx() - w / 2.0).round(), (band.cy() - lh / 2.0).round(), plug::DIM, caption, 1.0);
+    let text = ui.m.text(id);
+    let vh = ui.c.line_height(VALUE);
+    ui.c.text_clip(VALUE, x + 4.0, (r.bottom() - 13.0 - vh / 2.0).round(), band.w - 4.0, brand::TEXT, &text);
+    ui.hit(hr, target);
+}
+
+/// The wordmark (as Lemon Delay's): the lemon mark and "LEMON" in lemon beside the effect's name in large grey
+/// capitals, or LEMON over the name (`stacked`), placed by the spec's [`Mark`]; returns where it is.
+fn logo(ui: &mut Ui, spec: &Spec) -> Rect {
+    let Mark { x, y, anchor, stacked } = spec.mark;
     let ws = lemon::spaced_width(ui.c, MARK_SMALL, "LEMON", 2.5);
     let (lh_b, lh_s) = (ui.c.line_height(MARK_BIG), ui.c.line_height(MARK_SMALL));
+    if stacked {
+        // The mark and LEMON centred over the name.
+        let (wn, wl) = (lemon::spaced_width(ui.c, MARK_BIG, spec.word, 2.0), 14.0 + ws);
+        let w = wn.max(wl);
+        let left = (x - w * anchor).round();
+        let lx = (left + (w - wl) / 2.0).round();
+        lemon::lemon_mark(ui.c, lx + 5.0, y + lh_s / 2.0, 4.0, brand::MAIN);
+        lemon::spaced(ui.c, MARK_SMALL, lx + 14.0, y, brand::MAIN, "LEMON", 2.5);
+        lemon::spaced(ui.c, MARK_BIG, (left + (w - wn) / 2.0).round(), y + lh_s - 2.0, plug::WORDMARK, spec.word, 2.0);
+        let r = Rect::span(left - 2.0, left + w + 2.0, y - 2.0, y + lh_s + lh_b - 2.0);
+        ui.hit(r, Target::Logo);
+        return r;
+    }
+    let wb = lemon::spaced_width(ui.c, MARK_BIG, spec.word, 2.0);
+    let total = 14.0 + ws + 8.0 + wb;
+    let left = (x - total * anchor).round();
+    let right = left + total;
     let bx = (right - wb).round();
     lemon::spaced(ui.c, MARK_BIG, bx, (y - lh_b / 2.0).round(), plug::WORDMARK, spec.word, 2.0);
     let sx = (bx - 8.0 - ws).round();
     lemon::spaced(ui.c, MARK_SMALL, sx, (y - lh_s / 2.0).round() + 1.0, brand::MAIN, "LEMON", 2.5);
-    let left = sx - 14.0;
     lemon::lemon_mark(ui.c, left + 5.0, y, 4.0, brand::MAIN);
-    ui.hit(Rect::span(left - 2.0, right, y - 12.0, y + 12.0), Target::Logo);
-    left
+    let r = Rect::span(left - 2.0, right, y - 12.0, y + 12.0);
+    ui.hit(r, Target::Logo);
+    r
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -260,14 +359,15 @@ pub fn transfer(c: &mut Canvas, r: Rect, x_max: f32, y_max: f32, f: impl Fn(f32)
 /// tick at unity across both.
 pub fn level_bars(c: &mut Canvas, r: Rect, left: f32, right: f32, top: f32) {
     const BAR: f32 = 14.0;
-    const GAP: f32 = 26.0;
+    // 26 px apart, closer in a narrow well.
+    let gap = (r.w - 2.0 * BAR - 28.0).clamp(10.0, 26.0);
     let (y0, y1) = (r.y + 9.0, r.y + r.h - 22.0);
-    let x0 = (r.cx() - BAR - GAP / 2.0).round();
+    let x0 = (r.cx() - BAR - gap / 2.0).round();
     let lh = c.line_height(LABEL);
     let unity = (y1 - (y1 - y0) / top).round();
-    c.fill_rect(Rect::span(x0 - 8.0, x0 + 2.0 * BAR + GAP + 8.0, unity, unity + 1.0), plug::TICK);
+    c.fill_rect(Rect::span(x0 - 8.0, x0 + 2.0 * BAR + gap + 8.0, unity, unity + 1.0), plug::TICK);
     for (i, (v, name)) in [(left, "L"), (right, "R")].into_iter().enumerate() {
-        let x = x0 + i as f32 * (BAR + GAP);
+        let x = x0 + i as f32 * (BAR + gap);
         c.fill_rrect(Rect::span(x, x + BAR, y0, y1), 3.0, plug::TRACK);
         let h = ((y1 - y0) * (v.abs() / top).clamp(0.0, 1.0)).round();
         if h > 0.0 {
