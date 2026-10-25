@@ -829,7 +829,7 @@ mod tests {
     #[test]
     #[ignore]
     fn periods_of_the_windows_devices() {
-        let (devices, _) = audio_cfg::devices();
+        let (devices, _) = audio_cfg::devices(&AudioCfg::default());
         let p = periods(None).expect("the default device says");
         assert!(p.rate >= 8000 && p.exclusive.1 > 0 && p.exclusive.1 <= p.exclusive.0, "{p:?}");
         for d in devices {
@@ -841,7 +841,7 @@ mod tests {
     /// The first Windows device here that takes exclusive mode (Windows' sound settings allow it, `Periods`).
     #[cfg(windows)]
     fn exclusive_device() -> Option<String> {
-        audio_cfg::devices().0.into_iter().find(|d| periods(Some(d)).is_some_and(|p| !p.exclusive_rates.is_empty()))
+        audio_cfg::devices(&AudioCfg::default()).0.into_iter().find(|d| periods(Some(d)).is_some_and(|p| !p.exclusive_rates.is_empty()))
     }
 
     /// Exclusive mode plays on a device that takes it, at its default period, its smallest or a length asked; while
