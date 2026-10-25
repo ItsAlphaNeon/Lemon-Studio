@@ -27,9 +27,9 @@ pub const MIN_W: u32 = 680;
 pub const MIN_H: u32 = 360;
 
 pub const TOOLBAR_H: f32 = 92.0;
-pub const INFO_H: f32 = 28.0;
-pub const SCROLL_H: f32 = 29.0;
-pub const BOTTOM_H: f32 = 21.0;
+pub const INFO_H: f32 = 30.0;
+pub const SCROLL_H: f32 = 30.0;
+pub const BOTTOM_H: f32 = 20.0;
 /// The flag strip along the top of the wave area and the loop strip along its bottom.
 pub const FLAG_H: f32 = 14.0;
 pub const LOOP_H: f32 = 10.0;
@@ -60,13 +60,15 @@ pub struct Layout {
     pub bottom: Rect,
     /// The tool grid's left edge.
     pub grid_x: f32,
+    /// The input level, down the right edge of the toolbar and the info row.
+    pub meter: Rect,
 }
 
 impl Layout {
     pub fn new(w: u32, h: u32) -> Layout {
         let (w, h) = (w.max(MIN_W) as f32, h.max(MIN_H) as f32);
         let info = Rect::new(0.0, TOOLBAR_H, w, INFO_H);
-        let wave_top = TOOLBAR_H + INFO_H + 1.0;
+        let wave_top = TOOLBAR_H + INFO_H;
         let wave_bot = h - BOTTOM_H - SCROLL_H;
         Layout {
             w,
@@ -75,13 +77,19 @@ impl Layout {
             wave: Rect::new(4.0, wave_top, w - 8.0, wave_bot - wave_top),
             scroll: Rect::new(4.0, wave_bot + 1.0, w - 8.0, SCROLL_H - 2.0),
             bottom: Rect::new(0.0, h - BOTTOM_H, w, BOTTOM_H),
-            grid_x: w - 380.0,
+            grid_x: w - 376.0,
+            meter: Rect::new(w - 12.0, 5.0, 7.0, TOOLBAR_H + INFO_H - 9.0),
         }
     }
 
     /// The lane the waveform fills (between the flag strip and the loop strip).
     pub fn lane(&self) -> Rect {
         Rect::new(self.wave.x, self.wave.y + FLAG_H, self.wave.w, self.wave.h - FLAG_H - LOOP_H)
+    }
+
+    /// The scroll bar's overview, between its arrows.
+    pub fn overview(&self) -> Rect {
+        Rect::new(self.scroll.x + 15.0, self.scroll.y + 2.0, self.scroll.w - 30.0, self.scroll.h - 4.0)
     }
 }
 
@@ -171,6 +179,8 @@ pub enum Target {
     Flag(u32),
     LoopFlag,
     Scroll,
+    /// The scroll bar's arrows (right: true).
+    ScrollStep(bool),
     Bottom(Bt),
     Grip,
     Amp(AmpCtl),
@@ -251,6 +261,8 @@ pub enum Glyph {
     BowTie,
     Chain,
     Down,
+    Infinity,
+    Magnet,
 }
 
 /// The pointer, the pressed control and the open Amp panel.
@@ -338,12 +350,12 @@ pub fn time_text(fmt: u8, frames: f64, rate: u32, tempo: f32, per_px: f64) -> St
     }
 }
 
-/// The caption of the length for a time format.
-pub fn time_caption(fmt: u8) -> &'static str {
+/// The name of a time format, as the info row shows it over the length.
+pub fn time_unit(fmt: u8) -> &'static str {
     match fmt {
-        state::TIME_SAMPLES => "LENGTH / SAMPLES",
-        state::TIME_BBT => "LENGTH / BAR:BEAT:TICK",
-        _ => "LENGTH / MIN:SEC:MS",
+        state::TIME_SAMPLES => "SAMPLES",
+        state::TIME_BBT => "BAR:BEAT:TICK",
+        _ => "MIN:SEC:MS",
     }
 }
 
@@ -361,6 +373,10 @@ pub struct Look<'a> {
     pub shown: &'a Shown<'a>,
     pub st: &'a ViewState,
     pub hint: &'a str,
+    /// The host shows the hint (host link): the info row has no hint well.
+    pub hosted: bool,
+    /// The info row's FREE: the time left under the For limit while armed.
+    pub free: String,
     pub playing: bool,
     pub pos: f64,
     pub armed: bool,
@@ -434,16 +450,31 @@ pub fn paint(c: &mut Canvas, l: &Look, w: u32, h: u32) -> Vec<Hit> {
 fn toolbar(ui: &mut Ui, l: &Look, lay: &Layout) {
     let c = &mut *ui.c;
     c.fill_rect(Rect::new(0.0, 0.0, lay.w, TOOLBAR_H), plug::BG);
-    // Transport.
-    let y = 8.0;
-    let tr = [(Tr::Slave, l.rec.slave), (Tr::Loop, l.looping), (Tr::Play, l.playing), (Tr::Scrub, false), (Tr::Stop, false)];
-    for (i, (t, on)) in tr.into_iter().enumerate() {
-        let r = Rect::new(8.0 + i as f32 * 28.0, y, 26.0, 26.0);
-        let col = ui.button(r, Target::Transport(t), on, true);
-        let g = r.inset(5.0);
+    // Transport, where Edison has it: the slave link, loop / play / scrub / stop as one pill, then record.
+    let sr = Rect::new(6.0, 9.0, 24.0, 24.0);
+    let col = ui.flat(sr, Target::Transport(Tr::Slave), l.rec.slave, true);
+    ui.c.icon_stroke(&tabler::LINK, sr.inset(4.0), col, 2.0);
+    let pill = Rect::new(31.0, 6.0, 120.0, 30.0);
+    ui.c.fill_rrect(pill, 15.0, plug::FACE_LINE);
+    let segs = [(Tr::Loop, 31.0, 32.0, l.looping), (Tr::Play, 63.0, 31.0, l.playing), (Tr::Scrub, 94.0, 26.0, false), (Tr::Stop, 120.0, 31.0, false)];
+    for (i, (t, x, w, on)) in segs.into_iter().enumerate() {
+        let r = Rect::new(x, pill.y, w, pill.h);
+        let st = ui.state(r, Target::Transport(t), on);
+        ui.hit(r, Target::Transport(t));
+        // Each segment paints its slice of the pill; the 1 px between them is the outline.
+        let gap = if i > 0 { 1.0 } else { 0.0 };
+        ui.c.push_clip(Rect::new(x + gap, pill.y, w - gap, pill.h));
+        if on {
+            lemon::lit(ui.c, pill.inset(1.0), 14.0, st.hover);
+        } else {
+            let fill = if st.pressed { Color::rgb(0x3a3a3a) } else if st.hover { Color::rgb(0x525252) } else { plug::FACE };
+            ui.c.fill_rrect(pill.inset(1.0), 14.0, fill);
+        }
+        ui.c.pop_clip();
+        let col = if on { brand::COLORED_DARK } else if st.hover { Color::rgb(0xffffff) } else { brand::TEXT };
+        let g = Rect::new(r.cx() - 8.0, r.cy() - 8.0, 16.0, 16.0);
         match t {
-            Tr::Slave => ui.c.icon_stroke(&tabler::LINK, g, col, 2.0),
-            Tr::Loop => ui.c.icon_stroke(&tabler::REPEAT, g, col, 2.0),
+            Tr::Loop => glyph(ui.c, Glyph::Infinity, g, col),
             Tr::Play => {
                 if l.playing {
                     ui.c.fill_rect(Rect::new(g.x + 3.0, g.y + 2.0, 4.0, g.h - 4.0), col);
@@ -453,62 +484,49 @@ fn toolbar(ui: &mut Ui, l: &Look, lay: &Layout) {
                 }
             }
             Tr::Scrub => glyph(ui.c, Glyph::Scrub, g, col),
-            Tr::Stop => ui.c.icon(&tabler::PLAYER_STOP, g.inset(1.0), col),
-            Tr::Record => {}
+            Tr::Stop => ui.c.icon(&tabler::PLAYER_STOP, g.inset(1.5), col),
+            Tr::Slave | Tr::Record => {}
         }
     }
-    // Record: a large disc, lit while armed.
-    let rr = Rect::new(150.0, 5.0, 32.0, 32.0);
+    // Record: a round button beside the pill, lit while armed.
+    let rr = Rect::new(152.5, 6.5, 30.0, 30.0);
     let st = ui.state(rr, Target::Transport(Tr::Record), l.armed);
     ui.hit(rr, Target::Transport(Tr::Record));
     let ring = if st.hover { Color::rgb(0x5a5a5a) } else { plug::FACE };
     ui.c.fill_circle(rr.cx(), rr.cy(), 15.0, plug::FACE_LINE);
     ui.c.fill_circle(rr.cx(), rr.cy(), 14.0, ring);
     let disc = if l.capturing { RECORD } else if l.armed { Color::rgb(0xf08a30) } else { Color::rgb(0x8a3a32) };
-    ui.c.fill_circle(rr.cx(), rr.cy(), 8.0, disc);
+    ui.c.fill_circle(rr.cx(), rr.cy(), 7.5, disc);
     // Append, under the record button.
-    let ar = Rect::new(150.0, 44.0, 64.0, 14.0);
+    let ar = Rect::new(154.0, 40.0, 66.0, 14.0);
     let st = ui.state(ar, Target::Append, l.rec.append);
     ui.hit(ar, Target::Append);
-    lemon::toggle(ui.c, ar.x + 6.0, ar.cy(), l.rec.append, st);
-    ui.c.text(CAPTION, ar.x + 16.0, ar.y + 1.0, if st.hover { brand::TEXT } else { plug::DIM }, "APPEND");
+    lemon::toggle(ui.c, 161.0, 47.0, l.rec.append, st);
+    ui.c.text(CAPTION, 170.0, 41.5, if st.hover { brand::TEXT } else { plug::DIM }, "APPEND");
     // When and For.
-    let wr = Rect::new(192.0, 9.0, 86.0, 22.0);
+    let wr = Rect::new(188.0, 11.0, 66.0, 20.0);
     let st = ui.state(wr, Target::When, false);
     ui.hit(wr, Target::When);
     lemon::field(ui.c, wr, st);
     let when = state::WHEN_NAMES[l.rec.when.min(3) as usize].to_uppercase();
-    ui.c.text_clip(LABEL, wr.x + 7.0, wr.y + 5.0, wr.w - 18.0, brand::TEXT, &when);
+    ui.c.text_clip(LABEL, wr.x + 6.0, wr.y + 4.0, wr.w - 16.0, brand::TEXT, &when);
     caret(ui.c, wr, plug::DIM);
-    ui.c.text(CAPTION, 284.0, 15.0, plug::DIM, "FOR");
-    let mr = Rect::new(304.0, 9.0, 52.0, 22.0);
+    ui.c.text(CAPTION, 257.0, 16.0, plug::DIM, "FOR");
+    let mr = Rect::new(274.0, 11.0, 48.0, 20.0);
     let st = ui.state(mr, Target::Max, false);
     ui.hit(mr, Target::Max);
     lemon::field(ui.c, mr, st);
-    ui.c.text_clip(LABEL, mr.x + 7.0, mr.y + 5.0, mr.w - 18.0, brand::TEXT, state::MAX_SHORT[l.rec.max.min(11) as usize]);
+    ui.c.text_clip(LABEL, mr.x + 6.0, mr.y + 4.0, mr.w - 16.0, brand::TEXT, state::MAX_SHORT[l.rec.max.min(11) as usize]);
     caret(ui.c, mr, plug::DIM);
-    // The input level, under the selectors.
-    let lv = Rect::new(222.0, 40.0, 134.0, 5.0);
-    lemon::plug_well(ui.c, lv, 2.0);
-    let db = if l.level > 0.0 { 20.0 * l.level.log10() } else { -100.0 };
-    let f = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-    if f > 0.0 {
-        let col = if l.level >= 1.0 { RECORD } else { brand::MAIN };
-        ui.c.fill_rrect(Rect::new(lv.x + 1.0, lv.y + 1.0, (lv.w - 2.0) * f, lv.h - 2.0), 1.5, col);
-    }
-    // −60 dB, where On input and Input start.
-    ui.c.fill_rect(Rect::new(lv.x + 1.0, lv.y - 2.0, 1.0, lv.h + 4.0), plug::TICK);
 
-    // The nine menu buttons, in three groups.
-    let mut x = 8.0;
-    for (i, (id, _)) in MENUS.iter().enumerate() {
-        if i == 2 || i == 5 {
-            ui.c.fill_rect(Rect::new(x + 2.0, 64.0, 1.0, 18.0), plug::TICK);
-            x += 8.0;
-        }
-        let r = Rect::new(x, 60.0, 28.0, 26.0);
-        let col = ui.button(r, Target::Menu(*id), false, true);
-        let g = r.inset(6.0);
+    // The nine menus, as flat icons in three groups.
+    for (x, _) in [(74.0, ()), (158.0, ())] {
+        ui.c.fill_rect(Rect::new(x, 64.0, 1.0, 18.0), plug::TICK);
+    }
+    for ((id, _), cx) in MENUS.iter().zip([32.5, 58.0, 91.0, 116.0, 141.0, 175.0, 199.0, 220.0, 244.0]) {
+        let r = Rect::new(cx - 10.0, 61.0, 20.0, 23.0);
+        let col = ui.flat(r, Target::Menu(*id), false, true);
+        let g = Rect::new(cx - 8.0, r.cy() - 8.0, 16.0, 16.0);
         match id {
             MenuId::File => ui.c.icon_stroke(&tabler::DEVICE_FLOPPY, g, col, 1.8),
             MenuId::Format => glyph(ui.c, Glyph::Pages, g, col),
@@ -521,75 +539,100 @@ fn toolbar(ui: &mut Ui, l: &Look, lay: &Layout) {
             MenuId::Zoom => ui.c.icon_stroke(&tabler::ZOOM_IN, g, col, 1.8),
             MenuId::Options => {}
         }
-        x += 30.0;
     }
 
     // The tool grid.
     for (i, t) in TOOLS.iter().enumerate() {
-        let r = Rect::new(lay.grid_x + (i % 9) as f32 * 40.0, 25.0 + (i / 9) as f32 * 32.0, 38.0, 30.0);
+        let r = Rect::new((lay.grid_x + (i % 9) as f32 * 39.25).round(), 27.0 + (i / 9) as f32 * 31.0, 38.0, 30.0);
         let col = ui.button(r, Target::Tool(i), false, t.left || t.right);
         glyph(ui.c, t.glyph, Rect::new(r.cx() - 9.0, r.cy() - 9.0, 18.0, 18.0), col);
     }
 
-    // The wordmark and the input mute at the top right.
-    let mr = Rect::new(lay.w - 26.0, 3.0, 20.0, 19.0);
+    // The wordmark and the input mute at the top right, the input level down the right edge.
+    let mr = Rect::new(lay.w - 40.0, 2.0, 20.0, 20.0);
     let col = ui.flat(mr, Target::Mute, l.rec.mute, true);
     ui.c.icon_stroke(if l.rec.mute { &tabler::VOLUME_OFF } else { &tabler::VOLUME }, mr.inset(2.5), col, 1.8);
     let name_w = lemon::spaced_width(ui.c, MARK, "TESLA", 3.0);
-    let nx = lay.w - 34.0 - name_w;
+    let nx = lay.w - 45.0 - name_w;
     let wr = Rect::new(nx - 16.0, 3.0, name_w + 18.0, 19.0);
     ui.hit(wr, Target::Wordmark);
     lemon::lemon_mark(ui.c, nx - 9.0, 12.5, 4.5, brand::MAIN);
     lemon::spaced(ui.c, MARK, nx, 3.0, plug::WORDMARK, "TESLA", 3.0);
+    let lv = lay.meter;
+    lemon::plug_well(ui.c, lv, 3.0);
+    // −60 dB at the bottom (where On input and Input start) to 0 dB at the top.
+    let db = if l.level > 0.0 { 20.0 * l.level.log10() } else { -100.0 };
+    let f = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+    if f > 0.0 {
+        let col = if l.level >= 1.0 { RECORD } else { brand::MAIN };
+        let h = (lv.h - 2.0) * f;
+        ui.c.fill_rrect(Rect::new(lv.x + 1.0, lv.bottom() - 1.0 - h, lv.w - 2.0, h), 2.0, col);
+    }
 }
 
 /// The small arrow at a selector field's right end.
 fn caret(c: &mut Canvas, r: Rect, col: Color) {
-    let (x, y) = (r.right() - 11.0, r.cy());
-    c.fill_polygon(&[(x, y - 4.0), (x + 4.0, y), (x, y + 4.0)], col);
+    let (x, y) = (r.right() - 10.0, r.cy());
+    c.fill_polygon(&[(x, y - 3.5), (x + 3.5, y), (x, y + 3.5)], col);
 }
 
 fn info_row(ui: &mut Ui, l: &Look, lay: &Layout) {
     let r = lay.info;
-    lemon::outlined(ui.c, Rect::new(4.0, r.y, lay.w - 8.0, r.h - 1.0), 6.0, plug::PANEL_LINE, plug::PANEL);
+    let right = lay.meter.x - 4.0;
+    lemon::outlined(ui.c, Rect::new(4.0, r.y + 1.0, right - 4.0, r.h - 2.0), 6.0, plug::PANEL_LINE, plug::PANEL);
     let s = &l.doc.sample;
     let rate = l.shown.rate;
+    let (cap_y, val_y) = (r.y + 4.0, r.y + 14.0);
     let field = |ui: &mut Ui, x: f32, cap: &str, val: &str, col: Color| {
-        ui.c.text(CAPTION, x, r.y + 2.0, plug::FAINT, cap);
-        ui.c.text(VALUE, x, r.y + 12.0, col, val);
+        ui.c.text(CAPTION, x, cap_y, plug::FAINT, cap);
+        ui.c.text(VALUE, x, val_y, col, val);
     };
-    field(ui, 12.0, "SAMPLERATE", &format!("{rate}Hz"), brand::TEXT);
+    // Edison's columns, with its separators.
+    for x in [66.0, 114.0, 193.0] {
+        ui.c.fill_rect(Rect::new(x, r.y + 5.0, 1.0, r.h - 10.0), plug::TICK);
+    }
+    field(ui, 9.0, "SAMPLERATE", &format!("{rate}Hz"), brand::TEXT);
     // Format: bit depth and a channel glyph; clicking converts.
-    let fr = Rect::new(82.0, r.y + 1.0, 52.0, r.h - 3.0);
+    let fr = Rect::new(68.0, r.y + 3.0, 44.0, r.h - 6.0);
     let st = ui.state(fr, Target::Format, false);
     ui.hit(fr, Target::Format);
     if st.hover {
         ui.c.fill_rrect(fr, 4.0, Color::rgb(0x3d3d3d));
     }
-    field(ui, 86.0, "FORMAT", &format!("{}", s.format.bits()), brand::TEXT);
-    let gx = 106.0;
-    let gy = r.y + 15.0;
-    ui.c.stroke_circle(gx + 5.0, gy + 4.0, 4.0, 1.4, plug::DIM);
+    let bits = format!("{}", s.format.bits());
+    field(ui, 71.0, "FORMAT", &bits, brand::TEXT);
+    let gx = 71.0 + ui.c.text_width(VALUE, &bits) + 5.0;
+    let gy = val_y + 3.0;
+    ui.c.stroke_circle(gx + 4.0, gy + 4.0, 4.0, 1.4, plug::DIM);
     if l.shown.channels == 2 {
-        ui.c.stroke_circle(gx + 12.0, gy + 4.0, 4.0, 1.4, plug::DIM);
+        ui.c.stroke_circle(gx + 11.0, gy + 4.0, 4.0, 1.4, plug::DIM);
     }
     let tempo = if s.tempo > 0.0 { format!("{:.1}", s.tempo) } else { "-".into() };
-    field(ui, 140.0, "TEMPO", &tempo, brand::TEXT);
-    // The hint well.
-    let hx = 190.0;
-    let title_x = lay.w - 270.0;
-    let hr = Rect::new(hx, r.y + 4.0, title_x - hx - 10.0, r.h - 9.0);
-    lemon::plug_well(ui.c, hr, 5.0);
-    ui.c.text_clip(HINT, hr.x + 7.0, hr.y + 3.0, hr.w - 14.0, plug::DIM, l.hint);
-    // Title ("RECORDING" in red while armed) and length.
-    let (title, col) = if l.armed { ("RECORDING".to_string(), RECORD) } else { (l.doc.title(), brand::TEXT) };
-    ui.c.text(CAPTION, title_x, r.y + 2.0, plug::FAINT, "TITLE");
-    ui.c.text_clip(TITLE, title_x, r.y + 11.0, 150.0, col, &title);
-    let lw = lay.w - 12.0;
+    field(ui, 119.0, "TEMPO", &tempo, brand::TEXT);
+    field(ui, 162.0, "FREE", &l.free, brand::TEXT);
+    // Length, at the right: "LENGTH", then the time format's name over the value.
     let fmt = l.doc.view.time;
-    ui.c.text_right(CAPTION, lw, r.y + 2.0, plug::FAINT, time_caption(fmt));
+    let unit = time_unit(fmt);
+    let lw = right - 5.0;
+    ui.c.text_right(CAPTION, lw, cap_y, plug::FAINT, unit);
+    let unit_w = ui.c.text_width(CAPTION, unit);
+    let len_x = lw - unit_w - 10.0 - ui.c.text_width(CAPTION, "LENGTH");
+    ui.c.text(CAPTION, len_x, cap_y, plug::FAINT, "LENGTH");
     let len = time_text(if fmt == state::TIME_AUTO { state::TIME_MSM } else { fmt }, l.shown.frames() as f64, rate, s.tempo, 1.0);
-    ui.c.text_right(VALUE, lw, r.y + 12.0, brand::TEXT, &len);
+    ui.c.text_right(VALUE, lw, val_y, brand::TEXT, &len);
+    // Title ("RECORDING" in red while armed), and the hint where no host shows it.
+    let title_x = 198.0;
+    let (title, col) = if l.armed { ("RECORDING".to_string(), RECORD) } else { (l.doc.title(), brand::TEXT) };
+    ui.c.text(CAPTION, title_x, cap_y, plug::FAINT, "TITLE");
+    let title_end = if l.hosted { len_x - 10.0 } else { (title_x + 150.0).min(len_x - 10.0) };
+    ui.c.text_clip(TITLE, title_x, val_y - 1.0, title_end - title_x, col, &title);
+    if !l.hosted {
+        let hr = Rect::new(title_end + 6.0, r.y + 5.0, len_x - title_end - 18.0, r.h - 10.0);
+        if hr.w > 40.0 {
+            lemon::plug_well(ui.c, hr, 5.0);
+            ui.c.text_clip(HINT, hr.x + 7.0, hr.y + 3.0, hr.w - 14.0, plug::DIM, l.hint);
+        }
+    }
 }
 
 /// A good grid step (frames) for about `px` pixels between lines.
@@ -741,12 +784,24 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
 fn scroll(ui: &mut Ui, l: &Look, lay: &Layout) {
     let r = lay.scroll;
     lemon::plug_well(ui.c, r, 5.0);
-    ui.hit(r, Target::Scroll);
+    // The arrows at both ends step the view; the overview between them drags it.
+    for right in [false, true] {
+        let ar = if right { Rect::new(r.right() - 14.0, r.y, 14.0, r.h) } else { Rect::new(r.x, r.y, 14.0, r.h) };
+        let st = ui.state(ar, Target::ScrollStep(right), false);
+        ui.hit(ar, Target::ScrollStep(right));
+        let col = if st.hover { brand::TEXT } else { plug::DIM };
+        let (cx, cy) = (ar.cx(), ar.cy());
+        let pts = if right { [(cx - 2.0, cy - 4.0), (cx + 2.0, cy), (cx - 2.0, cy + 4.0)] } else { [(cx + 2.0, cy - 4.0), (cx - 2.0, cy), (cx + 2.0, cy + 4.0)] };
+        ui.c.polyline(&pts, 1.4, col);
+    }
+    let inner = lay.overview();
+    ui.c.fill_rect(Rect::new(inner.x - 1.0, r.y + 1.0, 1.0, r.h - 2.0), plug::WELL_LINE);
+    ui.c.fill_rect(Rect::new(inner.right(), r.y + 1.0, 1.0, r.h - 2.0), plug::WELL_LINE);
+    ui.hit(inner, Target::Scroll);
     let n = l.shown.frames();
     if n == 0 {
         return;
     }
-    let inner = r.inset(2.0);
     let per = n as f64 / inner.w as f64;
     let mid = inner.cy();
     let amp = inner.h / 2.0 - 1.0;
@@ -769,7 +824,7 @@ fn scroll(ui: &mut Ui, l: &Look, lay: &Layout) {
     let x0 = inner.x + (start / per) as f32;
     let x1 = inner.x + ((start + per_px * lane.w as f64) / per) as f32;
     let tr = Rect::new(x0.max(inner.x), r.y + 1.0, (x1.min(inner.right()) - x0.max(inner.x)).max(6.0), r.h - 2.0);
-    let st = ui.state(r, Target::Scroll, false);
+    let st = ui.state(inner, Target::Scroll, false);
     ui.c.fill_rrect(tr, 4.0, brand::MAIN.with_alpha(if st.hover { 46 } else { 30 }));
     ui.c.stroke_rrect(tr.inset(0.5), 4.0, 1.0, brand::MAIN.with_alpha(150));
     if l.playing {
@@ -781,20 +836,22 @@ fn scroll(ui: &mut Ui, l: &Look, lay: &Layout) {
 fn bottom(ui: &mut Ui, l: &Look, lay: &Layout) {
     let r = lay.bottom;
     let y = r.y + 1.0;
-    let mut x = 6.0;
-    let btn = |ui: &mut Ui, x: f32, t: Target, g: Glyph, on: bool, enabled: bool| {
-        let b = Rect::new(x, y, 22.0, 18.0);
+    // Buttons centred where Edison has its icons.
+    let btn = |ui: &mut Ui, cx: f32, w: f32, t: Target, g: Glyph, on: bool, enabled: bool| {
+        let b = Rect::new((cx - w / 2.0).round(), y, w, 18.0);
         let col = ui.flat(b, t, on, enabled);
-        glyph(ui.c, g, Rect::new(b.cx() - 7.0, b.cy() - 7.0, 14.0, 14.0), col);
+        let gr = Rect::new(b.cx() - 7.0, b.cy() - 7.0, 14.0, 14.0);
+        if g == Glyph::Magnet {
+            ui.c.icon_stroke(&tabler::MAGNET, gr, col, 1.8);
+        } else {
+            glyph(ui.c, g, gr, col);
+        }
     };
-    btn(ui, x, Target::Menu(MenuId::Options), Glyph::Down, false, true);
-    x += 24.0;
-    btn(ui, x, Target::Bottom(Bt::Undo), Glyph::Undo, false, l.can_undo);
-    x += 30.0;
+    btn(ui, 8.0, 14.0, Target::Menu(MenuId::Options), Glyph::Down, false, true);
+    btn(ui, 30.5, 22.0, Target::Bottom(Bt::Undo), Glyph::Undo, false, l.can_undo);
     for (i, g) in [Glyph::Wave, Glyph::Pan, Glyph::Ramp, Glyph::BowTie, Glyph::Chain].into_iter().enumerate() {
         // Envelope modes come in a later version.
-        btn(ui, x, Target::Bottom(Bt::Mode(i as u8)), g, i == 0, i == 0);
-        x += 24.0;
+        btn(ui, 59.0 + i as f32 * 23.5, 22.0, Target::Bottom(Bt::Mode(i as u8)), g, i == 0, i == 0);
     }
     let v = &l.doc.view;
     let right = [
@@ -804,64 +861,57 @@ fn bottom(ui: &mut Ui, l: &Look, lay: &Layout) {
         (Bt::Regions, Glyph::Flag, v.regions, true),
         (Bt::Freeze, Glyph::Snowflake, v.freeze, true),
         (Bt::ClickFree, Glyph::SCurve, v.clickfree, true),
-        (Bt::Snap, Glyph::Snowflake, v.snap_on, true),
+        (Bt::Snap, Glyph::Magnet, v.snap_on, true),
         (Bt::Slide, Glyph::Slide, v.slide, true),
     ];
-    let mut x = lay.w - 18.0 - right.len() as f32 * 24.0;
-    for (b, g, on, en) in right {
-        let g = if b == Bt::Snap { Glyph::Eq } else { g };
-        let rr = Rect::new(x, y, 22.0, 18.0);
-        let col = ui.flat(rr, Target::Bottom(b), on, en);
-        let gr = Rect::new(rr.cx() - 7.0, rr.cy() - 7.0, 14.0, 14.0);
-        if b == Bt::Snap {
-            ui.c.icon_stroke(&tabler::MAGNET, gr, col, 1.8);
-        } else {
-            glyph(ui.c, g, gr, col);
-        }
-        x += 24.0;
+    for (i, (b, g, on, en)) in right.into_iter().enumerate() {
+        btn(ui, lay.w - 183.0 + i as f32 * 23.5, 22.0, Target::Bottom(b), g, on, en);
     }
     // The resize grip in the corner.
-    let gr = Rect::new(lay.w - 14.0, lay.h - 14.0, 14.0, 14.0);
+    let gr = Rect::new(lay.w - 7.0, lay.h - 7.0, 7.0, 7.0);
     ui.hit(gr, Target::Grip);
-    for k in 0..3 {
-        let o = 3.0 + k as f32 * 4.0;
-        ui.c.line(lay.w - 2.0 - o, lay.h - 2.0, lay.w - 2.0, lay.h - 2.0 - o, 1.0, plug::TICK);
+    for k in 0..2 {
+        let o = 3.0 + k as f32 * 3.0;
+        ui.c.line(lay.w - 1.0 - o, lay.h - 1.0, lay.w - 1.0, lay.h - 1.0 - o, 1.0, plug::TICK);
     }
 }
 
-/// The Amp panel's geometry, centred on the wave area.
+/// The Amp panel's geometry: Edison's tall panel, centred over the wave area and as tall as the editor allows.
 pub fn amp_rect(lay: &Layout) -> Rect {
-    let (w, h) = (372.0, 196.0);
-    Rect::new((lay.wave.cx() - w / 2.0).round(), (lay.wave.cy() - h / 2.0).round().max(lay.wave.y), w, h)
+    let (w, h) = (208.0, (lay.h - 8.0).min(429.0));
+    Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h)
 }
 
-/// The Amp panel's knobs' centres and the faders' slots.
+/// The Amp panel's knobs, the law selector and the faders' slots, laid out as Edison's.
 pub fn amp_parts(lay: &Layout) -> (Rect, [(AmpCtl, Rect); 6]) {
     let p = amp_rect(lay);
-    let knob = |cx: f32| Rect::new(p.x + cx - 22.0, p.y + 48.0, 44.0, 44.0);
-    let fader = |cx: f32| Rect::new(p.x + cx - 9.0, p.y + 36.0, 18.0, 108.0);
+    let knob = |cy: f32, r: f32| Rect::new(p.x + 104.0 - r, p.y + cy - r, 2.0 * r, 2.0 * r);
+    // The faders take whatever height the knobs and the buttons leave.
+    let fh = (p.h - 248.0).max(60.0);
+    let fader = |cx: f32| Rect::new(p.x + cx - 15.0, p.y + 126.0, 30.0, fh);
     (p, [
-        (AmpCtl::Pan, knob(52.0)),
-        (AmpCtl::Law, Rect::new(p.x + 14.0, p.y + 112.0, 76.0, 20.0)),
-        (AmpCtl::Left, fader(140.0)),
-        (AmpCtl::Volume, fader(186.0)),
-        (AmpCtl::Right, fader(232.0)),
-        (AmpCtl::Sep, knob(316.0)),
+        (AmpCtl::Pan, knob(79.0, 22.0)),
+        (AmpCtl::Law, Rect::new(p.x + 124.0, p.y + 36.0, 66.0, 21.0)),
+        (AmpCtl::Left, fader(42.0)),
+        (AmpCtl::Volume, fader(104.0)),
+        (AmpCtl::Right, fader(166.0)),
+        (AmpCtl::Sep, knob(p.h - 90.0, 18.0)),
     ])
 }
 
 /// A fader's travel inside its slot (the top = +1).
 pub fn fader_travel(slot: Rect) -> (f32, f32) {
-    (slot.y + 8.0, slot.bottom() - 8.0)
+    (slot.y + 7.0, slot.bottom() - 7.0)
 }
 
 fn amp_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
-    ui.c.fill_rect(lay.wave, plug::BG.with_alpha(140));
+    ui.c.fill_rect(Rect::new(0.0, 0.0, lay.w, lay.h), plug::BG.with_alpha(140));
     let (p, parts) = amp_parts(lay);
     ui.hit(p, Target::AmpPanel);
     lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
     lemon::plug_panel(ui.c, p);
-    ui.c.text(TITLE, p.x + 14.0, p.y + 8.0, brand::TEXT, "Amp");
+    ui.c.text(TITLE, p.x + 12.0, p.y + 7.0, brand::TEXT, "Amp");
+    lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
     for (ctl, r) in parts {
         let t = Target::Amp(ctl);
         ui.hit(r, t);
@@ -869,14 +919,17 @@ fn amp_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
         match ctl {
             AmpCtl::Pan | AmpCtl::Sep => {
                 let v = if ctl == AmpCtl::Pan { a.amp.pan } else { a.amp.sep };
-                lemon::dial(ui.c, r.cx(), r.cy(), 20.0, 4.0, (v + 1.0) / 2.0, true, brand::MAIN, st);
-                let cap = if ctl == AmpCtl::Pan { "PANNING" } else { "STEREO SEP" };
-                ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.y - 16.0, r.w + 40.0, 12.0), plug::DIM, cap);
+                lemon::dial(ui.c, r.cx(), r.cy(), r.w / 2.0, 4.0, (v + 1.0) / 2.0, true, brand::MAIN, st);
+                if ctl == AmpCtl::Sep {
+                    ui.c.text_center(CAPTION, Rect::new(r.x - 30.0, r.bottom() + 4.0, r.w + 60.0, 12.0), plug::DIM, "STEREO SEP");
+                }
             }
             AmpCtl::Law => {
+                ui.c.text_right(CAPTION, r.x - 5.0, r.y + 5.0, plug::DIM, "PANNING");
                 lemon::field(ui.c, r, st);
                 let s = if a.amp.law == Law::Circular { "CIRCULAR" } else { "TRIANGULAR" };
-                ui.c.text_center(LABEL, r, brand::TEXT, s);
+                ui.c.text_clip(LABEL, r.x + 6.0, r.y + 4.0, r.w - 16.0, brand::TEXT, s);
+                caret(ui.c, r, plug::DIM);
             }
             AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right => {
                 let v = match ctl {
@@ -884,34 +937,47 @@ fn amp_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
                     AmpCtl::Volume => a.amp.volume,
                     _ => a.amp.right,
                 };
-                lemon::plug_well(ui.c, Rect::new(r.cx() - 2.0, r.y + 4.0, 4.0, r.h - 8.0), 2.0);
                 let (top, bot) = fader_travel(r);
-                ui.c.fill_rect(Rect::new(r.x + 2.0, (top + bot) / 2.0, r.w - 4.0, 1.0), plug::TICK);
+                lemon::plug_well(ui.c, Rect::new(r.cx() - 2.0, top - 3.0, 4.0, bot - top + 6.0), 2.0);
+                // Scale ticks beside the slot, and the centre line across.
+                let ticks = 12;
+                for k in 0..=ticks {
+                    let ty = (top + (bot - top) * k as f32 / ticks as f32).round();
+                    ui.c.fill_rect(Rect::new(r.cx() + 6.0, ty, 7.0, 1.0), plug::GRID.mix(plug::TICK, 0.5));
+                }
+                let mid = ((top + bot) / 2.0).round();
+                ui.c.fill_rect(Rect::new(r.x - 3.0, mid, r.w + 6.0, 1.0), plug::TICK);
                 let y = bot - (v + 1.0) / 2.0 * (bot - top);
                 let col = match ctl {
                     AmpCtl::Left => Color::rgb(0xf0a030),
                     AmpCtl::Right => Color::rgb(0xe0505a),
                     _ => Color::rgb(0xbdbdbd),
                 };
-                ui.c.fill_rrect(Rect::new(r.x, y - 5.0, r.w, 10.0), 3.0, if st.hover { col.shade(0.2) } else { col });
+                // The level from the centre line to the handle.
+                let (a0, a1) = (y.min(mid), y.max(mid));
+                ui.c.fill_rect(Rect::new(r.cx() - 1.0, a0, 2.0, a1 - a0), col.with_alpha(180));
+                let hr = Rect::new(r.x + 1.0, y - 7.0, r.w - 2.0, 14.0);
+                ui.c.fill_rrect(hr, 3.0, Color::rgb(0x111111));
+                ui.c.fill_rrect(hr.inset(1.0), 2.5, if st.hover { col.shade(0.2) } else { col });
+                ui.c.fill_rect(Rect::new(hr.x + 7.0, hr.cy() - 0.5, hr.w - 14.0, 1.0), Color::rgb(0x111111).with_alpha(160));
                 let cap = match ctl {
-                    AmpCtl::Left => "L",
-                    AmpCtl::Right => "R",
-                    _ => "VOL",
+                    AmpCtl::Left => "LEFT",
+                    AmpCtl::Right => "RIGHT",
+                    _ => "LEFT / RIGHT",
                 };
-                ui.c.text_center(CAPTION, Rect::new(r.x - 10.0, r.bottom() + 2.0, r.w + 20.0, 12.0), plug::DIM, cap);
+                ui.c.text_center(CAPTION, Rect::new(r.cx() - 40.0, r.y - 15.0, 80.0, 12.0), plug::DIM, cap);
             }
             _ => {}
         }
     }
-    let by = p.bottom() - 32.0;
-    let buttons = [(AmpCtl::Reset, "RESET", 150.0), (AmpCtl::Preview, "PREVIEW", 220.0), (AmpCtl::Accept, "ACCEPT", 292.0)];
-    for (ctl, label, x) in buttons {
-        let r = Rect::new(p.x + x, by, 66.0, 22.0);
+    let by = p.bottom() - 37.0;
+    let buttons = [(AmpCtl::Reset, "RESET", 8.0, 58.0), (AmpCtl::Preview, "PREVIEW", 72.0, 64.0), (AmpCtl::Accept, "ACCEPT", 140.0, 60.0)];
+    for (ctl, label, x, w) in buttons {
+        let r = Rect::new(p.x + x, by, w, 29.0);
         let col = ui.button(r, Target::Amp(ctl), ctl == AmpCtl::Preview && a.previewing, true);
         ui.c.text_center(LABEL, r, col, label);
     }
-    let cr = Rect::new(p.right() - 26.0, p.y + 6.0, 20.0, 20.0);
+    let cr = Rect::new(p.right() - 26.0, p.y + 5.0, 20.0, 20.0);
     let col = ui.flat(cr, Target::Amp(AmpCtl::Close), false, true);
     ui.c.icon_stroke(&tabler::X, cr.inset(4.0), col, 2.0);
 }
@@ -1044,9 +1110,24 @@ pub fn glyph(c: &mut Canvas, g: Glyph, r: Rect, col: Color) {
             c.fill_circle(x + w * 0.65, r.cy(), w * 0.2, col);
         }
         Glyph::Ramp => c.polyline(&[p(0.0, 0.9), p(1.0, 0.1)], lw, col),
-        Glyph::BowTie => c.fill_polygon(&[p(0.0, 0.15), p(0.5, 0.5), p(0.0, 0.85), p(1.0, 0.15), p(0.5, 0.5), p(1.0, 0.85)], col),
+        Glyph::BowTie => {
+            c.fill_polygon(&[p(0.05, 0.2), p(0.5, 0.5), p(0.05, 0.8)], col);
+            c.fill_polygon(&[p(0.95, 0.2), p(0.5, 0.5), p(0.95, 0.8)], col);
+        }
         Glyph::Chain => c.icon_stroke(&tabler::LINK, r, col, 1.8),
         Glyph::Down => c.fill_polygon(&[p(0.15, 0.3), p(0.85, 0.3), p(0.5, 0.75)], col),
+        Glyph::Infinity => {
+            // A lemniscate.
+            let pts: Vec<(f32, f32)> = (0..=48)
+                .map(|i| {
+                    let t = i as f32 / 48.0 * std::f32::consts::TAU;
+                    let d = 1.0 + t.sin() * t.sin();
+                    p(0.5 + 0.46 * t.cos() / d, 0.5 + 0.5 * t.sin() * t.cos() / d)
+                })
+                .collect();
+            c.polyline(&pts, lw, col);
+        }
+        Glyph::Magnet => c.icon_stroke(&tabler::MAGNET, r, col, 1.8),
     }
 }
 
@@ -1072,6 +1153,8 @@ pub fn hint(t: &Target, l: &HintCtx) -> String {
         Target::Flag(_) => "Marker / region: drag to move, right-click for options".into(),
         Target::LoopFlag => "Loop: right-click for options".into(),
         Target::Scroll => "Drag to scroll \u{00b7} wheel to zoom".into(),
+        Target::ScrollStep(false) => "Scroll left".into(),
+        Target::ScrollStep(true) => "Scroll right".into(),
         Target::Bottom(Bt::Undo) => "Undo / undo history".into(),
         Target::Bottom(Bt::Mode(0)) => "Edit waveform".into(),
         Target::Bottom(Bt::Mode(1)) => "Edit panning envelope (later version)".into(),

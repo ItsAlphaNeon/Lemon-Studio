@@ -609,7 +609,7 @@ impl Logic {
             }
             Target::Scroll => {
                 let lay = self.layout();
-                let inner = lay.scroll.inset(2.0);
+                let inner = lay.overview();
                 let (start, len, n) = self.doc(|d| {
                     let (s, p) = view::span(d, d.frames(), lay.lane().w);
                     (s, p * lay.lane().w as f64, d.frames() as f64)
@@ -621,6 +621,7 @@ impl Logic {
                     acts.extend(self.moved(x, y, m));
                 }
             }
+            Target::ScrollStep(right) => self.scroll_by(if right { 40.0 } else { -40.0 }),
             Target::Bottom(b) => acts.extend(self.bottom(b, x, y)),
             Target::Grip => {
                 let (w, h) = self.size();
@@ -739,7 +740,7 @@ impl Logic {
                 }
             }
             Some(Drag::Scroll { grab }) => {
-                let inner = lay.scroll.inset(2.0);
+                let inner = lay.overview();
                 let w = lay.lane().w;
                 self.doc(|d| {
                     let n = d.frames() as f64;
@@ -1749,11 +1750,22 @@ impl Logic {
         } else {
             None
         };
+        // FREE: what the For limit leaves of the recording, while armed.
+        let free = match crate::rec::Recorder::limit_frames(rec.max, take.rate.max(1)) {
+            u64::MAX => "-".to_string(),
+            _ if !rec.armed => "-".to_string(),
+            limit => {
+                let s = limit.saturating_sub(take.l.len() as u64) / u64::from(take.rate.max(1));
+                format!("{}:{:02}", s / 60, s % 60)
+            }
+        };
         let look = view::Look {
             doc: &d,
             shown: &shown,
             st: &self.view,
             hint: &self.hint,
+            hosted: self.hosted,
+            free,
             playing: sh.playing.load(Ordering::Relaxed),
             pos: sh.position(),
             armed: rec.armed,
@@ -2809,6 +2821,13 @@ mod tests {
         };
         let mut l = logic();
         save(&mut l, "tesla_empty", 1.0);
+        // TESLA_WAV=<file>: that file as loaded, at 2x (to set beside a capture of Edison with the same file).
+        if let Some(wav) = std::env::var_os("TESLA_WAV") {
+            let mut r = logic();
+            r.open(&wav.to_string_lossy());
+            r.hosted = true;
+            save(&mut r, "tesla_file_x2", 2.0);
+        }
         let n = 88200;
         let l_ch: Vec<f32> = (0..n).map(|i| (i as f32 * 0.03).sin() * 0.8 * (-(i as f32) / 30000.0).exp()).collect();
         let r_ch: Vec<f32> = (0..n).map(|i| (i as f32 * 0.071).sin() * 0.4 * (1.0 - i as f32 / n as f32)).collect();
