@@ -895,6 +895,10 @@ impl Plugins {
             p.open_editor(w.area(), k)?
         };
         h.link = fit_editor(&w, size, k);
+        #[cfg(target_os = "linux")]
+        if h.link.is_none() {
+            fit_resizable(&w, &h.plugin, size, k);
+        }
         // On top: the app stacks it above its other windows (`State::raise`), and a new child window starts below
         // the open ones.
         w.raise();
@@ -1149,6 +1153,20 @@ impl Plugins {
                         FrameEvent::MiscMenu(m, x, y) => Request::MiscMenu(row, m, x, y),
                         FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
                         FrameEvent::NotAvailable(name) => Request::NotAvailable(name),
+                        FrameEvent::Resized(ew, eh) => {
+                            // The user resized the window: the editor follows if it can, and the window follows the
+                            // editor. Lemon plugins joined through the host link size their editor themselves.
+                            #[cfg(target_os = "linux")]
+                            {
+                                let k = w.scale();
+                                let px = |v: f32| (v * k).round().max(1.0) as u32;
+                                let taken = if h.link.is_some() { None } else { h.plugin.lock().ok().and_then(|mut p| p.resize_editor(px(ew), px(eh))) };
+                                w.editor_resized(taken.map(|(tw, th)| (tw as f32 / k, th as f32 / k)));
+                            }
+                            #[cfg(not(target_os = "linux"))]
+                            let _ = (ew, eh);
+                            continue;
+                        }
                         FrameEvent::Dpi(k) => {
                             // A Main GUI scaling percentage replaces the monitor's scale (spec: ui/ui-scaling.md §1).
                             #[cfg(any(windows, target_os = "macos"))]
@@ -1200,6 +1218,22 @@ fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_ho
         None => w.set_editor_size((ew as f32 / scale, eh as f32 / scale)),
     }
     link
+}
+
+/// Lets the user resize window `w` when its freshly opened editor (`size` in device px at `scale`) can be resized by the
+/// host, and shrinks an editor whose window would not fit the monitor's work area to fit it. An editor that cannot be
+/// resized is left as it is.
+#[cfg(target_os = "linux")]
+fn fit_resizable(w: &FrameWindow, plugin: &std::sync::Mutex<dyn os_host::Plugin>, size: (u32, u32), scale: f32) {
+    let Ok(can) = plugin.lock().map(|p| p.can_resize_editor()) else { return };
+    w.set_resizable(can);
+    let editor = (size.0 as f32 / scale, size.1 as f32 / scale);
+    let Some((ew, eh)) = w.work_size().and_then(|room| crate::plugin_window::fit_in(editor, w.chrome(), room)).filter(|_| can) else { return };
+    let px = |v: f32| (v * scale).round().max(1.0) as u32;
+    let taken = plugin.lock().ok().and_then(|mut p| p.resize_editor(px(ew), px(eh)));
+    if let Some((tw, th)) = taken {
+        w.editor_resized(Some((tw as f32 / scale, th as f32 / scale)));
+    }
 }
 
 impl Drop for Hosted {
@@ -3790,5 +3824,204 @@ mod tests {
             pl.drop_key(k);
         }
         pump(&mut pl, 100);
+    }
+}
+
+/// Host-driven resizing of plugin editors on X11: a window whose editor can be resized follows a resize by the window
+/// manager (simulated: a bare X server has none, so the test resizes the frame itself), and an editor larger than the
+/// screen opens fitted to it. Opens windows: run it on a private X server only (`DISPLAY=:78 cargo test -p os-app
+/// --bin lemonstudio editors_follow_window_resizes -- --ignored`).
+#[cfg(all(test, target_os = "linux"))]
+mod resize_tests {
+    use super::*;
+    use std::ffi::c_void;
+    use std::sync::Mutex;
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt as _};
+    use x11rb::wrapper::ConnectionExt as _;
+
+    /// An editor that takes sizes in steps of 10 px, from 100 x 100 to 4000 x 4000, and counts the resizes it is asked for.
+    struct Stretchy {
+        desc: os_host::Descriptor,
+        size: (u32, u32),
+        resizable: bool,
+        asked: Arc<Mutex<Vec<(u32, u32)>>>,
+    }
+    impl os_engine::Instrument for Stretchy {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {}
+        fn note_off(&mut self, _: u32, _: u8) {}
+        fn process(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_engine::HostedEffect for Stretchy {
+        fn process_fx(&mut self, _: u32, _: &mut [f32], _: &mut [f32]) {}
+    }
+    impl os_host::Plugin for Stretchy {
+        fn desc(&self) -> &os_host::Descriptor {
+            &self.desc
+        }
+        fn activate(&mut self, _: u32) -> bool {
+            true
+        }
+        fn idle(&mut self) {}
+        fn has_editor(&self) -> bool {
+            true
+        }
+        fn editor_open(&self) -> bool {
+            true
+        }
+        fn open_editor(&mut self, _: *mut c_void, _: f32) -> Result<(u32, u32), String> {
+            Ok(self.size)
+        }
+        fn editor_size(&self) -> Option<(u32, u32)> {
+            Some(self.size)
+        }
+        fn close_editor(&mut self) {}
+        fn can_resize_editor(&self) -> bool {
+            self.resizable
+        }
+        fn resize_editor(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+            self.asked.lock().unwrap().push((w, h));
+            if !self.resizable {
+                return None;
+            }
+            let step = |v: u32| (v / 10 * 10).clamp(100, 4000);
+            self.size = (step(w), step(h));
+            Some(self.size)
+        }
+        fn save_state(&self) -> Option<Vec<u8>> {
+            None
+        }
+        fn load_state(&mut self, _: &[u8]) -> bool {
+            false
+        }
+    }
+
+    fn open(size: (u32, u32), resizable: bool) -> (Plugins, Arc<Mutex<Vec<(u32, u32)>>>) {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let desc = os_host::Descriptor { format: os_host::Format::Clap, id: "stretchy".into(), name: "Stretchy".into(), vendor: String::new(), version: String::new(), features: Vec::new(), kind: os_host::Kind::Instrument, path: PathBuf::new() };
+        let p: SharedPlugin = Arc::new(Mutex::new(Stretchy { desc, size, resizable, asked: asked.clone() }));
+        let mut pl = Plugins { scale: 1.0, rate: 48000, ..Plugins::default() };
+        pl.hosted.insert(0, Hosted::new(p));
+        let info = ChannelInfo { name: "Stretchy".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        pl.open_window(0, info).unwrap();
+        (pl, asked)
+    }
+
+    fn tick(pl: &mut Plugins, n: usize) {
+        for _ in 0..n {
+            pl.idle(|_| None);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn geometry(c: &x11rb::rust_connection::RustConnection, win: u32) -> (u32, u32) {
+        let g = c.get_geometry(win).unwrap().reply().unwrap();
+        (u32::from(g.width), u32::from(g.height))
+    }
+
+    /// A real plugin's editor (`OS_RESIZE_PLUGIN=<a .clap or .vst3>`) follows a resize of its window, if it can be
+    /// resized; prints what happened. Opens windows: a private X server only, as above.
+    #[test]
+    #[ignore]
+    fn real_editor_follows_window_resizes() {
+        let Some(path) = std::env::var_os("OS_RESIZE_PLUGIN") else { return };
+        let path = PathBuf::from(path);
+        let format = if path.extension().is_some_and(|e| e == "vst3") { os_host::Format::Vst3 } else { os_host::Format::Clap };
+        let lib = load_file(&path, format).expect("load the plugin");
+        let desc = lib.plugins()[0].clone();
+        let (c, _) = x11rb::connect(None).expect("an X server (DISPLAY)");
+        let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, rate: 48000, ..Plugins::default() };
+        pl.create(0, 0).unwrap();
+        let info = ChannelInfo { name: "Resize".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        pl.open_window(0, info).unwrap();
+        tick(&mut pl, 30);
+        let w = pl.hosted[&0].window.as_ref().unwrap();
+        let (win, area, k) = (w.hwnd() as u32, w.area() as usize as u32, w.scale());
+        let chrome = w.chrome();
+        let chrome = ((chrome.0 * k).round() as u32, (chrome.1 * k).round() as u32);
+        let editor_window = || c.query_tree(area).unwrap().reply().unwrap().children.first().map(|&e| geometry(&c, e));
+        let can = pl.hosted[&0].plugin.lock().unwrap().can_resize_editor();
+        let before = pl.hosted[&0].plugin.lock().unwrap().editor_size().unwrap();
+        println!("{}: can resize {can}; editor {before:?}, frame {:?}, editor window {:?}", path.display(), geometry(&c, win), editor_window());
+        for target in [(before.0 + 200, before.1 + 150), (before.0 * 3 / 4, before.1 * 3 / 4)] {
+            c.configure_window(win, &ConfigureWindowAux::new().width(target.0 + chrome.0).height(target.1 + chrome.1)).unwrap();
+            c.flush().unwrap();
+            c.sync().unwrap();
+            tick(&mut pl, 40);
+            let now = pl.hosted[&0].plugin.lock().unwrap().editor_size().unwrap();
+            let frame = geometry(&c, win);
+            println!("asked {target:?}: editor {now:?}, frame {frame:?}, area {:?}, editor window {:?}", geometry(&c, area), editor_window());
+            if can {
+                assert_ne!(now, before, "the editor follows the window");
+            } else {
+                assert_eq!(now, before, "an editor that cannot be resized keeps its size");
+            }
+            assert_eq!(frame, (now.0 + chrome.0, now.1 + chrome.1), "the frame matches the editor");
+        }
+        drop(pl);
+    }
+
+    #[test]
+    #[ignore]
+    fn editors_follow_window_resizes() {
+        let (c, screen) = x11rb::connect(None).expect("an X server (DISPLAY)");
+        let root = c.setup().roots[screen].clone();
+        let (mut pl, asked) = open((600, 400), true);
+        tick(&mut pl, 5);
+        let w = pl.hosted[&0].window.as_ref().unwrap();
+        let (win, area, k) = (w.hwnd() as u32, w.area() as usize as u32, w.scale());
+        let chrome = w.chrome();
+        let chrome = ((chrome.0 * k).round() as u32, (chrome.1 * k).round() as u32);
+        assert_eq!(geometry(&c, win), (600 + chrome.0, 400 + chrome.1), "the frame fits the editor");
+        assert!(asked.lock().unwrap().is_empty(), "opening the window asks no resize");
+
+        // A drag of the border: several sizes before the app's tick, one resize for the last.
+        for (fw, fh) in [(800, 600), (900, 650), (1005 + chrome.0, 703 + chrome.1)] {
+            c.configure_window(win, &ConfigureWindowAux::new().width(fw).height(fh)).unwrap();
+        }
+        c.flush().unwrap();
+        c.sync().unwrap();
+        tick(&mut pl, 5);
+        let asked_now = asked.lock().unwrap().clone();
+        println!("asked {asked_now:?}; frame {:?}, area {:?}", geometry(&c, win), geometry(&c, area));
+        assert_eq!(asked_now, vec![(1005, 703)], "one resize per tick, for the last size");
+        assert_eq!(geometry(&c, area), (1000, 700), "the editor area takes the size the editor took");
+        assert_eq!(geometry(&c, win), (1000 + chrome.0, 700 + chrome.1), "the frame follows the editor, not the drag");
+        tick(&mut pl, 10);
+        assert_eq!(asked.lock().unwrap().len(), 1, "the frame's own resize asks nothing more");
+
+        // Below the smallest editor: the window manager is told the least size; a smaller one gives the least editor.
+        c.configure_window(win, &ConfigureWindowAux::new().width(50).height(50)).unwrap();
+        c.flush().unwrap();
+        c.sync().unwrap();
+        tick(&mut pl, 5);
+        assert_eq!(asked.lock().unwrap().last(), Some(&((240.0 * k).round() as u32, (80.0 * k).round() as u32)));
+        drop(pl);
+
+        // An editor that cannot be resized: the window keeps the editor's size.
+        let (mut pl, asked) = open((600, 400), false);
+        tick(&mut pl, 5);
+        let win = pl.hosted[&0].window.as_ref().unwrap().hwnd() as u32;
+        c.configure_window(win, &ConfigureWindowAux::new().width(900).height(900)).unwrap();
+        c.flush().unwrap();
+        c.sync().unwrap();
+        tick(&mut pl, 5);
+        assert!(asked.lock().unwrap().is_empty(), "nothing asked of an editor that cannot be resized");
+        drop(pl);
+
+        // Larger than the screen: a resizable editor opens fitted to it, another one as it is.
+        let (sw, sh) = (u32::from(root.width_in_pixels), u32::from(root.height_in_pixels));
+        let (mut pl, asked) = open((sw + 500, sh + 300), true);
+        tick(&mut pl, 5);
+        let win = pl.hosted[&0].window.as_ref().unwrap().hwnd() as u32;
+        let (fw, fh) = geometry(&c, win);
+        println!("screen {sw} x {sh}: a {} x {} editor opens in a {fw} x {fh} window; asked {:?}", sw + 500, sh + 300, asked.lock().unwrap());
+        assert!(fw <= sw && fh <= sh, "the window fits the screen");
+        assert!(fw + 10 > sw && fh + 10 > sh, "and uses it");
+        drop(pl);
+        let (mut pl, _) = open((sw + 500, sh + 300), false);
+        tick(&mut pl, 5);
+        let win = pl.hosted[&0].window.as_ref().unwrap().hwnd() as u32;
+        assert!(geometry(&c, win).0 > sw, "an editor that cannot be resized is left as it is");
     }
 }

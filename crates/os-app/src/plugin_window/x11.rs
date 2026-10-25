@@ -30,6 +30,7 @@ use x11rb::protocol::xproto::{
     self, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, ImageFormat, ImageOrder,
     KeyButMask, PropMode, StackMode, VisualClass, WindowClass,
 };
+use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::shape::{self, ConnectionExt as _};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -52,6 +53,7 @@ x11rb::atom_manager! {
         _NET_ACTIVE_WINDOW,
         _NET_WM_STATE,
         _NET_WM_STATE_ABOVE,
+        _NET_WORKAREA,
         _MOTIF_WM_HINTS,
     }
 }
@@ -167,6 +169,15 @@ struct Frame {
     dirty: Cell<bool>,
     /// The last left press (server time, position) for double clicks.
     last_press: Cell<Option<(u32, i16, i16)>>,
+    /// The plugin's editor can be resized by the host: so can the window, by the user (`set_resizable`).
+    resizable: Cell<bool>,
+    /// The window's size as the server last reported it (physical px).
+    known: Cell<(u16, u16)>,
+    /// Sizes `layout` asked for that the server has not reported yet, oldest first: the reports of our own resizes are
+    /// not the user's.
+    own: RefCell<Vec<(u16, u16)>>,
+    /// The editor size the user's last resize leaves (logical px), for the app's next `take_events`.
+    resized: Cell<Option<(f32, f32)>>,
 }
 
 /// A plugin window. Dropping it destroys the native window (close the plugin's editor first).
@@ -247,7 +258,7 @@ impl FrameWindow {
             if !docked && conn.above.get() {
                 c.change_property32(PropMode::REPLACE, win, a._NET_WM_STATE, AtomEnum::ATOM, &[a._NET_WM_STATE_ABOVE])?;
             }
-            fixed_size(c, win, px(w, k), px(h, k))?;
+            size_hints(c, win, (px(w, k), px(h, k)), None, None)?;
             // Clicks in the plugin's editor come here first (then go on to it, `pump`): they bring the window to the
             // front of the app's windows, as clicks on the frame do.
             for b in [xproto::ButtonIndex::M1, xproto::ButtonIndex::M2, xproto::ButtonIndex::M3] {
@@ -274,6 +285,10 @@ impl FrameWindow {
             scale: k,
             dirty: Cell::new(true),
             last_press: Cell::new(None),
+            resizable: Cell::new(false),
+            known: Cell::new((px(w, k), px(h, k))),
+            own: RefCell::new(Vec::new()),
+            resized: Cell::new(None),
         });
         conn.frames.borrow_mut().insert(win, Rc::downgrade(&f));
         Ok(FrameWindow { f })
@@ -308,7 +323,7 @@ impl FrameWindow {
                 let cv = f.canvas.borrow();
                 (cv.pixmap.width() as u16, cv.pixmap.height() as u16)
             };
-            let _ = size_hints(c, f.win, w, h, Some(screen));
+            let _ = size_hints(c, f.win, (w, h), f.min_size(), Some(screen));
             let _ = c.reparent_window(f.win, root, screen.0 as i16, screen.1 as i16);
         } else {
             // A managed window goes back to the root when the window manager lets it go (it may have put it in a frame
@@ -431,6 +446,37 @@ impl FrameWindow {
         }
     }
 
+    /// After a `FrameEvent::Resized`: the editor took `editor` (logical px), or kept its size (`None`). The window
+    /// takes the editor's size either way (the window manager's size is undone where the editor did not follow).
+    pub fn editor_resized(&self, editor: Option<(f32, f32)>) {
+        if let Some(e) = editor {
+            self.f.state.borrow_mut().editor = e;
+        }
+        self.f.layout();
+    }
+
+    /// Whether the user may resize the window (its editor can be resized by the host): the window manager is told
+    /// the smallest size, and no largest.
+    pub fn set_resizable(&self, on: bool) {
+        if self.f.resizable.replace(on) != on {
+            let _ = size_hints(&self.f.conn.c, self.f.win, self.f.known.get(), self.f.min_size(), None);
+            let _ = self.f.conn.c.flush();
+        }
+    }
+
+    /// The size (logical px) of the work area of the monitor under the pointer (where the user opens the window), when
+    /// it is known.
+    pub fn work_size(&self) -> Option<(f32, f32)> {
+        let [x0, y0, x1, y1] = work_area(&self.f.conn)?;
+        let k = self.f.scale;
+        Some(((x1 - x0) as f32 / k, (y1 - y0) as f32 / k))
+    }
+
+    /// The window's chrome: what it adds to the editor (logical px).
+    pub fn chrome(&self) -> (f32, f32) {
+        self.f.state.borrow().chrome()
+    }
+
     /// Shows or hides the gear strip (mixer effects open without it).
     pub fn set_strip(&self, on: bool) {
         if self.f.state.borrow().strip != on {
@@ -440,7 +486,12 @@ impl FrameWindow {
     }
 
     pub fn take_events(&self) -> Vec<FrameEvent> {
-        std::mem::take(&mut self.f.state.borrow_mut().events)
+        let mut events = std::mem::take(&mut self.f.state.borrow_mut().events);
+        // A drag of the border reports many sizes: only the last one goes to the plugin.
+        if let Some((w, h)) = self.f.resized.take() {
+            events.push(FrameEvent::Resized(w, h));
+        }
+        events
     }
 }
 
@@ -459,16 +510,18 @@ impl Drop for FrameWindow {
     }
 }
 
-/// The window manager keeps the window at this size (the frame follows its editor, the user does not resize it).
-fn fixed_size(c: &RustConnection, win: xproto::Window, w: u16, h: u16) -> Result<(), Box<dyn std::error::Error>> {
-    size_hints(c, win, w, h, None)
-}
-
-/// `fixed_size`, and the place on the screen the window manager should keep (a window just detached stays put).
-fn size_hints(c: &RustConnection, win: xproto::Window, w: u16, h: u16, at: Option<(i32, i32)>) -> Result<(), Box<dyn std::error::Error>> {
+/// The window's size for the window manager: `size` (physical px), kept unless `min` (a resizable window: no smaller than
+/// it, no largest size), and the place on the screen it should keep (`at`: a window just detached stays put).
+fn size_hints(c: &RustConnection, win: xproto::Window, size: (u16, u16), min: Option<(u16, u16)>, at: Option<(i32, i32)>) -> Result<(), Box<dyn std::error::Error>> {
+    let (w, h) = (i32::from(size.0), i32::from(size.1));
     let mut hints = WmSizeHints::new();
-    hints.min_size = Some((i32::from(w), i32::from(h)));
-    hints.max_size = Some((i32::from(w), i32::from(h)));
+    match min {
+        Some((mw, mh)) => hints.min_size = Some((i32::from(mw), i32::from(mh))),
+        None => {
+            hints.min_size = Some((w, h));
+            hints.max_size = Some((w, h));
+        }
+    }
     hints.position = at.map(|(x, y)| (x11rb::properties::WmSizeHintsSpecification::UserSpecified, x, y));
     hints.set_normal_hints(c, win)?;
     Ok(())
@@ -510,7 +563,15 @@ impl Frame {
         drop(st);
         let (k, c) = (self.scale, &self.conn.c);
         let (w, h) = (px(fw, k), px(fh, k));
-        let _ = fixed_size(c, self.win, w, h);
+        let _ = size_hints(c, self.win, (w, h), self.min_size(), None);
+        if (w, h) != self.known.get() {
+            let mut own = self.own.borrow_mut();
+            // A request the server never reported (the window manager did not take it) is forgotten in time.
+            if own.len() >= 8 {
+                own.remove(0);
+            }
+            own.push((w, h));
+        }
         let _ = c.configure_window(self.win, &ConfigureWindowAux::new().width(u32::from(w)).height(u32::from(h)));
         let area = ConfigureWindowAux::new().x(i32::from(px(BORDER, k))).y(i32::from(px(ay, k))).width(u32::from(px(ed.0, k))).height(u32::from(px(ed.1, k)));
         let _ = c.configure_window(self.area, &area);
@@ -518,6 +579,33 @@ impl Frame {
         self.canvas.borrow_mut().resize(u32::from(w), u32::from(h), k);
         self.dirty.set(true);
         self.paint();
+    }
+
+    /// A resizable window's smallest size (physical px): the frame around the smallest editor. `None`: not resizable.
+    fn min_size(&self) -> Option<(u16, u16)> {
+        let (cw, ch) = self.state.borrow().chrome();
+        self.resizable.get().then(|| (px(cw + MIN_EDITOR.0, self.scale), px(ch + MIN_EDITOR.1, self.scale)))
+    }
+
+    /// The server reports the window's size (physical px): a size `layout` did not ask for is the user resizing it
+    /// through the window manager, which the editor is asked to follow (`FrameEvent::Resized`).
+    fn configured(&self, size: (u16, u16)) {
+        if self.known.replace(size) == size {
+            return;
+        }
+        {
+            let mut own = self.own.borrow_mut();
+            if let Some(i) = own.iter().position(|&o| o == size) {
+                own.drain(..=i);
+                return;
+            }
+        }
+        if self.resizable.get() {
+            let k = self.scale;
+            let editor = self.state.borrow().editor_in((f32::from(size.0) / k, f32::from(size.1) / k));
+            self.resized.set(Some(editor));
+            os_clap::wake();
+        }
     }
 
     /// Paints the frame when it changed.
@@ -631,6 +719,7 @@ impl Frame {
         let screen = |x: f32, y: f32| self.to_screen(x, y);
         match e {
             Event::Expose(_) => self.dirty.set(true),
+            Event::ConfigureNotify(e) if e.window == self.win => self.configured((e.width, e.height)),
             // A click in the plugin's editor (the grab on the area; `pump` lets the editor have it).
             Event::ButtonPress(e) if e.event == self.area => self.clicked(),
             Event::ButtonPress(e) => {
@@ -869,6 +958,7 @@ fn window_of(e: &Event) -> Option<xproto::Window> {
         Event::ButtonRelease(e) => e.event,
         Event::MotionNotify(e) => e.event,
         Event::ClientMessage(e) => e.window,
+        Event::ConfigureNotify(e) => e.window,
         _ => return None,
     })
 }
@@ -1026,6 +1116,35 @@ fn in_frame(conn: &Conn, mut w: xproto::Window) -> bool {
         }
     }
     false
+}
+
+/// The work area (screen px: left, top, right, bottom) of the monitor under the pointer: the monitor (RandR), or the
+/// whole screen without RandR, less what the window manager keeps for panels (`_NET_WORKAREA`) where it says so.
+fn work_area(conn: &Conn) -> Option<[i32; 4]> {
+    let c = &conn.c;
+    let geo = c.get_geometry(conn.root).ok()?.reply().ok()?;
+    let screen = [0, 0, i32::from(geo.width), i32::from(geo.height)];
+    let pointer = c.query_pointer(conn.root).ok().and_then(|r| r.reply().ok()).map(|r| (i32::from(r.root_x), i32::from(r.root_y)));
+    let monitors: Vec<[i32; 4]> = c
+        .randr_get_monitors(conn.root, true)
+        .ok()
+        .and_then(|r| r.reply().ok())
+        .map(|r| r.monitors.iter().map(|m| [i32::from(m.x), i32::from(m.y), i32::from(m.x) + i32::from(m.width), i32::from(m.y) + i32::from(m.height)]).collect())
+        .unwrap_or_default();
+    let monitor = pointer.and_then(|(x, y)| monitors.iter().copied().find(|m| m[0] <= x && x < m[2] && m[1] <= y && y < m[3])).or(monitors.first().copied()).unwrap_or(screen);
+    // _NET_WORKAREA: x, y, width, height per desktop; the first one's.
+    let work = c.get_property(false, conn.root, conn.atoms._NET_WORKAREA, AtomEnum::CARDINAL, 0, 4).ok().and_then(|r| r.reply().ok());
+    let work = work.and_then(|r| r.value32().map(|v| v.collect::<Vec<u32>>())).filter(|v| v.len() == 4).map(|v| [v[0] as i32, v[1] as i32, (v[0] + v[2]) as i32, (v[1] + v[3]) as i32]);
+    Some(match work {
+        Some(w) => intersect(monitor, w).unwrap_or(monitor),
+        None => monitor,
+    })
+}
+
+/// The overlap of two rects (left, top, right, bottom), when they overlap.
+fn intersect(a: [i32; 4], b: [i32; 4]) -> Option<[i32; 4]> {
+    let r = [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+    (r[0] < r[2] && r[1] < r[3]).then_some(r)
 }
 
 /// Screen position for a new plugin window: right of the main window's left edge, below its toolbar (physical px; the

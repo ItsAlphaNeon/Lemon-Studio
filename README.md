@@ -16,6 +16,10 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **Wayland first.** On Linux the main window is native Wayland in a Wayland session; plugin windows open detached.
   `OPENSTUDIO_WAYLAND=0` brings back the X11 window, where plugin windows dock. CI runs on Linux only
   (`.github/workflows/cutting-edge.yml`); Windows and macOS are not tested on every push.
+- **Resizable plugin windows (Linux).** A detached plugin window whose editor lets the host resize it (CLAP
+  `gui.can_resize`, VST3 `IPlugView::canResize`) can be resized by dragging its border: the editor is asked for the
+  new size and the window follows the size it takes, one request per UI tick. Such an editor larger than the
+  monitor's work area opens shrunk to fit it; editors that cannot be resized open as before.
 
 ## What this branch removes
 

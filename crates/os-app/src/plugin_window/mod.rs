@@ -108,6 +108,18 @@ pub const STRIP_H: f32 = 46.0;
 pub const BORDER: f32 = 7.0;
 /// Width of the Presets box in the title bar (its right edge is 49 px from the window's).
 const PRESETS_W: f32 = 80.0;
+/// The smallest editor a window resized by the user leaves (logical px): the title bar still shows its controls.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const MIN_EDITOR: (f32, f32) = (240.0, 80.0);
+
+/// An editor of `editor` in a frame adding `chrome` does not fit in `room` (all logical px): the editor size that fits
+/// (a side shrinks only where it is too large, and not below [`MIN_EDITOR`]). `None` when it fits.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn fit_in(editor: (f32, f32), chrome: (f32, f32), room: (f32, f32)) -> Option<(f32, f32)> {
+    let fit = |e: f32, c: f32, r: f32, min: f32| if e + c > r { (r - c).floor().max(min.min(e)) } else { e };
+    let fitted = (fit(editor.0, chrome.0, room.0, MIN_EDITOR.0), fit(editor.1, chrome.1, room.1, MIN_EDITOR.1));
+    (fitted != editor).then_some(fitted)
+}
 
 fn c_frame() -> Color {
     os_theme::current().s(0x25292b)
@@ -217,6 +229,10 @@ pub enum FrameEvent {
     /// plugins/presets.md "Drag and drop").
     #[cfg_attr(not(windows), allow(dead_code))]
     DropFile(std::path::PathBuf),
+    /// The window manager resized a window whose editor can be resized (the user dragged its border): the editor should
+    /// take this size (logical px), and the frame follows what it takes. At most one per `take_events`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Resized(f32, f32),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -352,7 +368,18 @@ impl State {
         }
     }
     fn size(&self) -> (f32, f32) {
-        (self.editor.0 + 2.0 * BORDER, self.area_y() + self.editor.1 + BORDER)
+        let (cw, ch) = self.chrome();
+        (self.editor.0 + cw, self.editor.1 + ch)
+    }
+    /// The frame around the editor: what the window adds to the editor's width and height (logical px).
+    fn chrome(&self) -> (f32, f32) {
+        (2.0 * BORDER, self.area_y() + BORDER)
+    }
+    /// The editor size a frame of `size` (logical px) leaves, at least [`MIN_EDITOR`].
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn editor_in(&self, size: (f32, f32)) -> (f32, f32) {
+        let (cw, ch) = self.chrome();
+        ((size.0 - cw).max(MIN_EDITOR.0), (size.1 - ch).max(MIN_EDITOR.1))
     }
     /// Top of the editor (below the strip, or the title bar, and the editor's 1 px outline).
     fn area_y(&self) -> f32 {
@@ -1104,6 +1131,28 @@ mod tests {
         assert_eq!(moved_to((2340, -40), second, second, (200, 100)), (2340, -40), "the same monitor: unchanged");
         assert_eq!(moved_to((2340, -40), second, primary, (200, 100)), (420, 160));
         assert_eq!(moved_to((4400, 1200), second, primary, (200, 100)), (1720, 940), "kept on the smaller monitor");
+    }
+
+    /// A window resized by the user: its size less the frame's chrome is the editor's (never below the smallest
+    /// editor); an editor larger than the work area is fitted into it, side by side.
+    #[test]
+    fn resize_arithmetic() {
+        let st = state(true, "Master");
+        assert_eq!(st.chrome(), (14.0, 74.0 + 7.0));
+        assert_eq!(st.editor_in((814.0, 681.0)), (800.0, 600.0));
+        assert_eq!(st.editor_in((100.0, 100.0)), MIN_EDITOR, "never below the smallest editor");
+        assert_eq!(state(false, "Master").editor_in((814.0, 635.0)), (800.0, 600.0), "no strip: a shorter chrome");
+        let e = st.editor_in(st.size());
+        assert_eq!(e, st.editor, "the window's own size leaves the editor as it is");
+
+        let chrome = st.chrome();
+        // 1920 x 1080 at scale 1.25: 1536 x 864 logical.
+        let room = (1536.0, 864.0);
+        assert_eq!(fit_in((800.0, 600.0), chrome, room), None, "fits");
+        assert_eq!(fit_in((1600.0, 1000.0), chrome, room), Some((1522.0, 783.0)));
+        assert_eq!(fit_in((800.0, 1000.0), chrome, room), Some((800.0, 783.0)), "only the side too large shrinks");
+        assert_eq!(fit_in((1522.0, 783.0), chrome, room), None, "exactly fits");
+        assert_eq!(fit_in((900.0, 900.0), chrome, (200.0, 120.0)), Some(MIN_EDITOR), "a tiny screen: the smallest editor");
     }
 
     #[test]

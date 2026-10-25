@@ -1040,6 +1040,34 @@ impl Plugin {
         (px(w), px(h))
     }
 
+    /// The open editor can be resized by the host (`IPlugView::canResize`).
+    pub fn can_resize_editor(&self) -> bool {
+        self.view.as_ref().is_some_and(|v| unsafe { v.can_resize() } == kResultTrue)
+    }
+
+    /// Resizes the open editor to about `w` x `h` pixels: the view adjusts the request to a size it can take
+    /// (`checkSizeConstraint`), then hears it (`onSize`). Returns that size in pixels.
+    pub fn resize_editor(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        if !self.can_resize_editor() {
+            return None;
+        }
+        let v = self.view.as_ref()?;
+        let from_px = |p: u32| ((p as f32 / self.editor_scale).round() as i32).max(1);
+        let mut r = ViewRect { left: 0, top: 0, right: from_px(w), bottom: from_px(h) };
+        unsafe {
+            v.check_size_constraint(&mut r);
+            if v.on_size(&mut r) != kResultOk {
+                return None;
+            }
+        }
+        let size = (r.right - r.left, r.bottom - r.top);
+        // What the editor asked for last (`resizeView`) no longer holds: `editor_size` reports this size.
+        if let Ok(mut s) = self.shared.size.lock() {
+            *s = Some(size);
+        }
+        Some(self.to_px(size.0, size.1))
+    }
+
     pub fn close_editor(&mut self) {
         // A menu the editor asked the host to pop up goes first: its targets are the editor's (spec §9).
         context_menu::drop_popup(&self.shared);
@@ -1320,6 +1348,14 @@ impl os_host::Plugin for Plugin {
 
     fn close_editor(&mut self) {
         Plugin::close_editor(self)
+    }
+
+    fn can_resize_editor(&self) -> bool {
+        Plugin::can_resize_editor(self)
+    }
+
+    fn resize_editor(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        Plugin::resize_editor(self, w, h)
     }
 
     fn save_state(&self) -> Option<Vec<u8>> {
