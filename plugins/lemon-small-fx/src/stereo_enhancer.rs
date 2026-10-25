@@ -11,10 +11,11 @@
 use nih_plug::prelude::*;
 
 use os_engine::effects::stereo_enhancer::{self as dsp, Settings, StereoEnhancer};
+use os_ui::Rect;
 
 use crate::balance::{parse_side, side_text};
 use crate::params::{db_text, leading_number, nearest, parse_db};
-use crate::{Card, Control, Kind, Setting, SmallFx, Sound, Spec};
+use crate::{Card, Control, Kind, Mark, Setting, SmallFx, Sound, Spec};
 
 /// The settings in the original's order (spec §5).
 pub const SETTINGS: [Setting; dsp::PARAMS] = [
@@ -26,20 +27,22 @@ pub const SETTINGS: [Setting; dsp::PARAMS] = [
     Setting { id: "invert", name: "Inversion", range: dsp::RANGES[dsp::INVERT], start: dsp::DEFAULTS[dsp::INVERT], magnet: None },
 ];
 
-/// Editor layout (spec §2).
-const CARDS: [Card; 3] = [
-    Card { x0: 8.0, x1: 156.0, y0: 28.0, y1: 116.0, heading: "STEREO" },
-    Card { x0: 162.0, x1: 310.0, y0: 28.0, y1: 116.0, heading: "PHASE OFFSET" },
-    Card { x0: 316.0, x1: 464.0, y0: 28.0, y1: 116.0, heading: "OUTPUT" },
+/// Editor layout (spec §2), as the original's: the separation, the phase offset between its placement and the
+/// inversion, then the pan and the volume.
+const CARDS: [Card; 4] = [
+    Card { x0: 8.0, x1: 84.0, y0: 28.0, y1: 116.0, heading: "STEREO SEP" },
+    Card { x0: 90.0, x1: 256.0, y0: 28.0, y1: 116.0, heading: "PHASE OFFSET" },
+    Card { x0: 262.0, x1: 334.0, y0: 28.0, y1: 116.0, heading: "INVERT" },
+    Card { x0: 340.0, x1: 492.0, y0: 28.0, y1: 116.0, heading: "OUTPUT" },
 ];
 
 const CONTROLS: [Control; 6] = [
-    Control::Knob { id: "separation", cx: 45.0, cy: 61.0, r: 22.0, caption: "SEPARATION", bipolar: true },
-    Control::Knob { id: "pan", cx: 119.0, cy: 61.0, r: 22.0, caption: "PAN", bipolar: true },
-    Control::Knob { id: "phase", cx: 204.0, cy: 61.0, r: 22.0, caption: "OFFSET", bipolar: true },
-    Control::Choice { id: "placement", x0: 250.0, x1: 300.0, top: 45.0, names: &["PRE", "POST"] },
-    Control::Knob { id: "volume", cx: 358.0, cy: 61.0, r: 22.0, caption: "VOLUME", bipolar: false },
-    Control::Choice { id: "invert", x0: 402.0, x1: 456.0, top: 37.0, names: &["NONE", "LEFT", "RIGHT"] },
+    Control::Knob { id: "separation", cx: 46.0, cy: 64.0, r: 20.0, caption: "+     -", bipolar: true },
+    Control::Choice { id: "placement", x: 102.0, top: 49.0, names: &["PRE", "POST"] },
+    Control::Knob { id: "phase", cx: 206.0, cy: 62.0, r: 24.0, caption: "L       R", bipolar: true },
+    Control::Choice { id: "invert", x: 274.0, top: 41.0, names: &["NONE", "LEFT", "RIGHT"] },
+    Control::Knob { id: "pan", cx: 378.0, cy: 64.0, r: 20.0, caption: "PAN", bipolar: true },
+    Control::Knob { id: "volume", cx: 454.0, cy: 64.0, r: 20.0, caption: "VOL", bipolar: false },
 ];
 
 pub const SPEC: &Spec = &Spec {
@@ -51,10 +54,13 @@ pub const SPEC: &Spec = &Spec {
     any_version: false,
     fields: &[],
     tail: &[],
-    size: (472, 154),
+    size: (500, 154),
     cards: &CARDS,
     controls: &CONTROLS,
     display: None,
+    mark: Mark { x: 492.0, y: 135.0, anchor: 1.0, stacked: false },
+    hint: Some(Rect::new(8.0, 124.0, 484.0, 22.0)),
+    labels: &[],
     text,
     parse,
     sound,

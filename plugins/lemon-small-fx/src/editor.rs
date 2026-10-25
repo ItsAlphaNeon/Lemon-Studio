@@ -22,7 +22,7 @@ use os_ui::kit::menu::{MenuItem, MenuStyle};
 
 use crate::params::{self, FxParams};
 use crate::view::{self, Target, ViewState};
-use crate::{Control, Shared, Spec};
+use crate::{Shared, Spec};
 
 pub struct FxEditor {
     pub spec: &'static Spec,
@@ -163,11 +163,13 @@ pub enum Btn {
     Middle,
 }
 
-/// A drag: `v` = the unrounded normalised value it has reached (steps would swallow small moves).
+/// A drag: `v` = the unrounded normalised value it has reached (steps would swallow small moves), over `px` for the
+/// whole range.
 #[derive(Clone, Debug)]
 struct Drag {
     id: String,
     v: f32,
+    px: f32,
 }
 
 pub struct Logic {
@@ -226,9 +228,9 @@ impl Logic {
         self.edit(id, d);
     }
 
-    fn begin_drag(&mut self, id: &str, t: Target) -> Vec<Act> {
+    fn begin_drag(&mut self, id: &str, px: f32, t: Target) -> Vec<Act> {
         self.vals.begin(id);
-        self.drag = Some(Drag { id: id.into(), v: self.vals.norm(id) });
+        self.drag = Some(Drag { id: id.into(), v: self.vals.norm(id), px });
         self.view.pressed = Some(t);
         vec![Act::Repaint, Act::Lock]
     }
@@ -244,7 +246,8 @@ impl Logic {
             (_, Btn::Left) if m.alt => self.reset(&id),
             (_, Btn::Middle) => self.reset(&id),
             (_, Btn::Right) => acts.push(Act::Menu(MenuReq::Param(id), x, y)),
-            (Target::Knob(_), Btn::Left) => acts = self.begin_drag(&id, t.clone()),
+            (Target::Knob(_), Btn::Left) => acts = self.begin_drag(&id, KNOB_PX, t.clone()),
+            (Target::Fader(_, px), Btn::Left) => acts = self.begin_drag(&id, *px, t.clone()),
             (Target::Choice(_, v), Btn::Left) => {
                 let n = self.vals.plain_to_norm(&id, *v as f32);
                 self.edit(&id, n);
@@ -256,13 +259,13 @@ impl Logic {
 
     /// Mouse movement during a locked drag (logical px since the last event).
     pub fn delta(&mut self, _dx: f32, dy: f32, m: Mods) -> Vec<Act> {
-        let Some(Drag { id, v }) = self.drag.clone() else { return vec![] };
+        let Some(Drag { id, v, px }) = self.drag.clone() else { return vec![] };
         let f = if m.ctrl { FINE } else { 1.0 };
-        let v = (v - dy * f / KNOB_PX).clamp(0.0, 1.0);
+        let v = (v - dy * f / px).clamp(0.0, 1.0);
         // The drag keeps its own position; the setting lands on a magnet (Shift drags freely).
         let shown = if m.shift { v } else { self.snapped(&id, v) };
         self.vals.set(&id, shown);
-        self.drag = Some(Drag { id, v });
+        self.drag = Some(Drag { id, v, px });
         let t = self.view.pressed.clone();
         self.hint = self.hint_for(t.as_ref());
         vec![Act::Repaint]
@@ -290,22 +293,10 @@ impl Logic {
         vec![Act::Repaint]
     }
 
-    /// Wheel: one step per notch (1/128 of the range for the settings with many steps; the next row on a pick).
+    /// Wheel: one step per notch (1/128 of the range for the settings with many steps).
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
         let Some((t, _)) = self.hit(x, y).filter(|(t, _)| *t != Target::Logo) else { return vec![] };
         let id = t.id().to_string();
-        let rows = self.spec.controls.iter().find_map(|c| match c {
-            Control::Pick { id: p, rows, .. } if *p == id => Some(*rows),
-            _ => None,
-        });
-        if let Some(rows) = rows {
-            let cur = self.vals.plain(&id).round() as i32;
-            let at = view::picked(self.spec, &id, cur, rows).unwrap_or(0) as i32;
-            let next = (at + notches.signum() as i32).clamp(0, rows.len() as i32 - 1);
-            self.vals.edit_plain(&id, rows[next as usize].1 as f32);
-            self.hint = self.hint_for(Some(&t));
-            return vec![Act::Repaint];
-        }
         let (lo, hi) = self.range(&id);
         let steps = (hi - lo) as f32;
         let step = if steps > WHEEL_STEPS { (steps / WHEEL_STEPS).round() } else { 1.0 };
@@ -904,7 +895,7 @@ mod gui {
 mod tests {
     use super::*;
     use crate::tests::SPECS;
-    use crate::{balance, chorus, fast_distortion, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor};
+    use crate::{balance, chorus, fast_distortion, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor, Control};
 
     fn logic(spec: &'static Spec) -> Logic {
         let mut l = Logic::new(spec, Arc::new(FxParams::new(spec)), Arc::new(Shared::default()), None);
@@ -937,23 +928,29 @@ mod tests {
                     assert!(apart, "{}: {:?} overlaps {:?}", spec.name, a.t, b.t);
                 }
             }
-            // Controls sit inside a card; the display too.
+            // Controls sit inside a card (a tile is its own); the display too. Cards, the hint well and the wordmark
+            // stay apart.
+            let cards: Vec<os_ui::Rect> = spec.cards.iter().map(|k| os_ui::Rect::span(k.x0, k.x1, k.y0, k.y1)).collect();
+            let within = |r: os_ui::Rect, k: &os_ui::Rect| r.x >= k.x && r.right() <= k.right() && r.y >= k.y && r.bottom() <= k.bottom();
             for c in spec.controls {
-                let hit = l.hits.iter().filter(|h| h.t.id() == c.id()).map(|h| h.r).collect::<Vec<_>>();
-                for r in hit {
-                    let inside = spec.cards.iter().any(|k| r.x >= k.x0 && r.x + r.w <= k.x1 && r.y >= k.y0 && r.y + r.h <= k.y1);
-                    assert!(inside, "{} {} outside its card", spec.name, c.id());
+                if matches!(c, Control::Tile { .. }) {
+                    continue;
+                }
+                for r in l.hits.iter().filter(|h| h.t.id() == c.id()).map(|h| h.r) {
+                    assert!(cards.iter().any(|k| within(r, k)), "{} {} outside its card", spec.name, c.id());
                 }
             }
             if let Some(d) = &spec.display {
-                let inside = spec.cards.iter().any(|k| d.r.x >= k.x0 && d.r.x + d.r.w <= k.x1 && d.r.y >= k.y0 && d.r.y + d.r.h <= k.y1);
-                assert!(inside, "{} display", spec.name);
+                assert!(cards.iter().any(|k| within(d.r, k)), "{} display", spec.name);
             }
-            // The (last row of) cards end 19 px over the foot's line; a row above leaves 28 px for the heading below.
-            let bottom = spec.cards.iter().map(|k| k.y1).fold(0.0f32, f32::max);
-            assert_eq!(bottom, view::foot(spec) - 19.0, "{}", spec.name);
-            for k in spec.cards {
-                assert!(k.y1 == bottom || spec.cards.iter().filter(|b| b.y1 == bottom).all(|b| b.y0 - k.y1 >= 28.0), "{} {}", spec.name, k.heading);
+            let logo = l.hits.iter().find(|h| h.t == Target::Logo).unwrap().r;
+            let mut boxes = cards.clone();
+            boxes.extend(spec.hint);
+            for (i, a) in boxes.iter().enumerate() {
+                assert!(a.x >= 0.0 && a.y >= 0.0 && a.right() <= w && a.bottom() <= h, "{} {a:?}", spec.name);
+                let apart = |b: &os_ui::Rect| a.right() <= b.x || b.right() <= a.x || a.bottom() <= b.y || b.bottom() <= a.y;
+                assert!(boxes[i + 1..].iter().all(apart), "{}: {a:?} overlaps", spec.name);
+                assert!(Some(*a) == spec.hint || apart(&logo), "{}: {a:?} under the wordmark", spec.name);
             }
         }
     }
@@ -1018,31 +1015,41 @@ mod tests {
         assert_eq!(l.hint, "Effects position: Off");
     }
 
-    /// A pick's rows stand for ranges of values: the row with the current value's text is chosen; a click sets the
-    /// row's value; a wheel moves a row.
+    /// A fader drags over its travel; a shape button steps through the shapes; a whole tile turns its dial.
     #[test]
-    fn picks_choose_rows_by_their_text() {
-        use os_engine::effects::chorus as dsp;
+    fn faders_shape_buttons_and_tiles() {
+        let mut l = logic(stereo_shaper::SPEC);
+        let t = Target::Fader("left".into(), 204.0);
+        let (x, y) = centre(&l, &t);
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        // The travel (204 px) is the whole range (-25600..25600): 51 px down from 100 % (12800) is 0.
+        for _ in 0..51 {
+            l.delta(0.0, 1.0, Mods { shift: true, ..Mods::default() });
+        }
+        l.up(Btn::Left);
+        assert_eq!(l.params.v(1), 0);
+        assert!(l.hint.starts_with("Left: "), "{}", l.hint);
+        let mut l = logic(transient_processor::SPEC);
+        let k = transient_processor::SPEC.index("attack_shape").unwrap();
+        let start = l.params.v(k);
+        for i in 1..=3 {
+            let h = l.hits.iter().find(|h| h.t.id() == "attack_shape").unwrap().clone();
+            l.down(h.r.cx(), h.r.cy(), Btn::Left, Mods::default(), false);
+            paint(&mut l);
+            assert_eq!(l.params.v(k), (start + i) % 3);
+        }
+        assert!(l.hint.starts_with("Attack shape: "), "{}", l.hint);
         let mut l = logic(chorus::SPEC);
-        let rows = chorus::WAVES;
-        // LFO 1 starts at 23: "Arc".
-        assert_eq!(view::picked(chorus::SPEC, "wave1", 23, rows), Some(0));
-        assert_eq!(view::picked(chorus::SPEC, "wave1", 700, rows), Some(2));
-        let (x, y) = centre(&l, &Target::Choice("wave1".into(), 683));
-        l.down(x, y, Btn::Left, Mods::default(), false);
-        assert_eq!(l.params.v(dsp::WAVE[0]), 683);
-        assert_eq!(l.hint, "LFO 1 wave: Sines");
-        l.wheel(x, y, 1.0, Mods::default());
-        assert_eq!(l.params.v(dsp::WAVE[0]), 1024);
-        l.wheel(x, y, 1.0, Mods::default());
-        assert_eq!(l.params.v(dsp::WAVE[0]), 1024);
-        l.wheel(x, y, -1.0, Mods::default());
-        l.wheel(x, y, -1.0, Mods::default());
-        assert_eq!(l.params.v(dsp::WAVE[0]), 342);
-        let (x, y) = centre(&l, &Target::Choice("wet".into(), 1024));
-        l.down(x, y, Btn::Left, Mods::default(), false);
-        assert_eq!(l.params.v(dsp::WET_ONLY), 1024);
-        assert_eq!(l.hint, "Wet only: On");
+        let h = l.hits.iter().find(|h| h.t.id() == "wave1").unwrap().clone();
+        assert_eq!(h.t, Target::Knob("wave1".into()));
+        // The tile's right end (the value text) turns the dial too: up to the top.
+        l.down(h.r.right() - 4.0, h.r.cy(), Btn::Left, Mods::default(), false);
+        for _ in 0..200 {
+            l.delta(0.0, -1.0, Mods::default());
+        }
+        l.up(Btn::Left);
+        assert_eq!(l.params.v(os_engine::effects::chorus::WAVE[0]), 1024);
+        assert_eq!(l.hint, "LFO 1 wave: Sharp sines");
     }
 
     #[test]

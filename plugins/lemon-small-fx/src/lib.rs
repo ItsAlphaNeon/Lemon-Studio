@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use nih_plug::prelude::*;
-use os_ui::{Canvas, Rect};
+use os_ui::{Canvas, Color, Rect};
 
 use params::FxParams;
 
@@ -56,24 +56,44 @@ pub struct Setting {
 
 /// A control of the editor.
 pub enum Control {
-    /// A Pith dial of radius `r` centred at (`cx`, `cy`), its caption under it.
+    /// A Pith dial of radius `r` centred at (`cx`, `cy`), its caption under it (the value text, in lemon, when the
+    /// caption is empty).
     Knob { id: &'static str, cx: f32, cy: f32, r: f32, caption: &'static str, bipolar: bool },
-    /// A selector: one row per value from the range's minimum, 16 px apart from `top`, between `x0` and `x1`.
-    Choice { id: &'static str, x0: f32, x1: f32, top: f32, names: &'static [&'static str] },
-    /// A selector over a long range: one row per `(name, value)`, laid out as a [`Control::Choice`]. The row whose value
-    /// has the current value's text is the chosen one; a wheel moves to the next row.
-    Pick { id: &'static str, x0: f32, x1: f32, top: f32, rows: &'static [(&'static str, i32)] },
+    /// A radio list: one row per value from the range's minimum, 16 px apart from `top`, a toggle at `x` and the name
+    /// beside it.
+    Choice { id: &'static str, x: f32, top: f32, names: &'static [&'static str] },
+    /// A vertical fader over `top..bot` at `x`, its fill in `col` from the bottom (from the middle when `bipolar`),
+    /// `label` over it and ticks at `marks` (normalised).
+    Fader { id: &'static str, x: f32, top: f32, bot: f32, label: &'static str, col: Color, bipolar: bool, marks: &'static [f32] },
+    /// A button centred at (`cx`, `cy`) that shows the value's envelope shape; a click steps to the next value.
+    Shape { id: &'static str, cx: f32, cy: f32 },
+    /// A tile (Lemon Chorus's grid): its own card over `x0..x1`, `y0..y1`, a small dial at the left, the caption in a
+    /// field at the top right and the value text under it.
+    Tile { id: &'static str, x0: f32, y0: f32, x1: f32, y1: f32, caption: &'static str },
 }
 
 impl Control {
     pub fn id(&self) -> &'static str {
         match self {
-            Control::Knob { id, .. } | Control::Choice { id, .. } | Control::Pick { id, .. } => id,
+            Control::Knob { id, .. }
+            | Control::Choice { id, .. }
+            | Control::Fader { id, .. }
+            | Control::Shape { id, .. }
+            | Control::Tile { id, .. } => id,
         }
     }
 }
 
-/// An outlined card under a ruled heading.
+/// Where the wordmark goes: the lemon mark and LEMON beside the name on one line centred at `y`, or (`stacked`) LEMON
+/// over the name, its top at `y`. `anchor` is the share of its width left of `x` (1 = right edge on `x`).
+pub struct Mark {
+    pub x: f32,
+    pub y: f32,
+    pub anchor: f32,
+    pub stacked: bool,
+}
+
+/// An outlined card under a ruled heading (no heading when it is empty).
 pub struct Card {
     pub x0: f32,
     pub x1: f32,
@@ -123,6 +143,12 @@ pub struct Spec {
     pub cards: &'static [Card],
     pub controls: &'static [Control],
     pub display: Option<Display>,
+    pub mark: Mark,
+    /// The hint well (`None`: the hint goes in the display's top-left corner); on the wordmark's line it stops 16 px
+    /// short of it.
+    pub hint: Option<Rect>,
+    /// Captions that belong to no control: (centre x, top, text).
+    pub labels: &'static [(f32, f32, &'static str)],
     /// A setting's value text.
     pub text: fn(usize, i32) -> String,
     /// A typed value for a setting.

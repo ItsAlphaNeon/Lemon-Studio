@@ -12,7 +12,7 @@ use os_engine::effects::soft_clipper::{self as dsp, Settings, SoftClipper};
 use os_ui::{Canvas, Rect};
 
 use crate::params::{db_text, parse_db};
-use crate::{view, Card, Control, Display, Kind, Setting, SmallFx, Sound, Spec};
+use crate::{view, Card, Control, Display, Kind, Mark, Setting, SmallFx, Sound, Spec};
 
 /// The settings in the original's order (spec §5).
 pub const SETTINGS: [Setting; dsp::PARAMS] = [
@@ -20,15 +20,15 @@ pub const SETTINGS: [Setting; dsp::PARAMS] = [
     Setting { id: "post", name: "Post gain", range: dsp::RANGES[dsp::POST], start: dsp::DEFAULTS[dsp::POST], magnet: Some(128) },
 ];
 
-/// Editor layout (spec §2): CLIPPER with both knobs, CURVE with the well.
+/// Editor layout (spec §2), as the original's: the two knobs over the wordmark at the left, the curve at the right.
 const CARDS: [Card; 2] = [
-    Card { x0: 8.0, x1: 176.0, y0: 28.0, y1: 116.0, heading: "CLIPPER" },
-    Card { x0: 182.0, x1: 392.0, y0: 28.0, y1: 116.0, heading: "CURVE" },
+    Card { x0: 8.0, x1: 156.0, y0: 28.0, y1: 104.0, heading: "CLIPPER" },
+    Card { x0: 162.0, x1: 312.0, y0: 28.0, y1: 152.0, heading: "CURVE" },
 ];
 
 const CONTROLS: [Control; 2] = [
-    Control::Knob { id: "threshold", cx: 50.0, cy: 61.0, r: 22.0, caption: "THRESHOLD", bipolar: false },
-    Control::Knob { id: "post", cx: 134.0, cy: 61.0, r: 22.0, caption: "POST GAIN", bipolar: false },
+    Control::Knob { id: "threshold", cx: 46.0, cy: 62.0, r: 20.0, caption: "THRESHOLD", bipolar: false },
+    Control::Knob { id: "post", cx: 118.0, cy: 62.0, r: 20.0, caption: "POST GAIN", bipolar: false },
 ];
 
 pub const SPEC: &Spec = &Spec {
@@ -40,10 +40,13 @@ pub const SPEC: &Spec = &Spec {
     any_version: false,
     fields: &[],
     tail: &[],
-    size: (400, 154),
+    size: (320, 160),
     cards: &CARDS,
     controls: &CONTROLS,
-    display: Some(Display { r: Rect::new(190.0, 36.0, 194.0, 72.0), draw: curve }),
+    display: Some(Display { r: Rect::new(170.0, 36.0, 134.0, 108.0), draw: curve }),
+    mark: Mark { x: 82.0, y: 114.0, anchor: 0.5, stacked: true },
+    hint: None,
+    labels: &[],
     text,
     parse,
     sound,

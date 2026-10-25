@@ -12,7 +12,7 @@ use os_engine::effects::balance::{self as dsp, Balance, Settings};
 use os_ui::{Canvas, Rect};
 
 use crate::params::{db_text, leading_number, nearest, parse_db};
-use crate::{view, Card, Control, Display, Kind, Setting, SmallFx, Sound, Spec};
+use crate::{view, Card, Control, Display, Kind, Mark, Setting, SmallFx, Sound, Spec};
 
 /// The settings in the original's order (spec §5).
 pub const SETTINGS: [Setting; dsp::PARAMS] = [
@@ -20,15 +20,17 @@ pub const SETTINGS: [Setting; dsp::PARAMS] = [
     Setting { id: "volume", name: "Volume", range: dsp::RANGES[dsp::VOLUME], start: dsp::DEFAULTS[dsp::VOLUME], magnet: Some(256) },
 ];
 
-/// Editor layout (spec §2): BALANCE with both knobs, OUTPUT with the levels.
-const CARDS: [Card; 2] = [
-    Card { x0: 8.0, x1: 176.0, y0: 28.0, y1: 116.0, heading: "BALANCE" },
-    Card { x0: 182.0, x1: 312.0, y0: 28.0, y1: 116.0, heading: "OUTPUT" },
+/// Editor layout (spec §2), as the original's: the balance knob, the levels between, the volume knob; the value texts
+/// under the knobs.
+const CARDS: [Card; 3] = [
+    Card { x0: 8.0, x1: 100.0, y0: 28.0, y1: 124.0, heading: "BALANCE" },
+    Card { x0: 106.0, x1: 182.0, y0: 28.0, y1: 124.0, heading: "OUTPUT" },
+    Card { x0: 188.0, x1: 280.0, y0: 28.0, y1: 124.0, heading: "VOLUME" },
 ];
 
 const CONTROLS: [Control; 2] = [
-    Control::Knob { id: "balance", cx: 50.0, cy: 61.0, r: 22.0, caption: "LEFT / RIGHT", bipolar: true },
-    Control::Knob { id: "volume", cx: 134.0, cy: 61.0, r: 22.0, caption: "VOLUME", bipolar: false },
+    Control::Knob { id: "balance", cx: 54.0, cy: 70.0, r: 24.0, caption: "", bipolar: true },
+    Control::Knob { id: "volume", cx: 234.0, cy: 70.0, r: 24.0, caption: "", bipolar: false },
 ];
 
 pub const SPEC: &Spec = &Spec {
@@ -40,10 +42,13 @@ pub const SPEC: &Spec = &Spec {
     any_version: false,
     fields: &[],
     tail: &[],
-    size: (320, 154),
+    size: (288, 162),
     cards: &CARDS,
     controls: &CONTROLS,
-    display: Some(Display { r: Rect::new(190.0, 36.0, 114.0, 72.0), draw: levels }),
+    display: Some(Display { r: Rect::new(114.0, 36.0, 60.0, 80.0), draw: levels }),
+    mark: Mark { x: 280.0, y: 143.0, anchor: 1.0, stacked: false },
+    hint: Some(Rect::new(8.0, 132.0, 272.0, 22.0)),
+    labels: &[],
     text,
     parse,
     sound,
