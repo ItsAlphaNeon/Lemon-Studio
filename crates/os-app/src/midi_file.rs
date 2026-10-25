@@ -146,10 +146,26 @@ thread_local! {
     static PENDING: RefCell<Option<(PathBuf, Options)>> = const { RefCell::new(None) };
 }
 
-/// The settings a form for file `f` opens with.
+/// The settings a form for file `f` opens with: Realign events on for a file with a leading silence (spec §10.5).
 fn options_for(f: &Smf) -> Options {
     let last = LAST.with_borrow(Clone::clone).unwrap_or_default();
-    Options { track: None, channels: [true; 16], per_track: f.format == 1, ..last }
+    let realign = last.realign || leading_silence(f);
+    Options { track: None, channels: [true; 16], per_track: f.format == 1, realign, ..last }
+}
+
+/// Whether file `f`'s first note starts at or after the end of its first bar, as the time signature at tick 0 sets
+/// it (4/4 without one): a MIDI pack's loop placed hundreds of bars in (spec §10.5). A pickup is not one.
+pub fn leading_silence(f: &Smf) -> bool {
+    let events = || f.tracks.iter().flat_map(|t| &t.events);
+    let first = events().filter(|e| matches!(e.kind, Ev::NoteOn { velocity, .. } if velocity > 0)).map(|e| e.tick).min();
+    let (num, den) = events()
+        .find_map(|e| match e.kind {
+            Ev::TimeSignature { numerator, denominator } if e.tick == 0 && numerator > 0 && denominator > 0 => Some((numerator, denominator)),
+            _ => None,
+        })
+        .unwrap_or((4, 4));
+    let bar = (u64::from(f.ppq.max(1)) * 4 * u64::from(num) / u64::from(den)).max(1);
+    first.is_some_and(|t| u64::from(t) >= bar)
 }
 
 /// The "Import MIDI data" form (spec §2): the file read, its tracks' names for the combo, the settings and which
@@ -347,8 +363,11 @@ pub fn convert(f: &Smf, o: &Options, ppq: u16) -> Imported {
 }
 
 /// Whether the form is needed for file `f` while "Show when necessary" applies: notes in more than one track or on
-/// more than one MIDI channel (spec §10.5).
+/// more than one MIDI channel, or a leading silence (spec §10.5).
 pub fn necessary(f: &Smf) -> bool {
+    if leading_silence(f) {
+        return true;
+    }
     let mut tracks = 0;
     let mut channels = 0u16;
     for t in &f.tracks {
@@ -594,7 +613,10 @@ impl App {
     /// The settings are chosen: the piano roll's import at once; FILE's into this project at once, into a new one
     /// once unsaved changes are answered.
     fn midi_accepted(&mut self, path: PathBuf, smf: Smf, o: Options, piano: bool) {
-        LAST.set(Some(o.clone()));
+        // Realign for a file with a leading silence is not remembered: the next file opens as the last other import
+        // left it (spec §10.5).
+        let realign = if leading_silence(&smf) { LAST.with_borrow(|l| l.as_ref().is_some_and(|l| l.realign)) } else { o.realign };
+        LAST.set(Some(Options { realign, ..o.clone() }));
         if piano {
             return self.import_into_piano(&path, &smf, &o);
         }
@@ -938,6 +960,52 @@ mod tests {
         assert!(!necessary(&single));
     }
 
+    /// Issue #159's file: type 0, 480 PPQ, 110 BPM, 4/4, one note at tick 384000 (bar 201), as a MIDI pack places a
+    /// loop.
+    const LATE_NOTE: [u8; 71] = [
+        0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, 0x01, 0xe0, 0x4d, 0x54, 0x72, 0x6b, 0, 0, 0, 0x31, 0, 0xff, 3, 0x0f, b'L',
+        b'a', b't', b'e', b' ', b'M', b'I', b'D', b'I', b' ', b'r', b'e', b'p', b'r', b'o', 0, 0xff, 0x51, 3, 0x08, 0x52, 0x2f,
+        0, 0xff, 0x58, 4, 4, 2, 0x18, 8, 0x97, 0xb8, 0, 0x90, 0x3c, 0x64, 0x81, 0x70, 0x80, 0x3c, 0x40, 0, 0xff, 0x2f, 0,
+    ];
+
+    /// One note on channel 1 at `tick`, after a time signature at 0 when given.
+    fn one_note(tick: u32, signature: Option<(u8, u8)>) -> Smf {
+        let mut events: Vec<Event> =
+            signature.map(|(numerator, denominator)| ev(0, Ev::TimeSignature { numerator, denominator })).into_iter().collect();
+        events.extend([on(tick, 0, 60, 100), off(tick + 240, 0, 60, 0)]);
+        Smf { format: 0, ppq: 480, tracks: vec![Track { events }] }
+    }
+
+    /// §10.5: a first note a bar or more in is a leading silence; the form shows for it with Realign on, and the
+    /// import starts at 0. A pickup inside the first bar is not one.
+    #[test]
+    fn leading_silence_shows_the_form_with_realign_on() {
+        let late = os_smf::read(&LATE_NOTE).unwrap();
+        assert!(leading_silence(&late));
+        assert!(necessary(&late), "one track and one channel, but the silence is a choice to make");
+        let o = options_for(&late);
+        assert!(o.realign);
+        assert_eq!(convert(&late, &Options::default(), 96).parts[0].notes[0].position, 76_800, "bar 201 with Realign off");
+        assert_eq!(convert(&late, &o, 96).parts[0].notes[0].position, 0);
+        for (tick, signature, silent) in [
+            (3 * 480, None, false),
+            (4 * 480 - 1, None, false),
+            (4 * 480, None, true),
+            (3 * 480, Some((3, 4)), true),
+            (3 * 480, Some((6, 8)), true),
+            (5 * 480, Some((7, 4)), false),
+        ] {
+            let f = one_note(tick, signature);
+            assert_eq!(leading_silence(&f), silent, "first note at {tick}, signature {signature:?}");
+            assert_eq!(necessary(&f), silent);
+            assert_eq!(options_for(&f).realign, silent);
+        }
+        // A velocity-0 note-on is a note-off, not a first note.
+        let mut f = one_note(8 * 480, None);
+        f.tracks[0].events.insert(0, on(0, 0, 61, 0));
+        assert!(leading_silence(&f));
+    }
+
     #[test]
     fn pitch_bends_round_toward_zero() {
         let f = Smf {
@@ -1082,6 +1150,40 @@ mod tests {
         app.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(!app.modal_open());
         assert_eq!(app.state.project, before);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Issue #159: a dropped file with a leading silence shows the form with Realign on and lands at bar 1; that
+    /// Realign is not remembered for the next file (§10.5).
+    #[test]
+    fn dropped_late_file_lands_at_the_start() {
+        let path = std::env::temp_dir().join(format!("os_midi_late_{}.mid", std::process::id()));
+        std::fs::write(&path, LATE_NOTE).unwrap();
+        let mut app = test_app();
+        app.drop_file(path.clone());
+        assert!(form(&app).expect("the form shows for the late file").o.realign);
+        app.dialog_click(crate::dialog::DHit::Form(FHit::Main));
+        let notes = &app.state.project.patterns[0].notes;
+        assert_eq!(notes.iter().map(|n| (n.position, n.length, n.key)).collect::<Vec<_>>(), [(0, 48, 60)]);
+        assert_eq!(app.state.tempo, 110.026);
+        assert_eq!(LAST.with_borrow(|l| l.as_ref().map(|o| o.realign)), Some(false));
+        assert!(!options_for(&one_note(3 * 480, None)).realign, "a pickup imports where it is");
+        // Realign chosen for an ordinary file is remembered, as the other settings are.
+        LAST.set(Some(Options { realign: true, ..Options::default() }));
+        let into_this = Options { realign: false, new_project: false, ..Options::default() };
+        app.midi_accepted(path.clone(), os_smf::read(&LATE_NOTE).unwrap(), into_this, false);
+        assert_eq!(LAST.with_borrow(|l| l.as_ref().map(|o| o.realign)), Some(true));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// §10.6: a .mid opened as a project (the command line) goes through the import, not the project reader.
+    #[test]
+    fn a_midi_file_opened_as_a_project_is_imported() {
+        let path = write_three("open");
+        let mut app = test_app();
+        app.open(path.clone());
+        assert!(form(&app).is_some(), "the form shows for the three-track file");
+        assert!(app.state.message.as_deref().is_none_or(|m| !m.starts_with("Could not open")));
         let _ = std::fs::remove_file(path);
     }
 

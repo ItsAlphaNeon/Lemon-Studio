@@ -1501,6 +1501,12 @@ impl App {
     }
 
     pub fn open(&mut self, path: PathBuf) {
+        // A MIDI file opened as a project (the command line, say) is imported as a dropped one is (spec:
+        // ui/midi-files.md §10.6).
+        let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        if ext == "mid" || ext == "midi" {
+            return self.midi_file_chosen(path, false);
+        }
         // A project in the layout used before version 24.2 gets a dialog that says what to do (spec:
         // flp/events/channels.md "Version scope"), not just a line in the hint bar.
         let mut legacy = None;
