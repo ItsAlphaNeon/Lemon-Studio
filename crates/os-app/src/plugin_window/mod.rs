@@ -541,9 +541,9 @@ fn presets_rect(st: &State) -> Rect {
     Rect::new(st.size().0 - 49.0 - max_w(st) - PRESETS_W, 6.0, PRESETS_W, 19.0)
 }
 
-/// The room the maximize button takes in the title bar: a resizable editor's frame has one (macOS so far).
+/// The room the maximize button takes in the title bar: a resizable editor's frame has one (macOS and Linux so far).
 fn max_w(st: &State) -> f32 {
-    if cfg!(target_os = "macos") && st.resize_min.is_some() { 19.0 } else { 0.0 }
+    if cfg!(any(target_os = "macos", target_os = "linux")) && st.resize_min.is_some() { 19.0 } else { 0.0 }
 }
 
 fn page_tabler(p: PageIcon) -> &'static tb::TablerIcon {
@@ -1266,7 +1266,7 @@ mod tests {
         assert_eq!(st.maximize((0, 100), None), Some((50, 60)), "restored to where it was");
         assert_eq!(st.events.pop(), Some(FrameEvent::Resize(480, 270)));
         assert_eq!(st.maximize((50, 60), None), None, "no target, nothing to do");
-        if cfg!(target_os = "macos") {
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
             let (w, _) = st.size();
             assert_eq!(part_at(&st, w - 35.0, 15.0), Some(Part::Maximize));
             assert_eq!(part_at(&st, w - 54.0, 15.0), Some(Part::Minimize));

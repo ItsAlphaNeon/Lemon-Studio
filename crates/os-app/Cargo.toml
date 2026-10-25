@@ -64,7 +64,7 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Diagnostics_Debug", "Win32_UI_HiDpi", "Win32_System_Registry"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", features = ["resource_manager", "shape"] }
+x11rb = { version = "0.13", features = ["randr", "resource_manager", "shape"] }
 
 # The main window's chrome (`macos`) and plugin windows (`plugin_window::cocoa`): the objc2 crates softbuffer already
 # uses.
