@@ -2171,6 +2171,12 @@ impl App {
         self.loading.is_some() || self.export.is_some()
     }
 
+    /// The opened project's loading, for the startup splash: its progress (0..=1) and step, while it loads.
+    pub fn project_loading(&self) -> Option<(f32, String)> {
+        let l = self.loading.as_ref()?;
+        Some((l.progress(), l.status().split_whitespace().collect::<Vec<_>>().join(" ")))
+    }
+
     /// Mixer slots that hold the project file's parametric EQ are played and edited by Lemon Parametric EQ, started
     /// from the slot's saved state (spec: plugins/lemon-parametric-eq-2.md §8). Without the plugin the engine's own EQ
     /// plays them. Edison's slots are opened as Tesla the same way, with their sample, loop, markers and recording
