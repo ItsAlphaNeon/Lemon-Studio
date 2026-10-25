@@ -11,8 +11,9 @@ for one under way, add "(in progress, #PR)" after it. Add items here as they tur
 
 Systems a fully functional DAW can't ship without.
 
-- [ ] **Audio editor.** The only area with nothing built: the mixer's Open audio editor and TOOLS ▸ Dump to audio
-  editor are stubs ([mixer.rs](../crates/os-app/src/mixer.rs))
+- [x] **Audio editor.** Tesla, after FL's Edison, in a mixer slot (#158), with the app's audio-editor entries wired to
+  it: Open audio editor and record, One-click recording and the Record question into it, Remove all instances.
+  TOOLS ▸ Audio logger and Tesla's later tools are listed under Gaps and polish
 - [ ] **Audio recording into mixer tracks.** Arm and disarm tracks and record their inputs; today only one-click
   recording into the playlist works ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [ ] **Input monitoring.** Hear an input through its mixer track while it is armed or recording
@@ -56,6 +57,10 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   pattern, instrument tracks, Advanced looping ([rack.rs](../crates/os-app/src/rack.rs))
 - [ ] **Main menu bar.** 24 of its 134 entries greyed out on 2026-10-24: 13 in TOOLS, 5 in VIEW, 4 in HELP, 2 in ADD
   ([menus.rs](../crates/os-app/src/views/menus.rs))
+- [ ] **TOOLS ▸ Audio logger and Dump to audio editor.** FL keeps the master's last minutes in memory; not measured
+  yet. Tesla's rolling recording goes with it: at its time limit Tesla stops, where Edison keeps the last minutes
+- [ ] **Tesla's later tools.** Envelopes, equalize, blur and convolution reverb, clean-up, time stretch and pitch
+  shift, slicing and beat detection (group 5 of Tesla's roadmap in the specs)
 - [ ] **Value boxes.** The widget doesn't work yet, so settings such as the autosave Maximum stay greyed out
 - [ ] **Recording settings page.** The only settings page that doesn't work yet
 - [ ] **Editable mixer latency settings.** Plugin delay compensation reads, uses and saves them, but they can't be

@@ -229,6 +229,23 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   a decoded copy of its own, so a sample playing from disk takes no memory for its file there either. Opening a project still decodes each
   sampler file once while it loads; that copy is let go when loading ends
 
+## ✅ Audio editing
+
+- Tesla, Lemon Studio's audio editor and recorder (its counterpart to FL's Edison), sits in a mixer slot and is also
+  a VST3 and CLAP plugin for other hosts. It records what reaches its slot (now, on input, while input is present,
+  or while the song plays, for a set time or size), holds one sample with markers, regions and a loop, and edits it:
+  cut, copy, paste, trim, silence, normalize, fades and declicks, reverse, channel tools, Amp, with undo
+- WAV, AIFF and FLAC in; WAV out with Edison's chunks (markers, regions, loop), 24-bit too. Drag the sample or the
+  selection out as a file, or send it to the playlist or the selected channel
+- A project's Edison slots open as Tesla with their audio, and are saved back as Edison so the file still opens in
+  FL Studio
+- The toolbar's audio editor button and the mixer's Open audio editor show Tesla on the track; Open audio editor and
+  record sets one up as an audio logger (records while the song plays, 5 minutes); One-click audio recording and the
+  Record button's question can record an input into the master track's Tesla; Remove all audio editor instances
+  (mixer options, TOOLS) clears them after asking
+- Not yet: envelopes, the spectral and clean-up tools, time stretch and pitch shift in Tesla, slicing; TOOLS ▸ Audio
+  logger and Dump to audio editor; a rolling recording (Tesla stops at its time limit, Edison keeps the last minutes)
+
 ## ✅ Exporting audio
 
 - FILE ▸ Export audio (Ctrl+R) and Export MP3 (Shift+Ctrl+R) open the Export form: a name and folder, then the song
@@ -264,7 +281,7 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   controller go into the current pattern, quantized to the main snap; a take replaces the notes that start inside it
   and is one undo step; in SONG mode a clip of the pattern is placed where none plays, and made longer when the
   take runs past it. A click or R (typing keyboard off) asks what to record (notes and automation, notes, automation,
-  or audio into the playlist); armed, the whole button fills red. Right-click for the options
+  or audio into the playlist or the audio editor); armed, the whole button fills red. Right-click for the options
 - Time selection loop: a piano roll (PAT) or playlist (SONG) time selection loops playback; armed with Loop record
   off it punches in and out (plays it once and stops back at its start)
 - Score logger (TOOLS): every note played is kept for 30 minutes; Dump score log writes the last 2 to 30 minutes into
@@ -277,10 +294,11 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   on, playback loops and each pass is a take (one undo step) that replaces what the pass before recorded
 - One-click audio recording (the toolbar's microphone, TOOLS): pick an input (an ASIO driver's inputs, else the
   system's input devices), the song plays with Record armed and precount, and on stop the take becomes a 32-bit WAV
-  in the data folder's `Recorded` folder plus a new audio clip channel and clip where playback started
+  in the data folder's `Recorded` folder plus a new audio clip channel and clip where playback started; or, picked
+  through Into the audio editor, the take goes into Tesla on the master track instead (see Audio editing)
 - TOOLS ▸ Cancel recording: while recording, playback stops and the takes of that playback are undone (Redo brings
   them back)
-- Not yet: audio recording into mixer tracks, input monitoring, the audio editor
+- Not yet: audio recording into mixer tracks, input monitoring
 
 ## 🚧 Undo
 
@@ -354,7 +372,3 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 - General ▸ System ▸ Associate project files (Windows): `.flp` files open with Lemon Studio, for your user
   only, and unticking puts the previous program back
 - Not yet: the recording settings
-
-## ❌ Not available yet
-
-- Audio editing

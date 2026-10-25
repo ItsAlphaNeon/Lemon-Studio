@@ -267,15 +267,15 @@ impl App {
     fn record_question(&mut self) {
         use crate::playlist::{Cmd, PItem, Popup};
         let arm = |label: &'static str, notes: bool, automation: bool| PItem::new(label, Cmd::Rec(RecCmd::Arm { notes, automation }));
-        let audio: Vec<PItem> = crate::one_click::items(&self.state).into_iter().skip(1).collect();
+        let audio = crate::one_click::inputs(false);
         let items = vec![
             PItem::head("What would you like to record?"),
             arm("Notes and automation", true, true),
             arm("Notes only", true, false),
             arm("Automation only", false, true),
             PItem::sub("Audio, into the playlist as an audio clip", audio),
-            // The audio editor is to be a plugin of its own.
-            PItem::new("Audio, into the audio editor", Cmd::Nothing).off(),
+            // Asks for the input, then records into Tesla on the master track (spec: ui/one-click-recording.md §2).
+            PItem::new("Audio, into the audio editor", Cmd::OneClickEditor),
             PItem::sep(),
             PItem::new("Don't ask again", Cmd::Rec(RecCmd::AskOff)),
         ];
@@ -468,8 +468,8 @@ impl App {
             PItem::head("Recording filter"),
             it("Notes", Opt::Notes),
             it("Automation", Opt::Automation),
-            // Audio (FL: into the audio editor, or the playlist): the audio editor is to be a plugin of its own, and the
-            // playlist's audio comes with One-click audio recording.
+            // Audio (FL: recording into mixer tracks, then the playlist): mixer tracks don't record yet; audio comes with
+            // One-click audio recording, into the playlist or the audio editor.
             PItem::new("Audio", Cmd::Nothing).off(),
             PItem::head("Options"),
             it("Ask what to record", Opt::Ask),
@@ -849,7 +849,7 @@ mod tests {
             ]
         );
         assert_eq!(x, b.x, "under the button");
-        assert!(!items[5].enabled);
+        assert!(items[5].enabled && items[5].cmd == Cmd::OneClickEditor);
         app.state.playlist.popup = None;
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Arm { notes: true, automation: false }));
         assert!(app.state.rec.armed && Opt::Notes.on() && !Opt::Automation.on());

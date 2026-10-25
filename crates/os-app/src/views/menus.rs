@@ -319,6 +319,7 @@ const TOOLS_B: &[Item] = &[
     it("Lock all playlist tracks to content", ""),
     it("Unlock all playlist tracks from content", ""),
     it("Reset empty playlist tracks", "").on(),
+    it(REMOVE_TESLAS_LABEL, "").on(),
     it(DELETE_UNUSED_LABEL, "").on(),
     it(EDITORS_LABEL, "").sub(),
     it("Set keyboard focus for all plugins to", "").sub(),
@@ -479,6 +480,9 @@ fn opens_sub(menu: usize, item: &Item) -> bool {
 /// TOOLS > Switch all plugin editors to ▸ and Change declicking for selected channels to ▸, also in the channel rack's
 /// options menu (spec: ui/channel-rack.md §17).
 pub const ONE_CLICK_LABEL: &str = "One-click audio recording";
+/// TOOLS > Macros: every Tesla in the mixer goes, after a question (FL: Remove all Edison instances; spec:
+/// plugins/tesla/README.md "Recording into Tesla from Lemon Studio").
+pub const REMOVE_TESLAS_LABEL: &str = "Remove all audio editor instances";
 pub const DUMP_LOG_LABEL: &str = "Dump score log to selected pattern";
 pub const CLEAR_LOG_LABEL: &str = "Clear log";
 pub const EDITORS_LABEL: &str = "Switch all plugin editors to";
