@@ -230,6 +230,9 @@ mod tests {
     }
 
     #[test]
+    // The expected values are rounded sines and cosines (`sin(pi / 4)` is one below `FRAC_1_SQRT_2`), not stand-ins
+    // for the constants.
+    #[allow(clippy::approx_constant)]
     fn sines_and_cosines_are_the_nearest_doubles() {
         use std::f64::consts::PI;
         // pi / 4 (a double a little below the true one): the sine rounds down, the cosine up.

@@ -30,6 +30,7 @@ use x11rb::protocol::xproto::{
     self, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, ImageFormat, ImageOrder,
     KeyButMask, PropMode, StackMode, VisualClass, WindowClass,
 };
+use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::shape::{self, ConnectionExt as _};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -52,6 +53,8 @@ x11rb::atom_manager! {
         _NET_ACTIVE_WINDOW,
         _NET_WM_STATE,
         _NET_WM_STATE_ABOVE,
+        _NET_WORKAREA,
+        _NET_CURRENT_DESKTOP,
         _MOTIF_WM_HINTS,
     }
 }
@@ -335,7 +338,11 @@ impl FrameWindow {
         if self.detached() {
             return;
         }
+        let changed = self.f.state.borrow().clip.as_ref().is_none_or(|c| c.0 != work);
         self.f.state.borrow_mut().clip = Some((work, covers.to_vec()));
+        if changed {
+            self.f.refit();
+        }
         self.f.apply_clip();
     }
 
@@ -381,6 +388,17 @@ impl FrameWindow {
             st.page = active.min(pages.len() - 1);
             st.pages = pages;
             self.f.dirty.set(true);
+        }
+    }
+
+    /// The plugin's smallest editor size when the frame's edges may resize it (`None`: a fixed size).
+    pub fn set_resizable(&self, min: Option<(f32, f32)>) {
+        let mut st = self.f.state.borrow_mut();
+        if st.resize_min != min {
+            st.resize_min = min;
+            if min.is_none() {
+                st.sizing = None;
+            }
         }
     }
 
@@ -574,6 +592,79 @@ impl Frame {
         expose();
     }
 
+    /// The frame's top-left on the screen (physical px).
+    fn top_left(&self) -> (i32, i32) {
+        self.to_screen(0.0, 0.0)
+    }
+
+    /// Moves the frame's top-left to screen point `at` (physical px); a docked frame is clipped again for the place.
+    fn place(&self, at: (i32, i32)) {
+        let c = &self.conn.c;
+        if self.state.borrow().detached {
+            let _ = c.configure_window(self.win, &ConfigureWindowAux::new().x(at.0).y(at.1));
+            let _ = c.flush();
+            return;
+        }
+        let at = from_root(&self.conn, self.conn.owner.get(), at);
+        self.pos.set(at);
+        let _ = c.configure_window(self.win, &ConfigureWindowAux::new().x(at.0).y(at.1));
+        self.apply_clip();
+        let _ = c.flush();
+        expose();
+    }
+
+    /// Maximizes the frame to its workspace, or restores it.
+    fn toggle_max(&self) {
+        let (top_left, target) = (self.top_left(), self.max_target());
+        let at = self.state.borrow_mut().maximize(top_left, target);
+        if let Some(at) = at {
+            self.place(at);
+            self.dirty.set(true);
+        }
+    }
+
+    /// What a maximized frame fills: docked, the app's workspace; detached, the work area of the monitor it is on.
+    /// Its top-left (screen px) and size (logical px).
+    fn max_target(&self) -> Option<((i32, i32), (f32, f32))> {
+        let k = self.scale;
+        let size = |r: [i32; 4]| ((r[2] - r[0]) as f32 / k, (r[3] - r[1]) as f32 / k);
+        let docked = {
+            let st = self.state.borrow();
+            if st.detached { None } else { Some(st.clip.as_ref()?.0) }
+        };
+        if let Some(work) = docked {
+            return Some((to_root(&self.conn, self.conn.owner.get(), (work[0], work[1])), size(work)));
+        }
+        let (x, y) = self.top_left();
+        let (w, h) = {
+            let cv = self.canvas.borrow();
+            (cv.pixmap.width() as i32, cv.pixmap.height() as i32)
+        };
+        let r = work_area(&self.conn, (x + w / 2, y + h / 2))?;
+        Some(((r[0], r[1]), size(r)))
+    }
+
+    /// A maximized docked frame keeps filling the workspace when it changes (the browser shown or hidden, the main
+    /// window resized).
+    fn refit(&self) {
+        if self.state.borrow().detached || self.state.borrow().maxed.is_none() {
+            return;
+        }
+        let Some((at, size)) = self.max_target() else { return };
+        let fill = {
+            let mut st = self.state.borrow_mut();
+            let fill = st.fill(size);
+            if let Some((w, h)) = fill.filter(|&(w, h)| (w as f32, h as f32) != st.editor) {
+                st.events.push(FrameEvent::Resize(w, h));
+                os_clap::wake();
+            }
+            fill
+        };
+        if fill.is_some() && at != self.top_left() {
+            self.place(at);
+        }
+    }
+
     /// A window point (logical px) on the X screen (physical px).
     fn to_screen(&self, x: f32, y: f32) -> (i32, i32) {
         let k = self.scale;
@@ -614,6 +705,7 @@ impl Frame {
                 let _ = c.send_event(false, self.conn.root, to_root, ClientMessageEvent::new(32, self.win, a.WM_CHANGE_STATE, [ICONIC_STATE, 0, 0, 0, 0]));
                 let _ = c.flush();
             }
+            Reply::Maximize => self.toggle_max(),
         }
     }
 
@@ -818,6 +910,33 @@ fn set_owner(conn: &Conn, owner: xproto::Window) {
     let _ = conn.c.change_window_attributes(owner, &xproto::ChangeWindowAttributesAux::new().event_mask(EventMask::EXPOSURE));
     // Owned windows stay above their owner without help.
     keep_above(conn);
+}
+
+/// The work area (screen px, `[x0, y0, x1, y1]`) of the monitor at `p`: the monitor (RandR) less the panels and docks
+/// of the current desktop's `_NET_WORKAREA` (which spans every monitor), or the whole screen without either.
+fn work_area(conn: &Conn, p: (i32, i32)) -> Option<[i32; 4]> {
+    let c = &conn.c;
+    let monitors = c.randr_get_monitors(conn.root, true).ok().and_then(|r| r.reply().ok()).map_or_else(Vec::new, |r| r.monitors);
+    let rect = |m: &randr::MonitorInfo| [i32::from(m.x), i32::from(m.y), i32::from(m.x) + i32::from(m.width), i32::from(m.y) + i32::from(m.height)];
+    let holds = |r: &[i32; 4]| r[0] <= p.0 && p.0 < r[2] && r[1] <= p.1 && p.1 < r[3];
+    let mon = monitors.iter().map(rect).find(holds).or_else(|| monitors.iter().find(|m| m.primary).or(monitors.first()).map(rect));
+    let mon = match mon {
+        Some(m) => m,
+        None => {
+            let g = c.get_geometry(conn.root).ok()?.reply().ok()?;
+            [0, 0, i32::from(g.width), i32::from(g.height)]
+        }
+    };
+    let a = &conn.atoms;
+    let card = |atom, offset, len| -> Option<Vec<u32>> {
+        let r = c.get_property(false, conn.root, atom, AtomEnum::CARDINAL, offset, len).ok()?.reply().ok()?;
+        Some(r.value32()?.collect())
+    };
+    let desk = card(a._NET_CURRENT_DESKTOP, 0, 1).and_then(|v| v.first().copied()).unwrap_or(0);
+    let Some(v) = card(a._NET_WORKAREA, desk * 4, 4).filter(|v| v.len() == 4) else { return Some(mon) };
+    let wa = [v[0] as i32, v[1] as i32, (v[0] + v[2]) as i32, (v[1] + v[3]) as i32];
+    let r = [mon[0].max(wa[0]), mon[1].max(wa[1]), mon[2].min(wa[2]), mon[3].min(wa[3])];
+    Some(if r[0] < r[2] && r[1] < r[3] { r } else { mon })
 }
 
 /// A screen point (physical px) in `win`'s coordinates.

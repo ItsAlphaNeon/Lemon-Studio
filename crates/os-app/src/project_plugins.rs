@@ -48,9 +48,9 @@ pub fn native_first() -> bool {
 }
 
 /// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, Sytrus, the
-/// parametric EQ).
+/// parametric EQ, Edison).
 pub fn has_recreation(id: &str) -> bool {
-    [crate::osc3::FILE_NAME, crate::citrus::FILE_NAME, crate::plugins::EQ_FILE_NAME].iter().any(|n| id.eq_ignore_ascii_case(n))
+    [crate::osc3::FILE_NAME, crate::citrus::FILE_NAME, crate::plugins::EQ_FILE_NAME, crate::plugins::EDISON_FILE_NAME].iter().any(|n| id.eq_ignore_ascii_case(n))
 }
 
 /// Whether a hosted plugin is saved inside the wrapper: CLAP, VST3 and VST2 plugins from plugin files, and the built-in
@@ -657,7 +657,7 @@ mod tests {
 
     /// Lemon Studio's other effects are compiled in like the EQ but have no file plugin of their own to be saved as: a
     /// slot hosting one is saved wrapped with its state, and the reopened project hosts the built-in copy again with
-    /// that state.
+    /// that state (Tesla's is its sample: its parameters are only its transport).
     #[test]
     fn linked_effects_save_wrapped_and_reopen() {
         use crate::plugins::LINKED_EFFECTS;
@@ -667,11 +667,26 @@ mod tests {
         a.state.file = None;
         a.state.path = None;
         a.plugins.effects = crate::plugins::builtin_effects();
-        let key = |k: usize| fx_key(3, k as u8);
+        // Ten slots a track: track 3, then 4.
+        let at = |k: usize| (3 + (k / 10) as u16, (k % 10) as u8);
+        let key = |k: usize| fx_key(at(k).0, at(k).1);
+        let tesla_frames = 4410;
+        let tesla_state = tesla::state::plugin_state(&tesla::state::Saved {
+            sample: tesla::sample::Sample::from_channels(44100, vec![vec![0.5; tesla_frames]], tesla::sample::Format::Int16),
+            ..Default::default()
+        });
+        let tesla_frames_of = |st: Option<Vec<u8>>| st.and_then(|b| tesla::state::from_plugin_state(&b)).map(|s| s.sample.frames());
         let mut set = Vec::new();
         for (k, name) in LINKED_EFFECTS.iter().enumerate() {
-            a.state.project.mixer[3].slots[k] = Some(crate::plugins::new_slot(name));
-            a.plugins.create_effect(3, k as u8, a.plugins.effect_index(name).unwrap(), None).unwrap();
+            let (t, slot) = at(k);
+            a.state.project.mixer[usize::from(t)].slots[usize::from(slot)] = Some(crate::plugins::new_slot(name));
+            let tesla = *name == crate::plugins::TESLA;
+            a.plugins.create_effect(t, slot, a.plugins.effect_index(name).unwrap(), tesla.then_some(tesla_state.as_slice())).unwrap();
+            if tesla {
+                assert_eq!(tesla_frames_of(a.plugins.state(key(k))), Some(tesla_frames));
+                set.push((u32::MAX, 0.0));
+                continue;
+            }
             // One setting away from its default.
             let p = a.plugins.param_infos(key(k)).into_iter().find(|p| !p.read_only && !p.bypass).unwrap();
             let n = if (p.default - 0.3).abs() > 0.1 { 0.3 } else { 0.8 };
@@ -687,7 +702,8 @@ mod tests {
 
         let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         for (k, name) in LINKED_EFFECTS.iter().enumerate() {
-            let r = wrapped_slot(saved.mixer[3].slots[k].as_ref().unwrap()).unwrap_or_else(|| panic!("{name} wrapped"));
+            let (t, slot) = at(k);
+            let r = wrapped_slot(saved.mixer[usize::from(t)].slots[usize::from(slot)].as_ref().unwrap()).unwrap_or_else(|| panic!("{name} wrapped"));
             assert_eq!((Format::parse(&r.format), r.name.as_str()), (Some(Format::Clap), *name));
             assert!(r.path.ends_with(&format!("{name}.clap")), "{}", r.path);
         }
@@ -699,8 +715,12 @@ mod tests {
         b.sync_wrapped();
         let _ = std::fs::remove_file(&path);
         for (k, name) in LINKED_EFFECTS.iter().enumerate() {
-            assert_eq!(crate::mixer::slot_name(&b.state, 3, k as u8).as_deref(), Some(*name));
+            assert_eq!(crate::mixer::slot_name(&b.state, at(k).0, at(k).1).as_deref(), Some(*name));
             assert!(b.plugins.descriptor(key(k)).is_some_and(|d| is_builtin(&d)), "{name} hosted, built in");
+            if *name == crate::plugins::TESLA {
+                assert_eq!(tesla_frames_of(b.plugins.state(key(k))), Some(tesla_frames), "Tesla kept its sample");
+                continue;
+            }
             assert_eq!(b.plugins.param_value(key(k), set[k].0), Some(set[k].1), "{name} kept its setting");
         }
     }

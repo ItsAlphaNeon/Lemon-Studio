@@ -14,10 +14,10 @@
 use super::design::Coefs;
 use super::{BAND_PASS, BAND_STOP, HIGH_PASS, HIGH_SHELF, LOW_PASS, LOW_SHELF, PEAKING};
 
-const HALFPI: f64 = 1.5707963267948966;
-const PI: f64 = 3.141592653589793;
+const HALFPI: f64 = std::f64::consts::FRAC_PI_2;
+const PI: f64 = std::f64::consts::PI;
 /// `2 / pi`, `16 / pi^4`, `4 / pi^2`.
-const TWO_OVER_PI: f64 = 0.6366197723675814;
+const TWO_OVER_PI: f64 = std::f64::consts::FRAC_2_PI;
 const SIXTEEN_OVER_PI4: f64 = 0.16425571607494938;
 const FOUR_OVER_PI2: f64 = 0.4052847345693511;
 
@@ -320,6 +320,8 @@ mod tests {
 
     // spec: plugins/fruity-parametric-eq-2.md "HQ+" ("What it matches", "Low pass", "High pass")
     #[test]
+    // Q 0.7071 is a knob value, not a stand-in for `FRAC_1_SQRT_2`.
+    #[allow(clippy::approx_constant)]
     fn pass_filters_match_their_prototypes() {
         // Prototype: P(f) = w^4 / ((w^2 - f^2)^2 + f^2 w^2 / Q^2).
         let proto_lp = |w: f64, q: f64, f: f64| 10.0 * (w.powi(4) / ((w * w - f * f).powi(2) + f * f * w * w / (q * q))).log10();
@@ -356,6 +358,8 @@ mod tests {
 
     // spec: plugins/fruity-parametric-eq-2.md "HQ+" ("Peaking", "Shelves")
     #[test]
+    // Q 0.7071 is a knob value, not a stand-in for `FRAC_1_SQRT_2`.
+    #[allow(clippy::approx_constant)]
     fn peaking_and_shelves() {
         // Peaking: G at the centre (P = G^2), 1 at 0 Hz, the prototype's value at the Nyquist frequency.
         for &(w, q, g) in &[(0.05, 1.41, 12.0), (0.5, 0.7, -9.0), (0.9, 2.0, 6.0), (0.2, 0.4, 18.0)] {
