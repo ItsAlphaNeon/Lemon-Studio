@@ -625,6 +625,8 @@ impl Frame {
                 let _ = c.send_event(false, self.conn.root, to_root, ClientMessageEvent::new(32, self.win, a.WM_CHANGE_STATE, [ICONIC_STATE, 0, 0, 0, 0]));
                 let _ = c.flush();
             }
+            // No maximize button here yet (`max_w`).
+            Reply::Maximize => {}
         }
     }
 

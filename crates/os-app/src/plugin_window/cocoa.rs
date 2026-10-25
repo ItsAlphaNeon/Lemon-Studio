@@ -491,7 +491,11 @@ impl FrameWindow {
         if self.detached() {
             return;
         }
+        let changed = self.f.state.borrow().clip.as_ref().is_none_or(|c| c.0 != work);
         self.f.state.borrow_mut().clip = Some((work, covers.to_vec()));
+        if changed {
+            self.f.refit();
+        }
         self.f.apply_clip();
     }
 
@@ -917,6 +921,7 @@ impl Frame {
                 self.state.borrow_mut().moving = Some((cx, cy, wx, wy));
                 self.view.setNeedsDisplay(true);
             }
+            Reply::Maximize => self.toggle_max(),
             Reply::Minimize => {
                 // A docked window hides (its channel's name button shows it again); a borderless panel cannot go to
                 // the Dock, so a detached one hides too.
@@ -925,6 +930,54 @@ impl Frame {
                     None => self.view.setHidden(true),
                 }
             }
+        }
+    }
+
+    /// Maximizes the frame to its workspace, or restores it.
+    fn toggle_max(&self) {
+        let target = self.max_target();
+        let at = self.state.borrow_mut().maximize(self.top_left(), target);
+        if let Some(at) = at {
+            self.place(at);
+            self.apply_clip();
+            self.front();
+        }
+    }
+
+    /// What a maximized frame fills: docked, the app's workspace; detached, its screen less the menu bar and the Dock.
+    /// Its top-left (screen px) and size (points).
+    fn max_target(&self) -> Option<((i32, i32), (f32, f32))> {
+        let k = self.main_scale();
+        if let Some(panel) = self.panel.borrow().as_ref() {
+            let v = panel.screen()?.visibleFrame();
+            let at = to_px(self.mtm, NSPoint::new(v.origin.x, v.origin.y + v.size.height), k);
+            return Some((at, (v.size.width as f32, v.size.height as f32)));
+        }
+        let owner = self.owner.as_deref()?;
+        let work = self.state.borrow().clip.as_ref()?.0;
+        let p = owner_to_screen(owner, NSPoint::new(f64::from(work[0]) / k, f64::from(work[1]) / k));
+        let size = (((work[2] - work[0]) as f64 / k) as f32, ((work[3] - work[1]) as f64 / k) as f32);
+        Some((to_px(self.mtm, p, k), size))
+    }
+
+    /// A maximized docked frame keeps filling the workspace when it changes (the browser shown or hidden, the main
+    /// window resized).
+    fn refit(&self) {
+        if self.panel.borrow().is_some() || self.state.borrow().maxed.is_none() {
+            return;
+        }
+        let Some((at, size)) = self.max_target() else { return };
+        let fill = {
+            let mut st = self.state.borrow_mut();
+            let fill = st.fill(size);
+            if let Some((w, h)) = fill.filter(|&(w, h)| (w as f32, h as f32) != st.editor) {
+                st.events.push(FrameEvent::Resize(w, h));
+                os_clap::wake();
+            }
+            fill
+        };
+        if fill.is_some() && at != self.top_left() {
+            self.place(at);
         }
     }
 

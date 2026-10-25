@@ -859,6 +859,8 @@ unsafe fn reply(hwnd: HWND, w: &mut Win, r: Reply) {
                 }
                 ShowWindow(hwnd, if detached { SW_MINIMIZE } else { SW_HIDE });
             }
+            // No maximize button here yet (`max_w`).
+            Reply::Maximize => {}
         }
     }
 }

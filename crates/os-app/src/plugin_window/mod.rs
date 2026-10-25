@@ -284,6 +284,9 @@ struct State {
     resize_min: Option<(f32, f32)>,
     /// An edge drag in progress.
     sizing: Option<Sizing>,
+    /// Maximized (the button, or a double-click on the title bar): where the frame was (screen px) and the editor's
+    /// size then, for the restore.
+    maxed: Option<((i32, i32), (f32, f32))>,
     events: Vec<FrameEvent>,
     drag: Option<(Knob, f32, f32)>,
     /// Title-bar move in progress: cursor and window position (screen px) at the press. Done by hand: the system's
@@ -319,6 +322,7 @@ impl State {
             editor,
             resize_min: None,
             sizing: None,
+            maxed: None,
             events: Vec::new(),
             drag: None,
             moving: None,
@@ -390,6 +394,8 @@ impl State {
 enum Part {
     Close,
     Minimize,
+    /// Maximize / restore (resizable editors).
+    Maximize,
     Gear,
     /// The menu arrow (the window menu, an app popup).
     Menu,
@@ -461,8 +467,11 @@ const CORNER: f32 = 16.0;
 
 fn parts(st: &State) -> Vec<(Rect, Part)> {
     let (w, h) = st.size();
-    let p = presets_rect(w);
+    let p = presets_rect(st);
     let mut v = Vec::new();
+    if max_w(st) > 0.0 {
+        v.push((Rect::new(w - 42.0, 7.0, 17.0, 17.0), Part::Maximize));
+    }
     if st.resize_min.is_some() {
         // The corner first (it overlaps both edges); below the title bar, so the close button stays a button.
         v.push((Rect::new(w - CORNER, h - CORNER, CORNER, CORNER), Part::Edge { right: true, bottom: true }));
@@ -471,7 +480,7 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
     }
     v.extend([
         (Rect::new(w - 23.0, 7.0, 17.0, 17.0), Part::Close),
-        (Rect::new(w - 42.0, 7.0, 17.0, 17.0), Part::Minimize),
+        (Rect::new(w - 42.0 - max_w(st), 7.0, 17.0, 17.0), Part::Minimize),
         (MENU_RECT, Part::Menu),
         (GEAR_RECT, Part::Gear),
         (Rect::new(p.right() - 33.0, p.y, 17.0, p.h), Part::PresetPrev),
@@ -528,8 +537,13 @@ const MENU_RECT: Rect = Rect { x: 8.0, y: 5.0, w: 14.0, h: 21.0 };
 const GEAR_RECT: Rect = Rect { x: 24.0, y: 5.0, w: 21.0, h: 21.0 };
 
 /// The Presets box: right side of the title bar, left of minimize.
-fn presets_rect(w: f32) -> Rect {
-    Rect::new(w - 49.0 - PRESETS_W, 6.0, PRESETS_W, 19.0)
+fn presets_rect(st: &State) -> Rect {
+    Rect::new(st.size().0 - 49.0 - max_w(st) - PRESETS_W, 6.0, PRESETS_W, 19.0)
+}
+
+/// The room the maximize button takes in the title bar: a resizable editor's frame has one (macOS so far).
+fn max_w(st: &State) -> f32 {
+    if cfg!(target_os = "macos") && st.resize_min.is_some() { 19.0 } else { 0.0 }
 }
 
 fn page_tabler(p: PageIcon) -> &'static tb::TablerIcon {
@@ -589,7 +603,7 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     }
     let gear = if st.strip && lemon { os_ui::kit::lemon::ink_on_lemon() } else if st.strip { c_gear_on() } else { c_icon() };
     icon_at(c, &tb::SETTINGS_FILLED, g.cx(), g.cy(), 18.4, gear);
-    let p = presets_rect(w);
+    let p = presets_rect(st);
     let f = title_font();
     let ty = (19.0 - c.ascent(f)).round();
     let nx = 48.0;
@@ -621,7 +635,11 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     c.text_clip(f, p.x + 9.0, ty, p.w - 9.0 - 31.0, c_text(), st.preset.as_deref().unwrap_or("Presets"));
     icon_at(c, &tb::CARET_LEFT, p.right() - 22.2, 15.5, 18.9, c_icon());
     icon_at(c, &tb::CARET_RIGHT, p.right() - 7.8, 15.5, 18.9, c_icon());
-    c.icon_stroke(&tb::MINUS, Rect::new(w - 39.5, 7.0, 12.0, 12.0), c_icon(), 2.0);
+    let mw = max_w(st);
+    c.icon_stroke(&tb::MINUS, Rect::new(w - 39.5 - mw, 7.0, 12.0, 12.0), c_icon(), 2.0);
+    if mw > 0.0 {
+        c.icon(&tb::SQUARES, Rect::new(w - 40.0, 9.0, 13.0, 13.0), c_icon());
+    }
     c.icon_stroke(&tb::X, Rect::new(w - 22.25, 7.75, 15.5, 15.5), c_icon(), 1.6);
 }
 
@@ -759,6 +777,8 @@ enum Reply {
     Move,
     /// Minimize the window (a docked one hides).
     Minimize,
+    /// Maximize a resizable editor's window to the workspace, or restore it (`State::maximize`).
+    Maximize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -772,6 +792,32 @@ enum Btn {
 type ToScreen<'a> = &'a dyn Fn(f32, f32) -> (i32, i32);
 
 impl State {
+    /// Maximize or restore. Maximized, the frame goes back to where it was (`top_left`'s answer then) at the editor's
+    /// size then. Otherwise it fills `target` (top-left in screen px, size in logical px), its editor as large as that
+    /// leaves; `None` when there is no target (or a fixed size). The answer: where the frame's top-left goes.
+    fn maximize(&mut self, top_left: (i32, i32), target: Option<((i32, i32), (f32, f32))>) -> Option<(i32, i32)> {
+        if let Some((at, editor)) = self.maxed.take() {
+            self.events.push(FrameEvent::Resize(editor.0.round() as u32, editor.1.round() as u32));
+            os_clap::wake();
+            return Some(at);
+        }
+        let (at, size) = target?;
+        let editor = self.fill(size)?;
+        self.maxed = Some((top_left, self.editor));
+        self.events.push(FrameEvent::Resize(editor.0, editor.1));
+        os_clap::wake();
+        Some(at)
+    }
+
+    /// The editor size (logical px) that makes the frame `size`, at least the editor's smallest; `None` for a fixed
+    /// size.
+    fn fill(&self, size: (f32, f32)) -> Option<(u32, u32)> {
+        let (min_w, min_h) = self.resize_min?;
+        let w = (size.0 - 2.0 * BORDER).max(min_w);
+        let h = (size.1 - self.area_y() - BORDER).max(min_h);
+        Some((w.floor() as u32, h.floor() as u32))
+    }
+
     /// Left button down at (x, y); `double` for the second press of a double click.
     fn left_down(&mut self, x: f32, y: f32, double: bool, screen: ToScreen) -> Reply {
         let part = part_at(self, x, y);
@@ -786,7 +832,7 @@ impl State {
             }
             Some(Part::Presets) => {
                 // The preset list is an app popup too, under the box's left edge.
-                let b = presets_rect(self.size().0);
+                let b = presets_rect(self);
                 let (sx, sy) = screen(b.x, b.bottom());
                 self.events.push(FrameEvent::Presets(sx, sy));
                 os_clap::wake();
@@ -806,7 +852,7 @@ impl State {
         }
         match part {
             // Close and minimize only arm on the press; the release over the same button acts (`left_up`).
-            Some(Part::Close | Part::Minimize) => {
+            Some(Part::Close | Part::Minimize | Part::Maximize) => {
                 self.armed = part;
                 Reply::Capture
             }
@@ -854,9 +900,14 @@ impl State {
                 os_clap::wake();
                 Reply::Repaint
             }
-            // Drag the window by the title bar.
-            Some(Part::Caption) if !double => Reply::Move,
+            // Drag the window by the title bar (no longer maximized); a double-click maximizes or restores.
+            Some(Part::Caption) if double && max_w(self) > 0.0 => Reply::Maximize,
+            Some(Part::Caption) if !double => {
+                self.maxed = None;
+                Reply::Move
+            }
             Some(Part::Edge { right, bottom }) => {
+                self.maxed = None;
                 let editor = self.editor;
                 self.sizing = Some(Sizing { right, bottom, x, y, editor, asked: (editor.0.round() as u32, editor.1.round() as u32) });
                 Reply::Capture
@@ -982,6 +1033,7 @@ impl State {
                 Reply::Repaint
             }
             Some(Part::Minimize) if over => Reply::Minimize,
+            Some(Part::Maximize) if over => Reply::Maximize,
             Some(_) => Reply::Repaint,
             None => Reply::None,
         }
@@ -1199,6 +1251,28 @@ mod tests {
         assert_eq!(st.left_down(w - 2.0, h - 2.0, false, &screen), Reply::Capture);
         st.motion(w + 18.0, h + 48.0, false);
         assert_eq!(st.events.pop(), Some(FrameEvent::Resize(500, 320)), "the corner: both ways");
+    }
+
+    /// A resizable editor's frame maximizes to a target and restores to where it was, at the editor's size then; a
+    /// fixed one does not (spec: ui/plugin-window.md "Frame").
+    #[test]
+    fn frames_maximize_and_restore() {
+        let mut st = state(true, "Master");
+        assert_eq!(st.maximize((50, 60), Some(((0, 100), (1200.0, 700.0)))), None, "a fixed size");
+        st.resize_min = Some((400.0, 200.0));
+        assert_eq!(st.maximize((50, 60), Some(((0, 100), (1200.0, 700.0)))), Some((0, 100)));
+        let (aw, ah) = (1200.0 - 2.0 * BORDER, 700.0 - st.area_y() - BORDER);
+        assert_eq!(st.events.pop(), Some(FrameEvent::Resize(aw as u32, ah as u32)));
+        assert_eq!(st.maximize((0, 100), None), Some((50, 60)), "restored to where it was");
+        assert_eq!(st.events.pop(), Some(FrameEvent::Resize(480, 270)));
+        assert_eq!(st.maximize((50, 60), None), None, "no target, nothing to do");
+        if cfg!(target_os = "macos") {
+            let (w, _) = st.size();
+            assert_eq!(part_at(&st, w - 35.0, 15.0), Some(Part::Maximize));
+            assert_eq!(part_at(&st, w - 54.0, 15.0), Some(Part::Minimize));
+            let screen = |x: f32, y: f32| (x as i32, y as i32);
+            assert_eq!(st.left_down(200.0, 15.0, true, &screen), Reply::Maximize, "a double-click on the title bar");
+        }
     }
 
     #[test]
