@@ -54,6 +54,8 @@ x11rb::atom_manager! {
         _NET_WM_STATE,
         _NET_WM_STATE_ABOVE,
         _NET_WORKAREA,
+        _NET_WM_WINDOW_TYPE,
+        _NET_WM_WINDOW_TYPE_DIALOG,
         _MOTIF_WM_HINTS,
     }
 }
@@ -253,6 +255,9 @@ impl FrameWindow {
             if owner != 0 {
                 c.change_property32(PropMode::REPLACE, win, AtomEnum::WM_TRANSIENT_FOR, AtomEnum::WINDOW, &[owner as u32])?;
             }
+            // A dialog: tiling window managers float it, resizable or not (with a Wayland main window it has no owner to
+            // be transient for, and once resizable its size no longer marks it as fixed).
+            c.change_property32(PropMode::REPLACE, win, a._NET_WM_WINDOW_TYPE, AtomEnum::ATOM, &[a._NET_WM_WINDOW_TYPE_DIALOG])?;
             // Opened from the active application: it starts above (taken when the window is mapped). Under X11 the main
             // window owns it instead (transient for it).
             if !docked && conn.above.get() {
