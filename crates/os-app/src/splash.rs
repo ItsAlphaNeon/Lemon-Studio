@@ -12,10 +12,10 @@
 //!
 //! The window has no background of its own: only the disc, its soft (Gaussian) shadow and the status line show, over
 //! whatever is behind, and clicks go through it. It is animated on a thread of its own (on macOS in a process of its
-//! own, `mac`), so it keeps moving while the UI thread loads the project and the plugins. Windows and macOS; elsewhere
-//! `open` shows nothing.
+//! own, `mac`), so it keeps moving while the UI thread loads the project and the plugins. Windows, macOS and Linux (X11,
+//! XWayland under Wayland, `x11`); elsewhere `open` shows nothing.
 // spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup"
-#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+#![cfg_attr(not(any(windows, target_os = "macos", target_os = "linux")), allow(dead_code))]
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -130,7 +130,7 @@ impl Shared {
 /// The splash while it shows: dropping it closes the window.
 pub struct Splash {
     shared: Arc<Shared>,
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     window: platform::Window,
 }
 
@@ -181,20 +181,20 @@ pub fn open() -> Option<Splash> {
     if !wanted() {
         return None;
     }
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     {
         let shared = Arc::new(Shared::default());
         let window = platform::open(shared.clone())?;
         Some(Splash { shared, window })
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     None
 }
 
 impl Drop for Splash {
     fn drop(&mut self) {
         self.shared.closed.store(true, Ordering::SeqCst);
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         self.window.close();
     }
 }
@@ -204,6 +204,9 @@ use win as platform;
 
 #[cfg(target_os = "macos")]
 use mac as platform;
+
+#[cfg(target_os = "linux")]
+use x11 as platform;
 
 #[cfg(target_os = "macos")]
 pub use mac::{child_main, ARG};
@@ -808,6 +811,154 @@ mod win {
                 _ => DefWindowProcW(hwnd, msg, wp, lp),
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Linux: the splash in an X11 window of its own connection (XWayland under Wayland), animated on a thread of its own. A
+// 32-bit (ARGB) window, so the compositor blends it over whatever is behind; override-redirect, so the window manager
+// neither frames nor places it and keeps it above the managed windows; an empty input shape, so clicks go through.
+
+#[cfg(target_os = "linux")]
+mod x11 {
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use x11rb::connection::{Connection, RequestConnection as _};
+    use x11rb::protocol::randr::ConnectionExt as _;
+    use x11rb::protocol::shape::{self, ConnectionExt as _};
+    use x11rb::protocol::xproto::{
+        AtomEnum, ClipOrdering, ColormapAlloc, ConnectionExt as _, CreateGCAux, CreateWindowAux, ImageFormat, ImageOrder, PropMode, VisualClass, WindowClass,
+    };
+    use x11rb::rust_connection::RustConnection;
+    use x11rb::wrapper::ConnectionExt as _;
+
+    use super::{device, Anim, Painter, Shared};
+
+    /// Time between frames.
+    const FRAME: Duration = Duration::from_millis(16);
+
+    /// The splash thread (it closes the window once `Shared::closed` is set).
+    pub struct Window;
+
+    impl Window {
+        /// Nothing to do: the thread sees `Shared::closed` at its next frame and closes the window.
+        pub fn close(&self) {}
+    }
+
+    pub fn open(shared: Arc<Shared>) -> Option<Window> {
+        if !std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) {
+            return None;
+        }
+        std::thread::Builder::new()
+            .name("splash".into())
+            .spawn(move || {
+                if run(&shared).is_none() {
+                    // No splash after all (no X server, no 32-bit visual): startup goes on without it.
+                    shared.gone.store(true, Ordering::Release);
+                }
+            })
+            .ok()?;
+        Some(Window)
+    }
+
+    /// Makes the window, then animates it until it is closed or has gone.
+    fn run(shared: &Shared) -> Option<()> {
+        let (c, screen_num) = RustConnection::connect(None).ok()?;
+        let screen = &c.setup().roots[screen_num];
+        let root = screen.root;
+        // A 32-bit TrueColor visual: per-pixel alpha.
+        let visual = screen
+            .allowed_depths
+            .iter()
+            .filter(|d| d.depth == 32)
+            .flat_map(|d| d.visuals.iter())
+            .find(|v| v.class == VisualClass::TRUE_COLOR)?
+            .visual_id;
+        // The UI scale: the X resources' `Xft.dpi` / 96, or Main GUI scaling's (spec: ui/ui-scaling.md §1).
+        let dpi = x11rb::resource_manager::new_from_default(&c).ok().and_then(|db| db.get_value::<u32>("Xft.dpi", "").ok().flatten());
+        let scale = crate::gui_scale(dpi.map_or(1.0, |d| f64::from(d) / 96.0)) as f32;
+        let mut painter = Painter::new(scale)?;
+        let (w, h) = device(scale);
+        // The primary monitor (RandR), else the first, else the whole screen.
+        let (mx, my, mw, mh) = c
+            .randr_get_monitors(root, true)
+            .ok()
+            .and_then(|r| r.reply().ok())
+            .and_then(|r| r.monitors.iter().find(|m| m.primary).or(r.monitors.first()).map(|m| (m.x, m.y, m.width, m.height)))
+            .unwrap_or((0, 0, screen.width_in_pixels, screen.height_in_pixels));
+        let x = i32::from(mx) + (i32::from(mw) - w as i32) / 2;
+        let y = i32::from(my) + (i32::from(mh) - h as i32) / 2;
+
+        let colormap = c.generate_id().ok()?;
+        c.create_colormap(ColormapAlloc::NONE, colormap, root, visual).ok()?;
+        let win = c.generate_id().ok()?;
+        c.create_window(
+            32,
+            win,
+            root,
+            x as i16,
+            y as i16,
+            w as u16,
+            h as u16,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            visual,
+            &CreateWindowAux::new().background_pixel(0).border_pixel(0).colormap(colormap).override_redirect(1),
+        )
+        .ok()?;
+        let atom = |name: &[u8]| c.intern_atom(false, name).ok()?.reply().ok().map(|r| r.atom);
+        if let (Some(ty), Some(splash)) = (atom(b"_NET_WM_WINDOW_TYPE"), atom(b"_NET_WM_WINDOW_TYPE_SPLASH")) {
+            let _ = c.change_property32(PropMode::REPLACE, win, ty, AtomEnum::ATOM, &[splash]);
+        }
+        let _ = c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, b"Lemon Studio");
+        let _ = c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_CLASS, AtomEnum::STRING, b"lemonstudio\0LemonStudio\0");
+        // No input region: clicks go through to what is behind.
+        let _ = c.shape_rectangles(shape::SO::SET, shape::SK::INPUT, ClipOrdering::UNSORTED, win, 0, 0, &[]);
+        let gc = c.generate_id().ok()?;
+        c.create_gc(gc, win, &CreateGCAux::new()).ok()?;
+
+        // Rows per PutImage, within the server's request size.
+        let stride = w as usize * 4;
+        let max = c.maximum_request_bytes().saturating_sub(64);
+        let band = (max / stride).clamp(1, h as usize);
+        let lsb = c.setup().image_byte_order == ImageOrder::LSB_FIRST;
+        let mut out = vec![0u8; stride * h as usize];
+
+        let mut anim = Anim::default();
+        let start = Instant::now();
+        let mut mapped = false;
+        while !shared.closed.load(Ordering::SeqCst) {
+            let next = Instant::now() + FRAME;
+            let (progress, what, done) = shared.feed();
+            let Some(look) = anim.frame(start.elapsed().as_secs_f32(), progress, &what, done) else {
+                shared.gone.store(true, Ordering::Release);
+                break;
+            };
+            // Premultiplied RGBA to the server's 32-bit ARGB, the window's opacity multiplied in.
+            let k = (look.alpha.clamp(0.0, 1.0) * 256.0) as u32;
+            for (o, p) in out.chunks_exact_mut(4).zip(painter.paint(&look).data().chunks_exact(4)) {
+                let [r, g, b, a] = [p[0], p[1], p[2], p[3]].map(|v| ((u32::from(v) * k) >> 8) as u8);
+                o.copy_from_slice(&if lsb { [b, g, r, a] } else { [a, r, g, b] });
+            }
+            for (i, rows) in out.chunks(band * stride).enumerate() {
+                let _ = c.put_image(ImageFormat::Z_PIXMAP, win, gc, w as u16, (rows.len() / stride) as u16, 0, (i * band) as i16, 0, 32, rows);
+            }
+            if !mapped {
+                // The first frame before the window shows.
+                let _ = c.map_window(win);
+                mapped = true;
+            }
+            let _ = c.flush();
+            // Errors (the server's) are of no consequence to the splash.
+            while let Ok(Some(_)) = c.poll_for_event() {}
+            std::thread::sleep(next.saturating_duration_since(Instant::now()));
+        }
+        let _ = c.destroy_window(win);
+        let _ = c.free_colormap(colormap);
+        let _ = c.flush();
+        Some(())
     }
 }
 
