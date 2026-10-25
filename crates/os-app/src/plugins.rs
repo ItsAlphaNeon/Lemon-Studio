@@ -255,6 +255,7 @@ pub fn builtin() -> Vec<Available> {
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
     v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_TRIO));
     v.extend(linked(&CITRUS, &citrus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::citrus::CITRUS));
+    v.extend(local_builtins().iter().filter(|a| a.desc.kind == os_host::Kind::Instrument).cloned());
     v
 }
 
@@ -277,7 +278,49 @@ pub fn builtin_effects() -> Vec<Available> {
         &lemon_stereo_shaper::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
     ];
     let names = std::iter::once(LEMON_EQ).chain(LINKED_EFFECTS);
-    LIBS.iter().zip(entries).zip(names).flat_map(|((lib, entry), name)| linked(lib, entry, name)).collect()
+    let mut v: Vec<Available> = LIBS.iter().zip(entries).zip(names).flat_map(|((lib, entry), name)| linked(lib, entry, name)).collect();
+    v.extend(local_builtins().iter().filter(|a| a.desc.kind == os_host::Kind::Effect).cloned());
+    v
+}
+
+/// The folder of local built-in plugins: `LEMONSTUDIO_BUILTIN_DIR`, else `builtin` in the user folder.
+pub fn local_builtin_dir() -> Option<PathBuf> {
+    std::env::var_os("LEMONSTUDIO_BUILTIN_DIR").map(PathBuf::from).filter(|p| p.is_absolute()).or_else(|| os_paths::user_file("builtin"))
+}
+
+/// Local built-in plugins: the CLAP files in [`local_builtin_dir`], loaded at startup (under the crash guard) and listed
+/// with the built-in plugins, so a developer's own plugins are always there without a scan or a format to choose. They
+/// are saved in projects as any CLAP plugin; a scan never lists another copy of them.
+pub fn local_builtins() -> &'static [Available] {
+    static LOCAL: OnceLock<Vec<Available>> = OnceLock::new();
+    LOCAL.get_or_init(|| {
+        // tests see them only when the folder is named for the test
+        if cfg!(test) && std::env::var_os("LEMONSTUDIO_BUILTIN_DIR").is_none() {
+            return Vec::new();
+        }
+        let Some(dir) = local_builtin_dir() else { return Vec::new() };
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("clap")))
+            .collect();
+        files.sort();
+        let mut out = Vec::new();
+        for f in files {
+            match load_file(&f, os_host::Format::Clap) {
+                Ok(lib) => out.extend(lib.plugins().iter().map(|d| Available { lib: lib.clone(), desc: d.clone() })),
+                Err(e) => eprintln!("local built-in {}: {e}", f.display()),
+            }
+        }
+        out
+    })
+}
+
+/// Whether `d` is one of the [`local_builtins`].
+pub fn is_local_builtin(d: &Descriptor) -> bool {
+    local_builtins().iter().any(|a| a.desc.path == d.path)
 }
 
 /// The plugins of a CLAP entry table linked into this program.
@@ -366,7 +409,13 @@ impl Plugins {
     /// lazily loaded library; plugins no longer found are marked missing (not listed). The first file wins for a
     /// plugin id. Built-in plugins are never replaced.
     pub fn merge(&mut self, cache: &crate::plugin_db::Cache) {
-        let builtin: HashSet<String> = self.available.iter().chain(&self.effects).filter(|a| crate::project_plugins::is_builtin(&a.desc)).map(|a| a.desc.uid()).collect();
+        let builtin: HashSet<String> = self
+            .available
+            .iter()
+            .chain(&self.effects)
+            .filter(|a| crate::project_plugins::is_builtin(&a.desc) || is_local_builtin(&a.desc))
+            .map(|a| a.desc.uid())
+            .collect();
         let mut seen: HashSet<String> = builtin.clone();
         for f in cache.files.iter().filter(|f| f.status == crate::plugin_db::Status::Ok) {
             let Some(format) = os_host::Format::parse(&f.format) else { continue };
@@ -4023,5 +4072,28 @@ mod resize_tests {
         tick(&mut pl, 5);
         let win = pl.hosted[&0].window.as_ref().unwrap().hwnd() as u32;
         assert!(geometry(&c, win).0 > sw, "an editor that cannot be resized is left as it is");
+    }
+}
+
+#[cfg(test)]
+mod local_builtin_tests {
+    use super::*;
+
+    /// `LEMONSTUDIO_BUILTIN_DIR=<folder of .clap files> cargo test -p os-app --bin lemonstudio local_builtins_are_listed
+    /// -- --ignored`: every plugin of the folder is listed with the built-in plugins, first, and a scan's copy of it is not
+    /// listed again.
+    #[test]
+    #[ignore]
+    fn local_builtins_are_listed() {
+        let dir = local_builtin_dir().expect("LEMONSTUDIO_BUILTIN_DIR");
+        let local = local_builtins();
+        assert!(!local.is_empty(), "no plugin loaded from {}", dir.display());
+        let p = Plugins::builtins();
+        for a in local {
+            assert!(a.desc.path.starts_with(&dir));
+            let listed = p.available.iter().chain(&p.effects).filter(|b| b.desc.uid() == a.desc.uid()).count();
+            assert_eq!(listed, 1, "{} listed once", a.desc.name);
+            println!("local built-in: {} ({:?})", a.desc.name, a.desc.kind);
+        }
     }
 }
