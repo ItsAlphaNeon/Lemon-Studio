@@ -309,18 +309,19 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Covers the piano roll, the playlist, step-sequencer edits and knob turns (channel, main, mixer panning and
   stereo separation, effect mix, send levels, swing), sample loads, the project's initial values, PATTERNS ▸ Split
   by channel and ADD's audio and automation clip channels
-- Also mixer volume faders ("Mixer track volume": a drag is one step, a typed value too), generators added at the
-  bottom of the rack ("Add channel": the plugin picker, F8, ADD, a browser drop), channel deletes ("Delete channel",
-  with notes, clips and the instruments' state), Settings > Project's bar, time mode, panning law, Play truncated
-  notes and Automatic crossfades ("Project settings"), and plugin parameters Lemon Studio sets ("Plugin
-  parameter": Type in value, Set..., Paste value); faders and parameters follow Undo knob tweaks
+- Also mixer volume faders ("Mixer track volume": a drag is one step, a typed value too), generators added to the
+  rack, at the bottom or inserted higher up ("Add channel": the plugin picker, F8, ADD, Insert, a browser drop),
+  Replace ("Replace channel", with the old instrument's state), channel deletes ("Delete channel", with notes,
+  clips and the instruments' state), Settings > Project's timebase (its ticks come back exactly), bar, time mode,
+  panning law, Play truncated notes and Automatic crossfades ("Project settings"), Settings > Info's text ("Project
+  info"), and plugin parameters Lemon Studio sets ("Plugin parameter": Type in value, Set..., Paste value); faders
+  and parameters follow Undo knob tweaks
 - The browser's Current project ▸ History lists the steps from "Last reset"; undone steps are grey, and a click
   on one goes back or forward to it
 - General settings ▸ Undo history: Maximum undo levels, Undo knob tweaks, Alternate undo mode, and showing the
   history in the browser, newest first if wanted
-- Not yet: a plugin editor's own changes, a generator inserted higher up the rack, Replace, the timebase (which
-  rescales the history instead), project info, other mixer track commands (mute, routing, names, slots);
-  "Put undone recordings in the recycle bin" waits for recording
+- Not yet: a plugin editor's own changes, other mixer track commands (mute, routing, names, slots); "Put undone
+  recordings in the recycle bin" waits for recording
 
 ## 🚧 Audio drivers
 

@@ -317,10 +317,12 @@ impl App {
     pub(crate) fn set_genre(&mut self, genre: Option<&'static str>) -> Option<String> {
         let s = &mut self.state;
         accept_info(s);
+        let before = s.project.info.clone();
         let value = &mut s.project.info.genre;
         if value.as_deref().unwrap_or("") != genre.unwrap_or("") {
             *value = genre.map(str::to_string);
         }
+        crate::history::project_info(s, before);
         self.invalidate();
         Some(format!("Genre: {}", genre.unwrap_or("(none)")))
     }
@@ -464,10 +466,13 @@ pub const GENRES: [&str; 56] = [
 pub(crate) fn accept_info(s: &mut State) {
     let Some(e) = s.settings.info_edit.take() else { return };
     let text = if e.field.multiline() { e.text.text } else { e.text.text.trim().to_string() };
+    let before = s.project.info.clone();
     let value = e.field.get_mut(&mut s.project.info);
     if value.as_deref().unwrap_or("") != text {
         *value = (!text.is_empty()).then_some(text);
     }
+    // One step, "Project info", when the text changed.
+    crate::history::project_info(s, before);
 }
 
 /// Home / End / Up / Down in Comments go by its lines (between line breaks): Up and Down keep the caret's column, in

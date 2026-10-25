@@ -400,6 +400,7 @@ impl App {
             self.tell(Kind::Error, f.title(), spans(&["", &dir.display().to_string(), &format!(" could not be made: {e}")]));
             return self.dialog_done(Then::SaveProject(f.next), Reply::File(None));
         }
+        let before = self.state.project.info.clone();
         let info = &mut self.state.project.info;
         for (value, field) in [&mut info.title, &mut info.author, &mut info.url, &mut info.genre].into_iter().zip(&f.info) {
             let text = field.text.trim();
@@ -407,6 +408,7 @@ impl App {
                 *value = (!text.is_empty()).then(|| text.to_string());
             }
         }
+        crate::history::project_info(&mut self.state, before);
         if f.new {
             self.set_timebase(f.ppq);
             self.set_bar(f.num, 16 / f.den.max(1));

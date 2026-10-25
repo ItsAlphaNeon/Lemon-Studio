@@ -944,6 +944,8 @@ pub struct State {
     /// order: each row's new row (`None`: its instance goes), then the instances to host again (row, `Plugins::available`
     /// index, saved state).
     pub rows_moved: Vec<(Vec<Option<usize>>, Vec<(usize, usize, Vec<u8>)>)>,
+    /// An undo or redo changed the timebase (`history::Timebase`): playback stops on the next tick.
+    pub retimed: bool,
     pub file: Option<os_flp::FlpFile>,
     pub path: Option<PathBuf>,
     /// Open child windows, bottom to top.
@@ -1310,6 +1312,7 @@ impl App {
                 pending_open: None,
                 sample_loads: Vec::new(),
                 rows_moved: Vec::new(),
+                retimed: false,
                 file: None,
                 path: None,
                 z: vec![Win::Playlist, Win::ChannelRack],
@@ -2232,6 +2235,9 @@ impl App {
             for (row, index, blob) in back {
                 self.plugin_paste(row, index, &blob);
             }
+        }
+        if std::mem::take(&mut self.state.retimed) {
+            self.transport.stop();
         }
         // Rows gone without the app (an undone drop that made a channel, `rack::remove_last`): their instruments go.
         let len = self.state.project.channels.len();
@@ -4535,15 +4541,10 @@ impl App {
         let (from, to) = (self.state.project.ppq.max(1), ppq.max(1));
         if from != to {
             self.transport.stop();
-            let s = &mut self.state;
-            s.project.set_ppq(to);
-            crate::piano::rescale(s, from, to);
-            crate::playlist::rescale(s, from, to);
-            crate::history::rescale(s, from, to);
-            if let Some(rows) = &mut s.rack.clipboard {
-                rows.iter_mut().flatten().for_each(|n| n.rescale(from, to));
-            }
-            s.piano.dirty = true;
+            // One step, "Project settings", that brings the ticks back exactly (spec: ui/settings-choices.md "Undo
+            // history: the four checks").
+            crate::history::timebase(&mut self.state);
+            retime(&mut self.state, from, to);
         }
         self.invalidate();
         Some(format!("Timebase: {to} PPQ"))
@@ -8614,6 +8615,22 @@ fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::Channel
     })
 }
 
+/// The timebase goes from `from` to `to` ticks per quarter (`App::set_timebase`, an undone or redone change): every tick
+/// count follows, the project's, the views', the history's and the clipboards'.
+pub(crate) fn retime(s: &mut State, from: u16, to: u16) {
+    if from == to {
+        return;
+    }
+    s.project.set_ppq(to);
+    crate::piano::rescale(s, from, to);
+    crate::playlist::rescale(s, from, to);
+    crate::history::rescale(s, from, to);
+    if let Some(rows) = &mut s.rack.clipboard {
+        rows.iter_mut().flatten().for_each(|n| n.rescale(from, to));
+    }
+    s.piano.dirty = true;
+}
+
 /// A generator-plugin channel played by a hosted instrument, routed like `add_channel`. Returns its rack row.
 pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
     let row = add_channel(p);
@@ -9752,10 +9769,17 @@ mod tests {
         assert_eq!((app.state.playlist.pos, app.state.playlist.range), (192, Some((192, 384))));
         // The pattern is still one 4/4 bar long, in the new ticks.
         assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern), 768);
-        // The undo step made before the change comes back in the new ticks.
+        // The change is one step, "Project settings": undone, the old timebase and its ticks, and the undo step made
+        // before it then works in those; redone, both come back in the new ticks.
+        assert_eq!(crate::history::undo(&mut app.state), Some(crate::history::PROJECT_SETTINGS));
+        assert_eq!((app.state.project.ppq, app.state.project.patterns[0].notes[0].position), (96, 72));
+        assert_eq!((app.state.piano.marker, app.state.playlist.pos), (48, 96));
         assert!(crate::piano::undo(&mut app.state));
-        assert_eq!(app.state.project.patterns[0].notes[0].position, 48);
-        app.state.project.patterns[0].notes[0].position = 144;
+        assert_eq!(app.state.project.patterns[0].notes[0].position, 24);
+        crate::history::redo(&mut app.state);
+        crate::history::redo(&mut app.state);
+        assert_eq!((app.state.project.ppq, app.state.project.patterns[0].notes[0].position), (192, 144));
+        assert!(std::mem::take(&mut app.state.retimed), "playback stops");
         // Back to 96: the same project as before (every tick was doubled, none rounded).
         project_pick(&mut app, &mut c, TIMEBASE, "96", 11);
         assert!(app.state.project == before && !app.unsaved());
