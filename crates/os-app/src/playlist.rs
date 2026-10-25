@@ -4692,7 +4692,9 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
             app.invalidate();
             return true;
         }
-        Key::Character(c) if !ctrl && !alt && !app.typing_on() && PlTool::from_letter(c).is_some() => {
+        // Tool letters; with Shift too, which the typing keyboard leaves alone (it takes the plain letters as notes).
+        // Shift+T and Shift+Z were taken above (as in the piano roll, spec: ui/piano-keys.md §4 rule 16).
+        Key::Character(c) if !ctrl && !alt && (shift || !app.typing_on()) && PlTool::from_letter(c).is_some() => {
             Cmd::Tool(PlTool::from_letter(c).expect("checked"))
         }
         Key::Named(NamedKey::Delete) if ctrl => Cmd::DeleteSpace,
