@@ -1497,7 +1497,8 @@ impl App {
         }
     }
 
-    pub fn open(&mut self, path: PathBuf) {
+    /// Opens a project file; whether it opened (a converted older project opens without a path).
+    pub fn open(&mut self, path: PathBuf) -> bool {
         // A project in the layout used before version 24.2 is converted to the newer one as it is read, as FL 26 does
         // (spec: flp/layouts.md "Saving a file of an older generation"), when FL 20 or later saved it; an older one
         // gets a dialog that says what to do (spec: flp/events/channels.md "Version scope"), not just a line in the
@@ -1575,8 +1576,12 @@ impl App {
                 self.loading = Some(crate::loading::Loading::start(&self.state.project));
                 self.state.playlist.wave_wait = true;
                 self.invalidate();
+                true
             }
-            Err(e) => self.state.message = Some(format!("Could not open {}: {e}", path.display())),
+            Err(e) => {
+                self.state.message = Some(format!("Could not open {}: {e}", path.display()));
+                false
+            }
         }
     }
 
@@ -1843,7 +1848,9 @@ impl App {
                 self.offer_new_form();
             }
             Next::OpenDialog => self.open_dialog(),
-            Next::Open(p) => self.open(p),
+            Next::Open(p) => {
+                self.open(p);
+            }
             Next::ImportMidi(p) => self.import_pending(p),
             Next::Revert(b) => self.revert_from(b),
             Next::Template(f) => self.new_from_pick(f),

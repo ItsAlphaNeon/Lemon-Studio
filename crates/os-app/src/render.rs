@@ -113,8 +113,7 @@ pub fn render(o: &Opts) -> Result<(), String> {
     }
     // Instances start at the render rate (`Plugins::create_with` activates at the current rate).
     app.plugins.set_rate(o.rate);
-    app.open(o.project.clone());
-    let opened = app.state.path.is_some();
+    let opened = app.open(o.project.clone());
     eprintln!("OPEN {}", app.state.message.clone().unwrap_or_default());
     if !opened {
         app.reset_hosted();
