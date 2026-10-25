@@ -221,6 +221,21 @@ pub enum FrameEvent {
     /// plugins/presets.md "Drag and drop").
     #[cfg_attr(not(windows), allow(dead_code))]
     DropFile(std::path::PathBuf),
+    /// The frame's edges were dragged: the plugin's editor should take this content size (logical px). Only for a
+    /// plugin that said it may be resized (host link `Resizable`; spec: plugins/host-link.md).
+    Resize(u32, u32),
+}
+
+/// A frame edge being dragged: which edges, the press (window coordinates, logical px) and the editor size then.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Sizing {
+    right: bool,
+    bottom: bool,
+    x: f32,
+    y: f32,
+    editor: (f32, f32),
+    /// The size last asked of the plugin.
+    asked: (u32, u32),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -265,6 +280,10 @@ struct State {
     misc_ui: crate::misc_page::MiscUi,
     /// Plugin editor size (logical px).
     editor: (f32, f32),
+    /// The editor's smallest size when the frame's edges may resize it (a resizable Lemon plugin, as Tesla).
+    resize_min: Option<(f32, f32)>,
+    /// An edge drag in progress.
+    sizing: Option<Sizing>,
     events: Vec<FrameEvent>,
     drag: Option<(Knob, f32, f32)>,
     /// Title-bar move in progress: cursor and window position (screen px) at the press. Done by hand: the system's
@@ -298,6 +317,8 @@ impl State {
             preset: None,
             misc_ui: Default::default(),
             editor,
+            resize_min: None,
+            sizing: None,
             events: Vec::new(),
             drag: None,
             moving: None,
@@ -386,6 +407,8 @@ enum Part {
     /// A strip control that is not available yet (drawn greyed out): its name for the hint.
     Off(&'static str),
     Caption,
+    /// A resizable editor's frame edge: the right one, the bottom one, or the corner where they meet.
+    Edge { right: bool, bottom: bool },
 }
 
 impl State {
@@ -433,10 +456,20 @@ fn strip_off(st: &State, w: f32) -> Vec<(Rect, &'static str)> {
     v
 }
 
+/// How far into a resizable frame's bottom-right corner it resizes both ways (logical px).
+const CORNER: f32 = 16.0;
+
 fn parts(st: &State) -> Vec<(Rect, Part)> {
-    let (w, _) = st.size();
+    let (w, h) = st.size();
     let p = presets_rect(w);
-    let mut v = vec![
+    let mut v = Vec::new();
+    if st.resize_min.is_some() {
+        // The corner first (it overlaps both edges); below the title bar, so the close button stays a button.
+        v.push((Rect::new(w - CORNER, h - CORNER, CORNER, CORNER), Part::Edge { right: true, bottom: true }));
+        v.push((Rect::new(w - BORDER, TITLE_H, BORDER, h - TITLE_H), Part::Edge { right: true, bottom: false }));
+        v.push((Rect::new(0.0, h - BORDER, w, BORDER), Part::Edge { right: false, bottom: true }));
+    }
+    v.extend([
         (Rect::new(w - 23.0, 7.0, 17.0, 17.0), Part::Close),
         (Rect::new(w - 42.0, 7.0, 17.0, 17.0), Part::Minimize),
         (MENU_RECT, Part::Menu),
@@ -444,7 +477,7 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
         (Rect::new(p.right() - 33.0, p.y, 17.0, p.h), Part::PresetPrev),
         (Rect::new(p.right() - 16.0, p.y, 16.0, p.h), Part::PresetNext),
         (p, Part::Presets),
-    ];
+    ]);
     if st.strip {
         let dx = w - STRIP_RIGHT;
         for i in 0..=st.pages.len() {
@@ -466,6 +499,18 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
 
 fn part_at(st: &State, x: f32, y: f32) -> Option<Part> {
     parts(st).into_iter().find(|(r, _)| r.contains(x, y)).map(|(_, p)| p)
+}
+
+/// A resizable frame's edges (right, bottom) and where they are, for the resize cursors.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn edge_rects(st: &State) -> Vec<(Rect, bool, bool)> {
+    parts(st)
+        .into_iter()
+        .filter_map(|(r, p)| match p {
+            Part::Edge { right, bottom } => Some((r, right, bottom)),
+            _ => None,
+        })
+        .collect()
 }
 
 const KNOBS: [Knob; 3] = [Knob::Pan, Knob::Vol, Knob::Pitch];
@@ -811,6 +856,11 @@ impl State {
             }
             // Drag the window by the title bar.
             Some(Part::Caption) if !double => Reply::Move,
+            Some(Part::Edge { right, bottom }) => {
+                let editor = self.editor;
+                self.sizing = Some(Sizing { right, bottom, x, y, editor, asked: (editor.0.round() as u32, editor.1.round() as u32) });
+                Reply::Capture
+            }
             _ => Reply::Repaint,
         }
     }
@@ -842,6 +892,20 @@ impl State {
 
     /// The mouse moved to (x, y) (a window move by the title bar is the native window's). `fine`: Ctrl is held.
     fn motion(&mut self, x: f32, y: f32, fine: bool) -> Reply {
+        if let Some(mut s) = self.sizing {
+            // The frame's top-left stays put, so window coordinates stay comparable while it grows.
+            let (min_w, min_h) = self.resize_min.unwrap_or(s.editor);
+            let w = if s.right { (s.editor.0 + x - s.x).max(min_w) } else { s.editor.0 };
+            let h = if s.bottom { (s.editor.1 + y - s.y).max(min_h) } else { s.editor.1 };
+            let want = (w.round() as u32, h.round() as u32);
+            if want != s.asked {
+                s.asked = want;
+                self.sizing = Some(s);
+                self.events.push(FrameEvent::Resize(want.0, want.1));
+                os_clap::wake();
+            }
+            return Reply::None;
+        }
         let mut hover = false;
         if self.misc {
             if self.misc_ui.bar_drag.is_some() {
@@ -928,6 +992,7 @@ impl State {
     fn release(&mut self) {
         self.armed = None;
         self.drag = None;
+        self.sizing = None;
         self.moving = None;
         self.misc_ui.drag = None;
         self.misc_ui.bar_drag = None;
@@ -1108,6 +1173,32 @@ mod tests {
         assert_eq!(moved_to((2340, -40), second, second, (200, 100)), (2340, -40), "the same monitor: unchanged");
         assert_eq!(moved_to((2340, -40), second, primary, (200, 100)), (420, 160));
         assert_eq!(moved_to((4400, 1200), second, primary, (200, 100)), (1720, 940), "kept on the smaller monitor");
+    }
+
+    /// A resizable plugin's frame (Tesla): its right and bottom edges and their corner drag the editor's size, never
+    /// below its smallest; a fixed-size plugin's frame has no edges to drag (spec: plugins/host-link.md `Resizable`).
+    #[test]
+    fn frame_edges_resize_a_resizable_editor() {
+        let mut st = state(true, "Master");
+        let (w, h) = st.size();
+        assert_eq!(part_at(&st, w - 2.0, h - 2.0), None, "a fixed size");
+        st.resize_min = Some((400.0, 200.0));
+        assert_eq!(part_at(&st, w - 2.0, h - 2.0), Some(Part::Edge { right: true, bottom: true }));
+        assert_eq!(part_at(&st, w - 2.0, 200.0), Some(Part::Edge { right: true, bottom: false }));
+        assert_eq!(part_at(&st, 100.0, h - 2.0), Some(Part::Edge { right: false, bottom: true }));
+        assert_eq!(part_at(&st, w - 15.0, 15.0), Some(Part::Close), "the title bar keeps its buttons");
+        let screen = |x: f32, y: f32| (x as i32, y as i32);
+        assert_eq!(st.left_down(w - 2.0, 200.0, false, &screen), Reply::Capture);
+        st.motion(w + 98.0, 260.0, false);
+        assert_eq!(st.events.pop(), Some(FrameEvent::Resize(580, 270)), "the right edge: wider only");
+        st.motion(w - 300.0, 200.0, false);
+        assert_eq!(st.events.pop(), Some(FrameEvent::Resize(400, 270)), "not below the smallest");
+        st.motion(w - 300.0, 200.0, false);
+        assert!(st.events.is_empty(), "nothing new to ask");
+        st.left_up(w - 300.0, 200.0);
+        assert_eq!(st.left_down(w - 2.0, h - 2.0, false, &screen), Reply::Capture);
+        st.motion(w + 18.0, h + 48.0, false);
+        assert_eq!(st.events.pop(), Some(FrameEvent::Resize(500, 320)), "the corner: both ways");
     }
 
     #[test]

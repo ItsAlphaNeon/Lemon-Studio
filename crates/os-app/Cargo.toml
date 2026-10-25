@@ -73,7 +73,7 @@ libc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "NSObjCRuntime", "NSString", "NSURL", "objc2-core-foundation"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-quartz-core", "NSApplication", "NSEvent", "NSCell", "NSGraphics", "NSMenu", "NSMenuItem", "NSPanel", "NSResponder", "NSScreen", "NSTrackingArea", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-quartz-core", "NSApplication", "NSCursor", "NSEvent", "NSCell", "NSGraphics", "NSMenu", "NSMenuItem", "NSPanel", "NSResponder", "NSScreen", "NSTrackingArea", "NSView", "NSWindow"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "objc2", "CGColorSpace", "CGDataProvider", "CGImage", "CGPath"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "CALayer", "CAShapeLayer", "CATransaction"] }

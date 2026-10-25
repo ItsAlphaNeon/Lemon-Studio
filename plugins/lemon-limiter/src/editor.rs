@@ -844,7 +844,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
             }
         }
 

@@ -30,7 +30,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSBackingStoreType, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSPanel, NSResponder, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSBackingStoreType, NSCursor, NSCursorFrameResizeDirections, NSCursorFrameResizePosition, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSPanel, NSResponder, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGFloat, CGPoint, CGRect, CGSize};
@@ -169,6 +169,15 @@ define_class!(
         #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _e: Option<&NSEvent>) -> bool {
             true
+        }
+
+        /// A resizable editor's frame edges show resize cursors.
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            let Some(f) = self.ivars().upgrade() else { return };
+            for (r, right, bottom) in super::edge_rects(&f.state.borrow()) {
+                self.addCursorRect_cursor(rect(f64::from(r.x), f64::from(r.y), f64::from(r.w), f64::from(r.h)), &resize_cursor(right, bottom));
+            }
         }
 
         #[unsafe(method(wantsUpdateLayer))]
@@ -525,6 +534,19 @@ impl FrameWindow {
         }
     }
 
+    /// The plugin's smallest editor size when the frame's edges may resize it (`None`: a fixed size).
+    pub fn set_resizable(&self, min: Option<(f32, f32)>) {
+        let mut st = self.f.state.borrow_mut();
+        if st.resize_min != min {
+            st.resize_min = min;
+            if min.is_none() {
+                st.sizing = None;
+            }
+            drop(st);
+            self.f.edges_changed();
+        }
+    }
+
     /// The plugin changed its page itself.
     pub fn set_page(&self, page: usize) {
         let mut st = self.f.state.borrow_mut();
@@ -721,7 +743,15 @@ impl Frame {
         self.canvas.borrow_mut().resize(px(fw), px(fh), k);
         self.state.borrow_mut().clip_key = None;
         self.apply_clip();
+        self.edges_changed();
         self.view.setNeedsDisplay(true);
+    }
+
+    /// The resize cursors' places moved (a new size), or there are none now.
+    fn edges_changed(&self) {
+        if let Some(w) = self.view.window() {
+            w.invalidateCursorRectsForView(&self.view);
+        }
     }
 
     /// Keeps the editor's views at the area's top-left, as on Windows and X11. The area is not flipped, so a view in it
@@ -904,6 +934,19 @@ impl Frame {
         self.state.borrow_mut().events.push(FrameEvent::Raise);
         os_clap::wake();
     }
+}
+
+/// The cursor over a frame edge: the system's frame-resize cursors (macOS 15 and later), else the plain ones.
+fn resize_cursor(right: bool, bottom: bool) -> Retained<NSCursor> {
+    let position = match (right, bottom) {
+        (true, true) => NSCursorFrameResizePosition::BottomRight,
+        (true, false) => NSCursorFrameResizePosition::Right,
+        _ => NSCursorFrameResizePosition::Bottom,
+    };
+    if <NSCursor as objc2::ClassType>::class().responds_to(objc2::sel!(frameResizeCursorFromPosition:inDirections:)) {
+        return NSCursor::frameResizeCursorFromPosition_inDirections(position, NSCursorFrameResizeDirections::All);
+    }
+    if bottom && !right { NSCursor::resizeUpDownCursor() } else { NSCursor::resizeLeftRightCursor() }
 }
 
 /// A view as the owner of its tracking area (it gets the mouse moves).

@@ -1093,14 +1093,23 @@ impl Plugins {
                     if let Some((lw, lh)) = l.size() {
                         w.set_editor_size((lw as f32, lh as f32));
                     }
+                    // A resizable Lemon plugin (Tesla): the frame's edges resize it.
+                    w.set_resizable(l.resizable().map(|(mw, mh)| (mw as f32, mh as f32)));
                 }
                 for e in w.take_events() {
-                    if let (FrameEvent::Page(n), Some(l)) = (&e, &mut h.link) {
-                        l.set_page(*n);
-                        continue;
+                    match (&e, &mut h.link) {
+                        (FrameEvent::Page(n), Some(l)) => {
+                            l.set_page(*n);
+                            continue;
+                        }
+                        (FrameEvent::Resize(ew, eh), Some(l)) => {
+                            l.set_size(*ew, *eh);
+                            continue;
+                        }
+                        _ => {}
                     }
                     out.push(match e {
-                        FrameEvent::Page(_) => continue,
+                        FrameEvent::Page(_) | FrameEvent::Resize(..) => continue,
                         FrameEvent::Close => {
                             close.push(row);
                             Request::Close(row)

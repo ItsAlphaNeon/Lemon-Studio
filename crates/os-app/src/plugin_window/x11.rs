@@ -384,6 +384,17 @@ impl FrameWindow {
         }
     }
 
+    /// The plugin's smallest editor size when the frame's edges may resize it (`None`: a fixed size).
+    pub fn set_resizable(&self, min: Option<(f32, f32)>) {
+        let mut st = self.f.state.borrow_mut();
+        if st.resize_min != min {
+            st.resize_min = min;
+            if min.is_none() {
+                st.sizing = None;
+            }
+        }
+    }
+
     /// The plugin changed its page itself.
     pub fn set_page(&self, page: usize) {
         let mut st = self.f.state.borrow_mut();

@@ -401,6 +401,17 @@ impl Logic {
         Layout::new(w, h)
     }
 
+    /// The host resized the editor's frame: the editor takes `w` × `h` (logical px), at least its smallest size.
+    pub fn resize_to(&mut self, w: u32, h: u32) -> Vec<Act> {
+        let (w, h) = (w.max(view::MIN_W), h.max(view::MIN_H));
+        if (w, h) == self.size() {
+            return vec![];
+        }
+        self.shared.size.0.store(w, Ordering::Relaxed);
+        self.shared.size.1.store(h, Ordering::Relaxed);
+        vec![Act::Resize(w, h), Act::Repaint]
+    }
+
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
     }
@@ -2161,6 +2172,14 @@ mod win32 {
                     }
                     1
                 }
+                // The host's frame may resize the editor (spec: plugins/tesla/README.md "The window").
+                Cmd::Resizable => os_hostlink::pack_size(crate::view::MIN_W, crate::view::MIN_H),
+                Cmd::SetSize => {
+                    let (w, h) = os_hostlink::unpack_size(lp);
+                    let acts = self.logic.resize_to(w, h);
+                    self.run(acts);
+                    1
+                }
                 Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio => 0,
             }
         }
@@ -2341,6 +2360,8 @@ mod gui {
         let size = (device(w, scale), device(h, scale));
         let wake = slot.clone();
         let link = Peer::register(parent as u64, vec![PageIcon::Sample], (w, h), move || px::notify(&wake));
+        // The host's frame may resize the editor (spec: plugins/tesla/README.md "The window").
+        link.set_resizable((crate::view::MIN_W, crate::view::MIN_H));
         let peer = link.clone();
         let p = params.clone();
         let thread = px::spawn(parent, size, slot, move |win| {
@@ -2431,6 +2452,11 @@ mod gui {
                 self.link.to_host(Cmd::Changed, 0);
             }
             self.logic.hosted = self.link.hosted();
+            // The host's frame was dragged to a new size.
+            if let Some((w, h)) = self.link.take_size_request() {
+                let acts = self.logic.resize_to(w, h);
+                self.act(acts);
+            }
         }
 
         fn act(&mut self, acts: Vec<Act>) {
@@ -2503,6 +2529,8 @@ mod gui {
                         self.size = (device(w, self.scale), device(h, self.scale));
                         self.canvas.resize(self.size.0, self.size.1, self.scale);
                         self.win.resize(self.size.0, self.size.1);
+                        // Lemon Studio's frame follows the link; other hosts the request.
+                        self.link.set_size(w, h);
                         self.ctx.request_resize();
                         self.dirty = true;
                     }
@@ -2760,6 +2788,16 @@ mod tests {
         l.up(Btn::Left);
         paint(&mut l);
         assert_eq!(l.size(), (view::MIN_W, view::H + 40));
+    }
+
+    /// Lemon Studio's frame resizes the editor through the host link: it takes the size, never below its smallest.
+    #[test]
+    fn the_host_resizes_the_editor() {
+        let mut l = logic();
+        assert_eq!(l.resize_to(900, 600), vec![Act::Resize(900, 600), Act::Repaint]);
+        assert_eq!(l.size(), (900, 600));
+        assert!(l.resize_to(900, 600).is_empty(), "unchanged");
+        assert_eq!(l.resize_to(10, 10), vec![Act::Resize(view::MIN_W, view::MIN_H), Act::Repaint]);
     }
 
     #[test]
