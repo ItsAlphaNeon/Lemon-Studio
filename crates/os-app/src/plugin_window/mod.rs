@@ -287,6 +287,9 @@ struct State {
     /// Maximized (the button, or a double-click on the title bar): where the frame was (screen px) and the editor's
     /// size then, for the restore.
     maxed: Option<((i32, i32), (f32, f32))>,
+    /// `maxed` before the title bar's last single press, which unmaximizes (a move may follow): the second press of a
+    /// double-click restores from it.
+    maxed_at_press: Option<((i32, i32), (f32, f32))>,
     events: Vec<FrameEvent>,
     drag: Option<(Knob, f32, f32)>,
     /// Title-bar move in progress: cursor and window position (screen px) at the press. Done by hand: the system's
@@ -323,6 +326,7 @@ impl State {
             resize_min: None,
             sizing: None,
             maxed: None,
+            maxed_at_press: None,
             events: Vec::new(),
             drag: None,
             moving: None,
@@ -541,9 +545,9 @@ fn presets_rect(st: &State) -> Rect {
     Rect::new(st.size().0 - 49.0 - max_w(st) - PRESETS_W, 6.0, PRESETS_W, 19.0)
 }
 
-/// The room the maximize button takes in the title bar: a resizable editor's frame has one (macOS and Linux so far).
+/// The room the maximize button takes in the title bar: a resizable editor's frame has one.
 fn max_w(st: &State) -> f32 {
-    if cfg!(any(target_os = "macos", target_os = "linux")) && st.resize_min.is_some() { 19.0 } else { 0.0 }
+    if st.resize_min.is_some() { 19.0 } else { 0.0 }
 }
 
 fn page_tabler(p: PageIcon) -> &'static tb::TablerIcon {
@@ -901,9 +905,15 @@ impl State {
                 Reply::Repaint
             }
             // Drag the window by the title bar (no longer maximized); a double-click maximizes or restores.
-            Some(Part::Caption) if double && max_w(self) > 0.0 => Reply::Maximize,
+            // The double-click's first press unmaximized the frame: the second restores it.
+            Some(Part::Caption) if double && max_w(self) > 0.0 => {
+                if self.maxed.is_none() {
+                    self.maxed = self.maxed_at_press.take();
+                }
+                Reply::Maximize
+            }
             Some(Part::Caption) if !double => {
-                self.maxed = None;
+                self.maxed_at_press = self.maxed.take();
                 Reply::Move
             }
             Some(Part::Edge { right, bottom }) => {
@@ -1266,13 +1276,26 @@ mod tests {
         assert_eq!(st.maximize((0, 100), None), Some((50, 60)), "restored to where it was");
         assert_eq!(st.events.pop(), Some(FrameEvent::Resize(480, 270)));
         assert_eq!(st.maximize((50, 60), None), None, "no target, nothing to do");
-        if cfg!(any(target_os = "macos", target_os = "linux")) {
-            let (w, _) = st.size();
-            assert_eq!(part_at(&st, w - 35.0, 15.0), Some(Part::Maximize));
-            assert_eq!(part_at(&st, w - 54.0, 15.0), Some(Part::Minimize));
-            let screen = |x: f32, y: f32| (x as i32, y as i32);
-            assert_eq!(st.left_down(200.0, 15.0, true, &screen), Reply::Maximize, "a double-click on the title bar");
-        }
+        let (w, _) = st.size();
+        assert_eq!(part_at(&st, w - 35.0, 15.0), Some(Part::Maximize));
+        assert_eq!(part_at(&st, w - 54.0, 15.0), Some(Part::Minimize));
+        let screen = |x: f32, y: f32| (x as i32, y as i32);
+        assert_eq!(st.left_down(200.0, 15.0, true, &screen), Reply::Maximize, "a double-click on the title bar");
+        // A double-click's first press is a plain one (a move), which unmaximizes; the second press restores.
+        st.maximize((50, 60), Some(((0, 100), (1200.0, 700.0))));
+        st.events.clear();
+        assert_eq!(st.left_down(200.0, 15.0, false, &screen), Reply::Move);
+        st.left_up(200.0, 15.0);
+        assert_eq!(st.left_down(200.0, 15.0, true, &screen), Reply::Maximize);
+        assert_eq!(st.maximize((0, 100), Some(((0, 100), (1200.0, 700.0)))), Some((50, 60)), "restored");
+        // Moved by the title bar (one press), it stays as it is: a later double-click maximizes it again.
+        st.maximize((50, 60), Some(((0, 100), (1200.0, 700.0))));
+        st.left_down(200.0, 15.0, false, &screen);
+        st.left_up(200.0, 15.0);
+        st.left_down(200.0, 15.0, false, &screen);
+        st.left_up(200.0, 15.0);
+        assert_eq!(st.left_down(200.0, 15.0, true, &screen), Reply::Maximize);
+        assert_eq!(st.maximize((300, 300), Some(((0, 100), (1200.0, 700.0)))), Some((0, 100)), "maximized again");
     }
 
     #[test]

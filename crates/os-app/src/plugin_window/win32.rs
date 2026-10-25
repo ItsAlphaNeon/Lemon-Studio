@@ -288,7 +288,13 @@ impl FrameWindow {
         if self.detached() {
             return;
         }
+        let changed = self.state.borrow().clip.as_ref().is_none_or(|c| c.0 != work);
         self.state.borrow_mut().clip = Some((work, covers.to_vec()));
+        if changed {
+            if let Some(w) = unsafe { win_of(self.hwnd) } {
+                unsafe { refit(self.hwnd, w) };
+            }
+        }
         // The workspace may have shrunk: the window keeps its part in it (`crate::win_clamp::keep_px`).
         if work[2] > work[0] && work[3] > work[1] {
             let k = self.scale();
@@ -859,9 +865,89 @@ unsafe fn reply(hwnd: HWND, w: &mut Win, r: Reply) {
                 }
                 ShowWindow(hwnd, if detached { SW_MINIMIZE } else { SW_HIDE });
             }
-            // No maximize button here yet (`max_w`).
-            Reply::Maximize => {}
+            Reply::Maximize => toggle_max(hwnd, w),
         }
+    }
+}
+
+/// The frame's top-left on the screen (physical px).
+unsafe fn top_left(hwnd: HWND) -> (i32, i32) {
+    let mut r: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetWindowRect(hwnd, &mut r) };
+    (r.left, r.top)
+}
+
+/// Moves the frame's top-left to screen point `at` (physical px); a docked frame is clipped again for the place.
+unsafe fn place_at(hwnd: HWND, w: &Win, at: (i32, i32)) {
+    unsafe {
+        if w.state.borrow().detached {
+            SetWindowPos(hwnd, std::ptr::null_mut(), at.0, at.1, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            return;
+        }
+        let mut p = POINT { x: at.0, y: at.1 };
+        ScreenToClient(GetParent(hwnd), &mut p);
+        SetWindowPos(hwnd, std::ptr::null_mut(), p.x, p.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        apply_clip(hwnd, &w.state);
+        expose();
+    }
+}
+
+/// Maximizes the frame to its workspace, or restores it.
+unsafe fn toggle_max(hwnd: HWND, w: &Win) {
+    let (top_left, target) = unsafe { (top_left(hwnd), max_target(hwnd, w)) };
+    let at = w.state.borrow_mut().maximize(top_left, target);
+    if let Some(at) = at {
+        unsafe {
+            place_at(hwnd, w, at);
+            InvalidateRect(hwnd, std::ptr::null(), 0);
+        }
+    }
+}
+
+/// What a maximized frame fills: docked, the app's workspace; detached, the work area of the monitor it is on (the
+/// screen less the taskbar). Its top-left (screen px) and size (logical px).
+unsafe fn max_target(hwnd: HWND, w: &Win) -> Option<((i32, i32), (f32, f32))> {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    let k = w.scale;
+    let size = |r: [i32; 4]| ((r[2] - r[0]) as f32 / k, (r[3] - r[1]) as f32 / k);
+    let docked = {
+        let st = w.state.borrow();
+        if st.detached { None } else { Some(st.clip.as_ref()?.0) }
+    };
+    unsafe {
+        if let Some(work) = docked {
+            let mut p = POINT { x: work[0], y: work[1] };
+            ClientToScreen(GetParent(hwnd), &mut p);
+            return Some(((p.x, p.y), size(work)));
+        }
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi) == 0 {
+            return None;
+        }
+        let r = mi.rcWork;
+        Some(((r.left, r.top), size([r.left, r.top, r.right, r.bottom])))
+    }
+}
+
+/// A maximized docked frame keeps filling the workspace when it changes (the browser shown or hidden, the main window
+/// resized).
+unsafe fn refit(hwnd: HWND, w: &Win) {
+    if w.state.borrow().detached || w.state.borrow().maxed.is_none() {
+        return;
+    }
+    let Some((at, size)) = (unsafe { max_target(hwnd, w) }) else { return };
+    let fill = {
+        let mut st = w.state.borrow_mut();
+        let fill = st.fill(size);
+        if let Some((fw, fh)) = fill.filter(|&(fw, fh)| (fw as f32, fh as f32) != st.editor) {
+            st.events.push(FrameEvent::Resize(fw, fh));
+            os_clap::wake();
+        }
+        fill
+    };
+    if fill.is_some() && at != unsafe { top_left(hwnd) } {
+        unsafe { place_at(hwnd, w, at) };
     }
 }
 
@@ -1191,6 +1277,106 @@ mod tests {
         assert_eq!(r[2] - r[0], w);
         // Moved as little as it takes: its bottom-right at the workspace's (its top at the top when it is taller).
         assert_eq!((r[2], r[3]), (600, (50 + r[3] - r[1]).max(400)));
+        drop(f);
+        unsafe { DestroyWindow(owner) };
+    }
+
+    /// A resizable editor's frame (Tesla) maximizes from its title bar's button or a double-click: docked, to the
+    /// workspace it is clipped to, which it keeps filling when that changes; detached, to its monitor's work area. Again
+    /// restores where it was (spec: ui/plugin-window.md "Frame"). Opens real windows:
+    /// `cargo test -p os-app --bin lemonstudio resizable_windows_maximize -- --ignored`.
+    #[test]
+    #[ignore]
+    fn resizable_windows_maximize() {
+        let class = wide("STATIC");
+        let owner = unsafe {
+            CreateWindowExW(0, class.as_ptr(), std::ptr::null(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 1300, 900, std::ptr::null_mut(), std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), std::ptr::null())
+        };
+        assert!(!owner.is_null());
+        let info = ChannelInfo { name: "Tesla".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let mut r: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetWindowRect(owner, &mut r) };
+        let f = FrameWindow::new(owner as isize, info, (480.0, 270.0), 1.0, (r.left + 300, r.top + 200), false).unwrap();
+        f.raise();
+        let me = || unsafe { parent_rect(f.hwnd) };
+        // A double-click is a press and a release, then the system's double-click message and a release.
+        let click = |x: f32, y: f32, double: bool| {
+            let at = (x as isize) | ((y as isize) << 16);
+            let presses: &[u32] = if double { &[WM_LBUTTONDOWN, WM_LBUTTONDBLCLK] } else { &[WM_LBUTTONDOWN] };
+            for &m in presses {
+                unsafe { SendMessageW(f.hwnd, m, 1, at) };
+                unsafe { SendMessageW(f.hwnd, WM_LBUTTONUP, 0, at) };
+            }
+        };
+        let resizes = || f.take_events().into_iter().filter_map(|e| if let FrameEvent::Resize(w, h) = e { Some((w, h)) } else { None }).collect::<Vec<_>>();
+        // The plugin takes the size it is asked for (the app does this through the host link).
+        let follow = |want: &[(u32, u32)]| {
+            let &(w, h) = want.last().unwrap();
+            f.set_editor_size((w as f32, h as f32));
+        };
+        let work = [40, 60, 1240, 820];
+        f.clip_to(work, &[]);
+        let before = me();
+
+        // A fixed size has no button: the click there is minimize's.
+        let (w, _) = f.state.borrow().size();
+        click(w - 35.0, 15.0, false);
+        assert!(resizes().is_empty(), "a fixed size does not maximize");
+        f.raise();
+
+        f.set_resizable(Some((400.0, 200.0)));
+        let (w, _) = f.state.borrow().size();
+        click(w - 35.0, 15.0, false);
+        let ay = f.state.borrow().area_y();
+        let full = ((1200.0 - 2.0 * BORDER) as u32, (760.0 - ay - BORDER) as u32);
+        let asked = resizes();
+        assert_eq!(asked, vec![full], "the editor fills the workspace");
+        follow(&asked);
+        assert_eq!(me(), work, "the frame is the workspace");
+
+        // The workspace grows (the browser hidden): it keeps filling it.
+        let wider = [0, 60, 1240, 820];
+        f.clip_to(wider, &[]);
+        let asked = resizes();
+        assert_eq!(asked, vec![(full.0 + 40, full.1)]);
+        follow(&asked);
+        assert_eq!(me(), wider);
+
+        // A double-click on the title bar restores the place and size before.
+        click(200.0, 15.0, true);
+        let asked = resizes();
+        assert_eq!(asked, vec![(480, 270)]);
+        follow(&asked);
+        assert_eq!(me(), before);
+
+        // Moving it leaves it as it is; the workspace changing no longer refits it.
+        click(200.0, 15.0, true);
+        follow(&resizes());
+        click(200.0, 15.0, false);
+        f.clip_to(work, &[]);
+        assert!(resizes().is_empty(), "no longer maximized");
+        f.set_editor_size((480.0, 270.0));
+
+        // Detached: the monitor's work area.
+        f.set_detached(owner as isize, true);
+        let (w, _) = f.state.borrow().size();
+        click(w - 35.0, 15.0, false);
+        let mon = unsafe {
+            use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+            let mut mi: MONITORINFO = std::mem::zeroed();
+            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            GetMonitorInfoW(MonitorFromWindow(f.hwnd, MONITOR_DEFAULTTONEAREST), &mut mi);
+            mi.rcWork
+        };
+        let asked = resizes();
+        assert_eq!(asked, vec![((mon.right - mon.left) as u32 - 2 * BORDER as u32, ((mon.bottom - mon.top) as f32 - ay - BORDER) as u32)]);
+        follow(&asked);
+        let mut r: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetWindowRect(f.hwnd, &mut r) };
+        assert_eq!([r.left, r.top, r.right, r.bottom], [mon.left, mon.top, mon.right, mon.bottom]);
+        let (w, _) = f.state.borrow().size();
+        click(w - 35.0, 15.0, false);
+        assert_eq!(resizes(), vec![(480, 270)], "restored");
         drop(f);
         unsafe { DestroyWindow(owner) };
     }
