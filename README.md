@@ -21,9 +21,6 @@ own content. Side branches are named `cutting-edge-<topic>`.
   new size and the window follows the size it takes, one request per UI tick. Such an editor larger than the
   monitor's work area opens shrunk to fit it; editors that cannot be resized open as before.
 
-- **Local built-in plugins.** CLAP files in `~/.config/Lemon Studio/builtin` (or `LEMONSTUDIO_BUILTIN_DIR`) load at
-  startup and are listed with the built-in plugins: no scan, no format to choose. Projects save them as CLAP plugins.
-
 ## What this branch removes
 
 Nothing yet.

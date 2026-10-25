@@ -657,7 +657,7 @@ fn vendors_match(a: &str, b: &str) -> bool {
 
 /// Lower ranks are listed first: the built-in plugins, the preferred format, then VST3, CLAP, VST2, native.
 fn rank(d: &Descriptor, prefer: Prefer) -> usize {
-    if crate::project_plugins::is_builtin(d) || crate::plugins::is_local_builtin(d) {
+    if crate::project_plugins::is_builtin(d) {
         return 0;
     }
     let preferred = match prefer {
