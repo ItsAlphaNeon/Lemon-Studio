@@ -38,6 +38,7 @@ lemon-stereo-enhancer = { path = "../../plugins/lemon-stereo-enhancer", features
 lemon-transient-processor = { path = "../../plugins/lemon-transient-processor", features = ["linked"] }
 lemon-chorus = { path = "../../plugins/lemon-chorus", features = ["linked"] }
 lemon-stereo-shaper = { path = "../../plugins/lemon-stereo-shaper", features = ["linked"] }
+tesla = { path = "../../plugins/tesla", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"
@@ -63,7 +64,7 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Diagnostics_Debug", "Win32_UI_HiDpi", "Win32_System_Registry"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", features = ["resource_manager", "shape"] }
+x11rb = { version = "0.13", features = ["randr", "resource_manager", "shape"] }
 
 # The main window's chrome (`macos`) and plugin windows (`plugin_window::cocoa`): the objc2 crates softbuffer already
 # uses.
@@ -72,7 +73,7 @@ libc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "NSObjCRuntime", "NSString", "NSURL", "objc2-core-foundation"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-quartz-core", "NSApplication", "NSEvent", "NSCell", "NSGraphics", "NSMenu", "NSMenuItem", "NSPanel", "NSResponder", "NSScreen", "NSTrackingArea", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-quartz-core", "NSApplication", "NSCursor", "NSEvent", "NSCell", "NSGraphics", "NSMenu", "NSMenuItem", "NSPanel", "NSResponder", "NSScreen", "NSTrackingArea", "NSView", "NSWindow"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "objc2", "CGColorSpace", "CGDataProvider", "CGImage", "CGPath"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "CALayer", "CAShapeLayer", "CATransaction"] }

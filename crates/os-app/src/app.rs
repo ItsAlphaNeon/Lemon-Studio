@@ -118,6 +118,9 @@ pub enum Util {
     Undo,
     Help,
     Save,
+    /// The audio editor button: Tesla on the master track; `NewAudioEditor` is its right click.
+    AudioEditor,
+    NewAudioEditor,
 }
 
 /// Mouse cursor shapes the shell should show.
@@ -2068,14 +2071,19 @@ impl App {
     }
 
     /// The built-in recreations write their settings into the model as the file's own plugin state: Lemon Parametric
-    /// EQ into its slots, Lemon Trio into its channels.
+    /// EQ and Tesla (as Edison) into their slots, Lemon Trio into its channels.
     pub(crate) fn store_builtin_states(&mut self) {
+        use crate::plugins::{EDISON_FILE_NAME, EQ_FILE_NAME};
         for key in self.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
-            let (Some((t, k)), Some(st)) = (crate::plugins::fx_of(key), self.plugins.eq_file_state(key)) else { continue };
-            if let Some(slot) = self.state.project.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) {
-                if slot.name == crate::plugins::EQ_FILE_NAME {
-                    slot.state = st;
-                }
+            let Some((t, k)) = crate::plugins::fx_of(key) else { continue };
+            let Some(slot) = self.state.project.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
+            let st = match slot.name.as_str() {
+                EQ_FILE_NAME => self.plugins.eq_file_state(key),
+                EDISON_FILE_NAME => self.plugins.edison_file_state(key),
+                _ => None,
+            };
+            if let Some(st) = st {
+                slot.state = st;
             }
         }
         crate::osc3::store(&mut self.state.project, &self.plugins);
@@ -2165,32 +2173,40 @@ impl App {
 
     /// Mixer slots that hold the project file's parametric EQ are played and edited by Lemon Parametric EQ, started
     /// from the slot's saved state (spec: plugins/lemon-parametric-eq-2.md §8). Without the plugin the engine's own EQ
-    /// plays them.
+    /// plays them. Edison's slots are opened as Tesla the same way, with their sample, loop, markers and recording
+    /// settings (spec: plugins/tesla/README.md "Opening Edison slots").
     pub(crate) fn sync_effects(&mut self) {
-        use crate::plugins::{fx_key, EQ_FILE_NAME, LEMON_EQ};
+        use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, TESLA};
         // The installed EQ plays these slots instead (`host_native`).
         if crate::project_plugins::native_first() {
             return;
         }
-        let Some(index) = self.plugins.effect_index(LEMON_EQ) else { return };
-        let todo: Vec<(u16, u8, Vec<u8>)> = self
+        let todo: Vec<(u16, u8, String, Vec<u8>)> = self
             .state
             .project
             .mixer
             .iter()
             .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
-            .filter_map(|(t, k, s)| s.as_ref().filter(|s| s.name == EQ_FILE_NAME).map(|s| (t, k, s.state.clone())))
-            .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
+            .filter_map(|(t, k, s)| s.as_ref().filter(|s| s.name == EQ_FILE_NAME || s.name == EDISON_FILE_NAME).map(|s| (t, k, s.name.clone(), s.state.clone())))
+            .filter(|&(t, k, _, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
             .collect();
-        if todo.is_empty() {
-            return;
-        }
-        for (t, k, fl) in todo {
-            let st = lemon_parametric_eq_2::params::plugin_state_from_fl(&fl);
-            if let Err(e) = self.plugins.create_effect(t, k, index, Some(&st)) {
+        let mut made = false;
+        for (t, k, file, fl) in todo {
+            let (name, st) = if file == EQ_FILE_NAME {
+                (LEMON_EQ, Some(lemon_parametric_eq_2::params::plugin_state_from_fl(&fl)))
+            } else {
+                // Bytes that are not an Edison state open an empty Tesla.
+                (TESLA, tesla::plugin_state_from_edison(&fl))
+            };
+            let Some(index) = self.plugins.effect_index(name) else { continue };
+            made = true;
+            if let Err(e) = self.plugins.create_effect(t, k, index, st.as_deref()) {
                 self.fx_failed.push(fx_key(t, k));
-                self.state.message = Some(format!("{LEMON_EQ}: {e}"));
+                self.state.message = Some(format!("{name}: {e}"));
             }
+        }
+        if !made {
+            return;
         }
         self.transport.set_effects(self.plugins.effects());
         self.state.piano.dirty = true;
@@ -2294,7 +2310,8 @@ impl App {
         // No plugin windows here, so no requests.
         #[cfg(not(plugin_windows))]
         self.plugins.idle(|_| None);
-        // An open instrument editor is processed while nothing plays, so notes from its own keyboard sound.
+        // Open plugin editors are processed while nothing plays: notes from an instrument's own keyboard sound, and an
+        // effect's own playback (Tesla) too.
         let listen = self.plugins.editor_open();
         if listen {
             self.sync_live();
@@ -2436,6 +2453,10 @@ impl App {
                     Request::Automate(row, index) => {
                         self.state.message = self.params_automate(row, index);
                         self.invalidate();
+                        continue;
+                    }
+                    Request::Audio(path, channel) => {
+                        self.sample_from_plugin(path, channel);
                         continue;
                     }
                     Request::NotAvailable(name) => {
@@ -3976,6 +3997,32 @@ impl App {
         s.rack.select_only(row);
         s.piano.dirty = true;
         s.message = Some(format!("{} loaded in Lemon Sampler", stem.unwrap_or_default()));
+        self.invalidate();
+    }
+
+    /// A sample a Lemon plugin sent (Tesla's "Send to playlist as audio clip" / "Send to selected channel", host link
+    /// `Audio`; spec: plugins/tesla/README.md "Version 1"): an audio clip at the song position on the first track
+    /// free over it (one "Playlist edit" step), or the selected channel's sample (a new sampler channel when the
+    /// selected one isn't a sampler), as a drop on the rack does.
+    pub(crate) fn sample_from_plugin(&mut self, path: String, channel: bool) {
+        if channel {
+            let s = &self.state;
+            let row = Some(s.selected_channel).filter(|&r| s.project.channels.get(r).is_some_and(|c| c.kind.is_sampler()));
+            return self.sample_to_channel(path, row);
+        }
+        let s = &mut self.state;
+        let start = s.playlist.pos;
+        let secs = s.playlist.wave(&path).map_or(0.0, |w| w.secs());
+        let p = &s.project;
+        let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
+        let len = (secs * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
+        let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
+        let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        s.message = Some(match crate::playlist::add_audio_clip(s, &path, track, start) {
+            Some(_) => format!("Added audio clip {name}"),
+            None => format!("Could not read {name} as audio"),
+        });
+        s.piano.dirty = true;
         self.invalidate();
     }
 
@@ -7729,6 +7776,8 @@ impl App {
             // No help index yet: the left click does nothing.
             Action::Util(Util::Help) => {}
             Action::Util(Util::Save) => self.menu_item(0, views::menus::FILE_SAVE_AS),
+            Action::Util(Util::AudioEditor) => self.audio_editor(0, false),
+            Action::Util(Util::NewAudioEditor) => self.audio_editor(0, true),
             Action::CloseWin(Win::Perf) => self.close_perf(),
             Action::CloseWin(Win::Strum) => {
                 crate::strum::cancel(s);
@@ -8433,6 +8482,7 @@ fn toolbar_right(hit: &Action) -> Option<Action> {
     Some(match *hit {
         Action::Util(Util::Save) => Action::MenuItem(0, FILE_SAVE_VERSION),
         Action::Util(Util::Help) => Action::MenuItem(HELP_MENU, HELP_ABOUT),
+        Action::Util(Util::AudioEditor) => Action::Util(Util::NewAudioEditor),
         Action::ToggleWin(w @ (Win::Playlist | Win::PianoRoll)) => Action::ShowMax(w),
         Action::ToggleWin(Win::Browser) | Action::ProjectPicker => Action::PickerOpen,
         _ => return None,
@@ -8834,6 +8884,93 @@ mod tests {
         a.sync_effects();
         assert_eq!(a.plugins.hosted.len(), before);
         assert_eq!(crate::plugins::new_slot(LEMON_EQ).state, lemon_parametric_eq_2::params::default_state());
+    }
+
+    /// A project's Edison slots are opened as Tesla with their sample and recording settings, show Tesla's name and
+    /// keep the file's Edison, whose state Tesla writes back (spec: plugins/tesla/README.md "Opening Edison slots").
+    #[test]
+    fn edison_slots_open_as_tesla() {
+        use crate::plugins::{fx_key, EDISON_FILE_NAME, TESLA};
+        use tesla::sample::{Format, Sample};
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let saved = tesla::state::Saved {
+            sample: Sample::from_channels(44100, vec![vec![0.25; 4410], vec![-0.25; 4410]], Format::Int16),
+            path: "take.wav".into(),
+            rec: tesla::state::Rec { armed: true, ..Default::default() },
+            ..Default::default()
+        };
+        let fl = tesla::state::to_edison(&saved);
+        a.state.project.mixer[0].slots[3] = Some(os_model::SlotPlugin { name: EDISON_FILE_NAME.into(), state: fl });
+        a.sync_effects();
+        let key = fx_key(0, 3);
+        assert!(a.plugins.hosted.contains_key(&key));
+        assert_eq!(crate::mixer::slot_name(&a.state, 0, 3).as_deref(), Some(TESLA));
+        let back = tesla::state::from_edison(&a.plugins.edison_file_state(key).expect("an Edison state")).unwrap();
+        assert_eq!((back.sample.frames(), back.sample.channels(), back.path.as_str(), back.rec.armed), (4410, 2, "take.wav", true));
+        a.store_builtin_states();
+        let slot = a.state.project.mixer[0].slots[3].clone().unwrap();
+        assert_eq!(slot.name, EDISON_FILE_NAME);
+        assert_eq!(tesla::state::from_edison(&slot.state).map(|s| s.sample.frames()), Some(4410));
+        // A second pass changes nothing.
+        let before = a.plugins.hosted.len();
+        a.sync_effects();
+        assert_eq!(a.plugins.hosted.len(), before);
+    }
+
+    /// The toolbar's audio editor button puts Tesla on the master track and shows it; another click shows the same
+    /// one, the right click adds another (spec: plugins/tesla/requests.md #5).
+    #[test]
+    fn the_audio_editor_button_opens_tesla_on_the_master() {
+        use crate::mixer::{slot_name, FxReq};
+        use crate::plugins::TESLA;
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let first = a.state.project.mixer[0].slots.iter().position(Option::is_none).unwrap() as u8;
+        a.audio_editor(0, false);
+        assert_eq!(slot_name(&a.state, 0, first).as_deref(), Some(TESLA));
+        assert!(a.state.mixer.pending.iter().any(|r| matches!(r, FxReq::Create { track: 0, slot, .. } if *slot == first)));
+        a.state.mixer.pending.clear();
+        a.audio_editor(0, false);
+        assert_eq!(a.state.mixer.pending, vec![FxReq::Show { track: 0, slot: first }]);
+        a.state.mixer.pending.clear();
+        a.audio_editor(0, true);
+        let teslas = (0..10).filter(|&k| slot_name(&a.state, 0, k).as_deref() == Some(TESLA)).count();
+        assert_eq!(teslas, 2);
+        assert_eq!(toolbar_right(&Action::Util(Util::AudioEditor)), Some(Action::Util(Util::NewAudioEditor)));
+    }
+
+    /// A sample Tesla sends becomes an audio clip at the song position on the first track free there, or the
+    /// selected sampler channel's sample (spec: plugins/tesla/README.md "Version 1").
+    #[test]
+    fn a_sent_sample_lands_on_the_playlist_or_the_channel() {
+        let path = std::env::temp_dir().join(format!("openstudio-sent-{}.wav", std::process::id()));
+        let s = tesla::sample::Sample::from_channels(44100, vec![vec![0.5; 44100]], tesla::sample::Format::Int16);
+        std::fs::write(&path, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
+        let p = path.to_string_lossy().into_owned();
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.playlist.pos = 384;
+        let before = a.state.project.channels.len();
+        a.sample_from_plugin(p.clone(), false);
+        assert_eq!(a.state.project.channels.len(), before + 1);
+        let clips = crate::playlist::clips(&a.state);
+        let i = *a.state.playlist.sel.first().expect("the new clip, selected");
+        let clip = clips[i];
+        assert_eq!(clip.position, 384);
+        assert!(clip.end() > clip.position + 100, "a second long");
+        let overlaps = |c: &os_model::Clip| c.track == clip.track && c.position < clip.end() && c.end() > clip.position;
+        assert_eq!(clips.iter().filter(|c| overlaps(c)).count(), 1, "alone on its track");
+        // To the selected channel: a sampler takes it.
+        let row = a.state.project.channels.iter().position(|c| c.kind.is_sampler()).unwrap();
+        a.state.selected_channel = row;
+        a.sample_from_plugin(p.clone(), true);
+        assert!(a.state.project.channels[row].sample_path.as_deref().is_some_and(|s| s.ends_with(".wav")));
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Writes the toolbar with a live-looking signal to OS_MONITOR_SHOT (a look-and-feel check, not an assertion).
@@ -17622,12 +17759,7 @@ mod tests {
         ] {
             assert_eq!(hint(&app, &a), h);
         }
-        // Greyed out.
-        for name in [
-            "Open audio editor / New audio editor",
-        ] {
-            assert_eq!(hint(&app, &Action::Placeholder(name)), format!("{name}: not available yet"));
-        }
+        assert_eq!(hint(&app, &Action::Util(Util::AudioEditor)), "Open audio editor / New audio editor");
         // Hidden until it has a shop icon of its own.
         assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder("Plugin repository")));
         // Help: the left click does nothing; the right click is About, on the release over the button only.

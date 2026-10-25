@@ -56,6 +56,18 @@ pub enum Cmd {
     /// plugin's parameter list (the CLAP / VST3 parameter index). The host makes the clip for that parameter of this
     /// instance and answers 1; 0 = not handled (a plugin that never got the hello keeps the entry disabled).
     Automate = 10,
+    /// Plugin -> host: an audio file for the project (Tesla's "Send to playlist as audio clip" / "Send to selected
+    /// channel"), `lparam` 0 = to the playlist as an audio clip, 1 = into the selected channel. The file's path waits in
+    /// the process's outbox ([`post_audio`]; the host takes it with [`take_audio`]). The host answers 1; 0 = not
+    /// handled (the plugin empties the outbox again).
+    Audio = 11,
+    /// Host -> plugin: whether the editor can be resized by the host's frame. Answer: its smallest content size in
+    /// logical px ([`pack_size`]); 0 = a fixed size (unanswered messages return 0 too).
+    Resizable = 12,
+    /// Host -> plugin: the user dragged the frame's edges; `lparam` = the content size wanted, logical px
+    /// ([`pack_size`]). The plugin resizes its editor (to at least its smallest size) and answers 1; [`Cmd::Metrics`]
+    /// then gives the size it took, and the frame follows.
+    SetSize = 13,
 }
 
 impl Cmd {
@@ -71,9 +83,27 @@ impl Cmd {
             8 => Cmd::Changed,
             9 => Cmd::Note,
             10 => Cmd::Automate,
+            11 => Cmd::Audio,
+            12 => Cmd::Resizable,
+            13 => Cmd::SetSize,
             _ => return None,
         })
     }
+}
+
+static OUTBOX: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
+
+/// Plugin: a file for the host to take with the next [`Cmd::Audio`] (`channel`: into the selected channel rather than
+/// the playlist). Plugins built into the host share its process, so the path need not travel in the message.
+pub fn post_audio(path: &str, channel: bool) {
+    if let Ok(mut o) = OUTBOX.lock() {
+        o.push((path.to_string(), channel));
+    }
+}
+
+/// Host (or a plugin whose message went unanswered): the files posted since the last call, oldest first.
+pub fn take_audio() -> Vec<(String, bool)> {
+    OUTBOX.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default()
 }
 
 /// The icon of a page tab. The ids are the protocol; the host maps them to its icon set.
@@ -233,6 +263,16 @@ mod win {
             send(self.editor, Cmd::Hint, &mut b as *mut HintBuf as isize);
             b.get()
         }
+
+        /// The editor's smallest content size (logical px) when the frame may resize it; `None` = a fixed size.
+        pub fn resizable(&self) -> Option<(u32, u32)> {
+            send(self.editor, Cmd::Resizable, 0).filter(|&v| v != 0).map(unpack_size)
+        }
+
+        /// The frame was resized: the editor takes content size `w` × `h` (logical px), or the nearest it allows.
+        pub fn set_size(&self, w: u32, h: u32) {
+            send(self.editor, Cmd::SetSize, pack_size(w, h));
+        }
     }
 }
 
@@ -251,8 +291,12 @@ mod local {
         /// The window the host gave the editor (its key in the registry).
         parent: u64,
         pages: Vec<PageIcon>,
-        /// Editor content size (logical px) once it has joined the strip.
-        hosted_size: (u32, u32),
+        /// Editor content size (logical px) once it has joined the strip; it changes when the editor resizes.
+        hosted_size: Mutex<(u32, u32)>,
+        /// The smallest content size when the host's frame may resize the editor (`None`: a fixed size).
+        min_size: Mutex<Option<(u32, u32)>>,
+        /// A size the host's frame asked for, not taken yet.
+        wanted: Mutex<Option<(u32, u32)>>,
         hosted: AtomicBool,
         page: AtomicUsize,
         hint: Mutex<String>,
@@ -263,7 +307,17 @@ mod local {
     impl Peer {
         /// A peer for an editor in host window `parent`, registered at once (until dropped by `unregister`).
         pub fn register(parent: u64, pages: Vec<PageIcon>, hosted_size: (u32, u32), wake: impl Fn() + Send + Sync + 'static) -> Arc<Peer> {
-            let peer = Arc::new(Peer { parent, pages, hosted_size, hosted: AtomicBool::new(false), page: AtomicUsize::new(0), hint: Mutex::new(String::new()), wake: Box::new(wake) });
+            let peer = Arc::new(Peer {
+                parent,
+                pages,
+                hosted_size: Mutex::new(hosted_size),
+                min_size: Mutex::new(None),
+                wanted: Mutex::new(None),
+                hosted: AtomicBool::new(false),
+                page: AtomicUsize::new(0),
+                hint: Mutex::new(String::new()),
+                wake: Box::new(wake),
+            });
             if let Ok(mut r) = REGISTRY.lock() {
                 r.retain(|(p, w)| *p != parent && w.strong_count() > 0);
                 r.push((parent, Arc::downgrade(&peer)));
@@ -300,6 +354,26 @@ mod local {
                     s.clone_into(&mut h);
                 }
             }
+        }
+
+        /// The editor's content size changed (it resized itself, or took a size the host asked for); the host's frame
+        /// follows on its next tick.
+        pub fn set_size(&self, w: u32, h: u32) {
+            if let Ok(mut s) = self.hosted_size.lock() {
+                *s = (w, h);
+            }
+        }
+
+        /// The host's frame may resize the editor, down to `min` (logical px).
+        pub fn set_resizable(&self, min: (u32, u32)) {
+            if let Ok(mut m) = self.min_size.lock() {
+                *m = Some(min);
+            }
+        }
+
+        /// The size the host's frame asked for since the last call (`Link::set_size`), if any.
+        pub fn take_size_request(&self) -> Option<(u32, u32)> {
+            self.wanted.lock().ok().and_then(|mut w| w.take())
         }
 
         /// Plugin -> host (`Changed`, `Note`, `Automate`): queued for the host's next tick, which is woken. 1 when a host
@@ -358,7 +432,21 @@ mod local {
 
         /// Editor content size (logical px) after the plugin joined the strip.
         pub fn size(&self) -> Option<(u32, u32)> {
-            Some(self.peer.hosted_size).filter(|&(w, h)| w > 0 && h > 0)
+            self.peer.hosted_size.lock().ok().map(|s| *s).filter(|&(w, h)| w > 0 && h > 0)
+        }
+
+        /// The editor's smallest content size (logical px) when the frame may resize it; `None` = a fixed size.
+        pub fn resizable(&self) -> Option<(u32, u32)> {
+            self.peer.min_size.lock().ok().and_then(|m| *m)
+        }
+
+        /// The frame was resized: the editor takes content size `w` × `h` (logical px), or the nearest it allows, on
+        /// its own thread (woken now); `size` follows.
+        pub fn set_size(&self, w: u32, h: u32) {
+            if let Ok(mut s) = self.peer.wanted.lock() {
+                *s = Some((w, h));
+            }
+            (self.peer.wake)();
         }
 
         /// The active page as last seen.
@@ -409,6 +497,15 @@ mod tests {
         assert!(peer.hosted());
         assert_eq!(link.pages, vec![PageIcon::Sample, PageIcon::Envelope]);
         assert_eq!(link.size(), Some((560, 390)));
+        // A fixed size until the editor says otherwise; then the frame's sizes reach the editor, and its size the host.
+        assert_eq!(link.resizable(), None);
+        peer.set_resizable((400, 300));
+        assert_eq!(link.resizable(), Some((400, 300)));
+        link.set_size(800, 500);
+        assert_eq!(peer.take_size_request(), Some((800, 500)));
+        assert_eq!(peer.take_size_request(), None);
+        peer.set_size(800, 500);
+        assert_eq!(link.size(), Some((800, 500)));
         link.set_page(1);
         assert_eq!(peer.page(), 1);
         assert!(WAKES.load(Ordering::Relaxed) >= 2, "hello and the page change wake the editor");
@@ -429,6 +526,7 @@ mod tests {
         assert_eq!(b.get(), "Volume: 50 %");
         assert_eq!(Cmd::from_usize(Cmd::SetPage as usize), Some(Cmd::SetPage));
         assert_eq!(Cmd::from_usize(10), Some(Cmd::Automate));
+        assert_eq!(Cmd::from_usize(13), Some(Cmd::SetSize));
         assert_eq!(PageIcon::from_id(99), PageIcon::Plugin);
         assert_eq!(unpack_note(pack_note(67, 100, true)), (67, 100, true));
         assert_eq!(unpack_note(pack_note(0, 0, false)), (0, 0, false));

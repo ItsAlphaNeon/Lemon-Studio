@@ -448,8 +448,9 @@ extern "C-unwind" fn on_event(v: &NSView, _: Sel, e: Option<&NSEvent>) {
     let Some((id, shared, scale)) = target(v) else { return };
     let flags = e.modifierFlags();
     let mut mods = mods_of(flags);
-    // Every second press of a run is a double click.
-    let dbl = e.clickCount() >= 2 && e.clickCount() % 2 == 0;
+    // Every second press of a run is a double click. Only mouse presses have a click count: AppKit raises on any other
+    // event (enter / exit, moves, keys), and an exception under a modal loop (a file dialog) ends that dialog.
+    let dbl = || e.clickCount() >= 2 && e.clickCount() % 2 == 0;
     let ev = match e.r#type() {
         NSEventType::LeftMouseDown => {
             let right = flags.contains(NSEventModifierFlags::Control) && !flags.contains(NSEventModifierFlags::Command);
@@ -458,12 +459,12 @@ extern "C-unwind" fn on_event(v: &NSView, _: Sel, e: Option<&NSEvent>) {
             if right {
                 mods.0 = false;
             }
-            Ev::Down { at: at(v, e, scale), btn: if right { Button::Right } else { Button::Left }, dbl }
+            Ev::Down { at: at(v, e, scale), btn: if right { Button::Right } else { Button::Left }, dbl: dbl() }
         }
         NSEventType::LeftMouseUp => Ev::Up { at: at(v, e, scale), btn: if CONTROL_CLICK.get() { Button::Right } else { Button::Left } },
-        NSEventType::RightMouseDown => Ev::Down { at: at(v, e, scale), btn: Button::Right, dbl },
+        NSEventType::RightMouseDown => Ev::Down { at: at(v, e, scale), btn: Button::Right, dbl: dbl() },
         NSEventType::RightMouseUp => Ev::Up { at: at(v, e, scale), btn: Button::Right },
-        NSEventType::OtherMouseDown if e.buttonNumber() == 2 => Ev::Down { at: at(v, e, scale), btn: Button::Middle, dbl },
+        NSEventType::OtherMouseDown if e.buttonNumber() == 2 => Ev::Down { at: at(v, e, scale), btn: Button::Middle, dbl: dbl() },
         NSEventType::OtherMouseUp if e.buttonNumber() == 2 => Ev::Up { at: at(v, e, scale), btn: Button::Middle },
         NSEventType::MouseMoved | NSEventType::LeftMouseDragged | NSEventType::RightMouseDragged | NSEventType::OtherMouseDragged => {
             Ev::Move { at: at(v, e, scale), dx: (e.deltaX() * f64::from(scale)) as f32, dy: (e.deltaY() * f64::from(scale)) as f32 }
