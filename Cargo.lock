@@ -2355,6 +2355,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "notices"
+version = "0.0.1"
+
+[[package]]
 name = "num-complex"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
