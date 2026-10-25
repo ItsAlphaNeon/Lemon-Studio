@@ -157,6 +157,10 @@ pub enum Request {
     /// "Create automation clip" from a Lemon plugin's own parameter menu (host link): row, parameter index.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
     Automate(usize, usize),
+    /// A sample file a Lemon plugin sent (host link `Audio`, Tesla's Send): to the selected channel (true) or the
+    /// playlist.
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
+    Audio(String, bool),
     /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
     Raise(usize),
     /// The menu arrow was clicked: open the window menu at this screen point.
@@ -264,6 +268,7 @@ pub fn builtin_effects() -> Vec<Available> {
         &lemon_transient_processor::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_chorus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_stereo_shaper::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &tesla::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
     ];
     let names = std::iter::once(LEMON_EQ).chain(LINKED_EFFECTS);
     LIBS.iter().zip(entries).zip(names).flat_map(|((lib, entry), name)| linked(lib, entry, name)).collect()
@@ -677,6 +682,16 @@ impl Plugins {
         lemon_parametric_eq_2::params::fl_from_plugin_state(&p.save_state()?)
     }
 
+    /// Edison's state (the project file's form) of the Tesla hosted under `key`; `None` for any other plugin.
+    pub fn edison_file_state(&self, key: usize) -> Option<Vec<u8>> {
+        let h = self.hosted.get(&key)?;
+        let p = h.plugin.lock().ok()?;
+        if p.desc().name != TESLA {
+            return None;
+        }
+        tesla::edison_from_plugin_state(&p.save_state()?)
+    }
+
     /// Row `row`'s Lemon Sampler takes the stretch settings `sound` holds (§9b), keeping its other settings.
     pub fn set_sampler_stretch(&mut self, row: usize, sound: &os_model::ChannelSound) -> bool {
         self.set_sampler(row, None, &stretch_params(sound))
@@ -1030,6 +1045,7 @@ impl Plugins {
             match (row, m) {
                 (Some(row), crate::plugin_window::LinkMsg::Note(k, v, on)) => out.push(Request::Note(row, k, v, on)),
                 (Some(row), crate::plugin_window::LinkMsg::Automate(i)) => out.push(Request::Automate(row, i)),
+                (_, crate::plugin_window::LinkMsg::Audio(_)) => out.extend(os_hostlink::take_audio().into_iter().map(|(p, ch)| Request::Audio(p, ch))),
                 _ => {}
             }
         }
@@ -1209,7 +1225,7 @@ pub const LEMON_EQ: &str = "Lemon Parametric EQ";
 /// Lemon Studio's effects compiled in besides the EQ (`builtin_effects`, in this order). They have no file plugin of
 /// their own to be stored as, so a project stores them wrapped, as it stored their plugin files
 /// (`project_plugins::is_wrapped`).
-pub const LINKED_EFFECTS: [&str; 10] = [
+pub const LINKED_EFFECTS: [&str; 11] = [
     "Lemon Limiter",
     "Lemon Reverb",
     "Lemon Delay",
@@ -1220,7 +1236,13 @@ pub const LINKED_EFFECTS: [&str; 10] = [
     "Lemon Transient Processor",
     "Lemon Chorus",
     "Lemon Stereo Shaper",
+    TESLA,
 ];
+/// Name of Tesla, Lemon Studio's audio editor and recorder (spec: plugins/tesla/README.md).
+pub const TESLA: &str = "Tesla";
+/// The plugin name a project file stores for Edison (file-format identifier, kept for interop): slots with it are
+/// played by Tesla (spec: plugins/tesla/README.md "Opening Edison slots").
+pub const EDISON_FILE_NAME: &str = "Edison";
 /// The plugin name a project file stores for the parametric EQ (file-format identifier, kept for interop): slots
 /// with it are played by Lemon Parametric EQ (spec: plugins/lemon-parametric-eq-2.md §8).
 pub const EQ_FILE_NAME: &str = "Fruity Parametric EQ 2";
@@ -1237,7 +1259,11 @@ pub const OLD_NAMES: [(&str, &str); 5] = [
 
 /// What the mixer shows for a slot's stored plugin name.
 pub fn slot_label(name: &str) -> &str {
-    if name == EQ_FILE_NAME { LEMON_EQ } else { name }
+    match name {
+        EQ_FILE_NAME => LEMON_EQ,
+        EDISON_FILE_NAME => TESLA,
+        _ => name,
+    }
 }
 
 /// A new slot for effect `name`: what the project stores (Lemon Parametric EQ as the file's EQ with its default

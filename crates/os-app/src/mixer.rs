@@ -77,6 +77,8 @@ pub enum MCmd {
     CablePhysics,
     /// General settings ▸ Animations: simulate the cables (true) or hang them still; kept for the next start.
     Animations(bool),
+    /// Open audio editor: Tesla on this track (Tesla's own, as FL's Edison).
+    AudioEditor(u16),
     /// Effect slots of the current track.
     AddEffect(u8, usize),
     SlotDelete(u8),
@@ -898,7 +900,7 @@ fn track_items(n: u16) -> Vec<PItem> {
         PItem::not_yet("Unassign from Audio track(s)"),
         PItem::sep(),
         PItem::sub("File", vec![PItem::not_yet("Render to wave file...")]),
-        PItem::not_yet("Open audio editor").key("Ctrl+E"),
+        PItem::new("Open audio editor", mx(MCmd::AudioEditor(n))).key("Ctrl+E"),
         PItem::not_yet("Open audio editor and record").key("Shift+E"),
         PItem::sep(),
         PItem::new("Reset selected track(s) to default", mx(MCmd::Reset(n))),
@@ -1094,6 +1096,10 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
                 }
             }
             None
+        }
+        MCmd::AudioEditor(n) => {
+            app.audio_editor(n, false);
+            return None;
         }
         MCmd::Reset(n) => {
             for t in targets(s, n) {
@@ -1394,6 +1400,37 @@ impl App {
         if done {
             self.invalidate();
         }
+    }
+
+    /// Tesla on track `t`: the toolbar's audio editor button puts it on the master, as FL opens Edison there (spec:
+    /// plugins/tesla/requests.md #5); the track menu's "Open audio editor" on that track. It shows the track's first
+    /// Tesla, adding one when it has none; `new` (the button's right click) always adds one, in the first free slot.
+    pub(crate) fn audio_editor(&mut self, t: u16, new: bool) {
+        use crate::plugins::TESLA;
+        let s = &mut self.state;
+        let Some(index) = self.plugins.effect_index(TESLA) else {
+            s.message = Some(format!("{TESLA} is not available"));
+            return self.invalidate();
+        };
+        let Some(m) = track(s, t) else { return };
+        if !new {
+            if let Some(k) = (0..m.slots.len() as u8).find(|&k| slot_name(s, t, k).as_deref() == Some(TESLA)) {
+                s.mixer.pending.push(FxReq::Show { track: t, slot: k });
+                return self.invalidate();
+            }
+        }
+        let Some(k) = m.slots.iter().position(Option::is_none) else {
+            s.message = Some("No free effect slot on this track".into());
+            return self.invalidate();
+        };
+        let m = track_mut(s, t).expect("the track");
+        m.slots[k] = Some(crate::plugins::new_slot(TESLA));
+        m.slot_on[k] = true;
+        m.slot_mix[k] = 1.0;
+        s.mixer.slot_names.remove(&(t, k as u8));
+        s.mixer.pending.push(FxReq::Create { track: t, slot: k as u8, index });
+        changed(s);
+        self.invalidate();
     }
 
     pub(crate) fn open_fx(&mut self, track: u16, slot: u8) {

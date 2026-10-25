@@ -810,7 +810,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio => 0,
             }
         }
 

@@ -56,6 +56,11 @@ pub enum Cmd {
     /// plugin's parameter list (the CLAP / VST3 parameter index). The host makes the clip for that parameter of this
     /// instance and answers 1; 0 = not handled (a plugin that never got the hello keeps the entry disabled).
     Automate = 10,
+    /// Plugin -> host: an audio file for the project (Tesla's "Send to playlist as audio clip" / "Send to selected
+    /// channel"), `lparam` 0 = to the playlist as an audio clip, 1 = into the selected channel. The file's path waits in
+    /// the process's outbox ([`post_audio`]; the host takes it with [`take_audio`]). The host answers 1; 0 = not
+    /// handled (the plugin empties the outbox again).
+    Audio = 11,
 }
 
 impl Cmd {
@@ -71,9 +76,25 @@ impl Cmd {
             8 => Cmd::Changed,
             9 => Cmd::Note,
             10 => Cmd::Automate,
+            11 => Cmd::Audio,
             _ => return None,
         })
     }
+}
+
+static OUTBOX: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
+
+/// Plugin: a file for the host to take with the next [`Cmd::Audio`] (`channel`: into the selected channel rather than
+/// the playlist). Plugins built into the host share its process, so the path need not travel in the message.
+pub fn post_audio(path: &str, channel: bool) {
+    if let Ok(mut o) = OUTBOX.lock() {
+        o.push((path.to_string(), channel));
+    }
+}
+
+/// Host (or a plugin whose message went unanswered): the files posted since the last call, oldest first.
+pub fn take_audio() -> Vec<(String, bool)> {
+    OUTBOX.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default()
 }
 
 /// The icon of a page tab. The ids are the protocol; the host maps them to its icon set.

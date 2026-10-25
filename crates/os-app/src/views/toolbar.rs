@@ -657,6 +657,8 @@ fn utilities(ui: &mut Ui, c: &Ctx) -> bool {
             Icon::Undo => Action::Util(Util::Undo),
             Icon::Help => Action::Util(Util::Help),
             Icon::Save => Action::Util(Util::Save),
+            // spec: plugins/tesla/requests.md #5: Tesla on the master track.
+            Icon::Cut => Action::Util(Util::AudioEditor),
             Icon::SaveRender => Action::MenuItem(0, menus::FILE_EXPORT),
             Icon::Info => Action::MenuItem(menus::OPTIONS_MENU, menus::OPT_INFO),
             // spec: ui/one-click-recording.md §2: lit while it records; a click then stops.

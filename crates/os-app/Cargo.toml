@@ -38,6 +38,7 @@ lemon-stereo-enhancer = { path = "../../plugins/lemon-stereo-enhancer", features
 lemon-transient-processor = { path = "../../plugins/lemon-transient-processor", features = ["linked"] }
 lemon-chorus = { path = "../../plugins/lemon-chorus", features = ["linked"] }
 lemon-stereo-shaper = { path = "../../plugins/lemon-stereo-shaper", features = ["linked"] }
+tesla = { path = "../../plugins/tesla", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"

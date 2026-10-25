@@ -68,6 +68,9 @@ pub enum LinkMsg {
     Note(u8, u8, bool),
     /// "Create automation clip" on the plugin parameter at this list position.
     Automate(usize),
+    /// A sample sent to the host (Tesla's Send): to the selected channel (true) or the playlist; the files wait in
+    /// `os_hostlink::take_audio`.
+    Audio(bool),
 }
 
 /// Mouse input on the lifted popup (see `lift_show`); positions in the main window (physical px).
@@ -93,6 +96,7 @@ pub fn take_link() -> Vec<(isize, LinkMsg)> {
                     LinkMsg::Note(k, v, on)
                 }
                 os_hostlink::Cmd::Automate => LinkMsg::Automate(arg.max(0) as usize),
+                os_hostlink::Cmd::Audio => LinkMsg::Audio(arg != 0),
                 _ => LinkMsg::Changed,
             };
             (area as isize, m)
