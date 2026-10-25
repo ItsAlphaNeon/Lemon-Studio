@@ -48,7 +48,8 @@ Greyed-out controls and partial features. These can land alongside the blockers.
 - [ ] **Event editor window.** Edit events is greyed out in five menus (playlist, channel rack, parameter menus)
 - [ ] **Undo for a plugin editor's own changes**
 - [ ] **Undo for mixer track commands.** Mute, routing, names and slots are not in the history yet
-- [ ] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the timebase
+- [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
+  timebase are each one step
 - [ ] **Mixer right-click menus.** 49 entries greyed out on 2026-10-24: the routing menu, groups, Render to wave
   file, spare states, smart disable ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [ ] **Playlist right-click menus.** 36 entries greyed out on 2026-10-24: key markers, Add two..., quantized song

@@ -196,9 +196,11 @@ pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Optio
     let d = app.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
-    // One step when the channel goes at the bottom (`history::add_channel`); one inserted higher up is not undoable yet.
-    if after.is_none_or(|r| r + 1 >= s.project.channels.len()) {
-        crate::history::add_channel(s, (!sampler).then_some(index));
+    // One step, at the bottom (`history::add_channel`) or inserted higher up (`history::insert_channel`).
+    let plugin = (!sampler).then_some(index);
+    match after.filter(|&r| r + 1 < s.project.channels.len()) {
+        Some(r) => crate::history::insert_channel(s, r + 1, plugin),
+        None => crate::history::add_channel(s, plugin),
     }
     let mut ch = if sampler { crate::app::add_channel(&mut s.project) } else { crate::app::add_plugin_channel(&mut s.project, &d.name) };
     if sampler {
@@ -233,6 +235,9 @@ pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<Stri
     let d = app.plugins.available.get(index)?.desc.clone();
     app.state.project.channels.get(row)?;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);
+    // One step, with the old instrument's state (`history::replace_channel`).
+    let old = app.plugin_copy(row);
+    crate::history::replace_channel(&mut app.state, row, old, (!sampler).then_some(index));
     app.plugins.drop_key(row);
     app.state.hosted_rows.retain(|&r| r != row);
     app.transport.set_instruments(app.plugins.instruments());
