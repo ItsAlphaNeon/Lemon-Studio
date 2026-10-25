@@ -36,6 +36,17 @@
 
 ---
 
+## The cutting-edge branch
+
+This is the `cutting-edge` branch. It is `main` plus the following:
+
+- **Control plane.** Every edit goes through one command layer with undo. Projects have stable ids, and scripts and
+  assistants can drive the app over a local socket (`--control`, `--serve`). See [docs/control-plane.md](docs/control-plane.md).
+- **Older FL projects open.** Projects saved by FL 20 to 24.1 are converted to the newer layout as they are read.
+  Save asks for a new file.
+
+`main` is merged into this branch regularly. Branches that belong to it are named `cutting-edge-<topic>`.
+
 ## Overview
 
 Lemon Studio is a pattern-based music production environment: build patterns in a step sequencer and
