@@ -3,8 +3,8 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Pulp Filter editor: painting and hit regions (platform independent). Love Philter's layout, every knob, slider and
-//! switch where FL has it and at FL's size, in the Lemon "Pith" plugin look: outlined grey cards, dark wells, lemon for
-//! what is on. The filter row, the filter's IN / FILTER / WS / OUT panels, the target and part tabs with the curve
+//! switch in FL's arrangement and at FL's size on a 6 px grid, in the Lemon "Pith" plugin look: outlined grey cards,
+//! dark wells, lemon for what is on. The filter row, the filter's IN / FILTER / WS / OUT panels, the target and part tabs with the curve
 //! view, the modulation card, the master sliders, the envelope follower card and the description. Controls that do
 //! nothing yet are greyed out.
 //!
@@ -36,22 +36,44 @@ pub const ACCENT: Color = brand::MAIN;
 const LABEL: Font = Font::new(10);
 const SMALL: Font = Font::new(9);
 
-/// The filter row: the enable switches' and the tabs' pitch.
-pub const FILTER_PITCH: f32 = 29.7;
-pub fn enable_x(f: usize) -> f32 {
-    23.5 + FILTER_PITCH * f as f32
+/// The layout's grid: every card 6 px from the editor's edges and from its neighbours. The left column holds the
+/// filter's panels and the curve view, the right one the wordmark, the modulation, the levels and the description;
+/// the header band above both holds the filter row, the wordmark and the header buttons.
+const GAP: f32 = 6.0;
+/// A rect from its left, right, top and bottom edges (right and bottom exclusive), so that cards 6 px apart leave 6
+/// clear pixels between them.
+const fn edges(x0: f32, x1: f32, y0: f32, y1: f32) -> Rect {
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
 }
+const LEFT: (f32, f32) = (GAP, 446.0);
+const RIGHT: (f32, f32) = (452.0, W as f32 - GAP);
+const HEAD: (f32, f32) = (GAP, 52.0);
+/// A titled card's header band (its title centred, a line under it) and where captions sit: 10 px over a card's foot.
+const BAND: f32 = 15.0;
+const FOOT: f32 = 10.0;
+
+/// The filter row: the enable switches over the tabs, both the header band's height.
+pub fn enable_x(f: usize) -> f32 {
+    filter_tab(f).cx()
+}
+const ENABLE_Y: f32 = 13.0;
 pub fn filter_tab(f: usize) -> Rect {
-    Rect::new(12.0 + 30.0 * f as f32, 28.0, 25.0, 27.0)
+    Rect::new(LEFT.0 + 30.0 * f as f32, 25.0, 26.0, HEAD.1 - 25.0)
 }
 
-/// The filter's panels: IN, FILTER, WS, OUT (header band 61 .. 76).
-pub const PANELS: [(f32, f32, &str); 4] = [(11.0, 56.0, "IN"), (62.0, 297.0, "FILTER"), (301.0, 372.0, "WS"), (376.0, 445.0, "OUT")];
-const PANEL_TOP: f32 = 61.0;
-const PANEL_BOTTOM: f32 = 196.0;
+/// The filter's panels: IN, FILTER, WS, OUT, under the header band.
+pub const PANELS: [(f32, f32, &str); 4] = [(LEFT.0, 52.0, "IN"), (58.0, 294.0, "FILTER"), (300.0, 372.0, "WS"), (378.0, LEFT.1, "OUT")];
+const PANEL_TOP: f32 = HEAD.1 + GAP;
+const PANEL_BOTTOM: f32 = 194.0;
+/// The panels' rows: the upper knobs and the lower ones with their captions, the sliders' track.
+const UPPER: (f32, f32) = (96.0, 123.0);
+const LOWER: (f32, f32) = (157.0, PANEL_BOTTOM - FOOT);
+const TRACK: (f32, f32) = (86.0, 172.0);
+/// The well of the type and the orders, and the knob row centred under it.
+const TYPE_WELL: Rect = edges(68.0, 220.0, 78.0, 130.0);
 
 /// The type box and its labels by type.
-pub const TYPE_BOX: Rect = Rect::span(79.0, 106.0, 97.0, 118.0);
+pub const TYPE_BOX: Rect = edges(75.0, 102.0, 94.0, 114.0);
 pub const TYPE_LABELS: [&str; TYPES as usize] = ["SVF", "LP", "HP", "LP2", "BP", "BS", "HP2", "AP", "LS", "PK", "HS", "LP3"];
 pub const TYPE_NAMES: [&str; TYPES as usize] = [
     "Chocolate (state variable)",
@@ -69,45 +91,57 @@ pub const TYPE_NAMES: [&str; TYPES as usize] = [
 ];
 /// The order radios: (order, x, y, label).
 pub const ORDERS: [(i32, f32, f32, &str); 6] = [
-    (0, 118.0, 90.0, "OFF"),
-    (1, 118.0, 106.0, "SINGLE"),
-    (2, 118.0, 122.0, "DUAL"),
-    (3, 170.0, 90.0, "TRIPLE"),
-    (4, 170.0, 106.0, "ALT DUAL"),
-    (5, 170.0, 122.0, "ALT TRIPLE"),
+    (0, 114.0, 88.0, "OFF"),
+    (1, 114.0, 104.0, "SINGLE"),
+    (2, 114.0, 120.0, "DUAL"),
+    (3, 166.0, 88.0, "TRIPLE"),
+    (4, 166.0, 104.0, "ALT DUAL"),
+    (5, 166.0, 120.0, "ALT TRIPLE"),
 ];
 
 /// The target tabs (the curve view's): PAN .. HIGH, the waveshaper's curve, WMIX.
-pub const TARGET_TABS: Rect = Rect::span(11.0, 445.0, 201.0, 216.0);
+pub const TARGET_TABS: Rect = edges(LEFT.0, LEFT.1, PANEL_BOTTOM + GAP, 216.0);
 pub const TARGET_LABELS: [&str; 9] = ["PAN", "VOL", "CUT", "RES", "LOW", "BAND", "HIGH", "WS", "WMIX"];
 /// The waveshaper curve's tab.
 pub const TAB_WS: usize = 7;
 /// The part tabs: the pattern spinner, then PAT, LFO, MOD X, MOD Y, IEF.
-pub const PATTERN_BOX: Rect = Rect::span(11.0, 52.0, 219.0, 234.0);
-pub const PART_X: [f32; 6] = [54.0, 132.0, 211.0, 289.0, 368.0, 445.0];
+pub const PATTERN_BOX: Rect = edges(LEFT.0, 47.0, PART_TOP, PART_BOTTOM);
+pub const PART_X: [f32; 6] = [49.0, 128.0, 208.0, 287.0, 367.0, LEFT.1];
 pub const PART_LABELS: [&str; 5] = ["PAT", "LFO", "MOD X", "MOD Y", "IEF"];
-pub const PART_TOP: f32 = 219.0;
+pub const PART_TOP: f32 = 218.0;
 pub const PART_BOTTOM: f32 = 234.0;
-/// The curve view (the waveshaper's curve also takes the part row's place).
-pub const CURVE: Rect = Rect::span(11.0, 445.0, 235.0, 362.0);
-pub const CURVE_WS: Rect = Rect::span(11.0, 445.0, 219.0, 362.0);
-pub const BAR: Rect = Rect::span(11.0, 164.0, 364.0, 397.0);
-pub const TOOLBAR: Rect = Rect::span(166.0, 445.0, 364.0, 397.0);
-pub const TOOL_X: [f32; 4] = [360.0, 385.0, 409.0, 432.0];
+/// The curve view (the waveshaper's curve also takes the part row's place), the bar and the toolbar under it, down
+/// to the editor's bottom margin.
+pub const CURVE: Rect = edges(LEFT.0, LEFT.1, 236.0, 358.0);
+pub const CURVE_WS: Rect = edges(LEFT.0, LEFT.1, PART_TOP, 358.0);
+pub const BAR: Rect = edges(LEFT.0, 164.0, 358.0 + GAP, H as f32 - GAP);
+pub const TOOLBAR: Rect = edges(164.0 + GAP, LEFT.1, 358.0 + GAP, H as f32 - GAP);
+/// The bar's row: its controls' centre line and their captions'.
+const BAR_ROW: (f32, f32) = (377.0, H as f32 - GAP - FOOT);
+/// The tool buttons, from the toolbar's right margin leftwards.
+pub const TOOL_X: [f32; 4] = [347.0, 374.0, 401.0, 428.0];
 pub const TOOL_NAMES: [&str; 4] = ["Freeze editing / hide points", "Step editing", "Snap to grid", "Slide succeeding points / regions"];
 const TOOL_LABELS: [&str; 4] = ["FRZ", "STP", "SNP", "SLD"];
-pub const LFO_KNOB_X: [f32; 4] = [40.0, 63.0, 86.0, 109.0];
+/// The bar's switch, the LFO's knobs between it and the tempo switch.
+const PART_ON_X: f32 = 21.0;
+pub const LFO_KNOB_X: [f32; 4] = [48.0, 71.0, 94.0, 117.0];
+const TEMPO_X: f32 = 145.0;
 
-/// The right panel.
-pub const MOD_CARD: Rect = Rect::span(455.0, 607.0, 57.0, 298.0);
-pub const PAD: Rect = Rect::span(462.0, 600.0, 64.0, 203.0);
-pub const IEF_CARD: Rect = Rect::span(612.0, 673.0, 155.0, 298.0);
-pub const MASTER_X: [f32; 3] = [617.0, 641.5, 665.0];
-pub const HEADER_X: [f32; 3] = [612.0, 637.5, 661.5];
-pub const OVERSAMPLING: Rect = Rect::span(641.0, 672.0, 324.0, 342.0);
+/// The right column: the modulation card, the levels and the envelope follower beside it, the global switches, the
+/// description.
+pub const MOD_CARD: Rect = edges(RIGHT.0, 606.0, PANEL_TOP, 294.0);
+pub const PAD: Rect = edges(459.0, 599.0, 80.0, 220.0);
+const LEVELS_CARD: Rect = edges(612.0, RIGHT.1, PANEL_TOP, 152.0);
+pub const IEF_CARD: Rect = edges(612.0, RIGHT.1, 152.0 + GAP, 294.0);
+pub const MASTER_X: [f32; 3] = [623.0, 645.0, 667.0];
+const GLOBAL_CARD: Rect = edges(RIGHT.0, RIGHT.1, 294.0 + GAP, 346.0);
+/// The header buttons, the last one at the right margin, centred on the header band.
+pub const HEADER_X: [f32; 3] = [617.0, 642.0, 667.0];
+const HEADER_Y: f32 = (HEAD.0 + HEAD.1) / 2.0;
+pub const OVERSAMPLING: Rect = edges(622.0, 654.0, 325.0, 343.0);
 pub const OVERSAMPLING_LABELS: [&str; 5] = ["1x", "2x", "4x", "8x", "16x"];
-pub const DESC: Rect = Rect::span(454.0, 673.0, 348.0, 398.0);
-pub const LOGO: Rect = Rect::span(455.0, 560.0, 5.0, 53.0);
+pub const DESC: Rect = edges(RIGHT.0, RIGHT.1, 346.0 + GAP, H as f32 - GAP);
+pub const LOGO: Rect = edges(RIGHT.0, 600.0, HEAD.0, HEAD.1);
 
 /// A switch of the state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,6 +283,39 @@ fn panel(ui: &mut Ui, r: Rect) {
     lemon::plug_panel(ui.c, r);
 }
 
+/// A card with its title centred in a header band and a line under the band.
+fn titled(ui: &mut Ui, r: Rect, title: &str) {
+    panel(ui, r);
+    ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + BAND, r.w - 2.0, 1.0), plug::PANEL_LINE);
+    ui.label(SMALL.bold(), r.cx(), r.y + BAND / 2.0, DIM, title);
+}
+
+/// A switch at the right end of a card's header band, its name before it.
+fn band_switch(ui: &mut Ui, r: Rect, t: Target, on: bool, label: &str) {
+    let (cx, cy) = (r.right() - 12.0, r.y + BAND / 2.0);
+    let w = ui.c.text_width(SMALL, label);
+    let hr = edges(cx - 14.0 - w, cx + 7.0, r.y, r.y + BAND);
+    let st = ui.state(hr, &t);
+    let lh = ui.c.line_height(SMALL);
+    ui.c.text_right(SMALL, cx - 11.0, (cy - lh / 2.0).round(), DIM, label);
+    lemon::toggle(ui.c, cx, cy, on, st);
+    ui.hit(hr, t);
+}
+
+/// The lemon mark and "PULP FILTER" in the wordmark's grey condensed caps (the citrus line's emblem, as Citrus and
+/// Tesla have it), from `x` or centred on it, on the line `cy`; `s` = the lemon's half length. Returns its rect.
+fn emblem(ui: &mut Ui, x: f32, cy: f32, centred: bool, f: Font, s: f32) -> Rect {
+    let wn = lemon::spaced_width(ui.c, f, "PULP FILTER", 3.0);
+    // The tilted lemon's width with its nubs, and the space before the name.
+    let (wl, gap) = (2.2 * s, (s * 1.3).round());
+    let w = wl + gap + wn;
+    let x = if centred { (x - w / 2.0).round() } else { x };
+    let lh = ui.c.line_height(f);
+    lemon::lemon_mark(ui.c, x + wl / 2.0, cy, s, brand::MAIN);
+    lemon::spaced(ui.c, f, x + wl + gap, (cy - lh / 2.0).round(), plug::WORDMARK, "PULP FILTER", 3.0);
+    Rect::new(x, cy - lh / 2.0, w, lh)
+}
+
 /// A knob of setting `k` (none: a filter's control it does not have, greyed out), radius `r`, its caption's centre at
 /// `cap_y`.
 fn knob(ui: &mut Ui, k: Option<usize>, cx: f32, cy: f32, r: f32, label: &str, cap_y: f32) {
@@ -271,7 +338,7 @@ fn knob(ui: &mut Ui, k: Option<usize>, cx: f32, cy: f32, r: f32, label: &str, ca
 
 /// A vertical slider of setting `k` at `x`, its track from `top` to `bot` (the value filled in lemon from its zero).
 fn slider(ui: &mut Ui, k: Option<usize>, x: f32, top: f32, bot: f32) {
-    let hr = Rect::span(x - 8.0, x + 8.0, top - 6.0, bot + 6.0);
+    let hr = edges(x - 8.0, x + 8.0, top - 6.0, bot + 6.0);
     let Some(k) = k else {
         keq::slot(ui.c, Rect::new(x - 3.0, top - 4.0, 6.0, bot - top + 8.0), Look::default());
         return;
@@ -284,7 +351,7 @@ fn slider(ui: &mut Ui, k: Option<usize>, x: f32, top: f32, bot: f32) {
     let zero = if lo < 0 { y_of(ctl::norm(k, 0)) } else { bot };
     keq::slot(ui.c, Rect::new(x - 3.0, top - 4.0, 6.0, bot - top + 8.0), st);
     if (y - zero).abs() > 1.0 {
-        ui.c.fill_rrect(Rect::span(x - 1.0, x + 1.0, y.min(zero), y.max(zero)), 1.0, ACCENT.with_alpha(170));
+        ui.c.fill_rrect(edges(x - 1.0, x + 1.0, y.min(zero), y.max(zero)), 1.0, ACCENT.with_alpha(170));
     }
     keq::handle(ui.c, x, y.round(), ACCENT, st);
     ui.hit(hr, t);
@@ -294,7 +361,7 @@ fn slider(ui: &mut Ui, k: Option<usize>, x: f32, top: f32, bot: f32) {
 fn lamp(ui: &mut Ui, t: Target, on: bool, cx: f32, cy: f32, label: &str, under: Option<f32>) {
     let w = ui.c.text_width(SMALL, label);
     let hr = match under {
-        Some(ly) => Rect::span(cx - 12.0, cx + 12.0, cy - 7.0, ly + 6.0),
+        Some(ly) => edges(cx - 12.0, cx + 12.0, cy - 7.0, ly + 6.0),
         None => Rect::new(cx - 7.0, cy - 7.0, w + 18.0, 14.0),
     };
     let mut st = ui.state(hr, &t);
@@ -337,19 +404,19 @@ fn filter_row(ui: &mut Ui) {
     for f in 0..FILTERS {
         let fl = &ui.m.st.filters[f];
         let (on, next, enabled) = (fl.enabled && solo.is_none_or(|s| s == f), fl.controls[C_NEXT] != 0 && f + 1 < FILTERS, fl.enabled);
-        let x = enable_x(f);
+        let (x, y) = (enable_x(f), ENABLE_Y);
         let t = Target::Enable(f);
-        let hr = Rect::new(x - 7.0, 10.0, 14.0, 14.0);
+        let hr = Rect::new(x - 7.0, y - 7.0, 14.0, 14.0);
         let st = ui.state(hr, &t);
-        lemon::toggle(ui.c, x, 17.0, on, st);
+        lemon::toggle(ui.c, x, y, on, st);
         if solo == Some(f) {
-            ui.c.stroke_rrect(Rect::new(x - 8.0, 9.0, 16.0, 16.0), 5.0, 1.0, ACCENT);
+            ui.c.stroke_rrect(Rect::new(x - 8.0, y - 8.0, 16.0, 16.0), 5.0, 1.0, ACCENT);
         }
         ui.hit(hr, t);
-        // To the next filter.
+        // To the next filter: an arrow halfway to the next switch.
         if next {
             let ax = x + 15.0;
-            ui.c.fill_polygon(&[(ax - 2.5, 14.0), (ax + 2.5, 17.0), (ax - 2.5, 20.0)], ACCENT);
+            ui.c.fill_polygon(&[(ax - 2.5, y - 3.0), (ax + 2.5, y), (ax - 2.5, y + 3.0)], ACCENT);
         }
         let r = filter_tab(f);
         let t = Target::FilterTab(f);
@@ -365,31 +432,23 @@ fn filter_row(ui: &mut Ui) {
         ui.c.text_center(Font::new(15).bold(), r, ink, &(f + 1).to_string());
         ui.hit(r, t);
     }
-    ui.c.fill_rect(Rect::new(4.0, 58.0, 441.0, 1.0), plug::STRIP_LINE);
 }
 
 fn panels(ui: &mut Ui) {
+    let card = |(x0, x1): (f32, f32)| edges(x0, x1, PANEL_TOP, PANEL_BOTTOM);
     for (x0, x1, title) in PANELS {
-        let r = Rect::span(x0, x1, PANEL_TOP, PANEL_BOTTOM);
-        panel(ui, r);
-        ui.c.fill_rect(Rect::new(x0 + 1.0, 76.0, x1 - x0 - 2.0, 1.0), plug::PANEL_LINE);
-        let cx = if title == "FILTER" { (x0 + x1) / 2.0 } else { (x0 + x1) / 2.0 };
-        ui.label(SMALL.bold(), cx, 68.5, DIM, title);
+        titled(ui, card((x0, x1)), title);
     }
+    let cx = |p: usize| ((PANELS[p].0 + PANELS[p].1) / 2.0).round();
     let f = ui.st.filter.min(FILTERS - 1);
     let ctl = |n: usize| control_index(f, n);
     // IN.
-    knob(ui, ctl(C_IN), 34.0, 163.0, 17.5, "VOL", 186.0);
-    // FILTER: the alternate switch in the header, the type, the orders, the knobs.
+    knob(ui, ctl(C_IN), cx(0), LOWER.0, 17.5, "VOL", LOWER.1);
+    // FILTER: the alternate switch in the header, the type and the orders in their well, the knobs centred under it,
+    // the type's own controls beside them.
     let fl = ui.filter().clone();
-    let alt_t = Target::Switch(Sw::Alt);
-    let lh = ui.c.line_height(SMALL);
-    ui.c.text(SMALL, 255.0, (68.5 - lh / 2.0).round(), DIM, "ALT");
-    let hr = Rect::new(251.0, 61.0, 40.0, 15.0);
-    let st = ui.state(hr, &alt_t);
-    lemon::toggle(ui.c, 283.0, 68.5, fl.alt, st);
-    ui.hit(hr, alt_t);
-    lemon::plug_well(ui.c, Rect::span(72.0, 222.0, 81.0, 132.0), 6.0);
+    band_switch(ui, card((PANELS[1].0, PANELS[1].1)), Target::Switch(Sw::Alt), fl.alt, "ALT");
+    lemon::plug_well(ui.c, TYPE_WELL, 6.0);
     let t = Target::Type;
     let st = ui.state(TYPE_BOX, &t);
     lemon::field(ui.c, TYPE_BOX, st);
@@ -399,36 +458,43 @@ fn panels(ui: &mut Ui) {
     for (o, x, y, label) in ORDERS {
         lamp(ui, Target::Order(o), fl.order == o, x, y, label, None);
     }
-    knob(ui, ctl(C_ENV), 105.0, 159.0, 17.5, "ENV", 186.0);
-    knob(ui, ctl(C_CUT), 148.5, 159.0, 20.5, "CUT", 186.0);
-    knob(ui, ctl(C_RES), 191.5, 159.0, 17.5, "RES", 186.0);
+    let mid = TYPE_WELL.cx();
+    knob(ui, ctl(C_ENV), mid - 43.0, LOWER.0, 17.5, "ENV", LOWER.1);
+    knob(ui, ctl(C_CUT), mid, LOWER.0, 20.5, "CUT", LOWER.1);
+    knob(ui, ctl(C_RES), mid + 43.0, LOWER.0, 17.5, "RES", LOWER.1);
+    // The type's controls, centred between the well and the panel's edge.
+    let side = ((TYPE_WELL.right() + PANELS[1].1) / 2.0).round();
     match fl.kind {
         CHOCOLATE => {
-            for (n, x, l) in [(C_LOW, 238.0, "L"), (C_BAND, 259.5, "B"), (C_HIGH, 281.5, "H")] {
-                slider(ui, ctl(n), x, 88.0, 175.0);
-                ui.label(SMALL, x, 186.0, DIM, l);
+            for (k, (n, l)) in [(C_LOW, "L"), (C_BAND, "B"), (C_HIGH, "H")].into_iter().enumerate() {
+                let x = side - 22.0 + 22.0 * k as f32;
+                slider(ui, ctl(n), x, TRACK.0, TRACK.1);
+                ui.label(SMALL, x, LOWER.1, DIM, l);
             }
         }
-        LOW_SHELF | PEAKING | HIGH_SHELF => knob(ui, ctl(C_LOW), 259.0, 159.0, 17.5, "GAIN", 186.0),
-        MANGO => knob(ui, ctl(C_LOW), 259.0, 159.0, 17.5, "DRIVE", 186.0),
+        LOW_SHELF | PEAKING | HIGH_SHELF => knob(ui, ctl(C_LOW), side, LOWER.0, 17.5, "GAIN", LOWER.1),
+        MANGO => knob(ui, ctl(C_LOW), side, LOWER.0, 17.5, "DRIVE", LOWER.1),
         _ => {}
     }
-    // WS.
-    lamp(ui, Target::Switch(Sw::Ws), fl.ws, 317.5, 109.0, "ON", Some(125.0));
-    knob(ui, ctl(C_PRE), 351.5, 100.5, 17.5, "AMP", 125.0);
+    // WS: the switch and the mode over each other on the left, the knobs on the right.
+    let (sx, kx) = (cx(2) - 20.0, cx(2) + 14.0);
+    lamp(ui, Target::Switch(Sw::Ws), fl.ws, sx, UPPER.0 + 8.0, "ON", Some(UPPER.1));
+    knob(ui, ctl(C_PRE), kx, UPPER.0, 17.5, "AMP", UPPER.1);
     let bip = fl.ws_bipolar != 0;
     let t = Target::Switch(Sw::WsBipolar);
-    let hr = Rect::span(305.0, 330.0, 158.0, 192.0);
+    let hr = edges(sx - 12.0, sx + 12.0, LOWER.0 - 10.0, LOWER.1 + 6.0);
     let hot = ui.hot(hr, &t);
-    ui.c.text_center(Font::new(15).bold(), Rect::new(307.5, 160.0, 20.0, 16.0), if hot { TEXT } else if bip { ACCENT } else { DIM }, if bip { "\u{b1}" } else { "+" });
-    ui.label(SMALL, 317.5, 186.0, DIM, "MODE");
+    let ink = if hot { TEXT } else if bip { ACCENT } else { DIM };
+    ui.c.text_center(Font::new(15).bold(), Rect::new(sx - 10.0, LOWER.0 - 3.0, 20.0, 16.0), ink, if bip { "\u{b1}" } else { "+" });
+    ui.label(SMALL, sx, LOWER.1, DIM, "MODE");
     ui.hit(hr, t);
-    knob(ui, ctl(C_WSMIX), 351.5, 159.0, 17.5, "MIX", 186.0);
-    // OUT.
-    knob(ui, ctl(C_PAN), 398.5, 100.5, 17.5, "PAN", 125.0);
-    knob(ui, ctl(C_VOL), 399.5, 163.0, 17.5, "VOL", 186.0);
-    slider(ui, ctl(C_NEXT), 431.0, 88.0, 176.0);
-    ui.label(SMALL, 431.0, 186.0, if ctl(C_NEXT).is_some() { DIM } else { OFF }, "NEXT");
+    knob(ui, ctl(C_WSMIX), kx, LOWER.0, 17.5, "MIX", LOWER.1);
+    // OUT: the knobs on the left, the slider to the next filter on the right.
+    let (kx, nx) = (cx(3) - 12.0, cx(3) + 21.0);
+    knob(ui, ctl(C_PAN), kx, UPPER.0, 17.5, "PAN", UPPER.1);
+    knob(ui, ctl(C_VOL), kx, LOWER.0, 17.5, "VOL", LOWER.1);
+    slider(ui, ctl(C_NEXT), nx, TRACK.0, TRACK.1);
+    ui.label(SMALL, nx, LOWER.1, if ctl(C_NEXT).is_some() { DIM } else { OFF }, "NEXT");
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -491,7 +557,7 @@ pub fn target_used(st: &State, f: usize, i: usize) -> bool {
 }
 
 pub fn part_tab(i: usize) -> Rect {
-    Rect::span(PART_X[i], PART_X[i + 1] - 1.0, PART_TOP, PART_BOTTOM)
+    edges(PART_X[i], PART_X[i + 1] - 1.0, PART_TOP, PART_BOTTOM)
 }
 
 pub fn target_tab(i: usize) -> Rect {
@@ -541,10 +607,10 @@ fn curve_section(ui: &mut Ui) {
     tools(ui);
 }
 
-/// Where the curve view draws its curve in `r`: time 0 half a pixel in, level 1 2 px below the top, level 0 3 px above
-/// the bottom.
+/// Where the curve view draws its curve in `r`: 6 px in from every edge, so a hovered point (5 px with its rim) stays
+/// inside the well.
 pub fn curve_inner(r: Rect) -> Rect {
-    Rect::new(r.x + 3.5, r.y + 3.0, r.w - 7.0, r.h - 6.0)
+    r.inset(6.0)
 }
 
 /// The time the curve view spans: a map 0 .. 1, a pattern or LFO its length and a tenth more (at least one unit).
@@ -663,35 +729,35 @@ fn curve_view(ui: &mut Ui, r: Rect, c: &Curve, centred: bool, pos: Option<f32>, 
     }
 }
 
-/// The bar under the curve view: the pattern's or LFO's switch, the LFO's knobs, the tempo switch.
+/// The bar under the curve view: the pattern's or LFO's switch, the LFO's knobs, the tempo switch, each with its
+/// caption on the bar's caption line.
 fn bar(ui: &mut Ui, f: usize, t: usize, p: usize, c: &Curve) {
     panel(ui, BAR);
     if p > 1 {
         return;
     }
-    lamp(ui, Target::Switch(Sw::PartOn), c.enabled, 20.0, 373.0, "", None);
+    let (y, cap) = BAR_ROW;
+    lamp(ui, Target::Switch(Sw::PartOn), c.enabled, PART_ON_X, y, "ON", Some(cap));
     if p == 1 {
         for (i, (x, l)) in LFO_KNOB_X.into_iter().zip(["SPD", "TNS", "SKW", "PW"]).enumerate() {
-            knob(ui, Some(lfo_index(f, t, i)), x, 375.0, 8.0, l, 391.0);
+            knob(ui, Some(lfo_index(f, t, i)), x, y, 8.0, l, cap);
         }
     }
     let synced = c.flags & SYNCED != 0;
-    // FL's small lamp with TEMPO to its right, in the bar's last 40 px.
-    lamp(ui, Target::Switch(Sw::Tempo), synced, 131.0, 372.0, "", None);
-    let f = Font::new(8).bold();
-    let lh = ui.c.line_height(f);
-    ui.c.text_center(f, Rect::new(118.0, (388.0 - lh / 2.0).round(), 26.0, lh), DIM, "TEMPO");
+    lamp(ui, Target::Switch(Sw::Tempo), synced, TEMPO_X, y, "TEMPO", Some(cap));
 }
 
 fn tools(ui: &mut Ui) {
     panel(ui, TOOLBAR);
-    let r = Rect::new(165.0, 382.0, 14.0, 14.0);
+    let cy = TOOLBAR.cy().round();
+    let r = Rect::new(TOOLBAR.x + 5.0, cy - 8.0, 16.0, 16.0);
     let t = Target::CurveOptions;
     let hot = ui.hot(r, &t);
-    ui.c.fill_polygon(&[(168.0, 387.0), (176.0, 387.0), (172.0, 392.0)], if hot { TEXT } else { DIM });
+    let x = r.cx();
+    ui.c.fill_polygon(&[(x - 4.5, cy - 2.0), (x + 4.5, cy - 2.0), (x, cy + 3.0)], if hot { TEXT } else { DIM });
     ui.hit(r, t);
     for (k, x) in TOOL_X.into_iter().enumerate() {
-        let r = Rect::new(x - 11.0, 381.0, 22.0, 15.0);
+        let r = Rect::new(x - 12.0, cy - 9.0, 24.0, 18.0);
         let t = Target::Tool(k);
         let mut st = ui.state(r, &t);
         st.on = ui.st.tools[k];
@@ -719,14 +785,11 @@ pub fn pad_values(x: f32, y: f32) -> (i32, i32) {
 }
 
 fn right_panel(ui: &mut Ui, hint: &str) {
-    // The wordmark where FL has its logo, the lemon where it has its heart.
-    let big = Font::condensed(22, 0).bold().italic();
-    lemon::spaced(ui.c, big, 457.0, 4.0, plug::WORDMARK, "PULP", 2.0);
-    lemon::spaced(ui.c, big, 457.0, 28.0, plug::WORDMARK, "FILTER", 2.0);
-    lemon::lemon_mark(ui.c, 538.0, 21.0, 13.0, plug::WORDMARK);
+    // The emblem where FL has its logo, on the header band's centre line like the header buttons.
+    emblem(ui, LOGO.x + 3.0, HEADER_Y, false, Font::condensed(18, 0).bold(), 6.0);
     ui.hit(LOGO, Target::Logo);
     for (i, x) in HEADER_X.into_iter().enumerate() {
-        let (y, rad) = (17.0, 11.0);
+        let (y, rad) = (HEADER_Y, 11.0);
         let t = if i == 0 { Target::Inert("Show / hide left controls panel (not done yet)") } else { Target::Header(i) };
         let r = Rect::new(x - rad, y - rad, 2.0 * rad, 2.0 * rad);
         let mut st = ui.state(r, &t);
@@ -747,27 +810,34 @@ fn right_panel(ui: &mut Ui, hint: &str) {
         ui.hit(r, t);
     }
     modulation(ui);
-    // The master, master LFO and envelope follower levels.
+    // The master, master LFO and envelope follower levels, spread evenly in their card, captions at its foot.
+    let r = LEVELS_CARD;
+    panel(ui, r);
+    let cap = r.bottom() - FOOT;
     for (k, x) in [MASTER, LFO_MASTER, FOLLOW_LEVEL].into_iter().zip(MASTER_X) {
-        slider(ui, Some(k), x, 62.0, 133.0);
+        slider(ui, Some(k), x, r.y + 12.0, cap - 14.0);
     }
-    ui.c.fill_polygon(&[(612.0, 151.0), (621.0, 151.0), (621.0, 144.0)], DIM);
-    ui.label(SMALL, MASTER_X[1], 147.5, DIM, "LFO");
-    ui.label(SMALL, MASTER_X[2], 147.5, DIM, "IEF");
-    // The envelope follower.
-    panel(ui, IEF_CARD);
-    ui.label(SMALL.bold(), IEF_CARD.cx(), 164.0, DIM, "IEF");
-    ui.c.fill_rect(Rect::new(IEF_CARD.x + 1.0, 172.0, IEF_CARD.w - 2.0, 1.0), plug::PANEL_LINE);
-    lamp(ui, Target::Switch(Sw::Use1), ui.m.st.follow_filter1, 630.0, 184.0, "USE1", None);
-    knob(ui, Some(FOLLOW_ATTACK), 643.0, 212.0, 13.5, "ATT", 237.0);
-    knob(ui, Some(FOLLOW_RELEASE), 643.0, 265.5, 13.5, "REL", 289.0);
-    // Switches, oversampling, description.
+    let x = MASTER_X[0];
+    ui.c.fill_polygon(&[(x - 4.0, cap + 3.5), (x + 4.0, cap + 3.5), (x + 4.0, cap - 3.5)], DIM);
+    ui.label(SMALL, MASTER_X[1], cap, DIM, "LFO");
+    ui.label(SMALL, MASTER_X[2], cap, DIM, "IEF");
+    // The envelope follower: its switch centred under the title, the knobs under each other.
+    let r = IEF_CARD;
+    titled(ui, r, "IEF");
+    let w = 14.0 + 3.0 + ui.c.text_width(SMALL, "USE1");
+    lamp(ui, Target::Switch(Sw::Use1), ui.m.st.follow_filter1, (r.cx() - w / 2.0 + 7.0).round(), r.y + BAND + 14.0, "USE1", None);
+    let cap = r.bottom() - FOOT;
+    knob(ui, Some(FOLLOW_ATTACK), r.cx(), cap - 69.0, 13.5, "ATT", cap - 46.0);
+    knob(ui, Some(FOLLOW_RELEASE), r.cx(), cap - 23.0, 13.5, "REL", cap);
+    // The global switches on the left, the oversampling on the right.
+    let r = GLOBAL_CARD;
+    panel(ui, r);
     let s = ui.m.st;
     let (dc, hq) = (s.dc(), s.hq_envelopes());
-    lamp(ui, Target::Switch(Sw::Center), dc, 460.0, 312.0, "CENTER", None);
-    lamp(ui, Target::Switch(Sw::HqEnvelopes), hq, 523.5, 312.0, "HQ ENVELOPES", None);
-    let lh = ui.c.line_height(SMALL);
-    ui.c.text_right(SMALL, 634.0, (333.0 - lh / 2.0).round(), DIM, "OVERSAMPLING");
+    let rows = [r.y + 12.0, r.bottom() - 12.0];
+    lamp(ui, Target::Switch(Sw::Center), dc, r.x + 13.0, rows[0], "CENTER", None);
+    lamp(ui, Target::Switch(Sw::HqEnvelopes), hq, r.x + 13.0, rows[1], "HQ ENVELOPES", None);
+    ui.label(SMALL, OVERSAMPLING.cx(), rows[0], DIM, "OVERSAMPLING");
     let t = Target::Oversampling;
     let st = ui.state(OVERSAMPLING, &t);
     lemon::field(ui.c, OVERSAMPLING, st);
@@ -780,22 +850,22 @@ fn right_panel(ui: &mut Ui, hint: &str) {
 }
 
 fn modulation(ui: &mut Ui) {
-    panel(ui, MOD_CARD);
+    titled(ui, MOD_CARD, "X / Y");
+    let on = ui.m.st.smooth();
+    band_switch(ui, MOD_CARD, Target::Switch(Sw::Smooth), on, "SMOOTH");
     lemon::plug_well(ui.c, PAD, 6.0);
-    ui.c.fill_rect(Rect::span(PAD.cx(), PAD.cx() + 1.0, PAD.y + 2.0, PAD.bottom() - 2.0), plug::GRID);
-    ui.c.fill_rect(Rect::span(PAD.x + 2.0, PAD.right() - 2.0, PAD.cy(), PAD.cy() + 1.0), plug::GRID);
+    ui.c.fill_rect(edges(PAD.cx(), PAD.cx() + 1.0, PAD.y + 2.0, PAD.bottom() - 2.0), plug::GRID);
+    ui.c.fill_rect(edges(PAD.x + 2.0, PAD.right() - 2.0, PAD.cy(), PAD.cy() + 1.0), plug::GRID);
     let (mx, my) = (ui.m.st.mod_x(), ui.m.st.mod_y());
     let (x, y) = pad_point(mx, my);
     let hot = ui.hot(PAD, &Target::Pad);
     ui.c.fill_circle(x, y, 7.0, ACCENT.with_alpha(if hot { 80 } else { 50 }));
     ui.c.stroke_circle(x, y, 4.5, 1.5, ACCENT);
     ui.hit(PAD, Target::Pad);
-    let on = ui.m.st.smooth();
-    lamp(ui, Target::Switch(Sw::Smooth), on, 467.5, 215.5, "SMOOTH", None);
-    knob(ui, Some(6), 535.0, 258.0, 17.5, "X", 286.0);
-    knob(ui, Some(7), 581.0, 258.0, 17.5, "Y", 286.0);
-    let lh = ui.c.line_height(LABEL);
-    ui.c.text(LABEL.italic(), 461.0, (286.0 - lh / 2.0).round(), FAINT, "Modulation");
+    // The X and Y knobs under the pad, the pair centred on it, captions at the card's foot.
+    let cap = MOD_CARD.bottom() - FOOT;
+    knob(ui, Some(6), PAD.cx() - 26.0, cap - 27.0, 17.5, "X", cap);
+    knob(ui, Some(7), PAD.cx() + 26.0, cap - 27.0, 17.5, "Y", cap);
 }
 
 fn description(ui: &mut Ui, hint: &str) {
@@ -897,14 +967,10 @@ pub fn plain_text(s: &str) -> String {
 
 fn info(ui: &mut Ui) {
     let (w, h) = ui.c.size();
-    let big = Font::condensed(32, 0).bold().italic();
-    let wn = lemon::spaced_width(ui.c, big, "PULP FILTER", 3.0);
-    let y = h / 2.0 - 60.0;
-    lemon::spaced(ui.c, big, ((w - wn) / 2.0).round(), y, plug::WORDMARK, "PULP FILTER", 3.0);
-    lemon::lemon_mark(ui.c, (w + wn) / 2.0 + 22.0, y + 18.0, 12.0, ACCENT);
+    let mid = emblem(ui, w / 2.0, h / 2.0 - 45.0, true, Font::condensed(32, 0).bold(), 9.0);
     let v = format!("Version {}", ui.m.version);
-    ui.c.text_center(LABEL, Rect::new(0.0, y + 46.0, w, 16.0), DIM, &v);
-    ui.c.text_center(LABEL, Rect::new(0.0, y + 64.0, w, 16.0), DIM, "Lemon Studio's pattern-controlled multi-filter");
+    ui.c.text_center(LABEL, Rect::new(0.0, mid.bottom() + 8.0, w, 16.0), DIM, &v);
+    ui.c.text_center(LABEL, Rect::new(0.0, mid.bottom() + 26.0, w, 16.0), DIM, "Lemon Studio's pattern-controlled multi-filter");
     ui.c.text_center(SMALL, Rect::new(0.0, h - 30.0, w, 16.0), FAINT, "Click to return");
     ui.hit(Rect::new(0.0, 0.0, w, h), Target::Cover);
 }

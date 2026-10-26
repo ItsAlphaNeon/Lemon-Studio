@@ -1389,32 +1389,32 @@ mod tests {
         crate::state_of(&l.params.state.read().unwrap().0)
     }
 
-    /// The knobs, sliders and switches sit where FL has them (plugins/lemon-pulp-filter.md §2).
+    /// The knobs, sliders and switches sit in FL's arrangement on the 6 px grid (plugins/lemon-pulp-filter.md §2).
     #[test]
-    fn controls_sit_where_fl_has_them() {
+    fn controls_sit_on_the_grid() {
         let l = logic();
         let c = |n| Target::Knob(control_index(0, n).unwrap());
         for (t, x, y) in [
-            (c(C_IN), 34.0, 163.0),
-            (c(C_ENV), 105.0, 159.0),
-            (c(C_CUT), 148.5, 159.0),
-            (c(C_RES), 191.5, 159.0),
-            (c(C_PRE), 351.5, 100.5),
-            (c(C_WSMIX), 351.5, 159.0),
-            (c(C_PAN), 398.5, 100.5),
-            (c(C_VOL), 399.5, 163.0),
-            (Target::Knob(6), 535.0, 258.0),
-            (Target::Knob(7), 581.0, 258.0),
-            (Target::Knob(FOLLOW_ATTACK), 643.0, 212.0),
-            (Target::Knob(FOLLOW_RELEASE), 643.0, 265.5),
+            (c(C_IN), 29.0, 157.0),
+            (c(C_ENV), 101.0, 157.0),
+            (c(C_CUT), 144.0, 157.0),
+            (c(C_RES), 187.0, 157.0),
+            (c(C_PRE), 350.0, 96.0),
+            (c(C_WSMIX), 350.0, 157.0),
+            (c(C_PAN), 400.0, 96.0),
+            (c(C_VOL), 400.0, 157.0),
+            (Target::Knob(6), 503.0, 257.0),
+            (Target::Knob(7), 555.0, 257.0),
+            (Target::Knob(FOLLOW_ATTACK), 645.0, 215.0),
+            (Target::Knob(FOLLOW_RELEASE), 645.0, 261.0),
         ] {
             let (cx, cy) = centre(&l, &t);
             assert!((cx - x).abs() < 1.0 && (cy - y).abs() < 1.0, "{t:?} at {cx},{cy}");
         }
-        for (k, x) in [(MASTER, 617.0), (LFO_MASTER, 641.5), (FOLLOW_LEVEL, 665.0)] {
+        for (k, x) in [(MASTER, 623.0), (LFO_MASTER, 645.0), (FOLLOW_LEVEL, 667.0)] {
             assert!((centre(&l, &Target::Slider(k)).0 - x).abs() < 1.0);
         }
-        assert!((centre(&l, &Target::Slider(control_index(0, C_NEXT).unwrap())).0 - 431.0).abs() < 1.0);
+        assert!((centre(&l, &Target::Slider(control_index(0, C_NEXT).unwrap())).0 - 433.0).abs() < 1.0);
         for f in 0..FILTERS {
             assert!((centre(&l, &Target::Enable(f)).0 - view::enable_x(f)).abs() < 1.0);
         }
