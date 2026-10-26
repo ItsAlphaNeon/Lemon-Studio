@@ -13,15 +13,19 @@
 //! - [`articulator`]: a channel's envelopes and LFOs, stepped once per tick for every voice.
 //! - [`channel_filter`]: the channel filter a voice runs through.
 //! - [`tone`]: the spectral make-up of a sound's stretches, for colourful waveforms.
+//! - [`curve`]: Image-Line's curves (envelopes, LFOs, maps) as Citrus and Pulp Filter walk them.
+//! - [`num`]: the plugin pages' arithmetic (`single( )`, Round, flushes) and a little-endian state reader.
 //!
 // spec: audio/conventions.md, audio/mixer.md, audio/sampler.md, audio/time-stretch.md, audio/envelopes-and-lfos.md,
-// audio/channel-filter.md
+// audio/channel-filter.md, plugins/image-line-curves.md
 
 pub mod articulator;
 pub mod channel_filter;
+pub mod curve;
 pub mod glide;
 pub mod level;
 pub mod mixer;
+pub mod num;
 pub mod resample;
 pub mod stretch;
 pub mod tone;

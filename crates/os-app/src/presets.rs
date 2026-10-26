@@ -928,8 +928,13 @@ mod tests {
             let d = pl.descriptor(key).unwrap();
             let infos = pl.param_infos(key);
             for p in factory_in(FACTORY, &d.name) {
-                let Ok((h, Body::Params(list))) = load(&p.path, &d.uid()) else { panic!("{} does not load for {}", p.name, d.name) };
+                let Ok((h, body)) = load(&p.path, &d.uid()) else { panic!("{} does not load for {}", p.name, d.name) };
                 assert_eq!(h.plugin, d.name);
+                // A state preset (Press, Pulp Filter): the plugin's own tests read its state.
+                let Body::Params(list) = body else {
+                    checked += 1;
+                    continue;
+                };
                 for (name, v) in list {
                     let i = infos.iter().find(|i| i.name == name).unwrap_or_else(|| panic!("{}/{}: no parameter {name}", d.name, p.name));
                     let (lo, hi) = (i.min.min(i.max), i.max.max(i.min));

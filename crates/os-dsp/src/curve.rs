@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Image-Line's curves as Citrus uses them: envelopes, LFOs and maps, a list of points joined by shaped segments,
+//! Image-Line's curves as Citrus and Pulp Filter use them: envelopes, LFOs and maps, a list of points joined by shaped segments,
 //! with a decay point, a loop and a sustain point. The stream, the preparation, the thirteen segment modes, the
-//! walks (with Sytrus's note-off, step points and global envelopes) and the LFO oscillator.
+//! walks (with Sytrus's note-off, step points and global envelopes, and Love Philter's starts at a time) and the LFO
+//! oscillator.
 //
 // spec: plugins/image-line-curves.md
 
@@ -189,6 +190,23 @@ impl Curve {
                 self.fit_map();
             }
             _ => {}
+        }
+        self.prepare();
+    }
+
+    /// What Love Philter keeps of a curve when it is loaded (spec "What the owner keeps"): patterns and LFOs keep the
+    /// loop start and the sustain point, maps no marker; no point keeps its step byte. Then the preparation.
+    pub fn keep_love_philter(&mut self) {
+        let n = self.points.len() as i32;
+        let valid = |m: i32| if (0..n).contains(&m) { m } else { -1 };
+        self.decay = -1;
+        self.loop_start = valid(self.loop_start);
+        self.sustain = valid(self.sustain);
+        if self.kind == MAP {
+            (self.loop_start, self.sustain) = (-1, -1);
+        }
+        for p in self.points.iter_mut() {
+            p.step = 0;
         }
         self.prepare();
     }
@@ -552,8 +570,53 @@ impl Walk {
         w
     }
 
+    /// A walk with the scales attack 1, decay 1, sustain offset 0, release 1 whatever the curve stores (Love Philter's
+    /// patterns).
+    pub fn unscaled(c: &Curve, step: f64, centre: f64) -> Walk {
+        let mut w = Walk {
+            step,
+            centre,
+            limit: true,
+            scales: [1.0, 1.0, 0.0, 1.0],
+            step_pos: -1,
+            ..Walk::default()
+        };
+        w.reset(c, 0.0);
+        w
+    }
+
     pub fn finished(&self) -> bool {
         self.stage >= FINISHED
+    }
+
+    /// Starts the walk at `s` steps from the curve's beginning (spec "Starting at a time"): reset, the time folded into
+    /// the loop and walked in one step; a negative `s` makes the first segment end `-s` steps from now.
+    pub fn start_at(&mut self, c: &Curve, s: f64) {
+        self.reset(c, 0.0);
+        if s < 0.0 {
+            if !self.finished() {
+                (self.r, self.p) = (-1.0 / s, 0.0);
+            }
+            return;
+        }
+        let t = s * self.step;
+        let t = match (c.loop_start, c.hold) {
+            (l, h) if l >= 0 && h >= 0 => {
+                let a = c.time_to(l as usize);
+                let len = c.time_to(h as usize) - a;
+                if len > 0.0 {
+                    let u = t - a;
+                    let k = f64::from(self::s(u / len)).trunc();
+                    (a + u) - k * len
+                } else {
+                    t
+                }
+            }
+            _ => t,
+        };
+        if self.step != 0.0 {
+            self.advance(c, t / self.step);
+        }
     }
 
     fn lvl(&self, c: &Curve, i: usize) -> f64 {
@@ -747,6 +810,8 @@ pub struct Lfo {
     pub phase: u32,
     pub value: f32,
     pub shape: LfoShape,
+    /// The phase the LFO last started with (a free-running LFO resets to it).
+    pub started: u32,
 }
 
 /// The LFO's set-up from its four parameters.
@@ -831,7 +896,29 @@ impl Lfo {
     pub fn new(c: &Curve, step: f64, phase: Option<u32>) -> Lfo {
         let shape = LfoShape::new(c, step);
         let walk = Walk::new(c, step, 0.5, true);
-        Lfo { walk, phase: phase.unwrap_or(shape.start), value: 0.0, shape }
+        let phase = phase.unwrap_or(shape.start);
+        Lfo { walk, phase, value: 0.0, shape, started: phase }
+    }
+
+    /// The reset: the walk reset, the phase at its start (a free-running LFO's: the phase it last started with), the
+    /// value 0.
+    pub fn reset(&mut self, c: &Curve) {
+        self.walk.reset(c, 0.0);
+        self.phase = if c.flags & GLOBAL != 0 { self.started } else { self.shape.start };
+        self.value = 0.0;
+    }
+
+    /// Starts the LFO at `s` steps (spec "Start, reset and steps"): its walk as an envelope's, the phase at the start
+    /// plus `s` steps of the unfrozen phase step, kept as the phase a free-running LFO resets to.
+    pub fn start_at(&mut self, c: &Curve, s: f64) {
+        self.reset(c);
+        self.walk.start_at(c, s);
+        self.phase = self.shape.start.wrapping_add(round(s * self.shape.dphi as f64) as u32);
+        self.started = self.phase;
+        let w = &self.walk;
+        if s >= 0.0 && !(w.i == 0 && !w.finished() && w.p < 1.0) {
+            self.value = self::s(f64::from(w.out) * f64::from(self.shape.wave(self.phase)));
+        }
     }
 
     pub fn advance(&mut self, c: &Curve, dt: f64) {
@@ -894,6 +981,18 @@ impl<'a> MapWalk<'a> {
         self.out = s(f64::from(self.from) + f64::from(c.progress(self.i, self.p) * self.by));
         self.out
     }
+}
+
+/// A map as a table (spec "A map as a table of 1025 entries"): entry 0 the value at the start, then one step of `dx`
+/// per entry, `n + 1` entries.
+pub fn map_table(c: &Curve, centre: f64, dx: f64, n: usize) -> Vec<f32> {
+    let mut w = MapWalk::new(c, centre);
+    let mut t = Vec::with_capacity(n + 1);
+    t.push(w.out);
+    for _ in 0..n {
+        t.push(w.advance(dx));
+    }
+    t
 }
 
 /// A map's value at `x` (key, velocity, unison and random maps, read at note-on; spec plugins/sytrus.md "Maps").

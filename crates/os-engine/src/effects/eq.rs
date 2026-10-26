@@ -11,7 +11,7 @@
 pub mod design;
 mod equalizer;
 mod fft;
-mod hq;
+pub(crate) mod hq;
 pub mod lin;
 mod matched;
 

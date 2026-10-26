@@ -5,7 +5,8 @@
 //! The metronome switch, sound and volume (toolbar, OPTIONS > Metronome, Ctrl+M, the button's right-click menu). A
 //! program
 //! setting, not part of the project: kept in the user folder (`metronome.txt`) and shared with every playing engine,
-//! which hears a change from its next beat.
+//! which hears a change from its next beat. The switch also carries Settings > Audio ▸ Metronome track
+//! (`prefs::METRONOME_TRACK`, kept with the other settings).
 // spec: ui/metronome.md §1-3
 
 use std::sync::{Arc, OnceLock}; // This code is a part of L e m o n S t u d i o.
@@ -15,16 +16,21 @@ use os_engine::metronome::{Sound, Switch};
 #[cfg_attr(test, allow(dead_code))]
 static SWITCH: OnceLock<Arc<Switch>> = OnceLock::new();
 
-/// The switch every playback engine clicks with: read from `metronome.txt` the first time (tests: off, Tick, one per
-/// test thread so that tests running side by side don't see each other's clicks).
+/// The switch every playback engine clicks with: read from `metronome.txt` and the Metronome track setting the first
+/// time (tests: off, Tick, one per test thread so that tests running side by side don't see each other's clicks).
 pub fn switch() -> Arc<Switch> {
     #[cfg(test)]
     {
-        thread_local!(static TEST: Arc<Switch> = Arc::new(Switch::default()));
+        thread_local!(static TEST: Arc<Switch> = Arc::new(with_track(Switch::default())));
         TEST.with(Arc::clone)
     }
     #[cfg(not(test))]
-    SWITCH.get_or_init(|| Arc::new(load())).clone()
+    SWITCH.get_or_init(|| Arc::new(with_track(load()))).clone()
+}
+
+fn with_track(s: Switch) -> Switch {
+    s.set_track(crate::prefs::number(&crate::prefs::METRONOME_TRACK));
+    s
 }
 
 pub fn on() -> bool {

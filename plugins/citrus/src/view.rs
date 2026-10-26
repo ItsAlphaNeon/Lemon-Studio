@@ -22,7 +22,7 @@ use crate::state::*;
 /// Editor size in logical pixels, with the testing keyboard and without it.
 pub const W: u32 = 850;
 pub const H: u32 = 450;
-pub const H_NO_KEYS: u32 = 348;
+pub const H_NO_KEYS: u32 = 352;
 
 /// The Pith colours (`ui/lemon-design.md` §11.1).
 pub const BG: Color = plug::BG;
@@ -47,20 +47,24 @@ pub const PAGES: usize = 11;
 pub const PAGE_FX: usize = 10;
 const TAB_NAMES: [&str; PAGES] = ["MAIN", "OP 1", "OP 2", "OP 3", "OP 4", "OP 5", "OP 6", "FILTER 1", "FILTER 2", "FILTER 3", "FX"];
 
-/// The page area and the matrix panel.
-pub const PAGE: Rect = Rect::new(0.0, 26.0, 546.0, 320.0);
-pub const MATRIX: Rect = Rect::new(550.0, 31.0, 296.0, 315.0);
-/// The matrix's cell pitch (FL's is 31 px; Pith's card padding takes the rest) and its first cell's corner.
+/// The layout's grid: every card 6 px from the surface's edges, the page strip and its neighbours.
+const GAP: f32 = 6.0;
+/// The page area (left of the matrix) and the matrix panel, both from under the strip to the keyboard.
+pub const PAGE: Rect = Rect::span(GAP, 544.0, 35.0, 346.0);
+pub const MATRIX: Rect = Rect::span(550.0, 850.0 - GAP, 35.0, 346.0);
+/// The matrix's cell pitch (FL's is 31 px; Pith's card padding takes the rest) and its first cell's corner: the row
+/// labels, the cells, the column labels and the FM / RM bar centred in the panel.
 const PITCH: f32 = 29.0;
 const GRID_X: f32 = 577.0;
-const GRID_Y: f32 = 52.0;
-pub const KEYS: Rect = Rect::new(4.0, 355.0, 842.0, 95.0);
+const GRID_Y: f32 = 56.0;
+/// The keys start 3 px over this (their rounded tops), 6 px under the cards.
+pub const KEYS: Rect = Rect::new(GAP, 355.0, 838.0, 95.0);
 /// The testing keyboard's keys: C3 .. B7 (FL's names, key 60 = C5).
 pub const FIRST_KEY: u8 = 36;
 pub const LAST_KEY: u8 = 95;
 /// The XY pad.
-pub const PAD: Rect = Rect::span(14.0, 142.0, 166.0, 293.0);
-pub const PATCH_TEXT: Rect = Rect::new(10.0, 305.0, 341.0, 37.0);
+pub const PAD: Rect = Rect::span(14.0, 136.0, 162.0, 292.0);
+pub const PATCH_TEXT: Rect = Rect::span(GAP, 348.0, 306.0, 346.0);
 
 /// What covers the whole surface instead of the pages (header buttons 2 and 3).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -335,6 +339,12 @@ fn caption(ui: &mut Ui, r: Rect, s: &str) {
     ui.label(SMALL, r.cx(), r.bottom() - 9.0, DIM, s);
 }
 
+/// A panel's title in its top-left corner.
+fn title(ui: &mut Ui, r: Rect, s: &str) {
+    let lh = ui.c.line_height(SMALL);
+    ui.c.text(SMALL, r.x + 10.0, (r.y + 12.0 - lh / 2.0).round(), DIM, s);
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Tabs and header (§1, §7)
 
@@ -373,11 +383,11 @@ fn tabs(ui: &mut Ui) {
     }
 }
 
-pub const HEADER_X: [f32; 4] = [771.0, 793.0, 815.0, 836.0];
+pub const HEADER_X: [f32; 4] = [769.0, 791.0, 813.0, 835.0];
 
 fn header(ui: &mut Ui) {
     for (i, x) in HEADER_X.into_iter().enumerate() {
-        let (y, rad) = (14.0, 9.0);
+        let (y, rad) = (15.0, 9.0);
         let t = Target::Header(i);
         let r = Rect::new(x - rad, y - rad, 2.0 * rad, 2.0 * rad);
         let mut st = ui.state(r, &t);
@@ -411,60 +421,74 @@ fn header(ui: &mut Ui) {
 // ---------------------------------------------------------------------------------------------------------------
 // Main page (§2)
 
+/// The main page's cards: a row of faders (each card's faders spread evenly, captions at the foot), the X / Y pad and
+/// the equaliser beside the quality and switch cards, the patch text beside the name.
+const ROW1: (f32, f32) = (35.0, 133.0);
+const ROW2: (f32, f32) = (139.0, 300.0);
+/// The faders of the first row: label, track.
+const FADER_LABEL: f32 = 47.0;
+const FADER_TRACK: (f32, f32) = (58.0, 106.0);
+/// The right-hand column (unison, quality, switches, the name).
+const RIGHT_COL: (f32, f32) = (354.0, 544.0);
+
 fn main_page(ui: &mut Ui, hint: &str) {
+    let (top, bot) = ROW1;
+    let (t0, t1) = FADER_TRACK;
     // Master.
-    let r = Rect::new(10.0, 35.0, 130.0, 98.0);
+    let r = Rect::span(GAP, 136.0, top, bot);
     panel(ui, r);
-    for (k, x, l) in [(0, 33.0, "VOL"), (1, 76.0, "LFO"), (2, 118.0, "PITCH")] {
-        slider(ui, Field::Main(k), x, 58.0, 118.0, l);
+    for (k, x, l) in [(0, 28.0, "VOL"), (1, 71.0, "LFO"), (2, 114.0, "PITCH")] {
+        slider(ui, Field::Main(k), x, t0, t1, l);
     }
+    caption(ui, r, "MASTER");
     // Envelope scales.
-    for (base, rect, xs, cap) in [
-        (0, Rect::new(146.0, 35.0, 99.0, 98.0), [158.0, 184.0, 208.0, 235.0], "VOL \u{2303}"),
-        (4, Rect::new(251.0, 35.0, 98.0, 98.0), [262.0, 289.0, 313.0, 340.0], "FILTER \u{2303}"),
-    ] {
+    for (base, rect, cap) in [(0, Rect::span(142.0, 242.0, top, bot), "VOL \u{2303}"), (4, Rect::span(248.0, 348.0, top, bot), "FILTER \u{2303}")] {
         panel(ui, rect);
         for (j, l) in ["A", "D", "S", "R"].into_iter().enumerate() {
-            slider(ui, Field::S(base + j), xs[j], 56.0, 108.0, l);
+            slider(ui, Field::S(base + j), rect.cx() - 36.0 + 24.0 * j as f32, t0, t1, l);
         }
         caption(ui, rect, cap);
     }
     // Unison.
-    let r = Rect::new(356.0, 35.0, 182.0, 98.0);
+    let r = Rect::span(RIGHT_COL.0, RIGHT_COL.1, top, bot);
     panel(ui, r);
-    ui.label(SMALL, 375.0, 43.0, DIM, "ORD");
+    ui.label(SMALL, 377.0, FADER_LABEL, DIM, "ORD");
     // A stored order 0 plays as 1.
     let ord = ui.get(Field::S(8)).max(1).to_string();
-    value_box(ui, Field::S(8), Rect::new(362.5, 52.5, 25.0, 21.0), &ord);
+    value_box(ui, Field::S(8), Rect::new(365.0, 56.0, 24.0, 21.0), &ord);
     let on = ui.get(Field::Switch(0)) != 0;
-    lamp(ui, Target::Switch(Field::Switch(0)), on, 375.0, 86.0, "OSC", true);
-    for (k, x, l) in [(9, 404.0, "PN"), (10, 430.0, "VL"), (11, 454.0, "PT"), (12, 477.0, "SB"), (13, 500.0, "PH"), (14, 525.0, "EN")] {
-        slider(ui, Field::S(k), x, 52.0, 108.0, l);
+    lamp(ui, Target::Switch(Field::Switch(0)), on, 377.0, 91.0, "OSC", true);
+    for (k, l) in [(9, "PN"), (10, "VL"), (11, "PT"), (12, "SB"), (13, "PH"), (14, "EN")] {
+        slider(ui, Field::S(k), 409.0 + 24.0 * (k - 9) as f32, t0, t1, l);
     }
     caption(ui, r, "UNISON");
     modulation(ui);
     equaliser(ui);
     quality(ui);
     // Switches and SOFTEN.
-    panel(ui, Rect::span(356.0, 538.0, 236.0, 298.0));
-    switch(ui, Field::S32(1), 367.0, 245.0, "RANDOM");
-    lamp(ui, Target::Inert("Limit to 1 voice per key"), false, 367.0, 264.0, "MONO KEY", false);
-    switch(ui, Field::S32(2), 367.0, 283.0, "GLOBAL PITCH");
-    switch(ui, Field::Switch(1), 448.0, 245.0, "CENTER");
-    switch(ui, Field::Switch(2), 448.0, 264.0, "GIBBS OFF");
-    switch(ui, Field::Switch(4), 448.0, 283.0, "PORTA");
-    knob(ui, Field::Soften, 520.0, 261.0, 10.0, "SOFTEN");
+    let r = Rect::span(RIGHT_COL.0, RIGHT_COL.1, 232.0, ROW2.1);
+    panel(ui, r);
+    let ys = [r.cy() - 20.0, r.cy(), r.cy() + 20.0];
+    switch(ui, Field::S32(1), 366.0, ys[0], "RANDOM");
+    lamp(ui, Target::Inert("Limit to 1 voice per key"), false, 366.0, ys[1], "MONO KEY", false);
+    switch(ui, Field::S32(2), 366.0, ys[2], "GLOBAL PITCH");
+    switch(ui, Field::Switch(1), 446.0, ys[0], "CENTER");
+    switch(ui, Field::Switch(2), 446.0, ys[1], "GIBBS OFF");
+    switch(ui, Field::Switch(4), 446.0, ys[2], "PORTA");
+    knob(ui, Field::Soften, 522.0, r.cy() - 7.0, 10.0, "SOFTEN");
     patch_text(ui, hint);
-    // The name where FL has its logo (Citrus has no Lemon wordmark).
-    let r = Rect::new(356.0, 298.0, 182.0, 44.0);
-    name(ui, r, Font::condensed(24, 0).bold());
+    // The lemon and the name where FL has its logo.
+    let r = Rect::span(RIGHT_COL.0, RIGHT_COL.1, PATCH_TEXT.y, PATCH_TEXT.bottom());
+    emblem(ui, r, Font::condensed(24, 0).bold(), 7.0);
     ui.hit(r, Target::Logo);
 }
 
 fn modulation(ui: &mut Ui) {
-    panel(ui, Rect::new(10.0, 140.0, 166.0, 159.0));
-    ui.label(SMALL, 40.0, 151.0, DIM, "X / Y");
-    switch(ui, Field::S32(0), 124.0, 150.0, "SMOOTH");
+    let r = Rect::span(GAP, 172.0, ROW2.0, ROW2.1);
+    panel(ui, r);
+    title(ui, r, "X / Y");
+    let w = ui.c.text_width(SMALL, "SMOOTH");
+    switch(ui, Field::S32(0), (r.right() - 10.0 - w - 10.0).round(), r.y + 12.0, "SMOOTH");
     lemon::plug_well(ui.c, PAD, 6.0);
     ui.c.fill_rect(Rect::span(PAD.cx(), PAD.cx(), PAD.y + 2.0, PAD.bottom() - 3.0), plug::TICK);
     ui.c.fill_rect(Rect::span(PAD.x + 2.0, PAD.right() - 3.0, PAD.cy(), PAD.cy()), plug::TICK);
@@ -472,9 +496,10 @@ fn modulation(ui: &mut Ui) {
     ui.c.fill_circle(x, y, 5.5, ACCENT.with_alpha(60));
     ui.c.fill_circle(x, y, 3.5, ACCENT);
     ui.hit(PAD, Target::Pad);
-    for (k, y, l) in [(25, 192.0, "X"), (26, 222.0, "Y")] {
-        knob(ui, Field::S(k), 162.0, y, 10.0, "");
-        ui.label(SMALL, 148.0, y, DIM, l);
+    // The X and Y knobs beside the pad, their captions under them, the pair centred on the pad.
+    let cx = ((PAD.right() + r.right()) / 2.0).round();
+    for (k, y, l) in [(25, PAD.cy() - 30.0, "X"), (26, PAD.cy() + 20.0, "Y")] {
+        knob(ui, Field::S(k), cx, y.round(), 10.0, l);
     }
 }
 
@@ -489,16 +514,21 @@ pub fn pad_values(x: f32, y: f32) -> (i32, i32) {
     (v((x - PAD.x) / PAD.w), v((PAD.bottom() - y) / PAD.h))
 }
 
-const EQ_X: [f32; 3] = [266.0, 297.0, 328.0];
-pub const EQ_TARGET_Y: [f32; 4] = [173.0, 187.0, 201.0, 215.0];
+const EQ_X: [f32; 3] = [259.0, 290.0, 321.0];
+pub const EQ_TARGET_Y: [f32; 4] = [171.0, 188.0, 205.0, 222.0];
+/// The equaliser's rows: type buttons, the gain faders' track, the frequency and bandwidth knobs.
+const EQ_TYPE_Y: f32 = 167.0;
+const EQ_TRACK: (f32, f32) = (186.0, 222.0);
+const EQ_KNOB_Y: [f32; 2] = [248.0, 278.0];
 
 fn equaliser(ui: &mut Ui) {
-    panel(ui, Rect::new(183.0, 140.0, 168.0, 159.0));
-    ui.label(SMALL, 205.0, 151.0, DIM, "EQ");
+    let card = Rect::span(178.0, 348.0, ROW2.0, ROW2.1);
+    panel(ui, card);
+    title(ui, card, "EQ");
     for (b, x) in EQ_X.into_iter().enumerate() {
         // The type button: an outline of the band's shape.
         let f = Field::Eq(b, 3);
-        let r = Rect::new(x - 13.0, 143.0, 26.0, 14.0);
+        let r = Rect::new(x - 13.0, EQ_TYPE_Y - 7.0, 26.0, 14.0);
         let t = Target::Cycle(f);
         let st = ui.state(r, &t);
         lemon::field(ui.c, r, st);
@@ -510,42 +540,51 @@ fn equaliser(ui: &mut Ui) {
         let cy = r.cy();
         ui.c.polyline(&[(x - 9.0, cy + l), (x - 4.0, cy + l), (x, cy + m), (x + 4.0, cy + h), (x + 9.0, cy + h)], 1.2, TEXT);
         ui.hit(r, t);
-        slider(ui, Field::Eq(b, 0), x, 176.0, 218.0, "");
-        knob(ui, Field::Eq(b, 1), x, 250.0, 10.0, "");
-        knob(ui, Field::Eq(b, 2), x, 279.0, 10.0, "");
+        slider(ui, Field::Eq(b, 0), x, EQ_TRACK.0, EQ_TRACK.1, "");
+        knob(ui, Field::Eq(b, 1), x, EQ_KNOB_Y[0], 10.0, "");
+        knob(ui, Field::Eq(b, 2), x, EQ_KNOB_Y[1], 10.0, "");
     }
-    ui.label(SMALL, 232.0, 250.0, DIM, "FREQ");
-    ui.label(SMALL, 232.0, 279.0, DIM, "BW");
+    // The knob rows' names, right-aligned before the first band.
+    let lh = ui.c.line_height(SMALL);
+    for (y, l) in EQ_KNOB_Y.into_iter().zip(["FREQ", "BW"]) {
+        ui.c.text_right(SMALL, EQ_X[0] - 17.0, (y - lh / 2.0).round(), DIM, l);
+    }
     let mode = ui.get(Field::EqMode);
     for (k, (y, l)) in EQ_TARGET_Y.into_iter().zip(["OFF", "OUT+FX", "OUT", "FX"]).enumerate() {
-        lamp(ui, Target::Choice(Field::EqMode, k as i32), mode == k as i32, 197.0, y, l, false);
+        lamp(ui, Target::Choice(Field::EqMode, k as i32), mode == k as i32, card.x + 12.0, y, l, false);
     }
 }
 
 fn quality(ui: &mut Ui) {
-    let r = Rect::new(356.0, 140.0, 182.0, 89.0);
+    let r = Rect::span(RIGHT_COL.0, RIGHT_COL.1, ROW2.0, 226.0);
     panel(ui, r);
-    ui.label(SMALL, 474.0, 160.0, DIM, "DRAFT");
-    ui.label(SMALL, 512.0, 160.0, DIM, "RENDER");
+    title(ui, r, "QUALITY");
+    let (head, rows) = (r.y + 12.0, [175.0, 204.0]);
     let lh = ui.c.line_height(SMALL);
-    ui.c.text(SMALL, 364.0, (181.0 - lh / 2.0).round(), DIM, "HQ ENVELOPES");
-    ui.c.text(SMALL, 364.0, (210.0 - lh / 2.0).round(), DIM, "OVERSAMPLING");
-    for (k, x) in [(0, 474.0), (1, 512.0)] {
+    for (y, l) in rows.into_iter().zip(["HQ ENVELOPES", "OVERSAMPLING"]) {
+        ui.c.text(SMALL, r.x + 10.0, (y - lh / 2.0).round(), DIM, l);
+    }
+    for (k, (x, l)) in [(476.0, "DRAFT"), (516.0, "RENDER")].into_iter().enumerate() {
+        ui.label(SMALL, x, head, DIM, l);
         let f = Field::S(28 + k);
         let on = ui.get(f) != 0;
-        lamp(ui, Target::Switch(f), on, x, 181.0, "", false);
+        lamp(ui, Target::Switch(f), on, x, rows[0], "", false);
         let f = Field::S(30 + k);
         let s = ctl::text(f, ui.get(f));
-        value_box(ui, f, Rect::new(x - 15.0, 200.0, 30.0, 20.0), &s);
+        value_box(ui, f, Rect::new(x - 15.0, rows[1] - 10.0, 30.0, 20.0), &s);
     }
-    ui.c.text(SMALL, 364.0, 146.0, DIM, "QUALITY");
 }
 
-/// "CITRUS" in the wordmark's grey condensed caps, centred in `r`.
-fn name(ui: &mut Ui, r: Rect, f: Font) {
+/// The lemon mark and "CITRUS" in the wordmark's grey condensed caps, the pair centred in `r`; `s` = the lemon's half
+/// length.
+fn emblem(ui: &mut Ui, r: Rect, f: Font, s: f32) {
     let wn = lemon::spaced_width(ui.c, f, "CITRUS", 3.0);
+    // The tilted lemon's width with its nubs, and the space before the name.
+    let (wl, gap) = (2.2 * s, (s * 1.3).round());
+    let x = (r.cx() - (wl + gap + wn) / 2.0).round();
     let y = (r.cy() - ui.c.line_height(f) / 2.0).round();
-    lemon::spaced(ui.c, f, (r.cx() - wn / 2.0).round(), y, plug::WORDMARK, "CITRUS", 3.0);
+    lemon::lemon_mark(ui.c, x + wl / 2.0, r.cy(), s, brand::MAIN);
+    lemon::spaced(ui.c, f, x + wl + gap, y, plug::WORDMARK, "CITRUS", 3.0);
 }
 
 fn patch_text(ui: &mut Ui, hint: &str) {
@@ -698,11 +737,14 @@ pub fn targets(page: usize) -> &'static [(&'static str, &'static str, Shown)] {
 
 pub const PART_LABELS: [&str; 8] = ["ENV", "LFO", "KEY M", "VEL M", "MOD X", "MOD Y", "RAND", "UNI"];
 
-/// The articulator editor's parts.
-pub const TARGET_TABS: Rect = Rect::new(6.0, 129.0, 540.0, 18.0);
-pub const PART_TABS: Rect = Rect::new(6.0, 148.0, 540.0, 18.0);
-pub const CURVE: Rect = Rect::new(6.0, 166.0, 540.0, 146.0);
-pub const BAR: Rect = Rect::new(6.0, 312.0, 540.0, 34.0);
+/// A module page's card of controls and the articulator editor's parts under it.
+const TOP_CARD: Rect = Rect::span(GAP, 544.0, 35.0, 131.0);
+pub const TARGET_TABS: Rect = Rect::span(GAP, 544.0, 135.0, 153.0);
+pub const PART_TABS: Rect = Rect::span(GAP, 544.0, 154.0, 172.0);
+pub const CURVE: Rect = Rect::span(GAP, 544.0, 174.0, 302.0);
+pub const BAR: Rect = Rect::span(GAP, 544.0, 306.0, 346.0);
+/// The bar's centre line.
+const BAR_Y: f32 = 326.0;
 
 /// Tab `i` of `n` across `r`.
 pub fn tab_rect(r: Rect, i: usize, n: usize) -> Rect {
@@ -719,7 +761,7 @@ pub fn shown(st: &ViewState) -> Shown {
 fn module_page(ui: &mut Ui) {
     let page = ui.st.page;
     let m = module_of(page);
-    panel(ui, Rect::new(6.0, 30.0, 540.0, 96.0));
+    panel(ui, TOP_CARD);
     match page {
         1..=6 => operator(ui, m),
         7..=9 => filter(ui, m),
@@ -771,7 +813,7 @@ fn digits(ui: &mut Ui, f: Field, r: Rect, decimals: i32, unit: &str) {
 /// The operator page's controls (§4).
 fn operator(ui: &mut Ui, m: usize) {
     // The waveform: one cycle.
-    let r = Rect::new(8.0, 33.0, 80.0, 65.0);
+    let r = Rect::span(14.0, 90.0, 43.0, 103.0);
     lemon::plug_well(ui.c, r, 6.0);
     ui.c.fill_rect(Rect::new(r.x + 2.0, r.cy(), r.w - 4.0, 1.0), plug::TICK);
     if let Some(w) = ui.m.wave {
@@ -781,72 +823,78 @@ fn operator(ui: &mut Ui, m: usize) {
         ui.c.polyline(&pts, 1.2, ACCENT);
     }
     ui.hit(r, Target::Wave(m));
-    for (k, x, l) in [(0, 20.0, "HALF"), (1, 49.0, "EVEN"), (2, 77.0, "ABS")] {
-        toggle(ui, Field::Op(m, 8 + k), Rect::new(x - 12.0, 106.0, 24.0, 14.0), l);
+    for (k, x, l) in [(0, 26.0, "HALF"), (1, 52.0, "EVEN"), (2, 78.0, "ABS")] {
+        toggle(ui, Field::Op(m, 8 + k), Rect::new(x - 12.0, 109.0, 24.0, 14.0), l);
     }
-    for (k, x, l) in [(3, 106.0, "SH"), (4, 135.0, "TN"), (5, 161.0, "SK"), (6, 187.0, "SN"), (7, 213.0, "PF"), (2, 239.0, "NS")] {
-        slider(ui, Field::Op(m, k), x, 56.0, 111.0, l);
+    for (k, x, l) in [(3, 109.0, "SH"), (4, 135.0, "TN"), (5, 161.0, "SK"), (6, 187.0, "SN"), (7, 213.0, "PF"), (2, 239.0, "NS")] {
+        slider(ui, Field::Op(m, k), x, 58.0, 112.0, l);
     }
-    switch(ui, Field::Op(m, 12), 267.0, 42.0, "CENTER");
-    switch(ui, Field::Op(m, 13), 267.0, 57.0, "DECLICK");
-    switch(ui, Field::Op(m, 15), 267.0, 73.0, "BAND LIMIT");
-    switch(ui, Field::Op(m, 14), 267.0, 114.0, "PLUCK");
-    digits(ui, Field::Op(m, 1), Rect::new(335.0, 37.0, 98.0, 20.0), 2, "Hz");
-    digits(ui, Field::Op(m, 0), Rect::new(440.0, 37.0, 98.0, 20.0), 4, "x");
-    ui.label(SMALL, 384.0, 64.0, DIM, "OFFSET");
-    ui.label(SMALL, 489.0, 64.0, DIM, "RATIO");
-    knob(ui, Field::Head(m, 0), 355.0, 92.0, 11.0, "PHASE");
-    switch(ui, Field::Op(m, 11), 398.0, 90.0, "GLOBAL");
-    knob(ui, Field::Head(m, 1), 476.0, 92.0, 11.0, "VOL");
-    knob(ui, Field::Head(m, 2), 513.0, 92.0, 11.0, "PE");
+    switch(ui, Field::Op(m, 12), 267.0, 47.0, "CENTER");
+    switch(ui, Field::Op(m, 13), 267.0, 63.0, "DECLICK");
+    switch(ui, Field::Op(m, 15), 267.0, 79.0, "BAND LIMIT");
+    switch(ui, Field::Op(m, 14), 267.0, 116.0, "PLUCK");
+    digits(ui, Field::Op(m, 1), Rect::new(334.0, 43.0, 98.0, 20.0), 2, "Hz");
+    digits(ui, Field::Op(m, 0), Rect::new(438.0, 43.0, 98.0, 20.0), 4, "x");
+    ui.label(SMALL, 383.0, 71.0, DIM, "OFFSET");
+    ui.label(SMALL, 487.0, 71.0, DIM, "RATIO");
+    knob(ui, Field::Head(m, 0), 355.0, 98.0, 11.0, "PHASE");
+    switch(ui, Field::Op(m, 11), 395.0, 98.0, "GLOBAL");
+    knob(ui, Field::Head(m, 1), 474.0, 98.0, 11.0, "VOL");
+    knob(ui, Field::Head(m, 2), 513.0, 98.0, 11.0, "PE");
 }
 
 /// A filter page's controls (§5).
 fn filter(ui: &mut Ui, m: usize) {
     let f = Field::Filt(m, 3);
     let kind = ui.get(f).clamp(0, 12) as usize;
-    value_box(ui, f, Rect::new(20.0, 36.0, 38.0, 25.0), ctl::FILTER_ABBR[kind]);
-    ui.c.fill_polygon(&[(60.0, 45.0), (66.0, 45.0), (63.0, 50.0)], DIM);
-    ui.hit(Rect::new(58.0, 36.0, 10.0, 25.0), Target::Box(f));
+    value_box(ui, f, Rect::new(14.0, 43.0, 38.0, 25.0), ctl::FILTER_ABBR[kind]);
+    ui.c.fill_polygon(&[(55.0, 53.0), (61.0, 53.0), (58.0, 58.0)], DIM);
+    ui.hit(Rect::new(52.0, 43.0, 10.0, 25.0), Target::Box(f));
     let stages = ui.get(Field::Head(m, 0));
-    for (k, (y, l)) in [42.0, 57.0, 71.0, 85.0, 99.0, 113.0].into_iter().zip(ctl::STAGE_LABELS).enumerate() {
-        lamp(ui, Target::Choice(Field::Head(m, 0), k as i32), stages == k as i32, 86.0, y, l, false);
+    for (k, l) in ctl::STAGE_LABELS.into_iter().enumerate() {
+        lamp(ui, Target::Choice(Field::Head(m, 0), k as i32), stages == k as i32, 86.0, 47.0 + 13.8 * k as f32, l, false);
     }
-    switch(ui, Field::Filt(m, 1), 30.0, 96.0, "FLAT");
-    switch(ui, Field::Filt(m, 0), 30.0, 112.0, "HQ");
-    for (k, x, l) in [(1, 153.0, "ENV"), (2, 198.0, "CUT"), (3, 245.0, "RES"), (7, 424.0, "AMP"), (8, 471.0, "MIX"), (9, 516.0, "NEXT")] {
-        knob(ui, Field::Head(m, k), x, 56.0, 14.0, l);
+    switch(ui, Field::Filt(m, 1), 20.0, 98.0, "FLAT");
+    switch(ui, Field::Filt(m, 0), 20.0, 116.0, "HQ");
+    for (k, x, l) in [(1, 153.0, "ENV"), (2, 198.0, "CUT"), (3, 243.0, "RES"), (7, 426.0, "AMP"), (8, 471.0, "MIX"), (9, 516.0, "NEXT")] {
+        knob(ui, Field::Head(m, k), x, 63.0, 14.0, l);
     }
     // MODE: FL's "+" button, whose setting was not identified: greyed out.
-    let r = Rect::new(380.0, 49.0, 20.0, 20.0);
+    let r = Rect::new(380.0, 53.0, 20.0, 20.0);
     let ink = lemon::plug_button(ui.c, r, 5.0, Look { disabled: true, ..Look::NORMAL });
     ui.c.text_center(LABEL, r, ink, "+");
-    ui.label(SMALL, 390.0, 77.0, OFF, "MODE");
+    ui.label(SMALL, 390.0, 84.0, OFF, "MODE");
     ui.hit(r, Target::Inert("Filter mode: off"));
-    switch(ui, Field::Filt(m, 2), 481.0, 112.0, "WS");
-    ui.label(SMALL, 470.0, 95.0, FAINT, "WAVESHAPER");
+    // The waveshaper's switch centred under its caption.
+    let w = ui.c.text_width(SMALL, "WS");
+    ui.label(SMALL, 471.0, 102.0, FAINT, "WAVESHAPER");
+    switch(ui, Field::Filt(m, 2), (471.0 - (w + 10.0) / 2.0).round(), 116.0, "WS");
 }
 
-pub const FX_UNIT_Y: [f32; 4] = [48.0, 66.0, 83.0, 101.0];
+pub const FX_UNIT_Y: [f32; 4] = [53.0, 70.0, 87.0, 104.0];
+
+/// The FX page's faders: track top and bottom, and the line under them (captions, the switches' last row).
+const FX_TRACK: (f32, f32, f32) = (58.0, 104.0, 120.0);
 
 /// The FX page's controls (§5).
 fn effects(ui: &mut Ui) {
-    knob(ui, Field::S(15), 21.0, 56.0, 12.0, "PAN");
-    ui.label(SMALL, 67.0, 47.0, DIM, "ORD");
+    let (t0, t1, foot) = FX_TRACK;
+    knob(ui, Field::S(15), 26.0, 63.0, 12.0, "PAN");
+    ui.label(SMALL, 67.0, 52.0, DIM, "ORD");
     let ord = ui.get(Field::S(16)).to_string();
-    value_box(ui, Field::S(16), Rect::new(55.0, 56.0, 24.0, 20.0), &ord);
-    lamp(ui, Target::Inert("Chorus"), false, 78.0, 113.0, "", false);
+    value_box(ui, Field::S(16), Rect::new(55.0, 61.0, 24.0, 20.0), &ord);
+    lamp(ui, Target::Inert("Chorus"), false, 76.0, foot, "", false);
     let lh = ui.c.line_height(SMALL);
-    ui.c.text_right(SMALL, 68.0, (113.0 - lh / 2.0).round(), OFF, "CHR");
-    for (k, x, l) in [(17, 96.0, "DP"), (18, 118.0, "SP"), (19, 139.0, "DL"), (20, 162.0, "SR"), (21, 184.0, "CR"), (22, 206.0, "VL")] {
-        slider(ui, Field::S(k), x, 54.0, 113.0, l);
+    ui.c.text_right(SMALL, 66.0, (foot - lh / 2.0).round(), OFF, "CHR");
+    for (k, x, l) in [(17, 96.0, "DP"), (18, 118.0, "SP"), (19, 140.0, "DL"), (20, 162.0, "SR"), (21, 184.0, "CR"), (22, 206.0, "VL")] {
+        slider(ui, Field::S(k), x, t0, t1, l);
     }
-    ui.label(SMALL, 150.0, 121.0, FAINT, "CHORUS");
+    ui.label(SMALL, 151.0, foot, FAINT, "CHORUS");
     // The send.
     let send = ctl::text(Field::S(24), ui.get(Field::S(24)));
-    value_box(ui, Field::S(24), Rect::new(227.0, 41.0, 28.0, 23.0), &send);
-    knob(ui, Field::S(23), 276.0, 54.0, 11.0, "VOL");
-    ui.label(SMALL, 250.0, 90.0, FAINT, "SEND");
+    value_box(ui, Field::S(24), Rect::new(227.0, 46.0, 28.0, 23.0), &send);
+    knob(ui, Field::S(23), 274.0, 58.0, 11.0, "VOL");
+    ui.label(SMALL, 250.0, 95.0, FAINT, "SEND");
     // The unit tabs.
     let unit = ui.st.fx_unit.min(3);
     for (k, y) in FX_UNIT_Y.into_iter().enumerate() {
@@ -862,28 +910,28 @@ fn effects(ui: &mut Ui) {
     }
     if unit < 3 {
         let d = unit;
-        switch(ui, Field::Delay(d, 6), 345.0, 80.0, "SERIAL");
-        switch(ui, Field::Delay(d, 5), 345.0, 95.0, "TEMPO");
-        switch(ui, Field::Delay(d, 7), 345.0, 110.0, "ON");
-        for (k, x, l) in [(0, 385.0, "FB"), (1, 412.0, "TM"), (2, 438.0, "SO"), (3, 464.0, "VL")] {
-            slider(ui, Field::Delay(d, k), x, 54.0, 113.0, l);
+        switch(ui, Field::Delay(d, 6), 341.0, foot - 32.0, "SERIAL");
+        switch(ui, Field::Delay(d, 5), 341.0, foot - 16.0, "TEMPO");
+        switch(ui, Field::Delay(d, 7), 341.0, foot, "ON");
+        for (k, x, l) in [(0, 386.0, "FB"), (1, 412.0, "TM"), (2, 438.0, "SO"), (3, 464.0, "VL")] {
+            slider(ui, Field::Delay(d, k), x, t0, t1, l);
         }
         let mode = ui.get(Field::Delay(d, 4));
-        for (k, (y, l)) in [47.0, 62.0, 79.0].into_iter().zip(["NORM", "INV", "PONG"]).enumerate() {
-            lamp(ui, Target::Choice(Field::Delay(d, 4), k as i32), mode == k as i32, 498.0, y, l, false);
+        for (k, (y, l)) in [52.0, 68.0, 84.0].into_iter().zip(["NORM", "INV", "PONG"]).enumerate() {
+            lamp(ui, Target::Choice(Field::Delay(d, 4), k as i32), mode == k as i32, 496.0, y, l, false);
         }
-        ui.label(SMALL, 425.0, 121.0, FAINT, &format!("DELAY {}", d + 1));
+        ui.label(SMALL, 425.0, foot, FAINT, &format!("DELAY {}", d + 1));
     } else {
         let f = Field::Reverb(7);
         let c = (ui.get(f) + 1).to_string();
-        value_box(ui, f, Rect::new(329.0, 54.0, 24.0, 22.0), &c);
-        ui.label(SMALL, 341.0, 45.0, DIM, "COLOR");
-        switch(ui, Field::Reverb(10), 333.0, 96.0, "TEMPO");
-        switch(ui, Field::Reverb(9), 333.0, 111.0, "ON");
-        for (k, x, l) in [(0, 374.0, "LC"), (1, 395.0, "HC"), (2, 415.0, "PD"), (3, 436.0, "RS"), (4, 457.0, "DF"), (5, 478.0, "DE"), (6, 499.0, "HD"), (8, 520.0, "VL")] {
-            slider(ui, Field::Reverb(k), x, 54.0, 113.0, l);
+        value_box(ui, f, Rect::new(329.0, 59.0, 24.0, 22.0), &c);
+        ui.label(SMALL, 341.0, 50.0, DIM, "COLOR");
+        switch(ui, Field::Reverb(10), 333.0, foot - 16.0, "TEMPO");
+        switch(ui, Field::Reverb(9), 333.0, foot, "ON");
+        for (k, x, l) in [(0, 373.0, "LC"), (1, 394.0, "HC"), (2, 415.0, "PD"), (3, 436.0, "RS"), (4, 457.0, "DF"), (5, 478.0, "DE"), (6, 499.0, "HD"), (8, 520.0, "VL")] {
+            slider(ui, Field::Reverb(k), x, t0, t1, l);
         }
-        ui.label(SMALL, 447.0, 121.0, FAINT, "REVERB");
+        ui.label(SMALL, 446.5, foot, FAINT, "REVERB");
     }
 }
 
@@ -946,10 +994,10 @@ fn tab(ui: &mut Ui, r: Rect, t: Target, label: &str, sel: bool, on: bool) {
     ui.hit(r, t);
 }
 
-/// Where the curve view draws its curve: time 0 half a pixel in, level 1 on the top edge, level 0 3.5 px above the
-/// bottom (FL's points, measured).
+/// Where the curve view draws its curve: inset so that a point's dot never meets the well's edge, with a strip at the
+/// bottom for the marker tags.
 pub fn curve_inner() -> Rect {
-    Rect::new(CURVE.x + 0.5, CURVE.y, CURVE.w - 1.0, CURVE.h - 3.5)
+    Rect::span(CURVE.x + 8.0, CURVE.right() - 8.0, CURVE.y + 8.0, CURVE.bottom() - 20.0)
 }
 
 /// The time the curve view spans: a map 0 .. 1, an envelope or LFO its length and a tenth more (at least one unit,
@@ -1026,7 +1074,7 @@ fn curve_view(ui: &mut Ui, c: &crate::curve::Curve) {
         if let Some(&t) = usize::try_from(i).ok().and_then(|i| ts.get(i)) {
             let x = t_to_x(t, span).round();
             ui.c.fill_rect(Rect::new(x, r.y + 1.0, 1.0, r.h - 2.0), plug::TICK);
-            let tag_r = Rect::new(x - 5.0, r.bottom() - 14.0, 11.0, 11.0);
+            let tag_r = Rect::new(x - 5.0, r.bottom() - 15.0, 11.0, 11.0);
             ui.c.fill_rrect(tag_r, 3.0, EDGE);
             ui.c.text_center(SMALL.bold(), tag_r, TEXT, tag);
         }
@@ -1084,11 +1132,12 @@ const SCALE_BTNS: [&str; 3] = ["Reset", "Accept", "Close"];
 pub fn scale_ctl(k: usize) -> Rect {
     let (dx, dy) = [(40.0, 135.0), (91.0, 98.0), (130.0, 135.0), (40.0, 190.0)][k];
     let (x, y) = (SCALE_DLG.x + dx, SCALE_DLG.y + dy);
-    if k == 3 { Rect::new(x - 14.0, y - 14.0, 28.0, 28.0) } else { Rect::new(x - 10.0, y - 45.0, 20.0, 90.0) }
+    // The faders 80 px tall, so that Center's foot stays clear of the Tension knob under it.
+    if k == 3 { Rect::new(x - 14.0, y - 14.0, 28.0, 28.0) } else { Rect::new(x - 10.0, y - 40.0, 20.0, 80.0) }
 }
 
 pub fn scale_btn(k: usize) -> Rect {
-    let (dx, dy, w) = [(35.0, 255.0, 50.0), (135.0, 255.0, 50.0), (160.0, 12.0, 14.0)][k];
+    let (dx, dy, w) = [(35.0, 255.0, 50.0), (135.0, 255.0, 50.0), (157.0, 14.0, 14.0)][k];
     Rect::new(SCALE_DLG.x + dx - w / 2.0, SCALE_DLG.y + dy - 8.0, w, if k == 2 { 14.0 } else { 16.0 })
 }
 
@@ -1148,7 +1197,7 @@ pub fn harm_level(y: f32) -> f32 {
 }
 
 /// The harmonics' scroll bar.
-pub const HARM_SCROLL: Rect = Rect::new(160.0, 312.0, 385.0, 12.0);
+pub const HARM_SCROLL: Rect = Rect::span(160.0, 536.0, 312.0, 324.0);
 
 /// The scroll a click on the scroll bar at `x` gives.
 pub fn harm_scroll_at(x: f32) -> usize {
@@ -1189,19 +1238,19 @@ fn harmonics(ui: &mut Ui, m: usize) {
     let tx = HARM_SCROLL.x + (HARM_SCROLL.w - tw) * scroll as f32 / (256 - HARM_VISIBLE) as f32;
     ui.c.fill_rrect(Rect::new(tx + 1.0, HARM_SCROLL.y + 2.0, tw - 2.0, HARM_SCROLL.h - 4.0), 3.0, if hover { Color::rgb(0x666666) } else { EDGE });
     ui.hit(HARM_SCROLL, Target::HarmScroll);
-    options_arrow(ui, Target::HarmOptions);
-    lamp(ui, Target::Inert("Smooth"), false, 190.0, 336.0, "SMOOTH", false);
+    options_arrow(ui, Target::HarmOptions, 335.0);
+    lamp(ui, Target::Inert("Smooth"), false, 190.0, 335.0, "SMOOTH", false);
 }
 
-/// The Options arrow under the view (167, 335).
-fn options_arrow(ui: &mut Ui, t: Target) {
-    let r = Rect::new(160.0, 328.0, 14.0, 14.0);
+/// The Options arrow under the view, centred on `cy`.
+fn options_arrow(ui: &mut Ui, t: Target, cy: f32) {
+    let r = Rect::new(160.0, cy - 7.0, 14.0, 14.0);
     let hot = ui.hot(r, &t);
-    ui.c.fill_polygon(&[(163.0, 333.0), (171.0, 333.0), (167.0, 338.0)], if hot { TEXT } else { DIM });
+    ui.c.fill_polygon(&[(163.0, cy - 2.5), (171.0, cy - 2.5), (167.0, cy + 2.5)], if hot { TEXT } else { DIM });
     ui.hit(r, t);
 }
 
-pub const TOOL_X: [f32; 4] = [458.0, 482.0, 505.0, 529.0];
+pub const TOOL_X: [f32; 4] = [456.0, 480.0, 504.0, 528.0];
 pub const TOOL_NAMES: [&str; 4] = ["Freeze editing / hide points", "Step editing", "Snap to grid", "Slide succeeding points / regions"];
 const TOOL_LABELS: [&str; 4] = ["FRZ", "STP", "SNP", "SLD"];
 
@@ -1209,22 +1258,22 @@ const TOOL_LABELS: [&str; 4] = ["FRZ", "STP", "SNP", "SLD"];
 /// and the tools.
 fn bar(ui: &mut Ui, m: usize, a: usize, p: usize) {
     panel(ui, BAR);
-    switch(ui, Field::Part(m, a, p, 0), 15.0, 320.0, "");
+    switch(ui, Field::Part(m, a, p, 0), 20.0, BAR_Y, "");
     if p < 2 {
         let labels = if p == 0 { ["ATT", "DEC", "SUS", "REL"] } else { ["SPD", "TNS", "SKEW", "PW"] };
-        for (k, (x, l)) in [35.0, 58.0, 81.0, 104.0].into_iter().zip(labels).enumerate() {
-            knob(ui, Field::Part(m, a, p, k + 1), x, 323.0, 8.0, l);
+        for (k, (x, l)) in [40.0, 62.0, 84.0, 106.0].into_iter().zip(labels).enumerate() {
+            knob(ui, Field::Part(m, a, p, k + 1), x, BAR_Y - 6.0, 8.0, l);
         }
-        switch(ui, Field::Part(m, a, p, 5), 123.0, 319.0, "TEMPO");
-        switch(ui, Field::Part(m, a, p, 6), 123.0, 335.0, "GLOBAL");
+        switch(ui, Field::Part(m, a, p, 5), 126.0, BAR_Y - 8.0, "TEMPO");
+        switch(ui, Field::Part(m, a, p, 6), 126.0, BAR_Y + 8.0, "GLOBAL");
     }
     tools(ui);
 }
 
 fn tools(ui: &mut Ui) {
-    options_arrow(ui, Target::CurveOptions);
+    options_arrow(ui, Target::CurveOptions, BAR_Y);
     for (k, x) in TOOL_X.into_iter().enumerate() {
-        let r = Rect::new(x - 10.0, 327.0, 20.0, 16.0);
+        let r = Rect::new(x - 10.0, BAR_Y - 8.0, 20.0, 16.0);
         let t = Target::Tool(k);
         let mut st = ui.state(r, &t);
         st.on = ui.st.tools[k];
@@ -1393,7 +1442,7 @@ fn keyboard(ui: &mut Ui) {
 fn info(ui: &mut Ui) {
     let (w, h) = ui.c.size();
     let mid = Rect::new(0.0, h / 2.0 - 60.0, w, 30.0);
-    name(ui, mid, Font::condensed(32, 0).bold());
+    emblem(ui, mid, Font::condensed(32, 0).bold(), 9.0);
     let v = format!("Version {}", ui.m.version);
     ui.c.text_center(LABEL, Rect::new(0.0, mid.bottom() + 8.0, w, 16.0), DIM, &v);
     ui.c.text_center(LABEL, Rect::new(0.0, mid.bottom() + 26.0, w, 16.0), DIM, "Lemon Studio's six-operator synthesizer");
