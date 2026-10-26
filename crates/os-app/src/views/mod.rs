@@ -203,14 +203,19 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     // card over a darker backdrop, the status bar below.
     let top = work_y(s);
     let work = s.work_rect();
+    let docked = s.docked();
+    // Snapped windows (the Lemon layout's split views) are cards of their own, the backdrop between them.
+    let tiles = crate::tiles::plan(s);
+    let split = docked.is_none() && !tiles.tiles.is_empty();
     if s.bar.lemon {
         ui.c.fill_rect(Rect::new(0.0, top, w, h - top), backdrop(ui));
-        ui.c.fill_rrect(work, CARD_R, ui.t.workspace);
+        if !split {
+            ui.c.fill_rrect(work, CARD_R, ui.t.workspace);
+        }
     }
-    let docked = s.docked();
     // spec: ui/flstheme.md §3 (BackMode, BackPicFilename); no watermark over a picture (`wallpaper`).
     // The cutting-edge branch marks itself: the watermark and the version string lean red.
-    if docked.is_none() && !crate::wallpaper::paint(ui, work) {
+    if docked.is_none() && !split && !crate::wallpaper::paint(ui, work) {
         let wm = ui.t.watermark.mix(CUTTING_EDGE_RED, 0.12);
         icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
         let version = concat!("Lemon Studio v", env!("CARGO_PKG_VERSION"), " - cutting-edge pre-alpha");
@@ -267,10 +272,18 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         }
         ui.c.pop_clip();
         ui.win = None;
-        // A maximized window fills the card square: its corners are rounded before the floating windows above it,
-        // which go over them.
+        // A maximized or snapped window fills its card square: its corners are rounded before the floating windows
+        // above it, which go over them.
         if s.bar.lemon && docked_at == Some(i) {
             card_corners(ui, work);
+        } else if let Some(&(_, tr)) = tiles.tiles.iter().find(|t| t.0 == win).filter(|_| docked_at.is_none()) {
+            card_corners(ui, tr);
+        }
+    }
+    // The gaps between snapped windows drag their splits.
+    if split {
+        for d in &tiles.dividers {
+            ui.hit(d.gap, Action::TileSplit(d.node), "Drag to resize the split");
         }
     }
     if s.bar.lemon {
@@ -383,7 +396,7 @@ pub fn window_body(ui: &mut Ui, r: Rect) {
 /// reaching 3 px outside the window. Not for maximized or collapsed windows.
 pub fn resize_zones(ui: &mut Ui, s: &State, win: Win, r: Rect) {
     let Some(i) = win.slot() else { return };
-    if s.wins[i].maxed || s.wins[i].mini {
+    if s.wins[i].maxed || s.wins[i].mini || s.tiled() {
         return;
     }
     use crate::app::{EDGE_B, EDGE_L, EDGE_R, EDGE_T};
@@ -405,21 +418,20 @@ pub fn resize_zones(ui: &mut Ui, s: &State, win: Win, r: Rect) {
 }
 
 /// Minimize / maximize / close buttons from `x0` at the title bar of a window at top `y`.
+/// The Lemon layout's split views have no minimize: the other two keep their places.
 pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _hover: Color) {
     let mut hovered = None;
-    for (i, (hint, action)) in [
-        ("Minimize window", Action::MinWin(win)),
-        ("Maximize / restore window", Action::MaxWin(win)),
-        ("Close window", Action::CloseWin(win)),
-    ]
-    .into_iter()
-    .enumerate()
+    let max_hint = if ui.tiled { "Maximize / back to the split" } else { "Maximize / restore window" };
+    for (i, (hint, action)) in [("Minimize window", Action::MinWin(win)), (max_hint, Action::MaxWin(win)), ("Close window", Action::CloseWin(win))]
+        .into_iter()
+        .enumerate()
+        .skip(usize::from(ui.tiled))
     {
         if ui.hit(Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0), action, hint) {
             hovered = Some(i);
         }
     }
-    kit::window_buttons(ui.c, ui.t, x0, y, hovered);
+    kit::window_buttons(ui.c, ui.t, x0, y, hovered, !ui.tiled);
 }
 
 /// Window frame with a title bar (§5); the bar drags the window. `buttons` = draw the window
@@ -456,7 +468,7 @@ pub fn window_frame_ex(ui: &mut Ui, win: Win, r: Rect, title: &str, title_x: f32
 /// Returns the inner rect (laid out like the docked window) when `win` floats, else `None`.
 pub fn float_frame(ui: &mut Ui, s: &State, win: Win, r: Rect) -> Option<Rect> {
     let ws = &s.wins[win.slot()?];
-    if ws.maxed || ws.mini || r.h < 2.0 * crate::app::TITLE_H {
+    if ws.maxed || ws.mini || s.tiled() || r.h < 2.0 * crate::app::TITLE_H {
         return None;
     }
     let t = ui.t;
@@ -475,7 +487,7 @@ pub fn float_frame(ui: &mut Ui, s: &State, win: Win, r: Rect) -> Option<Rect> {
 
 /// The (layout rect, client rect) that `framed` returns for `win` at `r`, without painting.
 pub fn frame_rects(s: &State, win: Win, r: Rect) -> (Rect, Rect) {
-    let floats = win.slot().is_some_and(|i| !s.wins[i].maxed && !s.wins[i].mini) && r.h >= 2.0 * crate::app::TITLE_H;
+    let floats = win.slot().is_some_and(|i| !s.wins[i].maxed && !s.wins[i].mini) && !s.tiled() && r.h >= 2.0 * crate::app::TITLE_H;
     let r = if floats { Rect::new(r.x + 7.0, r.y + 5.0, r.w - 14.0, r.h - 12.0) } else { r };
     (r, Rect::new(r.x, r.y + 23.0, r.w, r.h - 23.0))
 }

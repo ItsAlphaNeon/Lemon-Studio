@@ -234,6 +234,10 @@ pub enum Action {
     /// Step / piano-roll view toggle, and a row's mini piano roll (spec: ui/channel-rack.md §6).
     RackRollView,
     RackRoll(usize),
+    /// The Lemon layout's split views (`crate::tiles`): a gap between snapped windows (drags split `node`), and the
+    /// status bar's button for the next preset.
+    TileSplit(usize),
+    TilePreset,
     /// Floating window title bar (drag to move) and close button.
     WinDrag(Win),
     CloseWin(Win),
@@ -561,6 +565,7 @@ fn hover_is_visible(a: &Action) -> bool {
             | Action::RackGraphArea
             | Action::WinDrag(_)
             | Action::WinResize(..)
+            | Action::TileSplit(_)
             | Action::Tapper(crate::tapper::TapAct::Pad)
     )
 }
@@ -704,6 +709,8 @@ pub struct Ui<'a> {
     live: &'a mut Vec<(Live, Rect)>,
     /// Square toolbar buttons are drawn flat (the Toolbars menu, spec: ui/toolbar-menu.md §3).
     pub flat: bool,
+    /// The Lemon layout's split views (`State::tiled`): window title bars have no minimize button.
+    pub tiled: bool,
 }
 
 impl Ui<'_> {
@@ -840,6 +847,9 @@ pub enum Drag {
     PianoSplit { dy: f32, top: f32, h: f32 },
     /// The browser's splitter: `dx` = grab offset from the browser's right edge (spec: ui/browser.md §9).
     BrowserSplit { dx: f32 },
+    /// The Lemon layout: a snapped window's title bar (dropped on another, they swap), and a split's gap.
+    Tile { win: Win },
+    TileSplit { node: usize },
     /// Monitor debug panel slider.
     MonParam(usize),
     /// Cable physics debug panel slider.
@@ -1045,6 +1055,8 @@ pub struct State {
     pub control: crate::control::Control,
     /// The main toolbar's snap, which the editors' Main follows (spec: ui/global-snap.md).
     pub global_snap: crate::snap::Global,
+    /// The Lemon layout's split views (`crate::tiles`).
+    pub tiles: crate::tiles::Tiles,
     pub pat_ui: crate::patterns::PatternUi,
     /// Playlist, Mixer, Piano roll (see `Win::slot`).
     pub wins: [WinState; 3],
@@ -1078,7 +1090,18 @@ impl State {
 
     /// Whether `w` is maximized and not collapsed (it fills the workspace).
     pub fn is_max(&self, w: Win) -> bool {
-        w.slot().is_some_and(|i| self.wins[i].maxed && !self.wins[i].mini)
+        w.slot().is_some_and(|i| self.wins[i].maxed && (!self.wins[i].mini || self.tiled()))
+    }
+
+    /// The Lemon layout: the playlist, piano roll and mixer are maximized or snapped into a split, never floating or
+    /// collapsed (`crate::tiles`).
+    pub fn tiled(&self) -> bool {
+        self.bar.lemon
+    }
+
+    /// Whether `w` is shown snapped into the split (the Lemon layout, not maximized).
+    pub fn snapped(&self, w: Win) -> bool {
+        self.tiled() && w.slot().is_some_and(|i| !self.wins[i].maxed) && self.shown(w)
     }
 
     /// The maximized window in front (the one filling the workspace), if any.
@@ -1119,7 +1142,7 @@ impl State {
     pub fn win_area(&self, w: Win) -> Rect {
         let r = self.win_rect(w);
         let r = match w.slot() {
-            Some(i) if !self.wins[i].maxed && !self.wins[i].mini => r.outset(4.0),
+            Some(i) if !self.wins[i].maxed && !self.wins[i].mini && !self.tiled() => r.outset(4.0),
             _ => r,
         };
         match self.mixer_hang().filter(|_| w == Win::Mixer) {
@@ -1144,6 +1167,9 @@ impl State {
         let Some(i) = w.slot() else { return Rect::new(0.0, 0.0, 0.0, 0.0) };
         let f = self.float_rect(w);
         let ws = self.wins[i];
+        if self.tiled() {
+            return if ws.maxed { self.work_rect() } else { crate::tiles::rect_of(self, w).unwrap_or(f) };
+        }
         if ws.mini {
             Rect::new(f.x, f.y, f.w, TITLE_H)
         } else if ws.maxed {
@@ -1158,6 +1184,10 @@ impl State {
         self.z.retain(|&o| o != w);
         self.z.push(w);
         self.no_focus = false;
+        // The Lemon layout: a snapped window brought forward brings the split back from a maximized one.
+        if w.slot().is_some_and(|i| self.tiled() && !self.wins[i].maxed) {
+            self.wins.iter_mut().for_each(|ws| ws.maxed = false);
+        }
     }
 
     pub fn hide(&mut self, w: Win) {
@@ -1223,6 +1253,8 @@ pub struct App {
     pub(crate) step_chord: crate::step_edit::Chord,
     /// Last title-bar press (window, time, position), for double-click maximize / restore.
     pub(crate) title_click: Option<(Win, std::time::Instant, (f32, f32))>,
+    /// The Lemon layout's split views as last painted: a change repaints all (`take_damage`).
+    tile_plan: crate::tiles::Plan,
     /// Last channel-rack press (action, time), for double clicks on slots and mixer boxes (§8, §12).
     rack_click: Option<(Action, std::time::Instant)>,
     /// Last press on the CPU panel, for its double click (the Plugin performance monitor).
@@ -1411,6 +1443,7 @@ impl App {
                 history: Default::default(),
                 control: Default::default(),
                 global_snap: Default::default(),
+                tiles: crate::tiles::Tiles::load(),
                 pat_ui: Default::default(),
                 wins: [
                     WinState { rect: Rect::new(693.0, 101.0, 1126.0, 378.0), maxed: true, mini: false },
@@ -1453,6 +1486,7 @@ impl App {
             remote: Default::default(),
             step_chord: crate::step_edit::Chord::default(),
             title_click: None,
+            tile_plan: Default::default(),
             rack_click: None,
             cpu_click: None,
             hint: Cow::Borrowed(""),
@@ -2762,6 +2796,12 @@ impl App {
         // settings is brought up to date first, so the frame shows it.
         self.follow_settings();
         self.resolve_scroll();
+        // The Lemon layout's split views moved (a window shown, hidden, maximized, restored...): all repaints.
+        let tiles = crate::tiles::plan(&self.state);
+        if tiles != self.tile_plan {
+            self.tile_plan = tiles;
+            self.invalidate();
+        }
         match std::mem::replace(&mut self.damage, Damage::None) {
             Damage::None => None,
             Damage::Full => Some(None),
@@ -3910,6 +3950,7 @@ impl App {
             keep: &mut self.keep,
             live: &mut self.live,
             flat: self.state.toolbar.flat,
+            tiled: self.state.tiled(),
         };
         let info = views::FrameInfo {
             title,
@@ -5300,6 +5341,11 @@ impl App {
                     }
                 }
                 Drag::BrowserSplit { dx } => self.browser_split_drag(x - dx),
+                Drag::Tile { .. } => {}
+                Drag::TileSplit { node } => {
+                    crate::tiles::drag(&mut self.state, node, (x, y));
+                    self.invalidate();
+                }
                 Drag::SongPosHold { .. } => {}
                 Drag::PrefSlider { label, x: x0, w } => self.pref_slider_drag(label, x0, w),
                 Drag::Ppi { x0, n0 } => self.ppi_set(crate::ppi::dragged(n0, x - x0, self.px_scale)),
@@ -5693,6 +5739,13 @@ impl App {
         }
         if matches!((&self.drag, &self.hover), (Some(Drag::BrowserSplit { .. }), _) | (None, Some(Action::BrowserSplitter))) {
             return Cursor::EwResize;
+        }
+        let split = match (&self.drag, &self.hover) {
+            (Some(Drag::TileSplit { node }), _) | (None, Some(Action::TileSplit(node))) => Some(*node),
+            _ => None,
+        };
+        if let Some(d) = split.and_then(|n| crate::tiles::plan(&self.state).dividers.into_iter().find(|d| d.node == n)) {
+            return if d.rows { Cursor::NsResize } else { Cursor::EwResize };
         }
         let edges = match (&self.drag, &self.hover) {
             (Some(Drag::RackResize { edges, .. }), _) => *edges,
@@ -6150,6 +6203,10 @@ impl App {
             Some(Drag::Bar(d)) => self.bar_drop(d),
             Some(Drag::PianoSplit { .. }) => crate::piano_split::save(self.state.piano.split),
             Some(Drag::BrowserSplit { .. }) => crate::browser::save_width(self.state.browser_w),
+            Some(Drag::Tile { win }) => {
+                crate::tiles::drop(&mut self.state, win, self.mouse);
+            }
+            Some(Drag::TileSplit { .. }) => self.state.tiles.save(),
             Some(Drag::Marker) if self.transport.playing() && !self.transport.song() => {
                 self.start_playback();
             }
@@ -7888,6 +7945,10 @@ impl App {
                 if s.is_max(win) {
                     return;
                 }
+                if s.snapped(win) {
+                    self.drag = Some(Drag::Tile { win });
+                    return;
+                }
                 let pos = match win {
                     Win::Plugin => s.plugin_pos,
                     Win::Perf => s.perf.pos,
@@ -7913,7 +7974,7 @@ impl App {
                 self.drag = Some(Drag::WinResize { win, edges, m0: self.mouse, r0 });
             }
             Action::MinWin(w) => {
-                if let Some(i) = w.slot() {
+                if let Some(i) = w.slot().filter(|_| !s.tiled()) {
                     s.wins[i].mini = !s.wins[i].mini;
                 }
             }
@@ -7921,8 +7982,15 @@ impl App {
                 if let Some(i) = w.slot() {
                     s.wins[i].mini = false;
                     s.wins[i].maxed = !s.wins[i].maxed;
+                    // Maximized over the split, it goes in front of it.
+                    if s.tiled() && s.wins[i].maxed {
+                        s.z.retain(|&o| o != w);
+                        s.z.push(w);
+                    }
                 }
             }
+            Action::TileSplit(node) => self.drag = Some(Drag::TileSplit { node }),
+            Action::TilePreset => crate::tiles::next_preset(s),
             // A second one leaves it maximized (spec: ui/toolbar-buttons.md §2).
             Action::ShowMax(w) => {
                 s.raise(w);

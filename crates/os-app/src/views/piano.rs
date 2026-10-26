@@ -95,7 +95,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let title = "Piano roll - ";
     window_body(ui, r);
     let outer = r;
-    let floating = !s.wins[Win::PianoRoll.slot().unwrap_or(0)].maxed && r.h >= 2.0 * crate::app::TITLE_H;
+    let floating = !s.wins[Win::PianoRoll.slot().unwrap_or(0)].maxed && !s.tiled() && r.h >= 2.0 * crate::app::TITLE_H;
     let (r, _) = super::framed(ui, s, Win::PianoRoll, r, title, 365.0, true);
     // The target channel: name and arrow, orange with a ▾ while hovered (spec: ui/piano-target-channel.md §1).
     let font = Font::new(17);

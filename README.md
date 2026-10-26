@@ -26,6 +26,10 @@ own content. Side branches are named `cutting-edge-<topic>`.
     memory);
   - the workspace and the browser as rounded cards over a darker backdrop; the browser's splitter is the gap between
     them, and the mixer's routing cables hang over the gap below.
+  - split views instead of floating ones: the playlist, the piano roll and the mixer are maximized or snapped into a
+    split of the workspace, each its own card. The status bar's split button picks the preset (top and bottom, or left
+    and right); a title bar dragged onto another window swaps the two, and the gaps drag to resize. There is no
+    minimize. The channel rack, plugin and tool windows still float.
 
   Every keyboard shortcut works the same. Classic is FL's arrangement and unchanged.
 - **Branch marks.** The workspace watermark, the version string ("cutting-edge pre-alpha") and the status bar's mark

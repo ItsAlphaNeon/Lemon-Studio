@@ -936,6 +936,8 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
         button(ui, &mut x, icon, on, action, hint);
     }
     x -= 8.0;
+    split_button(ui, s, &mut x, cy);
+    x -= 8.0;
     for (icon, on, action, hint) in mode_buttons(s).into_iter().rev() {
         button(ui, &mut x, icon, on, action, hint);
     }
@@ -961,6 +963,28 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.text_clip(small, left, ty, title_w, t.text_dim.shade(-0.05), &f.title);
     let hx = left + title_w + if f.title.is_empty() { 0.0 } else { 14.0 };
     ui.c.text_clip(small, hx, ty, (left + room - hx).max(0.0), t.text, hint);
+}
+
+/// The status bar's split button (the Lemon layout's split views, `crate::tiles`): its glyph is the preset in use,
+/// a click takes the next.
+fn split_button(ui: &mut Ui, s: &State, x: &mut f32, cy: f32) {
+    let b = Rect::new(*x - 24.0, (cy - 11.0).round(), 24.0, 22.0);
+    let p = &crate::tiles::PRESETS[s.tiles.preset];
+    let hint = format!("Split: {} - click for the next", p.name);
+    let hov = ui.hit(b, Action::TilePreset, hint);
+    let look = if ui.down(b, &Action::TilePreset) { super::Look::Hot } else if hov { super::Look::Hover } else { super::Look::Off };
+    let ink = super::tool_face(ui, b, look);
+    // three panes, a px apart: the single one across, the pair split the other way
+    let g = Rect::new(b.x + 5.0, b.y + 5.0, 14.0, 12.0);
+    let panes = if p.outer_rows {
+        [Rect::new(g.x, g.y, 14.0, 5.0), Rect::new(g.x, g.y + 6.0, 6.5, 6.0), Rect::new(g.x + 7.5, g.y + 6.0, 6.5, 6.0)]
+    } else {
+        [Rect::new(g.x, g.y, 8.0, 5.5), Rect::new(g.x, g.y + 6.5, 8.0, 5.5), Rect::new(g.x + 9.0, g.y, 5.0, 12.0)]
+    };
+    for pane in panes {
+        ui.c.fill_rrect(pane, 1.0, ink);
+    }
+    *x = b.x - 2.0;
 }
 
 /// The editor's outline around something that can be dragged.

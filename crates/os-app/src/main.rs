@@ -118,6 +118,7 @@ mod chop;
 mod piano_dlg;
 mod arpeggiate;
 mod tapper;
+mod tiles;
 mod touch;
 mod record;
 mod recent;
