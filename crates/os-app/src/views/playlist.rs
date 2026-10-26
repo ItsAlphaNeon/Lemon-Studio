@@ -83,7 +83,10 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         let x0 = r.x + 281.0 + ui.c.text_width(f, "Playlist - ");
         let w = ui.c.text_width(f, &arr);
         let arrow_w = ui.c.text_width(f, "  \u{203a}  ");
-        let hit = Rect::new(x0 - 2.0, r.y, w + arrow_w * 0.7, 22.0);
+        // Short of the window buttons, as the title (a narrow window cuts it).
+        let room = Rect::new(r.x, r.y, super::title_room(r, true).max(0.0), 23.0);
+        let hit = Rect::new(x0 - 2.0, r.y, w + arrow_w * 0.7, 22.0).intersect(&room);
+        ui.c.push_clip(room);
         if ui.hit(hit, Action::PlArrangement, "Arrangements (switch, add, clone, rename, delete)") {
             let bg = ui.t.window_title;
             ui.c.fill_rect(Rect::new(x0 - 1.0, r.y + 1.0, w + arrow_w * 0.7, 20.0), bg);
@@ -92,6 +95,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             let ax = x0 + w + arrow_w * 0.35;
             ui.c.fill_polygon(&[(ax - 4.0, r.y + 9.0), (ax + 4.0, r.y + 9.0), (ax, r.y + 14.0)], hot);
         }
+        ui.c.pop_clip();
     }
 
     // Title-bar tools: ▸ options, snap magnet, then the nine tools (§1, §3).
