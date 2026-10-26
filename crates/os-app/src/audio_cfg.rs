@@ -294,8 +294,11 @@ pub fn output(cfg: &AudioCfg) -> Result<Output, String> {
         SupportedBufferSize::Unknown => None,
     };
     let mut config: StreamConfig = supported.into();
-    // "Smallest" is exclusive mode's; here it is the device's own.
-    if let Some(b) = cfg.buffer.filter(|&b| b != SMALLEST) {
+    #[cfg(target_os = "linux")]
+    let through_server = server(cfg);
+    #[cfg(not(target_os = "linux"))]
+    let through_server = false;
+    if let Some(b) = wanted_buffer(cfg.buffer, through_server) {
         let fits = match range {
             // Windows shared mode takes any length (it sizes the device buffer; blocks stay one device period).
             SupportedBufferSize::Range { min, max } => cfg!(windows) || (min..=max).contains(&b),
@@ -306,6 +309,14 @@ pub fn output(cfg: &AudioCfg) -> Result<Output, String> {
         }
     }
     Ok(Output { host: host.id().name(), name: device_name(&device), device, format, config, buffers })
+}
+
+/// The buffer length a stream asks for, `chosen` being the setting. "Smallest" is exclusive mode's; elsewhere it is the
+/// device's own, as is no length. Through the sound server (Linux shared mode) a stream always asks for one: asking
+/// for none gets the server's default buffering, about two seconds (PulseAudio's default target length, which
+/// pipewire-pulse keeps), so the device's own is `DEFAULT_BUFFER` there.
+fn wanted_buffer(chosen: Option<u32>, through_server: bool) -> Option<u32> {
+    chosen.filter(|&b| b != SMALLEST).or(if through_server { DEFAULT_BUFFER.or(Some(512)) } else { None })
 }
 
 /// The sample rate the settings' device would open at now, asking the device (`device::rate` knows it once the device
@@ -325,6 +336,19 @@ pub fn rate() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stream through the sound server never asks for no length (the server would buffer about two seconds); elsewhere
+    /// "Smallest" and the device's own ask for none, and a chosen length is asked for.
+    #[test]
+    fn a_stream_through_the_sound_server_asks_for_a_length() {
+        let default = DEFAULT_BUFFER.or(Some(512));
+        assert_eq!(wanted_buffer(None, true), default);
+        assert_eq!(wanted_buffer(Some(SMALLEST), true), default);
+        assert_eq!(wanted_buffer(Some(256), true), Some(256));
+        assert_eq!(wanted_buffer(None, false), None);
+        assert_eq!(wanted_buffer(Some(SMALLEST), false), None);
+        assert_eq!(wanted_buffer(Some(256), false), Some(256));
+    }
 
     #[test]
     fn settings_text_round_trips() {
