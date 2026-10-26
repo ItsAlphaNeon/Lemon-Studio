@@ -3997,6 +3997,13 @@ impl App {
             self.scrolled = None;
         }
         self.px_scale = canvas.scale;
+        // The Lemon layout's windows closing as others move: their last look is still on the canvas, kept for the
+        // moving ones to pass over (`tiles::Anim`).
+        if let Some(a) = &mut self.state.tile_anim {
+            for (r, snap) in a.closing.iter_mut().filter(|c| c.1.is_none()) {
+                *snap = canvas.snapshot(*r);
+            }
+        }
         match damage {
             Some(rects) => canvas.begin_region(rects),
             None => canvas.begin_frame(None),

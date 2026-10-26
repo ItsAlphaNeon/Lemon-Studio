@@ -76,6 +76,13 @@ impl Rect {
     }
 }
 
+/// Pixels taken from a canvas (`Canvas::snapshot`), and where (device px).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Snapshot {
+    img: Rc<Pixmap>,
+    at: (i32, i32),
+}
+
 /// The frame being painted.
 pub struct Canvas {
     pub pixmap: Pixmap,
@@ -415,6 +422,35 @@ impl Canvas {
             let cols: Vec<Color> = (0..cov.cov.w).map(|i| color((cov.x0 + i) as f32 / k + 0.5 / k)).collect();
             self.blend_columns(&cov, &cols);
         }
+    }
+
+    /// The pixels of `r` as they are now, to be painted back by `paint_snapshot` (a view's last look kept while it is
+    /// gone).
+    pub fn snapshot(&self, r: Rect) -> Option<Snapshot> {
+        let (x0, y0, x1, y1) = shift_area(r, self.scale, (self.pixmap.width(), self.pixmap.height()));
+        let img = self.pixmap.clone_rect(tiny_skia::IntRect::from_ltrb(x0, y0, x1, y1)?)?;
+        Some(Snapshot { img: Rc::new(img), at: (x0, y0) })
+    }
+
+    /// Paints `snap` back where it was taken, inside the clip (opaque: its pixels replace the canvas's).
+    pub fn paint_snapshot(&mut self, snap: &Snapshot) {
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        let (cx0, cy0, cx1, cy1) = shift_area(self.clip_rect(), self.scale, (w, h));
+        let (sx, sy) = snap.at;
+        let (x0, y0) = (sx.max(cx0), sy.max(cy0));
+        let (x1, y1) = ((sx + snap.img.width() as i32).min(cx1), (sy + snap.img.height() as i32).min(cy1));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let (stride, sstride) = (w as usize, snap.img.width() as usize);
+        let src = snap.img.pixels();
+        let dst = self.pixmap.pixels_mut();
+        for y in y0..y1 {
+            let d = y as usize * stride;
+            let s = (y - sy) as usize * sstride;
+            dst[d + x0 as usize..d + x1 as usize].copy_from_slice(&src[s + (x0 - sx) as usize..s + (x1 - sx) as usize]);
+        }
+        self.mark(x0, y0, x1, y1);
     }
 
     /// Record that device pixels `[x0, x1) x [y0, y1)` were drawn.

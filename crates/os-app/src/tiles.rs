@@ -230,7 +230,8 @@ pub fn targets(s: &State) -> Vec<(Win, Rect)> {
 }
 
 /// The animation, timed as Omarchy's Hyprland window moves (`hypr/looknfeel.lua`): 379 ms, easeOutQuint. Windows
-/// opening or closing do not animate: an empty card holds the place one is coming to or leaving while the others move.
+/// opening or closing do not animate: one opening is at its place at once, under the moving ones, and one closing
+/// leaves its last look there (`Snapshot`) for them to move over.
 const MOVE: f32 = 0.379;
 
 /// The curve (CSS cubic-bezier control points).
@@ -264,10 +265,11 @@ fn lerp(a: Rect, b: Rect, k: f32) -> Rect {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Anim {
     pub elapsed: f32,
-    /// Windows moving (from, to); the places of windows opening (to) and closing (from).
+    /// Windows moving (from, to); windows opening (to); the places of windows closing (from) with their last look,
+    /// once taken from the frame before (`App::paint_region`).
     moving: Vec<(Win, Rect, Rect)>,
     opening: Vec<(Win, Rect)>,
-    closing: Vec<Rect>,
+    pub closing: Vec<(Rect, Option<os_ui::Snapshot>)>,
 }
 
 impl Anim {
@@ -277,7 +279,7 @@ impl Anim {
         let was = |w: Win| from.iter().find(|f| f.0 == w).map(|f| f.1);
         let moving: Vec<_> = to.iter().filter_map(|&(w, r)| was(w).filter(|&f| f != r).map(|f| (w, f, r))).collect();
         let opening: Vec<_> = to.iter().copied().filter(|&(w, _)| was(w).is_none()).collect();
-        let closing: Vec<_> = from.iter().filter(|f| !to.iter().any(|t| t.0 == f.0)).map(|f| f.1).collect();
+        let closing: Vec<_> = from.iter().filter(|f| !to.iter().any(|t| t.0 == f.0)).map(|f| (f.1, None)).collect();
         (!moving.is_empty()).then_some(Anim { elapsed: 0.0, moving, opening, closing })
     }
 
@@ -291,14 +293,9 @@ impl Anim {
         Some(lerp(a, b, bezier(EASE_OUT_QUINT, self.elapsed / MOVE)))
     }
 
-    /// Whether `w` is opening: it shows once the others have moved.
-    pub fn opening(&self, w: Win) -> bool {
-        self.opening.iter().any(|o| o.0 == w)
-    }
-
-    /// The empty cards holding the places of the windows opening and closing, under the moving ones.
-    pub fn holders(&self) -> Vec<Rect> {
-        self.opening.iter().map(|o| o.1).chain(self.closing.iter().copied()).collect()
+    /// The windows opening, at their places: painted under the moving ones.
+    pub fn opening(&self) -> &[(Win, Rect)] {
+        &self.opening
     }
 
     /// The places shown now, back to front as `to` (to start another change from here).
@@ -355,7 +352,9 @@ mod tests {
         assert!(bezier(EASE_OUT_QUINT, 0.3) > 0.8, "fast out of the gate");
         let (a, b) = (Rect::new(0.0, 0.0, 100.0, 50.0), Rect::new(0.0, 56.0, 100.0, 50.0));
         let mut m = Anim::new(&[(Win::Playlist, a), (Win::Mixer, b)], &[(Win::Playlist, b), (Win::Mixer, a), (Win::PianoRoll, b)]).unwrap();
-        assert!(m.opening(Win::PianoRoll) && m.holders() == vec![b]);
+        assert_eq!(m.opening(), &[(Win::PianoRoll, b)]);
+        let c = Anim::new(&[(Win::Playlist, a), (Win::Mixer, b)], &[(Win::Mixer, a), (Win::PianoRoll, b)]).unwrap();
+        assert_eq!(c.closing, vec![(a, None)]);
         assert_eq!(m.at(Win::Playlist), Some(a));
         m.elapsed = MOVE;
         assert_eq!(m.at(Win::Playlist), Some(b));

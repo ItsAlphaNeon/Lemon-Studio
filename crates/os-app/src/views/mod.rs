@@ -262,13 +262,28 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         });
     }
     let _ = work;
-    // The Lemon layout's animation: empty cards hold the places of windows opening and closing, under the moving ones.
-    for r in anim.map(|m| m.holders()).unwrap_or_default() {
-        os_ui::kit::lemon::outlined(ui.c, r, CARD_R, ui.t.window_border, ui.t.window_body);
+    // The Lemon layout's animation: under the moving windows, a closing one's last look and the opening ones at their
+    // places.
+    if let Some(m) = anim {
+        for (r, snap) in &m.closing {
+            match snap {
+                Some(snap) => ui.c.paint_snapshot(snap),
+                None => os_ui::kit::lemon::outlined(ui.c, *r, CARD_R, ui.t.window_border, ui.t.window_body),
+            }
+            card_corners(ui, *r);
+        }
+        for &(win, r) in m.opening() {
+            ui.win = Some(win);
+            ui.c.push_clip(r);
+            paint_window(ui, s, win, r, r, f);
+            ui.c.pop_clip();
+            ui.win = None;
+            card_corners(ui, r);
+        }
     }
     for (i, &win) in s.z.iter().enumerate() {
-        // While windows move (the Lemon layout's animation) they all show, the covered ones too; an opening one waits.
-        if (docked_at.is_some_and(|d| i < d) && anim.is_none()) || anim.is_some_and(|m| m.opening(win)) {
+        // While windows move (the Lemon layout's animation) they all show, the covered ones too.
+        if (docked_at.is_some_and(|d| i < d) && anim.is_none()) || anim.is_some_and(|m| m.opening().iter().any(|o| o.0 == win)) {
             continue;
         }
         ui.win = Some(win);
