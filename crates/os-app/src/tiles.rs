@@ -403,6 +403,26 @@ mod tests {
         assert!(!app.state.shown(Win::Mixer), "maximized, its key hides it");
     }
 
+    /// A window alone neither maximizes nor splits; a maximized window closed opens again into the split, and a window
+    /// opening while another is maximized brings the split back with it in.
+    #[test]
+    fn alone_and_reopening() {
+        use crate::app::Action::{MaxWin, ToggleWin};
+        let mut app = lemon();
+        app.act(ToggleWin(Win::Mixer));
+        app.act(MaxWin(Win::Mixer));
+        assert!(app.state.alone() && !app.state.wins[1].maxed, "alone: nothing to maximize over");
+        app.act(ToggleWin(Win::Playlist));
+        app.act(MaxWin(Win::Mixer));
+        assert!(app.state.is_max(Win::Mixer));
+        app.act(ToggleWin(Win::PianoRoll));
+        assert_eq!(plan(&app.state).tiles.len(), 3, "opening the piano roll splits the three");
+        app.act(MaxWin(Win::Mixer));
+        app.act(ToggleWin(Win::Mixer));
+        app.act(ToggleWin(Win::Mixer));
+        assert!(app.state.snapped(Win::Mixer), "closed maximized, it opens into the split");
+    }
+
     /// The mixer's cables hang over the gap under it, to the window below or the status bar.
     #[test]
     fn mixer_cables_hang_over_the_gap() {

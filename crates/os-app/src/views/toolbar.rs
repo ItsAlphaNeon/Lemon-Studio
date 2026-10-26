@@ -871,7 +871,15 @@ fn window_buttons(ui: &mut Ui, c: &Ctx, which: Range<usize>) -> bool {
             return false;
         }
         let hov = ui.hit(r, action.clone(), hint) || ui.down(r, &action);
-        let ink = super::tool_face(ui, r, if hov { super::Look::Hot } else { super::Look::Off });
+        // The Lemon layout: a window's button is lit while it is open.
+        let open = c.s.bar.lemon
+            && match action {
+                Action::ToggleWin(Win::Browser) => c.s.show_browser,
+                Action::ToggleWin(w) => c.s.shown(w),
+                _ => false,
+            };
+        let look = if hov { super::Look::Hot } else if open { super::Look::On } else { super::Look::Off };
+        let ink = super::tool_face(ui, r, look);
         icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), ink);
     }
     // FL's news panel (x 1304..1470, with its separator) is left out: it suggested an online service Lemon Studio

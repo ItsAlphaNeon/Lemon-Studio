@@ -537,12 +537,18 @@ pub enum MaxGlyph {
     Full,
     /// Split views, maximized: two panes, back to the split.
     Split,
+    /// Split views, a window alone: only the close button.
+    None,
 }
 
 pub fn window_buttons(c: &mut Canvas, t: &Palette, x0: f32, y: f32, hovered: Option<usize>, max: MaxGlyph) -> [Rect; 3] {
     use crate::tabler as tb;
     let mut out = [Rect::default(); 3];
-    for (i, icon) in [&tb::MINUS, &tb::SQUARES, &tb::X].into_iter().enumerate().skip(usize::from(max != MaxGlyph::Restore)) {
+    for (i, icon) in [&tb::MINUS, &tb::SQUARES, &tb::X].into_iter().enumerate().skip(match max {
+        MaxGlyph::Restore => 0,
+        MaxGlyph::None => 2,
+        _ => 1,
+    }) {
         let b = Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0);
         let hov = hovered == Some(i);
         if hov && lemon::on(t) {

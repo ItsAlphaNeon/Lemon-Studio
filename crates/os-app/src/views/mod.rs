@@ -466,6 +466,8 @@ pub fn resize_zones(ui: &mut Ui, s: &State, win: Win, r: Rect) {
 pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _hover: Color) {
     let mut hovered = None;
     let maxed = win.slot().is_some_and(|i| ui.maxed[i]);
+    // A window alone in the Lemon layout has only its close button.
+    let skip = if ui.alone { 2 } else { usize::from(ui.tiled) };
     let max_hint = match (ui.tiled, maxed) {
         (false, _) => "Maximize / restore window",
         (true, false) => "Maximize",
@@ -474,13 +476,14 @@ pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _h
     for (i, (hint, action)) in [("Minimize window", Action::MinWin(win)), (max_hint, Action::MaxWin(win)), ("Close window", Action::CloseWin(win))]
         .into_iter()
         .enumerate()
-        .skip(usize::from(ui.tiled))
+        .skip(skip)
     {
         if ui.hit(Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0), action, hint) {
             hovered = Some(i);
         }
     }
     let glyph = match (ui.tiled, maxed) {
+        _ if ui.alone => kit::MaxGlyph::None,
         (false, _) => kit::MaxGlyph::Restore,
         (true, false) => kit::MaxGlyph::Full,
         (true, true) => kit::MaxGlyph::Split,

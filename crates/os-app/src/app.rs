@@ -712,8 +712,10 @@ pub struct Ui<'a> {
     /// Square toolbar buttons are drawn flat (the Toolbars menu, spec: ui/toolbar-menu.md §3).
     pub flat: bool,
     /// The Lemon layout's split views (`State::tiled`): window title bars have no minimize button, and their maximize
-    /// button shows which way it goes (`maxed`: the playlist, mixer and piano roll maximized).
+    /// button shows which way it goes (`maxed`: the playlist, mixer and piano roll maximized); a window `alone` has
+    /// none.
     pub tiled: bool,
+    pub alone: bool,
     pub maxed: [bool; 3],
 }
 
@@ -1214,6 +1216,16 @@ impl State {
 
     pub fn hide(&mut self, w: Win) {
         self.z.retain(|&o| o != w);
+        // The Lemon layout: a closed window opens again into the split.
+        if let Some(i) = w.slot().filter(|_| self.tiled()) {
+            self.wins[i].maxed = false;
+        }
+    }
+
+    /// The Lemon layout with at most one of the playlist, mixer and piano roll open: it fills the card, with nothing to
+    /// maximize over or split with.
+    pub fn alone(&self) -> bool {
+        self.tiled() && self.z.iter().filter(|w| w.slot().is_some()).count() <= 1
     }
 
     /// Whether `w` is in front of everything that could cover it: the top window for floating
@@ -1278,6 +1290,7 @@ pub struct App {
     /// The Lemon layout's windows as last painted (`tiles::targets`) and the card they were in: a change repaints all,
     /// and animates (`tiles_motion`).
     tile_targets: Vec<(Win, Rect)>,
+    tile_open: (Vec<Win>, bool),
     tile_work: Option<Rect>,
     tile_anim_at: Option<std::time::Instant>,
     /// Last press on a split's gap (node, time), for its double click.
@@ -1517,6 +1530,7 @@ impl App {
             step_chord: crate::step_edit::Chord::default(),
             title_click: None,
             tile_targets: Vec::new(),
+            tile_open: Default::default(),
             tile_work: None,
             tile_anim_at: None,
             tile_click: None,
@@ -3759,8 +3773,20 @@ impl App {
     /// the card jump straight there.
     fn tiles_motion(&mut self) {
         let now = std::time::Instant::now();
+        // A window alone is never maximized (`State::alone`).
+        if self.state.alone() {
+            self.state.wins.iter_mut().for_each(|w| w.maxed = false);
+        }
         let targets = crate::tiles::targets(&self.state);
         let work = self.state.work_rect();
+        // Which windows are open shows on the toolbar's window buttons: a change repaints all.
+        let open = (self.state.z.clone(), self.state.show_browser);
+        if open != self.tile_open {
+            self.tile_open = open;
+            if self.state.tiled() {
+                self.invalidate();
+            }
+        }
         if targets != self.tile_targets {
             // Instant too: a change that leaves one window filling the card (maximized, or alone).
             let full = self.state.docked().is_some() || targets.len() <= 1;
@@ -4010,6 +4036,7 @@ impl App {
             live: &mut self.live,
             flat: self.state.toolbar.flat,
             tiled: self.state.tiled(),
+            alone: self.state.alone(),
             maxed: self.state.wins.map(|w| w.maxed),
         };
         let info = views::FrameInfo {
@@ -7873,6 +7900,10 @@ impl App {
                 if seen {
                     s.hide(w);
                 } else {
+                    // The Lemon layout: a window opening goes into the split (a maximized one gives way to it).
+                    if let Some(i) = w.slot().filter(|_| s.tiled() && !s.shown(w)) {
+                        s.wins[i].maxed = false;
+                    }
                     s.raise(w);
                 }
                 if w == Win::PianoRoll && s.shown(Win::PianoRoll) {
@@ -8047,7 +8078,7 @@ impl App {
                 }
             }
             Action::MaxWin(w) => {
-                if let Some(i) = w.slot() {
+                if let Some(i) = w.slot().filter(|_| !s.alone()) {
                     s.wins[i].mini = false;
                     s.wins[i].maxed = !s.wins[i].maxed;
                     // Maximized over the split, it goes in front of it.
