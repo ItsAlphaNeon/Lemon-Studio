@@ -419,7 +419,7 @@ impl Preset {
 use Panel::*;
 
 /// The factory presets, in the Toolbars menu's order.
-pub const PRESETS: [Preset; 8] = [
+pub const PRESETS: [Preset; 9] = [
     Preset {
         name: "Classic",
         rows: &[&[Caption, Hint, Transport, Recording, Time, Monitor, Cpu, Utilities], &[Menu, Volume, Pitch, SongPos, Modes, Snap, Pattern, Windows, Tools]],
@@ -448,7 +448,16 @@ pub const PRESETS: [Preset; 8] = [
     Preset { name: "Compact", rows: &[&[Menu, Transport, Time, Pattern, Flex, Caption], &[Hint, SongPos, Windows, Snap]], logo: false },
     Preset { name: "One row", rows: &[&[Menu, Hint, Transport, Time, Monitor, Pattern, Snap, Windows, Cpu, Flex, Caption]], logo: false },
     Preset { name: "One row, centered", rows: &[&[Menu, Flex, Transport, Time, Monitor, Pattern, Windows, Flex, Hint, Caption]], logo: false },
+    // The Lemon layout's (General settings ▸ Layout): the hint, CPU, snap, mode and picker buttons are in its status bar.
+    Preset {
+        name: "Lemon",
+        rows: &[&[Menu, Flex, Transport, Recording, Time, Pattern, Flex, Volume, Pitch, Windows, Utilities, Caption]],
+        logo: false,
+    },
 ];
+
+/// The Lemon layout's toolbar (`PRESETS`).
+pub const LEMON_PRESET: usize = 8;
 
 /// Where the user's presets are: the user folder's `Toolbar presets` (in tests the thread's folder, `app::theme_dir`).
 pub fn user_dir() -> Option<PathBuf> {
@@ -502,17 +511,24 @@ pub fn write_preset(path: &Path, l: &Layout) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
-/// The editor's state, never kept: whether it is open and the user's presets as last read.
+/// The editor's state, never kept: whether it is open and the user's presets as last read; and General settings ▸
+/// Layout, kept in `settings.txt` (`layout_lemon`).
 #[derive(Debug, Clone, Default)]
 pub struct Bar {
     pub layout: Layout,
     pub editing: bool,
     pub user: Vec<UserPreset>,
+    /// The Lemon layout (a Lemon Studio addition): a toolbar of one row, the status bar along the window's bottom, the
+    /// workspace as a card (`views::status_h`, `App::work_rect`).
+    pub lemon: bool,
 }
+
+/// The settings key of General settings ▸ Layout.
+pub const LEMON_KEY: &str = "layout_lemon";
 
 impl Bar {
     pub fn load() -> Bar {
-        Bar { layout: Layout::load(), editing: false, user: user_presets() }
+        Bar { layout: Layout::load(), editing: false, user: user_presets(), lemon: crate::settings_file::flag(LEMON_KEY, false) }
     }
 
     /// The user preset with the current layout, if any.
@@ -677,7 +693,19 @@ mod tests {
             assert_eq!(Layout::parse(&l.text()).as_ref(), Some(&l), "{}: no copies", p.name);
             assert!(!p.name.contains("FL") && !p.name.contains("Studio"), "{}", p.name);
         }
-        assert_eq!(PRESETS.iter().filter(|p| p.rows.len() == 1).count(), 2);
+        assert_eq!(PRESETS.iter().filter(|p| p.rows.len() == 1).count(), 3);
+        assert_eq!(PRESETS[LEMON_PRESET].name, "Lemon");
+    }
+
+    /// The Lemon layout's one row fits a window 1536 px wide (1920 at 125 %) with room to spare.
+    #[test]
+    fn the_lemon_row_fits() {
+        let l = PRESETS[LEMON_PRESET].layout();
+        assert_eq!(l.rows.len(), 1);
+        assert!(natural_width(&l, false) <= 1536.0 - 40.0, "{}", natural_width(&l, false));
+        for p in [Panel::Hint, Panel::Cpu, Panel::Snap, Panel::Modes, Panel::Tools] {
+            assert!(!l.has(p), "{p:?} is in the status bar");
+        }
     }
 
     /// Flexible spaces share the band left over (the logo's room excepted when it shows), in whole px.
@@ -699,7 +727,7 @@ mod tests {
     /// Dragging moves a panel within and between rows, takes it off onto the palette and puts a tile back.
     #[test]
     fn drops_move_remove_and_add() {
-        let mut b = Bar { layout: Layout::classic(), editing: true, user: Vec::new() };
+        let mut b = Bar { layout: Layout::classic(), editing: true, user: Vec::new(), lemon: false };
         let palette = (b.layout.band_h(), 400.0);
         // The hint panel (row 1, second) dropped right of the transport: after it.
         let d = BarDrag { moving: Moving::Item(0, 1), grab: (5.0, 5.0) };

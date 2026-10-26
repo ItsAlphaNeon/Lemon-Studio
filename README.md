@@ -16,10 +16,17 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **Wayland first.** On Linux the main window is native Wayland in a Wayland session; plugin windows open detached.
   `OPENSTUDIO_WAYLAND=0` brings back the X11 window, where plugin windows dock. CI runs on Linux only
   (`.github/workflows/cutting-edge.yml`); Windows and macOS are not tested on every push.
-- **Resizable plugin windows (Linux).** A detached plugin window whose editor lets the host resize it (CLAP
-  `gui.can_resize`, VST3 `IPlugView::canResize`) can be resized by dragging its border: the editor is asked for the
-  new size and the window follows the size it takes, one request per UI tick. Such an editor larger than the
-  monitor's work area opens shrunk to fit it; editors that cannot be resized open as before.
+- **Resizable plugin windows (Linux).** Besides Lemon's own resizable plugins, any plugin whose editor lets the host
+  resize it (CLAP `gui.can_resize`, VST3 `IPlugView::canResize`) gets the frame's edges and maximize button. The
+  editor is asked for the new size and the frame takes the size it accepts. Such an editor larger than the monitor's
+  work area opens shrunk to fit it. Detached plugin windows open centred on the monitor under the pointer.
+- **Lemon layout.** General settings ▸ Display ▸ Layout: Classic or Lemon. The Lemon layout has:
+  - a toolbar of one row (menus, transport, time, pattern, main volume and pitch, windows, utilities);
+  - a status bar along the bottom (Lemon's mark, the title and hint, global snap, mode buttons, pickers, CPU and
+    memory);
+  - the workspace as a rounded card over a darker backdrop.
+
+  Every keyboard shortcut works the same. The classic layout is unchanged.
 
 ## What this branch removes
 

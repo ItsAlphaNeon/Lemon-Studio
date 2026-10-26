@@ -771,29 +771,23 @@ fn song_pos(ui: &mut Ui, c: &Ctx) {
 /// Mode buttons (spec: ui/main-window.md §3). Typing keyboard, auto scrolling (spec: ui/auto-scrolling.md), step edit
 /// (spec: ui/step-edit.md), enable groups (spec: ui/enable-groups.md) and multilink (spec: ui/remote-control.md §4)
 /// work.
-fn modes(ui: &mut Ui, c: &Ctx) -> bool {
-    let (a, s) = (c.a, c.s);
-    for (i, (icon, hint)) in [
-        (Icon::TypingKeyboard, "Typing keyboard to piano keyboard (Ctrl+T)"),
-        (Icon::AutoScroll, "Auto scrolling - right-click for continuous scrolling"),
-        (Icon::StepEdit, "Step editing (Ctrl+E)"),
-        (Icon::Link, "Enable groups (Shift+Alt+G)"),
-        (Icon::MidiControl, "Multilink to controllers (Ctrl+J)"),
+/// The mode buttons: icon, whether on, what a click does, hint.
+fn mode_buttons(s: &State) -> [(Icon, bool, Action, &'static str); 5] {
+    [
+        (Icon::TypingKeyboard, s.toggles.contains(&"typing"), Action::Typing, "Typing keyboard to piano keyboard (Ctrl+T)"),
+        (Icon::AutoScroll, crate::autoscroll::on(), Action::AutoScroll, "Auto scrolling - right-click for continuous scrolling"),
+        (Icon::StepEdit, crate::step_edit::on(), Action::StepEdit, "Step editing (Ctrl+E)"),
+        (Icon::Link, crate::enable_groups::on(), Action::EnableGroups, "Enable groups (Shift+Alt+G)"),
+        (Icon::MidiControl, s.multilink.on, Action::Multilink, "Multilink to controllers (Ctrl+J)"),
     ]
-    .into_iter()
-    .enumerate()
-    {
-        let r = a.r(btn(580.0 + 33.0 * i as f32, 45.0));
+}
+
+fn modes(ui: &mut Ui, c: &Ctx) -> bool {
+    for (i, (icon, on, action, hint)) in mode_buttons(c.s).into_iter().enumerate() {
+        let r = c.a.r(btn(580.0 + 33.0 * i as f32, 45.0));
         if r.right() > c.fit {
             return false;
         }
-        let (on, action) = match i {
-            0 => (s.toggles.contains(&"typing"), Action::Typing),
-            1 => (crate::autoscroll::on(), Action::AutoScroll),
-            2 => (crate::step_edit::on(), Action::StepEdit),
-            3 => (crate::enable_groups::on(), Action::EnableGroups),
-            _ => (s.multilink.on, Action::Multilink),
-        };
         tool_button(ui, r, icon, on, action, hint);
     }
     true
@@ -871,20 +865,7 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
 /// the window buttons are the first five, the pickers and tools the rest.
 fn window_buttons(ui: &mut Ui, c: &Ctx, which: Range<usize>) -> bool {
     let a = c.a;
-    let wins = [
-        (Icon::Playlist, Action::ToggleWin(Win::Playlist), "Playlist / Maximize Play list (F5)"),
-        (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), "Piano roll / Maximize Piano roll (F7)"),
-        (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), "Channel rack (F6)"),
-        (Icon::Mixer, Action::ToggleWin(Win::Mixer), "Mixer (F9)"),
-        (Icon::Browser, Action::ToggleWin(Win::Browser), "Browser / Plugin picker (Alt+F8)"),
-        (Icon::Project, Action::ProjectPicker, "Project picker / Plugin picker (Ctrl+F8)"),
-        (Icon::Plug, Action::PickerOpen, "Plugin picker (F8)"),
-        (Icon::Kick, Action::ToggleWin(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
-        (Icon::Touch, Action::ToggleWin(Win::Touch), "Touch controller (Alt+F7)"),
-        // FL's store button is hidden: its stand-in, a repository of free and open-source plugins (spec:
-        // ui/main-window.md §3), had the plugin picker's icon. It is to come back with a shop icon.
-    ];
-    for (i, (icon, action, hint)) in wins.into_iter().enumerate().filter(|(i, _)| which.contains(i)) {
+    for (i, (icon, action, hint)) in WINDOW_BUTTONS.into_iter().enumerate().filter(|(i, _)| which.contains(i)) {
         let r = a.r(btn(973.0 + 33.0 * i as f32, 45.0));
         if r.right() > c.fit {
             return false;
@@ -896,6 +877,90 @@ fn window_buttons(ui: &mut Ui, c: &Ctx, which: Range<usize>) -> bool {
     // FL's news panel (x 1304..1470, with its separator) is left out: it suggested an online service Lemon Studio
     // does not have. A tips panel may take its place (spec: ui/main-window.md §3).
     true
+}
+
+/// The row of nine: the window buttons (the first five), then the pickers and tools.
+const WINDOW_BUTTONS: [(Icon, Action, &str); 9] = [
+        (Icon::Playlist, Action::ToggleWin(Win::Playlist), "Playlist / Maximize Play list (F5)"),
+        (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), "Piano roll / Maximize Piano roll (F7)"),
+        (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), "Channel rack (F6)"),
+        (Icon::Mixer, Action::ToggleWin(Win::Mixer), "Mixer (F9)"),
+        (Icon::Browser, Action::ToggleWin(Win::Browser), "Browser / Plugin picker (Alt+F8)"),
+        (Icon::Project, Action::ProjectPicker, "Project picker / Plugin picker (Ctrl+F8)"),
+        (Icon::Plug, Action::PickerOpen, "Plugin picker (F8)"),
+        (Icon::Kick, Action::ToggleWin(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
+    (Icon::Touch, Action::ToggleWin(Win::Touch), "Touch controller (Alt+F7)"),
+    // FL's store button is hidden: its stand-in, a repository of free and open-source plugins (spec:
+    // ui/main-window.md §3), had the plugin picker's icon. It is to come back with a shop icon.
+];
+
+/// The Lemon layout's status bar along the window's bottom (General settings ▸ Layout; `super::status_rect`): Lemon
+/// Studio's mark, the project's title and the hint at the left; the global snap, the mode buttons, the pickers and
+/// tools, and the CPU load and memory at the right. These leave the toolbar, which the Lemon layout keeps to one row.
+pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
+    let t = ui.t;
+    let r = super::status_rect(s);
+    ui.hit(r, Action::Swallow, "");
+    ui.c.fill_rect(r, t.toolbar);
+    ui.c.fill_rect(Rect::new(r.x, r.y, r.w, 1.0), t.toolbar_edge);
+    let cy = r.cy() + 0.5;
+    icons::logo(ui.c, r.x + 15.0, cy, 8.0, os_theme::design::lemon::MAIN);
+    // the right side, from the right edge leftwards
+    let mut x = r.right() - 8.0;
+    let small = Font::new(13);
+    let cpu = &s.cpu.now;
+    let level = match cpu.load {
+        0..75 => t.glyph,
+        75..100 => t.meter_high,
+        _ => t.meter_clip,
+    };
+    let mem = cpu.mem_mb.map_or("- MB".to_string(), |m| format!("{m} MB"));
+    let load = format!("{}%", cpu.load);
+    let (mw, lw) = (ui.c.text_width(small, &mem), ui.c.text_width(small, &load));
+    let ty = (cy - ui.c.line_height(small) / 2.0).round();
+    ui.c.text_right(small, x, ty, t.text_dim, &mem);
+    ui.c.text_right(small, x - mw - 10.0, ty, level, &load);
+    let cpu_r = Rect::new(x - mw - 10.0 - lw - 4.0, r.y, mw + lw + 18.0, r.h);
+    ui.hit(cpu_r, Action::CpuPanel, "CPU load and memory - double-click for the performance monitor");
+    x = cpu_r.x - 10.0;
+    let mut button = |ui: &mut Ui, x: &mut f32, icon: Icon, on: bool, action: Action, hint: &'static str| {
+        let b = Rect::new(*x - 24.0, r.y + 2.0, 24.0, r.h - 3.0);
+        let hov = ui.hit(b, action.clone(), hint);
+        let look = if on { super::Look::On } else if ui.down(b, &action) { super::Look::Hot } else if hov { super::Look::Hover } else { super::Look::Off };
+        let ink = super::tool_face(ui, b, look);
+        icons::draw(ui.c, icon, b.inset(4.0), ink);
+        *x = b.x - 2.0;
+    };
+    for (icon, action, hint) in WINDOW_BUTTONS[5..].iter().rev().cloned() {
+        let on = matches!(action, Action::ToggleWin(w) if s.z.contains(&w));
+        button(ui, &mut x, icon, on, action, hint);
+    }
+    x -= 8.0;
+    for (icon, on, action, hint) in mode_buttons(s).into_iter().rev() {
+        button(ui, &mut x, icon, on, action, hint);
+    }
+    x -= 8.0;
+    // the global snap: its value (a click opens its menu), and the magnet before it
+    let global = s.global_snap.now;
+    let label = global.label();
+    let sw = ui.c.text_width(small, label) + 18.0;
+    let sr = Rect::new(x - sw, r.y + 3.0, sw, r.h - 5.0);
+    let hov = ui.hit(sr, Action::GlobalSnap, crate::snap::HINT);
+    os_ui::kit::lemon::well(ui.c, t, sr, if hov { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
+    ui.c.text(small, sr.x + 5.0, ty, t.glyph, label);
+    os_ui::kit::triangle(ui.c, sr.right() - 7.0, cy, 3.0, os_ui::kit::Dir::Down, t.glyph_dim);
+    let mr = Rect::new(sr.x - 26.0, r.y + 2.0, 24.0, r.h - 3.0);
+    let on = global != crate::playlist::Snap::None;
+    ui.hit(mr, Action::GlobalSnapToggle, crate::snap::MAGNET_HINT);
+    icons::draw(ui.c, Icon::Magnet, mr.inset(4.0), if on { t.glyph_dim } else { t.glyph_dim.mix(t.toolbar, 0.55) });
+    // the left side: the title, then the hint, up to what the right side took
+    let left = r.x + 32.0;
+    let room = (mr.x - 16.0 - left).max(0.0);
+    let hint: &str = if !f.hint.is_empty() { &f.hint } else { s.message.as_deref().unwrap_or("") };
+    let title_w = ui.c.text_width(small, &f.title).min(room * 0.4);
+    ui.c.text_clip(small, left, ty, title_w, t.text_dim.shade(-0.05), &f.title);
+    let hx = left + title_w + if f.title.is_empty() { 0.0 } else { 14.0 };
+    ui.c.text_clip(small, hx, ty, (left + room - hx).max(0.0), t.text, hint);
 }
 
 /// The editor's outline around something that can be dragged.

@@ -304,9 +304,11 @@ fn live(key: &str) -> bool {
 }
 
 /// The combos that work (they open a menu of choices, `App::audio_menu`).
-pub const LIVE_COMBOS: [&str; 5] = [OUTPUT_DEVICE, MODE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS];
+pub const LIVE_COMBOS: [&str; 6] = [OUTPUT_DEVICE, MODE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS, LAYOUT];
 /// General ▸ Display: "Entertain me" simulates the mixer's cables, "Off" hangs them still (crate::cable).
 pub const ANIMATIONS: &str = "Animations";
+/// General ▸ Display ▸ Layout: Classic, or Lemon (a Lemon Studio addition: `toolbar::Bar::lemon`).
+pub const LAYOUT: &str = "Layout";
 pub const OUTPUT_DEVICE: &str = "Output device";
 pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
@@ -686,6 +688,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 combo("Main", 64.0, "Toolbars scaling"),
                 combo("Off", 64.0, "Transparent windows"),
                 combo(if s.cables.borrow().animations() { "Entertain me" } else { "Off" }, 126.0, ANIMATIONS),
+                combo(if s.bar.lemon { "Lemon" } else { "Classic" }, 126.0, LAYOUT),
                 Slider("Smoothing", 0.2),
                 combo("Ultrasmooth", 126.0, "Animation refresh rate"),
                 Check2("Force refreshes", true, "Transparent menus", true),

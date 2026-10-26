@@ -1086,11 +1086,18 @@ impl State {
         self.z.iter().rev().copied().find(|&w| self.is_max(w))
     }
 
-    /// The workspace: right of the browser, below the toolbar.
+    /// The workspace: right of the browser, below the toolbar. The Lemon layout makes it a card: a gap all round, the
+    /// status bar below (`views::GUTTER`, `views::status_h`).
     pub fn work_rect(&self) -> Rect {
         let left = if self.show_browser { views::browser_w(self) } else { 0.0 };
         let top = views::work_y(self);
-        Rect::new(left, top, (self.screen.0 - left).max(0.0), (self.screen.1 - top).max(0.0))
+        let r = Rect::new(left, top, (self.screen.0 - left).max(0.0), (self.screen.1 - top - views::status_h(self)).max(0.0));
+        if self.bar.lemon {
+            let g = views::GUTTER;
+            Rect::new(r.x + g, r.y + g, (r.w - 2.0 * g).max(0.0), (r.h - 2.0 * g).max(0.0))
+        } else {
+            r
+        }
     }
 
     /// The window's floating rect, kept at least its minimum size and at most the screen's, with its part in the
@@ -2690,6 +2697,10 @@ impl App {
         }
         if self.state.toolbar.hint_bar && !r.intersect(&HINT_RECT).is_empty() {
             self.damage_rect(views::toolbar::hint_bar_rect(&self.state));
+        }
+        // The Lemon layout's status bar holds the hint, the CPU and some of the toolbar's buttons.
+        if self.state.bar.lemon {
+            self.damage_rect(views::status_rect(&self.state));
         }
     }
 
@@ -4504,6 +4515,11 @@ impl App {
             ANIMATIONS => {
                 let item = |label: &'static str, on: bool| PItem::new(label, Cmd::Mixer(crate::mixer::MCmd::Animations(on))).mark(Mark::Radio(still != on));
                 vec![item("Entertain me", true), item("Off", false)]
+            }
+            views::settings::LAYOUT => {
+                let lemon = self.state.bar.lemon;
+                let item = |label: &'static str, on: bool| PItem::new(label, Cmd::Layout(on)).mark(Mark::Radio(lemon == on));
+                vec![item("Classic", false), item("Lemon", true)]
             }
             _ => return,
         };
@@ -8443,6 +8459,20 @@ impl App {
         }
         s.menu_open = None;
         s.menu_sub = None;
+        self.invalidate();
+    }
+
+    /// General settings ▸ Display ▸ Layout: the Lemon layout (its toolbar preset, the status bar, the workspace card) or
+    /// the classic one (the classic toolbar). Kept for the next start.
+    pub(crate) fn set_lemon_layout(&mut self, on: bool) {
+        use crate::toolbar::{Layout, LEMON_PRESET, PRESETS};
+        if self.state.bar.lemon == on {
+            return;
+        }
+        self.state.bar.lemon = on;
+        crate::settings_file::set_flag(crate::toolbar::LEMON_KEY, on);
+        self.set_toolbar_layout(if on { PRESETS[LEMON_PRESET].layout() } else { Layout::classic() });
+        self.state.message = Some(format!("Layout: {}", if on { "Lemon" } else { "Classic" }));
         self.invalidate();
     }
 
@@ -18545,6 +18575,25 @@ mod tests {
     /// (One row: the menu bar in the one row, its menus opening under it); the editor's Save preset as... writes the
     /// layout to the user folder's Toolbar presets, where the menus list it under "User presets", checked; Delete
     /// preset asks, then removes the file.
+    /// The Lemon layout: the workspace is a card with a gap all round, above the status bar; the browser ends at the
+    /// status bar too. The classic layout's workspace runs to the window's edges.
+    #[test]
+    fn lemon_layout_geometry() {
+        let mut app = App::new(None);
+        app.state.screen = (1536.0, 864.0);
+        let classic = app.state.work_rect();
+        assert_eq!(classic.bottom(), 864.0);
+        app.state.bar.lemon = true;
+        app.state.bar.layout = crate::toolbar::PRESETS[crate::toolbar::LEMON_PRESET].layout();
+        let w = app.state.work_rect();
+        let g = views::GUTTER;
+        assert_eq!(w.bottom(), 864.0 - views::STATUS_H - g);
+        assert_eq!(w.right(), 1536.0 - g);
+        assert_eq!(w.y, views::work_y(&app.state) + g);
+        assert_eq!(views::work_y(&app.state), crate::toolbar::ROW_H + 1.0, "one row");
+        assert_eq!(views::status_rect(&app.state).y, 864.0 - views::STATUS_H);
+    }
+
     #[test]
     fn toolbar_presets() {
         use crate::dialog::DHit;

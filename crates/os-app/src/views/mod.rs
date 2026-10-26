@@ -153,6 +153,22 @@ pub fn palette_rect(s: &State) -> Option<Rect> {
     let k = band_k(s);
     (s.bar.editing && !s.toolbar.hidden).then(|| scale_rect(toolbar::palette(s, s.screen.0 / k).rect, k))
 }
+/// The Lemon layout's status bar along the window's bottom (General settings ▸ Layout): its height.
+pub const STATUS_H: f32 = 26.0;
+/// The Lemon layout's gap around the workspace card, and the card's corner radius.
+pub const GUTTER: f32 = 6.0;
+pub const CARD_R: f32 = 8.0;
+
+/// Height of the status bar now: none in the classic layout.
+pub fn status_h(s: &State) -> f32 {
+    if s.bar.lemon { STATUS_H } else { 0.0 }
+}
+
+/// The status bar (the Lemon layout).
+pub fn status_rect(s: &State) -> Rect {
+    Rect::new(0.0, s.screen.1 - STATUS_H, s.screen.0, STATUS_H)
+}
+
 /// Width of the docked browser incl. the splitter (§4): the default, and the least its splitter drags it to.
 pub const BROWSER_W: f32 = 209.0;
 
@@ -172,10 +188,14 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     ui.c.clear(ui.t.workspace);
     ui.c.set_cover(None);
 
-    // Workspace (§9): the theme's picture or the watermark, then docked windows on top.
-    let left = if s.show_browser { browser_w(s) } else { 0.0 };
+    // Workspace (§9): the theme's picture or the watermark, then docked windows on top. The Lemon layout puts it on a
+    // card over a darker backdrop, the status bar below.
     let top = work_y(s);
-    let work = Rect::new(left, top, w - left, h - top);
+    let work = s.work_rect();
+    if s.bar.lemon {
+        ui.c.fill_rect(Rect::new(0.0, top, w, h - top), backdrop(ui));
+        ui.c.fill_rrect(work, CARD_R, ui.t.workspace);
+    }
     let docked = s.docked();
     // spec: ui/flstheme.md §3 (BackMode, BackPicFilename); no watermark over a picture (`wallpaper`).
     if docked.is_none() && !crate::wallpaper::paint(ui, work) {
@@ -184,7 +204,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         let version = concat!("Lemon Studio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");
         let vc = ui.t.version_text;
         let vw = ui.c.text_width(crate::views::fnt(16.0), version);
-        ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, h - 22.0, vc, version);
+        ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, work.bottom() - 22.0, vc, version);
     }
 
     // One stacking order for all child windows (spec: ui/channel-rack.md §5). A maximized window
@@ -192,7 +212,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     let docked_at = s.z.iter().rposition(|&w| s.is_max(w));
     // Each part is skipped by a repaint that misses it (`Ui::part`).
     if s.show_browser {
-        let r = Rect::new(0.0, top, browser_w(s), h - top);
+        let r = Rect::new(0.0, top, browser_w(s), h - top - status_h(s));
         ui.part(Seg::Browser, r, |ui| browser::paint(ui, s, r));
     }
     let _ = work;
@@ -230,6 +250,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         }
         ui.c.pop_clip();
         ui.win = None;
+    }
+    if s.bar.lemon {
+        card_corners(ui, work);
+        toolbar::paint_status_bar(ui, s, f);
     }
     if !s.toolbar.hidden {
         // At Toolbars scaling (spec: ui/ui-scaling.md §1): the band works in its own px, `k` of the window's each, so
@@ -284,6 +308,28 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         playlist::paint_overlays(ui, s);
     }
     overlays
+}
+
+/// The Lemon layout's backdrop around the workspace card: a shade darker than the workspace.
+fn backdrop(ui: &Ui) -> Color {
+    ui.t.workspace.shade(-0.35)
+}
+
+/// Rounds the workspace card's corners over whatever a docked window painted there: each corner outside the arc is
+/// filled with the backdrop.
+fn card_corners(ui: &mut Ui, r: Rect) {
+    let bg = backdrop(ui);
+    let n = 8;
+    for (cx, cy, sx, sy) in [(r.x, r.y, 1.0, 1.0), (r.right(), r.y, -1.0, 1.0), (r.x, r.bottom(), 1.0, -1.0), (r.right(), r.bottom(), -1.0, -1.0)] {
+        // the corner point, then the arc from one edge to the other, curving towards the card
+        let mut pts = vec![(cx, cy), (cx + sx * CARD_R, cy)];
+        for i in 0..=n {
+            let a = std::f32::consts::FRAC_PI_2 * i as f32 / n as f32;
+            pts.push((cx + sx * CARD_R * (1.0 - a.sin()), cy + sy * CARD_R * (1.0 - a.cos())));
+        }
+        pts.push((cx, cy + sy * CARD_R));
+        ui.c.fill_polygon(&pts, bg);
+    }
 }
 
 /// Where window `w` paints: its rect (and the channel rack's graph editor hanging below it). The resize zones past

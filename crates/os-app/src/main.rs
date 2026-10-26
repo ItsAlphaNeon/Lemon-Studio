@@ -1268,7 +1268,7 @@ fn linux_icon() -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(rgba, w, h).ok()
 }
 
-/// `lemonstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-width PX] [--browser-menu] [--browser-search TEXT] [--browser-folder DIR[|SUB]] [project.flp]`:
+/// `lemonstudio --screenshot out.png [--layout lemon|classic] [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-width PX] [--browser-menu] [--browser-search TEXT] [--browser-folder DIR[|SUB]] [project.flp]`:
 /// paint one 1920×1080 frame offscreen (used to compare with reference measurements, and for the README's screenshots
 /// with `--float`, `--rack-pos`, `--rack-all`, `--rack-scroll` and `--insert`).
 fn screenshot(args: &[String]) {
@@ -1312,6 +1312,7 @@ fn screenshot(args: &[String]) {
     let mut rack_h: Option<f32> = None;
     let mut rack_scroll: Option<f32> = None;
     let mut rack_all = false;
+    let mut lemon_layout: Option<bool> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1322,6 +1323,8 @@ fn screenshot(args: &[String]) {
             // Device pixels per logical one (the frame stays 1920x1080 logical): 1.5 = Windows at 150 %.
             "--scale" => scale = it.next().and_then(|v| v.parse().ok()).filter(|s: &f32| *s >= 0.5 && *s <= 4.0).unwrap_or(1.0),
             "--view" => view = it.next().cloned().unwrap_or_default(),
+            // General settings ▸ Layout for this frame only: "lemon" or "classic" (default: the saved one).
+            "--layout" => lemon_layout = it.next().map(|v| v == "lemon"),
             "--no-rack" => rack = false,
             "--no-browser" => browser = false,
             "--rack-roll" => rack_roll = true,
@@ -1433,6 +1436,11 @@ fn screenshot(args: &[String]) {
         }
     }
     let mut app = App::new(path);
+    if let Some(on) = lemon_layout {
+        use crate::toolbar::{Layout, LEMON_PRESET, PRESETS};
+        app.state.bar.lemon = on;
+        app.state.bar.layout = if on { PRESETS[LEMON_PRESET].layout() } else { Layout::classic() };
+    }
     if let Some(i) = insert {
         app.state.selected_mixer = i;
         // Scrolled so the selected insert sits in the right half of the strips.

@@ -519,7 +519,7 @@ fn plugin_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
 
 /// Height of the list viewport for a browser of height `h` (from `WORK_Y`).
 pub fn list_h(s: &State) -> f32 {
-    (s.screen.1 - list_top(s) - FOOTER_H - info_h(&rows(s), s)).max(0.0)
+    (s.screen.1 - super::status_h(s) - list_top(s) - FOOTER_H - info_h(&rows(s), s)).max(0.0)
 }
 
 /// The selected disk entry, shown in the info panel (spec §6).
