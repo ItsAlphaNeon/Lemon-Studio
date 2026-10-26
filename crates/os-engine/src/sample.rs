@@ -386,9 +386,13 @@ pub fn search_folders() -> Vec<PathBuf> {
     search().read().map(|s| s.clone()).unwrap_or_default()
 }
 
-/// The file of `path`'s name in the first search folder that has one (its name matched without regard to case).
+/// The file of `path`'s name in the first search folder that has one (its name matched without regard to case). A
+/// Windows path's name is found off Windows too, where `\` does not separate folders.
 fn by_name(path: &Path) -> Option<PathBuf> {
-    let name = path.file_name()?;
+    let name = path.to_str().map_or(path.file_name(), |p| p.rsplit(['\\', '/']).next().map(std::ffi::OsStr::new))?;
+    if name.is_empty() {
+        return None;
+    }
     search_folders().iter().filter(|d| reachable(d)).find_map(|d| {
         let p = d.join(name);
         if p.is_file() {
