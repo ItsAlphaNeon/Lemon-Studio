@@ -154,7 +154,7 @@ pub fn palette_rect(s: &State) -> Option<Rect> {
     (s.bar.editing && !s.toolbar.hidden).then(|| scale_rect(toolbar::palette(s, s.screen.0 / k).rect, k))
 }
 /// The Lemon layout's status bar along the window's bottom (General settings ▸ Layout): its height.
-pub const STATUS_H: f32 = 26.0;
+pub const STATUS_H: f32 = 32.0;
 /// The Lemon layout's gap around the workspace card, and the card's corner radius.
 pub const GUTTER: f32 = 6.0;
 pub const CARD_R: f32 = 8.0;
@@ -167,6 +167,17 @@ pub fn status_h(s: &State) -> f32 {
 /// The status bar (the Lemon layout).
 pub fn status_rect(s: &State) -> Rect {
     Rect::new(0.0, s.screen.1 - STATUS_H, s.screen.0, STATUS_H)
+}
+
+/// The docked browser, its splitter included. The Lemon layout makes it a card like the workspace: a gap left, above
+/// and below it, and the splitter is the gap between the two cards (`GUTTER` wide, no bars).
+pub fn browser_rect(s: &State) -> Rect {
+    let (top, h) = (work_y(s), s.screen.1 - status_h(s));
+    if s.bar.lemon {
+        Rect::new(GUTTER, top + GUTTER, browser_w(s) - GUTTER, (h - top - 2.0 * GUTTER).max(0.0))
+    } else {
+        Rect::new(0.0, top, browser_w(s), (h - top).max(0.0))
+    }
 }
 
 /// Width of the docked browser incl. the splitter (§4): the default, and the least its splitter drags it to.
@@ -212,8 +223,13 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     let docked_at = s.z.iter().rposition(|&w| s.is_max(w));
     // Each part is skipped by a repaint that misses it (`Ui::part`).
     if s.show_browser {
-        let r = Rect::new(0.0, top, browser_w(s), h - top - status_h(s));
-        ui.part(Seg::Browser, r, |ui| browser::paint(ui, s, r));
+        let r = browser_rect(s);
+        ui.part(Seg::Browser, r, |ui| {
+            browser::paint(ui, s, r);
+            if s.bar.lemon {
+                card_corners(ui, Rect::new(r.x, r.y, r.w - GUTTER, r.h));
+            }
+        });
     }
     let _ = work;
     for (i, &win) in s.z.iter().enumerate() {
@@ -311,7 +327,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
 }
 
 /// The Lemon layout's backdrop around the workspace card: a shade darker than the workspace.
-fn backdrop(ui: &Ui) -> Color {
+pub(crate) fn backdrop(ui: &Ui) -> Color {
     ui.t.workspace.shade(-0.35)
 }
 

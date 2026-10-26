@@ -175,11 +175,7 @@ impl App {
 
     /// Whether the mouse is over the docked browser.
     pub(crate) fn over_browser(&self) -> bool {
-        let (x, y) = self.mouse;
-        self.state.show_browser
-            && x < crate::views::browser_w(&self.state)
-            && y >= crate::views::work_y(&self.state)
-            && y < self.state.screen.1 - crate::views::status_h(&self.state)
+        self.state.show_browser && crate::views::browser_rect(&self.state).contains(self.mouse.0, self.mouse.1)
     }
 
     /// Whether typed letters belong to the browser search (the typing keyboard leaves them alone).

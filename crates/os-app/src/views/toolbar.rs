@@ -924,7 +924,7 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.hit(cpu_r, Action::CpuPanel, "CPU load and memory - double-click for the performance monitor");
     x = cpu_r.x - 10.0;
     let mut button = |ui: &mut Ui, x: &mut f32, icon: Icon, on: bool, action: Action, hint: &'static str| {
-        let b = Rect::new(*x - 24.0, r.y + 2.0, 24.0, r.h - 3.0);
+        let b = Rect::new(*x - 24.0, (cy - 11.0).round(), 24.0, 22.0);
         let hov = ui.hit(b, action.clone(), hint);
         let look = if on { super::Look::On } else if ui.down(b, &action) { super::Look::Hot } else if hov { super::Look::Hover } else { super::Look::Off };
         let ink = super::tool_face(ui, b, look);
@@ -944,12 +944,12 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let global = s.global_snap.now;
     let label = global.label();
     let sw = ui.c.text_width(small, label) + 18.0;
-    let sr = Rect::new(x - sw, r.y + 3.0, sw, r.h - 5.0);
+    let sr = Rect::new(x - sw, (cy - 10.0).round(), sw, 20.0);
     let hov = ui.hit(sr, Action::GlobalSnap, crate::snap::HINT);
     os_ui::kit::lemon::well(ui.c, t, sr, if hov { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
     ui.c.text(small, sr.x + 5.0, ty, t.glyph, label);
     os_ui::kit::triangle(ui.c, sr.right() - 7.0, cy, 3.0, os_ui::kit::Dir::Down, t.glyph_dim);
-    let mr = Rect::new(sr.x - 26.0, r.y + 2.0, 24.0, r.h - 3.0);
+    let mr = Rect::new(sr.x - 26.0, (cy - 11.0).round(), 24.0, 22.0);
     let on = global != crate::playlist::Snap::None;
     ui.hit(mr, Action::GlobalSnapToggle, crate::snap::MAGNET_HINT);
     icons::draw(ui.c, Icon::Magnet, mr.inset(4.0), if on { t.glyph_dim } else { t.glyph_dim.mix(t.toolbar, 0.55) });

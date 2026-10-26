@@ -1093,8 +1093,10 @@ impl State {
         let top = views::work_y(self);
         let r = Rect::new(left, top, (self.screen.0 - left).max(0.0), (self.screen.1 - top - views::status_h(self)).max(0.0));
         if self.bar.lemon {
+            // the browser's splitter is the gap on its left
             let g = views::GUTTER;
-            Rect::new(r.x + g, r.y + g, (r.w - 2.0 * g).max(0.0), (r.h - 2.0 * g).max(0.0))
+            let gl = if self.show_browser { 0.0 } else { g };
+            Rect::new(r.x + gl, r.y + g, (r.w - gl - g).max(0.0), (r.h - 2.0 * g).max(0.0))
         } else {
             r
         }
@@ -18643,6 +18645,13 @@ mod tests {
         assert_eq!(w.y, views::work_y(&app.state) + g);
         assert_eq!(views::work_y(&app.state), crate::toolbar::ROW_H + 1.0, "one row");
         assert_eq!(views::status_rect(&app.state).y, 864.0 - views::STATUS_H);
+        // the browser is a card too, the splitter the gap between the two
+        app.state.show_browser = true;
+        let (b, w) = (views::browser_rect(&app.state), app.state.work_rect());
+        assert_eq!((b.x, b.y, b.bottom()), (g, w.y, w.bottom()));
+        assert_eq!(w.x, b.right());
+        app.state.show_browser = false;
+        assert_eq!(app.state.work_rect().x, g);
     }
 
     #[test]
