@@ -251,13 +251,16 @@ pub fn builtin() -> Vec<Available> {
     v
 }
 
-/// Lemon Parametric EQ, compiled in the same way: offered for every mixer slot, and it plays the slots a project
-/// saved with the original EQ (spec: plugins/lemon-parametric-eq-2.md §8). Then Lemon Studio's other effects
-/// (`LINKED_EFFECTS`), compiled in too, so they need no plugin file either.
+/// Lemon Parametric EQ and Pulp Filter, compiled in the same way (`FILE_MAPPED`): offered for every mixer slot, and
+/// they play the slots a project saved with the original EQ and Love Philter (spec: plugins/lemon-parametric-eq-2.md
+/// §8, plugins/lemon-pulp-filter.md §6). Then Lemon Studio's other effects (`LINKED_EFFECTS`), compiled in too, so
+/// they need no plugin file either.
 pub fn builtin_effects() -> Vec<Available> {
-    static LIBS: [OnceLock<Option<Arc<os_clap::Library>>>; 1 + LINKED_EFFECTS.len()] = [const { OnceLock::new() }; 1 + LINKED_EFFECTS.len()];
-    let entries: [*const std::ffi::c_void; 1 + LINKED_EFFECTS.len()] = [
+    const N: usize = FILE_MAPPED.len() + LINKED_EFFECTS.len();
+    static LIBS: [OnceLock<Option<Arc<os_clap::Library>>>; N] = [const { OnceLock::new() }; N];
+    let entries: [*const std::ffi::c_void; N] = [
         &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &pulp_filter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_limiter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_reverb::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_delay::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
@@ -270,7 +273,7 @@ pub fn builtin_effects() -> Vec<Available> {
         &lemon_stereo_shaper::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &tesla::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
     ];
-    let names = std::iter::once(LEMON_EQ).chain(LINKED_EFFECTS);
+    let names = FILE_MAPPED.into_iter().chain(LINKED_EFFECTS);
     LIBS.iter().zip(entries).zip(names).flat_map(|((lib, entry), name)| linked(lib, entry, name)).collect()
 }
 
@@ -690,6 +693,17 @@ impl Plugins {
             return None;
         }
         tesla::edison_from_plugin_state(&p.save_state()?)
+    }
+
+    /// Love Philter's state (the project file's form) of the Pulp Filter hosted under `key`; `None` for any other
+    /// plugin, and for one on its starting state that was never edited.
+    pub fn love_philter_file_state(&self, key: usize) -> Option<Vec<u8>> {
+        let h = self.hosted.get(&key)?;
+        let p = h.plugin.lock().ok()?;
+        if p.desc().name != PULP_FILTER {
+            return None;
+        }
+        pulp_filter::fl_from_plugin_state(&p.save_state()?).filter(|b| !b.is_empty())
     }
 
     /// Row `row`'s Lemon Sampler takes the stretch settings `sound` holds (§9b), keeping its other settings.
@@ -1248,8 +1262,16 @@ pub const LINKED_EFFECTS: [&str; 11] = [
     "Lemon Stereo Shaper",
     TESLA,
 ];
+/// Lemon Studio's effects compiled in that a project stores under the FL plugin they recreate, with that plugin's
+/// state (`new_slot`, `store_builtin_states`), so they are never saved wrapped.
+pub const FILE_MAPPED: [&str; 2] = [LEMON_EQ, PULP_FILTER];
 /// Name of Tesla, Lemon Studio's audio editor and recorder (spec: plugins/tesla/README.md).
 pub const TESLA: &str = "Tesla";
+/// Name of Pulp Filter, Lemon Studio's pattern-controlled multi-filter (spec: plugins/lemon-pulp-filter.md).
+pub const PULP_FILTER: &str = "Pulp Filter";
+/// The plugin name a project file stores for Love Philter (file-format identifier, kept for interop): slots with it
+/// are played and edited by Pulp Filter (spec: plugins/lemon-pulp-filter.md §6).
+pub const LOVE_PHILTER_FILE_NAME: &str = "Fruity Love Philter";
 /// The plugin name a project file stores for Edison (file-format identifier, kept for interop): slots with it are
 /// played by Tesla (spec: plugins/tesla/README.md "Opening Edison slots").
 pub const EDISON_FILE_NAME: &str = "Edison";
@@ -1272,15 +1294,19 @@ pub fn slot_label(name: &str) -> &str {
     match name {
         EQ_FILE_NAME => LEMON_EQ,
         EDISON_FILE_NAME => TESLA,
+        LOVE_PHILTER_FILE_NAME => PULP_FILTER,
         _ => name,
     }
 }
 
 /// A new slot for effect `name`: what the project stores (Lemon Parametric EQ as the file's EQ with its default
-/// state, so the file opens elsewhere; other effects by name).
+/// state, Pulp Filter as the file's Love Philter with its starting state, so the file opens elsewhere; other effects
+/// by name).
 pub fn new_slot(name: &str) -> os_model::SlotPlugin {
     if name == LEMON_EQ {
         os_model::SlotPlugin { name: EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() }
+    } else if name == PULP_FILTER {
+        os_model::SlotPlugin { name: LOVE_PHILTER_FILE_NAME.into(), state: os_engine::effects::love_philter::state::State::new_default().to_bytes() }
     } else {
         os_model::SlotPlugin { name: name.into(), state: Vec::new() }
     }
@@ -2963,6 +2989,8 @@ mod tests {
         assert!((peak - 0.398).abs() < 0.03, "+12 dB at the band (peak {peak})");
         assert_eq!(slot_label(EQ_FILE_NAME), LEMON_EQ);
         assert_eq!(new_slot(LEMON_EQ).name, EQ_FILE_NAME);
+        assert_eq!(slot_label(LOVE_PHILTER_FILE_NAME), PULP_FILTER);
+        assert_eq!(new_slot(PULP_FILTER).name, LOVE_PHILTER_FILE_NAME);
     }
 
     /// Playlist clips through Lemon Sampler (spec: plugins/lemon-sampler.md §7): a note can start partway into the sample

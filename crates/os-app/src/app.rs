@@ -2080,15 +2080,16 @@ impl App {
     }
 
     /// The built-in recreations write their settings into the model as the file's own plugin state: Lemon Parametric
-    /// EQ and Tesla (as Edison) into their slots, Lemon Trio into its channels.
+    /// EQ, Tesla (as Edison) and Pulp Filter (as Love Philter) into their slots, Lemon Trio into its channels.
     pub(crate) fn store_builtin_states(&mut self) {
-        use crate::plugins::{EDISON_FILE_NAME, EQ_FILE_NAME};
+        use crate::plugins::{EDISON_FILE_NAME, EQ_FILE_NAME, LOVE_PHILTER_FILE_NAME};
         for key in self.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
             let Some((t, k)) = crate::plugins::fx_of(key) else { continue };
             let Some(slot) = self.state.project.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
             let st = match slot.name.as_str() {
                 EQ_FILE_NAME => self.plugins.eq_file_state(key),
                 EDISON_FILE_NAME => self.plugins.edison_file_state(key),
+                LOVE_PHILTER_FILE_NAME => self.plugins.love_philter_file_state(key),
                 _ => None,
             };
             if let Some(st) = st {
@@ -2189,9 +2190,10 @@ impl App {
     /// Mixer slots that hold the project file's parametric EQ are played and edited by Lemon Parametric EQ, started
     /// from the slot's saved state (spec: plugins/lemon-parametric-eq-2.md §8). Without the plugin the engine's own EQ
     /// plays them. Edison's slots are opened as Tesla the same way, with their sample, loop, markers and recording
-    /// settings (spec: plugins/tesla/README.md "Opening Edison slots").
+    /// settings (spec: plugins/tesla/README.md "Opening Edison slots"), and Love Philter's as Pulp Filter with their
+    /// state (spec: plugins/lemon-pulp-filter.md §6).
     pub(crate) fn sync_effects(&mut self) {
-        use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, TESLA};
+        use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, LOVE_PHILTER_FILE_NAME, PULP_FILTER, TESLA};
         // The installed EQ plays these slots instead (`host_native`).
         if crate::project_plugins::native_first() {
             return;
@@ -2202,13 +2204,18 @@ impl App {
             .mixer
             .iter()
             .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
-            .filter_map(|(t, k, s)| s.as_ref().filter(|s| s.name == EQ_FILE_NAME || s.name == EDISON_FILE_NAME).map(|s| (t, k, s.name.clone(), s.state.clone())))
+            .filter_map(|(t, k, s)| {
+                s.as_ref().filter(|s| [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME].contains(&s.name.as_str())).map(|s| (t, k, s.name.clone(), s.state.clone()))
+            })
             .filter(|&(t, k, _, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
             .collect();
         let mut made = false;
         for (t, k, file, fl) in todo {
             let (name, st) = if file == EQ_FILE_NAME {
                 (LEMON_EQ, Some(lemon_parametric_eq_2::params::plugin_state_from_fl(&fl)))
+            } else if file == LOVE_PHILTER_FILE_NAME {
+                // Bytes that are not a Love Philter state open Pulp Filter's starting state.
+                (PULP_FILTER, Some(pulp_filter::plugin_state_from_fl(&fl)))
             } else {
                 // Bytes that are not an Edison state open an empty Tesla.
                 (TESLA, tesla::plugin_state_from_edison(&fl))
@@ -8959,6 +8966,46 @@ mod tests {
         let before = a.plugins.hosted.len();
         a.sync_effects();
         assert_eq!(a.plugins.hosted.len(), before);
+    }
+
+    /// A project's Love Philter slots are opened as Pulp Filter with their state, show Pulp Filter's name and keep the
+    /// file's Love Philter, whose state Pulp Filter writes back (spec: plugins/lemon-pulp-filter.md §6).
+    #[test]
+    fn love_philter_slots_open_as_pulp_filter() {
+        use crate::plugins::{LOVE_PHILTER_FILE_NAME, PULP_FILTER, fx_key};
+        use os_engine::effects::love_philter::state::{MASTER, State};
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let mut st = State::new_default();
+        st.globals[MASTER] = 77;
+        let fl = st.to_bytes();
+        a.state.project.mixer[1].slots[2] = Some(os_model::SlotPlugin {
+            name: LOVE_PHILTER_FILE_NAME.into(),
+            state: fl.clone(),
+        });
+        a.sync_effects();
+        let key = fx_key(1, 2);
+        assert!(a.plugins.hosted.contains_key(&key));
+        assert_eq!(
+            crate::mixer::slot_name(&a.state, 1, 2).as_deref(),
+            Some(PULP_FILTER)
+        );
+        assert_eq!(a.plugins.love_philter_file_state(key), Some(fl.clone()));
+        a.store_builtin_states();
+        let slot = a.state.project.mixer[1].slots[2].clone().unwrap();
+        assert_eq!(
+            (slot.name.as_str(), slot.state),
+            (LOVE_PHILTER_FILE_NAME, fl)
+        );
+        let before = a.plugins.hosted.len();
+        a.sync_effects();
+        assert_eq!(a.plugins.hosted.len(), before);
+        assert_eq!(
+            crate::plugins::new_slot(PULP_FILTER).name,
+            LOVE_PHILTER_FILE_NAME
+        );
     }
 
     /// The toolbar's audio editor button puts Tesla on the master track and shows it; another click shows the same
