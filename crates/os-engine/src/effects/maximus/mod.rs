@@ -811,7 +811,7 @@ impl Maximus {
         let k = |x: usize| p[band(b, x)];
         let modes: [i32; BANDS] = std::array::from_fn(|i| self.bands[i].mode);
         let mode = modes[b];
-        let none = modes[..3].iter().all(|&m| m > 0);
+        let none = b != MASTER && modes[..3].iter().all(|&m| m > 0);
         let look = if mode >= 2 || (b == MASTER && mode >= 1) || none {
             0
         } else {
@@ -1210,5 +1210,25 @@ impl Effect for Maximus {
 
     fn latency(&self) -> usize {
         self.delay
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// LOW, MID and HIGH all above mode 0 drop their own look-ahead, not MASTER's (found by null test against FL).
+    #[test]
+    fn masters_look_ahead_stays_when_the_bands_do_not_compress() {
+        let st = State::new_default();
+        let both = Maximus::with_state(st.clone(), 44100).delay();
+        let mut off = st.clone();
+        for b in 0..MASTER {
+            off.params[band(b, B_MODE)] = 1;
+        }
+        let master = Maximus::with_state(off.clone(), 44100).delay();
+        assert!(master > 0 && master < both, "{master} of {both}");
+        off.params[band(MASTER, B_MODE)] = 1;
+        assert_eq!(Maximus::with_state(off, 44100).delay(), 0);
     }
 }
