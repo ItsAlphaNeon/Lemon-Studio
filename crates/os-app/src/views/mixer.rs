@@ -63,9 +63,10 @@ const REF_TOP: f32 = 83.0;
 const FIXED_H: f32 = 218.0;
 
 /// How much the mixer's stretchy parts (meter, level scale, fader) are scaled at window `r`:
-/// 1 at the measured height; the rest of the strip keeps its size.
+/// 1 at the measured height; the rest of the strip keeps its size. A mixer snapped into a short split (the Lemon
+/// layout, `crate::tiles`) squeezes them further, to nothing.
 pub fn scale(r: Rect) -> f32 {
-    ((r.h - FIXED_H) / (REF_H - FIXED_H)).max(0.2)
+    ((r.h - FIXED_H) / (REF_H - FIXED_H)).max(0.02)
 }
 
 /// Maps the measured (absolute, window top 83) y values to the window `r`: the meter (130-453) and
@@ -133,7 +134,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.c.text_center(Font::new(17), Rect::new(r.x + 50.0, ly.y(HEAD_Y0), 22.0, 21.0), ui.t.s(0x6d7275), "M");
 
     // "C" column: the level scale with the current track's meter (spec: ui/mixer.md §9).
-    let col = Rect::new(r.x + 9.0, ly.y(METER_Y0), 28.0, bottom - 156.0 - ly.y(METER_Y0));
+    let col = Rect::new(r.x + 9.0, ly.y(METER_Y0), 28.0, (bottom - 156.0 - ly.y(METER_Y0)).max(0.0));
     let cfg = &s.mixer.meter_cfg;
     let floor = cfg.v[meters::k::FLOOR_DB];
     // The column is the law's whole range (130-924 at the measured size) squeezed evenly into its height, so marks and
@@ -522,9 +523,13 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     let hov = ui.hit(Rect::new(mx - 9.0, ly.y(TRACK_Y0) - 5.0, 18.0, track_y1 - ly.y(TRACK_Y0) + 10.0), Action::Fader(n), mx::level_text("Volume", f64::from(v)));
     fader_handle(ui, mx, hy, selected, hov);
 
-    // Input pin, latency clock and disk-recording dot: not available yet, greyed out.
+    // Input pin, latency clock and disk-recording dot: not available yet, greyed out. In a short mixer they would run
+    // into the separation knob above them: they give way (the routing below stays).
     let master = n == 0;
     let by = bottom;
+    if by - 149.0 < ring_y + 10.0 {
+        return routing(ui, s, n, kx, by, selected, master);
+    }
     let pin_c = if master { ui.t.h(0xf09a28) } else { ui.t.s(0x4d5357) };
     let mut g = Glyph::new();
     g.rrect(Rect::new(sx - 4.0, by - 146.0, 8.0, 9.0), 3.0);
@@ -540,9 +545,14 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     ui.off(Rect::new(sx - 6.0, by - 106.0, 12.0, 12.0), "Disk recording");
     ui.c.fill_circle(sx, by - 100.0, 2.6, ui.t.tx(0xd8e0e6));
     ui.veil(Rect::new(sx - 9.0, by - 149.0, 18.0, 55.0), body);
+    routing(ui, s, n, kx, by, selected, master);
+}
 
-    // Routing (spec: ui/mixer.md §5): the current track's green ⬇ (its cables are drawn over all strips: `cables`),
-    // a send knob where the current track sends, else the ▲ "route to this track" button; an orange "^" marks tracks that receive a route.
+/// Routing (spec: ui/mixer.md §5): the current track's green ⬇ (its cables are drawn over all strips: `cables`), a send
+/// knob where the current track sends, else the ▲ "route to this track" button; an orange "^" marks tracks that receive
+/// a route. `by`: the strip's bottom.
+fn routing(ui: &mut Ui, s: &State, n: u16, kx: f32, by: f32, selected: bool, master: bool) {
+    let t = ui.t;
     let ay = by - 38.0;
     let cur = s.selected_mixer;
     let cur_name = mx::name(s, cur);

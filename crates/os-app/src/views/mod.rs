@@ -421,7 +421,12 @@ pub fn resize_zones(ui: &mut Ui, s: &State, win: Win, r: Rect) {
 /// The Lemon layout's split views have no minimize: the other two keep their places.
 pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _hover: Color) {
     let mut hovered = None;
-    let max_hint = if ui.tiled { "Maximize / back to the split" } else { "Maximize / restore window" };
+    let maxed = win.slot().is_some_and(|i| ui.maxed[i]);
+    let max_hint = match (ui.tiled, maxed) {
+        (false, _) => "Maximize / restore window",
+        (true, false) => "Maximize",
+        (true, true) => "Back to the split",
+    };
     for (i, (hint, action)) in [("Minimize window", Action::MinWin(win)), (max_hint, Action::MaxWin(win)), ("Close window", Action::CloseWin(win))]
         .into_iter()
         .enumerate()
@@ -431,7 +436,12 @@ pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _h
             hovered = Some(i);
         }
     }
-    kit::window_buttons(ui.c, ui.t, x0, y, hovered, !ui.tiled);
+    let glyph = match (ui.tiled, maxed) {
+        (false, _) => kit::MaxGlyph::Restore,
+        (true, false) => kit::MaxGlyph::Full,
+        (true, true) => kit::MaxGlyph::Split,
+    };
+    kit::window_buttons(ui.c, ui.t, x0, y, hovered, glyph);
 }
 
 /// Window frame with a title bar (§5); the bar drags the window. `buttons` = draw the window

@@ -709,8 +709,10 @@ pub struct Ui<'a> {
     live: &'a mut Vec<(Live, Rect)>,
     /// Square toolbar buttons are drawn flat (the Toolbars menu, spec: ui/toolbar-menu.md §3).
     pub flat: bool,
-    /// The Lemon layout's split views (`State::tiled`): window title bars have no minimize button.
+    /// The Lemon layout's split views (`State::tiled`): window title bars have no minimize button, and their maximize
+    /// button shows which way it goes (`maxed`: the playlist, mixer and piano roll maximized).
     pub tiled: bool,
+    pub maxed: [bool; 3],
 }
 
 impl Ui<'_> {
@@ -1262,6 +1264,8 @@ pub struct App {
     pub(crate) title_click: Option<(Win, std::time::Instant, (f32, f32))>,
     /// The Lemon layout's split views as last painted: a change repaints all (`take_damage`).
     tile_plan: crate::tiles::Plan,
+    /// Last press on a split's gap (node, time), for its double click.
+    tile_click: Option<(usize, std::time::Instant)>,
     /// Last channel-rack press (action, time), for double clicks on slots and mixer boxes (§8, §12).
     rack_click: Option<(Action, std::time::Instant)>,
     /// Last press on the CPU panel, for its double click (the Plugin performance monitor).
@@ -1494,6 +1498,7 @@ impl App {
             step_chord: crate::step_edit::Chord::default(),
             title_click: None,
             tile_plan: Default::default(),
+            tile_click: None,
             rack_click: None,
             cpu_click: None,
             hint: Cow::Borrowed(""),
@@ -3958,6 +3963,7 @@ impl App {
             live: &mut self.live,
             flat: self.state.toolbar.flat,
             tiled: self.state.tiled(),
+            maxed: self.state.wins.map(|w| w.maxed),
         };
         let info = views::FrameInfo {
             title,
@@ -8003,7 +8009,17 @@ impl App {
                     }
                 }
             }
-            Action::TileSplit(node) => self.drag = Some(Drag::TileSplit { node }),
+            // A double click puts the split back to the preset's default.
+            Action::TileSplit(node) => {
+                let now = std::time::Instant::now();
+                if self.tile_click.is_some_and(|(n, t)| n == node && now.duration_since(t).as_millis() < 400) {
+                    self.tile_click = None;
+                    crate::tiles::reset(&mut self.state, node);
+                } else {
+                    self.tile_click = Some((node, now));
+                    self.drag = Some(Drag::TileSplit { node });
+                }
+            }
             Action::TilePreset => crate::tiles::next_preset(s),
             // A second one leaves it maximized (spec: ui/toolbar-buttons.md §2).
             Action::ShowMax(w) => {

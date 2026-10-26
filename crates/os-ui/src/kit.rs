@@ -528,10 +528,21 @@ pub fn tooltip(c: &mut Canvas, t: &Palette, at: (f32, f32), name: &str, caption:
 }
 
 /// Minimize / maximize / close glyphs (drawn with Tabler icons) in a row from `x0`; `hovered` = index under the mouse.
-pub fn window_buttons(c: &mut Canvas, t: &Palette, x0: f32, y: f32, hovered: Option<usize>, minimize: bool) -> [Rect; 3] {
+/// What a window's middle title-bar button shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaxGlyph {
+    /// Maximize / restore, after a minimize button.
+    Restore,
+    /// Split views (no minimize): a full square, to maximize.
+    Full,
+    /// Split views, maximized: two panes, back to the split.
+    Split,
+}
+
+pub fn window_buttons(c: &mut Canvas, t: &Palette, x0: f32, y: f32, hovered: Option<usize>, max: MaxGlyph) -> [Rect; 3] {
     use crate::tabler as tb;
     let mut out = [Rect::default(); 3];
-    for (i, icon) in [&tb::MINUS, &tb::SQUARES, &tb::X].into_iter().enumerate().skip(usize::from(!minimize)) {
+    for (i, icon) in [&tb::MINUS, &tb::SQUARES, &tb::X].into_iter().enumerate().skip(usize::from(max != MaxGlyph::Restore)) {
         let b = Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0);
         let hov = hovered == Some(i);
         if hov && lemon::on(t) {
@@ -539,7 +550,15 @@ pub fn window_buttons(c: &mut Canvas, t: &Palette, x0: f32, y: f32, hovered: Opt
         } else if hov {
             c.fill_rrect(b, 3.0, if i == 2 { t.record.with_alpha(170) } else { t.button_hi });
         }
-        c.icon(icon, b.inset(2.0), if hov { t.tx(0xffffff) } else { t.text_dim.mix(t.glyph, 0.6) });
+        let ink = if hov { t.tx(0xffffff) } else { t.text_dim.mix(t.glyph, 0.6) };
+        match (i, max) {
+            (1, MaxGlyph::Full) => c.stroke_rrect(Rect::new(b.x + 3.5, b.y + 3.5, 10.0, 10.0), 2.0, 1.5, ink),
+            (1, MaxGlyph::Split) => {
+                c.stroke_rrect(Rect::new(b.x + 3.5, b.y + 3.0, 10.0, 4.5), 1.5, 1.5, ink);
+                c.stroke_rrect(Rect::new(b.x + 3.5, b.y + 9.5, 10.0, 4.5), 1.5, 1.5, ink);
+            }
+            _ => c.icon(icon, b.inset(2.0), ink),
+        }
         out[i] = b;
     }
     out

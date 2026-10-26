@@ -92,14 +92,27 @@ impl Tiles {
     }
 }
 
-/// A gap between two snapped windows: dragging it moves split `node` (0 the outer, 1 the inner) of `parent`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A gap between two snapped windows: dragging it moves split `node` (0 the outer, 1 the inner) of `parent`, between
+/// the windows `sides` (first part, second part).
+#[derive(Clone, Debug, PartialEq)]
 pub struct Divider {
     pub node: usize,
     /// The split stacks its parts (the gap is horizontal).
     pub rows: bool,
     pub gap: Rect,
     pub parent: Rect,
+    pub sides: [Vec<Win>; 2],
+}
+
+/// The least a snapped window keeps across a split (px): its controls stay apart (a mixer's routing row clear of
+/// its separation knobs). A split stops there; a card too small for both splits them evenly.
+fn least(w: Win, rows: bool) -> f32 {
+    match (w, rows) {
+        (Win::Mixer, true) => 260.0,
+        (Win::Mixer, false) => 480.0,
+        (_, true) => 180.0,
+        (_, false) => 360.0,
+    }
 }
 
 /// Where the snapped windows are, and the gaps between them.
@@ -140,7 +153,7 @@ pub fn plan(s: &State) -> Plan {
             let (ra, gap, rb) = split(r, !p.outer_rows, share[1]);
             out.tiles.push((a, ra));
             out.tiles.push((b, rb));
-            out.dividers.push(Divider { node: 1, rows: !p.outer_rows, gap, parent: r });
+            out.dividers.push(Divider { node: 1, rows: !p.outer_rows, gap, parent: r, sides: [vec![a], vec![b]] });
         }
         _ => {}
     };
@@ -152,7 +165,8 @@ pub fn plan(s: &State) -> Plan {
             let (rs, rp) = if p.single_first { (first, second) } else { (second, first) };
             out.tiles.push((w, rs));
             place_pair(&mut out, rp);
-            out.dividers.push(Divider { node: 0, rows: p.outer_rows, gap, parent: work });
+            let sides = if p.single_first { [vec![w], pair.clone()] } else { [pair.clone(), vec![w]] };
+            out.dividers.push(Divider { node: 0, rows: p.outer_rows, gap, parent: work, sides });
         }
     }
     out
@@ -167,9 +181,19 @@ pub fn rect_of(s: &State, w: Win) -> Option<Rect> {
 pub fn drag(s: &mut State, node: usize, (x, y): (f32, f32)) {
     let Some(d) = plan(s).dividers.into_iter().find(|d| d.node == node) else { return };
     let r = d.parent;
-    let share = if d.rows { (y - GUTTER / 2.0 - r.y) / (r.h - GUTTER) } else { (x - GUTTER / 2.0 - r.x) / (r.w - GUTTER) };
+    let len = if d.rows { r.h } else { r.w } - GUTTER;
+    let share = if d.rows { (y - GUTTER / 2.0 - r.y) / len } else { (x - GUTTER / 2.0 - r.x) / len };
+    let side = |i: usize| d.sides[i].iter().map(|&w| least(w, d.rows)).fold(0.0, f32::max) / len.max(1.0);
+    let (lo, hi) = (side(0).max(SHARE.0), (1.0 - side(1)).min(SHARE.1));
     let p = s.tiles.preset;
-    s.tiles.share[p][node] = share.clamp(SHARE.0, SHARE.1);
+    s.tiles.share[p][node] = if lo <= hi { share.clamp(lo, hi) } else { 0.5 };
+}
+
+/// Split `node` back to the preset's default (a double click on its gap).
+pub fn reset(s: &mut State, node: usize) {
+    let p = s.tiles.preset;
+    s.tiles.share[p][node] = Tiles::default().share[p][node];
+    s.tiles.save();
 }
 
 /// The snapped window `w` dropped at `(x, y)`: onto another snapped window, the two change places. Returns whether
@@ -296,7 +320,16 @@ mod tests {
         let pl = rect_of(&app.state, Win::Playlist).unwrap();
         assert!((pl.h / work.h - 0.25).abs() < 0.02, "{}", pl.h);
         drag(&mut app.state, 0, (0.0, work.y));
-        assert_eq!(app.state.tiles.share[0][0], SHARE.0);
+        let pl = rect_of(&app.state, Win::Playlist).unwrap();
+        assert!((pl.h - least(Win::Playlist, true)).abs() <= 1.0, "stops at the playlist's least height: {}", pl.h);
+        // a double click on the gap: the default split
+        let gap = plan(&app.state).dividers[0].gap;
+        app.mouse_move(gap.cx(), gap.cy());
+        for _ in 0..2 {
+            app.act(crate::app::Action::TileSplit(0));
+            app.mouse_up();
+        }
+        assert_eq!(app.state.tiles.share[0][0], Tiles::default().share[0][0]);
         let pr = rect_of(&app.state, Win::PianoRoll).unwrap();
         assert!(drop(&mut app.state, Win::Playlist, (pr.cx(), pr.cy())));
         assert_eq!(rect_of(&app.state, Win::PianoRoll).unwrap().y, work.y, "swapped");
@@ -304,3 +337,4 @@ mod tests {
         assert_eq!(Tiles::parse("0 playlist playlist mixer 0.5 0.5 0.5 0.5"), None);
     }
 }
+
