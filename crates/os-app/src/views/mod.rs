@@ -250,7 +250,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
 
     // One stacking order for all child windows (spec: ui/channel-rack.md §5). A maximized window
     // fills the workspace, so windows below it are covered and not painted.
-    let docked_at = s.z.iter().rposition(|&w| s.is_max(w));
+    let order = s.paint_order();
+    let docked_at = order.iter().rposition(|&w| s.is_max(w));
     // Each part is skipped by a repaint that misses it (`Ui::part`).
     if s.show_browser {
         let r = browser_rect(s);
@@ -281,7 +282,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             card_corners(ui, r);
         }
     }
-    for (i, &win) in s.z.iter().enumerate() {
+    for (i, &win) in order.iter().enumerate() {
         // While windows move (the Lemon layout's animation) they all show, the covered ones too.
         if (docked_at.is_some_and(|d| i < d) && anim.is_none()) || anim.is_some_and(|m| m.opening().iter().any(|o| o.0 == win)) {
             continue;

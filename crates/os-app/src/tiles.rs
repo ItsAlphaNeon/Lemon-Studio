@@ -425,6 +425,23 @@ mod tests {
         assert!(app.state.snapped(Win::Mixer), "closed maximized, it opens into the split");
     }
 
+    /// Floating windows are a layer above the split ones: bringing a snapped window forward (and giving it the
+    /// keyboard) leaves the channel rack painted, and clicked, on top.
+    #[test]
+    fn floats_stay_on_top() {
+        let Ok(mut c) = os_ui::Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = lemon();
+        app.state.raise(Win::Playlist);
+        app.state.raise(Win::ChannelRack);
+        app.state.raise(Win::Mixer);
+        assert_eq!(app.state.z.last(), Some(&Win::Mixer), "the mixer has the keyboard");
+        assert_eq!(app.state.paint_order().last(), Some(&Win::ChannelRack));
+        app.paint(&mut c, None);
+        let rack = crate::views::rack::rect(&app.state);
+        let hit = app.hits.iter().rev().find(|h| h.rect.contains(rack.cx(), rack.cy())).map(|h| h.win);
+        assert_eq!(hit, Some(Some(Win::ChannelRack)));
+    }
+
     /// The mixer's cables hang over the gap under it, to the window below or the status bar.
     #[test]
     fn mixer_cables_hang_over_the_gap() {

@@ -1222,6 +1222,17 @@ impl State {
         }
     }
 
+    /// The windows back to front as they are painted and take clicks: the stacking order (`z`, which also says which has
+    /// the keyboard), except that in the Lemon layout the floating windows (channel rack, plugin and tool windows) are
+    /// a layer of their own above the playlist, mixer and piano roll.
+    pub fn paint_order(&self) -> Vec<Win> {
+        if !self.tiled() {
+            return self.z.clone();
+        }
+        let (tiles, floats): (Vec<Win>, Vec<Win>) = self.z.iter().partition(|w| w.slot().is_some());
+        tiles.into_iter().chain(floats).collect()
+    }
+
     /// The Lemon layout with at most one of the playlist, mixer and piano roll open: it fills the card, with nothing to
     /// maximize over or split with.
     pub fn alone(&self) -> bool {
@@ -2761,7 +2772,7 @@ impl App {
         let px = |r: Rect| [(r.x * k).floor() as i32 + ox, (r.y * k).floor() as i32 + oy, (r.right() * k).ceil() as i32 + ox, (r.bottom() * k).ceil() as i32 + oy];
         let work = px(self.state.work_rect());
         let over: Vec<[i32; 4]> = self.overlays.iter().map(|&r| px(r.outset(2.0))).collect();
-        let z = self.state.z.clone();
+        let z = self.state.paint_order();
         let stacked: Vec<usize> = z.iter().filter_map(|w| if let Win::Hosted(r) = w { Some(*r) } else { None }).collect();
         self.plugins.stack(&stacked);
         let docked_at = z.iter().rposition(|&w| self.state.is_max(w));
@@ -2916,7 +2927,7 @@ impl App {
     fn playlist_covers(&self) -> Vec<Cover> {
         let s = &self.state;
         let mut v: Vec<_> = s
-            .z
+            .paint_order()
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
