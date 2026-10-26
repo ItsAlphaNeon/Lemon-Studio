@@ -1151,15 +1151,22 @@ impl State {
         }
     }
 
-    /// The Lemon layout's gap under the mixer while it reaches the workspace card's bottom: its routing cables sag
-    /// into it, down to the status bar.
+    /// The Lemon layout's gap under the mixer, which its routing cables sag into: down to the status bar while it
+    /// reaches the workspace card's bottom, else the gap to the snapped window below it.
     pub fn mixer_hang(&self) -> Option<Rect> {
-        if !self.bar.lemon || !self.shown(Win::Mixer) {
+        if !self.bar.lemon || !self.shown(Win::Mixer) || self.docked().is_some_and(|d| d != Win::Mixer) {
             return None;
         }
         let r = self.win_rect(Win::Mixer);
         let floor = views::status_rect(self).y;
-        (r.h > TITLE_H && r.bottom() >= self.work_rect().bottom() - 0.5 && floor > r.bottom()).then(|| Rect::new(r.x, r.bottom(), r.w, floor - r.bottom()))
+        let bottom = if r.bottom() >= self.work_rect().bottom() - 0.5 {
+            floor
+        } else if self.snapped(Win::Mixer) {
+            r.bottom() + views::GUTTER
+        } else {
+            return None;
+        };
+        (r.h > TITLE_H && bottom > r.bottom()).then(|| Rect::new(r.x, r.bottom(), r.w, bottom - r.bottom()))
     }
 
     /// Where the window is painted: the workspace when maximized, a title bar when minimized.
@@ -7802,7 +7809,14 @@ impl App {
             Action::ToggleWin(Win::Tapper) => self.toggle_tapper(),
             Action::ToggleWin(Win::Touch) => self.toggle_touch(),
             Action::ToggleWin(w) => {
-                if s.shown(w) && s.in_front(w) {
+                // The Lemon layout's split views: shown in its place, the key hides it; else it shows it there, each
+                // key on its own whichever window is in front.
+                let seen = if s.tiled() && w.slot().is_some() {
+                    s.docked().map_or(s.snapped(w), |d| d == w)
+                } else {
+                    s.shown(w) && s.in_front(w)
+                };
+                if seen {
                     s.hide(w);
                 } else {
                     s.raise(w);

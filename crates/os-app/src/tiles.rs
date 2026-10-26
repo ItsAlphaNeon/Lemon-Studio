@@ -248,6 +248,43 @@ mod tests {
         assert!(!app.state.is_max(Win::Mixer) && plan(&app.state).tiles.len() == 2);
     }
 
+    /// F7 / F9 each show their window in its place and hide it again, whichever is in front; a maximized one hides
+    /// on its key, and a snapped one hidden behind it shows.
+    #[test]
+    fn keys_toggle_each_window() {
+        use crate::app::Action::{MaxWin, ToggleWin};
+        let mut app = lemon();
+        let shown = |app: &App| plan(&app.state).tiles.iter().map(|t| t.0).collect::<Vec<_>>();
+        app.act(ToggleWin(Win::Mixer));
+        app.act(ToggleWin(Win::PianoRoll));
+        assert_eq!(shown(&app), vec![Win::PianoRoll, Win::Mixer]);
+        app.act(ToggleWin(Win::Mixer));
+        assert_eq!(shown(&app), vec![Win::PianoRoll], "the mixer hides though the piano roll is in front");
+        app.act(ToggleWin(Win::Mixer));
+        app.act(MaxWin(Win::Mixer));
+        app.act(ToggleWin(Win::PianoRoll));
+        assert_eq!(shown(&app), vec![Win::PianoRoll, Win::Mixer], "the piano roll comes out from behind, the split back");
+        app.act(MaxWin(Win::Mixer));
+        app.act(ToggleWin(Win::Mixer));
+        assert!(!app.state.shown(Win::Mixer), "maximized, its key hides it");
+    }
+
+    /// The mixer's cables hang over the gap under it, to the window below or the status bar.
+    #[test]
+    fn mixer_cables_hang_over_the_gap() {
+        let mut app = lemon();
+        app.state.raise(Win::Mixer);
+        app.state.raise(Win::Playlist);
+        let mx = rect_of(&app.state, Win::Mixer).unwrap();
+        // top and bottom: the playlist on top (place 0), the mixer below
+        assert_eq!(app.state.mixer_hang().map(|h| h.bottom()), Some(crate::views::status_rect(&app.state).y));
+        let pl = rect_of(&app.state, Win::Playlist).unwrap();
+        assert!(drop(&mut app.state, Win::Mixer, (pl.cx(), pl.cy())));
+        let mx2 = rect_of(&app.state, Win::Mixer).unwrap();
+        assert!(mx2.y < mx.y, "the mixer on top now");
+        assert_eq!(app.state.mixer_hang(), Some(Rect::new(mx2.x, mx2.bottom(), mx2.w, GUTTER)));
+    }
+
     /// The gap drags the split, within bounds; a title bar dropped on another window swaps them; all is kept.
     #[test]
     fn drag_drop_and_keep() {
