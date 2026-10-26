@@ -209,11 +209,12 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     let docked = s.docked();
     // spec: ui/flstheme.md §3 (BackMode, BackPicFilename); no watermark over a picture (`wallpaper`).
+    // The cutting-edge branch marks itself: the watermark and the version string lean red.
     if docked.is_none() && !crate::wallpaper::paint(ui, work) {
-        let wm = ui.t.watermark;
+        let wm = ui.t.watermark.mix(CUTTING_EDGE_RED, 0.12);
         icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
-        let version = concat!("Lemon Studio v", env!("CARGO_PKG_VERSION"), " - pre-alpha");
-        let vc = ui.t.version_text;
+        let version = concat!("Lemon Studio v", env!("CARGO_PKG_VERSION"), " - cutting-edge pre-alpha");
+        let vc = ui.t.version_text.mix(CUTTING_EDGE_RED, 0.65);
         let vw = ui.c.text_width(crate::views::fnt(16.0), version);
         ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, work.bottom() - 22.0, vc, version);
     }
@@ -266,9 +267,13 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         }
         ui.c.pop_clip();
         ui.win = None;
+        // A maximized window fills the card square: its corners are rounded before the floating windows above it,
+        // which go over them.
+        if s.bar.lemon && docked_at == Some(i) {
+            card_corners(ui, work);
+        }
     }
     if s.bar.lemon {
-        card_corners(ui, work);
         toolbar::paint_status_bar(ui, s, f);
     }
     if !s.toolbar.hidden {
@@ -325,6 +330,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     overlays
 }
+
+/// The cutting-edge branch's mark colour (the workspace watermark and version string).
+const CUTTING_EDGE_RED: Color = Color::rgb(0xe5483b);
 
 /// The Lemon layout's backdrop around the workspace card: a shade darker than the workspace.
 pub(crate) fn backdrop(ui: &Ui) -> Color {
