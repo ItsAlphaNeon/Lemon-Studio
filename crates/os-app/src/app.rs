@@ -2306,44 +2306,55 @@ impl App {
         if crate::project_plugins::native_first() {
             return;
         }
-        let todo: Vec<(u16, u8, String, Vec<u8>)> = self
+        // Runs every tick: the slots already hosted are passed over before their states are read, as an Edison slot's
+        // can hold tens of megabytes of audio.
+        let todo: Vec<(u16, u8, String)> = self
             .state
             .project
             .mixer
             .iter()
             .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
+            .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
             .filter_map(|(t, k, s)| {
                 s.as_ref()
                     .filter(|s| {
                         [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str())
                             || crate::plugins::recreation_of(&s.name).is_some()
                     })
-                    .map(|s| (t, k, s.name.clone(), s.state.clone()))
+                    .map(|s| (t, k, s.name.clone()))
             })
-            .filter(|&(t, k, _, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
             .collect();
         let mut made = false;
-        for (t, k, file, fl) in todo {
+        for (t, k, file) in todo {
             if self.past_deadline() {
                 break;
             }
-            let (name, st) = if file == EQ_FILE_NAME {
-                (LEMON_EQ, Some(lemon_parametric_eq_2::params::plugin_state_from_fl(&fl)))
-            } else if file == LOVE_PHILTER_FILE_NAME {
-                // Bytes that are not a Love Philter state open Pulp Filter's starting state.
-                (PULP_FILTER, Some(pulp_filter::plugin_state_from_fl(&fl)))
-            } else if file == MAXIMUS_FILE_NAME {
-                // Bytes that are not a Maximus state open Press's starting state.
-                (PRESS, Some(press::plugin_state_from_fl(&fl)))
-            } else if let Some(lemon) = crate::plugins::recreation_of(&file) {
-                // A state shorter than the original's, or of a later version, opens the defaults (spec:
-                // plugins/lemon-small-effects.md §5).
-                (lemon, crate::plugins::recreation_state_from_fl(lemon, &fl))
-            } else {
-                // Bytes that are not an Edison state open an empty Tesla.
-                (TESLA, tesla::plugin_state_from_edison(&fl))
+            let recreation = crate::plugins::recreation_of(&file);
+            let name = match file.as_str() {
+                EQ_FILE_NAME => LEMON_EQ,
+                LOVE_PHILTER_FILE_NAME => PULP_FILTER,
+                MAXIMUS_FILE_NAME => PRESS,
+                _ => recreation.unwrap_or(TESLA),
             };
             let Some(index) = self.plugins.effect_index(name) else { continue };
+            let track = self.state.project.mixer.iter().find(|m| m.index == t);
+            let Some(fl) = track.and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.state.as_slice()) else { continue };
+            let st = if file == EQ_FILE_NAME {
+                Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl))
+            } else if file == LOVE_PHILTER_FILE_NAME {
+                // Bytes that are not a Love Philter state open Pulp Filter's starting state.
+                Some(pulp_filter::plugin_state_from_fl(fl))
+            } else if file == MAXIMUS_FILE_NAME {
+                // Bytes that are not a Maximus state open Press's starting state.
+                Some(press::plugin_state_from_fl(fl))
+            } else if let Some(lemon) = recreation {
+                // A state shorter than the original's, or of a later version, opens the defaults (spec:
+                // plugins/lemon-small-effects.md §5).
+                crate::plugins::recreation_state_from_fl(lemon, fl)
+            } else {
+                // Bytes that are not an Edison state open an empty Tesla.
+                tesla::plugin_state_from_edison(fl)
+            };
             made = true;
             if let Err(e) = self.plugins.create_effect(t, k, index, st.as_deref()) {
                 self.fx_failed.push(fx_key(t, k));

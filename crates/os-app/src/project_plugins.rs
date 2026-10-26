@@ -471,11 +471,13 @@ impl crate::app::App {
             .project
             .mixer
             .iter()
-            .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| s.as_ref().map(|s| (m.index, k as u8, s.name.clone(), s.state.clone()))))
-            .filter(|(t, k, name, _)| {
-                let key = fx_key(*t, *k);
-                !name.is_empty() && name != WRAPPER && !self.plugins.hosted.contains_key(&key) && !self.native_failed.contains(&key)
+            .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| s.as_ref().map(|s| (m.index, k as u8, s))))
+            // Before the states are copied: this runs every tick, and an Edison slot's can be tens of megabytes.
+            .filter(|&(t, k, s)| {
+                let key = fx_key(t, k);
+                !s.name.is_empty() && s.name != WRAPPER && !self.plugins.hosted.contains_key(&key) && !self.native_failed.contains(&key)
             })
+            .map(|(t, k, s)| (t, k, s.name.clone(), s.state.clone()))
             .collect();
         for (t, k, name, state) in slots {
             if self.past_deadline() {
