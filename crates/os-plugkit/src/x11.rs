@@ -227,7 +227,12 @@ impl Window {
             | EventMask::KEY_PRESS
             | EventMask::STRUCTURE_NOTIFY;
         (|| -> Result<(), Box<dyn std::error::Error>> {
-            c.create_window(x11rb::COPY_DEPTH_FROM_PARENT, win, parent, 0, 0, px(w), px(h), 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT, &CreateWindowAux::new().event_mask(events))?;
+            // The plugin look's background until the first frame is put: the server fills the window with it at once,
+            // so it does not show black while the editor builds that frame.
+            let bg = os_ui::kit::lemon::plug::BG;
+            let bg = u32::from(bg.r) << 16 | u32::from(bg.g) << 8 | u32::from(bg.b);
+            let aux = CreateWindowAux::new().event_mask(events).background_pixel(bg);
+            c.create_window(x11rb::COPY_DEPTH_FROM_PARENT, win, parent, 0, 0, px(w), px(h), 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT, &aux)?;
             c.create_gc(gc, win, &CreateGCAux::new().graphics_exposures(0))?;
             // An invisible cursor: a cleared 1 x 1 bitmap as its own mask.
             let (pix, pgc) = (c.generate_id()?, c.generate_id()?);
@@ -827,5 +832,30 @@ fn put(c: &RustConnection, win: u32, gc: u32, depth: u8, lsb_first: bool, max_re
     for (i, band) in px[..w * h].chunks(w * rows).enumerate() {
         let bytes: Vec<u8> = band.iter().flat_map(|p| if lsb_first { p.to_le_bytes() } else { p.to_be_bytes() }).collect();
         let _ = c.put_image(ImageFormat::Z_PIXMAP, win, gc, w as u16, (band.len() / w) as u16, 0, (i * rows) as i16, 0, depth, &bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use x11rb::wrapper::ConnectionExt as _;
+
+    /// A new editor window shows the plugin look's background before its first frame, not black. Opens a window: a
+    /// private X server only (`DISPLAY=:78 cargo test -p os-plugkit -- --ignored`).
+    #[test]
+    #[ignore]
+    fn a_new_window_is_never_black() {
+        let (c, screen) = RustConnection::connect(None).expect("an X server (DISPLAY)");
+        let root = c.setup().roots[screen].root;
+        let parent = c.generate_id().unwrap();
+        c.create_window(x11rb::COPY_DEPTH_FROM_PARENT, parent, root, 0, 0, 200, 120, 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT, &CreateWindowAux::new()).unwrap();
+        c.map_window(parent).unwrap();
+        c.flush().unwrap();
+        let w = Window::open(parent, (160, 100), Waker::new().unwrap()).unwrap();
+        c.sync().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let img = c.get_image(ImageFormat::Z_PIXMAP, w.win, 80, 50, 1, 1, !0).unwrap().reply().unwrap();
+        let px = u32::from_le_bytes(img.data[..4].try_into().unwrap()) & 0xff_ffff;
+        assert_eq!(px, 0x2b2b2b, "the background, not black ({px:06x})");
     }
 }
