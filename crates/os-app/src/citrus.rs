@@ -120,6 +120,9 @@ impl crate::app::App {
         }
         let mut added = false;
         for row in rows {
+            if self.past_deadline() {
+                break;
+            }
             let fl = self.state.project.channels[row].plugin_state.clone().unwrap_or_default();
             let st = citrus::plugin_state_from_fl(&fl);
             match self.plugins.create_with(row, index, Some(&st)) {

@@ -352,6 +352,107 @@ fn match_case(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
+/// The folders a missing sample is looked for in by its file name (spec: flp/sample-paths.md "Missing samples"): the
+/// opened project's folder and data folder, then the folders the user picked for this project.
+fn search() -> &'static std::sync::RwLock<Vec<PathBuf>> {
+    static SEARCH: OnceLock<std::sync::RwLock<Vec<PathBuf>>> = OnceLock::new();
+    SEARCH.get_or_init(Default::default)
+}
+
+thread_local! {
+    /// The folders as the thread that set them last gave them: a host that opens several projects at once on threads
+    /// of their own (tests) keeps each thread's.
+    static SEARCH_HERE: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The folders missing samples are looked for in, in order (`SampleLibrary::resolve`), for every thread.
+pub fn set_search_folders(dirs: Vec<PathBuf>) {
+    SEARCH_HERE.with(|h| *h.borrow_mut() = Some(dirs.clone()));
+    if let Ok(mut s) = search().write() {
+        *s = dirs;
+    }
+}
+
+/// The folders for this thread only (other threads keep theirs): a test starts its own empty.
+pub fn set_thread_search_folders(dirs: Vec<PathBuf>) {
+    SEARCH_HERE.with(|h| *h.borrow_mut() = Some(dirs));
+}
+
+/// The search folders: this thread's own when it set them, else the last ones set.
+pub fn search_folders() -> Vec<PathBuf> {
+    if let Some(d) = SEARCH_HERE.with(|h| h.borrow().clone()) {
+        return d;
+    }
+    search().read().map(|s| s.clone()).unwrap_or_default()
+}
+
+/// The file of `path`'s name in the first search folder that has one (its name matched without regard to case).
+fn by_name(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    search_folders().iter().filter(|d| reachable(d)).find_map(|d| {
+        let p = d.join(name);
+        if p.is_file() {
+            return Some(p);
+        }
+        match_case(&p).filter(|p| p.is_file())
+    })
+}
+
+/// How long the first look at a drive or network share may take before its samples count as missing.
+pub const REACH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+/// How long a drive or share that did not answer in time is skipped before it is tried again.
+const UNREACHABLE_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The drive or network share a path is on (`C:\`, `\\server\share\`), or `/` off Windows; `None` for a relative path.
+fn root_of(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut root = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::Prefix(_) | Component::RootDir => root.push(c.as_os_str()),
+            _ => break,
+        }
+    }
+    (!root.as_os_str().is_empty()).then_some(root)
+}
+
+/// Whether the drive or share `path` is on answers (spec: flp/sample-paths.md "Missing samples"). A sample path names
+/// a drive or share of the machine the project was made on, which here can be a network location that is gone or a
+/// drive that blocks every look at it for many seconds. Each root is looked at once, on a thread of its own, for at
+/// most `REACH_TIMEOUT`; one that did not answer counts as missing for `UNREACHABLE_FOR`, without waiting again.
+pub fn reachable(path: &Path) -> bool {
+    use std::sync::mpsc;
+    use std::time::Instant;
+    /// A root's last look: when, and whether it answered (`None`: still looking).
+    type Roots = HashMap<PathBuf, (Instant, Option<bool>)>;
+    static ROOTS: OnceLock<std::sync::Mutex<Roots>> = OnceLock::new();
+    let Some(root) = root_of(path) else { return true };
+    let roots = ROOTS.get_or_init(Default::default);
+    if let Some(&(at, answer)) = roots.lock().ok().as_ref().and_then(|r| r.get(&root)) {
+        match answer {
+            Some(true) => return true,
+            Some(false) if at.elapsed() < UNREACHABLE_FOR => return false,
+            // A look still running from before: the root has not answered for that long.
+            None if at.elapsed() >= REACH_TIMEOUT => return false,
+            _ => {}
+        }
+    }
+    let (tx, rx) = mpsc::channel();
+    let probe = root.clone();
+    if std::thread::Builder::new().name("sample-root".into()).spawn(move || tx.send(probe.exists()).ok()).is_err() {
+        return true;
+    }
+    if let Ok(mut r) = roots.lock() {
+        r.insert(root.clone(), (Instant::now(), None));
+    }
+    // A root that does not exist answers at once (false): its paths are simply missing, not slow.
+    let answer = rx.recv_timeout(REACH_TIMEOUT).ok();
+    if let Ok(mut r) = roots.lock() {
+        r.insert(root, (Instant::now(), Some(answer.is_some())));
+    }
+    answer.is_some()
+}
+
 /// Resolves project sample paths (with `%FLStudioFactoryData%` / `%FLStudioData%`
 /// placeholders) and caches decoded samples.
 #[derive(Debug, Default)]
@@ -446,10 +547,13 @@ impl SampleLibrary {
         } else {
             Self::local_path(project_path)
         };
+        if !reachable(&path) {
+            return Some(by_name(&path).unwrap_or(path));
+        }
         if path.exists() {
             return Some(path);
         }
-        Some(match_case(&path).unwrap_or(path))
+        Some(match_case(&path).or_else(|| by_name(&path)).unwrap_or(path))
     }
 
     /// Whether a project's sample path starts with one of the install folder's placeholders (in any case).

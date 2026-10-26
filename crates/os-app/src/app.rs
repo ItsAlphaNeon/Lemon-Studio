@@ -1277,6 +1277,14 @@ pub struct App {
     pub(crate) native_failed: Vec<usize>,
     /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
     loading: Option<crate::loading::Loading>,
+    /// The opened project's missing samples and plugins (`crate::missing`).
+    pub(crate) missing: crate::missing::Missing,
+    /// A zipped project being unzipped or written (`crate::zipped`): its panel shows, input waits.
+    pub(crate) zipping: Option<crate::zipped::Zipping>,
+    /// While a project loads: when the plugin hosts stop for this tick (`host_plugins`), and whether one stopped with
+    /// instances left to start.
+    host_deadline: Option<std::time::Instant>,
+    host_more: bool,
     /// An export is rendering (FILE > Export): its first file's name and progress (0..1); the same panel shows, input
     /// waits.
     pub(crate) export: Option<(String, f32)>,
@@ -1296,6 +1304,9 @@ pub struct App {
 /// Window-level requests the shell must carry out after an event.
 impl App {
     pub fn new(path: Option<PathBuf>) -> App {
+        // Each test's app looks for missing samples only in its own project's folders, never another test's.
+        #[cfg(test)]
+        os_engine::sample::set_thread_search_folders(Vec::new());
         let transport = Transport::new(crate::factory_folder::dir());
         // Tests keep the old five-channel template; a new session starts with one Lemon Sampler channel.
         #[cfg(test)]
@@ -1472,6 +1483,10 @@ impl App {
             osc3_look: None,
             native_failed: Vec::new(),
             loading: None,
+            missing: Default::default(),
+            zipping: None,
+            host_deadline: None,
+            host_more: false,
             export: None,
             export_reveal: false,
             pattern_render: None,
@@ -1509,6 +1524,10 @@ impl App {
         let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         if ext == "mid" || ext == "midi" {
             return self.midi_file_chosen(path, false);
+        }
+        // A zipped project is unzipped beside itself, then its project file opens (`crate::zipped`).
+        if ext == "zip" {
+            return crate::zipped::import(self, path);
         }
         // A project in the layout used before version 24.2 gets a dialog that says what to do (spec:
         // flp/events/channels.md "Version scope"), not just a line in the hint bar.
@@ -1572,6 +1591,7 @@ impl App {
                 s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 self.mark_saved();
+                crate::missing::opened(self);
                 self.loading = Some(crate::loading::Loading::start(&self.state.project));
                 self.state.playlist.wave_wait = true;
                 self.invalidate();
@@ -1682,13 +1702,14 @@ impl App {
 
     /// Saves the project to `target`; a file over the Project data size warning is said (`App::size_notice`).
     pub(crate) fn save_to(&mut self, target: PathBuf) {
-        if let Some(bytes) = self.write_project(target) {
+        if let Some(bytes) = self.write_project(target, &mut |_| {}) {
             self.size_notice(bytes);
         }
     }
 
-    /// Writes the project to `target`: the size of the file written, None when the save failed.
-    fn write_project(&mut self, target: PathBuf) -> Option<u64> {
+    /// Writes the project to `target`: the size of the file written, None when the save failed. `edit` changes what is
+    /// written (not the project), once the project's state is gathered.
+    fn write_project(&mut self, target: PathBuf, edit: &mut dyn FnMut(&mut os_model::Project)) -> Option<u64> {
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
         crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
         // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
@@ -1755,6 +1776,7 @@ impl App {
         crate::project_info::stamp(s, &mut proj);
         crate::data_folder::stamp(s, &mut proj);
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
+        edit(&mut proj);
         // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
         let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
@@ -1781,6 +1803,11 @@ impl App {
     /// Writes the project to `target` as Save does, as a copy: the project keeps its file, name, unsaved changes and the
     /// message (backups, spec: ui/settings-choices.md "Backup files"). None while a project loads or an export renders.
     pub(crate) fn save_copy(&mut self, target: PathBuf) -> Option<Result<(), String>> {
+        self.save_copy_with(target, &mut |_| {})
+    }
+
+    /// `save_copy`, with `edit` changing what is written (`write_project`).
+    pub(crate) fn save_copy_with(&mut self, target: PathBuf, edit: &mut dyn FnMut(&mut os_model::Project)) -> Option<Result<(), String>> {
         if self.loading.is_some() || self.export.is_some() {
             return None;
         }
@@ -1790,7 +1817,7 @@ impl App {
         // recent one (spec: ui/recent-projects.md §2).
         let (last, recent) = (crate::templates::last_kept(), crate::recent::list());
         // A copy never warns about its size.
-        self.write_project(target);
+        self.write_project(target, edit);
         crate::templates::restore_last(last);
         crate::recent::restore(&recent);
         let s = &mut self.state;
@@ -1949,6 +1976,21 @@ impl App {
                     self.search_folder_chosen(row, p);
                 }
             }
+            Then::MissingFiles => {
+                if reply == Reply::Button(Answer::Yes) {
+                    crate::missing::pick_folder(self);
+                }
+            }
+            Then::SampleFolder => {
+                if let Some(p) = file {
+                    crate::missing::search(self, p);
+                }
+            }
+            Then::ExportZip => {
+                if let Some(p) = file {
+                    crate::zipped::export(self, p);
+                }
+            }
             Then::FactoryFolder => {
                 if let Some(p) = file {
                     self.set_factory_folder(Some(p));
@@ -2087,7 +2129,7 @@ impl App {
     fn open_dialog(&mut self) {
         let start = self.state.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
         let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Open project", "project", crate::dialog::Then::OpenProject)
-            .filter("FLP project", &["flp"])
+            .filter("FLP project", &["flp", "zip"])
             .start(start.as_deref());
         self.file_dialog(dlg);
     }
@@ -2196,18 +2238,54 @@ impl App {
             self.sync_samplers(None);
             return;
         };
-        if decoded && self.sync_samplers(Some(std::time::Instant::now() + crate::loading::HOST_BUDGET)) {
+        let deadline = std::time::Instant::now() + crate::loading::HOST_BUDGET;
+        // Then the plugin channels and mixer effects, under the same budget, then the samplers' played samples.
+        if decoded && self.sync_samplers(Some(deadline)) && self.host_plugins(deadline) && self.loading.as_mut().is_some_and(|l| l.builds_done()) {
             self.loading = None;
             self.state.playlist.wave_wait = false;
+            // What was not found is listed now (spec: ui/project-loading.md §6).
+            crate::missing::loaded(self);
             return self.invalidate();
         }
         self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
     }
 
+    /// Starts the opened project's plugin channels and mixer effects until `deadline` (`project_plugins::sync_wrapped`
+    /// and the other hosts stop after the instance that passes it): true when none is left to start.
+    fn host_plugins(&mut self, deadline: std::time::Instant) -> bool {
+        self.host_deadline = Some(deadline);
+        self.host_more = false;
+        self.sync_effects();
+        self.sync_wrapped();
+        self.sync_osc3();
+        self.sync_citrus();
+        self.sync_native();
+        self.host_deadline = None;
+        let samplers = self.state.hosted_rows.iter().filter(|&&r| self.state.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
+        let done = (self.plugins.hosted.len() + self.wrap_failed.len() + self.fx_failed.len() + self.native_failed.len()).saturating_sub(samplers);
+        let more = self.host_more;
+        if let Some(l) = &mut self.loading {
+            l.label.clear();
+            l.plugins_done = done;
+            // Plugins no host plays (FL's own effects without a recreation) are not waited for.
+            if !more {
+                l.plugins = done;
+            }
+        }
+        !more
+    }
+
+    /// Whether the plugin hosts' time this tick is over (`host_plugins`): the host that asks stops and goes on next tick.
+    pub(crate) fn past_deadline(&mut self) -> bool {
+        let past = self.host_deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        self.host_more |= past;
+        past
+    }
+
     /// A project is loading or an export is rendering: the window shows the progress and takes no input (spec:
     /// ui/project-loading.md §2).
     pub fn loading(&self) -> bool {
-        self.loading.is_some() || self.export.is_some()
+        self.loading.is_some() || self.export.is_some() || self.missing.search.is_some() || self.zipping.is_some()
     }
 
     /// The opened project's loading, for the startup splash: its progress (0..=1) and step, while it loads.
@@ -2242,6 +2320,9 @@ impl App {
             .collect();
         let mut made = false;
         for (t, k, file, fl) in todo {
+            if self.past_deadline() {
+                break;
+            }
             let (name, st) = if file == EQ_FILE_NAME {
                 (LEMON_EQ, Some(lemon_parametric_eq_2::params::plugin_state_from_fl(&fl)))
             } else if file == LOVE_PHILTER_FILE_NAME {
@@ -2288,12 +2369,15 @@ impl App {
         self.scan_tick();
         self.loading_tick();
         self.export_tick();
+        crate::missing::tick(self);
+        crate::zipped::tick(self);
         self.midi_tick();
         self.mixer_tick();
-        self.sync_effects();
         crate::presets::pending_tick(self);
         self.params_tick();
+        // While a project loads, `loading_tick` starts these a few per tick.
         if self.loading.is_none() {
+            self.sync_effects();
             self.sync_wrapped();
             self.sync_osc3();
             self.follow_osc3_samples();
@@ -3871,6 +3955,12 @@ impl App {
         if let Some(l) = &self.loading {
             crate::loading::paint(canvas, &self.theme.colors, l);
         }
+        if let Some(s) = &self.missing.search {
+            crate::missing::paint(canvas, &self.theme.colors, s);
+        }
+        if let Some(z) = &self.zipping {
+            crate::zipped::paint(canvas, &self.theme.colors, z);
+        }
         if let Some((name, p)) = &self.export {
             let status = format!("Rendering {name}   {:.0} %", p * 100.0);
             crate::loading::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
@@ -3974,7 +4064,7 @@ impl App {
         // A drop accepts an Info box or a browser folder cell being edited, as a click does.
         crate::project_info::accept_info(&mut self.state);
         crate::search_folders::commit(&mut self.state);
-        if ext == "flp" {
+        if ext == "flp" || ext == "zip" {
             return self.ask_discard("opening another project", crate::dialog::Next::Open(path));
         }
         // A MIDI file is imported as FILE ▸ Import ▸ MIDI file does (spec: ui/midi-files.md §10.6).
@@ -8214,6 +8304,7 @@ impl App {
             (0, FILE_EXPORT) => self.open_export(false),
             (0, FILE_EXPORT_MP3) => self.open_export(true),
             (0, FILE_EXPORT_MIDI) => self.export_midi_dialog(false),
+            (0, i) if item_at(0, i).is_some_and(|it| it.label == EXPORT_ZIP_LABEL) => crate::zipped::export_dialog(self),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
             (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Sampler") => {
                 if let Some(index) = self.plugins.index_of(crate::plugins::LEMON_SAMPLER) {

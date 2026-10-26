@@ -209,7 +209,7 @@ mod tests {
         // The native menu bar: the same rows; More stays greyed out there (no native submenus yet).
         let bar = &menus::bar_model(&app.state)[0];
         let at = bar.rows.iter().position(|r| r.label == HEADING).expect("the heading");
-        assert_eq!((bar.rows[at].kind, bar.rows[at - 1].label.as_str()), (Kind::Head, "Export MIDI..."));
+        assert_eq!((bar.rows[at].kind, bar.rows[at - 1].label.as_str()), (Kind::Head, menus::EXPORT_ZIP_LABEL));
         let first = &bar.rows[at + 1];
         assert_eq!((first.label.as_str(), first.shortcut, first.pick), ("r11.flp", "Alt+1", Some((0, RECENT_PICK))));
         assert_eq!((bar.rows[at + 10].shortcut, bar.rows[at + 11].label.as_str(), bar.rows[at + 11].enabled), ("Alt+0", MORE, false));

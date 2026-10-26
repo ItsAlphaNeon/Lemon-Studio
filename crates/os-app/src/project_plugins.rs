@@ -310,6 +310,9 @@ impl crate::app::App {
                 continue;
             }
             let Some(r) = wrapped_channel(&self.state.project.channels[row]) else { continue };
+            if self.past_deadline() {
+                break;
+            }
             let made = find(&self.plugins.available, &r).map(|i| {
                 let other = switched_format(&self.plugins.available[i].desc, &r);
                 let state = other.is_none().then_some(r.state.as_slice());
@@ -347,6 +350,9 @@ impl crate::app::App {
             .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.wrap_failed.contains(&fx_key(t, k)))
             .collect();
         for (t, k, r) in slots {
+            if self.past_deadline() {
+                break;
+            }
             let made = find(&self.plugins.effects, &r).map(|i| {
                 let other = switched_format(&self.plugins.effects[i].desc, &r);
                 let state = other.is_none().then_some(r.state.as_slice());
@@ -378,8 +384,8 @@ impl crate::app::App {
         }
         let mut parts = Vec::new();
         if !missing.is_empty() {
-            missing.dedup();
-            parts.push(format!("Plugins not found (kept in the project): {}", missing.join(", ")));
+            self.missing.add_plugins(&missing);
+            parts.push(format!("Plugins not found (kept in the project): {}", name_list(self.missing.plugins.clone(), 6)));
         }
         if !switched.is_empty() {
             let names = name_list(switched, 4);
@@ -423,6 +429,9 @@ impl crate::app::App {
             })
             .collect();
         for (row, name, state) in rows {
+            if self.past_deadline() {
+                break;
+            }
             let Some(i) = find_native(&self.plugins.available, &name) else {
                 if !scanning {
                     self.native_failed.push(row);
@@ -460,6 +469,9 @@ impl crate::app::App {
             })
             .collect();
         for (t, k, name, state) in slots {
+            if self.past_deadline() {
+                break;
+            }
             let key = fx_key(t, k);
             let Some(i) = find_native(&self.plugins.effects, &name) else {
                 if !scanning {
@@ -498,6 +510,8 @@ impl crate::app::App {
         if !kept.is_empty() {
             parts.push(format!("saving keeps the file's settings for {}", name_list(kept, 6)));
         }
+        self.missing.add_plugins(&missing);
+        self.missing.add_plugins(&failed);
         if !missing.is_empty() {
             parts.push(format!("native plugins not installed (kept in the project): {}", name_list(missing, 6)));
         }
