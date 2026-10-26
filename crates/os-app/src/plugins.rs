@@ -3190,7 +3190,7 @@ mod tests {
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
         assert!(pl.set_state(0, json.as_bytes()), "the sample reaches the VST3 instance");
         let state = pl.state(0).unwrap();
-        assert!(state.starts_with(b"VST3"), "state bytes are a .vstpreset");
+        assert!(os_vst3::fl_state::FlState::parse(&state).is_some(), "state bytes are in FL Studio's wrapper layout");
         assert!(pl.set_state(0, &state));
         let (_, inst) = pl.instruments().pop().unwrap();
         let mut i = inst.lock().unwrap();
@@ -3237,7 +3237,8 @@ mod tests {
             fx.idle();
         }
         let (ch_state, fx_state) = (a.plugins.state(row).unwrap(), a.plugins.state(fx_key(3, 2)).unwrap());
-        assert!(ch_state.starts_with(b"VST3") && fx_state.starts_with(b"VST3"));
+        let fl = |b: &[u8]| os_vst3::fl_state::FlState::parse(b).is_some();
+        assert!(fl(&ch_state) && fl(&fx_state), "saved in FL Studio's wrapper layout");
         a.save_to(path.clone());
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
 
