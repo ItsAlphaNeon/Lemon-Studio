@@ -847,11 +847,8 @@ impl ApplicationHandler for Shell {
             e => e,
         };
         match event {
-            // While a dialog is open the window stays (the dialog is answered first).
             WindowEvent::CloseRequested => {
-                if !self.app.modal_open() {
-                    self.app.ask_discard("closing", crate::dialog::Next::Close);
-                }
+                self.app.close_requested();
                 if self.app.want_exit {
                     el.exit();
                 }

@@ -1844,6 +1844,21 @@ impl App {
         self.saved.0 != self.state.project || self.saved.1 != self.state.tempo
     }
 
+    /// The system asks the window to close (its close shortcut, a taskbar or dock): the settings window, drawn inside
+    /// the main window, closes first, as a window of its own would under that shortcut; otherwise the app closes, once
+    /// unsaved changes are answered. While a dialog is open the window stays (the dialog is answered first).
+    pub fn close_requested(&mut self) {
+        if self.modal_open() {
+            return;
+        }
+        if self.state.settings.open {
+            self.state.settings.open = false;
+            self.invalidate();
+            return;
+        }
+        self.ask_discard("closing", crate::dialog::Next::Close);
+    }
+
     /// Before the project is replaced or the app closes (`doing`: "closing", ...): with unsaved changes, asks to save
     /// them (spec: ui/dialogs.md §1f), and `next` follows once they are saved or not wanted; otherwise right away.
     pub fn ask_discard(&mut self, doing: &str, next: crate::dialog::Next) {
@@ -11417,6 +11432,17 @@ mod tests {
         assert!(top + crate::views::settings::TABLE_ROWS <= 80);
         drag(&mut app, &mut c, Scroll::PlugTable, 2000.0);
         assert_eq!(app.state.plugdb.top, 80 - crate::views::settings::TABLE_ROWS, "to the last row, no further");
+    }
+
+    /// The system's close shortcut over the settings window closes only that window; the next one closes the app.
+    #[test]
+    fn close_shortcut_closes_settings_first() {
+        let mut app = App::new(None);
+        app.open_settings(0);
+        app.close_requested();
+        assert!(!app.state.settings.open && !app.want_exit, "only the settings window closed");
+        app.close_requested();
+        assert!(app.want_exit, "then the app");
     }
 
     #[test]
