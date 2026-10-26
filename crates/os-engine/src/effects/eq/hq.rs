@@ -70,7 +70,7 @@ pub const TAPS: usize = 176;
 /// HQ Enhanced's taps: a half-band sinc centred on tap 89 under a sine window.
 pub fn decimator_taps() -> [f32; TAPS] {
     std::array::from_fn(|i| {
-        let d = (i as f64 - 89.0) * 1.5707963267948966;
+        let d = (i as f64 - 89.0) * std::f64::consts::FRAC_PI_2;
         let c = if i == 89 { 1.0 } else { d.sin() / d };
         ((i as f64 * 0.017849958259032916).sin() * f64::from((0.5 * c) as f32)) as f32
     })

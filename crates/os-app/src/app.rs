@@ -118,6 +118,9 @@ pub enum Util {
     Undo,
     Help,
     Save,
+    /// The audio editor button: Tesla on the master track; `NewAudioEditor` is its right click.
+    AudioEditor,
+    NewAudioEditor,
 }
 
 /// Mouse cursor shapes the shell should show.
@@ -937,6 +940,8 @@ pub struct State {
     pub pending_open: Option<usize>,
     /// Samples to load into rows' Lemon Sampler instances on the next tick (browser send, drops on a rack row).
     pub sample_loads: Vec<(usize, String)>,
+    /// An undo or redo changed the timebase (`history::Timebase`): playback stops on the next tick.
+    pub retimed: bool,
     pub file: Option<os_flp::FlpFile>,
     pub path: Option<PathBuf>,
     /// Open child windows, bottom to top.
@@ -1306,6 +1311,7 @@ impl App {
                 pending_plugin: None,
                 pending_open: None,
                 sample_loads: Vec::new(),
+                retimed: false,
                 file: None,
                 path: None,
                 z: vec![Win::Playlist, Win::ChannelRack],
@@ -1498,8 +1504,16 @@ impl App {
         }
     }
 
-    /// Opens a project file; whether it opened (a converted older project opens without a path).
+    /// Opens a project file; whether it opened (a converted older project opens without a path; a MIDI file goes
+    /// through the import form first, so it has not).
     pub fn open(&mut self, path: PathBuf) -> bool {
+        // A MIDI file opened as a project (the command line, say) is imported as a dropped one is (spec:
+        // ui/midi-files.md §10.6).
+        let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        if ext == "mid" || ext == "midi" {
+            self.midi_file_chosen(path, false);
+            return false;
+        }
         // A project in the layout used before version 24.2 is converted to the newer one as it is read, as FL 26 does
         // (spec: flp/layouts.md "Saving a file of an older generation"), when FL 20 or later saved it; an older one
         // gets a dialog that says what to do (spec: flp/events/channels.md "Version scope"), not just a line in the
@@ -2106,14 +2120,22 @@ impl App {
     }
 
     /// The built-in recreations write their settings into the model as the file's own plugin state: Lemon Parametric
-    /// EQ into its slots, Lemon Trio into its channels.
+    /// EQ, Tesla (as Edison), Pulp Filter (as Love Philter) and Press (as Maximus) into their slots, Lemon Trio into its
+    /// channels.
     pub(crate) fn store_builtin_states(&mut self) {
+        use crate::plugins::{EDISON_FILE_NAME, EQ_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME};
         for key in self.plugins.hosted.keys().copied().filter(|&k| k >= crate::plugins::FX_KEY).collect::<Vec<_>>() {
-            let (Some((t, k)), Some(st)) = (crate::plugins::fx_of(key), self.plugins.eq_file_state(key)) else { continue };
-            if let Some(slot) = self.state.project.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) {
-                if slot.name == crate::plugins::EQ_FILE_NAME {
-                    slot.state = st;
-                }
+            let Some((t, k)) = crate::plugins::fx_of(key) else { continue };
+            let Some(slot) = self.state.project.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()) else { continue };
+            let st = match slot.name.as_str() {
+                EQ_FILE_NAME => self.plugins.eq_file_state(key),
+                EDISON_FILE_NAME => self.plugins.edison_file_state(key),
+                LOVE_PHILTER_FILE_NAME => self.plugins.love_philter_file_state(key),
+                MAXIMUS_FILE_NAME => self.plugins.maximus_file_state(key),
+                _ => None,
+            };
+            if let Some(st) = st {
+                slot.state = st;
             }
         }
         crate::osc3::store(&mut self.state.project, &self.plugins);
@@ -2201,34 +2223,59 @@ impl App {
         self.loading.is_some() || self.export.is_some()
     }
 
+    /// The opened project's loading, for the startup splash: its progress (0..=1) and step, while it loads.
+    pub fn project_loading(&self) -> Option<(f32, String)> {
+        let l = self.loading.as_ref()?;
+        Some((l.progress(), l.status().split_whitespace().collect::<Vec<_>>().join(" ")))
+    }
+
     /// Mixer slots that hold the project file's parametric EQ are played and edited by Lemon Parametric EQ, started
     /// from the slot's saved state (spec: plugins/lemon-parametric-eq-2.md §8). Without the plugin the engine's own EQ
-    /// plays them.
+    /// plays them. Edison's slots are opened as Tesla the same way, with their sample, loop, markers and recording
+    /// settings (spec: plugins/tesla/README.md "Opening Edison slots"), Love Philter's as Pulp Filter and Maximus's as
+    /// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6).
     pub(crate) fn sync_effects(&mut self) {
-        use crate::plugins::{fx_key, EQ_FILE_NAME, LEMON_EQ};
+        use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME, PRESS, PULP_FILTER, TESLA};
         // The installed EQ plays these slots instead (`host_native`).
         if crate::project_plugins::native_first() {
             return;
         }
-        let Some(index) = self.plugins.effect_index(LEMON_EQ) else { return };
-        let todo: Vec<(u16, u8, Vec<u8>)> = self
+        let todo: Vec<(u16, u8, String, Vec<u8>)> = self
             .state
             .project
             .mixer
             .iter()
             .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
-            .filter_map(|(t, k, s)| s.as_ref().filter(|s| s.name == EQ_FILE_NAME).map(|s| (t, k, s.state.clone())))
-            .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
+            .filter_map(|(t, k, s)| {
+                s.as_ref()
+                    .filter(|s| [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str()))
+                    .map(|s| (t, k, s.name.clone(), s.state.clone()))
+            })
+            .filter(|&(t, k, _, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
             .collect();
-        if todo.is_empty() {
-            return;
-        }
-        for (t, k, fl) in todo {
-            let st = lemon_parametric_eq_2::params::plugin_state_from_fl(&fl);
-            if let Err(e) = self.plugins.create_effect(t, k, index, Some(&st)) {
+        let mut made = false;
+        for (t, k, file, fl) in todo {
+            let (name, st) = if file == EQ_FILE_NAME {
+                (LEMON_EQ, Some(lemon_parametric_eq_2::params::plugin_state_from_fl(&fl)))
+            } else if file == LOVE_PHILTER_FILE_NAME {
+                // Bytes that are not a Love Philter state open Pulp Filter's starting state.
+                (PULP_FILTER, Some(pulp_filter::plugin_state_from_fl(&fl)))
+            } else if file == MAXIMUS_FILE_NAME {
+                // Bytes that are not a Maximus state open Press's starting state.
+                (PRESS, Some(press::plugin_state_from_fl(&fl)))
+            } else {
+                // Bytes that are not an Edison state open an empty Tesla.
+                (TESLA, tesla::plugin_state_from_edison(&fl))
+            };
+            let Some(index) = self.plugins.effect_index(name) else { continue };
+            made = true;
+            if let Err(e) = self.plugins.create_effect(t, k, index, st.as_deref()) {
                 self.fx_failed.push(fx_key(t, k));
-                self.state.message = Some(format!("{LEMON_EQ}: {e}"));
+                self.state.message = Some(format!("{name}: {e}"));
             }
+        }
+        if !made {
+            return;
         }
         self.transport.set_effects(self.plugins.effects());
         self.state.piano.dirty = true;
@@ -2238,6 +2285,9 @@ impl App {
     pub(crate) fn plugin_tick(&mut self) {
         // Instances follow their channels by id (an undo, a command), before rows are looked at.
         self.follow_ids(true, false);
+        if std::mem::take(&mut self.state.retimed) {
+            self.transport.stop();
+        }
         // Rows gone without the app (an undone drop that made a channel, `rack::remove_last`): their instruments go.
         let len = self.state.project.channels.len();
         if self.plugins.hosted.range(len..crate::plugins::FX_KEY).next().is_some() {
@@ -2331,7 +2381,8 @@ impl App {
         self.plugins.idle(|_| None);
         // What was hosted on this tick takes the id of its channel or slot now, before anything moves rows.
         self.follow_ids(false, false);
-        // An open instrument editor is processed while nothing plays, so notes from its own keyboard sound.
+        // Open plugin editors are processed while nothing plays: notes from an instrument's own keyboard sound, and an
+        // effect's own playback (Tesla) too.
         let listen = self.plugins.editor_open();
         if listen {
             self.sync_live();
@@ -2473,6 +2524,10 @@ impl App {
                     Request::Automate(row, index) => {
                         self.state.message = self.params_automate(row, index);
                         self.invalidate();
+                        continue;
+                    }
+                    Request::Audio(path, channel) => {
+                        self.sample_from_plugin(path, channel);
                         continue;
                     }
                     Request::NotAvailable(name) => {
@@ -4029,6 +4084,32 @@ impl App {
         self.invalidate();
     }
 
+    /// A sample a Lemon plugin sent (Tesla's "Send to playlist as audio clip" / "Send to selected channel", host link
+    /// `Audio`; spec: plugins/tesla/README.md "Version 1"): an audio clip at the song position on the first track
+    /// free over it (one "Playlist edit" step), or the selected channel's sample (a new sampler channel when the
+    /// selected one isn't a sampler), as a drop on the rack does.
+    pub(crate) fn sample_from_plugin(&mut self, path: String, channel: bool) {
+        if channel {
+            let s = &self.state;
+            let row = Some(s.selected_channel).filter(|&r| s.project.channels.get(r).is_some_and(|c| c.kind.is_sampler()));
+            return self.sample_to_channel(path, row);
+        }
+        let s = &mut self.state;
+        let start = s.playlist.pos;
+        let secs = s.playlist.wave(&path).map_or(0.0, |w| w.secs());
+        let p = &s.project;
+        let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
+        let len = (secs * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
+        let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
+        let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        s.message = Some(match crate::playlist::add_audio_clip(s, &path, track, start) {
+            Some(_) => format!("Added audio clip {name}"),
+            None => format!("Could not read {name} as audio"),
+        });
+        s.piano.dirty = true;
+        self.invalidate();
+    }
+
     /// The mouse pointer's screen position (physical px).
     #[cfg(any(windows, target_os = "macos"))]
     fn pointer_on_screen() -> Option<(i32, i32)> {
@@ -4249,9 +4330,9 @@ impl App {
 
     /// Fills the Audio page: the output devices, the audio settings and the status (spec: ui/settings.md "Audio").
     fn audio_page(&mut self) {
-        let (devices, default) = crate::audio_cfg::devices();
-        let drivers = crate::device::asio_drivers();
         let cfg = crate::audio_cfg::AudioCfg::current();
+        let (devices, default) = crate::audio_cfg::devices(&cfg);
+        let drivers = crate::device::asio_drivers();
         let st = &mut self.state.settings;
         let listed = if cfg.asio_driver().is_some() { &drivers } else { &devices };
         st.device = match &cfg.device {
@@ -4297,10 +4378,10 @@ impl App {
                 let cfg = &self.state.settings.audio;
                 let host = if cfg.asio_driver().is_some() {
                     ASIO
-                } else if cfg.exclusive() {
+                } else if cfg!(windows) && cfg.exclusive() {
                     WASAPI_EXCLUSIVE
                 } else {
-                    cpal::default_host().id().name()
+                    crate::audio_cfg::host_name(cfg)
                 };
                 format!("Status: opens with the first note or Play ({host})")
             }
@@ -4372,7 +4453,8 @@ impl App {
                     .chain(st.asio_drivers.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Asio(d.clone()))).mark(on(d, true))))
                     .collect()
             }
-            // Windows devices: shared or exclusive mode (spec: audio/wasapi-low-latency.md 4.2).
+            // Windows devices: shared or exclusive mode (spec: audio/wasapi-low-latency.md 4.2). Linux: the sound server,
+            // or an ALSA device directly.
             MODE => vec![
                 PItem::new(MODE_SHARED, Cmd::Audio(Set::Mode(false))).mark(Mark::Radio(!cfg.exclusive)),
                 PItem::new(MODE_EXCLUSIVE, Cmd::Audio(Set::Mode(true))).mark(Mark::Radio(cfg.exclusive)),
@@ -4497,13 +4579,19 @@ impl App {
     /// Settings > Project ▸ a time division's value box (`label`, `settings::LIVE_NUMBERS`) moved by `delta` (the
     /// mouse wheel). It stays in its range; a file's value outside it can only move toward it.
     fn settings_number(&mut self, label: &str, delta: i32) -> Option<String> {
-        // The value boxes declared in `crate::prefs` (General ▸ Undo history ▸ Maximum undo levels).
+        // The value boxes declared in `crate::prefs` (General ▸ Undo history ▸ Maximum undo levels, File ▸ Backup ▸
+        // Maximum).
         if let Some(n) = crate::prefs::find_number(label) {
-            // Audio ▸ Browser preview track offers "---" and the open project's insert tracks; one past them comes
-            // back in range (spec: ui/settings-choices.md "Mixer: Browser preview track").
-            let max = if n == &crate::prefs::BROWSER_PREVIEW_TRACK { n.max.min(crate::mixer::inserts(&self.state)) } else { n.max };
+            // Audio ▸ Browser preview track and Metronome track offer "---" and the open project's insert tracks; one
+            // past them comes back in range (spec: ui/settings-choices.md "Mixer: Browser preview track").
+            let track = n == &crate::prefs::BROWSER_PREVIEW_TRACK || n == &crate::prefs::METRONOME_TRACK;
+            let max = if track { n.max.min(crate::mixer::inserts(&self.state)) } else { n.max };
             let v = (i32::from(crate::prefs::number(n)) + delta).clamp(i32::from(n.min), i32::from(max.max(n.min))) as u16;
             crate::prefs::set_number(n, v);
+            if n == &crate::prefs::METRONOME_TRACK {
+                // The playing engines hear it from their next tick.
+                crate::metronome::switch().set_track(v);
+            }
             crate::history::trim(&mut self.state);
             self.invalidate();
             return Some(format!("{}: {}", n.label, crate::prefs::number_text(n)));
@@ -4527,15 +4615,10 @@ impl App {
         let (from, to) = (self.state.project.ppq.max(1), ppq.max(1));
         if from != to {
             self.transport.stop();
-            let s = &mut self.state;
-            s.project.set_ppq(to);
-            crate::piano::rescale(s, from, to);
-            crate::playlist::rescale(s, from, to);
-            crate::history::rescale(s, from, to);
-            if let Some(rows) = &mut s.rack.clipboard {
-                rows.iter_mut().flatten().for_each(|n| n.rescale(from, to));
-            }
-            s.piano.dirty = true;
+            // One step, "Project settings", that brings the ticks back exactly (spec: ui/settings-choices.md "Undo
+            // history: the four checks").
+            crate::history::timebase(&mut self.state);
+            retime(&mut self.state, from, to);
         }
         self.invalidate();
         Some(format!("Timebase: {to} PPQ"))
@@ -7796,6 +7879,8 @@ impl App {
             // No help index yet: the left click does nothing.
             Action::Util(Util::Help) => {}
             Action::Util(Util::Save) => self.menu_item(0, views::menus::FILE_SAVE_AS),
+            Action::Util(Util::AudioEditor) => self.audio_editor(0, false),
+            Action::Util(Util::NewAudioEditor) => self.audio_editor(0, true),
             Action::CloseWin(Win::Perf) => self.close_perf(),
             Action::CloseWin(Win::Strum) => {
                 crate::strum::cancel(s);
@@ -8230,6 +8315,11 @@ impl App {
             (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Purge unused audio clips") => {
                 self.state.message = crate::rack::run(self, crate::rack::RCmd::Purge);
             }
+            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == crate::views::menus::REMOVE_TESLAS_LABEL) => {
+                if let Some(m) = self.ask_remove_teslas() {
+                    self.state.message = Some(m);
+                }
+            }
             (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Reset empty playlist tracks") => {
                 if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::ResetEmptyTracks) {
                     self.state.message = Some(m);
@@ -8502,6 +8592,7 @@ fn toolbar_right(hit: &Action) -> Option<Action> {
     Some(match *hit {
         Action::Util(Util::Save) => Action::MenuItem(0, FILE_SAVE_VERSION),
         Action::Util(Util::Help) => Action::MenuItem(HELP_MENU, HELP_ABOUT),
+        Action::Util(Util::AudioEditor) => Action::Util(Util::NewAudioEditor),
         Action::ToggleWin(w @ (Win::Playlist | Win::PianoRoll)) => Action::ShowMax(w),
         Action::ToggleWin(Win::Browser) | Action::ProjectPicker => Action::PickerOpen,
         _ => return None,
@@ -8608,6 +8699,22 @@ fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::Channel
         max_track: crate::mixer::max_insert(p),
         misc: Some(crate::misc::vals_of(ch)),
     })
+}
+
+/// The timebase goes from `from` to `to` ticks per quarter (`App::set_timebase`, an undone or redone change): every tick
+/// count follows, the project's, the views', the history's and the clipboards'.
+pub(crate) fn retime(s: &mut State, from: u16, to: u16) {
+    if from == to {
+        return;
+    }
+    s.project.set_ppq(to);
+    crate::piano::rescale(s, from, to);
+    crate::playlist::rescale(s, from, to);
+    crate::history::rescale(s, from, to);
+    if let Some(rows) = &mut s.rack.clipboard {
+        rows.iter_mut().flatten().for_each(|n| n.rescale(from, to));
+    }
+    s.piano.dirty = true;
 }
 
 /// A generator-plugin channel played by a hosted instrument, routed like `add_channel`. Returns its rack row.
@@ -8904,6 +9011,168 @@ mod tests {
         a.sync_effects();
         assert_eq!(a.plugins.hosted.len(), before);
         assert_eq!(crate::plugins::new_slot(LEMON_EQ).state, lemon_parametric_eq_2::params::default_state());
+    }
+
+    /// A project's Edison slots are opened as Tesla with their sample and recording settings, show Tesla's name and
+    /// keep the file's Edison, whose state Tesla writes back (spec: plugins/tesla/README.md "Opening Edison slots").
+    #[test]
+    fn edison_slots_open_as_tesla() {
+        use crate::plugins::{fx_key, EDISON_FILE_NAME, TESLA};
+        use tesla::sample::{Format, Sample};
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let saved = tesla::state::Saved {
+            sample: Sample::from_channels(44100, vec![vec![0.25; 4410], vec![-0.25; 4410]], Format::Int16),
+            path: "take.wav".into(),
+            rec: tesla::state::Rec { armed: true, ..Default::default() },
+            ..Default::default()
+        };
+        let fl = tesla::state::to_edison(&saved);
+        a.state.project.mixer[0].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: EDISON_FILE_NAME.into(), state: fl });
+        a.sync_effects();
+        let key = fx_key(0, 3);
+        assert!(a.plugins.hosted.contains_key(&key));
+        assert_eq!(crate::mixer::slot_name(&a.state, 0, 3).as_deref(), Some(TESLA));
+        let back = tesla::state::from_edison(&a.plugins.edison_file_state(key).expect("an Edison state")).unwrap();
+        assert_eq!((back.sample.frames(), back.sample.channels(), back.path.as_str(), back.rec.armed), (4410, 2, "take.wav", true));
+        a.store_builtin_states();
+        let slot = a.state.project.mixer[0].slots[3].clone().unwrap();
+        assert_eq!(slot.name, EDISON_FILE_NAME);
+        assert_eq!(tesla::state::from_edison(&slot.state).map(|s| s.sample.frames()), Some(4410));
+        // A second pass changes nothing.
+        let before = a.plugins.hosted.len();
+        a.sync_effects();
+        assert_eq!(a.plugins.hosted.len(), before);
+    }
+
+    /// A project's Love Philter slots are opened as Pulp Filter with their state, show Pulp Filter's name and keep the
+    /// file's Love Philter, whose state Pulp Filter writes back (spec: plugins/lemon-pulp-filter.md §6).
+    #[test]
+    fn love_philter_slots_open_as_pulp_filter() {
+        use crate::plugins::{LOVE_PHILTER_FILE_NAME, PULP_FILTER, fx_key};
+        use os_engine::effects::love_philter::state::{MASTER, State};
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let mut st = State::new_default();
+        st.globals[MASTER] = 77;
+        let fl = st.to_bytes();
+        a.state.project.mixer[1].slots[2] = Some(os_model::SlotPlugin {
+            id: os_model::Id::NONE,
+            name: LOVE_PHILTER_FILE_NAME.into(),
+            state: fl.clone(),
+        });
+        a.sync_effects();
+        let key = fx_key(1, 2);
+        assert!(a.plugins.hosted.contains_key(&key));
+        assert_eq!(
+            crate::mixer::slot_name(&a.state, 1, 2).as_deref(),
+            Some(PULP_FILTER)
+        );
+        assert_eq!(a.plugins.love_philter_file_state(key), Some(fl.clone()));
+        a.store_builtin_states();
+        let slot = a.state.project.mixer[1].slots[2].clone().unwrap();
+        assert_eq!(
+            (slot.name.as_str(), slot.state),
+            (LOVE_PHILTER_FILE_NAME, fl)
+        );
+        let before = a.plugins.hosted.len();
+        a.sync_effects();
+        assert_eq!(a.plugins.hosted.len(), before);
+        assert_eq!(
+            crate::plugins::new_slot(PULP_FILTER).name,
+            LOVE_PHILTER_FILE_NAME
+        );
+    }
+
+    /// A project's Maximus slots are opened as Press with their state, show Press's name and keep the file's Maximus,
+    /// whose state Press writes back (spec: plugins/lemon-press.md §6).
+    #[test]
+    fn maximus_slots_open_as_press() {
+        use crate::plugins::{MAXIMUS_FILE_NAME, PRESS, fx_key};
+        use os_engine::effects::maximus::state::{P_LMH_MIX, State};
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let mut st = State::new_default();
+        st.params[P_LMH_MIX] = 500;
+        let fl = st.to_bytes();
+        a.state.project.mixer[1].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: MAXIMUS_FILE_NAME.into(), state: fl.clone() });
+        a.sync_effects();
+        let key = fx_key(1, 3);
+        assert!(a.plugins.hosted.contains_key(&key));
+        assert_eq!(crate::mixer::slot_name(&a.state, 1, 3).as_deref(), Some(PRESS));
+        assert_eq!(a.plugins.maximus_file_state(key), Some(fl.clone()));
+        a.store_builtin_states();
+        let slot = a.state.project.mixer[1].slots[3].clone().unwrap();
+        assert_eq!((slot.name.as_str(), slot.state), (MAXIMUS_FILE_NAME, fl));
+        assert_eq!(crate::plugins::new_slot(PRESS).name, MAXIMUS_FILE_NAME);
+        // A factory preset (a state preset) gives the slot its Maximus state, saved back under the file's name
+        // (spec: plugins/factory-presets.md "Press (Maximus) and Pulp Filter").
+        let p = crate::presets::factory(PRESS).into_iter().find(|p| p.name == "Mastering/Max loudness").expect("the preset");
+        let Ok((_, crate::presets::Body::State(blob))) = crate::presets::load(&p.path, "clap:org.openstudio.press") else { panic!("a state preset") };
+        assert!(a.plugins.set_state(key, &blob));
+        let max = press::fl_from_plugin_state(&blob).unwrap();
+        assert_eq!(a.plugins.maximus_file_state(key), Some(max.clone()));
+        a.store_builtin_states();
+        assert_eq!(a.state.project.mixer[1].slots[3].clone().unwrap().state, max);
+    }
+
+    /// The toolbar's audio editor button puts Tesla on the master track and shows it; another click shows the same
+    /// one, the right click adds another (spec: plugins/tesla/requests.md #5).
+    #[test]
+    fn the_audio_editor_button_opens_tesla_on_the_master() {
+        use crate::mixer::{slot_name, FxReq};
+        use crate::plugins::TESLA;
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let first = a.state.project.mixer[0].slots.iter().position(Option::is_none).unwrap() as u8;
+        a.audio_editor(0, false);
+        assert_eq!(slot_name(&a.state, 0, first).as_deref(), Some(TESLA));
+        assert!(a.state.mixer.pending.iter().any(|r| matches!(r, FxReq::Create { track: 0, slot, .. } if *slot == first)));
+        a.state.mixer.pending.clear();
+        a.audio_editor(0, false);
+        assert_eq!(a.state.mixer.pending, vec![FxReq::Show { track: 0, slot: first }]);
+        a.state.mixer.pending.clear();
+        a.audio_editor(0, true);
+        let teslas = (0..10).filter(|&k| slot_name(&a.state, 0, k).as_deref() == Some(TESLA)).count();
+        assert_eq!(teslas, 2);
+        assert_eq!(toolbar_right(&Action::Util(Util::AudioEditor)), Some(Action::Util(Util::NewAudioEditor)));
+    }
+
+    /// A sample Tesla sends becomes an audio clip at the song position on the first track free there, or the
+    /// selected sampler channel's sample (spec: plugins/tesla/README.md "Version 1").
+    #[test]
+    fn a_sent_sample_lands_on_the_playlist_or_the_channel() {
+        let path = std::env::temp_dir().join(format!("openstudio-sent-{}.wav", std::process::id()));
+        let s = tesla::sample::Sample::from_channels(44100, vec![vec![0.5; 44100]], tesla::sample::Format::Int16);
+        std::fs::write(&path, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
+        let p = path.to_string_lossy().into_owned();
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.playlist.pos = 384;
+        let before = a.state.project.channels.len();
+        a.sample_from_plugin(p.clone(), false);
+        assert_eq!(a.state.project.channels.len(), before + 1);
+        let clips = crate::playlist::clips(&a.state);
+        let i = *a.state.playlist.sel.first().expect("the new clip, selected");
+        let clip = clips[i];
+        assert_eq!(clip.position, 384);
+        assert!(clip.end() > clip.position + 100, "a second long");
+        let overlaps = |c: &os_model::Clip| c.track == clip.track && c.position < clip.end() && c.end() > clip.position;
+        assert_eq!(clips.iter().filter(|c| overlaps(c)).count(), 1, "alone on its track");
+        // To the selected channel: a sampler takes it.
+        let row = a.state.project.channels.iter().position(|c| c.kind.is_sampler()).unwrap();
+        a.state.selected_channel = row;
+        a.sample_from_plugin(p.clone(), true);
+        assert!(a.state.project.channels[row].sample_path.as_deref().is_some_and(|s| s.ends_with(".wav")));
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Writes the toolbar with a live-looking signal to OS_MONITOR_SHOT (a look-and-feel check, not an assertion).
@@ -9661,10 +9930,17 @@ mod tests {
         assert_eq!((app.state.playlist.pos, app.state.playlist.range), (192, Some((192, 384))));
         // The pattern is still one 4/4 bar long, in the new ticks.
         assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern), 768);
-        // The undo step made before the change comes back in the new ticks.
+        // The change is one step, "Project settings": undone, the old timebase and its ticks, and the undo step made
+        // before it then works in those; redone, both come back in the new ticks.
+        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::history::PROJECT_SETTINGS));
+        assert_eq!((app.state.project.ppq, app.state.project.patterns[0].notes[0].position), (96, 72));
+        assert_eq!((app.state.piano.marker, app.state.playlist.pos), (48, 96));
         assert!(crate::piano::undo(&mut app.state));
-        assert_eq!(app.state.project.patterns[0].notes[0].position, 48);
-        app.state.project.patterns[0].notes[0].position = 144;
+        assert_eq!(app.state.project.patterns[0].notes[0].position, 24);
+        crate::history::redo(&mut app.state);
+        crate::history::redo(&mut app.state);
+        assert_eq!((app.state.project.ppq, app.state.project.patterns[0].notes[0].position), (192, 144));
+        assert!(std::mem::take(&mut app.state.retimed), "playback stops");
         // Back to 96: the same project as before (every tick was doubled, none rounded).
         project_pick(&mut app, &mut c, TIMEBASE, "96", 11);
         assert!(app.state.project == before && !app.unsaved());
@@ -11734,7 +12010,7 @@ mod tests {
         let devices = if cfg!(windows) { "Windows devices" } else { "Default device" };
         // The buffer lengths start with the device's own ("Device default", or its period where Windows says it).
         let mut menus = vec![(OUTPUT_DEVICE, devices), (SAMPLE_RATE, "Device rate"), (BUFFER_LENGTH, "Device")];
-        if cfg!(windows) {
+        if cfg!(windows) || cfg!(target_os = "linux") {
             menus.push((views::settings::MODE, views::settings::MODE_SHARED));
         }
         for (label, first) in menus {
@@ -17785,12 +18061,7 @@ mod tests {
         ] {
             assert_eq!(hint(&app, &a), h);
         }
-        // Greyed out.
-        for name in [
-            "Open audio editor / New audio editor",
-        ] {
-            assert_eq!(hint(&app, &Action::Placeholder(name)), format!("{name}: not available yet"));
-        }
+        assert_eq!(hint(&app, &Action::Util(Util::AudioEditor)), "Open audio editor / New audio editor");
         // Hidden until it has a shop icon of its own.
         assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder("Plugin repository")));
         // Help: the left click does nothing; the right click is About, on the release over the button only.
@@ -19065,8 +19336,10 @@ mod tests {
         // Star, then hide, an effect (one no scan found: as if listed before the scan).
         app.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
         app.state.plugdb.rebuild(&app.plugins);
-        frame(&mut app, &mut c, None);
         let row_of = |app: &App| app.state.plugdb.rows.iter().position(|r| r.name == "Test FX").unwrap();
+        // Scrolled to its row: the built-in plugins alone can fill the table.
+        app.state.plugdb.top = row_of(&app);
+        frame(&mut app, &mut c, None);
         let r = hit_rect(&app, &Action::Settings(SAct::Plug(Plug::Star(row_of(&app)))));
         click(&mut app, &mut c, r);
         assert!(app.state.plugdb.lists.fx.iter().any(|e| e.name == "Test FX" && e.favorite), "starred");
@@ -19515,7 +19788,7 @@ mod tests {
 
     /// Windows devices have a Mode combo (spec: audio/wasapi-low-latency.md 4.2): in exclusive mode a line says other
     /// programs can't play on the device, and its buffer lengths are the device's periods; under an ASIO driver the
-    /// combo is greyed. Elsewhere there is none.
+    /// combo is greyed. Linux devices have one too (the sound server, or ALSA directly). Elsewhere there is none.
     #[test]
     fn the_mode_combo_on_windows_devices() {
         use crate::audio_cfg::{AudioCfg, Set, SMALLEST};
@@ -19527,7 +19800,12 @@ mod tests {
         let rows = |app: &App| page(AUDIO, &app.state).into_iter().flat_map(|g| g.rows).collect::<Vec<_>>();
         let mode = |app: &App| rows(app).iter().find_map(|r| match r { Row::Combo(v, _, l) if *l == MODE => Some(v.clone()), _ => None });
         let alone = |app: &App| rows(app).iter().any(|r| matches!(r, Row::Text(t, _) if t.starts_with("Other programs can't play on")));
-        assert_eq!((mode(&app), alone(&app)), (cfg!(windows).then(|| "Shared".to_string()), false));
+        let has_mode = cfg!(windows) || cfg!(target_os = "linux");
+        assert_eq!((mode(&app), alone(&app)), (has_mode.then(|| "Shared".to_string()), false));
+        if cfg!(target_os = "linux") {
+            app.state.settings.audio = AudioCfg::default().with(Set::Mode(true));
+            assert_eq!((mode(&app).as_deref(), alone(&app)), (Some("Exclusive"), true));
+        }
         if !cfg!(windows) {
             return;
         }

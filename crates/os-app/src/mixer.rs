@@ -84,6 +84,13 @@ pub enum MCmd {
     CablePhysics,
     /// General settings ▸ Animations: simulate the cables (true) or hang them still; kept for the next start.
     Animations(bool),
+    /// Open audio editor: Tesla on this track (Tesla's own, as FL's Edison).
+    AudioEditor(u16),
+    /// Open audio editor and record: a Tesla on this track set up as an audio logger.
+    AudioEditorRecord(u16),
+    /// Remove all (audio editor) instances: asks first, then `RemoveTeslasNow` removes every Tesla.
+    RemoveTeslas,
+    RemoveTeslasNow,
     /// Effect slots of the current track.
     AddEffect(u8, usize),
     SlotDelete(u8),
@@ -98,7 +105,8 @@ pub enum MCmd {
 /// What the plugin host does next tick for a mixer slot (`App::mixer_tick`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum FxReq {
-    Create { track: u16, slot: u8, index: usize },
+    /// `state`: the instance starts from it (a Tesla set up for recording), else from its defaults.
+    Create { track: u16, slot: u8, index: usize, state: Option<Vec<u8>> },
     Toggle { track: u16, slot: u8 },
     Show { track: u16, slot: u8 },
     Delete { track: u16, slot: u8 },
@@ -191,6 +199,44 @@ pub fn receives(s: &State, n: u16) -> bool {
 pub fn slot_name(s: &State, t: u16, slot: u8) -> Option<String> {
     let p = track(s, t)?.slots.get(usize::from(slot))?.as_ref()?;
     Some(s.mixer.slot_names.get(&(t, slot)).cloned().unwrap_or_else(|| crate::project_plugins::slot_title(p)))
+}
+
+/// Tesla's "For" index of 5 minutes (Edison's menu: Forever, 1, 3, 5 minutes, ...), the audio logger's length.
+const AUDIO_LOG_5_MINUTES: u8 = 3;
+
+/// Whether slot `k` of track `t` holds Tesla (a project's Edison slots too; a name typed for the slot doesn't count).
+fn is_tesla(s: &State, t: u16, k: u8) -> bool {
+    track(s, t).and_then(|m| m.slots.get(usize::from(k))?.as_ref()).is_some_and(|p| crate::project_plugins::slot_title(p) == crate::plugins::TESLA)
+}
+
+/// Track `t`'s first Tesla slot.
+fn first_tesla(s: &State, t: u16) -> Option<u8> {
+    let n = track(s, t)?.slots.len() as u8;
+    (0..n).find(|&k| is_tesla(s, t, k))
+}
+
+/// Every Tesla in the mixer, as (track, slot).
+pub(crate) fn teslas(s: &State) -> Vec<(u16, u8)> {
+    s.project.mixer.iter().flat_map(|m| (0..m.slots.len() as u8).map(move |k| (m.index, k))).filter(|&(t, k)| is_tesla(s, t, k)).collect()
+}
+
+/// The question before Remove all (audio editor) instances.
+fn remove_question(n: usize) -> String {
+    match n {
+        1 => "Remove 1 audio editor? Its audio is lost.".into(),
+        n => format!("Remove {n} audio editors? Their audio is lost."),
+    }
+}
+
+/// Empties slot `k` of track `t` and drops its instance (the slot menu's Delete).
+fn clear_slot(s: &mut State, t: u16, k: u8) {
+    if let Some(m) = track_mut(s, t) {
+        m.slots[usize::from(k)] = None;
+        m.slot_on[usize::from(k)] = true;
+        m.slot_mix[usize::from(k)] = 1.0;
+    }
+    s.mixer.slot_names.remove(&(t, k));
+    s.mixer.pending.push(FxReq::Delete { track: t, slot: k });
 }
 
 /// "Volume: 100%  0.0dB  1.00" (§4); `label` = "Volume" or "To Insert 3".
@@ -921,8 +967,8 @@ fn track_items(n: u16) -> Vec<PItem> {
         PItem::not_yet("Unassign from Audio track(s)"),
         PItem::sep(),
         PItem::sub("File", vec![PItem::not_yet("Render to wave file...")]),
-        PItem::not_yet("Open audio editor").key("Ctrl+E"),
-        PItem::not_yet("Open audio editor and record").key("Shift+E"),
+        PItem::new("Open audio editor", mx(MCmd::AudioEditor(n))).key("Ctrl+E"),
+        PItem::new("Open audio editor and record", mx(MCmd::AudioEditorRecord(n))).key("Shift+E"),
         PItem::sep(),
         PItem::new("Reset selected track(s) to default", mx(MCmd::Reset(n))),
         PItem::head("Routing"),
@@ -999,7 +1045,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sep(),
         PItem::sub("Trim unused tracks", trim_items(s)),
         PItem::not_yet("Switch smart disable for all plugins"),
-        PItem::not_yet("Remove all (audio editor) instances"),
+        PItem::new("Remove all (audio editor) instances", Cmd::Mixer(MCmd::RemoveTeslas)),
         // The cable physics debug panel, hidden from users; uncomment to tune the cables again.
         // PItem::new("Cable physics (debug)...", Cmd::Mixer(MCmd::CablePhysics)).mark(Mark::Check(s.cables.borrow().debug)),
         PItem::head(format!("Mixer track ({})", name(s, s.selected_mixer))),
@@ -1143,6 +1189,26 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             }
             None
         }
+        MCmd::AudioEditor(n) => {
+            app.audio_editor(n, false);
+            return None;
+        }
+        MCmd::AudioEditorRecord(n) => {
+            app.audio_logger(n);
+            return None;
+        }
+        MCmd::RemoveTeslas => return app.ask_remove_teslas(),
+        MCmd::RemoveTeslasNow => {
+            let gone = teslas(s);
+            for &(t, k) in &gone {
+                clear_slot(s, t, k);
+            }
+            changed(s);
+            Some(match gone.len() {
+                1 => "Removed 1 audio editor".into(),
+                n => format!("Removed {n} audio editors"),
+            })
+        }
         MCmd::Reset(n) => {
             for t in targets(s, n) {
                 reset_track(s, t);
@@ -1224,19 +1290,12 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 m.slot_mix[usize::from(slot)] = 1.0;
             }
             s.mixer.slot_names.remove(&(t, slot));
-            s.mixer.pending.push(FxReq::Create { track: t, slot, index });
+            s.mixer.pending.push(FxReq::Create { track: t, slot, index, state: None });
             changed(s);
             None
         }
         MCmd::SlotDelete(slot) => {
-            let t = s.selected_mixer;
-            if let Some(m) = track_mut(s, t) {
-                m.slots[usize::from(slot)] = None;
-                m.slot_on[usize::from(slot)] = true;
-                m.slot_mix[usize::from(slot)] = 1.0;
-            }
-            s.mixer.slot_names.remove(&(t, slot));
-            s.mixer.pending.push(FxReq::Delete { track: t, slot });
+            clear_slot(s, s.selected_mixer, slot);
             changed(s);
             None
         }
@@ -1400,7 +1459,7 @@ impl App {
             }
             done = true;
             match r {
-                FxReq::Create { track, slot, index } => match self.plugins.create_effect(track, slot, index, None) {
+                FxReq::Create { track, slot, index, state } => match self.plugins.create_effect(track, slot, index, state.as_deref()) {
                     Ok(_) => {
                         self.plugins.added(crate::plugins::fx_key(track, slot));
                         relink = true;
@@ -1444,6 +1503,108 @@ impl App {
         if done {
             self.invalidate();
         }
+    }
+
+    /// Tesla on track `t`: the toolbar's audio editor button puts it on the master, as FL opens Edison there (spec:
+    /// plugins/tesla/requests.md #5); the track menu's "Open audio editor" on that track. It shows the track's first
+    /// Tesla, adding one when it has none; `new` (the button's right click) always adds one, in the first free slot.
+    pub(crate) fn audio_editor(&mut self, t: u16, new: bool) {
+        if !new {
+            if let Some(k) = first_tesla(&self.state, t) {
+                self.state.mixer.pending.push(FxReq::Show { track: t, slot: k });
+                return self.invalidate();
+            }
+        }
+        self.add_tesla(t, None);
+    }
+
+    /// Open audio editor and record: a Tesla on track `t` set up as an audio logger, as FL's quick load sets Edison
+    /// (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"): records on the host's play, for 5
+    /// minutes, appended, slaved to the transport, armed.
+    pub(crate) fn audio_logger(&mut self, t: u16) {
+        self.tesla_for_recording(t, |s| {
+            s.rec.when = tesla::state::WHEN_ON_PLAY;
+            s.rec.max = AUDIO_LOG_5_MINUTES;
+            s.rec.append = true;
+            s.rec.slave = true;
+            s.rec.armed = true;
+        });
+    }
+
+    /// A Tesla on track `t` to record into (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"):
+    /// the track's first Tesla when it holds no sample, else a new one in the first free slot, so no audio or undo
+    /// history is touched. `set` changes its state (the empty one is reloaded with it, a new one starts from it) and
+    /// its window is shown. False when there is no Tesla to use (the message says why).
+    pub(crate) fn tesla_for_recording(&mut self, t: u16, set: impl FnOnce(&mut tesla::state::Saved)) -> bool {
+        use tesla::state::{from_plugin_state, plugin_state, Saved};
+        let empty = first_tesla(&self.state, t).and_then(|k| {
+            let key = crate::plugins::fx_key(t, k);
+            let saved = self.plugins.state(key).and_then(|b| from_plugin_state(&b)).filter(|s| s.sample.is_empty())?;
+            Some((k, key, saved))
+        });
+        let saved = match empty {
+            Some((k, key, mut saved)) => {
+                set(&mut saved);
+                if self.plugins.set_state(key, &plugin_state(&saved)) {
+                    self.plugins.mark_edited(key);
+                    self.state.mixer.pending.push(FxReq::Show { track: t, slot: k });
+                    changed(&mut self.state);
+                    self.invalidate();
+                    return true;
+                }
+                saved
+            }
+            None => {
+                let mut saved = Saved::default();
+                set(&mut saved);
+                saved
+            }
+        };
+        self.add_tesla(t, Some(plugin_state(&saved)))
+    }
+
+    /// A new Tesla in track `t`'s first free slot, starting from `state` when given; false (with a message) when
+    /// Tesla is missing or the track is full.
+    fn add_tesla(&mut self, t: u16, state: Option<Vec<u8>>) -> bool {
+        use crate::plugins::TESLA;
+        let s = &mut self.state;
+        let Some(index) = self.plugins.effect_index(TESLA) else {
+            s.message = Some(format!("{TESLA} is not available"));
+            self.invalidate();
+            return false;
+        };
+        let Some(k) = track(s, t).and_then(|m| m.slots.iter().position(Option::is_none)) else {
+            s.message = Some("No free effect slot on this track".into());
+            self.invalidate();
+            return false;
+        };
+        let m = track_mut(s, t).expect("the track");
+        m.slots[k] = Some(crate::plugins::new_slot(TESLA));
+        m.slot_on[k] = true;
+        m.slot_mix[k] = 1.0;
+        s.mixer.slot_names.remove(&(t, k as u8));
+        s.mixer.pending.push(FxReq::Create { track: t, slot: k as u8, index, state });
+        changed(s);
+        self.invalidate();
+        true
+    }
+
+    /// Remove all (audio editor) instances (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"):
+    /// asks first, since removed slots can't be brought back yet; with none, says so.
+    pub(crate) fn ask_remove_teslas(&mut self) -> Option<String> {
+        let n = teslas(&self.state).len();
+        if n == 0 {
+            return Some("No audio editors in the mixer".into());
+        }
+        let (x, y) = self.mouse;
+        let items = vec![
+            PItem::head(remove_question(n)),
+            PItem::new("Remove", Cmd::Mixer(MCmd::RemoveTeslasNow)),
+            PItem::new("Cancel", Cmd::Nothing),
+        ];
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
+        self.invalidate();
+        None
     }
 
     pub(crate) fn open_fx(&mut self, track: u16, slot: u8) {
@@ -1662,7 +1823,7 @@ mod tests {
         assert!(!track(&a.state, 2).unwrap().slot_on[1]);
         run(&mut a, MCmd::SlotDelete(1));
         assert_eq!(slot_name(&a.state, 2, 1), None);
-        assert!(a.state.mixer.pending.iter().any(|r| matches!(r, FxReq::Create { track: 2, slot: 0, index: 0 })));
+        assert!(a.state.mixer.pending.iter().any(|r| matches!(r, FxReq::Create { track: 2, slot: 0, index: 0, .. })));
     }
 
     /// spec: audio/sidechain.md "Hosted plugins' input buses": Sidechain input ▸ lists None and the tracks routed into
@@ -1888,5 +2049,66 @@ mod tests {
         let slots = |t: u16| track(&opened.state, t).unwrap().slots.clone();
         assert_eq!((slots(2)[0].clone(), slots(3)[1].clone()), (fx("Test FX", 2), fx("Other FX", 4)));
         assert!(slots(4).iter().all(Option::is_none));
+    }
+
+    /// Open audio editor and record: a Tesla set up as an audio logger (On play, 5 minutes, Append, slaved, armed). An
+    /// empty Tesla on the track is used; one holding a sample is left alone for a new one (spec:
+    /// plugins/tesla/README.md "Recording into Tesla from Lemon Studio").
+    #[test]
+    fn open_audio_editor_and_record_sets_up_a_logger() {
+        use tesla::state::{from_plugin_state, plugin_state, Saved, WHEN_ON_PLAY};
+        let mut a = app();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let logger = |b: &[u8]| from_plugin_state(b).map(|s| (s.rec.when, s.rec.max, s.rec.append, s.rec.slave, s.rec.armed));
+        let want = Some((WHEN_ON_PLAY, 3, true, true, true));
+        assert!(track_items(2).iter().any(|i| i.label == "Open audio editor and record" && i.enabled));
+        run(&mut a, MCmd::AudioEditorRecord(2));
+        let Some(FxReq::Create { track: 2, slot: 0, index, state: Some(st) }) = a.state.mixer.pending.first().cloned() else {
+            panic!("{:?}", a.state.mixer.pending)
+        };
+        assert_eq!(logger(&st), want);
+        // An empty Tesla already there (hosted with its defaults) is set up in place and shown.
+        a.state.mixer.pending.clear();
+        a.plugins.create_effect(2, 0, index, None).unwrap();
+        let key = crate::plugins::fx_key(2, 0);
+        assert_eq!(logger(&a.plugins.state(key).unwrap()).map(|r| r.4), Some(false));
+        run(&mut a, MCmd::AudioEditorRecord(2));
+        assert_eq!(a.state.mixer.pending, vec![FxReq::Show { track: 2, slot: 0 }]);
+        assert_eq!(logger(&a.plugins.state(key).unwrap()), want);
+        // One holding a sample: a new Tesla in the next free slot.
+        a.state.mixer.pending.clear();
+        let sample = tesla::sample::Sample::from_channels(44100, vec![vec![0.5; 100]], tesla::sample::Format::Int16);
+        assert!(a.plugins.set_state(key, &plugin_state(&Saved { sample, ..Saved::default() })));
+        run(&mut a, MCmd::AudioEditorRecord(2));
+        assert!(matches!(a.state.mixer.pending.as_slice(), [FxReq::Create { track: 2, slot: 1, state: Some(_), .. }]));
+        assert_eq!(from_plugin_state(&a.plugins.state(key).unwrap()).map(|s| s.sample.frames()), Some(100), "left alone");
+    }
+
+    /// Remove all (audio editor) instances, in Mixer options and TOOLS > Macros: every Tesla (a project's Edison slots
+    /// too) goes after a question; with none, a message (spec: plugins/tesla/README.md "Recording into Tesla from
+    /// Lemon Studio").
+    #[test]
+    fn remove_all_audio_editors_asks_first() {
+        let mut a = app();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let label = "Remove all (audio editor) instances";
+        assert!(options_menu(&a.state, 0.0, 0.0).items.iter().any(|i| i.label == label && i.enabled));
+        assert_eq!(run(&mut a, MCmd::RemoveTeslas).as_deref(), Some("No audio editors in the mixer"));
+        a.audio_editor(0, false);
+        a.audio_editor(3, false);
+        track_mut(&mut a.state, 4).unwrap().slots[2] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EDISON_FILE_NAME.into(), state: Vec::new() });
+        a.state.mixer.pending.clear();
+        assert_eq!(run(&mut a, MCmd::RemoveTeslas), None);
+        let Some(Popup { items, .. }) = a.state.playlist.popup.clone() else { panic!("no question") };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
+        assert_eq!(labels, ["Remove 3 audio editors? Their audio is lost.", "Remove", "Cancel"]);
+        assert_eq!(teslas(&a.state).len(), 3, "nothing goes before the answer");
+        assert_eq!(run(&mut a, MCmd::RemoveTeslasNow).as_deref(), Some("Removed 3 audio editors"));
+        assert!(teslas(&a.state).is_empty());
+        assert_eq!(a.state.mixer.pending.iter().filter(|r| matches!(r, FxReq::Delete { .. })).count(), 3);
+        use crate::views::menus::{item_at, REMOVE_TESLAS_LABEL, TOOLS_MENU};
+        let i = (0..200).find(|&i| item_at(TOOLS_MENU, i).is_some_and(|it| it.label == REMOVE_TESLAS_LABEL)).expect("in TOOLS");
+        a.menu_item(TOOLS_MENU, i);
+        assert_eq!(a.state.message.as_deref(), Some("No audio editors in the mixer"));
     }
 }

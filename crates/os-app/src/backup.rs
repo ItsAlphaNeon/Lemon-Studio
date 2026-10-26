@@ -20,9 +20,6 @@ use os_model::Project; // This code is a part of L e m o n S t u d i o.
 use crate::app::App;
 use crate::prefs;
 
-/// Maximum: autosaves kept per project name (its value box is greyed out: value boxes do not work yet).
-pub const MAXIMUM: usize = 100;
-
 /// The Autosave timer and what the last backup wrote.
 #[derive(Debug, Default)]
 pub struct Backup {
@@ -148,8 +145,8 @@ impl App {
     }
 
     /// Writes a backup of the project as it is now, named for local time `t`, then deletes its oldest autosaves beyond
-    /// `MAXIMUM`. Returns the file (one already written in the same minute is not overwritten); None while the project
-    /// cannot be written now.
+    /// Maximum (`prefs::BACKUP_MAXIMUM`). Returns the file (one already written in the same minute is not
+    /// overwritten); None while the project cannot be written now.
     pub(crate) fn write_backup(&mut self, t: NaiveDateTime) -> Option<Result<PathBuf, String>> {
         let Some(dir) = crate::data_folder::backup_folder(&self.state, self.state.path.as_deref()) else { return Some(Err("no user folder".into())) };
         let name = project_name(self.state.path.as_deref());
@@ -164,7 +161,7 @@ impl App {
         let done = self.save_copy(target.clone())?;
         if done.is_ok() {
             self.backup.last = Some(snap);
-            prune(&dir, &name, MAXIMUM);
+            prune(&dir, &name, usize::from(prefs::number(&prefs::BACKUP_MAXIMUM)));
         }
         Some(done.map(|()| target))
     }
@@ -267,7 +264,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Backups are named for their time; past `MAXIMUM` the oldest go. Saving over a file keeps the old one.
+    /// Backups are named for their time; past Maximum the oldest go. Saving over a file keeps the old one.
     #[test]
     fn backups_and_overwritten_copies() {
         let dir = scratch("files");
@@ -283,21 +280,31 @@ mod tests {
         let over: Vec<String> = names(&dir).into_iter().filter(|n| n.starts_with("song (overwritten on ")).collect();
         assert_eq!(over.len(), 1, "{:?}", names(&dir));
         assert_ne!(std::fs::read(dir.join(&over[0])).unwrap(), std::fs::read(&song).unwrap(), "the file as it was");
-        // Autosaves of "song", newest kept.
-        for i in 0..MAXIMUM as u32 + 2 {
+        // Autosaves of "song", newest kept: 100 by default, here 5.
+        assert_eq!(prefs::number(&prefs::BACKUP_MAXIMUM), 100);
+        prefs::set_number(&prefs::BACKUP_MAXIMUM, 5);
+        for i in 0..7 {
             app.state.tempo = 100.0 + f64::from(i);
             let t = at(10, 1 + i / 60, 12, i % 60);
             assert_eq!(app.write_backup(t), Some(Ok(dir.join(file_name("song", "autosaved", t)))));
         }
         let auto: Vec<String> = names(&dir).into_iter().filter(|n| autosaved_at(n, "song").is_some()).collect();
-        assert_eq!(auto.len(), MAXIMUM);
+        assert_eq!(auto.len(), 5);
         assert!(!auto.contains(&file_name("song", "autosaved", at(10, 1, 12, 0))) && !auto.contains(&file_name("song", "autosaved", at(10, 1, 12, 1))));
-        assert!(auto.contains(&file_name("song", "autosaved", at(10, 2, 12, 41))), "the newest");
+        assert!(auto.contains(&file_name("song", "autosaved", at(10, 1, 12, 6))), "the newest");
+        // Lowered, nothing goes until the next backup.
+        prefs::set_number(&prefs::BACKUP_MAXIMUM, 2);
+        assert_eq!(names(&dir).into_iter().filter(|n| autosaved_at(n, "song").is_some()).count(), 5);
+        app.state.tempo = 1.0;
+        app.write_backup(at(10, 1, 13, 0)).unwrap().unwrap();
+        let auto: Vec<String> = names(&dir).into_iter().filter(|n| autosaved_at(n, "song").is_some()).collect();
+        assert_eq!(auto, [file_name("song", "autosaved", at(10, 1, 12, 6)), file_name("song", "autosaved", at(10, 1, 13, 0))]);
+        prefs::set_number(&prefs::BACKUP_MAXIMUM, prefs::BACKUP_MAXIMUM.default);
         assert_eq!(app.state.path.as_deref(), Some(song.as_path()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// File ▸ Backup: Autosave and Location are live combos; Maximum stays greyed out (no value boxes yet).
+    /// File ▸ Backup: Autosave and Location are live combos, Maximum a live value box the wheel moves within 1 to 999.
     #[test]
     fn the_file_page() {
         let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
@@ -307,6 +314,25 @@ mod tests {
         for c in [&prefs::AUTOSAVE, &prefs::BACKUP_LOCATION] {
             assert!(app.hits.iter().any(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == c.label)), "{}", c.label);
         }
-        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Maximum")));
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder("Maximum")));
+        let r = app.hits.iter().find(|h| h.action == Action::Settings(SAct::Number(prefs::BACKUP_MAXIMUM.label))).expect("the Maximum box").rect;
+        app.mouse_move(r.cx(), r.cy());
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(prefs::number(&prefs::BACKUP_MAXIMUM), 99);
+        assert_eq!(app.state.message.as_deref(), Some("Maximum: 99"));
+        prefs::set_number(&prefs::BACKUP_MAXIMUM, 1);
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!(prefs::number(&prefs::BACKUP_MAXIMUM), 1, "at least one");
+        prefs::set_number(&prefs::BACKUP_MAXIMUM, 999);
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!(prefs::number(&prefs::BACKUP_MAXIMUM), 999, "at most 999");
+        prefs::set_number(&prefs::BACKUP_MAXIMUM, prefs::BACKUP_MAXIMUM.default);
+        prefs::set_number(&prefs::BACKUP_MAXIMUM, 42);
+        let shown = settings::page(settings::FILE, &app.state).into_iter().flat_map(|g| g.rows).any(|r| match r {
+            settings::Row::Pair(_, b) => matches!(*b, settings::Row::ValueR("Maximum", ref v) if v == "42"),
+            _ => false,
+        });
+        assert!(shown, "the page shows the value");
+        prefs::set_number(&prefs::BACKUP_MAXIMUM, prefs::BACKUP_MAXIMUM.default);
     }
 }

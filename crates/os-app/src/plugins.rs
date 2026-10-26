@@ -161,6 +161,10 @@ pub enum Request {
     /// "Create automation clip" from a Lemon plugin's own parameter menu (host link): row, parameter index.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
     Automate(usize, usize),
+    /// A sample file a Lemon plugin sent (host link `Audio`, Tesla's Send): to the selected channel (true) or the
+    /// playlist.
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
+    Audio(String, bool),
     /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
     Raise(usize),
     /// The menu arrow was clicked: open the window menu at this screen point.
@@ -258,13 +262,17 @@ pub fn builtin() -> Vec<Available> {
     v
 }
 
-/// Lemon Parametric EQ, compiled in the same way: offered for every mixer slot, and it plays the slots a project
-/// saved with the original EQ (spec: plugins/lemon-parametric-eq-2.md §8). Then Lemon Studio's other effects
-/// (`LINKED_EFFECTS`), compiled in too, so they need no plugin file either.
+/// Lemon Parametric EQ, Pulp Filter and Press, compiled in the same way (`FILE_MAPPED`): offered for every mixer slot,
+/// and they play the slots a project saved with the original EQ, Love Philter and Maximus (spec:
+/// plugins/lemon-parametric-eq-2.md §8, plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6). Then Lemon Studio's other effects (`LINKED_EFFECTS`), compiled in too, so
+/// they need no plugin file either.
 pub fn builtin_effects() -> Vec<Available> {
-    static LIBS: [OnceLock<Option<Arc<os_clap::Library>>>; 1 + LINKED_EFFECTS.len()] = [const { OnceLock::new() }; 1 + LINKED_EFFECTS.len()];
-    let entries: [*const std::ffi::c_void; 1 + LINKED_EFFECTS.len()] = [
+    const N: usize = FILE_MAPPED.len() + LINKED_EFFECTS.len();
+    static LIBS: [OnceLock<Option<Arc<os_clap::Library>>>; N] = [const { OnceLock::new() }; N];
+    let entries: [*const std::ffi::c_void; N] = [
         &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &pulp_filter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &press::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_limiter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_reverb::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_delay::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
@@ -275,8 +283,9 @@ pub fn builtin_effects() -> Vec<Available> {
         &lemon_transient_processor::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_chorus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_stereo_shaper::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &tesla::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
     ];
-    let names = std::iter::once(LEMON_EQ).chain(LINKED_EFFECTS);
+    let names = FILE_MAPPED.into_iter().chain(LINKED_EFFECTS);
     LIBS.iter().zip(entries).zip(names).flat_map(|((lib, entry), name)| linked(lib, entry, name)).collect()
 }
 
@@ -715,6 +724,38 @@ impl Plugins {
         lemon_parametric_eq_2::params::fl_from_plugin_state(&p.save_state()?)
     }
 
+    /// Edison's state (the project file's form) of the Tesla hosted under `key`; `None` for any other plugin.
+    pub fn edison_file_state(&self, key: usize) -> Option<Vec<u8>> {
+        let h = self.hosted.get(&key)?;
+        let p = h.plugin.lock().ok()?;
+        if p.desc().name != TESLA {
+            return None;
+        }
+        tesla::edison_from_plugin_state(&p.save_state()?)
+    }
+
+    /// Love Philter's state (the project file's form) of the Pulp Filter hosted under `key`; `None` for any other
+    /// plugin, and for one on its starting state that was never edited.
+    pub fn love_philter_file_state(&self, key: usize) -> Option<Vec<u8>> {
+        let h = self.hosted.get(&key)?;
+        let p = h.plugin.lock().ok()?;
+        if p.desc().name != PULP_FILTER {
+            return None;
+        }
+        pulp_filter::fl_from_plugin_state(&p.save_state()?).filter(|b| !b.is_empty())
+    }
+
+    /// Maximus's state (the project file's form) of the Press hosted under `key`; `None` for any other plugin, and
+    /// for one on its starting state that was never edited.
+    pub fn maximus_file_state(&self, key: usize) -> Option<Vec<u8>> {
+        let h = self.hosted.get(&key)?;
+        let p = h.plugin.lock().ok()?;
+        if p.desc().name != PRESS {
+            return None;
+        }
+        press::fl_from_plugin_state(&p.save_state()?).filter(|b| !b.is_empty())
+    }
+
     /// Row `row`'s Lemon Sampler takes the stretch settings `sound` holds (§9b), keeping its other settings.
     pub fn set_sampler_stretch(&mut self, row: usize, sound: &os_model::ChannelSound) -> bool {
         self.set_sampler(row, None, &stretch_params(sound))
@@ -847,11 +888,12 @@ impl Plugins {
         }
     }
 
-    /// Whether an instrument's editor is open: its own keyboard plays it without the host, so the transport keeps it
-    /// processed while nothing plays (`Transport::listen`).
+    /// Whether a plugin's editor is open, so the transport keeps the plugins processed while nothing plays
+    /// (`Transport::listen`): an instrument's own keyboard plays it without the host, and an effect may make sound of
+    /// its own (Tesla plays its sample) or show what it hears.
     pub fn editor_open(&self) -> bool {
         #[cfg(plugin_windows)]
-        return self.hosted.range(..FX_KEY).any(|(_, h)| h.window.is_some());
+        return self.hosted.values().any(|h| h.window.is_some());
         #[cfg(not(plugin_windows))]
         false
     }
@@ -1078,6 +1120,7 @@ impl Plugins {
             match (row, m) {
                 (Some(row), crate::plugin_window::LinkMsg::Note(k, v, on)) => out.push(Request::Note(row, k, v, on)),
                 (Some(row), crate::plugin_window::LinkMsg::Automate(i)) => out.push(Request::Automate(row, i)),
+                (_, crate::plugin_window::LinkMsg::Audio(_)) => out.extend(os_hostlink::take_audio().into_iter().map(|(p, ch)| Request::Audio(p, ch))),
                 _ => {}
             }
         }
@@ -1125,14 +1168,29 @@ impl Plugins {
                     if let Some((lw, lh)) = l.size() {
                         w.set_editor_size((lw as f32, lh as f32));
                     }
+                    // A resizable Lemon plugin (Tesla): the frame's edges resize it.
+                    w.set_resizable(l.resizable().map(|(mw, mh)| (mw as f32, mh as f32)));
                 }
                 for e in w.take_events() {
-                    if let (FrameEvent::Page(n), Some(l)) = (&e, &mut h.link) {
-                        l.set_page(*n);
-                        continue;
+                    match (&e, &mut h.link) {
+                        (FrameEvent::Page(n), Some(l)) => {
+                            l.set_page(*n);
+                            continue;
+                        }
+                        (FrameEvent::Resize(ew, eh), Some(l)) => {
+                            l.set_size(*ew, *eh);
+                            continue;
+                        }
+                        // Another resizable plugin (CLAP, VST3; `fit_resizable`): its editor is asked.
+                        #[cfg(target_os = "linux")]
+                        (FrameEvent::Resize(ew, eh), None) => {
+                            follow_resize(w, &h.plugin, (*ew, *eh));
+                            continue;
+                        }
+                        _ => {}
                     }
                     out.push(match e {
-                        FrameEvent::Page(_) => continue,
+                        FrameEvent::Page(_) | FrameEvent::Resize(..) => continue,
                         FrameEvent::Close => {
                             close.push(row);
                             Request::Close(row)
@@ -1153,20 +1211,6 @@ impl Plugins {
                         FrameEvent::MiscMenu(m, x, y) => Request::MiscMenu(row, m, x, y),
                         FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
                         FrameEvent::NotAvailable(name) => Request::NotAvailable(name),
-                        FrameEvent::Resized(ew, eh) => {
-                            // The user resized the window: the editor follows if it can, and the window follows the
-                            // editor. Lemon plugins joined through the host link size their editor themselves.
-                            #[cfg(target_os = "linux")]
-                            {
-                                let k = w.scale();
-                                let px = |v: f32| (v * k).round().max(1.0) as u32;
-                                let taken = if h.link.is_some() { None } else { h.plugin.lock().ok().and_then(|mut p| p.resize_editor(px(ew), px(eh))) };
-                                w.editor_resized(taken.map(|(tw, th)| (tw as f32 / k, th as f32 / k)));
-                            }
-                            #[cfg(not(target_os = "linux"))]
-                            let _ = (ew, eh);
-                            continue;
-                        }
                         FrameEvent::Dpi(k) => {
                             // A Main GUI scaling percentage replaces the monitor's scale (spec: ui/ui-scaling.md §1).
                             #[cfg(any(windows, target_os = "macos"))]
@@ -1220,19 +1264,31 @@ fn fit_editor(w: &FrameWindow, (ew, eh): (u32, u32), scale: f32) -> Option<os_ho
     link
 }
 
-/// Lets the user resize window `w` when its freshly opened editor (`size` in device px at `scale`) can be resized by the
-/// host, and shrinks an editor whose window would not fit the monitor's work area to fit it. An editor that cannot be
-/// resized is left as it is.
+/// Lets the user resize window `w` by its edges when its freshly opened editor (`size` in device px at `scale`) can be
+/// resized by the host, and shrinks an editor whose window would not fit the monitor's work area to fit it. An editor
+/// that cannot be resized is left as it is.
 #[cfg(target_os = "linux")]
 fn fit_resizable(w: &FrameWindow, plugin: &std::sync::Mutex<dyn os_host::Plugin>, size: (u32, u32), scale: f32) {
     let Ok(can) = plugin.lock().map(|p| p.can_resize_editor()) else { return };
-    w.set_resizable(can);
+    w.set_resizable(can.then_some(crate::plugin_window::MIN_EDITOR));
     let editor = (size.0 as f32 / scale, size.1 as f32 / scale);
     let Some((ew, eh)) = w.work_size().and_then(|room| crate::plugin_window::fit_in(editor, w.chrome(), room)).filter(|_| can) else { return };
     let px = |v: f32| (v * scale).round().max(1.0) as u32;
     let taken = plugin.lock().ok().and_then(|mut p| p.resize_editor(px(ew), px(eh)));
     if let Some((tw, th)) = taken {
-        w.editor_resized(Some((tw as f32 / scale, th as f32 / scale)));
+        w.set_editor_size((tw as f32 / scale, th as f32 / scale));
+    }
+}
+
+/// The frame's edges asked for an editor of `size` (logical px): the plugin's editor is asked for it, and the frame
+/// takes the size it took (an editor that keeps its own size keeps the frame's).
+#[cfg(target_os = "linux")]
+fn follow_resize(w: &FrameWindow, plugin: &std::sync::Mutex<dyn os_host::Plugin>, size: (u32, u32)) {
+    let k = w.scale();
+    let px = |v: u32| (v as f32 * k).round().max(1.0) as u32;
+    let taken = plugin.lock().ok().and_then(|mut p| if p.can_resize_editor() { p.resize_editor(px(size.0), px(size.1)) } else { None });
+    if let Some((tw, th)) = taken {
+        w.set_editor_size((tw as f32 / k, th as f32 / k));
     }
 }
 
@@ -1287,7 +1343,7 @@ pub const LEMON_EQ: &str = "Lemon Parametric EQ";
 /// Lemon Studio's effects compiled in besides the EQ (`builtin_effects`, in this order). They have no file plugin of
 /// their own to be stored as, so a project stores them wrapped, as it stored their plugin files
 /// (`project_plugins::is_wrapped`).
-pub const LINKED_EFFECTS: [&str; 10] = [
+pub const LINKED_EFFECTS: [&str; 11] = [
     "Lemon Limiter",
     "Lemon Reverb",
     "Lemon Delay",
@@ -1298,7 +1354,26 @@ pub const LINKED_EFFECTS: [&str; 10] = [
     "Lemon Transient Processor",
     "Lemon Chorus",
     "Lemon Stereo Shaper",
+    TESLA,
 ];
+/// Lemon Studio's effects compiled in that a project stores under the FL plugin they recreate, with that plugin's
+/// state (`new_slot`, `store_builtin_states`), so they are never saved wrapped.
+pub const FILE_MAPPED: [&str; 3] = [LEMON_EQ, PULP_FILTER, PRESS];
+/// Name of Tesla, Lemon Studio's audio editor and recorder (spec: plugins/tesla/README.md).
+pub const TESLA: &str = "Tesla";
+/// Name of Pulp Filter, Lemon Studio's pattern-controlled multi-filter (spec: plugins/lemon-pulp-filter.md).
+pub const PULP_FILTER: &str = "Pulp Filter";
+/// The plugin name a project file stores for Love Philter (file-format identifier, kept for interop): slots with it
+/// are played and edited by Pulp Filter (spec: plugins/lemon-pulp-filter.md §6).
+pub const LOVE_PHILTER_FILE_NAME: &str = "Fruity Love Philter";
+/// Name of Press, Lemon Studio's multiband maximiser (spec: plugins/lemon-press.md).
+pub const PRESS: &str = "Press";
+/// The plugin name a project file stores for Maximus (file-format identifier, kept for interop): slots with it are
+/// played and edited by Press (spec: plugins/lemon-press.md §6).
+pub const MAXIMUS_FILE_NAME: &str = "Maximus";
+/// The plugin name a project file stores for Edison (file-format identifier, kept for interop): slots with it are
+/// played by Tesla (spec: plugins/tesla/README.md "Opening Edison slots").
+pub const EDISON_FILE_NAME: &str = "Edison";
 /// The plugin name a project file stores for the parametric EQ (file-format identifier, kept for interop): slots
 /// with it are played by Lemon Parametric EQ (spec: plugins/lemon-parametric-eq-2.md §8).
 pub const EQ_FILE_NAME: &str = "Fruity Parametric EQ 2";
@@ -1315,14 +1390,25 @@ pub const OLD_NAMES: [(&str, &str); 5] = [
 
 /// What the mixer shows for a slot's stored plugin name.
 pub fn slot_label(name: &str) -> &str {
-    if name == EQ_FILE_NAME { LEMON_EQ } else { name }
+    match name {
+        EQ_FILE_NAME => LEMON_EQ,
+        EDISON_FILE_NAME => TESLA,
+        LOVE_PHILTER_FILE_NAME => PULP_FILTER,
+        MAXIMUS_FILE_NAME => PRESS,
+        _ => name,
+    }
 }
 
 /// A new slot for effect `name`: what the project stores (Lemon Parametric EQ as the file's EQ with its default
-/// state, so the file opens elsewhere; other effects by name).
+/// state, Pulp Filter as the file's Love Philter and Press as the file's Maximus with their starting states, so the file
+/// opens elsewhere; other effects by name).
 pub fn new_slot(name: &str) -> os_model::SlotPlugin {
     if name == LEMON_EQ {
         os_model::SlotPlugin { id: os_model::Id::NONE, name: EQ_FILE_NAME.into(), state: lemon_parametric_eq_2::params::default_state() }
+    } else if name == PULP_FILTER {
+        os_model::SlotPlugin { id: os_model::Id::NONE, name: LOVE_PHILTER_FILE_NAME.into(), state: os_engine::effects::love_philter::state::State::new_default().to_bytes() }
+    } else if name == PRESS {
+        os_model::SlotPlugin { id: os_model::Id::NONE, name: MAXIMUS_FILE_NAME.into(), state: os_engine::effects::maximus::state::State::new_default().to_bytes() }
     } else {
         os_model::SlotPlugin { id: os_model::Id::NONE, name: name.into(), state: Vec::new() }
     }
@@ -3005,6 +3091,10 @@ mod tests {
         assert!((peak - 0.398).abs() < 0.03, "+12 dB at the band (peak {peak})");
         assert_eq!(slot_label(EQ_FILE_NAME), LEMON_EQ);
         assert_eq!(new_slot(LEMON_EQ).name, EQ_FILE_NAME);
+        assert_eq!(slot_label(LOVE_PHILTER_FILE_NAME), PULP_FILTER);
+        assert_eq!(new_slot(PULP_FILTER).name, LOVE_PHILTER_FILE_NAME);
+        assert_eq!(slot_label(MAXIMUS_FILE_NAME), PRESS);
+        assert_eq!(new_slot(PRESS).name, MAXIMUS_FILE_NAME);
     }
 
     /// Playlist clips through Lemon Sampler (spec: plugins/lemon-sampler.md §7): a note can start partway into the sample
@@ -3837,8 +3927,7 @@ mod resize_tests {
     use std::ffi::c_void;
     use std::sync::Mutex;
     use x11rb::connection::Connection as _;
-    use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt as _};
-    use x11rb::wrapper::ConnectionExt as _;
+    use x11rb::protocol::xproto::ConnectionExt as _;
 
     /// An editor that takes sizes in steps of 10 px, from 100 x 100 to 4000 x 4000, and counts the resizes it is asked for.
     struct Stretchy {
@@ -3919,11 +4008,11 @@ mod resize_tests {
         (u32::from(g.width), u32::from(g.height))
     }
 
-    /// A real plugin's editor (`OS_RESIZE_PLUGIN=<a .clap or .vst3>`) follows a resize of its window, if it can be
+    /// A real plugin's editor (`OS_RESIZE_PLUGIN=<a .clap or .vst3>`) follows its frame's edges, if it can be
     /// resized; prints what happened. Opens windows: a private X server only, as above.
     #[test]
     #[ignore]
-    fn real_editor_follows_window_resizes() {
+    fn real_editor_follows_frame_resizes() {
         let Some(path) = std::env::var_os("OS_RESIZE_PLUGIN") else { return };
         let path = PathBuf::from(path);
         let format = if path.extension().is_some_and(|e| e == "vst3") { os_host::Format::Vst3 } else { os_host::Format::Clap };
@@ -3944,9 +4033,8 @@ mod resize_tests {
         let before = pl.hosted[&0].plugin.lock().unwrap().editor_size().unwrap();
         println!("{}: can resize {can}; editor {before:?}, frame {:?}, editor window {:?}", path.display(), geometry(&c, win), editor_window());
         for target in [(before.0 + 200, before.1 + 150), (before.0 * 3 / 4, before.1 * 3 / 4)] {
-            c.configure_window(win, &ConfigureWindowAux::new().width(target.0 + chrome.0).height(target.1 + chrome.1)).unwrap();
-            c.flush().unwrap();
-            c.sync().unwrap();
+            let logical = |v: u32| (v as f32 / k).round() as u32;
+            pl.hosted[&0].window.as_ref().unwrap().push_event(FrameEvent::Resize(logical(target.0), logical(target.1)));
             tick(&mut pl, 40);
             let now = pl.hosted[&0].plugin.lock().unwrap().editor_size().unwrap();
             let frame = geometry(&c, win);
@@ -3963,7 +4051,7 @@ mod resize_tests {
 
     #[test]
     #[ignore]
-    fn editors_follow_window_resizes() {
+    fn editors_follow_frame_resizes() {
         let (c, screen) = x11rb::connect(None).expect("an X server (DISPLAY)");
         let root = c.setup().roots[screen].clone();
         let (mut pl, asked) = open((600, 400), true);
@@ -3975,36 +4063,22 @@ mod resize_tests {
         assert_eq!(geometry(&c, win), (600 + chrome.0, 400 + chrome.1), "the frame fits the editor");
         assert!(asked.lock().unwrap().is_empty(), "opening the window asks no resize");
 
-        // A drag of the border: several sizes before the app's tick, one resize for the last.
-        for (fw, fh) in [(800, 600), (900, 650), (1005 + chrome.0, 703 + chrome.1)] {
-            c.configure_window(win, &ConfigureWindowAux::new().width(fw).height(fh)).unwrap();
-        }
-        c.flush().unwrap();
-        c.sync().unwrap();
+        // A drag of the frame's edges: the editor is asked, and the frame takes the size it took.
+        w.push_event(FrameEvent::Resize(1005, 703));
         tick(&mut pl, 5);
         let asked_now = asked.lock().unwrap().clone();
         println!("asked {asked_now:?}; frame {:?}, area {:?}", geometry(&c, win), geometry(&c, area));
-        assert_eq!(asked_now, vec![(1005, 703)], "one resize per tick, for the last size");
-        assert_eq!(geometry(&c, area), (1000, 700), "the editor area takes the size the editor took");
-        assert_eq!(geometry(&c, win), (1000 + chrome.0, 700 + chrome.1), "the frame follows the editor, not the drag");
-        tick(&mut pl, 10);
-        assert_eq!(asked.lock().unwrap().len(), 1, "the frame's own resize asks nothing more");
-
-        // Below the smallest editor: the window manager is told the least size; a smaller one gives the least editor.
-        c.configure_window(win, &ConfigureWindowAux::new().width(50).height(50)).unwrap();
-        c.flush().unwrap();
-        c.sync().unwrap();
-        tick(&mut pl, 5);
-        assert_eq!(asked.lock().unwrap().last(), Some(&((240.0 * k).round() as u32, (80.0 * k).round() as u32)));
+        let px = |v: f32| (v * k).round() as u32;
+        assert_eq!(asked_now, vec![(px(1005.0), px(703.0))]);
+        let took = pl.hosted[&0].plugin.lock().unwrap().editor_size().unwrap();
+        assert_eq!(geometry(&c, area), took, "the editor area takes the size the editor took");
+        assert_eq!(geometry(&c, win), (took.0 + chrome.0, took.1 + chrome.1), "the frame follows the editor");
         drop(pl);
 
-        // An editor that cannot be resized: the window keeps the editor's size.
+        // An editor that cannot be resized: nothing is asked of it.
         let (mut pl, asked) = open((600, 400), false);
         tick(&mut pl, 5);
-        let win = pl.hosted[&0].window.as_ref().unwrap().hwnd() as u32;
-        c.configure_window(win, &ConfigureWindowAux::new().width(900).height(900)).unwrap();
-        c.flush().unwrap();
-        c.sync().unwrap();
+        pl.hosted[&0].window.as_ref().unwrap().push_event(FrameEvent::Resize(900, 900));
         tick(&mut pl, 5);
         assert!(asked.lock().unwrap().is_empty(), "nothing asked of an editor that cannot be resized");
         drop(pl);

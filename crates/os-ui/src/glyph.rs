@@ -129,36 +129,7 @@ impl Glyph {
     /// commands (space separated), mapped by `(x, y) -> (ox + x * k, oy + y * k)`. Filled when
     /// `stroke` is `None`, otherwise stroked with that width.
     pub fn commands(&mut self, d: &str, ox: f32, oy: f32, k: f32, stroke: Option<f32>) -> &mut Self {
-        let mut pb = PathBuilder::new();
-        let mut it = d.split_ascii_whitespace();
-        let pt = |it: &mut std::str::SplitAsciiWhitespace| -> Option<(f32, f32)> {
-            let x: f32 = it.next()?.parse().ok()?;
-            let y: f32 = it.next()?.parse().ok()?;
-            Some((ox + x * k, oy + y * k))
-        };
-        while let Some(c) = it.next() {
-            match c {
-                "M" => {
-                    let Some((x, y)) = pt(&mut it) else { break };
-                    pb.move_to(x, y);
-                }
-                "L" => {
-                    let Some((x, y)) = pt(&mut it) else { break };
-                    pb.line_to(x, y);
-                }
-                "Q" => {
-                    let (Some(a), Some(b)) = (pt(&mut it), pt(&mut it)) else { break };
-                    pb.quad_to(a.0, a.1, b.0, b.1);
-                }
-                "C" => {
-                    let (Some(a), Some(b), Some(e)) = (pt(&mut it), pt(&mut it), pt(&mut it)) else { break };
-                    pb.cubic_to(a.0, a.1, b.0, b.1, e.0, e.1);
-                }
-                "Z" => pb.close(),
-                _ => break,
-            }
-        }
-        if let Some(p) = pb.finish() {
+        if let Some(p) = path_data(d, ox, oy, k) {
             match stroke {
                 Some(w) => self.stroke_path(p, w),
                 None => self.path(p),
@@ -177,6 +148,41 @@ impl Glyph {
         });
         Some(Rect::new(b.left(), b.top(), b.width(), b.height()))
     }
+}
+
+/// A path from data made of absolute `M x y`, `L x y`, `Q x1 y1 x y`, `C x1 y1 x2 y2 x y` and `Z` commands (space
+/// separated), mapped by `(x, y) -> (ox + x * k, oy + y * k)`. Reading stops at the first command it does not know.
+pub fn path_data(d: &str, ox: f32, oy: f32, k: f32) -> Option<tiny_skia::Path> {
+    let mut pb = PathBuilder::new();
+    let mut it = d.split_ascii_whitespace();
+    let pt = |it: &mut std::str::SplitAsciiWhitespace| -> Option<(f32, f32)> {
+        let x: f32 = it.next()?.parse().ok()?;
+        let y: f32 = it.next()?.parse().ok()?;
+        Some((ox + x * k, oy + y * k))
+    };
+    while let Some(c) = it.next() {
+        match c {
+            "M" => {
+                let Some((x, y)) = pt(&mut it) else { break };
+                pb.move_to(x, y);
+            }
+            "L" => {
+                let Some((x, y)) = pt(&mut it) else { break };
+                pb.line_to(x, y);
+            }
+            "Q" => {
+                let (Some(a), Some(b)) = (pt(&mut it), pt(&mut it)) else { break };
+                pb.quad_to(a.0, a.1, b.0, b.1);
+            }
+            "C" => {
+                let (Some(a), Some(b), Some(e)) = (pt(&mut it), pt(&mut it), pt(&mut it)) else { break };
+                pb.cubic_to(a.0, a.1, b.0, b.1, e.0, e.1);
+            }
+            "Z" => pb.close(),
+            _ => break,
+        }
+    }
+    pb.finish()
 }
 
 /// Rasterize `g` into per-device-pixel RGB coverage over the device rect (x0, y0, w, h).

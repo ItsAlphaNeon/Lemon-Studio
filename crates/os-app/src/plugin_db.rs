@@ -487,7 +487,7 @@ fn walk(dir: &Path, depth: u32, formats: Formats, walked: &mut HashSet<(PathBuf,
 /// A file named like a built-in Lemon plugin, or like one by an earlier name (same plugin id): the built-in copy
 /// is used (a second copy in the process would share the built-in one's editor window class).
 fn builtin_file(p: &Path) -> bool {
-    let builtin = [crate::plugins::LEMON_SAMPLER, crate::plugins::LEMON_EQ, crate::osc3::LEMON_TRIO, crate::citrus::CITRUS];
+    let builtin = [crate::plugins::LEMON_SAMPLER, crate::plugins::LEMON_EQ, crate::plugins::PULP_FILTER, crate::plugins::PRESS, crate::osc3::LEMON_TRIO, crate::citrus::CITRUS];
     let old = crate::plugins::OLD_NAMES.map(|(old, _)| old);
     p.file_stem().is_some_and(|s| builtin.iter().chain(&crate::plugins::LINKED_EFFECTS).chain(&old).any(|b| s.eq_ignore_ascii_case(b)))
 }

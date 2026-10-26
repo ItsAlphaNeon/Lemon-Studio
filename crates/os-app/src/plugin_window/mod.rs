@@ -68,6 +68,9 @@ pub enum LinkMsg {
     Note(u8, u8, bool),
     /// "Create automation clip" on the plugin parameter at this list position.
     Automate(usize),
+    /// A sample sent to the host (Tesla's Send): to the selected channel (true) or the playlist; the files wait in
+    /// `os_hostlink::take_audio`.
+    Audio(bool),
 }
 
 /// Mouse input on the lifted popup (see `lift_show`); positions in the main window (physical px).
@@ -93,6 +96,7 @@ pub fn take_link() -> Vec<(isize, LinkMsg)> {
                     LinkMsg::Note(k, v, on)
                 }
                 os_hostlink::Cmd::Automate => LinkMsg::Automate(arg.max(0) as usize),
+                os_hostlink::Cmd::Audio => LinkMsg::Audio(arg != 0),
                 _ => LinkMsg::Changed,
             };
             (area as isize, m)
@@ -108,9 +112,10 @@ pub const STRIP_H: f32 = 46.0;
 pub const BORDER: f32 = 7.0;
 /// Width of the Presets box in the title bar (its right edge is 49 px from the window's).
 const PRESETS_W: f32 = 80.0;
-/// The smallest editor a window resized by the user leaves (logical px): the title bar still shows its controls.
+/// The smallest editor the frame's edges leave a resizable plugin that names no smallest size of its own (logical px):
+/// the title bar still shows its controls.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-const MIN_EDITOR: (f32, f32) = (240.0, 80.0);
+pub(crate) const MIN_EDITOR: (f32, f32) = (240.0, 80.0);
 
 /// An editor of `editor` in a frame adding `chrome` does not fit in `room` (all logical px): the editor size that fits
 /// (a side shrinks only where it is too large, and not below [`MIN_EDITOR`]). `None` when it fits.
@@ -229,10 +234,21 @@ pub enum FrameEvent {
     /// plugins/presets.md "Drag and drop").
     #[cfg_attr(not(windows), allow(dead_code))]
     DropFile(std::path::PathBuf),
-    /// The window manager resized a window whose editor can be resized (the user dragged its border): the editor should
-    /// take this size (logical px), and the frame follows what it takes. At most one per `take_events`.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    Resized(f32, f32),
+    /// The frame's edges were dragged: the plugin's editor should take this content size (logical px). Only for a
+    /// plugin that said it may be resized (host link `Resizable`; spec: plugins/host-link.md).
+    Resize(u32, u32),
+}
+
+/// A frame edge being dragged: which edges, the press (window coordinates, logical px) and the editor size then.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Sizing {
+    right: bool,
+    bottom: bool,
+    x: f32,
+    y: f32,
+    editor: (f32, f32),
+    /// The size last asked of the plugin.
+    asked: (u32, u32),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -277,6 +293,16 @@ struct State {
     misc_ui: crate::misc_page::MiscUi,
     /// Plugin editor size (logical px).
     editor: (f32, f32),
+    /// The editor's smallest size when the frame's edges may resize it (a resizable Lemon plugin, as Tesla).
+    resize_min: Option<(f32, f32)>,
+    /// An edge drag in progress.
+    sizing: Option<Sizing>,
+    /// Maximized (the button, or a double-click on the title bar): where the frame was (screen px) and the editor's
+    /// size then, for the restore.
+    maxed: Option<((i32, i32), (f32, f32))>,
+    /// `maxed` before the title bar's last single press, which unmaximizes (a move may follow): the second press of a
+    /// double-click restores from it.
+    maxed_at_press: Option<((i32, i32), (f32, f32))>,
     events: Vec<FrameEvent>,
     drag: Option<(Knob, f32, f32)>,
     /// Title-bar move in progress: cursor and window position (screen px) at the press. Done by hand: the system's
@@ -310,6 +336,10 @@ impl State {
             preset: None,
             misc_ui: Default::default(),
             editor,
+            resize_min: None,
+            sizing: None,
+            maxed: None,
+            maxed_at_press: None,
             events: Vec::new(),
             drag: None,
             moving: None,
@@ -368,18 +398,22 @@ impl State {
         }
     }
     fn size(&self) -> (f32, f32) {
+        let (w, h) = self.shown();
         let (cw, ch) = self.chrome();
-        (self.editor.0 + cw, self.editor.1 + ch)
+        (w + cw, h + ch)
     }
     /// The frame around the editor: what the window adds to the editor's width and height (logical px).
     fn chrome(&self) -> (f32, f32) {
         (2.0 * BORDER, self.area_y() + BORDER)
     }
-    /// The editor size a frame of `size` (logical px) leaves, at least [`MIN_EDITOR`].
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    fn editor_in(&self, size: (f32, f32)) -> (f32, f32) {
-        let (cw, ch) = self.chrome();
-        ((size.0 - cw).max(MIN_EDITOR.0), (size.1 - ch).max(MIN_EDITOR.1))
+    /// The size of what the editor area shows: the Misc page's own while that tab is open (the frame fits it, as a
+    /// tab change in FL does), the plugin's editor otherwise.
+    fn shown(&self) -> (f32, f32) {
+        if self.misc && self.info.misc.is_some() { (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H) } else { self.editor }
+    }
+    /// The frame's edges and its maximize button resize the editor: a resizable plugin, its editor showing.
+    fn resizable(&self) -> bool {
+        self.resize_min.is_some() && !self.misc
     }
     /// Top of the editor (below the strip, or the title bar, and the editor's 1 px outline).
     fn area_y(&self) -> f32 {
@@ -392,6 +426,8 @@ impl State {
 enum Part {
     Close,
     Minimize,
+    /// Maximize / restore (resizable editors).
+    Maximize,
     Gear,
     /// The menu arrow (the window menu, an app popup).
     Menu,
@@ -409,6 +445,8 @@ enum Part {
     /// A strip control that is not available yet (drawn greyed out): its name for the hint.
     Off(&'static str),
     Caption,
+    /// A resizable editor's frame edge: the right one, the bottom one, or the corner where they meet.
+    Edge { right: bool, bottom: bool },
 }
 
 impl State {
@@ -456,18 +494,31 @@ fn strip_off(st: &State, w: f32) -> Vec<(Rect, &'static str)> {
     v
 }
 
+/// How far into a resizable frame's bottom-right corner it resizes both ways (logical px).
+const CORNER: f32 = 16.0;
+
 fn parts(st: &State) -> Vec<(Rect, Part)> {
-    let (w, _) = st.size();
-    let p = presets_rect(w);
-    let mut v = vec![
+    let (w, h) = st.size();
+    let p = presets_rect(st);
+    let mut v = Vec::new();
+    if max_w(st) > 0.0 {
+        v.push((Rect::new(w - 42.0, 7.0, 17.0, 17.0), Part::Maximize));
+    }
+    if st.resizable() {
+        // The corner first (it overlaps both edges); below the title bar, so the close button stays a button.
+        v.push((Rect::new(w - CORNER, h - CORNER, CORNER, CORNER), Part::Edge { right: true, bottom: true }));
+        v.push((Rect::new(w - BORDER, TITLE_H, BORDER, h - TITLE_H), Part::Edge { right: true, bottom: false }));
+        v.push((Rect::new(0.0, h - BORDER, w, BORDER), Part::Edge { right: false, bottom: true }));
+    }
+    v.extend([
         (Rect::new(w - 23.0, 7.0, 17.0, 17.0), Part::Close),
-        (Rect::new(w - 42.0, 7.0, 17.0, 17.0), Part::Minimize),
+        (Rect::new(w - 42.0 - max_w(st), 7.0, 17.0, 17.0), Part::Minimize),
         (MENU_RECT, Part::Menu),
         (GEAR_RECT, Part::Gear),
         (Rect::new(p.right() - 33.0, p.y, 17.0, p.h), Part::PresetPrev),
         (Rect::new(p.right() - 16.0, p.y, 16.0, p.h), Part::PresetNext),
         (p, Part::Presets),
-    ];
+    ]);
     if st.strip {
         let dx = w - STRIP_RIGHT;
         for i in 0..=st.pages.len() {
@@ -491,6 +542,18 @@ fn part_at(st: &State, x: f32, y: f32) -> Option<Part> {
     parts(st).into_iter().find(|(r, _)| r.contains(x, y)).map(|(_, p)| p)
 }
 
+/// A resizable frame's edges (right, bottom) and where they are, for the resize cursors.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn edge_rects(st: &State) -> Vec<(Rect, bool, bool)> {
+    parts(st)
+        .into_iter()
+        .filter_map(|(r, p)| match p {
+            Part::Edge { right, bottom } => Some((r, right, bottom)),
+            _ => None,
+        })
+        .collect()
+}
+
 const KNOBS: [Knob; 3] = [Knob::Pan, Knob::Vol, Knob::Pitch];
 
 /// Cell of strip tab `i` (45 px wide from x 7, inside the strip's outline; the Misc tab is the one after the pages).
@@ -506,8 +569,13 @@ const MENU_RECT: Rect = Rect { x: 8.0, y: 5.0, w: 14.0, h: 21.0 };
 const GEAR_RECT: Rect = Rect { x: 24.0, y: 5.0, w: 21.0, h: 21.0 };
 
 /// The Presets box: right side of the title bar, left of minimize.
-fn presets_rect(w: f32) -> Rect {
-    Rect::new(w - 49.0 - PRESETS_W, 6.0, PRESETS_W, 19.0)
+fn presets_rect(st: &State) -> Rect {
+    Rect::new(st.size().0 - 49.0 - max_w(st) - PRESETS_W, 6.0, PRESETS_W, 19.0)
+}
+
+/// The room the maximize button takes in the title bar: a resizable editor's frame has one.
+fn max_w(st: &State) -> f32 {
+    if st.resizable() { 19.0 } else { 0.0 }
 }
 
 fn page_tabler(p: PageIcon) -> &'static tb::TablerIcon {
@@ -567,7 +635,7 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     }
     let gear = if st.strip && lemon { os_ui::kit::lemon::ink_on_lemon() } else if st.strip { c_gear_on() } else { c_icon() };
     icon_at(c, &tb::SETTINGS_FILLED, g.cx(), g.cy(), 18.4, gear);
-    let p = presets_rect(w);
+    let p = presets_rect(st);
     let f = title_font();
     let ty = (19.0 - c.ascent(f)).round();
     let nx = 48.0;
@@ -599,7 +667,11 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     c.text_clip(f, p.x + 9.0, ty, p.w - 9.0 - 31.0, c_text(), st.preset.as_deref().unwrap_or("Presets"));
     icon_at(c, &tb::CARET_LEFT, p.right() - 22.2, 15.5, 18.9, c_icon());
     icon_at(c, &tb::CARET_RIGHT, p.right() - 7.8, 15.5, 18.9, c_icon());
-    c.icon_stroke(&tb::MINUS, Rect::new(w - 39.5, 7.0, 12.0, 12.0), c_icon(), 2.0);
+    let mw = max_w(st);
+    c.icon_stroke(&tb::MINUS, Rect::new(w - 39.5 - mw, 7.0, 12.0, 12.0), c_icon(), 2.0);
+    if mw > 0.0 {
+        c.icon(&tb::SQUARES, Rect::new(w - 40.0, 9.0, 13.0, 13.0), c_icon());
+    }
     c.icon_stroke(&tb::X, Rect::new(w - 22.25, 7.75, 15.5, 15.5), c_icon(), 1.6);
 }
 
@@ -737,6 +809,8 @@ enum Reply {
     Move,
     /// Minimize the window (a docked one hides).
     Minimize,
+    /// Maximize a resizable editor's window to the workspace, or restore it (`State::maximize`).
+    Maximize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -750,6 +824,32 @@ enum Btn {
 type ToScreen<'a> = &'a dyn Fn(f32, f32) -> (i32, i32);
 
 impl State {
+    /// Maximize or restore. Maximized, the frame goes back to where it was (`top_left`'s answer then) at the editor's
+    /// size then. Otherwise it fills `target` (top-left in screen px, size in logical px), its editor as large as that
+    /// leaves; `None` when there is no target (or a fixed size). The answer: where the frame's top-left goes.
+    fn maximize(&mut self, top_left: (i32, i32), target: Option<((i32, i32), (f32, f32))>) -> Option<(i32, i32)> {
+        if let Some((at, editor)) = self.maxed.take() {
+            self.events.push(FrameEvent::Resize(editor.0.round() as u32, editor.1.round() as u32));
+            os_clap::wake();
+            return Some(at);
+        }
+        let (at, size) = target?;
+        let editor = self.fill(size)?;
+        self.maxed = Some((top_left, self.editor));
+        self.events.push(FrameEvent::Resize(editor.0, editor.1));
+        os_clap::wake();
+        Some(at)
+    }
+
+    /// The editor size (logical px) that makes the frame `size`, at least the editor's smallest; `None` for a fixed
+    /// size.
+    fn fill(&self, size: (f32, f32)) -> Option<(u32, u32)> {
+        let (min_w, min_h) = self.resize_min?;
+        let w = (size.0 - 2.0 * BORDER).max(min_w);
+        let h = (size.1 - self.area_y() - BORDER).max(min_h);
+        Some((w.floor() as u32, h.floor() as u32))
+    }
+
     /// Left button down at (x, y); `double` for the second press of a double click.
     fn left_down(&mut self, x: f32, y: f32, double: bool, screen: ToScreen) -> Reply {
         let part = part_at(self, x, y);
@@ -764,7 +864,7 @@ impl State {
             }
             Some(Part::Presets) => {
                 // The preset list is an app popup too, under the box's left edge.
-                let b = presets_rect(self.size().0);
+                let b = presets_rect(self);
                 let (sx, sy) = screen(b.x, b.bottom());
                 self.events.push(FrameEvent::Presets(sx, sy));
                 os_clap::wake();
@@ -784,7 +884,7 @@ impl State {
         }
         match part {
             // Close and minimize only arm on the press; the release over the same button acts (`left_up`).
-            Some(Part::Close | Part::Minimize) => {
+            Some(Part::Close | Part::Minimize | Part::Maximize) => {
                 self.armed = part;
                 Reply::Capture
             }
@@ -832,8 +932,24 @@ impl State {
                 os_clap::wake();
                 Reply::Repaint
             }
-            // Drag the window by the title bar.
-            Some(Part::Caption) if !double => Reply::Move,
+            // Drag the window by the title bar (no longer maximized); a double-click maximizes or restores.
+            // The double-click's first press unmaximized the frame: the second restores it.
+            Some(Part::Caption) if double && max_w(self) > 0.0 => {
+                if self.maxed.is_none() {
+                    self.maxed = self.maxed_at_press.take();
+                }
+                Reply::Maximize
+            }
+            Some(Part::Caption) if !double => {
+                self.maxed_at_press = self.maxed.take();
+                Reply::Move
+            }
+            Some(Part::Edge { right, bottom }) => {
+                self.maxed = None;
+                let editor = self.editor;
+                self.sizing = Some(Sizing { right, bottom, x, y, editor, asked: (editor.0.round() as u32, editor.1.round() as u32) });
+                Reply::Capture
+            }
             _ => Reply::Repaint,
         }
     }
@@ -865,6 +981,20 @@ impl State {
 
     /// The mouse moved to (x, y) (a window move by the title bar is the native window's). `fine`: Ctrl is held.
     fn motion(&mut self, x: f32, y: f32, fine: bool) -> Reply {
+        if let Some(mut s) = self.sizing {
+            // The frame's top-left stays put, so window coordinates stay comparable while it grows.
+            let (min_w, min_h) = self.resize_min.unwrap_or(s.editor);
+            let w = if s.right { (s.editor.0 + x - s.x).max(min_w) } else { s.editor.0 };
+            let h = if s.bottom { (s.editor.1 + y - s.y).max(min_h) } else { s.editor.1 };
+            let want = (w.round() as u32, h.round() as u32);
+            if want != s.asked {
+                s.asked = want;
+                self.sizing = Some(s);
+                self.events.push(FrameEvent::Resize(want.0, want.1));
+                os_clap::wake();
+            }
+            return Reply::None;
+        }
         let mut hover = false;
         if self.misc {
             if self.misc_ui.bar_drag.is_some() {
@@ -941,6 +1071,7 @@ impl State {
                 Reply::Repaint
             }
             Some(Part::Minimize) if over => Reply::Minimize,
+            Some(Part::Maximize) if over => Reply::Maximize,
             Some(_) => Reply::Repaint,
             None => Reply::None,
         }
@@ -951,6 +1082,7 @@ impl State {
     fn release(&mut self) {
         self.armed = None;
         self.drag = None;
+        self.sizing = None;
         self.moving = None;
         self.misc_ui.drag = None;
         self.misc_ui.bar_drag = None;
@@ -1133,19 +1265,38 @@ mod tests {
         assert_eq!(moved_to((4400, 1200), second, primary, (200, 100)), (1720, 940), "kept on the smaller monitor");
     }
 
-    /// A window resized by the user: its size less the frame's chrome is the editor's (never below the smallest
-    /// editor); an editor larger than the work area is fitted into it, side by side.
+    /// A resizable plugin's frame (Tesla): its right and bottom edges and their corner drag the editor's size, never
+    /// below its smallest; a fixed-size plugin's frame has no edges to drag (spec: plugins/host-link.md `Resizable`).
     #[test]
-    fn resize_arithmetic() {
-        let st = state(true, "Master");
-        assert_eq!(st.chrome(), (14.0, 74.0 + 7.0));
-        assert_eq!(st.editor_in((814.0, 681.0)), (800.0, 600.0));
-        assert_eq!(st.editor_in((100.0, 100.0)), MIN_EDITOR, "never below the smallest editor");
-        assert_eq!(state(false, "Master").editor_in((814.0, 635.0)), (800.0, 600.0), "no strip: a shorter chrome");
-        let e = st.editor_in(st.size());
-        assert_eq!(e, st.editor, "the window's own size leaves the editor as it is");
+    fn frame_edges_resize_a_resizable_editor() {
+        let mut st = state(true, "Master");
+        let (w, h) = st.size();
+        assert_eq!(part_at(&st, w - 2.0, h - 2.0), None, "a fixed size");
+        st.resize_min = Some((400.0, 200.0));
+        assert_eq!(part_at(&st, w - 2.0, h - 2.0), Some(Part::Edge { right: true, bottom: true }));
+        assert_eq!(part_at(&st, w - 2.0, 200.0), Some(Part::Edge { right: true, bottom: false }));
+        assert_eq!(part_at(&st, 100.0, h - 2.0), Some(Part::Edge { right: false, bottom: true }));
+        assert_eq!(part_at(&st, w - 15.0, 15.0), Some(Part::Close), "the title bar keeps its buttons");
+        let screen = |x: f32, y: f32| (x as i32, y as i32);
+        assert_eq!(st.left_down(w - 2.0, 200.0, false, &screen), Reply::Capture);
+        st.motion(w + 98.0, 260.0, false);
+        assert_eq!(st.events.pop(), Some(FrameEvent::Resize(580, 270)), "the right edge: wider only");
+        st.motion(w - 300.0, 200.0, false);
+        assert_eq!(st.events.pop(), Some(FrameEvent::Resize(400, 270)), "not below the smallest");
+        st.motion(w - 300.0, 200.0, false);
+        assert!(st.events.is_empty(), "nothing new to ask");
+        st.left_up(w - 300.0, 200.0);
+        assert_eq!(st.left_down(w - 2.0, h - 2.0, false, &screen), Reply::Capture);
+        st.motion(w + 18.0, h + 48.0, false);
+        assert_eq!(st.events.pop(), Some(FrameEvent::Resize(500, 320)), "the corner: both ways");
+    }
 
+    /// An editor larger than the work area opens fitted into it, side by side, never below the smallest editor.
+    #[test]
+    fn oversized_editors_fit_the_screen() {
+        let st = state(true, "Master");
         let chrome = st.chrome();
+        assert_eq!(chrome, (14.0, 74.0 + 7.0));
         // 1920 x 1080 at scale 1.25: 1536 x 864 logical.
         let room = (1536.0, 864.0);
         assert_eq!(fit_in((800.0, 600.0), chrome, room), None, "fits");
@@ -1153,6 +1304,41 @@ mod tests {
         assert_eq!(fit_in((800.0, 1000.0), chrome, room), Some((800.0, 783.0)), "only the side too large shrinks");
         assert_eq!(fit_in((1522.0, 783.0), chrome, room), None, "exactly fits");
         assert_eq!(fit_in((900.0, 900.0), chrome, (200.0, 120.0)), Some(MIN_EDITOR), "a tiny screen: the smallest editor");
+    }
+
+    /// A resizable editor's frame maximizes to a target and restores to where it was, at the editor's size then; a
+    /// fixed one does not (spec: ui/plugin-window.md "Frame").
+    #[test]
+    fn frames_maximize_and_restore() {
+        let mut st = state(true, "Master");
+        assert_eq!(st.maximize((50, 60), Some(((0, 100), (1200.0, 700.0)))), None, "a fixed size");
+        st.resize_min = Some((400.0, 200.0));
+        assert_eq!(st.maximize((50, 60), Some(((0, 100), (1200.0, 700.0)))), Some((0, 100)));
+        let (aw, ah) = (1200.0 - 2.0 * BORDER, 700.0 - st.area_y() - BORDER);
+        assert_eq!(st.events.pop(), Some(FrameEvent::Resize(aw as u32, ah as u32)));
+        assert_eq!(st.maximize((0, 100), None), Some((50, 60)), "restored to where it was");
+        assert_eq!(st.events.pop(), Some(FrameEvent::Resize(480, 270)));
+        assert_eq!(st.maximize((50, 60), None), None, "no target, nothing to do");
+        let (w, _) = st.size();
+        assert_eq!(part_at(&st, w - 35.0, 15.0), Some(Part::Maximize));
+        assert_eq!(part_at(&st, w - 54.0, 15.0), Some(Part::Minimize));
+        let screen = |x: f32, y: f32| (x as i32, y as i32);
+        assert_eq!(st.left_down(200.0, 15.0, true, &screen), Reply::Maximize, "a double-click on the title bar");
+        // A double-click's first press is a plain one (a move), which unmaximizes; the second press restores.
+        st.maximize((50, 60), Some(((0, 100), (1200.0, 700.0))));
+        st.events.clear();
+        assert_eq!(st.left_down(200.0, 15.0, false, &screen), Reply::Move);
+        st.left_up(200.0, 15.0);
+        assert_eq!(st.left_down(200.0, 15.0, true, &screen), Reply::Maximize);
+        assert_eq!(st.maximize((0, 100), Some(((0, 100), (1200.0, 700.0)))), Some((50, 60)), "restored");
+        // Moved by the title bar (one press), it stays as it is: a later double-click maximizes it again.
+        st.maximize((50, 60), Some(((0, 100), (1200.0, 700.0))));
+        st.left_down(200.0, 15.0, false, &screen);
+        st.left_up(200.0, 15.0);
+        st.left_down(200.0, 15.0, false, &screen);
+        st.left_up(200.0, 15.0);
+        assert_eq!(st.left_down(200.0, 15.0, true, &screen), Reply::Maximize);
+        assert_eq!(st.maximize((300, 300), Some(((0, 100), (1200.0, 700.0)))), Some((0, 100)), "maximized again");
     }
 
     #[test]
@@ -1320,6 +1506,28 @@ mod tests {
         st.left_down(tx, y, true, &screen);
         assert_eq!(st.events.last(), Some(&FrameEvent::ShowTrack));
         assert!(st.drag.is_none());
+    }
+
+    /// The frame fits the tab shown: the Misc page's size while it is open (larger or smaller than the plugin's
+    /// editor), the editor's again on its tab; a resizable editor's edges are off meanwhile.
+    #[test]
+    fn misc_tab_resizes_the_frame() {
+        use crate::misc_page::{PAGE_H, PAGE_W};
+        let screen = |_: f32, _: f32| (0, 0);
+        for editor in [(850.0, 450.0), (300.0, 200.0)] {
+            let mut st = state(true, "Insert 1");
+            st.editor = editor;
+            st.resize_min = Some((200.0, 100.0));
+            let at = |st: &State, i: usize| (tab_rect(i).cx(), tab_rect(i).cy());
+            let (x, y) = at(&st, st.pages.len());
+            assert_eq!(st.left_down(x, y, false, &screen), Reply::Relayout);
+            assert_eq!(st.size(), (PAGE_W + 2.0 * BORDER, st.area_y() + PAGE_H + BORDER));
+            assert!(!parts(&st).iter().any(|(_, p)| matches!(p, Part::Edge { .. } | Part::Maximize)));
+            let (x, y) = at(&st, 0);
+            assert_eq!(st.left_down(x, y, false, &screen), Reply::Relayout);
+            assert_eq!(st.size(), (editor.0 + 2.0 * BORDER, st.area_y() + editor.1 + BORDER));
+            assert!(parts(&st).iter().any(|(_, p)| matches!(p, Part::Edge { .. })));
+        }
     }
 
     /// A Misc keyboard key sounds while the button is held: sliding to the next key lets go of it and sounds that one,

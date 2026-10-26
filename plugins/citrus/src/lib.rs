@@ -9,13 +9,13 @@
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod ctl;
-pub mod curve;
+pub use os_dsp::curve;
 pub mod edit;
 pub mod editor;
 pub mod engine;
 pub mod filter;
 pub mod fx;
-pub mod num;
+pub use os_dsp::num;
 pub mod patch;
 pub mod preset;
 pub mod state;

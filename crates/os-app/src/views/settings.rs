@@ -312,9 +312,14 @@ pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
 /// Windows devices: shared mode, or exclusive mode with the device to Lemon Studio alone (spec:
 /// audio/wasapi-low-latency.md 4.2); its menu's two choices; its hint under an ASIO driver, which has no such mode.
+/// Linux: shared mode plays through the sound server (PulseAudio or PipeWire), exclusive mode opens an ALSA device
+/// itself (`audio_cfg::host`).
 pub const MODE: &str = "Mode";
 pub const MODE_SHARED: &str = "Shared (other programs play too)";
+#[cfg(not(target_os = "linux"))]
 pub const MODE_EXCLUSIVE: &str = "Exclusive (Lemon Studio alone, smaller buffers)";
+#[cfg(target_os = "linux")]
+pub const MODE_EXCLUSIVE: &str = "Exclusive (ALSA directly, past the sound server)";
 const MODE_ASIO: &str = "Mode: for Windows devices (an ASIO driver plays on its own terms)";
 /// With an ASIO driver: its own settings window, where its buffer length is set.
 pub const SHOW_ASIO_PANEL: &str = "Show ASIO panel";
@@ -610,11 +615,19 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             vec![
                 g("Input / output", [
                     vec![combo(&st.device, 360.0, OUTPUT_DEVICE)],
-                    // Windows devices play shared or exclusive (greyed under an ASIO driver, `MODE_ASIO`).
-                    if cfg!(windows) {
+                    // Windows devices play shared or exclusive (greyed under an ASIO driver, `MODE_ASIO`); so do Linux
+                    // ones, through the sound server or ALSA.
+                    if cfg!(windows) || cfg!(target_os = "linux") {
                         let mode = combo(if st.audio.exclusive { "Exclusive" } else { "Shared" }, 120.0, MODE);
                         let device = st.audio.device.as_deref().unwrap_or("the default device");
-                        let alone = exclusive.then(|| Text(format!("Other programs can't play on {device} while Lemon Studio has it open."), true));
+                        let alone = exclusive.then(|| {
+                            let line = if cfg!(windows) {
+                                format!("Other programs can't play on {device} while Lemon Studio has it open.")
+                            } else {
+                                format!("Other programs can't play on {device} while Lemon Studio has it open through ALSA (it lets go once nothing plays).")
+                            };
+                            Text(line, true)
+                        });
                         std::iter::once(mode).chain(alone).collect()
                     } else {
                         Vec::new()
@@ -653,7 +666,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 g("Mixer", vec![
                     combo("24-point sinc", 122.0, "Resampling quality"),
                     Value(crate::prefs::number_text(&crate::prefs::BROWSER_PREVIEW_TRACK), "Browser preview track"),
-                    Value("---".into(), "Metronome track"),
+                    Value(crate::prefs::number_text(&crate::prefs::METRONOME_TRACK), "Metronome track"),
                     Check("Play truncated notes on transport", true),
                     Check("Reset plugins on transport", false),
                 ]),
@@ -754,7 +767,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             let user = os_paths::user_dir().map(|d| format!("{}{}", d.display(), std::path::MAIN_SEPARATOR)).unwrap_or_default();
             vec![
                 g("Backup", vec![
-                    pair(combo("Occasionally (every 10 minutes)", 336.0, "Autosave"), ValueR("Maximum", "100".into())),
+                    pair(combo("Occasionally (every 10 minutes)", 336.0, "Autosave"), ValueR(crate::prefs::BACKUP_MAXIMUM.label, crate::prefs::number_text(&crate::prefs::BACKUP_MAXIMUM))),
                     combo("Save to the project data folder if there is one", 336.0, "Location"),
                 ]),
                 g("Plugins", vec![
