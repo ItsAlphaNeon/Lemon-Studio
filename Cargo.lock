@@ -2864,6 +2864,7 @@ dependencies = [
  "os-ui",
  "os-vst2",
  "os-vst3",
+ "press",
  "pulp-filter",
  "pulseaudio",
  "serde",
@@ -3200,6 +3201,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "press"
+version = "0.0.1"
+dependencies = [
+ "nih_plug",
+ "os-dsp",
+ "os-engine",
+ "os-hostlink",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "serde",
+ "serde_json",
+ "tiny-skia",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

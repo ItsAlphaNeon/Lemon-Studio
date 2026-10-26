@@ -48,9 +48,9 @@ pub fn native_first() -> bool {
 }
 
 /// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, Sytrus, the
-/// parametric EQ, Edison, Love Philter).
+/// parametric EQ, Edison, Love Philter, Maximus).
 pub fn has_recreation(id: &str) -> bool {
-    [crate::osc3::FILE_NAME, crate::citrus::FILE_NAME, crate::plugins::EQ_FILE_NAME, crate::plugins::EDISON_FILE_NAME, crate::plugins::LOVE_PHILTER_FILE_NAME]
+    [crate::osc3::FILE_NAME, crate::citrus::FILE_NAME, crate::plugins::EQ_FILE_NAME, crate::plugins::EDISON_FILE_NAME, crate::plugins::LOVE_PHILTER_FILE_NAME, crate::plugins::MAXIMUS_FILE_NAME]
         .iter()
         .any(|n| id.eq_ignore_ascii_case(n))
 }
