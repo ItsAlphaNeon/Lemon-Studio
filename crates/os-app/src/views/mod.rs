@@ -229,7 +229,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     let docked = s.docked();
     // Snapped windows (the Lemon layout's split views) are cards of their own, the backdrop between them.
     let tiles = crate::tiles::plan(s);
-    let split = docked.is_none() && !tiles.tiles.is_empty();
+    let anim = s.tile_anim.as_ref();
+    let split = (docked.is_none() && !tiles.tiles.is_empty()) || anim.is_some();
     if s.bar.lemon {
         ui.c.fill_rect(Rect::new(0.0, top, w, h - top), backdrop(ui));
         if !split {
@@ -262,14 +263,57 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     let _ = work;
     for (i, &win) in s.z.iter().enumerate() {
-        if docked_at.is_some_and(|d| i < d) {
+        // Moving windows (the Lemon layout's animations) show all, the covered ones too.
+        if docked_at.is_some_and(|d| i < d) && anim.is_none() {
             continue;
         }
         ui.win = Some(win);
-        let r = s.win_rect(win);
+        let moved = anim.and_then(|m| m.at(win));
+        let r = moved.map_or_else(|| s.win_rect(win), |m| m.0);
         // A window paints inside its paint area (also what it marks as drawn, e.g. text's generous overhang).
-        let a = paint_area(s, win);
+        let a = if moved.is_some() { r } else { paint_area(s, win) };
         ui.c.push_clip(a);
+        paint_window(ui, s, win, r, a, f);
+        ui.c.pop_clip();
+        ui.win = None;
+        // A maximized or snapped window fills its card square: its corners are rounded before the floating windows
+        // above it, which go over them. One still opening is veiled by the backdrop.
+        if let Some((mr, veil)) = moved {
+            card_corners(ui, mr);
+            if veil > 0.0 {
+                ui.c.fill_rect(mr, backdrop(ui).with_alpha((veil * 255.0) as u8));
+            }
+        } else if s.bar.lemon && docked_at == Some(i) {
+            card_corners(ui, work);
+        } else if let Some(&(_, tr)) = tiles.tiles.iter().find(|t| t.0 == win).filter(|_| docked_at.is_none() || anim.is_some()) {
+            card_corners(ui, tr);
+        }
+    }
+    // Closing windows (the Lemon layout's animations): their last look shrinks and fades, answering nothing.
+    for (win, r, veil) in anim.map(|m| m.ghosts()).unwrap_or_default() {
+        let mark = ui.mark();
+        ui.c.push_clip(r);
+        paint_window(ui, s, win, r, r, f);
+        ui.c.pop_clip();
+        ui.forget(mark);
+        card_corners(ui, r);
+        ui.c.fill_rect(r, backdrop(ui).with_alpha((veil * 255.0) as u8));
+    }
+    // The gaps between snapped windows drag their splits.
+    if split && anim.is_none() {
+        for d in &tiles.dividers {
+            ui.hit(d.gap, Action::TileSplit(d.node), "Drag to resize the split");
+        }
+    }
+    let _ = docked;
+    if s.bar.lemon {
+        toolbar::paint_status_bar(ui, s, f);
+    }
+    paint_rest(ui, s, f, w)
+}
+
+/// Paints window `win` at `r` inside its paint area `a`.
+fn paint_window(ui: &mut Ui, s: &State, win: Win, r: Rect, a: Rect, f: &FrameInfo) {
         match win {
             Win::Playlist => ui.part(Seg::Win(win), a, |ui| playlist::paint(ui, s, r, f)),
             Win::Mixer => ui.part(Seg::Win(win), a, |ui| {
@@ -293,25 +337,11 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::PianoDlg => ui.part(Seg::Win(win), a, |ui| piano_dlg::paint(ui, s, f)),
             _ => {}
         }
-        ui.c.pop_clip();
-        ui.win = None;
-        // A maximized or snapped window fills its card square: its corners are rounded before the floating windows
-        // above it, which go over them.
-        if s.bar.lemon && docked_at == Some(i) {
-            card_corners(ui, work);
-        } else if let Some(&(_, tr)) = tiles.tiles.iter().find(|t| t.0 == win).filter(|_| docked_at.is_none()) {
-            card_corners(ui, tr);
-        }
-    }
-    // The gaps between snapped windows drag their splits.
-    if split {
-        for d in &tiles.dividers {
-            ui.hit(d.gap, Action::TileSplit(d.node), "Drag to resize the split");
-        }
-    }
-    if s.bar.lemon {
-        toolbar::paint_status_bar(ui, s, f);
-    }
+}
+
+/// The frame above the windows: the toolbar, the hint bar, menus, popups, the settings window and dialogs. Returns the
+/// number of hits registered before the overlays.
+fn paint_rest(ui: &mut Ui, s: &State, f: &FrameInfo, w: f32) -> usize {
     if !s.toolbar.hidden {
         // At Toolbars scaling (spec: ui/ui-scaling.md §1): the band works in its own px, `k` of the window's each, so
         // it is `w / k` of them wide; what doesn't fit is left out (`toolbar::room`).

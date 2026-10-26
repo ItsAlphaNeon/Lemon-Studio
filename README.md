@@ -28,9 +28,14 @@ own content. Side branches are named `cutting-edge-<topic>`.
     them, and the mixer's routing cables hang over the gap below.
   - split views instead of floating ones: the playlist, the piano roll and the mixer are maximized or snapped into a
     split of the workspace, each its own card. The status bar's split button picks the preset (top and bottom, or left
-    and right); a title bar dragged onto another window swaps the two, and the gaps drag to resize. There is no
-    minimize. The channel rack, plugin and tool windows still float.
+    and right); a title bar dragged onto another window swaps the two, the gaps drag to resize (a double click resets
+    one), and windows keep a least size. F5, F7 and F9 show and hide their window on their own. There is no minimize;
+    the maximize button shows a full square, or two panes to go back to the split. The channel rack, plugin and tool
+    windows still float. With Animations on "Entertain me", windows move, open and close as Omarchy's Hyprland ones
+    do.
+  - the browser docked left or right: its title bar drags it to the other side.
 
+  The Lemon and Classic layouts each keep their own toolbar and, for the session, their own window arrangement.
   Every keyboard shortcut works the same. Classic is FL's arrangement and unchanged.
 - **Branch marks.** The workspace watermark, the version string ("cutting-edge pre-alpha") and the status bar's mark
   are red.

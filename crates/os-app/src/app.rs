@@ -1063,8 +1063,9 @@ pub struct State {
     pub control: crate::control::Control,
     /// The main toolbar's snap, which the editors' Main follows (spec: ui/global-snap.md).
     pub global_snap: crate::snap::Global,
-    /// The Lemon layout's split views (`crate::tiles`).
+    /// The Lemon layout's split views (`crate::tiles`), and their animation under way.
     pub tiles: crate::tiles::Tiles,
+    pub tile_anim: Option<crate::tiles::Anim>,
     /// Each layout's windows while the other is in use (classic, Lemon): the playlist, mixer and piano roll's states
     /// and the ones open, back to front (`App::set_lemon_layout`).
     pub layout_wins: [Option<([WinState; 3], Vec<Win>)>; 2],
@@ -1168,7 +1169,7 @@ impl State {
     /// The Lemon layout's gap under the mixer, which its routing cables sag into: down to the status bar while it
     /// reaches the workspace card's bottom, else the gap to the snapped window below it.
     pub fn mixer_hang(&self) -> Option<Rect> {
-        if !self.bar.lemon || !self.shown(Win::Mixer) || self.docked().is_some_and(|d| d != Win::Mixer) {
+        if !self.bar.lemon || !self.shown(Win::Mixer) || self.docked().is_some_and(|d| d != Win::Mixer) || self.tile_anim.is_some() {
             return None;
         }
         let r = self.win_rect(Win::Mixer);
@@ -1274,8 +1275,11 @@ pub struct App {
     pub(crate) step_chord: crate::step_edit::Chord,
     /// Last title-bar press (window, time, position), for double-click maximize / restore.
     pub(crate) title_click: Option<(Win, std::time::Instant, (f32, f32))>,
-    /// The Lemon layout's split views as last painted: a change repaints all (`take_damage`).
-    tile_plan: crate::tiles::Plan,
+    /// The Lemon layout's windows as last painted (`tiles::targets`) and the card they were in: a change repaints all,
+    /// and animates (`tiles_motion`).
+    tile_targets: Vec<(Win, Rect)>,
+    tile_work: Option<Rect>,
+    tile_anim_at: Option<std::time::Instant>,
     /// Last press on a split's gap (node, time), for its double click.
     tile_click: Option<(usize, std::time::Instant)>,
     /// Last channel-rack press (action, time), for double clicks on slots and mixer boxes (§8, §12).
@@ -1468,6 +1472,7 @@ impl App {
                 control: Default::default(),
                 global_snap: Default::default(),
                 tiles: crate::tiles::Tiles::load(),
+                tile_anim: None,
                 layout_wins: Default::default(),
                 pat_ui: Default::default(),
                 wins: [
@@ -1511,7 +1516,9 @@ impl App {
             remote: Default::default(),
             step_chord: crate::step_edit::Chord::default(),
             title_click: None,
-            tile_plan: Default::default(),
+            tile_targets: Vec::new(),
+            tile_work: None,
+            tile_anim_at: None,
             tile_click: None,
             rack_click: None,
             cpu_click: None,
@@ -2822,12 +2829,7 @@ impl App {
         // settings is brought up to date first, so the frame shows it.
         self.follow_settings();
         self.resolve_scroll();
-        // The Lemon layout's split views moved (a window shown, hidden, maximized, restored...): all repaints.
-        let tiles = crate::tiles::plan(&self.state);
-        if tiles != self.tile_plan {
-            self.tile_plan = tiles;
-            self.invalidate();
-        }
+        self.tiles_motion();
         match std::mem::replace(&mut self.damage, Damage::None) {
             Damage::None => None,
             Damage::Full => Some(None),
@@ -3748,6 +3750,33 @@ impl App {
             || self.midi_play.busy()
             || self.remote.busy()
             || self.state.browser_marquee.borrow().is_some()
+            || self.state.tile_anim.is_some()
+    }
+
+    /// The Lemon layout's windows changed places (shown, hidden, swapped, maximized, restored, another preset): the
+    /// frame repaints whole, and with "Entertain me" (General ▸ Display ▸ Animations) they move there as Hyprland's
+    /// windows do (`tiles::Anim`). A split dragged, the card resized and the first frame jump straight there.
+    fn tiles_motion(&mut self) {
+        let now = std::time::Instant::now();
+        let targets = crate::tiles::targets(&self.state);
+        let work = self.state.work_rect();
+        if targets != self.tile_targets {
+            let direct = matches!(self.drag, Some(Drag::TileSplit { .. })) || self.tile_work != Some(work);
+            let motion = !cfg!(test) && !direct && self.state.cables.borrow().animations();
+            let from = self.state.tile_anim.as_ref().map_or_else(|| self.tile_targets.clone(), |a| a.shown(&self.tile_targets));
+            self.state.tile_anim = motion.then(|| crate::tiles::Anim::new(&from, &targets)).flatten();
+            self.tile_anim_at = Some(now);
+            self.tile_targets = targets;
+            self.invalidate();
+        }
+        self.tile_work = Some(work);
+        if let (Some(a), Some(t0)) = (&mut self.state.tile_anim, self.tile_anim_at) {
+            a.elapsed = now.duration_since(t0).as_secs_f32();
+            if a.done() {
+                self.state.tile_anim = None;
+            }
+            self.invalidate();
+        }
     }
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
@@ -3912,7 +3941,8 @@ impl App {
             }
         }
         self.playback_damage();
-        self.has_damage()
+        // The Lemon layout's windows moving: the next frame of it.
+        self.has_damage() || self.state.tile_anim.is_some()
     }
 
     /// Paint the whole frame (`damage` None) or just the damaged rect.
