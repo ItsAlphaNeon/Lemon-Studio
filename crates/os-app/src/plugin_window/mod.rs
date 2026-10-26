@@ -385,7 +385,17 @@ impl State {
         }
     }
     fn size(&self) -> (f32, f32) {
-        (self.editor.0 + 2.0 * BORDER, self.area_y() + self.editor.1 + BORDER)
+        let (w, h) = self.shown();
+        (w + 2.0 * BORDER, self.area_y() + h + BORDER)
+    }
+    /// The size of what the editor area shows: the Misc page's own while that tab is open (the frame fits it, as a
+    /// tab change in FL does), the plugin's editor otherwise.
+    fn shown(&self) -> (f32, f32) {
+        if self.misc && self.info.misc.is_some() { (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H) } else { self.editor }
+    }
+    /// The frame's edges and its maximize button resize the editor: a resizable plugin, its editor showing.
+    fn resizable(&self) -> bool {
+        self.resize_min.is_some() && !self.misc
     }
     /// Top of the editor (below the strip, or the title bar, and the editor's 1 px outline).
     fn area_y(&self) -> f32 {
@@ -476,7 +486,7 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
     if max_w(st) > 0.0 {
         v.push((Rect::new(w - 42.0, 7.0, 17.0, 17.0), Part::Maximize));
     }
-    if st.resize_min.is_some() {
+    if st.resizable() {
         // The corner first (it overlaps both edges); below the title bar, so the close button stays a button.
         v.push((Rect::new(w - CORNER, h - CORNER, CORNER, CORNER), Part::Edge { right: true, bottom: true }));
         v.push((Rect::new(w - BORDER, TITLE_H, BORDER, h - TITLE_H), Part::Edge { right: true, bottom: false }));
@@ -547,7 +557,7 @@ fn presets_rect(st: &State) -> Rect {
 
 /// The room the maximize button takes in the title bar: a resizable editor's frame has one.
 fn max_w(st: &State) -> f32 {
-    if st.resize_min.is_some() { 19.0 } else { 0.0 }
+    if st.resizable() { 19.0 } else { 0.0 }
 }
 
 fn page_tabler(p: PageIcon) -> &'static tb::TablerIcon {
@@ -1463,6 +1473,28 @@ mod tests {
         st.left_down(tx, y, true, &screen);
         assert_eq!(st.events.last(), Some(&FrameEvent::ShowTrack));
         assert!(st.drag.is_none());
+    }
+
+    /// The frame fits the tab shown: the Misc page's size while it is open (larger or smaller than the plugin's
+    /// editor), the editor's again on its tab; a resizable editor's edges are off meanwhile.
+    #[test]
+    fn misc_tab_resizes_the_frame() {
+        use crate::misc_page::{PAGE_H, PAGE_W};
+        let screen = |_: f32, _: f32| (0, 0);
+        for editor in [(850.0, 450.0), (300.0, 200.0)] {
+            let mut st = state(true, "Insert 1");
+            st.editor = editor;
+            st.resize_min = Some((200.0, 100.0));
+            let at = |st: &State, i: usize| (tab_rect(i).cx(), tab_rect(i).cy());
+            let (x, y) = at(&st, st.pages.len());
+            assert_eq!(st.left_down(x, y, false, &screen), Reply::Relayout);
+            assert_eq!(st.size(), (PAGE_W + 2.0 * BORDER, st.area_y() + PAGE_H + BORDER));
+            assert!(!parts(&st).iter().any(|(_, p)| matches!(p, Part::Edge { .. } | Part::Maximize)));
+            let (x, y) = at(&st, 0);
+            assert_eq!(st.left_down(x, y, false, &screen), Reply::Relayout);
+            assert_eq!(st.size(), (editor.0 + 2.0 * BORDER, st.area_y() + editor.1 + BORDER));
+            assert!(parts(&st).iter().any(|(_, p)| matches!(p, Part::Edge { .. })));
+        }
     }
 
     /// A Misc keyboard key sounds while the button is held: sliding to the next key lets go of it and sounds that one,

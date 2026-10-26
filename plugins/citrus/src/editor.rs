@@ -2371,7 +2371,7 @@ mod tests {
             (Target::FxUnit(3), 309.0, 101.0),
             (Target::Slider(Field::Delay(0, 1)), 412.0, 84.0),
             (Target::Choice(Field::Delay(0, 4), 2), 498.0, 79.0),
-            (Target::Switch(Field::Delay(0, 7)), 345.0, 110.0),
+            (Target::Switch(Field::Delay(0, 7)), 345.0, 120.0),
             (Target::ArtTab(1), 400.0, 138.0),
         ] {
             at(&l, t, x, y);
