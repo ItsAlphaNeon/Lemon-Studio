@@ -3105,11 +3105,9 @@ impl App {
             _ => None,
         };
         let closing: Vec<Win> = self.state.z.iter().copied().filter(|&w| Some(w) != keep && (what != CloseAll::Plugins || plugin(w))).collect();
+        // each as its × closes it: the monitor resets, a piano roll tool dialog puts the notes back
         for w in closing {
-            match w {
-                Win::Perf => self.close_perf(),
-                w => self.state.hide(w),
-            }
+            self.act(Action::CloseWin(w));
         }
         // Hosted plugin windows (rack rows and mixer slots; detached ones are not in the stack).
         let rows: Vec<usize> = self.plugins.hosted.keys().copied().collect();
@@ -15754,6 +15752,15 @@ mod tests {
         app.act(Action::Strum(Act::Reset));
         assert_eq!(chord(&app), vec![0, 0, 0]);
         app.act(Action::CloseWin(Win::Strum));
+        // VIEW > Close all windows (F12) closes it as × does.
+        key(&mut app, "s", false, true, false);
+        app.state.set_knob(KnobId::Strum(Knob::Time), 0.5 + 29.0 / 64.0);
+        frame(&mut app, &mut c, None);
+        assert_eq!(chord(&app), vec![0, 22, 44]);
+        app.close_windows(CloseAll::All);
+        assert!(!app.state.shown(Win::Strum));
+        assert_eq!(chord(&app), vec![0, 0, 0], "F12 puts the notes back");
+        app.state.z = vec![Win::PianoRoll];
 
         // Alt+A opens the Arpeggiate dialog (spec: ui/piano-arpeggiate.md): the Default pattern previews at once, ×
         // puts the notes back, a menu entry changes the preview, Accept is one undo step.
