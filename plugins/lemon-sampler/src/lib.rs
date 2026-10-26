@@ -112,6 +112,13 @@ impl Default for Shared {
     }
 }
 
+/// Whether a sample file has a loop of its own that the voices play while "Use loop points" is on (the `smpl` loop
+/// `source_info` reads): the host's note rules hand such a voice its note's end (`os_engine::SampleLibrary::
+/// loop_reader`).
+pub fn file_loops(path: &Path) -> bool {
+    source_info(path).1.file_loop.is_some_and(|(a, b)| b > a)
+}
+
 /// Bit depth of a sample file's data (WAV `fmt `, FLAC STREAMINFO), | 0x100 for floating point; 16 when unknown.
 pub fn source_bits(path: &Path) -> u32 {
     source_info(path).0

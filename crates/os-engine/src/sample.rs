@@ -477,6 +477,12 @@ pub struct SampleLibrary {
     pub length_reader: Option<fn(&Path) -> Option<(usize, u32)>>,
     /// Lengths read so far, by project path, with the stamp of the file they were read from.
     lengths: HashMap<String, (Stamp, Option<(usize, u32)>)>,
+    /// Tells whether the host's sampler plugin plays a file with a sustain loop of its own (a WAV `smpl` loop), for a
+    /// host whose sampler plays the channels' samples itself (Lemon Studio gives Lemon Sampler's): such a channel's
+    /// voices sound until their notes end, so the note rules must hand them their note ends (`file_loops`).
+    pub loop_reader: Option<fn(&Path) -> bool>,
+    /// Loops read so far, by project path, with the stamp of the file they were read from.
+    loops: HashMap<String, (Stamp, bool)>,
 }
 
 impl SampleLibrary {
@@ -629,6 +635,22 @@ impl SampleLibrary {
             self.cache.remove(project_path);
         }
         n
+    }
+
+    /// Whether the sample at `project_path` has a loop of its own the host's sampler plugin plays (`loop_reader`, read
+    /// once per version of the file). False without a reader, or for a file that is not found.
+    pub fn file_loops(&mut self, project_path: &str) -> bool {
+        let Some(read) = self.loop_reader else { return false };
+        let Some(path) = self.resolve(project_path) else { return false };
+        let Some(st) = stamp(&path) else { return false };
+        match self.loops.get(project_path) {
+            Some(&(s, l)) if s == st => l,
+            _ => {
+                let l = read(&path);
+                self.loops.insert(project_path.into(), (st, l));
+                l
+            }
+        }
     }
 
     /// `raw` stretched to `frames` frames with its pitch multiplied by `transpose` (spec: audio/time-stretch.md), made
