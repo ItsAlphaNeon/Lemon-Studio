@@ -54,5 +54,9 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo run -p bundle-app --locked
 
+      # Every platform's crates: the notices test lists them with an offline `cargo tree --target all`.
+      - name: Fetch
+        run: cargo fetch --locked
+
       - name: Test
         run: cargo test --workspace --locked
