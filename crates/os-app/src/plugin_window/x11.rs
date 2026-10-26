@@ -199,7 +199,7 @@ fn pixel(c: Color) -> u32 {
 impl FrameWindow {
     /// A hidden frame for an editor of `editor` logical px; `raise` shows it. Docked (a child of `owner`, the main
     /// window, at screen position `pos`) unless `detached` or the main window is not an X11 one (`owner` 0); a detached
-    /// frame is placed by the window manager, transient for `owner`. The scale is the X server's (`Xft.dpi`), not
+    /// frame asks to be centred in the work area under the pointer (`centred`), transient for `owner`. The scale is the X server's (`Xft.dpi`), not
     /// `_scale`: under Wayland the main window's scale does not apply to X11 windows.
     pub fn new(owner: isize, info: ChannelInfo, editor: (f32, f32), _scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String> {
         let conn = conn()?;
@@ -209,8 +209,8 @@ impl FrameWindow {
         set_owner(&conn, owner);
         let docked = owner != 0 && !detached;
         let state = State::new(info, editor, !docked);
-        let (parent, at) = if docked { (owner, from_root(&conn, owner, pos)) } else { (conn.root, (0, 0)) };
         let (w, h) = state.size();
+        let (parent, at) = if docked { (owner, from_root(&conn, owner, pos)) } else { (conn.root, centred(&conn, (px(w, k), px(h, k)))) };
         let ay = state.area_y();
         let title = state.info.name.clone();
         let c = &conn.c;
@@ -263,7 +263,7 @@ impl FrameWindow {
             if !docked && conn.above.get() {
                 c.change_property32(PropMode::REPLACE, win, a._NET_WM_STATE, AtomEnum::ATOM, &[a._NET_WM_STATE_ABOVE])?;
             }
-            size_hints(c, win, (px(w, k), px(h, k)), None, None)?;
+            size_hints(c, win, (px(w, k), px(h, k)), None, (!docked).then_some(at))?;
             // Clicks in the plugin's editor come here first (then go on to it, `pump`): they bring the window to the
             // front of the app's windows, as clicks on the frame do.
             for b in [xproto::ButtonIndex::M1, xproto::ButtonIndex::M2, xproto::ButtonIndex::M3] {
@@ -1144,6 +1144,16 @@ fn work_area(conn: &Conn) -> Option<[i32; 4]> {
         Some(w) => intersect(monitor, w).unwrap_or(monitor),
         None => monitor,
     })
+}
+
+/// Where a detached frame of `size` (physical px) opens: centred in the work area under the pointer, its top no higher
+/// than the area's. A window that asks for no place lands at 0, 0 under some window managers (Hyprland keeps it there,
+/// under its bar and past the screen's edge).
+fn centred(conn: &Conn, size: (u16, u16)) -> (i32, i32) {
+    let Some([l, t, r, b]) = work_area(conn) else { return (0, 0) };
+    let x = l + ((r - l) - i32::from(size.0)).max(0) / 2;
+    let y = t + ((b - t) - i32::from(size.1)).max(0) / 2;
+    (x, y)
 }
 
 /// The overlap of two rects (left, top, right, bottom), when they overlap.
