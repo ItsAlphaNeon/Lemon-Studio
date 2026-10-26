@@ -101,8 +101,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let font = Font::new(17);
     let nx = r.x + 365.0 + ui.c.text_width(font, title);
     let nw = ui.c.text_width(font, &name);
+    // Short of the window buttons, as the title (a narrow window cuts it).
+    let room = Rect::new(r.x, r.y, super::title_room(r, true).max(0.0), 23.0);
+    ui.c.push_clip(room);
     let hov = ui.hit(
-        Rect::new(nx - 2.0, r.y + 2.0, nw + 22.0, 19.0),
+        Rect::new(nx - 2.0, r.y + 2.0, nw + 22.0, 19.0).intersect(&room),
         Action::PianoTarget,
         "Target channel (wheel: channels with notes; right-click: settings)",
     );
@@ -114,6 +117,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     } else {
         os_ui::kit::triangle(ui.c, ax, ay, 4.0, os_ui::kit::Dir::Right, t.text_dim);
     }
+    ui.c.pop_clip();
     let shift = if floating { -4.0 } else { 0.0 };
     toolbar(ui, s, r, shift);
     if r.h < 2.0 * crate::app::TITLE_H {

@@ -527,13 +527,19 @@ pub fn window_frame_ex(ui: &mut Ui, win: Win, r: Rect, title: &str, title_x: f32
         ui.c.fill_rect_gradient(bar, t.window_title.shade(0.04), t.window_title.shade(-0.03), 0.0);
         ui.c.fill_rect(Rect::new(r.x, r.y + 22.0, r.w, 1.0), t.splitter_dark);
     }
-    ui.c.text(os_ui::Font::new(17), r.x + title_x, r.y + 1.0, t.text, title);
+    // The title stops short of the window buttons (a narrow window cuts it).
+    ui.c.text_clip(os_ui::Font::new(17), r.x + title_x, r.y + 1.0, (title_room(r, buttons) - title_x).max(0.0), t.text, title);
     ui.hit(bar, Action::WinDrag(win), "Drag to move");
     // Minimize / maximize / close glyphs at the right (1862, 1881, 1901 at full width).
     if buttons {
         window_buttons(ui, win, r.right() - 64.0, r.y, t.text_dim.mix(t.glyph, 0.6), t.glyph);
     }
     Rect::new(r.x, r.y + 23.0, r.w, r.h - 23.0)
+}
+
+/// How far from a title bar's left (at `r`) its text may reach: short of the window buttons when there are any.
+pub fn title_room(r: Rect, buttons: bool) -> f32 {
+    if buttons { r.w - 68.0 } else { r.w }
 }
 
 /// Floating window frame (spec ui/piano-roll.md §1a, same for Playlist / Mixer / Piano roll):
