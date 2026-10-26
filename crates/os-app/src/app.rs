@@ -9038,6 +9038,15 @@ mod tests {
         let slot = a.state.project.mixer[1].slots[3].clone().unwrap();
         assert_eq!((slot.name.as_str(), slot.state), (MAXIMUS_FILE_NAME, fl));
         assert_eq!(crate::plugins::new_slot(PRESS).name, MAXIMUS_FILE_NAME);
+        // A factory preset (a state preset) gives the slot its Maximus state, saved back under the file's name
+        // (spec: plugins/factory-presets.md "Press (Maximus) and Pulp Filter").
+        let p = crate::presets::factory(PRESS).into_iter().find(|p| p.name == "Mastering/Max loudness").expect("the preset");
+        let Ok((_, crate::presets::Body::State(blob))) = crate::presets::load(&p.path, "clap:org.openstudio.press") else { panic!("a state preset") };
+        assert!(a.plugins.set_state(key, &blob));
+        let max = press::fl_from_plugin_state(&blob).unwrap();
+        assert_eq!(a.plugins.maximus_file_state(key), Some(max.clone()));
+        a.store_builtin_states();
+        assert_eq!(a.state.project.mixer[1].slots[3].clone().unwrap().state, max);
     }
 
     /// The toolbar's audio editor button puts Tesla on the master track and shows it; another click shows the same

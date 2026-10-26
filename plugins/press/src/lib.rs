@@ -285,4 +285,34 @@ mod tests {
         p.pick_up_state();
         assert_eq!(p.dsp.state(), &State::new_default());
     }
+
+    /// Every factory preset (`crates/os-app/factory-presets/Press/`, spec: plugins/factory-presets.md) holds the
+    /// plugin's saved state with a Maximus state that reads; Default is the starting state.
+    #[test]
+    fn factory_presets_hold_readable_states() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets/Press");
+        let (mut n, mut walk) = (0, vec![root.clone()]);
+        while let Some(d) = walk.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk.push(p);
+                    continue;
+                }
+                // Two header lines, then the saved state.
+                let b = std::fs::read(&p).unwrap();
+                let mut part = b.splitn(3, |&c| c == b'\n');
+                assert_eq!(part.next(), Some(&b"OSPRESET 1"[..]), "{p:?}");
+                let head = std::str::from_utf8(part.next().unwrap()).unwrap();
+                assert!(head.starts_with("plugin=Press\tid=clap:org.openstudio.press\t") && !head.contains("body="), "{p:?}");
+                let fl = fl_from_plugin_state(part.next().unwrap()).unwrap_or_else(|| panic!("{p:?}"));
+                let st = State::from_bytes(&fl).unwrap_or_else(|| panic!("{p:?}"));
+                if p == root.join("Default.ospreset") {
+                    assert_eq!(st, State::new_default());
+                }
+                n += 1;
+            }
+        }
+        assert_eq!(n, 41);
+    }
 }

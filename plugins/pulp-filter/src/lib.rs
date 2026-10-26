@@ -302,4 +302,31 @@ mod tests {
         p.pick_up_state();
         assert_eq!(p.dsp.state(), &State::new_default());
     }
+
+    /// Every factory preset (`crates/os-app/factory-presets/Pulp Filter/`, spec: plugins/factory-presets.md) holds the
+    /// plugin's saved state with a Love Philter state that reads.
+    #[test]
+    fn factory_presets_hold_readable_states() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/os-app/factory-presets/Pulp Filter");
+        let (mut n, mut walk) = (0, vec![root]);
+        while let Some(d) = walk.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk.push(p);
+                    continue;
+                }
+                // Two header lines, then the saved state.
+                let b = std::fs::read(&p).unwrap();
+                let mut part = b.splitn(3, |&c| c == b'\n');
+                assert_eq!(part.next(), Some(&b"OSPRESET 1"[..]), "{p:?}");
+                let head = std::str::from_utf8(part.next().unwrap()).unwrap();
+                assert!(head.starts_with("plugin=Pulp Filter\tid=clap:org.openstudio.pulp-filter\t") && !head.contains("body="), "{p:?}");
+                let fl = fl_from_plugin_state(part.next().unwrap()).unwrap_or_else(|| panic!("{p:?}"));
+                assert!(State::from_bytes(&fl).is_some(), "{p:?}");
+                n += 1;
+            }
+        }
+        assert_eq!(n, 47);
+    }
 }
