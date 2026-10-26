@@ -150,6 +150,11 @@ pub const BACKUP_LOCATION: Combo = Combo {
     default: 1,
 };
 
+/// File ▸ Backup: the most autosaves kept per project name; after a backup the oldest beyond it are deleted
+/// (`crate::backup::prune`). Lowering it deletes nothing until the next backup. FL's range was not measured: Lemon
+/// Studio's is 1 to 999. Spec: ui/settings-choices.md "Backup files".
+pub const BACKUP_MAXIMUM: Number = Number { key: "backup_maximum", label: "Maximum", min: 1, max: 999, default: 100 };
+
 /// General ▸ Miscellaneous: unsolo puts back the mute states from before the first solo (channel rack, playlist,
 /// mixer); off, unsolo turns everything on. Spec: ui/settings-choices.md "Miscellaneous: what four checks do".
 pub const RESTORE_AFTER_SOLO: Check = Check { key: "restore_after_solo", label: "Restore previous state after solo", default: false };
@@ -562,7 +567,7 @@ pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES,
 pub const OFF_PAGE_COMBOS: &[&Combo] = &crate::shortcuts::ROWS;
 
 /// The declared value boxes.
-pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BROWSER_PREVIEW_TRACK, &OMNI_CHANNEL, &MARKER_CHANNEL, &MUTING_CHANNEL];
+pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BACKUP_MAXIMUM, &BROWSER_PREVIEW_TRACK, &METRONOME_TRACK, &OMNI_CHANNEL, &MARKER_CHANNEL, &MUTING_CHANNEL];
 
 /// General ▸ Input: the editors scroll by the vertical wheel's steps times value / 256 (`crate::scroll_speed`);
 /// Shift+wheel keeps its own step. Spec: ui/settings-choices.md "Input: Vertical and Horizontal scrolling speed".
@@ -586,6 +591,11 @@ pub const SLIDERS: &[&Slider] = &[&SMOOTHING, &VERTICAL_SCROLLING_SPEED, &HORIZO
 /// to 125, the most a project file shows (spec: ui/mixer.md §1). Spec: ui/settings-choices.md "Mixer: Browser preview
 /// track".
 pub const BROWSER_PREVIEW_TRACK: Number = Number { key: "browser_preview_track", label: "Browser preview track", min: 0, max: 125, default: 0 };
+
+/// Audio ▸ Mixer: the insert track the metronome's clicks (and the count-in's and the Tempo tapper's) enter; 0, shown
+/// "---", the master (`crate::metronome::switch`). The wheel offers the open project's insert tracks, as for Browser
+/// preview track; one the playing project does not have is the master. Spec: ui/metronome.md §4.
+pub const METRONOME_TRACK: Number = Number { key: "metronome_track", label: "Metronome track", min: 0, max: 125, default: 0 };
 
 /// The declared slider its page labels `label`.
 pub fn find_slider(label: &str) -> Option<&'static Slider> {
@@ -1430,6 +1440,32 @@ main_gui_scaling = 200%
         assert_ne!(shot(&c), before, "the box shows 7");
         assert_eq!(shown(&app).as_deref(), Some("7"));
         set_number(&BROWSER_PREVIEW_TRACK, 0);
+    }
+
+    // spec: ui/metronome.md §4
+    /// Audio ▸ Mixer's Metronome track box steps from "---" through the open project's insert tracks like Browser
+    /// preview track, and the metronome's switch (shared with the playing engines) follows it.
+    #[test]
+    fn metronome_track_box() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(settings::AUDIO);
+        app.paint(&mut c, None);
+        let r = hit_rect(&app, &Action::Settings(SAct::Number(METRONOME_TRACK.label)));
+        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder(METRONOME_TRACK.label)));
+        assert_eq!((number(&METRONOME_TRACK), crate::metronome::switch().track()), (0, 0), "the master by default");
+        app.mouse_move(r.cx(), r.cy());
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!((number(&METRONOME_TRACK), crate::metronome::switch().track()), (1, 1));
+        assert_eq!(app.state.message.as_deref(), Some("Metronome track: 1"));
+        let inserts = crate::mixer::inserts(&app.state);
+        set_number(&METRONOME_TRACK, inserts);
+        app.wheel(0.0, 1.0, false, false);
+        assert_eq!(number(&METRONOME_TRACK), inserts, "up to the last insert track");
+        set_number(&METRONOME_TRACK, 1);
+        app.wheel(0.0, -1.0, false, false);
+        assert_eq!((number(&METRONOME_TRACK), crate::metronome::switch().track()), (0, 0));
+        assert_eq!(app.state.message.as_deref(), Some("Metronome track: ---"));
     }
 
     fn shot(c: &Canvas) -> Vec<u32> {

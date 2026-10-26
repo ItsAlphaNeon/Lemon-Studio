@@ -1,0 +1,8 @@
+[package]
+name = "notices"
+description = "Writes the Rust crates' section of THIRD-PARTY-NOTICES.txt and checks that it lists every crate shipped"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

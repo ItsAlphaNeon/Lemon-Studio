@@ -8,8 +8,9 @@
 //! done, the state after it while it is undone. Covered: a pattern's notes, control points and length (the piano roll
 //! and the step sequencer), the playlist (`playlist::snapshot`), knob turns, sample loads (`load_sample`), the
 //! project's initial values (`crate::init`), and with the playlist, PATTERNS > Split by channel's patterns and ADD's
-//! clip channels (`playlist::snapshot_with`). Also mixer volume faders (`fader`), generators added at the bottom of the
-//! rack (`add_channel`), channel deletes (`delete_channels`), Settings > Project's values (`project_settings`) and the
+//! clip channels (`playlist::snapshot_with`). Also mixer volume faders (`fader`), generators added to the rack
+//! (`add_channel`, `insert_channel`), Replace (`replace_channel`), channel deletes (`delete_channels`), Settings >
+//! Project's values (`project_settings`) and its timebase (`timebase`), Settings > Info's text (`project_info`) and the
 //! plugin parameters Lemon Studio sets (`param`).
 //!
 //! The settings of General ▸ Undo history (`crate::prefs`): Maximum undo levels (past it the oldest step goes), Undo
@@ -42,8 +43,12 @@ pub const PLUGIN_PARAMETER: &str = "Plugin parameter";
 pub const ADD_CHANNEL: &str = "Add channel";
 /// Channels deleted from the rack (`delete_channels`).
 pub const DELETE_CHANNEL: &str = "Delete channel";
-/// A value of Settings > Project changed (`project_settings`).
+/// A value of Settings > Project changed (`project_settings`, `timebase`).
 pub const PROJECT_SETTINGS: &str = "Project settings";
+/// A channel's generator replaced (`replace_channel`).
+pub const REPLACE_CHANNEL: &str = "Replace channel";
+/// Settings > Info's text changed (`project_info`).
+pub const PROJECT_INFO: &str = "Project info";
 
 /// What a step changes, as it is on the other side of the step.
 #[derive(Debug, Clone, PartialEq)]
@@ -81,6 +86,16 @@ pub enum Snap {
     Settings(Settings),
     /// The rack on one side of a channel delete (`Rows`).
     Rows(Box<Rows>),
+    /// A generator inserted higher up the rack (`insert_channel`): the rack on one side (`Rows`, the inserted row its
+    /// one row `gone`), and the generator a redo hosts again from its defaults (an index of the available plugins;
+    /// `None`: Lemon Sampler, hosted from the channel's settings).
+    Insert(Box<Rows>, Option<usize>),
+    /// A channel on one side of Replace (`Replaced`).
+    Replace(Box<Replaced>),
+    /// The timebase on one side of its change, with the ticks it holds (`Timebase`).
+    Timebase(Box<Timebase>),
+    /// Settings > Info's text (`project_info`).
+    Info(Box<os_model::ProjectInfo>),
     /// Several of these in one step, put back last first ("Create automation clip": the playlist and the initial
     /// value).
     Several(Vec<Snap>),
@@ -115,7 +130,37 @@ pub struct Tail {
     pub selected: usize,
 }
 
-/// What Settings > Project changes besides the timebase (which rescales the history itself, `rescale`): the bar and its
+/// Channel `row` on one side of Replace ▸ (`crate::plugin_menu::replace_generator`). Put back, its instrument is hosted
+/// as `host` says: (`Plugins::available` index, saved state; no state: from its defaults); `None`: none is, or Lemon
+/// Sampler hosts from the channel's settings. `other` is how the other side's is hosted: a swap hands it over, as the
+/// instance's state at the swap is out of the history's reach.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Replaced {
+    pub row: usize,
+    pub ch: os_model::Channel,
+    pub host: Option<(usize, Option<Vec<u8>>)>,
+    pub other: Option<(usize, Option<Vec<u8>>)>,
+}
+
+/// The timebase on one side of its change (`timebase`), with the patterns and arrangements at that timebase, so an undo
+/// brings back the ticks a lower timebase rounded. The history's other steps follow the timebase (`rescale`); these
+/// keep their own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Timebase {
+    pub ppq: u16,
+    pub patterns: Vec<os_model::Pattern>,
+    pub arrangements: Vec<os_model::Arrangement>,
+}
+
+impl Timebase {
+    /// The project's timebase and ticks now.
+    pub fn now(s: &State) -> Timebase {
+        let p = &s.project;
+        Timebase { ppq: p.ppq, patterns: p.patterns.clone(), arrangements: p.arrangements.clone() }
+    }
+}
+
+/// What Settings > Project changes besides the timebase (`Timebase`): the bar and its
 /// mode, the panning law, Play truncated notes in clips and Automatic crossfades (spec: ui/settings-choices.md
 /// "Project"). An OS addition: FL's history was not checked for these.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -295,6 +340,14 @@ impl Snap {
             Snap::Settings(_) => Snap::Settings(Settings::now(s)),
             // The other side of the delete, with the instruments kept for the next undo.
             Snap::Rows(r) => Snap::Rows(Box::new(Rows::now(s, !r.full, r.gone.clone(), r.back.clone()))),
+            Snap::Insert(r, g) => Snap::Insert(Box::new(Rows::now(s, !r.full, r.gone.clone(), Vec::new())), *g),
+            // A channel gone since is left as the step has it (`put` does nothing then).
+            Snap::Replace(r) => match s.project.channels.get(r.row) {
+                Some(ch) => Snap::Replace(Box::new(Replaced { row: r.row, ch: ch.clone(), host: r.other.clone(), other: r.host.clone() })),
+                None => self.clone(),
+            },
+            Snap::Timebase(_) => Snap::Timebase(Box::new(Timebase::now(s))),
+            Snap::Info(_) => Snap::Info(Box::new(s.project.info.clone())),
             Snap::Several(v) => Snap::Several(v.iter().map(|x| x.now(s)).collect()),
         }
     }
@@ -329,9 +382,21 @@ impl Snap {
                 }
             }
             Snap::Several(v) => v.iter_mut().for_each(|x| x.rescale(from, to)),
-            // A channel or an initial value holds no ticks.
-            Snap::Knob(..) | Snap::Fader(..) | Snap::Param(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) | Snap::Tail(_) | Snap::Generator(..) | Snap::Settings(_) => {}
-            Snap::Rows(r) => {
+            // A channel or an initial value holds no ticks; a timebase step's are at its own timebase.
+            Snap::Knob(..)
+            | Snap::Fader(..)
+            | Snap::Param(..)
+            | Snap::Sample { .. }
+            | Snap::Channel { .. }
+            | Snap::Init(..)
+            | Snap::Rack(_)
+            | Snap::Tail(_)
+            | Snap::Generator(..)
+            | Snap::Settings(_)
+            | Snap::Replace(_)
+            | Snap::Timebase(_)
+            | Snap::Info(_) => {}
+            Snap::Rows(r) | Snap::Insert(r, _) => {
                 for p in &mut r.patterns {
                     p.notes.iter_mut().for_each(|n| n.rescale(from, to));
                     p.controls.iter_mut().for_each(|c| c.rescale(from, to));
@@ -396,6 +461,27 @@ impl Snap {
                 }
             }
             Snap::Rows(r) => r.put(s),
+            // The inserted row back: its generator is hosted again (Lemon Sampler from the channel's settings).
+            Snap::Insert(r, g) => {
+                let (full, row) = (r.full, r.gone.first().copied());
+                r.put(s);
+                if let (Some(index), Some(row)) = (g.filter(|_| full), row) {
+                    s.pending_plugin = Some((row, index));
+                }
+            }
+            Snap::Replace(r) => put_replaced(s, *r),
+            Snap::Timebase(t) => {
+                let Timebase { ppq, patterns, arrangements } = *t;
+                let from = s.project.ppq.max(1);
+                crate::app::retime(s, from, ppq.max(1));
+                (s.project.patterns, s.project.arrangements) = (patterns, arrangements);
+                // Playback stops on the next tick, as for the change (`App::set_timebase`).
+                s.retimed = true;
+            }
+            Snap::Info(v) => {
+                s.project.info = *v;
+                s.settings.info_edit = None;
+            }
             Snap::Settings(v) => {
                 let p = &mut s.project;
                 let crossfades = p.auto_crossfades != v.auto_crossfades;
@@ -434,6 +520,30 @@ fn put_rack(s: &mut State, r: RackSide) {
     (s.rack.groups, s.rack.filter, s.rack.unsorted_at) = (groups, filter, unsorted_at);
     (s.rack.sel, s.selected_channel) = (sel, selected);
     (s.playlist.source, s.playlist.picker) = (source, picker);
+}
+
+/// Puts Replace's side `r` back (`Snap::Replace`): the channel, and on the next tick its instrument (`State::rows_moved`
+/// drops the row's instance and hosts a saved one; `State::pending_plugin` one from its defaults).
+fn put_replaced(s: &mut State, r: Replaced) {
+    let Replaced { row, ch, host, .. } = r;
+    let Some(c) = s.project.channels.get_mut(row) else { return };
+    *c = ch;
+    s.hosted_rows.retain(|&x| x != row);
+    s.sample_loads.retain(|&(x, _)| x != row);
+    if s.pending_plugin.is_some_and(|(x, _)| x == row) {
+        s.pending_plugin = None;
+    }
+    let map = (0..s.project.channels.len()).map(|x| (x != row).then_some(x)).collect();
+    let back = match &host {
+        Some((index, Some(blob))) => vec![(row, *index, blob.clone())],
+        _ => Vec::new(),
+    };
+    s.rows_moved.push((map, back));
+    if let Some((index, None)) = host {
+        s.pending_plugin = Some((row, index));
+    }
+    s.selected_channel = row;
+    s.rack.select_only(row);
 }
 
 /// The model's value of a knob: the channels' volume and pan as stored (exact), the others as the knob reads them.
@@ -621,6 +731,37 @@ pub fn delete_channels(s: &mut State, mut gone: Vec<usize>, back: Vec<(usize, us
     record(s, DELETE_CHANNEL, snap);
 }
 
+/// Before generator `plugin` (`None`: Lemon Sampler) is inserted as rack row `row`, above the last (a channel's Insert
+/// ▸): one step, "Add channel", holding the rack as it is; undone, the channel and its instance go and the rows under
+/// it move back up, redone, it comes back and its generator starts from its defaults.
+pub fn insert_channel(s: &mut State, row: usize, plugin: Option<usize>) {
+    let snap = Snap::Insert(Box::new(Rows::now(s, false, vec![row], Vec::new())), plugin);
+    record(s, ADD_CHANNEL, snap);
+}
+
+/// Before Replace ▸ puts generator `plugin` (`None`: Lemon Sampler) on rack row `row`: one step, "Replace channel",
+/// holding the channel and `old`, its instrument as Replace finds it (`Plugins::available` index, saved state).
+/// Undone, the channel and its old instrument come back; redone, the new generator starts again from its defaults.
+pub fn replace_channel(s: &mut State, row: usize, old: Option<(usize, Vec<u8>)>, plugin: Option<usize>) {
+    let Some(ch) = s.project.channels.get(row).cloned() else { return };
+    let (host, other) = (old.map(|(i, blob)| (i, Some(blob))), plugin.map(|i| (i, None)));
+    record(s, REPLACE_CHANNEL, Snap::Replace(Box::new(Replaced { row, ch, host, other })));
+}
+
+/// Before the timebase changes (Settings > Project, a new project's Save as form): one step, "Project settings",
+/// holding the timebase and the project's ticks, so an undo brings back the ticks exactly.
+pub fn timebase(s: &mut State) {
+    record(s, PROJECT_SETTINGS, Snap::Timebase(Box::new(Timebase::now(s))));
+}
+
+/// After Settings > Info's text changed from `before` (a box's accepted edit, the genre menu, a new project's Save as
+/// form): one step, "Project info", unless it stays the same.
+pub fn project_info(s: &mut State, before: os_model::ProjectInfo) {
+    if s.project.info != before {
+        record(s, PROJECT_INFO, Snap::Info(Box::new(before)));
+    }
+}
+
 /// Before Settings > Project changes a value (`Settings`): one step, "Project settings". With Automatic crossfades,
 /// which sets the clips' crossfades, the step holds the playlist too.
 pub fn project_settings(s: &mut State, crossfades: bool) {
@@ -805,7 +946,7 @@ pub fn forget_playlist(s: &mut State) {
 }
 
 /// The timebase changed from `from` to `to` ticks per quarter: the steps' notes, control points, lengths, clips and
-/// markers follow, so no undo brings back ticks of the old timebase.
+/// markers follow, so no undo brings back ticks of the old timebase (a timebase step keeps its own, `Timebase`).
 pub fn rescale(s: &mut State, from: u16, to: u16) {
     for st in &mut s.history.steps {
         st.snap.rescale(from, to);
@@ -1273,6 +1414,127 @@ mod tests {
         assert_eq!(Settings::now(&app.state), start);
         ctrl_alt_z(&mut app);
         assert_eq!(app.state.project.panning_law, Some(2));
+    }
+
+    /// The timebase is a "Project settings" step: undone, the ticks a lower timebase rounded come back exactly; redone,
+    /// the rounded ones; the same timebase again makes no step (OS).
+    #[test]
+    fn a_timebase_change_is_a_step() {
+        let mut app = App::new(None);
+        app.set_timebase(96);
+        app.state.project.patterns[0].notes = vec![os_model::Note { length: 7, ..os_model::Note::step(0, 5) }];
+        let before = app.state.project.clone();
+        app.set_timebase(24);
+        app.set_timebase(24);
+        assert_eq!(names(&app.state), [LAST_RESET, PROJECT_SETTINGS]);
+        let n = app.state.project.patterns[0].notes[0];
+        assert_eq!((n.position, n.length), (1, 2), "rounded to the new ticks");
+        let after = app.state.project.clone();
+        ctrl_z(&mut app);
+        assert_eq!(app.state.project, before, "every tick back");
+        assert!(app.state.retimed, "playback stops");
+        ctrl_alt_z(&mut app);
+        assert_eq!(app.state.project, after);
+        app.plugin_tick();
+        assert!(!app.state.retimed);
+    }
+
+    /// Settings > Info: an accepted box edit and a genre picked are each one step, "Project info"; an edit that changes
+    /// nothing and one dropped with Escape make none (OS).
+    #[test]
+    fn project_info_edits_are_steps() {
+        use crate::views::settings::InfoField;
+        use winit::keyboard::{Key, NamedKey};
+        let mut app = App::new(None);
+        let start = app.state.project.info.clone();
+        let type_in = |app: &mut App, field: InfoField, text: &str| {
+            app.info_act(field);
+            app.state.settings.info_edit.as_mut().unwrap().text.set(text);
+        };
+        type_in(&mut app, InfoField::Title, "  Song ");
+        crate::project_info::accept_info(&mut app.state);
+        type_in(&mut app, InfoField::Title, "Song");
+        crate::project_info::accept_info(&mut app.state);
+        type_in(&mut app, InfoField::Author, "Someone");
+        app.state.settings.info_edit = None;
+        app.info_act(InfoField::Author);
+        app.state.settings.open = true;
+        app.state.settings.tab = crate::views::settings::INFO;
+        app.info_key(&Key::Named(NamedKey::Escape), false, false);
+        app.set_genre(Some(crate::project_info::GENRES[0]));
+        assert_eq!(names(&app.state), [LAST_RESET, PROJECT_INFO, PROJECT_INFO]);
+        assert_eq!(app.state.project.info.title.as_deref(), Some("Song"));
+        ctrl_z(&mut app);
+        assert_eq!(app.state.project.info.genre, start.genre, "the genre back");
+        ctrl_z(&mut app);
+        assert_eq!(app.state.project.info, start);
+        ctrl_alt_z(&mut app);
+        assert_eq!(app.state.project.info.title.as_deref(), Some("Song"));
+    }
+
+    /// A generator inserted higher up the rack is one step, "Add channel": undone, it goes and the rows under it move
+    /// back up with their notes; redone, it comes back in its row and its generator is asked for again (OS).
+    #[test]
+    fn an_inserted_generator_is_one_step() {
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::default();
+        a.plugins.available = crate::plugins::builtin();
+        let trio = a.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
+        assert!(a.state.project.channels.len() >= 3);
+        a.state.project.patterns[0].notes = vec![os_model::Note::step(1, 0), os_model::Note::step(2, 4)];
+        let (chans, pats) = (a.state.project.channels.clone(), a.state.project.patterns.clone());
+        crate::plugin_menu::add_generator(&mut a, trio, Some(0));
+        let (more, moved) = (a.state.project.channels.clone(), a.state.project.patterns.clone());
+        assert_eq!((more.len(), a.state.selected_channel), (chans.len() + 1, 1));
+        assert_ne!(moved, pats, "the notes follow their rows");
+        assert_eq!(names(&a.state), [LAST_RESET, ADD_CHANNEL]);
+        (a.state.pending_plugin, a.state.rows_moved) = (None, Vec::new());
+        ctrl_z(&mut a);
+        assert_eq!((&a.state.project.channels, &a.state.project.patterns), (&chans, &pats), "all as before");
+        assert_eq!(a.state.rows_moved.last().unwrap().0[..3], [Some(0), None, Some(1)], "the instance goes");
+        assert_eq!(a.state.pending_plugin, None);
+        ctrl_alt_z(&mut a);
+        assert_eq!((&a.state.project.channels, &a.state.project.patterns), (&more, &moved), "inserted again");
+        assert_eq!(a.state.rows_moved.last().unwrap().0[..2], [Some(0), Some(2)]);
+        assert_eq!(a.state.pending_plugin, Some((1, trio)), "its generator is hosted again");
+        a.state.pending_plugin = None;
+        a.plugin_tick();
+        assert!(a.state.rows_moved.is_empty());
+    }
+
+    /// Replace is one step, "Replace channel": undone, the channel and its old instrument with the state Replace found
+    /// come back; redone, the new generator starts from its defaults; undone again, the old state once more (OS).
+    #[test]
+    fn replace_is_one_step() {
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::default();
+        a.plugins.available = crate::plugins::builtin();
+        let trio = a.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
+        let old = a.state.project.channels[0].clone();
+        let back: Vec<_> = a.plugin_copy(0).map(|(i, blob)| (0, i, blob)).into_iter().collect();
+        crate::plugin_menu::replace_generator(&mut a, trio, 0);
+        let new = a.state.project.channels[0].clone();
+        assert_ne!(new, old);
+        assert_eq!(names(&a.state), [LAST_RESET, REPLACE_CHANNEL]);
+        (a.state.pending_plugin, a.state.rows_moved) = (None, Vec::new());
+        ctrl_z(&mut a);
+        assert_eq!(a.state.project.channels[0], old);
+        let map: Vec<Option<usize>> = (0..a.state.project.channels.len()).map(|r| (r > 0).then_some(r)).collect();
+        assert_eq!(a.state.rows_moved.last().unwrap(), &(map, back), "the new instance goes, the old one comes back");
+        assert_eq!(a.state.pending_plugin, None);
+        ctrl_alt_z(&mut a);
+        assert_eq!(a.state.project.channels[0], new);
+        assert_eq!((a.state.pending_plugin, a.state.rows_moved.last().unwrap().1.is_empty()), (Some((0, trio)), true), "from its defaults");
+        // A saved state is handed over each way: undone again, the same one.
+        let ch = a.state.project.channels[1].clone();
+        record(&mut a.state, REPLACE_CHANNEL, Snap::Replace(Box::new(Replaced { row: 1, ch, host: Some((7, Some(vec![1, 2]))), other: None })));
+        a.state.project.channels[1].name = Some("New".into());
+        for _ in 0..2 {
+            ctrl_z(&mut a);
+            assert_eq!(a.state.rows_moved.last().unwrap().1, [(1, 7, vec![1, 2])]);
+            ctrl_alt_z(&mut a);
+            assert!(a.state.rows_moved.last().unwrap().1.is_empty());
+        }
     }
 
     /// Put undone recordings in the recycle bin: stored and shown, on by default; Lemon Studio does not record yet

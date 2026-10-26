@@ -295,7 +295,7 @@ impl OnePole {
 
 /// The feedback high pass: 10 Hz, always designed for 44100 Hz.
 fn high_pass_10hz() -> OnePole {
-    let w = (1.0f64 / 44100.0) as f32 * 3.141_592_7;
+    let w = (1.0f64 / 44100.0) as f32 * std::f32::consts::PI;
     let t = (f64::from(w) * 10.0).tan() as f32;
     let b0 = 1.0 / (t + 1.0);
     OnePole { b0, b1: -b0, a1: -(t - 1.0) / (t + 1.0), ..OnePole::default() }
@@ -802,7 +802,7 @@ impl Delay {
 
     fn design_colour(&mut self, hz: f32, high: bool) {
         self.colour_hz = Some((hz, high));
-        let w = (1.0 / self.rate) as f32 * 3.141_592_7;
+        let w = (1.0 / self.rate) as f32 * std::f32::consts::PI;
         let t = (f64::from(hz) * f64::from(w)).tan() as f32;
         let (b0, b1) = if high {
             let b0 = 1.0 / (t + 1.0);
@@ -840,7 +840,7 @@ impl Delay {
             }
         };
         let hz = hz.min((0.49 * self.rate) as f32);
-        let w = (3.1415 / self.rate) as f32;
+        let w = (std::f64::consts::PI / self.rate) as f32;
         // The product in single, the tangent in double.
         let g = f64::from(hz * w).tan() as f32;
         let a1 = 1.0 / ((g + k) * g + 1.0);

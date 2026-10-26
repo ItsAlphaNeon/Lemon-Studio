@@ -3,7 +3,7 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The arithmetic the Sytrus pages name: `single( )`, Round, Trunc, the flush of tiny values, the level curve and the
-//! matrix gain. Where the pages say "extended precision" Citrus works in doubles (the nearest width Rust has).
+//! matrix gain. Where the pages say "extended precision" Lemon Studio works in doubles (the nearest width Rust has).
 //
 // spec: audio/conventions.md ("Numbers", "Level curve"), plugins/sytrus.md ("The matrix", "Rates and control blocks")
 
@@ -43,7 +43,7 @@ pub fn flush_le(x: f64) -> f64 {
 /// The level curve in the host's form (`audio/conventions.md`), 1 at exactly 1.
 #[inline]
 pub fn curve(x: f32) -> f32 {
-    os_dsp::level::curve(x)
+    crate::level::curve(x)
 }
 
 /// A matrix cell's gain: `sign(v) * curve(|single(v) * single(1 / 256)|)`.

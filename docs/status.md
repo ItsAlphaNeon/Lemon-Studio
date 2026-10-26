@@ -142,10 +142,10 @@ counts. Double-clicking it opens the plugin performance monitor: each plugin's p
 and voices, with sorting, find and freeze.
 
 **Metronome.** The toolbar button, OPTIONS > Metronome or Ctrl+M: a click on every quarter note while playing,
-accented as FL does (the first beat of each bar in 4/4 and 3/4), through the master track. Right-click the
+accented as FL does (the first beat of each bar in 4/4 and 3/4), through the master track or the insert track that
+Audio settings ▸ Mixer ▸ Metronome track picks (the count-in and the Tempo tapper's clicks too). Right-click the
 button for five sounds and the volume (-12 to +12 dB; above 0 dB the click is soft-limited, not clipped). It is never in an export, and it is remembered between sessions. It follows the time-signature markers: the
-arrangement's in SONG mode, the current pattern's in PAT mode, each marker starting a bar of its own beats. Not yet:
-the "Metronome track" setting.
+arrangement's in SONG mode, the current pattern's in PAT mode, each marker starting a bar of its own beats.
 
 **Tempo tapper.** VIEW > Tempo tapper, Ctrl+F5 or the kick drum button on the toolbar: click the pad (or press
 a key on a MIDI keyboard, play a note on the typing keyboard, or press a Touch controller pad or key) in time. The average of the taps, in whole BPM, becomes the project tempo while Apply
@@ -186,6 +186,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   opens a Save as form that can make that folder (General ▸ Ask for data folder decides when; File ▸ New can
   open a New project form)
 - FILE lists the ten projects last opened or saved (Alt+1 .. Alt+0), More ▸ the older ones, fifty in all
+- File settings ▸ Backup: Autosave backs a changed project up at its interval into the user folder's
+  `Projects/Backup` (or the data folder's `Backup`), keeping the newest Maximum (100 unless changed) per project;
+  saving over a file keeps a copy of the old one there
 - FILE ▸ Revert to last backup opens the project's newest backup (asking about unsaved changes first, as Open
   does); Save as template... keeps a copy in the user folder's `Templates`, and New from template ▸ starts an
   untitled project from one (or Empty); Save to new project folder... saves into a folder named after the project,
@@ -229,6 +232,23 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   a decoded copy of its own, so a sample playing from disk takes no memory for its file there either. Opening a project still decodes each
   sampler file once while it loads; that copy is let go when loading ends
 
+## ✅ Audio editing
+
+- Tesla, Lemon Studio's audio editor and recorder (its counterpart to FL's Edison), sits in a mixer slot and is also
+  a VST3 and CLAP plugin for other hosts. It records what reaches its slot (now, on input, while input is present,
+  or while the song plays, for a set time or size), holds one sample with markers, regions and a loop, and edits it:
+  cut, copy, paste, trim, silence, normalize, fades and declicks, reverse, channel tools, Amp, with undo
+- WAV, AIFF and FLAC in; WAV out with Edison's chunks (markers, regions, loop), 24-bit too. Drag the sample or the
+  selection out as a file, or send it to the playlist or the selected channel
+- A project's Edison slots open as Tesla with their audio, and are saved back as Edison so the file still opens in
+  FL Studio
+- The toolbar's audio editor button and the mixer's Open audio editor show Tesla on the track; Open audio editor and
+  record sets one up as an audio logger (records while the song plays, 5 minutes); One-click audio recording and the
+  Record button's question can record an input into the master track's Tesla; Remove all audio editor instances
+  (mixer options, TOOLS) clears them after asking
+- Not yet: envelopes, the spectral and clean-up tools, time stretch and pitch shift in Tesla, slicing; TOOLS ▸ Audio
+  logger and Dump to audio editor; a rolling recording (Tesla stops at its time limit, Edison keeps the last minutes)
+
 ## ✅ Exporting audio
 
 - FILE ▸ Export audio (Ctrl+R) and Export MP3 (Shift+Ctrl+R) open the Export form: a name and folder, then the song
@@ -264,7 +284,7 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   controller go into the current pattern, quantized to the main snap; a take replaces the notes that start inside it
   and is one undo step; in SONG mode a clip of the pattern is placed where none plays, and made longer when the
   take runs past it. A click or R (typing keyboard off) asks what to record (notes and automation, notes, automation,
-  or audio into the playlist); armed, the whole button fills red. Right-click for the options
+  or audio into the playlist or the audio editor); armed, the whole button fills red. Right-click for the options
 - Time selection loop: a piano roll (PAT) or playlist (SONG) time selection loops playback; armed with Loop record
   off it punches in and out (plays it once and stops back at its start)
 - Score logger (TOOLS): every note played is kept for 30 minutes; Dump score log writes the last 2 to 30 minutes into
@@ -277,10 +297,11 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   on, playback loops and each pass is a take (one undo step) that replaces what the pass before recorded
 - One-click audio recording (the toolbar's microphone, TOOLS): pick an input (an ASIO driver's inputs, else the
   system's input devices), the song plays with Record armed and precount, and on stop the take becomes a 32-bit WAV
-  in the data folder's `Recorded` folder plus a new audio clip channel and clip where playback started
+  in the data folder's `Recorded` folder plus a new audio clip channel and clip where playback started; or, picked
+  through Into the audio editor, the take goes into Tesla on the master track instead (see Audio editing)
 - TOOLS ▸ Cancel recording: while recording, playback stops and the takes of that playback are undone (Redo brings
   them back)
-- Not yet: audio recording into mixer tracks, input monitoring, the audio editor
+- Not yet: audio recording into mixer tracks, input monitoring
 
 ## 🚧 Undo
 
@@ -288,18 +309,19 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Covers the piano roll, the playlist, step-sequencer edits and knob turns (channel, main, mixer panning and
   stereo separation, effect mix, send levels, swing), sample loads, the project's initial values, PATTERNS ▸ Split
   by channel and ADD's audio and automation clip channels
-- Also mixer volume faders ("Mixer track volume": a drag is one step, a typed value too), generators added at the
-  bottom of the rack ("Add channel": the plugin picker, F8, ADD, a browser drop), channel deletes ("Delete channel",
-  with notes, clips and the instruments' state), Settings > Project's bar, time mode, panning law, Play truncated
-  notes and Automatic crossfades ("Project settings"), and plugin parameters Lemon Studio sets ("Plugin
-  parameter": Type in value, Set..., Paste value); faders and parameters follow Undo knob tweaks
+- Also mixer volume faders ("Mixer track volume": a drag is one step, a typed value too), generators added to the
+  rack, at the bottom or inserted higher up ("Add channel": the plugin picker, F8, ADD, Insert, a browser drop),
+  Replace ("Replace channel", with the old instrument's state), channel deletes ("Delete channel", with notes,
+  clips and the instruments' state), Settings > Project's timebase (its ticks come back exactly), bar, time mode,
+  panning law, Play truncated notes and Automatic crossfades ("Project settings"), Settings > Info's text ("Project
+  info"), and plugin parameters Lemon Studio sets ("Plugin parameter": Type in value, Set..., Paste value); faders
+  and parameters follow Undo knob tweaks
 - The browser's Current project ▸ History lists the steps from "Last reset"; undone steps are grey, and a click
   on one goes back or forward to it
 - General settings ▸ Undo history: Maximum undo levels, Undo knob tweaks, Alternate undo mode, and showing the
   history in the browser, newest first if wanted
-- Not yet: a plugin editor's own changes, a generator inserted higher up the rack, Replace, the timebase (which
-  rescales the history instead), project info, other mixer track commands (mute, routing, names, slots);
-  "Put undone recordings in the recycle bin" waits for recording
+- Not yet: a plugin editor's own changes, other mixer track commands (mute, routing, names, slots); "Put undone
+  recordings in the recycle bin" waits for recording
 
 ## 🚧 Audio drivers
 
@@ -354,7 +376,3 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 - General ▸ System ▸ Associate project files (Windows): `.flp` files open with Lemon Studio, for your user
   only, and unticking puts the previous program back
 - Not yet: the recording settings
-
-## ❌ Not available yet
-
-- Audio editing

@@ -1,0 +1,23 @@
+-------------------------------------------------------------------------------
+12. The Rust crates in Cargo.lock
+-------------------------------------------------------------------------------
+
+This section is generated: `cargo run -p notices` writes it with cargo-about
+(https://github.com/EmbarkStudios/cargo-about) from the crates' own licence
+files, as set in tools/notices/about.toml.
+
+The Rust crates that Lemon Studio, its plugins and its tools are built with, on
+Windows, macOS and Linux, each with the licence it declares. Where a crate
+offers a choice, the text below is of the licence Lemon Studio takes it under.
+Crates that only run while building (build scripts and their libraries) are
+listed too.
+
+{{#each crates}}{{#if package.source}}  {{package.name}} {{package.version}} ({{{license}}})
+{{/if}}{{/each}}
+The licence texts follow, each after the crates it covers.
+{{#each licenses}}
+
+--- {{{name}}}: {{#each used_by}}{{#if crate.source}}{{crate.name}} {{crate.version}}{{#unless @last}}, {{/unless}}{{/if}}{{/each}}
+
+{{{text}}}
+{{/each}}
