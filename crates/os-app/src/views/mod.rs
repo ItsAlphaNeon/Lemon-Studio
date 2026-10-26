@@ -262,14 +262,18 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         });
     }
     let _ = work;
+    // The Lemon layout's animation: empty cards hold the places of windows opening and closing, under the moving ones.
+    for r in anim.map(|m| m.holders()).unwrap_or_default() {
+        os_ui::kit::lemon::outlined(ui.c, r, CARD_R, ui.t.window_border, ui.t.window_body);
+    }
     for (i, &win) in s.z.iter().enumerate() {
-        // Moving windows (the Lemon layout's animations) show all, the covered ones too.
-        if docked_at.is_some_and(|d| i < d) && anim.is_none() {
+        // While windows move (the Lemon layout's animation) they all show, the covered ones too; an opening one waits.
+        if (docked_at.is_some_and(|d| i < d) && anim.is_none()) || anim.is_some_and(|m| m.opening(win)) {
             continue;
         }
         ui.win = Some(win);
         let moved = anim.and_then(|m| m.at(win));
-        let r = moved.map_or_else(|| s.win_rect(win), |m| m.0);
+        let r = moved.unwrap_or_else(|| s.win_rect(win));
         // A window paints inside its paint area (also what it marks as drawn, e.g. text's generous overhang).
         let a = if moved.is_some() { r } else { paint_area(s, win) };
         ui.c.push_clip(a);
@@ -277,27 +281,14 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         ui.c.pop_clip();
         ui.win = None;
         // A maximized or snapped window fills its card square: its corners are rounded before the floating windows
-        // above it, which go over them. One still opening is veiled by the backdrop.
-        if let Some((mr, veil)) = moved {
+        // above it, which go over them.
+        if let Some(mr) = moved {
             card_corners(ui, mr);
-            if veil > 0.0 {
-                ui.c.fill_rect(mr, backdrop(ui).with_alpha((veil * 255.0) as u8));
-            }
         } else if s.bar.lemon && docked_at == Some(i) {
             card_corners(ui, work);
         } else if let Some(&(_, tr)) = tiles.tiles.iter().find(|t| t.0 == win).filter(|_| docked_at.is_none() || anim.is_some()) {
             card_corners(ui, tr);
         }
-    }
-    // Closing windows (the Lemon layout's animations): their last look shrinks and fades, answering nothing.
-    for (win, r, veil) in anim.map(|m| m.ghosts()).unwrap_or_default() {
-        let mark = ui.mark();
-        ui.c.push_clip(r);
-        paint_window(ui, s, win, r, r, f);
-        ui.c.pop_clip();
-        ui.forget(mark);
-        card_corners(ui, r);
-        ui.c.fill_rect(r, backdrop(ui).with_alpha((veil * 255.0) as u8));
     }
     // The gaps between snapped windows drag their splits.
     if split && anim.is_none() {

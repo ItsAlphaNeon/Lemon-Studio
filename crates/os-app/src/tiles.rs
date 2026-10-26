@@ -229,19 +229,12 @@ pub fn targets(s: &State) -> Vec<(Win, Rect)> {
         .collect()
 }
 
-/// The animations, timed as Omarchy's Hyprland ones (`hypr/looknfeel.lua`): a window moves in 379 ms (easeOutQuint),
-/// pops in from 87 % in 410 ms (easeOutQuint) while fading in over 173 ms (almostLinear), and pops out to 87 % in
-/// 149 ms (linear) while fading out over 146 ms.
+/// The animation, timed as Omarchy's Hyprland window moves (`hypr/looknfeel.lua`): 379 ms, easeOutQuint. Windows
+/// opening or closing do not animate: an empty card holds the place one is coming to or leaving while the others move.
 const MOVE: f32 = 0.379;
-const IN: f32 = 0.41;
-const FADE_IN: f32 = 0.173;
-const OUT: f32 = 0.149;
-const FADE_OUT: f32 = 0.146;
-const POPIN: f32 = 0.87;
 
-/// The curves (CSS cubic-bezier control points).
+/// The curve (CSS cubic-bezier control points).
 const EASE_OUT_QUINT: (f32, f32, f32, f32) = (0.23, 1.0, 0.32, 1.0);
-const ALMOST_LINEAR: (f32, f32, f32, f32) = (0.5, 0.5, 0.75, 1.0);
 
 /// `x` (0..1) through the cubic bezier from (0, 0) to (1, 1) with control points `c`.
 fn bezier((x1, y1, x2, y2): (f32, f32, f32, f32), x: f32) -> f32 {
@@ -267,59 +260,50 @@ fn lerp(a: Rect, b: Rect, k: f32) -> Rect {
     Rect::new(l(a.x, b.x), l(a.y, b.y), l(a.w, b.w), l(a.h, b.h))
 }
 
-/// `r` scaled by `k` about its centre.
-fn scaled(r: Rect, k: f32) -> Rect {
-    Rect::new(r.cx() - r.w * k / 2.0, r.cy() - r.h * k / 2.0, r.w * k, r.h * k)
-}
-
 /// A change of the windows' places under way: `elapsed` seconds into it (`App` moves it on before each frame).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Anim {
     pub elapsed: f32,
-    /// Windows moving (from, to), windows opening (to), windows closing (from).
+    /// Windows moving (from, to); the places of windows opening (to) and closing (from).
     moving: Vec<(Win, Rect, Rect)>,
     opening: Vec<(Win, Rect)>,
-    closing: Vec<(Win, Rect)>,
+    closing: Vec<Rect>,
 }
 
 impl Anim {
-    /// From the places shown (`from`, back to front) to `to`; `None` when nothing moves.
+    /// From the places shown (`from`, back to front) to `to`; `None` when no window moves (one only opening or
+    /// closing shows or goes at once).
     pub fn new(from: &[(Win, Rect)], to: &[(Win, Rect)]) -> Option<Anim> {
         let was = |w: Win| from.iter().find(|f| f.0 == w).map(|f| f.1);
         let moving: Vec<_> = to.iter().filter_map(|&(w, r)| was(w).filter(|&f| f != r).map(|f| (w, f, r))).collect();
         let opening: Vec<_> = to.iter().copied().filter(|&(w, _)| was(w).is_none()).collect();
-        let closing: Vec<_> = from.iter().copied().filter(|f| !to.iter().any(|t| t.0 == f.0)).collect();
-        (!(moving.is_empty() && opening.is_empty() && closing.is_empty())).then_some(Anim { elapsed: 0.0, moving, opening, closing })
+        let closing: Vec<_> = from.iter().filter(|f| !to.iter().any(|t| t.0 == f.0)).map(|f| f.1).collect();
+        (!moving.is_empty()).then_some(Anim { elapsed: 0.0, moving, opening, closing })
     }
 
     pub fn done(&self) -> bool {
-        self.elapsed >= MOVE.max(IN).max(OUT)
+        self.elapsed >= MOVE
     }
 
-    /// Where window `w` shows now and how much of the backdrop still veils it (0 = none); `None`: at its place.
-    pub fn at(&self, w: Win) -> Option<(Rect, f32)> {
-        let t = self.elapsed;
-        if let Some(&(_, a, b)) = self.moving.iter().find(|m| m.0 == w) {
-            return Some((lerp(a, b, bezier(EASE_OUT_QUINT, t / MOVE)), 0.0));
-        }
-        let &(_, r) = self.opening.iter().find(|o| o.0 == w)?;
-        let k = POPIN + (1.0 - POPIN) * bezier(EASE_OUT_QUINT, t / IN);
-        Some((scaled(r, k), 1.0 - bezier(ALMOST_LINEAR, t / FADE_IN)))
+    /// Where moving window `w` shows now; `None`: at its place.
+    pub fn at(&self, w: Win) -> Option<Rect> {
+        let &(_, a, b) = self.moving.iter().find(|m| m.0 == w)?;
+        Some(lerp(a, b, bezier(EASE_OUT_QUINT, self.elapsed / MOVE)))
     }
 
-    /// The closing windows still fading: where each shows now and its veil.
-    pub fn ghosts(&self) -> Vec<(Win, Rect, f32)> {
-        let t = self.elapsed;
-        if t >= OUT {
-            return Vec::new();
-        }
-        let k = 1.0 - (1.0 - POPIN) * (t / OUT);
-        self.closing.iter().map(|&(w, r)| (w, scaled(r, k), bezier(ALMOST_LINEAR, t / FADE_OUT))).collect()
+    /// Whether `w` is opening: it shows once the others have moved.
+    pub fn opening(&self, w: Win) -> bool {
+        self.opening.iter().any(|o| o.0 == w)
+    }
+
+    /// The empty cards holding the places of the windows opening and closing, under the moving ones.
+    pub fn holders(&self) -> Vec<Rect> {
+        self.opening.iter().map(|o| o.1).chain(self.closing.iter().copied()).collect()
     }
 
     /// The places shown now, back to front as `to` (to start another change from here).
     pub fn shown(&self, to: &[(Win, Rect)]) -> Vec<(Win, Rect)> {
-        to.iter().map(|&(w, r)| (w, self.at(w).map_or(r, |a| a.0))).collect()
+        to.iter().map(|&(w, r)| (w, self.at(w).unwrap_or(r))).collect()
     }
 }
 
@@ -363,26 +347,21 @@ mod tests {
         assert_eq!(get(Win::Playlist).x, work.x);
     }
 
-    /// The curves end where they should; a swap moves both windows, a new one pops in from 87 % behind a veil, a closed
-    /// one pops out; all is still after the longest.
+    /// The curve ends where it should; a swap moves both windows; a window opening or closing alone does not
+    /// animate, beside a move its place holds an empty card.
     #[test]
     fn motion() {
-        assert!(bezier(EASE_OUT_QUINT, 0.0).abs() < 1e-3 && (bezier(EASE_OUT_QUINT, 1.0) - 1.0).abs() < 1e-3);
+        assert!(bezier(EASE_OUT_QUINT, 0.0) == 0.0 && bezier(EASE_OUT_QUINT, 1.0) == 1.0);
         assert!(bezier(EASE_OUT_QUINT, 0.3) > 0.8, "fast out of the gate");
         let (a, b) = (Rect::new(0.0, 0.0, 100.0, 50.0), Rect::new(0.0, 56.0, 100.0, 50.0));
         let mut m = Anim::new(&[(Win::Playlist, a), (Win::Mixer, b)], &[(Win::Playlist, b), (Win::Mixer, a), (Win::PianoRoll, b)]).unwrap();
-        let (r, veil) = m.at(Win::PianoRoll).unwrap();
-        assert_eq!((r.w, veil), (87.0, 1.0));
-        assert_eq!(m.at(Win::Playlist).unwrap().0, a);
+        assert!(m.opening(Win::PianoRoll) && m.holders() == vec![b]);
+        assert_eq!(m.at(Win::Playlist), Some(a));
         m.elapsed = MOVE;
-        assert_eq!(m.at(Win::Playlist).unwrap().0, b);
-        let mut c = Anim::new(&[(Win::Playlist, a), (Win::Mixer, b)], &[(Win::Playlist, a)]).unwrap();
-        assert_eq!(c.ghosts(), vec![(Win::Mixer, b, 0.0)]);
-        c.elapsed = OUT;
-        assert!(c.ghosts().is_empty() && !c.done());
-        c.elapsed = IN;
-        assert!(c.done());
-        assert_eq!(Anim::new(&[(Win::Playlist, a)], &[(Win::Playlist, a)]), None);
+        assert_eq!(m.at(Win::Playlist), Some(b));
+        assert!(m.done());
+        assert_eq!(Anim::new(&[(Win::Playlist, a), (Win::Mixer, b)], &[(Win::Playlist, a)]), None, "a close alone");
+        assert_eq!(Anim::new(&[(Win::Playlist, a)], &[(Win::Playlist, a), (Win::Mixer, b)]), None, "an open alone");
     }
 
     /// A maximized window covers the card and is not in the plan; restoring it snaps it back.

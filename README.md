@@ -31,8 +31,9 @@ own content. Side branches are named `cutting-edge-<topic>`.
     and right); a title bar dragged onto another window swaps the two, the gaps drag to resize (a double click resets
     one), and windows keep a least size. F5, F7 and F9 show and hide their window on their own. There is no minimize;
     the maximize button shows a full square, or two panes to go back to the split. The channel rack, plugin and tool
-    windows still float. With Animations on "Entertain me", windows move, open and close as Omarchy's Hyprland ones
-    do.
+    windows still float. With Animations on "Entertain me", windows glide to new places as Omarchy's Hyprland ones
+    do; a window opening or closing beside them shows or goes at once (an empty card holds its place while they
+    move), and a change ending with one window filling the card is instant.
   - the browser docked left or right: its title bar drags it to the other side.
 
   The Lemon and Classic layouts each keep their own toolbar and, for the session, their own window arrangement.
