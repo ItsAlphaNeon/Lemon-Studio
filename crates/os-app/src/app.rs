@@ -19161,8 +19161,10 @@ mod tests {
         // Star, then hide, an effect (one no scan found: as if listed before the scan).
         app.plugins.effects.push(crate::plugin_db::fake("Test FX", os_host::Kind::Effect));
         app.state.plugdb.rebuild(&app.plugins);
-        frame(&mut app, &mut c, None);
         let row_of = |app: &App| app.state.plugdb.rows.iter().position(|r| r.name == "Test FX").unwrap();
+        // Scrolled to its row: the built-in plugins alone can fill the table.
+        app.state.plugdb.top = row_of(&app);
+        frame(&mut app, &mut c, None);
         let r = hit_rect(&app, &Action::Settings(SAct::Plug(Plug::Star(row_of(&app)))));
         click(&mut app, &mut c, r);
         assert!(app.state.plugdb.lists.fx.iter().any(|e| e.name == "Test FX" && e.favorite), "starred");
