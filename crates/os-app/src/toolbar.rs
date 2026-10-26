@@ -525,10 +525,16 @@ pub struct Bar {
 
 /// The settings key of General settings ▸ Layout.
 pub const LEMON_KEY: &str = "layout_lemon";
+/// The layout until one is chosen: Lemon. Tests keep the classic one, which the measured FL geometry is about.
+const LEMON_DEFAULT: bool = !cfg!(test);
 
 impl Bar {
     pub fn load() -> Bar {
-        Bar { layout: Layout::load(), editing: false, user: user_presets(), lemon: crate::settings_file::flag(LEMON_KEY, false) }
+        let chosen = crate::settings_file::get(LEMON_KEY).is_some();
+        let lemon = crate::settings_file::flag(LEMON_KEY, LEMON_DEFAULT);
+        // Not chosen yet: the default layout's toolbar too, over one kept from before there was a choice.
+        let layout = if !chosen && lemon { PRESETS[LEMON_PRESET].layout() } else { Layout::load() };
+        Bar { layout, editing: false, user: user_presets(), lemon }
     }
 
     /// The user preset with the current layout, if any.

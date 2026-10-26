@@ -1118,10 +1118,25 @@ impl State {
     /// Where window `w` paints and takes clicks: its rect plus, while it floats, the resize zones past its edges.
     pub fn win_area(&self, w: Win) -> Rect {
         let r = self.win_rect(w);
-        match w.slot() {
+        let r = match w.slot() {
             Some(i) if !self.wins[i].maxed && !self.wins[i].mini => r.outset(4.0),
             _ => r,
+        };
+        match self.mixer_hang().filter(|_| w == Win::Mixer) {
+            Some(h) => r.union(&h),
+            None => r,
         }
+    }
+
+    /// The Lemon layout's gap under the mixer while it reaches the workspace card's bottom: its routing cables sag
+    /// into it, down to the status bar.
+    pub fn mixer_hang(&self) -> Option<Rect> {
+        if !self.bar.lemon || !self.shown(Win::Mixer) {
+            return None;
+        }
+        let r = self.win_rect(Win::Mixer);
+        let floor = views::status_rect(self).y;
+        (r.h > TITLE_H && r.bottom() >= self.work_rect().bottom() - 0.5 && floor > r.bottom()).then(|| Rect::new(r.x, r.bottom(), r.w, floor - r.bottom()))
     }
 
     /// Where the window is painted: the workspace when maximized, a title bar when minimized.

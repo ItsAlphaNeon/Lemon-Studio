@@ -331,8 +331,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     overlays
 }
 
-/// The cutting-edge branch's mark colour (the workspace watermark and version string).
-const CUTTING_EDGE_RED: Color = Color::rgb(0xe5483b);
+/// The cutting-edge branch's mark colour (the workspace watermark, the version string, the status bar's mark).
+pub(crate) const CUTTING_EDGE_RED: Color = Color::rgb(0xe5483b);
 
 /// The Lemon layout's backdrop around the workspace card: a shade darker than the workspace.
 pub(crate) fn backdrop(ui: &Ui) -> Color {
@@ -368,6 +368,7 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
         Win::Strum => strum::bounds(s),
         Win::Arp => arpeggiate::bounds(s),
         Win::PianoDlg => piano_dlg::bounds(s),
+        Win::Mixer => s.mixer_hang().map_or(s.win_rect(Win::Mixer), |h| s.win_rect(Win::Mixer).union(&h)),
         w => s.win_rect(w),
     }
 }

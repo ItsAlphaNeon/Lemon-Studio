@@ -20,13 +20,16 @@ own content. Side branches are named `cutting-edge-<topic>`.
   resize it (CLAP `gui.can_resize`, VST3 `IPlugView::canResize`) gets the frame's edges and maximize button. The
   editor is asked for the new size and the frame takes the size it accepts. Such an editor larger than the monitor's
   work area opens shrunk to fit it. Detached plugin windows open centred on the monitor under the pointer.
-- **Lemon layout.** General settings ▸ Display ▸ Layout: Classic or Lemon. The Lemon layout has:
+- **Lemon layout, the default.** General settings ▸ Display ▸ Layout: Lemon or Classic. The Lemon layout has:
   - a toolbar of one row (menus, transport, time, pattern, main volume and pitch, windows, utilities);
   - a status bar along the bottom (Lemon's mark, the title and hint, global snap, mode buttons, pickers, CPU and
     memory);
-  - the workspace as a rounded card over a darker backdrop.
+  - the workspace and the browser as rounded cards over a darker backdrop; the browser's splitter is the gap between
+    them, and the mixer's routing cables hang over the gap below.
 
-  Every keyboard shortcut works the same. The classic layout is unchanged.
+  Every keyboard shortcut works the same. Classic is FL's arrangement and unchanged.
+- **Branch marks.** The workspace watermark, the version string ("cutting-edge pre-alpha") and the status bar's mark
+  are red.
 
 ## What this branch removes
 

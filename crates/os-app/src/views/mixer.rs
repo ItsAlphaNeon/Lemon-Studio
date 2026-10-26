@@ -252,6 +252,15 @@ fn cables(ui: &mut Ui, s: &State, strips: Rect, area: Rect, bottom: f32) {
         cables.connect(n, from, (socket_x(n), ky), cur == 0 || n == 0, col);
     }
     cables.end();
+    // The Lemon layout: they hang on over the gap under the workspace card (`State::mixer_hang`).
+    let (strips, area) = match s.mixer_hang() {
+        Some(h) => {
+            ui.c.fill_rect(h, super::backdrop(ui));
+            let down = |r: Rect| Rect::new(r.x, r.y, r.w, h.bottom() - r.y);
+            (down(strips), down(area))
+        }
+        None => (strips, area),
+    };
     // Cables between inserts are clipped where the inserts scroll; those into the master are not.
     for (master, pts, col) in cables.each() {
         ui.c.push_clip(if master { strips } else { area });

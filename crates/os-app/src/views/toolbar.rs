@@ -904,7 +904,7 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_rect(r, t.toolbar);
     ui.c.fill_rect(Rect::new(r.x, r.y, r.w, 1.0), t.toolbar_edge);
     let cy = r.cy() + 0.5;
-    icons::logo(ui.c, r.x + 15.0, cy, 8.0, os_theme::design::lemon::MAIN);
+    icons::logo(ui.c, r.x + 15.0, cy, 8.0, super::CUTTING_EDGE_RED);
     // the right side, from the right edge leftwards
     let mut x = r.right() - 8.0;
     let small = Font::new(13);

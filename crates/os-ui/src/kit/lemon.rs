@@ -86,10 +86,17 @@ pub fn panel(c: &mut Canvas, r: Rect, radius: f32, fill: Color) {
     c.fill_rrect(r, radius, fill);
 }
 
-/// A rounded panel with a 1 px outline.
+/// A rounded panel with a 1 px outline. The panel is snapped to whole device pixels and the outline is a whole number of
+/// them (one at 100 % and 125 %, two at 200 %): at a fractional scale an unsnapped 1 px line falls across two device
+/// pixels on some edges and one on others, so it looked blurred and of uneven strength.
 pub fn outlined(c: &mut Canvas, r: Rect, radius: f32, line: Color, fill: Color) {
+    let k = c.scale;
+    let snap = |v: f32| (v * k).round() / k;
+    let (x0, y0) = (snap(r.x), snap(r.y));
+    let r = Rect::new(x0, y0, snap(r.right()) - x0, snap(r.bottom()) - y0);
+    let lw = k.round().max(1.0) / k;
     c.fill_rrect(r, radius, line);
-    c.fill_rrect(r.inset(1.0), (radius - 1.0).max(0.0), fill);
+    c.fill_rrect(r.inset(lw), (radius - lw).max(0.0), fill);
 }
 
 /// A display well (hint bar, monitors, time / tempo displays, number fields): darker rounded field.
