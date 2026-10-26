@@ -256,9 +256,12 @@ fn bezier((x1, y1, x2, y2): (f32, f32, f32, f32), x: f32) -> f32 {
     at(y1, y2, 0.5 * (lo + hi))
 }
 
+/// The rect `k` of the way from `a` to `b`, on whole px (as every window's place is: views lay out from it and check
+/// their parts against each other exactly).
 fn lerp(a: Rect, b: Rect, k: f32) -> Rect {
-    let l = |p: f32, q: f32| p + (q - p) * k;
-    Rect::new(l(a.x, b.x), l(a.y, b.y), l(a.w, b.w), l(a.h, b.h))
+    let l = |p: f32, q: f32| (p + (q - p) * k).round();
+    let (x0, y0, x1, y1) = (l(a.x, b.x), l(a.y, b.y), l(a.right(), b.right()), l(a.bottom(), b.bottom()));
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
 }
 
 /// A change of the windows' places under way: `elapsed` seconds into it (`App` moves it on before each frame).
@@ -467,3 +470,40 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod frames {
+    use super::*;
+    use crate::app::App;
+    /// Every frame of every move paints without a view's checks tripping (fractional places once crashed the playlist's:
+    /// its parts, worked out two ways, differed by float rounding).
+    #[test]
+    fn frames_paint() {
+        let Ok(mut c) = os_ui::Canvas::new(1536, 864, 1.25) else { return };
+        let mut app = App::new(None);
+        app.state.bar.lemon = true;
+        app.state.wins.iter_mut().for_each(|w| (w.maxed, w.mini) = (false, false));
+        app.state.z.retain(|w| w.slot().is_none());
+        for w in [Win::Playlist, Win::PianoRoll, Win::Mixer] {
+            app.state.raise(w);
+        }
+        app.paint(&mut c, None);
+        // the playlist across x 700..1000 on fractional px (where a view's checks met float rounding)
+        let (a0, a1) = (Rect::new(700.0, 60.0, 600.0, 400.0), Rect::new(1000.7, 60.3, 500.0, 400.0));
+        for i in 0..40 {
+            let Some(mut m) = Anim::new(&[(Win::Playlist, a0)], &[(Win::Playlist, a1)]) else { break };
+            m.elapsed = 0.0093 * i as f32;
+            app.state.tile_anim = Some(m);
+            app.paint(&mut c, None);
+        }
+        let all = targets(&app.state);
+        for (from, to) in [(all.clone(), all.iter().rev().map(|t| t.0).zip(all.iter().map(|t| t.1)).collect::<Vec<_>>()), (all[..2].to_vec(), all.clone()), (all.clone(), all[..2].to_vec())] {
+            for i in 0..40 {
+                let Some(mut a) = Anim::new(&from, &to) else { break };
+                a.elapsed = 0.01 * i as f32;
+                app.state.tile_anim = Some(a);
+                app.paint(&mut c, None);
+            }
+        }
+    }
+}
