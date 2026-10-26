@@ -408,6 +408,27 @@ impl FrameWindow {
         }
     }
 
+    /// The size (logical px) of the work area of the monitor under the pointer (where the user opens the window), when
+    /// it is known.
+    pub fn work_size(&self) -> Option<(f32, f32)> {
+        let c = &self.f.conn.c;
+        let p = c.query_pointer(self.f.conn.root).ok().and_then(|r| r.reply().ok()).map_or((0, 0), |r| (i32::from(r.root_x), i32::from(r.root_y)));
+        let [x0, y0, x1, y1] = work_area(&self.f.conn, p)?;
+        let k = self.f.scale;
+        Some(((x1 - x0) as f32 / k, (y1 - y0) as f32 / k))
+    }
+
+    /// The window's chrome: what it adds to the editor (logical px).
+    pub fn chrome(&self) -> (f32, f32) {
+        self.f.state.borrow().chrome()
+    }
+
+    /// An event as if the frame had made it (tests: a drag of its edges).
+    #[cfg(test)]
+    pub(crate) fn push_event(&self, e: FrameEvent) {
+        self.f.state.borrow_mut().events.push(e);
+    }
+
     /// The plugin changed its page itself.
     pub fn set_page(&self, page: usize) {
         let mut st = self.f.state.borrow_mut();
