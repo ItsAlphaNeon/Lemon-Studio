@@ -2161,7 +2161,7 @@ impl App {
                 EDISON_FILE_NAME => self.plugins.edison_file_state(key),
                 LOVE_PHILTER_FILE_NAME => self.plugins.love_philter_file_state(key),
                 MAXIMUS_FILE_NAME => self.plugins.maximus_file_state(key),
-                _ => None,
+                file => self.plugins.recreation_file_state(key, file),
             };
             if let Some(st) = st {
                 slot.state = st;
@@ -2298,7 +2298,8 @@ impl App {
     /// from the slot's saved state (spec: plugins/lemon-parametric-eq-2.md §8). Without the plugin the engine's own EQ
     /// plays them. Edison's slots are opened as Tesla the same way, with their sample, loop, markers and recording
     /// settings (spec: plugins/tesla/README.md "Opening Edison slots"), Love Philter's as Pulp Filter and Maximus's as
-    /// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6).
+    /// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6), and the FL effects
+    /// another Lemon effect recreates (`plugins::FL_RECREATIONS`: Reeverb 2, Balance, Chorus, ...) by that effect.
     pub(crate) fn sync_effects(&mut self) {
         use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME, PRESS, PULP_FILTER, TESLA};
         // The installed EQ plays these slots instead (`host_native`).
@@ -2313,7 +2314,10 @@ impl App {
             .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
             .filter_map(|(t, k, s)| {
                 s.as_ref()
-                    .filter(|s| [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str()))
+                    .filter(|s| {
+                        [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str())
+                            || crate::plugins::recreation_of(&s.name).is_some()
+                    })
                     .map(|s| (t, k, s.name.clone(), s.state.clone()))
             })
             .filter(|&(t, k, _, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
@@ -2331,6 +2335,10 @@ impl App {
             } else if file == MAXIMUS_FILE_NAME {
                 // Bytes that are not a Maximus state open Press's starting state.
                 (PRESS, Some(press::plugin_state_from_fl(&fl)))
+            } else if let Some(lemon) = crate::plugins::recreation_of(&file) {
+                // A state shorter than the original's, or of a later version, opens the defaults (spec:
+                // plugins/lemon-small-effects.md §5).
+                (lemon, crate::plugins::recreation_state_from_fl(lemon, &fl))
             } else {
                 // Bytes that are not an Edison state open an empty Tesla.
                 (TESLA, tesla::plugin_state_from_edison(&fl))
@@ -9163,6 +9171,53 @@ mod tests {
         assert_eq!(a.plugins.maximus_file_state(key), Some(max.clone()));
         a.store_builtin_states();
         assert_eq!(a.state.project.mixer[1].slots[3].clone().unwrap().state, max);
+    }
+
+    /// A project's Fruity Reeverb 2, Balance and Chorus slots (user report 2026-10-26: "This slot's plugin is not
+    /// hosted") are opened as Lemon Reverb, Lemon Balance and Lemon Chorus with their state, show the Lemon names, and
+    /// a save keeps the FL effects, not wrapped, with the state the Lemon effects write back. Stereo Shaper stays the
+    /// engine's (its difference output is the slot's alone).
+    // spec: plugins/lemon-small-effects.md "Opened projects' slots"
+    #[test]
+    fn fl_effect_slots_open_as_their_lemon_recreations() {
+        use crate::plugins::fx_key;
+        let mut reverb = lemon_reverb::params::default_state();
+        lemon_reverb::params::set_field(&mut reverb, 4, 70);
+        let mut balance = lemon_small_fx::params::default_state(lemon_small_fx::balance::SPEC);
+        lemon_small_fx::params::set_field(&mut balance, 0, -64);
+        let mut chorus = lemon_small_fx::params::default_state(lemon_small_fx::chorus::SPEC);
+        let d = lemon_small_fx::params::field(&chorus, 1);
+        lemon_small_fx::params::set_field(&mut chorus, 1, d + 1);
+        let cases = [(1u16, 0u8, "Fruity Reeverb 2", "Lemon Reverb", reverb), (2, 1, "Fruity Balance", "Lemon Balance", balance), (3, 2, "Fruity Chorus", "Lemon Chorus", chorus)];
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        for (t, k, file, _, fl) in &cases {
+            a.state.project.mixer[usize::from(*t)].slots[usize::from(*k)] = Some(os_model::SlotPlugin { name: (*file).into(), state: fl.clone() });
+        }
+        let shaper = os_model::SlotPlugin { name: "Fruity Stereo Shaper".into(), state: Vec::new() };
+        a.state.project.mixer[4].slots[0] = Some(shaper.clone());
+        a.sync_effects();
+        for (t, k, file, lemon, fl) in &cases {
+            let key = fx_key(*t, *k);
+            assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(lemon.to_string()), "{file}");
+            assert_eq!(crate::mixer::slot_name(&a.state, *t, *k).as_deref(), Some(*lemon));
+            assert_eq!(a.plugins.recreation_file_state(key, file).as_ref(), Some(fl), "{file}: the state as it was opened");
+        }
+        assert!(!a.plugins.hosted.contains_key(&fx_key(4, 0)), "Stereo Shaper: the engine's");
+        let path = std::env::temp_dir().join(format!("lemon-fl-recreations-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        for (t, k, file, _, fl) in &cases {
+            let slot = saved.mixer[usize::from(*t)].slots[usize::from(*k)].clone().unwrap();
+            assert_eq!((slot.name.as_str(), &slot.state), (*file, fl));
+        }
+        assert_eq!(saved.mixer[4].slots[0], Some(shaper));
     }
 
     /// The toolbar's audio editor button puts Tesla on the master track and shows it; another click shows the same

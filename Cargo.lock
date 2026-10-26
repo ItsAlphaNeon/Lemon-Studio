@@ -2851,6 +2851,7 @@ dependencies = [
  "lemon-parametric-eq-2",
  "lemon-reverb",
  "lemon-sampler",
+ "lemon-small-fx",
  "lemon-soft-clipper",
  "lemon-stereo-enhancer",
  "lemon-stereo-shaper",

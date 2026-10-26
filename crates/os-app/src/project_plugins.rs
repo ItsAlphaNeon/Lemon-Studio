@@ -48,11 +48,12 @@ pub fn native_first() -> bool {
 }
 
 /// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, Sytrus, the
-/// parametric EQ, Edison, Love Philter, Maximus).
+/// parametric EQ, Edison, Love Philter, Maximus, and the effects of `plugins::FL_RECREATIONS`).
 pub fn has_recreation(id: &str) -> bool {
     [crate::osc3::FILE_NAME, crate::citrus::FILE_NAME, crate::plugins::EQ_FILE_NAME, crate::plugins::EDISON_FILE_NAME, crate::plugins::LOVE_PHILTER_FILE_NAME, crate::plugins::MAXIMUS_FILE_NAME]
         .iter()
         .any(|n| id.eq_ignore_ascii_case(n))
+        || crate::plugins::recreation_of(id).is_some()
 }
 
 /// Whether a hosted plugin is saved inside the wrapper: CLAP, VST3 and VST2 plugins from plugin files, and the built-in
@@ -104,7 +105,7 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
             }
             continue;
         }
-        if !is_wrapped(&d) {
+        if !is_wrapped(&d) || plays_fl_slot(proj, key, &d) {
             continue;
         }
         if untouched_stand_in(proj, plugins, key, &d) {
@@ -126,6 +127,14 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
             }
         }
     }
+}
+
+/// Whether the built-in effect `d` hosted under `key` plays a slot that `proj` stores as the FL effect it recreates
+/// (`plugins::FL_RECREATIONS`): the slot stays that effect, with the state `App::store_builtin_states` gave it.
+fn plays_fl_slot(proj: &Project, key: usize, d: &Descriptor) -> bool {
+    let Some((t, k)) = fx_of(key) else { return false };
+    let slot = proj.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_ref());
+    is_builtin(d) && slot.and_then(|s| crate::plugins::recreation_of(&s.name)) == Some(d.name.as_str())
 }
 
 /// Whether the instance under `key` (descriptor `d`) is a copy in another format standing in for the wrapped plugin its
