@@ -35,7 +35,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
     alone has only its close button. The channel rack, plugin and tool
     windows still float. With Animations on "Entertain me", windows glide to new places as Omarchy's Hyprland ones
     do; a window opening is at its place at once, under them as they move away, and one closing leaves its
-    last look there for them to move over, and a change ending with one window filling the card is instant.
+    last look there for them to move over, and maximizing is instant.
   - the browser docked left or right: its title bar drags it to the other side.
 
   The Lemon and Classic layouts each keep their own toolbar and, for the session, their own window arrangement.

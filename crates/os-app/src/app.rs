@@ -3769,8 +3769,8 @@ impl App {
 
     /// The Lemon layout's windows changed places (shown, hidden, swapped, restored, another preset): the frame repaints
     /// whole, and with "Entertain me" (General ▸ Display ▸ Animations) they move there as Hyprland's windows do
-    /// (`tiles::Anim`). A split dragged, the card resized, the first frame and a change ending with one window filling
-    /// the card jump straight there.
+    /// (`tiles::Anim`). A split dragged, the card resized, the first frame and a window maximized jump straight
+    /// there.
     fn tiles_motion(&mut self) {
         let now = std::time::Instant::now();
         // A window alone is never maximized (`State::alone`).
@@ -3788,8 +3788,8 @@ impl App {
             }
         }
         if targets != self.tile_targets {
-            // Instant too: a change that leaves one window filling the card (maximized, or alone).
-            let full = self.state.docked().is_some() || targets.len() <= 1;
+            // Instant too: maximizing a window over the card.
+            let full = self.state.docked().is_some();
             let direct = full || matches!(self.drag, Some(Drag::TileSplit { .. })) || self.tile_work != Some(work);
             let motion = !cfg!(test) && !direct && self.state.cables.borrow().animations();
             let from = self.state.tile_anim.as_ref().map_or_else(|| self.tile_targets.clone(), |a| a.shown(&self.tile_targets));
