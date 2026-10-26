@@ -1813,8 +1813,10 @@ impl App {
         self.saved.0 != self.state.project || self.saved.1 != self.state.tempo
     }
 
-    /// The system asks the window to close (its close shortcut, a taskbar or dock): the settings window, drawn inside
-    /// the main window, closes first, as a window of its own would under that shortcut; otherwise the app closes, once
+    /// The system asks the window to close (its close shortcut, a taskbar or dock). The dialog-like windows drawn
+    /// inside the main window close first, one per request, as windows of their own would under that shortcut: the
+    /// settings window, the Remote control settings box, then the tool window in front (Tempo tapper, Touch controller,
+    /// Plugin performance monitor, the piano roll's tool dialogs; as with their ×). Otherwise the app closes, once
     /// unsaved changes are answered. While a dialog is open the window stays (the dialog is answered first).
     pub fn close_requested(&mut self) {
         if self.modal_open() {
@@ -1822,6 +1824,16 @@ impl App {
         }
         if self.state.settings.open {
             self.state.settings.open = false;
+            self.invalidate();
+            return;
+        }
+        if self.state.link_box.take().is_some() {
+            self.invalidate();
+            return;
+        }
+        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg);
+        if let Some(&w) = self.state.z.last().filter(|w| !self.state.no_focus && tool(w)) {
+            self.act(Action::CloseWin(w));
             self.invalidate();
             return;
         }
@@ -11274,13 +11286,19 @@ mod tests {
         assert_eq!(app.state.plugdb.top, 80 - crate::views::settings::TABLE_ROWS, "to the last row, no further");
     }
 
-    /// The system's close shortcut over the settings window closes only that window; the next one closes the app.
+    /// The system's close shortcut closes the settings window, then the tool window in front, one per press; a
+    /// workspace window in front (the mixer) leaves the shortcut to the app, which then closes.
     #[test]
-    fn close_shortcut_closes_settings_first() {
+    fn close_shortcut_closes_dialog_windows_first() {
         let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        app.state.raise(Win::Tapper);
         app.open_settings(0);
         app.close_requested();
-        assert!(!app.state.settings.open && !app.want_exit, "only the settings window closed");
+        assert!(!app.state.settings.open && app.state.z.contains(&Win::Tapper) && !app.want_exit, "only the settings window closed");
+        app.close_requested();
+        assert!(!app.state.z.contains(&Win::Tapper) && !app.want_exit, "then the tapper");
+        assert_eq!(app.state.z.last(), Some(&Win::Mixer));
         app.close_requested();
         assert!(app.want_exit, "then the app");
     }
