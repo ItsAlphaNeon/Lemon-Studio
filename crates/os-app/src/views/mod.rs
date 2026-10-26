@@ -266,12 +266,18 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     // The Lemon layout's animation: under the moving windows, a closing one's last look and the opening ones at their
     // places.
     if let Some(m) = anim {
+        // Where the windows are this frame: the gaps between neighbours run on through a closing window's picture.
+        let now: Vec<Rect> = order.iter().filter(|w| w.slot().is_some()).map(|&w| m.at(w).unwrap_or_else(|| s.win_rect(w))).collect();
         for (r, snap) in &m.closing {
             match snap {
                 Some(snap) => ui.c.paint_snapshot(snap),
                 None => os_ui::kit::lemon::outlined(ui.c, *r, CARD_R, ui.t.window_border, ui.t.window_body),
             }
             card_corners(ui, *r);
+            for gap in gaps(&now) {
+                let g = if gap.w <= 2.0 * GUTTER { Rect::new(gap.x, r.y, gap.w, r.h) } else { Rect::new(r.x, gap.y, r.w, gap.h) };
+                ui.c.fill_rect(g.intersect(r), backdrop(ui));
+            }
         }
         for &(win, r) in m.opening() {
             ui.win = Some(win);
@@ -410,6 +416,23 @@ pub(crate) const CUTTING_EDGE_RED: Color = Color::rgb(0xe5483b);
 /// The Lemon layout's backdrop around the workspace card: a shade darker than the workspace.
 pub(crate) fn backdrop(ui: &Ui) -> Color {
     ui.t.workspace.shade(-0.35)
+}
+
+/// The gaps between windows side by side or one above the other (at most two gutters apart, along what they share).
+fn gaps(rects: &[Rect]) -> Vec<Rect> {
+    let mut out = Vec::new();
+    for a in rects {
+        for b in rects {
+            let (dx, dy) = (b.x - a.right(), b.y - a.bottom());
+            if dx > 0.0 && dx <= 2.0 * GUTTER && a.y < b.bottom() && b.y < a.bottom() {
+                out.push(Rect::new(a.right(), a.y.max(b.y), dx, a.bottom().min(b.bottom()) - a.y.max(b.y)));
+            }
+            if dy > 0.0 && dy <= 2.0 * GUTTER && a.x < b.right() && b.x < a.right() {
+                out.push(Rect::new(a.x.max(b.x), a.bottom(), a.right().min(b.right()) - a.x.max(b.x), dy));
+            }
+        }
+    }
+    out
 }
 
 /// Rounds the workspace card's corners over whatever a docked window painted there: each corner outside the arc is
