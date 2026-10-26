@@ -261,6 +261,8 @@ pub enum Action {
     BrowserSearch,
     /// The splitter right of the browser: drag to resize it, double-click for the default width (§9).
     BrowserSplitter,
+    /// The Lemon layout: the browser's title bar (drag it to the window's other side).
+    BrowserMove,
     PlaylistArea,
     MixerArea,
     RackArea,
@@ -849,6 +851,8 @@ pub enum Drag {
     PianoSplit { dy: f32, top: f32, h: f32 },
     /// The browser's splitter: `dx` = grab offset from the browser's right edge (spec: ui/browser.md §9).
     BrowserSplit { dx: f32 },
+    /// The Lemon layout: the browser's title bar, to the other side.
+    BrowserMove,
     /// The Lemon layout: a snapped window's title bar (dropped on another, they swap), and a split's gap.
     Tile { win: Win },
     TileSplit { node: usize },
@@ -1023,6 +1027,8 @@ pub struct State {
     /// Width of the docked browser incl. its splitter, as dragged (`views::browser_w` keeps it in range), kept between
     /// runs, and the last press on the splitter, for its double click (spec: ui/browser.md §9).
     pub browser_w: f32,
+    /// The Lemon layout: the browser docked right of the workspace (`views::browser_right`).
+    pub browser_right: bool,
     pub browser_split_click: Option<std::time::Instant>,
     /// The hovered row whose label is scrolling, as last painted (spec: ui/browser.md §9).
     pub browser_marquee: std::cell::RefCell<Option<views::browser::Marquee>>,
@@ -1117,14 +1123,17 @@ impl State {
     /// The workspace: right of the browser, below the toolbar. The Lemon layout makes it a card: a gap all round, the
     /// status bar below (`views::GUTTER`, `views::status_h`).
     pub fn work_rect(&self) -> Rect {
-        let left = if self.show_browser { views::browser_w(self) } else { 0.0 };
+        let right = self.show_browser && views::browser_right(self);
+        let left = if self.show_browser && !right { views::browser_w(self) } else { 0.0 };
         let top = views::work_y(self);
-        let r = Rect::new(left, top, (self.screen.0 - left).max(0.0), (self.screen.1 - top - views::status_h(self)).max(0.0));
+        let w = self.screen.0 - left - if right { views::browser_w(self) } else { 0.0 };
+        let r = Rect::new(left, top, w.max(0.0), (self.screen.1 - top - views::status_h(self)).max(0.0));
         if self.bar.lemon {
-            // the browser's splitter is the gap on its left
+            // the browser's splitter is the gap on its side
             let g = views::GUTTER;
-            let gl = if self.show_browser { 0.0 } else { g };
-            Rect::new(r.x + gl, r.y + g, (r.w - gl - g).max(0.0), (r.h - 2.0 * g).max(0.0))
+            let gl = if self.show_browser && !right { 0.0 } else { g };
+            let gr = if right { 0.0 } else { g };
+            Rect::new(r.x + gl, r.y + g, (r.w - gl - gr).max(0.0), (r.h - 2.0 * g).max(0.0))
         } else {
             r
         }
@@ -1430,6 +1439,7 @@ impl App {
                 browser_hist: Vec::new(),
                 browser_hist_pos: 0,
                 browser_w: crate::browser::load_width(),
+                browser_right: crate::settings_file::flag(crate::browser::BROWSER_RIGHT_KEY, false),
                 browser_split_click: None,
                 browser_marquee: Default::default(),
                 tempo: 130.0,
@@ -5358,7 +5368,7 @@ impl App {
                     }
                 }
                 Drag::BrowserSplit { dx } => self.browser_split_drag(x - dx),
-                Drag::Tile { .. } => {}
+                Drag::Tile { .. } | Drag::BrowserMove => {}
                 Drag::TileSplit { node } => {
                     crate::tiles::drag(&mut self.state, node, (x, y));
                     self.invalidate();
@@ -6220,6 +6230,7 @@ impl App {
             Some(Drag::Bar(d)) => self.bar_drop(d),
             Some(Drag::PianoSplit { .. }) => crate::piano_split::save(self.state.piano.split),
             Some(Drag::BrowserSplit { .. }) => crate::browser::save_width(self.state.browser_w),
+            Some(Drag::BrowserMove) => self.browser_move_drop(),
             Some(Drag::Tile { win }) => {
                 crate::tiles::drop(&mut self.state, win, self.mouse);
             }
@@ -8058,7 +8069,7 @@ impl App {
                 self.damage_win(Win::PianoRoll);
             }
             Action::CloseWin(w) => s.hide(w),
-            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserSplitter => {}
+            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserSplitter | Action::BrowserMove => {}
             Action::TypeIn(t) => crate::typein::click(s, t),
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
             Action::PlTool(_)
@@ -18805,6 +18816,12 @@ mod tests {
         let (b, w) = (views::browser_rect(&app.state), app.state.work_rect());
         assert_eq!((b.x, b.y, b.bottom()), (g, w.y, w.bottom()));
         assert_eq!(w.x, b.right());
+        // docked right: the same card on the other side, the workspace left of it
+        app.state.browser_right = true;
+        let (b, w) = (views::browser_rect(&app.state), app.state.work_rect());
+        assert_eq!((w.x, w.right(), b.right()), (g, b.x, 1536.0 - g));
+        assert_eq!(views::browser_panel(&app.state, b).x, b.x + g);
+        app.state.browser_right = false;
         app.state.show_browser = false;
         assert_eq!(app.state.work_rect().x, g);
     }

@@ -173,10 +173,33 @@ pub fn status_rect(s: &State) -> Rect {
 /// and below it, and the splitter is the gap between the two cards (`GUTTER` wide, no bars).
 pub fn browser_rect(s: &State) -> Rect {
     let (top, h) = (work_y(s), s.screen.1 - status_h(s));
-    if s.bar.lemon {
+    if browser_right(s) {
+        Rect::new(s.screen.0 - browser_w(s), top + GUTTER, browser_w(s) - GUTTER, (h - top - 2.0 * GUTTER).max(0.0))
+    } else if s.bar.lemon {
         Rect::new(GUTTER, top + GUTTER, browser_w(s) - GUTTER, (h - top - 2.0 * GUTTER).max(0.0))
     } else {
         Rect::new(0.0, top, browser_w(s), (h - top).max(0.0))
+    }
+}
+
+/// The browser sits right of the workspace (the Lemon layout, its title bar dragged there); else left of it.
+pub fn browser_right(s: &State) -> bool {
+    s.bar.lemon && s.browser_right
+}
+
+/// The browser's inner edge (where its splitter meets the workspace): its width from the window's left or right.
+pub fn browser_edge(s: &State) -> f32 {
+    if browser_right(s) { s.screen.0 - browser_w(s) } else { browser_w(s) }
+}
+
+/// The browser panel within `browser_rect` (the rest is its splitter).
+pub fn browser_panel(s: &State, r: Rect) -> Rect {
+    if browser_right(s) {
+        Rect::new(r.x + GUTTER, r.y, r.w - GUTTER, r.h)
+    } else if s.bar.lemon {
+        Rect::new(r.x, r.y, r.w - GUTTER, r.h)
+    } else {
+        Rect::new(r.x, r.y, r.w - browser::SPLITTER, r.h)
     }
 }
 
@@ -233,7 +256,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         ui.part(Seg::Browser, r, |ui| {
             browser::paint(ui, s, r);
             if s.bar.lemon {
-                card_corners(ui, Rect::new(r.x, r.y, r.w - GUTTER, r.h));
+                card_corners(ui, browser_panel(s, r));
             }
         });
     }

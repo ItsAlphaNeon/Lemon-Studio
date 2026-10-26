@@ -18,11 +18,18 @@ const DRAG_START: f32 = 4.0;
 /// How long a clicked sample plays (spec §7).
 const PREVIEW_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The settings key of the browser's side in the Lemon layout (`State::browser_right`).
+pub(crate) const BROWSER_RIGHT_KEY: &str = "browser_right";
+
 impl App {
     /// Browser actions; returns whether `a` was one.
     pub(crate) fn browser_act(&mut self, a: &Action) -> bool {
         if *a == Action::BrowserSplitter {
             self.browser_split_press();
+            return true;
+        }
+        if *a == Action::BrowserMove {
+            self.drag = Some(Drag::BrowserMove);
             return true;
         }
         let s = &mut self.state;
@@ -241,6 +248,18 @@ impl App {
         false
     }
 
+    /// The Lemon layout: the browser's title bar dragged and let go on the window's other half moves it to that side
+    /// (spec: the cutting-edge README, "Lemon layout").
+    pub(crate) fn browser_move_drop(&mut self) {
+        let right = self.mouse.0 > self.state.screen.0 / 2.0;
+        if right != self.state.browser_right {
+            self.state.browser_right = right;
+            crate::settings_file::set_flag(BROWSER_RIGHT_KEY, right);
+            self.state.message = Some(format!("Browser: {}", if right { "right" } else { "left" }));
+            self.invalidate();
+        }
+    }
+
     /// A press on the browser's splitter: drags it; a double click gives the browser its default width (spec §9).
     fn browser_split_press(&mut self) {
         let now = std::time::Instant::now();
@@ -252,14 +271,15 @@ impl App {
             save_width(s.browser_w);
             return self.invalidate();
         }
-        self.drag = Some(Drag::BrowserSplit { dx: self.mouse.0 - crate::views::browser_w(&self.state) });
+        self.drag = Some(Drag::BrowserSplit { dx: self.mouse.0 - crate::views::browser_edge(&self.state) });
     }
 
-    /// The splitter dragged so that the browser (its splitter included) ends at `right`: whole px, from its default width
-    /// to half the window. Everything right of it moves, so the whole frame is repainted.
-    pub(crate) fn browser_split_drag(&mut self, right: f32) {
+    /// The splitter dragged to `edge`, the browser's inner edge (its splitter included): whole px, from its default
+    /// width to half the window. Everything beside it moves, so the whole frame is repainted.
+    pub(crate) fn browser_split_drag(&mut self, edge: f32) {
         let s = &mut self.state;
-        let w = right.min(s.screen.0 / 2.0).max(crate::views::BROWSER_W).round();
+        let w = if crate::views::browser_right(s) { s.screen.0 - edge } else { edge };
+        let w = w.min(s.screen.0 / 2.0).max(crate::views::BROWSER_W).round();
         if w != s.browser_w {
             s.browser_w = w;
             self.invalidate();

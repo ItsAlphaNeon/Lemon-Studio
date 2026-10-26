@@ -651,9 +651,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     let dy = r.y - super::WORK_Y;
     // The panel left of the splitter: 201 px measured, wider as the splitter is dragged (§9).
     let lemon = s.bar.lemon;
-    let ox = r.x;
-    let bw = r.w - if lemon { super::GUTTER } else { SPLITTER };
+    let panel = super::browser_panel(s, r);
+    let (ox, bw) = (panel.x, panel.w);
     ui.hit(r, Action::Swallow, "");
+    // The Lemon layout: the title bar takes the browser to the window's other side.
+    if lemon {
+        ui.hit(Rect::new(ox, 83.0 + dy, bw, 22.0), Action::BrowserMove, "Browser - drag to the other side of the window");
+    }
     // Title bar.
     ui.c.fill_rect(Rect::span(ox, ox + bw - 1.0, 83.0 + dy, 105.0 + dy), t.browser_title);
     let at = menu_at(s);
@@ -798,7 +802,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     icons::draw(ui.c, Icon::Search, Rect::new(glass.x + 2.0, fy + 5.0, 17.0, 17.0), if hov { t.browser_search.shade(0.2) } else { t.browser_search });
     // Splitter: drags the browser's width (§9).
     // In the Lemon layout it is the gap between the browser and workspace cards.
-    let split = Rect::new(ox + bw, r.y, r.right() - ox - bw, r.h);
+    let split = if super::browser_right(s) { Rect::new(r.x, r.y, panel.x - r.x, r.h) } else { Rect::new(ox + bw, r.y, r.right() - ox - bw, r.h) };
     if lemon {
         ui.c.fill_rect(split, super::backdrop(ui));
     } else {
@@ -809,7 +813,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
 }
 
 /// The splitter's width right of the browser panel.
-const SPLITTER: f32 = 8.0;
+pub(crate) const SPLITTER: f32 = 8.0;
 
 /// A long disk name shortened in the middle with ".." to fit `w` (FL screenshots, spec §6).
 fn middle_cut(ui: &mut Ui, f: os_ui::Font, text: &str, w: f32) -> String {
