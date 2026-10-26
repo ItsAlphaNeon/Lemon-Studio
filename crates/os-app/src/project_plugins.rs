@@ -48,11 +48,12 @@ pub fn native_first() -> bool {
 }
 
 /// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, Sytrus, the
-/// parametric EQ, Edison, Love Philter, Maximus).
+/// parametric EQ, Edison, Love Philter, Maximus, and the effects of `plugins::FL_RECREATIONS`).
 pub fn has_recreation(id: &str) -> bool {
     [crate::osc3::FILE_NAME, crate::citrus::FILE_NAME, crate::plugins::EQ_FILE_NAME, crate::plugins::EDISON_FILE_NAME, crate::plugins::LOVE_PHILTER_FILE_NAME, crate::plugins::MAXIMUS_FILE_NAME]
         .iter()
         .any(|n| id.eq_ignore_ascii_case(n))
+        || crate::plugins::recreation_of(id).is_some()
 }
 
 /// Whether a hosted plugin is saved inside the wrapper: CLAP, VST3 and VST2 plugins from plugin files, and the built-in
@@ -104,7 +105,7 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
             }
             continue;
         }
-        if !is_wrapped(&d) {
+        if !is_wrapped(&d) || plays_fl_slot(proj, key, &d) {
             continue;
         }
         if untouched_stand_in(proj, plugins, key, &d) {
@@ -126,6 +127,14 @@ pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
             }
         }
     }
+}
+
+/// Whether the built-in effect `d` hosted under `key` plays a slot that `proj` stores as the FL effect it recreates
+/// (`plugins::FL_RECREATIONS`): the slot stays that effect, with the state `App::store_builtin_states` gave it.
+fn plays_fl_slot(proj: &Project, key: usize, d: &Descriptor) -> bool {
+    let Some((t, k)) = fx_of(key) else { return false };
+    let slot = proj.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_ref());
+    is_builtin(d) && slot.and_then(|s| crate::plugins::recreation_of(&s.name)) == Some(d.name.as_str())
 }
 
 /// Whether the instance under `key` (descriptor `d`) is a copy in another format standing in for the wrapped plugin its
@@ -310,6 +319,9 @@ impl crate::app::App {
                 continue;
             }
             let Some(r) = wrapped_channel(&self.state.project.channels[row]) else { continue };
+            if self.past_deadline() {
+                break;
+            }
             let made = find(&self.plugins.available, &r).map(|i| {
                 let other = switched_format(&self.plugins.available[i].desc, &r);
                 let state = other.is_none().then_some(r.state.as_slice());
@@ -347,6 +359,9 @@ impl crate::app::App {
             .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.wrap_failed.contains(&fx_key(t, k)))
             .collect();
         for (t, k, r) in slots {
+            if self.past_deadline() {
+                break;
+            }
             let made = find(&self.plugins.effects, &r).map(|i| {
                 let other = switched_format(&self.plugins.effects[i].desc, &r);
                 let state = other.is_none().then_some(r.state.as_slice());
@@ -378,8 +393,8 @@ impl crate::app::App {
         }
         let mut parts = Vec::new();
         if !missing.is_empty() {
-            missing.dedup();
-            parts.push(format!("Plugins not found (kept in the project): {}", missing.join(", ")));
+            self.missing.add_plugins(&missing);
+            parts.push(format!("Plugins not found (kept in the project): {}", name_list(self.missing.plugins.clone(), 6)));
         }
         if !switched.is_empty() {
             let names = name_list(switched, 4);
@@ -423,6 +438,9 @@ impl crate::app::App {
             })
             .collect();
         for (row, name, state) in rows {
+            if self.past_deadline() {
+                break;
+            }
             let Some(i) = find_native(&self.plugins.available, &name) else {
                 if !scanning {
                     self.native_failed.push(row);
@@ -453,13 +471,18 @@ impl crate::app::App {
             .project
             .mixer
             .iter()
-            .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| s.as_ref().map(|s| (m.index, k as u8, s.name.clone(), s.state.clone()))))
-            .filter(|(t, k, name, _)| {
-                let key = fx_key(*t, *k);
-                !name.is_empty() && name != WRAPPER && !self.plugins.hosted.contains_key(&key) && !self.native_failed.contains(&key)
+            .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| s.as_ref().map(|s| (m.index, k as u8, s))))
+            // Before the states are copied: this runs every tick, and an Edison slot's can be tens of megabytes.
+            .filter(|&(t, k, s)| {
+                let key = fx_key(t, k);
+                !s.name.is_empty() && s.name != WRAPPER && !self.plugins.hosted.contains_key(&key) && !self.native_failed.contains(&key)
             })
+            .map(|(t, k, s)| (t, k, s.name.clone(), s.state.clone()))
             .collect();
         for (t, k, name, state) in slots {
+            if self.past_deadline() {
+                break;
+            }
             let key = fx_key(t, k);
             let Some(i) = find_native(&self.plugins.effects, &name) else {
                 if !scanning {
@@ -498,6 +521,8 @@ impl crate::app::App {
         if !kept.is_empty() {
             parts.push(format!("saving keeps the file's settings for {}", name_list(kept, 6)));
         }
+        self.missing.add_plugins(&missing);
+        self.missing.add_plugins(&failed);
         if !missing.is_empty() {
             parts.push(format!("native plugins not installed (kept in the project): {}", name_list(missing, 6)));
         }

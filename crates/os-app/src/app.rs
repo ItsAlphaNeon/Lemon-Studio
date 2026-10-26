@@ -1277,6 +1277,14 @@ pub struct App {
     pub(crate) native_failed: Vec<usize>,
     /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
     loading: Option<crate::loading::Loading>,
+    /// The opened project's missing samples and plugins (`crate::missing`).
+    pub(crate) missing: crate::missing::Missing,
+    /// A zipped project being unzipped or written (`crate::zipped`): its panel shows, input waits.
+    pub(crate) zipping: Option<crate::zipped::Zipping>,
+    /// While a project loads: when the plugin hosts stop for this tick (`host_plugins`), and whether one stopped with
+    /// instances left to start.
+    host_deadline: Option<std::time::Instant>,
+    host_more: bool,
     /// An export is rendering (FILE > Export): its first file's name and progress (0..1); the same panel shows, input
     /// waits.
     pub(crate) export: Option<(String, f32)>,
@@ -1296,6 +1304,9 @@ pub struct App {
 /// Window-level requests the shell must carry out after an event.
 impl App {
     pub fn new(path: Option<PathBuf>) -> App {
+        // Each test's app looks for missing samples only in its own project's folders, never another test's.
+        #[cfg(test)]
+        os_engine::sample::set_thread_search_folders(Vec::new());
         let transport = Transport::new(crate::factory_folder::dir());
         // Tests keep the old five-channel template; a new session starts with one Lemon Sampler channel.
         #[cfg(test)]
@@ -1472,6 +1483,10 @@ impl App {
             osc3_look: None,
             native_failed: Vec::new(),
             loading: None,
+            missing: Default::default(),
+            zipping: None,
+            host_deadline: None,
+            host_more: false,
             export: None,
             export_reveal: false,
             pattern_render: None,
@@ -1509,6 +1524,10 @@ impl App {
         let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         if ext == "mid" || ext == "midi" {
             return self.midi_file_chosen(path, false);
+        }
+        // A zipped project is unzipped beside itself, then its project file opens (`crate::zipped`).
+        if ext == "zip" {
+            return crate::zipped::import(self, path);
         }
         // A project in the layout used before version 24.2 gets a dialog that says what to do (spec:
         // flp/events/channels.md "Version scope"), not just a line in the hint bar.
@@ -1572,6 +1591,7 @@ impl App {
                 s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 self.mark_saved();
+                crate::missing::opened(self);
                 self.loading = Some(crate::loading::Loading::start(&self.state.project));
                 self.state.playlist.wave_wait = true;
                 self.invalidate();
@@ -1682,13 +1702,14 @@ impl App {
 
     /// Saves the project to `target`; a file over the Project data size warning is said (`App::size_notice`).
     pub(crate) fn save_to(&mut self, target: PathBuf) {
-        if let Some(bytes) = self.write_project(target) {
+        if let Some(bytes) = self.write_project(target, &mut |_| {}) {
             self.size_notice(bytes);
         }
     }
 
-    /// Writes the project to `target`: the size of the file written, None when the save failed.
-    fn write_project(&mut self, target: PathBuf) -> Option<u64> {
+    /// Writes the project to `target`: the size of the file written, None when the save failed. `edit` changes what is
+    /// written (not the project), once the project's state is gathered.
+    fn write_project(&mut self, target: PathBuf, edit: &mut dyn FnMut(&mut os_model::Project)) -> Option<u64> {
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
         crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
         // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
@@ -1755,6 +1776,7 @@ impl App {
         crate::project_info::stamp(s, &mut proj);
         crate::data_folder::stamp(s, &mut proj);
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
+        edit(&mut proj);
         // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
         let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
@@ -1781,6 +1803,11 @@ impl App {
     /// Writes the project to `target` as Save does, as a copy: the project keeps its file, name, unsaved changes and the
     /// message (backups, spec: ui/settings-choices.md "Backup files"). None while a project loads or an export renders.
     pub(crate) fn save_copy(&mut self, target: PathBuf) -> Option<Result<(), String>> {
+        self.save_copy_with(target, &mut |_| {})
+    }
+
+    /// `save_copy`, with `edit` changing what is written (`write_project`).
+    pub(crate) fn save_copy_with(&mut self, target: PathBuf, edit: &mut dyn FnMut(&mut os_model::Project)) -> Option<Result<(), String>> {
         if self.loading.is_some() || self.export.is_some() {
             return None;
         }
@@ -1790,7 +1817,7 @@ impl App {
         // recent one (spec: ui/recent-projects.md §2).
         let (last, recent) = (crate::templates::last_kept(), crate::recent::list());
         // A copy never warns about its size.
-        self.write_project(target);
+        self.write_project(target, edit);
         crate::templates::restore_last(last);
         crate::recent::restore(&recent);
         let s = &mut self.state;
@@ -1949,6 +1976,21 @@ impl App {
                     self.search_folder_chosen(row, p);
                 }
             }
+            Then::MissingFiles => {
+                if reply == Reply::Button(Answer::Yes) {
+                    crate::missing::pick_folder(self);
+                }
+            }
+            Then::SampleFolder => {
+                if let Some(p) = file {
+                    crate::missing::search(self, p);
+                }
+            }
+            Then::ExportZip => {
+                if let Some(p) = file {
+                    crate::zipped::export(self, p);
+                }
+            }
             Then::FactoryFolder => {
                 if let Some(p) = file {
                     self.set_factory_folder(Some(p));
@@ -2087,7 +2129,7 @@ impl App {
     fn open_dialog(&mut self) {
         let start = self.state.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
         let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Open project", "project", crate::dialog::Then::OpenProject)
-            .filter("FLP project", &["flp"])
+            .filter("FLP project", &["flp", "zip"])
             .start(start.as_deref());
         self.file_dialog(dlg);
     }
@@ -2119,7 +2161,7 @@ impl App {
                 EDISON_FILE_NAME => self.plugins.edison_file_state(key),
                 LOVE_PHILTER_FILE_NAME => self.plugins.love_philter_file_state(key),
                 MAXIMUS_FILE_NAME => self.plugins.maximus_file_state(key),
-                _ => None,
+                file => self.plugins.recreation_file_state(key, file),
             };
             if let Some(st) = st {
                 slot.state = st;
@@ -2196,18 +2238,54 @@ impl App {
             self.sync_samplers(None);
             return;
         };
-        if decoded && self.sync_samplers(Some(std::time::Instant::now() + crate::loading::HOST_BUDGET)) {
+        let deadline = std::time::Instant::now() + crate::loading::HOST_BUDGET;
+        // Then the plugin channels and mixer effects, under the same budget, then the samplers' played samples.
+        if decoded && self.sync_samplers(Some(deadline)) && self.host_plugins(deadline) && self.loading.as_mut().is_some_and(|l| l.builds_done()) {
             self.loading = None;
             self.state.playlist.wave_wait = false;
+            // What was not found is listed now (spec: ui/project-loading.md §6).
+            crate::missing::loaded(self);
             return self.invalidate();
         }
         self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
     }
 
+    /// Starts the opened project's plugin channels and mixer effects until `deadline` (`project_plugins::sync_wrapped`
+    /// and the other hosts stop after the instance that passes it): true when none is left to start.
+    fn host_plugins(&mut self, deadline: std::time::Instant) -> bool {
+        self.host_deadline = Some(deadline);
+        self.host_more = false;
+        self.sync_effects();
+        self.sync_wrapped();
+        self.sync_osc3();
+        self.sync_citrus();
+        self.sync_native();
+        self.host_deadline = None;
+        let samplers = self.state.hosted_rows.iter().filter(|&&r| self.state.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
+        let done = (self.plugins.hosted.len() + self.wrap_failed.len() + self.fx_failed.len() + self.native_failed.len()).saturating_sub(samplers);
+        let more = self.host_more;
+        if let Some(l) = &mut self.loading {
+            l.label.clear();
+            l.plugins_done = done;
+            // Plugins no host plays (FL's own effects without a recreation) are not waited for.
+            if !more {
+                l.plugins = done;
+            }
+        }
+        !more
+    }
+
+    /// Whether the plugin hosts' time this tick is over (`host_plugins`): the host that asks stops and goes on next tick.
+    pub(crate) fn past_deadline(&mut self) -> bool {
+        let past = self.host_deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        self.host_more |= past;
+        past
+    }
+
     /// A project is loading or an export is rendering: the window shows the progress and takes no input (spec:
     /// ui/project-loading.md §2).
     pub fn loading(&self) -> bool {
-        self.loading.is_some() || self.export.is_some()
+        self.loading.is_some() || self.export.is_some() || self.missing.search.is_some() || self.zipping.is_some()
     }
 
     /// The opened project's loading, for the startup splash: its progress (0..=1) and step, while it loads.
@@ -2220,41 +2298,63 @@ impl App {
     /// from the slot's saved state (spec: plugins/lemon-parametric-eq-2.md §8). Without the plugin the engine's own EQ
     /// plays them. Edison's slots are opened as Tesla the same way, with their sample, loop, markers and recording
     /// settings (spec: plugins/tesla/README.md "Opening Edison slots"), Love Philter's as Pulp Filter and Maximus's as
-    /// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6).
+    /// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6), and the FL effects
+    /// another Lemon effect recreates (`plugins::FL_RECREATIONS`: Reeverb 2, Balance, Chorus, ...) by that effect.
     pub(crate) fn sync_effects(&mut self) {
         use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME, PRESS, PULP_FILTER, TESLA};
         // The installed EQ plays these slots instead (`host_native`).
         if crate::project_plugins::native_first() {
             return;
         }
-        let todo: Vec<(u16, u8, String, Vec<u8>)> = self
+        // Runs every tick: the slots already hosted are passed over before their states are read, as an Edison slot's
+        // can hold tens of megabytes of audio.
+        let todo: Vec<(u16, u8, String)> = self
             .state
             .project
             .mixer
             .iter()
             .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
+            .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
             .filter_map(|(t, k, s)| {
                 s.as_ref()
-                    .filter(|s| [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str()))
-                    .map(|s| (t, k, s.name.clone(), s.state.clone()))
+                    .filter(|s| {
+                        [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str())
+                            || crate::plugins::recreation_of(&s.name).is_some()
+                    })
+                    .map(|s| (t, k, s.name.clone()))
             })
-            .filter(|&(t, k, _, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
             .collect();
         let mut made = false;
-        for (t, k, file, fl) in todo {
-            let (name, st) = if file == EQ_FILE_NAME {
-                (LEMON_EQ, Some(lemon_parametric_eq_2::params::plugin_state_from_fl(&fl)))
-            } else if file == LOVE_PHILTER_FILE_NAME {
-                // Bytes that are not a Love Philter state open Pulp Filter's starting state.
-                (PULP_FILTER, Some(pulp_filter::plugin_state_from_fl(&fl)))
-            } else if file == MAXIMUS_FILE_NAME {
-                // Bytes that are not a Maximus state open Press's starting state.
-                (PRESS, Some(press::plugin_state_from_fl(&fl)))
-            } else {
-                // Bytes that are not an Edison state open an empty Tesla.
-                (TESLA, tesla::plugin_state_from_edison(&fl))
+        for (t, k, file) in todo {
+            if self.past_deadline() {
+                break;
+            }
+            let recreation = crate::plugins::recreation_of(&file);
+            let name = match file.as_str() {
+                EQ_FILE_NAME => LEMON_EQ,
+                LOVE_PHILTER_FILE_NAME => PULP_FILTER,
+                MAXIMUS_FILE_NAME => PRESS,
+                _ => recreation.unwrap_or(TESLA),
             };
             let Some(index) = self.plugins.effect_index(name) else { continue };
+            let track = self.state.project.mixer.iter().find(|m| m.index == t);
+            let Some(fl) = track.and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.state.as_slice()) else { continue };
+            let st = if file == EQ_FILE_NAME {
+                Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl))
+            } else if file == LOVE_PHILTER_FILE_NAME {
+                // Bytes that are not a Love Philter state open Pulp Filter's starting state.
+                Some(pulp_filter::plugin_state_from_fl(fl))
+            } else if file == MAXIMUS_FILE_NAME {
+                // Bytes that are not a Maximus state open Press's starting state.
+                Some(press::plugin_state_from_fl(fl))
+            } else if let Some(lemon) = recreation {
+                // A state shorter than the original's, or of a later version, opens the defaults (spec:
+                // plugins/lemon-small-effects.md §5).
+                crate::plugins::recreation_state_from_fl(lemon, fl)
+            } else {
+                // Bytes that are not an Edison state open an empty Tesla.
+                tesla::plugin_state_from_edison(fl)
+            };
             made = true;
             if let Err(e) = self.plugins.create_effect(t, k, index, st.as_deref()) {
                 self.fx_failed.push(fx_key(t, k));
@@ -2288,12 +2388,15 @@ impl App {
         self.scan_tick();
         self.loading_tick();
         self.export_tick();
+        crate::missing::tick(self);
+        crate::zipped::tick(self);
         self.midi_tick();
         self.mixer_tick();
-        self.sync_effects();
         crate::presets::pending_tick(self);
         self.params_tick();
+        // While a project loads, `loading_tick` starts these a few per tick.
         if self.loading.is_none() {
+            self.sync_effects();
             self.sync_wrapped();
             self.sync_osc3();
             self.follow_osc3_samples();
@@ -3871,6 +3974,12 @@ impl App {
         if let Some(l) = &self.loading {
             crate::loading::paint(canvas, &self.theme.colors, l);
         }
+        if let Some(s) = &self.missing.search {
+            crate::missing::paint(canvas, &self.theme.colors, s);
+        }
+        if let Some(z) = &self.zipping {
+            crate::zipped::paint(canvas, &self.theme.colors, z);
+        }
         if let Some((name, p)) = &self.export {
             let status = format!("Rendering {name}   {:.0} %", p * 100.0);
             crate::loading::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
@@ -3974,7 +4083,7 @@ impl App {
         // A drop accepts an Info box or a browser folder cell being edited, as a click does.
         crate::project_info::accept_info(&mut self.state);
         crate::search_folders::commit(&mut self.state);
-        if ext == "flp" {
+        if ext == "flp" || ext == "zip" {
             return self.ask_discard("opening another project", crate::dialog::Next::Open(path));
         }
         // A MIDI file is imported as FILE ▸ Import ▸ MIDI file does (spec: ui/midi-files.md §10.6).
@@ -8214,6 +8323,7 @@ impl App {
             (0, FILE_EXPORT) => self.open_export(false),
             (0, FILE_EXPORT_MP3) => self.open_export(true),
             (0, FILE_EXPORT_MIDI) => self.export_midi_dialog(false),
+            (0, i) if item_at(0, i).is_some_and(|it| it.label == EXPORT_ZIP_LABEL) => crate::zipped::export_dialog(self),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
             (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Sampler") => {
                 if let Some(index) = self.plugins.index_of(crate::plugins::LEMON_SAMPLER) {
@@ -9072,6 +9182,53 @@ mod tests {
         assert_eq!(a.plugins.maximus_file_state(key), Some(max.clone()));
         a.store_builtin_states();
         assert_eq!(a.state.project.mixer[1].slots[3].clone().unwrap().state, max);
+    }
+
+    /// A project's Fruity Reeverb 2, Balance and Chorus slots (user report 2026-10-26: "This slot's plugin is not
+    /// hosted") are opened as Lemon Reverb, Lemon Balance and Lemon Chorus with their state, show the Lemon names, and
+    /// a save keeps the FL effects, not wrapped, with the state the Lemon effects write back. Stereo Shaper stays the
+    /// engine's (its difference output is the slot's alone).
+    // spec: plugins/lemon-small-effects.md "Opened projects' slots"
+    #[test]
+    fn fl_effect_slots_open_as_their_lemon_recreations() {
+        use crate::plugins::fx_key;
+        let mut reverb = lemon_reverb::params::default_state();
+        lemon_reverb::params::set_field(&mut reverb, 4, 70);
+        let mut balance = lemon_small_fx::params::default_state(lemon_small_fx::balance::SPEC);
+        lemon_small_fx::params::set_field(&mut balance, 0, -64);
+        let mut chorus = lemon_small_fx::params::default_state(lemon_small_fx::chorus::SPEC);
+        let d = lemon_small_fx::params::field(&chorus, 1);
+        lemon_small_fx::params::set_field(&mut chorus, 1, d + 1);
+        let cases = [(1u16, 0u8, "Fruity Reeverb 2", "Lemon Reverb", reverb), (2, 1, "Fruity Balance", "Lemon Balance", balance), (3, 2, "Fruity Chorus", "Lemon Chorus", chorus)];
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        for (t, k, file, _, fl) in &cases {
+            a.state.project.mixer[usize::from(*t)].slots[usize::from(*k)] = Some(os_model::SlotPlugin { name: (*file).into(), state: fl.clone() });
+        }
+        let shaper = os_model::SlotPlugin { name: "Fruity Stereo Shaper".into(), state: Vec::new() };
+        a.state.project.mixer[4].slots[0] = Some(shaper.clone());
+        a.sync_effects();
+        for (t, k, file, lemon, fl) in &cases {
+            let key = fx_key(*t, *k);
+            assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(lemon.to_string()), "{file}");
+            assert_eq!(crate::mixer::slot_name(&a.state, *t, *k).as_deref(), Some(*lemon));
+            assert_eq!(a.plugins.recreation_file_state(key, file).as_ref(), Some(fl), "{file}: the state as it was opened");
+        }
+        assert!(!a.plugins.hosted.contains_key(&fx_key(4, 0)), "Stereo Shaper: the engine's");
+        let path = std::env::temp_dir().join(format!("lemon-fl-recreations-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        for (t, k, file, _, fl) in &cases {
+            let slot = saved.mixer[usize::from(*t)].slots[usize::from(*k)].clone().unwrap();
+            assert_eq!((slot.name.as_str(), &slot.state), (*file, fl));
+        }
+        assert_eq!(saved.mixer[4].slots[0], Some(shaper));
     }
 
     /// The toolbar's audio editor button puts Tesla on the master track and shows it; another click shows the same

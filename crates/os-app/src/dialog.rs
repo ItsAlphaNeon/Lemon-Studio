@@ -71,6 +71,12 @@ pub enum Then {
     /// The Chop dialog's folder button (spec: ui/piano-chop.md §1).
     ChopPattern,
     PluginFolder,
+    /// The missing files box (`crate::missing`): Find samples... (Yes) or OK.
+    MissingFiles,
+    /// The folder the missing samples are looked for in.
+    SampleFolder,
+    /// FILE ▸ Export ▸ Zipped loop package...: the zip file (`crate::zipped`).
+    ExportZip,
     /// Save preset as... for the plugin with this key (`plugins::Plugins::hosted`).
     SavePreset(usize),
     /// Import preset... for the plugin with this key.

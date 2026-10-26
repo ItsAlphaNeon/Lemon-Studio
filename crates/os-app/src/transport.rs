@@ -1163,11 +1163,13 @@ fn raise_priority() {}
 /// The sample library for engines whose sampler channels Lemon Sampler instances play. They stretch for themselves
 /// (spec: audio/time-stretch.md), and of a sample one of them plays the engine keeps only the length and rate Lemon
 /// Sampler reads from the file's headers, for the files it can play from disk (spec: plugins/lemon-sampler.md "Keep on
-/// disk (Lemon Studio)"); other files are decoded, a copy shared with the instance playing it.
+/// disk (Lemon Studio)"); other files are decoded, a copy shared with the instance playing it. The note rules learn from
+/// Lemon Sampler which files it loops, so a looping voice gets its note's end.
 pub fn host_library(factory: Option<PathBuf>) -> SampleLibrary {
     let mut library = SampleLibrary::new(factory);
     library.resample_stretches = true;
     library.length_reader = Some(lemon_sampler::stream::length);
+    library.loop_reader = Some(lemon_sampler::file_loops);
     library
 }
 

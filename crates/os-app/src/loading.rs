@@ -3,8 +3,9 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Project loading: an opened project's samples are decoded on worker threads, then its sampler channels get their
-//! Lemon Sampler instances a few per frame, while a progress panel shows and the window takes no input. Opening a
-//! sampler afterwards never waits for a file.
+//! Lemon Sampler instances a few per frame (their played samples are built on build threads), then its plugin
+//! channels and mixer effects start a few per frame, while a progress panel shows and the window takes no input.
+//! Opening a sampler afterwards never waits for a file.
 //!
 // spec: ui/project-loading.md
 
@@ -26,6 +27,12 @@ pub struct Loading {
     /// Sampler channels, and how many have their instance.
     pub rows: usize,
     pub hosted: usize,
+    /// Plugin channels and filled mixer slots, and how many have started or failed (`App::loading_tick`).
+    pub plugins: usize,
+    pub plugins_done: usize,
+    /// The samplers are all started: their played samples are being built (`lemon_sampler::pending_builds`), and the
+    /// most that were waiting at once.
+    pub builds: Option<usize>,
     /// What is happening now (file or channel name).
     pub label: String,
     rx: Receiver<(String, Option<Arc<Sample>>)>,
@@ -62,7 +69,35 @@ impl Loading {
                 os_clap::wake();
             });
         }
-        Loading { files: files.len(), decoded: 0, rows: samplers.len(), hosted: 0, label: String::new(), rx, workers, held: Vec::new(), queue }
+        let plugins = project.channels.iter().filter(|c| c.kind == os_model::ChannelKind::Plugin).count()
+            + project.mixer.iter().map(|m| m.slots.iter().flatten().count()).sum::<usize>();
+        lemon_sampler::set_deferred_builds(true);
+        Loading {
+            files: files.len(),
+            decoded: 0,
+            rows: samplers.len(),
+            hosted: 0,
+            plugins,
+            plugins_done: 0,
+            builds: None,
+            label: String::new(),
+            rx,
+            workers,
+            held: Vec::new(),
+            queue,
+        }
+    }
+
+    /// The played samples still being built, once every instance has started: true when there are none left.
+    pub fn builds_done(&mut self) -> bool {
+        let left = lemon_sampler::pending_builds();
+        let most = self.builds.unwrap_or(0).max(left);
+        self.builds = Some(most);
+        left == 0
+    }
+
+    fn builds_left(&self) -> usize {
+        self.builds.map_or(0, |_| lemon_sampler::pending_builds())
     }
 
     /// Takes finished decodes; true when every file is decoded (or failed: the instance reports that file itself).
@@ -75,21 +110,26 @@ impl Loading {
         self.decoded >= self.files
     }
 
-    /// Progress 0..=1 over decoding and starting instances.
+    /// Progress 0..=1 over decoding, starting instances, starting plugins and building the played samples.
     pub fn progress(&self) -> f32 {
-        let total = self.files + self.rows;
+        let built = self.builds.map_or(0, |most| most - self.builds_left());
+        let total = self.files + self.rows + self.plugins + self.builds.unwrap_or(0);
         if total == 0 {
             return 1.0;
         }
-        (self.decoded + self.hosted) as f32 / total as f32
+        (self.decoded + self.hosted + self.plugins_done.min(self.plugins) + built) as f32 / total as f32
     }
 
     /// The panel's text: the step and the item it is on.
     pub fn status(&self) -> String {
         if self.decoded < self.files {
             format!("Loading samples  {} / {}", self.decoded, self.files)
-        } else {
+        } else if self.hosted < self.rows {
             format!("Starting samplers  {} / {}", self.hosted, self.rows)
+        } else if self.builds.is_none() {
+            format!("Starting plugins  {}", self.plugins_done)
+        } else {
+            format!("Preparing samples  {} left", self.builds_left())
         }
     }
 }
@@ -108,11 +148,13 @@ pub fn workers(files: usize) -> usize {
 }
 
 impl Drop for Loading {
-    /// A project opened or closed meanwhile: the workers stop after their current file.
+    /// A project opened or closed meanwhile: the workers stop after their current file. Samplers started from now on
+    /// build their played sample as they start.
     fn drop(&mut self) {
         if let Ok(mut q) = self.queue.lock() {
             q.clear();
         }
+        lemon_sampler::set_deferred_builds(false);
     }
 }
 

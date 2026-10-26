@@ -38,6 +38,10 @@ pub(super) struct Rules {
     /// that root key.
     pub ring: f64,
     pub root: u8,
+    /// Output frames a voice of a hosted sampler that loops its sample sounds after its note's end: its closing fade,
+    /// or its volume envelope's release and then the fade (spec: audio/sampler.md "The end of a voice"). Infinite on
+    /// other channels, whose voices play their sample out (`ring`).
+    pub tail: f64,
     /// Frames of the closing fade of a sampler voice (the channel's declick mode, spec: audio/declick.md).
     pub close: u32,
 }
@@ -55,6 +59,7 @@ impl Default for Rules {
             plugin: true,
             ring: f64::INFINITY,
             root: 60,
+            tail: f64::INFINITY,
             close: 0,
         }
     }
@@ -238,14 +243,18 @@ impl Voices {
     /// Takes voice `i` out of the pool as FL does: the last voice takes its place.
     fn over(&mut self, i: usize) {
         let v = self.pool.swap_remove(i);
-        self.voice_gone(v.sent);
+        self.voice_gone(v);
     }
 
-    /// Mono bookkeeping when a voice ends or is released by a cut: the sounding voice's own note leaves the list and
-    /// the channel has no sounding voice until the list is empty.
-    fn voice_gone(&mut self, sent: u8) {
+    /// Mono bookkeeping when voice `v` (as it was) ends or is released by a cut: the sounding voice's own note leaves
+    /// the list and the channel has no sounding voice until the list is empty. A voice whose note had already ended is
+    /// not the sounding voice, though a later note may sound on its key.
+    fn voice_gone(&mut self, v: Voice) {
+        if v.state != State::Held {
+            return;
+        }
         if let Some((s, own)) = self.sounding {
-            if s == sent {
+            if s == v.sent {
                 self.sounding = None;
                 if let Some(i) = self.list.iter().position(|&k| k == own) {
                     self.list.remove(i);
@@ -262,24 +271,25 @@ impl Voices {
                 out.push((ch, off, Note::Off(v.sent)));
             }
             self.pool.remove(i);
-            self.voice_gone(v.sent);
+            self.voice_gone(v);
         } else if r.one_shot {
             self.close(i, r, ch, off, out);
         } else if v.state == State::Held {
             out.push((ch, off, Note::Off(v.sent)));
-            self.pool[i].state = State::Released;
-            self.voice_gone(v.sent);
+            let p = &mut self.pool[i];
+            (p.state, p.left) = (State::Released, p.left.min(r.tail));
+            self.voice_gone(v);
         }
     }
 
     /// Starts voice `i`'s closing fade.
     fn close(&mut self, i: usize, r: &Rules, ch: usize, off: u32, out: &mut Vec<(usize, u32, Note)>) {
+        let was = self.pool[i];
         let v = &mut self.pool[i];
         out.push((ch, off, Note::Choke(v.sent, v.voice)));
         v.state = State::Closing;
         v.left = v.left.min(f64::from(r.close));
-        let sent = v.sent;
-        self.voice_gone(sent);
+        self.voice_gone(was);
     }
 }
 
@@ -442,7 +452,8 @@ fn end_voice(v: &mut Voices, r: &Rules, i: usize, e: &Event, out: &mut Vec<(usiz
     if r.plugin {
         v.pool.remove(i);
     } else {
-        v.pool[i].state = State::Released;
+        let p = &mut v.pool[i];
+        (p.state, p.left) = (State::Released, p.left.min(r.tail));
     }
 }
 
@@ -496,7 +507,7 @@ fn note_start(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, N
     }
     if v.pool.len() >= POOL_CAP {
         let gone = v.pool.remove(0);
-        v.voice_gone(gone.sent);
+        v.voice_gone(gone);
     }
     // A voice belongs to "cut by"; on a channel whose voices are not one-shot, "cut itself" leaves a note with a
     // length out of the group. A note a layer handed on carries its group.
@@ -725,6 +736,48 @@ mod tests {
         assert!(tick(&r, &mut v, &[Event::off(0, 0, 60)], 100).iter().all(|e| !matches!(e.2, Note::Off(_))));
         let out = tick(&r, &mut v, &[Event::off(0, 0, 67)], 100);
         assert_eq!(out, vec![(0, 0, Note::Off(60))]);
+    }
+
+    /// A looped sample's voice (no volume envelope) is held until its note ends, however short the sample, and gets
+    /// that end, on a mono channel too; it is over once its closing fade (`tail`) has passed. A one-shot voice of the
+    /// same length is over when its sample has played and its note's end has nothing to end.
+    #[test]
+    fn a_looped_samples_voice_gets_its_note_end() {
+        let one_shot = [Rules { one_shot: true, ring: 550.0, ..sampler() }];
+        let looped = Rules { ring: f64::INFINITY, tail: 480.0, ..sampler() };
+        for (r, what) in [([looped], "poly"), ([Rules { mono: true, ..looped }], "mono")] {
+            let mut v = vec![Voices::default()];
+            tick(&r, &mut v, &[Event::on(0, 0, 60, 0.8)], 1000);
+            for _ in 0..20 {
+                tick(&r, &mut v, &[], 1000);
+            }
+            assert_eq!(tick(&r, &mut v, &[Event::off(0, 0, 60)], 100), vec![(0, 0, Note::Off(60))], "{what}");
+            assert_eq!(v[0].pool.len(), 1, "{what}: closing");
+            tick(&r, &mut v, &[], 1000);
+            assert!(v[0].pool.is_empty(), "{what}: over after its fade");
+        }
+        let mut v = vec![Voices::default()];
+        tick(&one_shot, &mut v, &[Event::on(0, 0, 60, 0.8)], 1000);
+        assert!(v[0].pool.is_empty());
+        assert!(tick(&one_shot, &mut v, &[Event::off(0, 0, 60)], 100).is_empty());
+    }
+
+    /// Mono: a note that starts on the key of a voice whose note has just ended sounds in a voice of its own, and the
+    /// old voice's fade passing leaves it alone: its end still ends it (back-to-back pattern clips that cut a looped
+    /// sample's note short at each clip's end).
+    // spec: audio/note-rules.md "Mono"
+    #[test]
+    fn mono_a_released_voice_on_the_same_key_leaves_the_next_note_alone() {
+        let r = [Rules { mono: true, ring: f64::INFINITY, tail: 480.0, ..sampler() }];
+        let mut v = vec![Voices::default()];
+        tick(&r, &mut v, &[Event::on(0, 0, 57, 0.8)], 1000);
+        let out = tick(&r, &mut v, &[Event::off(0, 0, 57), Event::on(0, 0, 57, 0.8)], 1000);
+        assert_eq!(out, vec![(0, 0, Note::Off(57)), (0, 0, on(57))]);
+        // The first voice's fade has passed.
+        tick(&r, &mut v, &[], 1000);
+        assert_eq!(v[0].pool.len(), 1);
+        assert_eq!(tick(&r, &mut v, &[Event::off(0, 0, 57)], 1000), vec![(0, 0, Note::Off(57))]);
+        assert!(v[0].pool.is_empty() && v[0].list.is_empty() && v[0].sounding.is_none());
     }
 
     #[test]
