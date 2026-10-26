@@ -48,9 +48,11 @@ pub fn native_first() -> bool {
 }
 
 /// Whether a channel or slot holding file id `id` is one a built-in Lemon recreation plays (3x Osc, Sytrus, the
-/// parametric EQ, Edison).
+/// parametric EQ, Edison, Love Philter).
 pub fn has_recreation(id: &str) -> bool {
-    [crate::osc3::FILE_NAME, crate::citrus::FILE_NAME, crate::plugins::EQ_FILE_NAME, crate::plugins::EDISON_FILE_NAME].iter().any(|n| id.eq_ignore_ascii_case(n))
+    [crate::osc3::FILE_NAME, crate::citrus::FILE_NAME, crate::plugins::EQ_FILE_NAME, crate::plugins::EDISON_FILE_NAME, crate::plugins::LOVE_PHILTER_FILE_NAME]
+        .iter()
+        .any(|n| id.eq_ignore_ascii_case(n))
 }
 
 /// Whether a hosted plugin is saved inside the wrapper: CLAP, VST3 and VST2 plugins from plugin files, and the built-in
@@ -642,12 +644,12 @@ mod tests {
         assert_eq!(again.mixer[3].slots[2], saved.mixer[3].slots[2]);
     }
 
-    /// Every Lemon effect is compiled in: the EQ, then `LINKED_EFFECTS` in that order, each an effect from this program.
+    /// Every Lemon effect is compiled in: `FILE_MAPPED`, then `LINKED_EFFECTS` in that order, each an effect from this program.
     #[test]
     fn every_lemon_effect_is_built_in() {
         let fx = crate::plugins::builtin_effects();
         let names: Vec<&str> = fx.iter().map(|a| a.desc.name.as_str()).collect();
-        let want: Vec<&str> = std::iter::once(LEMON_EQ).chain(crate::plugins::LINKED_EFFECTS).collect();
+        let want: Vec<&str> = crate::plugins::FILE_MAPPED.into_iter().chain(crate::plugins::LINKED_EFFECTS).collect();
         assert_eq!(names, want);
         for a in &fx {
             assert!(is_builtin(&a.desc), "{}", a.desc.name);

@@ -39,6 +39,7 @@ lemon-transient-processor = { path = "../../plugins/lemon-transient-processor", 
 lemon-chorus = { path = "../../plugins/lemon-chorus", features = ["linked"] }
 lemon-stereo-shaper = { path = "../../plugins/lemon-stereo-shaper", features = ["linked"] }
 tesla = { path = "../../plugins/tesla", features = ["linked"] }
+pulp-filter = { path = "../../plugins/pulp-filter", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"
