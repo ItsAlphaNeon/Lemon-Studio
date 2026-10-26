@@ -1059,6 +1059,9 @@ pub struct State {
     pub global_snap: crate::snap::Global,
     /// The Lemon layout's split views (`crate::tiles`).
     pub tiles: crate::tiles::Tiles,
+    /// Each layout's windows while the other is in use (classic, Lemon): the playlist, mixer and piano roll's states
+    /// and the ones open, back to front (`App::set_lemon_layout`).
+    pub layout_wins: [Option<([WinState; 3], Vec<Win>)>; 2],
     pub pat_ui: crate::patterns::PatternUi,
     /// Playlist, Mixer, Piano roll (see `Win::slot`).
     pub wins: [WinState; 3],
@@ -1455,6 +1458,7 @@ impl App {
                 control: Default::default(),
                 global_snap: Default::default(),
                 tiles: crate::tiles::Tiles::load(),
+                layout_wins: Default::default(),
                 pat_ui: Default::default(),
                 wins: [
                     WinState { rect: Rect::new(693.0, 101.0, 1126.0, 378.0), maxed: true, mini: false },
@@ -8605,13 +8609,25 @@ impl App {
     /// General settings ▸ Display ▸ Layout: the Lemon layout (its toolbar preset, the status bar, the workspace card) or
     /// the classic one (the classic toolbar). Kept for the next start.
     pub(crate) fn set_lemon_layout(&mut self, on: bool) {
-        use crate::toolbar::{Layout, LEMON_PRESET, PRESETS};
         if self.state.bar.lemon == on {
             return;
         }
-        self.state.bar.lemon = on;
+        // Each layout keeps its own toolbar (`settings.txt`) and, for the session, its own windows: which of the
+        // playlist, mixer and piano roll are open and how (maximized, collapsed, where they float).
+        let s = &mut self.state;
+        let shown: Vec<Win> = s.z.iter().copied().filter(|w| w.slot().is_some()).collect();
+        s.layout_wins[usize::from(s.bar.lemon)] = Some((s.wins, shown));
+        if let Some((wins, shown)) = s.layout_wins[usize::from(on)].clone() {
+            s.wins = wins;
+            s.z.retain(|w| w.slot().is_none());
+            s.z.splice(0..0, shown);
+        } else if on {
+            // First time in the Lemon layout: the open windows snap into the split.
+            s.wins.iter_mut().for_each(|w| (w.maxed, w.mini) = (false, false));
+        }
+        s.bar.lemon = on;
         crate::settings_file::set_flag(crate::toolbar::LEMON_KEY, on);
-        self.set_toolbar_layout(if on { PRESETS[LEMON_PRESET].layout() } else { Layout::classic() });
+        self.set_toolbar_layout(crate::toolbar::Layout::load_for(on));
         self.state.message = Some(format!("Layout: {}", if on { "Lemon" } else { "Classic" }));
         self.invalidate();
     }
@@ -8622,7 +8638,7 @@ impl App {
         let s = &mut self.state;
         let before = views::band_h(s);
         s.bar.layout = l;
-        s.bar.layout.save();
+        s.bar.layout.save_for(s.bar.lemon);
         let dy = views::band_h(s) - before;
         if !s.toolbar.hidden && dy != 0.0 {
             lift_windows(s, dy);
@@ -18743,6 +18759,32 @@ mod tests {
     /// preset asks, then removes the file.
     /// The Lemon layout: the workspace is a card with a gap all round, above the status bar; the browser ends at the
     /// status bar too. The classic layout's workspace runs to the window's edges.
+    #[test]
+    fn layouts_keep_their_own_state() {
+        use crate::toolbar::{Layout, LEMON_PRESET, PRESETS};
+        let mut app = App::new(None);
+        // Classic: a custom toolbar (one row of the classic), the mixer floating, the playlist maximized.
+        let mut mine = Layout::classic();
+        mine.set_rows(1);
+        app.set_toolbar_layout(mine.clone());
+        app.state.raise(Win::Mixer);
+        app.state.wins[1].maxed = false;
+        let mixer_at = app.state.wins[1].rect;
+        app.set_lemon_layout(true);
+        assert_eq!(app.state.bar.layout, PRESETS[LEMON_PRESET].layout());
+        // Lemon: the mixer hidden, the piano roll maximized.
+        app.act(Action::ToggleWin(Win::Mixer));
+        app.act(Action::ShowMax(Win::PianoRoll));
+        app.set_lemon_layout(false);
+        assert_eq!(app.state.bar.layout, mine, "the classic toolbar back");
+        assert!(app.state.shown(Win::Mixer) && !app.state.shown(Win::PianoRoll) && app.state.wins[1].rect == mixer_at);
+        assert!(app.state.is_max(Win::Playlist) && !app.state.is_max(Win::Mixer));
+        app.set_lemon_layout(true);
+        assert!(!app.state.shown(Win::Mixer), "{:?}", app.state.z);
+        assert!(app.state.is_max(Win::PianoRoll), "{:?}", app.state.z);
+        assert_eq!((Layout::load_for(false), Layout::load_for(true)), (mine, PRESETS[LEMON_PRESET].layout()));
+    }
+
     #[test]
     fn lemon_layout_geometry() {
         let mut app = App::new(None);

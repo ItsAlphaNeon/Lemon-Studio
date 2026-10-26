@@ -30,6 +30,8 @@ pub const FLEX_EDIT_W: f32 = 16.0;
 pub const EXT: &str = "lstoolbar";
 /// The settings key of the layout.
 const KEY: &str = "toolbar_layout";
+/// The Lemon layout's own toolbar (General settings ▸ Layout).
+const LEMON_TOOLBAR_KEY: &str = "toolbar_layout_lemon";
 
 /// What the toolbar can hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -314,14 +316,26 @@ impl Layout {
         Some(Layout { rows, logo })
     }
 
-    /// The layout kept in `settings.txt`; the classic one when there is none or it cannot be read.
+    /// The classic layout's toolbar kept in `settings.txt`; the classic one when there is none or it cannot be read.
     pub fn load() -> Layout {
-        crate::settings_file::get(KEY).and_then(|v| Layout::parse(&v)).unwrap_or_else(Layout::classic)
+        Layout::load_for(false)
     }
 
-    /// Keeps the layout for the next start.
-    pub fn save(&self) {
-        crate::settings_file::write(KEY, self.text().trim_end().replace('\n', "; ").as_str());
+    /// The toolbar kept for the Lemon layout (`lemon`) or the classic one, each its own: the layout's preset when none
+    /// is kept. A classic toolbar that is the Lemon preset was kept from before each had its own: the classic one.
+    pub fn load_for(lemon: bool) -> Layout {
+        let kept = crate::settings_file::get(if lemon { LEMON_TOOLBAR_KEY } else { KEY }).and_then(|v| Layout::parse(&v));
+        let lemon_preset = PRESETS[LEMON_PRESET].layout();
+        match kept {
+            Some(l) if lemon || l != lemon_preset => l,
+            _ if lemon => lemon_preset,
+            _ => Layout::classic(),
+        }
+    }
+
+    /// Keeps the layout as the Lemon layout's toolbar (`lemon`) or the classic one's, for the next start.
+    pub fn save_for(&self, lemon: bool) {
+        crate::settings_file::write(if lemon { LEMON_TOOLBAR_KEY } else { KEY }, self.text().trim_end().replace('\n', "; ").as_str());
     }
 
     /// One or two rows. Panels of rows taken away go to the end of the last row left; a new row is empty.
@@ -530,11 +544,8 @@ const LEMON_DEFAULT: bool = !cfg!(test);
 
 impl Bar {
     pub fn load() -> Bar {
-        let chosen = crate::settings_file::get(LEMON_KEY).is_some();
         let lemon = crate::settings_file::flag(LEMON_KEY, LEMON_DEFAULT);
-        // Not chosen yet: the default layout's toolbar too, over one kept from before there was a choice.
-        let layout = if !chosen && lemon { PRESETS[LEMON_PRESET].layout() } else { Layout::load() };
-        Bar { layout, editing: false, user: user_presets(), lemon }
+        Bar { layout: Layout::load_for(lemon), editing: false, user: user_presets(), lemon }
     }
 
     /// The user preset with the current layout, if any.
