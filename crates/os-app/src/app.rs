@@ -1813,6 +1813,33 @@ impl App {
         self.saved.0 != self.state.project || self.saved.1 != self.state.tempo
     }
 
+    /// The system asks the window to close (its close shortcut, a taskbar or dock). The dialog-like windows drawn
+    /// inside the main window close first, one per request, as windows of their own would under that shortcut: the
+    /// settings window, the Remote control settings box, then the tool window in front (Tempo tapper, Touch controller,
+    /// Plugin performance monitor, the piano roll's tool dialogs; as with their ×). Otherwise the app closes, once
+    /// unsaved changes are answered. While a dialog is open the window stays (the dialog is answered first).
+    pub fn close_requested(&mut self) {
+        if self.modal_open() {
+            return;
+        }
+        if self.state.settings.open {
+            self.state.settings.open = false;
+            self.invalidate();
+            return;
+        }
+        if self.state.link_box.take().is_some() {
+            self.invalidate();
+            return;
+        }
+        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg);
+        if let Some(&w) = self.state.z.last().filter(|w| !self.state.no_focus && tool(w)) {
+            self.act(Action::CloseWin(w));
+            self.invalidate();
+            return;
+        }
+        self.ask_discard("closing", crate::dialog::Next::Close);
+    }
+
     /// Before the project is replaced or the app closes (`doing`: "closing", ...): with unsaved changes, asks to save
     /// them (spec: ui/dialogs.md §1f), and `next` follows once they are saved or not wanted; otherwise right away.
     pub fn ask_discard(&mut self, doing: &str, next: crate::dialog::Next) {
@@ -3028,11 +3055,9 @@ impl App {
             _ => None,
         };
         let closing: Vec<Win> = self.state.z.iter().copied().filter(|&w| Some(w) != keep && (what != CloseAll::Plugins || plugin(w))).collect();
+        // each as its × closes it: the monitor resets, a piano roll tool dialog puts the notes back
         for w in closing {
-            match w {
-                Win::Perf => self.close_perf(),
-                w => self.state.hide(w),
-            }
+            self.act(Action::CloseWin(w));
         }
         // Hosted plugin windows (rack rows and mixer slots; detached ones are not in the stack).
         let rows: Vec<usize> = self.plugins.hosted.keys().copied().collect();
@@ -11259,6 +11284,23 @@ mod tests {
         assert_eq!(app.state.plugdb.top, 80 - crate::views::settings::TABLE_ROWS, "to the last row, no further");
     }
 
+    /// The system's close shortcut closes the settings window, then the tool window in front, one per press; a
+    /// workspace window in front (the mixer) leaves the shortcut to the app, which then closes.
+    #[test]
+    fn close_shortcut_closes_dialog_windows_first() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        app.state.raise(Win::Tapper);
+        app.open_settings(0);
+        app.close_requested();
+        assert!(!app.state.settings.open && app.state.z.contains(&Win::Tapper) && !app.want_exit, "only the settings window closed");
+        app.close_requested();
+        assert!(!app.state.z.contains(&Win::Tapper) && !app.want_exit, "then the tapper");
+        assert_eq!(app.state.z.last(), Some(&Win::Mixer));
+        app.close_requested();
+        assert!(app.want_exit, "then the app");
+    }
+
     #[test]
     fn settings_window() {
         use crate::views::menus::{item_at, OPTIONS_MENU};
@@ -15514,6 +15556,15 @@ mod tests {
         app.act(Action::Strum(Act::Reset));
         assert_eq!(chord(&app), vec![0, 0, 0]);
         app.act(Action::CloseWin(Win::Strum));
+        // VIEW > Close all windows (F12) closes it as × does.
+        key(&mut app, "s", false, true, false);
+        app.state.set_knob(KnobId::Strum(Knob::Time), 0.5 + 29.0 / 64.0);
+        frame(&mut app, &mut c, None);
+        assert_eq!(chord(&app), vec![0, 22, 44]);
+        app.close_windows(CloseAll::All);
+        assert!(!app.state.shown(Win::Strum));
+        assert_eq!(chord(&app), vec![0, 0, 0], "F12 puts the notes back");
+        app.state.z = vec![Win::PianoRoll];
 
         // Alt+A opens the Arpeggiate dialog (spec: ui/piano-arpeggiate.md): the Default pattern previews at once, ×
         // puts the notes back, a menu entry changes the preview, Accept is one undo step.
