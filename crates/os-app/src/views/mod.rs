@@ -302,8 +302,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         paint_window(ui, s, win, r, a, f);
         ui.c.pop_clip();
         ui.win = None;
-        // A split window without the keyboard is muted (`State::veil`).
-        if let Some(v) = win.slot().map(|i| s.veil[i]).filter(|&v| v > 0.0 && s.bar.lemon) {
+        // A split window without the keyboard is muted (`State::veil`); a maximized one never.
+        if let Some(v) = win.slot().map(|i| s.veil[i]).filter(|&v| v > 0.0 && s.bar.lemon && s.snapped(win) && docked.is_none()) {
             let bg = backdrop(ui);
             ui.c.fill_rect(r, Color { a: (v * VEIL * 255.0).round() as u8, ..bg });
         }

@@ -566,6 +566,14 @@ mod tests {
         let m = at(&app, Win::Mixer);
         f(&mut app, &mut c, (m.cx(), m.cy()));
         assert_eq!(app.state.docked(), Some(Win::Mixer), "F maximizes the window under the mouse");
+        let w = app.state.work_rect();
+        let mut px = |app: &mut App, veil: f32| {
+            app.state.veil[1] = veil;
+            app.invalidate();
+            app.paint(&mut c, None);
+            c.pixmap.data().to_vec()
+        };
+        assert!(px(&mut app, 1.0) == px(&mut app, 0.0), "maximized at {w:?}, the mixer is never muted");
         let all = plan_all(&app.state).tiles;
         let from = all.iter().find(|t| t.0 == Win::Mixer).unwrap().1;
         let others: Vec<(Win, Rect)> = all.into_iter().filter(|t| t.0 != Win::Mixer).collect();
