@@ -257,6 +257,14 @@ impl Window {
         either!(mut self, w => w.unlock())
     }
 
+    /// Whether a text field of the editor has the keyboard. Drawn in Lemon Studio's window, the app then sends it the
+    /// keys; a window of its own gets them from the X server as it is.
+    pub fn set_wants_keys(&self, on: bool) {
+        if let Backend::Embedded(w) = &self.0 {
+            w.set_wants_keys(on);
+        }
+    }
+
     /// Shows a menu at (`x`, `y`) (`to_root`'s points); the picked entry's command.
     pub fn popup<C: Clone>(&mut self, x: i32, y: i32, def: &MenuDef<C>, pal: &Palette, scale: f32) -> Option<C> {
         either!(mut self, w => w.popup(x, y, def, pal, scale))

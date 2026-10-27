@@ -57,6 +57,8 @@ pub struct View {
     pub size: (u32, u32),
     /// The editor holds the cursor (a knob drag): moves arrive as `Input::Delta`.
     pub locked: bool,
+    /// The editor wants the keyboard (a text field has it): the app sends it the keys while its window is in front.
+    pub wants_keys: bool,
     /// Bumped by every change above: the app repaints the editor when it differs.
     pub serial: u64,
 }
@@ -98,6 +100,12 @@ pub fn offer(size: (u32, u32), wake: impl Fn() + Send + Sync + 'static) -> Surfa
     let s = Surface(Arc::new(Inner { token, state: Mutex::new(state), editor: Mutex::new(None), host: Box::new(wake) }));
     offers().insert(token, s.clone());
     s
+}
+
+/// Editor side: whether the host offered a surface under `token` (the window it gave): the editor will be an embedded
+/// one (`claim`, which `x11::spawn` does).
+pub fn offered(token: u32) -> bool {
+    offers().contains_key(&token)
 }
 
 /// Editor side: the surface offered under `token` (the window the host gave), if any; taking it makes the editor an
@@ -263,6 +271,13 @@ impl Window {
     pub fn unlock(&mut self) {
         if self.locked() {
             self.s.changed(|v| v.locked = false);
+        }
+    }
+
+    /// Whether a text field of the editor has the keyboard: the app then sends it the keys.
+    pub fn set_wants_keys(&self, on: bool) {
+        if self.s.lock().view.wants_keys != on {
+            self.s.changed(|v| v.wants_keys = on);
         }
     }
 

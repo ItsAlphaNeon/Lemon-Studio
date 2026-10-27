@@ -55,6 +55,8 @@ struct Inner {
     canvas_off: (i32, i32),
     /// Placed in the workspace yet (it opens centred in it, `sync`).
     placed: bool,
+    /// The editor's size as `sync` last saw it (device px): a change is the editor resizing itself.
+    seen_size: Option<(u32, u32)>,
 }
 
 /// A plugin window in Lemon Studio's own window. Cheap to clone: the app's state holds one per open window to paint
@@ -152,6 +154,7 @@ impl EmbedFrame {
             work: Rect::new(0.0, 0.0, 0.0, 0.0),
             canvas_off: (0, 0),
             placed: false,
+            seen_size: None,
         };
         Ok(EmbedFrame(Rc::new(RefCell::new(inner))))
     }
@@ -328,6 +331,16 @@ impl EmbedFrame {
                 }
             }
         }
+        // The editor resized itself (not the size it was offered): the frame follows.
+        let size = i.surface.view().size;
+        if i.seen_size.is_some_and(|s| s != size) {
+            let editor = ((size.0 as f32 / k).round(), (size.1 as f32 / k).round());
+            if editor != i.st.editor {
+                i.st.editor = editor;
+                i.chrome_dirty = true;
+            }
+        }
+        i.seen_size = Some(size);
         let (ex, ey) = i.editor_at();
         i.surface.set_room([-ex, -ey, canvas.0 as i32 - ex, canvas.1 as i32 - ey]);
     }
