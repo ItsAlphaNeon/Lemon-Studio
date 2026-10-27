@@ -208,8 +208,10 @@ pub enum FrameEvent {
     PresetStep(i32),
     /// A Misc tab value changed (spec: ui/plugin-window.md "Misc tab").
     Misc(crate::misc_page::M, f32),
-    /// A Misc tab list (chord list, number box values): the app opens it at this screen point.
+    /// A Misc tab list (chord list, number box values) or knob menu: the app opens it at this screen point.
     MiscMenu(crate::misc_page::M, i32, i32),
+    /// A strip knob was right-clicked: the app opens its menu (Reset first) at this screen point.
+    KnobMenu(Knob, i32, i32),
     /// A Misc tab keyboard key: key, velocity, pressed.
     Note(u8, u8, bool),
     /// A detached window moved to a monitor with another DPI: the app redraws it at this scale (spec: ui/ui-scaling.md §3).
@@ -238,8 +240,8 @@ struct Sizing {
     asked: (u32, u32),
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Knob {
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Knob {
     Pan,
     Vol,
     Pitch,
@@ -936,9 +938,18 @@ impl State {
         }
     }
 
-    /// Right button down: the Misc page's lists and root note.
+    /// Right button down: the Misc page's lists, knob menus and root note; a strip knob's menu.
     fn right_down(&mut self, x: f32, y: f32, screen: ToScreen) -> Reply {
-        self.misc_button(x, y, Btn::Right, screen).unwrap_or(Reply::None)
+        if let Some(r) = self.misc_button(x, y, Btn::Right, screen) {
+            return r;
+        }
+        // No channel behind the window: the strip's knobs do nothing.
+        if let (Some(Part::Knob(i)), Some(_)) = (part_at(self, x, y), self.info.misc) {
+            let (sx, sy) = screen(x, y);
+            self.events.push(FrameEvent::KnobMenu(KNOBS[usize::from(i)], sx, sy));
+            os_clap::wake();
+        }
+        Reply::None
     }
 
     /// Middle button down resets a knob (spec: ui/knobs.md, owner decision).
@@ -1120,7 +1131,8 @@ impl State {
         let mut reply = Reply::Repaint;
         match (b, h) {
             (Btn::Middle, Hit::Value(m)) => misc_set(self, m, mp::default_of(m)),
-            (Btn::Right, Hit::Value(m) | Hit::Step(m, _)) if mp::list_on_right(m) => {
+            // A list, or a knob's or slider's menu (Reset, `misc::menu`).
+            (Btn::Right, Hit::Value(m) | Hit::Step(m, _)) if mp::list_on_right(m) || mp::draggable(m) => {
                 let (sx, sy) = screen(x, y);
                 self.events.push(FrameEvent::MiscMenu(m, sx, sy));
             }
@@ -1494,6 +1506,55 @@ mod tests {
             assert_eq!(st.left_down(x, y, false, &screen), Reply::Relayout);
             assert_eq!(st.size(), (editor.0 + 2.0 * BORDER, st.area_y() + editor.1 + BORDER));
             assert!(parts(&st).iter().any(|(_, p)| matches!(p, Part::Edge { .. })));
+        }
+    }
+
+    /// The strip's PAN, VOL and PITCH knobs and the Misc page's knobs and sliders: a right click asks the app for their
+    /// menu (Reset first), a middle click resets them (spec: ui/knobs.md "Owner decisions").
+    #[test]
+    fn knobs_have_a_menu_and_reset() {
+        use crate::misc_page::{self as mp, Hit};
+        let screen = |x: f32, y: f32| (x as i32, y as i32);
+        let mut st = state(true, "Insert 1");
+        let (w, _) = st.size();
+        let dx = w - STRIP_RIGHT;
+        for (k, x, reset) in [(Knob::Pan, 383.0, FrameEvent::Pan(0.0)), (Knob::Vol, 417.0, FrameEvent::Volume(0.78125)), (Knob::Pitch, 455.0, FrameEvent::PitchCents(0))] {
+            st.events.clear();
+            st.right_down(x + dx, 47.0, &screen);
+            assert_eq!(st.events, [FrameEvent::KnobMenu(k, (x + dx) as i32, 47)]);
+            st.set_knob(k, 0.1);
+            st.events.clear();
+            st.middle_down(x + dx, 47.0, &screen);
+            assert_eq!(st.events, [reset], "{k:?}");
+        }
+        // No channel behind the window (a mixer effect): the strip's knobs do nothing.
+        st.info.misc = None;
+        st.events.clear();
+        st.right_down(417.0 + dx, 47.0, &screen);
+        assert!(st.events.is_empty());
+        let mut st = state(true, "Insert 1");
+        st.misc = true;
+        st.editor = (mp::PAGE_W, mp::PAGE_H);
+        let (w, h) = st.size();
+        let vals = st.info.misc.unwrap();
+        let mut knobs: Vec<(mp::M, f32, f32)> = Vec::new();
+        for (x, y) in (0..w as i32).step_by(2).flat_map(|x| (0..h as i32).step_by(2).map(move |y| (x as f32, y as f32))) {
+            if let Some(h @ Hit::Value(m)) = misc_hit(&st, x, y)
+                && mp::draggable(m)
+                && !mp::list_on_right(m)
+                && mp::off_name(h, &vals).is_none()
+                && !knobs.iter().any(|k| k.0 == m)
+            {
+                knobs.push((m, x, y));
+            }
+        }
+        for m in [mp::M::LevelPan, mp::M::PolySlide, mp::M::Fine] {
+            assert!(knobs.iter().any(|k| k.0 == m), "{m:?} among the page's knobs and sliders: {knobs:?}");
+        }
+        for (m, x, y) in knobs {
+            st.events.clear();
+            st.right_down(x, y, &screen);
+            assert_eq!(st.events, [FrameEvent::MiscMenu(m, x as i32, y as i32)], "{m:?}");
         }
     }
 

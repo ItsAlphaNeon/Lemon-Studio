@@ -2544,7 +2544,7 @@ impl App {
                     }
                     // A native Wayland main window (Linux): the popups cannot be lifted above a plugin window there.
                     #[cfg(not(windows))]
-                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) if self.plugins.owner == 0 => {
+                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) | Request::KnobMenu(..) if self.plugins.owner == 0 => {
                         self.state.message = Some(off_text(PLUGIN_POPUPS));
                         self.invalidate();
                         continue;
@@ -2608,6 +2608,18 @@ impl App {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(crate::misc::menu(self, row, m, lx, ly));
+                        self.popup_lift = detached.then_some(row);
+                        self.invalidate();
+                        continue;
+                    }
+                    Request::KnobMenu(row, c, x, y) => {
+                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let (lx, ly) = self.screen_to_canvas(x, y);
+                        self.state.playlist.popup = Some(match c {
+                            // The channel's volume and pan: the rack's knob menu (spec: ui/channel-rack.md §19).
+                            crate::knobs::Control::Knob(k) => crate::rack::knob_menu(&self.state, k, self.automation_target(&Action::Knob(k)), lx, ly),
+                            c => crate::knobs::reset_menu(c, lx, ly),
+                        });
                         self.popup_lift = detached.then_some(row);
                         self.invalidate();
                         continue;
@@ -5944,15 +5956,9 @@ impl App {
                 return;
             }
         }
-        if let Some(Action::Settings(views::settings::SAct::ThemeKnob(i))) = action {
-            return self.theme_knob_reset(usize::from(i));
-        }
-        if let Some(Action::Knob(id)) = action {
-            crate::history::knob(&mut self.state, id, false);
-            self.state.set_knob(id, id.default_value());
-            self.hint = Cow::Owned(self.state.knob_text(id));
-            self.invalidate();
-            return;
+        // Knobs, faders and sliders go back to their default (spec: ui/knobs.md "Owner decisions").
+        if let Some(c) = action.as_ref().and_then(crate::knobs::Control::of) {
+            return self.reset_control(c);
         }
         if self.ctrl && matches!(action, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoKeys)) {
             self.drag = Some(Drag::PianoRowZoom { y0: y, row0: self.state.piano.row_h });
@@ -5994,6 +6000,13 @@ impl App {
         // Pattern selector (spec: ui/pattern-menu.md §1): box = menu at the mouse, "+" = find next empty.
         match &action {
             Some(Action::Settings(views::settings::SAct::Preset(i))) => return self.theme_menu(*i, x, y),
+            // The settings window's sliders and theme knobs: their default is all the menu offers.
+            Some(a @ Action::Settings(views::settings::SAct::Slider(..) | views::settings::SAct::ThemeKnob(_))) => {
+                if let Some(c) = crate::knobs::Control::of(a) {
+                    self.state.playlist.popup = Some(crate::knobs::reset_menu(c, x, y));
+                }
+                return self.invalidate();
+            }
             // Settings > MIDI's Port and offset boxes: right-click resets (spec: ui/midi-settings.md §1).
             Some(Action::Settings(views::settings::SAct::Midi(m))) if m.is_value() => return self.midi_page_reset(*m),
             Some(Action::PatternNext) => {
@@ -10704,6 +10717,79 @@ mod tests {
             assert!((app.state.knob(id) - (before + id.notch()).min(1.0)).abs() < 1e-4, "wheel {id:?}");
         }
         assert!(app.state.project.mixer.iter().find(|m| m.index == 1).unwrap().pan.unwrap() > 0.0, "mixer pan written to the model");
+    }
+
+    /// Every knob and fader the main window draws (toolbar, mixer, its equaliser and sends, channel rack) goes back to
+    /// its default with a middle click and with Reset, the first entry of its right-click menu (spec: ui/knobs.md,
+    /// ui/mixer.md §6.3, ui/channel-rack.md §19).
+    #[test]
+    fn every_knob_and_fader_resets() {
+        use crate::knobs::{Control, KnobId};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
+        app.state.z = vec![Win::ChannelRack, Win::Mixer];
+        frame(&mut app, &mut c, None);
+        let value = |app: &App, c: Control| match c {
+            Control::Knob(id) => app.state.knob(id),
+            Control::Fader(t) => crate::mixer::track(&app.state, t).and_then(|m| m.volume).unwrap_or(0.8) as f32,
+            _ => unreachable!(),
+        };
+        let default = |c: Control| match c {
+            Control::Knob(id) => id.default_value(),
+            _ => 0.8,
+        };
+        // Away from the default, by a step the stored value can hold.
+        let disturb = |app: &mut App, c: Control| {
+            let v = if default(c) < 0.5 { 0.875 } else { 0.125 };
+            match c {
+                Control::Knob(id) => app.state.set_knob(id, v),
+                Control::Fader(t) => crate::mixer::track_mut(&mut app.state, t).unwrap().volume = Some(f64::from(v)),
+                _ => unreachable!(),
+            }
+            assert!((value(app, c) - default(c)).abs() > 0.1, "{c:?} moved");
+        };
+        // The controls the mouse can reach (not under another window), once each.
+        let mut seen = Vec::new();
+        let controls: Vec<(Control, f32, f32)> = app
+            .hits
+            .iter()
+            .filter_map(|h| Some((Control::of(&h.action)?, h.rect.cx(), h.rect.cy())))
+            .filter(|&(c, x, y)| app.top_hit(x, y).and_then(|h| Control::of(&h.action)) == Some(c))
+            .filter(|&(c, ..)| !seen.contains(&c) && {
+                seen.push(c);
+                true
+            })
+            .collect();
+        for want in [
+            Control::Knob(KnobId::MasterVol),
+            Control::Knob(KnobId::MasterPitch),
+            Control::Knob(KnobId::Swing),
+            Control::Knob(KnobId::ChanVol(0)),
+            Control::Knob(KnobId::ChanPan(0)),
+            Control::Knob(KnobId::MixPan(1)),
+            Control::Fader(1),
+        ] {
+            assert!(seen.contains(&want), "{want:?} is drawn");
+        }
+        assert!(seen.iter().any(|c| matches!(c, Control::Knob(KnobId::Eq(..)))), "the equaliser's knobs are drawn");
+        for (ctl, x, y) in controls {
+            app.mouse_move(x, y);
+            disturb(&mut app, ctl);
+            app.mouse_down_middle();
+            app.mouse_up();
+            assert!((value(&app, ctl) - default(ctl)).abs() < 1e-4, "middle click resets {ctl:?}");
+            disturb(&mut app, ctl);
+            app.mouse_down_right();
+            app.mouse_up();
+            let menu = app.state.playlist.popup.clone().unwrap_or_else(|| panic!("{ctl:?} has a menu"));
+            assert_eq!(menu.items[0].label, "Reset", "{ctl:?}");
+            app.act(Action::PlPopup(0));
+            assert!((value(&app, ctl) - default(ctl)).abs() < 1e-4, "Reset resets {ctl:?}");
+            assert!(app.state.playlist.popup.is_none());
+            frame(&mut app, &mut c, None);
+        }
     }
 
     /// Holding the mouse on a toolbar window button lights it orange; releasing restores it.

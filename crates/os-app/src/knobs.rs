@@ -105,6 +105,42 @@ impl KnobId {
     }
 }
 
+/// A knob or slider of the app's own windows that goes back to its default: a middle click, and "Reset" in its right-click
+/// menu (spec: ui/knobs.md "Owner decisions", ui/mixer.md §6.3, ui/channel-rack.md §19). `App::reset_control` resets it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Control {
+    Knob(KnobId),
+    /// A mixer track's volume fader (spec: ui/mixer.md §4).
+    Fader(u16),
+    /// Channel row `.0`'s pitch knob in its plugin window (spec: ui/plugin-window.md).
+    ChanPitch(usize),
+    /// A declared slider of the settings window, by label (`prefs::SLIDERS`).
+    Slider(&'static str),
+    /// Knob `.0` of Settings > Theme's adjustments (`theme_adjust::KNOBS`): back to the chosen theme's value.
+    Theme(u8),
+}
+
+impl Control {
+    /// The control a main-window hit is, if it is one.
+    pub fn of(a: &crate::app::Action) -> Option<Control> {
+        use crate::app::Action;
+        use crate::views::settings::SAct;
+        match *a {
+            Action::Knob(id) => Some(Control::Knob(id)),
+            Action::Fader(t) => Some(Control::Fader(t)),
+            Action::Settings(SAct::Slider(label, ..)) => Some(Control::Slider(label)),
+            Action::Settings(SAct::ThemeKnob(i)) => Some(Control::Theme(i)),
+            _ => None,
+        }
+    }
+}
+
+/// The right-click menu of a control with nothing to offer but its default: "Reset".
+pub fn reset_menu(c: Control, x: f32, y: f32) -> crate::playlist::Popup {
+    use crate::playlist::{Cmd, PItem, Popup};
+    Popup { x, y, items: vec![PItem::new("Reset", Cmd::Reset(c))], sub: None, scroll: [0; 2] }
+}
+
 /// "Centered", "38% right", "2% left".
 pub fn pan_text(p: f32) -> String {
     let pct = (p.abs() * 100.0).round() as i32;
@@ -236,6 +272,12 @@ impl State {
         }
     }
 
+    /// Knob `id` back to its default, as an undo step.
+    pub fn reset_knob(&mut self, id: KnobId) {
+        crate::history::knob(self, id, false);
+        self.set_knob(id, id.default_value());
+    }
+
     /// The hint-bar text of a knob at its current value.
     pub fn knob_text(&self, id: KnobId) -> String {
         let n = self.knob(id);
@@ -280,6 +322,42 @@ impl State {
     }
 }
 
+impl crate::app::App {
+    /// Control `c` back to its default (a middle click, or "Reset" in its menu); the hint bar shows the new value.
+    pub(crate) fn reset_control(&mut self, c: Control) {
+        use std::borrow::Cow;
+        let s = &mut self.state;
+        match c {
+            Control::Knob(id) => {
+                s.reset_knob(id);
+                self.hint = Cow::Owned(s.knob_text(id));
+            }
+            Control::Fader(t) => {
+                crate::history::fader(s, t);
+                let v = os_model::MixerTrack::new(t).volume.unwrap_or(0.8);
+                if let Some(m) = crate::mixer::track_mut(s, t) {
+                    m.volume = Some(v);
+                    s.piano.dirty = true;
+                }
+                self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
+            }
+            Control::ChanPitch(row) => {
+                if let Some(ch) = s.project.channels.get_mut(row) {
+                    ch.pitch_cents = 0;
+                    s.piano.dirty = true;
+                }
+            }
+            Control::Slider(label) => {
+                if let Some(sl) = crate::prefs::find_slider(label) {
+                    crate::prefs::set_slider(sl, sl.default);
+                }
+            }
+            Control::Theme(i) => return self.theme_knob_reset(usize::from(i)),
+        }
+        self.invalidate();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +382,39 @@ mod tests {
         assert_eq!(s.knob_text(KnobId::Swing), "Main swing: 0%");
         s.project.channels = vec![os_model::Channel { volume: 0.78, ..crate::app::test_project().channels[0].clone() }];
         assert_eq!(s.knob_text(KnobId::ChanVol(0)), "Channel volume: 78%  -5.2dB  0.55");
+    }
+
+    /// Every kind of control goes back to its default through `App::reset_control`, as an undo step for the project's.
+    #[test]
+    fn controls_reset() {
+        use crate::app::Action;
+        use crate::views::settings::SAct;
+        let mut app = crate::app::App::new(None);
+        app.state.project = crate::app::test_project();
+        assert_eq!(Control::of(&Action::Knob(KnobId::Swing)), Some(Control::Knob(KnobId::Swing)));
+        assert_eq!(Control::of(&Action::Fader(2)), Some(Control::Fader(2)));
+        assert_eq!(Control::of(&Action::Settings(SAct::ThemeKnob(3))), Some(Control::Theme(3)));
+        assert_eq!(Control::of(&Action::Settings(SAct::Slider("Smoothing", 0.0, 9.0))), Some(Control::Slider("Smoothing")));
+        assert_eq!(Control::of(&Action::Tempo), None, "the tempo is a value box");
+        for id in [KnobId::MasterVol, KnobId::MasterPitch, KnobId::ChanVol(0), KnobId::ChanPan(0), KnobId::Swing, KnobId::MixPan(1), KnobId::MixSep(1), KnobId::SlotMix(1, 0)] {
+            app.state.set_knob(id, if id.default_value() < 0.5 { 0.875 } else { 0.125 });
+            app.reset_control(Control::Knob(id));
+            assert_eq!(app.state.knob(id), id.default_value(), "{id:?}");
+            assert_eq!(app.hint, app.state.knob_text(id));
+        }
+        assert!(crate::history::undo(&mut app.state).is_some(), "an undo step");
+        assert_ne!(app.state.knob(KnobId::SlotMix(1, 0)), 1.0, "undone");
+        crate::mixer::track_mut(&mut app.state, 1).unwrap().volume = Some(0.2);
+        app.reset_control(Control::Fader(1));
+        assert_eq!(crate::mixer::track(&app.state, 1).unwrap().volume, Some(0.8));
+        assert_eq!(app.hint, "Volume: 100%  0.0dB  1.00");
+        app.state.project.channels[0].pitch_cents = 250;
+        app.reset_control(Control::ChanPitch(0));
+        assert_eq!(app.state.project.channels[0].pitch_cents, 0);
+        let s = &crate::prefs::SMOOTHING;
+        crate::prefs::set_slider(s, 3);
+        app.reset_control(Control::Slider(s.label));
+        assert_eq!(crate::prefs::slider(s), s.default);
     }
 
     #[test]
