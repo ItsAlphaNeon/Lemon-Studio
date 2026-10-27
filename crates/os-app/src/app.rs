@@ -1214,6 +1214,11 @@ impl State {
         }
     }
 
+    /// The window with the keyboard: the one in front, unless a click on the empty workspace took it from all.
+    pub fn focused(&self) -> Option<Win> {
+        self.z.last().copied().filter(|_| !self.no_focus)
+    }
+
     pub fn hide(&mut self, w: Win) {
         self.z.retain(|&o| o != w);
         // The Lemon layout: a closed window opens again into the split.
@@ -5795,6 +5800,66 @@ impl App {
         self.rack_pending();
     }
 
+    /// The Lemon layout's keys for its windows, wherever the keyboard is:
+    /// - Ctrl+Alt+arrows: the keyboard to the nearest window that way (the split's windows and the floating ones). While
+    ///   one is maximized, a split window that way is maximized in its place.
+    /// - Ctrl+Alt+Shift+arrows: the split window with the keyboard changes places with the one that way.
+    /// - F: maximizes the split window under the mouse, or brings the split back (the one with the keyboard when the
+    ///   mouse is over none).
+    ///
+    /// Returns whether the key was one of them.
+    fn window_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
+        use crate::tiles::{self, Dir};
+        use winit::keyboard::{Key, NamedKey};
+        let dir = match key {
+            Key::Named(NamedKey::ArrowLeft) => Some(Dir::Left),
+            Key::Named(NamedKey::ArrowRight) => Some(Dir::Right),
+            Key::Named(NamedKey::ArrowUp) => Some(Dir::Up),
+            Key::Named(NamedKey::ArrowDown) => Some(Dir::Down),
+            _ => None,
+        };
+        if let Some(d) = dir.filter(|_| ctrl && alt) {
+            let s = &mut self.state;
+            let Some(from) = s.focused() else { return true };
+            let docked = s.docked();
+            // Where each window is: the split's as if none were maximized, so the arrows go the same ways either way.
+            let split = if docked.is_some() { tiles::plan_all(s) } else { tiles::plan(s) };
+            let mut rects: Vec<(Win, Rect)> = split.tiles.clone();
+            rects.extend(s.z.iter().filter(|w| w.slot().is_none() && !matches!(w, Win::Browser | Win::Hosted(_))).map(|&w| (w, views::frame_rect(s, w))));
+            let Some(at) = rects.iter().find(|r| r.0 == from).map(|r| r.1) else { return true };
+            let others: Vec<(Win, Rect)> = rects.into_iter().filter(|r| r.0 != from).collect();
+            if self.shift {
+                // Only split windows change places, and not while one is maximized.
+                let tiles: Vec<(Win, Rect)> = others.into_iter().filter(|r| r.0.slot().is_some()).collect();
+                if docked.is_none() && from.slot().is_some() && let Some(to) = tiles::neighbour(&tiles, at, d) {
+                    tiles::swap(s, from, to);
+                }
+                return true;
+            }
+            let Some(to) = tiles::neighbour(&others, at, d) else { return true };
+            if let (Some(old), Some(i)) = (docked, to.slot()) {
+                // A maximized window gives the workspace to the one that way.
+                if let Some(j) = old.slot() {
+                    s.wins[j].maxed = false;
+                }
+                s.wins[i].maxed = true;
+            }
+            s.raise(to);
+            return true;
+        }
+        let f = matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("f"));
+        if f && !ctrl && !alt && !self.shift {
+            let (x, y) = self.mouse;
+            let under = self.top_hit(x, y).and_then(|h| h.win).filter(|w| w.slot().is_some());
+            let s = &self.state;
+            if let Some(w) = under.or(s.docked()).or(s.focused().filter(|w| w.slot().is_some())) {
+                self.act(Action::MaxWin(w));
+            }
+            return true;
+        }
+        false
+    }
+
     /// Clicking any part of a child window brings it to the front (spec: ui/channel-rack.md §5).
     fn raise_under_mouse(&mut self) {
         let (x, y) = self.mouse;
@@ -7096,6 +7161,11 @@ impl App {
                 return self.invalidate();
             }
             return self.undo_key(alt);
+        }
+        // The Lemon layout's window keys: Ctrl+Alt+arrows, F (`window_key`).
+        let s = &self.state;
+        if s.tiled() && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && s.playlist.popup.is_none() && self.window_key(key, ctrl, alt) {
+            return;
         }
         // The channel rack's keys while it is in front (spec: ui/channel-rack.md §20).
         let s = &self.state;

@@ -135,6 +135,15 @@ fn split(r: Rect, rows: bool, share: f32) -> (Rect, Rect, Rect) {
 
 /// The plan for the windows snapped now (`State::snapped`); empty outside the Lemon layout.
 pub fn plan(s: &State) -> Plan {
+    plan_of(s, |w| s.snapped(w))
+}
+
+/// The plan as it would be with the maximized window back in the split: where each open window sits in it.
+pub fn plan_all(s: &State) -> Plan {
+    plan_of(s, |w| s.tiled() && s.shown(w))
+}
+
+fn plan_of(s: &State, in_split: impl Fn(Win) -> bool) -> Plan {
     let mut out = Plan::default();
     if !s.tiled() {
         return out;
@@ -142,7 +151,7 @@ pub fn plan(s: &State) -> Plan {
     let t = &s.tiles;
     let p = &PRESETS[t.preset];
     let share = t.share[t.preset];
-    let at = |place: usize| Some(t.order[place]).filter(|&w| s.snapped(w));
+    let at = |place: usize| Some(t.order[place]).filter(|&w| in_split(w));
     let (single, pair) = if p.single_first { (at(0), [at(1), at(2)]) } else { (at(2), [at(0), at(1)]) };
     let pair: Vec<Win> = pair.into_iter().flatten().collect();
     let work = s.work_rect();
@@ -200,11 +209,46 @@ pub fn reset(s: &mut State, node: usize) {
 /// they did.
 pub fn drop(s: &mut State, w: Win, (x, y): (f32, f32)) -> bool {
     let Some((other, _)) = plan(s).tiles.into_iter().find(|&(o, r)| o != w && r.contains(x, y)) else { return false };
-    let o = &mut s.tiles.order;
-    let (Some(a), Some(b)) = (o.iter().position(|&p| p == w), o.iter().position(|&p| p == other)) else { return false };
-    o.swap(a, b);
-    s.tiles.save();
+    swap(s, w, other);
     true
+}
+
+/// Snapped windows `a` and `b` change places.
+pub fn swap(s: &mut State, a: Win, b: Win) {
+    let o = &mut s.tiles.order;
+    if let (Some(i), Some(j)) = (o.iter().position(|&p| p == a), o.iter().position(|&p| p == b)) {
+        o.swap(i, j);
+        s.tiles.save();
+    }
+}
+
+/// A direction on the screen (Ctrl+Alt+arrows).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Dir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// The window of `rects` nearest to `from` in direction `d`: its centre past `from`'s that way, the nearest by how
+/// far that way plus twice how far across (a window straight across wins over a nearer one off to the side).
+pub fn neighbour(rects: &[(Win, Rect)], from: Rect, d: Dir) -> Option<Win> {
+    let (cx, cy) = (from.cx(), from.cy());
+    rects
+        .iter()
+        .filter_map(|&(w, r)| {
+            let (dx, dy) = (r.cx() - cx, r.cy() - cy);
+            let (along, across) = match d {
+                Dir::Left => (-dx, dy),
+                Dir::Right => (dx, dy),
+                Dir::Up => (-dy, dx),
+                Dir::Down => (dy, dx),
+            };
+            (along > 0.5).then_some((w, along + 2.0 * across.abs()))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(w, _)| w)
 }
 
 /// The next preset (the status bar's split button).
@@ -440,6 +484,81 @@ mod tests {
         let rack = crate::views::rack::rect(&app.state);
         let hit = app.hits.iter().rev().find(|h| h.rect.contains(rack.cx(), rack.cy())).map(|h| h.win);
         assert_eq!(hit, Some(Some(Win::ChannelRack)));
+    }
+
+    /// Ctrl+Alt+arrows give the keyboard to the window that way, the channel rack included; with Shift the split
+    /// windows change places. F maximizes the window under the mouse; while one is maximized, the arrows maximize the
+    /// one that way instead, and F brings the split back. The window with the keyboard is ringed in the gap round it.
+    #[test]
+    fn window_keys() {
+        use crate::app::Action::ToggleWin;
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = os_ui::Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = lemon();
+        app.state.hide(Win::ChannelRack);
+        for w in [Win::Playlist, Win::PianoRoll, Win::Mixer] {
+            app.act(ToggleWin(w));
+        }
+        let at = |app: &App, w: Win| rect_of(&app.state, w).unwrap_or_else(|| panic!("{w:?} not snapped: {:?}", app.state.z));
+        let arrow = |app: &mut App, k: NamedKey, shift: bool| {
+            app.shift = shift;
+            app.key(&Key::Named(k), true, true);
+            app.shift = false;
+        };
+        let f = |app: &mut App, c: &mut os_ui::Canvas, (x, y): (f32, f32)| {
+            app.paint(c, None);
+            app.mouse = (x, y);
+            app.key(&Key::Character("f".into()), false, false);
+        };
+        let ring = |app: &mut App, c: &mut os_ui::Canvas, w: Win| {
+            app.paint(c, None);
+            let r = at(app, w);
+            let p = c.pixmap.pixel(r.cx() as u32, (r.y - 2.0) as u32).unwrap();
+            (p.red(), p.green(), p.blue())
+        };
+
+        app.state.raise(Win::Playlist);
+        let lit = ring(&mut app, &mut c, Win::Playlist);
+        arrow(&mut app, NamedKey::ArrowDown, false);
+        let below = app.state.focused().unwrap();
+        assert!(below != Win::Playlist && at(&app, below).y > at(&app, Win::Playlist).y, "{below:?} is below");
+        assert!(ring(&mut app, &mut c, Win::Playlist) != lit, "the ring went with the keyboard");
+        arrow(&mut app, NamedKey::ArrowUp, false);
+        assert_eq!(app.state.focused(), Some(Win::Playlist));
+
+        arrow(&mut app, NamedKey::ArrowDown, true);
+        assert_eq!(app.state.focused(), Some(Win::Playlist), "the keyboard moves with the window");
+        assert!(at(&app, Win::Playlist).y > at(&app, below).y, "the playlist and {below:?} changed places");
+
+        let m = at(&app, Win::Mixer);
+        f(&mut app, &mut c, (m.cx(), m.cy()));
+        assert_eq!(app.state.docked(), Some(Win::Mixer), "F maximizes the window under the mouse");
+        let all = plan_all(&app.state).tiles;
+        let from = all.iter().find(|t| t.0 == Win::Mixer).unwrap().1;
+        let others: Vec<(Win, Rect)> = all.into_iter().filter(|t| t.0 != Win::Mixer).collect();
+        let (k, d) = [(NamedKey::ArrowUp, Dir::Up), (NamedKey::ArrowLeft, Dir::Left), (NamedKey::ArrowRight, Dir::Right)]
+            .into_iter()
+            .find(|&(_, d)| neighbour(&others, from, d).is_some())
+            .unwrap();
+        let next = neighbour(&others, from, d).unwrap();
+        arrow(&mut app, k, false);
+        assert_eq!(app.state.docked(), Some(next), "maximized, the arrows maximize the window that way");
+        assert!(!app.state.is_max(Win::Mixer));
+        let w = app.state.work_rect();
+        f(&mut app, &mut c, (w.cx(), w.cy()));
+        assert_eq!(app.state.docked(), None, "F again: the split");
+
+        app.state.raise(Win::ChannelRack);
+        let rack = crate::views::rack::rect(&app.state);
+        let away = [NamedKey::ArrowLeft, NamedKey::ArrowRight, NamedKey::ArrowUp, NamedKey::ArrowDown].into_iter().find(|&k| {
+            arrow(&mut app, k, false);
+            let gone = app.state.focused() != Some(Win::ChannelRack);
+            app.state.raise(Win::ChannelRack);
+            gone
+        });
+        assert!(away.is_some(), "the rack at {rack:?} has a split window some way");
+        arrow(&mut app, NamedKey::ArrowLeft, true);
+        assert_eq!(app.state.focused(), Some(Win::ChannelRack), "a floating window changes places with none");
     }
 
     /// The mixer's cables hang over the gap under it, to the window below or the status bar.

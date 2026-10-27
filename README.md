@@ -37,9 +37,14 @@ own content. Side branches are named `cutting-edge-<topic>`.
     do; a window opening is at its place at once, under them as they move away, and one closing leaves its
     last look there for them to move over, and maximizing is instant.
   - the browser docked left or right: its title bar drags it to the other side.
+  - window keys: the window with the keyboard is ringed in the brand colour. Ctrl+Alt+arrows move the keyboard to
+    the window that way (floating ones included; while one is maximized, the one that way is maximized instead),
+    Ctrl+Alt+Shift+arrows swap split windows, and F maximizes the window under the mouse or brings the split back.
 
   The Lemon and Classic layouts each keep their own toolbar and, for the session, their own window arrangement.
-  Every keyboard shortcut works the same. Classic is FL's arrangement and unchanged.
+  Every other keyboard shortcut works the same. Classic is FL's arrangement and unchanged.
+- **Plugin windows under Hyprland.** They drag by their own title bar (Hyprland ignores the X11 move request) and
+  have no compositor border or shadow.
 - **Branch marks.** The workspace watermark, the version string ("cutting-edge pre-alpha") and the status bar's mark
   are red.
 

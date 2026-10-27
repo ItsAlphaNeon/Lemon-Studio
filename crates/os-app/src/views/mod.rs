@@ -312,6 +312,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             card_corners(ui, tr);
         }
     }
+    if s.bar.lemon && anim.is_none() {
+        focus_ring(ui, s, &order, docked_at);
+    }
     // The gaps between snapped windows drag their splits.
     if split && anim.is_none() {
         for d in &tiles.dividers {
@@ -469,6 +472,34 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
     }
 }
 
+/// The Lemon layout rings the window with the keyboard in the brand colour, as Hyprland rings the active window: a split
+/// or maximized one in the gap round its card, a floating one on its edge. Not while it is the only window shown.
+fn focus_ring(ui: &mut Ui, s: &State, order: &[Win], docked_at: Option<usize>) {
+    let Some(fw) = s.focused() else { return };
+    let seen = |(i, w): (usize, &Win)| match w.slot() {
+        Some(_) => docked_at.is_none_or(|d| i >= d),
+        None => !matches!(w, Win::Browser | Win::Hosted(_)),
+    };
+    if order.iter().enumerate().filter(|&iw| seen(iw)).count() < 2 || !order.iter().enumerate().any(|(i, w)| *w == fw && seen((i, w))) {
+        return;
+    }
+    let c = ui.t.brand_lit(os_theme::design::lemon::MAIN).mix(backdrop(ui), 0.3);
+    if fw.slot().is_some() {
+        ui.c.stroke_rrect(s.win_rect(fw).outset(3.0), CARD_R + 3.0, 2.0, c);
+    } else {
+        ui.c.stroke_rrect(frame_rect(s, fw), kit::lemon::r_panel(ui.t), 1.5, c);
+    }
+}
+
+/// Window `w`'s own rect: the paint area without what hangs out of it (the channel rack's graph editor).
+pub fn frame_rect(s: &State, w: Win) -> Rect {
+    match w {
+        Win::ChannelRack => rack::rect(s),
+        Win::Plugin => channel_win::rect(s),
+        w => paint_area(s, w),
+    }
+}
+
 /// Start of a Playlist / Mixer / Piano roll window: blocks clicks through it, and (once the
 /// content is painted, so the zones sit on top) `resize_zones` adds its resize edges.
 pub fn window_body(ui: &mut Ui, r: Rect) {
@@ -509,8 +540,8 @@ pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _h
     let skip = if ui.alone { 2 } else { usize::from(ui.tiled) };
     let max_hint = match (ui.tiled, maxed) {
         (false, _) => "Maximize / restore window",
-        (true, false) => "Maximize",
-        (true, true) => "Back to the split",
+        (true, false) => "Maximize (F)",
+        (true, true) => "Back to the split (F)",
     };
     for (i, (hint, action)) in [("Minimize window", Action::MinWin(win)), (max_hint, Action::MaxWin(win)), ("Close window", Action::CloseWin(win))]
         .into_iter()
@@ -552,12 +583,20 @@ pub fn window_frame_ex(ui: &mut Ui, win: Win, r: Rect, title: &str, title_x: f32
     }
     // The title stops short of the window buttons (a narrow window cuts it).
     ui.c.text_clip(os_ui::Font::new(17), r.x + title_x, r.y + 1.0, (title_room(r, buttons) - title_x).max(0.0), t.text, title);
-    ui.hit(bar, Action::WinDrag(win), "Drag to move");
+    ui.hit(bar, Action::WinDrag(win), drag_hint(ui, win));
     // Minimize / maximize / close glyphs at the right (1862, 1881, 1901 at full width).
     if buttons {
         window_buttons(ui, win, r.right() - 64.0, r.y, t.text_dim.mix(t.glyph, 0.6), t.glyph);
     }
     Rect::new(r.x, r.y + 23.0, r.w, r.h - 23.0)
+}
+
+/// A title bar's hint: a split window is dragged onto another to change places.
+fn drag_hint(ui: &Ui, win: Win) -> &'static str {
+    match win.slot() {
+        Some(i) if ui.tiled && !ui.maxed[i] && !ui.alone => "Drag onto another window to change places (Ctrl+Alt+Shift+arrows)",
+        _ => "Drag to move",
+    }
 }
 
 /// How far from a title bar's left (at `r`) its text may reach: short of the window buttons when there are any.
