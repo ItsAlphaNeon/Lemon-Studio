@@ -4137,8 +4137,8 @@ impl App {
             }
         }
         self.playback_damage();
-        // The Lemon layout's windows moving: the next frame of it.
-        self.has_damage() || self.state.tile_anim.is_some()
+        // The Lemon layout's windows moving, or its veils fading: the next frame of it.
+        self.has_damage() || self.state.tile_anim.is_some() || self.veil_fade.is_some()
     }
 
     /// Paint the whole frame (`damage` None) or just the damaged rect.
