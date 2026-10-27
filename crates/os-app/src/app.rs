@@ -2010,7 +2010,9 @@ impl App {
             self.invalidate();
             return;
         }
-        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg);
+        // The Lemon layout's floating windows close the same way, as a plugin's window does (Hyprland's Super+W).
+        let lemon = self.state.tiled();
+        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg) || (lemon && matches!(w, Win::ChannelRack | Win::Plugin));
         if let Some(&w) = self.state.z.last().filter(|w| !self.state.no_focus && tool(w)) {
             self.act(Action::CloseWin(w));
             self.invalidate();
@@ -11956,6 +11958,19 @@ mod tests {
         assert_eq!(app.state.z.last(), Some(&Win::Mixer));
         app.close_requested();
         assert!(app.want_exit, "then the app");
+    }
+
+    /// The Lemon layout: the close shortcut closes the channel rack in front too, before the app.
+    #[test]
+    fn close_shortcut_closes_the_rack_in_lemon() {
+        let mut app = App::new(None);
+        app.state.bar.lemon = true;
+        app.state.raise(Win::Mixer);
+        app.state.raise(Win::ChannelRack);
+        app.close_requested();
+        assert!(!app.state.shown(Win::ChannelRack) && !app.want_exit, "the rack closed, not the app");
+        app.close_requested();
+        assert!(app.want_exit, "the mixer in front: the app");
     }
 
     #[test]
