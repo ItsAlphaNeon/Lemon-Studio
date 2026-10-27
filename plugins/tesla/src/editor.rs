@@ -566,6 +566,11 @@ impl Logic {
             return self.right(t, x, y);
         }
         if btn == Btn::Middle {
+            // A middle click resets an Amp control, as a right click does.
+            if let Target::Amp(c) = t {
+                self.reset_amp(c);
+                return vec![Act::Repaint];
+            }
             return vec![];
         }
         let mut acts = vec![Act::Repaint];
@@ -656,22 +661,26 @@ impl Logic {
             Target::When => acts.push(Act::Menu(MenuReq::When, x, y)),
             Target::Max => acts.push(Act::Menu(MenuReq::Max, x, y)),
             Target::Wave => acts.push(Act::Menu(MenuReq::Wave, x, y)),
-            Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right)) => {
-                // Right-click resets a control.
-                let d = Amp::default();
-                let v = match c {
-                    AmpCtl::Pan => d.pan,
-                    AmpCtl::Sep => d.sep,
-                    AmpCtl::Left => d.left,
-                    AmpCtl::Volume => d.volume,
-                    _ => d.right,
-                };
-                self.set_amp_value(c, v);
-                self.amp_changed();
-            }
+            // Right-click resets a control.
+            Target::Amp(c) => self.reset_amp(c),
             _ => {}
         }
         acts
+    }
+
+    /// Amp panel control `c` back to its default (its knobs and faders; the panel's buttons have none).
+    fn reset_amp(&mut self, c: AmpCtl) {
+        let d = Amp::default();
+        let v = match c {
+            AmpCtl::Pan => d.pan,
+            AmpCtl::Sep => d.sep,
+            AmpCtl::Left => d.left,
+            AmpCtl::Volume => d.volume,
+            AmpCtl::Right => d.right,
+            _ => return,
+        };
+        self.set_amp_value(c, v);
+        self.amp_changed();
     }
 
     fn wave_down(&mut self, x: f32, m: Mods, dbl: bool) -> Vec<Act> {

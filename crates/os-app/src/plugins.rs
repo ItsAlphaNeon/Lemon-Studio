@@ -176,6 +176,8 @@ pub enum Request {
     Misc(usize, crate::misc_page::M, f32),
     /// A Misc tab list asks for its menu at this screen point.
     MiscMenu(usize, crate::misc_page::M, i32, i32),
+    /// A strip knob of channel row `.0` asks for its menu at this screen point.
+    KnobMenu(usize, crate::knobs::Control, i32, i32),
     /// A greyed-out control of the window was clicked: the app says it is not available yet.
     NotAvailable(&'static str),
     /// The plugin asked for a menu over its editor (VST 3 context menu): shown at this screen point (spec:
@@ -1167,6 +1169,17 @@ impl Plugins {
                         FrameEvent::DropFile(p) => Request::DropFile(row, p),
                         FrameEvent::Misc(m, v) => Request::Misc(row, m, v),
                         FrameEvent::MiscMenu(m, x, y) => Request::MiscMenu(row, m, x, y),
+                        FrameEvent::KnobMenu(k, x, y) => {
+                            use crate::knobs::{Control, KnobId};
+                            use crate::plugin_window::Knob;
+                            let c = match k {
+                                Knob::Pan => Control::Knob(KnobId::ChanPan(row)),
+                                Knob::Vol => Control::Knob(KnobId::ChanVol(row)),
+                                Knob::Pitch => Control::ChanPitch(row),
+                                Knob::Range | Knob::Track => continue,
+                            };
+                            Request::KnobMenu(row, c, x, y)
+                        }
                         FrameEvent::Note(k, v, on) => Request::Note(row, k, v, on),
                         FrameEvent::NotAvailable(name) => Request::NotAvailable(name),
                         FrameEvent::Dpi(k) => {

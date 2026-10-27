@@ -162,7 +162,7 @@ fn set(s: &mut State, t: Target, v: f64) {
             s.set_knob(k, v as f32);
         }
         Target::Fader(m) => {
-            crate::history::fader(s, m);
+            crate::history::fader(s, m, false);
             if let Some(t) = crate::mixer::track_mut(s, m) {
                 t.volume = Some(v.clamp(0.0, 1.0));
                 s.piano.dirty = true;

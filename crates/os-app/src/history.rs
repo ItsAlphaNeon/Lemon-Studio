@@ -596,8 +596,8 @@ pub struct History {
     done: usize,
     /// The last move was an undo: with Alternate undo mode off, Ctrl+Z redoes it.
     undid: bool,
-    /// The knob the newest step's mouse-wheel turns go to (one step for a run of notches).
-    wheel: Option<KnobId>,
+    /// The knob or fader the newest step's mouse-wheel turns go to (one step for a run of notches).
+    wheel: Option<crate::knobs::Control>,
     /// The newest step was recorded since the last button release (`settle` looks at it then).
     fresh: bool,
 }
@@ -773,15 +773,23 @@ pub fn project_settings(s: &mut State, crossfades: bool) {
     }
 }
 
-/// Before mixer track `track`'s volume fader moves (a drag, a typed value): a step, "Mixer track volume", unless Undo
-/// knob tweaks is off (a fader is a knob here; an OS choice).
-pub fn fader(s: &mut State, track: u16) {
+/// Before mixer track `track`'s volume fader moves (a drag, a typed value, the wheel): a step, "Mixer track volume",
+/// unless Undo knob tweaks is off (a fader is a knob here; an OS choice). `wheel`: a mouse-wheel notch, which joins the
+/// step of the notches just before it on the same fader.
+pub fn fader(s: &mut State, track: u16, wheel: bool) {
     if !prefs::check(&prefs::UNDO_KNOB_TWEAKS) {
+        return;
+    }
+    let me = Some(crate::knobs::Control::Fader(track));
+    if wheel && s.history.wheel == me && s.history.done == s.history.steps.len() {
         return;
     }
     let Some(m) = crate::mixer::track(s, track) else { return };
     let snap = Snap::Fader(track, m.volume);
     record(s, MIXER_VOLUME, snap);
+    if wheel {
+        s.history.wheel = me;
+    }
 }
 
 /// After Lemon Studio set parameter `index` of plugin instance `key` from `before` to `to` (Type in value, the
@@ -802,13 +810,13 @@ pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
         return;
     }
     let h = &s.history;
-    if wheel && h.wheel == Some(id) && h.done == h.steps.len() {
+    if wheel && h.wheel == Some(crate::knobs::Control::Knob(id)) && h.done == h.steps.len() {
         return;
     }
     let snap = Snap::Knob(id, knob_value(s, id));
     record(s, knob_name(id), snap);
     if wheel {
-        s.history.wheel = Some(id);
+        s.history.wheel = Some(crate::knobs::Control::Knob(id));
     }
 }
 
