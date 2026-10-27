@@ -756,6 +756,18 @@ impl Plugins {
         press::fl_from_plugin_state(&p.save_state()?).filter(|b| !b.is_empty())
     }
 
+    /// The FL state (the project file's form) of the Lemon effect hosted under `key`, when it is the one that plays
+    /// slots stored as `file` (`FL_RECREATIONS`); `None` for any other plugin.
+    pub fn recreation_file_state(&self, key: usize, file: &str) -> Option<Vec<u8>> {
+        let lemon = recreation_of(file)?;
+        let h = self.hosted.get(&key)?;
+        let p = h.plugin.lock().ok()?;
+        if p.desc().name != lemon || !crate::project_plugins::is_builtin(p.desc()) {
+            return None;
+        }
+        fl_from_recreation_state(lemon, &p.save_state()?)
+    }
+
     /// Row `row`'s Lemon Sampler takes the stretch settings `sound` holds (§9b), keeping its other settings.
     pub fn set_sampler_stretch(&mut self, row: usize, sound: &os_model::ChannelSound) -> bool {
         self.set_sampler(row, None, &stretch_params(sound))
@@ -1388,6 +1400,65 @@ pub const OLD_NAMES: [(&str, &str); 5] = [
     ("Open 3x Osc", crate::osc3::LEMON_TRIO),
 ];
 
+/// The Lemon effects compiled in (`LINKED_EFFECTS`) that recreate an FL mixer effect, by the plugin name a project file
+/// stores for it (file-format identifiers, kept for interop): an opened project's slot holding one is played and edited
+/// by the Lemon effect, started from the slot's saved state, and saved back as the FL effect with that effect's state
+/// (`App::sync_effects`, `App::store_builtin_states`; spec: plugins/lemon-small-effects.md "Opened projects' slots").
+/// Not Lemon Stereo Shaper: the difference output is the mixer slot's alone (spec: plugins/lemon-stereo-shaper.md §5),
+/// so the engine's own Stereo Shaper keeps playing those slots.
+pub const FL_RECREATIONS: [(&str, &str); 9] = [
+    ("Fruity Limiter", "Lemon Limiter"),
+    ("Fruity Reeverb 2", "Lemon Reverb"),
+    ("Fruity Delay 3", "Lemon Delay"),
+    ("Fruity Soft Clipper", "Lemon Soft Clipper"),
+    ("Fruity Fast Dist", "Lemon Fast Distortion"),
+    ("Fruity Balance", "Lemon Balance"),
+    ("Fruity Stereo Enhancer", "Lemon Stereo Enhancer"),
+    ("Transient Processor", "Lemon Transient Processor"),
+    ("Fruity Chorus", "Lemon Chorus"),
+];
+
+/// The Lemon effect of `FL_RECREATIONS` that plays slots stored as `file` (any case: files may spell the id
+/// differently).
+pub fn recreation_of(file: &str) -> Option<&'static str> {
+    FL_RECREATIONS.iter().find(|(f, _)| f.eq_ignore_ascii_case(file)).map(|&(_, lemon)| lemon)
+}
+
+/// Lemon effect `lemon`'s plugin state for an FL slot state of the effect it recreates (`FL_RECREATIONS`).
+pub fn recreation_state_from_fl(lemon: &str, fl: &[u8]) -> Option<Vec<u8>> {
+    use lemon_small_fx::params::plugin_state_from_fl as small;
+    Some(match lemon {
+        "Lemon Limiter" => lemon_limiter::params::plugin_state_from_fl(fl),
+        "Lemon Reverb" => lemon_reverb::params::plugin_state_from_fl(fl),
+        "Lemon Delay" => lemon_delay::params::plugin_state_from_fl(fl),
+        "Lemon Soft Clipper" => small(lemon_small_fx::soft_clipper::SPEC, fl),
+        "Lemon Fast Distortion" => small(lemon_small_fx::fast_distortion::SPEC, fl),
+        "Lemon Balance" => small(lemon_small_fx::balance::SPEC, fl),
+        "Lemon Stereo Enhancer" => small(lemon_small_fx::stereo_enhancer::SPEC, fl),
+        "Lemon Transient Processor" => small(lemon_small_fx::transient_processor::SPEC, fl),
+        "Lemon Chorus" => small(lemon_small_fx::chorus::SPEC, fl),
+        _ => return None,
+    })
+}
+
+/// The FL slot state (the project file's form) of Lemon effect `lemon`'s plugin state `blob`; `None` for another
+/// plugin or a blob that is not its state.
+pub fn fl_from_recreation_state(lemon: &str, blob: &[u8]) -> Option<Vec<u8>> {
+    use lemon_small_fx::params::fl_from_plugin_state as small;
+    match lemon {
+        "Lemon Limiter" => lemon_limiter::params::fl_from_plugin_state(blob),
+        "Lemon Reverb" => lemon_reverb::params::fl_from_plugin_state(blob),
+        "Lemon Delay" => lemon_delay::params::fl_from_plugin_state(blob),
+        "Lemon Soft Clipper" => small(lemon_small_fx::soft_clipper::SPEC, blob),
+        "Lemon Fast Distortion" => small(lemon_small_fx::fast_distortion::SPEC, blob),
+        "Lemon Balance" => small(lemon_small_fx::balance::SPEC, blob),
+        "Lemon Stereo Enhancer" => small(lemon_small_fx::stereo_enhancer::SPEC, blob),
+        "Lemon Transient Processor" => small(lemon_small_fx::transient_processor::SPEC, blob),
+        "Lemon Chorus" => small(lemon_small_fx::chorus::SPEC, blob),
+        _ => None,
+    }
+}
+
 /// What the mixer shows for a slot's stored plugin name.
 pub fn slot_label(name: &str) -> &str {
     match name {
@@ -1395,7 +1466,7 @@ pub fn slot_label(name: &str) -> &str {
         EDISON_FILE_NAME => TESLA,
         LOVE_PHILTER_FILE_NAME => PULP_FILTER,
         MAXIMUS_FILE_NAME => PRESS,
-        _ => name,
+        _ => recreation_of(name).unwrap_or(name),
     }
 }
 
@@ -3201,7 +3272,7 @@ mod tests {
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
         assert!(pl.set_state(0, json.as_bytes()), "the sample reaches the VST3 instance");
         let state = pl.state(0).unwrap();
-        assert!(state.starts_with(b"VST3"), "state bytes are a .vstpreset");
+        assert!(os_vst3::fl_state::FlState::parse(&state).is_some(), "state bytes are in FL Studio's wrapper layout");
         assert!(pl.set_state(0, &state));
         let (_, inst) = pl.instruments().pop().unwrap();
         let mut i = inst.lock().unwrap();
@@ -3248,7 +3319,8 @@ mod tests {
             fx.idle();
         }
         let (ch_state, fx_state) = (a.plugins.state(row).unwrap(), a.plugins.state(fx_key(3, 2)).unwrap());
-        assert!(ch_state.starts_with(b"VST3") && fx_state.starts_with(b"VST3"));
+        let fl = |b: &[u8]| os_vst3::fl_state::FlState::parse(b).is_some();
+        assert!(fl(&ch_state) && fl(&fx_state), "saved in FL Studio's wrapper layout");
         a.save_to(path.clone());
         assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
 

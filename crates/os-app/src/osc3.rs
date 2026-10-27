@@ -121,6 +121,9 @@ impl crate::app::App {
         }
         let mut added = false;
         for row in rows {
+            if self.past_deadline() {
+                break;
+            }
             let ch = &self.state.project.channels[row];
             let fl = ch.plugin_state.clone().unwrap_or_else(lemon_3x_osc::params::default_state);
             let mut st = lemon_3x_osc::params::plugin_state_from_fl(&fl);
