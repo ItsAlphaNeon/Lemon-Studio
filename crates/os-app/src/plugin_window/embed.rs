@@ -82,7 +82,20 @@ impl Inner {
 
     /// The editor's top-left on the canvas (device px).
     fn editor_at(&self) -> (i32, i32) {
-        (dev(self.pos.0 + BORDER, self.k), dev(self.pos.1 + self.st.area_y(), self.k))
+        (dev(self.pos.0 + self.st.border(), self.k), dev(self.pos.1 + self.st.area_y(), self.k))
+    }
+
+    /// The editor's part of the window on the canvas (logical px).
+    fn editor_area(&self) -> Rect {
+        let (w, h) = self.size();
+        let (b, ay) = (self.st.border(), self.st.area_y());
+        Rect::new(self.pos.0 + b, self.pos.1 + ay, w - 2.0 * b, h - ay - b)
+    }
+
+    /// Canvas point (`x`, `y`) goes to the editor: over it, its page showing, and not on a card's resize edge (which
+    /// lies over the editor's own edge, the card having no frame around it).
+    fn takes(&self, x: f32, y: f32) -> bool {
+        !self.st.misc && self.editor_area().contains(x, y) && !matches!(part_at(&self.st, x - self.pos.0, y - self.pos.1), Some(Part::Edge { .. }))
     }
 
     /// A frame point (logical px from its top-left) as a screen point (device px): the main window's, for an X11 one.
@@ -267,7 +280,7 @@ impl EmbedFrame {
     pub fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32) {
         let i = self.0.borrow();
         let ay = i.st.area_y();
-        i.to_screen(BORDER + x, ay + y)
+        i.to_screen(i.st.border() + x, ay + y)
     }
 
     pub fn set_editor_size(&self, editor: (f32, f32)) {
@@ -303,9 +316,7 @@ impl EmbedFrame {
     /// The editor's part of it (logical px); `None` while the Misc page covers it.
     pub fn editor_rect(&self) -> Option<Rect> {
         let i = self.0.borrow();
-        let (w, h) = i.size();
-        let ay = i.st.area_y();
-        (!i.st.misc).then(|| Rect::new(i.pos.0 + BORDER, i.pos.1 + ay, w - 2.0 * BORDER, h - ay - BORDER))
+        (!i.st.misc).then(|| i.editor_area())
     }
 
     /// Moves the window's top-left to canvas point `pos` (logical px).
@@ -314,11 +325,18 @@ impl EmbedFrame {
     }
 
     /// What the app keeps it up to date with on every tick: the canvas's scale, size (device px) and place in the main
-    /// window, and the workspace (logical px).
-    pub fn sync(&self, k: f32, canvas: (u32, u32), canvas_off: (i32, i32), work: Rect) {
+    /// window, the workspace (logical px) and the app's theme.
+    pub fn sync(&self, k: f32, canvas: (u32, u32), canvas_off: (i32, i32), work: Rect, look: &os_theme::Palette) {
         let mut i = self.0.borrow_mut();
         if i.k != k {
             i.k = k;
+            i.chrome_dirty = true;
+        }
+        // The Lemon design draws it as a card (`State::card`); the Classic one keeps FL's frame. A theme change paints
+        // it again.
+        if i.st.look.as_ref() != Some(look) {
+            i.st.card = os_ui::kit::lemon::on(look);
+            i.st.look = Some(look.clone());
             i.chrome_dirty = true;
         }
         i.canvas_off = canvas_off;
@@ -395,13 +413,26 @@ impl EmbedFrame {
         if i.st.misc {
             return;
         }
-        let (w, h) = i.size();
-        let ay = i.st.area_y();
-        let area = Rect::new(i.pos.0 + BORDER, i.pos.1 + ay, w - 2.0 * BORDER, h - ay - BORDER);
+        let area = i.editor_area();
+        // A card's editor fills it to its bottom edge: its bottom corners follow the card's, inside the outline.
+        let radius = match i.st.look.as_ref().filter(|_| i.st.card) {
+            Some(t) => {
+                let lw = i.k.round().max(1.0) / i.k;
+                (os_ui::kit::lemon::r_panel(t) - lw).max(0.0) * i.k
+            }
+            None => 0.0,
+        };
         let v = i.surface.view();
         if let Some(f) = v.frame {
             c.push_clip(area);
-            c.paint_xrgb(&f.px, (f.w, f.h), i.editor_at());
+            // the editor may be smaller than its area for a moment (resizing): round the area's corners, not its own
+            let (ex, ey) = i.editor_at();
+            let full = (f.w.min((area.w * i.k).round() as u32), f.h.min((area.h * i.k).round() as u32));
+            if radius > 0.0 && full == (f.w, f.h) {
+                c.paint_xrgb_rounded(&f.px, (f.w, f.h), (ex, ey), radius);
+            } else {
+                c.paint_xrgb(&f.px, (f.w, f.h), (ex, ey));
+            }
             c.pop_clip();
         }
     }
@@ -432,11 +463,7 @@ impl EmbedFrame {
     /// A press at canvas point (`x`, `y`). Whatever it went to keeps the moves and the release.
     pub fn press(&self, x: f32, y: f32, btn: Button, mods: (bool, bool, bool)) {
         let mut i = self.0.borrow_mut();
-        let in_editor = !i.st.misc && {
-            let (w, h) = i.size();
-            let ay = i.st.area_y();
-            Rect::new(i.pos.0 + BORDER, i.pos.1 + ay, w - 2.0 * BORDER, h - ay - BORDER).contains(x, y)
-        };
+        let in_editor = i.takes(x, y);
         if in_editor || !i.surface.view().overlays.is_empty() {
             let p = Self::editor_point(&i, x, y);
             let now = std::time::Instant::now();
@@ -493,14 +520,13 @@ impl EmbedFrame {
             i.surface.push(Input::Move { x: p.0, y: p.1 }, mods);
             return;
         }
-        let over = !i.st.misc && {
-            let (w, h) = i.size();
-            let ay = i.st.area_y();
-            Rect::new(i.pos.0 + BORDER, i.pos.1 + ay, w - 2.0 * BORDER, h - ay - BORDER).contains(x, y)
-        };
+        let over = i.takes(x, y);
         if over {
             let p = Self::editor_point(&i, x, y);
             i.surface.push(Input::Move { x: p.0, y: p.1 }, mods);
+            if i.st.hover.take().is_some() {
+                i.chrome_dirty = true;
+            }
         } else {
             if i.over_editor {
                 i.surface.push(Input::Leave, mods);
@@ -524,6 +550,9 @@ impl EmbedFrame {
         if i.over_editor && i.grab.is_none() {
             i.over_editor = false;
             i.surface.push(Input::Leave, (false, false, false));
+        }
+        if i.grab.is_none() && i.st.hover.take().is_some() {
+            i.chrome_dirty = true;
         }
     }
 
@@ -557,12 +586,7 @@ impl EmbedFrame {
     /// The wheel turned `notches` (up positive) at canvas point (`x`, `y`).
     pub fn wheel(&self, x: f32, y: f32, notches: f32, mods: (bool, bool, bool)) {
         let mut i = self.0.borrow_mut();
-        let in_editor = !i.st.misc && {
-            let (w, h) = i.size();
-            let ay = i.st.area_y();
-            Rect::new(i.pos.0 + BORDER, i.pos.1 + ay, w - 2.0 * BORDER, h - ay - BORDER).contains(x, y)
-        };
-        if in_editor {
+        if i.takes(x, y) {
             let p = Self::editor_point(&i, x, y);
             i.surface.push(Input::Wheel { x: p.0, y: p.1, notches }, mods);
         } else {

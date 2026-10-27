@@ -2884,7 +2884,7 @@ impl App {
             }
         }
         for (&row, f) in &frames {
-            f.sync(k, canvas, self.canvas_off, work);
+            f.sync(k, canvas, self.canvas_off, work, &self.theme.colors);
             let now = (f.serial(), f.rect(), f.overlays_rect());
             if seen.get(&row) != Some(&now) {
                 if let Some((_, r, o)) = seen.get(&row) {
@@ -12325,6 +12325,63 @@ mod tests {
         app.close_requested();
         settle(&mut app, &|a| a.state.embeds.is_empty());
         assert!(app.plugins.hosted[&0].window.is_none() && !app.want_exit, "the shortcut closed the plugin window only");
+    }
+
+    /// The Lemon design draws a built-in editor's window as a card (owner, 2026-10-27): rounded like the channel rack,
+    /// the editor edge to edge below a title row, no strip and no minimize button. `OS_EMBED_SHOT=<file.png>` saves it.
+    #[test]
+    fn built_in_editors_are_lemon_cards() {
+        use crate::plugin_window::ChannelInfo;
+        use std::time::{Duration, Instant};
+        let Ok(mut c) = Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.bar.lemon = true;
+        // The app's own theme (`EmbedFrame::sync`), not the process-wide one the other tests paint with.
+        app.theme = design_theme(Design::Lemon, false);
+        app.plugins.available = crate::plugins::builtin();
+        app.plugins.scale = 1.0;
+        frame(&mut app, &mut c, None);
+        let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
+        app.plugins.create_with(0, index, None).unwrap();
+        let info = ChannelInfo { name: "Citrus".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: Some(Default::default()) };
+        app.plugins.open_window(0, info).unwrap();
+        let t0 = Instant::now();
+        while !app.state.embeds.get(&0).is_some_and(|e| e.claimed() && e.view().frame.is_some()) && t0.elapsed() < Duration::from_secs(3) {
+            app.plugin_tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        app.plugin_tick();
+        let e = app.state.embeds.get(&0).cloned().expect("drawn in the app");
+        app.take_damage();
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        if let Some(out) = std::env::var_os("OS_EMBED_SHOT") {
+            c.pixmap.save_png(std::path::Path::new(&out)).unwrap();
+        }
+        let r = e.rect();
+        let ed = e.editor_rect().expect("the editor shows");
+        assert_eq!((ed.x, ed.y, ed.right(), ed.bottom()), (r.x + 1.0, r.y + crate::plugin_window::CARD_TITLE_H, r.right() - 1.0, r.bottom() - 1.0), "edge to edge below the title row");
+        // the corners are rounded: what is below shows at the card's very corner
+        let px = |x: f32, y: f32| {
+            let p = c.pixmap.pixel(x as u32, y as u32).unwrap();
+            (p.red(), p.green(), p.blue())
+        };
+        let t = &app.theme.colors;
+        let border = (t.window_border.r, t.window_border.g, t.window_border.b);
+        assert_ne!(px(r.x, r.y), border, "top-left corner rounded");
+        assert_ne!(px(r.right() - 1.0, r.bottom() - 1.0), border, "bottom-right corner rounded");
+        let f = e.view().frame.unwrap();
+        assert_ne!(px(r.x + 1.0, r.bottom() - 2.0), { let p = f.px[((f.h - 1) * f.w) as usize]; ((p >> 16) as u8, (p >> 8) as u8, p as u8) }, "the editor's bottom corner is rounded too");
+        // the close button closes it
+        app.mouse_move(r.right() - 17.0, r.y + 15.0);
+        app.mouse_down();
+        app.mouse_up();
+        let t0 = Instant::now();
+        while !app.state.embeds.is_empty() && t0.elapsed() < Duration::from_secs(3) {
+            app.plugin_tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.state.embeds.is_empty(), "closed by its button");
     }
 
     /// The Lemon layout: the close shortcut closes the channel rack in front too, before the app.

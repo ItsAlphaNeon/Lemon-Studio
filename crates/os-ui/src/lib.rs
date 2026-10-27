@@ -448,8 +448,8 @@ impl Canvas {
             .collect()
     }
 
-    /// Copies `img` with its top-left at device px `at`, inside the clip and the damage (another canvas's frame: a
-    /// plugin window's chrome).
+    /// Paints `img` with its top-left at device px `at`, inside the clip and the damage (another canvas's frame: a
+    /// plugin window's chrome). Its see-through pixels (a card's rounded corners) let what is below show.
     pub fn paint_pixmap(&mut self, img: &Pixmap, at: (i32, i32)) {
         let (sx, sy) = at;
         let stride = self.pixmap.width() as usize;
@@ -460,7 +460,21 @@ impl Canvas {
             for y in y0..y1 {
                 let d = y as usize * stride;
                 let s = (y - sy) as usize * sstride;
-                dst[d + x0 as usize..d + x1 as usize].copy_from_slice(&src[s + (x0 - sx) as usize..s + (x1 - sx) as usize]);
+                let (from, to) = (&src[s + (x0 - sx) as usize..s + (x1 - sx) as usize], &mut dst[d + x0 as usize..d + x1 as usize]);
+                for (o, &p) in to.iter_mut().zip(from) {
+                    match p.alpha() {
+                        255 => *o = p,
+                        0 => {}
+                        a => {
+                            // Source over, both premultiplied.
+                            let keep = |v: u8, w: u8| (u16::from(v) + (u16::from(w) * u16::from(255 - a) + 127) / 255).min(255) as u8;
+                            let c = tiny_skia::PremultipliedColorU8::from_rgba(keep(p.red(), o.red()), keep(p.green(), o.green()), keep(p.blue(), o.blue()), keep(a, o.alpha()));
+                            if let Some(c) = c {
+                                *o = c;
+                            }
+                        }
+                    }
+                }
             }
             self.mark(x0, y0, x1, y1);
         }
@@ -468,21 +482,47 @@ impl Canvas {
 
     /// Copies XRGB pixels (rows of `pw`, `ph` rows) with their top-left at device px `at`, inside the clip and the
     /// damage (an editor's frame).
-    pub fn paint_xrgb(&mut self, px: &[u32], (pw, ph): (u32, u32), at: (i32, i32)) {
+    pub fn paint_xrgb(&mut self, px: &[u32], size: (u32, u32), at: (i32, i32)) {
+        self.paint_xrgb_rounded(px, size, at, 0.0);
+    }
+
+    /// `paint_xrgb` with the block's bottom corners rounded to `radius` device px (an editor filling a card to its
+    /// bottom edge): outside the arc what is below shows, the arc itself is blended.
+    pub fn paint_xrgb_rounded(&mut self, px: &[u32], (pw, ph): (u32, u32), at: (i32, i32), radius: f32) {
         if px.len() < (pw * ph) as usize {
             return;
         }
         let (sx, sy) = at;
         let stride = self.pixmap.width() as usize * 4;
+        let r = radius.max(0.0);
+        // How much of pixel (x, y) of the block the rounded corners leave (1 inside).
+        let cover = |x: i32, y: i32| -> f32 {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let cy = ph as f32 - r;
+            if r <= 0.0 || fy <= cy {
+                return 1.0;
+            }
+            let cx = if fx < r { r } else if fx > pw as f32 - r { pw as f32 - r } else { return 1.0 };
+            (r - ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() + 0.5).clamp(0.0, 1.0)
+        };
         for (x0, y0, x1, y1) in self.block_rects(at, (pw as i32, ph as i32)) {
             let data = self.pixmap.data_mut();
             for y in y0..y1 {
                 let d = y as usize * stride;
                 let s = (y - sy) as usize * pw as usize;
+                let corner = r > 0.0 && (y - sy) as f32 + 0.5 > ph as f32 - r;
                 for x in x0..x1 {
                     let p = px[s + (x - sx) as usize];
                     let o = d + x as usize * 4;
-                    data[o..o + 4].copy_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8, 255]);
+                    let rgb = [(p >> 16) as u8, (p >> 8) as u8, p as u8];
+                    let a = if corner { cover(x - sx, y - sy) } else { 1.0 };
+                    if a >= 1.0 {
+                        data[o..o + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+                    } else if a > 0.0 {
+                        for (i, &v) in rgb.iter().enumerate() {
+                            data[o + i] = (f32::from(v) * a + f32::from(data[o + i]) * (1.0 - a)).round() as u8;
+                        }
+                    }
                 }
             }
             self.mark(x0, y0, x1, y1);
@@ -1539,10 +1579,35 @@ mod tests {
         c.paint_xrgb(&vec![0x00ff_ffff; 40 * 20], (40, 20), (0, 0));
         let at = |c: &Canvas, x: u32| c.pixmap.pixel(x, 5).unwrap().red();
         assert_eq!((at(&c, 5), at(&c, 20), at(&c, 35)), (255, 0, 255), "only inside the two damage rects");
-        let img = Canvas::new(40, 20, 1.0).unwrap().pixmap;
+        let mut img = Canvas::new(40, 20, 1.0).unwrap();
+        img.clear(Color::rgb(0x000000));
         c.begin_region(&[Rect::new(0.0, 0.0, 10.0, 20.0)]);
-        c.paint_pixmap(&img, (0, 0));
+        c.paint_pixmap(&img.pixmap, (0, 0));
         assert_eq!((at(&c, 5), at(&c, 35)), (0, 255));
+    }
+
+    /// A chrome's see-through corners leave what is below; an editor's rounded bottom corners too.
+    #[test]
+    fn copies_keep_round_corners() {
+        let mut c = Canvas::new(40, 20, 1.0).unwrap();
+        c.begin_frame(None);
+        c.clear(Color::rgb(0x0000ff));
+        let mut card = Canvas::new(40, 20, 1.0).unwrap();
+        card.fill_rrect(Rect::new(0.0, 0.0, 40.0, 20.0), 8.0, Color::rgb(0xff0000));
+        c.paint_pixmap(&card.pixmap, (0, 0));
+        let px = |c: &Canvas, x: u32, y: u32| {
+            let p = c.pixmap.pixel(x, y).unwrap();
+            (p.red(), p.blue())
+        };
+        assert_eq!(px(&c, 0, 0), (0, 255), "the corner shows what is below");
+        assert_eq!(px(&c, 20, 10), (255, 0));
+        c.clear(Color::rgb(0x0000ff));
+        c.paint_xrgb_rounded(&vec![0x00ff_0000; 40 * 20], (40, 20), (0, 0), 8.0);
+        assert_eq!(px(&c, 0, 19), (0, 255), "bottom corner rounded");
+        assert_eq!(px(&c, 0, 0), (255, 0), "top corners stay square");
+        assert_eq!(px(&c, 20, 19), (255, 0));
+        let edge = px(&c, 2, 17);
+        assert!(edge.0 > 0 && edge.1 > 0, "the arc is blended: {edge:?}");
     }
 
     #[test]

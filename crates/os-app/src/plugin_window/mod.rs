@@ -238,6 +238,12 @@ pub const STRIP_H: f32 = 46.0;
 pub const BORDER: f32 = 7.0;
 /// Width of the Presets box in the title bar (its right edge is 49 px from the window's).
 const PRESETS_W: f32 = 80.0;
+/// The Lemon card's title row (`State::card`): its height, the card's top outline included.
+pub const CARD_TITLE_H: f32 = 30.0;
+/// The card's title-row buttons and toggles (close, maximize, page tabs): square, this wide.
+const CARD_BTN: f32 = 19.0;
+/// A resizable card's edges: how far into the editor they take the mouse (the card has no frame around it).
+const CARD_EDGE: f32 = 5.0;
 /// The smallest editor the frame's edges leave a resizable plugin that names no smallest size of its own (logical px):
 /// the title bar still shows its controls.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -400,6 +406,14 @@ const RANGE_MAX: i32 = 48;
 
 struct State {
     info: ChannelInfo,
+    /// Drawn as a Lemon card (an editor drawn in the app's window, Lemon design; owner, 2026-10-27): one rounded panel
+    /// as the channel rack's, a title row (menu arrow, name, hint, page tabs, Presets, close) over the editor, which
+    /// fills the rest. No strip, gear or minimize: the channel's settings window has those controls.
+    card: bool,
+    /// The card's title-row control under the mouse (lit as hovered).
+    hover: Option<Part>,
+    /// The theme a card paints with: the app's (`EmbedFrame::sync`), which the process-wide one may lag behind.
+    look: Option<os_theme::Palette>,
     strip: bool,
     /// The plugin's page tabs, left to right (a plain plugin: the plug).
     pages: Vec<PageIcon>,
@@ -448,10 +462,13 @@ struct State {
 }
 
 impl State {
-    /// A new frame's state: strip shown, the plug tab, no hint or preset.
+    /// A new frame's state: strip shown, the plug tab, no hint or preset, FL's frame (not a card).
     fn new(info: ChannelInfo, editor: (f32, f32), detached: bool) -> State {
         State {
             info,
+            card: false,
+            hover: None,
+            look: None,
             strip: true,
             pages: vec![PageIcon::Plugin],
             page: 0,
@@ -530,7 +547,15 @@ impl State {
     }
     /// The frame around the editor: what the window adds to the editor's width and height (logical px).
     fn chrome(&self) -> (f32, f32) {
-        (2.0 * BORDER, self.area_y() + BORDER)
+        (2.0 * self.border(), self.area_y() + self.border())
+    }
+    /// Left / right / bottom inset of the editor: the card's outline only, FL's frame otherwise.
+    fn border(&self) -> f32 {
+        if self.card { 1.0 } else { BORDER }
+    }
+    /// The gear's strip shows (a card has none).
+    fn strip_shown(&self) -> bool {
+        self.strip && !self.card
     }
     /// The size of what the editor area shows: the Misc page's own while that tab is open (the frame fits it, as a
     /// tab change in FL does), the plugin's editor otherwise.
@@ -543,6 +568,9 @@ impl State {
     }
     /// Top of the editor (below the strip, or the title bar, and the editor's 1 px outline).
     fn area_y(&self) -> f32 {
+        if self.card {
+            return CARD_TITLE_H;
+        }
         TITLE_H + if self.strip { STRIP_H } else { 0.0 } + 1.0
     }
 }
@@ -624,6 +652,9 @@ fn strip_off(st: &State, w: f32) -> Vec<(Rect, &'static str)> {
 const CORNER: f32 = 16.0;
 
 fn parts(st: &State) -> Vec<(Rect, Part)> {
+    if st.card {
+        return card_parts(st);
+    }
     let (w, h) = st.size();
     let p = presets_rect(st);
     let mut v = Vec::new();
@@ -645,7 +676,7 @@ fn parts(st: &State) -> Vec<(Rect, Part)> {
         (Rect::new(p.right() - 16.0, p.y, 16.0, p.h), Part::PresetNext),
         (p, Part::Presets),
     ]);
-    if st.strip {
+    if st.strip_shown() {
         let dx = w - STRIP_RIGHT;
         for i in 0..=st.pages.len() {
             v.push((tab_rect(i), Part::Tab(i)));
@@ -694,9 +725,64 @@ const STRIP_RIGHT: f32 = 570.0;
 const MENU_RECT: Rect = Rect { x: 8.0, y: 5.0, w: 14.0, h: 21.0 };
 const GEAR_RECT: Rect = Rect { x: 24.0, y: 5.0, w: 21.0, h: 21.0 };
 
-/// The Presets box: right side of the title bar, left of minimize.
+/// The Presets box: right side of the title bar, left of minimize (a card's: left of its buttons).
 fn presets_rect(st: &State) -> Rect {
+    if st.card {
+        let right = card_slot(st.size().0, card_buttons(st) - 1).x - 8.0;
+        return Rect::new(right - PRESETS_W - 16.0, 5.0, PRESETS_W + 16.0, 20.0);
+    }
     Rect::new(st.size().0 - 49.0 - max_w(st) - PRESETS_W, 6.0, PRESETS_W, 19.0)
+}
+
+/// The card's title-row button `i` from the right (0: close, 1: maximize).
+fn card_slot(w: f32, i: usize) -> Rect {
+    Rect::new(w - 8.0 - CARD_BTN - 23.0 * i as f32, 5.5, CARD_BTN, CARD_BTN)
+}
+
+/// The card's buttons: close, and maximize for a resizable editor.
+fn card_buttons(st: &State) -> usize {
+    1 + usize::from(max_w(st) > 0.0)
+}
+
+/// The card's tabs, left of the Presets box: the plugin's pages when it has more than one, then the Misc wrench in a
+/// channel's window (a toggle: the page comes back on a second click). `Part::Tab` numbers, with their rects.
+fn card_tabs(st: &State) -> Vec<(usize, Rect)> {
+    let n = st.pages.len();
+    let mut ids: Vec<usize> = if n > 1 { (0..n).collect() } else { Vec::new() };
+    if st.channel() {
+        ids.push(n);
+    }
+    let end = presets_rect(st).x - 8.0;
+    let k = ids.len();
+    ids.into_iter().enumerate().map(|(j, id)| (id, Rect::new(end - 23.0 * (k - j) as f32 + 4.0, 5.5, CARD_BTN, CARD_BTN))).collect()
+}
+
+/// The card's menu arrow (the window menu), where the channel rack has its options arrow.
+const CARD_MENU: Rect = Rect { x: 6.0, y: 5.0, w: 16.0, h: 20.0 };
+
+/// The card's hit regions (`parts`).
+fn card_parts(st: &State) -> Vec<(Rect, Part)> {
+    let (w, h) = st.size();
+    let p = presets_rect(st);
+    let mut v = Vec::new();
+    if st.resizable() {
+        v.push((Rect::new(w - CORNER, h - CORNER, CORNER, CORNER), Part::Edge { right: true, bottom: true }));
+        v.push((Rect::new(w - CARD_EDGE, CARD_TITLE_H, CARD_EDGE, h - CARD_TITLE_H), Part::Edge { right: true, bottom: false }));
+        v.push((Rect::new(0.0, h - CARD_EDGE, w, CARD_EDGE), Part::Edge { right: false, bottom: true }));
+    }
+    v.push((card_slot(w, 0), Part::Close));
+    if max_w(st) > 0.0 {
+        v.push((card_slot(w, 1), Part::Maximize));
+    }
+    v.extend([
+        (Rect::new(p.right() - 33.0, p.y, 17.0, p.h), Part::PresetPrev),
+        (Rect::new(p.right() - 16.0, p.y, 16.0, p.h), Part::PresetNext),
+        (p, Part::Presets),
+        (CARD_MENU, Part::Menu),
+    ]);
+    v.extend(card_tabs(st).into_iter().map(|(i, r)| (r, Part::Tab(i))));
+    v.push((Rect::new(0.0, 0.0, w, CARD_TITLE_H), Part::Caption));
+    v
 }
 
 /// The room the maximize button takes in the title bar: a resizable editor's frame has one.
@@ -722,6 +808,9 @@ fn title_font() -> Font {
 }
 
 fn paint(c: &mut Canvas, st: &State) {
+    if st.card {
+        return paint_card(c, st);
+    }
     let (w, h) = st.size();
     c.begin_frame(None);
     c.clear(c_frame());
@@ -731,7 +820,7 @@ fn paint(c: &mut Canvas, st: &State) {
     }
     c.fill_rect(Rect::new(1.0, 1.0, w - 2.0, 1.0), c_top_light());
     title_bar(c, st, w);
-    if st.strip {
+    if st.strip_shown() {
         strip(c, st, w);
     }
     // The editor's 1 px outline; the plugin's own window covers the inside.
@@ -745,6 +834,84 @@ fn paint(c: &mut Canvas, st: &State) {
             None => c.text_center(Font::new(16), a, c_grey(), "No channel settings here"),
         }
     }
+}
+
+/// The Lemon card (`State::card`): one rounded panel in the theme's window colours, as the channel rack, its title row
+/// over the editor (the app paints the editor edge to edge below it, its bottom corners rounded with the card's).
+fn paint_card(c: &mut Canvas, st: &State) {
+    use os_ui::kit::lemon as lk;
+    let t = st.look.clone().unwrap_or_else(|| (*os_theme::current()).clone());
+    let (w, h) = st.size();
+    c.begin_frame(None);
+    // See-through outside the rounded panel: the app's canvas shows there (`Canvas::paint_pixmap`).
+    c.pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    lk::outlined(c, Rect::new(0.0, 0.0, w, h), lk::r_panel(&t), t.window_border, t.window_body);
+    let hov = |p: Part| st.hover == Some(p) || st.armed == Some(p);
+    let ink = |p: Part| if hov(p) { t.text } else { t.glyph };
+    let dim = t.text.mix(t.window_body, 0.45);
+    // Menu arrow, as the rack's options arrow.
+    let m = CARD_MENU;
+    c.fill_polygon(&[(m.x + 7.0, m.y + 6.0), (m.x + 11.5, m.y + 10.0), (m.x + 7.0, m.y + 14.0)], ink(Part::Menu));
+    // Tabs: the plugin's pages and the Misc wrench, lit while showing (the rack's toggles).
+    let tabs = card_tabs(st);
+    let n = st.pages.len();
+    for &(i, r) in &tabs {
+        let on = if i == n { st.misc } else { !st.misc && st.page == i };
+        if on {
+            lk::lit_in(c, &t, r, lk::r_btn(&t), hov(Part::Tab(i)));
+        } else if hov(Part::Tab(i)) {
+            c.fill_rrect(r, lk::r_btn(&t), t.button_hi);
+        }
+        let icon = if i == n { &tb::TOOL } else { page_tabler(st.pages[i]) };
+        c.icon(icon, r.inset(2.0), if on { lk::ink_on_lit(&t) } else { ink(Part::Tab(i)) });
+    }
+    // Presets well: the loaded preset's name, previous / next arrows.
+    let p = presets_rect(st);
+    let ph = matches!(st.hover, Some(Part::Presets | Part::PresetPrev | Part::PresetNext));
+    lk::well(c, &t, p, if ph { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
+    let pf = Font::new(14);
+    let py = (p.cy() - c.ascent(pf) / 2.0 - 1.0).round();
+    c.text_clip(pf, p.x + 7.0, py, p.w - 7.0 - 33.0, t.text, st.preset.as_deref().unwrap_or("Presets"));
+    icon_at(c, &tb::CARET_LEFT, p.right() - 24.5, p.cy(), 16.0, ink(Part::PresetPrev));
+    icon_at(c, &tb::CARET_RIGHT, p.right() - 8.5, p.cy(), 16.0, ink(Part::PresetNext));
+    if max_w(st) > 0.0 {
+        let r = card_slot(w, 1);
+        if hov(Part::Maximize) {
+            c.fill_rrect(r, lk::r_btn(&t), t.button_hi);
+        }
+        c.icon(&tb::SQUARES, r.inset(3.0), ink(Part::Maximize));
+    }
+    let x = card_slot(w, 0);
+    if hov(Part::Close) {
+        c.fill_rrect(x, lk::r_btn(&t), t.button_hi);
+    }
+    crate::icons::draw(c, crate::icons::Icon::Close, x.inset(2.5), ink(Part::Close));
+    // Name, "(mixer target)" and the hint, up to the first control on the right.
+    let end = tabs.first().map_or(p.x, |&(_, r)| r.x) - 8.0;
+    let (nx, f, hf) = (CARD_MENU.right() + 4.0, Font::new(17), Font::new(13));
+    let ty = 6.0;
+    let room = (end - nx).max(0.0);
+    c.text_clip(f, nx, ty, room, t.text, &st.info.name);
+    let mut hx = nx + c.text_width(f, &st.info.name).min(room) + c.text_width(f, " ");
+    let target = format!("({})", st.info.target);
+    let hy = (15.0 - c.ascent(hf) / 2.0).round();
+    if hx < end {
+        c.text_clip(hf, hx, hy, end - hx, dim, &target);
+        hx += c.text_width(hf, &target) + 12.0;
+    }
+    let off = st.off_hint.map(crate::app::off_text);
+    let hint = if let Some(o) = &off { o } else if st.misc { &st.misc_ui.hint } else { &st.hint };
+    let hint = hint.split_once('\t').map_or(hint.as_str(), |(l, _)| l);
+    if !hint.is_empty() && hx < end {
+        c.text_clip(hf, hx, hy, end - hx, dim, hint);
+    }
+    if st.misc {
+        if let Some(v) = &st.info.misc {
+            let b = st.border();
+            crate::misc_page::paint(c, &t, b, st.area_y(), v, &st.misc_ui);
+        }
+    }
+    let _ = h;
 }
 
 /// Title bar, left to right: menu arrow, gear (boxed while the strip is shown), channel name, "(mixer target)", the
@@ -971,8 +1138,9 @@ impl State {
     /// size.
     fn fill(&self, size: (f32, f32)) -> Option<(u32, u32)> {
         let (min_w, min_h) = self.resize_min?;
-        let w = (size.0 - 2.0 * BORDER).max(min_w);
-        let h = (size.1 - self.area_y() - BORDER).max(min_h);
+        let b = self.border();
+        let w = (size.0 - 2.0 * b).max(min_w);
+        let h = (size.1 - self.area_y() - b).max(min_h);
         Some((w.floor() as u32, h.floor() as u32))
     }
 
@@ -1021,8 +1189,9 @@ impl State {
                 }
                 Reply::Relayout
             }
+            // A card's wrench is a toggle (it has no page tab to go back with when the plugin has one page).
             Some(Part::Tab(t)) if t == self.pages.len() => {
-                self.misc = true;
+                self.misc = !(self.card && self.misc);
                 Reply::Relayout
             }
             Some(Part::Tab(t)) => {
@@ -1124,12 +1293,13 @@ impl State {
         let mut hover = false;
         if self.misc {
             if self.misc_ui.bar_drag.is_some() {
-                let moved = crate::misc_page::bar_drag_to(&mut self.misc_ui, x - BORDER);
+                let bx = x - self.border();
+                let moved = crate::misc_page::bar_drag_to(&mut self.misc_ui, bx);
                 return if moved { Reply::Repaint } else { Reply::None };
             }
             if self.misc_ui.drag.is_some() {
                 let ay = self.area_y();
-                if let Some((m, v)) = crate::misc_page::drag_value(&self.misc_ui, x - BORDER, y - ay, fine) {
+                if let Some((m, v)) = crate::misc_page::drag_value(&self.misc_ui, x - self.border(), y - ay, fine) {
                     if self.info.misc.is_some_and(|vals| vals.get(m) != v) {
                         misc_set(self, m, v);
                         os_clap::wake();
@@ -1168,6 +1338,14 @@ impl State {
         }
         // Over a greyed-out control the title bar says it is not available yet; over a value box, its value.
         let part = part_at(self, x, y);
+        // A card lights its title-row control under the mouse.
+        if self.card {
+            let h = part.filter(|p| !matches!(p, Part::Caption | Part::Edge { .. }));
+            if h != self.hover {
+                self.hover = h;
+                hover = true;
+            }
+        }
         let off = match part {
             Some(Part::Off(name)) => Some(name),
             _ => None,
@@ -1274,7 +1452,7 @@ impl State {
                 self.events.push(FrameEvent::MiscMenu(m, sx, sy));
             }
             (Btn::Left, Hit::Value(m)) if mp::draggable(m) => {
-                self.misc_ui.drag = Some((m, mp::drag_start(m, x - BORDER, y - self.area_y()), vals.get(m)));
+                self.misc_ui.drag = Some((m, mp::drag_start(m, x - self.border(), y - self.area_y()), vals.get(m)));
                 reply = Reply::Capture;
             }
             (Btn::Left, Hit::Value(m)) => {
@@ -1299,7 +1477,8 @@ impl State {
                 misc_set(self, M::Fine, 0.0);
             }
             (Btn::Left, Hit::ScrollBar) => {
-                mp::bar_press(&mut self.misc_ui, x - BORDER);
+                let bx = x - self.border();
+                mp::bar_press(&mut self.misc_ui, bx);
                 reply = Reply::Capture;
             }
             (Btn::Left, Hit::Key(k)) => {
@@ -1340,7 +1519,7 @@ fn misc_hit(st: &State, x: f32, y: f32) -> Option<crate::misc_page::Hit> {
     if !st.misc || st.info.misc.is_none() {
         return None;
     }
-    let (ax, ay) = (BORDER, st.area_y());
+    let (ax, ay) = (st.border(), st.area_y());
     crate::misc_page::hit(&st.misc_ui, x - ax, y - ay)
 }
 

@@ -48,7 +48,10 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **Plugin editors in the app's window (Linux).** The plugins compiled into Lemon Studio (the stock instruments and
   effects) draw their editors inside Lemon Studio's own window, as floating windows like the channel rack: no X11
   window, no XWayland, no OpenGL. Their menus and value boxes are drawn above the app; knob drags hold the cursor as the
-  app's own knobs do; the close shortcut closes them. Third-party plugins keep windows of their own.
+  app's own knobs do; the close shortcut closes them. In the Lemon design their window is a card like the channel
+  rack's, in the theme's colours: rounded, the editor edge to edge under one title row (menu arrow, name, page tabs,
+  Presets, close). FL's frame is gone there: no minimize button, no gear strip (the channel settings window has those
+  controls), no frame around the editor. Third-party plugins keep windows of their own.
   `LEMONSTUDIO_PLUGIN_WINDOWS=1` gives the built-in ones their own windows again.
 - **Third-party plugin windows under Hyprland.** They drag by their own title bar (Hyprland ignores the X11 move
   request) and have no compositor border, shadow or move animation.
