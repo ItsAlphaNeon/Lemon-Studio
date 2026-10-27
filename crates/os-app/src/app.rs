@@ -5971,8 +5971,8 @@ impl App {
     }
 
     /// The Lemon layout's keys for its windows, wherever the keyboard is:
-    /// - Ctrl+Alt+arrows: the keyboard to the nearest window that way (the split's windows and the floating ones). While
-    ///   one is maximized, a split window that way is maximized in its place.
+    /// - Ctrl+Alt+arrows: the keyboard to the nearest split window that way (from a floating one too; floating windows
+    ///   are no stops). While one is maximized, a split window that way is maximized in its place.
     /// - Ctrl+Alt+Shift+arrows: the split window with the keyboard changes places with the one that way.
     /// - F: maximizes the split window under the mouse, or brings the split back (the one with the keyboard when the
     ///   mouse is over none).
@@ -5994,14 +5994,14 @@ impl App {
             let docked = s.docked();
             // Where each window is: the split's as if none were maximized, so the arrows go the same ways either way.
             let split = if docked.is_some() { tiles::plan_all(s) } else { tiles::plan(s) };
-            let mut rects: Vec<(Win, Rect)> = split.tiles.clone();
-            rects.extend(s.z.iter().filter(|w| w.slot().is_none() && !matches!(w, Win::Browser | Win::Hosted(_))).map(|&w| (w, views::frame_rect(s, w))));
-            let Some(at) = rects.iter().find(|r| r.0 == from).map(|r| r.1) else { return true };
+            // Only split windows are stops: the floating ones are a layer of their own (from one, the arrows go to the
+            // split window that way).
+            let rects: Vec<(Win, Rect)> = split.tiles.clone();
+            let at = rects.iter().find(|r| r.0 == from).map_or_else(|| views::frame_rect(s, from), |r| r.1);
             let others: Vec<(Win, Rect)> = rects.into_iter().filter(|r| r.0 != from).collect();
             if self.shift {
                 // Only split windows change places, and not while one is maximized.
-                let tiles: Vec<(Win, Rect)> = others.into_iter().filter(|r| r.0.slot().is_some()).collect();
-                if docked.is_none() && from.slot().is_some() && let Some(to) = tiles::neighbour(&tiles, at, d) {
+                if docked.is_none() && from.slot().is_some() && let Some(to) = tiles::neighbour(&others, at, d) {
                     tiles::swap(s, from, to);
                 }
                 return true;

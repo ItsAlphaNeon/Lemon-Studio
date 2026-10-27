@@ -519,7 +519,7 @@ mod tests {
         assert_eq!(hit, Some(Some(Win::ChannelRack)));
     }
 
-    /// Ctrl+Alt+arrows give the keyboard to the window that way, the channel rack included; with Shift the split
+    /// Ctrl+Alt+arrows give the keyboard to the split window that way (the channel rack is no stop); with Shift the split
     /// windows change places. F maximizes the window under the mouse; while one is maximized, the arrows maximize the
     /// one that way instead, and F brings the split back. The other split windows are muted.
     #[test]
@@ -590,15 +590,27 @@ mod tests {
         f(&mut app, &mut c, (w.cx(), w.cy()));
         assert_eq!(app.state.docked(), None, "F again: the split");
 
+        // The channel rack is no stop: from the playlist, an arrow goes straight to the split window that way, the
+        // rack open or not; from the rack, the arrows reach a split window.
         app.state.raise(Win::ChannelRack);
-        let rack = crate::views::rack::rect(&app.state);
-        let away = [NamedKey::ArrowLeft, NamedKey::ArrowRight, NamedKey::ArrowUp, NamedKey::ArrowDown].into_iter().find(|&k| {
+        app.state.raise(Win::Playlist);
+        let tiles = plan(&app.state).tiles;
+        let from = tiles.iter().find(|t| t.0 == Win::Playlist).unwrap().1;
+        let others: Vec<(Win, Rect)> = tiles.into_iter().filter(|t| t.0 != Win::Playlist).collect();
+        let (k, want) = [(NamedKey::ArrowUp, Dir::Up), (NamedKey::ArrowDown, Dir::Down), (NamedKey::ArrowLeft, Dir::Left), (NamedKey::ArrowRight, Dir::Right)]
+            .into_iter()
+            .find_map(|(k, d)| neighbour(&others, from, d).map(|w| (k, w)))
+            .unwrap();
+        arrow(&mut app, k, false);
+        assert_eq!(app.state.focused(), Some(want), "{k:?} from the playlist, past the rack");
+        app.state.raise(Win::ChannelRack);
+        let away = [NamedKey::ArrowLeft, NamedKey::ArrowRight, NamedKey::ArrowUp, NamedKey::ArrowDown].into_iter().any(|k| {
             arrow(&mut app, k, false);
-            let gone = app.state.focused() != Some(Win::ChannelRack);
+            let gone = app.state.focused().is_some_and(|w| w.slot().is_some());
             app.state.raise(Win::ChannelRack);
             gone
         });
-        assert!(away.is_some(), "the rack at {rack:?} has a split window some way");
+        assert!(away, "from the rack the arrows reach a split window");
         arrow(&mut app, NamedKey::ArrowLeft, true);
         assert_eq!(app.state.focused(), Some(Win::ChannelRack), "a floating window changes places with none");
     }
