@@ -172,6 +172,8 @@ struct Frame {
     dirty: Cell<bool>,
     /// The last left press (server time, position) for double clicks.
     last_press: Cell<Option<(u32, i16, i16)>>,
+    /// Hyprland took its border off (`hyprland::plain`) since it was last mapped.
+    plain: Cell<bool>,
 }
 
 /// A plugin window. Dropping it destroys the native window (close the plugin's editor first).
@@ -283,6 +285,7 @@ impl FrameWindow {
             scale: k,
             dirty: Cell::new(true),
             last_press: Cell::new(None),
+            plain: Cell::new(false),
         });
         conn.frames.borrow_mut().insert(win, Rc::downgrade(&f));
         Ok(FrameWindow { f })
@@ -310,6 +313,7 @@ impl FrameWindow {
         let (c, root) = (&f.conn.c, f.conn.root);
         let screen = f.to_screen(0.0, 0.0);
         let _ = c.unmap_window(f.win);
+        f.plain.set(false);
         let _ = shape_reset(c, f.win);
         if on {
             expose();
@@ -366,6 +370,9 @@ impl FrameWindow {
     pub fn raise(&self) {
         let (c, a, win) = (&self.f.conn.c, &self.f.conn.atoms, self.f.win);
         let _ = c.map_window(win);
+        if self.detached() && !self.f.plain.replace(true) {
+            super::hyprland::plain();
+        }
         let _ = c.configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
         if !self.detached() {
             self.f.dirty.set(true);
@@ -715,6 +722,11 @@ impl Frame {
                 self.state.borrow_mut().moving = Some((i32::from(root.0), i32::from(root.1), x, y));
                 self.dirty.set(true);
             }
+            Reply::Move if super::hyprland::running() => {
+                // Hyprland ignores the request below: the frame moves itself (the press's grab brings the motion here).
+                let (x, y) = self.top_left();
+                self.state.borrow_mut().moving = Some((i32::from(root.0), i32::from(root.1), x, y));
+            }
             Reply::Move => {
                 // The window manager moves it (it needs the pointer the press grabbed).
                 let _ = c.ungrab_pointer(x11rb::CURRENT_TIME);
@@ -782,7 +794,10 @@ impl Frame {
             Event::MotionNotify(e) if self.state.borrow().moving.is_some() => {
                 let Some((cx, cy, wx, wy)) = self.state.borrow().moving else { return };
                 let at = (wx + i32::from(e.root_x) - cx, wy + i32::from(e.root_y) - cy);
-                if at != self.pos.get() {
+                if self.state.borrow().detached {
+                    let _ = self.conn.c.configure_window(self.win, &ConfigureWindowAux::new().x(at.0).y(at.1));
+                    let _ = self.conn.c.flush();
+                } else if at != self.pos.get() {
                     self.pos.set(at);
                     let _ = self.conn.c.configure_window(self.win, &ConfigureWindowAux::new().x(at.0).y(at.1));
                     // Re-clip at once for the new place; what the move uncovered is shown by the next present.
