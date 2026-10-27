@@ -12296,9 +12296,22 @@ mod tests {
         assert_eq!(app.top_hit(ed.cx(), ed.cy()).map(|h| h.action.clone()), Some(Action::Embed(0)));
         app.mouse_down();
         app.mouse_up();
-        // the frame's close button
         let r = e.rect();
-        let (cx, cy) = (r.right() - 23.0 + 8.0, r.y + 7.0 + 8.0);
+        // dragged by its title bar above the workspace, it stops with its title bar at the workspace's top
+        let (tx, ty) = (r.x + 120.0, r.y + 10.0);
+        app.mouse_move(tx, ty);
+        app.mouse_down();
+        app.mouse_move(tx, 0.0);
+        app.mouse_move(tx - 5000.0, -400.0);
+        let kept = e.rect();
+        app.mouse_up();
+        let work = app.state.work_rect();
+        assert_eq!(kept.y, work.y, "its top stays in the workspace");
+        assert!(kept.right() >= work.x + crate::win_clamp::KEEP_W, "some of it stays in view: {kept:?}");
+        app.plugin_tick();
+        app.take_damage();
+        frame(&mut app, &mut c, None);
+        let (cx, cy) = (kept.right() - 23.0 + 8.0, kept.y + 7.0 + 8.0);
         app.mouse_move(cx, cy);
         app.mouse_down();
         app.mouse_up();

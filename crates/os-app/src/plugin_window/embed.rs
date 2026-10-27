@@ -91,6 +91,15 @@ impl Inner {
         super::x11::main_to_screen(p)
     }
 
+    /// Top-left `p` kept as the app's floating windows are (`win_clamp::keep`): its title bar never above the
+    /// workspace, so it can always be dragged back, and some of it in view at either side and the bottom.
+    fn kept(&self, p: (f32, f32)) -> (f32, f32) {
+        if self.work.w <= 0.0 {
+            return p;
+        }
+        crate::win_clamp::keep(p.0, p.1, self.size().0, self.work)
+    }
+
     /// Paints the frame again into its canvas when it changed.
     fn repaint(&mut self) {
         if !self.chrome_dirty {
@@ -331,6 +340,11 @@ impl EmbedFrame {
                 }
             }
         }
+        // Kept in the workspace when it changes too (the browser shown, the window resized).
+        if i.st.maxed.is_none() && !matches!(i.grab, Some(Grab::Move { .. })) {
+            let p = i.pos;
+            i.pos = i.kept(p);
+        }
         // The editor resized itself (not the size it was offered): the frame follows.
         let size = i.surface.view().size;
         if i.seen_size.is_some_and(|s| s != size) {
@@ -457,7 +471,8 @@ impl EmbedFrame {
         let mut i = self.0.borrow_mut();
         match i.grab {
             Some(Grab::Move { at, from }) => {
-                i.pos = ((from.0 + x - at.0).round(), (from.1 + y - at.1).round());
+                let want = ((from.0 + x - at.0).round(), (from.1 + y - at.1).round());
+                i.pos = i.kept(want);
                 return;
             }
             Some(Grab::Editor) => {
