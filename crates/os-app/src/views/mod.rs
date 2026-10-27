@@ -298,9 +298,15 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         let r = moved.unwrap_or_else(|| s.win_rect(win));
         // A window paints inside its paint area (also what it marks as drawn, e.g. text's generous overhang).
         let a = if moved.is_some() { r } else { paint_area(s, win) };
+        let h0 = ui.hits_len();
         ui.c.push_clip(a);
         paint_window(ui, s, win, r, a, f);
         ui.c.pop_clip();
+        // A split or maximized window's clicks stay in its card (a track row cut by the card's edge would take the
+        // window's below it).
+        if s.tiled() && win.slot().is_some() {
+            ui.clip_hits(h0, a);
+        }
         ui.win = None;
         // A split window without the keyboard is muted (`State::veil`); a maximized one never.
         if let Some(v) = win.slot().map(|i| s.veil[i]).filter(|&v| v > 0.0 && s.bar.lemon && s.snapped(win) && docked.is_none()) {

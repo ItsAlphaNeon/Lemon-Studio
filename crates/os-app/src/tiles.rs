@@ -602,6 +602,25 @@ mod tests {
         assert_eq!(app.state.focused(), Some(Win::ChannelRack), "a floating window changes places with none");
     }
 
+    /// A split window's clicks stay in its card: the playlist's last track row, cut by its bottom edge, takes none of
+    /// the mixer's below it, though the playlist is in front.
+    #[test]
+    fn clicks_stay_in_their_window() {
+        let Ok(mut c) = os_ui::Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = lemon();
+        app.state.hide(Win::ChannelRack);
+        app.state.raise(Win::Mixer);
+        app.state.raise(Win::Playlist);
+        app.paint(&mut c, None);
+        let m = rect_of(&app.state, Win::Mixer).unwrap();
+        for y in (m.y as i32 + 1..m.bottom() as i32).step_by(7) {
+            for x in (m.x as i32 + 1..m.right() as i32).step_by(23) {
+                let w = app.top_hit(x as f32, y as f32).and_then(|h| h.win);
+                assert!(w == Some(Win::Mixer), "({x}, {y}) in the mixer at {m:?} clicks {w:?}");
+            }
+        }
+    }
+
     /// The mixer's cables hang over the gap under it, to the window below or the status bar.
     #[test]
     fn mixer_cables_hang_over_the_gap() {

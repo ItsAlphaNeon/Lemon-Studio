@@ -760,6 +760,19 @@ impl Ui<'_> {
         hovered
     }
 
+    /// How many hits are registered so far (`clip_hits`).
+    pub fn hits_len(&self) -> usize {
+        self.hits.len()
+    }
+
+    /// The hits registered since `from` (`hits_len`) reach no further than `r`: a window's clicks stay in it. Hits with
+    /// no area (scrolled-out menu rows) are left as they are.
+    pub fn clip_hits(&mut self, from: usize, r: Rect) {
+        for h in self.hits.iter_mut().skip(from).filter(|h| !h.rect.is_empty()) {
+            h.rect = h.rect.intersect(&r);
+        }
+    }
+
     /// Marks the hit just registered as a row of menu `menu` (1 or more) that the wheel steps to.
     pub fn menu_row(&mut self, menu: u8) {
         if let Some(h) = self.hits.last_mut() {
