@@ -268,13 +268,14 @@ pub fn side_by_side(s: &State) -> Vec<(Win, Rect)> {
     plan(s).tiles
 }
 
-/// How muted each split window should be (by `Win::slot`): while one of two or three side by side has the keyboard,
-/// the others 1; else none.
+/// How muted each split window should be (by `Win::slot`): with two or three side by side, all but the one last in
+/// front 1. The floating windows are a layer of their own: one taking the keyboard changes nothing here.
 pub fn veil_target(s: &State) -> [f32; 3] {
     let shown = side_by_side(s);
+    let front = s.z.iter().rev().copied().find(|w| w.slot().is_some());
     let mut out = [0.0; 3];
-    if shown.len() >= 2 && s.focused().is_some_and(|f| shown.iter().any(|t| t.0 == f)) {
-        for (w, _) in shown.iter().filter(|t| Some(t.0) != s.focused()) {
+    if shown.len() >= 2 {
+        for (w, _) in shown.iter().filter(|t| Some(t.0) != front) {
             if let Some(i) = w.slot() {
                 out[i] = 1.0;
             }
@@ -600,6 +601,25 @@ mod tests {
         assert!(away.is_some(), "the rack at {rack:?} has a split window some way");
         arrow(&mut app, NamedKey::ArrowLeft, true);
         assert_eq!(app.state.focused(), Some(Win::ChannelRack), "a floating window changes places with none");
+    }
+
+    /// The floating windows leave the split ones as they are: the channel rack taking the keyboard mutes or brightens
+    /// none of them.
+    #[test]
+    fn floats_leave_the_veils() {
+        let mut app = lemon();
+        app.state.hide(Win::ChannelRack);
+        app.state.raise(Win::Mixer);
+        app.state.raise(Win::Playlist);
+        app.take_damage();
+        let before = app.state.veil;
+        assert_eq!(before, [0.0, 1.0, 0.0], "the mixer muted under the playlist in front");
+        app.state.raise(Win::ChannelRack);
+        app.take_damage();
+        assert_eq!(app.state.veil, before);
+        app.state.no_focus = true;
+        app.take_damage();
+        assert_eq!(app.state.veil, before, "nor does a click on no window");
     }
 
     /// A split window's clicks stay in its card: the playlist's last track row, cut by its bottom edge, takes none of

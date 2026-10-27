@@ -37,11 +37,11 @@ own content. Side branches are named `cutting-edge-<topic>`.
     do; a window opening is at its place at once, under them as they move away, and one closing leaves its
     last look there for them to move over, and maximizing is instant.
   - the browser docked left or right: its title bar drags it to the other side.
-  - window keys: while one split window has the keyboard, the others are muted a little, fading as Omarchy's borders do.
-    Ctrl+Alt+arrows move the keyboard to the window that way (floating ones included; while one is maximized, the one
-    that way is maximized instead), Ctrl+Alt+Shift+arrows swap split windows, and F maximizes the window under the mouse
-    or brings the split back. The window manager's close shortcut closes the channel rack or channel window with the
-    keyboard, as it closes a plugin's, before the app.
+  - window keys: split windows other than the one last in front are muted a little, fading as Omarchy's borders do
+    (floating windows change nothing). Ctrl+Alt+arrows move the keyboard to the window that way (floating ones included;
+    while one is maximized, the one that way is maximized instead), Ctrl+Alt+Shift+arrows swap split windows, and F
+    maximizes the window under the mouse or brings the split back. The window manager's close shortcut closes the
+    channel rack or channel window with the keyboard, as it closes a plugin's, before the app.
 
   The Lemon and Classic layouts each keep their own toolbar and, for the session, their own window arrangement.
   Every other keyboard shortcut works the same. Classic is FL's arrangement and unchanged.
