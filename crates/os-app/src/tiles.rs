@@ -251,34 +251,34 @@ pub fn neighbour(rects: &[(Win, Rect)], from: Rect, d: Dir) -> Option<Win> {
         .map(|(w, _)| w)
 }
 
-/// How long a window's ring takes to change between the inactive and the active colour (Omarchy's Hyprland `border`
-/// animation, `hypr/looknfeel.lua`: speed 5.39, easeOutQuint).
-pub const RING_FADE: f32 = 0.539;
+/// How long a split window takes to mute or come back (Omarchy's Hyprland `border` animation, `hypr/looknfeel.lua`:
+/// speed 5.39, easeOutQuint).
+pub const VEIL_FADE: f32 = 0.539;
 
-/// `x` (0..1 of the time) through the rings' and moves' curve.
+/// `x` (0..1 of the time) through the veils' and moves' curve.
 pub fn ease(x: f32) -> f32 {
     bezier(EASE_OUT_QUINT, x)
 }
 
-/// The split or maximized windows that are ringed and where: those shown (a maximized one alone), while more than one
-/// window shows, floating ones included. Not in the classic layout.
-pub fn rings(s: &State) -> Vec<(Win, Rect)> {
-    if !s.tiled() {
+/// The split windows shown side by side: the snapped ones, while a maximized one does not cover them.
+pub fn side_by_side(s: &State) -> Vec<(Win, Rect)> {
+    if !s.tiled() || s.docked().is_some() {
         return Vec::new();
     }
-    let shown: Vec<(Win, Rect)> = match s.docked() {
-        Some(d) => vec![(d, s.work_rect())],
-        None => plan(s).tiles,
-    };
-    let floats = s.z.iter().filter(|w| w.slot().is_none() && !matches!(w, Win::Browser | Win::Hosted(_))).count();
-    if shown.len() + floats < 2 { Vec::new() } else { shown }
+    plan(s).tiles
 }
 
-/// How lit each split window's ring should be (by `Win::slot`): 1 for the one with the keyboard, 0 for the others.
-pub fn ring_target(s: &State) -> [f32; 3] {
+/// How muted each split window should be (by `Win::slot`): while one of two or three side by side has the keyboard,
+/// the others 1; else none.
+pub fn veil_target(s: &State) -> [f32; 3] {
+    let shown = side_by_side(s);
     let mut out = [0.0; 3];
-    if let Some(i) = s.focused().filter(|&w| rings(s).iter().any(|r| r.0 == w)).and_then(Win::slot) {
-        out[i] = 1.0;
+    if shown.len() >= 2 && s.focused().is_some_and(|f| shown.iter().any(|t| t.0 == f)) {
+        for (w, _) in shown.iter().filter(|t| Some(t.0) != s.focused()) {
+            if let Some(i) = w.slot() {
+                out[i] = 1.0;
+            }
+        }
     }
     out
 }
@@ -520,7 +520,7 @@ mod tests {
 
     /// Ctrl+Alt+arrows give the keyboard to the window that way, the channel rack included; with Shift the split
     /// windows change places. F maximizes the window under the mouse; while one is maximized, the arrows maximize the
-    /// one that way instead, and F brings the split back. The window with the keyboard is ringed in the gap round it.
+    /// one that way instead, and F brings the split back. The other split windows are muted.
     #[test]
     fn window_keys() {
         use crate::app::Action::ToggleWin;
@@ -542,20 +542,20 @@ mod tests {
             app.mouse = (x, y);
             app.key(&Key::Character("f".into()), false, false);
         };
-        let ring = |app: &mut App, c: &mut os_ui::Canvas, w: Win| {
+        let look = |app: &mut App, c: &mut os_ui::Canvas, w: Win| {
             app.take_damage();
             app.paint(c, None);
             let r = at(app, w);
-            let p = c.pixmap.pixel(r.cx() as u32, (r.y - 2.0) as u32).unwrap();
+            let p = c.pixmap.pixel(r.cx() as u32, r.cy() as u32).unwrap();
             (p.red(), p.green(), p.blue())
         };
 
         app.state.raise(Win::Playlist);
-        let lit = ring(&mut app, &mut c, Win::Playlist);
+        let lit = look(&mut app, &mut c, Win::Playlist);
         arrow(&mut app, NamedKey::ArrowDown, false);
         let below = app.state.focused().unwrap();
         assert!(below != Win::Playlist && at(&app, below).y > at(&app, Win::Playlist).y, "{below:?} is below");
-        assert!(ring(&mut app, &mut c, Win::Playlist) != lit, "the ring went with the keyboard");
+        assert!(look(&mut app, &mut c, Win::Playlist) != lit, "without the keyboard, the playlist is muted");
         arrow(&mut app, NamedKey::ArrowUp, false);
         assert_eq!(app.state.focused(), Some(Win::Playlist));
 

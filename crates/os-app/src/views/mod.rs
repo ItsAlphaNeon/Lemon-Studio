@@ -288,13 +288,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             card_corners(ui, r);
         }
     }
-    let mut ringed = false;
     for (i, &win) in order.iter().enumerate() {
-        // The focus ring goes with the split windows, under the floating ones.
-        if win.slot().is_none() && !ringed {
-            ringed = true;
-            focus_ring(ui, s, anim.is_some());
-        }
         // While windows move (the Lemon layout's animation) they all show, the covered ones too.
         if (docked_at.is_some_and(|d| i < d) && anim.is_none()) || anim.is_some_and(|m| m.opening().iter().any(|o| o.0 == win)) {
             continue;
@@ -308,6 +302,11 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         paint_window(ui, s, win, r, a, f);
         ui.c.pop_clip();
         ui.win = None;
+        // A split window without the keyboard is muted (`State::veil`).
+        if let Some(v) = win.slot().map(|i| s.veil[i]).filter(|&v| v > 0.0 && s.bar.lemon) {
+            let bg = backdrop(ui);
+            ui.c.fill_rect(r, Color { a: (v * VEIL * 255.0).round() as u8, ..bg });
+        }
         // A maximized or snapped window fills its card square: its corners are rounded before the floating windows
         // above it, which go over them.
         if let Some(mr) = moved {
@@ -317,9 +316,6 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         } else if let Some(&(_, tr)) = tiles.tiles.iter().find(|t| t.0 == win).filter(|_| docked_at.is_none() || anim.is_some()) {
             card_corners(ui, tr);
         }
-    }
-    if !ringed {
-        focus_ring(ui, s, anim.is_some());
     }
     // The gaps between snapped windows drag their splits.
     if split && anim.is_none() {
@@ -481,29 +477,8 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
     }
 }
 
-/// The Lemon layout rings its split or maximized windows in the gap round their cards, as Hyprland rings its windows:
-/// the one with the keyboard in the text colour (a little softened), the others in Omarchy's inactive border grey,
-/// fading between them (`State::ring`). Not while one window shows alone, nor while windows move; floating windows have
-/// none (they are on top already).
-fn focus_ring(ui: &mut Ui, s: &State, moving: bool) {
-    if moving {
-        return;
-    }
-    let bg = backdrop(ui);
-    let active = ui.t.text.mix(bg, 0.25);
-    // Omarchy's inactive border, rgba(595959aa), over the backdrop
-    let inactive = bg.mix(Color::rgb(0x595959), 0xaa as f32 / 255.0);
-    // about 1.5 px wide, always whole device px: crisp straight edges
-    let k = ui.c.scale;
-    let lw = (1.5 * k).round().max(1.0) / k;
-    let snap = |v: f32| (v * k).round() / k;
-    for (w, r) in crate::tiles::rings(s) {
-        let lit = w.slot().map_or(0.0, |i| s.ring[i]);
-        let r = r.outset(2.0);
-        let r = Rect::new(snap(r.x), snap(r.y), snap(r.right()) - snap(r.x), snap(r.bottom()) - snap(r.y));
-        ui.c.stroke_rrect(r, CARD_R + 2.0, lw, inactive.mix(active, lit));
-    }
-}
+/// How much of the backdrop a muted split window takes on (`State::veil` at 1).
+const VEIL: f32 = 0.3;
 
 /// Window `w`'s own rect: the paint area without what hangs out of it (the channel rack's graph editor).
 pub fn frame_rect(s: &State, w: Win) -> Rect {

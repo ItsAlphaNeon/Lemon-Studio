@@ -1068,9 +1068,8 @@ pub struct State {
     /// The Lemon layout's split views (`crate::tiles`), and their animation under way.
     pub tiles: crate::tiles::Tiles,
     pub tile_anim: Option<crate::tiles::Anim>,
-    /// How lit each split window's ring is now, 0 (inactive) to 1 (it has the keyboard), by `Win::slot`
-    /// (`tiles::ring_target`; `App::rings_tick` fades it).
-    pub ring: [f32; 3],
+    /// How muted each split window is now, 0 to 1, by `Win::slot` (`tiles::veil_target`; `App::veils_tick` fades it).
+    pub veil: [f32; 3],
     /// Each layout's windows while the other is in use (classic, Lemon): the playlist, mixer and piano roll's states
     /// and the ones open, back to front (`App::set_lemon_layout`).
     pub layout_wins: [Option<([WinState; 3], Vec<Win>)>; 2],
@@ -1312,8 +1311,8 @@ pub struct App {
     tile_open: (Vec<Win>, bool),
     tile_work: Option<Rect>,
     tile_anim_at: Option<std::time::Instant>,
-    /// The rings fading: since when, from how lit, to how lit (`rings_tick`).
-    ring_fade: Option<(std::time::Instant, [f32; 3], [f32; 3])>,
+    /// The veils fading: since when, from how muted, to how muted (`veils_tick`).
+    veil_fade: Option<(std::time::Instant, [f32; 3], [f32; 3])>,
     /// Last press on a split's gap (node, time), for its double click.
     tile_click: Option<(usize, std::time::Instant)>,
     /// Last channel-rack press (action, time), for double clicks on slots and mixer boxes (§8, §12).
@@ -1518,7 +1517,7 @@ impl App {
                 global_snap: Default::default(),
                 tiles: crate::tiles::Tiles::load(),
                 tile_anim: None,
-                ring: [0.0; 3],
+                veil: [0.0; 3],
                 layout_wins: Default::default(),
                 pat_ui: Default::default(),
                 wins: [
@@ -1566,7 +1565,7 @@ impl App {
             tile_open: Default::default(),
             tile_work: None,
             tile_anim_at: None,
-            ring_fade: None,
+            veil_fade: None,
             tile_click: None,
             rack_click: None,
             cpu_click: None,
@@ -3892,7 +3891,7 @@ impl App {
             || self.remote.busy()
             || self.state.browser_marquee.borrow().is_some()
             || self.state.tile_anim.is_some()
-            || self.ring_fade.is_some()
+            || self.veil_fade.is_some()
     }
 
     /// The Lemon layout's windows changed places (shown, hidden, swapped, restored, another preset): the frame repaints
@@ -3934,43 +3933,42 @@ impl App {
             }
             self.invalidate();
         }
-        self.rings_tick(now);
+        self.veils_tick(now);
     }
 
-    /// The rings round the split windows go to their colours: with "Entertain me", fading as Hyprland's borders do
-    /// (`tiles::RING_FADE`); repainting only the rings.
-    fn rings_tick(&mut self, now: std::time::Instant) {
-        let want = crate::tiles::ring_target(&self.state);
-        let to = self.ring_fade.map_or(self.state.ring, |f| f.2);
+    /// The split windows without the keyboard mute (`tiles::veil_target`): with "Entertain me", fading as Hyprland's
+    /// borders do (`tiles::VEIL_FADE`).
+    fn veils_tick(&mut self, now: std::time::Instant) {
+        let want = crate::tiles::veil_target(&self.state);
+        let to = self.veil_fade.map_or(self.state.veil, |f| f.2);
         if want != to {
             let fade = !cfg!(test) && self.state.cables.borrow().animations();
             if fade {
-                self.ring_fade = Some((now, self.state.ring, want));
+                self.veil_fade = Some((now, self.state.veil, want));
             } else {
-                self.ring_fade = None;
-                self.state.ring = want;
+                self.veil_fade = None;
+                self.state.veil = want;
             }
-            self.damage_rings();
+            self.damage_veils(&want, &to);
         }
-        if let Some((t0, from, to)) = self.ring_fade {
-            let x = (now.duration_since(t0).as_secs_f32() / crate::tiles::RING_FADE).min(1.0);
+        if let Some((t0, from, to)) = self.veil_fade {
+            let x = (now.duration_since(t0).as_secs_f32() / crate::tiles::VEIL_FADE).min(1.0);
             let e = crate::tiles::ease(x);
             for i in 0..3 {
-                self.state.ring[i] = from[i] + (to[i] - from[i]) * e;
+                self.state.veil[i] = from[i] + (to[i] - from[i]) * e;
             }
             if x >= 1.0 {
-                self.ring_fade = None;
+                self.veil_fade = None;
             }
-            self.damage_rings();
+            self.damage_veils(&from, &to);
         }
     }
 
-    /// Repaint the rings round the split windows: the gap strips each runs in.
-    fn damage_rings(&mut self) {
-        for (_, r) in crate::tiles::rings(&self.state) {
-            let o = r.outset(4.0);
-            for strip in [Rect::new(o.x, o.y, o.w, 4.0), Rect::new(o.x, r.bottom(), o.w, 4.0), Rect::new(o.x, o.y, 4.0, o.h), Rect::new(r.right(), o.y, 4.0, o.h)] {
-                self.damage_rect(strip);
+    /// Repaint the split windows whose veil changes between `a` and `b`.
+    fn damage_veils(&mut self, a: &[f32; 3], b: &[f32; 3]) {
+        for (w, r) in crate::tiles::side_by_side(&self.state) {
+            if w.slot().is_some_and(|i| a[i] != b[i]) {
+                self.damage_rect(r);
             }
         }
     }
