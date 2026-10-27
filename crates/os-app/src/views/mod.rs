@@ -293,7 +293,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         // The focus ring goes with the split windows, under the floating ones.
         if win.slot().is_none() && !ringed {
             ringed = true;
-            focus_ring(ui, s, &order, docked_at, anim.is_some());
+            focus_ring(ui, s, anim.is_some());
         }
         // While windows move (the Lemon layout's animation) they all show, the covered ones too.
         if (docked_at.is_some_and(|d| i < d) && anim.is_none()) || anim.is_some_and(|m| m.opening().iter().any(|o| o.0 == win)) {
@@ -319,7 +319,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         }
     }
     if !ringed {
-        focus_ring(ui, s, &order, docked_at, anim.is_some());
+        focus_ring(ui, s, anim.is_some());
     }
     // The gaps between snapped windows drag their splits.
     if split && anim.is_none() {
@@ -449,14 +449,17 @@ fn gaps(rects: &[Rect]) -> Vec<Rect> {
 fn card_corners(ui: &mut Ui, r: Rect) {
     let bg = backdrop(ui);
     let n = 8;
+    // past the card's edge by a device px or so: an edge between device px would leave a sliver of the square corner
+    let e = 1.5 / ui.c.scale;
     for (cx, cy, sx, sy) in [(r.x, r.y, 1.0, 1.0), (r.right(), r.y, -1.0, 1.0), (r.x, r.bottom(), 1.0, -1.0), (r.right(), r.bottom(), -1.0, -1.0)] {
-        // the corner point, then the arc from one edge to the other, curving towards the card
-        let mut pts = vec![(cx, cy), (cx + sx * CARD_R, cy)];
+        // the corner point (out past the card), then the arc from one edge to the other, curving towards the card
+        let mut pts = vec![(cx - sx * e, cy - sy * e), (cx + sx * CARD_R, cy - sy * e), (cx + sx * CARD_R, cy)];
         for i in 0..=n {
             let a = std::f32::consts::FRAC_PI_2 * i as f32 / n as f32;
             pts.push((cx + sx * CARD_R * (1.0 - a.sin()), cy + sy * CARD_R * (1.0 - a.cos())));
         }
         pts.push((cx, cy + sy * CARD_R));
+        pts.push((cx - sx * e, cy + sy * CARD_R));
         ui.c.fill_polygon(&pts, bg);
     }
 }
@@ -478,26 +481,28 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
     }
 }
 
-/// The Lemon layout rings the split or maximized window with the keyboard with a thin text-coloured line, in the gap
-/// round its card, as Hyprland rings the active window. Not while it is the only window shown, nor while windows move;
-/// floating windows have none (they are on top already).
-fn focus_ring(ui: &mut Ui, s: &State, order: &[Win], docked_at: Option<usize>, moving: bool) {
-    let Some(fw) = s.focused().filter(|w| w.slot().is_some() && s.bar.lemon && !moving) else { return };
-    let seen = |(i, w): (usize, &Win)| match w.slot() {
-        Some(_) => docked_at.is_none_or(|d| i >= d),
-        None => !matches!(w, Win::Browser | Win::Hosted(_)),
-    };
-    if order.iter().enumerate().filter(|&iw| seen(iw)).count() < 2 || !order.iter().enumerate().any(|(i, w)| *w == fw && seen((i, w))) {
+/// The Lemon layout rings its split or maximized windows in the gap round their cards, as Hyprland rings its windows:
+/// the one with the keyboard in the text colour (a little softened), the others in Omarchy's inactive border grey,
+/// fading between them (`State::ring`). Not while one window shows alone, nor while windows move; floating windows have
+/// none (they are on top already).
+fn focus_ring(ui: &mut Ui, s: &State, moving: bool) {
+    if moving {
         return;
     }
-    // In the text colour, a little softened, about 1.5 px wide but always whole device px (crisp straight edges).
-    let c = ui.t.text.mix(backdrop(ui), 0.25);
+    let bg = backdrop(ui);
+    let active = ui.t.text.mix(bg, 0.25);
+    // Omarchy's inactive border, rgba(595959aa), over the backdrop
+    let inactive = bg.mix(Color::rgb(0x595959), 0xaa as f32 / 255.0);
+    // about 1.5 px wide, always whole device px: crisp straight edges
     let k = ui.c.scale;
     let lw = (1.5 * k).round().max(1.0) / k;
-    let r = s.win_rect(fw).outset(2.0);
     let snap = |v: f32| (v * k).round() / k;
-    let r = Rect::new(snap(r.x), snap(r.y), snap(r.right()) - snap(r.x), snap(r.bottom()) - snap(r.y));
-    ui.c.stroke_rrect(r, CARD_R + 2.0, lw, c);
+    for (w, r) in crate::tiles::rings(s) {
+        let lit = w.slot().map_or(0.0, |i| s.ring[i]);
+        let r = r.outset(2.0);
+        let r = Rect::new(snap(r.x), snap(r.y), snap(r.right()) - snap(r.x), snap(r.bottom()) - snap(r.y));
+        ui.c.stroke_rrect(r, CARD_R + 2.0, lw, inactive.mix(active, lit));
+    }
 }
 
 /// Window `w`'s own rect: the paint area without what hangs out of it (the channel rack's graph editor).

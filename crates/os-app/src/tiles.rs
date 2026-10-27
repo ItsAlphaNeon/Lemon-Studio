@@ -251,6 +251,38 @@ pub fn neighbour(rects: &[(Win, Rect)], from: Rect, d: Dir) -> Option<Win> {
         .map(|(w, _)| w)
 }
 
+/// How long a window's ring takes to change between the inactive and the active colour (Omarchy's Hyprland `border`
+/// animation, `hypr/looknfeel.lua`: speed 5.39, easeOutQuint).
+pub const RING_FADE: f32 = 0.539;
+
+/// `x` (0..1 of the time) through the rings' and moves' curve.
+pub fn ease(x: f32) -> f32 {
+    bezier(EASE_OUT_QUINT, x)
+}
+
+/// The split or maximized windows that are ringed and where: those shown (a maximized one alone), while more than one
+/// window shows, floating ones included. Not in the classic layout.
+pub fn rings(s: &State) -> Vec<(Win, Rect)> {
+    if !s.tiled() {
+        return Vec::new();
+    }
+    let shown: Vec<(Win, Rect)> = match s.docked() {
+        Some(d) => vec![(d, s.work_rect())],
+        None => plan(s).tiles,
+    };
+    let floats = s.z.iter().filter(|w| w.slot().is_none() && !matches!(w, Win::Browser | Win::Hosted(_))).count();
+    if shown.len() + floats < 2 { Vec::new() } else { shown }
+}
+
+/// How lit each split window's ring should be (by `Win::slot`): 1 for the one with the keyboard, 0 for the others.
+pub fn ring_target(s: &State) -> [f32; 3] {
+    let mut out = [0.0; 3];
+    if let Some(i) = s.focused().filter(|&w| rings(s).iter().any(|r| r.0 == w)).and_then(Win::slot) {
+        out[i] = 1.0;
+    }
+    out
+}
+
 /// The next preset (the status bar's split button).
 pub fn next_preset(s: &mut State) {
     s.tiles.preset = (s.tiles.preset + 1) % PRESETS.len();
@@ -511,6 +543,7 @@ mod tests {
             app.key(&Key::Character("f".into()), false, false);
         };
         let ring = |app: &mut App, c: &mut os_ui::Canvas, w: Win| {
+            app.take_damage();
             app.paint(c, None);
             let r = at(app, w);
             let p = c.pixmap.pixel(r.cx() as u32, (r.y - 2.0) as u32).unwrap();
