@@ -37,9 +37,10 @@ own content. Side branches are named `cutting-edge-<topic>`.
     do; a window opening is at its place at once, under them as they move away, and one closing leaves its
     last look there for them to move over, and maximizing is instant.
   - the browser docked left or right: its title bar drags it to the other side.
-  - window keys: the split window with the keyboard is ringed in the brand colour, under the floating ones. Ctrl+Alt+arrows move the keyboard to
-    the window that way (floating ones included; while one is maximized, the one that way is maximized instead),
-    Ctrl+Alt+Shift+arrows swap split windows, and F maximizes the window under the mouse or brings the split back.
+  - window keys: the split window with the keyboard is ringed with a thin text-coloured line, under the floating ones.
+    Ctrl+Alt+arrows move the keyboard to the window that way (floating ones included; while one is maximized, the one
+    that way is maximized instead), Ctrl+Alt+Shift+arrows swap split windows, and F maximizes the window under the mouse
+    or brings the split back.
 
   The Lemon and Classic layouts each keep their own toolbar and, for the session, their own window arrangement.
   Every other keyboard shortcut works the same. Classic is FL's arrangement and unchanged.

@@ -478,9 +478,9 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
     }
 }
 
-/// The Lemon layout rings the split or maximized window with the keyboard in the brand colour, in the gap round its card,
-/// as Hyprland rings the active window. Not while it is the only window shown, nor while windows move; floating windows
-/// have none (they are on top already).
+/// The Lemon layout rings the split or maximized window with the keyboard with a thin text-coloured line, in the gap
+/// round its card, as Hyprland rings the active window. Not while it is the only window shown, nor while windows move;
+/// floating windows have none (they are on top already).
 fn focus_ring(ui: &mut Ui, s: &State, order: &[Win], docked_at: Option<usize>, moving: bool) {
     let Some(fw) = s.focused().filter(|w| w.slot().is_some() && s.bar.lemon && !moving) else { return };
     let seen = |(i, w): (usize, &Win)| match w.slot() {
@@ -490,8 +490,14 @@ fn focus_ring(ui: &mut Ui, s: &State, order: &[Win], docked_at: Option<usize>, m
     if order.iter().enumerate().filter(|&iw| seen(iw)).count() < 2 || !order.iter().enumerate().any(|(i, w)| *w == fw && seen((i, w))) {
         return;
     }
-    let c = ui.t.brand_lit(os_theme::design::lemon::MAIN).mix(backdrop(ui), 0.3);
-    ui.c.stroke_rrect(s.win_rect(fw).outset(3.0), CARD_R + 3.0, 2.0, c);
+    // One device px in the text colour, a little softened, as the playlist picker's selected source is outlined.
+    let c = ui.t.text.mix(backdrop(ui), 0.25);
+    let k = ui.c.scale;
+    let lw = k.round().max(1.0) / k;
+    let r = s.win_rect(fw).outset(2.0);
+    let snap = |v: f32| (v * k).round() / k;
+    let r = Rect::new(snap(r.x), snap(r.y), snap(r.right()) - snap(r.x), snap(r.bottom()) - snap(r.y));
+    ui.c.stroke_rrect(r, CARD_R + 2.0, lw, c);
 }
 
 /// Window `w`'s own rect: the paint area without what hangs out of it (the channel rack's graph editor).
