@@ -333,7 +333,16 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if s.bar.lemon {
         toolbar::paint_status_bar(ui, s, f);
     }
-    paint_rest(ui, s, f, w)
+    let n = paint_rest(ui, s, f, w);
+    // The menus and boxes of plugin editors drawn in the app's window (Linux), above everything.
+    #[cfg(target_os = "linux")]
+    for (&row, e) in &s.embeds {
+        e.paint_overlays(ui.c);
+        if let Some(r) = e.overlays_rect() {
+            ui.hit(r, Action::Embed(row), "");
+        }
+    }
+    n
 }
 
 /// Paints window `win` at `r` inside its paint area `a`.
@@ -359,6 +368,16 @@ fn paint_window(ui: &mut Ui, s: &State, win: Win, r: Rect, a: Rect, f: &FrameInf
             Win::Strum => ui.part(Seg::Win(win), a, |ui| strum::paint(ui, s, f)),
             Win::Arp => ui.part(Seg::Win(win), a, |ui| arpeggiate::paint(ui, s, f)),
             Win::PianoDlg => ui.part(Seg::Win(win), a, |ui| piano_dlg::paint(ui, s, f)),
+            // A plugin window drawn in the app's (Linux): its frame and editor; every click on it goes to it.
+            #[cfg(target_os = "linux")]
+            Win::Hosted(row) => {
+                if let Some(e) = s.embeds.get(&row) {
+                    ui.part(Seg::Win(win), a, |ui| {
+                        e.paint(ui.c);
+                        ui.hit(e.rect(), Action::Embed(row), "");
+                    });
+                }
+            }
             _ => {}
         }
 }
@@ -479,6 +498,8 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
         Win::Arp => arpeggiate::bounds(s),
         Win::PianoDlg => piano_dlg::bounds(s),
         Win::Mixer => s.mixer_hang().map_or(s.win_rect(Win::Mixer), |h| s.win_rect(Win::Mixer).union(&h)),
+        #[cfg(target_os = "linux")]
+        Win::Hosted(row) => s.embeds.get(&row).map_or(Rect::new(0.0, 0.0, 0.0, 0.0), |e| e.rect()),
         w => s.win_rect(w),
     }
 }

@@ -453,6 +453,54 @@ impl Canvas {
         self.mark(x0, y0, x1, y1);
     }
 
+    /// Copies `img` with its top-left at device px `at`, clipped (another canvas's frame: a plugin window's chrome).
+    pub fn paint_pixmap(&mut self, img: &Pixmap, at: (i32, i32)) {
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        let (cx0, cy0, cx1, cy1) = shift_area(self.clip_rect(), self.scale, (w, h));
+        let (sx, sy) = at;
+        let (x0, y0) = (sx.max(cx0), sy.max(cy0));
+        let (x1, y1) = ((sx + img.width() as i32).min(cx1), (sy + img.height() as i32).min(cy1));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let (stride, sstride) = (w as usize, img.width() as usize);
+        let src = img.pixels();
+        let dst = self.pixmap.pixels_mut();
+        for y in y0..y1 {
+            let d = y as usize * stride;
+            let s = (y - sy) as usize * sstride;
+            dst[d + x0 as usize..d + x1 as usize].copy_from_slice(&src[s + (x0 - sx) as usize..s + (x1 - sx) as usize]);
+        }
+        self.mark(x0, y0, x1, y1);
+    }
+
+    /// Copies XRGB pixels (rows of `pw`, `ph` rows) with their top-left at device px `at`, clipped (an editor's frame).
+    pub fn paint_xrgb(&mut self, px: &[u32], (pw, ph): (u32, u32), at: (i32, i32)) {
+        if px.len() < (pw * ph) as usize {
+            return;
+        }
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        let (cx0, cy0, cx1, cy1) = shift_area(self.clip_rect(), self.scale, (w, h));
+        let (sx, sy) = at;
+        let (x0, y0) = (sx.max(cx0), sy.max(cy0));
+        let (x1, y1) = ((sx + pw as i32).min(cx1), (sy + ph as i32).min(cy1));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let stride = w as usize * 4;
+        let data = self.pixmap.data_mut();
+        for y in y0..y1 {
+            let d = y as usize * stride;
+            let s = (y - sy) as usize * pw as usize;
+            for x in x0..x1 {
+                let p = px[s + (x - sx) as usize];
+                let o = d + x as usize * 4;
+                data[o..o + 4].copy_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8, 255]);
+            }
+        }
+        self.mark(x0, y0, x1, y1);
+    }
+
     /// Record that device pixels `[x0, x1) x [y0, y1)` were drawn.
     fn mark(&mut self, x0: i32, y0: i32, x1: i32, y1: i32) {
         if x0 >= x1 || y0 >= y1 {

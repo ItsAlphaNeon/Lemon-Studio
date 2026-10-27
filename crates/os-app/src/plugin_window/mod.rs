@@ -37,8 +37,132 @@ mod x11;
 #[cfg(target_os = "linux")]
 pub use x11::{
     busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main, stack, take_exposed, take_lift_input, unpinned,
-    FrameWindow, Unpinned,
+    Unpinned,
 };
+#[cfg(target_os = "linux")]
+mod embed;
+#[cfg(target_os = "linux")]
+pub use embed::EmbedFrame;
+
+/// Linux: a plugin window of its own (an X11 window, `x11`), or drawn in Lemon Studio's window (`embed`: the plugins
+/// compiled into the app). The app makes the same calls either way.
+#[cfg(target_os = "linux")]
+pub enum FrameWindow {
+    X11(x11::FrameWindow),
+    Embedded(EmbedFrame),
+}
+
+#[cfg(target_os = "linux")]
+macro_rules! frame_call {
+    ($self:ident, $f:ident => $e:expr) => {
+        match $self {
+            FrameWindow::X11($f) => $e,
+            FrameWindow::Embedded($f) => $e,
+        }
+    };
+}
+
+#[cfg(target_os = "linux")]
+impl FrameWindow {
+    /// A window of its own (`x11::FrameWindow::new`).
+    pub fn new(owner: isize, info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String> {
+        x11::FrameWindow::new(owner, info, editor, scale, pos, detached).map(FrameWindow::X11)
+    }
+
+    /// A window drawn in the app's, at canvas point `pos` (logical px), at the canvas's `scale`.
+    pub fn embedded(info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (f32, f32)) -> Result<FrameWindow, String> {
+        EmbedFrame::new(info, editor, scale, pos).map(FrameWindow::Embedded)
+    }
+
+    /// The window drawn in the app's, if this is one.
+    pub fn embed(&self) -> Option<&EmbedFrame> {
+        match self {
+            FrameWindow::Embedded(e) => Some(e),
+            FrameWindow::X11(_) => None,
+        }
+    }
+
+    pub fn detached(&self) -> bool {
+        frame_call!(self, w => w.detached())
+    }
+
+    pub fn set_detached(&self, owner: isize, on: bool) {
+        frame_call!(self, w => w.set_detached(owner, on))
+    }
+
+    pub fn clip_to(&self, work: [i32; 4], covers: &[[i32; 4]]) {
+        frame_call!(self, w => w.clip_to(work, covers))
+    }
+
+    pub fn hwnd(&self) -> isize {
+        frame_call!(self, w => w.hwnd())
+    }
+
+    pub fn area(&self) -> *mut std::ffi::c_void {
+        frame_call!(self, w => w.area())
+    }
+
+    pub fn raise(&self) {
+        frame_call!(self, w => w.raise())
+    }
+
+    pub fn set_info(&self, info: ChannelInfo) {
+        frame_call!(self, w => w.set_info(info))
+    }
+
+    pub fn set_pages(&self, pages: Vec<PageIcon>, active: usize) {
+        frame_call!(self, w => w.set_pages(pages, active))
+    }
+
+    pub fn set_resizable(&self, min: Option<(f32, f32)>) {
+        frame_call!(self, w => w.set_resizable(min))
+    }
+
+    pub fn work_size(&self) -> Option<(f32, f32)> {
+        frame_call!(self, w => w.work_size())
+    }
+
+    pub fn chrome(&self) -> (f32, f32) {
+        frame_call!(self, w => w.chrome())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_event(&self, e: FrameEvent) {
+        frame_call!(self, w => w.push_event(e))
+    }
+
+    pub fn set_page(&self, page: usize) {
+        frame_call!(self, w => w.set_page(page))
+    }
+
+    pub fn set_hint(&self, hint: String) {
+        frame_call!(self, w => w.set_hint(hint))
+    }
+
+    pub fn set_preset(&self, name: Option<String>) {
+        frame_call!(self, w => w.set_preset(name))
+    }
+
+    pub fn scale(&self) -> f32 {
+        frame_call!(self, w => w.scale())
+    }
+
+    pub fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32) {
+        frame_call!(self, w => w.editor_to_screen(x, y))
+    }
+
+    pub fn set_editor_size(&self, editor: (f32, f32)) {
+        frame_call!(self, w => w.set_editor_size(editor))
+    }
+
+    pub fn set_strip(&self, on: bool) {
+        frame_call!(self, w => w.set_strip(on))
+    }
+
+    pub fn take_events(&self) -> Vec<FrameEvent> {
+        frame_call!(self, w => w.take_events())
+    }
+}
 
 #[cfg(target_os = "macos")]
 mod cocoa;

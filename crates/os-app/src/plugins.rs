@@ -289,6 +289,18 @@ pub fn builtin_effects() -> Vec<Available> {
     LIBS.iter().zip(entries).zip(names).flat_map(|((lib, entry), name)| linked(lib, entry, name)).collect()
 }
 
+/// Whether `plugin` is one compiled into Lemon Studio, whose editor is drawn in the app's own window (Linux;
+/// `plugin_window::EmbedFrame`). `LEMONSTUDIO_PLUGIN_WINDOWS=1` gives them windows of their own again.
+#[cfg(target_os = "linux")]
+fn embeds(plugin: &SharedPlugin) -> bool {
+    static IDS: OnceLock<HashSet<String>> = OnceLock::new();
+    if std::env::var_os("LEMONSTUDIO_PLUGIN_WINDOWS").is_some_and(|v| v == "1") {
+        return false;
+    }
+    let ids = IDS.get_or_init(|| builtin().into_iter().chain(builtin_effects()).map(|a| a.desc.id).collect());
+    plugin.lock().is_ok_and(|p| ids.contains(&p.desc().id))
+}
+
 /// The plugins of a CLAP entry table linked into this program.
 fn linked(cell: &OnceLock<Option<Arc<os_clap::Library>>>, entry: *const std::ffi::c_void, name: &str) -> Vec<Available> {
     let lib = cell.get_or_init(|| {
@@ -933,7 +945,15 @@ impl Plugins {
             (true, None) => crate::plugin_window::first_position(owner, scale, crate::prefs::check(&crate::prefs::DETACHED_WITH_MAIN)),
             (false, _) => crate::plugin_window::default_position(owner, scale),
         };
-        // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size.
+        // Create the frame at a provisional size, embed the editor, then fit the frame to the editor's real size. On
+        // Linux a plugin compiled into Lemon Studio draws its editor in the app's own window (`EmbedFrame`).
+        #[cfg(target_os = "linux")]
+        let w = if embeds(&h.plugin) {
+            FrameWindow::embedded(info, (560.0, 437.0), scale, (0.0, 0.0))?
+        } else {
+            FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, h.detached)?
+        };
+        #[cfg(not(target_os = "linux"))]
         let w = FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, h.detached)?;
         // Mixer effects have no channel strip (spec: ui/mixer.md §7).
         if row >= FX_KEY {
@@ -1005,7 +1025,7 @@ impl Plugins {
     }
 
     #[cfg(plugin_windows)]
-    fn close_window(&mut self, row: usize) {
+    pub(crate) fn close_window(&mut self, row: usize) {
         if let Some(h) = self.hosted.get_mut(&row) {
             // The mode and place it reopens in (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins
             // and startup").
@@ -1054,6 +1074,12 @@ impl Plugins {
 
     /// Rows whose plugin window is open and docked in the main window.
     #[cfg(plugin_windows)]
+    /// Linux: the open plugin windows drawn in the app's, by key.
+    #[cfg(target_os = "linux")]
+    pub fn embeds(&self) -> BTreeMap<usize, crate::plugin_window::EmbedFrame> {
+        self.hosted.iter().filter_map(|(&r, h)| Some((r, h.window.as_ref()?.embed()?.clone()))).collect()
+    }
+
     pub fn docked(&self) -> Vec<usize> {
         self.hosted.iter().filter(|(_, h)| h.window.as_ref().is_some_and(|w| !w.detached())).map(|(&r, _)| r).collect()
     }

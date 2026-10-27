@@ -15,6 +15,7 @@ os-dsp.workspace = true
 os-flp.workspace = true
 os-engine.workspace = true
 os-hostlink.workspace = true
+os-plugkit = { path = "../os-plugkit" }
 os-theme = { path = "../os-theme" }
 os-ui = { path = "../os-ui" }
 os-clap = { path = "../os-clap" }

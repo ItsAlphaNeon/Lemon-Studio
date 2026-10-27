@@ -600,6 +600,19 @@ impl Shell {
             menu_bar::update(views::menus::bar_model(&self.app.state));
         }
         self.pending |= self.app.tick();
+        // A plugin editor drawn in the app's window holds the cursor (a knob drag) a moment after the press that started
+        // it, and lets it go by itself (Linux, `App::cursor_locked`).
+        if let Some(window) = self.window.clone() {
+            let want = self.app.cursor_locked();
+            if want && self.lock.is_none() {
+                let scale = ui_scale(&window) as f32;
+                let (mx, my) = self.app.mouse;
+                let anchor = (f64::from(mx * scale) + f64::from(self.inset.0), f64::from(my * scale) + f64::from(self.inset.1));
+                self.lock_cursor(&window, anchor, (mx, my));
+            } else if !want && self.lock.is_some() {
+                self.unlock_cursor(&window);
+            }
+        }
         // The startup splash: the opened project's loading moves its gauge on; once the main window has shown and
         // nothing is loading, it finishes. It is dropped when it has faded away.
         if let Some(s) = &self.splash {

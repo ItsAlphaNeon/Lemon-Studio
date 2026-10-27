@@ -267,6 +267,9 @@ pub enum Action {
     MixerArea,
     RackArea,
     Swallow,
+    /// A plugin window drawn in the app's (Linux; `plugin_window::EmbedFrame`), by its `Plugins::hosted` key: its input
+    /// goes to it (`App::embed_down`).
+    Embed(usize),
     /// The value box of "Type in value..." (spec: ui/type-in-value.md).
     TypeIn(crate::typein::TiAct),
     /// The Remote control settings box (spec: ui/remote-control.md).
@@ -1083,6 +1086,10 @@ pub struct State {
     pub tile_anim: Option<crate::tiles::Anim>,
     /// How muted each split window is now, 0 to 1, by `Win::slot` (`tiles::veil_target`; `App::veils_tick` fades it).
     pub veil: [f32; 3],
+    /// The plugin windows drawn in the app's (Linux), by `Plugins::hosted` key: painted as `Win::Hosted` (kept by
+    /// `App::sync_embeds`).
+    #[cfg(target_os = "linux")]
+    pub embeds: std::collections::BTreeMap<usize, crate::plugin_window::EmbedFrame>,
     /// Each layout's windows while the other is in use (classic, Lemon): the playlist, mixer and piano roll's states
     /// and the ones open, back to front (`App::set_lemon_layout`).
     pub layout_wins: [Option<([WinState; 3], Vec<Win>)>; 2],
@@ -1281,6 +1288,18 @@ pub struct App {
     overlays: Vec<Rect>,
     /// Where the canvas sits in the main window's client area (physical px; the restored window's border).
     pub canvas_off: (i32, i32),
+    /// Linux: what each plugin window drawn in the app's showed at the last tick (serials, place, menus), to repaint it
+    /// where it changed (`sync_embeds`).
+    #[cfg(target_os = "linux")]
+    embed_seen: std::collections::HashMap<usize, ((u64, u64), Rect, Option<Rect>)>,
+    /// Linux: the plugin window drawn in the app's that has the mouse: pressed on (the button), or hovered.
+    #[cfg(target_os = "linux")]
+    embed_press: Option<(usize, os_plugkit::input::Button)>,
+    #[cfg(target_os = "linux")]
+    embed_hover: Option<usize>,
+    /// Linux: the virtual pointer at the last move while an embedded editor holds the cursor (`App::embed_move`).
+    #[cfg(target_os = "linux")]
+    embed_virt: Option<(f32, f32)>,
     /// The open popup belongs to this row's detached plugin window: it is shown lifted above that window.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
     popup_lift: Option<usize>,
@@ -1531,6 +1550,8 @@ impl App {
                 tiles: crate::tiles::Tiles::load(),
                 tile_anim: None,
                 veil: [0.0; 3],
+                #[cfg(target_os = "linux")]
+                embeds: Default::default(),
                 layout_wins: Default::default(),
                 pat_ui: Default::default(),
                 wins: [
@@ -1553,6 +1574,14 @@ impl App {
             shown: Shown::default(),
             overlays: Vec::new(),
             canvas_off: (0, 0),
+            #[cfg(target_os = "linux")]
+            embed_seen: std::collections::HashMap::new(),
+            #[cfg(target_os = "linux")]
+            embed_press: None,
+            #[cfg(target_os = "linux")]
+            embed_hover: None,
+            #[cfg(target_os = "linux")]
+            embed_virt: None,
             popup_lift: None,
             plugin_menu: None,
             bars: Vec::new(),
@@ -2020,6 +2049,13 @@ impl App {
             return;
         }
         if self.state.link_box.take().is_some() {
+            self.invalidate();
+            return;
+        }
+        // A plugin window drawn in the app's own (Linux) closes as a plugin's own window would.
+        #[cfg(target_os = "linux")]
+        if let Some(&Win::Hosted(row)) = self.state.z.last().filter(|w| !self.state.no_focus && matches!(w, Win::Hosted(r) if self.state.embeds.contains_key(r))) {
+            self.plugins.close_window(row);
             self.invalidate();
             return;
         }
@@ -2721,6 +2757,13 @@ impl App {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         let mut menu = crate::playlist::plugin_window_menu(row, detached, lx, ly);
+                        // A plugin window drawn in the app's own (Linux, a plugin compiled into Lemon Studio) stays in it.
+                        #[cfg(target_os = "linux")]
+                        if self.state.embeds.contains_key(&row) {
+                            if let Some(i) = menu.items.iter_mut().find(|i| matches!(i.cmd, crate::playlist::Cmd::PluginDetach(..))) {
+                                *i = i.clone().off();
+                            }
+                        }
                         crate::presets::fill_window_menu(self, row, &mut menu);
                         // A channel's window: Replace ▸ lists the generators (an effect slot's stays greyed here; the
                         // mixer's slot menu has its own Replace ▸).
@@ -2818,7 +2861,48 @@ impl App {
                 self.invalidate();
             }
             self.clip_docked();
+            #[cfg(target_os = "linux")]
+            self.sync_embeds();
         }
+    }
+
+    /// Linux: the plugin windows drawn in the app's (`plugin_window::EmbedFrame`) go into `State::embeds` to be painted,
+    /// follow the canvas and the workspace, and are repainted where they or their editors changed.
+    #[cfg(target_os = "linux")]
+    fn sync_embeds(&mut self) {
+        let k = self.state.ui_scale.max(0.1);
+        let canvas = ((self.state.screen.0 * k).round() as u32, (self.state.screen.1 * k).round() as u32);
+        let work = self.state.work_rect();
+        let frames = self.plugins.embeds();
+        let mut seen = std::mem::take(&mut self.embed_seen);
+        for (row, (_, r, o)) in &seen {
+            if !frames.contains_key(row) {
+                self.damage_rect(*r);
+                if let Some(o) = o {
+                    self.damage_rect(*o);
+                }
+            }
+        }
+        for (&row, f) in &frames {
+            f.sync(k, canvas, self.canvas_off, work);
+            let now = (f.serial(), f.rect(), f.overlays_rect());
+            if seen.get(&row) != Some(&now) {
+                if let Some((_, r, o)) = seen.get(&row) {
+                    self.damage_rect(*r);
+                    if let Some(o) = o {
+                        self.damage_rect(*o);
+                    }
+                }
+                self.damage_rect(now.1);
+                if let Some(o) = now.2 {
+                    self.damage_rect(o);
+                }
+            }
+            seen.insert(row, now);
+        }
+        seen.retain(|row, _| frames.contains_key(row));
+        self.embed_seen = seen;
+        self.state.embeds = frames;
     }
 
     /// Screen point -> canvas logical px (an X11 main window: Linux; macOS).
@@ -5269,6 +5353,10 @@ impl App {
     /// Mouse moved; returns whether a repaint is needed.
     pub fn mouse_move(&mut self, x: f32, y: f32) -> bool {
         self.mouse = (x, y);
+        #[cfg(target_os = "linux")]
+        if self.embed_move(x, y) {
+            return true;
+        }
         self.hold_moved(x, y);
         if let Some(d) = self.drag.clone() {
             match d {
@@ -5846,6 +5934,10 @@ impl App {
 
     pub fn mouse_down(&mut self) {
         self.invalidate();
+        #[cfg(target_os = "linux")]
+        if self.embed_down(os_plugkit::input::Button::Left) {
+            return;
+        }
         self.hold = None;
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
@@ -6030,6 +6122,129 @@ impl App {
         false
     }
 
+    /// Linux: Ctrl, Shift and Alt for a plugin editor drawn in the app's window.
+    #[cfg(target_os = "linux")]
+    fn embed_mods(&self) -> (bool, bool, bool) {
+        (self.ctrl, self.shift, self.alt)
+    }
+
+    /// Linux: the plugin window drawn in the app's whose editor has a menu or box open: every input goes to it.
+    #[cfg(target_os = "linux")]
+    fn embed_modal(&self) -> Option<usize> {
+        self.state.embeds.iter().find(|(_, e)| e.modal()).map(|(&r, _)| r)
+    }
+
+    /// Linux: the plugin window drawn in the app's that is on top at (`x`, `y`).
+    #[cfg(target_os = "linux")]
+    fn embed_at(&self, x: f32, y: f32) -> Option<usize> {
+        match self.top_hit(x, y)?.action {
+            Action::Embed(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// Linux: a press on a plugin window drawn in the app's (or anywhere while its editor's menu is open) goes to it,
+    /// and brings it to the front. Whether it took the press.
+    #[cfg(target_os = "linux")]
+    fn embed_down(&mut self, btn: os_plugkit::input::Button) -> bool {
+        if self.modal_open() || self.state.menu_open.is_some() {
+            return false;
+        }
+        let (x, y) = self.mouse;
+        let Some(row) = self.embed_modal().or_else(|| self.embed_at(x, y)) else { return false };
+        let Some(e) = self.state.embeds.get(&row).cloned() else { return false };
+        if self.state.z.last() != Some(&Win::Hosted(row)) {
+            self.state.raise(Win::Hosted(row));
+            self.invalidate();
+        }
+        self.state.no_focus = false;
+        e.press(x, y, btn, self.embed_mods());
+        self.embed_press = Some((row, btn));
+        self.embed_virt = None;
+        true
+    }
+
+    /// Linux: the mouse moved: to the plugin window drawn in the app's that was pressed on (as the distance moved while
+    /// its editor holds the cursor), whose menu is open, or that it is over. Whether that window took it alone.
+    #[cfg(target_os = "linux")]
+    fn embed_move(&mut self, x: f32, y: f32) -> bool {
+        let mods = self.embed_mods();
+        if let Some((row, _)) = self.embed_press {
+            if let Some(e) = self.state.embeds.get(&row).cloned() {
+                if e.locked() {
+                    let v = self.embed_virt.unwrap_or((x, y));
+                    if (x, y) != v {
+                        e.delta(x - v.0, y - v.1, mods);
+                    }
+                    self.embed_virt = Some((x, y));
+                } else {
+                    self.embed_virt = None;
+                    e.motion(x, y, mods);
+                }
+            }
+            return true;
+        }
+        if let Some(row) = self.embed_modal() {
+            if let Some(e) = self.state.embeds.get(&row) {
+                e.motion(x, y, mods);
+            }
+            return true;
+        }
+        let under = self.embed_at(x, y);
+        if self.embed_hover != under {
+            if let Some(e) = self.embed_hover.and_then(|r| self.state.embeds.get(&r)) {
+                e.leave();
+            }
+            self.embed_hover = under;
+        }
+        if let Some(e) = under.and_then(|r| self.state.embeds.get(&r)) {
+            e.motion(x, y, mods);
+        }
+        false
+    }
+
+    /// Linux: the button went up: to the plugin window drawn in the app's that had the press (or the open menu).
+    #[cfg(target_os = "linux")]
+    fn embed_up(&mut self) -> bool {
+        let (x, y) = self.mouse;
+        let mods = self.embed_mods();
+        let (row, btn) = match self.embed_press.take() {
+            Some(p) => p,
+            None => match self.embed_modal() {
+                Some(r) => (r, os_plugkit::input::Button::Left),
+                None => return false,
+            },
+        };
+        self.embed_virt = None;
+        if let Some(e) = self.state.embeds.get(&row) {
+            e.release(x, y, btn, mods);
+        }
+        true
+    }
+
+    /// Linux: the wheel over a plugin window drawn in the app's (or with its editor's menu open) turns there.
+    #[cfg(target_os = "linux")]
+    fn embed_wheel(&mut self, dy: f32) -> bool {
+        let (x, y) = self.mouse;
+        let Some(row) = self.embed_modal().or_else(|| self.embed_at(x, y)) else { return false };
+        if let Some(e) = self.state.embeds.get(&row) {
+            e.wheel(x, y, dy, self.embed_mods());
+        }
+        true
+    }
+
+    /// Linux: keys go to a plugin editor drawn in the app's window while its menu or box is open. Whether it took
+    /// the key.
+    #[cfg(target_os = "linux")]
+    fn embed_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
+        let Some(row) = self.embed_modal() else { return false };
+        let Some((sym, text)) = keysym_of(key) else { return true };
+        if let Some(e) = self.state.embeds.get(&row) {
+            e.key(sym, text, (ctrl, self.shift, alt));
+        }
+        true
+    }
+
     /// Clicking any part of a child window brings it to the front (spec: ui/channel-rack.md §5).
     fn raise_under_mouse(&mut self) {
         let (x, y) = self.mouse;
@@ -6055,6 +6270,8 @@ impl App {
             Win::Arp => views::arpeggiate::bounds(&self.state),
             Win::PianoDlg => views::piano_dlg::bounds(&self.state),
             Win::ChannelRack => views::rack::bounds(&self.state),
+            #[cfg(target_os = "linux")]
+            Win::Hosted(_) => views::paint_area(&self.state, w),
             w => self.state.win_rect(w).outset(5.0),
         }
     }
@@ -6104,6 +6321,10 @@ impl App {
     /// True while a drag moves a value rather than the cursor (knobs, the tempo, scroll-bar right-drags): the shell
     /// hides the cursor and keeps it where the drag started, feeding relative movement.
     pub fn cursor_locked(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if self.embed_press.is_some_and(|(r, _)| self.state.embeds.get(&r).is_some_and(|e| e.locked())) {
+            return true;
+        }
         matches!(self.drag, Some(Drag::BarZoom { .. } | Drag::BarRows { .. } | Drag::Knob { .. } | Drag::Tempo { .. }))
     }
 
@@ -6239,6 +6460,11 @@ impl App {
     /// Middle button: grab-scroll the Piano roll and Playlist (FL manual: middle-drag scrolls
     /// both directions).
     pub fn mouse_down_middle(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.embed_down(os_plugkit::input::Button::Middle) {
+            self.invalidate();
+            return;
+        }
         self.close_song_info();
         if crate::typein::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
             return;
@@ -6285,6 +6511,11 @@ impl App {
     /// Right button: delete notes in the piano roll (spec: ui/piano-roll.md §8); right-drag on
     /// a scroll bar scrolls.
     pub fn mouse_down_right(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.embed_down(os_plugkit::input::Button::Right) {
+            self.invalidate();
+            return;
+        }
         self.close_song_info();
         if crate::typein::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
             return;
@@ -6467,6 +6698,10 @@ impl App {
     }
 
     pub fn mouse_up(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.embed_up() {
+            return;
+        }
         self.hold = None;
         self.shift_clone = false;
         self.release();
@@ -6911,6 +7146,10 @@ impl App {
         if self.modal_open() {
             return self.dialog_wheel(dy);
         }
+        #[cfg(target_os = "linux")]
+        if self.embed_wheel(dy) {
+            return;
+        }
         if self.menu_wheel(dx, dy, shift) {
             return;
         }
@@ -7253,6 +7492,11 @@ impl App {
         // A dialog takes every key.
         if self.modal_open() {
             return self.dialog_key(key, ctrl, alt);
+        }
+        // So does a plugin editor's menu or box drawn in the app's window (Linux).
+        #[cfg(target_os = "linux")]
+        if self.embed_key(key, ctrl, alt) {
+            return;
         }
         // So does a box of the settings window's Info page while it is edited, and a cell of File ▸ Browser extra
         // search folders.
@@ -8393,7 +8637,7 @@ impl App {
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserSplitter | Action::BrowserMove => {}
             Action::TypeIn(t) => crate::typein::click(s, t),
-            Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow => {}
+            Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow | Action::Embed(_) => {}
             Action::PlTool(_)
             | Action::PlSnap
             | Action::PlOptions
@@ -9138,6 +9382,38 @@ fn pattern_shortcut(key: &winit::keyboard::Key, ctrl: bool, shift: bool) -> Opti
         (NamedKey::Delete, true, true) => Cmd::Delete,
         (NamedKey::ArrowUp, true, true) => Cmd::MoveUp,
         (NamedKey::ArrowDown, true, true) => Cmd::MoveDown,
+        _ => return None,
+    })
+}
+
+/// A key as an X11 key symbol and the character it types, for a plugin editor drawn in the app's window (Linux).
+#[cfg(target_os = "linux")]
+fn keysym_of(key: &winit::keyboard::Key) -> Option<(u32, Option<char>)> {
+    use os_plugkit::input::keysym;
+    use winit::keyboard::{Key, NamedKey};
+    Some(match key {
+        Key::Named(n) => (
+            match n {
+                NamedKey::Escape => keysym::ESCAPE,
+                NamedKey::Enter => keysym::RETURN,
+                NamedKey::Backspace => keysym::BACKSPACE,
+                NamedKey::Delete => keysym::DELETE,
+                NamedKey::ArrowLeft => keysym::LEFT,
+                NamedKey::ArrowRight => keysym::RIGHT,
+                NamedKey::ArrowUp => keysym::UP,
+                NamedKey::ArrowDown => keysym::DOWN,
+                NamedKey::Home => keysym::HOME,
+                NamedKey::End => keysym::END,
+                NamedKey::Space => 0x20,
+                _ => return None,
+            },
+            (*n == NamedKey::Space).then_some(' '),
+        ),
+        Key::Character(c) => {
+            let ch = c.chars().next()?;
+            let sym = if (ch as u32) < 0x100 { ch as u32 } else { 0x0100_0000 + ch as u32 };
+            (sym, Some(ch))
+        }
         _ => return None,
     })
 }
@@ -11971,6 +12247,66 @@ mod tests {
         assert_eq!(app.state.z.last(), Some(&Win::Mixer));
         app.close_requested();
         assert!(app.want_exit, "then the app");
+    }
+
+    /// A plugin compiled into Lemon Studio draws its editor in the app's own window (Linux): no window of its own and
+    /// no display needed. Its frame joins the window stack, the editor's pixels show on the canvas, a click in the
+    /// editor goes to it, and the frame's close button closes it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn built_in_editors_draw_in_the_app() {
+        use crate::plugin_window::ChannelInfo;
+        use std::time::{Duration, Instant};
+        let Ok(mut c) = Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = App::new(None);
+        app.plugins.available = crate::plugins::builtin();
+        app.plugins.scale = 1.0;
+        frame(&mut app, &mut c, None);
+        let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
+        app.plugins.create_with(0, index, None).unwrap();
+        let info = ChannelInfo { name: "Citrus".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        app.plugins.open_window(0, info).unwrap();
+        let settle = |app: &mut App, f: &dyn Fn(&App) -> bool| {
+            let t0 = Instant::now();
+            while !f(app) && t0.elapsed() < Duration::from_secs(3) {
+                app.plugin_tick();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            app.plugin_tick();
+        };
+        settle(&mut app, &|a| a.state.embeds.get(&0).is_some_and(|e| e.claimed() && e.view().frame.is_some()));
+        let e = app.state.embeds.get(&0).cloned().expect("drawn in the app");
+        assert!(e.claimed(), "the editor took the app's surface instead of opening a window");
+        assert!(app.state.z.contains(&Win::Hosted(0)), "it joins the window stack");
+        app.take_damage();
+        frame(&mut app, &mut c, None);
+        let ed = e.editor_rect().expect("the editor shows");
+        let f = e.view().frame.unwrap();
+        let (px, py) = ((ed.x + 30.0) as u32, (ed.y + 30.0) as u32);
+        let p = c.pixmap.pixel(px, py).unwrap();
+        let want = f.px[(30 * f.w + 30) as usize];
+        assert_eq!((p.red(), p.green(), p.blue()), ((want >> 16) as u8, (want >> 8) as u8, want as u8), "the editor's pixels on the canvas");
+        // a click in the editor is the editor's (nothing else under it moves)
+        app.mouse_move(ed.cx(), ed.cy());
+        assert_eq!(app.top_hit(ed.cx(), ed.cy()).map(|h| h.action.clone()), Some(Action::Embed(0)));
+        app.mouse_down();
+        app.mouse_up();
+        // the frame's close button
+        let r = e.rect();
+        let (cx, cy) = (r.right() - 23.0 + 8.0, r.y + 7.0 + 8.0);
+        app.mouse_move(cx, cy);
+        app.mouse_down();
+        app.mouse_up();
+        settle(&mut app, &|a| a.state.embeds.is_empty());
+        assert!(app.state.embeds.is_empty() && app.plugins.hosted[&0].window.is_none(), "closed by its button");
+        // the window manager's close shortcut closes it in front, not the app
+        let info = ChannelInfo { name: "Citrus".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        app.plugins.open_window(0, info).unwrap();
+        settle(&mut app, &|a| a.state.embeds.contains_key(&0));
+        app.state.raise(Win::Hosted(0));
+        app.close_requested();
+        settle(&mut app, &|a| a.state.embeds.is_empty());
+        assert!(app.plugins.hosted[&0].window.is_none() && !app.want_exit, "the shortcut closed the plugin window only");
     }
 
     /// The Lemon layout: the close shortcut closes the channel rack in front too, before the app.

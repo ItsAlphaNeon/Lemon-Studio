@@ -2874,6 +2874,7 @@ dependencies = [
  "os-model",
  "os-native",
  "os-paths",
+ "os-plugkit",
  "os-smf",
  "os-theme",
  "os-ui",

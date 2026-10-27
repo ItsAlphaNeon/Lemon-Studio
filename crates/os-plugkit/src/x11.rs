@@ -73,8 +73,20 @@ impl Waker {
         self.wake();
     }
 
-    fn quitting(&self) -> bool {
+    pub(crate) fn quitting(&self) -> bool {
         self.0.quit.load(Ordering::Acquire)
+    }
+
+    /// Waits up to `ms` for a wake (an embedded editor's input, a parameter, the close); whether there was one.
+    pub(crate) fn wait(&self, ms: i32) -> bool {
+        let mut fd = libc::pollfd { fd: self.0.rx.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        // SAFETY: one valid `pollfd`.
+        unsafe { libc::poll(&mut fd, 1, ms) };
+        let woke = fd.revents & libc::POLLIN != 0;
+        if woke {
+            self.drain();
+        }
+        woke
     }
 
     fn drain(&self) {
@@ -120,12 +132,16 @@ impl Drop for EditorThread {
 /// its own. `None` when there is no X11 display.
 pub fn spawn(parent: Parent, size: (u32, u32), slot: &Slot, run: impl FnOnce(Window) + Send + 'static) -> Option<EditorThread> {
     let waker = Waker::new()?;
-    let win = match Window::open(parent, size, waker.clone()) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("plugin editor: {e}");
-            return None;
-        }
+    // Lemon Studio drawing the editor in its own window: no X11 window at all (`embed`).
+    let win = match crate::embed::claim(parent) {
+        Some(s) => Window(Backend::Embedded(crate::embed::Window::new(s, waker.clone()))),
+        None => match XWindow::open(parent, size, waker.clone()) {
+            Ok(w) => Window(Backend::X11(w)),
+            Err(e) => {
+                eprintln!("plugin editor: {e}");
+                return None;
+            }
+        },
     };
     if let Ok(mut s) = slot.lock() {
         *s = Some(waker.clone());
@@ -166,8 +182,94 @@ impl Keymap {
     }
 }
 
+/// An editor's window (owned by the GUI thread): an X11 window of its own, or drawn in Lemon Studio's window
+/// (`embed`). The editors make the same calls either way.
+pub struct Window(Backend);
+
+enum Backend {
+    X11(XWindow),
+    Embedded(crate::embed::Window),
+}
+
+macro_rules! either {
+    ($self:ident, $w:ident => $e:expr) => {
+        match &$self.0 {
+            Backend::X11($w) => $e,
+            Backend::Embedded($w) => $e,
+        }
+    };
+    (mut $self:ident, $w:ident => $e:expr) => {
+        match &mut $self.0 {
+            Backend::X11($w) => $e,
+            Backend::Embedded($w) => $e,
+        }
+    };
+}
+
+impl Window {
+    /// No input is waiting: a good moment to paint (once per burst of events).
+    pub fn idle(&self) -> bool {
+        either!(self, w => w.idle())
+    }
+
+    /// Ctrl, Shift, Alt held at the last event.
+    pub fn mods(&self) -> (bool, bool, bool) {
+        either!(self, w => w.mods())
+    }
+
+    /// The next input, waiting for it; `None` when the editor closes (or the display goes).
+    pub fn next(&mut self) -> Option<Input> {
+        either!(mut self, w => w.next())
+    }
+
+    /// Copies `px` (XRGB rows of `w`) into the window at (0, 0).
+    pub fn blit(&self, px: &[u32], w: u32, h: u32) {
+        either!(self, win => win.blit(px, w, h))
+    }
+
+    /// Resizes the window (device px).
+    pub fn resize(&self, w: u32, h: u32) {
+        either!(self, win => win.resize(w, h))
+    }
+
+    /// A window point where menus and boxes are placed: on the screen (device px), or from the editor's top-left when
+    /// it is drawn in Lemon Studio's window.
+    pub fn to_root(&self, x: i32, y: i32) -> (i32, i32) {
+        either!(self, w => w.to_root(x, y))
+    }
+
+    /// Runs a desktop dialog (a file dialog) on this thread.
+    pub fn dialog<R: Send + 'static>(&self, f: impl FnOnce() -> R + Send + 'static) -> Option<R> {
+        either!(self, w => w.dialog(f))
+    }
+
+    pub fn locked(&self) -> bool {
+        either!(self, w => w.locked())
+    }
+
+    /// Hides the cursor and holds it where it is: movement arrives as `Input::Delta`.
+    pub fn lock(&mut self) {
+        either!(mut self, w => w.lock())
+    }
+
+    /// Shows the cursor again where the drag started.
+    pub fn unlock(&mut self) {
+        either!(mut self, w => w.unlock())
+    }
+
+    /// Shows a menu at (`x`, `y`) (`to_root`'s points); the picked entry's command.
+    pub fn popup<C: Clone>(&mut self, x: i32, y: i32, def: &MenuDef<C>, pal: &Palette, scale: f32) -> Option<C> {
+        either!(mut self, w => w.popup(x, y, def, pal, scale))
+    }
+
+    /// "Type in value" at (`x`, `y`) (`to_root`'s points): the text typed, unless cancelled.
+    pub fn type_in(&mut self, x: i32, y: i32, text: &str, scale: f32) -> Option<String> {
+        either!(mut self, w => w.type_in(x, y, text, scale))
+    }
+}
+
 /// An editor's X11 window and connection (owned by the GUI thread).
-pub struct Window {
+pub struct XWindow {
     c: RustConnection,
     pub win: u32,
     root: u32,
@@ -199,8 +301,8 @@ pub struct Window {
     queue: std::collections::VecDeque<Input>,
 }
 
-impl Window {
-    fn open(parent: u32, (w, h): (u32, u32), waker: Waker) -> Result<Window, String> {
+impl XWindow {
+    fn open(parent: u32, (w, h): (u32, u32), waker: Waker) -> Result<XWindow, String> {
         let err = |e: &dyn std::fmt::Display| format!("no X11 display for the editor: {e}");
         let (c, screen) = RustConnection::connect(None).map_err(|e| err(&e))?;
         let setup = c.setup();
@@ -251,7 +353,7 @@ impl Window {
             && c.xinput_xi_query_version(2, 0).ok().and_then(|r| r.reply().ok()).is_some_and(|r| r.major_version >= 2);
         let keys = Keymap::load(&c);
         let max_request = c.maximum_request_bytes();
-        Ok(Window {
+        Ok(XWindow {
             c,
             win,
             root,
@@ -785,7 +887,7 @@ impl Window {
     }
 }
 
-impl Drop for Window {
+impl Drop for XWindow {
     fn drop(&mut self) {
         self.unlock();
         let _ = self.c.free_cursor(self.blank);
@@ -851,7 +953,7 @@ mod tests {
         c.create_window(x11rb::COPY_DEPTH_FROM_PARENT, parent, root, 0, 0, 200, 120, 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT, &CreateWindowAux::new()).unwrap();
         c.map_window(parent).unwrap();
         c.flush().unwrap();
-        let w = Window::open(parent, (160, 100), Waker::new().unwrap()).unwrap();
+        let w = XWindow::open(parent, (160, 100), Waker::new().unwrap()).unwrap();
         c.sync().unwrap();
         std::thread::sleep(Duration::from_millis(100));
         let img = c.get_image(ImageFormat::Z_PIXMAP, w.win, 80, 50, 1, 1, !0).unwrap().reply().unwrap();

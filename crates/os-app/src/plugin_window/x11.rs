@@ -1012,6 +1012,14 @@ fn to_root(conn: &Conn, win: xproto::Window, (x, y): (i32, i32)) -> (i32, i32) {
     t.ok().and_then(|t| t.reply().ok()).map_or((x, y), |r| (i32::from(r.dst_x), i32::from(r.dst_y)))
 }
 
+/// A main-window point (physical px) on the screen: translated for an X11 main window, as it is otherwise (the app
+/// then reads it back as a main-window point, `screen_to_main`).
+pub fn main_to_screen(p: (i32, i32)) -> (i32, i32) {
+    let Some(conn) = CONN.with(|c| c.borrow().clone()) else { return p };
+    let owner = conn.owner.get();
+    if owner == 0 { p } else { to_root(&conn, owner, p) }
+}
+
 /// A screen point (physical px) in the main window's coordinates, when it is an X11 one.
 pub fn screen_to_main(x: i32, y: i32) -> Option<(i32, i32)> {
     let conn = CONN.with(|c| c.borrow().clone())?;
