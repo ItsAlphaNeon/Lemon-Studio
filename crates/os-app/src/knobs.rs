@@ -333,7 +333,7 @@ impl crate::app::App {
                 self.hint = Cow::Owned(s.knob_text(id));
             }
             Control::Fader(t) => {
-                crate::history::fader(s, t);
+                crate::history::fader(s, t, false);
                 let v = os_model::MixerTrack::new(t).volume.unwrap_or(0.8);
                 if let Some(m) = crate::mixer::track_mut(s, t) {
                     m.volume = Some(v);

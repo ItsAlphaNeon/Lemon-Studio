@@ -6847,6 +6847,23 @@ impl App {
             self.hint = Cow::Owned(self.state.knob_text(id));
             return None;
         }
+        // The wheel over a mixer fader moves it, not the mixer's scroll (spec: ui/mixer.md §4).
+        if let Some(Action::Fader(t)) = area
+            && dy != 0.0
+        {
+            let s = &mut self.state;
+            let v0 = crate::mixer::track(s, t).map(|m| m.volume.unwrap_or(0.8))?;
+            let v = (v0 + f64::from(dy.signum()) * views::mixer::FADER_NOTCH).clamp(0.0, 1.0);
+            if v != v0 {
+                crate::history::fader(s, t, true);
+                if let Some(m) = crate::mixer::track_mut(s, t) {
+                    m.volume = Some(v);
+                }
+                s.piano.dirty = true;
+            }
+            self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
+            return None;
+        }
         // The wheel over a mixer effect slot moves its effect up or down the track's chain (spec: ui/mixer.md §7).
         if let Some(Action::Mix(crate::mixer::MHit::SlotName(k) | crate::mixer::MHit::SlotArrow(k))) = area
             && dy + dx != 0.0
@@ -7885,7 +7902,7 @@ impl App {
             }
             Action::Fader(t) => {
                 crate::mixer::select(s, t, self.ctrl);
-                crate::history::fader(s, t);
+                crate::history::fader(s, t, false);
                 let v0 = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
                 self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0 });
             }
@@ -10717,6 +10734,33 @@ mod tests {
             assert!((app.state.knob(id) - (before + id.notch()).min(1.0)).abs() < 1e-4, "wheel {id:?}");
         }
         assert!(app.state.project.mixer.iter().find(|m| m.index == 1).unwrap().pan.unwrap() > 0.0, "mixer pan written to the model");
+    }
+
+    /// The wheel over a mixer fader moves it instead of scrolling the mixer: three notches up from unity read
+    /// `103%  0.8dB  1.09`, and a run of notches is one undo step (spec: ui/mixer.md §4).
+    #[test]
+    fn wheel_moves_a_mixer_fader() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut c, None);
+        let vol = |app: &App| crate::mixer::track(&app.state, 1).unwrap().volume.unwrap();
+        assert_eq!(vol(&app), 0.8);
+        let r = hit_rect(&app, &Action::Fader(1));
+        app.mouse_move(r.cx(), r.cy());
+        let scroll = app.state.mixer_scroll;
+        for _ in 0..3 {
+            app.wheel(0.0, 1.0, false, false);
+        }
+        assert_eq!(app.hint, "Volume: 103%  0.8dB  1.09");
+        assert_eq!(app.state.mixer_scroll, scroll, "the mixer does not scroll");
+        assert!(crate::history::undo(&mut app.state).is_some());
+        assert_eq!(vol(&app), 0.8, "one undo step for the three notches");
+        for _ in 0..200 {
+            app.wheel(0.0, -1.0, false, false);
+        }
+        assert_eq!(vol(&app), 0.0, "stops at the bottom");
     }
 
     /// Every knob and fader the main window draws (toolbar, mixer, its equaliser and sends, channel rack) goes back to
