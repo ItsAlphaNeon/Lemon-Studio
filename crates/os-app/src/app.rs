@@ -386,7 +386,35 @@ impl Bar {
         let travel = self.len() - self.thumb;
         if travel > 0.0 { self.max / travel } else { 0.0 }
     }
+
+    /// Where the thumb starts along the track at scroll `pos`.
+    fn thumb_at(&self, pos: f32) -> f32 {
+        if self.max > 0.0 { pos / self.max * (self.len() - self.thumb) } else { 0.0 }
+    }
+
+    /// The thumb end under `along` (pixels along the track) on a bar whose thumb ends zoom (spec: ui/scroll-bars.md
+    /// §4): Some(true) = the right end. The grab zone reaches `BAR_EDGE_PX` outside the end and up to that far inside,
+    /// leaving at least half a small thumb to scroll by.
+    fn edge_at(&self, pos: f32, along: f32) -> Option<bool> {
+        if !matches!(self.target, Scroll::PlaylistX | Scroll::PianoX) {
+            return None;
+        }
+        let (a, b) = (self.thumb_at(pos), self.thumb_at(pos) + self.thumb);
+        let inner = BAR_EDGE_PX.min(self.thumb / 4.0);
+        if (a - BAR_EDGE_PX..a + inner).contains(&along) {
+            Some(false)
+        } else if (b - inner..=b + BAR_EDGE_PX).contains(&along) {
+            Some(true)
+        } else {
+            None
+        }
+    }
 }
+
+/// Grab zone at each end of a zooming scroll bar's thumb, in pixels (spec: ui/scroll-bars.md §4).
+const BAR_EDGE_PX: f32 = 4.0;
+/// Hint over a zooming thumb end.
+const BAR_EDGE_HINT: &str = "Drag to zoom - the other end stays put";
 
 /// What needs repainting before the next present.
 #[derive(Clone, PartialEq)]
@@ -879,6 +907,10 @@ pub enum Drag {
     /// Right-drag on a horizontal scroll bar: horizontal mouse movement scrolls the bar, vertical movement
     /// zooms its axis around the view centre (up = zoom in).
     BarZoom { t: Scroll, m0: (f32, f32), p0: f32, ratio: f32, z0: f32, center: f32, view: f32 },
+    /// Left-drag on an end of the Playlist's or Piano roll's horizontal thumb (spec: ui/scroll-bars.md §4): the end
+    /// follows the mouse while the other end stays on the same time, so the view zooms. `fixed` = the other end and `units` = the
+    /// whole bar, both in content pixels at zoom 1; `grab` = where the mouse held the end, relative to it.
+    BarEdge { t: Scroll, right: bool, fixed: f32, units: f32, grab: f32 },
     /// Right-drag on a vertical scroll bar: vertical movement scrolls (as in FL), horizontal movement resizes the
     /// rows around the view centre where the bar has rows (right = taller). `last` = mouse at the previous move,
     /// `row` = unrounded row height so slow drags still add up (None: the bar only scrolls). Spec: ui/scroll-bars.md.
@@ -3071,7 +3103,7 @@ impl App {
     fn auto_scroll(&mut self) {
         let set = crate::autoscroll::get();
         let now = &self.shown;
-        if !set.on || !now.playing || now.paused || matches!(self.drag, Some(Drag::Scroll { .. } | Drag::BarZoom { .. } | Drag::BarRows { .. })) {
+        if !set.on || !now.playing || now.paused || matches!(self.drag, Some(Drag::Scroll { .. } | Drag::BarZoom { .. } | Drag::BarEdge { .. } | Drag::BarRows { .. })) {
             return;
         }
         let tick = now.tick as f32;
@@ -4980,6 +5012,21 @@ impl App {
                     let _ = p0;
                     self.damage_scroll(t);
                 }
+                Drag::BarEdge { t, right, fixed, units, grab } => {
+                    if let Some(b) = self.bar(t) {
+                        let along = if b.vertical { y - b.track.y } else { x - b.track.x };
+                        let at = ((along - grab) / b.len() * units).clamp(0.0, units);
+                        let span = if right { at - fixed } else { fixed - at };
+                        self.zoom_set(t, b.view / span.max(f32::MIN_POSITIVE));
+                        let z = self.zoom_get(t).unwrap_or(1.0);
+                        // The scroll range at the new zoom: the bar itself is only repainted with it next frame.
+                        if let Some(bar) = self.bars.iter_mut().find(|bar| bar.target == t) {
+                            bar.max = (units * z - bar.view).max(0.0);
+                        }
+                        self.scroll_set(t, if right { fixed * z } else { fixed * z - b.view });
+                        self.damage_scroll(t);
+                    }
+                }
                 Drag::BarRows { t, last, row } => {
                     // The picker's bar resizes its previews either way, down / right = taller, as FL's resizes them
                     // (spec: ui/scroll-bars.md §3); the others scroll up/down.
@@ -5354,6 +5401,14 @@ impl App {
             && rect.is_some_and(|r| x >= r.right() - resize_zone(r.w));
         // Playlist: the clip under the mouse (automation clips show their points) and the resize cursor on clip edges.
         let mut resize = resize;
+        // The ends of the Playlist's and Piano roll's horizontal thumbs zoom (spec: ui/scroll-bars.md §4).
+        if let Some(b) = hover.as_ref().and_then(|a| if let Action::Scrollbar(t) = a { self.bar(*t) } else { None }) {
+            let along = if b.vertical { y - b.track.y } else { x - b.track.x };
+            if b.edge_at(self.scroll_get(b.target), along).is_some() {
+                resize = true;
+                hint = Cow::Borrowed(BAR_EDGE_HINT);
+            }
+        }
         if hover == Some(Action::PlaylistArea) {
             if let Some(g) = self.pl_grid {
                 let s = &self.state;
@@ -5833,15 +5888,26 @@ impl App {
         }
     }
 
-    /// Press on a scroll bar. Left: a press off the thumb first centres the thumb on the mouse,
-    /// then dragging scrolls. Right: the cursor is held; on a horizontal bar sideways scrolls and up/down zooms,
+    /// Press on a scroll bar. Left: a press on an end of a horizontal thumb that zooms drags that end; a press
+    /// off the thumb first centres the thumb on the mouse, then dragging scrolls. Right: the cursor is held; on a horizontal bar sideways scrolls and up/down zooms,
     /// on a vertical bar up/down scrolls and sideways resizes the rows (spec: ui/scroll-bars.md).
     fn scrollbar_press(&mut self, t: Scroll, right: bool) {
         let Some(b) = self.bar(t) else { return };
         let (x, y) = self.mouse;
         let along = if b.vertical { y - b.track.y } else { x - b.track.x };
         let pos = self.scroll_get(t);
-        let thumb0 = if b.max > 0.0 { pos / b.max * (b.len() - b.thumb) } else { 0.0 };
+        let thumb0 = b.thumb_at(pos);
+        if let (false, Some(end), Some(z)) = (right, b.edge_at(pos, along), self.zoom_get(t)) {
+            let (units, start, stop) = ((b.max + b.view) / z, pos / z, (pos + b.view) / z);
+            let (fixed, moved) = if end { (start, stop) } else { (stop, start) };
+            // Measured from the end's time rather than the drawn thumb, so the press itself does not zoom.
+            let grab = along - moved / units * b.len();
+            if t == Scroll::PianoX {
+                self.state.piano.bar_span = Some(units * f32::from(self.state.project.ppq.max(4)));
+            }
+            self.drag = Some(Drag::BarEdge { t, right: end, fixed, units, grab });
+            return self.invalidate();
+        }
         if !right && (along < thumb0 || along > thumb0 + b.thumb) {
             self.scroll_set(t, (along - b.thumb / 2.0) * b.ratio());
         }
@@ -6169,6 +6235,7 @@ impl App {
             }
             Some(Drag::SongRuler) => self.song_pos_release(),
             Some(Drag::Touch) => self.touch_hold(None),
+            Some(Drag::BarEdge { .. }) => self.state.piano.bar_span = None,
             Some(Drag::ThemeKnob { .. } | Drag::PickSv(_) | Drag::PickHue(_)) => self.theme_store(),
             _ => {}
         }
@@ -11267,6 +11334,89 @@ mod tests {
             let _ = b.pixmap.save_png(std::env::temp_dir().join("os_full.png"));
         }
         assert_eq!(n, 0, "{what}: differing pixels in x {}..{} y {}..{}", bbox.0, bbox.2, bbox.1, bbox.3);
+    }
+
+    /// The ends of the Playlist's and Piano roll's horizontal thumbs zoom (spec: ui/scroll-bars.md §4): the dragged end
+    /// follows the mouse, the other end keeps its time, and the ends show the resize cursor.
+    #[test]
+    fn bar_ends_zoom() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let t = Scroll::PlaylistX;
+        let ends = |app: &App, t: Scroll| {
+            let b = app.bar(t).unwrap();
+            let a = b.track.x + b.thumb_at(app.scroll_get(t));
+            (a, a + b.thumb)
+        };
+        // Right end: dragged right it zooms out; the left end stays at the start.
+        let (a0, b0) = ends(&app, t);
+        let (cy, z0) = (app.bar(t).unwrap().track.cy(), app.state.playlist_bar_w);
+        app.mouse_move((a0 + b0) / 2.0, cy);
+        assert_eq!(app.cursor(), Cursor::Default, "the middle of the thumb scrolls");
+        app.mouse_move(b0 - 1.0, cy);
+        assert_eq!(app.cursor(), Cursor::EwResize);
+        assert_eq!(app.hint, BAR_EDGE_HINT);
+        app.mouse_down();
+        app.mouse_move(b0 + 59.0, cy);
+        assert_eq!(app.cursor(), Cursor::EwResize, "kept while dragging");
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        let (a1, b1) = ends(&app, t);
+        assert!(app.state.playlist_bar_w < z0, "zoomed out: {} -> {}", z0, app.state.playlist_bar_w);
+        assert_eq!(app.scroll_get(t), 0.0);
+        assert!((a1 - a0).abs() < 0.5 && (b1 - (b0 + 60.0)).abs() < 1.0, "{a0}..{b0} -> {a1}..{b1}");
+        // Left end, scrolled to the middle: dragged right it zooms in; the right end keeps its time.
+        let b = app.bar(t).unwrap();
+        app.scroll_set(t, b.max / 2.0);
+        frame(&mut app, &mut c, None);
+        let (z1, (a2, b2)) = (app.state.playlist_bar_w, ends(&app, t));
+        let stop = (app.scroll_get(t) + b.view) / z1;
+        app.mouse_move(a2 + 1.0, cy);
+        app.mouse_down();
+        app.mouse_move(a2 + 41.0, cy);
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        let z2 = app.state.playlist_bar_w;
+        let (a3, b3) = ends(&app, t);
+        assert!(z2 > z1, "zoomed in: {z1} -> {z2}");
+        assert!(((app.scroll_get(t) + b.view) / z2 - stop).abs() < 0.01, "the right end keeps its time");
+        assert!((a3 - (a2 + 40.0)).abs() < 1.0 && (b3 - b2).abs() < 1.0, "{a2}..{b2} -> {a3}..{b3}");
+        // The Piano roll's bar: while an end is dragged it keeps its length, so the end follows the mouse (with the
+        // pattern inside the view the thumb is two thirds of the bar again after the release).
+        app.state.z = vec![Win::PianoRoll];
+        frame(&mut app, &mut c, None);
+        let t = Scroll::PianoX;
+        let (a4, b4) = ends(&app, t);
+        let cy = app.bar(t).unwrap().track.cy();
+        let z4 = app.state.piano.px_per_beat;
+        app.mouse_move(b4 - 1.0, cy);
+        assert_eq!(app.cursor(), Cursor::EwResize);
+        app.mouse_down();
+        app.mouse_move(b4 - 41.0, cy);
+        frame(&mut app, &mut c, None);
+        let (a5, b5) = ends(&app, t);
+        assert!((a5 - a4).abs() < 0.5 && (b5 - (b4 - 40.0)).abs() < 1.0, "{a4}..{b4} -> {a5}..{b5}");
+        app.mouse_up();
+        assert_eq!(app.state.piano.bar_span, None);
+        frame(&mut app, &mut c, None);
+        assert!(app.state.piano.px_per_beat > z4, "zoomed in: {z4} -> {}", app.state.piano.px_per_beat);
+        assert_eq!(app.scroll_get(t), 0.0, "the start stays");
+        // Its left end, scrolled in: the end of the view keeps its time.
+        let b = app.bar(t).unwrap();
+        app.scroll_set(t, b.max / 2.0);
+        frame(&mut app, &mut c, None);
+        let ppb = |app: &App| app.state.piano.px_per_beat;
+        let (z6, (a6, _)) = (ppb(&app), ends(&app, t));
+        let stop = (app.scroll_get(t) + b.view) / z6;
+        app.mouse_move(a6 + 1.0, cy);
+        app.mouse_down();
+        app.mouse_move(a6 - 29.0, cy);
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        assert!(ppb(&app) < z6, "zoomed out: {z6} -> {}", ppb(&app));
+        assert!(((app.scroll_get(t) + b.view) / ppb(&app) - stop).abs() < 0.01, "the right end keeps its time");
     }
 
     /// Scroll bars: left-drag scrolls one axis, right-drag both (piano roll), middle-drag grabs.
