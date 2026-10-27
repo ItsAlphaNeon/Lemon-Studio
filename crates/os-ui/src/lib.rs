@@ -434,71 +434,59 @@ impl Canvas {
 
     /// Paints `snap` back where it was taken, inside the clip (opaque: its pixels replace the canvas's).
     pub fn paint_snapshot(&mut self, snap: &Snapshot) {
-        let (w, h) = (self.pixmap.width(), self.pixmap.height());
-        let (cx0, cy0, cx1, cy1) = shift_area(self.clip_rect(), self.scale, (w, h));
-        let (sx, sy) = snap.at;
-        let (x0, y0) = (sx.max(cx0), sy.max(cy0));
-        let (x1, y1) = ((sx + snap.img.width() as i32).min(cx1), (sy + snap.img.height() as i32).min(cy1));
-        if x0 >= x1 || y0 >= y1 {
-            return;
-        }
-        let (stride, sstride) = (w as usize, snap.img.width() as usize);
-        let src = snap.img.pixels();
-        let dst = self.pixmap.pixels_mut();
-        for y in y0..y1 {
-            let d = y as usize * stride;
-            let s = (y - sy) as usize * sstride;
-            dst[d + x0 as usize..d + x1 as usize].copy_from_slice(&src[s + (x0 - sx) as usize..s + (x1 - sx) as usize]);
-        }
-        self.mark(x0, y0, x1, y1);
+        let img = Rc::clone(&snap.img);
+        self.paint_pixmap(&img, snap.at);
     }
 
-    /// Copies `img` with its top-left at device px `at`, clipped (another canvas's frame: a plugin window's chrome).
+    /// The device rects of a `w` x `h` block at `at` that drawing reaches now: inside the clip and each damage rect.
+    fn block_rects(&self, at: (i32, i32), (w, h): (i32, i32)) -> Vec<(i32, i32, i32, i32)> {
+        let (cw, ch) = (self.pixmap.width() as i32, self.pixmap.height() as i32);
+        (0..self.clip_count())
+            .map(|i| self.clip_at(i))
+            .map(|c| (c.0.max(at.0).max(0), c.1.max(at.1).max(0), c.2.min(at.0 + w).min(cw), c.3.min(at.1 + h).min(ch)))
+            .filter(|r| r.0 < r.2 && r.1 < r.3)
+            .collect()
+    }
+
+    /// Copies `img` with its top-left at device px `at`, inside the clip and the damage (another canvas's frame: a
+    /// plugin window's chrome).
     pub fn paint_pixmap(&mut self, img: &Pixmap, at: (i32, i32)) {
-        let (w, h) = (self.pixmap.width(), self.pixmap.height());
-        let (cx0, cy0, cx1, cy1) = shift_area(self.clip_rect(), self.scale, (w, h));
         let (sx, sy) = at;
-        let (x0, y0) = (sx.max(cx0), sy.max(cy0));
-        let (x1, y1) = ((sx + img.width() as i32).min(cx1), (sy + img.height() as i32).min(cy1));
-        if x0 >= x1 || y0 >= y1 {
-            return;
+        let stride = self.pixmap.width() as usize;
+        let sstride = img.width() as usize;
+        for (x0, y0, x1, y1) in self.block_rects(at, (img.width() as i32, img.height() as i32)) {
+            let src = img.pixels();
+            let dst = self.pixmap.pixels_mut();
+            for y in y0..y1 {
+                let d = y as usize * stride;
+                let s = (y - sy) as usize * sstride;
+                dst[d + x0 as usize..d + x1 as usize].copy_from_slice(&src[s + (x0 - sx) as usize..s + (x1 - sx) as usize]);
+            }
+            self.mark(x0, y0, x1, y1);
         }
-        let (stride, sstride) = (w as usize, img.width() as usize);
-        let src = img.pixels();
-        let dst = self.pixmap.pixels_mut();
-        for y in y0..y1 {
-            let d = y as usize * stride;
-            let s = (y - sy) as usize * sstride;
-            dst[d + x0 as usize..d + x1 as usize].copy_from_slice(&src[s + (x0 - sx) as usize..s + (x1 - sx) as usize]);
-        }
-        self.mark(x0, y0, x1, y1);
     }
 
-    /// Copies XRGB pixels (rows of `pw`, `ph` rows) with their top-left at device px `at`, clipped (an editor's frame).
+    /// Copies XRGB pixels (rows of `pw`, `ph` rows) with their top-left at device px `at`, inside the clip and the
+    /// damage (an editor's frame).
     pub fn paint_xrgb(&mut self, px: &[u32], (pw, ph): (u32, u32), at: (i32, i32)) {
         if px.len() < (pw * ph) as usize {
             return;
         }
-        let (w, h) = (self.pixmap.width(), self.pixmap.height());
-        let (cx0, cy0, cx1, cy1) = shift_area(self.clip_rect(), self.scale, (w, h));
         let (sx, sy) = at;
-        let (x0, y0) = (sx.max(cx0), sy.max(cy0));
-        let (x1, y1) = ((sx + pw as i32).min(cx1), (sy + ph as i32).min(cy1));
-        if x0 >= x1 || y0 >= y1 {
-            return;
-        }
-        let stride = w as usize * 4;
-        let data = self.pixmap.data_mut();
-        for y in y0..y1 {
-            let d = y as usize * stride;
-            let s = (y - sy) as usize * pw as usize;
-            for x in x0..x1 {
-                let p = px[s + (x - sx) as usize];
-                let o = d + x as usize * 4;
-                data[o..o + 4].copy_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8, 255]);
+        let stride = self.pixmap.width() as usize * 4;
+        for (x0, y0, x1, y1) in self.block_rects(at, (pw as i32, ph as i32)) {
+            let data = self.pixmap.data_mut();
+            for y in y0..y1 {
+                let d = y as usize * stride;
+                let s = (y - sy) as usize * pw as usize;
+                for x in x0..x1 {
+                    let p = px[s + (x - sx) as usize];
+                    let o = d + x as usize * 4;
+                    data[o..o + 4].copy_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8, 255]);
+                }
             }
+            self.mark(x0, y0, x1, y1);
         }
-        self.mark(x0, y0, x1, y1);
     }
 
     /// Record that device pixels `[x0, x1) x [y0, y1)` were drawn.
@@ -1540,6 +1528,22 @@ fn poly_path(pts: &[(f32, f32)], close: bool) -> Option<tiny_skia::Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pixels copied in keep to the damage: a partial repaint leaves what lies outside its rects as it was.
+    #[test]
+    fn copies_keep_to_the_damage() {
+        let mut c = Canvas::new(40, 20, 1.0).unwrap();
+        c.begin_frame(None);
+        c.clear(Color::rgb(0x000000));
+        c.begin_region(&[Rect::new(0.0, 0.0, 10.0, 20.0), Rect::new(30.0, 0.0, 10.0, 20.0)]);
+        c.paint_xrgb(&vec![0x00ff_ffff; 40 * 20], (40, 20), (0, 0));
+        let at = |c: &Canvas, x: u32| c.pixmap.pixel(x, 5).unwrap().red();
+        assert_eq!((at(&c, 5), at(&c, 20), at(&c, 35)), (255, 0, 255), "only inside the two damage rects");
+        let img = Canvas::new(40, 20, 1.0).unwrap().pixmap;
+        c.begin_region(&[Rect::new(0.0, 0.0, 10.0, 20.0)]);
+        c.paint_pixmap(&img, (0, 0));
+        assert_eq!((at(&c, 5), at(&c, 35)), (0, 255));
+    }
 
     #[test]
     fn present_copy_is_xrgb() {
