@@ -490,10 +490,10 @@ fn focus_ring(ui: &mut Ui, s: &State, order: &[Win], docked_at: Option<usize>, m
     if order.iter().enumerate().filter(|&iw| seen(iw)).count() < 2 || !order.iter().enumerate().any(|(i, w)| *w == fw && seen((i, w))) {
         return;
     }
-    // One device px in the text colour, a little softened, as the playlist picker's selected source is outlined.
+    // In the text colour, a little softened, about 1.5 px wide but always whole device px (crisp straight edges).
     let c = ui.t.text.mix(backdrop(ui), 0.25);
     let k = ui.c.scale;
-    let lw = k.round().max(1.0) / k;
+    let lw = (1.5 * k).round().max(1.0) / k;
     let r = s.win_rect(fw).outset(2.0);
     let snap = |v: f32| (v * k).round() / k;
     let r = Rect::new(snap(r.x), snap(r.y), snap(r.right()) - snap(r.x), snap(r.bottom()) - snap(r.y));
