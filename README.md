@@ -45,8 +45,13 @@ own content. Side branches are named `cutting-edge-<topic>`.
 
   The Lemon and Classic layouts each keep their own toolbar and, for the session, their own window arrangement.
   Every other keyboard shortcut works the same. Classic is FL's arrangement and unchanged.
-- **Plugin windows under Hyprland.** They drag by their own title bar (Hyprland ignores the X11 move request) and
-  have no compositor border, shadow or move animation.
+- **Plugin editors in the app's window (Linux).** The plugins compiled into Lemon Studio (the stock instruments and
+  effects) draw their editors inside Lemon Studio's own window, as floating windows like the channel rack: no X11
+  window, no XWayland, no OpenGL. Their menus and value boxes are drawn above the app; knob drags hold the cursor as the
+  app's own knobs do; the close shortcut closes them. Third-party plugins keep windows of their own.
+  `LEMONSTUDIO_PLUGIN_WINDOWS=1` gives the built-in ones their own windows again.
+- **Third-party plugin windows under Hyprland.** They drag by their own title bar (Hyprland ignores the X11 move
+  request) and have no compositor border, shadow or move animation.
 - **Branch marks.** The workspace watermark, the version string ("cutting-edge pre-alpha") and the status bar's mark
   are red.
 
