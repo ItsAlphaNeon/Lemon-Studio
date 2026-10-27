@@ -174,6 +174,8 @@ struct Frame {
     last_press: Cell<Option<(u32, i16, i16)>>,
     /// Hyprland took its border off (`hyprland::plain`) since it was last mapped.
     plain: Cell<bool>,
+    /// A title-bar drag Hyprland carries out (`hyprland::Drag`).
+    hypr_drag: RefCell<Option<super::hyprland::Drag>>,
 }
 
 /// A plugin window. Dropping it destroys the native window (close the plugin's editor first).
@@ -286,6 +288,7 @@ impl FrameWindow {
             dirty: Cell::new(true),
             last_press: Cell::new(None),
             plain: Cell::new(false),
+            hypr_drag: RefCell::new(None),
         });
         conn.frames.borrow_mut().insert(win, Rc::downgrade(&f));
         Ok(FrameWindow { f })
@@ -723,7 +726,9 @@ impl Frame {
                 self.dirty.set(true);
             }
             Reply::Move if super::hyprland::running() => {
-                // Hyprland ignores the request below: the frame moves itself (the press's grab brings the motion here).
+                // Hyprland ignores the request below: it moves the frame on our asking, in its own coordinates, as the
+                // pointer goes (the press's grab brings the motion here).
+                *self.hypr_drag.borrow_mut() = super::hyprland::Drag::start();
                 let (x, y) = self.top_left();
                 self.state.borrow_mut().moving = Some((i32::from(root.0), i32::from(root.1), x, y));
             }
@@ -788,6 +793,9 @@ impl Frame {
                 self.reply(r, (e.root_x, e.root_y));
             }
             Event::ButtonRelease(e) if e.detail == 1 => {
+                if let Some(mut d) = self.hypr_drag.borrow_mut().take() {
+                    d.follow(true);
+                }
                 let r = self.state.borrow_mut().left_up(f32::from(e.event_x) / k, f32::from(e.event_y) / k);
                 self.reply(r, (e.root_x, e.root_y));
             }
@@ -795,8 +803,9 @@ impl Frame {
                 let Some((cx, cy, wx, wy)) = self.state.borrow().moving else { return };
                 let at = (wx + i32::from(e.root_x) - cx, wy + i32::from(e.root_y) - cy);
                 if self.state.borrow().detached {
-                    let _ = self.conn.c.configure_window(self.win, &ConfigureWindowAux::new().x(at.0).y(at.1));
-                    let _ = self.conn.c.flush();
+                    if let Some(d) = self.hypr_drag.borrow_mut().as_mut() {
+                        d.follow(false);
+                    }
                 } else if at != self.pos.get() {
                     self.pos.set(at);
                     let _ = self.conn.c.configure_window(self.win, &ConfigureWindowAux::new().x(at.0).y(at.1));

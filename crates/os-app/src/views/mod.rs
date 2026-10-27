@@ -288,7 +288,13 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             card_corners(ui, r);
         }
     }
+    let mut ringed = false;
     for (i, &win) in order.iter().enumerate() {
+        // The focus ring goes with the split windows, under the floating ones.
+        if win.slot().is_none() && !ringed {
+            ringed = true;
+            focus_ring(ui, s, &order, docked_at, anim.is_some());
+        }
         // While windows move (the Lemon layout's animation) they all show, the covered ones too.
         if (docked_at.is_some_and(|d| i < d) && anim.is_none()) || anim.is_some_and(|m| m.opening().iter().any(|o| o.0 == win)) {
             continue;
@@ -312,8 +318,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             card_corners(ui, tr);
         }
     }
-    if s.bar.lemon && anim.is_none() {
-        focus_ring(ui, s, &order, docked_at);
+    if !ringed {
+        focus_ring(ui, s, &order, docked_at, anim.is_some());
     }
     // The gaps between snapped windows drag their splits.
     if split && anim.is_none() {
@@ -472,10 +478,11 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
     }
 }
 
-/// The Lemon layout rings the window with the keyboard in the brand colour, as Hyprland rings the active window: a split
-/// or maximized one in the gap round its card, a floating one on its edge. Not while it is the only window shown.
-fn focus_ring(ui: &mut Ui, s: &State, order: &[Win], docked_at: Option<usize>) {
-    let Some(fw) = s.focused() else { return };
+/// The Lemon layout rings the split or maximized window with the keyboard in the brand colour, in the gap round its card,
+/// as Hyprland rings the active window. Not while it is the only window shown, nor while windows move; floating windows
+/// have none (they are on top already).
+fn focus_ring(ui: &mut Ui, s: &State, order: &[Win], docked_at: Option<usize>, moving: bool) {
+    let Some(fw) = s.focused().filter(|w| w.slot().is_some() && s.bar.lemon && !moving) else { return };
     let seen = |(i, w): (usize, &Win)| match w.slot() {
         Some(_) => docked_at.is_none_or(|d| i >= d),
         None => !matches!(w, Win::Browser | Win::Hosted(_)),
@@ -484,11 +491,7 @@ fn focus_ring(ui: &mut Ui, s: &State, order: &[Win], docked_at: Option<usize>) {
         return;
     }
     let c = ui.t.brand_lit(os_theme::design::lemon::MAIN).mix(backdrop(ui), 0.3);
-    if fw.slot().is_some() {
-        ui.c.stroke_rrect(s.win_rect(fw).outset(3.0), CARD_R + 3.0, 2.0, c);
-    } else {
-        ui.c.stroke_rrect(frame_rect(s, fw), kit::lemon::r_panel(ui.t), 1.5, c);
-    }
+    ui.c.stroke_rrect(s.win_rect(fw).outset(3.0), CARD_R + 3.0, 2.0, c);
 }
 
 /// Window `w`'s own rect: the paint area without what hangs out of it (the channel rack's graph editor).
