@@ -4,10 +4,12 @@
 
 //! `cargo run -p bundle-app [-- --install]` (macOS): builds Lemon Studio in release mode and writes
 //! `<target>/bundled/Lemon Studio.app`: the program, its icon and an `Info.plist` that lets the Finder open `.flp`
-//! projects with it. The icon is made from the Icon Composer document `assets/logo/macOS.icon` by
-//! `tools/logo/macos-icon.sh`: `assets/lemonstudio.car` (the bundle's `Assets.car`) is the icon macOS 26 and later draw,
-//! in every appearance, and `assets/lemonstudio.icns` the one older macOS shows. The bundle is signed ad hoc, as Apple
-//! silicon requires of any program it runs. `--install` copies it to `~/Applications`.
+//! projects with it and says why it uses the microphone (without that, macOS does not let an app hear its audio
+//! inputs: the mixer tracks' inputs and audio recording). The icon is made from the Icon Composer document
+//! `assets/logo/macOS.icon` by `tools/logo/macos-icon.sh`: `assets/lemonstudio.car` (the bundle's `Assets.car`) is the
+//! icon macOS 26 and later draw, in every appearance, and `assets/lemonstudio.icns` the one older macOS shows. The
+//! bundle is signed ad hoc, as Apple silicon requires of any program it runs. `--install` copies it to
+//! `~/Applications`.
 //!
 //! The macOS counterpart of Linux's desktop entry (`crates/os-app/assets/lemonstudio.desktop`).
 
@@ -103,6 +105,8 @@ fn info_plist() -> String {
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Lemon Studio records and monitors your audio inputs on its mixer tracks.</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
