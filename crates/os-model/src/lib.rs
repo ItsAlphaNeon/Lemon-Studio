@@ -9,6 +9,7 @@
 //! Units are the project's own: positions and lengths in ticks (see [`Project::ppq`]),
 //! levels as normalized `f64`s. File encodings live in `os-flp`, not here.
 
+pub mod clip_lfo;
 pub mod crossfade;
 pub mod curve;
 
@@ -1817,9 +1818,13 @@ pub struct Automation {
     pub targets: Vec<u32>,
     /// Points with absolute positions in beats from the clip start, sorted.
     pub points: Vec<AutoPoint>,
-    /// Stored header (21 bytes incl. the count) and tail of event 234, kept as read.
+    /// Stored header (21 bytes incl. the count) and tail of event 234, kept as read. On saving, the LFO's fields in
+    /// them (header bytes 4..8 and 8, the envelope and the LFO's values behind it) are written from `lfo`.
     pub header: Vec<u8>,
     pub tail: Vec<u8>,
+    /// The clip's LFO (spec: audio/automation.md "The LFO"). Its range is its channel's pan and volume
+    /// (`clip_lfo::range`).
+    pub lfo: clip_lfo::ClipLfo,
 }
 
 /// One automation point. `mode` shapes the segment that ends at this point.
@@ -2188,20 +2193,7 @@ impl Automation {
     /// The curve's value at `beat` (clamped to the first / last point), shaped per segment mode as the walk plays it
     /// (spec: audio/automation.md "Segment shapes"). At a point's own beat it is that point's level.
     pub fn value_at(&self, beat: f64) -> Option<f64> {
-        let pts = &self.points;
-        let first = pts.first()?;
-        if beat <= first.beat {
-            return Some(f64::from(first.value as f32));
-        }
-        let i = pts.partition_point(|p| p.beat <= beat);
-        let Some(b) = pts.get(i) else { return Some(f64::from(pts.last()?.value as f32)) };
-        let a = pts[i - 1];
-        let span = b.beat - a.beat;
-        if span <= 0.0 {
-            return Some(f64::from(b.value as f32));
-        }
-        let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
-        Some(curve::segment_value(pts, i, t))
+        curve::value_at(&self.points, beat)
     }
 }
 

@@ -2345,8 +2345,8 @@ mod tests {
         let main = shared.lock().unwrap().param_info(35).unwrap().id;
         let auto_ch = Channel {
             id: os_model::Id::NONE,
-            index: 0, kind: ChannelKind::Automation, name: None, plugin: None, color: None, enabled: true, volume: 0.78125,
-            pan: 0.0, pitch_cents: 0, mixer_track: 0, sample_path: None, layer_children: vec![], envelopes: Default::default(),
+            index: 0, kind: ChannelKind::Automation, name: None, plugin: None, color: None, enabled: true, volume: 1.0,
+            pan: -1.0, pitch_cents: 0, mixer_track: 0, sample_path: None, layer_children: vec![], envelopes: Default::default(),
             rack: Default::default(), plugin_state: None, misc: Default::default(), sound: Default::default(),
         };
         // Main level from 0 (-18 dB) to 1 (+18 dB) over 4 beats (120 BPM: 2 s).
@@ -2356,6 +2356,7 @@ mod tests {
             points: vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(4.0, 1.0)],
             header: vec![0; 21],
             tail: vec![],
+            lfo: Default::default(),
         };
         let project = Project {
             ppq: 96,

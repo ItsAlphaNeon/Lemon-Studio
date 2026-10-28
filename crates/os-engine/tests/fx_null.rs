@@ -16,13 +16,15 @@
 //! | `bpm`, `ppq` | The project's tempo and timebase: the effect runs on FL's ticks, as in a render (default 140, 96) |
 //! | `preroll` | Frames of silence FL ran through the effect before the song, in blocks of 512 (default 0) |
 //! | `phases` | Fruity Chorus only: the three LFO start phases of that export, `a,b,c` (FL draws them from the clock; a case without them is run with Lemon Studio's fixed seed and only reported) |
+//! | `extra` | `self`: the slot is on a track routed nowhere (the master), where the effect's extra output (Fruity Stereo Shaper's difference output) joins the audio right behind the effect; default `none` |
 //! | `limit_db` | The largest difference allowed, in dB of full scale (default -120) |
 //!
 //! Paths are relative to the case file. The test prints every case's peak difference and fails when one is over its
 //! limit. Lemon Studio's slot is the recreation run here (`effects::from_slot`); the engine's own handling of the slot
-//! (switches, mix level, the difference output) is not part of this comparison.
+//! (switches, mix level, the difference output other than `extra = self`) is not part of this comparison. The cases
+//! (FL's exports) are not part of the repository.
 //!
-// spec: plugins/fruity-chorus.md "FL 2026 null test (not run yet)", plugins/fruity-stereo-shaper.md "FL 2026 null test (not run yet)"
+// spec: plugins/transient-processor.md, plugins/fruity-chorus.md and plugins/fruity-stereo-shaper.md "FL 2026 null test"
 
 use std::path::{Path, PathBuf};
 
@@ -38,6 +40,7 @@ struct Case {
     ppq: u16,
     preroll: usize,
     phases: Option<[u32; 3]>,
+    extra_self: bool,
     limit_db: f64,
 }
 
@@ -61,6 +64,7 @@ fn parse(path: &Path) -> Result<Case, String> {
         ppq: 96,
         preroll: 0,
         phases: None,
+        extra_self: false,
         limit_db: -120.0,
     };
     for line in text.lines() {
@@ -80,6 +84,11 @@ fn parse(path: &Path) -> Result<Case, String> {
             "ppq" => case.ppq = num(value)? as u16,
             "preroll" => case.preroll = num(value)? as usize,
             "limit_db" => case.limit_db = num(value)?,
+            "extra" => case.extra_self = match value {
+                "self" => true,
+                "none" => false,
+                v => return Err(format!("extra: `self` or `none`, not {v}")),
+            },
             "phases" => {
                 let p: Vec<u32> = value.split(',').map(|v| v.trim().parse::<u32>().map_err(|e| format!("phases: {e}"))).collect::<Result<_, _>>()?;
                 case.phases = Some(p.try_into().map_err(|_| "phases: three values".to_owned())?);
@@ -127,6 +136,15 @@ fn run(case: &Case) -> Result<f64, String> {
         buf.clear();
         buf.extend((at..at + len).flat_map(|i| [dry.left[i], dry.right[i]]));
         fx.process(&mut buf);
+        // On the master the extra output is added to the buffer the effect worked on (spec: audio/sidechain.md "Extra
+        // output").
+        if case.extra_self {
+            if let Some((_, extra)) = fx.extra() {
+                for (b, e) in buf.iter_mut().zip(extra) {
+                    *b += e;
+                }
+            }
+        }
         for (k, f) in buf.chunks_exact(2).enumerate() {
             let i = at + k;
             peak = peak.max(f64::from(f[0] - fl.left[i]).abs()).max(f64::from(f[1] - fl.right[i]).abs());

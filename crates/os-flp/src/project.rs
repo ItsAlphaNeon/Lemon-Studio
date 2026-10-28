@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 
+use os_model::clip_lfo::ClipLfo;
 use os_model::{
     Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelMisc, ChannelRack, ChannelSound, Clip, ClipSource, ControlPoint,
     DataFolder, Envelope, InitControl, MixerTrack,
@@ -179,10 +180,12 @@ mod id {
 }
 
 const NOTE_LEN: usize = 24;
-/// Clip record lengths: 88 bytes in files of FL 26, 80 bytes in files of FL 24.2 to 25 (spec: flp/layouts.md,
-/// "Playlist clip records").
+/// Clip record lengths: 88 bytes in files of FL 26, 80 bytes in files of FL 24.2 to 25, 60 bytes in files of FL 21
+/// to 24.1 (20.99 betas included), 32 bytes up to FL 20 (spec: flp/layouts.md, "Playlist clip records").
 const CLIP_LEN: usize = 88;
 const CLIP_LEN_25: usize = 80;
+const CLIP_LEN_21: usize = 60;
+const CLIP_LEN_20: usize = 32;
 const MIXER_REC_LEN: usize = 12;
 const NOTE_FLAGS_DEFAULT: u16 = 0x4000;
 const PATTERN_COLOR_DEFAULT: u32 = 0x002D_2C29;
@@ -719,9 +722,10 @@ fn text_enc(events: &[Event], version: Option<usize>) -> TextEnc {
     if major_version(events, version) <= 11 { TextEnc::Ansi } else { TextEnc::Utf16 }
 }
 
-/// The record length a clip list fits: a whole number of records, each with `00 50` at byte 4.
+/// The record length a clip list fits: a whole number of records, each with `00 50` at byte 4, trying 88, 80, 60
+/// and 32 bytes (spec: flp/layouts.md, "How to tell the generation").
 fn list_clip_len(data: &[u8]) -> Option<usize> {
-    [CLIP_LEN, CLIP_LEN_25]
+    [CLIP_LEN, CLIP_LEN_25, CLIP_LEN_21, CLIP_LEN_20]
         .into_iter()
         .find(|&n| !data.is_empty() && data.len() % n == 0 && data.chunks_exact(n).all(|r| r[4..6] == [0x00, 0x50]))
 }
@@ -1570,20 +1574,26 @@ fn marker_events(m: &TimeMarker, enc: TextEnc) -> Vec<Event> {
 
 const AUTO_HEADER_LEN: usize = 21;
 const AUTO_POINT_LEN: usize = 24;
+/// Behind the curve's points: where the count of the LFO envelope's points sits, and its points begin (spec:
+/// flp/layouts.md "An automation clip's record").
+const LFO_ENV_COUNT: usize = 44;
+const LFO_ENV_POINTS: usize = 48;
+/// Behind the envelope's points: the LFO's flags byte, 3 unused bytes, its switch, three ints, speed, tension, skew,
+/// pulse width and phase offset.
+const LFO_VALUES_LEN: usize = 40;
 
-/// A new automation clip's event-234 header (count patched in on writing) and tail (spec: flp/events/automation.md).
-fn auto_template(bipolar: bool) -> (Vec<u8>, Vec<u8>) {
-    let h = vec![1, 0, 0, 0, 0x40, 0, 0, 0, u8::from(bipolar), 4, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0];
+/// A new automation clip's event-234 header and tail (spec: flp/layouts.md "An automation clip's record"), with the
+/// fields written from the points and the LFO left at 0: the curve's head (kind 4, version 3), the curve's flags byte 1
+/// and its four ints at -1, the four ints 128, 128, 0, 128, the LFO envelope's head (kind 5, version 3), the LFO's
+/// three ints at -1.
+fn auto_template() -> (Vec<u8>, Vec<u8>) {
+    let h = vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0];
     let mut t = vec![1, 0, 0, 0];
     t.extend([0xff; 16]);
-    t.extend([0x80, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 5, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0]);
-    t.extend([0; 14]);
-    t.extend([0xf0, 0x3f]);
+    t.extend([0x80, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 5, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0]);
     t.extend([0; 8]);
-    t.extend([1, 0, 0, 0, 0, 0, 0, 0]);
     t.extend([0xff; 12]);
-    t.extend([0xfb, 0xb2]);
-    t.extend([0; 18]);
+    t.extend([0; 20]);
     (h, t)
 }
 
@@ -1593,16 +1603,104 @@ pub fn new_automation(channel: u16, target: u32, value: f64, beats: f64) -> Auto
 }
 
 /// ADD > Automation clip's data (spec: ui/add-clip-channels.md §2): a flat line at `value` over `beats` and no target
-/// (no event 227); FL stored header byte 8 as 1 for it.
+/// (no event 227); FL stored header byte 8 (the LFO's mode) as 1 for it.
 pub fn untargeted_automation(channel: u16, value: f64, beats: f64) -> Automation {
     flat_automation(channel, Vec::new(), true, value, beats)
 }
 
+/// A flat line; a bipolar target's LFO adds (FL stores the LFO's mode as 1 for one).
 fn flat_automation(channel: u16, targets: Vec<u32>, bipolar: bool, value: f64, beats: f64) -> Automation {
-    let (header, tail) = auto_template(bipolar);
+    let (header, tail) = auto_template();
     let mut first = AutoPoint::new(0.0, value);
     first.flag = 0;
-    Automation { channel, targets, points: vec![first, AutoPoint::new(beats.max(0.0), value)], header, tail }
+    let lfo = ClipLfo { mode: u8::from(bipolar), ..ClipLfo::default() };
+    Automation { channel, targets, points: vec![first, AutoPoint::new(beats.max(0.0), value)], header, tail, lfo }
+}
+
+fn le_i32(d: &[u8], o: usize) -> i32 {
+    i32::from_le_bytes(d[o..o + 4].try_into().unwrap())
+}
+
+/// `n` point records (24 bytes each), positions made absolute (stored: the distance from the previous point).
+fn decode_points(d: &[u8]) -> Vec<AutoPoint> {
+    let mut beat = 0.0;
+    d.chunks_exact(AUTO_POINT_LEN)
+        .map(|r| {
+            beat += f64::from_le_bytes(r[0..8].try_into().unwrap());
+            AutoPoint {
+                beat,
+                value: f64::from_le_bytes(r[8..16].try_into().unwrap()),
+                tension: f32::from_le_bytes(r[16..20].try_into().unwrap()),
+                mode: AutoMode::from_byte(r[20]),
+                flag: r[23],
+            }
+        })
+        .collect()
+}
+
+fn encode_points(d: &mut Vec<u8>, pts: &[AutoPoint]) {
+    let mut prev = 0.0;
+    for p in pts {
+        d.extend_from_slice(&(p.beat - prev).max(0.0).to_le_bytes());
+        prev = p.beat;
+        d.extend_from_slice(&p.value.to_le_bytes());
+        d.extend_from_slice(&p.tension.to_le_bytes());
+        d.extend([p.mode.byte(), 0, 0, p.flag]);
+    }
+}
+
+/// Where the LFO's values begin in `tail` (the bytes behind the curve's points), if the tail holds the whole layout.
+fn lfo_values_at(tail: &[u8]) -> Option<usize> {
+    let m = u32::from_le_bytes(tail.get(LFO_ENV_COUNT..LFO_ENV_POINTS)?.try_into().unwrap()) as usize;
+    let o = LFO_ENV_POINTS.checked_add(m.checked_mul(AUTO_POINT_LEN)?)?;
+    (tail.len() >= o.checked_add(LFO_VALUES_LEN)?).then_some(o)
+}
+
+/// The LFO read out of an event-234 `header` and `tail`, and both with what was read zeroed and the envelope's points
+/// taken out (they are written from the model's `lfo`). A tail without the whole layout keeps the defaults.
+fn split_lfo(header: &mut [u8], tail: &[u8]) -> (ClipLfo, Vec<u8>) {
+    let mut lfo = ClipLfo { amount: le_i32(header, 4), mode: header[8], ..ClipLfo::default() };
+    header[4..9].fill(0);
+    let Some(o) = lfo_values_at(tail) else { return (lfo, tail.to_vec()) };
+    lfo.envelope = decode_points(&tail[LFO_ENV_POINTS..o]);
+    let v = &tail[o..o + LFO_VALUES_LEN];
+    (lfo.flags, lfo.switch, lfo.speed) = (v[0], le_i32(v, 4), le_i32(v, 20));
+    (lfo.tension, lfo.skew, lfo.pulse_width, lfo.phase) = (le_i32(v, 24), le_i32(v, 28), le_i32(v, 32), le_i32(v, 36));
+    let mut rest = tail[..LFO_ENV_COUNT].to_vec();
+    rest.extend([0; 4]);
+    let mut v = v.to_vec();
+    v[0] = 0;
+    for f in [4, 20, 24, 28, 32, 36] {
+        v[f..f + 4].fill(0);
+    }
+    rest.extend(v);
+    rest.extend_from_slice(&tail[o + LFO_VALUES_LEN..]);
+    (lfo, rest)
+}
+
+/// `tail` with the LFO `lfo` written into it: its envelope's count and points, its values. A tail without the layout
+/// is written as it is while the LFO is at its defaults, else the template's tail is used.
+fn join_lfo(tail: &[u8], lfo: &ClipLfo) -> Vec<u8> {
+    let template;
+    let (tail, o) = match lfo_values_at(tail) {
+        Some(o) => (tail, o),
+        None if *lfo == ClipLfo::default() => return tail.to_vec(),
+        None => {
+            template = auto_template().1;
+            (&template[..], LFO_ENV_POINTS)
+        }
+    };
+    let mut d = tail[..LFO_ENV_COUNT].to_vec();
+    d.extend_from_slice(&(lfo.envelope.len() as u32).to_le_bytes());
+    encode_points(&mut d, &lfo.envelope);
+    let mut v = tail[o..o + LFO_VALUES_LEN].to_vec();
+    v[0] = lfo.flags;
+    for (f, x) in [(4, lfo.switch), (20, lfo.speed), (24, lfo.tension), (28, lfo.skew), (32, lfo.pulse_width), (36, lfo.phase)] {
+        v[f..f + 4].copy_from_slice(&x.to_le_bytes());
+    }
+    d.extend(v);
+    d.extend_from_slice(&tail[o + LFO_VALUES_LEN..]);
+    d
 }
 
 fn decode_automation(channel: u16, d: &[u8]) -> Option<Automation> {
@@ -1614,39 +1712,21 @@ fn decode_automation(channel: u16, d: &[u8]) -> Option<Automation> {
     if d.len() < end {
         return None;
     }
-    let mut beat = 0.0;
-    let points = d[AUTO_HEADER_LEN..end]
-        .chunks_exact(AUTO_POINT_LEN)
-        .map(|r| {
-            // Positions are stored as the distance from the previous point.
-            beat += f64::from_le_bytes(r[0..8].try_into().unwrap());
-            AutoPoint {
-                beat,
-                value: f64::from_le_bytes(r[8..16].try_into().unwrap()),
-                tension: f32::from_le_bytes(r[16..20].try_into().unwrap()),
-                mode: AutoMode::from_byte(r[20]),
-                flag: r[23],
-            }
-        })
-        .collect();
+    let points = decode_points(&d[AUTO_HEADER_LEN..end]);
     let mut header = d[..AUTO_HEADER_LEN].to_vec();
     header[17..21].fill(0); // the count is written from the points
-    Some(Automation { channel, targets: Vec::new(), points, header, tail: d[end..].to_vec() })
+    let (lfo, tail) = split_lfo(&mut header, &d[end..]);
+    Some(Automation { channel, targets: Vec::new(), points, header, tail, lfo })
 }
 
 fn encode_automation(a: &Automation) -> Vec<u8> {
     let mut d = a.header.clone();
     d.resize(AUTO_HEADER_LEN, 0);
+    d[4..8].copy_from_slice(&a.lfo.amount.to_le_bytes());
+    d[8] = a.lfo.mode;
     d[17..21].copy_from_slice(&(a.points.len() as u32).to_le_bytes());
-    let mut prev = 0.0;
-    for p in &a.points {
-        d.extend_from_slice(&(p.beat - prev).max(0.0).to_le_bytes());
-        prev = p.beat;
-        d.extend_from_slice(&p.value.to_le_bytes());
-        d.extend_from_slice(&p.tension.to_le_bytes());
-        d.extend([p.mode.byte(), 0, 0, p.flag]);
-    }
-    d.extend_from_slice(&a.tail);
+    encode_points(&mut d, &a.points);
+    d.extend(join_lfo(&a.tail, &a.lfo));
     d
 }
 
@@ -5611,6 +5691,73 @@ mod tests {
         eprintln!("{lists} clip lists, {autos} automation records re-encode exactly");
     }
 
+    /// The LFO's fields and the range come back from a record as stored, and an edited LFO is written where it was read
+    /// from, every other byte kept (spec: flp/layouts.md "An automation clip's record", audio/automation.md "The LFO").
+    #[test]
+    fn automation_lfo_fields_round_trip() {
+        // A record as FL writes one: two curve points, the LFO on, adding, amount 38, two envelope points.
+        let mut a = new_automation(2, os_model::target::channel(0, 0), 0.5, 4.0);
+        a.lfo = ClipLfo {
+            switch: -1,
+            amount: 38,
+            mode: 1,
+            speed: 40898,
+            tension: 32,
+            skew: -128,
+            pulse_width: 64,
+            phase: 7,
+            flags: 3,
+            envelope: vec![os_model::clip_lfo::envelope_point(0.0, 0.0), os_model::clip_lfo::envelope_point(2.0, 1.0)],
+        };
+        let d = encode_automation(&a);
+        assert_eq!(d.len(), 109 + 24 * 2 + 24 * 2, "109 + 24 n + 24 m");
+        let o = 21 + 48;
+        assert_eq!((le_i32(&d, 4), d[8]), (38, 1));
+        assert_eq!(le_i32(&d, o + 44), 2, "the envelope's count");
+        let v = o + 48 + 48;
+        assert_eq!((d[v], le_i32(&d, v + 4), le_i32(&d, v + 8), le_i32(&d, v + 20)), (3, -1, -1, 40898));
+        assert_eq!((le_i32(&d, v + 24), le_i32(&d, v + 28), le_i32(&d, v + 32), le_i32(&d, v + 36)), (32, -128, 64, 7));
+        let back = decode_automation(2, &d).unwrap();
+        assert_eq!(back.lfo, a.lfo);
+        assert_eq!(back.points, a.points);
+        assert_eq!(encode_automation(&back), d, "decoded and encoded again: the same bytes");
+        // Bytes the model does not know stay, and an edit changes only its own field.
+        let mut d2 = d.clone();
+        d2[o + 1] = 0x55;
+        d2.extend([9, 8, 7]);
+        let mut back = decode_automation(2, &d2).unwrap();
+        assert_eq!(encode_automation(&back), d2);
+        back.lfo.speed = 26259;
+        let e = encode_automation(&back);
+        assert_eq!(le_i32(&e, v + 20), 26259);
+        assert!(e.iter().zip(&d2).enumerate().all(|(i, (x, y))| x == y || (v + 20..v + 24).contains(&i)));
+        // A record whose tail is cut short keeps it while the LFO is at its defaults; an LFO switched on gets the
+        // new clip's layout.
+        let mut short = Automation { header: vec![0; 21], tail: vec![1, 2, 3], ..new_automation(2, 0, 0.5, 4.0) };
+        short.lfo = ClipLfo::default();
+        assert_eq!(&encode_automation(&short)[21 + 48..], &[1, 2, 3]);
+        short.lfo.switch = -1;
+        let e = encode_automation(&short);
+        assert_eq!(e.len(), 109 + 48 + 24);
+        assert_eq!(decode_automation(2, &e).unwrap().lfo, short.lfo);
+    }
+
+    /// A new clip's record is FL's: amount 64, the LFO off with its flags 1, speed 45819, one envelope point at 1.
+    #[test]
+    fn a_new_clip_has_the_default_lfo() {
+        let a = new_automation(2, os_model::target::channel(0, 0), 0.5, 4.0);
+        let d = encode_automation(&a);
+        assert_eq!(d.len(), 109 + 48 + 24);
+        let t = &d[21 + 48..];
+        assert_eq!(&t[36..48], &[5, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(f64::from_le_bytes(t[56..64].try_into().unwrap()), 1.0);
+        assert_eq!(&t[72..80], &[1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&t[92..96], &45819i32.to_le_bytes());
+        assert_eq!((le_i32(&d, 4), d[8]), (64, 0));
+        assert_eq!(decode_automation(2, &d).unwrap(), Automation { targets: Vec::new(), ..a });
+        assert_eq!(untargeted_automation(2, 0.5, 4.0).lfo.mode, 1);
+    }
+
     /// Files of FL 24.2 to 25 hold 80-byte clip records: read with their fields, written back at 80 bytes with 0
     /// at bytes 76..79; 88-byte lists are still told apart (spec: flp/layouts.md, "Playlist clip records").
     #[test]
@@ -5625,6 +5772,22 @@ mod tests {
         assert_eq!((back[1].position, back[1].length, back[1].track), (768, 96, 0));
         assert_eq!(encode_clips(&back, CLIP_LEN_25), d);
         assert_eq!(list_clip_len(&encode_clips(&back, CLIP_LEN)), Some(CLIP_LEN));
+    }
+
+    /// Lists of older files, 60-byte (FL 21 to 24.1) and 32-byte (up to FL 20) records, are told apart and written
+    /// back at their length; 32-byte records have no id (spec: flp/layouts.md, "How to tell the generation").
+    #[test]
+    fn older_clip_records_are_read_at_their_length() {
+        let a = Clip::new(384, 288, 2, ClipSource::Pattern(1));
+        let b = Clip::new(768, 96, 0, ClipSource::Pattern(2));
+        for len in [CLIP_LEN_21, CLIP_LEN_20] {
+            let d = encode_clips(&[a.clone(), b.clone()], len);
+            assert_eq!(d.len(), 2 * len);
+            assert_eq!(list_clip_len(&d), Some(len));
+            let back = decode_clips(&d, len);
+            assert_eq!((back[1].position, back[1].length, back[1].track), (768, 96, 0));
+            assert_eq!(encode_clips(&back, len), d);
+        }
     }
 
     /// A new project's playlist (clips with windows, mute, markers) and automation clips are written by `create`,

@@ -1955,8 +1955,10 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
         color: Some(s.clip_colors.new_channel(index)),
         enabled: true,
+        // The clip's range 0..1: stored pan 0 (minimum), volume 12800 (maximum), as FL stores a new clip's
+        // (spec: audio/automation.md "Range").
         volume: 1.0,
-        pan: 0.0,
+        pan: -1.0,
         pitch_cents: 0,
         mixer_track: 0,
         sample_path: None,
@@ -2019,7 +2021,8 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
         color: (!audio).then(|| Rgb::new(0x5a, 0x74, 0x4c)),
         enabled: true,
         volume: if audio { 0.78125 } else { 1.0 },
-        pan: 0.0,
+        // An automation clip's range 0..1: its pan knob is the minimum (spec: audio/automation.md "Range").
+        pan: if audio { 0.0 } else { -1.0 },
         pitch_cents: 0,
         mixer_track: 0,
         sample_path: None,
