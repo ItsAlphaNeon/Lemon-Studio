@@ -52,6 +52,8 @@ says that they were. Without a window (`--serve`) the client saves directly.
 | `history` | | The undo history (`steps` with `name`, `undone`) and `at`, where the project is in it |
 | `events` | `since` | What changed after event `since` (0: all kept), and `last`, the newest event's number |
 | `journal` | `since` | The journal's entries after `since` (0: all kept this session), `last`, and the journal's `file` |
+| `plugin_states` | `owner` | The states that plugin had in the journals (this session's and earlier ones'), newest first: `file`, `seq`, `t`, `at`, `hash` |
+| `restore_state` | `owner`, `seq`, `file` (else this session's) | Puts that state back into the plugin (edit level) |
 | `apply` | `commands` (or `command`), `name` | Each command's `results`. The list is one undo step named `name` (else the command's own name), applied whole or not at all |
 | `propose` | `commands`, `name` | `proposal` (its number) and `changes` (what it would change). The project is not changed |
 | `proposals` | | The proposals waiting |
@@ -148,10 +150,13 @@ not the project is saved: one file per session, `Journal/<start time>-<pid>.json
 | `opened`, `new`, `saved` | `path` | A project was opened, made new or saved |
 | `step`, `undo`, `redo` | `name`, `done` | An undo step was made (its name: who and what), taken back or given again |
 | `changes` | `changes`: `path`, `before`, `after` | What the project's reading (`state`) changed, by id; at most four times a second |
+| `notes` | `pattern`, `number`, `added`, `removed` | A pattern's notes added and removed, with every stored field (a moved note is one removed and one added) |
 | `plugin_state` | `owner`, `at`, `plugin`, `size`, `hash`, `state` (base64) | A hosted plugin's whole state: after it reported a change while its window was open, as its window closes, and on save. Over 4 MB only `size` and `hash` |
 
-A sound made in a plugin's window is in the journal even if the project is never saved: its `state` loads back into
-the plugin. `journal` reads this session's entries back.
+A sound made in a plugin's window is in the journal even if the project is never saved. A plugin window's Presets box
+has **Recover from journal**: the states that plugin had, in this session and earlier ones, newest first by time and
+channel; choosing one puts it back. `journal` reads this session's entries back, `plugin_states` and `restore_state`
+do what Recover from journal does.
 
 ## An example
 
@@ -188,7 +193,6 @@ call("apply", commands=[
   fields; mixer track moves, slot moves, sidechains and Tesla; clip offsets, groups, markers and playlist tracks;
   automation clips and points; project settings beyond tempo, signature and song info; plugin state and presets;
   sample tags.
-- The journal records a pattern's notes as a count: which notes changed is not in it yet. Older sessions' journals are
-  read from their files; nothing in the app shows them or restores from them yet.
+- The journal has no automation points or event lanes yet, and nothing in the app replays it beyond plugin states.
 - Rendering through the control plane, and pushing events to clients (they poll `events`). A parameter changed in a
   plugin's window is an undo step but not an `edit` event.

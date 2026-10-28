@@ -145,6 +145,22 @@ impl App {
                 let (entries, last) = self.journal.since(since);
                 Ok(json!({ "entries": entries, "last": last, "file": self.journal.path.as_ref().map(|p| p.display().to_string()) }))
             }
+            "plugin_states" => {
+                let owner = uint(params, "owner")? as u32;
+                let key = super::command::owner_key(&self.state.project, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
+                let name = self.plugins.descriptor(key).map(|d| d.name).ok_or_else(|| failed(format!("{owner} is not played by a hosted plugin")))?;
+                let found = self.journal.states_of(&name, 50);
+                let list: Vec<Value> = found.iter().map(|f| json!({ "file": f.file.display().to_string(), "seq": f.seq, "t": f.t, "at": f.at, "hash": f.hash })).collect();
+                Ok(json!({ "plugin": name, "states": list }))
+            }
+            "restore_state" => {
+                need(c, Level::Edit)?;
+                let owner = uint(params, "owner")? as u32;
+                let key = super::command::owner_key(&self.state.project, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
+                let file = params.get("file").and_then(Value::as_str).map(std::path::PathBuf::from).or_else(|| self.journal.path.clone()).ok_or_else(|| bad("no journal file"))?;
+                let msg = self.recover_state(key, &file, uint(params, "seq")?);
+                Ok(json!({ "message": msg }))
+            }
             "proposals" => {
                 let list: Vec<Value> = self.state.control.proposals.iter().map(|p| json!({ "proposal": p.n, "name": p.name, "changes": p.changes })).collect();
                 Ok(Value::Array(list))

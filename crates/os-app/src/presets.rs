@@ -428,6 +428,8 @@ pub enum PCmd {
     /// Browse presets: the browser's Plugin presets, opened at the plugin.
     #[cfg_attr(not(windows), allow(dead_code))]
     Browse(usize),
+    /// Recover from journal: the state written as entry `.2` of journal file `.1` goes back into the instance.
+    Recover(usize, PathBuf, u64),
 }
 
 /// The preset header of the instance under `key`.
@@ -516,7 +518,24 @@ pub fn popup(app: &App, key: usize, x: f32, y: f32) -> Popup {
     items.push(on(PItem::new("Delete preset...", Cmd::Preset(PCmd::Delete(key))), own));
     items.push(PItem::sep());
     items.push(PItem::new("Browse presets", Cmd::Preset(PCmd::Browse(key))));
+    items.push(recover_item(app, key));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// Recover from journal ▸: the states this plugin had in the journals (`crate::journal`), newest first, as when and
+/// where it played; choosing one puts it back. Off when there are none.
+fn recover_item(app: &App, key: usize) -> PItem {
+    const MAX: usize = 20;
+    let found = header(app, key).map(|h| app.journal.states_of(&h.plugin, MAX)).unwrap_or_default();
+    let children: Vec<PItem> = found
+        .into_iter()
+        .map(|f| {
+            let label = if f.at.is_empty() { crate::journal::when(f.t) } else { format!("{}  ({})", crate::journal::when(f.t), f.at) };
+            PItem::new(label, Cmd::Preset(PCmd::Recover(key, f.file, f.seq)))
+        })
+        .collect();
+    let item = PItem { children, ..PItem::new("Recover from journal", Cmd::Nothing) };
+    if item.children.is_empty() { item.off() } else { item }
 }
 
 /// Runs a preset command; returns the status message.
@@ -557,6 +576,7 @@ pub fn run(app: &mut App, c: PCmd) -> Option<String> {
             None
         }
         PCmd::Browse(key) => browse(app, key),
+        PCmd::Recover(key, file, seq) => Some(app.recover_state(key, &file, seq)),
     };
     app.invalidate();
     msg

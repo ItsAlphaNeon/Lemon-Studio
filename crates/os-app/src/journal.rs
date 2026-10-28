@@ -9,6 +9,7 @@
 //! - `opened`, `new`, `saved`: the project was opened from a file, made new, or saved (with the path);
 //! - `step`, `undo`, `redo`: an undo step was made (its name: who and what) or taken back or given again;
 //! - `changes`: what the project's reading (`control::query::project`) gained, lost or changed, by id;
+//! - `notes`: a pattern's notes added and removed (every stored field; a moved note is one removed and one added);
 //! - `plugin_state`: a hosted plugin's whole state (base64), each time it changes while its window is open, as the
 //!   window closes, and as the project is saved: a sound made in a plugin's window survives an unsaved project.
 //!
@@ -45,6 +46,8 @@ pub struct Journal {
     seq: u64,
     /// The project's last reading, and whether it may have changed since.
     reading: Option<Value>,
+    /// Each pattern's notes as last read (by pattern id).
+    notes: HashMap<u32, Vec<os_model::Note>>,
     dirty: bool,
     read_at: Option<Instant>,
     /// The history as last seen: (steps, done).
@@ -120,6 +123,7 @@ impl App {
             None => j.write("new", json!({})),
         }
         j.reading = Some(crate::control::query::project(&self.state));
+        j.notes = self.state.project.patterns.iter().map(|p| (p.id.0, p.notes.clone())).collect();
         j.dirty = false;
         j.history = (self.state.history.steps(), self.state.history.done());
         j.plugin_hash.clear();
@@ -176,6 +180,20 @@ impl App {
             }
         }
         j.reading = Some(now);
+        let p = &self.state.project;
+        for q in &p.patterns {
+            let was = j.notes.get(&q.id.0);
+            if was.is_some_and(|w| *w == q.notes) {
+                continue;
+            }
+            let was = was.cloned().unwrap_or_default();
+            let (added, removed) = (minus(&q.notes, &was), minus(&was, &q.notes));
+            if !added.is_empty() || !removed.is_empty() {
+                let json = |v: Vec<os_model::Note>| v.iter().map(|n| note_json(p, n)).collect::<Vec<_>>();
+                j.write("notes", json!({ "pattern": q.id.0, "number": q.number, "added": json(added), "removed": json(removed) }));
+            }
+            j.notes.insert(q.id.0, q.notes.clone());
+        }
     }
 
     /// The plugins whose windows are open and that said something since they were last read (a parameter moved, a
@@ -210,7 +228,7 @@ impl App {
     }
 
     /// The state of the instance under `key`, into the journal when it differs from the last written.
-    fn journal_plugin(&mut self, key: usize) {
+    pub(crate) fn journal_plugin(&mut self, key: usize) {
         let Some(owner) = crate::control::command::key_owner(&self.state.project, key) else { return };
         let Some(state) = self.plugins.state(key) else { return };
         let hash = {
@@ -229,6 +247,135 @@ impl App {
         let data = (state.len() <= STATE_MAX).then(|| base64(&state));
         self.journal.write("plugin_state", json!({ "owner": owner, "at": place, "plugin": plugin, "size": state.len(), "hash": format!("{hash:016x}"), "state": data }));
     }
+}
+
+/// A plugin state found in the journals (`states_of`): where it is (the journal file and the entry's number), when it
+/// was written (Unix ms), the channel or slot it played and its hash.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Found {
+    pub file: PathBuf,
+    pub seq: u64,
+    pub t: u64,
+    pub at: String,
+    pub hash: String,
+}
+
+impl Journal {
+    /// The states plugin `name` had in the journals, newest first, each distinct state once: this session's, then the
+    /// earlier sessions' (their files, newest first). At most `max`.
+    pub fn states_of(&self, name: &str, max: usize) -> Vec<Found> {
+        let mut out: Vec<Found> = Vec::new();
+        let mut take = |file: &std::path::Path, e: &Value, out: &mut Vec<Found>| {
+            if e["kind"] != "plugin_state" || e["plugin"]["name"] != name || !e["state"].is_string() {
+                return;
+            }
+            let hash = e["hash"].as_str().unwrap_or("").to_string();
+            if out.iter().any(|f| f.hash == hash) {
+                return;
+            }
+            let at = e["at"]["channel"].as_str().map(str::to_string).or_else(|| e["at"]["track"].as_u64().map(|t| format!("bus {t}"))).unwrap_or_default();
+            out.push(Found { file: file.to_path_buf(), seq: e["seq"].as_u64().unwrap_or(0), t: e["t"].as_u64().unwrap_or(0), at, hash });
+        };
+        let here = self.path.clone().unwrap_or_default();
+        for e in self.entries.iter().rev() {
+            take(&here, e, &mut out);
+        }
+        for file in older_journals(self.path.as_deref()) {
+            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            let mut found: Vec<Value> = text.lines().filter(|l| l.contains("\"plugin_state\"") && l.contains(name)).filter_map(|l| serde_json::from_str(l).ok()).collect();
+            found.reverse();
+            for e in &found {
+                take(&file, e, &mut out);
+            }
+            if out.len() >= max {
+                break;
+            }
+        }
+        out.truncate(max);
+        out
+    }
+
+    /// The state written as entry `seq` of journal `file` (this session's when it is this journal's file).
+    pub fn state_at(&self, file: &std::path::Path, seq: u64) -> Option<Vec<u8>> {
+        let e = if self.path.as_deref() == Some(file) || file.as_os_str().is_empty() {
+            self.entries.iter().find(|e| e["seq"] == seq).cloned()?
+        } else {
+            let text = std::fs::read_to_string(file).ok()?;
+            text.lines().filter(|l| l.contains("\"plugin_state\"")).filter_map(|l| serde_json::from_str::<Value>(l).ok()).find(|e| e["seq"] == seq)?
+        };
+        unbase64(e["state"].as_str()?)
+    }
+}
+
+impl App {
+    /// Puts back the state written as entry `seq` of journal `file` into the instance under `key` (Recover from
+    /// journal). Returns the status message.
+    pub(crate) fn recover_state(&mut self, key: usize, file: &std::path::Path, seq: u64) -> String {
+        let Some(name) = self.plugins.descriptor(key).map(|d| d.name) else { return "No plugin there".into() };
+        let Some(state) = self.journal.state_at(file, seq) else { return format!("That {name} state is no longer in the journal") };
+        if !self.plugins.set_state(key, &state) {
+            return format!("{name} did not take the state");
+        }
+        self.plugins.mark_edited(key);
+        self.state.params.reread(key);
+        self.journal_plugin(key);
+        self.invalidate();
+        format!("{name} recovered from the journal")
+    }
+}
+
+/// The journal files other than `current`, newest first.
+fn older_journals(current: Option<&std::path::Path>) -> Vec<PathBuf> {
+    if cfg!(test) {
+        return Vec::new();
+    }
+    let Some(dir) = os_paths::user_dir().map(|d| d.join("Journal")) else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut v: Vec<(SystemTime, PathBuf)> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl") && Some(p.as_path()) != current)
+        .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
+        .collect();
+    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.into_iter().map(|(_, p)| p).collect()
+}
+
+/// A journal time as a menu shows it: "Today 7:48", "Oct 27 23:57".
+pub fn when(t: u64) -> String {
+    use chrono::{Local, TimeZone};
+    let Some(at) = Local.timestamp_millis_opt(t as i64).single() else { return String::new() };
+    if at.date_naive() == Local::now().date_naive() { at.format("Today %-H:%M").to_string() } else { at.format("%b %-d %-H:%M").to_string() }
+}
+
+/// The notes of `a` that `b` has fewer of (as many times as `a` has them more).
+fn minus(a: &[os_model::Note], b: &[os_model::Note]) -> Vec<os_model::Note> {
+    let key = |n: &os_model::Note| (n.position, n.key, n.channel, n.length, n.velocity, n.pan, n.fine_pitch, n.release, n.mod_x, n.mod_y, n.flags, (n.group, n.unk14, n.repeat));
+    let (mut a, mut b) = (a.to_vec(), b.to_vec());
+    a.sort_by_key(key);
+    b.sort_by_key(key);
+    let (mut out, mut k) = (Vec::new(), 0);
+    for n in a {
+        while k < b.len() && key(&b[k]) < key(&n) {
+            k += 1;
+        }
+        if k < b.len() && b[k] == n {
+            k += 1;
+        } else {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// A note with every stored field; its channel by id.
+fn note_json(p: &os_model::Project, n: &os_model::Note) -> Value {
+    let ch = p.channels.iter().find(|c| c.index == n.channel).map(|c| c.id.0);
+    json!({
+        "channel": ch, "position": n.position, "length": n.length, "key": n.key, "velocity": n.velocity, "pan": n.pan,
+        "fine_pitch": n.fine_pitch, "release": n.release, "mod_x": n.mod_x, "mod_y": n.mod_y, "flags": n.flags,
+        "group": n.group, "repeat": n.repeat,
+    })
 }
 
 /// Removes journals older than [`KEEP_DAYS`] from `dir`.
@@ -324,6 +471,26 @@ mod tests {
         a.journal_tick();
         assert_eq!(kinds(&a, mark), ["undo", "changes"]);
         assert_eq!(a.journal.since(mark).0[0]["name"], "Tempo");
+        // A note added, then moved: one added; then one removed and one added, with every field.
+        let mark = a.journal.since(0).1;
+        let n = os_model::Note { position: 0, length: 24, channel: 0, key: 60, velocity: 100, pan: 64, fine_pitch: 120, mod_x: 128, mod_y: 128, release: 64, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
+        crate::patterns::pat_mut(&mut a.state, 1).notes.push(n);
+        a.journal.touch();
+        a.journal.read_at = None;
+        a.journal_tick();
+        let notes: Vec<Value> = a.journal.since(mark).0.into_iter().filter(|e| e["kind"] == "notes").collect();
+        assert_eq!(notes.len(), 1);
+        assert_eq!((notes[0]["added"].as_array().unwrap().len(), notes[0]["removed"].as_array().unwrap().len()), (1, 0));
+        assert_eq!(notes[0]["added"][0]["fine_pitch"], 120);
+        let mark = a.journal.since(0).1;
+        crate::patterns::pat_mut(&mut a.state, 1).notes.iter_mut().find(|m| **m == n).unwrap().position = 48;
+        a.journal.touch();
+        a.journal.read_at = None;
+        a.journal_tick();
+        let notes: Vec<Value> = a.journal.since(mark).0.into_iter().filter(|e| e["kind"] == "notes").collect();
+        assert_eq!(notes[0]["added"][0]["position"], 48);
+        assert_eq!(notes[0]["removed"][0]["position"], 0);
+        assert_eq!(notes[0]["removed"].as_array().unwrap().len(), 1, "only the moved note");
         // A plugin's state, written once while it stays the same.
         a.plugins.available = crate::plugins::builtin();
         a.plugins.create_with(0, a.plugins.index_of(crate::citrus::CITRUS).unwrap(), None).unwrap();
@@ -335,5 +502,19 @@ mod tests {
         assert_eq!(es[0]["kind"], "plugin_state");
         let st = unbase64(es[0]["state"].as_str().unwrap()).unwrap();
         assert_eq!(Some(st), a.plugins.state(0), "the whole state, readable back");
+        // Changed, then recovered from the journal: the state it had.
+        let first = a.plugins.state(0).unwrap();
+        let p = a.plugins.param_infos(0).into_iter().find(|p| !p.read_only && !p.bypass && p.max > p.min).unwrap();
+        let v = if (p.default - p.min).abs() > 1e-6 { p.min } else { p.max };
+        assert!(a.plugins.set_param_named(0, &p.name, v));
+        a.plugins.hosted[&0].plugin.lock().unwrap().idle();
+        assert_ne!(a.plugins.state(0).as_ref(), Some(&first), "changed");
+        a.journal_plugin(0);
+        let name = a.plugins.descriptor(0).unwrap().name;
+        let found = a.journal.states_of(&name, 10);
+        assert_eq!(found.len(), 2, "both states, newest first");
+        let msg = a.recover_state(0, &found[1].file, found[1].seq);
+        assert!(msg.ends_with("recovered from the journal"), "{msg}");
+        assert_eq!(a.plugins.state(0), Some(first), "the first state back");
     }
 }
