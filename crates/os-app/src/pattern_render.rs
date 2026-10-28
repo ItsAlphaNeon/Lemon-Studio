@@ -21,7 +21,7 @@ pub const FOLDER: &str = "Rendered";
 /// The warning box's title when there is nothing to render.
 pub const TITLE: &str = "Render as audio clip";
 /// The undo steps (§2, §3).
-pub const QUICK: &str = "Quick render as audio clip";
+pub const QUICK: &str = "Render to audio clip";
 pub const REPLACE: &str = "Render and replace";
 
 /// A render under way: what to do with the file once it is written.
@@ -170,7 +170,7 @@ pub fn place(s: &mut State, p: &Pending, path: &Path) -> String {
         return format!("Rendered {} to {file}", crate::patterns::name_of(s, p.pattern));
     }
     match replace_clips(s, p.pattern, ch) {
-        0 => format!("Rendered {} to {file} (no clips of it in the playlist to replace)", crate::patterns::name_of(s, p.pattern)),
+        0 => format!("Rendered {} to {file} (no clips of it in the arranger to replace)", crate::patterns::name_of(s, p.pattern)),
         n => format!("Rendered {} to {file}: replaced {n} clip(s)", crate::patterns::name_of(s, p.pattern)),
     }
 }

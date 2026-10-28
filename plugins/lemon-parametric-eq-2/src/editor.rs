@@ -23,7 +23,7 @@ use crate::params::{self, byte, flag, freq_id, level_id, order_id, set_byte, set
 use crate::view::{self, Hit, Target, ViewState, MAIN_FADER};
 use crate::Shared;
 
-/// "Lock spare state" (Options menu) is not saved; it lasts while the plugin instance lives.
+/// "Lock B" (Options menu) is not saved; it lasts while the plugin instance lives.
 static LOCK_SPARE: AtomicBool = AtomicBool::new(false);
 
 pub struct EqEditor {
@@ -326,8 +326,8 @@ impl Logic {
             Some(Target::Tokens) => "View band tokens".into(),
             Some(Target::Phones) => "Band solo on shift".into(),
             Some(Target::Monitor(m)) => format!("Monitor: {}", ["off", "input", "output"][usize::from(m.min(2))]),
-            Some(Target::Store) => if LOCK_SPARE.load(Ordering::Relaxed) { "Store in spare state (locked)".into() } else { "Store in spare state".into() },
-            Some(Target::Flip) => "Flip with spare state (A/B compare)".into(),
+            Some(Target::Store) => if LOCK_SPARE.load(Ordering::Relaxed) { "Copy to B (locked)".into() } else { "Copy to B".into() },
+            Some(Target::Flip) => "Swap A / B".into(),
             _ => {
                 let _ = extra;
                 String::new()
@@ -624,14 +624,14 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
-                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
+                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(id.clone()));
                 // Automation belongs to the host: offered when Lemon Studio hosts the editor (host link).
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
             }
             MenuReq::Options => {
                 m.head("Options", Cmd::None);
-                check(&mut m, "Lock spare state", LOCK_SPARE.load(Ordering::Relaxed), Cmd::LockSpare);
+                check(&mut m, "Lock B", LOCK_SPARE.load(Ordering::Relaxed), Cmd::LockSpare);
                 m.submenu("Band solo on Shift", self.solo_menu(&extra), Cmd::None);
                 // Greyed out: nothing reads the minimum phase mod speed (parameter smoothing), phase rotation or the
                 // heatmap's enhanced frequency and high precision yet. The linear phase mod speed is LIN's crossfade time.
@@ -1478,7 +1478,7 @@ mod tests {
         for label in ["Phase rotation", "Enhanced frequency", "High precision", "Smooth", "Adaptive", "Inherit bandwidth"] {
             assert!(!clickable(&o, label), "{label}");
         }
-        for label in ["Lock spare state", "-120dB", "Average mode", "Highest", "Ultra"] {
+        for label in ["Lock B", "-120dB", "Average mode", "Highest", "Ultra"] {
             assert!(clickable(&o, label), "{label}");
         }
         assert!(l.menu(&MenuReq::Phones).items.iter().all(|it| !it.clickable()));

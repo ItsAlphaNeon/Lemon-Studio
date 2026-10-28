@@ -21,7 +21,7 @@ pub const MAIN: &str = "Export";
 /// The segmented rows: their labels and segments.
 pub const SEGS: [(&str, &[&str]); 3] = [("Play", &["Song", "Pattern"]), ("Range", &["Whole", "Selection"]), ("Tail", &ex::TAILS)];
 pub const SEG_HINTS: [&str; 3] = [
-    "What to render: the playlist, or one pass of the current pattern",
+    "What to render: the arrangement, or one pass of the current pattern",
     "The whole song, or only the time selection",
     "The sound after the end: cut it, let it ring out, or wrap it to the start (a seamless loop)",
 ];
@@ -33,7 +33,7 @@ pub const CHECKS: [&str; 12] = [
     "Include the master",
     "Insert effects",
     "Master effects",
-    "Playlist markers",
+    "Arranger markers",
     "Loop points",
     "Note markers",
     "Tempo",
@@ -273,7 +273,7 @@ impl App {
         let song_ok = p.arrangement().is_some_and(|a| !a.clips.is_empty());
         let pat_ok = p.patterns.iter().find(|q| q.number == s.pattern).is_some_and(|q| !q.notes.is_empty());
         if !song_ok && !pat_ok {
-            let text = format!("Nothing to export: the playlist is empty and {} has no notes.", crate::patterns::name_of(s, s.pattern));
+            let text = format!("Nothing to export: the arranger is empty and {} has no notes.", crate::patterns::name_of(s, s.pattern));
             return self.tell(Kind::Warning, TITLE, spans(&[&text]));
         }
         let song = if song { song_ok } else { !pat_ok };

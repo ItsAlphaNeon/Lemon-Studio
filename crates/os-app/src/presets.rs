@@ -599,7 +599,7 @@ fn apply(app: &mut App, key: usize, body: &Body) -> Option<Vec<String>> {
 
 /// A preset at `path` went into the instance under `key` (the ◀ ▶ arrows or the Presets lists): while "Auto name
 /// effect slots" is on, a mixer slot takes the preset's name, kept until the next preset or a rename by hand (the
-/// slot's window title shows it too); a channel goes by "Auto name channels" (`rack::auto_name`). Spec:
+/// slot's window title shows it too); a channel goes by "Name channels after their sample or plugin" (`rack::auto_name`). Spec:
 /// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup".
 fn auto_name(app: &mut App, key: usize, path: &Path) {
     let s = &mut app.state;
@@ -1056,7 +1056,7 @@ mod tests {
         run(&mut app, PCmd::Load(0, file_for(&dir_for(&h.plugin).unwrap(), "Rim")));
         assert_eq!(app.plugins.sampler_path(0).as_deref(), Some("C:/x/rim.wav"));
         assert_eq!(app.plugins.preset_name(0).as_deref(), Some("Rim"));
-        // spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup": "Auto name channels" is
+        // spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup": "Name channels after their sample or plugin" is
         // on by default.
         assert_eq!(app.state.project.channels[0].name.as_deref(), Some("Rim"), "the ◀ ▶ arrows rename the channel");
         run(&mut app, PCmd::Step(0, -1));
@@ -1116,8 +1116,8 @@ mod tests {
     }
 
     // spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup"
-    /// A preset loaded from the Presets lists names what holds it: a channel while "Auto name channels" is on (the
-    /// default), a mixer slot while "Auto name effect slots" is on (off by default). A slot keeps a preset's name until
+    /// A preset loaded from the Presets lists names what holds it: a channel while "Name channels after their sample or plugin" is on (the
+    /// default), a mixer slot while "Name effect slots after their plugin" is on (off by default). A slot keeps a preset's name until
     /// the next preset or a rename by hand, whatever the check; the slot's window title shows the slot's name.
     #[test]
     fn presets_auto_name_channels_and_effect_slots() {

@@ -64,7 +64,7 @@ pub fn base_w(s: &State) -> f32 {
 }
 
 /// Smallest width (Lemon Studio's; FL's is 4 steps, §5): four beats of the project's signature, and never under the
-/// default 16 steps, below which the title bar's right group runs into the speaker and the "Channel rack" title.
+/// default 16 steps, below which the title bar's right group runs into the speaker and the "Instrument rack" title.
 pub fn min_w(s: &State) -> f32 {
     let steps = (4 * rk::beat_steps(s)).max(16);
     base_w(s) + STEP_W * (steps - 1) as f32
@@ -273,9 +273,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.c.fill_rect(body, t.window_body);
         ui.c.fill_rect(Rect::new(body.x, body.y, body.w, 1.0), t.window_title_hi);
     }
-    ui.hit(win, Action::RackArea, "Channel rack");
+    ui.hit(win, Action::RackArea, "Instrument rack");
     let bar = Rect::span(x + 1.0, x + w - 1.0, y + 1.0, y + 29.0);
-    ui.hit(bar, Action::WinDrag(Win::ChannelRack), "Channel rack - drag to move");
+    ui.hit(bar, Action::WinDrag(Win::ChannelRack), "Instrument rack - drag to move");
     title_bar(ui, s, win, c, f);
 
     // Rows panel (§1, §3).
@@ -319,7 +319,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         if p.zipped {
             // A zipped row: a 7 px bar in the name column (§17).
             let zr = Rect::new(nb.x, ry + 1.0, nb.w, 7.0);
-            ui.hit(Rect::new(zr.x, zr.y - 2.0, zr.w, rk::ZIP_H), Action::ChannelSelect(i), "Zipped channel - Alt+U unzips all");
+            ui.hit(Rect::new(zr.x, zr.y - 2.0, zr.w, rk::ZIP_H), Action::ChannelSelect(i), "Collapsed channel - Alt+U expands all");
             let col = ch.color.map(rgb).unwrap_or(t.name_button);
             ui.c.fill_rrect(zr, 2.0, if focused { col.shade(0.2) } else { col });
             if selected {
@@ -543,7 +543,10 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let sc = if pat_playing { ui.t.h(0xffa53a) } else if shov { ui.t.tx(0xffffff) } else { t.glyph };
     icons::draw(ui.c, Icon::Speaker, Rect::new(x + 215.0 + c.dx, y + 7.0, 15.0, 15.0), sc);
     ui.c.push_clip(Rect::span(x + 236.0 + c.dx, r - 165.0, y, y + 29.0));
-    ui.c.text(Font::new(17), x + 236.0 + c.dx, y + 5.0, t.text, "Channel rack");
+    // The window's name; "Instruments" where the full one does not fit before the swing knob.
+    let (tf, tx) = (Font::new(17), x + 236.0 + c.dx);
+    let name = if tx + ui.c.text_width(tf, "Instrument rack") <= r - 165.0 { "Instrument rack" } else { "Instruments" };
+    ui.c.text(tf, tx, y + 5.0, t.text, name);
     ui.c.pop_clip();
     // Swing knob with its halo (§7); a non-zero swing draws an orange arc.
     let kx = r - 149.5;
@@ -597,7 +600,7 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     // Graph editor (§7, §14): blue outline when on.
     let gx = r - 58.0;
     let gr = Rect::new(gx - 9.5, y + 5.0, 19.0, 19.0);
-    let ghov = ui.hit(gr, Action::RackGraph, "Graph editor (Ctrl+K)");
+    let ghov = ui.hit(gr, Action::RackGraph, "Step parameters (Ctrl+K)");
     let blue = ui.t.a(0x40a8e0);
     let gc = if lemon {
         if s.rack.graph_open {
@@ -725,8 +728,8 @@ fn graph_editor(ui: &mut Ui, s: &State, sx: f32, first: u32, shown: u32) {
     }
     ui.c.pop_clip();
     let hint = match ch {
-        Some(_) => format!("Graph editor: {} - click / drag to set (left or right button)", tab.label()),
-        None => "Graph editor".into(),
+        Some(_) => format!("Step parameters: {} - click / drag to set (left or right button)", tab.label()),
+        None => "Step parameters".into(),
     };
     ui.hit(bars, Action::RackGraphArea, hint);
     // Tab row.
@@ -823,7 +826,7 @@ fn add_button(ui: &mut Ui, x: f32, w: f32, bottom: f32) {
 }
 
 pub fn insert_name(track: u16) -> String {
-    if track == 0 { "Master".into() } else { format!("Insert {track}") }
+    if track == 0 { "Master".into() } else { format!("Bus {track}") }
 }
 
 /// The Advanced fill dialog (§22), drawn above everything while open.

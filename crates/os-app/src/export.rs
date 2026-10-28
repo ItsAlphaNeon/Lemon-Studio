@@ -309,7 +309,7 @@ pub fn write(job: &Job, rate: u32, mix: Vec<f32>, tracks: Vec<Vec<f32>>, song: u
                 made = true;
             }
             let audio = shape(o, audio, song, rate, out_rate);
-            let name = job.track_names.get(t).cloned().unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Insert {t}") });
+            let name = job.track_names.get(t).cloned().unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Bus {t}") });
             let name: String = name.chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
             // As FL, only WAV and FLAC (spec §3 "Split mixer tracks").
             for f in o.ticked().filter(|&f| f == WAV || f == FLAC) {
@@ -786,7 +786,7 @@ mod tests {
         // The mix in four formats, the master and Drums stems in WAV and FLAC; the silent track is left out.
         assert_eq!(files.len(), 8, "{files:?}");
         assert!(dir.join("mix stems").join("01 Drums.flac").exists());
-        assert!(!dir.join("mix stems").join("02 Insert 2.wav").exists());
+        assert!(!dir.join("mix stems").join("02 Bus 2.wav").exists());
         let wav = std::fs::read(dir.join("mix.wav")).unwrap();
         for id in [&b"cue "[..], b"labl", b"Verse", b"smpl", b"acid"] {
             assert!(wav.windows(id.len()).any(|w| w == id), "{}", String::from_utf8_lossy(id));

@@ -112,7 +112,7 @@ pub const VIEWS: &[(&str, MenuView)] = &[("Categories", MenuView::Categories), (
 fn footer(s: &State) -> Vec<PItem> {
     let view = s.plugdb.prefs.menu_view;
     let scanning = s.plugdb.progress.is_some();
-    let find = PItem::new(if scanning { "Find new plugins (scanning...)" } else { "Find new plugins" }, Cmd::Plugin(PlugCmd::Find));
+    let find = PItem::new(if scanning { "Scan for new plugins (scanning...)" } else { "Scan for new plugins" }, Cmd::Plugin(PlugCmd::Find));
     let mut v = vec![PItem::sep(), if scanning { find.off() } else { find }, PItem::new("Manage plugins...", Cmd::Plugin(PlugCmd::Manage)), PItem::sep()];
     v.extend(VIEWS.iter().map(|&(label, m)| PItem::new(label, Cmd::Plugin(PlugCmd::View(m))).mark(Mark::Radio(view == m))));
     v

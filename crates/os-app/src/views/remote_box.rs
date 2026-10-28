@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The Remote control settings box ("Link to controller..."), drawn: the target's name, the MIDI controller group,
+//! The Remote control settings box ("MIDI learn..."), drawn: the target's name, the MIDI controller group,
 //! the mapping formula and its graph, smoothing, Remove conflicts, Reset and Accept. What it does: `crate::remote`.
 // spec: ui/remote-control.md §2, §3
 

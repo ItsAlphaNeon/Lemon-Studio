@@ -91,7 +91,7 @@ pub const OPT_THEME: usize = 5;
 /// OPTIONS > Metronome (spec: ui/metronome.md §1).
 pub const METRONOME_LABEL: &str = "Metronome";
 /// OPTIONS > the record options (spec: ui/recording.md §3).
-pub const PRECOUNT_LABEL: &str = "Recording precount";
+pub const PRECOUNT_LABEL: &str = "Count-in";
 pub const WAIT_LABEL: &str = "Start on input";
 pub const BLEND_LABEL: &str = "Blend recorded notes";
 pub const LOOP_LABEL: &str = "Loop record";
@@ -110,11 +110,11 @@ pub fn record_option(label: &str) -> Option<crate::record::Opt> {
 /// OPTIONS > Auto scrolling (spec: ui/auto-scrolling.md §1).
 pub const AUTOSCROLL_LABEL: &str = "Auto scrolling";
 /// OPTIONS > Enable groups (spec: ui/enable-groups.md §1).
-pub const GROUPS_LABEL: &str = "Enable groups";
+pub const GROUPS_LABEL: &str = "Grouped clips move together";
 /// OPTIONS > Step edit (spec: ui/step-edit.md).
 pub const STEP_EDIT_LABEL: &str = "Step edit";
 /// OPTIONS ▸ Switches: Multilink to controllers (spec: ui/remote-control.md §4).
-pub const MULTILINK_LABEL: &str = "Multilink to controllers";
+pub const MULTILINK_LABEL: &str = "Multi MIDI learn";
 /// VIEW > Into workspace: windows partly outside the workspace move fully back in (`App::move_into_workspace`). A plain
 /// entry after "Arrange windows", whose submenu isn't built (spec: ui/settings-choices.md "Advanced: Don't limit
 /// windows to screen (2026-10-16)").
@@ -157,7 +157,7 @@ const FILE: &[Item] = &[
     it("Export MIDI...", "Shift+Ctrl+M").on(),
     it(EXPORT_ZIP_LABEL, "").on(),
     SEP,
-    it("Revert to last backup", "").on(),
+    it("Restore backup...", "").on(),
     SEP,
     it("Exit", "").on(),
 ];
@@ -185,15 +185,15 @@ const ADD_PLUGINS: &[Item] = &[
 const ADD_OTHER: &[Item] = &[
     head("Other"),
     it("Effect", "").sub(),
-    it("Plugin picker", "F8").on(),
-    it("Browse plugin database", ""),
+    it("Plugin palette", "F8").on(),
+    it("Browse plugin library", ""),
     it("Browse all installed plugins", ""),
     it("Browse presets", ""),
     SEP,
-    it("Refresh plugin list (fast scan)", "").on(),
+    it("Rescan plugins (fast)", "").on(),
     it("Manage plugins", ""),
     SEP,
-    it("Automation for last tweaked parameter", ""),
+    it("Automation for the most recent parameter", ""),
     SEP,
     it("Pattern", "").on(),
 ];
@@ -201,12 +201,12 @@ const ADD_OTHER: &[Item] = &[
 /// The pattern list column is built from the project; this is its placeholder (never drawn).
 const PAT_LIST: &[Item] = &[];
 const PAT_CMDS: &[Item] = &[
-    it("Find first empty...", "Shift+F4").on(),
-    it("Find next empty...", "F4").on(),
-    it("Find next empty (no naming)", "Ctrl+F4").on(),
+    it("New empty pattern...", "Shift+F4").on(),
+    it("Next empty pattern...", "F4").on(),
+    it("Next empty pattern (unnamed)", "Ctrl+F4").on(),
     SEP,
-    it("Select in playlist", "").on(),
-    it("Rename and color...", "F2").on(),
+    it("Select in arranger", "").on(),
+    it("Rename and colour...", "F2").on(),
     it("Change color...", "").on(),
     it("Random color", "").on(),
     it("Open in project browser", "Shift+Ctrl+P").on(),
@@ -220,23 +220,23 @@ const PAT_CMDS: &[Item] = &[
     it("Move up", "Shift+Ctrl+Up").on(),
     it("Move down", "Shift+Ctrl+Down").on(),
     SEP,
-    it("Split by channel", "").on(),
+    it("Split by instrument", "").on(),
     // Spec: ui/pattern-render.md.
-    it("Quick render as audio clip", "").on(),
+    it("Render to audio clip", "").on(),
     it("Render as audio clip...", "").on(),
     it("Render and replace...", "").on(),
 ];
 
 const VIEW_ITEMS: &[Item] = &[
     head("Windows"),
-    it("Playlist", "F5").on().tick(),
+    it("Arranger", "F5").on().tick(),
     it("Piano roll", "F7").on().tick(),
-    it("Channel rack", "F6").on().tick(),
+    it("Instrument rack", "F6").on().tick(),
     it("Mixer", "F9").on().tick(),
     it("Browser", "Alt+F8").on().tick(),
-    it("Project picker", "Ctrl+F8").on(),
-    it("Plugin picker", "F8").on(),
-    it("Tempo tapper", "Ctrl+F5").tick(),
+    it("Clip palette", "Ctrl+F8").on(),
+    it("Plugin palette", "F8").on(),
+    it("Tap tempo", "Ctrl+F5").tick(),
     it("Touch controller", "Alt+F7").tick(),
     it("Script output", ""),
     it("Toolbars", "").sub(),
@@ -252,10 +252,10 @@ const VIEW_ITEMS: &[Item] = &[
     head("Browser"),
     it("Undo history", ""),
     it("Patterns", ""),
-    it("Generators in use", ""),
+    it("Instruments in use", ""),
     it("Effects in use", ""),
     it("Remote control", ""),
-    it("Plugin database", "Shift+F8"),
+    it("Plugin library", "Shift+F8"),
 ];
 
 const OPTIONS: &[Item] = &[
@@ -276,7 +276,7 @@ const OPTIONS: &[Item] = &[
     it("Enable MIDI output", "").on().tick(),
     it("Enable MIDI master sync", "").on().tick(),
     head("Switches"),
-    it("Typing keyboard to piano", "Ctrl+T").on().tick(),
+    it("Computer MIDI keyboard", "Ctrl+T").on().tick(),
     it(METRONOME_LABEL, "Ctrl+M").on().tick(),
     it(PRECOUNT_LABEL, "Ctrl+P").on().tick(),
     it(WAIT_LABEL, "Ctrl+I").on().tick(),
@@ -292,40 +292,40 @@ const TOOLS_A: &[Item] = &[
     it("Browser find...", "Ctrl+F"),
     it(ONE_CLICK_LABEL, "").sub(),
     it("Chord progression tool...", ""),
-    it("Control creator", ""),
+    it("Control builder", ""),
     head("Clipboard"),
     it("Save audio clipboard to browser", ""),
     it("Save MIDI clipboard to browser", ""),
-    head("Score logger"),
+    head("MIDI capture"),
     it(DUMP_LOG_LABEL, "").sub(),
     it(CLEAR_LOG_LABEL, "").on(),
-    head("Audio logger"),
+    head("Retro audio capture"),
     it("Enabled", "").tick(),
     it("Settings", "").sub(),
-    it("Dump to audio editor", ""),
-    head("Last tweaked parameters"),
-    it("Last tweaked", "").sub(),
-    it("Next to last tweaked", "").sub(),
+    it("Open capture in audio editor", ""),
+    head("Recent parameters"),
+    it("Most recent", "").sub(),
+    it("Second most recent", "").sub(),
 ];
 const TOOLS_B: &[Item] = &[
-    head("Macros"),
+    head("Project clean-up"),
     it("Stop sound", "Ctrl+H").on(),
     it("Cancel recording", "").on(),
     SEP,
-    it("Prepare for performance mode", ""),
-    it("Prepare for MIDI export", ""),
-    it("Select unused channels", "").on(),
-    it("Purge unused audio clips", "").on(),
-    it("Switch smart disable for all plugins", ""),
+    it("Set up for live performance", ""),
+    it("Set up for MIDI export", ""),
+    it("Select unused instruments", "").on(),
+    it("Remove unused audio clips", "").on(),
+    it("Switch auto-bypass for all plugins", ""),
     it(CLIPS_ALL_LABEL, "").sub(),
     it(CLIPS_SEL_LABEL, "").sub(),
-    it("Lock all playlist tracks to content", ""),
-    it("Unlock all playlist tracks from content", ""),
-    it("Reset empty playlist tracks", "").on(),
+    it("Lock all tracks to their clips", ""),
+    it("Unlock all tracks from their clips", ""),
+    it("Reset empty tracks", "").on(),
     it(REMOVE_TESLAS_LABEL, "").on(),
     it(DELETE_UNUSED_LABEL, "").on(),
     it(EDITORS_LABEL, "").sub(),
-    it("Set keyboard focus for all plugins to", "").sub(),
+    it("Set keyboard focus of all plugins to", "").sub(),
     it(DECLICK_LABEL, "").sub(),
 ];
 
@@ -383,14 +383,14 @@ pub fn bar_layout(c: &mut os_ui::Canvas) -> [(f32, f32, f32); 8] {
 /// VIEW's window entries toggle their window.
 fn win_of(label: &str) -> Option<Win> {
     Some(match label {
-        "Playlist" => Win::Playlist,
+        "Arranger" => Win::Playlist,
         "Piano roll" => Win::PianoRoll,
-        "Channel rack" => Win::ChannelRack,
+        "Instrument rack" => Win::ChannelRack,
         "Mixer" => Win::Mixer,
         "Browser" => Win::Browser,
         "Plugin performance monitor" => Win::Perf,
         // spec: ui/tempo-tapper.md §1
-        "Tempo tapper" => Win::Tapper,
+        "Tap tempo" => Win::Tapper,
         // spec: ui/touch-controller.md §2
         "Touch controller" => Win::Touch,
         _ => return None,
@@ -404,7 +404,7 @@ pub fn works(menu: usize, item: &Item) -> bool {
     item.works
         || ((menu == OPTIONS_MENU || menu == ADD_MENU) && crate::views::settings::tab_for_menu(item.label).is_some())
         || (menu == PATTERNS && crate::patterns::Cmd::from_label(item.label).is_some())
-        || (menu == VIEW && (win_of(item.label).is_some() || matches!(item.label, "Plugin picker" | "Project picker")))
+        || (menu == VIEW && (win_of(item.label).is_some() || matches!(item.label, "Plugin palette" | "Clip palette")))
         || (menu == EDIT_MENU && matches!(item.label, "Undo" | "Redo"))
         || crate::params::menu_handles(item.label)
         || crate::browser::Jump::from_label(menu, item.label).is_some()
@@ -449,14 +449,14 @@ pub fn active(s: &State, menu: usize, item: &Item) -> bool {
 }
 
 /// FILE / TOOLS ▸ Delete unused files and save project.
-pub const DELETE_UNUSED_LABEL: &str = "Delete unused files and save project";
+pub const DELETE_UNUSED_LABEL: &str = "Clean up and save";
 
 /// The rows greyed out for a project that was never saved (spec: ui/menu-submenus.md §1): Save to new project
 /// folder..., Delete unused files and save project, and Revert to last backup (Lemon Studio rule: a project never
 /// saved has no backups of its own; "untitled" ones may be any other's).
 pub fn needs_file(menu: usize, label: &str) -> bool {
     match menu {
-        0 => matches!(label, "Save to new project folder..." | DELETE_UNUSED_LABEL | "Revert to last backup"),
+        0 => matches!(label, "Save to new project folder..." | DELETE_UNUSED_LABEL | "Restore backup..."),
         TOOLS_MENU => label == DELETE_UNUSED_LABEL,
         _ => false,
     }
@@ -482,17 +482,17 @@ fn opens_sub(menu: usize, item: &Item) -> bool {
 
 /// TOOLS > Switch all plugin editors to ▸ and Change declicking for selected channels to ▸, also in the channel rack's
 /// options menu (spec: ui/channel-rack.md §17).
-pub const ONE_CLICK_LABEL: &str = "One-click audio recording";
+pub const ONE_CLICK_LABEL: &str = "Quick record";
 /// TOOLS > Macros: every Tesla in the mixer goes, after a question (FL: Remove all Edison instances; spec:
 /// plugins/tesla/README.md "Recording into Tesla from Lemon Studio").
 pub const REMOVE_TESLAS_LABEL: &str = "Remove all audio editor instances";
-pub const DUMP_LOG_LABEL: &str = "Dump score log to selected pattern";
+pub const DUMP_LOG_LABEL: &str = "Capture MIDI into pattern";
 pub const CLEAR_LOG_LABEL: &str = "Clear log";
-pub const EDITORS_LABEL: &str = "Switch all plugin editors to";
-pub const DECLICK_LABEL: &str = "Change declicking for selected channels to";
+pub const EDITORS_LABEL: &str = "Set all plugin windows to";
+pub const DECLICK_LABEL: &str = "Change click removal of selected channels to";
 /// TOOLS > Switch all / selected audio clip channels to ▸, also in the channel rack's options menu (spec:
 /// ui/channel-switches.md §1).
-pub const CLIPS_ALL_LABEL: &str = "Switch all audio clip channels to";
+pub const CLIPS_ALL_LABEL: &str = "Set all audio clip channels to";
 pub const CLIPS_SEL_LABEL: &str = "Switch selected audio clip channels to";
 
 /// What fills the submenu of ▸ entry `label` of `menu`: the app's own popup items, as the same submenu shows them
@@ -555,7 +555,7 @@ fn recent_rows() -> Vec<Recent> {
 /// Whether FILE's Recent projects section goes before item `i` of `items`: the separator over Revert to last backup,
 /// so it follows the exports as in FL.
 fn recent_before(menu: usize, items: &[Item], i: usize) -> bool {
-    menu == 0 && items.get(i + 1).is_some_and(|n| n.label == "Revert to last backup")
+    menu == 0 && items.get(i + 1).is_some_and(|n| n.label == "Restore backup...")
 }
 
 /// ADD > Categories / Simple / By vendor: the plugin menus' display mode the radio picks (spec: ui/plugin-menu.md §3).
@@ -574,7 +574,7 @@ fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
         // The browser is a panel of its own, shown by its own switch.
         (Mark::Check(_), true) if item.label == "Browser" => Mark::Check(s.show_browser),
         (Mark::Check(_), true) => Mark::Check(win_of(item.label).is_some_and(|w| s.shown(w))),
-        (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
+        (Mark::Check(_), _) if item.label == "Computer MIDI keyboard" => Mark::Check(s.toggles.contains(&"typing")),
         (Mark::Check(_), _) if item.label == METRONOME_LABEL => Mark::Check(crate::metronome::on()),
         (Mark::Check(_), _) if let Some(o) = record_option(item.label) => Mark::Check(o.on()),
         (Mark::Check(_), _) if item.label == AUTOSCROLL_LABEL => Mark::Check(crate::autoscroll::on()),
@@ -968,17 +968,17 @@ mod tests {
         }
         let save = bar[0].rows.iter().find(|r| r.label == "Save").unwrap();
         assert_eq!((save.shortcut, save.pick), ("Ctrl+S", Some((0, FILE_SAVE))));
-        let playlist = bar[VIEW].rows.iter().find(|r| r.label == "Playlist").unwrap();
+        let playlist = bar[VIEW].rows.iter().find(|r| r.label == "Arranger").unwrap();
         assert_eq!(pick(VIEW, playlist.pick.unwrap().1), Action::ToggleWin(Win::Playlist));
         assert_eq!(playlist.mark, Mark::Check(app.state.shown(Win::Playlist)));
         // Patterns in use head PATTERNS, the current one marked.
-        assert_eq!(bar[PATTERNS].rows[0].label, "Find first empty...", "a new project uses no pattern yet");
+        assert_eq!(bar[PATTERNS].rows[0].label, "New empty pattern...", "a new project uses no pattern yet");
         app.state.project.patterns.iter_mut().find(|p| p.number == 1).expect("pattern 1").name = Some("Intro".into());
         let first = bar_model(&app.state)[PATTERNS].rows[0].clone();
         assert_eq!((first.label.as_str(), first.mark, first.pick), ("Intro", Mark::Radio(true), Some((PATTERNS, PATTERN_PICK + 1))));
         // Live state: hiding the playlist unticks it.
         app.state.hide(Win::Playlist);
-        let playlist = bar_model(&app.state)[VIEW].rows.iter().find(|r| r.label == "Playlist").unwrap().clone();
+        let playlist = bar_model(&app.state)[VIEW].rows.iter().find(|r| r.label == "Arranger").unwrap().clone();
         assert_eq!(playlist.mark, Mark::Check(false));
         let declick = bar[TOOLS_MENU].rows.iter().find(|r| r.label == DECLICK_LABEL).unwrap();
         assert_eq!((declick.enabled, declick.pick), (false, None), "no native submenus yet");
@@ -1001,13 +1001,13 @@ mod tests {
         }
         assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
-        let modes = ["Out only (no bleeding)", "Transient (no bleeding)", "Transient (bleeding)", "Generic (bleeding)", "Smooth (bleeding)", "Crossfade (bleeding)"];
+        let modes = ["Fade out only", "Transient", "Transient (tail continues)", "Standard (tail continues)", "Smooth (tail continues)", "Crossfade (tail continues)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");
         assert_eq!(labels(TOOLS_MENU, EDITORS_LABEL), ["Attached", "Detached"]);
         // ADD > Effect: the effect plugin menu as a submenu (spec: ui/plugin-menu.md §1-2).
         let fx = submenu(ADD_MENU, "Effect").unwrap()(&app.state);
         assert_eq!(fx, crate::plugin_menu::items(&app.state, crate::plugin_menu::Target::Fx(None), true));
-        for label in ["Set keyboard focus for all plugins to"] {
+        for label in ["Set keyboard focus of all plugins to"] {
             let (mi, it) = MENUS.iter().enumerate().find_map(|(mi, m)| m.cols.iter().flat_map(|(_, items)| items.iter()).find(|it| it.label == label).map(|it| (mi, it))).unwrap();
             assert!(!works(mi, it), "{label} stays greyed out");
         }
@@ -1075,9 +1075,9 @@ pub fn toolbar_items(s: &State) -> Vec<crate::playlist::PItem> {
         switch("Edit", Switch::Edit, s.bar.editing),
         switch("Separators", Switch::Separators, o.separators),
         switch("Flat buttons", Switch::Flat, o.flat),
-        PItem::not_yet("Show detected MIDI chords near the hint bar").mark(Mark::Check(false)),
+        PItem::not_yet("Show detected MIDI chords near the status bar").mark(Mark::Check(false)),
         PItem::sep(),
-        switch("Hint bar", Switch::HintBar, o.hint_bar),
+        switch("Status bar", Switch::HintBar, o.hint_bar),
         // A command: always the dim mark (§1).
         switch("Hide", Switch::Hide, false).key("Ctrl+F11"),
         PItem::col(),

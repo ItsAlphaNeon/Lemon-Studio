@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The value box of "Type in value...": field, mode buttons, ✓ / ✗ and caption.
+//! The value box of "Enter value...": field, mode buttons, ✓ / ✗ and caption.
 // spec: ui/type-in-value.md §2-3 (the measured layout and shades)
 
 use os_ui::{Font, Rect};
@@ -32,7 +32,7 @@ pub fn paint(ui: &mut Ui, s: &State, e: &TextEdit, t: Target, norm: bool) {
 
     // Mode buttons: the knob's unit, then "A" (normalized).
     if let Some((label, name)) = typein::mode_button(t) {
-        let buttons = [(label, format!("Type in value as: {name}"), false), ("A", "Type in normalized value (0-1) or %".to_string(), true)];
+        let buttons = [(label, format!("Enter value as: {name}"), false), ("A", "Type in normalized value (0-1) or %".to_string(), true)];
         for (i, (label, hint, is_norm)) in buttons.into_iter().enumerate() {
             let b = Rect::new(r.x + 202.0 + 19.0 * i as f32, r.y + 3.0, 18.0, 17.0);
             let hov = ui.hit(b, Action::TypeIn(TiAct::Mode(is_norm)), hint);

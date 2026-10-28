@@ -315,7 +315,7 @@ pub enum Cmd {
     TrackMuteClips(u16, bool),
     /// "Create automation clip" on a control: target, name, current value 0..1.
     CreateAutomation(u32, String, f64),
-    /// "Init song with this position" on a control: target, current value 0..1; "Delete initial value": target
+    /// "Set as song start value" on a control: target, current value 0..1; "Remove start value": target
     /// (`crate::init`).
     InitControl(u32, f64),
     DeleteInit(u32),
@@ -332,7 +332,7 @@ pub enum Cmd {
     Mixer(crate::mixer::MCmd),
     /// Plugin parameter menus (spec: plugins/plugin-parameters.md §5-6).
     Param(crate::params::PCmd),
-    /// "Type in value..." of a knob or parameter menu (spec: ui/type-in-value.md).
+    /// "Enter value..." of a knob or parameter menu (spec: ui/type-in-value.md).
     TypeIn(crate::typein::Target),
     /// "Reset" of a knob, fader or slider menu: back to its default (spec: ui/mixer.md §6.3).
     Reset(crate::knobs::Control),
@@ -519,7 +519,7 @@ pub enum EditTarget {
     SlotName(u16, u8),
     /// The current arrangement's name (§12).
     ArrangementName,
-    /// The value box of "Type in value..." and whether it reads normalized values (spec: ui/type-in-value.md).
+    /// The value box of "Enter value..." and whether it reads normalized values (spec: ui/type-in-value.md).
     TypeIn(crate::typein::Target, bool),
 }
 
@@ -1263,7 +1263,7 @@ pub fn to_src(s: &State, src: ClipSource, ticks: f64) -> f64 {
 
 /// Undo snapshot of everything the playlist edits: a step of the project's undo history (`crate::history`).
 pub fn snapshot(s: &mut State) {
-    snapshot_as(s, "Playlist edit");
+    snapshot_as(s, "Arranger edit");
 }
 
 /// `snapshot`, the step named `name` (as the browser's History lists it; spec: ui/settings-choices.md "Undo history:
@@ -1521,7 +1521,7 @@ pub fn set_pick_row(s: &mut State, view: f32, row: f32) {
 }
 
 /// Take the project's stored playlist view (event 242): track height, time zoom and scroll (spec:
-/// flp/events/playlist.md "Playlist view"). A project without one gets the default height. The song position starts
+/// flp/events/playlist.md "Arranger view"). A project without one gets the default height. The song position starts
 /// at the Start marker (§7a).
 pub fn load_view(s: &mut State) {
     s.playlist.pos = start_marker(s).unwrap_or(0);
@@ -2074,7 +2074,7 @@ pub fn add_layer_channel(s: &mut State) -> usize {
 /// Add an audio clip channel for a sample file and place it at `tick` on `track` (§9). The channel's colour comes from
 /// `State::clip_colors`.
 pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Option<usize> {
-    add_audio_clip_as(s, path, track, tick, "Playlist edit")
+    add_audio_clip_as(s, path, track, tick, "Arranger edit")
 }
 
 /// `add_audio_clip` as the undo step `name` (One-click audio recording's "Recorded items").
@@ -2283,8 +2283,8 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sub(
             "Tools",
             vec![
-                PItem::new("Consolidate playlist selection", Cmd::Consolidate).key("Ctrl+Alt+C"),
-                PItem::new("Export all playlist tracks", Cmd::ExportTracks),
+                PItem::new("Consolidate arranger selection", Cmd::Consolidate).key("Ctrl+Alt+C"),
+                PItem::new("Export all arranger tracks", Cmd::ExportTracks),
                 PItem::new("Quick quantize start times", Cmd::QuantizeStarts),
             ],
         ),
@@ -2329,7 +2329,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
             ..PItem::not_yet("Quantize song jumps")
         },
         PItem::sep(),
-        PItem::new("Reset empty playlist tracks", Cmd::ResetEmptyTracks),
+        PItem::new("Reset empty tracks", Cmd::ResetEmptyTracks),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
@@ -2421,7 +2421,7 @@ pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
         items.push(it("Preview", PickCmd::Preview));
     }
     items.extend([
-        it("Select in playlist", PickCmd::SelectInPlaylist),
+        it("Select in arranger", PickCmd::SelectInPlaylist),
         it("Group selected...", PickCmd::Group),
         PItem::sep(),
         it("Rename, color and icon...", PickCmd::Rename),
@@ -2433,7 +2433,7 @@ pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
     if audio {
         items.extend([it("Load sample...", PickCmd::LoadSample), PItem::not_yet("Edit sample...")]);
     }
-    items.extend([PItem::not_yet("Cut itself").mark(Mark::Check(true)), PItem::sep(), it("Clone", PickCmd::Clone)]);
+    items.extend([PItem::not_yet("Chokes itself").mark(Mark::Check(true)), PItem::sep(), it("Clone", PickCmd::Clone)]);
     if !audio {
         items.push(it("Clone with links", PickCmd::Clone));
     }
@@ -2503,7 +2503,7 @@ pub fn point_menu(s: &State, ch: u16, i: usize, x: f32, y: f32) -> Popup {
     items.push(PItem::sep());
     items.push(PItem::new("Copy value", Cmd::PointCopy(ch, i)));
     items.push(if s.value_clip.is_some() { PItem::new(paste_label(s), Cmd::PointPaste(ch, i)) } else { PItem::new("Paste value", Cmd::Nothing).off() });
-    items.push(PItem::new("Type in value...", Cmd::PointValue(ch, i)));
+    items.push(PItem::new("Enter value...", Cmd::PointValue(ch, i)));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
@@ -2599,7 +2599,7 @@ pub fn marker_menu(s: &State, i: usize, tick: u32, x: f32, y: f32) -> Popup {
 
 /// The short right-click menu of the toolbar's and the mixer's knobs, faders and the tempo: "Reset" for a knob or fader,
 /// "Create automation clip" (§8) and the initial value's items (`crate::init::items`) when the control can be automated,
-/// "Type in value..." when it takes one (spec: ui/type-in-value.md §8).
+/// "Enter value..." when it takes one (spec: ui/type-in-value.md §8).
 pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<crate::typein::Target>, x: f32, y: f32) -> Popup {
     // Reset first, as on the rack's and the mixer's knobs (spec: ui/mixer.md §6.3, ui/channel-rack.md §19).
     let reset = match typein {
@@ -2615,14 +2615,14 @@ pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<cra
             PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, value)),
             init,
             delete,
-            PItem::not_yet("Edit events"),
+            PItem::not_yet("Edit automation"),
         ]);
     }
     if typein.is_some() {
         items.extend(crate::remote::menu_items(typein));
     }
     if let Some(t) = typein {
-        items.extend([PItem::head("Value"), PItem::new("Type in value...", Cmd::TypeIn(t))]);
+        items.extend([PItem::head("Value"), PItem::new("Enter value...", Cmd::TypeIn(t))]);
     }
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
@@ -2961,7 +2961,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             }
             // Any other tool: the right button is the Delete tool while held (also starting on empty grid).
             _ => {
-                snapshot_as(s, "Playlist delete clip");
+                snapshot_as(s, "Arranger delete clip");
                 app.drag = Some(Drag::Pl(PlDrag::Erase));
                 erase_at(app, grid);
                 return;
@@ -2971,7 +2971,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
 
     match tool {
         PlTool::Delete => {
-            snapshot_as(s, "Playlist delete clip");
+            snapshot_as(s, "Arranger delete clip");
             app.drag = Some(Drag::Pl(PlDrag::Erase));
             erase_at(app, grid);
         }
@@ -3013,7 +3013,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             }
             None => {
                 // FL's name for placing the current source's clip (spec: ui/settings-choices.md "Undo history").
-                snapshot_as(s, "Playlist fill paint clip");
+                snapshot_as(s, "Arranger fill paint clip");
                 s.playlist.sel.clear();
                 let start = snap_place(s, &g, tick, alt);
                 let i = place(s, track, start);
@@ -3726,7 +3726,7 @@ pub fn commit_edit(s: &mut State) {
             }
         }
         EditTarget::MixerName(n) => {
-            let def = if n == 0 { "Master".to_string() } else { format!("Insert {n}") };
+            let def = if n == 0 { "Master".to_string() } else { format!("Bus {n}") };
             if let Some(m) = s.project.mixer.iter_mut().find(|m| m.index == n) {
                 m.name = (!text.is_empty() && text != def).then_some(text);
             }
@@ -4521,7 +4521,7 @@ pub fn quantize_starts(s: &mut State) -> String {
 pub fn export_tracks(app: &mut App) -> String {
     let s = &app.state;
     let audible: Vec<Clip> = clips(s).iter().filter(|c| !c.muted && track_on(s, c.track)).copied().collect();
-    let Some(end) = audible.iter().map(|c| c.end()).max() else { return "Export tracks: the playlist has no clips to play".into() };
+    let Some(end) = audible.iter().map(|c| c.end()).max() else { return "Export tracks: the arranger has no clips to play".into() };
     let mut tracks: Vec<u16> = audible.iter().map(|c| c.track).collect();
     tracks.sort_unstable();
     tracks.dedup();
@@ -4783,16 +4783,16 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::not_yet("Presets"),
         PItem::not_yet("Browse presets"),
         PItem::not_yet("Save preset as..."),
-        PItem::not_yet("Add to plugin database (flag as favorite)"),
-        PItem::head("Spare state"),
-        PItem::not_yet("Store in spare state"),
-        PItem::not_yet("Flip with spare state"),
+        PItem::not_yet("Add to favourites"),
+        PItem::head("A/B compare"),
+        PItem::not_yet("Copy to B"),
+        PItem::not_yet("Swap A / B"),
         PItem::head("Parameters"),
         PItem::not_yet("Link all parameters..."),
-        PItem::new("Browse parameters", Cmd::Param(crate::params::PCmd::Browse(row))),
+        PItem::new("Show all parameters", Cmd::Param(crate::params::PCmd::Browse(row))),
         PItem::head("CPU"),
         PItem::not_yet("Allow threaded processing"),
-        PItem::not_yet("Smart disable"),
+        PItem::not_yet("Auto-bypass when silent"),
         PItem::sep(),
         PItem::not_yet("Rename, color and icon...").key("F2"),
         PItem::not_yet("Change color..."),

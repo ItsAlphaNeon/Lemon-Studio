@@ -31,7 +31,7 @@ pub const INFO_H: f32 = 84.0;
 /// (label, icon, category colour index). Only the roots with content: FL's other disk-folder roots (Recent files,
 /// Channel presets, Packs...) are left out until Lemon Studio has content for them (owner decision); dropped folders
 /// follow these. Plugin presets: the preset store, user and factory (spec: plugins/presets.md "Browser").
-const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin database", Icon::Speaker, 1), (PLUGIN_PRESETS, Icon::FilePreset, 1)];
+const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin library", Icon::Speaker, 1), (PLUGIN_PRESETS, Icon::FilePreset, 1)];
 pub const PLUGIN_PRESETS: &str = "Plugin presets";
 
 /// Tree key of the All tab's Plugin presets root; a plugin's node is `<this>/<plugin folder name>`.
@@ -53,7 +53,7 @@ const PROJECT: &[(&str, Icon)] = &[
     (PROJECT_DATA, Icon::Folder),
     ("Samples", Icon::Wave),
 ];
-pub const INITIALIZED_CONTROLS: &str = "Initialized controls";
+pub const INITIALIZED_CONTROLS: &str = "Controls with a start value";
 pub const PROJECT_DATA: &str = "Project data";
 
 /// The Current project and Plugin database tabs (spec §1).
@@ -120,7 +120,7 @@ pub struct Row {
 
 /// Keys of the rows that start opened (the project tab shows Patterns, like the screenshot).
 pub fn default_open() -> std::collections::HashSet<String> {
-    ["1:Current project", "1:Current project/Patterns", "2:Plugin database"].iter().map(|k| k.to_string()).collect()
+    ["1:Current project", "1:Current project/Patterns", "2:Plugin library"].iter().map(|k| k.to_string()).collect()
 }
 
 /// Options-menu toggles (spec §4); `DEFAULT_OPTS` are on in a fresh browser.
@@ -675,7 +675,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     ui.c.text(os_ui::Font::new(14), 52.0, 85.0 + dy, t.text_dim, "Browser");
     // Tabs (spec ui/browser.md §1): FL's five without Online content, sharing the strip.
     ui.c.fill_rect(Rect::span(0.0, bw - 1.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
-    const TIPS: [&str; 4] = ["All", "Current project", "Plugin database", "Favorites"];
+    const TIPS: [&str; 4] = ["All", "Current project", "Plugin library", "Favorites"];
     for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Star].into_iter().enumerate() {
         let cx = 25.0 + 50.0 * i as f32;
         let rr = Rect::new(cx - 18.0, 108.0 + dy, 36.0, 30.0);

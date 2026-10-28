@@ -3,8 +3,8 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The project's initial values (`Project::init_controls`): controls that take a value when the song starts. The
-//! Automation group of a control's menu adds one, "Init song with this position" (one undo step, "Initialized
-//! control"), and takes it out, "Delete initial value" (no undo step, as in FL). With "Initialize controls
+//! Automation group of a control's menu adds one, "Set as song start value" (one undo step, "Initialized
+//! control"), and takes it out, "Remove start value" (no undo step, as in FL). With "Initialize controls
 //! automatically" on, "Create automation clip" adds the control too, in its own step (`playlist::create_automation`).
 //! In song mode, starting playback, moving the song position and playback looping back to the song's start set every
 //! control in the list to its value (`apply`; the engine sets them itself where it loops), then automation clips act as
@@ -19,17 +19,17 @@ use crate::app::State;
 use crate::history::{self, Snap};
 use crate::playlist::{Cmd, Mark, PItem};
 
-/// The undo step of "Init song with this position" (FL's name).
+/// The undo step of "Set as song start value" (FL's name).
 pub const INITIALIZED: &str = "Initialized control";
-pub const INIT_LABEL: &str = "Init song with this position";
-pub const DELETE_LABEL: &str = "Delete initial value";
+pub const INIT_LABEL: &str = "Set as song start value";
+pub const DELETE_LABEL: &str = "Remove start value";
 
 /// Control `t`'s entry in the list.
 pub fn entry(s: &State, t: u32) -> Option<InitControl> {
     s.project.init_controls.iter().find(|c| c.target == t).copied()
 }
 
-/// Whether control `t` is in the list (the check mark of "Init song with this position").
+/// Whether control `t` is in the list (the check mark of "Set as song start value").
 pub fn listed(s: &State, t: u32) -> bool {
     entry(s, t).is_some()
 }
@@ -48,7 +48,7 @@ pub(crate) fn put(s: &mut State, t: u32, e: Option<InitControl>) {
     s.piano.dirty = true;
 }
 
-/// "Init song with this position": control `t`, at its value `v` (0..1), goes in the list, replacing an earlier value.
+/// "Set as song start value": control `t`, at its value `v` (0..1), goes in the list, replacing an earlier value.
 /// One undo step, "Initialized control". Nothing for a control whose stored units aren't known (a plugin parameter).
 pub fn init(s: &mut State, t: u32, v: f64) {
     let Some(c) = InitControl::from_unit(t, v) else { return };
@@ -56,7 +56,7 @@ pub fn init(s: &mut State, t: u32, v: f64) {
     put(s, t, Some(c));
 }
 
-/// "Delete initial value": control `t` leaves the list. No undo step (FL makes none).
+/// "Remove start value": control `t` leaves the list. No undo step (FL makes none).
 pub fn delete(s: &mut State, t: u32) {
     put(s, t, None);
 }
@@ -67,7 +67,7 @@ pub(crate) fn automatic(t: u32, v: f64) -> Option<InitControl> {
     crate::prefs::check(&crate::prefs::INIT_CONTROLS).then(|| InitControl::from_unit(t, v)).flatten()
 }
 
-/// "Init song with this position" and "Delete initial value" for a menu whose "Create automation clip" makes a clip on
+/// "Set as song start value" and "Remove start value" for a menu whose "Create automation clip" makes a clip on
 /// `control` (its target and current value 0..1); both greyed without one. Init is checked while the control is in the
 /// list, and greyed ("not yet") for a control whose stored units aren't known; Delete is greyed unless it is listed.
 pub fn items(s: &State, control: Option<(u32, f64)>) -> [PItem; 2] {
@@ -151,7 +151,7 @@ fn set_value(s: &mut State, c: InitControl) -> bool {
 }
 
 /// A list entry's name in the browser: "<owner> - <setting>", as the automation clip on the control is named
-/// ("808 Kick - Channel volume", "Insert 1 - Volume", "Tempo").
+/// ("808 Kick - Channel volume", "Bus 1 - Volume", "Tempo").
 pub fn name(s: &State, t: u32) -> String {
     let channel = |ch: u16| match s.project.channels.iter().position(|c| c.index == ch) {
         Some(row) => s.project.channels[row].name.clone().unwrap_or_else(|| format!("Channel {}", row + 1)),
@@ -175,8 +175,8 @@ pub fn name(s: &State, t: u32) -> String {
                 target::CHANNEL_RESONANCE => "Filter resonance",
                 target::CHANNEL_PAN_OFFSET => "Pan offset",
                 target::CHANNEL_VOLUME_MULT => "Volume multiplier",
-                target::CHANNEL_MOD_X => "Mod X offset",
-                _ => "Mod Y offset",
+                target::CHANNEL_MOD_X => "Mod A offset",
+                _ => "Mod B offset",
             };
             format!("{} - {setting}", channel(ch))
         }
@@ -216,9 +216,9 @@ mod tests {
         InitControl { head: 0, target, value }
     }
 
-    /// A menu's "Init song with this position" and "Delete initial value".
+    /// A menu's "Set as song start value" and "Remove start value".
     fn pair(menu: &Popup) -> (PItem, PItem) {
-        let i = menu.items.iter().position(|i| i.label == INIT_LABEL).expect("Init song with this position");
+        let i = menu.items.iter().position(|i| i.label == INIT_LABEL).expect("Set as song start value");
         assert_eq!(menu.items[i + 1].label, DELETE_LABEL);
         (menu.items[i].clone(), menu.items[i + 1].clone())
     }
@@ -258,14 +258,14 @@ mod tests {
         let [init, delete] = items(&a.state, Some((target::channel_param(0, 3), 0.5)));
         assert!(!init.enabled && matches!(init.cmd, Cmd::NotYet(_)) && !delete.enabled);
 
-        // "Delete initial value": the control leaves the list.
+        // "Remove start value": the control leaves the list.
         let delete = pair(&rack_menu(&a)).1.cmd;
         pl::run(&mut a, delete);
         assert!(a.state.project.init_controls.is_empty());
         assert_eq!(pair(&rack_menu(&a)).0.mark, Mark::Check(false));
     }
 
-    /// "Init song with this position" is one undo step, "Initialized control"; "Delete initial value" makes none.
+    /// "Set as song start value" is one undo step, "Initialized control"; "Remove start value" makes none.
     #[test]
     fn init_song_is_one_undo_step_and_delete_none() {
         let mut a = app();
@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(a.state.project.init_controls, vec![rec(vol, 6400)]);
     }
 
-    /// "Initialize controls automatically" (on by default): "Create automation clip" also lists the control at its
+    /// "Set start values automatically" (on by default): "Create automation clip" also lists the control at its
     /// value, in the same undo step; off, only the clip is made.
     #[test]
     fn create_automation_clip_lists_the_control_while_the_check_is_on() {
@@ -465,6 +465,6 @@ mod tests {
         assert_eq!(list[at - 1].label, "Generators");
         let inside = format!("{folder}/");
         let names: Vec<&str> = list.iter().filter(|r| r.key.starts_with(&inside)).map(|r| r.label.as_str()).collect();
-        assert_eq!(names, ["Clap - Channel volume", "Insert 1 - Volume", "Tempo", "Insert 2 - Slot 1 mix level", "Kick - Parameter 4"]);
+        assert_eq!(names, ["Clap - Channel volume", "Bus 1 - Volume", "Tempo", "Bus 2 - Slot 1 mix level", "Kick - Parameter 4"]);
     }
 }

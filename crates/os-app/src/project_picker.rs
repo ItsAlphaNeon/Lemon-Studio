@@ -157,7 +157,7 @@ mod tests {
         app.key(&f8, true, false);
         assert!(!is_open(&app.state), "and closes it");
 
-        let i = (0..).map_while(|i| menus::item_at(VIEW, i)).position(|it| it.label == "Project picker").expect("VIEW entry");
+        let i = (0..).map_while(|i| menus::item_at(VIEW, i)).position(|it| it.label == "Clip palette").expect("VIEW entry");
         assert!(menus::works(VIEW, menus::item_at(VIEW, i).unwrap()));
         app.menu_item(VIEW, i);
         assert!(is_open(&app.state));
