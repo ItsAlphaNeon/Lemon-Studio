@@ -3,7 +3,7 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Lemon Studio's small effects as VST3 / CLAP plugins (nih-plug): Lemon Soft Clipper, Lemon Fast Distortion, Lemon
-//! Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus and Lemon Stereo Shaper. Each is a handful
+//! Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus, Lemon Stereo Shaper and Lemon Filter. Each is a handful
 //! of settings over a sound of
 //! `os_engine::effects`, so they share
 //! everything but their description: the plugin, its parameters and saved state ([`params`]), the Pith editor
@@ -12,13 +12,14 @@
 //!
 // spec: plugins/lemon-small-effects.md (§1 how they are built, §5 parameters and state), the plugin pages
 // (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md,
-// lemon-transient-processor.md, lemon-chorus.md, lemon-stereo-shaper.md), plugins/plugin-formats.md
+// lemon-transient-processor.md, lemon-chorus.md, lemon-stereo-shaper.md, lemon-filter.md), plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod balance;
 pub mod chorus;
 pub mod editor;
 pub mod fast_distortion;
+pub mod filter;
 pub mod params;
 pub mod soft_clipper;
 pub mod stereo_enhancer;
@@ -134,7 +135,8 @@ pub struct Spec {
     /// Every version of the saved state is read the same way (Fruity Stereo Shaper's).
     pub any_version: bool,
     /// The int (after the version) each setting is, when that is not its place: an int left out is kept as stored
-    /// (Lemon Stereo Shaper leaves out the difference output). Empty: setting k is int k.
+    /// (Lemon Stereo Shaper leaves out the difference output); [`params::BYTE`] for a switch stored in the byte after
+    /// the ints (Lemon Filter's Center). Empty: setting k is int k.
     pub fields: &'static [usize],
     /// The bytes a new instance's saved state has after the settings (kept as stored otherwise).
     pub tail: &'static [u8],
@@ -312,7 +314,7 @@ impl<K: Kind> Vst3Plugin for SmallFx<K> {
 mod tests {
     use super::*;
 
-    pub const SPECS: [&Spec; 7] = [
+    pub const SPECS: [&Spec; 8] = [
         soft_clipper::SPEC,
         fast_distortion::SPEC,
         balance::SPEC,
@@ -320,6 +322,7 @@ mod tests {
         transient_processor::SPEC,
         chorus::SPEC,
         stereo_shaper::SPEC,
+        filter::SPEC,
     ];
 
     /// Every effect: ids unique, starts inside the ranges, a control per setting, the plugin ids distinct.
@@ -351,6 +354,7 @@ mod tests {
             <transient_processor::LemonTransientProcessor as ClapPlugin>::CLAP_ID,
             <chorus::LemonChorus as ClapPlugin>::CLAP_ID,
             <stereo_shaper::LemonStereoShaper as ClapPlugin>::CLAP_ID,
+            <filter::LemonFilter as ClapPlugin>::CLAP_ID,
         ];
         let classes = [
             <soft_clipper::LemonSoftClipper as Vst3Plugin>::VST3_CLASS_ID,
@@ -360,6 +364,7 @@ mod tests {
             <transient_processor::LemonTransientProcessor as Vst3Plugin>::VST3_CLASS_ID,
             <chorus::LemonChorus as Vst3Plugin>::VST3_CLASS_ID,
             <stereo_shaper::LemonStereoShaper as Vst3Plugin>::VST3_CLASS_ID,
+            <filter::LemonFilter as Vst3Plugin>::VST3_CLASS_ID,
         ];
         for i in 0..ids.len() {
             for j in i + 1..ids.len() {
@@ -428,7 +433,7 @@ mod tests {
             }
             v.into_iter().map(|x| x.expect("every parameter listed")).collect()
         };
-        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC] {
+        for spec in [soft_clipper::SPEC, fast_distortion::SPEC, stereo_enhancer::SPEC, transient_processor::SPEC, chorus::SPEC, stereo_shaper::SPEC, filter::SPEC] {
             for name in all(spec) {
                 read(spec, &name);
             }
@@ -454,5 +459,9 @@ mod tests {
         assert_eq!(read(stereo_shaper::SPEC, "Effects/Stereoize 3"), [0, 12800, 12800, 0, 1408, -2496, 1]);
         assert_eq!(read(stereo_shaper::SPEC, "Effects/Narrow"), [8176, 12800, 12800, 8076, -1952, 0, 0]);
         assert_eq!(all(stereo_shaper::SPEC).len(), 21);
+        // FL's four, Center on in each.
+        assert_eq!(read(filter::SPEC, "Party next door"), [160, 1024, 864, 0, 0, 0, 1]);
+        assert_eq!(read(filter::SPEC, "Tiny speakers"), [544, 0, 0, 1024, 464, 1, 1]);
+        assert_eq!(all(filter::SPEC).len(), 4);
     }
 }

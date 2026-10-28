@@ -1,6 +1,6 @@
 [package]
 name = "lemon-small-fx"
-description = "Lemon Studio's small effects (Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus, Lemon Stereo Shaper): the plugin, parameters and editor they share"
+description = "Lemon Studio's small effects (Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus, Lemon Stereo Shaper, Lemon Filter): the plugin, parameters and editor they share"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

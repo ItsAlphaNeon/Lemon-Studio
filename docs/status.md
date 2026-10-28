@@ -213,6 +213,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   sound in the mixer. Six match FL Studio 2026's exports sample for sample in the tests; the Chorus, with the true pi
   where the original's is a hair off, in 10 of 21 cases and the rest at least 37 dB below the test signal (once each
   export's LFO start phases are known: the original draws them anew for every render)
+- Lemon Filter (Fruity Filter: a resonant low, band and high pass mix, X 2 and the DC remover) as a VST3 and CLAP
+  plugin, with its response drawn in the editor; a project's Fruity Filter slots play through the same sound, which
+  matches FL Studio 2026's exports in the tests (10 of 13 cases sample for sample, the rest below -180 dB)
 - The Stereo Shaper's difference output plays in the mixer (added to the track it names, from the first tick, without
   delay compensation); Lemon Stereo Shaper as a plugin keeps the setting but has no output for it
 - Lemon Parametric EQ plays FL's Parametric EQ 2 in every quality mode, in a project's mixer slots and as a plugin:
