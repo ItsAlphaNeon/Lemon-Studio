@@ -100,17 +100,7 @@ pub struct Canvas {
     glyphs: Lru<Rc<GlyphCoverage>>,
     /// Device bounds of everything drawn since the last `take_drawn` (x0, y0, x1, y1).
     drawn: Option<(i32, i32, i32, i32)>,
-    /// Skeleton mode (cutting-edge: a plugin editor drawn once as it looks before its values are known, shown while it
-    /// opens): the kit's controls draw their resting shapes, what shows a value in `SKELETON_INK`, and text marked with
-    /// `SKELETON_MARK` (a value's) draws as a bar of its width. What does not change stays as drawn.
-    pub skeleton: bool,
 }
-
-/// Put before a value's text (`Canvas::skeleton`): drawn as a bar in skeleton mode, as the text after it otherwise.
-pub const SKELETON_MARK: char = '\u{e000}';
-
-/// What stands in for a value in skeleton mode: a faint light grey over the dark editors.
-pub const SKELETON_INK: Color = Color { r: 255, g: 255, b: 255, a: 26 };
 
 /// The scale and clips `Canvas::rescale` replaced, for `Canvas::unscale`.
 pub struct Rescaled {
@@ -174,7 +164,6 @@ impl Canvas {
             shapes: Lru::new(32 << 20),
             glyphs: Lru::new(16 << 20),
             drawn: None,
-            skeleton: false,
         })
     }
 
@@ -972,7 +961,6 @@ impl Canvas {
 
     /// Width of `s` in logical pixels.
     pub fn text_width(&mut self, f: Font, s: &str) -> f32 {
-        let s = s.strip_prefix(SKELETON_MARK).unwrap_or(s);
         self.text.extent(f, self.scale, s).0 as f32 / self.scale
     }
 
@@ -988,18 +976,6 @@ impl Canvas {
 
     /// Draw `s` with its text cell's top-left at (x, y). Returns the advance width.
     pub fn text(&mut self, f: Font, x: f32, y: f32, c: Color, s: &str) -> f32 {
-        // A value's text: a bar in skeleton mode, the text otherwise.
-        if let Some(rest) = s.strip_prefix(SKELETON_MARK) {
-            if !self.skeleton {
-                return self.text(f, x, y, c, rest);
-            }
-            let w = self.text_width(f, rest).max(10.0);
-            let (lh, asc) = (self.line_height(f), self.ascent(f));
-            let bh = (asc * 0.62).round().max(4.0);
-            let by = (y + asc - bh - (lh - asc) * 0.25).round();
-            self.fill_rrect(Rect::new(x, by, w, bh), bh / 2.0, SKELETON_INK);
-            return w;
-        }
         let k = self.scale;
         let (xi, yi) = ((x * k).round() as i32, (y * k).round() as i32);
         let (w, h) = self.text.extent(f, k, s);
@@ -1608,27 +1584,6 @@ mod tests {
         c.begin_region(&[Rect::new(0.0, 0.0, 10.0, 20.0)]);
         c.paint_pixmap(&img.pixmap, (0, 0));
         assert_eq!((at(&c, 5), at(&c, 35)), (0, 255));
-    }
-
-    /// A value's text (marked with `SKELETON_MARK`) is a plain bar in skeleton mode and the text otherwise; text not
-    /// marked draws the same either way.
-    #[test]
-    fn skeleton_text_is_a_bar() {
-        let f = Font::new(13);
-        let shot = |skeleton: bool, s: &str| {
-            let mut c = Canvas::new(80, 24, 1.0).unwrap();
-            c.begin_frame(None);
-            c.clear(Color::rgb(0x000000));
-            c.skeleton = skeleton;
-            c.text(f, 4.0, 4.0, Color::rgb(0xffffff), s);
-            c.pixmap.data().to_vec()
-        };
-        let marked = format!("{SKELETON_MARK}12.5");
-        assert_eq!(shot(false, &marked), shot(false, "12.5"), "the text, without the mark");
-        assert_ne!(shot(true, &marked), shot(false, "12.5"), "a bar");
-        assert_eq!(shot(true, "Gain"), shot(false, "Gain"), "a label stays");
-        let mut c = Canvas::new(80, 24, 1.0).unwrap();
-        assert_eq!(c.text_width(f, &marked), c.text_width(f, "12.5"));
     }
 
     /// A chrome's see-through corners leave what is below; an editor's rounded bottom corners too.

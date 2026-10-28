@@ -366,11 +366,6 @@ impl Logic {
         }
     }
 
-    /// Paints the editor's skeleton (`view::paint_skeleton`).
-    pub fn paint_skeleton(&self, c: &mut os_ui::Canvas, palette: &os_theme::Palette) {
-        view::paint_skeleton(self.spec, c, palette, &self.vals);
-    }
-
     /// Paints the editor; `hint` is drawn when the host does not show it.
     pub fn paint(&mut self, c: &mut os_ui::Canvas, palette: &os_theme::Palette) {
         let hint = if self.hosted { String::new() } else { self.hint.clone() };
@@ -735,8 +730,6 @@ mod gui {
         dirty: bool,
         /// The host link: the host finds the editor by the window it gave it (spec: plugins/host-link.md).
         link: Arc<Peer>,
-        /// The skeleton was handed to the app (drawn in its window: it shows it while the editor opens next time).
-        skeleton_sent: bool,
     }
 
     impl Drop for Ed {
@@ -775,7 +768,7 @@ mod gui {
         let thread = px::spawn(parent, size, slot, move |win| {
             let Ok(canvas) = Canvas::new(size.0, size.1, scale) else { return };
             let logic = Logic::new(spec, params, shared, Some(ctx));
-            let ed = Ed { win, canvas, buf: Vec::new(), scale, size, logic, palette: os_plugkit::palette(), last_hint: String::new(), dirty: true, link: peer, skeleton_sent: false };
+            let ed = Ed { win, canvas, buf: Vec::new(), scale, size, logic, palette: os_plugkit::palette(), last_hint: String::new(), dirty: true, link: peer };
             ed.run();
         });
         if thread.is_none() {
@@ -890,17 +883,10 @@ mod gui {
 
         fn paint(&mut self) {
             self.dirty = false;
-            self.buf.resize((self.size.0 * self.size.1) as usize, 0);
             self.logic.paint(&mut self.canvas, &self.palette);
+            self.buf.resize((self.size.0 * self.size.1) as usize, 0);
             self.canvas.copy_to_xrgb(&mut self.buf);
             self.win.blit(&self.buf, self.size.0, self.size.1);
-            // Then the skeleton, once: after the first frame, so the opening does not wait for it.
-            if !self.skeleton_sent && self.win.embedded() {
-                self.skeleton_sent = true;
-                self.logic.paint_skeleton(&mut self.canvas, &self.palette);
-                self.canvas.copy_to_xrgb(&mut self.buf);
-                self.win.set_skeleton(&self.buf, self.size.0, self.size.1);
-            }
         }
     }
 }
@@ -925,41 +911,6 @@ mod tests {
     fn centre(l: &Logic, t: &Target) -> (f32, f32) {
         let h = l.hits.iter().rev().find(|h| &h.t == t).unwrap_or_else(|| panic!("no hit {t:?}"));
         (h.r.cx(), h.r.cy())
-    }
-
-    /// The skeleton keeps what never changes and draws no value: it differs from the editor only where values show,
-    /// and is the same whatever the values are. `SKELETON_DIR=<dir>` saves each effect's editor and skeleton.
-    #[test]
-    fn skeletons_show_no_values() {
-        let mut showing = Vec::new();
-        for spec in SPECS {
-            let l = logic(spec);
-            let shot = |f: &dyn Fn(&mut os_ui::Canvas)| {
-                let mut c = os_ui::Canvas::new(spec.size.0, spec.size.1, 1.0).unwrap();
-                f(&mut c);
-                c
-            };
-            let pal = os_plugkit::palette();
-            let a = shot(&|c| l.paint_skeleton(c, &pal));
-            let mut l2 = logic(spec);
-            for s in spec.settings {
-                l2.vals.set(s.id, 1.0 - l2.vals.norm(s.id).clamp(0.0, 1.0));
-            }
-            let b = shot(&|c| l2.paint_skeleton(c, &pal));
-            if a.pixmap.data() != b.pixmap.data() {
-                showing.push(spec.name);
-            }
-            if let Some(dir) = std::env::var_os("SKELETON_DIR") {
-                let dir = std::path::PathBuf::from(dir);
-                let full = shot(&|c| {
-                    let mut l = logic(spec);
-                    l.paint(c, &pal);
-                });
-                full.pixmap.save_png(dir.join(format!("{}.png", spec.name))).unwrap();
-                a.pixmap.save_png(dir.join(format!("{}-skeleton.png", spec.name))).unwrap();
-            }
-        }
-        assert!(showing.is_empty(), "skeletons still showing values: {showing:?}");
     }
 
     #[test]

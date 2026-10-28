@@ -232,19 +232,6 @@ impl Window {
         either!(self, win => win.resize(w, h))
     }
 
-    /// Drawn in Lemon Studio's window: the app keeps how it looks before its values are known (`os_ui::Canvas::skeleton`)
-    /// and shows it while the editor opens next time.
-    pub fn embedded(&self) -> bool {
-        matches!(self.0, Backend::Embedded(_))
-    }
-
-    /// The editor's skeleton (`embedded`); a window of its own has no use for it.
-    pub fn set_skeleton(&self, px: &[u32], w: u32, h: u32) {
-        if let Backend::Embedded(win) = &self.0 {
-            win.set_skeleton(px, w, h);
-        }
-    }
-
     /// A window point where menus and boxes are placed: on the screen (device px), or from the editor's top-left when
     /// it is drawn in Lemon Studio's window.
     pub fn to_root(&self, x: i32, y: i32) -> (i32, i32) {

@@ -87,10 +87,6 @@ pub fn big_dial(c: &mut Canvas, cx: f32, cy: f32, value: f32, dot: Color, st: St
     }
     let (start, sweep) = (big_dial_angle(0.0) - PI / 2.0, 300f32.to_radians());
     c.arc(cx, cy, 22.5, start, sweep, 3.0, plug::TRACK);
-    // Skeleton (`Canvas::skeleton`): the ticks and track, a disc of the skeleton ink, no value.
-    if c.skeleton {
-        return c.fill_circle(cx, cy, 19.0, crate::SKELETON_INK);
-    }
     let v = value.clamp(0.0, 1.0);
     if v > 0.004 {
         c.arc(cx, cy, 22.5, start, sweep * v, 3.0, if hot { dot.mix(Color::rgb(0xffffff), 0.2) } else { dot });
@@ -212,14 +208,6 @@ pub fn label(c: &mut Canvas, t: &Palette, x: f32, cy: f32, s: &str, disabled: bo
 
 /// Dark list box with the chosen entry and a ▸ arrow (declicking mode, stretch mode, filter type).
 pub fn list_box(c: &mut Canvas, t: &Palette, r: Rect, text: &str, st: State) {
-    // Skeleton: the chosen entry is a value.
-    let marked;
-    let text = if c.skeleton {
-        marked = format!("{}{text}", crate::SKELETON_MARK);
-        marked.as_str()
-    } else {
-        text
-    };
     if lemon::on(t) {
         lemon::field(c, r, st);
         let lh = c.line_height(LABEL);
@@ -272,10 +260,6 @@ pub fn hslider(c: &mut Canvas, t: &Palette, x0: f32, x1: f32, cy: f32, value: f3
             c.line(x, cy + 6.0, x, cy + if i % 4 == 0 { 10.0 } else { 8.5 }, 1.0, plug::TICK);
         }
         let track = Rect::new(x0 + 6.0, cy - 9.0, x1 - x0 - 12.0, 18.0);
-        // Skeleton: the groove and ticks, no cap.
-        if c.skeleton {
-            return track;
-        }
         let tx = track.x + track.w * value.clamp(0.0, 1.0);
         let cap = Rect::new(tx - 6.0, cy - 7.0, 12.0, 14.0);
         c.fill_rrect(cap.outset(1.0), 5.0, Color::rgb(0x151515));

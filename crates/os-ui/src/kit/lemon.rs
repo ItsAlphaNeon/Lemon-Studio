@@ -68,9 +68,6 @@ pub fn ink_on(col: Color) -> Color {
 
 /// Lit (lemon) face: a soft top-light gradient from the highlight to the main colour (the plugin editors' brand look).
 pub fn lit(c: &mut Canvas, r: Rect, radius: f32, hover: bool) {
-    if c.skeleton {
-        return c.fill_rrect(r, radius, crate::SKELETON_INK);
-    }
     let (top, bottom) = if hover { (brand::HIGHLIGHT, brand::MAIN.mix(brand::HIGHLIGHT, 0.35)) } else { (brand::HIGHLIGHT.mix(brand::MAIN, 0.45), brand::MAIN) };
     c.fill_rect_gradient(r, top, bottom, radius);
 }
@@ -404,11 +401,6 @@ pub fn dial(c: &mut Canvas, cx: f32, cy: f32, r: f32, w: f32, value: f32, bipola
     let a = start + sweep * v;
     let ring = r - w / 2.0;
     c.arc(cx, cy, ring, start, sweep, w, plug::TRACK);
-    // Skeleton (`Canvas::skeleton`): the track, a disc of the skeleton ink, no value.
-    if c.skeleton {
-        c.fill_circle(cx, cy, r - w - 1.5, crate::SKELETON_INK);
-        return;
-    }
     let a0 = if bipolar { start + sweep / 2.0 } else { start };
     if !st.disabled && (a - a0).abs() > 0.01 {
         let col = if st.hover || st.pressed { arc.mix(Color::rgb(0xffffff), 0.2) } else { arc };
@@ -431,9 +423,6 @@ pub fn dial_disc(c: &mut Canvas, cx: f32, cy: f32, disc: f32, st: State) {
 /// outline, with a dim inner square when on (they still toggle).
 pub fn toggle(c: &mut Canvas, cx: f32, cy: f32, on: bool, st: State) {
     let r = Rect::new(cx - 6.0, cy - 6.0, 12.0, 12.0);
-    if c.skeleton {
-        return c.fill_rrect(r, 4.0, crate::SKELETON_INK);
-    }
     if st.disabled {
         c.stroke_rrect(r.inset(0.5), 3.5, 1.0, if st.hover { Color::rgb(0x5f5f5f) } else { Color::rgb(0x4f4f4f) });
         if on {
@@ -476,8 +465,6 @@ pub fn field(c: &mut Canvas, r: Rect, st: State) {
 /// Raised button (rounded square, radius `radius`): grey face with a dark outline, lit lemon when `st.on`; disabled,
 /// only an outline (olive when on, as a disabled `toggle`). Returns the colour for its label or glyph.
 pub fn plug_button(c: &mut Canvas, r: Rect, radius: f32, st: State) -> Color {
-    // Skeleton: unlit.
-    let st = if c.skeleton { State { on: false, hover: false, pressed: false, ..st } } else { st };
     if st.disabled {
         c.stroke_rrect(r.inset(0.5), (radius - 0.5).max(0.0), 1.0, if st.on { Color::rgb(0x6e6436) } else { plug::FACE });
         return plug::OFF;
@@ -560,8 +547,6 @@ pub fn text_tab(c: &mut Canvas, cell: Rect, x: f32, name: &str, font: Font, col:
 /// A small button of a set (LFO shapes): the chosen one on a dark rounded square. Returns its glyph colour (`col`
 /// when chosen, `plug::OFF` when disabled).
 pub fn choice_button(c: &mut Canvas, r: Rect, on: bool, col: Color, st: State) -> Color {
-    // Skeleton: none chosen.
-    let on = on && !c.skeleton;
     if st.disabled {
         if on {
             outlined(c, r, 5.0, plug::FIELD_LINE, plug::FIELD);

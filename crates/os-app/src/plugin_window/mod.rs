@@ -70,8 +70,8 @@ impl FrameWindow {
     }
 
     /// A window drawn in the app's, at canvas point `pos` (logical px), at the canvas's `scale`.
-    pub fn embedded(info: ChannelInfo, editor: (f32, f32), scale: f32, pos: Option<(f32, f32)>, look: Option<os_plugkit::embed::Pixels>) -> Result<FrameWindow, String> {
-        EmbedFrame::new(info, editor, scale, pos, look).map(FrameWindow::Embedded)
+    pub fn embedded(info: ChannelInfo, editor: (f32, f32), scale: f32, pos: Option<(f32, f32)>) -> Result<FrameWindow, String> {
+        EmbedFrame::new(info, editor, scale, pos).map(FrameWindow::Embedded)
     }
 
     /// The window drawn in the app's, if this is one.

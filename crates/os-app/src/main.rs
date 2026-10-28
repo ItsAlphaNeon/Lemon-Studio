@@ -30,8 +30,6 @@ mod cpu;
 mod data_folder;
 mod device;
 mod dialog;
-#[cfg(target_os = "linux")]
-mod editor_looks;
 mod filedlg;
 mod enable_groups;
 mod export;

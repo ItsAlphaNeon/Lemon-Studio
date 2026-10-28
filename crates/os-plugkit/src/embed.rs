@@ -51,9 +51,6 @@ pub struct Overlay {
 pub struct View {
     /// The editor's last frame.
     pub frame: Option<Pixels>,
-    /// The editor as it looks before its values are known (`os_ui::Canvas::skeleton`): the app keeps it and shows it
-    /// while the editor opens next time.
-    pub skeleton: Option<Pixels>,
     /// Open menus and boxes, bottom to top: while there is one, every input goes to the editor.
     pub overlays: Vec<Overlay>,
     /// The size the editor asked for (device px; `Window::resize`), or the size it opened at.
@@ -244,16 +241,6 @@ impl Window {
         }
         let p = Pixels { px: Arc::new(px[..n].to_vec()), w, h };
         self.s.changed(|v| v.frame = Some(p));
-    }
-
-    /// The editor's skeleton (`View::skeleton`).
-    pub fn set_skeleton(&self, px: &[u32], w: u32, h: u32) {
-        let n = (w * h) as usize;
-        if px.len() < n {
-            return;
-        }
-        let p = Pixels { px: Arc::new(px[..n].to_vec()), w, h };
-        self.s.lock().view.skeleton = Some(p);
     }
 
     /// The editor's new size (device px).
@@ -614,28 +601,6 @@ mod tests {
         drop(t);
         s.withdraw();
         assert!(claim(s.token()).is_none(), "withdrawn");
-    }
-
-    /// An editor drawn in the app's window hands the app its skeleton beside its frames; a window of its own says it is
-    /// not embedded.
-    #[test]
-    fn editors_hand_over_their_skeleton() {
-        let (s, _) = editor((4, 2));
-        let slot = crate::x11::Slot::default();
-        let t = crate::x11::spawn(s.token(), (4, 2), &slot, move |win| {
-            assert!(win.embedded());
-            win.set_skeleton(&[0x112233; 8], 4, 2);
-            win.blit(&[0x445566; 8], 4, 2);
-        })
-        .unwrap();
-        let t0 = Instant::now();
-        while s.view().frame.is_none() && t0.elapsed() < Duration::from_secs(2) {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let v = s.view();
-        assert_eq!(v.skeleton.map(|p| (p.w, p.h, p.px[0])), Some((4, 2, 0x112233)));
-        assert_eq!(v.frame.map(|p| p.px[0]), Some(0x445566));
-        drop(t);
     }
 
     /// A menu is an overlay: the app shows it, the editor gets the clicks on it, and it goes once a row is picked.

@@ -1494,9 +1494,6 @@ pub struct App {
 /// Window-level requests the shell must carry out after an event.
 impl App {
     pub fn new(path: Option<PathBuf>) -> App {
-        // The in-app plugin editors' last looks, read in the background (`editor_looks`).
-        #[cfg(target_os = "linux")]
-        crate::editor_looks::load_all();
         // Each test's app looks for missing samples only in its own project's folders, never another test's.
         #[cfg(test)]
         os_engine::sample::set_thread_search_folders(Vec::new());
@@ -12844,32 +12841,6 @@ mod tests {
         settle(&mut app, &|a| a.state.embeds.is_empty());
         assert!(app.plugins.hosted[&0].window.is_none(), "closed");
         assert_eq!(app.state.z.last(), Some(&Win::ChannelRack));
-    }
-
-    /// Until the editor draws, a window drawn in the app's shows the editor's skeleton as it is (`editor_looks`); one of
-    /// another size is not shown.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn in_app_editors_show_their_skeleton_until_they_draw() {
-        use crate::plugin_window::{ChannelInfo, EmbedFrame};
-        let Ok(mut c) = Canvas::new(800, 600, 1.0) else { return };
-        let info = ChannelInfo { name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
-        let pal = os_theme::Palette::default();
-        let paint = |c: &mut Canvas, w: u32, h: u32| {
-            let look = os_plugkit::embed::Pixels { px: std::sync::Arc::new(vec![0x00ff_0000; (w * h) as usize]), w, h };
-            let e = EmbedFrame::new(info.clone(), (300.0, 200.0), 1.0, Some((50.0, 50.0)), Some(look)).unwrap();
-            e.sync(1.0, (800, 600), (0, 0), Rect::new(0.0, 0.0, 800.0, 600.0), &pal);
-            c.begin_frame(None);
-            c.clear(os_ui::Color::rgb(0x000000));
-            e.paint(c);
-            let ed = e.editor_rect().unwrap();
-            let p = c.pixmap.pixel(ed.cx() as u32, ed.cy() as u32).unwrap();
-            (p.red(), p.green())
-        };
-        let (r, g) = paint(&mut c, 300, 200);
-        assert_eq!((r, g), (255, 0), "the skeleton, as it is");
-        let (r, _) = paint(&mut c, 320, 200);
-        assert!(r < 120, "one of another size is not shown: {r}");
     }
 
     /// Closed and opened again, a plugin window drawn in the app's comes back where it was, and the channel window

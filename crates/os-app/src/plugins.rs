@@ -956,10 +956,7 @@ impl Plugins {
         // Linux a plugin compiled into Lemon Studio draws its editor in the app's own window (`EmbedFrame`).
         #[cfg(target_os = "linux")]
         let w = if embeds(&h.plugin) {
-            {
-                let look = h.plugin.lock().ok().and_then(|p| crate::editor_looks::get(&p.desc().id));
-                FrameWindow::embedded(info, (560.0, 437.0), scale, h.embed_at, look)?
-            }
+            FrameWindow::embedded(info, (560.0, 437.0), scale, h.embed_at)?
         } else {
             FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, h.detached)?
         };
@@ -1045,10 +1042,6 @@ impl Plugins {
                 if let Some(e) = w.embed() {
                     let r = e.rect();
                     h.embed_at = Some((r.x, r.y));
-                    // Its skeleton: the next opening shows it until the editor draws (`editor_looks`).
-                    if let (Some(f), Ok(p)) = (e.skeleton(), h.plugin.lock()) {
-                        crate::editor_looks::put(&p.desc().id, f);
-                    }
                 }
                 #[cfg(windows)]
                 if h.detached {
