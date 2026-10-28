@@ -143,6 +143,8 @@ pub enum Next {
     ImportMidi(PathBuf),
     /// FILE ▸ Revert to last backup: this backup opened as the project (`crate::project_files`).
     Revert(PathBuf),
+    /// Current project ▸ Versions: this earlier save of the project's file opened as the project (`App::open_version`).
+    Version(String),
     /// FILE ▸ New from template ▸: a new project from this template file (None: Empty).
     Template(Option<PathBuf>),
 }

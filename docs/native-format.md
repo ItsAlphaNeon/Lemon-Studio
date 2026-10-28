@@ -16,6 +16,7 @@ A zip with these files:
 | `journal.jsonl` | The project's whole history: the journal's entries ([control-plane.md](control-plane.md) "Journal") from every session it was edited in, oldest first, each session starting with its `session` entry |
 | `ids.json` | Each channel's, pattern's, mixer track's, arrangement's, clip's and slot plugin's id, with what finds the thing again (index, number, place), and the next id to give out |
 | `history.json` | The undo history: each step's name and what it puts back, and how many are done |
+| `versions.json`, `versions/<saved>.flp` | Every earlier save's snapshot, and when it was saved: each save keeps the one before it (unless nothing changed) |
 
 A file of a newer `version` is not opened; one without a journal (or with a damaged line in it) opens with no
 history.
@@ -30,6 +31,10 @@ history.
   what it is.
 - **Undo goes on past closing.** Opened again, Ctrl+Z takes back the steps made before the save, and redo gives them
   again, as if the project had never closed. The browser's History lists them.
+- **Any earlier save can come back.** The browser's Current project ▸ Versions lists the file's earlier saves by when
+  they were made; one clicked (after the unsaved-changes question) becomes the project, in the same file and with the
+  same history and ids, unsaved until saved, and that save keeps the newest as a version too. Revert to last backup
+  keeps a Lemon project's history and ids the same way.
 - **The same things keep the same ids** from session to session, so the journal and the control plane's clients name
   them alike over the project's whole life, and an id that is gone is never given to something else.
 

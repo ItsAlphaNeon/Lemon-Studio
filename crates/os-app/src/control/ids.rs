@@ -125,7 +125,7 @@ pub fn stored(ids: &Ids, p: &Project) -> serde_json::Value {
 /// fresh id `settle` gives it. Ids are given out after all of them from then on.
 pub fn restore(ids: &mut Ids, p: &mut Project, v: &serde_json::Value) {
     // Each stored entry: its key (all numbers but the last) and its id (the last), in the stored order.
-    let mut table = |kind: &str| -> HashMap<Vec<u64>, std::collections::VecDeque<u32>> {
+    let table = |kind: &str| -> HashMap<Vec<u64>, std::collections::VecDeque<u32>> {
         let mut m: HashMap<Vec<u64>, std::collections::VecDeque<u32>> = HashMap::new();
         for e in v[kind].as_array().into_iter().flatten() {
             let Some(n) = e.as_array().map(|a| a.iter().filter_map(serde_json::Value::as_u64).collect::<Vec<_>>()) else { continue };

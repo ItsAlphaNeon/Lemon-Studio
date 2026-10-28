@@ -9,7 +9,9 @@
 //! - `journal.jsonl`: the project's whole history, every session it was edited in (`crate::journal`): what changed,
 //!   when and by whom, and every state its plugins had;
 //! - `ids.json`: its things' ids (`control::ids::stored`), so they keep them from session to session;
-//! - `history.json`: its undo history (`history::History::stored`), so Ctrl+Z goes on past opening it.
+//! - `history.json`: its undo history (`history::History::stored`), so Ctrl+Z goes on past opening it;
+//! - `versions.json` and `versions/<saved>.flp`: each earlier save's snapshot (the browser's Current project ▸
+//!   Versions opens one).
 
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
@@ -26,6 +28,67 @@ const SNAPSHOT: &str = "project.flp";
 const JOURNAL: &str = "journal.jsonl";
 const IDS: &str = "ids.json";
 const HISTORY: &str = "history.json";
+const VERSIONS: &str = "versions.json";
+
+/// An earlier save of a Lemon project, kept in the file: its snapshot's name in the zip and when it was saved (Unix ms).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Version {
+    pub file: String,
+    pub saved: u64,
+}
+
+/// The versions Lemon project file `path` keeps, newest first (none for another file).
+pub fn versions(path: &Path) -> Vec<Version> {
+    let Ok(bytes) = std::fs::read(path).map_err(|_| ()).and_then(|b| if is_native(path) { Ok(b) } else { Err(()) }) else { return Vec::new() };
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else { return Vec::new() };
+    let mut v = read_versions(&mut zip);
+    v.reverse();
+    v
+}
+
+/// Version `file`'s snapshot (an FLP) from Lemon project file `path`.
+pub fn version(path: &Path, file: &str) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    zip.by_name(file).map_err(|e| format!("{file}: {e}"))?.read_to_end(&mut out).map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// The versions list of an open Lemon project file, oldest first.
+fn read_versions(zip: &mut zip::ZipArchive<Cursor<Vec<u8>>>) -> Vec<Version> {
+    let mut s = String::new();
+    if zip.by_name(VERSIONS).ok().and_then(|mut f| f.read_to_string(&mut s).ok()).is_none() {
+        return Vec::new();
+    }
+    let v: Value = serde_json::from_str(&s).unwrap_or_default();
+    v.as_array().into_iter().flatten().filter_map(|e| Some(Version { file: e["file"].as_str()?.to_string(), saved: e["saved"].as_u64()? })).collect()
+}
+
+/// What the file at `path` keeps of its earlier saves, for the next one (a `.lemon` only): each version's snapshot,
+/// oldest first, then the snapshot it holds now as the newest version, unless `flp` (what is saved now) is the same.
+fn carried_versions(path: &Path, flp: &[u8]) -> Vec<(Version, Vec<u8>)> {
+    let Ok(bytes) = std::fs::read(path) else { return Vec::new() };
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else { return Vec::new() };
+    let list = read_versions(&mut zip);
+    let mut out = Vec::new();
+    for v in list {
+        let mut b = Vec::new();
+        if zip.by_name(&v.file).ok().and_then(|mut f| f.read_to_end(&mut b).ok()).is_some() {
+            out.push((v, b));
+        }
+    }
+    let mut now = Vec::new();
+    let saved = {
+        let mut s = String::new();
+        zip.by_name(MANIFEST).ok().and_then(|mut f| f.read_to_string(&mut s).ok());
+        serde_json::from_str::<Value>(&s).ok().and_then(|m| m["saved"].as_u64()).unwrap_or(0)
+    };
+    if zip.by_name(SNAPSHOT).ok().and_then(|mut f| f.read_to_end(&mut now).ok()).is_some() && now != flp && out.last().is_none_or(|(_, b)| *b != now) {
+        out.push((Version { file: format!("versions/{saved}.flp"), saved }, now));
+    }
+    out
+}
 
 /// Whether `path` names a Lemon project file.
 pub fn is_native(path: &Path) -> bool {
@@ -89,6 +152,8 @@ pub fn write(path: &Path, flp: &[u8], journal: &[Value], ids: &Value, history: O
         std::fs::write(path, flp).map_err(|e| e.to_string())?;
         return Ok(flp.len() as u64);
     }
+    // The earlier saves go along: what the file holds now becomes the newest version.
+    let versions = carried_versions(path, flp);
     let mut buf = Cursor::new(Vec::new());
     {
         let mut zip = zip::ZipWriter::new(&mut buf);
@@ -110,6 +175,15 @@ pub fn write(path: &Path, flp: &[u8], journal: &[Value], ids: &Value, history: O
         if let Some(h) = history {
             zip.start_file(HISTORY, opts).map_err(e)?;
             zip.write_all(h.to_string().as_bytes()).map_err(|e| e.to_string())?;
+        }
+        if !versions.is_empty() {
+            let list: Vec<Value> = versions.iter().map(|(v, _)| json!({ "file": v.file, "saved": v.saved })).collect();
+            zip.start_file(VERSIONS, opts).map_err(e)?;
+            zip.write_all(Value::Array(list).to_string().as_bytes()).map_err(|e| e.to_string())?;
+            for (v, b) in &versions {
+                zip.start_file(&v.file, opts).map_err(e)?;
+                zip.write_all(b).map_err(|e| e.to_string())?;
+            }
         }
         zip.finish().map_err(e)?;
     }
@@ -302,6 +376,40 @@ mod tests {
             crate::history::redo(&mut b.state).unwrap();
             assert_eq!(model(&b), read_back(&points[k]), "redone to point {k}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Each save keeps the one before it as a version; opening an earlier version makes it the project, in the same
+    /// file, with the file's history going on; saving then keeps the newest as a version too.
+    #[test]
+    fn versions_of_a_lemon_project() {
+        use crate::app::App;
+        let dir = std::env::temp_dir().join(format!("lemon-versions-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.lemon");
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.journal_opened(None, Vec::new());
+        for t in [120.0, 150.0, 170.0] {
+            a.state.tempo = t;
+            a.save_to(path.clone());
+        }
+        let v = versions(&path);
+        assert_eq!(v.len(), 2, "the two earlier saves: {v:?}");
+        assert!(v[0].saved >= v[1].saved, "newest first");
+        assert_eq!(a.state.versions, v);
+        // The oldest opened as the project: its tempo, the same file, unsaved.
+        let oldest = v[1].file.clone();
+        a.open_version(&oldest);
+        assert_eq!(a.state.tempo, 120.0);
+        assert_eq!(a.state.path.as_deref(), Some(path.as_path()));
+        assert!(a.unsaved());
+        a.save_to(path.clone());
+        let v = versions(&path);
+        assert_eq!(v.len(), 3, "170 is kept as a version too");
+        let (_, extra) = read(&path).unwrap();
+        let kinds: Vec<String> = extra.unwrap().journal.iter().map(|e| e["kind"].as_str().unwrap_or("").to_string()).collect();
+        assert!(kinds.contains(&"new".to_string()) && kinds.contains(&"version".to_string()), "the history went on: {kinds:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

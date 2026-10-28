@@ -122,6 +122,14 @@ impl Journal {
         self.carried.iter().cloned().chain(session).chain(here).collect()
     }
 
+    /// The project's file is Lemon project file `path` with history `entries` (an earlier save or a backup of it was
+    /// opened as the project): the history goes on from that file's.
+    pub fn carry(&mut self, path: &std::path::Path, entries: Vec<Value>) {
+        self.known.extend(entries.iter().filter(|e| e["kind"] == "plugin_state").filter_map(|e| e["hash"].as_str().map(str::to_string)));
+        self.carried = entries;
+        self.carried_from = Some(path.to_path_buf());
+    }
+
     /// The project was saved into Lemon project file `path`: that file holds the history so far.
     pub fn saved_into(&mut self, path: &std::path::Path) {
         self.carried = self.project_history();

@@ -46,6 +46,7 @@ pub fn presets_key() -> String {
 /// like a folder, shown only while the project has one (spec: ui/data-folder.md §3).
 const PROJECT: &[(&str, Icon)] = &[
     ("History", Icon::Undo),
+    (VERSIONS, Icon::FileProject),
     ("Patterns", Icon::Note),
     ("Effects", Icon::Speaker),
     ("Generators", Icon::Plug),
@@ -54,6 +55,8 @@ const PROJECT: &[(&str, Icon)] = &[
     ("Samples", Icon::Wave),
 ];
 pub const INITIALIZED_CONTROLS: &str = "Controls with a start value";
+/// The earlier saves a Lemon project file keeps (`crate::native`), shown only while there are some.
+pub const VERSIONS: &str = "Versions";
 pub const PROJECT_DATA: &str = "Project data";
 
 /// The Current project and Plugin database tabs (spec §1).
@@ -96,6 +99,8 @@ pub enum Item {
     /// An entry of the undo history, 0 = "Last reset" (`History::entries`): a click goes back or forward to it; not
     /// draggable.
     History(usize),
+    /// An earlier save of the project's Lemon project file (`native::Version::file`): a click opens it as the project.
+    Version(String),
     /// A plugin preset file (any `presets::IMPORT_EXTS` type) or factory preset path: dropped, it loads (spec:
     /// plugins/presets.md "Drag and drop").
     Preset(String),
@@ -351,6 +356,9 @@ fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
 fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
     let p = &s.project;
     for &(name, icon) in PROJECT {
+        if name == VERSIONS && s.versions.is_empty() {
+            continue;
+        }
         if name == INITIALIZED_CONTROLS && p.init_controls.is_empty() {
             continue;
         }
@@ -371,6 +379,11 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                     let icon = if s.history.undone(e) { Icon::Redo } else { Icon::Undo };
                     let (bright, item) = (s.history.current(e), Item::History(e));
                     out.push(Row { key: format!("{parent}/{e}"), depth: 2, label: step.into(), icon, cat, open: None, bright, item, path: None });
+                }
+            }
+            VERSIONS => {
+                for v in &s.versions {
+                    leaf(out, &parent, crate::journal::when(v.saved), Icon::FileProject, cat, false, Item::Version(v.file.clone()));
                 }
             }
             "Patterns" => {

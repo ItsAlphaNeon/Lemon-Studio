@@ -1004,6 +1004,8 @@ pub struct State {
     pub retimed: bool,
     pub file: Option<os_flp::FlpFile>,
     pub path: Option<PathBuf>,
+    /// The earlier saves the project's file keeps, newest first (a Lemon project's; `crate::native`).
+    pub versions: Vec<crate::native::Version>,
     /// Open child windows, bottom to top.
     pub z: Vec<Win>,
     /// The empty workspace took the last click: no window has the focus (Ctrl+F12 closes them all,
@@ -1510,6 +1512,7 @@ impl App {
                 retimed: false,
                 file: None,
                 path: None,
+                versions: Vec::new(),
                 z: vec![Win::Playlist, Win::ChannelRack],
                 no_focus: false,
                 show_browser: true,
@@ -1841,6 +1844,7 @@ impl App {
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 self.mark_saved();
                 self.journal_opened(Some(&opened), carried);
+                self.state.versions = crate::native::versions(&opened);
                 crate::missing::opened(self);
                 self.loading = Some(crate::loading::Loading::start(&self.state.project));
                 self.state.playlist.wave_wait = true;
@@ -2062,6 +2066,7 @@ impl App {
                 self.journal.saved_into(&target);
             }
             self.journal_saved(&target);
+            self.state.versions = crate::native::versions(&target);
         }
         result.ok()
     }
@@ -2179,6 +2184,7 @@ impl App {
             }
             Next::ImportMidi(p) => self.import_pending(p),
             Next::Revert(b) => self.revert_from(b),
+            Next::Version(f) => self.open_version(&f),
             Next::Template(f) => self.new_from_pick(f),
         }
         self.invalidate();
