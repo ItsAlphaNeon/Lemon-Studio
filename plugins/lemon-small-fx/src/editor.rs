@@ -319,7 +319,7 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
-                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
+                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(id.clone()));
                 // Automation belongs to the host: offered when Lemon Studio hosts the editor (host link).
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
@@ -1057,7 +1057,7 @@ mod tests {
         let mut l = logic(soft_clipper::SPEC);
         let m = l.menu(&MenuReq::Param("post".into()));
         assert_eq!(m.find("Reset"), Some(Cmd::Reset("post".into())));
-        assert_eq!(m.find("Type in value..."), Some(Cmd::TypeIn("post".into())));
+        assert_eq!(m.find("Enter value..."), Some(Cmd::TypeIn("post".into())));
         assert_eq!(m.find("About Lemon Soft Clipper..."), Some(Cmd::About));
         l.vals.edit_plain("post", 10.0);
         l.pick(&MenuReq::Param("post".into()), Cmd::Reset("post".into()), 0.0, 0.0);

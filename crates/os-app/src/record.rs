@@ -109,7 +109,7 @@ pub fn set_precount_bars(bars: u32) {
 pub fn option_hint(o: Opt) -> &'static str {
     match o {
         Opt::Wait => "Start on input (Ctrl+I) - right-click for options",
-        Opt::Precount => "Recording precount (Ctrl+P) - right-click for the length",
+        Opt::Precount => "Count-in (Ctrl+P) - right-click for the length",
         Opt::Loop => "Loop record (off: playback runs on past the end while recording)",
         _ => "Blend recorded notes (Ctrl+B)",
     }
@@ -273,7 +273,7 @@ impl App {
             arm("Notes and automation", true, true),
             arm("Notes only", true, false),
             arm("Automation only", false, true),
-            PItem::sub("Audio, into the playlist as an audio clip", audio),
+            PItem::sub("Audio, into the arranger as an audio clip", audio),
             // Asks for the input, then records into Tesla on the master track (spec: ui/one-click-recording.md §2).
             PItem::new("Audio, into the audio editor", Cmd::OneClickEditor),
             PItem::sep(),
@@ -306,7 +306,7 @@ impl App {
                 if bars > 0 {
                     set_precount_bars(bars);
                 }
-                Some(if bars > 0 { format!("Recording precount: {bars} bar{}", if bars == 1 { "" } else { "s" }) } else { "Recording precount off".into() })
+                Some(if bars > 0 { format!("Count-in: {bars} bar{}", if bars == 1 { "" } else { "s" }) } else { "Count-in off".into() })
             }
             RecCmd::Dump(minutes) => self.dump_score_log(minutes, None),
             RecCmd::DumpAs(minutes, replace) => self.dump_score_log(minutes, Some(replace)),
@@ -360,7 +360,7 @@ impl App {
             s.project.patterns.push(os_model::Pattern { number: pattern, notes: new, ..os_model::Pattern::default() });
         }
         s.piano.dirty = true;
-        Some(format!("Dumped {n} note{} into the pattern", if n == 1 { "" } else { "s" }))
+        Some(format!("Captured {n} note{} into the pattern", if n == 1 { "" } else { "s" }))
     }
 
     /// Hands the looping time selection to the playback (`Transport::set_loop`); returns it.
@@ -434,7 +434,7 @@ impl App {
             Opt::Precount => {
                 let bars = precount_bars();
                 vec![
-                    PItem::head("Precount duration"),
+                    PItem::head("Count-in length"),
                     PItem::new("1 bar", Cmd::RecPrecountBars(1)).mark(Mark::Radio(bars == 1)),
                     PItem::new("2 bars", Cmd::RecPrecountBars(2)).mark(Mark::Radio(bars == 2)),
                 ]
@@ -452,7 +452,7 @@ impl App {
         }
         let name = match o {
             Opt::Wait => "Start on input",
-            Opt::Precount => "Recording precount",
+            Opt::Precount => "Count-in",
             Opt::Loop => "Loop record",
             _ => "Blend recorded notes",
         };
@@ -842,7 +842,7 @@ mod tests {
                 "Notes and automation",
                 "Notes only",
                 "Automation only",
-                "Audio, into the playlist as an audio clip",
+                "Audio, into the arranger as an audio clip",
                 "Audio, into the audio editor",
                 "",
                 "Don't ask again"
@@ -989,7 +989,7 @@ mod tests {
         app.metronome_menu(10.0, 10.0);
         let Some(Popup { items, .. }) = app.state.playlist.popup.clone() else { panic!("no menu") };
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
-        assert_eq!(labels[labels.len() - 4..], ["Recording precount", "Off", "1 bar", "2 bars"]);
+        assert_eq!(labels[labels.len() - 4..], ["Count-in", "Off", "1 bar", "2 bars"]);
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Precount(2)));
         assert!(Opt::Precount.on() && precount_bars() == 2);
         crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Precount(0)));
@@ -1036,7 +1036,7 @@ mod tests {
         log.up(src(KeyCode::KeyX), t0 + Duration::from_millis(1000));
         let tps = crate::score_log::ticks_per_second(&app.state);
         let msg = crate::playlist::run(&mut app, Cmd::Rec(RecCmd::Dump(2)));
-        assert_eq!(msg.as_deref(), Some("Dumped 2 notes into the pattern"));
+        assert_eq!(msg.as_deref(), Some("Captured 2 notes into the pattern"));
         let t = |s: f64| (s * tps).round() as u32;
         assert_eq!(notes(&app), [(0, t(0.3), 0), (t(0.7), t(0.3), 0)]);
         assert_eq!(app.state.history.entries().last().map(|e| e.1), Some(crate::score_log::DUMPED));
@@ -1143,7 +1143,7 @@ mod tests {
         app.mouse_up();
         let Some(Popup { items, .. }) = app.state.playlist.popup.take() else { panic!("no menu") };
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
-        assert_eq!(labels, ["Precount duration", "1 bar", "2 bars"]);
+        assert_eq!(labels, ["Count-in length", "1 bar", "2 bars"]);
         crate::playlist::run(&mut app, Cmd::RecPrecountBars(2));
         assert_eq!(precount_bars(), 2);
         let w = hit_rect(&app, &Action::RecOpt(Opt::Wait));

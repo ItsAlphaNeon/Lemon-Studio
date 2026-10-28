@@ -503,7 +503,7 @@ impl Command {
             Command::AddClip { .. } => "Add clip",
             Command::DeleteClip { .. } => "Delete clip",
             Command::SetClip { .. } => "Edit clip",
-            Command::SetPlaylistTrack { .. } => "Playlist track",
+            Command::SetPlaylistTrack { .. } => "Arranger track",
             Command::SetParam { .. } => PLUGIN_PARAMETER,
             Command::Put(_) => "Undo",
         }

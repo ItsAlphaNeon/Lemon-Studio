@@ -70,7 +70,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     window_body(ui, r);
     let outer = r;
     let arr = pl::arrangement_name(s);
-    let title = format!("Playlist - {arr}  \u{203a}  {}  \u{203a}", pl::source_name(s, pl::source(s)));
+    let title = format!("Arranger - {arr}  \u{203a}  {}  \u{203a}", pl::source_name(s, pl::source(s)));
     // The grid covers most of the window and is painted all over (rows and gaps): the frame skips it.
     let (fr, fc) = super::frame_rects(s, Win::Playlist, r);
     let cover = grid_rect(s, fr, fc);
@@ -80,7 +80,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // The arrangement name opens the arrangement menu; hovered it turns orange with a down arrow (§12, as FL).
     {
         let f = Font::new(17);
-        let x0 = r.x + 281.0 + ui.c.text_width(f, "Playlist - ");
+        let x0 = r.x + 281.0 + ui.c.text_width(f, "Arranger - ");
         let w = ui.c.text_width(f, &arr);
         let arrow_w = ui.c.text_width(f, "  \u{203a}  ");
         // Short of the window buttons, as the title (a narrow window cuts it).
@@ -101,7 +101,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // Title-bar tools: ▸ options, snap magnet, then the nine tools (§1, §3).
     let ty = r.y + 2.0;
     let b = Rect::new(r.x + 13.0 - 9.0, ty, 18.0, 18.0);
-    let hov = ui.hit(b, Action::PlOptions, "Playlist options");
+    let hov = ui.hit(b, Action::PlOptions, "Arranger options");
     icons::draw(ui.c, Icon::ArrowRight, b, if hov { t.glyph } else { t.text });
     let b = Rect::new(r.x + 33.0 - 9.0, ty, 18.0, 18.0);
     let hov = ui.hit(b, Action::PlSnap, format!("Snap: {}", s.playlist.snap.label()));
@@ -189,7 +189,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
 
     // Grid background and lines; rows follow the track layout (collapsed groups' members are strips, §6a).
-    ui.hit(grid, Action::PlaylistArea, "Playlist");
+    ui.hit(grid, Action::PlaylistArea, "Arranger");
     let mut visible = Vec::new();
     let mut row = g.track_at(grid.y);
     while row < TRACKS && g.y_of(row) < grid.bottom() {

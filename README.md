@@ -26,14 +26,14 @@ own content. Side branches are named `cutting-edge-<topic>`.
     memory);
   - the workspace and the browser as rounded cards over a darker backdrop; the browser's splitter is the gap between
     them, and the mixer's routing cables hang over the gap below.
-  - split views instead of floating ones: the playlist, the piano roll and the mixer are maximized or snapped into a
+  - split views instead of floating ones: the arranger, the piano roll and the mixer are maximized or snapped into a
     split of the workspace, each its own card. The status bar's split button picks the preset (top and bottom, or left
     and right); a title bar dragged onto another window swaps the two, the gaps drag to resize (a double click resets
     one), and windows keep a least size. F5, F7 and F9 show and hide their window on their own, and a window opening
     goes into the split (one maximized gives way). The toolbar's window buttons are lit while their window is open.
     There is no minimize; the maximize button shows a full square, or two panes to go back to the split, and a window
-    alone has only its close button. The channel rack, plugin and tool
-    windows still float. With Animations on "Entertain me", windows glide to new places as Omarchy's Hyprland ones
+    alone has only its close button. The instrument rack, plugin and tool
+    windows still float. With Animations on "Playful", windows glide to new places as Omarchy's Hyprland ones
     do; a window opening is at its place at once, under them as they move away, and one closing leaves its
     last look there for them to move over, and maximizing is instant.
   - the browser docked left or right: its title bar drags it to the other side.
@@ -41,12 +41,21 @@ own content. Side branches are named `cutting-edge-<topic>`.
     (floating windows change nothing). Ctrl+Alt+arrows move the keyboard to the split window that way (floating windows
     are no stops; while one is maximized, the one that way is maximized instead), Ctrl+Alt+Shift+arrows swap split
     windows, and F maximizes the window under the mouse or brings the split back. The window manager's close shortcut
-    closes the channel rack or channel window with the keyboard, as it closes a plugin's, before the app.
+    closes the instrument rack or channel window with the keyboard, as it closes a plugin's, before the app.
 
   The tiling and Classic layouts each keep their own toolbar and, for the session, their own window arrangement.
   Every other keyboard shortcut works the same. Classic is FL's arrangement and unchanged.
+- **Its own names.** What FL calls by its own words has the usual or a plain name here; the files (`.flp`, plugin ids)
+  keep FL's, so projects still open both ways. Among them: Arranger (FL's Playlist), Instrument rack (Channel rack),
+  Bus N (Insert N), Plugin palette and Clip palette (the pickers), Plugin library (Plugin database), Status bar (Hint
+  bar), Multi MIDI learn (Multilink to controllers), Computer MIDI keyboard (Typing keyboard to piano), Auto-bypass when
+  silent (Smart disable), A/B compare (spare state), Collapse / Expand (Zip), choke groups (cut groups), Mod A / Mod B
+  (Mod X / Mod Y), Click removal (Declicking), Count-in (Recording precount), Tap tempo, Step parameters (Graph editor),
+  MIDI capture and Retro audio capture (Score and Audio logger), Project clean-up (Macros), MIDI learn... (Link to
+  controller...), Enter value... (Type in value...) and plainer settings labels. The menu bar reads File, Edit, Insert,
+  Patterns, View, Settings, Tools, Help, spread over its panel. Every menu keeps its place and order.
 - **Plugin editors in the app's window (Linux).** The plugins compiled into Lemon Studio (the stock instruments and
-  effects) draw their editors inside Lemon Studio's own window, as floating windows like the channel rack: no X11
+  effects) draw their editors inside Lemon Studio's own window, as floating windows like the instrument rack: no X11
   window, no XWayland, no OpenGL. Their menus and value boxes are drawn above the app; knob drags hold the cursor as the
   app's own knobs do; the close shortcut closes them. In the Lemon skin their window is a card like the channel
   rack's, in the theme's colours: rounded, the editor edge to edge under one title row (menu arrow, name, page tabs,

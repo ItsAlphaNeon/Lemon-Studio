@@ -14,7 +14,7 @@
 //!    label keeps what users chose); then list it in [`CHECKS`] or [`COMBOS`].
 //!    ```ignore
 //!    /// General ▸ Miscellaneous (spec: ui/...): what it does.
-//!    pub const AUTO_NAME_CHANNELS: Check = Check { key: "auto_name_channels", label: "Auto name channels", default: true };
+//!    pub const AUTO_NAME_CHANNELS: Check = Check { key: "auto_name_channels", label: "Name channels after their sample or plugin", default: true };
 //!    ```
 //! 2. Read it where its behaviour lives: `prefs::check(&prefs::AUTO_NAME_CHANNELS)` is the check's state;
 //!    `prefs::choice(&prefs::MAIN_GUI_SCALING)` is the chosen entry's text (`prefs::index` its position).
@@ -171,7 +171,7 @@ pub const SMALL_SCROLLBARS: Check = Check { key: "small_scrollbars", label: "Sma
 
 /// General ▸ Miscellaneous: a pattern switch zips the channels with nothing in the new pattern (`App::pattern_tick`).
 /// Spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project".
-pub const AUTO_ZIP_EMPTY: Check = Check { key: "auto_zip_empty_channels", label: "Auto zip empty channels", default: false };
+pub const AUTO_ZIP_EMPTY: Check = Check { key: "auto_zip_empty_channels", label: "Auto-collapse empty channels", default: false };
 
 /// General ▸ Miscellaneous: a painted note deletes the notes of other keys under it (`crate::piano::paint_mono`).
 /// Spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project".
@@ -210,27 +210,27 @@ pub const AUTOMATION_AT_PLAYBACK_POSITION: Check =
 /// General ▸ Miscellaneous: opening or focusing a plugin window selects its mixer track
 /// (`App::select_window_track`). Spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and
 /// Startup project".
-pub const AUTO_SELECT_LINKED: Check = Check { key: "auto_select_linked_modules", label: "Auto select linked modules", default: true };
+pub const AUTO_SELECT_LINKED: Check = Check { key: "auto_select_linked_modules", label: "Select linked controls automatically", default: true };
 
 /// General ▸ Miscellaneous: stored and shown only. FL showed no change on native plugin windows; it has no effect until
 /// hosted plugin windows get a toolbar (spec: ui/settings-choices.md, as above).
 pub const HIDE_PLUGIN_TOOLBAR: Check =
-    Check { key: "hide_plugin_window_toolbar", label: "Hide plugin window toolbar by default", default: true };
+    Check { key: "hide_plugin_window_toolbar", label: "Hide plugin window strip by default", default: true };
 
 /// General ▸ Miscellaneous: a sample or channel preset loaded into an existing channel renames the channel after the
 /// file (`rack::auto_name`); off, the channel keeps its name. Spec: ui/settings-choices.md "Miscellaneous: naming,
 /// detached plugins and startup".
-pub const AUTO_NAME_CHANNELS: Check = Check { key: "auto_name_channels", label: "Auto name channels", default: true };
+pub const AUTO_NAME_CHANNELS: Check = Check { key: "auto_name_channels", label: "Name channels after their sample or plugin", default: true };
 
 /// General ▸ Miscellaneous: a preset loaded into an effect renames its mixer slot after the preset
 /// (`presets::auto_name`); off, the slot keeps its name. Spec: ui/settings-choices.md, as above.
 pub const AUTO_NAME_EFFECT_SLOTS: Check =
-    Check { key: "auto_name_effect_slots", label: "Auto name effect slots", default: false };
+    Check { key: "auto_name_effect_slots", label: "Name effect slots after their plugin", default: false };
 
 /// General ▸ Miscellaneous: a plugin added from now on (a new channel's, a new effect in a slot) opens its window
 /// detached (`Plugins::added`); plugins that exist keep their own mode. Spec: ui/settings-choices.md "Miscellaneous:
 /// naming, detached plugins and startup".
-pub const DETACH_NEW: Check = Check { key: "detach_new_plugins", label: "Detach all new plugins", default: false };
+pub const DETACH_NEW: Check = Check { key: "detach_new_plugins", label: "Open new plugin windows floating", default: false };
 
 /// General ▸ Miscellaneous: a detached window opening for the first time goes on the main window's monitor; off, on
 /// the primary monitor (`plugin_window::first_position`, Windows only). A reopened one goes where it was either way.
@@ -240,7 +240,7 @@ pub const DETACHED_WITH_MAIN: Check =
 
 /// General ▸ Miscellaneous: stored and shown only (native plugins have no typing keyboard option). Spec: as above.
 pub const TYPING_PRIORITY_OFF: Check =
-    Check { key: "disable_typing_priority", label: "Disable typing keyboard priority by default", default: false };
+    Check { key: "disable_typing_priority", label: "Disable computer keyboard priority by default", default: false };
 
 /// General ▸ Miscellaneous: at most `plugins::MAX_EDITORS` plugin editor windows open; opening another first closes the
 /// one opened earliest (`Plugins::open_window`). Spec: as above.
@@ -259,7 +259,7 @@ pub const SILENT_STARTUP: Check = Check { key: "silent_startup", label: "Silent 
 /// sets steps and the right one only clears them. A drag sets (left) or clears (right) the steps it crosses either way
 /// (`App::rack_step`). Spec: ui/settings-choices.md "Input: Click-and-hold and both mouse buttons (2026-10-16)".
 pub const BOTH_MOUSE_BUTTONS: Check =
-    Check { key: "both_mouse_buttons_step_sequencer", label: "Use both mouse buttons in step sequencer", default: false };
+    Check { key: "both_mouse_buttons_step_sequencer", label: "Right button clears steps", default: false };
 
 /// General ▸ Miscellaneous: the project Lemon Studio starts with when no project file is passed to it
 /// (`App::startup_project`). Spec: ui/settings-choices.md, as above.
@@ -269,7 +269,7 @@ pub const STARTUP_PROJECT: Combo =
 /// General ▸ Input: a held click that doesn't move does more: in the piano roll the Draw tool's new note cycles plain,
 /// slide, porta, and a note held on is cloned; in the playlist a clip held on is cloned (`crate::hold`). Spec:
 /// ui/settings-choices.md "Input: Click-and-hold and both mouse buttons (2026-10-16)".
-pub const CLICK_AND_HOLD: Check = Check { key: "click_and_hold_gestures", label: "Click-and-hold & special gesture functions", default: false };
+pub const CLICK_AND_HOLD: Check = Check { key: "click_and_hold_gestures", label: "Click-and-hold gestures", default: false };
 
 /// General ▸ Undo history: the most steps the project's undo history keeps; past it the oldest step goes
 /// (`crate::history`). FL's range was not measured: Lemon Studio's is 1 to 999. Spec: ui/settings-choices.md "Undo
@@ -286,7 +286,7 @@ pub const ALTERNATE_UNDO: Check = Check { key: "alternate_undo_mode", label: "Al
 /// General ▸ Undo history: stored and shown only. Lemon Studio does not record audio yet, so no undone recording can
 /// go to the recycle bin; recording will read it. Spec: as above (not measured: it needs recording).
 pub const UNDONE_RECORDINGS_TO_BIN: Check =
-    Check { key: "undone_recordings_to_recycle_bin", label: "Put undone recordings in the recycle bin", default: true };
+    Check { key: "undone_recordings_to_recycle_bin", label: "Move undone recordings to the trash", default: true };
 
 /// General ▸ Undo history: Ctrl+Z also shows the browser's Current project ▸ History, opened
 /// (`browser::show_history`). Spec: as above.
@@ -323,7 +323,7 @@ pub const DONT_LIMIT_WINDOWS: Check = Check { key: "dont_limit_windows_to_screen
 /// General ▸ Advanced: "Create automation clip" also puts the control in the project's initial values with its value at
 /// that moment, replacing an earlier one, in the same undo step (`playlist::create_automation`, `crate::init`). Spec:
 /// ui/settings-choices.md "Advanced: Initialize controls automatically (2026-10-16)".
-pub const INIT_CONTROLS: Check = Check { key: "init_controls_automatically", label: "Initialize controls automatically", default: true };
+pub const INIT_CONTROLS: Check = Check { key: "init_controls_automatically", label: "Set start values automatically", default: true };
 
 /// General ▸ Advanced: stored and shown only. Lemon Studio's browser preview already starts as soon as the start of
 /// the file is decoded (ui/browser.md §7), and FL showed no difference either. Spec: ui/settings-choices.md "Advanced:
@@ -387,7 +387,7 @@ pub const OPTIMIZE_FOR: Combo =
 /// mouse's left and right buttons, so there is nothing to swap yet; when Lemon Studio reads pen input, on swaps what the
 /// tip and the barrel button do. Spec: ui/settings-choices.md "Input: Optimize for (2026-10-16)" (Invert pencil
 /// buttons).
-pub const INVERT_PENCIL_BUTTONS: Check = Check { key: "invert_pencil_buttons", label: "Invert pencil buttons", default: false };
+pub const INVERT_PENCIL_BUTTONS: Check = Check { key: "invert_pencil_buttons", label: "Swap mouse buttons for drawing", default: false };
 
 /// Audio ▸ Input / output: while another program is in front, the audio output closes and a playing transport pauses;
 /// both come back with the focus (`crate::auto_close`). Spec: ui/settings-choices.md "Input / output: Auto close; CPU
@@ -395,7 +395,7 @@ pub const INVERT_PENCIL_BUTTONS: Check = Check { key: "invert_pencil_buttons", l
 pub const AUTO_CLOSE: Check = Check { key: "auto_close", label: "Auto close", default: false };
 
 /// Audio ▸ CPU: stored and shown only. Lemon Studio has no smart disable yet. Spec: as above.
-pub const SMART_DISABLE: Check = Check { key: "smart_disable", label: "Smart disable", default: true };
+pub const SMART_DISABLE: Check = Check { key: "smart_disable", label: "Auto-bypass when silent", default: true };
 
 /// Audio ▸ CPU: stored and shown only. Lemon Studio's ticks follow audio/timing.md whatever it says. Spec: as above.
 pub const ALIGN_TICK_LENGTHS: Check = Check { key: "align_tick_lengths", label: "Align tick lengths", default: false };
@@ -462,7 +462,7 @@ pub const COPY_USED_SAMPLES: Check = Check { key: "copy_used_samples", label: "C
 
 /// MIDI ▸ Input: a linked controller does nothing after its knob changed another way until its value reaches or
 /// crosses the knob's (`crate::remote`). Spec: ui/remote-control.md §5.
-pub const PICKUP: Check = Check { key: "midi_pickup", label: "Pickup (takeover mode)", default: false };
+pub const PICKUP: Check = Check { key: "midi_pickup", label: "Soft takeover", default: false };
 
 /// MIDI ▸ Input: the Remote control settings box accepts the first controller it detects and closes (`crate::remote`).
 /// Spec: ui/remote-control.md §2.
@@ -470,14 +470,14 @@ pub const AUTO_ACCEPT: Check = Check { key: "midi_auto_accept", label: "Auto acc
 
 /// MIDI ▸ Input: controller 64 holds released keys until the pedal comes up; off, it goes to the instrument
 /// (`crate::midi_play`). Spec: ui/midi-settings.md §3.
-pub const FOOT_PEDAL: Check = Check { key: "midi_foot_pedal", label: "Foot pedal controls note off", default: true };
+pub const FOOT_PEDAL: Check = Check { key: "midi_foot_pedal", label: "Sustain pedal releases notes", default: true };
 
 /// MIDI ▸ Input: the generator muting keys mute while held (`crate::midi_play`). Spec: ui/midi-settings.md §3.
 pub const TOGGLE_ON_RELEASE: Check = Check { key: "midi_toggle_on_release", label: "Toggle on release", default: false };
 
 /// MIDI ▸ Input: what a note's velocity becomes (`crate::midi_play`). Spec: ui/midi-settings.md §3.
 pub const VELOCITY_LINK: Combo =
-    Combo { key: "midi_velocity_link", label: "Link note on velocity to", choices: &["(none)", "Velocity", "Mod X", "Mod Y"], default: 1 };
+    Combo { key: "midi_velocity_link", label: "Link note on velocity to", choices: &["(none)", "Velocity", "Mod A", "Mod B"], default: 1 };
 
 /// MIDI ▸ Input: what a note's release velocity becomes. Spec: as above.
 pub const RELEASE_LINK: Combo = Combo { key: "midi_release_link", label: "Link release velocity to", choices: &["(none)", "Release"], default: 1 };
@@ -506,7 +506,7 @@ pub const SYNC_TYPE: Combo = Combo {
 /// markers and mute rack channels (`crate::midi_play`). Spec: ui/midi-settings.md §3.
 pub const OMNI_CHANNEL: Number = Number { key: "midi_omni_channel", label: "Omni preview MIDI channel", min: 0, max: 16, default: 0 };
 pub const MARKER_CHANNEL: Number = Number { key: "midi_marker_channel", label: "Song marker jump MIDI channel", min: 0, max: 16, default: 0 };
-pub const MUTING_CHANNEL: Number = Number { key: "midi_muting_channel", label: "Generator muting MIDI channel", min: 0, max: 16, default: 0 };
+pub const MUTING_CHANNEL: Number = Number { key: "midi_muting_channel", label: "Instrument muting MIDI channel", min: 0, max: 16, default: 0 };
 
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
@@ -1487,7 +1487,7 @@ main_gui_scaling = 200%
         v
     }
 
-    /// "Invert pencil buttons" (General ▸ Input; spec: ui/settings-choices.md "Input: Optimize for"): off by default,
+    /// "Swap mouse buttons for drawing" (General ▸ Input; spec: ui/settings-choices.md "Input: Optimize for"): off by default,
     /// ticked and unticked on the page, kept for the next start; nothing reads it yet (pens arrive as the mouse).
     #[test]
     fn invert_pencil_buttons_is_stored_and_shown() {
@@ -1501,7 +1501,7 @@ main_gui_scaling = 200%
         let r = hit_rect(&app, &key);
         click(&mut app, &mut c, r);
         assert!(check(&INVERT_PENCIL_BUTTONS));
-        assert_eq!(app.state.message.as_deref(), Some("Invert pencil buttons: on"));
+        assert_eq!(app.state.message.as_deref(), Some("Swap mouse buttons for drawing: on"));
         // Kept: a new start shows it ticked; a click unticks it.
         let mut app = App::new(None);
         app.open_settings(settings::GENERAL);
@@ -1511,6 +1511,6 @@ main_gui_scaling = 200%
         let r = hit_rect(&app, &key);
         click(&mut app, &mut c, r);
         assert!(!check(&INVERT_PENCIL_BUTTONS));
-        assert_eq!(app.state.message.as_deref(), Some("Invert pencil buttons: off"));
+        assert_eq!(app.state.message.as_deref(), Some("Swap mouse buttons for drawing: off"));
     }
 }

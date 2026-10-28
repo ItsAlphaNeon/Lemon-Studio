@@ -49,7 +49,7 @@ pub const TARGET_COLORS: [(u32, u32, u32); 5] = [
     (0xf29a48, 0xf0792b, 0xce833c),
     (0xf64d70, 0xf13f37, 0xe2415f),
 ];
-pub const TARGET_NAMES: [&str; 5] = ["Panning", "Volume", "Mod X", "Mod Y", "Pitch"];
+pub const TARGET_NAMES: [&str; 5] = ["Panning", "Volume", "Mod A", "Mod B", "Pitch"];
 /// Parameter id prefixes of the five records (state order).
 pub const ENV_PREFIX: [&str; 5] = ["pan", "vol", "cut", "res", "pitch"];
 

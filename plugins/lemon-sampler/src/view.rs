@@ -51,7 +51,7 @@ pub const TARGET_COLORS: [(u32, u32, u32); 5] = [
     (0xf29a48, 0xf0792b, 0xce833c),
     (0xf64d70, 0xf13f37, 0xe2415f),
 ];
-pub const TARGET_NAMES: [&str; 5] = ["Panning", "Volume", "Mod X", "Mod Y", "Pitch"];
+pub const TARGET_NAMES: [&str; 5] = ["Panning", "Volume", "Mod A", "Mod B", "Pitch"];
 pub const ENV_PREFIX: [&str; 5] = ["envpan", "envvol", "envmodx", "envmody", "envpitch"];
 
 const LABEL: Font = inst::LABEL;
@@ -477,7 +477,7 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     radio(ui, "resample", 25.0, 178.0, "Resample");
     radio(ui, "load_regions", 153.0, 158.0, "Load regions");
     radio(ui, "load_slices", 153.0, 178.0, "Load slice markers");
-    label(ui, 21.0, 209.0, "Declicking mode");
+    label(ui, 21.0, 209.0, "Click removal");
     list(ui, "declick", 124.0, 270.0, 199.0, 219.0);
 
     panel(ui, 11.0, 280.0, 239.0, 319.0, 69.0, "Playback");

@@ -296,7 +296,7 @@ fn hint_panel(ui: &mut Ui, c: &Ctx) {
     let (t, a, s, f) = (ui.t, c.a, c.s, c.f);
     let hp = a.span(72.0, 376.0, 4.0, 36.0);
     sunken(ui, hp, t.sunken);
-    ui.hit(hp, Action::DragWindow, "Hint bar");
+    ui.hit(hp, Action::DragWindow, "Status bar");
     ui.c.text_clip(Font::new(13), a.x(76.0), a.y(6.0), 280.0, t.text_dim.shade(-0.05), &f.title);
     let hint: &str = if !f.hint.is_empty() { &f.hint } else { s.message.as_deref().unwrap_or("") };
     ui.c.text_clip(Font::new(14), a.x(77.0), a.y(19.0), 280.0, t.text, hint);
@@ -320,8 +320,8 @@ fn transport(ui: &mut Ui, c: &Ctx) {
     // PAT / SONG fill the whole top / bottom half of the capsule's left section.
     let pat = a.span(384.0, 418.0, 5.0, 20.0);
     let song = a.span(384.0, 418.0, 20.0, 35.0);
-    ui.hit(pat, Action::PatSong(false), "Pattern mode: play the current pattern");
-    ui.hit(song, Action::PatSong(true), "Song mode: play the playlist");
+    ui.hit(pat, Action::PatSong(false), "Pattern: play the current pattern");
+    ui.hit(song, Action::PatSong(true), "Song: play the arrangement");
     for (r, label, active) in [(pat, "PAT", !s.song_mode), (song, "SONG", s.song_mode)] {
         if active && lemon {
             os_ui::kit::lemon::lit_in(ui.c, ui.t, Rect::new(r.x + 2.0, r.y + 1.0, r.w - 3.0, r.h - 1.5), 4.0, false);
@@ -642,7 +642,7 @@ fn utilities(ui: &mut Ui, c: &Ctx) -> bool {
     let utils = [
         (Icon::Undo, "Undo / Undo history (Ctrl+Z)"),
         (Icon::Cut, "Open audio editor / New audio editor"),
-        (Icon::Mic, "One-click audio recording"),
+        (Icon::Mic, "Quick record"),
         (Icon::Help, "Help index / About..."),
         (Icon::Save, "Save as... / Save new version (Shift+Ctrl+S)"),
         (Icon::SaveRender, "Export audio... (Ctrl+R)"),
@@ -732,7 +732,7 @@ fn song_pos(ui: &mut Ui, c: &Ctx) {
         }
         // An empty playlist in SONG mode: nothing to move through.
         None => {
-            ui.hit(sp, Action::Swallow, "Song position: the playlist is empty");
+            ui.hit(sp, Action::Swallow, "Song position: the arranger is empty");
         }
     }
     let hx = range.map(|len| a.x(crate::song_pos::handle_x(pos, len).round()));
@@ -774,11 +774,11 @@ fn song_pos(ui: &mut Ui, c: &Ctx) {
 /// The mode buttons: icon, whether on, what a click does, hint.
 fn mode_buttons(s: &State) -> [(Icon, bool, Action, &'static str); 5] {
     [
-        (Icon::TypingKeyboard, s.toggles.contains(&"typing"), Action::Typing, "Typing keyboard to piano keyboard (Ctrl+T)"),
+        (Icon::TypingKeyboard, s.toggles.contains(&"typing"), Action::Typing, "Computer MIDI keyboard (Ctrl+T)"),
         (Icon::AutoScroll, crate::autoscroll::on(), Action::AutoScroll, "Auto scrolling - right-click for continuous scrolling"),
         (Icon::StepEdit, crate::step_edit::on(), Action::StepEdit, "Step editing (Ctrl+E)"),
-        (Icon::Link, crate::enable_groups::on(), Action::EnableGroups, "Enable groups (Shift+Alt+G)"),
-        (Icon::MidiControl, s.multilink.on, Action::Multilink, "Multilink to controllers (Ctrl+J)"),
+        (Icon::Link, crate::enable_groups::on(), Action::EnableGroups, "Grouped clips move together (Shift+Alt+G)"),
+        (Icon::MidiControl, s.multilink.on, Action::Multilink, "Multi MIDI learn (Ctrl+J)"),
     ]
 }
 
@@ -894,14 +894,14 @@ fn window_buttons(ui: &mut Ui, c: &Ctx, which: Range<usize>) -> bool {
 
 /// The row of nine: the window buttons (the first five), then the pickers and tools.
 const WINDOW_BUTTONS: [(Icon, Action, &str); 9] = [
-        (Icon::Playlist, Action::ToggleWin(Win::Playlist), "Playlist / Maximize Play list (F5)"),
+        (Icon::Playlist, Action::ToggleWin(Win::Playlist), "Arranger / Maximize arranger (F5)"),
         (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), "Piano roll / Maximize Piano roll (F7)"),
-        (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), "Channel rack (F6)"),
+        (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), "Instrument rack (F6)"),
         (Icon::Mixer, Action::ToggleWin(Win::Mixer), "Mixer (F9)"),
-        (Icon::Browser, Action::ToggleWin(Win::Browser), "Browser / Plugin picker (Alt+F8)"),
-        (Icon::Project, Action::ProjectPicker, "Project picker / Plugin picker (Ctrl+F8)"),
-        (Icon::Plug, Action::PickerOpen, "Plugin picker (F8)"),
-        (Icon::Kick, Action::ToggleWin(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
+        (Icon::Browser, Action::ToggleWin(Win::Browser), "Browser / Plugin palette (Alt+F8)"),
+        (Icon::Project, Action::ProjectPicker, "Clip palette / Plugin palette (Ctrl+F8)"),
+        (Icon::Plug, Action::PickerOpen, "Plugin palette (F8)"),
+        (Icon::Kick, Action::ToggleWin(Win::Tapper), "Tap tempo (Ctrl+F5)"),
     (Icon::Touch, Action::ToggleWin(Win::Touch), "Touch controller (Alt+F7)"),
     // FL's store button is hidden: its stand-in, a repository of free and open-source plugins (spec:
     // ui/main-window.md §3), had the plugin picker's icon. It is to come back with a shop icon.

@@ -85,7 +85,7 @@ fn source(ui: &mut Ui, f: &ExportForm, g: Rect) {
         for (i, seg) in segs.iter().enumerate() {
             let b = Rect::new((strip.x + i as f32 * sw).round(), strip.y, sw.round(), strip.h);
             let (enabled, off) = match (row, i) {
-                (0, 0) => (f.song_ok, "The playlist is empty"),
+                (0, 0) => (f.song_ok, "The arranger is empty"),
                 (0, _) => (f.pat_ok, "The pattern has no notes"),
                 (1, 1) => (f.has_selection(), "There is no time selection"),
                 _ => (true, ""),

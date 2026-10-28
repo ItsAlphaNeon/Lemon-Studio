@@ -183,12 +183,12 @@ pub fn note_name(key: i32) -> String {
 }
 
 pub const DECLICK: &[&str] = &[
-    "Out only (no bleeding)",
-    "Transient (no bleeding)",
-    "Transient (bleeding)",
-    "Generic (bleeding)",
-    "Smooth (bleeding)",
-    "Crossfade (bleeding)",
+    "Fade out only",
+    "Transient",
+    "Transient (tail continues)",
+    "Standard (tail continues)",
+    "Smooth (tail continues)",
+    "Crossfade (tail continues)",
 ];
 /// Stretch modes in the order of the mode menu (spec §Menus: two columns with headers).
 pub const STRETCH: &[&str] =
@@ -464,9 +464,9 @@ pub struct SamplerParams {
     pub env_pan: EnvParams,
     #[nested(id_prefix = "envvol", group = "Volume")]
     pub env_vol: EnvParams,
-    #[nested(id_prefix = "envmodx", group = "Mod X")]
+    #[nested(id_prefix = "envmodx", group = "Mod A")]
     pub env_modx: EnvParams,
-    #[nested(id_prefix = "envmody", group = "Mod Y")]
+    #[nested(id_prefix = "envmody", group = "Mod B")]
     pub env_mody: EnvParams,
     #[nested(id_prefix = "envpitch", group = "Pitch")]
     pub env_pitch: EnvParams,
@@ -514,7 +514,7 @@ impl Default for SamplerParams {
             resample: BoolParam::new("Resample", true),
             load_regions: BoolParam::new("Load regions", true),
             load_slices: BoolParam::new("Load slice markers", false),
-            declick: choice("Declicking mode", 0, DECLICK),
+            declick: choice("Click removal", 0, DECLICK),
             // A host can start one note further into the sample (a trimmed audio clip, spec §7).
             start_offset: knob("Sample start offset", 0.0).with_poly_modulation_id(START_OFFSET_POLY),
             loop_start: FloatParam::new("Loop start position", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
@@ -560,8 +560,8 @@ impl Default for SamplerParams {
             fx_loop_follows: BoolParam::new("Loop points follow a reversal", true).hide(),
             env_pan: EnvParams::new("Panning", 0),
             env_vol: EnvParams::new("Volume", -101),
-            env_modx: EnvParams::new("Mod X", 0),
-            env_mody: EnvParams::new("Mod Y", 0),
+            env_modx: EnvParams::new("Mod A", 0),
+            env_mody: EnvParams::new("Mod B", 0),
             env_pitch: EnvParams::new("Pitch", 0),
             f_cut: knob("Filter frequency (modulation X)", 1.0).with_poly_modulation_id(MOD_X_POLY),
             f_res: knob("Filter bandwidth (modulation Y)", 0.0).with_poly_modulation_id(MOD_Y_POLY),

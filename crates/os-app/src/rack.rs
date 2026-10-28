@@ -154,8 +154,8 @@ impl Tab {
             Tab::Rel => format!("Release {}", pct(v)),
             Tab::Fine => format!("Fine pitch {:+.0} cents", (f32::from(n.fine_pitch) - 120.0) * 100.0 / 120.0),
             Tab::Pan => format!("Panning {}", crate::knobs::pan_text((f32::from(n.pan) - 64.0) / 64.0)),
-            Tab::X => format!("Mod X {}", pct(v)),
-            Tab::Y => format!("Mod Y {}", pct(v)),
+            Tab::X => format!("Mod A {}", pct(v)),
+            Tab::Y => format!("Mod B {}", pct(v)),
             Tab::Shift => format!("Time shift {}", pct(v)),
             Tab::Rep => format!("Note repeat {}", n.repeat),
         }
@@ -688,7 +688,7 @@ pub fn solo(s: &mut State, r: usize) {
 /// What follows a pattern switch. Run on every tick and before each frame (`App::follow_settings`), so every way of
 /// switching pattern counts (numpad - / +, the pattern picker and box, a new pattern, the playlist...); a new or opened
 /// project is not a switch. Two General ▸ Miscellaneous checks (spec: ui/settings-choices.md "Miscellaneous"):
-/// - "Auto zip empty channels": the channels with notes or steps in the new pattern are unzipped and every other one
+/// - "Auto-collapse empty channels": the channels with notes or steps in the new pattern are unzipped and every other one
 ///   is zipped; a pattern without any unzips every channel. Zipping by hand works as ever between switches.
 /// - "Select first channel with notes when the pattern changes": the lowest-numbered channel with notes or steps in
 ///   the new pattern becomes the only selected channel and the focused one; a pattern without any (also one just made
@@ -1215,9 +1215,9 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     let items = vec![
         PItem::sub("Add one", add_one_items(s)),
         PItem::not_yet("Loop starter").mark(Mark::Check(false)),
-        it("Purge unused audio clips", RCmd::Purge),
+        it("Remove unused audio clips", RCmd::Purge),
         PItem::head("Channels"),
-        it("Select unused channels", RCmd::SelectUnused),
+        it("Select unused instruments", RCmd::SelectUnused),
         off(it("Clone selected", RCmd::CloneSel).key("Alt+C"), none),
         off(it("Delete selected...", RCmd::DeleteSel).key("Alt+Del"), none),
         PItem::not_yet("Create layer with selected channels"),
@@ -1244,13 +1244,13 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         off(it("Select mixer tracks for the selected channels", RCmd::SelectMixerTracks), none),
         PItem::sub(crate::views::menus::DECLICK_LABEL, declick_items(s)),
         PItem::sep(),
-        off(it("Zip selected", RCmd::ZipSel).key("Alt+Z"), none),
-        it("Unzip all", RCmd::UnzipAll).key("Alt+U"),
+        off(it("Collapse selected", RCmd::ZipSel).key("Alt+Z"), none),
+        it("Expand all", RCmd::UnzipAll).key("Alt+U"),
         PItem::sep(),
         PItem::not_yet("Restretch all").key("Ctrl+Alt+R"),
         PItem::head("Options"),
         PItem::sub(
-            "Group playlist tracks created by Loop starter",
+            "Group arranger tracks created by Loop starter",
             vec![PItem::not_yet("Don't group tracks"), PItem::not_yet("Group tracks"), PItem::not_yet("Always create a track for the pattern clip")],
         ),
         PItem::sub(
@@ -1277,7 +1277,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         opt(s, "Show a mute button on the piano roll preview"),
         opt(s, "Detached"),
         PItem::head("Switch"),
-        PItem::not_yet("Switch smart disable for all plugins"),
+        PItem::not_yet("Switch auto-bypass for all plugins"),
         PItem::sub(crate::views::menus::CLIPS_ALL_LABEL, stretch_items(true)),
         PItem::sub(crate::views::menus::CLIPS_SEL_LABEL, stretch_items(false)),
         PItem::sub(crate::views::menus::EDITORS_LABEL, editor_items()),
@@ -1369,7 +1369,7 @@ fn set_declick(app: &mut App, rows: &[usize], mode: u8) {
 }
 
 /// Lemon Sampler's declick mode parameter (its index is the mode).
-const SAMPLER_DECLICK: &str = "Declicking mode";
+const SAMPLER_DECLICK: &str = "Click removal";
 
 /// Right click on a name button (§18): two columns.
 pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
@@ -1377,7 +1377,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
     let piano_on = s.shown(Win::PianoRoll) && s.selected_channel == r;
     let mut items = vec![
         it("Piano roll", RCmd::PianoRoll(r)).key("F7").mark(Mark::Check(piano_on)),
-        it("Graph editor", RCmd::Graph(r)),
+        it("Step parameters", RCmd::Graph(r)),
         PItem::sep(),
         it("Rename, color and icon...", RCmd::Rename(r)),
         it("Change color...", RCmd::ChangeColor(r)),
@@ -1385,12 +1385,12 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         PItem::not_yet("Change icon..."),
         PItem::sep(),
         if sampler { it("Load sample...", RCmd::LoadSample(r)) } else { PItem::new("Load sample...", Cmd::Nothing).off() },
-        PItem::not_yet("Cut itself").mark(Mark::Check(false)),
+        PItem::not_yet("Chokes itself").mark(Mark::Check(false)),
         PItem::new("Show waveform preview", Cmd::Nothing).off(),
         PItem::sep(),
         PItem::sub("Insert", crate::plugin_menu::items(s, crate::plugin_menu::Target::Gen(Some(r)), true)),
         PItem::sub("Replace", crate::plugin_menu::items(s, crate::plugin_menu::Target::Replace(r), true)),
-        PItem::new("Patcherize", Cmd::Nothing).off(),
+        PItem::new("Wrap in container", Cmd::Nothing).off(),
         it("Clone", RCmd::Clone(r)),
         it("Delete...", RCmd::Delete(r)),
         PItem::sep(),
@@ -1413,7 +1413,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("Rotate right", RCmd::Rotate(r, 1)).key("Shift+Ctrl+Right"),
         PItem::sep(),
         PItem::not_yet("MIDI channel through").mark(Mark::Check(false)),
-        PItem::sub("Receive notes from", vec![PItem::new("Unlock", Cmd::Nothing).off(), PItem::not_yet("Typing keyboard").mark(Mark::Check(true))]),
+        PItem::sub("Receive notes from", vec![PItem::new("Unlock", Cmd::Nothing).off(), PItem::not_yet("Computer keyboard").mark(Mark::Check(true))]),
         PItem::not_yet("Create instrument..."),
         PItem::sub("Burn MIDI to", vec![PItem::not_yet("Current pattern"), PItem::not_yet("New pattern")]),
     ]);
@@ -1426,9 +1426,9 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
     let [init, delete] = crate::init::items(s, auto.as_ref().map(|a| (a.0, a.2)));
     let mut v = vec![
         PItem::head("Automation"),
-        PItem::not_yet("Edit events"),
-        PItem::new("Edit events in new window", Cmd::Nothing).off(),
-        PItem::new("Edit events in piano roll", Cmd::Nothing).off(),
+        PItem::not_yet("Edit automation"),
+        PItem::new("Edit automation in a window", Cmd::Nothing).off(),
+        PItem::new("Edit automation in piano roll", Cmd::Nothing).off(),
         init,
         delete,
         PItem::sep(),
@@ -1452,8 +1452,8 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
     }
     // spec: ui/type-in-value.md §8
     v.push(match knob {
-        Some(k) => PItem::new("Type in value...", Cmd::TypeIn(crate::typein::Target::Knob(k))),
-        None => PItem::not_yet("Type in value..."),
+        Some(k) => PItem::new("Enter value...", Cmd::TypeIn(crate::typein::Target::Knob(k))),
+        None => PItem::not_yet("Enter value..."),
     });
     v.push(PItem::not_yet("Set..."));
     v
@@ -1541,7 +1541,7 @@ fn box_at_row(s: &State, r: usize, mouse: (f32, f32)) -> (f32, f32) {
     crate::views::rack::name_rect(s, r).map_or(crate::patterns::box_at_mouse(mouse), |nb| (nb.x, nb.y))
 }
 
-/// A sample or channel preset at `path` went into the existing channel `ch`: while "Auto name channels" is on, the
+/// A sample or channel preset at `path` went into the existing channel `ch`: while "Name channels after their sample or plugin" is on, the
 /// channel takes the file's name without its extension; off, it keeps its name (spec: ui/settings-choices.md
 /// "Miscellaneous: naming, detached plugins and startup"). A channel made new for a file is named after it either way.
 pub fn auto_name(ch: &mut os_model::Channel, path: &std::path::Path) {
@@ -2402,18 +2402,18 @@ mod tests {
         crate::patterns::pat_mut(&mut app.state, 2).notes = vec![Note::step(i0, 0), Note::step(i2, 3)];
         crate::playlist::arr_mut(&mut app.state).clips.push(Clip::new(0, 384, 0, ClipSource::Channel(i3)));
         let tools = |label: &str| (0..80).find(|&i| item_at(TOOLS_MENU, i).is_some_and(|it| it.label == label)).unwrap();
-        for label in ["Select unused channels", "Purge unused audio clips"] {
+        for label in ["Select unused instruments", "Remove unused audio clips"] {
             assert!(works(TOOLS_MENU, item_at(TOOLS_MENU, tools(label)).unwrap()), "{label} is not greyed out");
         }
 
-        app.menu_item(TOOLS_MENU, tools("Select unused channels"));
+        app.menu_item(TOOLS_MENU, tools("Select unused instruments"));
         assert_eq!(app.state.rack.sel, BTreeSet::from([1, 4]));
         assert_eq!(app.state.message.as_deref(), Some("2 unused channel(s) selected"));
 
         // Purge asks first (no undo for channels yet); Cancel keeps everything.
         let names = |app: &App| app.state.project.channels.iter().map(|c| c.name.clone().unwrap_or_default()).collect::<Vec<_>>();
         let before = names(&app);
-        app.menu_item(TOOLS_MENU, tools("Purge unused audio clips"));
+        app.menu_item(TOOLS_MENU, tools("Remove unused audio clips"));
         assert_eq!(app.state.rack.pending_delete, Some(vec![4]));
         assert!(app.state.rack.purging && app.state.pat_ui.confirm);
         app.key(&Key::Named(NamedKey::Escape), false, false);
@@ -2671,7 +2671,7 @@ mod tests {
         set_check(&SELECT_FIRST_CHANNEL, false);
     }
 
-    /// "Auto zip empty channels" (spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and
+    /// "Auto-collapse empty channels" (spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and
     /// Startup project"), the measured case: steps on Kick and HiHat in pattern 1 and on Clap in pattern 2. On, each
     /// pattern switch unzips the channels with notes or steps in the new pattern and zips the others; an empty pattern
     /// unzips them all; zipping by hand holds until the next switch. Off: the zips stay as they are.
@@ -2744,7 +2744,7 @@ mod tests {
         app.mouse_up();
     }
 
-    /// "Use both mouse buttons in step sequencer", off as found (spec: ui/settings-choices.md "Input: Click-and-hold
+    /// "Right button clears steps", off as found (spec: ui/settings-choices.md "Input: Click-and-hold
     /// and both mouse buttons (2026-10-16)", the table's Off column): a left or a right click toggles the step; a left
     /// drag sets each step it crosses on, a right drag sets each one off.
     #[test]
@@ -3030,14 +3030,14 @@ mod tests {
         (path, p["root"]["i32"].as_i64().unwrap(), p["ts_mode"]["i32"].as_i64().unwrap(), steps.round() as i64)
     }
 
-    /// A file's name as "Auto name channels" gives it.
+    /// A file's name as "Name channels after their sample or plugin" gives it.
     fn stem(p: &std::path::Path) -> Option<String> {
         p.file_stem().map(|n| n.to_string_lossy().into_owned())
     }
 
     // spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)", "Load channel sample(s)"
     /// A sample load is one history step, "Load channel sample(s)", whichever way it comes in (Load sample..., a drop
-    /// on the row, the browser's send). Undo puts back the old sample, the old name ("Auto name channels" changed it),
+    /// on the row, the browser's send). Undo puts back the old sample, the old name ("Name channels after their sample or plugin" changed it),
     /// root note and stretch, and the entry is drawn grey; redo loads the new ones again.
     #[test]
     fn a_sample_load_is_one_history_step() {

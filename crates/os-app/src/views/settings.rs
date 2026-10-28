@@ -240,7 +240,7 @@ pub const NATIVE_HOST_CHECK: &str = "Experimental: host installed native plugins
 /// never by the built-in Lemon recreations (spec plugins/fruity-abi.md "Opened projects").
 pub const NATIVE_FIRST_CHECK: &str = "Experimental: real native plugins instead of Lemon recreations";
 /// Plugin manager checks (spec: ui/plugin-manager.md §2).
-pub const STARTUP_CHECK: &str = "Find new plugins at startup";
+pub const STARTUP_CHECK: &str = "Scan for new plugins at startup";
 pub const ERRORS_CHECK: &str = "Rescan plugins with errors";
 pub const COMBINE_CHECK: &str = "Combine formats of the same plugin";
 
@@ -282,7 +282,7 @@ pub const LIVE: &[&str] = &[
     "Manage messages",
     REFRESH_MIDI,
     "Add folder...",
-    "Find new plugins",
+    "Scan for new plugins",
     "Rescan all",
     "Load theme...",
     "Reset",
@@ -296,7 +296,7 @@ pub const UPDATE_SCRIPTS: &str = "Update MIDI scripts";
 const NO_SCRIPTS: &str = "Lemon Studio has no MIDI scripts";
 /// MIDI: Performance mode MIDI channel stays greyed with its reason.
 pub const PERFORMANCE_CHANNEL: &str = "Performance mode MIDI channel";
-const NO_PERFORMANCE: &str = "Lemon Studio has no playlist performance mode";
+const NO_PERFORMANCE: &str = "Lemon Studio has no live performance mode for the arranger";
 
 /// `LIVE`, and the checks declared in `crate::prefs`.
 fn live(key: &str) -> bool {
@@ -305,7 +305,7 @@ fn live(key: &str) -> bool {
 
 /// The combos that work (they open a menu of choices, `App::audio_menu`).
 pub const LIVE_COMBOS: [&str; 6] = [OUTPUT_DEVICE, MODE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS, LAYOUT];
-/// General ▸ Display: "Entertain me" simulates the mixer's cables, "Off" hangs them still (crate::cable).
+/// General ▸ Display: "Playful" simulates the mixer's cables, "Off" hangs them still (crate::cable).
 pub const ANIMATIONS: &str = "Animations";
 /// General ▸ Display ▸ Layout: Classic, or Lemon (a Lemon Studio addition: `toolbar::Bar::lemon`).
 pub const LAYOUT: &str = "Layout";
@@ -383,7 +383,7 @@ pub const SAVE_PRESET: &str = "Save preset...";
 pub const THEME_UNDO: &str = "Undo";
 pub const THEME_REDO: &str = "Redo";
 pub const FIX_TEXT: &str = "Fix text";
-pub const RESET_WORK_TIME: &str = "Reset working time";
+pub const RESET_WORK_TIME: &str = "Reset time spent on project";
 /// General ▸ Input: opens the Manage shortcuts window (`App::open_shortcuts`).
 pub const MANAGE_SHORTCUTS: &str = "Manage shortcuts";
 
@@ -652,9 +652,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     },
                     vec![
                         List(vec![("Output devices", 0.0)], listed.map(|d| vec![d]).collect(), 4),
-                        Check2("Mix in buffer switch", false, "Triple buffer", false),
+                        Check2("Mix at buffer boundaries", false, "Triple buffer", false),
                         combo("Highest", 96.0, "Priority"),
-                        Check("Safe overloads", true),
+                        Check("Avoid dropouts under load", true),
                         combo("Mixer", 96.0, "Playback tracking"),
                     ],
                 ]
@@ -662,7 +662,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 .flatten()
                 .collect()),
                 g("CPU", vec![
-                    Check2("Multithreaded generator processing", true, "Smart disable", true),
+                    Check2("Multithreaded instrument processing", true, "Auto-bypass when silent", true),
                     Check2("Multithreaded mixer processing", true, "Align tick lengths", false),
                 ]),
                 g("Mixer", vec![
@@ -687,7 +687,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 combo("Main", 64.0, "Pop-ups scaling"),
                 combo("Main", 64.0, "Toolbars scaling"),
                 combo("Off", 64.0, "Transparent windows"),
-                combo(if s.cables.borrow().animations() { "Entertain me" } else { "Off" }, 126.0, ANIMATIONS),
+                combo(if s.cables.borrow().animations() { "Playful" } else { "Off" }, 126.0, ANIMATIONS),
                 combo(if s.bar.tiling { "Tiling" } else { "Classic" }, 126.0, LAYOUT),
                 Slider("Smoothing", 0.2),
                 combo("Ultrasmooth", 126.0, "Animation refresh rate"),
@@ -705,18 +705,18 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             gf("Input", false, vec![
                 combo("Multi-button mouse", 136.0, "Optimize for"),
                 Buttons(vec![(MANAGE_SHORTCUTS, 212.0)]),
-                Check("Click-and-hold & special gesture functions", false),
-                Check("Use both mouse buttons in step sequencer", false),
+                Check("Click-and-hold gestures", false),
+                Check("Right button clears steps", false),
                 Slider("Vertical scrolling speed", 0.5),
                 Slider("Horizontal scrolling speed", 0.5),
-                Check("Invert pencil buttons", false),
+                Check("Swap mouse buttons for drawing", false),
             ]),
             // spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)" (`crate::history`).
             gf("Undo history", false, vec![
                 Value(crate::prefs::number(&crate::prefs::MAX_UNDO_LEVELS).to_string(), "Maximum undo levels"),
                 Check("Undo knob tweaks", true),
                 Check("Alternate undo mode", true),
-                Check("Put undone recordings in the recycle bin", true),
+                Check("Move undone recordings to the trash", true),
                 Check("Show undo history in the browser when undoing changes", false),
                 Check("Show recent changes at the top", false),
             ]),
@@ -733,18 +733,18 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Check("Automatically download program updates", true),
             ]),
             gf("Miscellaneous", false, vec![
-                Check("Auto name channels", true),
-                Check("Auto name effect slots", false),
-                Check("Auto zip empty channels", false),
-                Check("Auto select linked modules", true),
+                Check("Name channels after their sample or plugin", true),
+                Check("Name effect slots after their plugin", false),
+                Check("Auto-collapse empty channels", false),
+                Check("Select linked controls automatically", true),
                 Check("Auto zoom in piano roll", false),
                 Check("Small scrollbars in editors", false),
-                Check2("Detach all new plugins", false, "Open detached plugins with the main window", false),
-                Check("Disable typing keyboard priority by default", false),
+                Check2("Open new plugin windows floating", false, "Open detached plugins with the main window", false),
+                Check("Disable computer keyboard priority by default", false),
                 Check("Alternate meter scale", false),
                 Check("Show startup splash screen", true),
                 Check("Restore previous state after solo", false),
-                Check("Hide plugin window toolbar by default", true),
+                Check("Hide plugin window strip by default", true),
                 Check("Silent startup", false),
                 Check("Monophonic painting in piano roll", false),
                 Check("Create automation clips at the playback position", true),
@@ -758,8 +758,8 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Check("Fast sample preview", true),
                 Check("Auto keep long audio on disk", true),
                 Check2("Read sample tempo information", true, "Read sample root note", true),
-                Check("Initialize controls automatically", true),
-                Check("Force high performance power plan", true),
+                Check("Set start values automatically", true),
+                Check("Use the high-performance power plan", true),
                 Check("Threaded project sample loading", false),
                 combo("System", 64.0, "Cursors scaling"),
                 combo("Main", 64.0, "Legacy scaling"),
@@ -805,7 +805,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     scanning.push(Check(NATIVE_FIRST_CHECK, os_native::prefer_native()));
                 }
             }
-            scanning.push(Buttons(vec![("Find new plugins", 130.0), ("Rescan all", 100.0)]));
+            scanning.push(Buttons(vec![("Scan for new plugins", 130.0), ("Rescan all", 100.0)]));
             scanning.push(Text(d.status_line(), true));
             vec![
                 g("Search folders", vec![Folders(folders), Buttons(vec![("Add folder...", 110.0)])]),
@@ -866,11 +866,11 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             gf("Advanced", true, vec![
                 combo(&panning_text(s.project.panning_law), 82.0, PANNING_LAW),
                 Check(TRUNCATED_CHECK, s.project.play_truncated),
-                Check("Fast declick for cut groups", s.project.fast_declick.unwrap_or(false)),
+                Check("Fast fade for choke groups", s.project.fast_declick.unwrap_or(false)),
             ]),
             // The project's automatic crossfades (event 44; off when the file has none) and the program setting new
             // projects take it from (`prefs::AUTO_CROSSFADES_NEW`, which the check shows).
-            gf("Playlist", false, vec![Check2(
+            gf("Arranger", false, vec![Check2(
                 CROSSFADES_CHECK,
                 s.project.auto_crossfades.unwrap_or(false),
                 crate::prefs::AUTO_CROSSFADES_NEW.label,
