@@ -106,7 +106,11 @@ pub fn prune(dir: &Path, name: &str, max: usize) {
 /// `<name> (overwritten on ...).flp` (a copy of that name made earlier in the same minute is kept).
 pub fn keep_overwritten(target: &Path, dir: Option<PathBuf>) {
     let Some(dir) = dir.filter(|_| target.is_file()) else { return };
-    let to = dir.join(file_name(&project_name(Some(target)), "overwritten", chrono::Local::now().naive_local()));
+    let mut to = dir.join(file_name(&project_name(Some(target)), "overwritten", chrono::Local::now().naive_local()));
+    // A Lemon project's copy stays one.
+    if crate::native::is_native(target) {
+        to.set_extension(crate::native::EXT);
+    }
     if !to.exists() && std::fs::create_dir_all(&dir).is_ok() {
         let _ = std::fs::copy(target, to);
     }

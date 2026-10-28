@@ -32,6 +32,7 @@ mod device;
 mod dialog;
 mod floating;
 mod journal;
+mod native;
 mod filedlg;
 mod enable_groups;
 mod export;

@@ -1751,8 +1751,13 @@ impl App {
         // hint bar.
         let mut legacy = None;
         let mut converted = false;
-        let result = std::fs::read(&path)
-            .map_err(|e| e.to_string())
+        // A Lemon project file (`crate::native`): its snapshot is the project, its history goes on in the journal.
+        let mut carried = Vec::new();
+        let result = crate::native::read(&path)
+            .map(|(b, extra)| {
+                carried = extra.map(|x| x.journal).unwrap_or_default();
+                b
+            })
             .and_then(|b| os_flp::FlpFile::parse(&b).map_err(|e| e.to_string()))
             .map(|mut f| {
                 converted = os_flp::project::legacy::upgrade(&mut f);
@@ -1821,7 +1826,7 @@ impl App {
                 s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 self.mark_saved();
-                self.journal_opened(Some(&opened));
+                self.journal_opened(Some(&opened), carried);
                 crate::missing::opened(self);
                 self.loading = Some(crate::loading::Loading::start(&self.state.project));
                 self.state.playlist.wave_wait = true;
@@ -1869,6 +1874,7 @@ impl App {
         let name = path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "Untitled.flp".to_string(), |n| n.to_string_lossy().into_owned());
         let dlg = FileDlg::new(Mode::Save, "Save project as", "project", crate::dialog::Then::SaveProject(next))
             .filter("Lemon Studio project", &["flp"])
+            .filter("Lemon project, with its history", &[crate::native::EXT])
             .start(path.as_deref().and_then(|p| p.parent()))
             .name(&name);
         self.file_dialog(dlg);
@@ -1945,6 +1951,9 @@ impl App {
     /// Writes the project to `target`: the size of the file written, None when the save failed. `edit` changes what is
     /// written (not the project), once the project's state is gathered.
     fn write_project(&mut self, target: PathBuf, edit: &mut dyn FnMut(&mut os_model::Project)) -> Option<u64> {
+        // The journal has the project and its plugins as saved; a Lemon project file holds that history.
+        self.journal_saving();
+        let history = if crate::native::is_native(&target) { self.journal.project_history() } else { Vec::new() };
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
         crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
         // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
@@ -2016,7 +2025,7 @@ impl App {
         let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
-            .and_then(|b| std::fs::write(&target, &b).map(|()| b.len() as u64).map_err(|e| e.to_string()));
+            .and_then(|b| crate::native::write(&target, &b, &history));
         s.message = Some(match &result {
             Ok(_) if lost.is_empty() => format!("Saved {}", target.display()),
             Ok(_) => format!("Saved {} (not stored yet: {})", target.display(), lost.join(", ")),
@@ -2031,6 +2040,10 @@ impl App {
             crate::recent::add(&target);
             s.path = Some(target.clone());
             self.mark_saved();
+            if crate::native::is_native(&target) {
+                // The file holds the history from here on.
+                self.journal.saved_into(&target);
+            }
             self.journal_saved(&target);
         }
         result.ok()
@@ -2386,14 +2399,14 @@ impl App {
         s.piano.dirty = true;
         s.message = Some("New project".into());
         self.mark_saved();
-        self.journal_opened(None);
+        self.journal_opened(None, Vec::new());
     }
 
     /// FILE > Open: the open dialog, starting in the project's folder.
     fn open_dialog(&mut self) {
         let start = self.state.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
         let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Open project", "project", crate::dialog::Then::OpenProject)
-            .filter("Lemon Studio project", &["flp", "zip"])
+            .filter("Lemon Studio project", &["flp", crate::native::EXT, "zip"])
             .start(start.as_deref());
         self.file_dialog(dlg);
     }
@@ -4540,7 +4553,7 @@ impl App {
         // A drop accepts an Info box or a browser folder cell being edited, as a click does.
         crate::project_info::accept_info(&mut self.state);
         crate::search_folders::commit(&mut self.state);
-        if ext == "flp" || ext == "zip" {
+        if ext == "flp" || ext == crate::native::EXT || ext == "zip" {
             return self.ask_discard("opening another project", crate::dialog::Next::Open(path));
         }
         // A MIDI file is imported as FILE ▸ Import ▸ MIDI file does (spec: ui/midi-files.md §10.6).

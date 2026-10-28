@@ -108,7 +108,7 @@ pub fn unused_files(dir: &Path, used: &[PathBuf]) -> Vec<PathBuf> {
     for sub in SCANNED {
         files_under(&dir.join(sub), &mut found);
     }
-    found.retain(|f| !f.extension().is_some_and(|e| e.eq_ignore_ascii_case("flp")) && !used.iter().any(|u| same_file(f, u)));
+    found.retain(|f| !crate::native::is_project_file(f) && !used.iter().any(|u| same_file(f, u)));
     found.sort();
     found
 }
@@ -117,7 +117,7 @@ pub fn unused_files(dir: &Path, used: &[PathBuf]) -> Vec<PathBuf> {
 /// unused files leaves it alone.
 pub fn shared_folder(dir: &Path, own: &Path) -> bool {
     std::fs::read_dir(dir).is_ok_and(|r| {
-        r.flatten().any(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("flp")) && e.path().is_file() && !same_file(&e.path(), own))
+        r.flatten().any(|e| crate::native::is_project_file(&e.path()) && e.path().is_file() && !same_file(&e.path(), own))
     })
 }
 

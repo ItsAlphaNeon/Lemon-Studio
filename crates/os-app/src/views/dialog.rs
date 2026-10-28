@@ -643,7 +643,7 @@ fn places(ui: &mut Ui, f: &FileDlg, r: Rect) {
 fn file_icon(name: &str) -> Icon {
     let ext = std::path::Path::new(name).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
-        "flp" => Icon::FileProject,
+        "flp" | "lemon" => Icon::FileProject,
         "wav" | "mp3" | "flac" | "ogg" | "aif" | "aiff" => Icon::FileAudio,
         "zip" => Icon::FileZip,
         "txt" | "flstheme" => Icon::FileText,

@@ -48,7 +48,7 @@ fn file_name(p: &str) -> &str {
 }
 
 fn is_project(p: &Path) -> bool {
-    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("flp"))
+    crate::native::is_project_file(p)
 }
 
 /// Starts `job` on a thread of its own, behind the panel.
