@@ -944,7 +944,9 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     };
     let mem = cpu.mem_mb.map_or("- MB".to_string(), |m| format!("{m} MB"));
     let load = format!("{}%", cpu.load);
-    let (mw, lw) = (ui.c.text_width(small, &mem), ui.c.text_width(small, &load));
+    // Slots as wide as the widest reading: the bar to their left stays put while the numbers change length.
+    let mw = ui.c.text_width(small, &mem).max(ui.c.text_width(small, "88888 MB"));
+    let lw = ui.c.text_width(small, &load).max(ui.c.text_width(small, "100%"));
     let ty = (cy - ui.c.line_height(small) / 2.0).round();
     ui.c.text_right(small, x, ty, t.text_dim, &mem);
     ui.c.text_right(small, x - mw - 10.0, ty, level, &load);

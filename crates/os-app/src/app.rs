@@ -12918,6 +12918,25 @@ mod tests {
         assert_eq!(app.state.plugin_pos, (beside.0 + 120.0, beside.1 + 40.0), "the channel window reopens where it was moved");
     }
 
+    /// The status bar's load and memory readings take fixed slots: going from one digit to two moves nothing.
+    #[test]
+    fn status_bar_stays_put_as_the_load_changes() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.set_tiling_layout(true);
+        let place = |app: &mut App, c: &mut Canvas, load: u32| {
+            app.state.cpu.now.load = load;
+            app.invalidate();
+            frame(app, c, None);
+            // the touch controller's button in the status bar, left of the readings
+            let bar = views::status_rect(&app.state);
+            app.hits.iter().find(|h| h.action == Action::ToggleWin(Win::Touch) && bar.contains(h.rect.cx(), h.rect.cy())).expect("in the status bar").rect.x
+        };
+        let one = place(&mut app, &mut c, 5);
+        assert_eq!(place(&mut app, &mut c, 55), one, "two digits");
+        assert_eq!(place(&mut app, &mut c, 100), one, "three");
+    }
+
     /// The tiling layout: the close shortcut closes the channel rack in front too, before the app.
     #[test]
     fn close_shortcut_closes_the_rack_in_lemon() {
