@@ -2724,7 +2724,6 @@ impl App {
             ChannelControl::Pan => ("Channel panning", true),
             ChannelControl::Pitch => ("Channel pitch", true),
             ChannelControl::Track => ("Channel mixer track", false),
-            ChannelControl::Misc(_) => ("Channel settings", true),
         };
         let run = crate::history::Run::Channel(row, which);
         crate::control::run_edit(&mut self.state, name, Region::Channel(row), run, knob, |s| {

@@ -161,17 +161,10 @@ pub fn sampler_param(misc: &ChannelMisc, m: M) -> Option<(&'static str, f64)> {
 }
 
 /// A Misc tab edit of rack row `row`: the channel model, its hosted Lemon Sampler (root / fine), then playback.
-/// An undo step; a slider's drag or wheel notches one step (`control::run_edit`).
+/// No undo step, as in FL (measured 2026-10-28).
 pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
-    if app.state.project.channels.get(row).is_none() {
-        return;
-    }
-    let run = crate::history::Run::Channel(row, crate::history::ChannelControl::Misc(m));
-    crate::control::run_edit(&mut app.state, "Channel settings", crate::control::command::Region::Channel(row), run, mp::draggable(m), |s| {
-        if let Some(ch) = s.project.channels.get_mut(row) {
-            put(&mut ch.misc, m, v);
-        }
-    });
+    let Some(ch) = app.state.project.channels.get_mut(row) else { return };
+    put(&mut ch.misc, m, v);
     sync(app, row, &[m]);
     app.state.piano.dirty = true;
     app.invalidate();

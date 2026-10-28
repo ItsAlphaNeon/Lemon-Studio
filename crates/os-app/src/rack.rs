@@ -446,12 +446,9 @@ pub fn set_len(s: &mut State, steps: Option<u32>) {
     let ps = per_step(s);
     let n = s.pattern.max(1);
     let max = max_steps(s);
-    // An undo step; a drag or a run of wheel notches of the box one step.
-    let run = crate::history::Run::PatternLength(n);
-    crate::control::run_edit(s, "Pattern length", crate::control::command::Region::Pattern(n), run, false, |s| {
-        crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
-        s.piano.dirty = true;
-    });
+    // No undo step, as in FL (measured 2026-10-28).
+    crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
+    s.piano.dirty = true;
 }
 
 /// Length box value: 0 = Auto.

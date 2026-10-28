@@ -122,10 +122,10 @@ default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre).
   tempo, the project settings and plugin parameters, whether Lemon Studio sets them (Type in value, Set..., Paste
   value) or they change in the plugin's own window. Faders and parameters follow "Undo knob tweaks". A change has the
   same step name whichever made it ("Tempo", "Time signature", "Song info", "Plugin parameter").
-- So are the channel's own controls in a plugin window (volume, panning, pitch, pitch range, mixer track) and its
-  Misc tab, the channel rack's mixer-track box, the pattern length box, a pattern's time signature, arrangements
-  added, cloned and deleted, arrangement, pattern and effect-slot names, a clip's random colour and "Remove all audio
-  editors". A drag or a run of wheel notches on one box or knob is one step.
+- So are the channel's own controls in a plugin window (volume, panning, pitch, pitch range, mixer track), the
+  channel rack's mixer-track box, a pattern's time signature, arrangements added, cloned and deleted, arrangement,
+  pattern and effect-slot names, a clip's random colour and "Remove all audio editors". A drag or a run of wheel
+  notches on one box or knob is one step. The pattern length box and the Misc tab make none, as in FL.
 - A channel muted, soloed or switched on or off is one step of its own ("Channel mute / solo") that follows "Undo knob
   tweaks", and a mixer track's mute and solo make none, as in FL. An undo or redo of any other step leaves every
   channel and track muted or not as it is (a client's `enabled` too).
