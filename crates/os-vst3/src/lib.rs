@@ -11,6 +11,7 @@
 // spec: plugins/vst3-hosting.md
 
 mod context_menu;
+pub mod fl_state;
 mod host;
 pub mod preset;
 
@@ -1053,32 +1054,41 @@ impl Plugin {
         self.editor = false;
     }
 
-    /// The instance's state as `.vstpreset` bytes (spec §8).
+    /// The instance's state in the layout FL Studio's plugin wrapper keeps ([`fl_state`], spec §8).
     pub fn save_state(&self) -> Option<Vec<u8>> {
         unsafe {
             let s = Stream::create(Vec::new());
             if self.component.get_state(s.shared()) != kResultOk {
                 return None;
             }
-            let mut p = preset::Preset { class_id: self.desc.id.clone(), component: s.get().bytes(), controller: Vec::new() };
-            // A single-component plug-in's controller is the same object: its state is the component's.
-            if let (Some(c), true) = (&self.controller, self.separate) {
-                let s = Stream::create(Vec::new());
-                if c.get_state(s.shared()) == kResultOk {
-                    p.controller = s.get().bytes();
+            let mut st = fl_state::FlState { component: s.get().bytes(), controller: None, params: Vec::new() };
+            if let Some(c) = &self.controller {
+                // A single-component plug-in's controller is the same object: its state is the component's.
+                if self.separate {
+                    let s = Stream::create(Vec::new());
+                    st.controller = Some(if c.get_state(s.shared()) == kResultOk { s.get().bytes() } else { Vec::new() });
                 }
+                st.params = (0..c.get_parameter_count().max(0))
+                    .filter_map(|i| {
+                        let mut info: ParameterInfo = std::mem::zeroed();
+                        (c.get_parameter_info(i, &mut info) == kResultOk).then_some(info.id)
+                    })
+                    .collect();
             }
-            Some(p.to_bytes())
+            Some(st.to_bytes())
         }
     }
 
-    /// Restores `save_state` bytes (also accepts a bare component state). A preset of another class is refused.
+    /// Restores `save_state` bytes; also a `.vstpreset` (what Lemon Studio saved before, and preset files; one of
+    /// another class is refused) and a bare component state (imports, other hosts' chunks).
     pub fn load_state(&mut self, data: &[u8]) -> bool {
         let p = if data.starts_with(b"VST3") {
             match preset::Preset::parse(data) {
                 Some(p) if p.class_id.eq_ignore_ascii_case(&self.desc.id) => p,
                 _ => return false,
             }
+        } else if let Some(st) = fl_state::FlState::parse(data) {
+            preset::Preset { class_id: self.desc.id.clone(), component: st.component, controller: st.controller.unwrap_or_default() }
         } else {
             preset::Preset { class_id: self.desc.id.clone(), component: data.to_vec(), controller: Vec::new() }
         };

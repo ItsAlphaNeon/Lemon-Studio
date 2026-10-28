@@ -1724,8 +1724,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::Reset(k) => {
-            crate::history::knob(s, k, false);
-            s.set_knob(k, k.default_value());
+            s.reset_knob(k);
             None
         }
         RCmd::CopyValue(k) => {

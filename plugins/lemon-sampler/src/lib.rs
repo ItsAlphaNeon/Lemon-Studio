@@ -17,7 +17,7 @@ pub mod view;
 use std::num::NonZeroU32;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nih_plug::prelude::*;
@@ -112,6 +112,13 @@ impl Default for Shared {
     }
 }
 
+/// Whether a sample file has a loop of its own that the voices play while "Use loop points" is on (the `smpl` loop
+/// `source_info` reads): the host's note rules hand such a voice its note's end (`os_engine::SampleLibrary::
+/// loop_reader`).
+pub fn file_loops(path: &Path) -> bool {
+    source_info(path).1.file_loop.is_some_and(|(a, b)| b > a)
+}
+
 /// Bit depth of a sample file's data (WAV `fmt `, FLAC STREAMINFO), | 0x100 for floating point; 16 when unknown.
 pub fn source_bits(path: &Path) -> u32 {
     source_info(path).0
@@ -175,24 +182,107 @@ pub fn source_info(path: &Path) -> (u32, fx::Source) {
     (16, src)
 }
 
+thread_local! {
+    /// **(Lemon Studio)** While the host opens a project, instances it starts from a saved state on this thread build
+    /// their played sample on build threads instead of in `initialize` (spec: ui/project-loading.md §2): the host's
+    /// window keeps painting.
+    static DEFER_BUILDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Deferred builds queued or running, in every instance of the process.
+static PENDING_BUILDS: AtomicUsize = AtomicUsize::new(0);
+/// Deferred builds waiting for a thread, and how many threads take them.
+static BUILD_QUEUE: Mutex<(std::collections::VecDeque<Box<dyn FnOnce() + Send>>, usize)> = Mutex::new((std::collections::VecDeque::new(), 0));
+
+/// The host opens a project on this thread (on) or has opened it (off): see `DEFER_BUILDS`.
+pub fn set_deferred_builds(on: bool) {
+    DEFER_BUILDS.with(|d| d.set(on));
+}
+
+/// Deferred builds not finished yet: the host's project is ready when there are none.
+pub fn pending_builds() -> usize {
+    PENDING_BUILDS.load(Ordering::Acquire)
+}
+
+/// Runs `job` on one of up to 4 build threads (as many as the machine runs at once): long samples are built side by
+/// side, without holding every copy in memory at once.
+fn queue_build(job: Box<dyn FnOnce() + Send>) {
+    PENDING_BUILDS.fetch_add(1, Ordering::AcqRel);
+    let most = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 4);
+    let mut q = BUILD_QUEUE.lock().unwrap();
+    q.0.push_back(job);
+    if q.1 >= most {
+        return;
+    }
+    q.1 += 1;
+    let spawned = std::thread::Builder::new().name("sampler-build".into()).spawn(|| loop {
+        let job = {
+            let mut q = BUILD_QUEUE.lock().unwrap();
+            match q.0.pop_front() {
+                Some(j) => j,
+                None => {
+                    q.1 -= 1;
+                    return;
+                }
+            }
+        };
+        // A build that panics still counts as done, so the host's loading ends.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+        PENDING_BUILDS.fetch_sub(1, Ordering::AcqRel);
+    });
+    if spawned.is_err() {
+        // No thread: the jobs run here, as they would without deferring.
+        q.1 -= 1;
+        let jobs: Vec<_> = q.0.drain(..).collect();
+        drop(q);
+        for job in jobs {
+            job();
+            PENDING_BUILDS.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
 impl Shared {
     /// Loads a sample file and makes it the current one (UI / initialize thread). A decode the host already holds
     /// (it decodes a project's samples ahead, spec: ui/project-loading.md) is taken as it is. A file that plays from
     /// disk with the current settings (Keep on disk) is not decoded.
     pub fn load(&self, path: &str, params: &SamplerParams) -> Result<(), String> {
+        self.load_file(path, params)?;
+        self.precompute(params);
+        Ok(())
+    }
+
+    /// `load`, with the played sample built on a build thread while the host opens a project (`set_deferred_builds`).
+    pub fn load_for_host(self: &Arc<Self>, path: &str, params: &Arc<SamplerParams>) -> Result<(), String> {
+        if !DEFER_BUILDS.with(|d| d.get()) {
+            return self.load(path, params);
+        }
+        self.load_file(path, params)?;
+        let (s, p) = (self.clone(), params.clone());
+        queue_build(Box::new(move || s.precompute(&p)));
+        Ok(())
+    }
+
+    /// `load` without building the played sample.
+    fn load_file(&self, path: &str, params: &SamplerParams) -> Result<(), String> {
         let p = Path::new(path);
         let (bits, source) = source_info(p);
         let layout = stream::Layout::of(p);
         let on_disk = layout.as_ref().is_some_and(|l| self.streams(params, &source, l).is_some());
         let s = if on_disk { None } else { Some(os_engine::sample::load_shared(p).map_err(|e| e.to_string())?) };
         self.bits.store(bits, Ordering::Release);
-        self.set_loaded(s, path, source, layout, params);
+        self.set_file(s, path, source, layout, params);
         Ok(())
     }
 
     /// Replaces the loaded sample (`path` is what the state remembers), with the file's loop and format in `source`
     /// and, for a file that can play from disk, its layout.
     fn set_loaded(&self, s: Option<Arc<Sample>>, path: &str, source: fx::Source, layout: Option<stream::Layout>, params: &SamplerParams) {
+        self.set_file(s, path, source, layout, params);
+        self.precompute(params);
+    }
+
+    /// `set_loaded` without building the played sample.
+    fn set_file(&self, s: Option<Arc<Sample>>, path: &str, source: fx::Source, layout: Option<stream::Layout>, params: &SamplerParams) {
         {
             // All of it under the lock of `raw`, with the version: a decode made for an earlier load is never kept.
             let mut raw = self.raw.lock().unwrap();
@@ -205,7 +295,6 @@ impl Shared {
         if let Ok(mut p) = params.sample_path.write() {
             *p = path.to_string();
         }
-        self.precompute(params);
     }
 
     pub fn clear(&self, params: &SamplerParams) {
@@ -662,10 +751,11 @@ impl Plugin for LemonSampler {
         // An offline render (an export) gets the resampler's exact weights; live playback the tables.
         self.offline = config.process_mode == ProcessMode::Offline;
         self.engine.quality = if self.offline { os_dsp::resample::Quality::Exact } else { os_dsp::resample::Quality::Table };
-        // A restored state names a sample: load it now (initialize may block).
+        // A restored state names a sample: load it now (initialize may block); while the host opens a project, the
+        // played sample is built on a build thread and taken when it is ready (`pick_up_sample`).
         let path = self.params.sample_path.read().map(|p| p.clone()).unwrap_or_default();
         if !path.is_empty() && path != self.shared.loaded_path() {
-            if let Err(e) = self.shared.load(&path, &self.params) {
+            if let Err(e) = self.shared.load_for_host(&path, &self.params) {
                 nih_log!("Lemon Sampler: {e}");
             }
         } else if path.is_empty() && !self.shared.loaded_path().is_empty() {

@@ -16,6 +16,8 @@ mod autoscroll;
 mod backup;
 #[cfg(test)]
 mod audio_bench;
+#[cfg(test)]
+mod open_bench;
 mod browser;
 mod cable;
 mod capture;
@@ -42,6 +44,8 @@ mod init;
 mod knobs;
 mod layout;
 mod loading;
+mod missing;
+mod zipped;
 mod logo;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -847,11 +851,8 @@ impl ApplicationHandler for Shell {
             e => e,
         };
         match event {
-            // While a dialog is open the window stays (the dialog is answered first).
             WindowEvent::CloseRequested => {
-                if !self.app.modal_open() {
-                    self.app.ask_discard("closing", crate::dialog::Next::Close);
-                }
+                self.app.close_requested();
                 if self.app.want_exit {
                     el.exit();
                 }
