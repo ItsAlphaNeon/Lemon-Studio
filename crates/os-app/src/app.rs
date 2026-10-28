@@ -82,16 +82,6 @@ pub enum CloseAll {
     Plugins,
 }
 
-impl CloseAll {
-    pub fn from_label(label: &str) -> Option<CloseAll> {
-        Some(match label {
-            "Close all windows" => CloseAll::All,
-            "Close all unfocused windows" => CloseAll::Unfocused,
-            "Close all plugin windows" => CloseAll::Plugins,
-            _ => return None,
-        })
-    }
-}
 
 /// Resize edge bits for `Action::WinResize`.
 pub const EDGE_L: u8 = 1;
@@ -9112,143 +9102,131 @@ impl App {
 
     pub(crate) fn menu_item(&mut self, menu: usize, item: usize) {
         use views::menus::*;
+        // FILE's first entries and About go by their place; every other entry by its command (`MenuCmd`), never its
+        // label.
         match (menu, item) {
-            (0, FILE_NEW) => self.ask_discard("starting a new project", crate::dialog::Next::NewProject),
-            // Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
-            (OPTIONS_MENU | ADD_MENU, i) if item_at(menu, i).and_then(|it| views::settings::tab_for_menu(it.label)).is_some() => {
-                let tab = item_at(menu, i).and_then(|it| views::settings::tab_for_menu(it.label)).expect("checked");
-                self.open_settings(tab);
+            (0, FILE_NEW) => return self.ask_discard("starting a new project", crate::dialog::Next::NewProject),
+            (0, FILE_OPEN) => return self.ask_discard("opening another project", crate::dialog::Next::OpenDialog),
+            (0, FILE_SAVE) => return self.save(false),
+            (0, FILE_SAVE_AS) => return self.save(true),
+            (0, FILE_SAVE_VERSION) => return self.save_new_version(),
+            (0, FILE_EXPORT) => return self.open_export(false),
+            (0, FILE_EXPORT_MP3) => return self.open_export(true),
+            (0, FILE_EXPORT_MIDI) => return self.export_midi_dialog(false),
+            (0, FILE_EXIT) => {
+                self.want_close = true;
+                return;
             }
-            (0, FILE_OPEN) => self.ask_discard("opening another project", crate::dialog::Next::OpenDialog),
-            (0, FILE_SAVE) => self.save(false),
-            (0, FILE_EXPORT) => self.open_export(false),
-            (0, FILE_EXPORT_MP3) => self.open_export(true),
-            (0, FILE_EXPORT_MIDI) => self.export_midi_dialog(false),
-            (0, i) if item_at(0, i).is_some_and(|it| it.label == EXPORT_ZIP_LABEL) => crate::zipped::export_dialog(self),
+            (HELP_MENU, HELP_ABOUT) => {
+                // The Windows build includes the ASIO SDK, which is under version 3 only (THIRD-PARTY-NOTICES.txt §9).
+                let licence = if cfg!(windows) { "the GNU GPL v3" } else { "the GNU GPL v3 or later" };
+                self.state.message = Some(format!("Lemon Studio {} (cutting-edge pre-alpha), free software under {licence}", env!("CARGO_PKG_VERSION")));
+                return;
+            }
+            (PATTERNS, i) if i >= PATTERN_PICK => return crate::patterns::select(&mut self.state, (i - PATTERN_PICK) as u16),
+            (0, i) if i >= RECENT_PICK => return self.open_recent(i - RECENT_PICK),
+            _ => {}
+        }
+        let Some(entry) = item_at(menu, item) else { return };
+        match entry.cmd {
+            // Theme import (spec: ui/flstheme.md): pick a .flstheme, starting in FL's theme folder when installed.
+            MenuCmd::Settings(tab) => self.open_settings(tab),
+            MenuCmd::ExportZip => crate::zipped::export_dialog(self),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
-            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Sampler") => {
+            MenuCmd::Sampler => {
                 if let Some(index) = self.plugins.index_of(crate::plugins::LEMON_SAMPLER) {
                     self.state.message = crate::plugin_menu::add_generator(self, index, None);
                 }
             }
             // ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3).
-            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| matches!(it.label, "Audio clip" | "Automation clip")) => {
-                let audio = item_at(ADD_MENU, i).is_some_and(|it| it.label == "Audio clip");
-                self.add_clip_channel(if audio { ChannelKind::AudioClip } else { ChannelKind::Automation });
-            }
+            MenuCmd::AudioClip => self.add_clip_channel(ChannelKind::AudioClip),
+            MenuCmd::AutomationClip => self.add_clip_channel(ChannelKind::Automation),
             // ADD > Layer (spec: ui/add-clip-channels.md §4): the rack keeps the new row in view.
-            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Layer") => {
+            MenuCmd::Layer => {
                 crate::playlist::add_layer_channel(&mut self.state);
                 let s = &mut self.state;
                 let view_h = views::rack::panel(views::rack::rect(s)).h;
                 s.rack_scroll = (views::rack::content_h(s) - view_h).max(0.0);
                 self.invalidate();
             }
-            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "More plugins...") => {
+            MenuCmd::MorePlugins => {
                 let at = self.mouse;
                 self.open_plugin_menu(crate::plugin_menu::Target::Gen(None), at);
             }
-            (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Rescan plugins (fast)") => self.start_scan(crate::plugin_db::Mode::Changed),
+            MenuCmd::Rescan => self.start_scan(crate::plugin_db::Mode::Changed),
             // The plugin menus' display mode, as their own radios set it (spec: ui/plugin-menu.md §2-3).
-            (ADD_MENU, i) if item_at(ADD_MENU, i).and_then(|it| menu_view(ADD_MENU, it.label)).is_some() => {
-                let v = item_at(ADD_MENU, i).and_then(|it| menu_view(ADD_MENU, it.label)).expect("checked");
-                self.state.message = crate::plugin_menu::run(self, crate::plugin_menu::PlugCmd::View(v));
-            }
-            (HELP_MENU, HELP_ABOUT) => {
-                // The Windows build includes the ASIO SDK, which is under version 3 only (THIRD-PARTY-NOTICES.txt §9).
-                let licence = if cfg!(windows) { "the GNU GPL v3" } else { "the GNU GPL v3 or later" };
-                self.state.message = Some(format!("Lemon Studio {} (cutting-edge pre-alpha), free software under {licence}", env!("CARGO_PKG_VERSION")));
-            }
-            (ADD_MENU | TOOLS_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == "Pattern") => {
+            MenuCmd::View(v) => self.state.message = crate::plugin_menu::run(self, crate::plugin_menu::PlugCmd::View(v)),
+            MenuCmd::NewPattern => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
                 if let Some(m) = crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindFirst, at) {
                     self.state.message = Some(m);
                 }
             }
             // spec: ui/cancel-recording.md
-            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Cancel recording") => {
-                self.state.message = Some(self.cancel_recording());
-            }
-            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Stop sound") => {
+            MenuCmd::CancelRecording => self.state.message = Some(self.cancel_recording()),
+            MenuCmd::StopSound => {
                 self.transport.stop();
                 self.state.message = Some("Sound stopped".into());
             }
             // spec: ui/unused-channels.md
-            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Select unused instruments") => {
-                self.state.message = crate::rack::run(self, crate::rack::RCmd::SelectUnused);
-            }
-            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Remove unused audio clips") => {
-                self.state.message = crate::rack::run(self, crate::rack::RCmd::Purge);
-            }
-            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == crate::views::menus::REMOVE_TESLAS_LABEL) => {
+            MenuCmd::SelectUnused => self.state.message = crate::rack::run(self, crate::rack::RCmd::SelectUnused),
+            MenuCmd::PurgeClips => self.state.message = crate::rack::run(self, crate::rack::RCmd::Purge),
+            MenuCmd::RemoveTeslas => {
                 if let Some(m) = self.ask_remove_teslas() {
                     self.state.message = Some(m);
                 }
             }
-            (TOOLS_MENU, i) if item_at(TOOLS_MENU, i).is_some_and(|it| it.label == "Reset empty tracks") => {
+            MenuCmd::ResetEmptyTracks => {
                 if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::ResetEmptyTracks) {
                     self.state.message = Some(m);
                 }
             }
-            (0, FILE_SAVE_AS) => self.save(true),
             // spec: ui/project-templates.md
-            (0, i) if item_at(0, i).is_some_and(|it| it.label == "Restore backup...") => self.revert_to_backup(),
-            (0, i) if item_at(0, i).is_some_and(|it| it.label == "Save as template...") => self.save_template_dialog(),
-            (0, i) if item_at(0, i).is_some_and(|it| it.label == "Save to new project folder...") => self.new_folder_dialog(),
-            (0 | TOOLS_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == DELETE_UNUSED_LABEL) => self.delete_unused_ask(),
-            (0, FILE_SAVE_VERSION) => self.save_new_version(),
-            (0, FILE_EXIT) => self.want_close = true,
-            (VIEW, i) if item_at(menu, i).is_some_and(|it| it.label == "Clip palette") => {
+            MenuCmd::RestoreBackup => self.revert_to_backup(),
+            MenuCmd::SaveAsTemplate => self.save_template_dialog(),
+            MenuCmd::SaveToNewFolder => self.new_folder_dialog(),
+            MenuCmd::DeleteUnused => self.delete_unused_ask(),
+            MenuCmd::ClipPalette => {
                 let at = self.mouse;
                 self.open_project_picker(at);
             }
-            (VIEW | ADD_MENU, i) if item_at(menu, i).is_some_and(|it| it.label == "Plugin palette") => {
+            MenuCmd::PluginPalette => {
                 let at = self.mouse;
                 self.open_plugin_menu(crate::plugin_menu::Target::All, at);
             }
-            (PATTERNS, i) if i >= PATTERN_PICK => crate::patterns::select(&mut self.state, (i - PATTERN_PICK) as u16),
-            (0, i) if i >= RECENT_PICK => self.open_recent(i - RECENT_PICK),
-            (PATTERNS, i) if item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).is_some() => {
-                let cmd = item_at(PATTERNS, i).and_then(|it| crate::patterns::Cmd::from_label(it.label)).expect("checked");
+            MenuCmd::Pattern(cmd) => {
                 if let Some(m) = self.pattern_cmd(cmd) {
                     self.state.message = Some(m);
                 }
             }
-            (VIEW, i) if item_at(VIEW, i).and_then(|it| CloseAll::from_label(it.label)).is_some() => {
-                let what = item_at(VIEW, i).and_then(|it| CloseAll::from_label(it.label)).expect("checked");
-                self.close_windows(what);
-            }
-            (VIEW, i) if item_at(VIEW, i).is_some_and(|it| it.label == INTO_WORKSPACE_LABEL) => self.move_into_workspace(),
-            (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
-            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::METRONOME_LABEL) => self.toggle_metronome(),
-            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::CLEAR_LOG_LABEL) => {
+            MenuCmd::CloseAll(what) => self.close_windows(what),
+            MenuCmd::IntoWorkspace => self.move_into_workspace(),
+            MenuCmd::Typing => self.toggle_typing(),
+            MenuCmd::Metronome => self.toggle_metronome(),
+            MenuCmd::ClearLog => {
                 if let Some(m) = self.rec_cmd(crate::record::RecCmd::ClearLog) {
                     self.state.message = Some(m);
                 }
             }
-            (m, i) if let Some(o) = item_at(m, i).and_then(|it| views::menus::record_option(it.label)) => self.toggle_record_option(o),
-            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::AUTOSCROLL_LABEL) => self.toggle_autoscroll(),
-            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::GROUPS_LABEL) => self.toggle_groups(),
-            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::STEP_EDIT_LABEL) => self.toggle_step_edit(),
-            (m, i) if item_at(m, i).is_some_and(|it| it.label == views::menus::MULTILINK_LABEL) => self.toggle_multilink(),
-            (m, i) if let Some(sw) = item_at(m, i).and_then(|it| crate::midi_cfg::Switch::from_label(it.label)) => self.toggle_midi_switch(sw),
-            (m, i) if item_at(m, i).is_some_and(|it| crate::params::menu_handles(it.label)) => {
-                let label = item_at(m, i).map_or("", |it| it.label);
-                if let Some(msg) = self.params_menu(label) {
+            MenuCmd::Record(o) => self.toggle_record_option(o),
+            MenuCmd::Autoscroll => self.toggle_autoscroll(),
+            MenuCmd::Groups => self.toggle_groups(),
+            MenuCmd::StepEdit => self.toggle_step_edit(),
+            MenuCmd::Multilink => self.toggle_multilink(),
+            MenuCmd::Midi(sw) => self.toggle_midi_switch(sw),
+            MenuCmd::Params(entry) => {
+                if let Some(msg) = self.params_menu(entry) {
                     self.state.message = Some(msg);
                 }
             }
             // EDIT > Undo = Ctrl+Z, Redo = Ctrl+Alt+Z: the project's undo history (`undo_key`).
-            (EDIT_MENU, i) if item_at(EDIT_MENU, i).is_some_and(|it| it.label == "Undo") => self.undo_key(false),
-            (EDIT_MENU, i) if item_at(EDIT_MENU, i).is_some_and(|it| it.label == "Redo") => self.undo_key(true),
+            MenuCmd::Undo => self.undo_key(false),
+            MenuCmd::Redo => self.undo_key(true),
             // spec: ui/browser-commands.md
-            (m, i) if item_at(m, i).and_then(|it| crate::browser::Jump::from_label(m, it.label)).is_some() => {
-                let j = item_at(m, i).and_then(|it| crate::browser::Jump::from_label(m, it.label)).expect("checked");
-                self.browser_jump(j);
-            }
-            (m, i) => {
-                let label = item_at(m, i).map_or("item", |it| it.label);
-                self.state.message = Some(format!("{label}: not available yet"));
+            MenuCmd::Jump(j) if j.available() => self.browser_jump(j),
+            // VIEW's window entries are window toggles (`Action::ToggleWin`); ▸ entries open their submenu.
+            MenuCmd::Jump(_) | MenuCmd::Window(_) | MenuCmd::Sub(_) | MenuCmd::None => {
+                self.state.message = Some(format!("{}: not available yet", entry.label));
             }
         }
     }
@@ -9547,7 +9525,6 @@ fn keysym_of(key: &winit::keyboard::Key) -> Option<(u32, Option<char>)> {
 
 /// Typing keyboard velocity (fixed, spec: ui/typing-keyboard.md).
 const TYPING_VELOCITY: u8 = 100;
-const TYPING_LABEL: &str = "Computer MIDI keyboard";
 
 /// Semitone above the lower tier's first C (C4) for a physical key (spec: ui/typing-keyboard.md).
 fn typing_semitone(code: KeyCode) -> Option<i32> {

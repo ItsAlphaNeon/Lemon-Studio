@@ -1164,7 +1164,6 @@ mod tests {
         ctrl(&mut app, "p");
         ctrl(&mut app, "b");
         assert_eq!((Opt::Wait.on(), Opt::Precount.on(), Opt::Blend.on()), (true, true, false));
-        assert_eq!(crate::views::menus::record_option("Start on input"), Some(Opt::Wait));
     }
 
     /// Start on input: Play waits; the first note starts playback from the start and is recorded there; Play again

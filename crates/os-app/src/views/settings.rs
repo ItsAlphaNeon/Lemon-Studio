@@ -411,22 +411,6 @@ pub const TABLE_ROW_H: f32 = 17.0;
 /// Table columns: x from the table's left edge, width.
 const COLS: [(f32, f32); 8] = [(0.0, 20.0), (20.0, 38.0), (58.0, 152.0), (210.0, 50.0), (260.0, 68.0), (328.0, 112.0), (440.0, 66.0), (506.0, 80.0)];
 
-/// OPTIONS menu label -> tab (spec §1).
-pub fn tab_for_menu(label: &str) -> Option<usize> {
-    Some(match label {
-        "MIDI settings" => MIDI,
-        "Audio settings" => AUDIO,
-        "General settings" => GENERAL,
-        "File settings" => FILE,
-        "Manage plugins" => PLUGINS,
-        "Theme settings" => THEME,
-        "Project general settings" => PROJECT,
-        "Project info" => INFO,
-        "Debugging log" => DEBUG,
-        _ => return None,
-    })
-}
-
 pub const W: f32 = 668.0;
 const LABEL: Font = Font::new(13);
 const TABS_B: f32 = 64.0;

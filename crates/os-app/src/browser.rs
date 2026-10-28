@@ -618,23 +618,12 @@ pub enum Jump {
 }
 
 impl Jump {
-    /// The jump behind entry `label` of menu `menu`. `None` for other entries, and for a section the tree does not list
-    /// (History, Remote control: their entries stay greyed out).
-    pub fn from_label(menu: usize, label: &str) -> Option<Jump> {
-        use crate::views::menus::{ADD_MENU, TOOLS_MENU, VIEW};
-        let j = match (menu, label) {
-            (VIEW, "Undo history") => Jump::Section("History"),
-            (VIEW, "Patterns") => Jump::Section("Patterns"),
-            (VIEW, "Instruments in use") => Jump::Section("Generators"),
-            (VIEW, "Effects in use") => Jump::Section("Effects"),
-            (VIEW, "Remote control") => Jump::Section("Remote control"),
-            (VIEW, "Plugin library") | (ADD_MENU, "Browse plugin library") => Jump::PluginDb,
-            (TOOLS_MENU, "Browser find...") => Jump::Find,
-            _ => return None,
-        };
-        match j {
-            Jump::Section(name) => view::section_key(name).map(|_| j),
-            _ => Some(j),
+    /// Whether the jump has somewhere to go: a section the tree does not list (History, Remote control) has not, and
+    /// its entry stays greyed out.
+    pub fn available(self) -> bool {
+        match self {
+            Jump::Section(name) => view::section_key(name).is_some(),
+            _ => true,
         }
     }
 }

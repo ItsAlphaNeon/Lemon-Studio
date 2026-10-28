@@ -338,13 +338,14 @@ pub fn effect_label(s: &State, track: u16, slot: u8) -> Option<String> {
     Some(format!("{} ({})", crate::mixer::slot_name(s, track, slot)?, crate::mixer::name(s, track)))
 }
 
-/// Main-menu entries handled here (spec §5).
-pub const ADD_LAST: &str = "Automation for the most recent parameter";
-pub const TOOLS_LAST: &str = "Most recent";
-pub const TOOLS_NEXT: &str = "Second most recent";
-
-pub fn menu_handles(label: &str) -> bool {
-    matches!(label, ADD_LAST | TOOLS_LAST | TOOLS_NEXT)
+/// The menu entries for the last tweaked parameters (spec §5; `views::menus::MenuCmd::Params`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuEntry {
+    /// ADD > Automation for the most recent parameter: its automation clip at once.
+    Automation,
+    /// TOOLS > Most recent ▸ / Second most recent ▸: the parameter's menu, at the mouse.
+    Last,
+    NextToLast,
 }
 
 impl App {
@@ -508,11 +509,11 @@ impl App {
     }
 
     /// ADD / TOOLS menu entries for the last tweaked parameters (spec §5); returns a message.
-    pub(crate) fn params_menu(&mut self, label: &str) -> Option<String> {
-        let nth = usize::from(label == TOOLS_NEXT);
+    pub(crate) fn params_menu(&mut self, entry: MenuEntry) -> Option<String> {
+        let nth = usize::from(entry == MenuEntry::NextToLast);
         let tweak = self.state.params.last.get(nth).cloned();
         let create = tweak.as_ref().and_then(|t| self.tweak_automation(t));
-        if label == ADD_LAST {
+        if entry == MenuEntry::Automation {
             let Some((tgt, name, v)) = create else {
                 return Some("No parameter tweaked yet: move a plugin control or a knob first".into());
             };
@@ -702,13 +703,13 @@ mod tests {
 
         // Last tweaked: nothing yet ("No parameter", disabled entries), then a plugin parameter; a second clip on it
         // gets a numbered name.
-        assert!(a.params_menu(ADD_LAST).is_some_and(|m| m.starts_with("No parameter")));
-        assert_eq!(a.params_menu(TOOLS_LAST), None);
+        assert!(a.params_menu(MenuEntry::Automation).is_some_and(|m| m.starts_with("No parameter")));
+        assert_eq!(a.params_menu(MenuEntry::Last), None);
         let menu = a.state.playlist.popup.take().unwrap();
         assert_eq!((menu.items[0].label.as_ref(), menu.items[0].head), ("No parameter", true));
         assert!(menu.items.iter().any(|i| i.label == "Create automation clip" && !i.enabled));
         a.state.params.note(Tweak::Plugin { key, index: 35 });
-        a.params_menu(ADD_LAST);
+        a.params_menu(MenuEntry::Automation);
         let last = a.state.project.channels.last().unwrap();
         assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Bus 2 - Main level #2"));
         // A plugin's own knob menu (host link): a clip on band 1 frequency.
@@ -717,7 +718,7 @@ mod tests {
         assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Bus 2 - Band 1 freq"));
         assert_eq!(a.state.project.automations.last().and_then(|x| x.target()), Some(target::slot_param(2, 1, 7)));
         a.note_host_tweak(&Action::Tempo);
-        assert_eq!(a.params_menu(TOOLS_NEXT), None);
+        assert_eq!(a.params_menu(MenuEntry::NextToLast), None);
         let menu = a.state.playlist.popup.take().unwrap();
         assert!(menu.items.iter().any(|i| matches!(&i.cmd, Cmd::CreateAutomation(t, _, _) if *t == tgt)));
     }
@@ -857,7 +858,7 @@ mod tests {
         a.note_host_tweak(&Action::Tempo);
         let (tgt, name, v) = a.automation_target(&Action::Tempo).unwrap();
         crate::playlist::run(&mut a, Cmd::CreateAutomation(tgt, name, v));
-        assert_eq!(a.params_menu(TOOLS_LAST), None);
+        assert_eq!(a.params_menu(MenuEntry::Last), None);
         let m = a.state.playlist.popup.take().unwrap();
         let tempo = a.state.project.channels.last().unwrap().index;
         assert_eq!(entry(&m, "Edit automation clip...").cmd, Cmd::Param(PCmd::EditClip(tempo)));
