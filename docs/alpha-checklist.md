@@ -32,7 +32,8 @@ twelve effects; these are the gaps a project made in FL Studio runs into most.
 
 - [ ] **Drum sampler (FPC).** A pad-based drum instrument
 - [ ] **Slicer (Slicex, Fruity Slicer).** A loop chopped into slices that the piano roll plays
-- [ ] **Filter effect (Fruity Filter, Fruity Love Philter)**
+- [x] **Filter effect (Fruity Filter, Fruity Love Philter).** Lemon Filter and Pulp Filter, each also playing the
+  original's slots in opened projects
 - [ ] **Flanger and phaser.** Lemon Chorus exists; the other modulation effects don't
 - [ ] **Vocoder (Vocodex)**
 - [ ] **Peak Controller.** Common for sidechain pumping in projects; nothing in the code handles it yet
