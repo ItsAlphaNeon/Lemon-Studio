@@ -1027,6 +1027,9 @@ pub struct State {
     /// Channel shown in the plugin window, and where that window is.
     pub plugin_channel: usize,
     pub plugin_pos: (f32, f32),
+    /// The plugin window was moved by hand: it reopens there instead of next to the rack (spec: ui/channel-rack.md
+    /// "Left click").
+    pub plugin_moved: bool,
     pub selected_channel: usize,
     pub selected_mixer: u16,
     pub pattern: u16,
@@ -1520,6 +1523,7 @@ impl App {
                 rack_roll_view: false,
                 plugin_channel: 0,
                 plugin_pos: (560.0, 260.0),
+                plugin_moved: false,
                 selected_channel: 0,
                 selected_mixer: 1,
                 mixer: Default::default(),
@@ -8690,7 +8694,10 @@ impl App {
                     return;
                 }
                 let pos = match win {
-                    Win::Plugin => s.plugin_pos,
+                    Win::Plugin => {
+                        s.plugin_moved = true;
+                        s.plugin_pos
+                    }
                     Win::Perf => s.perf.pos,
                     Win::Tapper => s.tapper.pos,
                     Win::Touch => s.touch.pos,
@@ -8830,7 +8837,7 @@ impl App {
             s.pending_open = Some(i);
             self.sampler_failed.retain(|&r| r != i);
         } else {
-            if !s.shown(Win::Plugin) {
+            if !s.shown(Win::Plugin) && !s.plugin_moved {
                 let r = views::rack::rect(s);
                 s.plugin_pos = ((r.right() + 8.0).min(1920.0 - 440.0), r.y.min(1080.0 - 210.0));
             }
@@ -12765,6 +12772,50 @@ mod tests {
         settle(&mut app, &|a| a.state.embeds.is_empty());
         assert!(app.plugins.hosted[&0].window.is_none(), "closed");
         assert_eq!(app.state.z.last(), Some(&Win::ChannelRack));
+    }
+
+    /// Closed and opened again, a plugin window drawn in the app's comes back where it was, and the channel window
+    /// where it was last moved (before it is moved, next to the rack; spec: ui/channel-rack.md "Left click").
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn windows_reopen_where_they_were() {
+        use crate::plugin_window::ChannelInfo;
+        use std::time::{Duration, Instant};
+        let Ok(mut c) = Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = App::new(None);
+        app.plugins.available = crate::plugins::builtin();
+        app.plugins.scale = 1.0;
+        frame(&mut app, &mut c, None);
+        let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
+        app.plugins.create_with(0, index, None).unwrap();
+        let open = |app: &mut App| {
+            let info = ChannelInfo { name: "Citrus".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+            app.plugins.open_window(0, info).unwrap();
+            let t0 = Instant::now();
+            while !app.state.embeds.contains_key(&0) && t0.elapsed() < Duration::from_secs(3) {
+                app.plugin_tick();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            app.plugin_tick();
+            app.state.embeds[&0].clone()
+        };
+        let e = open(&mut app);
+        e.set_pos((300.0, 220.0));
+        app.plugin_tick();
+        app.plugins.close_window(0);
+        app.plugin_tick();
+        let e = open(&mut app);
+        assert_eq!((e.rect().x, e.rect().y), (300.0, 220.0), "the plugin window reopens where it was");
+        // the channel window: next to the rack until moved, then where it was moved
+        app.add_clip_channel(ChannelKind::Automation);
+        let row = app.state.project.channels.len() - 1;
+        assert!(app.state.shown(Win::Plugin), "an automation clip's channel window opens");
+        let beside = app.state.plugin_pos;
+        app.state.hide(Win::Plugin);
+        app.state.plugin_moved = true;
+        app.state.plugin_pos = (beside.0 + 120.0, beside.1 + 40.0);
+        app.open_channel_window(row);
+        assert_eq!(app.state.plugin_pos, (beside.0 + 120.0, beside.1 + 40.0), "the channel window reopens where it was moved");
     }
 
     /// The Lemon layout: the close shortcut closes the channel rack in front too, before the app.

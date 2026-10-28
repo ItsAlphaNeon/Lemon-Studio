@@ -68,6 +68,9 @@ pub struct Hosted {
     /// Where its detached window was when it last closed (screen px): reopened, it goes back there (spec: as above).
     #[cfg(plugin_windows)]
     pub placed: Option<(i32, i32)>,
+    /// Linux: where its window drawn in the app's was when it last closed (canvas px): it reopens there.
+    #[cfg(target_os = "linux")]
+    pub embed_at: Option<(f32, f32)>,
     /// When its open window opened (`Plugins::opens`): the limit on open editors closes the earliest first.
     #[cfg(plugin_windows)]
     opened: u64,
@@ -111,6 +114,8 @@ impl Hosted {
             detached: false,
             #[cfg(plugin_windows)]
             placed: None,
+            #[cfg(target_os = "linux")]
+            embed_at: None,
             #[cfg(plugin_windows)]
             opened: 0,
         }
@@ -951,7 +956,7 @@ impl Plugins {
         // Linux a plugin compiled into Lemon Studio draws its editor in the app's own window (`EmbedFrame`).
         #[cfg(target_os = "linux")]
         let w = if embeds(&h.plugin) {
-            FrameWindow::embedded(info, (560.0, 437.0), scale, (0.0, 0.0))?
+            FrameWindow::embedded(info, (560.0, 437.0), scale, h.embed_at)?
         } else {
             FrameWindow::new(owner, info, (560.0, 437.0), scale, pos, h.detached)?
         };
@@ -1033,6 +1038,11 @@ impl Plugins {
             // and startup").
             if let Some(w) = &h.window {
                 h.detached = w.detached();
+                #[cfg(target_os = "linux")]
+                if let Some(e) = w.embed() {
+                    let r = e.rect();
+                    h.embed_at = Some((r.x, r.y));
+                }
                 #[cfg(windows)]
                 if h.detached {
                     h.placed = w.position().or(h.placed);

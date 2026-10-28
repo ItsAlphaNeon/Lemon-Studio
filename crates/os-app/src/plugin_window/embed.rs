@@ -154,8 +154,9 @@ impl Inner {
 }
 
 impl EmbedFrame {
-    /// A frame for an editor of `editor` (logical px) at canvas point `pos`, drawn at `scale`.
-    pub fn new(info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (f32, f32)) -> Result<EmbedFrame, String> {
+    /// A frame for an editor of `editor` (logical px) at canvas point `pos` (`None`: centred in the workspace), drawn at
+    /// `scale`.
+    pub fn new(info: ChannelInfo, editor: (f32, f32), scale: f32, pos: Option<(f32, f32)>) -> Result<EmbedFrame, String> {
         let k = if scale > 0.0 { scale } else { 1.0 };
         let st = State::new(info, editor, false);
         let size = ((editor.0 * k).round() as u32, (editor.1 * k).round() as u32);
@@ -165,7 +166,7 @@ impl EmbedFrame {
         let inner = Inner {
             st,
             surface,
-            pos,
+            pos: pos.unwrap_or((0.0, 0.0)),
             k,
             chrome,
             chrome_dirty: true,
@@ -175,7 +176,7 @@ impl EmbedFrame {
             last_press: None,
             work: Rect::new(0.0, 0.0, 0.0, 0.0),
             canvas_off: (0, 0),
-            placed: false,
+            placed: pos.is_some(),
             seen_size: None,
         };
         Ok(EmbedFrame(Rc::new(RefCell::new(inner))))
