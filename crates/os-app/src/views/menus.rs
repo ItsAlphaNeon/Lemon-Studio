@@ -340,14 +340,14 @@ const HELP: &[Item] = &[
 ];
 
 pub const MENUS: &[Menu] = &[
-    Menu { title: "File", cols: &[(216.0, FILE)] },
-    Menu { title: "Edit", cols: &[(121.0, EDIT)] },
-    Menu { title: "Insert", cols: &[(176.0, ADD_PLUGINS), (239.0, ADD_OTHER)] },
-    Menu { title: "Patterns", cols: &[(80.0, PAT_LIST), (243.0, PAT_CMDS)] },
-    Menu { title: "View", cols: &[(244.0, VIEW_ITEMS)] },
-    Menu { title: "Settings", cols: &[(217.0, OPTIONS)] },
-    Menu { title: "Tools", cols: &[(212.0, TOOLS_A), (247.0, TOOLS_B)] },
-    Menu { title: "Help", cols: &[(207.0, HELP)] },
+    Menu { title: "FILE", cols: &[(216.0, FILE)] },
+    Menu { title: "EDIT", cols: &[(121.0, EDIT)] },
+    Menu { title: "ADD", cols: &[(176.0, ADD_PLUGINS), (239.0, ADD_OTHER)] },
+    Menu { title: "PATTERNS", cols: &[(80.0, PAT_LIST), (243.0, PAT_CMDS)] },
+    Menu { title: "VIEW", cols: &[(244.0, VIEW_ITEMS)] },
+    Menu { title: "OPTIONS", cols: &[(217.0, OPTIONS)] },
+    Menu { title: "TOOLS", cols: &[(212.0, TOOLS_A), (247.0, TOOLS_B)] },
+    Menu { title: "HELP", cols: &[(207.0, HELP)] },
 ];
 
 /// Flat item `i` of `menu` (columns in order; the pattern list column has no items).
@@ -364,7 +364,7 @@ pub const BAR_FONT: Font = Font::condensed(18, 6);
 pub fn bar_layout(c: &mut os_ui::Canvas) -> [(f32, f32, f32); 8] {
     const START: f32 = 8.0;
     const END: f32 = 296.0;
-    const GAP: f32 = 6.0;
+    const GAP: f32 = 4.0;
     let mut out = [(0.0, 0.0, 6.0); 8];
     for width in [BAR_FONT.width, 5, 4] {
         let f = Font::condensed(BAR_FONT.size, width);
@@ -937,23 +937,32 @@ mod tests {
         assert_eq!(l(FILE_SAVE_VERSION), Some("Save new version"));
         assert_eq!(item_at(OPTIONS_MENU, OPT_INFO).map(|it| it.label), Some("Project info"));
         assert_eq!(item_at(HELP_MENU, HELP_ABOUT).map(|it| it.label), Some("About..."));
-        assert_eq!(MENUS[ADD_MENU].title, "Insert");
-        assert_eq!(MENUS[TOOLS_MENU].title, "Tools");
+        assert_eq!(MENUS[ADD_MENU].title, "ADD");
+        assert_eq!(MENUS[TOOLS_MENU].title, "TOOLS");
         assert_eq!(l(FILE_EXIT), Some("Exit"));
-        assert_eq!(MENUS[PATTERNS].title, "Patterns");
-        assert_eq!(MENUS[VIEW].title, "View");
-        assert_eq!(MENUS[OPTIONS_MENU].title, "Settings");
+        assert_eq!(MENUS[PATTERNS].title, "PATTERNS");
+        assert_eq!(MENUS[VIEW].title, "VIEW");
+        assert_eq!(MENUS[OPTIONS_MENU].title, "OPTIONS");
         assert_eq!(item_at(OPTIONS_MENU, OPT_THEME).map(|it| it.label), Some("Theme settings"));
     }
 
     /// The native menu bar (macOS) is the dropdowns: every entry in order, greyed out and ticked alike, choosing one
     /// doing what the dropdown's does, and the project's patterns in PATTERNS. Its ▸ entries stay greyed out (no native
     /// submenus yet).
+    /// The menu titles fit the panel in the menu font as it is, never condensed further (owner, 2026-10-27).
+    #[test]
+    fn bar_titles_keep_the_font() {
+        let Ok(mut c) = os_ui::Canvas::new(400, 100, 1.0) else { return };
+        let l = bar_layout(&mut c);
+        assert!(l.iter().all(|&(_, _, w)| w == f32::from(BAR_FONT.width)), "{l:?}");
+        assert!(l.windows(2).all(|p| p[1].0 - p[0].1 >= 4.0), "a gap between titles: {l:?}");
+    }
+
     #[test]
     fn bar_model_follows_the_dropdowns() {
         let mut app = crate::app::App::new(None);
         let bar = bar_model(&app.state);
-        assert_eq!(bar.iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), ["File", "Edit", "Insert", "Patterns", "View", "Settings", "Tools", "Help"]);
+        assert_eq!(bar.iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), ["File", "Edit", "Add", "Patterns", "View", "Options", "Tools", "Help"]);
         for (mi, m) in MENUS.iter().enumerate() {
             let items: Vec<&Item> = m.cols.iter().flat_map(|(_, items)| items.iter()).collect();
             let rows: Vec<&BarRow> = bar[mi].rows.iter().filter(|r| r.pick.is_none_or(|(_, i)| i < PATTERN_PICK)).collect();

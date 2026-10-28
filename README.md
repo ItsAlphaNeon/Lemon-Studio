@@ -56,8 +56,8 @@ own content. Side branches are named `cutting-edge-<topic>`.
   silent (Smart disable), A/B compare (spare state), Collapse / Expand (Zip), choke groups (cut groups), Mod A / Mod B
   (Mod X / Mod Y), Click removal (Declicking), Count-in (Recording precount), Tap tempo, Step parameters (Graph editor),
   MIDI capture and Retro audio capture (Score and Audio logger), Project clean-up (Macros), MIDI learn... (Link to
-  controller...), Enter value... (Type in value...) and plainer settings labels. The menu bar reads File, Edit, Insert,
-  Patterns, View, Settings, Tools, Help, spread over its panel. Every menu keeps its place and order.
+  controller...), Enter value... (Type in value...) and plainer settings labels. The menu bar's titles are spread evenly over
+  its panel. Every menu keeps its place and order.
 - **Plugin editors in the app's window (Linux).** The plugins compiled into Lemon Studio (the stock instruments and
   effects) draw their editors inside Lemon Studio's own window, as floating windows like the instrument rack: no X11
   window, no XWayland, no OpenGL. Their menus and value boxes are drawn above the app; knob drags hold the cursor as the

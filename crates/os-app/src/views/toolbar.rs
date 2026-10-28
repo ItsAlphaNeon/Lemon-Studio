@@ -493,10 +493,13 @@ fn time(ui: &mut Ui, c: &Ctx) {
         let lit = t.brand_sel(brand::HIGHLIGHT);
         let (ink, dim) = (t.text, t.text.mix(t.time_panel, 0.5));
         let pulse = if f.playing && !f.paused { 1.0 - (f.tick / ppq).fract() as f32 } else { 0.0 };
+        // Each dot sits on its digits' baseline, centred in the gap between them, as a full stop would.
+        let (base, small_base) = (a.y(-3.0) + ui.c.ascent(big), a.y(9.0) + ui.c.ascent(small));
+        let (r1, r2) = (1.7, 1.4);
         ui.c.text(big, bar_x, a.y(-3.0), lit, &bar_s);
-        ui.c.fill_circle(step_x - 4.5, a.y(25.5), 1.6 + 0.6 * pulse, dim.mix(lit, pulse));
+        ui.c.fill_circle((bar_x + bw + step_x) / 2.0, base - r1 - 0.5, r1 + 0.5 * pulse, dim.mix(lit, pulse));
         ui.c.text(big, step_x, a.y(-3.0), ink, &step_s);
-        ui.c.fill_circle(tick_x - 4.0, a.y(25.5), 1.3, dim);
+        ui.c.fill_circle((step_x + sw + tick_x) / 2.0, small_base - r2 - 0.5, r2, dim);
         ui.c.text(small, tick_x, a.y(9.0), dim, &tick_s);
     } else {
         ui.c.text(big, bar_x, a.y(-3.0), g, &bar_s);
