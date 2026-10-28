@@ -395,7 +395,35 @@ impl Bar {
         let travel = self.len() - self.thumb;
         if travel > 0.0 { self.max / travel } else { 0.0 }
     }
+
+    /// Where the thumb starts along the track at scroll `pos`.
+    fn thumb_at(&self, pos: f32) -> f32 {
+        if self.max > 0.0 { pos / self.max * (self.len() - self.thumb) } else { 0.0 }
+    }
+
+    /// The thumb end under `along` (pixels along the track) on a bar whose thumb ends zoom (spec: ui/scroll-bars.md
+    /// §4): Some(true) = the right end. The grab zone reaches `BAR_EDGE_PX` outside the end and up to that far inside,
+    /// leaving at least half a small thumb to scroll by.
+    fn edge_at(&self, pos: f32, along: f32) -> Option<bool> {
+        if !matches!(self.target, Scroll::PlaylistX | Scroll::PianoX) {
+            return None;
+        }
+        let (a, b) = (self.thumb_at(pos), self.thumb_at(pos) + self.thumb);
+        let inner = BAR_EDGE_PX.min(self.thumb / 4.0);
+        if (a - BAR_EDGE_PX..a + inner).contains(&along) {
+            Some(false)
+        } else if (b - inner..=b + BAR_EDGE_PX).contains(&along) {
+            Some(true)
+        } else {
+            None
+        }
+    }
 }
+
+/// Grab zone at each end of a zooming scroll bar's thumb, in pixels (spec: ui/scroll-bars.md §4).
+const BAR_EDGE_PX: f32 = 4.0;
+/// Hint over a zooming thumb end.
+const BAR_EDGE_HINT: &str = "Drag to zoom - the other end stays put";
 
 /// What needs repainting before the next present.
 #[derive(Clone, PartialEq)]
@@ -913,6 +941,10 @@ pub enum Drag {
     /// Right-drag on a horizontal scroll bar: horizontal mouse movement scrolls the bar, vertical movement
     /// zooms its axis around the view centre (up = zoom in).
     BarZoom { t: Scroll, m0: (f32, f32), p0: f32, ratio: f32, z0: f32, center: f32, view: f32 },
+    /// Left-drag on an end of the Playlist's or Piano roll's horizontal thumb (spec: ui/scroll-bars.md §4): the end
+    /// follows the mouse while the other end stays on the same time, so the view zooms. `fixed` = the other end and `units` = the
+    /// whole bar, both in content pixels at zoom 1; `grab` = where the mouse held the end, relative to it.
+    BarEdge { t: Scroll, right: bool, fixed: f32, units: f32, grab: f32 },
     /// Right-drag on a vertical scroll bar: vertical movement scrolls (as in FL), horizontal movement resizes the
     /// rows around the view centre where the bar has rows (right = taller). `last` = mouse at the previous move,
     /// `row` = unrounded row height so slow drags still add up (None: the bar only scrolls). Spec: ui/scroll-bars.md.
@@ -2730,7 +2762,7 @@ impl App {
                     }
                     // A native Wayland main window (Linux): the popups cannot be lifted above a plugin window there.
                     #[cfg(not(windows))]
-                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) if self.plugins.owner == 0 => {
+                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) | Request::KnobMenu(..) if self.plugins.owner == 0 => {
                         self.state.message = Some(off_text(PLUGIN_POPUPS));
                         self.invalidate();
                         continue;
@@ -2801,6 +2833,18 @@ impl App {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(crate::misc::menu(self, row, m, lx, ly));
+                        self.popup_lift = detached.then_some(row);
+                        self.invalidate();
+                        continue;
+                    }
+                    Request::KnobMenu(row, c, x, y) => {
+                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let (lx, ly) = self.screen_to_canvas(x, y);
+                        self.state.playlist.popup = Some(match c {
+                            // The channel's volume and pan: the rack's knob menu (spec: ui/channel-rack.md §19).
+                            crate::knobs::Control::Knob(k) => crate::rack::knob_menu(&self.state, k, self.automation_target(&Action::Knob(k)), lx, ly),
+                            c => crate::knobs::reset_menu(c, lx, ly),
+                        });
                         self.popup_lift = detached.then_some(row);
                         self.invalidate();
                         continue;
@@ -3342,7 +3386,7 @@ impl App {
     fn auto_scroll(&mut self) {
         let set = crate::autoscroll::get();
         let now = &self.shown;
-        if !set.on || !now.playing || now.paused || matches!(self.drag, Some(Drag::Scroll { .. } | Drag::BarZoom { .. } | Drag::BarRows { .. })) {
+        if !set.on || !now.playing || now.paused || matches!(self.drag, Some(Drag::Scroll { .. } | Drag::BarZoom { .. } | Drag::BarEdge { .. } | Drag::BarRows { .. })) {
             return;
         }
         let tick = now.tick as f32;
@@ -5375,6 +5419,21 @@ impl App {
                     let _ = p0;
                     self.damage_scroll(t);
                 }
+                Drag::BarEdge { t, right, fixed, units, grab } => {
+                    if let Some(b) = self.bar(t) {
+                        let along = if b.vertical { y - b.track.y } else { x - b.track.x };
+                        let at = ((along - grab) / b.len() * units).clamp(0.0, units);
+                        let span = if right { at - fixed } else { fixed - at };
+                        self.zoom_set(t, b.view / span.max(f32::MIN_POSITIVE));
+                        let z = self.zoom_get(t).unwrap_or(1.0);
+                        // The scroll range at the new zoom: the bar itself is only repainted with it next frame.
+                        if let Some(bar) = self.bars.iter_mut().find(|bar| bar.target == t) {
+                            bar.max = (units * z - bar.view).max(0.0);
+                        }
+                        self.scroll_set(t, if right { fixed * z } else { fixed * z - b.view });
+                        self.damage_scroll(t);
+                    }
+                }
                 Drag::BarRows { t, last, row } => {
                     // The picker's bar resizes its previews either way, down / right = taller, as FL's resizes them
                     // (spec: ui/scroll-bars.md §3); the others scroll up/down.
@@ -5754,6 +5813,14 @@ impl App {
             && rect.is_some_and(|r| x >= r.right() - resize_zone(r.w));
         // Playlist: the clip under the mouse (automation clips show their points) and the resize cursor on clip edges.
         let mut resize = resize;
+        // The ends of the Playlist's and Piano roll's horizontal thumbs zoom (spec: ui/scroll-bars.md §4).
+        if let Some(b) = hover.as_ref().and_then(|a| if let Action::Scrollbar(t) = a { self.bar(*t) } else { None }) {
+            let along = if b.vertical { y - b.track.y } else { x - b.track.x };
+            if b.edge_at(self.scroll_get(b.target), along).is_some() {
+                resize = true;
+                hint = Cow::Borrowed(BAR_EDGE_HINT);
+            }
+        }
         if hover == Some(Action::PlaylistArea) {
             if let Some(g) = self.pl_grid {
                 let s = &self.state;
@@ -6438,15 +6505,26 @@ impl App {
         }
     }
 
-    /// Press on a scroll bar. Left: a press off the thumb first centres the thumb on the mouse,
-    /// then dragging scrolls. Right: the cursor is held; on a horizontal bar sideways scrolls and up/down zooms,
+    /// Press on a scroll bar. Left: a press on an end of a horizontal thumb that zooms drags that end; a press
+    /// off the thumb first centres the thumb on the mouse, then dragging scrolls. Right: the cursor is held; on a horizontal bar sideways scrolls and up/down zooms,
     /// on a vertical bar up/down scrolls and sideways resizes the rows (spec: ui/scroll-bars.md).
     fn scrollbar_press(&mut self, t: Scroll, right: bool) {
         let Some(b) = self.bar(t) else { return };
         let (x, y) = self.mouse;
         let along = if b.vertical { y - b.track.y } else { x - b.track.x };
         let pos = self.scroll_get(t);
-        let thumb0 = if b.max > 0.0 { pos / b.max * (b.len() - b.thumb) } else { 0.0 };
+        let thumb0 = b.thumb_at(pos);
+        if let (false, Some(end), Some(z)) = (right, b.edge_at(pos, along), self.zoom_get(t)) {
+            let (units, start, stop) = ((b.max + b.view) / z, pos / z, (pos + b.view) / z);
+            let (fixed, moved) = if end { (start, stop) } else { (stop, start) };
+            // Measured from the end's time rather than the drawn thumb, so the press itself does not zoom.
+            let grab = along - moved / units * b.len();
+            if t == Scroll::PianoX {
+                self.state.piano.bar_span = Some(units * f32::from(self.state.project.ppq.max(4)));
+            }
+            self.drag = Some(Drag::BarEdge { t, right: end, fixed, units, grab });
+            return self.invalidate();
+        }
         if !right && (along < thumb0 || along > thumb0 + b.thumb) {
             self.scroll_set(t, (along - b.thumb / 2.0) * b.ratio());
         }
@@ -6488,15 +6566,9 @@ impl App {
                 return;
             }
         }
-        if let Some(Action::Settings(views::settings::SAct::ThemeKnob(i))) = action {
-            return self.theme_knob_reset(usize::from(i));
-        }
-        if let Some(Action::Knob(id)) = action {
-            crate::history::knob(&mut self.state, id, false);
-            self.state.set_knob(id, id.default_value());
-            self.hint = Cow::Owned(self.state.knob_text(id));
-            self.invalidate();
-            return;
+        // Knobs, faders and sliders go back to their default (spec: ui/knobs.md "Owner decisions").
+        if let Some(c) = action.as_ref().and_then(crate::knobs::Control::of) {
+            return self.reset_control(c);
         }
         if self.ctrl && matches!(action, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoKeys)) {
             self.drag = Some(Drag::PianoRowZoom { y0: y, row0: self.state.piano.row_h });
@@ -6543,6 +6615,13 @@ impl App {
         // Pattern selector (spec: ui/pattern-menu.md §1): box = menu at the mouse, "+" = find next empty.
         match &action {
             Some(Action::Settings(views::settings::SAct::Preset(i))) => return self.theme_menu(*i, x, y),
+            // The settings window's sliders and theme knobs: their default is all the menu offers.
+            Some(a @ Action::Settings(views::settings::SAct::Slider(..) | views::settings::SAct::ThemeKnob(_))) => {
+                if let Some(c) = crate::knobs::Control::of(a) {
+                    self.state.playlist.popup = Some(crate::knobs::reset_menu(c, x, y));
+                }
+                return self.invalidate();
+            }
             // Settings > MIDI's Port and offset boxes: right-click resets (spec: ui/midi-settings.md §1).
             Some(Action::Settings(views::settings::SAct::Midi(m))) if m.is_value() => return self.midi_page_reset(*m),
             Some(Action::PatternNext) => {
@@ -6793,6 +6872,7 @@ impl App {
             }
             Some(Drag::SongRuler) => self.song_pos_release(),
             Some(Drag::Touch) => self.touch_hold(None),
+            Some(Drag::BarEdge { .. }) => self.state.piano.bar_span = None,
             Some(Drag::ThemeKnob { .. } | Drag::PickSv(_) | Drag::PickHue(_)) => self.theme_store(),
             _ => {}
         }
@@ -7393,6 +7473,27 @@ impl App {
             self.record_knob(id);
             self.multilink_knob(crate::typein::Target::Knob(id));
             self.hint = Cow::Owned(self.state.knob_text(id));
+            return None;
+        }
+        // The wheel over a mixer fader moves it, not the mixer's scroll (spec: ui/mixer.md §4).
+        if let Some(Action::Fader(t)) = area
+            && dy != 0.0
+        {
+            let s = &mut self.state;
+            let v0 = crate::mixer::track(s, t).map(|m| m.volume.unwrap_or(0.8))?;
+            let v = (v0 + f64::from(dy.signum()) * views::mixer::FADER_NOTCH).clamp(0.0, 1.0);
+            if v != v0 {
+                // One step for a run of notches on the fader (none with Undo knob tweaks off: a fader is a knob here).
+                if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) && !s.history.joins(crate::history::Run::Fader(t)) {
+                    crate::control::edit_press(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t));
+                    s.history.set_run(crate::history::Run::Fader(t));
+                }
+                if let Some(m) = crate::mixer::track_mut(s, t) {
+                    m.volume = Some(v);
+                }
+                s.piano.dirty = true;
+            }
+            self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
             return None;
         }
         // The wheel over a mixer effect slot moves its effect up or down the track's chain (spec: ui/mixer.md §7).
@@ -11435,6 +11536,106 @@ mod tests {
         assert!(app.state.project.mixer.iter().find(|m| m.index == 1).unwrap().pan.unwrap() > 0.0, "mixer pan written to the model");
     }
 
+    /// The wheel over a mixer fader moves it instead of scrolling the mixer: three notches up from unity read
+    /// `103%  0.8dB  1.09`, and a run of notches is one undo step (spec: ui/mixer.md §4).
+    #[test]
+    fn wheel_moves_a_mixer_fader() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut c, None);
+        let vol = |app: &App| crate::mixer::track(&app.state, 1).unwrap().volume.unwrap();
+        assert_eq!(vol(&app), 0.8);
+        let r = hit_rect(&app, &Action::Fader(1));
+        app.mouse_move(r.cx(), r.cy());
+        let scroll = app.state.mixer_scroll;
+        for _ in 0..3 {
+            app.wheel(0.0, 1.0, false, false);
+        }
+        assert_eq!(app.hint, "Volume: 103%  0.8dB  1.09");
+        assert_eq!(app.state.mixer_scroll, scroll, "the mixer does not scroll");
+        assert!(crate::history::undo(&mut app.state).is_some());
+        assert_eq!(vol(&app), 0.8, "one undo step for the three notches");
+        for _ in 0..200 {
+            app.wheel(0.0, -1.0, false, false);
+        }
+        assert_eq!(vol(&app), 0.0, "stops at the bottom");
+    }
+
+    /// Every knob and fader the main window draws (toolbar, mixer, its equaliser and sends, channel rack) goes back to
+    /// its default with a middle click and with Reset, the first entry of its right-click menu (spec: ui/knobs.md,
+    /// ui/mixer.md §6.3, ui/channel-rack.md §19).
+    #[test]
+    fn every_knob_and_fader_resets() {
+        use crate::knobs::{Control, KnobId};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
+        app.state.z = vec![Win::ChannelRack, Win::Mixer];
+        frame(&mut app, &mut c, None);
+        let value = |app: &App, c: Control| match c {
+            Control::Knob(id) => app.state.knob(id),
+            Control::Fader(t) => crate::mixer::track(&app.state, t).and_then(|m| m.volume).unwrap_or(0.8) as f32,
+            _ => unreachable!(),
+        };
+        let default = |c: Control| match c {
+            Control::Knob(id) => id.default_value(),
+            _ => 0.8,
+        };
+        // Away from the default, by a step the stored value can hold.
+        let disturb = |app: &mut App, c: Control| {
+            let v = if default(c) < 0.5 { 0.875 } else { 0.125 };
+            match c {
+                Control::Knob(id) => app.state.set_knob(id, v),
+                Control::Fader(t) => crate::mixer::track_mut(&mut app.state, t).unwrap().volume = Some(f64::from(v)),
+                _ => unreachable!(),
+            }
+            assert!((value(app, c) - default(c)).abs() > 0.1, "{c:?} moved");
+        };
+        // The controls the mouse can reach (not under another window), once each.
+        let mut seen = Vec::new();
+        let controls: Vec<(Control, f32, f32)> = app
+            .hits
+            .iter()
+            .filter_map(|h| Some((Control::of(&h.action)?, h.rect.cx(), h.rect.cy())))
+            .filter(|&(c, x, y)| app.top_hit(x, y).and_then(|h| Control::of(&h.action)) == Some(c))
+            .filter(|&(c, ..)| !seen.contains(&c) && {
+                seen.push(c);
+                true
+            })
+            .collect();
+        for want in [
+            Control::Knob(KnobId::MasterVol),
+            Control::Knob(KnobId::MasterPitch),
+            Control::Knob(KnobId::Swing),
+            Control::Knob(KnobId::ChanVol(0)),
+            Control::Knob(KnobId::ChanPan(0)),
+            Control::Knob(KnobId::MixPan(1)),
+            Control::Fader(1),
+        ] {
+            assert!(seen.contains(&want), "{want:?} is drawn");
+        }
+        assert!(seen.iter().any(|c| matches!(c, Control::Knob(KnobId::Eq(..)))), "the equaliser's knobs are drawn");
+        for (ctl, x, y) in controls {
+            app.mouse_move(x, y);
+            disturb(&mut app, ctl);
+            app.mouse_down_middle();
+            app.mouse_up();
+            assert!((value(&app, ctl) - default(ctl)).abs() < 1e-4, "middle click resets {ctl:?}");
+            disturb(&mut app, ctl);
+            app.mouse_down_right();
+            app.mouse_up();
+            let menu = app.state.playlist.popup.clone().unwrap_or_else(|| panic!("{ctl:?} has a menu"));
+            assert_eq!(menu.items[0].label, "Reset", "{ctl:?}");
+            app.act(Action::PlPopup(0));
+            assert!((value(&app, ctl) - default(ctl)).abs() < 1e-4, "Reset resets {ctl:?}");
+            assert!(app.state.playlist.popup.is_none());
+            frame(&mut app, &mut c, None);
+        }
+    }
+
     /// Holding the mouse on a toolbar window button lights it orange; releasing restores it.
     #[test]
     fn pressed_button_look() {
@@ -12063,6 +12264,89 @@ mod tests {
             let _ = b.pixmap.save_png(std::env::temp_dir().join("os_full.png"));
         }
         assert_eq!(n, 0, "{what}: differing pixels in x {}..{} y {}..{}", bbox.0, bbox.2, bbox.1, bbox.3);
+    }
+
+    /// The ends of the Playlist's and Piano roll's horizontal thumbs zoom (spec: ui/scroll-bars.md §4): the dragged end
+    /// follows the mouse, the other end keeps its time, and the ends show the resize cursor.
+    #[test]
+    fn bar_ends_zoom() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let t = Scroll::PlaylistX;
+        let ends = |app: &App, t: Scroll| {
+            let b = app.bar(t).unwrap();
+            let a = b.track.x + b.thumb_at(app.scroll_get(t));
+            (a, a + b.thumb)
+        };
+        // Right end: dragged right it zooms out; the left end stays at the start.
+        let (a0, b0) = ends(&app, t);
+        let (cy, z0) = (app.bar(t).unwrap().track.cy(), app.state.playlist_bar_w);
+        app.mouse_move((a0 + b0) / 2.0, cy);
+        assert_eq!(app.cursor(), Cursor::Default, "the middle of the thumb scrolls");
+        app.mouse_move(b0 - 1.0, cy);
+        assert_eq!(app.cursor(), Cursor::EwResize);
+        assert_eq!(app.hint, BAR_EDGE_HINT);
+        app.mouse_down();
+        app.mouse_move(b0 + 59.0, cy);
+        assert_eq!(app.cursor(), Cursor::EwResize, "kept while dragging");
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        let (a1, b1) = ends(&app, t);
+        assert!(app.state.playlist_bar_w < z0, "zoomed out: {} -> {}", z0, app.state.playlist_bar_w);
+        assert_eq!(app.scroll_get(t), 0.0);
+        assert!((a1 - a0).abs() < 0.5 && (b1 - (b0 + 60.0)).abs() < 1.0, "{a0}..{b0} -> {a1}..{b1}");
+        // Left end, scrolled to the middle: dragged right it zooms in; the right end keeps its time.
+        let b = app.bar(t).unwrap();
+        app.scroll_set(t, b.max / 2.0);
+        frame(&mut app, &mut c, None);
+        let (z1, (a2, b2)) = (app.state.playlist_bar_w, ends(&app, t));
+        let stop = (app.scroll_get(t) + b.view) / z1;
+        app.mouse_move(a2 + 1.0, cy);
+        app.mouse_down();
+        app.mouse_move(a2 + 41.0, cy);
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        let z2 = app.state.playlist_bar_w;
+        let (a3, b3) = ends(&app, t);
+        assert!(z2 > z1, "zoomed in: {z1} -> {z2}");
+        assert!(((app.scroll_get(t) + b.view) / z2 - stop).abs() < 0.01, "the right end keeps its time");
+        assert!((a3 - (a2 + 40.0)).abs() < 1.0 && (b3 - b2).abs() < 1.0, "{a2}..{b2} -> {a3}..{b3}");
+        // The Piano roll's bar: while an end is dragged it keeps its length, so the end follows the mouse (with the
+        // pattern inside the view the thumb is two thirds of the bar again after the release).
+        app.state.z = vec![Win::PianoRoll];
+        frame(&mut app, &mut c, None);
+        let t = Scroll::PianoX;
+        let (a4, b4) = ends(&app, t);
+        let cy = app.bar(t).unwrap().track.cy();
+        let z4 = app.state.piano.px_per_beat;
+        app.mouse_move(b4 - 1.0, cy);
+        assert_eq!(app.cursor(), Cursor::EwResize);
+        app.mouse_down();
+        app.mouse_move(b4 - 41.0, cy);
+        frame(&mut app, &mut c, None);
+        let (a5, b5) = ends(&app, t);
+        assert!((a5 - a4).abs() < 0.5 && (b5 - (b4 - 40.0)).abs() < 1.0, "{a4}..{b4} -> {a5}..{b5}");
+        app.mouse_up();
+        assert_eq!(app.state.piano.bar_span, None);
+        frame(&mut app, &mut c, None);
+        assert!(app.state.piano.px_per_beat > z4, "zoomed in: {z4} -> {}", app.state.piano.px_per_beat);
+        assert_eq!(app.scroll_get(t), 0.0, "the start stays");
+        // Its left end, scrolled in: the end of the view keeps its time.
+        let b = app.bar(t).unwrap();
+        app.scroll_set(t, b.max / 2.0);
+        frame(&mut app, &mut c, None);
+        let ppb = |app: &App| app.state.piano.px_per_beat;
+        let (z6, (a6, _)) = (ppb(&app), ends(&app, t));
+        let stop = (app.scroll_get(t) + b.view) / z6;
+        app.mouse_move(a6 + 1.0, cy);
+        app.mouse_down();
+        app.mouse_move(a6 - 29.0, cy);
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        assert!(ppb(&app) < z6, "zoomed out: {z6} -> {}", ppb(&app));
+        assert!(((app.scroll_get(t) + b.view) / ppb(&app) - stop).abs() < 0.01, "the right end keeps its time");
     }
 
     /// Scroll bars: left-drag scrolls one axis, right-drag both (piano roll), middle-drag grabs.

@@ -20,6 +20,9 @@ use crate::icons::{self, Icon};
 pub const STRIP_W: f32 = 44.0;
 /// Fader travel: value units per pixel (handle centre 618 at 0 dB = value 0.8, 970 at value 0).
 pub const FADER_PER_PX: f64 = 1.0 / 440.0;
+/// Fader change per wheel notch: 4 px of drag. Fitted to the one measurement (spec: ui/mixer.md §4): three notches up
+/// from unity read `103%  0.8dB  1.09`, which puts a notch between 0.0088 and 0.0092.
+pub const FADER_NOTCH: f64 = 4.0 * FADER_PER_PX;
 
 // Vertical layout at the default 1080p window (spec §7): absolute y for a window top of 83;
 // bottom-anchored values are offsets from the window bottom.

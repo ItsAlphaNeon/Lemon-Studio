@@ -1383,6 +1383,19 @@ main_gui_scaling = 200%
         app.invalidate();
         app.paint(&mut c, None);
         assert_ne!(shot(&c), at0, "the handle moved");
+        // A middle click, and Reset in the right-click menu, put a slider back to its default.
+        let (r, _, _) = track(&app, &VERTICAL_SCROLLING_SPEED);
+        app.mouse_move(r.cx(), r.cy());
+        set_slider(&VERTICAL_SCROLLING_SPEED, 32);
+        app.mouse_down_middle();
+        assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), VERTICAL_SCROLLING_SPEED.default, "middle click");
+        set_slider(&VERTICAL_SCROLLING_SPEED, 32);
+        app.mouse_down_right();
+        app.mouse_up();
+        let menu = app.state.playlist.popup.clone().expect("the slider's menu");
+        assert_eq!(menu.items.iter().map(|i| i.label.to_string()).collect::<Vec<_>>(), ["Reset"]);
+        app.act(Action::PlPopup(0));
+        assert_eq!(slider(&VERTICAL_SCROLLING_SPEED), VERTICAL_SCROLLING_SPEED.default, "Reset");
         set_slider(&VERTICAL_SCROLLING_SPEED, 256);
         set_slider(&HORIZONTAL_SCROLLING_SPEED, 256);
     }

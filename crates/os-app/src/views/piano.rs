@@ -395,7 +395,7 @@ fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Op
     // pattern or the current view).
     let view = l.grid.w / g.ppt;
     let len = piano::pattern_length(s, s.pattern) as f32;
-    let span = len.max(g.scroll_x + view) + view / 2.0;
+    let span = s.piano.bar_span.unwrap_or(len.max(g.scroll_x + view) + view / 2.0);
     // Scroll arrows at both ends (§1a); the bar runs between them (small scroll bars: no arrows).
     let arrow = if super::small_scrollbars() { 0.0 } else { 19.0 };
     if arrow > 0.0 {

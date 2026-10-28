@@ -176,10 +176,14 @@ pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
     app.invalidate();
 }
 
-/// The list menu of a Misc value (chord list, number boxes) at canvas point (x, y); the current value is ticked.
+/// The list menu of a Misc value (chord list, number boxes) at canvas point (x, y); the current value is ticked. A knob or
+/// slider's menu is "Reset" (spec: ui/knobs.md "Owner decisions").
 #[cfg(plugin_windows)]
 pub fn menu(app: &crate::app::App, row: usize, m: M, x: f32, y: f32) -> crate::playlist::Popup {
     use crate::playlist::{Cmd, Mark, PItem, Popup};
+    if mp::draggable(m) && !mp::list_on_right(m) {
+        return Popup { x, y, items: vec![PItem::new("Reset", Cmd::Misc(row, m, mp::default_of(m)))], sub: None, scroll: [0; 2] };
+    }
     let cur = app.state.project.channels.get(row).map_or(mp::default_of(m), |ch| get(&ch.misc, m));
     let items = mp::list_entries(m)
         .into_iter()
@@ -191,6 +195,22 @@ pub fn menu(app: &crate::app::App, row: usize, m: M, x: f32, y: f32) -> crate::p
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Misc knob's or slider's right-click menu is Reset, to the page's default; a list keeps its values.
+    #[cfg(plugin_windows)]
+    #[test]
+    fn knob_and_slider_menus_reset() {
+        use crate::playlist::Cmd;
+        let mut app = crate::app::App::new(None);
+        app.state.project = crate::app::test_project();
+        for m in [M::LevelPan, M::TimeGate, M::VolMid, M::Fine] {
+            let menu = menu(&app, 0, m, 0.0, 0.0);
+            assert_eq!(menu.items.len(), 1, "{m:?}");
+            assert_eq!((menu.items[0].label.as_ref(), &menu.items[0].cmd), ("Reset", &Cmd::Misc(0, m, mp::default_of(m))), "{m:?}");
+        }
+        assert!(menu(&app, 0, M::PolyMax, 0.0, 0.0).items.len() > 1, "a number box's list");
+        assert!(menu(&app, 0, M::ArpChord, 0.0, 0.0).items.len() > 1, "the chord list");
+    }
 
     #[test]
     fn every_value_round_trips_through_the_model() {

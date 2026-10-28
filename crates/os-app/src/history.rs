@@ -339,6 +339,8 @@ pub struct History {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Run {
     Wheel(KnobId),
+    /// Mouse-wheel notches on mixer track `.0`'s volume fader.
+    Fader(u16),
     Tap,
     /// Mouse-wheel notches on Settings > Project's time boxes.
     Bar,
