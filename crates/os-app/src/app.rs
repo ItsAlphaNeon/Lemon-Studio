@@ -234,7 +234,7 @@ pub enum Action {
     /// Step / piano-roll view toggle, and a row's mini piano roll (spec: ui/channel-rack.md §6).
     RackRollView,
     RackRoll(usize),
-    /// The Lemon layout's split views (`crate::tiles`): a gap between snapped windows (drags split `node`), and the
+    /// The tiling layout's split views (`crate::tiles`): a gap between snapped windows (drags split `node`), and the
     /// status bar's button for the next preset.
     TileSplit(usize),
     TilePreset,
@@ -261,7 +261,7 @@ pub enum Action {
     BrowserSearch,
     /// The splitter right of the browser: drag to resize it, double-click for the default width (§9).
     BrowserSplitter,
-    /// The Lemon layout: the browser's title bar (drag it to the window's other side).
+    /// The tiling layout: the browser's title bar (drag it to the window's other side).
     BrowserMove,
     PlaylistArea,
     MixerArea,
@@ -742,7 +742,7 @@ pub struct Ui<'a> {
     live: &'a mut Vec<(Live, Rect)>,
     /// Square toolbar buttons are drawn flat (the Toolbars menu, spec: ui/toolbar-menu.md §3).
     pub flat: bool,
-    /// The Lemon layout's split views (`State::tiled`): window title bars have no minimize button, and their maximize
+    /// The tiling layout's split views (`State::tiled`): window title bars have no minimize button, and their maximize
     /// button shows which way it goes (`maxed`: the playlist, mixer and piano roll maximized); a window `alone` has
     /// none.
     pub tiled: bool,
@@ -897,9 +897,9 @@ pub enum Drag {
     PianoSplit { dy: f32, top: f32, h: f32 },
     /// The browser's splitter: `dx` = grab offset from the browser's right edge (spec: ui/browser.md §9).
     BrowserSplit { dx: f32 },
-    /// The Lemon layout: the browser's title bar, to the other side.
+    /// The tiling layout: the browser's title bar, to the other side.
     BrowserMove,
-    /// The Lemon layout: a snapped window's title bar (dropped on another, they swap), and a split's gap.
+    /// The tiling layout: a snapped window's title bar (dropped on another, they swap), and a split's gap.
     Tile { win: Win },
     TileSplit { node: usize },
     /// Monitor debug panel slider.
@@ -1080,7 +1080,7 @@ pub struct State {
     /// Width of the docked browser incl. its splitter, as dragged (`views::browser_w` keeps it in range), kept between
     /// runs, and the last press on the splitter, for its double click (spec: ui/browser.md §9).
     pub browser_w: f32,
-    /// The Lemon layout: the browser docked right of the workspace (`views::browser_right`).
+    /// The tiling layout: the browser docked right of the workspace (`views::browser_right`).
     pub browser_right: bool,
     pub browser_split_click: Option<std::time::Instant>,
     /// The hovered row whose label is scrolling, as last painted (spec: ui/browser.md §9).
@@ -1116,7 +1116,7 @@ pub struct State {
     pub control: crate::control::Control,
     /// The main toolbar's snap, which the editors' Main follows (spec: ui/global-snap.md).
     pub global_snap: crate::snap::Global,
-    /// The Lemon layout's split views (`crate::tiles`), and their animation under way.
+    /// The tiling layout's split views (`crate::tiles`), and their animation under way.
     pub tiles: crate::tiles::Tiles,
     pub tile_anim: Option<crate::tiles::Anim>,
     /// How muted each split window is now, 0 to 1, by `Win::slot` (`tiles::veil_target`; `App::veils_tick` fades it).
@@ -1126,7 +1126,7 @@ pub struct State {
     #[cfg(target_os = "linux")]
     pub embeds: std::collections::BTreeMap<usize, crate::plugin_window::EmbedFrame>,
     /// Each layout's windows while the other is in use (classic, Lemon): the playlist, mixer and piano roll's states
-    /// and the ones open, back to front (`App::set_lemon_layout`).
+    /// and the ones open, back to front (`App::set_tiling_layout`).
     pub layout_wins: [Option<([WinState; 3], Vec<Win>)>; 2],
     pub pat_ui: crate::patterns::PatternUi,
     /// Playlist, Mixer, Piano roll (see `Win::slot`).
@@ -1164,13 +1164,13 @@ impl State {
         w.slot().is_some_and(|i| self.wins[i].maxed && (!self.wins[i].mini || self.tiled()))
     }
 
-    /// The Lemon layout: the playlist, piano roll and mixer are maximized or snapped into a split, never floating or
+    /// The tiling layout: the playlist, piano roll and mixer are maximized or snapped into a split, never floating or
     /// collapsed (`crate::tiles`).
     pub fn tiled(&self) -> bool {
-        self.bar.lemon
+        self.bar.tiling
     }
 
-    /// Whether `w` is shown snapped into the split (the Lemon layout, not maximized).
+    /// Whether `w` is shown snapped into the split (the tiling layout, not maximized).
     pub fn snapped(&self, w: Win) -> bool {
         self.tiled() && w.slot().is_some_and(|i| !self.wins[i].maxed) && self.shown(w)
     }
@@ -1180,7 +1180,7 @@ impl State {
         self.z.iter().rev().copied().find(|&w| self.is_max(w))
     }
 
-    /// The workspace: right of the browser, below the toolbar. The Lemon layout makes it a card: a gap all round, the
+    /// The workspace: right of the browser, below the toolbar. The tiling layout makes it a card: a gap all round, the
     /// status bar below (`views::GUTTER`, `views::status_h`).
     pub fn work_rect(&self) -> Rect {
         let right = self.show_browser && views::browser_right(self);
@@ -1188,7 +1188,7 @@ impl State {
         let top = views::work_y(self);
         let w = self.screen.0 - left - if right { views::browser_w(self) } else { 0.0 };
         let r = Rect::new(left, top, w.max(0.0), (self.screen.1 - top - views::status_h(self)).max(0.0));
-        if self.bar.lemon {
+        if self.bar.tiling {
             // the browser's splitter is the gap on its side
             let g = views::GUTTER;
             let gl = if self.show_browser && !right { 0.0 } else { g };
@@ -1225,10 +1225,10 @@ impl State {
         }
     }
 
-    /// The Lemon layout's gap under the mixer, which its routing cables sag into: down to the status bar while it
+    /// The tiling layout's gap under the mixer, which its routing cables sag into: down to the status bar while it
     /// reaches the workspace card's bottom, else the gap to the snapped window below it.
     pub fn mixer_hang(&self) -> Option<Rect> {
-        if !self.bar.lemon || !self.shown(Win::Mixer) || self.docked().is_some_and(|d| d != Win::Mixer) || self.tile_anim.is_some() {
+        if !self.bar.tiling || !self.shown(Win::Mixer) || self.docked().is_some_and(|d| d != Win::Mixer) || self.tile_anim.is_some() {
             return None;
         }
         let r = self.win_rect(Win::Mixer);
@@ -1265,7 +1265,7 @@ impl State {
         self.z.retain(|&o| o != w);
         self.z.push(w);
         self.no_focus = false;
-        // The Lemon layout: a snapped window brought forward brings the split back from a maximized one.
+        // The tiling layout: a snapped window brought forward brings the split back from a maximized one.
         if w.slot().is_some_and(|i| self.tiled() && !self.wins[i].maxed) {
             self.wins.iter_mut().for_each(|ws| ws.maxed = false);
         }
@@ -1278,14 +1278,14 @@ impl State {
 
     pub fn hide(&mut self, w: Win) {
         self.z.retain(|&o| o != w);
-        // The Lemon layout: a closed window opens again into the split.
+        // The tiling layout: a closed window opens again into the split.
         if let Some(i) = w.slot().filter(|_| self.tiled()) {
             self.wins[i].maxed = false;
         }
     }
 
     /// The windows back to front as they are painted and take clicks: the stacking order (`z`, which also says which has
-    /// the keyboard), except that in the Lemon layout the floating windows (channel rack, plugin and tool windows) are
+    /// the keyboard), except that in the tiling layout the floating windows (channel rack, plugin and tool windows) are
     /// a layer of their own above the playlist, mixer and piano roll.
     pub fn paint_order(&self) -> Vec<Win> {
         if !self.tiled() {
@@ -1295,7 +1295,7 @@ impl State {
         tiles.into_iter().chain(floats).collect()
     }
 
-    /// The Lemon layout with at most one of the playlist, mixer and piano roll open: it fills the card, with nothing to
+    /// The tiling layout with at most one of the playlist, mixer and piano roll open: it fills the card, with nothing to
     /// maximize over or split with.
     pub fn alone(&self) -> bool {
         self.tiled() && self.z.iter().filter(|w| w.slot().is_some()).count() <= 1
@@ -1377,7 +1377,7 @@ pub struct App {
     pub(crate) step_chord: crate::step_edit::Chord,
     /// Last title-bar press (window, time, position), for double-click maximize / restore.
     pub(crate) title_click: Option<(Win, std::time::Instant, (f32, f32))>,
-    /// The Lemon layout's windows as last painted (`tiles::targets`) and the card they were in: a change repaints all,
+    /// The tiling layout's windows as last painted (`tiles::targets`) and the card they were in: a change repaints all,
     /// and animates (`tiles_motion`).
     tile_targets: Vec<(Win, Rect)>,
     tile_open: (Vec<Win>, bool),
@@ -2103,7 +2103,7 @@ impl App {
             self.invalidate();
             return;
         }
-        // The Lemon layout's floating windows close the same way, as a plugin's window does (Hyprland's Super+W).
+        // The tiling layout's floating windows close the same way, as a plugin's window does (Hyprland's Super+W).
         let lemon = self.state.tiled();
         let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg) || (lemon && matches!(w, Win::ChannelRack | Win::Plugin));
         if let Some(&w) = self.state.z.last().filter(|w| !self.state.no_focus && tool(w)) {
@@ -3104,8 +3104,8 @@ impl App {
         if self.state.toolbar.hint_bar && !r.intersect(&HINT_RECT).is_empty() {
             self.damage_rect(views::toolbar::hint_bar_rect(&self.state));
         }
-        // The Lemon layout's status bar holds the hint, the CPU and some of the toolbar's buttons.
-        if self.state.bar.lemon {
+        // The tiling layout's status bar holds the hint, the CPU and some of the toolbar's buttons.
+        if self.state.bar.tiling {
             self.damage_rect(views::status_rect(&self.state));
         }
     }
@@ -4049,7 +4049,7 @@ impl App {
             || self.veil_fade.is_some()
     }
 
-    /// The Lemon layout's windows changed places (shown, hidden, swapped, restored, another preset): the frame repaints
+    /// The tiling layout's windows changed places (shown, hidden, swapped, restored, another preset): the frame repaints
     /// whole, and with "Entertain me" (General ▸ Display ▸ Animations) they move there as Hyprland's windows do
     /// (`tiles::Anim`). A split dragged, the card resized, the first frame and a window maximized jump straight
     /// there.
@@ -4290,7 +4290,7 @@ impl App {
             }
         }
         self.playback_damage();
-        // The Lemon layout's windows moving, or its veils fading: the next frame of it.
+        // The tiling layout's windows moving, or its veils fading: the next frame of it.
         self.has_damage() || self.state.tile_anim.is_some() || self.veil_fade.is_some()
     }
 
@@ -4317,7 +4317,7 @@ impl App {
             self.scrolled = None;
         }
         self.px_scale = canvas.scale;
-        // The Lemon layout's windows closing as others move: their last look is still on the canvas, kept for the
+        // The tiling layout's windows closing as others move: their last look is still on the canvas, kept for the
         // moving ones to pass over (`tiles::Anim`).
         if let Some(a) = &mut self.state.tile_anim {
             for (r, snap) in a.closing.iter_mut().filter(|c| c.1.is_none()) {
@@ -5020,9 +5020,9 @@ impl App {
                 vec![item("Entertain me", true), item("Off", false)]
             }
             views::settings::LAYOUT => {
-                let lemon = self.state.bar.lemon;
+                let lemon = self.state.bar.tiling;
                 let item = |label: &'static str, on: bool| PItem::new(label, Cmd::Layout(on)).mark(Mark::Radio(lemon == on));
-                vec![item("Classic", false), item("Lemon", true)]
+                vec![item("Classic", false), item("Tiling", true)]
             }
             _ => return,
         };
@@ -6149,7 +6149,7 @@ impl App {
         self.rack_pending();
     }
 
-    /// The Lemon layout's keys for its windows, wherever the keyboard is:
+    /// The tiling layout's keys for its windows, wherever the keyboard is:
     /// - Ctrl+Alt+arrows: the keyboard to the nearest split window that way (from a floating one too; floating windows
     ///   are no stops). While one is maximized, a split window that way is maximized in its place.
     /// - Ctrl+Alt+Shift+arrows: the split window with the keyboard changes places with the one that way.
@@ -7719,7 +7719,7 @@ impl App {
             }
             return self.undo_key(alt);
         }
-        // The Lemon layout's window keys: Ctrl+Alt+arrows, F (`window_key`).
+        // The tiling layout's window keys: Ctrl+Alt+arrows, F (`window_key`).
         let s = &self.state;
         if s.tiled() && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && s.playlist.popup.is_none() && self.window_key(key, ctrl, alt) {
             return;
@@ -8535,7 +8535,7 @@ impl App {
             Action::ToggleWin(Win::Tapper) => self.toggle_tapper(),
             Action::ToggleWin(Win::Touch) => self.toggle_touch(),
             Action::ToggleWin(w) => {
-                // The Lemon layout's split views: shown in its place, the key hides it; else it shows it there, each
+                // The tiling layout's split views: shown in its place, the key hides it; else it shows it there, each
                 // key on its own whichever window is in front.
                 let seen = if s.tiled() && w.slot().is_some() {
                     s.docked().map_or(s.snapped(w), |d| d == w)
@@ -8545,7 +8545,7 @@ impl App {
                 if seen {
                     s.hide(w);
                 } else {
-                    // The Lemon layout: a window opening goes into the split (a maximized one gives way to it).
+                    // The tiling layout: a window opening goes into the split (a maximized one gives way to it).
                     if let Some(i) = w.slot().filter(|_| s.tiled() && !s.shown(w)) {
                         s.wins[i].maxed = false;
                     }
@@ -9330,29 +9330,29 @@ impl App {
         self.invalidate();
     }
 
-    /// General settings ▸ Display ▸ Layout: the Lemon layout (its toolbar preset, the status bar, the workspace card) or
+    /// General settings ▸ Display ▸ Layout: the tiling layout (its toolbar preset, the status bar, the workspace card) or
     /// the classic one (the classic toolbar). Kept for the next start.
-    pub(crate) fn set_lemon_layout(&mut self, on: bool) {
-        if self.state.bar.lemon == on {
+    pub(crate) fn set_tiling_layout(&mut self, on: bool) {
+        if self.state.bar.tiling == on {
             return;
         }
         // Each layout keeps its own toolbar (`settings.txt`) and, for the session, its own windows: which of the
         // playlist, mixer and piano roll are open and how (maximized, collapsed, where they float).
         let s = &mut self.state;
         let shown: Vec<Win> = s.z.iter().copied().filter(|w| w.slot().is_some()).collect();
-        s.layout_wins[usize::from(s.bar.lemon)] = Some((s.wins, shown));
+        s.layout_wins[usize::from(s.bar.tiling)] = Some((s.wins, shown));
         if let Some((wins, shown)) = s.layout_wins[usize::from(on)].clone() {
             s.wins = wins;
             s.z.retain(|w| w.slot().is_none());
             s.z.splice(0..0, shown);
         } else if on {
-            // First time in the Lemon layout: the open windows snap into the split.
+            // First time in the tiling layout: the open windows snap into the split.
             s.wins.iter_mut().for_each(|w| (w.maxed, w.mini) = (false, false));
         }
-        s.bar.lemon = on;
-        crate::settings_file::set_flag(crate::toolbar::LEMON_KEY, on);
+        s.bar.tiling = on;
+        crate::settings_file::set_flag(crate::toolbar::TILING_KEY, on);
         self.set_toolbar_layout(crate::toolbar::Layout::load_for(on));
-        self.state.message = Some(format!("Layout: {}", if on { "Lemon" } else { "Classic" }));
+        self.state.message = Some(format!("Layout: {}", if on { "Tiling" } else { "Classic" }));
         self.invalidate();
     }
 
@@ -9362,7 +9362,7 @@ impl App {
         let s = &mut self.state;
         let before = views::band_h(s);
         s.bar.layout = l;
-        s.bar.layout.save_for(s.bar.lemon);
+        s.bar.layout.save_for(s.bar.tiling);
         let dy = views::band_h(s) - before;
         if !s.toolbar.hidden && dy != 0.0 {
             lift_windows(s, dy);
@@ -12659,7 +12659,7 @@ mod tests {
         use std::time::{Duration, Instant};
         let Ok(mut c) = Canvas::new(1536, 864, 1.0) else { return };
         let mut app = App::new(None);
-        app.state.bar.lemon = true;
+        app.state.bar.tiling = true;
         // The app's own theme (`EmbedFrame::sync`), not the process-wide one the other tests paint with.
         app.theme = design_theme(Design::Lemon, false);
         app.plugins.available = crate::plugins::builtin();
@@ -12818,11 +12818,11 @@ mod tests {
         assert_eq!(app.state.plugin_pos, (beside.0 + 120.0, beside.1 + 40.0), "the channel window reopens where it was moved");
     }
 
-    /// The Lemon layout: the close shortcut closes the channel rack in front too, before the app.
+    /// The tiling layout: the close shortcut closes the channel rack in front too, before the app.
     #[test]
     fn close_shortcut_closes_the_rack_in_lemon() {
         let mut app = App::new(None);
-        app.state.bar.lemon = true;
+        app.state.bar.tiling = true;
         app.state.raise(Win::Mixer);
         app.state.raise(Win::ChannelRack);
         app.close_requested();
@@ -19996,11 +19996,11 @@ mod tests {
     /// (One row: the menu bar in the one row, its menus opening under it); the editor's Save preset as... writes the
     /// layout to the user folder's Toolbar presets, where the menus list it under "User presets", checked; Delete
     /// preset asks, then removes the file.
-    /// The Lemon layout: the workspace is a card with a gap all round, above the status bar; the browser ends at the
+    /// The tiling layout: the workspace is a card with a gap all round, above the status bar; the browser ends at the
     /// status bar too. The classic layout's workspace runs to the window's edges.
     #[test]
     fn layouts_keep_their_own_state() {
-        use crate::toolbar::{Layout, LEMON_PRESET, PRESETS};
+        use crate::toolbar::{Layout, TILING_PRESET, PRESETS};
         let mut app = App::new(None);
         // Classic: a custom toolbar (one row of the classic), the mixer floating, the playlist maximized.
         let mut mine = Layout::classic();
@@ -20009,19 +20009,19 @@ mod tests {
         app.state.raise(Win::Mixer);
         app.state.wins[1].maxed = false;
         let mixer_at = app.state.wins[1].rect;
-        app.set_lemon_layout(true);
-        assert_eq!(app.state.bar.layout, PRESETS[LEMON_PRESET].layout());
+        app.set_tiling_layout(true);
+        assert_eq!(app.state.bar.layout, PRESETS[TILING_PRESET].layout());
         // Lemon: the mixer hidden, the piano roll maximized.
         app.act(Action::ToggleWin(Win::Mixer));
         app.act(Action::ShowMax(Win::PianoRoll));
-        app.set_lemon_layout(false);
+        app.set_tiling_layout(false);
         assert_eq!(app.state.bar.layout, mine, "the classic toolbar back");
         assert!(app.state.shown(Win::Mixer) && !app.state.shown(Win::PianoRoll) && app.state.wins[1].rect == mixer_at);
         assert!(app.state.is_max(Win::Playlist) && !app.state.is_max(Win::Mixer));
-        app.set_lemon_layout(true);
+        app.set_tiling_layout(true);
         assert!(!app.state.shown(Win::Mixer), "{:?}", app.state.z);
         assert!(app.state.is_max(Win::PianoRoll), "{:?}", app.state.z);
-        assert_eq!((Layout::load_for(false), Layout::load_for(true)), (mine, PRESETS[LEMON_PRESET].layout()));
+        assert_eq!((Layout::load_for(false), Layout::load_for(true)), (mine, PRESETS[TILING_PRESET].layout()));
     }
 
     #[test]
@@ -20030,8 +20030,8 @@ mod tests {
         app.state.screen = (1536.0, 864.0);
         let classic = app.state.work_rect();
         assert_eq!(classic.bottom(), 864.0);
-        app.state.bar.lemon = true;
-        app.state.bar.layout = crate::toolbar::PRESETS[crate::toolbar::LEMON_PRESET].layout();
+        app.state.bar.tiling = true;
+        app.state.bar.layout = crate::toolbar::PRESETS[crate::toolbar::TILING_PRESET].layout();
         let w = app.state.work_rect();
         let g = views::GUTTER;
         assert_eq!(w.bottom(), 864.0 - views::STATUS_H - g);

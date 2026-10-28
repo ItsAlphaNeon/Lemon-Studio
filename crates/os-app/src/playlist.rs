@@ -369,7 +369,7 @@ pub enum Cmd {
     ChopPattern(Option<std::path::PathBuf>),
     /// Settings > Audio menus: device, sample rate, buffer length (spec: ui/settings.md "Audio").
     Audio(crate::audio_cfg::Set),
-    /// General settings ▸ Display ▸ Layout: the Lemon layout (`true`) or the classic one.
+    /// General settings ▸ Display ▸ Layout: the tiling layout (`true`) or the classic one.
     Layout(bool),
     /// The toolbar CPU panel's menu (spec: ui/main-window.md §13).
     Cpu(crate::cpu::CpuCmd),
@@ -3903,7 +3903,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             return None;
         }
         Cmd::Layout(on) => {
-            app.set_lemon_layout(on);
+            app.set_tiling_layout(on);
             return None;
         }
         Cmd::Cpu(c) => return app.cpu_cmd(c),

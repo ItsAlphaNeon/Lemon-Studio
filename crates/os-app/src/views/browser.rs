@@ -650,11 +650,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     // Measured with the browser top at `WORK_Y`; it moves up with a hidden toolbar (spec: ui/toolbar-menu.md §5).
     let dy = r.y - super::WORK_Y;
     // The panel left of the splitter: 201 px measured, wider as the splitter is dragged (§9).
-    let lemon = s.bar.lemon;
+    let lemon = s.bar.tiling;
     let panel = super::browser_panel(s, r);
     let (ox, bw) = (panel.x, panel.w);
     ui.hit(r, Action::Swallow, "");
-    // The Lemon layout: the title bar takes the browser to the window's other side.
+    // The tiling layout: the title bar takes the browser to the window's other side.
     if lemon {
         ui.hit(Rect::new(ox, 83.0 + dy, bw, 22.0), Action::BrowserMove, "Browser - drag to the other side of the window");
     }
@@ -801,7 +801,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     let hov = ui.hit(glass, Action::BrowserSearch, "Search the browser (Enter = find next, Esc = clear)");
     icons::draw(ui.c, Icon::Search, Rect::new(glass.x + 2.0, fy + 5.0, 17.0, 17.0), if hov { t.browser_search.shade(0.2) } else { t.browser_search });
     // Splitter: drags the browser's width (§9).
-    // In the Lemon layout it is the gap between the browser and workspace cards.
+    // In the tiling layout it is the gap between the browser and workspace cards.
     let split = if super::browser_right(s) { Rect::new(r.x, r.y, panel.x - r.x, r.h) } else { Rect::new(ox + bw, r.y, r.right() - ox - bw, r.h) };
     if lemon {
         ui.c.fill_rect(split, super::backdrop(ui));

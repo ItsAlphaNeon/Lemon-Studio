@@ -871,8 +871,8 @@ fn window_buttons(ui: &mut Ui, c: &Ctx, which: Range<usize>) -> bool {
             return false;
         }
         let (hov, down) = (ui.hit(r, action.clone(), hint), ui.down(r, &action));
-        // The Lemon layout: a window's button is lit while it is open, and a hover only glows (as the metronome's).
-        let look = if c.s.bar.lemon {
+        // The tiling layout: a window's button is lit while it is open, and a hover only glows (as the metronome's).
+        let look = if c.s.bar.tiling {
             let open = match action {
                 Action::ToggleWin(Win::Browser) => c.s.show_browser,
                 Action::ToggleWin(w) => c.s.shown(w),
@@ -907,9 +907,9 @@ const WINDOW_BUTTONS: [(Icon, Action, &str); 9] = [
     // ui/main-window.md §3), had the plugin picker's icon. It is to come back with a shop icon.
 ];
 
-/// The Lemon layout's status bar along the window's bottom (General settings ▸ Layout; `super::status_rect`): Lemon
+/// The tiling layout's status bar along the window's bottom (General settings ▸ Layout; `super::status_rect`): Lemon
 /// Studio's mark, the project's title and the hint at the left; the global snap, the mode buttons, the pickers and
-/// tools, and the CPU load and memory at the right. These leave the toolbar, which the Lemon layout keeps to one row.
+/// tools, and the CPU load and memory at the right. These leave the toolbar, which the tiling layout keeps to one row.
 pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let t = ui.t;
     let r = super::status_rect(s);
@@ -978,7 +978,7 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.text_clip(small, hx, ty, (left + room - hx).max(0.0), t.text, hint);
 }
 
-/// The status bar's split button (the Lemon layout's split views, `crate::tiles`): its glyph is the preset in use,
+/// The status bar's split button (the tiling layout's split views, `crate::tiles`): its glyph is the preset in use,
 /// a click takes the next.
 fn split_button(ui: &mut Ui, s: &State, x: &mut f32, cy: f32) {
     let b = Rect::new(*x - 24.0, (cy - 11.0).round(), 24.0, 22.0);

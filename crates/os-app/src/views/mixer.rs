@@ -256,7 +256,7 @@ fn cables(ui: &mut Ui, s: &State, strips: Rect, area: Rect, bottom: f32) {
         cables.connect(n, from, (socket_x(n), ky), cur == 0 || n == 0, col);
     }
     cables.end();
-    // The Lemon layout: they hang on over the gap under the workspace card (`State::mixer_hang`).
+    // The tiling layout: they hang on over the gap under the workspace card (`State::mixer_hang`).
     let (strips, area) = match s.mixer_hang() {
         Some(h) => {
             ui.c.fill_rect(h, super::backdrop(ui));

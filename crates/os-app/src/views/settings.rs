@@ -688,7 +688,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 combo("Main", 64.0, "Toolbars scaling"),
                 combo("Off", 64.0, "Transparent windows"),
                 combo(if s.cables.borrow().animations() { "Entertain me" } else { "Off" }, 126.0, ANIMATIONS),
-                combo(if s.bar.lemon { "Lemon" } else { "Classic" }, 126.0, LAYOUT),
+                combo(if s.bar.tiling { "Tiling" } else { "Classic" }, 126.0, LAYOUT),
                 Slider("Smoothing", 0.2),
                 combo("Ultrasmooth", 126.0, "Animation refresh rate"),
                 Check2("Force refreshes", true, "Transparent menus", true),

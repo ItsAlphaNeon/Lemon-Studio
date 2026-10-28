@@ -153,38 +153,38 @@ pub fn palette_rect(s: &State) -> Option<Rect> {
     let k = band_k(s);
     (s.bar.editing && !s.toolbar.hidden).then(|| scale_rect(toolbar::palette(s, s.screen.0 / k).rect, k))
 }
-/// The Lemon layout's status bar along the window's bottom (General settings ▸ Layout): its height.
+/// The tiling layout's status bar along the window's bottom (General settings ▸ Layout): its height.
 pub const STATUS_H: f32 = 32.0;
-/// The Lemon layout's gap around the workspace card, and the card's corner radius.
+/// The tiling layout's gap around the workspace card, and the card's corner radius.
 pub const GUTTER: f32 = 6.0;
 pub const CARD_R: f32 = 8.0;
 
 /// Height of the status bar now: none in the classic layout.
 pub fn status_h(s: &State) -> f32 {
-    if s.bar.lemon { STATUS_H } else { 0.0 }
+    if s.bar.tiling { STATUS_H } else { 0.0 }
 }
 
-/// The status bar (the Lemon layout).
+/// The status bar (the tiling layout).
 pub fn status_rect(s: &State) -> Rect {
     Rect::new(0.0, s.screen.1 - STATUS_H, s.screen.0, STATUS_H)
 }
 
-/// The docked browser, its splitter included. The Lemon layout makes it a card like the workspace: a gap left, above
+/// The docked browser, its splitter included. The tiling layout makes it a card like the workspace: a gap left, above
 /// and below it, and the splitter is the gap between the two cards (`GUTTER` wide, no bars).
 pub fn browser_rect(s: &State) -> Rect {
     let (top, h) = (work_y(s), s.screen.1 - status_h(s));
     if browser_right(s) {
         Rect::new(s.screen.0 - browser_w(s), top + GUTTER, browser_w(s) - GUTTER, (h - top - 2.0 * GUTTER).max(0.0))
-    } else if s.bar.lemon {
+    } else if s.bar.tiling {
         Rect::new(GUTTER, top + GUTTER, browser_w(s) - GUTTER, (h - top - 2.0 * GUTTER).max(0.0))
     } else {
         Rect::new(0.0, top, browser_w(s), (h - top).max(0.0))
     }
 }
 
-/// The browser sits right of the workspace (the Lemon layout, its title bar dragged there); else left of it.
+/// The browser sits right of the workspace (the tiling layout, its title bar dragged there); else left of it.
 pub fn browser_right(s: &State) -> bool {
-    s.bar.lemon && s.browser_right
+    s.bar.tiling && s.browser_right
 }
 
 /// The browser's inner edge (where its splitter meets the workspace): its width from the window's left or right.
@@ -196,7 +196,7 @@ pub fn browser_edge(s: &State) -> f32 {
 pub fn browser_panel(s: &State, r: Rect) -> Rect {
     if browser_right(s) {
         Rect::new(r.x + GUTTER, r.y, r.w - GUTTER, r.h)
-    } else if s.bar.lemon {
+    } else if s.bar.tiling {
         Rect::new(r.x, r.y, r.w - GUTTER, r.h)
     } else {
         Rect::new(r.x, r.y, r.w - browser::SPLITTER, r.h)
@@ -222,16 +222,16 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     ui.c.clear(ui.t.workspace);
     ui.c.set_cover(None);
 
-    // Workspace (§9): the theme's picture or the watermark, then docked windows on top. The Lemon layout puts it on a
+    // Workspace (§9): the theme's picture or the watermark, then docked windows on top. The tiling layout puts it on a
     // card over a darker backdrop, the status bar below.
     let top = work_y(s);
     let work = s.work_rect();
     let docked = s.docked();
-    // Snapped windows (the Lemon layout's split views) are cards of their own, the backdrop between them.
+    // Snapped windows (the tiling layout's split views) are cards of their own, the backdrop between them.
     let tiles = crate::tiles::plan(s);
     let anim = s.tile_anim.as_ref();
     let split = (docked.is_none() && !tiles.tiles.is_empty()) || anim.is_some();
-    if s.bar.lemon {
+    if s.bar.tiling {
         ui.c.fill_rect(Rect::new(0.0, top, w, h - top), backdrop(ui));
         if !split {
             ui.c.fill_rrect(work, CARD_R, ui.t.workspace);
@@ -257,13 +257,13 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         let r = browser_rect(s);
         ui.part(Seg::Browser, r, |ui| {
             browser::paint(ui, s, r);
-            if s.bar.lemon {
+            if s.bar.tiling {
                 card_corners(ui, browser_panel(s, r));
             }
         });
     }
     let _ = work;
-    // The Lemon layout's animation: under the moving windows, a closing one's last look and the opening ones at their
+    // The tiling layout's animation: under the moving windows, a closing one's last look and the opening ones at their
     // places.
     if let Some(m) = anim {
         // Where the windows are this frame: the gaps between neighbours run on through a closing window's picture.
@@ -289,7 +289,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         }
     }
     for (i, &win) in order.iter().enumerate() {
-        // While windows move (the Lemon layout's animation) they all show, the covered ones too.
+        // While windows move (the tiling layout's animation) they all show, the covered ones too.
         if (docked_at.is_some_and(|d| i < d) && anim.is_none()) || anim.is_some_and(|m| m.opening().iter().any(|o| o.0 == win)) {
             continue;
         }
@@ -309,7 +309,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         }
         ui.win = None;
         // A split window without the keyboard is muted (`State::veil`); a maximized one never.
-        if let Some(v) = win.slot().map(|i| s.veil[i]).filter(|&v| v > 0.0 && s.bar.lemon && s.snapped(win) && docked.is_none()) {
+        if let Some(v) = win.slot().map(|i| s.veil[i]).filter(|&v| v > 0.0 && s.bar.tiling && s.snapped(win) && docked.is_none()) {
             let bg = backdrop(ui);
             ui.c.fill_rect(r, Color { a: (v * VEIL * 255.0).round() as u8, ..bg });
         }
@@ -317,7 +317,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         // above it, which go over them.
         if let Some(mr) = moved {
             card_corners(ui, mr);
-        } else if s.bar.lemon && docked_at == Some(i) {
+        } else if s.bar.tiling && docked_at == Some(i) {
             card_corners(ui, work);
         } else if let Some(&(_, tr)) = tiles.tiles.iter().find(|t| t.0 == win).filter(|_| docked_at.is_none() || anim.is_some()) {
             card_corners(ui, tr);
@@ -330,7 +330,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         }
     }
     let _ = docked;
-    if s.bar.lemon {
+    if s.bar.tiling {
         toolbar::paint_status_bar(ui, s, f);
     }
     let n = paint_rest(ui, s, f, w);
@@ -443,7 +443,7 @@ fn paint_rest(ui: &mut Ui, s: &State, f: &FrameInfo, w: f32) -> usize {
 /// The cutting-edge branch's mark colour (the workspace watermark, the version string, the status bar's mark).
 pub(crate) const CUTTING_EDGE_RED: Color = Color::rgb(0xe5483b);
 
-/// The Lemon layout's backdrop around the workspace card: a shade darker than the workspace.
+/// The tiling layout's backdrop around the workspace card: a shade darker than the workspace.
 pub(crate) fn backdrop(ui: &Ui) -> Color {
     ui.t.workspace.shade(-0.35)
 }
@@ -548,11 +548,11 @@ pub fn resize_zones(ui: &mut Ui, s: &State, win: Win, r: Rect) {
 }
 
 /// Minimize / maximize / close buttons from `x0` at the title bar of a window at top `y`.
-/// The Lemon layout's split views have no minimize: the other two keep their places.
+/// The tiling layout's split views have no minimize: the other two keep their places.
 pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _hover: Color) {
     let mut hovered = None;
     let maxed = win.slot().is_some_and(|i| ui.maxed[i]);
-    // A window alone in the Lemon layout has only its close button.
+    // A window alone in the tiling layout has only its close button.
     let skip = if ui.alone { 2 } else { usize::from(ui.tiled) };
     let max_hint = match (ui.tiled, maxed) {
         (false, _) => "Maximize / restore window",

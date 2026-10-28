@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The Lemon layout's split views (a Lemon Studio addition): the playlist, the piano roll and the mixer are either
+//! The tiling layout's split views (a Lemon Studio addition): the playlist, the piano roll and the mixer are either
 //! maximized (filling the workspace card) or snapped into a split of it, each its own card; none of them floats. A
 //! preset says how the card is split into three places; the windows shown take their places and a place left empty
 //! goes to its neighbour, so two windows share the card and one alone fills it. The channel rack, plugin and tool
@@ -133,7 +133,7 @@ fn split(r: Rect, rows: bool, share: f32) -> (Rect, Rect, Rect) {
     }
 }
 
-/// The plan for the windows snapped now (`State::snapped`); empty outside the Lemon layout.
+/// The plan for the windows snapped now (`State::snapped`); empty outside the tiling layout.
 pub fn plan(s: &State) -> Plan {
     plan_of(s, |w| s.snapped(w))
 }
@@ -293,7 +293,7 @@ pub fn next_preset(s: &mut State) {
 
 // ---------------------------------------------------------------------------------------------------------- motion
 
-/// Where the playlist, mixer and piano roll show in the Lemon layout, back to front: the maximized one across the card,
+/// Where the playlist, mixer and piano roll show in the tiling layout, back to front: the maximized one across the card,
 /// the snapped ones (also those it covers) in their places. What the animations go between.
 pub fn targets(s: &State) -> Vec<(Win, Rect)> {
     if !s.tiled() {
@@ -392,7 +392,7 @@ mod tests {
     fn lemon() -> App {
         let mut app = App::new(None);
         app.state.screen = (1536.0, 864.0);
-        app.state.bar.lemon = true;
+        app.state.bar.tiling = true;
         app.state.wins.iter_mut().for_each(|w| (w.maxed, w.mini) = (false, false));
         app.state.z.retain(|w| w.slot().is_none());
         app
@@ -709,7 +709,7 @@ mod frames {
     fn frames_paint() {
         let Ok(mut c) = os_ui::Canvas::new(1536, 864, 1.25) else { return };
         let mut app = App::new(None);
-        app.state.bar.lemon = true;
+        app.state.bar.tiling = true;
         app.state.wins.iter_mut().for_each(|w| (w.maxed, w.mini) = (false, false));
         app.state.z.retain(|w| w.slot().is_none());
         for w in [Win::Playlist, Win::PianoRoll, Win::Mixer] {

@@ -1327,7 +1327,7 @@ fn screenshot(args: &[String]) {
     let mut rack_h: Option<f32> = None;
     let mut rack_scroll: Option<f32> = None;
     let mut rack_all = false;
-    let mut lemon_layout: Option<bool> = None;
+    let mut tiling_layout: Option<bool> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1338,8 +1338,9 @@ fn screenshot(args: &[String]) {
             // Device pixels per logical one (the frame stays 1920x1080 logical): 1.5 = Windows at 150 %.
             "--scale" => scale = it.next().and_then(|v| v.parse().ok()).filter(|s: &f32| *s >= 0.5 && *s <= 4.0).unwrap_or(1.0),
             "--view" => view = it.next().cloned().unwrap_or_default(),
-            // General settings ▸ Layout for this frame only: "lemon" or "classic" (default: the saved one).
-            "--layout" => lemon_layout = it.next().map(|v| v == "lemon"),
+            // General settings ▸ Layout for this frame only: "tiling" (or its old name "lemon") or "classic" (default:
+            // the saved one).
+            "--layout" => tiling_layout = it.next().map(|v| v == "tiling" || v == "lemon"),
             "--no-rack" => rack = false,
             "--no-browser" => browser = false,
             "--rack-roll" => rack_roll = true,
@@ -1451,10 +1452,10 @@ fn screenshot(args: &[String]) {
         }
     }
     let mut app = App::new(path);
-    if let Some(on) = lemon_layout {
-        use crate::toolbar::{Layout, LEMON_PRESET, PRESETS};
-        app.state.bar.lemon = on;
-        app.state.bar.layout = if on { PRESETS[LEMON_PRESET].layout() } else { Layout::classic() };
+    if let Some(on) = tiling_layout {
+        use crate::toolbar::{Layout, TILING_PRESET, PRESETS};
+        app.state.bar.tiling = on;
+        app.state.bar.layout = if on { PRESETS[TILING_PRESET].layout() } else { Layout::classic() };
     }
     if let Some(i) = insert {
         app.state.selected_mixer = i;

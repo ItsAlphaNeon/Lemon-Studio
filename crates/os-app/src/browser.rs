@@ -18,7 +18,7 @@ const DRAG_START: f32 = 4.0;
 /// How long a clicked sample plays (spec §7).
 const PREVIEW_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The settings key of the browser's side in the Lemon layout (`State::browser_right`).
+/// The settings key of the browser's side in the tiling layout (`State::browser_right`).
 pub(crate) const BROWSER_RIGHT_KEY: &str = "browser_right";
 
 impl App {
@@ -248,8 +248,8 @@ impl App {
         false
     }
 
-    /// The Lemon layout: the browser's title bar dragged and let go on the window's other half moves it to that side
-    /// (spec: the cutting-edge README, "Lemon layout").
+    /// The tiling layout: the browser's title bar dragged and let go on the window's other half moves it to that side
+    /// (spec: the cutting-edge README, "tiling layout").
     pub(crate) fn browser_move_drop(&mut self) {
         let right = self.mouse.0 > self.state.screen.0 / 2.0;
         if right != self.state.browser_right {

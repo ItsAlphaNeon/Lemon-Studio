@@ -30,8 +30,9 @@ pub const FLEX_EDIT_W: f32 = 16.0;
 pub const EXT: &str = "lstoolbar";
 /// The settings key of the layout.
 const KEY: &str = "toolbar_layout";
-/// The Lemon layout's own toolbar (General settings ▸ Layout).
-const LEMON_TOOLBAR_KEY: &str = "toolbar_layout_lemon";
+/// The tiling layout's own toolbar (General settings ▸ Layout).
+/// (Its text is from when the layout was called Lemon, as `TILING_KEY`'s.)
+const TILING_TOOLBAR_KEY: &str = "toolbar_layout_lemon";
 
 /// What the toolbar can hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -321,21 +322,21 @@ impl Layout {
         Layout::load_for(false)
     }
 
-    /// The toolbar kept for the Lemon layout (`lemon`) or the classic one, each its own: the layout's preset when none
-    /// is kept. A classic toolbar that is the Lemon preset was kept from before each had its own: the classic one.
-    pub fn load_for(lemon: bool) -> Layout {
-        let kept = crate::settings_file::get(if lemon { LEMON_TOOLBAR_KEY } else { KEY }).and_then(|v| Layout::parse(&v));
-        let lemon_preset = PRESETS[LEMON_PRESET].layout();
+    /// The toolbar kept for the tiling layout (`tiling`) or the classic one, each its own: the layout's preset when none
+    /// is kept. A classic toolbar that is the tiling preset was kept from before each had its own: the classic one.
+    pub fn load_for(tiling: bool) -> Layout {
+        let kept = crate::settings_file::get(if tiling { TILING_TOOLBAR_KEY } else { KEY }).and_then(|v| Layout::parse(&v));
+        let tiling_preset = PRESETS[TILING_PRESET].layout();
         match kept {
-            Some(l) if lemon || l != lemon_preset => l,
-            _ if lemon => lemon_preset,
+            Some(l) if tiling || l != tiling_preset => l,
+            _ if tiling => tiling_preset,
             _ => Layout::classic(),
         }
     }
 
-    /// Keeps the layout as the Lemon layout's toolbar (`lemon`) or the classic one's, for the next start.
-    pub fn save_for(&self, lemon: bool) {
-        crate::settings_file::write(if lemon { LEMON_TOOLBAR_KEY } else { KEY }, self.text().trim_end().replace('\n', "; ").as_str());
+    /// Keeps the layout as the tiling layout's toolbar (`tiling`) or the classic one's, for the next start.
+    pub fn save_for(&self, tiling: bool) {
+        crate::settings_file::write(if tiling { TILING_TOOLBAR_KEY } else { KEY }, self.text().trim_end().replace('\n', "; ").as_str());
     }
 
     /// One or two rows. Panels of rows taken away go to the end of the last row left; a new row is empty.
@@ -462,16 +463,16 @@ pub const PRESETS: [Preset; 9] = [
     Preset { name: "Compact", rows: &[&[Menu, Transport, Time, Pattern, Flex, Caption], &[Hint, SongPos, Windows, Snap]], logo: false },
     Preset { name: "One row", rows: &[&[Menu, Hint, Transport, Time, Monitor, Pattern, Snap, Windows, Cpu, Flex, Caption]], logo: false },
     Preset { name: "One row, centered", rows: &[&[Menu, Flex, Transport, Time, Monitor, Pattern, Windows, Flex, Hint, Caption]], logo: false },
-    // The Lemon layout's (General settings ▸ Layout): the hint, CPU, snap, mode and picker buttons are in its status bar.
+    // The tiling layout's (General settings ▸ Layout): the hint, CPU, snap, mode and picker buttons are in its status bar.
     Preset {
-        name: "Lemon",
+        name: "Tiling",
         rows: &[&[Menu, Flex, Transport, Recording, Time, Pattern, Flex, Volume, Pitch, Windows, Utilities, Caption]],
         logo: false,
     },
 ];
 
-/// The Lemon layout's toolbar (`PRESETS`).
-pub const LEMON_PRESET: usize = 8;
+/// The tiling layout's toolbar (`PRESETS`).
+pub const TILING_PRESET: usize = 8;
 
 /// Where the user's presets are: the user folder's `Toolbar presets` (in tests the thread's folder, `app::theme_dir`).
 pub fn user_dir() -> Option<PathBuf> {
@@ -532,20 +533,21 @@ pub struct Bar {
     pub layout: Layout,
     pub editing: bool,
     pub user: Vec<UserPreset>,
-    /// The Lemon layout (a Lemon Studio addition): a toolbar of one row, the status bar along the window's bottom, the
+    /// The tiling layout (a Lemon Studio addition): a toolbar of one row, the status bar along the window's bottom, the
     /// workspace as a card (`views::status_h`, `App::work_rect`).
-    pub lemon: bool,
+    pub tiling: bool,
 }
 
 /// The settings key of General settings ▸ Layout.
-pub const LEMON_KEY: &str = "layout_lemon";
-/// The layout until one is chosen: Lemon. Tests keep the classic one, which the measured FL geometry is about.
-const LEMON_DEFAULT: bool = !cfg!(test);
+/// (Its text is from when the layout was called Lemon: kept, so the choice made then still holds.)
+pub const TILING_KEY: &str = "layout_lemon";
+/// The layout until one is chosen: tiling. Tests keep the classic one, which the measured FL geometry is about.
+const TILING_DEFAULT: bool = !cfg!(test);
 
 impl Bar {
     pub fn load() -> Bar {
-        let lemon = crate::settings_file::flag(LEMON_KEY, LEMON_DEFAULT);
-        Bar { layout: Layout::load_for(lemon), editing: false, user: user_presets(), lemon }
+        let tiling = crate::settings_file::flag(TILING_KEY, TILING_DEFAULT);
+        Bar { layout: Layout::load_for(tiling), editing: false, user: user_presets(), tiling }
     }
 
     /// The user preset with the current layout, if any.
@@ -711,13 +713,13 @@ mod tests {
             assert!(!p.name.contains("FL") && !p.name.contains("Studio"), "{}", p.name);
         }
         assert_eq!(PRESETS.iter().filter(|p| p.rows.len() == 1).count(), 3);
-        assert_eq!(PRESETS[LEMON_PRESET].name, "Lemon");
+        assert_eq!(PRESETS[TILING_PRESET].name, "Tiling");
     }
 
-    /// The Lemon layout's one row fits a window 1536 px wide (1920 at 125 %) with room to spare.
+    /// The tiling layout's one row fits a window 1536 px wide (1920 at 125 %) with room to spare.
     #[test]
     fn the_lemon_row_fits() {
-        let l = PRESETS[LEMON_PRESET].layout();
+        let l = PRESETS[TILING_PRESET].layout();
         assert_eq!(l.rows.len(), 1);
         assert!(natural_width(&l, false) <= 1536.0 - 40.0, "{}", natural_width(&l, false));
         for p in [Panel::Hint, Panel::Cpu, Panel::Snap, Panel::Modes, Panel::Tools] {
@@ -744,7 +746,7 @@ mod tests {
     /// Dragging moves a panel within and between rows, takes it off onto the palette and puts a tile back.
     #[test]
     fn drops_move_remove_and_add() {
-        let mut b = Bar { layout: Layout::classic(), editing: true, user: Vec::new(), lemon: false };
+        let mut b = Bar { layout: Layout::classic(), editing: true, user: Vec::new(), tiling: false };
         let palette = (b.layout.band_h(), 400.0);
         // The hint panel (row 1, second) dropped right of the transport: after it.
         let d = BarDrag { moving: Moving::Item(0, 1), grab: (5.0, 5.0) };

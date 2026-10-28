@@ -20,7 +20,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
   resize it (CLAP `gui.can_resize`, VST3 `IPlugView::canResize`) gets the frame's edges and maximize button. The
   editor is asked for the new size and the frame takes the size it accepts. Such an editor larger than the monitor's
   work area opens shrunk to fit it. Detached plugin windows open centred on the monitor under the pointer.
-- **Lemon layout, the default.** General settings ▸ Display ▸ Layout: Lemon or Classic. The Lemon layout has:
+- **Tiling layout, the default.** General settings ▸ Display ▸ Layout: Tiling or Classic. The tiling layout has:
   - a toolbar of one row (menus, transport, time, pattern, main volume and pitch, windows, utilities);
   - a status bar along the bottom (Lemon's mark, the title and hint, global snap, mode buttons, pickers, CPU and
     memory);
@@ -43,12 +43,12 @@ own content. Side branches are named `cutting-edge-<topic>`.
     windows, and F maximizes the window under the mouse or brings the split back. The window manager's close shortcut
     closes the channel rack or channel window with the keyboard, as it closes a plugin's, before the app.
 
-  The Lemon and Classic layouts each keep their own toolbar and, for the session, their own window arrangement.
+  The tiling and Classic layouts each keep their own toolbar and, for the session, their own window arrangement.
   Every other keyboard shortcut works the same. Classic is FL's arrangement and unchanged.
 - **Plugin editors in the app's window (Linux).** The plugins compiled into Lemon Studio (the stock instruments and
   effects) draw their editors inside Lemon Studio's own window, as floating windows like the channel rack: no X11
   window, no XWayland, no OpenGL. Their menus and value boxes are drawn above the app; knob drags hold the cursor as the
-  app's own knobs do; the close shortcut closes them. In the Lemon design their window is a card like the channel
+  app's own knobs do; the close shortcut closes them. In the Lemon skin their window is a card like the channel
   rack's, in the theme's colours: rounded, the editor edge to edge under one title row (menu arrow, name, page tabs,
   Presets, close). FL's frame is gone there: no minimize button, no gear strip (the channel settings window has those
   controls), no frame around the editor. Third-party plugins keep windows of their own.
