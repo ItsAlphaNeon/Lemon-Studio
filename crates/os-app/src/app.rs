@@ -1305,6 +1305,8 @@ impl State {
 pub struct App {
     pub state: State,
     pub plugins: crate::plugins::Plugins,
+    /// Everything that happens to the project, written as it happens (`crate::journal`).
+    pub journal: crate::journal::Journal,
     pub theme: Theme,
     pub transport: Transport,
     pub hits: Vec<Hit>,
@@ -1497,6 +1499,7 @@ impl App {
         let project = default_project();
         let mut app = App {
             plugins: crate::plugins::Plugins::default(),
+            journal: crate::journal::Journal::start(),
             state: State {
                 project,
                 plugdb: Default::default(),
@@ -1729,6 +1732,7 @@ impl App {
     /// Opens a project file; whether it opened (a converted older project opens without a path; a MIDI file goes
     /// through the import form first, so it has not).
     pub fn open(&mut self, path: PathBuf) -> bool {
+        let opened = path.clone();
         // A MIDI file opened as a project (the command line, say) is imported as a dropped one is (spec:
         // ui/midi-files.md §10.6).
         let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
@@ -1817,6 +1821,7 @@ impl App {
                 s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 self.mark_saved();
+                self.journal_opened(Some(&opened));
                 crate::missing::opened(self);
                 self.loading = Some(crate::loading::Loading::start(&self.state.project));
                 self.state.playlist.wave_wait = true;
@@ -2024,8 +2029,9 @@ impl App {
             s.file = Some(file);
             crate::templates::remember(&target);
             crate::recent::add(&target);
-            s.path = Some(target);
+            s.path = Some(target.clone());
             self.mark_saved();
+            self.journal_saved(&target);
         }
         result.ok()
     }
@@ -2380,6 +2386,7 @@ impl App {
         s.piano.dirty = true;
         s.message = Some("New project".into());
         self.mark_saved();
+        self.journal_opened(None);
     }
 
     /// FILE > Open: the open dialog, starting in the project's folder.
@@ -4295,6 +4302,7 @@ impl App {
         // also during a drag (at most once per tick).
         if self.state.piano.dirty {
             self.state.piano.dirty = false;
+            self.journal.touch();
             // An edit in the interface (a command's change is its event already; an undo or redo is one too).
             let s = &mut self.state;
             if s.control.changed_since_seen(&s.project, s.tempo) {
@@ -4306,6 +4314,7 @@ impl App {
             }
         }
         self.playback_damage();
+        self.journal_tick();
         // The tiling layout's windows moving, or its veils fading: the next frame of it.
         self.has_damage() || self.state.tile_anim.is_some() || self.veil_fade.is_some()
     }

@@ -14,6 +14,9 @@ own content. Side branches are named `cutting-edge-<topic>`.
 
 - **Control plane.** Every edit goes through one command layer with undo. Projects have stable ids, and scripts and
   assistants can drive the app over a local socket (`--control`, `--serve`). See [docs/control-plane.md](docs/control-plane.md).
+- **A project journal.** Every edit, undo, save and plugin state is written to disk as it happens, saved or not, and
+  readable through the control plane: a sound made in a plugin's window survives an unsaved project. See
+  [docs/control-plane.md](docs/control-plane.md) "Journal".
 - **Older FL projects open.** Projects saved by FL 20 to 24.1 are converted to the newer layout as they are read.
   Save asks for a new file.
 

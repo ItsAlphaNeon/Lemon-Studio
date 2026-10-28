@@ -51,6 +51,7 @@ says that they were. Without a window (`--serve`) the client saves directly.
 | `params` | `owner` | The parameters of the plugin playing a channel or a mixer slot: id, name, group, unit, value 0..1, value text, range, default, steps |
 | `history` | | The undo history (`steps` with `name`, `undone`) and `at`, where the project is in it |
 | `events` | `since` | What changed after event `since` (0: all kept), and `last`, the newest event's number |
+| `journal` | `since` | The journal's entries after `since` (0: all kept this session), `last`, and the journal's `file` |
 | `apply` | `commands` (or `command`), `name` | Each command's `results`. The list is one undo step named `name` (else the command's own name), applied whole or not at all |
 | `propose` | `commands`, `name` | `proposal` (its number) and `changes` (what it would change). The project is not changed |
 | `proposals` | | The proposals waiting |
@@ -135,6 +136,23 @@ default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre).
 - `events` lists each change: `apply`, `undo`, `redo`, `proposal`, `accepted`, `discarded`, `opened` (a project was
   opened or made), and `edit` for a change made in the interface. Clients poll it with the last number they saw.
 
+## Journal
+
+Everything that happens to the project is written as it happens, whether or not a client is connected and whether or
+not the project is saved: one file per session, `Journal/<start time>-<pid>.jsonl` in the user folder
+(`~/.config/Lemon Studio` on Linux), one JSON object per line, kept 30 days. Each has `seq`, `t` (Unix ms) and `kind`:
+
+| `kind` | Fields | When |
+|---|---|---|
+| `session` | `version`, `pid` | The app started |
+| `opened`, `new`, `saved` | `path` | A project was opened, made new or saved |
+| `step`, `undo`, `redo` | `name`, `done` | An undo step was made (its name: who and what), taken back or given again |
+| `changes` | `changes`: `path`, `before`, `after` | What the project's reading (`state`) changed, by id; at most four times a second |
+| `plugin_state` | `owner`, `at`, `plugin`, `size`, `hash`, `state` (base64) | A hosted plugin's whole state: after it reported a change while its window was open, as its window closes, and on save. Over 4 MB only `size` and `hash` |
+
+A sound made in a plugin's window is in the journal even if the project is never saved: its `state` loads back into
+the plugin. `journal` reads this session's entries back.
+
 ## An example
 
 ```python
@@ -170,5 +188,7 @@ call("apply", commands=[
   fields; mixer track moves, slot moves, sidechains and Tesla; clip offsets, groups, markers and playlist tracks;
   automation clips and points; project settings beyond tempo, signature and song info; plugin state and presets;
   sample tags.
+- The journal records a pattern's notes as a count: which notes changed is not in it yet. Older sessions' journals are
+  read from their files; nothing in the app shows them or restores from them yet.
 - Rendering through the control plane, and pushing events to clients (they poll `events`). A parameter changed in a
   plugin's window is an undo step but not an `edit` event.

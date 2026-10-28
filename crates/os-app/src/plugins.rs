@@ -124,6 +124,12 @@ impl Hosted {
     /// Whether a per-tick job last done at `last` should lock the instance now, and the look to remember if it does:
     /// its attention count moved, its editor is open, it has no count, or `LOOK_EVERY` passed. Otherwise the UI leaves
     /// it to the audio thread (spec: audio/implementing.md "Playing live").
+    /// How often the instance has asked for attention (a parameter changed in its window, a state to save...); None
+    /// for one that never says.
+    pub fn attention_count(&self) -> Option<u64> {
+        self.attention.as_ref().map(|a| a.count())
+    }
+
     pub fn due(&self, last: Look) -> Option<Look> {
         let now = Instant::now();
         let Some(a) = &self.attention else {

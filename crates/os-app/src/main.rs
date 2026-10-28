@@ -31,6 +31,7 @@ mod data_folder;
 mod device;
 mod dialog;
 mod floating;
+mod journal;
 mod filedlg;
 mod enable_groups;
 mod export;

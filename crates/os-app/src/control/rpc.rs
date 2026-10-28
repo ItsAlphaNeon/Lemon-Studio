@@ -140,6 +140,11 @@ impl App {
                 let (events, last) = self.state.control.events_since(since);
                 Ok(json!({ "events": events, "last": last }))
             }
+            "journal" => {
+                let since = params.get("since").and_then(Value::as_u64).unwrap_or(0);
+                let (entries, last) = self.journal.since(since);
+                Ok(json!({ "entries": entries, "last": last, "file": self.journal.path.as_ref().map(|p| p.display().to_string()) }))
+            }
             "proposals" => {
                 let list: Vec<Value> = self.state.control.proposals.iter().map(|p| json!({ "proposal": p.n, "name": p.name, "changes": p.changes })).collect();
                 Ok(Value::Array(list))

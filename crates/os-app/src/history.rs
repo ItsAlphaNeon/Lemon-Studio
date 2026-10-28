@@ -385,6 +385,16 @@ impl History {
         self.steps.len()
     }
 
+    /// How many steps there are, done and undone (the journal follows them).
+    pub fn steps(&self) -> usize {
+        self.steps.len()
+    }
+
+    /// The name of step `k` (1 = the oldest).
+    pub fn name_of(&self, k: usize) -> Option<&str> {
+        k.checked_sub(1).and_then(|i| self.steps.get(i)).map(|s| &*s.name)
+    }
+
     /// How many steps are done (undone ones not counted).
     pub fn done(&self) -> usize {
         self.done
