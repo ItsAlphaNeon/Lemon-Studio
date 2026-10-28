@@ -44,9 +44,9 @@ pub const MAX_STAGES: usize = 23;
 pub const TABLE: usize = 4096;
 
 /// The frames the LFO has run when a song starts (Lemon Studio choice). FL's runs from the plugin's creation through
-/// the mixer's idle blocks, 2048 or 4096 frames in FL's exports, varying from run to run (spec "The LFO"); 2048 is one
-/// of the starts FL makes, and a fixed one makes renders repeat.
-pub const IDLE: u32 = 2048;
+/// the mixer's idle blocks, 512 or 1024 frames in FL 2026's exports, varying from run to run (spec "The LFO",
+/// `plugins/lemon-phaser.md` §5); 512 is one of the starts FL makes, and a fixed one makes renders repeat.
+pub const IDLE: u32 = 512;
 
 /// Everything the saved state says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn the_lfo_starts_after_the_idle_frames_and_runs_on() {
         let p = Phaser::with_settings(44100, &Settings::default());
-        assert_eq!(p.phases(), [2048 * 91, 2048 * 91 + (1 << 22)]);
+        assert_eq!(p.phases(), [512 * 91, 512 * 91 + (1 << 22)]);
         let mut p = Phaser::with_settings(44100, &Settings::default());
         p.start(0);
         assert_eq!(p.phases(), [0, 1 << 22]);
