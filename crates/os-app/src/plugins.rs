@@ -276,6 +276,8 @@ pub fn builtin_effects() -> Vec<Available> {
         &lemon_stereo_shaper::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_filter::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &tesla::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_flanger::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_phaser::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
     ];
     let names = FILE_MAPPED.into_iter().chain(LINKED_EFFECTS);
     LIBS.iter().zip(entries).zip(names).flat_map(|((lib, entry), name)| linked(lib, entry, name)).collect()
@@ -1287,7 +1289,7 @@ pub const LEMON_EQ: &str = "Lemon Parametric EQ";
 /// Lemon Studio's effects compiled in besides the EQ (`builtin_effects`, in this order). They have no file plugin of
 /// their own to be stored as, so a project stores them wrapped, as it stored their plugin files
 /// (`project_plugins::is_wrapped`).
-pub const LINKED_EFFECTS: [&str; 12] = [
+pub const LINKED_EFFECTS: [&str; 14] = [
     "Lemon Limiter",
     "Lemon Reverb",
     "Lemon Delay",
@@ -1300,6 +1302,8 @@ pub const LINKED_EFFECTS: [&str; 12] = [
     "Lemon Stereo Shaper",
     "Lemon Filter",
     TESLA,
+    "Lemon Flanger",
+    "Lemon Phaser",
 ];
 /// Lemon Studio's effects compiled in that a project stores under the FL plugin they recreate, with that plugin's
 /// state (`new_slot`, `store_builtin_states`), so they are never saved wrapped.
@@ -1339,7 +1343,7 @@ pub const OLD_NAMES: [(&str, &str); 5] = [
 /// (`App::sync_effects`, `App::store_builtin_states`; spec: plugins/lemon-small-effects.md "Opened projects' slots").
 /// Not Lemon Stereo Shaper: the difference output is the mixer slot's alone (spec: plugins/lemon-stereo-shaper.md §5),
 /// so the engine's own Stereo Shaper keeps playing those slots.
-pub const FL_RECREATIONS: [(&str, &str); 10] = [
+pub const FL_RECREATIONS: [(&str, &str); 12] = [
     ("Fruity Limiter", "Lemon Limiter"),
     ("Fruity Reeverb 2", "Lemon Reverb"),
     ("Fruity Delay 3", "Lemon Delay"),
@@ -1350,6 +1354,8 @@ pub const FL_RECREATIONS: [(&str, &str); 10] = [
     ("Transient Processor", "Lemon Transient Processor"),
     ("Fruity Chorus", "Lemon Chorus"),
     ("Fruity Filter", "Lemon Filter"),
+    ("Fruity Flanger", "Lemon Flanger"),
+    ("Fruity Phaser", "Lemon Phaser"),
 ];
 
 /// The Lemon effect of `FL_RECREATIONS` that plays slots stored as `file` (any case: files may spell the id
@@ -1372,6 +1378,8 @@ pub fn recreation_state_from_fl(lemon: &str, fl: &[u8]) -> Option<Vec<u8>> {
         "Lemon Transient Processor" => small(lemon_small_fx::transient_processor::SPEC, fl),
         "Lemon Chorus" => small(lemon_small_fx::chorus::SPEC, fl),
         "Lemon Filter" => small(lemon_small_fx::filter::SPEC, fl),
+        "Lemon Flanger" => small(lemon_small_fx::flanger::SPEC, fl),
+        "Lemon Phaser" => small(lemon_small_fx::phaser::SPEC, fl),
         _ => return None,
     })
 }
@@ -1391,6 +1399,8 @@ pub fn fl_from_recreation_state(lemon: &str, blob: &[u8]) -> Option<Vec<u8>> {
         "Lemon Transient Processor" => small(lemon_small_fx::transient_processor::SPEC, blob),
         "Lemon Chorus" => small(lemon_small_fx::chorus::SPEC, blob),
         "Lemon Filter" => small(lemon_small_fx::filter::SPEC, blob),
+        "Lemon Flanger" => small(lemon_small_fx::flanger::SPEC, blob),
+        "Lemon Phaser" => small(lemon_small_fx::phaser::SPEC, blob),
         _ => None,
     }
 }

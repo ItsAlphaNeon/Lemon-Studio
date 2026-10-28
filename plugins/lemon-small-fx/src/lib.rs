@@ -3,16 +3,16 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Lemon Studio's small effects as VST3 / CLAP plugins (nih-plug): Lemon Soft Clipper, Lemon Fast Distortion, Lemon
-//! Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus, Lemon Stereo Shaper and Lemon Filter. Each is a handful
-//! of settings over a sound of
-//! `os_engine::effects`, so they share
+//! Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus, Lemon Stereo Shaper, Lemon Filter, Lemon
+//! Flanger and Lemon Phaser. Each is a handful of settings over a sound of `os_engine::effects`, so they share
 //! everything but their description: the plugin, its parameters and saved state ([`params`]), the Pith editor
 //! ([`editor`], [`view`]). A description ([`Spec`]) gives the settings, their value texts, the editor's cards and
 //! controls, and the sound. The plugin modules (`plugins/lemon-soft-clipper` and the others) export one each.
 //!
 // spec: plugins/lemon-small-effects.md (§1 how they are built, §5 parameters and state), the plugin pages
 // (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md,
-// lemon-transient-processor.md, lemon-chorus.md, lemon-stereo-shaper.md, lemon-filter.md), plugins/plugin-formats.md
+// lemon-transient-processor.md, lemon-chorus.md, lemon-stereo-shaper.md, lemon-filter.md, lemon-flanger.md,
+// lemon-phaser.md), plugins/plugin-formats.md
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod balance;
@@ -20,7 +20,9 @@ pub mod chorus;
 pub mod editor;
 pub mod fast_distortion;
 pub mod filter;
+pub mod flanger;
 pub mod params;
+pub mod phaser;
 pub mod soft_clipper;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
@@ -314,7 +316,7 @@ impl<K: Kind> Vst3Plugin for SmallFx<K> {
 mod tests {
     use super::*;
 
-    pub const SPECS: [&Spec; 8] = [
+    pub const SPECS: [&Spec; 10] = [
         soft_clipper::SPEC,
         fast_distortion::SPEC,
         balance::SPEC,
@@ -323,6 +325,8 @@ mod tests {
         chorus::SPEC,
         stereo_shaper::SPEC,
         filter::SPEC,
+        flanger::SPEC,
+        phaser::SPEC,
     ];
 
     /// Every effect: ids unique, starts inside the ranges, a control per setting, the plugin ids distinct.
@@ -355,6 +359,8 @@ mod tests {
             <chorus::LemonChorus as ClapPlugin>::CLAP_ID,
             <stereo_shaper::LemonStereoShaper as ClapPlugin>::CLAP_ID,
             <filter::LemonFilter as ClapPlugin>::CLAP_ID,
+            <flanger::LemonFlanger as ClapPlugin>::CLAP_ID,
+            <phaser::LemonPhaser as ClapPlugin>::CLAP_ID,
         ];
         let classes = [
             <soft_clipper::LemonSoftClipper as Vst3Plugin>::VST3_CLASS_ID,
@@ -365,6 +371,8 @@ mod tests {
             <chorus::LemonChorus as Vst3Plugin>::VST3_CLASS_ID,
             <stereo_shaper::LemonStereoShaper as Vst3Plugin>::VST3_CLASS_ID,
             <filter::LemonFilter as Vst3Plugin>::VST3_CLASS_ID,
+            <flanger::LemonFlanger as Vst3Plugin>::VST3_CLASS_ID,
+            <phaser::LemonPhaser as Vst3Plugin>::VST3_CLASS_ID,
         ];
         for i in 0..ids.len() {
             for j in i + 1..ids.len() {
@@ -463,5 +471,19 @@ mod tests {
         assert_eq!(read(filter::SPEC, "Party next door"), [160, 1024, 864, 0, 0, 0, 1]);
         assert_eq!(read(filter::SPEC, "Tiny speakers"), [544, 0, 0, 1024, 464, 1, 1]);
         assert_eq!(all(filter::SPEC).len(), 4);
+        // FL's 27 Flanger and 27 Phaser presets. Their Default presets are not what a new instance holds: the Flanger's has
+        // the phase at 119 and the feedback at 24 (a new one 118 and 23), the Phaser's is a slower, all-wet sweep.
+        for spec in [flanger::SPEC, phaser::SPEC] {
+            for name in all(spec) {
+                read(spec, &name);
+            }
+            assert_eq!(all(spec).len(), 27, "{}", spec.name);
+        }
+        let mut start = flanger::SPEC.start();
+        (start[os_engine::effects::flanger::PHASE], start[os_engine::effects::flanger::FEED]) = (119, 24);
+        assert_eq!(read(flanger::SPEC, "Default"), start);
+        assert_eq!(read(flanger::SPEC, "Rotary"), [597, 938, 4740, 165, 4010, 501, 82, 629, 747, 4323, 3281, 4323]);
+        assert_eq!(read(phaser::SPEC, "Default"), [1500, 0, 900, 0, 512, 11, 693, 0, 2500]);
+        assert_eq!(read(phaser::SPEC, "Whale song"), [547, 953, 1000, 1024, 512, 22, 990, 0, 3047]);
     }
 }
