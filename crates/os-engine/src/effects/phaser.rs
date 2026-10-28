@@ -162,7 +162,7 @@ pub fn table() -> &'static ([f32; TABLE], [f32; TABLE]) {
     static T: OnceLock<Box<([f32; TABLE], [f32; TABLE])>> = OnceLock::new();
     T.get_or_init(|| {
         let mut t = Box::new(([0.0f32; TABLE], [0.0f32; TABLE]));
-        // The true 2 pi (the original's is a hair off it: its exports where the feedback runs away differ).
+        // The true 2 pi (the original's is a hair off it, so its exports differ slightly).
         for i in 0..TABLE {
             t.0[i] = ((((i as f64 / 4096.0) * TAU).sin() + 1.0) * 0.5) as f32;
         }
