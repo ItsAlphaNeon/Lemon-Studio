@@ -1327,6 +1327,9 @@ pub struct App {
     /// Linux: the plugin window drawn in the app's that has the mouse: pressed on (the button), or hovered.
     #[cfg(target_os = "linux")]
     embed_press: Option<(usize, os_plugkit::input::Button)>,
+    /// Linux: that press was on its frame's maximize or minimize button: the window comes to the front at the release.
+    #[cfg(target_os = "linux")]
+    embed_raise: Option<usize>,
     #[cfg(target_os = "linux")]
     embed_hover: Option<usize>,
     /// Linux: the virtual pointer at the last move while an embedded editor holds the cursor (`App::embed_move`).
@@ -1344,6 +1347,8 @@ pub struct App {
     pub pressed: Option<Action>,
     /// A button pressed and not released yet (`acts_on_release`).
     armed: Option<Action>,
+    /// Where that press was: its window comes to the front at the release, as the button acts (`mouse_down`).
+    raise_at: Option<(f32, f32)>,
     /// A toolbar button right-pressed and not released yet: (its hit, what the release over it runs).
     armed_right: Option<(Action, Action)>,
     hover_rect: Option<Rect>,
@@ -1611,6 +1616,8 @@ impl App {
             #[cfg(target_os = "linux")]
             embed_press: None,
             #[cfg(target_os = "linux")]
+            embed_raise: None,
+            #[cfg(target_os = "linux")]
             embed_hover: None,
             #[cfg(target_os = "linux")]
             embed_virt: None,
@@ -1620,6 +1627,7 @@ impl App {
             hover: None,
             pressed: None,
             armed: None,
+            raise_at: None,
             armed_right: None,
             hover_rect: None,
             damage: Damage::Full,
@@ -6118,7 +6126,15 @@ impl App {
                 return;
             }
         }
-        self.raise_under_mouse();
+        // A button that acts on its release brings its window to the front then too: raised at the press, the window
+        // showed in front of what the button was about to change for as long as the button was held (the channel
+        // name button over an open plugin window hid it only after the rack had come over it).
+        if action.as_ref().is_some_and(|a| self.acts_on_release(a)) {
+            self.raise_at = Some((x, y));
+        } else {
+            self.raise_at = None;
+            self.raise_under_mouse();
+        }
         if let Some(a) = action {
             if self.acts_on_release(&a) {
                 self.armed = Some(a);
@@ -6220,7 +6236,11 @@ impl App {
         let (x, y) = self.mouse;
         let Some(row) = self.embed_modal().or_else(|| self.embed_at(x, y)) else { return false };
         let Some(e) = self.state.embeds.get(&row).cloned() else { return false };
-        if self.state.z.last() != Some(&Win::Hosted(row)) {
+        // Its title-row buttons act on the release: the close button never brings the window forward (it showed in
+        // front of the window the keyboard was in until the release closed it), maximize and minimize at the release.
+        let button = e.button_at(x, y).filter(|_| btn == os_plugkit::input::Button::Left);
+        self.embed_raise = button.filter(|&close| !close).map(|_| row);
+        if button.is_none() && self.state.z.last() != Some(&Win::Hosted(row)) {
             self.state.raise(Win::Hosted(row));
             self.invalidate();
         }
@@ -6283,6 +6303,10 @@ impl App {
             },
         };
         self.embed_virt = None;
+        if self.embed_raise.take() == Some(row) && self.state.z.last() != Some(&Win::Hosted(row)) {
+            self.state.raise(Win::Hosted(row));
+            self.invalidate();
+        }
         if let Some(e) = self.state.embeds.get(&row) {
             e.release(x, y, btn, mods);
         }
@@ -6320,6 +6344,11 @@ impl App {
     /// Clicking any part of a child window brings it to the front (spec: ui/channel-rack.md §5).
     fn raise_under_mouse(&mut self) {
         let (x, y) = self.mouse;
+        self.raise_at_point(x, y);
+    }
+
+    /// The window at (`x`, `y`) to the front, the keyboard to it; a press on the empty workspace takes it from all.
+    fn raise_at_point(&mut self, x: f32, y: f32) {
         if let Some(w) = self.top_hit(x, y).and_then(|h| h.win) {
             if self.state.z.last() != Some(&w) {
                 self.state.raise(w);
@@ -6797,6 +6826,10 @@ impl App {
         // A held nudge ends with the button (spec: ui/tempo-tapper.md §6).
         if crate::tapper::nudge_flag().swap(0, std::sync::atomic::Ordering::Relaxed) != 0 {
             self.damage_win(Win::Tapper);
+        }
+        // The pressed button's window comes to the front, before the button acts (it may close the window).
+        if let Some((x, y)) = self.raise_at.take() {
+            self.raise_at_point(x, y);
         }
         // An armed button acts if the release is over it (`acts_on_release`).
         if let Some(a) = self.armed.take() {
@@ -12666,6 +12699,72 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(app.state.embeds.is_empty(), "closed by its button");
+    }
+
+    /// Buttons that act on their release bring their window forward then too, so nothing shows half done while the
+    /// button is held: the channel's name button over its open plugin window raises the rack and hides the window at
+    /// the release, and the plugin window's close button with the rack in front never brings the window forward.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn release_buttons_raise_their_window_at_the_release() {
+        use crate::plugin_window::ChannelInfo;
+        use std::time::{Duration, Instant};
+        let Ok(mut c) = Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = App::new(None);
+        app.plugins.available = crate::plugins::builtin();
+        app.plugins.scale = 1.0;
+        let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
+        app.plugins.create_with(0, index, None).unwrap();
+        if !app.state.hosted_rows.contains(&0) {
+            app.state.hosted_rows.push(0);
+        }
+        let settle = |app: &mut App, f: &dyn Fn(&App) -> bool| {
+            let t0 = Instant::now();
+            while !f(app) && t0.elapsed() < Duration::from_secs(3) {
+                app.plugin_tick();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            app.plugin_tick();
+        };
+        let open = |app: &mut App| {
+            let info = ChannelInfo { name: "Citrus".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+            app.plugins.open_window(0, info).unwrap();
+            settle(app, &|a| a.state.embeds.contains_key(&0));
+            app.state.raise(Win::Hosted(0));
+        };
+        app.state.raise(Win::ChannelRack);
+        open(&mut app);
+        // the plugin window off the rack's name buttons
+        let name = views::rack::name_rect(&app.state, 0).expect("row 0's name button");
+        let e = app.state.embeds[&0].clone();
+        e.set_pos((name.right() + 400.0, name.y));
+        app.plugin_tick();
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        app.mouse_move(name.cx(), name.cy());
+        app.mouse_down();
+        assert_eq!(app.state.z.last(), Some(&Win::Hosted(0)), "held, the button changes nothing yet");
+        app.mouse_up();
+        assert!(app.plugins.hosted[&0].window.is_none(), "the release hides the plugin window");
+        assert_eq!(app.state.z.last(), Some(&Win::ChannelRack), "and brings the rack forward with it");
+        // the rack in front: the plugin window's close button closes it without bringing it forward
+        open(&mut app);
+        app.state.raise(Win::ChannelRack);
+        let e = app.state.embeds[&0].clone();
+        e.set_pos((name.right() + 400.0, name.y));
+        app.plugin_tick();
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        let r = e.rect();
+        let (cx, cy) = (r.right() - 15.0, r.y + 15.0);
+        app.mouse_move(cx, cy);
+        assert_eq!(app.top_hit(cx, cy).map(|h| h.action.clone()), Some(Action::Embed(0)), "the close button shows");
+        app.mouse_down();
+        assert_eq!(app.state.z.last(), Some(&Win::ChannelRack), "the close button's press leaves the rack in front");
+        app.mouse_up();
+        settle(&mut app, &|a| a.state.embeds.is_empty());
+        assert!(app.plugins.hosted[&0].window.is_none(), "closed");
+        assert_eq!(app.state.z.last(), Some(&Win::ChannelRack));
     }
 
     /// The Lemon layout: the close shortcut closes the channel rack in front too, before the app.

@@ -610,6 +610,20 @@ impl EmbedFrame {
         }
     }
 
+    /// The frame's title-row button at canvas point (`x`, `y`), if any: whether it is the close button (else maximize or
+    /// minimize).
+    pub fn button_at(&self, x: f32, y: f32) -> Option<bool> {
+        let i = self.0.borrow();
+        if i.takes(x, y) || !i.surface.view().overlays.is_empty() {
+            return None;
+        }
+        match part_at(&i.st, x - i.pos.0, y - i.pos.1)? {
+            Part::Close => Some(true),
+            Part::Minimize | Part::Maximize => Some(false),
+            _ => None,
+        }
+    }
+
     /// A press or drag is under way in the window.
     pub fn grabbed(&self) -> bool {
         self.0.borrow().grab.is_some()
