@@ -870,6 +870,43 @@ pub fn auto_zoom(s: &mut State, grid: Rect) {
     center_keys(s, grid.h);
 }
 
+/// When the channel `ch` has notes in `notes` but none shows in the note grid (`g.grid`): the nearest one (its index)
+/// and its point nearest the grid's centre, in window px. The arrow that points at it (`views::piano`) brings it into
+/// view (`show_note`).
+pub fn off_view_note(g: &Geom, notes: &[Note], ch: Option<u16>) -> Option<(usize, (f32, f32))> {
+    let grid = g.grid;
+    let c = (grid.cx(), grid.cy());
+    let mut best: Option<(f32, usize, (f32, f32))> = None;
+    for (i, n) in notes.iter().enumerate().filter(|(_, n)| Some(n.channel) == ch) {
+        let Some(r) = g.note_rect(n) else { continue };
+        let v = r.intersect(&grid);
+        if v.w > 0.0 && v.h > 0.0 {
+            return None;
+        }
+        let p = (c.0.clamp(r.x, r.right()), c.1.clamp(r.y, r.bottom()));
+        let d = (p.0 - c.0).hypot(p.1 - c.1);
+        if best.is_none_or(|b| d < b.0) {
+            best = Some((d, i, p));
+        }
+    }
+    best.map(|(_, i, p)| (i, p))
+}
+
+/// Scrolls the piano roll's note grid `grid` to note `i` of the pattern: its key centred, and its start a quarter of
+/// the way in when it is off the visible time span.
+pub fn show_note(s: &mut State, i: usize, grid: Rect) {
+    let Some(n) = notes(s).get(i).copied() else { return };
+    let row = s.piano.row_h;
+    s.piano.scroll_y = (TOP_KEY - i32::from(n.key)) as f32 * row - grid.h / 2.0 + row / 2.0;
+    let ppt = s.piano.px_per_beat / f32::from(s.project.ppq.max(4));
+    let span = grid.w / ppt.max(1e-6);
+    let at = n.position as f32;
+    if at < s.piano.scroll_x || at > s.piano.scroll_x + span * 0.85 {
+        s.piano.scroll_x = (at - span * 0.25).max(0.0);
+    }
+    clamp_scroll(s, grid.h);
+}
+
 pub fn clamp_scroll(s: &mut State, view_h: f32) {
     let max = ((TOP_KEY + 1) as f32 * s.piano.row_h - view_h).max(0.0);
     s.piano.scroll_y = s.piano.scroll_y.clamp(0.0, max).round();

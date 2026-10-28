@@ -58,6 +58,9 @@ own content. Side branches are named `cutting-edge-<topic>`.
   MIDI capture and Retro audio capture (Score and Audio logger), Project clean-up (Macros), MIDI learn... (Link to
   controller...), Enter value... (Type in value...) and plainer settings labels. The menu bar's titles are spread evenly over
   its panel. Every menu keeps its place and order.
+- **The piano roll finds its notes.** When the channel has notes in the pattern but none is in view (octaves above
+  or below, or further along), a round arrow at the note grid's edge points at the nearest one and names its key; a
+  click scrolls it into view.
 - **Plugin editors in the app's window (Linux).** The plugins compiled into Lemon Studio (the stock instruments and
   effects) draw their editors inside Lemon Studio's own window, as floating windows like the instrument rack: no X11
   window, no XWayland, no OpenGL. Their menus and value boxes are drawn above the app; knob drags hold the cursor as the

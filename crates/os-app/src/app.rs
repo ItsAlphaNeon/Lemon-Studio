@@ -290,6 +290,8 @@ pub enum Action {
     /// The channel name in the title: the channel menu; right-click: channel settings; wheel: channels with notes
     /// (spec: ui/piano-target-channel.md).
     PianoTarget,
+    /// The arrow to the nearest note while none of the channel's is in view: note `.0` of the pattern into view.
+    PianoSeek(usize),
     PianoLanePick(usize),
     /// Arrow button of the pitch lane's scroll bar: +1 up, -1 down.
     PitchStep(i32),
@@ -5982,6 +5984,7 @@ impl App {
                     | Action::ToggleWin(_)
                     | Action::PatternAdd
                     | Action::ChannelSelect(_)
+                    | Action::PianoSeek(_)
                     | Action::ChannelEnable(_)
                     | Action::Util(_)
                     | Action::RackRollView
@@ -8642,6 +8645,11 @@ impl App {
                 // Top-left 4 px left of the name, 11 px below the title text's centre (spec: ui/piano-target-channel.md §2).
                 let b = self.hits.iter().rev().find(|h| h.action == Action::PianoTarget).map_or(Rect::new(self.mouse.0, self.mouse.1, 0.0, 0.0), |h| h.rect);
                 s.playlist.popup = Some(crate::piano_tools::target_menu(s, b.x + 2.0 - 4.0, b.cy() + 11.0));
+            }
+            Action::PianoSeek(i) => {
+                // Eased as a scroll arrow's step (General ▸ Display ▸ Smoothing).
+                let grid = views::piano::grid_rect(&self.state);
+                self.eased(|app| piano::show_note(&mut app.state, i, grid));
             }
             Action::PianoSnapMenu => {
                 // Top-left 11 px left of and below the button's centre (spec: ui/piano-snap.md §1).
@@ -14904,6 +14912,44 @@ mod tests {
     }
 
     /// The piano roll's scroll-bar arrows step their axis (spec: ui/piano-roll.md §1a).
+    /// The channel's notes are all out of view: an arrow at the grid's edge points at the nearest and names it; a click
+    /// brings it into view, and the arrow goes.
+    #[test]
+    fn piano_arrow_finds_notes_out_of_view() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        let ch = app.state.project.channels[app.state.selected_channel].index;
+        let ppq = u32::from(app.state.project.ppq.max(4));
+        // C5 centred, then notes far above and below the rows shown around it.
+        let pattern = app.state.pattern;
+        app.state.project.patterns.iter_mut().find(|p| p.number == pattern).unwrap().notes.clear();
+        let h = views::piano::grid_rect(&app.state).h;
+        crate::piano::center_keys(&mut app.state, h);
+        let pat = app.state.project.patterns.iter_mut().find(|p| p.number == pattern).unwrap();
+        pat.notes = vec![Note { key: 125, length: ppq, ..Note::step(ch, 0) }, Note { key: 2, length: ppq, ..Note::step(ch, 0) }];
+        frame(&mut app, &mut c, None);
+        let g = crate::piano::Geom::new(&app.state, views::piano::grid_rect(&app.state));
+        let (i, p) = crate::piano::off_view_note(&g, &app.state.project.patterns.iter().find(|p| p.number == app.state.pattern).unwrap().notes, Some(ch)).expect("none in view");
+        let r = hit_rect(&app, &Action::PianoSeek(i));
+        if let Some(out) = std::env::var_os("OS_SEEK_SHOT") {
+            c.pixmap.save_png(std::path::Path::new(&out)).unwrap();
+        }
+        let grid = views::piano::grid_rect(&app.state);
+        assert!(grid.contains(r.cx(), r.cy()), "the arrow is on the grid");
+        assert_eq!(p.1 < grid.cy(), r.cy() < grid.cy(), "on the side of the nearest note");
+        click(&mut app, &mut c, r);
+        app.ease_to_end();
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        assert!(app.hits.iter().all(|h| !matches!(h.action, Action::PianoSeek(_))), "a note is in view: no arrow");
+        let g = crate::piano::Geom::new(&app.state, grid);
+        let n = app.state.project.patterns.iter().find(|p| p.number == app.state.pattern).unwrap().notes[i];
+        let nr = g.note_rect(&n).unwrap();
+        // Centred as far as the roll scrolls (the lowest and highest keys stop at its ends).
+        assert!(nr.intersect(&grid).h >= nr.h, "the note is in view: {nr:?} in {grid:?}");
+    }
+
     #[test]
     fn piano_scroll_arrows_step() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
