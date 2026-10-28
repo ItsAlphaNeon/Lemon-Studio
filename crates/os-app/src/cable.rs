@@ -34,6 +34,9 @@ const SETTLE_MAX: usize = 2400;
 const SLOW: std::time::Duration = std::time::Duration::from_millis(8);
 /// ...and this many slow paints in a row hang the cables still, until a new cable is plugged in.
 const SLOW_PAINTS: u32 = 8;
+/// The farthest apart (in track numbers) a cable's ends are and it still hangs in front of the window below the mixer
+/// (`front`): two tracks between them, as bus 3 into the master. Longer cables sag too far and go behind it.
+const FRONT_SPAN: u16 = 3;
 
 /// A tunable factor of the simulation.
 pub struct Param {
@@ -423,14 +426,34 @@ impl Cables {
 
     /// The area the cables cover now.
     pub fn bounds(&self) -> Option<Rect> {
-        let mut pts = self.ropes.iter().flat_map(|r| r.p.iter());
-        let &(x, y) = pts.next()?;
-        let (mut x0, mut y0, mut x1, mut y1) = (x, y, x, y);
-        for &(x, y) in pts {
-            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
-        }
-        Some(Rect::new(x0, y0, x1 - x0, y1 - y0))
+        area(self.ropes.iter())
     }
+
+    /// The short cables (`FRONT_SPAN`), which hang in front of the window below the mixer: their points and colour.
+    pub fn front(&self) -> impl Iterator<Item = (&[Pt], Color)> {
+        self.front_ropes().map(|r| (&r.p[..], r.color))
+    }
+
+    /// The area the short cables cover now.
+    pub fn front_bounds(&self) -> Option<Rect> {
+        area(self.front_ropes())
+    }
+
+    fn front_ropes(&self) -> impl Iterator<Item = &Rope> {
+        let cur = self.current;
+        self.ropes.iter().filter(move |r| cur.is_some_and(|c| r.key.abs_diff(c) <= FRONT_SPAN))
+    }
+}
+
+/// The area `ropes` cover.
+fn area<'a>(ropes: impl Iterator<Item = &'a Rope>) -> Option<Rect> {
+    let mut pts = ropes.flat_map(|r| r.p.iter());
+    let &(x, y) = pts.next()?;
+    let (mut x0, mut y0, mut x1, mut y1) = (x, y, x, y);
+    for &(x, y) in pts {
+        (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+    }
+    Some(Rect::new(x0, y0, x1 - x0, y1 - y0))
 }
 
 /// The shape a cable spanning `d` from its first socket settles to (points relative to that socket): its resting curve,
@@ -526,6 +549,17 @@ mod tests {
 
     fn lowest(c: &Cables, i: usize) -> f32 {
         c.ropes[i].p.iter().map(|p| p.1).fold(f32::MIN, f32::max)
+    }
+
+    /// Only cables with at most two tracks between their ends hang in front of the window below the mixer.
+    #[test]
+    fn short_cables_hang_in_front() {
+        let mut c = Cables::default();
+        let (a, b) = ((100.0, 200.0), (300.0, 203.0));
+        plug(&mut c, 3, &[(0, a, b), (5, a, b), (6, a, b), (7, a, b)]);
+        assert_eq!(c.front_ropes().map(|r| r.key).collect::<Vec<_>>(), vec![0, 5, 6], "into the master, 5 and 6, not 7");
+        assert_eq!(c.front().count(), 3);
+        assert!(c.front_bounds().is_some());
     }
 
     #[test]

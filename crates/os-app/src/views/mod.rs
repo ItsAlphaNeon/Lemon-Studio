@@ -896,15 +896,15 @@ pub fn rgb(c: os_model::Rgb) -> Color {
     Color { r: c.r, g: c.g, b: c.b, a: 255 }
 }
 
-/// The mixer's routing cables where they hang in front of the split window below it (`State::cable_reach`), as the
-/// mixer drew them (`mixer::paint` keeps them inside itself and its gap).
+/// The mixer's short routing cables (`Cables::front`) where they hang in front of the split window below it
+/// (`State::cable_reach`), as the mixer drew them (`mixer::paint` keeps them inside itself and its gap).
 fn paint_cables_over(ui: &mut Ui, s: &State, reach: Rect) {
     let cables = s.cables.borrow();
     // Muted with the mixer when it is a split window without the keyboard (`State::veil`), as the mixer is.
     let v = Win::Mixer.slot().map_or(0.0, |i| s.veil[i]);
     let bg = backdrop(ui);
     ui.c.push_clip(reach);
-    for (_, pts, col) in cables.each() {
+    for (pts, col) in cables.front() {
         ui.c.polyline(pts, 2.0, col.mix(bg, v * VEIL));
     }
     ui.c.pop_clip();
