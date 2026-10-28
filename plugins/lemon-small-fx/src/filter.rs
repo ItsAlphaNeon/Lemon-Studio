@@ -68,7 +68,7 @@ pub const SPEC: &Spec = &Spec {
     cards: &CARDS,
     controls: &CONTROLS,
     display: Some(Display { r: RESPONSE, draw: response }),
-    mark: Mark { x: 480.0, y: 162.0, anchor: 1.0, stacked: false },
+    mark: Mark { x: 400.0, y: 162.0, anchor: 0.5, stacked: false },
     hint: None,
     labels: &[],
     text,
