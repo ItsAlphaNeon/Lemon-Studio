@@ -183,6 +183,7 @@ impl Mix {
     }
 
     /// Plays `pairs` output pairs (before the device starts: the room is made now, not in the callback).
+    #[cfg_attr(not(windows), allow(dead_code))]
     fn set_width(&mut self, pairs: usize) {
         self.width = 2 * pairs.max(1);
         self.one.reserve(self.width * MAX_FRAMES);
@@ -257,12 +258,14 @@ fn input_ring() -> &'static Inputs {
 
 impl Inputs {
     /// A stream with `channels` inputs and blocks of `block` frames opened (0: closed); readers start again.
+    #[cfg_attr(not(windows), allow(dead_code))]
     fn open(&self, channels: usize, block: usize) {
         self.channels.store(channels.min(INPUT_CHANNELS), Ordering::Release);
         self.block.store(block, Ordering::Relaxed);
     }
 
     /// The driver's callback: a block of `frames` frames, `at(channel, frame)` an input's sample.
+    #[cfg_attr(not(windows), allow(dead_code))]
     fn push(&self, frames: usize, at: impl Fn(usize, usize) -> f32) {
         let ch = self.channels.load(Ordering::Relaxed);
         let w = self.written.load(Ordering::Relaxed);
