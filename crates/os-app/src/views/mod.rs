@@ -489,18 +489,10 @@ fn card_corners(ui: &mut Ui, r: Rect) {
 /// its edges are hits only. A repaint that misses this skips the window; a playlist scroll paints around it.
 pub fn paint_area(s: &State, w: Win) -> Rect {
     match w {
-        Win::ChannelRack => rack::paint_area(s),
-        Win::Plugin => channel_win::rect(s),
-        Win::Perf => perf::bounds(s),
-        Win::Tapper => tapper::bounds(s),
-        Win::Touch => touch::bounds(s),
-        Win::Strum => strum::bounds(s),
-        Win::Arp => arpeggiate::bounds(s),
-        Win::PianoDlg => piano_dlg::bounds(s),
         Win::Mixer => s.mixer_hang().map_or(s.win_rect(Win::Mixer), |h| s.win_rect(Win::Mixer).union(&h)),
         #[cfg(target_os = "linux")]
-        Win::Hosted(row) => s.embeds.get(&row).map_or(Rect::new(0.0, 0.0, 0.0, 0.0), |e| e.rect()),
-        w => s.win_rect(w),
+        Win::Hosted(_) => crate::floating::paint_area(s, w).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0)),
+        w => crate::floating::paint_area(s, w).unwrap_or_else(|| s.win_rect(w)),
     }
 }
 

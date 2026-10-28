@@ -2107,7 +2107,7 @@ impl App {
         }
         // The tiling layout's floating windows close the same way, as a plugin's window does (Hyprland's Super+W).
         let lemon = self.state.tiled();
-        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg) || (lemon && matches!(w, Win::ChannelRack | Win::Plugin));
+        let tool = |w: &Win| crate::floating::is_tool(*w) || (lemon && matches!(w, Win::ChannelRack | Win::Plugin));
         if let Some(&w) = self.state.z.last().filter(|w| !self.state.no_focus && tool(w)) {
             self.act(Action::CloseWin(w));
             self.invalidate();
@@ -3203,9 +3203,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            // Plugin windows drawn in the app's too (Linux): a scroll that moved their pixels with the playlist's left
-            // them jittering, and their old places on the playlist.
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg | Win::Hosted(_)))
+            .filter(|&&w| matches!(w, Win::Mixer | Win::PianoRoll) || crate::floating::floats(w))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -3227,16 +3225,9 @@ impl App {
     fn win_solid(&self, w: Win) -> Option<Rect> {
         let s = &self.state;
         let r = match w {
-            Win::ChannelRack => Some(views::rack::rect(s)),
-            Win::Plugin => s.project.channels.get(s.plugin_channel).map(|_| views::channel_win::rect(s)),
-            Win::Perf => Some(views::perf::rect(s)),
-            Win::Tapper => Some(views::tapper::rect(s)),
-            Win::Touch => Some(views::touch::rect(s)),
-            Win::Strum => Some(views::strum::rect(s)),
-            Win::Arp => Some(views::arpeggiate::rect(s)),
-            Win::PianoDlg => Some(views::piano_dlg::rect(s)),
-            #[cfg(target_os = "linux")]
-            Win::Hosted(row) => s.embeds.get(&row).map(|e| e.rect()),
+            // The channel window without a channel draws no frame.
+            Win::Plugin if s.project.channels.get(s.plugin_channel).is_none() => None,
+            w if crate::floating::floats(w) => crate::floating::rect(s, w),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -3886,15 +3877,11 @@ impl App {
             return self.invalidate();
         }
         match w {
-            Win::ChannelRack => self.damage_rect(views::rack::bounds(&self.state)),
-            Win::Perf => self.damage_rect(views::perf::bounds(&self.state)),
-            Win::Tapper => self.damage_rect(views::tapper::bounds(&self.state)),
-            Win::Touch => self.damage_rect(views::touch::bounds(&self.state)),
-            Win::Strum => self.damage_rect(views::strum::bounds(&self.state)),
-            Win::Arp => self.damage_rect(views::arpeggiate::bounds(&self.state)),
-            Win::PianoDlg => self.damage_rect(views::piano_dlg::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
-            _ => self.invalidate(),
+            w => match crate::floating::bounds(&self.state, w) {
+                Some(r) => self.damage_rect(r),
+                None => self.invalidate(),
+            },
         }
     }
 
@@ -6373,19 +6360,7 @@ impl App {
 
     /// Area a floating window paints (for damage).
     fn win_bounds(&self, w: Win) -> Rect {
-        match w {
-            Win::Plugin => views::channel_win::bounds(&self.state),
-            Win::Perf => views::perf::bounds(&self.state),
-            Win::Tapper => views::tapper::bounds(&self.state),
-            Win::Touch => views::touch::bounds(&self.state),
-            Win::Strum => views::strum::bounds(&self.state),
-            Win::Arp => views::arpeggiate::bounds(&self.state),
-            Win::PianoDlg => views::piano_dlg::bounds(&self.state),
-            Win::ChannelRack => views::rack::bounds(&self.state),
-            #[cfg(target_os = "linux")]
-            Win::Hosted(_) => views::paint_area(&self.state, w),
-            w => self.state.win_rect(w).outset(5.0),
-        }
+        crate::floating::bounds(&self.state, w).unwrap_or_else(|| self.state.win_rect(w).outset(5.0))
     }
 
     /// Cursor for the current hover / drag.
@@ -8705,19 +8680,13 @@ impl App {
                     self.drag = Some(Drag::Tile { win });
                     return;
                 }
-                let pos = match win {
-                    Win::Plugin => {
-                        s.plugin_moved = true;
-                        s.plugin_pos
-                    }
-                    Win::Perf => s.perf.pos,
-                    Win::Tapper => s.tapper.pos,
-                    Win::Touch => s.touch.pos,
-                    Win::Strum => s.strum.pos,
-                    Win::Arp => s.arp.pos,
-                    Win::PianoDlg => s.piano_dlg.pos[s.piano_dlg.tool.index()],
-                    Win::ChannelRack => s.rack_pos,
-                    w => {
+                if win == Win::Plugin {
+                    s.plugin_moved = true;
+                }
+                let pos = match crate::floating::placed(win) {
+                    Some(p) => (p.pos)(s),
+                    None => {
+                        let w = win;
                         // Start from the rect as shown (kept on screen), then move it.
                         let r = s.float_rect(w);
                         if let Some(i) = w.slot() {
