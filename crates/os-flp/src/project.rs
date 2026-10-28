@@ -168,15 +168,23 @@ mod id {
     pub const MX_SLOT: u8 = 98;
     pub const MX_ROUTES: u8 = 235;
     pub const MX_PARAMS: u8 = 225;
+    /// After the routes: record source, monitor mode, audio input and audio output, u32s read as signed (spec:
+    /// audio/track-io.md §1.6).
+    pub const MX_REC_SOURCE: u8 = 165;
+    pub const MX_MONITOR: u8 = 166;
+    pub const MX_INPUT: u8 = 154;
+    pub const MX_OUTPUT: u8 = 147;
     /// Number of stored mixer tracks, just before the first track (spec: flp/events/mixer.md).
     pub const MX_COUNT: u8 = 103;
 }
 
 const NOTE_LEN: usize = 24;
-/// Clip record lengths: 88 bytes in files of FL 26, 80 bytes in files of FL 24.2 to 25 (spec: flp/layouts.md,
-/// "Playlist clip records").
+/// Clip record lengths: 88 bytes in files of FL 26, 80 bytes in files of FL 24.2 to 25, 60 bytes in files of FL 21
+/// to 24.1 (20.99 betas included), 32 bytes up to FL 20 (spec: flp/layouts.md, "Playlist clip records").
 const CLIP_LEN: usize = 88;
 const CLIP_LEN_25: usize = 80;
+const CLIP_LEN_21: usize = 60;
+const CLIP_LEN_20: usize = 32;
 const MIXER_REC_LEN: usize = 12;
 const NOTE_FLAGS_DEFAULT: u16 = 0x4000;
 const PATTERN_COLOR_DEFAULT: u32 = 0x002D_2C29;
@@ -356,6 +364,11 @@ struct MixerLoc {
     name: Option<usize>,
     flags: Option<usize>,
     routes: Option<usize>,
+    /// Events 165, 166, 154 and 147 (`id::MX_REC_SOURCE` ..).
+    rec_source: Option<usize>,
+    monitor: Option<usize>,
+    input: Option<usize>,
+    output: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -640,6 +653,17 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
                     m.routes = Some(i);
                 }
             }
+            (Region::Mixer, id::MX_REC_SOURCE | id::MX_MONITOR | id::MX_INPUT | id::MX_OUTPUT) => {
+                if let Some(m) = l.mixer.last_mut().filter(|m| m.routes.is_some()) {
+                    let at = match e.id {
+                        id::MX_REC_SOURCE => &mut m.rec_source,
+                        id::MX_MONITOR => &mut m.monitor,
+                        id::MX_INPUT => &mut m.input,
+                        _ => &mut m.output,
+                    };
+                    *at = Some(i);
+                }
+            }
             (Region::Mixer, id::MX_PARAMS) => l.mixer_params = Some(i),
             _ => {}
         }
@@ -697,9 +721,10 @@ fn text_enc(events: &[Event], version: Option<usize>) -> TextEnc {
     if major_version(events, version) <= 11 { TextEnc::Ansi } else { TextEnc::Utf16 }
 }
 
-/// The record length a clip list fits: a whole number of records, each with `00 50` at byte 4.
+/// The record length a clip list fits: a whole number of records, each with `00 50` at byte 4, trying 88, 80, 60
+/// and 32 bytes (spec: flp/layouts.md, "How to tell the generation").
 fn list_clip_len(data: &[u8]) -> Option<usize> {
-    [CLIP_LEN, CLIP_LEN_25]
+    [CLIP_LEN, CLIP_LEN_25, CLIP_LEN_21, CLIP_LEN_20]
         .into_iter()
         .find(|&n| !data.is_empty() && data.len() % n == 0 && data.chunks_exact(n).all(|r| r[4..6] == [0x00, 0x50]))
 }
@@ -2062,6 +2087,25 @@ fn plugin_record(slot: Option<(u16, u8)>) -> Vec<u8> {
     r
 }
 
+/// `t` with the track's audio input and output, record source and monitor mode from its block (a file without them
+/// keeps the defaults; spec: audio/track-io.md §1.6).
+fn io_of(events: &[Event], m: &MixerLoc, mut t: MixerTrack) -> MixerTrack {
+    let at = |i: Option<usize>| i.map(|i| int(&events[i]));
+    if let Some(v) = at(m.input) {
+        t.audio_in = (v as i32).max(-1);
+    }
+    if let Some(v) = at(m.output) {
+        t.audio_out = (v as i32).max(-1);
+    }
+    if let Some(v) = at(m.rec_source) {
+        t.rec_source = v.min(255) as u8;
+    }
+    if let Some(v) = at(m.monitor) {
+        t.monitor = v.min(255) as u8;
+    }
+    t
+}
+
 fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
     let params = l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[]);
     let old = before_12_8(events, l.version);
@@ -2167,7 +2211,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             latency_in,
             icon: m.icon.map(|i| int(&events[i]) as u16),
             origin: Some(index),
-            ..MixerTrack::new(index)
+            ..io_of(events, m, MixerTrack::new(index))
         });
     }
     out
@@ -3224,6 +3268,22 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 None => return Err(ProjectError::Structure(format!("mixer track {} has no routing event", m.index))),
             }
         }
+        // Audio input / output, record source, monitor mode (spec: audio/track-io.md §1.6). A file without them gets
+        // the ones that changed after the routes, in the order FL writes them (each insert lands before the earlier
+        // ones at the same place).
+        let io = [
+            (ml.output, id::MX_OUTPUT, m.audio_out as u32, old.audio_out as u32),
+            (ml.input, id::MX_INPUT, m.audio_in as u32, old.audio_in as u32),
+            (ml.monitor, id::MX_MONITOR, m.monitor.into(), old.monitor.into()),
+            (ml.rec_source, id::MX_REC_SOURCE, m.rec_source.into(), old.rec_source.into()),
+        ];
+        for (at, eid, new, _) in io.into_iter().filter(|&(_, _, new, was)| new != was) {
+            match (at, ml.routes) {
+                (Some(i), _) => set_int(&mut events[i], new),
+                (None, Some(r)) => inserts.push((r + 1, Event::new(eid, Value::U32(new)))),
+                (None, None) => {}
+            }
+        }
         // spec: flp/events/mixer.md "Kind 0x20, route level": records right after the source track's own records.
         if m.send_levels != old.send_levels {
             if let Some(data) = params.as_mut() {
@@ -3968,11 +4028,11 @@ fn track_block_events(m: &MixerTrack, last: bool, enc: TextEnc) -> Vec<Event> {
         ev.push(Event::new(id::MX_SLOT, Value::U16(k as u16)));
     }
     ev.push(Event::new(id::MX_ROUTES, Value::var(route_bytes(&m.routes))));
-    ev.push(Event::new(165, Value::U32(3)));
-    ev.push(Event::new(166, Value::U32(1)));
+    ev.push(Event::new(id::MX_REC_SOURCE, Value::U32(m.rec_source.into())));
+    ev.push(Event::new(id::MX_MONITOR, Value::U32(m.monitor.into())));
     ev.push(Event::new(49, Value::U8(0)));
-    ev.push(Event::new(154, Value::U32(u32::MAX)));
-    ev.push(Event::new(147, Value::U32(if m.index == 0 { 0 } else { u32::MAX })));
+    ev.push(Event::new(id::MX_INPUT, Value::U32(m.audio_in as u32)));
+    ev.push(Event::new(id::MX_OUTPUT, Value::U32(m.audio_out as u32)));
     ev
 }
 
@@ -5344,6 +5404,37 @@ mod tests {
         assert_eq!(load(&file).unwrap().mixer, edited.mixer);
     }
 
+    /// A track's audio input and output, record source and monitor mode are events 154, 147, 165 and 166 (spec:
+    /// audio/track-io.md §1.6): written for a new project, read back, and changed in place; arming is not saved.
+    #[test]
+    fn track_inputs_and_outputs_are_saved() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..18).map(MixerTrack::new).collect();
+        p.mixer[17].routes.clear();
+        p.mixer[1].audio_in = 2;
+        p.mixer[1].audio_out = 0;
+        p.mixer[0].audio_out = -1;
+        p.mixer[3].monitor = os_model::MONITOR_ON;
+        p.mixer[3].rec_source = os_model::REC_EXTERNAL;
+        p.mixer[3].armed = true;
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.mixer, p.mixer);
+        assert!(!back.mixer[3].armed);
+        let at = |f: &FlpFile, eid: u8, t: usize| int(events_of(f).unwrap().iter().filter(|e| e.id == eid).nth(t).unwrap()) as i32;
+        assert_eq!((at(&file, id::MX_INPUT, 1), at(&file, id::MX_OUTPUT, 1), at(&file, id::MX_OUTPUT, 0)), (2, 0, -1));
+        assert_eq!((at(&file, id::MX_MONITOR, 3), at(&file, id::MX_REC_SOURCE, 3)), (3, 0));
+        let mut edited = back.clone();
+        edited.mixer[1].audio_in = -1;
+        edited.mixer[5].audio_out = 1;
+        edited.mixer[5].monitor = os_model::MONITOR_OFF;
+        apply(&edited, &mut file).unwrap();
+        assert_eq!(load(&file).unwrap().mixer, edited.mixer);
+        assert_eq!((at(&file, id::MX_INPUT, 1), at(&file, id::MX_OUTPUT, 5), at(&file, id::MX_MONITOR, 5)), (-1, 1, 0));
+    }
+
     /// The last stored track is the "current" track: its slot plugins and records use track 501. Added tracks go
     /// before it (spec: flp/events/mixer.md "The last track", "Adding tracks").
     #[test]
@@ -5676,6 +5767,22 @@ mod tests {
         assert_eq!((back[1].position, back[1].length, back[1].track), (768, 96, 0));
         assert_eq!(encode_clips(&back, CLIP_LEN_25), d);
         assert_eq!(list_clip_len(&encode_clips(&back, CLIP_LEN)), Some(CLIP_LEN));
+    }
+
+    /// Lists of older files, 60-byte (FL 21 to 24.1) and 32-byte (up to FL 20) records, are told apart and written
+    /// back at their length; 32-byte records have no id (spec: flp/layouts.md, "How to tell the generation").
+    #[test]
+    fn older_clip_records_are_read_at_their_length() {
+        let a = Clip::new(384, 288, 2, ClipSource::Pattern(1));
+        let b = Clip::new(768, 96, 0, ClipSource::Pattern(2));
+        for len in [CLIP_LEN_21, CLIP_LEN_20] {
+            let d = encode_clips(&[a.clone(), b.clone()], len);
+            assert_eq!(d.len(), 2 * len);
+            assert_eq!(list_clip_len(&d), Some(len));
+            let back = decode_clips(&d, len);
+            assert_eq!((back[1].position, back[1].length, back[1].track), (768, 96, 0));
+            assert_eq!(encode_clips(&back, len), d);
+        }
     }
 
     /// A new project's playlist (clips with windows, mute, markers) and automation clips are written by `create`,

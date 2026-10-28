@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! ASIO output (Windows): the chosen driver plays the mix on its first two outputs, at the buffer length chosen on the
-//! Audio page when it takes it, else the one set in its own panel (`control_panel`). Its first inputs open with the
-//! outputs (full duplex): the same callback hands them to the capture while One-click audio recording records
-//! (`crate::capture`; spec: ui/one-click-recording.md §2).
+//! ASIO output (Windows): the chosen driver plays the mix on its first outputs, in pairs (the master on the pair it is
+//! set to, a mixer track on its own: spec audio/track-io.md §2.1), at the buffer length chosen on the Audio page when it
+//! takes it, else the one set in its own panel (`control_panel`). Its first inputs open with the outputs (full duplex):
+//! the same callback hands them to the mixer tracks that hear them (`super::input_ring`) and to the capture while One-click
+//! audio recording records (`crate::capture`; spec: ui/one-click-recording.md §2).
 //!
 //! The driver is loaded by name through asio-sys, which builds the ASIO SDK's host files (`asiosdk`). cpal's ASIO host
 //! is not used: it finds a driver by loading every driver listed before it, and one whose hardware is missing may
@@ -18,7 +19,7 @@ use std::sync::{Arc, OnceLock};
 
 use asio_sys as sys;
 
-use super::{Errors, Mix};
+use super::{input_ring, Errors, Mix};
 
 static ASIO: OnceLock<sys::Asio> = OnceLock::new();
 
@@ -43,6 +44,7 @@ impl Drop for AsioOut {
         let _ = self.driver.stop();
         // The mix, and the sources in it, go with the callback (on this thread: the driver no longer calls it).
         self.driver.remove_callback(self.callback);
+        input_ring().open(0, 0);
         self.driver.remove_event_callback(self.events);
         let _ = self.driver.dispose_buffers();
         // Then `driver` itself: the driver exits and is unloaded.
@@ -59,6 +61,9 @@ pub(crate) struct Opened {
     pub(crate) channels: u16,
     /// Inputs open (0: none, or the driver refused them).
     pub(crate) inputs: u16,
+    /// The driver's names for the outputs and inputs open.
+    pub(crate) out_names: Vec<String>,
+    pub(crate) in_names: Vec<String>,
     /// The rates of `audio_cfg::RATES` and the lengths of `audio_cfg::BUFFERS` it takes.
     pub(crate) rates: Vec<u32>,
     pub(crate) sizes: Vec<u32>,
@@ -67,8 +72,10 @@ pub(crate) struct Opened {
     pub(crate) input_latency: Option<u32>,
 }
 
-/// The inputs opened at most: the ones the menu lists.
+/// The inputs opened at most: the ones the menus list.
 const MAX_INPUTS: i32 = 8;
+/// The outputs opened at most, in pairs (spec: audio/track-io.md §2.1).
+const MAX_OUTPUTS: i32 = 16;
 
 /// Loads driver `name` and plays `mix` on it: at `rate` when the driver takes it (else its own), at `buffer` frames
 /// when it takes that (else its own, the length set in its panel). Overloads and requests to be reset (a buffer length
@@ -103,7 +110,9 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
     if outs < 1 {
         return Err("the driver has no outputs".into());
     }
-    let channels = outs.min(2) as usize;
+    // Its outputs in pairs (one alone when it has one: both sides summed there).
+    let channels = if outs == 1 { 1 } else { (outs.min(MAX_OUTPUTS) / 2 * 2) as usize };
+    mix.set_width((channels / 2).max(1));
     let ty = driver.output_data_type().map_err(|e| e.to_string())?;
     let (format, big) = Format::of(&ty).ok_or_else(|| format!("the driver's sample format ({ty:?}) is not one Lemon Studio writes"))?;
     let range = driver.buffersize_range().map_err(|e| e.to_string())?;
@@ -137,28 +146,35 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
     let frames = stream.buffer_size.max(1) as usize;
     // Each channel's two halves (the driver plays one while the callback fills the other).
     let halves = Halves(stream.buffer_infos.iter().map(|b| b.buffers.map(|p| p as usize)).collect());
+    let width = 2 * (channels / 2).max(1);
+    input_ring().open(in_halves.0.len(), frames);
     let callback = driver.add_callback(move |info| {
-        let sum = mix.block(frames);
         let half = (info.buffer_index & 1) as usize;
+        // The block's inputs first, so the streams rendering the next one hear them; the capture's too, while One-click
+        // audio recording records.
+        if !in_halves.0.is_empty() {
+            let last = in_halves.0.len() - 1;
+            let n = in_format.bytes();
+            let at = |ch: usize, f: usize| {
+                let p = in_halves.0[ch.min(last)][half] as *const u8;
+                // Safety: the driver's input buffer holds `frames` samples of `in_format` while this callback runs.
+                let b = unsafe { std::slice::from_raw_parts(p.add(f * n), n) };
+                decode(b, in_format, in_big)
+            };
+            input_ring().push(frames, at);
+            let cap = crate::capture::capture();
+            if cap.on() {
+                cap.push(frames, at);
+            }
+        }
+        let sum = mix.block(frames);
         // One output: both sides (`Side::Both`).
         let mono = halves.0.len() == 1;
         for (ch, b) in halves.0.iter().enumerate() {
             let side = if mono { Side::Both } else { Side::One(ch) };
             // Safety: the driver's buffer holds `frames` samples of `format` until the buffers are disposed of, which
             // only happens after this callback is removed (`AsioOut::drop`).
-            unsafe { write(b[half] as *mut u8, sum, side, frames, format, big) };
-        }
-        // The inputs of the same block, while One-click audio recording records.
-        let cap = crate::capture::capture();
-        if cap.on() && !in_halves.0.is_empty() {
-            let last = in_halves.0.len() - 1;
-            let n = in_format.bytes();
-            cap.push(frames, |ch, f| {
-                let p = in_halves.0[ch.min(last)][half] as *const u8;
-                // Safety: the driver's input buffer holds `frames` samples of `in_format` while this callback runs.
-                let b = unsafe { std::slice::from_raw_parts(p.add(f * n), n) };
-                decode(b, in_format, in_big)
-            });
+            unsafe { write(b[half] as *mut u8, sum, width, side, frames, format, big) };
         }
     });
     // Drivers may ask to be reset while they start; that is not a reason to open them anew.
@@ -198,7 +214,9 @@ pub(crate) fn open(name: &str, rate: Option<u32>, buffer: Option<u32>, mut mix: 
     let lat = out.driver.latencies().ok();
     let latency = lat.as_ref().map(|l| l.output).filter(|&l| l > 0).map(|l| l as u32);
     let input_latency = lat.map(|l| l.input).filter(|&l| l > 0 && inputs > 0).map(|l| l as u32);
-    Ok(Opened { out, rate: now.round() as u32, frames: frames as u32, buffers, channels: channels as u16, inputs, rates, sizes, latency, input_latency })
+    let out_names = (0..channels).map(|c| channel_name(c as i32, false).unwrap_or_else(|| format!("Out {}", c + 1))).collect();
+    let in_names = (0..usize::from(inputs)).map(|c| channel_name(c as i32, true).unwrap_or_else(|| format!("In {}", c + 1))).collect();
+    Ok(Opened { out, rate: now.round() as u32, frames: frames as u32, buffers, channels: channels as u16, inputs, out_names, in_names, rates, sizes, latency, input_latency })
 }
 
 /// The lengths of `audio_cfg::BUFFERS` a driver takes: within its range, and a power of two or a whole number of steps
@@ -235,6 +253,33 @@ pub(crate) fn control_panel() -> Result<(), String> {
         -1000 => Err("the driver has no panel".into()),
         e => Err(format!("the driver's panel did not open (error {e})")),
     }
+}
+
+/// The loaded driver's name for its output (or input) `channel` (`ASIOGetChannelInfo`); `None` when it gives none.
+fn channel_name(channel: i32, input: bool) -> Option<String> {
+    #[repr(C)]
+    struct ChannelInfo {
+        channel: std::ffi::c_long,
+        is_input: std::ffi::c_long,
+        is_active: std::ffi::c_long,
+        channel_group: std::ffi::c_long,
+        sample_type: std::ffi::c_long,
+        name: [std::ffi::c_char; 32],
+    }
+    unsafe extern "C" {
+        // `ASIOError ASIOGetChannelInfo(ASIOChannelInfo *info)` in the SDK's common/asio.cpp, as `control_panel`'s.
+        #[link_name = "\u{1}?ASIOGetChannelInfo@@YAJPEAUASIOChannelInfo@@@Z"]
+        fn asio_get_channel_info(info: *mut ChannelInfo) -> std::ffi::c_long;
+    }
+    asio().loaded_driver()?;
+    let mut info = ChannelInfo { channel, is_input: input.into(), is_active: 0, channel_group: 0, sample_type: 0, name: [0; 32] };
+    // Safety: a driver is loaded (on this thread), and `info` is laid out as the SDK's struct.
+    if unsafe { asio_get_channel_info(&mut info) } != 0 {
+        return None;
+    }
+    let bytes: Vec<u8> = info.name.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+    let name = String::from_utf8_lossy(&bytes).trim().to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 /// The driver's buffer halves per channel, as addresses: only the callback writes to them.
@@ -325,23 +370,24 @@ fn decode(b: &[u8], format: Format, big: bool) -> f32 {
     }
 }
 
-/// Which of the stereo mix an output gets: one side, or both summed and halved (a driver with one output).
+/// Which of the mix an output gets: its own channel, or the first pair's sides summed and halved (a driver with one
+/// output).
 #[derive(Clone, Copy)]
 enum Side {
     One(usize),
     Both,
 }
 
-/// Writes `side` of the interleaved stereo `mix` into a driver buffer of `frames` samples.
+/// Writes `side` of `mix` (interleaved, `width` channels) into a driver buffer of `frames` samples.
 ///
 /// Safety: `dst` holds `frames` samples of `format`, and nothing else uses it meanwhile.
-unsafe fn write(dst: *mut u8, mix: &[f32], side: Side, frames: usize, format: Format, big: bool) {
+unsafe fn write(dst: *mut u8, mix: &[f32], width: usize, side: Side, frames: usize, format: Format, big: bool) {
     let n = format.bytes();
     let out = unsafe { std::slice::from_raw_parts_mut(dst, frames * n) };
     for (i, s) in out.chunks_exact_mut(n).enumerate() {
         let x = match side {
-            Side::One(ch) => mix[2 * i + ch],
-            Side::Both => 0.5 * (mix[2 * i] + mix[2 * i + 1]),
+            Side::One(ch) => mix[width * i + ch],
+            Side::Both => 0.5 * (mix[width * i] + mix[width * i + 1]),
         };
         encode(x, format, big, s);
     }
@@ -392,17 +438,22 @@ mod tests {
         }
     }
 
-    /// A buffer gets one side of the stereo mix; a driver's only output gets both, halved.
+    /// A buffer gets its channel of the mix; a driver's only output gets both sides, halved.
     #[test]
     fn a_buffer_gets_its_side() {
         let mix = [0.5, -0.5, 0.25, 0.75];
         let mut buf = [0u8; 8];
-        unsafe { write(buf.as_mut_ptr(), &mix, Side::One(1), 2, Format::F32, false) };
+        unsafe { write(buf.as_mut_ptr(), &mix, 2, Side::One(1), 2, Format::F32, false) };
         assert_eq!(buf[..4], (-0.5f32).to_le_bytes());
         assert_eq!(buf[4..], 0.75f32.to_le_bytes());
-        unsafe { write(buf.as_mut_ptr(), &mix, Side::Both, 2, Format::F32, false) };
+        unsafe { write(buf.as_mut_ptr(), &mix, 2, Side::Both, 2, Format::F32, false) };
         assert_eq!(buf[..4], 0.0f32.to_le_bytes());
         assert_eq!(buf[4..], 0.5f32.to_le_bytes());
+        // Two pairs: output 3 is the second pair's left.
+        let wide = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+        unsafe { write(buf.as_mut_ptr(), &wide, 4, Side::One(2), 2, Format::F32, false) };
+        assert_eq!(buf[..4], 0.3f32.to_le_bytes());
+        assert_eq!(buf[4..], 0.7f32.to_le_bytes());
     }
 
     /// The buffer lengths offered for a driver: those of the usual list it takes.
