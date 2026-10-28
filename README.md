@@ -275,6 +275,9 @@ that stay above Lemon Studio while it is the active application. A few things di
 - **Plugin windows:** a minimized detached window is hidden rather than sent to the Dock; its channel's button brings
   it back. A sample dragged from Lemon Studio's browser onto a plugin window reaches Lemon Sampler only (other plugins
   take dropped files only from the Finder).
+- **Microphone:** the first time a mixer track monitors or records an input (the Mac's microphone, an audio
+  interface's inputs), macOS asks whether Lemon Studio may use the microphone; System Settings > Privacy & Security >
+  Microphone changes the answer. Started from a terminal, macOS asks on the terminal's behalf instead.
 - **FL Studio's factory content** (samples that projects name through `%FLStudioFactoryData%`) is found in the newest
   `/Applications/FL Studio *.app`; `OPENSTUDIO_FACTORY` overrides it.
 - **Settings, themes and presets** live in `~/Library/Application Support/Lemon Studio`. `OPENSTUDIO_USER_DIR`
