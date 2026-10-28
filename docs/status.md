@@ -210,8 +210,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon
   Chorus and Lemon Stereo Shaper as VST3 and CLAP plugins; a project's Fruity Soft Clipper, Fruity Fast Dist, Fruity
   Balance, Fruity Stereo Enhancer, Transient Processor, Fruity Chorus and Fruity Stereo Shaper play through the same
-  sound in the mixer. The first four match FL Studio 2026's exports sample for sample in the tests; Transient
-  Processor, Chorus and Stereo Shaper have not been compared with FL 2026's exports yet
+  sound in the mixer. All seven match FL Studio 2026's exports sample for sample in the tests (the Chorus once each
+  export's LFO start phases are known: the original draws them anew for every render)
 - The Stereo Shaper's difference output plays in the mixer (added to the track it names, from the first tick, without
   delay compensation); Lemon Stereo Shaper as a plugin keeps the setting but has no output for it
 - Lemon Parametric EQ plays FL's Parametric EQ 2 in every quality mode, in a project's mixer slots and as a plugin:

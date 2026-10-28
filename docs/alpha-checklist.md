@@ -38,8 +38,8 @@ twelve effects; these are the gaps a project made in FL Studio runs into most.
 - [ ] **Peak Controller.** Common for sidechain pumping in projects; nothing in the code handles it yet
 - [ ] **Formula Controller**
 - [ ] **Patcher.** The mixer slot menu's Patcherize and Patcherize all are greyed out
-- [ ] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** The other four small
-  effects already match sample for sample in the tests
+- [x] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** All seven small
+  effects now match sample for sample in the tests (98 cases for these three: `os-engine/tests/fx_null.rs`)
 
 ## Gaps and polish
 

@@ -11,7 +11,6 @@
 //!
 // spec: plugins/fruity-chorus.md, plugins/lemon-chorus.md
 
-use std::f64::consts::{PI, TAU};
 use std::sync::OnceLock;
 
 use super::Effect;
@@ -180,7 +179,8 @@ impl Working {
 // ---------------------------------------------------------------------------------------------------------------
 // LFO tables and the generator (spec "LFO tables", "State and timing")
 
-/// The four LFO tables (arc, arc cubed, sines, sines cubed), entries 0..32766 with 16383 the middle.
+/// The four LFO tables (arc, arc cubed, sines, sines cubed), entries 0..32766 with 16383 the middle. The sines use
+/// 3.1415, 9.4245 and 6.283 as the spec gives them, not multiples of pi (with pi, FL's exports of shapes 2 and 3 differ).
 pub fn tables() -> &'static [[u32; LINE]; 4] {
     static TABLES: OnceLock<Box<[[u32; LINE]; 4]>> = OnceLock::new();
     TABLES.get_or_init(|| {
@@ -191,7 +191,7 @@ pub fn tables() -> &'static [[u32; LINE]; 4] {
             let x = (i as f64 / 2048.0) as f32;
             let arc = if x < 1.0 { x * 4.0 * (1.0 - x) } else { (x - 1.0) * -4.0 * (2.0 - x) };
             let d = f64::from(x);
-            let sines = (((PI * d).sin() + ((3.0 * PI * d).sin() + (TAU * d).sin()) * third) * 3.0 / norm) as f32;
+            let sines = (((3.1415 * d).sin() + ((9.4245 * d).sin() + (6.283 * d).sin()) * third) * 3.0 / norm) as f32;
             for (k, v) in [arc, arc * arc * arc, sines, sines * sines * sines].into_iter().enumerate() {
                 t[k][i] = trunc(f64::from((v + 1.0) * 16383.0));
             }
@@ -435,8 +435,8 @@ mod tests {
         let at = |k: usize| [0, 1, 512, 1024, 1536, 2048, 2049, 2560, 3072, 3584, 4095].map(|i| t[k][i]);
         assert_eq!(at(ARC), [16383, 16414, 28670, 32766, 28670, 16383, 16351, 4095, 0, 4095, 16351]);
         assert_eq!(at(ARC_CUBED), [16383, 16383, 23294, 32766, 23294, 16383, 16383, 9471, 0, 9471, 16383]);
-        assert_eq!(at(SINES), [16383, 16435, 32766, 24941, 24207, 16383, 16356, 8558, 7824, 0, 16330]);
-        assert_eq!(at(SINES_CUBED), [16383, 16383, 32766, 18718, 18167, 16383, 16383, 14598, 14047, 0, 16382]);
+        assert_eq!(at(SINES), [16383, 16435, 32766, 24942, 24207, 16384, 16358, 8558, 7825, 0, 16324]);
+        assert_eq!(at(SINES_CUBED), [16383, 16383, 32766, 18719, 18167, 16383, 16383, 14598, 14048, 0, 16382]);
         for table in t.iter() {
             assert_eq!((*table.iter().min().unwrap(), *table.iter().max().unwrap()), (0, 32766));
         }
@@ -476,7 +476,8 @@ mod tests {
         (l, r)
     }
 
-    /// Samples of three settings, bit for bit: an independent reading of the page, its sine shapes with the true pi.
+    /// Samples of three settings, bit for bit: an independent reading of the page, its sine shapes with the page's
+    /// constants (FL 2026's exports confirm them: plugins/fruity-chorus.md "FL 2026 null test").
     #[test]
     fn samples_match_the_reading_of_the_page() {
         let bits = |x: &[f32], i: usize| x[i].to_bits();
@@ -490,14 +491,14 @@ mod tests {
         // "50 Detune": wet only, the low band, shapes 1 and 3.
         let (l, r) = run([40, 4375, 149, 3229, 0, 781, 587, 0, 1024, 65, 4531, 491]);
         let want_l = [0, 0, 0, 0, 0, 0xbf1f4597, 0xbf203e3e, 0xbedf6dbc, 0xbe895880, 0xbe1486a4];
-        let want_r = [0, 0, 0, 0, 0, 0xbd0f1772, 0xbda0039d, 0xbe06f623, 0x3da7bf2c, 0x3da0b043];
+        let want_r = [0, 0, 0, 0, 0, 0xbd104ae6, 0xbda07c82, 0xbe06f623, 0x3da7bf2c, 0x3da09ccd];
         for (k, &i) in at.iter().enumerate() {
             assert_eq!((bits(&l, i), bits(&r, i)), (want_l[k], want_r[k]), "50 Detune, sample {i}");
         }
         // "Low Enhance": two LFOs stopped.
         let (l, r) = run([243, 4336, 416, 0, 0, 781, 0, 0, 1024, 65, 4635, 96]);
-        assert_eq!((bits(&l, 500), bits(&r, 500)), (0xbf24e906, 0xbe80e9c6));
-        assert_eq!((bits(&l, 2999), bits(&r, 2999)), (0xbf15707c, 0xbd85dfdb));
+        assert_eq!((bits(&l, 500), bits(&r, 500)), (0xbf24e906, 0xbe8134cd));
+        assert_eq!((bits(&l, 2999), bits(&r, 2999)), (0xbf15707c, 0xbd853cb7));
     }
 
     /// The dry part is the input at 0.7; without delay or depth the three reads are the band just written.
