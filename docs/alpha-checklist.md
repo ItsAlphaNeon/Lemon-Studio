@@ -28,12 +28,12 @@ Systems a fully functional DAW can't ship without.
 ## Built-in instruments and effects
 
 Without third-party plugins, the built-in ones are the whole sound palette. Lemon Studio has three instruments and
-twelve effects; these are the gaps a project made in FL Studio runs into most.
+fourteen effects; these are the gaps a project made in FL Studio runs into most.
 
 - [ ] **Drum sampler (FPC).** A pad-based drum instrument
 - [ ] **Slicer (Slicex, Fruity Slicer).** A loop chopped into slices that the piano roll plays
 - [ ] **Filter effect (Fruity Filter, Fruity Love Philter)**
-- [ ] **Flanger and phaser.** Lemon Chorus exists; the other modulation effects don't
+- [x] **Flanger and phaser.** Lemon Flanger and Lemon Phaser recreate Fruity Flanger and Fruity Phaser
 - [ ] **Vocoder (Vocodex)**
 - [ ] **Peak Controller.** Common for sidechain pumping in projects; nothing in the code handles it yet
 - [ ] **Formula Controller**
