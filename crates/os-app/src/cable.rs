@@ -421,7 +421,8 @@ impl Cables {
         }
     }
 
-    fn bounds(&self) -> Option<Rect> {
+    /// The area the cables cover now.
+    pub fn bounds(&self) -> Option<Rect> {
         let mut pts = self.ropes.iter().flat_map(|r| r.p.iter());
         let &(x, y) = pts.next()?;
         let (mut x0, mut y0, mut x1, mut y1) = (x, y, x, y);

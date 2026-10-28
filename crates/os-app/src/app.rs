@@ -1221,6 +1221,19 @@ impl State {
         }
     }
 
+    /// Where the mixer's routing cables hang in front of the split window below it (the tiling layout, the mixer
+    /// snapped above another window): from the gap's end down to the status bar, as wide as the mixer. Painted after the
+    /// split windows, under the floating ones (`views::paint_cables_over`).
+    /// Only with Animations on "Playful".
+    pub fn cable_reach(&self) -> Option<Rect> {
+        if !self.cables.borrow().animations() {
+            return None;
+        }
+        let h = self.mixer_hang()?;
+        let floor = views::status_rect(self).y;
+        (h.bottom() < floor - 0.5).then(|| Rect::new(h.x, h.bottom(), h.w, floor - h.bottom()))
+    }
+
     /// The tiling layout's gap under the mixer, which its routing cables sag into: down to the status bar while it
     /// reaches the workspace card's bottom, else the gap to the snapped window below it.
     pub fn mixer_hang(&self) -> Option<Rect> {
@@ -3275,6 +3288,13 @@ impl App {
             .collect();
         if !s.toolbar.hidden {
             v.push(Cover { bounds: Rect::new(0.0, 0.0, s.screen.0, views::work_y(s) + 1.0), win: None, solid: None });
+        }
+        // The mixer's cables hanging over the playlist (`State::cable_reach`): they stay where they are.
+        if let (Some(reach), Some(c)) = (s.cable_reach(), s.cables.borrow().bounds()) {
+            let r = reach.intersect(&c.outset(3.0));
+            if r.w > 0.0 && r.h > 0.0 {
+                v.push(Cover { bounds: r, win: None, solid: None });
+            }
         }
         // The toolbar editor's palette (spec: ui/toolbar-menu.md §8).
         if let Some(p) = views::palette_rect(s) {

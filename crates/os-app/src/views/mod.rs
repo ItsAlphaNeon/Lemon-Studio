@@ -288,7 +288,14 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             card_corners(ui, r);
         }
     }
+    let mut cables_over = s.cable_reach().filter(|_| anim.is_none());
     for (i, &win) in order.iter().enumerate() {
+        // The mixer's cables over the split window below it: after the split windows, under the floating ones.
+        if crate::floating::floats(win) {
+            if let Some(r) = cables_over.take() {
+                paint_cables_over(ui, s, r);
+            }
+        }
         // While windows move (the tiling layout's animation) they all show, the covered ones too.
         if (docked_at.is_some_and(|d| i < d) && anim.is_none()) || anim.is_some_and(|m| m.opening().iter().any(|o| o.0 == win)) {
             continue;
@@ -322,6 +329,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         } else if let Some(&(_, tr)) = tiles.tiles.iter().find(|t| t.0 == win).filter(|_| docked_at.is_none() || anim.is_some()) {
             card_corners(ui, tr);
         }
+    }
+    if let Some(r) = cables_over {
+        paint_cables_over(ui, s, r);
     }
     // The gaps between snapped windows drag their splits, except where a floating window lies over them (its clicks
     // and cursor are its own).
@@ -872,6 +882,17 @@ pub fn remember_check(ui: &mut Ui, x: f32, cy: f32, on: bool, action: Action) {
 /// Channel / clip colors from the model.
 pub fn rgb(c: os_model::Rgb) -> Color {
     Color { r: c.r, g: c.g, b: c.b, a: 255 }
+}
+
+/// The mixer's routing cables where they hang in front of the split window below it (`State::cable_reach`), as the
+/// mixer drew them (`mixer::paint` keeps them inside itself and its gap).
+fn paint_cables_over(ui: &mut Ui, s: &State, reach: Rect) {
+    let cables = s.cables.borrow();
+    ui.c.push_clip(reach);
+    for (_, pts, col) in cables.each() {
+        ui.c.polyline(pts, 2.0, col);
+    }
+    ui.c.pop_clip();
 }
 
 /// The pieces of thin strip `r` (a split's gap) that none of `over` covers, cut along its length.
