@@ -288,7 +288,14 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             card_corners(ui, r);
         }
     }
-    let mut cables_over = s.cable_reach().filter(|_| anim.is_none());
+    // While windows move (Playful), from where the mixer is drawn: from its bottom (the gap moves with it).
+    let mut cables_over = match anim {
+        None => s.cable_reach(),
+        Some(m) => m.at(Win::Mixer).filter(|_| s.bar.tiling && s.snapped(Win::Mixer)).and_then(|mr| {
+            let floor = status_rect(s).y;
+            (mr.bottom() < floor - 0.5).then(|| Rect::new(mr.x, mr.bottom(), mr.w, floor - mr.bottom()))
+        }),
+    };
     for (i, &win) in order.iter().enumerate() {
         // The mixer's cables over the split window below it: after the split windows, under the floating ones.
         if crate::floating::floats(win) {
@@ -318,6 +325,11 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         // A split window without the keyboard is muted (`State::veil`); a maximized one never.
         if let Some(v) = win.slot().map(|i| s.veil[i]).filter(|&v| v > 0.0 && s.bar.tiling && s.snapped(win) && docked.is_none()) {
             let bg = backdrop(ui);
+            // The mixer's gap too: its cables hang there.
+            let r = match s.mixer_hang().filter(|_| win == Win::Mixer && moved.is_none()) {
+                Some(h) => r.union(&h),
+                None => r,
+            };
             ui.c.fill_rect(r, Color { a: (v * VEIL * 255.0).round() as u8, ..bg });
         }
         // A maximized or snapped window fills its card square: its corners are rounded before the floating windows
@@ -888,9 +900,12 @@ pub fn rgb(c: os_model::Rgb) -> Color {
 /// mixer drew them (`mixer::paint` keeps them inside itself and its gap).
 fn paint_cables_over(ui: &mut Ui, s: &State, reach: Rect) {
     let cables = s.cables.borrow();
+    // Muted with the mixer when it is a split window without the keyboard (`State::veil`), as the mixer is.
+    let v = Win::Mixer.slot().map_or(0.0, |i| s.veil[i]);
+    let bg = backdrop(ui);
     ui.c.push_clip(reach);
     for (_, pts, col) in cables.each() {
-        ui.c.polyline(pts, 2.0, col);
+        ui.c.polyline(pts, 2.0, col.mix(bg, v * VEIL));
     }
     ui.c.pop_clip();
 }
