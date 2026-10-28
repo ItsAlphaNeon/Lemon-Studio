@@ -8,7 +8,8 @@
 //! inputs: the mixer tracks' inputs and audio recording). The icon is made from the Icon Composer document
 //! `assets/logo/macOS.icon` by `tools/logo/macos-icon.sh`: `assets/lemonstudio.car` (the bundle's `Assets.car`) is the
 //! icon macOS 26 and later draw, in every appearance, and `assets/lemonstudio.icns` the one older macOS shows. The
-//! bundle is signed ad hoc, as Apple silicon requires of any program it runs. `--install` copies it to `~/Applications`.
+//! bundle is signed ad hoc, as Apple silicon requires of any program it runs. `--install` copies it to
+//! `~/Applications`.
 //!
 //! The macOS counterpart of Linux's desktop entry (`crates/os-app/assets/lemonstudio.desktop`).
 
