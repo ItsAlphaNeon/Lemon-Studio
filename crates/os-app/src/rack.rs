@@ -666,6 +666,14 @@ pub fn gradient(s: &mut State) {
 /// with "Restore previous state after solo" on, puts back the states from before the first solo (a solo moved to
 /// another channel keeps them; spec: ui/settings-choices.md "Miscellaneous"). Locked channels keep their state.
 pub fn solo(s: &mut State, r: usize) {
+    crate::control::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| solo_now(s, r));
+}
+
+/// The undo step of a channel muted, soloed or switched on or off: a knob tweak's, as in FL (none with "Undo knob
+/// tweaks" off).
+pub const MUTE_SOLO: &str = "Channel mute / solo";
+
+fn solo_now(s: &mut State, r: usize) {
     let locked = s.rack.locked.clone();
     let soloed_now = solo_of(s, r);
     // A solo still in effect (the last solo click's shape, untouched since) keeps the states saved when it started.
@@ -735,10 +743,12 @@ fn solo_of(s: &State, r: usize) -> bool {
 }
 
 pub fn toggle_mute(s: &mut State, r: usize) {
-    if let Some(c) = s.project.channels.get_mut(r) {
-        c.enabled = !c.enabled;
-        s.piano.dirty = true;
-    }
+    crate::control::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
+        if let Some(c) = s.project.channels.get_mut(r) {
+            c.enabled = !c.enabled;
+            s.piano.dirty = true;
+        }
+    });
 }
 
 pub fn toggle_lock(s: &mut State, r: usize) {
@@ -1817,12 +1827,14 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::MuteSel(mute) => {
-            for &r in &sel {
-                if let Some(c) = s.project.channels.get_mut(r) {
-                    c.enabled = !mute;
+            crate::control::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
+                for &r in &sel {
+                    if let Some(c) = s.project.channels.get_mut(r) {
+                        c.enabled = !mute;
+                    }
                 }
-            }
-            s.piano.dirty = true;
+                s.piano.dirty = true;
+            });
             None
         }
         RCmd::TransposeSel => {

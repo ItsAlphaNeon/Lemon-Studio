@@ -273,6 +273,8 @@ pub enum Taken {
     Param(u32, u32, f64),
     /// The whole project and the rack's own state of it (adding or deleting channels, tracks, patterns).
     Project(Box<Side>),
+    /// Which channels are on, by id (a channel muted or soloed).
+    Mutes(Vec<(u32, bool)>),
 }
 
 /// The project settings commands change: the tempo (kept by the app beside the project), swing, main volume and
@@ -361,6 +363,7 @@ pub enum Region {
     Pattern(u16),
     Arrangement,
     Project,
+    Mutes,
 }
 
 impl Taken {
@@ -374,6 +377,7 @@ impl Taken {
             Region::Pattern(n) => Taken::Pattern(Box::new(p.patterns.iter().find(|q| q.number == n)?.clone())),
             Region::Arrangement => Taken::Arrangement(Box::new(p.arrangement()?.clone())),
             Region::Project => Taken::Project(Box::new(Side::of(s))),
+            Region::Mutes => mutes(p),
         })
     }
 }
@@ -560,6 +564,7 @@ impl Command {
                 // The value now is the one this puts back's other side: the value the parameter was set to.
                 Taken::Param(..) => return Err("a parameter's undo is taken by `apply`".into()),
                 Taken::Project(_) => Taken::Project(Box::new(Side::of(s))),
+                Taken::Mutes(_) => mutes(p),
             },
         })
     }
@@ -579,7 +584,7 @@ impl Command {
                 a.markers.iter_mut().for_each(|m| m.rescale(from, to));
             }
             Taken::Project(side) => side.project.set_ppq(to),
-            Taken::Settings(_) | Taken::Channel(_) | Taken::Track(_) | Taken::Param(..) => {}
+            Taken::Settings(_) | Taken::Channel(_) | Taken::Track(_) | Taken::Param(..) | Taken::Mutes(_) => {}
         }
     }
 
@@ -1065,7 +1070,7 @@ fn put(s: &mut State, t: Taken) {
                 if ch.misc != c.misc && c.kind.is_sampler() {
                     s.control.misc.push(row);
                 }
-                // Muting is no edit: the channel stays muted or not (`keep_mutes`).
+                // Muting is a step of its own: the channel stays muted or not (`Mutes`).
                 let on = ch.enabled;
                 *ch = *c;
                 ch.enabled = on;
@@ -1093,7 +1098,20 @@ fn put(s: &mut State, t: Taken) {
         // `apply` set it already.
         Taken::Param(..) => {}
         Taken::Project(side) => restore(s, *side),
+        Taken::Mutes(on) => {
+            for (id, v) in on {
+                if let Some(c) = s.project.channels.iter_mut().find(|c| c.id.0 == id) {
+                    c.enabled = v;
+                }
+            }
+            s.piano.dirty = true;
+        }
     }
+}
+
+/// Which channels are on now (`Taken::Mutes`).
+fn mutes(p: &Project) -> Taken {
+    Taken::Mutes(p.channels.iter().map(|c| (c.id.0, c.enabled)).collect())
 }
 
 /// The whole project back (an undo of adding or deleting channels, tracks or patterns): the rack's own state with it,
@@ -1119,8 +1137,9 @@ fn restore(s: &mut State, side: Side) {
     reselect_clips(s, &sel_clips);
 }
 
-/// Muting and soloing are no edits (as in FL, where they make no undo step): an undo or redo leaves every channel and
-/// mixer track that is still there muted or not as it is now. The states by id.
+/// Muting and soloing are steps of their own (a channel's, `Taken::Mutes`) or none (a mixer track's, as in FL): an undo
+/// or redo of another step leaves every channel and mixer track that is still there muted or not as it is now. The
+/// states by id.
 struct Mutes {
     channels: std::collections::HashMap<u32, bool>,
     tracks: std::collections::HashMap<u32, bool>,

@@ -839,22 +839,22 @@ fn interface_edits_are_undo_steps() {
     });
 }
 
-/// Muting and soloing make no undo step, and an undo or redo of another step leaves them as they are (an undo of a
-/// channel's volume does not unmute it), whoever muted: the interface or a client.
+/// As in FL (measured 2026-10-28): a channel muted, soloed or switched on or off is one step of its own (a knob tweak's:
+/// none with "Undo knob tweaks" off); a mixer track's mute and solo make none. An undo or redo of another step leaves
+/// every channel and track muted or not as it is (an undo of a channel's volume does not unmute it).
 #[test]
-fn mutes_are_no_undo_steps() {
+fn mutes_follow_fl_s_history() {
     let mut a = app();
+    ui_round_trip(&mut a, crate::rack::MUTE_SOLO, |a| crate::rack::toggle_mute(&mut a.state, 0));
+    ui_round_trip(&mut a, crate::rack::MUTE_SOLO, |a| crate::rack::solo(&mut a.state, 1));
     let steps = a.state.history.at();
-    crate::rack::toggle_mute(&mut a.state, 0);
-    crate::rack::solo(&mut a.state, 1);
     crate::mixer::hit(&mut a, crate::mixer::MHit::Led(2));
     crate::mixer::run(&mut a, crate::mixer::MCmd::Solo(1));
-    assert_eq!(a.state.history.at(), steps, "no steps");
+    assert_eq!(a.state.history.at(), steps, "a mixer track's mute and solo make no steps");
     let on = |a: &App| (a.state.project.channels.iter().map(|c| c.enabled).collect::<Vec<_>>(), a.state.project.mixer.iter().map(|m| m.enabled).collect::<Vec<_>>());
-    // A step on channel 0, then a mute of it and of a track: its undo and redo keep both muted.
+    // A step on channel 0, then a mixer track muted: its undo and redo keep the track muted.
     let track = a.state.project.channels[0].mixer_track;
     a.channel_control(0, crate::history::ChannelControl::Track, |c| c.mixer_track = 5);
-    crate::rack::toggle_mute(&mut a.state, 0);
     crate::mixer::hit(&mut a, crate::mixer::MHit::Led(3));
     let now = on(&a);
     crate::history::undo(&mut a.state).unwrap();
@@ -862,11 +862,14 @@ fn mutes_are_no_undo_steps() {
     assert_eq!(on(&a), now, "the mutes stay through the undo");
     crate::history::redo(&mut a.state).unwrap();
     assert_eq!(on(&a), now, "and the redo");
-    // A whole-project step (a channel deleted and brought back) keeps them too.
-    let kick = a.state.project.channels[0].id.0;
-    a.state.control.settle(&mut a.state.project);
-    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": kick, "enabled": true}))]).unwrap();
+    // With Undo knob tweaks off, a channel's mute makes no step either, and an undo of an earlier step keeps it.
+    let was = crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS);
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, false);
+    let steps = a.state.history.at();
+    crate::rack::toggle_mute(&mut a.state, 0);
     let now = on(&a);
+    crate::prefs::set_check(&crate::prefs::UNDO_KNOB_TWEAKS, was);
+    assert_eq!(a.state.history.at(), steps, "no step with Undo knob tweaks off");
     crate::history::undo(&mut a.state).unwrap();
-    assert_eq!(on(&a), now, "a client's mute is no edit either");
+    assert_eq!(on(&a), now, "the mute stays through an undo of the step before it");
 }
