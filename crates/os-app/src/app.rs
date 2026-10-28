@@ -2039,6 +2039,11 @@ impl App {
                 }
             }
             Then::DeleteUnused(files) => self.delete_unused_done(files, &reply),
+            Then::ExtInput(t) => {
+                if reply == Reply::Button(Answer::Yes) {
+                    crate::mixer::external_only(&mut self.state, t);
+                }
+            }
             Then::SavePreset(key) => {
                 if let Some(p) = file {
                     self.state.message = crate::presets::save_chosen(self, key, p);
@@ -2505,8 +2510,10 @@ impl App {
         #[cfg(not(plugin_windows))]
         self.plugins.idle(|_| None);
         // Open plugin editors are processed while nothing plays: notes from an instrument's own keyboard sound, and an
-        // effect's own playback (Tesla) too.
-        let listen = self.plugins.editor_open();
+        // effect's own playback (Tesla) too. So is the mixer while a track monitors its input (spec:
+        // audio/track-io.md §1 "Signal": monitoring works while stopped).
+        let monitoring = self.state.project.mixer.iter().any(|m| m.monitored()) && crate::device::last().is_some_and(|d| d.inputs > 0);
+        let listen = self.plugins.editor_open() || monitoring;
         if listen {
             self.sync_live();
         }

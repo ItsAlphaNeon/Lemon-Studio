@@ -21,8 +21,8 @@
 //! What opened is published (`last`, `rate`), so the settings page and the hosted plugins never have to ask the device
 //! themselves: asking an ASIO driver means loading it, and only the thread that drives the device may.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, SampleFormat, SizedSample, StreamConfig};
@@ -143,8 +143,9 @@ pub fn periods(device: Option<&str>) -> Option<Periods> {
 
 /// What the device's callback plays: one stream's worth of sound (playback, a preview, live notes).
 pub(crate) trait Source: Send {
-    /// Writes the next `stereo.len() / 2` frames (interleaved L/R) into `stereo`, overwriting what is there.
-    fn play(&mut self, stereo: &mut [f32]);
+    /// Writes the next `out.len() / width` frames of the device's `width` channels (its output pairs, interleaved;
+    /// `DeviceInfo::pairs`) into `out`, overwriting what is there.
+    fn play(&mut self, out: &mut [f32], width: usize);
     /// Its owner let go of it: the callback no longer plays it and hands it back (`OutputDevice::collect`).
     fn detached(&self) -> bool;
 }
@@ -169,17 +170,26 @@ struct Mix {
     sources: Vec<Box<dyn Source>>,
     inbox: Arc<Queue>,
     outbox: Arc<Queue>,
-    /// One source's block, and the sum of all of them (interleaved stereo).
+    /// One source's block, and the sum of all of them (interleaved, `width` channels).
     one: Vec<f32>,
     sum: Vec<f32>,
+    /// Channels in a frame: 2 × the output pairs (2 unless an ASIO driver opened more; `set_width`).
+    width: usize,
 }
 
 impl Mix {
     fn new(inbox: Arc<Queue>, outbox: Arc<Queue>) -> Mix {
-        Mix { sources: Vec::with_capacity(MAX_SOURCES), inbox, outbox, one: Vec::with_capacity(2 * MAX_FRAMES), sum: Vec::with_capacity(2 * MAX_FRAMES) }
+        Mix { sources: Vec::with_capacity(MAX_SOURCES), inbox, outbox, one: Vec::with_capacity(2 * MAX_FRAMES), sum: Vec::with_capacity(2 * MAX_FRAMES), width: 2 }
     }
 
-    /// The next `frames` frames of every source, summed (interleaved stereo, not clipped).
+    /// Plays `pairs` output pairs (before the device starts: the room is made now, not in the callback).
+    fn set_width(&mut self, pairs: usize) {
+        self.width = 2 * pairs.max(1);
+        self.one.reserve(self.width * MAX_FRAMES);
+        self.sum.reserve(self.width * MAX_FRAMES);
+    }
+
+    /// The next `frames` frames of every source, summed (interleaved, `width` channels, not clipped).
     fn block(&mut self, frames: usize) -> &[f32] {
         BLOCKS.fetch_add(1, Ordering::Relaxed);
         while self.sources.len() < MAX_SOURCES {
@@ -188,9 +198,10 @@ impl Mix {
                 None => break,
             }
         }
+        let w = self.width;
         self.sum.clear();
-        self.sum.resize(2 * frames, 0.0);
-        self.one.resize(2 * frames, 0.0);
+        self.sum.resize(w * frames, 0.0);
+        self.one.resize(w * frames, 0.0);
         let mut i = 0;
         while i < self.sources.len() {
             if self.sources[i].detached() {
@@ -208,13 +219,106 @@ impl Mix {
                     }
                 }
             }
-            self.sources[i].play(&mut self.one);
+            self.sources[i].play(&mut self.one, w);
             for (a, b) in self.sum.iter_mut().zip(&self.one) {
                 *a += *b;
             }
             i += 1;
         }
         &self.sum
+    }
+}
+
+/// The device's inputs as they come in (an ASIO driver's: spec audio/track-io.md §2.2), for every stream whose mixer
+/// tracks hear them: the driver's callback writes, and each stream reads at its own place (`input_reader`). Neither
+/// locks; a reader that falls a ring behind skips ahead.
+struct Inputs {
+    samples: Box<[AtomicU32]>,
+    /// Inputs in a frame of the stream open (0: none), its block length, and frames written since the start.
+    channels: AtomicUsize,
+    block: AtomicUsize,
+    written: AtomicU64,
+}
+
+/// Frames the input ring holds: over a second at 48 kHz.
+const INPUT_FRAMES: usize = 1 << 16;
+/// Inputs heard at most (`asio::MAX_INPUTS`).
+const INPUT_CHANNELS: usize = 8;
+
+fn input_ring() -> &'static Inputs {
+    static I: OnceLock<Inputs> = OnceLock::new();
+    I.get_or_init(|| Inputs {
+        samples: (0..INPUT_FRAMES * INPUT_CHANNELS).map(|_| AtomicU32::new(0)).collect(),
+        channels: AtomicUsize::new(0),
+        block: AtomicUsize::new(0),
+        written: AtomicU64::new(0),
+    })
+}
+
+impl Inputs {
+    /// A stream with `channels` inputs and blocks of `block` frames opened (0: closed); readers start again.
+    fn open(&self, channels: usize, block: usize) {
+        self.channels.store(channels.min(INPUT_CHANNELS), Ordering::Release);
+        self.block.store(block, Ordering::Relaxed);
+    }
+
+    /// The driver's callback: a block of `frames` frames, `at(channel, frame)` an input's sample.
+    fn push(&self, frames: usize, at: impl Fn(usize, usize) -> f32) {
+        let ch = self.channels.load(Ordering::Relaxed);
+        let w = self.written.load(Ordering::Relaxed);
+        for f in 0..frames {
+            let base = ((w as usize + f) % INPUT_FRAMES) * INPUT_CHANNELS;
+            for c in 0..ch {
+                self.samples[base + c].store(at(c, f).to_bits(), Ordering::Relaxed);
+            }
+        }
+        self.written.store(w + frames as u64, Ordering::Release);
+    }
+}
+
+/// One stream's place in the device's inputs (`os_engine::DeviceInput`).
+pub(crate) struct InputReader {
+    /// The next frame to read (`None`: from the first read on).
+    at: Option<u64>,
+    channels: usize,
+}
+
+/// A reader of the device's inputs from now on: `None` when the open device has none.
+pub(crate) fn input_reader() -> Option<InputReader> {
+    let channels = input_ring().channels.load(Ordering::Acquire);
+    (channels > 0).then_some(InputReader { at: None, channels })
+}
+
+impl os_engine::DeviceInput for InputReader {
+    fn channels(&self) -> usize {
+        self.channels
+    }
+
+    /// The next frames as they came in. A stream renders ahead of the device, a tick at a time, so it reads two device
+    /// blocks behind the newest input: what came in since its last tick is then there, though not in step with the
+    /// tick. What has not come in is silence (the reader waits there); one that fell far behind skips ahead.
+    fn read(&mut self, out: &mut [f32]) {
+        let i = input_ring();
+        let ch = self.channels;
+        let frames = (out.len() / ch.max(1)) as u64;
+        let written = i.written.load(Ordering::Acquire);
+        let behind = 2 * i.block.load(Ordering::Relaxed).max(64) as u64;
+        let mut at = self.at.unwrap_or(written.saturating_sub(behind));
+        if written.saturating_sub(at) > INPUT_FRAMES as u64 / 2 {
+            at = written.saturating_sub(behind);
+        }
+        let n = written.saturating_sub(at).min(frames);
+        for (f, o) in out.chunks_exact_mut(ch.max(1)).enumerate() {
+            if (f as u64) < n {
+                let base = ((at as usize + f) % INPUT_FRAMES) * INPUT_CHANNELS;
+                for (c, s) in o.iter_mut().enumerate() {
+                    *s = f32::from_bits(i.samples[base + c].load(Ordering::Relaxed));
+                }
+            } else {
+                o.fill(0.0);
+            }
+        }
+        self.at = Some(at + n);
     }
 }
 
@@ -230,10 +334,14 @@ pub struct DeviceInfo {
     pub fixed: Option<u32>,
     /// The buffer lengths the device says it takes, frames (`None`: it does not say).
     pub buffers: Option<(u32, u32)>,
-    /// Output channels open (the master plays on the first two).
+    /// Output channels open (a Windows device's master plays on the first two; an ASIO driver's are its pairs).
     pub channels: u16,
-    /// An ASIO driver's inputs open with its outputs (One-click audio recording), and its input latency, frames.
+    /// An ASIO driver's inputs open with its outputs (One-click audio recording, the mixer tracks' inputs), and its
+    /// input latency, frames.
     pub inputs: u16,
+    /// An ASIO driver's names for its outputs and inputs open (empty: unknown, or another device).
+    pub out_names: Vec<String>,
+    pub in_names: Vec<String>,
     pub input_latency: Option<u32>,
     /// An ASIO driver's: the rates of `audio_cfg::RATES` and the lengths of `audio_cfg::BUFFERS` it takes (empty for
     /// a Windows device, which is not asked).
@@ -244,6 +352,14 @@ pub struct DeviceInfo {
     pub latency: Option<u32>,
     /// It opened in place of the ASIO driver chosen: "Couldn't open <driver>: <why>; using <this device>".
     pub instead: Option<String>,
+}
+
+impl DeviceInfo {
+    /// The output pairs the mixer tracks can play on (spec: audio/track-io.md §2.1): an ASIO driver's (a driver with
+    /// one output has one, both sides summed there), one for any other device.
+    pub fn pairs(&self) -> usize {
+        if self.host == ASIO { usize::from(self.channels / 2).max(1) } else { 1 }
+    }
 }
 
 /// The device last opened and the settings it opened for (`rate`), and how many times one opened (`opens`).
@@ -537,7 +653,7 @@ fn open_small(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, Option<Str
 fn wasapi_open(w: wasapi::Opened, host: &'static str, inbox: Arc<Queue>, outbox: Arc<Queue>, errors: Errors) -> Open {
     let i = w.info;
     let fixed = Some(if host == WASAPI_EXCLUSIVE { i.period } else { i.buffer });
-    let info = DeviceInfo { host, name: i.name, rate: i.rate, fixed, buffers: Some(i.range), channels: i.channels, inputs: 0, input_latency: None, rates: Vec::new(), sizes: Vec::new(), latency: i.latency, instead: None };
+    let info = DeviceInfo { host, name: i.name, rate: i.rate, fixed, buffers: Some(i.range), channels: i.channels, inputs: 0, out_names: Vec::new(), in_names: Vec::new(), input_latency: None, rates: Vec::new(), sizes: Vec::new(), latency: i.latency, instead: None };
     Open { _stream: Stream::Wasapi(w.out), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault }
 }
 
@@ -553,7 +669,7 @@ fn open_asio(name: &str, cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open,
     let (inbox, outbox, errors) = queues(xruns);
     let a = asio::open(name, cfg.rate, cfg.buffer, Mix::new(inbox.clone(), outbox.clone()), errors.clone())?;
     let (fixed, buffers) = (Some(a.frames), Some(a.buffers));
-    let info = DeviceInfo { host: ASIO, name: name.to_string(), rate: a.rate, fixed, buffers, channels: a.channels, inputs: a.inputs, input_latency: a.input_latency, rates: a.rates, sizes: a.sizes, latency: a.latency, instead: None };
+    let info = DeviceInfo { host: ASIO, name: name.to_string(), rate: a.rate, fixed, buffers, channels: a.channels, inputs: a.inputs, out_names: a.out_names, in_names: a.in_names, input_latency: a.input_latency, rates: a.rates, sizes: a.sizes, latency: a.latency, instead: None };
     Ok(Open { _stream: Stream::Asio(a.out), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault })
 }
 
@@ -578,7 +694,7 @@ fn open_system(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
     }
     let stream = stream?;
     stream.play().map_err(|e| e.to_string())?;
-    let info = DeviceInfo { host, name: out.name, rate: config.sample_rate, fixed, buffers, channels: config.channels, inputs: 0, input_latency: None, rates: Vec::new(), sizes: Vec::new(), latency: None, instead: None };
+    let info = DeviceInfo { host, name: out.name, rate: config.sample_rate, fixed, buffers, channels: config.channels, inputs: 0, out_names: Vec::new(), in_names: Vec::new(), input_latency: None, rates: Vec::new(), sizes: Vec::new(), latency: None, instead: None };
     Ok(Open { _stream: Stream::Cpal(stream), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault })
 }
 
@@ -670,7 +786,7 @@ mod tests {
     }
 
     impl Source for Level {
-        fn play(&mut self, stereo: &mut [f32]) {
+        fn play(&mut self, stereo: &mut [f32], _width: usize) {
             stereo.fill(self.value);
             self.blocks.fetch_add(1, Ordering::Relaxed);
         }
