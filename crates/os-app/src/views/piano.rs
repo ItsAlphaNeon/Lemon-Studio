@@ -285,7 +285,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.c.fill_rect(Rect::new(x - 1.0, l.grid.y, 3.0, l.grid.h), ui.t.s(0x38373b));
         ui.c.fill_rect(Rect::new(x, l.grid.y, 1.0, l.grid.h), ui.t.s(0x53585c));
     }
-    seek_arrow(ui, &g, notes, ch);
+    seek_arrows(ui, &g, notes, ch);
     ui.c.pop_clip();
 
     // Vertical scroll bar: arrow buttons at its ends; small scroll bars have none and run along the grid.
@@ -309,14 +309,25 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 }
 
 /// While the channel has notes in the pattern but none is in view: a round arrow at the note grid's edge, on the way
-/// from its centre to the nearest note, pointing at it and naming its key; a click brings the note into view
-/// (cutting-edge; owner, 2026-10-27: notes octaves away are found at once).
-fn seek_arrow(ui: &mut Ui, g: &Geom, notes: &[Note], ch: Option<u16>) {
+/// from its centre to the nearest note, pointing at it and naming its key; when notes also lie the other way, a second,
+/// smaller as its note is farther and in a muted grey, so the nearest stands out. A click brings the note into view
+/// (cutting-edge; owner, 2026-10-27: notes octaves away are found at once; two arrows at most).
+fn seek_arrows(ui: &mut Ui, g: &Geom, notes: &[Note], ch: Option<u16>) {
     let grid = g.grid;
     if grid.w < 90.0 || grid.h < 70.0 {
         return;
     }
-    let Some((i, p)) = piano::off_view_note(g, notes, ch) else { return };
+    let found = piano::off_view_notes(g, notes, ch);
+    let Some(&(_, _, nearest)) = found.first() else { return };
+    for (n, &(i, p, d)) in found.iter().enumerate().rev() {
+        let k = if n == 0 { 1.0 } else { (0.6 + 0.4 * nearest / d.max(1.0)).min(0.85) };
+        seek_arrow(ui, g, notes, i, p, k, n > 0);
+    }
+}
+
+/// One of `seek_arrows`: note `i`, nearest point `p`, at size `k` (1: the nearest note's); `muted`: the farther one.
+fn seek_arrow(ui: &mut Ui, g: &Geom, notes: &[Note], i: usize, p: (f32, f32), k: f32, muted: bool) {
+    let grid = g.grid;
     let t = ui.t;
     let (cx, cy) = (grid.cx(), grid.cy());
     let (dx, dy) = (p.0 - cx, p.1 - cy);
@@ -327,28 +338,36 @@ fn seek_arrow(ui: &mut Ui, g: &Geom, notes: &[Note], ch: Option<u16>) {
     let reach = |half: f32, u: f32| if u.abs() > 1e-4 { (half - m).max(0.0) / u.abs() } else { f32::MAX };
     let along = reach(grid.w / 2.0, ux).min(reach(grid.h / 2.0, uy));
     let (ax, ay) = (cx + ux * along, cy + uy * along);
-    let r = 13.0;
+    let r = 13.0 * k;
     let key = notes.get(i).map_or(60, |n| i32::from(n.key));
     let name = key_name(key);
-    let f = Font::new(13);
+    let f = Font::new(if muted { 11 } else { 13 });
     let lw = ui.c.text_width(f, &name) + 10.0;
+    let lh = if muted { 15.0 } else { 18.0 };
     // The key's name on the side of the arrow towards the centre.
     let below = uy < 0.5;
-    let lr = Rect::new((ax - lw / 2.0).clamp(grid.x + 2.0, grid.right() - lw - 2.0), if below { ay + r + 4.0 } else { ay - r - 4.0 - 18.0 }, lw, 18.0);
-    let hov = ui.hit(Rect::new(ax - r - 2.0, ay - r - 2.0, 2.0 * r + 4.0, 2.0 * r + 4.0).union(&lr), Action::PianoSeek(i), format!("Nearest note: {name} - click to show it"));
-    let face = if super::lemon(ui) { t.brand_sel(os_theme::design::lemon::MAIN) } else { t.note_top };
+    let lr = Rect::new((ax - lw / 2.0).clamp(grid.x + 2.0, grid.right() - lw - 2.0), if below { ay + r + 4.0 } else { ay - r - 4.0 - lh }, lw, lh);
+    let hov = ui.hit(Rect::new(ax - r - 2.0, ay - r - 2.0, 2.0 * r + 4.0, 2.0 * r + 4.0).union(&lr), Action::PianoSeek(i), format!("Note {name} out of view - click to show it"));
+    let face = if muted {
+        t.text_dim.mix(t.window_body, 0.35)
+    } else if super::lemon(ui) {
+        t.brand_sel(os_theme::design::lemon::MAIN)
+    } else {
+        t.note_top
+    };
     let face = if hov { face.shade(0.12) } else { face };
     ui.c.fill_circle(ax, ay, r + 2.0, t.window_body.with_alpha(170));
     ui.c.fill_circle(ax, ay, r, face);
-    let ink = lk::ink_on(face);
+    let ink = if muted { t.window_body } else { lk::ink_on(face) };
     // An arrow: a shaft and a head narrower than it is long, so its way reads at any angle.
     let (px, py) = (-uy, ux);
-    let at = |k: f32, w: f32| (ax + ux * k + px * w, ay + uy * k + py * w);
+    let at = |a: f32, w: f32| (ax + (ux * a + px * w) * k, ay + (uy * a + py * w) * k);
     let (tail, neck) = (at(-7.0, 0.0), at(1.0, 0.0));
-    ui.c.line(tail.0, tail.1, neck.0, neck.1, 2.2, ink);
+    ui.c.line(tail.0, tail.1, neck.0, neck.1, 2.2 * k, ink);
     ui.c.fill_polygon(&[at(8.0, 0.0), at(0.0, 4.6), at(0.0, -4.6)], ink);
     ui.c.fill_rrect(lr, 5.0, t.window_body.with_alpha(215));
-    ui.c.text_center(f, lr, if hov { t.text } else { t.text_dim.mix(t.text, 0.5) }, &name);
+    let text = if hov { t.text } else if muted { t.text_dim } else { t.text_dim.mix(t.text, 0.5) };
+    ui.c.text_center(f, lr, text, &name);
 }
 
 /// Scroll arrow button (§1a): raised face with a 1 px dark rim and a chevron pointing `dir`

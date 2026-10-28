@@ -870,26 +870,38 @@ pub fn auto_zoom(s: &mut State, grid: Rect) {
     center_keys(s, grid.h);
 }
 
-/// When the channel `ch` has notes in `notes` but none shows in the note grid (`g.grid`): the nearest one (its index)
-/// and its point nearest the grid's centre, in window px. The arrow that points at it (`views::piano`) brings it into
-/// view (`show_note`).
-pub fn off_view_note(g: &Geom, notes: &[Note], ch: Option<u16>) -> Option<(usize, (f32, f32))> {
+/// When the channel `ch` has notes in `notes` but none shows in the note grid (`g.grid`): the nearest one (its index),
+/// its point nearest the grid's centre (window px) and how far that is; then, when notes also lie the other way (more
+/// than 120° from it, seen from the centre), the nearest of those. At most two: the arrows that point at them
+/// (`views::piano`) bring them into view (`show_note`).
+pub fn off_view_notes(g: &Geom, notes: &[Note], ch: Option<u16>) -> Vec<(usize, (f32, f32), f32)> {
     let grid = g.grid;
     let c = (grid.cx(), grid.cy());
-    let mut best: Option<(f32, usize, (f32, f32))> = None;
+    let mut all = Vec::new();
     for (i, n) in notes.iter().enumerate().filter(|(_, n)| Some(n.channel) == ch) {
         let Some(r) = g.note_rect(n) else { continue };
         let v = r.intersect(&grid);
         if v.w > 0.0 && v.h > 0.0 {
-            return None;
+            return Vec::new();
         }
         let p = (c.0.clamp(r.x, r.right()), c.1.clamp(r.y, r.bottom()));
-        let d = (p.0 - c.0).hypot(p.1 - c.1);
-        if best.is_none_or(|b| d < b.0) {
-            best = Some((d, i, p));
-        }
+        all.push((i, p, (p.0 - c.0).hypot(p.1 - c.1)));
     }
-    best.map(|(_, i, p)| (i, p))
+    let Some(&first) = all.iter().min_by(|a, b| a.2.total_cmp(&b.2)) else { return Vec::new() };
+    let way = |p: (f32, f32), d: f32| ((p.0 - c.0) / d.max(1.0), (p.1 - c.1) / d.max(1.0));
+    let u = way(first.1, first.2);
+    let other = all.iter().filter(|o| {
+        let w = way(o.1, o.2);
+        u.0 * w.0 + u.1 * w.1 < -0.5
+    });
+    let mut v = vec![first];
+    v.extend(other.min_by(|a, b| a.2.total_cmp(&b.2)).copied());
+    v
+}
+
+/// The nearest note out of view (`off_view_notes`' first).
+pub fn off_view_note(g: &Geom, notes: &[Note], ch: Option<u16>) -> Option<(usize, (f32, f32))> {
+    off_view_notes(g, notes, ch).first().map(|&(i, p, _)| (i, p))
 }
 
 /// Scrolls the piano roll's note grid `grid` to note `i` of the pattern: its key centred, and its start a quarter of

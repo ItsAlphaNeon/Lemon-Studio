@@ -14926,11 +14926,19 @@ mod tests {
         app.state.project.patterns.iter_mut().find(|p| p.number == pattern).unwrap().notes.clear();
         let h = views::piano::grid_rect(&app.state).h;
         crate::piano::center_keys(&mut app.state, h);
+        // Both under the grid's middle, so one is straight above and the other straight below.
+        let mid = crate::piano::Geom::new(&app.state, views::piano::grid_rect(&app.state)).tick_at(views::piano::grid_rect(&app.state).cx()) as u32;
         let pat = app.state.project.patterns.iter_mut().find(|p| p.number == pattern).unwrap();
-        pat.notes = vec![Note { key: 125, length: ppq, ..Note::step(ch, 0) }, Note { key: 2, length: ppq, ..Note::step(ch, 0) }];
+        pat.notes = vec![Note { key: 125, length: ppq, ..Note::step(ch, mid) }, Note { key: 2, length: ppq, ..Note::step(ch, mid) }];
         frame(&mut app, &mut c, None);
         let g = crate::piano::Geom::new(&app.state, views::piano::grid_rect(&app.state));
         let (i, p) = crate::piano::off_view_note(&g, &app.state.project.patterns.iter().find(|p| p.number == app.state.pattern).unwrap().notes, Some(ch)).expect("none in view");
+        // One arrow each way, the nearest note's the larger.
+        let notes_now = app.state.project.patterns.iter().find(|p| p.number == app.state.pattern).unwrap().notes.clone();
+        let both = crate::piano::off_view_notes(&g, &notes_now, Some(ch));
+        assert_eq!(both.len(), 2, "one above, one below");
+        let other = hit_rect(&app, &Action::PianoSeek(both[1].0));
+        assert!(other.w < hit_rect(&app, &Action::PianoSeek(i)).w, "the farther note's arrow is smaller");
         let r = hit_rect(&app, &Action::PianoSeek(i));
         if let Some(out) = std::env::var_os("OS_SEEK_SHOT") {
             c.pixmap.save_png(std::path::Path::new(&out)).unwrap();
