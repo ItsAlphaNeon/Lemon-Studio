@@ -3206,7 +3206,9 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg))
+            // Plugin windows drawn in the app's too (Linux): a scroll that moved their pixels with the playlist's left
+            // them jittering, and their old places on the playlist.
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg | Win::Hosted(_)))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -3236,6 +3238,8 @@ impl App {
             Win::Strum => Some(views::strum::rect(s)),
             Win::Arp => Some(views::arpeggiate::rect(s)),
             Win::PianoDlg => Some(views::piano_dlg::rect(s)),
+            #[cfg(target_os = "linux")]
+            Win::Hosted(row) => s.embeds.get(&row).map(|e| e.rect()),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -12053,6 +12057,55 @@ mod tests {
             }
         }
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// A plugin window drawn in the app's over the playlist stays put while the playlist scrolls under it: its pixels
+    /// do not move with the playlist's, and the result equals a full repaint (no jitter, no old copies left behind).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn playlist_scroll_leaves_in_app_plugin_windows_in_place() {
+        use crate::playlist as pl;
+        use crate::plugin_window::ChannelInfo;
+        use std::time::{Duration, Instant};
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut b = Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let bar = 4 * u32::from(app.state.project.ppq);
+        for t in 0..14u16 {
+            pl::place(&mut app.state, t, u32::from(t) * bar);
+        }
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut a, None);
+        app.plugins.available = crate::plugins::builtin();
+        app.plugins.scale = 1.0;
+        let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
+        app.plugins.create_with(0, index, None).unwrap();
+        let info = ChannelInfo { name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        app.plugins.open_window(0, info).unwrap();
+        let t0 = Instant::now();
+        while !app.state.embeds.get(&0).is_some_and(|e| e.view().frame.is_some()) && t0.elapsed() < Duration::from_secs(3) {
+            app.plugin_tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let g = app.pl_grid.expect("the playlist's grid");
+        app.state.embeds[&0].set_pos((g.x + 420.0, g.y + 60.0));
+        app.state.raise(Win::Hosted(0));
+        app.plugin_tick();
+        app.invalidate();
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut a, d);
+        crate::prefs::set_slider(&crate::prefs::SMOOTHING, 0);
+        let over = (g.x + 150.0, g.y + 300.0);
+        app.mouse_move(over.0, over.1);
+        assert_eq!(app.top_hit(over.0, over.1).map(|h| h.action.clone()), Some(Action::PlaylistArea), "the mouse is over the playlist");
+        for (what, dy) in [("down", -1.0), ("down again", -1.0), ("up", 1.0)] {
+            app.wheel(0.0, dy, false, false);
+            let d = app.take_damage();
+            frame_damage(&mut app, &mut a, d);
+            frame(&mut app, &mut b, None);
+            assert_same(&a, &b, &format!("scrolled {what} under a plugin window"));
+        }
     }
 
     fn scroll_moves_at(wav: &std::path::Path, scale: f32, design: Design) {
