@@ -761,9 +761,9 @@ mod tests {
         use os_model::target;
         // A volume ramp on insert 1, whose effect is two ticks late: the export equals the one without the delay.
         let mut p = project(&[1], 2);
-        p.channels.push(Channel { kind: ChannelKind::Automation, ..gate_channel(1, 0) });
+        p.channels.push(Channel { kind: ChannelKind::Automation, pan: -1.0, volume: 1.0, ..gate_channel(1, 0) });
         let points = vec![AutoPoint::new(0.0, 0.8), AutoPoint::new(4.0, 0.1)];
-        p.automations.push(Automation { channel: 1, targets: vec![target::mixer(1, target::MIXER_VOLUME)], points, header: vec![0; 21], tail: vec![] });
+        p.automations.push(Automation { channel: 1, targets: vec![target::mixer(1, target::MIXER_VOLUME)], points, header: vec![0; 21], tail: vec![], lfo: Default::default() });
         p.arrangements = vec![os_model::Arrangement {
             clips: vec![Clip::new(0, 384, 0, ClipSource::Pattern(1)), Clip::new(0, 384, 1, ClipSource::Channel(1))],
             tracks: (1..=2).map(os_model::PlaylistTrack::new).collect(),

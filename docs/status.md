@@ -169,7 +169,11 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   levels, stereo separation and the channel's level adjustments
 - All thirteen curve shapes are walked exactly; values are taken one tick ahead and passed on only when
   they change
-- Not yet: recording of movements, clip LFO, min / range
+- A clip's range (its channel's MIN and MAX knobs, minimum above maximum turning the curve upside down) and its
+  LFO (on / off, multiply or add, amount, speed, tension, skew, pulse width, and its own envelope) shape what it
+  hands on, in the original's arithmetic; the clip's channel window sets them, each change an undo step, and
+  projects keep every LFO field
+- Not yet: recording of movements
 
 ## 🚧 Project files
 

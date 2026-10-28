@@ -2193,9 +2193,9 @@ mod tests {
         let mut project = crate::app::test_project();
         project.tempo = Some(130.0);
         let index = project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-        project.channels.push(Channel { index, kind: ChannelKind::Automation, ..project.channels[0].clone() });
+        project.channels.push(Channel { index, kind: ChannelKind::Automation, pan: -1.0, volume: 1.0, ..project.channels[0].clone() });
         // 0.25: (10000 + Round(0.25 * 512000)) / 1000 = 138 BPM.
-        project.automations.push(Automation { channel: index, targets: vec![target::TEMPO], points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![] });
+        project.automations.push(Automation { channel: index, targets: vec![target::TEMPO], points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![], lfo: Default::default() });
         project.arrangements = vec![os_model::Arrangement { clips: vec![Clip::new(0, 384 * 4, 0, ClipSource::Channel(index))], ..Default::default() }];
         let e = Engine::new(&project, &mut SampleLibrary::default(), 48000, PlayMode::Song);
         let (mut r, _, shared) = renderer(e);

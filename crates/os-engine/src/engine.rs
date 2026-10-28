@@ -664,12 +664,10 @@ struct AutoClip {
     targets: Vec<os_model::target::Target>,
     /// The walk along the curve and the tick steps it has taken (spec: audio/automation.md "Walking the curve").
     walk: Option<(os_model::curve::Walk, u64)>,
-}
-
-/// What an automation clip hands on: `Round(level * 2^30)` within 0..2^30 (spec: audio/automation.md "What a clip
-/// hands on"; the clip's own min / range knobs and its LFO are not applied yet).
-fn handed_on(level: f32) -> i64 {
-    ((f64::from(level) * 1_073_741_824.0).round_ties_even() as i64).clamp(0, 1 << 30)
+    /// The clip's range (its channel's two level knobs) and its LFO (spec: audio/automation.md "Range", "The LFO").
+    out: os_model::clip_lfo::ClipOut,
+    /// The walk along the LFO's own envelope.
+    env: os_model::clip_lfo::EnvWalk,
 }
 
 struct MixTrack {
@@ -1468,6 +1466,8 @@ impl Engine {
                         curves.len() - 1
                     }
                 };
+                // The range comes from the clip channel's pan and volume (spec: audio/automation.md "Range").
+                let (pan, volume) = project.channels.iter().find(|x| x.index == ch).map_or((-1.0, 1.0), |x| (x.pan, x.volume));
                 autos.push(AutoClip {
                     start: u64::from(c.position),
                     end: u64::from(c.end()),
@@ -1475,6 +1475,8 @@ impl Engine {
                     curve,
                     targets,
                     walk: None,
+                    out: os_model::clip_lfo::ClipOut::new(&a.lfo, pan, volume, ppq),
+                    env: None,
                 });
             }
         }
@@ -2392,7 +2394,11 @@ impl Engine {
                 taken += 1;
             }
             a.walk = Some((walk, taken));
-            let n = handed_on(walk.value(pts));
+            // The level put into the clip's range and moved by its LFO, whose phase starts with the clip and whose
+            // envelope is walked from the clip's start (spec: audio/automation.md "What a clip hands on", "The LFO's
+            // value").
+            let env = a.out.envelope(&mut a.env, steps, self.ppq);
+            let n = os_model::clip_lfo::handed_on(a.out.out(walk.value(pts), steps, env));
             for &t in &a.targets {
                 if !values.iter().any(|v| v.0 == t) {
                     values.push((t, n));
@@ -4504,9 +4510,11 @@ mod tests {
             let mut c = channel();
             c.index = index;
             c.kind = ChannelKind::Automation;
+            // A new clip's range, 0..1 (stored pan 0, volume 12800).
+            (c.pan, c.volume) = (-1.0, 1.0);
             p.channels.push(c);
             let points = vec![AutoPoint::new(0.0, v), AutoPoint::new(8.0, v)];
-            p.automations.push(Automation { channel: index, targets: vec![target::channel(0, id)], points, header: vec![0; 21], tail: vec![] });
+            p.automations.push(Automation { channel: index, targets: vec![target::channel(0, id)], points, header: vec![0; 21], tail: vec![], lfo: Default::default() });
             p.arrangements[0].clips.push(Clip::new(384, 768, index, ClipSource::Channel(index)));
         }
         let (out, levels) = render(&p);
@@ -6369,9 +6377,11 @@ mod tests {
         let mut auto_ch = channel();
         auto_ch.index = 1;
         auto_ch.kind = ChannelKind::Automation;
+        // A new clip's range, 0..1 (stored pan 0, volume 12800).
+        (auto_ch.pan, auto_ch.volume) = (-1.0, 1.0);
         p.channels.push(auto_ch);
         // A flat tempo clip at 0.25: (10000 + Round(0.25 * 512000)) / 1000 = 138 BPM.
-        p.automations.push(Automation { channel: 1, targets: vec![target::TEMPO], points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![] });
+        p.automations.push(Automation { channel: 1, targets: vec![target::TEMPO], points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![], lfo: Default::default() });
         p.arrangements[0].clips.push(Clip::new(0, 384 * 4, 1, ClipSource::Channel(1)));
         let mut lib = SampleLibrary::new(None);
         let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
@@ -6399,12 +6409,14 @@ mod tests {
         let mut auto_ch = channel();
         auto_ch.index = 1;
         auto_ch.kind = ChannelKind::Automation;
+        // A new clip's range, 0..1 (stored pan 0, volume 12800).
+        (auto_ch.pan, auto_ch.volume) = (-1.0, 1.0);
         p.channels.push(auto_ch);
         p.mixer = (0..2)
             .map(os_model::MixerTrack::new)
             .collect();
         // Channel volume falls from 1.0 to 0.0 over 8 beats, starting at bar 2.
-        let a = Automation { channel: 1, targets: vec![target::channel(0, 0)], points: vec![AutoPoint::new(0.0, 1.0), AutoPoint::new(8.0, 0.0)], header: vec![0; 21], tail: vec![] };
+        let a = Automation { channel: 1, targets: vec![target::channel(0, 0)], points: vec![AutoPoint::new(0.0, 1.0), AutoPoint::new(8.0, 0.0)], header: vec![0; 21], tail: vec![], lfo: Default::default() };
         p.automations.push(a);
         p.arrangements[0].clips.push(Clip::new(384, 768, 1, ClipSource::Channel(1)));
         let mut lib = SampleLibrary::new(None);
@@ -6445,15 +6457,17 @@ mod tests {
             let mut c = channel();
             c.index = i;
             c.kind = ChannelKind::Automation;
+            // A new clip's range, 0..1 (stored pan 0, volume 12800).
+            (c.pan, c.volume) = (-1.0, 1.0);
             p.channels.push(c);
         }
         p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
         let flat = |v| vec![AutoPoint::new(0.0, v), AutoPoint::new(8.0, v)];
         // One clip on the channel volume and two mixer volumes, an unknown target among them.
         let targets = vec![target::channel(0, 0), target::mixer(1, target::MIXER_VOLUME), 0x7FFF_FFFF, target::mixer(2, target::MIXER_VOLUME)];
-        p.automations.push(Automation { channel: 1, targets, points: flat(0.25), header: vec![0; 21], tail: vec![] });
+        p.automations.push(Automation { channel: 1, targets, points: flat(0.25), header: vec![0; 21], tail: vec![], lfo: Default::default() });
         // A later clip on mixer track 2 only: it decides that target while the first keeps the others.
-        p.automations.push(Automation { channel: 2, targets: vec![target::mixer(2, target::MIXER_VOLUME)], points: flat(0.5), header: vec![0; 21], tail: vec![] });
+        p.automations.push(Automation { channel: 2, targets: vec![target::mixer(2, target::MIXER_VOLUME)], points: flat(0.5), header: vec![0; 21], tail: vec![], lfo: Default::default() });
         p.arrangements[0].clips.push(Clip::new(0, 768, 1, ClipSource::Channel(1)));
         p.arrangements[0].clips.push(Clip::new(96, 768, 2, ClipSource::Channel(2)));
         let mut lib = SampleLibrary::new(None);
@@ -6507,9 +6521,11 @@ mod tests {
             let mut c = channel();
             c.index = index;
             c.kind = ChannelKind::Automation;
+            // A new clip's range, 0..1 (stored pan 0, volume 12800).
+            (c.pan, c.volume) = (-1.0, 1.0);
             p.channels.push(c);
             let points = vec![AutoPoint::new(0.0, v), AutoPoint::new(8.0, v)];
-            p.automations.push(Automation { channel: index, targets: vec![t], points, header: vec![0; 21], tail: vec![] });
+            p.automations.push(Automation { channel: index, targets: vec![t], points, header: vec![0; 21], tail: vec![], lfo: Default::default() });
             p.arrangements[0].clips.push(Clip::new(384, 768, index, ClipSource::Channel(index)));
         }
         let mut lib = SampleLibrary::new(None);
@@ -6568,12 +6584,14 @@ mod tests {
         let mut auto_ch = channel();
         auto_ch.index = 1;
         auto_ch.kind = ChannelKind::Automation;
+        // A new clip's range, 0..1 (stored pan 0, volume 12800).
+        (auto_ch.pan, auto_ch.volume) = (-1.0, 1.0);
         p.channels.push(auto_ch);
         // Channel pitch from the bottom, jumping to the top at beat 1 of a clip at tick 384, staying there for half a
         // beat, then falling to 0.75 at beat 2.
         let jump = AutoPoint { mode: AutoMode::Hold, ..AutoPoint::new(1.0, 1.0) };
         let points = vec![AutoPoint::new(0.0, 0.0), jump, AutoPoint::new(1.5, 1.0), AutoPoint::new(2.0, 0.75)];
-        let a = Automation { channel: 1, targets: vec![target::channel(0, target::CHANNEL_PITCH)], points, header: vec![0; 21], tail: vec![] };
+        let a = Automation { channel: 1, targets: vec![target::channel(0, target::CHANNEL_PITCH)], points, header: vec![0; 21], tail: vec![], lfo: Default::default() };
         p.automations.push(a);
         p.arrangements[0].clips.push(Clip::new(384, 768, 1, ClipSource::Channel(1)));
         let mut lib = SampleLibrary::new(None);
@@ -6608,6 +6626,94 @@ mod tests {
         e.next_tick();
         assert!(e.channels[0].ramp.is_none());
         assert_eq!(e.channels[0].vol_v, 0.5);
+    }
+
+    /// A clip's range and LFO, as the values handed on to a mixer volume, tick by tick, against the page's formulas
+    /// worked out here: the default LFO (amount 64, multiplying, one cycle a beat, a triangle starting where it passes
+    /// 0 going up) on a level of 0.5 swings 0.25..0.75; a range of 0.2..0.8 (stored 2560 / 10240) with an adding LFO
+    /// at amount 128 swings 0.2..0.8 around 0.5; a clip started part-way restarts the phase at its own start.
+    // spec: audio/automation.md "Range", "What a clip hands on", "The LFO's value"
+    #[test]
+    fn a_clips_range_and_lfo_shape_the_values_handed_on() {
+        use os_model::clip_lfo::ClipLfo;
+        use os_model::{AutoPoint, Automation, ChannelKind, Clip, ClipSource, target};
+        let tgt = target::mixer(1, target::MIXER_VOLUME);
+        let make = |pan: f64, volume: f64, lfo: ClipLfo, clip: Clip| {
+            let mut p = song(vec![long_note(0, 384 * 4, 0)], vec![Clip::new(0, 384 * 8, 0, ClipSource::Pattern(1))]);
+            let mut auto_ch = channel();
+            auto_ch.index = 1;
+            auto_ch.kind = ChannelKind::Automation;
+            (auto_ch.pan, auto_ch.volume) = (pan, volume);
+            p.channels.push(auto_ch);
+            let points = vec![AutoPoint::new(0.0, 0.5), AutoPoint::new(16.0, 0.5)];
+            p.automations.push(Automation { channel: 1, targets: vec![tgt], points, header: vec![0; 21], tail: vec![], lfo });
+            p.arrangements[0].clips.push(clip);
+            p
+        };
+        // What the page says: the step per tick, the triangle, every operation a single.
+        let b = f64::from((1.0f64 / 96.0) as f32);
+        let q = (45819.0f64 / 65536.0) as f32;
+        let e = ((f64::from(q) * 10001f64.ln()).exp() - 1.0) as f32;
+        let step = (f64::from(e) * (4294967296.0 / 625.0) * b).min(805306368.0).round_ties_even() as u32;
+        let tri = |ph: u32| -> f32 {
+            let half = 1u32 << 31;
+            if ph < half { 1.0 - ph as f32 * (2.0f64 / f64::from(half)) as f32 } else { (ph - half) as f32 * (2.0f64 / f64::from(half - 1)) as f32 - 1.0 }
+        };
+        let phase = |k: u64| (3u32 << 30).wrapping_add((k as u32).wrapping_mul(step));
+        let r = 1.0f32 / 12800.0;
+        let n = |out: f32| ((f64::from(out) * 1073741824.0).round_ties_even() as i64).clamp(0, 1 << 30);
+        let run = |p: &Project, from: u64, to: u64| -> Vec<(u64, i64)> {
+            let mut lib = SampleLibrary::new(None);
+            let mut e = Engine::new(p, &mut lib, 48000, PlayMode::Song);
+            let mut v = Vec::new();
+            while e.tick <= to {
+                e.next_tick();
+                if e.tick > from {
+                    v.push((e.tick - 1, e.auto_last.iter().find(|l| l.0 == target::decode(tgt)).map_or(-1, |l| l.1)));
+                }
+            }
+            v
+        };
+        let on = ClipLfo { switch: -1, ..ClipLfo::default() };
+
+        // The default LFO multiplying, from a clip at tick 96: the k-th tick of the clip (from 1) takes phase start + k step.
+        let p = make(-1.0, 1.0, on.clone(), Clip::new(96, 384 * 4, 1, ClipSource::Channel(1)));
+        let got = run(&p, 96, 96 + 384 * 4 - 1);
+        let (mut lo, mut hi) = (1.0f32, 0.0f32);
+        for &(tick, v) in &got {
+            let k = tick + 1 - 96;
+            let lfo = 0.5 * tri(phase(k));
+            let out = (0.0 + 0.5 * (r * 12800.0)) * (lfo * (64.0 * (1.0 / 128.0) * (r * 12800.0)) * 2.0 + 1.0);
+            assert_eq!(v, n(out), "tick {tick}");
+            (lo, hi) = (lo.min(out), hi.max(out));
+        }
+        assert!((lo - 0.25).abs() < 2e-3 && (hi - 0.75).abs() < 2e-3, "{lo} {hi}");
+
+        // A range of 0.2..0.8 and an LFO adding at amount 128.
+        let (pan, vol) = (2560.0 / 6400.0 - 1.0, 10240.0 / 12800.0);
+        let add = ClipLfo { mode: 1, amount: 128, ..on.clone() };
+        let p = make(pan, vol, add, Clip::new(0, 384 * 4, 1, ClipSource::Channel(1)));
+        let (min, range) = (2560.0f32 * r, 10240.0f32 * r - 2560.0f32 * r);
+        let (mut lo, mut hi) = (1.0f32, 0.0f32);
+        for &(tick, v) in &run(&p, 0, 384 * 4 - 1) {
+            let out = min + 0.5 * range;
+            let out = out + 0.5 * tri(phase(tick + 1)) * (128.0 * (1.0 / 128.0) * range);
+            assert_eq!(v, n(out), "tick {tick}");
+            (lo, hi) = (lo.min(out), hi.max(out));
+        }
+        assert!((lo - 0.2).abs() < 2e-3 && (hi - 0.8).abs() < 2e-3, "{lo} {hi}");
+        // Without the LFO the range alone: 0.2 + 0.5 * 0.6.
+        let p = make(pan, vol, ClipLfo::default(), Clip::new(0, 384, 1, ClipSource::Channel(1)));
+        assert!(run(&p, 0, 300).iter().all(|&(_, v)| v == n(min + 0.5 * range)));
+
+        // A clip whose window starts 2 beats in: the curve starts there, the LFO's phase at the clip's own start.
+        let mut c = Clip::new(192, 384, 1, ClipSource::Channel(1));
+        c.window = Some((2.0, 6.0));
+        let p = make(-1.0, 1.0, on, c);
+        for &(tick, v) in &run(&p, 192, 300) {
+            let out = 0.5f32 * (0.5 * tri(phase(tick + 1 - 192)) * 0.5 * 2.0 + 1.0);
+            assert_eq!(v, n(out), "tick {tick}");
+        }
     }
 
     /// A five-bar song (one clip to tick 1920, a note every beat) with time markers (tick, kind), at 125 BPM and 48 kHz,
@@ -6830,9 +6936,11 @@ mod tests {
         let mut auto_ch = channel();
         auto_ch.index = 1;
         auto_ch.kind = ChannelKind::Automation;
+        // A new clip's range, 0..1 (stored pan 0, volume 12800).
+        (auto_ch.pan, auto_ch.volume) = (-1.0, 1.0);
         p.channels.push(auto_ch);
         let points = vec![AutoPoint::new(0.0, 0.75), AutoPoint::new(4.0, 0.75)];
-        p.automations.push(Automation { channel: 1, targets: vec![target::channel(0, target::CHANNEL_PITCH)], points, header: vec![0; 21], tail: vec![] });
+        p.automations.push(Automation { channel: 1, targets: vec![target::channel(0, target::CHANNEL_PITCH)], points, header: vec![0; 21], tail: vec![], lfo: Default::default() });
         p.arrangements[0].clips.push(Clip::new(0, 384, 1, ClipSource::Channel(1)));
         let mut lib = SampleLibrary::new(None);
         let to_loop = |e: &mut Engine| {

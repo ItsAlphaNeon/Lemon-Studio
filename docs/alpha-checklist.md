@@ -18,7 +18,9 @@ Systems a fully functional DAW can't ship without.
   recording into the playlist works ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [ ] **Input monitoring.** Hear an input through its mixer track while it is armed or recording
 - [ ] **Automation recording into clips.** Only channel volume and pan moves record, and only into the pattern
-- [ ] **Automation clip LFO and min / range.** Clips walk all thirteen curve shapes but have neither yet
+- [x] **Automation clip LFO and min / range.** The clip channel's MIN / MAX knobs set its range and its LFO
+  (switch, mode, amount, speed, tension, skew, pulse width, its own envelope) plays as the original's, in the clip's
+  channel window; files keep every LFO field
 - [ ] **Projects saved before FL Studio 24.2.** They are refused with a dialog that asks for a re-save in a newer
   version
 - [ ] **Multi-core mixing.** The engine renders on one audio thread, which limits dense projects
