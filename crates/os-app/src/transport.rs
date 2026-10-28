@@ -1916,7 +1916,7 @@ impl Session {
         let mut e = engine(project, library, rate, mode, inst, kind != Kind::Preview);
         // The device's output pairs, and its inputs for the mixer tracks that hear them (a preview hears none; spec:
         // audio/track-io.md §2.2).
-        let input = (kind != Kind::Preview).then(crate::device::input_reader).flatten();
+        let input = (kind != Kind::Preview).then(|| crate::device::input_reader((f64::from(rate) * MARGIN_MAX) as u64)).flatten();
         e.set_device(info.pairs(), input.map(|i| Box::new(i) as Box<dyn os_engine::DeviceInput>));
         // Playback loops: a pattern on its bar line, the song at its end (back to the start).
         e.set_looping(song);

@@ -278,15 +278,18 @@ impl Inputs {
 
 /// One stream's place in the device's inputs (`os_engine::DeviceInput`).
 pub(crate) struct InputReader {
-    /// The next frame to read (`None`: from the first read on).
+    /// The next frame to read (`None`: not placed yet).
     at: Option<u64>,
     channels: usize,
+    /// The most its stream keeps queued beyond a device block, frames (the render-ahead margin at its longest).
+    margin: u64,
 }
 
-/// A reader of the device's inputs from now on: `None` when the open device has none.
-pub(crate) fn input_reader() -> Option<InputReader> {
+/// A reader of the device's inputs from now on, for a stream that keeps at most `margin` frames queued beyond a device
+/// block: `None` when the open device has none.
+pub(crate) fn input_reader(margin: u64) -> Option<InputReader> {
     let channels = input_ring().channels.load(Ordering::Acquire);
-    (channels > 0).then_some(InputReader { at: None, channels })
+    (channels > 0).then_some(InputReader { at: None, channels, margin })
 }
 
 impl os_engine::DeviceInput for InputReader {
@@ -294,31 +297,32 @@ impl os_engine::DeviceInput for InputReader {
         self.channels
     }
 
-    /// The next frames as they came in. A stream renders ahead of the device, a tick at a time, so it reads two device
-    /// blocks behind the newest input: what came in since its last tick is then there, though not in step with the
-    /// tick. What has not come in is silence (the reader waits there); one that fell far behind skips ahead.
+    /// The next frames as they came in. A stream renders ahead of the device, a tick at a time, from one tick to a
+    /// block, its margin and a tick ahead of the newest input, and one more block when the driver asks for two back to
+    /// back. So the reader is placed that far behind the newest input on its first read and reads on from there, every
+    /// frame there when it is read. Before that much has come in it reads silence. One that caught up with the newest
+    /// input (the device stalled) or fell far behind is placed again: a jump, heard once.
     fn read(&mut self, out: &mut [f32]) {
         let i = input_ring();
         let ch = self.channels;
         let frames = (out.len() / ch.max(1)) as u64;
         let written = i.written.load(Ordering::Acquire);
-        let behind = 2 * i.block.load(Ordering::Relaxed).max(64) as u64;
-        let mut at = self.at.unwrap_or(written.saturating_sub(behind));
-        if written.saturating_sub(at) > INPUT_FRAMES as u64 / 2 {
-            at = written.saturating_sub(behind);
-        }
-        let n = written.saturating_sub(at).min(frames);
+        let behind = 2 * i.block.load(Ordering::Relaxed).max(64) as u64 + self.margin + frames;
+        let at = match self.at {
+            Some(at) if at + frames <= written && written - at <= INPUT_FRAMES as u64 / 2 => Some(at),
+            _ => written.checked_sub(behind),
+        };
+        let Some(at) = at else {
+            out.fill(0.0);
+            return;
+        };
         for (f, o) in out.chunks_exact_mut(ch.max(1)).enumerate() {
-            if (f as u64) < n {
-                let base = ((at as usize + f) % INPUT_FRAMES) * INPUT_CHANNELS;
-                for (c, s) in o.iter_mut().enumerate() {
-                    *s = f32::from_bits(i.samples[base + c].load(Ordering::Relaxed));
-                }
-            } else {
-                o.fill(0.0);
+            let base = ((at as usize + f) % INPUT_FRAMES) * INPUT_CHANNELS;
+            for (c, s) in o.iter_mut().enumerate() {
+                *s = f32::from_bits(i.samples[base + c].load(Ordering::Relaxed));
             }
         }
-        self.at = Some(at + n);
+        self.at = Some(at + frames);
     }
 }
 
@@ -878,6 +882,38 @@ mod tests {
         let got = m.block(MAX_FRAMES + 100);
         assert_eq!(got.len(), 2 * (MAX_FRAMES + 100));
         assert!(got.iter().all(|v| *v == 0.5));
+    }
+
+    /// A stream rendering ahead of the device, a tick at a time, reads every input frame once and in order, however its
+    /// ticks fall against the device's blocks and when the driver asks for two blocks back to back (it once read up
+    /// to the newest input and then heard silence, a click, each time it rendered further ahead).
+    #[test]
+    fn a_stream_hears_the_inputs_without_gaps() {
+        use os_engine::DeviceInput;
+        let (block, margin, tick) = (512u64, 264u64, 197usize);
+        let ring = input_ring();
+        ring.open(1, block as usize);
+        let mut reader = input_reader(margin).expect("inputs open");
+        let (mut played, mut rendered, mut heard) = (0u64, 0u64, Vec::new());
+        let mut buf = vec![0.0; tick];
+        for k in 0..400u64 {
+            // The device's block: its inputs (the frame's number, from 1), then it plays what is queued.
+            for _ in 0..if k % 37 == 5 { 2 } else { 1 } {
+                let w = ring.written.load(Ordering::Relaxed);
+                ring.push(block as usize, |_, f| (w + f as u64 + 1) as f32);
+                played += block;
+            }
+            // The feeder: whole ticks until a block and the margin are queued.
+            while rendered < played + block + margin {
+                reader.read(&mut buf);
+                heard.extend_from_slice(&buf);
+                rendered += tick as u64;
+            }
+        }
+        // Silence until that much input came in and the reader is placed, then the inputs from some frame on.
+        let start = heard.iter().position(|&v| v != 0.0).expect("inputs heard");
+        assert!(start <= 4 * block as usize, "placed within the first blocks ({start})");
+        assert!(heard[start..].windows(2).all(|w| w[1] == w[0] + 1.0), "every frame once, in order, no silence between");
     }
 
     /// The Buffer length menu's lengths per mode (spec: audio/wasapi-low-latency.md 4.3): only those that change
