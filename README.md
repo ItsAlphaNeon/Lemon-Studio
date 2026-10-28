@@ -3,6 +3,10 @@
 This is the `cutting-edge` branch of Lemon Studio. It is [`main`](https://github.com/ItsAlphaNeon/Lemon-Studio/tree/main)
 plus what is listed here. For everything else (building, using, contributing, license), read `main`'s README.
 
+> **Linux only, Wayland first, for now.** This branch is built, tested and used on Linux under Wayland (Hyprland).
+> X11 still works (`OPENSTUDIO_WAYLAND=0`). Windows and macOS may build, but nothing added here is tested there, and
+> some of it is Linux-only (plugin editors drawn in the app's window, the Hyprland plugin-window handling).
+
 `main` is merged into this branch with `tools/merge-main.sh`, which keeps this README and `docs/` to this branch's
 own content. Side branches are named `cutting-edge-<topic>`.
 
