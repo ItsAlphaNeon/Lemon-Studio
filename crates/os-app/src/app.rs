@@ -9328,6 +9328,44 @@ mod tests {
         assert_eq!(saved.mixer[4].slots[0], Some(shaper));
     }
 
+    /// A project's Fruity Flanger and Fruity Phaser slots open as Lemon Flanger and Lemon Phaser with their state, show
+    /// the Lemon names, and a save keeps the FL effects with the state the Lemon effects write back.
+    // spec: plugins/lemon-small-effects.md "Opened projects' slots", plugins/lemon-flanger.md §5, plugins/lemon-phaser.md §5
+    #[test]
+    fn fl_flanger_and_phaser_slots_open_as_their_lemon_recreations() {
+        use crate::plugins::fx_key;
+        let mut flanger = lemon_small_fx::params::default_state(lemon_small_fx::flanger::SPEC);
+        lemon_small_fx::params::set_field(&mut flanger, 1, 700);
+        let mut phaser = lemon_small_fx::params::default_state(lemon_small_fx::phaser::SPEC);
+        lemon_small_fx::params::set_field(&mut phaser, 6, 15);
+        let cases = [(1u16, 0u8, "Fruity Flanger", "Lemon Flanger", flanger), (2, 1, "Fruity Phaser", "Lemon Phaser", phaser)];
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        for (t, k, file, _, fl) in &cases {
+            a.state.project.mixer[usize::from(*t)].slots[usize::from(*k)] = Some(os_model::SlotPlugin { name: (*file).into(), state: fl.clone() });
+        }
+        a.sync_effects();
+        for (t, k, file, lemon, fl) in &cases {
+            let key = fx_key(*t, *k);
+            assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(lemon.to_string()), "{file}");
+            assert_eq!(crate::mixer::slot_name(&a.state, *t, *k).as_deref(), Some(*lemon));
+            assert_eq!(a.plugins.recreation_file_state(key, file).as_ref(), Some(fl), "{file}: the state as it was opened");
+        }
+        let path = std::env::temp_dir().join(format!("lemon-fl-modulation-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        for (t, k, file, _, fl) in &cases {
+            let slot = saved.mixer[usize::from(*t)].slots[usize::from(*k)].clone().unwrap();
+            assert_eq!((slot.name.as_str(), &slot.state), (*file, fl));
+        }
+    }
+
     /// The toolbar's audio editor button puts Tesla on the master track and shows it; another click shows the same
     /// one, the right click adds another (spec: plugins/tesla/requests.md #5).
     #[test]

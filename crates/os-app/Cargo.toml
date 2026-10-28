@@ -42,6 +42,8 @@ lemon-stereo-shaper = { path = "../../plugins/lemon-stereo-shaper", features = [
 tesla = { path = "../../plugins/tesla", features = ["linked"] }
 pulp-filter = { path = "../../plugins/pulp-filter", features = ["linked"] }
 press = { path = "../../plugins/press", features = ["linked"] }
+lemon-flanger = { path = "../../plugins/lemon-flanger", features = ["linked"] }
+lemon-phaser = { path = "../../plugins/lemon-phaser", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"

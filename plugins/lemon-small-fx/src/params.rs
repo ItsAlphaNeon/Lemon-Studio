@@ -223,6 +223,15 @@ pub fn db_text(gain: f32) -> String {
     if gain <= 0.0 { "-INFdB".into() } else { format!("{:.1}dB", 20.0 * f64::from(gain).log10()) }
 }
 
+/// As [`db_text`], with levels just under unity (that round to -0.0) shown as 0.0dB, so the text typed back gives a
+/// value with the same text.
+pub fn db_text_fine(gain: f32) -> String {
+    match db_text(gain) {
+        t if t == "-0.0dB" => "0.0dB".into(),
+        t => t,
+    }
+}
+
 /// The number a typed text starts with.
 pub fn leading_number(s: &str) -> Option<f64> {
     let lead: String = s.trim().chars().take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
@@ -262,6 +271,19 @@ pub fn parse_db(range: (i32, i32), s: &str, gain: impl Fn(i32) -> f32) -> Option
     })
 }
 
+/// As [`parse_db`], for a `gain` that never falls as the value rises (a binary search: for the long ranges).
+pub fn parse_db_rising(range: (i32, i32), s: &str, gain: impl Fn(i32) -> f32) -> Option<i32> {
+    let s = s.trim().to_ascii_lowercase();
+    if s.contains("inf") || s == "off" {
+        return (gain(range.0) <= 0.0).then_some(range.0);
+    }
+    let x = leading_number(&s)?;
+    Some(nearest_rising(range, x, |v| {
+        let g = gain(v);
+        if g > 0.0 { 20.0 * f64::from(g).log10() } else { f64::NEG_INFINITY }
+    }))
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Plugin state <-> the original's saved state
 
@@ -299,7 +321,7 @@ pub fn fl_from_plugin_state(spec: &Spec, blob: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{balance, chorus, fast_distortion, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor};
+    use crate::{balance, chorus, fast_distortion, flanger, phaser, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor};
 
     #[test]
     fn a_new_instance_starts_on_the_originals_default_and_its_state_reads_back() {
@@ -323,6 +345,8 @@ mod tests {
         );
         assert_eq!(default_state(chorus::SPEC), os_engine::effects::chorus::Settings::default().to_state());
         assert_eq!(default_state(stereo_shaper::SPEC), os_engine::effects::stereo_shaper::Settings::default().to_state());
+        assert_eq!(default_state(flanger::SPEC), os_engine::effects::flanger::Settings::default().to_state());
+        assert_eq!(default_state(phaser::SPEC), os_engine::effects::phaser::Settings::default().to_state());
     }
 
     /// Lemon Stereo Shaper leaves the difference output (int 6 after the version) out of its settings: it is kept as
