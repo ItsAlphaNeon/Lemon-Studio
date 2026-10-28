@@ -1,7 +1,9 @@
 # The Lemon project file (`.lemon`)
 
-Lemon Studio's own project file. Save as offers it ("Lemon project, with its history"); Open and a drop onto the
-window open it. A `.flp` is still saved and opened as before.
+Lemon Studio's own project file, and what a new project is saved as (Save as's first choice, "Lemon project, with its
+history"; the Save as form names `<name>.lemon`). Open and a drop onto the window open it. A project opened from a
+`.flp` keeps saving as one (Save new version and renaming keep the file's type), and Save as offers "FL Studio project"
+too.
 
 ## What it holds
 

@@ -94,7 +94,7 @@ thread_local! {
 
 /// The first `Project_N` (N from 1) that names nothing in `root`, as a folder or as a project file.
 pub fn free_name(root: &Path) -> String {
-    let taken = |n: &str| !root.as_os_str().is_empty() && (root.join(n).exists() || root.join(format!("{n}.flp")).exists());
+    let taken = |n: &str| !root.as_os_str().is_empty() && (root.join(n).exists() || root.join(format!("{n}.flp")).exists() || root.join(format!("{n}.{}", crate::native::EXT)).exists());
     (1u32..).map(|n| format!("Project_{n}")).find(|n| !taken(n)).expect("a free name")
 }
 
@@ -176,9 +176,9 @@ impl SaveForm {
         if self.new_folder { self.root.join(self.name.text.trim()) } else { self.root.clone() }
     }
 
-    /// The project's file: `<folder>/<name>.flp`.
+    /// The project's file: `<folder>/<name>.lemon` (a Lemon project, `crate::native`).
     pub fn file(&self) -> PathBuf {
-        self.folder().join(format!("{}.flp", self.name.text.trim()))
+        self.folder().join(format!("{}.{}", self.name.text.trim(), crate::native::EXT))
     }
 
     /// Location's text: the folder with a trailing separator (nothing without a root).
@@ -389,7 +389,7 @@ impl App {
 
     /// Save / Create (spec §7): the folder is made, the form's information (and New project's time settings) go into
     /// the project, the samples it uses are copied to `<folder>/Samples` while Copy is ticked, event 202 names the
-    /// folder (the Data folder choice stays as it was), and the project is saved as `<folder>/<name>.flp`. The root
+    /// folder (the Data folder choice stays as it was), and the project is saved as `<folder>/<name>.lemon`. The root
     /// folder, Copy and Move are kept for the next form.
     fn save_form_save(&mut self, f: SaveForm) {
         prefs::set_text(ROOT_KEY, &f.root.to_string_lossy());
@@ -472,7 +472,7 @@ mod tests {
 
     /// Save on a project never saved (the default, When saving unsaved projects only): the Save as form, named the next
     /// free Project_N in the user's projects folder, Create new project folder ticked, Location the folder it makes.
-    /// Save makes `<root>/Project_1/Project_1.flp`, copies the samples to its Samples folder, 202 names the folder and
+    /// Save makes `<root>/Project_1/Project_1.lemon`, copies the samples to its Samples folder, 202 names the folder and
     /// 167 stays 0; the next form offers Project_2, the remembered root and Copy as left. A saved project's Save as is
     /// the file dialog.
     #[test]
@@ -496,7 +496,7 @@ mod tests {
         click(&mut app, FHit::Main);
         assert!(app.state.dialogs.is_empty(), "saved");
         let folder = root.join("Project_1");
-        let file = folder.join("Project_1.flp");
+        let file = folder.join("Project_1.lemon");
         let copy = folder.join(df::SAMPLES_DIR).join("kick.wav");
         assert_eq!(app.state.path, Some(file.clone()));
         assert!(file.is_file() && copy.is_file());
@@ -526,7 +526,7 @@ mod tests {
         let dir = scratch("names");
         let root = dir.join("Projects");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("Taken.flp"), b"x").unwrap();
+        std::fs::write(root.join("Taken.lemon"), b"x").unwrap();
         let mut app = App::new(None);
         app.open_save_form(None);
         type_text(&mut app, "a/b");
@@ -539,7 +539,7 @@ mod tests {
         type_text(&mut app, "Taken");
         click(&mut app, FHit::Check(0));
         click(&mut app, FHit::Main);
-        assert!(app.top_message().is_some_and(|m| m.1.contains("Taken.flp already exists")));
+        assert!(app.top_message().is_some_and(|m| m.1.contains("Taken.lemon already exists")));
         app.dialog_click(DHit::Button(0));
         // The Information group: folded, its fields do not take the keys; unfolded, Tab goes through them.
         click(&mut app, FHit::Field(1));
@@ -557,7 +557,7 @@ mod tests {
         type_text(&mut app, "Song");
         app.dialog_key(&Key::Named(NamedKey::Enter), false, false);
         assert!(app.state.dialogs.is_empty());
-        assert_eq!(app.state.path, Some(root.join("Song.flp")), "into the root");
+        assert_eq!(app.state.path, Some(root.join("Song.lemon")), "into the root");
         let info = &app.state.project.info;
         assert_eq!((info.title.as_deref(), info.author.as_deref(), info.url.as_deref(), info.genre.as_deref()), (Some("My song"), Some("Me"), None, Some("Lo-fi")));
         done(&dir);
@@ -632,7 +632,7 @@ mod tests {
         click(&mut app, FHit::Main);
         assert!(app.state.dialogs.is_empty());
         assert_eq!((app.state.project.ppq, app.state.project.bar()), (192, (3, 2)));
-        let file = dir.join("Projects").join("Project_1").join("Project_1.flp");
+        let file = dir.join("Projects").join("Project_1").join("Project_1.lemon");
         assert_eq!(app.state.path, Some(file.clone()));
         assert!(!app.unsaved());
         done(&dir);

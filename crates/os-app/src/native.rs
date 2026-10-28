@@ -33,6 +33,11 @@ pub fn is_project_file(path: &Path) -> bool {
     is_native(path) || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("flp"))
 }
 
+/// The extension a project saves with: its file's, when it has one; a Lemon project for a new one.
+pub fn ext_for(path: Option<&Path>) -> String {
+    path.filter(|p| is_project_file(p)).and_then(|p| p.extension()).map_or_else(|| EXT.to_string(), |e| e.to_string_lossy().into_owned())
+}
+
 /// What a Lemon project file holds besides the project.
 #[derive(Debug, Default)]
 pub struct Extra {

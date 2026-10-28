@@ -1871,10 +1871,11 @@ impl App {
     pub(crate) fn save_file_dialog(&mut self, next: Option<crate::dialog::Next>) {
         use crate::filedlg::{FileDlg, Mode};
         let path = self.state.path.clone();
-        let name = path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "Untitled.flp".to_string(), |n| n.to_string_lossy().into_owned());
+        let name = path.as_ref().and_then(|p| p.file_name()).map_or_else(|| format!("Untitled.{}", crate::native::EXT), |n| n.to_string_lossy().into_owned());
+        // A Lemon project first: what a new project is saved as.
         let dlg = FileDlg::new(Mode::Save, "Save project as", "project", crate::dialog::Then::SaveProject(next))
-            .filter("Lemon Studio project", &["flp"])
             .filter("Lemon project, with its history", &[crate::native::EXT])
+            .filter("FL Studio project", &["flp"])
             .start(path.as_deref().and_then(|p| p.parent()))
             .name(&name);
         self.file_dialog(dlg);
@@ -2421,7 +2422,8 @@ impl App {
             _ => (stem.clone(), 1),
         };
         let dir = path.parent().map(PathBuf::from).unwrap_or_default();
-        let target = (n + 1..).map(|k| dir.join(format!("{base}_{k}.flp"))).find(|p| !p.exists()).expect("a free name");
+        let ext = crate::native::ext_for(Some(&path));
+        let target = (n + 1..).map(|k| dir.join(format!("{base}_{k}.{ext}"))).find(|p| !p.exists()).expect("a free name");
         self.save_to(target);
     }
 
@@ -13120,13 +13122,13 @@ mod tests {
             named(&mut app, NamedKey::Enter);
             assert_eq!(app.state.dialogs.len(), 1, "Tab went round to Yes");
             let f = top_file(&app);
-            assert_eq!((f.mode, f.name.text.as_str(), f.name.all), (crate::filedlg::Mode::Save, "Untitled.flp", true));
+            assert_eq!((f.mode, f.name.text.as_str(), f.name.all), (crate::filedlg::Mode::Save, "Untitled.lemon", true));
             frame(&mut app, &mut c, None);
             let target = dir.join(format!("Tune {design:?}"));
             typed(&mut app, &target.display().to_string());
             assert!(!app.want_exit);
             named(&mut app, NamedKey::Enter);
-            let saved = dir.join(format!("Tune {design:?}.flp"));
+            let saved = dir.join(format!("Tune {design:?}.lemon"));
             assert!(saved.exists() && !app.unsaved(), "saved with the type's extension: {:?}", app.state.message);
             assert!(app.want_exit && !app.modal_open(), "then the window closes");
             // Save as onto that file: the replace question starts on No; Yes replaces.
@@ -13137,7 +13139,7 @@ mod tests {
             assert_eq!(top_file(&app).dir, dir, "the dialog starts in the project's folder");
             named(&mut app, NamedKey::Enter);
             assert_eq!(app.state.dialogs.len(), 2);
-            assert_eq!(app.top_message().unwrap().1, format!("Tune {design:?}.flp already exists.\nDo you want to replace it?"));
+            assert_eq!(app.top_message().unwrap().1, format!("Tune {design:?}.lemon already exists.\nDo you want to replace it?"));
             frame(&mut app, &mut c, None);
             named(&mut app, NamedKey::Enter);
             assert_eq!(app.state.dialogs.len(), 1, "No goes back to the dialog");

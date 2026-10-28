@@ -316,7 +316,8 @@ impl App {
                         self.copy_used_samples();
                     }
                     let name = crate::backup::project_name(self.state.path.as_deref());
-                    self.save_to(dir.join(format!("{name}.flp")));
+                    let ext = crate::native::ext_for(self.state.path.as_deref());
+                    self.save_to(dir.join(format!("{name}.{ext}")));
                     reread(&self.state);
                 }
             }
@@ -350,7 +351,7 @@ impl App {
             Some((old, new)) => file.strip_prefix(old).map_or_else(|_| file.clone(), |rel| new.join(rel)),
             None => file.clone(),
         };
-        let target = file_after.with_file_name(format!("{}.flp", name.trim()));
+        let target = file_after.with_file_name(format!("{}.{}", name.trim(), crate::native::ext_for(Some(&file))));
         // Both names are checked before anything is renamed (the file's new name where the file is now).
         if let Some((_, new)) = folder_move.as_ref().filter(|(_, new)| new.exists()) {
             return self.rename_refused(new);

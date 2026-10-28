@@ -17,7 +17,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **A project journal.** Every edit, undo, save and plugin state is written to disk as it happens, saved or not, and
   readable through the control plane: a sound made in a plugin's window survives an unsaved project. See
   [docs/control-plane.md](docs/control-plane.md) "Journal".
-- **Lemon project files (`.lemon`).** Save as offers a project file of Lemon Studio's own: the project as an FLP plus its
+- **Lemon project files (`.lemon`), the default for new projects.** A project file of Lemon Studio's own: the project as an FLP plus its
   whole history across sessions (every change and every plugin state), so Recover from journal reaches any sound the
   project ever had. See [docs/native-format.md](docs/native-format.md).
 - **Older FL projects open.** Projects saved by FL 20 to 24.1 are converted to the newer layout as they are read.
