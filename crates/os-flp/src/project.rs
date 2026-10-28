@@ -172,10 +172,12 @@ mod id {
 }
 
 const NOTE_LEN: usize = 24;
-/// Clip record lengths: 88 bytes in files of FL 26, 80 bytes in files of FL 24.2 to 25 (spec: flp/layouts.md,
-/// "Playlist clip records").
+/// Clip record lengths: 88 bytes in files of FL 26, 80 bytes in files of FL 24.2 to 25, 60 bytes in files of FL 21
+/// to 24.1 (20.99 betas included), 32 bytes up to FL 20 (spec: flp/layouts.md, "Playlist clip records").
 const CLIP_LEN: usize = 88;
 const CLIP_LEN_25: usize = 80;
+const CLIP_LEN_21: usize = 60;
+const CLIP_LEN_20: usize = 32;
 const MIXER_REC_LEN: usize = 12;
 const NOTE_FLAGS_DEFAULT: u16 = 0x4000;
 const PATTERN_COLOR_DEFAULT: u32 = 0x002D_2C29;
@@ -696,9 +698,10 @@ fn text_enc(events: &[Event], version: Option<usize>) -> TextEnc {
     if major_version(events, version) <= 11 { TextEnc::Ansi } else { TextEnc::Utf16 }
 }
 
-/// The record length a clip list fits: a whole number of records, each with `00 50` at byte 4.
+/// The record length a clip list fits: a whole number of records, each with `00 50` at byte 4, trying 88, 80, 60
+/// and 32 bytes (spec: flp/layouts.md, "How to tell the generation").
 fn list_clip_len(data: &[u8]) -> Option<usize> {
-    [CLIP_LEN, CLIP_LEN_25]
+    [CLIP_LEN, CLIP_LEN_25, CLIP_LEN_21, CLIP_LEN_20]
         .into_iter()
         .find(|&n| !data.is_empty() && data.len() % n == 0 && data.chunks_exact(n).all(|r| r[4..6] == [0x00, 0x50]))
 }
@@ -5532,6 +5535,22 @@ mod tests {
         assert_eq!((back[1].position, back[1].length, back[1].track), (768, 96, 0));
         assert_eq!(encode_clips(&back, CLIP_LEN_25), d);
         assert_eq!(list_clip_len(&encode_clips(&back, CLIP_LEN)), Some(CLIP_LEN));
+    }
+
+    /// Lists of older files, 60-byte (FL 21 to 24.1) and 32-byte (up to FL 20) records, are told apart and written
+    /// back at their length; 32-byte records have no id (spec: flp/layouts.md, "How to tell the generation").
+    #[test]
+    fn older_clip_records_are_read_at_their_length() {
+        let a = Clip::new(384, 288, 2, ClipSource::Pattern(1));
+        let b = Clip::new(768, 96, 0, ClipSource::Pattern(2));
+        for len in [CLIP_LEN_21, CLIP_LEN_20] {
+            let d = encode_clips(&[a.clone(), b.clone()], len);
+            assert_eq!(d.len(), 2 * len);
+            assert_eq!(list_clip_len(&d), Some(len));
+            let back = decode_clips(&d, len);
+            assert_eq!((back[1].position, back[1].length, back[1].track), (768, 96, 0));
+            assert_eq!(encode_clips(&back, len), d);
+        }
     }
 
     /// A new project's playlist (clips with windows, mute, markers) and automation clips are written by `create`,
