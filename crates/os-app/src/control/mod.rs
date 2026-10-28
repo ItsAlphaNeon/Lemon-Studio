@@ -111,6 +111,8 @@ pub struct Control {
     pub host: Vec<HostReq>,
     /// Parameter values commands set, for the app to pass on: (owner, parameter, value).
     pub params: Vec<(u32, u32, f64)>,
+    /// Rack rows whose Misc values an undo put back, for their Lemon Sampler to follow (`misc::follow`).
+    pub misc: Vec<usize>,
     /// The values parameters were last set to or read at (the undo of a parameter change puts the value back).
     known: HashMap<(u32, u32), f64>,
     events: VecDeque<Event>,
@@ -327,6 +329,24 @@ pub fn knob_edit<R>(s: &mut State, name: &'static str, region: command::Region, 
     } else {
         f(s)
     }
+}
+
+/// An edit of `region` that joins the step of run `run` just before it (a knob dragged, a box's wheel notches): its
+/// first change records the step holding `region` as it was, the others go into it. `knob`: a knob-like control, no
+/// step while Undo knob tweaks is off.
+pub fn run_edit<R>(s: &mut State, name: &'static str, region: command::Region, run: crate::history::Run, knob: bool, f: impl FnOnce(&mut State) -> R) -> R {
+    if (knob && !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) || s.history.joins(run) {
+        return f(s);
+    }
+    let before = command::Taken::of(s, region);
+    let r = f(s);
+    if let Some(before) = before {
+        if command::Taken::of(s, region).as_ref() != Some(&before) {
+            record_edit(s, name, before);
+            s.history.set_run(run);
+        }
+    }
+    r
 }
 
 /// Records an interface edit's step. A step of the same press that changed nothing goes first (a text box's playlist

@@ -122,6 +122,11 @@ default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre).
   tempo, the project settings and plugin parameters, whether Lemon Studio sets them (Type in value, Set..., Paste
   value) or they change in the plugin's own window. Faders and parameters follow "Undo knob tweaks". A change has the
   same step name whichever made it ("Tempo", "Time signature", "Song info", "Plugin parameter").
+- So are the channel's own controls in a plugin window (on/off, volume, panning, pitch, pitch range, mixer track) and
+  its Misc tab, channel mute and solo (the LED, the menu, MIDI), mixer solo, the instrument rack's mixer-track box,
+  the pattern length box, a pattern's time signature, arrangements added, cloned and deleted, arrangement, pattern
+  and effect-slot names, a clip's random colour and "Remove all audio editors". A drag or a run of wheel notches on
+  one box or knob is one step.
 - An undone channel or effect keeps its plugin instance's state: a redo hosts it again from that state.
 - A proposal is applied to see what it changes and taken back at once; with a window the app asks the user to Apply
   or Discard it. Accepted, it is one undo step named after its client.
@@ -155,5 +160,13 @@ call("apply", commands=[
 - Live commands that reach the playing engine without a rebuild (each change rebuilds it, as edits in the interface
   do); parameter changes go straight to the plugin.
 - A native project format: projects are read and saved as FL Studio projects.
+- Undo steps for: replacing a plugin's whole state (loading a preset, adding a Tesla), the graph editor, note fields
+  edited in place (fine pitch, release, Mod A/B, slide and porta flags), the Lemon Sampler editor's channel side,
+  clip groups, and Make unique / audio clips added (partly undone). Locking, collapsing and loop lengths in the
+  instrument rack are view state and stay out of history.
+- Commands for what the interface edits but clients can't yet: channel envelopes, groups, clip channels; note
+  fields; mixer track moves, slot moves, sidechains and Tesla; clip offsets, groups, markers and playlist tracks;
+  automation clips and points; project settings beyond tempo, signature and song info; plugin state and presets;
+  sample tags.
 - Rendering through the control plane, and pushing events to clients (they poll `events`). A parameter changed in a
   plugin's window is an undo step but not an `edit` event.

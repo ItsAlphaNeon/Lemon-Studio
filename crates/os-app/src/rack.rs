@@ -446,8 +446,12 @@ pub fn set_len(s: &mut State, steps: Option<u32>) {
     let ps = per_step(s);
     let n = s.pattern.max(1);
     let max = max_steps(s);
-    crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
-    s.piano.dirty = true;
+    // An undo step; a drag or a run of wheel notches of the box one step.
+    let run = crate::history::Run::PatternLength(n);
+    crate::control::run_edit(s, "Pattern length", crate::control::command::Region::Pattern(n), run, false, |s| {
+        crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
+        s.piano.dirty = true;
+    });
 }
 
 /// Length box value: 0 = Auto.
@@ -662,6 +666,10 @@ pub fn gradient(s: &mut State) {
 /// with "Restore previous state after solo" on, puts back the states from before the first solo (a solo moved to
 /// another channel keeps them; spec: ui/settings-choices.md "Miscellaneous"). Locked channels keep their state.
 pub fn solo(s: &mut State, r: usize) {
+    crate::control::edit(s, "Channel solo", crate::control::command::Region::Project, |s| solo_now(s, r));
+}
+
+fn solo_now(s: &mut State, r: usize) {
     let locked = s.rack.locked.clone();
     let soloed_now = solo_of(s, r);
     // A solo still in effect (the last solo click's shape, untouched since) keeps the states saved when it started.
@@ -731,10 +739,12 @@ fn solo_of(s: &State, r: usize) -> bool {
 }
 
 pub fn toggle_mute(s: &mut State, r: usize) {
-    if let Some(c) = s.project.channels.get_mut(r) {
-        c.enabled = !c.enabled;
-        s.piano.dirty = true;
-    }
+    crate::control::edit(s, "Channel mute", crate::control::command::Region::Channel(r), |s| {
+        if let Some(c) = s.project.channels.get_mut(r) {
+            c.enabled = !c.enabled;
+            s.piano.dirty = true;
+        }
+    });
 }
 
 pub fn toggle_lock(s: &mut State, r: usize) {

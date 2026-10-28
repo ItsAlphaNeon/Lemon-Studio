@@ -343,10 +343,12 @@ impl crate::app::App {
                 self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
             }
             Control::ChanPitch(row) => {
-                if let Some(ch) = s.project.channels.get_mut(row) {
-                    ch.pitch_cents = 0;
-                    s.piano.dirty = true;
-                }
+                crate::control::edit(s, "Channel pitch", crate::control::command::Region::Channel(row), |s| {
+                    if let Some(ch) = s.project.channels.get_mut(row) {
+                        ch.pitch_cents = 0;
+                        s.piano.dirty = true;
+                    }
+                });
             }
             Control::Slider(label) => {
                 if let Some(sl) = crate::prefs::find_slider(label) {

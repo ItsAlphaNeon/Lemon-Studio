@@ -3701,9 +3701,10 @@ pub fn commit_edit(s: &mut State) {
     snapshot(s);
     let text = e.text.trim().to_string();
     match e.target {
+        // Names aren't in the playlist's step (`capture`): their own steps, which drop the empty one above.
         EditTarget::ArrangementName => {
             if !text.trim().is_empty() {
-                arr_mut(s).name = Some(text.trim().to_string());
+                crate::control::edit(s, "Arrangement name", crate::control::command::Region::Arrangement, |s| arr_mut(s).name = Some(text.trim().to_string()));
             }
         }
         EditTarget::TrackName(t) => {
@@ -3739,21 +3740,21 @@ pub fn commit_edit(s: &mut State) {
                 }
             });
         }
-        EditTarget::SlotName(t, k) => {
+        EditTarget::SlotName(t, k) => crate::control::edit(s, "Slot name", crate::control::command::Region::Project, |s| {
             if text.is_empty() {
                 s.mixer.slot_names.remove(&(t, k));
             } else {
                 s.mixer.slot_names.insert((t, k), text);
             }
-        }
+        }),
         EditTarget::TypeIn(t, norm) => crate::typein::accept(s, t, norm, &text),
-        EditTarget::PatternName(n) => {
+        EditTarget::PatternName(n) => crate::control::edit(s, "Pattern name", crate::control::command::Region::Project, |s| {
             if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == n) {
                 p.name = (!text.is_empty()).then_some(text);
             } else if !text.is_empty() {
                 s.project.patterns.push(os_model::Pattern { number: n, name: Some(text), ..Default::default() });
             }
-        }
+        }),
     }
     s.piano.dirty = true;
 }
@@ -4288,23 +4289,25 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::ClipRandomColor(i) => {
             let Some(src) = clips(s).get(i).map(|c| c.source) else { return None };
-            let seed = (clips(s).len() as u32).wrapping_mul(2654435761).wrapping_add(i as u32 * 40503);
-            let rgb = hsl_rgb((seed % 360) as f32, 0.45, 0.45);
-            match src {
-                ClipSource::Pattern(n) => {
-                    if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == n) {
-                        p.color = Some(rgb);
-                    } else {
-                        s.project.patterns.push(os_model::Pattern { number: n, color: Some(rgb), ..Default::default() });
+            crate::control::edit(s, "Clip color", crate::control::command::Region::Project, |s| {
+                let seed = (clips(s).len() as u32).wrapping_mul(2654435761).wrapping_add(i as u32 * 40503);
+                let rgb = hsl_rgb((seed % 360) as f32, 0.45, 0.45);
+                match src {
+                    ClipSource::Pattern(n) => {
+                        if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == n) {
+                            p.color = Some(rgb);
+                        } else {
+                            s.project.patterns.push(os_model::Pattern { number: n, color: Some(rgb), ..Default::default() });
+                        }
+                    }
+                    ClipSource::Channel(ch) => {
+                        if let Some(c) = s.project.channels.iter_mut().find(|c| c.index == ch) {
+                            c.color = Some(rgb);
+                            c.rack.stored_color = Some(rgb);
+                        }
                     }
                 }
-                ClipSource::Channel(ch) => {
-                    if let Some(c) = s.project.channels.iter_mut().find(|c| c.index == ch) {
-                        c.color = Some(rgb);
-                        c.rack.stored_color = Some(rgb);
-                    }
-                }
-            }
+            });
             None
         }
         Cmd::PointDelete(ch, i) => {
@@ -4361,7 +4364,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             show_arrangement(s, n);
             None
         }
-        Cmd::ArrAdd | Cmd::ArrClone => {
+        Cmd::ArrAdd | Cmd::ArrClone => crate::control::edit(s, "Add arrangement", crate::control::command::Region::Project, |s| {
             let n = s.project.arrangements.iter().map(|a| a.number + 1).max().unwrap_or(0);
             let mut a = if cmd_is_clone(&cmd) { arr_mut(s).clone() } else { os_flp::project::default_arrangement() };
             a.number = n;
@@ -4375,18 +4378,18 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             // FL's "Add one..." / "Clone..." ask for the name.
             start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
             None
-        }
+        }),
         Cmd::ArrRename => {
             start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
             None
         }
-        Cmd::ArrDelete if s.project.arrangements.len() > 1 => {
+        Cmd::ArrDelete if s.project.arrangements.len() > 1 => crate::control::edit(s, "Delete arrangement", crate::control::command::Region::Project, |s| {
             let i = s.project.arrangement_index();
             s.project.arrangements.remove(i);
             let n = s.project.arrangements[i.saturating_sub(1)].number;
             show_arrangement(s, n);
             None
-        }
+        }),
         Cmd::ArrDelete => Some("The only arrangement cannot be deleted".into()),
         Cmd::ArrMerge(n) => {
             let Some(other) = s.project.arrangements.iter().find(|a| a.number == n).cloned() else { return None };
