@@ -428,7 +428,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
                 let sr = Rect::new(step_x0 + STEP_W * k as f32 - sx, ry + 4.0, 13.0, 19.0);
                 let on = rk::step_on(notes, ch.index, k, per_step);
                 let hov = ui.hit(sr.intersect(&step_area), Action::Step(i, k), "Step - click or drag to paint (left / right)");
-                step_button(ui, sr, (k / group) % 2 == 1, on, k >= row_len, hov, on && cur_step.is_some_and(|c| c % len.max(1) == k));
+                step_button(ui, sr, k % group, (k / group) % 2 == 1, on, k >= row_len, hov, on && cur_step.is_some_and(|c| c % len.max(1) == k));
             }
             ui.c.pop_clip();
         }
@@ -656,15 +656,20 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     }
     let close = Rect::new(r - 22.0, y + 6.0, 16.0, 16.0);
     let hov = ui.hit(close, Action::CloseWin(Win::ChannelRack), "Close");
-    icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
+    if lemon {
+        super::window_light(ui.c, t, close, super::Light::Close, hov);
+    } else {
+        icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
+    }
 }
 
 /// One step button (§3): bordered, lighter at the top, a dark dash below the top edge (red at the play position).
-/// `odd`: in an odd colour group (red; a group is a beat of the project's signature, §23).
-fn step_button(ui: &mut Ui, r: Rect, odd: bool, on: bool, past_len: bool, hov: bool, playing: bool) {
+/// `odd`: in an odd colour group (red; a group is a beat of the project's signature, §23). `in_beat`: the step's place in
+/// its beat (0: the beat's first).
+fn step_button(ui: &mut Ui, r: Rect, in_beat: u32, odd: bool, on: bool, past_len: bool, hov: bool, playing: bool) {
     let t = ui.t;
     if super::lemon(ui) {
-        return lk::step(ui.c, t, r, on, odd, past_len, hov, playing);
+        return lemon_step(ui.c, t, r, in_beat == 0, on, past_len, hov, playing);
     }
     let (border, face) = match (past_len, odd) {
         (false, false) => (t.rack_control_border.shade(-0.1), t.step_a),
@@ -687,6 +692,30 @@ fn step_button(ui: &mut Ui, r: Rect, odd: bool, on: bool, past_len: bool, hov: b
     let dash = if playing { Color::rgb(0xe03030) } else { face.shade(-0.55) };
     ui.c.fill_rect(Rect::new(f.x + 2.0, f.y + 2.0, f.w - 4.0, 2.0), dash);
     ui.c.fill_rect(Rect::new(f.x, f.bottom() - 2.0, f.w, 2.0), face.shade(-0.35));
+}
+
+/// A step in the Lemon skin (cutting-edge's own look, not FL's): every beat in one colour, its first step a shade
+/// lighter with a lemon dot, instead of whole beats alternating colours. Softer, rounder steps; a lit one is the brand
+/// colour, a dark bar along its foot while it plays.
+fn lemon_step(c: &mut os_ui::Canvas, t: &os_theme::Palette, r: Rect, downbeat: bool, on: bool, dim: bool, hover: bool, playing: bool) {
+    use os_theme::design::lemon as brand;
+    let rad = (r.w / 2.0).min(4.5);
+    let base = if dim { t.step_dim_a } else { t.step_a };
+    let lift = t.brand_grey(brand::DARK_HIGHLIGHT);
+    if on {
+        let (main, high) = (t.brand_sel(brand::MAIN), t.brand_sel(brand::HIGHLIGHT));
+        let (top, bottom) = if dim { (main.mix(base, 0.45), main.mix(base, 0.55)) } else { (high.mix(main, 0.5), main) };
+        c.fill_rect_gradient(r, if hover { high } else { top }, bottom, rad);
+        if playing {
+            c.fill_rrect(Rect::new(r.x + 2.5, r.bottom() - 4.0, r.w - 5.0, 2.0), 1.0, t.brand_sel(brand::COLORED_DARK));
+        }
+        return;
+    }
+    let face = if downbeat { base.mix(lift, 0.3) } else { base };
+    c.fill_rrect(r, rad, if hover { face.mix(lift, 0.4) } else { face });
+    if downbeat && !dim {
+        c.fill_circle(r.cx(), r.bottom() - 4.5, 1.4, t.brand_sel(brand::MAIN).mix(face, 0.35));
+    }
 }
 
 /// Graph editor (§14): one column per step, the focused channel's step values as bars, the tab row below.

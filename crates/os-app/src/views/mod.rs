@@ -574,7 +574,66 @@ pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _h
         (true, false) => kit::MaxGlyph::Full,
         (true, true) => kit::MaxGlyph::Split,
     };
-    kit::window_buttons(ui.c, ui.t, x0, y, hovered, glyph);
+    if kit::lemon::on(ui.t) {
+        lights(ui.c, ui.t, x0, y, hovered, glyph);
+    } else {
+        kit::window_buttons(ui.c, ui.t, x0, y, hovered, glyph);
+    }
+}
+
+/// What a window button does, for its light (`window_light`).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Light {
+    Min,
+    Max(kit::MaxGlyph),
+    Close,
+}
+
+/// The Lemon skin's window buttons (cutting-edge, its own look rather than FL's glyphs): round lights in the places of
+/// `kit::window_buttons`, muted until the mouse is over them, then lit in their colour with what they do drawn in.
+fn lights(c: &mut os_ui::Canvas, t: &os_theme::Palette, x0: f32, y: f32, hovered: Option<usize>, max: kit::MaxGlyph) {
+    let first = match max {
+        kit::MaxGlyph::Restore => 0,
+        kit::MaxGlyph::None => 2,
+        _ => 1,
+    };
+    for i in first..3 {
+        let b = Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0);
+        let which = [Light::Min, Light::Max(max), Light::Close][i];
+        window_light(c, t, b, which, hovered == Some(i));
+    }
+}
+
+/// One window button's light, centred in `b`: muted, or lit in its colour with its sign when `hover`.
+pub fn window_light(c: &mut os_ui::Canvas, t: &os_theme::Palette, b: Rect, which: Light, hover: bool) {
+    use os_theme::design::lemon as brand;
+    let col = match which {
+        Light::Close => CUTTING_EDGE_RED,
+        Light::Max(_) => t.brand_sel(brand::MAIN),
+        Light::Min => Color::rgb(0x8fd14a),
+    };
+    let (cx, cy) = (b.cx(), b.cy());
+    let r = 5.5;
+    if !hover {
+        c.fill_circle(cx, cy, r, col.mix(t.window_title, 0.62));
+        return;
+    }
+    c.fill_circle(cx, cy, r + 0.5, col);
+    let ink = kit::lemon::ink_on(col).with_alpha(220);
+    let d = 2.6;
+    match which {
+        Light::Close => {
+            c.line(cx - d, cy - d, cx + d, cy + d, 1.4, ink);
+            c.line(cx - d, cy + d, cx + d, cy - d, 1.4, ink);
+        }
+        Light::Min => c.line(cx - d, cy, cx + d, cy, 1.4, ink),
+        // Maximize grows (+); back to the split or restore shrinks (-).
+        Light::Max(kit::MaxGlyph::Full) => {
+            c.line(cx - d, cy, cx + d, cy, 1.4, ink);
+            c.line(cx, cy - d, cx, cy + d, 1.4, ink);
+        }
+        Light::Max(_) => c.line(cx - d, cy, cx + d, cy, 1.4, ink),
+    }
 }
 
 /// Window frame with a title bar (§5); the bar drags the window. `buttons` = draw the window

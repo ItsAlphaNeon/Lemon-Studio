@@ -10184,6 +10184,14 @@ mod tests {
         let scale: f32 = std::env::var("OS_TEXT_SHOT_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
         let Ok(mut c) = Canvas::new((1600.0 * scale) as u32, (900.0 * scale) as u32, scale) else { return };
         let mut app = App::new(None);
+        // OS_TEXT_SHOT_LEMON=1: the Lemon skin and the tiling layout, the mixer split under the arranger, the rack open.
+        if std::env::var_os("OS_TEXT_SHOT_LEMON").is_some() {
+            app.theme = design_theme(Design::Lemon, false);
+            os_theme::set_current(&app.theme.colors);
+            app.set_tiling_layout(true);
+            app.state.raise(Win::Mixer);
+            app.state.raise(Win::ChannelRack);
+        }
         app.invalidate();
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(std::path::Path::new(&out)).unwrap();

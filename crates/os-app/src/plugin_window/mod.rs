@@ -877,17 +877,11 @@ fn paint_card(c: &mut Canvas, st: &State) {
     icon_at(c, &tb::CARET_LEFT, p.right() - 24.5, p.cy(), 16.0, ink(Part::PresetPrev));
     icon_at(c, &tb::CARET_RIGHT, p.right() - 8.5, p.cy(), 16.0, ink(Part::PresetNext));
     if max_w(st) > 0.0 {
-        let r = card_slot(w, 1);
-        if hov(Part::Maximize) {
-            c.fill_rrect(r, lk::r_btn(&t), t.button_hi);
-        }
-        c.icon(&tb::SQUARES, r.inset(3.0), ink(Part::Maximize));
+        let glyph = if st.maxed.is_some() { os_ui::kit::MaxGlyph::Restore } else { os_ui::kit::MaxGlyph::Full };
+        crate::views::window_light(c, &t, card_slot(w, 1), crate::views::Light::Max(glyph), hov(Part::Maximize));
     }
-    let x = card_slot(w, 0);
-    if hov(Part::Close) {
-        c.fill_rrect(x, lk::r_btn(&t), t.button_hi);
-    }
-    crate::icons::draw(c, crate::icons::Icon::Close, x.inset(2.5), ink(Part::Close));
+    // The window buttons' lights, as the app's windows have them in the Lemon skin.
+    crate::views::window_light(c, &t, card_slot(w, 0), crate::views::Light::Close, hov(Part::Close));
     // Name, "(mixer target)" and the hint, up to the first control on the right.
     let end = tabs.first().map_or(p.x, |&(_, r)| r.x) - 8.0;
     let (nx, f, hf) = (CARD_MENU.right() + 4.0, Font::new(17), Font::new(13));

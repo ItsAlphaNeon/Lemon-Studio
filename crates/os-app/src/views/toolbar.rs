@@ -486,6 +486,18 @@ fn time(ui: &mut Ui, c: &Ctx) {
     if let Some(c) = s.rec.count.filter(|c| c.left() > 0) {
         // A recording count-in (spec: ui/recording.md §3): the beats left.
         ui.c.text_center(Font::light(22, 8), Rect::new(tp.x, tp.y + 2.0, tp.w, tp.h - 2.0), g, &format!("REC IN {}", c.left()));
+    } else if lemon {
+        // The Lemon skin's own reading (cutting-edge, not FL's colons): the bar in lemon, the rest in the text colour, a
+        // round dot between the parts. While the song plays, the first dot lights on each beat and fades through it.
+        use os_theme::design::lemon as brand;
+        let lit = t.brand_sel(brand::HIGHLIGHT);
+        let (ink, dim) = (t.text, t.text.mix(t.time_panel, 0.5));
+        let pulse = if f.playing && !f.paused { 1.0 - (f.tick / ppq).fract() as f32 } else { 0.0 };
+        ui.c.text(big, bar_x, a.y(-3.0), lit, &bar_s);
+        ui.c.fill_circle(step_x - 4.5, a.y(25.5), 1.6 + 0.6 * pulse, dim.mix(lit, pulse));
+        ui.c.text(big, step_x, a.y(-3.0), ink, &step_s);
+        ui.c.fill_circle(tick_x - 4.0, a.y(25.5), 1.3, dim);
+        ui.c.text(small, tick_x, a.y(9.0), dim, &tick_s);
     } else {
         ui.c.text(big, bar_x, a.y(-3.0), g, &bar_s);
         ui.c.fill_rect(Rect::new(step_x - 5.5, a.y(20.0), 2.0, 2.5), g);
