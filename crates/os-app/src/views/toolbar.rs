@@ -942,8 +942,9 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let ty = (cy - ui.c.line_height(small) / 2.0).round();
     ui.c.text_right(small, x, ty, t.text_dim, &mem);
     ui.c.text_right(small, x - mw - 10.0, ty, level, &load);
-    // Dropouts in the last half hour, in red, in a slot of their own left of the load (empty while there are none).
-    let drops = cpu.recent_dropouts;
+    // The dropouts since the program started (as the classic CPU panel counts them), in red, in a slot of their own
+    // left of the load (empty while there are none).
+    let drops = cpu.dropouts;
     let dl = format!("!{}", drops.min(9999));
     let dw = ui.c.text_width(small, &dl).max(ui.c.text_width(small, "!888"));
     let dx = x - mw - 10.0 - lw - 8.0;
@@ -956,9 +957,9 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
     let cpu_r = Rect::new(dx - dw - 4.0, r.y, mw + lw + dw + 26.0, r.h);
     let hint = match drops {
-        0 => "CPU load and memory, no dropouts in the last 30 minutes - double-click for the performance monitor".to_string(),
-        1 => "CPU load and memory, 1 dropout in the last 30 minutes - double-click for the performance monitor".to_string(),
-        n => format!("CPU load and memory, {n} dropouts in the last 30 minutes - double-click for the performance monitor"),
+        0 => "CPU load and memory, no dropouts - double-click for the performance monitor".to_string(),
+        1 => "CPU load and memory, 1 dropout since the start - double-click for the performance monitor".to_string(),
+        n => format!("CPU load and memory, {n} dropouts since the start - double-click for the performance monitor"),
     };
     ui.hit(cpu_r, Action::CpuPanel, hint);
     x = cpu_r.x - 10.0;

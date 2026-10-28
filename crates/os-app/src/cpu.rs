@@ -74,8 +74,6 @@ pub struct Reading {
     /// Memory in use, MB (None where the system does not say).
     pub mem_mb: Option<u64>,
     pub dropouts: u64,
-    /// Dropouts in the last [`RECENT`]: what the tiling layout's status bar shows.
-    pub recent_dropouts: u64,
     /// Handles / threads / fonts, while Misc is ticked.
     pub misc: Option<Misc>,
 }
@@ -93,14 +91,7 @@ pub struct Cpu {
     at: Option<Instant>,
     /// Frames painted since the last reading.
     frames: u32,
-    /// The dropouts as they came (when, how many), the last [`RECENT`] of them, and the engine's count at the last
-    /// reading.
-    drops: VecDeque<(Instant, u64)>,
-    drops_total: u64,
 }
-
-/// How far back the status bar's dropouts count.
-pub const RECENT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 /// The colour of an audio load of `load` percent: the text colour while it is low, then yellow, orange and red as it
 /// climbs towards what the engine can keep up with.
@@ -185,20 +176,7 @@ impl Cpu {
         self.at = Some(now);
         self.frames = 0;
         let misc = self.misc.then(misc_now);
-        // A count lower than the last (the device opened again) starts over.
-        let new = if dropouts >= self.drops_total { dropouts - self.drops_total } else { dropouts };
-        self.drops_total = dropouts;
-        if new > 0 {
-            self.drops.push_back((now, new));
-        }
-        while self.drops.front().is_some_and(|&(t, _)| now.duration_since(t) > RECENT) {
-            self.drops.pop_front();
-        }
-        let changed = self.read(load, voices, fps, memory_mb(), dropouts, misc);
-        let recent = self.drops.iter().map(|&(_, n)| n).sum();
-        let moved = recent != self.now.recent_dropouts;
-        self.now.recent_dropouts = recent;
-        changed || moved
+        self.read(load, voices, fps, memory_mb(), dropouts, misc)
     }
 
     fn read(&mut self, load: Option<f32>, voices: usize, fps: u32, mem_mb: Option<u64>, dropouts: u64, misc: Option<Misc>) -> bool {
@@ -211,7 +189,7 @@ impl Cpu {
         }
         // Frames per second only matter while they are shown: else a repaint would cause the next one.
         let fps = if self.fps_view { fps } else { 0 };
-        let r = Reading { load, voices, fps, mem_mb, dropouts, recent_dropouts: self.now.recent_dropouts, misc };
+        let r = Reading { load, voices, fps, mem_mb, dropouts, misc };
         let changed = moved || r != self.now;
         self.now = r;
         changed
@@ -369,29 +347,6 @@ mod tests {
         assert!(c.read(None, 0, 0, Some(100), 1, None), "a dropout shows");
         assert!(c.hint().contains("1 dropout") && c.hint().contains("100 MB") && c.hint().contains("0 voices"));
         assert!(memory_mb().is_some_and(|m| m > 0) || cfg!(not(any(windows, target_os = "linux", target_os = "macos"))));
-    }
-
-    /// The status bar counts the dropouts of the last half hour: they show as they come, add up, and go once older.
-    #[test]
-    fn recent_dropouts_last_half_an_hour() {
-        use std::time::Duration;
-        let mut c = Cpu::default();
-        let t0 = Instant::now();
-        let min = |m: u64| t0 + Duration::from_secs(60 * m);
-        c.update(t0, None, 0, 0);
-        assert_eq!(c.now.recent_dropouts, 0);
-        assert!(c.update(min(1), None, 0, 2), "dropouts show");
-        assert_eq!(c.now.recent_dropouts, 2);
-        c.update(min(20), None, 0, 5);
-        assert_eq!(c.now.recent_dropouts, 5);
-        c.update(min(40), None, 0, 5);
-        assert_eq!(c.now.recent_dropouts, 3, "the first two are older than half an hour");
-        assert!(c.update(min(60), None, 0, 5), "gone");
-        assert_eq!(c.now.recent_dropouts, 0);
-        assert_eq!(c.now.dropouts, 5, "the count since opening stays");
-        // The output opened again: its count starts over.
-        c.update(min(61), None, 0, 1);
-        assert_eq!(c.now.recent_dropouts, 1);
     }
 
     #[test]
