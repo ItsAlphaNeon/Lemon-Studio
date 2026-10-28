@@ -35,7 +35,8 @@ pub const RANGES: [(i32, i32); PARAMS] =
 /// FL's "Default" preset (what a new Stereo Shaper holds): the levels at 100 %, nothing else, the effects "post".
 pub const DEFAULTS: [i32; PARAMS] = [0, 12800, 12800, 0, 0, 0, 0, 1];
 
-/// Effects positions.
+/// Effects positions. The editor's Off (-1, and any value below 0) plays as Pre: FL 2026's exports of such states put
+/// the delay and the phase before the matrix (spec "FL 2026 null test").
 pub const OFF: i32 = -1;
 pub const PRE: i32 = 0;
 pub const POST: i32 = 1;
@@ -286,13 +287,9 @@ impl StereoShaper {
         self.gains.map(|g| g.current)
     }
 
-    /// Where the delay and the all-pass act: before the matrix (`Some(true)`), after it, or not at all.
-    fn pre(&self) -> Option<bool> {
-        match self.applied[POSITION] {
-            p if p < 0 => None,
-            0 => Some(true),
-            _ => Some(false),
-        }
+    /// The delay and the all-pass act before the matrix (0 and below), or after it (above 0).
+    fn pre(&self) -> bool {
+        self.applied[POSITION] <= PRE
     }
 
     /// The delay, then the all-pass, on one frame.
@@ -332,12 +329,12 @@ impl StereoShaper {
         for (i, (l, r)) in frames.enumerate() {
             let input = [*l, *r];
             let mut x = input;
-            if pre == Some(true) {
+            if pre {
                 self.effects(&mut x);
             }
             let (gl, gr, grl, glr) = (l_.next(), r_.next(), rl_.next(), lr_.next());
             let mut y = if straight { [gl * x[0], gr * x[1]] } else { [gl * x[0] + grl * x[1], gr * x[1] + glr * x[0]] };
-            if pre == Some(false) {
+            if !pre {
                 self.effects(&mut y);
             }
             (*l, *r) = (y[0], y[1]);
@@ -500,8 +497,8 @@ mod tests {
         (buf.iter().step_by(2).copied().collect(), buf.iter().skip(1).step_by(2).copied().collect())
     }
 
-    /// Samples against an independent reading of the page (bit for bit): delay and phase before the matrix, after it,
-    /// and off.
+    /// Samples against an independent reading of the page (bit for bit): delay and phase before the matrix and after
+    /// it; the editor's Off plays as before the matrix.
     #[test]
     fn samples_match_the_reading_of_the_page() {
         let at = [0, 1, 2, 3, 100, 500, 1000, 1999, 2500, 2999];
@@ -510,8 +507,9 @@ mod tests {
             ([0, 12800, 12800, 0, 1408, -2496, 0, 1], &STEREOIZE_3),
             // Mixed levels with the effects first: delay -300 on the left, phase 1744 on the right.
             ([-3000, 9000, 15000, 4000, -300, 1744, 0, 0], &MIXED_PRE),
-            // The same with the effects off.
-            ([-3000, 9000, 15000, 4000, -300, 1744, 0, -1], &MIXED_OFF),
+            // The same with the position at Off (-1) and far below.
+            ([-3000, 9000, 15000, 4000, -300, 1744, 0, -1], &MIXED_PRE),
+            ([-3000, 9000, 15000, 4000, -300, 1744, 0, -1000], &MIXED_PRE),
         ] {
             let (l, r) = run(v);
             for (k, &i) in at.iter().enumerate() {
@@ -524,8 +522,6 @@ mod tests {
     const STEREOIZE_3: [(u32, u32); 10] = [(0x0, 0x0), (0x3cc56016, 0x0), (0x3d3dec0e, 0x0), (0x3d88de5c, 0x0), (0x3e2c6613, 0x0), (0x3ef497b8, 0xbdc0a238), (0x3ee803d8, 0x3d981447), (0x3ebafee0, 0x3d367ebc), (0x3eabe7ef, 0xbed7720f), (0x3e869232, 0x3ec32b17)];
     #[rustfmt::skip]
     const MIXED_PRE: [(u32, u32); 10] = [(0x3d7e138f, 0xbf0ddbc8), (0xbb8ea8cf, 0x3d1f4d57), (0xbd54beb6, 0x3eed905a), (0x3d2561d5, 0xbeb8acfb), (0xbe8ceac2, 0x3d1cbc1a), (0xbe334a56, 0xbf0666d1), (0xbe537256, 0xbee82434), (0xbe7c4945, 0xbeda2914), (0xbeb24b5b, 0x3ee123b5), (0xbe9cefea, 0x3d0e0abe)];
-    #[rustfmt::skip]
-    const MIXED_OFF: [(u32, u32); 10] = [(0x3d965c9d, 0xbf27e72d), (0x3d0c04e9, 0xbe2e4c8c), (0xbba6ac80, 0x3ea18022), (0x3dd1bb1a, 0xbf02bcc2), (0xbe990e02, 0x3d9df8ba), (0x3c265978, 0xbee5b3a4), (0xbd56c544, 0xbe76f35b), (0xbe06aa68, 0xbe9e717a), (0xbe6b1a6e, 0x3ec51cd6), (0xbe74f707, 0x3de49c45)];
 
     #[test]
     fn delay_and_phase_settings() {

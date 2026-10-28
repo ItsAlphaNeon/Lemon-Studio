@@ -232,6 +232,24 @@ pub fn segment_value(pts: &[AutoPoint], i: usize, x: f64) -> f64 {
     f64::from(Segment::new(pts, i).progress(x) * by + from)
 }
 
+/// The curve's value at `beat` (clamped to the first / last point), shaped per segment mode as the walk plays it. At a
+/// point's own beat it is that point's level.
+pub fn value_at(pts: &[AutoPoint], beat: f64) -> Option<f64> {
+    let first = pts.first()?;
+    if beat <= first.beat {
+        return Some(f64::from(first.value as f32));
+    }
+    let i = pts.partition_point(|p| p.beat <= beat);
+    let Some(b) = pts.get(i) else { return Some(f64::from(pts.last()?.value as f32)) };
+    let a = pts[i - 1];
+    let span = b.beat - a.beat;
+    if span <= 0.0 {
+        return Some(f64::from(b.value as f32));
+    }
+    let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
+    Some(segment_value(pts, i, t))
+}
+
 /// The step the walk takes per tick: `single(1 / PPQ)`, used as a double (at 96 PPQ about 3e-8 too long, so a stair
 /// that falls exactly on a tick has already happened on it).
 pub fn tick_step(ppq: u16) -> f64 {

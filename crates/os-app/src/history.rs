@@ -357,6 +357,7 @@ fn knob_name(id: KnobId) -> &'static str {
         KnobId::Strum(_) => "Piano roll strum",
         KnobId::Arp(_) => "Piano roll arpeggiate",
         KnobId::PianoDlg(_) => "Piano roll tool",
+        KnobId::AutoLfo(..) => "Automation clip LFO",
     }
 }
 

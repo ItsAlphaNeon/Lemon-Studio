@@ -176,7 +176,12 @@ impl Engine {
                     let v = match value {
                         Some((at, v)) if at == g => v,
                         _ => {
-                            let v = self.curves[a.curve].value_at(a.from_beat + (g + 1.0 - a.start as f64) / ppq).map(|v| v.clamp(0.0, 1.0));
+                            // Put into the clip's range and moved by its LFO (spec: audio/automation.md "What a clip
+                            // hands on"), between ticks at the share of the tick reached.
+                            let ticks = g + 1.0 - a.start as f64;
+                            let v = self.curves[a.curve]
+                                .value_at(a.from_beat + ticks / ppq)
+                                .map(|v| f64::from(a.out.out_between(v as f32, ticks, self.ppq)).clamp(0.0, 1.0));
                             value = Some((g, v));
                             v
                         }
@@ -263,8 +268,9 @@ mod tests {
             plugin: None,
             color: None,
             enabled: true,
-            volume: 0.78125,
-            pan: 0.0,
+            // An automation clip's channel at its range 0..1 (stored pan 0, volume 12800).
+            volume: if kind == ChannelKind::Automation { 1.0 } else { 0.78125 },
+            pan: if kind == ChannelKind::Automation { -1.0 } else { 0.0 },
             pitch_cents: 0,
             mixer_track: 0,
             sample_path: None,
@@ -285,6 +291,7 @@ mod tests {
             points: vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(4.0, 1.0)],
             header: vec![0; 21],
             tail: vec![],
+            lfo: Default::default(),
         };
         Project {
             ppq: 96,
