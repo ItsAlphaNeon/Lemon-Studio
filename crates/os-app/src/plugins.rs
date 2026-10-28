@@ -1045,8 +1045,8 @@ impl Plugins {
                 if let Some(e) = w.embed() {
                     let r = e.rect();
                     h.embed_at = Some((r.x, r.y));
-                    // How it looks now: the next opening shows it until the editor draws (`editor_looks`).
-                    if let (Some(f), Ok(p)) = (e.last_frame(), h.plugin.lock()) {
+                    // Its skeleton: the next opening shows it until the editor draws (`editor_looks`).
+                    if let (Some(f), Ok(p)) = (e.skeleton(), h.plugin.lock()) {
                         crate::editor_looks::put(&p.desc().id, f);
                     }
                 }

@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The last look of each plugin editor drawn in the app's window (Linux, `plugin_window::EmbedFrame`), by plugin id:
-//! kept when its window closes, and in the user folder for the next start (`editor-looks/<id>.png`). A window opening
-//! shows it, dimmed, until the editor draws its first frame, so it looks open at once (owner, 2026-10-27: the
-//! "skeleton" of a page that loads, with the real picture instead of grey shapes).
+//! The skeleton of each plugin editor drawn in the app's window (Linux, `plugin_window::EmbedFrame`), by plugin id: how
+//! it looks before its values are known, drawn by the editor in skeleton mode (`os_ui::Canvas::skeleton`: what never
+//! changes as it is, the values as plain shapes). Kept when its window closes, and in the user folder for the next start
+//! (`editor-skeletons/<id>.png`). A window opening shows it until the editor draws its first frame, so it looks open at
+//! once (owner, 2026-10-28: a loading page's skeleton, not a dimmed picture of the last values).
 //!
 //! Files are read and written on threads of their own: closing a window or starting the app waits for neither.
 
@@ -22,7 +23,7 @@ fn looks() -> &'static Mutex<HashMap<String, Pixels>> {
 
 /// The folder of the kept looks; none in tests (they keep theirs in memory only).
 fn dir() -> Option<PathBuf> {
-    if cfg!(test) { None } else { os_paths::user_file("editor-looks") }
+    if cfg!(test) { None } else { os_paths::user_file("editor-skeletons") }
 }
 
 /// A plugin id as a file name: what is not a letter, a digit, `.`, `-` or `_` becomes `_`.

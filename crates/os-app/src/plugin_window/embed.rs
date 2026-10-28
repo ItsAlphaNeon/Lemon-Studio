@@ -57,10 +57,8 @@ struct Inner {
     placed: bool,
     /// The editor's size as `sync` last saw it (device px): a change is the editor resizing itself.
     seen_size: Option<(u32, u32)>,
-    /// How the editor looked when its window last closed (`editor_looks`): shown, dimmed, until its first frame.
+    /// The editor's skeleton as last kept (`editor_looks`): shown until its first frame.
     look: Option<Pixels>,
-    /// `look` dimmed, made at its first paint.
-    look_dim: Option<Vec<u32>>,
 }
 
 /// A plugin window in Lemon Studio's own window. Cheap to clone: the app's state holds one per open window to paint
@@ -159,7 +157,7 @@ impl Inner {
 
 impl EmbedFrame {
     /// A frame for an editor of `editor` (logical px) at canvas point `pos` (`None`: centred in the workspace), drawn at
-    /// `scale`; `look`: how the editor looked last (`editor_looks`), shown until it draws.
+    /// `scale`; `look`: the editor's skeleton (`editor_looks`), shown until it draws.
     pub fn new(info: ChannelInfo, editor: (f32, f32), scale: f32, pos: Option<(f32, f32)>, look: Option<Pixels>) -> Result<EmbedFrame, String> {
         let k = if scale > 0.0 { scale } else { 1.0 };
         let st = State::new(info, editor, false);
@@ -183,7 +181,6 @@ impl EmbedFrame {
             placed: pos.is_some(),
             seen_size: None,
             look,
-            look_dim: None,
         };
         Ok(EmbedFrame(Rc::new(RefCell::new(inner))))
     }
@@ -430,24 +427,20 @@ impl EmbedFrame {
             None => 0.0,
         };
         let v = i.surface.view();
-        // Until the editor's first frame: how it looked last, dimmed, when it has the same size (a look from another
-        // size or scale would show broken).
+        // Until the editor's first frame: its skeleton (how it looks before its values are known, `editor_looks`), when
+        // it has the same size (one from another size or scale would show broken).
         if v.frame.is_none() {
             let want = ((area.w * i.k).round() as u32, (area.h * i.k).round() as u32);
             let (ex, ey) = i.editor_at();
-            let body = i.st.look.as_ref().map_or_else(|| os_theme::current().window_body, |t| t.window_body);
-            let inner = &mut *i;
-            if let Some(look) = inner.look.as_ref().filter(|l| l.w.abs_diff(want.0) <= 1 && l.h.abs_diff(want.1) <= 1) {
-                let dim = inner.look_dim.get_or_insert_with(|| look.px.iter().map(|&p| dim_px(p, body)).collect());
+            if let Some(look) = i.look.as_ref().filter(|l| l.w.abs_diff(want.0) <= 1 && l.h.abs_diff(want.1) <= 1) {
                 c.push_clip(area);
-                c.paint_xrgb_rounded(dim, (look.w, look.h), (ex, ey), radius);
+                c.paint_xrgb_rounded(&look.px, (look.w, look.h), (ex, ey), radius);
                 c.pop_clip();
             }
             return;
         }
-        // Drawing now: the last look is no longer needed.
+        // Drawing now: the skeleton is no longer needed.
         i.look = None;
-        i.look_dim = None;
         if let Some(f) = v.frame {
             c.push_clip(area);
             // the editor may be smaller than its area for a moment (resizing): round the area's corners, not its own
@@ -655,16 +648,10 @@ impl EmbedFrame {
     }
 }
 
-/// An XRGB pixel taken 35 % of the way to `body` (a look shown while the editor starts).
-fn dim_px(p: u32, body: os_ui::Color) -> u32 {
-    let mix = |v: u32, b: u8| ((v as f32) * 0.65 + f32::from(b) * 0.35).round() as u32;
-    (mix((p >> 16) & 0xff, body.r) << 16) | (mix((p >> 8) & 0xff, body.g) << 8) | mix(p & 0xff, body.b)
-}
-
-/// The editor's last frame (`editor_looks` keeps it when the window closes).
+/// The editor's skeleton (`editor_looks` keeps it when the window closes).
 impl EmbedFrame {
-    pub fn last_frame(&self) -> Option<Pixels> {
-        self.0.borrow().surface.view().frame
+    pub fn skeleton(&self) -> Option<Pixels> {
+        self.0.borrow().surface.view().skeleton
     }
 }
 

@@ -50,6 +50,30 @@ impl Model for os_plugkit::vals::Vals {
     }
 }
 
+/// A model whose values' texts are marked as values (`os_ui::SKELETON_MARK`): painted with the canvas in skeleton mode,
+/// the editor draws its skeleton (what never changes as it is, the values as plain shapes).
+pub struct Skeleton<'a>(pub &'a dyn Model);
+
+impl Model for Skeleton<'_> {
+    fn norm(&self, id: &str) -> f32 {
+        self.0.norm(id)
+    }
+    fn plain(&self, id: &str) -> f32 {
+        self.0.plain(id)
+    }
+    /// A value's bar: the same width whatever the value (its text would tell it).
+    fn text(&self, _id: &str) -> String {
+        format!("{}0000", os_ui::SKELETON_MARK)
+    }
+}
+
+/// The editor's skeleton (`Skeleton`), at rest (nothing hovered or pressed).
+pub fn paint_skeleton(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model) {
+    c.skeleton = true;
+    paint(spec, c, t, &Skeleton(m), &ViewState::default(), "");
+    c.skeleton = false;
+}
+
 /// What a region of the editor does when clicked or dragged.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -139,8 +163,11 @@ pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewS
     }
     if let Some(d) = &spec.display {
         lemon::plug_well(ui.c, d.r, 6.0);
-        let v = values(spec, m);
-        (d.draw)(ui.c, d.r, &v[..spec.settings.len()]);
+        // Skeleton: the display's well, not what the values draw in it.
+        if !ui.c.skeleton {
+            let v = values(spec, m);
+            (d.draw)(ui.c, d.r, &v[..spec.settings.len()]);
+        }
     }
     for &(cx, top, s) in spec.labels {
         inst::caption(ui.c, ui.t, cx, top, s, false);
@@ -200,7 +227,8 @@ fn knob(ui: &mut Ui, id: &str, cx: f32, cy: f32, r: f32, cap: &str, bipolar: boo
 /// A radio list (as the original's): one row per position from `top` (the first is the range's minimum), a toggle
 /// lit lemon on the chosen one and the name beside it, in lemon when chosen.
 fn choices(ui: &mut Ui, id: &str, x: f32, top: f32, min: i32, names: &[&str]) {
-    let chosen = ui.m.plain(id).round() as i32;
+    // Skeleton (`Canvas::skeleton`): none chosen.
+    let chosen = if ui.c.skeleton { i32::MIN } else { ui.m.plain(id).round() as i32 };
     let lh = ui.c.line_height(LABEL);
     for (i, name) in names.iter().enumerate() {
         let v = min + i as i32;
@@ -232,10 +260,13 @@ fn fader(ui: &mut Ui, id: &str, x: f32, top: f32, bot: f32, label: &str, col: Co
     }
     let y = at(ui.m.norm(id));
     let from = if bipolar { at(0.5) } else { bot };
-    if (from - y).abs() > 1.0 {
-        ui.c.fill_rrect(Rect::span(x - 1.0, x + 1.0, y.min(from), y.max(from)), 1.0, col.with_alpha(190));
+    // Skeleton (`Canvas::skeleton`): the slot and its marks, no value.
+    if !ui.c.skeleton {
+        if (from - y).abs() > 1.0 {
+            ui.c.fill_rrect(Rect::span(x - 1.0, x + 1.0, y.min(from), y.max(from)), 1.0, col.with_alpha(190));
+        }
+        keq::handle(ui.c, x, y.round(), col, st);
     }
-    keq::handle(ui.c, x, y.round(), col, st);
     let lh = ui.c.line_height(LABEL);
     ui.c.text_center(LABEL, Rect::new(x - 12.0, top - 10.0 - lh, 24.0, lh), col, label);
     ui.hit(hr, target);
@@ -263,7 +294,10 @@ fn shape(ui: &mut Ui, id: &str, cx: f32, cy: f32, (lo, hi): (i32, i32)) {
         let t = i as f32 / 10.0;
         pts.push((x1 - 9.0 + 9.0 * t, y1 + (y0 - y1) * t.powf(1.0 / p)));
     }
-    ui.c.polyline(&pts, 1.5, brand::MAIN);
+    // Skeleton: the button, not the shape it shows.
+    if !ui.c.skeleton {
+        ui.c.polyline(&pts, 1.5, brand::MAIN);
+    }
     ui.hit(r, target);
 }
 

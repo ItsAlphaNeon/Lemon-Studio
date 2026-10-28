@@ -12846,11 +12846,11 @@ mod tests {
         assert_eq!(app.state.z.last(), Some(&Win::ChannelRack));
     }
 
-    /// Until the editor draws, a window drawn in the app's shows how the editor looked last, dimmed; a look of another
-    /// size is not shown.
+    /// Until the editor draws, a window drawn in the app's shows the editor's skeleton as it is (`editor_looks`); one of
+    /// another size is not shown.
     #[cfg(target_os = "linux")]
     #[test]
-    fn in_app_editors_show_their_last_look_until_they_draw() {
+    fn in_app_editors_show_their_skeleton_until_they_draw() {
         use crate::plugin_window::{ChannelInfo, EmbedFrame};
         let Ok(mut c) = Canvas::new(800, 600, 1.0) else { return };
         let info = ChannelInfo { name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
@@ -12867,9 +12867,9 @@ mod tests {
             (p.red(), p.green())
         };
         let (r, g) = paint(&mut c, 300, 200);
-        assert!(r > 120 && r < 255 && r > g + 60, "the look, dimmed: {r} {g}");
+        assert_eq!((r, g), (255, 0), "the skeleton, as it is");
         let (r, _) = paint(&mut c, 320, 200);
-        assert!(r < 120, "a look of another size is not shown: {r}");
+        assert!(r < 120, "one of another size is not shown: {r}");
     }
 
     /// Closed and opened again, a plugin window drawn in the app's comes back where it was, and the channel window
@@ -12902,8 +12902,6 @@ mod tests {
         app.plugin_tick();
         app.plugins.close_window(0);
         app.plugin_tick();
-        let id = app.plugins.descriptor(0).unwrap().id;
-        assert!(crate::editor_looks::get(&id).is_some(), "its look is kept for the next opening");
         let e = open(&mut app);
         assert_eq!((e.rect().x, e.rect().y), (300.0, 220.0), "the plugin window reopens where it was");
         // the channel window: next to the rack until moved, then where it was moved

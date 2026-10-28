@@ -69,8 +69,9 @@ own content. Side branches are named `cutting-edge-<topic>`.
   rack's, in the theme's colours: rounded, the editor edge to edge under one title row (menu arrow, name, page tabs,
   Presets, close). FL's frame is gone there: no minimize button, no gear strip (the channel settings window has those
   controls), no frame around the editor. They open at once: until the editor draws its first frame, the window shows
-  how it looked when it last closed, a little dimmed (kept per plugin in the user folder's `editor-looks`, so after a
-  restart too). Third-party plugins keep windows of their own.
+  its skeleton, drawn by the editor once (`os_ui::Canvas::skeleton`): what never changes as it is (panels, captions,
+  the logo, dial tracks), every value as a plain shape. Kept per plugin in the user folder's `editor-skeletons`, so after
+  a restart too. The small effects draw one; the other editors open plain until they do. Third-party plugins keep windows of their own.
   `LEMONSTUDIO_PLUGIN_WINDOWS=1` gives the built-in ones their own windows again.
 - **Third-party plugin windows under Hyprland.** They drag by their own title bar (Hyprland ignores the X11 move
   request) and have no compositor border, shadow or move animation.
