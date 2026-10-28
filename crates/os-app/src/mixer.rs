@@ -443,7 +443,7 @@ pub fn right(app: &mut App, h: MHit) -> bool {
             s.playlist.popup = Some(track_menu(s, n, at.0, at.1));
         }
         MHit::Add => s.playlist.popup = Some(track_menu(s, s.selected_mixer, at.0, at.1)),
-        MHit::Led(n) => solo(s, n),
+        MHit::Led(n) => edit(s, SOLO, Region::Project, |s| solo(s, n)),
         MHit::Route(dst) => {
             let items = vec![
                 PItem::new("Route to this track", Cmd::Mixer(MCmd::Route { dst, only: false, side: false })),
@@ -534,6 +534,9 @@ pub fn solo(s: &mut State, n: u16) {
 /// all on when exactly that set is already the audible one (spec: ui/mixer-track-commands.md §5), or, with "Restore
 /// previous state after solo" on, to the states from before the first solo (a solo moved to another track keeps them;
 /// spec: ui/settings-choices.md "Miscellaneous").
+/// A solo's undo step.
+const SOLO: &str = "Mixer track solo";
+
 pub fn solo_with(s: &mut State, n: u16, alt: bool) {
     let mut keep = reach(s, n, true);
     if alt {
@@ -1151,6 +1154,8 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::AddEffect(..) => Some("Add effect"),
         MCmd::SlotDelete(_) => Some("Remove effect"),
         MCmd::SlotMove(..) => Some("Move effect"),
+        MCmd::RemoveTeslasNow => Some("Remove audio editors"),
+        MCmd::Solo(_) => Some(SOLO),
         _ => None,
     };
     if let Some(name) = step {

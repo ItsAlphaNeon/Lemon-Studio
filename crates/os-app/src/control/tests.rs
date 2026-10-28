@@ -812,3 +812,37 @@ fn edits_in_a_plugin_s_window_are_undo_steps() {
     crate::history::redo(&mut a.state);
     assert_eq!(value(&mut a), [0.15, 0.4]);
 }
+
+/// The interface edits the audit of 2026-10-28 found without an undo step have one now; a drag or a run of wheel
+/// notches of one box is one step.
+#[test]
+fn interface_edits_are_undo_steps() {
+    let mut a = app();
+    ui_round_trip(&mut a, "Channel mute", |a| crate::rack::toggle_mute(&mut a.state, 0));
+    ui_round_trip(&mut a, "Channel solo", |a| crate::rack::solo(&mut a.state, 1));
+    ui_round_trip(&mut a, "Mixer track solo", |a| {
+        crate::mixer::run(a, crate::mixer::MCmd::Solo(1));
+    });
+    ui_round_trip(&mut a, "Pattern length", |a| {
+        crate::rack::set_len(&mut a.state, Some(8));
+        crate::rack::set_len(&mut a.state, Some(12));
+    });
+    ui_round_trip(&mut a, "Channel mixer track", |a| {
+        a.channel_control(0, crate::history::ChannelControl::Track, |c| c.mixer_track = 3);
+        a.channel_control(0, crate::history::ChannelControl::Track, |c| c.mixer_track = 4);
+    });
+    ui_round_trip(&mut a, "Channel settings", |a| {
+        crate::misc::set(a, 0, crate::misc_page::M::Fine, 20.0);
+        crate::misc::set(a, 0, crate::misc_page::M::Fine, 30.0);
+    });
+    ui_round_trip(&mut a, "Pattern time signature", |a| crate::timesig::set_start(&mut a.state, 1, 3, 8));
+    ui_round_trip(&mut a, "Add arrangement", |a| {
+        crate::playlist::run(a, crate::playlist::Cmd::ArrAdd);
+        a.state.playlist.edit = None;
+    });
+    ui_round_trip(&mut a, "Pattern name", |a| {
+        crate::playlist::start_edit(&mut a.state, crate::playlist::EditTarget::PatternName(1), (0.0, 0.0));
+        a.state.playlist.edit.as_mut().unwrap().text = "Lead".into();
+        crate::playlist::commit_edit(&mut a.state);
+    });
+}

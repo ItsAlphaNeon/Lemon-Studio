@@ -8,6 +8,8 @@
 //! Painting is immediate: every frame repaints from `State` and records hit regions. Hover uses
 //! the topmost hit from the previous frame, so occluded controls never highlight.
 
+use crate::control::command::Region;
+use crate::history::ChannelControl;
 use std::borrow::Cow;
 use std::path::PathBuf;
 
@@ -2642,20 +2644,32 @@ impl App {
                         self.invalidate();
                         continue;
                     }
-                    Request::ToggleOn(row) => chans.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled),
-                    Request::Volume(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.volume = v),
-                    Request::Pan(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.pan = v),
-                    Request::PitchCents(row, v) => chans.get_mut(row).into_iter().for_each(|c| c.pitch_cents = v),
-                    Request::PitchRange(row, r) => chans.get_mut(row).into_iter().for_each(|c| {
-                        // A narrower range takes the pitch knob with it.
-                        c.misc.pitch_range = r.clamp(1, 48) as u8;
-                        let lim = 100 * i32::from(c.misc.pitch_range);
-                        c.pitch_cents = c.pitch_cents.clamp(-lim, lim);
-                    }),
+                    // The channel's controls in a plugin window's strip or card: undo steps, a drag or a run of wheel
+                    // notches of one knob one step (`control::run_edit`).
+                    Request::ToggleOn(row) => {
+                        let _ = chans;
+                        crate::control::edit(&mut self.state, "Channel on / off", Region::Channel(row), |s| {
+                            s.project.channels.get_mut(row).into_iter().for_each(|c| c.enabled = !c.enabled)
+                        })
+                    }
+                    Request::Volume(row, v) => self.channel_control(row, ChannelControl::Volume, |c| c.volume = v),
+                    Request::Pan(row, v) => self.channel_control(row, ChannelControl::Pan, |c| c.pan = v),
+                    Request::PitchCents(row, v) => self.channel_control(row, ChannelControl::Pitch, |c| c.pitch_cents = v),
+                    Request::PitchRange(row, r) => {
+                        let _ = chans;
+                        crate::control::edit(&mut self.state, "Channel pitch range", Region::Channel(row), |s| {
+                            s.project.channels.get_mut(row).into_iter().for_each(|c| {
+                                // A narrower range takes the pitch knob with it.
+                                c.misc.pitch_range = r.clamp(1, 48) as u8;
+                                let lim = 100 * i32::from(c.misc.pitch_range);
+                                c.pitch_cents = c.pitch_cents.clamp(-lim, lim);
+                            })
+                        })
+                    }
                     Request::Track(row, t) => {
+                        let _ = chans;
                         let max = crate::mixer::max_insert(&self.state.project);
-                        let chans = &mut self.state.project.channels;
-                        chans.get_mut(row).into_iter().for_each(|c| c.mixer_track = t.min(max));
+                        self.channel_control(row, ChannelControl::Track, |c| c.mixer_track = t.min(max));
                     }
                     Request::ShowTrack(row) => {
                         // As a double click on the channel rack's mixer box (spec: ui/channel-rack.md §12).
@@ -2699,6 +2713,25 @@ impl App {
             }
             self.clip_docked();
         }
+    }
+
+    /// Control `which` of the channel on row `row` changed by `f` (a plugin window's strip or card, the rack's mixer
+    /// box): an undo step, a run of changes of one control one step; volume, pan and pitch as knobs (none with Undo knob
+    /// tweaks off).
+    pub(crate) fn channel_control(&mut self, row: usize, which: ChannelControl, f: impl FnOnce(&mut os_model::Channel)) {
+        let (name, knob) = match which {
+            ChannelControl::Volume => ("Channel volume", true),
+            ChannelControl::Pan => ("Channel panning", true),
+            ChannelControl::Pitch => ("Channel pitch", true),
+            ChannelControl::Track => ("Channel mixer track", false),
+            ChannelControl::Misc(_) => ("Channel settings", true),
+        };
+        let run = crate::history::Run::Channel(row, which);
+        crate::control::run_edit(&mut self.state, name, Region::Channel(row), run, knob, |s| {
+            if let Some(c) = s.project.channels.get_mut(row) {
+                f(c);
+            }
+        });
     }
 
     /// Screen point -> canvas logical px (an X11 main window: Linux; macOS).
@@ -5255,12 +5288,9 @@ impl App {
                 Drag::RackMixer { ch, y0, v0 } => {
                     // One insert per 10 px, up = higher (spec: ui/channel-rack.md §12).
                     let v = (i32::from(v0) + ((y0 - y) / crate::rack::MIXER_DRAG).round() as i32).clamp(0, i32::from(crate::mixer::max_insert(&self.state.project))) as u16;
-                    let s = &mut self.state;
-                    if let Some(c) = s.project.channels.get_mut(ch) {
-                        if c.mixer_track != v {
-                            c.mixer_track = v;
-                            s.piano.dirty = true;
-                        }
+                    if self.state.project.channels.get(ch).is_some_and(|c| c.mixer_track != v) {
+                        self.channel_control(ch, ChannelControl::Track, |c| c.mixer_track = v);
+                        self.state.piano.dirty = true;
                     }
                     self.hint = Cow::Owned(format!("Target mixer track: {}", views::rack::insert_name(v)));
                     let r = self.hits.iter().rev().find(|h| h.action == Action::RackMixer(ch)).map(|h| h.rect);
@@ -6921,12 +6951,12 @@ impl App {
         let d = if dy + dx > 0.0 { 1 } else { -1 };
         match area {
             Some(Action::RackMixer(i)) => {
-                let s = &mut self.state;
-                let max = crate::mixer::max_insert(&s.project);
-                if let Some(c) = s.project.channels.get_mut(i) {
-                    c.mixer_track = (i32::from(c.mixer_track) + d).clamp(0, i32::from(max)) as u16;
-                    self.hint = Cow::Owned(format!("Target mixer track: {}", views::rack::insert_name(c.mixer_track)));
-                    s.piano.dirty = true;
+                let max = crate::mixer::max_insert(&self.state.project);
+                if let Some(now) = self.state.project.channels.get(i).map(|c| c.mixer_track) {
+                    let v = (i32::from(now) + d).clamp(0, i32::from(max)) as u16;
+                    self.channel_control(i, ChannelControl::Track, |c| c.mixer_track = v);
+                    self.hint = Cow::Owned(format!("Target mixer track: {}", views::rack::insert_name(v)));
+                    self.state.piano.dirty = true;
                 }
                 return None;
             }

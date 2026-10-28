@@ -350,12 +350,16 @@ impl Side {
     }
 }
 
-/// What an edit in the interface changes (`control::edit`): the project settings, one mixer track (by number), or the
-/// whole project with the rack's state of it.
+/// What an edit in the interface changes (`control::edit`): the project settings, one channel (by row), one mixer
+/// track (by number), one pattern (by number), the arrangement shown, or the whole project with the rack's state of it.
+/// The smallest that holds the edit keeps the undo step small.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
     Settings,
+    Channel(usize),
     Track(u16),
+    Pattern(u16),
+    Arrangement,
     Project,
 }
 
@@ -365,7 +369,10 @@ impl Taken {
         let p = &s.project;
         Some(match region {
             Region::Settings => Taken::Settings(Box::new(Settings::of(s))),
+            Region::Channel(row) => Taken::Channel(Box::new(p.channels.get(row)?.clone())),
             Region::Track(n) => Taken::Track(Box::new(p.mixer.iter().find(|m| m.index == n)?.clone())),
+            Region::Pattern(n) => Taken::Pattern(Box::new(p.patterns.iter().find(|q| q.number == n)?.clone())),
+            Region::Arrangement => Taken::Arrangement(Box::new(p.arrangement()?.clone())),
             Region::Project => Taken::Project(Box::new(Side::of(s))),
         })
     }
@@ -1053,6 +1060,10 @@ fn put(s: &mut State, t: Taken) {
                 // A sampler's sample: its Lemon Sampler follows.
                 if ch.sample_path != c.sample_path && c.kind.is_sampler() {
                     s.sample_loads.push((row, c.sample_path.clone().unwrap_or_default()));
+                }
+                // And its Misc values it plays.
+                if ch.misc != c.misc && c.kind.is_sampler() {
+                    s.control.misc.push(row);
                 }
                 *ch = *c;
             }

@@ -346,6 +346,21 @@ pub enum Run {
     Bar,
     /// Values plugin `.0` sends outside a gesture (no begin and end of an edit).
     Param(u32),
+    /// Changes of control `.1` of the channel on row `.0` (`ChannelControl`): a plugin window's strip knob dragged or
+    /// turned, the rack's mixer track box.
+    Channel(usize, ChannelControl),
+    /// Pattern `.0`'s length box dragged or turned.
+    PatternLength(u16),
+}
+
+/// A channel control a run of changes goes to (`Run::Channel`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelControl {
+    Volume,
+    Pan,
+    Pitch,
+    Track,
+    Misc(crate::misc_page::M),
 }
 
 impl History {

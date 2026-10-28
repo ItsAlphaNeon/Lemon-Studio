@@ -169,6 +169,9 @@ impl App {
         if relink.0 || relink.1 {
             self.follow_ids(false, false);
         }
+        for row in std::mem::take(&mut self.state.control.misc) {
+            crate::misc::follow(self, row);
+        }
         for (owner, param, v) in std::mem::take(&mut self.state.control.params) {
             let Some(key) = crate::control::command::owner_key(&self.state.project, owner) else { continue };
             let set = self.plugins.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.set_param(param, v));
