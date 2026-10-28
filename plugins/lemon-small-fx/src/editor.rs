@@ -891,15 +891,16 @@ mod gui {
         fn paint(&mut self) {
             self.dirty = false;
             self.buf.resize((self.size.0 * self.size.1) as usize, 0);
+            self.logic.paint(&mut self.canvas, &self.palette);
+            self.canvas.copy_to_xrgb(&mut self.buf);
+            self.win.blit(&self.buf, self.size.0, self.size.1);
+            // Then the skeleton, once: after the first frame, so the opening does not wait for it.
             if !self.skeleton_sent && self.win.embedded() {
                 self.skeleton_sent = true;
                 self.logic.paint_skeleton(&mut self.canvas, &self.palette);
                 self.canvas.copy_to_xrgb(&mut self.buf);
                 self.win.set_skeleton(&self.buf, self.size.0, self.size.1);
             }
-            self.logic.paint(&mut self.canvas, &self.palette);
-            self.canvas.copy_to_xrgb(&mut self.buf);
-            self.win.blit(&self.buf, self.size.0, self.size.1);
         }
     }
 }
