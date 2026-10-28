@@ -1932,6 +1932,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-filter"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
 name = "lemon-limiter"
 version = "0.0.1"
 dependencies = [
@@ -2847,6 +2856,7 @@ dependencies = [
  "lemon-chorus",
  "lemon-delay",
  "lemon-fast-distortion",
+ "lemon-filter",
  "lemon-limiter",
  "lemon-parametric-eq-2",
  "lemon-reverb",
