@@ -4214,6 +4214,14 @@ impl App {
         for (w, r) in crate::tiles::side_by_side(&self.state) {
             if w.slot().is_some_and(|i| a[i] != b[i]) {
                 self.damage_rect(r);
+                // The mixer's cables are muted with it: the gap they hang in and where they hang over the window below.
+                if w == Win::Mixer {
+                    let s = &self.state;
+                    let extra: Vec<Rect> = s.mixer_hang().into_iter().chain(s.cable_reach().zip(s.cables.borrow().bounds()).map(|(r, c)| r.intersect(&c.outset(3.0)))).collect();
+                    for e in extra.into_iter().filter(|e| e.w > 0.0 && e.h > 0.0) {
+                        self.damage_rect(e);
+                    }
+                }
             }
         }
     }
