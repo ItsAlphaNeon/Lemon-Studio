@@ -104,6 +104,78 @@ pub fn settle(ids: &mut Ids, p: &mut Project) -> bool {
 }
 
 /// Forgets where things were: the project was replaced (opened, made). Ids already given out are not given again.
+/// The project's ids, as a Lemon project file keeps them (`crate::native`), each with what finds its thing again: a
+/// channel's index, a pattern's number, a mixer track's number, an arrangement's number, a clip's (arrangement, track,
+/// position), a slot plugin's (track number, slot); and the next id to give out (so an id that is gone is never given
+/// to another thing later).
+pub fn stored(ids: &Ids, p: &Project) -> serde_json::Value {
+    use serde_json::json;
+    json!({
+        "next": ids.next,
+        "channels": p.channels.iter().map(|c| [u32::from(c.index), c.id.0]).collect::<Vec<_>>(),
+        "patterns": p.patterns.iter().map(|c| [u32::from(c.number), c.id.0]).collect::<Vec<_>>(),
+        "mixer": p.mixer.iter().map(|c| [u32::from(c.index), c.id.0]).collect::<Vec<_>>(),
+        "arrangements": p.arrangements.iter().map(|a| [u32::from(a.number), a.id.0]).collect::<Vec<_>>(),
+        "clips": p.arrangements.iter().flat_map(|a| a.clips.iter().map(move |c| [u32::from(a.number), u32::from(c.track), c.position, c.id.0])).collect::<Vec<_>>(),
+        "slots": p.mixer.iter().flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| s.as_ref().map(|s| [u32::from(m.index), k as u32, s.id.0]))).collect::<Vec<_>>(),
+    })
+}
+
+/// Gives the things of a project just opened the ids `v` (`stored`) names them by; a thing it does not name keeps the
+/// fresh id `settle` gives it. Ids are given out after all of them from then on.
+pub fn restore(ids: &mut Ids, p: &mut Project, v: &serde_json::Value) {
+    // Each stored entry: its key (all numbers but the last) and its id (the last), in the stored order.
+    let mut table = |kind: &str| -> HashMap<Vec<u64>, std::collections::VecDeque<u32>> {
+        let mut m: HashMap<Vec<u64>, std::collections::VecDeque<u32>> = HashMap::new();
+        for e in v[kind].as_array().into_iter().flatten() {
+            let Some(n) = e.as_array().map(|a| a.iter().filter_map(serde_json::Value::as_u64).collect::<Vec<_>>()) else { continue };
+            if let Some((&id, key)) = n.split_last() {
+                m.entry(key.to_vec()).or_default().push_back(id as u32);
+            }
+        }
+        m
+    };
+    let (mut ch, mut pat, mut mix, mut arr, mut clips, mut slots) = (table("channels"), table("patterns"), table("mixer"), table("arrangements"), table("clips"), table("slots"));
+    // Two things under one key (two clips at one place) take its ids in order.
+    let take = |m: &mut HashMap<Vec<u64>, std::collections::VecDeque<u32>>, key: Vec<u64>, id: &mut Id| {
+        if let Some(n) = m.get_mut(&key).and_then(std::collections::VecDeque::pop_front) {
+            *id = Id(n);
+        }
+    };
+    for c in &mut p.channels {
+        take(&mut ch, vec![u64::from(c.index)], &mut c.id);
+    }
+    for c in &mut p.patterns {
+        take(&mut pat, vec![u64::from(c.number)], &mut c.id);
+    }
+    for m in &mut p.mixer {
+        take(&mut mix, vec![u64::from(m.index)], &mut m.id);
+        for (k, s) in m.slots.iter_mut().enumerate() {
+            if let Some(s) = s {
+                take(&mut slots, vec![u64::from(m.index), k as u64], &mut s.id);
+            }
+        }
+    }
+    for a in &mut p.arrangements {
+        take(&mut arr, vec![u64::from(a.number)], &mut a.id);
+        for c in &mut a.clips {
+            take(&mut clips, vec![u64::from(a.number), u64::from(c.track), u64::from(c.position)], &mut c.id);
+        }
+    }
+    let most = p
+        .channels
+        .iter()
+        .map(|c| c.id.0)
+        .chain(p.patterns.iter().map(|c| c.id.0))
+        .chain(p.mixer.iter().map(|c| c.id.0))
+        .chain(p.arrangements.iter().flat_map(|a| std::iter::once(a.id.0).chain(a.clips.iter().map(|c| c.id.0))))
+        .chain(p.mixer.iter().flat_map(|m| m.slots.iter().flatten().map(|s| s.id.0)))
+        .max()
+        .unwrap_or(0);
+    let stored_next = v["next"].as_u64().unwrap_or(0) as u32;
+    ids.next = ids.next.max(stored_next).max(most + 1);
+}
+
 pub fn forget(ids: &mut Ids) {
     let next = ids.next;
     *ids = Ids { next, ..Ids::default() };

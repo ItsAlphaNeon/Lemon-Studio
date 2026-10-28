@@ -7,7 +7,8 @@
 //! - `project.flp`: the project as it is now, in FL's layout, written as a `.flp` save writes it (so everything that
 //!   reads a project reads this, and taking it out of the zip gives FL its project);
 //! - `journal.jsonl`: the project's whole history, every session it was edited in (`crate::journal`): what changed,
-//!   when and by whom, and every state its plugins had.
+//!   when and by whom, and every state its plugins had;
+//! - `ids.json`: its things' ids (`control::ids::stored`), so they keep them from session to session.
 
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
@@ -22,6 +23,7 @@ pub const VERSION: u64 = 1;
 const MANIFEST: &str = "lemon.json";
 const SNAPSHOT: &str = "project.flp";
 const JOURNAL: &str = "journal.jsonl";
+const IDS: &str = "ids.json";
 
 /// Whether `path` names a Lemon project file.
 pub fn is_native(path: &Path) -> bool {
@@ -43,6 +45,8 @@ pub fn ext_for(path: Option<&Path>) -> String {
 pub struct Extra {
     /// The journal's entries, oldest first.
     pub journal: Vec<Value>,
+    /// The project's ids (`control::ids::stored`).
+    pub ids: Option<Value>,
 }
 
 /// Reads a project file: a `.flp`'s bytes; a `.lemon`'s snapshot, and its history.
@@ -69,11 +73,12 @@ pub fn read(path: &Path) -> Result<(Vec<u8>, Option<Extra>), String> {
     zip.by_name(SNAPSHOT).map_err(|e| format!("{SNAPSHOT}: {e}"))?.read_to_end(&mut flp).map_err(|e| e.to_string())?;
     // A file without a journal (or with a damaged line) still opens.
     let journal = text(&mut zip, JOURNAL).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-    Ok((flp, Some(Extra { journal })))
+    let ids = text(&mut zip, IDS).ok().and_then(|t| serde_json::from_str(&t).ok());
+    Ok((flp, Some(Extra { journal, ids })))
 }
 
-/// Writes project file `path`: the `.flp` bytes as they are, or a `.lemon` holding them and `journal`.
-pub fn write(path: &Path, flp: &[u8], journal: &[Value]) -> Result<u64, String> {
+/// Writes project file `path`: the `.flp` bytes as they are, or a `.lemon` holding them, `journal` and `ids`.
+pub fn write(path: &Path, flp: &[u8], journal: &[Value], ids: &Value) -> Result<u64, String> {
     if !is_native(path) {
         std::fs::write(path, flp).map_err(|e| e.to_string())?;
         return Ok(flp.len() as u64);
@@ -94,6 +99,8 @@ pub fn write(path: &Path, flp: &[u8], journal: &[Value]) -> Result<u64, String> 
             zip.write_all(entry.to_string().as_bytes()).map_err(|e| e.to_string())?;
             zip.write_all(b"\n").map_err(|e| e.to_string())?;
         }
+        zip.start_file(IDS, opts).map_err(e)?;
+        zip.write_all(ids.to_string().as_bytes()).map_err(|e| e.to_string())?;
         zip.finish().map_err(e)?;
     }
     // Through a temporary file, so a failed write keeps the old project.
@@ -116,13 +123,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("x.lemon");
         let journal = vec![json!({ "seq": 1, "kind": "session" }), json!({ "seq": 2, "kind": "step", "name": "Tempo" })];
-        write(&p, b"FLhd-bytes", &journal).unwrap();
+        write(&p, b"FLhd-bytes", &journal, &json!({})).unwrap();
         let (flp, extra) = read(&p).unwrap();
         assert_eq!(flp, b"FLhd-bytes");
         assert_eq!(extra.unwrap().journal, journal);
         // A .flp is its bytes.
         let f = dir.join("x.flp");
-        write(&f, b"FLhd", &journal).unwrap();
+        write(&f, b"FLhd", &journal, &json!({})).unwrap();
         let (b, x) = read(&f).unwrap();
         assert!(b == b"FLhd" && x.is_none());
         let _ = std::fs::remove_dir_all(&dir);
@@ -168,6 +175,47 @@ mod tests {
         let (_, extra) = read(&path).unwrap();
         let opened = extra.unwrap().journal.iter().filter(|e| e["kind"] == "new" || e["kind"] == "opened").count();
         assert_eq!(opened, 2, "both sessions");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Lemon project's things keep their ids from session to session, and new ones never reuse an id.
+    #[test]
+    fn ids_survive_saving() {
+        use crate::app::App;
+        let dir = std::env::temp_dir().join(format!("lemon-ids-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ids.lemon");
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.project.arrangements = vec![os_flp::project::default_arrangement()];
+        crate::playlist::arr_mut(&mut a.state).clips.push(os_model::Clip::new(0, 384, 2, os_model::ClipSource::Pattern(1)));
+        // A named pattern is stored even without notes.
+        a.state.project.patterns[0].name = Some("Verse".into());
+        // Ids given out before, so the project's are not 1, 2, 3...
+        for _ in 0..3 {
+            a.state.control.settle(&mut a.state.project);
+            let c = a.state.project.channels[0].clone();
+            a.state.project.channels.push(c);
+            a.state.control.settle(&mut a.state.project);
+            a.state.project.channels.pop();
+        }
+        a.state.control.settle(&mut a.state.project);
+        let read = |p: &os_model::Project| {
+            (p.channels.iter().map(|c| c.id.0).collect::<Vec<_>>(), p.patterns.iter().map(|c| c.id.0).collect::<Vec<_>>(), p.mixer.iter().map(|c| c.id.0).collect::<Vec<_>>(), p.arrangements[0].clips.iter().map(|c| c.id.0).collect::<Vec<_>>())
+        };
+        let before = read(&a.state.project);
+        a.save_to(path.clone());
+        let mut b = App::new(None);
+        // This session has given out ids of its own already.
+        b.state.control.settle(&mut b.state.project);
+        assert!(b.open(path.clone()));
+        b.state.control.settle(&mut b.state.project);
+        assert_eq!(read(&b.state.project), before, "the same ids");
+        let most = before.0.iter().chain(&before.1).chain(&before.2).chain(&before.3).max().copied().unwrap();
+        let c = b.state.project.channels[0].clone();
+        b.state.project.channels.push(c);
+        b.state.control.settle(&mut b.state.project);
+        assert!(b.state.project.channels.last().unwrap().id.0 > most, "a new thing gets a new id");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
