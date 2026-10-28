@@ -759,6 +759,15 @@ fn card_tabs(st: &State) -> Vec<(usize, Rect)> {
     ids.into_iter().enumerate().map(|(j, id)| (id, Rect::new(end - 23.0 * (k - j) as f32 + 4.0, 5.5, CARD_BTN, CARD_BTN))).collect()
 }
 
+/// The card's volume knob, left of its tabs: the channel's volume, as the instrument rack's knob (a channel's window
+/// only; owner, 2026-10-28: the one control of FL's strip worth keeping in the title row).
+fn card_knob(st: &State) -> Option<Rect> {
+    st.channel().then(|| {
+        let end = card_tabs(st).first().map_or(presets_rect(st).x, |&(_, r)| r.x);
+        Rect::new(end - 8.0 - 22.0, 4.0, 22.0, 22.0)
+    })
+}
+
 /// The card's menu arrow (the window menu), where the channel rack has its options arrow.
 const CARD_MENU: Rect = Rect { x: 6.0, y: 5.0, w: 16.0, h: 20.0 };
 
@@ -783,6 +792,9 @@ fn card_parts(st: &State) -> Vec<(Rect, Part)> {
         (CARD_MENU, Part::Menu),
     ]);
     v.extend(card_tabs(st).into_iter().map(|(i, r)| (r, Part::Tab(i))));
+    if let Some(k) = card_knob(st) {
+        v.push((k, Part::Knob(1)));
+    }
     v.push((Rect::new(0.0, 0.0, w, CARD_TITLE_H), Part::Caption));
     v
 }
@@ -882,8 +894,14 @@ fn paint_card(c: &mut Canvas, st: &State) {
     }
     // The window buttons' lights, as the app's windows have them in the Lemon skin.
     crate::views::window_light(c, &t, card_slot(w, 0), crate::views::Light::Close, hov(Part::Close));
+    // The volume knob (the channel's volume).
+    if let Some(k) = card_knob(st) {
+        let look = os_ui::kit::KnobLook::Mixer { halo: 9.5, arc: true };
+        let state = os_ui::kit::State::hover(hov(Part::Knob(1)) || st.drag.is_some_and(|d| d.0 == Knob::Vol));
+        os_ui::kit::knob(c, &t, k.cx(), k.cy(), 7.5, st.knob_value(Knob::Vol), false, look, state);
+    }
     // Name, "(mixer target)" and the hint, up to the first control on the right.
-    let end = tabs.first().map_or(p.x, |&(_, r)| r.x) - 8.0;
+    let end = card_knob(st).map_or_else(|| tabs.first().map_or(p.x, |&(_, r)| r.x), |k| k.x) - 8.0;
     let (nx, f, hf) = (CARD_MENU.right() + 4.0, Font::new(17), Font::new(13));
     let ty = 6.0;
     let room = (end - nx).max(0.0);
@@ -1843,6 +1861,23 @@ mod tests {
 
     /// The strip's PAN, VOL and PITCH knobs and the Misc page's knobs and sliders: a right click asks the app for their
     /// menu (Reset first), a middle click resets them (spec: ui/knobs.md "Owner decisions").
+    /// A channel's card has the channel's volume knob in its title row: a drag up turns it up; an effect's card has none.
+    #[test]
+    fn cards_keep_the_volume_knob() {
+        let screen = |x: f32, y: f32| (x as i32, y as i32);
+        let mut st = state(true, "Bus 1");
+        st.card = true;
+        let k = card_knob(&st).expect("a channel's card");
+        assert_eq!(part_at(&st, k.cx(), k.cy()), Some(Part::Knob(1)));
+        let v0 = st.info.volume;
+        st.left_down(k.cx(), k.cy(), false, &screen);
+        st.motion(k.cx(), k.cy() - 100.0, false);
+        st.release();
+        assert!(st.info.volume > v0 && st.events.iter().any(|e| matches!(e, FrameEvent::Volume(_))), "turned up: {:?}", st.events);
+        st.info.misc = None;
+        assert!(card_knob(&st).is_none(), "an effect's card has no channel volume");
+    }
+
     #[test]
     fn knobs_have_a_menu_and_reset() {
         use crate::misc_page::{self as mp, Hit};
