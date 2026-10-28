@@ -611,11 +611,7 @@ fn cpu(ui: &mut Ui, c: &Ctx) {
     sunken(ui, cpu, t.sunken_dark);
     ui.hit(cpu, Action::CpuPanel, "");
     let r = &s.cpu.now;
-    let level = |load: u32| match load {
-        0..75 => t.glyph,
-        75..100 => t.meter_high,
-        _ => t.meter_clip,
-    };
+    let level = |load: u32| crate::cpu::load_color(t, t.glyph, load);
     let k = (r.load as f32 / 100.0).min(1.0);
     ui.c.fill_rect(a.r(Rect::new(1055.0, 6.0, 1.5, 12.0)), t.glyph.with_alpha(60));
     if k > 0.0 {
@@ -937,11 +933,7 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let mut x = r.right() - 8.0;
     let small = Font::new(13);
     let cpu = &s.cpu.now;
-    let level = match cpu.load {
-        0..75 => t.glyph,
-        75..100 => t.meter_high,
-        _ => t.meter_clip,
-    };
+    let level = crate::cpu::load_color(t, t.glyph, cpu.load);
     let mem = cpu.mem_mb.map_or("- MB".to_string(), |m| format!("{m} MB"));
     let load = format!("{}%", cpu.load);
     // Slots as wide as the widest reading: the bar to their left stays put while the numbers change length.
@@ -950,8 +942,25 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let ty = (cy - ui.c.line_height(small) / 2.0).round();
     ui.c.text_right(small, x, ty, t.text_dim, &mem);
     ui.c.text_right(small, x - mw - 10.0, ty, level, &load);
-    let cpu_r = Rect::new(x - mw - 10.0 - lw - 4.0, r.y, mw + lw + 18.0, r.h);
-    ui.hit(cpu_r, Action::CpuPanel, "CPU load and memory - double-click for the performance monitor");
+    // Dropouts in the last half hour, in red, in a slot of their own left of the load (empty while there are none).
+    let drops = cpu.recent_dropouts;
+    let dl = format!("!{}", drops.min(9999));
+    let dw = ui.c.text_width(small, &dl).max(ui.c.text_width(small, "!888"));
+    let dx = x - mw - 10.0 - lw - 8.0;
+    if drops > 0 {
+        // A red pill: it should catch the eye.
+        let tw = ui.c.text_width(small, &dl);
+        let pill = Rect::new((dx - tw - 6.0).round(), (cy - 9.0).round(), (tw + 12.0).round(), 18.0);
+        ui.c.fill_rrect(pill, 9.0, t.meter_clip);
+        ui.c.text_right(small, dx, ty, t.s(0xffffff), &dl);
+    }
+    let cpu_r = Rect::new(dx - dw - 4.0, r.y, mw + lw + dw + 26.0, r.h);
+    let hint = match drops {
+        0 => "CPU load and memory, no dropouts in the last 30 minutes - double-click for the performance monitor".to_string(),
+        1 => "CPU load and memory, 1 dropout in the last 30 minutes - double-click for the performance monitor".to_string(),
+        n => format!("CPU load and memory, {n} dropouts in the last 30 minutes - double-click for the performance monitor"),
+    };
+    ui.hit(cpu_r, Action::CpuPanel, hint);
     x = cpu_r.x - 10.0;
     let mut button = |ui: &mut Ui, x: &mut f32, icon: Icon, on: bool, action: Action, hint: &'static str| {
         let b = Rect::new(*x - 24.0, (cy - 11.0).round(), 24.0, 22.0);
