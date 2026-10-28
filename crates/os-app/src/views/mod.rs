@@ -323,10 +323,14 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             card_corners(ui, tr);
         }
     }
-    // The gaps between snapped windows drag their splits.
+    // The gaps between snapped windows drag their splits, except where a floating window lies over them (its clicks
+    // and cursor are its own).
     if split && anim.is_none() {
+        let over: Vec<Rect> = s.z.iter().filter(|&&w| crate::floating::floats(w)).filter_map(|&w| crate::floating::paint_area(s, w)).collect();
         for d in &tiles.dividers {
-            ui.hit(d.gap, Action::TileSplit(d.node), "Drag to resize the split");
+            for part in uncovered(d.gap, &over) {
+                ui.hit(part, Action::TileSplit(d.node), "Drag to resize the split");
+            }
         }
     }
     let _ = docked;
@@ -868,4 +872,44 @@ pub fn remember_check(ui: &mut Ui, x: f32, cy: f32, on: bool, action: Action) {
 /// Channel / clip colors from the model.
 pub fn rgb(c: os_model::Rgb) -> Color {
     Color { r: c.r, g: c.g, b: c.b, a: 255 }
+}
+
+/// The pieces of thin strip `r` (a split's gap) that none of `over` covers, cut along its length.
+fn uncovered(r: Rect, over: &[Rect]) -> Vec<Rect> {
+    let along_x = r.w >= r.h;
+    let mut parts = vec![r];
+    for o in over {
+        let mut next = Vec::new();
+        for p in parts {
+            let i = p.intersect(o);
+            if i.w <= 0.0 || i.h <= 0.0 {
+                next.push(p);
+                continue;
+            }
+            if along_x {
+                (i.x > p.x).then(|| next.push(Rect::new(p.x, p.y, i.x - p.x, p.h)));
+                (i.right() < p.right()).then(|| next.push(Rect::new(i.right(), p.y, p.right() - i.right(), p.h)));
+            } else {
+                (i.y > p.y).then(|| next.push(Rect::new(p.x, p.y, p.w, i.y - p.y)));
+                (i.bottom() < p.bottom()).then(|| next.push(Rect::new(p.x, i.bottom(), p.w, p.bottom() - i.bottom())));
+            }
+        }
+        parts = next;
+    }
+    parts
+}
+
+#[cfg(test)]
+mod gap_tests {
+    use super::*;
+
+    #[test]
+    fn a_floating_window_cuts_a_split_gap() {
+        let gap = Rect::new(0.0, 100.0, 400.0, 6.0);
+        assert_eq!(uncovered(gap, &[]), vec![gap]);
+        assert_eq!(uncovered(gap, &[Rect::new(100.0, 50.0, 50.0, 200.0)]), vec![Rect::new(0.0, 100.0, 100.0, 6.0), Rect::new(150.0, 100.0, 250.0, 6.0)]);
+        assert!(uncovered(gap, &[Rect::new(-10.0, 0.0, 500.0, 300.0)]).is_empty(), "all covered");
+        let tall = Rect::new(200.0, 0.0, 6.0, 300.0);
+        assert_eq!(uncovered(tall, &[Rect::new(150.0, 0.0, 100.0, 120.0)]), vec![Rect::new(200.0, 120.0, 6.0, 180.0)]);
+    }
 }

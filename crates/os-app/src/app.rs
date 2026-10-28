@@ -11618,6 +11618,35 @@ mod tests {
         assert!(app.state.project.mixer.iter().find(|m| m.index == 1).unwrap().pan.unwrap() > 0.0, "mixer pan written to the model");
     }
 
+    /// The tiling layout's split gaps drag only where no floating window lies over them: over a floating window, its
+    /// own clicks and cursor come first.
+    #[test]
+    fn floating_windows_cover_split_gaps() {
+        let Ok(mut c) = Canvas::new(1600, 900, 1.0) else { return };
+        let mut app = App::new(None);
+        app.set_tiling_layout(true);
+        app.state.raise(Win::Playlist);
+        app.state.raise(Win::PianoRoll);
+        frame(&mut app, &mut c, None);
+        let gap = crate::tiles::plan(&app.state).dividers[0].gap;
+        let along = gap.w >= gap.h;
+        let at = |k: f32| if along { (gap.x + k * gap.w, gap.cy()) } else { (gap.cx(), gap.y + k * gap.h) };
+        let split = |app: &App, (x, y): (f32, f32)| matches!(app.top_hit(x, y).map(|h| &h.action), Some(Action::TileSplit(_)));
+        assert!(split(&app, at(0.5)), "the gap drags the split");
+        // The instrument rack over the gap's middle.
+        app.state.raise(Win::ChannelRack);
+        let r = views::rack::rect(&app.state);
+        let (mx, my) = at(0.5);
+        app.state.rack_pos = (app.state.rack_pos.0 + mx - r.cx(), app.state.rack_pos.1 + my - r.cy());
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        let r = views::rack::rect(&app.state);
+        assert!(r.contains(mx, my));
+        assert!(!split(&app, (mx, my)), "the rack's, not the gap's");
+        let free = (0..=20).map(|k| at(k as f32 / 20.0)).find(|&(x, y)| !r.outset(8.0).contains(x, y)).expect("a part of the gap the rack leaves");
+        assert!(split(&app, free), "the gap still drags where the rack is not");
+    }
+
     /// The wheel over a mixer fader moves it instead of scrolling the mixer: three notches up from unity read
     /// `103%  0.8dB  1.09`, and a run of notches is one undo step (spec: ui/mixer.md §4).
     #[test]
