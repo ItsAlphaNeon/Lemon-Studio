@@ -129,7 +129,7 @@ cd Lemon-Studio
 `cargo run -p os-app --release` builds and runs Lemon Studio. Before Lemon Studio starts, it also rebuilds Lemon
 Studio's own plugins (Lemon Sampler, Lemon Trio, Lemon Parametric EQ, Lemon Limiter, Lemon Reverb, Lemon Delay, Lemon
 Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus,
-Lemon Stereo Shaper and Citrus) and
+Lemon Stereo Shaper, Lemon Filter and Citrus) and
 installs the ones that changed as VST3 and CLAP plugins, in the folders where other DAWs find them. Lemon Studio itself
 has every one of them built in and needs no plugin files. A plugin that is new or updated in the repository shows up
 in other DAWs at the next run. The first run builds every plugin, which takes
@@ -276,6 +276,9 @@ that stay above Lemon Studio while it is the active application. A few things di
 - **Plugin windows:** a minimized detached window is hidden rather than sent to the Dock; its channel's button brings
   it back. A sample dragged from Lemon Studio's browser onto a plugin window reaches Lemon Sampler only (other plugins
   take dropped files only from the Finder).
+- **Microphone:** the first time a mixer track monitors or records an input (the Mac's microphone, an audio
+  interface's inputs), macOS asks whether Lemon Studio may use the microphone; System Settings > Privacy & Security >
+  Microphone changes the answer. Started from a terminal, macOS asks on the terminal's behalf instead.
 - **FL Studio's factory content** (samples that projects name through `%FLStudioFactoryData%`) is found in the newest
   `/Applications/FL Studio *.app`; `OPENSTUDIO_FACTORY` overrides it.
 - **Settings, themes and presets** live in `~/Library/Application Support/Lemon Studio`. `OPENSTUDIO_USER_DIR`
@@ -369,7 +372,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`lemon-limiter`](plugins/lemon-limiter) | Lemon Limiter effect (VST3 + CLAP) |
 | [`lemon-reverb`](plugins/lemon-reverb) | Lemon Reverb effect (VST3 + CLAP) |
 | [`lemon-delay`](plugins/lemon-delay) | Lemon Delay effect (VST3 + CLAP) |
-| [`lemon-small-fx`](plugins/lemon-small-fx) | What the seven small Lemon effects share: the plugin, its state, the editor and each effect's description |
+| [`lemon-small-fx`](plugins/lemon-small-fx) | What the small Lemon effects share: the plugin, its state, the editor and each effect's description |
 | [`lemon-soft-clipper`](plugins/lemon-soft-clipper) | Lemon Soft Clipper effect (VST3 + CLAP) |
 | [`lemon-fast-distortion`](plugins/lemon-fast-distortion) | Lemon Fast Distortion effect (VST3 + CLAP) |
 | [`lemon-balance`](plugins/lemon-balance) | Lemon Balance effect (VST3 + CLAP) |
@@ -377,6 +380,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`lemon-transient-processor`](plugins/lemon-transient-processor) | Lemon Transient Processor effect (VST3 + CLAP) |
 | [`lemon-chorus`](plugins/lemon-chorus) | Lemon Chorus effect (VST3 + CLAP) |
 | [`lemon-stereo-shaper`](plugins/lemon-stereo-shaper) | Lemon Stereo Shaper effect (VST3 + CLAP) |
+| [`lemon-filter`](plugins/lemon-filter) | Lemon Filter effect (VST3 + CLAP) |
 | [`citrus`](plugins/citrus) | Citrus instrument, a six-operator synthesizer (VST3 + CLAP) |
 
 ## Roadmap
