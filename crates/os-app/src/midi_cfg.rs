@@ -93,8 +93,6 @@ pub enum Switch {
 }
 
 impl Switch {
-    pub const ALL: [Switch; 3] = [Switch::Remote, Switch::Output, Switch::MasterSync];
-
     fn key(self) -> &'static str {
         match self {
             Switch::Remote => "midi_remote_control",
@@ -112,9 +110,6 @@ impl Switch {
         }
     }
 
-    pub fn from_label(label: &str) -> Option<Switch> {
-        Switch::ALL.into_iter().find(|s| s.label() == label)
-    }
 
     pub fn on(self) -> bool {
         flag(self.key(), self != Switch::MasterSync)
@@ -242,7 +237,6 @@ mod tests {
         assert!(Switch::Remote.on() && Switch::Output.on() && !Switch::MasterSync.on());
         Switch::MasterSync.set(true);
         assert!(Switch::MasterSync.on());
-        assert_eq!(Switch::from_label("Enable MIDI output"), Some(Switch::Output));
     }
 
     #[test]

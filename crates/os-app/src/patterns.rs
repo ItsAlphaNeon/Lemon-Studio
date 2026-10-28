@@ -58,34 +58,6 @@ pub enum Cmd {
     RenderAsClip,
 }
 
-impl Cmd {
-    /// The command behind a PATTERNS menu label.
-    pub fn from_label(label: &str) -> Option<Cmd> {
-        Some(match label {
-            "New empty pattern..." => Cmd::FindFirst,
-            "Next empty pattern..." => Cmd::FindNext,
-            "Next empty pattern (unnamed)" => Cmd::FindNextNoName,
-            "Select in arranger" => Cmd::SelectInPlaylist,
-            "Rename and colour..." => Cmd::Rename,
-            "Change color..." => Cmd::ChangeColor,
-            "Random color" => Cmd::RandomColor,
-            "Transpose..." => Cmd::Transpose,
-            "Insert one" => Cmd::InsertOne,
-            "Clone" => Cmd::Clone,
-            "Delete" => Cmd::Delete,
-            "Move up" => Cmd::MoveUp,
-            "Move down" => Cmd::MoveDown,
-            "Set time signature..." => Cmd::TimeSignature,
-            "Open in project browser" => Cmd::OpenInBrowser,
-            "Split by instrument" => Cmd::SplitByChannel,
-            "Render to audio clip" => Cmd::QuickRender,
-            "Render as audio clip..." => Cmd::RenderAsClip,
-            "Render and replace..." => Cmd::RenderReplace,
-            _ => return None,
-        })
-    }
-}
-
 /// Clicks inside the name box, its popups and the confirm dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
