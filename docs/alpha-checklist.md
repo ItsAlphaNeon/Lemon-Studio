@@ -18,7 +18,9 @@ Systems a fully functional DAW can't ship without.
   recording into the playlist works ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [ ] **Input monitoring.** Hear an input through its mixer track while it is armed or recording
 - [ ] **Automation recording into clips.** Only channel volume and pan moves record, and only into the pattern
-- [ ] **Automation clip LFO and min / range.** Clips walk all thirteen curve shapes but have neither yet
+- [x] **Automation clip LFO and min / range.** The clip channel's MIN / MAX knobs set its range and its LFO
+  (switch, mode, amount, speed, tension, skew, pulse width, its own envelope) plays as the original's, in the clip's
+  channel window; files keep every LFO field
 - [ ] **Projects saved before FL Studio 24.2.** They are refused with a dialog that asks for a re-save in a newer
   version
 - [ ] **Multi-core mixing.** The engine renders on one audio thread, which limits dense projects
@@ -32,14 +34,17 @@ fourteen effects; these are the gaps a project made in FL Studio runs into most.
 
 - [ ] **Drum sampler (FPC).** A pad-based drum instrument
 - [ ] **Slicer (Slicex, Fruity Slicer).** A loop chopped into slices that the piano roll plays
-- [ ] **Filter effect (Fruity Filter, Fruity Love Philter)**
+- [x] **Filter effect (Fruity Filter, Fruity Love Philter).** Lemon Filter and Pulp Filter, each also playing the
+  original's slots in opened projects
 - [x] **Flanger and phaser.** Lemon Flanger and Lemon Phaser recreate Fruity Flanger and Fruity Phaser
 - [ ] **Vocoder (Vocodex)**
 - [ ] **Peak Controller.** Common for sidechain pumping in projects; nothing in the code handles it yet
 - [ ] **Formula Controller**
 - [ ] **Patcher.** The mixer slot menu's Patcherize and Patcherize all are greyed out
-- [ ] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** The other four small
-  effects already match sample for sample in the tests
+- [x] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** Six of the seven
+  small effects match sample for sample in the tests (98 cases for these three: `os-engine/tests/fx_null.rs`); the
+  Chorus uses the true pi where the original's is a hair off, so 10 of its 21 cases match and the rest are at least
+  37 dB below the test signal
 
 ## Gaps and polish
 

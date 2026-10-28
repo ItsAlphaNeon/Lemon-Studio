@@ -8,6 +8,7 @@
 //! Units are the project's own: positions and lengths in ticks (see [`Project::ppq`]),
 //! levels as normalized `f64`s. File encodings live in `os-flp`, not here.
 
+pub mod clip_lfo;
 pub mod crossfade;
 pub mod curve;
 
@@ -1335,6 +1336,18 @@ pub struct MixerTrack {
     /// The track's icon (event 95) as the file numbers it; `None` = no icon (spec: flp/events/mixer.md "Track blocks",
     /// flp/engine-events.md "The mixer"). It stays with its track; Lemon Studio does not draw it.
     pub icon: Option<u16>,
+    /// The audio device input the track takes and the output pair it plays on directly, as stored (events 154 / 147):
+    /// -1 = none, else the entry's place in the input menu (stereo pairs, then single inputs) or the output pair (spec:
+    /// audio/track-io.md §1.6, §2.1). New tracks: none; the master: pair 0.
+    pub audio_in: i32,
+    pub audio_out: i32,
+    /// What disk recording takes (event 165: 0 External input only .. 5 Post track, `REC_POST_EQ` new) and when the
+    /// input is heard (event 166: `MONITOR_OFF`, `MONITOR_ARMED`, `MONITOR_ON`).
+    pub rec_source: u8,
+    pub monitor: u8,
+    /// Armed for disk recording (the strip's record button). Not saved, and not part of the track: tracks that differ
+    /// only here are equal (spec: audio/track-io.md §1.5).
+    pub armed: bool,
     /// Position of the file's track block this track was loaded from (`None` = made in Lemon Studio). When tracks are
     /// moved, deleted or trimmed, the writer takes the track's effect-slot events from that block (spec:
     /// flp/events/mixer.md "Removing tracks"). Bookkeeping, not part of the track: tracks that differ only here are
@@ -1365,6 +1378,11 @@ impl PartialEq for MixerTrack {
             latency_out,
             latency_in,
             icon,
+            audio_in,
+            audio_out,
+            rec_source,
+            monitor,
+            armed: _,
             origin: _,
         } = self;
         *index == o.index
@@ -1386,8 +1404,20 @@ impl PartialEq for MixerTrack {
             && *latency_out == o.latency_out
             && *latency_in == o.latency_in
             && *icon == o.icon
+            && *audio_in == o.audio_in
+            && *audio_out == o.audio_out
+            && *rec_source == o.rec_source
+            && *monitor == o.monitor
     }
 }
+
+/// Monitor modes of a track's input (event 166; spec: audio/track-io.md §1.6).
+pub const MONITOR_OFF: u8 = 0;
+pub const MONITOR_ARMED: u8 = 1;
+pub const MONITOR_ON: u8 = 3;
+/// Record sources (event 165): External input only, and the default, Post EQ.
+pub const REC_EXTERNAL: u8 = 0;
+pub const REC_POST_EQ: u8 = 3;
 
 /// A new track's equaliser: flat, at the default frequencies and widths.
 pub const EQ_DEFAULT: [[i32; 3]; 3] = [[0, 5777, 17500], [0, 33145, 17500], [0, 55825, 17500]];
@@ -1415,8 +1445,19 @@ impl MixerTrack {
             latency_out: 0.0,
             latency_in: 0.0,
             icon: None,
+            audio_in: -1,
+            audio_out: if index == 0 { 0 } else { -1 },
+            rec_source: REC_POST_EQ,
+            monitor: MONITOR_ARMED,
+            armed: false,
             origin: None,
         }
+    }
+
+    /// The track's input is heard: one is chosen, and the monitor mode is On, or When armed with the track armed
+    /// (spec: audio/track-io.md §2.2).
+    pub fn monitored(&self) -> bool {
+        self.audio_in >= 0 && (self.monitor == MONITOR_ON || (self.monitor == MONITOR_ARMED && self.armed))
     }
 }
 
@@ -1735,9 +1776,13 @@ pub struct Automation {
     pub targets: Vec<u32>,
     /// Points with absolute positions in beats from the clip start, sorted.
     pub points: Vec<AutoPoint>,
-    /// Stored header (21 bytes incl. the count) and tail of event 234, kept as read.
+    /// Stored header (21 bytes incl. the count) and tail of event 234, kept as read. On saving, the LFO's fields in
+    /// them (header bytes 4..8 and 8, the envelope and the LFO's values behind it) are written from `lfo`.
     pub header: Vec<u8>,
     pub tail: Vec<u8>,
+    /// The clip's LFO (spec: audio/automation.md "The LFO"). Its range is its channel's pan and volume
+    /// (`clip_lfo::range`).
+    pub lfo: clip_lfo::ClipLfo,
 }
 
 /// One automation point. `mode` shapes the segment that ends at this point.
@@ -2106,20 +2151,7 @@ impl Automation {
     /// The curve's value at `beat` (clamped to the first / last point), shaped per segment mode as the walk plays it
     /// (spec: audio/automation.md "Segment shapes"). At a point's own beat it is that point's level.
     pub fn value_at(&self, beat: f64) -> Option<f64> {
-        let pts = &self.points;
-        let first = pts.first()?;
-        if beat <= first.beat {
-            return Some(f64::from(first.value as f32));
-        }
-        let i = pts.partition_point(|p| p.beat <= beat);
-        let Some(b) = pts.get(i) else { return Some(f64::from(pts.last()?.value as f32)) };
-        let a = pts[i - 1];
-        let span = b.beat - a.beat;
-        if span <= 0.0 {
-            return Some(f64::from(b.value as f32));
-        }
-        let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
-        Some(curve::segment_value(pts, i, t))
+        curve::value_at(&self.points, beat)
     }
 }
 

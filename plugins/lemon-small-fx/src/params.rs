@@ -122,15 +122,25 @@ pub fn first(spec: &Spec) -> usize {
     usize::from(spec.version.is_some())
 }
 
-/// The int (after the version field) setting `k` is.
+/// In [`Spec::fields`]: the setting is not an int but bit 0 of the byte right after the ints (Fruity Filter's Center),
+/// read as 0 from a state without that byte (an earlier version).
+pub const BYTE: usize = usize::MAX;
+
+/// The int (after the version field) setting `k` is ([`BYTE`] for the byte after the ints).
 pub fn int_of(spec: &Spec, k: usize) -> usize {
     spec.fields.get(k).copied().unwrap_or(k)
 }
 
-/// The ints the saved state has for its settings (after the version field): one per setting, and those the
-/// description leaves out.
+/// The ints the saved state has for its settings (after the version field): one per setting but a [`BYTE`] one, and
+/// those the description leaves out.
 pub fn ints(spec: &Spec) -> usize {
-    spec.fields.iter().map(|&i| i + 1).max().unwrap_or(0).max(spec.settings.len())
+    let bytes = spec.fields.iter().filter(|&&i| i == BYTE).count();
+    spec.fields.iter().filter(|&&i| i != BYTE).map(|&i| i + 1).max().unwrap_or(0).max(spec.settings.len() - bytes)
+}
+
+/// Where a [`BYTE`] setting is: the byte after the ints.
+fn byte_at(spec: &Spec) -> usize {
+    4 * (first(spec) + ints(spec))
 }
 
 /// The shortest readable saved state: the version field, if any, and the settings' ints.
@@ -147,11 +157,22 @@ pub fn normalized(spec: &Spec, b: Vec<u8>) -> Vec<u8> {
 
 /// Setting `k`'s stored value.
 pub fn setting(spec: &Spec, b: &[u8], k: usize) -> i32 {
-    field(b, first(spec) + int_of(spec, k))
+    match int_of(spec, k) {
+        BYTE => b.get(byte_at(spec)).map_or(0, |x| i32::from(x & 1)),
+        i => field(b, first(spec) + i),
+    }
 }
 
+/// Writes setting `k` (a [`BYTE`] setting only where the state has its byte; the other bits of it are kept).
 pub fn set_setting(spec: &Spec, b: &mut [u8], k: usize, v: i32) {
-    set_field(b, first(spec) + int_of(spec, k), v);
+    match int_of(spec, k) {
+        BYTE => {
+            if let Some(x) = b.get_mut(byte_at(spec)) {
+                *x = (*x & !1) | (v & 1) as u8;
+            }
+        }
+        i => set_field(b, first(spec) + i, v),
+    }
 }
 
 /// Little-endian int32 field `k`.
@@ -184,6 +205,13 @@ pub fn to_fl(spec: &Spec, vals: &[i32], raw: &[u8]) -> Vec<u8> {
     let mut b = normalized(spec, raw.to_vec());
     for (k, &v) in vals.iter().enumerate().take(spec.settings.len()) {
         if decode(spec, k, setting(spec, &b, k)) != v {
+            // A state of the version before the byte gains it, and the version that has it.
+            if int_of(spec, k) == BYTE && b.len() <= byte_at(spec) {
+                b.resize(byte_at(spec) + 1, 0);
+                if let Some(version) = spec.version {
+                    set_field(&mut b, 0, version);
+                }
+            }
             set_setting(spec, &mut b, k, v);
         }
     }
@@ -345,6 +373,7 @@ mod tests {
         );
         assert_eq!(default_state(chorus::SPEC), os_engine::effects::chorus::Settings::default().to_state());
         assert_eq!(default_state(stereo_shaper::SPEC), os_engine::effects::stereo_shaper::Settings::default().to_state());
+        assert_eq!(default_state(crate::filter::SPEC), os_engine::effects::filter::Settings::default().to_state());
         assert_eq!(default_state(flanger::SPEC), os_engine::effects::flanger::Settings::default().to_state());
         assert_eq!(default_state(phaser::SPEC), os_engine::effects::phaser::Settings::default().to_state());
     }

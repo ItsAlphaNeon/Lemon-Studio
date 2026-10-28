@@ -11,6 +11,7 @@ pub mod delay;
 pub mod dynamics;
 pub mod eq;
 pub mod fast_dist;
+pub mod filter;
 pub mod flanger;
 pub mod limiter;
 pub mod love_philter;
@@ -74,6 +75,7 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
         "Transient Processor" => {
             transient_processor::TransientProcessor::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
         }
+        "Fruity Filter" => filter::Filter::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         _ => None,
     }
 }
