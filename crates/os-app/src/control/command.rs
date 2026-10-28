@@ -1065,12 +1065,17 @@ fn put(s: &mut State, t: Taken) {
                 if ch.misc != c.misc && c.kind.is_sampler() {
                     s.control.misc.push(row);
                 }
+                // Muting is no edit: the channel stays muted or not (`keep_mutes`).
+                let on = ch.enabled;
                 *ch = *c;
+                ch.enabled = on;
             }
         }
         Taken::Track(m) => {
             if let Ok(place) = track_place(&s.project, m.id.0) {
+                let on = s.project.mixer[place].enabled;
                 s.project.mixer[place] = *m;
+                s.project.mixer[place].enabled = on;
             }
         }
         Taken::Pattern(p) => {
@@ -1100,7 +1105,9 @@ fn restore(s: &mut State, side: Side) {
     let map: Vec<Option<usize>> = old.iter().map(|id| new_row.get(id).copied()).collect();
     let Side { project, tempo, pattern, groups, unsorted_at, filter, zipped, locked, loop_len, slot_names } = side;
     s.mixer.slot_names = slot_names;
+    let mutes = Mutes::of(&s.project);
     s.project = project;
+    mutes.keep(&mut s.project);
     s.tempo = tempo;
     s.pattern = pattern;
     crate::rack::remap_ui(s, &map);
@@ -1110,6 +1117,32 @@ fn restore(s: &mut State, side: Side) {
     s.selected_mixer = s.selected_mixer.min(tracks);
     s.mixer.sel.retain(|&t| t <= tracks);
     reselect_clips(s, &sel_clips);
+}
+
+/// Muting and soloing are no edits (as in FL, where they make no undo step): an undo or redo leaves every channel and
+/// mixer track that is still there muted or not as it is now. The states by id.
+struct Mutes {
+    channels: std::collections::HashMap<u32, bool>,
+    tracks: std::collections::HashMap<u32, bool>,
+}
+
+impl Mutes {
+    fn of(p: &Project) -> Mutes {
+        Mutes { channels: p.channels.iter().map(|c| (c.id.0, c.enabled)).collect(), tracks: p.mixer.iter().map(|m| (m.id.0, m.enabled)).collect() }
+    }
+
+    fn keep(&self, p: &mut Project) {
+        for c in &mut p.channels {
+            if let Some(&on) = self.channels.get(&c.id.0) {
+                c.enabled = on;
+            }
+        }
+        for m in &mut p.mixer {
+            if let Some(&on) = self.tracks.get(&m.id.0) {
+                m.enabled = on;
+            }
+        }
+    }
 }
 
 /// The playlist's selected clips by id (an edit that moves clips in the list keeps them selected).
