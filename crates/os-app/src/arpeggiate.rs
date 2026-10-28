@@ -98,7 +98,7 @@ impl Default for Settings {
 }
 
 /// The dialog's knobs (Range is a spin box, driven like a knob).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Knob {
     TimeMul,
     Range,

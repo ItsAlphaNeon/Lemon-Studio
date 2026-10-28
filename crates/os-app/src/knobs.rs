@@ -15,7 +15,7 @@ pub const PITCH_SNAP: f32 = 0.2;
 /// Normalised value change per mouse-wheel notch (1/64).
 pub const PER_NOTCH: f32 = 1.0 / 64.0;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum KnobId {
     /// The toolbar's main volume (stored 0..16000, 12800 = unity at 0.8) and main pitch (-1200..1200 cents) (model
     /// `Project::main_volume` / `main_pitch`; spec: audio/mixer.md "Main volume", audio/voice-levels.md).

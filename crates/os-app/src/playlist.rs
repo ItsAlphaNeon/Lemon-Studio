@@ -179,7 +179,7 @@ pub fn grid_ticks(ppq: u32, bar_w: f32) -> u32 {
 }
 
 /// Picker panel lists (§1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum PickKind {
     #[default]
     Pattern,

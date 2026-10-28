@@ -51,8 +51,8 @@ pub const PROJECT_SETTINGS: &str = "Project settings";
 /// A channel's generator replaced (`plugin_menu::replace_generator`).
 pub const REPLACE_CHANNEL: &str = "Replace channel";
 
-/// What a step changes, as it is on the other side of the step.
-#[derive(Debug, Clone, PartialEq)]
+/// What a step changes, as it is on the other side of the step. Serialized into a Lemon project file (`History::stored`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Snap {
     /// Pattern `number`'s notes, control points and length (the piano roll, the step sequencer).
     Pattern { number: u16, notes: Vec<Note>, controls: Vec<ControlPoint>, length: Option<u32> },
@@ -78,15 +78,49 @@ pub enum Snap {
     Several(Vec<Snap>),
     /// The control plane's commands that take a step back (`control::run`'s undo); applying them gives the commands
     /// for the other way (`swap`).
-    Commands(Vec<crate::control::Command>),
+    Commands(#[serde(with = "stored_commands")] Vec<crate::control::Command>),
     /// The timebase on one side of its change, with the ticks it holds (`Timebase`).
     Timebase(Box<Timebase>),
+}
+
+/// `Snap::Commands` serialized: a `Put` as its `Taken` (a command's own tag cannot hold an enum), the others as they are.
+mod stored_commands {
+    use crate::control::command::Taken;
+    use crate::control::Command;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    enum Stored {
+        Put(Box<Taken>),
+        Command(Command),
+    }
+
+    pub fn serialize<S: Serializer>(v: &[Command], s: S) -> Result<S::Ok, S::Error> {
+        let list: Vec<Stored> = v
+            .iter()
+            .map(|c| match c {
+                Command::Put(t) => Stored::Put(t.clone()),
+                c => Stored::Command(c.clone()),
+            })
+            .collect();
+        list.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Command>, D::Error> {
+        Ok(Vec::<Stored>::deserialize(d)?
+            .into_iter()
+            .map(|x| match x {
+                Stored::Put(t) => Command::Put(t),
+                Stored::Command(c) => c,
+            })
+            .collect())
+    }
 }
 
 /// The timebase on one side of its change (`timebase`), with the patterns and arrangements at that timebase, so an undo
 /// brings back the ticks a lower timebase rounded. The history's other steps follow the timebase (`rescale`); these
 /// keep their own.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Timebase {
     pub ppq: u16,
     pub patterns: Vec<os_model::Pattern>,
@@ -104,7 +138,7 @@ impl Timebase {
 /// The rack's side of ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the added channel at `row`
 /// (`None` while it doesn't exist; only the last row comes and goes), the rack's filter groups, filter and selection,
 /// and the playlist's clip source.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RackSide {
     pub row: usize,
     pub ch: Option<os_model::Channel>,
@@ -403,6 +437,33 @@ impl History {
     /// The name of the newest done step.
     pub fn newest_done(&self) -> Option<&str> {
         self.done.checked_sub(1).map(|i| &*self.steps[i].name)
+    }
+
+    /// The steps as a Lemon project file keeps them (`crate::native`): names and what each puts back, and how many are
+    /// done. None when one does not serialize (nothing is kept then).
+    pub fn stored(&self) -> Option<serde_json::Value> {
+        let steps: Option<Vec<serde_json::Value>> =
+            self.steps.iter().map(|s| serde_json::to_value(&s.snap).ok().map(|snap| serde_json::json!({ "name": s.name, "snap": snap }))).collect();
+        Some(serde_json::json!({ "done": self.done, "steps": steps? }))
+    }
+
+    /// The steps a Lemon project file kept (`stored`): the history goes on from where it was saved. A step that does
+    /// not read back drops it and the steps before it (they could not be reached past it).
+    pub fn restore(&mut self, v: &serde_json::Value) {
+        let mut steps = Vec::new();
+        let mut done = v["done"].as_u64().unwrap_or(0) as usize;
+        for (i, s) in v["steps"].as_array().into_iter().flatten().enumerate() {
+            let name = s["name"].as_str().unwrap_or("").to_string();
+            match serde_json::from_value::<Snap>(s["snap"].clone()) {
+                Ok(snap) => steps.push(Step { name: Cow::Owned(name), snap }),
+                Err(e) => {
+                    eprintln!("lemonstudio: undo step {} of the project file: {e}", i + 1);
+                    done = done.saturating_sub(steps.len() + 1);
+                    steps.clear();
+                }
+            }
+        }
+        *self = History { done: done.min(steps.len()), steps, ..History::default() };
     }
 
     /// Forgets every step: the project was opened or made ("Last reset").

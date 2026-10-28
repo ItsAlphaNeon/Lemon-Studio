@@ -53,7 +53,7 @@ impl Default for Settings {
 }
 
 /// A knob of the dialog.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Knob {
     Time,
     TimeTension,

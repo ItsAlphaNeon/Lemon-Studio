@@ -5,4 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Serde for every model type: Lemon project files keep undo steps (os-app `native`).
+serde = ["dep:serde"]
+
 [dependencies]
+serde = { version = "1", features = ["derive"], optional = true }

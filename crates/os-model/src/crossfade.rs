@@ -19,6 +19,7 @@ pub type Fade = (f32, f32);
 /// A clip's longest overlaps with the audio clips of its track: for its fade-in the earlier clip (index, ticks), for
 /// its fade-out the later one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Overlaps {
     pub fade_in: Option<(usize, u32)>,
     pub fade_out: Option<(usize, u32)>,

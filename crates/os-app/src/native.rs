@@ -8,7 +8,8 @@
 //!   reads a project reads this, and taking it out of the zip gives FL its project);
 //! - `journal.jsonl`: the project's whole history, every session it was edited in (`crate::journal`): what changed,
 //!   when and by whom, and every state its plugins had;
-//! - `ids.json`: its things' ids (`control::ids::stored`), so they keep them from session to session.
+//! - `ids.json`: its things' ids (`control::ids::stored`), so they keep them from session to session;
+//! - `history.json`: its undo history (`history::History::stored`), so Ctrl+Z goes on past opening it.
 
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
@@ -24,6 +25,7 @@ const MANIFEST: &str = "lemon.json";
 const SNAPSHOT: &str = "project.flp";
 const JOURNAL: &str = "journal.jsonl";
 const IDS: &str = "ids.json";
+const HISTORY: &str = "history.json";
 
 /// Whether `path` names a Lemon project file.
 pub fn is_native(path: &Path) -> bool {
@@ -47,6 +49,8 @@ pub struct Extra {
     pub journal: Vec<Value>,
     /// The project's ids (`control::ids::stored`).
     pub ids: Option<Value>,
+    /// The undo history (`history::History::stored`).
+    pub history: Option<Value>,
 }
 
 /// Reads a project file: a `.flp`'s bytes; a `.lemon`'s snapshot, and its history.
@@ -74,11 +78,13 @@ pub fn read(path: &Path) -> Result<(Vec<u8>, Option<Extra>), String> {
     // A file without a journal (or with a damaged line) still opens.
     let journal = text(&mut zip, JOURNAL).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     let ids = text(&mut zip, IDS).ok().and_then(|t| serde_json::from_str(&t).ok());
-    Ok((flp, Some(Extra { journal, ids })))
+    let history = text(&mut zip, HISTORY).ok().and_then(|t| serde_json::from_str(&t).ok());
+    Ok((flp, Some(Extra { journal, ids, history })))
 }
 
-/// Writes project file `path`: the `.flp` bytes as they are, or a `.lemon` holding them, `journal` and `ids`.
-pub fn write(path: &Path, flp: &[u8], journal: &[Value], ids: &Value) -> Result<u64, String> {
+/// Writes project file `path`: the `.flp` bytes as they are, or a `.lemon` holding them, `journal`, `ids` and the undo
+/// `history` (when there is one to keep).
+pub fn write(path: &Path, flp: &[u8], journal: &[Value], ids: &Value, history: Option<&Value>) -> Result<u64, String> {
     if !is_native(path) {
         std::fs::write(path, flp).map_err(|e| e.to_string())?;
         return Ok(flp.len() as u64);
@@ -101,6 +107,10 @@ pub fn write(path: &Path, flp: &[u8], journal: &[Value], ids: &Value) -> Result<
         }
         zip.start_file(IDS, opts).map_err(e)?;
         zip.write_all(ids.to_string().as_bytes()).map_err(|e| e.to_string())?;
+        if let Some(h) = history {
+            zip.start_file(HISTORY, opts).map_err(e)?;
+            zip.write_all(h.to_string().as_bytes()).map_err(|e| e.to_string())?;
+        }
         zip.finish().map_err(e)?;
     }
     // Through a temporary file, so a failed write keeps the old project.
@@ -123,13 +133,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("x.lemon");
         let journal = vec![json!({ "seq": 1, "kind": "session" }), json!({ "seq": 2, "kind": "step", "name": "Tempo" })];
-        write(&p, b"FLhd-bytes", &journal, &json!({})).unwrap();
+        write(&p, b"FLhd-bytes", &journal, &json!({}), None).unwrap();
         let (flp, extra) = read(&p).unwrap();
         assert_eq!(flp, b"FLhd-bytes");
         assert_eq!(extra.unwrap().journal, journal);
         // A .flp is its bytes.
         let f = dir.join("x.flp");
-        write(&f, b"FLhd", &journal, &json!({})).unwrap();
+        write(&f, b"FLhd", &journal, &json!({}), None).unwrap();
         let (b, x) = read(&f).unwrap();
         assert!(b == b"FLhd" && x.is_none());
         let _ = std::fs::remove_dir_all(&dir);
@@ -216,6 +226,82 @@ mod tests {
         b.state.project.channels.push(c);
         b.state.control.settle(&mut b.state.project);
         assert!(b.state.project.channels.last().unwrap().id.0 > most, "a new thing gets a new id");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Lemon project's undo history survives closing it: opened again, Ctrl+Z takes back each step made before
+    /// the save, in order, and redo gives them again.
+    #[test]
+    fn undo_survives_closing() {
+        use crate::app::App;
+        use crate::knobs::KnobId;
+        let dir = std::env::temp_dir().join(format!("lemon-undo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("undo.lemon");
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.project.arrangements = vec![os_flp::project::default_arrangement()];
+        a.state.project.patterns[0].name = Some("Verse".into());
+        crate::playlist::arr_mut(&mut a.state).clips.push(os_model::Clip::new(0, 384, 2, os_model::ClipSource::Pattern(1)));
+        a.state.control.settle(&mut a.state.project);
+        // What the project is at each point: the model and the tempo.
+        let at = |a: &App| (a.state.project.clone(), a.state.tempo);
+        let mut points = vec![at(&a)];
+        // A setting (a command's Put), a knob, notes, the playlist, a mute (the channels' on states).
+        crate::control::edit(&mut a.state, crate::control::command::TEMPO, crate::control::command::Region::Settings, |s| s.tempo = 141.0);
+        points.push(at(&a));
+        crate::history::knob(&mut a.state, KnobId::ChanVol(0), false);
+        a.state.set_knob(KnobId::ChanVol(0), 0.3);
+        points.push(at(&a));
+        let snap = crate::history::Snap::pattern(&a.state, 1);
+        crate::history::record(&mut a.state, "Add note", snap);
+        let n = os_model::Note { position: 96, length: 24, channel: 0, key: 64, velocity: 100, pan: 64, fine_pitch: 120, release: 64, mod_x: 128, mod_y: 128, flags: 0x4000, group: 0, unk14: 0, repeat: 0 };
+        crate::patterns::pat_mut(&mut a.state, 1).notes.push(n);
+        points.push(at(&a));
+        crate::playlist::snapshot(&mut a.state);
+        crate::playlist::arr_mut(&mut a.state).clips.clear();
+        points.push(at(&a));
+        crate::rack::toggle_mute(&mut a.state, 1);
+        points.push(at(&a));
+        assert_eq!(a.state.history.done(), 5);
+        a.save_to(path.clone());
+
+        let mut b = App::new(None);
+        assert!(b.open(path.clone()), "{:?}", b.state.message);
+        assert_eq!(b.state.history.done(), 5, "the steps came along");
+        assert_eq!(b.state.history.newest_done(), Some(crate::rack::MUTE_SOLO));
+        // Each save stamps the work time: not what undo is about.
+        // A clip's record bytes are written as it is saved: not what undo is about either.
+        // The model's tempo follows the live one (compared beside it) only as the project is saved.
+        let plain = |mut p: os_model::Project| {
+            p.work_time = None;
+            p.tempo = None;
+            // An unset main volume is saved as its default.
+            p.main_volume = Some(p.main_volume.unwrap_or(os_model::Project::MAIN_VOLUME_DEFAULT));
+            p.arrangements.iter_mut().flat_map(|a| a.clips.iter_mut()).for_each(|c| c.raw = os_model::Clip::TEMPLATE);
+            p
+        };
+        let model = |b: &App| (plain(b.state.project.clone()), b.state.tempo);
+        // The file's model is what saving and reading give: compare each undo with the saved-and-read point.
+        let read_back = |p: &(os_model::Project, f64)| {
+            let mut t = App::new(None);
+            t.state.project = p.0.clone();
+            t.state.tempo = p.1;
+            let f = dir.join("point.flp");
+            t.save_to(f.clone());
+            let mut r = App::new(None);
+            r.open(f);
+            (plain(r.state.project.clone()), r.state.tempo)
+        };
+        assert_eq!(model(&b), read_back(&points[5]));
+        for k in (0..5).rev() {
+            crate::history::undo(&mut b.state).unwrap();
+            assert_eq!(model(&b), read_back(&points[k]), "undone to point {k}");
+        }
+        for k in 1..=5 {
+            crate::history::redo(&mut b.state).unwrap();
+            assert_eq!(model(&b), read_back(&points[k]), "redone to point {k}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

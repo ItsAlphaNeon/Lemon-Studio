@@ -90,7 +90,7 @@ impl Tool {
 }
 
 /// A knob or fader of the dialogs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Knob {
     FlamTime,
     FlamVel,

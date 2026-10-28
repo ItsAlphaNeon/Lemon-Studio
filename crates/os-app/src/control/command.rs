@@ -230,8 +230,8 @@ pub enum Command {
         from: Option<f64>,
     },
 
-    /// Puts back what a command took (its undo); not offered to clients.
-    #[serde(skip)]
+    /// Puts back what a command took (its undo); not offered to clients (`rpc` refuses it), serialized only for a Lemon
+    /// project file's undo history.
     Put(Box<Taken>),
 }
 
@@ -257,7 +257,7 @@ fn middle_c() -> u16 {
 }
 
 /// What a command is about to change, as it was (`Command::Put` puts it back).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Taken {
     /// The project settings commands change.
     Settings(Box<Settings>),
@@ -279,7 +279,7 @@ pub enum Taken {
 
 /// The project settings commands change: the tempo (kept by the app beside the project), swing, main volume and
 /// pitch, the bar and the Song info.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     pub tempo: f64,
     pub swing: Option<u8>,
@@ -319,7 +319,7 @@ impl Settings {
 }
 
 /// The whole project with the rack's own state of it: the tempo, groups, filter, zipped and locked rows and loops.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Side {
     pub project: Project,
     pub tempo: f64,
@@ -331,7 +331,24 @@ pub struct Side {
     pub locked: std::collections::BTreeSet<usize>,
     pub loop_len: std::collections::BTreeMap<usize, u32>,
     /// The mixer's slot names typed in this session (they follow tracks and slots as they move).
+    #[serde(with = "slot_names")]
     pub slot_names: std::collections::HashMap<(u16, u8), String>,
+}
+
+/// `Side::slot_names` as a list of (track, slot, name): JSON keys are text only.
+mod slot_names {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S: Serializer>(m: &HashMap<(u16, u8), String>, s: S) -> Result<S::Ok, S::Error> {
+        let mut v: Vec<(u16, u8, &String)> = m.iter().map(|(&(t, k), n)| (t, k, n)).collect();
+        v.sort();
+        v.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<HashMap<(u16, u8), String>, D::Error> {
+        Ok(Vec::<(u16, u8, String)>::deserialize(d)?.into_iter().map(|(t, k, n)| ((t, k), n)).collect())
+    }
 }
 
 impl Side {

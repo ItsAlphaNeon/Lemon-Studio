@@ -78,7 +78,12 @@ fn commands(params: &Value) -> Result<Vec<Command>, Fail> {
         (None, Some(v)) => Value::Array(vec![v.clone()]),
         _ => return Err(bad("give `commands` (a list) or `command`")),
     };
-    serde_json::from_value(list).map_err(bad)
+    let cmds: Vec<Command> = serde_json::from_value(list).map_err(bad)?;
+    // `put` is how the history puts things back, not a command for clients.
+    if cmds.iter().any(|c| matches!(c, Command::Put(_))) {
+        return Err(bad("unknown op `put`"));
+    }
+    Ok(cmds)
 }
 
 impl App {

@@ -39,6 +39,7 @@ fn count(t: f32) -> f64 {
 /// The shape of one segment: `progress(x)` maps the position 0..1 along it to 0..1 between its two levels. Its
 /// coefficients are worked out once, from the point the segment ends on (and for the smooth mode its neighbours).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Segment {
     mode: AutoMode,
     /// The tension is below 0.
@@ -240,6 +241,7 @@ pub fn tick_step(ppq: u16) -> f64 {
 /// FL's walk along a curve: it keeps its place inside the current segment and moves on by steps of beats, so that a
 /// stair edge that falls exactly on a step lands on the same side as in FL.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Walk {
     /// The point the current segment ends on.
     i: usize,

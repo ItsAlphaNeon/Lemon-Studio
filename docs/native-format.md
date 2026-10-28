@@ -7,13 +7,15 @@ too.
 
 ## What it holds
 
-A zip with three files:
+A zip with these files:
 
 | File | What |
 |---|---|
 | `lemon.json` | `format: "lemon"`, `version` (1), `app` (the version that saved it), `saved` (Unix ms), `snapshot` and `journal` (the names below), `entries` |
 | `project.flp` | The project as it is now, in FL's layout, byte for byte what saving it as a `.flp` writes. Taken out of the zip, FL opens it. |
 | `journal.jsonl` | The project's whole history: the journal's entries ([control-plane.md](control-plane.md) "Journal") from every session it was edited in, oldest first, each session starting with its `session` entry |
+| `ids.json` | Each channel's, pattern's, mixer track's, arrangement's, clip's and slot plugin's id, with what finds the thing again (index, number, place), and the next id to give out |
+| `history.json` | The undo history: each step's name and what it puts back, and how many are done |
 
 A file of a newer `version` is not opened; one without a journal (or with a damaged line in it) opens with no
 history.
@@ -26,14 +28,15 @@ history.
 - **The project can be read back.** What changed, when and by whom (the user, or a client of the control plane by
   name), down to each note added and removed: a client opening the file sees how the project came to be, not only
   what it is.
-- **A base for more:** going back to any earlier point by replaying the journal over the snapshot, undo that survives
-  closing the project, and branches of one project.
+- **Undo goes on past closing.** Opened again, Ctrl+Z takes back the steps made before the save, and redo gives them
+  again, as if the project had never closed. The browser's History lists them.
+- **The same things keep the same ids** from session to session, so the journal and the control plane's clients name
+  them alike over the project's whole life, and an id that is gone is never given to something else.
 
 ## Not yet
 
-- Undo history does not survive closing the project; the journal says what each step did, but steps are not rebuilt
-  from it.
-- Ids (`os_model::Id`) are not stored, so the journal's ids name things only within their own session.
+- A plugin instance an undone step brings back (a deleted channel) starts from the state the step holds, which may be
+  older than the instance's last state in that session.
 - The snapshot is in FL's layout, so it holds only what an FLP holds; what Lemon Studio adds on top (anything not in
   an FLP) is not saved yet.
 - Samples are not inside the file (FILE ▸ Export ▸ Zipped project still gathers them).

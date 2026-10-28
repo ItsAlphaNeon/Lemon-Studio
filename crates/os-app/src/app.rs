@@ -1754,11 +1754,13 @@ impl App {
         // A Lemon project file (`crate::native`): its snapshot is the project, its history goes on in the journal.
         let mut carried = Vec::new();
         let mut stored_ids = None;
+        let mut stored_history = None;
         let result = crate::native::read(&path)
             .map(|(b, extra)| {
                 if let Some(x) = extra {
                     carried = x.journal;
                     stored_ids = x.ids;
+                    stored_history = x.history;
                 }
                 b
             })
@@ -1828,6 +1830,10 @@ impl App {
                 // A Lemon project's things keep the ids they had.
                 if let Some(v) = &stored_ids {
                     crate::control::ids::restore(&mut s.control.ids, &mut s.project, v);
+                }
+                // And its undo history goes on.
+                if let Some(h) = &stored_history {
+                    s.history.restore(h);
                 }
                 s.control.event(&crate::control::By::User, "opened", s.path.as_ref().map_or(String::new(), |p| p.display().to_string()), Vec::new());
                 crate::playlist::load_view(s);
@@ -1964,6 +1970,7 @@ impl App {
         self.journal_saving();
         let history = if crate::native::is_native(&target) { self.journal.project_history() } else { Vec::new() };
         let ids = crate::control::ids::stored(&self.state.control.ids, &self.state.project);
+        let undo = if crate::native::is_native(&target) { self.state.history.stored() } else { None };
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
         crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
         // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
@@ -2035,7 +2042,7 @@ impl App {
         let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
-            .and_then(|b| crate::native::write(&target, &b, &history, &ids));
+            .and_then(|b| crate::native::write(&target, &b, &history, &ids, undo.as_ref()));
         s.message = Some(match &result {
             Ok(_) if lost.is_empty() => format!("Saved {}", target.display()),
             Ok(_) => format!("Saved {} (not stored yet: {})", target.display(), lost.join(", ")),

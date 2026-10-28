@@ -38,7 +38,7 @@ pub const KEY_LO: u16 = 48;
 pub const KEY_HI: u16 = 72;
 
 /// Display filter (§21).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Filter {
     #[default]
     All,
@@ -168,7 +168,7 @@ pub fn key_name(k: u16) -> String {
 }
 
 /// A named set of channels (§21).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Group {
     pub name: String,
     pub members: BTreeSet<usize>,
