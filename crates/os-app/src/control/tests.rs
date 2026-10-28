@@ -70,9 +70,9 @@ fn every_command_undoes_and_redoes() {
         json!({"op": "set_main_pitch", "cents": -300}),
         json!({"op": "set_time_signature", "numerator": 3, "denominator": 4}),
         json!({"op": "set_info", "title": "Song", "author": "Me"}),
-        json!({"op": "set_channel", "channel": kick, "name": "Big kick", "color": "#ff8000", "volume": 0.5, "pan": -0.25, "pitch": 100, "enabled": false, "track": ins2}),
+        json!({"op": "set_channel", "channel": kick, "name": "Big kick", "color": "#ff8000", "volume": 0.5, "pan": -0.25, "pitch": 100, "track": ins2}),
         json!({"op": "load_sample", "channel": clap, "path": "/no/such/folder/snare.wav"}),
-        json!({"op": "set_track", "track": ins1, "name": "Drums", "color": "#102030", "volume": 0.6, "pan": 0.5, "stereo": -0.5, "enabled": false, "polarity": true, "swap": true, "effects_enabled": false}),
+        json!({"op": "set_track", "track": ins1, "name": "Drums", "color": "#102030", "volume": 0.6, "pan": 0.5, "stereo": -0.5, "polarity": true, "swap": true, "effects_enabled": false}),
         json!({"op": "set_send", "from": ins1, "to": ins2, "level": 0.5}),
         json!({"op": "set_send", "from": ins1, "to": master}),
         json!({"op": "set_eq", "track": ins1, "band": 1, "gain": 600, "frequency": 30000}),
@@ -454,9 +454,6 @@ fn ui_round_trip(a: &mut App, name: &str, f: impl FnOnce(&mut App)) {
 fn the_mixer_s_edits_are_undoable() {
     use crate::mixer::{hit, run, MCmd, MHit};
     let mut a = app();
-    ui_round_trip(&mut a, "Mixer track mute", |a| {
-        hit(a, MHit::Led(2));
-    });
     ui_round_trip(&mut a, "Mixer track polarity", |a| {
         hit(a, MHit::Polarity(3));
     });
@@ -818,11 +815,6 @@ fn edits_in_a_plugin_s_window_are_undo_steps() {
 #[test]
 fn interface_edits_are_undo_steps() {
     let mut a = app();
-    ui_round_trip(&mut a, "Channel mute", |a| crate::rack::toggle_mute(&mut a.state, 0));
-    ui_round_trip(&mut a, "Channel solo", |a| crate::rack::solo(&mut a.state, 1));
-    ui_round_trip(&mut a, "Mixer track solo", |a| {
-        crate::mixer::run(a, crate::mixer::MCmd::Solo(1));
-    });
     ui_round_trip(&mut a, "Pattern length", |a| {
         crate::rack::set_len(&mut a.state, Some(8));
         crate::rack::set_len(&mut a.state, Some(12));
@@ -845,4 +837,36 @@ fn interface_edits_are_undo_steps() {
         a.state.playlist.edit.as_mut().unwrap().text = "Lead".into();
         crate::playlist::commit_edit(&mut a.state);
     });
+}
+
+/// Muting and soloing make no undo step, and an undo or redo of another step leaves them as they are (an undo of a
+/// channel's volume does not unmute it), whoever muted: the interface or a client.
+#[test]
+fn mutes_are_no_undo_steps() {
+    let mut a = app();
+    let steps = a.state.history.at();
+    crate::rack::toggle_mute(&mut a.state, 0);
+    crate::rack::solo(&mut a.state, 1);
+    crate::mixer::hit(&mut a, crate::mixer::MHit::Led(2));
+    crate::mixer::run(&mut a, crate::mixer::MCmd::Solo(1));
+    assert_eq!(a.state.history.at(), steps, "no steps");
+    let on = |a: &App| (a.state.project.channels.iter().map(|c| c.enabled).collect::<Vec<_>>(), a.state.project.mixer.iter().map(|m| m.enabled).collect::<Vec<_>>());
+    // A step on channel 0, then a mute of it and of a track: its undo and redo keep both muted.
+    let track = a.state.project.channels[0].mixer_track;
+    a.channel_control(0, crate::history::ChannelControl::Track, |c| c.mixer_track = 5);
+    crate::rack::toggle_mute(&mut a.state, 0);
+    crate::mixer::hit(&mut a, crate::mixer::MHit::Led(3));
+    let now = on(&a);
+    crate::history::undo(&mut a.state).unwrap();
+    assert_eq!(a.state.project.channels[0].mixer_track, track, "undone");
+    assert_eq!(on(&a), now, "the mutes stay through the undo");
+    crate::history::redo(&mut a.state).unwrap();
+    assert_eq!(on(&a), now, "and the redo");
+    // A whole-project step (a channel deleted and brought back) keeps them too.
+    let kick = a.state.project.channels[0].id.0;
+    a.state.control.settle(&mut a.state.project);
+    apply(&mut a.state, &test_client(), None, vec![cmd(json!({"op": "set_channel", "channel": kick, "enabled": true}))]).unwrap();
+    let now = on(&a);
+    crate::history::undo(&mut a.state).unwrap();
+    assert_eq!(on(&a), now, "a client's mute is no edit either");
 }

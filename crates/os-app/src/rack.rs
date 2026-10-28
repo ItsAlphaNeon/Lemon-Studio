@@ -666,10 +666,6 @@ pub fn gradient(s: &mut State) {
 /// with "Restore previous state after solo" on, puts back the states from before the first solo (a solo moved to
 /// another channel keeps them; spec: ui/settings-choices.md "Miscellaneous"). Locked channels keep their state.
 pub fn solo(s: &mut State, r: usize) {
-    crate::control::edit(s, "Channel solo", crate::control::command::Region::Project, |s| solo_now(s, r));
-}
-
-fn solo_now(s: &mut State, r: usize) {
     let locked = s.rack.locked.clone();
     let soloed_now = solo_of(s, r);
     // A solo still in effect (the last solo click's shape, untouched since) keeps the states saved when it started.
@@ -739,12 +735,10 @@ fn solo_of(s: &State, r: usize) -> bool {
 }
 
 pub fn toggle_mute(s: &mut State, r: usize) {
-    crate::control::edit(s, "Channel mute", crate::control::command::Region::Channel(r), |s| {
-        if let Some(c) = s.project.channels.get_mut(r) {
-            c.enabled = !c.enabled;
-            s.piano.dirty = true;
-        }
-    });
+    if let Some(c) = s.project.channels.get_mut(r) {
+        c.enabled = !c.enabled;
+        s.piano.dirty = true;
+    }
 }
 
 pub fn toggle_lock(s: &mut State, r: usize) {
@@ -1614,7 +1608,6 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::RandomColor(_) | RCmd::ColorGradient | RCmd::ColorRandom => Some("Channel color"),
         RCmd::Clone(_) | RCmd::CloneSel => Some("Clone channel"),
         RCmd::MoveSel(_) | RCmd::Sort(_) => Some("Move channel"),
-        RCmd::MuteSel(_) => Some("Channel mute"),
         RCmd::MixerReset(_) | RCmd::AssignFree(_) | RCmd::AssignFreeSel => Some("Channel mixer track"),
         RCmd::DeclickSel(_) => Some("Channel settings"),
         RCmd::AddGroup | RCmd::DeleteGroup | RCmd::GroupSel => Some("Channel group"),

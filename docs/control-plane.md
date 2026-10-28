@@ -115,18 +115,19 @@ default), `velocity` 0..128 (100), `pan` 0..128 (64 = centre).
 
 - Every `apply` is one step in the project's undo history, named after the client ("Beat bot: build a beat"). The
   user can undo it like any other step, and Ctrl+Z after it works as usual.
-- The interface's own edits use the same path: mixer edits (faders dragged or typed, mute, polarity, routing,
+- The interface's own edits use the same path: mixer edits (faders dragged or typed, polarity, routing,
   colours, names, effect slots and their sidechain input, adding, moving and deleting tracks), channels added (the
   plugin picker, F8, ADD, a browser drop), coloured, named, cloned, moved and deleted, FILE ▸ Import ▸ MIDI file into
   the open project, and pattern colours, names, inserting, cloning, moving and deleting are undo steps too, as are the
   tempo, the project settings and plugin parameters, whether Lemon Studio sets them (Type in value, Set..., Paste
   value) or they change in the plugin's own window. Faders and parameters follow "Undo knob tweaks". A change has the
   same step name whichever made it ("Tempo", "Time signature", "Song info", "Plugin parameter").
-- So are the channel's own controls in a plugin window (on/off, volume, panning, pitch, pitch range, mixer track) and
-  its Misc tab, channel mute and solo (the LED, the menu, MIDI), mixer solo, the instrument rack's mixer-track box,
-  the pattern length box, a pattern's time signature, arrangements added, cloned and deleted, arrangement, pattern
-  and effect-slot names, a clip's random colour and "Remove all audio editors". A drag or a run of wheel notches on
-  one box or knob is one step.
+- So are the channel's own controls in a plugin window (volume, panning, pitch, pitch range, mixer track) and its
+  Misc tab, the instrument rack's mixer-track box, the pattern length box, a pattern's time signature, arrangements
+  added, cloned and deleted, arrangement, pattern and effect-slot names, a clip's random colour and "Remove all audio
+  editors". A drag or a run of wheel notches on one box or knob is one step.
+- Muting and soloing a channel or a mixer track are no undo steps, whoever does them (a client's `enabled` too), and
+  an undo or redo of another step leaves every channel and track muted or not as it is.
 - An undone channel or effect keeps its plugin instance's state: a redo hosts it again from that state.
 - A proposal is applied to see what it changes and taken back at once; with a window the app asks the user to Apply
   or Discard it. Accepted, it is one undo step named after its client.
