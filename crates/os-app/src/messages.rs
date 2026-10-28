@@ -50,6 +50,11 @@ pub const PROJECT_DATA_SIZE: Message = Message {
     kind: Kind::Notice,
 };
 
+/// The mixer's External input question (`mixer::ask_external`). Not listed: Remember my choice keeps its answer,
+/// either one, in `mixer::EXT_INPUT_ANSWER` instead (spec: audio/track-io.md §2.3).
+pub const EXT_INPUT: Message =
+    Message { check: Check { key: "msg_ext_input", label: "External input", default: true }, group: "Audio", kind: Kind::Question };
+
 /// Every message that can be skipped.
 pub const MESSAGES: &[&Message] = &[&DELETE_CHANNEL, &DELETE_PATTERN, &PROJECT_DATA_SIZE];
 
