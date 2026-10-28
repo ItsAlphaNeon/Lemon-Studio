@@ -429,11 +429,11 @@ pub const REC_SOURCES: [(&str, &str); 6] = [
 pub const MONITOR_MODES: [(u8, &str); 3] = [(os_model::MONITOR_OFF, "Off"), (os_model::MONITOR_ARMED, "When armed"), (os_model::MONITOR_ON, "On")];
 
 /// The device's inputs as the input menu lists them (§2.1): its stereo pairs, then each input alone, each with its
-/// stored number. None unless an ASIO driver opened inputs.
-pub fn input_choices(d: Option<&crate::device::DeviceInfo>) -> (Vec<(i32, String)>, Vec<(i32, String)>) {
-    let Some(d) = d.filter(|d| d.host == crate::device::ASIO && d.inputs > 0) else { return (Vec::new(), Vec::new()) };
-    let n = usize::from(d.inputs);
-    let name = |c: usize| d.in_names.get(c).cloned().unwrap_or_else(|| format!("In {}", c + 1));
+/// stored number (`device::input_source`: an ASIO driver's, else the system's input device's).
+pub fn input_choices(d: Option<&crate::device::InputSource>) -> (Vec<(i32, String)>, Vec<(i32, String)>) {
+    let Some(d) = d.filter(|d| !d.names.is_empty()) else { return (Vec::new(), Vec::new()) };
+    let n = d.names.len();
+    let name = |c: usize| d.names[c].clone();
     let pairs: Vec<(i32, String)> = (0..n / 2).map(|k| (k as i32, format!("{} - {}", name(2 * k), name(2 * k + 1)))).collect();
     let p = pairs.len() as i32;
     (pairs, (0..n).map(|c| (p + c as i32, name(c))).collect())
@@ -466,7 +466,7 @@ fn choice_label(v: i32, choices: &[(i32, String)]) -> String {
 
 /// The input combo's text for track `n`, and whether the device has inputs to choose from.
 pub fn input_label(s: &State, n: u16) -> (String, bool) {
-    let (pairs, monos) = input_choices(crate::device::last().as_ref());
+    let (pairs, monos) = input_choices(crate::device::input_source().as_ref());
     let v = track(s, n).map_or(-1, |m| m.audio_in);
     let all: Vec<(i32, String)> = pairs.into_iter().chain(monos).collect();
     (choice_label(v, &all), !all.is_empty())
@@ -481,7 +481,7 @@ pub fn output_label(s: &State, n: u16) -> String {
 /// The input menu of the current track (§1.2): `<driver> - stereo` and its pairs, `<driver> - mono` and the inputs,
 /// then "(none)". `None` when the device has no inputs.
 fn input_menu(s: &State, x: f32, y: f32) -> Option<Popup> {
-    let d = crate::device::last();
+    let d = crate::device::input_source();
     let (pairs, monos) = input_choices(d.as_ref());
     let driver = d.map(|d| d.name).unwrap_or_default();
     if pairs.is_empty() && monos.is_empty() {
@@ -1875,13 +1875,16 @@ mod tests {
     #[test]
     fn device_inputs_and_outputs_are_numbered_as_stored() {
         let d = asio(3, 5);
-        let (pairs, monos) = input_choices(Some(&d));
+        let (pairs, monos) = input_choices(crate::device::InputSource::of_asio(&d).as_ref());
         assert_eq!(pairs, [(0, "Mic - Guitar".to_string())]);
         assert_eq!(monos, [(1, "Mic".to_string()), (2, "Guitar".to_string()), (3, "In 3".to_string())]);
         assert_eq!(output_choices(Some(&d)), [(0, "Out 1 - Out 2".to_string()), (1, "Out 3 - Out 4".to_string())], "a last odd output is not offered");
         assert_eq!(output_choices(Some(&asio(0, 1))), [(0, "Out 1".to_string())]);
         let wasapi = crate::device::DeviceInfo { host: "WASAPI", name: "Speakers".into(), ..asio(0, 2) };
-        assert_eq!(input_choices(Some(&wasapi)), (vec![], vec![]), "inputs only under ASIO");
+        assert_eq!(crate::device::InputSource::of_asio(&wasapi), None, "an ASIO driver's inputs only under ASIO");
+        let mic = crate::device::InputSource::of_system("Microphone", 2);
+        assert_eq!(input_choices(Some(&mic)), (vec![(0, "Left - Right".to_string())], vec![(1, "Left".to_string()), (2, "Right".to_string())]), "the system's input device");
+        assert_eq!(input_choices(Some(&crate::device::InputSource::of_system("Headset", 1))), (vec![], vec![(0, "In 1".to_string())]));
         assert_eq!(output_choices(Some(&wasapi)), [(0, "Speakers".to_string())]);
         assert_eq!(choice_label(-1, &pairs), "(none)");
         assert_eq!(choice_label(4, &monos), "(not available)");

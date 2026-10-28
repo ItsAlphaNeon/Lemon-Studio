@@ -1742,6 +1742,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 device.close_idle();
             }
         }
+        // The system's input device, with the output, while a track has an input chosen.
+        if let Some(e) = device.sync_inputs() {
+            report(&shared, e);
+        }
         if let Some((_, tries)) = open_asio.filter(|&(at, _)| !closed && lost.is_none() && Instant::now() >= at) {
             open_asio = None;
             if crate::audio_cfg::AudioCfg::current().asio_driver().is_some() {
@@ -1916,7 +1920,7 @@ impl Session {
         let mut e = engine(project, library, rate, mode, inst, kind != Kind::Preview);
         // The device's output pairs, and its inputs for the mixer tracks that hear them (a preview hears none; spec:
         // audio/track-io.md §2.2).
-        let input = (kind != Kind::Preview).then(|| crate::device::input_reader((f64::from(rate) * MARGIN_MAX) as u64)).flatten();
+        let input = (kind != Kind::Preview).then(|| crate::device::input_reader((f64::from(rate) * MARGIN_MAX) as u64));
         e.set_device(info.pairs(), input.map(|i| Box::new(i) as Box<dyn os_engine::DeviceInput>));
         // Playback loops: a pattern on its bar line, the song at its end (back to the start).
         e.set_looping(song);

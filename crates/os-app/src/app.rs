@@ -2512,7 +2512,10 @@ impl App {
         // Open plugin editors are processed while nothing plays: notes from an instrument's own keyboard sound, and an
         // effect's own playback (Tesla) too. So is the mixer while a track monitors its input (spec:
         // audio/track-io.md §1 "Signal": monitoring works while stopped).
-        let monitoring = self.state.project.mixer.iter().any(|m| m.monitored()) && crate::device::last().is_some_and(|d| d.inputs > 0);
+        // The system's input device opens with the output only while a track with an input chosen hears it or is
+        // armed, so the microphone is not held (and shown in use) the rest of the time.
+        crate::device::want_inputs(self.state.project.mixer.iter().any(|m| m.audio_in >= 0 && (m.monitored() || m.armed)));
+        let monitoring = self.state.project.mixer.iter().any(|m| m.monitored()) && crate::device::input_source().is_some();
         let listen = self.plugins.editor_open() || monitoring;
         if listen {
             self.sync_live();

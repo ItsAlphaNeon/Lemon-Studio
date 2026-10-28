@@ -36,6 +36,7 @@ mod asio;
 mod wasapi;
 #[cfg(target_os = "linux")]
 mod sound_server;
+mod system_input;
 
 /// Tests leave the sound server's cards alone, but for the one that checks they are given back.
 static HEAL_IN_TESTS: AtomicBool = AtomicBool::new(false);
@@ -230,21 +231,23 @@ impl Mix {
     }
 }
 
-/// The device's inputs as they come in (an ASIO driver's: spec audio/track-io.md §2.2), for every stream whose mixer
-/// tracks hear them: the driver's callback writes, and each stream reads at its own place (`input_reader`). Neither
-/// locks; a reader that falls a ring behind skips ahead.
+/// The device's inputs as they come in (an ASIO driver's, else the system's input device: spec audio/track-io.md
+/// §2.2), for every stream whose mixer tracks hear them: the input's callback writes, and each stream reads at its own
+/// place (`input_reader`). Neither locks; a reader that falls behind skips ahead.
 struct Inputs {
     samples: Box<[AtomicU32]>,
-    /// Inputs in a frame of the stream open (0: none), its block length, and frames written since the start.
+    /// Inputs in a frame of the stream open (0: none), its longest block, and frames written since the start.
     channels: AtomicUsize,
     block: AtomicUsize,
     written: AtomicU64,
+    /// Counts the streams opened: a reader of an earlier one is placed again.
+    opened: AtomicU64,
 }
 
 /// Frames the input ring holds: over a second at 48 kHz.
 const INPUT_FRAMES: usize = 1 << 16;
 /// Inputs heard at most (`asio::MAX_INPUTS`).
-const INPUT_CHANNELS: usize = 8;
+pub(crate) const INPUT_CHANNELS: usize = 8;
 
 fn input_ring() -> &'static Inputs {
     static I: OnceLock<Inputs> = OnceLock::new();
@@ -253,20 +256,21 @@ fn input_ring() -> &'static Inputs {
         channels: AtomicUsize::new(0),
         block: AtomicUsize::new(0),
         written: AtomicU64::new(0),
+        opened: AtomicU64::new(0),
     })
 }
 
 impl Inputs {
     /// A stream with `channels` inputs and blocks of `block` frames opened (0: closed); readers start again.
-    #[cfg_attr(not(windows), allow(dead_code))]
     fn open(&self, channels: usize, block: usize) {
-        self.channels.store(channels.min(INPUT_CHANNELS), Ordering::Release);
         self.block.store(block, Ordering::Relaxed);
+        self.opened.fetch_add(1, Ordering::AcqRel);
+        self.channels.store(channels.min(INPUT_CHANNELS), Ordering::Release);
     }
 
-    /// The driver's callback: a block of `frames` frames, `at(channel, frame)` an input's sample.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// The input's callback: a block of `frames` frames, `at(channel, frame)` an input's sample.
     fn push(&self, frames: usize, at: impl Fn(usize, usize) -> f32) {
+        self.block.fetch_max(frames, Ordering::Relaxed);
         let ch = self.channels.load(Ordering::Relaxed);
         let w = self.written.load(Ordering::Relaxed);
         for f in 0..frames {
@@ -281,38 +285,48 @@ impl Inputs {
 
 /// One stream's place in the device's inputs (`os_engine::DeviceInput`).
 pub(crate) struct InputReader {
-    /// The next frame to read (`None`: not placed yet).
+    /// The next frame to read (`None`: not placed yet), in the input stream opened `opened`.
     at: Option<u64>,
-    channels: usize,
+    opened: u64,
     /// The most its stream keeps queued beyond a device block, frames (the render-ahead margin at its longest).
     margin: u64,
 }
 
 /// A reader of the device's inputs from now on, for a stream that keeps at most `margin` frames queued beyond a device
-/// block: `None` when the open device has none.
-pub(crate) fn input_reader(margin: u64) -> Option<InputReader> {
-    let channels = input_ring().channels.load(Ordering::Acquire);
-    (channels > 0).then_some(InputReader { at: None, channels, margin })
+/// block. It has the inputs of whatever input stream is open (none while none is: a system input opens after the
+/// output, once a track hears it).
+pub(crate) fn input_reader(margin: u64) -> InputReader {
+    InputReader { at: None, opened: 0, margin }
 }
 
 impl os_engine::DeviceInput for InputReader {
     fn channels(&self) -> usize {
-        self.channels
+        input_ring().channels.load(Ordering::Acquire)
     }
 
     /// The next frames as they came in. A stream renders ahead of the device, a tick at a time, from one tick to a
     /// block, its margin and a tick ahead of the newest input, and one more block when the driver asks for two back to
     /// back. So the reader is placed that far behind the newest input on its first read and reads on from there, every
     /// frame there when it is read. Before that much has come in it reads silence. One that caught up with the newest
-    /// input (the device stalled) or fell far behind is placed again: a jump, heard once.
+    /// input (the device stalled, or a system input's clock runs slower than the output's) or fell twice that far
+    /// behind (it runs faster) is placed again: a jump, heard once.
     fn read(&mut self, out: &mut [f32]) {
         let i = input_ring();
-        let ch = self.channels;
-        let frames = (out.len() / ch.max(1)) as u64;
+        let opened = i.opened.load(Ordering::Acquire);
+        let ch = i.channels.load(Ordering::Acquire);
+        if ch == 0 || opened != self.opened {
+            (self.at, self.opened) = (None, opened);
+        }
+        if ch == 0 || out.len() % ch != 0 {
+            out.fill(0.0);
+            return;
+        }
+        let frames = (out.len() / ch) as u64;
         let written = i.written.load(Ordering::Acquire);
         let behind = 2 * i.block.load(Ordering::Relaxed).max(64) as u64 + self.margin + frames;
+        let far = (2 * behind).min(INPUT_FRAMES as u64 / 2);
         let at = match self.at {
-            Some(at) if at + frames <= written && written - at <= INPUT_FRAMES as u64 / 2 => Some(at),
+            Some(at) if at + frames <= written && written - at <= far => Some(at),
             _ => written.checked_sub(behind),
         };
         let Some(at) = at else {
@@ -437,6 +451,52 @@ pub(crate) struct Open {
     /// The stream reported an error it does not recover from (the device went away), and what it said.
     failed: Arc<AtomicBool>,
     fault: Arc<Mutex<Option<String>>>,
+    /// The system's input device, open while a track hears its input or is armed (`OutputDevice::sync_inputs`); `true` once
+    /// it would not open (or stopped), until the output opens again or no track wants it.
+    input: Option<system_input::SystemInput>,
+    input_failed: bool,
+}
+
+/// A mixer track hears its input or is armed (`want_inputs`).
+static INPUT_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a mixer track with an input chosen hears it or is armed: the system's input device is open with the output
+/// only then (`OutputDevice::sync_inputs`).
+pub fn want_inputs(on: bool) {
+    INPUT_WANTED.store(on, Ordering::Relaxed);
+}
+
+/// The inputs the mixer tracks can hear (spec: audio/track-io.md §2.1): the device's and its names for them, one per
+/// input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputSource {
+    pub name: String,
+    pub names: Vec<String>,
+}
+
+impl InputSource {
+    /// An ASIO driver's inputs (`None` when it opened none).
+    pub fn of_asio(d: &DeviceInfo) -> Option<InputSource> {
+        (d.host == ASIO && d.inputs > 0).then(|| {
+            let names = (0..usize::from(d.inputs)).map(|c| d.in_names.get(c).cloned().unwrap_or_else(|| format!("In {}", c + 1))).collect();
+            InputSource { name: d.name.clone(), names }
+        })
+    }
+
+    /// The system's input device with `channels` inputs: a stereo one's are its left and right.
+    pub fn of_system(name: &str, channels: usize) -> InputSource {
+        let names = if channels == 2 { vec!["Left".into(), "Right".into()] } else { (1..=channels).map(|c| format!("In {c}")).collect() };
+        InputSource { name: name.to_string(), names }
+    }
+}
+
+/// The inputs the mixer offers: an ASIO driver's while one is open, else the system's default input device's (its
+/// stream opens once a track hears one).
+pub fn input_source() -> Option<InputSource> {
+    match last() {
+        Some(d) if d.host == ASIO => InputSource::of_asio(&d),
+        _ => system_input::info().map(|i| InputSource::of_system(&i.name, i.channels)),
+    }
 }
 
 /// The one output stream (closed until first needed). Dropped (the audio thread ends as the app exits), it lets go of
@@ -535,6 +595,35 @@ impl OutputDevice {
         let o = self.open.as_ref().filter(|o| o.failed.load(Ordering::Acquire))?;
         let why = o.fault.lock().ok().and_then(|f| f.clone()).unwrap_or_else(|| "it stopped".into());
         Some((o.info.name.clone(), why))
+    }
+
+    /// Opens the system's input device with the output while a track hears its input or is armed, and closes it when
+    /// none does (an ASIO driver's inputs open with it). What went wrong opening it, once.
+    pub(crate) fn sync_inputs(&mut self) -> Option<String> {
+        let want = INPUT_WANTED.load(Ordering::Relaxed);
+        let o = self.open.as_mut().filter(|o| o.info.host != ASIO)?;
+        if o.input.as_ref().is_some_and(|i| i.failed()) {
+            o.input = None;
+            o.input_failed = true;
+            return Some("The audio input stopped".into());
+        }
+        if !want {
+            (o.input, o.input_failed) = (None, false);
+            return None;
+        }
+        if o.input.is_some() || o.input_failed {
+            return None;
+        }
+        match system_input::open(&AudioCfg::current(), o.info.rate, o.info.fixed) {
+            Ok(i) => {
+                o.input = Some(i);
+                None
+            }
+            Err(e) => {
+                o.input_failed = true;
+                Some(format!("Couldn't open the audio input: {e}"))
+            }
+        }
     }
 
     /// The device's own dropouts since the last call.
@@ -661,7 +750,7 @@ fn wasapi_open(w: wasapi::Opened, host: &'static str, inbox: Arc<Queue>, outbox:
     let i = w.info;
     let fixed = Some(if host == WASAPI_EXCLUSIVE { i.period } else { i.buffer });
     let info = DeviceInfo { host, name: i.name, rate: i.rate, fixed, buffers: Some(i.range), channels: i.channels, inputs: 0, out_names: Vec::new(), in_names: Vec::new(), input_latency: None, rates: Vec::new(), sizes: Vec::new(), latency: i.latency, instead: None };
-    Open { _stream: Stream::Wasapi(w.out), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault }
+    Open { _stream: Stream::Wasapi(w.out), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault, input: None, input_failed: false }
 }
 
 /// The two queues a new stream's callback takes its sources from and hands them back on, and where its errors go.
@@ -677,7 +766,7 @@ fn open_asio(name: &str, cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open,
     let a = asio::open(name, cfg.rate, cfg.buffer, Mix::new(inbox.clone(), outbox.clone()), errors.clone())?;
     let (fixed, buffers) = (Some(a.frames), Some(a.buffers));
     let info = DeviceInfo { host: ASIO, name: name.to_string(), rate: a.rate, fixed, buffers, channels: a.channels, inputs: a.inputs, out_names: a.out_names, in_names: a.in_names, input_latency: a.input_latency, rates: a.rates, sizes: a.sizes, latency: a.latency, instead: None };
-    Ok(Open { _stream: Stream::Asio(a.out), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault })
+    Ok(Open { _stream: Stream::Asio(a.out), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault, input: None, input_failed: false })
 }
 
 /// Opens a Windows (ALSA, Core Audio) device's stream for `cfg`: its device, rate and buffer length, else the
@@ -702,7 +791,7 @@ fn open_system(cfg: &AudioCfg, xruns: &Arc<AtomicU64>) -> Result<Open, String> {
     let stream = stream?;
     stream.play().map_err(|e| e.to_string())?;
     let info = DeviceInfo { host, name: out.name, rate: config.sample_rate, fixed, buffers, channels: config.channels, inputs: 0, out_names: Vec::new(), in_names: Vec::new(), input_latency: None, rates: Vec::new(), sizes: Vec::new(), latency: None, instead: None };
-    Ok(Open { _stream: Stream::Cpal(stream), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault })
+    Ok(Open { _stream: Stream::Cpal(stream), inbox, outbox, info, note: None, failed: errors.failed, fault: errors.fault, input: None, input_failed: false })
 }
 
 /// Where a stream's errors go (its error callback, which runs off the audio callback).
@@ -896,7 +985,7 @@ mod tests {
         let (block, margin, tick) = (512u64, 264u64, 197usize);
         let ring = input_ring();
         ring.open(1, block as usize);
-        let mut reader = input_reader(margin).expect("inputs open");
+        let mut reader = input_reader(margin);
         let (mut played, mut rendered, mut heard) = (0u64, 0u64, Vec::new());
         let mut buf = vec![0.0; tick];
         for k in 0..400u64 {
