@@ -11,6 +11,7 @@
 //!
 // spec: plugins/fruity-flanger.md, plugins/lemon-flanger.md
 
+use std::f64::consts::TAU;
 use std::sync::OnceLock;
 
 use super::Effect;
@@ -197,8 +198,9 @@ pub fn waves() -> &'static [[i32; TABLE]; 2] {
             w[0][i] = (d * 32767.0) as i32;
             d += if (1024..3072).contains(&i) { -1.0 / 1024.0 } else { 1.0 / 1024.0 };
         }
+        // The true 2 pi (the original's is a hair off it).
         for i in 0..TABLE {
-            w[1][i] = (((i as f64 * 6.283185307) / 4096.0).sin() * 32767.0) as i32;
+            w[1][i] = (((i as f64 * TAU) / 4096.0).sin() * 32767.0) as i32;
         }
         w
     })
