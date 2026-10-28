@@ -68,7 +68,9 @@ own content. Side branches are named `cutting-edge-<topic>`.
   app's own knobs do; the close shortcut closes them. In the Lemon skin their window is a card like the channel
   rack's, in the theme's colours: rounded, the editor edge to edge under one title row (menu arrow, name, page tabs,
   Presets, close). FL's frame is gone there: no minimize button, no gear strip (the channel settings window has those
-  controls), no frame around the editor. Third-party plugins keep windows of their own.
+  controls), no frame around the editor. They open at once: until the editor draws its first frame, the window shows
+  how it looked when it last closed, a little dimmed (kept per plugin in the user folder's `editor-looks`, so after a
+  restart too). Third-party plugins keep windows of their own.
   `LEMONSTUDIO_PLUGIN_WINDOWS=1` gives the built-in ones their own windows again.
 - **Third-party plugin windows under Hyprland.** They drag by their own title bar (Hyprland ignores the X11 move
   request) and have no compositor border, shadow or move animation.
