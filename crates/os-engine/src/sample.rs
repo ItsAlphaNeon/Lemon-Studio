@@ -119,6 +119,24 @@ pub fn load(path: &Path) -> Result<Sample, SampleError> {
     decode(bytes, ext).map_err(decode_err)
 }
 
+/// The frames of a WavPack packet whose blocks all have magnitude 0 (flag bits 18 to 22): digital silence, which
+/// the WavPack decoder refuses in some encoders' files, kept as that many frames of silence. `None` for any other.
+fn wavpack_quiet_frames(p: &[u8]) -> Option<usize> {
+    let (mut pos, mut frames) = (0, None);
+    while pos < p.len() {
+        if p.get(pos..pos + 4)? != b"wvpk" {
+            return None;
+        }
+        let word = |at: usize| p.get(pos + at..pos + at + 4).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes);
+        if (word(24)? >> 18) & 0x1f != 0 {
+            return None;
+        }
+        frames = Some(word(20)? as usize);
+        pos += word(4)? as usize + 8;
+    }
+    frames.filter(|&n| n > 0)
+}
+
 /// A WavPack file whose first blocks hold no audio (a block carrying only the original RIFF header, its flags all 0,
 /// as in many sample packs): the WavPack reader takes the stream's rate, channels and depth from the first block, so
 /// those blocks are dropped and the rest decoded. `None` for any other file.
@@ -299,6 +317,7 @@ fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<Sample, String> {
         .and_then(|p| p.audio())
         .ok_or("no audio codec parameters")?;
     let mp3 = format.format_info().short_name == "mp3";
+    let wavpack = format.format_info().short_name == "wavpack";
     let mut decoder = codecs()
         .make_audio_decoder(params, &AudioDecoderOptions::default().gapless(!mp3))
         .map_err(|e| e.to_string())?;
@@ -319,7 +338,13 @@ fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<Sample, String> {
         }
         let audio = match decoder.decode(&packet) {
             Ok(a) => a,
-            Err(SymError::DecodeError(_)) => continue,
+            Err(SymError::DecodeError(_)) => {
+                if let Some(n) = wavpack.then(|| wavpack_quiet_frames(&packet.data)).flatten() {
+                    left.resize(left.len() + n, 0.0);
+                    right.resize(right.len() + n, 0.0);
+                }
+                continue;
+            }
             Err(e) => return Err(e.to_string()),
         };
         rate = audio.spec().rate();
@@ -712,6 +737,17 @@ mod tests {
         let crossings = s.left.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
         assert!((43..=45).contains(&crossings), "{crossings} upward zero crossings");
         assert_eq!(length(&path), Some((4410, 44100)));
+    }
+
+    /// `tests/data/quiet_tail.wv`: 0.1 s of a 441 Hz sine at 44.1 kHz, mono 16-bit (made with ffmpeg), then a block of
+    /// 0.1 s of silence (magnitude 0) that the WavPack decoder refuses: it stays, as silence.
+    #[test]
+    fn wavpack_silence_the_decoder_refuses_stays() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/quiet_tail.wv");
+        let s = load(&path).expect("decodes");
+        assert_eq!((s.frames(), s.rate), (8820, 44100));
+        assert!(s.left[..4410].iter().any(|v| v.abs() > 0.1));
+        assert!(s.left[4410..].iter().chain(&s.right[4410..]).all(|&v| v == 0.0));
     }
 
     /// `tests/data/click_sine.mp3` (made with ffmpeg + LAME, 64 kbit/s mono, ID3v2 tag, LAME info frame): 0.3 s at
