@@ -22,4 +22,6 @@ lemon-sampler = { path = "../../plugins/lemon-sampler", features = ["linked"] }
 lemon-limiter = { path = "../../plugins/lemon-limiter", features = ["linked"] }
 # The built-in Lemon Peak Controller, linked: controller outputs as MIDI.
 lemon-peak-controller = { path = "../../plugins/lemon-peak-controller", features = ["linked"] }
+# The built-in Lemon Formula Controller, linked: a controller output worked out from the song position.
+lemon-formula-controller = { path = "../../plugins/lemon-formula-controller", features = ["linked"] }
 lemon-small-fx = { path = "../../plugins/lemon-small-fx" }

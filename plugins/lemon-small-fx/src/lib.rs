@@ -4,11 +4,12 @@
 
 //! Lemon Studio's small effects as VST3 / CLAP plugins (nih-plug): Lemon Soft Clipper, Lemon Fast Distortion, Lemon
 //! Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus, Lemon Stereo Shaper, Lemon Filter, Lemon
-//! Flanger and Lemon Phaser (and Lemon Peak Controller's settings and editor, [`peak_controller`]). Each is a handful
-//! of settings over a sound of `os_engine::effects`, so they share everything but their description: the plugin, its
-//! parameters and saved state ([`params`]), the Pith editor ([`editor`], [`view`]). A description ([`Spec`]) gives the
-//! settings, their value texts, the editor's cards and controls, and the sound. The plugin modules
-//! (`plugins/lemon-soft-clipper` and the others) export one each.
+//! Flanger and Lemon Phaser (and the settings and editors of the controllers, Lemon Peak Controller's
+//! [`peak_controller`] and Lemon Formula Controller's [`formula_controller`], with the ticks they share, [`ticks`]).
+//! Each is a handful of settings over a sound of `os_engine::effects`, so they share everything but their
+//! description: the plugin, its parameters and saved state ([`params`]), the Pith editor ([`editor`], [`view`]). A
+//! description ([`Spec`]) gives the settings, their value texts, the editor's cards and controls, and the sound. The
+//! plugin modules (`plugins/lemon-soft-clipper` and the others) export one each.
 //!
 // spec: plugins/lemon-small-effects.md (§1 how they are built, §5 parameters and state), the plugin pages
 // (plugins/lemon-soft-clipper.md, lemon-fast-distortion.md, lemon-balance.md, lemon-stereo-enhancer.md,
@@ -22,12 +23,14 @@ pub mod editor;
 pub mod fast_distortion;
 pub mod filter;
 pub mod flanger;
+pub mod formula_controller;
 pub mod params;
 pub mod peak_controller;
 pub mod phaser;
 pub mod soft_clipper;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
+pub mod ticks;
 pub mod transient_processor;
 pub mod view;
 
@@ -75,6 +78,10 @@ pub enum Control {
     /// A tile (Lemon Chorus's grid): its own card over `x0..x1`, `y0..y1`, a small dial at the left, the caption in a
     /// field at the top right and the value text under it.
     Tile { id: &'static str, x0: f32, y0: f32, x1: f32, y1: f32, caption: &'static str },
+    /// A line of text kept in the saved state, not a parameter (Lemon Formula Controller's formula): a field over
+    /// `x0..x1`, `y0..y1` showing the text, a status line under it. `show` reads the text and the status from the saved
+    /// state, `edit` gives the saved state with a typed text. A click opens the type-in box on it.
+    Text { id: &'static str, x0: f32, y0: f32, x1: f32, y1: f32, show: fn(&[u8]) -> (String, String), edit: fn(&[u8], &str) -> Vec<u8> },
 }
 
 impl Control {
@@ -84,7 +91,8 @@ impl Control {
             | Control::Choice { id, .. }
             | Control::Fader { id, .. }
             | Control::Shape { id, .. }
-            | Control::Tile { id, .. } => id,
+            | Control::Tile { id, .. }
+            | Control::Text { id, .. } => id,
         }
     }
 }
@@ -318,7 +326,7 @@ impl<K: Kind> Vst3Plugin for SmallFx<K> {
 mod tests {
     use super::*;
 
-    pub const SPECS: [&Spec; 11] = [
+    pub const SPECS: [&Spec; 12] = [
         soft_clipper::SPEC,
         fast_distortion::SPEC,
         balance::SPEC,
@@ -330,6 +338,7 @@ mod tests {
         flanger::SPEC,
         phaser::SPEC,
         peak_controller::SPEC,
+        formula_controller::SPEC,
     ];
 
     /// Every effect: ids unique, starts inside the ranges, a control per setting, the plugin ids distinct.

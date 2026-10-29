@@ -139,6 +139,8 @@ pub(super) struct MixCx<'a> {
     pub wait: Duration,
     /// While the song plays: where armed tracks record, and the song tick being mixed (spec: audio/track-io.md §2.5).
     pub record: Option<(&'a dyn super::RecordTap, u64)>,
+    /// The song tick being mixed and the ticks per beat (controllers that work on the song's ticks).
+    pub tick: (u64, u16),
 }
 
 // SAFETY: `keys` is shared under the graph's rule (see `Keys`); the rest is read only (a record tap takes each track's

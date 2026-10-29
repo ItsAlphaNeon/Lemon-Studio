@@ -1950,6 +1950,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-formula-controller"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-engine",
+ "os-plugkit",
+]
+
+[[package]]
 name = "lemon-limiter"
 version = "0.0.1"
 dependencies = [
@@ -2886,6 +2896,7 @@ dependencies = [
  "lemon-fast-distortion",
  "lemon-filter",
  "lemon-flanger",
+ "lemon-formula-controller",
  "lemon-limiter",
  "lemon-parametric-eq-2",
  "lemon-peak-controller",
@@ -2941,6 +2952,7 @@ name = "os-clap"
 version = "0.0.1"
 dependencies = [
  "clap-sys 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lemon-formula-controller",
  "lemon-limiter",
  "lemon-parametric-eq-2",
  "lemon-peak-controller",

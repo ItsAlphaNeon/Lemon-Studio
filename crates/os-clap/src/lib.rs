@@ -2385,6 +2385,44 @@ mod tests {
         assert!(worst < 1e-6, "{worst}");
     }
 
+    /// Lemon Formula Controller hosted as the engine hosts a mixer slot (a call per tick, the song's transport): after
+    /// each tick its output is what the engine's own Fruity Formula Controller gives for the next tick's start, to the
+    /// 21 bits it travels in; a formula that does not compile sends nothing.
+    #[test]
+    fn hosted_formula_controller_matches_the_engines() {
+        use os_engine::effects::formula_ctrl::{Core, Settings};
+        use os_engine::HostedEffect as _;
+        let entry = &lemon_formula_controller::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Formula Controller.clap")) }.expect("linked formula controller");
+        let spec = lemon_small_fx::formula_controller::SPEC;
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 44100));
+        let s = Settings { knobs: [16384, 49152, 0], formula: "a+Sin(SongTime*Pi/2)*b*0.5+Frac(SongTime)*0.1".into(), ..Settings::default() };
+        assert!(os_host::Plugin::load_state(&mut p, &lemon_small_fx::params::plugin_state_from_fl(spec, &s.to_state())));
+        let mut own = Core::new(s);
+        let (tempo, spt) = (130.0, 44100.0 * 60.0 / (130.0 * 96.0));
+        let mut worst = 0.0f64;
+        for j in 0..400u64 {
+            let (a, b) = ((j as f64 * spt).round() as u64, ((j + 1) as f64 * spt).round() as u64);
+            let (mut l, mut r) = (vec![0.1f32; (b - a) as usize], vec![0.1f32; (b - a) as usize]);
+            p.transport_fx(&os_engine::TransportInfo { playing: true, tempo, frame: a, beats: j as f64 / 96.0, bar_start: 0.0, bar: 0, numerator: 4, denominator: 4, looping: None });
+            p.process_fx(44100, &mut l, &mut r);
+            own.advance((j + 1) as f64 / 96.0, tempo);
+            let got = f64::from(p.control_fx(0).expect("an output"));
+            worst = worst.max((got - own.output().unwrap()).abs());
+            assert_eq!(l[0], 0.1, "the sound passes through");
+        }
+        assert!(worst < 1e-6, "{worst}");
+        let bad = Settings { formula: "a*".into(), ..Settings::default() };
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 44100));
+        assert!(os_host::Plugin::load_state(&mut p, &lemon_small_fx::params::plugin_state_from_fl(spec, &bad.to_state())));
+        let (mut l, mut r) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+        p.transport_fx(&os_engine::TransportInfo { playing: true, tempo, frame: 0, beats: 0.0, bar_start: 0.0, bar: 0, numerator: 4, denominator: 4, looping: None });
+        p.process_fx(44100, &mut l, &mut r);
+        assert_eq!(p.control_fx(0), None);
+    }
+
     /// The UI locks an instance only when it has work (spec: audio/implementing.md "Playing live"): host edits waiting
     /// for a flush, a stream at another rate and the plugin's own requests raise its attention count; an idle with
     /// nothing left to do leaves it alone, so a quiet instance is not locked again and again.
