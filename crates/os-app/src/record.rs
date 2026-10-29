@@ -213,6 +213,11 @@ impl Rec {
     pub fn recording(&self) -> bool {
         self.take.is_some()
     }
+
+    /// Notes are held for the take (the piano roll draws them growing).
+    pub fn holding(&self) -> bool {
+        self.take.is_some() && !self.held.is_empty()
+    }
 }
 
 /// The main snap step that quantizing rounds to; None for Line, Cell and (none), which leave times as played.
@@ -580,26 +585,20 @@ impl App {
 
     /// The current pattern's tick at playback tick `t`: the tick itself in PAT mode; in SONG mode where a clip of the
     /// pattern plays there. Past the end of the take's clip that clip is made longer (to the end of `t`'s bar); with
-    /// no clip, one is placed from the start of that bar on the first free track (spec §2).
+    /// no clip, a whole-pattern clip just before `t` becomes the take's and grows, else one is placed from the start
+    /// of that bar on the first free track (spec §2).
     fn rec_pattern_tick(&mut self, t: f64, song: bool) -> Option<f64> {
         if !song {
             return Some(t);
         }
         let s = &mut self.state;
+        if let Some((p, _)) = grow_take_clip(s, t) {
+            return Some(p);
+        }
         let bar = s.project.bar_ticks().max(1);
         let pattern = s.pattern;
         let whole = |c: &os_model::Clip| c.source == ClipSource::Pattern(pattern) && c.window.is_none();
         let ti = t.max(0.0) as u32;
-        let mine = s.rec.take.as_ref().and_then(|k| k.clip);
-        if let Some((track, at)) = mine.filter(|&(_, at)| ti >= at) {
-            if let Some(c) = crate::playlist::arr_mut(s).clips.iter_mut().find(|c| whole(c) && c.track == track && c.position == at) {
-                if ti >= at + c.length {
-                    c.length = (ti / bar + 1) * bar - at;
-                    s.piano.dirty = true;
-                }
-                return Some(t - f64::from(at));
-            }
-        }
         if let Some(p) = crate::piano::pattern_tick_in_song(s, t) {
             // The whole-pattern clip playing there becomes the take's.
             let under = crate::playlist::clips(s)
@@ -611,6 +610,20 @@ impl App {
                 k.clip = under;
             }
             return Some(p);
+        }
+        // Right after a whole-pattern clip, less than a bar past the bar line at or after its end, with its track free
+        // up to the end of `t`'s bar: that clip becomes the take's and grows instead of a second one being placed.
+        let end = (ti / bar + 1) * bar;
+        let clips = crate::playlist::clips(s);
+        let before = clips
+            .iter()
+            .filter(|c| whole(c) && !c.muted && c.end() <= ti && ti < c.end().div_ceil(bar) * bar + bar)
+            .filter(|c| !clips.iter().any(|o| o.track == c.track && o.position < end && o.end() > c.end()))
+            .max_by_key(|c| c.end())
+            .map(|c| (c.track, c.position));
+        if let Some(k) = s.rec.take.as_mut().filter(|k| k.clip.is_none() && before.is_some()) {
+            k.clip = before;
+            return grow_take_clip(s, t).map(|(p, _)| p);
         }
         let at = ti / bar * bar;
         let len = crate::piano::pattern_length(s, pattern).max(bar);
@@ -721,6 +734,10 @@ impl App {
             }
             self.state.rec.take = None;
         }
+        // SONG mode: a note held past the take's clip makes it longer as playback runs (spec §2).
+        if live && self.transport.song() && !self.state.rec.held.is_empty() && grow_take_clip(&mut self.state, now).is_some_and(|(_, g)| g) {
+            self.invalidate();
+        }
         if live {
             self.state.rec.last = Some(now);
         }
@@ -770,6 +787,43 @@ impl App {
             n => format!("Recording canceled: {n} takes undone"),
         }
     }
+}
+
+/// The notes held for the current pattern's take, from their start (quantized as they will be written) to playback
+/// tick `now` (spec §2 "Shown while held").
+pub fn held_notes(s: &State, now: f64) -> Vec<Note> {
+    if s.rec.take.as_ref().is_none_or(|t| t.pattern != s.pattern) {
+        return Vec::new();
+    }
+    let note = |h: &Held| {
+        let start = h.at.max(0.0).round() as u32;
+        let end = (h.at + (now - h.start)).round().max(0.0) as u32;
+        let (a, _) = quantized(s, start, end.max(start));
+        Note { length: end.saturating_sub(a).max(1), key: h.key, velocity: h.velocity, ..Note::step(h.channel, a) }
+    };
+    s.rec.held.iter().filter(|h| now >= h.start).map(note).collect()
+}
+
+/// SONG mode: the pattern tick at song tick `t` in the take's clip, when `t` is at or past its start; past its end the
+/// clip is made longer, to the end of `t`'s bar (spec §2 "one clip per performance"). Also says whether it grew.
+fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
+    let (track, at) = s.rec.take.as_ref().and_then(|k| k.clip)?;
+    let ti = t.max(0.0) as u32;
+    if ti < at {
+        return None;
+    }
+    let bar = s.project.bar_ticks().max(1);
+    let pattern = s.pattern;
+    let c = crate::playlist::arr_mut(s)
+        .clips
+        .iter_mut()
+        .find(|c| c.source == ClipSource::Pattern(pattern) && c.window.is_none() && c.track == track && c.position == at)?;
+    let grow = ti >= at + c.length;
+    if grow {
+        c.length = (ti / bar + 1) * bar - at;
+        s.piano.dirty = true;
+    }
+    Some((t - f64::from(at), grow))
 }
 
 #[cfg(test)]
@@ -968,6 +1022,63 @@ mod tests {
         assert_eq!(clips.len(), 1, "{clips:?}");
         assert_eq!((clips[0].position, clips[0].length), (0, 2 * bar));
         assert_eq!(notes(&app), [(48, 48, 0), (bar + 48, 24, 0)]);
+    }
+
+    /// SONG mode: a take starting less than a bar past a whole-pattern clip's bar line takes that clip and makes it
+    /// longer; further on, or with the track taken after the clip, a clip of its own is placed (spec §2 "right after a
+    /// clip", issue 192).
+    #[test]
+    fn takes_the_clip_just_before_in_song_mode() {
+        let clips =
+            |app: &App| -> Vec<(u16, u32, u32)> { crate::playlist::clips(&app.state).iter().map(|c| (c.track, c.position, c.length)).collect() };
+        let take = |other: bool, at: f64| {
+            let mut app = app();
+            crate::playlist::arr_mut(&mut app.state).clips.clear();
+            crate::playlist::place(&mut app.state, 0, 0);
+            let bar = app.state.project.bar_ticks();
+            if other {
+                let c = os_model::Clip::new(bar + bar / 2, bar, 0, ClipSource::Pattern(2));
+                crate::playlist::arr_mut(&mut app.state).clips.push(c);
+            }
+            app.toggle_record();
+            key(&mut app, KeyCode::KeyW, true, at, true);
+            key(&mut app, KeyCode::KeyW, false, at + 24.0, true);
+            stop(&mut app);
+            (app, bar)
+        };
+        let (app, bar) = take(false, 400.0);
+        assert_eq!(clips(&app), [(0, 0, 2 * bar)]);
+        assert_eq!(notes(&app), [(408, 24, 0)]);
+        let (app, bar) = take(false, f64::from(2 * bar + 16));
+        assert_eq!(clips(&app), [(0, 0, bar), (0, 2 * bar, bar)]);
+        let (app, bar) = take(true, 400.0);
+        assert_eq!(clips(&app), [(0, 0, bar), (0, bar + bar / 2, bar), (1, bar, bar)]);
+    }
+
+    /// SONG mode: a note held past the take's clip makes it longer while playback runs, so the written note ends inside
+    /// it; the piano roll's held note grows to the playhead (spec §2, issue 192).
+    #[test]
+    fn a_held_note_grows_the_clip_and_shows() {
+        let mut app = app();
+        crate::playlist::arr_mut(&mut app.state).clips.clear();
+        crate::playlist::place(&mut app.state, 0, 0);
+        let bar = app.state.project.bar_ticks();
+        app.toggle_record();
+        key(&mut app, KeyCode::KeyW, true, 50.0, true);
+        assert!(app.state.rec.holding());
+        assert_eq!(held_notes(&app.state, 50.0).iter().map(|n| (n.position, n.length)).collect::<Vec<_>>(), [(48, 2)]);
+        let held = |at: f64| held_notes(&app.state, at).iter().map(|n| (n.position, n.length)).collect::<Vec<_>>();
+        assert_eq!(held(500.0), [(48, 452)]);
+        app.transport.pretend_at(f64::from(2 * bar + 100), true);
+        app.record_tick();
+        assert_eq!(crate::playlist::clips(&app.state)[0].length, 3 * bar);
+        key(&mut app, KeyCode::KeyW, false, f64::from(2 * bar + 200), true);
+        assert!(!app.state.rec.holding() && held_notes(&app.state, 1000.0).is_empty());
+        stop(&mut app);
+        let n = notes(&app);
+        assert_eq!(n.len(), 1);
+        assert!(n[0].0 + n[0].1 <= 3 * bar, "{n:?}");
+        assert_eq!(crate::playlist::clips(&app.state).len(), 1);
     }
 
     /// R arms like a click when the typing keyboard is off; with it on, R is a note.

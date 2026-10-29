@@ -3121,7 +3121,8 @@ impl App {
     }
 
     /// Auto scrolling (spec: ui/auto-scrolling.md §5): the playlist (song) or the piano roll (pattern) scrolls so the
-    /// shown playing position stays in view. Left alone while the mouse drags a scroll bar.
+    /// shown playing position stays in view; in song mode the piano roll too, while a clip of its pattern plays. Left
+    /// alone while the mouse drags a scroll bar.
     fn auto_scroll(&mut self) {
         let set = crate::autoscroll::get();
         let now = &self.shown;
@@ -3130,8 +3131,10 @@ impl App {
         }
         let tick = now.tick as f32;
         let ppq = f32::from(self.state.project.ppq.max(4));
-        if now.song {
-            let Some(g) = self.pl_grid.filter(|_| self.state.shown(Win::Playlist)) else { return };
+        let pattern_tick = if now.song { piano::pattern_tick_in_song(&self.state, now.tick).map(|t| t as f32) } else { Some(tick) };
+        if now.song
+            && let Some(g) = self.pl_grid.filter(|_| self.state.shown(Win::Playlist))
+        {
             let left = self.state.playlist_scroll.0;
             let x = tick * self.state.playlist_bar_w / (ppq * 4.0);
             if let Some(v) = crate::autoscroll::follow(left, g.w, x, set.continuous) {
@@ -3141,15 +3144,15 @@ impl App {
                 self.scroll_set(Scroll::PlaylistX, v);
                 self.playlist_scrolled(before);
             }
-        } else {
-            let Some(g) = self.piano_grid.filter(|_| self.state.shown(Win::PianoRoll)) else { return };
-            let left = self.scroll_get(Scroll::PianoX);
-            let x = tick * self.state.piano.px_per_beat / ppq;
-            if let Some(v) = crate::autoscroll::follow(left, g.w, x, set.continuous) {
-                self.scroll_set(Scroll::PianoX, v);
-                if self.scroll_get(Scroll::PianoX) != left {
-                    self.damage_win(Win::PianoRoll);
-                }
+        }
+        let Some(g) = self.piano_grid.filter(|_| self.state.shown(Win::PianoRoll)) else { return };
+        let Some(tick) = pattern_tick else { return };
+        let left = self.scroll_get(Scroll::PianoX);
+        let x = tick * self.state.piano.px_per_beat / ppq;
+        if let Some(v) = crate::autoscroll::follow(left, g.w, x, set.continuous) {
+            self.scroll_set(Scroll::PianoX, v);
+            if self.scroll_get(Scroll::PianoX) != left {
+                self.damage_win(Win::PianoRoll);
             }
         }
     }
@@ -3684,8 +3687,15 @@ impl App {
                     let grid = g.grid;
                     // In song mode the piano roll's playhead is where its pattern plays, while a clip of it does.
                     let at = |t: f64| if now.song { piano::pattern_tick_in_song(&self.state, t) } else { Some(t) };
-                    for t in [at(old.tick), at(now.tick)].into_iter().flatten() {
-                        self.damage_rect(Rect::new(g.x_of(t as f32) - 2.0, grid.y, 5.0, grid.h));
+                    let xs: Vec<f32> = [at(old.tick), at(now.tick)].into_iter().flatten().map(|t| g.x_of(t as f32)).collect();
+                    for &x in &xs {
+                        self.damage_rect(Rect::new(x - 2.0, grid.y, 5.0, grid.h));
+                    }
+                    // A note held while recording grows from the old playhead to the new one (spec: ui/recording.md §2).
+                    if let [a, b] = xs[..]
+                        && self.state.rec.holding()
+                    {
+                        self.damage_rect(Rect::new(a.min(b) - 2.0, grid.y, (a - b).abs() + 5.0, grid.h));
                     }
                 }
             }
@@ -12570,6 +12580,42 @@ mod tests {
         frame_damage(&mut app, &mut a, d);
         frame(&mut app, &mut b, None);
         assert_same(&a, &b, "piano roll step");
+    }
+
+    /// Song mode: the piano roll follows too, by its pattern's position, while a clip of the pattern plays there; past
+    /// the clips it stays (spec: ui/auto-scrolling.md §5, issue 192).
+    #[test]
+    fn piano_roll_follows_in_song_mode() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        crate::playlist::arr_mut(&mut app.state).clips.clear();
+        let bar = app.state.project.bar_ticks();
+        let c = crate::playlist::place(&mut app.state, 0, 2 * bar);
+        crate::playlist::arr_mut(&mut app.state).clips[c].length = 8 * bar;
+        app.state.project.patterns.iter_mut().filter(|p| p.number == app.state.pattern).for_each(|p| p.length = Some(8 * bar));
+        let ws = &mut app.state.wins[Win::PianoRoll.slot().unwrap()];
+        ws.maxed = false;
+        ws.rect = Rect::new(220.0, 90.0, 1000.0, 480.0);
+        app.state.z = vec![Win::PianoRoll];
+        crate::autoscroll::toggle();
+        frame(&mut app, &mut a, None);
+        let g = app.piano_grid.expect("piano roll shown");
+        let ppq = f64::from(app.state.project.ppq.max(4));
+        let per_px = ppq / f64::from(app.state.piano.px_per_beat);
+        let play = |tick: f64| Shown { playing: true, paused: false, tick, song: true, sounding: Vec::new(), tempo: None };
+        app.show_playback(play(0.0));
+        // In the clip: the pattern position, 0.9 of the width in, is held at a third.
+        let p = f64::from(g.w) * 0.9 * per_px;
+        for k in 1..=9 {
+            app.show_playback(play(f64::from(2 * bar) + p * f64::from(k) / 9.0));
+            frame(&mut app, &mut a, None);
+        }
+        let want = g.w * 0.9 - g.w / 3.0;
+        assert!((app.scroll_get(Scroll::PianoX) - want).abs() <= 1.0, "{} != {want}", app.scroll_get(Scroll::PianoX));
+        // Past the clip: the view stays.
+        app.show_playback(play(f64::from(20 * bar)));
+        assert!((app.scroll_get(Scroll::PianoX) - want).abs() <= 1.0);
     }
 
     /// CPU panel (spec: ui/main-window.md §13): the menu's View FPS / Misc / Refresh change what it shows; a double
