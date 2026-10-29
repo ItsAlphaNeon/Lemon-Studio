@@ -1,9 +1,11 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 Samrat Dutta
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The system's input device (a microphone, a line input) for the mixer tracks, when the output is not an ASIO driver
-//! (spec: audio/track-io.md §2.2). Its stream opens with the output, only while a track hears its input or is armed
+//! The input device (a microphone, a line input) for the mixer tracks, when the output is not an ASIO driver (spec:
+//! audio/track-io.md §2.2): the one chosen in Settings > Audio, else the system's default (`audio_cfg::input_device`).
+//! Its stream opens with the output, only while a track hears its input or is armed
 //! (`super::want_inputs`), so the microphone is not taken (and the system does not show it in use) the rest of the
 //! time. It runs at the output's rate (resampled when the device will not), and its callback pushes into the same ring
 //! an ASIO driver's inputs go into (`super::input_ring`), which the streams read at their own place.
@@ -15,13 +17,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, SampleFormat, SizedSample, StreamConfig, SupportedBufferSize};
 
 use super::{input_ring, INPUT_CHANNELS};
 use crate::audio_cfg::{self, AudioCfg};
 
-/// The system's default input device as the mixer offers it.
+/// The input device as the mixer offers it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Info {
     pub name: String,
@@ -37,11 +39,20 @@ struct Cache {
     /// When it was asked last (`None`: never), and whether an ask is under way.
     at: Option<Instant>,
     asking: bool,
+    /// Counts `forget`s: an ask begun before one is not kept.
+    generation: u64,
 }
 
-static CACHE: Mutex<Cache> = Mutex::new(Cache { found: None, at: None, asking: false });
+static CACHE: Mutex<Cache> = Mutex::new(Cache { found: None, at: None, asking: false, generation: 0 });
 
-/// The system's default input device for the audio settings in use (`None`: none, or not asked yet). It never waits:
+/// Another input device was chosen: what was found is dropped and the device is asked again.
+pub fn forget() {
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    (c.found, c.at, c.asking) = (None, None, false);
+    c.generation += 1;
+}
+
+/// The input device for the audio settings in use (`None`: none, or not asked yet). It never waits:
 /// a device asked about more than `KEEP` ago is asked again on a thread of its own.
 pub fn info() -> Option<Info> {
     if cfg!(test) {
@@ -50,10 +61,13 @@ pub fn info() -> Option<Info> {
     let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if !c.asking && c.at.is_none_or(|t| t.elapsed() >= KEEP) {
         c.asking = true;
-        let spawned = std::thread::Builder::new().name("input device".into()).spawn(|| {
+        let generation = c.generation;
+        let spawned = std::thread::Builder::new().name("input device".into()).spawn(move || {
             let found = ask(&AudioCfg::current());
             let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            (c.found, c.at, c.asking) = (found, Some(Instant::now()), false);
+            if c.generation == generation {
+                (c.found, c.at, c.asking) = (found, Some(Instant::now()), false);
+            }
         });
         if spawned.is_err() {
             c.asking = false;
@@ -62,16 +76,27 @@ pub fn info() -> Option<Info> {
     c.found.clone()
 }
 
-/// Asks the host `cfg` plays on for its default input device.
+/// Asks the host `cfg` plays on for the input device `cfg` records from.
 fn ask(cfg: &AudioCfg) -> Option<Info> {
-    let device = audio_cfg::host(cfg).default_input_device()?;
-    let channels = usize::from(device.default_input_config().ok()?.channels()).min(INPUT_CHANNELS);
+    let device = audio_cfg::input_device(cfg)?;
+    let channels = usize::from(input_config(&device).ok()?.channels()).min(INPUT_CHANNELS);
     (channels > 0).then(|| Info { name: audio_cfg::device_name(&device), channels })
+}
+
+/// The format an input device records in: its default, else the first it lists at its highest rate (a device that
+/// reports no default format is still offered and opened, rather than left out).
+pub fn input_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+    device.default_input_config().or_else(|e| {
+        let listed = device.supported_input_configs().ok().and_then(|mut cs| cs.next()).map(|c| c.with_max_sample_rate());
+        listed.ok_or_else(|| format!("{}: {e}", audio_cfg::device_name(device)))
+    })
 }
 
 /// The open input stream. Dropped, it stops and the ring has no inputs again.
 pub struct SystemInput {
     stream: Option<cpal::Stream>,
+    /// The device it opened (`audio_cfg::device_name`): another one chosen, or another default, opens anew.
+    pub name: String,
     /// Its error callback said it does not play on (the device went away).
     failed: Arc<AtomicBool>,
     alsa: bool,
@@ -94,11 +119,13 @@ impl SystemInput {
     }
 }
 
-/// Opens the default input device of `cfg`'s host at `rate` (the output's), with blocks of about `block` frames.
+/// Opens the input device of `cfg` (`audio_cfg::input_device`) at `rate` (the output's), with blocks of about `block`
+/// frames.
 pub fn open(cfg: &AudioCfg, rate: u32, block: Option<u32>) -> Result<SystemInput, String> {
     let host = audio_cfg::host(cfg);
-    let device = host.default_input_device().ok_or("no audio input device")?;
-    let own = device.default_input_config().map_err(|e| e.to_string())?;
+    let device = audio_cfg::input_device(cfg).ok_or("no audio input device")?;
+    let name = audio_cfg::device_name(&device);
+    let own = input_config(&device)?;
     // The output's rate when the device takes it, else its own (resampled in the callback).
     let supported = if own.sample_rate() == rate {
         own
@@ -131,7 +158,7 @@ pub fn open(cfg: &AudioCfg, rate: u32, block: Option<u32>) -> Result<SystemInput
         input_ring().open(0, 0);
         e.to_string()
     })?;
-    Ok(SystemInput { stream: Some(stream), failed, alsa: host.id().name() == "ALSA" })
+    Ok(SystemInput { stream: Some(stream), name, failed, alsa: host.id().name() == "ALSA" })
 }
 
 fn build_any(device: &cpal::Device, format: SampleFormat, config: &StreamConfig, rate: u32, failed: Arc<AtomicBool>) -> Result<cpal::Stream, String> {

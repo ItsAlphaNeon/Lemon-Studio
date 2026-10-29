@@ -4478,6 +4478,13 @@ impl App {
         };
         st.devices = devices;
         st.asio_drivers = drivers;
+        let (inputs, default_input) = if cfg.asio_driver().is_some() { (Vec::new(), None) } else { crate::audio_cfg::input_devices(&cfg) };
+        st.input = match &cfg.input {
+            Some(d) if inputs.contains(d) => d.clone(),
+            Some(d) => format!("{d} (not found: default device)"),
+            None => format!("Default ({})", default_input.as_deref().unwrap_or("no input device")),
+        };
+        st.inputs = inputs;
         // What the Windows device offers for short buffers (spec: audio/wasapi-low-latency.md 4.3).
         st.periods = if cfg.asio_driver().is_some() { None } else { crate::device::periods(cfg.device.as_deref()) };
         st.audio = cfg;
@@ -4537,7 +4544,7 @@ impl App {
     fn audio_menu(&mut self, label: &str, x: f32, y: f32) {
         use crate::audio_cfg::{Set, BUFFERS, RATES, SMALLEST};
         use crate::playlist::{Cmd, Mark, PItem, Popup};
-        use views::settings::{ANIMATIONS, BUFFER_LENGTH, MODE, MODE_EXCLUSIVE, MODE_SHARED, OUTPUT_DEVICE, SAMPLE_RATE};
+        use views::settings::{ANIMATIONS, BUFFER_LENGTH, INPUT_DEVICE, MODE, MODE_EXCLUSIVE, MODE_SHARED, OUTPUT_DEVICE, SAMPLE_RATE};
         let still = !self.state.cables.borrow().animations();
         let st = &self.state.settings;
         let cfg = &st.audio;
@@ -4589,6 +4596,10 @@ impl App {
                     .chain(st.asio_drivers.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Asio(d.clone()))).mark(on(d, true))))
                     .collect()
             }
+            // The system's default input (followed when it changes), then each input device.
+            INPUT_DEVICE => std::iter::once(PItem::new("Default device", Cmd::Audio(Set::Input(None))).mark(Mark::Radio(cfg.input.is_none())))
+                .chain(st.inputs.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Input(Some(d.clone())))).mark(Mark::Radio(cfg.input.as_ref() == Some(d)))))
+                .collect(),
             // Windows devices: shared or exclusive mode (spec: audio/wasapi-low-latency.md 4.2). Linux: the sound server,
             // or an ALSA device directly.
             MODE => vec![
@@ -4650,8 +4661,16 @@ impl App {
     /// Changes one audio setting: kept for the next start, hosted plugins move to the new rate, and the open streams
     /// move to the new output (spec: ui/settings.md "Audio").
     pub fn set_audio(&mut self, s: crate::audio_cfg::Set) {
+        let input = matches!(s, crate::audio_cfg::Set::Input(_));
         let cfg = crate::audio_cfg::AudioCfg::current().with(s);
         cfg.apply();
+        crate::device::system_input::forget();
+        if input {
+            // The output plays on; the mixer's input stream moves to the new device (`OutputDevice::sync_inputs`).
+            self.audio_page();
+            self.state.message = Some(format!("Audio input: {}", self.state.settings.input));
+            return self.invalidate();
+        }
         if let Some(rate) = Transport::device_rate() {
             self.plugins.set_rate(rate);
         }
@@ -12918,7 +12937,7 @@ mod tests {
         eprintln!("driver | block | rate | tick | ahead min / mean / max (frames) | mean ms | driver latency | longest gap ms | load | dropouts");
         for &b in &buffers {
             for _ in 0..runs {
-                AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b), exclusive: false }.apply();
+                AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b), exclusive: false, input: None }.apply();
                 app.transport.reopen();
                 let t0 = Instant::now();
                 let info = loop {
