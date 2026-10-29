@@ -23,6 +23,8 @@ mod cable;
 mod capture;
 #[cfg(target_os = "linux")]
 mod mpris;
+#[cfg(target_os = "linux")]
+mod rt;
 mod omarchy;
 mod one_click;
 mod session;

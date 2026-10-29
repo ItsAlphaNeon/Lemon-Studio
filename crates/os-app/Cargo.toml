@@ -79,6 +79,8 @@ cpal = { version = "0.18", features = ["pulseaudio"] }
 # protocol crate cpal's PulseAudio host is built on.
 pulseaudio = "0.3"
 x11rb = { version = "0.13", features = ["randr", "resource_manager", "shape"] }
+# Real-time priority for the audio threads (`rt`).
+libc = "0.2"
 # MPRIS on the session bus (`mpris`): the zbus the file dialogs already bring.
 zbus = "5"
 

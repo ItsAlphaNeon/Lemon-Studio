@@ -103,6 +103,11 @@ own content. Side branches are named `cutting-edge-<topic>`.
   mixer, piano roll, instrument rack, channel window, tool windows and plugin windows, back to front; each plugin's
   window once its plugin has loaded). Linux: the audio stream is named "Lemon Studio" in the sound server, not
   "PipeWire ALSA [lemonstudio]" (unless `PIPEWIRE_ALSA` is set).
+- **Real-time audio threads (Linux).** The feeder that renders and the device callback run at real-time priority
+  (through rtkit, as PipeWire's do), so a busy machine no longer makes them late at small buffers. A thread that keeps
+  the CPU too long (a project too heavy to play in time) goes back to normal priority instead of the kernel ending the
+  program. Under load (16 busy threads per core, 4 ms of work per 5.3 ms block) a normal-priority thread missed all of
+  1500 blocks, a real-time one none (`rt::tests::deadlines_under_load`).
 - **A media player to the desktop (MPRIS).** Lemon Studio is on the session bus as `org.mpris.MediaPlayer2.lemonstudio`:
   media keys, a bar's player widget and `playerctl` play, pause and stop the transport, and show whether it plays and
   the project's name.
