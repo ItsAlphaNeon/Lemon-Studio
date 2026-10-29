@@ -37,7 +37,10 @@ Without third-party plugins, the built-in ones are the whole sound palette. Lemo
 sixteen effects and the Tesla audio editor; these are the gaps a project made in FL Studio runs into most.
 
 - [ ] **Drum sampler (FPC).** A pad-based drum instrument
-- [ ] **Slicer (Slicex, Fruity Slicer).** A loop chopped into slices that the piano roll plays
+- [x] **Slicer (Slicex, Fruity Slicer).** A loop chopped into slices that the piano roll plays. Lemon Slicer
+  recreates Fruity Slicer: it slices a loop by its markers, by beats or by transients, plays slice n on C5 + n, dumps
+  the slices to the piano roll, and opens and saves a project's Fruity Slicer channels so the original still opens
+  them. Slicex is not done: its channels (28 in 16 of the corpus projects, states of about 27 KB) need their own study
 - [x] **Filter effect (Fruity Filter, Fruity Love Philter).** Lemon Filter and Pulp Filter, each also playing the
   original's slots in opened projects
 - [x] **Flanger and phaser.** Lemon Flanger and Lemon Phaser recreate Fruity Flanger and Fruity Phaser
