@@ -926,7 +926,7 @@ pub enum Drag {
     RackSel { from: usize },
     RackDots { x0: f32, p0: u32 },
     RackLen { y0: f32, v0: u32 },
-    RackLoopLen { row: usize, y0: f32, v0: u32 },
+    RackLoopLen { row: usize, y0: f32, v0: i32 },
     RackGraph,
     /// A dialog's caption (offset of the mouse from its top-left), the file list's scroll bar (`ratio` = list pixels
     /// per pixel moved), spec: ui/dialogs.md.
@@ -5412,10 +5412,8 @@ impl App {
                     self.invalidate();
                 }
                 Drag::RackLoopLen { row, y0, v0 } => {
-                    let v = (v0 as i32 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32).clamp(1, crate::rack::MAX_STEPS as i32) as u32;
-                    self.state.rack.loop_len.insert(row, v);
-                    self.state.piano.dirty = true;
-                    self.hint = Cow::Owned(format!("Loop point: {v} steps"));
+                    let hint = crate::rack::set_loop_box(&mut self.state, row, v0 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32);
+                    self.hint = Cow::Owned(hint);
                     self.invalidate();
                 }
                 Drag::RackGraph => self.rack_graph_at((x, y)),
@@ -7074,9 +7072,8 @@ impl App {
                 return None;
             }
             Some(Action::RackLoopBox(i)) => {
-                let v = (crate::rack::loop_box_len(&self.state, i) as i32 + d).clamp(1, crate::rack::MAX_STEPS as i32) as u32;
-                self.state.rack.loop_len.insert(i, v);
-                self.state.piano.dirty = true;
+                let v = crate::rack::loop_box_value(&self.state, i) + d;
+                crate::rack::set_loop_box(&mut self.state, i, v);
                 return None;
             }
             // Shift+wheel over a channel's name button moves the channel (spec: ui/channel-rack.md §13).
@@ -8492,7 +8489,7 @@ impl App {
                 s.piano.dirty = true;
             }
             Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,
-            Action::RackLoopBox(i) => self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_len(&self.state, i) }),
+            Action::RackLoopBox(i) => self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_value(&self.state, i) }),
             Action::RackGraphArea => {
                 self.rack_graph_at(mouse);
                 self.drag = Some(Drag::RackGraph);

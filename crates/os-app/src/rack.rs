@@ -234,6 +234,9 @@ pub struct RackUi {
     pub loop_mode: bool,
     /// Per-channel loop length in steps (§15).
     pub loop_len: BTreeMap<usize, u32>,
+    /// Advanced looping's loop points (§15, loop type 2): a row with one loops at the end of its last used step, beat
+    /// or bar; a row without one does not loop.
+    pub loop_unit: BTreeMap<usize, LoopUnit>,
     pub loop_type: u8,
     /// Position of "Unsorted" in the file's group list (`None` = last; see [`to_model`]).
     pub unsorted_at: Option<usize>,
@@ -278,6 +281,7 @@ impl Default for RackUi {
             graph_tab: Tab::Vel,
             loop_mode: false,
             loop_len: BTreeMap::new(),
+            loop_unit: BTreeMap::new(),
             loop_type: 0,
             unsorted_at: None,
             clipboard: None,
@@ -318,6 +322,7 @@ impl RackUi {
         self.soloed = self.soloed.and_then(m);
         self.pre_solo = None; // rows renumbered: unsolo turns everything on
         self.loop_len = self.loop_len.iter().filter_map(|(&r, &l)| m(r).map(|n| (n, l))).collect();
+        self.loop_unit = self.loop_unit.iter().filter_map(|(&r, &u)| m(r).map(|n| (n, u))).collect();
         if let Some(f) = self.fill.as_mut() {
             match m(f.row) {
                 Some(r) => f.row = r,
@@ -473,7 +478,107 @@ pub fn len_value(s: &State) -> u32 {
 
 /// A row's own length in steps: its loop length in loop mode, else the pattern length (§15).
 pub fn row_len(s: &State, r: usize) -> u32 {
-    if s.rack.loop_mode { loop_box_len(s, r) } else { pattern_steps(s) }
+    if !s.rack.loop_mode {
+        return pattern_steps(s);
+    }
+    if advanced(s) {
+        return unit_len(s, r).unwrap_or_else(|| pattern_steps(s));
+    }
+    loop_box_len(s, r)
+}
+
+/// Under Advanced looping, row `r`'s loop length in the current pattern (`None`: it does not loop there).
+fn unit_len(s: &State, r: usize) -> Option<u32> {
+    let notes = s.project.pattern(s.pattern).map_or(&[][..], |p| &p.notes[..]);
+    unit_steps(s, notes, ch_index(s, r)?, s.rack.loop_unit.get(&r).copied())
+}
+
+/// Advanced looping's loop point (§7 Loop type, §15; the original's manual: a row plays to the end of its last used
+/// step, beat or bar, then loops; "···" does not loop). How the boxes set it is Lemon Studio's design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopUnit {
+    Step,
+    Beat,
+    Bar,
+}
+
+/// The loop box's values under Advanced looping, in its wheel's order: no loop, then the units.
+pub const LOOP_UNITS: [Option<LoopUnit>; 4] = [None, Some(LoopUnit::Step), Some(LoopUnit::Beat), Some(LoopUnit::Bar)];
+
+impl LoopUnit {
+    pub fn name(self) -> &'static str {
+        match self {
+            LoopUnit::Step => "Step",
+            LoopUnit::Beat => "Beat",
+            LoopUnit::Bar => "Bar",
+        }
+    }
+
+    /// Steps in one unit: a beat and a bar of the project's signature (§23).
+    fn steps(self, s: &State) -> u32 {
+        match self {
+            LoopUnit::Step => 1,
+            LoopUnit::Beat => beat_steps(s),
+            LoopUnit::Bar => bar_steps(s),
+        }
+    }
+}
+
+/// Whether the loop type is Advanced looping.
+pub fn advanced(s: &State) -> bool {
+    s.rack.loop_type == 2
+}
+
+/// The loop length, in steps, of channel `ch` among `notes` with loop point `unit`: its last used step (a note covers
+/// the steps it lasts) rounded up to whole units. `None` without a unit or without notes.
+fn unit_steps(s: &State, notes: &[Note], ch: u16, unit: Option<LoopUnit>) -> Option<u32> {
+    let ps = per_step(s);
+    let u = unit?.steps(s).max(1);
+    let used = notes.iter().filter(|n| n.channel == ch && !n.muted()).map(|n| (n.position + n.length.max(ps) - 1) / ps + 1).max()?;
+    Some(used.div_ceil(u) * u)
+}
+
+/// The rows that loop: those with a loop point under Advanced looping, else those with a loop length.
+fn loop_rows(s: &State) -> Vec<usize> {
+    if advanced(s) { s.rack.loop_unit.keys().copied().collect() } else { s.rack.loop_len.keys().copied().collect() }
+}
+
+/// What row `r`'s loop box shows: the loop length, or under Advanced looping its loop point ("···" for none).
+pub fn loop_box_text(s: &State, r: usize) -> String {
+    if advanced(s) { s.rack.loop_unit.get(&r).map_or("···", |u| u.name()).to_string() } else { loop_box_len(s, r).to_string() }
+}
+
+/// The value a loop box's wheel and drag start from: the loop length, or under Advanced looping the loop point's place
+/// in [`LOOP_UNITS`].
+pub fn loop_box_value(s: &State, r: usize) -> i32 {
+    if advanced(s) {
+        let u = s.rack.loop_unit.get(&r).copied();
+        LOOP_UNITS.iter().position(|&x| x == u).unwrap_or(0) as i32
+    } else {
+        loop_box_len(s, r) as i32
+    }
+}
+
+/// A loop box's wheel or drag reached value `v` (as [`loop_box_value`] counts): row `r` takes that length or loop
+/// point. Returns the hint to show.
+pub fn set_loop_box(s: &mut State, r: usize, v: i32) -> String {
+    s.piano.dirty = true;
+    if advanced(s) {
+        match LOOP_UNITS[v.clamp(0, LOOP_UNITS.len() as i32 - 1) as usize] {
+            Some(u) => {
+                s.rack.loop_unit.insert(r, u);
+                format!("Loop point: {}", u.name())
+            }
+            None => {
+                s.rack.loop_unit.remove(&r);
+                "Loop point: don't loop".into()
+            }
+        }
+    } else {
+        let v = v.clamp(1, MAX_STEPS as i32) as u32;
+        s.rack.loop_len.insert(r, v);
+        format!("Loop point: {v} steps")
+    }
 }
 
 /// What a row's loop box shows and its wheel and drag start from: the row's loop length, else the pattern length; also
@@ -1633,7 +1738,8 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
 /// a selected channel has a loop length (Lemon Studio's design; the original showed it greyed with loop mode off).
 fn burn_sel(s: &State) -> PItem {
     let i = it("Burn selected loops to pattern", RCmd::Burn(false));
-    if s.rack.loop_mode && s.rack.sel.iter().any(|r| s.rack.loop_len.contains_key(r)) { i } else { i.off() }
+    let rows = loop_rows(s);
+    if s.rack.loop_mode && s.rack.sel.iter().any(|r| rows.contains(r)) { i } else { i.off() }
 }
 
 /// The Automation / Remote control / Value groups shared by knob and LED menus (§19). `other` is the mixer box or the
@@ -1800,7 +1906,7 @@ pub fn loop_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::head("Loop type"),
         it("Loop step channels", RCmd::LoopType(0)).mark(Mark::Radio(t == 0)),
         it("Loop all channels", RCmd::LoopType(1)).mark(Mark::Radio(t == 1)),
-        PItem::not_yet("Advanced looping").mark(Mark::Radio(t == 2)),
+        it("Advanced looping", RCmd::LoopType(2)).mark(Mark::Radio(t == 2)),
         PItem::head("Burn to pattern"),
         burn("Burn selected channels", false),
         burn("Burn all looping channels", true),
@@ -2256,22 +2362,25 @@ pub fn open_fill(s: &mut State, r: usize) {
 pub fn play_project(s: &State) -> Project {
     let mut p = s.project.clone();
     p.tempo = Some(s.tempo);
-    if s.rack.loop_mode && !s.rack.loop_len.is_empty() {
-        let rows: Vec<usize> = s.rack.loop_len.keys().copied().collect();
+    let rows = loop_rows(s);
+    if s.rack.loop_mode && !rows.is_empty() {
         expand_loops(&mut p, s, &rows);
     }
     p
 }
 
 /// Repeat each row's first `loop_len` steps up to the end of every pattern (its length as played, §23); notes past
-/// the loop length go.
+/// the loop length go. Under Advanced looping the length is each pattern's own: the row's notes there rounded up to
+/// its loop point.
 fn expand_loops(p: &mut Project, s: &State, rows: &[usize]) {
     let ps = per_step(s);
     let ends: Vec<u32> = p.patterns.iter().map(|pat| p.pattern_length(pat.number)).collect();
     for &r in rows {
-        let (Some(&len), Some(ch)) = (s.rack.loop_len.get(&r), p.channels.get(r).map(|c| c.index)) else { continue };
-        let span = len.max(1) * ps;
+        let Some(ch) = p.channels.get(r).map(|c| c.index) else { continue };
         for (pat, &end) in p.patterns.iter_mut().zip(&ends) {
+            let len = if advanced(s) { unit_steps(s, &pat.notes, ch, s.rack.loop_unit.get(&r).copied()) } else { s.rack.loop_len.get(&r).copied() };
+            let Some(len) = len else { continue };
+            let span = len.max(1) * ps;
             let src: Vec<Note> = pat.notes.iter().filter(|n| n.channel == ch && n.position < span).copied().collect();
             if src.is_empty() {
                 continue;
@@ -2289,7 +2398,8 @@ fn expand_loops(p: &mut Project, s: &State, rows: &[usize]) {
 
 /// Loop button > Burn: write the loops into the current pattern's notes and drop the loop lengths.
 fn burn(s: &mut State, all: bool) {
-    let rows: Vec<usize> = if all { s.rack.loop_len.keys().copied().collect() } else { s.rack.sel.iter().copied().filter(|r| s.rack.loop_len.contains_key(r)).collect() };
+    let looping = loop_rows(s);
+    let rows: Vec<usize> = if all { looping } else { s.rack.sel.iter().copied().filter(|r| looping.contains(r)).collect() };
     let mut p = s.project.clone();
     expand_loops(&mut p, s, &rows);
     if let (Some(src), Some(dst)) = (p.pattern(s.pattern).cloned(), s.project.patterns.iter_mut().find(|x| x.number == s.pattern)) {
@@ -2297,6 +2407,7 @@ fn burn(s: &mut State, all: bool) {
     }
     for r in rows {
         s.rack.loop_len.remove(&r);
+        s.rack.loop_unit.remove(&r);
     }
     s.piano.dirty = true;
 }
@@ -2566,6 +2677,10 @@ pub fn from_model(s: &mut State) {
 
 /// Writes the rack state into the project before a save (the inverse of [`from_model`]).
 pub fn to_model(s: &mut State) {
+    // Advanced looping's loop points are saved as the lengths they give in the current pattern (Lemon Studio's choice:
+    // the file's own form for them is not known); a row with no notes there has none.
+    let lens: BTreeMap<usize, u32> =
+        if advanced(s) { s.rack.loop_unit.keys().filter_map(|&r| unit_len(s, r).map(|l| (r, l))).collect() } else { s.rack.loop_len.clone() };
     let rack = &s.rack;
     let p = &mut s.project;
     // Groups in file order: the user groups, with "Unsorted" where the file had it (else last, like FL's Alt+G).
@@ -2592,8 +2707,7 @@ pub fn to_model(s: &mut State) {
         p.current_group = None;
     }
     // Loop lengths belong to the current pattern.
-    let mut loops: Vec<(u16, u32)> =
-        rack.loop_len.iter().filter_map(|(&r, &l)| p.channels.get(r).map(|c| (c.index, l))).collect();
+    let mut loops: Vec<(u16, u32)> = lens.iter().filter_map(|(&r, &l)| p.channels.get(r).map(|c| (c.index, l))).collect();
     if rack.loop_type == 1 && !loops.is_empty() {
         let set: BTreeSet<u16> = loops.iter().map(|l| l.0).collect();
         loops.extend(p.channels.iter().filter(|c| !set.contains(&c.index)).map(|c| (c.index, os_model::Pattern::LOOP_FOLLOW)));
@@ -2845,6 +2959,50 @@ mod tests {
         assert_eq!(app.state.rack.name_pct, NAME_PCT_MAX);
         typed(&mut app, "10");
         assert_eq!(app.state.rack.name_pct, NAME_PCT_MIN);
+    }
+
+    /// Advanced looping: a row's loop box sets a loop point (···, Step, Beat, Bar) by wheel order; the row then loops
+    /// at the end of its last used step rounded up to the unit, in playback, burning and saving.
+    #[test]
+    fn advanced_looping_loop_points() {
+        let mut app = App::new(None);
+        let item = |app: &App| loop_menu(&app.state, 0.0, 0.0).items.iter().find(|i| i.label == "Advanced looping").map(|i| (i.enabled, i.mark.clone())).unwrap();
+        assert_eq!(item(&app), (true, Mark::Radio(false)));
+        run(&mut app, RCmd::LoopType(2));
+        assert_eq!(item(&app), (true, Mark::Radio(true)));
+        let s = &mut app.state;
+        s.rack.loop_mode = true;
+        let ch = s.project.channels[0].index;
+        let ps = per_step(s);
+        let n = s.pattern.max(1);
+        let p = crate::patterns::pat_mut(s, n);
+        p.notes.retain(|x| x.channel != ch);
+        p.notes.extend([Note::step(ch, 0), Note::step(ch, 5 * ps)]);
+        p.notes.sort_by_key(|x| (x.position, x.channel));
+        assert_eq!((pattern_steps(s), beat_steps(s), bar_steps(s)), (16, 4, 16));
+
+        assert_eq!((loop_box_text(s, 0), loop_box_value(s, 0), row_len(s, 0)), ("···".to_string(), 0, 16), "no loop point: no loop");
+        assert_eq!(set_loop_box(s, 0, 1), "Loop point: Step");
+        assert_eq!(row_len(s, 0), 6, "the last used step");
+        set_loop_box(s, 0, 2);
+        assert_eq!((loop_box_text(s, 0).as_str(), row_len(s, 0)), ("Beat", 8));
+        set_loop_box(s, 0, 9);
+        assert_eq!((loop_box_text(s, 0).as_str(), row_len(s, 0)), ("Bar", 16), "past the last: Bar");
+        set_loop_box(s, 0, 2);
+
+        // Playback repeats the first beat-rounded 8 steps over the pattern.
+        let steps = |p: &Project| p.pattern(n).unwrap().notes.iter().filter(|x| x.channel == ch).map(|x| x.position / ps).collect::<Vec<_>>();
+        assert_eq!(steps(&play_project(s)), [0, 5, 8, 13]);
+        // Saved as the length it gives.
+        to_model(s);
+        assert!(s.project.pattern(n).unwrap().loops.contains(&(ch, 8)), "{:?}", s.project.pattern(n).unwrap().loops);
+        // Burned: written into the pattern, the loop point gone.
+        s.rack.sel = BTreeSet::from([0]);
+        run(&mut app, RCmd::Burn(false));
+        let s = &app.state;
+        assert_eq!(steps(&s.project), [0, 5, 8, 13]);
+        assert!(s.rack.loop_unit.is_empty());
+        assert_eq!(loop_box_text(s, 0), "···");
     }
 
     /// Auto switch display filter: a newly selected channel the filter hides switches the filter to its group (else

@@ -454,8 +454,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
                 ui.c.fill_rect_gradient(lb.inset(1.0), t.rack_row_box.shade(-0.04), t.rack_row_box, 2.5);
             }
             let tc = if !has { t.text_dim.shade(-0.3) } else if lhov { t.glyph } else { t.text_dim.shade(0.08) };
-            let txt = rk::loop_box_len(s, i).to_string();
-            ui.c.text_center(Font::new(13), lb, tc, &txt);
+            // Advanced looping's words ("Beat") take a smaller font to fit.
+            let txt = rk::loop_box_text(s, i);
+            let font = if rk::advanced(s) { Font::new(10) } else { Font::new(13) };
+            ui.c.text_center(font, lb, tc, &txt);
         }
     }
     ui.c.pop_clip();
