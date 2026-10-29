@@ -289,17 +289,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
 /// Where window `w` paints: its rect (and the channel rack's graph editor hanging below it). The resize zones past
 /// its edges are hits only. A repaint that misses this skips the window; a playlist scroll paints around it.
 pub fn paint_area(s: &State, w: Win) -> Rect {
-    match w {
-        Win::ChannelRack => rack::paint_area(s),
-        Win::Plugin => channel_win::rect(s),
-        Win::Perf => perf::bounds(s),
-        Win::Tapper => tapper::bounds(s),
-        Win::Touch => touch::bounds(s),
-        Win::Strum => strum::bounds(s),
-        Win::Arp => arpeggiate::bounds(s),
-        Win::PianoDlg => piano_dlg::bounds(s),
-        w => s.win_rect(w),
-    }
+    crate::floating::placed(w).map_or_else(|| s.win_rect(w), |p| (p.paint)(s))
 }
 
 /// Start of a Playlist / Mixer / Piano roll window: blocks clicks through it, and (once the

@@ -30,6 +30,7 @@ mod cpu;
 mod data_folder;
 mod device;
 mod dialog;
+mod floating;
 mod filedlg;
 mod enable_groups;
 mod export;
