@@ -20240,11 +20240,19 @@ mod tests {
         assert!(list.items[13].col && list.items[17].sep && list.items.len() == 18 + 37);
         assert_eq!((labels[18], labels[54]), ("Major (Ionian)", "Other Whole Tone"));
         assert_eq!((list.items[1].mark, list.items[16].mark), (Mark::Radio(true), Mark::Check(true)));
+        // It paints in two columns: the scales start right of the root notes, at the top.
+        if let Ok(mut c) = Canvas::new(1920, 1080, 1.0) {
+            app.state.playlist.popup.as_mut().expect("open").y = 100.0;
+            frame(&mut app, &mut c, None);
+            let (root, scale) = (hit_rect(&app, &Action::PlPopup(1)), hit_rect(&app, &Action::PlPopup(15)));
+            assert!(scale.x > root.x + root.w - 1.0 && scale.y < root.y + root.h, "{root:?} {scale:?}");
+        }
         // A root note keeps the list open where it was.
+        let was = app.state.playlist.popup.as_ref().map(|p| (p.x, p.y));
         app.mouse = (900.0, 900.0);
         pl::run(&mut app, Cmd::KeyRoot(2));
         let again = app.state.playlist.popup.clone().expect("still open");
-        assert_eq!((again.x, again.y, again.items[3].mark), (list.x, list.y, Mark::Radio(true)));
+        assert_eq!((Some((again.x, again.y)), again.items[3].mark), (was, Mark::Radio(true)));
         // A scale adds the marker at the song position and closes the list; one undo step.
         app.state.playlist.pos = 1536;
         let steps = app.state.history.len();
