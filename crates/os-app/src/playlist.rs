@@ -1344,12 +1344,13 @@ pub fn grid_snap(s: &State) -> Snap {
     s.playlist.snap.grid(s.global_snap.now).unwrap_or(Snap::None)
 }
 
-/// Events and Markers catch a target this close (the piano roll's 5 px, ui/piano-snap.md §3).
-const CATCH_PX: f32 = 5.0;
+/// Events and Markers catch a target this close: in FL's playlist a click 6.4 px from a marker landed on it, 7.6 and
+/// 8.4 px away on the tick under the pointer (ui/playlist.md §4).
+const CATCH_PX: f32 = 7.0;
 
-/// What Events and Markers catch in the playlist (Lemon Studio's reading of the piano roll's rule): the starts and
-/// ends of the arrangement's clips (`skip`: clips being dragged), or its time markers; the one nearest `tick` within
-/// 5 px.
+/// What Events and Markers catch in the playlist: its time markers (measured), or the starts and ends of the
+/// arrangement's clips (`skip`: clips being dragged; Lemon Studio's reading of the piano roll's rule); the one nearest
+/// `tick` within 7 px.
 fn catch(s: &State, g: &PGeom, tick: f32, skip: &[usize]) -> Option<u32> {
     let targets: Vec<u32> = match s.playlist.snap {
         EditorSnap::Events => clips(s).iter().enumerate().filter(|(i, _)| !skip.contains(i)).flat_map(|(_, c)| [c.position, c.end()]).collect(),
@@ -1360,7 +1361,7 @@ fn catch(s: &State, g: &PGeom, tick: f32, skip: &[usize]) -> Option<u32> {
 }
 
 /// Where a click at `tick` lands (§4): the nearest unit (Cell: the start of the cell it is in), the tick under the
-/// pointer for (none); under Events and Markers a clip edge or marker within 5 px, else the tick. Alt: no snapping.
+/// pointer for (none); under Events and Markers a clip edge or marker within 7 px, else the tick. Alt: no snapping.
 pub fn snap_place(s: &State, g: &PGeom, tick: f32, alt: bool) -> u32 {
     let t = tick.max(0.0);
     if !alt && let Some(c) = catch(s, g, t, &[]) {
@@ -1388,7 +1389,7 @@ fn snap_down(s: &State, g: &PGeom, tick: f32, alt: bool) -> u32 {
 }
 
 /// A drag's delta for the edge at `from` (a moved clip's start, a resized edge): under Events and Markers the edge goes
-/// to a clip edge or marker within 5 px (`skip`: the dragged clips); otherwise [`snap_delta`].
+/// to a clip edge or marker within 7 px (`skip`: the dragged clips); otherwise [`snap_delta`].
 fn snap_edge(s: &State, g: &PGeom, from: u32, dt: f32, alt: bool, skip: &[usize]) -> i64 {
     match catch(s, g, from as f32 + dt, skip) {
         Some(c) if !alt => i64::from(c) - i64::from(from),

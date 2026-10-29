@@ -16274,8 +16274,9 @@ mod tests {
         assert_eq!((m.items[0].label.as_ref(), m.items[0].mark), ("Main", Mark::Radio(true)));
         let n = m.items.len();
         assert_eq!(m.items[n - 2..].iter().map(|i| (i.label.as_ref(), i.enabled, i.cmd.clone())).collect::<Vec<_>>(), [("Events", true, pl::Cmd::Snap(EditorSnap::Events)), ("Markers", true, pl::Cmd::Snap(EditorSnap::Markers))]);
-        // Markers: a click within 5 px of a time marker lands on it, farther off on the tick under the pointer;
-        // Events: on a clip's start or end the same way. The song position on the ruler follows Markers too.
+        // Markers: a click within 7 px of a time marker lands on it (FL: 6.4 px did, 7.6 px did not), farther off on
+        // the tick under the pointer; Events: on a clip's start or end the same way. The song position on the ruler
+        // follows Markers too.
         pl::arr_mut(&mut app.state).clips.clear();
         pl::arr_mut(&mut app.state).markers = vec![os_model::TimeMarker::new(1000, "M")];
         app.state.playlist.snap = EditorSnap::Markers;
