@@ -33,6 +33,8 @@ pub use win32::{default_position, first_position, focus_main, lift_hide, lift_sh
 #[cfg(target_os = "linux")]
 mod x11;
 #[cfg(target_os = "linux")]
+mod hyprland;
+#[cfg(target_os = "linux")]
 pub use x11::{
     busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main, stack, take_exposed, take_lift_input, unpinned,
     FrameWindow, Unpinned,
