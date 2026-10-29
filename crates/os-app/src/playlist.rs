@@ -343,9 +343,9 @@ pub enum Cmd {
     Rack(crate::rack::RCmd),
     /// Mixer menus (spec: ui/mixer.md §6-7).
     Mixer(crate::mixer::MCmd),
-    /// A slot command from the plugin window menu of mixer track `.0`'s slot: the track is the selected one for the
-    /// command only.
-    SlotWin(u16, crate::mixer::MCmd),
+    /// A slot command from the plugin window menu of mixer track `.0`'s slot (a mixer or plugin menu command): the
+    /// track is the selected one for the command only.
+    SlotWin(u16, Box<Cmd>),
     /// Plugin parameter menus (spec: plugins/plugin-parameters.md §5-6).
     Param(crate::params::PCmd),
     /// "Enter value..." of a knob or parameter menu (spec: ui/type-in-value.md).
@@ -3960,7 +3960,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
         Cmd::SlotWin(t, c) => {
             let was = std::mem::replace(&mut app.state.selected_mixer, t);
-            let m = crate::mixer::run(app, c);
+            let m = run(app, *c);
             app.state.selected_mixer = was;
             return m;
         }
@@ -5058,8 +5058,9 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
 /// Enables the window menu's entries that act on the window's channel or slot (`key`, a rack row or a `fx_key`; spec:
 /// ui/plugin-window.md "Lemon Studio: the channel and slot entries"). A channel's window: Piano roll, Delete...,
 /// Rename, color and icon..., Change color... and Random color are the rack's channel menu entries of those names
-/// (ui/channel-rack.md §18), the boxes opening at the mouse as the picker's do. An effect slot's window: Delete... and
-/// Rename, color and icon... are the mixer slot menu's (ui/mixer.md §7.2); the others stay greyed there.
+/// (ui/channel-rack.md §18), the boxes opening at the mouse as the picker's do. An effect slot's window: Replace ▸,
+/// Delete... and Rename, color and icon... are the mixer slot menu's (ui/mixer.md §7.2), on that slot whichever track
+/// is selected; the others stay greyed there.
 pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
     use crate::mixer::MCmd;
     use crate::rack::RCmd;
@@ -5068,10 +5069,24 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
         it.enabled = true;
     };
     if let Some((t, k)) = crate::plugins::fx_of(key) {
+        // Every command of the slot's entries runs with its track selected.
+        fn on_track(t: u16, items: &mut [PItem]) {
+            for it in items.iter_mut() {
+                if it.cmd != Cmd::Nothing {
+                    it.cmd = Cmd::SlotWin(t, Box::new(std::mem::replace(&mut it.cmd, Cmd::Nothing)));
+                }
+                on_track(t, &mut it.children);
+            }
+        }
         for it in menu.items.iter_mut() {
             match &*it.label {
-                "Delete..." => set(it, Cmd::SlotWin(t, MCmd::SlotDelete(k))),
-                "Rename, color and icon..." => set(it, Cmd::SlotWin(t, MCmd::SlotRename(k))),
+                "Replace" => {
+                    let mut replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(k)), true);
+                    on_track(t, &mut replace);
+                    *it = PItem::sub("Replace", replace);
+                }
+                "Delete..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::SlotDelete(k))))),
+                "Rename, color and icon..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::SlotRename(k))))),
                 _ => {}
             }
         }
@@ -5186,11 +5201,13 @@ mod tests {
         assert!(app.state.rack.pending_delete.is_some() || app.state.rack.delete_now.is_some(), "asks first");
     }
 
-    /// An effect slot's window menu: Delete... and Rename, color and icon... act on that slot, whichever mixer track
-    /// is selected; the channel entries stay greyed.
+    /// An effect slot's window menu: Replace ▸, Delete... and Rename, color and icon... act on that slot, whichever
+    /// mixer track is selected; the channel entries stay greyed.
     #[test]
     fn slot_window_menu_entries() {
         let mut app = app();
+        app.plugins.effects = crate::plugins::builtin_effects();
+        app.state.plugdb.rebuild(&app.plugins);
         let (t, k) = (3u16, 2u8);
         crate::mixer::track_mut(&mut app.state, t).unwrap().slots[usize::from(k)] = Some(crate::plugins::new_slot("Test FX"));
         app.state.selected_mixer = 5;
@@ -5200,6 +5217,14 @@ mod tests {
         for label in ["Piano roll", "Change color...", "Random color"] {
             assert!(!entry(&m, label).enabled, "{label} stays greyed");
         }
+        // Replace ▸: the effects, into this slot.
+        fn leaf(items: &[PItem]) -> Option<&PItem> {
+            items.iter().find_map(|i| if i.children.is_empty() { matches!(i.cmd, Cmd::SlotWin(..)).then_some(i) } else { leaf(&i.children) })
+        }
+        let replace = entry(&m, "Replace");
+        assert!(replace.enabled && !replace.children.is_empty());
+        let Some(Cmd::SlotWin(3, inner)) = leaf(&replace.children).map(|i| i.cmd.clone()) else { panic!("an effect to pick") };
+        assert!(matches!(*inner, Cmd::Plugin(crate::plugin_menu::PlugCmd::Effect { slot: Some(2), .. })), "{inner:?}");
         run(&mut app, entry(&m, "Rename, color and icon...").cmd.clone());
         assert_eq!(app.state.playlist.edit.as_ref().map(|e| e.target.clone()), Some(EditTarget::SlotName(t, k)));
         app.state.playlist.edit = None;
