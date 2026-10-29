@@ -187,7 +187,7 @@ impl App {
         let _ = std::fs::remove_file(&tmp);
         if self.state.path.as_ref() == Some(&own) {
             self.journal.write("version", serde_json::json!({ "file": file, "saved": saved }));
-            self.state.message = Some(format!("Opened the version saved {} (saving keeps the newest as a version too)", crate::journal::when(saved)));
+            self.state.message = Some(format!("Opened the version saved {}", crate::journal::when(saved)));
         }
     }
 

@@ -4547,7 +4547,6 @@ impl App {
         };
         let overlays = views::paint(&mut ui, &self.state, &info);
         if self.state.cables.get_mut().take_slowed() {
-            self.state.message = Some("Mixer cables hang still: the mixer is too slow to redraw them swinging (they try again with a new route or another current track)".into());
             self.damage_win(Win::Mixer);
         }
         self.keep.parts = std::mem::take(&mut self.keep.next);
@@ -5577,7 +5576,7 @@ impl App {
             SAct::Check(k) if k == views::settings::TINT_PLUGINS_CHECK => {
                 let on = !crate::settings_file::flag(crate::plugin_window::TINT_KEY, true);
                 crate::settings_file::set_flag(crate::plugin_window::TINT_KEY, on);
-                self.state.message = Some(format!("Stock plugins {} the theme", if on { "follow" } else { "keep Lemon's colours, whatever" }));
+                self.state.message = Some(if on { "Stock plugins: the theme's colours" } else { "Stock plugins: their own colours" }.into());
             }
             // The only place that writes the registry (`crate::file_assoc`).
             #[cfg(windows)]
