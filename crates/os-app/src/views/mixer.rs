@@ -539,7 +539,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     ui.c.glyph(clk, &g);
     ui.off(Rect::new(sx - 8.0, by - 125.0, 16.0, 16.0), "Track latency");
     ui.veil(Rect::new(sx - 9.0, by - 149.0, 18.0, 38.0), body);
-    let hint = if armed { "Armed: monitoring the input (recording into tracks is not available yet)" } else { "Arm disk recording" };
+    let hint = if armed { format!("Record to: {}", crate::track_rec::armed_file(s, n)) } else { "Arm disk recording".into() };
     let hov = ui.hit(Rect::new(sx - 7.0, by - 107.0, 14.0, 14.0), Action::Mix(MHit::Arm(n)), hint);
     if armed {
         // An orange-red ring about 8 px across with a 3 px hole.

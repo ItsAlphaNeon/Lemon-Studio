@@ -317,7 +317,13 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   through Into the audio editor, the take goes into Tesla on the master track instead (see Audio editing)
 - TOOLS ▸ Cancel recording: while recording, playback stops and the takes of that playback are undone (Redo brings
   them back)
-- Not yet: audio recording into mixer tracks, input monitoring
+- Recording into mixer tracks: arm tracks with their disk-record button or the track menu's Arm selected track(s)
+  (arming turns Audio on in Record's filter); with Record armed, every armed track records while the song plays,
+  taken at its record source (the input alone, with the mixer input, after the effects, after the EQ, after the
+  fader). On stop each take is a WAV in the `Recorded` folder named after the track and, with the mixer menu's Disk
+  recording ▸ Auto-create audio clips on, an audio clip channel on that track with its clip where the take started,
+  the input's delay taken out (one undo step)
+- Input monitoring: a track's input plays through it while armed, or always, per its Monitor external input setting
 
 ## 🚧 Undo
 

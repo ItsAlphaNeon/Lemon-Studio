@@ -23,6 +23,8 @@ pub const RECORDED: &str = "Recorded items";
 pub enum Opt {
     Notes,
     Automation,
+    /// Armed mixer tracks record (spec: audio/track-io.md §2.5).
+    Audio,
     StartsPlayback,
     DisarmOnStop,
     QuantizeStart,
@@ -59,6 +61,7 @@ impl Opt {
         match self {
             Opt::Notes => ("rec_notes", true),
             Opt::Automation => ("rec_automation", true),
+            Opt::Audio => ("rec_audio", false),
             Opt::StartsPlayback => ("rec_starts_play", false),
             Opt::DisarmOnStop => ("rec_disarm_stop", false),
             Opt::QuantizeStart => ("rec_q_start", true),
@@ -87,12 +90,8 @@ impl Opt {
 
 /// The button's hint: what the filter records (spec §2 The button).
 pub fn hint() -> String {
-    let what = match (Opt::Notes.on(), Opt::Automation.on()) {
-        (true, true) => "notes, automation",
-        (true, false) => "notes",
-        (false, true) => "automation",
-        (false, false) => "nothing",
-    };
+    let what: Vec<&str> = [(Opt::Notes, "notes"), (Opt::Automation, "automation"), (Opt::Audio, "audio")].into_iter().filter(|(o, _)| o.on()).map(|(_, w)| w).collect();
+    let what = if what.is_empty() { "nothing".to_string() } else { what.join(", ") };
     format!("Record ({what}) (R) - right-click for options")
 }
 
@@ -473,9 +472,8 @@ impl App {
             PItem::head("Recording filter"),
             it("Notes", Opt::Notes),
             it("Automation", Opt::Automation),
-            // Audio (FL: recording into mixer tracks, then the playlist): mixer tracks don't record yet; audio comes with
-            // One-click audio recording, into the playlist or the audio editor.
-            PItem::new("Audio", Cmd::Nothing).off(),
+            // Audio: the armed mixer tracks record, into the playlist (spec: audio/track-io.md §2.5).
+            it("Audio", Opt::Audio),
             PItem::head("Options"),
             it("Ask what to record", Opt::Ask),
             it("Recording starts playback", Opt::StartsPlayback),
@@ -694,6 +692,7 @@ impl App {
     /// a stop disarms when "Disarm on stop" is on.
     pub(crate) fn record_tick(&mut self) {
         self.one_click_tick();
+        self.track_rec_tick();
         // A count-in ends after its beats (or with the playback); the clock shows each beat left. A wait ends when
         // something else starts playback.
         if let Some(c) = self.state.rec.count {

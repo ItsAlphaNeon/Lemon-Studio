@@ -32,7 +32,9 @@ mod marks;
 mod notes;
 mod param_auto;
 mod pdc;
+mod rec;
 pub use param_auto::PARAM_STEP;
+pub use rec::{Point as RecordPoint, RecordTap};
 
 /// What to play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -710,6 +712,8 @@ struct MixTrack {
     /// none), numbered as stored (spec: audio/track-io.md §2.1, §2.2).
     input: i32,
     output: i32,
+    /// Armed for disk recording: where the take is tapped and the input it records (spec: audio/track-io.md §2.5).
+    rec: Option<rec::Arm>,
 }
 
 /// The audio device's inputs as they arrive, for the mixer tracks that monitor one (spec: audio/track-io.md §2.2).
@@ -865,6 +869,7 @@ impl MixTrack {
             pad: pdc::Pad::default(),
             input: -1,
             output: -1,
+            rec: None,
         }
     }
 
@@ -1135,6 +1140,9 @@ pub struct Engine {
     /// Every mixer track's post-fader output, tick after tick, while capturing (`set_track_capture`; an export's Split
     /// mixer tracks).
     capture: Option<Vec<Vec<f32>>>,
+    /// Disk recording: what the armed tracks take while the song plays goes here (`set_record_tap`).
+    record: Option<std::sync::Arc<dyn RecordTap>>,
+    rec_buf: std::cell::Cell<Vec<f32>>,
     /// Plugin delay compensation: the pads not kept with the tracks, the head of the stream skipped, the values
     /// waiting for late audio (spec: audio/delay-compensation.md).
     pdc: pdc::Pdc,
@@ -1380,6 +1388,7 @@ impl Engine {
                         latency: (m.latency_out, m.latency_in),
                         input: if m.monitored() { m.audio_in } else { -1 },
                         output: m.audio_out,
+                        rec: rec::Arm::of(m),
                         ..MixTrack::unity()
                     };
                     // At the start of the song every gain is at its target.
@@ -1638,6 +1647,8 @@ impl Engine {
             insert_fx: true,
             master_fx: true,
             capture: None,
+            record: None,
+            rec_buf: std::cell::Cell::new(Vec::new()),
             pdc,
             pad_buf: Vec::new(),
             main_unity: main_volume == os_model::Project::MAIN_VOLUME_DEFAULT,
@@ -1815,6 +1826,12 @@ impl Engine {
     /// Samples in a frame of what the engine hands out: 2, or 2 × the device's output pairs (`set_device`).
     pub fn width(&self) -> usize {
         self.io.as_ref().map_or(2, |io| 2 * io.pairs)
+    }
+
+    /// Hands the armed tracks' takes to `tap` from now on, tick after tick while the song plays (not in a count-in or
+    /// while paused), each taken where its record source says (spec: audio/track-io.md §2.5). `None` stops it.
+    pub fn set_record_tap(&mut self, tap: Option<std::sync::Arc<dyn RecordTap>>) {
+        self.record = tap;
     }
 
     /// Keeps every mixer track's post-fader output (before its sends) from now on: `take_track_audio` hands it over.
@@ -2325,6 +2342,7 @@ impl Engine {
         (self.held, self.fade_out, self.fade_in, self.fade_len) = (old.held, old.fade_out, old.fade_in, old.fade_len);
         (self.count_in, self.count_in_len) = (old.count_in, old.count_in_len);
         self.run_on = old.run_on.take();
+        self.record = old.record.take();
         (self.landed, self.punched, self.pause_at, self.marker_paused) = (old.landed, old.punched, old.pause_at, old.marker_paused.take());
         self.spans = std::mem::take(&mut old.spans);
         self.inst_offs = std::mem::take(&mut old.inst_offs);
@@ -3360,6 +3378,12 @@ impl Engine {
                     }
                 }
             }
+            // Disk recording, while the song plays (spec: audio/track-io.md §2.5).
+            // The tick being mixed is the one before `tick`.
+            let (tap, at) = (self.record.as_ref().filter(|_| song.playing).and_then(|r| Some((r, self.tracks[t].rec?))), self.tick.saturating_sub(1));
+            if let Some((r, arm)) = tap.filter(|(_, a)| matches!(a.point, RecordPoint::External | RecordPoint::WithMixer)) {
+                self.rec_input(r.as_ref(), t, at, arm, &buf);
+            }
             let rate = self.rate;
             let (dry, l, r) = (&mut self.fx_dry, &mut self.scratch.0, &mut self.scratch.1);
             let busy = (&mut self.busy_until, self.busy_wait, self.exporting, &mut self.missed);
@@ -3376,7 +3400,13 @@ impl Engine {
                     run_slot(fx, &mut buf, rate, limit, song, dry, l, r, (&mut *busy.0, busy.1, busy.2, &mut *busy.3), &mut moved, extra, (key, main));
                 }
             }
+            if let Some((r, rec::Arm { point: RecordPoint::PostFx, .. })) = tap {
+                r.push(t, at, &buf);
+            }
             track.eq.process(&mut buf);
+            if let Some((r, rec::Arm { point: RecordPoint::PostEq, .. })) = tap {
+                r.push(t, at, &buf);
+            }
             // The four gains glide to their targets: a per-sample step for this tick, at most `limit`, applied as a
             // running sum (spec: audio/mixer.md "Gains ramp").
             let to = track.matrix;
@@ -3398,6 +3428,9 @@ impl Engine {
                     f[0] = ll * l + lr * r;
                     f[1] = rr * r + rl * l;
                 }
+            }
+            if let Some((r, rec::Arm { point: RecordPoint::PostLevel, .. })) = tap {
+                r.push(t, at, &buf);
             }
             // What the track puts out, for the slots that listen to it (spec: audio/sidechain.md "Sidechain input").
             if let Some(k) = self.key_out.get_mut(t).and_then(Option::as_mut) {
@@ -3468,6 +3501,31 @@ impl Engine {
         if moved {
             self.pdc.due = true;
         }
+    }
+
+    /// Disk recording from the device input (External input only), or with what reaches the track before its slots
+    /// (External and mixer input; `buf` holds the input already when the track hears it). A single input is on both
+    /// sides; a track with no input, or with one the device does not have, records silence or the mixer alone.
+    fn rec_input(&self, tap: &dyn RecordTap, t: usize, at: u64, arm: rec::Arm, buf: &[f32]) {
+        let mut take = self.rec_buf.take();
+        take.clear();
+        if arm.point == RecordPoint::WithMixer {
+            take.extend_from_slice(buf);
+        } else {
+            take.resize(buf.len(), 0.0);
+        }
+        let heard = self.tracks[t].input >= 0 && arm.point == RecordPoint::WithMixer;
+        if let (Some(io), false) = (&self.io, heard) {
+            let ch = io.input.as_ref().map_or(0, |i| i.channels());
+            if let Some((l, r)) = input_channels(arm.input, ch) {
+                for (f, x) in take.chunks_exact_mut(2).zip(io.inputs.chunks_exact(ch)) {
+                    f[0] += x[l];
+                    f[1] += x[r];
+                }
+            }
+        }
+        tap.push(t, at, &take);
+        self.rec_buf.set(take);
     }
 
     /// The transport hosted plugins see at `frame` (spec: plugins/vst3-hosting.md Â§1): playing at the project tempo,
@@ -7789,6 +7847,82 @@ mod tests {
         let mut out = vec![0.0; 2 * pairs * 48000];
         e.process(&mut out);
         out[out.len() - 2 * pairs..].to_vec()
+    }
+
+    /// What the armed tracks hand to the recorder: every push, in order.
+    #[derive(Default)]
+    struct Takes(std::sync::Mutex<Vec<(usize, Vec<f32>)>>);
+
+    impl RecordTap for Takes {
+        fn push(&self, track: usize, _: u64, frames: &[f32]) {
+            self.0.lock().unwrap().push((track, frames.to_vec()));
+        }
+    }
+
+    /// Records a second of `p` on a device with `inputs` held: the pushes per track (frames), and the last frame
+    /// track 1 took (L, R).
+    fn record_takes(p: &Project, inputs: [f32; 2], count_in: u32) -> (Vec<(usize, usize)>, Option<[f32; 2]>) {
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_looping(true);
+        e.set_device(1, Some(Box::new(Held(inputs.to_vec()))));
+        let takes = Arc::new(Takes::default());
+        e.set_record_tap(Some(takes.clone()));
+        e.set_count_in(count_in);
+        let mut out = vec![0.0; 2 * 48000];
+        e.process(&mut out);
+        let got = takes.0.lock().unwrap();
+        let mut frames: Vec<(usize, usize)> = Vec::new();
+        for (t, f) in got.iter() {
+            match frames.iter_mut().find(|(k, _)| k == t) {
+                Some(e) => e.1 += f.len() / 2,
+                None => frames.push((*t, f.len() / 2)),
+            }
+        }
+        let last = got.iter().rev().find(|(t, _)| *t == 1).map(|(_, f)| [f[f.len() - 2], f[f.len() - 1]]);
+        (frames, last)
+    }
+
+    // spec: audio/track-io.md §2.5: only armed tracks record, each where its record source says.
+    #[test]
+    fn armed_tracks_record_at_their_source() {
+        let (frames, _) = record_takes(&io_project(0, os_model::MONITOR_ARMED, false), [0.5, 0.25], 0);
+        assert!(frames.is_empty(), "nothing armed: {frames:?}");
+        // External input only: the input as it came in, heard or not.
+        let mut p = io_project(0, os_model::MONITOR_OFF, true);
+        p.mixer[1].rec_source = os_model::REC_EXTERNAL;
+        let (frames, last) = record_takes(&p, [0.5, 0.25], 0);
+        assert_eq!(frames.len(), 1, "track 1 alone: {frames:?}");
+        assert!(frames[0].0 == 1 && frames[0].1 >= 47000, "a second of it: {frames:?}");
+        assert_eq!(last, Some([0.5, 0.25]));
+        // In 2 alone: on both sides.
+        p.mixer[1].audio_in = 2;
+        assert_eq!(record_takes(&p, [0.5, 0.25], 0).1, Some([0.25, 0.25]));
+        // External and mixer input, heard: the input once, not twice.
+        let mut p = io_project(0, os_model::MONITOR_ARMED, true);
+        p.mixer[1].rec_source = 1;
+        assert_eq!(record_takes(&p, [0.5, 0.25], 0).1, Some([0.5, 0.25]));
+        // Post level and panning: after the fader.
+        p.mixer[1].rec_source = 4;
+        p.mixer[1].volume = Some(0.4);
+        let [l, r] = record_takes(&p, [0.5, 0.25], 0).1.unwrap();
+        assert!(l > 0.0 && l < 0.4 && r < 0.2, "faded: {l} {r}");
+        // Post EQ (the default): before the fader.
+        p.mixer[1].rec_source = os_model::REC_POST_EQ;
+        assert_eq!(record_takes(&p, [0.5, 0.25], 0).1, Some([0.5, 0.25]));
+        // No input and Post EQ: what reaches the track (silence here), still a take.
+        p.mixer[1].audio_in = -1;
+        let (frames, last) = record_takes(&p, [0.5, 0.25], 0);
+        assert!(frames.len() == 1 && last == Some([0.0, 0.0]), "{frames:?} {last:?}");
+    }
+
+    // spec: audio/track-io.md §2.5: a count-in records nothing.
+    #[test]
+    fn a_count_in_is_not_recorded() {
+        let mut p = io_project(0, os_model::MONITOR_ARMED, true);
+        p.tempo = Some(60.0);
+        let (frames, _) = record_takes(&p, [0.5, 0.25], 1);
+        assert!(frames.is_empty(), "a bar at 60 BPM outlasts the second: {frames:?}");
     }
 
     fn io_project(input: i32, monitor: u8, armed: bool) -> Project {

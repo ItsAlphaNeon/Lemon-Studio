@@ -113,6 +113,10 @@ pub enum MCmd {
     Output(u16, i32),
     RecSource(u16, u8),
     Monitor(u16, u8),
+    /// Arm selected track(s) (true) / Disarm selected track(s) for disk recording (spec: audio/track-io.md §2.5).
+    Arm(u16, bool),
+    /// Disk recording ▸ Auto-create audio clips (a program setting).
+    AutoClips,
 }
 
 /// What the plugin host does next tick for a mixer slot (`App::mixer_tick`).
@@ -418,10 +422,8 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             None
         }
         MHit::Arm(n) => {
-            let m = track_mut(s, n)?;
-            m.armed = !m.armed;
-            changed(s);
-            None
+            let on = !track(s, n)?.armed;
+            app.arm_tracks(&[n], on)
         }
         MHit::Scale | MHit::EqGraph => None,
     }
@@ -1171,9 +1173,8 @@ fn track_items(n: u16) -> Vec<PItem> {
         PItem::sep(),
         PItem::new("Solo selected track(s)", mx(MCmd::Solo(n))).key("S"),
         PItem::new("Alt solo selected track(s)", mx(MCmd::AltSolo(n))).key("Alt+S"),
-        // Disk recording is not available yet.
-        PItem::not_yet("Arm selected track(s)"),
-        PItem::not_yet("Disarm selected track(s)"),
+        PItem::new("Arm selected track(s)", mx(MCmd::Arm(n, true))),
+        PItem::new("Disarm selected track(s)", mx(MCmd::Arm(n, false))),
         PItem::sep(),
         PItem::not_yet("Compensate for master latency").mark(Mark::Check(true)),
         PItem::head("Group"),
@@ -1210,7 +1211,7 @@ fn trim_items(s: &State) -> Vec<PItem> {
 pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     let mut items = vec![
         PItem::head("Options"),
-        PItem::sub("Disk recording", vec![PItem::not_yet("Auto-create audio clips")]),
+        PItem::sub("Disk recording", vec![PItem::new("Auto-create audio clips", Cmd::Mixer(MCmd::AutoClips)).mark(Mark::Check(crate::settings_file::flag(crate::track_rec::AUTO_CLIPS, true)))]),
         PItem::sub("Plugin delay compensation", vec![PItem::not_yet("Automatic")]),
         PItem::not_yet("Link all parameters..."),
         PItem::sub("View", vec![PItem::not_yet("Waveforms"), PItem::not_yet("Extra properties")]),
@@ -1431,6 +1432,15 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::Solo(n) => {
             solo(s, n);
             None
+        }
+        MCmd::Arm(n, on) => {
+            let tg = targets(s, n);
+            app.arm_tracks(&tg, on)
+        }
+        MCmd::AutoClips => {
+            let on = !crate::settings_file::flag(crate::track_rec::AUTO_CLIPS, true);
+            crate::settings_file::set_flag(crate::track_rec::AUTO_CLIPS, on);
+            Some(format!("Auto-create audio clips {}", if on { "on" } else { "off" }))
         }
         MCmd::AltSolo(n) => {
             solo_with(s, n, true);

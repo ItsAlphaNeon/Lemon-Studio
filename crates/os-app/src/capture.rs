@@ -298,6 +298,11 @@ pub struct Recorder {
 impl Recorder {
     /// Starts writing what the capture takes in into `file` (a WAV at `rate` once finished).
     pub fn start(file: PathBuf, rate: u32) -> Result<Recorder, String> {
+        Recorder::start_from(file, rate, |out| capture().drain(out))
+    }
+
+    /// Starts writing what `drain` hands over (stereo frames, appended to its argument) into `file`.
+    pub fn start_from(file: PathBuf, rate: u32, mut drain: impl FnMut(&mut Vec<f32>) + Send + 'static) -> Result<Recorder, String> {
         if let Some(d) = file.parent() {
             std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
@@ -316,7 +321,7 @@ impl Recorder {
                 loop {
                     let last = s.load(Ordering::Acquire);
                     buf.clear();
-                    capture().drain(&mut buf);
+                    drain(&mut buf);
                     for x in &buf {
                         w.write_all(&x.to_le_bytes()).map_err(|e| e.to_string())?;
                     }
