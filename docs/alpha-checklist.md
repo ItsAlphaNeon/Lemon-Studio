@@ -20,8 +20,8 @@ Systems a fully functional DAW can't ship without.
   mixer menu's Arm and Disarm selected track(s) and Disk recording ▸ Auto-create audio clips work
 - [x] **Input monitoring.** A track's input plays through it while it is armed, or always, per its Monitor external
   input setting (Off / When armed / On), also while stopped (#182)
-- [ ] **Automation recording into clips.** Every automatable control now records into the pattern, as in the
-  original, and patterns play those points; turning them into automation clips waits for the event editor
+- [x] **Automation recording into clips.** Every automatable control records into the pattern, as in the original,
+  and patterns play those points; the event editor's Turn into automation clip makes a clip of them
 - [x] **Automation clip LFO and min / range.** The clip channel's MIN / MAX knobs set its range and its LFO
   (switch, mode, amount, speed, tension, skew, pulse width, its own envelope) plays as the original's, in the clip's
   channel window; files keep every LFO field
@@ -55,7 +55,8 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
 
 Greyed-out controls and partial features. These can land alongside the blockers.
 
-- [ ] **Event editor window.** Edit events is greyed out in five menus (playlist, channel rack, parameter menus)
+- [x] **Event editor window.** Edit events opens it from the parameter, channel rack and knob menus: a control's
+  events in the pattern, drawn, erased, selected and deleted, and turned into an automation clip
 - [x] **Undo for a plugin editor's own changes.** Parameters moved in a plugin's window and presets loaded from its
   title bar or dropped on it are one step each; a preset's undo brings back the state, the preset and the name
 - [x] **Undo for mixer track commands.** Routing, names, colours, resets, effect slots, audio input / output and
