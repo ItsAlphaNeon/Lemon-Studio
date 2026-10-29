@@ -332,18 +332,27 @@ pub fn generate_noise(s: &mut Sample, a: usize, b: usize, seed: u64) {
     normalize(s, a, b);
 }
 
-/// Time stretch / pitch shift... settings, each knob from −1 to 1: pitch ±24 semitones, time ×¼ to ×4 the length
-/// (Lemon Studio's ranges; the original's coarse / fine / mul controls and its methods were not measured).
+/// Time stretch / pitch shift... settings, each knob from −1 to 1: pitch ±24 semitones, time ×¼ to ×4 the length,
+/// formant ±24 semitones (Lemon Studio's ranges; the original's coarse / fine / mul controls and its methods were not
+/// measured). With formant preservation on, a pitch change leaves the formants where they were and the Formant knob
+/// moves them; off, they move with the pitch.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stretch {
     pub pitch: f32,
     pub time: f32,
+    pub formant: f32,
+    pub preserve: bool,
 }
 
 impl Stretch {
     /// The pitch change in semitones, in hundredths.
     pub fn semitones(&self) -> f32 {
         (self.pitch * 2400.0).round() / 100.0
+    }
+
+    /// The formants' move in semitones, in hundredths.
+    pub fn formant_semitones(&self) -> f32 {
+        (self.formant * 2400.0).round() / 100.0
     }
 
     /// The new length over the old.
@@ -358,7 +367,8 @@ pub fn stretch(s: &Sample, a: usize, b: usize, st: &Stretch) -> Vec<Vec<f32>> {
     let frames = (((b + 1 - a) as f64) * st.ratio()).round().max(1.0) as usize;
     let l = &s.ch[0][a..=b];
     let r = s.ch.get(1).map_or(l, |c| &c[a..=b]);
-    let (ol, or) = os_dsp::stretch::whole(l, r, s.rate, frames, 2f64.powf(f64::from(st.semitones()) / 12.0));
+    let formant = st.preserve.then(|| 2f64.powf(f64::from(st.formant_semitones()) / 12.0));
+    let (ol, or) = os_dsp::stretch::whole_formant(l, r, s.rate, frames, 2f64.powf(f64::from(st.semitones()) / 12.0), formant);
     if s.ch.len() == 1 { vec![ol] } else { vec![ol, or] }
 }
 

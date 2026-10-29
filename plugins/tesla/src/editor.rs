@@ -678,7 +678,7 @@ impl Logic {
             AmpCtl::Left => d.left,
             AmpCtl::Volume => d.volume,
             AmpCtl::Right => d.right,
-            AmpCtl::Pitch | AmpCtl::Time => 0.0,
+            AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant => 0.0,
             _ => return,
         };
         self.set_amp_value(c, v);
@@ -823,7 +823,7 @@ impl Logic {
 
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
         match self.at(x, y) {
-            Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right | AmpCtl::Pitch | AmpCtl::Time))) => {
+            Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant))) => {
                 let v = self.amp_value(c) + notches * 0.02;
                 self.set_amp_value(c, v.clamp(-1.0, 1.0));
                 self.hint = self.amp_hint(c);
@@ -984,6 +984,7 @@ impl Logic {
         match c {
             AmpCtl::Pitch => st.pitch,
             AmpCtl::Time => st.time,
+            AmpCtl::Formant => st.formant,
             AmpCtl::Pan => a.pan,
             AmpCtl::Sep => a.sep,
             AmpCtl::Left => a.left,
@@ -999,6 +1000,7 @@ impl Logic {
                 match c {
                     AmpCtl::Pitch => st.pitch = v,
                     AmpCtl::Time => st.time = v,
+                    AmpCtl::Formant => st.formant = v,
                     _ => {}
                 }
             }
@@ -1034,9 +1036,14 @@ impl Logic {
                 };
                 format!("{name}: {:.0}%{}", g.abs() * 100.0, if g < 0.0 { " (inverted)" } else { "" })
             }
-            AmpCtl::Pitch | AmpCtl::Time => {
+            AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant => {
                 let st = self.view.amp.and_then(|a| a.stretch).unwrap_or_default();
-                if c == AmpCtl::Pitch { format!("Pitch: {:+.2} semitones", st.semitones()) } else { format!("Length: x{:.3}", st.ratio()) }
+                match c {
+                    AmpCtl::Pitch => format!("Pitch: {:+.2} semitones", st.semitones()),
+                    AmpCtl::Time => format!("Length: x{:.3}", st.ratio()),
+                    _ if st.preserve => format!("Formant: {:+.2} semitones", st.formant_semitones()),
+                    _ => "Formant: moves with the pitch (formant preservation off)".into(),
+                }
             }
             _ => view::hint(&Target::Amp(c), &view::HintCtx { when: 0, max: 0 }),
         }
@@ -1083,7 +1090,13 @@ impl Logic {
 
     fn amp_down(&mut self, c: AmpCtl, y: f32, dbl: bool) -> Vec<Act> {
         match c {
-            AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Pitch | AmpCtl::Time => {
+            AmpCtl::Preserve => {
+                if let Some(st) = self.view.amp.as_mut().and_then(|u| u.stretch.as_mut()) {
+                    st.preserve = !st.preserve;
+                }
+                self.amp_changed();
+            }
+            AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant => {
                 if dbl {
                     self.set_amp_value(c, 0.0);
                     self.amp_changed();
@@ -2836,6 +2849,35 @@ mod tests {
         assert!((after as f32 / before as f32 - 2.0).abs() < 0.05, "{before} -> {after}");
     }
 
+    /// Formant preservation (the panel's switch) changes how a pitch shift sounds; the Formant knob only says
+    /// "with pitch" while it is off.
+    #[test]
+    fn formant_preservation() {
+        // A buzz: a pulse train has formant-like harmonics for the stretcher to keep.
+        let ch: Vec<f32> = (0..44100).map(|i| if i % 200 < 4 { 0.8 } else { 0.0 }).collect();
+        let shifted = |preserve: bool| {
+            let mut l = logic();
+            load(&mut l, Sample::from_channels(44100, vec![ch.clone()], Format::Float32));
+            l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Stretch), 0.0, 0.0);
+            paint(&mut l);
+            l.set_amp_value(AmpCtl::Pitch, 0.25);
+            if preserve {
+                assert_eq!(l.amp_hint(AmpCtl::Formant), "Formant: moves with the pitch (formant preservation off)");
+                let (x, y) = centre(&l, Target::Amp(AmpCtl::Preserve));
+                l.down(x, y, Btn::Left, Mods::default(), false);
+                assert_eq!(l.amp_hint(AmpCtl::Formant), "Formant: +0.00 semitones");
+            }
+            let (x, y) = centre(&l, Target::Amp(AmpCtl::Accept));
+            l.down(x, y, Btn::Left, Mods::default(), false);
+            l.doc(|d| (d.sample.channels(), d.history()[0].clone(), d.sample.ch[0].clone()))
+        };
+        let (plain, kept) = (shifted(false), shifted(true));
+        assert_eq!((plain.0, kept.0), (1, 1), "a mono sample stays mono");
+        assert_eq!((plain.1.as_str(), kept.1.as_str()), ("Time stretch / pitch shift", "Time stretch / pitch shift"));
+        let diff: f32 = plain.2.iter().zip(&kept.2).map(|(a, b)| (a - b).abs()).sum::<f32>() / plain.2.len() as f32;
+        assert!(diff > 1e-3, "preservation changes the sound ({diff})");
+    }
+
     #[test]
     fn flags_move_and_resizing_keeps_a_minimum() {
         let mut l = logic();
@@ -2966,6 +3008,7 @@ mod tests {
         l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Stretch), 0.0, 0.0);
         l.set_amp_value(AmpCtl::Pitch, 0.125);
         l.set_amp_value(AmpCtl::Time, 0.25);
+        l.view.amp.as_mut().unwrap().stretch.as_mut().unwrap().preserve = true;
         save(&mut l, "tesla_stretch", 1.0);
         save(&mut l, "tesla_stretch_x2", 2.0);
         l.view.amp = None;

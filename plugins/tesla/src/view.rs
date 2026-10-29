@@ -159,6 +159,8 @@ pub enum AmpCtl {
     /// Time stretch / pitch shift's knobs.
     Pitch,
     Time,
+    Formant,
+    Preserve,
     Reset,
     Preview,
     Accept,
@@ -909,12 +911,18 @@ pub fn fader_travel(slot: Rect) -> (f32, f32) {
     (slot.y + 7.0, slot.bottom() - 7.0)
 }
 
-/// The Time stretch / pitch shift panel: two knobs over the buttons, centred over the wave area.
-pub fn stretch_parts(lay: &Layout) -> (Rect, [(AmpCtl, Rect); 2]) {
-    let (w, h) = (208.0, 170.0f32.min(lay.h - 8.0));
+/// The Time stretch / pitch shift panel: the Pitch and Time knobs, then formant preservation's switch and knob, over
+/// the buttons, centred over the wave area.
+pub fn stretch_parts(lay: &Layout) -> (Rect, [(AmpCtl, Rect); 4]) {
+    let (w, h) = (208.0, 268.0f32.min(lay.h - 8.0));
     let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
-    let knob = |cx: f32| Rect::new(p.x + cx - 22.0, p.y + 50.0, 44.0, 44.0);
-    (p, [(AmpCtl::Pitch, knob(58.0)), (AmpCtl::Time, knob(150.0))])
+    let knob = |cx: f32, cy: f32| Rect::new(p.x + cx - 22.0, p.y + cy - 22.0, 44.0, 44.0);
+    (p, [
+        (AmpCtl::Pitch, knob(58.0, 72.0)),
+        (AmpCtl::Time, knob(150.0, 72.0)),
+        (AmpCtl::Preserve, Rect::new(p.x + 18.0, p.y + 128.0, 172.0, 18.0)),
+        (AmpCtl::Formant, knob(104.0, 184.0)),
+    ])
 }
 
 fn stretch_panel(ui: &mut Ui, a: &AmpUi, st: &Stretch, lay: &Layout) {
@@ -928,10 +936,15 @@ fn stretch_panel(ui: &mut Ui, a: &AmpUi, st: &Stretch, lay: &Layout) {
         let t = Target::Amp(ctl);
         ui.hit(r, t);
         let s = ui.state(r, t, false);
-        let (v, cap, val) = if ctl == AmpCtl::Pitch {
-            (st.pitch, "PITCH", format!("{:+.2} st", st.semitones()))
-        } else {
-            (st.time, "TIME", format!("x{:.3}", st.ratio()))
+        if ctl == AmpCtl::Preserve {
+            lemon::toggle(ui.c, r.x + 7.0, r.cy(), st.preserve, s);
+            ui.c.text(CAPTION, r.x + 18.0, r.y + 3.5, if s.hover { brand::TEXT } else { plug::DIM }, "FORMANT PRESERVATION");
+            continue;
+        }
+        let (v, cap, val) = match ctl {
+            AmpCtl::Pitch => (st.pitch, "PITCH", format!("{:+.2} st", st.semitones())),
+            AmpCtl::Time => (st.time, "TIME", format!("x{:.3}", st.ratio())),
+            _ => (st.formant, "FORMANT", if st.preserve { format!("{:+.2} st", st.formant_semitones()) } else { "with pitch".into() }),
         };
         lemon::dial(ui.c, r.cx(), r.cy(), r.w / 2.0, 4.0, (v + 1.0) / 2.0, true, brand::MAIN, s);
         ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.y - 15.0, r.w + 40.0, 12.0), plug::DIM, cap);
@@ -1222,6 +1235,8 @@ pub fn hint(t: &Target, l: &HintCtx) -> String {
         Target::Amp(AmpCtl::Sep) => "Stereo separation".into(),
         Target::Amp(AmpCtl::Pitch) => "Pitch".into(),
         Target::Amp(AmpCtl::Time) => "Time (length)".into(),
+        Target::Amp(AmpCtl::Formant) => "Formant".into(),
+        Target::Amp(AmpCtl::Preserve) => "Formant preservation".into(),
         Target::Amp(AmpCtl::Reset) => "Reset".into(),
         Target::Amp(AmpCtl::Preview) => "Preview".into(),
         Target::Amp(AmpCtl::Accept) => "Accept".into(),
