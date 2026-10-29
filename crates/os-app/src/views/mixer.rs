@@ -523,7 +523,8 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     let hov = ui.hit(Rect::new(mx - 9.0, ly.y(TRACK_Y0) - 5.0, 18.0, track_y1 - ly.y(TRACK_Y0) + 10.0), Action::Fader(n), mx::level_text("Volume", f64::from(v)));
     fader_handle(ui, mx, hy, selected, hov);
 
-    // Input pin and latency clock: not available yet, greyed out. The disk-record button below them arms the track.
+    // Input pin: not available yet, greyed out. The latency clock under it sets the track latency (right click); the
+    // disk-record button below them arms the track.
     let master = n == 0;
     let by = bottom;
     let pin_c = if master { ui.t.h(0xf09a28) } else { ui.t.s(0x4d5357) };
@@ -533,12 +534,14 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     ui.c.glyph(pin_c, &g);
     ui.c.fill_rect(Rect::new(sx - 1.0, by - 145.0, 2.0, 9.0), if master { ui.t.h(0x7a3c08) } else { ui.t.s(0x23272a) });
     ui.off(Rect::new(sx - 8.0, by - 148.0, 16.0, 18.0), "Track audio input");
-    let clk = if master { ui.t.h(0xf09a28) } else { ui.t.tx(0xc4d4e0) };
+    ui.veil(Rect::new(sx - 9.0, by - 149.0, 18.0, 20.0), body);
+    // Orange on the master and on a track with a latency setting (spec: ui/mixer.md §4).
+    let lat = track.map_or(0.0, |m| m.latency_out);
+    let hov = ui.hit(Rect::new(sx - 8.0, by - 125.0, 16.0, 16.0), Action::Mix(MHit::Latency(n)), format!("Track latency  {}", mx::latency_text(lat)));
+    let clk = if hov { ui.t.tx(0xffffff) } else if master || lat != 0.0 { ui.t.h(0xf09a28) } else { ui.t.tx(0xc4d4e0) };
     let mut g = Glyph::new();
     g.ring(sx, by - 117.0, 6.0, 1.6).rect(sx - 0.7, by - 121.0, 1.4, 4.5).rect(sx - 0.7, by - 117.7, 3.5, 1.4);
     ui.c.glyph(clk, &g);
-    ui.off(Rect::new(sx - 8.0, by - 125.0, 16.0, 16.0), "Track latency");
-    ui.veil(Rect::new(sx - 9.0, by - 149.0, 18.0, 38.0), body);
     let hint = if armed { format!("Record to: {}", crate::track_rec::armed_file(s, n)) } else { "Arm disk recording".into() };
     let hov = ui.hit(Rect::new(sx - 7.0, by - 107.0, 14.0, 14.0), Action::Mix(MHit::Arm(n)), hint);
     if armed {
@@ -683,12 +686,12 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     } else {
         off_combo(ui, combo, "Audio input source", &text, input_bg);
     }
+    let clock = Rect::new(r.x + 192.0, r.y + 29.0, 21.0, 21.0);
+    let lat = mx::track(s, n).map_or(0.0, |m| m.latency_in);
+    let hov = ui.hit(clock, Action::Mix(MHit::InLatency), format!("Input latency  {}", mx::latency_text(lat)));
     let mut g = Glyph::new();
     g.ring(r.x + 202.0, r.y + 39.5, 8.5, 1.8).rect(r.x + 201.2, r.y + 34.0, 1.6, 6.5).rect(r.x + 201.2, r.y + 38.9, 5.0, 1.6);
-    ui.c.glyph(ui.t.tx(0xd4dade), &g);
-    let clock = Rect::new(r.x + 192.0, r.y + 29.0, 21.0, 21.0);
-    ui.off(clock, "Input latency");
-    ui.veil(clock, input_bg);
+    ui.c.glyph(if hov { ui.t.tx(0xffffff) } else if lat != 0.0 { ui.t.h(0xf09a28) } else { ui.t.tx(0xd4dade) }, &g);
 
     // Ten effect slots.
     for i in 0..10 {
@@ -806,16 +809,16 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     }
     let b = r.bottom();
 
-    // Output rows at the bottom: the track latency combo (not available yet: greyed out), then the output combo.
+    // Output rows at the bottom: the track latency combo, then the output combo.
     ui.c.fill_rect(Rect::new(r.x, b - 66.0, r.w, 1.0), ui.t.s(0x1f2224));
     ui.c.fill_rect(Rect::new(r.x, b - 33.0, r.w, 1.0), ui.t.s(0x1f2224));
+    let lat = mx::track(s, n).map_or(0.0, |m| m.latency_out);
+    let hov = ui.hit(Rect::new(r.x + 3.0, b - 60.0, r.w - 6.0, 22.0), Action::Mix(MHit::OutLatency), format!("Track latency  {}", mx::latency_text(lat)));
     let mut g = Glyph::new();
     g.ring(r.x + 14.0, b - 48.5, 8.0, 1.5).rect(r.x + 13.3, b - 53.0, 1.4, 5.0).rect(r.x + 13.3, b - 49.2, 4.0, 1.4);
-    ui.c.glyph(ui.t.s(0x40464a), &g);
-    ui.off(Rect::new(r.x + 25.0, b - 60.0, r.w - 28.0, 22.0), "Track latency");
-    ui.c.text(Font::new(17), r.x + 30.0, b - 59.0, ui.t.tx(0xd4dade), "(none)");
-    chevron(ui, r.right() - 11.0, b - 48.5, true, ui.t.tx(0x8c969c));
-    ui.veil(Rect::span(r.x, r.right(), b - 65.0, b - 34.0), ui.t.s(0x2e3133));
+    ui.c.glyph(if lat != 0.0 { ui.t.h(0xf09a28) } else { ui.t.tx(0xc4ccd0) }, &g);
+    ui.c.text(Font::new(17), r.x + 30.0, b - 59.0, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xd4dade) }, &mx::latency_text(lat));
+    chevron(ui, r.right() - 11.0, b - 48.5, true, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0x8c969c) });
     let mut g = Glyph::new();
     g.ring(r.x + 13.0, b - 16.0, 8.0, 1.6);
     g.erase(true).rect(r.x + 13.0, b - 26.0, 10.0, 20.0);

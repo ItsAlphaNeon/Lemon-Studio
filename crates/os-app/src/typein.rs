@@ -20,7 +20,40 @@ pub enum Target {
     Fader(u16),
     /// A plugin parameter: hosted key, parameter index.
     Param(usize, usize),
+    /// A mixer track's input latency (`true`) or output latency setting, typed in a unit (spec: audio/track-io.md
+    /// §2.6).
+    Latency(u16, bool, LatUnit),
 }
+
+/// The units a latency setting is typed in: Set in ms / samples / beats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LatUnit {
+    Ms,
+    Samples,
+    Beats,
+}
+
+impl LatUnit {
+    pub fn name(self) -> &'static str {
+        match self {
+            LatUnit::Ms => "ms",
+            LatUnit::Samples => "samples",
+            LatUnit::Beats => "beats",
+        }
+    }
+
+    /// Milliseconds per unit: a sample at the device's rate (44.1 kHz with none open), a beat at the project's tempo.
+    fn ms(self, s: &State) -> f64 {
+        match self {
+            LatUnit::Ms => 1.0,
+            LatUnit::Samples => 1000.0 / f64::from(crate::device::rate().unwrap_or(44100).max(1)),
+            LatUnit::Beats => 60000.0 / s.project.tempo.unwrap_or(140.0).max(1.0),
+        }
+    }
+}
+
+/// The range a latency setting takes, in ms (OS).
+pub const LATENCY_MAX_MS: f64 = 1000.0;
 
 /// Clicks on the box's parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,6 +87,8 @@ enum Unit {
     Hz,
     /// No value mode (plugin parameters, OS).
     Plain,
+    /// A latency setting in its unit (no value mode).
+    Latency,
 }
 
 /// The gain laws of the dB controls (spec: audio/gain-laws.md).
@@ -75,6 +110,7 @@ fn unit(t: Target) -> Unit {
         Target::Knob(KnobId::MasterPitch) => Unit::Hz,
         // The equaliser's settings take the plain 0..1 position for now.
         Target::Param(..) | Target::Knob(KnobId::Eq(..) | KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)) => Unit::Plain,
+        Target::Latency(..) => Unit::Latency,
     }
 }
 
@@ -85,7 +121,7 @@ pub fn mode_button(t: Target) -> Option<(&'static str, &'static str)> {
         Unit::Pan | Unit::Sep => Some(("C", "Centered")),
         Unit::Db(_) => Some(("dB", "dB")),
         Unit::Percent => Some(("%", "%")),
-        Unit::Hz | Unit::Plain => None,
+        Unit::Hz | Unit::Plain | Unit::Latency => None,
     }
 }
 
@@ -96,7 +132,7 @@ pub fn width(t: Target) -> f32 {
 /// The mode a box opens in: the remembered one, or the only one it has.
 fn opening_norm(t: Target, remembered: bool) -> bool {
     match unit(t) {
-        Unit::Hz => false,
+        Unit::Hz | Unit::Latency => false,
         Unit::Plain => true,
         _ => remembered,
     }
@@ -113,6 +149,7 @@ pub fn caption(s: &State, t: Target) -> String {
         Target::Knob(k) => knob_label(s, k),
         Target::Fader(m) => format!("{} - Volume", crate::mixer::name(s, m)),
         Target::Param(key, index) => crate::params::param_name(s, key, index).unwrap_or_else(|| format!("Parameter {}", index + 1)),
+        Target::Latency(m, input, u) => format!("{} - {} latency ({})", crate::mixer::name(s, m), if input { "Input" } else { "Track" }, u.name()),
     };
     format!("Value for {name}")
 }
@@ -153,6 +190,7 @@ pub(crate) fn get(s: &State, t: Target) -> Option<f64> {
         Target::Knob(k) => Some(f64::from(s.knob(k))),
         Target::Fader(m) => Some(crate::mixer::track(s, m)?.volume.unwrap_or(0.8)),
         Target::Param(key, index) => crate::params::param_value(s, key, index),
+        Target::Latency(m, input, _) => crate::mixer::track(s, m).map(|t| f64::from(if input { t.latency_in } else { t.latency_out })),
     }
 }
 
@@ -176,6 +214,8 @@ fn set(s: &mut State, t: Target, v: f64) {
                 s.message = Some("The plugin did not take the value".into());
             }
         }
+        // `v` is in the box's unit.
+        Target::Latency(m, input, u) => crate::mixer::set_latency(s, m, input, (v * u.ms(s)).clamp(-LATENCY_MAX_MS, LATENCY_MAX_MS) as f32),
     }
 }
 
@@ -189,6 +229,9 @@ fn short(v: f64, places: usize) -> String {
 /// The field's text for the box's current value in a mode (spec §3, §6).
 pub fn text(s: &State, t: Target, norm: bool) -> String {
     let n = get(s, t).unwrap_or(0.0);
+    if let Target::Latency(_, _, u) = t {
+        return short(n / u.ms(s), 4);
+    }
     if norm {
         return short(n, 4);
     }
@@ -202,7 +245,7 @@ pub fn text(s: &State, t: Target, norm: bool) -> String {
         }
         Unit::Percent => format!("{:.0}%", n * 100.0),
         Unit::Hz => short(440.0 * 2f64.powf(bipolar), 11),
-        Unit::Plain => short(n, 4),
+        Unit::Plain | Unit::Latency => short(n, 4),
     }
 }
 
@@ -234,6 +277,10 @@ pub fn parse(t: Target, norm: bool, text: &str) -> Option<f64> {
         return None;
     }
     let u = unit(t);
+    // A latency in its unit, with or without the unit's name after it.
+    if let Target::Latency(_, _, lu) = t {
+        return number(strip_suffix_ci(text, lu.name())).filter(|(_, pct)| !pct).map(|(v, _)| v);
+    }
     if norm || u == Unit::Plain {
         // spec §5: up to 1 = the position, above 1 or with "%" = a percent.
         let (v, pct) = number(text)?;
@@ -266,7 +313,7 @@ pub fn parse(t: Target, norm: bool, text: &str) -> Option<f64> {
             let (hz, _) = number(strip_suffix_ci(text, "hz"))?;
             (hz > 0.0).then(|| 0.5 + (1200.0 * (hz / 440.0).log2()).clamp(-1200.0, 1200.0) / 2400.0)
         }
-        Unit::Plain => None,
+        Unit::Plain | Unit::Latency => None,
     }
 }
 
