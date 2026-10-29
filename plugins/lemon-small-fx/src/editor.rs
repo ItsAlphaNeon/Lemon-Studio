@@ -1159,7 +1159,7 @@ mod tests {
             }
             pm.save_png(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
         };
-        let settings: [(&Spec, &str, &[(&str, i32)]); 12] = [
+        let settings: [(&Spec, &str, &[(&str, i32)]); 13] = [
             (soft_clipper::SPEC, "soft_clipper", &[("threshold", 64), ("post", 150)]),
             (fast_distortion::SPEC, "fast_distortion", &[("pre", 192), ("threshold", 3), ("type", 1), ("mix", 100), ("post", 110)]),
             (balance::SPEC, "balance", &[("balance", -70), ("volume", 220)]),

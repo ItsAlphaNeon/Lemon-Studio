@@ -334,7 +334,7 @@ impl<K: Kind> Vst3Plugin for SmallFx<K> {
 mod tests {
     use super::*;
 
-    pub const SPECS: [&Spec; 12] = [
+    pub const SPECS: [&Spec; 13] = [
         soft_clipper::SPEC,
         fast_distortion::SPEC,
         balance::SPEC,

@@ -75,6 +75,8 @@ pub const SPEC: &Spec = &Spec {
     fields: &[],
     // A new instance's: no formula, the original's comments.
     tail: &NEW_AFTER_KNOBS,
+    blank: None,
+    locate: None,
     size: (WIDTH as u32, HEIGHT as u32),
     cards: &CARDS,
     controls: &CONTROLS,
