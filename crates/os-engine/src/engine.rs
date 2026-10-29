@@ -28,6 +28,7 @@ use crate::instrument::{Instrument, SharedInstrument, Slot, TransportInfo};
 use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
 
+mod controllers;
 mod layers;
 mod marks;
 mod notes;
@@ -1121,6 +1122,8 @@ pub struct Engine {
     /// which values are set in place rather than smoothed (playback's first tick after a start, seek or loop).
     auto_last: Vec<(os_model::target::Target, i64)>,
     auto_from: u64,
+    /// Controller links from slots to targets (spec: plugins/lemon-peak-controller.md "Links").
+    ctl_links: Vec<controllers::CtlLink>,
     /// The project's initial values the engine can set (song mode), as automation values: a song that loops sets them
     /// again at its start (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
     init: Vec<(os_model::target::Target, i64)>,
@@ -1571,6 +1574,7 @@ impl Engine {
             curves,
             auto_last: Vec::new(),
             auto_from: 0,
+            ctl_links: controllers::links(project),
             init,
             rate,
             channels,
@@ -2757,6 +2761,7 @@ impl Engine {
         self.run_controls(len);
         self.run_automation(len);
         self.run_param_automation(len);
+        self.run_controllers(len);
         for b in &mut self.bus {
             b.clear();
             b.resize(len * 2, 0.0);

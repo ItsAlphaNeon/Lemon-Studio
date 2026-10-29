@@ -45,6 +45,7 @@ pulp-filter = { path = "../../plugins/pulp-filter", features = ["linked"] }
 press = { path = "../../plugins/press", features = ["linked"] }
 lemon-flanger = { path = "../../plugins/lemon-flanger", features = ["linked"] }
 lemon-phaser = { path = "../../plugins/lemon-phaser", features = ["linked"] }
+lemon-peak-controller = { path = "../../plugins/lemon-peak-controller", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"

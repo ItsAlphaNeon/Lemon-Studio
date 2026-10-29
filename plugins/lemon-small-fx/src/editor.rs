@@ -895,7 +895,7 @@ mod gui {
 mod tests {
     use super::*;
     use crate::tests::SPECS;
-    use crate::{balance, chorus, fast_distortion, filter, flanger, phaser, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor, Control};
+    use crate::{balance, chorus, fast_distortion, filter, flanger, peak_controller, phaser, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor, Control};
 
     fn logic(spec: &'static Spec) -> Logic {
         let mut l = Logic::new(spec, Arc::new(FxParams::new(spec)), Arc::new(Shared::default()), None);
@@ -1095,7 +1095,7 @@ mod tests {
             }
             pm.save_png(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
         };
-        let settings: [(&Spec, &str, &[(&str, i32)]); 10] = [
+        let settings: [(&Spec, &str, &[(&str, i32)]); 11] = [
             (soft_clipper::SPEC, "soft_clipper", &[("threshold", 64), ("post", 150)]),
             (fast_distortion::SPEC, "fast_distortion", &[("pre", 192), ("threshold", 3), ("type", 1), ("mix", 100), ("post", 110)]),
             (balance::SPEC, "balance", &[("balance", -70), ("volume", 220)]),
@@ -1110,6 +1110,7 @@ mod tests {
             (filter::SPEC, "filter", &[("cutoff", 544), ("resonance", 900), ("low", 0), ("band", 1024), ("high", 464), ("x2", 1)]),
             (flanger::SPEC, "flanger", &[("delay", 300), ("depth", 4200), ("rate", 900), ("shape", 512), ("feed", 70), ("invert_feed", 0), ("damp", 1500), ("cross", 0)]),
             (phaser::SPEC, "phaser", &[("sweep", 4000), ("range", 1024), ("stages", 15), ("feedback", 850), ("dry_wet", 0), ("gain", 2500)]),
+            (peak_controller::SPEC, "peak_controller", &[("base", 13568), ("amount", -120), ("decay", 30), ("lfo_amount", 200), ("speed", 13000), ("shape", 3), ("ramp", 1)]),
         ];
         for (spec, name, values) in settings {
             let mut l = logic(spec);

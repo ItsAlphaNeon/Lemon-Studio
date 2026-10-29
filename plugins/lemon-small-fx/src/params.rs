@@ -124,7 +124,18 @@ pub fn first(spec: &Spec) -> usize {
 
 /// In [`Spec::fields`]: the setting is not an int but bit 0 of the byte right after the ints (Fruity Filter's Center),
 /// read as 0 from a state without that byte (an earlier version).
-pub const BYTE: usize = usize::MAX;
+pub const BYTE: usize = byte(0);
+
+/// In [`Spec::fields`]: bit 0 of the `n`-th byte after the ints (Fruity Peak Controller's Mute and Ramp: `byte(0)`,
+/// `byte(1)`), read as 0 from a state without that byte.
+pub const fn byte(n: usize) -> usize {
+    usize::MAX - n
+}
+
+/// The byte after the ints a field of [`Spec::fields`] is, if it is one.
+fn byte_of(i: usize) -> Option<usize> {
+    (i > usize::MAX - 16).then(|| usize::MAX - i)
+}
 
 /// The int (after the version field) setting `k` is ([`BYTE`] for the byte after the ints).
 pub fn int_of(spec: &Spec, k: usize) -> usize {
@@ -134,13 +145,13 @@ pub fn int_of(spec: &Spec, k: usize) -> usize {
 /// The ints the saved state has for its settings (after the version field): one per setting but a [`BYTE`] one, and
 /// those the description leaves out.
 pub fn ints(spec: &Spec) -> usize {
-    let bytes = spec.fields.iter().filter(|&&i| i == BYTE).count();
-    spec.fields.iter().filter(|&&i| i != BYTE).map(|&i| i + 1).max().unwrap_or(0).max(spec.settings.len() - bytes)
+    let bytes = spec.fields.iter().filter(|&&i| byte_of(i).is_some()).count();
+    spec.fields.iter().filter(|&&i| byte_of(i).is_none()).map(|&i| i + 1).max().unwrap_or(0).max(spec.settings.len() - bytes)
 }
 
-/// Where a [`BYTE`] setting is: the byte after the ints.
-fn byte_at(spec: &Spec) -> usize {
-    4 * (first(spec) + ints(spec))
+/// Where the `n`-th byte setting is: that byte after the ints.
+fn byte_at(spec: &Spec, n: usize) -> usize {
+    4 * (first(spec) + ints(spec)) + n
 }
 
 /// The shortest readable saved state: the version field, if any, and the settings' ints.
@@ -157,21 +168,23 @@ pub fn normalized(spec: &Spec, b: Vec<u8>) -> Vec<u8> {
 
 /// Setting `k`'s stored value.
 pub fn setting(spec: &Spec, b: &[u8], k: usize) -> i32 {
-    match int_of(spec, k) {
-        BYTE => b.get(byte_at(spec)).map_or(0, |x| i32::from(x & 1)),
-        i => field(b, first(spec) + i),
+    let i = int_of(spec, k);
+    match byte_of(i) {
+        Some(n) => b.get(byte_at(spec, n)).map_or(0, |x| i32::from(x & 1)),
+        None => field(b, first(spec) + i),
     }
 }
 
 /// Writes setting `k` (a [`BYTE`] setting only where the state has its byte; the other bits of it are kept).
 pub fn set_setting(spec: &Spec, b: &mut [u8], k: usize, v: i32) {
-    match int_of(spec, k) {
-        BYTE => {
-            if let Some(x) = b.get_mut(byte_at(spec)) {
+    let i = int_of(spec, k);
+    match byte_of(i) {
+        Some(n) => {
+            if let Some(x) = b.get_mut(byte_at(spec, n)) {
                 *x = (*x & !1) | (v & 1) as u8;
             }
         }
-        i => set_field(b, first(spec) + i, v),
+        None => set_field(b, first(spec) + i, v),
     }
 }
 
@@ -206,8 +219,8 @@ pub fn to_fl(spec: &Spec, vals: &[i32], raw: &[u8]) -> Vec<u8> {
     for (k, &v) in vals.iter().enumerate().take(spec.settings.len()) {
         if decode(spec, k, setting(spec, &b, k)) != v {
             // A state of the version before the byte gains it, and the version that has it.
-            if int_of(spec, k) == BYTE && b.len() <= byte_at(spec) {
-                b.resize(byte_at(spec) + 1, 0);
+            if let Some(n) = byte_of(int_of(spec, k)).filter(|&n| b.len() <= byte_at(spec, n)) {
+                b.resize(byte_at(spec, n) + 1, 0);
                 if let Some(version) = spec.version {
                     set_field(&mut b, 0, version);
                 }

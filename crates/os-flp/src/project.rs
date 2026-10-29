@@ -159,6 +159,8 @@ mod id {
     /// (spec: flp/events/automation.md).
     pub const AUTO_DATA: u8 = 234;
     pub const AUTO_LINK: u8 = 227;
+    /// A link's mapping formula, right after its event 227 (spec: flp/events/automation.md "Controller links").
+    pub const LINK_FORMULA: u8 = 230;
 
     pub const MX_COLOR: u8 = 149;
     pub const MX_COLOR_FLAG: u8 = 42;
@@ -402,6 +404,9 @@ struct Layout {
     mixer_params: Option<usize>,
     /// Automation links (event 227 with a zero first field), in the prelude.
     links: Vec<usize>,
+    /// Controller links (event 227 with the bit 0x8000 in its first field), in the prelude, each with the formula event
+    /// (230) right after it.
+    ctl_links: Vec<(usize, Option<usize>)>,
     swing: Option<usize>,
     /// Time signature and "play truncated notes" (spec: flp/engine-events.md "Project").
     time_num: Option<usize>,
@@ -546,6 +551,12 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
             }
             (Region::Prelude, _) => match e.id {
                 id::AUTO_LINK if e.data().is_some_and(|d| d.len() >= 20 && d[0] == 0 && d[1] == 0) => l.links.push(i),
+                id::AUTO_LINK if e.data().and_then(os_model::ControllerLink::from_bytes).is_some() => l.ctl_links.push((i, None)),
+                id::LINK_FORMULA => {
+                    if let Some(c) = l.ctl_links.last_mut().filter(|c| c.0 + 1 == i) {
+                        c.1 = Some(i);
+                    }
+                }
                 id::VERSION => l.version = Some(i),
                 id::TEMPO => l.tempo = Some(i),
                 id::TITLE => l.title = Some(i),
@@ -796,6 +807,15 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
             folder: l.info_202.and_then(|i| events[i].data()).map(|d| decode_text(d, enc)).unwrap_or_default(),
         }),
         init_controls,
+        controller_links: l
+            .ctl_links
+            .iter()
+            .filter_map(|&(i, f)| {
+                let mut c = events[i].data().and_then(os_model::ControllerLink::from_bytes)?;
+                c.formula = f.and_then(|f| events[f].data()).map(|d| decode_text(d, enc));
+                Some(c)
+            })
+            .collect(),
         ..Default::default()
     };
 
@@ -2862,6 +2882,33 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         inserts.extend(block.into_iter().rev().map(|e| (at, e)));
     }
 
+    // Controller links (spec: flp/events/automation.md "Controller links"): the k-th link event takes the model's k-th
+    // link and its formula (event 230 right after it), links beyond the file's go after its last one (before the first
+    // channel block when it has none), events beyond the model's go. Unchanged, the events stay as they are.
+    if project.controller_links != current.controller_links {
+        let formula = |s: &str| Event::new(id::LINK_FORMULA, Value::var(encode_text(s, enc)));
+        for (&(i, f), c) in l.ctl_links.iter().zip(&project.controller_links) {
+            set_data(&mut events[i], c.bytes.to_vec());
+            match (f, &c.formula) {
+                (Some(f), Some(s)) => set_data(&mut events[f], encode_text(s, enc)),
+                (Some(f), None) => removals.push(f),
+                (None, Some(s)) => inserts.push((i + 1, formula(s))),
+                (None, None) => {}
+            }
+        }
+        let at = l.ctl_links.last().map_or_else(|| l.channels.first().map_or(0, |c| c.start), |&(i, f)| f.unwrap_or(i) + 1);
+        for c in project.controller_links.iter().skip(l.ctl_links.len()).rev() {
+            if let Some(s) = &c.formula {
+                inserts.push((at, formula(s)));
+            }
+            inserts.push((at, Event::new(id::AUTO_LINK, Value::var(c.bytes.to_vec()))));
+        }
+        for &(i, f) in l.ctl_links.iter().skip(project.controller_links.len()) {
+            removals.push(i);
+            removals.extend(f);
+        }
+    }
+
     // Automation data of existing automation channels, and the links of every automation clip.
     for a in &project.automations {
         let old = current.automation(a.channel);
@@ -3849,6 +3896,10 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     }
     for a in &project.automations {
         ev.extend(a.targets.iter().map(|&t| link_event(a.channel, t)));
+    }
+    for c in &project.controller_links {
+        ev.push(Event::new(id::AUTO_LINK, Value::var(c.bytes.to_vec())));
+        ev.extend(c.formula.as_deref().map(|s| Event::new(id::LINK_FORMULA, Value::var(encode_text(s, enc)))));
     }
     for (i, ch) in project.channels.iter().enumerate() {
         ev.extend(channel_block_events(ch, project.automation(ch.index), enc)?);
@@ -6459,6 +6510,51 @@ mod tests {
             assert_eq!(l.len(), targets.len() + 1);
             assert_eq!(l[0], ctl, "the controller link is left alone");
             assert!(l[1..].iter().all(|d| d[2..4] == 2u16.to_le_bytes()));
+        }
+        assert_eq!(back.controller_links, vec![os_model::ControllerLink::from_bytes(&ctl).unwrap()]);
+    }
+
+    /// Controller links are read in file order with their bytes as they are; a new file holds them; changed links patch
+    /// their events, new ones follow the last, links gone are removed, and the automation links stay (spec:
+    /// flp/events/automation.md "Controller links").
+    #[test]
+    fn controller_links_round_trip() {
+        use os_model::target::{mixer, slot_param, MIXER_VOLUME};
+        use os_model::ControllerLink;
+        let mut p = new_project();
+        p.channels.push(Channel { kind: ChannelKind::Automation, ..sampler(2, "Clip", 0) });
+        p.automations.push(new_automation(2, mixer(3, MIXER_VOLUME), 0.5, 4.0));
+        let mut odd = ControllerLink::new(0x7000 + 2 * 64 + 1, 2, slot_param(1, 0, 5));
+        odd.bytes[4..8].copy_from_slice(&0x000D_2000u32.to_le_bytes());
+        odd.formula = Some("1-Input*0.8-0.2".into());
+        p.controller_links = vec![ControllerLink::new(0x7000 + 64, 1, mixer(2, MIXER_VOLUME)), odd];
+        let file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.controller_links, p.controller_links);
+        assert_eq!(back.controller_links[0].output(), 1);
+        assert_eq!(back.controller_links[0].source_slot(), Some((1, 0)));
+        assert_eq!(back.controller_links[1].source_slot(), Some((2, 1)));
+        assert_eq!(os_model::target::decode(back.controller_links[1].target()), os_model::target::Target::SlotParam(1, 0, 5));
+        assert_eq!(back.automations[0].targets, vec![mixer(3, MIXER_VOLUME)]);
+        let bytes = file.to_bytes().unwrap();
+        let mut same = file.clone();
+        apply(&back, &mut same).unwrap();
+        assert_eq!(same.to_bytes().unwrap(), bytes, "unchanged: byte for byte");
+        // The formula moves with its link, comes and goes with it.
+        let mut inverted = ControllerLink::new(0x7000 + 64, 0, mixer(4, MIXER_VOLUME));
+        inverted.formula = Some("1-Input".into());
+        let (a, b) = (p.controller_links[0].clone(), p.controller_links[1].clone());
+        let more = vec![b.clone(), inverted.clone(), a.clone(), inverted];
+        for links in [vec![b.clone()], more, vec![a, b], vec![]] {
+            let mut m = back.clone();
+            m.controller_links = links.clone();
+            let mut f = file.clone();
+            apply(&m, &mut f).unwrap();
+            let again = load(&FlpFile::parse(&f.to_bytes().unwrap()).unwrap()).unwrap();
+            assert_eq!(again.controller_links, links);
+            assert_eq!(again.automations[0].targets, vec![mixer(3, MIXER_VOLUME)]);
+            let n = |id: u8| events_of(&f).unwrap().iter().filter(|e| e.id == id).count();
+            assert_eq!(n(id::LINK_FORMULA), links.iter().filter(|c| c.formula.is_some()).count(), "no formula left over");
         }
     }
 

@@ -396,6 +396,12 @@ pub trait HostedEffect: Send {
     fn reported_delay_fx(&self) -> u32 {
         0
     }
+    /// A controller plugin's output `k` (0..1) as its last block left it, for the links that read it (spec:
+    /// plugins/lemon-peak-controller.md "Links"). `None`: no such output (yet).
+    fn control_fx(&self, k: usize) -> Option<f32> {
+        let _ = k;
+        None
+    }
 }
 
 pub type SharedEffect = Arc<Mutex<dyn HostedEffect>>;
