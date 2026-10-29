@@ -73,6 +73,8 @@ pub enum LinkMsg {
     /// A sample sent to the host (Tesla's Send): to the selected channel (true) or the playlist; the files wait in
     /// `os_hostlink::take_audio`.
     Audio(bool),
+    /// Notes for the plugin's channel (Lemon Slicer's dump), waiting in `os_hostlink::take_notes` under this token.
+    Notes(isize),
 }
 
 /// Mouse input on the lifted popup (see `lift_show`); positions in the main window (physical px).
@@ -99,6 +101,7 @@ pub fn take_link() -> Vec<(isize, LinkMsg)> {
                 }
                 os_hostlink::Cmd::Automate => LinkMsg::Automate(arg.max(0) as usize),
                 os_hostlink::Cmd::Audio => LinkMsg::Audio(arg != 0),
+                os_hostlink::Cmd::Notes => LinkMsg::Notes(arg),
                 _ => LinkMsg::Changed,
             };
             (area as isize, m)

@@ -66,6 +66,7 @@ mod midi_play;
 mod mixer;
 mod osc3;
 mod citrus;
+mod slicer;
 mod monitor;
 mod params;
 mod piano;

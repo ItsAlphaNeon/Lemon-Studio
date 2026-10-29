@@ -165,6 +165,10 @@ pub enum Request {
     /// playlist.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
     Audio(String, bool),
+    /// Notes a Lemon plugin sent for its channel's current pattern (host link `Notes`, Lemon Slicer's dump): row,
+    /// notes.
+    #[cfg_attr(not(plugin_windows), allow(dead_code))]
+    Notes(usize, Vec<os_hostlink::NoteOut>),
     /// The window was clicked (or docked / detached): it goes to the front of the app's window stack.
     Raise(usize),
     /// The menu arrow was clicked: open the window menu at this screen point.
@@ -252,15 +256,17 @@ pub struct Plugins {
 const STASH_MAX: usize = 64;
 
 /// Lemon Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
-/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon Trio and Citrus likewise (spec:
-/// plugins/lemon-3x-osc.md §6, plugins/citrus.md).
+/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon Trio, Citrus and Lemon Slicer likewise (spec:
+/// plugins/lemon-3x-osc.md §6, plugins/citrus.md, plugins/lemon-slicer.md §6).
 pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static OSC3: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static CITRUS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    static SLICER: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
     v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_TRIO));
     v.extend(linked(&CITRUS, &citrus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::citrus::CITRUS));
+    v.extend(linked(&SLICER, &lemon_slicer::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::slicer::LEMON_SLICER));
     v
 }
 
@@ -1138,6 +1144,8 @@ impl Plugins {
                 (Some(row), crate::plugin_window::LinkMsg::Note(k, v, on)) => out.push(Request::Note(row, k, v, on)),
                 (Some(row), crate::plugin_window::LinkMsg::Automate(i)) => out.push(Request::Automate(row, i)),
                 (_, crate::plugin_window::LinkMsg::Audio(_)) => out.extend(os_hostlink::take_audio().into_iter().map(|(p, ch)| Request::Audio(p, ch))),
+                (Some(row), crate::plugin_window::LinkMsg::Notes(token)) => out.push(Request::Notes(row, os_hostlink::take_notes(token))),
+                (None, crate::plugin_window::LinkMsg::Notes(token)) => drop(os_hostlink::take_notes(token)),
                 _ => {}
             }
         }
