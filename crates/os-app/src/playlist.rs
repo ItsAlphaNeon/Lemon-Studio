@@ -412,6 +412,8 @@ pub enum Cmd {
     Toolbar(crate::views::toolbar::Switch),
     /// VIEW ▸ Arrange windows ▸ (`crate::arrange`).
     Arrange(crate::arrange::Layout),
+    /// VIEW ▸ Background ▸ Set image wallpaper... (`crate::wallpaper`).
+    Wallpaper,
     /// A toolbar preset picked (spec: ui/toolbar-menu.md §8).
     ToolbarPreset(crate::toolbar::PresetId),
     /// The toolbar editor's Save preset as... and Delete preset.
@@ -3870,6 +3872,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.arrange(l);
             return None;
         }
+        Cmd::Wallpaper => {
+            app.wallpaper_dialog();
+            return None;
+        }
         Cmd::ToolbarPreset(id) => {
             app.toolbar_preset(id);
             return None;
@@ -4081,7 +4087,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

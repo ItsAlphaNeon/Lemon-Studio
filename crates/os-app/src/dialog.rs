@@ -65,6 +65,8 @@ pub enum Then {
     ExportFolder,
     OpenProject,
     LoadTheme,
+    /// VIEW ▸ Background ▸ Set image wallpaper... (`App::set_wallpaper`).
+    Wallpaper,
     /// The Arpeggiate dialog's folder button (spec: ui/piano-arpeggiate.md §1).
     ArpPattern,
     /// The Quantize dialog's folder button (spec: ui/piano-quantize.md §1).

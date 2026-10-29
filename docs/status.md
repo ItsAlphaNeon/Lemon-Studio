@@ -186,7 +186,9 @@ Not yet: Align all channel editors.
 **Arranging windows.** VIEW > Arrange windows: Realign (Shift+Ctrl+H) and Desktop (default) put the Playlist, Mixer,
 Piano roll and Channel rack back as a new install has them; Desktop (alternate) floats the Playlist over the top of
 the workspace with the Piano roll and Mixer side by side under it; Save custom layout keeps the current layout and
-Custom brings it back. The Tablet layouts are greyed (they need the toolbar at the bottom).
+Custom brings it back. The Tablet layouts are greyed (they need the toolbar at the bottom). VIEW > Background > Set
+image wallpaper... makes a PNG or JPEG picture the theme's workspace wallpaper; the HTML document and the background
+colour are greyed.
 
 **Window positions.** Where the windows were when Lemon Studio closed comes back at the next start: the main
 window (its place and size, and whether it was maximized; brought back onto a screen if its screen is gone) and the

@@ -2006,6 +2006,11 @@ impl App {
                     self.load_theme_file(&p);
                 }
             }
+            Then::Wallpaper => {
+                if let Some(p) = file {
+                    self.set_wallpaper(&p);
+                }
+            }
             Then::ArpPattern => {
                 if let Some(p) = file {
                     self.arp_command(crate::arpeggiate::ACmd::Pattern(Some(p)));

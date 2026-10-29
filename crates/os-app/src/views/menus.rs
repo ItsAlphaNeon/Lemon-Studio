@@ -96,6 +96,7 @@ pub enum Sub {
     Effect,
     Toolbars,
     Arrange,
+    Background,
     OneClick,
     DumpLog,
     AudioLog,
@@ -317,7 +318,7 @@ const VIEW_ITEMS: &[Item] = &[
     it("Align all channel editors", "Shift+F12"),
     it("Arrange windows", "").sub().cmd(MenuCmd::Sub(Sub::Arrange)),
     it(INTO_WORKSPACE_LABEL, "").on().cmd(MenuCmd::IntoWorkspace),
-    it("Background", "").sub(),
+    it("Background", "").sub().cmd(MenuCmd::Sub(Sub::Background)),
     head("Browser"),
     it("Undo history", "").cmd(MenuCmd::Jump(crate::browser::Jump::Section("History"))),
     it("Patterns", "").cmd(MenuCmd::Jump(crate::browser::Jump::Section("Patterns"))),
@@ -576,6 +577,8 @@ pub fn sub_items(cmd: MenuCmd) -> Option<fn(&State) -> Vec<crate::playlist::PIte
         Sub::Toolbars => toolbar_items,
         // spec: ui/menu-submenus.md §2
         Sub::Arrange => crate::arrange::items,
+        // spec: ui/menu-submenus.md §3
+        Sub::Background => crate::wallpaper::items,
     })
 }
 
@@ -1075,7 +1078,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", "Arrange windows", ONE_CLICK_LABEL, DUMP_LOG_LABEL, LOGGER_SETTINGS_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", "Arrange windows", "Background", ONE_CLICK_LABEL, DUMP_LOG_LABEL, LOGGER_SETTINGS_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Fade out only", "Transient", "Transient (tail continues)", "Standard (tail continues)", "Smooth (tail continues)", "Crossfade (tail continues)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");
