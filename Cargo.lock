@@ -1932,6 +1932,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-filter"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
+name = "lemon-flanger"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
 name = "lemon-limiter"
 version = "0.0.1"
 dependencies = [
@@ -1959,6 +1977,15 @@ dependencies = [
  "serde_json",
  "tiny-skia",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "lemon-phaser"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
 ]
 
 [[package]]
@@ -2847,8 +2874,11 @@ dependencies = [
  "lemon-chorus",
  "lemon-delay",
  "lemon-fast-distortion",
+ "lemon-filter",
+ "lemon-flanger",
  "lemon-limiter",
  "lemon-parametric-eq-2",
+ "lemon-phaser",
  "lemon-reverb",
  "lemon-sampler",
  "lemon-small-fx",

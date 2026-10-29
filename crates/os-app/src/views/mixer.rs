@@ -386,8 +386,15 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     let _ = f;
 
     // Body and the strip divider.
-    // The current strip's body is a shade lighter (measured: 0x26292b vs 0x232527).
-    let body = if selected { ui.t.s(0x26292b) } else { ui.t.s(0x232527) };
+    // The current strip's body is a shade lighter (measured: 0x26292b vs 0x232527); an armed one is tinted (0x312236 vs
+    // 0x2d1f31; spec: audio/track-io.md §1.5).
+    let armed = track.is_some_and(|m| m.armed);
+    let body = match (armed, selected) {
+        (true, true) => ui.t.s(0x312236),
+        (true, false) => ui.t.s(0x2d1f31),
+        (false, true) => ui.t.s(0x26292b),
+        (false, false) => ui.t.s(0x232527),
+    };
     let lemon = super::lemon(ui);
     if lemon {
         // Lemon (spec: ui/lemon-design.md §8): each strip is a rounded card on the dark gap colour.
@@ -516,7 +523,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     let hov = ui.hit(Rect::new(mx - 9.0, ly.y(TRACK_Y0) - 5.0, 18.0, track_y1 - ly.y(TRACK_Y0) + 10.0), Action::Fader(n), mx::level_text("Volume", f64::from(v)));
     fader_handle(ui, mx, hy, selected, hov);
 
-    // Input pin, latency clock and disk-recording dot: not available yet, greyed out.
+    // Input pin and latency clock: not available yet, greyed out. The disk-record button below them arms the track.
     let master = n == 0;
     let by = bottom;
     let pin_c = if master { ui.t.h(0xf09a28) } else { ui.t.s(0x4d5357) };
@@ -531,9 +538,15 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     g.ring(sx, by - 117.0, 6.0, 1.6).rect(sx - 0.7, by - 121.0, 1.4, 4.5).rect(sx - 0.7, by - 117.7, 3.5, 1.4);
     ui.c.glyph(clk, &g);
     ui.off(Rect::new(sx - 8.0, by - 125.0, 16.0, 16.0), "Track latency");
-    ui.off(Rect::new(sx - 6.0, by - 106.0, 12.0, 12.0), "Disk recording");
-    ui.c.fill_circle(sx, by - 100.0, 2.6, ui.t.tx(0xd8e0e6));
-    ui.veil(Rect::new(sx - 9.0, by - 149.0, 18.0, 55.0), body);
+    ui.veil(Rect::new(sx - 9.0, by - 149.0, 18.0, 38.0), body);
+    let hint = if armed { "Armed: monitoring the input (recording into tracks is not available yet)" } else { "Arm disk recording" };
+    let hov = ui.hit(Rect::new(sx - 7.0, by - 107.0, 14.0, 14.0), Action::Mix(MHit::Arm(n)), hint);
+    if armed {
+        // An orange-red ring about 8 px across with a 3 px hole.
+        ui.c.stroke_circle(sx, by - 100.0, 2.75, 2.5, ui.t.h(0xff633f));
+    } else {
+        ui.c.fill_circle(sx, by - 100.0, 2.6, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xd8e0e6) });
+    }
 
     // Routing (spec: ui/mixer.md §5): the current track's green ⬇ (its cables are drawn over all strips: `cables`),
     // a send knob where the current track sends, else the ▲ "route to this track" button; an orange "^" marks tracks that receive a route.
@@ -646,14 +659,30 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     let kp = ((room - 15.0) / 503.0).clamp(0.3, 1.0);
     let knobs = room >= 579.0;
     let q = kp.max(0.55);
-    // Input row: EQ glyph, "(none)" combo, latency clock. Audio inputs are not available yet: greyed out.
+    // Input row: the record-source icon with its label, the input combo, the input latency clock (not available yet:
+    // greyed out). Spec: audio/track-io.md §1.1, §2.3.
     let input_bg = ui.t.s(0x2b2e30);
     ui.c.fill_rect(Rect::new(r.x, r.y + 23.0, r.w, 36.0), input_bg);
+    let io = track.map_or((-1, os_model::REC_POST_EQ), |m| (m.audio_in, m.rec_source));
+    let icon = Rect::new(r.x + 3.0, r.y + 28.0, 21.0, 23.0);
+    let hov = ui.hit(icon, Action::Mix(MHit::RecSource), "Select what is included when recording audio");
+    // Grey while no input is chosen, orange once one is.
+    let ink = if hov { ui.t.tx(0xffffff) } else if io.0 >= 0 { ui.t.h(0xf09a28) } else { ui.t.s(0x5a6266) };
     let mut g = Glyph::new();
     g.polygon(&[(r.x + 7.0, r.y + 32.0), (r.x + 13.0, r.y + 32.0), (r.x + 18.0, r.y + 37.5), (r.x + 13.0, r.y + 43.0), (r.x + 7.0, r.y + 43.0)]);
-    ui.c.glyph(ui.t.s(0x40464a), &g);
-    ui.c.text(Font::new(9).bold(), r.x + 6.0, r.y + 43.0, ui.t.s(0x40464a), "EQ");
-    off_combo(ui, Rect::new(r.x + 27.0, r.y + 28.0, 159.0, 23.0), "Audio input source", input_bg);
+    ui.c.glyph(ink, &g);
+    let label = mx::REC_SOURCES.get(usize::from(io.1)).map_or("", |s| s.1);
+    let lf = Font::new(9).bold();
+    let lw = ui.c.text_width(lf, label);
+    ui.c.text(lf, r.x + 12.5 - lw / 2.0, r.y + 43.0, ink, label);
+    let (text, any) = mx::input_label(s, n);
+    let combo = Rect::new(r.x + 27.0, r.y + 28.0, 159.0, 23.0);
+    if any {
+        let hov = ui.hit(combo, Action::Mix(MHit::Input), "Audio input source");
+        os_ui::kit::combo(ui.c, ui.t, combo, &text, Font::new(17), os_ui::kit::State::hover(hov));
+    } else {
+        off_combo(ui, combo, "Audio input source", &text, input_bg);
+    }
     let mut g = Glyph::new();
     g.ring(r.x + 202.0, r.y + 39.5, 8.5, 1.8).rect(r.x + 201.2, r.y + 34.0, 1.6, 6.5).rect(r.x + 201.2, r.y + 38.9, 5.0, 1.6);
     ui.c.glyph(ui.t.tx(0xd4dade), &g);
@@ -777,13 +806,13 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     }
     let b = r.bottom();
 
-    // Output rows at the bottom: audio outputs are not available yet, greyed out.
+    // Output rows at the bottom: the track latency combo (not available yet: greyed out), then the output combo.
     ui.c.fill_rect(Rect::new(r.x, b - 66.0, r.w, 1.0), ui.t.s(0x1f2224));
     ui.c.fill_rect(Rect::new(r.x, b - 33.0, r.w, 1.0), ui.t.s(0x1f2224));
     let mut g = Glyph::new();
     g.ring(r.x + 14.0, b - 48.5, 8.0, 1.5).rect(r.x + 13.3, b - 53.0, 1.4, 5.0).rect(r.x + 13.3, b - 49.2, 4.0, 1.4);
     ui.c.glyph(ui.t.s(0x40464a), &g);
-    ui.off(Rect::new(r.x + 25.0, b - 60.0, r.w - 28.0, 22.0), "Audio output target");
+    ui.off(Rect::new(r.x + 25.0, b - 60.0, r.w - 28.0, 22.0), "Track latency");
     ui.c.text(Font::new(17), r.x + 30.0, b - 59.0, ui.t.tx(0xd4dade), "(none)");
     chevron(ui, r.right() - 11.0, b - 48.5, true, ui.t.tx(0x8c969c));
     ui.veil(Rect::span(r.x, r.right(), b - 65.0, b - 34.0), ui.t.s(0x2e3133));
@@ -792,15 +821,16 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     g.erase(true).rect(r.x + 13.0, b - 26.0, 10.0, 20.0);
     g.erase(false).polygon(&[(r.x + 11.0, b - 20.5), (r.x + 16.0, b - 20.5), (r.x + 21.0, b - 16.0), (r.x + 16.0, b - 11.5), (r.x + 11.0, b - 11.5)]);
     ui.c.glyph(ui.t.tx(0xc4ccd0), &g);
-    ui.veil(Rect::new(r.x + 3.0, b - 26.0, 20.0, 20.0), ui.t.s(0x2e3133));
-    off_combo(ui, Rect::new(r.x + 26.0, b - 28.0, 189.0, 24.0), "Audio output target", ui.t.s(0x2e3133));
+    let out = Rect::new(r.x + 26.0, b - 28.0, 189.0, 24.0);
+    let hov = ui.hit(out, Action::Mix(MHit::Output), "Audio output target");
+    os_ui::kit::combo(ui.c, ui.t, out, &mx::output_label(s, n), Font::new(17), os_ui::kit::State::hover(hov));
 }
 
-/// An input / output combo that is not available yet: drawn greyed out, its hit only says so.
-fn off_combo(ui: &mut Ui, r: Rect, name: &'static str, bg: Color) {
+/// An input combo with nothing to choose (no device inputs): drawn greyed out with `text`, its hit only says so.
+fn off_combo(ui: &mut Ui, r: Rect, name: &'static str, text: &str, bg: Color) {
     ui.off(r, name);
     let st = os_ui::kit::State::NORMAL.with_disabled(true);
-    os_ui::kit::combo(ui.c, ui.t, r, "(none)", Font::new(17), st);
+    os_ui::kit::combo(ui.c, ui.t, r, text, Font::new(17), st);
     ui.veil(r, bg);
 }
 

@@ -247,6 +247,14 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             ui.c.text_clip(label_font, nr.x + if lemon { 4.0 } else { 3.0 }, nr.y + 2.0, room - 4.0, text, &shown);
         }
     }
+    // Notes still held while recording, growing to the playhead (spec: ui/recording.md §2 "Shown while held").
+    for n in crate::record::held_notes(s, f.tick).iter().filter(|n| f.playing && Some(n.channel) == ch) {
+        let Some(nr) = g.note_rect(n) else { continue };
+        let body = Rect::new(nr.x + 1.0, nr.y + 1.0, (nr.w - 2.0).max(1.0), nr.h - 2.0);
+        let rad = if lemon { 3.5f32.min(nr.w / 2.0).min(nr.h / 2.0) } else { 2.0 };
+        ui.c.fill_rrect(nr, rad, t.note_rim);
+        ui.c.fill_rect_gradient(body, t.note_top, t.note_bottom, (rad - 1.0).max(0.0));
+    }
     // Tool overlays (§9): marquee and zoom box (orange, rounded), slice and scrub lines.
     match s.piano.overlay {
         Some(Overlay::Marquee(m) | Overlay::ZoomBox(m)) => {

@@ -11,9 +11,12 @@ pub mod delay;
 pub mod dynamics;
 pub mod eq;
 pub mod fast_dist;
+pub mod filter;
+pub mod flanger;
 pub mod limiter;
 pub mod love_philter;
 pub mod maximus;
+pub mod phaser;
 pub mod reverb;
 pub mod soft_clipper;
 pub mod stereo_enhancer;
@@ -64,12 +67,15 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
         "Fruity Balance" => balance::Balance::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Stereo Enhancer" => stereo_enhancer::StereoEnhancer::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Chorus" => chorus::Chorus::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Flanger" => flanger::Flanger::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Phaser" => phaser::Phaser::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Stereo Shaper" => stereo_shaper::StereoShaper::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Love Philter" => love_philter::LovePhilter::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Maximus" => maximus::Maximus::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Transient Processor" => {
             transient_processor::TransientProcessor::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
         }
+        "Fruity Filter" => filter::Filter::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         _ => None,
     }
 }

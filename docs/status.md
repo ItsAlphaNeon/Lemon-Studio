@@ -169,7 +169,11 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   levels, stereo separation and the channel's level adjustments
 - All thirteen curve shapes are walked exactly; values are taken one tick ahead and passed on only when
   they change
-- Not yet: recording of movements, clip LFO, min / range
+- A clip's range (its channel's MIN and MAX knobs, minimum above maximum turning the curve upside down) and its
+  LFO (on / off, multiply or add, amount, speed, tension, skew, pulse width, and its own envelope) shape what it
+  hands on, in the original's arithmetic; the clip's channel window sets them, each change an undo step, and
+  projects keep every LFO field
+- Not yet: recording of movements
 
 ## 🚧 Project files
 
@@ -210,8 +214,20 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Lemon Soft Clipper, Lemon Fast Distortion, Lemon Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon
   Chorus and Lemon Stereo Shaper as VST3 and CLAP plugins; a project's Fruity Soft Clipper, Fruity Fast Dist, Fruity
   Balance, Fruity Stereo Enhancer, Transient Processor, Fruity Chorus and Fruity Stereo Shaper play through the same
-  sound in the mixer. The first four match FL Studio 2026's exports sample for sample in the tests; Transient
-  Processor, Chorus and Stereo Shaper have not been compared with FL 2026's exports yet
+  sound in the mixer. Six match FL Studio 2026's exports sample for sample in the tests; the Chorus, with the true pi
+  where the original's is a hair off, in 10 of 21 cases and the rest at least 37 dB below the test signal (once each
+  export's LFO start phases are known: the original draws them anew for every render)
+- Lemon Filter (Fruity Filter: a resonant low, band and high pass mix, X 2 and the DC remover) as a VST3 and CLAP
+  plugin, with its response drawn in the editor; a project's Fruity Filter slots play through the same sound, which
+  matches FL Studio 2026's exports in the tests (10 of 13 cases sample for sample, the rest below -180 dB)
+- Pulp Filter (Fruity Love Philter: a pattern-controlled multi-filter) and Press (Maximus: a multiband maximiser) as
+  VST3 and CLAP plugins; a project's Fruity Love Philter and Maximus slots play and open in them, and are saved back
+  as the original effects with their state
+- Lemon Flanger and Lemon Phaser as VST3 and CLAP plugins, each with the original's 27 presets as factory presets; a
+  project's Fruity Flanger and Fruity Phaser play through the same sound in the mixer. Their sine waves use the true
+  pi, where the original's is a hair off: the flanger still matches FL Studio 2026's exports sample for sample in the
+  tests (36 cases), the phaser in 11 of 35 and the rest at least 86 dB below the test signal; the phaser's LFO starts
+  as after 512 idle frames, one of the two starts (512 or 1024) FL's exports make
 - The Stereo Shaper's difference output plays in the mixer (added to the track it names, from the first tick, without
   delay compensation); Lemon Stereo Shaper as a plugin keeps the setting but has no output for it
 - Lemon Parametric EQ plays FL's Parametric EQ 2 in every quality mode, in a project's mixer slots and as a plugin:

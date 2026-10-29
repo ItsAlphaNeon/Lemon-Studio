@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 Samrat Dutta
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -165,6 +166,9 @@ pub struct SettingsUi {
     pub devices: Vec<String>,
     pub asio_drivers: Vec<String>,
     pub device: String,
+    /// The input devices, and the Input device box's text.
+    pub inputs: Vec<String>,
+    pub input: String,
     /// Audio page: the audio settings, the rate streams open at, and the status lines (kept up to date while shown).
     pub audio: crate::audio_cfg::AudioCfg,
     pub rate: Option<u32>,
@@ -304,10 +308,13 @@ fn live(key: &str) -> bool {
 }
 
 /// The combos that work (they open a menu of choices, `App::audio_menu`).
-pub const LIVE_COMBOS: [&str; 5] = [OUTPUT_DEVICE, MODE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS];
+pub const LIVE_COMBOS: [&str; 6] = [OUTPUT_DEVICE, INPUT_DEVICE, MODE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS];
 /// General ▸ Display: "Playful" simulates the mixer's cables, "Off" hangs them still (crate::cable).
 pub const ANIMATIONS: &str = "Animations";
 pub const OUTPUT_DEVICE: &str = "Output device";
+/// The device the mixer tracks' inputs and one-click recording take in from (not under an ASIO driver, whose inputs
+/// are its own).
+pub const INPUT_DEVICE: &str = "Input device";
 pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
 /// Windows devices: shared mode, or exclusive mode with the device to Lemon Studio alone (spec:
@@ -599,6 +606,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             vec![
                 g("Input / output", [
                     vec![combo(&st.device, 360.0, OUTPUT_DEVICE)],
+                    if asio { Vec::new() } else { vec![combo(&st.input, 360.0, INPUT_DEVICE)] },
                     // Windows devices play shared or exclusive (greyed under an ASIO driver, `MODE_ASIO`); so do Linux
                     // ones, through the sound server or ALSA.
                     if cfg!(windows) || cfg!(target_os = "linux") {

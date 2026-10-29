@@ -209,16 +209,17 @@ impl Default for Tap {
 }
 
 impl Tap {
-    /// One stream's block (interleaved stereo) for device block `block`, taken `at`. The streams of one device block
-    /// (playback and live notes) are summed, as the device hears them; a new device block comes after the last.
-    fn push(&mut self, stereo: &[f32], block: u64, at: Instant, rate: u32) {
-        let n = (stereo.len() / 2) as u64;
+    /// One stream's block (interleaved, `w` channels: its first pair is taken) for device block `block`, taken `at`.
+    /// The streams of one device block (playback and live notes) are summed, as the device hears them; a new device
+    /// block comes after the last.
+    fn push(&mut self, stereo: &[f32], w: usize, block: u64, at: Instant, rate: u32) {
+        let n = (stereo.len() / w) as u64;
         let same = block != 0 && block == self.block && n == self.frames;
         if !same {
             (self.block, self.start, self.frames, self.at, self.rate) = (block, self.total, n, Some(at), rate);
             self.total += n;
         }
-        for (i, f) in stereo.chunks_exact(2).enumerate() {
+        for (i, f) in stereo.chunks_exact(w).enumerate() {
             let k = (self.start as usize + i) % TAP_FRAMES;
             if same {
                 self.l[k] += f[0];
@@ -879,6 +880,8 @@ impl Transport {
 /// each tick the feeder records where it starts in the queue, its tick and the engine's frame there, so the callback
 /// can publish the position of what is being heard.
 struct Queue {
+    /// Samples in a frame: 2 × the device's output pairs (`Engine::width`).
+    w: usize,
     samples: Box<[AtomicU32]>,
     /// Samples written / read since the start.
     written: AtomicU64,
@@ -896,8 +899,9 @@ struct Queue {
 }
 
 impl Queue {
-    fn new() -> Queue {
+    fn new(w: usize) -> Queue {
         Queue {
+            w,
             samples: (0..QUEUE_SAMPLES).map(|_| AtomicU32::new(0)).collect(),
             written: AtomicU64::new(0),
             read: AtomicU64::new(0),
@@ -964,10 +968,11 @@ impl Queue {
         }
         let rec = &self.ticks[at as usize % QUEUE_TICKS];
         // The samples a whole tick lasts: a block delay compensation cut short still moves at the song's pace.
-        let (start, len) = (rec[0].load(Ordering::Relaxed), 2 * rec[5].load(Ordering::Relaxed).max(1));
+        let w = self.w as u64;
+        let (start, len) = (rec[0].load(Ordering::Relaxed), w * rec[5].load(Ordering::Relaxed).max(1));
         // A held tick is heard at its start all through (the paused position stays put).
         let into = if rec[4].load(Ordering::Relaxed) != 0 { 0 } else { r.saturating_sub(start) };
-        Some((rec[3].load(Ordering::Relaxed) + into / 2, f64::from_bits(rec[2].load(Ordering::Relaxed)) + into as f64 / len as f64))
+        Some((rec[3].load(Ordering::Relaxed) + into / w, f64::from_bits(rec[2].load(Ordering::Relaxed)) + into as f64 / len as f64))
     }
 }
 
@@ -999,7 +1004,8 @@ impl Feeder {
     /// finds the block, the margin and less than a tick more queued.
     fn fill(&mut self, block: usize) {
         let block = block.max(self.queue.block.load(Ordering::Relaxed)) as u64;
-        let want = 2 * (block + margin(block, self.rate));
+        let w = self.queue.w as u64;
+        let want = w * (block + margin(block, self.rate));
         let Ok(mut e) = self.engine.lock() else { return };
         // Song playback loops over the loop points as they are now.
         if self.ctl.report.load(Ordering::Relaxed) {
@@ -1020,8 +1026,8 @@ impl Feeder {
                     break;
                 }
                 Some((s, tick, frame, held, tick_frames)) => {
-                    frames += s.len() as u64 / 2;
-                    let at = self.queue.written.load(Ordering::Relaxed) / 2;
+                    frames += s.len() as u64 / w;
+                    let at = self.queue.written.load(Ordering::Relaxed) / w;
                     self.queue.push(s, tick, frame, held, tick_frames);
                     // The playback's meters wait for the device to play this tick.
                     if self.meters && self.ctl.report.load(Ordering::Relaxed) {
@@ -1736,6 +1742,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 device.close_idle();
             }
         }
+        // The system's input device, with the output, while a track has an input chosen.
+        if let Some(e) = device.sync_inputs() {
+            report(&shared, e);
+        }
         if let Some((_, tries)) = open_asio.filter(|&(at, _)| !closed && lost.is_none() && Instant::now() >= at) {
             open_asio = None;
             if crate::audio_cfg::AudioCfg::current().asio_driver().is_some() {
@@ -1908,6 +1918,10 @@ impl Session {
         let out = device.open()?;
         let (rate, fixed, info) = (out.info.rate, out.info.fixed, out.info.clone());
         let mut e = engine(project, library, rate, mode, inst, kind != Kind::Preview);
+        // The device's output pairs, and its inputs for the mixer tracks that hear them (a preview hears none; spec:
+        // audio/track-io.md §2.2).
+        let input = (kind != Kind::Preview).then(|| crate::device::input_reader((f64::from(rate) * MARGIN_MAX) as u64));
+        e.set_device(info.pairs(), input.map(|i| Box::new(i) as Box<dyn os_engine::DeviceInput>));
         // Playback loops: a pattern on its bar line, the song at its end (back to the start).
         e.set_looping(song);
         if kind == Kind::Live {
@@ -1940,7 +1954,7 @@ impl Session {
             publish(&shared, &info);
         }
         // The queue gets a first block before the stream starts; then the feeder keeps it filled.
-        let queue = Arc::new(Queue::new());
+        let queue = Arc::new(Queue::new(2 * info.pairs()));
         let mut feeder = Feeder::new(engine.clone(), queue.clone(), shared.clone(), ctl.clone(), rate);
         feeder.meters = kind != Kind::Preview;
         feeder.fill(PREFILL_FRAMES.max(fixed.unwrap_or(0) as usize));
@@ -1984,6 +1998,8 @@ struct Renderer {
     detach: Arc<AtomicBool>,
     /// When the device last asked for a block (monitored streams, for `Ahead::gap`).
     asked: Option<Instant>,
+    /// A block in the queue's width, for a device of another (opened anew with other pairs while it plays).
+    other: Vec<f32>,
 }
 
 impl Renderer {
@@ -1991,7 +2007,8 @@ impl Renderer {
         let step = (1.0 / (f64::from(rate.max(1)) * FADE_SECONDS)) as f32;
         // A stream that starts paused (moved to new audio settings while paused) starts silent.
         let gain = if ctl.paused.load(Ordering::Relaxed) { 0.0 } else { 1.0 };
-        Renderer { queue, wake: None, inline: None, ctl, done, shared, gain, step, tap: false, detach: Arc::new(AtomicBool::new(false)), asked: None }
+        let other = Vec::with_capacity(queue.w * 2 * 8192);
+        Renderer { queue, wake: None, inline: None, ctl, done, shared, gain, step, tap: false, detach: Arc::new(AtomicBool::new(false)), asked: None, other }
     }
 
     /// Renders one block (see `render_block`) and copies it to the monitor tap, unless the stream is held.
@@ -2000,34 +2017,35 @@ impl Renderer {
         self.render_block(stereo);
         if self.tap && !held {
             if let Ok(mut t) = self.shared.tap.try_lock() {
-                t.push(stereo, crate::device::blocks(), Instant::now(), self.shared.sample_rate.load(Ordering::Relaxed));
+                t.push(stereo, self.queue.w, crate::device::blocks(), Instant::now(), self.shared.sample_rate.load(Ordering::Relaxed));
             }
         }
     }
 
-    /// Plays `stereo.len() / 2` frames (interleaved L/R) from the queue. A paused stream, once faded out, reads
-    /// nothing, so its position and the queued ticks stay exactly where they were.
+    /// Plays `stereo.len() / w` frames (interleaved, the queue's `w` channels) from the queue. A paused stream, once
+    /// faded out, reads nothing, so its position and the queued ticks stay exactly where they were.
     fn render_block(&mut self, stereo: &mut [f32]) {
+        let w = self.queue.w;
         let target = if self.ctl.paused.load(Ordering::Relaxed) { 0.0 } else { 1.0 };
         if self.gain == 0.0 && target == 0.0 {
             stereo.fill(0.0);
             return;
         }
-        self.queue.block.fetch_max(stereo.len() / 2, Ordering::Relaxed);
+        self.queue.block.fetch_max(stereo.len() / w, Ordering::Relaxed);
         if self.tap {
-            self.shared.block.store((stereo.len() / 2) as u32, Ordering::Relaxed);
+            self.shared.block.store((stereo.len() / w) as u32, Ordering::Relaxed);
         }
         if let Some(f) = &mut self.inline {
             f.fill(0);
         }
         if self.tap {
             let now = Instant::now();
-            self.shared.ahead.record(self.queue.queued() / 2, self.asked.map(|t| now - t));
+            self.shared.ahead.record(self.queue.queued() / w as u64, self.asked.map(|t| now - t));
             self.asked = Some(now);
         }
         // Where the block starts (the playback's position moves from here to its end while the device plays it).
         let from = self.queue.heard();
-        let read = self.queue.read.load(Ordering::Relaxed) / 2;
+        let read = self.queue.read.load(Ordering::Relaxed) / w as u64;
         let got = self.queue.pop(stereo);
         let ended = self.queue.ended.load(Ordering::Acquire);
         if got < stereo.len() {
@@ -2054,26 +2072,41 @@ impl Renderer {
                 self.shared.tick.store(tick.to_bits(), Ordering::Relaxed);
                 if let Ok(mut p) = self.shared.pace.try_lock() {
                     let rate = self.shared.sample_rate.load(Ordering::Relaxed);
-                    *p = Some(Pace { from: from.unwrap_or((frame, tick)), to: (frame, tick), read: (read, read + (got / 2) as u64), frames: (got / 2) as u64, at: Instant::now(), rate });
+                    *p = Some(Pace { from: from.unwrap_or((frame, tick)), to: (frame, tick), read: (read, read + (got / w) as u64), frames: (got / w) as u64, at: Instant::now(), rate });
                 }
             }
         }
         if self.gain != 1.0 || target != 1.0 {
-            for f in stereo.chunks_exact_mut(2) {
+            for f in stereo.chunks_exact_mut(w) {
                 self.gain = if self.gain < target { (self.gain + self.step).min(target) } else { (self.gain - self.step).max(target) };
-                f[0] *= self.gain;
-                f[1] *= self.gain;
+                for s in f {
+                    *s *= self.gain;
+                }
             }
         }
     }
 }
 
-/// What the device plays of a stream: its block, and its own peaks for the meters.
+/// What the device plays of a stream: its block, and its own peaks (the first pair's) for the meters.
 impl Source for Renderer {
-    fn play(&mut self, stereo: &mut [f32]) {
-        self.render(stereo);
+    fn play(&mut self, out: &mut [f32], width: usize) {
+        let w = self.queue.w;
+        if width == w {
+            self.render(out);
+        } else {
+            // The pairs both have; the device's others are silent.
+            let mut other = std::mem::take(&mut self.other);
+            other.resize(out.len() / width * w, 0.0);
+            self.render(&mut other);
+            for (o, f) in out.chunks_exact_mut(width).zip(other.chunks_exact(w)) {
+                let n = width.min(w);
+                o[..n].copy_from_slice(&f[..n]);
+                o[n..].fill(0.0);
+            }
+            self.other = other;
+        }
         let (mut pl, mut pr) = (0.0f32, 0.0f32);
-        for s in stereo.chunks_exact(2) {
+        for s in out.chunks_exact(width) {
             pl = pl.max(s[0].abs());
             pr = pr.max(s[1].abs());
         }
@@ -2112,7 +2145,7 @@ mod tests {
     fn renderer(e: Engine) -> (Renderer, Arc<Ctl>, Arc<Shared>) {
         let ctl = Arc::new(Ctl { paused: AtomicBool::new(false), held: AtomicBool::new(false), report: AtomicBool::new(true) });
         let shared = Arc::new(Shared::default());
-        let queue = Arc::new(Queue::new());
+        let queue = Arc::new(Queue::new(2));
         let mut r = Renderer::new(queue.clone(), ctl.clone(), Arc::new(AtomicBool::new(false)), shared.clone(), 48000);
         r.inline = Some(Feeder::new(Arc::new(Mutex::new(e)), queue, shared.clone(), ctl.clone(), 48000));
         (r, ctl, shared)
@@ -2193,9 +2226,9 @@ mod tests {
         let mut project = crate::app::test_project();
         project.tempo = Some(130.0);
         let index = project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
-        project.channels.push(Channel { index, kind: ChannelKind::Automation, ..project.channels[0].clone() });
+        project.channels.push(Channel { index, kind: ChannelKind::Automation, pan: -1.0, volume: 1.0, ..project.channels[0].clone() });
         // 0.25: (10000 + Round(0.25 * 512000)) / 1000 = 138 BPM.
-        project.automations.push(Automation { channel: index, targets: vec![target::TEMPO], points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![] });
+        project.automations.push(Automation { channel: index, targets: vec![target::TEMPO], points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![], lfo: Default::default() });
         project.arrangements = vec![os_model::Arrangement { clips: vec![Clip::new(0, 384 * 4, 0, ClipSource::Channel(index))], ..Default::default() }];
         let e = Engine::new(&project, &mut SampleLibrary::default(), 48000, PlayMode::Song);
         let (mut r, _, shared) = renderer(e);
@@ -2480,18 +2513,18 @@ mod tests {
     fn the_tap_is_heard_through_the_block() {
         let mut t = Tap::default();
         let t0 = Instant::now();
-        t.push(&[0.5; 2 * 4800], 1, t0, 48000);
+        t.push(&[0.5; 2 * 4800], 2, 1, t0, 48000);
         assert_eq!((t.total, t.heard(t0)), (4800, 0), "taken, not heard yet");
         assert_eq!(t.heard(t0 + Duration::from_millis(50)), 2400, "half way through 100 ms");
         assert_eq!(t.heard(t0 + Duration::from_secs(1)), 4800, "not past its end");
         // Live notes in the same device block: summed, not after it.
-        t.push(&[0.25; 2 * 4800], 1, t0, 48000);
+        t.push(&[0.25; 2 * 4800], 2, 1, t0, 48000);
         assert_eq!((t.total, t.l[10], t.r[4799]), (4800, 0.75, 0.75));
-        t.push(&[0.0; 2 * 4800], 2, t0 + Duration::from_millis(100), 48000);
+        t.push(&[0.0; 2 * 4800], 2, 2, t0 + Duration::from_millis(100), 48000);
         assert_eq!((t.total, t.start, t.heard(t0 + Duration::from_millis(125))), (9600, 4800, 6000));
         // Without a rate (no stream opened yet), everything written is heard.
         let mut u = Tap::default();
-        u.push(&[0.0; 8], 0, t0, 0);
+        u.push(&[0.0; 8], 2, 0, t0, 0);
         assert_eq!(u.heard(t0), 4);
     }
 

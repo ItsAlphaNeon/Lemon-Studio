@@ -122,15 +122,25 @@ pub fn first(spec: &Spec) -> usize {
     usize::from(spec.version.is_some())
 }
 
-/// The int (after the version field) setting `k` is.
+/// In [`Spec::fields`]: the setting is not an int but bit 0 of the byte right after the ints (Fruity Filter's Center),
+/// read as 0 from a state without that byte (an earlier version).
+pub const BYTE: usize = usize::MAX;
+
+/// The int (after the version field) setting `k` is ([`BYTE`] for the byte after the ints).
 pub fn int_of(spec: &Spec, k: usize) -> usize {
     spec.fields.get(k).copied().unwrap_or(k)
 }
 
-/// The ints the saved state has for its settings (after the version field): one per setting, and those the
-/// description leaves out.
+/// The ints the saved state has for its settings (after the version field): one per setting but a [`BYTE`] one, and
+/// those the description leaves out.
 pub fn ints(spec: &Spec) -> usize {
-    spec.fields.iter().map(|&i| i + 1).max().unwrap_or(0).max(spec.settings.len())
+    let bytes = spec.fields.iter().filter(|&&i| i == BYTE).count();
+    spec.fields.iter().filter(|&&i| i != BYTE).map(|&i| i + 1).max().unwrap_or(0).max(spec.settings.len() - bytes)
+}
+
+/// Where a [`BYTE`] setting is: the byte after the ints.
+fn byte_at(spec: &Spec) -> usize {
+    4 * (first(spec) + ints(spec))
 }
 
 /// The shortest readable saved state: the version field, if any, and the settings' ints.
@@ -147,11 +157,22 @@ pub fn normalized(spec: &Spec, b: Vec<u8>) -> Vec<u8> {
 
 /// Setting `k`'s stored value.
 pub fn setting(spec: &Spec, b: &[u8], k: usize) -> i32 {
-    field(b, first(spec) + int_of(spec, k))
+    match int_of(spec, k) {
+        BYTE => b.get(byte_at(spec)).map_or(0, |x| i32::from(x & 1)),
+        i => field(b, first(spec) + i),
+    }
 }
 
+/// Writes setting `k` (a [`BYTE`] setting only where the state has its byte; the other bits of it are kept).
 pub fn set_setting(spec: &Spec, b: &mut [u8], k: usize, v: i32) {
-    set_field(b, first(spec) + int_of(spec, k), v);
+    match int_of(spec, k) {
+        BYTE => {
+            if let Some(x) = b.get_mut(byte_at(spec)) {
+                *x = (*x & !1) | (v & 1) as u8;
+            }
+        }
+        i => set_field(b, first(spec) + i, v),
+    }
 }
 
 /// Little-endian int32 field `k`.
@@ -184,6 +205,13 @@ pub fn to_fl(spec: &Spec, vals: &[i32], raw: &[u8]) -> Vec<u8> {
     let mut b = normalized(spec, raw.to_vec());
     for (k, &v) in vals.iter().enumerate().take(spec.settings.len()) {
         if decode(spec, k, setting(spec, &b, k)) != v {
+            // A state of the version before the byte gains it, and the version that has it.
+            if int_of(spec, k) == BYTE && b.len() <= byte_at(spec) {
+                b.resize(byte_at(spec) + 1, 0);
+                if let Some(version) = spec.version {
+                    set_field(&mut b, 0, version);
+                }
+            }
             set_setting(spec, &mut b, k, v);
         }
     }
@@ -221,6 +249,15 @@ pub fn snap_step(spec: &Spec, k: usize, v: i32, next: i32) -> i32 {
 /// A gain as `<dB>dB` with one decimal (`-INFdB` for silence).
 pub fn db_text(gain: f32) -> String {
     if gain <= 0.0 { "-INFdB".into() } else { format!("{:.1}dB", 20.0 * f64::from(gain).log10()) }
+}
+
+/// As [`db_text`], with levels just under unity (that round to -0.0) shown as 0.0dB, so the text typed back gives a
+/// value with the same text.
+pub fn db_text_fine(gain: f32) -> String {
+    match db_text(gain) {
+        t if t == "-0.0dB" => "0.0dB".into(),
+        t => t,
+    }
 }
 
 /// The number a typed text starts with.
@@ -262,6 +299,19 @@ pub fn parse_db(range: (i32, i32), s: &str, gain: impl Fn(i32) -> f32) -> Option
     })
 }
 
+/// As [`parse_db`], for a `gain` that never falls as the value rises (a binary search: for the long ranges).
+pub fn parse_db_rising(range: (i32, i32), s: &str, gain: impl Fn(i32) -> f32) -> Option<i32> {
+    let s = s.trim().to_ascii_lowercase();
+    if s.contains("inf") || s == "off" {
+        return (gain(range.0) <= 0.0).then_some(range.0);
+    }
+    let x = leading_number(&s)?;
+    Some(nearest_rising(range, x, |v| {
+        let g = gain(v);
+        if g > 0.0 { 20.0 * f64::from(g).log10() } else { f64::NEG_INFINITY }
+    }))
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Plugin state <-> the original's saved state
 
@@ -299,7 +349,7 @@ pub fn fl_from_plugin_state(spec: &Spec, blob: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{balance, chorus, fast_distortion, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor};
+    use crate::{balance, chorus, fast_distortion, flanger, phaser, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor};
 
     #[test]
     fn a_new_instance_starts_on_the_originals_default_and_its_state_reads_back() {
@@ -323,6 +373,9 @@ mod tests {
         );
         assert_eq!(default_state(chorus::SPEC), os_engine::effects::chorus::Settings::default().to_state());
         assert_eq!(default_state(stereo_shaper::SPEC), os_engine::effects::stereo_shaper::Settings::default().to_state());
+        assert_eq!(default_state(crate::filter::SPEC), os_engine::effects::filter::Settings::default().to_state());
+        assert_eq!(default_state(flanger::SPEC), os_engine::effects::flanger::Settings::default().to_state());
+        assert_eq!(default_state(phaser::SPEC), os_engine::effects::phaser::Settings::default().to_state());
     }
 
     /// Lemon Stereo Shaper leaves the difference output (int 6 after the version) out of its settings: it is kept as

@@ -1,5 +1,6 @@
 // Copyright (C) 2026 ItsAlphaNeon
 // Copyright (C) 2026 thacer13
+// Copyright (C) 2026 Samrat Dutta
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -2029,6 +2030,11 @@ impl App {
                 }
             }
             Then::DeleteUnused(files) => self.delete_unused_done(files, &reply),
+            Then::ExtInput(t) => {
+                if reply == Reply::Button(Answer::Yes) {
+                    crate::mixer::external_only(&mut self.state, t);
+                }
+            }
             Then::SavePreset(key) => {
                 if let Some(p) = file {
                     self.state.message = crate::presets::save_chosen(self, key, p);
@@ -2495,8 +2501,13 @@ impl App {
         #[cfg(not(plugin_windows))]
         self.plugins.idle(|_| None);
         // Open plugin editors are processed while nothing plays: notes from an instrument's own keyboard sound, and an
-        // effect's own playback (Tesla) too.
-        let listen = self.plugins.editor_open();
+        // effect's own playback (Tesla) too. So is the mixer while a track monitors its input (spec:
+        // audio/track-io.md §1 "Signal": monitoring works while stopped).
+        // The system's input device opens with the output only while a track with an input chosen hears it or is
+        // armed, so the microphone is not held (and shown in use) the rest of the time.
+        crate::device::want_inputs(self.state.project.mixer.iter().any(|m| m.audio_in >= 0 && (m.monitored() || m.armed)));
+        let monitoring = self.state.project.mixer.iter().any(|m| m.monitored()) && crate::device::input_source().is_some();
+        let listen = self.plugins.editor_open() || monitoring;
         if listen {
             self.sync_live();
         }
@@ -3101,7 +3112,8 @@ impl App {
     }
 
     /// Auto scrolling (spec: ui/auto-scrolling.md §5): the playlist (song) or the piano roll (pattern) scrolls so the
-    /// shown playing position stays in view. Left alone while the mouse drags a scroll bar.
+    /// shown playing position stays in view; in song mode the piano roll too, while a clip of its pattern plays. Left
+    /// alone while the mouse drags a scroll bar.
     fn auto_scroll(&mut self) {
         let set = crate::autoscroll::get();
         let now = &self.shown;
@@ -3110,8 +3122,10 @@ impl App {
         }
         let tick = now.tick as f32;
         let ppq = f32::from(self.state.project.ppq.max(4));
-        if now.song {
-            let Some(g) = self.pl_grid.filter(|_| self.state.shown(Win::Playlist)) else { return };
+        let pattern_tick = if now.song { piano::pattern_tick_in_song(&self.state, now.tick).map(|t| t as f32) } else { Some(tick) };
+        if now.song
+            && let Some(g) = self.pl_grid.filter(|_| self.state.shown(Win::Playlist))
+        {
             let left = self.state.playlist_scroll.0;
             let x = tick * self.state.playlist_bar_w / (ppq * 4.0);
             if let Some(v) = crate::autoscroll::follow(left, g.w, x, set.continuous) {
@@ -3121,15 +3135,15 @@ impl App {
                 self.scroll_set(Scroll::PlaylistX, v);
                 self.playlist_scrolled(before);
             }
-        } else {
-            let Some(g) = self.piano_grid.filter(|_| self.state.shown(Win::PianoRoll)) else { return };
-            let left = self.scroll_get(Scroll::PianoX);
-            let x = tick * self.state.piano.px_per_beat / ppq;
-            if let Some(v) = crate::autoscroll::follow(left, g.w, x, set.continuous) {
-                self.scroll_set(Scroll::PianoX, v);
-                if self.scroll_get(Scroll::PianoX) != left {
-                    self.damage_win(Win::PianoRoll);
-                }
+        }
+        let Some(g) = self.piano_grid.filter(|_| self.state.shown(Win::PianoRoll)) else { return };
+        let Some(tick) = pattern_tick else { return };
+        let left = self.scroll_get(Scroll::PianoX);
+        let x = tick * self.state.piano.px_per_beat / ppq;
+        if let Some(v) = crate::autoscroll::follow(left, g.w, x, set.continuous) {
+            self.scroll_set(Scroll::PianoX, v);
+            if self.scroll_get(Scroll::PianoX) != left {
+                self.damage_win(Win::PianoRoll);
             }
         }
     }
@@ -3664,8 +3678,15 @@ impl App {
                     let grid = g.grid;
                     // In song mode the piano roll's playhead is where its pattern plays, while a clip of it does.
                     let at = |t: f64| if now.song { piano::pattern_tick_in_song(&self.state, t) } else { Some(t) };
-                    for t in [at(old.tick), at(now.tick)].into_iter().flatten() {
-                        self.damage_rect(Rect::new(g.x_of(t as f32) - 2.0, grid.y, 5.0, grid.h));
+                    let xs: Vec<f32> = [at(old.tick), at(now.tick)].into_iter().flatten().map(|t| g.x_of(t as f32)).collect();
+                    for &x in &xs {
+                        self.damage_rect(Rect::new(x - 2.0, grid.y, 5.0, grid.h));
+                    }
+                    // A note held while recording grows from the old playhead to the new one (spec: ui/recording.md §2).
+                    if let [a, b] = xs[..]
+                        && self.state.rec.holding()
+                    {
+                        self.damage_rect(Rect::new(a.min(b) - 2.0, grid.y, (a - b).abs() + 5.0, grid.h));
                     }
                 }
             }
@@ -4458,6 +4479,13 @@ impl App {
         };
         st.devices = devices;
         st.asio_drivers = drivers;
+        let (inputs, default_input) = if cfg.asio_driver().is_some() { (Vec::new(), None) } else { crate::audio_cfg::input_devices(&cfg) };
+        st.input = match &cfg.input {
+            Some(d) if inputs.contains(d) => d.clone(),
+            Some(d) => format!("{d} (not found: default device)"),
+            None => format!("Default ({})", default_input.as_deref().unwrap_or("no input device")),
+        };
+        st.inputs = inputs;
         // What the Windows device offers for short buffers (spec: audio/wasapi-low-latency.md 4.3).
         st.periods = if cfg.asio_driver().is_some() { None } else { crate::device::periods(cfg.device.as_deref()) };
         st.audio = cfg;
@@ -4517,7 +4545,7 @@ impl App {
     fn audio_menu(&mut self, label: &str, x: f32, y: f32) {
         use crate::audio_cfg::{Set, BUFFERS, RATES, SMALLEST};
         use crate::playlist::{Cmd, Mark, PItem, Popup};
-        use views::settings::{ANIMATIONS, BUFFER_LENGTH, MODE, MODE_EXCLUSIVE, MODE_SHARED, OUTPUT_DEVICE, SAMPLE_RATE};
+        use views::settings::{ANIMATIONS, BUFFER_LENGTH, INPUT_DEVICE, MODE, MODE_EXCLUSIVE, MODE_SHARED, OUTPUT_DEVICE, SAMPLE_RATE};
         let still = !self.state.cables.borrow().animations();
         let st = &self.state.settings;
         let cfg = &st.audio;
@@ -4569,6 +4597,10 @@ impl App {
                     .chain(st.asio_drivers.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Asio(d.clone()))).mark(on(d, true))))
                     .collect()
             }
+            // The system's default input (followed when it changes), then each input device.
+            INPUT_DEVICE => std::iter::once(PItem::new("Default device", Cmd::Audio(Set::Input(None))).mark(Mark::Radio(cfg.input.is_none())))
+                .chain(st.inputs.iter().map(|d| PItem::new(d.clone(), Cmd::Audio(Set::Input(Some(d.clone())))).mark(Mark::Radio(cfg.input.as_ref() == Some(d)))))
+                .collect(),
             // Windows devices: shared or exclusive mode (spec: audio/wasapi-low-latency.md 4.2). Linux: the sound server,
             // or an ALSA device directly.
             MODE => vec![
@@ -4630,8 +4662,16 @@ impl App {
     /// Changes one audio setting: kept for the next start, hosted plugins move to the new rate, and the open streams
     /// move to the new output (spec: ui/settings.md "Audio").
     pub fn set_audio(&mut self, s: crate::audio_cfg::Set) {
+        let input = matches!(s, crate::audio_cfg::Set::Input(_));
         let cfg = crate::audio_cfg::AudioCfg::current().with(s);
         cfg.apply();
+        crate::device::system_input::forget();
+        if input {
+            // The output plays on; the mixer's input stream moves to the new device (`OutputDevice::sync_inputs`).
+            self.audio_page();
+            self.state.message = Some(format!("Audio input: {}", self.state.settings.input));
+            return self.invalidate();
+        }
         if let Some(rate) = Transport::device_rate() {
             self.plugins.set_rate(rate);
         }
@@ -7921,6 +7961,12 @@ impl App {
                 let at = self.top_hit(x, y).map_or((x, y), |h| (h.rect.x, h.rect.bottom() + 2.0));
                 self.open_project_picker(at);
             }
+            // An automation clip LFO's switch and mode: a click flips them, one undo step.
+            Action::Knob(id @ crate::knobs::KnobId::AutoLfo(_, k)) if k.switch() => {
+                crate::history::knob(s, id, false);
+                s.set_knob(id, if s.knob(id) >= 0.5 { 0.0 } else { 1.0 });
+                self.hint = Cow::Owned(s.knob_text(id));
+            }
             Action::Knob(id) => {
                 crate::history::knob(s, id, false);
                 self.drag = Some(Drag::Knob { id, y0: self.mouse.1, v0: s.knob(id) });
@@ -9303,6 +9349,44 @@ mod tests {
             assert_eq!((slot.name.as_str(), &slot.state), (*file, fl));
         }
         assert_eq!(saved.mixer[4].slots[0], Some(shaper));
+    }
+
+    /// A project's Fruity Flanger and Fruity Phaser slots open as Lemon Flanger and Lemon Phaser with their state, show
+    /// the Lemon names, and a save keeps the FL effects with the state the Lemon effects write back.
+    // spec: plugins/lemon-small-effects.md "Opened projects' slots", plugins/lemon-flanger.md §5, plugins/lemon-phaser.md §5
+    #[test]
+    fn fl_flanger_and_phaser_slots_open_as_their_lemon_recreations() {
+        use crate::plugins::fx_key;
+        let mut flanger = lemon_small_fx::params::default_state(lemon_small_fx::flanger::SPEC);
+        lemon_small_fx::params::set_field(&mut flanger, 1, 700);
+        let mut phaser = lemon_small_fx::params::default_state(lemon_small_fx::phaser::SPEC);
+        lemon_small_fx::params::set_field(&mut phaser, 6, 15);
+        let cases = [(1u16, 0u8, "Fruity Flanger", "Lemon Flanger", flanger), (2, 1, "Fruity Phaser", "Lemon Phaser", phaser)];
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        for (t, k, file, _, fl) in &cases {
+            a.state.project.mixer[usize::from(*t)].slots[usize::from(*k)] = Some(os_model::SlotPlugin { name: (*file).into(), state: fl.clone() });
+        }
+        a.sync_effects();
+        for (t, k, file, lemon, fl) in &cases {
+            let key = fx_key(*t, *k);
+            assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(lemon.to_string()), "{file}");
+            assert_eq!(crate::mixer::slot_name(&a.state, *t, *k).as_deref(), Some(*lemon));
+            assert_eq!(a.plugins.recreation_file_state(key, file).as_ref(), Some(fl), "{file}: the state as it was opened");
+        }
+        let path = std::env::temp_dir().join(format!("lemon-fl-modulation-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        for (t, k, file, _, fl) in &cases {
+            let slot = saved.mixer[usize::from(*t)].slots[usize::from(*k)].clone().unwrap();
+            assert_eq!((slot.name.as_str(), &slot.state), (*file, fl));
+        }
     }
 
     /// The toolbar's audio editor button puts Tesla on the master track and shows it; another click shows the same
@@ -12495,6 +12579,42 @@ mod tests {
         assert_same(&a, &b, "piano roll step");
     }
 
+    /// Song mode: the piano roll follows too, by its pattern's position, while a clip of the pattern plays there; past
+    /// the clips it stays (spec: ui/auto-scrolling.md §5, issue 192).
+    #[test]
+    fn piano_roll_follows_in_song_mode() {
+        let Ok(mut a) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        crate::playlist::arr_mut(&mut app.state).clips.clear();
+        let bar = app.state.project.bar_ticks();
+        let c = crate::playlist::place(&mut app.state, 0, 2 * bar);
+        crate::playlist::arr_mut(&mut app.state).clips[c].length = 8 * bar;
+        app.state.project.patterns.iter_mut().filter(|p| p.number == app.state.pattern).for_each(|p| p.length = Some(8 * bar));
+        let ws = &mut app.state.wins[Win::PianoRoll.slot().unwrap()];
+        ws.maxed = false;
+        ws.rect = Rect::new(220.0, 90.0, 1000.0, 480.0);
+        app.state.z = vec![Win::PianoRoll];
+        crate::autoscroll::toggle();
+        frame(&mut app, &mut a, None);
+        let g = app.piano_grid.expect("piano roll shown");
+        let ppq = f64::from(app.state.project.ppq.max(4));
+        let per_px = ppq / f64::from(app.state.piano.px_per_beat);
+        let play = |tick: f64| Shown { playing: true, paused: false, tick, song: true, sounding: Vec::new(), tempo: None };
+        app.show_playback(play(0.0));
+        // In the clip: the pattern position, 0.9 of the width in, is held at a third.
+        let p = f64::from(g.w) * 0.9 * per_px;
+        for k in 1..=9 {
+            app.show_playback(play(f64::from(2 * bar) + p * f64::from(k) / 9.0));
+            frame(&mut app, &mut a, None);
+        }
+        let want = g.w * 0.9 - g.w / 3.0;
+        assert!((app.scroll_get(Scroll::PianoX) - want).abs() <= 1.0, "{} != {want}", app.scroll_get(Scroll::PianoX));
+        // Past the clip: the view stays.
+        app.show_playback(play(f64::from(20 * bar)));
+        assert!((app.scroll_get(Scroll::PianoX) - want).abs() <= 1.0);
+    }
+
     /// CPU panel (spec: ui/main-window.md §13): the menu's View FPS / Misc / Refresh change what it shows; a double
     /// click opens the Plugin performance monitor (spec: ui/plugin-performance.md), which lists the hosted
     /// instruments, sorts, finds and closes from the VIEW menu.
@@ -12841,7 +12961,7 @@ mod tests {
         eprintln!("driver | block | rate | tick | ahead min / mean / max (frames) | mean ms | driver latency | longest gap ms | load | dropouts");
         for &b in &buffers {
             for _ in 0..runs {
-                AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b), exclusive: false }.apply();
+                AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b), exclusive: false, input: None }.apply();
                 app.transport.reopen();
                 let t0 = Instant::now();
                 let info = loop {
@@ -18914,6 +19034,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// An automation clip's channel window (spec: audio/automation.md "Range", "The LFO"): a new clip's range is 0..1
+    /// (its pan knob the minimum at 0, its volume knob the maximum at 1); the LFO's switch and mode flip on a click and
+    /// its knobs turn, each an undo step; everything saves into the project and loads back.
+    #[test]
+    fn automation_clip_window_sets_range_and_lfo() {
+        use crate::knobs::{KnobId, LfoKnob};
+        use views::menus::{item_at, ADD_MENU};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let entry = |label: &str| (0..).find(|&i| item_at(ADD_MENU, i).is_some_and(|it| it.label == label)).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
+        app.menu_item(ADD_MENU, entry("Automation clip"));
+        let row = app.state.project.channels.len() - 1;
+        let ch = app.state.project.channels[row].clone();
+        assert_eq!((ch.pan, ch.volume), (-1.0, 1.0), "a new clip's range is 0..1");
+        assert!(app.state.shown(Win::Plugin) && app.state.plugin_channel == row);
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.state.knob_text(KnobId::ChanPan(row)), "Minimum: 0%");
+        assert_eq!(app.state.knob_text(KnobId::ChanVol(row)), "Maximum: 100%");
+        assert_eq!(app.state.knob_text(KnobId::AutoLfo(row, LfoKnob::On)), "LFO: off");
+        assert_eq!(app.state.knob_text(KnobId::AutoLfo(row, LfoKnob::Speed)), "LFO speed: 1.00 cycles per beat");
+        let lfo = |app: &App| app.state.project.automation(ch.index).unwrap().lfo.clone();
+        let steps = app.state.history.done();
+
+        // The switch and the mode: a click flips each.
+        for k in [LfoKnob::On, LfoKnob::Mode] {
+            let r = hit_rect(&app, &Action::Knob(KnobId::AutoLfo(row, k)));
+            click(&mut app, &mut c, r);
+        }
+        assert_eq!((lfo(&app).switch, lfo(&app).mode), (-1, 0), "on; the untargeted clip's mode was add, now multiply");
+        // Amount: dragged up by 64 px at the default rate.
+        let id = KnobId::AutoLfo(row, LfoKnob::Amount);
+        let r = hit_rect(&app, &Action::Knob(id));
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_move(r.cx(), r.cy() - 128.0);
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        assert_eq!(lfo(&app).amount, 64 + (128.0 * id.drag_rate() * 128.0).round() as i32);
+        // The range: the minimum up to 25 %, through the window's MIN knob.
+        let r = hit_rect(&app, &Action::Knob(KnobId::ChanPan(row)));
+        assert!(app.state.plugin_pos.1 < r.y, "the knob is in the channel window");
+        app.state.set_knob(KnobId::ChanPan(row), 0.25);
+        assert_eq!(app.state.project.channels[row].pan, -0.5);
+        assert_eq!(os_model::clip_lfo::range(-0.5, 1.0), (0.25, 0.75));
+        // Each change is an undo step; undo puts them back.
+        assert_eq!(app.state.history.done(), steps + 3);
+        crate::history::undo(&mut app.state);
+        assert_eq!(lfo(&app).amount, 64);
+        crate::history::undo(&mut app.state);
+        assert_eq!(lfo(&app).mode, 1);
+        crate::history::redo(&mut app.state);
+        crate::history::redo(&mut app.state);
+        // Middle click: the minimum goes back to 0, not to the centre.
+        app.state.reset_knob(KnobId::ChanPan(row));
+        assert_eq!(app.state.project.channels[row].pan, -1.0);
+        app.state.set_knob(KnobId::ChanPan(row), 0.25);
+        app.state.set_knob(KnobId::AutoLfo(row, LfoKnob::Pulse), 0.75);
+        // Saved and loaded back: the levels as the range, the LFO's fields as set.
+        let path = std::env::temp_dir().join(format!("os_clip_lfo_{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let bc = back.channels.iter().find(|x| x.index == ch.index).unwrap();
+        assert_eq!((bc.pan, bc.volume), (-0.5, 1.0));
+        let want = lfo(&app);
+        assert_eq!((want.switch, want.mode, want.pulse_width), (-1, 0, 64));
+        assert_eq!(back.automation(ch.index).unwrap().lfo, want);
+    }
+
     /// ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the channel goes last, named and routed to
     /// the master, alone selected, into its filter group (made before Unsorted) with the filter on it, as the
     /// playlist's clip source; its window opens; the automation clip has FL's default points and no target and saves
@@ -18957,7 +19148,7 @@ mod tests {
         let a = s.project.automation(6).expect("its points").clone();
         let pts: Vec<_> = a.points.iter().map(|p| (p.beat, p.value, p.tension, p.mode)).collect();
         assert_eq!(pts, [(0.0, 0.5, 0.0, AutoMode::Single), (4.0, 0.5, 0.0, AutoMode::Single)]);
-        assert!(a.targets.is_empty() && a.header[8] == 1);
+        assert!(a.targets.is_empty() && a.lfo.mode == 1);
         assert_eq!((names(&app), app.state.rack.unsorted_at, app.state.rack.filter), (vec!["Drums".into(), "Audio".into(), "Automation".into()], Some(3), Filter::Group(2)));
         let s = &app.state;
         assert!(s.shown(Win::Plugin) && s.plugin_channel == 6 && s.pending_open.is_none(), "its channel window opens");
@@ -18978,7 +19169,7 @@ mod tests {
         assert_eq!(kinds, [(ChannelKind::AudioClip, "Audio Clip".into(), 1), (ChannelKind::Automation, "Automation Clip".into(), 2), (ChannelKind::AudioClip, "Audio Clip #2".into(), 1)]);
         assert_eq!(back.current_group, Some(1));
         let a2 = back.automation(6).expect("saved points");
-        assert_eq!((&a2.points, &a2.targets, a2.header[8]), (&a.points, &Vec::new(), 1));
+        assert_eq!((&a2.points, &a2.targets, a2.lfo.mode), (&a.points, &Vec::new(), 1));
         // Undo (Ctrl+Z), one step each: the channel goes, the groups, filter, selection and clip source come back.
         let undo = |app: &mut App| crate::playlist::run(app, crate::playlist::Cmd::Undo);
         assert_eq!(undo(&mut app).as_deref(), Some("Undo: add audio clip"));
