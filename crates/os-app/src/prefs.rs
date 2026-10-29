@@ -262,9 +262,10 @@ pub const BOTH_MOUSE_BUTTONS: Check =
     Check { key: "both_mouse_buttons_step_sequencer", label: "Right button clears steps", default: false };
 
 /// General ▸ Miscellaneous: the project Lemon Studio starts with when no project file is passed to it
-/// (`App::startup_project`). Spec: ui/settings-choices.md, as above.
+/// (`App::startup_project`). Spec: ui/settings-choices.md, as above. Cutting-edge: "Last used project" by default, and
+/// it puts the windows back too (`crate::session`): closing costs nothing.
 pub const STARTUP_PROJECT: Combo =
-    Combo { key: "startup_project", label: "Startup project", choices: &["Empty project", "Default template", "Last used project"], default: 1 };
+    Combo { key: "startup_project", label: "Startup project", choices: &["Empty project", "Default template", "Last used project"], default: 2 };
 
 /// General ▸ Input: a held click that doesn't move does more: in the piano roll the Draw tool's new note cycles plain,
 /// slide, porta, and a note held on is cloned; in the playlist a clip held on is cloned (`crate::hold`). Spec:

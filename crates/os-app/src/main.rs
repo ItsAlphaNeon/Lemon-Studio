@@ -25,6 +25,7 @@ mod capture;
 mod mpris;
 mod omarchy;
 mod one_click;
+mod session;
 mod score_log;
 mod clip_colors;
 mod clock;
@@ -798,6 +799,7 @@ impl ApplicationHandler for Shell {
             layout::save_main(m);
         }
         layout::save(&self.app.state);
+        session::save(&self.app);
         #[cfg(target_os = "macos")]
         {
             if os_host::guard::tripped() {
@@ -1758,6 +1760,13 @@ fn wake_ui() {
 }
 
 fn main() {
+    // Linux: a stream through PipeWire's ALSA plugin (exclusive mode on a PipeWire system) is named "PipeWire ALSA
+    // [lemonstudio]" unless told otherwise; it is "Lemon Studio", as other programs' are named, unless the user set it.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("PIPEWIRE_ALSA").is_none() {
+        // SAFETY: the first thing the program does, before any other thread.
+        unsafe { std::env::set_var("PIPEWIRE_ALSA", "{ application.name = \"Lemon Studio\" }") };
+    }
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // A plugin scanner process (spec: ui/plugin-manager.md §4): loads one file, prints its plugins, ends.
     if args.first().map(String::as_str) == Some(plugin_scan::ARG) {

@@ -1501,6 +1501,9 @@ pub struct App {
     pub(crate) backup: crate::backup::Backup,
     /// Follow Omarchy: the system theme last applied (`omarchy::stamp`) and when to look again (`omarchy_tick`).
     pub(crate) omarchy: (Option<(String, Option<std::time::SystemTime>)>, std::time::Instant),
+    /// Session restore (`crate::session`): the kept plugin windows still to open, and since when they wait.
+    pub(crate) session_plugins: Vec<usize>,
+    pub(crate) session_since: Option<std::time::Instant>,
     /// The media player the desktop sees (`crate::mpris`; none in tests or without a session bus).
     #[cfg(target_os = "linux")]
     mpris: Option<crate::mpris::Mpris>,
@@ -1727,6 +1730,8 @@ impl App {
             saved: (Project::default(), 0.0),
             backup: Default::default(),
             omarchy: (None, std::time::Instant::now()),
+            session_plugins: Vec::new(),
+            session_since: None,
             #[cfg(target_os = "linux")]
             mpris: if cfg!(test) { None } else { crate::mpris::Mpris::start() },
         };
@@ -2721,6 +2726,7 @@ impl App {
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     pub(crate) fn plugin_tick(&mut self) {
+        self.session_tick();
         // Instances follow their channels by id (an undo, a command), before rows are looked at.
         self.follow_ids(true, false);
         if std::mem::take(&mut self.state.retimed) {

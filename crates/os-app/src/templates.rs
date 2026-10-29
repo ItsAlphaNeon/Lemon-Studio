@@ -183,6 +183,8 @@ impl App {
             if let Some(p) = last_project().filter(|p| p.is_file()) {
                 self.open(p.clone());
                 if self.state.path.as_deref() == Some(p.as_path()) {
+                    // Its windows as they were when the app closed (`crate::session`).
+                    self.restore_session();
                     return;
                 }
             }
@@ -315,11 +317,12 @@ mod tests {
     #[test]
     fn startup_project_choices() {
         assert_eq!(prefs::STARTUP_PROJECT.choices, ["Empty project", "Default template", "Last used project"]);
-        assert_eq!(prefs::choice(&prefs::STARTUP_PROJECT), "Default template");
+        assert_eq!(prefs::choice(&prefs::STARTUP_PROJECT), "Last used project", "cutting-edge's default (session restore)");
         let dir = templates("startup");
         let mut app = App::new(None);
         app.set_template("Utility/Scoring");
         // Default template.
+        prefs::set_choice(&prefs::STARTUP_PROJECT, 1);
         let mut a = App::new(None);
         a.startup_project();
         assert_eq!((a.state.tempo, a.state.path.clone()), (140.0, None));

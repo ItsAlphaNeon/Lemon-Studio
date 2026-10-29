@@ -98,6 +98,11 @@ own content. Side branches are named `cutting-edge-<topic>`.
   (drawn in the app's window) take the applied theme's colours too: Lemon's greys become its surfaces, light greys its
   text, the lemon yellows its selection; signal colours stay. Theme ▸ Options ▸ "Stock plugins follow the theme", on
   by default.
+- **Closing costs nothing: the session comes back.** General settings ▸ Miscellaneous ▸ Startup project is on "Last
+  used project" by default, and a start puts back the windows that were open in it when the app closed (the arranger,
+  mixer, piano roll, instrument rack, channel window, tool windows and plugin windows, back to front; each plugin's
+  window once its plugin has loaded). Linux: the audio stream is named "Lemon Studio" in the sound server, not
+  "PipeWire ALSA [lemonstudio]" (unless `PIPEWIRE_ALSA` is set).
 - **A media player to the desktop (MPRIS).** Lemon Studio is on the session bus as `org.mpris.MediaPlayer2.lemonstudio`:
   media keys, a bar's player widget and `playerctl` play, pause and stop the transport, and show whether it plays and
   the project's name.
