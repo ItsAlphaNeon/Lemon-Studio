@@ -1227,8 +1227,9 @@ mod tests {
         (h.r.cx(), h.r.cy())
     }
 
-    fn loaded() -> (Logic, std::path::PathBuf) {
-        let p = loop_file("editor", &[]);
+    /// A loop loaded into the editor, from a file of its own (`name`), as the tests run side by side.
+    fn loaded(name: &str) -> (Logic, std::path::PathBuf) {
+        let p = loop_file(name, &[]);
         let mut l = logic();
         l.load(&p.to_string_lossy());
         paint(&mut l);
@@ -1273,7 +1274,7 @@ mod tests {
 
     #[test]
     fn slicing_choosing_and_the_slices_settings() {
-        let (mut l, p) = loaded();
+        let (mut l, p) = loaded("slicing");
         assert_eq!(l.state().slices.len(), 4);
         l.pick(&MenuReq::Slicing, Cmd::Slice(Slicing::Beats(2)), 0.0, 0.0);
         let st = l.state();
@@ -1304,7 +1305,7 @@ mod tests {
 
     #[test]
     fn tempo_and_length_move_together() {
-        let (mut l, p) = loaded();
+        let (mut l, p) = loaded("tempo");
         // 2 s at 4 beats, 120 BPM; 9 beats make 270 BPM; 60 BPM make 2 beats.
         l.typed(BEATS_ID, "9");
         assert_eq!((l.state().beats(), l.state().bpm()), (9.0, 270.0));
@@ -1316,7 +1317,7 @@ mod tests {
 
     #[test]
     fn the_dump_is_offered_when_hosted() {
-        let (mut l, p) = loaded();
+        let (mut l, p) = loaded("dump");
         assert!(!l.menu(&MenuReq::Dump).items.iter().any(|i| matches!(i, MenuItem::Item { enabled: true, .. })));
         l.hosted = true;
         assert_eq!(l.menu(&MenuReq::Dump).find("Normal"), Some(Cmd::Dump(false)));
