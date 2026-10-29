@@ -1986,9 +1986,11 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
 
 /// Turn into automation clip (spec: ui/event-editor.md §5): an automation clip channel at the end of the rack named
 /// `name` (made unique), linked to `target`, with `points`, in the rack group "Automation" and the playlist's clip
-/// source, as ADD > Automation clip makes one. One undo step. Returns its rack row.
+/// source, as ADD > Automation clip makes one. One undo step, which also holds the selected pattern (whose events
+/// the caller then takes away). Returns its rack row.
 pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os_model::AutoPoint>) -> usize {
-    let before = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    let before = crate::history::Snap::Several(vec![rack, crate::history::Snap::pattern(s, s.pattern)]);
     snapshot_with(s, crate::events::TURN_INTO_CLIP, before);
     let name = unique_channel_name(s, name);
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);

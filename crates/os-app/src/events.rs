@@ -40,6 +40,11 @@ pub enum EvAct {
 /// An entry of the editor's menu (§4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvCmd {
+    /// The selection's events to the editor's clipboard; Cut deletes them too.
+    Cut,
+    Copy,
+    /// The clipboard's events at the selection's start (or the pattern's), in place of those they cover.
+    Paste,
     SelectAll,
     /// The selection's events, or every event of the control without one.
     Delete,
@@ -69,6 +74,8 @@ pub struct EventsUi {
     pub sel: Option<(u32, u32)>,
     /// A right-button line being drawn: its start and its end (tick, level).
     pub line: Option<((u32, f64), (u32, f64))>,
+    /// Cut or copied events: (ticks from the selection's start, level), and the selection's length.
+    pub clipboard: Option<(Vec<(u32, f64)>, u32)>,
 }
 
 impl Default for EventsUi {
@@ -85,6 +92,7 @@ impl Default for EventsUi {
             px_per_beat: 48.0,
             sel: None,
             line: None,
+            clipboard: None,
         }
     }
 }
@@ -187,6 +195,31 @@ pub fn select_all(s: &mut State) {
     s.events.sel = Some((0, end.max(1)));
 }
 
+/// Edit ▸ Copy: the selection's events (all of them without one) as levels, from the selection's start.
+pub fn copy(s: &mut State) -> bool {
+    let range = s.events.range;
+    let (a, b) = s.events.sel.unwrap_or((0, s.project.pattern_length(s.pattern).max(points(s).last().map_or(0, |p| p.0 + 1))));
+    let events: Vec<(u32, f64)> = points(s).into_iter().filter(|p| (a..b).contains(&p.0)).map(|(t, v)| (t - a, level(range, v))).collect();
+    if events.is_empty() {
+        return false;
+    }
+    s.events.clipboard = Some((events, b - a));
+    true
+}
+
+/// Edit ▸ Paste: the clipboard at the selection's start (the pattern's without one), the control's events in the
+/// stretch it covers replaced; the stretch becomes the selection.
+pub fn paste(s: &mut State) -> bool {
+    let Some((events, len)) = s.events.clipboard.clone() else { return false };
+    let at = s.events.sel.map_or(0, |(a, _)| a);
+    erase(s, at, at + len.max(1) - 1);
+    for (t, l) in events {
+        set(s, at + t, l);
+    }
+    s.events.sel = Some((at, at + len.max(1)));
+    true
+}
+
 /// Edit ▸ Insert current controller value.
 pub fn insert_value(s: &mut State) {
     let at = s.events.sel.map_or(0, |(a, _)| a);
@@ -198,21 +231,23 @@ pub fn insert_value(s: &mut State) {
 /// points that stay this close (a Lemon Studio choice; spec §5).
 pub const CLIP_TOLERANCE: f64 = 0.01;
 
-/// The automation clip points that follow `points` (tick, value) in `range`, `ppq` ticks a beat, to `end` ticks:
-/// each event's level holds until the next one, as the pattern plays it; the steps a ramp of events makes become
-/// straight lines, and points the line through their neighbours already passes within `tol` of are left out. The
-/// clip starts at the pattern's start (the first event's level from there) and ends at `end`.
-pub fn clip_points(points: &[(u32, i32)], range: (f64, f64), ppq: u32, end: u32, tol: f64) -> Vec<AutoPoint> {
+/// The automation clip points that follow `points` (tick, value) in `range`, `ppq` ticks a beat: each event's level
+/// holds until the next one, as the pattern plays it; the steps a ramp of events makes become straight lines, and
+/// points the line through their neighbours already passes within `tol` of are left out. Before the first event the
+/// clip holds `start` (the control's level), stepping to the event over its last tick; it ends on the last event,
+/// as the original's does (spec §6).
+pub fn clip_points(points: &[(u32, i32)], range: (f64, f64), ppq: u32, start: f64, tol: f64) -> Vec<AutoPoint> {
     let Some(first) = points.first() else { return Vec::new() };
     let beat = |t: u32| f64::from(t) / f64::from(ppq.max(1));
     // The held levels as a line: a vertex where each event takes over.
-    let mut line: Vec<(f64, f64)> = vec![(0.0, level(range, first.1))];
+    let mut line: Vec<(f64, f64)> = Vec::new();
+    if first.0 > 0 {
+        line.push((0.0, start));
+        line.push((beat(first.0 - 1), start));
+    }
     for &(t, v) in points {
         line.push((beat(t), level(range, v)));
     }
-    let end = beat(end.max(points.last().map_or(0, |p| p.0)));
-    let last = line.last().map_or(0.0, |p| p.1);
-    line.push((end, last));
     line.dedup_by(|b, a| a.0 == b.0 && { a.1 = b.1; true });
     let keep = simplify(&line, tol);
     let mut out: Vec<AutoPoint> = keep.iter().map(|&i| AutoPoint::new(line[i].0, line[i].1)).collect();
@@ -287,6 +322,12 @@ pub fn menu(s: &State, x: f32, y: f32) -> Popup {
     let turn = PItem::new("Turn into automation clip", Cmd::Events(EvCmd::TurnIntoClip));
     let items = vec![
         PItem::head("Edit"),
+        PItem::new("Cut", Cmd::Events(EvCmd::Cut)).key("Ctrl+X"),
+        PItem::new("Copy", Cmd::Events(EvCmd::Copy)).key("Ctrl+C"),
+        {
+            let p = PItem::new("Paste", Cmd::Events(EvCmd::Paste)).key("Ctrl+V");
+            if s.events.clipboard.is_some() { p } else { p.off() }
+        },
         PItem::new("Select all", Cmd::Events(EvCmd::SelectAll)).key("Ctrl+A"),
         PItem::new("Delete", Cmd::Events(EvCmd::Delete)).key("Del"),
         PItem::new("Insert current controller value", Cmd::Events(EvCmd::InsertValue)).key("Ctrl+I"),
@@ -407,6 +448,24 @@ impl App {
     pub(crate) fn events_cmd(&mut self, c: EvCmd) -> Option<String> {
         let s = &mut self.state;
         let m = match c {
+            EvCmd::Copy => {
+                copy(s);
+                None
+            }
+            EvCmd::Cut => {
+                if copy(s) {
+                    piano::snapshot_as(s, EDIT);
+                    delete(s);
+                }
+                None
+            }
+            EvCmd::Paste => {
+                if s.events.clipboard.is_some() {
+                    piano::snapshot_as(s, EDIT);
+                    paste(s);
+                }
+                None
+            }
             EvCmd::SelectAll => {
                 select_all(s);
                 None
@@ -427,11 +486,14 @@ impl App {
         m
     }
 
-    /// The editor's keys while it is in front (§4): Del, Ctrl+A, Ctrl+I.
+    /// The editor's keys while it is in front (§4): Del, Ctrl+X / C / V, Ctrl+A, Ctrl+I.
     pub(crate) fn events_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
         use winit::keyboard::{Key, NamedKey};
         let c = match key {
             Key::Named(NamedKey::Delete) if !ctrl && !alt => EvCmd::Delete,
+            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("x") => EvCmd::Cut,
+            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("c") => EvCmd::Copy,
+            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("v") => EvCmd::Paste,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("a") => EvCmd::SelectAll,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("i") => EvCmd::InsertValue,
             _ => return false,
@@ -464,17 +526,19 @@ pub const EDIT: &str = "Event editor edit";
 pub const TURN_INTO_CLIP: &str = "Turn into automation clip";
 
 /// Edit ▸ Turn into automation clip (§5): an automation clip channel named after the control, linked to it, whose
-/// points follow the events (`clip_points`).
+/// points follow the events (`clip_points`); the events leave the pattern, the clip now drives the control, and the
+/// editor closes, as in the original (§6).
 pub fn turn_into_clip(s: &mut State) -> Option<String> {
     let points = points(s);
     if points.is_empty() {
         return None;
     }
     let ppq = u32::from(s.project.ppq.max(4));
-    let end = s.project.pattern_length(s.pattern);
-    let clip = clip_points(&points, s.events.range, ppq, end, CLIP_TOLERANCE);
+    let clip = clip_points(&points, s.events.range, ppq, s.events.value, CLIP_TOLERANCE);
     let (target, name) = (s.events.target, s.events.name.clone());
     let row = crate::playlist::automation_channel(s, target, &name, clip);
+    erase(s, 0, u32::MAX);
+    s.hide(Win::Events);
     let name = s.project.channels.get(row).and_then(|c| c.name.clone()).unwrap_or(name);
     Some(format!("Created automation clip \"{name}\""))
 }
@@ -515,7 +579,17 @@ mod tests {
         s.events.sel = None;
         insert_value(s);
         assert_eq!(point(s, 0), Some(6400), "the value it had when the editor opened");
-        assert_eq!(delete(s), 2, "every event without a selection");
+        // Copy and paste: the selection's events from its start, pasted over the stretch they cover.
+        draw(s, (24, 0.25), (48, 0.5), 24);
+        s.events.sel = Some((24, 72));
+        assert!(copy(s));
+        s.events.sel = Some((192, 200));
+        piano::set_control(s, 0, 0, 200, 1);
+        assert!(paste(s));
+        assert_eq!(points(s).iter().filter(|p| p.0 >= 192).copied().collect::<Vec<_>>(), vec![(192, 3200), (216, 6400)]);
+        assert_eq!(s.events.sel, Some((192, 240)));
+        s.events.sel = None;
+        assert_eq!(delete(s), 6, "every event without a selection");
         // Another control's events stay.
         piano::set_control(s, 1, 0, 0, 100);
         assert_eq!(delete(s), 0);
@@ -527,19 +601,19 @@ mod tests {
         assert!(!open(s, 0x4000_0000, "Main volume", 0.5, None), "no events for it");
     }
 
-    /// The clip follows the events: a ramp recorded every 4 ticks becomes one straight line, a held level one more
-    /// point to the pattern's end (§5).
+    /// The clip follows the events: a ramp recorded every 4 ticks becomes one straight line ending on the last event
+    /// (§5, §6).
     #[test]
     fn clip_points_follow_the_events() {
         let pts: Vec<(u32, i32)> = (0..=24).map(|k| (k * 4, k as i32 * 400)).collect();
-        let c = clip_points(&pts, (0.0, 9600.0), 96, 384, CLIP_TOLERANCE);
+        let c = clip_points(&pts, (0.0, 9600.0), 96, 0.5, CLIP_TOLERANCE);
         let at: Vec<(f64, f64)> = c.iter().map(|p| (p.beat, p.value)).collect();
-        assert_eq!(at, vec![(0.0, 0.0), (1.0, 1.0), (4.0, 1.0)]);
-        // A late first event: its level from the start.
-        let c = clip_points(&[(96, 0), (192, 9600)], (0.0, 9600.0), 96, 384, CLIP_TOLERANCE);
+        assert_eq!(at, vec![(0.0, 0.0), (1.0, 1.0)]);
+        // A late first event: the control's level until a tick before it.
+        let c = clip_points(&[(96, 0), (192, 9600)], (0.0, 9600.0), 96, 0.5, CLIP_TOLERANCE);
         let at: Vec<(f64, f64)> = c.iter().map(|p| (p.beat, p.value)).collect();
-        assert_eq!(at, vec![(0.0, 0.0), (1.0, 0.0), (2.0, 1.0), (4.0, 1.0)]);
-        assert!(clip_points(&[], (0.0, 1.0), 96, 384, CLIP_TOLERANCE).is_empty());
+        assert_eq!(at, vec![(0.0, 0.5), (95.0 / 96.0, 0.5), (1.0, 0.0), (2.0, 1.0)]);
+        assert!(clip_points(&[], (0.0, 1.0), 96, 0.5, CLIP_TOLERANCE).is_empty());
     }
 
     /// Edit automation on a channel knob's menu opens the editor on that control; a drag draws; Turn into automation clip
@@ -576,8 +650,10 @@ mod tests {
         let a = app.state.project.automation(ch.index).expect("clip");
         assert_eq!(a.targets, vec![os_model::target::channel(0, 0)]);
         assert!(a.points.len() >= 2 && a.points[0].value < 0.02);
-        assert_eq!(points(&app.state), pts, "the events stay");
+        assert!(points(&app.state).is_empty(), "the events leave the pattern");
+        assert!(!app.state.shown(Win::Events));
         crate::history::undo(&mut app.state);
         assert_eq!(app.state.project.channels.len(), rows);
+        assert_eq!(points(&app.state), pts, "undo brings the events back");
     }
 }

@@ -188,13 +188,14 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   hands on, in the original's arithmetic; the clip's channel window sets them, each change an undo step, and
   projects keep every LFO field
 - The event editor (Edit events on a control's menu: channel volume, pan and pitch, mixer controls, the tempo, plugin
-  parameters) shows the control's events in the selected pattern as its level over time, in the setting's own unit:
-  left drag draws freehand on the global snap, right drag a straight line, Erase and Select tools, the wheel scrolls
-  and Ctrl+wheel zooms; its Edit menu has Select all, Delete, Insert current controller value and Turn into automation
-  clip, which makes a clip channel linked to the control whose points follow the events (a recorded ramp becomes one
-  straight segment). Each edit is an undo step
-- Not yet in the event editor: cut, copy and paste, the Paint, Interpolate and Zoom tools, Scale levels and LFO,
-  inserting and deleting time, a second window
+  parameters) shows the control's events in the selected pattern as its level over time, in the setting's own unit: left
+  drag draws freehand on the global snap, right drag a straight line, Erase and Select tools, the wheel scrolls and
+  Ctrl+wheel zooms; its Edit menu has Cut, Copy, Paste, Select all, Delete, Insert current controller value and Turn
+  into automation clip, which moves the events into a new clip channel linked to the control, as the original does
+  (the control's earlier value until the first event, then the events, a recorded ramp as one straight segment, ending
+  on the last event). Each edit is an undo step
+- Not yet in the event editor: the Paint, Interpolate and Zoom tools, Scale levels and LFO, inserting and deleting time,
+  a second window
 
 ## 🚧 Project files
 
