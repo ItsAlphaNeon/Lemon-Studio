@@ -274,7 +274,7 @@ impl Default for RackUi {
             loop_type: 0,
             unsorted_at: None,
             clipboard: None,
-            opts: [COMPLETE_PREVIEW, "Show a mute button on the piano roll preview"].into_iter().collect(),
+            opts: [COMPLETE_PREVIEW, PREVIEW_MUTE].into_iter().collect(),
             pending_delete: None,
             purging: false,
             delete_now: None,
@@ -485,9 +485,12 @@ pub const MUTE_REMOVED: &str = "Mute removed steps";
 /// Options ▸ Show complete piano roll preview (§17, on by default; the original's manual: off, a preview shows only
 /// the notes in the step sequencer's visible bars).
 pub const COMPLETE_PREVIEW: &str = "Show complete piano roll preview";
+/// Options ▸ Show a mute button on the piano roll preview (§17, on by default; the original's manual: a mute button on
+/// the preview, tied to the channel's mute).
+pub const PREVIEW_MUTE: &str = "Show a mute button on the piano roll preview";
 
 /// The rack menus' check options that work; the other ones are shown greyed with their default ticks.
-const LIVE_OPTS: [&str; 4] = [ALWAYS_ADVANCED, FOCUS_ON_PLAY, MUTE_REMOVED, COMPLETE_PREVIEW];
+const LIVE_OPTS: [&str; 5] = [ALWAYS_ADVANCED, FOCUS_ON_PLAY, MUTE_REMOVED, COMPLETE_PREVIEW, PREVIEW_MUTE];
 
 /// Every tick, with whether playback runs: on a start or a stop, with Focus selected channel on playback ticked, the
 /// highest selected channel scrolls into view (§17). Returns whether the rack scrolled.

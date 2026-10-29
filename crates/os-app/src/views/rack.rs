@@ -423,6 +423,14 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
             let grid = (!s.rack.opts.contains(rk::COMPLETE_PREVIEW)).then(|| (step_x0 - sx, STEP_W / per_step.max(1) as f32));
             mini_roll(ui, block, notes, ch.index, per_step, &bars, focused, grid);
             ui.hit(block.intersect(&rows_clip), Action::RackRoll(i), "Piano roll preview - click to open the Piano roll");
+            // Show a mute button on the piano roll preview (§17, on by default): the LED's switch at the preview's left
+            // end (Lemon Studio's design: a speaker, struck through while the channel is muted).
+            if s.rack.opts.contains(rk::PREVIEW_MUTE) {
+                let mb = Rect::new(block.x + 4.0, block.cy() - 7.0, 14.0, 14.0);
+                let hov = ui.hit(mb.intersect(&rows_clip), Action::ChannelEnable(i), "Mute / solo  (shift/ctrl+)0..9");
+                let col = if hov { ui.t.tx(0xffffff) } else if ch.enabled { t.glyph } else { t.glyph.shade(-0.3) };
+                ui.c.icon(if ch.enabled { &os_ui::tabler::VOLUME } else { &os_ui::tabler::VOLUME_OFF }, mb, col);
+            }
         } else {
             let row_len = rk::row_len(s, i);
             ui.c.push_clip(step_area);
