@@ -35,7 +35,7 @@ pub const LAST_RESET: &str = "Last reset";
 pub const STEP_SEQ_EDIT: &str = "Step seq edit";
 /// A sample loaded into a channel (FL's name; spec: ui/settings-choices.md "Undo history: the four checks").
 pub const LOAD_SAMPLE: &str = "Load channel sample(s)";
-/// "Create automation clip" (FL's name), with the control's initial value while "Initialize controls automatically" is
+/// "Create automation clip" (FL's name), with the control's initial value while "Set start values automatically" is
 /// on (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
 pub const CREATE_AUTOMATION: &str = "Create automation clip";
 /// A chord written by step edit (spec: ui/step-edit.md).
@@ -65,7 +65,7 @@ pub enum Snap {
     /// Mixer track `.0`'s audio input, output, record source and monitor mode (`MixerTrack::audio_in` ...); its armed
     /// state is no part of it (spec: audio/track-io.md §2.3).
     TrackIo(u16, [i32; 4]),
-    /// What a sample load changes on channel `row`: its sample, its name ("Auto name channels"), its root note and its
+    /// What a sample load changes on channel `row`: its sample, its name ("Name channels after their sample or plugin"), its root note and its
     /// stretch ("Read sample root note" and "Read sample tempo information", `rack::read_tags`) and its sampler flags
     /// (Keep on disk, "Auto keep long audio on disk").
     Sample { row: usize, path: Option<String>, name: Option<String>, root: u8, stretch: [u32; 4], flags: Option<u32> },

@@ -297,7 +297,7 @@ mod tests {
         assert!(v[0].enabled && v[0].cmd == Cmd::OneClickEditor && v[1].head && v[3].head);
         assert!(v.iter().all(|p| p.mark != Mark::Radio(true)), "nothing picked yet");
         capture::set_last_input(&Input { device: "Test ASIO".into(), asio: true, first: 1, stereo: false });
-        let v = submenu(TOOLS_MENU, "One-click audio recording").expect("TOOLS submenu")(&app.state);
+        let v = submenu(TOOLS_MENU, "Quick record").expect("TOOLS submenu")(&app.state);
         assert_eq!(v[5].mark, Mark::Radio(true), "In 2 dotted");
     }
 

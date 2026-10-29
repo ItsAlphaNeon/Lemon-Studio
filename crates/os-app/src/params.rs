@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Plugin parameters in the app: the parameter lists of hosted instances (shown in the browser, "Browse parameters"),
+//! Plugin parameters in the app: the parameter lists of hosted instances (shown in the browser, "Show all parameters"),
 //! the last tweaked parameter (Tools / Add menus), the parameter menu, and automation clips on plugin parameters
 //! (targets, names, value texts).
 //!
@@ -93,7 +93,7 @@ impl ParamUi {
 pub struct ParamUi {
     /// By hosted key (`plugins::Plugins::hosted`).
     pub lists: BTreeMap<usize, List>,
-    /// Newest first: "Last tweaked", "Next to last tweaked".
+    /// Newest first: "Most recent", "Second most recent".
     pub last: Vec<Tweak>,
 }
 
@@ -125,7 +125,7 @@ impl ParamUi {
 /// Commands from the parameter menus.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PCmd {
-    /// Plugin window ▸ "Browse parameters": hosted key.
+    /// Plugin window ▸ "Show all parameters": hosted key.
     Browse(usize),
     /// "Copy value" / "Paste value" of parameter (hosted key, index).
     Copy(usize, usize),
@@ -284,9 +284,9 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
     let set = param.map(|(key, index)| set_items(s, key, index)).filter(|v| !v.is_empty());
     let mut v = vec![
         // Lemon Studio has no event editor yet; FL showed the other two disabled.
-        PItem::not_yet("Edit events"),
-        PItem::new("Edit events in new window", Cmd::Nothing).off(),
-        PItem::new("Edit events in piano roll", Cmd::Nothing).off(),
+        PItem::not_yet("Edit automation"),
+        PItem::new("Edit automation in a window", Cmd::Nothing).off(),
+        PItem::new("Edit automation in piano roll", Cmd::Nothing).off(),
         init,
         delete,
         PItem::sep(),
@@ -298,7 +298,7 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
     let target = param.map(|(key, index)| crate::typein::Target::Param(key, index));
     let linked = driven.is_some() || target.is_some_and(|t| crate::remote::link_of(t).is_some());
     let mut remote = crate::remote::menu_items(target);
-    if let Some(link) = remote.iter_mut().find(|i| i.label == "Link to controller...") {
+    if let Some(link) = remote.iter_mut().find(|i| i.label == "MIDI learn...") {
         link.mark = Mark::Check(linked);
     }
     v.extend(remote);
@@ -308,8 +308,8 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         paste,
         // spec: ui/type-in-value.md §8 (normalized mode only)
         match param {
-            Some((key, index)) => PItem::new("Type in value...", Cmd::TypeIn(crate::typein::Target::Param(key, index))),
-            None => PItem::not_yet("Type in value..."),
+            Some((key, index)) => PItem::new("Enter value...", Cmd::TypeIn(crate::typein::Target::Param(key, index))),
+            None => PItem::not_yet("Enter value..."),
         },
         match set {
             Some(values) => PItem::sub("Set...", values),
@@ -338,13 +338,14 @@ pub fn effect_label(s: &State, track: u16, slot: u8) -> Option<String> {
     Some(format!("{} ({})", crate::mixer::slot_name(s, track, slot)?, crate::mixer::name(s, track)))
 }
 
-/// Main-menu entries handled here (spec §5).
-pub const ADD_LAST: &str = "Automation for last tweaked parameter";
-pub const TOOLS_LAST: &str = "Last tweaked";
-pub const TOOLS_NEXT: &str = "Next to last tweaked";
-
-pub fn menu_handles(label: &str) -> bool {
-    matches!(label, ADD_LAST | TOOLS_LAST | TOOLS_NEXT)
+/// The menu entries for the last tweaked parameters (spec §5; `views::menus::MenuCmd::Params`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuEntry {
+    /// ADD > Automation for the most recent parameter: its automation clip at once.
+    Automation,
+    /// TOOLS > Most recent ▸ / Second most recent ▸: the parameter's menu, at the mouse.
+    Last,
+    NextToLast,
 }
 
 impl App {
@@ -508,11 +509,11 @@ impl App {
     }
 
     /// ADD / TOOLS menu entries for the last tweaked parameters (spec §5); returns a message.
-    pub(crate) fn params_menu(&mut self, label: &str) -> Option<String> {
-        let nth = usize::from(label == TOOLS_NEXT);
+    pub(crate) fn params_menu(&mut self, entry: MenuEntry) -> Option<String> {
+        let nth = usize::from(entry == MenuEntry::NextToLast);
         let tweak = self.state.params.last.get(nth).cloned();
         let create = tweak.as_ref().and_then(|t| self.tweak_automation(t));
-        if label == ADD_LAST {
+        if entry == MenuEntry::Automation {
             let Some((tgt, name, v)) = create else {
                 return Some("No parameter tweaked yet: move a plugin control or a knob first".into());
             };
@@ -528,7 +529,7 @@ impl App {
         let head = create.as_ref().map_or_else(|| "No parameter".to_string(), |c| c.1.clone());
         let mut items = vec![PItem { head: true, ..PItem::new(head, Cmd::Nothing) }, PItem::head("Automation")];
         items.extend(parameter_items(&self.state, param, create));
-        items.extend([PItem::sep(), PItem::not_yet("Override volatile link...")]);
+        items.extend([PItem::sep(), PItem::not_yet("Override temporary mapping...")]);
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
         self.invalidate();
         None
@@ -579,7 +580,7 @@ impl App {
         (!ok).then(|| "The plugin did not take the value".to_string())
     }
 
-    /// "Browse parameters" (spec §6): the browser shows the instance's parameters in the Current project tab.
+    /// "Show all parameters" (spec §6): the browser shows the instance's parameters in the Current project tab.
     pub(crate) fn browse_params(&mut self, key: usize) -> Option<String> {
         self.params_tick();
         let s = &mut self.state;
@@ -649,7 +650,7 @@ mod tests {
         assert_eq!(p.last, vec![Tweak::Plugin { key: 0, index: 0 }, Tweak::Host(Action::Tempo)]);
     }
 
-    /// The built-in EQ in a mixer slot: "Browse parameters" lists its parameters in the browser, a parameter row makes
+    /// The built-in EQ in a mixer slot: "Show all parameters" lists its parameters in the browser, a parameter row makes
     /// an automation clip (menu or drop on the playlist) aimed at the slot parameter and named after it, clip values read
     /// as the plugin's text, and the last tweaked parameter feeds the ADD / TOOLS entries.
     #[test]
@@ -665,7 +666,7 @@ mod tests {
         let key = fx_key(2, 1);
         assert_eq!(a.browse_params(key), None);
         assert_eq!(a.state.params.visible(key).count(), 36);
-        let node = "1:Current project/Effects/Lemon Parametric EQ (Insert 2)";
+        let node = "1:Current project/Effects/Lemon Parametric EQ (Bus 2)";
         assert_eq!((a.state.show_browser, a.state.browser_tab, a.state.browser_sel.as_deref()), (true, PROJECT_TAB, Some(node)));
         let list = rows(&a.state);
         let names: Vec<&str> = list.iter().filter(|r| matches!(r.item, Item::Param(k, _) if k == key)).map(|r| r.label.as_str()).collect();
@@ -678,7 +679,7 @@ mod tests {
         let menu = a.state.playlist.popup.take().unwrap();
         let tgt = target::slot_param(2, 1, 35);
         let create = menu.items.iter().find(|i| i.label == "Create automation clip").unwrap();
-        assert_eq!(create.cmd, Cmd::CreateAutomation(tgt, "Lemon Parametric EQ - Insert 2 - Main level".into(), 0.5));
+        assert_eq!(create.cmd, Cmd::CreateAutomation(tgt, "Lemon Parametric EQ - Bus 2 - Main level".into(), 0.5));
         // A plugin parameter's stored units aren't known: no initial value (spec: ui/settings-choices.md "Advanced:
         // Initialize controls automatically").
         let init = menu.items.iter().find(|i| i.label == crate::init::INIT_LABEL).unwrap();
@@ -693,7 +694,7 @@ mod tests {
 
         // Dropped on the playlist: a clip there, aimed at the parameter.
         let msg = a.params_drop(key, 35, 3, 384);
-        assert_eq!(msg.as_deref(), Some("Created automation clip \"Lemon Parametric EQ - Insert 2 - Main level\""));
+        assert_eq!(msg.as_deref(), Some("Created automation clip \"Lemon Parametric EQ - Bus 2 - Main level\""));
         let ch = a.state.project.channels.last().unwrap().index;
         assert_eq!(a.state.project.automations.last().map(|x| (x.channel, x.target())), Some((ch, Some(tgt))));
         let clip = crate::playlist::arr_mut(&mut a.state).clips.last().cloned().unwrap();
@@ -702,22 +703,22 @@ mod tests {
 
         // Last tweaked: nothing yet ("No parameter", disabled entries), then a plugin parameter; a second clip on it
         // gets a numbered name.
-        assert!(a.params_menu(ADD_LAST).is_some_and(|m| m.starts_with("No parameter")));
-        assert_eq!(a.params_menu(TOOLS_LAST), None);
+        assert!(a.params_menu(MenuEntry::Automation).is_some_and(|m| m.starts_with("No parameter")));
+        assert_eq!(a.params_menu(MenuEntry::Last), None);
         let menu = a.state.playlist.popup.take().unwrap();
         assert_eq!((menu.items[0].label.as_ref(), menu.items[0].head), ("No parameter", true));
         assert!(menu.items.iter().any(|i| i.label == "Create automation clip" && !i.enabled));
         a.state.params.note(Tweak::Plugin { key, index: 35 });
-        a.params_menu(ADD_LAST);
+        a.params_menu(MenuEntry::Automation);
         let last = a.state.project.channels.last().unwrap();
-        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Insert 2 - Main level #2"));
+        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Bus 2 - Main level #2"));
         // A plugin's own knob menu (host link): a clip on band 1 frequency.
         a.params_automate(key, 7);
         let last = a.state.project.channels.last().unwrap();
-        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Insert 2 - Band 1 freq"));
+        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Bus 2 - Band 1 freq"));
         assert_eq!(a.state.project.automations.last().and_then(|x| x.target()), Some(target::slot_param(2, 1, 7)));
         a.note_host_tweak(&Action::Tempo);
-        assert_eq!(a.params_menu(TOOLS_NEXT), None);
+        assert_eq!(a.params_menu(MenuEntry::NextToLast), None);
         let menu = a.state.playlist.popup.take().unwrap();
         assert!(menu.items.iter().any(|i| matches!(&i.cmd, Cmd::CreateAutomation(t, _, _) if *t == tgt)));
     }
@@ -752,7 +753,7 @@ mod tests {
     /// events "not yet", the other two disabled as FL shows them); "Set..." lists a stepped parameter's values by the
     /// plugin's text and a continuous one's default and quarter values, the current one marked, and a pick sets the
     /// parameter; "Edit automation clip..." is enabled once a clip drives the parameter and shows that clip in the
-    /// playlist; "Link to controller..." is ticked while a clip drives the parameter or a controller is linked to it.
+    /// playlist; "MIDI learn..." is ticked while a clip drives the parameter or a controller is linked to it.
     /// Set... is one undo step, "Plugin parameter": Ctrl+Z puts the parameter back, redo sets it again; a pick of the
     /// value it has makes none (OS, `control::param_set`).
     #[test]
@@ -781,15 +782,15 @@ mod tests {
     fn parameter_menu_set_edit_clip_and_link() {
         let (mut a, key) = eq_app();
         let m = row_menu(&mut a, key, 35);
-        let ev = entry(&m, "Edit events");
+        let ev = entry(&m, "Edit automation");
         assert!(!ev.enabled && matches!(ev.cmd, Cmd::NotYet(_)));
-        for label in ["Edit events in new window", "Edit events in piano roll"] {
+        for label in ["Edit automation in a window", "Edit automation in piano roll"] {
             let i = entry(&m, label);
             assert!(!i.enabled && i.cmd == Cmd::Nothing, "{label}");
         }
         assert!(!entry(&m, "Edit automation clip...").enabled);
-        assert!(!entry(&m, "Override global link...").enabled);
-        assert_eq!(entry(&m, "Link to controller...").mark, Mark::Check(false));
+        assert!(!entry(&m, "Override global mapping...").enabled);
+        assert_eq!(entry(&m, "MIDI learn...").mark, Mark::Check(false));
 
         // Set... on Main level (continuous, at its default 0.5): default, then the quarters, with the plugin's text.
         let set = entry(&m, "Set...");
@@ -825,7 +826,7 @@ mod tests {
         crate::playlist::run(&mut a, Cmd::CreateAutomation(tgt, name, v));
         let ch = a.state.project.channels.last().unwrap().index;
         let m = row_menu(&mut a, key, 35);
-        assert_eq!(entry(&m, "Link to controller...").mark, Mark::Check(true));
+        assert_eq!(entry(&m, "MIDI learn...").mark, Mark::Check(true));
         let edit = entry(&m, "Edit automation clip...");
         assert_eq!((edit.enabled, &edit.cmd), (true, &Cmd::Param(PCmd::EditClip(ch))));
         // Picked: the clip is the current source, selected and in view, the playlist in front.
@@ -848,16 +849,16 @@ mod tests {
         // Another parameter: no clip, not linked; a controller linked to it ticks Link to controller... too.
         let m = row_menu(&mut a, key, 0);
         assert!(!entry(&m, "Edit automation clip...").enabled);
-        assert_eq!(entry(&m, "Link to controller...").mark, Mark::Check(false));
+        assert_eq!(entry(&m, "MIDI learn...").mark, Mark::Check(false));
         crate::remote::add(crate::remote::Link::new(0, 7, crate::typein::Target::Param(key, 0)), true);
-        assert_eq!(entry(&row_menu(&mut a, key, 0), "Link to controller...").mark, Mark::Check(true));
+        assert_eq!(entry(&row_menu(&mut a, key, 0), "MIDI learn...").mark, Mark::Check(true));
         crate::remote::remove(crate::typein::Target::Param(key, 0));
 
         // TOOLS ▸ Last tweaked on the tempo (a host control): Edit automation clip... follows a tempo clip too.
         a.note_host_tweak(&Action::Tempo);
         let (tgt, name, v) = a.automation_target(&Action::Tempo).unwrap();
         crate::playlist::run(&mut a, Cmd::CreateAutomation(tgt, name, v));
-        assert_eq!(a.params_menu(TOOLS_LAST), None);
+        assert_eq!(a.params_menu(MenuEntry::Last), None);
         let m = a.state.playlist.popup.take().unwrap();
         let tempo = a.state.project.channels.last().unwrap().index;
         assert_eq!(entry(&m, "Edit automation clip...").cmd, Cmd::Param(PCmd::EditClip(tempo)));

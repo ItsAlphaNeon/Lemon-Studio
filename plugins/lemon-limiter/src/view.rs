@@ -488,8 +488,8 @@ pub fn hint(t: &Target, m: &dyn Model, names: &dyn Fn(&str) -> String, mouse: Op
         Target::Layer(k) => LAYER_HINTS[(*k).min(LAYERS - 1)].into(),
         Target::Speed => "Scrolling speed".into(),
         Target::Menu => "Display options".into(),
-        Target::Store => "Store in spare state".into(),
-        Target::Flip => "Flip with spare state (A/B compare)".into(),
+        Target::Store => "Copy to B".into(),
+        Target::Flip => "Swap A / B".into(),
         Target::Display => {
             let a = mouse.map_or(0.0, |(_, y)| display_amp(y));
             if a <= 0.0 { "-INFdB 0.00".into() } else { format!("{:.1}dB {:.2}", 20.0 * a.log10(), a) }

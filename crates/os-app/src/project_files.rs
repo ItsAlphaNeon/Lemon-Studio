@@ -133,7 +133,7 @@ impl App {
             Some(b) => self.ask_discard("reverting to the last backup", Next::Revert(b)),
             None => {
                 let file = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-                self.tell(Kind::Info, "Revert to last backup", spans(&["There is no backup of ", &file, "."]));
+                self.tell(Kind::Info, "Restore backup...", spans(&["There is no backup of ", &file, "."]));
             }
         }
     }
@@ -167,7 +167,7 @@ impl App {
         let start = root.join(USER_CATEGORY);
         let _ = std::fs::create_dir_all(&start);
         let name = format!("{}.flp", crate::backup::project_name(self.state.path.as_deref()));
-        let dlg = FileDlg::new(Mode::Save, "Save as template", "template", Then::SaveTemplate).filter("FLP project", &["flp"]).start(Some(&start)).name(&name);
+        let dlg = FileDlg::new(Mode::Save, "Save as template", "template", Then::SaveTemplate).filter("Lemon Studio project", &["flp"]).start(Some(&start)).name(&name);
         self.file_dialog(dlg);
     }
 
@@ -254,7 +254,7 @@ impl App {
     /// (`unused_files`) are listed in a Yes / No question; Yes deletes them, then saves. With none, it only saves. A
     /// data folder that holds other project files is not looked in.
     pub(crate) fn delete_unused_ask(&mut self) {
-        const TITLE: &str = "Delete unused files";
+        const TITLE: &str = "Clean up";
         let Some(path) = self.state.path.clone() else { return };
         let dir = crate::data_folder::folder(&self.state).filter(|d| d.is_dir());
         if let Some(d) = dir.as_ref().filter(|d| shared_folder(d, &path)) {
@@ -472,7 +472,7 @@ mod tests {
         use crate::views::menus::{active, item_at, DELETE_UNUSED_LABEL, TOOLS_MENU};
         let mut app = App::new(None);
         let row = |menu: usize, label: &str| (0..200).find_map(|i| item_at(menu, i).filter(|it| it.label == label)).unwrap();
-        let rows = [(0, "Revert to last backup"), (0, "Save to new project folder..."), (0, DELETE_UNUSED_LABEL), (TOOLS_MENU, DELETE_UNUSED_LABEL)];
+        let rows = [(0, "Restore backup..."), (0, "Save to new project folder..."), (0, DELETE_UNUSED_LABEL), (TOOLS_MENU, DELETE_UNUSED_LABEL)];
         for (m, l) in rows {
             assert!(!active(&app.state, m, row(m, l)), "{l}: never saved");
         }

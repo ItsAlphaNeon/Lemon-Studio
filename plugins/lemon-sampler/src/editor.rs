@@ -1081,19 +1081,19 @@ impl Logic {
         }
         // Automation and remote control belong to the host: shown; "Create automation clip" goes to Lemon Studio (host link).
         m.head("Automation");
-        for l in ["Edit events", "Edit events in new window", "Edit events in piano roll", "Init song with this position", "Delete initial value"] {
+        for l in ["Edit automation", "Edit automation in a window", "Edit automation in piano roll", "Set as song start value", "Remove start value"] {
             m.add(MenuItem::item(l).enabled(false), Cmd::None);
         }
         m.sep();
         m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate);
         m.add(MenuItem::item("Edit automation clip...").enabled(false), Cmd::None);
         m.head("Remote control");
-        m.add(MenuItem::item("Link to controller...").enabled(false), Cmd::None);
-        m.add(MenuItem::item("Override global link...").enabled(false), Cmd::None);
+        m.add(MenuItem::item("MIDI learn...").enabled(false), Cmd::None);
+        m.add(MenuItem::item("Override global mapping...").enabled(false), Cmd::None);
         m.head("Value");
         m.add(MenuItem::item("Copy value"), Cmd::CopyValue);
         m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue);
-        m.add(MenuItem::item("Type in value..."), Cmd::TypeIn);
+        m.add(MenuItem::item("Enter value..."), Cmd::TypeIn);
         m.add(MenuItem::item("Set..."), Cmd::TypeIn);
         m
     }

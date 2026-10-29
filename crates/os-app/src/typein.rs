@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! "Type in value...": the value box of the knob and parameter menus. It is the playlist's inline text box
+//! "Enter value...": the value box of the knob and parameter menus. It is the playlist's inline text box
 //! (`EditTarget::TypeIn`) drawn as FL's value box, reading the text in the knob's own unit or as a normalized value.
 //!
 // spec: ui/type-in-value.md
@@ -78,7 +78,7 @@ fn unit(t: Target) -> Unit {
     }
 }
 
-/// The value-mode button's label and its name in the hint ("Type in value as: <name>"), when the box has the two
+/// The value-mode button's label and its name in the hint ("Enter value as: <name>"), when the box has the two
 /// mode buttons (spec §3).
 pub fn mode_button(t: Target) -> Option<(&'static str, &'static str)> {
     match unit(t) {
@@ -270,7 +270,7 @@ pub fn parse(t: Target, norm: bool, text: &str) -> Option<f64> {
     }
 }
 
-/// "Type in value...": the box at the mouse (spec §1), its field holding the value in the remembered mode.
+/// "Enter value...": the box at the mouse (spec §1), its field holding the value in the remembered mode.
 pub fn open(s: &mut State, t: Target, mouse: (f32, f32)) {
     let norm = opening_norm(t, s.playlist.typein_norm);
     let w = width(t);

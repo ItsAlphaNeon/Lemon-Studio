@@ -342,7 +342,7 @@ impl Logic {
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
                 if params::index(id).is_some() {
-                    m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
+                    m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(id.clone()));
                 }
                 // Automation belongs to the host: offered when Lemon Studio hosts the editor (host link).
                 m.sep(Cmd::None);
@@ -1019,8 +1019,8 @@ mod tests {
         let mut l = logic();
         let m = l.menu(&MenuReq::Param("dec".into()));
         assert_eq!(m.find("Reset"), Some(Cmd::Reset("dec".into())));
-        assert_eq!(m.find("Type in value..."), Some(Cmd::TypeIn("dec".into())));
-        assert!(l.menu(&MenuReq::Param(params::TEMPO_ID.into())).find("Type in value...").is_none());
+        assert_eq!(m.find("Enter value..."), Some(Cmd::TypeIn("dec".into())));
+        assert!(l.menu(&MenuReq::Param(params::TEMPO_ID.into())).find("Enter value...").is_none());
         l.vals.edit_plain("dec", 100.0);
         l.pick(&MenuReq::Param("dec".into()), Cmd::Reset("dec".into()), 0.0, 0.0);
         assert_eq!(l.vals.plain("dec"), 15.0);

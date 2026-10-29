@@ -357,7 +357,7 @@ impl App {
                         let i = pl::place(s, track, tick);
                         s.playlist.sel = vec![i];
                     } else {
-                        s.message = Some("Only audio and automation channels go on the playlist; drop a pattern instead".into());
+                        s.message = Some("Only audio and automation channels go on the arranger; drop a pattern instead".into());
                     }
                 } else if matches!(win, Some(Win::PianoRoll | Win::ChannelRack)) {
                     s.selected_channel = c;
@@ -599,23 +599,12 @@ pub enum Jump {
 }
 
 impl Jump {
-    /// The jump behind entry `label` of menu `menu`. `None` for other entries, and for a section the tree does not list
-    /// (History, Remote control: their entries stay greyed out).
-    pub fn from_label(menu: usize, label: &str) -> Option<Jump> {
-        use crate::views::menus::{ADD_MENU, TOOLS_MENU, VIEW};
-        let j = match (menu, label) {
-            (VIEW, "Undo history") => Jump::Section("History"),
-            (VIEW, "Patterns") => Jump::Section("Patterns"),
-            (VIEW, "Generators in use") => Jump::Section("Generators"),
-            (VIEW, "Effects in use") => Jump::Section("Effects"),
-            (VIEW, "Remote control") => Jump::Section("Remote control"),
-            (VIEW, "Plugin database") | (ADD_MENU, "Browse plugin database") => Jump::PluginDb,
-            (TOOLS_MENU, "Browser find...") => Jump::Find,
-            _ => return None,
-        };
-        match j {
-            Jump::Section(name) => view::section_key(name).map(|_| j),
-            _ => Some(j),
+    /// Whether the jump has somewhere to go: a section the tree does not list (History, Remote control) has not, and
+    /// its entry stays greyed out.
+    pub fn available(self) -> bool {
+        match self {
+            Jump::Section(name) => view::section_key(name).is_some(),
+            _ => true,
         }
     }
 }
@@ -691,13 +680,13 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
             items.extend([
                 r("Select pattern", RowCmd::Activate),
                 PItem::sep(),
-                p("Rename and color...", P::Rename),
+                p("Rename and colour...", P::Rename),
                 p("Change color...", P::ChangeColor),
                 p("Clone", P::Clone),
                 p("Delete", P::Delete),
                 PItem::sep(),
-                p("Select in playlist", P::SelectInPlaylist),
-                p("Split by channel", P::SplitByChannel),
+                p("Select in arranger", P::SelectInPlaylist),
+                p("Split by instrument", P::SplitByChannel),
             ]);
         }
         Item::Channel(c) => {
@@ -715,9 +704,9 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
         Item::Sample(_) => {
             let send = r("Send to selected channel", RowCmd::Send);
             let sampler = s.project.channels.get(s.selected_channel).is_some_and(|c| c.kind.is_sampler());
-            items.extend([r("Preview", RowCmd::Preview), if sampler { send } else { send.off() }, r("Add to channel rack", RowCmd::NewChannel)]);
+            items.extend([r("Preview", RowCmd::Preview), if sampler { send } else { send.off() }, r("Add to instrument rack", RowCmd::NewChannel)]);
         }
-        Item::Generator(index) => items.push(PItem::new("Add to channel rack", Cmd::Plugin(crate::plugin_menu::PlugCmd::Generator { index, after: None }))),
+        Item::Generator(index) => items.push(PItem::new("Add to instrument rack", Cmd::Plugin(crate::plugin_menu::PlugCmd::Generator { index, after: None }))),
         Item::Effect(index) => items.push(PItem::new("Add to selected mixer track", Cmd::Plugin(crate::plugin_menu::PlugCmd::Effect { index, slot: None }))),
         Item::History(_) => items.push(r("Go to this step", RowCmd::Activate)),
         // Into the selected channel's plugin (spec: plugins/presets.md "Browser").
@@ -784,7 +773,7 @@ pub fn options_menu(s: &crate::app::State) -> Vec<PItem> {
         b("Reread structure", BCmd::Reread).key("Ctrl+R"),
         PItem::head("Content"),
         PItem::not_yet("Configure extra folders"),
-        b("Refresh plugin list (fast scan)", BCmd::Rescan),
+        b("Rescan plugins (fast)", BCmd::Rescan),
     ]
 }
 
@@ -871,7 +860,7 @@ fn send(s: &mut crate::app::State, dir: isize) -> Option<String> {
     send_sample(s, &path, &rows[i].label)
 }
 
-/// Sample `path` (shown as `label`) into the selected channel, which takes the file's name while "Auto name channels"
+/// Sample `path` (shown as `label`) into the selected channel, which takes the file's name while "Name channels after their sample or plugin"
 /// is on (`rack::auto_name`). One history step (`history::load_sample`).
 fn send_sample(s: &mut crate::app::State, path: &str, label: &str) -> Option<String> {
     let row = s.selected_channel;

@@ -58,34 +58,6 @@ pub enum Cmd {
     RenderAsClip,
 }
 
-impl Cmd {
-    /// The command behind a PATTERNS menu label.
-    pub fn from_label(label: &str) -> Option<Cmd> {
-        Some(match label {
-            "Find first empty..." => Cmd::FindFirst,
-            "Find next empty..." => Cmd::FindNext,
-            "Find next empty (no naming)" => Cmd::FindNextNoName,
-            "Select in playlist" => Cmd::SelectInPlaylist,
-            "Rename and color..." => Cmd::Rename,
-            "Change color..." => Cmd::ChangeColor,
-            "Random color" => Cmd::RandomColor,
-            "Transpose..." => Cmd::Transpose,
-            "Insert one" => Cmd::InsertOne,
-            "Clone" => Cmd::Clone,
-            "Delete" => Cmd::Delete,
-            "Move up" => Cmd::MoveUp,
-            "Move down" => Cmd::MoveDown,
-            "Set time signature..." => Cmd::TimeSignature,
-            "Open in project browser" => Cmd::OpenInBrowser,
-            "Split by channel" => Cmd::SplitByChannel,
-            "Quick render as audio clip" => Cmd::QuickRender,
-            "Render as audio clip..." => Cmd::RenderAsClip,
-            "Render and replace..." => Cmd::RenderReplace,
-            _ => return None,
-        })
-    }
-}
-
 /// Clicks inside the name box, its popups and the confirm dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
@@ -456,7 +428,7 @@ pub fn split_by_channel(s: &mut State) {
         return;
     }
     let undo = crate::history::Snap::Patterns { patterns: s.project.patterns.clone(), current: cur };
-    crate::playlist::snapshot_with(s, "Split by channel", undo);
+    crate::playlist::snapshot_with(s, "Split by instrument", undo);
     // Notes of a channel no longer in the rack stay with the original.
     let p = pat_mut(s, cur);
     p.notes.retain(|n| n.channel == *first || !chans.iter().any(|c| c.0 == n.channel));

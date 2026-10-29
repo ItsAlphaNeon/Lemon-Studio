@@ -1353,7 +1353,7 @@ impl Logic {
                 t(&mut m, "Declick in all regions", "", ToolCmd::DeclickInRegions, regions);
                 t(&mut m, "Declick out all regions", "", ToolCmd::DeclickOutRegions, regions);
                 m.head("Sequencing", Cmd::None);
-                m.add(item("Send to playlist as audio clip").shortcut("Shift+C").enabled(has), Cmd::Send(false));
+                m.add(item("Send to arranger as audio clip").shortcut("Shift+C").enabled(has), Cmd::Send(false));
                 m.add(item("Send to selected channel").enabled(has), Cmd::Send(true));
             }
             MenuId::Regions => {

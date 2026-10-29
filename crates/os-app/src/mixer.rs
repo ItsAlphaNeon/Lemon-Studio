@@ -181,9 +181,9 @@ pub(crate) fn track_mut(s: &mut State, n: u16) -> Option<&mut MixerTrack> {
     s.project.mixer.iter_mut().find(|m| m.index == n)
 }
 
-/// "Master", "Insert 3", or the track's own name.
+/// "Master", "Bus 3", or the track's own name.
 pub fn name(s: &State, n: u16) -> String {
-    track(s, n).and_then(|m| m.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| if n == 0 { "Master".into() } else { format!("Insert {n}") })
+    track(s, n).and_then(|m| m.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| if n == 0 { "Master".into() } else { format!("Bus {n}") })
 }
 
 /// The current track first, then the other selected ones.
@@ -252,7 +252,7 @@ fn clear_slot(s: &mut State, t: u16, k: u8) {
     s.mixer.pending.push(FxReq::Delete { track: t, slot: k });
 }
 
-/// "Volume: 100%  0.0dB  1.00" (§4); `label` = "Volume" or "To Insert 3".
+/// "Volume: 100%  0.0dB  1.00" (§4); `label` = "Volume" or "To Bus 3".
 pub fn level_text(label: &str, v: f64) -> String {
     let g = os_engine::laws::fader_gain(v);
     let db = if g > 0.0 { format!("{:.1}dB", 20.0 * g.log10()) } else { "-INFdB".into() };
@@ -1157,7 +1157,7 @@ fn track_items(n: u16) -> Vec<PItem> {
             "Select",
             vec![
                 PItem::new("Channels routed to this track", mx(MCmd::SelectChannels(n))).key("Alt+L"),
-                PItem::not_yet("Channels and playlist tracks routed to this track"),
+                PItem::not_yet("Channels and arranger tracks routed to this bus"),
                 PItem::sep(),
                 PItem::new("Tracks this one is routed to", mx(MCmd::SelectDest(n))),
                 PItem::new("Tracks routed to this one", mx(MCmd::SelectSources(n))).key("Ctrl+Alt+L"),
@@ -1217,7 +1217,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::not_yet("Detached").mark(Mark::Check(false)),
         PItem::sep(),
         PItem::sub("Trim unused tracks", trim_items(s)),
-        PItem::not_yet("Switch smart disable for all plugins"),
+        PItem::not_yet("Switch auto-bypass for all plugins"),
         PItem::new("Remove all (audio editor) instances", Cmd::Mixer(MCmd::RemoveTeslas)),
         // The cable physics debug panel, hidden from users; uncomment to tune the cables again.
         // PItem::new("Cable physics (debug)...", Cmd::Mixer(MCmd::CablePhysics)).mark(Mark::Check(s.cables.borrow().debug)),
@@ -1242,7 +1242,7 @@ pub fn layout_menu(s: &State, x: f32, y: f32) -> Popup {
 
 /// Empty slot: the effect list (§7.1), the plugin menu for this slot (spec: ui/plugin-menu.md).
 pub fn effect_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
-    let mut items = vec![PItem::not_yet("Plugin database").key(crate::shortcuts::menu_key("Plugin database", "Shift+F8")), PItem::sep()];
+    let mut items = vec![PItem::not_yet("Plugin library").key(crate::shortcuts::menu_key("Plugin library", "Shift+F8")), PItem::sep()];
     items.extend(crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), false));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
@@ -1255,24 +1255,24 @@ pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
         PItem::sub("Replace", replace),
         PItem::new("Delete...", mx(MCmd::SlotDelete(slot))),
         PItem::sep(),
-        PItem::not_yet("Patcherize"),
-        PItem::not_yet("Patcherize all"),
+        PItem::not_yet("Wrap in container"),
+        PItem::not_yet("Wrap all in container"),
         PItem::head("Presets"),
         PItem::sub("Presets", vec![PItem::not_yet("(none)")]),
         PItem::not_yet("Browse presets"),
         PItem::not_yet("Save preset as..."),
-        PItem::not_yet("Add to plugin database (flag as favorite)"),
+        PItem::not_yet("Add to favourites"),
         PItem::not_yet("Display preset name in preset selector").mark(Mark::Check(true)),
-        PItem::head("Spare state"),
-        PItem::not_yet("Store in spare state"),
-        PItem::not_yet("Flip with spare state"),
+        PItem::head("A/B compare"),
+        PItem::not_yet("Copy to B"),
+        PItem::not_yet("Swap A / B"),
         PItem::head("Parameters"),
         PItem::not_yet("Link all parameters..."),
-        PItem::new("Browse parameters", Cmd::Param(crate::params::PCmd::Browse(crate::plugins::fx_key(s.selected_mixer, slot)))),
+        PItem::new("Show all parameters", Cmd::Param(crate::params::PCmd::Browse(crate::plugins::fx_key(s.selected_mixer, slot)))),
         PItem::sub("Sidechain input", sidechain_items(s, slot)),
         PItem::head("CPU"),
         PItem::not_yet("Allow threaded processing").mark(Mark::Check(true)),
-        PItem::not_yet("Smart disable"),
+        PItem::not_yet("Auto-bypass when silent"),
         PItem::sep(),
         PItem::new("Move up", mx(MCmd::SlotMove(slot, -1))),
         PItem::new("Move down", mx(MCmd::SlotMove(slot, 1))),
@@ -1879,7 +1879,7 @@ pub fn fx_info(p: &os_model::Project, ui: &MixerUi, key: usize) -> Option<crate:
     Some(crate::plugin_window::ChannelInfo {
         misc: None,
         name,
-        target: m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Insert {t}") }),
+        target: m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Bus {t}") }),
         enabled: m.slot_on[usize::from(k)],
         volume: 0.8,
         pan: 0.0,
@@ -1981,7 +1981,7 @@ mod tests {
     fn select_mute_solo() {
         let mut a = app();
         let n = inserts(&a.state);
-        assert_eq!(n, 16, "default mixer shows Insert 1-16");
+        assert_eq!(n, 16, "default mixer shows Bus 1-16");
         hit(&mut a, MHit::Strip(3));
         assert_eq!(selected(&a.state), vec![3]);
         a.ctrl = true;
@@ -2038,9 +2038,9 @@ mod tests {
         a.state.project.channels[4].mixer_track = 16;
         a.select_window_track(4);
         assert_eq!(a.state.selected_mixer, 16);
-        assert!((a.state.mixer_scroll + view - 16.0 * w).abs() < 0.5, "Insert 16 at the right edge: {}", a.state.mixer_scroll);
+        assert!((a.state.mixer_scroll + view - 16.0 * w).abs() < 0.5, "Bus 16 at the right edge: {}", a.state.mixer_scroll);
         a.select_window_track(2);
-        assert_eq!((a.state.selected_mixer, a.state.mixer_scroll), (3, 2.0 * w), "Insert 3 at the left edge");
+        assert_eq!((a.state.selected_mixer, a.state.mixer_scroll), (3, 2.0 * w), "Bus 3 at the left edge");
         a.select_window_track(0);
         assert_eq!((a.state.selected_mixer, a.state.mixer_scroll), (0, 2.0 * w), "the master does not scroll");
         // Off: the selection is left alone.
@@ -2072,7 +2072,7 @@ mod tests {
         assert!(hit(&mut a, MHit::Route(1)).is_some_and(|m| m.contains("loop")));
         assert!(!track(&a.state, 6).unwrap().routes.contains(&1));
         assert_eq!(level_text("Volume", 0.8), "Volume: 100%  0.0dB  1.00");
-        assert_eq!(level_text("To Insert 11", 0.0), "To Insert 11: 0%  -INFdB  0.00");
+        assert_eq!(level_text("To Bus 11", 0.0), "To Bus 11: 0%  -INFdB  0.00");
     }
 
     #[test]
@@ -2127,7 +2127,7 @@ mod tests {
         let plugin = os_model::PluginRef { format: "clap".into(), name: "Comp".into(), path: "C:/Comp.clap".into(), ..Default::default() };
         track_mut(&mut a.state, 1).unwrap().slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: wrapper::WRAPPER.into(), state: wrapper::encode(None, &plugin) });
         let labels = |a: &App| sidechain_items(&a.state, 0).iter().map(|i| (i.label.to_string(), i.mark == Mark::Radio(true))).collect::<Vec<_>>();
-        assert_eq!(labels(&a), [("None".into(), true), ("1. Kick".into(), false), ("2. Insert 3".into(), false)]);
+        assert_eq!(labels(&a), [("None".into(), true), ("1. Kick".into(), false), ("2. Bus 3".into(), false)]);
         assert_eq!(run(&mut a, MCmd::SlotSidechain(0, 2)), None);
         let state = |a: &App| track(&a.state, 1).unwrap().slots[0].as_ref().unwrap().state.clone();
         assert_eq!(wrapper::input_ports(&state(&a)), [0, 2]);
@@ -2179,7 +2179,7 @@ mod tests {
         assert_eq!(a.state.project.channels[0].mixer_track, 14);
         assert_eq!(a.state.project.channels[2].mixer_track, 14);
         assert_eq!(name(&a.state, 14), "Kick", "named after the first channel");
-        assert_eq!(name(&a.state, 3), "Insert 3", "the track left keeps its name");
+        assert_eq!(name(&a.state, 3), "Bus 3", "the track left keeps its name");
         assert_eq!(a.state.selected_mixer, 14);
         a.state.rack.sel = [1, 3, 4].into_iter().collect();
         run(&mut a, MCmd::RouteChannels { dst: 15, spread: true });

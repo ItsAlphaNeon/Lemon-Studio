@@ -231,10 +231,10 @@ pub fn menu_items(t: Option<Target>) -> Vec<PItem> {
     let mut v = vec![
         PItem::head("Remote control"),
         match t {
-            Some(t) => PItem::new("Link to controller...", Cmd::Remote(RCmd::Link(t))),
-            None => PItem::not_yet("Link to controller..."),
+            Some(t) => PItem::new("MIDI learn...", Cmd::Remote(RCmd::Link(t))),
+            None => PItem::not_yet("MIDI learn..."),
         },
-        PItem::new("Override global link...", Cmd::Nothing).off(),
+        PItem::new("Override global mapping...", Cmd::Nothing).off(),
     ];
     if let Some(t) = t.filter(|&t| link_of(t).is_some()) {
         v.push(PItem::new("Remove link", Cmd::Remote(RCmd::Unlink(t))));
@@ -633,9 +633,9 @@ impl App {
         m.on = !m.on;
         m.queue.clear();
         self.state.message = Some(if m.on {
-            "Multilink to controllers: change the knobs to link, then move a controller for each, in the same order".into()
+            "Multi MIDI learn: change the knobs to link, then move a controller for each, in the same order".into()
         } else {
-            "Multilink to controllers: off".into()
+            "Multi MIDI learn: off".into()
         });
         self.invalidate();
     }
@@ -647,7 +647,7 @@ impl App {
             m.queue.push_back(t);
             let name = crate::typein::caption(&self.state, t);
             let n = self.state.multilink.queue.len();
-            self.state.message = Some(format!("Multilink {n}: {}", name.trim_start_matches("Value for ")));
+            self.state.message = Some(format!("MIDI learn {n}: {}", name.trim_start_matches("Value for ")));
         }
     }
 }

@@ -461,7 +461,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     }
 
     // Name, rotated, reading upward from the bottom of the meter.
-    let name = track.and_then(|m| m.name.clone()).unwrap_or_else(|| if n == 0 { "Master".into() } else { format!("Insert {n}") });
+    let name = track.and_then(|m| m.name.clone()).unwrap_or_else(|| if n == 0 { "Master".into() } else { format!("Bus {n}") });
     let name_c = track
         .and_then(|m| m.color)
         .map(super::rgb)
@@ -644,7 +644,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     let title = match track.and_then(|m| m.name.clone()) {
         Some(nm) => format!("Mixer - {nm}"),
         None if n == 0 => "Mixer - Master".into(),
-        None => format!("Mixer - Insert {n}"),
+        None => format!("Mixer - Bus {n}"),
     };
     ui.c.fill_rect(Rect::new(r.x, r.y, r.w, 23.0), t.window_title);
     ui.c.text_clip(Font::new(17), r.x + 1.0, r.y + 2.0, r.w - 70.0, ui.t.tx(0xd4dade), &title);
