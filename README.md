@@ -3,6 +3,10 @@
 This is the `cutting-edge` branch of Lemon Studio. It is [`main`](https://github.com/ItsAlphaNeon/Lemon-Studio/tree/main)
 plus what is listed here. For everything else (building, using, contributing, license), read `main`'s README.
 
+> **Anything here can be dropped at any moment.** This branch is where ideas are tried. A feature listed below may
+> change or be removed without notice, and nothing here is promised to reach `main`. Don't build on it, and keep
+> copies of what you make with it (`.lemon` files included).
+
 > **Linux only, Wayland first, for now.** This branch is built, tested and used on Linux under Wayland (Hyprland).
 > X11 still works (`OPENSTUDIO_WAYLAND=0`). Windows and macOS may build, but nothing added here is tested there, and
 > some of it is Linux-only (plugin editors drawn in the app's window, the Hyprland plugin-window handling).
@@ -76,6 +80,16 @@ own content. Side branches are named `cutting-edge-<topic>`.
   Presets, close). FL's frame is gone there: no minimize button, no gear strip (the channel settings window has those
   controls), no frame around the editor. Third-party plugins keep windows of their own.
   `LEMONSTUDIO_PLUGIN_WINDOWS=1` gives the built-in ones their own windows again.
+- **Tiling desktops leave the window to the window manager.** On a tiling desktop (Hyprland, sway, i3, niri, river
+  and the like, read from `XDG_CURRENT_DESKTOP`), the tiling layout's toolbar has no minimize, maximize and close
+  buttons: the window manager places, sizes and closes the window with its own keys. The flexible spaces take their
+  room. A window made floating gets them back (on Hyprland, which says so). The Classic layout and the toolbar editor
+  keep them.
+- **Follow Omarchy's theme.** On Omarchy, the theme follows the system's: Omarchy's current theme (`colors.toml`) is
+  applied over the skin in use, its backgrounds as the surfaces exactly, its accent as the selection, its foreground
+  as the text, and it changes when the system theme changes. Theme ▸ Options ▸ "Follow Omarchy's theme" shows only
+  on Omarchy and is on there by default; choosing another theme turns it off. A theme file can give its surfaces
+  outright with `LemonStudioSurfaces=#darker,#dark,#background,#lighter` (FL ignores the key).
 - **Third-party plugin windows under Hyprland.** They drag by their own title bar (Hyprland ignores the X11 move
   request) and have no compositor border, shadow or move animation.
 - **Branch marks.** The workspace watermark, the version string ("cutting-edge pre-alpha") and the status bar's mark

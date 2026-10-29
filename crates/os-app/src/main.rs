@@ -21,6 +21,7 @@ mod open_bench;
 mod browser;
 mod cable;
 mod capture;
+mod omarchy;
 mod one_click;
 mod score_log;
 mod clip_colors;
@@ -28,6 +29,7 @@ mod clock;
 mod control;
 mod cpu;
 mod data_folder;
+mod desktop;
 mod device;
 mod dialog;
 mod floating;
@@ -1100,6 +1102,7 @@ impl ApplicationHandler for Shell {
                 window.request_redraw();
             }
             WindowEvent::Resized(_) => {
+                desktop::window_changed();
                 self.follow_frame(&window);
                 self.inset = insets(&window);
                 self.app.invalidate();

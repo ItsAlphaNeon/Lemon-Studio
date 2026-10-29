@@ -5,6 +5,9 @@ history"; the Save as form names `<name>.lemon`). Open and a drop onto the windo
 `.flp` keeps saving as one (Save new version and renaming keep the file's type), and Save as offers "FL Studio project"
 too.
 
+> Like everything on this branch, the format may change or be dropped. Its `project.flp` is the way out: taken out of
+> the zip, it opens in Lemon Studio's `main` and in FL.
+
 ## What it holds
 
 A zip with these files:

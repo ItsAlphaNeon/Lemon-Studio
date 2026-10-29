@@ -114,9 +114,14 @@ pub fn scale_rect(r: Rect, k: f32) -> Rect {
     Rect::new(r.x * k, r.y * k, r.w * k, r.h * k)
 }
 
+#[cfg(test)]
+pub fn toolbar_placed(s: &State) -> Vec<crate::toolbar::Placed> {
+    placed(s)
+}
+
 /// The top band's toolbar panels as laid out now, in the band's own px.
 fn placed(s: &State) -> Vec<crate::toolbar::Placed> {
-    crate::toolbar::place(&s.bar.layout, s.screen.0 / band_k(s), s.bar.editing)
+    crate::toolbar::place(&toolbar::shown(s), s.screen.0 / band_k(s), s.bar.editing)
 }
 
 /// How far toolbar panel `p` is from its home (`toolbar::Panel::home`); `None` when it is not on the toolbar.

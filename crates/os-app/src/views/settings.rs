@@ -272,6 +272,7 @@ pub const LIVE: &[&str] = &[
     CROSSFADES_CHECK,
     SHOW_INFO_CHECK,
     NOTE_COLORS_CHECK,
+    FOLLOW_OMARCHY_CHECK,
     SAVE_PRESET,
     THEME_UNDO,
     THEME_REDO,
@@ -377,6 +378,8 @@ pub const SHOW_INFO_CHECK: &str = "Show info on opening";
 /// Theme ▸ Options: the applied theme's `OverrideClips` (`App::toggle_theme_option`; spec: ui/settings-choices.md
 /// "Light mode and clip note colours"). There is no Light mode option (removed 2026-10-18; themes draw as with it on).
 pub const NOTE_COLORS_CHECK: &str = "Audio and automation clips use note colors";
+/// Theme ▸ Options, on Omarchy only: the theme follows the system's (`crate::omarchy`).
+pub const FOLLOW_OMARCHY_CHECK: &str = "Follow Omarchy's theme";
 /// Theme: save the applied theme under a name, undo / redo theme changes, and the readability warning's fix
 /// (`crate::theme_library`).
 pub const SAVE_PRESET: &str = "Save preset...";
@@ -810,7 +813,12 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             .chain(st.unreadable.map(|_| g("", vec![ThemeWarn])))
             .chain([
                 gf("Adjustments", false, vec![ThemeKnobs]),
-                g("Options", vec![Check(NOTE_COLORS_CHECK, s.fl_theme().override_clips)]),
+                g(
+                    "Options",
+                    std::iter::once(Check(NOTE_COLORS_CHECK, s.fl_theme().override_clips))
+                        .chain(crate::omarchy::available().then(|| Check(FOLLOW_OMARCHY_CHECK, crate::omarchy::following())))
+                        .collect(),
+                ),
                 g(
                     "",
                     vec![Buttons(vec![("Load theme...", 110.0), ("Reset", 64.0), (SAVE_PRESET, 100.0), (THEME_UNDO, 64.0), (THEME_REDO, 64.0)])],

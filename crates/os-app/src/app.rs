@@ -1498,6 +1498,8 @@ pub struct App {
     pub(crate) saved: (Project, f64),
     /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
     pub(crate) backup: crate::backup::Backup,
+    /// Follow Omarchy: the system theme last applied (`omarchy::stamp`) and when to look again (`omarchy_tick`).
+    pub(crate) omarchy: (Option<(String, Option<std::time::SystemTime>)>, std::time::Instant),
 }
 
 /// Window-level requests the shell must carry out after an event.
@@ -1720,6 +1722,7 @@ impl App {
             device_opens: 0,
             saved: (Project::default(), 0.0),
             backup: Default::default(),
+            omarchy: (None, std::time::Instant::now()),
         };
         // The snap settings are program settings, kept in the user folder (spec: ui/global-snap.md §6).
         let snap = crate::snap::load();
@@ -1727,6 +1730,7 @@ impl App {
         app.state.piano.snap = snap.piano;
         app.state.playlist.snap = snap.playlist;
         crate::project_info::created(&mut app.state);
+        app.omarchy_tick(std::time::Instant::now());
         app.mark_saved();
         if let Some(p) = path {
             app.open(p);
@@ -4323,6 +4327,7 @@ impl App {
         self.work_tick(now);
         self.song_info_tick(now);
         self.auto_close_tick(now);
+        self.omarchy_tick(now);
         self.follow_settings();
         if self.state.cpu.due(now) {
             let tp = &self.transport;
@@ -4821,6 +4826,9 @@ impl App {
         };
         match loaded {
             Ok((t, text)) => {
+                if remember {
+                    self.stop_following_omarchy();
+                }
                 self.theme_mark(crate::theme_library::Step::Other);
                 let to_citrus = !fl && self.design() != Design::Citrus;
                 self.theme = t;
@@ -4847,6 +4855,66 @@ impl App {
             Err(e) => self.state.message = Some(format!("Could not load theme {name}: {e}")),
         }
         self.invalidate();
+    }
+
+    /// Follow Omarchy (`crate::omarchy`): once a second, the system theme applied when it changed.
+    pub(crate) fn omarchy_tick(&mut self, now: std::time::Instant) {
+        if now < self.omarchy.1 {
+            return;
+        }
+        self.omarchy.1 = now + std::time::Duration::from_secs(1);
+        if !crate::omarchy::following() {
+            self.omarchy.0 = None;
+            return;
+        }
+        let stamp = crate::omarchy::stamp();
+        if stamp == self.omarchy.0 {
+            return;
+        }
+        self.omarchy.0 = stamp;
+        self.apply_omarchy();
+    }
+
+    /// Omarchy's current theme over the skin in use. Not kept as `current.flstheme`: the next start follows the system
+    /// again (and with the option off, it starts on the theme chosen before).
+    fn apply_omarchy(&mut self) {
+        let Some((name, text)) = crate::omarchy::theme() else { return };
+        self.theme = skin_theme(self.design(), &name, Some(&text));
+        os_theme::set_current(&self.theme.colors);
+        self.state.fl_text = Some(text.clone());
+        self.state.theme_base = Some(text);
+        crate::wallpaper::forget();
+        self.sync_preset();
+        self.invalidate();
+    }
+
+    /// Theme ▸ Options ▸ Follow Omarchy's theme: on applies the system's now; off goes back to the theme kept from
+    /// before (`current.flstheme`, else the skin's own colours).
+    pub(crate) fn toggle_follow_omarchy(&mut self) {
+        let on = !crate::omarchy::following();
+        crate::settings_file::set_flag(crate::omarchy::KEY, on);
+        self.omarchy = (None, std::time::Instant::now());
+        if on {
+            self.omarchy_tick(std::time::Instant::now());
+            self.state.message = Some(format!("Theme: {} (following Omarchy)", self.theme.name));
+        } else {
+            self.theme = design_theme(self.design(), true);
+            os_theme::set_current(&self.theme.colors);
+            self.state.fl_text = saved_fl_text();
+            self.state.theme_base = self.state.fl_text.clone();
+            crate::wallpaper::forget();
+            self.sync_preset();
+            self.state.message = Some(format!("Theme: {} (no longer following Omarchy)", self.theme.name));
+        }
+        self.invalidate();
+    }
+
+    /// A theme chosen by hand: Follow Omarchy goes off, so the choice holds.
+    fn stop_following_omarchy(&mut self) {
+        if crate::omarchy::following() {
+            crate::settings_file::set_flag(crate::omarchy::KEY, false);
+            self.omarchy.0 = None;
+        }
     }
 
     /// The design in use (spec: ui/lemon-design.md).
@@ -5384,6 +5452,7 @@ impl App {
             SAct::Check(k) if k == views::settings::CROSSFADES_CHECK => self.toggle_auto_crossfades(),
             SAct::Check(k) if k == views::settings::SHOW_INFO_CHECK => self.toggle_show_info(),
             SAct::Check(k) if k == views::settings::NOTE_COLORS_CHECK => self.toggle_theme_option(k),
+            SAct::Check(k) if k == views::settings::FOLLOW_OMARCHY_CHECK => self.toggle_follow_omarchy(),
             // The only place that writes the registry (`crate::file_assoc`).
             #[cfg(windows)]
             SAct::Check(k) if k == views::settings::ASSOCIATE_CHECK => self.assoc_click(),
@@ -5405,6 +5474,7 @@ impl App {
                 }
             }
             SAct::Button("Reset") => {
+                self.stop_following_omarchy();
                 self.theme_mark(crate::theme_library::Step::Other);
                 self.theme = design_theme(self.design(), false);
                 os_theme::set_current(&self.theme.colors);
@@ -5418,6 +5488,7 @@ impl App {
             }
             SAct::Preset(i) => {
                 if let Some((name, text)) = st.themes.get(i).cloned() {
+                    self.stop_following_omarchy();
                     self.theme_mark(crate::theme_library::Step::Other);
                     self.theme = skin_theme(self.design(), &name, Some(&text));
                     os_theme::set_current(&self.theme.colors);

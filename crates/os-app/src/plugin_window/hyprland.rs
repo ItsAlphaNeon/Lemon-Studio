@@ -101,6 +101,16 @@ fn cursor() -> Option<(f64, f64)> {
     Some((v["x"].as_f64()?, v["y"].as_f64()?))
 }
 
+/// Whether this process's main window (its Wayland one) floats (`None`: no answer, or no such window).
+pub fn main_floats() -> Option<bool> {
+    let list: serde_json::Value = serde_json::from_str(&ask("j/clients")?).ok()?;
+    let pid = std::process::id() as u64;
+    list.as_array()?
+        .iter()
+        .find(|c| c["pid"].as_u64() == Some(pid) && c["xwayland"].as_bool() == Some(false))
+        .and_then(|c| c["floating"].as_bool())
+}
+
 /// This process's XWayland windows not made plain yet (`None`: no answer from Hyprland).
 fn ours() -> Option<Vec<String>> {
     let list: serde_json::Value = serde_json::from_str(&ask("j/clients")?).ok()?;

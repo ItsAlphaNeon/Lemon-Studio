@@ -429,6 +429,10 @@ fn skin_palette(design: Design, theme: Option<&FlTheme>) -> Palette {
 /// FL's base palette toolbar (spec: ui/flstheme.md §5): its slight blue tint is what a theme's Hue and Saturation turn.
 const BASE_TINT: Color = Color::rgb(0x434c51);
 
+/// Lemon's greys of the four surface roles (`fl::Surfaces`): the browser list (#1f1f1f), the workspace (#262626),
+/// DARK (the toolbar) and a button face (#474747).
+const LEMON_SURFACES: [f32; 4] = [0.122, 0.149, 0.231, 0.278];
+
 /// A theme laid over a skin's own colours: the theme's surface adjustment tints and lights the skin's greys (read as
 /// stock Dark surfaces, given FL's base tint), its selection / highlight / mute colours take the place of the skin's
 /// key colour, and its text colour the skin's text, keeping each text's place between the skin's background and text.
@@ -436,6 +440,8 @@ const BASE_TINT: Color = Color::rgb(0x434c51);
 pub struct Retint {
     /// The theme's surface adjustment.
     pub surface: fl::Surface,
+    /// The theme's surfaces given outright, instead of the adjustment.
+    pub surfaces: Option<fl::Surfaces>,
     /// The skin's key colour (Lemon: Main) and the theme's keys (`None` = keep the skin's).
     pub key: Color,
     pub accent: Option<Color>,
@@ -451,6 +457,7 @@ impl Retint {
     pub fn lemon(th: &FlTheme) -> Retint {
         let mut r = Retint {
             surface: th.surface,
+            surfaces: th.surfaces,
             key: lemon::MAIN,
             accent: th.selected,
             highlight: th.highlight,
@@ -465,9 +472,14 @@ impl Retint {
     }
 
     pub fn surface(&self, c: Color) -> Color {
-        let l = fl::DARK.invert(c).hsl().2;
-        let (h, s, _) = BASE_TINT.hsl();
-        let (h2, s2, l2) = self.surface.apply(Color::from_hsl_pub(h, s, l, c.a)).hsl();
+        let (h2, s2, l2) = match self.surfaces {
+            Some(k) => k.at(LEMON_SURFACES, c).hsl(),
+            None => {
+                let l = fl::DARK.invert(c).hsl().2;
+                let (h, s, _) = BASE_TINT.hsl();
+                self.surface.apply(Color::from_hsl_pub(h, s, l, c.a)).hsl()
+            }
+        };
         // A coloured surface (Lemon's lemon-tinted wells and hovers) takes the theme's selection hue.
         let chroma = f32::from(c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b)) / 255.0;
         let (h2, s2) = if chroma > 0.09 {

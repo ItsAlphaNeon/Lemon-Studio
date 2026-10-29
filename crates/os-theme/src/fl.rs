@@ -106,7 +106,62 @@ pub struct FlTheme {
     /// Lemon Studio's own key (`COLORS_KEY`, ignored by FL): the theme is a skin's own colours, the Lemon or Citrus
     /// theme (spec: ui/theme-presets.md §B).
     pub colors: Option<crate::Design>,
+    /// Lemon Studio's own key (`SURFACES_KEY`, ignored by FL): the surfaces' exact colours, darkest role first
+    /// (`Surfaces`).
+    pub surfaces: Option<Surfaces>,
 }
+
+/// The key that sets a theme's surfaces outright: `LemonStudioSurfaces=#darker,#dark,#background,#lighter` (as an
+/// Omarchy theme names its backgrounds, `crate::omarchy`). FL ignores it.
+pub const SURFACES_KEY: &str = "LemonStudioSurfaces";
+
+/// A theme's surfaces given outright, by role: the recessed lists and rulers, the window bodies, the main surface (the
+/// toolbar) and the raised faces. A skin's greys are mapped onto them by lightness (`at`), between its own greys of
+/// those roles; past the raised ones they go on away from the main surface (lighter on a dark theme, darker on a
+/// light one), keeping the step the skin has.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Surfaces(pub [Color; 4]);
+
+impl Surfaces {
+    /// From the key's value: four `#rrggbb` colours, separated by commas.
+    pub fn parse(v: &str) -> Option<Surfaces> {
+        let c: Vec<Color> = v.split(',').map(Color::parse).collect::<Option<_>>()?;
+        Some(Surfaces(c.try_into().ok()?))
+    }
+
+    pub fn text(&self) -> String {
+        self.0.iter().map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)).collect::<Vec<_>>().join(",")
+    }
+
+    /// Whether the main surface is light.
+    pub fn light(&self) -> bool {
+        self.0[2].hsl().2 > 0.5
+    }
+
+    /// Grey `c` of a skin whose greys of the four roles have lightness `anchors` (ascending): its colour here.
+    pub fn at(&self, anchors: [f32; 4], c: Color) -> Color {
+        let l = c.hsl().2;
+        let k = &self.0;
+        let lerp = |a: Color, b: Color, t: f32| a.mix(b, t.clamp(0.0, 1.0)).with_alpha(c.a);
+        if l <= anchors[0] {
+            return k[0].with_alpha(c.a);
+        }
+        for i in 0..3 {
+            if l <= anchors[i + 1] {
+                return lerp(k[i], k[i + 1], (l - anchors[i]) / (anchors[i + 1] - anchors[i]));
+            }
+        }
+        // Past the raised faces: on, away from the main surface.
+        let (h, s, l3) = k[3].hsl();
+        let d = l - anchors[3];
+        let l2 = if self.light() { l3 - d } else { l3 + d };
+        Color::from_hsl_pub(h, s, l2.clamp(0.0, 1.0), c.a)
+    }
+}
+
+/// The classic palette's greys of the four surface roles (`Surfaces`): the browser list, a window body, the toolbar,
+/// a raised face.
+pub const CLASSIC_SURFACES: [f32; 4] = [0.03, 0.155, 0.19, 0.25];
 
 /// The key that makes a theme file a skin's own colours: `LemonStudioColors=Lemon` or `=Citrus`. FL ignores it and
 /// reads the rest of the file (an approximation of those colours).
@@ -172,6 +227,7 @@ impl FlTheme {
             back_color: col("backcolor"),
             back_picture: kv.get("backpicfilename").cloned().unwrap_or_default(),
             colors: kv.get(&COLORS_KEY.to_ascii_lowercase()).and_then(|v| crate::Design::parse(v)),
+            surfaces: kv.get(&SURFACES_KEY.to_ascii_lowercase()).and_then(|v| Surfaces::parse(v)),
         }
     }
 
@@ -309,6 +365,8 @@ pub fn shift(c: Color, from: Color, to: Color) -> Color {
 pub struct Xform {
     /// Surface adjustment of the theme (`None` = the stock Dark look).
     pub surf: Option<Surface>,
+    /// The theme's surfaces given outright, instead of `surf`.
+    pub surfaces: Option<Surfaces>,
     /// (default key, theme key) pairs.
     pub accent: Option<(Color, Color)>,
     pub highlight: Option<(Color, Color)>,
@@ -325,6 +383,9 @@ impl Xform {
         if let Some(d) = &self.design {
             let c = d.surface(c);
             return self.retint.as_ref().map_or(c, |r| r.surface(c));
+        }
+        if let Some(k) = self.surfaces {
+            return k.at(CLASSIC_SURFACES, c);
         }
         match self.surf {
             Some(s) => s.apply(DARK.invert(c)),
@@ -395,13 +456,17 @@ pub fn palette(th: &FlTheme) -> Palette {
         design: None,
         retint: None,
         surf: (surface != DARK).then_some(surface),
+        surfaces: th.surfaces,
         accent: pair(dark.selected, th.selected),
         highlight: pair(dark.highlight, th.highlight),
         text: pair(dark.text_color, th.text_color),
         mute: pair(dark.mute, th.mute),
     };
-    let surf = |c: Color| surface.apply(DARK.invert(c));
-    let identity = surface == DARK;
+    let surf = |c: Color| match th.surfaces {
+        Some(k) => k.at(CLASSIC_SURFACES, c),
+        None => surface.apply(DARK.invert(c)),
+    };
+    let identity = surface == DARK && th.surfaces.is_none();
     let key = |c: Color, from: Option<Color>, to: Option<Color>| match (from, to) {
         (Some(f), Some(t)) if f != t => rekey(c, f, t),
         _ => c,

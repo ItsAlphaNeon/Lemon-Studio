@@ -30,7 +30,7 @@ pub fn room(width: f32, full: f32) -> f32 {
 
 /// `room` for the band of `s`, `width` px wide.
 pub fn fit(s: &State, width: f32) -> f32 {
-    room(width, crate::toolbar::natural_width(&s.bar.layout, s.bar.editing))
+    room(width, crate::toolbar::natural_width(&shown(s), s.bar.editing))
 }
 
 /// The Toolbars menu's switches (spec: ui/toolbar-menu.md §8): app-wide, kept in `settings.txt` across runs but for
@@ -85,6 +85,21 @@ pub enum Switch {
     Flat,
     HintBar,
     Hide,
+}
+
+/// The toolbar as shown: the tiling layout's leaves out the caption buttons where the window manager tiles the window
+/// (`crate::desktop`: it places, sizes and closes windows with its own keys), its flexible spaces taking their room;
+/// the editor shows them still.
+pub fn shown(s: &State) -> std::borrow::Cow<'_, crate::toolbar::Layout> {
+    let l = &s.bar.layout;
+    if !s.bar.tiling || s.bar.editing || crate::desktop::captions() || !l.has(Panel::Caption) {
+        return std::borrow::Cow::Borrowed(l);
+    }
+    let mut l = l.clone();
+    for row in &mut l.rows {
+        row.retain(|&p| p != Panel::Caption);
+    }
+    std::borrow::Cow::Owned(l)
 }
 
 /// The toolbar's rows, the bottom edge excepted, in a band `width` px wide: one band, repainted whole while the
@@ -148,7 +163,8 @@ struct Ctx<'a> {
 pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
     let t = ui.t;
     let lemon = super::lemon(ui);
-    let l = &s.bar.layout;
+    let shown = shown(s);
+    let l = &*shown;
     let editing = s.bar.editing;
     let fit = fit(s, width);
     let (rows, h) = (l.rows.len(), l.height());
@@ -1285,6 +1301,37 @@ mod tests {
         app.mouse_down();
         app.mouse_up();
         app.paint(c, None);
+    }
+
+    /// On a tiling desktop the tiling layout's toolbar has no caption buttons, its flexible spaces taking their room;
+    /// a floating window, the classic layout and the toolbar editor keep them.
+    #[test]
+    fn a_tiling_desktop_takes_the_caption_buttons() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        let captions = |app: &mut App, c: &mut Canvas| {
+            app.paint(c, None);
+            [Action::Minimize, Action::Maximize, Action::Close].iter().filter(|a| has(app, a)).count()
+        };
+        app.state.bar.tiling = true;
+        app.state.bar.layout = crate::toolbar::PRESETS[crate::toolbar::TILING_PRESET].layout();
+        assert_eq!(captions(&mut app, &mut c), 3, "not a tiling desktop");
+        let flex = |app: &App| crate::views::toolbar_placed(&app.state).iter().filter(|p| p.panel == crate::toolbar::Panel::Flex).map(|p| p.w).sum::<f32>();
+        let wide = flex(&app);
+        crate::desktop::set_tiling(true, false);
+        assert_eq!(captions(&mut app, &mut c), 0);
+        assert_eq!(flex(&app), wide + crate::toolbar::Panel::Caption.width(), "the spaces take their room");
+        assert!(app.state.bar.layout.has(crate::toolbar::Panel::Caption), "kept in the layout");
+        app.state.bar.editing = true;
+        assert!(super::shown(&app.state).has(crate::toolbar::Panel::Caption), "the editor shows them");
+        app.state.bar.editing = false;
+        crate::desktop::set_tiling(true, true);
+        assert_eq!(captions(&mut app, &mut c), 3, "a floating window");
+        crate::desktop::set_tiling(true, false);
+        app.state.bar.tiling = false;
+        app.state.bar.layout = crate::toolbar::Layout::classic();
+        assert_eq!(captions(&mut app, &mut c), 3, "the classic layout");
+        crate::desktop::set_tiling(false, false);
     }
 
     fn twice(r: Rect) -> Rect {

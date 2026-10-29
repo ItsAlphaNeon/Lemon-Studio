@@ -31,7 +31,7 @@ mod win32;
 pub use win32::{default_position, first_position, focus_main, lift_hide, lift_show, stack, take_exposed, take_keys, take_link, FrameWindow};
 
 #[cfg(target_os = "linux")]
-mod hyprland;
+pub(crate) mod hyprland;
 #[cfg(target_os = "linux")]
 mod x11;
 #[cfg(target_os = "linux")]
