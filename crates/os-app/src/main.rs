@@ -127,6 +127,7 @@ mod piano_dlg;
 mod arpeggiate;
 mod tapper;
 mod touch;
+mod events;
 mod record;
 mod recent;
 mod theme_adjust;

@@ -2093,6 +2093,24 @@ pub mod target {
         if whole_range(min, max) { (min + level * (max - min)).round() as i32 } else { (level * 65536.0).round() as i32 }
     }
 
+    /// The stored values a control point of `t` holds for automation levels 0 and 1, in the setting's own unit (spec:
+    /// audio/automation.md "Pattern control points"); a level maps to them linearly, as a clip's value does. `None` for
+    /// plugin parameters (their range is the plugin's: `plugin_point_value`) and the targets no point drives.
+    pub fn point_range(t: Target) -> Option<(f64, f64)> {
+        Some(match t {
+            Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => (0.0, 12800.0),
+            Target::ChannelPitch(_) => (-4800.0, 4800.0),
+            Target::MixerVolume(_) => (0.0, 16000.0),
+            Target::MixerPan(_) => (-6400.0, 6400.0),
+            Target::MixerSeparation(_) => (-64.0, 64.0),
+            Target::MixerEq(_, _, 0) => (-1800.0, 1800.0),
+            Target::MixerEq(..) => (0.0, 65536.0),
+            Target::SlotOn(..) => (0.0, 1.0),
+            Target::Tempo => (10000.0, 522000.0),
+            _ => return None,
+        })
+    }
+
     fn whole_range(min: f64, max: f64) -> bool {
         min.fract() == 0.0 && max.fract() == 0.0 && max - min >= 2.0 && max.abs() < 1e9 && min.abs() < 1e9
     }
