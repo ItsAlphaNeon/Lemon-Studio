@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use os_ui::{Color, Rect};
 
-use crate::app::{Action, State, Ui};
+use crate::app::{Action, State, Ui, Win};
 use crate::icons::{self, Icon};
 
 /// Row pitch and indent per depth level (spec: ui/browser.md §2).
@@ -692,6 +692,17 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         icons::draw(ui.c, icon, Rect::new(r.x + 1.0, 87.0 + dy, 12.0, 14.0), if hov { t.glyph } else { t.text_dim });
     }
     ui.c.text(os_ui::Font::new(14), ox + 52.0, 85.0 + dy, t.text_dim, "Browser");
+    // The tiling layout: a close button at the title bar's right, as the split windows' cards have (FL's browser has
+    // none; Alt+F8 brings it back).
+    if lemon {
+        let b = Rect::new(ox + bw - 23.0, 85.5 + dy, 17.0, 17.0);
+        let hov = ui.hit(b, Action::ToggleWin(Win::Browser), "Close the browser (Alt+F8)");
+        if os_ui::kit::lemon::on(t) {
+            super::window_light(ui.c, t, b, super::Light::Close, hov);
+        } else {
+            icons::draw(ui.c, Icon::Close, b.inset(3.5), if hov { t.tx(0xffffff) } else { t.glyph });
+        }
+    }
     // Tabs (spec ui/browser.md §1): FL's five without Online content, sharing the strip.
     ui.c.fill_rect(Rect::span(ox, ox + bw - 1.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
     const TIPS: [&str; 4] = ["All", "Current project", "Plugin library", "Favorites"];
@@ -915,5 +926,34 @@ mod tests {
         let at = |t: f32| marquee_offset(t, over);
         assert_eq!([at(0.5), at(2.0), at(3.5), at(5.0), at(6.0), at(8.0)], [0.0, 30.0, 60.0, 30.0, 0.0, 30.0]);
         assert_eq!(marquee_offset(3.0, 0.0), 0.0, "a label that fits stays");
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use crate::app::{Action, App, Win};
+
+    /// The tiling layout's browser has a close button at its title bar's right; it hides the browser (Alt+F8 shows it
+    /// again). Classic's has none, as FL's.
+    #[test]
+    fn the_tiling_browser_closes_from_its_title_bar() {
+        let Ok(mut c) = os_ui::Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.show_browser = true;
+        app.paint(&mut c, None);
+        // In the browser's title bar, at the workspace's top (the toolbar and the status bar have browser buttons too).
+        let close = |app: &App| {
+            let top = crate::views::work_y(&app.state);
+            app.hits.iter().rev().find(|h| h.action == Action::ToggleWin(Win::Browser) && h.rect.y >= top && h.rect.y < top + 40.0).map(|h| h.rect)
+        };
+        assert_eq!(close(&app), None, "Classic: none");
+        app.set_tiling_layout(true);
+        app.state.show_browser = true;
+        app.paint(&mut c, None);
+        let r = close(&app).expect("a close button");
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_up();
+        assert!(!app.state.show_browser, "closed");
     }
 }
