@@ -5316,6 +5316,8 @@ impl App {
                     if edges & EDGE_B != 0 {
                         r.h = (r0.h + dy).max(mh);
                     }
+                    // On whole px, as a dragged window's place (`win_clamp::set_pos`).
+                    let r = Rect::new(r.x.round(), r.y.round(), r.w.round(), r.h.round());
                     if let Some(i) = win.slot() {
                         self.state.wins[i].rect = r;
                     }
