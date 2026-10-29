@@ -1,0 +1,12 @@
+OSPRESET 1
+plugin=Lemon Phaser	id=clap:org.openstudio.lemon-phaser	format=clap	body=params
+# Values: OpenStudio-specs plugins/factory-presets.md.
+Sweep frequency = 4547
+Minimum depth = 36
+Maximum depth = 406
+Frequency range = 557
+Stereo = 517
+Stages = 12
+Feedback = 0
+Dry - wet = 83
+Output gain = 2812

@@ -7,7 +7,7 @@
 //! - [`sample`]: decoding and resolving sample files.
 //! - [`laws`]: gain, pan and pitch laws measured from FL Studio.
 //! - [`effects`]: Lemon Studio's mixer-slot effects (EQ, limiter, reverb, delay, soft clipper, fast distortion,
-//!   balance, stereo enhancer, transient processor, chorus, stereo shaper).
+//!   balance, stereo enhancer, transient processor, chorus, stereo shaper, flanger, phaser).
 //! - [`clock`]: the sequencer's tick clock (ticks to samples).
 //! - [`engine`]: tick-based playback of patterns and the playlist through the mixer.
 //! - [`metronome`]: the click on every beat while playing live.
@@ -26,6 +26,6 @@ pub mod voices;
 pub mod wav;
 
 pub use clock::Clock;
-pub use engine::{Engine, EngineReport, PlayMode};
+pub use engine::{input_channels, DeviceInput, Engine, EngineReport, PlayMode};
 pub use instrument::{ChannelLevels, ChannelVoicing, HostedEffect, Instrument, NoteLevels, SharedEffect, SharedInstrument, TransportInfo, TuningBend};
 pub use sample::{Sample, SampleLibrary};

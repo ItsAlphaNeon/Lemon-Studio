@@ -71,6 +71,12 @@ pub enum Then {
     /// The Chop dialog's folder button (spec: ui/piano-chop.md §1).
     ChopPattern,
     PluginFolder,
+    /// The missing files box (`crate::missing`): Find samples... (Yes) or OK.
+    MissingFiles,
+    /// The folder the missing samples are looked for in.
+    SampleFolder,
+    /// FILE ▸ Export ▸ Zipped loop package...: the zip file (`crate::zipped`).
+    ExportZip,
     /// Save preset as... for the plugin with this key (`plugins::Plugins::hosted`).
     SavePreset(usize),
     /// Import preset... for the plugin with this key.
@@ -113,6 +119,9 @@ pub enum Then {
     NewProjectFolder,
     /// The Delete unused files question: Yes deletes these files, then saves the project.
     DeleteUnused(Vec<PathBuf>),
+    /// The External input question for this mixer track: Yes switches it to External input only (spec:
+    /// audio/track-io.md §1.4).
+    ExtInput(u16),
 }
 
 /// What waits for the save-changes question.
@@ -453,8 +462,12 @@ impl App {
         self.modal_changed();
         let then = match m.body {
             Body::Msg(m) => {
+                // The External input question remembers either answer (`mixer::EXT_INPUT_ANSWER`).
+                if let (Then::ExtInput(_), Some((_, true)), Reply::Button(a @ (Answer::Yes | Answer::No))) = (&m.then, m.remember, &reply) {
+                    crate::prefs::set_text(crate::mixer::EXT_INPUT_ANSWER, if *a == Answer::Yes { "yes" } else { "no" });
+                }
                 // Ok with Remember my choice ticked turns the message off; Cancel never does.
-                if let Some((entry, true)) = m.remember {
+                else if let Some((entry, true)) = m.remember {
                     if matches!(reply, Reply::Button(Answer::Ok | Answer::Yes)) {
                         crate::messages::set(entry, false);
                     }

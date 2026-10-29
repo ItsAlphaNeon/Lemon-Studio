@@ -664,12 +664,10 @@ struct AutoClip {
     targets: Vec<os_model::target::Target>,
     /// The walk along the curve and the tick steps it has taken (spec: audio/automation.md "Walking the curve").
     walk: Option<(os_model::curve::Walk, u64)>,
-}
-
-/// What an automation clip hands on: `Round(level * 2^30)` within 0..2^30 (spec: audio/automation.md "What a clip
-/// hands on"; the clip's own min / range knobs and its LFO are not applied yet).
-fn handed_on(level: f32) -> i64 {
-    ((f64::from(level) * 1_073_741_824.0).round_ties_even() as i64).clamp(0, 1 << 30)
+    /// The clip's range (its channel's two level knobs) and its LFO (spec: audio/automation.md "Range", "The LFO").
+    out: os_model::clip_lfo::ClipOut,
+    /// The walk along the LFO's own envelope.
+    env: os_model::clip_lfo::EnvWalk,
 }
 
 struct MixTrack {
@@ -707,6 +705,40 @@ struct MixTrack {
     /// What the engine itself plays into the track (sampler voices, the metronome) waits here for the latest path
     /// into it (delay compensation).
     pad: pdc::Pad,
+    /// The device input the track hears (-1: none, or not monitored) and the output pair it plays on directly (-1:
+    /// none), numbered as stored (spec: audio/track-io.md §2.1, §2.2).
+    input: i32,
+    output: i32,
+}
+
+/// The audio device's inputs as they arrive, for the mixer tracks that monitor one (spec: audio/track-io.md §2.2).
+pub trait DeviceInput: Send {
+    /// Inputs the device has open.
+    fn channels(&self) -> usize;
+    /// The next `out.len() / channels` frames of every input, interleaved; what has not arrived is silence.
+    fn read(&mut self, out: &mut [f32]);
+}
+
+/// A stream's device: its inputs, and its output pairs, which the master and the tracks' direct outputs play on. With
+/// it the engine hands out `2 × pairs` interleaved channels instead of the master (`Engine::set_device`).
+struct DeviceIo {
+    input: Option<Box<dyn DeviceInput>>,
+    pairs: usize,
+    /// This tick's inputs (interleaved), and what the tracks send to the pairs directly.
+    inputs: Vec<f32>,
+    direct: Vec<f32>,
+}
+
+/// Input number `n` of a device with `channels` inputs as (left, right) channels: the stereo pairs first, then each
+/// input alone, heard on both sides (spec: audio/track-io.md §2.1).
+pub fn input_channels(n: i32, channels: usize) -> Option<(usize, usize)> {
+    let n = usize::try_from(n).ok()?;
+    let pairs = channels / 2;
+    if n < pairs {
+        Some((2 * n, 2 * n + 1))
+    } else {
+        (n - pairs < channels).then_some((n - pairs, n - pairs))
+    }
 }
 
 /// A mixer track's settings as the project stores them.
@@ -830,6 +862,8 @@ impl MixTrack {
             },
             latency: (0.0, 0.0),
             pad: pdc::Pad::default(),
+            input: -1,
+            output: -1,
         }
     }
 
@@ -1025,6 +1059,8 @@ pub struct Engine {
     out_frame: u64,
     out_held: bool,
     out_len: u64,
+    /// Playing on a device (`set_device`): `out` holds its output pairs instead of the master.
+    io: Option<DeviceIo>,
     /// Instrument channels: scheduled note ends (tick, channel, key, an audio clip's voice: choked at the clip's end;
     /// `None`: a note, which ends with a note off), live notes waiting for the next tick (channel, key, velocity;
     /// negative = note off), this tick's events.
@@ -1168,6 +1204,15 @@ impl Engine {
                 }
                 // A channel its hosted instrument plays: the length and rate of its sample are all it needs.
                 let length = ch.sample_path.as_deref().filter(|_| plays_sample && hosted.contains(&row)).and_then(|p| library.length(p));
+                // The hosted sampler loops the sample: "Use loop points" is on (a sampler's default; an audio clip's is
+                // off) and there is a loop, the channel's own (one that is not the whole file) or the file's. Its voices
+                // are not one-shot voices: they sound until their note ends (spec: audio/note-rules.md, audio/sampler.md
+                // "The sample file"). The engine's own voices never loop.
+                let use_loop = ch.sound.sampler_flags.map_or(ch.kind == ChannelKind::Sampler, |f| f & os_model::ChannelSound::USE_LOOP != 0);
+                let own_loop = |n: usize| ch.sound.loop_points.is_some_and(|[a, b]| b > a && (a > 0 || b < n as i64));
+                let looped = length.is_some_and(|(n, _)| {
+                    use_loop && (own_loop(n) || ch.sample_path.as_deref().is_some_and(|p| library.file_loops(p)))
+                });
                 let sample = if plays_sample && length.is_none() {
                     match ch.sample_path.as_deref() {
                         Some(p) => {
@@ -1268,19 +1313,24 @@ impl Engine {
                 let played = state.played();
                 let r = &mut state.rules;
                 r.plugin = ch.kind == ChannelKind::Plugin;
-                r.one_shot = ch.kind.is_sampler() && state.vol_env.is_none();
+                r.one_shot = ch.kind.is_sampler() && state.vol_env.is_none() && !looped;
                 r.root = ch.misc.root;
                 r.close = notes::closing_frames(ch.sound.declick, rate);
                 r.ring = match (played, r.plugin) {
+                    _ if looped => f64::INFINITY,
                     (Some((frames, _)), false) if frames > 0 => frames as f64 / state.src_ratio.max(1e-9) * state.realtime.map_or(1.0, |t| t.0.max(1e-9)),
                     _ => f64::INFINITY,
                 };
+                if looped {
+                    let release = state.vol_env.as_ref().map_or(0.0, |e| e.release_seconds() * f64::from(rate));
+                    r.tail = release + f64::from(r.close);
+                }
                 state
             })
             .collect();
 
         let tracks: Vec<MixTrack> = if project.mixer.is_empty() {
-            vec![MixTrack { eq: os_dsp::mixer::TrackEq::new(os_dsp::mixer::EQ_DEFAULT, rate), law: pan_law, ..MixTrack::unity() }]
+            vec![MixTrack { eq: os_dsp::mixer::TrackEq::new(os_dsp::mixer::EQ_DEFAULT, rate), law: pan_law, output: 0, ..MixTrack::unity() }]
         } else {
             project
                 .mixer
@@ -1327,6 +1377,8 @@ impl Engine {
                         slot_mix: m.slot_mix.map(mix_level),
                         routes,
                         latency: (m.latency_out, m.latency_in),
+                        input: if m.monitored() { m.audio_in } else { -1 },
+                        output: m.audio_out,
                         ..MixTrack::unity()
                     };
                     // At the start of the song every gain is at its target.
@@ -1454,6 +1506,8 @@ impl Engine {
                         curves.len() - 1
                     }
                 };
+                // The range comes from the clip channel's pan and volume (spec: audio/automation.md "Range").
+                let (pan, volume) = project.channels.iter().find(|x| x.index == ch).map_or((-1.0, 1.0), |x| (x.pan, x.volume));
                 autos.push(AutoClip {
                     start: u64::from(c.position),
                     end: u64::from(c.end()),
@@ -1461,6 +1515,8 @@ impl Engine {
                     curve,
                     targets,
                     walk: None,
+                    out: os_model::clip_lfo::ClipOut::new(&a.lfo, pan, volume, ppq),
+                    env: None,
                 });
             }
         }
@@ -1550,6 +1606,7 @@ impl Engine {
             out_frame: 0,
             out_held: false,
             out_len: 1,
+            io: None,
             inst_offs: Vec::with_capacity(64),
             inst_shapes: Vec::new(),
             next_voice: 0,
@@ -1745,6 +1802,18 @@ impl Engine {
     /// Runs the insert tracks' effect slots (`insert`) and the master's (`master`), or skips them.
     pub fn set_effects(&mut self, insert: bool, master: bool) {
         (self.insert_fx, self.master_fx) = (insert, master);
+    }
+
+    /// Plays on a device with `pairs` stereo output pairs (at least one) and, for the tracks that monitor one, its
+    /// inputs: from then on a tick hands out `2 × pairs` interleaved channels, the master on its output pair and each
+    /// track's direct output added to its own (spec: audio/track-io.md §2.2). Set before the first tick.
+    pub fn set_device(&mut self, pairs: usize, input: Option<Box<dyn DeviceInput>>) {
+        self.io = Some(DeviceIo { input, pairs: pairs.max(1), inputs: Vec::new(), direct: Vec::new() });
+    }
+
+    /// Samples in a frame of what the engine hands out: 2, or 2 × the device's output pairs (`set_device`).
+    pub fn width(&self) -> usize {
+        self.io.as_ref().map_or(2, |io| 2 * io.pairs)
     }
 
     /// Keeps every mixer track's post-fader output (before its sends) from now on: `take_track_audio` hands it over.
@@ -1962,7 +2031,7 @@ impl Engine {
         if self.out_held {
             return self.out_frame;
         }
-        self.out_frame + (self.out_pos / 2) as u64
+        self.out_frame + (self.out_pos / self.width()) as u64
     }
 
     /// The position being heard in ticks, with the fraction of the tick handed out so far.
@@ -1973,7 +2042,7 @@ impl Engine {
         if self.out_held {
             return self.out_tick;
         }
-        self.out_tick + self.out_pos as f64 / 2.0 / self.out_len as f64
+        self.out_tick + (self.out_pos / self.width()) as f64 / self.out_len as f64
     }
 
     /// The song's end in frames at the project tempo (voices may ring past it).
@@ -2190,6 +2259,10 @@ impl Engine {
         };
         self.tick = tick;
         self.frame = self.clock.next_start();
+        // The device, with where its inputs have been read to.
+        if old.io.is_some() {
+            self.io = old.io.take();
+        }
         if self.rate == old.rate {
             self.out = std::mem::take(&mut old.out);
             self.out_pos = old.out_pos;
@@ -2378,7 +2451,11 @@ impl Engine {
                 taken += 1;
             }
             a.walk = Some((walk, taken));
-            let n = handed_on(walk.value(pts));
+            // The level put into the clip's range and moved by its LFO, whose phase starts with the clip and whose
+            // envelope is walked from the clip's start (spec: audio/automation.md "What a clip hands on", "The LFO's
+            // value").
+            let env = a.out.envelope(&mut a.env, steps, self.ppq);
+            let n = os_model::clip_lfo::handed_on(a.out.out(walk.value(pts), steps, env));
             for &t in &a.targets {
                 if !values.iter().any(|v| v.0 == t) {
                     values.push((t, n));
@@ -2543,11 +2620,11 @@ impl Engine {
             }
             self.render_tick();
         }
-        let from = self.out_pos;
+        let (from, w) = (self.out_pos, self.width());
         self.out_pos = self.out.len();
         let (tick, frame) = match self.out_held {
             true => (self.out_tick, self.out_frame),
-            false => (self.out_tick + from as f64 / 2.0 / self.out_len as f64, self.out_frame + (from / 2) as u64),
+            false => (self.out_tick + (from / w) as f64 / self.out_len as f64, self.out_frame + (from / w) as u64),
         };
         Some((&self.out[from..], tick, frame, self.out_held, self.out_len))
     }
@@ -2710,6 +2787,7 @@ impl Engine {
                 self.tail_done = true;
             }
         }
+        self.route_out();
         self.hand_out(tick, start, false, was_done);
         // The file keeps its length: as many frames as the head skipped follow the tick that ended the song.
         if self.tail_done && !was_done && self.pdc.lag > 0 {
@@ -2763,6 +2841,7 @@ impl Engine {
                 f[1] *= g;
             }
         }
+        self.route_out();
         self.hand_out(self.tick, self.frame, true, false);
     }
 
@@ -2788,6 +2867,7 @@ impl Engine {
                 f[1] *= g;
             }
         }
+        self.route_out();
         self.hand_out(self.tick, self.frame, true, false);
     }
 
@@ -3233,17 +3313,52 @@ impl Engine {
         }
     }
 
+    /// On a device (`set_device`): the tick's master, in `out`, goes to the master's output pair and joins the tracks'
+    /// direct outputs; `out` then holds every pair (spec: audio/track-io.md §2.2).
+    fn route_out(&mut self) {
+        let Some(io) = self.io.as_mut() else { return };
+        let w = 2 * io.pairs;
+        io.direct.resize(self.out.len() / 2 * w, 0.0);
+        if let Some(p) = usize::try_from(self.tracks[0].output).ok().filter(|&p| p < io.pairs) {
+            for (d, s) in io.direct.chunks_exact_mut(w).zip(self.out.chunks_exact(2)) {
+                d[2 * p] += s[0];
+                d[2 * p + 1] += s[1];
+            }
+        }
+        std::mem::swap(&mut self.out, &mut io.direct);
+    }
+
     /// The mixer over this tick: each track's effects, then its gain / pan (ramped over the tick after an edit), then
     /// its output added into its destinations; the master's output is the song.
     fn mix(&mut self, frames: usize, song: &TransportInfo) {
         let limit = os_dsp::glide::engine_limit(self.rate);
         let mut moved = false;
+        // The device's inputs over this tick, read whether a track hears them or not (a track that starts to monitor
+        // hears what arrives from then on), and the pairs the tracks' direct outputs are added into.
+        if let Some(io) = self.io.as_mut() {
+            io.direct.clear();
+            io.direct.resize(frames * 2 * io.pairs, 0.0);
+            if let Some(i) = io.input.as_mut() {
+                io.inputs.resize(frames * i.channels(), 0.0);
+                i.read(&mut io.inputs);
+            }
+        }
         for &t in &self.order {
             // On the first tick the slot values arrived before delay compensation was worked out.
             if !self.pdc.delivered {
                 self.params.deliver_slots(t, &self.tracks[t].effects);
             }
             let mut buf = std::mem::take(&mut self.bus[t]);
+            // A monitored input joins what reaches the track, before its slots (spec: audio/track-io.md §2.2).
+            if let Some(io) = &self.io {
+                let ch = io.input.as_ref().map_or(0, |i| i.channels());
+                if let Some((l, r)) = input_channels(self.tracks[t].input, ch) {
+                    for (f, x) in buf.chunks_exact_mut(2).zip(io.inputs.chunks_exact(ch)) {
+                        f[0] += x[l];
+                        f[1] += x[r];
+                    }
+                }
+            }
             let rate = self.rate;
             let (dry, l, r) = (&mut self.fx_dry, &mut self.scratch.0, &mut self.scratch.1);
             let busy = (&mut self.busy_until, self.busy_wait, self.exporting, &mut self.missed);
@@ -3292,6 +3407,15 @@ impl Engine {
             for f in buf.chunks_exact(2) {
                 pk[0] = pk[0].max(f[0].abs());
                 pk[1] = pk[1].max(f[1].abs());
+            }
+            // The direct output, after the fader matrix, besides the sends (the master's goes out in `route_out`).
+            if let (Some(io), true) = (self.io.as_mut(), t != 0) {
+                if let Some(p) = usize::try_from(self.tracks[t].output).ok().filter(|&p| p < io.pairs) {
+                    for (d, s) in io.direct.chunks_exact_mut(2 * io.pairs).zip(buf.chunks_exact(2)) {
+                        d[2 * p] += s[0];
+                        d[2 * p + 1] += s[1];
+                    }
+                }
             }
             if let Some(c) = self.capture.as_mut().and_then(|c| c.get_mut(t)) {
                 // Each track's own lateness is skipped at the start (`take_track_audio`).
@@ -4490,9 +4614,11 @@ mod tests {
             let mut c = channel();
             c.index = index;
             c.kind = ChannelKind::Automation;
+            // A new clip's range, 0..1 (stored pan 0, volume 12800).
+            (c.pan, c.volume) = (-1.0, 1.0);
             p.channels.push(c);
             let points = vec![AutoPoint::new(0.0, v), AutoPoint::new(8.0, v)];
-            p.automations.push(Automation { channel: index, targets: vec![target::channel(0, id)], points, header: vec![0; 21], tail: vec![] });
+            p.automations.push(Automation { channel: index, targets: vec![target::channel(0, id)], points, header: vec![0; 21], tail: vec![], lfo: Default::default() });
             p.arrangements[0].clips.push(Clip::new(384, 768, index, ClipSource::Channel(index)));
         }
         let (out, levels) = render(&p);
@@ -5189,6 +5315,58 @@ mod tests {
         for wav in [hosted_wav, own_wav] {
             let _ = std::fs::remove_file(wav);
         }
+    }
+
+    /// A hosted sampler that loops its sample (user report 2026-10-26: a single-cycle wave with its file's `smpl` loop
+    /// rang on for ever): its voices are not one-shot voices, so the note's end reaches the instrument when the note
+    /// ends, however short the sample. A sample without a loop, or with "Use loop points" off, keeps its one-shot
+    /// voices, whose note ends never reach it. The channel's own loop points loop it too.
+    #[test]
+    fn a_looping_hosted_sampler_gets_its_note_ends() {
+        #[derive(Default)]
+        struct Log(Vec<(u64, bool)>, u64);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, o: u32, _k: u8, _v: f32) {
+                self.0.push((self.1 + u64::from(o), true));
+            }
+            fn note_off(&mut self, o: u32, _k: u8) {
+                self.0.push((self.1 + u64::from(o), false));
+            }
+            fn process(&mut self, _rate: u32, l: &mut [f32], _r: &mut [f32]) {
+                self.1 += l.len() as u64;
+            }
+        }
+        fn read(path: &std::path::Path) -> Option<(usize, u32)> {
+            crate::sample::length(path).map(|(n, r)| (n as usize, r))
+        }
+        // 550 frames: about 11 ms, played out long before the note's end.
+        let wav = std::env::temp_dir().join(format!("os-engine-looped-{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 1100]).unwrap();
+        let mut p = project(vec![long_note(0, 96, 0)], vec![]);
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        // The note ends one beat in, at 130 BPM.
+        let end = (48000.0 * 60.0 / 130.0) as u64;
+        let offs = |p: &Project, loops: fn(&std::path::Path) -> bool| {
+            let mut lib = SampleLibrary::new(None);
+            lib.length_reader = Some(read);
+            lib.loop_reader = Some(loops);
+            let log = Arc::new(std::sync::Mutex::new(Log::default()));
+            let mut e = Engine::with_instruments(p, &mut lib, 48000, PlayMode::Pattern(1), &[(0, log.clone() as SharedInstrument)]);
+            e.render_all(480);
+            let offs: Vec<u64> = log.lock().unwrap().0.iter().filter(|n| !n.1).map(|n| n.0).collect();
+            offs
+        };
+        let at_end = |o: &[u64]| o.len() == 1 && o[0].abs_diff(end) < 480;
+        let o = offs(&p, |_| true);
+        assert!(at_end(&o), "the file's loop: {o:?} (end {end})");
+        assert!(offs(&p, |_| false).is_empty(), "no loop: a one-shot voice");
+        p.channels[0].sound.sampler_flags = Some(os_model::ChannelSound::LOAD_REGIONS);
+        assert!(offs(&p, |_| true).is_empty(), "Use loop points off");
+        p.channels[0].sound.sampler_flags = None;
+        p.channels[0].sound.loop_points = Some([100, 400]);
+        let o = offs(&p, |_| false);
+        assert!(at_end(&o), "the channel's own loop: {o:?}");
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// A paused playback whose hosted instruments another stream processes lets go of them: an audio clip's voice is
@@ -6303,9 +6481,11 @@ mod tests {
         let mut auto_ch = channel();
         auto_ch.index = 1;
         auto_ch.kind = ChannelKind::Automation;
+        // A new clip's range, 0..1 (stored pan 0, volume 12800).
+        (auto_ch.pan, auto_ch.volume) = (-1.0, 1.0);
         p.channels.push(auto_ch);
         // A flat tempo clip at 0.25: (10000 + Round(0.25 * 512000)) / 1000 = 138 BPM.
-        p.automations.push(Automation { channel: 1, targets: vec![target::TEMPO], points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![] });
+        p.automations.push(Automation { channel: 1, targets: vec![target::TEMPO], points: vec![AutoPoint::new(0.0, 0.25), AutoPoint::new(16.0, 0.25)], header: vec![0; 21], tail: vec![], lfo: Default::default() });
         p.arrangements[0].clips.push(Clip::new(0, 384 * 4, 1, ClipSource::Channel(1)));
         let mut lib = SampleLibrary::new(None);
         let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
@@ -6333,12 +6513,14 @@ mod tests {
         let mut auto_ch = channel();
         auto_ch.index = 1;
         auto_ch.kind = ChannelKind::Automation;
+        // A new clip's range, 0..1 (stored pan 0, volume 12800).
+        (auto_ch.pan, auto_ch.volume) = (-1.0, 1.0);
         p.channels.push(auto_ch);
         p.mixer = (0..2)
             .map(os_model::MixerTrack::new)
             .collect();
         // Channel volume falls from 1.0 to 0.0 over 8 beats, starting at bar 2.
-        let a = Automation { channel: 1, targets: vec![target::channel(0, 0)], points: vec![AutoPoint::new(0.0, 1.0), AutoPoint::new(8.0, 0.0)], header: vec![0; 21], tail: vec![] };
+        let a = Automation { channel: 1, targets: vec![target::channel(0, 0)], points: vec![AutoPoint::new(0.0, 1.0), AutoPoint::new(8.0, 0.0)], header: vec![0; 21], tail: vec![], lfo: Default::default() };
         p.automations.push(a);
         p.arrangements[0].clips.push(Clip::new(384, 768, 1, ClipSource::Channel(1)));
         let mut lib = SampleLibrary::new(None);
@@ -6379,15 +6561,17 @@ mod tests {
             let mut c = channel();
             c.index = i;
             c.kind = ChannelKind::Automation;
+            // A new clip's range, 0..1 (stored pan 0, volume 12800).
+            (c.pan, c.volume) = (-1.0, 1.0);
             p.channels.push(c);
         }
         p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
         let flat = |v| vec![AutoPoint::new(0.0, v), AutoPoint::new(8.0, v)];
         // One clip on the channel volume and two mixer volumes, an unknown target among them.
         let targets = vec![target::channel(0, 0), target::mixer(1, target::MIXER_VOLUME), 0x7FFF_FFFF, target::mixer(2, target::MIXER_VOLUME)];
-        p.automations.push(Automation { channel: 1, targets, points: flat(0.25), header: vec![0; 21], tail: vec![] });
+        p.automations.push(Automation { channel: 1, targets, points: flat(0.25), header: vec![0; 21], tail: vec![], lfo: Default::default() });
         // A later clip on mixer track 2 only: it decides that target while the first keeps the others.
-        p.automations.push(Automation { channel: 2, targets: vec![target::mixer(2, target::MIXER_VOLUME)], points: flat(0.5), header: vec![0; 21], tail: vec![] });
+        p.automations.push(Automation { channel: 2, targets: vec![target::mixer(2, target::MIXER_VOLUME)], points: flat(0.5), header: vec![0; 21], tail: vec![], lfo: Default::default() });
         p.arrangements[0].clips.push(Clip::new(0, 768, 1, ClipSource::Channel(1)));
         p.arrangements[0].clips.push(Clip::new(96, 768, 2, ClipSource::Channel(2)));
         let mut lib = SampleLibrary::new(None);
@@ -6441,9 +6625,11 @@ mod tests {
             let mut c = channel();
             c.index = index;
             c.kind = ChannelKind::Automation;
+            // A new clip's range, 0..1 (stored pan 0, volume 12800).
+            (c.pan, c.volume) = (-1.0, 1.0);
             p.channels.push(c);
             let points = vec![AutoPoint::new(0.0, v), AutoPoint::new(8.0, v)];
-            p.automations.push(Automation { channel: index, targets: vec![t], points, header: vec![0; 21], tail: vec![] });
+            p.automations.push(Automation { channel: index, targets: vec![t], points, header: vec![0; 21], tail: vec![], lfo: Default::default() });
             p.arrangements[0].clips.push(Clip::new(384, 768, index, ClipSource::Channel(index)));
         }
         let mut lib = SampleLibrary::new(None);
@@ -6502,12 +6688,14 @@ mod tests {
         let mut auto_ch = channel();
         auto_ch.index = 1;
         auto_ch.kind = ChannelKind::Automation;
+        // A new clip's range, 0..1 (stored pan 0, volume 12800).
+        (auto_ch.pan, auto_ch.volume) = (-1.0, 1.0);
         p.channels.push(auto_ch);
         // Channel pitch from the bottom, jumping to the top at beat 1 of a clip at tick 384, staying there for half a
         // beat, then falling to 0.75 at beat 2.
         let jump = AutoPoint { mode: AutoMode::Hold, ..AutoPoint::new(1.0, 1.0) };
         let points = vec![AutoPoint::new(0.0, 0.0), jump, AutoPoint::new(1.5, 1.0), AutoPoint::new(2.0, 0.75)];
-        let a = Automation { channel: 1, targets: vec![target::channel(0, target::CHANNEL_PITCH)], points, header: vec![0; 21], tail: vec![] };
+        let a = Automation { channel: 1, targets: vec![target::channel(0, target::CHANNEL_PITCH)], points, header: vec![0; 21], tail: vec![], lfo: Default::default() };
         p.automations.push(a);
         p.arrangements[0].clips.push(Clip::new(384, 768, 1, ClipSource::Channel(1)));
         let mut lib = SampleLibrary::new(None);
@@ -6542,6 +6730,94 @@ mod tests {
         e.next_tick();
         assert!(e.channels[0].ramp.is_none());
         assert_eq!(e.channels[0].vol_v, 0.5);
+    }
+
+    /// A clip's range and LFO, as the values handed on to a mixer volume, tick by tick, against the page's formulas
+    /// worked out here: the default LFO (amount 64, multiplying, one cycle a beat, a triangle starting where it passes
+    /// 0 going up) on a level of 0.5 swings 0.25..0.75; a range of 0.2..0.8 (stored 2560 / 10240) with an adding LFO
+    /// at amount 128 swings 0.2..0.8 around 0.5; a clip started part-way restarts the phase at its own start.
+    // spec: audio/automation.md "Range", "What a clip hands on", "The LFO's value"
+    #[test]
+    fn a_clips_range_and_lfo_shape_the_values_handed_on() {
+        use os_model::clip_lfo::ClipLfo;
+        use os_model::{AutoPoint, Automation, ChannelKind, Clip, ClipSource, target};
+        let tgt = target::mixer(1, target::MIXER_VOLUME);
+        let make = |pan: f64, volume: f64, lfo: ClipLfo, clip: Clip| {
+            let mut p = song(vec![long_note(0, 384 * 4, 0)], vec![Clip::new(0, 384 * 8, 0, ClipSource::Pattern(1))]);
+            let mut auto_ch = channel();
+            auto_ch.index = 1;
+            auto_ch.kind = ChannelKind::Automation;
+            (auto_ch.pan, auto_ch.volume) = (pan, volume);
+            p.channels.push(auto_ch);
+            let points = vec![AutoPoint::new(0.0, 0.5), AutoPoint::new(16.0, 0.5)];
+            p.automations.push(Automation { channel: 1, targets: vec![tgt], points, header: vec![0; 21], tail: vec![], lfo });
+            p.arrangements[0].clips.push(clip);
+            p
+        };
+        // What the page says: the step per tick, the triangle, every operation a single.
+        let b = f64::from((1.0f64 / 96.0) as f32);
+        let q = (45819.0f64 / 65536.0) as f32;
+        let e = ((f64::from(q) * 10001f64.ln()).exp() - 1.0) as f32;
+        let step = (f64::from(e) * (4294967296.0 / 625.0) * b).min(805306368.0).round_ties_even() as u32;
+        let tri = |ph: u32| -> f32 {
+            let half = 1u32 << 31;
+            if ph < half { 1.0 - ph as f32 * (2.0f64 / f64::from(half)) as f32 } else { (ph - half) as f32 * (2.0f64 / f64::from(half - 1)) as f32 - 1.0 }
+        };
+        let phase = |k: u64| (3u32 << 30).wrapping_add((k as u32).wrapping_mul(step));
+        let r = 1.0f32 / 12800.0;
+        let n = |out: f32| ((f64::from(out) * 1073741824.0).round_ties_even() as i64).clamp(0, 1 << 30);
+        let run = |p: &Project, from: u64, to: u64| -> Vec<(u64, i64)> {
+            let mut lib = SampleLibrary::new(None);
+            let mut e = Engine::new(p, &mut lib, 48000, PlayMode::Song);
+            let mut v = Vec::new();
+            while e.tick <= to {
+                e.next_tick();
+                if e.tick > from {
+                    v.push((e.tick - 1, e.auto_last.iter().find(|l| l.0 == target::decode(tgt)).map_or(-1, |l| l.1)));
+                }
+            }
+            v
+        };
+        let on = ClipLfo { switch: -1, ..ClipLfo::default() };
+
+        // The default LFO multiplying, from a clip at tick 96: the k-th tick of the clip (from 1) takes phase start + k step.
+        let p = make(-1.0, 1.0, on.clone(), Clip::new(96, 384 * 4, 1, ClipSource::Channel(1)));
+        let got = run(&p, 96, 96 + 384 * 4 - 1);
+        let (mut lo, mut hi) = (1.0f32, 0.0f32);
+        for &(tick, v) in &got {
+            let k = tick + 1 - 96;
+            let lfo = 0.5 * tri(phase(k));
+            let out = (0.0 + 0.5 * (r * 12800.0)) * (lfo * (64.0 * (1.0 / 128.0) * (r * 12800.0)) * 2.0 + 1.0);
+            assert_eq!(v, n(out), "tick {tick}");
+            (lo, hi) = (lo.min(out), hi.max(out));
+        }
+        assert!((lo - 0.25).abs() < 2e-3 && (hi - 0.75).abs() < 2e-3, "{lo} {hi}");
+
+        // A range of 0.2..0.8 and an LFO adding at amount 128.
+        let (pan, vol) = (2560.0 / 6400.0 - 1.0, 10240.0 / 12800.0);
+        let add = ClipLfo { mode: 1, amount: 128, ..on.clone() };
+        let p = make(pan, vol, add, Clip::new(0, 384 * 4, 1, ClipSource::Channel(1)));
+        let (min, range) = (2560.0f32 * r, 10240.0f32 * r - 2560.0f32 * r);
+        let (mut lo, mut hi) = (1.0f32, 0.0f32);
+        for &(tick, v) in &run(&p, 0, 384 * 4 - 1) {
+            let out = min + 0.5 * range;
+            let out = out + 0.5 * tri(phase(tick + 1)) * (128.0 * (1.0 / 128.0) * range);
+            assert_eq!(v, n(out), "tick {tick}");
+            (lo, hi) = (lo.min(out), hi.max(out));
+        }
+        assert!((lo - 0.2).abs() < 2e-3 && (hi - 0.8).abs() < 2e-3, "{lo} {hi}");
+        // Without the LFO the range alone: 0.2 + 0.5 * 0.6.
+        let p = make(pan, vol, ClipLfo::default(), Clip::new(0, 384, 1, ClipSource::Channel(1)));
+        assert!(run(&p, 0, 300).iter().all(|&(_, v)| v == n(min + 0.5 * range)));
+
+        // A clip whose window starts 2 beats in: the curve starts there, the LFO's phase at the clip's own start.
+        let mut c = Clip::new(192, 384, 1, ClipSource::Channel(1));
+        c.window = Some((2.0, 6.0));
+        let p = make(-1.0, 1.0, on, c);
+        for &(tick, v) in &run(&p, 192, 300) {
+            let out = 0.5f32 * (0.5 * tri(phase(tick + 1 - 192)) * 0.5 * 2.0 + 1.0);
+            assert_eq!(v, n(out), "tick {tick}");
+        }
     }
 
     /// A five-bar song (one clip to tick 1920, a note every beat) with time markers (tick, kind), at 125 BPM and 48 kHz,
@@ -6764,9 +7040,11 @@ mod tests {
         let mut auto_ch = channel();
         auto_ch.index = 1;
         auto_ch.kind = ChannelKind::Automation;
+        // A new clip's range, 0..1 (stored pan 0, volume 12800).
+        (auto_ch.pan, auto_ch.volume) = (-1.0, 1.0);
         p.channels.push(auto_ch);
         let points = vec![AutoPoint::new(0.0, 0.75), AutoPoint::new(4.0, 0.75)];
-        p.automations.push(Automation { channel: 1, targets: vec![target::channel(0, target::CHANNEL_PITCH)], points, header: vec![0; 21], tail: vec![] });
+        p.automations.push(Automation { channel: 1, targets: vec![target::channel(0, target::CHANNEL_PITCH)], points, header: vec![0; 21], tail: vec![], lfo: Default::default() });
         p.arrangements[0].clips.push(Clip::new(0, 384, 1, ClipSource::Channel(1)));
         let mut lib = SampleLibrary::new(None);
         let to_loop = |e: &mut Engine| {
@@ -7482,5 +7760,86 @@ mod tests {
         e2.process(&mut rest);
         assert!(rest.iter().any(|&s| s != 0.0));
         assert!(e2.finished(), "silent again once the click is over");
+    }
+
+    /// A device's inputs held at fixed levels.
+    struct Held(Vec<f32>);
+
+    impl DeviceInput for Held {
+        fn channels(&self) -> usize {
+            self.0.len()
+        }
+        fn read(&mut self, out: &mut [f32]) {
+            for f in out.chunks_exact_mut(self.0.len()) {
+                f.copy_from_slice(&self.0);
+            }
+        }
+    }
+
+    /// Plays `p` for a second on a device of `pairs` output pairs whose two inputs hold `inputs`; the last frame.
+    fn on_device(p: &Project, pairs: usize, inputs: [f32; 2]) -> Vec<f32> {
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_looping(true);
+        e.set_device(pairs, Some(Box::new(Held(inputs.to_vec()))));
+        assert_eq!(e.width(), 2 * pairs);
+        let mut out = vec![0.0; 2 * pairs * 48000];
+        e.process(&mut out);
+        out[out.len() - 2 * pairs..].to_vec()
+    }
+
+    fn io_project(input: i32, monitor: u8, armed: bool) -> Project {
+        let mut p = project(vec![], vec![]);
+        p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        (p.mixer[1].audio_in, p.mixer[1].monitor, p.mixer[1].armed) = (input, monitor, armed);
+        p
+    }
+
+    // spec: audio/track-io.md §1 "Signal", §2.1: a pair is heard left / right, one input alone on both sides.
+    #[test]
+    fn a_monitored_input_reaches_the_master() {
+        let f = on_device(&io_project(0, os_model::MONITOR_ON, false), 1, [0.5, 0.0]);
+        assert!(f[0] > 0.1 && f[1].abs() < 1e-6, "the pair: {f:?}");
+        let f = on_device(&io_project(2, os_model::MONITOR_ON, false), 1, [0.0, 0.5]);
+        assert!(f[0] > 0.1 && (f[0] - f[1]).abs() < 1e-6, "In 2 on both sides: {f:?}");
+        assert!(on_device(&io_project(-1, os_model::MONITOR_ON, false), 1, [0.5, 0.5]).iter().all(|&s| s == 0.0), "(none)");
+        let mut muted = io_project(0, os_model::MONITOR_ON, false);
+        muted.mixer[1].enabled = false;
+        assert!(on_device(&muted, 1, [0.5, 0.5]).iter().all(|&s| s == 0.0), "muted");
+    }
+
+    // spec: audio/track-io.md §1 "Monitor external input".
+    #[test]
+    fn monitoring_follows_the_setting_and_the_arm() {
+        let heard = |monitor, armed| on_device(&io_project(0, monitor, armed), 1, [0.5, 0.5]).iter().any(|&s| s != 0.0);
+        assert_eq!([heard(os_model::MONITOR_OFF, false), heard(os_model::MONITOR_OFF, true)], [false, false]);
+        assert_eq!([heard(os_model::MONITOR_ARMED, false), heard(os_model::MONITOR_ARMED, true)], [false, true]);
+        assert_eq!([heard(os_model::MONITOR_ON, false), heard(os_model::MONITOR_ON, true)], [true, true]);
+    }
+
+    // spec: audio/track-io.md §1 "Signal": a direct output plays besides the routing; the master's (none) silences it.
+    #[test]
+    fn direct_outputs_play_on_their_pair() {
+        let mut p = io_project(0, os_model::MONITOR_ON, false);
+        p.mixer[1].audio_out = 1;
+        let f = on_device(&p, 2, [0.5, 0.5]);
+        assert!(f[0] > 0.1 && f[2] > 0.1, "the master on pair 1, the track on pair 2: {f:?}");
+        // Both faders at unity: the master hears the track as the pair does.
+        assert!((f[0] - f[2]).abs() < 1e-5, "both at unity: {f:?}");
+        p.mixer[0].audio_out = -1;
+        let f = on_device(&p, 2, [0.5, 0.5]);
+        assert!(f[0] == 0.0 && f[1] == 0.0 && f[2] > 0.1, "{f:?}");
+        // A pair the device does not have plays nowhere.
+        p.mixer[1].audio_out = 5;
+        assert!(on_device(&p, 2, [0.5, 0.5]).iter().all(|&s| s == 0.0));
+        p.mixer[1].enabled = false;
+        p.mixer[1].audio_out = 1;
+        assert!(on_device(&p, 2, [0.5, 0.5]).iter().all(|&s| s == 0.0), "muted");
+    }
+
+    #[test]
+    fn input_numbers_are_pairs_then_single_inputs() {
+        assert_eq!((0..7).map(|n| input_channels(n, 4)).collect::<Vec<_>>(), [Some((0, 1)), Some((2, 3)), Some((0, 0)), Some((1, 1)), Some((2, 2)), Some((3, 3)), None]);
+        assert_eq!([input_channels(-1, 4), input_channels(0, 0), input_channels(0, 1)], [None, None, Some((0, 0))]);
     }
 }

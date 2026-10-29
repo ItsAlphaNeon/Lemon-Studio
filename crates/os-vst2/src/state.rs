@@ -11,7 +11,8 @@
 //! project FL Studio 26.1.3 saved). What tells the two apart is not known, so both are read as a chunk; Lemon Studio
 //! writes 12, which FL Studio reads back. Kind 4, for plugins that keep no chunk: the size is 0, and the parameter count
 //! and each value (`f32`) follow. FL Studio puts a part about programs after the values; its meaning is not known, so
-//! it is not written, and it is skipped when read (FL Studio reads the values without it).
+//! it is not written, and it is skipped when read (FL Studio reads the values without it). FL Studio 26.1 writes kind 5
+//! instead, laid out as kind 4 (spec: "Third-party plugins in producers' projects"); it is read as kind 4.
 //!
 //! Lemon Studio's first saves wrote kind 13, with the chunk, or for plugins without one their program and values in a
 //! list of its own ([`LIST_TAG`]). Both are still read; FL Studio reads the chunk but not the list.
@@ -24,6 +25,7 @@ const HEAD_2: i32 = -2;
 const KIND_CHUNK: u8 = 12;
 const KIND_CHUNK_13: u8 = 13;
 const KIND_PARAMS: u8 = 4;
+const KIND_PARAMS_5: u8 = 5;
 /// Header length; the kind is at byte 4, the size at byte 9.
 const HEADER: usize = 21;
 
@@ -75,7 +77,7 @@ impl Saved {
             return None;
         }
         match data[4] {
-            KIND_PARAMS => Some(Saved::Params { program: None, values: floats(HEADER + 4, len_at(HEADER)?)? }),
+            KIND_PARAMS | KIND_PARAMS_5 => Some(Saved::Params { program: None, values: floats(HEADER + 4, len_at(HEADER)?)? }),
             KIND_CHUNK | KIND_CHUNK_13 => {
                 let size = len_at(9)?;
                 let body = data.get(HEADER..HEADER.checked_add(size)?)?;
@@ -127,6 +129,9 @@ mod tests {
         let mut fl = b.clone();
         fl.extend(1u32.to_le_bytes());
         fl.extend(b"Init\0\xe0\x68\x5f\x10\0\0\0\0\x10\x4c\xbc\0\0\0\0\0\x01\0\0\0");
+        assert_eq!(Saved::parse(&fl, false), Some(back.clone()));
+        // Kind 5, as FL Studio 26.1 writes it, is the same list.
+        fl[4] = 5;
         assert_eq!(Saved::parse(&fl, false), Some(back));
     }
 

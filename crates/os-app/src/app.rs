@@ -386,7 +386,35 @@ impl Bar {
         let travel = self.len() - self.thumb;
         if travel > 0.0 { self.max / travel } else { 0.0 }
     }
+
+    /// Where the thumb starts along the track at scroll `pos`.
+    fn thumb_at(&self, pos: f32) -> f32 {
+        if self.max > 0.0 { pos / self.max * (self.len() - self.thumb) } else { 0.0 }
+    }
+
+    /// The thumb end under `along` (pixels along the track) on a bar whose thumb ends zoom (spec: ui/scroll-bars.md
+    /// §4): Some(true) = the right end. The grab zone reaches `BAR_EDGE_PX` outside the end and up to that far inside,
+    /// leaving at least half a small thumb to scroll by.
+    fn edge_at(&self, pos: f32, along: f32) -> Option<bool> {
+        if !matches!(self.target, Scroll::PlaylistX | Scroll::PianoX) {
+            return None;
+        }
+        let (a, b) = (self.thumb_at(pos), self.thumb_at(pos) + self.thumb);
+        let inner = BAR_EDGE_PX.min(self.thumb / 4.0);
+        if (a - BAR_EDGE_PX..a + inner).contains(&along) {
+            Some(false)
+        } else if (b - inner..=b + BAR_EDGE_PX).contains(&along) {
+            Some(true)
+        } else {
+            None
+        }
+    }
 }
+
+/// Grab zone at each end of a zooming scroll bar's thumb, in pixels (spec: ui/scroll-bars.md §4).
+const BAR_EDGE_PX: f32 = 4.0;
+/// Hint over a zooming thumb end.
+const BAR_EDGE_HINT: &str = "Drag to zoom - the other end stays put";
 
 /// What needs repainting before the next present.
 #[derive(Clone, PartialEq)]
@@ -879,6 +907,10 @@ pub enum Drag {
     /// Right-drag on a horizontal scroll bar: horizontal mouse movement scrolls the bar, vertical movement
     /// zooms its axis around the view centre (up = zoom in).
     BarZoom { t: Scroll, m0: (f32, f32), p0: f32, ratio: f32, z0: f32, center: f32, view: f32 },
+    /// Left-drag on an end of the Playlist's or Piano roll's horizontal thumb (spec: ui/scroll-bars.md §4): the end
+    /// follows the mouse while the other end stays on the same time, so the view zooms. `fixed` = the other end and `units` = the
+    /// whole bar, both in content pixels at zoom 1; `grab` = where the mouse held the end, relative to it.
+    BarEdge { t: Scroll, right: bool, fixed: f32, units: f32, grab: f32 },
     /// Right-drag on a vertical scroll bar: vertical movement scrolls (as in FL), horizontal movement resizes the
     /// rows around the view centre where the bar has rows (right = taller). `last` = mouse at the previous move,
     /// `row` = unrounded row height so slow drags still add up (None: the bar only scrolls). Spec: ui/scroll-bars.md.
@@ -1277,6 +1309,14 @@ pub struct App {
     pub(crate) native_failed: Vec<usize>,
     /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
     loading: Option<crate::loading::Loading>,
+    /// The opened project's missing samples and plugins (`crate::missing`).
+    pub(crate) missing: crate::missing::Missing,
+    /// A zipped project being unzipped or written (`crate::zipped`): its panel shows, input waits.
+    pub(crate) zipping: Option<crate::zipped::Zipping>,
+    /// While a project loads: when the plugin hosts stop for this tick (`host_plugins`), and whether one stopped with
+    /// instances left to start.
+    host_deadline: Option<std::time::Instant>,
+    host_more: bool,
     /// An export is rendering (FILE > Export): its first file's name and progress (0..1); the same panel shows, input
     /// waits.
     pub(crate) export: Option<(String, f32)>,
@@ -1296,6 +1336,9 @@ pub struct App {
 /// Window-level requests the shell must carry out after an event.
 impl App {
     pub fn new(path: Option<PathBuf>) -> App {
+        // Each test's app looks for missing samples only in its own project's folders, never another test's.
+        #[cfg(test)]
+        os_engine::sample::set_thread_search_folders(Vec::new());
         let transport = Transport::new(crate::factory_folder::dir());
         // Tests keep the old five-channel template; a new session starts with one Lemon Sampler channel.
         #[cfg(test)]
@@ -1472,6 +1515,10 @@ impl App {
             osc3_look: None,
             native_failed: Vec::new(),
             loading: None,
+            missing: Default::default(),
+            zipping: None,
+            host_deadline: None,
+            host_more: false,
             export: None,
             export_reveal: false,
             pattern_render: None,
@@ -1511,6 +1558,11 @@ impl App {
         let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         if ext == "mid" || ext == "midi" {
             self.midi_file_chosen(path, false);
+            return false;
+        }
+        // A zipped project is unzipped beside itself, then its project file opens (`crate::zipped`).
+        if ext == "zip" {
+            crate::zipped::import(self, path);
             return false;
         }
         // A project in the layout used before version 24.2 is converted to the newer one as it is read, as FL 26 does
@@ -1587,6 +1639,7 @@ impl App {
                 s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
                 self.mark_saved();
+                crate::missing::opened(self);
                 self.loading = Some(crate::loading::Loading::start(&self.state.project));
                 self.state.playlist.wave_wait = true;
                 self.invalidate();
@@ -1701,13 +1754,14 @@ impl App {
 
     /// Saves the project to `target`; a file over the Project data size warning is said (`App::size_notice`).
     pub(crate) fn save_to(&mut self, target: PathBuf) {
-        if let Some(bytes) = self.write_project(target) {
+        if let Some(bytes) = self.write_project(target, &mut |_| {}) {
             self.size_notice(bytes);
         }
     }
 
-    /// Writes the project to `target`: the size of the file written, None when the save failed.
-    fn write_project(&mut self, target: PathBuf) -> Option<u64> {
+    /// Writes the project to `target`: the size of the file written, None when the save failed. `edit` changes what is
+    /// written (not the project), once the project's state is gathered.
+    fn write_project(&mut self, target: PathBuf, edit: &mut dyn FnMut(&mut os_model::Project)) -> Option<u64> {
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
         crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
         // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
@@ -1774,6 +1828,7 @@ impl App {
         crate::project_info::stamp(s, &mut proj);
         crate::data_folder::stamp(s, &mut proj);
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
+        edit(&mut proj);
         // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
         let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
@@ -1800,6 +1855,11 @@ impl App {
     /// Writes the project to `target` as Save does, as a copy: the project keeps its file, name, unsaved changes and the
     /// message (backups, spec: ui/settings-choices.md "Backup files"). None while a project loads or an export renders.
     pub(crate) fn save_copy(&mut self, target: PathBuf) -> Option<Result<(), String>> {
+        self.save_copy_with(target, &mut |_| {})
+    }
+
+    /// `save_copy`, with `edit` changing what is written (`write_project`).
+    pub(crate) fn save_copy_with(&mut self, target: PathBuf, edit: &mut dyn FnMut(&mut os_model::Project)) -> Option<Result<(), String>> {
         if self.loading.is_some() || self.export.is_some() {
             return None;
         }
@@ -1809,7 +1869,7 @@ impl App {
         // recent one (spec: ui/recent-projects.md §2).
         let (last, recent) = (crate::templates::last_kept(), crate::recent::list());
         // A copy never warns about its size.
-        self.write_project(target);
+        self.write_project(target, edit);
         crate::templates::restore_last(last);
         crate::recent::restore(&recent);
         let s = &mut self.state;
@@ -1830,6 +1890,33 @@ impl App {
     /// not compared.
     pub fn unsaved(&self) -> bool {
         self.saved.0 != self.state.project || self.saved.1 != self.state.tempo
+    }
+
+    /// The system asks the window to close (its close shortcut, a taskbar or dock). The dialog-like windows drawn
+    /// inside the main window close first, one per request, as windows of their own would under that shortcut: the
+    /// settings window, the Remote control settings box, then the tool window in front (Tempo tapper, Touch controller,
+    /// Plugin performance monitor, the piano roll's tool dialogs; as with their ×). Otherwise the app closes, once
+    /// unsaved changes are answered. While a dialog is open the window stays (the dialog is answered first).
+    pub fn close_requested(&mut self) {
+        if self.modal_open() {
+            return;
+        }
+        if self.state.settings.open {
+            self.state.settings.open = false;
+            self.invalidate();
+            return;
+        }
+        if self.state.link_box.take().is_some() {
+            self.invalidate();
+            return;
+        }
+        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg);
+        if let Some(&w) = self.state.z.last().filter(|w| !self.state.no_focus && tool(w)) {
+            self.act(Action::CloseWin(w));
+            self.invalidate();
+            return;
+        }
+        self.ask_discard("closing", crate::dialog::Next::Close);
     }
 
     /// Before the project is replaced or the app closes (`doing`: "closing", ...): with unsaved changes, asks to save
@@ -1943,6 +2030,21 @@ impl App {
                     self.search_folder_chosen(row, p);
                 }
             }
+            Then::MissingFiles => {
+                if reply == Reply::Button(Answer::Yes) {
+                    crate::missing::pick_folder(self);
+                }
+            }
+            Then::SampleFolder => {
+                if let Some(p) = file {
+                    crate::missing::search(self, p);
+                }
+            }
+            Then::ExportZip => {
+                if let Some(p) = file {
+                    crate::zipped::export(self, p);
+                }
+            }
             Then::FactoryFolder => {
                 if let Some(p) = file {
                     self.set_factory_folder(Some(p));
@@ -1959,6 +2061,11 @@ impl App {
                 }
             }
             Then::DeleteUnused(files) => self.delete_unused_done(files, &reply),
+            Then::ExtInput(t) => {
+                if reply == Reply::Button(Answer::Yes) {
+                    crate::mixer::external_only(&mut self.state, t);
+                }
+            }
             Then::SavePreset(key) => {
                 if let Some(p) = file {
                     self.state.message = crate::presets::save_chosen(self, key, p);
@@ -2081,7 +2188,7 @@ impl App {
     fn open_dialog(&mut self) {
         let start = self.state.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
         let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Open project", "project", crate::dialog::Then::OpenProject)
-            .filter("FLP project", &["flp"])
+            .filter("FLP project", &["flp", "zip"])
             .start(start.as_deref());
         self.file_dialog(dlg);
     }
@@ -2113,7 +2220,7 @@ impl App {
                 EDISON_FILE_NAME => self.plugins.edison_file_state(key),
                 LOVE_PHILTER_FILE_NAME => self.plugins.love_philter_file_state(key),
                 MAXIMUS_FILE_NAME => self.plugins.maximus_file_state(key),
-                _ => None,
+                file => self.plugins.recreation_file_state(key, file),
             };
             if let Some(st) = st {
                 slot.state = st;
@@ -2190,18 +2297,54 @@ impl App {
             self.sync_samplers(None);
             return;
         };
-        if decoded && self.sync_samplers(Some(std::time::Instant::now() + crate::loading::HOST_BUDGET)) {
+        let deadline = std::time::Instant::now() + crate::loading::HOST_BUDGET;
+        // Then the plugin channels and mixer effects, under the same budget, then the samplers' played samples.
+        if decoded && self.sync_samplers(Some(deadline)) && self.host_plugins(deadline) && self.loading.as_mut().is_some_and(|l| l.builds_done()) {
             self.loading = None;
             self.state.playlist.wave_wait = false;
+            // What was not found is listed now (spec: ui/project-loading.md §6).
+            crate::missing::loaded(self);
             return self.invalidate();
         }
         self.damage_rect(crate::loading::panel_rect(self.state.screen).outset(4.0));
     }
 
+    /// Starts the opened project's plugin channels and mixer effects until `deadline` (`project_plugins::sync_wrapped`
+    /// and the other hosts stop after the instance that passes it): true when none is left to start.
+    fn host_plugins(&mut self, deadline: std::time::Instant) -> bool {
+        self.host_deadline = Some(deadline);
+        self.host_more = false;
+        self.sync_effects();
+        self.sync_wrapped();
+        self.sync_osc3();
+        self.sync_citrus();
+        self.sync_native();
+        self.host_deadline = None;
+        let samplers = self.state.hosted_rows.iter().filter(|&&r| self.state.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
+        let done = (self.plugins.hosted.len() + self.wrap_failed.len() + self.fx_failed.len() + self.native_failed.len()).saturating_sub(samplers);
+        let more = self.host_more;
+        if let Some(l) = &mut self.loading {
+            l.label.clear();
+            l.plugins_done = done;
+            // Plugins no host plays (FL's own effects without a recreation) are not waited for.
+            if !more {
+                l.plugins = done;
+            }
+        }
+        !more
+    }
+
+    /// Whether the plugin hosts' time this tick is over (`host_plugins`): the host that asks stops and goes on next tick.
+    pub(crate) fn past_deadline(&mut self) -> bool {
+        let past = self.host_deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        self.host_more |= past;
+        past
+    }
+
     /// A project is loading or an export is rendering: the window shows the progress and takes no input (spec:
     /// ui/project-loading.md §2).
     pub fn loading(&self) -> bool {
-        self.loading.is_some() || self.export.is_some()
+        self.loading.is_some() || self.export.is_some() || self.missing.search.is_some() || self.zipping.is_some()
     }
 
     /// The opened project's loading, for the startup splash: its progress (0..=1) and step, while it loads.
@@ -2214,41 +2357,63 @@ impl App {
     /// from the slot's saved state (spec: plugins/lemon-parametric-eq-2.md §8). Without the plugin the engine's own EQ
     /// plays them. Edison's slots are opened as Tesla the same way, with their sample, loop, markers and recording
     /// settings (spec: plugins/tesla/README.md "Opening Edison slots"), Love Philter's as Pulp Filter and Maximus's as
-    /// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6).
+    /// Press with their state (spec: plugins/lemon-pulp-filter.md §6, plugins/lemon-press.md §6), and the FL effects
+    /// another Lemon effect recreates (`plugins::FL_RECREATIONS`: Reeverb 2, Balance, Chorus, ...) by that effect.
     pub(crate) fn sync_effects(&mut self) {
         use crate::plugins::{fx_key, EDISON_FILE_NAME, EQ_FILE_NAME, LEMON_EQ, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME, PRESS, PULP_FILTER, TESLA};
         // The installed EQ plays these slots instead (`host_native`).
         if crate::project_plugins::native_first() {
             return;
         }
-        let todo: Vec<(u16, u8, String, Vec<u8>)> = self
+        // Runs every tick: the slots already hosted are passed over before their states are read, as an Edison slot's
+        // can hold tens of megabytes of audio.
+        let todo: Vec<(u16, u8, String)> = self
             .state
             .project
             .mixer
             .iter()
             .flat_map(|m| m.slots.iter().enumerate().map(move |(k, s)| (m.index, k as u8, s)))
+            .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
             .filter_map(|(t, k, s)| {
                 s.as_ref()
-                    .filter(|s| [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str()))
-                    .map(|s| (t, k, s.name.clone(), s.state.clone()))
+                    .filter(|s| {
+                        [EQ_FILE_NAME, EDISON_FILE_NAME, LOVE_PHILTER_FILE_NAME, MAXIMUS_FILE_NAME].contains(&s.name.as_str())
+                            || crate::plugins::recreation_of(&s.name).is_some()
+                    })
+                    .map(|s| (t, k, s.name.clone()))
             })
-            .filter(|&(t, k, _, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.fx_failed.contains(&fx_key(t, k)))
             .collect();
         let mut made = false;
-        for (t, k, file, fl) in todo {
-            let (name, st) = if file == EQ_FILE_NAME {
-                (LEMON_EQ, Some(lemon_parametric_eq_2::params::plugin_state_from_fl(&fl)))
-            } else if file == LOVE_PHILTER_FILE_NAME {
-                // Bytes that are not a Love Philter state open Pulp Filter's starting state.
-                (PULP_FILTER, Some(pulp_filter::plugin_state_from_fl(&fl)))
-            } else if file == MAXIMUS_FILE_NAME {
-                // Bytes that are not a Maximus state open Press's starting state.
-                (PRESS, Some(press::plugin_state_from_fl(&fl)))
-            } else {
-                // Bytes that are not an Edison state open an empty Tesla.
-                (TESLA, tesla::plugin_state_from_edison(&fl))
+        for (t, k, file) in todo {
+            if self.past_deadline() {
+                break;
+            }
+            let recreation = crate::plugins::recreation_of(&file);
+            let name = match file.as_str() {
+                EQ_FILE_NAME => LEMON_EQ,
+                LOVE_PHILTER_FILE_NAME => PULP_FILTER,
+                MAXIMUS_FILE_NAME => PRESS,
+                _ => recreation.unwrap_or(TESLA),
             };
             let Some(index) = self.plugins.effect_index(name) else { continue };
+            let track = self.state.project.mixer.iter().find(|m| m.index == t);
+            let Some(fl) = track.and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.state.as_slice()) else { continue };
+            let st = if file == EQ_FILE_NAME {
+                Some(lemon_parametric_eq_2::params::plugin_state_from_fl(fl))
+            } else if file == LOVE_PHILTER_FILE_NAME {
+                // Bytes that are not a Love Philter state open Pulp Filter's starting state.
+                Some(pulp_filter::plugin_state_from_fl(fl))
+            } else if file == MAXIMUS_FILE_NAME {
+                // Bytes that are not a Maximus state open Press's starting state.
+                Some(press::plugin_state_from_fl(fl))
+            } else if let Some(lemon) = recreation {
+                // A state shorter than the original's, or of a later version, opens the defaults (spec:
+                // plugins/lemon-small-effects.md §5).
+                crate::plugins::recreation_state_from_fl(lemon, fl)
+            } else {
+                // Bytes that are not an Edison state open an empty Tesla.
+                tesla::plugin_state_from_edison(fl)
+            };
             made = true;
             if let Err(e) = self.plugins.create_effect(t, k, index, st.as_deref()) {
                 self.fx_failed.push(fx_key(t, k));
@@ -2282,12 +2447,15 @@ impl App {
         self.scan_tick();
         self.loading_tick();
         self.export_tick();
+        crate::missing::tick(self);
+        crate::zipped::tick(self);
         self.midi_tick();
         self.mixer_tick();
-        self.sync_effects();
         crate::presets::pending_tick(self);
         self.params_tick();
+        // While a project loads, `loading_tick` starts these a few per tick.
         if self.loading.is_none() {
+            self.sync_effects();
             self.sync_wrapped();
             self.sync_osc3();
             self.follow_osc3_samples();
@@ -2364,8 +2532,13 @@ impl App {
         #[cfg(not(plugin_windows))]
         self.plugins.idle(|_| None);
         // Open plugin editors are processed while nothing plays: notes from an instrument's own keyboard sound, and an
-        // effect's own playback (Tesla) too.
-        let listen = self.plugins.editor_open();
+        // effect's own playback (Tesla) too. So is the mixer while a track monitors its input (spec:
+        // audio/track-io.md §1 "Signal": monitoring works while stopped).
+        // The system's input device opens with the output only while a track with an input chosen hears it or is
+        // armed, so the microphone is not held (and shown in use) the rest of the time.
+        crate::device::want_inputs(self.state.project.mixer.iter().any(|m| m.audio_in >= 0 && (m.monitored() || m.armed)));
+        let monitoring = self.state.project.mixer.iter().any(|m| m.monitored()) && crate::device::input_source().is_some();
+        let listen = self.plugins.editor_open() || monitoring;
         if listen {
             self.sync_live();
         }
@@ -2403,7 +2576,7 @@ impl App {
                     }
                     // A native Wayland main window (Linux): the popups cannot be lifted above a plugin window there.
                     #[cfg(not(windows))]
-                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) if self.plugins.owner == 0 => {
+                    Request::Menu(..) | Request::Presets(..) | Request::MiscMenu(..) | Request::KnobMenu(..) if self.plugins.owner == 0 => {
                         self.state.message = Some(off_text(PLUGIN_POPUPS));
                         self.invalidate();
                         continue;
@@ -2467,6 +2640,18 @@ impl App {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(crate::misc::menu(self, row, m, lx, ly));
+                        self.popup_lift = detached.then_some(row);
+                        self.invalidate();
+                        continue;
+                    }
+                    Request::KnobMenu(row, c, x, y) => {
+                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let (lx, ly) = self.screen_to_canvas(x, y);
+                        self.state.playlist.popup = Some(match c {
+                            // The channel's volume and pan: the rack's knob menu (spec: ui/channel-rack.md §19).
+                            crate::knobs::Control::Knob(k) => crate::rack::knob_menu(&self.state, k, self.automation_target(&Action::Knob(k)), lx, ly),
+                            c => crate::knobs::reset_menu(c, lx, ly),
+                        });
                         self.popup_lift = detached.then_some(row);
                         self.invalidate();
                         continue;
@@ -2962,7 +3147,7 @@ impl App {
     fn auto_scroll(&mut self) {
         let set = crate::autoscroll::get();
         let now = &self.shown;
-        if !set.on || !now.playing || now.paused || matches!(self.drag, Some(Drag::Scroll { .. } | Drag::BarZoom { .. } | Drag::BarRows { .. })) {
+        if !set.on || !now.playing || now.paused || matches!(self.drag, Some(Drag::Scroll { .. } | Drag::BarZoom { .. } | Drag::BarEdge { .. } | Drag::BarRows { .. })) {
             return;
         }
         let tick = now.tick as f32;
@@ -3049,11 +3234,9 @@ impl App {
             _ => None,
         };
         let closing: Vec<Win> = self.state.z.iter().copied().filter(|&w| Some(w) != keep && (what != CloseAll::Plugins || plugin(w))).collect();
+        // each as its × closes it: the monitor resets, a piano roll tool dialog puts the notes back
         for w in closing {
-            match w {
-                Win::Perf => self.close_perf(),
-                w => self.state.hide(w),
-            }
+            self.act(Action::CloseWin(w));
         }
         // Hosted plugin windows (rack rows and mixer slots; detached ones are not in the stack).
         let rows: Vec<usize> = self.plugins.hosted.keys().copied().collect();
@@ -3867,6 +4050,12 @@ impl App {
         if let Some(l) = &self.loading {
             crate::loading::paint(canvas, &self.theme.colors, l);
         }
+        if let Some(s) = &self.missing.search {
+            crate::missing::paint(canvas, &self.theme.colors, s);
+        }
+        if let Some(z) = &self.zipping {
+            crate::zipped::paint(canvas, &self.theme.colors, z);
+        }
         if let Some((name, p)) = &self.export {
             let status = format!("Rendering {name}   {:.0} %", p * 100.0);
             crate::loading::panel(canvas, &self.theme.colors, "Exporting", &status, *p);
@@ -3970,7 +4159,7 @@ impl App {
         // A drop accepts an Info box or a browser folder cell being edited, as a click does.
         crate::project_info::accept_info(&mut self.state);
         crate::search_folders::commit(&mut self.state);
-        if ext == "flp" {
+        if ext == "flp" || ext == "zip" {
             return self.ask_discard("opening another project", crate::dialog::Next::Open(path));
         }
         // A MIDI file is imported as FILE ▸ Import ▸ MIDI file does (spec: ui/midi-files.md §10.6).
@@ -4867,6 +5056,21 @@ impl App {
                     let _ = p0;
                     self.damage_scroll(t);
                 }
+                Drag::BarEdge { t, right, fixed, units, grab } => {
+                    if let Some(b) = self.bar(t) {
+                        let along = if b.vertical { y - b.track.y } else { x - b.track.x };
+                        let at = ((along - grab) / b.len() * units).clamp(0.0, units);
+                        let span = if right { at - fixed } else { fixed - at };
+                        self.zoom_set(t, b.view / span.max(f32::MIN_POSITIVE));
+                        let z = self.zoom_get(t).unwrap_or(1.0);
+                        // The scroll range at the new zoom: the bar itself is only repainted with it next frame.
+                        if let Some(bar) = self.bars.iter_mut().find(|bar| bar.target == t) {
+                            bar.max = (units * z - bar.view).max(0.0);
+                        }
+                        self.scroll_set(t, if right { fixed * z } else { fixed * z - b.view });
+                        self.damage_scroll(t);
+                    }
+                }
                 Drag::BarRows { t, last, row } => {
                     // The picker's bar resizes its previews either way, down / right = taller, as FL's resizes them
                     // (spec: ui/scroll-bars.md §3); the others scroll up/down.
@@ -5241,6 +5445,14 @@ impl App {
             && rect.is_some_and(|r| x >= r.right() - resize_zone(r.w));
         // Playlist: the clip under the mouse (automation clips show their points) and the resize cursor on clip edges.
         let mut resize = resize;
+        // The ends of the Playlist's and Piano roll's horizontal thumbs zoom (spec: ui/scroll-bars.md §4).
+        if let Some(b) = hover.as_ref().and_then(|a| if let Action::Scrollbar(t) = a { self.bar(*t) } else { None }) {
+            let along = if b.vertical { y - b.track.y } else { x - b.track.x };
+            if b.edge_at(self.scroll_get(b.target), along).is_some() {
+                resize = true;
+                hint = Cow::Borrowed(BAR_EDGE_HINT);
+            }
+        }
         if hover == Some(Action::PlaylistArea) {
             if let Some(g) = self.pl_grid {
                 let s = &self.state;
@@ -5720,15 +5932,26 @@ impl App {
         }
     }
 
-    /// Press on a scroll bar. Left: a press off the thumb first centres the thumb on the mouse,
-    /// then dragging scrolls. Right: the cursor is held; on a horizontal bar sideways scrolls and up/down zooms,
+    /// Press on a scroll bar. Left: a press on an end of a horizontal thumb that zooms drags that end; a press
+    /// off the thumb first centres the thumb on the mouse, then dragging scrolls. Right: the cursor is held; on a horizontal bar sideways scrolls and up/down zooms,
     /// on a vertical bar up/down scrolls and sideways resizes the rows (spec: ui/scroll-bars.md).
     fn scrollbar_press(&mut self, t: Scroll, right: bool) {
         let Some(b) = self.bar(t) else { return };
         let (x, y) = self.mouse;
         let along = if b.vertical { y - b.track.y } else { x - b.track.x };
         let pos = self.scroll_get(t);
-        let thumb0 = if b.max > 0.0 { pos / b.max * (b.len() - b.thumb) } else { 0.0 };
+        let thumb0 = b.thumb_at(pos);
+        if let (false, Some(end), Some(z)) = (right, b.edge_at(pos, along), self.zoom_get(t)) {
+            let (units, start, stop) = ((b.max + b.view) / z, pos / z, (pos + b.view) / z);
+            let (fixed, moved) = if end { (start, stop) } else { (stop, start) };
+            // Measured from the end's time rather than the drawn thumb, so the press itself does not zoom.
+            let grab = along - moved / units * b.len();
+            if t == Scroll::PianoX {
+                self.state.piano.bar_span = Some(units * f32::from(self.state.project.ppq.max(4)));
+            }
+            self.drag = Some(Drag::BarEdge { t, right: end, fixed, units, grab });
+            return self.invalidate();
+        }
         if !right && (along < thumb0 || along > thumb0 + b.thumb) {
             self.scroll_set(t, (along - b.thumb / 2.0) * b.ratio());
         }
@@ -5765,15 +5988,9 @@ impl App {
                 return;
             }
         }
-        if let Some(Action::Settings(views::settings::SAct::ThemeKnob(i))) = action {
-            return self.theme_knob_reset(usize::from(i));
-        }
-        if let Some(Action::Knob(id)) = action {
-            crate::history::knob(&mut self.state, id, false);
-            self.state.set_knob(id, id.default_value());
-            self.hint = Cow::Owned(self.state.knob_text(id));
-            self.invalidate();
-            return;
+        // Knobs, faders and sliders go back to their default (spec: ui/knobs.md "Owner decisions").
+        if let Some(c) = action.as_ref().and_then(crate::knobs::Control::of) {
+            return self.reset_control(c);
         }
         if self.ctrl && matches!(action, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoKeys)) {
             self.drag = Some(Drag::PianoRowZoom { y0: y, row0: self.state.piano.row_h });
@@ -5815,6 +6032,13 @@ impl App {
         // Pattern selector (spec: ui/pattern-menu.md §1): box = menu at the mouse, "+" = find next empty.
         match &action {
             Some(Action::Settings(views::settings::SAct::Preset(i))) => return self.theme_menu(*i, x, y),
+            // The settings window's sliders and theme knobs: their default is all the menu offers.
+            Some(a @ Action::Settings(views::settings::SAct::Slider(..) | views::settings::SAct::ThemeKnob(_))) => {
+                if let Some(c) = crate::knobs::Control::of(a) {
+                    self.state.playlist.popup = Some(crate::knobs::reset_menu(c, x, y));
+                }
+                return self.invalidate();
+            }
             // Settings > MIDI's Port and offset boxes: right-click resets (spec: ui/midi-settings.md §1).
             Some(Action::Settings(views::settings::SAct::Midi(m))) if m.is_value() => return self.midi_page_reset(*m),
             Some(Action::PatternNext) => {
@@ -6056,6 +6280,7 @@ impl App {
             }
             Some(Drag::SongRuler) => self.song_pos_release(),
             Some(Drag::Touch) => self.touch_hold(None),
+            Some(Drag::BarEdge { .. }) => self.state.piano.bar_span = None,
             Some(Drag::ThemeKnob { .. } | Drag::PickSv(_) | Drag::PickHue(_)) => self.theme_store(),
             _ => {}
         }
@@ -6652,6 +6877,23 @@ impl App {
             self.record_knob(id);
             self.multilink_knob(crate::typein::Target::Knob(id));
             self.hint = Cow::Owned(self.state.knob_text(id));
+            return None;
+        }
+        // The wheel over a mixer fader moves it, not the mixer's scroll (spec: ui/mixer.md §4).
+        if let Some(Action::Fader(t)) = area
+            && dy != 0.0
+        {
+            let s = &mut self.state;
+            let v0 = crate::mixer::track(s, t).map(|m| m.volume.unwrap_or(0.8))?;
+            let v = (v0 + f64::from(dy.signum()) * views::mixer::FADER_NOTCH).clamp(0.0, 1.0);
+            if v != v0 {
+                crate::history::fader(s, t, true);
+                if let Some(m) = crate::mixer::track_mut(s, t) {
+                    m.volume = Some(v);
+                }
+                s.piano.dirty = true;
+            }
+            self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
             return None;
         }
         // The wheel over a mixer effect slot moves its effect up or down the track's chain (spec: ui/mixer.md §7).
@@ -7692,7 +7934,7 @@ impl App {
             }
             Action::Fader(t) => {
                 crate::mixer::select(s, t, self.ctrl);
-                crate::history::fader(s, t);
+                crate::history::fader(s, t, false);
                 let v0 = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
                 self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0 });
             }
@@ -7720,6 +7962,12 @@ impl App {
                 let (x, y) = self.mouse;
                 let at = self.top_hit(x, y).map_or((x, y), |h| (h.rect.x, h.rect.bottom() + 2.0));
                 self.open_project_picker(at);
+            }
+            // An automation clip LFO's switch and mode: a click flips them, one undo step.
+            Action::Knob(id @ crate::knobs::KnobId::AutoLfo(_, k)) if k.switch() => {
+                crate::history::knob(s, id, false);
+                s.set_knob(id, if s.knob(id) >= 0.5 { 0.0 } else { 1.0 });
+                self.hint = Cow::Owned(s.knob_text(id));
             }
             Action::Knob(id) => {
                 crate::history::knob(s, id, false);
@@ -8210,6 +8458,7 @@ impl App {
             (0, FILE_EXPORT) => self.open_export(false),
             (0, FILE_EXPORT_MP3) => self.open_export(true),
             (0, FILE_EXPORT_MIDI) => self.export_midi_dialog(false),
+            (0, i) if item_at(0, i).is_some_and(|it| it.label == EXPORT_ZIP_LABEL) => crate::zipped::export_dialog(self),
             // ADD > Sampler: a new Lemon Sampler channel at the bottom of the rack (spec: ui/plugin-menu.md §1).
             (ADD_MENU, i) if item_at(ADD_MENU, i).is_some_and(|it| it.label == "Sampler") => {
                 if let Some(index) = self.plugins.index_of(crate::plugins::LEMON_SAMPLER) {
@@ -9068,6 +9317,91 @@ mod tests {
         assert_eq!(a.plugins.maximus_file_state(key), Some(max.clone()));
         a.store_builtin_states();
         assert_eq!(a.state.project.mixer[1].slots[3].clone().unwrap().state, max);
+    }
+
+    /// A project's Fruity Reeverb 2, Balance and Chorus slots (user report 2026-10-26: "This slot's plugin is not
+    /// hosted") are opened as Lemon Reverb, Lemon Balance and Lemon Chorus with their state, show the Lemon names, and
+    /// a save keeps the FL effects, not wrapped, with the state the Lemon effects write back. Stereo Shaper stays the
+    /// engine's (its difference output is the slot's alone).
+    // spec: plugins/lemon-small-effects.md "Opened projects' slots"
+    #[test]
+    fn fl_effect_slots_open_as_their_lemon_recreations() {
+        use crate::plugins::fx_key;
+        let mut reverb = lemon_reverb::params::default_state();
+        lemon_reverb::params::set_field(&mut reverb, 4, 70);
+        let mut balance = lemon_small_fx::params::default_state(lemon_small_fx::balance::SPEC);
+        lemon_small_fx::params::set_field(&mut balance, 0, -64);
+        let mut chorus = lemon_small_fx::params::default_state(lemon_small_fx::chorus::SPEC);
+        let d = lemon_small_fx::params::field(&chorus, 1);
+        lemon_small_fx::params::set_field(&mut chorus, 1, d + 1);
+        let cases = [(1u16, 0u8, "Fruity Reeverb 2", "Lemon Reverb", reverb), (2, 1, "Fruity Balance", "Lemon Balance", balance), (3, 2, "Fruity Chorus", "Lemon Chorus", chorus)];
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        for (t, k, file, _, fl) in &cases {
+            a.state.project.mixer[usize::from(*t)].slots[usize::from(*k)] = Some(os_model::SlotPlugin { name: (*file).into(), state: fl.clone() });
+        }
+        let shaper = os_model::SlotPlugin { name: "Fruity Stereo Shaper".into(), state: Vec::new() };
+        a.state.project.mixer[4].slots[0] = Some(shaper.clone());
+        a.sync_effects();
+        for (t, k, file, lemon, fl) in &cases {
+            let key = fx_key(*t, *k);
+            assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(lemon.to_string()), "{file}");
+            assert_eq!(crate::mixer::slot_name(&a.state, *t, *k).as_deref(), Some(*lemon));
+            assert_eq!(a.plugins.recreation_file_state(key, file).as_ref(), Some(fl), "{file}: the state as it was opened");
+        }
+        assert!(!a.plugins.hosted.contains_key(&fx_key(4, 0)), "Stereo Shaper: the engine's");
+        let path = std::env::temp_dir().join(format!("lemon-fl-recreations-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        for (t, k, file, _, fl) in &cases {
+            let slot = saved.mixer[usize::from(*t)].slots[usize::from(*k)].clone().unwrap();
+            assert_eq!((slot.name.as_str(), &slot.state), (*file, fl));
+        }
+        assert_eq!(saved.mixer[4].slots[0], Some(shaper));
+    }
+
+    /// A project's Fruity Flanger and Fruity Phaser slots open as Lemon Flanger and Lemon Phaser with their state, show
+    /// the Lemon names, and a save keeps the FL effects with the state the Lemon effects write back.
+    // spec: plugins/lemon-small-effects.md "Opened projects' slots", plugins/lemon-flanger.md §5, plugins/lemon-phaser.md §5
+    #[test]
+    fn fl_flanger_and_phaser_slots_open_as_their_lemon_recreations() {
+        use crate::plugins::fx_key;
+        let mut flanger = lemon_small_fx::params::default_state(lemon_small_fx::flanger::SPEC);
+        lemon_small_fx::params::set_field(&mut flanger, 1, 700);
+        let mut phaser = lemon_small_fx::params::default_state(lemon_small_fx::phaser::SPEC);
+        lemon_small_fx::params::set_field(&mut phaser, 6, 15);
+        let cases = [(1u16, 0u8, "Fruity Flanger", "Lemon Flanger", flanger), (2, 1, "Fruity Phaser", "Lemon Phaser", phaser)];
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        for (t, k, file, _, fl) in &cases {
+            a.state.project.mixer[usize::from(*t)].slots[usize::from(*k)] = Some(os_model::SlotPlugin { name: (*file).into(), state: fl.clone() });
+        }
+        a.sync_effects();
+        for (t, k, file, lemon, fl) in &cases {
+            let key = fx_key(*t, *k);
+            assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(lemon.to_string()), "{file}");
+            assert_eq!(crate::mixer::slot_name(&a.state, *t, *k).as_deref(), Some(*lemon));
+            assert_eq!(a.plugins.recreation_file_state(key, file).as_ref(), Some(fl), "{file}: the state as it was opened");
+        }
+        let path = std::env::temp_dir().join(format!("lemon-fl-modulation-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        for (t, k, file, _, fl) in &cases {
+            let slot = saved.mixer[usize::from(*t)].slots[usize::from(*k)].clone().unwrap();
+            assert_eq!((slot.name.as_str(), &slot.state), (*file, fl));
+        }
     }
 
     /// The toolbar's audio editor button puts Tesla on the master track and shows it; another click shows the same
@@ -10478,6 +10812,106 @@ mod tests {
         assert!(app.state.project.mixer.iter().find(|m| m.index == 1).unwrap().pan.unwrap() > 0.0, "mixer pan written to the model");
     }
 
+    /// The wheel over a mixer fader moves it instead of scrolling the mixer: three notches up from unity read
+    /// `103%  0.8dB  1.09`, and a run of notches is one undo step (spec: ui/mixer.md §4).
+    #[test]
+    fn wheel_moves_a_mixer_fader() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut c, None);
+        let vol = |app: &App| crate::mixer::track(&app.state, 1).unwrap().volume.unwrap();
+        assert_eq!(vol(&app), 0.8);
+        let r = hit_rect(&app, &Action::Fader(1));
+        app.mouse_move(r.cx(), r.cy());
+        let scroll = app.state.mixer_scroll;
+        for _ in 0..3 {
+            app.wheel(0.0, 1.0, false, false);
+        }
+        assert_eq!(app.hint, "Volume: 103%  0.8dB  1.09");
+        assert_eq!(app.state.mixer_scroll, scroll, "the mixer does not scroll");
+        assert!(crate::history::undo(&mut app.state).is_some());
+        assert_eq!(vol(&app), 0.8, "one undo step for the three notches");
+        for _ in 0..200 {
+            app.wheel(0.0, -1.0, false, false);
+        }
+        assert_eq!(vol(&app), 0.0, "stops at the bottom");
+    }
+
+    /// Every knob and fader the main window draws (toolbar, mixer, its equaliser and sends, channel rack) goes back to
+    /// its default with a middle click and with Reset, the first entry of its right-click menu (spec: ui/knobs.md,
+    /// ui/mixer.md §6.3, ui/channel-rack.md §19).
+    #[test]
+    fn every_knob_and_fader_resets() {
+        use crate::knobs::{Control, KnobId};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
+        app.state.z = vec![Win::ChannelRack, Win::Mixer];
+        frame(&mut app, &mut c, None);
+        let value = |app: &App, c: Control| match c {
+            Control::Knob(id) => app.state.knob(id),
+            Control::Fader(t) => crate::mixer::track(&app.state, t).and_then(|m| m.volume).unwrap_or(0.8) as f32,
+            _ => unreachable!(),
+        };
+        let default = |c: Control| match c {
+            Control::Knob(id) => id.default_value(),
+            _ => 0.8,
+        };
+        // Away from the default, by a step the stored value can hold.
+        let disturb = |app: &mut App, c: Control| {
+            let v = if default(c) < 0.5 { 0.875 } else { 0.125 };
+            match c {
+                Control::Knob(id) => app.state.set_knob(id, v),
+                Control::Fader(t) => crate::mixer::track_mut(&mut app.state, t).unwrap().volume = Some(f64::from(v)),
+                _ => unreachable!(),
+            }
+            assert!((value(app, c) - default(c)).abs() > 0.1, "{c:?} moved");
+        };
+        // The controls the mouse can reach (not under another window), once each.
+        let mut seen = Vec::new();
+        let controls: Vec<(Control, f32, f32)> = app
+            .hits
+            .iter()
+            .filter_map(|h| Some((Control::of(&h.action)?, h.rect.cx(), h.rect.cy())))
+            .filter(|&(c, x, y)| app.top_hit(x, y).and_then(|h| Control::of(&h.action)) == Some(c))
+            .filter(|&(c, ..)| !seen.contains(&c) && {
+                seen.push(c);
+                true
+            })
+            .collect();
+        for want in [
+            Control::Knob(KnobId::MasterVol),
+            Control::Knob(KnobId::MasterPitch),
+            Control::Knob(KnobId::Swing),
+            Control::Knob(KnobId::ChanVol(0)),
+            Control::Knob(KnobId::ChanPan(0)),
+            Control::Knob(KnobId::MixPan(1)),
+            Control::Fader(1),
+        ] {
+            assert!(seen.contains(&want), "{want:?} is drawn");
+        }
+        assert!(seen.iter().any(|c| matches!(c, Control::Knob(KnobId::Eq(..)))), "the equaliser's knobs are drawn");
+        for (ctl, x, y) in controls {
+            app.mouse_move(x, y);
+            disturb(&mut app, ctl);
+            app.mouse_down_middle();
+            app.mouse_up();
+            assert!((value(&app, ctl) - default(ctl)).abs() < 1e-4, "middle click resets {ctl:?}");
+            disturb(&mut app, ctl);
+            app.mouse_down_right();
+            app.mouse_up();
+            let menu = app.state.playlist.popup.clone().unwrap_or_else(|| panic!("{ctl:?} has a menu"));
+            assert_eq!(menu.items[0].label, "Reset", "{ctl:?}");
+            app.act(Action::PlPopup(0));
+            assert!((value(&app, ctl) - default(ctl)).abs() < 1e-4, "Reset resets {ctl:?}");
+            assert!(app.state.playlist.popup.is_none());
+            frame(&mut app, &mut c, None);
+        }
+    }
+
     /// Holding the mouse on a toolbar window button lights it orange; releasing restores it.
     #[test]
     fn pressed_button_look() {
@@ -11108,6 +11542,89 @@ mod tests {
         assert_eq!(n, 0, "{what}: differing pixels in x {}..{} y {}..{}", bbox.0, bbox.2, bbox.1, bbox.3);
     }
 
+    /// The ends of the Playlist's and Piano roll's horizontal thumbs zoom (spec: ui/scroll-bars.md §4): the dragged end
+    /// follows the mouse, the other end keeps its time, and the ends show the resize cursor.
+    #[test]
+    fn bar_ends_zoom() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let t = Scroll::PlaylistX;
+        let ends = |app: &App, t: Scroll| {
+            let b = app.bar(t).unwrap();
+            let a = b.track.x + b.thumb_at(app.scroll_get(t));
+            (a, a + b.thumb)
+        };
+        // Right end: dragged right it zooms out; the left end stays at the start.
+        let (a0, b0) = ends(&app, t);
+        let (cy, z0) = (app.bar(t).unwrap().track.cy(), app.state.playlist_bar_w);
+        app.mouse_move((a0 + b0) / 2.0, cy);
+        assert_eq!(app.cursor(), Cursor::Default, "the middle of the thumb scrolls");
+        app.mouse_move(b0 - 1.0, cy);
+        assert_eq!(app.cursor(), Cursor::EwResize);
+        assert_eq!(app.hint, BAR_EDGE_HINT);
+        app.mouse_down();
+        app.mouse_move(b0 + 59.0, cy);
+        assert_eq!(app.cursor(), Cursor::EwResize, "kept while dragging");
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        let (a1, b1) = ends(&app, t);
+        assert!(app.state.playlist_bar_w < z0, "zoomed out: {} -> {}", z0, app.state.playlist_bar_w);
+        assert_eq!(app.scroll_get(t), 0.0);
+        assert!((a1 - a0).abs() < 0.5 && (b1 - (b0 + 60.0)).abs() < 1.0, "{a0}..{b0} -> {a1}..{b1}");
+        // Left end, scrolled to the middle: dragged right it zooms in; the right end keeps its time.
+        let b = app.bar(t).unwrap();
+        app.scroll_set(t, b.max / 2.0);
+        frame(&mut app, &mut c, None);
+        let (z1, (a2, b2)) = (app.state.playlist_bar_w, ends(&app, t));
+        let stop = (app.scroll_get(t) + b.view) / z1;
+        app.mouse_move(a2 + 1.0, cy);
+        app.mouse_down();
+        app.mouse_move(a2 + 41.0, cy);
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        let z2 = app.state.playlist_bar_w;
+        let (a3, b3) = ends(&app, t);
+        assert!(z2 > z1, "zoomed in: {z1} -> {z2}");
+        assert!(((app.scroll_get(t) + b.view) / z2 - stop).abs() < 0.01, "the right end keeps its time");
+        assert!((a3 - (a2 + 40.0)).abs() < 1.0 && (b3 - b2).abs() < 1.0, "{a2}..{b2} -> {a3}..{b3}");
+        // The Piano roll's bar: while an end is dragged it keeps its length, so the end follows the mouse (with the
+        // pattern inside the view the thumb is two thirds of the bar again after the release).
+        app.state.z = vec![Win::PianoRoll];
+        frame(&mut app, &mut c, None);
+        let t = Scroll::PianoX;
+        let (a4, b4) = ends(&app, t);
+        let cy = app.bar(t).unwrap().track.cy();
+        let z4 = app.state.piano.px_per_beat;
+        app.mouse_move(b4 - 1.0, cy);
+        assert_eq!(app.cursor(), Cursor::EwResize);
+        app.mouse_down();
+        app.mouse_move(b4 - 41.0, cy);
+        frame(&mut app, &mut c, None);
+        let (a5, b5) = ends(&app, t);
+        assert!((a5 - a4).abs() < 0.5 && (b5 - (b4 - 40.0)).abs() < 1.0, "{a4}..{b4} -> {a5}..{b5}");
+        app.mouse_up();
+        assert_eq!(app.state.piano.bar_span, None);
+        frame(&mut app, &mut c, None);
+        assert!(app.state.piano.px_per_beat > z4, "zoomed in: {z4} -> {}", app.state.piano.px_per_beat);
+        assert_eq!(app.scroll_get(t), 0.0, "the start stays");
+        // Its left end, scrolled in: the end of the view keeps its time.
+        let b = app.bar(t).unwrap();
+        app.scroll_set(t, b.max / 2.0);
+        frame(&mut app, &mut c, None);
+        let ppb = |app: &App| app.state.piano.px_per_beat;
+        let (z6, (a6, _)) = (ppb(&app), ends(&app, t));
+        let stop = (app.scroll_get(t) + b.view) / z6;
+        app.mouse_move(a6 + 1.0, cy);
+        app.mouse_down();
+        app.mouse_move(a6 - 29.0, cy);
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        assert!(ppb(&app) < z6, "zoomed out: {z6} -> {}", ppb(&app));
+        assert!(((app.scroll_get(t) + b.view) / ppb(&app) - stop).abs() < 0.01, "the right end keeps its time");
+    }
+
     /// Scroll bars: left-drag scrolls one axis, right-drag both (piano roll), middle-drag grabs.
     #[test]
     fn scrollbar_drags() {
@@ -11278,6 +11795,23 @@ mod tests {
         assert!(top + crate::views::settings::TABLE_ROWS <= 80);
         drag(&mut app, &mut c, Scroll::PlugTable, 2000.0);
         assert_eq!(app.state.plugdb.top, 80 - crate::views::settings::TABLE_ROWS, "to the last row, no further");
+    }
+
+    /// The system's close shortcut closes the settings window, then the tool window in front, one per press; a
+    /// workspace window in front (the mixer) leaves the shortcut to the app, which then closes.
+    #[test]
+    fn close_shortcut_closes_dialog_windows_first() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        app.state.raise(Win::Tapper);
+        app.open_settings(0);
+        app.close_requested();
+        assert!(!app.state.settings.open && app.state.z.contains(&Win::Tapper) && !app.want_exit, "only the settings window closed");
+        app.close_requested();
+        assert!(!app.state.z.contains(&Win::Tapper) && !app.want_exit, "then the tapper");
+        assert_eq!(app.state.z.last(), Some(&Win::Mixer));
+        app.close_requested();
+        assert!(app.want_exit, "then the app");
     }
 
     #[test]
@@ -15559,6 +16093,15 @@ mod tests {
         app.act(Action::Strum(Act::Reset));
         assert_eq!(chord(&app), vec![0, 0, 0]);
         app.act(Action::CloseWin(Win::Strum));
+        // VIEW > Close all windows (F12) closes it as × does.
+        key(&mut app, "s", false, true, false);
+        app.state.set_knob(KnobId::Strum(Knob::Time), 0.5 + 29.0 / 64.0);
+        frame(&mut app, &mut c, None);
+        assert_eq!(chord(&app), vec![0, 22, 44]);
+        app.close_windows(CloseAll::All);
+        assert!(!app.state.shown(Win::Strum));
+        assert_eq!(chord(&app), vec![0, 0, 0], "F12 puts the notes back");
+        app.state.z = vec![Win::PianoRoll];
 
         // Alt+A opens the Arpeggiate dialog (spec: ui/piano-arpeggiate.md): the Default pattern previews at once, ×
         // puts the notes back, a menu entry changes the preview, Accept is one undo step.
@@ -18494,6 +19037,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// An automation clip's channel window (spec: audio/automation.md "Range", "The LFO"): a new clip's range is 0..1
+    /// (its pan knob the minimum at 0, its volume knob the maximum at 1); the LFO's switch and mode flip on a click and
+    /// its knobs turn, each an undo step; everything saves into the project and loads back.
+    #[test]
+    fn automation_clip_window_sets_range_and_lfo() {
+        use crate::knobs::{KnobId, LfoKnob};
+        use views::menus::{item_at, ADD_MENU};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let entry = |label: &str| (0..).find(|&i| item_at(ADD_MENU, i).is_some_and(|it| it.label == label)).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
+        app.menu_item(ADD_MENU, entry("Automation clip"));
+        let row = app.state.project.channels.len() - 1;
+        let ch = app.state.project.channels[row].clone();
+        assert_eq!((ch.pan, ch.volume), (-1.0, 1.0), "a new clip's range is 0..1");
+        assert!(app.state.shown(Win::Plugin) && app.state.plugin_channel == row);
+        frame(&mut app, &mut c, None);
+        assert_eq!(app.state.knob_text(KnobId::ChanPan(row)), "Minimum: 0%");
+        assert_eq!(app.state.knob_text(KnobId::ChanVol(row)), "Maximum: 100%");
+        assert_eq!(app.state.knob_text(KnobId::AutoLfo(row, LfoKnob::On)), "LFO: off");
+        assert_eq!(app.state.knob_text(KnobId::AutoLfo(row, LfoKnob::Speed)), "LFO speed: 1.00 cycles per beat");
+        let lfo = |app: &App| app.state.project.automation(ch.index).unwrap().lfo.clone();
+        let steps = app.state.history.done();
+
+        // The switch and the mode: a click flips each.
+        for k in [LfoKnob::On, LfoKnob::Mode] {
+            let r = hit_rect(&app, &Action::Knob(KnobId::AutoLfo(row, k)));
+            click(&mut app, &mut c, r);
+        }
+        assert_eq!((lfo(&app).switch, lfo(&app).mode), (-1, 0), "on; the untargeted clip's mode was add, now multiply");
+        // Amount: dragged up by 64 px at the default rate.
+        let id = KnobId::AutoLfo(row, LfoKnob::Amount);
+        let r = hit_rect(&app, &Action::Knob(id));
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down();
+        app.mouse_move(r.cx(), r.cy() - 128.0);
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        assert_eq!(lfo(&app).amount, 64 + (128.0 * id.drag_rate() * 128.0).round() as i32);
+        // The range: the minimum up to 25 %, through the window's MIN knob.
+        let r = hit_rect(&app, &Action::Knob(KnobId::ChanPan(row)));
+        assert!(app.state.plugin_pos.1 < r.y, "the knob is in the channel window");
+        app.state.set_knob(KnobId::ChanPan(row), 0.25);
+        assert_eq!(app.state.project.channels[row].pan, -0.5);
+        assert_eq!(os_model::clip_lfo::range(-0.5, 1.0), (0.25, 0.75));
+        // Each change is an undo step; undo puts them back.
+        assert_eq!(app.state.history.done(), steps + 3);
+        crate::history::undo(&mut app.state);
+        assert_eq!(lfo(&app).amount, 64);
+        crate::history::undo(&mut app.state);
+        assert_eq!(lfo(&app).mode, 1);
+        crate::history::redo(&mut app.state);
+        crate::history::redo(&mut app.state);
+        // Middle click: the minimum goes back to 0, not to the centre.
+        app.state.reset_knob(KnobId::ChanPan(row));
+        assert_eq!(app.state.project.channels[row].pan, -1.0);
+        app.state.set_knob(KnobId::ChanPan(row), 0.25);
+        app.state.set_knob(KnobId::AutoLfo(row, LfoKnob::Pulse), 0.75);
+        // Saved and loaded back: the levels as the range, the LFO's fields as set.
+        let path = std::env::temp_dir().join(format!("os_clip_lfo_{}.flp", std::process::id()));
+        app.save_to(path.clone());
+        let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let bc = back.channels.iter().find(|x| x.index == ch.index).unwrap();
+        assert_eq!((bc.pan, bc.volume), (-0.5, 1.0));
+        let want = lfo(&app);
+        assert_eq!((want.switch, want.mode, want.pulse_width), (-1, 0, 64));
+        assert_eq!(back.automation(ch.index).unwrap().lfo, want);
+    }
+
     /// ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the channel goes last, named and routed to
     /// the master, alone selected, into its filter group (made before Unsorted) with the filter on it, as the
     /// playlist's clip source; its window opens; the automation clip has FL's default points and no target and saves
@@ -18537,7 +19151,7 @@ mod tests {
         let a = s.project.automation(6).expect("its points").clone();
         let pts: Vec<_> = a.points.iter().map(|p| (p.beat, p.value, p.tension, p.mode)).collect();
         assert_eq!(pts, [(0.0, 0.5, 0.0, AutoMode::Single), (4.0, 0.5, 0.0, AutoMode::Single)]);
-        assert!(a.targets.is_empty() && a.header[8] == 1);
+        assert!(a.targets.is_empty() && a.lfo.mode == 1);
         assert_eq!((names(&app), app.state.rack.unsorted_at, app.state.rack.filter), (vec!["Drums".into(), "Audio".into(), "Automation".into()], Some(3), Filter::Group(2)));
         let s = &app.state;
         assert!(s.shown(Win::Plugin) && s.plugin_channel == 6 && s.pending_open.is_none(), "its channel window opens");
@@ -18558,7 +19172,7 @@ mod tests {
         assert_eq!(kinds, [(ChannelKind::AudioClip, "Audio Clip".into(), 1), (ChannelKind::Automation, "Automation Clip".into(), 2), (ChannelKind::AudioClip, "Audio Clip #2".into(), 1)]);
         assert_eq!(back.current_group, Some(1));
         let a2 = back.automation(6).expect("saved points");
-        assert_eq!((&a2.points, &a2.targets, a2.header[8]), (&a.points, &Vec::new(), 1));
+        assert_eq!((&a2.points, &a2.targets, a2.lfo.mode), (&a.points, &Vec::new(), 1));
         // Undo (Ctrl+Z), one step each: the channel goes, the groups, filter, selection and clip source come back.
         let undo = |app: &mut App| crate::playlist::run(app, crate::playlist::Cmd::Undo);
         assert_eq!(undo(&mut app).as_deref(), Some("Undo: add audio clip"));

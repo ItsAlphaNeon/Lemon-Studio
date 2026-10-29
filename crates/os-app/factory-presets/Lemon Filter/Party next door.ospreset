@@ -1,0 +1,10 @@
+OSPRESET 1
+plugin=Lemon Filter	id=clap:org.openstudio.lemon-filter	format=clap	body=params
+# Values: OpenStudio-specs plugins/fruity-filter.md ("Settings": the original's four presets).
+Cutoff frequency = 160
+Resonance = 1024
+Low pass = 864
+Band pass = 0
+High pass = 0
+X 2 = 0
+Center = 1

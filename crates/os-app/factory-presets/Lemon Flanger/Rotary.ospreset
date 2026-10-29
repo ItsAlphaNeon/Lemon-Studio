@@ -1,0 +1,15 @@
+OSPRESET 1
+plugin=Lemon Flanger	id=clap:org.openstudio.lemon-flanger	format=clap	body=params
+# Values: OpenStudio-specs plugins/factory-presets.md.
+Delay = 597
+Depth = 938
+Rate = 4740
+Phase = 165
+Damp = 4010
+Shape = 501
+Feedback = 82
+Invert feedback = 629
+Invert wet = 747
+Dry = 4323
+Wet = 3281
+Cross = 4323

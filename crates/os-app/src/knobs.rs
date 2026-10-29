@@ -42,6 +42,78 @@ pub enum KnobId {
     /// A knob or fader of the piano roll's Flam or Scale levels dialog (dialog state; spec: ui/piano-flam.md §1,
     /// ui/piano-level-scaling.md §1).
     PianoDlg(crate::piano_dlg::Knob),
+    /// A control of the LFO of the automation clip on channel row `.0` (model `Automation::lfo`; spec:
+    /// audio/automation.md "The LFO"). Its switch and mode are two-position controls that a click flips.
+    AutoLfo(usize, LfoKnob),
+}
+
+/// The controls of an automation clip's LFO, each over its stored range: switch (off, on), mode (multiply, add),
+/// amount 0..128, speed 0..65536, tension, skew and pulse width -128..128 (Lemon Studio's ranges for the knobs; the
+/// page gives the stored values' meaning).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum LfoKnob {
+    On,
+    Mode,
+    Amount,
+    Speed,
+    Tension,
+    Skew,
+    Pulse,
+}
+
+impl LfoKnob {
+    pub const ALL: [LfoKnob; 7] = [LfoKnob::On, LfoKnob::Mode, LfoKnob::Amount, LfoKnob::Speed, LfoKnob::Tension, LfoKnob::Skew, LfoKnob::Pulse];
+
+    /// A switch a click flips (not turned by dragging).
+    pub fn switch(self) -> bool {
+        matches!(self, LfoKnob::On | LfoKnob::Mode)
+    }
+
+    /// The control's 0..1 position for `l`.
+    pub fn pos(self, l: &os_model::clip_lfo::ClipLfo) -> f32 {
+        let bi = |v: i32| ((v as f32 + 128.0) / 256.0).clamp(0.0, 1.0);
+        match self {
+            LfoKnob::On => f32::from(u8::from(l.on())),
+            LfoKnob::Mode => f32::from(u8::from(l.adds())),
+            LfoKnob::Amount => (l.amount as f32 / 128.0).clamp(0.0, 1.0),
+            LfoKnob::Speed => (l.speed as f32 / 65536.0).clamp(0.0, 1.0),
+            LfoKnob::Tension => bi(l.tension),
+            LfoKnob::Skew => bi(l.skew),
+            LfoKnob::Pulse => bi(l.pulse_width),
+        }
+    }
+
+    /// Stores position `v` (0..1) into `l`.
+    pub fn store(self, l: &mut os_model::clip_lfo::ClipLfo, v: f32) {
+        let bi = |v: f32| (v * 256.0).round() as i32 - 128;
+        match self {
+            LfoKnob::On => l.switch = if v >= 0.5 { -1 } else { 0 },
+            LfoKnob::Mode => l.mode = u8::from(v >= 0.5),
+            LfoKnob::Amount => l.amount = (v * 128.0).round() as i32,
+            LfoKnob::Speed => l.speed = (v * 65536.0).round() as i32,
+            LfoKnob::Tension => l.tension = bi(v),
+            LfoKnob::Skew => l.skew = bi(v),
+            LfoKnob::Pulse => l.pulse_width = bi(v),
+        }
+    }
+
+    /// The hint text at `l`: "LFO amount: 50%", "LFO speed: 1.00 cycles per beat".
+    pub fn text(self, l: &os_model::clip_lfo::ClipLfo) -> String {
+        let pct = |v: i32| format!("{:+.0}%", v as f32 / 128.0 * 100.0);
+        match self {
+            LfoKnob::On => format!("LFO: {}", if l.on() { "on" } else { "off" }),
+            LfoKnob::Mode => format!("LFO mode: {}", if l.adds() { "add" } else { "multiply" }),
+            LfoKnob::Amount => format!("LFO amount: {:.0}%", l.amount as f32 / 128.0 * 100.0),
+            LfoKnob::Speed => match os_model::clip_lfo::ClipLfo::cycles_per_beat(l.speed) {
+                c if c <= 0.0 => "LFO speed: stopped".into(),
+                c if c >= 1.0 => format!("LFO speed: {c:.2} cycles per beat"),
+                c => format!("LFO speed: 1 cycle per {:.2} beats", 1.0 / c),
+            },
+            LfoKnob::Tension => format!("LFO tension: {}", pct(l.tension)),
+            LfoKnob::Skew => format!("LFO skew: {}", pct(l.skew)),
+            LfoKnob::Pulse => format!("LFO pulse width: {}", pct(l.pulse_width)),
+        }
+    }
 }
 
 /// The equaliser's band names as its hints give them (spec: ui/mixer.md §8).
@@ -99,10 +171,47 @@ impl KnobId {
             KnobId::Swing => 0.0,
             KnobId::Arp(k) => crate::arpeggiate::Settings::default().get(k),
             KnobId::PianoDlg(k) => k.default_pos(),
+            KnobId::AutoLfo(_, k) => k.pos(&os_model::clip_lfo::ClipLfo::default()),
             KnobId::Eq(_, b, f) => eq_pos(f, os_model::EQ_DEFAULT[usize::from(b.min(2))][usize::from(f.min(2))]),
             _ => 0.5,
         }
     }
+}
+
+/// A knob or slider of the app's own windows that goes back to its default: a middle click, and "Reset" in its right-click
+/// menu (spec: ui/knobs.md "Owner decisions", ui/mixer.md §6.3, ui/channel-rack.md §19). `App::reset_control` resets it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Control {
+    Knob(KnobId),
+    /// A mixer track's volume fader (spec: ui/mixer.md §4).
+    Fader(u16),
+    /// Channel row `.0`'s pitch knob in its plugin window (spec: ui/plugin-window.md).
+    ChanPitch(usize),
+    /// A declared slider of the settings window, by label (`prefs::SLIDERS`).
+    Slider(&'static str),
+    /// Knob `.0` of Settings > Theme's adjustments (`theme_adjust::KNOBS`): back to the chosen theme's value.
+    Theme(u8),
+}
+
+impl Control {
+    /// The control a main-window hit is, if it is one.
+    pub fn of(a: &crate::app::Action) -> Option<Control> {
+        use crate::app::Action;
+        use crate::views::settings::SAct;
+        match *a {
+            Action::Knob(id) => Some(Control::Knob(id)),
+            Action::Fader(t) => Some(Control::Fader(t)),
+            Action::Settings(SAct::Slider(label, ..)) => Some(Control::Slider(label)),
+            Action::Settings(SAct::ThemeKnob(i)) => Some(Control::Theme(i)),
+            _ => None,
+        }
+    }
+}
+
+/// The right-click menu of a control with nothing to offer but its default: "Reset".
+pub fn reset_menu(c: Control, x: f32, y: f32) -> crate::playlist::Popup {
+    use crate::playlist::{Cmd, PItem, Popup};
+    Popup { x, y, items: vec![PItem::new("Reset", Cmd::Reset(c))], sub: None, scroll: [0; 2] }
 }
 
 /// "Centered", "38% right", "2% left".
@@ -144,6 +253,28 @@ impl State {
             KnobId::Strum(k) => (self.strum.set.get(k) + 1.0) / 2.0,
             KnobId::Arp(k) => self.arp.set.get(k),
             KnobId::PianoDlg(k) => self.piano_dlg.get(k),
+            KnobId::AutoLfo(row, k) => k.pos(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
+        }
+    }
+
+    /// The LFO of the automation clip on channel row `row`.
+    pub fn clip_lfo(&self, row: usize) -> Option<&os_model::clip_lfo::ClipLfo> {
+        let ch = self.project.channels.get(row)?;
+        self.project.automation(ch.index).map(|a| &a.lfo)
+    }
+
+    /// Channel row `row` is an automation clip's: its pan and volume knobs are the clip's minimum and maximum (spec:
+    /// audio/automation.md "Range").
+    pub fn is_clip_row(&self, row: usize) -> bool {
+        self.project.channels.get(row).is_some_and(|c| c.kind == os_model::ChannelKind::Automation)
+    }
+
+    /// The value a knob goes back to: an automation clip's range is 0..1 (stored pan 0, volume 12800).
+    pub fn knob_default(&self, id: KnobId) -> f32 {
+        match id {
+            KnobId::ChanVol(row) if self.is_clip_row(row) => 1.0,
+            KnobId::ChanPan(row) if self.is_clip_row(row) => 0.0,
+            _ => id.default_value(),
         }
     }
 
@@ -233,7 +364,20 @@ impl State {
                     crate::piano_dlg::preview(self);
                 }
             }
+            KnobId::AutoLfo(row, k) => {
+                let Some(ch) = self.project.channels.get(row).map(|c| c.index) else { return };
+                if let Some(a) = self.project.automation_mut(ch) {
+                    k.store(&mut a.lfo, v);
+                    self.piano.dirty = true;
+                }
+            }
         }
+    }
+
+    /// Knob `id` back to its default, as an undo step.
+    pub fn reset_knob(&mut self, id: KnobId) {
+        crate::history::knob(self, id, false);
+        self.set_knob(id, self.knob_default(id));
     }
 
     /// The hint-bar text of a knob at its current value.
@@ -253,6 +397,9 @@ impl State {
                 c => format!("Master pitch: {c} cents"),
             },
             KnobId::MixPan(_) => format!("Panning: {}", pan_text(bipolar)),
+            // An automation clip's range: the pan knob is its minimum, the volume knob its maximum.
+            KnobId::ChanPan(row) if self.is_clip_row(row) => format!("Minimum: {:.0}%", n * 100.0),
+            KnobId::ChanVol(row) if self.is_clip_row(row) => format!("Maximum: {:.0}%", n * 100.0),
             KnobId::ChanPan(_) => format!("Channel panning: {}", pan_text(bipolar)),
             KnobId::MixSep(_) => crate::mixer::sep_text(f64::from(bipolar)),
             KnobId::Send(_, b) => crate::mixer::level_text(&format!("To {}", crate::mixer::name(self, b)), f64::from(n)),
@@ -276,13 +423,70 @@ impl State {
             KnobId::Strum(k) => self.strum.set.text(k, u32::from(self.project.ppq.max(4))),
             KnobId::Arp(k) => self.arp.set.text(k),
             KnobId::PianoDlg(k) => self.piano_dlg.text(k, u32::from(self.project.ppq.max(4))),
+            KnobId::AutoLfo(row, k) => k.text(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
         }
+    }
+}
+
+impl crate::app::App {
+    /// Control `c` back to its default (a middle click, or "Reset" in its menu); the hint bar shows the new value.
+    pub(crate) fn reset_control(&mut self, c: Control) {
+        use std::borrow::Cow;
+        let s = &mut self.state;
+        match c {
+            Control::Knob(id) => {
+                s.reset_knob(id);
+                self.hint = Cow::Owned(s.knob_text(id));
+            }
+            Control::Fader(t) => {
+                crate::history::fader(s, t, false);
+                let v = os_model::MixerTrack::new(t).volume.unwrap_or(0.8);
+                if let Some(m) = crate::mixer::track_mut(s, t) {
+                    m.volume = Some(v);
+                    s.piano.dirty = true;
+                }
+                self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
+            }
+            Control::ChanPitch(row) => {
+                if let Some(ch) = s.project.channels.get_mut(row) {
+                    ch.pitch_cents = 0;
+                    s.piano.dirty = true;
+                }
+            }
+            Control::Slider(label) => {
+                if let Some(sl) = crate::prefs::find_slider(label) {
+                    crate::prefs::set_slider(sl, sl.default);
+                }
+            }
+            Control::Theme(i) => return self.theme_knob_reset(usize::from(i)),
+        }
+        self.invalidate();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every LFO control stores its position and reads it back exactly (an undo puts the knob's position back), and
+    /// the defaults read as a new clip's LFO.
+    #[test]
+    fn lfo_controls_store_and_read_back() {
+        use os_model::clip_lfo::ClipLfo;
+        let d = ClipLfo::default();
+        for k in LfoKnob::ALL {
+            assert_eq!(KnobId::AutoLfo(0, k).default_value(), k.pos(&d), "{k:?}");
+            for v in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let mut l = d.clone();
+                k.store(&mut l, v);
+                let want = if k.switch() { if v >= 0.5 { 1.0 } else { 0.0 } } else { v };
+                assert_eq!(k.pos(&l), want, "{k:?} {v}");
+            }
+        }
+        assert_eq!(LfoKnob::Amount.text(&d), "LFO amount: 50%");
+        assert_eq!(LfoKnob::Speed.text(&ClipLfo { speed: 26259, ..d.clone() }), "LFO speed: 1 cycle per 16.00 beats");
+        assert_eq!(LfoKnob::Pulse.text(&ClipLfo { pulse_width: -64, ..d }), "LFO pulse width: -50%");
+    }
 
     #[test]
     fn texts_and_roundtrip() {
@@ -304,6 +508,39 @@ mod tests {
         assert_eq!(s.knob_text(KnobId::Swing), "Main swing: 0%");
         s.project.channels = vec![os_model::Channel { volume: 0.78, ..crate::app::test_project().channels[0].clone() }];
         assert_eq!(s.knob_text(KnobId::ChanVol(0)), "Channel volume: 78%  -5.2dB  0.55");
+    }
+
+    /// Every kind of control goes back to its default through `App::reset_control`, as an undo step for the project's.
+    #[test]
+    fn controls_reset() {
+        use crate::app::Action;
+        use crate::views::settings::SAct;
+        let mut app = crate::app::App::new(None);
+        app.state.project = crate::app::test_project();
+        assert_eq!(Control::of(&Action::Knob(KnobId::Swing)), Some(Control::Knob(KnobId::Swing)));
+        assert_eq!(Control::of(&Action::Fader(2)), Some(Control::Fader(2)));
+        assert_eq!(Control::of(&Action::Settings(SAct::ThemeKnob(3))), Some(Control::Theme(3)));
+        assert_eq!(Control::of(&Action::Settings(SAct::Slider("Smoothing", 0.0, 9.0))), Some(Control::Slider("Smoothing")));
+        assert_eq!(Control::of(&Action::Tempo), None, "the tempo is a value box");
+        for id in [KnobId::MasterVol, KnobId::MasterPitch, KnobId::ChanVol(0), KnobId::ChanPan(0), KnobId::Swing, KnobId::MixPan(1), KnobId::MixSep(1), KnobId::SlotMix(1, 0)] {
+            app.state.set_knob(id, if id.default_value() < 0.5 { 0.875 } else { 0.125 });
+            app.reset_control(Control::Knob(id));
+            assert_eq!(app.state.knob(id), id.default_value(), "{id:?}");
+            assert_eq!(app.hint, app.state.knob_text(id));
+        }
+        assert!(crate::history::undo(&mut app.state).is_some(), "an undo step");
+        assert_ne!(app.state.knob(KnobId::SlotMix(1, 0)), 1.0, "undone");
+        crate::mixer::track_mut(&mut app.state, 1).unwrap().volume = Some(0.2);
+        app.reset_control(Control::Fader(1));
+        assert_eq!(crate::mixer::track(&app.state, 1).unwrap().volume, Some(0.8));
+        assert_eq!(app.hint, "Volume: 100%  0.0dB  1.00");
+        app.state.project.channels[0].pitch_cents = 250;
+        app.reset_control(Control::ChanPitch(0));
+        assert_eq!(app.state.project.channels[0].pitch_cents, 0);
+        let s = &crate::prefs::SMOOTHING;
+        crate::prefs::set_slider(s, 3);
+        app.reset_control(Control::Slider(s.label));
+        assert_eq!(crate::prefs::slider(s), s.default);
     }
 
     #[test]

@@ -418,21 +418,22 @@ impl Engine {
     /// what is left of the skipped frames follows (`flushing`), and the position handed out with it is where the song
     /// was when what is heard first was made: `lag` frames earlier in the stream (spec: "Lemon Studio").
     pub(super) fn hand_out(&mut self, tick: u64, frame: u64, held: bool, flushing: bool) {
-        let n = (self.out.len() / 2) as u64;
+        let w = self.width();
+        let n = (self.out.len() / w) as u64;
         let at = self.pdc.stream;
         self.pdc.stream += n;
         let skip = self.pdc.head.min(n);
         self.pdc.head -= skip;
         if skip > 0 {
-            self.out.drain(..2 * skip as usize);
+            self.out.drain(..w * skip as usize);
         }
         // Once they are out, an engine kept going (live notes still held) plays on as it renders.
         if let (true, Some(f)) = (flushing, self.pdc.flush.as_mut().filter(|f| **f > 0)) {
             let keep = (*f).min(n - skip);
-            self.out.truncate(2 * keep as usize);
+            self.out.truncate(w * keep as usize);
             *f -= keep;
         }
-        self.pdc.handed += (self.out.len() / 2) as u64;
+        self.pdc.handed += (self.out.len() / w) as u64;
         // A live engine plays on while a sound is still on its way through the pads.
         if !self.voices.is_empty() || self.inst_tail > 0 || self.tap_clicks.sounding() {
             self.pdc.drain = self.pdc.reach;
@@ -761,9 +762,9 @@ mod tests {
         use os_model::target;
         // A volume ramp on insert 1, whose effect is two ticks late: the export equals the one without the delay.
         let mut p = project(&[1], 2);
-        p.channels.push(Channel { kind: ChannelKind::Automation, ..gate_channel(1, 0) });
+        p.channels.push(Channel { kind: ChannelKind::Automation, pan: -1.0, volume: 1.0, ..gate_channel(1, 0) });
         let points = vec![AutoPoint::new(0.0, 0.8), AutoPoint::new(4.0, 0.1)];
-        p.automations.push(Automation { channel: 1, targets: vec![target::mixer(1, target::MIXER_VOLUME)], points, header: vec![0; 21], tail: vec![] });
+        p.automations.push(Automation { channel: 1, targets: vec![target::mixer(1, target::MIXER_VOLUME)], points, header: vec![0; 21], tail: vec![], lfo: Default::default() });
         p.arrangements = vec![os_model::Arrangement {
             clips: vec![Clip::new(0, 384, 0, ClipSource::Pattern(1)), Clip::new(0, 384, 1, ClipSource::Channel(1))],
             tracks: (1..=2).map(os_model::PlaylistTrack::new).collect(),

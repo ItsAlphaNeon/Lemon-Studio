@@ -49,6 +49,8 @@ pub const PROJECT_SETTINGS: &str = "Project settings";
 pub const REPLACE_CHANNEL: &str = "Replace channel";
 /// Settings > Info's text changed (`project_info`).
 pub const PROJECT_INFO: &str = "Project info";
+/// A mixer track's audio input, output, record source or monitor mode changed (`track_io`).
+pub const MIXER_TRACK_IO: &str = "Mixer track audio input / output";
 
 /// What a step changes, as it is on the other side of the step.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +63,9 @@ pub enum Snap {
     Knob(KnobId, f64),
     /// Mixer track `.0`'s volume fader (0..1, the fader law; `None`: the track's default).
     Fader(u16, Option<f64>),
+    /// Mixer track `.0`'s audio input, output, record source and monitor mode (`MixerTrack::audio_in` ...); its armed
+    /// state is no part of it (spec: audio/track-io.md §2.3).
+    TrackIo(u16, [i32; 4]),
     /// Parameter `.1` of hosted plugin instance `.0` (normalized), set by Lemon Studio itself (`crate::params`).
     Param(usize, usize, f64),
     /// What a sample load changes on channel `row`: its sample, its name ("Auto name channels"), its root note and its
@@ -328,6 +333,7 @@ impl Snap {
             Snap::Knob(id, _) => Snap::Knob(*id, knob_value(s, *id)),
             // A track or an instance gone since is left as the step has it (`put` does nothing then).
             Snap::Fader(t, _) => crate::mixer::track(s, *t).map_or_else(|| self.clone(), |m| Snap::Fader(*t, m.volume)),
+            Snap::TrackIo(t, _) => crate::mixer::track(s, *t).map_or_else(|| self.clone(), |m| Snap::TrackIo(*t, track_io_of(m))),
             Snap::Param(key, i, _) => crate::params::param_value(s, *key, *i).map_or_else(|| self.clone(), |v| Snap::Param(*key, *i, v)),
             // A channel gone since is left as the step has it (`put` does nothing then).
             Snap::Sample { row, .. } => Snap::sample(s, *row).unwrap_or_else(|| self.clone()),
@@ -385,6 +391,7 @@ impl Snap {
             // A channel or an initial value holds no ticks; a timebase step's are at its own timebase.
             Snap::Knob(..)
             | Snap::Fader(..)
+            | Snap::TrackIo(..)
             | Snap::Param(..)
             | Snap::Sample { .. }
             | Snap::Channel { .. }
@@ -425,6 +432,11 @@ impl Snap {
             Snap::Fader(t, v) => {
                 if let Some(m) = crate::mixer::track_mut(s, t) {
                     m.volume = v;
+                }
+            }
+            Snap::TrackIo(t, [i, o, r, m]) => {
+                if let Some(x) = crate::mixer::track_mut(s, t) {
+                    (x.audio_in, x.audio_out, x.rec_source, x.monitor) = (i, o, r as u8, m as u8);
                 }
             }
             Snap::Param(key, i, v) => {
@@ -579,6 +591,7 @@ fn knob_name(id: KnobId) -> &'static str {
         KnobId::Strum(_) => "Piano roll strum",
         KnobId::Arp(_) => "Piano roll arpeggiate",
         KnobId::PianoDlg(_) => "Piano roll tool",
+        KnobId::AutoLfo(..) => "Automation clip LFO",
     }
 }
 
@@ -596,8 +609,8 @@ pub struct History {
     done: usize,
     /// The last move was an undo: with Alternate undo mode off, Ctrl+Z redoes it.
     undid: bool,
-    /// The knob the newest step's mouse-wheel turns go to (one step for a run of notches).
-    wheel: Option<KnobId>,
+    /// The knob or fader the newest step's mouse-wheel turns go to (one step for a run of notches).
+    wheel: Option<crate::knobs::Control>,
     /// The newest step was recorded since the last button release (`settle` looks at it then).
     fresh: bool,
 }
@@ -773,15 +786,36 @@ pub fn project_settings(s: &mut State, crossfades: bool) {
     }
 }
 
-/// Before mixer track `track`'s volume fader moves (a drag, a typed value): a step, "Mixer track volume", unless Undo
-/// knob tweaks is off (a fader is a knob here; an OS choice).
-pub fn fader(s: &mut State, track: u16) {
+/// Before mixer track `track`'s volume fader moves (a drag, a typed value, the wheel): a step, "Mixer track volume",
+/// unless Undo knob tweaks is off (a fader is a knob here; an OS choice). `wheel`: a mouse-wheel notch, which joins the
+/// step of the notches just before it on the same fader.
+pub fn fader(s: &mut State, track: u16, wheel: bool) {
     if !prefs::check(&prefs::UNDO_KNOB_TWEAKS) {
+        return;
+    }
+    let me = Some(crate::knobs::Control::Fader(track));
+    if wheel && s.history.wheel == me && s.history.done == s.history.steps.len() {
         return;
     }
     let Some(m) = crate::mixer::track(s, track) else { return };
     let snap = Snap::Fader(track, m.volume);
     record(s, MIXER_VOLUME, snap);
+    if wheel {
+        s.history.wheel = me;
+    }
+}
+
+/// A mixer track's input, output, record source and monitor mode, as `Snap::TrackIo` holds them.
+fn track_io_of(m: &os_model::MixerTrack) -> [i32; 4] {
+    [m.audio_in, m.audio_out, i32::from(m.rec_source), i32::from(m.monitor)]
+}
+
+/// Before mixer track `track`'s audio input, output, record source or monitor mode changes: a step, "Mixer track audio
+/// input / output".
+pub fn track_io(s: &mut State, track: u16) {
+    let Some(m) = crate::mixer::track(s, track) else { return };
+    let snap = Snap::TrackIo(track, track_io_of(m));
+    record(s, MIXER_TRACK_IO, snap);
 }
 
 /// After Lemon Studio set parameter `index` of plugin instance `key` from `before` to `to` (Type in value, the
@@ -802,13 +836,13 @@ pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
         return;
     }
     let h = &s.history;
-    if wheel && h.wheel == Some(id) && h.done == h.steps.len() {
+    if wheel && h.wheel == Some(crate::knobs::Control::Knob(id)) && h.done == h.steps.len() {
         return;
     }
     let snap = Snap::Knob(id, knob_value(s, id));
     record(s, knob_name(id), snap);
     if wheel {
-        s.history.wheel = Some(id);
+        s.history.wheel = Some(crate::knobs::Control::Knob(id));
     }
 }
 

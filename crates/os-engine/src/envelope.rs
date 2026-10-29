@@ -66,6 +66,11 @@ pub struct Params {
 }
 
 impl Params {
+    /// Seconds of the release stage.
+    pub fn release_seconds(&self) -> f64 {
+        self.release
+    }
+
     /// `None` when the record is switched off.
     pub fn new(e: &Envelope) -> Option<Self> {
         e.enabled.then(|| Params {

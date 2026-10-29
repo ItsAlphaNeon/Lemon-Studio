@@ -68,6 +68,9 @@ pub struct PianoState {
     pub scroll_y: f32,
     /// Horizontal zoom (§3: 96 px per beat in the default floating window).
     pub px_per_beat: f32,
+    /// The horizontal scroll bar's length in ticks, held while an end of its thumb is dragged (spec:
+    /// ui/scroll-bars.md §4): its usual length follows the view, which would move the end away from the mouse.
+    pub bar_span: Option<f32>,
     /// Length of the last note added, moved or resized; 0 = not yet (§8: first note is PPQ/2).
     pub last_len: u32,
     /// The last note clicked or edited in the event panel: new notes take its controls (velocity, pan, release, cutoff,
@@ -122,6 +125,7 @@ impl Default for PianoState {
             scroll_x: 0.0,
             scroll_y: ((TOP_KEY - 72) as f32) * ROW,
             px_per_beat: 96.0,
+            bar_span: None,
             last_len: 0,
             last_controls: None,
             dirty: false,

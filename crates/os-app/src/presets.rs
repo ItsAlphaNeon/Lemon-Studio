@@ -1154,7 +1154,8 @@ mod tests {
         assert_eq!(channel(&app), "808 HiHat", "off: the channel keeps its name");
         // Effect slots: off by default.
         run(&mut app, PCmd::Load(fx, bandpass.clone()));
-        assert_eq!(slot(&app), "Fruity Delay 3", "off: the slot keeps its name");
+        // The slot shows the Lemon effect that plays Delay 3 (`plugins::FL_RECREATIONS`).
+        assert_eq!(slot(&app), "Lemon Delay", "off: the slot keeps its name");
         prefs::set_check(&AUTO_NAME_EFFECT_SLOTS, true);
         run(&mut app, PCmd::Load(fx, chorus));
         assert_eq!(slot(&app), "Chorus");
