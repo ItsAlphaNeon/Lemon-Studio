@@ -382,6 +382,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`lemon-stereo-shaper`](plugins/lemon-stereo-shaper) | Lemon Stereo Shaper effect (VST3 + CLAP) |
 | [`lemon-filter`](plugins/lemon-filter) | Lemon Filter effect (VST3 + CLAP) |
 | [`lemon-flanger`](plugins/lemon-flanger) | Lemon Flanger effect (VST3 + CLAP) |
+| [`lemon-peak-controller`](plugins/lemon-peak-controller) | Lemon Peak Controller: a peak follower and LFO whose outputs drive linked controls (VST3 + CLAP) |
 | [`lemon-phaser`](plugins/lemon-phaser) | Lemon Phaser effect (VST3 + CLAP) |
 | [`pulp-filter`](plugins/pulp-filter) | Pulp Filter effect, a pattern-controlled multi-filter (VST3 + CLAP) |
 | [`press`](plugins/press) | Press effect, a multiband maximiser (VST3 + CLAP) |

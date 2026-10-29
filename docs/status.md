@@ -242,6 +242,11 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   pi, where the original's is a hair off: the flanger still matches FL Studio 2026's exports sample for sample in the
   tests (36 cases), the phaser in 11 of 35 and the rest at least 86 dB below the test signal; the phaser's LFO starts
   as after 512 idle frames, one of the two starts (512 or 1024) FL's exports make
+- Peak Controller: a project's Fruity Peak Controller slots open as Lemon Peak Controller (VST3 and CLAP, Pith editor)
+  and save back unchanged; their controller links (kept byte for byte, formulas included) drive mixer volumes, pans,
+  sends and plugin parameters one tick late, as in the original, within the fader's resolution of FL Studio 2026's
+  exports (93 cases). The link's smoothing is approximated; links can't be made or edited in the app yet, and the
+  links of rack controllers (Envelope and Keyboard Controllers, Control Surface) are kept but not played
 - The Stereo Shaper's difference output plays in the mixer (added to the track it names, from the first tick, without
   delay compensation); Lemon Stereo Shaper as a plugin keeps the setting but has no output for it
 - Lemon Parametric EQ plays FL's Parametric EQ 2 in every quality mode, in a project's mixer slots and as a plugin:
