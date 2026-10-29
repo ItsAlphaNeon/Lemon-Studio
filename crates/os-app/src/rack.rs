@@ -25,6 +25,9 @@ pub const FL_NAME_W: f32 = 82.0;
 pub const MIX_W: f32 = 41.0;
 /// Extra width of loop mode (§15).
 pub const LOOP_W: f32 = 40.0;
+/// The channel button widths the dots drag and Custom give, in percent of [`NAME_W`] (§17).
+pub const NAME_PCT_MIN: u32 = 30;
+pub const NAME_PCT_MAX: u32 = 400;
 /// Row pitch of a zipped channel (§17).
 pub const ZIP_H: f32 = 12.0;
 /// Pixels of vertical drag per step on the pattern length box and the loop boxes (§7, §15).
@@ -199,6 +202,8 @@ pub enum RBox {
     SwingMix,
     /// Color selected ▸ All...: the palette, a swatch colours every selected channel.
     ColorSel,
+    /// Channel button width ▸ Custom: the width in percent (Lemon Studio's design).
+    NameWidth,
 }
 
 /// Rack UI state. Lock, zip, groups, the filter and loop lengths are saved through [`to_model`] / [`from_model`].
@@ -1229,6 +1234,7 @@ pub fn box_text(s: &State, b: RBox) -> String {
         RBox::GroupSel | RBox::NewGroup => format!("Group {}", s.rack.groups.len() + 1),
         RBox::RenameGroup(g) => s.rack.groups.get(g).map(|g| g.name.clone()).unwrap_or_default(),
         RBox::Transpose | RBox::ColorSel => String::new(),
+        RBox::NameWidth => s.rack.name_pct.to_string(),
         RBox::SwingMix => {
             let r = s.rack.sel.first().copied().unwrap_or(s.selected_channel);
             s.project.channels.get(r).map_or(String::new(), |c| format!("{}", (c.misc.swing * 100.0).round()))
@@ -1242,6 +1248,7 @@ pub fn box_caption(s: &State, b: RBox) -> String {
         RBox::GroupSel | RBox::NewGroup | RBox::RenameGroup(_) => "Filter group name".into(),
         RBox::Transpose => "Semitones".into(),
         RBox::SwingMix => "Swing mix (%)".into(),
+        RBox::NameWidth => "Channel button width (%)".into(),
         RBox::ColorSel => format!("Color of {} channel(s)", s.rack.sel.len()),
     }
 }
@@ -1273,6 +1280,14 @@ pub fn box_accept(s: &mut State, b: RBox, text: &str) {
         RBox::SwingMix => {
             if let Ok(v) = text.trim_end_matches('%').trim().parse::<f32>() {
                 swing_selected(s, v / 100.0);
+            }
+        }
+        // The range the dots drag gives.
+        RBox::NameWidth => {
+            if let Ok(v) = text.trim_end_matches('%').trim().parse::<f32>() {
+                if v.is_finite() {
+                    relayout(s, |s| s.rack.name_pct = v.round().clamp(NAME_PCT_MIN as f32, NAME_PCT_MAX as f32) as u32);
+                }
             }
         }
         _ => {}
@@ -1371,6 +1386,9 @@ pub enum RCmd {
     AutoResize(AutoResize),
     ResizeNow,
     NameWidth(u32),
+    /// Channel button width ▸ Custom: a box for the percent (Lemon Studio's design; the original's entry shows the
+    /// dragged width).
+    NameWidthBox,
     SizeToFit,
     AlignLeft(bool),
     ShowMixer,
@@ -1397,7 +1415,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     let widths = [100, 200, 300, 400];
     let mut width: Vec<PItem> = widths.iter().map(|&w| it(format!("{w}%"), RCmd::NameWidth(w)).mark(Mark::Radio(r.name_pct == w))).collect();
     let custom = !widths.contains(&r.name_pct);
-    width.push(PItem::new(if custom { format!("Custom ({}%)", r.name_pct) } else { "Custom".into() }, Cmd::Nothing).mark(Mark::Radio(custom)).off());
+    width.push(it(if custom { format!("Custom ({}%)", r.name_pct) } else { "Custom".into() }, RCmd::NameWidthBox).mark(Mark::Radio(custom)));
     width.push(PItem::sep());
     width.push(it("Size to fit", RCmd::SizeToFit));
     let items = vec![
@@ -2127,6 +2145,10 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             open_box(s, RBox::SwingMix, crate::patterns::box_at_mouse(mouse));
             None
         }
+        RCmd::NameWidthBox => {
+            open_box(s, RBox::NameWidth, crate::patterns::box_at_mouse(mouse));
+            None
+        }
         RCmd::ColorAll => {
             open_box(s, RBox::ColorSel, crate::patterns::box_at_mouse(mouse));
             if let Some(b) = s.pat_ui.name_box.as_mut() {
@@ -2792,6 +2814,37 @@ mod tests {
         s.rack.opts.remove(MUTE_REMOVED);
         set_step(s, 0, 3, false);
         assert!(at(s).is_empty());
+    }
+
+    /// Channel button width ▸ Custom opens a box for the percent: the width takes it, clamped to the dots' range, and
+    /// Custom shows it with its radio; text that is not a number leaves it.
+    #[test]
+    fn custom_channel_button_width() {
+        let mut app = App::new(None);
+        let custom = |app: &App| {
+            let m = options_menu(&app.state, 0.0, 0.0);
+            let w = m.items.iter().find(|i| i.label == "Channel button width").unwrap();
+            w.children.iter().find(|i| i.label.starts_with("Custom")).map(|i| (i.label.to_string(), i.enabled, i.mark.clone())).unwrap()
+        };
+        assert_eq!(custom(&app), ("Custom".to_string(), true, Mark::Radio(false)));
+        let typed = |app: &mut App, text: &str| {
+            run(app, RCmd::NameWidthBox);
+            let b = app.state.pat_ui.name_box.as_mut().expect("the box opens");
+            assert_eq!(b.target, crate::patterns::BoxTarget::Rack(RBox::NameWidth));
+            b.text = text.into();
+            crate::patterns::accept(&mut app.state);
+        };
+        let w = app.state.rack_size.0;
+        typed(&mut app, "250%");
+        assert_eq!(app.state.rack.name_pct, 250);
+        assert_eq!(custom(&app), ("Custom (250%)".to_string(), true, Mark::Radio(true)));
+        assert!(app.state.rack_size.0 > w, "the window widens with the buttons");
+        typed(&mut app, "abc");
+        assert_eq!(app.state.rack.name_pct, 250);
+        typed(&mut app, "1000");
+        assert_eq!(app.state.rack.name_pct, NAME_PCT_MAX);
+        typed(&mut app, "10");
+        assert_eq!(app.state.rack.name_pct, NAME_PCT_MIN);
     }
 
     /// Auto switch display filter: a newly selected channel the filter hides switches the filter to its group (else

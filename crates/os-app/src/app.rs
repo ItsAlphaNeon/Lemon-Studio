@@ -5400,7 +5400,7 @@ impl App {
                 }
                 Drag::RackDots { x0, p0 } => {
                     let w = p0 as f32 / 100.0 * crate::rack::NAME_W + (x - x0);
-                    let pct = (w / crate::rack::NAME_W * 100.0).round().clamp(30.0, 400.0) as u32;
+                    let pct = (w / crate::rack::NAME_W * 100.0).round().clamp(crate::rack::NAME_PCT_MIN as f32, crate::rack::NAME_PCT_MAX as f32) as u32;
                     crate::rack::relayout(&mut self.state, |s| s.rack.name_pct = pct);
                     self.hint = Cow::Owned(format!("Channel button width: {pct}%"));
                     self.invalidate();
