@@ -1355,7 +1355,8 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
     } else if let Some(e) = &s.playlist.edit {
         let t = ui.t;
         let r = Rect::new(e.at.0, e.at.1, 150.0, 20.0);
-        ui.hit(r, Action::Swallow, "Type, Enter accepts, Esc cancels");
+        let hint = if let pl::EditTarget::MixerInsert(_) = e.target { "How many mixer tracks to insert: type a number, Enter inserts, Esc cancels" } else { "Type, Enter accepts, Esc cancels" };
+        ui.hit(r, Action::Swallow, hint);
         ui.c.fill_rect(r, ui.t.s(0x0e1214));
         ui.c.stroke_rrect(r, 0.0, 1.0, t.glyph);
         ui.c.text_clip(Font::new(14), r.x + 4.0, r.y + 2.0, r.w - 8.0, t.text, &e.text);

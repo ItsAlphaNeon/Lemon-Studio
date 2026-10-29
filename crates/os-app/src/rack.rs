@@ -648,19 +648,28 @@ pub fn gradient(s: &mut State) {
         return;
     }
     let (a, b) = (s.project.channels[rows[0]].color, s.project.channels[*rows.last().expect("len >= 2")].color);
-    let n = (rows.len() - 1) as f32;
-    for (i, &r) in rows.iter().enumerate() {
-        let t = i as f32 / n;
-        let c = match (a, b) {
-            (Some(a), Some(b)) if a != b => {
-                let l = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
-                Rgb::new(l(a.r, b.r), l(a.g, b.g), l(a.b, b.b))
-            }
-            _ => crate::playlist::hsl_rgb(300.0 * t, 0.35, 0.45),
-        };
+    for (c, &r) in gradient_colors(a, b, rows.len()).into_iter().zip(&rows) {
         s.project.channels[r].color = Some(c);
         s.project.channels[r].rack.stored_color = Some(c);
     }
+}
+
+/// `k` (2 or more) colours from `a` to `b`, or a hue sweep when they match or either is missing (`gradient`; the
+/// mixer's Gradient color... too).
+pub fn gradient_colors(a: Option<Rgb>, b: Option<Rgb>, k: usize) -> Vec<Rgb> {
+    let n = (k.max(2) - 1) as f32;
+    (0..k)
+        .map(|i| {
+            let t = i as f32 / n;
+            match (a, b) {
+                (Some(a), Some(b)) if a != b => {
+                    let l = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+                    Rgb::new(l(a.r, b.r), l(a.g, b.g), l(a.b, b.b))
+                }
+                _ => crate::playlist::hsl_rgb(300.0 * t, 0.35, 0.45),
+            }
+        })
+        .collect()
 }
 
 /// Ctrl / Alt + click on a LED (§10): solo this channel; the same click again on the soloed channel unmutes all, or,
