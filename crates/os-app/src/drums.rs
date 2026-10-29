@@ -241,11 +241,17 @@ mod tests {
                     assert!(std::path::Path::new(&file).is_file(), "channel {r}: {} -> {file}", l.path);
                 }
             }
+            // The first pad whose samples open (Lemon Studio reads none of a WavPack file whose first block is empty,
+            // like the Breakbeat kick).
+            let decodes = |p: &&lemon_drum_sampler::state::Pad| {
+                p.sounding().all(|(_, l)| os_engine::sample::load_shared(std::path::Path::new(&crate::plugins::resolve_sample(&l.path))).is_ok())
+            };
+            let pad = pads.iter().find(decodes).unwrap_or_else(|| panic!("channel {r}: a pad whose samples open"));
             let inst = a.plugins.hosted[&r].plugin.clone() as SharedInstrument;
             let mut i = inst.lock().unwrap();
-            let key = u8::try_from(pads[0].key).unwrap();
+            let key = u8::try_from(pad.key).unwrap();
             i.note_on(0, key, 100.0 / 128.0);
-            assert!(peak(&mut *i) > 0.01, "channel {r}: pad {:?} on key {key} sounds", pads[0].name);
+            assert!(peak(&mut *i) > 0.01, "channel {r}: pad {:?} on key {key} sounds", pad.name);
         }
         let out = std::env::temp_dir().join(format!("openstudio-drums-breakbeat-{}.flp", std::process::id()));
         let before = a.state.project.clone();
