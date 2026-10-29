@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -4313,6 +4314,7 @@ mod tests {
 
     fn channel() -> Channel {
         Channel {
+            id: os_model::Id::NONE,
             index: 0,
             kind: ChannelKind::Sampler,
             name: None,
@@ -7134,6 +7136,7 @@ mod tests {
         let same = |a: &[f32], b: &[f32], k: f32| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - k * y).abs() < 1e-6);
         // The matrix at zero: what is heard is the difference (the whole input), wherever it goes.
         let shaper = |difference: i32| os_model::SlotPlugin {
+            id: os_model::Id::NONE,
             name: "Fruity Stereo Shaper".into(),
             state: Settings { v: [0, 0, 0, 0, 0, 0, difference, 1] }.to_state(),
         };
@@ -7222,7 +7225,7 @@ mod tests {
         v.extend_from_slice(&[0, 0, 0, 0, key]);
         let mut state = crate::effects::state_of(&v);
         state.push(0);
-        os_model::SlotPlugin { name: "Fruity Limiter".into(), state }
+        os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state }
     }
 
     /// spec: audio/sidechain.md "Settings", "Sidechain input"; plugins/fruity-limiter-dsp.md: a Fruity Limiter on

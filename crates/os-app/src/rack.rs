@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -445,6 +446,7 @@ pub fn set_len(s: &mut State, steps: Option<u32>) {
     let ps = per_step(s);
     let n = s.pattern.max(1);
     let max = max_steps(s);
+    // No undo step, as in FL (measured 2026-10-28).
     crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
     s.piano.dirty = true;
 }
@@ -661,6 +663,14 @@ pub fn gradient(s: &mut State) {
 /// with "Restore previous state after solo" on, puts back the states from before the first solo (a solo moved to
 /// another channel keeps them; spec: ui/settings-choices.md "Miscellaneous"). Locked channels keep their state.
 pub fn solo(s: &mut State, r: usize) {
+    crate::control::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| solo_now(s, r));
+}
+
+/// The undo step of a channel muted, soloed or switched on or off: a knob tweak's, as in FL (none with "Undo knob
+/// tweaks" off).
+pub const MUTE_SOLO: &str = "Channel mute / solo";
+
+fn solo_now(s: &mut State, r: usize) {
     let locked = s.rack.locked.clone();
     let soloed_now = solo_of(s, r);
     // A solo still in effect (the last solo click's shape, untouched since) keeps the states saved when it started.
@@ -730,10 +740,12 @@ fn solo_of(s: &State, r: usize) -> bool {
 }
 
 pub fn toggle_mute(s: &mut State, r: usize) {
-    if let Some(c) = s.project.channels.get_mut(r) {
-        c.enabled = !c.enabled;
-        s.piano.dirty = true;
-    }
+    crate::control::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
+        if let Some(c) = s.project.channels.get_mut(r) {
+            c.enabled = !c.enabled;
+            s.piano.dirty = true;
+        }
+    });
 }
 
 pub fn toggle_lock(s: &mut State, r: usize) {
@@ -879,9 +891,14 @@ pub fn push_channel(s: &mut State, mut ch: os_model::Channel) {
 }
 
 /// `reorder` in the project and the app state: `map` gives each row's new row (`None`: the channel goes).
-fn remap_state(s: &mut State, map: &[Option<usize>]) {
-    let m = |r: usize| map.get(r).copied().flatten();
+pub(crate) fn remap_state(s: &mut State, map: &[Option<usize>]) {
     remap_project(&mut s.project, map);
+    remap_ui(s, map);
+}
+
+/// `remap_state`'s part in the app state, for a project already renumbered (`map` as there).
+pub(crate) fn remap_ui(s: &mut State, map: &[Option<usize>]) {
+    let m = |r: usize| map.get(r).copied().flatten();
     let len = s.project.channels.len().max(1);
     s.rack.remap(&m);
     let keep = |r: usize| m(r).unwrap_or(r.min(len - 1));
@@ -980,13 +997,14 @@ pub fn ask_purge(s: &mut State) -> Option<String> {
     None
 }
 
-/// Delete rows now: the channels, their notes and clips go. One undo step, with the rows' instruments
-/// (`history::delete_channels`).
+/// `delete_rows` as one undo step (their hosted instruments come back with an undo, `control::host`).
+pub fn delete_step(app: &mut App, rows: &[usize]) {
+    crate::control::edit_app(app, crate::history::DELETE_CHANNEL, crate::control::command::Region::Project, |app| delete_rows(app, rows));
+}
+
+/// Delete rows now: the channels, their notes and clips go.
 pub fn delete_rows(app: &mut App, rows: &[usize]) {
     let n = app.state.project.channels.len();
-    let gone: Vec<usize> = rows.iter().copied().filter(|&r| r < n).collect();
-    let back = gone.iter().filter_map(|&r| app.plugin_copy(r).map(|(i, blob)| (r, i, blob))).collect();
-    crate::history::delete_channels(&mut app.state, gone, back);
     let order: Vec<usize> = (0..n).filter(|r| !rows.contains(r)).collect();
     let first = rows.iter().copied().min().unwrap_or(0);
     reorder(app, &order);
@@ -1355,6 +1373,7 @@ fn set_declick(app: &mut App, rows: &[usize], mode: u8) {
         c.sound.declick = mode;
         if c.kind.is_sampler() {
             app.plugins.set_param_named(r, SAMPLER_DECLICK, f64::from(mode));
+            app.state.params.reread(r);
         }
     }
     app.state.piano.dirty = true;
@@ -1590,6 +1609,25 @@ pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
 
 /// Run a rack menu command. Returns a status message.
 pub fn run(app: &mut App, c: RCmd) -> Option<String> {
+    // The commands that change the project are one undo step each (spec: roadmap/control-plane.md); Cut, Paste, Fill
+    // and Rotate record their own.
+    let step = match c {
+        RCmd::RandomColor(_) | RCmd::ColorGradient | RCmd::ColorRandom => Some("Channel color"),
+        RCmd::Clone(_) | RCmd::CloneSel => Some("Clone channel"),
+        RCmd::MoveSel(_) | RCmd::Sort(_) => Some("Move channel"),
+        RCmd::MixerReset(_) | RCmd::AssignFree(_) | RCmd::AssignFreeSel => Some("Channel mixer track"),
+        RCmd::DeclickSel(_) => Some("Channel settings"),
+        RCmd::AddGroup | RCmd::DeleteGroup | RCmd::GroupSel => Some("Channel group"),
+        RCmd::Burn(_) => Some("Burn loops"),
+        _ => None,
+    };
+    if let Some(name) = step {
+        return crate::control::edit_app(app, name, crate::control::command::Region::Project, |app| run_now(app, c));
+    }
+    run_now(app, c)
+}
+
+fn run_now(app: &mut App, c: RCmd) -> Option<String> {
     let mouse = app.mouse;
     let sel: Vec<usize> = app.state.rack.sel.iter().copied().collect();
     match c {
@@ -1786,12 +1824,14 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::MuteSel(mute) => {
-            for &r in &sel {
-                if let Some(c) = s.project.channels.get_mut(r) {
-                    c.enabled = !mute;
+            crate::control::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| {
+                for &r in &sel {
+                    if let Some(c) = s.project.channels.get_mut(r) {
+                        c.enabled = !mute;
+                    }
                 }
-            }
-            s.piano.dirty = true;
+                s.piano.dirty = true;
+            });
             None
         }
         RCmd::TransposeSel => {
@@ -1856,7 +1896,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
     // Channels let go without asking (`ask_delete`) are deleted now.
     let msg = match app.state.rack.delete_now.take() {
         Some(rows) => {
-            delete_rows(app, &rows);
+            delete_step(app, &rows);
             app.state.message.take().or(msg)
         }
         None => msg,

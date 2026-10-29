@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -274,17 +275,17 @@ mod tests {
         pl::run(&mut a, Cmd::InitControl(vol, 0.25));
         assert_eq!(a.state.history.len(), 2);
         assert_eq!(a.state.project.init_controls, vec![rec(vol, 3200)], "a new value replaces the old one");
-        assert_eq!(history::undo(&mut a.state), Some(INITIALIZED));
+        assert_eq!(history::undo(&mut a.state).as_deref(), Some(INITIALIZED));
         assert_eq!(a.state.project.init_controls, vec![rec(vol, 6400)]);
-        assert_eq!(history::undo(&mut a.state), Some(INITIALIZED));
+        assert_eq!(history::undo(&mut a.state).as_deref(), Some(INITIALIZED));
         assert!(a.state.project.init_controls.is_empty());
-        assert_eq!(history::redo(&mut a.state), Some(INITIALIZED));
-        assert_eq!(history::redo(&mut a.state), Some(INITIALIZED));
+        assert_eq!(history::redo(&mut a.state).as_deref(), Some(INITIALIZED));
+        assert_eq!(history::redo(&mut a.state).as_deref(), Some(INITIALIZED));
         assert_eq!(a.state.project.init_controls, vec![rec(vol, 3200)]);
         pl::run(&mut a, Cmd::DeleteInit(vol));
         assert!(a.state.project.init_controls.is_empty());
         assert_eq!(a.state.history.len(), 2, "no step");
-        assert_eq!(history::undo(&mut a.state), Some(INITIALIZED), "undo goes back past the delete");
+        assert_eq!(history::undo(&mut a.state).as_deref(), Some(INITIALIZED), "undo goes back past the delete");
         assert_eq!(a.state.project.init_controls, vec![rec(vol, 6400)]);
     }
 
@@ -299,24 +300,24 @@ mod tests {
         pl::run(&mut a, Cmd::CreateAutomation(t, name, v));
         assert_eq!(a.state.project.init_controls, vec![rec(vol, 10000)]);
         assert_eq!((a.state.history.len(), pl::clips(&a.state).len()), (1, 1));
-        assert_eq!(history::undo(&mut a.state), Some(history::CREATE_AUTOMATION));
+        assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
         assert!(a.state.project.init_controls.is_empty() && pl::clips(&a.state).is_empty());
-        assert_eq!(history::redo(&mut a.state), Some(history::CREATE_AUTOMATION));
+        assert_eq!(history::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
         assert_eq!((a.state.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 10000)], 1));
         // A second clip on the moved knob: its new value replaces the old one; undo brings that back.
         a.state.project.channels[0].volume = 0.5;
         pl::run(&mut a, Cmd::CreateAutomation(vol, "Kick - Channel volume".into(), 0.5));
         assert_eq!(a.state.project.init_controls, vec![rec(vol, 6400)]);
-        assert_eq!(history::undo(&mut a.state), Some(history::CREATE_AUTOMATION));
+        assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
         assert_eq!(a.state.project.init_controls, vec![rec(vol, 10000)]);
-        assert_eq!(history::redo(&mut a.state), Some(history::CREATE_AUTOMATION));
+        assert_eq!(history::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
 
         // Off: the clip only.
         prefs::set_check(&prefs::INIT_CONTROLS, false);
         let (t, name, v) = a.automation_target(&Action::Tempo).unwrap();
         pl::run(&mut a, Cmd::CreateAutomation(t, name, v));
         assert_eq!((a.state.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 6400)], 3));
-        assert_eq!(history::undo(&mut a.state), Some(history::CREATE_AUTOMATION));
+        assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
         assert_eq!((a.state.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 6400)], 2));
         prefs::set_check(&prefs::INIT_CONTROLS, true);
     }

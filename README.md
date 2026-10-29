@@ -85,7 +85,8 @@ Where Lemon Studio stands against what a complete DAW offers:
 | MIDI file import / export | ✅ | Import into a new project, the open one or a piano roll channel (tracks, channels, tempo changes, time signatures, markers); export a pattern or the song's patterns |
 | Note input | 🚧 | Mouse, computer keyboard, MIDI controllers (velocity curves, sustain pedal, pitch bend, aftertouch) and the touch controller; note recording into patterns with loop record, precount and Start on input; step edit |
 | MIDI controllers and sync | ✅ | Link any knob, fader or plugin parameter to a controller (or many at once with Multilink); MIDI clock and time code out, external clock in |
-| Undo | 🚧 | One history for the whole project, with redo and the browser's History: edits, knobs and faders, channels added and deleted, project settings; not yet for a plugin editor's own changes |
+| Undo | 🚧 | One history for the whole project, with redo and the browser's History: edits, knobs and faders, the mixer, channels added and deleted, the tempo and project settings, and plugin parameters, those changed in their own windows too |
+| Scripting and assistants | 🚧 | Scripts, tests and AI assistants read and edit projects over a local socket, every change undoable; see [docs/control-plane.md](docs/control-plane.md) |
 | Audio drivers | 🚧 | WASAPI (shared and exclusive) and ASIO® (output, and inputs for audio recording) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no JACK yet |
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
 | Look and themes | 🚧 | Lemon and Citrus (formerly Classic) skins; 25 built-in themes, your own themes and `.flstheme` files colour either skin, with live adjustments and a colour picker; Lemon plugin editors in the Lemon design only |
@@ -323,6 +324,17 @@ Project-file corpus tests run when `OPENSTUDIO_FLP_CORPUS` points to a text file
 project files are never committed to this repository.
 The watermark test (`cargo test -p watermark`) checks that every source file opens with its header: a copyright line
 for each of its copyright holders, its SPDX licence identifier and the project's name.
+
+### Scripting and assistants
+
+`--control <socket>` lets scripts, tests and AI assistants read and change the open project over a local socket
+(JSON-RPC 2.0), and `--serve <socket> [project.flp]` does the same without a window. Each change is an undo step named
+after the client; clients can be limited to reading or to proposing changes the user accepts. The protocol and its
+commands are in [docs/control-plane.md](docs/control-plane.md).
+
+```bash
+cargo run -p os-app --release -- --control /tmp/lemon.sock path/to/project.flp
+```
 
 ### Command-line tools
 

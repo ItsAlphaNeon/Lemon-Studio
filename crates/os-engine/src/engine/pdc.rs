@@ -634,6 +634,7 @@ mod tests {
 
     fn gate_channel(index: u16, insert: u16) -> Channel {
         Channel {
+            id: os_model::Id::NONE,
             index,
             kind: ChannelKind::Plugin,
             name: None,

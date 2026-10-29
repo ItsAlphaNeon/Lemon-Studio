@@ -663,6 +663,8 @@ impl App {
             s.piano.reset();
             s.playlist.reset();
             s.history.reset();
+            s.control.reset();
+            s.control.event(&crate::control::By::User, "opened", "New project", Vec::new());
             crate::playlist::load_view(s);
             s.rack.reset();
             crate::rack::from_model(s);
@@ -673,14 +675,9 @@ impl App {
             let s = &mut self.state;
             // As every playlist step does (`playlist::snapshot_as`), the arrangement exists before the step.
             crate::playlist::arr_mut(s);
-            let snap = Snap::Several(vec![
-                Snap::Patterns { patterns: s.project.patterns.clone(), current: s.pattern },
-                Snap::Playlist(Box::new(crate::playlist::capture(s))),
-                Snap::Tail(Box::new(history::Tail::now(s, s.project.channels.len()))),
-            ]);
-            history::record(s, IMPORT_STEP, snap);
+            // One undo step through the control plane, as the rack's other channel adds (`control::edit`).
             let n = s.pattern;
-            place(s, imp, o, &name, n);
+            crate::control::edit(s, IMPORT_STEP, crate::control::command::Region::Project, |s| place(s, imp, o, &name, n));
         }
         let s = &mut self.state;
         crate::piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
@@ -1094,7 +1091,7 @@ mod tests {
         let notes = app.state.project.pattern(1).unwrap().notes.len();
         assert_eq!(notes, before.pattern(1).map_or(0, |p| p.notes.len()) + 4);
         let after = app.state.project.clone();
-        assert_eq!(crate::history::undo(&mut app.state), Some(IMPORT_STEP));
+        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(IMPORT_STEP));
         assert_eq!(app.state.project, before);
         crate::history::redo(&mut app.state);
         assert_eq!(app.state.project.channels.len(), after.channels.len());

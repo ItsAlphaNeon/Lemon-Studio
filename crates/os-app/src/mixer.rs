@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -14,6 +15,12 @@ use std::collections::HashMap;
 use os_model::{MixerTrack, Rgb};
 
 use crate::app::{App, State};
+use crate::control::{command::Region, edit};
+
+/// Undo step names of the mixer's edits.
+const ROUTING: &str = "Mixer routing";
+const INSERT: &str = "Insert mixer track";
+const SLOT: &str = "Effect slot";
 use crate::knobs::KnobId;
 use crate::playlist::{Cmd, EditTarget, Mark, PItem, Popup};
 
@@ -266,7 +273,7 @@ pub fn sep_text(sep: f64) -> String {
 }
 
 /// Would a route `src` -> `dst` make a loop (dst already reaches src)?
-fn makes_loop(s: &State, src: u16, dst: u16) -> bool {
+pub(crate) fn makes_loop(s: &State, src: u16, dst: u16) -> bool {
     let mut seen = vec![dst];
     let mut i = 0;
     while i < seen.len() {
@@ -328,33 +335,41 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
         }
         MHit::Polarity(n) => {
             select(s, n, ctrl);
-            let m = track_mut(s, n)?;
-            m.polarity = !m.polarity;
-            changed(s);
+            edit(s, "Mixer track polarity", Region::Track(n), |s| {
+                let m = track_mut(s, n)?;
+                m.polarity = !m.polarity;
+                changed(s);
+                Some(())
+            })?;
             None
         }
         MHit::Swap(n) => {
             select(s, n, ctrl);
-            let m = track_mut(s, n)?;
-            m.swap = !m.swap;
-            changed(s);
+            edit(s, "Mixer track swap", Region::Track(n), |s| {
+                let m = track_mut(s, n)?;
+                m.swap = !m.swap;
+                changed(s);
+                Some(())
+            })?;
             None
         }
-        MHit::Route(dst) => route(s, dst, ctrl, shift),
+        MHit::Route(dst) => edit(s, ROUTING, Region::Project, |s| route(s, dst, ctrl, shift)),
         MHit::Unroute(dst) => {
             let cur = s.selected_mixer;
-            let m = track_mut(s, cur)?;
-            m.routes.retain(|&r| r != dst);
-            m.send_levels.retain(|&(d, _)| d != dst);
-            changed(s);
-            Some(format!("{} no longer sends to {}", name(s, cur), name(s, dst)))
+            edit(s, ROUTING, Region::Track(cur), |s| {
+                let m = track_mut(s, cur)?;
+                m.routes.retain(|&r| r != dst);
+                m.send_levels.retain(|&(d, _)| d != dst);
+                changed(s);
+                Some(format!("{} no longer sends to {}", name(s, cur), name(s, dst)))
+            })
         }
         MHit::Add => {
-            let n = add_track(s, None);
+            let n = edit(s, INSERT, Region::Project, |s| add_track(s, None));
             Some(format!("Added {}", name(s, n)))
         }
         MHit::AddAfter => {
-            let n = add_track(s, Some(s.selected_mixer + 1));
+            let n = edit(s, INSERT, Region::Project, |s| add_track(s, Some(s.selected_mixer + 1)));
             Some(format!("Added {}", name(s, n)))
         }
         MHit::Options => {
@@ -381,10 +396,13 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
         }
         MHit::SlotLed(i) => {
             let t = s.selected_mixer;
-            let m = track_mut(s, t)?;
-            let k = usize::from(i);
-            m.slot_on[k] = !m.slot_on[k];
-            changed(s);
+            edit(s, SLOT, Region::Track(t), |s| {
+                let m = track_mut(s, t)?;
+                let k = usize::from(i);
+                m.slot_on[k] = !m.slot_on[k];
+                changed(s);
+                Some(())
+            })?;
             None
         }
         MHit::Input => {
@@ -625,13 +643,15 @@ pub fn right(app: &mut App, h: MHit) -> bool {
         MHit::SlotLed(i) => {
             // Solo the slot: the track's other slots are bypassed (§7).
             let t = s.selected_mixer;
-            if let Some(m) = track_mut(s, t) {
-                let only = (0..10).all(|k| m.slot_on[k] == (k == usize::from(i)));
-                for k in 0..10 {
-                    m.slot_on[k] = only || k == usize::from(i);
+            edit(s, SLOT, Region::Track(t), |s| {
+                if let Some(m) = track_mut(s, t) {
+                    let only = (0..10).all(|k| m.slot_on[k] == (k == usize::from(i)));
+                    for k in 0..10 {
+                        m.slot_on[k] = only || k == usize::from(i);
+                    }
+                    changed(s);
                 }
-                changed(s);
-            }
+            });
         }
         MHit::Polarity(n) | MHit::Swap(n) => select(s, n, false),
         _ => return false,
@@ -1019,7 +1039,7 @@ fn move_track(s: &mut State, n: u16, d: i32) -> Option<String> {
 }
 
 /// Deletes track `n`: later tracks move one left, a default track is added at the end (§6.1 Delete).
-fn delete_track(s: &mut State, n: u16) -> Option<String> {
+pub(crate) fn delete_track(s: &mut State, n: u16) -> Option<String> {
     if n == 0 || n > inserts(s) {
         return Some("The master track can't be deleted".into());
     }
@@ -1293,6 +1313,32 @@ fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
 // Commands
 
 pub fn run(app: &mut App, c: MCmd) -> Option<String> {
+    // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
+    let step = match &c {
+        MCmd::Color(..) | MCmd::RandomColor(_) => Some("Mixer track color"),
+        MCmd::Reset(_) => Some("Mixer track reset"),
+        MCmd::ResetRouting(_) | MCmd::UnrouteTo(_) | MCmd::Route { .. } | MCmd::RouteChannels { .. } => Some(ROUTING),
+        MCmd::Trim { .. } | MCmd::Delete(_) => Some("Delete mixer track"),
+        MCmd::MoveLeft(_) | MCmd::MoveRight(_) => Some("Move mixer track"),
+        MCmd::InsertOne(_) => Some(INSERT),
+        MCmd::AddEffect(..) => Some("Add effect"),
+        MCmd::SlotDelete(_) => Some("Remove effect"),
+        MCmd::SlotMove(..) => Some("Move effect"),
+        MCmd::RemoveTeslasNow => Some("Remove audio editors"),
+        _ => None,
+    };
+    if let Some(name) = step {
+        return crate::control::edit_app(app, name, Region::Project, |app| run_now(app, c));
+    }
+    // A slot's sidechain input is the track's own (its slot's saved state).
+    if let MCmd::SlotSidechain(..) = c {
+        let t = app.state.selected_mixer;
+        return crate::control::edit_app(app, "Sidechain input", Region::Track(t), |app| run_now(app, c));
+    }
+    run_now(app, c)
+}
+
+fn run_now(app: &mut App, c: MCmd) -> Option<String> {
     let at = app.mouse;
     let s = &mut app.state;
     let msg = match c {
@@ -1630,6 +1676,8 @@ impl App {
                 FxReq::Delete { track, slot } => {
                     let key = crate::plugins::fx_key(track, slot);
                     if self.plugins.hosted.contains_key(&key) {
+                        // Kept for an undo that brings the slot back (`control::host`).
+                        self.plugins.keep(key);
                         self.plugins.drop_key(key);
                         relink = true;
                     }
@@ -2077,7 +2125,7 @@ mod tests {
         track_mut(&mut a.state, 2).unwrap().name = Some("Kick".into());
         assert_eq!(inputs(&a.state, 1), [2, 3]);
         let plugin = os_model::PluginRef { format: "clap".into(), name: "Comp".into(), path: "C:/Comp.clap".into(), ..Default::default() };
-        track_mut(&mut a.state, 1).unwrap().slots[0] = Some(os_model::SlotPlugin { name: wrapper::WRAPPER.into(), state: wrapper::encode(None, &plugin) });
+        track_mut(&mut a.state, 1).unwrap().slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: wrapper::WRAPPER.into(), state: wrapper::encode(None, &plugin) });
         let labels = |a: &App| sidechain_items(&a.state, 0).iter().map(|i| (i.label.to_string(), i.mark == Mark::Radio(true))).collect::<Vec<_>>();
         assert_eq!(labels(&a), [("None".into(), true), ("1. Kick".into(), false), ("2. Insert 3".into(), false)]);
         assert_eq!(run(&mut a, MCmd::SlotSidechain(0, 2)), None);
@@ -2086,7 +2134,7 @@ mod tests {
         assert_eq!(wrapper::decode(&state(&a)), Some(plugin));
         assert_eq!(labels(&a)[2].1, true);
         assert_eq!(crate::project_plugins::slot_ports(&a.state.project, 1, 0), (0, 2));
-        track_mut(&mut a.state, 1).unwrap().slots[1] = Some(os_model::SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
+        track_mut(&mut a.state, 1).unwrap().slots[1] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: vec![] });
         assert!(run(&mut a, MCmd::SlotSidechain(1, 1)).is_some());
     }
 
@@ -2172,7 +2220,7 @@ mod tests {
         a.state.project.channels[4].mixer_track = 9;
         track_mut(&mut a.state, 9).unwrap().name = Some("Nine".into());
         // 12 holds an effect, 11 feeds nothing but 9 sends to 13.
-        track_mut(&mut a.state, 12).unwrap().slots[0] = Some(os_model::SlotPlugin { name: "FX".into(), state: Vec::new() });
+        track_mut(&mut a.state, 12).unwrap().slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "FX".into(), state: Vec::new() });
         track_mut(&mut a.state, 9).unwrap().routes = vec![13];
         assert_eq!(trim_list(&a.state, false), vec![4, 6, 7, 8, 10, 11, 14, 15, 16]);
         assert_eq!(trim_list(&a.state, true), vec![4, 6, 7, 8, 10, 11, 12, 14, 15, 16]);
@@ -2237,7 +2285,7 @@ mod tests {
         use os_model::SlotPlugin;
         let mut a = app();
         (a.state.file, a.state.path) = (None, None);
-        let fx = |name: &str, s: u8| Some(SlotPlugin { name: name.into(), state: vec![s; 4] });
+        let fx = |name: &str, s: u8| Some(SlotPlugin { id: os_model::Id::NONE, name: name.into(), state: vec![s; 4] });
         track_mut(&mut a.state, 2).unwrap().slots[0] = fx("Test FX", 2);
         track_mut(&mut a.state, 3).unwrap().slots[0] = fx("Test FX", 3);
         track_mut(&mut a.state, 4).unwrap().slots[1] = fx("Other FX", 4);
@@ -2334,7 +2382,7 @@ mod tests {
         assert_eq!(run(&mut a, MCmd::RemoveTeslas).as_deref(), Some("No audio editors in the mixer"));
         a.audio_editor(0, false);
         a.audio_editor(3, false);
-        track_mut(&mut a.state, 4).unwrap().slots[2] = Some(os_model::SlotPlugin { name: crate::plugins::EDISON_FILE_NAME.into(), state: Vec::new() });
+        track_mut(&mut a.state, 4).unwrap().slots[2] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::plugins::EDISON_FILE_NAME.into(), state: Vec::new() });
         a.state.mixer.pending.clear();
         assert_eq!(run(&mut a, MCmd::RemoveTeslas), None);
         let Some(Popup { items, .. }) = a.state.playlist.popup.clone() else { panic!("no question") };

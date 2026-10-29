@@ -161,18 +161,31 @@ pub fn sampler_param(misc: &ChannelMisc, m: M) -> Option<(&'static str, f64)> {
 }
 
 /// A Misc tab edit of rack row `row`: the channel model, its hosted Lemon Sampler (root / fine), then playback.
+/// No undo step, as in FL (measured 2026-10-28).
 pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
     let Some(ch) = app.state.project.channels.get_mut(row) else { return };
     put(&mut ch.misc, m, v);
+    sync(app, row, &[m]);
+    app.state.piano.dirty = true;
+    app.invalidate();
+}
+
+/// Rack row `row`'s Lemon Sampler takes the Misc values it plays again (after an undo put them back).
+pub fn follow(app: &mut crate::app::App, row: usize) {
+    sync(app, row, &M::ALL);
+    app.invalidate();
+}
+
+/// Rack row `row`'s Lemon Sampler takes Misc values `ms` it plays.
+fn sync(app: &mut crate::app::App, row: usize, ms: &[M]) {
+    let Some(ch) = app.state.project.channels.get(row).filter(|c| c.kind.is_sampler()) else { return };
     let misc = ch.misc;
-    let sampler = ch.kind.is_sampler();
-    if sampler {
+    for &m in ms {
         if let Some((name, plain)) = sampler_param(&misc, m) {
             app.plugins.set_param_named(row, name, plain);
         }
     }
-    app.state.piano.dirty = true;
-    app.invalidate();
+    app.state.params.reread(row);
 }
 
 /// The list menu of a Misc value (chord list, number boxes) at canvas point (x, y); the current value is ticked. A knob or

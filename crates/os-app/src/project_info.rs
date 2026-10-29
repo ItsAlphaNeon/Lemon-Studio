@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -21,6 +22,7 @@ use os_ui::{Color, Font, Rect};
 use winit::keyboard::{Key, NamedKey};
 
 use crate::app::{Action, App, State, Ui};
+use crate::control::command::{Region, SONG_INFO};
 use crate::dialog::Field;
 use crate::views::settings::{self, InfoEdit, InfoField};
 
@@ -317,12 +319,12 @@ impl App {
     pub(crate) fn set_genre(&mut self, genre: Option<&'static str>) -> Option<String> {
         let s = &mut self.state;
         accept_info(s);
-        let before = s.project.info.clone();
-        let value = &mut s.project.info.genre;
-        if value.as_deref().unwrap_or("") != genre.unwrap_or("") {
-            *value = genre.map(str::to_string);
-        }
-        crate::history::project_info(s, before);
+        crate::control::edit(s, SONG_INFO, Region::Settings, |s| {
+            let value = &mut s.project.info.genre;
+            if value.as_deref().unwrap_or("") != genre.unwrap_or("") {
+                *value = genre.map(str::to_string);
+            }
+        });
         self.invalidate();
         Some(format!("Genre: {}", genre.unwrap_or("(none)")))
     }
@@ -466,13 +468,12 @@ pub const GENRES: [&str; 56] = [
 pub(crate) fn accept_info(s: &mut State) {
     let Some(e) = s.settings.info_edit.take() else { return };
     let text = if e.field.multiline() { e.text.text } else { e.text.text.trim().to_string() };
-    let before = s.project.info.clone();
-    let value = e.field.get_mut(&mut s.project.info);
-    if value.as_deref().unwrap_or("") != text {
-        *value = (!text.is_empty()).then_some(text);
-    }
-    // One step, "Project info", when the text changed.
-    crate::history::project_info(s, before);
+    crate::control::edit(s, SONG_INFO, Region::Settings, |s| {
+        let value = e.field.get_mut(&mut s.project.info);
+        if value.as_deref().unwrap_or("") != text {
+            *value = (!text.is_empty()).then_some(text);
+        }
+    });
 }
 
 /// Home / End / Up / Down in Comments go by its lines (between line breaks): Up and Down keep the caret's column, in
@@ -549,6 +550,11 @@ mod tests {
         assert_eq!(app.state.project.info.title.as_deref(), Some("Song"), "trimmed");
         assert!(app.unsaved());
         assert_eq!(app.title(), "[Song]");
+        // The accepted box is one undo step.
+        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(crate::control::command::SONG_INFO));
+        assert!(app.state.project.info.title.is_none());
+        assert_eq!(crate::history::redo(&mut app.state).as_deref(), Some(crate::control::command::SONG_INFO));
+        assert_eq!(app.state.project.info.title.as_deref(), Some("Song"));
     }
 
     /// Esc drops the edit; an emptied box clears its field; an unchanged one changes nothing.
@@ -788,7 +794,7 @@ mod tests {
         p.channels[1].plugin = Some(String::new());
         p.channels[2].plugin = None;
         (p.channels[0].mixer_track, p.channels[1].mixer_track, p.channels[2].mixer_track) = (1, 1, 0);
-        let slot = |name: &str| Some(SlotPlugin { name: name.into(), state: Vec::new() });
+        let slot = |name: &str| Some(SlotPlugin { id: os_model::Id::NONE, name: name.into(), state: Vec::new() });
         let mut m = MixerTrack::new(0);
         m.slots[0] = slot("Fruity Limiter");
         m.slots[3] = slot("");
@@ -827,7 +833,7 @@ mod tests {
         assert_eq!(mixer_tracks(&p), 1, "a channel on the master counts the master; routes to the master do not");
         // A named track holding an effect, which nothing routes to: not counted.
         p.mixer[2].name = Some("Bus".into());
-        p.mixer[2].slots[0] = Some(SlotPlugin { name: "Fruity Limiter".into(), state: Vec::new() });
+        p.mixer[2].slots[0] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: Vec::new() });
         assert_eq!(mixer_tracks(&p), 1);
         // A send: insert 1 routes to insert 3 too, so 3 counts, but not 1 for its own routes.
         p.mixer[1].routes = vec![0, 3];

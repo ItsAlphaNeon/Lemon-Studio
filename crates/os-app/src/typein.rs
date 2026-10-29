@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -161,17 +162,16 @@ fn set(s: &mut State, t: Target, v: f64) {
             crate::history::knob(s, k, false);
             s.set_knob(k, v as f32);
         }
-        Target::Fader(m) => {
-            crate::history::fader(s, m, false);
+        Target::Fader(m) => crate::control::knob_edit(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(m), |s| {
             if let Some(t) = crate::mixer::track_mut(s, m) {
                 t.volume = Some(v.clamp(0.0, 1.0));
                 s.piano.dirty = true;
             }
-        }
+        }),
         Target::Param(key, index) => {
             let before = crate::params::param_value(s, key, index);
             if crate::params::set_param_value(s, key, index, v) {
-                crate::history::param(s, key, index, before, v);
+                crate::control::param_set(s, key, index, before, v);
             } else {
                 s.message = Some("The plugin did not take the value".into());
             }
