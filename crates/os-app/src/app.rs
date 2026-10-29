@@ -18420,7 +18420,7 @@ mod tests {
         app.state.playlist.popup = Some(mx::track_menu(&app.state, 3, 500.0, 200.0));
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(dir.join("mx_menu.png")).unwrap();
-        app.state.playlist.popup = Some(mx::slot_menu(&app.state, 0, 1500.0, 150.0));
+        app.state.playlist.popup = Some(mx::slot_menu(&app, 0, 1500.0, 150.0));
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(dir.join("mx_slot_menu.png")).unwrap();
     }

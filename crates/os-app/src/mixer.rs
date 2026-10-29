@@ -402,7 +402,8 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
         }
         MHit::SlotArrow(i) => {
             let t = s.selected_mixer;
-            s.playlist.popup = Some(if slot_name(s, t, i).is_some() { slot_menu(s, i, at.0, at.1) } else { effect_menu(s, i, at.0, at.1) });
+            let m = if slot_name(s, t, i).is_some() { slot_menu(app, i, at.0, at.1) } else { effect_menu(&app.state, i, at.0, at.1) };
+            app.state.playlist.popup = Some(m);
             None
         }
         MHit::SlotLed(i) => {
@@ -712,7 +713,8 @@ pub fn right(app: &mut App, h: MHit) -> bool {
         // The slot's plugin menu, like a left click (spec: ui/plugin-menu.md §1).
         MHit::SlotArrow(i) => {
             let t = s.selected_mixer;
-            s.playlist.popup = Some(if slot_name(s, t, i).is_some() { slot_menu(s, i, at.0, at.1) } else { effect_menu(s, i, at.0, at.1) });
+            let m = if slot_name(s, t, i).is_some() { slot_menu(app, i, at.0, at.1) } else { effect_menu(&app.state, i, at.0, at.1) };
+            app.state.playlist.popup = Some(m);
         }
         MHit::SlotName(i) => {
             let t = s.selected_mixer;
@@ -1334,8 +1336,9 @@ pub fn effect_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// Filled slot ▸ (§7.2).
-pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
+/// Filled slot ▸ (§7.2). Its Presets section works as in the plugin's window menu.
+pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
+    let s = &app.state;
     let mx = |c: MCmd| Cmd::Mixer(c);
     let replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), true);
     let items = vec![
@@ -1373,7 +1376,9 @@ pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
         PItem::sub("Scaling", vec![PItem::not_yet("100%")]),
         PItem::not_yet("Help"),
     ];
-    Popup { x, y, items, sub: None, scroll: [0; 2] }
+    let mut menu = Popup { x, y, items, sub: None, scroll: [0; 2] };
+    crate::presets::fill_window_menu(app, crate::plugins::fx_key(s.selected_mixer, slot), &mut menu);
+    menu
 }
 
 /// The tracks routed into track `n`, in track order: its inputs, numbered from 1 (spec: audio/sidechain.md "Settings").
@@ -1997,6 +2002,21 @@ pub fn fx_info(p: &os_model::Project, ui: &MixerUi, key: usize) -> Option<crate:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The slot menu's Presets section works as in the plugin's window menu: the list, Browse presets and Save preset
+    /// as... on the slot's plugin (§7.2).
+    #[test]
+    fn slot_menu_presets_act_on_the_slot() {
+        let mut app = App::new(None);
+        app.state.selected_mixer = 2;
+        let key = crate::plugins::fx_key(2, 3);
+        let m = slot_menu(&app, 3, 0.0, 0.0);
+        let cmd = |label: &str| m.items.iter().find(|i| i.label == label && !i.head).map(|i| (i.enabled, i.cmd.clone())).unwrap();
+        assert_eq!(cmd("Browse presets"), (true, Cmd::Preset(crate::presets::PCmd::Browse(key))));
+        assert_eq!(cmd("Save preset as..."), (true, Cmd::Preset(crate::presets::PCmd::SaveAs(key))));
+        let p = m.items.iter().find(|i| i.label == "Presets" && !i.head).unwrap();
+        assert!(p.enabled, "a submenu of the plugin's presets (empty here: no plugin is hosted)");
+    }
 
     fn app() -> App {
         let mut app = App::new(None);
