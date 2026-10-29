@@ -74,7 +74,7 @@ pub fn armed_file(s: &State, track: u16) -> String {
     file_name(&crate::backup::project_name(s.path.as_deref()), chrono::Local::now().naive_local(), &crate::mixer::name(s, track))
 }
 
-fn folder(s: &State) -> std::path::PathBuf {
+pub(crate) fn folder(s: &State) -> std::path::PathBuf {
     crate::data_folder::folder(s).or_else(crate::app::theme_dir).unwrap_or_else(std::env::temp_dir).join("Recorded")
 }
 
