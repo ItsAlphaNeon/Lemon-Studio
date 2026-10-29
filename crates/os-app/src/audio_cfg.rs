@@ -1,8 +1,10 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 Samrat Dutta
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Audio device settings (Settings > Audio): the output device, sample rate and buffer length. They are kept in the
+//! Audio device settings (Settings > Audio): the output device, the input device (`input`, for the mixer tracks'
+//! inputs when the output is not an ASIO driver), sample rate and buffer length. They are kept in the
 //! user folder (`audio.txt`) and every stream the transport opens uses them; a device that is gone, a rate it does not
 //! offer or a buffer length it refuses falls back to the system's default device and that device's own rate and buffer.
 //! The device is a Windows (ALSA, Core Audio) one or, on Windows, an ASIO driver (`asio`): for a driver, `None` and a
@@ -31,6 +33,9 @@ pub struct AudioCfg {
     /// A Windows device in exclusive mode (Lemon Studio alone on it), on Linux an ALSA device opened directly; ignored
     /// for an ASIO driver and on macOS.
     pub exclusive: bool,
+    /// Input device by name (`None`: the system's default input, followed when it changes); ignored for an ASIO
+    /// driver, whose inputs are its own.
+    pub input: Option<String>,
 }
 
 /// `AudioCfg::buffer` for "Smallest": the shortest period the device takes in exclusive mode, at whatever rate it opens
@@ -43,7 +48,7 @@ pub const DEFAULT_BUFFER: Option<u32> = if cfg!(target_os = "linux") { Some(512)
 
 impl Default for AudioCfg {
     fn default() -> AudioCfg {
-        AudioCfg { asio: false, device: None, rate: None, buffer: DEFAULT_BUFFER, exclusive: false }
+        AudioCfg { asio: false, device: None, rate: None, buffer: DEFAULT_BUFFER, exclusive: false, input: None }
     }
 }
 
@@ -58,6 +63,8 @@ pub enum Set {
     Buffer(Option<u32>),
     /// Exclusive (`true`) or shared mode for Windows devices (Linux: ALSA, or the sound server).
     Mode(bool),
+    /// The input device (`None`: the system's default).
+    Input(Option<String>),
 }
 
 /// Sample rates the settings offer.
@@ -89,10 +96,11 @@ impl AudioCfg {
             Set::Mode(on) => {
                 // Linux: the sound server's devices are not ALSA's; the new mode starts on its default.
                 if cfg!(target_os = "linux") && on != self.exclusive {
-                    self.device = None;
+                    (self.device, self.input) = (None, None);
                 }
                 self.exclusive = on;
             }
+            Set::Input(d) => self.input = d,
         }
         self
     }
@@ -108,7 +116,7 @@ impl AudioCfg {
     }
 
     /// `key=value` lines: `host` (`asio`: the device is an ASIO driver), `mode` (`exclusive`; else shared), `device`,
-    /// `rate`, `buffer` (`device`: the device's own; `smallest`: `SMALLEST`); anything else is ignored.
+    /// `input`, `rate`, `buffer` (`device`: the device's own; `smallest`: `SMALLEST`); anything else is ignored.
     pub fn parse(text: &str) -> AudioCfg {
         let mut c = AudioCfg::default();
         for line in text.lines() {
@@ -118,6 +126,7 @@ impl AudioCfg {
                 "host" => c.asio = v.eq_ignore_ascii_case("asio"),
                 "mode" => c.exclusive = v.eq_ignore_ascii_case("exclusive"),
                 "device" if !v.is_empty() => c.device = Some(v.to_string()),
+                "input" if !v.is_empty() => c.input = Some(v.to_string()),
                 "rate" => c.rate = v.parse().ok().filter(|&r| r >= 8000),
                 "buffer" if v == "device" => c.buffer = None,
                 "buffer" if v == "smallest" => c.buffer = Some(SMALLEST),
@@ -138,6 +147,9 @@ impl AudioCfg {
         }
         if let Some(d) = &self.device {
             s += &format!("device={d}\n");
+        }
+        if let Some(d) = &self.input {
+            s += &format!("input={d}\n");
         }
         if let Some(r) = self.rate {
             s += &format!("rate={r}\n");
@@ -254,6 +266,20 @@ pub fn devices(cfg: &AudioCfg) -> (Vec<String>, Option<String>) {
     (list, host.default_output_device().map(|d| device_name(&d)))
 }
 
+/// `cfg`'s host's input devices by name, and the default one's name.
+pub fn input_devices(cfg: &AudioCfg) -> (Vec<String>, Option<String>) {
+    let host = host(cfg);
+    let list = host.input_devices().map(|ds| ds.filter(listed).map(|d| device_name(&d)).collect()).unwrap_or_default();
+    (list, host.default_input_device().map(|d| device_name(&d)))
+}
+
+/// The input device `cfg` records from: the one chosen, else (none chosen, or it is gone) the system's default.
+pub fn input_device(cfg: &AudioCfg) -> Option<cpal::Device> {
+    let host = host(cfg);
+    let chosen = cfg.input.as_ref().and_then(|want| find(host.input_devices().ok()?, want));
+    chosen.or_else(|| host.default_input_device())
+}
+
 /// What a stream opens.
 pub struct Output {
     /// The audio system the device is on (cpal's name for it).
@@ -352,8 +378,13 @@ mod tests {
 
     #[test]
     fn settings_text_round_trips() {
-        let c = AudioCfg { asio: false, device: Some("Speakers (USB Audio)".into()), rate: Some(48000), buffer: Some(256), exclusive: false };
+        let c = AudioCfg { asio: false, device: Some("Speakers (USB Audio)".into()), rate: Some(48000), buffer: Some(256), exclusive: false, input: None };
         assert_eq!(AudioCfg::parse(&c.text()), c);
+        // An input device chosen, and back to the default.
+        let i = c.clone().with(Set::Input(Some("Microphone (USB Audio)".into())));
+        assert!(i.text().contains("input=Microphone (USB Audio)\n"), "{}", i.text());
+        assert_eq!(AudioCfg::parse(&i.text()), i);
+        assert_eq!(i.with(Set::Input(None)), c);
         // Exclusive mode and its smallest period; a file without `mode` is shared.
         let x = c.clone().with(Set::Mode(true)).with(Set::Device(c.device.clone())).with(Set::Buffer(Some(SMALLEST)));
         assert_eq!(x.text(), "mode=exclusive\ndevice=Speakers (USB Audio)\nrate=48000\nbuffer=smallest\n");
