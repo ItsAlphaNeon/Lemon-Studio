@@ -55,7 +55,8 @@ Greyed-out controls and partial features. These can land alongside the blockers.
 
 - [ ] **Event editor window.** Edit events is greyed out in five menus (playlist, channel rack, parameter menus)
 - [ ] **Undo for a plugin editor's own changes**
-- [ ] **Undo for mixer track commands.** Mute, routing, names and slots are not in the history yet
+- [x] **Undo for mixer track commands.** Routing, names, colours, resets, effect slots, audio input / output and
+  latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
 - [ ] **Mixer right-click menus.** 43 entries greyed out on 2026-10-29: the routing menu, groups, Render to wave

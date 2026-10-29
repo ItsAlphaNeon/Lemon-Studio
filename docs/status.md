@@ -332,9 +332,10 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Covers the piano roll, the playlist, step-sequencer edits and knob turns (channel, main, mixer panning and
   stereo separation, effect mix, send levels, swing), sample loads, the project's initial values, PATTERNS ▸ Split
   by channel and ADD's audio and automation clip channels
-- The mixer: faders (a drag is one step, a typed value too), mute, polarity and swap buttons, the equaliser graph,
-  routing, colours, names, effect slots (adding, removing, moving, their lights) and adding, moving, deleting and
-  trimming tracks
+- The mixer: faders (a drag is one step, a typed value too), polarity and swap buttons, the equaliser graph,
+  routing, colours, names, resets, effect slots (adding, removing, moving, naming, their lights, sidechain inputs),
+  audio inputs and outputs, record source, monitoring, latency settings, and adding, moving, deleting and trimming
+  tracks. A track's mute and solo make no step, as in FL Studio
 - The channel rack: generators added, at the bottom or inserted higher up (the plugin picker, F8, ADD, Insert, a
   browser drop; undone, the instance is kept and comes back with a redo), Replace (with the old instrument's state),
   colours, names, cloning, moving, sorting, deleting (with notes, clips and the instruments'
