@@ -59,13 +59,13 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
-- [ ] **Mixer right-click menus.** 43 entries greyed out on 2026-10-29: the routing menu, groups, Render to wave
+- [ ] **Mixer right-click menus.** 41 entries greyed out on 2026-10-29: the routing menu, groups, Render to wave
   file, spare states, smart disable ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [ ] **Playlist right-click menus.** 36 entries greyed out on 2026-10-29: key markers, Add two..., quantized song
   jumps, the Start / Stop recording markers' punch ([playlist.rs](../crates/os-app/src/playlist.rs))
 - [ ] **Channel rack right-click menus.** 25 entries greyed out on 2026-10-29: Type in value, Burn selected loops to
   pattern, instrument tracks, Advanced looping ([rack.rs](../crates/os-app/src/rack.rs))
-- [ ] **Main menu bar.** 24 of its 136 entries greyed out on 2026-10-29: 13 in TOOLS, 5 in VIEW, 4 in HELP, 2 in ADD
+- [ ] **Main menu bar.** 22 of its 136 entries greyed out on 2026-10-29: 13 in TOOLS, 5 in VIEW, 4 in HELP
   ([menus.rs](../crates/os-app/src/views/menus.rs))
 - [ ] **TOOLS ▸ Audio logger and Dump to audio editor.** FL keeps the master's last minutes in memory; not measured
   yet. Tesla's rolling recording goes with it: at its time limit Tesla stops, where Edison keeps the last minutes
@@ -78,7 +78,10 @@ Greyed-out controls and partial features. These can land alongside the blockers.
 - [ ] **Recording settings page.** The only settings page that doesn't work yet
 - [x] **Editable mixer latency settings.** The input clock, the track latency combo and the strip's latency clock
   (right click) set them in ms, samples or beats, one undo step each
-- [ ] **Browser: Favorites, the plugin database and Browser find**
+- [x] **Browser: Favorites, the plugin database and Browser find.** A Favorite check in the row menus of files and
+  plugins, starred rows and the Favorites tab; the Plugin database by category, and Installed by format; search finds
+  files in closed folders through a folder index (Enable indexing, Re-index, Expand folders). Tags and the "New"
+  folder come later
 - [ ] **JACK on Linux**
 - [x] **ASIO output pairs.** Every track has an output menu with the pairs of the driver's first 16 outputs, and the
   master plays on the pair chosen for it (#182)
