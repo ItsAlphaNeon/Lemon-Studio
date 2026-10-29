@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(ch.mixer_track, 1);
         let path = std::path::PathBuf::from(ch.sample_path.clone().unwrap());
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(path.parent().unwrap().ends_with("Recorded") && name.ends_with("_Insert 1.wav"), "{name}");
+        assert!(path.parent().unwrap().ends_with("Recorded") && name.ends_with("_Bus 1.wav"), "{name}");
         let clip = app.state.project.arrangement().unwrap().clips.last().unwrap().clone();
         assert_eq!(clip.position, 96);
         assert!(app.state.history.entries().iter().any(|e| e.1 == crate::one_click::RECORDED));
