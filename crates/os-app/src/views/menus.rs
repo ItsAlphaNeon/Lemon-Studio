@@ -95,6 +95,7 @@ pub enum Sub {
     Import,
     Effect,
     Toolbars,
+    Arrange,
     OneClick,
     DumpLog,
     AudioLog,
@@ -184,7 +185,7 @@ pub const STEP_EDIT_LABEL: &str = "Step edit";
 /// OPTIONS ▸ Switches: Multilink to controllers (spec: ui/remote-control.md §4).
 pub const MULTILINK_LABEL: &str = "Multi MIDI learn";
 /// VIEW > Into workspace: windows partly outside the workspace move fully back in (`App::move_into_workspace`). A plain
-/// entry after "Arrange windows", whose submenu isn't built (spec: ui/settings-choices.md "Advanced: Don't limit
+/// entry after "Arrange windows" (spec: ui/settings-choices.md "Advanced: Don't limit
 /// windows to screen (2026-10-16)").
 pub const INTO_WORKSPACE_LABEL: &str = "Into workspace";
 /// Index of the OPTIONS menu.
@@ -314,7 +315,7 @@ const VIEW_ITEMS: &[Item] = &[
     it("Close all plugin windows", "Alt+F12").on().cmd(MenuCmd::CloseAll(crate::app::CloseAll::Plugins)),
     it("Close all unfocused windows", "Ctrl+F12").on().cmd(MenuCmd::CloseAll(crate::app::CloseAll::Unfocused)),
     it("Align all channel editors", "Shift+F12"),
-    it("Arrange windows", "").sub(),
+    it("Arrange windows", "").sub().cmd(MenuCmd::Sub(Sub::Arrange)),
     it(INTO_WORKSPACE_LABEL, "").on().cmd(MenuCmd::IntoWorkspace),
     it("Background", "").sub(),
     head("Browser"),
@@ -573,6 +574,8 @@ pub fn sub_items(cmd: MenuCmd) -> Option<fn(&State) -> Vec<crate::playlist::PIte
         Sub::ClipsSel => |_| crate::rack::stretch_items(false),
         // spec: ui/toolbar-menu.md §8
         Sub::Toolbars => toolbar_items,
+        // spec: ui/menu-submenus.md §2
+        Sub::Arrange => crate::arrange::items,
     })
 }
 
@@ -1072,7 +1075,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, LOGGER_SETTINGS_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", "Arrange windows", ONE_CLICK_LABEL, DUMP_LOG_LABEL, LOGGER_SETTINGS_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Fade out only", "Transient", "Transient (tail continues)", "Standard (tail continues)", "Smooth (tail continues)", "Crossfade (tail continues)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");

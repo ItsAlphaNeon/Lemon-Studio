@@ -74,7 +74,7 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   recording markers' punch ([playlist.rs](../crates/os-app/src/playlist.rs))
 - [ ] **Channel rack right-click menus.** 14 entries greyed out on 2026-10-29: Type in value, Burn selected loops to
   pattern, instrument tracks, Advanced looping, Loop starter, Change icon ([rack.rs](../crates/os-app/src/rack.rs))
-- [ ] **Main menu bar.** 19 of its 136 entries greyed out on 2026-10-29: 10 in TOOLS, 5 in VIEW, 4 in HELP
+- [ ] **Main menu bar.** 18 of its 136 entries greyed out on 2026-10-29: 10 in TOOLS, 4 in VIEW, 4 in HELP
   ([menus.rs](../crates/os-app/src/views/menus.rs))
 - [x] **TOOLS ▸ Audio logger and Dump to audio editor.** Enabled (on by default, as in FL Studio) keeps the last 1 to
   10 minutes of what the device plays, the header showing the memory used; Dump puts them into the master track's

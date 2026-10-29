@@ -10,6 +10,7 @@
 #![cfg_attr(not(plugin_windows), allow(dead_code))]
 
 mod app;
+mod arrange;
 mod audio_cfg;
 mod auto_close;
 mod autoscroll;
