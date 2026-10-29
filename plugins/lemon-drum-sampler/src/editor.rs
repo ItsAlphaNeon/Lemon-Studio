@@ -8,7 +8,7 @@
 //! sample onto a pad (the open dialog, or a file dropped on the pad). Every edit changes the saved state the voices
 //! play.
 //!
-// spec: plugins/lemon-drum-sampler.md §4, plugins/host-link.md
+// spec: plugins/lemon-drum-sampler.md §3, plugins/host-link.md
 
 use std::any::Any;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};

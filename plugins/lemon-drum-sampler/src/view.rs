@@ -7,7 +7,7 @@
 //! at the bottom left), and the cards of the chosen pad (its key, cut groups and levels) and of its chosen layer (its
 //! sample, velocity range and levels).
 //!
-// spec: plugins/lemon-drum-sampler.md §4, ui/lemon-design.md §11.1
+// spec: plugins/lemon-drum-sampler.md §3, ui/lemon-design.md §11.1
 
 use os_theme::design::lemon as brand;
 use os_theme::Palette;

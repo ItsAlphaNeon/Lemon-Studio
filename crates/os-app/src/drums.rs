@@ -7,7 +7,7 @@
 //! saving writes the state it plays back into the channel byte for byte, so the file keeps its own plugin with its
 //! pads and samples.
 //!
-// spec: plugins/lemon-drum-sampler.md §5 (app integration); plugins/fpc.md §1
+// spec: plugins/lemon-drum-sampler.md §4 (app integration); plugins/fpc.md §1
 
 use os_model::{Channel, ChannelKind, Project};
 

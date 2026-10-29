@@ -7,7 +7,7 @@
 //! kept as its bytes. Writing the tree back gives the bytes it was read from, so what Lemon Drum Sampler does not change
 //! stays as the file had it.
 //!
-// spec: plugins/fpc.md §1 – §3
+// spec: plugins/fpc.md §1
 
 /// The head of every state seen.
 pub const HEAD: [u8; 4] = [0x03, 0xe4, 0x84, 0x1e];
@@ -227,7 +227,7 @@ pub fn new_layer(path: &str) -> Node {
     Node::Tree(P_LAYER, vec![Node::Leaf(L_PATH, utf16(path)), Node::Leaf(L_SETTINGS, s), Node::Leaf(L_END, Vec::new())])
 }
 
-/// An envelope record as a new pad stores it (spec: plugins/fpc.md §2.3): three head ints (the last is the number of
+/// An envelope record as a new pad stores it (spec: plugins/fpc.md §1): three head ints (the last is the number of
 /// points), 24 bytes per point (f64 time, f64 level, f32 tension, u32 flags), then nine tail ints.
 struct Env {
     head: [i32; 3],
