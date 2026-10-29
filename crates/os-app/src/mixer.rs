@@ -1268,7 +1268,7 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
                 PItem::new("Route selected channels starting from this track", mx(MCmd::RouteChannels { dst: n, spread: true })).key("Shift+Ctrl+L"),
             ],
         ),
-        PItem::not_yet("Track routing"),
+        track_routing(s, n),
         PItem::sub(
             "Select",
             vec![
@@ -1307,6 +1307,22 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
         PItem::head("CPU"),
         PItem::not_yet("Allow threaded processing").mark(Mark::Check(true)),
     ]
+}
+
+/// Track routing ▸ (Lemon Studio's design; greyed in the original's menu as captured, its entries not seen): the ▲ menu's
+/// four entries (spec: ui/mixer.md §5) for the other selected tracks into track `n`. Greyed when no other track is
+/// selected (the master never sends).
+fn track_routing(s: &State, n: u16) -> PItem {
+    let mx = |only, side| Cmd::Mixer(MCmd::Route { dst: n, only, side });
+    let items = vec![
+        PItem::new("Route selected tracks to this track", mx(false, false)),
+        PItem::new("Route selected tracks to this track only", mx(true, false)),
+        PItem::sep(),
+        PItem::new("Sidechain selected tracks to this track", mx(false, true)),
+        PItem::new("Sidechain selected tracks to this track only", mx(true, true)),
+    ];
+    let it = PItem::sub("Track routing", items);
+    if is_selected(s, n) && selected(s).iter().any(|&t| t != n && t != 0) { it } else { it.off() }
 }
 
 /// Trim unused tracks ▸ (spec: ui/mixer-track-commands.md §6): each choice with the number of tracks it deletes.
@@ -2699,5 +2715,30 @@ mod tests {
         let mut t = form(&a).tracks;
         t.sort_unstable();
         assert_eq!(t, [2, 4]);
+    }
+
+    /// Track routing ▸ (Lemon Studio's design): greyed until another track is selected; then the ▲ menu's four entries
+    /// route or sidechain the other selected tracks into this one, one undo step each.
+    #[test]
+    fn track_routing_routes_the_selected_tracks_here() {
+        let mut a = app();
+        let entry = |a: &App, n: u16| track_items(&a.state, n).into_iter().find(|i| i.label == "Track routing").unwrap();
+        select(&mut a.state, 5, false);
+        assert!(!entry(&a, 5).enabled, "only this track selected");
+        select(&mut a.state, 2, true);
+        select(&mut a.state, 3, true);
+        select(&mut a.state, 5, true);
+        let e = entry(&a, 5);
+        assert!(e.enabled);
+        let labels: Vec<&str> = e.children.iter().filter(|i| !i.sep).map(|i| i.label.as_ref()).collect();
+        assert_eq!(labels, ["Route selected tracks to this track", "Route selected tracks to this track only", "Sidechain selected tracks to this track", "Sidechain selected tracks to this track only"]);
+        assert!(!entry(&a, 9).enabled, "a track outside the selection");
+        let steps = a.state.history.at();
+        crate::playlist::run(&mut a, e.children[0].cmd.clone());
+        assert_eq!((send(&a.state, 2, 5), send(&a.state, 3, 5), send(&a.state, 2, 0)), (Some(0.8), Some(0.8), Some(0.8)));
+        assert_eq!(a.state.history.at(), steps + 1);
+        crate::playlist::run(&mut a, e.children[4].cmd.clone());
+        assert_eq!((send(&a.state, 2, 5), send(&a.state, 2, 0)), (Some(0.0), None), "sidechained only: the master route goes");
+        assert_eq!(send(&a.state, 5, 5), None, "this track does not route to itself");
     }
 }
