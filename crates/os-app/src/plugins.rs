@@ -194,6 +194,10 @@ pub enum Request {
 /// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
 pub const FX_KEY: usize = 1 << 24;
 
+/// The smallest a resizable CLAP or VST3 editor is made by the frame's edges (logical px).
+#[cfg(plugin_windows)]
+const RESIZE_MIN: (f32, f32) = (240.0, 80.0);
+
 /// Plugin editor windows open at once under "Limit the number of open plugin editors" (FL's hint: 25; spec:
 /// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
 pub const MAX_EDITORS: usize = 25;
@@ -1168,6 +1172,9 @@ impl Plugins {
                 if let (Some(w), false, Some((ew, eh))) = (&h.window, h.linked(), p.editor_size()) {
                     let k = w.scale();
                     w.set_editor_size((ew as f32 / k, eh as f32 / k));
+                    // A CLAP or VST3 editor the host may resize: the frame's edges and maximize resize it, as a
+                    // resizable Lemon plugin's do.
+                    w.set_resizable(p.can_resize_editor().then_some(RESIZE_MIN));
                 }
             }
             #[cfg(plugin_windows)]
@@ -1192,6 +1199,17 @@ impl Plugins {
                         }
                         (FrameEvent::Resize(ew, eh), Some(l)) => {
                             l.set_size(*ew, *eh);
+                            continue;
+                        }
+                        // A CLAP or VST3 editor takes the size it can nearest the one asked for; the frame follows it.
+                        (FrameEvent::Resize(ew, eh), None) => {
+                            if let Ok(mut p) = h.plugin.try_lock() {
+                                let k = w.scale();
+                                let px = |v: u32| (v as f32 * k).round() as u32;
+                                if let Some((tw, th)) = p.resize_editor(px(*ew), px(*eh)) {
+                                    w.set_editor_size((tw as f32 / k, th as f32 / k));
+                                }
+                            }
                             continue;
                         }
                         _ => {}

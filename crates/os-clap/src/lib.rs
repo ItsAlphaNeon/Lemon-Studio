@@ -1276,6 +1276,31 @@ impl Plugin {
         (px(w), px(h))
     }
 
+    /// The open editor can be resized by the host (`clap_plugin_gui.can_resize`).
+    pub fn can_resize_editor(&self) -> bool {
+        self.editor && unsafe { (*self.gui).can_resize.is_some_and(|f| f(self.plugin)) }
+    }
+
+    /// Resizes the open editor to about `w` x `h` pixels: the plugin adjusts the request to a size it can take
+    /// (`adjust_size`), then takes it (`set_size`). Returns that size in pixels.
+    pub fn resize_editor(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        if !self.can_resize_editor() {
+            return None;
+        }
+        let from_px = |v: u32| (v as f32 / self.editor_scale).round().max(1.0) as u32;
+        let (mut w, mut h) = (from_px(w), from_px(h));
+        unsafe {
+            let g = &*self.gui;
+            if let Some(adjust) = g.adjust_size {
+                adjust(self.plugin, &mut w, &mut h);
+            }
+            if !g.set_size.is_some_and(|f| f(self.plugin, w, h)) {
+                return None;
+            }
+        }
+        Some(self.to_px((w, h)))
+    }
+
     pub fn close_editor(&mut self) {
         if self.editor {
             unsafe {
@@ -1688,6 +1713,14 @@ impl os_host::Plugin for Plugin {
 
     fn close_editor(&mut self) {
         Plugin::close_editor(self)
+    }
+
+    fn can_resize_editor(&self) -> bool {
+        Plugin::can_resize_editor(self)
+    }
+
+    fn resize_editor(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        Plugin::resize_editor(self, w, h)
     }
 
     fn save_state(&self) -> Option<Vec<u8>> {
