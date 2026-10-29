@@ -1828,9 +1828,61 @@ pub struct TimeMarker {
     pub name: String,
     pub numerator: u8,
     pub denominator: u8,
-    /// Event 101: a key marker's scale, kept as read (0 for the other kinds).
+    /// Event 101: a key marker's scale as the notes it leaves out, bit 11 − pitch class (C = bit 11); 0 for the
+    /// other kinds (spec: flp/events/playlist.md "Key markers").
     pub scale: u16,
+    /// Event 46: a key marker's root note, 0 = C … 11 = B.
+    pub root: u8,
+    /// Event 45: 1 on a "Default" key marker, else 0 (meaning not known; kept as read).
+    pub flag: u8,
+    /// Event 168: a key marker's place in [`SCALES`]; −1 Default, −2 Black notes.
+    pub scale_index: i32,
 }
+
+/// The Add key marker list's scales in its order, each with the notes it leaves out at root C in event 101's bits
+/// (bit 11 − pitch class; spec: flp/events/playlist.md "Key markers", read from the original's saves).
+pub const SCALES: [(&str, u16); 37] = [
+    ("Major (Ionian)", 0x52A),
+    ("Major Bebop", 0x522),
+    ("Major Bulgarian", 0x592),
+    ("Major Hexatonic", 0x52B),
+    ("Major Pentatonic", 0x56B),
+    ("Major Persian", 0x316),
+    ("Major Polymode", 0x494),
+    ("Minor Harmonic", 0x4A6),
+    ("Minor Hungarian", 0x4C6),
+    ("Minor Melodic", 0x4AA),
+    ("Minor Natural (Aeolian)", 0x4A5),
+    ("Minor Neapolitan", 0x2A6),
+    ("Minor Pentatonic", 0x6AD),
+    ("Minor Polymode", 0x125),
+    ("Minor Romanian", 0x4C9),
+    ("Other Arabic", 0x326),
+    ("Other Bebop Dominant", 0x528),
+    ("Other Blues", 0x68D),
+    ("Other Blues Nonatonic", 0x409),
+    ("Other Diminished", 0x492),
+    ("Other Dorian", 0x4A9),
+    ("Other Eastern", 0x4A4),
+    ("Other Egyptian", 0x5AD),
+    ("Other Enigmatic", 0x354),
+    ("Other Hirajoshi", 0x4E7),
+    ("Other Iwato", 0x39D),
+    ("Other Japanese Insen", 0x3AD),
+    ("Other Locrian", 0x295),
+    ("Other Locrian Super", 0x255),
+    ("Other Lydian", 0x54A),
+    ("Other Mixolydian", 0x529),
+    ("Other Neapolitan", 0x2AA),
+    ("Other Phrygian", 0x2A5),
+    ("Other Phrygian Dominant", 0x325),
+    ("Other Piongio", 0x5A9),
+    ("Other Prometheus", 0x559),
+    ("Other Whole Tone", 0x555),
+];
+
+/// Root note names as the key markers write them.
+pub const NOTE_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 impl TimeMarker {
     /// None: a plain marker.
@@ -1847,7 +1899,26 @@ impl TimeMarker {
     pub const KEY: u8 = 12;
 
     pub fn new(position: u32, name: &str) -> Self {
-        TimeMarker { position, kind: Self::PLAIN, name: name.into(), numerator: 4, denominator: 4, scale: 0 }
+        TimeMarker { position, kind: Self::PLAIN, name: name.into(), numerator: 4, denominator: 4, scale: 0, root: 0, flag: 0, scale_index: 0 }
+    }
+
+    /// The key marker Add key marker ▸ adds (spec: ui/playlist.md §7a): `scale` is a place in [`SCALES`], −1 for
+    /// Default, −2 for Black notes. The name and events are the original's: "D Major (Ionian)" with the scale's notes
+    /// turned to D; Default keeps the root, leaves out every note and sets event 45; Black notes is always C's major.
+    pub fn key(position: u32, root: u8, scale: i32) -> Self {
+        let root = root % 12;
+        let (name, root, mask, flag) = match scale {
+            -1 => ("Default".to_string(), root, 0xFFF, 1),
+            -2 => ("Black notes".to_string(), 0, SCALES[0].1, 0),
+            i => {
+                let (label, m) = SCALES[i.clamp(0, SCALES.len() as i32 - 1) as usize];
+                // A note n semitones up is bit 11 − n: turning the scale up rotates the bits down.
+                let m = u32::from(m);
+                let r = u32::from(root);
+                (format!("{} {label}", NOTE_NAMES[usize::from(root)]), root, ((m >> r | m << (12 - r)) & 0xFFF) as u16, 0)
+            }
+        };
+        TimeMarker { kind: Self::KEY, scale: mask, root, flag, scale_index: scale, ..TimeMarker::new(position, &name) }
     }
 
     /// The marker at timebase `to` instead of `from` ([`Project::set_ppq`]).

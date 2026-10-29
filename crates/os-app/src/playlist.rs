@@ -257,6 +257,13 @@ pub enum Cmd {
     AddJumpMarker,
     MarkerEveryMenu,
     MarkerEvery(u32),
+    /// Add two... (§7a): the base-name box, then "<base> -  start" and "<base> -  end" at the time selection's ends.
+    AddTwoMarkers,
+    /// Add key marker ▸ (§7a): its two-column list as a menu of its own, a root note (the list stays open) and a scale
+    /// (`os_model::SCALES` index, −1 Default, −2 Black notes), which adds the key marker at the song position.
+    KeyMarkerMenu,
+    KeyRoot(u8),
+    AddKeyMarker(i32),
     AddSignature,
     PlaceLoop,
     DeleteMarkers,
@@ -522,6 +529,8 @@ pub enum EditTarget {
     NewMarker(u32),
     /// Add one every n bars: the base name of "<base> #1", "<base> #2" … (§7a).
     MarkerBase(u32),
+    /// Add two...: the base name of the markers at the time selection's start and end (§7a).
+    MarkerTwo(u32, u32),
     PointValue(u16, usize),
     PatternName(u16),
     /// Mixer track name (spec: ui/mixer.md §2) and a mixer slot's plugin name (§7).
@@ -585,6 +594,10 @@ pub struct PlaylistState {
     /// The ▸ menu's Quantize song jumps (§7a): a move of the song position while the song plays waits for the next
     /// beat (1), bar (2), 2, 4 or 8 bars (3 to 5); 0 = Off. Kept for the session only (Lemon Studio's choice).
     pub jump_quantize: u8,
+    /// Add key marker ▸ (§7a): the Root note radio (0 = C) and the scale last added (a place in `os_model::SCALES`,
+    /// −1 Default, −2 Black notes), which the list checks. Kept for the session only (Lemon Studio's choice).
+    pub key_root: u8,
+    pub key_scale: i32,
     /// Time selection (ticks).
     pub range: Option<(u32, u32)>,
     pub clipboard: Vec<Clip>,
@@ -639,6 +652,8 @@ impl Default for PlaylistState {
             track: 0,
             pos: 0,
             jump_quantize: 0,
+            key_root: 0,
+            key_scale: -2,
             range: None,
             clipboard: Vec::new(),
             overlay: None,
@@ -1324,15 +1339,33 @@ pub fn clip_at(s: &State, g: &PGeom, x: f32, y: f32) -> Option<usize> {
     clips(s).iter().enumerate().rev().find(|(_, c)| g.clip_rect(c).contains(x, y)).map(|(i, _)| i)
 }
 
-/// The playlist's snap setting with Main read as the global snap (§4). Events and Markers are not available here.
+/// The playlist's snap setting with Main read as the global snap (§4); Events and Markers have no unit, as (none).
 pub fn grid_snap(s: &State) -> Snap {
-    s.playlist.snap.grid(s.global_snap.now).unwrap_or(Snap::Line)
+    s.playlist.snap.grid(s.global_snap.now).unwrap_or(Snap::None)
+}
+
+/// Events and Markers catch a target this close (the piano roll's 5 px, ui/piano-snap.md §3).
+const CATCH_PX: f32 = 5.0;
+
+/// What Events and Markers catch in the playlist (Lemon Studio's reading of the piano roll's rule): the starts and
+/// ends of the arrangement's clips (`skip`: clips being dragged), or its time markers; the one nearest `tick` within
+/// 5 px.
+fn catch(s: &State, g: &PGeom, tick: f32, skip: &[usize]) -> Option<u32> {
+    let targets: Vec<u32> = match s.playlist.snap {
+        EditorSnap::Events => clips(s).iter().enumerate().filter(|(i, _)| !skip.contains(i)).flat_map(|(_, c)| [c.position, c.end()]).collect(),
+        EditorSnap::Markers => markers(s).iter().map(|m| m.position).collect(),
+        _ => return None,
+    };
+    targets.into_iter().map(|t| (t, (t as f32 - tick).abs() * g.ppt)).filter(|&(_, px)| px <= CATCH_PX).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(t, _)| t)
 }
 
 /// Where a click at `tick` lands (§4): the nearest unit (Cell: the start of the cell it is in), the tick under the
-/// pointer for (none). Alt: no snapping.
+/// pointer for (none); under Events and Markers a clip edge or marker within 5 px, else the tick. Alt: no snapping.
 pub fn snap_place(s: &State, g: &PGeom, tick: f32, alt: bool) -> u32 {
     let t = tick.max(0.0);
+    if !alt && let Some(c) = catch(s, g, t, &[]) {
+        return c;
+    }
     let sn = grid_snap(s);
     if alt || sn == Snap::None {
         return t as u32;
@@ -1347,8 +1380,20 @@ fn snap_down(s: &State, g: &PGeom, tick: f32, alt: bool) -> u32 {
     if alt {
         return t;
     }
+    if let Some(c) = catch(s, g, tick.max(0.0), &[]) {
+        return c;
+    }
     let u = grid_snap(s).ticks(g.ppq, g.bar_w);
     t - t % u
+}
+
+/// A drag's delta for the edge at `from` (a moved clip's start, a resized edge): under Events and Markers the edge goes
+/// to a clip edge or marker within 5 px (`skip`: the dragged clips); otherwise [`snap_delta`].
+fn snap_edge(s: &State, g: &PGeom, from: u32, dt: f32, alt: bool, skip: &[usize]) -> i64 {
+    match catch(s, g, from as f32 + dt, skip) {
+        Some(c) if !alt => i64::from(c) - i64::from(from),
+        _ => snap_delta(s, g, dt, alt),
+    }
 }
 
 /// Snap a tick delta to the nearest snap unit.
@@ -2385,7 +2430,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Zoom on selection", Cmd::ZoomSelection).key("Shift+5"),
             ],
         ),
-        PItem::sub("Time markers", time_marker_items()),
+        PItem::sub("Time markers", time_marker_items(s)),
         PItem::sub("Quantize song jumps", jump_items(s)),
         PItem::sep(),
         PItem::new("Reset empty tracks", Cmd::ResetEmptyTracks),
@@ -2394,17 +2439,18 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
 }
 
 /// The ▸ menu's Time markers submenu (§7a), in FL's order. FL's Ctrl+T for Add auto is not bound: in Lemon Studio
-/// Ctrl+T switches the typing keyboard. Add two... and Add key marker are not built yet. Add one every opens its list
-/// as a menu of its own (a submenu holds no submenus here).
-fn time_marker_items() -> Vec<PItem> {
+/// Ctrl+T switches the typing keyboard. Add two... is greyed without a time selection, as in FL. Add one every and
+/// Add key marker open their lists as menus of their own (a submenu holds no submenus here).
+fn time_marker_items(s: &State) -> Vec<PItem> {
+    let two = PItem::new("Add two...", Cmd::AddTwoMarkers);
     vec![
         PItem::new("Add one...", Cmd::AddMarker).key("Alt+T"),
         PItem::new("Add auto", Cmd::AddAutoMarker),
-        PItem::not_yet("Add two..."),
+        if s.playlist.range.is_some() { two } else { two.off() },
         PItem { children: every_items(), ..PItem::new("Add one every", Cmd::MarkerEveryMenu) },
         PItem::new("Add jump to next bar", Cmd::AddJumpMarker),
         PItem::new("Add time signature change...", Cmd::AddSignature).key("Shift+Alt+T"),
-        PItem { children: vec![PItem::not_yet("Root note"), PItem::not_yet("Scale")], ..PItem::not_yet("Add key marker") },
+        PItem { children: key_items(s), ..PItem::new("Add key marker", Cmd::KeyMarkerMenu) },
         PItem::new("Place loop", Cmd::PlaceLoop).key("Shift+T"),
         PItem::new("Delete", Cmd::DeleteMarkers),
         PItem::new("Change to marker loop", Cmd::ToMarkerLoop),
@@ -2432,19 +2478,31 @@ pub(crate) fn jump_unit(s: &State) -> Option<u32> {
     }
 }
 
+/// Add key marker ▸ (§7a), FL's two columns: "Root note" with C … B (radio), then "Scale" with Default, Black notes
+/// and the scale list; the scale last added is checked.
+pub(crate) fn key_items(s: &State) -> Vec<PItem> {
+    let pl = &s.playlist;
+    let mut items = vec![PItem::head("Root note")];
+    items.extend(os_model::NOTE_NAMES.iter().enumerate().map(|(k, n)| PItem::new(*n, Cmd::KeyRoot(k as u8)).mark(Mark::Radio(pl.key_root == k as u8))));
+    items.extend([PItem::col(), PItem::head("Scale")]);
+    let check = |k: i32| Mark::Check(pl.key_scale == k);
+    items.extend([PItem::new("Default", Cmd::AddKeyMarker(-1)).mark(check(-1)), PItem::new("Black notes", Cmd::AddKeyMarker(-2)).mark(check(-2)), PItem::sep()]);
+    items.extend(os_model::SCALES.iter().enumerate().map(|(k, (n, _))| PItem::new(*n, Cmd::AddKeyMarker(k as i32)).mark(check(k as i32))));
+    items
+}
+
 /// Add one every ▸ (§7a): every bar, 2, 4 or 8 bars.
 fn every_items() -> Vec<PItem> {
     [(1, "Bar"), (2, "2 bars"), (4, "4 bars"), (8, "8 bars")].into_iter().map(|(n, l)| PItem::new(l, Cmd::MarkerEvery(n))).collect()
 }
 
-/// The magnet's Snap menu and the ▸ menu's Snap submenu (§4): Main, Line, Cell, (none) to Bar; Events and Markers
-/// are not available yet.
+/// The magnet's Snap menu and the ▸ menu's Snap submenu (§4): Main, Line, Cell, (none) to Bar, Events and Markers.
 fn snap_items(s: &State) -> Vec<PItem> {
     let now = s.playlist.snap;
     let radio = |p: EditorSnap| PItem::new(p.label(), Cmd::Snap(p)).mark(Mark::Radio(now == p));
     let mut items = vec![radio(EditorSnap::Main), PItem::sep(), radio(EditorSnap::Grid(Snap::Line)), radio(EditorSnap::Grid(Snap::Cell)), PItem::sep()];
     items.extend(Snap::MENU.iter().filter(|sn| !matches!(sn, Snap::Line | Snap::Cell)).map(|&sn| radio(EditorSnap::Grid(sn))));
-    items.extend([PItem::sep(), PItem::not_yet("Events"), PItem::not_yet("Markers")]);
+    items.extend([PItem::sep(), radio(EditorSnap::Events), radio(EditorSnap::Markers)]);
     items
 }
 
@@ -3248,7 +3306,8 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
     let g = PGeom::new(s, grid);
     match d {
         PlDrag::Move { x0, y0, orig, .. } => {
-            let mut dt = snap_delta(s, &g, (x - x0) / g.ppt, alt);
+            let skip: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
+            let mut dt = orig.first().map_or(0, |(_, c)| snap_edge(s, &g, c.position, (x - x0) / g.ppt, alt, &skip));
             let min_pos = orig.iter().map(|(_, c)| i64::from(c.position)).min().unwrap_or(0);
             dt = dt.max(-min_pos);
             let dk = i32::from(g.track_at(y)) - i32::from(g.track_at(y0));
@@ -3265,7 +3324,8 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             s.piano.dirty = true;
         }
         PlDrag::ResizeR { x0, orig } => {
-            let dt = snap_delta(s, &g, (x - x0) / g.ppt, alt);
+            let skip: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
+            let dt = orig.first().map_or(0, |(_, c)| snap_edge(s, &g, c.end(), (x - x0) / g.ppt, alt, &skip));
             let min = if alt { 1 } else { grid_snap(s).ticks(g.ppq, g.bar_w) } as i64;
             for &(i, o) in &orig {
                 let len = (i64::from(o.length) + dt).max(min) as u32;
@@ -3275,7 +3335,8 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             }
         }
         PlDrag::ResizeL { x0, orig } => {
-            let dt = snap_delta(s, &g, (x - x0) / g.ppt, alt);
+            let skip: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
+            let dt = orig.first().map_or(0, |(_, c)| snap_edge(s, &g, c.position, (x - x0) / g.ppt, alt, &skip));
             for &(i, o) in &orig {
                 let dt = dt.clamp(-i64::from(o.position), i64::from(o.length) - 1);
                 let (pos, len) = ((i64::from(o.position) + dt) as u32, (i64::from(o.length) - dt) as u32);
@@ -3754,7 +3815,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::TrackName(t) => track_name(s, t),
         EditTarget::ArrangementName => arrangement_name(s),
         EditTarget::MarkerName(i) => markers(s).get(i).map(|m| m.name.clone()).unwrap_or_default(),
-        EditTarget::NewMarker(_) | EditTarget::MarkerBase(_) => String::new(),
+        EditTarget::NewMarker(_) | EditTarget::MarkerBase(_) | EditTarget::MarkerTwo(..) => String::new(),
         EditTarget::PointValue(ch, i) => {
             let v = s.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.value);
             match s.project.automation(ch).and_then(|a| a.target()).map(target::decode) {
@@ -3802,6 +3863,12 @@ pub fn commit_edit(s: &mut State) {
             let base = if text.is_empty() { "Marker".to_string() } else { text };
             add_every(s, n, &base);
         }
+        EditTarget::MarkerTwo(a, b) => {
+            // FL's names, two spaces included: "Sec -  start", "Sec -  end" (measured).
+            let base = if text.is_empty() { "Marker".to_string() } else { text };
+            add_marker(s, TimeMarker::new(a, &format!("{base} -  start")));
+            add_marker(s, TimeMarker::new(b, &format!("{base} -  end")));
+        }
         EditTarget::PointValue(ch, i) => {
             if let Some(v) = parse_value(s, ch, &text) {
                 let beat = s.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.beat);
@@ -3842,7 +3909,7 @@ pub fn commit_edit(s: &mut State) {
 /// Run a menu / shortcut command. Returns a status message, if any.
 pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid = app.pl_grid();
-    app.state.playlist.popup = None;
+    let was = app.state.playlist.popup.take();
     // Commands that need the whole app.
     match cmd {
         Cmd::Browser(b) => return app.browser_cmd(b),
@@ -3911,6 +3978,19 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::MarkerEveryMenu => {
             let (x, y) = app.mouse;
             app.state.playlist.popup = Some(Popup { x, y, items: every_items(), sub: None, scroll: [0; 2] });
+            app.invalidate();
+            return None;
+        }
+        // The key marker list opens as a menu of its own; a root note keeps it open where it was, as in FL.
+        Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => {
+            if let Cmd::KeyRoot(r) = cmd {
+                app.state.playlist.key_root = r % 12;
+            }
+            let (x, y) = match (&was, cmd) {
+                (Some(p), Cmd::KeyRoot(_)) if p.sub.is_none() => (p.x, p.y),
+                _ => app.mouse,
+            };
+            app.state.playlist.popup = Some(Popup { x, y, items: key_items(&app.state), sub: None, scroll: [0; 2] });
             app.invalidate();
             return None;
         }
@@ -4087,7 +4167,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -4274,6 +4354,21 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::MarkerEvery(n) => {
             let at = grid.map_or((600.0, 200.0), |g| (g.x + 40.0, g.y));
             start_edit(s, EditTarget::MarkerBase(n), at);
+            None
+        }
+        Cmd::AddTwoMarkers => {
+            let (a, b) = s.playlist.range?;
+            let at = grid.map_or((600.0, 200.0), |g| (PGeom::new(s, g).x_of(a as f32), g.y));
+            start_edit(s, EditTarget::MarkerTwo(a, b), at);
+            None
+        }
+        Cmd::AddKeyMarker(k) => {
+            // At the song position (measured: with it at bar 5, and at a time selection's start, which the song
+            // position follows), named after the root and scale; one undo step.
+            snapshot(s);
+            s.playlist.key_scale = k;
+            let pos = s.playlist.pos;
+            add_marker(s, TimeMarker::key(pos, s.playlist.key_root, k));
             None
         }
         Cmd::PlaceLoop | Cmd::PlaceLoopAt(_) => {
