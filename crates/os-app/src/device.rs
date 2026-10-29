@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 Samrat Dutta
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -36,7 +37,7 @@ mod asio;
 mod wasapi;
 #[cfg(target_os = "linux")]
 mod sound_server;
-mod system_input;
+pub(crate) mod system_input;
 
 /// Tests leave the sound server's cards alone, but for the one that checks they are given back.
 static HEAL_IN_TESTS: AtomicBool = AtomicBool::new(false);
@@ -610,6 +611,15 @@ impl OutputDevice {
         if !want {
             (o.input, o.input_failed) = (None, false);
             return None;
+        }
+        // Another input device chosen, or another system default while none is: the stream moves to it.
+        let now = system_input::info().map(|i| i.name);
+        if o.input.as_ref().is_some_and(|i| now.as_ref().is_some_and(|n| *n != i.name)) {
+            (o.input, o.input_failed) = (None, false);
+        }
+        // Another input device chosen after one failed to open: that one is tried.
+        if system_input::take_retry() {
+            o.input_failed = false;
         }
         if o.input.is_some() || o.input_failed {
             return None;
