@@ -498,6 +498,8 @@ pub fn fill_window_menu(app: &App, key: usize, menu: &mut Popup) {
             "Presets" if !it.head => *it = PItem { children: items(app, key, false), ..PItem::new("Presets", Cmd::Nothing) },
             "Browse presets" => *it = PItem::new("Browse presets", Cmd::Preset(PCmd::Browse(key))),
             "Save preset as..." => *it = PItem::new("Save preset as...", Cmd::Preset(PCmd::SaveAs(key))),
+            // The plugin's star in the plugin manager (spec: ui/browser.md §10).
+            "Add to favourites" => *it = PItem::new(it.label.clone(), Cmd::Browser(crate::browser::BCmd::Star(key))),
             _ => {}
         }
     }

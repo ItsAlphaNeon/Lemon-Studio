@@ -1329,7 +1329,7 @@ pub fn layout_menu(s: &State, x: f32, y: f32) -> Popup {
 
 /// Empty slot: the effect list (§7.1), the plugin menu for this slot (spec: ui/plugin-menu.md).
 pub fn effect_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
-    let mut items = vec![PItem::not_yet("Plugin library").key(crate::shortcuts::menu_key("Plugin library", "Shift+F8")), PItem::sep()];
+    let mut items = vec![PItem::new("Plugin library", Cmd::Browser(crate::browser::BCmd::Jump(crate::browser::Jump::DbEffects))).key(crate::shortcuts::menu_key("Plugin library", "Shift+F8")), PItem::sep()];
     items.extend(crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), false));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
@@ -1348,7 +1348,7 @@ pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
         PItem::sub("Presets", vec![PItem::not_yet("(none)")]),
         PItem::not_yet("Browse presets"),
         PItem::not_yet("Save preset as..."),
-        PItem::not_yet("Add to favourites"),
+        PItem::new("Add to favourites", Cmd::Browser(crate::browser::BCmd::Star(crate::plugins::fx_key(s.selected_mixer, slot)))),
         PItem::not_yet("Display preset name in preset selector").mark(Mark::Check(true)),
         PItem::head("A/B compare"),
         PItem::not_yet("Copy to B"),
