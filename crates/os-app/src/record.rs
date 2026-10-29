@@ -1202,9 +1202,9 @@ mod tests {
         assert_eq!(app.selection_loop(), None);
     }
 
-    /// SONG mode, a Stop recording marker (audio/transport.md "Time markers in SONG mode"): the take ends on it, a note held over it ends there,
-    /// later notes are not recorded; a Start recording marker before playback reaches it changes nothing, and one
-    /// passed after the Stop records again. Stopping clears it.
+    /// SONG mode, a Stop recording marker (audio/transport.md "Time markers in SONG mode"): the take ends on it, a note
+    /// held over it ends there, later notes are not recorded; a Start recording marker before playback reaches it
+    /// changes nothing, and one passed after the Stop records again. Stopping clears it.
     #[test]
     fn stop_recording_marker_punches_out() {
         let mut app = app();
