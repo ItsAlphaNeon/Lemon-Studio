@@ -3951,6 +3951,10 @@ impl App {
             self.invalidate();
         }
         self.follow_device();
+        // Options ▸ Focus selected channel on playback (spec: ui/channel-rack.md §17).
+        if crate::rack::focus_tick(&mut self.state, self.transport.playing()) {
+            self.damage_win(Win::ChannelRack);
+        }
         self.record_tick();
         self.audio_log.tick();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
@@ -7070,7 +7074,7 @@ impl App {
                 return None;
             }
             Some(Action::RackLoopBox(i)) => {
-                let v = (crate::rack::row_len(&self.state, i) as i32 + d).clamp(1, crate::rack::MAX_STEPS as i32) as u32;
+                let v = (crate::rack::loop_box_len(&self.state, i) as i32 + d).clamp(1, crate::rack::MAX_STEPS as i32) as u32;
                 self.state.rack.loop_len.insert(i, v);
                 self.state.piano.dirty = true;
                 return None;
@@ -8488,7 +8492,7 @@ impl App {
                 s.piano.dirty = true;
             }
             Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,
-            Action::RackLoopBox(i) => self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::row_len(&self.state, i) }),
+            Action::RackLoopBox(i) => self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_len(&self.state, i) }),
             Action::RackGraphArea => {
                 self.rack_graph_at(mouse);
                 self.drag = Some(Drag::RackGraph);

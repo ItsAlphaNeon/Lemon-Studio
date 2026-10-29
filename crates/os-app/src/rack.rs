@@ -247,6 +247,8 @@ pub struct RackUi {
     pub fill: Option<FillDlg>,
     /// The channel Shift+wheel last moved and where the mouse was then (`wheel_move`).
     pub wheel_grab: Option<(usize, (f32, f32))>,
+    /// Whether playback ran at the last tick (`focus_tick`).
+    pub played: bool,
 }
 
 impl Default for RackUi {
@@ -272,12 +274,13 @@ impl Default for RackUi {
             loop_type: 0,
             unsorted_at: None,
             clipboard: None,
-            opts: ["Show complete piano roll preview", "Show a mute button on the piano roll preview"].into_iter().collect(),
+            opts: [COMPLETE_PREVIEW, "Show a mute button on the piano roll preview"].into_iter().collect(),
             pending_delete: None,
             purging: false,
             delete_now: None,
             fill: None,
             wheel_grab: None,
+            played: false,
         }
     }
 }
@@ -462,8 +465,63 @@ pub fn len_value(s: &State) -> u32 {
 
 /// A row's own length in steps: its loop length in loop mode, else the pattern length (§15).
 pub fn row_len(s: &State, r: usize) -> u32 {
-    let pat = pattern_steps(s);
-    if s.rack.loop_mode { s.rack.loop_len.get(&r).copied().unwrap_or(pat).max(1) } else { pat }
+    if s.rack.loop_mode { loop_box_len(s, r) } else { pattern_steps(s) }
+}
+
+/// What a row's loop box shows and its wheel and drag start from: the row's loop length, else the pattern length; also
+/// with loop mode off, where the boxes show while "Always show advanced controls" is ticked (§15).
+pub fn loop_box_len(s: &State, r: usize) -> u32 {
+    s.rack.loop_len.get(&r).copied().unwrap_or_else(|| pattern_steps(s)).max(1)
+}
+
+/// Loop options ▸ Always show advanced controls (§7; the original's manual: the looping controls stay visible with
+/// looping off).
+pub const ALWAYS_ADVANCED: &str = "Always show advanced controls";
+/// Options ▸ Focus selected channel on playback (§17; the original's manual: on start or stop, the selected channel,
+/// the highest one of several, scrolls into view).
+pub const FOCUS_ON_PLAY: &str = "Focus selected channel on playback";
+/// Options ▸ Mute removed steps (§17; the original's manual: a step turned off keeps its note, muted).
+pub const MUTE_REMOVED: &str = "Mute removed steps";
+/// Options ▸ Show complete piano roll preview (§17, on by default; the original's manual: off, a preview shows only
+/// the notes in the step sequencer's visible bars).
+pub const COMPLETE_PREVIEW: &str = "Show complete piano roll preview";
+
+/// The rack menus' check options that work; the other ones are shown greyed with their default ticks.
+const LIVE_OPTS: [&str; 4] = [ALWAYS_ADVANCED, FOCUS_ON_PLAY, MUTE_REMOVED, COMPLETE_PREVIEW];
+
+/// Every tick, with whether playback runs: on a start or a stop, with Focus selected channel on playback ticked, the
+/// highest selected channel scrolls into view (§17). Returns whether the rack scrolled.
+pub fn focus_tick(s: &mut State, playing: bool) -> bool {
+    if s.rack.played == playing {
+        return false;
+    }
+    s.rack.played = playing;
+    match s.rack.sel.first() {
+        Some(&r) if s.rack.opts.contains(FOCUS_ON_PLAY) => scroll_to_row(s, r),
+        _ => false,
+    }
+}
+
+/// Scrolls the rack the least that shows row `r` whole (nothing when the display filter hides it). Returns whether it
+/// scrolled.
+pub fn scroll_to_row(s: &mut State, r: usize) -> bool {
+    use crate::views::rack::{content_h, layout, panel, rect, ROW_H};
+    let rows = layout(s);
+    let Some(i) = rows.iter().position(|p| p.row == r) else { return false };
+    let view_h = panel(rect(s)).h;
+    // The row's band in content pixels, as `views::rack::row_at` hits it; the first and last rows take the padding.
+    let band = rows[i].top - 2.0 - (ROW_H - 22.0) / 2.0;
+    let top = if i == 0 { 0.0 } else { band };
+    let bottom = if i + 1 == rows.len() { content_h(s) } else { band + rows[i].pitch() };
+    let now = s.rack_scroll;
+    let to = if top < now { top } else if bottom > now + view_h { (bottom - view_h).min(top) } else { now };
+    s.rack_scroll = to.max(0.0);
+    to != now
+}
+
+/// Whether the rows show their loop boxes: in loop mode, or with Always show advanced controls ticked (§15).
+pub fn loop_boxes(s: &State) -> bool {
+    s.rack.loop_mode || s.rack.opts.contains(ALWAYS_ADVANCED)
 }
 
 /// Channel index (note `channel`) of row `r`.
@@ -471,9 +529,10 @@ fn ch_index(s: &State, r: usize) -> Option<u16> {
     s.project.channels.get(r).map(|c| c.index)
 }
 
-/// Whether step `k` of channel `ch` has a note (a note anywhere inside the step counts).
+/// Whether step `k` of channel `ch` has a note (a note anywhere inside the step counts); a muted note, which a removed
+/// step leaves with Mute removed steps on, does not.
 pub fn step_on(notes: &[Note], ch: u16, k: u32, ps: u32) -> bool {
-    notes.iter().any(|n| n.channel == ch && n.position / ps == k)
+    notes.iter().any(|n| n.channel == ch && n.position / ps == k && !n.muted())
 }
 
 /// The current pattern's notes of row `r`.
@@ -529,13 +588,24 @@ pub fn set_step(s: &mut State, r: usize, k: u32, on: bool) {
     let Some(ch) = ch_index(s, r) else { return };
     let ps = per_step(s);
     let n = s.pattern.max(1);
+    let mute = s.rack.opts.contains(MUTE_REMOVED);
     let p = crate::patterns::pat_mut(s, n);
     let has = step_on(&p.notes, ch, k, ps);
+    let at = |x: &Note| x.channel == ch && x.position / ps == k;
     if on && !has {
-        p.notes.push(Note::step(ch, k * ps));
-        p.notes.sort_by_key(|x| (x.position, x.channel));
+        // A step removed with Mute removed steps on comes back with its notes (Lemon Studio's design), else a new one.
+        if p.notes.iter().any(at) {
+            p.notes.iter_mut().filter(|x| at(x)).for_each(|x| x.set_muted(false));
+        } else {
+            p.notes.push(Note::step(ch, k * ps));
+            p.notes.sort_by_key(|x| (x.position, x.channel));
+        }
     } else if !on && has {
-        p.notes.retain(|x| !(x.channel == ch && x.position / ps == k));
+        if mute {
+            p.notes.iter_mut().filter(|x| at(x)).for_each(|x| x.set_muted(true));
+        } else {
+            p.notes.retain(|x| !at(x));
+        }
     }
     s.piano.dirty = true;
 }
@@ -1277,15 +1347,18 @@ pub enum RCmd {
     AlignLeft(bool),
     ShowMixer,
     Colorful,
+    /// Tick or untick a check option of `LIVE_OPTS`.
+    Opt(&'static str),
 }
 
 fn it(label: impl Into<std::borrow::Cow<'static, str>>, c: RCmd) -> PItem {
     PItem::new(label, Cmd::Rack(c))
 }
 
-/// A menu option that is not available yet: greyed out, showing its default tick.
+/// A check option of the rack's menus with its tick; greyed out (showing its default tick) while it does nothing yet.
 fn opt(s: &State, label: &'static str) -> PItem {
-    PItem::not_yet(label).mark(Mark::Check(s.rack.opts.contains(label)))
+    let tick = Mark::Check(s.rack.opts.contains(label));
+    if LIVE_OPTS.contains(&label) { it(label, RCmd::Opt(label)).mark(tick) } else { PItem::not_yet(label).mark(tick) }
 }
 
 /// Options menu (title ▸, §17).
@@ -2084,6 +2157,15 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             s.rack.colorful = !s.rack.colorful;
             None
         }
+        // The loop boxes take width (§15).
+        RCmd::Opt(label) => {
+            relayout(s, |s| {
+                if !s.rack.opts.remove(label) {
+                    s.rack.opts.insert(label);
+                }
+            });
+            None
+        }
         RCmd::Clone(_)
         | RCmd::CloneSel
         | RCmd::MoveSel(_)
@@ -2629,6 +2711,80 @@ mod tests {
         let Cmd::Rack(c) = c else { panic!() };
         run(&mut app, c);
         assert_eq!(app.state.rack.loop_len, BTreeMap::from([(0, 3)]), "only the selected channel's loop burned");
+    }
+
+    /// The check options that work are enabled and tick on a click; Always show advanced controls shows the loop boxes
+    /// with loop mode off, widening the window, the boxes showing a row's loop length or the pattern length.
+    #[test]
+    fn live_options_tick_and_always_show_loop_boxes() {
+        let mut app = App::new(None);
+        let find = |m: Popup, label: &str| m.items.iter().find(|i| i.label == label).map(|i| (i.enabled, i.mark.clone())).unwrap();
+        for label in [FOCUS_ON_PLAY, MUTE_REMOVED, COMPLETE_PREVIEW] {
+            let tick = app.state.rack.opts.contains(label);
+            assert_eq!(find(options_menu(&app.state, 0.0, 0.0), label), (true, Mark::Check(tick)), "{label}");
+        }
+        assert_eq!(find(options_menu(&app.state, 0.0, 0.0), COMPLETE_PREVIEW).1, Mark::Check(true), "on by default");
+        assert_eq!(find(options_menu(&app.state, 0.0, 0.0), "Detached").0, false, "still greyed");
+        assert_eq!(find(loop_menu(&app.state, 0.0, 0.0), ALWAYS_ADVANCED), (true, Mark::Check(false)));
+
+        assert!(!loop_boxes(&app.state));
+        let w = app.state.rack_size.0;
+        run(&mut app, RCmd::Opt(ALWAYS_ADVANCED));
+        assert_eq!(find(loop_menu(&app.state, 0.0, 0.0), ALWAYS_ADVANCED).1, Mark::Check(true));
+        assert!(loop_boxes(&app.state) && !app.state.rack.loop_mode);
+        assert_eq!(app.state.rack_size.0, w + LOOP_W, "room for the boxes");
+        app.state.rack.loop_len.insert(1, 5);
+        assert_eq!((loop_box_len(&app.state, 1), loop_box_len(&app.state, 0)), (5, pattern_steps(&app.state)));
+        assert_eq!(row_len(&app.state, 1), pattern_steps(&app.state), "loop mode off: the length plays no part");
+        run(&mut app, RCmd::Opt(ALWAYS_ADVANCED));
+        assert!(!loop_boxes(&app.state));
+        assert_eq!(app.state.rack_size.0, w);
+    }
+
+    /// Mute removed steps: a step turned off keeps its note, muted (the step shows off and stays silent); turned on
+    /// again it gets that note back. Unticked, the note goes.
+    #[test]
+    fn mute_removed_steps_keeps_the_note() {
+        let mut app = App::new(None);
+        let s = &mut app.state;
+        let ch = s.project.channels[0].index;
+        let ps = per_step(s);
+        let at = |s: &State| s.project.pattern(s.pattern).map(|p| p.notes.iter().filter(|n| n.channel == ch && n.position / ps == 3).copied().collect::<Vec<_>>()).unwrap_or_default();
+        set_step(s, 0, 3, true);
+        crate::patterns::pat_mut(s, s.pattern.max(1)).notes.iter_mut().filter(|n| n.channel == ch && n.position / ps == 3).for_each(|n| n.velocity = 33);
+        run(&mut app, RCmd::Opt(MUTE_REMOVED));
+        let s = &mut app.state;
+        set_step(s, 0, 3, false);
+        let notes = at(s);
+        assert!(notes.len() == 1 && notes[0].muted() && notes[0].velocity == 33, "{notes:?}");
+        assert!(!step_on(&s.project.pattern(s.pattern).unwrap().notes, ch, 3, ps), "a muted note shows as off");
+        set_step(s, 0, 3, true);
+        let notes = at(s);
+        assert!(notes.len() == 1 && !notes[0].muted() && notes[0].velocity == 33, "back with its velocity: {notes:?}");
+        s.rack.opts.remove(MUTE_REMOVED);
+        set_step(s, 0, 3, false);
+        assert!(at(s).is_empty());
+    }
+
+    /// Focus selected channel on playback: on a start and on a stop the highest selected channel scrolls into view;
+    /// unticked, or with no change of the playback state, nothing scrolls.
+    #[test]
+    fn focus_selected_channel_on_playback() {
+        let mut app = App::new(None);
+        let s = &mut app.state;
+        let last = s.project.channels.len() - 1;
+        assert!(last >= 3);
+        s.rack_size.1 = crate::views::rack::MIN_H;
+        s.rack.sel = BTreeSet::from([last]);
+        assert!(!focus_tick(s, true), "unticked");
+        assert_eq!(s.rack_scroll, 0.0);
+        s.rack.opts.insert(FOCUS_ON_PLAY);
+        assert!(!focus_tick(s, true), "still playing");
+        assert!(focus_tick(s, false), "stop");
+        assert!(s.rack_scroll > 0.0);
+        s.rack.sel = BTreeSet::from([0, last]);
+        assert!(focus_tick(s, true), "start: the highest selected one");
+        assert_eq!(s.rack_scroll, 0.0);
     }
 
     /// Options ▸ Set swing mix for selected, Create layer with selected channels and Color selected ▸ All... act on the
