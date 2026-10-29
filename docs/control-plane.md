@@ -184,7 +184,8 @@ call("apply", commands=[
 
 - Live commands that reach the playing engine without a rebuild (each change rebuilds it, as edits in the interface
   do); parameter changes go straight to the plugin.
-- A native project format: projects are read and saved as FL Studio projects.
+- Ids, the undo history and the journal stay with a project only in a Lemon project file (`.lemon`,
+  [native-format.md](native-format.md)); a project saved as an FLP keeps none of them.
 - Undo steps for: replacing a plugin's whole state (loading a preset, adding a Tesla), the graph editor, note fields
   edited in place (fine pitch, release, Mod A/B, slide and porta flags), the Lemon Sampler editor's channel side,
   clip groups, and Make unique / audio clips added (partly undone). Locking, collapsing and loop lengths in the
