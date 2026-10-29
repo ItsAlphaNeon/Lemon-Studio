@@ -1023,10 +1023,10 @@ pub struct State {
     pub rack_roll_view: bool,
     /// Channel shown in the plugin window, and where that window is.
     pub plugin_channel: usize,
-    pub plugin_pos: (f32, f32),
     /// The plugin window was moved by hand: it reopens there instead of next to the rack (spec: ui/channel-rack.md
     /// "Left click").
     pub plugin_moved: bool,
+    pub plugin_pos: (f32, f32),
     pub selected_channel: usize,
     pub selected_mixer: u16,
     pub pattern: u16,
@@ -1541,8 +1541,8 @@ impl App {
                 rack: Default::default(),
                 rack_roll_view: false,
                 plugin_channel: 0,
-                plugin_pos: (560.0, 260.0),
                 plugin_moved: false,
+                plugin_pos: (560.0, 260.0),
                 selected_channel: 0,
                 selected_mixer: 1,
                 mixer: Default::default(),
@@ -22118,5 +22118,21 @@ mod tests {
         // Delete asks first.
         pl::run(&mut app, Cmd::Pick(PickCmd::Delete, copy));
         assert!(app.state.rack.pending_delete.is_some() || app.state.rack.delete_now.is_some());
+    }
+
+    /// The channel window opens next to the rack until it is moved by hand, and where it was moved after that (spec:
+    /// ui/channel-rack.md "Left click").
+    #[test]
+    fn channel_window_reopens_where_it_was_moved() {
+        let mut app = App::new(None);
+        app.add_clip_channel(ChannelKind::Automation);
+        let row = app.state.project.channels.len() - 1;
+        assert!(app.state.shown(Win::Plugin), "an automation clip's channel window opens");
+        let beside = app.state.plugin_pos;
+        app.state.hide(Win::Plugin);
+        app.state.plugin_moved = true;
+        app.state.plugin_pos = (beside.0 + 120.0, beside.1 + 40.0);
+        app.open_channel_window(row);
+        assert_eq!(app.state.plugin_pos, (beside.0 + 120.0, beside.1 + 40.0), "the channel window reopens where it was moved");
     }
 }

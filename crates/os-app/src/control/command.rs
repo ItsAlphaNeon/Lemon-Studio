@@ -370,7 +370,8 @@ impl Side {
 }
 
 /// What an edit in the interface changes (`control::edit`): the project settings, one channel (by row), one mixer
-/// track (by number), one pattern (by number), the arrangement shown, or the whole project with the rack's state of it.
+/// track (by number), one pattern (by number), the arrangement shown, the whole project with the rack's state of it, or
+/// which channels are on.
 /// The smallest that holds the edit keeps the undo step small.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
