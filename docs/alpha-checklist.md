@@ -72,8 +72,14 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
-- [ ] **Mixer right-click menus.** 32 entries greyed out on 2026-10-29: the routing menu, groups, docking, smart
-  disable and threaded processing, slot colours and icons, Patcherize ([mixer.rs](../crates/os-app/src/mixer.rs))
+- [ ] **Mixer right-click menus.** 28 entries greyed out on 2026-10-29, counted entry by entry after Track routing and
+  the slot's Change color... and Random color were enabled: track menu Change icon, Assign to / Unassign from Audio
+  track(s), Select ▸ Channels and playlist tracks and Group, Compensate for master latency, the Group section
+  (Separator, Create group..., Auto color group), Dock to ▸ Left / Middle / Right, Insert from state, Allow threaded
+  processing; Mixer options Plugin delay compensation ▸ Automatic, Link all parameters..., View ▸ Waveforms and Extra
+  properties, Detached, Switch smart disable for all plugins; slot menu Patcherize, Patcherize all, Link all
+  parameters..., Allow threaded processing, Smart disable, Change icon..., Scaling ▸ 100%, Help. Not counted: the
+  layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [ ] **Playlist right-click menus.** 21 entries greyed out on 2026-10-29: the plugin window's ▸ menu (presets, spare
   states, color and icon, channel states), the picker's Change icon, Edit sample and Cut itself
   ([playlist.rs](../crates/os-app/src/playlist.rs))

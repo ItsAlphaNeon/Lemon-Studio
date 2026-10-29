@@ -80,6 +80,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The mixer track menu's Insert multiple... (type how many tracks to insert), Gradient color... (over the selected
   tracks) and File ▸ Render to wave file... (the Export form for the selected tracks, writing each track's output to
   its own file)
+- The mixer track menu's Track routing ▸ routes or sidechains the other selected tracks into the track clicked (only,
+  or besides their other routes), and an effect slot can be given a colour (Change color..., Random color), shown as a
+  bar at the slot's edge for the session
 
 ## ✅ Plugin hosting
 
