@@ -188,7 +188,9 @@ Piano roll and Channel rack back as a new install has them; Desktop (alternate) 
 the workspace with the Piano roll and Mixer side by side under it; Save custom layout keeps the current layout and
 Custom brings it back. The Tablet layouts are greyed (they need the toolbar at the bottom). VIEW > Background > Set
 image wallpaper... makes a PNG or JPEG picture the theme's workspace wallpaper; the HTML document and the background
-colour are greyed.
+colour are greyed. VIEW > Align all channel editors (Shift+F12) puts the channel window back right of the Channel
+rack and cascades the docked plugin windows of rack channels from there, each title showing. HELP > Help index and
+What's new open the project's README and its merged pull requests in the web browser.
 
 **Window positions.** Where the windows were when Lemon Studio closed comes back at the next start: the main
 window (its place and size, and whether it was maximized; brought back onto a screen if its screen is gone) and the

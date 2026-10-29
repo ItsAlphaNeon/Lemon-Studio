@@ -60,6 +60,10 @@ pub enum MenuCmd {
     Window(Win),
     CloseAll(crate::app::CloseAll),
     IntoWorkspace,
+    /// VIEW > Align all channel editors.
+    AlignEditors,
+    /// HELP's entries that open a page in the web browser (`crate::help_links`).
+    Web(&'static str),
     /// The menu bar's ways into the browser.
     Jump(crate::browser::Jump),
     /// A settings tab.
@@ -189,6 +193,7 @@ pub const MULTILINK_LABEL: &str = "Multi MIDI learn";
 /// entry after "Arrange windows" (spec: ui/settings-choices.md "Advanced: Don't limit
 /// windows to screen (2026-10-16)").
 pub const INTO_WORKSPACE_LABEL: &str = "Into workspace";
+pub const ALIGN_LABEL: &str = "Align all channel editors";
 /// Index of the OPTIONS menu.
 pub const OPTIONS_MENU: usize = 5;
 /// OPTIONS > Project info (the toolbar's info button).
@@ -315,7 +320,7 @@ const VIEW_ITEMS: &[Item] = &[
     it("Close all windows", "F12").on().cmd(MenuCmd::CloseAll(crate::app::CloseAll::All)),
     it("Close all plugin windows", "Alt+F12").on().cmd(MenuCmd::CloseAll(crate::app::CloseAll::Plugins)),
     it("Close all unfocused windows", "Ctrl+F12").on().cmd(MenuCmd::CloseAll(crate::app::CloseAll::Unfocused)),
-    it("Align all channel editors", "Shift+F12"),
+    it(ALIGN_LABEL, "Shift+F12").on().cmd(MenuCmd::AlignEditors),
     it("Arrange windows", "").sub().cmd(MenuCmd::Sub(Sub::Arrange)),
     it(INTO_WORKSPACE_LABEL, "").on().cmd(MenuCmd::IntoWorkspace),
     it("Background", "").sub().cmd(MenuCmd::Sub(Sub::Background)),
@@ -400,11 +405,11 @@ const TOOLS_B: &[Item] = &[
 ];
 
 const HELP: &[Item] = &[
-    it("Help index", ""),
+    it("Help index", "").on().cmd(MenuCmd::Web(crate::help_links::HELP_INDEX_URL)),
     it("Tutorials", "").sub(),
     head("Support"),
     it("Diagnostics", ""),
-    it("What's new", ""),
+    it("What's new", "").on().cmd(MenuCmd::Web(crate::help_links::WHATS_NEW_URL)),
     SEP,
     it("About...", "").on(),
 ];

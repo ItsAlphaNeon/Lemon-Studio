@@ -11,6 +11,7 @@
 
 mod app;
 mod arrange;
+mod help_links;
 mod audio_cfg;
 mod auto_close;
 mod autoscroll;

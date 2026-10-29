@@ -7282,8 +7282,9 @@ impl App {
             Key::Named(NamedKey::F11) => self.open_settings(views::settings::INFO),
             // Monitor debug panel (views/mondebug.rs) parked 2026-10-09: its values are now the defaults. Uncomment to tune again.
             // Key::Named(NamedKey::F12) => self.state.monitor.debug = !self.state.monitor.debug,
-            // spec: ui/close-windows.md (Shift+F12, Align all channel editors, is not available yet).
-            Key::Named(NamedKey::F12) if !self.shift => self.close_windows(if ctrl {
+            // spec: ui/close-windows.md; Shift+F12 is Align all channel editors (arrange.rs).
+            Key::Named(NamedKey::F12) if self.shift => self.align_channel_editors(),
+            Key::Named(NamedKey::F12) => self.close_windows(if ctrl {
                 CloseAll::Unfocused
             } else if alt {
                 CloseAll::Plugins
@@ -8321,8 +8322,7 @@ impl App {
             self.sampler_failed.retain(|&r| r != i);
         } else {
             if !s.shown(Win::Plugin) && !s.plugin_moved {
-                let r = views::rack::rect(s);
-                s.plugin_pos = ((r.right() + 8.0).min(1920.0 - 440.0), r.y.min(1080.0 - 210.0));
+                s.plugin_pos = crate::arrange::channel_home(s);
             }
             s.plugin_channel = i;
             s.raise(Win::Plugin);
@@ -8668,6 +8668,10 @@ impl App {
             MenuCmd::Rescan => self.start_scan(crate::plugin_db::Mode::Changed),
             // The plugin menus' display mode, as their own radios set it (spec: ui/plugin-menu.md §2-3).
             MenuCmd::View(v) => self.state.message = crate::plugin_menu::run(self, crate::plugin_menu::PlugCmd::View(v)),
+            MenuCmd::Web(url) => {
+                crate::help_links::open(url);
+                self.state.message = Some(format!("Opening {url}"));
+            }
             MenuCmd::NewPattern => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
                 if let Some(m) = crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindFirst, at) {
@@ -8713,6 +8717,7 @@ impl App {
             }
             MenuCmd::CloseAll(what) => self.close_windows(what),
             MenuCmd::IntoWorkspace => self.move_into_workspace(),
+            MenuCmd::AlignEditors => self.align_channel_editors(),
             MenuCmd::Typing => self.toggle_typing(),
             MenuCmd::Metronome => self.toggle_metronome(),
             MenuCmd::AudioLog => self.toggle_audio_log(),

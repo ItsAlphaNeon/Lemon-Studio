@@ -115,6 +115,37 @@ impl App {
     }
 }
 
+/// Where the channel window first opens: right of the Channel rack, level with its top.
+pub fn channel_home(s: &State) -> (f32, f32) {
+    let r = views::rack::rect(s);
+    ((r.right() + 8.0).min(1920.0 - 440.0), r.y.min(1080.0 - 210.0))
+}
+
+impl App {
+    /// VIEW ▸ Align all channel editors (Shift+F12; Lemon Studio's design, the original's result was not measured):
+    /// the channel window goes back to where it first opens, right of the Channel rack, and the docked plugin windows
+    /// of rack channels cascade from there, back to front, each a title bar lower and to the right so every title
+    /// shows. Mixer slot windows and detached windows stay where they are.
+    pub(crate) fn align_channel_editors(&mut self) {
+        let s = &mut self.state;
+        let (x, y) = channel_home(s);
+        s.plugin_pos = (x, y);
+        s.plugin_moved = false;
+        #[cfg(all(plugin_windows, windows))]
+        {
+            let first = usize::from(s.shown(Win::Plugin));
+            let k = self.plugins.scale;
+            let (ox, oy) = self.canvas_off;
+            let rows: Vec<usize> = s.z.iter().filter_map(|w| if let Win::Hosted(r) = *w { Some(r) } else { None }).filter(|&r| r < crate::plugins::FX_KEY).collect();
+            for (i, r) in rows.into_iter().enumerate() {
+                let d = (first + i) as f32 * crate::app::TITLE_H;
+                self.plugins.move_docked(r, ((x + d) * k).round() as i32 + ox, ((y + d) * k).round() as i32 + oy);
+            }
+        }
+        self.invalidate();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +178,19 @@ mod tests {
         assert_eq!(app.state.wins[0].rect, kept);
         assert!(!app.state.wins[0].maxed);
         assert_eq!(app.state.rack_pos, (400.0, 300.0));
+    }
+
+    /// Align all channel editors (VIEW and Shift+F12) puts a moved channel window back right of the rack.
+    #[test]
+    fn align_all_channel_editors() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Plugin);
+        let home = channel_home(&app.state);
+        app.state.plugin_pos = (900.0, 700.0);
+        app.state.plugin_moved = true;
+        let at = crate::views::menus::MENUS[crate::views::menus::VIEW].cols.iter().flat_map(|(_, items)| items.iter()).position(|it| it.label == crate::views::menus::ALIGN_LABEL).unwrap();
+        app.menu_item(crate::views::menus::VIEW, at);
+        assert_eq!(app.state.plugin_pos, home);
+        assert!(!app.state.plugin_moved && app.state.shown(Win::Plugin));
     }
 }
