@@ -356,6 +356,7 @@ impl App {
         let mut moved = None;
         let mut edited = Vec::new();
         let mut automate = Vec::new();
+        let mut recorded = Vec::new();
         let mut stretch = Vec::new();
         let (mut seen, mut steps) = (Vec::new(), Vec::new());
         for (&key, h) in &self.plugins.hosted {
@@ -434,6 +435,10 @@ impl App {
                 edited.push(key);
                 if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
                     moved = Some(Tweak::Plugin { key, index });
+                    // What automation recording takes: the value with the parameter's stated range.
+                    if let (os_host::ParamEvent::Value(_, v), Some(info)) = (e, p.param_info(index)) {
+                        recorded.push((key, index, (info.min, info.max), v));
+                    }
                 }
             }
             // "Create automation clip" picked in the plugin's own menu (CLAP context menu).
@@ -476,9 +481,23 @@ impl App {
             self.state.params.note(t);
             self.tweak_hint();
         }
+        for (key, index, range, v) in recorded {
+            if let Some(target) = target_of(&self.state, key, index) {
+                self.record_param(target, range, v);
+            }
+        }
         for (key, index) in automate {
             self.state.message = self.params_automate(key, index);
             self.invalidate();
+        }
+    }
+
+    /// A plugin parameter set from outside its window (a remote control) to `level`, for automation recording.
+    pub(crate) fn record_plugin_param(&mut self, key: usize, index: usize, level: f64) {
+        let Some(target) = target_of(&self.state, key, index) else { return };
+        let range = self.state.params.plugin(key).and_then(|p| p.lock().ok()?.param_info(index)).map(|i| (i.min, i.max));
+        if let Some(range) = range {
+            self.record_param(target, range, level);
         }
     }
 

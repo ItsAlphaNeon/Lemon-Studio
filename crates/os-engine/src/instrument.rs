@@ -111,6 +111,12 @@ pub trait Instrument: Send {
     fn tick_params(&self) -> bool {
         false
     }
+    /// The plain range (min, max) of parameter `index` as the plugin states it: what a pattern control point on the
+    /// parameter is read against (`os_model::target::plugin_point_level`). Default: unknown (such points do nothing).
+    fn param_range(&self, index: usize) -> Option<(f64, f64)> {
+        let _ = index;
+        None
+    }
     /// The channel's levels for the next `process` call. An instrument that works the volume and pan into its voices
     /// itself returns true, and the engine then adds its output unchanged (FL native generators get them in their
     /// voices' final levels: spec plugins/fruity-abi.md "Voices"). Default: false, the engine applies the volume and
@@ -375,6 +381,11 @@ pub trait HostedEffect: Send {
     /// [`Instrument::tick_params`] for effects.
     fn tick_params_fx(&self) -> bool {
         false
+    }
+    /// [`Instrument::param_range`] for effects.
+    fn param_range_fx(&self, index: usize) -> Option<(f64, f64)> {
+        let _ = index;
+        None
     }
     /// [`Instrument::transport`] for effects: the song position during the next `process_fx` call.
     fn transport_fx(&mut self, info: &TransportInfo) {

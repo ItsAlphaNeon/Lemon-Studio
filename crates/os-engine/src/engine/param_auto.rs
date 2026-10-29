@@ -54,6 +54,9 @@ pub(super) struct ParamAuto {
     pub ticks: Vec<ParamEvent>,
     /// Last per-tick value handed on per target (`Round(level * 2^30)`).
     last_tick: Vec<(Target, i64)>,
+    /// Pattern control points on plugin parameters due on the tick starting now: target, level 0..1. They act before
+    /// the clips of the same tick (spec: audio/automation.md "Pattern control points").
+    pub points: Vec<(Target, f64)>,
 }
 
 impl ParamAuto {
@@ -65,6 +68,37 @@ impl ParamAuto {
             any,
             ticks: Vec::with_capacity(16),
             last_tick: Vec::with_capacity(16),
+            points: Vec::with_capacity(16),
+        }
+    }
+
+    /// A control point on a plugin parameter, handed on with this tick's values (`point_ticks`, `point_events`).
+    pub fn point(&mut self, target: Target, level: f64) {
+        self.points.retain(|p| p.0 != target);
+        self.points.push((target, level));
+    }
+
+    /// This tick's points for the plugins that take one value per tick.
+    pub fn point_ticks(&mut self) {
+        for i in 0..self.points.len() {
+            let (target, level) = self.points[i];
+            self.tick_value(target, (level * 1_073_741_824.0).round() as i64);
+        }
+    }
+
+    /// This tick's points for the other plugins, at the tick's first frame; then they are done.
+    fn point_events(&mut self) {
+        for (target, level) in std::mem::take(&mut self.points) {
+            let (dest, index) = match target {
+                Target::ChannelParam(c, k) => (Dest::Channel(usize::from(c)), k),
+                Target::SlotParam(t, s, k) => (Dest::Slot(usize::from(t), usize::from(s)), k),
+                _ => continue,
+            };
+            match self.last.iter_mut().find(|(t, _)| *t == target) {
+                Some((_, last)) => *last = level,
+                None => self.last.push((target, level)),
+            }
+            self.events.push(ParamEvent { dest, offset: 0, index: u32::from(index), value: level });
         }
     }
 
@@ -145,6 +179,7 @@ impl Engine {
     /// Samples every plugin-parameter clip over the `frames` frames of the tick starting now into `self.params.events`.
     pub(super) fn run_param_automation(&mut self, frames: usize) {
         self.params.events.clear();
+        self.params.point_events();
         if !self.params.any {
             return;
         }
@@ -257,6 +292,34 @@ mod tests {
         fn tick_params_fx(&self) -> bool {
             self.ticks
         }
+        fn param_range_fx(&self, index: usize) -> Option<(f64, f64)> {
+            // Parameter 0 in a whole range, as FL's own plugins state theirs; the others 0..1.
+            Some(if index == 0 { (-64.0, 64.0) } else { (0.0, 1.0) })
+        }
+    }
+
+    /// Pattern control points on a slot plugin's parameters reach it on their tick's first frame, at the level the value
+    /// stands for in the parameter's stated range (spec: audio/automation.md "Pattern control points").
+    #[test]
+    fn control_points_drive_a_slot_plugin() {
+        use os_model::{target, ControlPoint, Pattern};
+        let mut p = project(0);
+        p.automations.clear();
+        p.arrangements.clear();
+        let point = |position: u32, kind: u32, value: i32| ControlPoint { position, kind, value };
+        let controls = vec![
+            point(0, target::slot_param(1, 3, 0), 32),
+            point(96, target::slot_param(1, 3, 0), -64),
+            point(96, target::slot_param(1, 3, 5), 16384),
+        ];
+        p.patterns = vec![Pattern { number: 1, controls, ..Pattern::default() }];
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let probe = Arc::new(Mutex::new(Probe::default()));
+        e.set_effect(1, 3, probe.clone());
+        run(&mut e, 48000, 1000);
+        // 96 ticks at 120 BPM, PPQ 96: one beat, 24000 frames.
+        assert_eq!(probe.lock().unwrap().seen, vec![(0, 0, 0.75), (24000, 0, 0.0), (24000, 5, 0.25)]);
     }
 
     fn channel(index: u16, kind: ChannelKind) -> Channel {

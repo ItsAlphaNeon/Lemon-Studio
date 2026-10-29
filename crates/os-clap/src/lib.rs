@@ -1834,6 +1834,10 @@ impl os_engine::Instrument for Plugin {
         self.sounding
     }
 
+    fn param_range(&self, index: usize) -> Option<(f64, f64)> {
+        os_host::Plugin::param_info(self, index).map(|p| (p.min, p.max))
+    }
+
     fn voices(&self) -> usize {
         self.ledger.count()
     }
@@ -2009,6 +2013,10 @@ impl os_engine::Instrument for Plugin {
 impl os_engine::HostedEffect for Plugin {
     fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
         self.effect(rate, left, right, None);
+    }
+
+    fn param_range_fx(&self, index: usize) -> Option<(f64, f64)> {
+        os_host::Plugin::param_info(self, index).map(|p| (p.min, p.max))
     }
 
     fn process_fx_keyed(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: (&[f32], &[f32])) {

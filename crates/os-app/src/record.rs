@@ -495,28 +495,38 @@ impl App {
         r.armed && r.count.is_none() && what.on() && self.transport.playing() && !self.transport.paused()
     }
 
-    /// A channel's volume or pan knob moved: its value goes into the current pattern as a control point at the playback
-    /// position while recording automation (spec §2 Taking automation).
+    /// A knob moved (`record_control`).
     pub(crate) fn record_knob(&mut self, id: KnobId) {
-        use os_model::ControlPoint;
-        if matches!(id, KnobId::ChanVol(_) | KnobId::ChanPan(_)) {
-            self.start_on_input(Opt::Automation);
+        self.record_control(&crate::app::Action::Knob(id));
+    }
+
+    /// A control moved (a channel's volume or pan knob, a mixer track's fader, pan, separation, equaliser or slot mix
+    /// knob, the tempo): while recording automation its value goes into the current pattern as a control point at the
+    /// playback position, in the setting's own unit (spec §2 Taking automation).
+    pub(crate) fn record_control(&mut self, a: &crate::app::Action) {
+        let Some((kind, value)) = point_of(&self.state, a) else { return };
+        self.start_on_input(Opt::Automation);
+        if self.rec_live(Opt::Automation) {
+            self.record_point(kind, value);
         }
-        if !self.rec_live(Opt::Automation) {
-            return;
+    }
+
+    /// A plugin's parameter `target` moved in its own window to normalized `level`; `range` is its plain range as the
+    /// plugin states it (spec §2 Taking automation; the value: `os_model::target::plugin_point_value`).
+    pub(crate) fn record_param(&mut self, target: u32, range: (f64, f64), level: f64) {
+        self.start_on_input(Opt::Automation);
+        if self.rec_live(Opt::Automation) {
+            self.record_point(target, os_model::target::plugin_point_value(range.0, range.1, level));
         }
-        let (row, param, value) = match id {
-            KnobId::ChanVol(i) => (i, ControlPoint::VOLUME, (self.state.knob(id) * 12800.0).round() as i32),
-            KnobId::ChanPan(i) => (i, ControlPoint::PAN, (self.state.knob(id) * 12800.0).round() as i32),
-            _ => return,
-        };
-        let Some(channel) = self.state.project.channels.get(row).map(|c| c.index) else { return };
+    }
+
+    /// Writes a control point on target word `kind` at the playback position, replacing the move's earlier points.
+    fn record_point(&mut self, kind: u32, value: i32) {
         let song = self.transport.song();
         let t = self.transport.tick();
         self.open_take(song);
         let Some(at) = self.rec_pattern_tick(t, song) else { return };
         let tick = at.max(0.0).round() as u32;
-        let kind = ControlPoint::new(tick, channel, param, value).kind;
         let s = &mut self.state;
         let Some(take) = s.rec.take.as_mut() else { return };
         let last = take.controls.iter().find(|c| c.0 == kind).map(|c| c.1);
@@ -526,7 +536,7 @@ impl App {
             let p = crate::piano::pattern_mut(s);
             p.controls.retain(|c| !(c.kind == kind && c.position > last && c.position < tick));
         }
-        crate::piano::set_control(s, channel, param, tick, value);
+        crate::piano::set_control(s, (kind >> 16) as u16, kind as u16, tick, value);
         s.piano.dirty = true;
     }
 
@@ -826,6 +836,33 @@ fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
         s.piano.dirty = true;
     }
     Some((t - f64::from(at), grow))
+}
+
+/// The control point a control's present value makes: its target word and the value in the setting's own unit (spec:
+/// audio/automation.md "Pattern control points"). The main volume and pitch are not recorded (FL recorded nothing for
+/// the main volume).
+fn point_of(s: &State, a: &crate::app::Action) -> Option<(u32, i32)> {
+    use crate::app::Action;
+    use os_model::target;
+    let track = |t: u16| s.project.mixer.iter().find(|m| m.index == t);
+    let r = |v: f64| v.round() as i32;
+    Some(match *a {
+        Action::Knob(id @ (KnobId::ChanVol(row) | KnobId::ChanPan(row))) => {
+            let param = if matches!(id, KnobId::ChanVol(_)) { target::CHANNEL_VOLUME } else { target::CHANNEL_PAN };
+            (target::channel(s.project.channels.get(row)?.index, param), r(f64::from(s.knob(id)) * 12800.0))
+        }
+        Action::Fader(t) => (target::mixer(t, target::MIXER_VOLUME), r(track(t)?.volume.unwrap_or(0.8) * 16000.0)),
+        Action::Knob(KnobId::MixPan(t)) => (target::mixer(t, target::MIXER_PAN), r(track(t)?.pan.unwrap_or(0.0) * 6400.0)),
+        Action::Knob(KnobId::MixSep(t)) => (target::mixer(t, target::MIXER_SEPARATION), r(track(t)?.stereo_separation.unwrap_or(0.0) * 64.0)),
+        Action::Knob(KnobId::SlotMix(t, k)) => (target::slot(t, k.min(9), target::SLOT_MIX), r(track(t)?.slot_mix[usize::from(k.min(9))] * 12800.0)),
+        Action::Knob(KnobId::Eq(t, b, f)) => {
+            let (b, f) = (b.min(2), f.min(2));
+            let id = [target::EQ_GAIN, target::EQ_FREQ, target::EQ_WIDTH][usize::from(f)] + b;
+            (target::mixer(t, id), track(t)?.eq[usize::from(b)][usize::from(f)])
+        }
+        Action::Tempo => (target::TEMPO, r(s.tempo * 1000.0)),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -1217,6 +1254,48 @@ mod tests {
         app.record_knob(KnobId::ChanVol(1));
         assert_eq!(vol(&app), [(70, 1000), (200, 2000)]);
         assert_eq!(crate::record::hint(), "Record (notes) (R) - right-click for options");
+    }
+
+    /// A mixer track's fader and pan, the tempo and a plugin's parameter record into the current pattern as control
+    /// points on their targets, each in its setting's own unit (the plugin's parameter: its plain value in a whole
+    /// range), in the take's one undo step; a dialog's knob records nothing (spec §2 Taking automation).
+    #[test]
+    fn records_mixer_controls_the_tempo_and_plugin_parameters() {
+        use os_model::target;
+        let mut app = app();
+        if crate::mixer::track(&app.state, 1).is_none() {
+            app.state.project.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        }
+        app.toggle_record();
+        app.transport.pretend_at(24.0, false);
+        app.record_tick();
+        let m = crate::mixer::track_mut(&mut app.state, 1).unwrap();
+        (m.volume, m.pan) = (Some(0.5), Some(-0.25));
+        app.record_control(&Action::Fader(1));
+        app.record_control(&Action::Knob(KnobId::MixPan(1)));
+        app.transport.pretend_at(48.0, false);
+        app.state.tempo = 150.0;
+        app.record_control(&Action::Tempo);
+        app.record_param(target::slot_param(1, 2, 0), (-64.0, 64.0), 0.75);
+        app.record_param(target::slot_param(1, 2, 1), (0.0, 1.0), 0.25);
+        app.record_knob(KnobId::Swing);
+        let points = |app: &App| {
+            let p = app.state.project.pattern(app.state.pattern).map(|p| p.controls.clone()).unwrap_or_default();
+            p.into_iter().map(|c| (c.position, c.kind, c.value)).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            points(&app),
+            [
+                (24, target::mixer(1, target::MIXER_VOLUME), 8000),
+                (24, target::mixer(1, target::MIXER_PAN), -1600),
+                (48, target::TEMPO, 150_000),
+                (48, target::slot_param(1, 2, 0), 32),
+                (48, target::slot_param(1, 2, 1), 16384),
+            ]
+        );
+        stop(&mut app);
+        crate::history::undo(&mut app.state);
+        assert_eq!(points(&app), []);
     }
 
     /// "Disarm on stop" disarms at the stop; step edit never takes a recorded note.
