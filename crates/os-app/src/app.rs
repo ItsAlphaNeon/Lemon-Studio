@@ -1501,6 +1501,9 @@ pub struct App {
     pub(crate) backup: crate::backup::Backup,
     /// Follow Omarchy: the system theme last applied (`omarchy::stamp`) and when to look again (`omarchy_tick`).
     pub(crate) omarchy: (Option<(String, Option<std::time::SystemTime>)>, std::time::Instant),
+    /// The media player the desktop sees (`crate::mpris`; none in tests or without a session bus).
+    #[cfg(target_os = "linux")]
+    mpris: Option<crate::mpris::Mpris>,
 }
 
 /// Window-level requests the shell must carry out after an event.
@@ -1724,6 +1727,8 @@ impl App {
             saved: (Project::default(), 0.0),
             backup: Default::default(),
             omarchy: (None, std::time::Instant::now()),
+            #[cfg(target_os = "linux")]
+            mpris: if cfg!(test) { None } else { crate::mpris::Mpris::start() },
         };
         // The snap settings are program settings, kept in the user folder (spec: ui/global-snap.md §6).
         let snap = crate::snap::load();
@@ -1732,6 +1737,8 @@ impl App {
         app.state.playlist.snap = snap.playlist;
         crate::project_info::created(&mut app.state);
         app.omarchy_tick(std::time::Instant::now());
+        // The Theme page's tiles (and what it offers for the skin in use) from the start.
+        app.sync_preset();
         app.mark_saved();
         if let Some(p) = path {
             app.open(p);
@@ -4339,6 +4346,8 @@ impl App {
         self.song_info_tick(now);
         self.auto_close_tick(now);
         self.omarchy_tick(now);
+        #[cfg(target_os = "linux")]
+        self.mpris_tick();
         self.follow_settings();
         if self.state.cpu.due(now) {
             let tp = &self.transport;
@@ -4866,6 +4875,31 @@ impl App {
             Err(e) => self.state.message = Some(format!("Could not load theme {name}: {e}")),
         }
         self.invalidate();
+    }
+
+    /// MPRIS (`crate::mpris`): the desktop's play, pause and stop, as the transport's buttons; then what it shows.
+    #[cfg(target_os = "linux")]
+    fn mpris_tick(&mut self) {
+        let Some(m) = &self.mpris else { return };
+        for c in m.take() {
+            let playing = self.transport.state() == TransportState::Playing;
+            match c {
+                crate::mpris::Cmd::Play if playing => {}
+                crate::mpris::Cmd::Pause if !playing => {}
+                crate::mpris::Cmd::Play | crate::mpris::Cmd::Pause | crate::mpris::Cmd::PlayPause => self.act(Action::Play),
+                crate::mpris::Cmd::Stop => self.act(Action::Stop),
+            }
+        }
+        let status = match self.transport.state() {
+            TransportState::Playing => "Playing",
+            TransportState::Paused => "Paused",
+            TransportState::Stopped => "Stopped",
+        };
+        let title = self.title();
+        let title = title.trim_start_matches('[').trim_end_matches(']').to_string();
+        if let Some(m) = &self.mpris {
+            m.show(crate::mpris::Now { status, title });
+        }
     }
 
     /// Follow Omarchy (`crate::omarchy`): once a second, the system theme applied when it changed.
@@ -5483,6 +5517,11 @@ impl App {
             SAct::Check(k) if k == views::settings::SHOW_INFO_CHECK => self.toggle_show_info(),
             SAct::Check(k) if k == views::settings::NOTE_COLORS_CHECK => self.toggle_theme_option(k),
             SAct::Check(k) if k == views::settings::FOLLOW_OMARCHY_CHECK => self.toggle_follow_omarchy(),
+            SAct::Check(k) if k == views::settings::TINT_PLUGINS_CHECK => {
+                let on = !crate::settings_file::flag(crate::plugin_window::TINT_KEY, true);
+                crate::settings_file::set_flag(crate::plugin_window::TINT_KEY, on);
+                self.state.message = Some(format!("Stock plugins {} the theme", if on { "follow" } else { "keep Lemon's colours, whatever" }));
+            }
             // The only place that writes the registry (`crate::file_assoc`).
             #[cfg(windows)]
             SAct::Check(k) if k == views::settings::ASSOCIATE_CHECK => self.assoc_click(),

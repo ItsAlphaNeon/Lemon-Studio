@@ -90,6 +90,13 @@ own content. Side branches are named `cutting-edge-<topic>`.
   as the text, and it changes when the system theme changes. Theme ▸ Options ▸ "Follow Omarchy's theme" shows only
   on Omarchy and is on there by default; choosing another theme turns it off. A theme file can give its surfaces
   outright with `LemonStudioSurfaces=#darker,#dark,#background,#lighter` (FL ignores the key).
+- **Stock plugins follow the theme.** With the Lemon skin, the editors of the plugins compiled into Lemon Studio
+  (drawn in the app's window) take the applied theme's colours too: Lemon's greys become its surfaces, light greys its
+  text, the lemon yellows its selection; signal colours stay. Theme ▸ Options ▸ "Stock plugins follow the theme", on
+  by default.
+- **A media player to the desktop (MPRIS).** Lemon Studio is on the session bus as `org.mpris.MediaPlayer2.lemonstudio`:
+  media keys, a bar's player widget and `playerctl` play, pause and stop the transport, and show whether it plays and
+  the project's name.
 - **Third-party plugin windows under Hyprland.** They drag by their own title bar (Hyprland ignores the X11 move
   request) and have no compositor border, shadow or move animation.
 - **Branch marks.** The workspace watermark, the version string ("cutting-edge pre-alpha") and the status bar's mark

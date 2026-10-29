@@ -277,6 +277,7 @@ pub const LIVE: &[&str] = &[
     SHOW_INFO_CHECK,
     NOTE_COLORS_CHECK,
     FOLLOW_OMARCHY_CHECK,
+    TINT_PLUGINS_CHECK,
     SAVE_PRESET,
     THEME_UNDO,
     THEME_REDO,
@@ -385,6 +386,9 @@ pub const SHOW_INFO_CHECK: &str = "Show info on opening";
 /// Theme ▸ Options: the applied theme's `OverrideClips` (`App::toggle_theme_option`; spec: ui/settings-choices.md
 /// "Light mode and clip note colours"). There is no Light mode option (removed 2026-10-18; themes draw as with it on).
 pub const NOTE_COLORS_CHECK: &str = "Audio and automation clips use note colors";
+/// Theme ▸ Options: the stock plugins' editors drawn in the theme's colours too (`plugin_window::embed`), with the Lemon
+/// skin.
+pub const TINT_PLUGINS_CHECK: &str = "Stock plugins follow the theme";
 /// Theme ▸ Options, on Omarchy only: the theme follows the system's (`crate::omarchy`).
 pub const FOLLOW_OMARCHY_CHECK: &str = "Follow Omarchy's theme";
 /// Theme: save the applied theme under a name, undo / redo theme changes, and the readability warning's fix
@@ -813,6 +817,8 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             // ui/theme-presets.md "Settings".
             let skins = os_theme::Design::ALL.iter().map(|d| d.name().to_string()).collect();
             let themes = st.themes.iter().map(|(n, _)| n.clone()).collect();
+            // The stock plugins' editors are Lemon's: recoloured with the Lemon skin only.
+            let lemon_skin = os_theme::Design::ALL.get(st.skin) == Some(&os_theme::Design::Lemon);
             vec![
                 g("Skins", vec![Tiles(TileList::Skins, skins, st.skin)]),
                 g("Themes", vec![Tiles(TileList::Themes, themes, st.preset)]),
@@ -824,6 +830,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 g(
                     "Options",
                     std::iter::once(Check(NOTE_COLORS_CHECK, s.fl_theme().override_clips))
+                        .chain(lemon_skin.then(|| Check(TINT_PLUGINS_CHECK, crate::settings_file::flag(crate::plugin_window::TINT_KEY, true))))
                         .chain(crate::omarchy::available().then(|| Check(FOLLOW_OMARCHY_CHECK, crate::omarchy::following())))
                         .collect(),
                 ),

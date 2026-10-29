@@ -504,6 +504,21 @@ impl Retint {
         self.key(c, self.mute)
     }
 
+    /// A colour Lemon draws with as this theme has it, for pictures painted in Lemon's own colours (the stock plugins'
+    /// editors, `os_plugkit::palette`): greys become the theme's surfaces, or its text when light; the lemon yellows its
+    /// selection; other colours (signals, bands, meters) stay.
+    pub fn recolor(&self, c: Color) -> Color {
+        let chroma = f32::from(c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b)) / 255.0;
+        let (h, _, l) = c.hsl();
+        if chroma < 0.07 {
+            if l > 0.45 { self.text(c) } else { self.surface(c) }
+        } else if (30.0..=70.0).contains(&h) {
+            self.accent(c)
+        } else {
+            c
+        }
+    }
+
     pub fn text(&self, c: Color) -> Color {
         let (_, s, l) = c.hsl();
         let ((ft, fb), (tt, tb)) = (self.text_from, self.text_to);
@@ -576,6 +591,20 @@ fn retint(p: &mut Palette, th: &FlTheme) {
 
 #[cfg(test)]
 mod tests {
+    /// A stock editor's colours under a theme: Lemon's greys become its surfaces (the toolbar grey its background),
+    /// light greys its text, the lemon yellows its selection; other colours stay.
+    #[test]
+    fn lemon_colours_recoloured() {
+        let v = |k: &str, c: u32| format!("{k}={}\n", fl::colour_value(k, Color::rgb(c)));
+        let text = format!("{}{}LemonStudioSurfaces=#181d20,#21272c,#2d353b,#343f44\n", v("Selected", 0x7fbbb3), v("TextColor", 0xd3c6aa));
+        let r = Retint::lemon(&FlTheme::parse(&text));
+        assert_eq!(r.recolor(lemon::DARK), Color::rgb(0x2d353b));
+        assert_eq!(r.recolor(lemon::TEXT), Color::rgb(0xd3c6aa));
+        let sel = r.recolor(lemon::MAIN).hsl().0;
+        assert!((sel - Color::rgb(0x7fbbb3).hsl().0).abs() < 2.0, "{sel}");
+        assert_eq!(r.recolor(Color::rgb(0xe05050)), Color::rgb(0xe05050), "a signal colour stays");
+    }
+
     use super::*;
 
     fn contrast(a: Color, b: Color) -> f32 {

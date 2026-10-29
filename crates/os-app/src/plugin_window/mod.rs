@@ -44,6 +44,10 @@ mod embed;
 #[cfg(target_os = "linux")]
 pub use embed::EmbedFrame;
 
+/// Settings key of Theme ▸ Options ▸ "Stock plugins follow the theme" (on unless turned off): the stock plugins'
+/// editors drawn in the app's window take the theme's colours (`embed`).
+pub const TINT_KEY: &str = "theme_stock_plugins";
+
 /// Linux: a plugin window of its own (an X11 window, `x11`), or drawn in Lemon Studio's window (`embed`: the plugins
 /// compiled into the app). The app makes the same calls either way.
 #[cfg(target_os = "linux")]

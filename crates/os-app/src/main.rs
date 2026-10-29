@@ -21,6 +21,8 @@ mod open_bench;
 mod browser;
 mod cable;
 mod capture;
+#[cfg(target_os = "linux")]
+mod mpris;
 mod omarchy;
 mod one_click;
 mod score_log;

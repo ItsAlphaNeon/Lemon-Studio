@@ -14,7 +14,10 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
 
+use std::sync::Arc;
+
 use os_hostlink::PageIcon;
+use os_theme::design::Retint;
 use os_plugkit::embed::{Surface, View};
 use os_plugkit::input::{Button, Input};
 use os_ui::{Canvas, Rect};
@@ -57,6 +60,35 @@ struct Inner {
     placed: bool,
     /// The editor's size as `sync` last saw it (device px): a change is the editor resizing itself.
     seen_size: Option<(u32, u32)>,
+    /// The editor's last frame in the theme's colours (`tint`): the frame it was made from and the mapping.
+    tinted: Option<(Arc<Vec<u32>>, Retint, Arc<Vec<u32>>)>,
+}
+
+/// What the stock editors are recoloured with: the applied theme over Lemon's colours (`Retint::recolor`); `None`
+/// with the skin's own colours, the Classic skin (its editors stay Lemon's) or the option off.
+fn tint() -> Option<Retint> {
+    if !crate::settings_file::flag(super::TINT_KEY, true) {
+        return None;
+    }
+    os_theme::current().xf.retint
+}
+
+/// XRGB pixels recoloured by `r`: runs of one colour are mapped once.
+fn recolor(px: &[u32], r: &Retint) -> Vec<u32> {
+    let mut seen: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let mut last = (u32::MAX, 0);
+    px.iter()
+        .map(|&p| {
+            if p != last.0 {
+                let q = *seen.entry(p).or_insert_with(|| {
+                    let c = r.recolor(os_ui::Color::rgb(p & 0xff_ffff));
+                    (p & 0xff00_0000) | u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+                });
+                last = (p, q);
+            }
+            last.1
+        })
+        .collect()
 }
 
 /// A plugin window in Lemon Studio's own window. Cheap to clone: the app's state holds one per open window to paint
@@ -178,6 +210,7 @@ impl EmbedFrame {
             canvas_off: (0, 0),
             placed: pos.is_some(),
             seen_size: None,
+            tinted: None,
         };
         Ok(EmbedFrame(Rc::new(RefCell::new(inner))))
     }
@@ -424,7 +457,16 @@ impl EmbedFrame {
             None => 0.0,
         };
         let v = i.surface.view();
-        if let Some(f) = v.frame {
+        if let Some(mut f) = v.frame {
+            if let Some(r) = tint() {
+                let fresh = i.tinted.as_ref().filter(|(from, at, _)| Arc::ptr_eq(from, &f.px) && *at == r).map(|t| t.2.clone());
+                let px = fresh.unwrap_or_else(|| {
+                    let px = Arc::new(recolor(&f.px, &r));
+                    i.tinted = Some((f.px.clone(), r, px.clone()));
+                    px
+                });
+                f.px = px;
+            }
             c.push_clip(area);
             // the editor may be smaller than its area for a moment (resizing): round the area's corners, not its own
             let (ex, ey) = i.editor_at();
@@ -442,8 +484,12 @@ impl EmbedFrame {
     pub fn paint_overlays(&self, c: &mut Canvas) {
         let i = self.0.borrow();
         let (ex, ey) = i.editor_at();
+        let r = tint();
         for o in i.surface.view().overlays {
-            c.paint_xrgb(&o.pixels.px, (o.pixels.w, o.pixels.h), (ex + o.x, ey + o.y));
+            match &r {
+                Some(r) => c.paint_xrgb(&recolor(&o.pixels.px, r), (o.pixels.w, o.pixels.h), (ex + o.x, ey + o.y)),
+                None => c.paint_xrgb(&o.pixels.px, (o.pixels.w, o.pixels.h), (ex + o.x, ey + o.y)),
+            }
         }
     }
 
