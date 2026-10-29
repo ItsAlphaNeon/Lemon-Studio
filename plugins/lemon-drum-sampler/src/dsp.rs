@@ -448,7 +448,8 @@ mod tests {
         let (pan, g) = pan_pair(pan_of(64), pan_of(64));
         let (l, r) = split(f64::from(pan));
         assert!((db(l as f32 * g) + 10.67).abs() < 0.02 && (db(r as f32 * g) - 4.65).abs() < 0.02, "{pan} {g}");
-        assert_eq!(pan_pair(0.0, 0.0), (0.0, 1.0));
+        let (pan, g) = pan_pair(0.0, 0.0);
+        assert!(pan.abs() < 1e-6 && (g - 1.0).abs() < 1e-6, "{pan} {g}");
         assert!((tune_cents(100) - 937.5).abs() < 1e-9 && tune_cents(-128) == -1200.0);
     }
 
