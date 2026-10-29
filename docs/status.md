@@ -68,6 +68,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - CLAP and VST3 effects get a sidechain input too: pick it in the slot menu's Sidechain input submenu, which lists
   the tracks routed into the track. The choice is saved where FL saves it, and projects saved by FL play their
   plugins' sidechain and input choices as FL plays them
+- The mixer track menu's Insert multiple... (type how many tracks to insert), Gradient color... (over the selected
+  tracks) and File ▸ Render to wave file... (the Export form for the selected tracks, writing each track's output to
+  its own file)
 
 ## ✅ Plugin hosting
 
@@ -118,6 +121,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   own plugins), stepped with the arrows or the wheel; Save preset as..., Rename, Delete and Browse presets
 - The mixer's slot menu lists the effect's presets and has Browse presets and Save preset as..., as its window
   menu does
+- Spare state in plugin windows and mixer slots: Store in spare state, then Flip with spare state swaps the two to
+  compare them (one undo step; the spare state is kept while the plugin is open, not in the project). Display preset
+  name in preset selector hides or shows the preset's name in the window
 - Import of `.ospreset`, `.vstpreset` and VST2 `.fxp` / `.fxb` files (a bank goes into a folder of its own); a preset
   file dropped onto a plugin window, rack row or mixer slot loads there, and anywhere else adds its plugin
 

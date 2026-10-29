@@ -68,8 +68,8 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
-- [ ] **Mixer right-click menus.** 38 entries greyed out on 2026-10-29: the routing menu, groups, Render to wave
-  file, spare states, smart disable ([mixer.rs](../crates/os-app/src/mixer.rs))
+- [ ] **Mixer right-click menus.** 32 entries greyed out on 2026-10-29: the routing menu, groups, docking, smart
+  disable and threaded processing, slot colours and icons, Patcherize ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [ ] **Playlist right-click menus.** 29 entries greyed out on 2026-10-29: key markers, Add two..., the Start / Stop
   recording markers' punch ([playlist.rs](../crates/os-app/src/playlist.rs))
 - [ ] **Channel rack right-click menus.** 14 entries greyed out on 2026-10-29: Type in value, Burn selected loops to
