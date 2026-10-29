@@ -1220,6 +1220,12 @@ pub enum RCmd {
     PasteValue(KnobId),
     /// Set... ▸ a value: the knob at that position (0..1).
     SetValue(KnobId, f32),
+    /// The mixer box's and the LED's Value group (Lemon Studio's design): Copy value copies the box's position (0..1),
+    /// Paste value sets it from the copied one, Set... ▸ sets a value in the box's unit (`typein::Target::RackTrack` /
+    /// `RackLed`).
+    CopyBox(crate::typein::Target),
+    PasteBox(crate::typein::Target),
+    SetBox(crate::typein::Target, f64),
     MixerReset(usize),
     AssignFree(usize),
     // Display filter (§21).
@@ -1323,7 +1329,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
             [0u8, 25, 50, 75, 100].into_iter().map(|p| off(it(format!("{p}%"), RCmd::SwingSel(Some(p))), none)).chain([off(it("Custom...", RCmd::SwingSel(None)), none)]).collect(),
         ),
         PItem::sub("Set truncate swing notes for selected", vec![off(it("Turn on", RCmd::TruncSel(true)), none), off(it("Turn off", RCmd::TruncSel(false)), none)]),
-        PItem::not_yet("Burn selected loops to pattern"),
+        burn_sel(s),
         off(it("Assign selected to free mixer track(s)", RCmd::AssignFreeSel).key("Ctrl+L"), none),
         off(it("Select mixer tracks for the selected channels", RCmd::SelectMixerTracks), none),
         PItem::sub(crate::views::menus::DECLICK_LABEL, declick_items(s)),
@@ -1504,8 +1510,16 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// The Automation / Remote control / Value groups shared by knob and LED menus (§19).
-fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)>) -> Vec<PItem> {
+/// Burn selected loops to pattern (§17): the loop menu's Burn selected channels (§7), enabled while loop mode is on and
+/// a selected channel has a loop length (Lemon Studio's design; the original showed it greyed with loop mode off).
+fn burn_sel(s: &State) -> PItem {
+    let i = it("Burn selected loops to pattern", RCmd::Burn(false));
+    if s.rack.loop_mode && s.rack.sel.iter().any(|r| s.rack.loop_len.contains_key(r)) { i } else { i.off() }
+}
+
+/// The Automation / Remote control / Value groups shared by knob and LED menus (§19). `other` is the mixer box or the
+/// LED when `knob` is `None`: its Value group works on it (Lemon Studio's design).
+fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Target>, auto: Option<(u32, String, f64)>) -> Vec<PItem> {
     // spec: ui/settings-choices.md "Advanced: Initialize controls automatically"
     let [init, delete] = crate::init::items(s, auto.as_ref().map(|a| (a.0, a.2)));
     let mut v = vec![
@@ -1536,17 +1550,55 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
             let p = it(crate::playlist::paste_label(s), RCmd::PasteValue(k));
             v.push(if s.value_clip.is_some() { p } else { p.off() });
         }
-        None => v.extend([PItem::not_yet("Copy value"), PItem::new("Paste value", Cmd::Nothing).off()]),
+        None => match other {
+            Some(t) => {
+                v.push(it("Copy value", RCmd::CopyBox(t)));
+                let p = it(crate::playlist::paste_label(s), RCmd::PasteBox(t));
+                v.push(if s.value_clip.is_some() { p } else { p.off() });
+            }
+            None => v.extend([PItem::not_yet("Copy value"), PItem::new("Paste value", Cmd::Nothing).off()]),
+        },
     }
     // spec: ui/type-in-value.md §8
     v.push(match knob {
         Some(k) => PItem::new("Enter value...", Cmd::TypeIn(crate::typein::Target::Knob(k))),
-        None => PItem::not_yet("Enter value..."),
+        None => match other {
+            Some(t) => PItem::new("Enter value...", Cmd::TypeIn(t)),
+            None => PItem::not_yet("Enter value..."),
+        },
     });
-    v.push(match knob {
-        Some(k) => PItem::sub("Set...", set_items(s, k)),
-        None => PItem::not_yet("Set..."),
+    v.push(match (knob, other) {
+        (Some(k), _) => PItem::sub("Set...", set_items(s, k)),
+        (None, Some(t)) => PItem::sub("Set...", box_set_items(s, t)),
+        (None, None) => PItem::not_yet("Set..."),
     });
+    v
+}
+
+/// The "Set..." submenu of the mixer box and the LED (Lemon Studio's design, after the knobs' `set_items`): the default
+/// (the insert Reset gives; on), then the mixer box's master, 25 %, 50 %, 75 % and last insert, or the LED's Off and
+/// On, each with the box's text at that value. The current value has the radio mark.
+fn box_set_items(s: &State, t: crate::typein::Target) -> Vec<PItem> {
+    use crate::typein::{at_position, get, Target};
+    let now = get(s, t);
+    let item = |name: &str, v: f64| {
+        let text = crate::views::rack::insert_name(v as u16);
+        let label = match t {
+            Target::RackLed(_) if name == "Default" => "Default (On)".to_string(),
+            Target::RackLed(_) => name.to_string(),
+            _ => format!("{name} ({text})"),
+        };
+        it(label, RCmd::SetBox(t, v)).mark(Mark::Radio(now == Some(v)))
+    };
+    let default = match t {
+        Target::RackTrack(r) => s.project.channels.get(r).map_or(0, |c| (c.index + 1).min(crate::mixer::max_insert(&s.project))),
+        _ => 1,
+    };
+    let mut v = vec![item("Default", f64::from(default)), PItem::sep()];
+    match t {
+        Target::RackTrack(_) => v.extend([("Minimum", 0.0), ("25%", 0.25), ("50%", 0.5), ("75%", 0.75), ("Maximum", 1.0)].map(|(name, p)| item(name, at_position(s, t, p)))),
+        _ => v.extend([item("Off", 0.0), item("On", 1.0)]),
+    }
     v
 }
 
@@ -1568,14 +1620,14 @@ fn set_items(s: &State, k: KnobId) -> Vec<PItem> {
 /// Right click on a knob (§19): Reset, then the shared groups.
 pub fn knob_menu(s: &State, k: KnobId, auto: Option<(u32, String, f64)>, x: f32, y: f32) -> Popup {
     let mut items = vec![it("Reset", RCmd::Reset(k))];
-    items.extend(value_groups(s, Some(k), auto));
+    items.extend(value_groups(s, Some(k), None, auto));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Right click on the mixer box (§12).
 pub fn mixer_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
     let mut items = vec![it("Reset", RCmd::MixerReset(r))];
-    items.extend(value_groups(s, None, None));
+    items.extend(value_groups(s, None, Some(crate::typein::Target::RackTrack(r)), None));
     items.push(PItem::sep());
     items.push(it("Assign to free mixer track", RCmd::AssignFree(r)));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
@@ -1588,7 +1640,7 @@ pub fn led_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("Solo", RCmd::Solo(r)).mark(Mark::Check(soloed)),
         it("Lock active/mute state", RCmd::Lock(r)).mark(Mark::Check(s.rack.locked.contains(&r))),
     ];
-    items.extend(value_groups(s, None, None));
+    items.extend(value_groups(s, None, Some(crate::typein::Target::RackLed(r)), None));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
@@ -1846,6 +1898,21 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::SetValue(k, v) => {
             crate::history::knob(s, k, false);
             s.set_knob(k, v);
+            None
+        }
+        RCmd::CopyBox(t) => {
+            s.value_clip = crate::typein::position(s, t);
+            None
+        }
+        RCmd::PasteBox(t) => {
+            if let Some(p) = s.value_clip {
+                let v = crate::typein::at_position(s, t, p);
+                crate::typein::set_value(s, t, v);
+            }
+            None
+        }
+        RCmd::SetBox(t, v) => {
+            crate::typein::set_value(s, t, v);
             None
         }
         RCmd::MixerReset(r) => {
@@ -2455,6 +2522,113 @@ mod tests {
         assert_eq!(set(&app).iter().position(|i| i.mark == Mark::Radio(true)), Some(6));
         crate::history::undo(&mut app.state);
         assert_eq!(app.state.knob(knob), 0.5, "one undo step");
+    }
+
+    /// The mixer box's and the LED's Type in value... open the value box on them (Lemon Studio's design): a track number
+    /// or "Master", "On" or "Off", each one undo step; text it cannot read leaves the value.
+    #[test]
+    fn mixer_box_and_led_type_in_value() {
+        use crate::typein::{accept, caption, text, Target};
+        let mut app = App::new(None);
+        let type_in = |m: Popup| m.items.iter().find(|i| i.label == "Enter value...").map(|i| (i.enabled, i.cmd.clone())).unwrap();
+        assert_eq!(type_in(mixer_menu(&app.state, 0, 0.0, 0.0)), (true, Cmd::TypeIn(Target::RackTrack(0))));
+        assert_eq!(type_in(led_menu(&app.state, 1, 0.0, 0.0)), (true, Cmd::TypeIn(Target::RackLed(1))));
+
+        let (box_, led) = (Target::RackTrack(0), Target::RackLed(1));
+        let track = |app: &App| app.state.project.channels[0].mixer_track;
+        assert_eq!(caption(&app.state, box_), "Value for Target mixer track");
+        assert_eq!(text(&app.state, box_, false), format!("Bus {}", track(&app)));
+        let before = track(&app);
+        accept(&mut app.state, box_, false, "Bus 3");
+        assert_eq!(track(&app), 3);
+        accept(&mut app.state, box_, false, "master");
+        assert_eq!((track(&app), text(&app.state, box_, false).as_str()), (0, "Master"));
+        accept(&mut app.state, box_, false, "7");
+        accept(&mut app.state, box_, false, "abc");
+        assert_eq!(track(&app), 7, "unreadable text leaves it");
+        accept(&mut app.state, box_, false, "100000");
+        assert_eq!(track(&app), crate::mixer::max_insert(&app.state.project), "clamped to the last insert");
+        crate::history::undo(&mut app.state);
+        assert_eq!(track(&app), 7, "one undo step each");
+        for _ in 0..3 {
+            crate::history::undo(&mut app.state);
+        }
+        assert_eq!(track(&app), before);
+
+        let on = |app: &App| app.state.project.channels[1].enabled;
+        assert_eq!((on(&app), text(&app.state, led, false).as_str()), (true, "On"));
+        accept(&mut app.state, led, false, "off");
+        assert!(!on(&app));
+        accept(&mut app.state, led, false, "1");
+        assert!(on(&app));
+        accept(&mut app.state, led, false, "muted");
+        assert_eq!((on(&app), text(&app.state, led, false).as_str()), (false, "Off"));
+        crate::history::undo(&mut app.state);
+        assert!(on(&app));
+    }
+
+    /// The mixer box's and the LED's Copy value, Paste value and Set... (Lemon Studio's design): the position over the
+    /// inserts or the LED's 0 / 1 is copied, pasted onto another row, and Set... lists the default and fixed values.
+    #[test]
+    fn mixer_box_and_led_copy_paste_set() {
+        use crate::typein::Target;
+        let mut app = App::new(None);
+        let find = |m: &Popup, label: &str| m.items.iter().find(|i| i.label.starts_with(label)).cloned().unwrap();
+        let cmd = |i: &PItem| match i.cmd.clone() {
+            Cmd::Rack(c) => c,
+            c => panic!("{c:?}"),
+        };
+        app.state.project.channels[0].mixer_track = 4;
+        let m = mixer_menu(&app.state, 0, 0.0, 0.0);
+        assert!(find(&m, "Copy value").enabled && !find(&m, "Paste value").enabled);
+        run(&mut app, cmd(&find(&m, "Copy value")));
+        let m = mixer_menu(&app.state, 2, 0.0, 0.0);
+        run(&mut app, cmd(&find(&m, "Paste value")));
+        assert_eq!(app.state.project.channels[2].mixer_track, 4);
+
+        let set = find(&mixer_menu(&app.state, 2, 0.0, 0.0), "Set...").children;
+        let labels: Vec<_> = set.iter().map(|i| i.label.to_string()).collect();
+        let max = crate::mixer::max_insert(&app.state.project);
+        let default = (app.state.project.channels[2].index + 1).min(max);
+        assert_eq!(labels[0], format!("Default (Bus {default})"));
+        assert_eq!(labels[2], "Minimum (Master)");
+        assert_eq!(labels[6], format!("Maximum (Bus {max})"));
+        run(&mut app, cmd(&set[2]));
+        assert_eq!(app.state.project.channels[2].mixer_track, 0);
+        let set = find(&mixer_menu(&app.state, 2, 0.0, 0.0), "Set...").children;
+        assert_eq!(set.iter().position(|i| i.mark == Mark::Radio(true)), Some(2));
+        crate::history::undo(&mut app.state);
+        assert_eq!(app.state.project.channels[2].mixer_track, 4, "one undo step");
+
+        // The LED: Set... ▸ Off mutes; a copied off pastes as off.
+        let set = find(&led_menu(&app.state, 1, 0.0, 0.0), "Set...").children;
+        let labels: Vec<_> = set.iter().map(|i| i.label.to_string()).collect();
+        assert_eq!(labels, ["Default (On)", "", "Off", "On"]);
+        run(&mut app, cmd(&set[2]));
+        assert!(!app.state.project.channels[1].enabled);
+        run(&mut app, RCmd::CopyBox(Target::RackLed(1)));
+        assert_eq!(app.state.value_clip, Some(0.0));
+        run(&mut app, RCmd::PasteBox(Target::RackLed(3)));
+        assert!(!app.state.project.channels[3].enabled);
+    }
+
+    /// Options ▸ Burn selected loops to pattern is the loop menu's Burn selected channels: enabled while loop mode is on
+    /// and a selected channel has a loop length; it burns only the selected channels' loops.
+    #[test]
+    fn options_burn_selected_loops() {
+        let mut app = App::new(None);
+        let burn = |app: &App| options_menu(&app.state, 0.0, 0.0).items.iter().find(|i| i.label == "Burn selected loops to pattern").map(|i| (i.enabled, i.cmd.clone())).unwrap();
+        assert_eq!(burn(&app).0, false);
+        app.state.rack.loop_mode = true;
+        app.state.rack.loop_len = BTreeMap::from([(0, 3), (1, 5)]);
+        app.state.rack.sel = BTreeSet::from([2]);
+        assert_eq!(burn(&app).0, false, "no selected channel loops");
+        app.state.rack.sel = BTreeSet::from([1, 2]);
+        let (on, c) = burn(&app);
+        assert!(on);
+        let Cmd::Rack(c) = c else { panic!() };
+        run(&mut app, c);
+        assert_eq!(app.state.rack.loop_len, BTreeMap::from([(0, 3)]), "only the selected channel's loop burned");
     }
 
     /// Options ▸ Set swing mix for selected, Create layer with selected channels and Color selected ▸ All... act on the
