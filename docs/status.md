@@ -220,6 +220,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Lemon Filter (Fruity Filter: a resonant low, band and high pass mix, X 2 and the DC remover) as a VST3 and CLAP
   plugin, with its response drawn in the editor; a project's Fruity Filter slots play through the same sound, which
   matches FL Studio 2026's exports in the tests (10 of 13 cases sample for sample, the rest below -180 dB)
+- Pulp Filter (Fruity Love Philter: a pattern-controlled multi-filter) and Press (Maximus: a multiband maximiser) as
+  VST3 and CLAP plugins; a project's Fruity Love Philter and Maximus slots play and open in them, and are saved back
+  as the original effects with their state
 - Lemon Flanger and Lemon Phaser as VST3 and CLAP plugins, each with the original's 27 presets as factory presets; a
   project's Fruity Flanger and Fruity Phaser play through the same sound in the mixer. Their sine waves use the true
   pi, where the original's is a hair off: the flanger still matches FL Studio 2026's exports sample for sample in the

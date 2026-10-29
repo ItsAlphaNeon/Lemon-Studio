@@ -3,7 +3,8 @@
 What stands between Lemon Studio and its first alpha: a fully functional DAW at FL Studio parity. Third-party plugins
 (CLAP, VST3, VST2) are not part of the alpha bar; hosting them already works, and the rest of that work comes later.
 
-The list started from an assessment of `main` at `a637e72` on 2026-10-24. Tick an item in the change that finishes it;
+The list started from an assessment of `main` at `a637e72` on 2026-10-24 and was checked again against `fb4382e` on
+2026-10-29. Tick an item in the change that finishes it;
 for one under way, add "(in progress, #PR)" after it. Add items here as they turn up. What already works is in
 [status.md](status.md).
 
@@ -14,9 +15,11 @@ Systems a fully functional DAW can't ship without.
 - [x] **Audio editor.** Tesla, after FL's Edison, in a mixer slot (#158), with the app's audio-editor entries wired to
   it: Open audio editor and record, One-click recording and the Record question into it, Remove all instances.
   TOOLS ▸ Audio logger and Tesla's later tools are listed under Gaps and polish
-- [ ] **Audio recording into mixer tracks.** Arm and disarm tracks and record their inputs; today only one-click
-  recording into the playlist works ([mixer.rs](../crates/os-app/src/mixer.rs))
-- [ ] **Input monitoring.** Hear an input through its mixer track while it is armed or recording
+- [ ] **Audio recording into mixer tracks.** Tracks take device inputs and the disk-record button arms them (#182),
+  but nothing records into them yet; one-click recording into the playlist or Tesla is the only way in. The mixer
+  menu's Arm and Disarm selected track(s) are still greyed out ([mixer.rs](../crates/os-app/src/mixer.rs))
+- [x] **Input monitoring.** A track's input plays through it while it is armed, or always, per its Monitor external
+  input setting (Off / When armed / On), also while stopped (#182)
 - [ ] **Automation recording into clips.** Only channel volume and pan moves record, and only into the pattern
 - [x] **Automation clip LFO and min / range.** The clip channel's MIN / MAX knobs set its range and its LFO
   (switch, mode, amount, speed, tension, skew, pulse width, its own envelope) plays as the original's, in the clip's
@@ -29,8 +32,8 @@ Systems a fully functional DAW can't ship without.
 
 ## Built-in instruments and effects
 
-Without third-party plugins, the built-in ones are the whole sound palette. Lemon Studio has three instruments and
-fourteen effects; these are the gaps a project made in FL Studio runs into most.
+Without third-party plugins, the built-in ones are the whole sound palette. Lemon Studio has three instruments,
+sixteen effects and the Tesla audio editor; these are the gaps a project made in FL Studio runs into most.
 
 - [ ] **Drum sampler (FPC).** A pad-based drum instrument
 - [ ] **Slicer (Slicex, Fruity Slicer).** A loop chopped into slices that the piano roll plays
@@ -55,13 +58,13 @@ Greyed-out controls and partial features. These can land alongside the blockers.
 - [ ] **Undo for mixer track commands.** Mute, routing, names and slots are not in the history yet
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
-- [ ] **Mixer right-click menus.** 49 entries greyed out on 2026-10-24: the routing menu, groups, Render to wave
-  file, spare states, smart disable ([mixer.rs](../crates/os-app/src/mixer.rs))
-- [ ] **Playlist right-click menus.** 36 entries greyed out on 2026-10-24: key markers, Add two..., quantized song
+- [ ] **Mixer right-click menus.** 46 entries greyed out on 2026-10-29: the routing menu, groups, Render to wave
+  file, spare states, smart disable, Arm and Disarm selected track(s) ([mixer.rs](../crates/os-app/src/mixer.rs))
+- [ ] **Playlist right-click menus.** 36 entries greyed out on 2026-10-29: key markers, Add two..., quantized song
   jumps, the Start / Stop recording markers' punch ([playlist.rs](../crates/os-app/src/playlist.rs))
-- [ ] **Channel rack right-click menus.** 25 entries greyed out on 2026-10-24: Type in value, Burn selected loops to
+- [ ] **Channel rack right-click menus.** 25 entries greyed out on 2026-10-29: Type in value, Burn selected loops to
   pattern, instrument tracks, Advanced looping ([rack.rs](../crates/os-app/src/rack.rs))
-- [ ] **Main menu bar.** 24 of its 134 entries greyed out on 2026-10-24: 13 in TOOLS, 5 in VIEW, 4 in HELP, 2 in ADD
+- [ ] **Main menu bar.** 24 of its 136 entries greyed out on 2026-10-29: 13 in TOOLS, 5 in VIEW, 4 in HELP, 2 in ADD
   ([menus.rs](../crates/os-app/src/views/menus.rs))
 - [ ] **TOOLS ▸ Audio logger and Dump to audio editor.** FL keeps the master's last minutes in memory; not measured
   yet. Tesla's rolling recording goes with it: at its time limit Tesla stops, where Edison keeps the last minutes
@@ -76,11 +79,14 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   edited
 - [ ] **Browser: Favorites, the plugin database and Browser find**
 - [ ] **JACK on Linux**
-- [ ] **ASIO output pairs.** The master always plays to the driver's first two outputs
+- [x] **ASIO output pairs.** Every track has an output menu with the pairs of the driver's first 16 outputs, and the
+  master plays on the pair chosen for it (#182)
 
 ## Shipping a build
 
-What has to exist before anyone outside can run the alpha.
+What has to exist before anyone outside can run the alpha. Builds ship once the rest of this checklist is done
+(decided 2026-10-29), so these come last: until then nothing is packaged or released, and contributions that add
+installers or release packaging are declined.
 
 - [ ] **Prebuilt binaries for Windows, macOS and Linux.** Today Lemon Studio is built from source only
 - [x] **Complete [THIRD-PARTY-NOTICES.txt](../THIRD-PARTY-NOTICES.txt).** Every crate that goes into a build is
