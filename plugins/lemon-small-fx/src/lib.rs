@@ -5,7 +5,8 @@
 //! Lemon Studio's small effects as VST3 / CLAP plugins (nih-plug): Lemon Soft Clipper, Lemon Fast Distortion, Lemon
 //! Balance, Lemon Stereo Enhancer, Lemon Transient Processor, Lemon Chorus, Lemon Stereo Shaper, Lemon Filter, Lemon
 //! Flanger and Lemon Phaser (and the settings and editors of the controllers, Lemon Peak Controller's
-//! [`peak_controller`] and Lemon Formula Controller's [`formula_controller`], with the ticks they share, [`ticks`]).
+//! [`peak_controller`] and Lemon Formula Controller's [`formula_controller`], with the ticks they share, [`ticks`], and
+//! Lemon Vocoder's, [`vocoder`]).
 //! Each is a handful of settings over a sound of `os_engine::effects`, so they share everything but their
 //! description: the plugin, its parameters and saved state ([`params`]), the Pith editor ([`editor`], [`view`]). A
 //! description ([`Spec`]) gives the settings, their value texts, the editor's cards and controls, and the sound. The
@@ -33,6 +34,7 @@ pub mod stereo_shaper;
 pub mod ticks;
 pub mod transient_processor;
 pub mod view;
+pub mod vocoder;
 
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
@@ -45,7 +47,7 @@ use os_ui::{Canvas, Color, Rect};
 use params::FxParams;
 
 /// The most settings an effect here has.
-pub const MAX: usize = 12;
+pub const MAX: usize = 20;
 
 /// One setting: the original's saved state holds it as int `k` (its place in [`Spec::settings`], unless
 /// [`Spec::fields`] maps it).
@@ -152,6 +154,12 @@ pub struct Spec {
     pub fields: &'static [usize],
     /// The bytes a new instance's saved state has after the settings (kept as stored otherwise).
     pub tail: &'static [u8],
+    /// A new instance's whole saved state, when the description makes it (Vocodex's, with its curves and the ints no
+    /// setting covers); `None`: the version, the settings' starts and the tail.
+    pub blank: Option<fn() -> Vec<u8>>,
+    /// Where the settings' ints start in a stored state, for a state whose part before them varies in length
+    /// (Vocodex's curves): `None` from it when the state cannot be read. `None` here: right after the version.
+    pub locate: Option<fn(&[u8]) -> Option<usize>>,
     /// Editor size in logical pixels.
     pub size: (u32, u32),
     pub cards: &'static [Card],
@@ -339,6 +347,7 @@ mod tests {
         phaser::SPEC,
         peak_controller::SPEC,
         formula_controller::SPEC,
+        vocoder::SPEC,
     ];
 
     /// Every effect: ids unique, starts inside the ranges, a control per setting, the plugin ids distinct.

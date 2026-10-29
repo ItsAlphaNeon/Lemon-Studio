@@ -87,6 +87,8 @@ pub const SPEC: &Spec = &Spec {
     any_version: true,
     fields: &FIELDS,
     tail: &[],
+    blank: None,
+    locate: None,
     size: (360, 372),
     cards: &CARDS,
     controls: &CONTROLS,

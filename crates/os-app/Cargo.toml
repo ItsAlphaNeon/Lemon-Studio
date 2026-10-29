@@ -48,6 +48,7 @@ lemon-phaser = { path = "../../plugins/lemon-phaser", features = ["linked"] }
 lemon-peak-controller = { path = "../../plugins/lemon-peak-controller", features = ["linked"] }
 lemon-formula-controller = { path = "../../plugins/lemon-formula-controller", features = ["linked"] }
 lemon-slicer = { path = "../../plugins/lemon-slicer", features = ["linked"] }
+lemon-vocoder = { path = "../../plugins/lemon-vocoder", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"
