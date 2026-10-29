@@ -43,6 +43,30 @@ pub fn enable_in_tests() {
     TEST_ON.store(true, Ordering::Release);
 }
 
+/// The audio threads by what they do, for the audio log (`crate::audio_log`).
+#[derive(Clone, Copy)]
+pub enum Role {
+    Feeder,
+    Callback,
+}
+
+static ROLES: [AtomicI32; 2] = [const { AtomicI32::new(0) }; 2];
+
+/// Thread `tid` is now the one doing `role`.
+pub fn set_role(role: Role, tid: i32) {
+    ROLES[role as usize].store(tid, Ordering::Release);
+}
+
+/// Whether the feeder and the device callback run at real-time priority (`None`: none running).
+pub fn roles() -> (Option<bool>, Option<bool>) {
+    let state = |r: Role| match ROLES[r as usize].load(Ordering::Acquire) {
+        0 => None,
+        t if ended(t) => None,
+        t => Some(is_realtime(t)),
+    };
+    (state(Role::Feeder), state(Role::Callback))
+}
+
 /// The calling thread's kernel id.
 pub fn tid() -> i32 {
     // SAFETY: gettid has no preconditions.

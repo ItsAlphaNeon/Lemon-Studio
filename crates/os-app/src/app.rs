@@ -1504,6 +1504,12 @@ pub struct App {
     /// Session restore (`crate::session`): the kept plugin windows still to open, and since when they wait.
     pub(crate) session_plugins: Vec<usize>,
     pub(crate) session_since: Option<std::time::Instant>,
+    /// The audio log's dropout watch (`crate::audio_log`).
+    #[cfg(target_os = "linux")]
+    audio_watch: crate::audio_log::Watch,
+    /// Whether the transport played at the last tick: a start is logged.
+    #[cfg(target_os = "linux")]
+    audio_playing: bool,
     /// The media player the desktop sees (`crate::mpris`; none in tests or without a session bus).
     #[cfg(target_os = "linux")]
     mpris: Option<crate::mpris::Mpris>,
@@ -1732,6 +1738,10 @@ impl App {
             omarchy: (None, std::time::Instant::now()),
             session_plugins: Vec::new(),
             session_since: None,
+            #[cfg(target_os = "linux")]
+            audio_watch: Default::default(),
+            #[cfg(target_os = "linux")]
+            audio_playing: false,
             #[cfg(target_os = "linux")]
             mpris: if cfg!(test) { None } else { crate::mpris::Mpris::start() },
         };
@@ -4374,6 +4384,8 @@ impl App {
         self.omarchy_tick(now);
         #[cfg(target_os = "linux")]
         self.mpris_tick();
+        #[cfg(target_os = "linux")]
+        self.audio_log_tick();
         self.follow_settings();
         if self.state.cpu.due(now) {
             let tp = &self.transport;
@@ -4925,6 +4937,25 @@ impl App {
         let title = title.trim_start_matches('[').trim_end_matches(']').to_string();
         if let Some(m) = &self.mpris {
             m.show(crate::mpris::Now { status, title });
+        }
+    }
+
+    /// The audio log (`crate::audio_log`): a playback starting, and dropouts with what the audio threads were then.
+    #[cfg(target_os = "linux")]
+    fn audio_log_tick(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let playing = self.transport.playing();
+        let context = |a: &App| format!("{} ({})", a.title(), crate::audio_cfg::AudioCfg::current().text().replace('\n', " ").trim());
+        if playing && !self.audio_playing {
+            crate::audio_log::write(&format!("play: {}", context(self)));
+        }
+        self.audio_playing = playing;
+        let (_, demoted) = crate::rt::counts();
+        let drops = self.transport.drops();
+        if let Some(line) = self.audio_watch.check(drops, demoted, crate::rt::roles(), "") {
+            crate::audio_log::write(&format!("{line}{}", context(self)));
         }
     }
 

@@ -16,6 +16,8 @@ mod autoscroll;
 mod backup;
 #[cfg(test)]
 mod audio_bench;
+#[cfg(target_os = "linux")]
+mod audio_log;
 #[cfg(test)]
 mod open_bench;
 mod browser;

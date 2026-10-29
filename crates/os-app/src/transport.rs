@@ -114,6 +114,10 @@ pub struct Shared {
     tracks: Mutex<TrackPeaks>,
     /// Device blocks the queue could not fill since the program started.
     underruns: AtomicU64,
+    /// Of those, by kind (`crate::audio_log`): an empty block, a plugin late for its tick, the device's own.
+    drops_empty: AtomicU64,
+    drops_plugin: AtomicU64,
+    drops_device: AtomicU64,
     /// How far the playback and live streams render ahead of the device.
     ahead: AheadStats,
     /// Time spent rendering per second of audio (f32 bits), over the last quarter second of playback.
@@ -823,6 +827,12 @@ impl Transport {
         self.shared.underruns.load(Ordering::Relaxed)
     }
 
+    /// The dropouts by kind (`crate::audio_log`).
+    pub fn drops(&self) -> crate::audio_log::Drops {
+        let s = &self.shared;
+        crate::audio_log::Drops { empty: s.drops_empty.load(Ordering::Relaxed), plugin: s.drops_plugin.load(Ordering::Relaxed), device: s.drops_device.load(Ordering::Relaxed) }
+    }
+
     /// Time the engine spends rendering per second of audio, 0..1 (more than 1: it cannot keep up), over the last
     /// quarter second of playback or live notes.
     pub fn load(&self) -> f32 {
@@ -1055,6 +1065,7 @@ impl Feeder {
         let missed = e.take_missed();
         if missed > 0 {
             self.shared.underruns.fetch_add(missed, Ordering::Relaxed);
+            self.shared.drops_plugin.fetch_add(missed, Ordering::Relaxed);
         }
         if frames > 0 && self.meters {
             self.busy += t0.elapsed();
@@ -1166,8 +1177,14 @@ fn raise_priority() {
 /// Linux: real-time priority, by itself or through rtkit (`crate::rt`); at normal priority when neither allows it.
 #[cfg(target_os = "linux")]
 fn raise_priority() {
-    if let Err(e) = crate::rt::promote(crate::rt::tid()) {
-        eprintln!("Audio: the feeder runs at normal priority ({e})");
+    let tid = crate::rt::tid();
+    crate::rt::set_role(crate::rt::Role::Feeder, tid);
+    match crate::rt::promote(tid) {
+        Ok(()) => crate::audio_log::write("feeder: real-time priority"),
+        Err(e) => {
+            eprintln!("Audio: the feeder runs at normal priority ({e})");
+            crate::audio_log::write(&format!("feeder: normal priority ({e})"));
+        }
     }
 }
 
@@ -1659,7 +1676,9 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         }
         // Stopped streams are dropped once their fade is over; then the instruments are silenced for good.
         closing.retain(|(_, since)| since.elapsed() < CLOSE_AFTER);
-        shared.underruns.fetch_add(device.take_xruns(), Ordering::Relaxed);
+        let xruns = device.take_xruns();
+        shared.underruns.fetch_add(xruns, Ordering::Relaxed);
+        shared.drops_device.fetch_add(xruns, Ordering::Relaxed);
         // A device that failed (it went away, a driver asked to be reset): the playback is held where it was heard and
         // the other streams go; it goes on when the device opens again (spec: audio/devices.md).
         if lost.is_none() {
@@ -2060,6 +2079,7 @@ impl Renderer {
             stereo[got..].fill(0.0);
             if !ended {
                 self.shared.underruns.fetch_add(1, Ordering::Relaxed);
+                self.shared.drops_empty.fetch_add(1, Ordering::Relaxed);
             }
         }
         if let Some(t) = &self.wake {
