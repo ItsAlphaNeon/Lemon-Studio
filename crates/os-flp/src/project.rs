@@ -22,6 +22,9 @@ use os_model::{
 
 use crate::{Chunk, ChunkBody, Event, FlpFile, Header, Tag, Value};
 
+mod legacy;
+pub use legacy::{is_legacy, upgrade};
+
 // Event IDs (see the specs for meanings).
 mod id {
     pub const VERSION: u8 = 199;
@@ -207,9 +210,9 @@ pub enum ProjectError {
     NoHeader,
     #[error("{0}")]
     Structure(String),
-    /// Files saved before FL 24.2 use a channel layout that isn't specified yet
-    /// (specs REQUESTS.md #4).
-    #[error("legacy project layout (saved by {0}) is not supported yet")]
+    /// A stream in an older generation's layout (channel blocks without event 51) that [`upgrade`] has not converted,
+    /// or could not (spec: flp/layouts.md).
+    #[error("project in an older file layout (saved by {0}) that could not be converted")]
     LegacyLayout(String),
     #[error("model does not match the file layout: {0}")]
     Mismatch(String),
@@ -488,7 +491,8 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
             (Region::Prelude | Region::Channels, id::CH_START) => {
                 region = Region::Channels;
                 // spec: flp/events/channels.md "Version scope": blocks end with 51 only in
-                // files saved by FL 24.2+; a block reaching the next 64 without one is legacy.
+                // files saved by FL 24.2+; a block reaching the next 64 without one is in an older layout,
+                // which [`upgrade`] converts first (spec: flp/layouts.md).
                 let end = (i + 1..events.len())
                     .take_while(|&k| events[k].id != id::CH_START && events[k].id != id::ARR_START)
                     .find(|&k| events[k].id == id::CH_END)
@@ -763,6 +767,13 @@ fn clip_len(events: &[Event], version: Option<usize>) -> usize {
 /// Reads the typed project from a parsed file.
 pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
     let events = events_of(file)?;
+    // A file of an older generation is read as its conversion to the current layout (spec: flp/layouts.md); [`apply`]
+    // needs the converted file itself ([`upgrade`]).
+    if is_legacy(events) {
+        let mut current = file.clone();
+        upgrade(&mut current)?;
+        return load(&current);
+    }
     let header = file.header().ok_or(ProjectError::NoHeader)?;
     let mut l = scan(events)?;
     let enc = text_enc(events, l.version);
@@ -1790,6 +1801,12 @@ fn load_pl_track(events: &[Event], t: &PlTrackLoc, enc: TextEnc) -> PlaylistTrac
     }
 }
 
+/// The slot a slot marker (98) closes: its low byte. Files hold the slot's number there; a few (an FL 20.8 file and its
+/// resaves) have 0x106 and 0x107 for slots 6 and 7 (spec: flp/layouts.md "Older files").
+fn slot_number(e: &Event) -> usize {
+    (int(e) & 0xFF) as usize
+}
+
 fn mixer_param_records(data: &[u8]) -> impl Iterator<Item = (usize, u8, u8, u16, i32)> + '_ {
     data.chunks_exact(MIXER_REC_LEN).enumerate().map(|(n, r)| {
         (
@@ -1829,7 +1846,7 @@ fn slot_state_events(events: &[Event], l: &Layout) -> Vec<[Option<usize>; 10]> {
                         }
                     }
                     id::MX_SLOT => {
-                        if let (Some(o), Some(p)) = (out.get_mut(int(e) as usize), pending.take()) {
+                        if let (Some(o), Some(p)) = (out.get_mut(slot_number(e)), pending.take()) {
                             *o = p;
                         }
                     }
@@ -2003,7 +2020,7 @@ fn slot_areas(events: &[Event], l: &Layout) -> Vec<Option<SlotArea>> {
                 match e.id {
                     id::PLUGIN_NAME => start = Some(i),
                     id::MX_SLOT => {
-                        if let (Some(r), Some(s)) = (runs.get_mut(int(e) as usize), start.take()) {
+                        if let (Some(r), Some(s)) = (runs.get_mut(slot_number(e)), start.take()) {
                             *r = Some((s, i));
                         }
                     }
@@ -2172,7 +2189,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
                     }
                 }
                 id::MX_SLOT => {
-                    if let Some(s) = slots.get_mut(int(e) as usize) {
+                    if let Some(s) = slots.get_mut(slot_number(e)) {
                         *s = pending_plugin.take();
                     }
                 }
@@ -2456,8 +2473,10 @@ fn write_sampler(
 /// Writes the model back into `file`, changing only the events that hold modeled values
 /// that differ from what's stored. Returns an error when the model's shape (number of
 /// channels, patterns with notes, mixer tracks, …) doesn't match the file: adding or
-/// removing objects isn't supported yet.
+/// removing objects isn't supported yet. A file of an older generation is first converted to the current layout
+/// ([`upgrade`]), which is the layout it is saved in.
 pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> {
+    upgrade(file)?;
     restructure(project, file)?;
     // The file's effect slots as they are before inserts are added or removed: a renumbered track takes its own.
     let (file_slots, file_tracks) = file_slot_runs(file)?;
@@ -6163,7 +6182,8 @@ mod tests {
         assert_eq!(load(&file3).unwrap().info.url.as_deref(), Some("https://example.org"));
     }
 
-    /// Files saved by FL 11 and older hold 8-bit text (spec: flp/container.md "Text payloads").
+    /// Files saved by FL 11 and older hold 8-bit text (spec: flp/container.md "Text payloads"); saved, they are in the
+    /// current layout, whose text is UTF-16 (spec: flp/layouts.md "Converting to the newer layout").
     #[test]
     fn project_info_is_8_bit_in_old_files() {
         let mut p = new_project();
@@ -6173,13 +6193,16 @@ mod tests {
             if e.id == id::VERSION {
                 e.value = Value::var(b"11.1.1\0".to_vec());
             }
+            if e.id == id::TITLE {
+                e.value = Value::var(b"Caf\xe9\0".to_vec());
+            }
         }
         let mut m = load(&file).unwrap();
-        m.info.title = Some("Café".into());
+        assert_eq!(m.info.title.as_deref(), Some("Caf\u{e9}"));
         m.info.comments = Some("a\nb".into());
         apply(&m, &mut file).unwrap();
-        assert_eq!(event_data(&file, id::TITLE), Some(b"Caf\xe9\0".to_vec()));
-        assert_eq!(event_data(&file, id::COMMENTS), Some(b"a\rb\0".to_vec()));
+        assert_eq!(event_data(&file, id::TITLE), Some(utf16z("Caf\u{e9}")));
+        assert_eq!(event_data(&file, id::COMMENTS), Some(utf16z("a\rb")));
         assert_eq!(load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap().info, m.info);
     }
 

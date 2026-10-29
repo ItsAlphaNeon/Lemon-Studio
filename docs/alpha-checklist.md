@@ -25,8 +25,10 @@ Systems a fully functional DAW can't ship without.
 - [x] **Automation clip LFO and min / range.** The clip channel's MIN / MAX knobs set its range and its LFO
   (switch, mode, amount, speed, tension, skew, pulse width, its own envelope) plays as the original's, in the clip's
   channel window; files keep every LFO field
-- [ ] **Projects saved before FL Studio 24.2.** They are refused with a dialog that asks for a re-save in a newer
-  version
+- [x] **Projects saved before FL Studio 24.2.** Projects from FL Studio 10 to 24.1 (and the 24.2 betas) open: they
+  are converted to the current layout as they open, as the original does, and save in that layout. Not yet: wrapped
+  Fruity effects stay wrapped instead of becoming the native plugins, and a 3x Osc saved before FL Studio 21 has
+  its envelope and filter settings at their defaults
 - [x] **Multi-core mixing.** The engine renders on one audio thread, which limits dense projects
 - [ ] **Engine rework (sampler voice, automation).** The README's roadmap names it as the next big step; land it
   before the alpha rather than after
