@@ -8672,6 +8672,7 @@ impl App {
                 crate::help_links::open(url);
                 self.state.message = Some(format!("Opening {url}"));
             }
+            MenuCmd::SaveMidiClip => self.save_midi_clipboard(),
             MenuCmd::NewPattern => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
                 if let Some(m) = crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindFirst, at) {

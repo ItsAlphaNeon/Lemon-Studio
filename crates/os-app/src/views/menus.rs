@@ -62,6 +62,8 @@ pub enum MenuCmd {
     IntoWorkspace,
     /// VIEW > Align all channel editors.
     AlignEditors,
+    /// TOOLS > Save MIDI clipboard to browser.
+    SaveMidiClip,
     /// HELP's entries that open a page in the web browser (`crate::help_links`).
     Web(&'static str),
     /// The menu bar's ways into the browser.
@@ -370,7 +372,7 @@ const TOOLS_A: &[Item] = &[
     it("Control builder", ""),
     head("Clipboard"),
     it("Save audio clipboard to browser", ""),
-    it("Save MIDI clipboard to browser", ""),
+    it(SAVE_MIDI_CLIP_LABEL, "").on().cmd(MenuCmd::SaveMidiClip),
     head("MIDI capture"),
     it(DUMP_LOG_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::DumpLog)),
     it(CLEAR_LOG_LABEL, "").on().cmd(MenuCmd::ClearLog),
@@ -501,11 +503,17 @@ pub fn in_menu(s: &State, menu: usize, item: &Item) -> bool {
     !(menu == EDIT_MENU && item.label == "Redo") || crate::history::redo_shown(s)
 }
 
-/// Whether an entry can be chosen now: it works (`works`), EDIT's have a step to act on, and the project file rows
-/// that need a saved project have one (`needs_file`).
+/// Whether an entry can be chosen now: it works (`works`), EDIT's have a step to act on, the project file rows
+/// that need a saved project have one (`needs_file`), and Save MIDI clipboard to browser has notes to save.
 pub fn active(s: &State, menu: usize, item: &Item) -> bool {
-    works(menu, item) && (menu != EDIT_MENU || crate::history::edit_enabled(s, item.label == "Redo")) && (s.path.is_some() || !needs_file(menu, item.label))
+    works(menu, item)
+        && (menu != EDIT_MENU || crate::history::edit_enabled(s, item.label == "Redo"))
+        && (s.path.is_some() || !needs_file(menu, item.label))
+        && (!matches!(item.cmd, MenuCmd::SaveMidiClip) || !s.piano.clipboard.is_empty())
 }
+
+/// TOOLS ▸ Save MIDI clipboard to browser (`App::save_midi_clipboard`).
+pub const SAVE_MIDI_CLIP_LABEL: &str = "Save MIDI clipboard to browser";
 
 /// FILE / TOOLS ▸ Delete unused files and save project.
 pub const DELETE_UNUSED_LABEL: &str = "Clean up and save";
