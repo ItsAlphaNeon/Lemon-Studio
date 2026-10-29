@@ -47,7 +47,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   play in SONG mode; exports start at the Start marker and jump at skips. Move content left / right, Place loop
   (Shift+T), Add auto, Add one every, Add jump to next bar, time signature markers, and Delete or Change to marker
   loop in the time selection. A click on a marker moves the song position there. Not yet: Add two..., key
-  markers, quantized song jumps, the Start / Stop recording markers' punch
+  markers, the Start / Stop recording markers' punch
+- Quantize song jumps (the playlist's ▸ menu): while the song plays, a click in the ruler waits for the next beat,
+  bar, or 2, 4 or 8 bars, then jumps there exactly on it
 - Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
 - Track height, zoom and scroll saved with the project
 - Project picker (VIEW, Ctrl+F8 or the toolbar's project button): a menu of the patterns and channels; picking a
