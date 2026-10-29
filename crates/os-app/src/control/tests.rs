@@ -483,6 +483,47 @@ fn the_mixer_s_edits_are_undoable() {
         a.state.playlist.edit.as_mut().unwrap().text = "Drums".into();
         crate::playlist::commit_edit(&mut a.state);
     });
+    ui_round_trip(&mut a, "Mixer track reset", |a| {
+        run(a, MCmd::Reset(1));
+    });
+    crate::mixer::track_mut(&mut a.state, 3).unwrap().routes = vec![5];
+    ui_round_trip(&mut a, "Mixer routing", |a| {
+        a.state.mixer.sel.clear();
+        run(a, MCmd::ResetRouting(3));
+    });
+    ui_round_trip(&mut a, "Delete mixer track", |a| {
+        run(a, MCmd::Trim { non_empty: false });
+    });
+    ui_round_trip(&mut a, crate::history::MIXER_TRACK_IO, |a| {
+        run(a, MCmd::Monitor(2, os_model::MONITOR_ON));
+    });
+    ui_round_trip(&mut a, crate::mixer::LATENCY, |a| {
+        crate::mixer::set_latency(&mut a.state, 2, false, 20.0);
+    });
+    // Effect slots: added, moved, named, removed.
+    a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+    a.state.selected_mixer = 2;
+    a.state.mixer.sel.clear();
+    ui_round_trip(&mut a, "Add effect", |a| {
+        run(a, MCmd::AddEffect(0, 0));
+    });
+    run(&mut a, MCmd::AddEffect(0, 0));
+    a.state.control.settle(&mut a.state.project);
+    ui_round_trip(&mut a, "Move effect", |a| {
+        run(a, MCmd::SlotMove(0, 1));
+    });
+    // A slot's name is kept beside the project (the reading does not show it).
+    crate::playlist::start_edit(&mut a.state, crate::playlist::EditTarget::SlotName(2, 1), (0.0, 0.0));
+    a.state.playlist.edit.as_mut().unwrap().text = "Glue".into();
+    crate::playlist::commit_edit(&mut a.state);
+    assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some("Glue"));
+    assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Slot name"));
+    assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some("Test FX"));
+    assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some("Slot name"));
+    assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some("Glue"));
+    ui_round_trip(&mut a, "Remove effect", |a| {
+        run(a, MCmd::SlotDelete(1));
+    });
     // A fader drag is one step; a press that doesn't move it is none.
     let steps = a.state.history.at();
     crate::control::edit_press(&mut a.state, "Mixer track volume", command::Region::Track(1));
