@@ -18,7 +18,7 @@ use os_ui::{tabler, Canvas, Color, Font, Rect};
 use crate::doc::Doc;
 use crate::peaks::Peaks;
 use crate::state::{self, Rec};
-use crate::tools::{Amp, Law};
+use crate::tools::{Amp, Law, Stretch};
 
 /// The default editor size (Edison's) and the smallest it may be resized to, in logical pixels.
 pub const W: u32 = 744;
@@ -156,6 +156,9 @@ pub enum AmpCtl {
     Volume,
     Right,
     Sep,
+    /// Time stretch / pitch shift's knobs.
+    Pitch,
+    Time,
     Reset,
     Preview,
     Accept,
@@ -217,7 +220,7 @@ pub const TOOLS: [ToolDef; 18] = [
     ToolDef { glyph: Glyph::Reverse, hint: "Reverse / swap channels", left: true, right: true },
     ToolDef { glyph: Glyph::Gate, hint: "Trim side noise / gate noise (later version)", left: false, right: false },
     ToolDef { glyph: Glyph::FadeOut, hint: "Fade out / declick out", left: true, right: true },
-    ToolDef { glyph: Glyph::Stretch, hint: "Time stretch / pitch shift... (later version)", left: false, right: false },
+    ToolDef { glyph: Glyph::Stretch, hint: "Time stretch / pitch shift...", left: true, right: false },
     ToolDef { glyph: Glyph::Blur, hint: "Blur... (later version)", left: false, right: false },
     ToolDef { glyph: Glyph::Clean, hint: "Clean up (denoise)... (later version)", left: false, right: false },
     ToolDef { glyph: Glyph::Slice, hint: "Auto-slicing (later version)", left: false, right: false },
@@ -273,9 +276,11 @@ pub struct ViewState {
     pub amp: Option<AmpUi>,
 }
 
+/// The open tool panel: Amp, or Time stretch / pitch shift when `stretch` is set.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AmpUi {
     pub amp: Amp,
+    pub stretch: Option<Stretch>,
     pub previewing: bool,
 }
 
@@ -904,8 +909,56 @@ pub fn fader_travel(slot: Rect) -> (f32, f32) {
     (slot.y + 7.0, slot.bottom() - 7.0)
 }
 
+/// The Time stretch / pitch shift panel: two knobs over the buttons, centred over the wave area.
+pub fn stretch_parts(lay: &Layout) -> (Rect, [(AmpCtl, Rect); 2]) {
+    let (w, h) = (208.0, 170.0f32.min(lay.h - 8.0));
+    let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
+    let knob = |cx: f32| Rect::new(p.x + cx - 22.0, p.y + 50.0, 44.0, 44.0);
+    (p, [(AmpCtl::Pitch, knob(58.0)), (AmpCtl::Time, knob(150.0))])
+}
+
+fn stretch_panel(ui: &mut Ui, a: &AmpUi, st: &Stretch, lay: &Layout) {
+    let (p, parts) = stretch_parts(lay);
+    ui.hit(p, Target::AmpPanel);
+    lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
+    lemon::plug_panel(ui.c, p);
+    ui.c.text(TITLE, p.x + 12.0, p.y + 7.0, brand::TEXT, "Time stretch / pitch shift");
+    lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
+    for (ctl, r) in parts {
+        let t = Target::Amp(ctl);
+        ui.hit(r, t);
+        let s = ui.state(r, t, false);
+        let (v, cap, val) = if ctl == AmpCtl::Pitch {
+            (st.pitch, "PITCH", format!("{:+.2} st", st.semitones()))
+        } else {
+            (st.time, "TIME", format!("x{:.3}", st.ratio()))
+        };
+        lemon::dial(ui.c, r.cx(), r.cy(), r.w / 2.0, 4.0, (v + 1.0) / 2.0, true, brand::MAIN, s);
+        ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.y - 15.0, r.w + 40.0, 12.0), plug::DIM, cap);
+        ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.bottom() + 4.0, r.w + 40.0, 12.0), brand::TEXT, &val);
+    }
+    panel_buttons(ui, a, p);
+}
+
+/// Reset, Preview and Accept along a tool panel's bottom, and its close box.
+fn panel_buttons(ui: &mut Ui, a: &AmpUi, p: Rect) {
+    let by = p.bottom() - 37.0;
+    let buttons = [(AmpCtl::Reset, "RESET", 8.0, 58.0), (AmpCtl::Preview, "PREVIEW", 72.0, 64.0), (AmpCtl::Accept, "ACCEPT", 140.0, 60.0)];
+    for (ctl, label, x, w) in buttons {
+        let r = Rect::new(p.x + x, by, w, 29.0);
+        let col = ui.button(r, Target::Amp(ctl), ctl == AmpCtl::Preview && a.previewing, true);
+        ui.c.text_center(LABEL, r, col, label);
+    }
+    let cr = Rect::new(p.right() - 26.0, p.y + 5.0, 20.0, 20.0);
+    let col = ui.flat(cr, Target::Amp(AmpCtl::Close), false, true);
+    ui.c.icon_stroke(&tabler::X, cr.inset(4.0), col, 2.0);
+}
+
 fn amp_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
     ui.c.fill_rect(Rect::new(0.0, 0.0, lay.w, lay.h), plug::BG.with_alpha(140));
+    if let Some(st) = &a.stretch {
+        return stretch_panel(ui, a, st, lay);
+    }
     let (p, parts) = amp_parts(lay);
     ui.hit(p, Target::AmpPanel);
     lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
@@ -970,16 +1023,7 @@ fn amp_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
             _ => {}
         }
     }
-    let by = p.bottom() - 37.0;
-    let buttons = [(AmpCtl::Reset, "RESET", 8.0, 58.0), (AmpCtl::Preview, "PREVIEW", 72.0, 64.0), (AmpCtl::Accept, "ACCEPT", 140.0, 60.0)];
-    for (ctl, label, x, w) in buttons {
-        let r = Rect::new(p.x + x, by, w, 29.0);
-        let col = ui.button(r, Target::Amp(ctl), ctl == AmpCtl::Preview && a.previewing, true);
-        ui.c.text_center(LABEL, r, col, label);
-    }
-    let cr = Rect::new(p.right() - 26.0, p.y + 5.0, 20.0, 20.0);
-    let col = ui.flat(cr, Target::Amp(AmpCtl::Close), false, true);
-    ui.c.icon_stroke(&tabler::X, cr.inset(4.0), col, 2.0);
+    panel_buttons(ui, a, p);
 }
 
 /// Draws a glyph into `r`.
@@ -1176,6 +1220,8 @@ pub fn hint(t: &Target, l: &HintCtx) -> String {
         Target::Amp(AmpCtl::Volume) => "Volume".into(),
         Target::Amp(AmpCtl::Right) => "Right channel volume".into(),
         Target::Amp(AmpCtl::Sep) => "Stereo separation".into(),
+        Target::Amp(AmpCtl::Pitch) => "Pitch".into(),
+        Target::Amp(AmpCtl::Time) => "Time (length)".into(),
         Target::Amp(AmpCtl::Reset) => "Reset".into(),
         Target::Amp(AmpCtl::Preview) => "Preview".into(),
         Target::Amp(AmpCtl::Accept) => "Accept".into(),

@@ -343,6 +343,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   recording and the Record button's question can record an input into the master track's Tesla; Remove all audio
   editor instances (mixer options, TOOLS) clears them after asking
 - At its time limit Tesla keeps recording and holds the last minutes (a rolling log, as Edison)
+- Tesla's Time stretch / pitch shift... (Alt+T, the tool grid's stretch button) changes the selection's pitch by up
+  to 24 semitones either way and its length from a quarter to four times, with a preview, on Lemon Studio's
+  stretcher; formant preservation and the drum(loop) stretch come later
 - TOOLS ▸ Audio logger: on by default, it keeps the last 1 to 10 minutes of what the audio device plays (Settings ▸;
   the header shows the memory used); Dump to audio editor puts them, silence at either end left out, into a WAV in
   the Recorded folder and into the master track's Tesla
