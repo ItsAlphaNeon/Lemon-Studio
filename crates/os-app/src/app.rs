@@ -3951,9 +3951,9 @@ impl App {
             self.invalidate();
         }
         self.follow_device();
-        // Options ▸ Focus selected channel on playback (spec: ui/channel-rack.md §17).
-        if crate::rack::focus_tick(&mut self.state, self.transport.playing()) {
-            self.damage_win(Win::ChannelRack);
+        // Options ▸ Focus selected channel on playback and Auto switch display filter (spec: ui/channel-rack.md §17).
+        if crate::rack::focus_tick(&mut self.state, self.transport.playing()) | crate::rack::filter_tick(&mut self.state) {
+            self.invalidate();
         }
         self.record_tick();
         self.audio_log.tick();
@@ -19108,8 +19108,9 @@ mod tests {
         app.state.rack_roll_view = true;
         frame(&mut app, &mut c, None);
         let b = hit_rect(&app, &Action::RackRoll(1));
+        // Clear of the preview's mute button at its left end.
         let shade = |q: f32| at(&c, b.x + b.w * q, b.y + 15.0);
-        assert!(shade(0.05) == shade(0.45) && shade(0.45) != shade(0.55) && shade(0.55) == shade(0.95), "two bars over the width");
+        assert!(shade(0.1) == shade(0.45) && shade(0.45) != shade(0.55) && shade(0.55) == shade(0.95), "two bars over the width");
     }
 
     /// The rack's preview options (spec: ui/channel-rack.md §17): Show a mute button on the piano roll preview puts the

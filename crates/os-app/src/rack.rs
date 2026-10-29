@@ -249,6 +249,8 @@ pub struct RackUi {
     pub wheel_grab: Option<(usize, (f32, f32))>,
     /// Whether playback ran at the last tick (`focus_tick`).
     pub played: bool,
+    /// The selected channel at the last tick (`filter_tick`).
+    pub filter_seen: Option<usize>,
 }
 
 impl Default for RackUi {
@@ -281,6 +283,7 @@ impl Default for RackUi {
             fill: None,
             wheel_grab: None,
             played: false,
+            filter_seen: None,
         }
     }
 }
@@ -489,8 +492,30 @@ pub const COMPLETE_PREVIEW: &str = "Show complete piano roll preview";
 /// the preview, tied to the channel's mute).
 pub const PREVIEW_MUTE: &str = "Show a mute button on the piano roll preview";
 
+/// Options ▸ Auto switch display filter (§17; the original's manual: the display filter changes by itself to the
+/// group that fits the content in use).
+pub const AUTO_FILTER: &str = "Auto switch display filter";
+
 /// The rack menus' check options that work; the other ones are shown greyed with their default ticks.
-const LIVE_OPTS: [&str; 5] = [ALWAYS_ADVANCED, FOCUS_ON_PLAY, MUTE_REMOVED, COMPLETE_PREVIEW, PREVIEW_MUTE];
+const LIVE_OPTS: [&str; 6] = [ALWAYS_ADVANCED, FOCUS_ON_PLAY, MUTE_REMOVED, COMPLETE_PREVIEW, PREVIEW_MUTE, AUTO_FILTER];
+
+/// Every tick: with Auto switch display filter ticked, a channel newly made the selected one (from the piano roll, a
+/// plugin window, the playlist...) that the display filter hides switches the filter to its group, else to Unsorted
+/// (Lemon Studio's design). A filter picked by hand stays until the selected channel changes. Returns whether it
+/// switched.
+pub fn filter_tick(s: &mut State) -> bool {
+    let r = s.selected_channel;
+    if s.rack.filter_seen == Some(r) {
+        return false;
+    }
+    s.rack.filter_seen = Some(r);
+    if !s.rack.opts.contains(AUTO_FILTER) || r >= s.project.channels.len() || in_filter(s, r) {
+        return false;
+    }
+    s.rack.filter = s.rack.groups.iter().position(|g| g.members.contains(&r)).map_or(Filter::Unsorted, Filter::Group);
+    autosize(s);
+    true
+}
 
 /// Every tick, with whether playback runs: on a start or a stop, with Focus selected channel on playback ticked, the
 /// highest selected channel scrolls into view (§17). Returns whether the rack scrolled.
@@ -2722,7 +2747,7 @@ mod tests {
     fn live_options_tick_and_always_show_loop_boxes() {
         let mut app = App::new(None);
         let find = |m: Popup, label: &str| m.items.iter().find(|i| i.label == label).map(|i| (i.enabled, i.mark.clone())).unwrap();
-        for label in [FOCUS_ON_PLAY, MUTE_REMOVED, COMPLETE_PREVIEW] {
+        for label in [FOCUS_ON_PLAY, MUTE_REMOVED, COMPLETE_PREVIEW, PREVIEW_MUTE, AUTO_FILTER] {
             let tick = app.state.rack.opts.contains(label);
             assert_eq!(find(options_menu(&app.state, 0.0, 0.0), label), (true, Mark::Check(tick)), "{label}");
         }
@@ -2767,6 +2792,30 @@ mod tests {
         s.rack.opts.remove(MUTE_REMOVED);
         set_step(s, 0, 3, false);
         assert!(at(s).is_empty());
+    }
+
+    /// Auto switch display filter: a newly selected channel the filter hides switches the filter to its group (else
+    /// Unsorted); a filter picked by hand stays while the selected channel does not change; unticked, nothing switches.
+    #[test]
+    fn auto_switch_display_filter() {
+        let mut app = App::new(None);
+        let s = &mut app.state;
+        s.rack.groups = vec![Group { name: "Drums".into(), members: BTreeSet::from([0, 1]) }, Group { name: "Keys".into(), members: BTreeSet::from([2]) }];
+        s.rack.filter = Filter::Group(0);
+        s.selected_channel = 2;
+        assert!(!filter_tick(s), "unticked");
+        assert_eq!(s.rack.filter, Filter::Group(0));
+        s.rack.opts.insert(AUTO_FILTER);
+        s.selected_channel = 0;
+        assert!(!filter_tick(s), "shown already");
+        s.selected_channel = 2;
+        assert!(filter_tick(s));
+        assert_eq!(s.rack.filter, Filter::Group(1));
+        s.rack.filter = Filter::Group(0);
+        assert!(!filter_tick(s), "the hand-picked filter stays");
+        s.selected_channel = 3;
+        assert!(filter_tick(s));
+        assert_eq!(s.rack.filter, Filter::Unsorted);
     }
 
     /// Focus selected channel on playback: on a start and on a stop the highest selected channel scrolls into view;
