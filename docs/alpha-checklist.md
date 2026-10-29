@@ -26,7 +26,7 @@ Systems a fully functional DAW can't ship without.
   channel window; files keep every LFO field
 - [ ] **Projects saved before FL Studio 24.2.** They are refused with a dialog that asks for a re-save in a newer
   version
-- [ ] **Multi-core mixing.** The engine renders on one audio thread, which limits dense projects
+- [x] **Multi-core mixing.** The engine renders on one audio thread, which limits dense projects
 - [ ] **Engine rework (sampler voice, automation).** The README's roadmap names it as the next big step; land it
   before the alpha rather than after
 
