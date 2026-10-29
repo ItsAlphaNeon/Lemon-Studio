@@ -48,6 +48,7 @@ mod knobs;
 mod layout;
 mod loading;
 mod missing;
+mod mix_threads;
 mod zipped;
 mod logo;
 #[cfg(target_os = "macos")]
@@ -1748,6 +1749,8 @@ fn main() {
         std::process::exit(plugins::window_check::run(&args[1..]));
     }
     app::move_old_settings();
+    // The mixing threads every engine renders on, from here on (spec: audio/multicore.md).
+    mix_threads::start();
     // A render without a window (FILE > Export audio from the command line, `render`).
     if args.first().map(String::as_str) == Some("--render") {
         std::process::exit(render::cli(&args[1..]));
@@ -1786,6 +1789,8 @@ fn main() {
         *p = Some(event_loop.create_proxy());
     }
     os_clap::set_waker(wake_ui);
+    // CLAP plugins asking which thread they are on (`thread-check`): this one is the main thread.
+    os_clap::set_main_thread();
     // Lemon plugins' editors run on threads of their own off Windows and wake the app when they send something.
     #[cfg(not(windows))]
     os_hostlink::set_host_waker(wake_ui);

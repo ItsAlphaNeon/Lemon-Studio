@@ -1173,7 +1173,7 @@ impl Drop for FeedThread {
 
 /// The feeder renders for the device: it runs above the UI.
 #[cfg(windows)]
-fn raise_priority() {
+pub(crate) fn raise_priority() {
     use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
     unsafe {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -1182,7 +1182,7 @@ fn raise_priority() {
 
 /// macOS: the user-interactive class keeps the feeder on the performance cores.
 #[cfg(target_os = "macos")]
-fn raise_priority() {
+pub(crate) fn raise_priority() {
     // SAFETY: changes the calling thread's own QoS class.
     unsafe {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
@@ -1190,7 +1190,7 @@ fn raise_priority() {
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn raise_priority() {}
+pub(crate) fn raise_priority() {}
 
 /// The sample library for engines whose sampler channels Lemon Sampler instances play. They stretch for themselves
 /// (spec: audio/time-stretch.md), and of a sample one of them plays the engine keeps only the length and rate Lemon
