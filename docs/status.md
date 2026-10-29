@@ -11,7 +11,11 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 - Channel rack with steps and mini piano rolls
 - Swing and per-channel loops
-- ADD ▸ Layer: a layer channel whose children are the channels selected in the rack
+- ADD ▸ Layer: a layer channel whose children are the channels selected in the rack; the rack's Create layer with
+  selected channels does the same
+- The rack's menu sets the selected channels' swing mix (0 to 100% or a typed value), turns their Truncate swing
+  notes on or off (a swung note keeps its end, so it gets shorter) and gives them one colour (Color selected ▸
+  All...); a channel's Cut itself gives it a cut group of its own, as the original does. One undo step each
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)
 - Deleting channels or a pattern asks first, unless the box's Remember my choice was ticked or the question
   is turned off in General settings ▸ Hints and warnings ▸ Manage messages

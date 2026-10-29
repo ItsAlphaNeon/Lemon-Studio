@@ -989,6 +989,9 @@ pub struct ChannelMisc {
     pub gate: f32,
     pub shift: f32,
     pub swing: f32,
+    /// Truncate swing notes: a swung note keeps its end, so it gets shorter (channel event 48; the rule is Lemon
+    /// Studio's design, spec: audio/swing.md "Truncate swing notes").
+    pub truncate_swing: bool,
     /// Full portamento. Not saved: where the file keeps it is an open question (OpenStudio-specs REQUESTS.md #5).
     pub full_porta: bool,
     /// Tracking by volume (0) and by key (1) (spec: audio/channel-misc.md "Tracking").
@@ -1045,6 +1048,7 @@ impl Default for ChannelMisc {
             gate: 1.0,
             shift: 0.0,
             swing: 1.0,
+            truncate_swing: false,
             full_porta: true,
             tracking: [Tracking { mid: 100, ..Tracking::default() }, Tracking::default()],
             cut: 0,

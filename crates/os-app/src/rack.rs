@@ -195,6 +195,10 @@ pub enum RBox {
     RenameGroup(usize),
     /// Transpose selected: semitones.
     Transpose,
+    /// Set swing mix for selected ▸ Custom...: percent.
+    SwingMix,
+    /// Color selected ▸ All...: the palette, a swatch colours every selected channel.
+    ColorSel,
 }
 
 /// Rack UI state. Lock, zip, groups, the filter and loop lengths are saved through [`to_model`] / [`from_model`].
@@ -767,6 +771,40 @@ pub fn unused(s: &State) -> BTreeSet<usize> {
         .collect()
 }
 
+/// Set swing mix for selected (§17): each selected channel's share of the main swing, 0..1 (channel event 97, 0..128;
+/// spec: audio/swing.md).
+pub fn swing_selected(s: &mut State, mix: f32) {
+    let mix = (mix.clamp(0.0, 1.0) * 128.0).round() / 128.0;
+    for &r in &s.rack.sel.clone() {
+        if let Some(c) = s.project.channels.get_mut(r) {
+            c.misc.swing = mix;
+        }
+    }
+    s.piano.dirty = true;
+}
+
+/// Whether a channel cuts itself: it cuts and is cut by the same group (spec: audio/note-rules.md).
+pub fn cuts_itself(m: &os_model::ChannelMisc) -> bool {
+    m.cut != 0 && m.cut == m.cut_by
+}
+
+/// Chokes itself on a channel's menu (§18), as the original does: ticking gives the channel the lowest cut group no
+/// channel uses yet, as both its cut and cut by; unticking sets both to none (spec: ui/channel-rack.md §18).
+pub fn cut_itself(s: &mut State, r: usize) {
+    let Some(on) = s.project.channels.get(r).map(|c| cuts_itself(&c.misc)) else { return };
+    let group = if on {
+        0
+    } else {
+        let used: BTreeSet<u32> = s.project.channels.iter().flat_map(|c| [c.misc.cut, c.misc.cut_by]).collect();
+        (1..).find(|g| !used.contains(g)).unwrap_or(1)
+    };
+    if let Some(c) = s.project.channels.get_mut(r) {
+        c.misc.cut = group;
+        c.misc.cut_by = group;
+    }
+    s.piano.dirty = true;
+}
+
 /// Transpose the selected channels' notes of the current pattern.
 pub fn transpose_selected(s: &mut State, semis: i32) {
     let chans: Vec<u16> = s.rack.sel.iter().filter_map(|&r| ch_index(s, r)).collect();
@@ -1083,7 +1121,11 @@ pub fn box_text(s: &State, b: RBox) -> String {
         RBox::Channel(r) => channel_name(s, r),
         RBox::GroupSel | RBox::NewGroup => format!("Group {}", s.rack.groups.len() + 1),
         RBox::RenameGroup(g) => s.rack.groups.get(g).map(|g| g.name.clone()).unwrap_or_default(),
-        RBox::Transpose => String::new(),
+        RBox::Transpose | RBox::ColorSel => String::new(),
+        RBox::SwingMix => {
+            let r = s.rack.sel.first().copied().unwrap_or(s.selected_channel);
+            s.project.channels.get(r).map_or(String::new(), |c| format!("{}", (c.misc.swing * 100.0).round()))
+        }
     }
 }
 
@@ -1092,6 +1134,8 @@ pub fn box_caption(s: &State, b: RBox) -> String {
         RBox::Channel(r) => format!("Channel #{} name", s.project.channels.get(r).map_or(r + 1, |c| usize::from(c.index) + 1)),
         RBox::GroupSel | RBox::NewGroup | RBox::RenameGroup(_) => "Filter group name".into(),
         RBox::Transpose => "Semitones".into(),
+        RBox::SwingMix => "Swing mix (%)".into(),
+        RBox::ColorSel => format!("Color of {} channel(s)", s.rack.sel.len()),
     }
 }
 
@@ -1117,6 +1161,11 @@ pub fn box_accept(s: &mut State, b: RBox, text: &str) {
         RBox::Transpose => {
             if let Ok(v) = text.trim_start_matches('+').parse::<i32>() {
                 transpose_selected(s, v);
+            }
+        }
+        RBox::SwingMix => {
+            if let Ok(v) = text.trim_end_matches('%').trim().parse::<f32>() {
+                swing_selected(s, v / 100.0);
             }
         }
         _ => {}
@@ -1184,6 +1233,16 @@ pub enum RCmd {
     ColorRandom,
     MuteSel(bool),
     TransposeSel,
+    /// Set swing mix for selected ▸: a percent, or None for Custom... (a box).
+    SwingSel(Option<u8>),
+    /// Set truncate swing notes for selected ▸ Turn on (true) / Turn off.
+    TruncSel(bool),
+    /// Chokes itself on a channel's menu: its own cut group, or none.
+    CutItself(usize),
+    /// Create layer with selected channels: ADD ▸ Layer with the selection as its children.
+    LayerSel,
+    /// Color selected ▸ All...: the palette for every selected channel.
+    ColorAll,
     AssignFreeSel,
     SelectMixerTracks,
     /// Change declicking for selected channels to ▸: declick mode 0..5 (spec: audio/declick.md).
@@ -1231,7 +1290,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         it("Select unused instruments", RCmd::SelectUnused),
         off(it("Clone selected", RCmd::CloneSel).key("Alt+C"), none),
         off(it("Delete selected...", RCmd::DeleteSel).key("Alt+Del"), none),
-        PItem::not_yet("Create layer with selected channels"),
+        off(it("Create layer with selected channels", RCmd::LayerSel), none),
         PItem::sep(),
         off(it("Move selected up", RCmd::MoveSel(-1)).key("Alt+Up"), none),
         off(it("Move selected down", RCmd::MoveSel(1)).key("Alt+Down"), none),
@@ -1243,13 +1302,16 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         off(it("Group selected...", RCmd::GroupSel).key("Alt+G"), none),
         PItem::sub(
             "Color selected",
-            vec![it("Gradient...", RCmd::ColorGradient).key("Shift+Alt+C"), it("Random", RCmd::ColorRandom).key("Ctrl+Alt+C"), PItem::not_yet("All...")],
+            vec![it("Gradient...", RCmd::ColorGradient).key("Shift+Alt+C"), it("Random", RCmd::ColorRandom).key("Ctrl+Alt+C"), off(it("All...", RCmd::ColorAll), none)],
         ),
         off(it("Mute selected", RCmd::MuteSel(true)), none),
         off(it("Unmute selected", RCmd::MuteSel(false)), none),
         off(it("Transpose selected...", RCmd::TransposeSel), none),
-        PItem::sub("Set swing mix for selected", ["0%", "25%", "50%", "75%", "100%", "Custom..."].into_iter().map(PItem::not_yet).collect()),
-        PItem::sub("Set truncate swing notes for selected", vec![PItem::not_yet("Turn on"), PItem::not_yet("Turn off")]),
+        PItem::sub(
+            "Set swing mix for selected",
+            [0u8, 25, 50, 75, 100].into_iter().map(|p| off(it(format!("{p}%"), RCmd::SwingSel(Some(p))), none)).chain([off(it("Custom...", RCmd::SwingSel(None)), none)]).collect(),
+        ),
+        PItem::sub("Set truncate swing notes for selected", vec![off(it("Turn on", RCmd::TruncSel(true)), none), off(it("Turn off", RCmd::TruncSel(false)), none)]),
         PItem::not_yet("Burn selected loops to pattern"),
         off(it("Assign selected to free mixer track(s)", RCmd::AssignFreeSel).key("Ctrl+L"), none),
         off(it("Select mixer tracks for the selected channels", RCmd::SelectMixerTracks), none),
@@ -1396,7 +1458,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         PItem::not_yet("Change icon..."),
         PItem::sep(),
         if sampler { it("Load sample...", RCmd::LoadSample(r)) } else { PItem::new("Load sample...", Cmd::Nothing).off() },
-        PItem::not_yet("Chokes itself").mark(Mark::Check(false)),
+        it("Chokes itself", RCmd::CutItself(r)).mark(Mark::Check(s.project.channels.get(r).is_some_and(|c| cuts_itself(&c.misc)))),
         PItem::new("Show waveform preview", Cmd::Nothing).off(),
         PItem::sep(),
         PItem::sub("Insert", crate::plugin_menu::items(s, crate::plugin_menu::Target::Gen(Some(r)), true)),
@@ -1616,7 +1678,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::Clone(_) | RCmd::CloneSel => Some("Clone channel"),
         RCmd::MoveSel(_) | RCmd::Sort(_) => Some("Move channel"),
         RCmd::MixerReset(_) | RCmd::AssignFree(_) | RCmd::AssignFreeSel => Some("Channel mixer track"),
-        RCmd::DeclickSel(_) => Some("Channel settings"),
+        RCmd::DeclickSel(_) | RCmd::SwingSel(Some(_)) | RCmd::TruncSel(_) | RCmd::CutItself(_) => Some("Channel settings"),
         RCmd::AddGroup | RCmd::DeleteGroup | RCmd::GroupSel => Some("Channel group"),
         RCmd::Burn(_) => Some("Burn loops"),
         _ => None,
@@ -1836,6 +1898,40 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::TransposeSel => {
             open_box(s, RBox::Transpose, crate::patterns::box_at_mouse(mouse));
+            None
+        }
+        RCmd::SwingSel(Some(p)) => {
+            swing_selected(s, f32::from(p) / 100.0);
+            Some(format!("Swing mix {p}% for {} channel(s)", sel.len()))
+        }
+        RCmd::TruncSel(on) => {
+            for &r in &sel {
+                if let Some(c) = s.project.channels.get_mut(r) {
+                    c.misc.truncate_swing = on;
+                }
+            }
+            s.piano.dirty = true;
+            Some(format!("Truncate swing notes {} for {} channel(s)", if on { "on" } else { "off" }, sel.len()))
+        }
+        RCmd::CutItself(r) => {
+            cut_itself(s, r);
+            None
+        }
+        RCmd::SwingSel(None) => {
+            open_box(s, RBox::SwingMix, crate::patterns::box_at_mouse(mouse));
+            None
+        }
+        RCmd::ColorAll => {
+            open_box(s, RBox::ColorSel, crate::patterns::box_at_mouse(mouse));
+            if let Some(b) = s.pat_ui.name_box.as_mut() {
+                b.palette = true;
+            }
+            None
+        }
+        RCmd::LayerSel => {
+            crate::playlist::add_layer_channel(s);
+            let view_h = crate::views::rack::panel(crate::views::rack::rect(s)).h;
+            s.rack_scroll = (crate::views::rack::content_h(s) - view_h).max(0.0);
             None
         }
         RCmd::ZipSel => {
@@ -2281,6 +2377,73 @@ pub fn to_model(s: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Options ▸ Set swing mix for selected, Create layer with selected channels and Color selected ▸ All... act on the
+    /// selected channels (§17); the menu greys them with nothing selected.
+    #[test]
+    fn options_swing_mix_layer_and_color_for_selected() {
+        let mut app = App::new(None);
+        assert!(app.state.project.channels.len() >= 4);
+        let swing = |app: &App| app.state.project.channels.iter().take(4).map(|c| c.misc.swing).collect::<Vec<_>>();
+        let enabled = |app: &App, label: &str| {
+            let m = options_menu(&app.state, 0.0, 0.0);
+            let find = |items: &[PItem]| items.iter().find(|i| i.label == label).map(|i| i.enabled);
+            find(&m.items).or_else(|| m.items.iter().find_map(|i| find(&i.children)))
+        };
+        app.state.rack.sel.clear();
+        assert_eq!(enabled(&app, "Create layer with selected channels"), Some(false));
+        assert_eq!(enabled(&app, "50%"), Some(false));
+        app.state.rack.sel = BTreeSet::from([0, 2]);
+        assert_eq!((enabled(&app, "Create layer with selected channels"), enabled(&app, "Custom..."), enabled(&app, "All...")), (Some(true), Some(true), Some(true)));
+
+        assert_eq!(run(&mut app, RCmd::SwingSel(Some(50))).as_deref(), Some("Swing mix 50% for 2 channel(s)"));
+        assert_eq!(swing(&app), [0.5, 1.0, 0.5, 1.0]);
+        crate::history::undo(&mut app.state);
+        assert_eq!(swing(&app), [1.0; 4], "one undo step");
+        run(&mut app, RCmd::SwingSel(None));
+        assert_eq!(app.state.pat_ui.name_box.as_ref().map(|b| (b.target, b.text.clone())), Some((crate::patterns::BoxTarget::Rack(RBox::SwingMix), "100".into())));
+        app.state.pat_ui.name_box.as_mut().unwrap().text = "25".into();
+        crate::patterns::accept(&mut app.state);
+        assert_eq!(swing(&app), [0.25, 1.0, 0.25, 1.0]);
+
+        run(&mut app, RCmd::ColorAll);
+        assert!(app.state.pat_ui.name_box.as_ref().is_some_and(|b| b.palette));
+        crate::patterns::set_color(&mut app.state, 3);
+        let c = |r: usize| app.state.project.channels[r].color;
+        assert!(c(0).is_some() && c(0) == c(2) && c(1) != c(0) && app.state.pat_ui.name_box.is_none(), "both selected, the box closes");
+
+        // Truncate swing notes for the selection; Turn off clears it.
+        assert_eq!(run(&mut app, RCmd::TruncSel(true)).as_deref(), Some("Truncate swing notes on for 2 channel(s)"));
+        let trunc = |app: &App| app.state.project.channels.iter().take(3).map(|c| c.misc.truncate_swing).collect::<Vec<_>>();
+        assert_eq!(trunc(&app), [true, false, true]);
+        run(&mut app, RCmd::TruncSel(false));
+        assert_eq!(trunc(&app), [false; 3]);
+
+        // Chokes itself: the lowest group no channel uses, as both words; again: none (§18, measured on the original).
+        for c in app.state.project.channels.iter_mut() {
+            (c.misc.cut, c.misc.cut_by) = (0, 0);
+        }
+        app.state.project.channels[3].misc.cut_by = 1;
+        let cut = |app: &App, r: usize| (app.state.project.channels[r].misc.cut, app.state.project.channels[r].misc.cut_by);
+        run(&mut app, RCmd::CutItself(0));
+        run(&mut app, RCmd::CutItself(1));
+        assert_eq!((cut(&app, 0), cut(&app, 1)), ((2, 2), (3, 3)));
+        let ticked = |app: &App, r: usize| channel_menu(&app.state, r, 0.0, 0.0).items.iter().find(|i| i.label == "Chokes itself").map(|i| (i.enabled, i.mark));
+        assert_eq!(ticked(&app, 0), Some((true, Mark::Check(true))));
+        run(&mut app, RCmd::CutItself(0));
+        assert_eq!(cut(&app, 0), (0, 0));
+        assert_eq!(ticked(&app, 0), Some((true, Mark::Check(false))));
+        run(&mut app, RCmd::CutItself(2));
+        assert_eq!(cut(&app, 2), (2, 2), "the freed group is taken again");
+        crate::history::undo(&mut app.state);
+        assert_eq!(cut(&app, 2), (0, 0), "one undo step");
+
+        let n = app.state.project.channels.len();
+        let kids = vec![app.state.project.channels[0].index, app.state.project.channels[2].index];
+        run(&mut app, RCmd::LayerSel);
+        let l = app.state.project.channels.last().unwrap();
+        assert_eq!((app.state.project.channels.len(), l.kind, l.layer_children.clone()), (n + 1, os_model::ChannelKind::Layer, kids));
+    }
 
     /// Ctrl+C / Ctrl+X / Ctrl+V with the rack in front (§11, §20): copy takes the selected channels' steps, a row each;
     /// paste puts the first row into the first selected channel and the next rows into the rows below it, whatever else

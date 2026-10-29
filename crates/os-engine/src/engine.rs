@@ -4307,8 +4307,12 @@ fn push_note(out: &mut Vec<Sched>, start: i64, n: &os_model::Note, project: &Pro
     if first < 0 {
         return;
     }
-    let first = Sched::note(first as u64, n);
-    let span = if n.length > 0 { u64::from(n.length) } else { u64::from(ppq / 4).max(1) };
+    let mut first = Sched::note(first as u64, n);
+    // Truncate swing notes: a swung note with a length keeps its end (spec: audio/swing.md, Lemon Studio's rule).
+    if delay > 0 && n.length > 0 && project.channels.get(usize::from(n.channel)).is_some_and(|c| c.misc.truncate_swing) {
+        first.len = first.len.saturating_sub(u64::from(delay)).max(1);
+    }
+    let span = if n.length > 0 { first.len } else { u64::from(ppq / 4).max(1) };
     let capped = |s: Sched| match cap {
         Some(c) if s.len > 0 => Sched { len: s.len.min(c.saturating_sub(s.tick)), ..s },
         _ => s,
@@ -4771,6 +4775,31 @@ mod tests {
         let ons: Vec<u64> = probe.lock().unwrap().log.iter().filter(|l| l.1).map(|l| l.0).collect();
         assert_eq!(ons[0], laws::tick_to_frame(36.0, 96, 130.0, 48000), "{ons:?}");
         assert_eq!(ons[1], laws::tick_to_frame(48.0, 96, 130.0, 48000), "{ons:?}");
+    }
+
+    /// Truncate swing notes: a swung note with a length keeps its end; without it the whole note moves (spec:
+    /// audio/swing.md).
+    #[test]
+    fn truncate_swing_notes_keeps_the_end() {
+        for (truncate, end) in [(false, 60.0), (true, 48.0)] {
+            let mut p = project(vec![long_note(24, 24, 0)], vec![]);
+            p.swing = Some(128);
+            p.channels[0].kind = ChannelKind::Plugin;
+            p.channels[0].misc.truncate_swing = truncate;
+            let mut lib = SampleLibrary::default();
+            let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+            let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+            e.set_instrument(0, probe.clone());
+            let mut out = vec![0.0f32; 512 * 2];
+            for _ in 0..100 {
+                e.process(&mut out);
+            }
+            let log = probe.lock().unwrap().log.clone();
+            let on = log.iter().find(|l| l.1).map(|l| l.0);
+            let off = log.iter().find(|l| !l.1).map(|l| l.0);
+            assert_eq!(on, Some(laws::tick_to_frame(36.0, 96, 130.0, 48000)), "{log:?}");
+            assert_eq!(off, Some(laws::tick_to_frame(end, 96, 130.0, 48000)), "truncate {truncate}: {log:?}");
+        }
     }
 
     // spec: plugins/plugin-formats.md (hosting: notes at frame offsets; the channel's volume and pan apply)

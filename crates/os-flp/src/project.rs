@@ -89,6 +89,8 @@ mod id {
     pub const CH_FINE: u8 = 142;
     /// Channel settings the engine reads (spec: flp/engine-events.md "A channel").
     pub const CH_SWING_SHARE: u8 = 97;
+    /// Truncate swing notes, 0 or 1 (spec: audio/swing.md).
+    pub const CH_TRUNCATE_SWING: u8 = 48;
     /// Time shift, 0..=1024 (spec: audio/channel-misc.md "Settings").
     pub const CH_TIME_SHIFT: u8 = 89;
     pub const CH_ROOT: u8 = 135;
@@ -957,6 +959,9 @@ fn load_misc(block: &[Event]) -> ChannelMisc {
     if let Some(e) = find(id::CH_SWING_SHARE) {
         m.swing = int(e) as f32 / 128.0;
     }
+    if let Some(e) = find(id::CH_TRUNCATE_SWING) {
+        m.truncate_swing = int(e) != 0;
+    }
     if let Some(e) = find(id::CH_ROOT) {
         m.root = int(e).min(127) as u8;
     }
@@ -1173,6 +1178,7 @@ fn write_misc(block: &mut [Event], ch: &Channel, old: &ChannelMisc) -> Vec<Event
     let cuts = |m: &ChannelMisc| m.cut & 0xffff | m.cut_by << 16;
     for (eid, v, was) in [
         (id::CH_SWING_SHARE, (m.swing * 128.0).round() as u32, (n.swing * 128.0).round() as u32),
+        (id::CH_TRUNCATE_SWING, u32::from(m.truncate_swing), u32::from(n.truncate_swing)),
         (id::CH_TIME_SHIFT, (m.shift * 1024.0).round() as u32, (n.shift * 1024.0).round() as u32),
         (id::CH_CUT_GROUPS, cuts(m), cuts(n)),
         (id::CH_LAYER_FLAGS, m.layer.flags, n.layer.flags),
@@ -4552,6 +4558,7 @@ mod tests {
             gate: 499.0 / 997.0,
             shift: 0.25,
             swing: 0.5,
+            truncate_swing: true,
             cut: 7,
             cut_by: 9,
             root: 48,
