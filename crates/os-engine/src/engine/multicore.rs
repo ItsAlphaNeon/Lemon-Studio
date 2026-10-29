@@ -1026,4 +1026,59 @@ pub(super) mod tests {
             check(&p, &pool, seed % 2 == 0, seed % 3 == 0, &format!("seed {seed}"));
         }
     }
+
+    /// The speed-up on this machine: dense projects rendered on one thread, then on pools of several sizes (each
+    /// checked against the one-thread render; the best of three runs each). `cargo test -p os-engine --release multicore_bench -- --ignored
+    /// --nocapture`; `OS_BENCH_TICKS=n` renders more or fewer ticks (768, about 1.9 s of audio, by default).
+    #[test]
+    #[ignore]
+    fn multicore_bench() {
+        let ticks: usize = std::env::var("OS_BENCH_TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(8 * 96);
+        let heavy = |seed: u64, inserts: u16, channels: u16| {
+            let mut p = dense(seed, inserts, channels);
+            let mut rng = Lcg(seed + 99);
+            // Every insert gets three more own effects, a reverb among them.
+            for t in 1..=usize::from(inserts) {
+                p.mixer[t].slots[1] = Some(effect(0));
+                p.mixer[t].slots[2] = Some(effect(rng.next()));
+                p.mixer[t].slots[3] = Some(effect(rng.next()));
+            }
+            p
+        };
+        let projects = [
+            ("mixer-heavy: 96 inserts with 4-5 effects each, 24 channels", heavy(5, 96, 24)),
+            ("dense: 48 inserts with 4-5 effects each, 48 channels", heavy(6, 48, 48)),
+            ("generator-heavy: 12 inserts, 96 channels", dense(7, 12, 96)),
+        ];
+        let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let mut sizes = vec![1, 3, crate::parallel::default_workers(None)];
+        sizes.sort_unstable();
+        sizes.dedup();
+        println!("{logical} logical cores; {ticks} ticks per render");
+        for (what, p) in &projects {
+            let run = |pool: Option<Arc<Pool>>| {
+                let mut best = (f64::MAX, Vec::new());
+                for _ in 0..3 {
+                    let mut lib = SampleLibrary::new(None);
+                    let mut e = Engine::new(p, &mut lib, 44100, PlayMode::Pattern(1));
+                    e.set_threads(pool.clone());
+                    let mut out = Vec::new();
+                    let t = std::time::Instant::now();
+                    e.render_ticks(ticks, &mut out);
+                    best = (best.0.min(t.elapsed().as_secs_f64()), out);
+                }
+                best
+            };
+            let (one, reference) = run(None);
+            let secs = reference.len() as f64 / 2.0 / 44100.0;
+            println!("{what}: {secs:.2} s of audio");
+            println!("  1 thread: {one:.3} s ({:.1}x real time)", secs / one);
+            for &w in &sizes {
+                let pool = Pool::new(w, None);
+                let (t, out) = run(Some(pool));
+                assert_eq!(first_difference(&reference, &out), None, "{what}: {w} workers");
+                println!("  {} threads: {t:.3} s ({:.1}x real time), {:.2}x faster", w + 1, secs / t, one / t);
+            }
+        }
+    }
 }
