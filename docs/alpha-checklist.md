@@ -77,8 +77,12 @@ Greyed-out controls and partial features. These can land alongside the blockers.
 - [ ] **Playlist right-click menus.** 21 entries greyed out on 2026-10-29: the plugin window's ▸ menu (presets, spare
   states, color and icon, channel states), the picker's Change icon, Edit sample and Cut itself
   ([playlist.rs](../crates/os-app/src/playlist.rs))
-- [ ] **Channel rack right-click menus.** 14 entries greyed out on 2026-10-29: Type in value, Burn selected loops to
-  pattern, instrument tracks, Advanced looping, Loop starter, Change icon ([rack.rs](../crates/os-app/src/rack.rs))
+- [ ] **Channel rack right-click menus.** 18 of the rack's own entries greyed out on 2026-10-29, counted entry by
+  entry after 17 more were enabled: Loop starter and its 3 playlist-track options, Restretch all, Detached,
+  Switch smart disable for all plugins, Change icon, Show waveform preview, Patcherize, Assign to new instrument
+  track, Auto fill, MIDI channel through, Receive notes from ▸ Unlock and Typing keyboard, Create instrument, Burn
+  MIDI to ▸ (2). The knob, mixer box and LED menus' Automation and Remote control groups add 23 more (events in a new
+  window or the piano roll, initial values, automation clips, controller links) ([rack.rs](../crates/os-app/src/rack.rs))
 - [ ] **Main menu bar.** 13 of its 136 entries greyed out on 2026-10-29: 9 in TOOLS, 2 in VIEW, 2 in HELP
   ([menus.rs](../crates/os-app/src/views/menus.rs))
 - [x] **TOOLS ▸ Audio logger and Dump to audio editor.** Enabled (on by default, as in FL Studio) keeps the last 1 to
