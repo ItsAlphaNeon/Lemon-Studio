@@ -4870,6 +4870,7 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::not_yet("Browse presets"),
         PItem::not_yet("Save preset as..."),
         PItem::not_yet("Add to favourites"),
+        PItem::not_yet("Display preset name in preset selector").mark(Mark::Check(true)),
         PItem::head("A/B compare"),
         PItem::not_yet("Copy to B"),
         PItem::not_yet("Swap A / B"),
