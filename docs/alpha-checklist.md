@@ -80,10 +80,10 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   properties, Detached, Switch smart disable for all plugins; slot menu Patcherize, Patcherize all, Link all
   parameters..., Allow threaded processing, Smart disable, Change icon..., Scaling ▸ 100%, Help. Not counted: the
   layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs))
-- [ ] **Playlist right-click menus.** 11 entries greyed out on 2026-10-29, counted entry by entry after 7 more were
+- [ ] **Playlist right-click menus.** 10 entries greyed out on 2026-10-29, counted entry by entry after 8 more were
   enabled: the picker's Change icon; the plugin window's ▸ menu: Link all parameters..., Allow threaded processing,
   Smart disable, Change icon..., Save channel state as... and Browse channel states, and in an effect slot's window
-  also Piano roll, Replace ▸, Change color... and Random color ([playlist.rs](../crates/os-app/src/playlist.rs))
+  also Piano roll, Change color... and Random color ([playlist.rs](../crates/os-app/src/playlist.rs))
 - [ ] **Channel rack right-click menus.** 18 of the rack's own entries greyed out on 2026-10-29, counted entry by
   entry after 17 more were enabled: Loop starter and its 3 playlist-track options, Restretch all, Detached,
   Switch smart disable for all plugins, Change icon, Show waveform preview, Patcherize, Assign to new instrument
