@@ -179,7 +179,7 @@ pub fn pat_mut(s: &mut State, n: u16) -> &mut Pattern {
 
 /// Renumber patterns (`None` removes one): playlist clips follow (clips of removed patterns go). Numbers that
 /// end up without a pattern keep an empty entry so saving clears their blocks.
-fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
+pub(crate) fn renumber(s: &mut State, map: impl Fn(u16) -> Option<u16>) {
     let old: Vec<u16> = s.project.patterns.iter().map(|p| p.number).collect();
     let mut pats: Vec<Pattern> = std::mem::take(&mut s.project.patterns)
         .into_iter()
@@ -291,6 +291,25 @@ pub const PLUS_BOX_AT: (f32, f32) = (949.0, 46.0);
 
 /// Run a command; `at` is where a name box opens. Returns a status message.
 pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
+    // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
+    let step = match cmd {
+        Cmd::RandomColor => Some("Pattern color"),
+        Cmd::InsertOne => Some("Insert pattern"),
+        Cmd::Clone => Some("Clone pattern"),
+        Cmd::Delete if !crate::messages::on(&crate::messages::DELETE_PATTERN) => Some(DELETE),
+        Cmd::MoveUp | Cmd::MoveDown => Some("Move pattern"),
+        _ => None,
+    };
+    match step {
+        Some(name) => crate::control::edit(s, name, crate::control::command::Region::Project, |s| run_now(s, cmd, at)),
+        None => run_now(s, cmd, at),
+    }
+}
+
+/// The undo step of a pattern's deletion.
+const DELETE: &str = "Delete pattern";
+
+fn run_now(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
     let cur = s.pattern.max(1);
     match cmd {
         Cmd::FindFirst => {
@@ -449,7 +468,7 @@ pub fn delete_current(s: &mut State) {
         s.rack.delete_now = Some(rows);
         return;
     }
-    delete_pattern(s);
+    crate::control::edit(s, DELETE, crate::control::command::Region::Project, delete_pattern);
 }
 
 /// Cancel in the delete confirmation: nothing is deleted and Remember my choice is not kept.
@@ -467,6 +486,17 @@ fn delete_pattern(s: &mut State) {
 
 /// Accept the name box.
 pub fn accept(s: &mut State) {
+    let Some(b) = s.pat_ui.name_box.as_ref() else { return };
+    let name = match b.target {
+        BoxTarget::Name(_) => "Pattern name",
+        BoxTarget::Transpose(_) | BoxTarget::Rack(crate::rack::RBox::Transpose) => "Transpose",
+        BoxTarget::Rack(crate::rack::RBox::Channel(_)) => "Channel name",
+        BoxTarget::Rack(_) => "Channel group",
+    };
+    crate::control::edit(s, name, crate::control::command::Region::Project, accept_now);
+}
+
+fn accept_now(s: &mut State) {
     let Some(b) = s.pat_ui.name_box.take() else { return };
     match b.target {
         BoxTarget::Name(n) => {
@@ -507,6 +537,14 @@ pub fn suggest(s: &mut State, col: usize, row: usize) {
 }
 
 pub fn set_color(s: &mut State, i: usize) {
+    let name = match s.pat_ui.name_box.as_ref().map(|b| b.target) {
+        Some(BoxTarget::Rack(_)) => "Channel color",
+        _ => "Pattern color",
+    };
+    crate::control::edit(s, name, crate::control::command::Region::Project, |s| set_color_now(s, i));
+}
+
+fn set_color_now(s: &mut State, i: usize) {
     let target = s.pat_ui.name_box.as_ref().map(|b| b.target);
     if let Some(&c) = SWATCHES.get(i) {
         let col = Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8));

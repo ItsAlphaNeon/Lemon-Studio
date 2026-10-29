@@ -547,7 +547,7 @@ impl App {
                 }
             }
             Target::Param(key, index) => {
-                crate::params::set_param_value(&self.state, key, index, f64::from(v));
+                crate::params::set_param_value(&mut self.state, key, index, f64::from(v));
             }
         }
         self.invalidate();

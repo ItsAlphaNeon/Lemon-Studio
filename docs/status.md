@@ -325,19 +325,38 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Covers the piano roll, the playlist, step-sequencer edits and knob turns (channel, main, mixer panning and
   stereo separation, effect mix, send levels, swing), sample loads, the project's initial values, PATTERNS ▸ Split
   by channel and ADD's audio and automation clip channels
-- Also mixer volume faders ("Mixer track volume": a drag is one step, a typed value too), generators added to the
-  rack, at the bottom or inserted higher up ("Add channel": the plugin picker, F8, ADD, Insert, a browser drop),
-  Replace ("Replace channel", with the old instrument's state), channel deletes ("Delete channel", with notes,
-  clips and the instruments' state), Settings > Project's timebase (its ticks come back exactly), bar, time mode,
-  panning law, Play truncated notes and Automatic crossfades ("Project settings"), Settings > Info's text ("Project
-  info"), and plugin parameters Lemon Studio sets ("Plugin parameter": Type in value, Set..., Paste value); faders
-  and parameters follow Undo knob tweaks
+- The mixer: faders (a drag is one step, a typed value too), mute, polarity and swap buttons, the equaliser graph,
+  routing, colours, names, effect slots (adding, removing, moving, their lights) and adding, moving, deleting and
+  trimming tracks
+- The channel rack: generators added, at the bottom or inserted higher up (the plugin picker, F8, ADD, Insert, a
+  browser drop; undone, the instance is kept and comes back with a redo), Replace (with the old instrument's state),
+  colours, names, cloning, moving, sorting, deleting (with notes, clips and the instruments'
+  state), mixer track assignments, groups and Burn loops, and the PATTERNS menu's colours, names, inserting, cloning,
+  moving and deleting
+- FILE ▸ Import ▸ MIDI file into the open project
+- The tempo (the toolbar's box; the tempo tapper's taps, one step per count), Settings ▸ Project's timebase (its
+  ticks come back exactly), time signature, panning law, Play truncated notes in clips and Automatic crossfades, and Settings ▸ Info's boxes
+- Plugin parameters Lemon Studio sets ("Plugin parameter": Type in value, Set..., Paste value), and those changed in a
+  plugin's own window: one step per gesture (mouse down to up on its knob), or per run of values from a plugin that
+  sends them without one; mixer faders and parameters follow "Undo knob tweaks"
+- Changes made through the control plane (see Scripting and assistants), named after the client that made them
 - The browser's Current project ▸ History lists the steps from "Last reset"; undone steps are grey, and a click
   on one goes back or forward to it
 - General settings ▸ Undo history: Maximum undo levels, Undo knob tweaks, Alternate undo mode, and showing the
   history in the browser, newest first if wanted
-- Not yet: a plugin editor's own changes, other mixer track commands (mute, routing, names, slots); "Put undone
-  recordings in the recycle bin" waits for recording
+- Not yet: "Put undone recordings in the recycle bin", which waits for recording. A plugin's own undo inside its
+  window is the plugin's, apart from the app's history
+
+## 🚧 Scripting and assistants
+
+- The control plane ([control-plane.md](control-plane.md)): `--control <socket>` beside the window, `--serve` without
+  one; JSON-RPC 2.0 over a Unix socket or a local port
+- Reads the project (channels, mixer, patterns, notes, playlist, plugin parameters) with stable ids, and changes it
+  with commands: one undo step per request, applied whole or not at all
+- Read-only, propose-only (the user applies or discards each proposal) and edit levels; saving to a file asks the
+  user while there is a window
+- Events for every change, including edits in the interface
+- Not yet: live commands to the playing engine, a native project format, rendering through it
 
 ## 🚧 Audio drivers
 

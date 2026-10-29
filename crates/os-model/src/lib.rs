@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -11,6 +12,33 @@
 pub mod clip_lfo;
 pub mod crossfade;
 pub mod curve;
+
+/// A stable identity for a channel, pattern, mixer track, arrangement, playlist clip or mixer slot's plugin: it stays
+/// with the thing through moves, renumbering and the deletion of others, so commands can name it (the control plane,
+/// `os-app`'s `control`). [`Id::NONE`] until the app assigns one; project files don't store ids, so an opened project
+/// gets new ones.
+///
+/// An id is who a thing is, not what it holds: two things compare equal whatever their ids (`==` on a project, a
+/// channel, a clip compares their contents, as it did before ids). Compare ids by their numbers (`id.0`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Id(pub u32);
+
+impl Id {
+    /// Not assigned yet.
+    pub const NONE: Id = Id(0);
+
+    pub fn is_none(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl PartialEq for Id {
+    fn eq(&self, _: &Id) -> bool {
+        true
+    }
+}
+
+impl Eq for Id {}
 
 /// An RGB color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -561,6 +589,8 @@ impl ChannelKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Channel {
+    /// The channel's stable identity ([`Id`]).
+    pub id: Id,
     /// Position in the Channel rack, 0-based.
     pub index: u16,
     pub kind: ChannelKind,
@@ -1121,6 +1151,8 @@ impl Default for Envelope {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Pattern {
+    /// The pattern's stable identity ([`Id`]).
+    pub id: Id,
     /// 1-based.
     pub number: u16,
     pub name: Option<String>,
@@ -1300,6 +1332,8 @@ impl Note {
 
 #[derive(Debug, Clone)]
 pub struct MixerTrack {
+    /// The track's stable identity ([`Id`]).
+    pub id: Id,
     /// 0 = Master.
     pub index: u16,
     pub name: Option<String>,
@@ -1357,8 +1391,9 @@ pub struct MixerTrack {
 
 impl PartialEq for MixerTrack {
     fn eq(&self, o: &Self) -> bool {
-        // Every field but `origin`, named so that a new field is not left out.
+        // Every field but `origin` (and `id`, which compares equal anyway), named so that a new field is not left out.
         let MixerTrack {
+            id: _,
             index,
             name,
             color,
@@ -1426,6 +1461,7 @@ impl MixerTrack {
     /// A default track: unnamed, enabled, unity volume, centred, empty slots, routed to the master (except the master).
     pub fn new(index: u16) -> Self {
         MixerTrack {
+            id: Id::NONE,
             index,
             name: None,
             color: None,
@@ -1464,6 +1500,8 @@ impl MixerTrack {
 /// A plugin in a mixer slot: its name and its opaque saved state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotPlugin {
+    /// The plugin instance's stable identity ([`Id`]).
+    pub id: Id,
     pub name: String,
     pub state: Vec<u8>,
 }
@@ -1487,6 +1525,8 @@ pub struct PluginRef {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Arrangement {
+    /// The arrangement's stable identity ([`Id`]).
+    pub id: Id,
     pub number: u16,
     pub name: Option<String>,
     /// Sorted by position.
@@ -1512,6 +1552,8 @@ pub const CLIP_RECORD_LEN: usize = 88;
 /// source's start for the clip's length.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Clip {
+    /// The clip's stable identity ([`Id`]).
+    pub id: Id,
     pub position: u32,
     pub length: u32,
     /// 0-based playlist track.
@@ -1550,7 +1592,7 @@ impl Clip {
     };
 
     pub fn new(position: u32, length: u32, track: u16, source: ClipSource) -> Clip {
-        Clip { position, length, track, source, muted: false, window: None, raw: Clip::TEMPLATE }
+        Clip { id: Id::NONE, position, length, track, source, muted: false, window: None, raw: Clip::TEMPLATE }
     }
 
     pub fn end(&self) -> u32 {

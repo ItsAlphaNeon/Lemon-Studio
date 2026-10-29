@@ -94,6 +94,7 @@ pub fn add_channel(s: &mut State, path: &str, pattern: u16) -> u16 {
     let name = crate::playlist::unique_channel_name(s, &crate::patterns::name_of(s, pattern));
     let color = s.project.pattern(pattern).and_then(|p| p.color).or_else(|| Some(s.clip_colors.new_channel(index)));
     s.project.channels.push(Channel {
+        id: os_model::Id::NONE,
         index,
         kind: ChannelKind::AudioClip,
         name: Some(name),
