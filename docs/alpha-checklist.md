@@ -56,7 +56,8 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
 Greyed-out controls and partial features. These can land alongside the blockers.
 
 - [ ] **Event editor window.** Edit events is greyed out in five menus (playlist, channel rack, parameter menus)
-- [ ] **Undo for a plugin editor's own changes**
+- [x] **Undo for a plugin editor's own changes.** Parameters moved in a plugin's window and presets loaded from its
+  title bar or dropped on it are one step each; a preset's undo brings back the state, the preset and the name
 - [x] **Undo for mixer track commands.** Routing, names, colours, resets, effect slots, audio input / output and
   latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the

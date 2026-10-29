@@ -684,14 +684,12 @@ impl Plugins {
     }
 
     /// The parameters of the instance under `key`, in the plugin's order.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn param_infos(&self, key: usize) -> Vec<os_host::ParamInfo> {
         let Some(p) = self.hosted.get(&key).and_then(|h| h.plugin.lock().ok()) else { return Vec::new() };
         (0..p.param_count()).filter_map(|i| p.param_info(i)).collect()
     }
 
     /// The normalized value of parameter `id` of the instance under `key`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn param_value(&self, key: usize, id: u32) -> Option<f64> {
         self.hosted.get(&key)?.plugin.lock().ok()?.param_value(id)
     }
@@ -1085,8 +1083,12 @@ impl Plugins {
         }
     }
 
-    /// Rack rows were renumbered (`m(old) = new`; `None` drops the instance and its window).
+    /// Rack rows were renumbered (`m(old) = new`; `None` drops the instance and its window). The presets the instances
+    /// hold go with them.
     pub fn remap(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
+        let rows: Vec<usize> = self.presets.range(..FX_KEY).map(|(&r, _)| r).collect();
+        let presets: Vec<(usize, PathBuf)> = rows.into_iter().filter_map(|r| Some((r, self.presets.remove(&r)?))).filter_map(|(r, p)| Some((m(r)?, p))).collect();
+        self.presets.extend(presets);
         for (row, h) in std::mem::take(&mut self.hosted) {
             if row >= FX_KEY {
                 self.hosted.insert(row, h);

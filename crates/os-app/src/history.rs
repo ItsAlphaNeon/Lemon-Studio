@@ -13,8 +13,9 @@
 //! covered too: their steps hold the commands that undo them (`Snap::Commands`), as do the interface's edits that go
 //! through `control::edit` (the mixer and its faders; the rack's channels added, moved and deleted, FILE ▸ Import ▸
 //! MIDI file into the open project among them; the tempo and Settings > Project's values), the plugin parameters
-//! Lemon Studio sets (`control::param_set`) and those moved in a plugin's own window (`control::param_edit`). The
-//! timebase has a step of its own (`timebase`), which brings back the ticks a lower timebase rounded.
+//! Lemon Studio sets (`control::param_set`), those moved in a plugin's own window (`control::param_edit`) and the
+//! presets loaded into a plugin from its window or dropped on it (`control::state_edit`). The timebase has a step of
+//! its own (`timebase`), which brings back the ticks a lower timebase rounded.
 //!
 //! The settings of General ▸ Undo history (`crate::prefs`): Maximum undo levels (past it the oldest step goes), Undo
 //! knob tweaks, Alternate undo mode (what Ctrl+Z and Ctrl+Alt+Z do), Show undo history in the browser when undoing
@@ -476,6 +477,25 @@ pub fn extend_newest(s: &mut State, f: impl FnOnce(&mut Vec<crate::control::Comm
     if h.done > 0 && h.done == h.steps.len() {
         if let Snap::Commands(c) = &mut h.steps[h.done - 1].snap {
             f(c);
+        }
+    }
+}
+
+/// The plugin state side numbered `fill` (`PluginSide::fill`), in whichever step holds it, takes the state and preset
+/// the app found in the plugin as it put the other side in (`App::host_commands`).
+pub fn fill_plugin_side(s: &mut State, fill: u64, state: &[u8], preset: Option<&std::path::Path>) {
+    use crate::control::command::Taken;
+    for st in &mut s.history.steps {
+        let Snap::Commands(v) = &mut st.snap else { continue };
+        for c in v {
+            if let crate::control::Command::Put(t) = c {
+                if let Taken::Plugin(_, side) = &mut **t {
+                    if side.fill == fill {
+                        (side.state, side.preset, side.fill) = (state.to_vec(), preset.map(Into::into), 0);
+                        return;
+                    }
+                }
+            }
         }
     }
 }
