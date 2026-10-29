@@ -2938,6 +2938,7 @@ dependencies = [
  "lemon-balance",
  "lemon-chorus",
  "lemon-delay",
+ "lemon-drum-sampler",
  "lemon-fast-distortion",
  "lemon-filter",
  "lemon-flanger",

@@ -264,17 +264,20 @@ pub struct Plugins {
 const STASH_MAX: usize = 64;
 
 /// Lemon Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
-/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon Trio, Citrus and Lemon Slicer likewise (spec:
-/// plugins/lemon-3x-osc.md §6, plugins/citrus.md, plugins/lemon-slicer.md §6).
+/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon Trio, Citrus, Lemon Slicer and Lemon Drum Sampler likewise (spec:
+/// plugins/lemon-3x-osc.md §6, plugins/citrus.md, plugins/lemon-slicer.md §6,
+/// plugins/lemon-drum-sampler.md §5).
 pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static OSC3: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static CITRUS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static SLICER: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    static DRUMS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
     v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_TRIO));
     v.extend(linked(&CITRUS, &citrus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::citrus::CITRUS));
     v.extend(linked(&SLICER, &lemon_slicer::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::slicer::LEMON_SLICER));
+    v.extend(linked(&DRUMS, &lemon_drum_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::drums::LEMON_DRUMS));
     v
 }
 
