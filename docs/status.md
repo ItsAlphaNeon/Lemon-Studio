@@ -259,6 +259,13 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   sends and plugin parameters one tick late, as in the original, within the fader's resolution of FL Studio 2026's
   exports (93 cases). The link's smoothing is approximated; links can't be made or edited in the app yet, and the
   links of rack controllers (Envelope and Keyboard Controllers, Control Surface) are kept but not played
+- Formula Controller: a project's Fruity Formula Controller slots open as Lemon Formula Controller (VST3 and CLAP,
+  Pith editor with a formula field and its compile status) and save back with their knobs, formula and comments; the
+  formula is worked out once per tick and its controller links drive their targets, matching FL Studio 2026's
+  exports within the fader's resolution (158 cases: every function, the original's precedence and rounding rules). A
+  formula that doesn't compile leaves its targets alone, as in the original. Rand and SeededRand use our own
+  generators, Time counts from the program's start, Date is the UTC day and the mouse reads 0; the comments are kept
+  but not shown
 - The Stereo Shaper's difference output plays in the mixer (added to the track it names, from the first tick, without
   delay compensation); Lemon Stereo Shaper as a plugin keeps the setting but has no output for it
 - Lemon Parametric EQ plays FL's Parametric EQ 2 in every quality mode, in a project's mixer slots and as a plugin:
