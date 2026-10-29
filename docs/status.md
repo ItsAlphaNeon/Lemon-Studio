@@ -266,6 +266,13 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   pi, where the original's is a hair off: the flanger still matches FL Studio 2026's exports sample for sample in the
   tests (36 cases), the phaser in 11 of 35 and the rest at least 86 dB below the test signal; the phaser's LFO starts
   as after 512 idle frames, one of the two starts (512 or 1024) FL's exports make
+- Vocoder: Lemon Vocoder (VST3 and CLAP, Pith editor) is a band vocoder with a sidechain input: the voice on the
+  track and the synth from another track, or the other way round. A project's Vocodex slots open as it and save back
+  unchanged. It plays the wet level, the pass-throughs, added noise, hold, attack and release (peak or RMS), band
+  count, width and order; the original's built-in synth carrier, unison, pitch shift, contour and the band curves
+  (other than where the bands start and end) are kept but not played. Its sound is Lemon Studio's own, not compared
+  with FL Studio's exports. Changing its input selectors reroutes the track only after the project is saved and
+  opened again
 - Peak Controller: a project's Fruity Peak Controller slots open as Lemon Peak Controller (VST3 and CLAP, Pith editor)
   and save back unchanged; their controller links (kept byte for byte, formulas included) drive mixer volumes, pans,
   sends and plugin parameters one tick late, as in the original, within the fader's resolution of FL Studio 2026's
