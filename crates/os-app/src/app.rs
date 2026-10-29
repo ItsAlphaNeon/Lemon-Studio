@@ -2156,22 +2156,42 @@ impl App {
             self.invalidate();
             return;
         }
-        // A plugin window drawn in the app's own (Linux) closes as a plugin's own window would.
-        #[cfg(target_os = "linux")]
-        if let Some(&Win::Hosted(row)) = self.state.z.last().filter(|w| !self.state.no_focus && matches!(w, Win::Hosted(r) if self.state.embeds.contains_key(r))) {
-            self.plugins.close_window(row);
-            self.invalidate();
-            return;
+        // The tiling layout: the floating window in front closes (a plugin's window drawn in the app's, the instrument
+        // rack, the channel window, a tool window), whichever window has the keyboard, as each would if it were a
+        // window of its own (Hyprland's Super+W): the app closes only when none is open.
+        if self.state.tiled() {
+            if let Some(&w) = self.state.z.iter().rev().find(|&&w| self.closes_first(w)) {
+                self.close_floating(w);
+                return;
+            }
         }
-        // The tiling layout's floating windows close the same way, as a plugin's window does (Hyprland's Super+W).
-        let lemon = self.state.tiled();
-        let tool = |w: &Win| crate::floating::is_tool(*w) || (lemon && matches!(w, Win::ChannelRack | Win::Plugin));
-        if let Some(&w) = self.state.z.last().filter(|w| !self.state.no_focus && tool(w)) {
-            self.act(Action::CloseWin(w));
-            self.invalidate();
+        // Classic: the one in front, when it has the keyboard.
+        let tool = |w: &Win| crate::floating::is_tool(*w) || matches!(w, Win::Hosted(_));
+        if let Some(&w) = self.state.z.last().filter(|&&w| !self.state.no_focus && tool(&w) && self.closes_first(w)) {
+            self.close_floating(w);
             return;
         }
         self.ask_discard("closing", crate::dialog::Next::Close);
+    }
+
+    /// Whether the system's close shortcut closes floating window `w` before the app (`close_requested`): an open plugin
+    /// window drawn in the app's (Linux), or a placed floating window.
+    fn closes_first(&self, w: Win) -> bool {
+        match w {
+            #[cfg(target_os = "linux")]
+            Win::Hosted(r) => self.state.embeds.contains_key(&r),
+            Win::Hosted(_) => false,
+            w => crate::floating::placed(w).is_some(),
+        }
+    }
+
+    /// Closes floating window `w` as its × does.
+    fn close_floating(&mut self, w: Win) {
+        match w {
+            Win::Hosted(row) => self.plugins.close_window(row),
+            w => self.act(Action::CloseWin(w)),
+        }
+        self.invalidate();
     }
 
     /// Before the project is replaced or the app closes (`doing`: "closing", ...): with unsaved changes, asks to save
@@ -13179,7 +13199,8 @@ mod tests {
         assert_eq!(place(&mut app, &mut c, 100), one, "three");
     }
 
-    /// The tiling layout: the close shortcut closes the channel rack in front too, before the app.
+    /// The tiling layout: the close shortcut closes the floating windows, the one in front first, whichever window has
+    /// the keyboard (a split window clicked last, or none), before the app.
     #[test]
     fn close_shortcut_closes_the_rack_in_lemon() {
         let mut app = App::new(None);
@@ -13190,6 +13211,19 @@ mod tests {
         assert!(!app.state.shown(Win::ChannelRack) && !app.want_exit, "the rack closed, not the app");
         app.close_requested();
         assert!(app.want_exit, "the mixer in front: the app");
+        // The keyboard in a split window, or in none: the floating windows still close first, front one first.
+        let mut app = App::new(None);
+        app.state.bar.tiling = true;
+        app.state.raise(Win::ChannelRack);
+        app.state.raise(Win::Tapper);
+        app.state.raise(Win::Mixer);
+        app.close_requested();
+        assert!(!app.state.shown(Win::Tapper) && app.state.shown(Win::ChannelRack) && !app.want_exit, "the tapper first");
+        app.state.no_focus = true;
+        app.close_requested();
+        assert!(!app.state.shown(Win::ChannelRack) && !app.want_exit, "then the rack");
+        app.close_requested();
+        assert!(app.want_exit, "then the app");
     }
 
     #[test]

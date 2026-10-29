@@ -55,7 +55,8 @@ own content. Side branches are named `cutting-edge-<topic>`.
     (floating windows change nothing). Ctrl+Alt+arrows move the keyboard to the split window that way (floating windows
     are no stops; while one is maximized, the one that way is maximized instead), Ctrl+Alt+Shift+arrows swap split
     windows, and F maximizes the window under the mouse or brings the split back. The window manager's close shortcut
-    closes the instrument rack or channel window with the keyboard, as it closes a plugin's, before the app.
+    closes the floating windows first, the one in front first (plugin windows, the instrument rack, the channel window,
+    tool windows), whichever window has the keyboard; the app closes only when none is open.
 
   The tiling and Classic layouts each keep their own toolbar and, for the session, their own window arrangement.
   Every other keyboard shortcut works the same. Classic is FL's arrangement and unchanged.
