@@ -198,6 +198,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   into automation clip, which moves the events into a new clip channel linked to the control, as the original does
   (the control's earlier value until the first event, then the events, a recorded ramp as one straight segment, ending
   on the last event). Each edit is an undo step
+- A knob's menu (channel volume and pan, mixer and main knobs): Edit automation clip... shows the clip that drives it,
+  as on a plugin parameter, and Set... puts it at its default, the minimum, 25, 50 or 75% or the maximum, each listed
+  with the knob's value there (one undo step)
 - Not yet in the event editor: the Paint, Interpolate and Zoom tools, Scale levels and LFO, inserting and deleting time,
   a second window
 
