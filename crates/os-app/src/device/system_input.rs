@@ -45,11 +45,20 @@ struct Cache {
 
 static CACHE: Mutex<Cache> = Mutex::new(Cache { found: None, at: None, asking: false, generation: 0 });
 
+/// Set by `forget`: an input that failed to open is tried again (`OutputDevice::sync_inputs`).
+static RETRY: AtomicBool = AtomicBool::new(false);
+
 /// Another input device was chosen: what was found is dropped and the device is asked again.
 pub fn forget() {
     let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     (c.found, c.at, c.asking) = (None, None, false);
     c.generation += 1;
+    RETRY.store(true, Ordering::Release);
+}
+
+/// Whether another input device was chosen since this was last asked (`forget`).
+pub fn take_retry() -> bool {
+    RETRY.swap(false, Ordering::AcqRel)
 }
 
 /// The input device for the audio settings in use (`None`: none, or not asked yet). It never waits:
