@@ -1460,6 +1460,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     _ => {
                         if live.is_none() {
                             if let Some(p) = project {
+                                crate::dropout_log::write(&match &cmd {
+                                    Cmd::NoteOn(c, k, v) => format!("live stream: note {k} on channel {c}, velocity {v}"),
+                                    Cmd::Midi(c, b, _) => format!("live stream: message {b:02x?} to channel {c}"),
+                                    _ => "live stream: tempo tap".to_string(),
+                                });
                                 match open_live(p, listen, &mut library, &mut device) {
                                     Ok(s) => live = Some(s),
                                     Err(e) => report(&shared, e),
@@ -1515,6 +1520,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     let running = session.as_ref().is_some_and(|s| !s.paused());
                     if !running && live.is_none() {
                         if let Some(p) = live_project.as_ref().or(Some(&*project)) {
+                            crate::dropout_log::write(&format!("live stream: a preview of channel {}", r));
                             match open_live(p, listen, &mut library, &mut device) {
                                 Ok(s) => live = Some(s),
                                 Err(e) => report(&shared, e),
@@ -1861,6 +1867,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             listen_retry = false;
             if let Some(p) = live_project.as_ref() {
                 release_paused(&session);
+                crate::dropout_log::write("live stream: an instrument's window is open");
                 match open_live(p, true, &mut library, &mut device) {
                     Ok(s) => live = Some(s),
                     Err(e) => eprintln!("lemonstudio: live stream for the open plugin editor: {e}"),
