@@ -260,16 +260,17 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   projects keep every LFO field
 - The event editor (Edit events on a control's menu: channel volume, pan and pitch, mixer controls, the tempo, plugin
   parameters) shows the control's events in the selected pattern as its level over time, in the setting's own unit: left
-  drag draws freehand on the global snap, right drag a straight line, Erase and Select tools, the wheel scrolls and
-  Ctrl+wheel zooms; its Edit menu has Cut, Copy, Paste, Select all, Delete, Insert current controller value and Turn
+  drag draws freehand on the global snap, right drag a straight line, Paint (drawing off the snap), Erase,
+  Interpolate (a drag lays the events under it on a straight line, right drag a smooth one) and Select tools, the
+  wheel scrolls and Ctrl+wheel zooms; its Edit menu has Cut, Copy, Paste, Select all, Delete, Duplicate (Ctrl+B),
+  Insert space (Ctrl+Ins), Delete space (Ctrl+Del), Insert current controller value and Turn
   into automation clip, which moves the events into a new clip channel linked to the control, as the original does
   (the control's earlier value until the first event, then the events, a recorded ramp as one straight segment, ending
   on the last event). Each edit is an undo step
 - A knob's menu (channel volume and pan, mixer and main knobs): Edit automation clip... shows the clip that drives it,
   as on a plugin parameter, and Set... puts it at its default, the minimum, 25, 50 or 75% or the maximum, each listed
   with the knob's value there (one undo step)
-- Not yet in the event editor: the Paint, Interpolate and Zoom tools, Scale levels and LFO, inserting and deleting time,
-  a second window
+- Not yet in the event editor: the Zoom tool, Scale levels and LFO, Select previous / next, a second window
 
 ## 🚧 Project files
 
