@@ -27,6 +27,8 @@ pub enum Tool {
     Interpolate,
     /// Left drag selects a stretch of time.
     Select,
+    /// A click zooms in about it, a drag zooms on the stretch dragged over, a right click zooms out.
+    Zoom,
 }
 
 /// The window's buttons and areas.
@@ -286,12 +288,19 @@ pub fn select_step(s: &mut State, next: bool) -> bool {
 /// Zoom in or out (`factor` times the pixels a beat) about the graph's middle.
 pub fn zoom(s: &mut State, factor: f32) {
     let g = crate::views::events::graph(s);
-    let mid = g.x + g.w / 2.0;
-    let at = crate::views::events::tick_at(s, mid);
+    zoom_about(s, factor, g.x + g.w / 2.0);
+}
+
+/// Zoom in or out about `x`: the tick there stays there.
+pub fn zoom_about(s: &mut State, factor: f32, x: f32) {
+    let at = crate::views::events::tick_at(s, x);
     s.events.px_per_beat = (s.events.px_per_beat * factor).clamp(ZOOM.0, ZOOM.1);
-    let back = crate::views::events::tick_at(s, mid) - s.events.scroll;
+    let back = crate::views::events::tick_at(s, x) - s.events.scroll;
     s.events.scroll = (at - back).max(0.0);
 }
+
+/// The Zoom tool's and the menu's zoom step.
+pub const ZOOM_STEP: f32 = 1.5;
 
 /// Zoom ▸ on selection: the selection fills the graph's width.
 pub fn zoom_selection(s: &mut State) -> bool {
@@ -437,6 +446,8 @@ pub enum Stroke {
     Line,
     /// The Interpolate tool's line (`EventsUi::line`), smooth with the right button: made on release.
     Interpolate(bool),
+    /// The Zoom tool's drag from the anchor tick; the selection it hides while the stretch shows.
+    Zoom(u32, Option<(u32, u32)>),
 }
 
 /// The snap's unit in ticks at the editor's zoom: the global snap (none with Alt held).
@@ -539,6 +550,14 @@ impl App {
         let stroke = if ruler || ctrl || (!right && s.events.tool == Tool::Select) {
             s.events.sel = None;
             Stroke::Select(tick)
+        } else if s.events.tool == Tool::Zoom {
+            if right {
+                zoom_about(s, 1.0 / ZOOM_STEP, x);
+                self.damage_win(Win::Events);
+                return;
+            }
+            let anchor = crate::views::events::tick_at(s, x).max(0.0) as u32;
+            Stroke::Zoom(anchor, s.events.sel.take())
         } else if s.events.tool == Tool::Interpolate {
             s.events.line = Some(((tick, level), (tick, level)));
             Stroke::Interpolate(right)
@@ -580,6 +599,12 @@ impl App {
                 s.events.sel = Some((anchor.min(tick), anchor.max(tick) + u));
                 stroke
             }
+            // The stretch shows as the selection until the button goes up.
+            Stroke::Zoom(anchor, _) => {
+                let t = crate::views::events::tick_at(s, x).max(0.0) as u32;
+                s.events.sel = Some((anchor.min(t), anchor.max(t)));
+                stroke
+            }
             Stroke::Line | Stroke::Interpolate(_) => {
                 if let Some(l) = &mut s.events.line {
                     l.1 = (tick, level);
@@ -595,6 +620,26 @@ impl App {
     pub(crate) fn events_release(&mut self, stroke: Stroke) {
         let s = &mut self.state;
         let alt = self.alt || s.events.tool == Tool::Paint;
+        // Zoom: a drag of 4 px or more zooms on its stretch, a click zooms in about it; the selection comes back.
+        if let Stroke::Zoom(anchor, kept) = stroke {
+            let dragged = s.events.sel.take().filter(|(a, b)| {
+                let px = f64::from(s.events.px_per_beat) / f64::from(s.project.ppq.max(4));
+                f64::from(b - a) * px >= 4.0
+            });
+            match dragged {
+                Some(r) => {
+                    s.events.sel = Some(r);
+                    zoom_selection(s);
+                }
+                None => {
+                    let x = crate::views::events::x_of(s, f64::from(anchor));
+                    zoom_about(s, ZOOM_STEP, x);
+                }
+            }
+            s.events.sel = kept;
+            self.damage_win(Win::Events);
+            return;
+        }
         let line = match stroke {
             Stroke::Line | Stroke::Interpolate(_) => s.events.line.take(),
             _ => return,
@@ -671,7 +716,7 @@ impl App {
                 Some(format!("Relocate events {}", if s.events.relocate { "on" } else { "off" }))
             }
             EvCmd::ZoomIn | EvCmd::ZoomOut => {
-                zoom(s, if c == EvCmd::ZoomIn { 1.5 } else { 1.0 / 1.5 });
+                zoom(s, if c == EvCmd::ZoomIn { ZOOM_STEP } else { 1.0 / ZOOM_STEP });
                 None
             }
             EvCmd::ZoomSelection => {
@@ -724,6 +769,11 @@ impl App {
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("a") => EvCmd::SelectAll,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("i") => EvCmd::InsertValue,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("l") => EvCmd::Lfo,
+            // Z: the Zoom tool (the original's key).
+            Key::Character(c) if !ctrl && !alt && !shift && c.eq_ignore_ascii_case("z") => {
+                self.state.events.tool = Tool::Zoom;
+                return true;
+            }
             _ => return false,
         };
         if let Some(m) = self.events_cmd(c) {
@@ -905,6 +955,48 @@ mod tests {
         assert_eq!(point(s, 400.max(bar)), if bar > 400 { None } else { Some(3200) });
         dlg::accept(s);
         assert!(!s.piano_dlg.session_open());
+    }
+
+    /// The Zoom tool (§3): a click zooms in about it, a drag on the stretch, a right click out; Z picks it.
+    #[test]
+    fn zoom_tool() {
+        use crate::app::Drag;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        assert!(open(&mut app.state, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
+        app.state.z.push(Win::Events);
+        assert!(app.events_key(&winit::keyboard::Key::Character("z".into()), false, false));
+        assert_eq!(app.state.events.tool, Tool::Zoom);
+        let g = crate::views::events::graph(&app.state);
+        let ppq = f64::from(app.state.project.ppq);
+        app.state.events.sel = Some((0, 10));
+        // A click: in, the tick under it stays.
+        app.mouse = (g.x + 200.0, g.y + 20.0);
+        let (px, at) = (app.state.events.px_per_beat, crate::views::events::tick_at(&app.state, g.x + 200.0));
+        app.events_press(false, false);
+        let Some(Drag::Events(st)) = app.drag.take() else { panic!("a zoom stroke") };
+        app.events_release(st);
+        assert_eq!(app.state.events.px_per_beat, px * ZOOM_STEP);
+        assert!((crate::views::events::tick_at(&app.state, g.x + 200.0) - at).abs() < 1e-6);
+        assert_eq!(app.state.events.sel, Some((0, 10)), "the selection stays");
+        // A drag: on its stretch.
+        app.state.events.scroll = 0.0;
+        app.mouse = (g.x + 10.0, g.y + 20.0);
+        app.events_press(false, false);
+        let Some(Drag::Events(st)) = app.drag.take() else { panic!() };
+        let to = crate::views::events::x_of(&app.state, 8.0 * ppq);
+        let from = crate::views::events::tick_at(&app.state, g.x + 10.0).floor();
+        app.events_drag(st, to, g.y + 20.0);
+        let Some(Drag::Events(st)) = app.drag.take() else { panic!() };
+        app.events_release(st);
+        assert!((app.state.events.scroll - from).abs() < 1.0);
+        assert!((crate::views::events::x_of(&app.state, 8.0 * ppq) - (g.x + g.w)).abs() < 1.0, "the stretch fills the graph");
+        assert_eq!(app.state.events.sel, Some((0, 10)));
+        // A right click: out.
+        let px = app.state.events.px_per_beat;
+        app.events_press(true, false);
+        assert!(app.drag.is_none());
+        assert!((app.state.events.px_per_beat - px / ZOOM_STEP).abs() < 1e-3);
     }
 
     /// Select previous / next, Relocate events and the zoom (§4).

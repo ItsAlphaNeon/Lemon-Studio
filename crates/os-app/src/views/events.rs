@@ -120,6 +120,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         (Tool::Erase, "Erase", "Erase events"),
         (Tool::Interpolate, "Interp.", "Interpolate (left: straight, right: smooth)"),
         (Tool::Select, "Select", "Select a stretch of time"),
+        (Tool::Zoom, "Zoom", "Zoom (Z; click: in, drag: on the stretch, right-click: out)"),
     ];
     for (i, (tool, text, hint)) in tools.into_iter().enumerate() {
         button(ui, at(80.0 + 64.0 * i as f32, 34.0, 60.0, 24.0), Action::Events(EvAct::Tool(tool)), hint, Ok(text), e.tool == tool);
