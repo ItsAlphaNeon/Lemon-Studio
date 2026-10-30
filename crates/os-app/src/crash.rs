@@ -56,12 +56,13 @@ fn running(pid: u64) -> bool {
 /// The newest autosave of `project` (None: an untitled one) written after `since` (Unix ms): in the project's folder's
 /// `Backup` (a data folder's) and the global backup folder.
 fn backup_after(project: Option<&Path>, since: u64) -> Option<PathBuf> {
-    let name = crate::backup::project_name(project);
+    // A project opened converted has no path while it plays: its backups are an untitled project's.
+    let names = [crate::backup::project_name(project), crate::backup::project_name(None)];
     let dirs: Vec<PathBuf> = project.and_then(Path::parent).map(|d| d.join(crate::data_folder::BACKUP_DIR)).into_iter().chain(crate::backup::folder()).collect();
     let written = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
     dirs.iter()
         .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
-        .filter(|e| e.file_name().to_str().is_some_and(|f| crate::backup::saved_at(f, &name, "autosaved").is_some()))
+        .filter(|e| e.file_name().to_str().is_some_and(|f| names.iter().any(|n| crate::backup::saved_at(f, n, "autosaved").is_some())))
         .map(|e| (written(&e.path()), e.path()))
         .filter(|(t, _)| *t > since)
         .max()
@@ -122,6 +123,9 @@ impl App {
                 }
                 if self.state.path.as_deref() == Some(p.as_path()) {
                     self.revert_from(b);
+                } else {
+                    // Opened converted, without its path: the backup as itself.
+                    self.open(b);
                 }
             }
             None => {
@@ -184,6 +188,11 @@ mod tests {
         let ms = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         assert_eq!(backup_after(Some(&song), 0), Some(new.clone()), "the newest autosave, a .lemon one too; not an overwritten copy");
         assert_eq!(backup_after(Some(&song), ms(&new)), None, "none written after the save");
+        // A project that opened converted backs up as untitled.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let untitled = backup.join(crate::backup::file_name("untitled", "autosaved", at(4))).with_extension("lemon");
+        std::fs::write(&untitled, b"x").unwrap();
+        assert_eq!(backup_after(Some(&song), ms(&new)), Some(untitled));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
