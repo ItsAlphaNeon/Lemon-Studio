@@ -36,8 +36,8 @@ mod x11;
 mod hyprland;
 #[cfg(target_os = "linux")]
 pub use x11::{
-    busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main, stack, take_exposed, take_lift_input, unpinned,
-    FrameWindow, Unpinned,
+    busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main, set_transient, stack, take_exposed,
+    take_lift_input, unpinned, FrameWindow, Unpinned,
 };
 
 #[cfg(target_os = "macos")]
