@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 
 /// Settings ▸'s choices: how many minutes the log keeps.
 pub const MINUTES: [u32; 4] = [1, 2, 5, 10];
-/// Kept in `settings.txt`: the switch (on by default, as in FL Studio) and the length.
+/// Kept in `settings.txt`: the switch (on by default) and the length.
 const ON: &str = "audio_logger";
 const LENGTH: &str = "audio_logger_minutes";
 const DEFAULT_MINUTES: u32 = 5;

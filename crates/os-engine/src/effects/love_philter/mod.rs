@@ -5,8 +5,8 @@
 //! Fruity Love Philter: eight filters in a chain, each with its type, cascade, waveshaper, pan and volume, and eight
 //! modulation targets driven by patterns, an LFO and three maps. Lemon Studio's Pulp Filter plays this code.
 //!
-//! The x87 extended-precision loops of the page run in doubles here (as Citrus does), so the samples are close to
-//! FL's but not bit for bit.
+//! The x87 extended-precision loops of the page run in doubles here (as Citrus does), so the samples are close to the
+//! reference's but not bit for bit.
 //!
 // spec: plugins/fruity-love-philter.md, plugins/image-line-curves.md, plugins/lemon-pulp-filter.md
 
@@ -245,7 +245,7 @@ fn shape(t: &[i32], bip: bool, pre: f32, x: f32, interp: bool) -> f32 {
 }
 
 impl LovePhilter {
-    /// An instance with `state` applied at `rate`, through the start a render's slot has been through: FL's silent
+    /// An instance with `state` applied at `rate`, through the start a render's slot has been through: the silent
     /// device buffers (4 x 2048 frames), then a reposition to the song's start (spec "What the plugin has been through
     /// when a render starts").
     pub fn from_state(state: &[u8], rate: u32) -> Option<LovePhilter> {
@@ -302,7 +302,7 @@ impl LovePhilter {
         lp
     }
 
-    /// FL's silent buffers before a render, then the song-position change to the start.
+    /// The silent buffers before a render, then the song-position change to the start.
     pub fn preroll(&mut self) {
         let mut buf = vec![0.0f32; 2 * 2048];
         for _ in 0..4 {
@@ -575,7 +575,7 @@ impl LovePhilter {
         }
     }
 
-    /// Sets a setting by FL's automation index (spec "Automation").
+    /// Sets a setting by its automation index (spec "Automation").
     pub fn set_param(&mut self, k: usize, v: i32) {
         if k >= PARAMS {
             return;

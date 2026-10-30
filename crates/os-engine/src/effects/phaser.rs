@@ -6,8 +6,8 @@
 //!
 //! Per side a chain of 3 to 23 first-order all-pass sections whose common coefficient a sine LFO sweeps, with feedback
 //! from the chain's end to its input, mixed with the dry signal. The right LFO runs up to half a cycle ahead of the
-//! left one. FL's LFO runs from the plugin's creation, through the mixer's idle blocks before a song; Lemon Studio
-//! starts a song with it as after [`IDLE`] such frames.
+//! left one. The reference's LFO runs from the plugin's creation, through the mixer's idle blocks before a song; Lemon
+//! Studio starts a song with it as after [`IDLE`] such frames.
 //!
 // spec: plugins/fruity-phaser.md, plugins/lemon-phaser.md
 
@@ -44,9 +44,9 @@ pub const MAX_STAGES: usize = 23;
 /// The LFO table's length.
 pub const TABLE: usize = 4096;
 
-/// The frames the LFO has run when a song starts (Lemon Studio choice). FL's runs from the plugin's creation through
-/// the mixer's idle blocks, 512 or 1024 frames in FL 2026's exports, varying from run to run (spec "The LFO",
-/// `plugins/lemon-phaser.md` §5); 512 is one of the starts FL makes, and a fixed one makes renders repeat.
+/// The frames the LFO has run when a song starts (Lemon Studio choice; spec "The LFO", `plugins/lemon-phaser.md` §5).
+/// The reference's LFO runs from the plugin's creation through the mixer's idle blocks, 512 or 1024 frames in its
+/// exports, varying from run to run; 512 is one of the starts it makes, and a fixed one makes renders repeat.
 pub const IDLE: u32 = 512;
 
 /// Everything the saved state says.
@@ -297,8 +297,8 @@ impl Effect for Phaser {
         }
     }
 
-    // A slot switched on during the song: FL's plugin ignores the enable message, so nothing is cleared and the LFO
-    // runs on (the default `reset` does nothing).
+    // A slot switched on during the song: the reference plugin ignores the enable message, so nothing is cleared and
+    // the LFO runs on (the default `reset` does nothing).
 }
 
 #[cfg(test)]

@@ -253,7 +253,8 @@ mod tests {
         assert_eq!(keep(400.0, 9000.0, w, WORK).1, WORK.bottom() - 15.0);
         // Up: never above the workspace's top.
         assert_eq!(keep(400.0, -50.0, w, WORK).1, WORK.y);
-        // Partly out, past the limits nowhere: unchanged (only the title bar inside at the right was kept by FL too).
+        // Partly out, past the limits nowhere: unchanged (the reference too kept one with only the title bar inside at
+        // the right).
         assert_eq!(keep(WORK.right() - 106.0, 300.0, w, WORK), (WORK.right() - 106.0, 300.0));
         // The same in physical px at 150 %: 47 and 23 px.
         let work = [314, 125, 2880, 1620];
@@ -275,7 +276,7 @@ mod tests {
     }
 
     /// Spec "Lemon Studio", detached windows with the check off: the title bar stays on the screens. Two side-by-side
-    /// screens (as measured), the right one shorter.
+    /// screens, the right one shorter.
     #[test]
     fn detached_title_bars_stay_on_the_screens() {
         let screens = [[0, 0, 1920, 1040], [1920, 0, 3840, 1000]];

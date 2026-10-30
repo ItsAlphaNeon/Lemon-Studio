@@ -307,7 +307,7 @@ mod tests {
         let gaps: Vec<f64> = std::iter::repeat_n(0.5, 19).chain(std::iter::repeat_n(0.4, 8)).collect();
         let (tp, out) = run(&gaps);
         assert_eq!(tp.taps(), 28);
-        // Taps 24, 26 and 28 (the measured 124, 126, 128).
+        // Taps 24, 26 and 28: 124, 126 and 128.
         assert_eq!((out[23], out[25], out[27]), (Some(124.0), Some(126.0), Some(128.0)));
         let gaps: Vec<f64> = std::iter::repeat_n(0.5, 7).chain(std::iter::repeat_n(0.4, 8)).collect();
         assert_eq!(run(&gaps).1[15], Some(134.0));

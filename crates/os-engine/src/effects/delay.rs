@@ -110,7 +110,8 @@ pub const HP: [f32; 5] = [20.0, 90.0, 400.0, 1300.0, 4200.0];
 /// The LFO's periods (s) over its speed.
 pub const LFO_PERIODS: [f32; 8] = [8.872, 3.808, 1.833, 0.878, 0.398, 0.15, 0.05, 0.0];
 
-/// Silence FL runs through a slot before the song (device buffers of 2048 frames; FL's count varies from 4 to 7).
+/// Silence the reference host runs through a slot before the song (device buffers of 2048 frames; its count varies
+/// from 4 to 7, spec: plugins/fruity-delay-3.md "State and timing").
 pub const PREROLL: usize = 4 * 2048;
 
 /// Everything the saved state says.
@@ -518,7 +519,7 @@ pub struct Delay {
     shaper: [Shaper; 2],
     attack: f32,
     release: f32,
-    /// The mixer slot has run FL's start (pre-roll and two resets).
+    /// The mixer slot has run its start (pre-roll and two resets).
     started: bool,
 }
 
@@ -533,7 +534,7 @@ fn line_len(rate: f64) -> usize {
 }
 
 impl Delay {
-    /// A new instance with the defaults at `sample_rate` (FL then sets the rate, which resets it).
+    /// A new instance with the defaults at `sample_rate` (the host then sets the rate, which resets it).
     pub fn new(sample_rate: u32) -> Delay {
         let rate = f64::from(sample_rate.max(1));
         let n = line_len(rate);
@@ -617,7 +618,8 @@ impl Delay {
         d
     }
 
-    /// FL's start of a render: created with the defaults, the sample rate set (a reset), the state applied, the tempo.
+    /// The reference host's start of a render: created with the defaults, the sample rate set (a reset), the state
+    /// applied, the tempo.
     pub fn with_settings(sample_rate: u32, s: &Settings, bpm: f64) -> Delay {
         let mut d = Delay::new(sample_rate);
         d.set(s);
@@ -1031,7 +1033,8 @@ impl Delay {
         let old = self.phase;
         let p = old + self.lfo_step;
         self.phase = p - p.trunc();
-        // FL's single-precision sine: on Windows `f32::sin` is the C runtime's `sinf`, which gives FL's values.
+        // Single-precision sine: on Windows `f32::sin` is the C runtime's `sinf`, which gives the reference renders'
+        // values (spec: plugins/fruity-delay-3.md "LFO").
         self.lfo = ((old * 6.283_185_5).sin() + 1.0) * 0.5;
         if self.kind != OFF {
             let half = 0.5 * self.rate as f32;
@@ -1131,7 +1134,7 @@ impl Delay {
         }
     }
 
-    /// What FL runs between loading a slot and the song: silence, then two resets.
+    /// What the reference host runs between loading a slot and the song: silence, then two resets.
     pub fn start(&mut self) {
         self.preroll(PREROLL);
         self.reset();
@@ -1181,7 +1184,7 @@ mod tests {
         s
     }
 
-    /// A delay at 44.1 kHz past FL's start sequence.
+    /// A delay at 44.1 kHz past the start sequence.
     fn started(s: &Settings, bpm: f64) -> Delay {
         let mut d = Delay::with_settings(44100, s, bpm);
         d.start();

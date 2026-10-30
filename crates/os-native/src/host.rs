@@ -232,7 +232,7 @@ unsafe extern "system" fn dispatcher(this: *mut HostObject, _sender: IntPtr, id:
             }
             0
         }
-        // Harmless notifications observed from FL 26 plugins (answered 0 with no ill effect).
+        // Harmless notifications FL 26's plugins send, answered 0 with no ill effect.
         // 2 EditorResized: the host polls the editor's size on its UI tick instead.
         // 22 OnHint_Direct, 24 GetInstance (none).
         2 | 3 | 5 | 10 | 13 | 22 | 23 | 24 | 33 | 35 | 46 | 48 | 50 | 72 | 86 => 0,

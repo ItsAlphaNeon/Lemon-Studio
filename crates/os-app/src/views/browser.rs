@@ -28,7 +28,7 @@ const FILE: u8 = 254;
 /// Height of the info panel above the footer (spec §6).
 pub const INFO_H: f32 = 84.0;
 
-/// (label, icon, category colour index). Only the roots with content: FL's other disk-folder roots (Recent files,
+/// (label, icon, category colour index). Only the roots with content: the other disk-folder roots (Recent files,
 /// Channel presets, Packs...) are left out until Lemon Studio has content for them (owner decision); dropped folders
 /// follow these. Plugin presets: the preset store, user and factory (spec: plugins/presets.md "Browser").
 const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin library", Icon::Speaker, 1), (PLUGIN_PRESETS, Icon::FilePreset, 1)];
@@ -39,7 +39,7 @@ pub fn presets_key() -> String {
     format!("0:{PLUGIN_PRESETS}")
 }
 
-/// The "Current project" tree's sections, in screenshot order (spec §2), without the one nothing is tracked in yet
+/// The "Current project" tree's sections, in order (spec §2), without the one nothing is tracked in yet
 /// (Remote control). History: the undo history (spec: ui/settings-choices.md "Undo history: the four checks
 /// (2026-10-16)"). Initialized controls: the project's initial values, shown only while there are some (spec:
 /// ui/settings-choices.md "Advanced: Initialize controls automatically"). Project data: the project's data folder, opened
@@ -124,7 +124,7 @@ pub struct Row {
     pub path: Option<PathBuf>,
 }
 
-/// Keys of the rows that start opened (the project tab shows Patterns, like the screenshot).
+/// Keys of the rows that start opened (the project tab shows Patterns).
 pub fn default_open() -> std::collections::HashSet<String> {
     ["1:Current project", "1:Current project/Patterns", "2:Plugin library"].iter().map(|k| k.to_string()).collect()
 }
@@ -685,7 +685,7 @@ fn paint_info(ui: &mut Ui, s: &State, path: &Path, r: Rect) {
         y += lh;
     }
     ui.c.text(f, lx, y, t.text_dim, "Path");
-    // Wrap the path at any character (FL breaks mid-word too).
+    // Wrap the path at any character (the reference breaks mid-word too).
     let mut line = String::new();
     for ch in path.display().to_string().chars() {
         line.push(ch);
@@ -748,7 +748,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     let t = ui.t;
     // Measured with the browser top at `WORK_Y`; it moves up with a hidden toolbar (spec: ui/toolbar-menu.md §5).
     let dy = r.y - super::WORK_Y;
-    // The panel left of the splitter: 201 px measured, wider as the splitter is dragged (§9).
+    // The panel left of the splitter: 201 px, wider as the splitter is dragged (§9).
     let bw = r.w - SPLITTER;
     ui.hit(r, Action::Swallow, "");
     // Title bar.
@@ -772,7 +772,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         icons::draw(ui.c, icon, Rect::new(r.x + 1.0, 87.0 + dy, 12.0, 14.0), if hov { t.glyph } else { t.text_dim });
     }
     ui.c.text(os_ui::Font::new(14), 52.0, 85.0 + dy, t.text_dim, "Browser");
-    // Tabs (spec ui/browser.md §1): FL's five without Online content, sharing the strip.
+    // Tabs (spec ui/browser.md §1): five, without Online content, sharing the strip.
     ui.c.fill_rect(Rect::span(0.0, bw - 1.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
     const TIPS: [&str; 4] = ["All", "Current project", "Plugin library", "Favorites"];
     for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Star].into_iter().enumerate() {
@@ -827,7 +827,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         };
         let c = if row.bright { base.shade(0.12) } else if row.depth > 0 { base.shade(-0.06) } else { base };
         let c = if matches!(row.item, Item::History(e) if s.history.undone(e)) { t.text_faint } else { c };
-        // Expander: only an opened node shows its ▾ in the gutter (FL screenshots, spec §2).
+        // Expander: only an opened node shows its ▾ in the gutter (spec §2).
         if row.open == Some(true) && s.browser_search.is_empty() {
             let (ax, cy) = (x - 9.0, y + ROW_H / 2.0);
             for k in 0..4 {
@@ -917,7 +917,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
 /// The splitter's width right of the browser panel.
 const SPLITTER: f32 = 8.0;
 
-/// A long disk name shortened in the middle with ".." to fit `w` (FL screenshots, spec §6).
+/// A long disk name shortened in the middle with ".." to fit `w` (spec §6).
 fn middle_cut(ui: &mut Ui, f: os_ui::Font, text: &str, w: f32) -> String {
     if ui.c.text_width(f, text) <= w {
         return text.to_string();

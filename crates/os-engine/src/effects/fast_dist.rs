@@ -26,7 +26,7 @@ pub const POST: usize = 4;
 /// pre amp, mix and post gain are used as they are.
 pub const RANGES: [(i32, i32); PARAMS] = [(64, 192), (1, 10), (0, 1), (0, 128), (0, 128)];
 
-/// FL's `Default` preset: unity pre amp, threshold 10, type A, full mix and post gain.
+/// The `Default` preset: unity pre amp, threshold 10, type A, full mix and post gain.
 pub const DEFAULTS: [i32; PARAMS] = [128, 10, 0, 128, 128];
 
 /// Curve types.
@@ -96,8 +96,8 @@ pub fn level(i: usize, step: i32, kind: i32) -> f64 {
 
 /// The curve a stored threshold and type pick, as (threshold 1..10, type): one of 20, A at thresholds 1..10 and then
 /// B at 1..10, number `type * 10 + threshold - 1`. So a stored threshold of 0 with type B is A at 10, and 11 with type
-/// A is B at 1 (spec "Values outside the ranges"). Beyond the 20, FL reads memory that holds no curve; Lemon Studio
-/// takes the nearest end (A at 1 below, B at 10 above).
+/// A is B at 1 (spec "Values outside the ranges"). Beyond the 20 the reference reads memory that holds no curve;
+/// Lemon Studio takes the nearest end (A at 1 below, B at 10 above).
 pub fn curve(threshold: i32, kind: i32) -> (i32, i32) {
     let n = (i64::from(kind) * 10 + i64::from(threshold) - 1).clamp(0, 19) as i32;
     (n % 10 + 1, n / 10)
@@ -114,11 +114,11 @@ pub fn table(threshold: i32, kind: i32, wet: f32) -> Vec<f64> {
     t
 }
 
-/// From `p = 2^31` on (and for NaN) the table's part of a sample is +0: FL's whole-number index overflows there (spec
-/// "Checked against FL", very loud input).
+/// From `p = 2^31` on (and for NaN) the table's part of a sample is +0: the reference's whole-number index overflows
+/// there (spec "Checked against FL", very loud input).
 const OVERFLOW: f64 = 2_147_483_648.0;
 
-/// Rounds toward zero to single, as FL stores a sample (spec "Per sample").
+/// Rounds toward zero to single, as the reference stores a sample (spec "Per sample").
 #[inline]
 pub fn chop(y: f64) -> f32 {
     let s = y as f32;
@@ -176,7 +176,8 @@ impl FastDist {
     }
 
     /// One sample of either channel: the interpolated table at `p = |x * pre * 8191|`, with the sign of `x`, over `x *
-    /// dry`, all in doubles (FL's extended precision; doubles give the same samples), rounded toward zero to single.
+    /// dry`, all in doubles (the reference works in extended precision; doubles give the same samples), rounded toward
+    /// zero to single.
     #[inline]
     pub fn sample(&self, x: f32) -> f32 {
         let x64 = f64::from(x);
@@ -220,7 +221,7 @@ mod tests {
 
     #[test]
     fn states_round_trip() {
-        // FL's "fuzz" preset.
+        // The "fuzz" preset.
         let s = Settings { v: [192, 10, 1, 128, 80] };
         let b = s.to_state();
         assert_eq!(b.len(), STATE_LEN);
@@ -256,8 +257,8 @@ mod tests {
         let b = table(1, TYPE_B, 1.0);
         assert_eq!(b[8191], 32767.0 / 32768.0);
         assert!(b[4096] > 0.5 && b[4096] < 0.53, "{}", b[4096]);
-        // Out of range: threshold and type pick one of the 20 curves together (FL 2026's renders of threshold 0 with
-        // type B and 11 with type A); beyond them, the nearest end.
+        // Out of range: threshold and type pick one of the 20 curves together (threshold 0 with type B and 11 with
+        // type A); beyond them, the nearest end.
         assert_eq!(curve(0, TYPE_B), (10, TYPE_A));
         assert_eq!(curve(11, TYPE_A), (1, TYPE_B));
         assert_eq!(table(0, TYPE_B, 1.0), t);
@@ -306,9 +307,9 @@ mod tests {
             // Type A, threshold 1.
             ([128, 1, 0, 128, 128], 0.021931838, 0.02192916),
             ([128, 1, 0, 128, 128], 0.0591505, 0.059143275),
-            // FL's compressor preset (pre amp 192, reduced mix and post gain).
+            // The compressor preset (pre amp 192, reduced mix and post gain).
             ([192, 1, 0, 104, 93], 0.087571196, 0.11551188),
-            // FL's fuzz preset.
+            // The fuzz preset.
             ([192, 10, 1, 128, 80], 0.06572277, 0.14467822),
             // Type B, threshold 10, pre amp 192.
             ([192, 10, 1, 128, 128], -0.25366217, -0.8983255),

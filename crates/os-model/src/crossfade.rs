@@ -6,8 +6,8 @@
 //! Automatic crossfades: with the project's switch on (event 44), audio clips that overlap on one track crossfade. A
 //! crossfade is two ordinary fades in the clip records, the earlier clip's fade-out and the later clip's fade-in,
 //! written without their "set by hand" bits (byte 56). An edge whose bit is clear belongs to the switch and follows
-//! the clips ([`derive`]); one whose bit is set keeps its own fade. The records keep FL's bytes: the lengths and
-//! tensions are the fades' own fields, the bits are never touched here.
+//! the clips ([`derive`]); one whose bit is set keeps its own fade. The records keep their stored bytes: the lengths
+//! and tensions are the fades' own fields, the bits are never touched here.
 //!
 // spec: audio/audio-clips.md "Automatic crossfades", flp/events/playlist.md (event 233, bytes 36..56)
 
@@ -110,13 +110,13 @@ pub fn ms(ticks: u32, tempo: f64, ppq: u16) -> f32 {
 }
 
 /// The tension a crossfade's fade-out takes from the later clip's fade-in tension `t`: `-t` (0, not -0, for 0, so the
-/// stored bytes are FL's; an unusable value counts as 0).
+/// stored bytes are the ones FL writes; an unusable value counts as 0).
 pub fn opposite(t: f32) -> f32 {
     if t == 0.0 || !t.is_finite() { 0.0 } else { -t }
 }
 
 /// Whether a stored length can stay for `want`: equal, or within a thousandth of a millisecond (and a millionth of
-/// the length), so the bytes FL wrote for a crossfade are kept rather than written again from our arithmetic.
+/// the length), so the bytes a file holds for a crossfade are kept rather than written again from our arithmetic.
 fn keeps(stored: f32, want: f32) -> bool {
     if want == 0.0 {
         stored == 0.0
@@ -298,7 +298,7 @@ mod tests {
         clips(p).iter().map(|c| (c.stored_fade_in().map_or(0.0, |f| f.0), c.stored_fade_out().map_or(0.0, |f| f.0))).collect()
     }
 
-    /// 240 ticks at 130 BPM and PPQ 96 (the spec's measured crossfade).
+    /// 240 ticks at 130 BPM and PPQ 96 (the spec's crossfade).
     const XF: f32 = 1153.846_2;
 
     #[test]
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn stored_lengths_close_to_ours_are_kept() {
-        // FL's own bytes for the measured crossfade, an ulp or so from ours: kept as they are.
+        // A file's own bytes for the spec's crossfade, an ulp or so from ours: kept as they are.
         let mut p = project(vec![audio(0, 480, 0), audio(240, 480, 0)]);
         let fl = f32::from_bits(ms(240, 130.0, 96).to_bits() + 1);
         p.arrangements[0].clips[0].set_fade_out_length(fl);
@@ -490,8 +490,8 @@ mod tests {
             let m = fade_curve(0.5, t);
             assert!((tension_for_mid(m) - t).abs() < 1e-9 * t.abs().max(1.0), "t {t}: {}", tension_for_mid(m));
         }
-        // The two drags measured at 100 % (18 px up from 0, then 40 px down; FL stored 2.289, then -4.736) at 1/120 of
-        // the gain per pixel: r = 0.65 / 0.35, then r = (1 - 0.65 + 1/3) / (0.65 - 1/3).
+        // Two drags at 100 % (18 px up from 0, then 40 px down; stored 2.289, then -4.736) at 1/120 of the gain per
+        // pixel: r = 0.65 / 0.35, then r = (1 - 0.65 + 1/3) / (0.65 - 1/3).
         let up = tension_for_mid(0.5 + 18.0 / 120.0);
         assert!((up - 120.0 / 49.0).abs() < 1e-9, "{up}");
         let down = tension_for_mid(fade_curve(0.5, up) - 40.0 / 120.0);

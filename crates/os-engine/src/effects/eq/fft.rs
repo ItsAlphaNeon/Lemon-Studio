@@ -3,8 +3,8 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! A plain radix-2 complex FFT in doubles, unscaled both ways, for LIN's kernels and convolution. The page leaves the
-//! transform open ("any other FFT gives the same result up to single-precision rounding"); doubles rounded to single
-//! where LIN holds singles is the variant it measured closest to FL's.
+//! transform open ("any other FFT gives the same result up to single-precision rounding"); this one rounds its doubles
+//! to single where LIN holds singles, the variant the page found closest to the reference's output.
 //!
 // spec: plugins/fruity-parametric-eq-2.md ("LIN": "The transforms")
 

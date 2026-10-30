@@ -161,7 +161,7 @@ pub fn sampler_param(misc: &ChannelMisc, m: M) -> Option<(&'static str, f64)> {
 }
 
 /// A Misc tab edit of rack row `row`: the channel model, its hosted Lemon Sampler (root / fine), then playback.
-/// No undo step, as in FL (measured 2026-10-28).
+/// No undo step.
 pub fn set(app: &mut crate::app::App, row: usize, m: M, v: f32) {
     let Some(ch) = app.state.project.channels.get_mut(row) else { return };
     put(&mut ch.misc, m, v);

@@ -3,7 +3,7 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The piano roll's Strum dialog ("Piano roll - strumizer"): the Start and End sections, Chop chords, Alternate
-//! direction, Reset and Accept, laid out as FL's (312 × 219).
+//! direction, Reset and Accept, laid out at 312 × 219.
 // spec: ui/piano-strum.md §1
 
 use os_ui::kit::lemon as lk;
@@ -25,7 +25,7 @@ pub fn bounds(s: &State) -> Rect {
     rect(s).outset(1.0)
 }
 
-/// A round switch (FL: dark, red-orange when on; Lemon: the kit's LED, an outline when greyed out).
+/// A round switch (Classic: dark, red-orange when on; Lemon: the kit's LED, an outline when greyed out).
 pub(super) fn led(ui: &mut Ui, cx: f32, cy: f32, on: bool, hover: bool, off: bool) {
     led_r(ui, cx, cy, 7.0, on, hover, off);
 }
@@ -104,7 +104,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     section(ui, at(8.0, 30.0, 146.0, 184.0), set.start, Act::Start, "Start", "Start: strum the note starts and velocities");
     section(ui, at(160.0, 30.0, 146.0, 92.0), set.end, Act::End, "End", "End: strum the note ends");
 
-    // Knobs (§1): strengths orange, tensions green on FL; greyed with their section.
+    // Knobs (§1): strengths orange, tensions green in Classic; greyed with their section.
     let knob = |ui: &mut Ui, cx: f32, cy: f32, k: Knob, off: bool| {
         let id = KnobId::Strum(k);
         let (cx, cy) = (x0 + cx, y0 + cy);

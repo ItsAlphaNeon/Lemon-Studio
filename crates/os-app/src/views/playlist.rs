@@ -33,7 +33,7 @@ const NOTE: u32 = 0xa5aeb3;
 const WAVE: u32 = 0xb1c7bd;
 const CURVE: u32 = 0xd8e0b0;
 
-/// A clip colour in the palette's design: Classic draws the measured value, Lemon its own neutral clip shades with
+/// A clip colour in the palette's design: Classic draws the given value, Lemon its own neutral clip shades with
 /// the lemon selection (spec: ui/lemon-design.md §7).
 fn cc(t: &os_theme::Palette, v: u32) -> Color {
     if !lk::on(t) {
@@ -60,8 +60,7 @@ fn cc(t: &os_theme::Palette, v: u32) -> Color {
 const TOOL_X: [f32; 9] = [66.0, 86.0, 108.0, 129.0, 150.0, 171.0, 192.0, 213.0, 233.0];
 const TOOL_ICONS: [Icon; 9] =
     [Icon::Pencil, Icon::Brush, Icon::Delete, Icon::Mute, Icon::Slip, Icon::Slice, Icon::Select, Icon::Zoom, Icon::Speaker];
-/// Picker item pitch (§1): the measured 30 px rows; taller items show a title strip of this height over their
-/// preview.
+/// Picker item pitch (§1): 30 px rows; taller items show a title strip of this height over their preview.
 const PICK_ROW: f32 = pl::PICK_ROW;
 const PICK_TITLE: f32 = 26.0;
 
@@ -77,7 +76,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.c.set_cover((fr.h >= 2.0 * crate::app::TITLE_H).then_some(cover));
     let (r, client) = super::framed(ui, s, Win::Playlist, r, &title, 281.0, true);
     ui.c.set_cover(None);
-    // The arrangement name opens the arrangement menu; hovered it turns orange with a down arrow (§12, as FL).
+    // The arrangement name opens the arrangement menu; hovered it turns orange with a down arrow (§12).
     {
         let f = Font::new(17);
         let x0 = r.x + 281.0 + ui.c.text_width(f, "Arranger - ");
@@ -288,7 +287,7 @@ pub fn ruler_rect(s: &State, grid: Rect) -> Rect {
 }
 
 /// Thickness of the overview bar (the horizontal scroll bar) and of the vertical scroll bar: 18 px, or 9 and 10 px
-/// with "Small scrollbars in editors" (FL measured 17 → 9 and about 19 → 10 px; spec: ui/settings-choices.md
+/// with "Small scrollbars in editors" (the reference's 17 → 9 and about 19 → 10 px; spec: ui/settings-choices.md
 /// "Miscellaneous").
 fn bar_sizes() -> (f32, f32) {
     if super::small_scrollbars() { (9.0, 10.0) } else { (18.0, 18.0) }
@@ -356,7 +355,7 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
     }
     let items: Vec<ClipSource> = pick_items(s);
     let cur = pl::source(s);
-    // spec: ui/playlist.md §1a (picker panel, measured from FL): framed list + 15 px scroll bar, 19 px footer with "+".
+    // spec: ui/playlist.md §1a (picker panel): framed list + 15 px scroll bar, 19 px footer with "+".
     let bottom = p.bottom() - FOOT_H;
     let bx = Rect::span(p.x, p.right() - 6.0, p.y + 44.0, bottom);
     if bx.h < 8.0 {
@@ -381,7 +380,7 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             continue;
         }
         let row = Rect::new(list.x + 2.0, y, list.w - 4.0, pitch - 1.0);
-        // A taller item: the name in a title strip, its contents previewed under it (FL's resized picker).
+        // A taller item: the name in a title strip, its contents previewed under it (a resized picker).
         let tall = pitch > PICK_ROW;
         let title = if tall { Rect::new(row.x, row.y, row.w, PICK_TITLE) } else { row };
         let body = if tall { Rect::span(row.x + 3.0, row.right() - 3.0, title.bottom(), row.bottom() - 3.0) } else { row.inset(3.0) };
@@ -417,7 +416,7 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             ui.c.fill_rect(row, edge);
             ui.c.fill_rect(row.inset(1.0), face);
         } else {
-            // Empty pattern: dark face (owner's FL screenshot).
+            // Empty pattern: dark face.
             ui.c.fill_rect_gradient(row, ui.t.s(0x2a2d2e).shade(k), ui.t.s(0x232627).shade(k), 0.0);
         }
         if src == cur && !filled {
@@ -452,8 +451,7 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
     ui.c.fill_rect(Rect::new(cx - 0.5, cy - 3.5, 2.0, 8.0), pc);
 }
 
-/// The picker's scroll bar in the Classic design (§1a, measured from FL): bordered dithered track, raised thumb with
-/// a dark grip.
+/// The picker's scroll bar in the Classic design (§1a): bordered dithered track, raised thumb with a dark grip.
 fn classic_pick_bar(ui: &mut Ui, tr: Rect, scroll: f32, view: f32, total: f32) {
     ui.c.fill_rect(tr, ui.t.s(0x212426));
     let mut yy = tr.y;
@@ -505,7 +503,7 @@ fn pick_used(s: &State, src: ClipSource) -> bool {
     }
 }
 
-/// Preview of a picker item's contents in `r`: a pattern's notes, faint behind the name of an item at the measured
+/// Preview of a picker item's contents in `r`: a pattern's notes, faint behind the name of an item at the default
 /// size; a `tall` item (resized, spec: ui/scroll-bars.md §3) shows them, an audio clip's waveform or an automation
 /// clip's curve under its title strip, as a clip's body shows them (§2). `face`: the item's colour.
 fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: Color) {
@@ -696,7 +694,7 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
     ui.c.pop_clip();
 }
 
-/// A time marker's action icon (§7a "Look"), Lemon Studio's own drawing at FL's measured sizes: light grey, the
+/// A time marker's action icon (§7a "Look"), Lemon Studio's own drawing at the reference's sizes: light grey, the
 /// recording markers' dot red; none for a plain marker. `x` is the marker's place, `cy` the middle of its tab.
 fn marker_glyph(ui: &mut Ui, kind: u8, x: f32, cy: f32) {
     let grey = ui.t.s(0xa8abae);
@@ -748,7 +746,7 @@ fn marker_glyph(ui: &mut Ui, kind: u8, x: f32, cy: f32) {
 /// A marker's label: its name; a time signature first shows the signature (spec: ui/pattern-time-signature.md §2).
 pub(crate) fn marker_label(m: &TimeMarker) -> String {
     if m.kind == TimeMarker::SIGNATURE {
-        // FL names a new signature marker after its signature ("3/8", spec: ui/pattern-time-signature.md §4): shown once.
+        // A new signature marker is named for its signature ("3/8", spec: ui/pattern-time-signature.md §4): shown once.
         let sig = format!("{}/{}", m.numerator, m.denominator);
         if m.name.is_empty() || m.name == sig { sig } else { format!("{sig} {}", m.name) }
     } else {
@@ -912,7 +910,7 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         match (kind, c.source) {
             (PickKind::Pattern, ClipSource::Pattern(n)) => pattern_notes(ui, s, g, c, n, body_at, content),
             (PickKind::Audio, ClipSource::Channel(ch)) => {
-                // The channel colour lifted by 80 (§2); without one the measured default.
+                // The channel colour lifted by 80 (§2); without one the default.
                 let wave = tint.map_or(cc(t, WAVE), |c| offset(c, 80));
                 let col = if c.muted { content } else { dim(wave) };
                 // Colorful waveforms colour a clip that plays; a muted one keeps its grey.
@@ -1129,7 +1127,7 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
         curve(ui, edges.x, f64::from(xf.x1), xf.t_in, false);
         curve(ui, edges.x, f64::from(xf.x1), xf.t_out, true);
     }
-    // Handles only while the mouse is over the clip (as FL): white, brighter on the one under the mouse.
+    // Handles only while the mouse is over the clip: white, brighter on the one under the mouse.
     if !hovered {
         return;
     }
@@ -1260,7 +1258,7 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     let bh = if joins_below { h } else { h - gap };
     let hr = Rect::new(bx, y, bw, bh);
     if member {
-        // The indent beside the members: a dark strip (FL dithers it).
+        // The indent beside the members: a dark strip (the reference dithers it).
         ui.c.fill_rect(Rect::new(x, y, INDENT, bh), t.s(0x2b3439));
     }
     let (top, bottom) = if super::lemon(ui) { (base, base) } else { (base.shade(0.035), base.shade(-0.03)) };
@@ -1307,7 +1305,7 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
         }
     }
     if lead && info.is_some_and(|i| i.locked) {
-        // FL draws a lock where the LED is on such a group (§6a).
+        // A lock is drawn where the LED is on such a group (§6a).
         let (cx, cy) = (led.cx(), led.cy() + 1.0);
         let green = t.led(0xa0dd48);
         ui.c.fill_rrect(Rect::new(cx - 5.0, cy - 2.0, 10.0, 8.0), 1.5, green);
@@ -1369,7 +1367,7 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
     }
 }
 
-// Row heights follow the display scale like FL's popup menus (spec: ui/ui-scaling.md §2).
+// Row heights follow the display scale like the popup menus (spec: ui/ui-scaling.md §2).
 fn item_h(m: &os_ui::kit::menu::Metrics, it: &pl::PItem) -> f32 {
     if it.col { 0.0 } else if it.sep { m.sep } else if it.head { m.head } else { m.row }
 }
@@ -1500,7 +1498,7 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
                 ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, color);
                 ui.c.line(mx - 1.0, my + 3.0, mx + 4.0, my - 3.0, 1.5, color);
             }
-            // Unticked checks show a faint tick (FL browser options menu, spec ui/browser.md §4).
+            // Unticked checks show a faint tick (the browser options menu, spec ui/browser.md §4).
             Mark::Check(false) => {
                 ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, t.menu_pop_dim.shade(-0.15));
                 ui.c.line(mx - 1.0, my + 3.0, mx + 4.0, my - 3.0, 1.5, t.menu_pop_dim.shade(-0.15));

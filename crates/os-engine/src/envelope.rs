@@ -5,7 +5,7 @@
 //! Channel envelopes: delay / attack / hold / decay / sustain / release levels for the volume and
 //! pitch records of a sampler channel.
 //!
-// spec: audio/channel-envelopes.md (measured in FL renders of patched projects)
+// spec: audio/channel-envelopes.md
 
 use os_model::Envelope;
 
@@ -21,7 +21,8 @@ pub fn fall_seconds(v: i32) -> f64 {
     knob_seconds(v) + 0.0090
 }
 
-/// Curvature `k` of a tension value, signed like the tension (measured at 64, 101 and 128; linear between).
+/// Curvature `k` of a tension value, signed like the tension (fitted at 64, 101 and 128; linear between, spec:
+/// audio/channel-envelopes.md "Tension curves").
 pub fn tension_k(t: i32) -> f64 {
     const TABLE: [(f64, f64); 4] = [(0.0, 0.0), (64.0, 2.2), (101.0, 4.85), (128.0, 6.3)];
     let a = f64::from(t.clamp(-128, 128)).abs();
@@ -82,7 +83,7 @@ impl Params {
             sustain: f64::from(e.sustain.clamp(0, 128)) / 128.0,
             amount: f64::from(e.amount),
             att_k: tension_k(e.attack_tension),
-            // At the knob's minimum the short fall is a plain linear fade whatever the tension (measured).
+            // At the knob's minimum the short fall is a plain linear fade whatever the tension.
             dec_k: if e.decay > 100 { tension_k(e.decay_tension) } else { 0.0 },
             rel_k: if e.release > 100 { tension_k(e.release_tension) } else { 0.0 },
         })
@@ -149,7 +150,7 @@ mod tests {
 
     #[test]
     fn time_knob_matches_measurements() {
-        // Falls measured as linear decays to zero; rises from onset / ramp times.
+        // Falls are linear decays to zero; rises from onset / ramp times.
         for (v, s) in [(8000, 0.0925), (22500, 0.6345), (35000, 2.5406), (48000, 10.1716)] {
             let t = fall_seconds(v);
             assert!((t / s - 1.0).abs() < 0.015, "{v}: {t} vs {s}");

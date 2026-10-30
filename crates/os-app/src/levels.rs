@@ -108,7 +108,7 @@ mod tests {
         out(Lane::Velocity, &(0..=16).map(|i| i * 8).collect::<Vec<u8>>(), s)
     }
 
-    /// FL's wheel notches: Center and Offset 3.125 %, Multiply 6.25 %, Tension 3.125 %.
+    /// The wheel notches: Center and Offset 3.125 %, Multiply 6.25 %, Tension 3.125 %.
     fn n(k: i32) -> f32 {
         k as f32 / 32.0
     }

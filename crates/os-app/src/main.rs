@@ -665,7 +665,7 @@ impl ApplicationHandler for Shell {
             .with_title("Lemon Studio")
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(1920.0, 1080.0))
-            // Layouts are measured at 1920x1080 and are not responsive yet; below this they break.
+            // Layouts are made for 1920x1080 and are not responsive yet; below this they break.
             .with_min_inner_size(LogicalSize::new(1024.0, 600.0))
             .with_maximized(true);
         // macOS: the restored size (the window's size once un-maximized) fits the screen; a Mac's screen is often
@@ -1282,7 +1282,7 @@ fn linux_icon() -> Option<winit::window::Icon> {
 }
 
 /// `lemonstudio --screenshot out.png [--view playlist|mixer|piano|none] [--pattern N] [--channel I] [--no-rack] [--browser-tab N] [--browser-width PX] [--browser-menu] [--browser-search TEXT] [--browser-folder DIR[|SUB]] [project.flp]`:
-/// paint one 1920×1080 frame offscreen (used to compare with reference measurements, and for the README's screenshots
+/// paint one 1920×1080 frame offscreen (used to compare with reference screenshots, and for the README's screenshots
 /// with `--float`, `--rack-pos`, `--rack-all`, `--rack-scroll` and `--insert`).
 fn screenshot(args: &[String]) {
     let mut out = None;
@@ -1389,7 +1389,8 @@ fn screenshot(args: &[String]) {
             "--rack-width" => rack_w = it.next().and_then(|v| v.parse().ok()),
             "--pattern" => pattern = it.next().and_then(|v| v.parse().ok()),
             "--channel" => channel = it.next().and_then(|v| v.parse().ok()),
-            // Physical canvas size "WxH" (default 1920x1080 times the scale), e.g. FL's window on a 150 % display:
+            // Physical canvas size "WxH" (default 1920x1080 times the scale), e.g. the reference's window on a 150 %
+            // display:
             // `--size 2560x1540 --scale 1.5`.
             "--size" => {
                 if let Some((w, h)) = it.next().and_then(|v| v.split_once('x')) {

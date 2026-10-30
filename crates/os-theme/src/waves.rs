@@ -40,8 +40,8 @@ impl Mode {
     }
 }
 
-/// The stock Waves gradient (position, colour), as measured: `#7f2047` rose at the low end through peach and pale
-/// yellow to `#696091` violet-blue at the high end.
+/// The stock Waves gradient (position, colour): `#7f2047` rose at the low end through peach and pale yellow to
+/// `#696091` violet-blue at the high end.
 pub const STOCK: [(f32, Color); 6] = [
     (0.0, Color::rgb(0x7f2047)),
     (0.15, Color::rgb(0xc97467)),

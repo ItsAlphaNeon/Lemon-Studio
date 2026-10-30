@@ -139,7 +139,7 @@ impl Settings {
         }
     }
 
-    /// The hint-bar text (FL shows none; §9).
+    /// The hint-bar text (a Lemon Studio addition: the reference shows none; §9).
     pub fn text(&self, k: Knob) -> String {
         match k {
             Knob::TimeMul => format!("Time multiplicator: {}", TIME_MUL_NAMES[usize::from(self.time_mul.min(6))]),
@@ -228,7 +228,7 @@ pub struct Pattern {
 }
 
 impl Default for Pattern {
-    /// FL's Default pattern (§9): C5, C#5, D5, a 1/16 note each, one after another.
+    /// The Default pattern (§9): C5, C#5, D5, a 1/16 note each, one after another.
     fn default() -> Self {
         Pattern { name: "Default".into(), path: None, ppq: 96, rows: vec![Row::plain(0, 24, 60), Row::plain(24, 24, 61), Row::plain(48, 24, 62)] }
     }
@@ -816,7 +816,7 @@ mod tests {
         assert_eq!(arp_with(one(), &Pattern::default(), 192, |_| {})[1].0, 48);
     }
 
-    /// §7: the measured Levels case.
+    /// §7: the Levels case.
     #[test]
     fn levels_match_fl() {
         let src = Note { velocity: 50, pan: 100, release: 20, mod_x: 60, mod_y: 200, fine_pitch: 150, ..note(0, 48, 60) };

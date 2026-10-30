@@ -91,7 +91,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
                 let r = Rect::new(area.x + f32::from(col) * (w + GAP), area.bottom() - h - f32::from(row) * (h + GAP), w, h);
                 ui.hit(r, Action::Touch(TouchAct::Note(k)), format!("Touch controller: {}", name(k)));
                 let on = held == Some(k);
-                // Violet at the bottom to cyan at the top, as FL's pads (Lemon: the brand colour when held).
+                // Violet at the bottom to cyan at the top; the brand colour when held.
                 let base = Color::rgb(0x55508f).mix(Color::rgb(0x3b8a99), f32::from(row) / (n - 1.0));
                 let face = if on { lit } else { base };
                 lk::outlined(ui.c, r, lk::r_btn(t), line, face);

@@ -7,7 +7,7 @@
 //! their boxes. A box takes the keyboard when clicked and edits with the file dialog's text field (`dialog::Field`:
 //! caret, Backspace / Delete, Left / Right / Home / End, Ctrl+A); Comments has several lines. The project keeps the
 //! text (`Project::info`), so an edit is an unsaved change and is saved with the project; the window caption shows the
-//! title instead of the file name (`App::title`). The button at the Genre box's right end offers FL's genre list.
+//! title instead of the file name (`App::title`). The button at the Genre box's right end offers the genre list.
 //!
 //! The page's footer tells when the project was started, the time spent working on it (event 237, which counts on
 //! while the project is open: `WorkClock`) and what the project holds. "Show info on opening" (event 10) makes opening
@@ -26,11 +26,10 @@ use crate::control::command::{Region, SONG_INFO};
 use crate::dialog::Field;
 use crate::views::settings::{self, InfoEdit, InfoField};
 
-/// The time spent working on the project this session. The spec has the time spent count on while the project is open
-/// but does not say what FL counts (spec: flp/events/project-info.md, event 237 and "Open questions"); Lemon Studio's
-/// rule: it counts while a project is open and Lemon Studio's main window is the foreground window. The project keeps
-/// the time spent it was opened with; saving writes that plus this clock (`stamp`), so the counting itself is no
-/// unsaved change.
+/// The time spent working on the project this session. What the reference counts is an open question (spec:
+/// flp/events/project-info.md, event 237 and "Open questions"); Lemon Studio's rule: it counts while a project is open
+/// and Lemon Studio's main window is the foreground window. The project keeps the time spent it was opened with;
+/// saving writes that plus this clock (`stamp`), so the counting itself is no unsaved change.
 #[derive(Debug, Default)]
 pub struct WorkClock {
     /// Counted before the main window last left the foreground.
@@ -124,7 +123,7 @@ pub fn date_text(days: f64) -> Option<String> {
 }
 
 /// The time spent as the Info page words it (spec: ui/settings-choices.md "Info", footer line 2). One hour and one
-/// minute are worded "1 hour", "1 minute": FL's wording of them was not seen.
+/// minute are worded "1 hour", "1 minute", a guess: the reference's wording of them is unknown.
 pub fn spent_text(days: f64) -> String {
     let minutes = (days.max(0.0) * 1440.0 + 1e-6).floor() as u64;
     if minutes == 0 {
@@ -402,7 +401,7 @@ impl App {
     }
 }
 
-/// FL's genre menu after "(none)", in its order (spec: ui/settings-choices.md "Info").
+/// The reference's genre menu after "(none)", in its order (spec: ui/settings-choices.md "Info").
 pub const GENRES: [&str; 56] = [
     "Acid House",
     "Afro House",
@@ -682,7 +681,7 @@ mod tests {
         crate::playlist::run(app, cmd);
     }
 
-    /// The genre menu: "(none)" and FL's 56 genres in order, the project's genre marked; a row writes the box, "(none)"
+    /// The genre menu: "(none)" and the 56 genres in order, the project's genre marked; a row writes the box, "(none)"
     /// empties it, and the box still takes any typed genre (spec: ui/settings-choices.md "Info").
     #[test]
     fn genre_menu_fills_the_box() {
@@ -826,7 +825,7 @@ mod tests {
         use os_model::{MixerTrack, SlotPlugin};
         let mut p = crate::app::default_project();
         let ch = p.channels[0].clone();
-        // Inserts 1-4 route to the master (as FL's do); one channel straight to the master.
+        // Inserts 1-4 route to the master; one channel straight to the master.
         p.mixer = (0..5).map(MixerTrack::new).collect();
         p.channels = vec![ch.clone()];
         p.channels[0].mixer_track = 0;

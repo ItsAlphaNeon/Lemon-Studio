@@ -4,7 +4,7 @@
 
 //! The piano roll's Arpeggiate dialog ("Piano roll - arpeggiator"): the pattern box with its folder button and ▸ menu,
 //! the Options (Pattern, Time mul, Range, Range mode, Sync, Gate), the Levels knobs, Group notes, Reset and Accept,
-//! laid out as FL's (303 × 331).
+//! laid out at 303 × 331.
 // spec: ui/piano-arpeggiate.md §1
 
 use os_ui::kit::{self, lemon as lk};
@@ -18,7 +18,7 @@ use crate::knobs::KnobId;
 
 pub const SIZE: (f32, f32) = (303.0, 331.0);
 
-/// The Levels knobs' ring colours (PAN … PITCH), as FL's.
+/// The Levels knobs' ring colours (PAN … PITCH).
 pub(super) const LEVEL_COLOURS: [u32; 6] = [0x3cc8e8, 0x3ed89a, 0x52d84a, 0xd2dc3c, 0xf0a03c, 0xf04a64];
 
 pub fn rect(s: &State) -> Rect {

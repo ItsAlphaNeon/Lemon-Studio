@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn smpte_timecode() {
-        // The measured case (§2): 1.495 s at 25 fps is 0:01:12.
+        // The case of §2: 1.495 s at 25 fps is 0:01:12.
         assert_eq!(smpte(1.495, rate_of("SMPTE 25 fps")), (0, 1, 12));
         assert_eq!(smpte(61.0, rate_of("SMPTE 24 fps")), (1, 1, 0));
         assert_eq!(smpte(1.0, rate_of("SMPTE 120 fps")), (0, 1, 0));
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn bar_beat_tick() {
-        // The measured case (§2): step 13, tick 23 of bar 1 in 4/4 is beat 4, tick 23.
+        // The case of §2: step 13, tick 23 of bar 1 in 4/4 is beat 4, tick 23.
         assert_eq!(bbt(12.0 * 24.0 + 23.0, 4, 4), (1, 4, 23));
         assert_eq!(bbt(0.0, 4, 4), (1, 1, 0));
         assert_eq!(bbt(384.0 + 95.0, 4, 4), (2, 1, 95));

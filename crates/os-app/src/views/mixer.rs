@@ -20,8 +20,8 @@ use crate::icons::{self, Icon};
 pub const STRIP_W: f32 = 44.0;
 /// Fader travel: value units per pixel (handle centre 618 at 0 dB = value 0.8, 970 at value 0).
 pub const FADER_PER_PX: f64 = 1.0 / 440.0;
-/// Fader change per wheel notch: 4 px of drag. Fitted to the one measurement (spec: ui/mixer.md §4): three notches up
-/// from unity read `103%  0.8dB  1.09`, which puts a notch between 0.0088 and 0.0092.
+/// Fader change per wheel notch: 4 px of drag, fitted to a single data point (spec: ui/mixer.md §4): three notches
+/// up from unity read `103%  0.8dB  1.09`, which puts a notch between 0.0088 and 0.0092.
 pub const FADER_NOTCH: f64 = 4.0 * FADER_PER_PX;
 
 // Vertical layout at the default 1080p window (spec §7): absolute y for a window top of 83;
@@ -40,7 +40,7 @@ const RING_Y: f32 = 563.0;
 const TRACK_Y0: f32 = 525.0;
 const HANDLE_0DB: f32 = 618.0; // handle centre at 0 dB (value 0.8)
 
-/// dB marks of the level scale and their measured y positions (number centres).
+/// dB marks of the level scale and their y positions (number centres).
 const SCALE: [(&str, f32); 17] = [
     ("3", 181.0), ("0", 241.0), ("3", 301.0), ("6", 360.0), ("9", 419.0), ("12", 479.0), ("15", 535.0), ("18", 588.0),
     ("21", 639.0), ("24", 686.0), ("27", 728.0), ("30", 766.0), ("33", 799.0), ("36", 826.0), ("39", 848.0), ("42", 866.0),
@@ -58,7 +58,7 @@ pub fn scale_marks(alt: bool, floor: f32) -> Vec<(&'static str, f32)> {
     SCALE[1..].iter().zip(meters::ALTERNATE).map(|(&(m, _), (_, d))| (m, meters::law_y(d, floor, false))).collect()
 }
 
-/// Height of the mixer window the absolute y values above were measured at (1080p workspace).
+/// Height of the mixer window the absolute y values above are for (1080p workspace).
 const REF_H: f32 = 997.0;
 /// Reference y of the window top.
 const REF_TOP: f32 = 83.0;
@@ -66,12 +66,12 @@ const REF_TOP: f32 = 83.0;
 const FIXED_H: f32 = 218.0;
 
 /// How much the mixer's stretchy parts (meter, level scale, fader) are scaled at window `r`:
-/// 1 at the measured height; the rest of the strip keeps its size.
+/// 1 at the reference height; the rest of the strip keeps its size.
 pub fn scale(r: Rect) -> f32 {
     ((r.h - FIXED_H) / (REF_H - FIXED_H)).max(0.2)
 }
 
-/// Maps the measured (absolute, window top 83) y values to the window `r`: the meter (130-453) and
+/// Maps the reference (absolute, window top 83) y values to the window `r`: the meter (130-453) and
 /// the fader (525-981) scale, the controls between them and below them keep their size.
 struct Ly {
     top: f32,
@@ -139,7 +139,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let col = Rect::new(r.x + 9.0, ly.y(METER_Y0), 28.0, bottom - 156.0 - ly.y(METER_Y0));
     let cfg = &s.mixer.meter_cfg;
     let floor = cfg.v[meters::k::FLOOR_DB];
-    // The column is the law's whole range (130-924 at the measured size) squeezed evenly into its height, so marks and
+    // The column is the law's whole range (130-924 at the reference size) squeezed evenly into its height, so marks and
     // bars keep their proportions at any mixer height (the strips' fixed-size controls do not apply here).
     let law_h = meters::LAW_BOTTOM - meters::LAW_TOP;
     let cy = |abs: f32| col.y + (abs - meters::LAW_TOP) / law_h * col.h;
@@ -188,7 +188,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             ui.c.fill_rect(Rect::new(col.x + 4.0, y, col.w - 8.0, 1.0), ui.t.s(0x111315));
         }
     }
-    // The bars cover the labels (measured: two 13 px bars filling the column inside its 1 px border).
+    // The bars cover the labels (two 13 px bars filling the column inside its 1 px border).
     ui.live(Live::Meter, col);
     if let Some(m) = s.mixer.meters.get(usize::from(s.selected_mixer)) {
         let ys = |db: f32| cy(meters::law_y(db, floor, alt)).min(col.bottom() - 1.0);
@@ -323,10 +323,10 @@ fn shade(c: Color, k: f32) -> Color {
     mix(Color::rgb(0), c, k)
 }
 
-/// One meter bar (spec: ui/mixer.md §9, measured from FL): the colour depends on the height, not on the level: green up
-/// to "Yellow from", yellow-orange up to "Red from", red above; each zone is a slight vertical gradient. The outer
-/// columns are darker, the next ones a touch lighter; a 1 px dark cap sits on the top and the peak-hold line is a
-/// 1 px orange line. `ys` maps a level to y; `bottom` is the bar's foot.
+/// One meter bar (spec: ui/mixer.md §9): the colour depends on the height, not on the level: green up to "Yellow
+/// from", yellow-orange up to "Red from", red above; each zone is a slight vertical gradient. The outer columns are
+/// darker, the next ones a touch lighter; a 1 px dark cap sits on the top and the peak-hold line is a 1 px orange
+/// line. `ys` maps a level to y; `bottom` is the bar's foot.
 #[allow(clippy::too_many_arguments)]
 fn meter_bar(ui: &mut Ui, x: f32, w: f32, bottom: f32, db: f32, hold: f32, cfg: &meters::Settings, ys: &dyn Fn(f32) -> f32) {
     use meters::k;
@@ -334,7 +334,7 @@ fn meter_bar(ui: &mut Ui, x: f32, w: f32, bottom: f32, db: f32, hold: f32, cfg: 
     let full_top = ys(12.0);
     let grad = cfg.v[k::GRADIENT];
     let edge = cfg.v[k::EDGE];
-    // Zone colours at the zone's top and bottom (measured 0xa0db40 / 0xb6db4d, 0xeec757 / 0xfac050).
+    // Zone colours at the zone's top and bottom (0xa0db40 / 0xb6db4d, 0xeec757 / 0xfac050).
     let green = (ui.t.a(0xa0db40), ui.t.a(0xb6db4d));
     let yellow = (ui.t.h(0xeec757), ui.t.h(0xfac050));
     let red = (t.meter_clip, t.meter_clip);
@@ -386,7 +386,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     let _ = f;
 
     // Body and the strip divider.
-    // The current strip's body is a shade lighter (measured: 0x26292b vs 0x232527); an armed one is tinted (0x312236 vs
+    // The current strip's body is a shade lighter (0x26292b vs 0x232527); an armed one is tinted (0x312236 vs
     // 0x2d1f31; spec: audio/track-io.md §1.5).
     let armed = track.is_some_and(|m| m.armed);
     let body = match (armed, selected) {
@@ -480,8 +480,8 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     mixer_knob(ui, kx, ly.y(PAN_Y), 10.5, 15.0, s.knob(pan), Some(true));
 
     // Reverse polarity (⇕) and swap left / right (⇔) buttons, lit when on, then the separation knob (§4).
-    // They keep their size and spacing below the fader's top at any mixer height (FL's short mixer stacks them the
-    // same way), so they are placed from the fader's top, not scaled with it.
+    // They keep their size and spacing below the fader's top at any mixer height (the reference's short mixer stacks
+    // them the same way), so they are placed from the fader's top, not scaled with it.
     let (pol, swp) = (track.is_some_and(|m| m.polarity), track.is_some_and(|m| m.swap));
     let top = ly.y(TRACK_Y0);
     let (sep_y, swap_y, ring_y) = (top + SEP_Y - TRACK_Y0, top + SWAP_Y - TRACK_Y0, top + RING_Y - TRACK_Y0);
@@ -604,9 +604,9 @@ fn mixer_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, halo: f32, value: f32, arc:
     os_ui::kit::knob(ui.c, ui.t, cx, cy, r, value, arc.unwrap_or(false), look, os_ui::kit::State::hover(hov));
 }
 
-/// Gain marks beside a fader track (spec: ui/mixer.md §5, measured from FL): 6 px ticks on both sides at 0, −6, −12 and
-/// −18 dB (2 px clear of the track), and faint 4 px rails between consecutive ticks (1 px clear of each tick). They
-/// belong to the track: the handle covers them as it moves.
+/// Gain marks beside a fader track (spec: ui/mixer.md §5): 6 px ticks on both sides at 0, −6, −12 and −18 dB (2 px
+/// clear of the track), and faint 4 px rails between consecutive ticks (1 px clear of each tick). They belong to the
+/// track: the handle covers them as it moves.
 fn fader_marks(ui: &mut Ui, mx: f32, track_y1: f32, ly: &Ly) {
     let ys: Vec<f32> = [0.0, -6.0, -12.0, -18.0]
         .iter()
@@ -721,7 +721,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         };
         // Lemon centres the name's capitals on the row, level with the chevron, knob and LED: the baseline sits half a
         // cap height (the face's is about 0.72 of its size) under the middle, measured on the face drawn (the italic
-        // one has its own ascent). Classic keeps FL's place.
+        // one has its own ascent). Classic keeps the reference's place.
         let ty = if super::lemon(ui) { (row.cy() + 0.36 * f32::from(fs) - ui.c.ascent(f)).round() } else { row.y + 4.0 * kp };
         ui.c.text_clip(f, row.x + 19.0, ty, 140.0, ink, &name);
         let mix = KnobId::SlotMix(n, k);

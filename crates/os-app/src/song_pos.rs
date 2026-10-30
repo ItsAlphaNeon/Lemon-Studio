@@ -197,7 +197,7 @@ impl App {
 mod tests {
     use super::*;
 
-    /// The handle's place and the steps (§1, §3, §4): measured on FL at PPQ 96.
+    /// The handle's place and the steps (§1, §3, §4) at PPQ 96.
     #[test]
     fn handle_and_steps() {
         let song = 3168; // 8.25 bars

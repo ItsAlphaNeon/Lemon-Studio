@@ -21,11 +21,11 @@ use crate::snap::EditorSnap;
 
 /// Track row pitch at the default size (spec: ui/main-window.md §6); a clip fills its row less the 3 px gap.
 pub const ROW_H: f32 = 48.0;
-/// Picker item pitch: FL's measured 30 px rows (§1), the smallest; a right-drag on the picker's scroll bar makes the
-/// items up to [`PICK_ROW_MAX`] tall, previews of their contents (spec: ui/scroll-bars.md §3).
+/// Picker item pitch: 30 px rows (§1), the smallest; a right-drag on the picker's scroll bar makes the items up to
+/// [`PICK_ROW_MAX`] tall, previews of their contents (spec: ui/scroll-bars.md §3).
 pub const PICK_ROW: f32 = 31.0;
 pub const PICK_ROW_MAX: f32 = 200.0;
-/// Track heights Alt+wheel can reach, and the step per wheel notch (§6; FL's `16 + 2 × h`, h = 0..=132, 3 per notch).
+/// Track heights Alt+wheel can reach, and the step per wheel notch (§6; `16 + 2 × h`, h = 0..=132, 3 per notch).
 pub const ROW_MIN: f32 = 16.0;
 pub const ROW_MAX: f32 = 280.0;
 pub const ROW_STEP: f32 = 6.0;
@@ -624,7 +624,7 @@ pub struct PlaylistState {
     pub stretch: bool,
     pub stretch_base: Vec<(u16, f64)>,
     /// A resized clip's length, kept for its source: new clips of that source are placed / painted at this length
-    /// until a clip of natural length is clicked (OS, as FL does).
+    /// until a clip of natural length is clicked (OS).
     pub lock_len: Option<(ClipSource, u32)>,
     /// Track row pitch (vertical zoom: Alt+wheel; saved in the project's playlist view).
     pub row_h: f32,
@@ -905,7 +905,7 @@ impl PGeom {
 // ---------------------------------------------------------------------------------------------------------
 // Model helpers
 
-/// The arrangement being edited, created (with FL's 500 default tracks) when the project has none.
+/// The arrangement being edited, created (with 500 default tracks) when the project has none.
 pub fn arr_mut(s: &mut State) -> &mut Arrangement {
     if s.project.arrangements.is_empty() {
         s.project.arrangements.push(os_flp::project::default_arrangement());
@@ -1090,7 +1090,7 @@ pub fn clip_tint(s: &State, src: ClipSource) -> Option<Rgb> {
     ch.color.or(ch.rack.stored_color).or_else(|| Some(pastel(ch.name.as_deref().or(ch.sample_path.as_deref()).unwrap_or(""))))
 }
 
-/// A pastel of FL's audio-clip family (one component 0x68, one 0x7e, the third between), its hue from a hash of
+/// A pastel of the audio-clip family (one component 0x68, one 0x7e, the third between), its hue from a hash of
 /// `seed` (a Lemon Studio choice for clips whose file has no colour).
 pub fn pastel(seed: &str) -> Rgb {
     let h = seed.bytes().fold(2_166_136_261u32, |h, b| (h ^ u32::from(b)).wrapping_mul(16_777_619));
@@ -1141,10 +1141,10 @@ pub fn audio_speed(s: &State, src: ClipSource) -> f64 {
     stretch * os_engine::laws::cents_rate(cents)
 }
 
-/// Works every audio clip's length out again from its trims and its channel's stretch, pitch and the tempo, as FL
-/// does (the stored length is not used for an audio clip): each trim point becomes ticks on its own, rounded; an
-/// untrimmed clip spans the whole sample (ui/playlist.md §9c, audio/audio-clips.md). Clips whose sample is not
-/// loaded keep their length. Returns whether a length changed. (The app's tick uses `audio_fits` + `fit_clips`.)
+/// Works every audio clip's length out again from its trims and its channel's stretch, pitch and the tempo (the
+/// stored length is not used for an audio clip): each trim point becomes ticks on its own, rounded; an untrimmed clip
+/// spans the whole sample (ui/playlist.md §9c, audio/audio-clips.md). Clips whose sample is not loaded keep their
+/// length. Returns whether a length changed. (The app's tick uses `audio_fits` + `fit_clips`.)
 #[cfg(test)]
 pub fn fit_audio(s: &mut State) -> bool {
     audio_fits(s).is_some_and(|fits| fit_clips(&mut s.project.arrangements, &fits))
@@ -1206,7 +1206,7 @@ pub fn fit_clips(arrangements: &mut [os_model::Arrangement], fits: &Fits) -> boo
             let ClipSource::Channel(ch) = c.source else { continue };
             let Some(&Some((t, ms))) = fits.get(&ch) else { continue };
             let (w0, w1) = c.window.unwrap_or((0.0, ms));
-            // Scaled from the whole length, so a point that falls on half a tick stays a tie and rounds up as in FL.
+            // Scaled from the whole length, so a point that falls on half a tick stays a tie and rounds up.
             let tick = |w: f64| (w * t / ms).round();
             let len = (tick(w1) - tick(w0)).max(1.0) as u32;
             if c.length != len {
@@ -1347,11 +1347,11 @@ pub fn grid_snap(s: &State) -> Snap {
     s.playlist.snap.grid(s.global_snap.now).unwrap_or(Snap::None)
 }
 
-/// Events and Markers catch a target this close: in FL's playlist a click 6.4 px from a marker landed on it, 7.6 and
-/// 8.4 px away on the tick under the pointer (ui/playlist.md §4).
+/// Events and Markers catch a target this close: in the reference a click 6.4 px from a marker landed on it, 7.6 and
+/// 8.4 px away on the tick under the pointer (ui/playlist.md §4); 7 lies between.
 const CATCH_PX: f32 = 7.0;
 
-/// What Events and Markers catch in the playlist: its time markers (measured), or the starts and ends of the
+/// What Events and Markers catch in the playlist: its time markers, or the starts and ends of the
 /// arrangement's clips (`skip`: clips being dragged; Lemon Studio's reading of the piano roll's rule); the one nearest
 /// `tick` within 7 px.
 fn catch(s: &State, g: &PGeom, tick: f32, skip: &[usize]) -> Option<u32> {
@@ -1473,7 +1473,7 @@ pub fn group_clips(s: &mut State) -> usize {
     if idx.len() < 2 {
         return 0;
     }
-    // The selected clips' own groups count as used (FL: group 1 + loose clips regrouped became group 2).
+    // The selected clips' own groups count as used (group 1 + loose clips regrouped become group 2).
     let used: Vec<u16> = clips(s).iter().map(Clip::group).collect();
     let g = free_group(&used);
     let arr = arr_mut(s);
@@ -1487,8 +1487,7 @@ pub fn group_clips(s: &mut State) -> usize {
     idx.len()
 }
 
-/// Alt+G / Alt+U: take the selected clips' groups apart and deselect them, as FL does. Returns how many clips
-/// left a group.
+/// Alt+G / Alt+U: take the selected clips' groups apart and deselect them. Returns how many clips left a group.
 pub fn ungroup_clips(s: &mut State) -> usize {
     let idx = with_groups(s, s.playlist.sel.clone());
     let arr = arr_mut(s);
@@ -1506,7 +1505,7 @@ pub fn ungroup_clips(s: &mut State) -> usize {
     n
 }
 
-/// The number a new group gets: the lowest from 1 up that none of `used` holds (§3a, checked in FL).
+/// The number a new group gets: the lowest from 1 up that none of `used` holds (§3a).
 fn free_group(used: &[u16]) -> u16 {
     (1..=u16::MAX).find(|g| !used.contains(g)).unwrap_or(u16::MAX)
 }
@@ -1553,7 +1552,7 @@ pub fn clone_clips(s: &mut State, orig: &[(usize, Clip)]) -> Vec<(usize, Clip)> 
     clips(s).iter().enumerate().skip(first).map(|(i, c)| (i, *c)).collect()
 }
 
-/// Alt+wheel: change the track height by FL's 6 px steps around the track under the mouse (§6).
+/// Alt+wheel: change the track height in 6 px steps around the track under the mouse (§6).
 pub fn zoom_rows(s: &mut State, grid: Rect, y: f32, notches: f32) {
     let row = s.playlist.row_h + ROW_STEP * notches.round();
     set_row_h(s, grid, y, row);
@@ -1694,7 +1693,7 @@ pub fn resize_right(s: &mut State, i: usize, orig: &Clip, len: u32) {
 
 /// Stretch mode (§9b): an audio clip resized to `len` ticks at `pos` keeps showing the same part of its sample: its
 /// channel's stretch time becomes the whole sample's stretched length times the new / old clip length, the multiplier
-/// back at 1, the method and pitch kept (FL does this). False when not stretching.
+/// back at 1, the method and pitch kept. False when not stretching.
 pub fn stretch_clip(s: &mut State, i: usize, orig: &Clip, pos: u32, len: u32) -> bool {
     let ClipSource::Channel(ch) = orig.source else { return false };
     let Some(&(_, base)) = s.playlist.stretch_base.iter().find(|b| b.0 == ch) else { return false };
@@ -1737,7 +1736,7 @@ pub fn duplicate(s: &mut State) {
     let span = match s.playlist.range {
         Some((r0, r1)) if r1 > r0 => r1 - r0,
         _ => {
-            // Whole bars, as FL duplicates sections.
+            // Whole bars.
             let bar = bar(s);
             (b - a).div_ceil(bar) * bar
         }
@@ -2020,8 +2019,8 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
         color: Some(s.clip_colors.new_channel(index)),
         enabled: true,
-        // The clip's range 0..1: stored pan 0 (minimum), volume 12800 (maximum), as FL stores a new clip's
-        // (spec: audio/automation.md "Range").
+        // The clip's range 0..1: stored pan 0 (minimum), volume 12800 (maximum), as FL stores a new clip's (spec:
+        // audio/automation.md "Range").
         volume: 1.0,
         pan: -1.0,
         pitch_cents: 0,
@@ -2108,8 +2107,8 @@ pub fn unique_channel_name(s: &State, name: &str) -> String {
 /// ADD > Audio clip and ADD > Automation clip (spec: ui/add-clip-channels.md §3): a channel of `kind` at the end of
 /// the rack named "Audio Clip" / "Automation Clip" (made unique), on the master, the only selected channel, in the
 /// rack filter group "Audio" / "Automation" with the filter on it, and the playlist's clip source; no clip is
-/// placed. An audio clip has no sample and the default stretch and declick settings; an automation clip has FL's
-/// two default points and no target. One undo step. Returns the rack row.
+/// placed. An audio clip has no sample and the default stretch and declick settings; an automation clip has two
+/// default points and no target. One undo step. Returns the rack row.
 pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
     let audio = kind == ChannelKind::AudioClip;
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
@@ -2150,7 +2149,7 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
 
 /// ADD > Layer (spec: ui/add-clip-channels.md §4, Lemon Studio's design): a layer channel at the end of the rack named
 /// "Layer" (made unique), on the master, at full volume so its children keep their levels; its children are the
-/// channels selected in the rack, in rack order (FL's Set children, done at once). It becomes the only selected
+/// channels selected in the rack, in rack order (Set children, done at once). It becomes the only selected
 /// channel. One undo step. Returns the rack row.
 pub fn add_layer_channel(s: &mut State) -> usize {
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
@@ -2442,9 +2441,9 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// The ▸ menu's Time markers submenu (§7a), in FL's order. FL's Ctrl+T for Add auto is not bound: in Lemon Studio
-/// Ctrl+T switches the typing keyboard. Add two... is greyed without a time selection, as in FL. Add one every and
-/// Add key marker open their lists as menus of their own (a submenu holds no submenus here).
+/// The ▸ menu's Time markers submenu (§7a), in the reference's order. The reference's Ctrl+T for Add auto is
+/// deliberately not bound: Ctrl+T switches the typing keyboard. Add two... is greyed without a time selection. Add
+/// one every and Add key marker open their lists as menus of their own (a submenu holds no submenus here).
 fn time_marker_items(s: &State) -> Vec<PItem> {
     let two = PItem::new("Add two...", Cmd::AddTwoMarkers);
     vec![
@@ -2482,7 +2481,7 @@ pub(crate) fn jump_unit(s: &State) -> Option<u32> {
     }
 }
 
-/// Add key marker ▸ (§7a), FL's two columns: "Root note" with C … B (radio), then "Scale" with Default, Black notes
+/// Add key marker ▸ (§7a), two columns: "Root note" with C … B (radio), then "Scale" with Default, Black notes
 /// and the scale list; the scale last added is checked.
 pub(crate) fn key_items(s: &State) -> Vec<PItem> {
     let pl = &s.playlist;
@@ -2556,7 +2555,7 @@ pub enum PickCmd {
     Delete,
 }
 
-/// Right-click on an audio or automation clip in the picker (§10a): its channel's menu, as FL shows it there.
+/// Right-click on an audio or automation clip in the picker (§10a): its channel's menu.
 pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
     let audio = source_kind(s, ClipSource::Channel(ch)) == PickKind::Audio;
     let it = |label: &'static str, c: PickCmd| PItem::new(label, Cmd::Pick(c, ch));
@@ -2686,7 +2685,7 @@ pub fn point_menu(s: &State, ch: u16, i: usize, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// "Paste value" with the copied value as a percentage, as FL writes it ("Paste value (23%)").
+/// "Paste value" with the copied value as a percentage ("Paste value (23%)").
 pub fn paste_label(s: &State) -> String {
     match s.value_clip {
         Some(v) => format!("Paste value ({}%)", (v * 100.0).round()),
@@ -2853,8 +2852,8 @@ pub enum Handle {
     Crossfade,
 }
 
-/// Tension per logical pixel of a tension-handle drag, and dB per pixel of a gain drag (§9a, OS: FL's per-pixel
-/// steps at 150 %).
+/// Tension per logical pixel of a tension-handle drag, and dB per pixel of a gain drag (§9a, OS: the reference's
+/// per-pixel steps at 150 %).
 const TENSION_PER_PX: f32 = 0.28;
 const DB_PER_PX: f32 = 0.15;
 /// Logical pixels of a crossfade-handle drag per unit of the later clip's gain at the middle (§9a, OS: 1/120 per
@@ -3037,7 +3036,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
     if let Some(ci) = hit {
         let c = clips(s)[ci];
         // Double-clicking an audio clip opens its channel's sampler and selects that channel in the rack (§9); a
-        // pattern clip makes its pattern the current one and opens the piano roll (§2b, as FL does). Which modifier
+        // pattern clip makes its pattern the current one and opens the piano roll (§2b). Which modifier
         // opens what on an audio clip is General ▸ Input ▸ Manage shortcuts' (`crate::shortcuts::clip_double_click`):
         // Show clip properties does nothing yet (no clip properties window); with neither row's modifier (a row set to
         // "(disabled)"), the second click is a plain one.
@@ -3086,7 +3085,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 }
             }
             if edge(g.clip_rect(&c), x) == 0 && curve_dist(s, &g, ci, x, y).is_some_and(|d| d <= 6.0) {
-                // Left-click on the curve adds a point (owner); FL's right-click adds one too.
+                // Left-click on the curve adds a point (owner); in the reference a right-click adds one too.
                 snapshot(s);
                 let beat = beat_at(s, &g, &c, x);
                 let v = value_at_y(g.body(&c), y);
@@ -3192,7 +3191,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 s.playlist.overlay = Some(Overlay::Slice { tick: t, t0: track, t1: track });
             }
             None => {
-                // FL's name for placing the current source's clip (spec: ui/settings-choices.md "Undo history").
+                // The undo name for placing the current source's clip (spec: ui/settings-choices.md "Undo history").
                 snapshot_as(s, "Arranger fill paint clip");
                 s.playlist.sel.clear();
                 let start = snap_place(s, &g, tick, alt);
@@ -3672,7 +3671,8 @@ pub fn zoom_on(s: &mut State, grid: (f32, f32), idx: &[usize]) {
     s.playlist_bar_w = (grid.0 / span).clamp(4.0, 600.0);
     s.playlist_scroll.0 = a as f32 / bar * s.playlist_bar_w;
     let top = cs.iter().map(|c| c.track).min().unwrap_or(0);
-    // The selected tracks fill the view's height, on FL's 2 px height steps (§5; FL measured only at the maximum).
+    // The selected tracks fill the view's height, on 2 px height steps (§5; checked only at the maximum, below it
+    // unverified: spec ui/playlist.md "Open questions").
     let n = f32::from(cs.iter().map(|c| c.track).max().unwrap_or(0) - top + 1);
     let fit = ROW_MIN + ((grid.1 / n - ROW_MIN) / 2.0).floor() * 2.0;
     s.playlist.row_h = fit.clamp(ROW_MIN, ROW_MAX);
@@ -3699,7 +3699,7 @@ pub fn show_arrangement(s: &mut State, n: u16) {
     s.piano.dirty = true;
 }
 
-/// The arrangement menu of the playlist title (§12, as FL 26 shows it): the arrangements (the current one ticked),
+/// The arrangement menu of the playlist title (§12): the arrangements (the current one ticked),
 /// then Clone, Rename, Delete, Merge with, Add one.
 pub fn arrangement_menu(s: &State, x: f32, y: f32) -> Popup {
     let cur = s.project.arrangement().map(|a| a.number);
@@ -3748,7 +3748,7 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
         s.playlist.last_ruler = None;
         app.drag = Some(Drag::Pl(PlDrag::TimeSel { t0: t }));
     } else {
-        // A double click clears the time selection (a Lemon Studio choice, besides FL's right click).
+        // A double click clears the time selection (a Lemon Studio choice, besides the reference's right click).
         let now = std::time::Instant::now();
         let double = s.playlist.last_ruler.is_some_and(|t| now.duration_since(t).as_millis() < 450);
         s.playlist.last_ruler = (!double).then_some(now);
@@ -3905,7 +3905,7 @@ pub fn commit_edit(s: &mut State) {
             add_every(s, n, &base);
         }
         EditTarget::MarkerTwo(a, b) => {
-            // FL's names, two spaces included: "Sec -  start", "Sec -  end" (measured).
+            // The reference's names, two spaces included: "Sec -  start", "Sec -  end".
             let base = if text.is_empty() { "Marker".to_string() } else { text };
             add_marker(s, TimeMarker::new(a, &format!("{base} -  start")));
             add_marker(s, TimeMarker::new(b, &format!("{base} -  end")));
@@ -4028,7 +4028,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return None;
         }
-        // The key marker list opens as a menu of its own; a root note keeps it open where it was, as in FL.
+        // The key marker list opens as a menu of its own; a root note keeps it open where it was.
         Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => {
             if let Cmd::KeyRoot(r) = cmd {
                 app.state.playlist.key_root = r % 12;
@@ -4410,8 +4410,9 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::AddKeyMarker(k) => {
-            // At the song position (measured: with it at bar 5, and at a time selection's start, which the song
-            // position follows), named after the root and scale; one undo step.
+            // At the song position (seen with it at bar 5, and at a time selection's start, which the song position
+            // follows; tick 0 was also seen: spec ui/playlist.md "Open questions"), named after the root and scale;
+            // one undo step.
             snapshot(s);
             s.playlist.key_scale = k;
             let pos = s.playlist.pos;
@@ -4600,7 +4601,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             });
             s.project.arrangements.push(a);
             show_arrangement(s, n);
-            // FL's "Add one..." / "Clone..." ask for the name.
+            // "Add one..." / "Clone..." ask for the name.
             start_edit(s, EditTarget::ArrangementName, s.playlist.arr_anchor);
             None
         }),
@@ -4652,7 +4653,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot(s);
             if let Some(tr) = arr_mut(s).tracks.get_mut(usize::from(t)) {
                 tr.color = c;
-                // FL writes the default name when a track is recoloured (flp playlist.md).
+                // A recoloured track gets the default name written (flp playlist.md).
                 if c.is_some() && tr.name.is_none() {
                     tr.name = Some(format!("Track {}", t + 1));
                 }
@@ -4927,7 +4928,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
     let cmd = match key {
         Key::Character(c) if ctrl && alt && c.eq_ignore_ascii_case("c") => Cmd::Consolidate,
         Key::Character(c) if ctrl && shift && c.eq_ignore_ascii_case("c") => Cmd::MakeUnique,
-        // Performance mode (live clip launching, Ctrl+P in FL's menu) is not built yet.
+        // Performance mode (live clip launching, Ctrl+P) is not built yet.
         Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("p") => Cmd::NotYet("Performance mode"),
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") => Cmd::SelectAll,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("d") => Cmd::Deselect,
@@ -5015,7 +5016,7 @@ pub fn rescale(s: &mut State, from: u16, to: u16) {
     }
 }
 
-/// The plugin window's ▸ menu (spec: ui/plugin-window.md "Docking and the window menu"): FL's entries; Detached and
+/// The plugin window's ▸ menu (spec: ui/plugin-window.md "Docking and the window menu"): all its entries; Detached and
 /// Browse parameters work here, `fill_plugin_window_menu` and `presets::fill_window_menu` enable more.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
@@ -5043,7 +5044,7 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::not_yet("Change color..."),
         PItem::not_yet("Random color"),
         PItem::not_yet("Change icon..."),
-        // Named for what it does, not checked as in FL: Detach while docked, Attach while detached (owner, 2026-10-18).
+        // Named for what it does rather than checked: Detach while docked, Attach while detached (owner, 2026-10-18).
         PItem::new(if detached { "Attach" } else { "Detach" }, Cmd::PluginDetach(row, !detached)),
         PItem::col(),
         PItem::head("Channel"),

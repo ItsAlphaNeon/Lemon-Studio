@@ -26,7 +26,7 @@ pub fn smoothing() -> f32 {
 }
 
 /// How much of the way one stage moves in a frame of `dt_ms` at Smoothing `value`: `1 - 2^(-dt / (value x 0.25 ms))`.
-/// That is FL's `1 - 2^(-n / value)` with `n` = 40 for a nominal 10 ms frame (its Ultrasmooth), counted in time so
+/// That is the spec's `1 - 2^(-n / value)` with `n` = 40 for a nominal 10 ms frame (Ultrasmooth), counted in time so
 /// that the ease takes as long at any frame rate. All of it at 0.
 pub fn share(dt_ms: f64, value: f64) -> f64 {
     if value <= 0.0 { 1.0 } else { 1.0 - (-dt_ms / (value * 0.25)).exp2() }
@@ -258,7 +258,7 @@ mod tests {
     use crate::prefs::{set_slider, SMOOTHING};
     use os_ui::Canvas;
 
-    /// What a 48 px notch at 128 showed, one value per frame (repeats dropped): the spec's measured sequence.
+    /// What a 48 px notch at 128 showed, one value per frame (repeats dropped): the spec's sequence.
     const NOTCH_48: [f64; 22] =
         [2.0, 5.0, 8.0, 12.0, 16.0, 20.0, 23.0, 26.0, 29.0, 32.0, 34.0, 36.0, 38.0, 39.0, 41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0];
 
@@ -288,7 +288,7 @@ mod tests {
         panic!("the ease ends");
     }
 
-    /// The 48 px notch at 128 in 10 ms frames (FL's `n` = 40) shows the spec's sequence, in the stages alone and as
+    /// The 48 px notch at 128 in 10 ms frames (`n` = 40) shows the spec's sequence, in the stages alone and as
     /// the playlist's scroll; it settles in about the same time at any frame rate.
     #[test]
     fn a_notch_eases_as_measured() {

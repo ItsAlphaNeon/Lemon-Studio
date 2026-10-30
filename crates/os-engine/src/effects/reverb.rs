@@ -51,7 +51,7 @@ pub const RANGES: [(i32, i32); PARAMS] = [
     (0, 2048),
 ];
 
-/// A fresh instance (FL's Default preset, with its wet level at 100 %).
+/// A fresh instance (the Default preset, with its wet level at 100 %).
 pub const DEFAULTS: [i32; PARAMS] = [75, 40, 0, 50, 100, 15, 40, 100, 500, 0, 128, 128, 128, 684, 0];
 
 /// The value that switches a filter off: low cut 19, high cut / high damping 221.
@@ -94,7 +94,7 @@ fn int_at(b: &[u8], at: usize) -> Option<i32> {
 
 impl Settings {
     /// A saved state: version 10001 (fifteen knobs and two switches), 10000 (thirteen knobs, no modulation) or a
-    /// state without a version (FL's factory presets: thirteen knobs and one byte).
+    /// state without a version (the factory presets: thirteen knobs and one byte).
     pub fn from_state(b: &[u8]) -> Option<Settings> {
         let mut s = Settings { knobs: DEFAULTS, tempo_sync: false, mid_side: false };
         let first = int_at(b, 0)?;
@@ -112,7 +112,7 @@ impl Settings {
             s.knobs[MOD_DEPTH] = 0;
         }
         let sw = at + 4 * n;
-        // The presets' single byte is 0 in all of FL's; read as the tempo switch.
+        // The presets' single byte is 0 in all of them; read as the tempo switch.
         s.tempo_sync = b.get(sw).is_some_and(|&x| x != 0);
         if bytes == 2 {
             s.mid_side = b.get(sw + 1).is_some_and(|&x| x != 0);
@@ -194,8 +194,8 @@ pub fn matrix(v: f32, separation: i32, mid_side: bool) -> [f32; 4] {
     } else if v == 0.0 {
         [0.0; 4]
     } else {
-        // The pan's cosine and sine stay double until the product is rounded (FL renders: a single cosine leaves
-        // l one step below v and the separated cases 1 ulp off).
+        // The pan's cosine and sine stay double until the product is rounded (against the reference renders, a
+        // single cosine leaves l one step below v and the separated cases 1 ulp off).
         let u = v * (1.0 / (PI / 4.0).cos()) as f32;
         let l = (f64::from(u) * (PI / 4.0).cos()) as f32;
         let r = (f64::from(u) * (PI / 4.0).sin()) as f32;
@@ -423,7 +423,8 @@ struct Half {
     d: f32,
 }
 
-/// Level ramps for knob moves while the reverb plays (Lemon Studio's own: FL ramps its levels, how is not described).
+/// Level ramps for knob moves while the reverb plays (Lemon Studio's own: the reference's ramp rate is unknown, spec:
+/// plugins/lemon-reverb.md "6. Audio").
 #[derive(Clone, Debug)]
 struct Ramp {
     from: [f32; 9],
@@ -686,7 +687,7 @@ impl Reverb {
         }
     }
 
-    /// Runs `frames` samples of silence through the reverb (what FL processes after loading, before the song).
+    /// Runs `frames` samples of silence through the reverb (what a slot processes after loading, before the song).
     pub fn preroll(&mut self, frames: usize) {
         let mut a = vec![0.0f32; 2048];
         let mut b = vec![0.0f32; 2048];

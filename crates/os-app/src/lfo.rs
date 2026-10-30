@@ -83,7 +83,7 @@ impl Knobs {
         format!("{}%", pct(self.range))
     }
 
-    /// The period as steps:ticks, FL's hint; the ticks are the whole part of `P + 1/4` (§1, §7).
+    /// The period as steps:ticks, the hint; the ticks are the whole part of `P + 1/4` (§1, §7).
     pub fn speed_text(&self, ppq: u32) -> String {
         let step = (ppq.max(4) / 4).max(1);
         let t = (self.period(ppq) + 0.25).floor() as u32;
@@ -91,7 +91,7 @@ impl Knobs {
     }
 }
 
-/// Percent with halves to even, as FL's hints show them.
+/// Percent with halves to even, as the hints show them.
 fn pct(v: f32) -> i64 {
     (f64::from(v) * 100.0).round_ties_even() as i64
 }
@@ -125,7 +125,7 @@ impl Settings {
         }
     }
 
-    /// Degrees (a Lemon Studio choice: FL's hint bar shows nothing, §7).
+    /// Degrees (a deliberate choice: the reference's hint bar shows nothing, §7).
     pub fn phase_text(&self) -> String {
         format!("{}°", (f64::from(self.phase) * 360.0).round() as i64)
     }
@@ -148,8 +148,8 @@ pub fn range_of(pos: f32) -> f32 {
     pos * 2.0 - 1.0
 }
 
-/// Speed in octaves, in 1/64ths of a wheel notch: whole notches land on exact eighths of an octave, as FL's do (the
-/// phase sum shows the difference on a square's edges, §3).
+/// Speed in octaves, in 1/64ths of a wheel notch: whole notches land on exact eighths of an octave, as the
+/// reference's do (the phase sum shows the difference on a square's edges, §3).
 pub fn speed_of(pos: f32) -> f32 {
     let notches = (f64::from(pos) * 2.0 * OCTAVES * 8.0 * 64.0).round() / 64.0;
     (notches / 8.0 - OCTAVES) as f32
@@ -160,7 +160,8 @@ pub fn phase_of(pos: f32) -> f32 {
 }
 
 /// The wave before the lane's scale, `v + r × w(φ)`, tick by tick from the time origin; End's values are reached `len`
-/// ticks in (§3). The phase is a running sum of `1 / P` in double precision, as FL's.
+/// ticks in (§3). The phase is a running sum of `1 / P` in double precision, which reproduces every square edge of
+/// the reference (§3).
 fn wave(set: &Settings, ppq: u32, len: u32) -> impl Iterator<Item = f64> {
     let set = *set;
     let len = f64::from(len.max(1));
@@ -257,7 +258,7 @@ mod tests {
         assert_eq!(velocities(&Settings { start: knobs(0, 0, -3), ..d }), of("64 74 82 89 94 96 95 91 85 77 68 58 49 41 36 32 32 35 40 48 57 66 76 84"));
         assert_eq!(velocities(&Settings { phase: phase_of(phase_pos(0.0) + 16.0 * PHASE_NOTCH), ..d })[..9], of("96 94 87 76 64 52 41 34 32"));
         let end = |e: Knobs, log: bool| Settings { end: e, end_on: true, log, ..d };
-        // The note at 192 is an exact 61.5: FL gave 62, halves to even give 61 (§3's open question).
+        // The note at 192 is an exact 61.5: the reference gives 62, halves to even give 61 (§3's open question).
         assert_eq!(velocities(&end(knobs(-10, 0, 0), false)), of("64 76 86 93 95 92 85 74 61 49 38 31 28 30 37 47 59 71 81 88 90 87 80 69"));
         assert_eq!(velocities(&end(knobs(0, 0, 8), false)), of("64 76 87 94 96 93 85 74 61 48 38 33 33 39 50 63 77 89 95 95 89 77 62 48"));
         assert_eq!(velocities(&end(knobs(0, 0, 8), true)), of("64 76 87 94 96 93 85 73 60 47 37 32 34 41 53 68 81 92 96 93 84 69 54 40"));

@@ -20,7 +20,7 @@ pub const ROW: f32 = 18.0;
 /// Highest key shown (B10); the lowest is 0 (C0) (§3).
 pub const TOP_KEY: i32 = 131;
 
-/// Key name in FL's naming (key 60 = C5) (§3), as the settings choose it (`crate::note_names`).
+/// Key name with key 60 = C5 (§3), as the settings choose it (`crate::note_names`).
 pub fn key_name(key: i32) -> String {
     crate::note_names::note_name(key)
 }
@@ -59,7 +59,7 @@ pub struct Layout {
 /// ui/event-panel-splitter.md; the default puts the splitter at bottom − 185, §1).
 ///
 /// The overview (the horizontal scroll bar) is 22 px tall and the vertical scroll bar's column 22 px wide; with
-/// "Small scrollbars in editors" 11 and 12 px (about half, as FL's playlist measured; spec: ui/settings-choices.md
+/// "Small scrollbars in editors" 11 and 12 px (about half; spec: ui/settings-choices.md
 /// "Miscellaneous"), the room going to the ruler and the grid.
 pub fn layout(r: Rect, split: crate::piano_split::Split) -> Layout {
     use crate::piano_split::BAND;
@@ -186,7 +186,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         let (top, bottom, rim, text) = if selected {
             (t.note_sel_top, t.note_sel_bottom, t.note_sel_rim, t.note_sel_text)
         } else if n.muted() {
-            // Muted (§9): grey body, measured from FL.
+            // Muted (§9): grey body.
             (ui.t.s(0x6d7276), ui.t.s(0x63686c), ui.t.s(0x474a4d), ui.t.tx(0xc4c8cc))
         } else {
             (t.note_top, t.note_bottom, t.note_rim, t.note_text)
@@ -433,7 +433,7 @@ fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u
     ui.c.fill_rect(Rect::new(rr.x, rr.y + 17.0, rr.w, 1.0), ui.t.s(0x16191c));
     ui.c.fill_rect(Rect::new(rr.x, rr.y + 18.0, rr.w, 1.0), ui.t.s(0x090c0f));
     ui.c.push_clip(Rect::new(l.grid.x, rr.y, l.grid.w, rr.h));
-    // Time selection: red band (§10, colours sampled from FL).
+    // Time selection: red band (§10).
     if let Some((x0, x1)) = range {
         let b = Rect::span(x0, x1, rr.y + 1.0, rr.y + 19.0);
         ui.c.fill_rect_gradient(b, Color::rgb(0x9c5353), Color::rgb(0x944a4b), 0.0);
@@ -464,7 +464,7 @@ fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u
         ui.c.fill_rect(Rect::new(x, rr.y + 1.0, 1.0, rr.h - 1.0), t.text);
         ui.c.text(Font::new(12), x + 4.0, rr.y + 2.0, t.text, name);
     }
-    // Play-start marker: an orange downward triangle (§10, colours sampled from FL).
+    // Play-start marker: an orange downward triangle (§10).
     let mx = g.x_of(marker as f32).round() + 0.5;
     let tri = [(mx - 7.5, rr.y + 2.0), (mx + 7.5, rr.y + 2.0), (mx, rr.y + 11.0)];
     ui.c.fill_polygon(&tri, ui.t.s(0x2f1818));
@@ -723,7 +723,7 @@ fn pitch_scroll(ui: &mut Ui, s: &State, l: &Layout) {
 /// point to the next (the last to the panel's end) and is filled from the lane's baseline to the value.
 fn control_bars(ui: &mut Ui, s: &State, g: &Geom, p: Rect, lane: Lane, ch: Option<u16>) {
     let (Some(ch), Some(param)) = (ch, lane.param()) else { return };
-    // Fills measured from FL; the edge of the volume bars was measured, the others are derived from their fill.
+    // The edges other than the volume bars' are derived from their fill.
     let (fill, edge) = match lane {
         Lane::ChanVolume => (Color::rgb(0x6e4a4c), Color::rgb(0x895556)),
         Lane::ChanPan => (ui.t.a(0x57643f), ui.t.a(0x6f7d51)),

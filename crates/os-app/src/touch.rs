@@ -9,7 +9,7 @@
 
 use crate::app::{App, Win};
 
-/// The pads' bottom-left note when first opened: G#4, as FL opens (spec §2 Window).
+/// The pads' bottom-left note when first opened: G#4 (spec §2 Window).
 pub const PAD_ROOT: u8 = 56;
 /// The keyboard's first C when first opened: C4.
 pub const KEYS_LOW: u8 = 48;
@@ -17,7 +17,7 @@ pub const KEYS_LOW: u8 = 48;
 pub const PADS: u8 = 4;
 /// The keyboard's octaves.
 pub const OCTAVES: u8 = 2;
-/// Velocity of a press: FL's default note velocity (spec §2 Playing).
+/// Velocity of a press: the default note velocity (spec §2 Playing).
 pub const VELOCITY: u8 = 100;
 
 /// What the window's controls do.

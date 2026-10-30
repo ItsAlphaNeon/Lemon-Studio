@@ -4,7 +4,7 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! "Enter value...": the value box of the knob and parameter menus. It is the playlist's inline text box
-//! (`EditTarget::TypeIn`) drawn as FL's value box, reading the text in the knob's own unit or as a normalized value.
+//! (`EditTarget::TypeIn`) drawn as a value box, reading the text in the knob's own unit or as a normalized value.
 //!
 // spec: ui/type-in-value.md
 

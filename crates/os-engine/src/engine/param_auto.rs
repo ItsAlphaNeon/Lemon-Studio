@@ -293,7 +293,7 @@ mod tests {
             self.ticks
         }
         fn param_range_fx(&self, index: usize) -> Option<(f64, f64)> {
-            // Parameter 0 in a whole range, as FL's own plugins state theirs; the others 0..1.
+            // Parameter 0 in a whole range, as the stock plugins state theirs; the others 0..1.
             Some(if index == 0 { (-64.0, 64.0) } else { (0.0, 1.0) })
         }
     }

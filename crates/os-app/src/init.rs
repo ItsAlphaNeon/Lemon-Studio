@@ -5,7 +5,7 @@
 
 //! The project's initial values (`Project::init_controls`): controls that take a value when the song starts. The
 //! Automation group of a control's menu adds one, "Set as song start value" (one undo step, "Initialized
-//! control"), and takes it out, "Remove start value" (no undo step, as in FL). With "Initialize controls
+//! control"), and takes it out, "Remove start value" (no undo step). With "Initialize controls
 //! automatically" on, "Create automation clip" adds the control too, in its own step (`playlist::create_automation`).
 //! In song mode, starting playback, moving the song position and playback looping back to the song's start set every
 //! control in the list to its value (`apply`; the engine sets them itself where it loops), then automation clips act as
@@ -20,7 +20,7 @@ use crate::app::State;
 use crate::history::{self, Snap};
 use crate::playlist::{Cmd, Mark, PItem};
 
-/// The undo step of "Set as song start value" (FL's name).
+/// The undo step of "Set as song start value".
 pub const INITIALIZED: &str = "Initialized control";
 pub const INIT_LABEL: &str = "Set as song start value";
 pub const DELETE_LABEL: &str = "Remove start value";
@@ -57,7 +57,7 @@ pub fn init(s: &mut State, t: u32, v: f64) {
     put(s, t, Some(c));
 }
 
-/// "Remove start value": control `t` leaves the list. No undo step (FL makes none).
+/// "Remove start value": control `t` leaves the list. No undo step.
 pub fn delete(s: &mut State, t: u32) {
     put(s, t, None);
 }
@@ -389,10 +389,10 @@ mod tests {
         assert_eq!(controls(&a), INIT);
     }
 
-    /// Opening a project in song mode sets the listed controls, as FL 26 does (spec: flp/engine-events.md "Event
-    /// 216"): the file keeps the stored values, the opened project has the initial ones and is not changed, and saving
-    /// it stores them. Opened in pattern mode, the stored values stay. The mode is the one saved (event 9), clips or
-    /// not; a file without it opens in song mode, as in FL.
+    /// Opening a project in song mode sets the listed controls (spec: flp/engine-events.md "Event 216"): the file
+    /// keeps the stored values, the opened project has the initial ones and is not changed, and saving it stores them.
+    /// Opened in pattern mode, the stored values stay. The mode is the one saved (event 9), clips or not; a file
+    /// without it opens in song mode.
     #[test]
     fn opening_a_song_sets_the_initial_values() {
         const INIT: (f64, f64) = (0.5, 140.0);

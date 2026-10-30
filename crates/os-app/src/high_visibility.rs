@@ -27,13 +27,13 @@ pub fn publish() {
     os_ui::kit::set_high_visibility(on());
 }
 
-/// The record button's dot while recording isn't armed: red, or with `high` white (#dce7e8, measured).
+/// The record button's dot while recording isn't armed: red, or with `high` white (#dce7e8).
 pub fn record_dot(t: &Palette, high: bool) -> Color {
     if high { t.tx(0xdce7e8) } else { t.record }
 }
 
 /// A rack row's channel name text (a channel without a colour, not focused): the look's own, or with `high` brighter,
-/// #ededde as measured (the Lemon look: its brightest text colour).
+/// #ededde (the Lemon look: its brightest text colour).
 pub fn rack_name(t: &Palette, lemon: bool, high: bool) -> Color {
     match (high, lemon) {
         (false, _) => t.name_text,
@@ -42,8 +42,8 @@ pub fn rack_name(t: &Palette, lemon: bool, high: bool) -> Color {
     }
 }
 
-/// A rack row's mixer track number (not hovered): the look's own, or with `high` brighter, #b2a9b6 as measured (the
-/// Lemon look: its brightest text colour).
+/// A rack row's mixer track number (not hovered): the look's own, or with `high` brighter, #b2a9b6 (the Lemon
+/// look: its brightest text colour).
 pub fn rack_number(t: &Palette, lemon: bool, high: bool) -> Color {
     match (high, lemon) {
         (false, _) => t.text_dim.shade(0.08),
@@ -53,7 +53,7 @@ pub fn rack_number(t: &Palette, lemon: bool, high: bool) -> Color {
 }
 
 /// The two lighter edges of the playlist's horizontal scroll bar track, outer then inner, 1 px each at its top and
-/// bottom (measured).
+/// bottom.
 pub const PLAYLIST_EDGES: [u32; 2] = [0x525557, 0x4b4f52];
 
 #[cfg(test)]

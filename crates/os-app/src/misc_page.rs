@@ -7,8 +7,8 @@
 //! instrument kit in place of the plugin's editor; values come from the channel (`ChannelInfo::misc`), edits go back
 //! to the app as `FrameEvent::Misc`.
 //!
-//! Coordinates in the tables are FL window pixels of the measured Sampler window (568 x 466 with its title bar), the
-//! same frame of reference as Lemon Sampler's pages: the page's top-left is FL (4, 72).
+//! Coordinates in the tables are window pixels of the Sampler window (568 x 466 with its title bar), the same frame
+//! of reference as Lemon Sampler's pages: the page's top-left is (4, 72).
 // spec: ui/plugin-window.md (Misc tab), plugins/lemon-sampler.md §9 (Misc page layout)
 
 use os_theme::design::lemon as brand;
@@ -18,7 +18,7 @@ use os_ui::kit::{inst, State as KS};
 use os_ui::tabler as tb;
 use os_ui::{Canvas, Font, Glyph, Rect};
 
-/// FL x / y of the page's top-left corner.
+/// Window x / y of the page's top-left corner.
 const OX: f32 = 4.0;
 const OY: f32 = 72.0;
 /// Page size (the joined Lemon Sampler editor's size).
@@ -196,7 +196,7 @@ pub struct MiscVals {
 }
 
 impl Default for MiscVals {
-    /// A new channel (measured on FL's default Sampler channel).
+    /// A new channel (the default Sampler channel).
     fn default() -> Self {
         let mut v = [0.0; M::COUNT];
         for m in M::ALL {
@@ -277,7 +277,7 @@ pub fn range_of(m: M) -> (f32, f32) {
     }
 }
 
-/// Note name ("C5", "F#4"): FL's naming, C5 = MIDI 60, as the settings choose it (`crate::note_names`).
+/// Note name ("C5", "F#4"): C5 = MIDI 60, as the settings choose it (`crate::note_names`).
 pub fn note_name(key: i32) -> String {
     crate::note_names::note_name(key)
 }
@@ -306,7 +306,7 @@ const ARP_DIR_NAMES: [&str; 6] = ["off", "up", "down", "up and down (bounce)", "
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Kind {
-    /// FL x / y centre, ball radius, ring radius, dot colour.
+    /// Window x / y centre, ball radius, ring radius, dot colour.
     Knob { bipolar: bool },
     Radio,
     /// A number box; `dash` = 0 shows `---`.
@@ -334,9 +334,9 @@ fn kind(m: M) -> Kind {
 }
 
 // ----------------------------------------------------------------------------------------------------------------
-// Layout (FL window px)
+// Layout (window px)
 
-/// Panels: outline rect (inclusive FL x0, x1, y0, y1), header tab width, title.
+/// Panels: outline rect (inclusive window x0, x1, y0, y1), header tab width, title.
 const PANELS: [(f32, f32, f32, f32, f32, &str); 8] = [
     (11.0, 188.0, 78.0, 179.0, 106.0, "Level offsets"),
     (195.0, 316.0, 78.0, 179.0, 67.0, "Polyphony"),
@@ -348,7 +348,7 @@ const PANELS: [(f32, f32, f32, f32, f32, &str); 8] = [
     (11.0, 556.0, 316.0, 454.0, 84.0, ""),
 ];
 
-/// Knobs: value, FL centre, ball radius, ring radius, dot colour, caption, caption top.
+/// Knobs: value, window centre, ball radius, ring radius, dot colour, caption, caption top.
 const KNOBS: [(M, f32, f32, f32, f32, u32, &str, f32); 19] = [
     (M::LevelPan, 37.0, 123.5, 15.0, 17.0, 0x43afbd, "PAN", 149.0),
     (M::LevelVol, 79.0, 123.5, 15.0, 17.0, 0x41b57a, "VOL", 149.0),
@@ -372,7 +372,7 @@ const KNOBS: [(M, f32, f32, f32, f32, u32, &str, f32); 19] = [
     (M::EchoTime, 534.0, 229.0, 11.0, 13.5, 0xe89a2f, "TIME", 247.0),
 ];
 
-/// Radios: value, FL centre, label, label left of the radio.
+/// Radios: value, window centre, label, label left of the radio.
 const RADIOS: [(M, f32, f32, &str, bool); 8] = [
     (M::Porta, 209.5, 161.5, "Porta", false),
     (M::Mono, 264.5, 161.5, "Mono", false),
@@ -384,7 +384,7 @@ const RADIOS: [(M, f32, f32, &str, bool); 8] = [
     (M::AddKey, 200.0, 350.0, "Add to key", false),
 ];
 
-/// Number boxes: value, rect (inclusive FL x0, x1, y0, y1), label, label x.
+/// Number boxes: value, rect (inclusive window x0, x1, y0, y1), label, label x.
 const SPINS: [(M, f32, f32, f32, f32, &str, f32); 6] = [
     (M::PolyMax, 230.0, 259.0, 108.0, 130.0, "Max", 204.0),
     (M::Cut, 44.0, 72.0, 216.0, 237.0, "Cut", 20.0),
@@ -397,7 +397,7 @@ const SPINS: [(M, f32, f32, f32, f32, &str, f32); 6] = [
 const CHORD_BOX: (f32, f32, f32, f32) = (203.0, 308.0, 272.0, 292.0);
 const CUT_SELF: (f32, f32, f32, f32) = (15.0, 75.0, 276.0, 305.0);
 const RESET: (f32, f32, f32, f32) = (13.0, 62.0, 339.0, 361.0);
-/// Tracking header words: Vol, Key (FL x0..x1 of their cells, y 80..97).
+/// Tracking header words: Vol, Key (window x0..x1 of their cells, y 80..97).
 const TRACK_TABS: [(f32, f32); 2] = [(443.0, 467.0), (468.0, 493.0)];
 /// Arpeggio direction marks (centre x, y 196.5).
 const ARP_DIRS: [f32; 6] = [96.0, 116.0, 135.0, 153.5, 172.0, 191.5];
@@ -425,7 +425,7 @@ thread_local! {
     static ORG: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((0.0, 0.0)) };
 }
 
-/// FL px -> frame px offsets while painting.
+/// window px -> frame px offsets while painting.
 fn dx() -> f32 {
     ORG.with(|o| o.get().0) - OX
 }
@@ -433,7 +433,7 @@ fn dy() -> f32 {
     ORG.with(|o| o.get().1) - OY
 }
 
-/// FL px -> frame px.
+/// window px -> frame px.
 fn p(x: f32, y: f32) -> (f32, f32) {
     (x + dx(), y + dy())
 }
@@ -484,13 +484,13 @@ pub enum Hit {
 /// Page UI state kept by the frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MiscUi {
-    /// Tracking page: false = Vol, true = Key (FL shows Key).
+    /// Tracking page: false = Vol, true = Key (the reference opens on Key).
     pub track_key: bool,
-    /// Keyboard scroll: FL x of C0 (C3 sits at x 96 by default).
+    /// Keyboard scroll: window x of C0 (C3 sits at x 96 by default).
     pub kb_scroll: f32,
     /// Drag in progress: value, start y (or x for sliders), start value.
     pub drag: Option<(M, f32, f32)>,
-    /// Scroll bar thumb drag in progress: start FL x, start scroll (`bar_press`).
+    /// Scroll bar thumb drag in progress: start window x, start scroll (`bar_press`).
     pub bar_drag: Option<(f32, f32)>,
     pub hover: Option<Hit>,
     /// Key held by a left press on the keyboard.
@@ -571,7 +571,7 @@ pub fn hit(ui: &MiscUi, x: f32, y: f32) -> Option<Hit> {
     None
 }
 
-/// Keyboard key under FL point (fx, fy).
+/// Keyboard key under window point (fx, fy).
 fn key_at(ui: &MiscUi, fx: f32, fy: f32) -> Option<u8> {
     let rel = fx - ui.kb_scroll;
     let oct = (rel / OCTAVE).floor();
@@ -668,7 +668,7 @@ fn state_of(ui: &MiscUi, v: &MiscVals, h: Hit) -> KS {
     KS::hover(ui.hover == Some(h) && !off).with_disabled(off)
 }
 
-/// A highlight colour of the page: FL's orange accent and the root key's blues. The Lemon design draws them in its
+/// A highlight colour of the page: the orange accent and the root key's blues. The Lemon design draws them in its
 /// yellow (through the theme), as Lemon Sampler's pages do.
 fn hi(t: &Palette, hex: u32) -> Color {
     if !t.style.lemon() {
@@ -684,7 +684,7 @@ fn hi(t: &Palette, hex: u32) -> Color {
 }
 
 /// Veils over what is greyed out: whole panels with nothing working, as Lemon Sampler greys out its panels in the
-/// Lemon design. The single controls (`works`) draw their disabled look; Classic veils them too (FL px rects).
+/// Lemon design. The single controls (`works`) draw their disabled look; Classic veils them too (window px rects).
 fn veil_off(c: &mut Canvas, t: &Palette, v: &MiscVals) {
     let veil = t.s(0x222525).with_alpha(crate::app::OFF_VEIL);
     let lemon = t.style.lemon();
@@ -736,7 +736,7 @@ pub fn paint(c: &mut Canvas, t: &Palette, ax: f32, ay: f32, v: &MiscVals, ui: &M
         let ring_col = if off { accent.mix(t.s(0x222525), 0.45) } else { accent };
         let st = state_of(ui, v, Hit::Value(mm));
         inst::dial(c, t, x, y, r, ring, v.get(mm), bipolar, ring_col, st);
-        // The Classic kit dial colours its dot from the accent; FL's Misc dots have their own colours. The Lemon dial
+        // The Classic kit dial colours its dot from the accent; the Misc dots have their own colours. The Lemon dial
         // has a pointer line and no dot.
         if !t.style.lemon() && !st.disabled {
             let a = inst::dial_angle(v.get(mm), bipolar);
@@ -899,9 +899,9 @@ fn headers(c: &mut Canvas, t: &Palette, v: &MiscVals, ui: &MiscUi) {
     c.text(tf, 338.0 + dx(), ty2, title_col, "Echo delay / fat mode");
 }
 
-/// FL's number box: a rounded grey block, brightest across its middle, with the value right-aligned (or `---`) and
-/// small up / down arrows at its right edge; a disabled box has a faint value. The Lemon design draws it as a field
-/// (Lemon Sampler's list boxes).
+/// The Classic number box: a rounded grey block, brightest across its middle, with the value right-aligned (or `---`)
+/// and small up / down arrows at its right edge; a disabled box has a faint value. The Lemon design draws it as a
+/// field (Lemon Sampler's list boxes).
 fn spin_box(c: &mut Canvas, t: &Palette, r: Rect, text: Option<&str>, st: KS) {
     if t.style.lemon() {
         lk::field(c, r, st);
@@ -945,7 +945,7 @@ fn spin_box(c: &mut Canvas, t: &Palette, r: Rect, text: Option<&str>, st: KS) {
     }
 }
 
-/// FL's dark push button (Cut self, Reset); the Lemon design's is Lemon Sampler's (`inst::text_button`).
+/// The Classic dark push button (Cut self, Reset); the Lemon design's is Lemon Sampler's (`inst::text_button`).
 fn dark_button(c: &mut Canvas, t: &Palette, r: Rect, s: &str, st: KS) {
     if t.style.lemon() {
         inst::text_button(c, r, s, st);
@@ -1117,12 +1117,12 @@ fn key_colour(t: &Palette, k: i32, root: u8, held: Option<u8>) -> Option<Color> 
     }
 }
 
-/// How far the keyboard scrolls (FL px) and the scroll bar's width.
+/// How far the keyboard scrolls (window px) and the scroll bar's width.
 const KB_TOTAL: f32 = 11.0 * OCTAVE;
 const KB_VIEW: f32 = KB_X1 - KB_X0;
 const BAR_W: f32 = KB_X1 - KB_X0 + 1.0;
 
-/// The scroll bar thumb: its left edge (FL x) and width.
+/// The scroll bar thumb: its left edge (window x) and width.
 fn thumb(ui: &MiscUi) -> (f32, f32) {
     let start = (KB_X0 - ui.kb_scroll).clamp(0.0, KB_TOTAL - KB_VIEW);
     let tw = BAR_W * KB_VIEW / KB_TOTAL;
@@ -1149,7 +1149,7 @@ pub fn bar_drag_to(ui: &mut MiscUi, x: f32) -> bool {
     ui.kb_scroll != was
 }
 
-/// Scrolls so the keyboard shows from `start` FL px past C0, kept in range.
+/// Scrolls so the keyboard shows from `start` window px past C0, kept in range.
 fn set_start(ui: &mut MiscUi, start: f32) {
     ui.kb_scroll = KB_X0 - start.clamp(0.0, KB_TOTAL - KB_VIEW);
 }

@@ -25,7 +25,7 @@ pub const X2: usize = 5;
 /// The settings' ranges (the editor's). Stored values outside them are clamped by the positions (X 2: only 1 is on).
 pub const RANGES: [(i32, i32); PARAMS] = [(0, 1024), (0, 1024), (0, 1024), (0, 1024), (0, 1024), (0, 1)];
 
-/// A fresh instance (FL's Default preset): cutoff fully open, the low pass at full level and the high pass at half.
+/// A fresh instance (the Default preset): cutoff fully open, the low pass at full level and the high pass at half.
 pub const DEFAULTS: [i32; PARAMS] = [1024, 205, 1024, 0, 512, 0];
 
 /// The version the state is written with; a state of a later one is not read (the defaults play).
@@ -251,7 +251,7 @@ pub struct Filter {
 }
 
 impl Filter {
-    /// A filter whose coefficients stand at the settings' values (the start of a song: nothing glides in; FL's idle
+    /// A filter whose coefficients stand at the settings' values (the start of a song: nothing glides in; the idle
     /// blocks before an export complete that glide).
     pub fn with_settings(sample_rate: u32, s: &Settings) -> Filter {
         let target = coefficients(&s.v);
@@ -349,7 +349,7 @@ impl Effect for Filter {
 mod tests {
     use super::*;
 
-    /// FL's four presets (spec "Settings").
+    /// The four presets (spec "Settings").
     const PRESETS: [(&str, [i32; PARAMS], bool); 4] = [
         ("Default", [1024, 205, 1024, 0, 512, 0], true),
         ("Party next door", [160, 1024, 864, 0, 0, 0], true),

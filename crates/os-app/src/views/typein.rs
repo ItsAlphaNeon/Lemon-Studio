@@ -3,7 +3,7 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The value box of "Enter value...": field, mode buttons, ✓ / ✗ and caption.
-// spec: ui/type-in-value.md §2-3 (the measured layout and shades)
+// spec: ui/type-in-value.md §2-3 (the layout and shades)
 
 use os_ui::{Font, Rect};
 

@@ -31,7 +31,7 @@ pub const LEVEL_NOTCH: f32 = 3.0 / 64.0;
 pub const MIN_LEN: u32 = 4;
 /// The highest key: higher picks become it.
 const TOP_KEY: u16 = 131;
-/// Random portamento's odds (a Lemon Studio choice near FL's measured one in eight, §6).
+/// Random portamento's odds (a Lemon Studio choice near the reference's one in eight, §6).
 const PORTA_ODDS: f64 = 1.0 / 8.0;
 
 /// Each Levels property in `quantize::LEVELS` order (PAN … PITCH): half its swing, its largest value and a new note's
@@ -134,7 +134,7 @@ impl Settings {
         self.variation = v.clamp(0.0, 1.0) * 2.0 * VAR_MAX - VAR_MAX;
     }
 
-    /// The hints (Lemon Studio's, §6: FL's controls write none): "Length: 1 step".
+    /// The hints (Lemon Studio's, §6: the reference's controls write none): "Length: 1 step".
     pub fn length_text(&self) -> String {
         format!("Length: {}", steps(self.length).trim_start_matches('+'))
     }

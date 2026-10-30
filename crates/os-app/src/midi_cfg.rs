@@ -81,7 +81,7 @@ pub fn set_output(name: &str, c: OutCfg) {
     write(&key("midi_out", name), &format!("{}|{}|{}", port_text(c.port), bit(c.sync), bit(c.notes_off)));
 }
 
-/// The OPTIONS menu's MIDI switches (spec §5), with FL's defaults.
+/// The OPTIONS menu's MIDI switches (spec §5), with their defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Switch {
     /// Enable MIDI remote control: off, every input message is ignored.

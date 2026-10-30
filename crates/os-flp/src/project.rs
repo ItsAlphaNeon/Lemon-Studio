@@ -792,7 +792,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
             .unwrap_or_default(),
         ppq: header.ppq().unwrap_or(96),
         // The stored tempo. The initial values' tempo record is not read into it: the app sets the initial values on
-        // opening in song mode, as FL does (spec: flp/engine-events.md "Event 216").
+        // opening in song mode (spec: flp/engine-events.md "Event 216").
         tempo: l.tempo.map(|i| f64::from(int(&events[i])) / 1000.0),
         info: ProjectInfo {
             title: text(l.title),
@@ -2417,7 +2417,7 @@ fn write_sampler(
     }
     if s.loop_points != o.loop_points {
         // Without loop points the record holds the sample's ends; removing the sample (the Sampler window's file box
-        // X) removes it, as in FL (spec: flp/events/channels.md "Loop points (event 251)").
+        // X) removes it (spec: flp/events/channels.md "Loop points (event 251)").
         let points = s.loop_points.unwrap_or([-1, i64::MAX]);
         let removed = s.loop_points.is_none() && ch.sample_path.is_none() && old.sample_path.is_some();
         match find(events, id::CH_LOOP_POINTS) {
@@ -3841,7 +3841,7 @@ fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -
 
 /// Builds a new FLP file from the model: project info, tempo, patterns (notes, control points, names, colors)
 /// and channels, in FL's order. FL fills in everything not written (mixer, playlist, per-channel settings), which
-/// this version does not write yet: see [`unsaved_parts`]. Opens in FL 26 (checked 2026-10-09).
+/// this version does not write yet: see [`unsaved_parts`]. Opens in FL 26.
 // spec: flp/container.md, flp/events/{project-info,channels,patterns}.md
 pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     let enc = TextEnc::Utf16;

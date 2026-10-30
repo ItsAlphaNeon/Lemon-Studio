@@ -15,8 +15,8 @@ use os_model::Note;
 use crate::arpeggiate::{Pattern, Row, TIME_MUL, TIME_MUL_NAMES};
 use crate::playlist::{Cmd, PItem};
 
-/// Wheel notches on the knobs' 0..1 positions (Lemon Studio's; FL's knobs take no wheel, §1): Time mul one step, the
-/// Levels 1/32.
+/// Wheel notches on the knobs' 0..1 positions (a Lemon Studio addition; the reference's knobs take no wheel, §1):
+/// Time mul one step, the Levels 1/32.
 pub const TIME_MUL_NOTCH: f32 = 1.0 / 6.0;
 pub const LEVEL_NOTCH: f32 = 1.0 / 32.0;
 
@@ -61,7 +61,7 @@ impl Settings {
 pub struct ChopPattern(pub Pattern);
 
 impl Default for ChopPattern {
-    /// FL's Default chopping pattern: four one-step C5 notes, a beat.
+    /// The Default chopping pattern: four one-step C5 notes, a beat.
     fn default() -> Self {
         let rows = (0..4).map(|i| Row { pos: 24 * i, len: 24, key: 60, colour: 0, slide: false, fine: 120, rel: 64, pan: 64, vel: 100, mod_x: 128, mod_y: 128 }).collect();
         ChopPattern(Pattern { name: "Default".into(), path: None, ppq: 96, rows })

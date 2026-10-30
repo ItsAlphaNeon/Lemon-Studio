@@ -28,15 +28,15 @@ pub const DIFFERENCE: usize = 6;
 pub const POSITION: usize = 7;
 
 /// The settings' ranges (spec "Settings"; stored values are used as they are). The difference output's range is the
-/// editor's (FL lists the routes of the track; 126 is the most a track can have).
+/// editor's (the reference's lists the routes of the track; 126 is the most a track can have).
 pub const RANGES: [(i32, i32); PARAMS] =
     [(-25600, 25600), (-25600, 25600), (-25600, 25600), (-25600, 25600), (-4096, 4096), (-4096, 4096), (0, 126), (-1, 1)];
 
-/// FL's "Default" preset (what a new Stereo Shaper holds): the levels at 100 %, nothing else, the effects "post".
+/// The "Default" preset (what a new Stereo Shaper holds): the levels at 100 %, nothing else, the effects "post".
 pub const DEFAULTS: [i32; PARAMS] = [0, 12800, 12800, 0, 0, 0, 0, 1];
 
-/// Effects positions. The editor's Off (-1, and any value below 0) plays as Pre: FL 2026's exports of such states put
-/// the delay and the phase before the matrix (spec "FL 2026 null test").
+/// Effects positions. The editor's Off (-1, and any value below 0) plays as Pre: the delay and the phase go before
+/// the matrix (spec "FL 2026 null test").
 pub const OFF: i32 = -1;
 pub const PRE: i32 = 0;
 pub const POST: i32 = 1;
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn states_round_trip_whatever_the_version() {
-        // FL's "Stereoize 3" preset.
+        // The "Stereoize 3" preset.
         let s = Settings { v: [0, 12800, 12800, 0, 1408, -2496, 0, 1] };
         let b = s.to_state();
         assert_eq!(b.len(), STATE_LEN);
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn the_matrix_and_the_difference() {
-        // FL's "LR to MS": mid on the left, side on the right, a half each.
+        // The "LR to MS" preset: mid on the left, side on the right, a half each.
         let mut e = StereoShaper::with_settings(44100, &Settings { v: [8076, 8076, -8076, 8076, 0, 0, 1, 1] });
         let mut buf = frames(&[0.5, 0.25], &[0.25, -0.5]);
         Effect::process(&mut e, &mut buf);

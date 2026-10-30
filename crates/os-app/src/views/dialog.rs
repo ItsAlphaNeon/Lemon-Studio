@@ -3,8 +3,8 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Message boxes, the file dialog (`dialog`, `filedlg`) and Manage shortcuts (`shortcuts`), painted over everything
-//! with a veil under them. Classic draws FL's message form as measured; Lemon draws the same layout in the Lemon
-//! design's rounded parts.
+//! with a veil under them. Classic draws the message form; Lemon draws the same layout in the Lemon design's rounded
+//! parts.
 // spec: ui/dialogs.md §3, §4; ui/settings-choices.md "Input: Manage shortcuts (2026-10-16)"
 
 use os_theme::design::lemon as brand;
@@ -26,7 +26,7 @@ const PANEL_LINE: u32 = 0x1a1d1e;
 /// Fields and lists, their outline.
 const WELL: u32 = 0x1b1e1f;
 const WELL_LINE: u32 = 0x141617;
-/// The focus border of a field (FL's Save as form, spec §2) and a text selection.
+/// The focus border of a field (the Save as form, spec §2) and a text selection.
 const FOCUS_BLUE: Color = Color::rgb(0x1367b8);
 const SEL_BLUE: Color = Color::rgb(0x0080ff);
 
@@ -290,7 +290,7 @@ pub(super) fn button(ui: &mut Ui, b: Rect, label: &str, main: bool, hov: bool, d
 // ---------------------------------------------------------------- time signature dialog
 
 /// PATTERNS > Set time signature... (spec: ui/pattern-time-signature.md §1): Numerator and Denominator value boxes, whose
-/// lists are the app's popups (`App::sig_list`), and Accept, in FL's 156 x 143 (wider when the labels need it).
+/// lists are the app's popups (`App::sig_list`), and Accept, in 156 x 143 (wider when the labels need it).
 fn sig_box(ui: &mut Ui, s: &State, m: &Modal, f: &SigForm) {
     let t = ui.t;
     let font = Font::new(13);
@@ -493,7 +493,7 @@ fn shortcut_list(ui: &mut Ui, f: &crate::shortcuts::Form, row: usize, b: Rect, d
     }
 }
 
-/// A section panel with its header tab (as the Settings window's groups and FL's Save as form).
+/// A section panel with its header tab (as the Settings window's groups and the Save as form).
 pub(super) fn section(ui: &mut Ui, p: Rect, title: &str) {
     let t = ui.t;
     let f = Font::new(13).bold();

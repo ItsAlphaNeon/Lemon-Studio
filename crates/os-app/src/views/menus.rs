@@ -435,9 +435,9 @@ pub fn item_at(menu: usize, i: usize) -> Option<&'static Item> {
 /// Menu bar font: Cuprum 18 px condensed (spec §3).
 pub const BAR_FONT: Font = Font::condensed(18, 6);
 
-/// Menu bar item layout: (x0, x1, average character width of the font). Left edges are the measured word
-/// starts. The words are as wide as the font makes them; where a text engine sets them wider than the slots
-/// were measured for, all eight are condensed one step further so that no word runs into the next.
+/// Menu bar item layout: (x0, x1, average character width of the font). Left edges are the word starts. The
+/// words are as wide as the font makes them; where a text engine sets them wider than the slots were laid out
+/// for, all eight are condensed one step further so that no word runs into the next.
 pub fn bar_layout(c: &mut os_ui::Canvas) -> [(f32, f32, f32); 8] {
     const X: [f32; 8] = [8.0, 35.0, 61.0, 88.0, 143.0, 176.0, 226.0, 266.0];
     const END: f32 = 300.0;
@@ -548,8 +548,8 @@ fn opens_sub(_menu: usize, item: &Item) -> bool {
 /// TOOLS > Switch all plugin editors to ▸ and Change declicking for selected channels to ▸, also in the channel rack's
 /// options menu (spec: ui/channel-rack.md §17).
 pub const ONE_CLICK_LABEL: &str = "Quick record";
-/// TOOLS > Macros: every Tesla in the mixer goes, after a question (FL: Remove all Edison instances; spec:
-/// plugins/tesla/README.md "Recording into Tesla from Lemon Studio").
+/// TOOLS > Macros: every Tesla in the mixer goes, after a question (in the reference: Remove all Edison instances;
+/// spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio").
 pub const REMOVE_TESLAS_LABEL: &str = "Remove all audio editor instances";
 pub const DUMP_LOG_LABEL: &str = "Capture MIDI into pattern";
 pub const CLEAR_LOG_LABEL: &str = "Clear log";
@@ -571,7 +571,7 @@ pub const CLIPS_SEL_LABEL: &str = "Switch selected audio clip channels to";
 pub fn sub_items(cmd: MenuCmd) -> Option<fn(&State) -> Vec<crate::playlist::PItem>> {
     let MenuCmd::Sub(sub) = cmd else { return None };
     Some(match sub {
-        // spec: ui/midi-files.md §1: FL's Import holds only MIDI file...
+        // spec: ui/midi-files.md §1: Import holds only MIDI file...
         Sub::Import => |_| vec![crate::playlist::PItem::new("MIDI file...", crate::playlist::Cmd::MidiImport(false))],
         // spec: ui/project-templates.md
         Sub::Templates => crate::project_files::template_items,
@@ -633,7 +633,7 @@ fn recent_rows() -> Vec<Recent> {
 }
 
 /// Whether FILE's Recent projects section goes before item `i` of `items`: the separator over Revert to last backup,
-/// so it follows the exports as in FL.
+/// so it follows the exports.
 fn recent_before(menu: usize, items: &[Item], i: usize) -> bool {
     menu == 0 && items.get(i + 1).is_some_and(|n| n.cmd == MenuCmd::RestoreBackup)
 }
@@ -747,7 +747,7 @@ pub fn pick(menu: usize, i: usize) -> Action {
     }
 }
 
-// Row heights follow the display scale like FL's popup menus (spec: ui/ui-scaling.md §2).
+// Row heights follow the display scale (spec: ui/ui-scaling.md §2).
 fn row_h(m: &os_ui::kit::menu::Metrics, it: &Item) -> f32 {
     match it.kind {
         Kind::Item => m.row,
@@ -777,7 +777,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
     let recent = if menu == 0 { recent_rows() } else { Vec::new() };
     let recent_h: f32 = recent.iter().map(|r| if *r == Recent::Head { mt.head } else { row }).sum();
     let has_recent = |items: &[Item]| (0..items.len()).any(|i| recent_before(menu, items, i));
-    // A column is FL's width, or wider when an entry needs it in this font: its label, then its shortcut or its ▸
+    // A column is its set width, or wider when an entry needs it in this font: its label, then its shortcut or its ▸
     // (EDIT grows with the step its entries name, "Undo piano roll delete note  Ctrl+Z").
     let mut col_ws = Vec::with_capacity(m.cols.len());
     for (ci, (w, items)) in m.cols.iter().enumerate() {
