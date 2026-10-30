@@ -221,6 +221,28 @@ impl Doc {
         true
     }
 
+    /// Replaces the range with what `f` makes of it (its channels, of any length): the markers after it move with the
+    /// audio, a selection becomes the new audio.
+    pub fn replace_range(&mut self, name: &str, f: impl FnOnce(&Sample, usize, usize) -> Vec<Vec<f32>>) -> bool {
+        let Some((a, b)) = self.range() else { return false };
+        let new = f(&self.sample, a, b);
+        let m = new.first().map_or(0, |c| c.len());
+        if m == 0 {
+            return false;
+        }
+        let selected = self.sel.is_some();
+        let s = self.edit(name);
+        for (c, v) in s.ch.iter_mut().zip(new) {
+            c.splice(a..=b, v);
+        }
+        s.shift_after(b + 1, m as isize - (b + 1 - a) as isize);
+        s.quantize();
+        if selected {
+            self.select(a, a + m - 1);
+        }
+        true
+    }
+
     /// Runs a tool on every region's range.
     pub fn tool_regions(&mut self, name: &str, f: impl Fn(&mut Sample, usize, usize)) -> bool {
         let regions: Vec<(usize, usize)> = self.sample.cues.iter().filter(|c| c.is_region()).map(|c| (c.pos, c.end())).collect();

@@ -17,12 +17,21 @@ use signalsmith_stretch::Stretch;
 /// Stretches the stereo buffer `left` / `right` (`rate` Hz) to `frames` frames with its pitch multiplied by
 /// `transpose`. The result starts where the input starts: the stretcher's latency is taken out.
 pub fn whole(left: &[f32], right: &[f32], rate: u32, frames: usize, transpose: f64) -> (Vec<f32>, Vec<f32>) {
+    whole_formant(left, right, rate, frames, transpose, None)
+}
+
+/// `whole`, with the formants kept where they were (corrected for the transposition) and then moved by `formant`
+/// (a frequency factor, 1 = kept), when it is set.
+pub fn whole_formant(left: &[f32], right: &[f32], rate: u32, frames: usize, transpose: f64, formant: Option<f64>) -> (Vec<f32>, Vec<f32>) {
     let n = left.len().min(right.len());
     if frames == 0 || n == 0 {
         return (vec![0.0; frames], vec![0.0; frames]);
     }
     let mut st = Stretch::preset_default(2, rate.max(1));
     st.set_transpose_factor(transpose as f32, None);
+    if let Some(f) = formant {
+        st.set_formant_factor(f as f32, true);
+    }
     // The stretcher needs an output of at least twice its latency: a shorter one is made from the input padded with
     // silence in proportion (the same ratio), and the padding's part of the output is cut off.
     let out_n = frames.max(2 * st.output_latency() + 1);
