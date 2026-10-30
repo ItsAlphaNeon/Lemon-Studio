@@ -174,6 +174,10 @@ and `...\CLAP`, where DAWs find them. To build and install them without starting
 **Notes**
 
 - A plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio.
+- `lemonstudio.exe` is a Windows GUI program: started from Explorer, the Start menu or a shortcut it opens no console
+  window. Under `cargo run` its output goes to the terminal as before. Started directly from a terminal it prints there
+  too, but the terminal does not wait for it: for `--render`, add `| Out-Default` in PowerShell (or use
+  `start /wait` in `cmd`) to wait until the render is done.
 - Settings, themes and presets live in `%APPDATA%\Lemon Studio`. `OPENSTUDIO_USER_DIR` overrides the folder.
 - Plugins are found in `%LOCALAPPDATA%\Programs\Common\{VST3,CLAP}`, `%COMMONPROGRAMFILES%\{VST3,CLAP}` and
   `CLAP_PATH`, plus any folder added in Settings > Plugins. VST2 plugins are found in the folder their installers
