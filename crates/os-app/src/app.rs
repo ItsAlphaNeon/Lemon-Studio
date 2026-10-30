@@ -1580,13 +1580,14 @@ impl App {
         if ext == "zip" {
             return crate::zipped::import(self, path);
         }
-        // A project in the layout used before version 24.2 gets a dialog that says what to do (spec:
-        // flp/events/channels.md "Version scope"), not just a line in the hint bar.
+        // A project in the layout used before version 24.2 is converted to the current one as it opens, and is saved in
+        // that layout (spec: flp/layouts.md "Converting to the newer layout"). One the conversion cannot handle gets a
+        // dialog that says so, not just a line in the hint bar.
         let mut legacy = None;
         let result = std::fs::read(&path)
             .map_err(|e| e.to_string())
             .and_then(|b| os_flp::FlpFile::parse(&b).map_err(|e| e.to_string()))
-            .and_then(|f| match os_flp::project::load(&f) {
+            .and_then(|mut f| match os_flp::project::upgrade(&mut f).and_then(|_| os_flp::project::load(&f)) {
                 Ok(p) => Ok((f, p)),
                 Err(os_flp::project::ProjectError::LegacyLayout(v)) => {
                     let e = os_flp::project::ProjectError::LegacyLayout(v.clone()).to_string();
@@ -1599,11 +1600,10 @@ impl App {
             let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
             let saved = if v.trim().is_empty() { "an older version".to_string() } else { format!("version {}", v.trim()) };
             let rest = format!(
-                " yet.\n\nIt was saved by {saved}. Projects saved before version 24.2 use an older channel layout that Lemon \
-                 Studio does not read yet.\n\nOpen the project in version 24.2 or later, save it again, then open the new copy \
-                 here."
+                ".\n\nIt was saved by {saved}, in an older file layout that Lemon Studio could not convert.\n\nOpen the project in \
+                 version 24.2 or later, save it again, then open the new copy here."
             );
-            self.tell(crate::dialog::Kind::Info, "Project not supported yet", crate::dialog::spans(&["Lemon Studio cannot open ", &name, &rest]));
+            self.tell(crate::dialog::Kind::Info, "Project not supported", crate::dialog::spans(&["Lemon Studio cannot open ", &name, &rest]));
         }
         match result {
             Ok((file, project)) => {
@@ -12220,9 +12220,9 @@ mod tests {
         assert!(app.state.settings.open && app.state.settings.tab == MIDI);
     }
 
-    /// A project in the layout used before version 24.2 is refused with a dialog that says what to do.
+    /// A project in the layout used before version 24.2 opens, converted to the current layout, and is saved in it.
     #[test]
-    fn older_projects_get_a_dialog() {
+    fn older_projects_open_converted() {
         let mut file = os_flp::project::create(&test_project()).expect("create");
         // Channel blocks without their end event: the older layout.
         for c in &mut file.chunks {
@@ -12233,18 +12233,15 @@ mod tests {
         let path = std::env::temp_dir().join(format!("lemon-legacy-{}.flp", std::process::id()));
         std::fs::write(&path, file.to_bytes().expect("bytes")).expect("write");
         let mut app = App::new(None);
-        let before = app.state.project.channels.len();
         app.open(path.clone());
         let _ = std::fs::remove_file(&path);
-        assert_eq!(app.state.dialogs.len(), 1);
-        let (title, text) = app.top_message().expect("a message box");
-        assert_eq!(title, "Project not supported yet");
-        assert!(text.contains("before version 24.2") && text.contains("lemon-legacy-"), "{text}");
-        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Could not open")));
-        assert_eq!(app.state.project.channels.len(), before, "the open project stays");
-        // Its Ok closes it (Enter presses the focused button).
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter), false, false);
-        assert!(!app.modal_open());
+        assert!(app.state.dialogs.is_empty() && !app.modal_open());
+        assert_eq!(app.state.project.channels.len(), test_project().channels.len());
+        // The file kept for saving is the converted one: every channel block has its end event again.
+        let open = app.state.file.as_ref().expect("the project's file");
+        let events: Vec<os_flp::Event> = open.events().cloned().collect();
+        assert_eq!(events.iter().filter(|e| e.id == 51).count(), test_project().channels.len());
+        assert!(!os_flp::project::is_legacy(&events));
     }
 
     /// Press `k` (a character or a named key) with the modifiers given.
@@ -12459,7 +12456,7 @@ mod tests {
                 (Kind::Question, "Confirm", spans(&["Save the changes to ", "Demo.flp", " before closing?"]), &[Answer::Yes, Answer::No, Answer::Cancel][..], "question"),
                 (Kind::Warning, "Confirm save as", spans(&["", "Demo.flp", " already exists.\nDo you want to replace it?"]), &[Answer::Yes, Answer::No][..], "warning"),
                 (Kind::Error, "Error", spans(&["The file doesn't exist or has been moved."]), &[Answer::Ok][..], "error"),
-                (Kind::Info, "Project not supported yet", spans(&["Lemon Studio cannot open ", "Old.flp", " yet.\n\nIt was saved by version 12.3. Projects saved before version 24.2 use an older channel layout that Lemon Studio does not read yet."]), &[Answer::Ok][..], "info"),
+                (Kind::Info, "Project not supported", spans(&["Lemon Studio cannot open ", "Old.flp", ".\n\nIt was saved by version 12.3, in an older file layout that Lemon Studio could not convert."]), &[Answer::Ok][..], "info"),
             ] {
                 let mut m = Msg::new(kind, title, text, buttons, Then::Nothing);
                 // As in the app, the replace question starts on No.

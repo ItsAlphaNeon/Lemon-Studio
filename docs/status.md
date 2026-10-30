@@ -230,9 +230,12 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 ## 🚧 Project files
 
 - Opens and saves `.flp` projects saved by FL Studio 24.2 and later, 25 and 26 included
+- Projects saved by FL Studio 10 to 24.1 open too: they are converted to the current layout as they open (channel
+  blocks, step sequencer dots as notes, playlist clip and track records, mixer places, send levels and slot
+  markers, a 105-track mixer grown to 127) and are saved in that layout, as the original does with an older file.
+  Fruity effects that an old project hosts through the plugin wrapper stay wrapped, and a 3x Osc saved before FL
+  Studio 21 opens with its envelope and filter settings at their defaults
 - Anything in a file that Lemon Studio does not understand yet is kept and written back unchanged
-- A project in the layout used before version 24.2 is refused with a dialog that explains how to re-save
-  it; support for older versions is on the roadmap
 - An opened project's samples load behind a progress panel, one file at a time or on up to 4 threads
   (General settings ▸ Advanced ▸ Threaded project sample loading)
 - A save that writes a file over General settings ▸ Hints and warnings ▸ Project data size warning (100 MB

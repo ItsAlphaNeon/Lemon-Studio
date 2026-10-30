@@ -59,8 +59,9 @@ young, so read the warning below before trying it on real work.
 >   nothing so far; they are drawn dim and say "not available yet".
 > - **No prebuilt binaries** will be published until Lemon Studio reaches a usable state. Until then it
 >   can only be built from source.
-> - **Only projects saved by FL Studio 24.2 or later open for now** (25 and 26 included). Older projects
->   are refused with a dialog that explains how to re-save them; support for them is on the roadmap.
+> - **Projects saved by FL Studio 10 or later open** (25 and 26 included). Projects older than 24.2 are
+>   converted to the current layout as they open and are saved in it, so the version that wrote them may not
+>   read the saved copy.
 > - **Project-file support is at a very early stage.** Do not overwrite your original `.flp` projects
 >   with files saved by Lemon Studio until this support is declared stable. Work on copies and keep backups.
 
@@ -79,7 +80,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Time-stretching | ✅ | All twelve stretch methods for samples and audio clips, played by one open-source stretcher |
 | Playback engine | 🚧 | Renders ahead of the audio device so edits do not cause dropouts; voice limits, cut groups, glides, layer channels; one audio thread for now |
 | Automation | 🚧 | Clips for channel, mixer and plugin parameters with every curve shape, their range and their LFO; channel volume and pan moves record into a pattern; not yet recording into automation clips |
-| Project files | 🚧 | Opens and saves projects from FL Studio 24.2 and later; older versions are on the roadmap. Keep backups |
+| Project files | 🚧 | Opens and saves projects from FL Studio 10 and later (older layouts are converted as they open). Keep backups |
 | Built-in instruments and effects | 🚧 | Instruments: Lemon Sampler (long samples can play straight from disk), Lemon Trio (three oscillators), Citrus (a six-operator synth that plays Sytrus patches), Lemon Slicer (a loop cut into slices that plays Fruity Slicer channels) and Lemon Drum Sampler (32 pads of velocity-layered samples that plays FPC kits). Effects: Lemon Parametric EQ (all of FL's quality modes: HQ+, HQ Enhanced, linear phase), Limiter, Reverb, Delay, Chorus, Stereo Shaper, Stereo Enhancer, Balance, Soft Clipper, Fast Distortion, Transient Processor, Filter, Flanger and Phaser, plus Pulp Filter (a pattern-controlled multi-filter) and Press (a multiband maximiser). All built in, and also VST3 and CLAP plugins for other DAWs; a project's Fruity Limiter slots play Lemon Limiter's sound, sidechain included |
 | Exporting audio | ✅ | Song, pattern or selection to WAV, FLAC, MP3 and OGG at once; bit depth, sample rate, interpolation, dither, mono, tails, stems and WAV markers; a pattern rendered as an audio clip (Quick render, Render and replace) |
 | MIDI file import / export | ✅ | Import into a new project, the open one or a piano roll channel (tracks, channels, tempo changes, time signatures, markers); export a pattern or the song's patterns |

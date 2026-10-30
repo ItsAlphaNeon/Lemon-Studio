@@ -343,11 +343,13 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// A state of the full size (shorter ones are completed with the defaults).
+/// A state of the full size: shorter ones (an older version's, 92 bytes in projects older than FL 21) are completed
+/// with the defaults and take the current version.
 fn normalized(mut b: Vec<u8>) -> Vec<u8> {
     let d = default_state();
     if b.len() < STATE_LEN {
         b.extend_from_slice(&d[b.len()..]);
+        set_field(&mut b, 0, STATE_VERSION);
     }
     b
 }
