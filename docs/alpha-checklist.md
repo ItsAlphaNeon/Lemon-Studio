@@ -67,8 +67,8 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   file, spare states, smart disable ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [ ] **Playlist right-click menus.** 36 entries greyed out on 2026-10-29: key markers, Add two..., quantized song
   jumps, the Start / Stop recording markers' punch ([playlist.rs](../crates/os-app/src/playlist.rs))
-- [ ] **Channel rack right-click menus.** 25 entries greyed out on 2026-10-29: Type in value, Burn selected loops to
-  pattern, instrument tracks, Advanced looping ([rack.rs](../crates/os-app/src/rack.rs))
+- [ ] **Channel rack right-click menus.** 14 entries greyed out on 2026-10-29: Type in value, Burn selected loops to
+  pattern, instrument tracks, Advanced looping, Loop starter, Change icon ([rack.rs](../crates/os-app/src/rack.rs))
 - [ ] **Main menu bar.** 19 of its 136 entries greyed out on 2026-10-29: 10 in TOOLS, 5 in VIEW, 4 in HELP
   ([menus.rs](../crates/os-app/src/views/menus.rs))
 - [x] **TOOLS ▸ Audio logger and Dump to audio editor.** Enabled (on by default, as in FL Studio) keeps the last 1 to

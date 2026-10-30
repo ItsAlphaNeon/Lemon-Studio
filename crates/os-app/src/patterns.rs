@@ -491,6 +491,8 @@ pub fn accept(s: &mut State) {
         BoxTarget::Name(_) => "Pattern name",
         BoxTarget::Transpose(_) | BoxTarget::Rack(crate::rack::RBox::Transpose) => "Transpose",
         BoxTarget::Rack(crate::rack::RBox::Channel(_)) => "Channel name",
+        BoxTarget::Rack(crate::rack::RBox::SwingMix) => "Channel settings",
+        BoxTarget::Rack(crate::rack::RBox::ColorSel) => "Channel color",
         BoxTarget::Rack(_) => "Channel group",
     };
     crate::control::edit(s, name, crate::control::command::Region::Project, accept_now);
@@ -554,6 +556,15 @@ fn set_color_now(s: &mut State, i: usize) {
                 if let Some(ch) = s.project.channels.get_mut(r) {
                     ch.color = col;
                 }
+            }
+            // Color selected ▸ All...: every selected channel, and the box closes.
+            Some(BoxTarget::Rack(crate::rack::RBox::ColorSel)) => {
+                for r in s.rack.sel.clone() {
+                    if let Some(ch) = s.project.channels.get_mut(r) {
+                        ch.color = col;
+                    }
+                }
+                s.pat_ui.name_box = None;
             }
             _ => return,
         }
