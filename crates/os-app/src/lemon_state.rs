@@ -8,7 +8,8 @@
 //! Scaling ▸, the channels' Show waveform preview and MIDI channel through checks, Set keyboard focus of all plugins
 //! to ▸ and the playlist tracks' locks to their clips. Each kind is one event; its payload starts with a layout version
 //! (1), and numbers are little-endian. Save writes them all (empty ones too, so a file saved again holds no stale
-//! state); an FLP target drops them with the rest of `LMex`. Open reads them back from a `.lemon` file only.
+//! state); an FLP target drops them with the rest of `LMex`. Open reads them back from a `.lemon` file only; an FLP's
+//! icons come from its icon numbers instead.
 
 use crate::app::State;
 use crate::playlist::{ICONS, IconOwner};
@@ -65,9 +66,10 @@ pub fn saved_form(s: &State, plugins: &Plugins) -> Vec<u8> {
 }
 
 /// Puts the state a `.lemon` file holds into `s` and `plugins` (a project just opened, its ids given). An FLP has
-/// none.
+/// none; its channels and mixer tracks show the icons their numbers stand for instead ([`from_flp`]).
 pub fn apply(s: &mut State, plugins: &mut Plugins, file: &FlpFile) {
     if !lemon::is_lemon(file) {
+        from_flp(s);
         return;
     }
     let read = |id| lemon::data(file, id).filter(|d| d.first() == Some(&LAYOUT));
@@ -146,6 +148,17 @@ pub fn apply(s: &mut State, plugins: &mut Plugins, file: &FlpFile) {
         pl.perf_plus_scene = flags & PLUS_SCENE != 0;
         pl.perf_velocity_subclips = flags & VELOCITY_SUBCLIPS != 0;
     }
+}
+
+/// The icons of an opened FLP: each channel's and mixer track's icon number (events 155 and 95) that has a picture in
+/// the Change icon... list ([`crate::playlist::FLP_ICONS`]). A `.lemon` file's icons are its own (event 193), so a
+/// choice made in Lemon Studio, None too, wins over the numbers its FLP events keep.
+fn from_flp(s: &mut State) {
+    let p = &s.project;
+    let channels = p.channels.iter().filter_map(|c| Some((IconOwner::Channel(c.id.0), crate::playlist::flp_icon(c.rack.icon)?)));
+    let tracks = p.mixer.iter().filter_map(|m| Some((IconOwner::Track(m.index), crate::playlist::flp_icon(u32::from(m.icon?))?)));
+    let found: Vec<_> = channels.chain(tracks).collect();
+    s.playlist.icons.extend(found);
 }
 
 /// [`lemon::ICONS`]: a u32 count, then per icon its owner's kind (u8: 0 a channel, 1 a mixer track, 2 an effect slot),
@@ -511,6 +524,59 @@ mod tests {
         assert!(s.project.arrangements.iter().flat_map(|a| &a.tracks).all(|t| t.clip_lock.is_none()));
         #[cfg(any(windows, target_os = "macos"))]
         assert!(editor_keys());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An FLP's icon numbers (a channel's event 155, a mixer track's event 95) open as the icons with the same picture
+    /// (`playlist::FLP_ICONS`), other numbers as none. Saved as .lemon, the FLP events keep the file's numbers and the
+    /// icons come back from event 193, so one taken off in Lemon Studio stays off.
+    #[test]
+    fn flp_icon_numbers_open_as_icons() {
+        let d = dir("flp_icons");
+        let path = d.join("Icons.flp");
+        let mut made = App::new(None);
+        made.state.project = crate::app::test_project();
+        made.state.control.settle(&mut made.state.project);
+        let m = &mut made.state.project.mixer;
+        m[2].icon = Some(75);
+        m[3].icon = Some(74); // the automation clip's nodes: no picture of Lemon Studio's
+        m[4].icon = Some(80);
+        made.save_to(path.clone());
+        let mut file = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
+        // The second channel's icon number, before its colour: 30, the microphone.
+        let ev = file.chunks.iter_mut().find_map(|c| match &mut c.body {
+            os_flp::ChunkBody::Events(v) => Some(v),
+            _ => None,
+        });
+        let ev = ev.unwrap();
+        let second = ev.iter().enumerate().filter(|(_, e)| e.id == 64).nth(1).unwrap().0;
+        let color = second + ev[second..].iter().position(|e| e.id == 128).unwrap();
+        ev.insert(color, Event::new(155, Value::U32(30)));
+        std::fs::write(&path, file.to_bytes().unwrap()).unwrap();
+        let mut app = App::new(None);
+        app.open(path);
+        let s = &app.state;
+        let (first, second) = (s.project.channels[0].id.0, s.project.channels[1].id.0);
+        assert_eq!(s.project.channels[1].rack.icon, 30);
+        assert_eq!(s.playlist.icons.get(&IconOwner::Channel(second)), Some(&Icon::Mic));
+        assert_eq!(s.playlist.icons.get(&IconOwner::Channel(first)), None);
+        assert_eq!(s.playlist.icons.get(&IconOwner::Track(2)), Some(&Icon::Wave));
+        assert_eq!(s.playlist.icons.get(&IconOwner::Track(4)), Some(&Icon::Kick));
+        assert_eq!(s.playlist.icons.len(), 3, "74 has no picture here");
+        assert_eq!(crate::playlist::window_icon(&s.project, &s.playlist.icons, 1), Some(Icon::Mic));
+        assert!(!app.unsaved(), "the icons are the opened state");
+        // Saved as .lemon with the track 2 icon taken off: the FLP events keep the original numbers.
+        app.state.playlist.icons.remove(&IconOwner::Track(2));
+        let lemon_path = d.join("Icons.lemon");
+        app.save_to(lemon_path.clone());
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&lemon_path).unwrap()).unwrap()).unwrap();
+        assert_eq!((saved.channels[1].rack.icon, saved.mixer[2].icon, saved.mixer[3].icon), (30, Some(75), Some(74)));
+        let mut back = App::new(None);
+        back.open(lemon_path);
+        let s = &back.state;
+        assert_eq!(s.playlist.icons.get(&IconOwner::Channel(s.project.channels[1].id.0)), Some(&Icon::Mic));
+        assert_eq!(s.playlist.icons.get(&IconOwner::Track(2)), None, "event 193 holds the choice, not event 95");
+        assert_eq!(s.playlist.icons.len(), 2);
         let _ = std::fs::remove_dir_all(&d);
     }
 

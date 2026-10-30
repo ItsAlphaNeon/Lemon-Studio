@@ -353,7 +353,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Opens `.lemon` files and `.flp` projects saved by FL Studio 24.2 and later, 25 and 26 included. A project opened
   from an FLP is never saved over: Save asks for a name, offering the FLP's name with `.lemon`. Backups, new versions,
   templates and zipped projects are `.lemon` too; FLP backups and templates still open. General ▸ System ▸
-  Associate project files covers `.lemon` along with `.flp`
+  Associate project files covers `.lemon` along with `.flp`. An opened FLP shows its channels' and mixer tracks' icons
+  where Lemon Studio has the same picture (drum, keys, microphone, wave, note, speaker, plug; the others show none);
+  a `.lemon` save keeps the FLP's icon numbers and stores the icons shown beside them
 - Projects saved by FL Studio 10 to 24.1 open too: they are converted to the current layout as they open (channel
   blocks, step sequencer dots as notes, playlist clip and track records, mixer places, send levels and slot
   markers, a 105-track mixer grown to 127) and are saved in that layout, as the original does with an older file.
