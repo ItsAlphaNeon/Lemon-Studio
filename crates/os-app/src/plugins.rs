@@ -96,6 +96,36 @@ impl Look {
 /// An instance whose count did not move is still looked at this often (anything a plugin did not report).
 const LOOK_EVERY: Duration = Duration::from_millis(250);
 
+
+/// How long a whole-state read waits for its moment (`lock_between_blocks`): two blocks of 256 frames and more.
+pub const STATE_WAIT: Duration = Duration::from_millis(12);
+/// How long the UI's per-tick work on an instance (its idle, its parameters, a keyboard's screen) waits for its moment:
+/// one block of 256 frames, so it nearly always comes, and a tick skipped otherwise.
+pub const TICK_WAIT: Duration = Duration::from_millis(6);
+
+/// Locks `m` for a UI call that may hold it a few ms: right after the audio thread processed it (`meter`), when it will
+/// not need it again for most of a block (it gives up on an instance it waits for over 2 ms: a late plugin), else at
+/// once when nothing is processing it. Waits up to `wait` for that moment; `None` when it did not come.
+pub fn lock_between_blocks<'a, T: ?Sized>(m: &'a std::sync::Mutex<T>, meter: Option<&os_host::Meter>, wait: Duration) -> Option<std::sync::MutexGuard<'a, T>> {
+    const JUST: Duration = Duration::from_millis(1);
+    const IDLE: Duration = Duration::from_millis(50);
+    let t0 = Instant::now();
+    loop {
+        let free = match meter.and_then(|m| m.since_processed()) {
+            None => true,
+            Some(d) => d <= JUST || d >= IDLE,
+        };
+        if free {
+            // The audio thread holds it only while processing: a short wait if it just started another block.
+            return m.lock().ok();
+        }
+        if t0.elapsed() >= wait {
+            return None;
+        }
+        std::thread::sleep(Duration::from_micros(200));
+    }
+}
+
 impl Hosted {
     /// A newly hosted instance, without a window.
     pub fn new(plugin: SharedPlugin) -> Hosted {
@@ -124,9 +154,27 @@ impl Hosted {
         }
     }
 
+    /// Locks the instance to read its whole state (a save, an autosave): between two of its blocks
+    /// ([`lock_between_blocks`]), else once the audio thread lets go of it. Never fails for want of the moment.
+    pub fn lock_for_state(&self) -> Option<std::sync::MutexGuard<'_, dyn os_host::Plugin + 'static>> {
+        self.lock_between_blocks().or_else(|| self.plugin.lock().ok())
+    }
+
+    /// Locks the instance for a UI call that may hold it a few ms (reading its state), between two of its blocks
+    /// ([`lock_between_blocks`]).
+    pub fn lock_between_blocks(&self) -> Option<std::sync::MutexGuard<'_, dyn os_host::Plugin + 'static>> {
+        lock_between_blocks(&self.plugin, self.meter.as_deref(), STATE_WAIT)
+    }
+
     /// Whether a per-tick job last done at `last` should lock the instance now, and the look to remember if it does:
     /// its attention count moved, its editor is open, it has no count, or `LOOK_EVERY` passed. Otherwise the UI leaves
     /// it to the audio thread (spec: audio/implementing.md "Playing live").
+    /// How often the instance has asked for attention (a parameter changed in its window, a state to save...); None
+    /// for one that never says.
+    pub fn attention_count(&self) -> Option<u64> {
+        self.attention.as_ref().map(|a| a.count())
+    }
+
     pub fn due(&self, last: Look) -> Option<Look> {
         let now = Instant::now();
         let Some(a) = &self.attention else {
@@ -578,7 +626,7 @@ impl Plugins {
         if h.owner.is_none() || h.stopped() {
             return;
         }
-        let Some((uid, state)) = h.plugin.lock().ok().and_then(|p| Some((p.desc().uid(), p.save_state()?))) else { return };
+        let Some((uid, state)) = h.lock_for_state().and_then(|p| Some((p.desc().uid(), p.save_state()?))) else { return };
         let owner = h.owner;
         self.stash.retain(|e| e.0 .0 != owner.0);
         self.stash.push((owner, fx, uid, state));
@@ -686,8 +734,9 @@ impl Plugins {
 
     /// The saved state of the instance under `key`, in its format's own bytes.
     pub fn state(&self, key: usize) -> Option<Vec<u8>> {
-        self.hosted.get(&key)?.plugin.lock().ok()?.save_state()
+        self.hosted.get(&key)?.lock_for_state()?.save_state()
     }
+
 
     /// Marks the instance under `key`, just created, as a copy standing in for a plugin in another format
     /// (`Hosted::stand_in`).
@@ -757,7 +806,7 @@ impl Plugins {
     /// `None` when the slot hosts something else.
     pub fn eq_file_state(&self, key: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&key)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != LEMON_EQ {
             return None;
         }
@@ -767,7 +816,7 @@ impl Plugins {
     /// Edison's state (the project file's form) of the Tesla hosted under `key`; `None` for any other plugin.
     pub fn edison_file_state(&self, key: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&key)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != TESLA {
             return None;
         }
@@ -778,7 +827,7 @@ impl Plugins {
     /// plugin, and for one on its starting state that was never edited.
     pub fn love_philter_file_state(&self, key: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&key)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != PULP_FILTER {
             return None;
         }
@@ -789,7 +838,7 @@ impl Plugins {
     /// for one on its starting state that was never edited.
     pub fn maximus_file_state(&self, key: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&key)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != PRESS {
             return None;
         }
@@ -801,7 +850,7 @@ impl Plugins {
     pub fn recreation_file_state(&self, key: usize, file: &str) -> Option<Vec<u8>> {
         let lemon = recreation_of(file)?;
         let h = self.hosted.get(&key)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != lemon || !crate::project_plugins::is_builtin(p.desc()) {
             return None;
         }
@@ -893,7 +942,7 @@ impl Plugins {
     /// The sample file a Lemon Sampler instance holds (its persisted `sample-path`), `Some("")` when it has none.
     pub fn sampler_path(&self, row: usize) -> Option<String> {
         let h = self.hosted.get(&row)?;
-        let blob = h.plugin.lock().ok()?.save_state()?;
+        let blob = h.lock_for_state()?.save_state()?;
         sample_path_of(&blob)
     }
 
@@ -1189,7 +1238,7 @@ impl Plugins {
         for (&row, h) in &mut self.hosted {
             let look = h.due(h.seen);
             let mut menu: Option<(os_host::Menu, (i32, i32))> = None;
-            if let Some(mut p) = look.and_then(|_| h.plugin.try_lock().ok()) {
+            if let Some(mut p) = look.and_then(|_| lock_between_blocks(&h.plugin, h.meter.as_deref(), TICK_WAIT)) {
                 h.seen = look.unwrap_or(h.seen);
                 // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
                 if let (Some(code), false) = (p.stopped(), h.stop_told) {
@@ -4048,5 +4097,80 @@ mod tests {
             pl.drop_key(k);
         }
         pump(&mut pl, 100);
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+
+    /// A UI call holding a plugin 3 ms every 40 ms beside an audio thread that processes it every 5.33 ms (256 frames at
+    /// 48 kHz) and gives up after waiting 2 ms, as the engine does: taken at any moment it makes the plugin late now and
+    /// then; taken between two blocks (`lock_between_blocks`), never. Timing on the real clock for 3 s per way:
+    /// `cargo test -p os-app --bin lemonstudio long_ui_calls_between_blocks -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn long_ui_calls_between_blocks_make_no_plugin_late() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::{Arc, Mutex};
+        fn run(between: bool) -> u32 {
+            let plugin = Arc::new(Mutex::new(()));
+            let meter = Arc::new(os_host::Meter::default());
+            let (late, stop) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicBool::new(false)));
+            let audio = {
+                let (plugin, meter, late, stop) = (plugin.clone(), meter.clone(), late.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let (period, start) = (Duration::from_micros(5333), Instant::now());
+                    for n in 1u32.. {
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let waited = Instant::now();
+                        let got = loop {
+                            match plugin.try_lock() {
+                                Ok(g) => break Some(g),
+                                Err(_) if waited.elapsed() >= Duration::from_millis(2) => break None,
+                                Err(_) => std::thread::yield_now(),
+                            }
+                        };
+                        match got {
+                            Some(_g) => {
+                                let t0 = Instant::now();
+                                while t0.elapsed() < Duration::from_micros(800) {
+                                    std::hint::spin_loop();
+                                }
+                                meter.add(t0.elapsed());
+                            }
+                            None => {
+                                late.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        let next = start + period * n;
+                        if let Some(d) = next.checked_duration_since(Instant::now()) {
+                            std::thread::sleep(d);
+                        }
+                    }
+                })
+            };
+            // Playing already: before its first block nothing processes the instance (`since_processed` is `None`).
+            while meter.since_processed().is_none() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs(3) {
+                let g = if between { lock_between_blocks(&plugin, Some(&meter), STATE_WAIT) } else { plugin.lock().ok() };
+                if let Some(_g) = g {
+                    std::thread::sleep(Duration::from_millis(3));
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            stop.store(true, Ordering::Relaxed);
+            audio.join().unwrap();
+            late.load(Ordering::Relaxed)
+        }
+        let (any, between) = (run(false), run(true));
+        println!("late blocks in 3 s: {any} with the lock taken at any moment, {between} between blocks");
+        assert!(any > 0, "the plain lock makes it late (else the test shows nothing)");
+        assert_eq!(between, 0);
     }
 }
