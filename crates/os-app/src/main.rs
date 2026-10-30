@@ -8,6 +8,9 @@
 // Plugin windows exist on Windows, Linux and macOS (`plugin_window`): elsewhere what only they reach (the Misc tab, the
 // window and preset menus, their requests) is built but unused. Those builds still report real dead code.
 #![cfg_attr(not(plugin_windows), allow(dead_code))]
+// Windows: a GUI program, so started from Explorer, the Start menu or a shortcut it opens no console window beside its
+// own. Started from a terminal it still writes there (`attach_console`).
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod app;
 mod arrange;
@@ -1774,7 +1777,22 @@ fn wake_ui() {
     }
 }
 
+/// Windows: a GUI program gets a console only through handles its parent passes it (`cargo run`, a pipe, the plugin
+/// scanner's parent). Without them, the terminal it was started from (if any) takes its output, so `--render` and the
+/// errors printed before the window opens still show there.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    unsafe {
+        if GetStdHandle(STD_OUTPUT_HANDLE).is_null() && GetStdHandle(STD_ERROR_HANDLE).is_null() {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    attach_console();
     // Linux: a stream through PipeWire's ALSA plugin (exclusive mode on a PipeWire system) is named "PipeWire ALSA
     // [lemonstudio]" unless told otherwise; it is "Lemon Studio", as other programs' are named, unless the user set it.
     #[cfg(target_os = "linux")]
