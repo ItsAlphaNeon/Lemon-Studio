@@ -259,6 +259,30 @@ pub struct RackUi {
     pub played: bool,
     /// The selected channel at the last tick (`filter_tick`).
     pub filter_seen: Option<usize>,
+    /// The channel each live note source is locked to (§18 Receive notes from ▸), indexed by [`NoteSrc`]; a source
+    /// without one plays the focused channel. Not saved (Lemon Studio's choice: the original's file was not measured).
+    pub note_lock: [Option<usize>; 2],
+}
+
+/// A live note source a channel can be locked to (§18 Receive notes from ▸).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteSrc {
+    /// The computer keyboard's note keys (spec: ui/typing-keyboard.md).
+    Typing,
+    /// The Touch controller's pads and keys (spec: ui/touch-controller.md).
+    Touch,
+}
+
+impl NoteSrc {
+    pub const ALL: [NoteSrc; 2] = [NoteSrc::Typing, NoteSrc::Touch];
+
+    /// The entry's label, also the hint's "locked to" name.
+    pub fn label(self) -> &'static str {
+        match self {
+            NoteSrc::Typing => "Computer keyboard",
+            NoteSrc::Touch => "Touch controller",
+        }
+    }
 }
 
 impl Default for RackUi {
@@ -293,11 +317,17 @@ impl Default for RackUi {
             wheel_grab: None,
             played: false,
             filter_seen: None,
+            note_lock: [None; 2],
         }
     }
 }
 
 impl RackUi {
+    /// The row `src`'s notes play: the channel locked to it, else the focused one (`focused`).
+    pub fn note_row(&self, src: NoteSrc, focused: usize) -> usize {
+        self.note_lock[src as usize].unwrap_or(focused)
+    }
+
     pub fn select_only(&mut self, r: usize) {
         self.sel.clear();
         self.sel.insert(r);
@@ -323,6 +353,9 @@ impl RackUi {
         self.pre_solo = None; // rows renumbered: unsolo turns everything on
         self.loop_len = self.loop_len.iter().filter_map(|(&r, &l)| m(r).map(|n| (n, l))).collect();
         self.loop_unit = self.loop_unit.iter().filter_map(|(&r, &u)| m(r).map(|n| (n, u))).collect();
+        for l in &mut self.note_lock {
+            *l = l.and_then(m);
+        }
         if let Some(f) = self.fill.as_mut() {
             match m(f.row) {
                 Some(r) => f.row = r,
@@ -1500,6 +1533,10 @@ pub enum RCmd {
     Colorful,
     /// Tick or untick a check option of `LIVE_OPTS`.
     Opt(&'static str),
+    /// Receive notes from ▸ a source (§18): the channel takes that source's notes, whichever channel is focused.
+    ReceiveFrom(usize, NoteSrc),
+    /// Receive notes from ▸ Unlock (§18): the channel's locks end; their sources play the focused channel again.
+    Unlock(usize),
 }
 
 fn it(label: impl Into<std::borrow::Cow<'static, str>>, c: RCmd) -> PItem {
@@ -1682,6 +1719,19 @@ fn set_declick(app: &mut App, rows: &[usize], mode: u8) {
     app.state.piano.dirty = true;
 }
 
+/// Sources `srcs` play row `row` from now on (`None`: the focused channel). Notes they hold end first, so none hangs
+/// on the channel they started on.
+fn lock_notes(app: &mut App, srcs: &[NoteSrc], row: Option<usize>) {
+    for &src in srcs {
+        match src {
+            NoteSrc::Typing => app.typing_release_all(),
+            NoteSrc::Touch => app.touch_hold(None),
+        }
+        app.state.rack.note_lock[src as usize] = row.filter(|&r| r < app.state.project.channels.len());
+    }
+    app.invalidate();
+}
+
 /// Lemon Sampler's declick mode parameter (its index is the mode).
 const SAMPLER_DECLICK: &str = "Click removal";
 
@@ -1726,12 +1776,26 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("Rotate left", RCmd::Rotate(r, -1)).key("Shift+Ctrl+Left"),
         it("Rotate right", RCmd::Rotate(r, 1)).key("Shift+Ctrl+Right"),
         PItem::sep(),
-        PItem::not_yet("MIDI channel through").mark(Mark::Check(false)),
-        PItem::sub("Receive notes from", vec![PItem::new("Unlock", Cmd::Nothing).off(), PItem::not_yet("Computer keyboard").mark(Mark::Check(true))]),
+        PItem::not_yet("MIDI channel through").mark(Mark::Check(true)),
+        PItem::sub("Receive notes from", receive_items(s, r)),
         PItem::not_yet("Create instrument..."),
         PItem::sub("Burn MIDI to", vec![PItem::not_yet("Current pattern"), PItem::not_yet("New pattern")]),
     ]);
     Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// Receive notes from ▸ (§18): Unlock, enabled while the channel holds a lock, then the sources, each ticked while its
+/// notes reach this channel: locked to it, or locked to none (they follow the focus). Lemon Studio has no per-device
+/// MIDI locks yet, and the Touch controller is one entry where the original has a Touch Keyboard ▸ submenu.
+fn receive_items(s: &State, r: usize) -> Vec<PItem> {
+    let locks = &s.rack.note_lock;
+    let unlock = it("Unlock", RCmd::Unlock(r));
+    let mut v = vec![if locks.contains(&Some(r)) { unlock } else { unlock.off() }];
+    v.extend(NoteSrc::ALL.map(|src| {
+        let lock = locks[src as usize];
+        it(src.label(), RCmd::ReceiveFrom(r, src)).mark(Mark::Check(lock.is_none_or(|l| l == r)))
+    }));
+    v
 }
 
 /// Burn selected loops to pattern (§17): the loop menu's Burn selected channels (§7), enabled while loop mode is on and
@@ -2020,6 +2084,11 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             app.state.raise(Win::PianoRoll);
         }
         RCmd::DeclickSel(mode) => set_declick(app, &sel, mode),
+        RCmd::ReceiveFrom(r, src) => lock_notes(app, &[src], Some(r)),
+        RCmd::Unlock(r) => {
+            let held: Vec<NoteSrc> = NoteSrc::ALL.into_iter().filter(|&src| app.state.rack.note_lock[src as usize] == Some(r)).collect();
+            lock_notes(app, &held, None);
+        }
         RCmd::StretchClips(all, method) => ask_stretch(app, all, method, &sel),
         // spec: ui/plugin-window.md "Docking and the window menu"
         #[cfg(plugin_windows)]
@@ -2330,7 +2399,9 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::PianoRoll(_)
         | RCmd::DeclickSel(_)
         | RCmd::DetachAll(_)
-        | RCmd::StretchClips(..) => None,
+        | RCmd::StretchClips(..)
+        | RCmd::ReceiveFrom(..)
+        | RCmd::Unlock(_) => None,
     };
     // Channels let go without asking (`ask_delete`) are deleted now.
     let msg = match app.state.rack.delete_now.take() {
@@ -4003,5 +4074,82 @@ mod tests {
         for p in [plain, both] {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    /// The channel menu's Receive notes from ▸ for row `r`: (label, enabled, mark) of each entry.
+    fn receive(app: &App, r: usize) -> Vec<(String, bool, Mark)> {
+        let m = channel_menu(&app.state, r, 0.0, 0.0);
+        let sub = m.items.iter().find(|i| i.label == "Receive notes from").expect("Receive notes from ▸");
+        sub.children.iter().map(|i| (i.label.to_string(), i.enabled, i.mark)).collect()
+    }
+
+    fn lock_app() -> App {
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        app.state.toggles.push("typing");
+        app.state.selected_channel = 0;
+        app
+    }
+
+    /// Receive notes from ▸ Computer keyboard (§18, measured on the original 2026-10-30): the locked channel takes the
+    /// typing keyboard's notes whichever channel is focused, the focused one no longer does, the hint names the lock,
+    /// and the lock follows the channel when the rows move.
+    #[test]
+    fn computer_keyboard_lock_takes_the_typing_notes() {
+        use winit::keyboard::KeyCode;
+        let mut app = lock_app();
+        let unlocked = receive(&app, 1);
+        assert_eq!(unlocked[0], ("Unlock".to_string(), false, Mark::None), "nothing to unlock yet");
+        assert_eq!(unlocked[1], ("Computer keyboard".to_string(), true, Mark::Check(true)), "notes follow the focus");
+        run(&mut app, RCmd::ReceiveFrom(1, NoteSrc::Typing));
+        assert_eq!(receive(&app, 1)[1].2, Mark::Check(true));
+        assert_eq!(receive(&app, 0)[1].2, Mark::Check(false), "the focused channel no longer gets them");
+        assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
+        let index = |app: &App, r: usize| app.state.project.channels[r].index;
+        assert_eq!(app.state.piano.typed, [(index(&app, 1), 48)], "the note plays the locked channel");
+        let name = app.state.project.channels[1].name.clone().unwrap_or_else(|| format!("Channel {}", index(&app, 1) + 1));
+        assert_eq!(app.state.message.as_deref(), Some(format!("{name} (locked to computer keyboard)").as_str()));
+        app.typing_key(KeyCode::KeyZ, false, false, false);
+        assert!(app.state.piano.typed.is_empty());
+
+        app.state.rack.select_only(1);
+        run(&mut app, RCmd::MoveSel(1));
+        assert_eq!(app.state.rack.note_lock[NoteSrc::Typing as usize], Some(2), "the lock moves with its channel");
+        app.typing_key(KeyCode::KeyX, true, false, false);
+        assert_eq!(app.state.piano.typed, [(index(&app, 2), 50)]);
+    }
+
+    /// Receive notes from ▸ Touch controller (§18; Lemon Studio's entry where the original has a Touch Keyboard ▸
+    /// submenu): the controller's pads play the locked channel, and locking ends a note it holds.
+    #[test]
+    fn touch_controller_lock_takes_the_touch_notes() {
+        let mut app = lock_app();
+        app.touch_hold(Some(60));
+        assert_eq!(app.state.touch.held, Some((60, 0)), "the focused channel plays");
+        run(&mut app, RCmd::ReceiveFrom(2, NoteSrc::Touch));
+        assert_eq!(app.state.touch.held, None, "the held note ends");
+        assert_eq!(receive(&app, 2)[2], ("Touch controller".to_string(), true, Mark::Check(true)));
+        assert_eq!(receive(&app, 2)[1].2, Mark::Check(true), "the computer keyboard still follows the focus");
+        app.touch_hold(Some(62));
+        assert_eq!(app.state.touch.held, Some((62, 2)), "the locked channel plays");
+        app.touch_hold(None);
+    }
+
+    /// Receive notes from ▸ Unlock (§18, measured on the original 2026-10-30): enabled only on a locked channel; it ends
+    /// that channel's locks, and the sources play the focused channel again. A deleted channel's lock ends too.
+    #[test]
+    fn unlock_ends_the_channel_locks() {
+        let mut app = lock_app();
+        run(&mut app, RCmd::ReceiveFrom(1, NoteSrc::Typing));
+        run(&mut app, RCmd::ReceiveFrom(1, NoteSrc::Touch));
+        assert_eq!(receive(&app, 1)[0], ("Unlock".to_string(), true, Mark::None));
+        assert!(!receive(&app, 2)[0].1, "greyed on a channel without a lock");
+        run(&mut app, RCmd::Unlock(1));
+        assert_eq!(app.state.rack.note_lock, [None, None]);
+        assert_eq!(app.state.rack.note_row(NoteSrc::Typing, 3), 3, "the focused channel plays again");
+
+        run(&mut app, RCmd::ReceiveFrom(2, NoteSrc::Typing));
+        app.state.rack.remap(&|r| if r == 2 { None } else { Some(r) });
+        assert_eq!(app.state.rack.note_lock[NoteSrc::Typing as usize], None, "removed with its channel");
     }
 }

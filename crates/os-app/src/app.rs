@@ -7490,10 +7490,12 @@ impl App {
             return true; // auto-repeat
         }
         let key = 48 + semi + 12 * self.typing_octave;
-        let row = self.state.selected_channel;
+        // A channel locked to the computer keyboard takes its notes (spec: ui/channel-rack.md §18 Receive notes from).
+        let row = self.state.rack.note_row(crate::rack::NoteSrc::Typing, self.state.selected_channel);
         if !(0..=127).contains(&key) || row >= self.state.project.channels.len() {
             return true;
         }
+        self.locked_hint(crate::rack::NoteSrc::Typing, row);
         self.sync_live();
         let key = key as u16;
         self.transport.note_on(row, key, TYPING_VELOCITY);
@@ -7502,6 +7504,18 @@ impl App {
         self.typing_lit_changed();
         self.key_tap(); // spec: ui/tempo-tapper.md §8
         true
+    }
+
+    /// A note of `src` plays its locked channel `row` while another one is focused: the hint bar says so, as the
+    /// original's did ("808 Clap (Locked:Typing keyboard)", measured 2026-10-30).
+    pub(crate) fn locked_hint(&mut self, src: crate::rack::NoteSrc, row: usize) {
+        if row == self.state.selected_channel {
+            return;
+        }
+        let Some(c) = self.state.project.channels.get(row) else { return };
+        let name = c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1));
+        self.state.message = Some(format!("{name} (locked to {})", src.label().to_lowercase()));
+        self.invalidate();
     }
 
     /// The live stream needs the project before the first live note.

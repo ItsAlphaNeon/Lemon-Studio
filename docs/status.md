@@ -21,6 +21,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   display filter, Focus selected channel on playback, Mute removed steps (a removed step keeps its note, muted), Show
   complete piano roll preview, Show a mute button on the piano roll preview and the loop button's Always show advanced
   controls
+- A channel's Receive notes from ▸ locks it to the computer keyboard or the Touch controller: their notes play it
+  whichever channel is selected (a padlock on its name button; Unlock ends the lock)
 - Advanced looping (the loop button's third loop type): each row's loop box takes a loop point, Step, Beat or Bar,
   and the row loops at the end of its last used step rounded up to it
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)

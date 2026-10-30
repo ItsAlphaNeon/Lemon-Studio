@@ -381,13 +381,19 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         };
         let label = ch.name.clone().unwrap_or_else(|| format!("Channel {}", ch.index + 1));
         let nf = Font::new(14);
-        let label = shorten(ui, nf, &label, nb.w - 8.0);
+        // A channel locked to a note source shows a padlock at the button's right end (§18 Receive notes from ▸).
+        let locked = s.rack.note_lock.contains(&Some(i));
+        let tb = if locked { Rect::new(nb.x, nb.y, nb.w - 12.0, nb.h) } else { nb };
+        let label = shorten(ui, nf, &label, tb.w - 8.0);
         ui.c.push_clip(nb.inset(1.0));
         if s.rack.align_left {
             let lh = ui.c.line_height(nf);
             ui.c.text(nf, nb.x + if lemon { 9.0 } else { 5.0 }, (nb.cy() - lh / 2.0).round(), col, &label);
         } else {
-            ui.c.text_center(nf, nb, col, &label);
+            ui.c.text_center(nf, tb, col, &label);
+        }
+        if locked {
+            icons::draw(ui.c, Icon::Lock, Rect::new(nb.right() - 17.0, nb.cy() - 6.0, 12.0, 12.0), col);
         }
         ui.c.pop_clip();
         // Activity / select slot (§8, §16).

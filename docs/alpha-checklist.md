@@ -84,11 +84,11 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   enabled: the picker's Change icon; the plugin window's ▸ menu: Link all parameters..., Allow threaded processing,
   Smart disable, Change icon..., Save channel state as... and Browse channel states, and in an effect slot's window
   also Piano roll, Change color... and Random color ([playlist.rs](../crates/os-app/src/playlist.rs))
-- [ ] **Channel rack right-click menus.** 18 of the rack's own entries greyed out on 2026-10-29, counted entry by
-  entry after 17 more were enabled: Loop starter and its 3 playlist-track options, Restretch all, Detached,
-  Switch smart disable for all plugins, Change icon, Show waveform preview, Patcherize, Assign to new instrument
-  track, Auto fill, MIDI channel through, Receive notes from ▸ Unlock and Typing keyboard, Create instrument, Burn
-  MIDI to ▸ (2). The knob, mixer box and LED menus' Automation and Remote control groups add 23 more (events in a new
+- [ ] **Channel rack right-click menus.** 16 of the rack's own entries greyed out on 2026-10-30, counted entry by
+  entry after 19 more were enabled (Receive notes from ▸ Unlock and Computer keyboard on 2026-10-30): Loop starter
+  and its 3 playlist-track options, Restretch all, Detached, Switch smart disable for all plugins, Change icon, Show
+  waveform preview, Patcherize, Assign to new instrument track, Auto fill, MIDI channel through, Create instrument,
+  Burn MIDI to ▸ (2). The knob, mixer box and LED menus' Automation and Remote control groups add 23 more (events in a new
   window or the piano roll, initial values, automation clips, controller links) ([rack.rs](../crates/os-app/src/rack.rs))
 - [ ] **Main menu bar.** 8 of its 136 entries greyed out on 2026-10-30, counted entry by entry after Save audio
   clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics and TOOLS > Set up for live
