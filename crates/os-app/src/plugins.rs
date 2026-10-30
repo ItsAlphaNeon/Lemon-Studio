@@ -261,6 +261,8 @@ pub struct Plugins {
     /// A plugin menu's Scaling ▸ (Lemon Studio's design, session only), by `hosted` key: the scale its window and
     /// editor are drawn at instead of the program's (`scale_for`).
     pub editor_scales: BTreeMap<usize, f32>,
+    /// The containers playing mixer slots, by `fx_key` (`crate::container`).
+    pub containers: BTreeMap<usize, crate::container::Live>,
 }
 
 /// How many gone instances `Plugins::stash` keeps.
@@ -530,9 +532,16 @@ impl Plugins {
 
     /// Creates effect `index` (of `effects`) in mixer track `track`'s slot `slot`, replacing what was there.
     pub fn create_effect(&mut self, track: u16, slot: u8, index: usize, state: Option<&[u8]>) -> Result<String, String> {
+        self.drop_key(fx_key(track, slot));
+        let (plugin, name) = self.instantiate_effect(index, state)?;
+        self.hosted.insert(fx_key(track, slot), Hosted::new(plugin));
+        Ok(name)
+    }
+
+    /// An instance of effect `index` (of `effects`) started from `state`, activated at the device rate, not hosted under
+    /// any key (a container's member, `crate::container`).
+    pub fn instantiate_effect(&mut self, index: usize, state: Option<&[u8]>) -> Result<(SharedPlugin, String), String> {
         let a = self.effects.get(index).ok_or("no such effect")?.clone();
-        let key = fx_key(track, slot);
-        self.drop_key(key);
         self.native_check(&a.desc)?;
         let plugin = a.lib.clone().create(&a.desc.id)?;
         let mut p = plugin.lock().map_err(|_| "plugin busy")?;
@@ -546,8 +555,7 @@ impl Plugins {
             return Err(format!("{} could not start", a.desc.name));
         }
         drop(p);
-        self.hosted.insert(key, Hosted::new(plugin));
-        Ok(a.desc.name)
+        Ok((plugin, a.desc.name))
     }
 
     /// The user just added the instance under `key` (a new channel's plugin, a new effect in a slot): its window opens
@@ -653,11 +661,14 @@ impl Plugins {
 
     /// The mixer slot instances for the transport: (track, slot, effect).
     pub fn effects(&self) -> Vec<(usize, usize, SharedEffect)> {
-        self.hosted
-            .range(FX_KEY..)
-            .map(|(&k, h)| {
+        let hosted = self.hosted.range(FX_KEY..).map(|(&k, h)| (k, h.plugin.clone() as SharedEffect));
+        // A container's chain plays its slot (after a hosted instance still under the key, which it replaces).
+        let chains = self.containers.iter().map(|(&k, c)| (k, c.fx.clone() as SharedEffect));
+        hosted
+            .chain(chains)
+            .map(|(k, fx)| {
                 let (t, s) = fx_of(k).unwrap();
-                (usize::from(t), usize::from(s), h.plugin.clone() as SharedEffect)
+                (usize::from(t), usize::from(s), fx)
             })
             .collect()
     }
@@ -888,6 +899,7 @@ impl Plugins {
             self.close_window(row);
         }
         self.hosted.clear();
+        self.containers.clear();
         self.presets.clear();
         self.stash.clear();
         self.preset_waits.clear();
@@ -1205,6 +1217,14 @@ impl Plugins {
                 (Some(row), crate::plugin_window::LinkMsg::Notes(token)) => out.push(Request::Notes(row, os_hostlink::take_notes(token))),
                 (None, crate::plugin_window::LinkMsg::Notes(token)) => drop(os_hostlink::take_notes(token)),
                 _ => {}
+            }
+        }
+        // A container's members get their housekeeping too (`crate::container`); they have no window or menu yet.
+        for c in self.containers.values() {
+            for p in c.plugins.iter().flatten() {
+                if let Ok(mut p) = p.try_lock() {
+                    p.idle();
+                }
             }
         }
         for (&row, h) in &mut self.hosted {
