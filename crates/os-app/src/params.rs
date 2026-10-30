@@ -366,8 +366,8 @@ impl App {
             // Only an instance with something new is locked, and never waited for: one the audio thread is rendering
             // is read again next tick (its events stay queued).
             let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen)) else { continue };
-            // Between two of its blocks (`lock_between_blocks`): a plugin's parameters can take a few ms to read.
-            let Some(mut p) = crate::plugins::lock_between_blocks(&h.plugin, h.meter.as_deref(), crate::plugins::TICK_WAIT) else { continue };
+            // A plugin's parameters can take a few ms to read (`lock_for_tick`).
+            let Some(mut p) = crate::plugins::lock_for_tick(&h.plugin, h.meter.as_deref()) else { continue };
             let t0 = std::time::Instant::now();
             let weak = Arc::downgrade(&h.plugin);
             let count = p.param_count();
@@ -451,6 +451,9 @@ impl App {
                 if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
                     automate.push((key, index));
                 }
+            }
+            if let Some(m) = &h.meter {
+                m.note_hold(t0.elapsed());
             }
             crate::dropout_log::held(&p.desc().name, "reading its parameters", t0.elapsed());
         }

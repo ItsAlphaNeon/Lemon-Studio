@@ -388,13 +388,13 @@ fn page_name(pt: &PluginTarget) -> String {
 
 /// The plugin's text for its parameter's value, or the value in percent.
 /// The value texts of Plugin mode's eight slots, the plugin held once for all of them.
-/// `None` when the instance gave no moment between two of its blocks this tick (`plugins::lock_between_blocks`): the
-/// texts shown stay, read again at the next tick.
+/// `None` when the instance was not to be had this tick (`plugins::lock_for_tick`): the texts shown stay, read again at
+/// the next tick.
 fn plugin_texts(s: &State, pt: &PluginTarget, meter: Option<&os_host::Meter>) -> Option<[String; 8]> {
     let list = s.params.lists.get(&pt.key);
     let plugin = s.params.plugin(pt.key);
     let p = match &plugin {
-        Some(m) => Some(crate::plugins::lock_between_blocks(m, meter, crate::plugins::TICK_WAIT)?),
+        Some(m) => Some(crate::plugins::lock_for_tick(m, meter)?),
         None => None,
     };
     let t0 = Instant::now();
@@ -409,6 +409,9 @@ fn plugin_texts(s: &State, pt: &PluginTarget, meter: Option<&os_host::Meter>) ->
         text.filter(|t| !t.is_empty()).unwrap_or_else(|| format!("{:.0}%", v * 100.0))
     });
     if let Some(p) = &p {
+        if let Some(m) = meter {
+            m.note_hold(t0.elapsed());
+        }
         crate::dropout_log::held(&p.desc().name, "the keyboard's screen", t0.elapsed());
     }
     Some(texts)

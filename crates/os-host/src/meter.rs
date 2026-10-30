@@ -37,7 +37,13 @@ pub struct Meter {
     /// When its last processing call ended, ns after `epoch` (0: never): the UI times its long calls by it
     /// (`since_processed`).
     done: AtomicU64,
+    /// The UI thread's long holds of the instance, ns: the longest, fading (`note_hold`).
+    held: AtomicU64,
 }
+
+/// A hold from this long on counts as long: it leaves the audio thread (which waits 2 ms for all its plugins together)
+/// little room.
+const HOLD_LONG_NS: u64 = 1_000_000;
 
 /// The time `Meter::done` counts from.
 fn epoch() -> Instant {
@@ -50,6 +56,18 @@ impl Meter {
     pub fn add(&self, d: Duration) {
         self.busy.fetch_add(d.as_nanos().min(u128::from(u64::MAX)) as u64, Ordering::Relaxed);
         self.done.store((epoch().elapsed().as_nanos() as u64).max(1), Ordering::Release);
+    }
+
+    /// The UI thread held the instance for `d`. Each hold fades the record by 1/256: a plugin stays slow for a few
+    /// hundred holds after a long one.
+    pub fn note_hold(&self, d: Duration) {
+        let old = self.held.load(Ordering::Relaxed);
+        self.held.store((old - old / 256).max(d.as_nanos().min(u128::from(u64::MAX)) as u64), Ordering::Relaxed);
+    }
+
+    /// The UI thread's holds of this instance can take long enough to make it late (`note_hold`).
+    pub fn holds_long(&self) -> bool {
+        self.held.load(Ordering::Relaxed) >= HOLD_LONG_NS
     }
 
     /// How long ago its last processing call ended (`None`: never processed). Just after one, the audio thread will

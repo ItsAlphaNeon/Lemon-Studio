@@ -27,6 +27,8 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **After a crash, the backup is offered.** When the last run ended without closing while its project had unsaved
   changes, the next start says so and offers the newest autosave written since the project was last saved. Opening it
   works as Revert to last backup. A Lemon project's autosaves are `.lemon` files, so they keep its undo history.
+- **Ctrl+C in the terminal closes properly.** The keyboard is let go and the session kept, as closing the window does;
+  unsaved changes go to a backup, which the next start offers. A second Ctrl+C ends the program at once.
 
 - **Wayland first.** On Linux the main window is native Wayland in a Wayland session; plugin windows open detached.
   `OPENSTUDIO_WAYLAND=0` brings back the X11 window, where plugin windows dock. CI runs on Linux only
