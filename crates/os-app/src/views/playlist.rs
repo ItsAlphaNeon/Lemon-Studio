@@ -1327,6 +1327,14 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
         ui.c.text(Font::new(14), hr.x + 14.0, led.y - 6.0, text.shade(-0.2), "...");
     }
     let info = pl::track_info(s, row);
+    if info.is_some_and(|i| i.clip_lock.is_some()) {
+        // Locked to its clips (Lemon Studio's design, ui/playlist.md "Locking tracks to their clips"): a lock left of
+        // the LED, and of the group arrow on a group's lead.
+        let x = if lead { led.x - 34.0 } else { led.x - 16.0 };
+        let b = Rect::new(x, led.y + 1.0, 12.0, 12.0);
+        ui.hit(b, Action::PlHeader(row), "Locked to its clips: Draw and Paint place this source (TOOLS: Unlock all tracks)");
+        icons::draw(ui.c, Icon::Lock, b, text);
+    }
     if lead {
         // Collapse arrow left of the LED: up while open, down while collapsed.
         let a = Rect::new(led.x - 18.0, led.y, 14.0, 14.0);
@@ -1395,6 +1403,7 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
         let hint = match e.target {
             pl::EditTarget::MixerInsert(_) => "How many mixer tracks to insert: type a number, Enter inserts, Esc cancels",
             pl::EditTarget::MixerGroup(_) => "Group name: type, Enter creates the group, Esc cancels",
+            pl::EditTarget::Chords => "Chords, one a bar (C G Am F, or I V vi IV; \"Am:\" first sets the key): Enter writes them into the piano roll, Esc cancels",
             _ => "Type, Enter accepts, Esc cancels",
         };
         ui.hit(r, Action::Swallow, hint);

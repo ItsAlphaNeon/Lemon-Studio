@@ -1813,6 +1813,7 @@ fn load_pl_track(events: &[Event], t: &PlTrackLoc, enc: TextEnc) -> PlaylistTrac
         grouped: r.get(46).is_some_and(|&b| b != 0),
         collapsed: r.get(61).is_some_and(|&b| b == 0),
         locked: r.get(47).is_some_and(|&b| b != 0),
+        clip_lock: None,
         perf: perf_settings(r),
     }
 }

@@ -74,6 +74,7 @@ mod mixer;
 mod mixer_state;
 mod osc3;
 mod citrus;
+mod chord_tool;
 mod slicer;
 mod drums;
 mod monitor;
