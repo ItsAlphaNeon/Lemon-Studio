@@ -216,8 +216,8 @@ pub struct SettingsUi {
     pub assoc: bool,
 }
 
-/// Tabs: label, page title, group (0 system / 1 project / 2 info) (spec §2). Plugins takes the place of an Account
-/// tab (spec: ui/plugin-manager.md §2); tabs are laid out from their text widths (`tab_rects`).
+/// Tabs: label, page title, group (0 system / 1 project / 2 info) (spec §2). Plugins takes the place of the
+/// reference's Account tab (spec: ui/plugin-manager.md §2); tabs are laid out from their text widths (`tab_rects`).
 pub const TABS: [(&str, &str, u8); 10] = [
     ("MIDI", "MIDI input / output devices", 0),
     ("Audio", "Audio devices / mixer", 0),
@@ -921,7 +921,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             }
             vec![g("", vec![List(vec![("", 0.0)], lines.into_iter().map(|l| vec![l]).collect(), 40)])]
         }
-        // About also carries what an Account tab would hold (spec: ui/plugin-manager.md §2).
+        // About also carries what the reference's Account tab had (spec: ui/plugin-manager.md §2).
         // The Windows build includes the ASIO SDK, which is under the GPL version 3 only, and names ASIO, so it carries
         // the ASIO logo and Steinberg's notice (THIRD-PARTY-NOTICES.txt §9).
         _ => vec![

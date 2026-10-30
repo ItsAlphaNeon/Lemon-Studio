@@ -3,7 +3,7 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Debug panel for the toolbar output monitor (F12, or right-click the monitor): one slider per
-//! `monitor::PARAMS` entry, plus Reset / Save / Close. A tuning aid for the monitor's look.
+//! `monitor::PARAMS` entry, plus Reset / Save / Close. A tuning aid for the monitor's look, not a product feature.
 //!
 // spec: ui/monitor.md (debug panel)
 

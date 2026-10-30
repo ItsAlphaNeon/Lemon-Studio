@@ -1761,8 +1761,8 @@ pub fn store_sampler(ch: &mut os_model::Channel, state: &[u8]) {
     if let Some(d) = i("declick").filter(|&d| d != if s.declick <= 5 { i32::from(s.declick) } else { 0 }) {
         s.declick = d.clamp(0, 5) as u8;
     }
-    // A channel without sampler flags has those of a new channel (Load regions, Use loop points); it gets the
-    // event when one of them changes.
+    // A channel without sampler flags has those of a new sampler channel (Load regions, Use loop points; spec:
+    // flp/events/channels.md "Sampler flags (event 143)"); it gets the event when one of them changes.
     let flags = s.sampler_flags.unwrap_or(os_model::ChannelSound::DEFAULT_FLAGS);
     let mut new = flags;
     for (bit, id) in SAMPLER_FLAGS {
@@ -1867,7 +1867,8 @@ fn sample_frames(path: &str) -> Option<u64> {
 }
 
 /// Lemon Sampler's loop start / end knobs for stored loop points (frames) of a sample of `n` frames: fractions of its
-/// last frame's index, where the END knob stops; -1, `i64::MAX` and points past it are the sample's ends.
+/// last frame's index, where the Sampler window's END knob stops; -1, `i64::MAX` and points past it are the sample's
+/// ends (spec: flp/events/channels.md "Loop points (event 251)").
 fn loop_knobs(points: Option<[i64; 2]>, n: u64) -> (f32, f32) {
     let last = n.saturating_sub(1);
     let Some([s, e]) = points.filter(|_| last > 0) else { return (0.0, 1.0) };
@@ -2517,7 +2518,8 @@ mod tests {
             num.parse().unwrap_or(-1.0)
         };
         let before = offset(&state(&pl));
-        // START OFFSET knob: window (45, 286) -> editor client (41, 214) with the host's strip row.
+        // START OFFSET knob: the reference's plugin window (45, 286) -> editor client (41, 214) with the host's strip
+        // row.
         let mut p = POINT { x: 41, y: 214 };
         unsafe { ClientToScreen(editor, &mut p) };
         let input = |flags: u32, dx: i32, dy: i32| unsafe {
@@ -2617,7 +2619,8 @@ mod tests {
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
         unsafe { SetForegroundWindow(frame as HWND) };
         pump(&mut pl, 200);
-        // Filter MOD X: window (492.5, 168.5) -> editor client (488, 96) with the host's strip row.
+        // Filter MOD X: the reference's plugin window (492.5, 168.5) -> editor client (488, 96) with the host's strip
+        // row.
         let mut p = POINT { x: 488, y: 96 };
         unsafe { ClientToScreen(editor, &mut p) };
         let input = |flags: u32, dx: i32, dy: i32| unsafe {
@@ -2703,7 +2706,8 @@ mod tests {
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
         unsafe { SetForegroundWindow(frame as HWND) };
         pump(&mut pl, 200);
-        // Filter MOD X: window (492.5, 168.5) -> editor client (488, 96) with the host's strip row.
+        // Filter MOD X: the reference's plugin window (492.5, 168.5) -> editor client (488, 96) with the host's strip
+        // row.
         let mut p = POINT { x: 488, y: 96 };
         unsafe { ClientToScreen(editor, &mut p) };
         let input = |flags: u32, dx: i32, dy: i32| unsafe {

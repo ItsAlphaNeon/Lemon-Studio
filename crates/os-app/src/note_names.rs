@@ -5,7 +5,7 @@
 //! Note names, as General ▸ Language ▸ Note names and Black notes choose them: the pitch class's letter or syllable,
 //! then the octave, MIDI note 60 in octave 5 (`C5`). Germanic only renames B to H; Solfege reads Do Re Mi Fa Sol La Si.
 //! A black key is the white key below with `#` (Sharps), or the first letter of the white key above with `♭` (Flats).
-//! A change of either setting renames at once.
+//! A change of either setting renames at once (a deliberate difference: the reference asks for a restart).
 // spec: ui/settings-choices.md "Note names and Black notes"
 
 use crate::prefs; // This code is a part of L e m o n S t u d i o.

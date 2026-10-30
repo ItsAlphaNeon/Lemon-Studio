@@ -21,7 +21,8 @@ pub fn fall_seconds(v: i32) -> f64 {
     knob_seconds(v) + 0.0090
 }
 
-/// Curvature `k` of a tension value, signed like the tension (set at 64, 101 and 128; linear between).
+/// Curvature `k` of a tension value, signed like the tension (fitted at 64, 101 and 128; linear between, spec:
+/// audio/channel-envelopes.md "Tension curves").
 pub fn tension_k(t: i32) -> f64 {
     const TABLE: [(f64, f64); 4] = [(0.0, 0.0), (64.0, 2.2), (101.0, 4.85), (128.0, 6.3)];
     let a = f64::from(t.clamp(-128, 128)).abs();

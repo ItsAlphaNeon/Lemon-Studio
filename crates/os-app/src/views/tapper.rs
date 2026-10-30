@@ -154,7 +154,8 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     label(ui, nf, left.cx() + 2.0, left.cy(), true, text(hov_l, held < 0), "- nudge");
     label(ui, nf, right.cx() - 2.0, right.cy(), true, text(hov_r, held > 0), "nudge +");
 
-    // Sync, Mute (switches) and now (a button): not available yet (§6, §8).
+    // Sync, Mute (switches) and now (a button): not available yet (§6, §8); with Apply tempo off the reference greys
+    // them too.
     let lf = Font::new(14);
     let cy = y0 + 231.0;
     ui.off(at(5.0, 222.0, 43.0, 18.0), "Resynchronize to taps");

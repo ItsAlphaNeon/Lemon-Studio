@@ -6,8 +6,8 @@
 //! Mixer, Piano roll and Channel rack, whether they are shown or not (which windows show does not change).
 //! - Realign (Shift+Ctrl+H) and Desktop (default): the layout of a new install, the three windows maximized and the
 //!   rack where it first opens.
-//! - Desktop (alternate): the three float, the Playlist over the top 55 % of the workspace, the Piano roll under it on
-//!   the left 60 % and the Mixer on the right.
+//! - Desktop (alternate) (Lemon Studio's own layout; the reference's rects are unknown): the three float, the
+//!   Playlist over the top 55 % of the workspace, the Piano roll under it on the left 60 % and the Mixer on the right.
 //! - Save custom layout keeps the current one in the settings (`window_layout`); Custom, greyed until then, brings it
 //!   back, moved into the workspace if the screen changed.
 //! - Tablet (default) and (alternate) stay greyed: they move the toolbar to the window's bottom, which Lemon Studio
@@ -49,7 +49,7 @@ pub fn default_wins() -> [WinState; 3] {
 /// Where the Channel rack first opens.
 pub const RACK_POS: (f32, f32) = (317.0, 195.0);
 
-/// The submenu's rows, in order.
+/// The submenu's rows, in the reference's order.
 pub fn items(_: &State) -> Vec<PItem> {
     let custom = PItem::new("Custom", Cmd::Arrange(Layout::Custom));
     vec![
@@ -122,7 +122,7 @@ pub fn channel_home(s: &State) -> (f32, f32) {
 }
 
 impl App {
-    /// VIEW ▸ Align all channel editors (Shift+F12):
+    /// VIEW ▸ Align all channel editors (Shift+F12; Lemon Studio's own design, the reference's result is unknown):
     /// the channel window goes back to where it first opens, right of the Channel rack, and the docked plugin windows
     /// of rack channels cascade from there, back to front, each a title bar lower and to the right so every title
     /// shows. Mixer slot windows and detached windows stay where they are.

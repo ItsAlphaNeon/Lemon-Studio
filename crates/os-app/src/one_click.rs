@@ -11,7 +11,8 @@ use crate::app::{Action, App, State};
 use crate::capture::{self, capture, Input, InputStream, Recorder};
 use crate::playlist::{Cmd, Mark, PItem, Popup};
 
-/// The undo step a take is placed with.
+/// The undo step a take is placed with (the reference's History name; spec: ui/one-click-recording.md "Into the
+/// playlist").
 pub const RECORDED: &str = "Recorded items";
 
 /// A recording under way, or its file being made.

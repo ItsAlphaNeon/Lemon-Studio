@@ -550,8 +550,8 @@ fn opens_sub(_menu: usize, item: &Item) -> bool {
 /// TOOLS > Switch all plugin editors to ▸ and Change declicking for selected channels to ▸, also in the channel rack's
 /// options menu (spec: ui/channel-rack.md §17).
 pub const ONE_CLICK_LABEL: &str = "Quick record";
-/// TOOLS > Macros: every Tesla in the mixer goes, after a question (spec: plugins/tesla/README.md "Recording into
-/// Tesla from Lemon Studio").
+/// TOOLS > Macros: every Tesla in the mixer goes, after a question (in the reference: Remove all Edison instances;
+/// spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio").
 pub const REMOVE_TESLAS_LABEL: &str = "Remove all audio editor instances";
 pub const DUMP_LOG_LABEL: &str = "Capture MIDI into pattern";
 pub const CLEAR_LOG_LABEL: &str = "Clear log";

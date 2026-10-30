@@ -139,7 +139,7 @@ impl Settings {
         }
     }
 
-    /// The hint-bar text (§9).
+    /// The hint-bar text (a Lemon Studio addition: the reference shows none; §9).
     pub fn text(&self, k: Knob) -> String {
         match k {
             Knob::TimeMul => format!("Time multiplicator: {}", TIME_MUL_NAMES[usize::from(self.time_mul.min(6))]),

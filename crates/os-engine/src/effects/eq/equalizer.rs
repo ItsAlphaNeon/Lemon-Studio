@@ -335,8 +335,8 @@ impl Equalizer {
     }
 
     /// The buffers of silence run before a render: four of 2048 frames, five when LIN's `N` is 8192 or more, so that
-    /// LIN's first fade is over when the song starts. In the other modes silence does nothing (the gate closes on the
-    /// first buffer).
+    /// LIN's first fade is over when the song starts and its blocks fall where the reference renders' do. In the other
+    /// modes silence does nothing (the gate closes on the first buffer).
     pub fn preroll(&mut self) {
         let buffers = if self.mode() == Mode::Lin && self.opts.lin_n(self.rate) >= 8192 { 5 } else { 4 };
         let (mut l, mut r) = (vec![0f32; PREROLL_BLOCK], vec![0f32; PREROLL_BLOCK]);

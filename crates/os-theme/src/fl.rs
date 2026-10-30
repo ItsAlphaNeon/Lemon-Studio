@@ -28,8 +28,8 @@ pub const DARK: Surface = Surface { hue: 0.0, saturation: 0.0, lightness: -153.0
 pub const BASE: Surface = Surface { hue: 0.0, saturation: 0.0, lightness: 0.0, contrast: 0.0 };
 
 /// The stock Dark theme's file text (its key colours, those of Lemon Studio's default palette). A theme's `Lightmode`
-/// key is ignored: every theme is drawn as with Light mode on (spec: ui/settings-choices.md "Light mode and clip note
-/// colours", removed 2026-10-18).
+/// key is ignored: every theme is drawn as the reference draws it with Light mode on (spec: ui/settings-choices.md
+/// "Light mode and clip note colours", removed 2026-10-18).
 pub const DARK_TEXT: &str = "Hue=0\nSaturation=0\nLightness=-153\nContrast=-8\nText=0\nSelected=11068490\nHighlight=-12283141\n\
      Mute=577656\nOption=-14135064\nStepEven=-13357016\nStepOdd=-12764317\nTextColor=-3551277\nBackMode=2\n";
 

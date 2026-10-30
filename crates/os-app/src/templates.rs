@@ -6,9 +6,9 @@
 //!
 //! The Default template is what FILE ▸ New gives (the FILE menu's first item names it, "New (<name>)"): the built-in
 //! "Empty" (`app::default_project`), or a template found in the `Templates` folder of Lemon Studio's user folder, laid
-//! out with a folder per category, holding a folder per template with `<name>.flp` in it. A template is opened as a
-//! project and the result is untitled; a picked template whose file has gone gives Empty. The pick is a program setting
-//! kept as free text (`prefs::text`): "Empty" or "<category>/<template>".
+//! out as FL's `Templates` folder: a folder per category, holding a folder per template with `<name>.flp` in it. A
+//! template is opened as a project and the result is untitled; a picked template whose file has gone gives Empty. The
+//! pick is a program setting kept as free text (`prefs::text`): "Empty" or "<category>/<template>".
 //!
 //! The Startup project (`prefs::STARTUP_PROJECT`) is the project Lemon Studio starts with when no project file is
 //! passed to it: the built-in project, the Default template, or the project file last opened or saved (kept as a

@@ -2502,7 +2502,7 @@ impl App {
         s.path = None;
         s.tempo = 130.0;
         s.pattern = 1;
-        // The default template is saved in pattern mode.
+        // The reference's default template is saved in pattern mode (spec: flp/engine-events.md "Project").
         s.song_mode = false;
         s.piano.reset();
         s.playlist.reset();
@@ -10067,7 +10067,7 @@ pub fn test_project() -> Project {
 }
 
 /// Sampler channels named `names` (channel i on insert i + 1), 18 mixer tracks (master, Insert 1-16 and the hidden
-/// last one, as the default template stores them; spec: ui/mixer.md §1) routed to the master, pattern 1.
+/// last one, as the reference's default template stores them; spec: ui/mixer.md §1) routed to the master, pattern 1.
 fn template_project(names: &[&str]) -> Project {
     let channel = |i: u16, name: &str| sampler_channel(i, name, i + 1);
     let mut mixer: Vec<MixerTrack> = (0..18u16).map(MixerTrack::new).collect();
@@ -10080,8 +10080,8 @@ fn template_project(names: &[&str]) -> Project {
         channels: names.iter().enumerate().map(|(i, n)| channel(i as u16, n)).collect(),
         patterns: vec![Pattern { number: 1, ..Pattern::default() }],
         mixer,
-        // The default template holds event 30 = 1: "Play truncated notes in clips" is on in a new project (spec:
-        // flp/engine-events.md "Project", "Event 30").
+        // The reference's default template holds event 30 = 1: "Play truncated notes in clips" is on in a new
+        // project (spec: flp/engine-events.md "Project", "Event 30").
         play_truncated: true,
         // Automatic crossfades (event 44) as the program setting says, whatever the template holds (spec:
         // ui/settings-choices.md "Project").
@@ -10832,8 +10832,8 @@ mod tests {
         assert_eq!(app.state.project.bar, Some((3, 2)), "an eighth is two sixteenths");
         assert_eq!((shown(&app, NUMERATOR).as_deref(), shown(&app, DENOMINATOR).as_deref()), (Some("3"), Some("8")));
         assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern), 432);
-        // Play truncated notes: on in a new project, as in the default template (spec: flp/engine-events.md "Event
-        // 30"), on File > New too; a click switches it.
+        // Play truncated notes: on in a new project, as in the reference's default template (spec:
+        // flp/engine-events.md "Event 30"), on File > New too; a click switches it.
         assert!(default_project().play_truncated);
         let r = hit_rect(&app, &Action::Settings(SAct::Group("Advanced")));
         click(&mut app, &mut c, r);
@@ -15146,7 +15146,8 @@ mod tests {
         // The pitch record's amount is in cents (±2400).
         assert_eq!(ch.envelopes[os_model::Envelope::PITCH].amount, 600);
         assert_eq!(ch.envelopes[os_model::Envelope::PAN].flags & 0x20, 0x20, "global LFO");
-        // A new channel's flags (Load regions, Use loop points), loop points off, Keep on disk and Resample on.
+        // The reference's new-channel flags (Load regions, Use loop points), loop points off, Keep on disk and
+        // Resample on.
         assert_eq!((ch.sound.cutoff, ch.sound.filter_type, ch.sound.declick, ch.sound.sampler_flags), (64, 3, 2, Some(0x103)));
         assert_eq!(ch.sound.start_offset(), 0.125);
         let m = ch.misc;
@@ -15960,8 +15961,8 @@ mod tests {
         click(&mut app, &mut a, hr);
         assert_eq!(crate::rack::pattern_steps(&app.state), 32);
 
-        // Sizes snap to whole steps / rows (the base widths plus the wider name button), down to four beats of the
-        // project's signature but never under 16 steps (the title bar's buttons would collide), and one row.
+        // Sizes snap to whole steps / rows (the reference's widths plus the wider name button), down to four beats of
+        // the project's signature but never under 16 steps (the title bar's buttons would collide), and one row.
         let d = crate::rack::NAME_W - crate::rack::FL_NAME_W;
         assert_eq!(views::rack::snap_size(&app.state, 822.0 + d, 300.0), (819.0 + d, 306.0));
         assert_eq!(views::rack::snap_size(&app.state, 10.0, 10.0), (499.0 + d, 126.0));
@@ -17642,9 +17643,9 @@ mod tests {
         assert_eq!((m.items[0].label.as_ref(), m.items[0].mark), ("Main", Mark::Radio(true)));
         let n = m.items.len();
         assert_eq!(m.items[n - 2..].iter().map(|i| (i.label.as_ref(), i.enabled, i.cmd.clone())).collect::<Vec<_>>(), [("Events", true, pl::Cmd::Snap(EditorSnap::Events)), ("Markers", true, pl::Cmd::Snap(EditorSnap::Markers))]);
-        // Markers: a click within 7 px of a time marker lands on it (6.4 px does, 7.6 px does not), farther off on
-        // the tick under the pointer; Events: on a clip's start or end the same way. The song position on the ruler
-        // follows Markers too.
+        // Markers: a click within 7 px of a time marker lands on it (in the reference 6.4 px did, 7.6 px did not; the
+        // exact limit between them is unknown), farther off on the tick under the pointer; Events: on a clip's start
+        // or end the same way. The song position on the ruler follows Markers too.
         pl::arr_mut(&mut app.state).clips.clear();
         pl::arr_mut(&mut app.state).markers = vec![os_model::TimeMarker::new(1000, "M")];
         app.state.playlist.snap = EditorSnap::Markers;
@@ -20349,8 +20350,8 @@ mod tests {
     }
 
     /// Every drop-down entry fits its row in this font: the label is not clipped and stops before its shortcut or its
-    /// ▸ (the columns are the base widths, widened where an entry needs it; macOS test of #61: TOOLS > Change
-    /// declicking for selected channels to ▸ was cut at "channels t").
+    /// ▸ (the columns are the reference's widths, widened where an entry needs it; macOS test of #61: TOOLS >
+    /// Change declicking for selected channels to ▸ was cut at "channels t").
     #[test]
     fn menu_entries_fit_their_columns() {
         use views::menus::{label_now, shortcut_now, Kind, MENUS};

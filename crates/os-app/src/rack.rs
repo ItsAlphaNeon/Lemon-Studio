@@ -852,7 +852,7 @@ pub fn random_color(s: &mut State, r: usize, salt: u64) {
 }
 
 /// Color selected > Gradient: from the first selected channel's colour to the last one's (a hue sweep when they
-/// match or have none).
+/// match or have none; Lemon Studio's version of the reference's gradient dialog).
 pub fn gradient(s: &mut State) {
     let rows: Vec<usize> = s.rack.sel.iter().copied().filter(|&r| r < s.project.channels.len()).collect();
     if rows.len() < 2 {
@@ -1764,7 +1764,7 @@ fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Ta
         None => PItem::new("Create automation clip", Cmd::Nothing).off(),
     });
     // Enabled while a clip drives the control; it shows that clip in the playlist, as on a plugin parameter (spec:
-    // plugins/plugin-parameters.md §5.1).
+    // plugins/plugin-parameters.md §5.1, which records it on the channel volume knob).
     v.push(match driven {
         Some(ch) => PItem::new("Edit automation clip...", Cmd::Param(crate::params::PCmd::EditClip(ch))),
         None => PItem::new("Edit automation clip...", Cmd::Nothing).off(),
@@ -1945,7 +1945,7 @@ pub fn auto_name(ch: &mut os_model::Channel, path: &std::path::Path) {
 /// - "Auto keep long audio on disk" on: a file of 30 s or more turns Keep on disk on (`keep_on_disk::keep_long`).
 ///
 /// Part of the load: it has no undo step of its own. Project loading and previews don't come here; audio clip channels
-/// keep their root note and stretch.
+/// keep their root note and stretch (unverified).
 pub fn read_tags(ch: &mut os_model::Channel, path: &std::path::Path) {
     crate::keep_on_disk::keep_long(ch, path);
     use crate::prefs::{check, READ_ROOT_NOTE, READ_TEMPO};
@@ -2627,7 +2627,7 @@ pub fn graph_set(s: &mut State, k: u32, v: f32) -> Option<String> {
 // Saving (spec: ui/channel-rack.md "Saving"; flp/events/channels.md, project-info.md, patterns.md)
 
 /// Loop type values of event 162 for the rack's loop types (Loop step channels, Loop all channels, Advanced
-/// looping). Advanced looping is written like step channels.
+/// looping). Advanced looping's value is unverified; it is written like step channels.
 const LOOP_TYPE_CODES: [u32; 3] = [3, 2, 3];
 
 /// The rack state of an opened (or new) project: lock, zip, filter groups and the current filter from the channels,
@@ -3822,7 +3822,7 @@ mod tests {
         let ch = &app.state.project.channels[r];
         assert_eq!(ch.sample_path.as_deref(), Some(sent.to_string_lossy().as_ref()));
         assert_eq!((ch.misc.root, ch.sound.stretch), (71, auto(2.0, was)), "the browser's send");
-        // Audio clip channels keep theirs.
+        // Audio clip channels keep theirs (unverified).
         let mut clip = app.state.project.channels[r].clone();
         (clip.kind, clip.misc.root) = (os_model::ChannelKind::AudioClip, 50);
         read_tags(&mut clip, &new);

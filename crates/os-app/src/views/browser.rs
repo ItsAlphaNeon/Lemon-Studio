@@ -698,7 +698,7 @@ fn paint_info(ui: &mut Ui, s: &State, path: &Path, r: Rect) {
         y += lh;
     }
     ui.c.text(f, lx, y, t.text_dim, "Path");
-    // Wrap the path at any character.
+    // Wrap the path at any character (the reference breaks mid-word too).
     let mut line = String::new();
     for ch in path.display().to_string().chars() {
         line.push(ch);

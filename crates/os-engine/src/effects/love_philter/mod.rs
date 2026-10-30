@@ -5,7 +5,8 @@
 //! Fruity Love Philter: eight filters in a chain, each with its type, cascade, waveshaper, pan and volume, and eight
 //! modulation targets driven by patterns, an LFO and three maps. Lemon Studio's Pulp Filter plays this code.
 //!
-//! The x87 extended-precision loops of the page run in doubles here (as Citrus does).
+//! The x87 extended-precision loops of the page run in doubles here (as Citrus does), so the samples are close to the
+//! reference's but not bit for bit.
 //!
 // spec: plugins/fruity-love-philter.md, plugins/image-line-curves.md, plugins/lemon-pulp-filter.md
 

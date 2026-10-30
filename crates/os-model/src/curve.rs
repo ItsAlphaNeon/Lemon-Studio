@@ -257,7 +257,7 @@ pub fn tick_step(ppq: u16) -> f64 {
 }
 
 /// A walk along a curve: it keeps its place inside the current segment and moves on by steps of beats, so that a
-/// stair edge that falls exactly on a step always lands on the same side.
+/// stair edge that falls exactly on a step lands on the same side as in the reference.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Walk {

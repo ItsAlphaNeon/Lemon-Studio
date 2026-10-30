@@ -110,7 +110,8 @@ pub const HP: [f32; 5] = [20.0, 90.0, 400.0, 1300.0, 4200.0];
 /// The LFO's periods (s) over its speed.
 pub const LFO_PERIODS: [f32; 8] = [8.872, 3.808, 1.833, 0.878, 0.398, 0.15, 0.05, 0.0];
 
-/// Silence run through a slot before the song (device buffers of 2048 frames, 4 to 7 of them).
+/// Silence the reference host runs through a slot before the song (device buffers of 2048 frames; its count varies
+/// from 4 to 7, spec: plugins/fruity-delay-3.md "State and timing").
 pub const PREROLL: usize = 4 * 2048;
 
 /// Everything the saved state says.
@@ -233,7 +234,7 @@ fn pow10_20(db: f32) -> f32 {
 // ---------------------------------------------------------------------------------------------------------------
 // Building blocks
 
-/// Flush to zero: the delay runs with denormals off.
+/// Flush to zero: the original runs with denormals off.
 #[inline]
 fn ftz(x: f32) -> f32 {
     if x.abs() < f32::MIN_POSITIVE { 0.0 } else { x }
@@ -617,7 +618,8 @@ impl Delay {
         d
     }
 
-    /// The start of a render: created with the defaults, the sample rate set (a reset), the state applied, the tempo.
+    /// The reference host's start of a render: created with the defaults, the sample rate set (a reset), the state
+    /// applied, the tempo.
     pub fn with_settings(sample_rate: u32, s: &Settings, bpm: f64) -> Delay {
         let mut d = Delay::new(sample_rate);
         d.set(s);
@@ -1031,7 +1033,8 @@ impl Delay {
         let old = self.phase;
         let p = old + self.lfo_step;
         self.phase = p - p.trunc();
-        // Single-precision sine: on Windows `f32::sin` is the C runtime's `sinf`.
+        // Single-precision sine: on Windows `f32::sin` is the C runtime's `sinf`, which gives the reference renders'
+        // values (spec: plugins/fruity-delay-3.md "LFO").
         self.lfo = ((old * 6.283_185_5).sin() + 1.0) * 0.5;
         if self.kind != OFF {
             let half = 0.5 * self.rate as f32;
@@ -1131,7 +1134,7 @@ impl Delay {
         }
     }
 
-    /// What a slot runs between loading and the song: silence, then two resets.
+    /// What the reference host runs between loading a slot and the song: silence, then two resets.
     pub fn start(&mut self) {
         self.preroll(PREROLL);
         self.reset();

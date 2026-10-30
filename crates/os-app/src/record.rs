@@ -754,8 +754,8 @@ impl App {
         }
         // SONG mode, Start / Stop recording markers (audio/transport.md): passing a Stop recording marker ends the take
         // there (held notes end on it) and later notes are not recorded; passing a Start recording marker records
-        // again. Recording before any of them goes on as usual, from the song's start with a Start recording marker
-        // later on.
+        // again (Lemon Studio's choice). Recording before any of them goes on as usual, from the song's start with a
+        // Start recording marker later on.
         if live && self.transport.song() {
             let from = self.state.rec.last.filter(|&l| l <= now);
             let mut passed: Vec<(u32, u8)> = crate::playlist::markers(&self.state)
@@ -871,7 +871,8 @@ fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
 }
 
 /// The control point a control's present value makes: its target word and the value in the setting's own unit (spec:
-/// audio/automation.md "Pattern control points"). The main volume and pitch are not recorded.
+/// audio/automation.md "Pattern control points"). The main volume and pitch are not recorded (spec: ui/recording.md
+/// "Taking automation").
 fn point_of(s: &State, a: &crate::app::Action) -> Option<(u32, i32)> {
     use crate::app::Action;
     use os_model::target;

@@ -233,7 +233,8 @@ mod tests {
         assert_eq!(keep(400.0, 9000.0, w, WORK).1, WORK.bottom() - 15.0);
         // Up: never above the workspace's top.
         assert_eq!(keep(400.0, -50.0, w, WORK).1, WORK.y);
-        // Partly out, past the limits nowhere: unchanged.
+        // Partly out, past the limits nowhere: unchanged (the reference too kept one with only the title bar inside at
+        // the right).
         assert_eq!(keep(WORK.right() - 106.0, 300.0, w, WORK), (WORK.right() - 106.0, 300.0));
         // The same in physical px at 150 %: 47 and 23 px.
         let work = [314, 125, 2880, 1620];

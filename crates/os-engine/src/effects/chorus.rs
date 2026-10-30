@@ -7,7 +7,7 @@
 //! The input, at 0.7, is split by a one-pole crossover; one band goes into a short delay line per side and is read
 //! back at three places that three slow LFOs move; the three reads, at 0.6, are added to the input. There is no
 //! feedback. The LFOs start where a generator puts them each time the effect starts (from a fixed seed, so renders
-//! repeat).
+//! repeat; the original seeds it from the clock).
 //!
 // spec: plugins/fruity-chorus.md, plugins/lemon-chorus.md
 
@@ -45,8 +45,8 @@ pub const VERSION: i32 = 1;
 pub const LINE: usize = 4096;
 const MASK: u32 = LINE as u32 - 1;
 
-/// The generator's seed when the effect is created: fixed, so renders repeat (spec "State and timing" and
-/// audio/quirks.md).
+/// The generator's seed when the effect is created, a deliberate choice: the original seeds it from the clock, so any
+/// seed is one it could have used; a fixed one makes renders repeat (spec "State and timing" and audio/quirks.md).
 pub const SEED: u32 = 0;
 
 /// LFO shapes (spec "LFO tables").
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(Settings::from_state(&b[..48]), None);
     }
 
-    /// The working values of the spec's formulas.
+    /// The working values of the spec's formulas (expected values from an independent reading of the page).
     #[test]
     fn knobs_become_working_values() {
         let w = Working::new(&DEFAULTS, 44100);
