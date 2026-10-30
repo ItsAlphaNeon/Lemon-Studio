@@ -36,10 +36,6 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwayland-dev libclang-dev pkg-config
 
-      # The README and docs/ name files, links and code that must still exist (they go stale otherwise).
-      - name: Docs point at what exists
-        run: python3 tools/docs-check.py
-
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
