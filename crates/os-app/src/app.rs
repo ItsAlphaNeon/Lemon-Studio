@@ -959,6 +959,8 @@ pub struct State {
     pub touch: crate::touch::TouchUi,
     /// The event editor: the control it shows, its view, tool and selection.
     pub events: crate::events::EventsUi,
+    /// Edit automation in a window: the second event editor, behind `events` (spec: ui/event-editor.md §3a).
+    pub events_back: Option<crate::events::EventsUi>,
     /// The piano roll's Strum dialog: where it is, its settings and its preview session.
     pub strum: crate::strum::StrumUi,
     /// The piano roll's Arpeggiate dialog: where it is, its settings and pattern, its preview session.
@@ -1432,6 +1434,7 @@ impl App {
                 tapper: Default::default(),
                 touch: Default::default(),
                 events: Default::default(),
+                events_back: None,
                 strum: Default::default(),
                 arp: Default::default(),
                 piano_dlg: Default::default(),
@@ -8366,6 +8369,10 @@ impl App {
                 crate::piano_dlg::cancel(s);
                 s.hide(Win::PianoDlg);
                 self.damage_win(Win::PianoRoll);
+            }
+            Action::CloseWin(Win::Events) => {
+                crate::events::close(s);
+                self.invalidate();
             }
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserClear | Action::BrowserSplitter => {}

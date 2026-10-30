@@ -1883,8 +1883,8 @@ fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Ta
     let mut v = vec![
         PItem::head("Automation"),
         crate::events::menu_item(auto.as_ref(), None),
-        // Lemon Studio has one event editor window, which Edit automation already opens floating.
-        PItem::new("Edit automation in a window", Cmd::Nothing).off(),
+        // A second event editor window (Lemon Studio's design, ui/event-editor.md §3a).
+        crate::events::window_item(auto.as_ref(), None),
         piano.unwrap_or_else(|| PItem::new("Edit automation in piano roll", Cmd::Nothing).off()),
         init,
         delete,
@@ -4321,13 +4321,13 @@ mod tests {
         assert!(menu(&app, 4).items.iter().any(|i| i.label == "Remove link" && i.enabled));
         assert_eq!(crate::remote::links().iter().map(|l| l.target).collect::<Vec<_>>(), [Target::RackTrack(1), Target::RackLed(1)]);
 
-        // What stays greyed whatever the state (§19 lists the reasons): 2 on the volume and panning knobs, 5 on the
+        // What stays greyed whatever the state (§19 lists the reasons): 1 on the volume and panning knobs, 5 on the
         // swing knob, 6 on the mixer box and on the LED.
         let greyed = |which: u8| -> Vec<String> {
             let state_bound = ["Remove start value", "Edit automation clip...", "Paste value"];
             menu(&app, which).items.iter().filter(|i| !i.enabled && !i.label.is_empty() && !state_bound.contains(&i.label.as_ref())).map(|i| i.label.to_string()).collect()
         };
-        assert_eq!(greyed(0), ["Edit automation in a window", "Override global mapping..."]);
+        assert_eq!(greyed(0), ["Override global mapping..."]);
         assert_eq!(greyed(1), greyed(0));
         assert_eq!(greyed(2), ["Edit automation", "Edit automation in a window", "Edit automation in piano roll", "Create automation clip", "Override global mapping..."]);
         let boxes = ["Edit automation", "Edit automation in a window", "Edit automation in piano roll", "Set as song start value", "Create automation clip", "Override global mapping..."];

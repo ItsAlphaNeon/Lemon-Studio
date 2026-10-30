@@ -300,6 +300,7 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
         Win::Strum => strum::bounds(s),
         Win::Arp => arpeggiate::bounds(s),
         Win::PianoDlg => piano_dlg::bounds(s),
+        Win::Events => events::bounds(s),
         w => s.win_rect(w),
     }
 }
