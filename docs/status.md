@@ -152,7 +152,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Not yet in the parameter menu: Init song with this position on a plugin parameter
 - VST2 shells (one file offering several plugins); a VST2 plugin's state is saved in the layout FL Studio's projects use
 - A plugin that crashes is stopped (its slot passes the sound through) instead of closing Lemon Studio. On macOS
-  and Linux this is new and not yet tried on those systems, and a crash in a plugin's editor still closes it there
+  and Linux this is new; there a crash in a plugin's editor still closes Lemon Studio, except in a CLAP plugin's
+  editor on Linux
 - Not yet: 32-bit plugins, and Intel-only plugins on Apple silicon (they need a bridge)
 
 ## 🚧 Plugin delay compensation
