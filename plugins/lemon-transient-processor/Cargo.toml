@@ -7,6 +7,8 @@ license.workspace = true
 
 [lib]
 crate-type = ["cdylib", "lib"]
+doctest = false
+test = false
 
 [features]
 # Compiled into Lemon Studio: no exported plugin entry points (they would clash with the other built-in plugins).

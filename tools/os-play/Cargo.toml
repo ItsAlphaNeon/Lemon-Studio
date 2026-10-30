@@ -5,6 +5,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "os-play"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 os-flp.workspace = true
 os-engine.workspace = true

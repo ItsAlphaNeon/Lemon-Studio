@@ -5,6 +5,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "os-native-probe"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 os-native = { path = "../../crates/os-native" }
 os-engine.workspace = true

@@ -5,7 +5,7 @@
 
 // spec: flp/events/*.md
 //
-// Typed-model tests over the corpus (OPENSTUDIO_FLP_CORPUS, see tests/corpus.rs):
+// Typed-model tests over the corpus (OPENSTUDIO_FLP_CORPUS, see corpus.rs):
 // 1. load → apply (no edits) → bytes identical to the input (a file of an older generation: to its conversion to the
 //    current layout, which must itself load and re-serialize);
 // 2. edits survive apply → to_bytes → parse → load;
@@ -346,7 +346,7 @@ fn new_pattern_blocks_are_added() {
     eprintln!("{checked} files: new pattern blocks added");
 }
 
-/// Manual helper: `OS_IN=a.flp OS_OUT=b.flp cargo test -p os-flp --test project_corpus -- --ignored new_pattern_file`
+/// Manual helper: `OS_IN=a.flp OS_OUT=b.flp cargo test -p os-flp --test integration -- --ignored new_pattern_file`
 /// writes `a.flp` with two new patterns (notes, points, name, colour) so FL can be asked to open it.
 #[test]
 #[ignore]
