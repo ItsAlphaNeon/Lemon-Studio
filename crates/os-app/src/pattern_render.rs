@@ -82,6 +82,7 @@ pub fn job(s: &State, dir: &Path, stem: &str) -> ex::Job {
         loop_frames: None,
         tempo: (tempo, f64::from(ticks) / f64::from(s.project.ppq.max(1))),
         track_names: Vec::new(),
+        tracks: Vec::new(),
     }
 }
 

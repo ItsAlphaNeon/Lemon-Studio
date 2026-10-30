@@ -71,6 +71,12 @@ pub struct Hosted {
     /// When its open window opened (`Plugins::opens`): the limit on open editors closes the earliest first.
     #[cfg(plugin_windows)]
     opened: u64,
+    /// Its spare state (window or slot menu ▸ Copy to B; `presets::PCmd::StoreSpare`): a second copy of its
+    /// state that Swap A / B swaps with the one in use. Lemon Studio's choice: kept in memory with the
+    /// instance only, not in the project (spec: ui/plugin-window.md "Spare state").
+    pub spare: Option<Vec<u8>>,
+    /// "Display preset name in preset selector" unticked: its window's Presets box shows no preset name.
+    pub hide_preset: bool,
 }
 
 /// When the UI last locked an instance for one of its per-tick jobs: the attention count it acted on, and when.
@@ -113,6 +119,8 @@ impl Hosted {
             placed: None,
             #[cfg(plugin_windows)]
             opened: 0,
+            spare: None,
+            hide_preset: false,
         }
     }
 
@@ -584,13 +592,30 @@ impl Plugins {
         };
         #[cfg(plugin_windows)]
         if let Some(w) = self.hosted.get(&key).and_then(|h| h.window.as_ref()) {
-            w.set_preset(self.preset_name(key));
+            w.set_preset(self.shown_preset(key));
         }
     }
 
     /// The name of the preset the instance under `key` holds.
     pub fn preset_name(&self, key: usize) -> Option<String> {
         self.presets.get(&key).map(|p| crate::presets::shown_name(p))
+    }
+
+    /// What the window's Presets box of the instance under `key` shows: its preset's name, none while "Display preset
+    /// name in preset selector" is unticked.
+    pub fn shown_preset(&self, key: usize) -> Option<String> {
+        self.preset_name(key).filter(|_| !self.hosted.get(&key).is_some_and(|h| h.hide_preset))
+    }
+
+    /// Window or slot menu ▸ Display preset name in preset selector: ticks (`show`) or unticks it for the instance under
+    /// `key`; the open window's Presets box follows.
+    pub fn show_preset_name(&mut self, key: usize, show: bool) {
+        let Some(h) = self.hosted.get_mut(&key) else { return };
+        h.hide_preset = !show;
+        #[cfg(plugin_windows)]
+        if let Some(w) = self.hosted.get(&key).and_then(|h| h.window.as_ref()) {
+            w.set_preset(self.shown_preset(key));
+        }
     }
 
     /// Moves mixer slot instances: `m(track, slot)` gives the new place, `None` drops the instance.
@@ -967,7 +992,7 @@ impl Plugins {
         h.window = Some(w);
         self.opens += 1;
         h.opened = self.opens;
-        let name = self.preset_name(row);
+        let name = self.shown_preset(row);
         if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
             w.set_preset(name);
         }

@@ -69,6 +69,8 @@ pub enum MCmd {
     Rename(u16),
     Color(u16, Option<Rgb>),
     RandomColor(u16),
+    /// Gradient color...: the selected tracks, in track order, from the first one's colour to the last one's.
+    GradientColor,
     Reset(u16),
     ResetRouting(u16),
     UnrouteTo(u16),
@@ -88,6 +90,10 @@ pub enum MCmd {
     MoveRight(u16),
     Delete(u16),
     InsertOne(u16),
+    /// Insert multiple...: a box for how many tracks to insert in front of this one (`insert_many`).
+    InsertMultiple(u16),
+    /// File ▸ Render to wave file...: the Export form for the selected track(s)' outputs (`App::open_track_render`).
+    RenderWave(u16),
     /// Route the selected tracks to `dst`: only = drop their other routes, side = sidechain (level 0).
     Route { dst: u16, only: bool, side: bool },
     /// Layout menu: Wide (the only layout drawn; the others are greyed out).
@@ -1071,6 +1077,24 @@ pub fn add_track(s: &mut State, at: Option<u16>) -> u16 {
     n
 }
 
+/// The most tracks one Insert multiple... adds (Lemon Studio's choice).
+pub const INSERT_MAX: u16 = 100;
+
+/// Insert multiple... (the track menu): `text` read as a count (1 to `INSERT_MAX`) of new tracks inserted in front of
+/// track `n`, as Insert one inserts one, in one undo step; the first new one becomes current. Spec: the original's
+/// manual says its insert entry asks how many tracks to insert in front of the selected one; the box is Lemon
+/// Studio's (ui/mixer-track-commands.md §6).
+pub fn insert_many(s: &mut State, n: u16, text: &str) -> Option<String> {
+    let Ok(k) = text.trim().parse::<u16>() else { return Some(format!("Insert multiple: \"{}\" is not a number", text.trim())) };
+    let k = k.clamp(1, INSERT_MAX);
+    edit(s, INSERT, Region::Project, |s| {
+        for _ in 0..k {
+            add_track(s, Some(n));
+        }
+    });
+    Some(format!("Inserted {k} mixer track{}", if k == 1 { "" } else { "s" }))
+}
+
 /// Moves tracks `from..to` (exclusive) by `d` places (+1 = right): contents, routes into them, channel targets and
 /// hosted slot instances. The track at the destination end is overwritten; callers make room first.
 fn shift_tracks(s: &mut State, from: u16, to: u16, d: i32) {
@@ -1212,11 +1236,11 @@ const COLORS: [(&str, u32); 8] = [
 /// Track menu (right click on a strip), §6.1.
 pub fn track_menu(s: &State, n: u16, x: f32, y: f32) -> Popup {
     let mut items = vec![PItem::head(format!("Mixer track ({})", name(s, n)))];
-    items.extend(track_items(n));
+    items.extend(track_items(s, n));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-fn track_items(n: u16) -> Vec<PItem> {
+fn track_items(s: &State, n: u16) -> Vec<PItem> {
     let mx = |c: MCmd| Cmd::Mixer(c);
     let mut colors: Vec<PItem> = vec![PItem::new("Default", mx(MCmd::Color(n, None)))];
     colors.extend(COLORS.iter().map(|&(l, c)| PItem::new(l, mx(MCmd::Color(n, Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8)))))));
@@ -1224,12 +1248,14 @@ fn track_items(n: u16) -> Vec<PItem> {
         PItem::new("Rename, color and icon...", mx(MCmd::Rename(n))).key("F2"),
         PItem::sub("Change color...", colors),
         PItem::new("Random color", mx(MCmd::RandomColor(n))),
-        PItem::not_yet("Gradient color..."),
+        // Greyed with one track selected, as in the original's menu (§6.1); with several it is Lemon Studio's version of
+        // the channel rack's gradient (no dialog).
+        if is_selected(s, n) && selected(s).len() > 1 { PItem::new("Gradient color...", mx(MCmd::GradientColor)) } else { PItem::not_yet("Gradient color...") },
         PItem::not_yet("Change icon..."),
         PItem::not_yet("Assign to new Audio track(s)"),
         PItem::not_yet("Unassign from Audio track(s)"),
         PItem::sep(),
-        PItem::sub("File", vec![PItem::not_yet("Render to wave file...")]),
+        PItem::sub("File", vec![PItem::new("Render to wave file...", mx(MCmd::RenderWave(n)))]),
         PItem::new("Open audio editor", mx(MCmd::AudioEditor(n))).key("Ctrl+E"),
         PItem::new("Open audio editor and record", mx(MCmd::AudioEditorRecord(n))).key("Shift+E"),
         PItem::sep(),
@@ -1276,7 +1302,7 @@ fn track_items(n: u16) -> Vec<PItem> {
         PItem::sep(),
         PItem::new("Delete", mx(MCmd::Delete(n))).key("Del"),
         PItem::new("Insert one", mx(MCmd::InsertOne(n))),
-        PItem::not_yet("Insert multiple..."),
+        PItem::new("Insert multiple...", mx(MCmd::InsertMultiple(n))),
         PItem::sub("Insert from state", vec![PItem::not_yet("(no saved states)")]),
         PItem::head("CPU"),
         PItem::not_yet("Allow threaded processing").mark(Mark::Check(true)),
@@ -1312,7 +1338,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         // PItem::new("Cable physics (debug)...", Cmd::Mixer(MCmd::CablePhysics)).mark(Mark::Check(s.cables.borrow().debug)),
         PItem::head(format!("Mixer track ({})", name(s, s.selected_mixer))),
     ];
-    items.extend(track_items(s.selected_mixer));
+    items.extend(track_items(s, s.selected_mixer));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
@@ -1407,7 +1433,7 @@ fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
 pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
     let step = match &c {
-        MCmd::Color(..) | MCmd::RandomColor(_) => Some("Mixer track color"),
+        MCmd::Color(..) | MCmd::RandomColor(_) | MCmd::GradientColor => Some("Mixer track color"),
         MCmd::Reset(_) => Some("Mixer track reset"),
         MCmd::ResetRouting(_) | MCmd::UnrouteTo(_) | MCmd::Route { .. } | MCmd::RouteChannels { .. } => Some(ROUTING),
         MCmd::Trim { .. } | MCmd::Delete(_) => Some("Delete mixer track"),
@@ -1451,6 +1477,19 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 let c = crate::patterns::random_color(u64::from(t).wrapping_mul(0x9e37_79b9) ^ u64::from(rand_seed()));
                 if let Some(m) = track_mut(s, t) {
                     m.color = Some(c);
+                }
+            }
+            None
+        }
+        MCmd::GradientColor => {
+            let mut t = selected(s);
+            t.sort_unstable();
+            if let (Some(&a), Some(&b)) = (t.first(), t.last()) {
+                let (a, b) = (track(s, a).and_then(|m| m.color), track(s, b).and_then(|m| m.color));
+                for (c, &n) in crate::rack::gradient_colors(a, b, t.len()).into_iter().zip(&t) {
+                    if let Some(m) = track_mut(s, n) {
+                        m.color = Some(c);
+                    }
                 }
             }
             None
@@ -1570,6 +1609,18 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::InsertOne(n) => {
             let n = add_track(s, Some(n.max(1)));
             Some(format!("Inserted {}", name(s, n)))
+        }
+        MCmd::InsertMultiple(n) => {
+            crate::playlist::start_edit(s, EditTarget::MixerInsert(n.max(1)), at);
+            if let Some(e) = s.playlist.edit.as_mut() {
+                e.sel = true;
+            }
+            Some("How many tracks to insert: type a number, Enter inserts them".into())
+        }
+        MCmd::RenderWave(n) => {
+            let tracks = targets(s, n);
+            app.open_track_render(tracks);
+            return None;
         }
         MCmd::Route { dst, only, side } => route(s, dst, only, side),
         // Wide is the layout shown; the others are greyed out in the menu.
@@ -2514,7 +2565,7 @@ mod tests {
         a.plugins.effects = crate::plugins::builtin_effects();
         let logger = |b: &[u8]| from_plugin_state(b).map(|s| (s.rec.when, s.rec.max, s.rec.append, s.rec.slave, s.rec.armed));
         let want = Some((WHEN_ON_PLAY, 3, true, true, true));
-        assert!(track_items(2).iter().any(|i| i.label == "Open audio editor and record" && i.enabled));
+        assert!(track_items(&a.state, 2).iter().any(|i| i.label == "Open audio editor and record" && i.enabled));
         run(&mut a, MCmd::AudioEditorRecord(2));
         let Some(FxReq::Create { track: 2, slot: 0, index, state: Some(st) }) = a.state.mixer.pending.first().cloned() else {
             panic!("{:?}", a.state.mixer.pending)
@@ -2563,5 +2614,90 @@ mod tests {
         let i = (0..200).find(|&i| item_at(TOOLS_MENU, i).is_some_and(|it| it.label == REMOVE_TESLAS_LABEL)).expect("in TOOLS");
         a.menu_item(TOOLS_MENU, i);
         assert_eq!(a.state.message.as_deref(), Some("No audio editors in the mixer"));
+    }
+
+    /// Insert multiple... asks how many (a box opening on 2, selected) and inserts that many fresh tracks in front of
+    /// the track, one undo step; text that is not a number inserts none.
+    #[test]
+    fn insert_multiple_tracks() {
+        let mut a = app();
+        let len = a.state.project.mixer.len();
+        let it = track_items(&a.state, 3).into_iter().find(|i| i.label == "Insert multiple...").unwrap();
+        assert_eq!((it.enabled, it.cmd), (true, Cmd::Mixer(MCmd::InsertMultiple(3))));
+        track_mut(&mut a.state, 3).unwrap().name = Some("Three".into());
+        a.state.project.channels[0].mixer_track = 3;
+        run(&mut a, MCmd::InsertMultiple(3));
+        let e = a.state.playlist.edit.clone().expect("the box");
+        assert_eq!((e.target, e.text.as_str(), e.sel), (EditTarget::MixerInsert(3), "2", true));
+        a.state.playlist.edit.as_mut().unwrap().text = "3".into();
+        let steps = a.state.history.at();
+        crate::playlist::commit_edit(&mut a.state);
+        assert_eq!(a.state.project.mixer.len(), len + 3);
+        assert_eq!(name(&a.state, 6), "Three");
+        assert_eq!(a.state.project.channels[0].mixer_track, 6, "channels follow their track");
+        assert_eq!((name(&a.state, 3), a.state.selected_mixer), ("Bus 3".to_string(), 3));
+        assert_eq!(a.state.message.as_deref(), Some("Inserted 3 mixer tracks"));
+        assert_eq!((a.state.history.at(), a.state.history.newest_done()), (steps + 1, Some(INSERT)));
+        crate::history::undo(&mut a.state);
+        assert_eq!((a.state.project.mixer.len(), name(&a.state, 3)), (len, "Three".to_string()));
+        assert_eq!(insert_many(&mut a.state, 3, "lots").as_deref(), Some("Insert multiple: \"lots\" is not a number"));
+        assert_eq!(a.state.project.mixer.len(), len);
+        insert_many(&mut a.state, 1, "1000");
+        assert_eq!(a.state.project.mixer.len(), len + usize::from(INSERT_MAX), "at most INSERT_MAX at once");
+    }
+
+    /// Gradient color...: greyed with one track selected; with several, their colours run from the first one's to the
+    /// last one's in track order (a hue sweep when either has none), one undo step.
+    #[test]
+    fn gradient_color_over_the_selected_tracks() {
+        let mut a = app();
+        let entry = |a: &App, n: u16| track_items(&a.state, n).into_iter().find(|i| i.label == "Gradient color...").unwrap();
+        select(&mut a.state, 2, false);
+        assert!(!entry(&a, 2).enabled, "one track");
+        select(&mut a.state, 6, true);
+        select(&mut a.state, 4, true);
+        assert_eq!((entry(&a, 4).enabled, entry(&a, 4).cmd), (true, Cmd::Mixer(MCmd::GradientColor)));
+        assert!(!entry(&a, 9).enabled, "a track outside the selection");
+        let (red, blue) = (Rgb::new(200, 0, 0), Rgb::new(0, 0, 100));
+        track_mut(&mut a.state, 2).unwrap().color = Some(red);
+        track_mut(&mut a.state, 6).unwrap().color = Some(blue);
+        let steps = a.state.history.at();
+        run(&mut a, MCmd::GradientColor);
+        let col = |a: &App, n: u16| track(&a.state, n).unwrap().color;
+        assert_eq!((col(&a, 2), col(&a, 4), col(&a, 6)), (Some(red), Some(Rgb::new(100, 0, 50)), Some(blue)));
+        assert_eq!(col(&a, 3), None, "unselected tracks keep theirs");
+        assert_eq!(a.state.history.at(), steps + 1);
+        crate::history::undo(&mut a.state);
+        assert_eq!(col(&a, 4), None);
+    }
+
+    /// File ▸ Render to wave file...: the Export form for the selected tracks, or the one clicked, named after it and
+    /// with WAV ticked; its export writes those tracks' outputs (`export::Job::tracks`).
+    #[test]
+    fn render_to_wave_file_opens_the_form_for_the_tracks() {
+        let mut a = app();
+        a.state.project.patterns[0].notes.push(os_model::Note::step(0, 0));
+        a.state.song_mode = false;
+        let file = track_items(&a.state, 2).into_iter().find(|i| i.label == "File").unwrap();
+        assert_eq!(file.children[0].cmd, Cmd::Mixer(MCmd::RenderWave(2)));
+        track_mut(&mut a.state, 2).unwrap().name = Some("Bass: sub".into());
+        run(&mut a, MCmd::RenderWave(2));
+        let form = |a: &App| match &a.state.dialogs.last().expect("the form").body {
+            crate::dialog::Body::Project(crate::project_forms::Form::Export(f)) => (**f).clone(),
+            _ => panic!("not the Export form"),
+        };
+        let f = form(&a);
+        assert_eq!((f.tracks.clone(), f.name.text.as_str(), f.o.formats), (vec![2], "Bass_ sub", [true, false, false, false]));
+        assert!(!f.check(2).1 && !f.check(3).1, "Split mixer tracks does not apply");
+        let job = a.export_job(&f);
+        assert_eq!((job.tracks, job.options.split), (vec![2], true));
+        // The selection, when the track clicked is in it.
+        a.state.dialogs.clear();
+        select(&mut a.state, 2, false);
+        select(&mut a.state, 4, true);
+        run(&mut a, MCmd::RenderWave(4));
+        let mut t = form(&a).tracks;
+        t.sort_unstable();
+        assert_eq!(t, [2, 4]);
     }
 }
