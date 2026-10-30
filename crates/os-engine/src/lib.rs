@@ -11,6 +11,7 @@
 //! - [`clock`]: the sequencer's tick clock (ticks to samples).
 //! - [`engine`]: tick-based playback of patterns and the playlist through the mixer.
 //! - [`metronome`]: the click on every beat while playing live.
+//! - [`parallel`]: rendering on several cores (a pool of worker threads and the jobs' graph).
 //! - [`voices`]: a hosted instrument's voices as the host counts them.
 //! - [`wav`]: writing renders to disk.
 
@@ -21,6 +22,7 @@ pub mod envelope;
 pub mod instrument;
 pub mod laws;
 pub mod metronome;
+pub mod parallel;
 pub mod sample;
 pub mod voices;
 pub mod wav;

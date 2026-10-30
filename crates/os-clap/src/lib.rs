@@ -37,6 +37,7 @@ use clap_sys::ext::params::{
 };
 use clap_sys::ext::render::{clap_plugin_render, CLAP_EXT_RENDER, CLAP_RENDER_OFFLINE, CLAP_RENDER_REALTIME};
 use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
+use clap_sys::ext::thread_check::{clap_host_thread_check, CLAP_EXT_THREAD_CHECK};
 use clap_sys::ext::voice_info::{clap_host_voice_info, clap_plugin_voice_info, clap_voice_info, CLAP_EXT_VOICE_INFO};
 use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
 use clap_sys::host::clap_host;
@@ -315,6 +316,9 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
     if id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU || id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU_COMPAT {
         return &context_menu::HOST_CONTEXT_MENU as *const clap_sys::ext::context_menu::clap_host_context_menu as *const c_void;
     }
+    if id == CLAP_EXT_THREAD_CHECK {
+        return &HOST_THREAD_CHECK as *const clap_host_thread_check as *const c_void;
+    }
     #[cfg(all(unix, not(target_os = "macos")))]
     if let Some(ext) = run_loop::extension(id) {
         return ext;
@@ -464,6 +468,24 @@ static HOST_PARAMS: clap_host_params =
 /// The plugin's voice count changed (a patch with another polyphony): the voice list's limit is read again on the UI
 /// tick (spec: audio/voices.md §2.7).
 static HOST_VOICE_INFO: clap_host_voice_info = clap_host_voice_info { changed: Some(host_voice_info_changed) };
+/// Which thread asks (`thread-check`): the engine's rendering thread and its mixing workers are audio threads
+/// (`os_engine::parallel::on_audio_thread`; spec: audio/multicore.md "Plugins"); the main thread is the one
+/// `set_main_thread` named, or, before that, any thread that is not an audio thread.
+static HOST_THREAD_CHECK: clap_host_thread_check = clap_host_thread_check { is_main_thread: Some(host_is_main_thread), is_audio_thread: Some(host_is_audio_thread) };
+static MAIN_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+/// Names the calling thread the main thread (the app's UI thread) for plugins that ask.
+pub fn set_main_thread() {
+    let _ = MAIN_THREAD.set(std::thread::current().id());
+}
+unsafe extern "C" fn host_is_main_thread(_host: *const clap_host) -> bool {
+    match MAIN_THREAD.get() {
+        Some(id) => *id == std::thread::current().id(),
+        None => !os_engine::parallel::on_audio_thread(),
+    }
+}
+unsafe extern "C" fn host_is_audio_thread(_host: *const clap_host) -> bool {
+    os_engine::parallel::on_audio_thread()
+}
 unsafe extern "C" fn host_voice_info_changed(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).voice_info.store(true, Ordering::Release) };
     unsafe { attend(host) };
@@ -2103,6 +2125,31 @@ mod mono_mock;
 mod tests {
     use super::*;
     use os_engine::Instrument;
+
+    // spec: audio/multicore.md "Plugins"
+    /// A plugin asking which thread it is on hears "audio" on the rendering thread and on the mixing workers, "main"
+    /// elsewhere.
+    #[test]
+    fn thread_check_knows_the_audio_threads() {
+        let host = ptr::null();
+        let ext = unsafe { host_get_extension(host, CLAP_EXT_THREAD_CHECK.as_ptr()) } as *const clap_host_thread_check;
+        assert!(!ext.is_null());
+        let ext = unsafe { &*ext };
+        let (main, audio) = (ext.is_main_thread.unwrap(), ext.is_audio_thread.unwrap());
+        assert!(unsafe { !audio(host) && main(host) });
+        // The engine renders a tick inside such a scope; the workers are audio threads of their own.
+        let pool = os_engine::parallel::Pool::new(2, None);
+        let mut graph = os_engine::parallel::Graph::default();
+        graph.set(4, &mut vec![]);
+        let seen = Mutex::new(Vec::new());
+        {
+            let _scope = os_engine::parallel::AudioScope::enter();
+            assert!(unsafe { audio(host) && !main(host) });
+            assert!(pool.run(&graph, &|_, _| seen.lock().unwrap().push(unsafe { (audio(ptr::null()), main(ptr::null())) })));
+        }
+        assert_eq!(*seen.lock().unwrap(), [(true, false); 4]);
+        assert!(unsafe { !audio(host) && main(host) });
+    }
 
     /// A plugin whose main ports are mono (DPF's Kars has a mono output) gets one channel each way: its output is
     /// heard on both sides, and an effect's input reaches it as the average of both sides. Without the audio-ports

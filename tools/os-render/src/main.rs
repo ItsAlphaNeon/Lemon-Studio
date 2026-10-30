@@ -4,10 +4,13 @@
 
 //! os-render: render an FLP project to a 32-bit float WAV with the Lemon Studio engine.
 //!
-//! Usage: os-render <project.flp> <out.wav> [--pattern N] [--rate HZ] [--factory DIR]
+//! Usage: os-render <project.flp> <out.wav> [--pattern N] [--rate HZ] [--factory DIR] [--threads N]
 //!
 //! `--factory` is the FL Studio install folder used to resolve `%FLStudioFactoryData%` sample
 //! paths (default: `C:\Program Files\Image-Line\FL Studio 2026` if present).
+//!
+//! `--threads` is the number of mixing workers beside the rendering thread (default: one fewer than the physical
+//! cores, guessed; 0 renders on one thread). The result is the same sample for sample either way.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -30,17 +33,19 @@ fn run() -> Result<(), String> {
     let mut mode = PlayMode::Song;
     let mut rate = 44100u32;
     let mut factory = SampleLibrary::default_factory_dir();
+    let mut threads = os_engine::parallel::default_workers(None);
     while let Some(a) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
         match a.as_str() {
             "--pattern" => mode = PlayMode::Pattern(value("--pattern")?.parse().map_err(|e| format!("--pattern: {e}"))?),
             "--rate" => rate = value("--rate")?.parse().map_err(|e| format!("--rate: {e}"))?,
             "--factory" => factory = Some(PathBuf::from(value("--factory")?)),
+            "--threads" => threads = value("--threads")?.parse().map_err(|e| format!("--threads: {e}"))?,
             _ => positional.push(a),
         }
     }
     let [input, output] = positional.as_slice() else {
-        return Err("usage: os-render <project.flp> <out.wav> [--pattern N] [--rate HZ] [--factory DIR]".into());
+        return Err("usage: os-render <project.flp> <out.wav> [--pattern N] [--rate HZ] [--factory DIR] [--threads N]".into());
     };
 
     let bytes = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
@@ -50,6 +55,7 @@ fn run() -> Result<(), String> {
     let mut library = SampleLibrary::new(factory);
     let started = std::time::Instant::now();
     let mut engine = Engine::new(&project, &mut library, rate, mode);
+    engine.set_threads((threads > 0).then(|| os_engine::parallel::Pool::new(threads, None)));
     // A song renders from its start marker and jumps at skips, as the app's export (spec: audio/song-structure.md
     // "Time markers").
     engine.follow_markers();
@@ -61,8 +67,9 @@ fn run() -> Result<(), String> {
 
     let peak = audio.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     eprintln!(
-        "rendered {secs:.2} s in {:.2} s, peak {peak:.4} ({:+.2} dBFS) -> {output}",
+        "rendered {secs:.2} s in {:.2} s on {} thread(s), peak {peak:.4} ({:+.2} dBFS) -> {output}",
         started.elapsed().as_secs_f64(),
+        threads + 1,
         20.0 * peak.max(1e-12).log10()
     );
     let r = &engine.report;
