@@ -54,6 +54,8 @@ pub enum RecCmd {
     /// Dump the last n minutes, replacing the pattern's notes (true) or merging with them.
     DumpAs(u32, bool),
     ClearLog,
+    /// The audio logger keeps the last n minutes.
+    AudioLog(u32),
 }
 
 impl Opt {
@@ -318,6 +320,7 @@ impl App {
                 self.state.rec.log.clear();
                 Some("Score log cleared".into())
             }
+            RecCmd::AudioLog(m) => Some(self.set_audio_log_minutes(m)),
         };
         self.invalidate();
         msg

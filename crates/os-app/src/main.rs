@@ -24,6 +24,7 @@ mod cable;
 mod capture;
 mod one_click;
 mod track_rec;
+mod audio_log;
 mod score_log;
 mod clip_colors;
 mod clock;

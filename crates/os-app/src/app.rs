@@ -1251,6 +1251,8 @@ pub struct App {
     pub(crate) audio_rec: Option<crate::one_click::AudioRec>,
     /// Disk recording into the armed mixer tracks under way (spec: audio/track-io.md §2.5).
     pub(crate) track_rec: Option<crate::track_rec::TrackRec>,
+    /// TOOLS > Retro audio capture: the last minutes the device played (spec: ui/audio-logger.md).
+    pub(crate) audio_log: crate::audio_log::Log,
     /// Wheel movement in an open menu short of a whole notch (trackpads).
     menu_notch: f32,
     /// A Shift+press grabbed piano-roll notes: the drag's first move picks up copies of them (`App::pick_up_notes`).
@@ -1491,6 +1493,7 @@ impl App {
             warp: None,
             audio_rec: None,
             track_rec: None,
+            audio_log: Default::default(),
             menu_notch: 0.0,
             shift_clone: false,
             auto_close: Default::default(),
@@ -3927,6 +3930,7 @@ impl App {
         }
         self.follow_device();
         self.record_tick();
+        self.audio_log.tick();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
         let now = std::time::Instant::now();
@@ -8666,6 +8670,11 @@ impl App {
             MenuCmd::IntoWorkspace => self.move_into_workspace(),
             MenuCmd::Typing => self.toggle_typing(),
             MenuCmd::Metronome => self.toggle_metronome(),
+            MenuCmd::AudioLog => self.toggle_audio_log(),
+            MenuCmd::DumpAudioLog => {
+                let m = self.dump_audio_log();
+                self.state.message = Some(m);
+            }
             MenuCmd::ClearLog => {
                 if let Some(m) = self.rec_cmd(crate::record::RecCmd::ClearLog) {
                     self.state.message = Some(m);

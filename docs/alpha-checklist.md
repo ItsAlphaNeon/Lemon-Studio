@@ -65,10 +65,12 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   jumps, the Start / Stop recording markers' punch ([playlist.rs](../crates/os-app/src/playlist.rs))
 - [ ] **Channel rack right-click menus.** 25 entries greyed out on 2026-10-29: Type in value, Burn selected loops to
   pattern, instrument tracks, Advanced looping ([rack.rs](../crates/os-app/src/rack.rs))
-- [ ] **Main menu bar.** 22 of its 136 entries greyed out on 2026-10-29: 13 in TOOLS, 5 in VIEW, 4 in HELP
+- [ ] **Main menu bar.** 19 of its 136 entries greyed out on 2026-10-29: 10 in TOOLS, 5 in VIEW, 4 in HELP
   ([menus.rs](../crates/os-app/src/views/menus.rs))
-- [ ] **TOOLS ▸ Audio logger and Dump to audio editor.** FL keeps the master's last minutes in memory; not measured
-  yet. Tesla's rolling recording goes with it: at its time limit Tesla stops, where Edison keeps the last minutes
+- [x] **TOOLS ▸ Audio logger and Dump to audio editor.** Enabled (on by default, as in FL Studio) keeps the last 1 to
+  10 minutes of what the device plays, the header showing the memory used; Dump puts them into the master track's
+  Tesla. At its time limit Tesla now keeps the last minutes, as Edison does. What FL Studio's logger records and how
+  long was not measured: Lemon Studio's design
 - [ ] **Tesla's later tools.** Envelopes, equalize, blur and convolution reverb, clean-up, time stretch and pitch
   shift, slicing and beat detection (group 5 of Tesla's roadmap in the specs)
 - [x] **Value boxes.** All of them work, the last two being the autosave Maximum and Metronome track. MIDI settings'

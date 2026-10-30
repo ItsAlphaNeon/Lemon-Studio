@@ -268,11 +268,14 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - A project's Edison slots open as Tesla with their audio, and are saved back as Edison so the file still opens in
   FL Studio
 - The toolbar's audio editor button and the mixer's Open audio editor show Tesla on the track; Open audio editor and
-  record sets one up as an audio logger (records while the song plays, 5 minutes); One-click audio recording and the
-  Record button's question can record an input into the master track's Tesla; Remove all audio editor instances
-  (mixer options, TOOLS) clears them after asking
-- Not yet: envelopes, the spectral and clean-up tools, time stretch and pitch shift in Tesla, slicing; TOOLS ▸ Audio
-  logger and Dump to audio editor; a rolling recording (Tesla stops at its time limit, Edison keeps the last minutes)
+  record sets one up as an audio logger (records while the song plays, keeping the last 5 minutes); One-click audio
+  recording and the Record button's question can record an input into the master track's Tesla; Remove all audio
+  editor instances (mixer options, TOOLS) clears them after asking
+- At its time limit Tesla keeps recording and holds the last minutes (a rolling log, as Edison)
+- TOOLS ▸ Audio logger: on by default, it keeps the last 1 to 10 minutes of what the audio device plays (Settings ▸;
+  the header shows the memory used); Dump to audio editor puts them, silence at either end left out, into a WAV in
+  the Recorded folder and into the master track's Tesla
+- Not yet: envelopes, the spectral and clean-up tools, time stretch and pitch shift in Tesla, slicing
 
 ## ✅ Exporting audio
 
