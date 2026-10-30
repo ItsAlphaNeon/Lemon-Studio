@@ -343,6 +343,9 @@ pub enum Cmd {
     Rack(crate::rack::RCmd),
     /// Mixer menus (spec: ui/mixer.md §6-7).
     Mixer(crate::mixer::MCmd),
+    /// A slot command from the plugin window menu of mixer track `.0`'s slot (a mixer or plugin menu command): the
+    /// track is the selected one for the command only.
+    SlotWin(u16, Box<Cmd>),
     /// Plugin parameter menus (spec: plugins/plugin-parameters.md §5-6).
     Param(crate::params::PCmd),
     /// "Enter value..." of a knob or parameter menu (spec: ui/type-in-value.md).
@@ -2547,6 +2550,8 @@ pub enum PickCmd {
     ChangeColor,
     RandomColor,
     LoadSample,
+    EditSample,
+    CutItself,
     Clone,
     Delete,
 }
@@ -2570,9 +2575,14 @@ pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
         PItem::sep(),
     ]);
     if audio {
-        items.extend([it("Load sample...", PickCmd::LoadSample), PItem::not_yet("Edit sample...")]);
+        // Greyed while the channel has no sample to open.
+        let edit = it("Edit sample...", PickCmd::EditSample);
+        let has = s.project.channel(ch).is_some_and(|c| c.sample_path.as_deref().is_some_and(|p| !p.is_empty()));
+        items.extend([it("Load sample...", PickCmd::LoadSample), if has { edit } else { edit.off() }]);
     }
-    items.extend([PItem::not_yet("Chokes itself").mark(Mark::Check(true)), PItem::sep(), it("Clone", PickCmd::Clone)]);
+    // Ticked while the channel's cut and cut by are one group, as on the rack's channel menu (ui/channel-rack.md §18).
+    let cuts = s.project.channel(ch).is_some_and(|c| crate::rack::cuts_itself(&c.misc));
+    items.extend([it("Chokes itself", PickCmd::CutItself).mark(Mark::Check(cuts)), PItem::sep(), it("Clone", PickCmd::Clone)]);
     if !audio {
         items.push(it("Clone with links", PickCmd::Clone));
     }
@@ -2607,10 +2617,40 @@ fn pick(app: &mut App, c: PickCmd, ch: u16) -> Option<String> {
             s.piano.dirty = true;
         }
         PickCmd::LoadSample => return crate::rack::run(app, crate::rack::RCmd::LoadSample(row)),
+        PickCmd::EditSample => return edit_sample(app, row),
+        // Through the rack's command, so it is one undo step there too.
+        PickCmd::CutItself => return crate::rack::run(app, crate::rack::RCmd::CutItself(row)),
         PickCmd::Clone => crate::rack::clone_rows(app, &[row]),
         PickCmd::Delete => crate::rack::ask_delete(s, vec![row]),
     }
     None
+}
+
+/// Edit sample... of a picker item (Lemon Studio's design; the original opens its audio editor): rack row `row`'s
+/// sample goes into Tesla on the master track, its first Tesla when that holds no sample, else a new one in the first
+/// free slot, as Open capture in audio editor puts the retro audio capture there (spec: plugins/tesla/README.md
+/// "Recording into Tesla from Lemon Studio"). Tesla keeps the file's path; the channel keeps its sample as it was.
+fn edit_sample(app: &mut App, row: usize) -> Option<String> {
+    let path = app.state.project.channels.get(row)?.sample_path.clone().filter(|p| !p.is_empty())?;
+    let file = std::path::PathBuf::from(crate::plugins::resolve_sample(&path));
+    let name = file.file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+    // A WAV keeps its own sample format; other files are decoded as the engine plays them.
+    let sample = match std::fs::read(&file).map_err(|e| e.to_string()).and_then(|b| tesla::wav::read(&b)) {
+        Ok(s) => s,
+        Err(_) => match os_engine::sample::load(&file) {
+            Ok(s) => tesla::sample::Sample::from_channels(s.rate, vec![s.left, s.right], tesla::sample::Format::Float32),
+            Err(e) => return Some(format!("{name} could not be read: {e}")),
+        },
+    };
+    let text = file.to_string_lossy().into_owned();
+    if app.tesla_for_recording(0, |s| {
+        s.sample = sample;
+        s.path = text;
+    }) {
+        Some(format!("{name} is in the audio editor"))
+    } else {
+        app.state.message.take()
+    }
 }
 
 /// "Edit automation clip..." of a parameter menu (spec: plugins/plugin-parameters.md §5.2, a Lemon Studio choice): the
@@ -3918,6 +3958,12 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Project(c) => return crate::project_picker::run(app, c),
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
+        Cmd::SlotWin(t, c) => {
+            let was = std::mem::replace(&mut app.state.selected_mixer, t);
+            let m = run(app, *c);
+            app.state.selected_mixer = was;
+            return m;
+        }
         Cmd::Param(c) => return app.params_cmd(c),
         Cmd::EditEvents(tgt, name, v, range) => return app.edit_events(tgt, &name, v, range),
         Cmd::Events(c) => return app.events_cmd(c),
@@ -4168,7 +4214,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::SlotWin(..) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -4969,8 +5015,8 @@ pub fn rescale(s: &mut State, from: u16, to: u16) {
     }
 }
 
-/// The plugin window's ▸ menu (spec: ui/plugin-window.md "Docking and the window menu"): FL's entries, only Detached
-/// works yet.
+/// The plugin window's ▸ menu (spec: ui/plugin-window.md "Docking and the window menu"): FL's entries; Detached and
+/// Browse parameters work here, `fill_plugin_window_menu` and `presets::fill_window_menu` enable more.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
     let items = vec![
@@ -5007,4 +5053,185 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::new("Route to free mixer track", Cmd::Rack(crate::rack::RCmd::AssignFree(row))).key("Ctrl+L"),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// Enables the window menu's entries that act on the window's channel or slot (`key`, a rack row or a `fx_key`; spec:
+/// ui/plugin-window.md "Lemon Studio: the channel and slot entries"). A channel's window: Piano roll, Delete...,
+/// Rename, color and icon..., Change color... and Random color are the rack's channel menu entries of those names
+/// (ui/channel-rack.md §18), the boxes opening at the mouse as the picker's do. An effect slot's window: Replace ▸,
+/// Delete... and Rename, color and icon... are the mixer slot menu's (ui/mixer.md §7.2), on that slot whichever track
+/// is selected; the others stay greyed there.
+pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
+    use crate::mixer::MCmd;
+    use crate::rack::RCmd;
+    let set = |it: &mut PItem, cmd: Cmd| {
+        it.cmd = cmd;
+        it.enabled = true;
+    };
+    if let Some((t, k)) = crate::plugins::fx_of(key) {
+        // Every command of the slot's entries runs with its track selected.
+        fn on_track(t: u16, items: &mut [PItem]) {
+            for it in items.iter_mut() {
+                if it.cmd != Cmd::Nothing {
+                    it.cmd = Cmd::SlotWin(t, Box::new(std::mem::replace(&mut it.cmd, Cmd::Nothing)));
+                }
+                on_track(t, &mut it.children);
+            }
+        }
+        for it in menu.items.iter_mut() {
+            match &*it.label {
+                "Replace" => {
+                    let mut replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(k)), true);
+                    on_track(t, &mut replace);
+                    *it = PItem::sub("Replace", replace);
+                }
+                "Delete..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::SlotDelete(k))))),
+                "Rename, color and icon..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::SlotRename(k))))),
+                _ => {}
+            }
+        }
+        return;
+    }
+    let Some(ch) = s.project.channels.get(key).map(|c| c.index) else { return };
+    for it in menu.items.iter_mut() {
+        match &*it.label {
+            "Piano roll" => set(it, Cmd::Rack(RCmd::PianoRoll(key))),
+            "Delete..." => set(it, Cmd::Rack(RCmd::Delete(key))),
+            "Rename, color and icon..." => set(it, Cmd::Pick(PickCmd::Rename, ch)),
+            "Change color..." => set(it, Cmd::Pick(PickCmd::ChangeColor, ch)),
+            "Random color" => set(it, Cmd::Rack(RCmd::RandomColor(key))),
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> App {
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        app
+    }
+
+    fn entry<'a>(m: &'a Popup, label: &str) -> &'a PItem {
+        m.items.iter().find(|i| i.label == label && !i.head).expect(label)
+    }
+
+    /// The picker's Chokes itself is the rack's (ui/channel-rack.md §18): ticked while the channel cuts itself, ticking
+    /// takes the lowest free cut group, unticking clears it, and each is one undo step.
+    #[test]
+    fn picker_cut_itself() {
+        let mut app = app();
+        app.state.project.channels[0].kind = os_model::ChannelKind::AudioClip;
+        let ch = app.state.project.channels[0].index;
+        let it = |app: &App| entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Chokes itself").clone();
+        assert!(it(&app).enabled);
+        assert_eq!(it(&app).mark, Mark::Check(false));
+        let cmd = it(&app).cmd;
+        run(&mut app, cmd);
+        let m = &app.state.project.channels[0].misc;
+        assert_eq!((m.cut, m.cut_by), (1, 1));
+        assert_eq!(it(&app).mark, Mark::Check(true));
+        let cmd = it(&app).cmd;
+        run(&mut app, cmd);
+        let m = &app.state.project.channels[0].misc;
+        assert_eq!((m.cut, m.cut_by), (0, 0));
+        crate::history::undo(&mut app.state);
+        assert_eq!(it(&app).mark, Mark::Check(true), "one undo step");
+    }
+
+    /// Edit sample... (Lemon Studio's design): greyed without a sample; with one, the sample goes into Tesla on the
+    /// master track.
+    #[test]
+    fn picker_edit_sample_opens_tesla() {
+        let mut app = app();
+        app.plugins.effects = crate::plugins::builtin_effects();
+        app.state.project.channels[0].kind = os_model::ChannelKind::AudioClip;
+        app.state.project.channels[0].sample_path = None;
+        let ch = app.state.project.channels[0].index;
+        assert!(!entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Edit sample...").enabled, "no sample");
+        let dir = std::env::temp_dir().join(format!("ls_edit_sample_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Tone.wav");
+        let tone = tesla::sample::Sample::from_channels(44100, vec![vec![0.25; 4410], vec![-0.25; 4410]], tesla::sample::Format::Int16);
+        std::fs::write(&file, tesla::wav::write(&tone, tesla::wav::Depth::Own)).unwrap();
+        app.state.project.channels[0].sample_path = Some(file.to_string_lossy().into_owned());
+        let it = entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Edit sample...").clone();
+        assert!(it.enabled);
+        assert_eq!(run(&mut app, it.cmd).as_deref(), Some("Tone.wav is in the audio editor"));
+        let Some(crate::mixer::FxReq::Create { track: 0, state: Some(st), .. }) = app.state.mixer.pending.last().cloned() else {
+            panic!("{:?}", app.state.mixer.pending)
+        };
+        let saved = tesla::state::from_plugin_state(&st).unwrap();
+        assert_eq!((saved.sample.frames(), saved.sample.rate), (4410, 44100));
+        assert_eq!(std::path::PathBuf::from(&saved.path), file);
+        assert_eq!(app.state.project.channels[0].sample_path.as_deref(), Some(file.to_string_lossy().as_ref()), "the channel keeps its sample");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A channel's plugin window menu: Piano roll, Delete..., Rename, color and icon..., Change color... and Random
+    /// color are the rack's channel entries.
+    #[test]
+    fn channel_window_menu_entries() {
+        use crate::app::Win;
+        let mut app = app();
+        let mut m = plugin_window_menu(1, false, 0.0, 0.0);
+        fill_plugin_window_menu(&app.state, 1, &mut m);
+        for label in ["Piano roll", "Delete...", "Rename, color and icon...", "Change color...", "Random color"] {
+            assert!(entry(&m, label).enabled, "{label}");
+        }
+        for label in ["Link all parameters...", "Allow threaded processing", "Auto-bypass when silent", "Change icon...", "Save channel state as...", "Browse channel states"] {
+            assert!(!entry(&m, label).enabled, "{label} stays greyed");
+        }
+        run(&mut app, entry(&m, "Piano roll").cmd.clone());
+        assert!(app.state.shown(Win::PianoRoll));
+        assert_eq!(app.state.selected_channel, 1);
+        let before = app.state.project.channels[1].color;
+        run(&mut app, entry(&m, "Random color").cmd.clone());
+        assert_ne!(app.state.project.channels[1].color, before);
+        run(&mut app, entry(&m, "Rename, color and icon...").cmd.clone());
+        assert!(app.state.pat_ui.name_box.is_some(), "the name box opens");
+        app.state.pat_ui.name_box = None;
+        run(&mut app, entry(&m, "Change color...").cmd.clone());
+        assert!(app.state.pat_ui.name_box.as_ref().is_some_and(|b| b.palette), "with its palette");
+        app.state.pat_ui.name_box = None;
+        run(&mut app, entry(&m, "Delete...").cmd.clone());
+        assert!(app.state.rack.pending_delete.is_some() || app.state.rack.delete_now.is_some(), "asks first");
+    }
+
+    /// An effect slot's window menu: Replace ▸, Delete... and Rename, color and icon... act on that slot, whichever
+    /// mixer track is selected; the channel entries stay greyed.
+    #[test]
+    fn slot_window_menu_entries() {
+        let mut app = app();
+        app.plugins.effects = crate::plugins::builtin_effects();
+        app.state.plugdb.rebuild(&app.plugins);
+        let (t, k) = (3u16, 2u8);
+        crate::mixer::track_mut(&mut app.state, t).unwrap().slots[usize::from(k)] = Some(crate::plugins::new_slot("Test FX"));
+        app.state.selected_mixer = 5;
+        let key = crate::plugins::fx_key(t, k);
+        let mut m = plugin_window_menu(key, false, 0.0, 0.0);
+        fill_plugin_window_menu(&app.state, key, &mut m);
+        for label in ["Piano roll", "Change color...", "Random color"] {
+            assert!(!entry(&m, label).enabled, "{label} stays greyed");
+        }
+        // Replace ▸: the effects, into this slot.
+        fn leaf(items: &[PItem]) -> Option<&PItem> {
+            items.iter().find_map(|i| if i.children.is_empty() { matches!(i.cmd, Cmd::SlotWin(..)).then_some(i) } else { leaf(&i.children) })
+        }
+        let replace = entry(&m, "Replace");
+        assert!(replace.enabled && !replace.children.is_empty());
+        let Some(Cmd::SlotWin(3, inner)) = leaf(&replace.children).map(|i| i.cmd.clone()) else { panic!("an effect to pick") };
+        assert!(matches!(*inner, Cmd::Plugin(crate::plugin_menu::PlugCmd::Effect { slot: Some(2), .. })), "{inner:?}");
+        run(&mut app, entry(&m, "Rename, color and icon...").cmd.clone());
+        assert_eq!(app.state.playlist.edit.as_ref().map(|e| e.target.clone()), Some(EditTarget::SlotName(t, k)));
+        app.state.playlist.edit = None;
+        run(&mut app, entry(&m, "Delete...").cmd.clone());
+        assert!(crate::mixer::track(&app.state, t).unwrap().slots[usize::from(k)].is_none(), "the slot is cleared");
+        assert_eq!(app.state.selected_mixer, 5, "the selection stays");
+        crate::history::undo(&mut app.state);
+        assert!(crate::mixer::track(&app.state, t).unwrap().slots[usize::from(k)].is_some(), "one undo step");
+    }
 }

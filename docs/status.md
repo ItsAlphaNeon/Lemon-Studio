@@ -61,6 +61,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   bar, or 2, 4 or 8 bars, then jumps there exactly on it
 - Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
 - Track height, zoom and scroll saved with the project
+- The clip source picker's item menu: Cut itself (the rack's, one undo step) and Edit sample..., which opens an audio
+  clip's sample in Tesla on the master track
 - Project picker (VIEW, Ctrl+F8 or the toolbar's project button): a menu of the patterns and channels; picking a
   pattern makes it current, picking a channel opens its window
 - Song position slider in the toolbar: drag, click to step, right-click to jump, wheel; it follows playback
@@ -136,6 +138,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Spare state in plugin windows and mixer slots: Store in spare state, then Flip with spare state swaps the two to
   compare them (one undo step; the spare state is kept while the plugin is open, not in the project). Display preset
   name in preset selector hides or shows the preset's name in the window
+- The plugin window's menu acts on its own channel (Piano roll, Delete..., Rename, color and icon..., Change color...,
+  Random color) or effect slot (Replace ▸, Delete..., Rename, color and icon...)
 - Import of `.ospreset`, `.vstpreset` and VST2 `.fxp` / `.fxb` files (a bank goes into a folder of its own); a preset
   file dropped onto a plugin window, rack row or mixer slot loads there, and anywhere else adds its plugin
 
