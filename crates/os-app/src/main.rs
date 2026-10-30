@@ -53,6 +53,7 @@ mod icons;
 mod init;
 mod knobs;
 mod layout;
+mod lemon_state;
 mod loading;
 mod missing;
 mod mix_threads;
