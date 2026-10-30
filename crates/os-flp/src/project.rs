@@ -17,7 +17,7 @@ use os_model::clip_lfo::ClipLfo;
 use os_model::{
     Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelMisc, ChannelRack, ChannelSound, Clip, ClipSource, ControlPoint,
     DataFolder, Envelope, InitControl, MixerTrack,
-    Note, Pattern, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, WorkTime, CLIP_RECORD_LEN,
+    Note, Pattern, PerfSettings, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, WorkTime, CLIP_RECORD_LEN,
 };
 
 use crate::{Chunk, ChunkBody, Event, FlpFile, Header, Tag, Value};
@@ -86,6 +86,8 @@ mod id {
     pub const PANNING_LAW: u8 = 23;
     pub const AUTO_CROSSFADES: u8 = 44;
     pub const FAST_DECLICK: u8 = 40;
+    /// Performance mode, after event 40 (spec: ui/performance-mode.md §5).
+    pub const PERFORMANCE: u8 = 31;
     /// The project's main pitch, cents as a signed 16-bit value (spec: flp/engine-events.md "Project").
     pub const MAIN_PITCH: u8 = 80;
     /// Channel fine tune, cents (spec: audio/voice-levels.md).
@@ -428,6 +430,8 @@ struct Layout {
     unread_settings: Vec<(u8, usize)>,
     /// Fast declick for cut groups (event 40), after event 100.
     fast_declick: Option<usize>,
+    /// Performance mode (event 31), after event 100.
+    performance: Option<usize>,
     groups: Vec<usize>,
     current_group: Option<usize>,
     /// Event 216, the initial values.
@@ -631,6 +635,7 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
             (Region::Arrangements, id::FAST_DECLICK) if l.current_arrangement.is_some() && l.fast_declick.is_none() => {
                 l.fast_declick = Some(i)
             }
+            (Region::Arrangements, id::PERFORMANCE) if l.current_arrangement.is_some() && l.performance.is_none() => l.performance = Some(i),
             (Region::Arrangements | Region::Mixer, id::PLAYLIST_VIEW) => l.playlist_view = Some(i),
             (Region::Arrangements, id::PL_NAME) => {
                 if let Some(t) = l.arrangements.last_mut().and_then(|a| a.tracks.last_mut()) {
@@ -812,6 +817,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
         play_truncated: l.truncated.is_some_and(|i| int(&events[i]) != 0),
         panning_law: l.setting(id::PANNING_LAW).map(|i| int(&events[i]) as u8),
         fast_declick: l.fast_declick.map(|i| int(&events[i]) != 0),
+        performance: l.performance.map(|i| int(&events[i]) != 0),
         auto_crossfades: l.setting(id::AUTO_CROSSFADES).map(|i| int(&events[i]) != 0),
         main_pitch: l.main_pitch.map(|i| int(&events[i]) as u16 as i16),
         main_volume: main_volume(l.mixer_params.and_then(|i| events[i].data()).unwrap_or(&[])),
@@ -1798,7 +1804,33 @@ fn load_pl_track(events: &[Event], t: &PlTrackLoc, enc: TextEnc) -> PlaylistTrac
         grouped: r.get(46).is_some_and(|&b| b != 0),
         collapsed: r.get(61).is_some_and(|&b| b == 0),
         locked: r.get(47).is_some_and(|&b| b != 0),
+        perf: perf_settings(r),
     }
+}
+
+/// A track record's Performance settings, u32s at 22, 26, 30, 34, 38 and 42 (spec: ui/performance-mode.md §5); a
+/// short record or a value out of range keeps the default.
+fn perf_settings(r: &[u8]) -> PerfSettings {
+    let at = |o: usize| r.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    let pick = |o: usize, n: usize, d: u8| at(o).filter(|&v| (v as usize) < n).map_or(d, |v| v as u8);
+    let d = PerfSettings::default();
+    PerfSettings {
+        motion: pick(22, PerfSettings::MOTIONS.len(), d.motion),
+        press: pick(26, PerfSettings::PRESSES.len(), d.press),
+        trigger_sync: pick(30, PerfSettings::SYNCS.len(), d.trigger_sync),
+        queue: at(34).map_or(d.queue, |v| v != 0),
+        tolerant: at(38).map_or(d.tolerant, |v| v != 0),
+        position_sync: pick(42, PerfSettings::SYNCS.len(), d.position_sync),
+    }
+}
+
+/// The record bytes 22..46 for `p`.
+fn perf_bytes(p: &PerfSettings) -> [u8; 24] {
+    let mut b = [0u8; 24];
+    for (k, v) in [p.motion.into(), p.press.into(), p.trigger_sync.into(), u32::from(p.queue), u32::from(p.tolerant), p.position_sync.into()].into_iter().enumerate() {
+        b[4 * k..4 * k + 4].copy_from_slice(&u32::to_le_bytes(v));
+    }
+    b
 }
 
 /// The slot a slot marker (98) closes: its low byte. Files hold the slot's number there; a few (an FL 20.8 file and its
@@ -2603,6 +2635,14 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     if let (Some(i), Some(v)) = (l.current_arrangement, project.current_arrangement.filter(|&v| Some(v) != current.current_arrangement)) {
         set_int(&mut events[i], v.into());
     }
+    // Performance mode (event 31): in place, else behind 40 or 100 (spec: ui/performance-mode.md §5).
+    if let Some(on) = project.performance.filter(|&on| Some(on) != current.performance) {
+        match (l.performance, l.fast_declick.or(l.current_arrangement)) {
+            (Some(i), _) => set_int(&mut events[i], u32::from(on)),
+            (None, Some(at)) => inserts.push((at + 1, Event::new(id::PERFORMANCE, Value::U8(u8::from(on))))),
+            (None, None) => {}
+        }
+    }
 
     // Project settings the file lacks (11, 80, 17, 18, 30) go where FL 26 writes them (spec: flp/engine-events.md
     // "Project", "Order in the file": 156, 67, 9, 11, 80, 17, 18, 35, 23, 44, 30, 10): behind the last of the settings
@@ -3168,6 +3208,9 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             }
             if t.locked != old.locked {
                 patch_bytes(&mut events[tl.record], 47, &[u8::from(t.locked)]);
+            }
+            if t.perf != old.perf {
+                patch_bytes(&mut events[tl.record], 22, &perf_bytes(&t.perf));
             }
             if t.collapsed != old.collapsed {
                 patch_bytes(&mut events[tl.record], 61, &[u8::from(!t.collapsed)]);
@@ -3957,6 +4000,9 @@ pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
         if let Some(on) = project.fast_declick {
             ev.push(Event::new(id::FAST_DECLICK, Value::U8(u8::from(on))));
         }
+        if let Some(on) = project.performance {
+            ev.push(Event::new(id::PERFORMANCE, Value::U8(u8::from(on))));
+        }
     }
     // The mixer follows the arrangements (spec: flp/events/mixer.md "Where the mixer sits").
     if !project.arrangements.is_empty() && !project.mixer.is_empty() {
@@ -3987,8 +4033,7 @@ fn track_record(t: &PlaylistTrack) -> Vec<u8> {
     r[13..17].copy_from_slice(&1.0f32.to_le_bytes());
     r[17] = if t.number <= 33 { 0xf0 } else { 0xff };
     r[18..21].fill(0xff);
-    r[30] = 5;
-    r[38] = 1;
+    r[22..46].copy_from_slice(&perf_bytes(&t.perf));
     r[46] = u8::from(t.grouped);
     r[47] = u8::from(t.locked);
     r[53..61].fill(0xff);
@@ -4854,6 +4899,51 @@ mod tests {
             assert_eq!(ev[at].id, id::SONG_MODE, "in place");
             assert_eq!(load(&file).unwrap().song_mode, Some(!on));
         }
+    }
+
+    /// Performance mode (event 31, after 100 and 40) and each track's Performance settings (track record u32s at 22..46;
+    /// spec: ui/performance-mode.md §5): written, read, patched in place, and added behind 40 when the file has none.
+    #[test]
+    fn performance_mode_round_trip() {
+        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        (p.current_arrangement, p.fast_declick, p.performance) = (Some(0), Some(false), Some(false));
+        let file = reparse(&create(&p).unwrap());
+        let ev = events_of(&file).unwrap();
+        let at = ev.iter().position(|e| e.id == id::CURRENT_ARRANGEMENT).unwrap();
+        assert_eq!((ev[at + 1].id, ev[at + 2].id, int(&ev[at + 2])), (id::FAST_DECLICK, id::PERFORMANCE, 0));
+        // A new track's record holds the defaults: Trigger sync 4 beats (5 at 30), Tolerant (1 at 38).
+        let rec = ev.iter().find(|e| e.id == id::PL_TRACK).and_then(|e| e.data()).unwrap();
+        assert_eq!((rec[30], rec[38], rec[22..30].iter().all(|&b| b == 0)), (5, 1, true));
+        let mut q = load(&file).unwrap();
+        assert_eq!((q.performance, q.arrangements[0].tracks[0].perf), (Some(false), PerfSettings::default()));
+
+        let mut file = file;
+        q.performance = Some(true);
+        let perf = PerfSettings { motion: 6, press: 3, trigger_sync: 0, queue: true, tolerant: false, position_sync: 6 };
+        q.arrangements[0].tracks[2].perf = perf;
+        apply(&q, &mut file).unwrap();
+        let file = reparse(&file);
+        let ev = events_of(&file).unwrap();
+        assert_eq!(ev.iter().filter(|e| e.id == id::PERFORMANCE).count(), 1);
+        assert_eq!((ev[at + 2].id, int(&ev[at + 2])), (id::PERFORMANCE, 1), "in place");
+        let rec = ev.iter().filter(|e| e.id == id::PL_TRACK).nth(2).and_then(|e| e.data()).unwrap();
+        assert_eq!(rec[22..46], [6, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0]);
+        let back = load(&file).unwrap();
+        assert_eq!((back.performance, back.arrangements[0].tracks[2].perf, back.arrangements[0].tracks[1].perf), (Some(true), perf, PerfSettings::default()));
+
+        // A file without event 31 gets it behind 40 when performance mode is switched on.
+        p.performance = None;
+        let mut file = reparse(&create(&p).unwrap());
+        let mut q = load(&file).unwrap();
+        assert_eq!(q.performance, None);
+        q.performance = Some(true);
+        apply(&q, &mut file).unwrap();
+        let file = reparse(&file);
+        let ev = events_of(&file).unwrap();
+        assert_eq!((ev[at + 1].id, ev[at + 2].id, int(&ev[at + 2])), (id::FAST_DECLICK, id::PERFORMANCE, 1));
+        assert_eq!(load(&file).unwrap().performance, Some(true));
     }
 
     /// The initial values (event 216; spec: ui/settings-choices.md "Advanced: Initialize controls automatically",

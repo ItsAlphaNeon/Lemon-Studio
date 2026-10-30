@@ -99,6 +99,8 @@ pub struct Project {
     pub panning_law: Option<u8>,
     pub fast_declick: Option<bool>,
     pub auto_crossfades: Option<bool>,
+    /// Performance mode (event 31: 1 = on; spec: ui/performance-mode.md §5). `None` = not in the file (off).
+    pub performance: Option<bool>,
     /// Playlist scroll, time zoom and track height (event 242). `None` = not in the file.
     pub playlist_view: Option<PlaylistView>,
     /// Main volume 0..=16000, 12800 = unity (mixer record id 0 at place 0x4000; spec: audio/mixer.md "Main volume").
@@ -1941,12 +1943,60 @@ pub struct PlaylistTrack {
     pub collapsed: bool,
     /// Byte 47: FL draws a lock on such a group (meaning not measured; kept and drawn).
     pub locked: bool,
+    /// Performance settings (bytes 22..46; spec: ui/performance-mode.md §4).
+    pub perf: PerfSettings,
 }
 
 impl PlaylistTrack {
     /// Track `number` as a new project has it: unnamed, default colour, on, not grouped.
     pub fn new(number: u32) -> Self {
-        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false }
+        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false, perf: PerfSettings::default() }
+    }
+}
+
+/// A playlist track's Performance settings (spec: ui/performance-mode.md §4, §5), as the track record stores them:
+/// each an index into its list below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerfSettings {
+    /// [`PerfSettings::MOTIONS`].
+    pub motion: u8,
+    /// [`PerfSettings::PRESSES`].
+    pub press: u8,
+    /// [`PerfSettings::SYNCS`].
+    pub trigger_sync: u8,
+    pub queue: bool,
+    pub tolerant: bool,
+    /// [`PerfSettings::SYNCS`].
+    pub position_sync: u8,
+}
+
+impl Default for PerfSettings {
+    /// A new project's tracks: Retrigger, Stay, Trigger sync 4 beats, Tolerant, Position sync Off.
+    fn default() -> Self {
+        PerfSettings { motion: 0, press: 0, trigger_sync: 5, queue: false, tolerant: true, position_sync: 0 }
+    }
+}
+
+impl PerfSettings {
+    pub const MOTIONS: [&str; 7] = ["Stay", "One shot", "March & wrap", "March & stay", "March & stop", "Random", "Exclusive random"];
+    pub const PRESSES: [&str; 4] = ["Retrigger", "Hold & stop", "Hold & motion", "Latch"];
+    pub const SYNCS: [&str; 7] = ["Off", "1/4 beat", "1/2 beat", "1 beat", "2 beats", "4 beats", "Auto"];
+    pub const ONE_SHOT: u8 = 1;
+    pub const AUTO: u8 = 6;
+
+    /// A sync setting's length in ticks at `ppq`: `None` for Off, the clip's `len` capped at 4 beats for Auto (Trigger
+    /// sync) or the clip's length (Position sync, `cap` false).
+    pub fn sync_ticks(sync: u8, ppq: u32, len: u32, cap: bool) -> Option<u32> {
+        match sync {
+            1 => Some(ppq / 4),
+            2 => Some(ppq / 2),
+            3 => Some(ppq),
+            4 => Some(2 * ppq),
+            5 => Some(4 * ppq),
+            Self::AUTO if cap => Some(len.clamp(1, 4 * ppq)),
+            Self::AUTO => Some(len.max(1)),
+            _ => None,
+        }
     }
 }
 

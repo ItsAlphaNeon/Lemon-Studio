@@ -331,6 +331,12 @@ pub enum Cmd {
     InitControl(u32, f64),
     DeleteInit(u32),
     ResetEmptyTracks,
+    /// The ▸ menu's Prepare for performance mode and Performance mode (Ctrl+P) (spec: ui/performance-mode.md §1).
+    PerfPrepare,
+    PerfToggle,
+    /// A track's Performance settings ▸ entry (§4): track, which list (0 Press, 1 Motion, 2 Trigger sync, 3 Position
+    /// sync, 4 Queue, 5 Tolerant), the choice.
+    PerfSet(u16, u8, u8),
     /// Quantize song jumps ▸ (`PlaylistState::jump_quantize`).
     JumpQuantize(u8),
     /// Browser options menu (spec: ui/browser.md §4).
@@ -642,6 +648,8 @@ pub struct PlaylistState {
     pub tones: RefCell<HashMap<String, Option<Rc<os_dsp::tone::Tones>>>>,
     /// A project is loading and its files decode off the UI thread: waveforms wait (spec: ui/project-loading.md).
     pub wave_wait: bool,
+    /// Performance mode's launched clips (spec: ui/performance-mode.md).
+    pub perform: crate::perform::Perform,
 }
 
 impl Default for PlaylistState {
@@ -680,6 +688,7 @@ impl Default for PlaylistState {
             waves: RefCell::new(HashMap::new()),
             tones: RefCell::new(HashMap::new()),
             wave_wait: false,
+            perform: crate::perform::Perform::default(),
         }
     }
 }
@@ -2440,6 +2449,9 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sub("Quantize song jumps", jump_items(s)),
         PItem::sep(),
         PItem::new("Reset empty tracks", Cmd::ResetEmptyTracks),
+        PItem::sep(),
+        PItem::new("Prepare for performance mode", Cmd::PerfPrepare),
+        PItem::new("Performance mode", Cmd::PerfToggle).key("Ctrl+P").mark(Mark::Check(crate::perform::on(s))),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
@@ -2728,8 +2740,29 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         PItem::new("Delete one", Cmd::TrackDelete(t)),
         PItem::new("Move up", Cmd::TrackUp(t)),
         PItem::new("Move down", Cmd::TrackDown(t)),
+        PItem::sep(),
+        PItem::sub("Performance settings", perf_items(s, t)),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// A track's Performance settings ▸ (spec: ui/performance-mode.md §4): Press, Motion, Trigger sync with Queue and
+/// Tolerant, Position sync, a column each.
+fn perf_items(s: &State, t: u16) -> Vec<PItem> {
+    use os_model::PerfSettings as P;
+    let p = track_info(s, t).map(|x| x.perf).unwrap_or_default();
+    let list = |head: &'static str, which: u8, labels: &[&'static str], on: u8, col: bool| {
+        let mut v = vec![PItem { col, ..PItem::head(head) }];
+        v.extend(labels.iter().enumerate().map(|(k, l)| PItem::new(*l, Cmd::PerfSet(t, which, k as u8)).mark(Mark::Radio(on == k as u8))));
+        v
+    };
+    let mut items = list("Press", 0, &P::PRESSES, p.press, false);
+    items.extend(list("Motion", 1, &P::MOTIONS, p.motion, true));
+    items.extend(list("Trigger sync", 2, &P::SYNCS, p.trigger_sync, true));
+    items.push(PItem::new("Queue", Cmd::PerfSet(t, 4, u8::from(!p.queue))).mark(Mark::Check(p.queue)));
+    items.push(PItem::new("Tolerant", Cmd::PerfSet(t, 5, u8::from(!p.tolerant))).mark(Mark::Check(p.tolerant)));
+    items.extend(list("Position sync", 3, &P::SYNCS, p.position_sync, true));
+    items
 }
 
 /// The actions a time marker can take, as its menu lists them (§7a), with their kinds (spec: flp/events/playlist.md
@@ -2830,6 +2863,8 @@ pub enum PlDrag {
     ZoomBox { x0: f32, y0: f32 },
     Playback,
     SongPos,
+    /// A slot held with the mouse in performance mode (Press Hold & stop, Hold & motion).
+    Perform,
     TimeSel { t0: u32 },
     Marker { i: usize, dt: i64, t0: u32 },
     Point { ch: u16, clip: usize, i: usize, x0: f32, y0: f32, beat0: f64, v0: f64, lock: Option<bool> },
@@ -3012,6 +3047,23 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
     let hit = clip_at(s, &g, x, y);
     let tool = s.playlist.tool;
     let alt = app.alt;
+
+    // Performance mode: a click on a clip in the zone launches it, a right click stops its track (spec:
+    // ui/performance-mode.md §3).
+    if let Some((ci, (t, _))) = hit.and_then(|ci| crate::perform::slot_of(s, ci).map(|slot| (ci, slot))) {
+        let now = app.transport.playing().then(|| app.transport.tick().max(0.0) as u32);
+        let s = &mut app.state;
+        if right {
+            crate::perform::stop(s, t, now, alt);
+            s.message = Some(format!("{}: stopping", track_name(s, t)));
+        } else {
+            s.message = crate::perform::trigger(s, ci, now, alt, app.shift);
+            if s.playlist.perform.held.is_some() {
+                app.drag = Some(Drag::Pl(PlDrag::Perform));
+            }
+        }
+        return app.invalidate();
+    }
 
     // Audio clip handles: fades, fade tensions, gain (§9a).
     if let (Some(ci), false) = (hit, right) {
@@ -3440,7 +3492,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
         PlDrag::ZoomBox { x0, y0 } => {
             s.playlist.overlay = Some(Overlay::ZoomBox(Rect::span(x0.min(x), x0.max(x), y0.min(y), y0.max(y))));
         }
-        PlDrag::Playback => {}
+        PlDrag::Playback | PlDrag::Perform => {}
         PlDrag::SongPos => {
             s.playlist.pos = snap_down(s, &g, g.tick_at(x), alt);
             crate::init::apply(s);
@@ -3574,6 +3626,10 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
         s.playlist.lock_len = Some((c.source, c.length));
     }
     match d {
+        PlDrag::Perform => {
+            let now = app.transport.playing().then(|| app.transport.tick().max(0.0) as u32);
+            crate::perform::release(&mut app.state, now);
+        }
         PlDrag::Slice { .. } => {
             if let Some(Overlay::Slice { tick, t0, t1 }) = overlay {
                 snapshot(s);
@@ -3771,13 +3827,14 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
 pub fn marker_at(s: &State, g: &PGeom, x: f32) -> Option<usize> {
     markers(s).iter().enumerate().rev().find(|(_, m)| {
         let mx = g.x_of(m.position as f32);
-        x >= mx - marker_icon(m.kind).1.max(2.0) && x <= mx + marker_w(m)
+        x >= mx - marker_icon(m.kind).1.max(2.0) && x <= mx + marker_w(s, m)
     }).map(|(i, _)| i)
 }
 
-/// Width of a marker tab: its action's icon and its name.
-pub fn marker_w(m: &TimeMarker) -> f32 {
-    (m.name.chars().count() as f32 * 7.0 + 18.0 + marker_icon(m.kind).0).max(24.0)
+/// Width of a marker tab: its action's icon and its label.
+pub fn marker_w(s: &State, m: &TimeMarker) -> f32 {
+    let n = crate::perform::pad_name(s, m).map_or_else(|| m.name.chars().count(), |p| p.chars().count());
+    (n as f32 * 7.0 + 18.0 + marker_icon(m.kind).0).max(24.0)
 }
 
 /// How far a marker's name sits right of where it would without an action icon, and how far the icon reaches left of
@@ -3832,6 +3889,13 @@ pub fn press_header(app: &mut App, t: u16, right: bool, at: (f32, f32)) {
         s.playlist.popup = Some(track_menu(s, t, app.mouse.0, app.mouse.1));
         return app.invalidate();
     }
+    // Performance mode: a click on a playing track's header stops it at the next sync point, with Alt at once (spec:
+    // ui/performance-mode.md §3).
+    if crate::perform::zone(s).is_some() && s.playlist.perform.live.contains_key(&t) {
+        let playing = app.transport.playing().then(|| app.transport.tick().max(0.0) as u32);
+        crate::perform::stop(&mut app.state, t, playing, app.alt);
+    }
+    let s = &mut app.state;
     let now = std::time::Instant::now();
     let double = s.playlist.last_header.is_some_and(|(lt, when)| lt == t && now.duration_since(when).as_millis() < 450);
     s.playlist.track = t;
@@ -4692,6 +4756,25 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             s.playlist.jump_quantize = q;
             None
         }
+        Cmd::PerfPrepare => Some(crate::perform::prepare(s)),
+        Cmd::PerfToggle => {
+            snapshot_as(s, "Performance mode");
+            Some(crate::perform::toggle(s))
+        }
+        Cmd::PerfSet(t, which, v) => {
+            snapshot_as(s, "Performance settings");
+            let p = &mut arr_mut(s).tracks[usize::from(t)].perf;
+            match which {
+                0 => p.press = v,
+                1 => p.motion = v,
+                2 => p.trigger_sync = v,
+                3 => p.position_sync = v,
+                4 => p.queue = v != 0,
+                _ => p.tolerant = v != 0,
+            }
+            s.piano.dirty = true;
+            None
+        }
         Cmd::ResetEmptyTracks => {
             snapshot(s);
             let used: Vec<u16> = clips(s).iter().map(|c| c.track).collect();
@@ -4934,8 +5017,8 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
     let cmd = match key {
         Key::Character(c) if ctrl && alt && c.eq_ignore_ascii_case("c") => Cmd::Consolidate,
         Key::Character(c) if ctrl && shift && c.eq_ignore_ascii_case("c") => Cmd::MakeUnique,
-        // Performance mode (live clip launching, Ctrl+P in FL's menu) is not built yet.
-        Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("p") => Cmd::NotYet("Performance mode"),
+        // Performance mode, also with Shift (spec: ui/playlist.md, ui/performance-mode.md §1).
+        Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("p") => Cmd::PerfToggle,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") => Cmd::SelectAll,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("d") => Cmd::Deselect,
         Key::Character(c) if ctrl && c.eq_ignore_ascii_case("c") => Cmd::Copy,

@@ -93,6 +93,8 @@ pub enum MenuCmd {
     SelectUnused,
     PurgeClips,
     ResetEmptyTracks,
+    /// TOOLS ▸ Set up for live performance: Prepare for performance mode (spec: ui/performance-mode.md §1).
+    PrepPerformance,
     RemoveTeslas,
     /// A ▸ entry with a submenu built (`sub_items`).
     Sub(Sub),
@@ -394,7 +396,7 @@ const TOOLS_B: &[Item] = &[
     it("Stop sound", "Ctrl+H").on().cmd(MenuCmd::StopSound),
     it("Cancel recording", "").on().cmd(MenuCmd::CancelRecording),
     SEP,
-    it("Set up for live performance", ""),
+    it("Set up for live performance", "").on().cmd(MenuCmd::PrepPerformance),
     it("Set up for MIDI export", ""),
     it("Select unused instruments", "").on().cmd(MenuCmd::SelectUnused),
     it("Remove unused audio clips", "").on().cmd(MenuCmd::PurgeClips),

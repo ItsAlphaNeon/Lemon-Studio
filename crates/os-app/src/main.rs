@@ -87,6 +87,7 @@ mod render;
 mod pattern_render;
 mod patterns;
 mod perf;
+mod perform;
 mod playlist;
 mod plugin_db;
 mod plugin_manager;

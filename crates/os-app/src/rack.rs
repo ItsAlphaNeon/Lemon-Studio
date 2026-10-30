@@ -2366,6 +2366,7 @@ pub fn play_project(s: &State) -> Project {
     if s.rack.loop_mode && !rows.is_empty() {
         expand_loops(&mut p, s, &rows);
     }
+    crate::perform::apply(s, &mut p);
     p
 }
 
