@@ -16,7 +16,7 @@ A zip with these files:
 |---|---|
 | `lemon.json` | `format: "lemon"`, `version` (1), `app` (the version that saved it), `saved` (Unix ms), `snapshot` and `journal` (the names below), `entries` |
 | `project.flp` | The project as it is now, in FL's layout, byte for byte what saving it as a `.flp` writes. Taken out of the zip, FL opens it. |
-| `journal.jsonl` | The project's whole history: the journal's entries ([control-plane.md](control-plane.md) "Journal") from every session it was edited in, oldest first, each session starting with its `session` entry |
+| `journal.jsonl` | The project's whole history: the journal's entries ([journal.md](journal.md)) from every session it was edited in, oldest first, each session starting with its `session` entry |
 | `ids.json` | Each channel's, pattern's, mixer track's, arrangement's, clip's and slot plugin's id, with what finds the thing again (index, number, place), and the next id to give out |
 | `history.json` | The undo history: each step's name and what it puts back, and how many are done |
 | `versions.json`, `versions/<saved>.flp` | Every earlier save's snapshot, and when it was saved: each save keeps the one before it (unless nothing changed) |
