@@ -120,6 +120,7 @@ mod toolbar;
 mod splash;
 mod stall;
 mod step_edit;
+mod surface;
 mod strum;
 mod flam;
 mod flip;
@@ -804,6 +805,7 @@ impl ApplicationHandler for Shell {
         }
         layout::save(&self.app.state);
         session::save(&self.app);
+        self.app.surface_exit();
         #[cfg(target_os = "macos")]
         {
             if os_host::guard::tripped() {

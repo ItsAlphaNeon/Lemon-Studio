@@ -73,7 +73,7 @@ pub fn hint(s: &State, pos: u32) -> String {
 
 impl App {
     /// The position the slider's input starts from (the playhead while this mode plays).
-    fn song_pos_now(&self) -> u32 {
+    pub(crate) fn song_pos_now(&self) -> u32 {
         let t = &self.transport;
         let dragging = matches!(self.drag, Some(Drag::SongPos { .. }));
         shown(&self.state, t.playing(), t.song(), t.tick(), dragging)

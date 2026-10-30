@@ -223,8 +223,19 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         }
         icons::draw(ui.c, Icon::Plus, pb.inset(3.0), if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0x9aa1a5) });
     }
+    // The tracks a control surface's faders take (crate::surface::Marks).
+    let marked = s.surface_marks.mixer();
+    if let Some(m) = marked.clone().filter(|m| m.end > 1) {
+        let (a, b) = (m.start.max(1), m.end - 1);
+        let x0 = area.x + STRIP_W * (a - 1) as f32 - s.mixer_scroll;
+        let x1 = area.x + STRIP_W * b as f32 - s.mixer_scroll;
+        ui.c.stroke_rrect(Rect::new(x0 + 1.0, client.y + 1.0, x1 - x0 - 2.0, bottom - client.y - 18.0), 2.0, 2.0, ui.t.h(0xd23c3c));
+    }
     ui.c.pop_clip();
     strip(ui, s, 0, r.x + 44.0, bottom, f, &ly);
+    if marked.is_some_and(|m| m.start == 0) {
+        ui.c.stroke_rrect(Rect::new(r.x + 45.0, client.y + 1.0, STRIP_W - 2.0, bottom - client.y - 18.0), 2.0, 2.0, ui.t.h(0xd23c3c));
+    }
 
     // Horizontal scroll bar under the strips.
     let sb = Rect::new(area.x + 13.0, bottom - 14.0, area.w - 20.0, 9.0);

@@ -151,6 +151,7 @@ impl App {
         self.midi_pending();
         self.ext_sync_tick();
         self.remote_tick();
+        self.surface_tick();
         // The bent row returns to the centre when another is selected (spec §4).
         if let Some(row) = self.midi_play.bend_row.filter(|&r| r != self.state.selected_channel) {
             self.midi_play.bend_row = None;
@@ -164,6 +165,7 @@ impl App {
     pub(crate) fn midi_refresh(&mut self, said: bool) {
         let before: Vec<String> = self.midi_page().inputs.iter().map(|i| i.name.clone()).collect();
         let opened = self.midi.refresh();
+        self.surface_refresh();
         self.midi.set_ext_sync(cfg::ext_sync().as_deref());
         let p = &mut self.state.midi;
         p.inputs = self.midi.inputs.clone();
@@ -220,6 +222,15 @@ impl App {
                 Msg::Cc { ch, n, v } => {
                     if !self.remote_cc(&ev.dev, ch, n, v) {
                         self.midi_forward(ev.msg);
+                    }
+                }
+                // A Launchkey MK4's pitch wheel turns the selected channel's pitch knob (FL's script for its keys).
+                Msg::Bend { v, .. } if crate::surface::launchkey::Model::is_keys_port(&ev.dev) => {
+                    let row = self.state.selected_channel;
+                    if let Some(range) = self.state.project.channels.get(row).map(|c| c.misc.pitch_range) {
+                        let x = f64::from(v) / 16384.0 * 2.0 - 1.0;
+                        let cents = (x * 100.0 * f64::from(range)).round() as i32;
+                        self.channel_control(row, crate::history::ChannelControl::Pitch, |c| c.pitch_cents = cents);
                     }
                 }
                 Msg::Bend { .. } => {
@@ -298,6 +309,19 @@ impl App {
         self.transport.note_on(row, play, vel);
         self.midi_play.held.push(Held { key, src, row, play, up: None });
         self.step_edit_down_with(src, play, vel, extra);
+    }
+
+    /// A note started from a control surface's pad, as a MIDI keyboard's would be (recorded, in the score log).
+    pub(crate) fn midi_play_note(&mut self, src: Src, key: u8, row: usize, play: u16, vel: u8, extra: Extra) {
+        self.midi_start(src, key, row, play, vel, extra);
+    }
+
+    /// The notes `src` started end.
+    pub(crate) fn note_off_from(&mut self, src: Src, release: u8) {
+        while let Some(i) = self.midi_play.held.iter().position(|h| h.src == src) {
+            let h = self.midi_play.held.remove(i);
+            self.midi_end(h, release);
+        }
     }
 
     fn midi_end(&mut self, h: Held, release: u8) {

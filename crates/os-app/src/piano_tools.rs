@@ -180,7 +180,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
 }
 
 /// PgUp / PgDn: zoom time around the mouse when it is over the grid, else around the grid's left edge (§3a).
-fn zoom_key(app: &mut App, notches: f32) -> bool {
+pub(crate) fn zoom_key(app: &mut App, notches: f32) -> bool {
     let Some(grid) = app.piano_grid else { return false };
     let g = piano::Geom::new(&app.state, grid);
     let x = if grid.contains(app.mouse.0, app.mouse.1) { app.mouse.0 } else { grid.x };

@@ -117,7 +117,7 @@ impl ParamUi {
     }
 
     /// The instance behind `key`, if it is still hosted.
-    fn plugin(&self, key: usize) -> Option<Arc<Mutex<dyn os_host::Plugin>>> {
+    pub(crate) fn plugin(&self, key: usize) -> Option<Arc<Mutex<dyn os_host::Plugin>>> {
         self.lists.get(&key)?.plugin.upgrade()
     }
 }

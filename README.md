@@ -115,6 +115,13 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **A media player to the desktop (MPRIS).** Lemon Studio is on the session bus as `org.mpris.MediaPlayer2.lemonstudio`:
   media keys, a bar's player widget and `playerctl` play, pause and stop the transport, and show whether it plays and
   the project's name.
+- **Novation Launchkey MK4, with no setup.** Plugged in, it goes into its DAW mode and works as FL Studio's script for
+  it does (Novation's): transport, undo, metronome, loop record, capture and quantise buttons; pads that play and pick
+  channels in the rack's colours, or drums; encoders on the focused plugin, the mixer (five pages) or the transport;
+  faders and their buttons on the mixer bank (arm or mute), the master fader always; the screen naming what each
+  control turns. The tracks and channels it takes are outlined in the mixer and the channel rack. Its DAW port is not a
+  plain MIDI input; its keys still are, and its pitch wheel turns the selected channel's pitch knob. The Launchkey Mini
+  MK4 uses the same driver.
 - **Third-party plugin windows under Hyprland.** They drag by their own title bar (Hyprland ignores the X11 move
   request) and have no compositor border, shadow or move animation.
 - **Branch marks.** The workspace watermark, the version string ("cutting-edge pre-alpha") and the status bar's mark

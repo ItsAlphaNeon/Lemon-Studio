@@ -448,6 +448,14 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
             ui.c.text_center(Font::new(13), lb, tc, &txt);
         }
     }
+    // The channels a control surface's pads play (crate::surface::Marks): their names outlined.
+    if let Some(rows) = s.surface_marks.rack() {
+        let rects: Vec<Rect> = rows.iter().filter_map(|&r| name_rect(s, r)).collect();
+        if let (Some(a), Some(b)) = (rects.iter().map(|r| r.y).reduce(f32::min), rects.iter().map(|r| r.bottom()).reduce(f32::max)) {
+            let x = rects[0].x;
+            ui.c.stroke_rrect(Rect::new(x - 2.0, a - 2.0, rects[0].w + 4.0, b - a + 4.0), 2.0, 2.0, t.h(0xd23c3c));
+        }
+    }
     ui.c.pop_clip();
     if vbar {
         let track = Rect::span(inner.right() - 10.0, inner.right(), inner.y, inner.bottom());

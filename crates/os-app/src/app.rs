@@ -1116,6 +1116,9 @@ pub struct State {
     /// The tiling layout's split views (`crate::tiles`), and their animation under way.
     pub tiles: crate::tiles::Tiles,
     pub tile_anim: Option<crate::tiles::Anim>,
+    /// The mixer tracks and rack rows a control surface's faders and pads take, marked while its Shift is held or a
+    /// moment after its banks move.
+    pub surface_marks: crate::surface::Marks,
     /// How muted each split window is now, 0 to 1, by `Win::slot` (`tiles::veil_target`; `App::veils_tick` fades it).
     pub veil: [f32; 3],
     /// The plugin windows drawn in the app's (Linux), by `Plugins::hosted` key: painted as `Win::Hosted` (kept by
@@ -1383,6 +1386,8 @@ pub struct App {
     /// MIDI controller input, and its held notes: (key, rack row they started on).
     pub midi: crate::midi_in::MidiIn,
     pub(crate) midi_play: crate::midi_play::Play,
+    /// The control surface (a Launchkey MK4) Lemon Studio drives, while one is connected.
+    pub(crate) surface: Option<crate::surface::drive::Drive>,
     pub midi_out: crate::midi_out::MidiOut,
     pub(crate) remote: crate::remote::Remote,
     /// Step edit's chord being collected from the typing keyboard and MIDI notes (`crate::step_edit`).
@@ -1618,6 +1623,7 @@ impl App {
                 global_snap: Default::default(),
                 tiles: crate::tiles::Tiles::load(),
                 tile_anim: None,
+                surface_marks: Default::default(),
                 veil: [0.0; 3],
                 #[cfg(target_os = "linux")]
                 embeds: Default::default(),
@@ -1671,6 +1677,7 @@ impl App {
             key_velocity: TYPING_VELOCITY,
             midi: crate::midi_in::MidiIn::none(),
             midi_play: Default::default(),
+            surface: None,
             midi_out: crate::midi_out::MidiOut::none(),
             remote: Default::default(),
             step_chord: crate::step_edit::Chord::default(),
@@ -2195,6 +2202,7 @@ impl App {
         match w {
             #[cfg(target_os = "linux")]
             Win::Hosted(r) => self.state.embeds.contains_key(&r),
+            #[cfg(not(target_os = "linux"))]
             Win::Hosted(_) => false,
             w => crate::floating::placed(w).is_some(),
         }
@@ -2539,6 +2547,7 @@ impl App {
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
     pub(crate) fn reset_hosted(&mut self) {
+        self.surface_reload();
         self.plugins.clear();
         self.loading = None;
         self.state.playlist.wave_wait = false;
@@ -4191,6 +4200,8 @@ impl App {
             || self.hold.is_some()
             || self.smooth.running()
             || self.midi_play.busy()
+            || self.surface_busy()
+            || self.state.surface_marks.fading()
             || self.remote.busy()
             || self.state.browser_marquee.borrow().is_some()
             || self.state.tile_anim.is_some()
