@@ -31,6 +31,9 @@ const NAME: &str = "Lemon Studio";
 const BANK: usize = 8;
 /// Parameters with up to this many steps move a step per encoder detent.
 const MAX_STEPPED: u32 = 32;
+/// How long Plugin mode's parameter texts are shown before the plugin is read again (each read holds the plugin, which
+/// the audio thread may be waiting for); a turn reads it at once.
+const PLUGIN_REREAD: Duration = Duration::from_millis(250);
 
 /// The Mixer encoder layout's pages.
 const MIXER_PAGES: [&str; 5] = ["Channel Volume", "Channel Pan", "Mixer Volume", "Mixer Pan", "Mixer EQ"];
@@ -76,6 +79,8 @@ pub struct Drive {
     carry: [f64; 8],
     /// The tempo the Transport layout last showed.
     tempo_shown: Option<f64>,
+    /// Plugin mode's value texts as last read: when, of which instance and page.
+    plugin_shown: Option<(Instant, usize, usize, [String; 8])>,
 }
 
 /// What an encoder or fader turns.
@@ -115,6 +120,7 @@ impl Drive {
             last_turn: [None; 8],
             carry: [0.0; 8],
             tempo_shown: None,
+            plugin_shown: None,
         }
     }
 
@@ -381,17 +387,21 @@ fn page_name(pt: &PluginTarget) -> String {
 }
 
 /// The plugin's text for its parameter's value, or the value in percent.
-fn param_text(s: &State, key: usize, index: usize, regions: &[(f64, &str)]) -> String {
-    let v = crate::params::param_value(s, key, index).unwrap_or(0.0);
-    if let Some((_, name)) = regions.iter().rev().find(|(lo, _)| *lo <= v + 1e-6) {
-        return name.to_string();
-    }
-    let text = s.params.lists.get(&key).and_then(|l| l.params.get(index)).and_then(|e| {
-        let p = s.params.plugin(key)?;
-        let p = p.lock().ok()?;
-        p.param_text(e.id, v)
-    });
-    text.filter(|t| !t.is_empty()).unwrap_or_else(|| format!("{:.0}%", v * 100.0))
+/// The value texts of Plugin mode's eight slots, the plugin held once for all of them.
+fn plugin_texts(s: &State, pt: &PluginTarget) -> [String; 8] {
+    let list = s.params.lists.get(&pt.key);
+    let plugin = s.params.plugin(pt.key);
+    let p = plugin.as_ref().and_then(|p| p.lock().ok());
+    std::array::from_fn(|i| {
+        let Some((index, _, _, regions)) = &pt.slots[i] else { return String::new() };
+        let Some(e) = list.and_then(|l| l.params.get(*index)) else { return String::new() };
+        let v = p.as_ref().and_then(|p| p.param_value(e.id)).unwrap_or(0.0);
+        if let Some((_, name)) = regions.iter().rev().find(|(lo, _)| *lo <= v + 1e-6) {
+            return name.to_string();
+        }
+        let text = p.as_ref().and_then(|p| p.param_text(e.id, v));
+        text.filter(|t| !t.is_empty()).unwrap_or_else(|| format!("{:.0}%", v * 100.0))
+    })
 }
 
 impl App {
@@ -1178,6 +1188,13 @@ impl App {
         let s = &self.state;
         let (pads, enc, faders, arm, mbank, cbank, page) = (d.pads, d.encoders, d.faders, d.arm, d.mixer_bank, d.channel_bank, d.mixer_page);
         let plugin = if enc == Some(Encoders::Plugin) { plugin_target(s, d.plugin_page) } else { None };
+        // The plugin's texts: read again only after a while, on another instance or page, or after a turn.
+        let now = Instant::now();
+        let reread = plugin.as_ref().map(|pt| match &d.plugin_shown {
+            Some((at, key, pg, texts)) if *key == pt.key && *pg == pt.page && now.duration_since(*at) < PLUGIN_REREAD
+                && !d.last_turn.iter().flatten().any(|(t, _)| t > at) => (false, texts.clone()),
+            _ => (true, plugin_texts(s, pt)),
+        });
         let held: Vec<u8> = d.held.iter().map(|h| h.0).collect();
         let pads_held: Vec<u8> = d.pads_held.iter().map(|h| h.0).collect();
         let n = track_count(s);
@@ -1256,11 +1273,12 @@ impl App {
         let mut texts: Vec<(u8, Text)> = vec![(display::STATIONARY, stationary)];
         let unused = |title: String| Text::three(title, "Not Used", "");
         match enc {
-            Some(Encoders::Plugin) => match plugin {
+            Some(Encoders::Plugin) => match &plugin {
                 Some(pt) => {
+                    let shown = &reread.as_ref().expect("read with the target").1;
                     for (i, slot) in pt.slots.iter().enumerate() {
                         let t = match slot {
-                            Some((index, name, _, regions)) => Text::three(pt.title.clone(), name.clone(), param_text(s, pt.key, *index, regions)),
+                            Some((_, name, _, _)) => Text::three(pt.title.clone(), name.clone(), shown[i].clone()),
                             None => unused(pt.title.clone()),
                         };
                         texts.push((display::ENCODER_1 + i as u8, t));
@@ -1323,7 +1341,11 @@ impl App {
         let tempo = self.transport.tempo().unwrap_or(s.tempo);
         let master_again = d.master_again.filter(|t| *t <= Instant::now()).is_some();
         let master = (crate::mixer::name(s, 0), crate::mixer::track(s, 0).and_then(|m| m.volume).unwrap_or(0.8));
+        let shown = plugin.as_ref().zip(reread).filter(|(_, (read, _))| *read).map(|(pt, (_, texts))| (now, pt.key, pt.page, texts));
         let d = self.drive();
+        if shown.is_some() {
+            d.plugin_shown = shown;
+        }
         for (led, c, shift) in lights {
             d.lights.set(led, c, shift);
         }
