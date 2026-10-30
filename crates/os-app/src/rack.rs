@@ -1646,7 +1646,11 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         it("Show mixer track selectors", RCmd::ShowMixer).key("Alt+M").mark(Mark::Check(r.show_mixer)),
         opt(s, "Show complete piano roll preview"),
         opt(s, "Show a mute button on the piano roll preview"),
-        opt(s, "Detached"),
+        // In a native window of its own (Lemon Studio's design: ui/channel-rack.md §17).
+        {
+            let on = s.is_detached(Win::ChannelRack);
+            PItem::new("Detached", Cmd::Detach(Win::ChannelRack, !on)).mark(Mark::Check(on))
+        },
         PItem::head("Switch"),
         PItem::new(crate::mixer::AUTO_BYPASS_ALL_LABEL, Cmd::Mixer(crate::mixer::MCmd::AutoBypassAll)),
         PItem::sub(crate::views::menus::CLIPS_ALL_LABEL, stretch_items(true)),
@@ -3099,7 +3103,10 @@ mod tests {
             assert_eq!(find(options_menu(&app.state, 0.0, 0.0), label), (true, Mark::Check(tick)), "{label}");
         }
         assert_eq!(find(options_menu(&app.state, 0.0, 0.0), COMPLETE_PREVIEW).1, Mark::Check(true), "on by default");
-        assert_eq!(find(options_menu(&app.state, 0.0, 0.0), "Detached").0, false, "still greyed");
+        assert_eq!(find(options_menu(&app.state, 0.0, 0.0), "Detached"), (true, Mark::Check(false)));
+        app.set_detached(Win::ChannelRack, true);
+        assert_eq!(find(options_menu(&app.state, 0.0, 0.0), "Detached"), (true, Mark::Check(true)));
+        app.set_detached(Win::ChannelRack, false);
         assert_eq!(find(loop_menu(&app.state, 0.0, 0.0), ALWAYS_ADVANCED), (true, Mark::Check(false)));
 
         assert!(!loop_boxes(&app.state));
@@ -3768,7 +3775,7 @@ mod tests {
     /// The rack shown with row 0's steps `on` (the rest off), painted so its step buttons can be hit.
     fn step_app(c: &mut os_ui::Canvas, on: &[u32]) -> App {
         let mut app = App::new(None);
-        app.state.z = vec![crate::app::Win::ChannelRack];
+        app.state.z = vec![Win::ChannelRack];
         let ch = ch_index(&app.state, 0).expect("row 0");
         let ps = per_step(&app.state);
         let n = app.state.pattern;

@@ -153,6 +153,7 @@ mod timesig;
 mod transport;
 mod typein;
 mod views;
+mod detached_win;
 mod wallpaper;
 mod waves;
 mod win_clamp;
@@ -219,6 +220,10 @@ struct Shell {
     /// The main window's restored frame and whether it is maximized, kept for the next start as the app closes
     /// (`layout`): the last run's at first, then followed as the window moves and resizes (`follow_frame`).
     main_win: Option<layout::MainWin>,
+    /// The detached windows' native windows (Options ▸ Detached, `detached_win`).
+    detached: Vec<detached_win::DetWin>,
+    /// The key event being handled came to this detached window: it goes to the app on that window's surface.
+    key_on: Option<app::Win>,
 }
 
 /// Frame timing for tuning (`OS_FRAMES=<file>`): per frame the time, what was repainted (`full` or the number of
@@ -620,6 +625,7 @@ impl Shell {
             menu_bar::update(views::menus::bar_model(&self.app.state));
         }
         self.pending |= self.app.tick();
+        self.sync_detached(el);
         // The startup splash: the opened project's loading moves its gauge on; once the main window has shown and
         // nothing is loading, it finishes. It is dropped when it has faded away.
         if let Some(s) = &self.splash {
@@ -821,7 +827,15 @@ impl ApplicationHandler for Shell {
         self.pending = true;
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // A detached window's native window: its own handling, but for its keys, which go where the main window's do.
+        let det = self.detached_of(id);
+        self.key_on = det.map(|i| self.detached[i].win);
+        if let Some(i) = det {
+            if !matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_)) {
+                return self.detached_event(i, event);
+            }
+        }
         let Some(window) = self.window.clone() else { return };
         let scale = ui_scale(&window) as f32;
         // The monitor's own scale, for General ▸ Display's PPI ruler (`crate::ppi`).
@@ -1060,7 +1074,11 @@ impl ApplicationHandler for Shell {
                         event
                     };
                     self.app.repeat = event.repeat;
-                    self.app.key(&event.logical_key, ctrl(self.mods), self.mods.alt_key());
+                    let (key, c, alt) = (&event.logical_key, ctrl(self.mods), self.mods.alt_key());
+                    match self.key_on {
+                        Some(w) => self.app.on_surface(w, |a| a.key(key, c, alt)),
+                        None => self.app.key(key, c, alt),
+                    }
                     self.app.repeat = false;
                     window.request_redraw();
                 }
@@ -1896,6 +1914,8 @@ fn main() {
         watchdog,
         ctrl_click: false,
         main_win: layout::main_win(),
+        detached: Vec::new(),
+        key_on: None,
     };
     event_loop.run_app(&mut shell).expect("run");
     // After a contained plugin crash the process ends here, before plugin files are unloaded (a stopped plugin's code

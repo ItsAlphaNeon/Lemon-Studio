@@ -638,6 +638,33 @@ pub struct Keep {
     full: bool,
 }
 
+/// A detached window's part of the app's input and paint state (`App::on_surface`): swapped in while that window paints
+/// or takes input, so its hits, mouse position and hover are its own, in its own logical px.
+#[derive(Default)]
+struct Screen {
+    hits: Vec<Hit>,
+    bars: Vec<Bar>,
+    live: Vec<(Live, Rect)>,
+    keep: Keep,
+    overlays: Vec<Rect>,
+    mouse: (f32, f32),
+    hover: Option<Action>,
+    hover_rect: Option<Rect>,
+    /// Something it shows changed: the shell paints it again (`App::detached_dirty`).
+    dirty: bool,
+}
+
+/// What a detached window's drawn frame asks of its native window (Lemon Studio's design, spec: ui/mixer.md §6.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Native {
+    /// The title bar was pressed: the window system moves the window.
+    Move,
+    /// A resize zone was pressed (`EDGE_*` bits): the window system resizes the window.
+    Resize(u8),
+    Minimize,
+    Maximize,
+}
+
 struct Part {
     seg: Seg,
     hits: std::ops::Range<usize>,
@@ -1113,6 +1140,17 @@ pub struct State {
     /// The current theme's rule for the colours of new audio and automation clips' channels (`App::clip_colors`, kept
     /// up to date by `App::follow_settings`).
     pub clip_colors: crate::clip_colors::ClipColors,
+    /// Windows shown in a native window of their own (Options ▸ Detached; spec: ui/mixer.md §6.2, ui/channel-rack.md
+    /// §17; Lemon Studio's design), each with that window's size in logical px. Being in `z` still says whether one is
+    /// shown; detached, it is drawn there at (0, 0) and the main window leaves it out (`App::on_surface`).
+    pub detached: Vec<(Win, (f32, f32))>,
+    /// The detached windows' native frames as the window system places them (outer x, y, inner w, h: points on macOS,
+    /// pixels elsewhere), kept for opening them there again (`layout`).
+    pub detached_frames: Vec<(Win, [i32; 4])>,
+    /// The surface being painted or taking input: `None` the main window, else that detached window.
+    pub surface: Option<Win>,
+    /// The surface the last press came from: the popups and boxes it opens are drawn there (`App::on_surface`).
+    pub overlay_on: Option<Win>,
 }
 
 impl State {
@@ -1126,9 +1164,39 @@ impl State {
         self.z.contains(&w)
     }
 
-    /// Whether `w` is maximized and not collapsed (it fills the workspace).
+    /// Whether `w` is maximized and not collapsed (it fills the workspace). A detached window never is.
     pub fn is_max(&self, w: Win) -> bool {
-        w.slot().is_some_and(|i| self.wins[i].maxed && !self.wins[i].mini)
+        w.slot().is_some_and(|i| self.wins[i].maxed && !self.wins[i].mini) && !self.is_detached(w)
+    }
+
+    /// Whether `w` is shown in a native window of its own (Options ▸ Detached).
+    pub fn is_detached(&self, w: Win) -> bool {
+        self.detached.iter().any(|d| d.0 == w)
+    }
+
+    /// The size (logical px) of `w`'s own native window, when it is detached. The Channel rack's follows what it paints
+    /// (its size and the graph editor hanging below it, `rack_area`); the Mixer's is the native window's.
+    pub fn detached_size(&self, w: Win) -> Option<(f32, f32)> {
+        let d = self.detached.iter().find(|d| d.0 == w)?;
+        Some(if w == Win::ChannelRack { self.rack_area().1 } else { d.1 })
+    }
+
+    /// Smallest size (logical px) of `w`'s native window when detached.
+    pub fn detached_min(&self, w: Win) -> (f32, f32) {
+        match w {
+            Win::ChannelRack => {
+                let (_, (aw, ah)) = self.rack_area();
+                (views::rack::min_w(self) + (aw - self.rack_size.0).max(0.0), views::rack::MIN_H + (ah - self.rack_size.1).max(0.0))
+            }
+            w => w.min_size(),
+        }
+    }
+
+    /// The Channel rack's place in what it paints (`views::rack::paint_area`, with the graph editor hanging below it):
+    /// its offset in that area, and the area's size.
+    pub fn rack_area(&self) -> ((f32, f32), (f32, f32)) {
+        let (r, a) = (views::rack::rect(self), views::rack::paint_area(self));
+        ((r.x - a.x, r.y - a.y), (a.w, a.h))
     }
 
     /// The maximized window in front (the one filling the workspace), if any.
@@ -1146,6 +1214,9 @@ impl State {
     /// The window's floating rect, kept at least its minimum size and at most the screen's, with its part in the
     /// workspace (`win_clamp::keep`).
     pub fn float_rect(&self, w: Win) -> Rect {
+        if let (Some(_), Some((dw, dh))) = (w.slot(), self.detached_size(w)) {
+            return Rect::new(0.0, 0.0, dw, dh);
+        }
         let Some(i) = w.slot() else { return Rect::new(0.0, 0.0, 0.0, 0.0) };
         let r = self.wins[i].rect;
         let (mw, mh) = w.min_size();
@@ -1167,6 +1238,10 @@ impl State {
 
     /// Where the window is painted: the workspace when maximized, a title bar when minimized.
     pub fn win_rect(&self, w: Win) -> Rect {
+        // Detached: its whole native window (`App::on_surface`).
+        if let (Some(_), Some((dw, dh))) = (w.slot(), self.detached_size(w)) {
+            return Rect::new(0.0, 0.0, dw, dh);
+        }
         let Some(i) = w.slot() else { return Rect::new(0.0, 0.0, 0.0, 0.0) };
         let f = self.float_rect(w);
         let ws = self.wins[i];
@@ -1210,6 +1285,10 @@ pub struct App {
     shown: Shown,
     /// Rects of last frame's overlays (menus, popups...): docked plugin windows are clipped under them.
     overlays: Vec<Rect>,
+    /// Each detached window's own hits, mouse and hover while another surface is active (`on_surface`).
+    screens: Vec<(Win, Screen)>,
+    /// What the shell is to do with a detached window's native frame: its title bar dragged, its buttons pressed.
+    pub native: Vec<(Win, Native)>,
     /// Where the canvas sits in the main window's client area (physical px; the restored window's border).
     pub canvas_off: (i32, i32),
     /// The open popup belongs to this row's detached plugin window: it is shown lifted above that window.
@@ -1471,6 +1550,10 @@ impl App {
                 dialogs: Vec::new(),
                 credits: Default::default(),
                 clip_colors: Default::default(),
+                detached: Vec::new(),
+                detached_frames: Vec::new(),
+                surface: None,
+                overlay_on: None,
             },
             theme: load_theme(),
             transport,
@@ -1479,6 +1562,8 @@ impl App {
             live: Vec::new(),
             shown: Shown::default(),
             overlays: Vec::new(),
+            screens: Vec::new(),
+            native: Vec::new(),
             canvas_off: (0, 0),
             popup_lift: None,
             plugin_menu: None,
@@ -2923,7 +3008,7 @@ impl App {
             let Win::Hosted(row) = w else { continue };
             let mut covers = over.clone();
             for &a in &z[i + 1..] {
-                if !matches!(a, Win::Hosted(_)) {
+                if !matches!(a, Win::Hosted(_)) && !self.state.is_detached(a) {
                     covers.push(px(self.win_bounds(a)));
                 }
             }
@@ -2993,7 +3078,13 @@ impl App {
         // settings is brought up to date first, so the frame shows it.
         self.follow_settings();
         self.resolve_scroll();
-        match std::mem::replace(&mut self.damage, Damage::None) {
+        let damage = std::mem::replace(&mut self.damage, Damage::None);
+        // A change that repaints the whole main window may show in a detached one too (the colours, a project opened);
+        // the detached windows' own changes mark them (`damage_win`, `on_surface`).
+        if damage == Damage::Full {
+            self.mark_detached(None);
+        }
+        match damage {
             Damage::None => None,
             Damage::Full => Some(None),
             Damage::Rects(mut v) => {
@@ -3754,6 +3845,9 @@ impl App {
         if !self.state.shown(w) {
             return self.invalidate();
         }
+        if self.state.is_detached(w) {
+            return self.mark_detached(Some(w));
+        }
         match w {
             Win::ChannelRack => self.damage_rect(views::rack::bounds(&self.state)),
             Win::Perf => self.damage_rect(views::perf::bounds(&self.state)),
@@ -4110,6 +4204,218 @@ impl App {
     }
 
     /// Paint the whole frame (None) or only the given rects, in one pass (see `Canvas::begin_region`).
+    /// What a paint shows of playback and the drags in progress.
+    fn frame_info(&self) -> views::FrameInfo {
+        views::FrameInfo {
+            title: self.title(),
+            hint: self.hint.clone(),
+            playing: self.shown.playing,
+            paused: self.shown.paused,
+            tick: self.shown.tick,
+            song: self.shown.song,
+            tempo: self.shown.tempo.unwrap_or(self.state.tempo),
+            peaks: self.transport.peaks(),
+            sounding: self.shown.sounding.clone(),
+            song_pos_drag: matches!(self.drag, Some(Drag::SongPos { .. })),
+            bar_drag: match self.drag {
+                Some(Drag::Bar(d)) => Some(d),
+                _ => None,
+            },
+        }
+    }
+
+    /// Options ▸ Detached on window `w` (the Mixer, the Channel rack; spec: ui/mixer.md §6.2, Lemon Studio's design):
+    /// `on` shows it in a native window of its own, at the size it has in the main window, and brings it to the front;
+    /// off puts it back in the main window where it was. A maximized or collapsed window detaches floating.
+    pub fn set_detached(&mut self, w: Win, on: bool) {
+        let s = &mut self.state;
+        if on == s.is_detached(w) {
+            return;
+        }
+        if on {
+            let r = s.float_rect(w);
+            if let Some(i) = w.slot() {
+                s.wins[i].rect = r;
+                s.wins[i].maxed = false;
+                s.wins[i].mini = false;
+            }
+            s.detached.push((w, (r.w, r.h)));
+            self.screen_of(w);
+        } else {
+            s.detached.retain(|d| d.0 != w);
+            // Re-attached from its own window (its menu): `on_surface` drops the surface once done with it.
+            if s.surface != Some(w) {
+                self.screens.retain(|d| d.0 != w);
+            }
+            if s.overlay_on == Some(w) {
+                s.overlay_on = None;
+            }
+        }
+        self.state.raise(w);
+        self.drag = None;
+        self.invalidate();
+    }
+
+    /// The detached windows that are shown: each needs its native window (the shell opens and closes them to match).
+    pub fn detached_windows(&self) -> Vec<Win> {
+        self.state.detached.iter().map(|d| d.0).filter(|&w| self.state.shown(w)).collect()
+    }
+
+    /// Where detached window `w` was in the main window (logical px), to open its native window over that place.
+    pub fn detached_origin(&self, w: Win) -> Option<Rect> {
+        let s = &self.state;
+        match w {
+            Win::ChannelRack => {
+                let ((dx, dy), (aw, ah)) = s.rack_area();
+                Some(Rect::new(s.rack_pos.0 - dx, s.rack_pos.1 - dy, aw, ah))
+            }
+            w => w.slot().map(|i| s.wins[i].rect),
+        }
+    }
+
+    /// The native window that `w` was last in (outer x, y and inner w, h in window-system px), from this run or the
+    /// settings.
+    pub fn detached_frame(&self, w: Win) -> Option<[i32; 4]> {
+        self.state.detached_frames.iter().find(|d| d.0 == w).map(|d| d.1)
+    }
+
+    /// The shell's native window for `w` now has this size (logical px): it is painted again at that size. The Channel
+    /// rack takes it as its own size, less the graph editor below it.
+    pub fn set_detached_size(&mut self, w: Win, size: (f32, f32)) {
+        let s = &mut self.state;
+        if w == Win::ChannelRack && s.is_detached(w) {
+            let (_, (aw, ah)) = s.rack_area();
+            let (ew, eh) = (aw - s.rack_size.0, ah - s.rack_size.1);
+            let to = ((size.0 - ew).max(views::rack::min_w(s)), (size.1 - eh).max(views::rack::MIN_H));
+            if to != s.rack_size {
+                s.rack_size = to;
+                self.mark_detached(Some(w));
+            }
+            return;
+        }
+        if let Some(d) = s.detached.iter_mut().find(|d| d.0 == w) {
+            if d.1 != size {
+                d.1 = size;
+                self.mark_detached(Some(w));
+            }
+        }
+    }
+
+    /// The native window for `w` sits at `frame` (outer x, y and inner w, h in window-system px), kept for `layout`.
+    pub fn set_detached_frame(&mut self, w: Win, frame: [i32; 4]) {
+        let f = &mut self.state.detached_frames;
+        f.retain(|d| d.0 != w);
+        f.push((w, frame));
+    }
+
+    /// Marks detached window `w` (all of them with `None`) for painting again.
+    pub(crate) fn mark_detached(&mut self, w: Option<Win>) {
+        for (win, sc) in &mut self.screens {
+            if w.is_none_or(|w| w == *win) {
+                sc.dirty = true;
+            }
+        }
+    }
+
+    /// Detached window `w`'s surface (`Screen`), made on first use (a window detached by the settings at the start,
+    /// `layout::restore`, has none yet).
+    fn screen_of(&mut self, w: Win) -> Option<usize> {
+        if !self.state.is_detached(w) {
+            return None;
+        }
+        Some(self.screens.iter().position(|d| d.0 == w).unwrap_or_else(|| {
+            self.screens.push((w, Screen { mouse: (-1.0, -1.0), dirty: true, ..Screen::default() }));
+            self.screens.len() - 1
+        }))
+    }
+
+    /// Whether detached window `w` has something new to show (painting it, `paint_detached`, clears that).
+    pub fn detached_dirty(&self, w: Win) -> bool {
+        self.state.is_detached(w) && self.screens.iter().find(|d| d.0 == w).is_none_or(|d| d.1.dirty)
+    }
+
+    /// Runs `f` (input or a paint) on detached window `w`'s surface: its hits, mouse and hover are swapped in, the state
+    /// knows the surface (`State::surface`) and its screen is that window's size. Not detached: `f` runs on the main
+    /// window's.
+    pub fn on_surface<R>(&mut self, w: Win, f: impl FnOnce(&mut Self) -> R) -> R {
+        let (Some(i), Some(size)) = (self.screen_of(w), self.state.detached_size(w)) else {
+            return f(self);
+        };
+        self.swap_screen(i);
+        let main_screen = std::mem::replace(&mut self.state.screen, size);
+        self.state.surface = Some(w);
+        // The Channel rack is laid out from its place (`views::rack::rect`): at its window's top-left meanwhile.
+        let rack_pos = (w == Win::ChannelRack).then(|| {
+            let (off, _) = self.state.rack_area();
+            std::mem::replace(&mut self.state.rack_pos, off)
+        });
+        let r = f(self);
+        if let Some(p) = rack_pos {
+            self.state.rack_pos = p;
+        }
+        self.state.surface = None;
+        self.state.screen = main_screen;
+        // (`f` may have detached or re-attached other windows.)
+        let i = self.screens.iter().position(|d| d.0 == w).unwrap_or(i);
+        self.swap_screen(i);
+        // Its look changed with its hover or what was done there. Re-attached meanwhile (`set_detached`), its surface
+        // goes.
+        if self.state.is_detached(w) {
+            self.screens[i].1.dirty = true;
+        } else {
+            self.screens.remove(i);
+        }
+        r
+    }
+
+    fn swap_screen(&mut self, i: usize) {
+        let sc = &mut self.screens[i].1;
+        std::mem::swap(&mut self.hits, &mut sc.hits);
+        std::mem::swap(&mut self.bars, &mut sc.bars);
+        std::mem::swap(&mut self.live, &mut sc.live);
+        std::mem::swap(&mut self.keep, &mut sc.keep);
+        std::mem::swap(&mut self.overlays, &mut sc.overlays);
+        std::mem::swap(&mut self.mouse, &mut sc.mouse);
+        std::mem::swap(&mut self.hover, &mut sc.hover);
+        std::mem::swap(&mut self.hover_rect, &mut sc.hover_rect);
+    }
+
+    /// Paints detached window `w` whole into `canvas` (its native window's), with the popups and boxes opened from it.
+    pub fn paint_detached(&mut self, w: Win, canvas: &mut Canvas) {
+        if w != Win::ChannelRack {
+            if let Some(d) = self.state.detached.iter_mut().find(|d| d.0 == w) {
+                d.1 = canvas.size();
+            }
+        }
+        let info = self.frame_info();
+        self.on_surface(w, |app| {
+            canvas.begin_frame(None);
+            app.hits.clear();
+            app.bars.clear();
+            app.live.clear();
+            app.keep = Keep { full: true, ..Keep::default() };
+            let mut ui = Ui {
+                c: canvas,
+                t: &app.theme.colors,
+                hits: &mut app.hits,
+                bars: &mut app.bars,
+                hover: &app.hover,
+                pressed: &app.pressed,
+                mouse: app.mouse,
+                win: None,
+                keep: &mut app.keep,
+                live: &mut app.live,
+                flat: app.state.toolbar.flat,
+            };
+            let overlays = views::paint_detached(&mut ui, &app.state, &info, w);
+            app.keep.next.clear();
+            app.overlays = app.hits[overlays.min(app.hits.len())..].iter().map(|h| h.rect).collect();
+        });
+        if let Some(d) = self.screens.iter_mut().find(|d| d.0 == w) {
+            d.1.dirty = false;
+        }
+    }
+
     pub fn paint_region(&mut self, canvas: &mut Canvas, damage: Option<&[Rect]>) {
         // The CPU panel's View FPS counts painted frames.
         self.state.cpu.frame();
@@ -4152,7 +4458,7 @@ impl App {
         self.bars.clear();
         self.live.clear();
         self.keep.full = damage.is_none();
-        let title = self.title();
+        let info = self.frame_info();
         let mut ui = Ui {
             c: canvas,
             t: &self.theme.colors,
@@ -4165,22 +4471,6 @@ impl App {
             keep: &mut self.keep,
             live: &mut self.live,
             flat: self.state.toolbar.flat,
-        };
-        let info = views::FrameInfo {
-            title,
-            hint: self.hint.clone(),
-            playing: self.shown.playing,
-            paused: self.shown.paused,
-            tick: self.shown.tick,
-            song: self.shown.song,
-            tempo: self.shown.tempo.unwrap_or(self.state.tempo),
-            peaks: self.transport.peaks(),
-            sounding: self.shown.sounding.clone(),
-            song_pos_drag: matches!(self.drag, Some(Drag::SongPos { .. })),
-            bar_drag: match self.drag {
-                Some(Drag::Bar(d)) => Some(d),
-                _ => None,
-            },
         };
         let overlays = views::paint(&mut ui, &self.state, &info);
         if self.state.cables.get_mut().take_slowed() {
@@ -5863,6 +6153,8 @@ impl App {
     }
 
     pub fn mouse_down(&mut self) {
+        // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
+        self.state.overlay_on = self.state.surface;
         self.invalidate();
         self.hold = None;
         let (x, y) = self.mouse;
@@ -6216,6 +6508,8 @@ impl App {
     /// Middle button: grab-scroll the Piano roll and Playlist (FL manual: middle-drag scrolls
     /// both directions).
     pub fn mouse_down_middle(&mut self) {
+        // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
+        self.state.overlay_on = self.state.surface;
         self.close_song_info();
         if crate::typein::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
             return;
@@ -6256,6 +6550,8 @@ impl App {
     /// Right button: delete notes in the piano roll (spec: ui/piano-roll.md §8); right-drag on
     /// a scroll bar scrolls.
     pub fn mouse_down_right(&mut self) {
+        // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
+        self.state.overlay_on = self.state.surface;
         self.close_song_info();
         if crate::typein::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
             return;
@@ -8321,6 +8617,12 @@ impl App {
                 s.lane_menu = false;
             }
             Action::Settings(_) => {}
+            // The rack's own edge mask (right, bottom) as a window's.
+            Action::RackResize(edges) if s.is_detached(Win::ChannelRack) => {
+                let r = if edges & views::rack::EDGE_RIGHT != 0 { EDGE_R } else { 0 };
+                let b = if edges & views::rack::EDGE_BOTTOM != 0 { EDGE_B } else { 0 };
+                self.native.push((Win::ChannelRack, Native::Resize(r | b)));
+            }
             Action::RackResize(edges) => {
                 self.drag = Some(Drag::RackResize { edges, m0: self.mouse, s0: s.rack_size });
             }
@@ -8350,6 +8652,11 @@ impl App {
                     return;
                 }
                 self.title_click = Some((win, now, m));
+                // A detached window's own title bar moves its native window (the window system drags it).
+                if self.state.is_detached(win) {
+                    self.native.push((win, Native::Move));
+                    return;
+                }
                 let s = &mut self.state;
                 if s.is_max(win) {
                     return;
@@ -8379,6 +8686,10 @@ impl App {
                 };
                 self.drag = Some(Drag::Window { win, dx: self.mouse.0 - pos.0, dy: self.mouse.1 - pos.1 });
             }
+            // A detached window's frame, buttons and edges work its native window.
+            Action::WinResize(win, edges) if s.is_detached(win) => self.native.push((win, Native::Resize(edges))),
+            Action::MinWin(w) if s.is_detached(w) => self.native.push((w, Native::Minimize)),
+            Action::MaxWin(w) if s.is_detached(w) => self.native.push((w, Native::Maximize)),
             Action::WinResize(win, edges) => {
                 let r0 = s.float_rect(win);
                 self.drag = Some(Drag::WinResize { win, edges, m0: self.mouse, r0 });
@@ -21393,5 +21704,201 @@ mod tests {
         app.state.plugin_pos = (beside.0 + 120.0, beside.1 + 40.0);
         app.open_channel_window(row);
         assert_eq!(app.state.plugin_pos, (beside.0 + 120.0, beside.1 + 40.0), "the channel window reopens where it was moved");
+    }
+}
+
+/// Options ▸ Detached (Lemon Studio's design, spec: ui/mixer.md §6.2, ui/channel-rack.md §17): the window bookkeeping,
+/// the menu entries, the paints and the input routed by surface. The native windows themselves are the shell's
+/// (`detached_win`).
+#[cfg(test)]
+mod detach_tests {
+    use super::*;
+
+    fn main_paint(app: &mut App) -> Option<Canvas> {
+        let mut c = Canvas::new(1600, 900, 1.0).ok()?;
+        app.invalidate();
+        app.paint(&mut c, None);
+        Some(c)
+    }
+
+    fn hit_of(hits: &[Hit], a: &Action) -> Option<Rect> {
+        hits.iter().rev().find(|h| &h.action == a).map(|h| h.rect)
+    }
+
+    fn screen(app: &App, w: Win) -> &Screen {
+        &app.screens.iter().find(|d| d.0 == w).expect("its surface").1
+    }
+
+    /// The Mixer's Options ▸ Detached works and is ticked while detached; unticked, the Mixer is back in the main window
+    /// where it was, as it was there.
+    #[test]
+    fn the_mixer_menu_detaches_and_reattaches() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        let r = app.state.float_rect(Win::Mixer);
+        let entry = |app: &App| {
+            let m = crate::mixer::options_menu(&app.state, 0.0, 0.0);
+            m.items.iter().find(|i| i.label == "Detached").map(|i| (i.enabled, i.mark.clone(), i.cmd.clone())).expect("the entry")
+        };
+        let (enabled, mark, cmd) = entry(&app);
+        assert_eq!((enabled, mark), (true, crate::playlist::Mark::Check(false)));
+        assert_eq!(cmd, crate::playlist::Cmd::Detach(Win::Mixer, true));
+        crate::playlist::run(&mut app, cmd);
+        assert!(app.state.is_detached(Win::Mixer));
+        assert_eq!(app.detached_windows(), vec![Win::Mixer]);
+        assert_eq!(app.state.detached_size(Win::Mixer), Some((r.w, r.h)), "at the size it had");
+        assert_eq!(app.state.win_rect(Win::Mixer), Rect::new(0.0, 0.0, r.w, r.h), "its whole native window");
+        assert!(!app.state.is_max(Win::Mixer), "it floats in its own window");
+        assert_eq!(app.state.z.last(), Some(&Win::Mixer), "brought to the front");
+        let (_, mark, cmd) = entry(&app);
+        assert_eq!((mark, cmd.clone()), (crate::playlist::Mark::Check(true), crate::playlist::Cmd::Detach(Win::Mixer, false)));
+        crate::playlist::run(&mut app, cmd);
+        assert!(!app.state.is_detached(Win::Mixer) && app.detached_windows().is_empty());
+        assert_eq!(app.state.win_rect(Win::Mixer), r, "back where it was");
+    }
+
+    /// Unticking Detached in the detached Mixer's own menu puts it back with the main window's mouse and hits intact.
+    #[test]
+    fn reattaching_from_its_own_window_keeps_the_main_surface() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        app.set_detached(Win::Mixer, true);
+        app.mouse_move(640.0, 480.0);
+        app.hits.push(Hit { rect: Rect::new(1.0, 2.0, 3.0, 4.0), action: Action::Swallow, hint: "".into(), win: None, menu: 0, reveal: None });
+        let n = app.hits.len();
+        app.on_surface(Win::Mixer, |a| {
+            a.mouse_move(10.0, 10.0);
+            crate::playlist::run(a, crate::playlist::Cmd::Detach(Win::Mixer, false));
+        });
+        assert!(!app.state.is_detached(Win::Mixer) && app.screens.is_empty());
+        assert_eq!((app.mouse, app.hits.len()), ((640.0, 480.0), n));
+    }
+
+    /// Closing a detached window takes its native window away (it stays detached); showing it again brings it back.
+    #[test]
+    fn a_detached_window_follows_show_and_hide() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        app.set_detached(Win::Mixer, true);
+        app.act(Action::CloseWin(Win::Mixer));
+        assert!(app.detached_windows().is_empty() && app.state.is_detached(Win::Mixer));
+        app.state.raise(Win::Mixer);
+        assert_eq!(app.detached_windows(), vec![Win::Mixer]);
+    }
+
+    /// Detached, the Mixer is painted in its own surface at (0, 0), not in the main window: its hits are that surface's,
+    /// and input given to that surface reaches them (its title bar asks the shell to move the native window), while the
+    /// main window's mouse stays where it was.
+    #[test]
+    fn a_detached_mixer_paints_and_takes_input_on_its_own_surface() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        let Some(_) = main_paint(&mut app) else { return };
+        assert!(app.hits.iter().any(|h| h.win == Some(Win::Mixer)), "in the main window");
+        app.set_detached(Win::Mixer, true);
+        main_paint(&mut app);
+        assert!(!app.hits.iter().any(|h| h.win == Some(Win::Mixer)), "out of the main window");
+        assert!(app.detached_dirty(Win::Mixer), "its window has something to show");
+
+        let (w, h) = app.state.detached_size(Win::Mixer).unwrap();
+        let mut c = Canvas::new(w as u32, h as u32, 1.0).unwrap();
+        app.paint_detached(Win::Mixer, &mut c);
+        assert!(!app.detached_dirty(Win::Mixer));
+        let title = hit_of(&screen(&app, Win::Mixer).hits, &Action::WinDrag(Win::Mixer)).expect("the title bar");
+        assert!(title.y < 30.0 && title.right() <= w, "at the window's top, inside it: {title:?}");
+        assert!(hit_of(&app.hits, &Action::WinDrag(Win::Mixer)).is_none(), "not among the main window's hits");
+
+        app.mouse_move(3.0, 3.0);
+        let (x, y) = (title.cx(), title.cy());
+        app.on_surface(Win::Mixer, |a| {
+            a.mouse_move(x, y);
+            a.mouse_down();
+            assert_eq!(a.state.surface, Some(Win::Mixer));
+        });
+        assert_eq!(app.native, vec![(Win::Mixer, Native::Move)], "the window system moves it");
+        assert_eq!(app.mouse, (3.0, 3.0), "the main window's mouse is its own");
+        assert_eq!(screen(&app, Win::Mixer).mouse, (x, y));
+        assert_eq!((app.state.surface, app.state.overlay_on), (None, Some(Win::Mixer)));
+        assert!(app.detached_dirty(Win::Mixer), "input on it paints it again");
+        app.on_surface(Win::Mixer, App::mouse_up);
+        app.native.clear();
+
+        // Its frame's buttons work the native window.
+        if let Some(m) = hit_of(&screen(&app, Win::Mixer).hits, &Action::MaxWin(Win::Mixer)) {
+            app.on_surface(Win::Mixer, |a| {
+                a.mouse_move(m.cx(), m.cy());
+                a.mouse_down();
+                a.mouse_up();
+            });
+            assert_eq!(app.native, vec![(Win::Mixer, Native::Maximize)]);
+            assert!(!app.state.is_max(Win::Mixer));
+        }
+    }
+
+    /// A popup opened from the detached Mixer is painted there, not in the main window; one opened from the main window
+    /// stays in the main window.
+    #[test]
+    fn popups_go_to_the_surface_they_were_opened_from() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        app.set_detached(Win::Mixer, true);
+        let (w, h) = app.state.detached_size(Win::Mixer).unwrap();
+        let Ok(mut c) = Canvas::new(w as u32, h as u32, 1.0) else { return };
+        app.paint_detached(Win::Mixer, &mut c);
+        app.on_surface(Win::Mixer, |a| {
+            a.mouse_move(w / 2.0, h / 2.0);
+            a.mouse_down_right();
+            a.mouse_up();
+            a.state.playlist.popup = Some(crate::mixer::options_menu(&a.state, 20.0, 30.0));
+        });
+        main_paint(&mut app);
+        assert!(app.overlays.is_empty(), "not in the main window");
+        app.paint_detached(Win::Mixer, &mut c);
+        assert!(!screen(&app, Win::Mixer).overlays.is_empty(), "in the Mixer's window");
+
+        app.state.playlist.popup = None;
+        app.mouse_move(800.0, 600.0);
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!(app.state.overlay_on, None);
+        app.state.playlist.popup = Some(crate::mixer::options_menu(&app.state, 800.0, 600.0));
+        main_paint(&mut app);
+        assert!(!app.overlays.is_empty(), "in the main window");
+    }
+
+    /// The Channel rack detaches the same way: its window is the size of what it paints, it is laid out at that window's
+    /// top-left while painted or clicked there (and back at its place afterwards), and its resize edges and title bar
+    /// work the native window. The native window's size becomes the rack's.
+    #[test]
+    fn the_channel_rack_detaches_too() {
+        let mut app = App::new(None);
+        app.state.raise(Win::ChannelRack);
+        let pos = app.state.rack_pos;
+        app.set_detached(Win::ChannelRack, true);
+        let (w, h) = app.state.detached_size(Win::ChannelRack).unwrap();
+        let area = views::rack::paint_area(&app.state);
+        assert_eq!((w, h), (area.w, area.h));
+        assert_eq!(app.detached_origin(Win::ChannelRack).map(|r| (r.x, r.y)), Some((area.x, area.y)));
+        let Ok(mut c) = Canvas::new(w as u32, h as u32, 1.0) else { return };
+        app.paint_detached(Win::ChannelRack, &mut c);
+        assert_eq!(app.state.rack_pos, pos, "its place in the main window is kept");
+        let sc = screen(&app, Win::ChannelRack);
+        let title = hit_of(&sc.hits, &Action::WinDrag(Win::ChannelRack)).expect("the title bar");
+        assert!(title.x < 40.0 && title.y < 30.0, "{title:?}");
+        let corner = hit_of(&sc.hits, &Action::RackResize(views::rack::EDGE_RIGHT | views::rack::EDGE_BOTTOM)).expect("the corner");
+        app.on_surface(Win::ChannelRack, |a| {
+            a.mouse_move(corner.cx(), corner.cy());
+            a.mouse_down();
+        });
+        assert_eq!(app.native, vec![(Win::ChannelRack, Native::Resize(EDGE_R | EDGE_B))]);
+        assert!(app.drag.is_none(), "the window system resizes it");
+        app.on_surface(Win::ChannelRack, App::mouse_up);
+        main_paint(&mut app);
+        assert!(!app.hits.iter().any(|h| h.win == Some(Win::ChannelRack)), "out of the main window");
+
+        app.set_detached_size(Win::ChannelRack, (w + 96.0, h + 40.0));
+        assert_eq!(app.state.detached_size(Win::ChannelRack), Some((w + 96.0, h + 40.0)), "the rack takes its window's size");
+        app.set_detached(Win::ChannelRack, false);
+        assert_eq!(app.state.rack_pos, pos);
     }
 }
