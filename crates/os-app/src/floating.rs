@@ -29,7 +29,7 @@ pub struct Placed {
 }
 
 /// The windows placed by position: the channel rack, the channel window and the tool windows.
-pub const PLACED: [Placed; 9] = [
+pub const PLACED: [Placed; 10] = [
     Placed {
         win: Win::ChannelRack,
         rect: views::rack::rect,
@@ -52,6 +52,7 @@ pub const PLACED: [Placed; 9] = [
     Placed { win: Win::Events, rect: views::events::rect, paint: views::events::bounds, bounds: views::events::bounds, pos: |s| s.events.pos, set_pos: |s, p| s.events.pos = p },
     Placed { win: Win::Strum, rect: views::strum::rect, paint: views::strum::bounds, bounds: views::strum::bounds, pos: |s| s.strum.pos, set_pos: |s, p| s.strum.pos = p },
     Placed { win: Win::Arp, rect: views::arpeggiate::rect, paint: views::arpeggiate::bounds, bounds: views::arpeggiate::bounds, pos: |s| s.arp.pos, set_pos: |s, p| s.arp.pos = p },
+    Placed { win: Win::Container, rect: views::container::rect, paint: views::container::bounds, bounds: views::container::bounds, pos: |s| s.container.pos, set_pos: |s, p| s.container.pos = p },
     Placed {
         win: Win::PianoDlg,
         rect: views::piano_dlg::rect,

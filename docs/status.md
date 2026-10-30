@@ -138,17 +138,19 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   moves the slot's effect into a container in the same slot, and Wrap all in container moves all of the track's
   effects into one container in that slot, in slot order. One undo step each. A container plays its effects one
   after the other, each with its own wet and dry levels (taken from the slot's mix knob and switch), and its delay
-  is the sum of theirs, made up as any plugin's. The container keeps the slot's name, colour and icon. Its list
-  (the slot menu's Container ▸ Edit list..., or opening the slot) opens each effect's own plugin window, sets its
-  wet and dry levels in the value box (in percent), and moves, removes and adds effects (the effect list of an empty
-  slot), one undo step each. Containers are saved in Lemon
+  is the sum of theirs, made up as any plugin's. The container keeps the slot's name, colour and icon. Its window
+  (the slot menu's Container ▸ Edit list..., or opening the slot) lists the effects with a wet and a dry knob each
+  (turned, typed in, reset, one undo step a turn; an automated level turns its knob), opens each effect's own
+  plugin window, and moves, removes and adds effects (the effect list of an empty slot), one undo step each. An
+  effect's window menu replaces or deletes it. Containers are saved in Lemon
   Studio's projects with their effects' settings. The effects inside are listed with their parameters in the
   browser's Effects (after their container), and their parameters' menu makes automation clips, controller links and
   event editors as a slot's effect's does; each level in the list has that menu too. A clip or link names the effect
   by its container's slot and its id in the container (at most 15 effects), so it follows the effect when the list
   is reordered, plays in playback and export, and is saved with the project. A member's window lists, steps, saves
-  and loads its presets. Not yet: undo steps for a member's window edits and presets, moving a wrapped slot's own
-  clips and links onto the member, and the original's Patcher slots in imported projects
+  and loads its presets; its window edits and presets are undo steps, as a slot effect's are. Not yet: moving a
+  wrapped slot's own clips and links onto the member, the CPU switches per effect, the channel's Patcherize (it
+  needs instrument containers), and the original's Patcher slots in imported projects
 
 ## ✅ Plugin hosting
 

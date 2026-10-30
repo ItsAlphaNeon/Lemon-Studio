@@ -209,7 +209,7 @@ impl App {
 
     /// The parameters of the plugin playing channel or slot `owner`.
     fn params_of(&mut self, owner: u32) -> Result<Value, Fail> {
-        let key = super::command::owner_key(&self.state.project, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
+        let key = super::command::owner_key(&self.state, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
         let h = self.plugins.hosted.get(&key).ok_or_else(|| failed(format!("{owner} is not played by a hosted plugin")))?;
         let p = h.plugin.lock().map_err(|_| failed("the plugin is busy"))?;
         let mut list = Vec::new();
@@ -245,7 +245,7 @@ impl App {
     pub(crate) fn fill_params(&mut self, cmds: &mut [Command]) -> Result<(), String> {
         for c in cmds.iter_mut() {
             if let Command::SetParam { owner, param, from: from @ None, .. } = c {
-                let key = super::command::owner_key(&self.state.project, *owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
+                let key = super::command::owner_key(&self.state, *owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
                 let v = self
                     .plugins
                     .hosted
