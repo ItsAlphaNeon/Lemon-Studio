@@ -152,7 +152,11 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   compare them (one undo step; the spare state is kept while the plugin is open, not in the project). Display preset
   name in preset selector hides or shows the preset's name in the window
 - The plugin window's menu acts on its own channel (Piano roll, Delete..., Rename, color and icon..., Change color...,
-  Random color) or effect slot (Replace ▸, Delete..., Rename, color and icon...)
+  Random color) or effect slot (Replace ▸, Delete..., Rename, color and icon..., Change color..., Random color); an
+  effect's window menu has no Piano roll or Channel column, as in the original
+- Allow threaded processing and Auto-bypass when silent (the original's Smart disable) in a plugin's window menu: per
+  plugin switches, one undo step each, saved in the project the way the original saves them. The engine does not act
+  on them yet
 - Import of `.ospreset`, `.vstpreset` and VST2 `.fxp` / `.fxb` files (a bank goes into a folder of its own); a preset
   file dropped onto a plugin window, rack row or mixer slot loads there, and anywhere else adds its plugin
 

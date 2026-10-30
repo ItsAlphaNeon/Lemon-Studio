@@ -298,6 +298,7 @@ fn clear_slot(s: &mut State, t: u16, k: u8) {
         m.slots[usize::from(k)] = None;
         m.slot_on[usize::from(k)] = true;
         m.slot_mix[usize::from(k)] = 1.0;
+        m.slot_cpu[usize::from(k)] = os_model::PluginCpu::default();
     }
     forget_slot_ui(s, t, k);
     s.mixer.pending.push(FxReq::Delete { track: t, slot: k });
@@ -1298,7 +1299,7 @@ const COLORS: [(&str, u32); 8] = [
 ];
 
 /// Change color... ▸: Default, then the palette.
-fn color_items(cmd: impl Fn(Option<Rgb>) -> Cmd) -> Vec<PItem> {
+pub(crate) fn color_items(cmd: impl Fn(Option<Rgb>) -> Cmd) -> Vec<PItem> {
     let mut items = vec![PItem::new("Default", cmd(None))];
     items.extend(COLORS.iter().map(|&(l, c)| PItem::new(l, cmd(Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8))))));
     items
@@ -1795,6 +1796,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 m.slots[usize::from(slot)] = Some(crate::plugins::new_slot(&nm));
                 m.slot_on[usize::from(slot)] = true;
                 m.slot_mix[usize::from(slot)] = 1.0;
+                m.slot_cpu[usize::from(slot)] = os_model::PluginCpu::default();
             }
             forget_slot_ui(s, t, slot);
             s.mixer.pending.push(FxReq::Create { track: t, slot, index, state: None });
@@ -1817,6 +1819,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 m.slots.swap(a, b);
                 m.slot_on.swap(a, b);
                 m.slot_mix.swap(a, b);
+                m.slot_cpu.swap(a, b);
             }
             let (ka, kb) = (a as u8, b as u8);
             remap_slot_ui(s, |u, k| Some((u, if u != t { k } else if k == ka { kb } else if k == kb { ka } else { k })));
@@ -2098,6 +2101,7 @@ impl App {
         m.slots[k] = Some(crate::plugins::new_slot(TESLA));
         m.slot_on[k] = true;
         m.slot_mix[k] = 1.0;
+        m.slot_cpu[k] = os_model::PluginCpu::default();
         forget_slot_ui(s, t, k as u8);
         s.mixer.pending.push(FxReq::Create { track: t, slot: k as u8, index, state });
         changed(s);

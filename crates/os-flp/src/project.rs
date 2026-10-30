@@ -973,6 +973,9 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
 fn load_misc(block: &[Event]) -> ChannelMisc {
     let find = |id: u8| block.iter().find(|e| e.id == id);
     let mut m = ChannelMisc::default();
+    if let Some(c) = find(id::PLUGIN_REC).and_then(|e| plugin_cpu(e.data())) {
+        m.cpu = c;
+    }
     if let Some(d) = find(id::CH_ADJUST).and_then(Event::data).filter(|d| d.len() >= 20) {
         let v = |i: usize| i32::from_le_bytes(d[4 * i..4 * i + 4].try_into().unwrap()) as f32;
         m.levels = [v(0) / 6400.0, (v(1) - 12800.0) / 12800.0, v(3) / 256.0, v(4) / 256.0];
@@ -1179,6 +1182,12 @@ fn write_misc(block: &mut [Event], ch: &Channel, old: &ChannelMisc) -> Vec<Event
         return add;
     }
     let find = |block: &[Event], id: u8| block.iter().position(|e| e.id == id);
+    // The plugin's CPU switches, in its window record (a channel without one keeps the defaults).
+    if m.cpu != n.cpu {
+        if let Some(i) = find(block, id::PLUGIN_REC) {
+            patch_cpu(&mut block[i], m.cpu);
+        }
+    }
     let ints = |v: &[i32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
     // Level adjustments (229): pan offset, volume multiplier, -, mod X offset, mod Y offset.
     let adjust = |l: &[f32; 4]| {
@@ -1863,6 +1872,11 @@ const MX_EQ_WIDTH: u8 = 0xE0;
 /// Per mixer track, the plugin-state event (213) of each slot 0-9 that holds a plugin (spec: flp/events/mixer.md
 /// "Slot sub-block": a slot's plugin events come before its 98 marker). Track ranges as in `load_mixer`.
 fn slot_state_events(events: &[Event], l: &Layout) -> Vec<[Option<usize>; 10]> {
+    slot_events(events, l, id::PLUGIN_STATE)
+}
+
+/// Per stored track, per slot: the slot plugin's event `want` (its state 213 or window record 212).
+fn slot_events(events: &[Event], l: &Layout, want: u8) -> Vec<[Option<usize>; 10]> {
     let starts: Vec<usize> = l.mixer.iter().map(|m| m.color.or(m.color_flag).or(m.name).or(m.flags).unwrap_or(0)).collect();
     (0..l.mixer.len())
         .map(|n| {
@@ -1872,7 +1886,7 @@ fn slot_state_events(events: &[Event], l: &Layout) -> Vec<[Option<usize>; 10]> {
             for (i, e) in events.iter().enumerate().take(to).skip(starts[n]) {
                 match e.id {
                     id::PLUGIN_NAME => pending = Some(None),
-                    id::PLUGIN_STATE => {
+                    x if x == want => {
                         if let Some(p) = pending.as_mut() {
                             *p = Some(i);
                         }
@@ -2148,11 +2162,13 @@ fn take_runs(pool: &mut [SlotRun], wanted: &[(usize, Option<usize>, &SlotPlugin)
 
 /// A slot plugin's events (spec: flp/events/plugins.md §2): the file's own events when it had the plugin (window
 /// record moved to the new place, state replaced), else new ones.
-fn slot_plugin_events(p: &SlotPlugin, track: u16, slot: u8, run: Option<Vec<Event>>, enc: TextEnc) -> Vec<Event> {
+fn slot_plugin_events(p: &SlotPlugin, cpu: os_model::PluginCpu, track: u16, slot: u8, run: Option<Vec<Event>>, enc: TextEnc) -> Vec<Event> {
     let Some(mut ev) = run else {
+        let mut rec = Event::new(id::PLUGIN_REC, Value::var(plugin_record(Some((track, slot)))));
+        patch_cpu(&mut rec, cpu);
         let mut ev = vec![
             Event::new(id::PLUGIN_NAME, Value::var(encode_text(&p.name, enc))),
-            Event::new(id::PLUGIN_REC, Value::var(plugin_record(Some((track, slot))))),
+            rec,
             Event::new(id::PLUGIN_ICON, Value::U32(0)),
             Event::new(id::COLOR, Value::U32(SLOT_COLOR_DEFAULT)),
             Event::new(id::CH_COLOR_FLAG, Value::U8(0)),
@@ -2168,6 +2184,7 @@ fn slot_plugin_events(p: &SlotPlugin, track: u16, slot: u8, run: Option<Vec<Even
         at[0..4].copy_from_slice(&u32::from(track).to_le_bytes());
         at[4..8].copy_from_slice(&u32::from(slot).to_le_bytes());
         patch_bytes(e, 0, &at);
+        patch_cpu(e, cpu);
     }
     match ev.iter().position(|e| e.id == id::PLUGIN_STATE) {
         Some(i) => set_data(&mut ev[i], p.state.clone()),
@@ -2181,6 +2198,29 @@ fn slot_plugin_events(p: &SlotPlugin, track: u16, slot: u8, run: Option<Vec<Even
 const PLUGIN_REC_LEN: usize = 52;
 /// Colour FL stores for most slot plugins (spec: flp/events/plugins.md §1, corpus).
 const SLOT_COLOR_DEFAULT: u32 = 0x0056_5148;
+
+/// A plugin window record's CPU switches (event 212, flags at byte 16: 0x40 threaded processing allowed, 0x20 smart
+/// disable; spec: flp/events/plugins.md §3, checked in FL 26 by save and diff on a channel and a slot).
+const PLUGIN_THREADED: u8 = 0x40;
+const PLUGIN_SMART_DISABLE: u8 = 0x20;
+
+fn plugin_cpu(d: Option<&[u8]>) -> Option<os_model::PluginCpu> {
+    let b = *d?.get(16)?;
+    Some(os_model::PluginCpu { threaded: b & PLUGIN_THREADED != 0, smart_disable: b & PLUGIN_SMART_DISABLE != 0 })
+}
+
+/// Window record `e` with the CPU switches `c` (its other flags kept).
+fn patch_cpu(e: &mut Event, c: os_model::PluginCpu) {
+    let Some(&b) = e.data().and_then(|d| d.get(16)) else { return };
+    let mut b = b & !(PLUGIN_THREADED | PLUGIN_SMART_DISABLE);
+    if c.threaded {
+        b |= PLUGIN_THREADED;
+    }
+    if c.smart_disable {
+        b |= PLUGIN_SMART_DISABLE;
+    }
+    patch_bytes(e, 16, &[b]);
+}
 
 /// A new plugin window record (event 212, spec: flp/events/plugins.md §3): `+8 = 2`; channels flags 0x50
 /// (generator, threaded); mixer slots carry their track and slot, flags 0x140.
@@ -2234,12 +2274,16 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         let to = starts.get(n + 1).copied().or(l.mixer_params).unwrap_or(events.len());
         let mut slots: [Option<SlotPlugin>; 10] = Default::default();
         let mut pending_plugin: Option<SlotPlugin> = None;
+        let mut slot_cpu = [os_model::PluginCpu::default(); 10];
+        let mut pending_cpu = None;
         let mut routes = Vec::new();
         for e in &events[from..to] {
             match e.id {
                 id::PLUGIN_NAME => {
                     pending_plugin = e.data().map(|d| SlotPlugin { id: os_model::Id::NONE, name: decode_text(d, enc), state: Vec::new() });
+                    pending_cpu = None;
                 }
+                id::PLUGIN_REC => pending_cpu = plugin_cpu(e.data()),
                 // spec: flp/events/mixer.md (slot sub-block: 213 = plugin state)
                 id::PLUGIN_STATE => {
                     if let (Some(p), Some(d)) = (pending_plugin.as_mut(), e.data()) {
@@ -2247,8 +2291,12 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
                     }
                 }
                 id::MX_SLOT => {
-                    if let Some(s) = slots.get_mut(slot_number(e)) {
+                    let k = slot_number(e);
+                    if let Some(s) = slots.get_mut(k) {
                         *s = pending_plugin.take();
+                        if let (Some(c), Some(_)) = (pending_cpu.take(), s.as_ref()) {
+                            slot_cpu[k] = c;
+                        }
                     }
                 }
                 id::MX_ROUTES => {
@@ -2330,6 +2378,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             latency_out,
             latency_in,
             icon: m.icon.map(|i| int(&events[i]) as u16),
+            slot_cpu,
             origin: Some(index),
             ..io_of(events, m, fresh)
         });
@@ -3274,6 +3323,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     // Mixer tracks.
     let mut params = l.mixer_params.and_then(|i| events[i].data()).map(<[u8]>::to_vec);
     let slot_states = if skip_mixer { Vec::new() } else { slot_state_events(events, &l) };
+    let slot_recs = if skip_mixer { Vec::new() } else { slot_events(events, &l, id::PLUGIN_REC) };
     // The file track each block now stands for: inserts are added or removed just before the last track
     // (`grow_mixer`, `shrink_mixer`), so a block keeps its position, the last one was the file's last, and an added one
     // has none.
@@ -3316,7 +3366,7 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             for (k, slot) in m.slots.iter().enumerate() {
                 if let Some(p) = slot {
                     let rt = record_track(t as u16, n);
-                    block.extend(slot_plugin_events(p, rt, k as u8, runs.next().flatten(), enc));
+                    block.extend(slot_plugin_events(p, m.slot_cpu[k], rt, k as u8, runs.next().flatten(), enc));
                 }
                 block.push(Event::new(id::MX_SLOT, Value::U16(k as u16)));
             }
@@ -3324,16 +3374,23 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             inserts.extend(block.into_iter().rev().map(|e| (area.to, e)));
         }
     }
-    for (t, ((((m, old), ml), states), &rewritten)) in project
+    for (t, (((((m, old), ml), states), recs), &rewritten)) in project
         .mixer
         .iter()
         .zip(&current.mixer)
         .zip(&l.mixer)
         .zip(slot_states.iter().chain(std::iter::repeat(&[None; 10])))
+        .zip(slot_recs.iter().chain(std::iter::repeat(&[None; 10])))
         .zip(rewrite.iter())
         .enumerate()
     {
         let last = t > 0 && t + 1 == n;
+        // A plugin kept in its slot gets its CPU switches in its window record (212, flp/events/plugins.md §3).
+        for (k, &at) in recs.iter().enumerate().filter(|_| !rewritten) {
+            if let Some(i) = at.filter(|_| m.slot_cpu[k] != old.slot_cpu[k] && m.slots[k].is_some()) {
+                patch_cpu(&mut events[i], m.slot_cpu[k]);
+            }
+        }
         // spec: flp/events/mixer.md "Slot sub-block": a plugin kept in its slot gets its new state (213).
         for ((new, prev), &at) in m.slots.iter().zip(&old.slots).zip(states).filter(|_| !rewritten) {
             if let (Some(new), Some(prev), Some(i)) = (new, prev, at) {
@@ -4195,7 +4252,7 @@ fn track_block_events(m: &MixerTrack, last: bool, enc: TextEnc) -> Vec<Event> {
     ev.push(Event::new(id::MX_FLAGS, Value::var(flags.to_vec())));
     for (k, slot) in m.slots.iter().enumerate() {
         if let Some(p) = slot {
-            ev.extend(slot_plugin_events(p, rt, k as u8, None, enc));
+            ev.extend(slot_plugin_events(p, m.slot_cpu[k], rt, k as u8, None, enc));
         }
         ev.push(Event::new(id::MX_SLOT, Value::U16(k as u16)));
     }
@@ -5033,6 +5090,62 @@ mod tests {
         let ev = events_of(&file).unwrap();
         assert_eq!((ev[at + 1].id, ev[at + 2].id, int(&ev[at + 2])), (id::FAST_DECLICK, id::PERFORMANCE, 1));
         assert_eq!(load(&file).unwrap().performance, Some(true));
+    }
+
+    /// A plugin's CPU switches (spec: flp/events/plugins.md §3, ui/plugin-window.md "CPU"): event 212's flags 0x40
+    /// (threaded processing allowed) and 0x20 (smart disable), for a channel plugin and a slot plugin alike, as FL 26
+    /// saved them (slot 0x160 -> smart disable off 0x140 -> threaded off 0x100; channel 0x151 -> 0x171 -> 0x131). Only
+    /// those two bits change; a slot's switches follow its plugin when it moves.
+    #[test]
+    fn plugin_cpu_switches_round_trip() {
+        use os_model::{MixerTrack, PluginCpu};
+        let mut p = new_project();
+        let mut ch = sampler(2, "Synth", 1);
+        ch.kind = ChannelKind::Plugin;
+        (ch.plugin, ch.plugin_state) = (Some(crate::wrapper::WRAPPER.into()), Some(vec![10, 0, 0, 0]));
+        p.channels.push(ch);
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..18).map(MixerTrack::new).collect();
+        p.mixer[17].routes.clear();
+        let limiter = || Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: vec![1, 2] });
+        p.mixer[2].slots[3] = limiter();
+        p.mixer[2].slots[4] = limiter();
+        p.mixer[2].slot_cpu[4] = PluginCpu { threaded: false, smart_disable: true };
+        let mut file = create(&p).unwrap();
+        let recs = |file: &FlpFile| -> Vec<u8> {
+            events_of(file).unwrap().iter().filter(|e| e.id == id::PLUGIN_REC).map(|e| e.data().unwrap()[16]).collect()
+        };
+        // The channel's record, then the slots' (a new slot plugin: 0x140 with its switches).
+        assert_eq!(recs(&file), [0x50, 0x40, 0x20]);
+        let back = load(&file).unwrap();
+        assert_eq!(back.channels[2].misc.cpu, PluginCpu::default());
+        assert_eq!(back.mixer[2].slot_cpu[3..5], [PluginCpu::default(), PluginCpu { threaded: false, smart_disable: true }]);
+        let bytes = file.to_bytes().unwrap();
+        apply(&back, &mut file).unwrap();
+        assert_eq!(file.to_bytes().unwrap(), bytes, "untouched");
+
+        // Patched in place: FL's own bytes for a channel (0x151, window open) and a slot.
+        let mut edited = back.clone();
+        edited.channels[2].misc.cpu.smart_disable = true;
+        edited.mixer[2].slot_cpu[3].smart_disable = true;
+        edited.mixer[2].slot_cpu[3].threaded = false;
+        apply(&edited, &mut file).unwrap();
+        let count = events_of(&file).unwrap().len();
+        assert_eq!(recs(&file), [0x70, 0x20, 0x20]);
+        let again = load(&file).unwrap();
+        assert_eq!(again.channels[2].misc.cpu, edited.channels[2].misc.cpu);
+        assert_eq!(again.mixer[2].slot_cpu, edited.mixer[2].slot_cpu);
+        assert_eq!(count, FlpFile::parse(&bytes).map(|f| events_of(&f).unwrap().len()).unwrap(), "no event added");
+
+        // Moved, the switches go with the plugin.
+        let mut moved = again.clone();
+        moved.mixer[2].slots.swap(3, 4);
+        moved.mixer[2].slot_cpu.swap(3, 4);
+        moved.mixer[2].slots[4].as_mut().unwrap().state = vec![9];
+        apply(&moved, &mut file).unwrap();
+        let last = load(&file).unwrap();
+        assert_eq!(last.mixer[2].slot_cpu, moved.mixer[2].slot_cpu);
+        assert_eq!(last.mixer[2].slot_cpu[4], PluginCpu { threaded: false, smart_disable: true });
     }
 
     /// The initial values (event 216; spec: ui/settings-choices.md "Advanced: Initialize controls automatically",

@@ -214,6 +214,9 @@ pub enum Cmd {
     /// Plugin window menu > Detached: rack row, new state (spec: ui/plugin-window.md "Docking and the window menu").
     #[cfg_attr(not(windows), allow(dead_code))]
     PluginDetach(usize, bool),
+    /// Plugin window menu > CPU: the window's channel row or `fx_key`, and which switch (`true` = Smart disable, else
+    /// Allow threaded processing) to flip (spec: ui/plugin-window.md "CPU").
+    PluginCpu(usize, bool),
     NotYet(&'static str),
     Tool(PlTool),
     /// The playlist's magnet setting (§4).
@@ -4251,6 +4254,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return None;
         }
+        Cmd::PluginCpu(key, smart) => {
+            flip_plugin_cpu(&mut app.state, key, smart);
+            app.invalidate();
+            return None;
+        }
         Cmd::Consolidate => {
             let m = consolidate(app);
             app.invalidate();
@@ -4289,7 +4297,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::SlotWin(..) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::SlotWin(..) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::PluginCpu(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -5110,10 +5118,12 @@ pub fn rescale(s: &mut State, from: u16, to: u16) {
 }
 
 /// The plugin window's ▸ menu (spec: ui/plugin-window.md "Docking and the window menu"): FL's entries; Detached and
-/// Browse parameters work here, `fill_plugin_window_menu` and `presets::fill_window_menu` enable more.
+/// Browse parameters work here, `fill_plugin_window_menu` and `presets::fill_window_menu` enable more. An effect slot's
+/// window (`row` an `fx_key`) has no Piano roll and no Channel column, as in the original.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
-    let items = vec![
+    let slot = crate::plugins::fx_of(row).is_some();
+    let mut items = vec![
         PItem::not_yet("Piano roll"),
         PItem::not_yet("Replace"),
         PItem::not_yet("Delete..."),
@@ -5130,8 +5140,8 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::not_yet("Link all parameters..."),
         PItem::new("Show all parameters", Cmd::Param(crate::params::PCmd::Browse(row))),
         PItem::head("CPU"),
-        PItem::not_yet("Allow threaded processing"),
-        PItem::not_yet("Auto-bypass when silent"),
+        PItem::not_yet("Allow threaded processing").mark(Mark::Check(true)),
+        PItem::not_yet("Auto-bypass when silent").mark(Mark::Check(false)),
         PItem::sep(),
         PItem::not_yet("Rename, color and icon...").key("F2"),
         PItem::not_yet("Change color..."),
@@ -5146,7 +5156,48 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::sep(),
         PItem::new("Route to free mixer track", Cmd::Rack(crate::rack::RCmd::AssignFree(row))).key("Ctrl+L"),
     ];
+    if slot {
+        items.remove(0);
+        if let Some(c) = items.iter().position(|i| i.col) {
+            items.truncate(c);
+        }
+    }
     Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// The CPU switches of the plugin in window `key` (a channel row or an `fx_key`; `None`: no plugin there, or a
+/// channel that hosts none, a sampler's or an audio clip's).
+pub fn plugin_cpu(s: &State, key: usize) -> Option<os_model::PluginCpu> {
+    match crate::plugins::fx_of(key) {
+        Some((t, k)) => {
+            let m = s.project.mixer.iter().find(|m| m.index == t)?;
+            m.slots.get(usize::from(k))?.as_ref().map(|_| m.slot_cpu[usize::from(k)])
+        }
+        None => s.project.channels.get(key).filter(|c| c.kind == os_model::ChannelKind::Plugin).map(|c| c.misc.cpu),
+    }
+}
+
+/// Plugin window menu > CPU (spec: ui/plugin-window.md "CPU"): flips Smart disable (`smart`) or Allow threaded processing
+/// of the plugin in window `key`, one undo step. Saved with the plugin (event 212's flags); the engine renders the same.
+pub fn flip_plugin_cpu(s: &mut State, key: usize, smart: bool) {
+    use crate::control::command::Region;
+    if plugin_cpu(s, key).is_none() {
+        return;
+    }
+    let flip = |c: &mut os_model::PluginCpu| {
+        let b = if smart { &mut c.smart_disable } else { &mut c.threaded };
+        *b = !*b;
+    };
+    let name = if smart { "Smart disable" } else { "Threaded processing" };
+    match crate::plugins::fx_of(key) {
+        Some((t, k)) => crate::control::edit(s, name, Region::Track(t), |s| {
+            if let Some(m) = s.project.mixer.iter_mut().find(|m| m.index == t) {
+                flip(&mut m.slot_cpu[usize::from(k)]);
+            }
+        }),
+        None => crate::control::edit(s, name, Region::Channel(key), |s| flip(&mut s.project.channels[key].misc.cpu)),
+    }
+    s.piano.dirty = true;
 }
 
 /// Enables the window menu's entries that act on the window's channel or slot (`key`, a rack row or a `fx_key`; spec:
@@ -5154,7 +5205,7 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
 /// Rename, color and icon..., Change color... and Random color are the rack's channel menu entries of those names
 /// (ui/channel-rack.md §18), the boxes opening at the mouse as the picker's do. An effect slot's window: Replace ▸,
 /// Delete... and Rename, color and icon... are the mixer slot menu's (ui/mixer.md §7.2), on that slot whichever track
-/// is selected; the others stay greyed there.
+/// is selected, and so are Change color... ▸ and Random color (the slot's colour). Both: the CPU entries (`fill_cpu`).
 pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
     use crate::mixer::MCmd;
     use crate::rack::RCmd;
@@ -5181,9 +5232,16 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
                 }
                 "Delete..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::SlotDelete(k))))),
                 "Rename, color and icon..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::SlotRename(k))))),
+                "Change color..." => {
+                    let mut colors = crate::mixer::color_items(|c| Cmd::Mixer(MCmd::SlotColor(k, c)));
+                    on_track(t, &mut colors);
+                    *it = PItem::sub("Change color...", colors);
+                }
+                "Random color" => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::SlotRandomColor(k))))),
                 _ => {}
             }
         }
+        fill_cpu(s, key, menu);
         return;
     }
     let Some(ch) = s.project.channels.get(key).map(|c| c.index) else { return };
@@ -5196,6 +5254,23 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
             "Random color" => set(it, Cmd::Rack(RCmd::RandomColor(key))),
             _ => {}
         }
+    }
+    fill_cpu(s, key, menu);
+}
+
+/// The window menu's CPU entries, ticked from the plugin's switches; greyed (with the defaults' ticks) for a channel
+/// hosting no plugin, as in the original.
+fn fill_cpu(s: &State, key: usize, menu: &mut Popup) {
+    let Some(c) = plugin_cpu(s, key) else { return };
+    for it in menu.items.iter_mut() {
+        let (on, smart) = match &*it.label {
+            "Allow threaded processing" => (c.threaded, false),
+            "Auto-bypass when silent" => (c.smart_disable, true),
+            _ => continue,
+        };
+        it.cmd = Cmd::PluginCpu(key, smart);
+        it.enabled = true;
+        it.mark = Mark::Check(on);
     }
 }
 
@@ -5276,7 +5351,7 @@ mod tests {
         for label in ["Piano roll", "Delete...", "Rename, color and icon...", "Change color...", "Random color"] {
             assert!(entry(&m, label).enabled, "{label}");
         }
-        for label in ["Link all parameters...", "Allow threaded processing", "Auto-bypass when silent", "Change icon...", "Save channel state as...", "Browse channel states"] {
+        for label in ["Link all parameters...", "Change icon...", "Save channel state as...", "Browse channel states"] {
             assert!(!entry(&m, label).enabled, "{label} stays greyed");
         }
         run(&mut app, entry(&m, "Piano roll").cmd.clone());
@@ -5308,9 +5383,24 @@ mod tests {
         let key = crate::plugins::fx_key(t, k);
         let mut m = plugin_window_menu(key, false, 0.0, 0.0);
         fill_plugin_window_menu(&app.state, key, &mut m);
-        for label in ["Piano roll", "Change color...", "Random color"] {
+        // As in the original: no Piano roll and no Channel column.
+        for label in ["Piano roll", "Save channel state as...", "Browse channel states", "Route to free mixer track"] {
+            assert!(!m.items.iter().any(|i| i.label == label), "{label}");
+        }
+        assert!(!m.items.iter().any(|i| i.col));
+        for label in ["Link all parameters...", "Change icon..."] {
             assert!(!entry(&m, label).enabled, "{label} stays greyed");
         }
+        // Change color... ▸ and Random color: the slot's colour, on that slot.
+        let change = entry(&m, "Change color...");
+        assert!(change.enabled && change.children.len() > 1);
+        let red = change.children.iter().find(|i| i.cmd != Cmd::Nothing && i.label != change.children[0].label).unwrap().cmd.clone();
+        run(&mut app, red);
+        let c = app.state.mixer.slot_colors.get(&(t, k)).copied();
+        assert!(c.is_some(), "a colour on slot {k} of track {t}");
+        run(&mut app, entry(&m, "Random color").cmd.clone());
+        assert!(app.state.mixer.slot_colors.get(&(t, k)).is_some_and(|&r| Some(r) != c));
+        app.state.selected_mixer = 5;
         // Replace ▸: the effects, into this slot.
         fn leaf(items: &[PItem]) -> Option<&PItem> {
             items.iter().find_map(|i| if i.children.is_empty() { matches!(i.cmd, Cmd::SlotWin(..)).then_some(i) } else { leaf(&i.children) })
@@ -5327,5 +5417,47 @@ mod tests {
         assert_eq!(app.state.selected_mixer, 5, "the selection stays");
         crate::history::undo(&mut app.state);
         assert!(crate::mixer::track(&app.state, t).unwrap().slots[usize::from(k)].is_some(), "one undo step");
+    }
+
+    /// The window menu's CPU entries (ui/plugin-window.md "CPU"): ticked from the plugin's switches, each flip one undo
+    /// step, for a plugin channel and an effect slot (whose switches follow it when it moves); greyed for a sampler.
+    #[test]
+    fn window_menu_cpu_switches() {
+        let mut app = app();
+        let menu = |app: &App, key: usize| {
+            let mut m = plugin_window_menu(key, false, 0.0, 0.0);
+            fill_plugin_window_menu(&app.state, key, &mut m);
+            m
+        };
+        app.state.control.settle(&mut app.state.project);
+        app.state.project.channels[1].kind = os_model::ChannelKind::Sampler;
+        for label in ["Allow threaded processing", "Auto-bypass when silent"] {
+            assert!(!entry(&menu(&app, 1), label).enabled, "{label}: a sampler hosts no plugin");
+        }
+        app.state.project.channels[1].kind = os_model::ChannelKind::Plugin;
+        let m = menu(&app, 1);
+        assert_eq!(entry(&m, "Allow threaded processing").mark, Mark::Check(true));
+        assert_eq!(entry(&m, "Auto-bypass when silent").mark, Mark::Check(false));
+        run(&mut app, entry(&m, "Auto-bypass when silent").cmd.clone());
+        let cpu = app.state.project.channels[1].misc.cpu;
+        assert_eq!((cpu.threaded, cpu.smart_disable), (true, true));
+        assert_eq!(entry(&menu(&app, 1), "Auto-bypass when silent").mark, Mark::Check(true));
+        crate::history::undo(&mut app.state);
+        assert!(!app.state.project.channels[1].misc.cpu.smart_disable, "one undo step");
+
+        let (t, k) = (3u16, 2u8);
+        crate::mixer::track_mut(&mut app.state, t).unwrap().slots[usize::from(k)] = Some(crate::plugins::new_slot("Test FX"));
+        let key = crate::plugins::fx_key(t, k);
+        let cmd = entry(&menu(&app, key), "Allow threaded processing").cmd.clone();
+        run(&mut app, cmd);
+        assert!(!crate::mixer::track(&app.state, t).unwrap().slot_cpu[usize::from(k)].threaded);
+        assert_eq!(entry(&menu(&app, key), "Allow threaded processing").mark, Mark::Check(false));
+        app.state.selected_mixer = t;
+        run(&mut app, Cmd::Mixer(crate::mixer::MCmd::SlotMove(k, 1)));
+        let m = crate::mixer::track(&app.state, t).unwrap();
+        assert_eq!((m.slot_cpu[2].threaded, m.slot_cpu[3].threaded), (true, false), "the switches follow the plugin");
+        crate::history::undo(&mut app.state);
+        crate::history::undo(&mut app.state);
+        assert!(crate::mixer::track(&app.state, t).unwrap().slot_cpu.iter().all(|c| c.threaded));
     }
 }

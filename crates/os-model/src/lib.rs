@@ -1018,6 +1018,23 @@ pub struct ChannelMisc {
     /// The pitch knob's range, semitones either way (1..=48; the plugin window's RANGE box). Not saved: where the file
     /// keeps it is not mapped yet (flp/events/channels.md).
     pub pitch_range: u8,
+    /// The channel plugin's CPU switches (its window menu's CPU entries).
+    pub cpu: PluginCpu,
+}
+
+/// A hosted plugin's CPU switches, its window menu's Allow threaded processing (on for a new plugin) and Smart disable
+/// (off), as event 212 stores them (flags 0x40 and 0x20; spec: flp/events/plugins.md §3, ui/plugin-window.md "CPU").
+/// Saved with the plugin; Lemon Studio's engine renders the same either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginCpu {
+    pub threaded: bool,
+    pub smart_disable: bool,
+}
+
+impl Default for PluginCpu {
+    fn default() -> Self {
+        PluginCpu { threaded: true, smart_disable: false }
+    }
 }
 
 /// A layer channel's settings besides its children (spec: audio/note-rules.md "Settings", "Layer channels").
@@ -1064,6 +1081,7 @@ impl Default for ChannelMisc {
             key_range: [0, 256],
             layer: LayerSettings::default(),
             pitch_range: 2,
+            cpu: PluginCpu::default(),
         }
     }
 }
@@ -1460,6 +1478,8 @@ pub struct MixerTrack {
     /// input is heard (event 166: `MONITOR_OFF`, `MONITOR_ARMED`, `MONITOR_ON`).
     pub rec_source: u8,
     pub monitor: u8,
+    /// Per slot: the slot plugin's CPU switches (event 212 flags; they follow the plugin when it moves).
+    pub slot_cpu: [PluginCpu; 10],
     /// Armed for disk recording (the strip's record button). Not saved, and not part of the track: tracks that differ
     /// only here are equal (spec: audio/track-io.md §1.5).
     pub armed: bool,
@@ -1501,6 +1521,7 @@ impl PartialEq for MixerTrack {
             audio_out,
             rec_source,
             monitor,
+            slot_cpu,
             armed: _,
             origin: _,
         } = self;
@@ -1530,6 +1551,7 @@ impl PartialEq for MixerTrack {
             && *audio_out == o.audio_out
             && *rec_source == o.rec_source
             && *monitor == o.monitor
+            && *slot_cpu == o.slot_cpu
     }
 }
 
@@ -1579,6 +1601,7 @@ impl MixerTrack {
             audio_out: if index == 0 { 0 } else { -1 },
             rec_source: REC_POST_EQ,
             monitor: MONITOR_ARMED,
+            slot_cpu: [PluginCpu::default(); 10],
             armed: false,
             origin: None,
         }
