@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use nih_plug::prelude::*;
+use os_hostlink::AudioTo;
 use os_plugkit::MenuDef;
 use os_ui::kit::menu::{Mark, MenuItem, MenuStyle};
 use os_ui::{Canvas, Rect};
@@ -27,7 +28,7 @@ use crate::peaks::Peaks;
 use crate::sample::{Format, Sample};
 use crate::state;
 use crate::spectral::{self, Blur, Clean, Curve, Equalize, Profile};
-use crate::tools::{self, Amp, Law, Reverb, Stretch};
+use crate::tools::{self, Amp, DrumStretch, Law, Reverb, Stretch};
 use crate::view::{self, AmpCtl, AmpUi, Bt, Hit, Layout, MenuId, Part, Shown, Target, Tr, ViewState};
 use crate::wav::{self, Depth};
 use crate::{Cmd as Play, Shared, TeslaParams};
@@ -115,6 +116,11 @@ fn file_stem(title: &str) -> String {
 }
 
 /// Where a sample handed out of the plugin (dragged out, sent to the host) is written.
+/// A noise threshold as the hints read it.
+fn gate_db(v: f32) -> String {
+    format!("{:.1} dBFS", 20.0 * v.max(1e-6).log10())
+}
+
 fn out_path(title: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("Tesla");
     let _ = std::fs::create_dir_all(&dir);
@@ -136,6 +142,7 @@ fn out_path(title: &str) -> PathBuf {
 pub enum ToolCmd {
     Amp,
     Stretch,
+    DrumStretch,
     Reverb,
     /// The spectral panels, and Acquire noise profile (Clean up's).
     Equalize,
@@ -148,6 +155,11 @@ pub enum ToolCmd {
     GridSlice(u8),
     DetectBeats,
     ZeroCross,
+    /// Tools > Noise gating.
+    AcquireThreshold,
+    GateNoise,
+    TrimSideNoise,
+    TrimAllNoise,
     ReversePolarity,
     Normalize,
     FadeIn,
@@ -197,7 +209,8 @@ pub enum Cmd {
     InsertSilence,
     ClickFree,
     Tool(ToolCmd),
-    Send(bool),
+    /// The selection (else the whole sample) with its regions, to the host.
+    Send(AudioTo),
     AddRegion,
     AddMarker,
     SetLoop,
@@ -276,8 +289,9 @@ pub enum Act {
     Paste(Paste),
     /// Drag this file out of the editor.
     DragOut(PathBuf),
-    /// Hand this file to the host: to the playlist as an audio clip, or (true) to the selected channel.
-    Send(PathBuf, bool),
+    /// Hand this file to the host: to the playlist as an audio clip, to the selected channel, or to a new Lemon Slicer
+    /// channel sliced at its regions.
+    Send(PathBuf, AudioTo),
     /// The editor's new size in logical px.
     Resize(u32, u32),
 }
@@ -745,7 +759,7 @@ impl Logic {
             AmpCtl::Left => d.left,
             AmpCtl::Volume => d.volume,
             AmpCtl::Right => d.right,
-            AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Dry | AmpCtl::Decay => 0.0,
+            AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Slope | AmpCtl::Dry | AmpCtl::Decay => 0.0,
             AmpCtl::Wet => tools::WET_DEFAULT,
             _ => return,
         };
@@ -971,7 +985,7 @@ impl Logic {
 
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
         match self.at(x, y) {
-            Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Dry | AmpCtl::Wet | AmpCtl::Decay | AmpCtl::Mix | AmpCtl::Amount | AmpCtl::Offset | AmpCtl::Threshold | AmpCtl::Reduction | AmpCtl::ClipLevel))) => {
+            Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Slope | AmpCtl::Dry | AmpCtl::Wet | AmpCtl::Decay | AmpCtl::Mix | AmpCtl::Amount | AmpCtl::Offset | AmpCtl::Threshold | AmpCtl::Reduction | AmpCtl::ClipLevel))) => {
                 let v = self.amp_value(c) + notches * 0.02;
                 self.set_amp_value(c, v.clamp(-1.0, 1.0));
                 self.hint = self.amp_hint(c);
@@ -1064,18 +1078,30 @@ impl Logic {
             (9, true) => Cmd::Tool(ToolCmd::Swap),
             (11, false) => Cmd::Tool(ToolCmd::FadeOut),
             (11, true) => Cmd::Tool(ToolCmd::DeclickOut),
+            (10, false) => Cmd::Tool(ToolCmd::TrimSideNoise),
+            (10, true) => Cmd::Tool(ToolCmd::GateNoise),
             (12, false) => Cmd::Tool(ToolCmd::Stretch),
+            (12, true) => Cmd::Tool(ToolCmd::DrumStretch),
             (16, false) => Cmd::Save(Depth::Own),
             (16, true) => Cmd::Save(Depth::Int24),
-            (17, b) => Cmd::Send(b),
+            (17, b) => Cmd::Send(if b { AudioTo::Channel } else { AudioTo::Playlist }),
             _ => Cmd::None,
         };
         self.pick(&MenuReq::Main(MenuId::Tools), cmd, x, y)
     }
 
     fn run_tool(&mut self, t: ToolCmd) -> Vec<Act> {
+        let thr = self.view.gate.unwrap_or(tools::GATE_DEFAULT);
         let ok = self.doc(|d| match t {
-            ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::Reverb | ToolCmd::Equalize | ToolCmd::Blur | ToolCmd::CleanUp | ToolCmd::AcquireNoise => false,
+            ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::DrumStretch | ToolCmd::Reverb | ToolCmd::Equalize | ToolCmd::Blur | ToolCmd::CleanUp | ToolCmd::AcquireNoise => false,
+            ToolCmd::AcquireThreshold | ToolCmd::TrimAllNoise => false,
+            ToolCmd::GateNoise => {
+                let gated = d.range().is_some_and(|(a, b)| tools::gate_gain(&d.sample, a, b, thr).iter().any(|&g| g < 1.0));
+                gated && d.tool("Gate noise", |s, a, b| {
+                    tools::gate(s, a, b, thr);
+                })
+            }
+            ToolCmd::TrimSideNoise => d.trim_side_noise(thr),
             ToolCmd::ReversePolarity => d.tool("Reverse polarity", tools::reverse_polarity),
             ToolCmd::Normalize => {
                 let mut changed = false;
@@ -1150,22 +1176,48 @@ impl Logic {
                 self.hint = "Zero-cross check: every region already starts and ends at a zero crossing".into();
                 return vec![Act::Repaint];
             }
+            ToolCmd::AcquireThreshold => {
+                if let Some(v) = self.doc(|d| d.range().map(|(a, b)| tools::noise_threshold(&d.sample, a, b))) {
+                    self.view.gate = Some(v);
+                    self.view.mark = true;
+                    self.hint = format!("Noise threshold acquired: {}", gate_db(v));
+                }
+                return vec![Act::Repaint];
+            }
+            ToolCmd::TrimAllNoise => {
+                if self.doc(|d| d.frames()) > 0 {
+                    let n = self.doc(|d| d.trim_all_noise(thr));
+                    self.hint = if n > 0 {
+                        format!("Trim all noise & slice up: {n} slice{}", if n == 1 { "" } else { "s" })
+                    } else {
+                        format!("Trim all noise & slice up: nothing over the noise threshold ({})", gate_db(thr))
+                    };
+                }
+                return vec![Act::Repaint];
+            }
+            ToolCmd::GateNoise | ToolCmd::TrimSideNoise if !ok && self.doc(|d| d.frames()) > 0 => {
+                let what = if t == ToolCmd::GateNoise { "Gate noise: nothing stays" } else { "Trim side noise: nothing to trim, or nothing" };
+                self.hint = format!("{what} under the noise threshold ({}) long enough; acquire one with Alt+N", gate_db(thr));
+                return vec![Act::Repaint];
+            }
             _ => {}
         }
         if t == ToolCmd::AcquireNoise {
             self.acquire_noise();
-        } else if matches!(t, ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::Reverb | ToolCmd::Equalize | ToolCmd::Blur | ToolCmd::CleanUp) {
+        } else if matches!(t, ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::DrumStretch | ToolCmd::Reverb | ToolCmd::Equalize | ToolCmd::Blur | ToolCmd::CleanUp) {
             if self.doc(|d| d.frames()) > 0 {
                 let stretch = (t == ToolCmd::Stretch).then(Stretch::default);
+                let drum = (t == ToolCmd::DrumStretch).then(DrumStretch::default);
                 let reverb = (t == ToolCmd::Reverb).then(Reverb::default);
                 let eq = (t == ToolCmd::Equalize).then(Equalize::default);
                 let blur = (t == ToolCmd::Blur).then(Blur::default);
                 let clean = (t == ToolCmd::CleanUp).then(Clean::default);
                 let curve = if blur.is_some() { Curve::bell() } else { Curve::flat() };
-                self.view.amp = Some(AmpUi { stretch, reverb, eq, blur, clean, curve, ..AmpUi::default() });
+                self.view.amp = Some(AmpUi { stretch, drum, reverb, eq, blur, clean, curve, ..AmpUi::default() });
                 self.backdrop();
                 self.hint = match t {
                     ToolCmd::Stretch => "Time stretch / pitch shift of the selection",
+                    ToolCmd::DrumStretch => "Drum(loop) stretch of the selection: its slices keep their sound and move apart or together",
                     ToolCmd::Reverb => "Convolution reverb of the selection",
                     ToolCmd::Equalize => "Equalize the selection: draw the curve over its spectrum",
                     ToolCmd::Blur => "Blur the selection: each frequency smeared over time by the impulse",
@@ -1326,6 +1378,13 @@ impl Logic {
         let a = self.view.amp.map(|a| a.amp).unwrap_or_default();
         let st = self.view.amp.and_then(|a| a.stretch).unwrap_or_default();
         let rv = self.view.amp.and_then(|a| a.reverb).unwrap_or_default();
+        if let Some(ds) = self.view.amp.and_then(|a| a.drum) {
+            match c {
+                AmpCtl::Time => return ds.time,
+                AmpCtl::Slope => return ds.tail,
+                _ => {}
+            }
+        }
         match c {
             AmpCtl::Dry => rv.dry,
             AmpCtl::Wet => rv.wet,
@@ -1374,6 +1433,13 @@ impl Logic {
                     _ => {}
                 }
             }
+            if let Some(ds) = &mut ui.drum {
+                match c {
+                    AmpCtl::Time => ds.time = v,
+                    AmpCtl::Slope => ds.tail = v,
+                    _ => {}
+                }
+            }
             if let Some(st) = &mut ui.stretch {
                 match c {
                     AmpCtl::Pitch => st.pitch = v,
@@ -1413,6 +1479,13 @@ impl Logic {
                     _ => "Volume",
                 };
                 format!("{name}: {:.0}%{}", g.abs() * 100.0, if g < 0.0 { " (inverted)" } else { "" })
+            }
+            AmpCtl::Time if self.view.amp.is_some_and(|a| a.drum.is_some()) => {
+                format!("Length: x{:.3}", self.view.amp.and_then(|a| a.drum).unwrap_or_default().ratio())
+            }
+            AmpCtl::Slope => {
+                let p = (v * 100.0).round() as i32;
+                if p == 0 { "Tail: a smooth fade".into() } else { format!("Tail: {}% {}", p.abs(), if p < 0 { "shorter" } else { "longer" }) }
             }
             AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant => {
                 let st = self.view.amp.and_then(|a| a.stretch).unwrap_or_default();
@@ -1463,6 +1536,9 @@ impl Logic {
                 _ => tools::default_impulse(d.sample.rate, d.sample.channels(), r.seconds()),
             };
             return d.replace_range("Convolution reverb", |s, a, b| tools::reverb(s, a, b, &r, &impulse));
+        }
+        if let Some(ds) = ui.drum {
+            return d.drum_stretch(&ds);
         }
         match ui.stretch {
             Some(st) => d.replace_range("Time stretch / pitch shift", |s, a, b| tools::stretch(s, a, b, &st)),
@@ -1558,6 +1634,19 @@ impl Logic {
                 }
                 self.amp_changed();
             }
+            AmpCtl::Tails | AmpCtl::AutoSlice | AmpCtl::Filling => {
+                if let Some(ds) = self.view.amp.as_mut().and_then(|u| u.drum.as_mut()) {
+                    match c {
+                        AmpCtl::Tails => ds.tails = !ds.tails,
+                        AmpCtl::AutoSlice => ds.auto = !ds.auto,
+                        _ => ds.fill = ds.fill.next(),
+                    }
+                    if c == AmpCtl::Filling {
+                        self.hint = format!("Filling: {}", ds.fill.name());
+                    }
+                }
+                self.amp_changed();
+            }
             AmpCtl::Tail | AmpCtl::ClipImpulse => {
                 let has_clip = self.clip.as_ref().is_some_and(|c| c.frames() > 0);
                 if let Some(r) = self.view.amp.as_mut().and_then(|u| u.reverb.as_mut()) {
@@ -1579,7 +1668,7 @@ impl Logic {
                     self.drag = Some(Drag::Knob { ctl: c, y, v: self.amp_value(c) });
                 }
             }
-            AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant => {
+            AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Slope => {
                 if dbl {
                     self.set_amp_value(c, 0.0);
                     self.amp_changed();
@@ -1602,6 +1691,7 @@ impl Logic {
                 if let Some(ui) = &mut self.view.amp {
                     ui.amp = Amp::default();
                     ui.stretch = ui.stretch.map(|_| Stretch::default());
+                    ui.drum = ui.drum.map(|_| DrumStretch::default());
                     ui.reverb = ui.reverb.map(|_| Reverb::default());
                     ui.eq = ui.eq.map(|_| Equalize::default());
                     ui.blur = ui.blur.map(|_| Blur::default());
@@ -1643,7 +1733,11 @@ impl Logic {
         match b {
             Bt::Undo => return self.pick(&MenuReq::Undo, Cmd::Undo, x, y),
             Bt::Mode(i) => self.doc(|d| d.view.mode = i.min(4)),
-            Bt::Threshold => self.hint = "Not in this version".into(),
+            Bt::Threshold => {
+                self.view.mark = !self.view.mark;
+                let thr = self.view.gate.unwrap_or(tools::GATE_DEFAULT);
+                self.hint = if self.view.mark { format!("Noise threshold: {}", gate_db(thr)) } else { "Noise threshold mark hidden".into() };
+            }
             Bt::Follow => self.doc(|d| d.view.follow = !d.view.follow),
             Bt::Spectrum => self.doc(|d| d.view.spectrum = !d.view.spectrum),
             Bt::Regions => self.doc(|d| {
@@ -1694,7 +1788,7 @@ impl Logic {
             Key::Delete if a => Cmd::DeleteAfterLoop,
             Key::Delete => Cmd::Delete,
             Key::Insert => Cmd::InsertSilence,
-            Key::Char('C') if s => Cmd::Send(false),
+            Key::Char('C') if s => Cmd::Send(AudioTo::Playlist),
             Key::Char('C') if !a => Cmd::ClickFree,
             Key::Char('E') if c && !a => Cmd::Tool(ToolCmd::Mixdown),
             Key::Char('E') if a && !c => Cmd::Tool(ToolCmd::CancelEnvelopes),
@@ -1707,6 +1801,8 @@ impl Logic {
             Key::Char('A') if a => Cmd::Tool(ToolCmd::Amp),
             Key::Char('S') if a && !c => Cmd::Tool(ToolCmd::AutoSlice(1)),
             Key::Char('T') if a => Cmd::Tool(ToolCmd::Stretch),
+            Key::Char('T') if c => Cmd::Tool(ToolCmd::DrumStretch),
+            Key::Char('N') if a && !c => Cmd::Tool(ToolCmd::AcquireThreshold),
             Key::Char('A') if c => Cmd::SelectZoomed,
             Key::Char('N') if c => Cmd::Tool(ToolCmd::Normalize),
             Key::Char('F') if c => Cmd::Tool(ToolCmd::FadeIn),
@@ -1827,6 +1923,8 @@ impl Logic {
         for (i, n) in doc::GRID_SLICING.iter().enumerate() {
             m.add(MenuItem::item(n).enabled(has), Cmd::Tool(ToolCmd::GridSlice(i as u8)));
         }
+        m.sep(Cmd::None);
+        m.add(MenuItem::item("Send to new Lemon Slicer channel").enabled(has), Cmd::Send(AudioTo::Slicer));
         m
     }
 
@@ -1907,6 +2005,7 @@ impl Logic {
                 m.head("Time", Cmd::None);
                 t(&mut m, "Reverse", "Alt+Left", ToolCmd::Reverse, has);
                 t(&mut m, "Time stretch / pitch shift...", "Alt+T", ToolCmd::Stretch, has);
+                t(&mut m, "Drum(loop) stretch...", "Ctrl+T", ToolCmd::DrumStretch, has);
                 m.head("Channels", Cmd::None);
                 t(&mut m, "Swap channels", "", ToolCmd::Swap, has && stereo);
                 t(&mut m, "Convert left channel to mono", "", ToolCmd::LeftToMono, has && stereo);
@@ -1915,6 +2014,11 @@ impl Logic {
                 m.add(MenuItem::Column, Cmd::None);
                 m.head("Synthesis", Cmd::None);
                 t(&mut m, "Generate noise", "", ToolCmd::Noise, has);
+                m.head("Noise gating", Cmd::None);
+                t(&mut m, "Acquire noise threshold", "Alt+N", ToolCmd::AcquireThreshold, has);
+                t(&mut m, "Gate noise", "", ToolCmd::GateNoise, has);
+                t(&mut m, "Trim side noise", "", ToolCmd::TrimSideNoise, has);
+                t(&mut m, "Trim all noise & slice up", "", ToolCmd::TrimAllNoise, has);
                 m.head("Spectral", Cmd::None);
                 t(&mut m, "Convolution reverb...", "Ctrl+R", ToolCmd::Reverb, has);
                 t(&mut m, "Blur...", "Ctrl+B", ToolCmd::Blur, has);
@@ -1926,8 +2030,9 @@ impl Logic {
                 t(&mut m, "Declick in all regions", "", ToolCmd::DeclickInRegions, regions);
                 t(&mut m, "Declick out all regions", "", ToolCmd::DeclickOutRegions, regions);
                 m.head("Sequencing", Cmd::None);
-                m.add(item("Send to arranger as audio clip").shortcut("Shift+C").enabled(has), Cmd::Send(false));
-                m.add(item("Send to selected channel").enabled(has), Cmd::Send(true));
+                m.add(item("Send to arranger as audio clip").shortcut("Shift+C").enabled(has), Cmd::Send(AudioTo::Playlist));
+                m.add(item("Send to selected channel").enabled(has), Cmd::Send(AudioTo::Channel));
+                m.add(item("Send to new Lemon Slicer channel").enabled(has), Cmd::Send(AudioTo::Slicer));
             }
             MenuId::Regions => {
                 m.add(item("Add region...").shortcut("Alt+M").enabled(has), Cmd::AddRegion);
@@ -2068,11 +2173,11 @@ impl Logic {
             }
             Cmd::ClickFree => self.doc(|d| d.view.clickfree = !d.view.clickfree),
             Cmd::Tool(t) => acts.extend(self.run_tool(t)),
-            Cmd::Send(channel) => {
+            Cmd::Send(to) => {
                 if let Some((s, title)) = self.doc(|d| d.copy().map(|s| (s, d.title()))) {
                     let p = out_path(&title);
                     if std::fs::write(&p, wav::write(&s, Depth::Own)).is_ok() {
-                        acts.push(Act::Send(p, channel));
+                        acts.push(Act::Send(p, to));
                     }
                 }
             }
@@ -2258,10 +2363,11 @@ impl Logic {
     }
 
     /// The host answered (true) or didn't take a sample sent to it.
-    pub fn sent(&mut self, ok: bool, channel: bool) {
-        self.hint = match (ok, channel) {
-            (true, false) => "Sent to the playlist".into(),
-            (true, true) => "Sent to the selected channel".into(),
+    pub fn sent(&mut self, ok: bool, to: AudioTo) {
+        self.hint = match (ok, to) {
+            (true, AudioTo::Playlist) => "Sent to the playlist".into(),
+            (true, AudioTo::Channel) => "Sent to the selected channel".into(),
+            (true, AudioTo::Slicer) => "Sent to a new Lemon Slicer channel".into(),
             (false, _) => "Sending needs Lemon Studio".into(),
         };
     }
@@ -2707,13 +2813,13 @@ mod win32 {
                         let acts = self.logic.up(Btn::Left);
                         self.run(acts);
                     }
-                    Act::Send(path, channel) => {
-                        os_hostlink::post_audio(&path.to_string_lossy(), channel);
-                        let ok = os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Audio, channel as isize) == 1;
+                    Act::Send(path, to) => {
+                        os_hostlink::post_audio(&path.to_string_lossy(), to);
+                        let ok = os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Audio, to as isize) == 1;
                         if !ok {
                             os_hostlink::take_audio();
                         }
-                        self.logic.sent(ok, channel);
+                        self.logic.sent(ok, to);
                         repaint = true;
                     }
                     Act::Resize(w, h) => {
@@ -3102,13 +3208,13 @@ mod gui {
                         let acts = self.logic.up(Btn::Left);
                         self.act(acts);
                     }
-                    Act::Send(path, channel) => {
-                        os_hostlink::post_audio(&path.to_string_lossy(), channel);
-                        let ok = self.link.hosted() && self.link.to_host(Cmd::Audio, channel as isize) == 1;
+                    Act::Send(path, to) => {
+                        os_hostlink::post_audio(&path.to_string_lossy(), to);
+                        let ok = self.link.hosted() && self.link.to_host(Cmd::Audio, to as isize) == 1;
                         if !ok {
                             os_hostlink::take_audio();
                         }
-                        self.logic.sent(ok, channel);
+                        self.logic.sent(ok, to);
                         self.dirty = true;
                     }
                     Act::Resize(w, h) => {
@@ -3283,7 +3389,8 @@ mod tests {
         assert_eq!(l.doc(|d| d.frames()), 900 + 44100);
         let m = l.menu(&MenuReq::Main(MenuId::Tools));
         assert_eq!(m.find("Normalize"), Some(Cmd::Tool(ToolCmd::Normalize)));
-        assert_eq!(m.find("Send to selected channel"), Some(Cmd::Send(true)));
+        assert_eq!(m.find("Send to selected channel"), Some(Cmd::Send(AudioTo::Channel)));
+        assert_eq!(m.find("Send to new Lemon Slicer channel"), Some(Cmd::Send(AudioTo::Slicer)));
         let m = l.menu(&MenuReq::Main(MenuId::Options));
         assert_eq!(m.find("Zoom out full"), Some(Cmd::ZoomFull));
         assert_eq!(l.key(Key::Char('M'), Mods::default()).last(), Some(&Act::TypeIn(Prompt::Marker, 40.0, 140.0)));
@@ -3307,7 +3414,7 @@ mod tests {
         assert!(l.doc(|d| d.sample.ch[0][10].abs() < d.sample.ch[1][10].abs()));
         let (x, y) = centre(&l, Target::Tool(10));
         l.down(x, y, Btn::Left, Mods::default(), false);
-        assert_eq!(l.hint, "Trim side noise / gate noise is not in this version");
+        assert!(l.hint.starts_with("Trim side noise: nothing to trim"), "{}", l.hint);
         let (x, y) = centre(&l, Target::Tool(0));
         assert!(matches!(l.down(x, y, Btn::Right, Mods::default(), false).last(), Some(Act::Menu(MenuReq::Undo, _, _))));
         assert_eq!(l.menu(&MenuReq::Undo).find("Swap channels"), Some(Cmd::UndoTo(1)));
@@ -3624,6 +3731,63 @@ mod tests {
     /// Auto-slicing (the tool grid's last-but-two button, Alt+S, Regions > Auto-slice), grid-slicing, Detect beats and
     /// the zero-cross check, on a two-bar loop at 120 BPM with a hit on every beat.
     #[test]
+    fn drum_loop_stretch_and_noise_gating() {
+        let mut l = logic();
+        let n = 44100;
+        let mut x = vec![0f32; n];
+        for k in 0..4 {
+            for i in 0..2000 {
+                x[k * n / 4 + 1000 + i] = 0.6 * (-(i as f32) / 400.0).exp();
+            }
+        }
+        load(&mut l, Sample::from_channels(44100, vec![x.clone(), x], Format::Float32));
+        // Ctrl+T: the Drum(loop) stretch panel; Time to x2, Accept.
+        l.key(Key::Char('T'), Mods { ctrl: true, ..Mods::default() });
+        assert!(l.view.amp.is_some_and(|u| u.drum == Some(DrumStretch::default())));
+        paint(&mut l);
+        l.set_amp_value(AmpCtl::Time, 0.5);
+        assert_eq!(l.amp_hint(AmpCtl::Time), "Length: x2.000");
+        let (fx, fy) = centre(&l, Target::Amp(AmpCtl::Filling));
+        l.down(fx, fy, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(l.hint, "Filling: Time stretch");
+        let (ax, ay) = centre(&l, Target::Amp(AmpCtl::Accept));
+        l.down(ax, ay, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(l.doc(|d| d.frames()), 2 * n);
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Drum(loop) stretch");
+        l.doc(|d| d.undo());
+        // The tool button's right click opens it too.
+        let (bx, by) = centre(&l, Target::Tool(12));
+        l.down(bx, by, Btn::Right, Mods::default(), false);
+        assert!(l.view.amp.is_some_and(|u| u.drum.is_some()));
+        l.close_amp(false);
+        assert_eq!(l.menu(&MenuReq::Main(MenuId::Tools)).find("Drum(loop) stretch..."), Some(Cmd::Tool(ToolCmd::DrumStretch)));
+        // Noise gating: the threshold from the selection (Alt+N), its mark on; the button gates (right) or trims (left).
+        let m = l.menu(&MenuReq::Main(MenuId::Tools));
+        assert_eq!(m.find("Trim all noise & slice up"), Some(Cmd::Tool(ToolCmd::TrimAllNoise)));
+        l.doc(|d| d.select(0, 999));
+        l.key(Key::Char('N'), Mods { alt: true, ..Mods::default() });
+        assert!(l.view.mark && l.view.gate.is_some());
+        assert!(l.hint.starts_with("Noise threshold acquired: "), "{}", l.hint);
+        l.doc(|d| d.sel = None);
+        let (gx, gy) = centre(&l, Target::Tool(10));
+        l.down(gx, gy, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Trim side noise");
+        assert!(l.doc(|d| d.frames()) < n - 900);
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::TrimAllNoise), 0.0, 0.0);
+        assert_eq!(l.hint, "Trim all noise & slice up: 4 slices");
+        let (tx, ty) = centre(&l, Target::Bottom(Bt::Threshold));
+        l.down(tx, ty, Btn::Left, Mods::default(), false);
+        assert!(!l.view.mark);
+        // The Lemon Slicer send sits in the auto-slicing menu as well.
+        assert_eq!(l.menu(&MenuReq::Slice).find("Send to new Lemon Slicer channel"), Some(Cmd::Send(AudioTo::Slicer)));
+        l.sent(true, AudioTo::Slicer);
+        assert_eq!(l.hint, "Sent to a new Lemon Slicer channel");
+    }
+
+    #[test]
     fn auto_slicing_and_detect_beats() {
         let mut l = logic();
         let rate = 44100;
@@ -3887,6 +4051,14 @@ mod tests {
         load(&mut b, Sample::from_channels(44100, vec![x.clone(), x], Format::Float32));
         b.pick(&MenuReq::Slice, Cmd::Tool(ToolCmd::AutoSlice(1)), 0.0, 0.0);
         save(&mut b, "tesla_slices", 1.0);
+        // Drum(loop) stretch over the sliced loop, and the noise threshold's mark.
+        b.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::DrumStretch), 0.0, 0.0);
+        b.set_amp_value(AmpCtl::Time, 0.25);
+        save(&mut b, "tesla_drum_stretch", 1.0);
+        b.close_amp(true);
+        b.view.gate = Some(0.2);
+        b.view.mark = true;
+        save(&mut b, "tesla_drum_stretched", 1.0);
         l.shared.armed.store(true, Ordering::Relaxed);
         l.shared.size.0.store(1000, Ordering::Relaxed);
         l.shared.size.1.store(600, Ordering::Relaxed);

@@ -634,6 +634,111 @@ impl Doc {
         self.slice_regions(AUTO_SLICING[k.min(2)], &st, "Slice", None)
     }
 
+    /// Drum(loop) stretch of the range (spec: plugins/tesla/README.md "Drum(loop) stretch"): sliced at the regions and
+    /// markers inside it, or at the detected transients (Medium) with Auto-slice on or none there; the cues inside move
+    /// with their slices, the ones after with the end. False without a range.
+    pub fn drum_stretch(&mut self, ds: &tools::DrumStretch) -> bool {
+        let Some((a, b)) = self.range() else { return false };
+        let mut starts: Vec<usize> = if ds.auto { Vec::new() } else { self.sample.cues.iter().map(|c| c.pos).filter(|&p| p > a && p <= b).map(|p| p - a).collect() };
+        if starts.is_empty() {
+            let s = &self.sample;
+            let (l, r) = Self::pair(s);
+            starts = transients::detect(&l[a..=b], &r[a..=b], s.rate, transients::AUTO_DB[1]);
+            transients::zero_cross(&mut starts, &l[a..=b], &r[a..=b], s.rate);
+            // The first slice starts with the range, wherever its crossing is.
+            starts[0] = 0;
+        }
+        starts.push(0);
+        starts.sort_unstable();
+        starts.dedup();
+        let new = tools::drum_stretch(&self.sample, a, b, &starts, ds);
+        let m = new.first().map_or(0, |c| c.len());
+        let r = m as f64 / (b + 1 - a) as f64;
+        let inside: Vec<(u32, usize, Option<usize>)> = self.sample.cues.iter().filter(|c| c.pos >= a && c.pos <= b).map(|c| (c.id, c.pos, c.len)).collect();
+        if !self.replace_range("Drum(loop) stretch", |_, _, _| new) {
+            return false;
+        }
+        let s = Arc::make_mut(&mut self.sample);
+        for (id, pos, len) in inside {
+            if let Some(c) = s.cues.iter_mut().find(|c| c.id == id) {
+                c.pos = a + (((pos - a) as f64) * r).round() as usize;
+                c.len = len.map(|n| ((n as f64 * r).round() as usize).max(1));
+            }
+        }
+        true
+    }
+
+    /// Trim side noise (spec: plugins/tesla/README.md "Noise gating"): what is under threshold `thr` before the
+    /// range's first sound and after its last goes, the edges ramped as the gate ramps them. False when there is no
+    /// sound, or nothing to trim.
+    pub fn trim_side_noise(&mut self, thr: f32) -> bool {
+        let Some((a, b)) = self.range() else { return false };
+        let g = tools::gate_gain(&self.sample, a, b, thr);
+        let runs = tools::sound_runs(&g);
+        let (Some(&(f, _)), Some(&(_, l))) = (runs.first(), runs.last()) else { return false };
+        if f == 0 && l == b - a {
+            return false;
+        }
+        // Only the opening ramp before the first sound and the closing one after the last are applied.
+        let up = (f..=l).find(|&j| g[j] >= 1.0).unwrap_or(l + 1);
+        let down = (f..=l).rev().find(|&j| g[j] >= 1.0).map_or(f, |j| j + 1);
+        let selected = self.sel.is_some();
+        let s = self.edit("Trim side noise");
+        for c in &mut s.ch {
+            for j in (f..up).chain(down.max(up)..=l) {
+                c[a + j] *= g[j];
+            }
+            c.drain(a + l + 1..=b);
+            c.drain(a..a + f);
+        }
+        if l < b - a {
+            s.shift_after(a + l + 1, -((b - a - l) as isize));
+        }
+        if f > 0 {
+            s.shift_after(a, -(f as isize));
+        }
+        s.quantize();
+        let n = l + 1 - f;
+        if selected {
+            self.select(a, a + n - 1);
+        }
+        self.cursor = self.cursor.min(self.frames());
+        true
+    }
+
+    /// Trim all noise & slice up: every stretch of the range under threshold `thr` goes (the gate's ramps kept), and
+    /// each sound left becomes a region "Noise slice n"; the range's markers and regions go. The number of slices (0:
+    /// no sound, nothing done).
+    pub fn trim_all_noise(&mut self, thr: f32) -> usize {
+        let Some((a, b)) = self.range() else { return 0 };
+        let g = tools::gate_gain(&self.sample, a, b, thr);
+        let runs = tools::sound_runs(&g);
+        if runs.is_empty() {
+            return 0;
+        }
+        let new: Vec<Vec<f32>> = self.sample.ch.iter().map(|c| runs.iter().flat_map(|&(f, l)| (f..=l).map(|j| c[a + j] * g[j])).collect()).collect();
+        let m = new[0].len();
+        let selected = self.sel.is_some();
+        let s = self.edit("Trim all noise & slice up");
+        s.cues.retain(|c| c.pos < a || c.pos > b);
+        for (c, v) in s.ch.iter_mut().zip(new) {
+            c.splice(a..=b, v);
+        }
+        s.shift_after(b + 1, m as isize - (b + 1 - a) as isize);
+        let mut at = a;
+        for (i, &(f, l)) in runs.iter().enumerate() {
+            s.add_cue(&format!("Noise slice {}", i + 1), at, Some(l + 1 - f));
+            at += l + 1 - f;
+        }
+        s.quantize();
+        self.view.regions = true;
+        if selected {
+            self.select(a, a + m - 1);
+        }
+        self.cursor = self.cursor.min(self.frames());
+        runs.len()
+    }
+
     /// The tempo the grid slices by: the sample's, else the one Detect beats would find, else a whole number of bars.
     pub fn grid_tempo(&self) -> f64 {
         let s = &self.sample;
@@ -960,6 +1065,92 @@ mod tests {
         d.delete();
         let c = &d.sample.ch[0];
         assert!(c.windows(2).all(|w| (w[1] - w[0]).abs() < 0.02));
+    }
+
+    /// Four hits a quarter apart, each a 0.8 burst decaying over its quarter.
+    fn hits(n: usize) -> Doc {
+        let mut d = Doc::default();
+        let mut x = vec![0f32; n];
+        for k in 0..4 {
+            for i in 0..n / 4 {
+                x[k * n / 4 + i] = 0.8 * (-(i as f32) / 4000.0).exp() * if i % 2 == 0 { 1.0 } else { -1.0 };
+            }
+        }
+        d.sample = Arc::new(Sample::from_channels(44100, vec![x], Format::Float32));
+        d
+    }
+
+    /// Where the hits start: the first frame over 0.5 after 50 quiet ones.
+    fn onsets(d: &Doc) -> Vec<usize> {
+        let x = &d.sample.ch[0];
+        (0..x.len()).filter(|&i| x[i].abs() > 0.5 && (i == 0 || (i >= 50 && x[i - 50..i].iter().all(|v| v.abs() < 0.1)))).collect()
+    }
+
+    #[test]
+    fn drum_loop_stretch_moves_the_slices_and_fills_the_gaps() {
+        let n = 44100;
+        // Twice as long, sliced at the regions: the hits twice as far apart, unchanged, the regions with them.
+        let mut d = hits(n);
+        for k in 0..4 {
+            d.select(k * n / 4, (k + 1) * n / 4 - 1);
+            d.add_cue(&format!("hit {k}"), true);
+        }
+        d.sel = None;
+        let ds = tools::DrumStretch { time: 0.5, ..tools::DrumStretch::default() };
+        assert!(d.drum_stretch(&ds));
+        assert_eq!(d.frames(), 2 * n);
+        assert_eq!(onsets(&d), vec![0, n / 2, n, 3 * n / 2]);
+        assert_eq!(d.sample.cues.iter().map(|c| (c.pos, c.len)).collect::<Vec<_>>(), (0..4).map(|k| (k * n / 2, Some(n / 2))).collect::<Vec<_>>());
+        assert!((d.sample.ch[0][n / 2 + 5] - 0.8 * (-5f32 / 4000.0).exp() * -1.0).abs() < 1e-6, "a hit keeps its samples");
+        assert_eq!(d.history()[0], "Drum(loop) stretch");
+        // Echo grains: the gap after a hit's audio rings on, fading to nothing by the next hit.
+        let gap = |d: &Doc, a: usize, b: usize| d.sample.ch[0][a..b].iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(gap(&d, n / 4 + 100, n / 4 + 2000) > 1e-4, "filled");
+        assert!(gap(&d, n / 2 - 20, n / 2) < 1e-3, "faded out before the next hit");
+        // Silence instead: nothing in the gaps.
+        let mut d = hits(n);
+        let ds = tools::DrumStretch { time: 0.5, fill: tools::Fill::Silence, ..tools::DrumStretch::default() };
+        assert!(d.drum_stretch(&ds), "no regions: sliced at the detected transients");
+        assert_eq!(onsets(&d).len(), 4);
+        assert!(onsets(&d).iter().zip([0, n / 2, n, 3 * n / 2]).all(|(&a, b)| a.abs_diff(b) < 64), "{:?}", onsets(&d));
+        assert_eq!(gap(&d, n / 4 + 64, n / 2 - 64), 0.0);
+        // Half as long: the hits closer, each cut short with a fade.
+        let mut d = hits(n);
+        assert!(d.drum_stretch(&tools::DrumStretch { time: -0.5, ..tools::DrumStretch::default() }));
+        assert_eq!(d.frames(), n / 2);
+        assert!(onsets(&d).iter().zip([0, n / 8, n / 4, 3 * n / 8]).all(|(&a, b)| a.abs_diff(b) < 64), "{:?}", onsets(&d));
+    }
+
+    #[test]
+    fn noise_gating_gates_and_trims() {
+        let n = 44100;
+        // Noise at 0.005 (−46 dBFS) with two bursts of 0.5.
+        let mut r = tools::Rng::new(9);
+        let x: Vec<f32> = (0..n).map(|i| if (10000..15000).contains(&i) || (30000..32000).contains(&i) { 0.5 } else { 0.005 * r.gauss().clamp(-1.0, 1.0) as f32 }).collect();
+        let base = Sample::from_channels(44100, vec![x], Format::Float32);
+        let mut d = Doc::default();
+        d.sample = Arc::new(base.clone());
+        // Gate noise at the default −40 dBFS: the noise far from the bursts goes, the bursts stay.
+        assert!(tools::gate(Arc::make_mut(&mut d.sample), 0, n - 1, tools::GATE_DEFAULT));
+        let s = &d.sample.ch[0];
+        assert!(s[..9000].iter().all(|&v| v == 0.0) && s[20000..29000].iter().all(|&v| v == 0.0));
+        assert!(s[10000..15000].iter().all(|&v| v == 0.5) && s[30000..32000].iter().all(|&v| v == 0.5));
+        assert!(s[9950] != 0.0 && s[9950].abs() < 0.005, "the look-ahead opens the gate before the burst");
+        // Trim side noise: from the look-ahead before the first burst to the release after the last.
+        d.sample = Arc::new(base.clone());
+        assert!(d.trim_side_noise(tools::GATE_DEFAULT));
+        let (look, tail) = (88, 1323 + 881);
+        assert_eq!(d.frames(), 32000 - 10000 + look + tail);
+        assert_eq!(d.sample.ch[0][look], 0.5);
+        assert!(!d.trim_side_noise(tools::GATE_DEFAULT), "nothing left to trim");
+        // Trim all noise & slice up: the bursts, a region each.
+        d.sample = Arc::new(base);
+        assert_eq!(d.trim_all_noise(tools::GATE_DEFAULT), 2);
+        let rg: Vec<(String, usize, usize)> = d.sample.cues.iter().map(|c| (c.name.clone(), c.pos, c.len.unwrap())).collect();
+        assert_eq!(rg, vec![("Noise slice 1".to_string(), 0, 5000 + look + tail), ("Noise slice 2".to_string(), 5000 + look + tail, 2000 + look + tail)]);
+        assert_eq!(d.frames(), 7000 + 2 * (look + tail));
+        // An acquired threshold over the bursts: no sound, nothing done.
+        assert_eq!(d.trim_all_noise(0.6), 0);
     }
 
     #[test]

@@ -249,6 +249,38 @@ mod tests {
         let _ = std::fs::remove_file(wav);
     }
 
+    /// A file Tesla sends to a new Lemon Slicer channel: a hosted Fruity Slicer channel named after the file, sliced at
+    /// its regions, selected; undone, it goes (spec: plugins/tesla/README.md "Sending slices to Lemon Slicer").
+    #[test]
+    fn a_sent_file_becomes_a_sliced_slicer_channel() {
+        use tesla::sample::{Cue, Format, Sample};
+        let path = std::env::temp_dir().join(format!("openstudio-to-slicer-{}.wav", std::process::id()));
+        let mut s = Sample::from_channels(44100, vec![vec![0.25; 44100]], Format::Int16);
+        for (i, (pos, len)) in [(0usize, 11025usize), (11025, 11025), (22050, 22050)].into_iter().enumerate() {
+            s.cues.push(Cue { id: i as u32 + 1, name: format!("Part {}", i + 1), pos, len: Some(len) });
+        }
+        std::fs::write(&path, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.plugins.available = crate::plugins::builtin();
+        let before = a.state.project.channels.len();
+        a.sample_from_plugin(path.to_string_lossy().into_owned(), os_hostlink::AudioTo::Slicer);
+        assert_eq!(a.state.project.channels.len(), before + 1, "{:?}", a.state.message);
+        let row = before;
+        let ch = &a.state.project.channels[row];
+        assert!(is_slicer(ch));
+        assert_eq!(ch.name.as_deref(), Some(format!("openstudio-to-slicer-{}", std::process::id()).as_str()));
+        let st = State::parse(ch.plugin_state.as_deref().unwrap()).unwrap();
+        assert_eq!(st.slices.iter().map(|s| s.start).collect::<Vec<_>>(), [0, 11025, 22050]);
+        assert_eq!(st.slices[1].name(), "Part 2");
+        assert_eq!(a.state.selected_channel, row);
+        assert!(a.state.hosted_rows.contains(&row));
+        assert!(a.state.message.as_deref().is_some_and(|m| m.contains("3 slices")));
+        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(crate::history::ADD_CHANNEL));
+        assert_eq!(a.state.project.channels.len(), before);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The dump replaces the channel's notes in the current pattern (the other channels' stay), in ticks, as one undo
     /// step.
     #[test]

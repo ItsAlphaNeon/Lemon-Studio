@@ -172,7 +172,7 @@ pub enum Request {
     /// A sample file a Lemon plugin sent (host link `Audio`, Tesla's Send): to the selected channel (true) or the
     /// playlist.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
-    Audio(String, bool),
+    Audio(String, os_hostlink::AudioTo),
     /// Notes a Lemon plugin sent for its channel's current pattern (host link `Notes`, Lemon Slicer's dump): row,
     /// notes.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]

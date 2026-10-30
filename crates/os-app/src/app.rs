@@ -2731,8 +2731,8 @@ impl App {
                         self.invalidate();
                         continue;
                     }
-                    Request::Audio(path, channel) => {
-                        self.sample_from_plugin(path, channel);
+                    Request::Audio(path, to) => {
+                        self.sample_from_plugin(path, to);
                         continue;
                     }
                     Request::Notes(row, notes) => {
@@ -4333,15 +4333,51 @@ impl App {
         self.invalidate();
     }
 
-    /// A sample a Lemon plugin sent (Tesla's "Send to arranger as audio clip" / "Send to selected channel", host link
-    /// `Audio`; spec: plugins/tesla/README.md "Version 1"): an audio clip at the song position on the first track
-    /// free over it (one "Arranger edit" step), or the selected channel's sample (a new sampler channel when the
-    /// selected one isn't a sampler), as a drop on the rack does.
-    pub(crate) fn sample_from_plugin(&mut self, path: String, channel: bool) {
-        if channel {
-            let s = &self.state;
-            let row = Some(s.selected_channel).filter(|&r| s.project.channels.get(r).is_some_and(|c| c.kind.is_sampler()));
-            return self.sample_to_channel(path, row);
+    /// Sample `path` in a new Lemon Slicer channel at the bottom of the rack (the file's Fruity Slicer), named after the
+    /// file and selected: sliced at the file's cue points (Tesla's regions), else auto-sliced, as Lemon Slicer's own
+    /// Load does (spec: plugins/tesla/README.md "Sending slices to Lemon Slicer"). One undo step, "Add channel", as the
+    /// plugin picker's.
+    pub(crate) fn sample_to_slicer(&mut self, path: String) {
+        let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let path = crate::data_folder::adopt(&mut self.state, &path);
+        let st = match lemon_slicer::file_state(&path, lemon_slicer::state::State::default()) {
+            Ok((st, _)) => st,
+            Err(e) => {
+                self.state.message = Some(format!("{}: {e}", crate::slicer::LEMON_SLICER));
+                return self.invalidate();
+            }
+        };
+        let n = st.slices.len();
+        crate::control::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
+            let s = &mut app.state;
+            let row = add_plugin_channel(&mut s.project, crate::slicer::LEMON_SLICER);
+            let ch = &mut s.project.channels[row];
+            ch.name = Some(stem.clone());
+            ch.plugin_state = Some(st.to_bytes());
+            s.selected_channel = row;
+            s.rack.select_only(row);
+            crate::rack::autosize(s);
+            s.piano.dirty = true;
+        });
+        self.state.message = Some(format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER));
+        self.sync_slicer();
+        self.invalidate();
+    }
+
+    /// A sample a Lemon plugin sent (Tesla's "Send to arranger as audio clip" / "Send to selected channel" / "Send to
+    /// new Lemon Slicer channel", host link `Audio`; spec: plugins/tesla/README.md "Version 1", "Sending slices to
+    /// Lemon Slicer"): an audio clip at the song position on the first track free over it (one "Arranger edit" step),
+    /// the selected channel's sample (a new sampler channel when the selected one isn't a sampler), as a drop on the
+    /// rack does, or a new Lemon Slicer channel.
+    pub(crate) fn sample_from_plugin(&mut self, path: String, to: os_hostlink::AudioTo) {
+        match to {
+            os_hostlink::AudioTo::Channel => {
+                let s = &self.state;
+                let row = Some(s.selected_channel).filter(|&r| s.project.channels.get(r).is_some_and(|c| c.kind.is_sampler()));
+                return self.sample_to_channel(path, row);
+            }
+            os_hostlink::AudioTo::Slicer => return self.sample_to_slicer(path),
+            os_hostlink::AudioTo::Playlist => {}
         }
         let s = &mut self.state;
         let start = s.playlist.pos;
@@ -9738,7 +9774,7 @@ mod tests {
         a.state.project = test_project();
         a.state.playlist.pos = 384;
         let before = a.state.project.channels.len();
-        a.sample_from_plugin(p.clone(), false);
+        a.sample_from_plugin(p.clone(), os_hostlink::AudioTo::Playlist);
         assert_eq!(a.state.project.channels.len(), before + 1);
         let clips = crate::playlist::clips(&a.state);
         let i = *a.state.playlist.sel.first().expect("the new clip, selected");
@@ -9750,7 +9786,7 @@ mod tests {
         // To the selected channel: a sampler takes it.
         let row = a.state.project.channels.iter().position(|c| c.kind.is_sampler()).unwrap();
         a.state.selected_channel = row;
-        a.sample_from_plugin(p.clone(), true);
+        a.sample_from_plugin(p.clone(), os_hostlink::AudioTo::Channel);
         assert!(a.state.project.channels[row].sample_path.as_deref().is_some_and(|s| s.ends_with(".wav")));
         let _ = std::fs::remove_file(&path);
     }
