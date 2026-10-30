@@ -203,6 +203,11 @@ pub fn lfo(notes: Vec<Note>, lane: Lane, set: &Settings, ppq: u32, origin: u32, 
 
 /// The channel lane's control points (§5): a point on every tick from 0 to `len − 1` (the pattern's length), left out
 /// where the value is the tick before's. Volume and pan 0..12800, pitch in cents, ±4800.
+/// The wave as levels (0..1), tick by tick over `len` ticks: the event editor's LFO (event-editor.md §4).
+pub fn levels(set: &Settings, ppq: u32, len: u32) -> impl Iterator<Item = (u32, f64)> {
+    (0..len).zip(wave(set, ppq, len)).map(|(t, y)| (t, y.clamp(0.0, 1.0)))
+}
+
 pub fn points(set: &Settings, lane: Lane, ppq: u32, len: u32) -> Vec<(u32, i32)> {
     let mut out: Vec<(u32, i32)> = Vec::new();
     for (t, y) in (0..len).zip(wave(set, ppq, len)) {

@@ -69,6 +69,9 @@ pub enum EvCmd {
     ZoomIn,
     ZoomOut,
     ZoomSelection,
+    /// Tools ▸ Scale levels and LFO: the piano roll's dialogs on the control's events.
+    ScaleLevels,
+    Lfo,
     TurnIntoClip,
 }
 
@@ -256,6 +259,15 @@ pub fn space(s: &mut State, insert: bool) -> bool {
         set_value(s, if insert { t + len } else { t - len }, v);
     }
     true
+}
+
+/// The control's events from `from` up to `to` give way to `points` (tick, stored value).
+pub fn replace(s: &mut State, from: u32, to: u32, points: &[(u32, i32)]) {
+    erase(s, from, to.saturating_sub(1).max(from));
+    for &(t, v) in points {
+        set_value(s, t, v);
+    }
+    s.piano.dirty = true;
 }
 
 /// Edit ▸ Select previous (Ctrl+Left) / Select next (Ctrl+Right): the selection moves back or on by its length (the
@@ -467,6 +479,12 @@ pub fn menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::new("Insert current controller value", Cmd::Events(EvCmd::InsertValue)).key("Ctrl+I"),
         PItem::sep(),
         if any { turn } else { turn.off() },
+        PItem::head("Tools"),
+        {
+            let p = PItem::new("Scale levels...", Cmd::Events(EvCmd::ScaleLevels));
+            if any { p } else { p.off() }
+        },
+        PItem::new("LFO...", Cmd::Events(EvCmd::Lfo)).key("Ctrl+L"),
         PItem::head("Zoom"),
         PItem::new("Zoom in", Cmd::Events(EvCmd::ZoomIn)).key("PgUp"),
         PItem::new("Zoom out", Cmd::Events(EvCmd::ZoomOut)).key("PgDn"),
@@ -660,10 +678,29 @@ impl App {
                 zoom_selection(s);
                 None
             }
+            EvCmd::ScaleLevels | EvCmd::Lfo => {
+                let tool = if c == EvCmd::Lfo { crate::piano_dlg::Tool::Lfo } else { crate::piano_dlg::Tool::Levels };
+                self.open_events_tool(tool);
+                None
+            }
             EvCmd::TurnIntoClip => turn_into_clip(s),
         };
         self.invalidate();
         m
+    }
+
+    /// Tools ▸ Scale levels / LFO: the piano roll's dialog, where it was last left (centred the first time), on the
+    /// control's events (§4).
+    fn open_events_tool(&mut self, tool: crate::piano_dlg::Tool) {
+        let s = &mut self.state;
+        let i = tool.index();
+        if !s.piano_dlg.placed[i] {
+            let (w, h) = crate::views::piano_dlg::size(&s.piano_dlg, tool);
+            s.piano_dlg.pos[i] = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(crate::views::work_y(s)).round());
+            s.piano_dlg.placed[i] = true;
+        }
+        crate::piano_dlg::open_events(s, tool);
+        s.raise(Win::PianoDlg);
     }
 
     /// The editor's keys while it is in front (§4): Del, Ctrl+X / C / V, Ctrl+A, Ctrl+I, Ctrl+B, Ctrl+Ins / Del,
@@ -686,6 +723,7 @@ impl App {
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("v") => EvCmd::Paste,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("a") => EvCmd::SelectAll,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("i") => EvCmd::InsertValue,
+            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("l") => EvCmd::Lfo,
             _ => return false,
         };
         if let Some(m) = self.events_cmd(c) {
@@ -819,6 +857,54 @@ mod tests {
         assert_eq!(points(s), vec![(0, 0), (24, 1875), (48, 12800)]);
         s.events.sel = None;
         assert!(!space(s, true), "needs a selection");
+    }
+
+    /// Tools ▸ Scale levels and LFO: the piano roll's dialogs preview on the control's events, Accept is one undo step
+    /// and × puts them back (§4).
+    #[test]
+    fn scale_levels_and_lfo() {
+        use crate::piano_dlg::{self as dlg, Tool as DTool};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let s = &mut app.state;
+        assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
+        for t in [0, 24, 48] {
+            set(s, t, 0.5);
+        }
+        set(s, 400, 0.25);
+        let before = points(s);
+        app.events_cmd(EvCmd::ScaleLevels);
+        let s = &mut app.state;
+        assert!(s.shown(Win::PianoDlg) && s.piano_dlg.on_events);
+        assert_eq!(s.piano_dlg.tool.events_title(), "Events - level scaling");
+        assert_eq!(points(s), before, "the settings kept: nothing changes yet");
+        s.piano_dlg.levels.mult = 0.5;
+        dlg::preview(s);
+        assert_eq!(point(s, 24), Some(3200), "half of 50 %");
+        assert_eq!(point(s, 400), Some(1600));
+        assert_eq!(dlg::accept(s), "Event editor: levels scaled");
+        assert!(piano::undo(s));
+        assert_eq!(points(s), before, "one undo step");
+
+        // LFO over the selection; × puts the events back.
+        s.events.sel = Some((0, 96));
+        app.events_cmd(EvCmd::Lfo);
+        let s = &mut app.state;
+        assert_eq!(s.piano_dlg.tool, DTool::Lfo);
+        let lfo: Vec<(u32, i32)> = points(s).into_iter().filter(|p| p.0 < 96).collect();
+        assert!(lfo.len() > 10 && lfo.windows(2).all(|w| w[0].1 != w[1].1), "an event wherever the value changes");
+        assert_eq!(point(s, 400), Some(3200), "outside the selection: kept");
+        app.act(crate::app::Action::CloseWin(Win::PianoDlg));
+        assert_eq!(points(&app.state), before);
+        // Without a selection: the first bar.
+        app.state.events.sel = None;
+        app.events_cmd(EvCmd::Lfo);
+        let s = &mut app.state;
+        let bar = 4 * u32::from(s.project.ppq);
+        assert!(points(s).iter().filter(|p| p.0 < bar).count() > 10);
+        assert_eq!(point(s, 400.max(bar)), if bar > 400 { None } else { Some(3200) });
+        dlg::accept(s);
+        assert!(!s.piano_dlg.session_open());
     }
 
     /// Select previous / next, Relocate events and the zoom (§4).

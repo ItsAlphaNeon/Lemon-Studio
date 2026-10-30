@@ -66,7 +66,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     ui.hit(win, Action::Swallow, "");
     ui.hit(at(1.0, 1.0, w - 30.0, 26.0), Action::WinDrag(Win::PianoDlg), "");
     // FL's narrow dialogs: the title condensed to end before ×.
-    let name = d.tool.title_on(s.piano.lane);
+    let name = if d.on_events { d.tool.events_title() } else { d.tool.title_on(s.piano.lane) };
     let title = ui.c.fit_font(Font::new(17), name, w - 31.0);
     label(ui, title, x0 + 7.0, y0 + 15.0, -1, t.text, name);
     let close = at(w - 20.0, 10.0, 10.0, 10.0);
