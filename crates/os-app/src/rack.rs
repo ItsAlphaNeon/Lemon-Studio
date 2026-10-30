@@ -1209,6 +1209,8 @@ pub enum RCmd {
     Reset(KnobId),
     CopyValue(KnobId),
     PasteValue(KnobId),
+    /// Set... ▸ a value: the knob at that position (0..1).
+    SetValue(KnobId, f32),
     MixerReset(usize),
     AssignFree(usize),
     // Display filter (§21).
@@ -1506,13 +1508,17 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
         delete,
         PItem::sep(),
     ];
+    let driven = auto.as_ref().and_then(|a| crate::params::driving_clip(s, a.0));
     v.push(match auto {
         Some((tgt, name, val)) => PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, val)),
         None => PItem::new("Create automation clip", Cmd::Nothing).off(),
     });
-    v.extend([
-        PItem::new("Edit automation clip...", Cmd::Nothing).off(),
-    ]);
+    // Enabled while a clip drives the control; it shows that clip in the playlist, as on a plugin parameter (spec:
+    // plugins/plugin-parameters.md §5.1, measured there on the channel volume knob).
+    v.push(match driven {
+        Some(ch) => PItem::new("Edit automation clip...", Cmd::Param(crate::params::PCmd::EditClip(ch))),
+        None => PItem::new("Edit automation clip...", Cmd::Nothing).off(),
+    });
     v.extend(crate::remote::menu_items(knob.map(crate::typein::Target::Knob)));
     v.push(PItem::head("Value"));
     match knob {
@@ -1528,7 +1534,25 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
         Some(k) => PItem::new("Enter value...", Cmd::TypeIn(crate::typein::Target::Knob(k))),
         None => PItem::not_yet("Enter value..."),
     });
-    v.push(PItem::not_yet("Set..."));
+    v.push(match knob {
+        Some(k) => PItem::sub("Set...", set_items(s, k)),
+        None => PItem::not_yet("Set..."),
+    });
+    v
+}
+
+/// A knob's "Set..." submenu (Lemon Studio's choice, as on a plugin parameter: spec plugins/plugin-parameters.md §5.2;
+/// the original opens a box with one large control): the default, then minimum, 25 %, 50 %, 75 % and maximum, each
+/// with the knob's text at that value where it has one. The current value has the radio mark.
+fn set_items(s: &State, k: KnobId) -> Vec<PItem> {
+    let now = s.knob(k);
+    let at = |v: f32| {
+        let t = s.knob_text_at(k, v)?;
+        Some(t.find(": ").map_or(t.clone(), |i| t[i + 2..].to_string()))
+    };
+    let item = |name: &str, v: f32| it(at(v).map_or_else(|| name.to_string(), |t| format!("{name} ({t})")), RCmd::SetValue(k, v)).mark(Mark::Radio((now - v).abs() < 1e-6));
+    let mut v = vec![item("Default", s.knob_default(k)), PItem::sep()];
+    v.extend([("Minimum", 0.0), ("25%", 0.25), ("50%", 0.5), ("75%", 0.75), ("Maximum", 1.0)].map(|(name, x)| item(name, x)));
     v
 }
 
@@ -1808,6 +1832,11 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
                 crate::history::knob(s, k, false);
                 s.set_knob(k, v as f32);
             }
+            None
+        }
+        RCmd::SetValue(k, v) => {
+            crate::history::knob(s, k, false);
+            s.set_knob(k, v);
             None
         }
         RCmd::MixerReset(r) => {
@@ -2377,6 +2406,47 @@ pub fn to_model(s: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A knob's Edit automation clip... is greyed until a clip drives the control, then shows that clip (§19, as on a
+    /// plugin parameter).
+    #[test]
+    fn knob_menu_edit_automation_clip_follows_a_clip() {
+        let mut app = App::new(None);
+        let knob = crate::knobs::KnobId::ChanVol(0);
+        let auto = app.automation_target(&crate::app::Action::Knob(knob));
+        let edit = |app: &App| {
+            let m = knob_menu(&app.state, knob, app.automation_target(&crate::app::Action::Knob(knob)), 0.0, 0.0);
+            m.items.iter().find(|i| i.label == "Edit automation clip...").map(|i| (i.enabled, i.cmd.clone())).unwrap()
+        };
+        assert_eq!(edit(&app), (false, Cmd::Nothing));
+        let (tgt, name, v) = auto.expect("the volume knob is automatable");
+        crate::playlist::run(&mut app, Cmd::CreateAutomation(tgt, name, v));
+        let ch = app.state.project.channels.last().unwrap().index;
+        assert_eq!(edit(&app), (true, Cmd::Param(crate::params::PCmd::EditClip(ch))));
+    }
+
+    /// A knob's Set... lists the default and five fixed positions with the knob's text; one sets the knob as one undo
+    /// step, and the radio mark follows the value.
+    #[test]
+    fn knob_menu_set_values() {
+        let mut app = App::new(None);
+        let knob = crate::knobs::KnobId::ChanPan(0);
+        let set = |app: &App| {
+            let m = knob_menu(&app.state, knob, None, 0.0, 0.0);
+            m.items.iter().find(|i| i.label == "Set...").map(|i| i.children.clone()).unwrap()
+        };
+        let items = set(&app);
+        let labels: Vec<_> = items.iter().map(|i| i.label.to_string()).collect();
+        assert_eq!(labels[0], "Default (Centered)", "{labels:?}");
+        assert_eq!(&labels[2..], ["Minimum (100% left)", "25% (50% left)", "50% (Centered)", "75% (50% right)", "Maximum (100% right)"]);
+        assert_eq!(items.iter().filter(|i| i.mark == Mark::Radio(true)).count(), 2, "Default and 50% both match");
+        let Cmd::Rack(c) = items[6].cmd.clone() else { panic!("{:?}", items[6].cmd) };
+        run(&mut app, c);
+        assert_eq!(app.state.knob(knob), 1.0);
+        assert_eq!(set(&app).iter().position(|i| i.mark == Mark::Radio(true)), Some(6));
+        crate::history::undo(&mut app.state);
+        assert_eq!(app.state.knob(knob), 0.5, "one undo step");
+    }
 
     /// Options ▸ Set swing mix for selected, Create layer with selected channels and Color selected ▸ All... act on the
     /// selected channels (§17); the menu greys them with nothing selected.
