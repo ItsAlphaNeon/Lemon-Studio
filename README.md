@@ -22,7 +22,8 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **Lemon project files (`.lemon`), the default for new projects.** A project file of Lemon Studio's own: the project as an FLP plus its
   whole history across sessions (every change and every plugin state), so Recover from journal reaches any sound the
   project ever had. See [docs/native-format.md](docs/native-format.md).
-- **A converted older project keeps its original.** It opens without its path, so Save asks for a new file.
+- **A converted older project keeps its original.** An FLP in the layout before 24.2 opens without its path, so Save
+  asks for a new file. A Lemon project file keeps its path: its earlier saves stay in it as versions.
 - **After a crash, the backup is offered.** When the last run ended without closing while its project had unsaved
   changes, the next start says so and offers the newest autosave written since the project was last saved. Opening it
   works as Revert to last backup. A Lemon project's autosaves are `.lemon` files, so they keep its undo history.
@@ -65,6 +66,9 @@ own content. Side branches are named `cutting-edge-<topic>`.
   Every other keyboard shortcut works the same. Classic is FL's arrangement and unchanged.
 - **Menu bar titles spread evenly** over its panel; where they do not fit with a gap between them, all eight are
   condensed one step further. Every menu keeps its place and order.
+- **Status messages say what happened.** "The arranger is empty", not "The arranger is empty: nothing to play as a
+  song"; no clause or parenthesis explaining why. Errors keep their cause, and a message that says how to go on with a
+  mode just started stays.
 - **The piano roll finds its notes.** When the channel has notes in the pattern but none is in view (octaves above
   or below, or further along), a round arrow at the note grid's edge points at the nearest one and names its key; a
   click scrolls it into view. When notes also lie the opposite way, a second, smaller grey arrow points at the nearest
