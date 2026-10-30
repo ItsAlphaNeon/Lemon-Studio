@@ -5419,6 +5419,7 @@ impl App {
                         t.volume = Some(v);
                         self.state.piano.dirty = true;
                     }
+                    self.record_control(&Action::Fader(track));
                     self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
                     let col = self.hits.iter().rev().find(|h| h.action == Action::Fader(track)).map(|h| h.rect);
                     match col {
@@ -5504,6 +5505,7 @@ impl App {
                 Drag::Tempo { y0, t0, step } => {
                     // Rounded to the box's thousandths, so repeated steps don't drift.
                     let t = self.set_tempo(((t0 + f64::from(y0 - y).round() * step) * 1000.0).round() / 1000.0);
+                    self.record_control(&Action::Tempo);
                     self.hint = Cow::Owned(format!("Tempo {t:.3} BPM"));
                     self.damage_band(TEMPO_RECT);
                     self.damage_band(HINT_RECT);
@@ -7003,6 +7005,7 @@ impl App {
                     m.volume = Some(v);
                 }
                 s.piano.dirty = true;
+                self.record_control(&Action::Fader(t));
             }
             self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
             return None;

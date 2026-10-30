@@ -2009,6 +2009,26 @@ pub mod target {
         u32::from(0x7000 + track * 64 + u16::from(slot)) << 16 | u32::from(PLUGIN_PARAM | (k & 0x7FFF))
     }
 
+    /// A plugin parameter's control point holds the plain value as the plugin states its range when that range runs
+    /// between whole numbers at least 2 apart (FL's own plugins, and Lemon Studio's recreations of them, keep whole
+    /// values in their own unit), else the normalized value times 65536 (a Lemon Studio choice: the unit FL keeps for
+    /// other plugins is not measured). This is the level 0..1 such a value stands for.
+    pub fn plugin_point_level(min: f64, max: f64, value: i32) -> f64 {
+        let v = f64::from(value);
+        let level = if whole_range(min, max) { (v - min) / (max - min) } else { v / 65536.0 };
+        level.clamp(0.0, 1.0)
+    }
+
+    /// The control point value for normalized `level` of a parameter whose range is `min..max` (`plugin_point_level`).
+    pub fn plugin_point_value(min: f64, max: f64, level: f64) -> i32 {
+        let level = level.clamp(0.0, 1.0);
+        if whole_range(min, max) { (min + level * (max - min)).round() as i32 } else { (level * 65536.0).round() as i32 }
+    }
+
+    fn whole_range(min: f64, max: f64) -> bool {
+        min.fract() == 0.0 && max.fract() == 0.0 && max - min >= 2.0 && max.abs() < 1e9 && min.abs() < 1e9
+    }
+
     /// What a target id names.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Target {

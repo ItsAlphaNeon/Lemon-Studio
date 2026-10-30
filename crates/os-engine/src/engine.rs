@@ -17,6 +17,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
+use os_model::target::Target;
 use os_model::{ChannelKind, ClipSource, ControlPoint, Project, Stretching};
 
 use crate::clock::Clock;
@@ -389,13 +390,25 @@ impl Ramp {
 const VOLUME_GLIDE_SECONDS: f64 = 0.0093;
 const PAN_GLIDE_SECONDS: f64 = 0.0047;
 
-/// A channel control point placed on its tick.
+/// A pattern control point placed on its tick.
 #[derive(Debug, Clone, Copy)]
 struct CtlEvent {
     tick: u64,
-    channel: usize,
-    param: u16,
+    to: CtlTo,
+    /// In the setting's own unit (spec: audio/automation.md "Pattern control points").
     value: i32,
+}
+
+/// What a control point sets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CtlTo {
+    /// A channel's own setting: rack position, parameter (`ChannelState::apply`).
+    Channel(usize, u16),
+    /// A mixer value, a slot, the tempo.
+    Target(os_model::target::Target),
+    /// A plugin's parameter, with the level the value stands for once the plugin is known (`Engine::set_effect`,
+    /// `Engine::set_instrument`; spec: plugins/plugin-parameters.md §1).
+    Param(os_model::target::Target, Option<f64>),
 }
 
 /// Frames of a sample of `frames` frames stretched to `factor` times its length.
@@ -1397,8 +1410,8 @@ impl Engine {
 
         let mut controls: Vec<CtlEvent> = schedule_controls(project, mode)
             .into_iter()
-            .filter(|&(_, channel, _, _)| channel < channels.len())
-            .map(|(tick, channel, param, value)| CtlEvent { tick, channel, param, value })
+            .map(|(tick, kind, value)| CtlEvent { tick, to: ctl_to(kind), value })
+            .filter(|e| !matches!(e.to, CtlTo::Channel(c, _) if c >= channels.len()))
             .collect();
         controls.sort_by_key(|c| c.tick); // stable: equal ticks keep their order
         let (mut sched, end_tick) = schedule(project, mode, &mut report);
@@ -1704,6 +1717,10 @@ impl Engine {
                 self.report.plugin_channels_silent = self.report.plugin_channels_silent.saturating_sub(1);
             }
             ch.plugin = true;
+            if let Ok(h) = inst.try_lock() {
+                let mine = |g: Target| matches!(g, Target::ChannelParam(c, _) if usize::from(c) == channel);
+                param_points(&mut self.controls, mine, |k| h.param_range(k));
+            }
             ch.instrument = Slot(Some(inst));
             // Its delay is read after it processes; the pads are worked out again then.
             self.pdc.due = true;
@@ -1723,6 +1740,10 @@ impl Engine {
         }
         t.effects.retain(|e| e.slot != slot);
         let at = t.effects.partition_point(|e| e.slot < slot);
+        if let Ok(h) = fx.try_lock() {
+            let mine = |g: Target| matches!(g, Target::SlotParam(a, b, _) if usize::from(a) == track && usize::from(b) == slot);
+            param_points(&mut self.controls, mine, |k| h.param_range_fx(k));
+        }
         t.effects.insert(at, FxSlot::new(slot, t.slot_on[slot], t.slot_mix[slot], Fx::Hosted(fx)));
         self.pdc.due = true;
     }
@@ -2214,16 +2235,43 @@ impl Engine {
         out
     }
 
-    /// Applies the control points due on the tick starting now, smoothing volume and pan.
-    fn run_controls(&mut self) {
+    /// Applies the control points due on the tick starting now, smoothing volume and pan; a mixer track's values ramp
+    /// over the tick's `len` frames as a clip's do (spec: audio/automation.md "Pattern control points").
+    fn run_controls(&mut self, len: usize) {
+        let len = if self.tick == self.auto_from { 0 } else { len.max(1) as u32 };
         while let Some(&e) = self.controls.get(self.next_ctl) {
             if e.tick > self.tick {
                 break;
             }
             self.next_ctl += 1;
-            if let Some(ch) = self.channels.get_mut(e.channel) {
-                ch.apply(e.param, e.value, self.rate);
+            self.apply_point(e, len, self.rate);
+        }
+    }
+
+    /// One control point: a channel's setting, any other target's value as an automation level (the waits for late
+    /// audio included), a plugin's parameter for this tick's parameter events. `rate` 0 sets a channel in place.
+    fn apply_point(&mut self, e: CtlEvent, len: u32, rate: u32) {
+        match e.to {
+            CtlTo::Channel(c, param) => {
+                if let Some(ch) = self.channels.get_mut(c) {
+                    ch.apply(param, e.value, rate);
+                }
             }
+            // The tempo for the ticks after this one: the point's own tick keeps its length.
+            CtlTo::Target(Target::Tempo) => {
+                let bpm = f64::from(e.value) / 1000.0;
+                if bpm > 0.0 && bpm != self.tempo {
+                    self.tempo = bpm;
+                    self.clock.set_tempo(self.rate, self.ppq, self.clock_tempo());
+                }
+            }
+            CtlTo::Target(t) => {
+                if let Some(v) = point_level(t, e.value) {
+                    self.set_auto_values(vec![(t, (v * 1_073_741_824.0).round() as i64)], len);
+                }
+            }
+            CtlTo::Param(t, Some(v)) => self.params.point(t, v),
+            CtlTo::Param(_, None) => {}
         }
     }
 
@@ -2236,14 +2284,13 @@ impl Engine {
         self.auto_last.clear();
         self.auto_from = tick;
         self.next_ctl = 0;
+        self.params.points.clear();
         while let Some(&e) = self.controls.get(self.next_ctl) {
             if e.tick >= tick {
                 break;
             }
             self.next_ctl += 1;
-            if let Some(ch) = self.channels.get_mut(e.channel) {
-                ch.apply(e.param, e.value, 0);
-            }
+            self.apply_point(e, 0, 0);
         }
     }
 
@@ -2427,6 +2474,7 @@ impl Engine {
     fn run_automation(&mut self, len: usize) {
         use os_model::target::Target;
         self.params.ticks.clear();
+        self.params.point_ticks();
         if self.autos.is_empty() {
             return;
         }
@@ -2706,7 +2754,7 @@ impl Engine {
         // A delay that changed, or an insert whose slots all went off, works the pads out again before this tick's
         // values arrive; on the first tick they are worked out after its slot values.
         self.check_delays();
-        self.run_controls();
+        self.run_controls(len);
         self.run_automation(len);
         self.run_param_automation(len);
         for b in &mut self.bus {
@@ -4327,13 +4375,13 @@ fn pattern_plays(project: &Project, clips: &[os_model::Clip]) -> Vec<PatternPlay
     out
 }
 
-/// Channel control points as (tick, channel, parameter, value): a pattern's own, or those of every
-/// pattern clip of the playlist (spec: audio/pattern-controls.md, audio/song-structure.md "Control points").
-fn schedule_controls(project: &Project, mode: PlayMode) -> Vec<(u64, usize, u16, i32)> {
+/// Control points as (tick, target word, value): a pattern's own, or those of every pattern clip of the playlist
+/// (spec: audio/pattern-controls.md, audio/song-structure.md "Control points").
+fn schedule_controls(project: &Project, mode: PlayMode) -> Vec<(u64, u32, i32)> {
     let points = |n: u16| project.patterns.iter().find(|p| p.number == n).map(|p| p.controls.as_slice()).unwrap_or(&[]);
     let place = |out: &mut Vec<_>, n: u16| {
         for c in points(n) {
-            out.push((u64::from(c.position), usize::from(c.channel()), c.param(), c.value));
+            out.push((u64::from(c.position), c.kind, c.value));
         }
     };
     let mut out = Vec::new();
@@ -4349,13 +4397,57 @@ fn schedule_controls(project: &Project, mode: PlayMode) -> Vec<(u64, usize, u16,
                 for p in points(play.pattern).iter().filter(|p| u64::from(p.position) >= play.from && u64::from(p.position) < play.from + play.len) {
                     let tick = play.origin + i64::from(p.position);
                     if tick >= 0 && (tick as u64) < play.starts_until {
-                        out.push((tick as u64, usize::from(p.channel()), p.param(), p.value));
+                        out.push((tick as u64, p.kind, p.value));
                     }
                 }
             }
         }
     }
     out
+}
+
+/// What a control point's target word sets: a channel's own setting below the project's place, else the target an
+/// automation link with that word names (spec: audio/automation.md "Pattern control points").
+fn ctl_to(kind: u32) -> CtlTo {
+    use os_model::target::{self, PLUGIN_PARAM};
+    let (place, id) = ((kind >> 16) as u16, kind as u16);
+    if place < 0x4000 && id < PLUGIN_PARAM {
+        return CtlTo::Channel(usize::from(place), id);
+    }
+    match target::decode(kind) {
+        t @ (Target::ChannelParam(..) | Target::SlotParam(..)) => CtlTo::Param(t, None),
+        t => CtlTo::Target(t),
+    }
+}
+
+/// The automation level (0..1) a point's value in its setting's own unit stands for: the inverse of what a clip's
+/// level becomes (`Engine::auto_value`; spec: audio/automation.md "Pattern control points"). `None` for the targets a
+/// point does not move (a send's unit is not measured).
+fn point_level(t: Target, value: i32) -> Option<f64> {
+    let v = f64::from(value);
+    Some(match t {
+        Target::MixerVolume(_) => v / 16000.0,
+        Target::MixerPan(_) => (v / 6400.0 + 1.0) / 2.0,
+        Target::MixerSeparation(_) => (v / 64.0 + 1.0) / 2.0,
+        Target::MixerEq(_, _, 0) => (v / 1800.0 + 1.0) / 2.0,
+        Target::MixerEq(..) => v / 65536.0,
+        Target::SlotOn(..) => v,
+        Target::SlotMix(..) => v / 12800.0,
+        _ => return None,
+    })
+}
+
+/// Gives the plugin-parameter points `mine` picks their level, from the parameter's range as the plugin states it
+/// (`os_model::target::plugin_point_level`).
+fn param_points(controls: &mut [CtlEvent], mine: impl Fn(Target) -> bool, range: impl Fn(usize) -> Option<(f64, f64)>) {
+    for e in controls {
+        if let CtlTo::Param(t, level) = &mut e.to {
+            let (Target::ChannelParam(_, k) | Target::SlotParam(_, _, k)) = *t else { continue };
+            if mine(*t) {
+                *level = range(usize::from(k)).map(|(min, max)| os_model::target::plugin_point_level(min, max, e.value));
+            }
+        }
+    }
 }
 
 /// A clip plays unless it is muted or its playlist track is (spec: ui/playlist.md §2, §6).
@@ -5153,7 +5245,7 @@ mod tests {
         let pts = vec![ControlPoint::new(24, 0, ControlPoint::VOLUME, 6400), ControlPoint::new(96, 3, ControlPoint::PAN, 0)];
         let p = project(vec![long_note(0, 96, 0)], pts);
         let c = schedule_controls(&p, PlayMode::Pattern(1));
-        assert_eq!(c, vec![(24, 0, ControlPoint::VOLUME, 6400), (96, 3, ControlPoint::PAN, 0)]);
+        assert_eq!(c, vec![(24, u32::from(ControlPoint::VOLUME), 6400), (96, 3 << 16 | u32::from(ControlPoint::PAN), 0)]);
     }
 
     #[test]
@@ -5197,6 +5289,37 @@ mod tests {
         assert!((e.channels[0].volume - laws::channel_gain(0.5)).abs() < 1e-12);
         e.seek(0);
         assert!((e.channels[0].volume - laws::channel_gain(0.78125)).abs() < 1e-12, "back before the point");
+    }
+
+    /// Control points on a mixer track's volume, a slot's mix level and the tempo set them in their own units from
+    /// their tick on; seeking back before them puts the track's own values back (spec: audio/automation.md "Pattern
+    /// control points").
+    #[test]
+    fn points_set_mixer_values_and_the_tempo() {
+        use os_model::target;
+        let point = |position: u32, kind: u32, value: i32| ControlPoint { position, kind, value };
+        let mut p = project(vec![long_note(0, 384, 0)], vec![]);
+        p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        p.patterns[0].controls = vec![
+            point(24, target::mixer(1, target::MIXER_VOLUME), 8000),
+            point(24, target::mixer(2, target::MIXER_PAN), -3200),
+            point(24, target::slot(1, 2, target::SLOT_MIX), 6400),
+            point(48, target::TEMPO, 150_000),
+        ];
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+        let mut out = vec![0.0f32; 512];
+        while e.tick < 30 {
+            e.process(&mut out);
+        }
+        assert_eq!((e.tracks[1].vol, e.tracks[2].pan, e.tracks[1].slot_mix[2]), (8000, -3200, 6400));
+        assert_eq!(e.tempo, 130.0);
+        while e.tick < 50 {
+            e.process(&mut out);
+        }
+        assert_eq!(e.tempo, 150.0);
+        e.seek(0);
+        assert_eq!((e.tracks[1].vol, e.tracks[1].slot_mix[2]), (12800, 12800), "back before the points");
     }
 
     fn song(notes: Vec<Note>, clips: Vec<os_model::Clip>) -> Project {

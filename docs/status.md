@@ -179,6 +179,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Automation clips for channel, mixer and plugin parameters
 - A clip drives every target it is linked to, including mixer slot switches and mix levels, track EQ, send
   levels, stereo separation and the channel's level adjustments
+- A pattern's control points drive mixer volumes, pans, separation, equalisers, slot switches and mix levels, the
+  tempo and plugin parameters, besides the channel's own settings (sends and the main pitch not yet)
 - All thirteen curve shapes are walked exactly; values are taken one tick ahead and passed on only when
   they change
 - A clip's range (its channel's MIN and MAX knobs, minimum above maximum turning the curve upside down) and its
@@ -320,7 +322,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   off it punches in and out (plays it once and stops back at its start)
 - Score logger (TOOLS): every note played is kept for 30 minutes; Dump score log writes the last 2 to 30 minutes into
   the pattern at their real timing (Merge / Replace when it has notes); Clear log
-- Automation recording: channel volume and pan knob moves while recording become the pattern's control points
+- Automation recording: moves of a channel's volume and pan, a mixer track's fader, pan, stereo separation, equaliser
+  and slot mix knobs, the tempo and any plugin parameter (in its own window) become the current pattern's control
+  points while recording, each in its setting's own unit, as in the original
 - Record options (toolbar, OPTIONS, Ctrl+I / Ctrl+P / Ctrl+B): Start on input (Play waits for the first note, which
   is recorded at the start), Recording precount (1 or 2 bars of metronome count-in, "REC IN n" on the clock; also
   set from the metronome's right-click menu) and Blend (a take keeps the notes it overlaps)

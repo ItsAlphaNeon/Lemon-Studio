@@ -20,7 +20,8 @@ Systems a fully functional DAW can't ship without.
   mixer menu's Arm and Disarm selected track(s) and Disk recording ▸ Auto-create audio clips work
 - [x] **Input monitoring.** A track's input plays through it while it is armed, or always, per its Monitor external
   input setting (Off / When armed / On), also while stopped (#182)
-- [ ] **Automation recording into clips.** Only channel volume and pan moves record, and only into the pattern
+- [ ] **Automation recording into clips.** Every automatable control now records into the pattern, as in the
+  original, and patterns play those points; turning them into automation clips waits for the event editor
 - [x] **Automation clip LFO and min / range.** The clip channel's MIN / MAX knobs set its range and its LFO
   (switch, mode, amount, speed, tension, skew, pulse width, its own envelope) plays as the original's, in the clip's
   channel window; files keep every LFO field
