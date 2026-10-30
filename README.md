@@ -24,8 +24,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **Lemon project files (`.lemon`), the default for new projects.** A project file of Lemon Studio's own: the project as an FLP plus its
   whole history across sessions (every change and every plugin state), so Recover from journal reaches any sound the
   project ever had. See [docs/native-format.md](docs/native-format.md).
-- **Older FL projects open.** Projects saved by FL 20 to 24.1 are converted to the newer layout as they are read.
-  Save asks for a new file.
+- **A converted older project keeps its original.** It opens without its path, so Save asks for a new file.
 
 - **Wayland first.** On Linux the main window is native Wayland in a Wayland session; plugin windows open detached.
   `OPENSTUDIO_WAYLAND=0` brings back the X11 window, where plugin windows dock. CI runs on Linux only
@@ -119,7 +118,9 @@ own content. Side branches are named `cutting-edge-<topic>`.
   it does (Novation's): transport, undo, metronome, loop record, capture and quantise buttons; pads that play and pick
   channels in the rack's colours, or drums; encoders on the focused plugin, the mixer (five pages) or the transport;
   faders and their buttons on the mixer bank (arm or mute), the master fader always; the screen naming what each
-  control turns. The tracks and channels it takes are outlined in the mixer and the channel rack. Its DAW port is not a
+  control turns. In Plugin mode the encoder arrows page through all of a plugin's parameters, eight at a time (FL
+  has no pages there), Zest has a map of its own (cutoff, resonance, filter envelope, ADSR, output), and a switch or
+  choice moves a step per detent. The tracks and channels it takes are outlined in the mixer and the channel rack. Its DAW port is not a
   plain MIDI input; its keys still are, and its pitch wheel turns the selected channel's pitch knob. The Launchkey Mini
   MK4 uses the same driver.
 - **Third-party plugin windows under Hyprland.** They drag by their own title bar (Hyprland ignores the X11 move

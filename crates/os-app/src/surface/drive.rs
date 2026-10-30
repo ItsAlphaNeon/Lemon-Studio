@@ -30,6 +30,8 @@ const GESTURE: Duration = Duration::from_secs(1);
 const NAME: &str = "Lemon Studio";
 /// Mixer tracks and channels the faders, encoders and pads take at a time.
 const BANK: usize = 8;
+/// Parameters with up to this many steps move a step per encoder detent.
+const MAX_STEPPED: u32 = 32;
 
 /// The Mixer encoder layout's pages.
 const MIXER_PAGES: [&str; 5] = ["Channel Volume", "Channel Pan", "Mixer Volume", "Mixer Pan", "Mixer EQ"];
@@ -58,6 +60,9 @@ pub struct Drive {
     pads_held: Vec<(u8, usize)>,
     /// The plugin window the encoders opened (a rack row), closed again when the encoders move on.
     opened: Option<usize>,
+    /// Plugin mode's page, and the instance it is of (a new one starts on the first page).
+    plugin_page: usize,
+    plugin_key: Option<usize>,
     /// Transport encoder 5's turns toward the next or previous marker.
     marker_turns: i32,
     master_again: Option<Instant>,
@@ -101,6 +106,8 @@ impl Drive {
             arm: true,
             pads_held: Vec::new(),
             opened: None,
+            plugin_page: 0,
+            plugin_key: None,
             marker_turns: 0,
             master_again: None,
             rearm: [true; 9],
@@ -270,16 +277,39 @@ fn map_of(name: &str) -> Option<&'static [Option<Slot>; 8]> {
     MAPS.iter().find(|(n, _)| squash(n) == want).map(|(_, m)| m)
 }
 
-/// What Plugin mode's encoders turn: an instance (a rack row, or a mixer slot's key) and encoder n's parameter, its
-/// screen name, centre and ranges.
+/// Maps of Lemon Studio's own plugins (FL has none for them): encoder n's parameter by its index and the name the plugin
+/// gives it (a slot whose parameter has moved or been renamed is dropped), and the name the screen shows.
+const LEMON_MAPS: &[(&str, [Option<(usize, &str, &str)>; 8])] = &[(
+    "Zest",
+    [
+        Some((149, "Frequency", "Cutoff")),
+        Some((150, "Resonance", "Resonance")),
+        Some((152, "Freq Mod Depth", "Filter Env")),
+        Some((182, "Attack", "Attack")),
+        Some((183, "Decay", "Decay")),
+        Some((184, "Sustain", "Sustain")),
+        Some((185, "Release", "Release")),
+        Some((0, "Output", "Output")),
+    ],
+)];
+
+/// An encoder's parameter in Plugin mode: its index, screen name, centre and ranges.
+type PluginSlot = (usize, String, Option<(f64, f64)>, &'static [(f64, &'static str)]);
+
+/// What Plugin mode's encoders turn: an instance (a rack row, or a mixer slot's key), its page of eight parameters (the
+/// first is the plugin's map when it has one; then all its parameters, eight at a time) and the number of pages.
 struct PluginTarget {
     key: usize,
     /// The title line: the channel's name, or the mixer track's for an effect.
     title: String,
-    slots: [Option<(usize, String, Option<(f64, f64)>, &'static [(f64, &'static str)])>; 8],
+    slots: [Option<PluginSlot>; 8],
+    page: usize,
+    pages: usize,
+    /// The first page is a map.
+    mapped: bool,
 }
 
-fn plugin_target(s: &State) -> Option<PluginTarget> {
+fn plugin_target(s: &State, page: usize) -> Option<PluginTarget> {
     // A focused effect window first, then the selected channel.
     let (key, title, name, sampler) = match s.focused() {
         Some(Win::Hosted(key)) if crate::plugins::fx_of(key).is_some() => {
@@ -299,27 +329,56 @@ fn plugin_target(s: &State) -> Option<PluginTarget> {
         }
     };
     let list = s.params.lists.get(&key)?;
-    let mut slots: [Option<(usize, String, Option<(f64, f64)>, &'static [(f64, &'static str)])>; 8] = Default::default();
+    let mut map: [Option<PluginSlot>; 8] = Default::default();
+    let mut mapped = true;
     if sampler {
         for (i, (shown, theirs)) in SAMPLER.iter().enumerate() {
             if let Some(index) = list.params.iter().position(|e| e.name == *theirs) {
-                slots[i] = Some((index, shown.to_string(), None, if i == 2 { FILTER_TYPES } else { &[] }));
+                map[i] = Some((index, shown.to_string(), None, if i == 2 { FILTER_TYPES } else { &[] }));
             }
         }
-    } else if let Some(map) = map_of(&name) {
-        for (i, slot) in map.iter().enumerate() {
+    } else if let Some(m) = map_of(&name) {
+        for (i, slot) in m.iter().enumerate() {
             if let Some(sl) = slot.as_ref().filter(|sl| sl.index < list.params.len()) {
                 let n = sl.name.map(String::from).unwrap_or_else(|| list.params[sl.index].name.clone());
-                slots[i] = Some((sl.index, n, sl.centre, sl.regions));
+                map[i] = Some((sl.index, n, sl.centre, sl.regions));
+            }
+        }
+    } else if let Some((_, m)) = LEMON_MAPS.iter().find(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+        for (i, slot) in m.iter().enumerate() {
+            if let Some((index, theirs, shown)) = slot.filter(|(index, theirs, _)| list.params.get(*index).is_some_and(|e| e.name == *theirs)) {
+                let _ = theirs;
+                map[i] = Some((index, shown.to_string(), None, &[]));
             }
         }
     } else {
-        // A plugin FL has no map for: its first eight parameters.
-        for (i, (index, e)) in list.params.iter().enumerate().filter(|(_, e)| !e.hidden).take(8).enumerate() {
-            slots[i] = Some((index, e.name.clone(), None, &[]));
-        }
+        mapped = false;
     }
-    Some(PluginTarget { key, title, slots })
+    // Then every parameter the plugin shows, eight at a time.
+    let shown: Vec<usize> = list.params.iter().enumerate().filter(|(_, e)| !e.hidden).map(|(i, _)| i).collect();
+    let pages = usize::from(mapped) + shown.len().div_ceil(8).max(usize::from(!mapped));
+    let page = page.min(pages - 1);
+    let slots = if mapped && page == 0 {
+        map
+    } else {
+        let first = (page - usize::from(mapped)) * 8;
+        let mut slots: [Option<PluginSlot>; 8] = Default::default();
+        for (i, &index) in shown.iter().skip(first).take(8).enumerate() {
+            slots[i] = Some((index, list.params[index].name.clone(), None, &[]));
+        }
+        slots
+    };
+    Some(PluginTarget { key, title, slots, page, pages, mapped })
+}
+
+/// A page's name on the screen: "Main controls", "Parameters 9-16".
+fn page_name(pt: &PluginTarget) -> String {
+    if pt.mapped && pt.page == 0 {
+        return "Main controls".into();
+    }
+    let first = (pt.page - usize::from(pt.mapped)) * 8 + 1;
+    let n = pt.slots.iter().filter(|s| s.is_some()).count().max(1);
+    format!("Parameters {first}-{}", first + n - 1)
 }
 
 /// The plugin's text for its parameter's value, or the value in percent.
@@ -393,6 +452,9 @@ impl App {
             }
         }
         self.surface_repeat();
+        if self.drive().encoders == Some(Encoders::Plugin) {
+            self.plugin_page_follow();
+        }
         self.surface_paint();
     }
 
@@ -698,6 +760,9 @@ impl App {
     }
 
     fn mixer_page_step(&mut self, by: isize) {
+        if self.drive().encoders == Some(Encoders::Plugin) {
+            return self.plugin_page_step(by);
+        }
         if self.drive().encoders != Some(Encoders::Mixer) {
             return;
         }
@@ -711,6 +776,31 @@ impl App {
         self.close_opened();
         self.mixer_page_window();
         self.notify("Mixer", MIXER_PAGES[new]);
+    }
+
+    /// Plugin mode's pages: the encoder arrows step through the plugin's parameters, eight at a time (FL's script has
+    /// no pages; the arrows do nothing there).
+    fn plugin_page_step(&mut self, by: isize) {
+        let page = self.drive().plugin_page;
+        let Some(pt) = plugin_target(&self.state, page) else { return };
+        let new = (pt.page as isize + by).clamp(0, pt.pages as isize - 1) as usize;
+        if new == pt.page {
+            return;
+        }
+        let d = self.drive();
+        (d.plugin_page, d.carry, d.sticky) = (new, [0.0; 8], [None; 8]);
+        if let Some(pt) = plugin_target(&self.state, new) {
+            self.notify(pt.title.clone(), page_name(&pt));
+        }
+    }
+
+    /// Another instance in Plugin mode starts on its first page.
+    fn plugin_page_follow(&mut self) {
+        let key = plugin_target(&self.state, 0).map(|pt| pt.key);
+        let d = self.drive();
+        if d.plugin_key != key {
+            (d.plugin_key, d.plugin_page) = (key, 0);
+        }
     }
 
     fn fader_button(&mut self, i: usize) {
@@ -861,17 +951,31 @@ impl App {
     }
 
     fn plugin_encoder(&mut self, i: usize, steps: i8) {
-        let Some(pt) = plugin_target(&self.state) else { return };
+        let page = self.drive().plugin_page;
+        let Some(pt) = plugin_target(&self.state, page) else { return };
         let Some((index, _, centre, _)) = pt.slots[i].clone() else { return };
         let t = Target::Param(pt.key, index);
+        // A parameter of few steps (a switch, a choice) moves a step per detent.
+        let steps_of = self.state.params.lists.get(&pt.key).and_then(|l| l.params.get(index)).map_or(0, |e| e.steps);
+        if (1..=MAX_STEPPED).contains(&steps_of) {
+            let n = f64::from(steps_of);
+            let at = (self.target_value(t) * n).round() + f64::from(steps);
+            let first = self.gesture(i, t);
+            self.target_set(t, at.clamp(0.0, n) / n, first);
+            return self.open_target_window(pt.key);
+        }
         // A stepped parameter takes the turns it could not show yet into the next.
         let carry = self.drive().carry[i];
         let wanted = self.turn(i, t, steps, centre, carry);
         let got = self.target_value(t);
         self.drive().carry[i] = if (got - wanted).abs() > 1e-9 { carry + wanted - got } else { 0.0 };
-        // The selected channel's plugin window opens, unless an effect's window is in front.
-        if crate::plugins::fx_of(pt.key).is_none() {
-            let row = pt.key;
+        self.open_target_window(pt.key);
+    }
+
+    /// The selected channel's plugin window opens as its parameters turn, unless an effect's window is in front.
+    fn open_target_window(&mut self, key: usize) {
+        if crate::plugins::fx_of(key).is_none() {
+            let row = key;
             let open = self.plugins.window_of(row).is_some();
             if !open {
                 if self.state.hosted_rows.contains(&row) {
@@ -1074,6 +1178,7 @@ impl App {
         }
         let s = &self.state;
         let (pads, enc, faders, arm, mbank, cbank, page) = (d.pads, d.encoders, d.faders, d.arm, d.mixer_bank, d.channel_bank, d.mixer_page);
+        let plugin = if enc == Some(Encoders::Plugin) { plugin_target(s, d.plugin_page) } else { None };
         let held: Vec<u8> = d.held.iter().map(|h| h.0).collect();
         let pads_held: Vec<u8> = d.pads_held.iter().map(|h| h.0).collect();
         let n = track_count(s);
@@ -1102,8 +1207,12 @@ impl App {
         lights.push((Led::Button(button::PADS_UP), arrow(button::PADS_UP, daw_pads && cbank > 0), false));
         lights.push((Led::Button(button::PADS_DOWN), arrow(button::PADS_DOWN, daw_pads && cbank + 1 < cbanks), false));
         let mixer = enc == Some(Encoders::Mixer);
-        lights.push((Led::Button(button::ENCODERS_UP), arrow(button::ENCODERS_UP, mixer && page > 0), false));
-        lights.push((Led::Button(button::ENCODERS_DOWN), arrow(button::ENCODERS_DOWN, mixer && page + 1 < MIXER_PAGES.len()), false));
+        let (up, down) = match &plugin {
+            Some(pt) => (pt.page > 0, pt.page + 1 < pt.pages),
+            None => (mixer && page > 0, mixer && page + 1 < MIXER_PAGES.len()),
+        };
+        lights.push((Led::Button(button::ENCODERS_UP), arrow(button::ENCODERS_UP, up), false));
+        lights.push((Led::Button(button::ENCODERS_DOWN), arrow(button::ENCODERS_DOWN, down), false));
         // Fader buttons: armed red, not armed dark red; or the track's colour unless muted.
         if faders == Some(Faders::Volume) {
             for i in 0..8u8 {
@@ -1148,7 +1257,7 @@ impl App {
         let mut texts: Vec<(u8, Text)> = vec![(display::STATIONARY, stationary)];
         let unused = |title: String| Text::three(title, "Not Used", "");
         match enc {
-            Some(Encoders::Plugin) => match plugin_target(s) {
+            Some(Encoders::Plugin) => match plugin {
                 Some(pt) => {
                     for (i, slot) in pt.slots.iter().enumerate() {
                         let t = match slot {
