@@ -564,21 +564,42 @@ pub fn run(app: &mut App, c: PCmd) -> Option<String> {
     msg
 }
 
-/// Loads preset `path` (any [`IMPORT_EXTS`] type, or a factory preset) into the instance under `key`; returns the
-/// status message.
+/// Loads preset `path` (any [`IMPORT_EXTS`] type, or a factory preset) into the instance under `key` at the user's
+/// request; returns the status message. One undo step, "Plugin preset", that brings back the state, the preset shown
+/// and the channel's or slot's name (`control::state_edit`). Lemon Studio's choice: the original's own behaviour was
+/// not looked at.
 pub fn load_into(app: &mut App, key: usize, path: &Path) -> Option<String> {
+    load_with(app, key, path, true)
+}
+
+/// The state the instance under `key` would go back to on undo (`Taken::Plugin`); `None` when it has none to save.
+fn side(app: &App, key: usize) -> Option<crate::control::command::PluginSide> {
+    let name = match crate::plugins::fx_of(key) {
+        None => app.state.project.channels.get(key)?.name.clone(),
+        Some(slot) => app.state.mixer.slot_names.get(&slot).cloned(),
+    };
+    Some(crate::control::command::PluginSide { state: app.plugins.state(key)?, preset: app.plugins.presets.get(&key).cloned(), name, fill: 0 })
+}
+
+/// `load_into`; `step`: an undo step for it (none for a preset that goes into an instance just made for it, part of
+/// the step that made it).
+fn load_with(app: &mut App, key: usize, path: &Path, step: bool) -> Option<String> {
     let d = app.plugins.descriptor(key)?;
     let first = match crate::citrus::fst_state(path) {
         // An FL preset file (Citrus's list of an FL install's presets) holds the original's state.
         Some(state) => state.map(|s| (shown_name(path), Body::State(s))),
         None => read_any(path, &d).and_then(|v| v.into_iter().next().ok_or_else(|| format!("{} holds no preset", shown_name(path)))),
     };
+    let before = if step { side(app, key) } else { None };
     Some(match first {
         Ok((_, body)) => match apply(app, key, &body) {
             Some(missing) => {
                 app.plugins.mark_edited(key);
                 app.plugins.set_preset(key, Some(path.to_path_buf()));
                 auto_name(app, key, path);
+                if let Some(before) = before.filter(|b| side(app, key).as_ref() != Some(b)) {
+                    crate::control::state_edit(&mut app.state, key, crate::control::command::PLUGIN_PRESET, before);
+                }
                 match missing.is_empty() {
                     true => format!("Preset: {}", shown_name(path)),
                     false => format!("Preset: {} ({} has no {})", shown_name(path), d.name, missing.join(", ")),
@@ -798,7 +819,7 @@ pub fn pending_tick(app: &mut App) {
     }
     for (key, path, at) in std::mem::take(&mut app.plugins.preset_waits) {
         if app.plugins.descriptor(key).is_some() {
-            app.state.message = load_into(app, key, &path);
+            app.state.message = load_with(app, key, &path, false);
             app.invalidate();
         } else if at.elapsed() < WAIT {
             app.plugins.preset_waits.push((key, path, at));

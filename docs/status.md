@@ -370,13 +370,19 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Plugin parameters Lemon Studio sets ("Plugin parameter": Type in value, Set..., Paste value), and those changed in a
   plugin's own window: one step per gesture (mouse down to up on its knob), or per run of values from a plugin that
   sends them without one; mixer faders and parameters follow "Undo knob tweaks"
+- Presets loaded into a plugin ("Plugin preset": its window's Presets box, ◀ ▶ and window menu, Import preset..., a
+  preset file dropped on the window, its channel or its slot), one step each, by the owner's id so it follows moves:
+  the undo brings back the plugin's state, the preset its window showed and the name the load gave its channel or
+  slot; the redo the state as the undo found it. A preset that goes into an instance made for it is part of that
+  step. Lemon Studio's choice; the original's behaviour was not looked at
 - Changes made through the control plane (see Scripting and assistants), named after the client that made them
 - The browser's Current project ▸ History lists the steps from "Last reset"; undone steps are grey, and a click
   on one goes back or forward to it
 - General settings ▸ Undo history: Maximum undo levels, Undo knob tweaks, Alternate undo mode, and showing the
   history in the browser, newest first if wanted
 - Not yet: "Put undone recordings in the recycle bin", which waits for recording. A plugin's own undo inside its
-  window is the plugin's, apart from the app's history
+  window is the plugin's, apart from the app's history; a state a plugin changes by itself without parameter edits
+  (its own preset browser) makes no step, as the host is not told
 
 ## 🚧 Scripting and assistants
 
