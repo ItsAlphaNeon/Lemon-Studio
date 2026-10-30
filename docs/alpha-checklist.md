@@ -101,7 +101,7 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   plugins, Change icon ▸, Show waveform preview, MIDI channel through and Restretch all on 2026-10-30): Loop starter
   and its 3 playlist-track options (it is built on the original's online loop library), Detached (drawn in the main window's one surface, as the mixer), Patcherize, Assign
   to new instrument track (instrument tracks, and how the original saves a track's link to its channel, not measured
-  yet), Auto fill (the manual does not describe it), Create instrument (no multi-sample instrument to put the samples
+  yet), Auto fill (greyed on every channel tried in the original; what it does is unknown), Create instrument (no multi-sample instrument to put the samples
   in yet), Burn MIDI to ▸ (2) (no plugin hands its notes back to the host yet). The knob, mixer box and LED menus'
   Automation and Remote control groups add 18 more, after 5 were enabled on 2026-10-30 (Edit automation in piano roll
   on the volume and panning knobs, the swing knob's Set as song start value, MIDI learn... on the mixer box and the
@@ -116,7 +116,7 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   Switch auto-bypass for all plugins, Chord progression tool..., Set keyboard focus of all plugins to ▸ (its Enabled
   and Disabled not counted; greyed on Linux) and Lock / Unlock all tracks to / from their clips were enabled (the last
   four as Lemon Studio's design): TOOLS > Control builder (no control builder yet), Set up for MIDI export (what it
-  does was not observed); VIEW > Script output (no scripting) ([menus.rs](../crates/os-app/src/views/menus.rs))
+  does is now measured, `ui/menus.md`; it waits for a MIDI Out instrument); VIEW > Script output (no scripting) ([menus.rs](../crates/os-app/src/views/menus.rs))
 - [x] **TOOLS ▸ Audio logger and Dump to audio editor.** Enabled (on by default, as in FL Studio) keeps the last 1 to
   10 minutes of what the device plays, the header showing the memory used; Dump puts them into the master track's
   Tesla. At its time limit Tesla now keeps the last minutes, as Edison does. What FL Studio's logger records and how

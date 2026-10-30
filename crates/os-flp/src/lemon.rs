@@ -37,6 +37,8 @@ pub const CHANNEL_CHECKS: u8 = 199;
 pub const KEY_FOCUS: u8 = 200;
 /// `LMex` event: the playlist tracks locked to their clips.
 pub const TRACK_LOCKS: u8 = 201;
+/// `LMex` event: the channels the live note sources are locked to (Receive notes from ▸).
+pub const NOTE_LOCKS: u8 = 202;
 
 /// Whether `file` is a `.lemon` file (its first chunk is `LMhd`).
 pub fn is_lemon(file: &FlpFile) -> bool {
