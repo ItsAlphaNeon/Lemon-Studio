@@ -115,11 +115,11 @@ Greyed-out controls and partial features. These can land alongside the blockers.
 - [x] **Value boxes.** All of them work, the last two being the autosave Maximum and Metronome track, and MIDI
   settings' Performance mode MIDI channel (2026-10-30)
 - [ ] **Performance mode.** The typing keyboard (its key layout is only in a picture the original's manual no longer
-  serves), sub-clips and recording a performance. Launching the zone's clips with the mouse and with notes 0–119 on
+  serves) and sub-clips. Launching the zone's clips with the mouse and with notes 0–119 on
   the Performance mode MIDI channel (scrolled and paged with notes 120–124, synced to the global snap while 127 is
   held), column, clip group and track group scenes and +Scenes (Ctrl+click, notes 125 / 126 held), each track's Performance
-  settings, Ctrl+P, Prepare for performance mode, the clip and track progress displays and the clock counting bars
-  from the Start marker work (2026-10-30)
+  settings, Ctrl+P, Prepare for performance mode, the clip and track progress displays, the clock counting bars
+  from the Start marker and recording a performance (Record armed) work (2026-10-30)
 - [x] **Recording settings page.** Settings ▸ Recording, Lemon Studio's own page (the original keeps these in the
   Record button's menus): the recording filter, the Record options and quantize, Start on input, Loop record, Blend,
   Count-in and its length, Auto-create audio clips and the External input question's answer, shared with the menus
