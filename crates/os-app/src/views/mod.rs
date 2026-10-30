@@ -614,8 +614,8 @@ pub enum Light {
     Close,
 }
 
-/// The Lemon skin's window buttons (cutting-edge, its own look rather than FL's glyphs): round lights in the places of
-/// `kit::window_buttons`, muted until the mouse is over them, then lit in their colour with what they do drawn in.
+/// The Lemon skin's window buttons: round lights in the places of `kit::window_buttons`, muted until the mouse is over
+/// them, then lit in their colour with what they do drawn in.
 fn lights(c: &mut os_ui::Canvas, t: &os_theme::Palette, x0: f32, y: f32, hovered: Option<usize>, max: kit::MaxGlyph) {
     let first = match max {
         kit::MaxGlyph::Restore => 0,

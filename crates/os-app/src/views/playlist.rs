@@ -69,7 +69,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     window_body(ui, r);
     let outer = r;
     let arr = pl::arrangement_name(s);
-    // The Lemon skin's own title (cutting-edge): dots between its parts instead of FL's dash and chevrons.
+    // The Lemon skin's own title: dots between its parts.
     let lemon = super::lemon(ui);
     let (lead, sep, tail) = if lemon { ("Arranger  \u{b7}  ", "  \u{b7}  ", "") } else { ("Arranger - ", "  \u{203a}  ", "  \u{203a}") };
     let title = format!("{lead}{arr}{sep}{}{tail}", pl::source_name(s, pl::source(s)));

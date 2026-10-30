@@ -471,7 +471,7 @@ struct State {
 }
 
 impl State {
-    /// A new frame's state: strip shown, the plug tab, no hint or preset, FL's frame (not a card).
+    /// A new frame's state: strip shown, the plug tab, no hint or preset, the Classic frame (not a card).
     fn new(info: ChannelInfo, editor: (f32, f32), detached: bool) -> State {
         State {
             info,
@@ -558,7 +558,7 @@ impl State {
     fn chrome(&self) -> (f32, f32) {
         (2.0 * self.border(), self.area_y() + self.border())
     }
-    /// Left / right / bottom inset of the editor: the card's outline only, FL's frame otherwise.
+    /// Left / right / bottom inset of the editor: the card's outline only, the Classic frame otherwise.
     fn border(&self) -> f32 {
         if self.card { 1.0 } else { BORDER }
     }
@@ -767,7 +767,7 @@ fn card_tabs(st: &State) -> Vec<(usize, Rect)> {
 }
 
 /// The card's volume knob, left of its tabs: the channel's volume, as the instrument rack's knob (a channel's window
-/// only; owner, 2026-10-28: the one control of FL's strip worth keeping in the title row).
+/// only).
 fn card_knob(st: &State) -> Option<Rect> {
     st.channel().then(|| {
         let end = card_tabs(st).first().map_or(presets_rect(st).x, |&(_, r)| r.x);

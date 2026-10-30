@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! What a Launchkey MK4's controls do in Lemon Studio, and what its lights and screen show: FL Studio's behaviour with
-//! the keyboard (Novation's FL device script), on Lemon Studio's windows and functions. Runs on the UI thread, from
+//! What a Launchkey MK4's controls do in Lemon Studio, and what its lights and screen show. Runs on the UI thread, from
 //! `App::midi_tick`: the port's messages first, then the lights and displays brought up to date with the project.
 // spec: controllers/launchkey-mk4.md
 
@@ -17,8 +16,7 @@ use crate::knobs::KnobId;
 use crate::record::{Extra, Opt, RecCmd};
 use crate::step_edit::Src;
 
-/// A held arrow repeats after 6 of FL's idle ticks (taken as 20 ms); banks then step every 6 ticks, the selected mixer
-/// track every 2.
+/// A held arrow repeats after 6 ticks of 20 ms; banks then step every 6 ticks, the selected mixer track every 2.
 const REPEAT_DELAY: Duration = Duration::from_millis(6 * 20);
 const REPEAT_SLOW: Duration = Duration::from_millis(6 * 20);
 const REPEAT_FAST: Duration = Duration::from_millis(2 * 20);
@@ -66,7 +64,7 @@ pub struct Drive {
     /// Transport encoder 5's turns toward the next or previous marker.
     marker_turns: i32,
     master_again: Option<Instant>,
-    /// Faders whose next move first takes over (FL's pickup reset), by fader (8: master).
+    /// Faders whose next move first takes over, by fader (8: master).
     rearm: [bool; 9],
     /// A fader's last position and whether it has caught the value it controls (Soft takeover).
     takeover: [(Option<f64>, bool); 9],
@@ -245,7 +243,7 @@ const MAPS: &[(&str, [Option<Slot>; 8])] = &[
     ("Fruity Stereo Shaper", [c(0, "R into L Vol", 0.5), c(1, "Left Vol", 0.5), c(2, "Right Vol", 0.5), c(3, "L into R Vol", 0.5), c(4, "L/R Delay", 0.5), c(5, "L/R Phase", 0.5), None, None]),
 ];
 
-/// FL's sampler channel's encoders, on Lemon Sampler's parameters by name: name on the screen, Lemon Sampler's name.
+/// A sampler channel's encoders, on Lemon Sampler's parameters by name: name on the screen, Lemon Sampler's name.
 const SAMPLER: [(&str, &str); 4] =
     [("Filter Cutoff", "Filter frequency (modulation X)"), ("Filter Resonance", "Filter bandwidth (modulation Y)"), ("Filter Type", "Filter type"), ("Sample Start", "Sample start")];
 
@@ -277,7 +275,7 @@ fn map_of(name: &str) -> Option<&'static [Option<Slot>; 8]> {
     MAPS.iter().find(|(n, _)| squash(n) == want).map(|(_, m)| m)
 }
 
-/// Maps of Lemon Studio's own plugins (FL has none for them): encoder n's parameter by its index and the name the plugin
+/// Maps of Lemon Studio's own plugins: encoder n's parameter by its index and the name the plugin
 /// gives it (a slot whose parameter has moved or been renamed is dropped), and the name the screen shows.
 const LEMON_MAPS: &[(&str, [Option<(usize, &str, &str)>; 8])] = &[(
     "Zest",
@@ -412,7 +410,7 @@ impl App {
         }
     }
 
-    /// FL turns loop recording on the first time the keyboard is ever connected, and sends it the clock.
+    /// The first time the keyboard is ever connected, loop recording goes on and the keyboard gets the clock.
     fn surface_first_connect(&mut self) {
         const KEY: &str = "launchkey_mk4_connected";
         if crate::settings_file::get(KEY).is_some() {
@@ -435,7 +433,7 @@ impl App {
         }
     }
 
-    /// A project opened: the keyboard starts over (banks, pages, button mode), as FL's script does on a project load.
+    /// A project opened: the keyboard starts over (banks, pages, button mode).
     pub(crate) fn surface_reload(&mut self) {
         if let Some(d) = &mut self.surface {
             d.start();
@@ -778,8 +776,7 @@ impl App {
         self.notify("Mixer", MIXER_PAGES[new]);
     }
 
-    /// Plugin mode's pages: the encoder arrows step through the plugin's parameters, eight at a time (FL's script has
-    /// no pages; the arrows do nothing there).
+    /// Plugin mode's pages: the encoder arrows step through the plugin's parameters, eight at a time.
     fn plugin_page_step(&mut self, by: isize) {
         let page = self.drive().plugin_page;
         let Some(pt) = plugin_target(&self.state, page) else { return };

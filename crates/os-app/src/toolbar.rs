@@ -541,7 +541,7 @@ pub struct Bar {
 /// The settings key of General settings ▸ Layout.
 /// (Its text is from when the layout was called Lemon: kept, so the choice made then still holds.)
 pub const TILING_KEY: &str = "layout_lemon";
-/// The layout until one is chosen: tiling. Tests keep the classic one, which the measured FL geometry is about.
+/// The layout until one is chosen: tiling. Tests keep the classic one, whose geometry they check.
 const TILING_DEFAULT: bool = !cfg!(test);
 
 impl Bar {

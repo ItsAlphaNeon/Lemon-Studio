@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Control surfaces: keyboards whose buttons, pads, knobs, lights and screen Lemon Studio drives itself, as FL Studio's
-//! device scripts do. A recognised keyboard's control port (its "DAW" port) is opened both ways here and is not a
-//! plain MIDI input (`crate::midi_in` leaves it alone); its keys' port stays one. What the controls do is `drive`.
+//! Control surfaces: keyboards whose buttons, pads, knobs, lights and screen Lemon Studio drives itself. A recognised
+//! keyboard's control port (its "DAW" port) is opened both ways here and is not a plain MIDI input (`crate::midi_in`
+//! leaves it alone); its keys' port stays one. What the controls do is `drive`.
 //!
 //! - `launchkey`: the Novation Launchkey MK4 and Launchkey Mini MK4.
 // spec: controllers/launchkey-mk4.md
@@ -73,8 +73,8 @@ impl Port {
     }
 }
 
-/// The mixer tracks and rack rows a surface's faders and pads take, outlined in the mixer and the channel rack (FL's
-/// controller rectangle): until a time, or with no end while the surface's Shift is held.
+/// The mixer tracks and rack rows a surface's faders and pads take, outlined in the mixer and the channel rack: until
+/// a time, or with no end while the surface's Shift is held.
 #[derive(Debug, Default, Clone)]
 pub struct Marks {
     pub mixer: Option<(Range<usize>, Option<Instant>)>,

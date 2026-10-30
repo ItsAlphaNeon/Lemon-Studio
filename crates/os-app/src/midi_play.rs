@@ -224,8 +224,8 @@ impl App {
                         self.midi_forward(ev.msg);
                     }
                 }
-                // A Launchkey MK4's pitch wheel turns the selected channel's pitch knob (FL's script for its keys); the
-                // sounding notes follow it. A wheel is no edit: no undo step.
+                // A Launchkey MK4's pitch wheel turns the selected channel's pitch knob; the sounding notes
+                // follow it. A wheel is no edit: no undo step.
                 Msg::Bend { v, .. } if crate::surface::launchkey::Model::is_keys_port(&ev.dev) => {
                     let row = self.state.selected_channel;
                     if let Some(c) = self.state.project.channels.get_mut(row) {

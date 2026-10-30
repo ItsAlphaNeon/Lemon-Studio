@@ -366,7 +366,7 @@ impl EmbedFrame {
             i.k = k;
             i.chrome_dirty = true;
         }
-        // The Lemon design draws it as a card (`State::card`); the Classic one keeps FL's frame. A theme change paints
+        // The Lemon design draws it as a card (`State::card`); the Classic one keeps its frame. A theme change paints
         // it again.
         if i.st.look.as_ref() != Some(look) {
             i.st.card = os_ui::kit::lemon::on(look);

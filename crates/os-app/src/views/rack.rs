@@ -714,9 +714,9 @@ fn step_button(ui: &mut Ui, r: Rect, in_beat: u32, odd: bool, on: bool, past_len
     ui.c.fill_rect(Rect::new(f.x, f.bottom() - 2.0, f.w, 2.0), face.shade(-0.35));
 }
 
-/// A step in the Lemon skin (cutting-edge's own look, not FL's): every beat in one colour, its first step a shade
-/// lighter with a lemon dot, instead of whole beats alternating colours. Softer, rounder steps; a lit one is the brand
-/// colour, a dark bar along its foot while it plays.
+/// A step in the Lemon skin: every beat in one colour, its first step a shade lighter with a lemon dot, instead of
+/// whole beats alternating colours. Softer, rounder steps; a lit one is the brand colour, a dark bar along its foot
+/// while it plays.
 fn lemon_step(c: &mut os_ui::Canvas, t: &os_theme::Palette, r: Rect, downbeat: bool, on: bool, dim: bool, hover: bool, playing: bool) {
     use os_theme::design::lemon as brand;
     let rad = (r.w / 2.0).min(4.5);
