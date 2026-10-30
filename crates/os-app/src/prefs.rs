@@ -395,7 +395,8 @@ pub const INVERT_PENCIL_BUTTONS: Check = Check { key: "invert_pencil_buttons", l
 /// and Mixer: Smart disable, Align tick lengths, Resampling quality (2026-10-16)".
 pub const AUTO_CLOSE: Check = Check { key: "auto_close", label: "Auto close", default: false };
 
-/// Audio ▸ CPU: stored and shown only. Lemon Studio has no smart disable yet. Spec: as above.
+/// Audio ▸ CPU: Auto-bypass when silent for every effect slot whose own switch is on (`os_engine::engine::auto_bypass`;
+/// spec: audio/auto-bypass.md).
 pub const SMART_DISABLE: Check = Check { key: "smart_disable", label: "Auto-bypass when silent", default: true };
 
 /// Audio ▸ CPU: stored and shown only. Lemon Studio's ticks follow audio/timing.md whatever it says. Spec: as above.

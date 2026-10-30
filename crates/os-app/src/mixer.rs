@@ -143,6 +143,9 @@ pub enum MCmd {
     /// tracks.
     Dock(u16, u8),
     Threaded(u16),
+    /// Switch auto-bypass for all plugins (Options, TOOLS and the instrument rack's options menu): every plugin's Auto-
+    /// bypass when silent on when one is off, all off when all are on (`switch_auto_bypass`).
+    AutoBypassAll,
 }
 
 /// What the plugin host does next tick for a mixer slot (`App::mixer_tick`).
@@ -347,6 +350,29 @@ pub(crate) fn makes_loop(s: &State, src: u16, dst: u16) -> bool {
 
 fn changed(s: &mut State) {
     s.piano.dirty = true;
+}
+
+/// The label of Switch auto-bypass for all plugins (mixer Options, TOOLS, the instrument rack's options menu).
+pub const AUTO_BYPASS_ALL_LABEL: &str = "Switch auto-bypass for all plugins";
+
+/// Switch auto-bypass for all plugins (spec: ui/channel-switches.md §5): every plugin's Auto-bypass when silent (the
+/// mixer slots' and the plugin channels', `os_model::PluginCpu::smart_disable`) on when one is off, as the original
+/// does; with all of them on, all off (Lemon Studio's choice: the original's answer there was not observed). No
+/// message, as in the original. Returns whether there was a plugin to switch.
+pub(crate) fn switch_auto_bypass(s: &mut State) -> bool {
+    let p = &mut s.project;
+    let slots = p.mixer.iter_mut().flat_map(|m| m.slot_cpu.iter_mut().zip(&m.slots).filter(|(_, p)| p.is_some()).map(|(c, _)| c));
+    let channels = p.channels.iter_mut().filter(|c| c.kind == os_model::ChannelKind::Plugin).map(|c| &mut c.misc.cpu);
+    let mut all: Vec<&mut os_model::PluginCpu> = slots.chain(channels).collect();
+    if all.is_empty() {
+        return false;
+    }
+    let on = all.iter().any(|c| !c.smart_disable);
+    for c in &mut all {
+        c.smart_disable = on;
+    }
+    changed(s);
+    true
 }
 
 /// Selects `n` as a click with these modifiers does (§2): plain = only it, Ctrl = add it.
@@ -1434,7 +1460,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::not_yet("Detached").mark(Mark::Check(false)),
         PItem::sep(),
         PItem::sub("Trim unused tracks", trim_items(s)),
-        PItem::not_yet("Switch auto-bypass for all plugins"),
+        PItem::new(AUTO_BYPASS_ALL_LABEL, Cmd::Mixer(MCmd::AutoBypassAll)),
         PItem::new("Remove all (audio editor) instances", Cmd::Mixer(MCmd::RemoveTeslas)),
         // The cable physics debug panel, hidden from users; uncomment to tune the cables again.
         // PItem::new("Cable physics (debug)...", Cmd::Mixer(MCmd::CablePhysics)).mark(Mark::Check(s.cables.borrow().debug)),
@@ -1469,6 +1495,9 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
     let s = &app.state;
     let mx = |c: MCmd| Cmd::Mixer(c);
     let replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), true);
+    // CPU: the plugin's switches, as in its window menu (spec: ui/plugin-window.md "CPU", audio/auto-bypass.md).
+    let key = crate::plugins::fx_key(s.selected_mixer, slot);
+    let cpu = crate::playlist::plugin_cpu(s, key).unwrap_or_default();
     let items = vec![
         PItem::sub("Replace", replace),
         PItem::new("Delete...", mx(MCmd::SlotDelete(slot))),
@@ -1489,8 +1518,8 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
         PItem::new("Show all parameters", Cmd::Param(crate::params::PCmd::Browse(crate::plugins::fx_key(s.selected_mixer, slot)))),
         PItem::sub("Sidechain input", sidechain_items(s, slot)),
         PItem::head("CPU"),
-        PItem::not_yet("Allow threaded processing").mark(Mark::Check(true)),
-        PItem::not_yet("Auto-bypass when silent"),
+        PItem::new("Allow threaded processing", Cmd::PluginCpu(key, false)).mark(Mark::Check(cpu.threaded)),
+        PItem::new("Auto-bypass when silent", Cmd::PluginCpu(key, true)).mark(Mark::Check(cpu.smart_disable)),
         PItem::sep(),
         PItem::new("Move up", mx(MCmd::SlotMove(slot, -1))),
         PItem::new("Move down", mx(MCmd::SlotMove(slot, 1))),
@@ -1540,6 +1569,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::Separator(_) => Some("Mixer track separator"),
         MCmd::Dock(..) => Some("Mixer track docking"),
         MCmd::Threaded(_) => Some("Mixer track threading"),
+        MCmd::AutoBypassAll => Some("Auto-bypass for all plugins"),
         MCmd::Reset(_) => Some("Mixer track reset"),
         MCmd::ResetRouting(_) | MCmd::UnrouteTo(_) | MCmd::Route { .. } | MCmd::RouteChannels { .. } => Some(ROUTING),
         MCmd::Trim { .. } | MCmd::Delete(_) => Some("Delete mixer track"),
@@ -1728,6 +1758,10 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 }
             }
             changed(s);
+            None
+        }
+        MCmd::AutoBypassAll => {
+            switch_auto_bypass(s);
             None
         }
         MCmd::AutoClips => {
@@ -3026,5 +3060,53 @@ mod tests {
         run(&mut a, MCmd::SlotDelete(1));
         assert_eq!(slot_color(&a.state, 3, 1), None, "goes with the plugin");
         assert!(a.state.mixer.slot_colors.is_empty());
+    }
+
+    /// The slot menu's CPU entries are the plugin's switches, as in its window menu, one undo step each (spec:
+    /// audio/auto-bypass.md); Switch auto-bypass for all plugins (Options, TOOLS, the instrument rack's options menu)
+    /// turns every plugin's Auto-bypass when silent on when one is off, and all of them off when all are on.
+    #[test]
+    fn auto_bypass_switches_per_slot_and_for_all() {
+        let mut a = app();
+        a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        select(&mut a.state, 2, false);
+        run(&mut a, MCmd::AddEffect(0, 0));
+        run(&mut a, MCmd::AddEffect(1, 0));
+        let key = crate::plugins::fx_key(2, 0);
+        let entry = |a: &App, label: &str| {
+            let m = slot_menu(a, 0, 0.0, 0.0);
+            m.items.iter().find(|i| i.label == label && !i.head).map(|i| (i.enabled, i.mark.clone(), i.cmd.clone())).unwrap()
+        };
+        assert_eq!(entry(&a, "Auto-bypass when silent"), (true, Mark::Check(false), Cmd::PluginCpu(key, true)), "new slots start off");
+        assert_eq!(entry(&a, "Allow threaded processing"), (true, Mark::Check(true), Cmd::PluginCpu(key, false)));
+        crate::playlist::run(&mut a, Cmd::PluginCpu(key, true));
+        assert_eq!(entry(&a, "Auto-bypass when silent").1, Mark::Check(true));
+        let smart = |a: &App, k: usize| track(&a.state, 2).unwrap().slot_cpu[k].smart_disable;
+        assert!(smart(&a, 0) && !smart(&a, 1), "only that slot");
+        crate::history::undo(&mut a.state);
+        assert!(!smart(&a, 0), "one undo step");
+        crate::playlist::run(&mut a, Cmd::PluginCpu(key, false));
+        assert_eq!(entry(&a, "Allow threaded processing").1, Mark::Check(false));
+        // Options > Switch auto-bypass for all plugins: the slots and the plugin channels.
+        let find = |m: Popup| m.items.iter().find(|i| i.label == AUTO_BYPASS_ALL_LABEL).map(|i| (i.enabled, i.cmd.clone())).unwrap();
+        assert_eq!(find(options_menu(&a.state, 0.0, 0.0)), (true, Cmd::Mixer(MCmd::AutoBypassAll)));
+        a.state.project.channels[0].kind = os_model::ChannelKind::Plugin;
+        crate::playlist::run(&mut a, Cmd::PluginCpu(key, true));
+        run(&mut a, MCmd::AutoBypassAll);
+        assert!(smart(&a, 0) && smart(&a, 1) && a.state.project.channels[0].misc.cpu.smart_disable, "one off: all on");
+        assert!(!track(&a.state, 2).unwrap().slot_cpu[2].smart_disable, "an empty slot stays as it is");
+        run(&mut a, MCmd::AutoBypassAll);
+        assert!(!smart(&a, 0) && !smart(&a, 1) && !a.state.project.channels[0].misc.cpu.smart_disable, "all on: all off");
+        crate::history::undo(&mut a.state);
+        assert!(smart(&a, 0) && smart(&a, 1), "one undo step");
+        // The instrument rack's options menu runs the same command.
+        assert_eq!(find(crate::rack::options_menu(&a.state, 0.0, 0.0)), (true, Cmd::Mixer(MCmd::AutoBypassAll)));
+        // TOOLS > Switch auto-bypass for all plugins.
+        use crate::views::menus::{self, MENUS, TOOLS_MENU};
+        let items: Vec<_> = MENUS[TOOLS_MENU].cols.iter().flat_map(|(_, items)| items.iter()).collect();
+        let i = items.iter().position(|it| it.label == AUTO_BYPASS_ALL_LABEL).unwrap();
+        assert!(menus::works(TOOLS_MENU, items[i]));
+        a.menu_item(TOOLS_MENU, i);
+        assert!(!smart(&a, 0) && !smart(&a, 1), "TOOLS: all on, so all off");
     }
 }

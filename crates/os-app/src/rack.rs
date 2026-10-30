@@ -1628,7 +1628,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         opt(s, "Show a mute button on the piano roll preview"),
         opt(s, "Detached"),
         PItem::head("Switch"),
-        PItem::not_yet("Switch auto-bypass for all plugins"),
+        PItem::new(crate::mixer::AUTO_BYPASS_ALL_LABEL, Cmd::Mixer(crate::mixer::MCmd::AutoBypassAll)),
         PItem::sub(crate::views::menus::CLIPS_ALL_LABEL, stretch_items(true)),
         PItem::sub(crate::views::menus::CLIPS_SEL_LABEL, stretch_items(false)),
         PItem::sub(crate::views::menus::EDITORS_LABEL, editor_items()),

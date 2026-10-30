@@ -132,6 +132,8 @@ pub(super) struct MixCx<'a> {
     /// Whether the master's slots and the insert tracks' run (an export's switches).
     pub master_fx: bool,
     pub insert_fx: bool,
+    /// The program's Auto-bypass when silent setting (`super::auto_bypass`).
+    pub auto_bypass: bool,
     /// On a device: its inputs this tick (interleaved), how many, and its output pairs.
     pub io: Option<(&'a [f32], usize, usize)>,
     pub keys: Keys,

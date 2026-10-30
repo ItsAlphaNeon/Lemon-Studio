@@ -3971,6 +3971,8 @@ impl App {
         self.work_tick(now);
         self.song_info_tick(now);
         self.auto_close_tick(now);
+        // Audio ▸ CPU ▸ Auto-bypass when silent, for every slot whose own switch is on (spec: audio/auto-bypass.md).
+        os_engine::engine::auto_bypass::set_enabled(crate::prefs::check(&crate::prefs::SMART_DISABLE));
         self.follow_settings();
         if self.state.cpu.due(now) {
             let tp = &self.transport;
@@ -8747,6 +8749,7 @@ impl App {
             // spec: ui/unused-channels.md
             MenuCmd::SelectUnused => self.state.message = crate::rack::run(self, crate::rack::RCmd::SelectUnused),
             MenuCmd::PurgeClips => self.state.message = crate::rack::run(self, crate::rack::RCmd::Purge),
+            MenuCmd::AutoBypassAll => self.state.message = crate::mixer::run(self, crate::mixer::MCmd::AutoBypassAll),
             MenuCmd::RemoveTeslas => {
                 if let Some(m) = self.ask_remove_teslas() {
                     self.state.message = Some(m);

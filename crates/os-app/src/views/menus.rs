@@ -92,6 +92,8 @@ pub enum MenuCmd {
     CancelRecording,
     SelectUnused,
     PurgeClips,
+    /// TOOLS ▸ Switch auto-bypass for all plugins (`crate::mixer::MCmd::AutoBypassAll`).
+    AutoBypassAll,
     ResetEmptyTracks,
     /// TOOLS ▸ Set up for live performance: Prepare for performance mode (spec: ui/performance-mode.md §1).
     PrepPerformance,
@@ -400,7 +402,7 @@ const TOOLS_B: &[Item] = &[
     it("Set up for MIDI export", ""),
     it("Select unused instruments", "").on().cmd(MenuCmd::SelectUnused),
     it("Remove unused audio clips", "").on().cmd(MenuCmd::PurgeClips),
-    it("Switch auto-bypass for all plugins", ""),
+    it(crate::mixer::AUTO_BYPASS_ALL_LABEL, "").on().cmd(MenuCmd::AutoBypassAll),
     it(CLIPS_ALL_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::ClipsAll)),
     it(CLIPS_SEL_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::ClipsSel)),
     it("Lock all tracks to their clips", ""),
