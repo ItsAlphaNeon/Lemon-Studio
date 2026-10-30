@@ -54,7 +54,12 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
   Controller slots and the engine plays their controller links (mixer and plugin targets, formulas)
 - [x] **Formula Controller.** Lemon Formula Controller plays projects' Fruity Formula Controller slots, with the
   original's formula language, and their controller links drive linked controls as the Peak Controller's do
-- [ ] **Patcher.** The mixer slot menu's Patcherize and Patcherize all are greyed out
+- [ ] **Patcher.** Slice 1 on 2026-10-30: the mixer slot menu's Patcherize and Patcherize all (Wrap in container,
+  Wrap all in container) put the slot's effect, or all of the track's, into a container that plays them in series,
+  each with its own wet and dry, with their delays made up and one undo step; the slot menu lists them
+  ([container.rs](../crates/os-app/src/container.rs), [chain.rs](../crates/os-engine/src/chain.rs)). Left: the
+  original's Patcher slots in projects (read and saved), windows, automation and links for the effects inside, adding,
+  removing and reordering them in the list, presets, the channel's Patcherize, and the graph editor
 - [x] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** Six of the seven
   small effects match sample for sample in the tests (98 cases for these three: `os-engine/tests/integration/fx_null.rs`); the
   Chorus uses the true pi where the original's is a hair off, so 10 of its 21 cases match and the rest are at least
@@ -72,14 +77,14 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
-- [ ] **Mixer right-click menus.** 7 entries greyed out on 2026-10-30, counted entry by entry after Insert from state
+- [ ] **Mixer right-click menus.** 5 entries greyed out on 2026-10-30, counted entry by entry after Insert from state
   (and File ▸ Open / Save mixer track state), Plugin delay compensation ▸ Automatic, View ▸ Waveforms and Extra
   properties, the slot menu's Scaling ▸ and Help, Mixer options ▸ Link all parameters... (the current track's own
-  controls), and the track and slot menus' Change icon... and the slot menu's Link all parameters... were enabled:
+  controls), the track and slot menus' Change icon..., the slot menu's Link all parameters... and its Patcherize and
+  Patcherize all (Wrap in container, Wrap all in container: see Patcher) were enabled:
   Assign to / Unassign from Audio track(s) and Select ▸ Channels and playlist tracks (no audio tracks in the playlist
   yet), Compensate for master latency (greyed in the original too); Mixer options Detached (the mixer is drawn in the
-  main window's one surface; only plugin windows, native windows around the plugin's own editor, detach); slot menu
-  Patcherize, Patcherize all
+  main window's one surface; only plugin windows, native windows around the plugin's own editor, detach).
   Scaling ▸ is greyed for a slot without a hosted plugin, "(no saved states)" when none is saved. Not counted: the
   layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [x] **Playlist right-click menus.** None greyed out since 2026-10-30: the last five, the picker's Change icon and
