@@ -5,6 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 os-theme = { path = "../os-theme" }
 tiny-skia = "0.11"
