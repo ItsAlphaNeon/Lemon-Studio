@@ -18,6 +18,15 @@ pub const EXTRA: Tag = Tag(*b"LMex");
 pub const VERSION: u16 = 1;
 /// `LMex` event: the program and version that saved the file (UTF-8 text).
 pub const SAVED_BY: u8 = 192;
+/// `LMex` event: the icons chosen with Change icon... (channels, mixer tracks, effect slots). The payloads of these
+/// events are Lemon Studio's (os-app `lemon_state`, spec: flp/lemon-format.md "LMex").
+pub const ICONS: u8 = 193;
+/// `LMex` event: the names given to effect slots.
+pub const SLOT_NAMES: u8 = 194;
+/// `LMex` event: the effect slots' colours.
+pub const SLOT_COLORS: u8 = 195;
+/// `LMex` event: Performance mode's settings (the playlist ▸ menu's checks).
+pub const PERFORMANCE: u8 = 196;
 
 /// Whether `file` is a `.lemon` file (its first chunk is `LMhd`).
 pub fn is_lemon(file: &FlpFile) -> bool {
@@ -45,6 +54,12 @@ pub fn events(file: &FlpFile) -> Result<Vec<Event>, ReadError> {
         }
     }
     Ok(out)
+}
+
+/// The payload of the last `LMex` event with `id`, if the file has one.
+pub fn data(file: &FlpFile, id: u8) -> Option<Vec<u8>> {
+    let e = events(file).ok()?.into_iter().rev().find(|e| e.id == id)?;
+    Some(e.data()?.to_vec())
 }
 
 /// Makes `file` a `.lemon` file: an `LMhd` chunk first (an existing one keeps its extra bytes, with the version
@@ -82,8 +97,7 @@ pub fn saved_by(text: &str) -> Event {
 
 /// The text of the `SAVED_BY` event, if the file has one.
 pub fn saved_by_text(file: &FlpFile) -> Option<String> {
-    let e = events(file).ok()?.into_iter().find(|e| e.id == SAVED_BY)?;
-    String::from_utf8(e.data()?.to_vec()).ok()
+    String::from_utf8(data(file, SAVED_BY)?).ok()
 }
 
 #[cfg(test)]
