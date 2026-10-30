@@ -1788,6 +1788,8 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         PItem::sep(),
         PItem::sub("Insert", crate::plugin_menu::items(s, crate::plugin_menu::Target::Gen(Some(r)), true)),
         PItem::sub("Replace", crate::plugin_menu::items(s, crate::plugin_menu::Target::Replace(r), true)),
+        // Patcherize: the original moves the channel's plugin into an instrument patch (spec plugins/patcher/README.md
+        // §2.8, §3.3), slice 3's instrument containers; Lemon Studio's containers are effect chains in a mixer slot.
         PItem::new("Wrap in container", Cmd::Nothing).off(),
         it("Clone", RCmd::Clone(r)),
         it("Delete...", RCmd::Delete(r)),

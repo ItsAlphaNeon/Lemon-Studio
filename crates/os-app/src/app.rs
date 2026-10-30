@@ -50,6 +50,9 @@ pub enum Win {
     PianoDlg,
     /// The event editor (spec: ui/event-editor.md).
     Events,
+    /// A container's window: its effects with their wet and dry knobs (Lemon Studio's design: spec
+    /// plugins/patcher/README.md §4.3).
+    Container,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -174,6 +177,8 @@ pub enum Action {
     Touch(crate::touch::TouchAct),
     /// The Strum dialog's switches and buttons (spec: ui/piano-strum.md).
     Strum(crate::strum::Act),
+    /// The container window's names and buttons (`crate::container::CAct`).
+    Container(crate::container::CAct),
     /// The Arpeggiate dialog's buttons, switches and menus (spec: ui/piano-arpeggiate.md).
     Arp(crate::arpeggiate::Act),
     /// The Flam, Flip and Scale levels dialogs' switches and buttons (spec: as `Win::PianoDlg`).
@@ -956,6 +961,8 @@ pub struct State {
     pub perf: crate::perf::Perf,
     /// The Tempo tapper: where it is, the count of taps, the pad's flash.
     pub tapper: crate::tapper::TapperUi,
+    /// The container's window: where it is, which container it shows, the levels its chain plays.
+    pub container: crate::container::ContainerUi,
     pub touch: crate::touch::TouchUi,
     /// The event editor: the control it shows, its view, tool and selection.
     pub events: crate::events::EventsUi,
@@ -1435,6 +1442,7 @@ impl App {
                 cpu: crate::cpu::Cpu::saved(),
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
+                container: Default::default(),
                 touch: Default::default(),
                 events: Default::default(),
                 events_back: None,
@@ -1932,7 +1940,7 @@ impl App {
             self.invalidate();
             return;
         }
-        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg | Win::Events);
+        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg | Win::Events | Win::Container);
         if let Some(&w) = self.state.z.last().filter(|w| !self.state.no_focus && tool(w)) {
             self.act(Action::CloseWin(w));
             self.invalidate();
@@ -3061,7 +3069,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg | Win::Events))
+            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg | Win::Events | Win::Container))
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -3092,6 +3100,7 @@ impl App {
             Win::Arp => Some(views::arpeggiate::rect(s)),
             Win::PianoDlg => Some(views::piano_dlg::rect(s)),
             Win::Events => Some(views::events::rect(s)),
+            Win::Container => Some(views::container::rect(s)),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -3754,6 +3763,7 @@ impl App {
             Win::Arp => self.damage_rect(views::arpeggiate::bounds(&self.state)),
             Win::PianoDlg => self.damage_rect(views::piano_dlg::bounds(&self.state)),
             Win::Events => self.damage_rect(views::events::bounds(&self.state)),
+            Win::Container => self.damage_rect(views::container::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
             _ => self.invalidate(),
         }
@@ -5559,7 +5569,7 @@ impl App {
                 Drag::Knob { id, y0, v0 } => {
                     self.state.set_knob(id, v0 - (y - y0) * id.drag_rate());
                     self.record_knob(id);
-                    self.multilink_knob(crate::typein::Target::Knob(id));
+                    self.multilink_knob(id.target());
                     self.hint = Cow::Owned(self.state.knob_text(id));
                     match self.hits.iter().rev().find(|h| h.action == Action::Knob(id)).map(|h| h.rect) {
                         Some(r) => self.damage_rect(r.outset(6.0)),
@@ -6016,6 +6026,7 @@ impl App {
             Win::Arp => views::arpeggiate::bounds(&self.state),
             Win::PianoDlg => views::piano_dlg::bounds(&self.state),
             Win::Events => views::events::bounds(&self.state),
+            Win::Container => views::container::bounds(&self.state),
             Win::ChannelRack => views::rack::bounds(&self.state),
             w => self.state.win_rect(w).outset(5.0),
         }
@@ -6363,7 +6374,7 @@ impl App {
             return self.scrollbar_press(t, true);
         }
         if let Some(a) = action.as_ref() {
-            if self.rack_right(a) {
+            if self.rack_right(a) || self.container_right(a) {
                 return self.invalidate();
             }
         }
@@ -7122,7 +7133,7 @@ impl App {
             }
             self.state.set_knob(id, v);
             self.record_knob(id);
-            self.multilink_knob(crate::typein::Target::Knob(id));
+            self.multilink_knob(id.target());
             self.hint = Cow::Owned(self.state.knob_text(id));
             return None;
         }
@@ -8069,6 +8080,7 @@ impl App {
             Action::Tapper(a) => self.tapper_act(a),
             Action::Touch(a) => self.touch_act(a),
             Action::Strum(a) => self.strum_act(a),
+            Action::Container(a) => self.container_act(a),
             Action::Arp(a) => self.arp_act(a),
             Action::PianoDlg(a) => self.piano_dlg_act(a),
             Action::Events(a) => self.events_act(a),
@@ -8354,6 +8366,7 @@ impl App {
                     Win::Arp => s.arp.pos,
                     Win::PianoDlg => s.piano_dlg.pos[s.piano_dlg.tool.index()],
                     Win::Events => s.events.pos,
+                    Win::Container => s.container.pos,
                     Win::ChannelRack => s.rack_pos,
                     w => {
                         // Start from the rect as shown (kept on screen), then move it.
