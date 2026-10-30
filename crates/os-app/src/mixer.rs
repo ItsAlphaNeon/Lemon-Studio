@@ -133,6 +133,16 @@ pub enum MCmd {
     AutoClips,
     /// A track's input (true) or output latency setting: Reset (`None`), or Set in ms / samples / beats (the value box).
     Latency(u16, bool, Option<crate::typein::LatUnit>),
+    /// The track menu's Group entries (spec: ui/mixer.md §6.1 "Group, Layout and CPU entries"): Separator on or off for
+    /// the target tracks, Create group... (its name box, then `create_group`), Auto color group, Select ▸ Group.
+    Separator(u16),
+    CreateGroup(u16),
+    AutoColorGroup(u16),
+    SelectGroup(u16),
+    /// Dock to ▸ Left / Middle / Right (`os_model::DOCK_*`) and Allow threaded processing on or off, for the target
+    /// tracks.
+    Dock(u16, u8),
+    Threaded(u16),
 }
 
 /// What the plugin host does next tick for a mixer slot (`App::mixer_tick`).
@@ -815,6 +825,39 @@ fn start_rename(s: &mut State, n: u16, at: (f32, f32)) {
     crate::playlist::start_edit(s, EditTarget::MixerName(n), at);
 }
 
+/// The group track `n` is in (spec: ui/mixer.md §6.1): the inserts from the nearest one at or before it with Separator
+/// on up to the next one with it; `None` before the first separator, and for the master.
+pub fn group(s: &State, n: u16) -> Option<std::ops::RangeInclusive<u16>> {
+    let last = inserts(s);
+    if n == 0 || n > last {
+        return None;
+    }
+    let sep = |t: u16| track(s, t).is_some_and(|m| m.separator);
+    let first = (1..=n).rev().find(|&t| sep(t))?;
+    let end = (n + 1..=last).find(|&t| sep(t)).map_or(last, |t| t - 1);
+    Some(first..=end)
+}
+
+/// Create group..., Enter in its name box: names track `n` (an empty box keeps its name) and turns Separator on
+/// for the first target track and for the track after the last one, as one undo step (spec: ui/mixer.md §6.1).
+pub fn create_group(s: &mut State, n: u16, text: &str) {
+    let tg: Vec<u16> = targets(s, n).into_iter().filter(|&t| t > 0).collect();
+    let (Some(&a), Some(&b)) = (tg.iter().min(), tg.iter().max()) else { return };
+    let last = inserts(s);
+    let def = format!("Bus {n}");
+    let name = text.trim().to_string();
+    crate::control::edit(s, "Create group", Region::Project, |s| {
+        if let Some(m) = track_mut(s, n).filter(|_| !name.is_empty()) {
+            m.name = (name != def).then_some(name);
+        }
+        for t in [a, b + 1].into_iter().filter(|&t| t <= last) {
+            if let Some(m) = track_mut(s, t) {
+                m.separator = true;
+            }
+        }
+    });
+}
+
 /// Right click on a LED (§3): solo, or back to all on when it already is the only one audible.
 pub fn solo(s: &mut State, n: u16) {
     solo_with(s, n, false);
@@ -1271,6 +1314,15 @@ pub fn track_menu(s: &State, n: u16, x: f32, y: f32) -> Popup {
 fn track_items(s: &State, n: u16) -> Vec<PItem> {
     let mx = |c: MCmd| Cmd::Mixer(c);
     let colors = color_items(|c| mx(MCmd::Color(n, c)));
+    let t = track(s, n);
+    let dock = t.map_or(os_model::DOCK_MIDDLE, |m| m.dock);
+    let dock_items = [(os_model::DOCK_LEFT, "Left"), (os_model::DOCK_MIDDLE, "Middle"), (os_model::DOCK_RIGHT, "Right")]
+        .into_iter()
+        .map(|(d, label)| PItem::new(label, mx(MCmd::Dock(n, d))).mark(Mark::Radio(dock == d)))
+        .collect();
+    // Greyed outside a group, as the original's Auto color group.
+    let grouped = group(s, n).is_some();
+    let in_group = |it: PItem| if grouped { it } else { it.off() };
     vec![
         PItem::new("Rename, color and icon...", mx(MCmd::Rename(n))).key("F2"),
         PItem::sub("Change color...", colors),
@@ -1305,7 +1357,7 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
                 PItem::new("Tracks this one is routed to", mx(MCmd::SelectDest(n))),
                 PItem::new("Tracks routed to this one", mx(MCmd::SelectSources(n))).key("Ctrl+Alt+L"),
                 PItem::sep(),
-                PItem::not_yet("Group"),
+                in_group(PItem::new("Group", mx(MCmd::SelectGroup(n)))),
                 PItem::new("All", mx(MCmd::SelectAll)).key("Ctrl+A"),
             ],
         ),
@@ -1317,13 +1369,14 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
         PItem::new("Arm selected track(s)", mx(MCmd::Arm(n, true))),
         PItem::new("Disarm selected track(s)", mx(MCmd::Arm(n, false))),
         PItem::sep(),
-        PItem::not_yet("Compensate for master latency").mark(Mark::Check(true)),
+        // Greyed in every capture of the original's menu (a track without an external output), and off.
+        PItem::not_yet("Compensate for master latency").mark(Mark::Check(false)),
         PItem::head("Group"),
-        PItem::not_yet("Separator").mark(Mark::Check(true)),
-        PItem::not_yet("Create group..."),
-        PItem::not_yet("Auto color group"),
+        insert_only(n, PItem::new("Separator", mx(MCmd::Separator(n))).mark(Mark::Check(t.is_some_and(|m| m.separator)))),
+        insert_only(n, PItem::new("Create group...", mx(MCmd::CreateGroup(n)))),
+        in_group(PItem::new("Auto color group", mx(MCmd::AutoColorGroup(n)))),
         PItem::head("Layout"),
-        PItem::sub("Dock to", vec![PItem::not_yet("Left"), PItem::not_yet("Middle"), PItem::not_yet("Right")]),
+        insert_only(n, PItem::sub("Dock to", dock_items)),
         PItem::new("Move left", mx(MCmd::MoveLeft(n))).key("Alt+Left"),
         PItem::new("Move right", mx(MCmd::MoveRight(n))).key("Alt+Right"),
         PItem::sep(),
@@ -1332,8 +1385,13 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
         PItem::new("Insert multiple...", mx(MCmd::InsertMultiple(n))),
         PItem::sub("Insert from state", vec![PItem::not_yet("(no saved states)")]),
         PItem::head("CPU"),
-        PItem::not_yet("Allow threaded processing").mark(Mark::Check(true)),
+        PItem::new("Allow threaded processing", mx(MCmd::Threaded(n))).mark(Mark::Check(t.is_none_or(|m| m.threaded))),
     ]
+}
+
+/// Entries that do not apply to the master (its strip is fixed and starts no group).
+fn insert_only(n: u16, it: PItem) -> PItem {
+    if n == 0 { it.off() } else { it }
 }
 
 /// Track routing ▸ (Lemon Studio's design; greyed in the original's menu as captured, its entries not seen): the ▲ menu's
@@ -1477,7 +1535,10 @@ fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
 pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
     let step = match &c {
-        MCmd::Color(..) | MCmd::RandomColor(_) | MCmd::GradientColor => Some("Mixer track color"),
+        MCmd::Color(..) | MCmd::RandomColor(_) | MCmd::GradientColor | MCmd::AutoColorGroup(_) => Some("Mixer track color"),
+        MCmd::Separator(_) => Some("Mixer track separator"),
+        MCmd::Dock(..) => Some("Mixer track docking"),
+        MCmd::Threaded(_) => Some("Mixer track threading"),
         MCmd::Reset(_) => Some("Mixer track reset"),
         MCmd::ResetRouting(_) | MCmd::UnrouteTo(_) | MCmd::Route { .. } | MCmd::RouteChannels { .. } => Some(ROUTING),
         MCmd::Trim { .. } | MCmd::Delete(_) => Some("Delete mixer track"),
@@ -1617,6 +1678,55 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         }
         MCmd::Latency(t, input, Some(u)) => {
             crate::typein::open(s, crate::typein::Target::Latency(t, input, u), at);
+            None
+        }
+        MCmd::Separator(n) => {
+            let on = !track(s, n).is_some_and(|m| m.separator);
+            for t in targets(s, n).into_iter().filter(|&t| t > 0) {
+                if let Some(m) = track_mut(s, t) {
+                    m.separator = on;
+                }
+            }
+            None
+        }
+        MCmd::CreateGroup(n) => {
+            crate::playlist::start_edit(s, EditTarget::MixerGroup(n), at);
+            None
+        }
+        MCmd::AutoColorGroup(n) => {
+            if let Some(g) = group(s, n) {
+                if let Some(c) = track(s, *g.start()).and_then(|m| m.color) {
+                    for t in g {
+                        if let Some(m) = track_mut(s, t) {
+                            m.color = Some(c);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        MCmd::SelectGroup(n) => {
+            let Some(g) = group(s, n) else { return Some("Not in a group".into()) };
+            s.selected_mixer = n;
+            s.mixer.sel = g.collect();
+            None
+        }
+        MCmd::Dock(n, d) => {
+            for t in targets(s, n).into_iter().filter(|&t| t > 0) {
+                if let Some(m) = track_mut(s, t) {
+                    m.dock = d.min(os_model::DOCK_RIGHT);
+                }
+            }
+            None
+        }
+        MCmd::Threaded(n) => {
+            let on = !track(s, n).is_none_or(|m| m.threaded);
+            for t in targets(s, n) {
+                if let Some(m) = track_mut(s, t) {
+                    m.threaded = on;
+                }
+            }
+            changed(s);
             None
         }
         MCmd::AutoClips => {
@@ -2068,10 +2178,10 @@ impl App {
         };
         let Some(t) = track.filter(|t| s.project.mixer.iter().any(|m| m.index == *t)) else { return };
         select(&mut self.state, t, false);
-        // The master strip is fixed; an insert scrolls into the mixer's last painted view.
-        if let Some(bar) = self.bar(crate::app::Scroll::MixerX).filter(|_| t > 0) {
+        // The master and the docked strips are fixed; a middle one scrolls into the mixer's last painted view.
+        let place = crate::views::mixer::docks(&self.state).place(t).filter(|&(p, _)| p == 1);
+        if let (Some(bar), Some((_, left))) = (self.bar(crate::app::Scroll::MixerX), place) {
             let w = crate::views::mixer::STRIP_W;
-            let left = w * f32::from(t - 1);
             let scroll = self.state.mixer_scroll;
             if left < scroll {
                 self.scroll_set(crate::app::Scroll::MixerX, left);
@@ -2106,6 +2216,110 @@ pub fn fx_info(p: &os_model::Project, ui: &MixerUi, key: usize) -> Option<crate:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The track menu entry `label` (searched in the submenus too): whether it is enabled, its command and its mark.
+    fn track_entry(a: &App, n: u16, label: &str) -> (bool, Cmd, Mark) {
+        let items = track_items(&a.state, n);
+        let all = items.iter().chain(items.iter().flat_map(|i| i.children.iter()));
+        let found = all.filter(|i| i.label == label && !i.head).last().unwrap_or_else(|| panic!("no entry {label}"));
+        (found.enabled, found.cmd.clone(), found.mark)
+    }
+
+    /// spec: ui/mixer.md §6.1 "Group, Layout and CPU entries": Separator toggles on the targets, one undo step; a group
+    /// runs from a separator to the next; Create group... names the track and puts separators around the selection;
+    /// Auto color group gives the group its first track's colour; Select ▸ Group selects it.
+    #[test]
+    fn group_entries_set_separators_and_act_on_the_group() {
+        let mut a = app();
+        assert_eq!(track_entry(&a, 3, "Separator"), (true, Cmd::Mixer(MCmd::Separator(3)), Mark::Check(false)));
+        assert!(!track_entry(&a, 0, "Separator").0, "not on the master");
+        assert!(!track_entry(&a, 3, "Auto color group").0, "no group yet");
+        assert!(!track_entry(&a, 3, "Group").0, "Select ▸ Group: no group yet");
+        assert_eq!(track_entry(&a, 3, "Compensate for master latency"), (false, Cmd::NotYet("Compensate for master latency"), Mark::Check(false)));
+        let steps = a.state.history.at();
+        run(&mut a, MCmd::Separator(3));
+        assert!(track(&a.state, 3).unwrap().separator);
+        assert_eq!(a.state.history.at(), steps + 1);
+        assert_eq!(track_entry(&a, 3, "Separator").2, Mark::Check(true));
+        assert_eq!((group(&a.state, 2), group(&a.state, 3), group(&a.state, 16)), (None, Some(3..=16), Some(3..=16)));
+        crate::history::undo(&mut a.state);
+        assert!(!track(&a.state, 3).unwrap().separator);
+
+        // Create group... on 5 with 5 to 7 selected: the name box, then Enter.
+        select(&mut a.state, 5, false);
+        select(&mut a.state, 6, true);
+        select(&mut a.state, 7, true);
+        select(&mut a.state, 5, true);
+        run(&mut a, MCmd::CreateGroup(5));
+        let e = a.state.playlist.edit.as_ref().expect("the name box");
+        assert_eq!((e.target, e.text.as_str()), (EditTarget::MixerGroup(5), ""));
+        a.state.playlist.edit.as_mut().unwrap().text = "Drums".into();
+        let steps = a.state.history.at();
+        crate::playlist::commit_edit(&mut a.state);
+        assert_eq!(name(&a.state, 5), "Drums");
+        let seps: Vec<u16> = (1..=inserts(&a.state)).filter(|&t| track(&a.state, t).unwrap().separator).collect();
+        assert_eq!(seps, vec![5, 8]);
+        assert_eq!(group(&a.state, 6), Some(5..=7));
+        assert_eq!(a.state.history.at(), steps + 1, "one step");
+
+        // Auto color group: the first track's colour over the group; Select ▸ Group.
+        let red = Rgb::new(200, 0, 0);
+        track_mut(&mut a.state, 5).unwrap().color = Some(red);
+        select(&mut a.state, 6, false);
+        assert!(track_entry(&a, 6, "Auto color group").0);
+        run(&mut a, MCmd::AutoColorGroup(6));
+        let col = |a: &App, n: u16| track(&a.state, n).unwrap().color;
+        assert_eq!((col(&a, 5), col(&a, 6), col(&a, 7), col(&a, 8)), (Some(red), Some(red), Some(red), None));
+        assert_eq!(track_entry(&a, 6, "Group").1, Cmd::Mixer(MCmd::SelectGroup(6)));
+        run(&mut a, MCmd::SelectGroup(6));
+        assert_eq!((a.state.selected_mixer, a.state.mixer.sel.clone()), (6, vec![5, 6, 7]));
+        // Esc in the name box changes nothing.
+        run(&mut a, MCmd::CreateGroup(12));
+        a.state.playlist.edit = None;
+        assert!(!track(&a.state, 12).unwrap().separator);
+    }
+
+    /// Dock to ▸ (radio) and Allow threaded processing (check), saved in the track; docked strips are drawn after the
+    /// master (left) or at the right edge (right) and do not scroll; a separator's gap is 6 px (spec: ui/mixer.md §6.1).
+    #[test]
+    fn docking_and_threading_entries() {
+        use crate::views::mixer::{docks, SEP_W, STRIP_W};
+        let mut a = app();
+        assert_eq!(track_entry(&a, 4, "Middle"), (true, Cmd::Mixer(MCmd::Dock(4, os_model::DOCK_MIDDLE)), Mark::Radio(true)));
+        assert_eq!(track_entry(&a, 4, "Right").2, Mark::Radio(false));
+        assert!(!track_entry(&a, 0, "Dock to").0, "the master stays put");
+        assert_eq!(track_entry(&a, 4, "Allow threaded processing"), (true, Cmd::Mixer(MCmd::Threaded(4)), Mark::Check(true)));
+        run(&mut a, MCmd::Dock(4, os_model::DOCK_RIGHT));
+        run(&mut a, MCmd::Dock(2, os_model::DOCK_LEFT));
+        run(&mut a, MCmd::Separator(7));
+        run(&mut a, MCmd::Threaded(4));
+        assert_eq!(track_entry(&a, 4, "Right").2, Mark::Radio(true));
+        assert!(!track(&a.state, 4).unwrap().threaded);
+        assert_eq!(track_entry(&a, 4, "Allow threaded processing").2, Mark::Check(false));
+        let d = docks(&a.state);
+        let ids = |p: usize| d.parts[p].iter().map(|e| e.0).collect::<Vec<_>>();
+        assert_eq!((ids(0), ids(2)), (vec![2], vec![4]));
+        assert_eq!(ids(1), vec![1, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        // 1, 3, 5, 6 before 7: its gap.
+        assert_eq!(d.place(7), Some((1, 4.0 * STRIP_W + SEP_W)));
+        assert_eq!(d.widths, [STRIP_W, 14.0 * STRIP_W + SEP_W, STRIP_W]);
+        // Painted: the right-docked strip at the right end of the strips, the left-docked one after the master.
+        let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) else { return };
+        let ws = &mut a.state.wins[crate::app::Win::Mixer.slot().unwrap()];
+        (ws.maxed, ws.rect) = (false, os_ui::Rect::new(100.0, 100.0, 900.0, 500.0));
+        a.state.z = vec![crate::app::Win::Mixer];
+        a.paint(&mut c, None);
+        let at = |a: &App, n: u16| a.hits.iter().rev().find(|h| h.action == crate::app::Action::Mix(MHit::Strip(n))).map(|h| h.rect).unwrap();
+        let (master, left, first, right) = (at(&a, 0), at(&a, 2), at(&a, 1), at(&a, 4));
+        assert_eq!(left.x, master.right(), "left-docked right after the master");
+        assert_eq!(first.x, left.right() + 9.0, "then the gap and the middle strips");
+        assert!(right.x > at(&a, 3).x && right.right() > 700.0, "right-docked at the right end: {right:?}");
+        // Scrolling moves the middle strips only.
+        a.state.mixer_scroll = 2.0 * STRIP_W;
+        a.paint(&mut c, None);
+        assert_eq!((at(&a, 2), at(&a, 4)), (left, right));
+        assert_eq!(at(&a, 5).x, first.x, "Bus 5 where Bus 1 was");
+    }
 
     /// The slot menu's Presets section works as in the plugin's window menu: the list, Browse presets and Save preset
     /// as... on the slot's plugin (§7.2).

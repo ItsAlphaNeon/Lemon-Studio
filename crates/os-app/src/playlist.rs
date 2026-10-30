@@ -549,6 +549,8 @@ pub enum EditTarget {
     SlotName(u16, u8),
     /// The mixer track menu's Insert multiple...: how many tracks to insert in front of this one.
     MixerInsert(u16),
+    /// The mixer track menu's Create group...: the track's name, then the group's separators (`mixer::create_group`).
+    MixerGroup(u16),
     /// The current arrangement's name (§12).
     ArrangementName,
     /// The value box of "Enter value..." and whether it reads normalized values (spec: ui/type-in-value.md).
@@ -3934,6 +3936,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::MixerName(n) => crate::mixer::name(s, n),
         EditTarget::SlotName(t, k) => crate::mixer::slot_name(s, t, k).unwrap_or_default(),
         EditTarget::MixerInsert(_) => "2".into(),
+        EditTarget::MixerGroup(_) => String::new(),
         EditTarget::TypeIn(t, norm) => crate::typein::text(s, t, norm),
     };
     s.playlist.edit = Some(TextEdit { target, text, at, sel: false });
@@ -3999,6 +4002,7 @@ pub fn commit_edit(s: &mut State) {
         }),
         EditTarget::TypeIn(t, norm) => crate::typein::accept(s, t, norm, &text),
         EditTarget::MixerInsert(n) => s.message = crate::mixer::insert_many(s, n, &text),
+        EditTarget::MixerGroup(n) => crate::mixer::create_group(s, n, &text),
         EditTarget::PatternName(n) => crate::control::edit(s, "Pattern name", crate::control::command::Region::Project, |s| {
             if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == n) {
                 p.name = (!text.is_empty()).then_some(text);

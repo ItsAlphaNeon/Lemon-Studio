@@ -92,6 +92,10 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The mixer track menu's Track routing ▸ routes or sidechains the other selected tracks into the track clicked (only,
   or besides their other routes), and an effect slot can be given a colour (Change color..., Random color), shown as a
   bar at the slot's edge for the session
+- The mixer track menu's Group section: Separator (a gap before the strip), Create group... (names the track and puts
+  separators around the selected tracks), Auto color group and Select ▸ Group; Dock to ▸ Left / Middle / Right keeps a
+  strip after the master or at the right edge while the others scroll; Allow threaded processing off keeps the track
+  on the rendering thread. All saved in the project as the original saves them
 
 ## ✅ Plugin hosting
 

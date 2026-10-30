@@ -18,6 +18,73 @@ use crate::mixer::{self as mx, MHit};
 use crate::icons::{self, Icon};
 
 pub const STRIP_W: f32 = 44.0;
+/// The gap a track's Separator puts before its strip (measured: 6 px).
+pub const SEP_W: f32 = 6.0;
+/// From the strips' left edge: the master strip's right edge, and the gap after it (and after the left-docked strips).
+const MASTER_END: f32 = 88.0;
+const MASTER_GAP: f32 = 9.0;
+
+/// Where the inserts' strips are (spec: ui/mixer.md §6.1 "Group, Layout and CPU entries"). Per part (docked left,
+/// middle, right) the tracks in track order, each with its x from the part's start and whether a separator's gap is
+/// before it; and each part's width. A separator on a part's first strip adds no gap (Lemon Studio's choice).
+pub struct Docks {
+    pub parts: [Vec<(u16, f32, bool)>; 3],
+    pub widths: [f32; 3],
+}
+
+pub fn docks(s: &State) -> Docks {
+    let mut d = Docks { parts: Default::default(), widths: [0.0; 3] };
+    for n in 1..=mx::inserts(s) {
+        let (dock, sep) = mx::track(s, n).map_or((os_model::DOCK_MIDDLE, false), |m| (m.dock.min(os_model::DOCK_RIGHT), m.separator));
+        let p = usize::from(dock);
+        let gap = sep && !d.parts[p].is_empty();
+        if gap {
+            d.widths[p] += SEP_W;
+        }
+        d.parts[p].push((n, d.widths[p], gap));
+        d.widths[p] += STRIP_W;
+    }
+    d
+}
+
+impl Docks {
+    /// The scrolling middle part: after the master, the left-docked strips and the gap, up to the right-docked strips.
+    pub fn area(&self, strips: Rect) -> Rect {
+        let x = strips.x + MASTER_END + MASTER_GAP + self.widths[0];
+        Rect::new(x, strips.y, (strips.right() - self.widths[2] - x).max(0.0), strips.h)
+    }
+
+    /// Track `n`'s part (0 left, 1 middle, 2 right) and its x from the part's start.
+    pub fn place(&self, n: u16) -> Option<(usize, f32)> {
+        (0..3).find_map(|p| self.parts[p].iter().find(|e| e.0 == n).map(|e| (p, e.1)))
+    }
+
+    /// Track `n`'s strip's left edge (the master's too), the middle part scrolled by `scroll`.
+    pub fn x(&self, n: u16, strips: Rect, scroll: f32) -> Option<f32> {
+        if n == 0 {
+            return Some(strips.x + 44.0);
+        }
+        let (p, off) = self.place(n)?;
+        Some(match p {
+            0 => strips.x + MASTER_END + off,
+            1 => self.area(strips).x + off - scroll,
+            _ => self.area(strips).right() + off,
+        })
+    }
+
+    /// Whether track `n`'s strip scrolls (the middle part).
+    pub fn scrolls(&self, n: u16) -> bool {
+        self.place(n).is_some_and(|(p, _)| p == 1)
+    }
+}
+
+/// A separator's gap before a strip at `left`: a lighter band with darker edges (measured: #282b2d, 1 px #1e2123).
+fn separator(ui: &mut Ui, left: f32, top: f32, bottom: f32) {
+    let r = Rect::new(left - SEP_W, top, SEP_W, bottom - top);
+    ui.c.fill_rect(r, ui.t.s(0x1e2123));
+    ui.c.fill_rect(r.inset(1.0), ui.t.s(0x282b2d));
+}
+
 /// Fader travel: value units per pixel (handle centre 618 at 0 dB = value 0.8, 970 at value 0).
 pub const FADER_PER_PX: f64 = 1.0 / 440.0;
 /// Fader change per wheel notch: 4 px of drag. Fitted to the one measurement (spec: ui/mixer.md §4): three notches up
@@ -127,7 +194,6 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let strips = Rect::new(r.x, client.y, r.w - panel_w - 7.0, client.h);
     ui.c.fill_rect(Rect::new(r.x, client.y, r.w - panel_w, client.h), ui.t.s(0x232527));
     ui.hit(strips, Action::MixerArea, "Mixer");
-    let inserts = mx::inserts(s);
     let bottom = r.bottom();
 
     // Header row: "C" (scale) and "M" (master) on a lighter band.
@@ -197,21 +263,29 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         }
     }
 
-    // Inserts scroll; the master strip and the scale stay put.
-    let area = Rect::new(r.x + 97.0, client.y, strips.w - 97.0, client.h);
-    ui.c.fill_rect(Rect::new(r.x + 88.0, client.y, 9.0, client.h), ui.t.s(0x1a1e20));
+    // The middle inserts scroll; the master strip, the scale and the left- and right-docked strips stay put (spec:
+    // ui/mixer.md §6.1 "Group, Layout and CPU entries").
+    let docks = docks(s);
+    let area = docks.area(strips);
+    let gap = area.x - MASTER_GAP;
+    ui.c.fill_rect(Rect::new(gap, client.y, MASTER_GAP, client.h), ui.t.s(0x1a1e20));
     for k in 0..3 {
-        ui.c.fill_rect(Rect::new(r.x + 92.0, ly.y(497.0 + 3.0 * k as f32), 1.0, 1.0), ui.t.s(0x3a3e41));
+        ui.c.fill_rect(Rect::new(gap + 4.0, ly.y(497.0 + 3.0 * k as f32), 1.0, 1.0), ui.t.s(0x3a3e41));
     }
+    let (sep_top, sep_bottom) = (ly.y(HEAD_Y0), bottom - 18.0);
     ui.c.push_clip(area);
-    let first = (s.mixer_scroll / STRIP_W) as usize;
-    let count = (area.w / STRIP_W).ceil() as usize + 2;
-    for n in (first + 1..first + 1 + count).filter(|n| *n <= usize::from(inserts)) {
-        let left = area.x + STRIP_W * (n - 1) as f32 - s.mixer_scroll;
-        strip(ui, s, n as u16, left, bottom, f, &ly);
+    for &(n, off, gap) in &docks.parts[1] {
+        let left = area.x + off - s.mixer_scroll;
+        if left + STRIP_W < area.x || left - SEP_W > area.right() {
+            continue;
+        }
+        if gap {
+            separator(ui, left, sep_top, sep_bottom);
+        }
+        strip(ui, s, n, left, bottom, f, &ly);
     }
     // "+" after the last strip, at the fader handle's height (spec: ui/mixer.md §1).
-    let px = area.x + STRIP_W * f32::from(inserts) - s.mixer_scroll + 14.0;
+    let px = area.x + docks.widths[1] - s.mixer_scroll + 14.0;
     let pb = Rect::new(px - 9.0, ly.y(HANDLE_0DB) - 9.0, 18.0, 18.0);
     if px < area.right() + 10.0 {
         let hov = ui.hit(pb, Action::Mix(MHit::Add), "Add more tracks");
@@ -224,12 +298,20 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     ui.c.pop_clip();
     strip(ui, s, 0, r.x + 44.0, bottom, f, &ly);
+    for (p, x0) in [(0, strips.x + MASTER_END), (2, area.right())] {
+        for &(n, off, gap) in &docks.parts[p] {
+            if gap {
+                separator(ui, x0 + off, sep_top, sep_bottom);
+            }
+            strip(ui, s, n, x0 + off, bottom, f, &ly);
+        }
+    }
 
     // Horizontal scroll bar under the strips.
     let sb = Rect::new(area.x + 13.0, bottom - 14.0, area.w - 20.0, 9.0);
-    super::scrollbar(ui, sb, false, s.mixer_scroll, area.w, (f32::from(inserts) + 1.0) * STRIP_W, crate::app::Scroll::MixerX);
+    super::scrollbar(ui, sb, false, s.mixer_scroll, area.w, docks.widths[1] + STRIP_W, crate::app::Scroll::MixerX);
     chevron(ui, area.x + 5.0, bottom - 9.5, false, ui.t.s(0x5d6366));
-    cables(ui, s, strips, area, bottom);
+    cables(ui, s, strips, &docks, bottom);
 
     slot_panel(ui, s, Rect::new(r.right() - panel_w, r.y, panel_w, r.h));
     resize_zones(ui, s, Win::Mixer, outer);
@@ -237,11 +319,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
 
 /// The routing cables (spec: ui/mixer.md §5): one from the current track's ⬇ into each of its send knobs, sagging
 /// and swinging (crate::cable). Sockets on strips scrolled out of view still hold their cable's end.
-fn cables(ui: &mut Ui, s: &State, strips: Rect, area: Rect, bottom: f32) {
-    let socket_x = |n: u16| match n {
-        0 => strips.x + 44.0 + 22.0,
-        n => area.x + STRIP_W * f32::from(n - 1) - s.mixer_scroll + 22.0,
-    };
+fn cables(ui: &mut Ui, s: &State, strips: Rect, docks: &Docks, bottom: f32) {
+    let area = docks.area(strips);
+    let socket_x = |n: u16| docks.x(n, strips, s.mixer_scroll).unwrap_or(area.x) + 22.0;
+    // Only the middle strips scroll: what is on the others is not clipped to the scrolling part.
+    let fixed = |n: u16| !docks.scrolls(n);
     // Each cable is plugged in under the middle of its ⬇ and its knob, which are drawn again over the cables' ends.
     let (ay, ky) = (bottom - 38.0, bottom - 40.0);
     let cur = s.selected_mixer;
@@ -252,10 +334,10 @@ fn cables(ui: &mut Ui, s: &State, strips: Rect, area: Rect, bottom: f32) {
     for &(n, level) in &sends {
         // A send at zero is dimmed, as its knob.
         let col = if level <= 0.0 { ui.t.accent.mix(ui.t.s(0x26292b), 0.65) } else { ui.t.accent };
-        cables.connect(n, from, (socket_x(n), ky), cur == 0 || n == 0, col);
+        cables.connect(n, from, (socket_x(n), ky), fixed(cur) || fixed(n), col);
     }
     cables.end();
-    // Cables between inserts are clipped where the inserts scroll; those into the master are not.
+    // Cables between middle strips are clipped where they scroll; those into the master or a docked strip are not.
     for (master, pts, col) in cables.each() {
         ui.c.push_clip(if master { strips } else { area });
         ui.c.polyline(pts, 2.0, col);
@@ -265,7 +347,7 @@ fn cables(ui: &mut Ui, s: &State, strips: Rect, area: Rect, bottom: f32) {
     if sends.is_empty() {
         return;
     }
-    let clip = |n: u16| if n == 0 { strips } else { area };
+    let clip = |n: u16| if fixed(n) { strips } else { area };
     ui.c.push_clip(clip(cur));
     down_arrow(ui, from.0, ay);
     ui.c.pop_clip();
