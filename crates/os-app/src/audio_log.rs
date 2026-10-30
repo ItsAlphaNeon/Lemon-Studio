@@ -103,7 +103,10 @@ impl Log {
         let mut incoming = std::mem::take(&mut self.incoming);
         incoming.clear();
         f.ring.pop_into(&mut incoming);
-        self.keep(&incoming, crate::device::rate().unwrap_or(44100), minutes());
+        // At the rate of the device that played them, the one last opened (`device::rate` would ask the system for the
+        // settings' device on every tick while none is open, which takes milliseconds).
+        let rate = crate::device::last().map_or(self.rate, |i| i.rate);
+        self.keep(&incoming, rate, minutes());
         self.incoming = incoming;
         HELD.store(self.kept.capacity() * std::mem::size_of::<f32>(), Ordering::Relaxed);
     }
