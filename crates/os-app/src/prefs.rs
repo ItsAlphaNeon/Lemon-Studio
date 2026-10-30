@@ -404,7 +404,7 @@ pub const ALIGN_TICK_LENGTHS: Check = Check { key: "align_tick_lengths", label: 
 /// (`crate::mix_threads`). Spec: audio/multicore.md "Settings".
 pub const MULTITHREADED_MIXER: Check = Check { key: "multithreaded_mixer", label: "Multithreaded mixer processing", default: true };
 pub const MULTITHREADED_GENERATORS: Check =
-    Check { key: "multithreaded_generators", label: "Multithreaded generator processing", default: true };
+    Check { key: "multithreaded_generators", label: "Multithreaded instrument processing", default: true };
 
 /// Audio ▸ Mixer: stored and shown only. The sampler keeps the one kernel audio/sampler.md gives, whatever is chosen;
 /// when the live kernels are measured, the choice will pick among them. Its menu groups the choices under grey

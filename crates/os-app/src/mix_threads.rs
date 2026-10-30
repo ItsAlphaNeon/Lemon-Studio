@@ -4,7 +4,7 @@
 
 //! The program's mixing threads (spec: audio/multicore.md): a pool of one fewer workers than the machine has physical
 //! cores, which every engine the program builds renders on (playback, exports, renders from the command line), and
-//! Audio ▸ CPU's two switches, "Multithreaded mixer processing" and "Multithreaded generator processing", which engines
+//! Audio ▸ CPU's two switches, "Multithreaded mixer processing" and "Multithreaded instrument processing", which engines
 //! read every tick.
 
 use crate::prefs::{check, MULTITHREADED_GENERATORS, MULTITHREADED_MIXER};
