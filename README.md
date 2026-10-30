@@ -101,7 +101,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **A dropout log (Linux).** `Logs/audio.log` in the user folder says why playback dropped out: each playback's start
   (its audio settings), each audio thread's priority (real-time, or refused and why, or taken back by the safety cap),
   and dropouts at most once a second, by kind (the feeder late, a plugin late, the device's own underruns) with the
-  threads' priority at that moment. Events only, and at 256 KB it becomes `audio.log.1`: never more than half a MB.
+  threads' priority at that moment, and what held a plugin for 2 ms or more on the UI's side. Events only, and at 256 KB it becomes `audio.log.1`: never more than half a MB.
 - **A media player to the desktop (MPRIS).** Lemon Studio is on the session bus as `org.mpris.MediaPlayer2.lemonstudio`:
   media keys, a bar's player widget and `playerctl` play, pause and stop the transport, and show whether it plays and
   the project's name.
