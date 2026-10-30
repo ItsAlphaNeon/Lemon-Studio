@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use os_model::{Clip, PerfSettings, Project, TimeMarker};
 
 use crate::app::State;
+use crate::app::App;
 use crate::playlist::{arr_mut, clips, markers, start_marker, to_src, track_info, window};
 
 /// How far ahead of its start a launched clip's copies are placed, in bars of 4 beats (Lemon Studio's design: the
@@ -496,19 +497,36 @@ pub fn toggle(s: &mut State) -> String {
     format!("Performance mode: {}", if on { "on" } else { "off" })
 }
 
-/// Prepare for performance mode (§1), one undo step: 16 unnamed markers 4 bars apart from bar 1, a Start marker one
-/// bar after the last column, SONG, performance mode on. Lemon Studio does not ask first or show the Marker settings
-/// dialog yet: it uses the dialog's defaults.
-pub fn prepare(s: &mut State) -> String {
-    const COUNT: u32 = 16;
-    const SPACING_BARS: u32 = 4;
+/// The Marker settings dialog (§1): how many columns and how many bars apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkerForm {
+    pub count: u8,
+    pub spacing: u8,
+}
+
+impl Default for MarkerForm {
+    fn default() -> Self {
+        MarkerForm { count: 16, spacing: 4 }
+    }
+}
+
+impl MarkerForm {
+    /// The values the boxes' lists offer (Lemon Studio's ranges; the original's were not measured).
+    pub const COUNTS: std::ops::RangeInclusive<u8> = 1..=64;
+    pub const SPACINGS: std::ops::RangeInclusive<u8> = 1..=16;
+}
+
+/// Prepare for performance mode (§1) with the Marker settings `f`, one undo step: `f.count` unnamed markers
+/// `f.spacing` bars apart from bar 1, a Start marker one bar after the last column, SONG, performance mode on.
+pub fn prepare_with(s: &mut State, f: MarkerForm) -> String {
+    let (count, spacing) = (u32::from(f.count.max(1)), u32::from(f.spacing.max(1)));
     crate::playlist::snapshot_as(s, "Prepare for performance mode");
     let bar = 4 * ppq(s);
-    let start = COUNT * SPACING_BARS * bar + bar;
+    let start = count * spacing * bar + bar;
     let a = arr_mut(s);
     a.markers.retain(|m| !(m.kind == TimeMarker::START || (m.kind == TimeMarker::PLAIN && m.position < start)));
-    for k in 0..COUNT {
-        a.markers.push(TimeMarker::new(k * SPACING_BARS * bar, ""));
+    for k in 0..count {
+        a.markers.push(TimeMarker::new(k * spacing * bar, ""));
     }
     a.markers.push(TimeMarker { kind: TimeMarker::START, ..TimeMarker::new(start, "Start") });
     a.markers.sort_by_key(|m| m.position);
@@ -516,7 +534,55 @@ pub fn prepare(s: &mut State) -> String {
     s.song_mode = true;
     s.playlist.pos = start;
     s.piano.dirty = true;
-    format!("Prepared for performance mode: {COUNT} columns, Start marker at bar {}", start / bar + 1)
+    format!("Prepared for performance mode: {count} columns, Start marker at bar {}", start / bar + 1)
+}
+
+/// The text of the question Prepare for performance mode asks first (§1).
+pub const CONFIRM: &str = "The project will be tweaked for best results in a live performance situation (no undo).";
+
+impl App {
+    /// Prepare for performance mode (§1): the question first, then Marker settings, then the markers.
+    pub(crate) fn ask_prepare(&mut self) {
+        use crate::dialog::{spans, Answer, Kind, Msg, Then};
+        self.show_msg(Msg::new(Kind::Question, "Confirm", spans(&[CONFIRM]), &[Answer::Ok, Answer::Cancel], Then::PerfConfirm));
+    }
+
+    /// Ok to the question: the Marker settings dialog at its defaults.
+    pub(crate) fn open_marker_settings(&mut self) {
+        self.state.playlist.popup = None;
+        self.show_form(crate::dialog::Body::Markers(MarkerForm::default()));
+    }
+
+    fn marker_form(&mut self) -> Option<&mut MarkerForm> {
+        match &mut self.state.dialogs.last_mut()?.body {
+            crate::dialog::Body::Markers(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// A click on a Marker settings box: its list under it, the current value marked.
+    pub(crate) fn marker_list(&mut self, spacing: bool) {
+        use crate::playlist::{Cmd, Mark, PItem, Popup};
+        let Some(f) = self.marker_form().copied() else { return };
+        let act = crate::app::Action::Dlg(crate::dialog::DHit::MarkerValue(spacing));
+        let Some(r) = self.hits.iter().rev().find(|h| h.action == act).map(|h| h.rect) else { return };
+        let (cur, values) = if spacing { (f.spacing, MarkerForm::SPACINGS) } else { (f.count, MarkerForm::COUNTS) };
+        let items = values.map(|v| PItem::new(v.to_string(), Cmd::PerfMarkerPick(spacing, v)).mark(Mark::Radio(v == cur))).collect();
+        self.state.playlist.popup = Some(Popup { x: r.x, y: r.bottom() + 1.0, items, sub: None, scroll: [0; 2] });
+        self.invalidate();
+    }
+
+    /// A pick in a Marker settings list sets its box.
+    pub(crate) fn marker_pick(&mut self, spacing: bool, v: u8) {
+        if let Some(f) = self.marker_form() {
+            if spacing {
+                f.spacing = v;
+            } else {
+                f.count = v;
+            }
+        }
+        self.invalidate();
+    }
 }
 
 /// The project as played (§3): the zone silent, each launched clip's passes on its track, and that track's own clips
@@ -812,7 +878,7 @@ mod tests {
         let mut app = App::new(None);
         let s = &mut app.state;
         s.project.ppq = 96;
-        let msg = prepare(s);
+        let msg = prepare_with(s, MarkerForm::default());
         assert!(msg.contains("bar 66"), "{msg}");
         let m = markers(s);
         assert_eq!(m.len(), 17);
@@ -824,5 +890,35 @@ mod tests {
         s.song_mode = false;
         assert_eq!(toggle(s), "Performance mode: on");
         assert!(s.song_mode);
+    }
+
+    /// §1: Prepare asks first, then Marker settings sets the count and spacing; Cancel leaves the project alone.
+    #[test]
+    fn prepare_asks_and_takes_marker_settings() {
+        use crate::dialog::{Body, DHit};
+        let mut app = App::new(None);
+        app.state.project.ppq = 96;
+        crate::playlist::run(&mut app, crate::playlist::Cmd::PerfPrepare);
+        assert_eq!(app.top_message().map(|m| m.1), Some(CONFIRM.to_string()));
+        app.act(crate::app::Action::Dlg(DHit::Button(1)));
+        assert!(app.state.dialogs.is_empty() && markers(&app.state).is_empty(), "Cancel");
+        crate::playlist::run(&mut app, crate::playlist::Cmd::PerfPrepare);
+        app.act(crate::app::Action::Dlg(DHit::Button(0)));
+        assert!(matches!(app.state.dialogs.last().map(|m| &m.body), Some(Body::Markers(f)) if *f == MarkerForm::default()));
+        // The count's box opens its list (where a canvas can be made).
+        if let Ok(mut c) = os_ui::Canvas::new(1280, 800, 1.0) {
+            app.paint(&mut c, None);
+            app.act(crate::app::Action::Dlg(DHit::MarkerValue(false)));
+            let pop = app.state.playlist.popup.take().expect("the count's list");
+            assert_eq!(pop.items.len(), 64);
+        }
+        crate::playlist::run(&mut app, crate::playlist::Cmd::PerfMarkerPick(false, 8));
+        crate::playlist::run(&mut app, crate::playlist::Cmd::PerfMarkerPick(true, 2));
+        app.act(crate::app::Action::Dlg(DHit::Accept));
+        assert!(app.state.dialogs.is_empty());
+        let s = &app.state;
+        assert_eq!(markers(s).len(), 9);
+        assert_eq!((markers(s)[1].position, markers(s)[8].position), (768, 8 * 768 + 384), "2 bars apart, Start a bar after");
+        assert_eq!(s.message.as_deref(), Some("Prepared for performance mode: 8 columns, Start marker at bar 18"));
     }
 }

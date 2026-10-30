@@ -340,6 +340,8 @@ pub enum Cmd {
     ResetEmptyTracks,
     /// The ▸ menu's Prepare for performance mode and Performance mode (Ctrl+P) (spec: ui/performance-mode.md §1).
     PerfPrepare,
+    /// A pick in Marker settings' Spacing list (true) or Marker count list.
+    PerfMarkerPick(bool, u8),
     PerfToggle,
     /// Performance mode's view and scene checks (§3, §3a).
     PerfClipProgress,
@@ -4173,6 +4175,15 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.sig_pick(den, v);
             return None;
         }
+        // Prepare for performance mode asks first (spec: ui/performance-mode.md §1).
+        Cmd::PerfPrepare => {
+            app.ask_prepare();
+            return None;
+        }
+        Cmd::PerfMarkerPick(spacing, v) => {
+            app.marker_pick(spacing, v);
+            return None;
+        }
         // Time signature markers ask for their signature (§7a).
         Cmd::AddSignature | Cmd::MarkerSigAt(_) => {
             let pos = if let Cmd::MarkerSigAt(t) = cmd { t } else { app.state.playlist.pos };
@@ -4395,7 +4406,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::SlotWin(..) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::PluginCpu(..) | Cmd::ChannelState(_) | Cmd::SetIcon(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::SlotWin(..) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::PluginCpu(..) | Cmd::ChannelState(_) | Cmd::SetIcon(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) | Cmd::PerfPrepare | Cmd::PerfMarkerPick(..) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -4866,7 +4877,6 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             s.playlist.jump_quantize = q;
             None
         }
-        Cmd::PerfPrepare => Some(crate::perform::prepare(s)),
         Cmd::PerfClipProgress | Cmd::PerfTrackProgress | Cmd::PerfPlusScene => {
             let (flag, name) = match cmd {
                 Cmd::PerfClipProgress => (&mut s.playlist.perf_clip_progress, "Performance clip progress"),

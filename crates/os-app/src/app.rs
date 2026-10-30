@@ -2135,6 +2135,17 @@ impl App {
                     crate::timesig::set_song(&mut self.state, at, num, den);
                 }
             }
+            Then::PerfConfirm => {
+                if reply == Reply::Button(Answer::Ok) {
+                    self.open_marker_settings();
+                }
+            }
+            Then::PerfMarkers(count, spacing) => {
+                if reply == Reply::Button(Answer::Ok) {
+                    let m = crate::perform::prepare_with(&mut self.state, crate::perform::MarkerForm { count, spacing });
+                    self.state.message = Some(m);
+                }
+            }
             Then::DataFolder(d) => self.data_folder_done(d, reply),
             Then::ClientSave(p) => {
                 if reply == Reply::Button(Answer::Yes) {
@@ -12344,6 +12355,7 @@ mod tests {
             crate::dialog::Body::Msg(m) => panic!("a message box is on top: {}", m.plain()),
             crate::dialog::Body::Shortcuts(_) => panic!("Manage shortcuts is on top"),
             crate::dialog::Body::TimeSig(_) => panic!("the time signature dialog is on top"),
+            crate::dialog::Body::Markers(_) => panic!("Marker settings is on top"),
             crate::dialog::Body::Project(_) => panic!("a project form is on top"),
         }
     }
