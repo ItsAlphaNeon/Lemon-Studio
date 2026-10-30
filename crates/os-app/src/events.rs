@@ -60,6 +60,15 @@ pub enum EvCmd {
     /// Moves the events from the selection's start on later by its length, or pulls those after it back over it.
     InsertSpace,
     DeleteSpace,
+    /// The selection moved back or on by its own length.
+    SelectPrev,
+    SelectNext,
+    /// The Relocate events check: Paste inserts, and Cut and Delete close the gap.
+    Relocate,
+    /// Zoom in or out about the graph's middle, or to the selection.
+    ZoomIn,
+    ZoomOut,
+    ZoomSelection,
     TurnIntoClip,
 }
 
@@ -85,6 +94,8 @@ pub struct EventsUi {
     pub line: Option<((u32, f64), (u32, f64))>,
     /// Cut or copied events: (ticks from the selection's start, level), and the selection's length.
     pub clipboard: Option<(Vec<(u32, f64)>, u32)>,
+    /// Relocate events (§4): Paste makes room for what it pastes, Cut and Delete pull the later events back.
+    pub relocate: bool,
 }
 
 impl Default for EventsUi {
@@ -102,6 +113,7 @@ impl Default for EventsUi {
             sel: None,
             line: None,
             clipboard: None,
+            relocate: false,
         }
     }
 }
@@ -246,8 +258,50 @@ pub fn space(s: &mut State, insert: bool) -> bool {
     true
 }
 
-/// Edit ▸ Delete: the selection's events, or all of them.
+/// Edit ▸ Select previous (Ctrl+Left) / Select next (Ctrl+Right): the selection moves back or on by its length (the
+/// original's manual); back stops at the pattern's start. Returns whether it moved.
+pub fn select_step(s: &mut State, next: bool) -> bool {
+    let Some((a, b)) = s.events.sel.filter(|(a, b)| b > a) else { return false };
+    let len = b - a;
+    let at = if next { b } else { a.saturating_sub(len) };
+    if at == a {
+        return false;
+    }
+    s.events.sel = Some((at, at + len));
+    true
+}
+
+/// Zoom in or out (`factor` times the pixels a beat) about the graph's middle.
+pub fn zoom(s: &mut State, factor: f32) {
+    let g = crate::views::events::graph(s);
+    let mid = g.x + g.w / 2.0;
+    let at = crate::views::events::tick_at(s, mid);
+    s.events.px_per_beat = (s.events.px_per_beat * factor).clamp(ZOOM.0, ZOOM.1);
+    let back = crate::views::events::tick_at(s, mid) - s.events.scroll;
+    s.events.scroll = (at - back).max(0.0);
+}
+
+/// Zoom ▸ on selection: the selection fills the graph's width.
+pub fn zoom_selection(s: &mut State) -> bool {
+    let Some((a, b)) = s.events.sel.filter(|(a, b)| b > a) else { return false };
+    let w = crate::views::events::graph(s).w;
+    let ppq = f32::from(s.project.ppq.max(4));
+    s.events.px_per_beat = (w * ppq / (b - a) as f32).clamp(ZOOM.0, ZOOM.1);
+    s.events.scroll = f64::from(a);
+    true
+}
+
+/// The zoom's limits, pixels a beat.
+pub const ZOOM: (f32, f32) = (4.0, 600.0);
+
+/// Edit ▸ Delete: the selection's events, or all of them. With Relocate events on, the later events move back over a
+/// selection's place.
 pub fn delete(s: &mut State) -> usize {
+    if s.events.relocate && s.events.sel.is_some_and(|(a, b)| b > a) {
+        let n = points(s).iter().filter(|p| s.events.sel.is_some_and(|(a, b)| (a..b).contains(&p.0))).count();
+        space(s, false);
+        return n;
+    }
     match s.events.sel {
         Some((a, b)) => erase(s, a, b.saturating_sub(1).max(a)),
         None => erase(s, 0, u32::MAX),
@@ -273,10 +327,15 @@ pub fn copy(s: &mut State) -> bool {
 }
 
 /// Edit ▸ Paste: the clipboard at the selection's start (the pattern's without one), the control's events in the
-/// stretch it covers replaced; the stretch becomes the selection.
+/// stretch it covers replaced; the stretch becomes the selection. With Relocate events on, the events from there on
+/// move later by its length first, so none is replaced.
 pub fn paste(s: &mut State) -> bool {
     let Some((events, len)) = s.events.clipboard.clone() else { return false };
     let at = s.events.sel.map_or(0, |(a, _)| a);
+    if s.events.relocate {
+        s.events.sel = Some((at, at + len.max(1)));
+        space(s, true);
+    }
     erase(s, at, at + len.max(1) - 1);
     for (t, l) in events {
         set(s, at + t, l);
@@ -387,6 +446,7 @@ fn snapped(s: &State, tick: f64, alt: bool) -> u32 {
 pub fn menu(s: &State, x: f32, y: f32) -> Popup {
     let any = !points(s).is_empty();
     let turn = PItem::new("Turn into automation clip", Cmd::Events(EvCmd::TurnIntoClip));
+    let on_sel = |p: PItem| if s.events.sel.is_some() { p } else { p.off() };
     let items = vec![
         PItem::head("Edit"),
         PItem::new("Cut", Cmd::Events(EvCmd::Cut)).key("Ctrl+X"),
@@ -396,21 +456,23 @@ pub fn menu(s: &State, x: f32, y: f32) -> Popup {
             if s.events.clipboard.is_some() { p } else { p.off() }
         },
         PItem::new("Select all", Cmd::Events(EvCmd::SelectAll)).key("Ctrl+A"),
+        on_sel(PItem::new("Select previous", Cmd::Events(EvCmd::SelectPrev)).key("Ctrl+Left")),
+        on_sel(PItem::new("Select next", Cmd::Events(EvCmd::SelectNext)).key("Ctrl+Right")),
         PItem::new("Delete", Cmd::Events(EvCmd::Delete)).key("Del"),
         PItem::new("Duplicate", Cmd::Events(EvCmd::Duplicate)).key("Ctrl+B"),
         PItem::sep(),
-        {
-            let p = PItem::new("Insert space", Cmd::Events(EvCmd::InsertSpace)).key("Ctrl+Ins");
-            if s.events.sel.is_some() { p } else { p.off() }
-        },
-        {
-            let p = PItem::new("Delete space", Cmd::Events(EvCmd::DeleteSpace)).key("Ctrl+Del");
-            if s.events.sel.is_some() { p } else { p.off() }
-        },
+        on_sel(PItem::new("Insert space", Cmd::Events(EvCmd::InsertSpace)).key("Ctrl+Ins")),
+        on_sel(PItem::new("Delete space", Cmd::Events(EvCmd::DeleteSpace)).key("Ctrl+Del")),
         PItem::sep(),
         PItem::new("Insert current controller value", Cmd::Events(EvCmd::InsertValue)).key("Ctrl+I"),
         PItem::sep(),
         if any { turn } else { turn.off() },
+        PItem::head("Zoom"),
+        PItem::new("Zoom in", Cmd::Events(EvCmd::ZoomIn)).key("PgUp"),
+        PItem::new("Zoom out", Cmd::Events(EvCmd::ZoomOut)).key("PgDn"),
+        on_sel(PItem::new("Zoom on selection", Cmd::Events(EvCmd::ZoomSelection)).key("Shift+5")),
+        PItem::sep(),
+        PItem::new("Relocate events", Cmd::Events(EvCmd::Relocate)).mark(crate::playlist::Mark::Check(s.events.relocate)),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
@@ -582,16 +644,39 @@ impl App {
                 }
                 None
             }
+            EvCmd::SelectPrev | EvCmd::SelectNext => {
+                select_step(s, c == EvCmd::SelectNext);
+                None
+            }
+            EvCmd::Relocate => {
+                s.events.relocate = !s.events.relocate;
+                Some(format!("Relocate events {}", if s.events.relocate { "on" } else { "off" }))
+            }
+            EvCmd::ZoomIn | EvCmd::ZoomOut => {
+                zoom(s, if c == EvCmd::ZoomIn { 1.5 } else { 1.0 / 1.5 });
+                None
+            }
+            EvCmd::ZoomSelection => {
+                zoom_selection(s);
+                None
+            }
             EvCmd::TurnIntoClip => turn_into_clip(s),
         };
         self.invalidate();
         m
     }
 
-    /// The editor's keys while it is in front (§4): Del, Ctrl+X / C / V, Ctrl+A, Ctrl+I, Ctrl+B, Ctrl+Ins / Del.
+    /// The editor's keys while it is in front (§4): Del, Ctrl+X / C / V, Ctrl+A, Ctrl+I, Ctrl+B, Ctrl+Ins / Del,
+    /// Ctrl+Left / Right, PgUp / PgDn, Shift+5.
     pub(crate) fn events_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
         use winit::keyboard::{Key, NamedKey};
+        let shift = self.shift;
         let c = match key {
+            Key::Named(NamedKey::ArrowLeft) if ctrl && !alt => EvCmd::SelectPrev,
+            Key::Named(NamedKey::ArrowRight) if ctrl && !alt => EvCmd::SelectNext,
+            Key::Named(NamedKey::PageUp) if !ctrl && !alt => EvCmd::ZoomIn,
+            Key::Named(NamedKey::PageDown) if !ctrl && !alt => EvCmd::ZoomOut,
+            Key::Character(c) if shift && !ctrl && !alt && (c == "5" || c == "%") => EvCmd::ZoomSelection,
             Key::Named(NamedKey::Delete) if !ctrl && !alt => EvCmd::Delete,
             Key::Named(NamedKey::Delete) if ctrl && !alt => EvCmd::DeleteSpace,
             Key::Named(NamedKey::Insert) if ctrl && !alt => EvCmd::InsertSpace,
@@ -616,7 +701,7 @@ impl App {
         let ppq = f64::from(s.project.ppq.max(4));
         if ctrl {
             let at = crate::views::events::tick_at(s, x);
-            s.events.px_per_beat = (s.events.px_per_beat * 1.25f32.powf(d)).clamp(4.0, 600.0);
+            s.events.px_per_beat = (s.events.px_per_beat * 1.25f32.powf(d)).clamp(ZOOM.0, ZOOM.1);
             let back = crate::views::events::tick_at(s, x) - s.events.scroll;
             s.events.scroll = (at - back).max(0.0);
         } else {
@@ -734,6 +819,54 @@ mod tests {
         assert_eq!(points(s), vec![(0, 0), (24, 1875), (48, 12800)]);
         s.events.sel = None;
         assert!(!space(s, true), "needs a selection");
+    }
+
+    /// Select previous / next, Relocate events and the zoom (§4).
+    #[test]
+    fn select_step_relocate_and_zoom() {
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let s = &mut app.state;
+        assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
+        assert!(!select_step(s, true), "needs a selection");
+        s.events.sel = Some((96, 144));
+        assert!(select_step(s, true));
+        assert_eq!(s.events.sel, Some((144, 192)));
+        assert!(select_step(s, false) && select_step(s, false));
+        assert_eq!(s.events.sel, Some((48, 96)));
+        assert!(select_step(s, false));
+        assert_eq!(s.events.sel, Some((0, 48)), "stops at the start");
+        assert!(!select_step(s, false));
+
+        for t in [0, 24, 48, 72] {
+            set(s, t, 0.25);
+        }
+        s.events.relocate = true;
+        s.events.sel = Some((0, 48));
+        assert!(copy(s));
+        assert_eq!(delete(s), 2);
+        assert_eq!(points(s), vec![(0, 3200), (24, 3200)], "the later events move back");
+        s.events.sel = Some((24, 30));
+        assert!(paste(s));
+        assert_eq!(points(s), vec![(0, 3200), (24, 3200), (48, 3200), (72, 3200)], "pasted in, the event at 24 moved on");
+        assert_eq!(s.events.sel, Some((24, 72)));
+
+        let px = s.events.px_per_beat;
+        zoom(s, 2.0);
+        assert_eq!(s.events.px_per_beat, px * 2.0);
+        let end = 96 + 8 * u32::from(s.project.ppq);
+        s.events.sel = Some((96, end));
+        assert!(zoom_selection(s));
+        assert_eq!(s.events.scroll, 96.0);
+        let g = crate::views::events::graph(s);
+        assert!((crate::views::events::x_of(s, f64::from(end)) - (g.x + g.w)).abs() < 0.01, "the selection fills the graph");
+
+        // The keys.
+        s.events.sel = Some((0, 48));
+        app.state.z.push(Win::Events);
+        assert!(app.events_key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowRight), true, false));
+        assert_eq!(app.state.events.sel, Some((48, 96)));
+        assert_eq!(app.events_cmd(EvCmd::Relocate).as_deref(), Some("Relocate events off"));
     }
 
     /// The clip follows the events: a ramp recorded every 4 ticks becomes one straight line ending on the last event
