@@ -435,6 +435,13 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 for i in 0..p.channels.len() {
                     let label = channel_label(s, i).unwrap_or_default();
                     plugin_node(s, out, &parent, label, Icon::Plug, cat, i == s.selected_channel, Item::Channel(i), i);
+                    // A channel's container's plugins follow it, in its order (plugins/patcher §4.4).
+                    for mem in crate::container::members(s, i as u16, crate::container::CHANNEL).unwrap_or_default() {
+                        let Some(key) = crate::container::member_key(s, i, mem.id) else { continue };
+                        let label = crate::container::member_label(s, key).unwrap_or_default();
+                        let icon = if mem.instrument { Icon::Plug } else { Icon::Speaker };
+                        plugin_node(s, out, &parent, label, icon, cat, false, Item::None, key);
+                    }
                 }
             }
             "Effects" => {
@@ -445,7 +452,7 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                         // A container's effects follow it, in its order (Lemon Studio's design: plugins/patcher §4.2).
                         let list = crate::container::members(s, m.index, k as u8).unwrap_or_default();
                         for mem in &list {
-                            let Some(key) = crate::container::member_key(s, crate::plugins::fx_key(m.index, k as u8), mem.id) else { continue };
+                            let Some(key) = crate::container::member_key(s, crate::container::place_key(m.index, k as u8), mem.id) else { continue };
                             let label = crate::container::member_label(s, key).unwrap_or_default();
                             plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, key);
                         }
