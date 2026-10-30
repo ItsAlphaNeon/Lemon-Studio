@@ -238,6 +238,11 @@ impl InitControl {
     pub fn from_unit(t: u32, v: f64) -> Option<InitControl> {
         use target::Target;
         let v = v.clamp(0.0, 1.0);
+        // The main swing's start value, in event 11's unit (the rack's swing knob: 0..128). Lemon Studio's design: what
+        // the original writes for it was not measured, and no automation clip drives it yet (`unit` gives `None`).
+        if t == Self::MAIN_SWING {
+            return Some(InitControl { head: 0, target: t, value: (128.0 * v).round() as i32 });
+        }
         let value = match target::decode(t) {
             Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => 12800.0 * v,
             Target::ChannelPitch(_) => 9600.0 * v - 4800.0,
@@ -2454,6 +2459,8 @@ pub mod target {
                 let v = c.unit().unwrap();
                 assert_eq!(InitControl::from_unit(t, v), Some(c), "{t:#010x}");
             }
+            // The main swing's start value: 0..128, as event 11 keeps it.
+            assert_eq!(InitControl::from_unit(InitControl::MAIN_SWING, 0.5), Some(InitControl { head: 0, target: InitControl::MAIN_SWING, value: 64 }));
             // Units not known: kept, not converted.
             for t in [channel_param(0, 4), slot_param(1, 0, 2), InitControl::MAIN_VOLUME, channel(0, CHANNEL_CUTOFF)] {
                 assert_eq!(InitControl::from_unit(t, 0.5), None);
