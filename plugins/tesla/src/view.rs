@@ -761,16 +761,28 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
     }
     let fmt = doc.view.time;
     let step = grid_step(fmt, l.shown.rate, doc.sample.tempo, per_px, 90.0);
-    let mut g = (start / step).floor() * step;
+    // Bars run through the first downbeat and count from it.
+    let db = if fmt == state::TIME_BBT { doc.sample.downbeat as f64 } else { 0.0 };
+    let mut g = ((start - db) / step).floor() * step + db;
     let end = start + per_px * lane.w as f64;
     while g <= end {
         let x = fx(g).round();
         if x >= lane.x {
             ui.c.fill_rect(Rect::new(x, lane.y, 1.0, lane.h), plug::GRID);
-            let t = time_text(fmt, g, l.shown.rate, doc.sample.tempo, per_px);
-            ui.c.text(SMALL, x + 3.0, lane.bottom() - 13.0, plug::OFF, &t);
+            if g >= db - 0.5 {
+                let t = time_text(fmt, (g - db).max(0.0), l.shown.rate, doc.sample.tempo, per_px);
+                ui.c.text(SMALL, x + 3.0, lane.bottom() - 13.0, plug::OFF, &t);
+            }
         }
         g += step;
+    }
+    // The first downbeat, when it is set.
+    if doc.sample.downbeat > 0 {
+        let x = fx(doc.sample.downbeat as f64).round();
+        if x >= lane.x && x <= lane.right() {
+            ui.c.fill_rect(Rect::new(x, lane.y, 1.0, lane.h), LOOP.with_alpha(150));
+            ui.c.text(SMALL, x + 3.0, lane.bottom() - 26.0, LOOP, "Downbeat");
+        }
     }
     // The waveform (the spectrogram is drawn under the selection and the grid).
     if l.spectrum.is_none() {
@@ -861,12 +873,26 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
         let n = doc.frames();
         if n > 0 {
             let p = doc.env.points(k, n);
-            let pts: Vec<(f32, f32)> = p.iter().map(|q| (fx(q.pos), env_y(lane, q.v))).collect();
+            // A smooth point's line is drawn in 16 pieces.
+            let mut pts: Vec<(f32, f32)> = Vec::with_capacity(p.len() * 2);
+            for (i, q) in p.iter().enumerate() {
+                pts.push((fx(q.pos), env_y(lane, q.v)));
+                if let (true, Some(b)) = (q.smooth, p.get(i + 1)) {
+                    for s in 1..16 {
+                        let pos = q.pos + (b.pos - q.pos) * s as f64 / 16.0;
+                        pts.push((fx(pos), env_y(lane, crate::env::value(&p, pos))));
+                    }
+                }
+            }
             ui.c.polyline(&pts, 1.6, FLAG);
-            for &(x, y) in &pts {
+            for q in &p {
+                let (x, y) = (fx(q.pos), env_y(lane, q.v));
                 if x >= lane.x - POINT_R && x <= lane.right() + POINT_R {
                     ui.c.fill_circle(x, y, POINT_R, plug::BG);
                     ui.c.stroke_circle(x, y, POINT_R, 1.4, FLAG);
+                    if q.smooth {
+                        ui.c.fill_circle(x, y, POINT_R - 1.8, FLAG);
+                    }
                 }
             }
         }

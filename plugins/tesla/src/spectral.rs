@@ -153,11 +153,11 @@ pub fn curve_at(p: &[Point], x: f64, smooth: bool) -> f32 {
 
 /// The default curves: Equalize's flat line with three points, Blur's bell with five.
 pub fn flat_curve() -> Vec<Point> {
-    [0.0, 0.5, 1.0].iter().map(|&pos| Point { pos, v: 0.5 }).collect()
+    [0.0, 0.5, 1.0].iter().map(|&pos| Point { pos, v: 0.5, smooth: false }).collect()
 }
 
 pub fn bell_curve() -> Vec<Point> {
-    [(0.0, 0.0), (0.25, 0.5), (0.5, 1.0), (0.75, 0.5), (1.0, 0.0)].iter().map(|&(pos, v)| Point { pos, v }).collect()
+    [(0.0, 0.0), (0.25, 0.5), (0.5, 1.0), (0.75, 0.5), (1.0, 0.0)].iter().map(|&(pos, v)| Point { pos, v, smooth: false }).collect()
 }
 
 /// The equalizer's frequency axis: x (0 to 1) to Hz, 20 Hz to 20 kHz on a log scale, and back.
@@ -388,7 +388,7 @@ impl Curve {
     pub const MAX: usize = 16;
 
     pub fn from_points(p: &[Point]) -> Curve {
-        let mut c = Curve { n: 0, p: [Point { pos: 0.0, v: 0.5 }; Curve::MAX] };
+        let mut c = Curve { n: 0, p: [Point { pos: 0.0, v: 0.5, smooth: false }; Curve::MAX] };
         for q in p.iter().take(Curve::MAX) {
             c.p[c.n] = *q;
             c.n += 1;
@@ -416,7 +416,7 @@ impl Curve {
         let x = x.clamp(0.0, 1.0);
         let i = self.points().iter().position(|q| q.pos > x).unwrap_or(self.n - 1).max(1);
         self.p.copy_within(i..self.n, i + 1);
-        self.p[i] = Point { pos: x, v: v.clamp(0.0, 1.0) };
+        self.p[i] = Point { pos: x, v: v.clamp(0.0, 1.0), smooth: false };
         self.n += 1;
         Some(i)
     }
@@ -433,7 +433,7 @@ impl Curve {
         } else {
             x.clamp(self.p[i - 1].pos, self.p[i + 1].pos)
         };
-        self.p[i] = Point { pos, v: v.clamp(0.0, 1.0) };
+        self.p[i] = Point { pos, v: v.clamp(0.0, 1.0), smooth: false };
     }
 
     /// Removes point `i` (not an end); whether it went.
@@ -746,7 +746,7 @@ mod tests {
         let y = equalize(&lo, rate, &flat_curve(), &Equalize::default());
         assert!(lo.iter().zip(&y).all(|(a, b)| (a - b).abs() < 1e-4));
         // A curve from +24 dB at the bottom to −24 dB at the top: the low tone up, the high tone down.
-        let tilt = vec![Point { pos: 0.0, v: 1.0 }, Point { pos: 1.0, v: 0.0 }];
+        let tilt = vec![Point { pos: 0.0, v: 1.0, smooth: false }, Point { pos: 1.0, v: 0.0, smooth: false }];
         let eq = Equalize { mix: 1.0, smooth: false };
         let g = |x: &[f32]| 20.0 * (rms(&equalize(x, rate, &tilt, &eq)[4000..40000]) / rms(&x[4000..40000])).log10();
         let (glo, ghi) = (g(&lo), g(&hi));
@@ -808,11 +808,11 @@ mod tests {
         let mut c = Curve::flat();
         assert_eq!(c.points().len(), 3);
         assert_eq!(c.insert(0.25, 0.9), Some(1));
-        assert_eq!(c.points()[1], Point { pos: 0.25, v: 0.9 });
+        assert_eq!(c.points()[1], Point { pos: 0.25, v: 0.9, smooth: false });
         c.move_point(1, 0.8, 0.1);
         assert_eq!(c.points()[1].pos, 0.5, "kept left of its right neighbour");
         c.move_point(0, 0.3, 1.0);
-        assert_eq!(c.points()[0], Point { pos: 0.0, v: 1.0 }, "an end moves only up and down");
+        assert_eq!(c.points()[0], Point { pos: 0.0, v: 1.0, smooth: false }, "an end moves only up and down");
         assert!(!c.remove(0) && !c.remove(3));
         assert!(c.remove(1));
         assert_eq!(c.points().len(), 3);

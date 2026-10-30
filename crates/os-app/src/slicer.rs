@@ -109,8 +109,10 @@ impl crate::app::App {
     }
 
     /// Notes a plugin sent for channel row `row` (Lemon Slicer's dump): they replace the channel's notes in the
-    /// current pattern, positions rounded to the project's ticks, as one undo step.
+    /// current pattern, positions rounded to the project's ticks, as one undo step. An effect's notes (`row` a mixer
+    /// slot's key: Tesla's Convert to score) go to the selected channel.
     pub(crate) fn notes_from_plugin(&mut self, row: usize, notes: &[os_hostlink::NoteOut]) {
+        let row = if crate::plugins::fx_of(row).is_some() { self.state.selected_channel } else { row };
         let s = &mut self.state;
         let Some(ch) = s.project.channels.get(row).map(|c| c.index) else { return };
         if notes.is_empty() {
@@ -302,6 +304,14 @@ mod tests {
         assert_eq!(got, [(ch, 0, 54, 60), (other, 48, 0, 60), (ch, 54, 54, 61)]);
         assert!(crate::piano::undo(&mut a.state));
         assert_eq!(crate::piano::notes(&a.state).len(), 2);
+        // An effect's notes (Tesla's Convert to score, from a mixer slot) go to the selected channel.
+        a.state.selected_channel = 0;
+        a.notes_from_plugin(crate::plugins::fx_key(0, 3), &notes[..1]);
+        let mut got: Vec<(u16, u32, u16)> = crate::piano::notes(&a.state).iter().map(|n| (n.channel, n.position, n.key)).collect();
+        got.sort();
+        let mut want = vec![(ch, 0, 60), (other, 0, 60)];
+        want.sort();
+        assert_eq!(got, want);
     }
 
     /// `OS_SLICER_FLP=<a.flp>;<b.flp> cargo test -p os-app corpus_slicer -- --ignored`: every Fruity Slicer channel of

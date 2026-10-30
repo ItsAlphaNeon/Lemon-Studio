@@ -176,6 +176,8 @@ struct Json {
     view: View,
     edison_env: String,
     env: Envs,
+    /// The first downbeat (frames; the WAV has no place for it).
+    downbeat: usize,
 }
 
 /// The persisted field holding Tesla's state.
@@ -191,6 +193,7 @@ pub fn to_json(s: &Saved) -> String {
         view: s.view.clone(),
         edison_env: b64_encode(&s.edison_env),
         env: s.env.clone(),
+        downbeat: s.sample.downbeat,
     };
     serde_json::to_string(&j).unwrap_or_default()
 }
@@ -198,7 +201,8 @@ pub fn to_json(s: &Saved) -> String {
 pub fn from_json(text: &str) -> Option<Saved> {
     let j: Json = serde_json::from_str(text).ok()?;
     let bytes = b64_decode(&j.wav)?;
-    let sample = if bytes.is_empty() { Sample::default() } else { wav::read(&bytes).ok()? };
+    let mut sample = if bytes.is_empty() { Sample::default() } else { wav::read(&bytes).ok()? };
+    sample.downbeat = j.downbeat.min(sample.frames().saturating_sub(1));
     Some(Saved { sample, path: j.path, rec: j.rec, view: j.view, edison_env: b64_decode(&j.edison_env).unwrap_or_default(), env: j.env })
 }
 

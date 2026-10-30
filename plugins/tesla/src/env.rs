@@ -15,12 +15,18 @@
 //! - **Panning**: the top is left, the bottom right (p = 1 − 2v), with the Amp's circular law.
 //! - **Stereo separation**: above mid widens up to double width at the top, below narrows to mono at the bottom (the
 //!   Amp knob turned left / right: s = 1 − 2v).
-//! - **All-purpose**: drawn and saved; the mixdown leaves it alone.
+//! - **All-purpose**: drawn and saved; the mixdown leaves it alone. Tools > Scratch (envelope) and Edit > Paste mix
+//!   (envelope) follow it.
+//!
+//! A point's **curve** shapes the line leaving it: straight, or smooth (an S-curve, flat at both ends: Tools > Turn
+//! all points smooth, Alt+click on a point). While Tesla plays, the panning, volume and stereo separation envelopes are
+//! heard as the mixdown would make them ([`Playback`]); the sample itself changes only with the mixdown.
 //!
 //! Points keep their frame positions when the sample is edited; the envelope always spans the sample (its first
 //! point is at the start, its last at the end).
 //!
-// spec: plugins/tesla/README.md "Envelopes in Tesla", plugins/edison/window.md "Wave area", plugins/edison/menus.md
+// spec: plugins/tesla/README.md "Envelopes in Tesla", plugins/edison/window.md "Wave area", plugins/edison/menus.md,
+// plugins/tesla/README.md "Downbeat, score, smooth points, envelopes heard and scratching in Tesla 1.7"
 
 use serde::{Deserialize, Serialize};
 
@@ -38,11 +44,18 @@ pub const NAMES: [&str; 4] = ["Panning", "Volume", "Stereo separation", "All-pur
 /// The neutral height (the default flat line).
 pub const MID: f32 = 0.5;
 
-/// One envelope point: its frame (fractional) and height, 0 (bottom) to 1 (top).
+/// One envelope point: its frame (fractional) and height, 0 (bottom) to 1 (top), and the curve of the line leaving it
+/// (smooth, or straight). Files saved before curves load with straight lines.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub pos: f64,
     pub v: f32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub smooth: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// The four envelopes. An empty list is the default flat line (it follows the sample's length).
@@ -55,7 +68,7 @@ pub struct Envs {
 /// The default envelope over `n` frames: flat at mid height, points at the start, the middle and the end.
 pub fn default_points(n: usize) -> Vec<Point> {
     let last = n.saturating_sub(1) as f64;
-    vec![Point { pos: 0.0, v: MID }, Point { pos: (last / 2.0).round(), v: MID }, Point { pos: last, v: MID }]
+    [0.0, (last / 2.0).round(), last].into_iter().map(|pos| Point { pos, v: MID, smooth: false }).collect()
 }
 
 impl Envs {
@@ -66,7 +79,7 @@ impl Envs {
             return default_points(n);
         }
         let last = n.saturating_sub(1) as f64;
-        let mut p: Vec<Point> = e.iter().map(|q| Point { pos: q.pos.clamp(0.0, last), v: q.v.clamp(0.0, 1.0) }).collect();
+        let mut p: Vec<Point> = e.iter().map(|q| Point { pos: q.pos.clamp(0.0, last), v: q.v.clamp(0.0, 1.0), smooth: q.smooth }).collect();
         p[0].pos = 0.0;
         let m = p.len() - 1;
         p[m].pos = last;
@@ -100,7 +113,9 @@ impl Envs {
             return i;
         }
         let i = e.iter().position(|p| p.pos > pos).unwrap_or(e.len());
-        e.insert(i, Point { pos, v: v.clamp(0.0, 1.0) });
+        // A point added on a smooth line keeps the line smooth.
+        let smooth = i > 0 && e[i - 1].smooth;
+        e.insert(i, Point { pos, v: v.clamp(0.0, 1.0), smooth });
         i
     }
 
@@ -142,6 +157,24 @@ impl Envs {
         for p in self.make(k, n) {
             p.v = 1.0 - p.v;
         }
+    }
+
+    /// Tools > Turn all points smooth: every point's line becomes an S-curve. False when they all are already.
+    pub fn smooth_all(&mut self, k: usize, n: usize) -> bool {
+        if self.points(k, n).iter().all(|p| p.smooth) {
+            return false;
+        }
+        for p in self.make(k, n) {
+            p.smooth = true;
+        }
+        true
+    }
+
+    /// Alt+click on point `i`: its line becomes smooth, or straight again. The new curve (`None` past the end).
+    pub fn toggle_smooth(&mut self, k: usize, n: usize, i: usize) -> Option<bool> {
+        let p = self.make(k, n).get_mut(i)?;
+        p.smooth = !p.smooth;
+        Some(p.smooth)
     }
 
     /// Tools > Normalize levels: the points stretched about mid height until the farthest reaches the top or the
@@ -304,7 +337,7 @@ impl Envs {
         let after: Vec<Point> = match dlg.tool {
             EnvTool::Scale => {
                 let (g, o) = dlg.scale();
-                before.iter().map(|p| Point { pos: p.pos, v: (MID + (p.v - MID) * g + o).clamp(0.0, 1.0) }).collect()
+                before.iter().map(|p| Point { v: (MID + (p.v - MID) * g + o).clamp(0.0, 1.0), ..*p }).collect()
             }
             EnvTool::Decimate => {
                 let mut kept = vec![false; before.len()];
@@ -315,14 +348,14 @@ impl Envs {
             }
             EnvTool::Filter => {
                 let v = average(&before.iter().map(|p| p.v).collect::<Vec<_>>(), dlg.reach());
-                before.iter().zip(v).map(|(p, v)| Point { pos: p.pos, v }).collect()
+                before.iter().zip(v).map(|(p, v)| Point { v, ..*p }).collect()
             }
             EnvTool::SmoothUp => {
                 let (m, r) = dlg.smooth_up();
                 let m = m.max(2);
                 let pos: Vec<f64> = (0..m).map(|i| (last * i as f64 / (m - 1) as f64).round()).collect();
                 let v = average(&pos.iter().map(|&x| value(&before, x)).collect::<Vec<_>>(), r);
-                let mut p: Vec<Point> = pos.into_iter().zip(v).map(|(pos, v)| Point { pos, v }).collect();
+                let mut p: Vec<Point> = pos.into_iter().zip(v).map(|(pos, v)| Point { pos, v, smooth: false }).collect();
                 p.dedup_by(|b, a| b.pos == a.pos);
                 p
             }
@@ -336,17 +369,17 @@ impl Envs {
                     let s0 = (a + len * i as f64 / steps as f64).round();
                     let s1 = ((a + len * (i + 1) as f64 / steps as f64).round() - 1.0).max(s0);
                     let v = if i % 2 == 0 { hi } else { lo };
-                    p.push(Point { pos: s0, v });
+                    p.push(Point { pos: s0, v, smooth: false });
                     if s1 > s0 {
-                        p.push(Point { pos: s1, v });
+                        p.push(Point { pos: s1, v, smooth: false });
                     }
                 }
                 // Past the range the envelope goes on where it was.
                 if b < last && !before.iter().any(|q| q.pos == b + 1.0) {
-                    p.push(Point { pos: b + 1.0, v: value(&before, b + 1.0) });
+                    p.push(Point { pos: b + 1.0, v: value(&before, b + 1.0), smooth: false });
                 }
                 if a > 0.0 && !before.iter().any(|q| q.pos == a - 1.0) {
-                    p.push(Point { pos: a - 1.0, v: value(&before, a - 1.0) });
+                    p.push(Point { pos: a - 1.0, v: value(&before, a - 1.0), smooth: false });
                 }
                 p.sort_by(|x, y| x.pos.total_cmp(&y.pos));
                 p.dedup_by(|b, a| b.pos == a.pos);
@@ -361,23 +394,25 @@ impl Envs {
     }
 }
 
-/// The envelope's height at `pos` (frames): straight lines between the points, flat beyond the ends.
+/// The line from `a` to `b` at `t` (0 to 1 of the way): straight, or an S-curve (smoothstep) when `a` is smooth.
+fn between(a: &Point, b: &Point, t: f32) -> f32 {
+    let t = if a.smooth { t * t * (3.0 - 2.0 * t) } else { t };
+    a.v + (b.v - a.v) * t
+}
+
+/// The envelope's height at `pos` (frames): each point's line (straight or smooth) to the next, flat beyond the ends.
 pub fn value(p: &[Point], pos: f64) -> f32 {
     let Some(first) = p.first() else { return MID };
     if pos <= first.pos {
         return first.v;
     }
-    for w in p.windows(2) {
-        let (a, b) = (w[0], w[1]);
-        if pos <= b.pos {
-            if b.pos <= a.pos {
-                return b.v;
-            }
-            let t = ((pos - a.pos) / (b.pos - a.pos)) as f32;
-            return a.v + (b.v - a.v) * t;
-        }
+    // The first point at or after `pos`.
+    let j = p.partition_point(|q| q.pos < pos);
+    if j >= p.len() {
+        return p[p.len() - 1].v;
     }
-    p[p.len() - 1].v
+    let (a, b) = (&p[j - 1], &p[j]);
+    between(a, b, ((pos - a.pos) / (b.pos - a.pos)) as f32)
 }
 
 /// The envelope over frames `0..n`, one height per frame.
@@ -390,7 +425,7 @@ pub fn render(p: &[Point], n: usize) -> Vec<f32> {
             j += 1;
         }
         let v = match (p.get(j), p.get(j + 1)) {
-            (Some(a), Some(b)) if x >= a.pos && b.pos > a.pos => a.v + (b.v - a.v) * ((x - a.pos) / (b.pos - a.pos)) as f32,
+            (Some(a), Some(b)) if x >= a.pos && b.pos > a.pos => between(a, b, ((x - a.pos) / (b.pos - a.pos)) as f32),
             (Some(a), Some(b)) => if x < a.pos { a.v } else { b.v },
             (Some(a), None) => a.v,
             _ => MID,
@@ -467,6 +502,70 @@ pub fn mixdown(s: &mut Sample, envs: &Envs) {
     }
 }
 
+/// The panning, volume and stereo separation envelopes as playback hears them (Lemon Studio's design: Edison's
+/// envelopes are heard before a mixdown; the original's playback was not measured). Made off the audio thread
+/// whenever the envelopes or the sample change.
+#[derive(Clone, Debug, Default)]
+pub struct Playback {
+    /// Nothing to apply: the three are flat (or the sample is empty).
+    pub flat: bool,
+    mono: bool,
+    pan: Vec<Point>,
+    vol: Vec<Point>,
+    sep: Vec<Point>,
+}
+
+impl Playback {
+    pub fn new(e: &Envs, n: usize, channels: usize) -> Playback {
+        if n == 0 || e.amp_flat() {
+            return Playback { flat: true, ..Playback::default() };
+        }
+        Playback { flat: false, mono: channels < 2, pan: e.points(PAN, n), vol: e.points(VOLUME, n), sep: e.points(SEP, n) }
+    }
+
+    /// The three heights at frame `pos`.
+    pub fn at(&self, pos: f64) -> (f32, f32, f32) {
+        (value(&self.pan, pos), value(&self.vol, pos), value(&self.sep, pos))
+    }
+
+    /// The Amp matrix for heights `k` (as the mixdown uses them; a mono sample takes only the volume).
+    pub fn matrix(&self, k: (f32, f32, f32)) -> [[f64; 2]; 2] {
+        if self.mono {
+            let g = gain(k.1);
+            return [[g, 0.0], [0.0, g]];
+        }
+        Amp { pan: pan(k.0), law: Law::Circular, left: 0.5, volume: k.1, right: 0.5, sep: sep(k.2) }.matrix()
+    }
+}
+
+/// Tools > Scratch (envelope): the all-purpose envelope `p` (over the whole sample) is the playing speed along
+/// frames `a..=b`: 4v − 1 times normal (mid height ×1, the top ×3, a quarter of the way up stopped, the bottom
+/// backwards at ×1). The range keeps its length; the reading starts at `a` and stays within the sample. Lemon
+/// Studio's design (the original's tool was not measured).
+pub fn scratch(s: &mut Sample, a: usize, b: usize, p: &[Point]) {
+    let n = s.frames();
+    if n == 0 || a > b {
+        return;
+    }
+    let src = s.clone();
+    let last = (n - 1) as f64;
+    let mut pos = a as f64;
+    for i in a..=b.min(n - 1) {
+        let x = pos.clamp(0.0, last);
+        let (j, t) = (x.floor() as usize, (x - x.floor()) as f32);
+        for (c, out) in s.ch.iter_mut().enumerate() {
+            let (u, w) = (src.at(c, j), src.at(c, (j + 1).min(n - 1)));
+            out[i] = u + (w - u) * t;
+        }
+        pos = (pos + scratch_speed(value(p, i as f64))).clamp(0.0, last);
+    }
+}
+
+/// Scratch (envelope)'s speed at height `v`.
+pub fn scratch_speed(v: f32) -> f64 {
+    4.0 * f64::from(v.clamp(0.0, 1.0)) - 1.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,6 +585,69 @@ mod tests {
         let mut s = st(100, 0.3, -0.2);
         mixdown(&mut s, &e);
         assert_eq!(s, st(100, 0.3, -0.2));
+    }
+
+    #[test]
+    fn smooth_points_old_files_playback_and_scratch() {
+        // A smooth point's line is an S-curve: the same ends and middle, flat at the ends.
+        let mut e = Envs::default();
+        e.move_point(VOLUME, 11, 0, 0.0, 0.0);
+        e.move_point(VOLUME, 11, 2, 10.0, 1.0);
+        e.remove(VOLUME, 11, 1);
+        assert!(e.smooth_all(VOLUME, 11));
+        assert!(!e.smooth_all(VOLUME, 11), "already smooth");
+        let p = e.points(VOLUME, 11);
+        assert_eq!((value(&p, 0.0), value(&p, 5.0), value(&p, 10.0)), (0.0, 0.5, 1.0));
+        assert!((value(&p, 1.0) - 0.028).abs() < 1e-3 && (value(&p, 9.0) - 0.972).abs() < 1e-3);
+        assert_eq!(render(&p, 11)[1], value(&p, 1.0));
+        assert_eq!(e.toggle_smooth(VOLUME, 11, 0), Some(false));
+        assert_eq!(value(&e.points(VOLUME, 11), 1.0), 0.1);
+        // Saved points: straight ones as before; files without curves load straight.
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("\"smooth\":true") && json.matches("smooth").count() == 1, "{json}");
+        let old: Envs = serde_json::from_str(r#"{"e":[[],[{"pos":0.0,"v":0.2},{"pos":10.0,"v":0.8}],[],[]]}"#).unwrap();
+        assert!(old.e[VOLUME].iter().all(|p| !p.smooth));
+        // Playback: flat envelopes do nothing; otherwise each frame hears what the mixdown makes of it.
+        assert!(Playback::new(&Envs::default(), 100, 2).flat);
+        let mut v = Envs::default();
+        v.move_point(VOLUME, 101, 2, 100.0, 1.0);
+        v.move_point(PAN, 101, 0, 0.0, 0.8);
+        let pb = Playback::new(&v, 101, 2);
+        let mut s = st(101, 0.25, -0.1);
+        mixdown(&mut s, &v);
+        for i in [0usize, 30, 100] {
+            let m = pb.matrix(pb.at(i as f64));
+            let l = m[0][0] * 0.25 + m[0][1] * -0.1;
+            let r = m[1][0] * 0.25 + m[1][1] * -0.1;
+            assert!((s.ch[0][i] as f64 - l).abs() < 1e-6 && (s.ch[1][i] as f64 - r).abs() < 1e-6, "{i}");
+        }
+        assert!(s.ch[0][100] > 0.5, "louder at the top");
+        // Scratch: flat plays the range as it is; a quarter of the way up holds the first frame.
+        let ramp = Sample::from_channels(44100, vec![(0..100).map(|i| i as f32).collect()], Format::Float32);
+        let mut r = ramp.clone();
+        scratch(&mut r, 10, 50, &Envs::default().points(ALL, 100));
+        assert_eq!(r, ramp);
+        let mut a = Envs::default();
+        for i in 0..3 {
+            a.move_point(ALL, 100, i, [0.0, 50.0, 99.0][i], 0.25);
+        }
+        scratch(&mut r, 10, 50, &a.points(ALL, 100));
+        assert!(r.ch[0][10..=50].iter().all(|&x| x == 10.0) && r.ch[0][51] == 51.0);
+        // The top plays at x3, the bottom backwards.
+        let mut f = ramp.clone();
+        let mut up = Envs::default();
+        for i in 0..3 {
+            up.move_point(ALL, 100, i, [0.0, 50.0, 99.0][i], 1.0);
+        }
+        scratch(&mut f, 0, 9, &up.points(ALL, 100));
+        assert_eq!(&f.ch[0][..4], &[0.0, 3.0, 6.0, 9.0]);
+        let mut back = ramp.clone();
+        let mut down = Envs::default();
+        for i in 0..3 {
+            down.move_point(ALL, 100, i, [0.0, 50.0, 99.0][i], 0.0);
+        }
+        scratch(&mut back, 20, 30, &down.points(ALL, 100));
+        assert_eq!(&back.ch[0][20..24], &[20.0, 19.0, 18.0, 17.0]);
     }
 
     #[test]
