@@ -1998,12 +1998,16 @@ pub struct PlaylistTrack {
     pub locked: bool,
     /// Performance settings (bytes 22..46; spec: ui/performance-mode.md §4).
     pub perf: PerfSettings,
+    /// The source this track is locked to: Draw and Paint place it here whatever the picker's current source is
+    /// (TOOLS ▸ Lock all tracks to their clips). Lemon Studio's design, for the session only: no file stores it
+    /// (spec: ui/playlist.md "Locking tracks to their clips").
+    pub clip_lock: Option<ClipSource>,
 }
 
 impl PlaylistTrack {
     /// Track `number` as a new project has it: unnamed, default colour, on, not grouped.
     pub fn new(number: u32) -> Self {
-        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false, perf: PerfSettings::default() }
+        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false, perf: PerfSettings::default(), clip_lock: None }
     }
 }
 
