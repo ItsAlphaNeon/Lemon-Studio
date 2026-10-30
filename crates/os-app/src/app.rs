@@ -1225,7 +1225,9 @@ pub struct App {
     damage: Damage,
     /// Typing keyboard (spec: ui/typing-keyboard.md): keys held now as (physical key, rack row,
     /// note key), the octave shift, and whether the transport has the project for live notes.
-    typing_held: Vec<(KeyCode, usize, u16)>,
+    pub(crate) typing_held: Vec<(KeyCode, usize, u16)>,
+    /// Keys held now that launched Performance mode slots (spec: ui/performance-mode.md §3), as (physical key, note).
+    perf_typed: Vec<(KeyCode, u8)>,
     pub typing_octave: i32,
     typing_synced: bool,
     /// The piano-roll key held with the mouse, sounding as a live note until released: (rack row, key).
@@ -1481,6 +1483,7 @@ impl App {
             hover_rect: None,
             damage: Damage::Full,
             typing_held: Vec::new(),
+            perf_typed: Vec::new(),
             typing_octave: 0,
             typing_synced: false,
             mouse_note: None,
@@ -7558,6 +7561,11 @@ impl App {
             return false;
         }
         if !pressed {
+            if let Some(i) = self.perf_typed.iter().position(|h| h.0 == code) {
+                let (_, note) = self.perf_typed.remove(i);
+                self.perform_note(note, TYPING_VELOCITY, false);
+                return true;
+            }
             let Some(i) = self.typing_held.iter().position(|h| h.0 == code) else { return false };
             let (_, row, key) = self.typing_held.remove(i);
             self.transport.note_off(row, key);
@@ -7575,6 +7583,20 @@ impl App {
             self.state.message = Some(format!("Computer keyboard octave {:+}", self.typing_octave));
             self.invalidate();
             return true;
+        }
+        // Performance mode (spec: ui/performance-mode.md §3): its layout's keys launch the zone's slots as the
+        // Performance mode MIDI channel's notes do, and play no note; the other note keys do nothing.
+        if crate::perform::zone(&self.state).is_some() {
+            if let Some(note) = crate::perform::typing_note(code) {
+                if !self.perf_typed.iter().any(|h| h.0 == code) {
+                    self.perf_typed.push((code, note));
+                    self.perform_note(note, TYPING_VELOCITY, true);
+                }
+                return true;
+            }
+            if typing_semitone(code).is_some() {
+                return true;
+            }
         }
         let Some(semi) = typing_semitone(code) else { return false };
         if self.typing_held.iter().any(|h| h.0 == code) {
@@ -7623,6 +7645,9 @@ impl App {
         self.step_chord.clear();
         if let Some((row, key)) = self.mouse_note.take() {
             self.transport.note_off(row, key);
+        }
+        for (_, note) in std::mem::take(&mut self.perf_typed) {
+            self.perform_note(note, TYPING_VELOCITY, false);
         }
         if self.typing_held.is_empty() {
             return;

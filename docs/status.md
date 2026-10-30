@@ -98,7 +98,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   Position sync) are saved as FL saves them. With Record armed, stopping the song writes what the launched tracks
   played after the Start marker as clips on their tracks (one undo step). A slot's later clips are sub-clips: the
   mouse plays them in turn, a MIDI note's velocity picks one (the ▸ menu's Velocity picks sub-clips), and Motion
-  plays each slot's first clip. Not yet: the typing keyboard
+  plays each slot's first clip. In Performance mode the typing keyboard launches slots as those notes do (the
+  original's layout: 1–5, Q–T, A–G and Z–B are tracks 1–4, 6–0, Y–P, H–; and N–/ tracks 5–8, five columns; it
+  follows the grid's scroll, and a key's release is the note's); its other note keys do nothing
 
 ## ✅ Mixing and routing
 
