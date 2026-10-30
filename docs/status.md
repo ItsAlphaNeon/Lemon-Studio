@@ -303,7 +303,10 @@ from taking typed keys, which then play and steer Lemon Studio instead (Windows 
 Lock all tracks to their clips locks each playlist track whose clips share one source to it, so Draw and Paint place
 that source there whatever the current one is (a lock shows in the track header); Unlock all tracks from their
 clips clears the locks. Both are one undo step, and the locks are saved in `.lemon` projects.
-Not yet (greyed in the menu bar): TOOLS > Control builder, Set up for MIDI export; VIEW > Script output.
+TOOLS > Set up for MIDI export asks first, then turns every sampler and instrument channel into a Lemon MIDI Out
+channel (MIDI channel 1, 2, 3 … in rack order, port 0, patch 1, on the master track, each with a cut group of its
+own; names, places and notes kept), as one undo step that brings the channels and their instruments back.
+Not yet (greyed in the menu bar): TOOLS > Control builder; VIEW > Script output.
 
 **Window positions.** Where the windows were when Lemon Studio closed comes back at the next start: the main
 window (its place and size, and whether it was maximized; brought back onto a screen if its screen is gone) and the
@@ -548,6 +551,12 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - The modifier held while choosing the file picks whether the form shows (General ▸ Input ▸ Manage shortcuts, MIDI
   import window)
 - FILE ▸ Export MIDI... (Shift+Ctrl+M): the current pattern, or the song's pattern clips, with a track per channel
+- Lemon MIDI Out (ADD ▸ MIDI Out, and a project's MIDI Out channels): a channel's notes go to the MIDI output devices
+  whose Port (Settings ▸ MIDI) is the channel's port, on its MIDI channel, while Enable MIDI output is on; starting
+  playback sends its pan, volume, pitch-bend range, bank and program, as its On reset settings say. Its window sets
+  the channel, port, patch (with the General MIDI names), bank and its two checks; the file's MIDI Out state is kept
+  byte for byte. Not yet: its knob pages and controllers, Map note color to MIDI channel, fine pitch as pitch bend,
+  and recording what it sends into an exported MIDI file
 - The piano roll's Tools menu: Import MIDI file... into its channel (replacing or blending), Export as MIDI file...
 - Not yet: FL's FLEX mapping of the mod wheel and sustain pedal
 
