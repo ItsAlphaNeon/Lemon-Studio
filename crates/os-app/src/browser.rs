@@ -407,6 +407,7 @@ impl App {
     /// Release: drop the dragged item on whatever is under the mouse (spec §3).
     pub(crate) fn browser_drop(&mut self, item: Item, started: bool) {
         self.state.browser_drag = None;
+        self.state.drag_on = None;
         self.invalidate();
         if !started {
             return;
