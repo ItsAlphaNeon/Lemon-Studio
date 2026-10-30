@@ -19,6 +19,7 @@ mod audio_bench;
 #[cfg(test)]
 mod open_bench;
 mod browser;
+mod browser_index;
 mod cable;
 mod capture;
 mod one_click;

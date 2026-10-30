@@ -99,6 +99,14 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - A background scan at startup; each file is tried in a separate scanner process, so a broken plugin
   cannot take Lemon Studio down
 - Favourites and hidden plugins
+- The browser's Favorites: right-click a file or a plugin ▸ Favorite; favorite rows show a star, and the Favorites
+  tab lists favorite plugins, then files. A plugin's favorite is its plugin-manager star, also toggled by "Add to
+  plugin database (flag as favorite)" in plugin windows and mixer slots
+- The browser's Plugin database: plugins by category, and by format under Installed; ADD ▸ Browse all installed
+  plugins / Browse presets and the mixer's Plugin database entry open it
+- Browser find (Ctrl+F): search finds files anywhere below the dropped folders and the data folder through a
+  background index; Expand folders, the indexing options and Configure extra folders work, the options are kept
+  between runs, and a × clears the search
 - One menu entry per plugin installed in several formats (VST3, CLAP, VST2: your preferred format wins)
 - Presets in the plugin window's title bar: your own presets, then factory presets (compiled in for Lemon Studio's
   own plugins), stepped with the arrows or the wheel; Save preset as..., Rename, Delete and Browse presets

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Browser behaviour: tabs, tree open/close, selection, scrolling and drag and drop into the project, and the menu
-//! bar's ways in.
+//! Browser behaviour: tabs, tree open/close, selection, scrolling and drag and drop into the project, favorites, the
+//! folder index, and the menu bar's ways in.
 // spec: ui/browser.md, ui/browser-commands.md
 
 use os_model::{ChannelKind, ClipSource};
@@ -44,6 +44,12 @@ impl App {
                 s.playlist.popup = if open { None } else { Some(Popup { x, y, items: options_menu(s), sub: None, scroll: [0; 2] }) };
             }
             Action::BrowserSearch => s.browser_search_focus = true,
+            // The cross that stands in for the magnifier while there is text (spec §5).
+            Action::BrowserClear => {
+                s.browser_search.clear();
+                s.browser_search_focus = false;
+                s.browser_scroll = 0.0;
+            }
             Action::BrowserRow(i) => {
                 let Some(row) = view::rows(s).into_iter().nth(i) else { return true };
                 select(s, &row.key);
@@ -95,6 +101,7 @@ impl App {
                 if !s.browser_opts.remove(k) {
                     s.browser_opts.insert(k);
                 }
+                save_opts(&s.browser_opts);
                 s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
             }
             BCmd::History(dir) => {
@@ -116,8 +123,80 @@ impl App {
             // A background scan (spec: ui/plugin-manager.md §4); plugins in use stay where they are.
             BCmd::Rescan => self.start_scan(crate::plugin_db::Mode::Changed),
             BCmd::Row(c) => return self.browser_row_cmd(c),
+            BCmd::Jump(j) => self.browser_jump(j),
+            // File ▸ Browser extra search folders (spec §4).
+            BCmd::Configure => self.open_settings(crate::views::settings::FILE),
+            BCmd::Star(key) => {
+                let Some(d) = self.plugins.descriptor(key) else { return Some("No plugin here".into()) };
+                return Some(self.star_plugin(&d.uid(), &d.name));
+            }
         }
         None
+    }
+
+    /// The plugin manager's star on plugin `uid` (spec §10: a favorite plugin; ui/plugin-manager.md §2), toggled.
+    fn star_plugin(&mut self, uid: &str, name: &str) -> String {
+        self.state.plugdb.prefs.toggle_favorite(uid);
+        self.prefs_changed();
+        if self.state.plugdb.prefs.is_favorite(uid) {
+            format!("{name} is a favorite: listed first in the plugin menus and in the browser's Favorites")
+        } else {
+            format!("{name} is no longer a favorite")
+        }
+    }
+
+    /// The row's Favorite (spec §10): a plugin's star, or the file in or out of the favorites.
+    fn toggle_favorite(&mut self, row: &view::Row) -> Option<String> {
+        let s = &mut self.state;
+        let path = match &row.item {
+            Item::Generator(i) | Item::Effect(i) => {
+                let list = if matches!(row.item, Item::Generator(_)) { &s.plugdb.lists.gens } else { &s.plugdb.lists.fx };
+                let e = list.iter().find(|e| e.index == *i)?;
+                let (uid, name) = (e.uid.clone(), e.label.clone());
+                return Some(self.star_plugin(&uid, &name));
+            }
+            Item::Sample(p) | Item::Preset(p) | Item::File(p) => p.clone(),
+            _ => return None,
+        };
+        let on = if let Some(i) = s.browser_favs.iter().position(|f| f.path == path) {
+            s.browser_favs.remove(i);
+            false
+        } else {
+            s.browser_favs.push(Fav { path, label: row.label.clone() });
+            true
+        };
+        save_favs(&s.browser_favs);
+        s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
+        Some(if on { format!("{} added to the favorites", row.label) } else { format!("{} removed from the favorites", row.label) })
+    }
+
+    /// Keeps the folder index up to date (spec §11): read again when the indexed folders change, at once with "Re-index
+    /// changed folders on startup", else when a search needs it; a search repaints when its index arrives.
+    pub(crate) fn browser_index_tick(&mut self) {
+        let s = &mut self.state;
+        if s.browser_index.poll() {
+            if s.browser_index.cut() {
+                s.message = Some(format!("Browser index: the folders hold more than {} entries; a search finds the first ones", crate::browser_index::MAX_ENTRIES));
+            }
+            if !s.browser_search.is_empty() {
+                s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
+                self.invalidate();
+            }
+            return;
+        }
+        if !view::opt(s, view::OPT_INDEX) || s.browser_index.building() {
+            return;
+        }
+        let roots = index_roots(s);
+        if roots.is_empty() || s.browser_index.covers(&roots) {
+            return;
+        }
+        if view::opt(s, view::OPT_REINDEX) || !s.browser_search.is_empty() {
+            s.browser_index.start(roots);
+            if cfg!(test) {
+                self.invalidate();
+            }
+        }
     }
 
     /// A way into the browser from the menu bar or its keys (spec: ui/browser-commands.md): the browser is shown first
@@ -153,6 +232,26 @@ impl App {
             // §3: exactly as a click in the search field.
             Jump::Find => {
                 self.browser_act(&Action::BrowserSearch);
+            }
+            // ADD ▸ Browse all installed plugins, the mixer's Plugin database entry, ADD ▸ Browse presets (§2, §5): that
+            // node of its tab opened and selected.
+            Jump::Installed | Jump::DbEffects | Jump::Presets => {
+                let (tab, key) = match j {
+                    Jump::Installed => (view::PLUGIN_TAB, format!("{}:Plugin library/{}", view::PLUGIN_TAB, view::INSTALLED)),
+                    Jump::DbEffects => (view::PLUGIN_TAB, format!("{}:Plugin library/Effects", view::PLUGIN_TAB)),
+                    _ => (0, view::presets_key()),
+                };
+                if s.browser_tab != tab {
+                    s.browser_tab = tab;
+                    s.browser_scroll = 0.0;
+                }
+                s.browser_search.clear();
+                if tab == view::PLUGIN_TAB {
+                    s.browser_open.insert(format!("{tab}:Plugin library"));
+                }
+                s.browser_open.insert(key.clone());
+                select(s, &key);
+                reveal(s);
             }
             // §4-5: Patterns opened, the current pattern's row selected when listed (else the section's).
             Jump::Patterns => {
@@ -496,6 +595,7 @@ impl App {
                 self.search_folder_cell(i, crate::search_folders::Col::Name);
             }
             RowCmd::Remove => return Some(remove_root(s, &row.path?)),
+            RowCmd::Favorite => return self.toggle_favorite(&row),
         }
         None
     }
@@ -534,9 +634,49 @@ fn width_file() -> Option<std::path::PathBuf> {
     os_paths::user_file("browser.txt")
 }
 
+/// The value of `key=` in `browser.txt`'s text.
+fn value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().filter_map(|l| l.split_once('=')).find(|(k, _)| k.trim() == key).map(|(_, v)| v.trim())
+}
+
 fn parse_width(text: &str) -> f32 {
-    let w = text.lines().filter_map(|l| l.split_once('=')).find(|(k, _)| k.trim() == "width").and_then(|(_, v)| v.trim().parse::<f32>().ok());
+    let w = value(text, "width").and_then(|v| v.parse::<f32>().ok());
     w.filter(|w| w.is_finite()).map_or(crate::views::BROWSER_W, |w| w.max(crate::views::BROWSER_W))
+}
+
+/// `options=` the options-menu toggles that are on, by name, comma-separated (spec §4); missing = the defaults.
+fn parse_opts(text: &str) -> std::collections::HashSet<&'static str> {
+    match value(text, "options") {
+        Some(v) => v.split(',').filter_map(|o| view::ALL_OPTS.iter().copied().find(|k| *k == o.trim())).collect(),
+        None => view::DEFAULT_OPTS.iter().copied().collect(),
+    }
+}
+
+/// The options kept from the last run (tests: the defaults).
+pub(crate) fn load_opts() -> std::collections::HashSet<&'static str> {
+    parse_opts(&width_file().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default())
+}
+
+/// `browser.txt` with `key=` set to `v`, its other lines kept.
+fn with_value(text: &str, key: &str, v: &str) -> String {
+    let mut out: String = text.lines().filter(|l| l.split_once('=').is_none_or(|(k, _)| k.trim() != key)).map(|l| format!("{l}\n")).collect();
+    out.push_str(&format!("{key}={v}\n"));
+    out
+}
+
+fn save_value(key: &str, v: &str) {
+    let Some(p) = width_file() else { return };
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let old = std::fs::read_to_string(&p).unwrap_or_default();
+    let _ = std::fs::write(p, with_value(&old, key, v));
+}
+
+/// Keeps the options for the next run.
+fn save_opts(opts: &std::collections::HashSet<&'static str>) {
+    let on: Vec<&str> = view::ALL_OPTS.iter().copied().filter(|k| opts.contains(k)).collect();
+    save_value("options", &on.join(","));
 }
 
 /// The browser's width kept from the last run (spec §9; tests: the default).
@@ -546,11 +686,57 @@ pub(crate) fn load_width() -> f32 {
 
 /// Keeps the browser's width for the next run.
 pub(crate) fn save_width(w: f32) {
-    let Some(p) = width_file() else { return };
+    save_value("width", &w.to_string());
+}
+
+/// A favorite file (spec §10): its path (or a factory preset's) and the label its row had when it was starred.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fav {
+    pub path: String,
+    pub label: String,
+}
+
+/// `browser_favorites.txt` in the user folder: one favorite per line, its path, a tab, its label.
+fn favs_file() -> Option<std::path::PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    os_paths::user_file("browser_favorites.txt")
+}
+
+fn parse_favs(text: &str) -> Vec<Fav> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let (path, label) = l.split_once('\t').unwrap_or((l, ""));
+            let label = if label.is_empty() { path.rsplit(['/', '\\']).next().unwrap_or(path) } else { label };
+            Fav { path: path.to_string(), label: label.to_string() }
+        })
+        .collect()
+}
+
+fn favs_text(favs: &[Fav]) -> String {
+    favs.iter().map(|f| format!("{}\t{}\n", f.path, f.label)).collect()
+}
+
+/// The favorite files kept from the last run.
+pub(crate) fn load_favs() -> Vec<Fav> {
+    favs_file().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| parse_favs(&t)).unwrap_or_default()
+}
+
+fn save_favs(favs: &[Fav]) {
+    let Some(p) = favs_file() else { return };
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    let _ = std::fs::write(p, format!("width={w}\n"));
+    let _ = std::fs::write(p, favs_text(favs));
+}
+
+/// The folders the index reads (spec §11): the dropped folders and the project's data folder.
+pub(crate) fn index_roots(s: &crate::app::State) -> Vec<std::path::PathBuf> {
+    let mut v = s.browser_folders.clone();
+    v.extend(crate::data_folder::folder(s));
+    v
 }
 
 /// `browser_folders.txt` in the user folder (`os_paths::user_dir`): one dropped folder per line (spec §6), its Browser
@@ -596,6 +782,12 @@ pub enum Jump {
     Find,
     /// PATTERNS > Open in project browser (Shift+Ctrl+P): the Patterns section, the other sections left as they are (§4).
     Patterns,
+    /// ADD > Browse all installed plugins: the Plugin database's Installed section (§2).
+    Installed,
+    /// The mixer's Plugin database entry (Shift+F8 in its effect list): the Plugin database's Effects.
+    DbEffects,
+    /// ADD > Browse presets: the All tab's Plugin presets.
+    Presets,
 }
 
 impl Jump {
@@ -624,6 +816,12 @@ pub enum BCmd {
     Rescan,
     /// A row menu command (spec §8), on the selected row (the right click selected it).
     Row(RowCmd),
+    /// A way into the browser from another menu (the mixer's Plugin database entry).
+    Jump(Jump),
+    /// Configure extra folders: File ▸ Browser extra search folders.
+    Configure,
+    /// "Add to plugin database (flag as favorite)" of the plugin at this hosted key: its star toggled (spec §10).
+    Star(usize),
 }
 
 /// What a row menu entry does (spec §8).
@@ -647,6 +845,8 @@ pub enum RowCmd {
     /// A dropped folder root: its Browser name typed in File ▸ Browser extra search folders; out of the browser.
     Rename,
     Remove,
+    /// The row's Favorite check: a plugin's star, a file in or out of the favorites (spec §10).
+    Favorite,
 }
 
 /// The row menu's way to the system's file manager: a folder, a file.
@@ -724,6 +924,11 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
             items.extend([r("Rename...", RowCmd::Rename), r("Remove from browser", RowCmd::Remove)]);
         }
     }
+    // Files and plugins can be favorites (§10; folders cannot).
+    if matches!(row.item, Item::Sample(_) | Item::Preset(_) | Item::File(_) | Item::Generator(_) | Item::Effect(_)) {
+        sep(&mut items);
+        items.push(r("Favorite", RowCmd::Favorite).mark(Mark::Check(view::is_favorite(s, row))));
+    }
     sep(&mut items);
     items.extend([
         PItem::new("Collapse structure", Cmd::Browser(BCmd::Collapse)).key("Ctrl+Up"),
@@ -749,13 +954,13 @@ pub fn options_menu(s: &crate::app::State) -> Vec<PItem> {
         find("Find next", "F3", 1),
         PItem::sep(),
         t("Show parent folders in search results", view::OPT_PARENTS),
-        dead("Expand folders", view::OPT_EXPAND),
+        t("Expand folders", view::OPT_EXPAND),
         t("Search for folders", view::OPT_FOLDERS),
         t("Search box on top", view::OPT_TOP),
         t("Type to filter", view::OPT_TYPE),
         dead("Load plugin tags", view::OPT_TAGS),
-        dead("Enable indexing", view::OPT_INDEX),
-        dead("Re-index changed folders on startup", view::OPT_REINDEX),
+        t("Enable indexing", view::OPT_INDEX),
+        t("Re-index changed folders on startup", view::OPT_REINDEX),
         PItem::head("Navigation history"),
         b("Previous", BCmd::History(-1)),
         b("Next", BCmd::History(1)),
@@ -772,14 +977,16 @@ pub fn options_menu(s: &crate::app::State) -> Vec<PItem> {
         b("Collapse structure", BCmd::Collapse).key("Ctrl+Up"),
         b("Reread structure", BCmd::Reread).key("Ctrl+R"),
         PItem::head("Content"),
-        PItem::not_yet("Configure extra folders"),
+        b("Configure extra folders", BCmd::Configure),
         b("Rescan plugins (fast)", BCmd::Rescan),
     ]
 }
 
-/// Reread structure (spec §4): folders are read from disk again; open nodes and the selection stay.
+/// Reread structure (spec §4): folders are read from disk again, the index too (§11); open nodes and the selection
+/// stay.
 fn reread(s: &mut crate::app::State) {
     s.browser_dirs.borrow_mut().clear();
+    s.browser_index.clear();
     s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
 }
 
@@ -883,6 +1090,208 @@ fn send_sample(s: &mut crate::app::State, path: &str, label: &str) -> Option<Str
 mod tests {
     use super::*;
 
+    use crate::app::{Action, App};
+    use os_ui::Canvas;
+
+    /// A temporary folder holding `files` (paths relative to it; audio files get a short WAV, others nothing).
+    fn folder(name: &str, files: &[&str]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("os_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for f in files {
+            let p = dir.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            if f.ends_with(".wav") {
+                os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&p).unwrap(), 44100, &[0.0; 8]).unwrap();
+            } else {
+                std::fs::write(&p, b"").unwrap();
+            }
+        }
+        dir
+    }
+
+    /// Right-clicks the first row `find` accepts, as the mouse does; the menu it opens.
+    fn right(app: &mut App, c: &mut Canvas, find: impl Fn(&view::Row) -> bool) -> Vec<PItem> {
+        app.paint(c, None);
+        let i = view::rows(&app.state).iter().position(find).expect("the row");
+        let r = app.hits.iter().rev().find(|h| h.action == Action::BrowserRow(i)).expect("row on screen").rect;
+        app.mouse_move(r.cx(), r.cy());
+        app.mouse_down_right();
+        app.state.playlist.popup.take().expect("a menu").items
+    }
+
+    fn labels(app: &App) -> Vec<String> {
+        view::rows(&app.state).into_iter().map(|r| r.label).collect()
+    }
+
+    /// Favorites (spec: ui/browser.md §10): a file's and a plugin's row menu tick Favorite; the Favorites tab lists the
+    /// favorite plugins, then the files, and drops a row whose Favorite is unticked; folders cannot be favorites; the
+    /// plugin windows' and mixer slots' "Add to plugin database (flag as favorite)" star the plugin.
+    #[test]
+    fn favorites() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = folder("browser_favs", &["Kick 01.wav", "readme.txt"]);
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.plugins);
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_open.insert(view::disk_key(&dir));
+        let fav = |items: &[PItem]| items.iter().find(|i| i.label == "Favorite").map(|i| i.mark);
+        assert_eq!(fav(&right(&mut app, &mut c, |r| r.label == "Kick 01")), Some(Mark::Check(false)));
+        app.browser_cmd(BCmd::Row(RowCmd::Favorite));
+        let kick = dir.join("Kick 01.wav").to_string_lossy().into_owned();
+        assert_eq!(app.state.browser_favs, [Fav { path: kick.clone(), label: "Kick 01".into() }]);
+        assert_eq!(fav(&right(&mut app, &mut c, |r| r.label == "Kick 01")), Some(Mark::Check(true)));
+        assert_eq!(fav(&right(&mut app, &mut c, |r| r.key == view::disk_key(&dir))), None, "a folder is no favorite");
+        // Lemon Sampler in the Plugin database: its star.
+        app.state.browser_tab = view::PLUGIN_TAB;
+        app.state.browser_open.extend(["2:Plugin library/Generators".into(), "2:Plugin library/Generators/Sampler".into()]);
+        assert_eq!(fav(&right(&mut app, &mut c, |r| r.item == Item::Generator(0))), Some(Mark::Check(false)));
+        app.browser_cmd(BCmd::Row(RowCmd::Favorite));
+        let uid = app.plugins.available[0].desc.uid();
+        assert!(app.state.plugdb.prefs.is_favorite(&uid) && app.state.plugdb.lists.gens.iter().any(|e| e.index == 0 && e.favorite));
+        // The Favorites tab: the plugin, then the file, each starred; the file row shows its info.
+        app.act(Action::BrowserTab(view::FAV_TAB));
+        assert_eq!(labels(&app), [crate::plugins::LEMON_SAMPLER, "Kick 01"]);
+        let rows = view::rows(&app.state);
+        assert!(rows.iter().all(|r| view::is_favorite(&app.state, r)));
+        assert_eq!(rows[1].item, Item::Sample(kick.clone()));
+        assert_eq!(rows[1].path.as_deref(), Some(dir.join("Kick 01.wav").as_path()));
+        // A favorite dragged from the tab is the sample it stands for (as in any tab).
+        app.paint(&mut c, None);
+        assert!(app.hits.iter().any(|h| h.action == Action::BrowserRow(1)));
+        // Unticked in the tab, the row goes.
+        right(&mut app, &mut c, |r| r.label == "Kick 01");
+        app.browser_cmd(BCmd::Row(RowCmd::Favorite));
+        assert_eq!(labels(&app), [crate::plugins::LEMON_SAMPLER]);
+        assert!(app.state.browser_favs.is_empty());
+        // "Add to plugin database (flag as favorite)" of a hosted plugin toggles the same star.
+        app.state.project = crate::app::test_project();
+        let row = 0;
+        app.plugins.create(row, 0).expect("Lemon Sampler hosted");
+        assert!(app.browser_cmd(BCmd::Star(row)).is_some_and(|m| m.contains("no longer")));
+        assert!(!app.state.plugdb.prefs.is_favorite(&uid));
+        assert_eq!(labels(&app), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Search with the folder index (spec §5, §11): files in folders nobody opened are found, flat or under their
+    /// folders; Expand folders lists a found folder's contents; without indexing only opened folders are searched;
+    /// Reread structure reads the index again; the cross clears the search.
+    #[test]
+    fn search_finds_files_in_closed_folders() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = folder("browser_find", &["A/Bzz/Qzx Kick.wav", "A/Bzz/notes.txt", "Other/Snare.wav"]);
+        let mut app = App::new(None);
+        app.state.browser_folders.push(dir.clone());
+        app.state.browser_search = "qzx".into();
+        assert!(view::rows(&app.state).is_empty(), "no index yet");
+        app.browser_index_tick();
+        assert_eq!(labels(&app), ["Qzx Kick"]);
+        let root = view::root_label(&app.state, &dir);
+        app.browser_cmd(BCmd::Toggle(view::OPT_PARENTS));
+        assert_eq!(labels(&app), [root.as_str(), "A", "Bzz", "Qzx Kick"]);
+        let depths: Vec<u8> = view::rows(&app.state).iter().map(|r| r.depth).collect();
+        assert_eq!(depths, [0, 1, 2, 3]);
+        app.browser_cmd(BCmd::Toggle(view::OPT_PARENTS));
+        // Find next selects the match; a click on it is a sample row (preview, drag).
+        assert_eq!(app.browser_cmd(BCmd::Find(1)), None);
+        assert_eq!(app.state.browser_sel.as_ref(), Some(&view::rows(&app.state)[0].key));
+        // Expand folders: the found folder with what it holds.
+        app.state.browser_search = "bzz".into();
+        assert_eq!(labels(&app), ["Bzz"]);
+        app.browser_cmd(BCmd::Toggle(view::OPT_EXPAND));
+        assert_eq!(labels(&app), ["Bzz", "notes.txt", "Qzx Kick"]);
+        assert_eq!(view::rows(&app.state)[1].depth, 1);
+        app.browser_cmd(BCmd::Toggle(view::OPT_EXPAND));
+        // Indexing off: closed folders are not searched.
+        app.state.browser_search = "qzx".into();
+        app.browser_cmd(BCmd::Toggle(view::OPT_INDEX));
+        assert!(view::rows(&app.state).is_empty());
+        app.browser_cmd(BCmd::Toggle(view::OPT_INDEX));
+        // Reread structure forgets the index; the tick reads the folders again (a file added meanwhile is found).
+        std::fs::write(dir.join("Other").join("Qzx Snare.wav"), b"").unwrap();
+        app.browser_cmd(BCmd::Reread);
+        assert!(view::rows(&app.state).is_empty());
+        app.browser_index_tick();
+        assert_eq!(labels(&app), ["Qzx Kick", "Qzx Snare"]);
+        // The cross right of the field clears the search.
+        app.paint(&mut c, None);
+        assert!(!app.hits.iter().any(|h| h.action == Action::BrowserSearch && h.rect.w < 30.0), "the magnifier gave way");
+        app.act(Action::BrowserClear);
+        assert!(app.state.browser_search.is_empty());
+        app.paint(&mut c, None);
+        assert!(!app.hits.iter().any(|h| h.action == Action::BrowserClear));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The browser's new pages to look at: `OS_SHOT_DIR=dir cargo test -p os-app browser_shots` writes the window with
+    /// the Plugin database opened, the Favorites tab and an indexed search.
+    #[test]
+    fn browser_shots() {
+        let Some(out) = std::env::var_os("OS_SHOT_DIR").map(std::path::PathBuf::from) else { return };
+        let Ok(mut c) = Canvas::new(1280, 900, 1.0) else { return };
+        let dir = folder("browser_shots", &["Drums/Kicks/Big Kick.wav", "Drums/Kicks/Kick Tail.wav", "Drums/Snares/Kick Snare Combo.wav", "readme.txt"]);
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.plugins);
+        app.state.browser_folders.push(dir.clone());
+        let mut shot = |app: &mut App, name: &str| {
+            app.paint(&mut c, None);
+            c.pixmap.save_png(out.join(format!("browser_{name}.png"))).unwrap();
+        };
+        app.state.browser_tab = view::PLUGIN_TAB;
+        let root = "2:Plugin library";
+        app.state.browser_open.extend([format!("{root}/Effects"), format!("{root}/Effects/Dynamics"), format!("{root}/{}", view::INSTALLED), format!("{root}/{}/Generators", view::INSTALLED), format!("{root}/{}/Generators/{}", view::INSTALLED, view::BUILT_IN)]);
+        let star = view::rows(&app.state).iter().position(|r| r.depth == 3).unwrap();
+        app.state.browser_sel = Some(view::rows(&app.state)[star].key.clone());
+        app.browser_cmd(BCmd::Row(RowCmd::Favorite));
+        shot(&mut app, "plugin_database");
+        app.state.browser_favs.push(Fav { path: dir.join("Drums/Kicks/Big Kick.wav").to_string_lossy().into_owned(), label: "Big Kick".into() });
+        app.act(Action::BrowserTab(view::FAV_TAB));
+        shot(&mut app, "favorites");
+        app.act(Action::BrowserTab(0));
+        app.state.browser_search = "kick".into();
+        app.browser_cmd(BCmd::Toggle(view::OPT_PARENTS));
+        app.browser_index_tick();
+        shot(&mut app, "search");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Plugin database (spec §2): Generators and Effects by category, Installed by format; the mixer effect list's
+    /// Plugin database entry opens its Effects, and Configure extra folders opens File ▸ Browser extra search folders.
+    #[test]
+    fn plugin_database_by_category_and_format() {
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::builtins();
+        app.state.plugdb.rebuild(&app.plugins);
+        app.state.browser_tab = view::PLUGIN_TAB;
+        let root = "2:Plugin library";
+        app.state.browser_open.extend([format!("{root}/Generators"), format!("{root}/{}", view::INSTALLED), format!("{root}/{}/Generators", view::INSTALLED)]);
+        let rows = view::rows(&app.state);
+        let at = |depth: u8| rows.iter().filter(|r| r.depth == depth).map(|r| r.label.as_str()).collect::<Vec<_>>();
+        assert_eq!(at(1), ["Generators", "Effects", view::INSTALLED]);
+        assert!(at(2).starts_with(&["Sampler", "Synth"]), "{:?}", at(2));
+        assert!(at(3).contains(&view::BUILT_IN));
+        app.state.browser_open.insert(format!("{root}/{}/Generators/{}", view::INSTALLED, view::BUILT_IN));
+        let built_in: Vec<String> = view::rows(&app.state).into_iter().filter(|r| r.depth == 4).map(|r| r.label).collect();
+        assert!(built_in.iter().any(|l| l == crate::plugins::LEMON_SAMPLER), "{built_in:?}");
+        // The mixer's empty-slot menu: Plugin database works and opens the Effects section.
+        let menu = crate::mixer::effect_menu(&app.state, 0, 0.0, 0.0);
+        let first = &menu.items[0];
+        assert!(first.label == "Plugin library" && first.enabled);
+        app.state.browser_tab = 0;
+        app.browser_cmd(BCmd::Jump(Jump::DbEffects));
+        let fx = format!("{root}/Effects");
+        assert!(app.state.browser_tab == view::PLUGIN_TAB && app.state.browser_open.contains(&fx) && app.state.browser_sel.as_ref() == Some(&fx));
+        // The options menu: Expand folders and the indexing options work; tags stay greyed out.
+        let opts = options_menu(&app.state);
+        let on = |l: &str| opts.iter().find(|i| i.label == l).unwrap().enabled;
+        assert!(on("Expand folders") && on("Enable indexing") && on("Re-index changed folders on startup") && on("Configure extra folders"));
+        assert!(!on("Load plugin tags"));
+        app.browser_cmd(BCmd::Configure);
+        assert!(app.state.settings.open);
+    }
+
     /// `browser.txt` (spec: ui/browser.md §9): the dragged width, never below the default; anything else is the default.
     #[test]
     fn kept_width() {
@@ -890,5 +1299,25 @@ mod tests {
         assert_eq!(parse_width("width=120"), crate::views::BROWSER_W);
         assert_eq!(parse_width("width=wide\n"), crate::views::BROWSER_W);
         assert_eq!(parse_width(""), crate::views::BROWSER_W);
+        assert_eq!(parse_width("options=top\nwidth=300\n"), 300.0);
+    }
+
+    /// The options are kept in `browser.txt` beside the width (spec §4): missing = the defaults, unknown names dropped.
+    #[test]
+    fn kept_options() {
+        assert_eq!(parse_opts("width=300\n"), view::DEFAULT_OPTS.iter().copied().collect());
+        assert_eq!(parse_opts("options=top, expand,nonsense\n"), [view::OPT_TOP, view::OPT_EXPAND].into_iter().collect());
+        assert!(parse_opts("options=\n").is_empty());
+        let text = with_value("width=300\noptions=top\n", "options", "expand");
+        assert_eq!(text, "width=300\noptions=expand\n");
+        assert_eq!(parse_width(&with_value(&text, "width", "250")), 250.0);
+    }
+
+    /// `browser_favorites.txt` (spec §10): path and label per line; a line without a label shows the file's name.
+    #[test]
+    fn kept_favorites() {
+        let favs = vec![Fav { path: "C:\\Kits\\Kick.wav".into(), label: "Kick".into() }, Fav { path: "/x/y.fxp".into(), label: "y".into() }];
+        assert_eq!(parse_favs(&favs_text(&favs)), favs);
+        assert_eq!(parse_favs("C:\\Kits\\Snare.wav\n\n")[0].label, "Snare.wav");
     }
 }
