@@ -22,6 +22,7 @@ pub mod curve;
 /// channel, a clip compares their contents, as it did before ids). Compare ids by their numbers (`id.0`).
 #[derive(Debug, Clone, Copy, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Id(pub u32);
 
 impl Id {
@@ -44,6 +45,7 @@ impl Eq for Id {}
 /// An RGB color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Rgb {
     pub r: u8,
     pub g: u8,
@@ -58,6 +60,7 @@ impl Rgb {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Project {
     /// Version string of the program that saved the file, e.g. `26.1.7.5653`.
     pub saved_by: String,
@@ -129,8 +132,9 @@ pub struct Project {
 /// One internal controller link (spec: flp/events/automation.md "Controller links"): output `output` of the controller
 /// plugin at `source` drives `target`. The record's 20 bytes are kept as read, so the fields not understood are written
 /// back as they were.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ControllerLink {
     pub bytes: [u8; ControllerLink::LEN],
     /// The link's mapping formula (event 230 right after the link, e.g. "1-Input"); `None` = the value as it is.
@@ -195,8 +199,9 @@ impl ControllerLink {
 /// One of the project's initial values: a control and the value it takes when the song starts (spec:
 /// ui/settings-choices.md "Advanced: Initialize controls automatically"). A 12-byte record of event 216, kept as read,
 /// so a record whose meaning isn't known (a plugin parameter's) is written back as it was.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct InitControl {
     /// Bytes 0..3 of the record: 0 in every record seen.
     pub head: u32,
@@ -278,6 +283,7 @@ impl InitControl {
 /// Event 237: two doubles in days (spec: flp/events/project-info.md).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct WorkTime {
     /// When the project was started: days since 1899-12-30 00:00, local time.
     pub started: f64,
@@ -381,6 +387,7 @@ pub fn rescale_length(t: u32, from: u16, to: u16) -> u32 {
 /// flp/events/playlist.md "Playlist view"). Pixels are FL's at 100 % UI scale.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct PlaylistView {
     pub raw: [u8; 28],
 }
@@ -616,6 +623,7 @@ impl Project {
 /// its own for its backups and the copies of the samples it uses. An event the file lacks reads as its default.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct DataFolder {
     /// Event 167, the Project page's choice: [`DataFolder::NONE`], [`DataFolder::RELATIVE`] or
     /// [`DataFolder::SPECIFIED`].
@@ -636,6 +644,7 @@ impl DataFolder {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ProjectInfo {
     pub title: Option<String>,
     pub author: Option<String>,
@@ -645,9 +654,10 @@ pub struct ProjectInfo {
     pub url: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ChannelKind {
+    #[default]
     Sampler,
     Plugin,
     Layer,
@@ -665,8 +675,9 @@ impl ChannelKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Channel {
     /// The channel's stable identity ([`Id`]).
     pub id: Id,
@@ -718,6 +729,7 @@ impl Channel {
 /// audio/channel-filter.md, audio/sampler.md, audio/declick.md, audio/audio-clips.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ChannelSound {
     /// Filter cutoff (mod X) and resonance (mod Y), 0..=256; filter type 0..=7 (event 219, ints 3..5).
     pub cutoff: i32,
@@ -764,6 +776,7 @@ impl ChannelSound {
 /// audio/precomputed-effects.md "Settings"). Saving writes it back for sampler channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct SampleFx {
     /// Event 70: `FADE_STEREO`, `REVERSE`, `CLIP`, `SWAP`.
     pub flags: u16,
@@ -989,6 +1002,7 @@ impl Default for ChannelSound {
 /// = centre.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ChannelMisc {
     /// Levels adjustment: panning, volume, Mod X, Mod Y (bipolar).
     pub levels: [f32; 4],
@@ -1036,6 +1050,7 @@ pub struct ChannelMisc {
 /// A layer channel's settings besides its children (spec: audio/note-rules.md "Settings", "Layer channels").
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct LayerSettings {
     /// Event 144: [`LayerSettings::RANDOM`], [`LayerSettings::CROSSFADE`], [`LayerSettings::IN_TURN`].
     pub flags: u32,
@@ -1085,6 +1100,7 @@ impl Default for ChannelMisc {
 /// One tracking page of the Misc tab (by volume or by key; spec: audio/channel-misc.md "Settings").
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Tracking {
     /// Middle point: the mid volume (100 for a new channel) or the mid key (60).
     pub mid: u8,
@@ -1103,6 +1119,7 @@ impl Default for Tracking {
 /// The Misc tab's arpeggiator (spec: audio/channel-misc.md "Settings", "Arpeggiator").
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Arpeggio {
     /// 0 off, 1 up, 2 down, 3 up-down (bounce), 4 up-down (sticky), 5 random.
     pub direction: u8,
@@ -1133,6 +1150,7 @@ impl Default for Arpeggio {
 /// The Misc tab's echo delay (spec: audio/channel-misc.md "Settings", "Echo delay").
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Echo {
     /// Feed knob: the stored feed 0..=25600 as 0..=1 (0.5 = 100 %, 0 = no echo).
     pub feed: f32,
@@ -1164,6 +1182,7 @@ impl Default for Echo {
 /// Channel rack settings of one channel (spec: flp/events/channels.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ChannelRack {
     /// Index of the file block this channel was loaded from (`None` = created in Lemon Studio). A clone keeps its
     /// source's origin, so the writer copies the source block (spec: channels.md "Deleting, cloning and moving").
@@ -1183,6 +1202,7 @@ pub struct ChannelRack {
 /// values (100 = none), `sustain` is 0..=128, tensions are -128..=128.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Envelope {
     pub enabled: bool,
     pub delay: i32,
@@ -1244,6 +1264,7 @@ impl Default for Envelope {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Pattern {
     /// The pattern's stable identity ([`Id`]).
     pub id: Id,
@@ -1280,8 +1301,9 @@ impl Pattern {
 /// One point of a pattern's channel control lane (event 223 record). `kind` is
 /// `channel << 16 | parameter`; only [`ControlPoint::VOLUME`], [`ControlPoint::PAN`] and
 /// [`ControlPoint::PITCH`] are edited, other targets are kept as read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ControlPoint {
     pub position: u32,
     pub kind: u32,
@@ -1312,8 +1334,9 @@ impl ControlPoint {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Note {
     pub position: u32,
     /// 0 for a plain step.
@@ -1426,8 +1449,9 @@ impl Note {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct MixerTrack {
     /// The track's stable identity ([`Id`]).
     pub id: Id,
@@ -1595,8 +1619,9 @@ impl MixerTrack {
 }
 
 /// A plugin in a mixer slot: its name and its opaque saved state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct SlotPlugin {
     /// The plugin instance's stable identity ([`Id`]).
     pub id: Id,
@@ -1608,6 +1633,7 @@ pub struct SlotPlugin {
 /// spec: flp/events/plugins.md §4
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct PluginRef {
     /// `clap`, `vst3` or `vst2`.
     pub format: String,
@@ -1624,6 +1650,7 @@ pub struct PluginRef {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Arrangement {
     /// The arrangement's stable identity ([`Id`]).
     pub id: Id,
@@ -1645,6 +1672,12 @@ pub enum ClipSource {
     Channel(u16),
 }
 
+impl Default for ClipSource {
+    fn default() -> Self {
+        ClipSource::Pattern(1)
+    }
+}
+
 /// Length of a stored clip record (spec: flp/events/playlist.md).
 pub const CLIP_RECORD_LEN: usize = 88;
 
@@ -1653,6 +1686,7 @@ pub const CLIP_RECORD_LEN: usize = 88;
 /// source's start for the clip's length.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Clip {
     /// The clip's stable identity ([`Id`]).
     pub id: Id,
@@ -1666,6 +1700,12 @@ pub struct Clip {
     /// The stored record (fields not modeled are written back from here; a new clip gets FL's defaults).
     #[cfg_attr(feature = "serde", serde(with = "crate::serde_big"))]
     pub raw: [u8; CLIP_RECORD_LEN],
+}
+
+impl Default for Clip {
+    fn default() -> Self {
+        Clip::new(0, 0, 0, ClipSource::default())
+    }
 }
 
 impl Clip {
@@ -1850,8 +1890,9 @@ pub fn fade_curve(x: f64, tension: f64) -> f64 {
 }
 
 /// A time marker (spec: flp/events/playlist.md "Time markers").
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct TimeMarker {
     pub position: u32,
     /// High byte of the stored position: the marker's action (the constants below; spec: flp/events/playlist.md
@@ -1959,8 +2000,9 @@ impl TimeMarker {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct PlaylistTrack {
     /// 1-based.
     pub number: u32,
@@ -1986,8 +2028,9 @@ impl PlaylistTrack {
 
 /// The data of an automation clip channel (spec: flp/events/automation.md): its points (event 234) and the
 /// targets it moves (one event 227 each).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Default, Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Automation {
     /// Channel index of the automation clip channel.
     pub channel: u16,
@@ -2006,8 +2049,9 @@ pub struct Automation {
 }
 
 /// One automation point. `mode` shapes the segment that ends at this point.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct AutoPoint {
     pub beat: f64,
     /// Normalized 0..=1.
@@ -2026,9 +2070,10 @@ impl AutoPoint {
 }
 
 /// Segment shapes, by stored value (spec: flp/events/automation.md).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AutoMode {
+    #[default]
     Single,
     Double,
     Hold,
@@ -2416,6 +2461,41 @@ impl Automation {
 }
 
 // spec: audio/audio-clips.md "Fades and clip gain"
+/// Every struct a Lemon project file keeps (undo steps, `serde`) takes its missing fields from its `Default`: a file
+/// saved before a field existed still reads back.
+#[cfg(test)]
+mod serde_default_tests {
+    #[test]
+    fn every_serialized_struct_fills_missing_fields() {
+        let (mut dirs, mut files) = (vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")], Vec::new());
+        while let Some(d) = dirs.pop() {
+            for e in std::fs::read_dir(d).unwrap() {
+                let path = e.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut missing = Vec::new();
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, l) in lines.iter().enumerate() {
+                if !l.contains("derive(serde::Serialize, serde::Deserialize)") {
+                    continue;
+                }
+                let item = lines[i + 1..].iter().position(|x| !x.trim_start().starts_with("#[")).map(|k| i + 1 + k).unwrap();
+                if lines[item].trim_start().starts_with("pub struct") && !lines[i + 1..item].iter().any(|x| x.contains("serde(default)")) {
+                    missing.push(format!("{}: {}", path.display(), lines[item].trim()));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "without #[cfg_attr(feature = \"serde\", serde(default))]: {missing:#?}");
+    }
+}
+
 #[cfg(test)]
 mod bar_tests {
     use super::Project;

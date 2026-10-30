@@ -803,6 +803,30 @@ mod tests {
         s.project.pattern(s.pattern).map_or(0, |p| p.notes.len())
     }
 
+    /// A Lemon project file's step saved before a model field existed (here `truncate_swing`) still reads back: the
+    /// field takes its default.
+    #[test]
+    fn a_step_from_before_a_new_field_reads_back() {
+        fn strip(v: &mut serde_json::Value, key: &str) -> usize {
+            match v {
+                serde_json::Value::Object(m) => m.remove(key).map_or(0, |_| 1) + m.values_mut().map(|x| strip(x, key)).sum::<usize>(),
+                serde_json::Value::Array(a) => a.iter_mut().map(|x| strip(x, key)).sum(),
+                _ => 0,
+            }
+        }
+        let app = App::new(None);
+        let ch = app.state.project.channels.first().cloned().expect("a channel");
+        let mut h = History::default();
+        h.steps.push(Step { name: Cow::Borrowed("Insert channel"), snap: Snap::Channel { row: 0, ch: Some(Box::new(ch)) } });
+        h.done = 1;
+        let mut stored = h.stored().expect("serializes");
+        assert!(strip(&mut stored, "truncate_swing") > 0, "the field was there");
+        let mut back = History::default();
+        back.restore(&stored);
+        assert_eq!(back.done(), 1);
+        assert_eq!(back.name_of(1), Some("Insert channel"));
+    }
+
     /// Two recorded edits: undo and redo swap them back and forth; a new action drops the undone branch; past
     /// Maximum undo levels the oldest step goes (spec: ui/settings-choices.md "Undo history: the four checks").
     #[test]

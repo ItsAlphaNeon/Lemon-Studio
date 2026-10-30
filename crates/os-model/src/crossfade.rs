@@ -20,6 +20,7 @@ pub type Fade = (f32, f32);
 /// its fade-out the later one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Overlaps {
     pub fade_in: Option<(usize, u32)>,
     pub fade_out: Option<(usize, u32)>,

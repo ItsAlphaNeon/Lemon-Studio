@@ -13,6 +13,7 @@ use crate::{AutoMode, AutoPoint};
 /// clip's record"). Values are the stored ones, kept as read.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ClipLfo {
     /// 0 = off, -1 = on.
     pub switch: i32,
