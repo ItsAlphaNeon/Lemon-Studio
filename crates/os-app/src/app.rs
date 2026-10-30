@@ -1311,7 +1311,7 @@ pub struct App {
     pub(crate) piano_grid: Option<Rect>,
     piano_panel: Option<Rect>,
     /// Sampler channel rows whose Lemon Sampler instance could not be created (not retried).
-    sampler_failed: Vec<usize>,
+    pub(crate) sampler_failed: Vec<usize>,
     /// The control plane's socket (`--control`), when it listens.
     pub rpc_server: Option<crate::control::server::Server>,
     /// Mixer slots (`plugins::fx_key`) whose Lemon Parametric EQ could not start (not retried).
@@ -2159,6 +2159,11 @@ impl App {
                     self.open_marker_settings();
                 }
             }
+            Then::MidiExportConfirm => {
+                if reply == Reply::Button(Answer::Ok) {
+                    self.state.message = Some(self.prepare_midi_export());
+                }
+            }
             Then::PerfMarkers(count, spacing) => {
                 if reply == Reply::Button(Answer::Ok) {
                     let m = crate::perform::prepare_with(&mut self.state, crate::perform::MarkerForm { count, spacing });
@@ -2505,6 +2510,7 @@ impl App {
         crate::missing::tick(self);
         crate::zipped::tick(self);
         self.midi_tick();
+        self.sync_midi_outs();
         self.mixer_tick();
         self.follow_ids(false, true);
         self.host_commands();
@@ -8269,6 +8275,12 @@ impl App {
                 s.set_knob(id, if s.knob(id) >= 0.5 { 0.0 } else { 1.0 });
                 self.hint = Cow::Owned(s.knob_text(id));
             }
+            // A MIDI Out check: a click flips it, one undo step.
+            Action::Knob(id @ crate::knobs::KnobId::MidiOut(_, k)) if k.switch() => {
+                crate::history::knob(s, id, false);
+                s.set_knob(id, if s.knob(id) >= 0.5 { 0.0 } else { 1.0 });
+                self.hint = Cow::Owned(s.knob_text(id));
+            }
             Action::Knob(id) => {
                 crate::history::knob(s, id, false);
                 self.drag = Some(Drag::Knob { id, y0: self.mouse.1, v0: s.knob(id) });
@@ -8837,6 +8849,8 @@ impl App {
                     self.state.message = Some(m);
                 }
             }
+            MenuCmd::MidiOut => self.state.message = self.add_midi_out(),
+            MenuCmd::PrepMidiExport => self.ask_midi_export(),
             MenuCmd::PrepPerformance => {
                 if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::PerfPrepare) {
                     self.state.message = Some(m);

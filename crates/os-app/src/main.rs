@@ -70,6 +70,7 @@ mod midi_cfg;
 mod midi_file;
 mod midi_in;
 mod midi_out;
+mod lemon_midi_out;
 mod midi_play;
 mod container;
 mod mixer;
