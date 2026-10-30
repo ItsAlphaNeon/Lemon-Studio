@@ -42,15 +42,20 @@ pub enum Target {
     Replace(usize),
     /// Effects into the selected track: slot `k`, else its first empty slot.
     Fx(Option<u8>),
+    /// Effects added at the end of the container in the selected track's slot `k` (`crate::container`).
+    Container(u8),
 }
 
 fn pick(target: Target, effect: bool, index: usize) -> Cmd {
+    if let Target::Container(slot) = target {
+        return Cmd::Mixer(crate::mixer::MCmd::MemberAdd(slot, index));
+    }
     Cmd::Plugin(match (target, effect) {
         (Target::Fx(slot), _) => PlugCmd::Effect { index, slot },
         (_, true) => PlugCmd::Effect { index, slot: None },
         (Target::Gen(after), false) => PlugCmd::Generator { index, after },
         (Target::Replace(row), false) => PlugCmd::Replace { index, row },
-        (Target::All, false) => PlugCmd::Generator { index, after: None },
+        (Target::All | Target::Container(_), false) => PlugCmd::Generator { index, after: None },
     })
 }
 
@@ -130,7 +135,7 @@ pub fn items(s: &State, target: Target, nested: bool) -> Vec<PItem> {
             v.extend(section(s, true, target, nested));
         }
         Target::Gen(_) | Target::Replace(_) => v.extend(section(s, false, target, nested)),
-        Target::Fx(_) => v.extend(section(s, true, target, nested)),
+        Target::Fx(_) | Target::Container(_) => v.extend(section(s, true, target, nested)),
     }
     v.extend(footer(s));
     v
