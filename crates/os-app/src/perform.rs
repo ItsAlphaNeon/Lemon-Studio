@@ -233,6 +233,11 @@ fn next_in_slot(s: &mut State, cols: &[u32], track: u16, col: usize) -> Option<C
 /// `queue` (Shift) waits for the playing clip to end its pass. Returns the hint, `None` when `i` is not in the zone.
 pub fn trigger(s: &mut State, i: usize, now: Option<u32>, instant: bool, queue: bool) -> Option<String> {
     let (track, col) = slot_of(s, i)?;
+    trigger_slot(s, track, col, now, instant, queue)
+}
+
+/// `trigger` for slot (`track`, `col`); `None` when the slot has no clips.
+fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant: bool, queue: bool) -> Option<String> {
     let z = zone(s)?;
     let set = settings(s, track);
     let cols = columns(s);
@@ -314,7 +319,33 @@ pub fn stop(s: &mut State, track: u16, now: Option<u32>, instant: bool) -> bool 
 /// The mouse button is up after a press on a slot (§4 Press): Hold & stop stops at once, Hold & motion moves on as
 /// Motion says when the pass playing ends.
 pub fn release(s: &mut State, now: Option<u32>) {
-    let Some(track) = s.playlist.perform.held.take() else { return };
+    if let Some(track) = s.playlist.perform.held.take() {
+        release_track(s, track, now);
+    }
+}
+
+/// A note on the Performance mode MIDI channel (§3): notes 0–119 are 10 tracks of 12 slots, the note / 12 the track
+/// and the note % 12 the column. A key's release ends Press Hold & stop and Hold & motion as the mouse button's does.
+pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option<String> {
+    zone(s)?;
+    let (track, col) = (u16::from(key / 12), usize::from(key % 12));
+    if key >= 120 {
+        return None;
+    }
+    if !down {
+        if s.playlist.perform.live.get(&track).is_some_and(|l| l.column == col) {
+            release_track(s, track, now);
+        }
+        return None;
+    }
+    // The mouse's held slot is not this key's.
+    let held = s.playlist.perform.held;
+    let hint = trigger_slot(s, track, col, now, false, false);
+    s.playlist.perform.held = held;
+    hint
+}
+
+fn release_track(s: &mut State, track: u16, now: Option<u32>) {
     let set = settings(s, track);
     match set.press {
         1 => {
@@ -425,6 +456,8 @@ pub fn apply(s: &State, p: &mut Project) {
 mod tests {
     use super::*;
     use crate::app::App;
+    use crate::midi_in::Msg;
+    use crate::prefs;
     use os_model::ClipSource;
 
     #[test]
@@ -456,6 +489,30 @@ mod tests {
         a.markers = vec![TimeMarker::new(0, ""), TimeMarker::new(1536, ""), TimeMarker { kind: TimeMarker::START, ..TimeMarker::new(3072, "Start") }];
         s.project.performance = Some(true);
         app
+    }
+
+    /// §3: the Performance mode MIDI channel's notes trigger slots; their release ends Hold & stop.
+    #[test]
+    fn midi_notes_trigger_slots() {
+        let mut app = app();
+        prefs::set_number(&prefs::PERFORMANCE_CHANNEL, 6);
+        let note = |key, down| if down { Msg::On { ch: 5, key, vel: 100 } } else { Msg::Off { ch: 5, key, vel: 64 } };
+        app.midi_notes(vec![note(1, true), note(1, false)]);
+        let l = &app.state.playlist.perform.live[&0];
+        assert_eq!((l.column, l.armed), (1, true), "note 1: track 1, column 2, armed while stopped");
+        app.midi_notes(vec![note(12, true), note(120, true)]);
+        assert!(!app.state.playlist.perform.live.contains_key(&1), "track 2 has no clips in the zone");
+        arr_mut(&mut app.state).tracks[0].perf.press = 1;
+        app.midi_notes(vec![note(0, true)]);
+        assert_eq!(app.state.playlist.perform.live[&0].column, 0);
+        app.midi_notes(vec![note(1, false)]);
+        assert!(app.state.playlist.perform.live.contains_key(&0), "another key's release");
+        app.midi_notes(vec![note(0, false)]);
+        assert!(!app.state.playlist.perform.live.contains_key(&0), "Hold & stop: the release stops it");
+        app.state.project.performance = Some(false);
+        app.midi_notes(vec![note(0, true)]);
+        assert!(app.state.playlist.perform.live.is_empty(), "off: nothing is triggered");
+        prefs::set_number(&prefs::PERFORMANCE_CHANNEL, 0);
     }
 
     #[test]

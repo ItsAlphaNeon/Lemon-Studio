@@ -106,11 +106,12 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   Clean up (denoise with an acquired noise profile, and the declipper), auto-slicing / grid-slicing, Detect beats
   and the zero-cross check, Send to new Lemon Slicer channel, drum(loop) stretch and noise gating (Acquire noise
   threshold, Gate noise, Trim side noise, Trim all noise & slice up, the threshold mark) work (2026-10-30)
-- [x] **Value boxes.** All of them work, the last two being the autosave Maximum and Metronome track. MIDI settings'
-  Performance mode MIDI channel stays greyed out until Performance mode is built
-- [ ] **Performance mode.** MIDI settings' Performance mode MIDI channel and the typing keyboard, scenes, recording a
-  performance, the progress displays and the clock in the zone. Launching the zone's clips with the mouse, each
-  track's Performance settings, Ctrl+P and Prepare for performance mode work (2026-10-30)
+- [x] **Value boxes.** All of them work, the last two being the autosave Maximum and Metronome track, and MIDI
+  settings' Performance mode MIDI channel (2026-10-30)
+- [ ] **Performance mode.** The typing keyboard, the MIDI channel's scroll, page and scene keys (notes 120–127),
+  scenes, recording a performance, the progress displays and the clock in the zone. Launching the zone's clips with
+  the mouse and with notes 0–119 on the Performance mode MIDI channel, each track's Performance settings, Ctrl+P and
+  Prepare for performance mode work (2026-10-30)
 - [x] **Recording settings page.** Settings ▸ Recording, Lemon Studio's own page (the original keeps these in the
   Record button's menus): the recording filter, the Record options and quantize, Start on input, Loop record, Blend,
   Count-in and its length, Auto-create audio clips and the External input question's answer, shared with the menus

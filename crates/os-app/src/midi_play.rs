@@ -271,6 +271,9 @@ impl App {
             }
             return;
         }
+        if Some(ch) == channel_of(&prefs::PERFORMANCE_CHANNEL) {
+            return self.perform_note(key, true);
+        }
         if Some(ch) == channel_of(&prefs::MUTING_CHANNEL) {
             if let Some(row) = white_index(key).filter(|&r| r < n) {
                 crate::rack::toggle_mute(&mut self.state, row);
@@ -305,7 +308,19 @@ impl App {
         self.step_edit_up_with(h.src, Some(release));
     }
 
+    /// A key of the Performance mode MIDI channel (spec: ui/performance-mode.md §3).
+    fn perform_note(&mut self, key: u8, down: bool) {
+        let now = self.transport.playing().then(|| self.transport.tick().max(0.0) as u32);
+        if let Some(m) = crate::perform::midi_note(&mut self.state, key, down, now) {
+            self.state.message = Some(m);
+        }
+        self.invalidate();
+    }
+
     fn midi_note_off(&mut self, ch: u8, key: u8, vel: u8) {
+        if Some(ch) == channel_of(&prefs::PERFORMANCE_CHANNEL) {
+            return self.perform_note(key, false);
+        }
         if Some(ch) == channel_of(&prefs::MUTING_CHANNEL) {
             while let Some(i) = self.midi_play.muted.iter().position(|m| m.0 == key) {
                 let (_, row) = self.midi_play.muted.remove(i);
