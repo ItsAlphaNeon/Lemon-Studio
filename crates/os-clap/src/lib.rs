@@ -2718,7 +2718,7 @@ mod tests {
         let mut p = Plugin::new(&lib, &d.id).unwrap();
         assert!(p.has_editor());
         // Give it a sample through its state (nih-plug JSON: persisted fields are JSON strings).
-        let wav = std::env::temp_dir().join("os-clap-test.wav");
+        let wav = std::env::temp_dir().join(format!("os-clap-test-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..4800).flat_map(|i| { let v = (i as f32 * 0.05).sin() * 0.5; [v, v] }).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
         let path = serde_string(&wav.to_string_lossy());
@@ -2735,7 +2735,7 @@ mod tests {
         let peak = l.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(peak > 0.05, "plays the sample (peak {peak})");
         let saved = String::from_utf8_lossy(&p.save_state().unwrap()[8..]).into_owned();
-        assert!(saved.contains("os-clap-test.wav"), "{saved}");
+        assert!(saved.contains(&*wav.file_name().unwrap().to_string_lossy()), "{saved}");
     }
 
     /// A CLAP effect in a mixer slot (spec: ui/mixer.md §7): `OS_CLAP_FX=<effect>.clap` names one (skipped when unset).
@@ -2764,7 +2764,7 @@ mod tests {
     fn engine_plays_a_pattern_through_lemon_sampler() {
         let Some(lib) = lemon_sampler() else { return };
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
-        let wav = std::env::temp_dir().join("os-clap-engine.wav");
+        let wav = std::env::temp_dir().join(format!("os-clap-engine-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..9600).flat_map(|i| { let v = (i as f32 * 0.03).sin() * 0.5; [v, v] }).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
         let state = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", serde_string(&wav.to_string_lossy()));
@@ -2845,7 +2845,7 @@ mod tests {
         let Some(lib) = lemon_sampler() else { return };
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         // 30 s of a 441 Hz sine at 44.1 kHz.
-        let wav = std::env::temp_dir().join("os-clap-long.wav");
+        let wav = std::env::temp_dir().join(format!("os-clap-long-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..44100 * 30).flat_map(|i| { let v = (i as f32 / 44100.0 * 441.0 * std::f32::consts::TAU).sin() * 0.5; [v, v] }).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &tone).unwrap();
         let state = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", serde_string(&wav.to_string_lossy()));
@@ -2896,7 +2896,7 @@ mod tests {
         let Some(lib) = lemon_sampler() else { return };
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         // A single-unit impulse then silence: every voice start is one spike.
-        let wav = std::env::temp_dir().join("os-clap-impulse.wav");
+        let wav = std::env::temp_dir().join(format!("os-clap-impulse-{}.wav", std::process::id()));
         let mut frame = vec![0.0f32; 48000 * 2];
         frame[0] = 1.0;
         frame[1] = 1.0;
@@ -2951,7 +2951,7 @@ mod tests {
     fn lemon_sampler_parameters_change_the_sound() {
         let Some(lib) = lemon_sampler() else { return };
         // A 2 s decaying saw-ish tone at 44.1 kHz, stereo with different channels.
-        let wav = std::env::temp_dir().join("os-clap-params.wav");
+        let wav = std::env::temp_dir().join(format!("os-clap-params-{}.wav", std::process::id()));
         let n = 44100 * 2;
         let tone: Vec<f32> = (0..n)
             .flat_map(|i| {
@@ -3040,7 +3040,7 @@ mod tests {
         let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Sampler.clap")) }.expect("linked Lemon Sampler");
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         // 4 s of a 441 Hz sine at 48 kHz.
-        let wav = std::env::temp_dir().join("os-clap-porta.wav");
+        let wav = std::env::temp_dir().join(format!("os-clap-porta-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..48000 * 4).flat_map(|i| { let v = (i as f32 / 48000.0 * 441.0 * std::f32::consts::TAU).sin() * 0.5; [v, v] }).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
         let state = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", serde_string(&wav.to_string_lossy()));
