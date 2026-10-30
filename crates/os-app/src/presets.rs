@@ -489,9 +489,8 @@ pub fn items(app: &App, key: usize, nested: bool) -> Vec<PItem> {
     v
 }
 
-/// Fills the window menu's Presets section (spec: ui/plugin-window.md "Presets"): "Presets" becomes the list
-/// (a submenu), "Browse presets" and "Save preset as..." work.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// Fills the Presets section of the window menu and of the mixer's slot menu (spec: ui/plugin-window.md "Presets"):
+/// "Presets" becomes the list (a submenu), "Browse presets" and "Save preset as..." work.
 pub fn fill_window_menu(app: &App, key: usize, menu: &mut Popup) {
     for it in menu.items.iter_mut() {
         match &*it.label {

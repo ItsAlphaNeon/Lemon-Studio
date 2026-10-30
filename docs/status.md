@@ -114,6 +114,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - One menu entry per plugin installed in several formats (VST3, CLAP, VST2: your preferred format wins)
 - Presets in the plugin window's title bar: your own presets, then factory presets (compiled in for Lemon Studio's
   own plugins), stepped with the arrows or the wheel; Save preset as..., Rename, Delete and Browse presets
+- The mixer's slot menu lists the effect's presets and has Browse presets and Save preset as..., as its window
+  menu does
 - Import of `.ospreset`, `.vstpreset` and VST2 `.fxp` / `.fxb` files (a bank goes into a folder of its own); a preset
   file dropped onto a plugin window, rack row or mixer slot loads there, and anywhere else adds its plugin
 
