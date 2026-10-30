@@ -14,6 +14,7 @@
 //! - [`channel_filter`]: the channel filter a voice runs through.
 //! - [`tone`]: the spectral make-up of a sound's stretches, for colourful waveforms.
 //! - [`transients`]: Lemon's transient detector and beat finder (auto slicing, Detect beats).
+//! - [`pitch`]: Lemon's pitch tracker (YIN), for Tesla's Detect pitch regions.
 //! - [`curve`]: Image-Line's curves (envelopes, LFOs, maps) as Citrus and Pulp Filter walk them.
 //! - [`num`]: the plugin pages' arithmetic (`single( )`, Round, flushes) and a little-endian state reader.
 //!
@@ -27,6 +28,7 @@ pub mod glide;
 pub mod level;
 pub mod mixer;
 pub mod num;
+pub mod pitch;
 pub mod resample;
 pub mod stretch;
 pub mod tone;

@@ -415,7 +415,12 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Tesla's noise gating: Acquire noise threshold (Alt+N, from a noise-only selection, else -40 dBFS), Gate noise (the
   gate button's right click), Trim side noise (its left click) and Trim all noise & slice up (each sound left a
   region); the bottom bar's threshold button shows the threshold over the waveform
-- Not yet: the declicker, the envelope tools with a dialog, detect pitch regions, convert to score
+- Tesla's Clean up (Ctrl+U) has a declicker (with a sensitivity) that redraws clicks and pops, and the declipper has
+  three modes (General, Digital for flat tops only, Soft) and a Safe mode; either one alone is enough to preview
+- Tesla's envelope tools with a dialog, in an envelope mode: Scale levels..., Decimate points..., Filter..., Smooth
+  up... and Create sequence... (steps over the selection), each with a preview
+- Tesla's Regions > Detect pitch regions makes a region per held note, named after it
+- Not yet: Set first downbeat, convert to score
 
 ## ✅ Exporting audio
 

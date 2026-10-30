@@ -773,6 +773,27 @@ impl Doc {
         (k > 0).then_some((bpm, k))
     }
 
+    /// Regions > Detect pitch regions (Lemon Studio's design, `os_dsp::pitch`): the sample's regions give way to one
+    /// per held note, named after it ("A5"; C5 = note 60). The number of regions (0: no note found, nothing done).
+    pub fn detect_pitch_regions(&mut self) -> usize {
+        if self.frames() == 0 {
+            return 0;
+        }
+        let s = self.sample.clone();
+        let (l, r) = Self::pair(&s);
+        let found = os_dsp::pitch::regions(l, r, s.rate);
+        if found.is_empty() {
+            return 0;
+        }
+        let e = self.edit("Detect pitch regions");
+        e.cues.retain(|c| !c.is_region());
+        for &(pos, len, note) in &found {
+            e.add_cue(&os_dsp::pitch::note_name(note), pos, Some(len));
+        }
+        self.view.regions = true;
+        found.len()
+    }
+
     /// Regions > Zero-cross check all regions: each region's start and end move to the nearest zero crossing within
     /// 2 ms (the end as the frame after it); a start at the sample's start and an end at its end stay. Whether anything
     /// moved.

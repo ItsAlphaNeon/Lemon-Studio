@@ -23,7 +23,7 @@ use os_ui::kit::menu::{Mark, MenuItem, MenuStyle};
 use os_ui::{Canvas, Rect};
 
 use crate::doc::{self, Doc, Paste};
-use crate::env;
+use crate::env::{self, EnvDlg, EnvTool};
 use crate::peaks::Peaks;
 use crate::sample::{Format, Sample};
 use crate::state;
@@ -154,6 +154,7 @@ pub enum ToolCmd {
     AutoSlice(u8),
     GridSlice(u8),
     DetectBeats,
+    DetectPitch,
     ZeroCross,
     /// Tools > Noise gating.
     AcquireThreshold,
@@ -183,6 +184,9 @@ pub enum ToolCmd {
     PointsAtRegions,
     FlipEnvelope,
     NormalizeEnvelope,
+    /// The envelope tools with a dialog (Scale levels..., Decimate points..., Filter..., Smooth up..., Create
+    /// sequence...).
+    EnvDialog(EnvTool),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -751,7 +755,7 @@ impl Logic {
         let d = Amp::default();
         let defaults = AmpUi { eq: Some(Equalize::default()), blur: Some(Blur::default()), clean: Some(Clean::default()), ..AmpUi::default() };
         let v = match c {
-            AmpCtl::Mix | AmpCtl::Amount | AmpCtl::Offset | AmpCtl::Threshold | AmpCtl::Reduction | AmpCtl::ClipLevel => {
+            AmpCtl::Mix | AmpCtl::Amount | AmpCtl::Offset | AmpCtl::Threshold | AmpCtl::Reduction | AmpCtl::ClipLevel | AmpCtl::Sensitivity => {
                 Self::spectral_value(&defaults, c).unwrap_or(0.0)
             }
             AmpCtl::Pan => d.pan,
@@ -760,6 +764,11 @@ impl Logic {
             AmpCtl::Volume => d.volume,
             AmpCtl::Right => d.right,
             AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Slope | AmpCtl::Dry | AmpCtl::Decay => 0.0,
+            AmpCtl::EnvA | AmpCtl::EnvB => {
+                let Some(e) = self.view.amp.and_then(|u| u.env) else { return };
+                let d = EnvDlg::new(e.tool);
+                if c == AmpCtl::EnvA { d.a } else { d.b }
+            }
             AmpCtl::Wet => tools::WET_DEFAULT,
             _ => return,
         };
@@ -985,7 +994,7 @@ impl Logic {
 
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
         match self.at(x, y) {
-            Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Slope | AmpCtl::Dry | AmpCtl::Wet | AmpCtl::Decay | AmpCtl::Mix | AmpCtl::Amount | AmpCtl::Offset | AmpCtl::Threshold | AmpCtl::Reduction | AmpCtl::ClipLevel))) => {
+            Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Slope | AmpCtl::Dry | AmpCtl::Wet | AmpCtl::Decay | AmpCtl::Mix | AmpCtl::Amount | AmpCtl::Offset | AmpCtl::Threshold | AmpCtl::Reduction | AmpCtl::ClipLevel | AmpCtl::Sensitivity | AmpCtl::EnvA | AmpCtl::EnvB))) => {
                 let v = self.amp_value(c) + notches * 0.02;
                 self.set_amp_value(c, v.clamp(-1.0, 1.0));
                 self.hint = self.amp_hint(c);
@@ -1094,7 +1103,7 @@ impl Logic {
         let thr = self.view.gate.unwrap_or(tools::GATE_DEFAULT);
         let ok = self.doc(|d| match t {
             ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::DrumStretch | ToolCmd::Reverb | ToolCmd::Equalize | ToolCmd::Blur | ToolCmd::CleanUp | ToolCmd::AcquireNoise => false,
-            ToolCmd::AcquireThreshold | ToolCmd::TrimAllNoise => false,
+            ToolCmd::AcquireThreshold | ToolCmd::TrimAllNoise | ToolCmd::EnvDialog(_) => false,
             ToolCmd::GateNoise => {
                 let gated = d.range().is_some_and(|(a, b)| tools::gate_gain(&d.sample, a, b, thr).iter().any(|&g| g < 1.0));
                 gated && d.tool("Gate noise", |s, a, b| {
@@ -1149,7 +1158,7 @@ impl Logic {
                 true
             }),
             ToolCmd::NormalizeEnvelope => d.env_tool("Normalize envelope levels", |e, k, n| e.normalize(k, n)),
-            ToolCmd::AutoSlice(_) | ToolCmd::GridSlice(_) | ToolCmd::DetectBeats => false,
+            ToolCmd::AutoSlice(_) | ToolCmd::GridSlice(_) | ToolCmd::DetectBeats | ToolCmd::DetectPitch => false,
             ToolCmd::ZeroCross => d.zero_cross_regions(),
         });
         match t {
@@ -1168,6 +1177,17 @@ impl Logic {
                     self.hint = match self.doc(|d| d.detect_beats()) {
                         Some((bpm, n)) => format!("Detect beats: {bpm:.2} BPM, {n} beats"),
                         None => "Detect beats: no beats found (it needs at least two hits)".into(),
+                    };
+                }
+                return vec![Act::Repaint];
+            }
+            ToolCmd::DetectPitch => {
+                if self.doc(|d| d.frames()) > 0 {
+                    let n = self.doc(|d| d.detect_pitch_regions());
+                    self.hint = if n > 0 {
+                        format!("Detect pitch regions: {n} region{}", if n == 1 { "" } else { "s" })
+                    } else {
+                        "Detect pitch regions: no held note found".into()
                     };
                 }
                 return vec![Act::Repaint];
@@ -1202,7 +1222,14 @@ impl Logic {
             }
             _ => {}
         }
-        if t == ToolCmd::AcquireNoise {
+        if let ToolCmd::EnvDialog(tool) = t {
+            if self.doc(|d| d.frames() > 0 && d.env_shown().is_some()) {
+                self.view.amp = Some(AmpUi { env: Some(EnvDlg::new(tool)), ..AmpUi::default() });
+                self.hint = format!("{} of the shown envelope", tool.name());
+            } else {
+                self.hint = "The envelope tools work in an envelope mode (the bottom bar)".into();
+            }
+        } else if t == ToolCmd::AcquireNoise {
             self.acquire_noise();
         } else if matches!(t, ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::DrumStretch | ToolCmd::Reverb | ToolCmd::Equalize | ToolCmd::Blur | ToolCmd::CleanUp) {
             if self.doc(|d| d.frames()) > 0 {
@@ -1367,6 +1394,9 @@ impl Logic {
             AmpCtl::Threshold => u(cl.denoise.threshold),
             AmpCtl::Reduction => u(cl.denoise.amount),
             AmpCtl::ClipLevel => u(cl.level),
+            AmpCtl::Sensitivity => u(cl.sensitivity),
+            AmpCtl::EnvA => ui.env?.a,
+            AmpCtl::EnvB => ui.env?.b,
             _ => return None,
         })
     }
@@ -1422,6 +1452,7 @@ impl Logic {
                     AmpCtl::Threshold => cl.denoise.threshold = h,
                     AmpCtl::Reduction => cl.denoise.amount = h,
                     AmpCtl::ClipLevel => cl.level = h,
+                    AmpCtl::Sensitivity => cl.sensitivity = h,
                     _ => {}
                 }
             }
@@ -1430,6 +1461,13 @@ impl Logic {
                     AmpCtl::Dry => r.dry = v,
                     AmpCtl::Wet => r.wet = v,
                     AmpCtl::Decay => r.decay = v,
+                    _ => {}
+                }
+            }
+            if let Some(e) = &mut ui.env {
+                match c {
+                    AmpCtl::EnvA => e.a = v,
+                    AmpCtl::EnvB => e.b = v,
                     _ => {}
                 }
             }
@@ -1506,6 +1544,16 @@ impl Logic {
             AmpCtl::Reduction => format!("Amount: noise down by {:.0} dB", self.view.amp.and_then(|a| a.clean).unwrap_or_default().denoise.reduction_db()),
             AmpCtl::ClipLevel => format!("Declipper: samples over {:.0}% of the peak count as clipped", self.view.amp.and_then(|a| a.clean).unwrap_or_default().clip_ratio() * 100.0),
             AmpCtl::Curve => self.curve_hint(),
+            AmpCtl::Sensitivity => format!("Declicker sensitivity: {:.0}%", (v + 1.0) * 50.0),
+            AmpCtl::EnvA | AmpCtl::EnvB => {
+                let Some(e) = self.view.amp.and_then(|u| u.env) else { return String::new() };
+                let (ca, cb) = e.tool.captions();
+                let (ta, tb) = e.texts();
+                let (cap, txt) = if c == AmpCtl::EnvA { (ca, ta) } else { (cb.unwrap_or(""), tb) };
+                let mut cap = cap.to_lowercase();
+                cap[..1].make_ascii_uppercase();
+                format!("{cap}: {txt}")
+            }
             AmpCtl::Dry => format!("Dry: x{:.2}", Reverb::gain(v)),
             AmpCtl::Wet => format!("Wet: x{:.2}", Reverb::gain(v)),
             AmpCtl::Decay => {
@@ -1539,6 +1587,10 @@ impl Logic {
         }
         if let Some(ds) = ui.drum {
             return d.drum_stretch(&ds);
+        }
+        if let Some(e) = ui.env {
+            let r = d.range().unwrap_or((0, d.frames().saturating_sub(1)));
+            return d.env_tool(e.tool.name(), |envs, k, n| envs.apply_tool(k, n, &e, r));
         }
         match ui.stretch {
             Some(st) => d.replace_range("Time stretch / pitch shift", |s, a, b| tools::stretch(s, a, b, &st)),
@@ -1584,16 +1636,21 @@ impl Logic {
                 let (x, _) = self.view.mouse.unwrap_or((0.0, y));
                 return self.curve_down(x, y, dbl);
             }
-            AmpCtl::Smooth | AmpCtl::NoiseOnly | AmpCtl::Declip => {
+            AmpCtl::Smooth | AmpCtl::NoiseOnly | AmpCtl::Declip | AmpCtl::Declick | AmpCtl::Safe | AmpCtl::Mode => {
                 if let Some(ui) = &mut self.view.amp {
                     if let Some(e) = &mut ui.eq {
                         e.smooth = !e.smooth;
                     }
                     if let Some(cl) = &mut ui.clean {
-                        if c == AmpCtl::NoiseOnly {
-                            cl.denoise.noise_only = !cl.denoise.noise_only;
-                        } else {
-                            cl.declip = !cl.declip;
+                        match c {
+                            AmpCtl::NoiseOnly => cl.denoise.noise_only = !cl.denoise.noise_only,
+                            AmpCtl::Declick => cl.declick = !cl.declick,
+                            AmpCtl::Safe => cl.safe = !cl.safe,
+                            AmpCtl::Mode => {
+                                cl.mode = cl.mode.next();
+                                self.hint = format!("Declipper mode: {}", cl.mode.name());
+                            }
+                            _ => cl.declip = !cl.declip,
                         }
                     }
                 }
@@ -1618,7 +1675,7 @@ impl Logic {
                     self.acquire_noise();
                 }
             }
-            AmpCtl::Mix | AmpCtl::Amount | AmpCtl::Offset | AmpCtl::Threshold | AmpCtl::Reduction | AmpCtl::ClipLevel => {
+            AmpCtl::Mix | AmpCtl::Amount | AmpCtl::Offset | AmpCtl::Threshold | AmpCtl::Reduction | AmpCtl::ClipLevel | AmpCtl::Sensitivity | AmpCtl::EnvA | AmpCtl::EnvB => {
                 if dbl {
                     self.reset_amp(c);
                 } else {
@@ -1626,7 +1683,7 @@ impl Logic {
                 }
             }
             AmpCtl::Preview | AmpCtl::Accept if !ready => {
-                self.hint = "Clean up needs a noise profile: select noise only and press ACQUIRE (Alt+U), or turn on the declipper".into();
+                self.hint = "Clean up needs a noise profile: select noise only and press ACQUIRE (Alt+U), or turn on the declipper or the declicker".into();
             }
             AmpCtl::Preserve => {
                 if let Some(st) = self.view.amp.as_mut().and_then(|u| u.stretch.as_mut()) {
@@ -1692,6 +1749,7 @@ impl Logic {
                     ui.amp = Amp::default();
                     ui.stretch = ui.stretch.map(|_| Stretch::default());
                     ui.drum = ui.drum.map(|_| DrumStretch::default());
+                    ui.env = ui.env.map(|e| EnvDlg::new(e.tool));
                     ui.reverb = ui.reverb.map(|_| Reverb::default());
                     ui.eq = ui.eq.map(|_| Equalize::default());
                     ui.blur = ui.blur.map(|_| Blur::default());
@@ -1990,7 +2048,12 @@ impl Logic {
                 t(&mut m, "Add points at selection", "P", ToolCmd::PointsAtSelection, envm && sel);
                 t(&mut m, "Add points at regions", "", ToolCmd::PointsAtRegions, envm && regions);
                 t(&mut m, "Flip vertically", "", ToolCmd::FlipEnvelope, envm);
+                t(&mut m, "Scale levels...", "", ToolCmd::EnvDialog(EnvTool::Scale), envm);
                 t(&mut m, "Normalize levels", "", ToolCmd::NormalizeEnvelope, envm && d.env_shown().is_some_and(|k| !d.env.is_flat(k)));
+                t(&mut m, "Decimate points...", "", ToolCmd::EnvDialog(EnvTool::Decimate), envm);
+                t(&mut m, "Filter...", "", ToolCmd::EnvDialog(EnvTool::Filter), envm);
+                t(&mut m, "Smooth up...", "", ToolCmd::EnvDialog(EnvTool::SmoothUp), envm);
+                t(&mut m, "Create sequence...", "", ToolCmd::EnvDialog(EnvTool::Sequence), envm);
                 m.head("Amp", Cmd::None);
                 t(&mut m, "Mixdown amp envelopes", "Ctrl+E", ToolCmd::Mixdown, has && !d.env.amp_flat());
                 t(&mut m, "Amp...", "Alt+A", ToolCmd::Amp, has);
@@ -2044,6 +2107,7 @@ impl Logic {
                 m.head("Detection", Cmd::None);
                 m.submenu("Auto-slice", Self::slice_menu(has), Cmd::None);
                 m.add(item("Detect beats").enabled(has), Cmd::Tool(ToolCmd::DetectBeats));
+                m.add(item("Detect pitch regions").enabled(has), Cmd::Tool(ToolCmd::DetectPitch));
                 m.add(item("Zero-cross check all regions").enabled(regions), Cmd::Tool(ToolCmd::ZeroCross));
                 m.sep(Cmd::None);
                 m.add(check("Freeze all", v.freeze), Cmd::Freeze);
@@ -3717,6 +3781,7 @@ mod tests {
         l.noise = None;
         l.view.profile = false;
         l.doc(|d| d.select(0, 999));
+        paint(&mut l);
         l.down(bx, by, Btn::Right, Mods::default(), false);
         assert!(l.noise.is_some());
         l.noise = None;
@@ -3785,6 +3850,56 @@ mod tests {
         assert_eq!(l.menu(&MenuReq::Slice).find("Send to new Lemon Slicer channel"), Some(Cmd::Send(AudioTo::Slicer)));
         l.sent(true, AudioTo::Slicer);
         assert_eq!(l.hint, "Sent to a new Lemon Slicer channel");
+    }
+
+    /// Clean up's second row: the declicker alone makes Preview and Accept work; the declipper's mode cycles. The
+    /// envelope tools' dialogs (volume mode); Detect pitch regions.
+    #[test]
+    fn declicker_envelope_dialogs_and_pitch_regions() {
+        let mut l = logic();
+        let mut x: Vec<f32> = (0..44100).map(|i| (0.4 * (std::f64::consts::TAU * 440.0 * i as f64 / 44100.0).sin()) as f32).collect();
+        x[10000] += 0.6;
+        load(&mut l, Sample::from_channels(44100, vec![x], Format::Float32));
+        l.key(Key::Char('U'), Mods { ctrl: true, ..Mods::default() });
+        paint(&mut l);
+        let (mx, my) = centre(&l, Target::Amp(AmpCtl::Mode));
+        l.down(mx, my, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(l.hint, "Declipper mode: Digital");
+        let (dx, dy) = centre(&l, Target::Amp(AmpCtl::Declick));
+        l.down(dx, dy, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert!(l.view.amp.is_some_and(|u| u.clean.is_some_and(|c| c.declick) && u.ready(false)));
+        assert_eq!(l.amp_hint(AmpCtl::Sensitivity), "Declicker sensitivity: 50%");
+        let (ax, ay) = centre(&l, Target::Amp(AmpCtl::Accept));
+        l.down(ax, ay, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Clean up");
+        assert!(l.doc(|d| d.sample.ch[0][10000].abs() < 0.45), "the click is gone");
+        // The envelope tools: grey in waveform mode, a panel in volume mode.
+        let m = l.menu(&MenuReq::Main(MenuId::Tools));
+        assert_eq!(m.find("Scale levels..."), Some(Cmd::Tool(ToolCmd::EnvDialog(EnvTool::Scale))));
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::EnvDialog(EnvTool::Scale)), 0.0, 0.0);
+        assert!(l.view.amp.is_none());
+        assert_eq!(l.hint, "The envelope tools work in an envelope mode (the bottom bar)");
+        l.doc(|d| {
+            d.view.mode = 2;
+            d.env.move_point(env::VOLUME, d.frames(), 1, 22050.0, 0.8);
+        });
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::EnvDialog(EnvTool::Scale)), 0.0, 0.0);
+        assert!(l.view.amp.is_some_and(|u| u.env == Some(EnvDlg::new(EnvTool::Scale))));
+        paint(&mut l);
+        l.set_amp_value(AmpCtl::EnvA, 1.0);
+        assert_eq!(l.amp_hint(AmpCtl::EnvA), "Scale: 200%");
+        let (ax, ay) = centre(&l, Target::Amp(AmpCtl::Accept));
+        l.down(ax, ay, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Scale levels");
+        assert!(l.doc(|d| (d.env.e[env::VOLUME][1].v - 1.0).abs() < 1e-6));
+        // Detect pitch regions: one A5 region (440 Hz, C5 = 60).
+        l.pick(&MenuReq::Main(MenuId::Regions), Cmd::Tool(ToolCmd::DetectPitch), 0.0, 0.0);
+        assert_eq!(l.hint, "Detect pitch regions: 1 region");
+        assert_eq!(l.doc(|d| d.sample.cues[0].name.clone()), "A5");
     }
 
     #[test]
@@ -4026,8 +4141,25 @@ mod tests {
         l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::AcquireNoise), 0.0, 0.0);
         l.doc(|d| d.sel = None);
         l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::CleanUp), 0.0, 0.0);
+        if let Some(c) = l.view.amp.as_mut().and_then(|u| u.clean.as_mut()) {
+            c.declip = true;
+            c.declick = true;
+        }
         save(&mut l, "tesla_cleanup", 1.0);
         l.view.amp = None;
+        // An envelope tool's dialog over the volume envelope.
+        l.doc(|d| {
+            d.view.mode = 2;
+            let n = d.frames();
+            d.env.move_point(env::VOLUME, n, 1, n as f64 / 2.0, 0.85);
+        });
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::EnvDialog(EnvTool::SmoothUp)), 0.0, 0.0);
+        save(&mut l, "tesla_env_smooth_up", 1.0);
+        l.view.amp = None;
+        l.doc(|d| {
+            d.view.mode = 0;
+            d.env = env::Envs::default();
+        });
         l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Amp), 0.0, 0.0);
         save(&mut l, "tesla_amp", 1.0);
         l.view.amp = None;
