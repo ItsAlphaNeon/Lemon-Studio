@@ -11,7 +11,7 @@ use crate::app::{Action, App, State};
 use crate::capture::{self, capture, Input, InputStream, Recorder};
 use crate::playlist::{Cmd, Mark, PItem, Popup};
 
-/// The undo step a take is placed with (as FL's History names it).
+/// The undo step a take is placed with.
 pub const RECORDED: &str = "Recorded items";
 
 /// A recording under way, or its file being made.
@@ -112,7 +112,7 @@ impl App {
         self.invalidate();
     }
 
-    /// Into the audio editor: the inputs, at the cursor (as FL prompts for one).
+    /// Into the audio editor: the inputs, at the cursor.
     pub(crate) fn one_click_editor_prompt(&mut self) {
         let (x, y) = self.mouse;
         self.state.playlist.popup = Some(Popup { x, y, items: inputs(true), sub: None, scroll: [0; 2] });

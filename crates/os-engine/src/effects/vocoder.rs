@@ -12,7 +12,7 @@
 //! pass-through too.
 //!
 //! The band spacing, the filter shapes, the envelope laws and the level of the wet signal are Lemon Studio's own design
-//! (spec plugins/lemon-vocoder.md §4); what the saved state's ints mean is measured (plugins/vocodex.md).
+//! (spec plugins/lemon-vocoder.md §4); the saved state's ints are in plugins/vocodex.md.
 //!
 // spec: plugins/vocodex.md, plugins/lemon-vocoder.md
 
@@ -588,9 +588,9 @@ pub fn mouth(v: i32) -> f64 {
     (f64::from(v - 2000) / 2000.0 * 4f64.ln()).exp()
 }
 
-/// A level of the band distribution curve as a frequency: measured on the original's editor, a 24th of an octave per
-/// pixel: `20950 * 2^(9.275 * (u - 1))` Hz (85 Hz at the default's lowest level, 19.9 kHz at its highest). Below about
-/// 80 Hz the original's scale bends down to 0 Hz at the bottom; Lemon Studio keeps the exponential, from 20 Hz.
+/// A level of the band distribution curve as a frequency, a 24th of an octave per editor pixel:
+/// `20950 * 2^(9.275 * (u - 1))` Hz (85 Hz at the default's lowest level, 19.9 kHz at its highest). Below about 80 Hz
+/// it stays exponential, from 20 Hz.
 pub fn distribution_hz(u: f64) -> f64 {
     (20950.0 * (9.275 * (u - 1.0)).exp2()).max(20.0)
 }
@@ -810,7 +810,7 @@ mod tests {
         let _ = PI;
     }
 
-    /// A new instance's state is FL 2026's 1182 bytes; the measured laws give the original's texts at their marks
+    /// A new instance's state is FL 2026's 1182 bytes; the laws give the original's texts at their marks
     /// (spec plugins/vocodex.md "Settings").
     #[test]
     fn the_state_reads_and_the_laws_match_the_measured_texts() {

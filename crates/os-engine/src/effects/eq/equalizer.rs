@@ -18,7 +18,7 @@ pub const PARAMS: usize = 36;
 pub const MAIN: usize = 35;
 /// A block is silent when no sample's magnitude is above this (1e-6).
 const SILENT: u32 = 0x358637BD;
-/// Pre-roll: the buffers of silence FL runs before a render.
+/// Pre-roll: the buffers of silence run before a render.
 const PREROLL_BLOCK: usize = 2048;
 
 /// Each parameter's range.
@@ -334,9 +334,9 @@ impl Equalizer {
         self.changed = true;
     }
 
-    /// The buffers of silence FL runs before a render: four of 2048 frames, five when LIN's `N` is 8192 or more, so
-    /// that LIN's first fade is over when the song starts and its blocks fall where FL's do. In the other modes
-    /// silence does nothing (the gate closes on the first buffer).
+    /// The buffers of silence run before a render: four of 2048 frames, five when LIN's `N` is 8192 or more, so that
+    /// LIN's first fade is over when the song starts. In the other modes silence does nothing (the gate closes on the
+    /// first buffer).
     pub fn preroll(&mut self) {
         let buffers = if self.mode() == Mode::Lin && self.opts.lin_n(self.rate) >= 8192 { 5 } else { 4 };
         let (mut l, mut r) = (vec![0f32; PREROLL_BLOCK], vec![0f32; PREROLL_BLOCK]);
@@ -505,7 +505,7 @@ mod tests {
     use super::*;
     use crate::effects::eq::{HIGH_PASS, HIGH_SHELF, LOW_SHELF};
 
-    /// FL's factory preset "Default" with band 4 at `level`, in the given options.
+    /// The factory preset "Default" with band 4 at `level`, in the given options.
     fn preset(level: i32) -> [i32; PARAMS] {
         let mut p = [0; PARAMS];
         let freqs = [10923, 18204, 25486, 32768, 40050, 47332, 54613];

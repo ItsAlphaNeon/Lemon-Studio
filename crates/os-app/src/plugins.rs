@@ -206,7 +206,7 @@ pub enum Request {
 /// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
 pub const FX_KEY: usize = 1 << 24;
 
-/// Plugin editor windows open at once under "Limit the number of open plugin editors" (FL's hint: 25; spec:
+/// Plugin editor windows open at once under "Limit the number of open plugin editors" (spec:
 /// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
 pub const MAX_EDITORS: usize = 25;
 
@@ -1681,7 +1681,7 @@ pub fn store_sampler(ch: &mut os_model::Channel, state: &[u8]) {
     if let Some(d) = i("declick").filter(|&d| d != if s.declick <= 5 { i32::from(s.declick) } else { 0 }) {
         s.declick = d.clamp(0, 5) as u8;
     }
-    // A channel without sampler flags has those of FL's new channel (Load regions, Use loop points); it gets the
+    // A channel without sampler flags has those of a new channel (Load regions, Use loop points); it gets the
     // event when one of them changes.
     let flags = s.sampler_flags.unwrap_or(os_model::ChannelSound::DEFAULT_FLAGS);
     let mut new = flags;
@@ -1771,7 +1771,7 @@ fn amount_scale(k: usize) -> i32 {
     if k == os_model::Envelope::PITCH { 2400 } else { 128 }
 }
 
-/// The stored key zone end for Lemon Sampler's key: its highest key is FL's "no zone" 256.
+/// The stored key zone end for Lemon Sampler's key: its highest key is the "no zone" value 256.
 fn zone_units(key: i32) -> i32 {
     if key >= lemon_sampler::params::KEY_MAX { 256 } else { key.max(0) }
 }
@@ -1787,7 +1787,7 @@ fn sample_frames(path: &str) -> Option<u64> {
 }
 
 /// Lemon Sampler's loop start / end knobs for stored loop points (frames) of a sample of `n` frames: fractions of its
-/// last frame's index, where FL's END knob stops; -1, `i64::MAX` and points past it are the sample's ends.
+/// last frame's index, where the END knob stops; -1, `i64::MAX` and points past it are the sample's ends.
 fn loop_knobs(points: Option<[i64; 2]>, n: u64) -> (f32, f32) {
     let last = n.saturating_sub(1);
     let Some([s, e]) = points.filter(|_| last > 0) else { return (0.0, 1.0) };
@@ -1904,7 +1904,7 @@ fn stretch_params(sound: &os_model::ChannelSound) -> [(&'static str, serde_json:
 /// Lemon Sampler's parameters for a channel's sample settings: start and length, the precomputed effects and the loop
 /// options (spec: audio/precomputed-effects.md "Settings"), the channel filter (audio/channel-filter.md: knob
 /// positions = stored / 256) and the declick mode (audio/declick.md). "Use loop points" only when the file has the
-/// sampler flags (value 8), or off on an audio clip channel (`clip`) without them: FL's clips never loop.
+/// sampler flags (value 8), or off on an audio clip channel (`clip`) without them: audio clips never loop.
 fn sample_params(sound: &os_model::ChannelSound, clip: bool) -> Vec<(&'static str, serde_json::Value)> {
     use lemon_sampler::params::{unit, Unit};
     use os_model::SampleFx;
@@ -2437,7 +2437,7 @@ mod tests {
             num.parse().unwrap_or(-1.0)
         };
         let before = offset(&state(&pl));
-        // START OFFSET knob: FL (45, 286) -> editor client (41, 214) with the host's strip row.
+        // START OFFSET knob: window (45, 286) -> editor client (41, 214) with the host's strip row.
         let mut p = POINT { x: 41, y: 214 };
         unsafe { ClientToScreen(editor, &mut p) };
         let input = |flags: u32, dx: i32, dy: i32| unsafe {
@@ -2537,7 +2537,7 @@ mod tests {
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
         unsafe { SetForegroundWindow(frame as HWND) };
         pump(&mut pl, 200);
-        // Filter MOD X: FL (492.5, 168.5) -> editor client (488, 96) with the host's strip row.
+        // Filter MOD X: window (492.5, 168.5) -> editor client (488, 96) with the host's strip row.
         let mut p = POINT { x: 488, y: 96 };
         unsafe { ClientToScreen(editor, &mut p) };
         let input = |flags: u32, dx: i32, dy: i32| unsafe {
@@ -2623,7 +2623,7 @@ mod tests {
         let editor = unsafe { GetWindow(GetWindow(frame as HWND, GW_CHILD), GW_CHILD) };
         unsafe { SetForegroundWindow(frame as HWND) };
         pump(&mut pl, 200);
-        // Filter MOD X: FL (492.5, 168.5) -> editor client (488, 96) with the host's strip row.
+        // Filter MOD X: window (492.5, 168.5) -> editor client (488, 96) with the host's strip row.
         let mut p = POINT { x: 488, y: 96 };
         unsafe { ClientToScreen(editor, &mut p) };
         let input = |flags: u32, dx: i32, dy: i32| unsafe {
@@ -3120,7 +3120,7 @@ mod tests {
     }
 
     /// Lemon Sampler's root note page edits reach the channel as they happen (`misc_param`): the engine plays the main
-    /// pitch switch; the key zone's top key is FL's "no zone".
+    /// pitch switch; the key zone's top key is "no zone".
     #[test]
     fn lemon_sampler_root_page_edits_give_the_channel_settings() {
         use lemon_sampler::params::KEY_MAX;
@@ -3976,7 +3976,7 @@ mod tests {
         transport.stop();
     }
 
-    /// The four plugin window checks as found in FL; "Open new plugin windows floating": an instance the user adds takes the
+    /// The four plugin window checks; "Open new plugin windows floating": an instance the user adds takes the
     /// check's state as its window mode, one that exists keeps its own (spec: ui/settings-choices.md "Miscellaneous:
     /// naming, detached plugins and startup").
     #[test]

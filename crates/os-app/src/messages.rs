@@ -26,12 +26,12 @@ pub struct Message {
     /// Its setting: its key in `settings.txt`, its label in the menu, on by default. Not among `prefs::CHECKS`: it is
     /// no check on a settings page.
     pub check: Check,
-    /// The menu group it is listed under (one of `GROUPS`; FL's group for the same message).
+    /// The menu group it is listed under (one of `GROUPS`).
     pub group: &'static str,
     pub kind: Kind,
 }
 
-/// The menu's groups in its order (FL's names). A group without entries is left out.
+/// The menu's groups in its order. A group without entries is left out.
 pub const GROUPS: [&str; 5] = ["Audio", "Behavior", "File/Data", "Notifications", "Trial"];
 
 /// The channel rack's delete confirmation: Delete..., Delete selected... and Purge unused audio clips
@@ -198,7 +198,7 @@ mod tests {
         click(app, c, r);
     }
 
-    /// The entries' keys are unique, apart from every declared setting's, and their groups are FL's.
+    /// The entries' keys are unique, apart from every declared setting's, and their groups are in `GROUPS`.
     #[test]
     fn entries_are_kept_under_their_own_keys() {
         let mut keys: Vec<&str> = prefs::CHECKS.iter().map(|c| c.key).collect();

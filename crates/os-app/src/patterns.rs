@@ -280,7 +280,7 @@ pub fn box_at_mouse(mouse: (f32, f32)) -> (f32, f32) {
 }
 
 /// Pattern `n` picked in the pattern selector (its menu, a drag or the wheel): it becomes the current pattern and the
-/// playlist's clip source, so Draw and Paint place it, as FL does (issue #94).
+/// playlist's clip source, so Draw and Paint place it (issue #94).
 pub fn select(s: &mut State, n: u16) {
     s.pattern = n;
     s.playlist.source = Some(ClipSource::Pattern(n));

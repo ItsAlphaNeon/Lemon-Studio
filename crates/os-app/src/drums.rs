@@ -54,8 +54,8 @@ pub fn store(proj: &mut Project, plugins: &Plugins) {
     }
 }
 
-/// The plugin state for a channel's FPC state: every layer's stored sample path resolved for the plugin to open (FL's
-/// placeholders made real), the stored paths kept in the state.
+/// The plugin state for a channel's FPC state: every layer's stored sample path resolved for the plugin to open (the
+/// stored placeholders made real), the stored paths kept in the state.
 pub fn plugin_state(fl: &[u8]) -> Vec<u8> {
     let paths: Vec<String> = lemon_drum_sampler::params::stored_paths(fl).iter().map(|p| crate::plugins::resolve_sample(p)).collect();
     lemon_drum_sampler::params::plugin_state_from_fl(fl, &paths)

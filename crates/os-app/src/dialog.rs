@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Dialogs drawn in the main window: message boxes (as FL's message form) and the file dialog (`filedlg`). They replace
+//! Dialogs drawn in the main window: message boxes and the file dialog (`filedlg`). They replace
 //! the system's own dialogs, which some Linux desktops do not have. They do not block: the caller says what happens
 //! with the answer (`Then`), which `App::dialog_done` carries out once the dialog closes. While one is open it takes
 //! every click, key, wheel turn and drop (`App::modal_open`); `views::dialog` paints them.

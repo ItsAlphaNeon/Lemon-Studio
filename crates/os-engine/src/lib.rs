@@ -5,7 +5,7 @@
 //! Lemon Studio audio engine.
 //!
 //! - [`sample`]: decoding and resolving sample files.
-//! - [`laws`]: gain, pan and pitch laws measured from FL Studio.
+//! - [`laws`]: gain, pan and pitch laws.
 //! - [`effects`]: Lemon Studio's mixer-slot effects (EQ, limiter, reverb, delay, soft clipper, fast distortion,
 //!   balance, stereo enhancer, transient processor, chorus, stereo shaper, flanger, phaser, peak controller).
 //! - [`formula`]: links' mapping formulas.

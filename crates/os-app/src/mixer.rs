@@ -102,7 +102,7 @@ pub enum MCmd {
     CablePhysics,
     /// General settings ▸ Animations: simulate the cables (true) or hang them still; kept for the next start.
     Animations(bool),
-    /// Open audio editor: Tesla on this track (Tesla's own, as FL's Edison).
+    /// Open audio editor: Tesla on this track (Tesla's own).
     AudioEditor(u16),
     /// Open audio editor and record: a Tesla on this track set up as an audio logger.
     AudioEditorRecord(u16),
@@ -301,7 +301,7 @@ pub fn level_text(label: &str, v: f64) -> String {
 }
 
 /// "Stereo separation: Original" / "40% separated" / "40% merged" (§4). A positive stored value merges towards mono
-/// (spec: audio/mixer.md "Fader matrix"); which way FL's knob turns for it is not checked.
+/// (spec: audio/mixer.md "Fader matrix").
 pub fn sep_text(sep: f64) -> String {
     let pct = (sep.abs() * 100.0).round();
     if pct == 0.0 {
@@ -1915,9 +1915,9 @@ impl App {
         }
     }
 
-    /// Tesla on track `t`: the toolbar's audio editor button puts it on the master, as FL opens Edison there (spec:
-    /// plugins/tesla/requests.md #5); the track menu's "Open audio editor" on that track. It shows the track's first
-    /// Tesla, adding one when it has none; `new` (the button's right click) always adds one, in the first free slot.
+    /// Tesla on track `t`: the toolbar's audio editor button puts it on the master (spec: plugins/tesla/requests.md
+    /// #5); the track menu's "Open audio editor" on that track. It shows the track's first Tesla, adding one when it
+    /// has none; `new` (the button's right click) always adds one, in the first free slot.
     pub(crate) fn audio_editor(&mut self, t: u16, new: bool) {
         if !new {
             if let Some(k) = first_tesla(&self.state, t) {
@@ -1928,9 +1928,9 @@ impl App {
         self.add_tesla(t, None);
     }
 
-    /// Open audio editor and record: a Tesla on track `t` set up as an audio logger, as FL's quick load sets Edison
-    /// (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"): records on the host's play, for 5
-    /// minutes, appended, slaved to the transport, armed.
+    /// Open audio editor and record: a Tesla on track `t` set up as an audio logger (spec: plugins/tesla/README.md
+    /// "Recording into Tesla from Lemon Studio"): records on the host's play, for 5 minutes, appended, slaved to the
+    /// transport, armed.
     pub(crate) fn audio_logger(&mut self, t: u16) {
         self.tesla_for_recording(t, |s| {
             s.rec.when = tesla::state::WHEN_ON_PLAY;
@@ -2288,7 +2288,7 @@ mod tests {
         use crate::app::{Scroll, Win};
         let mut a = app();
         assert!(crate::prefs::check(&crate::prefs::AUTO_SELECT_LINKED), "on by default");
-        // Snare (channel 3) is on Insert 4, as in the test FL was checked with.
+        // Snare (channel 3) is on Insert 4.
         select(&mut a.state, 2, true);
         a.select_window_track(3);
         assert_eq!((a.state.selected_mixer, a.state.mixer.sel.clone()), (4, vec![]), "as a plain click on the insert");
@@ -2387,7 +2387,7 @@ mod tests {
     }
 
     /// spec: audio/sidechain.md "Hosted plugins' input buses": Sidechain input ▸ lists None and the tracks routed into
-    /// the track, in track order, and writes the pick into the slot's wrapper state as FL does; an effect that is not
+    /// the track, in track order, and writes the pick into the slot's wrapper state; an effect that is not
     /// a wrapped plugin says so.
     #[test]
     fn sidechain_input_submenu() {

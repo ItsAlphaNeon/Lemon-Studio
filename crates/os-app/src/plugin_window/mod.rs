@@ -395,8 +395,8 @@ impl State {
         let (w, h) = self.shown();
         (w + 2.0 * BORDER, self.area_y() + h + BORDER)
     }
-    /// The size of what the editor area shows: the Misc page's own while that tab is open (the frame fits it, as a
-    /// tab change in FL does), the plugin's editor otherwise.
+    /// The size of what the editor area shows: the Misc page's own while that tab is open (the frame fits it), the
+    /// plugin's editor otherwise.
     fn shown(&self) -> (f32, f32) {
         if self.misc && self.info.misc.is_some() { (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H) } else { self.editor }
     }
@@ -450,7 +450,7 @@ fn track_name(t: u16) -> String {
     if t == 0 { "Master".into() } else { format!("Bus {t}") }
 }
 
-/// The RANGE box's live part and the TRACK box (window coordinates). Classic: FL's measured places, the PITCH knob
+/// The RANGE box's live part and the TRACK box (window coordinates). Classic: fixed places, the PITCH knob
 /// covering the RANGE box's left end. Lemon: RANGE gets its own place right of the knob, both boxes centred over their
 /// captions (spec: ui/plugin-window.md "OpenStudio").
 fn range_rect(dx: f32) -> Rect {
@@ -579,7 +579,7 @@ fn icon_at(c: &mut Canvas, t: &tb::TablerIcon, cx: f32, cy: f32, size: f32, col:
     c.icon(t, Rect::new(cx - size / 2.0, cy - size / 2.0, size, size), col);
 }
 
-/// The title bar's text font (FL: 8 px cap height, baseline under row 18).
+/// The title bar's text font (8 px cap height, baseline under row 18).
 fn title_font() -> Font {
     Font::new(13)
 }
@@ -745,7 +745,7 @@ fn value_box(c: &mut Canvas, r: Rect, s: &str) {
         c.fill_rrect(r, 4.0, Color::rgb(0x631d25));
         c.fill_rect_gradient(r.inset(1.0), Color::rgb(0x8d434b), Color::rgb(0x833941), 3.0);
     }
-    // Classic: FL's large digits, right-aligned; Lemon: smaller digits centred in the box.
+    // Classic: large digits, right-aligned; Lemon: smaller digits centred in the box.
     let f = if lemon { Font::light(18, 0) } else { Font::light(22, 0) };
     let w = c.text_width(f, s);
     let lh = c.line_height(f);

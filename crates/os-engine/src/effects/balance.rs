@@ -41,7 +41,7 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// A saved state (8 bytes), its values as they are (FL does not clamp them: spec "Checked against FL").
+    /// A saved state (8 bytes), its values as they are, unclamped (spec "Checked against FL").
     pub fn from_state(b: &[u8]) -> Option<Settings> {
         Some(Settings { v: super::ints(b, 0)? })
     }

@@ -19,7 +19,7 @@ use crate::playlist::{Cmd, Mark, PItem, Popup};
 /// Name button width at 100 % (§17): wide enough for a new project's "Lemon Sampler" at every UI scale with every text
 /// engine; Linux's Barlow is the widest (Lemon Studio).
 pub const NAME_W: f32 = 94.0;
-/// FL's name button width at 100 % (§17): the measured columns right of the name button assume it.
+/// The reference name button width at 100 % (§17): the column positions right of the name button assume it.
 pub const FL_NAME_W: f32 = 82.0;
 /// Width of the mixer-box column (§17: Alt+M moves everything right of it ≈ 41 px).
 pub const MIX_W: f32 = 41.0;
@@ -466,7 +466,7 @@ pub fn set_len(s: &mut State, steps: Option<u32>) {
     let ps = per_step(s);
     let n = s.pattern.max(1);
     let max = max_steps(s);
-    // No undo step, as in FL (measured 2026-10-28).
+    // No undo step.
     crate::patterns::pat_mut(s, n).length = steps.filter(|&v| v > 0).map(|v| v.min(max) * ps);
     s.piano.dirty = true;
 }
@@ -849,7 +849,7 @@ pub fn random_color(s: &mut State, r: usize, salt: u64) {
 }
 
 /// Color selected > Gradient: from the first selected channel's colour to the last one's (a hue sweep when they
-/// match or have none; Lemon Studio's version of FL's gradient dialog).
+/// match or have none).
 pub fn gradient(s: &mut State) {
     let rows: Vec<usize> = s.rack.sel.iter().copied().filter(|&r| r < s.project.channels.len()).collect();
     if rows.len() < 2 {
@@ -887,8 +887,7 @@ pub fn solo(s: &mut State, r: usize) {
     crate::control::knob_edit(s, MUTE_SOLO, crate::control::command::Region::Mutes, |s| solo_now(s, r));
 }
 
-/// The undo step of a channel muted, soloed or switched on or off: a knob tweak's, as in FL (none with "Undo knob
-/// tweaks" off).
+/// The undo step of a channel muted, soloed or switched on or off: a knob tweak's (none with "Undo knob tweaks" off).
 pub const MUTE_SOLO: &str = "Channel mute / solo";
 
 fn solo_now(s: &mut State, r: usize) {
@@ -1762,7 +1761,7 @@ fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Ta
         None => PItem::new("Create automation clip", Cmd::Nothing).off(),
     });
     // Enabled while a clip drives the control; it shows that clip in the playlist, as on a plugin parameter (spec:
-    // plugins/plugin-parameters.md §5.1, measured there on the channel volume knob).
+    // plugins/plugin-parameters.md §5.1).
     v.push(match driven {
         Some(ch) => PItem::new("Edit automation clip...", Cmd::Param(crate::params::PCmd::EditClip(ch))),
         None => PItem::new("Edit automation clip...", Cmd::Nothing).off(),
@@ -1943,7 +1942,7 @@ pub fn auto_name(ch: &mut os_model::Channel, path: &std::path::Path) {
 /// - "Auto keep long audio on disk" on: a file of 30 s or more turns Keep on disk on (`keep_on_disk::keep_long`).
 ///
 /// Part of the load: it has no undo step of its own. Project loading and previews don't come here; audio clip channels
-/// keep their root note and stretch (not measured).
+/// keep their root note and stretch.
 pub fn read_tags(ch: &mut os_model::Channel, path: &std::path::Path) {
     crate::keep_on_disk::keep_long(ch, path);
     use crate::prefs::{check, READ_ROOT_NOTE, READ_TEMPO};
@@ -2625,7 +2624,7 @@ pub fn graph_set(s: &mut State, k: u32, v: f32) -> Option<String> {
 // Saving (spec: ui/channel-rack.md "Saving"; flp/events/channels.md, project-info.md, patterns.md)
 
 /// Loop type values of event 162 for the rack's loop types (Loop step channels, Loop all channels, Advanced
-/// looping). Advanced looping was not measured; it is written like step channels.
+/// looping). Advanced looping is written like step channels.
 const LOOP_TYPE_CODES: [u32; 3] = [3, 2, 3];
 
 /// The rack state of an opened (or new) project: lock, zip, filter groups and the current filter from the channels,
@@ -2683,7 +2682,7 @@ pub fn to_model(s: &mut State) {
         if advanced(s) { s.rack.loop_unit.keys().filter_map(|&r| unit_len(s, r).map(|l| (r, l))).collect() } else { s.rack.loop_len.clone() };
     let rack = &s.rack;
     let p = &mut s.project;
-    // Groups in file order: the user groups, with "Unsorted" where the file had it (else last, like FL's Alt+G).
+    // Groups in file order: the user groups, with "Unsorted" where the file had it (else last).
     let mut names: Vec<String> = rack.groups.iter().map(|g| g.name.clone()).collect();
     let unsorted = rack.unsorted_at.unwrap_or(names.len()).min(names.len());
     names.insert(unsorted, os_model::UNSORTED_GROUP.to_string());
@@ -3091,7 +3090,7 @@ mod tests {
         run(&mut app, RCmd::TruncSel(false));
         assert_eq!(trunc(&app), [false; 3]);
 
-        // Chokes itself: the lowest group no channel uses, as both words; again: none (§18, measured on the original).
+        // Chokes itself: the lowest group no channel uses, as both words; again: none (§18).
         for c in app.state.project.channels.iter_mut() {
             (c.misc.cut, c.misc.cut_by) = (0, 0);
         }
@@ -3407,9 +3406,9 @@ mod tests {
         assert_eq!(key_name(60), "C5");
     }
 
-    /// "Restore previous state after solo" (spec: ui/settings-choices.md "Miscellaneous"), as measured in the channel
-    /// rack, the playlist and the mixer: mute B, solo A (the second time moving the solo on to C), unsolo. Off:
-    /// everything on; on: the states from before the first solo (B muted). A locked channel keeps its state.
+    /// "Restore previous state after solo" (spec: ui/settings-choices.md "Miscellaneous") in the channel rack, the
+    /// playlist and the mixer: mute B, solo A (the second time moving the solo on to C), unsolo. Off: everything on;
+    /// on: the states from before the first solo (B muted). A locked channel keeps its state.
     #[test]
     fn restore_previous_state_after_solo() {
         use crate::prefs::{set_check, RESTORE_AFTER_SOLO};
@@ -3519,7 +3518,7 @@ mod tests {
     }
 
     /// "Auto-collapse empty channels" (spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and
-    /// Startup project"), the measured case: steps on Kick and HiHat in pattern 1 and on Clap in pattern 2. On, each
+    /// Startup project"), the spec's case: steps on Kick and HiHat in pattern 1 and on Clap in pattern 2. On, each
     /// pattern switch unzips the channels with notes or steps in the new pattern and zips the others; an empty pattern
     /// unzips them all; zipping by hand holds until the next switch. Off: the zips stay as they are.
     #[test]
@@ -3719,7 +3718,7 @@ mod tests {
     }
 
     // spec: ui/settings-choices.md "Advanced: Read sample root note and Read sample tempo information (2026-10-16)"
-    /// Both checks on (as found): the measured table, file by file, loaded with Load sample... into a channel whose
+    /// Both checks on (as found): the spec's table, file by file, loaded with Load sample... into a channel whose
     /// root is 50 and whose stretch is Resample x2 at +300 cents. A file without `smpl` sets the root back to C5;
     /// `acid`'s beats set Auto and TIME (its tempo and root unused), PITCH and MUL kept; a file without `acid`, or with
     /// 0 beats, keeps the stretch. What the file says is part of the load's history step, with none of its own.
@@ -3820,7 +3819,7 @@ mod tests {
         let ch = &app.state.project.channels[r];
         assert_eq!(ch.sample_path.as_deref(), Some(sent.to_string_lossy().as_ref()));
         assert_eq!((ch.misc.root, ch.sound.stretch), (71, auto(2.0, was)), "the browser's send");
-        // Not measured for audio clip channels: they keep theirs.
+        // Audio clip channels keep theirs.
         let mut clip = app.state.project.channels[r].clone();
         (clip.kind, clip.misc.root) = (os_model::ChannelKind::AudioClip, 50);
         read_tags(&mut clip, &new);

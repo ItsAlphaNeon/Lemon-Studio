@@ -52,7 +52,7 @@ thread_local! {
     pub static TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
-/// FL's time stamp in backup names: `M-D-YYYY at HhMM`, 24-hour clock, no leading zeros but the minutes'.
+/// The time stamp in backup names: `M-D-YYYY at HhMM`, 24-hour clock, no leading zeros but the minutes'.
 pub fn stamp(t: NaiveDateTime) -> String {
     format!("{}-{}-{} at {}h{:02}", t.month(), t.day(), t.year(), t.hour(), t.minute())
 }

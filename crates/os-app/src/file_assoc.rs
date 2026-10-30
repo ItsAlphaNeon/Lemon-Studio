@@ -354,7 +354,7 @@ mod tests {
         look(reg::get)
     }
 
-    /// The other program's per-user registration, as found on the measured machine (spec).
+    /// The other program's per-user registration, as the spec gives it.
     fn other_registration() {
         reg::put("HKCU", r"Software\Classes\.flp", "", FL_TYPE);
         reg::put("HKCU", r"Software\Classes\.flp\OpenWithProgids", FL_TYPE, "");

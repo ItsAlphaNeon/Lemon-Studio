@@ -255,8 +255,8 @@ pub fn tick_step(ppq: u16) -> f64 {
     f64::from((1.0 / f64::from(ppq.max(1))) as f32)
 }
 
-/// FL's walk along a curve: it keeps its place inside the current segment and moves on by steps of beats, so that a
-/// stair edge that falls exactly on a step lands on the same side as in FL.
+/// A walk along a curve: it keeps its place inside the current segment and moves on by steps of beats, so that a
+/// stair edge that falls exactly on a step always lands on the same side.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Walk {
     /// The point the current segment ends on.

@@ -15,7 +15,7 @@ use crate::playlist::Snap;
 use crate::step_edit::Src;
 use os_model::{ClipSource, Note, TimeMarker};
 
-/// The undo step of a take (FL's name for it).
+/// The undo step of a take.
 pub const RECORDED: &str = "Recorded items";
 
 /// The right-click menu's checks: key in `settings.txt` and default (spec §2 Right-click menu).
@@ -753,9 +753,9 @@ impl App {
             self.state.rec.take = None;
         }
         // SONG mode, Start / Stop recording markers (audio/transport.md): passing a Stop recording marker ends the take
-        // there (held notes end on it) and later notes are not recorded (measured in FL: notes after the marker were
-        // not); passing a Start recording marker records again (Lemon Studio's choice). Recording before any of them
-        // goes on as usual: FL recorded from the song's start with a Start recording marker later on.
+        // there (held notes end on it) and later notes are not recorded; passing a Start recording marker records
+        // again. Recording before any of them goes on as usual, from the song's start with a Start recording marker
+        // later on.
         if live && self.transport.song() {
             let from = self.state.rec.last.filter(|&l| l <= now);
             let mut passed: Vec<(u32, u8)> = crate::playlist::markers(&self.state)
@@ -871,8 +871,7 @@ fn grow_take_clip(s: &mut State, t: f64) -> Option<(f64, bool)> {
 }
 
 /// The control point a control's present value makes: its target word and the value in the setting's own unit (spec:
-/// audio/automation.md "Pattern control points"). The main volume and pitch are not recorded (FL recorded nothing for
-/// the main volume).
+/// audio/automation.md "Pattern control points"). The main volume and pitch are not recorded.
 fn point_of(s: &State, a: &crate::app::Action) -> Option<(u32, i32)> {
     use crate::app::Action;
     use os_model::target;
@@ -1215,7 +1214,7 @@ mod tests {
             TimeMarker { kind: TimeMarker::PUNCH_IN, ..TimeMarker::new(2304, "In") },
         ];
         app.toggle_record();
-        // From the song's start: recorded before the Start recording marker too, as FL did.
+        // From the song's start: recorded before the Start recording marker too.
         key(&mut app, KeyCode::KeyZ, true, 24.0, true);
         key(&mut app, KeyCode::KeyZ, false, 72.0, true);
         // Held over the Stop recording marker: it ends there.

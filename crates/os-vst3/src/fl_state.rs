@@ -17,7 +17,7 @@ const KIND_HEAD: u32 = 1;
 const KIND_CONTROLLER: u32 = 2;
 const KIND_COMPONENT: u32 = 3;
 const KIND_PARAMS: u32 = 4;
-/// Kind 1's bytes: the value 1, then zeros (in every state FL Studio wrote that has been seen).
+/// Kind 1's bytes: the value 1, then zeros (in every state FL Studio writes).
 const HEAD_LEN: usize = 64;
 
 /// The parts of a saved state.

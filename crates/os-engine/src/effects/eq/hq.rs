@@ -76,7 +76,7 @@ pub fn decimator_taps() -> [f32; TAPS] {
     })
 }
 
-/// HQ Enhanced's way down: one output for every two samples at the high rate, summed in FL's order.
+/// HQ Enhanced's way down: one output for every two samples at the high rate, summed piece by piece (`piece`).
 #[derive(Clone, Debug)]
 pub struct Decimator {
     /// The last 176 samples, newest first from `pos`, written twice so they always lie in one piece.

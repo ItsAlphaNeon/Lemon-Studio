@@ -5,7 +5,7 @@
 //! Skins: the shapes and base colours of a look over the same layout. A theme (`.flstheme`) colours whichever skin is
 //! in use.
 //!
-//! `Citrus` (formerly Classic) is the measured default look. `Lemon` is Lemon Studio's own look: neutral greys, one
+//! `Citrus` (formerly Classic) is the default look. `Lemon` is Lemon Studio's own look: neutral greys, one
 //! lemon-yellow brand colour and rounded-square controls (knobs stay round). It re-colours every token and every
 //! role-mapped literal (`Palette::s/a/h/tx/led`) through a `DesignMap` (a neutral lightness ramp plus key colours), sets
 //! the tokens the map can't get right outright, and tells the widget kit which shape language to draw (`Style`). A
@@ -20,7 +20,7 @@ use crate::{Color, Palette};
 /// A skin: the look's shapes and base colours (Settings > Theme > Skins).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Design {
-    /// The measured default look (named Classic before 2026-10-17).
+    /// The default look (named Classic before 2026-10-17).
     #[default]
     Citrus,
     /// Lemon Studio's own look: lemon on neutral greys, rounded squares.
@@ -90,7 +90,7 @@ impl Default for Style {
     }
 }
 
-/// How a design re-colours the measured (Classic) colours, by role.
+/// How a design re-colours the Classic colours, by role.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DesignMap {
     /// Surface lightness: (classic lightness, design lightness) points, ascending input.
@@ -160,7 +160,7 @@ impl DesignMap {
     }
 }
 
-/// Key colours of the stock look (Classic was measured with them).
+/// Key colours of the stock look (Classic's).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Keys {
     pub selected: Color,
@@ -367,7 +367,7 @@ fn overrides(d: Design) -> Vec<(&'static str, Color)> {
 }
 
 /// The palette of skin `design` coloured by `theme` (a `.flstheme`). The stock Dark theme (whatever its options), or
-/// none, leaves a skin its own colours: Citrus the measured look, Lemon the brand palette; any other theme colours
+/// none, leaves a skin its own colours: Citrus the default look, Lemon the brand palette; any other theme colours
 /// Citrus through `fl::palette` and is laid over Lemon's colours by a `Retint`. The theme's workspace picture goes with
 /// it on either skin, also where it keeps the skin's own colours (spec: ui/flstheme.md §3).
 pub fn palette(design: Design, theme: Option<&FlTheme>) -> Palette {
@@ -426,11 +426,11 @@ fn skin_palette(design: Design, theme: Option<&FlTheme>) -> Palette {
     p
 }
 
-/// FL's base palette toolbar (spec: ui/flstheme.md §5): its slight blue tint is what a theme's Hue and Saturation turn.
+/// The base palette toolbar (spec: ui/flstheme.md §5): its slight blue tint is what a theme's Hue and Saturation turn.
 const BASE_TINT: Color = Color::rgb(0x434c51);
 
 /// A theme laid over a skin's own colours: the theme's surface adjustment tints and lights the skin's greys (read as
-/// stock Dark surfaces, given FL's base tint), its selection / highlight / mute colours take the place of the skin's
+/// stock Dark surfaces, given the base tint), its selection / highlight / mute colours take the place of the skin's
 /// key colour, and its text colour the skin's text, keeping each text's place between the skin's background and text.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Retint {

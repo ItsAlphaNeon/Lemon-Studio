@@ -32,12 +32,12 @@ use crate::prefs;
 
 /// The history's first entry: the project as opened or reset.
 pub const LAST_RESET: &str = "Last reset";
-/// A step-sequencer step click (FL's name).
+/// A step-sequencer step click.
 pub const STEP_SEQ_EDIT: &str = "Step seq edit";
-/// A sample loaded into a channel (FL's name; spec: ui/settings-choices.md "Undo history: the four checks").
+/// A sample loaded into a channel (spec: ui/settings-choices.md "Undo history: the four checks").
 pub const LOAD_SAMPLE: &str = "Load channel sample(s)";
-/// "Create automation clip" (FL's name), with the control's initial value while "Set start values automatically" is
-/// on (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
+/// "Create automation clip", with the control's initial value while "Set start values automatically" is on (spec:
+/// ui/settings-choices.md "Advanced: Initialize controls automatically").
 pub const CREATE_AUTOMATION: &str = "Create automation clip";
 /// A chord written by step edit (spec: ui/step-edit.md).
 pub const STEP_EDIT: &str = "Step edit";
@@ -642,8 +642,7 @@ pub fn ctrl_alt_z(s: &mut State) -> Option<String> {
     Some(m)
 }
 
-/// Ctrl+Shift+Z (Command+Shift+Z, macOS's usual redo): redo, in either mode. A Lemon Studio addition: FL redoes with
-/// Ctrl+Alt+Z only.
+/// Ctrl+Shift+Z (Command+Shift+Z, macOS's usual redo): redo, in either mode, besides Ctrl+Alt+Z.
 pub fn ctrl_shift_z(s: &mut State) -> String {
     let m = did(s, true);
     shown_in_browser(s);
@@ -799,7 +798,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------------------------------------------
-    // Through the app, as the spec measured it: two step-sequencer clicks (row 0 step 1, row 1 step 2), Ctrl+Z,
+    // Through the app, as in the spec: two step-sequencer clicks (row 0 step 1, row 1 step 2), Ctrl+Z,
     // Ctrl+Alt+Z, the first channel's volume knob and the EDIT menu (spec: ui/settings-choices.md "Undo history: the
     // four checks (2026-10-16)").
 

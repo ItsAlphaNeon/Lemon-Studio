@@ -4,7 +4,7 @@
 
 //! FLP project file support.
 //!
-//! Implemented from the specs' `flp/` pages only (clean-room rules).
+//! Implemented from the specs' `flp/` pages.
 //! Requirement: read → write must reproduce the input byte-for-byte; unknown events are
 //! preserved verbatim.
 //!

@@ -1278,8 +1278,7 @@ fn reset_instruments(inst: &Instruments) {
 /// A start of playback (Play, a jump while playing) calls it with "Reset plugins on transport" (spec:
 /// ui/settings-choices.md "Transport: Play truncated notes and Reset plugins"): on, every hosted plugin is reset before
 /// the first block at the new place; off, the effects are left alone, so a delay's tail rings on through the start. The
-/// instruments are reset either way, as at Stop: the new engine does not know the notes the old one held at them (a
-/// Lemon Studio choice; what FL does to an instrument's voices at a jump is not measured).
+/// instruments are reset either way, as at Stop: the new engine does not know the notes the old one held at them.
 fn reset_hosts(inst: &Instruments, effects: bool) {
     let (list, fx): (Vec<SharedInstrument>, Vec<SharedEffect>) = inst
         .lock()

@@ -16,7 +16,7 @@ use crate::rack::{self as rk, FillHit, FillType, Tab};
 
 pub const ROW_H: f32 = 30.0;
 pub const STEP_W: f32 = 16.0;
-/// Default outer size (§1): 16 steps, FL's 499 px plus Lemon Studio's wider name button (§17).
+/// Default outer size (§1): 16 steps, 499 px plus the wider name button (§17).
 pub const DEFAULT_SIZE: (f32, f32) = (499.0 + rk::NAME_W - rk::FL_NAME_W, 246.0);
 /// Smallest height: one row (§5).
 pub const MIN_H: f32 = 96.0 + ROW_H;
@@ -63,8 +63,8 @@ pub fn base_w(s: &State) -> f32 {
     259.0 + c.dx + c.loop_w
 }
 
-/// Smallest width (Lemon Studio's; FL's is 4 steps, §5): four beats of the project's signature, and never under the
-/// default 16 steps, below which the title bar's right group runs into the speaker and the "Instrument rack" title.
+/// Smallest width (§5): four beats of the project's signature, and never under the default 16 steps, below which the
+/// title bar's right group runs into the speaker and the "Instrument rack" title.
 pub fn min_w(s: &State) -> f32 {
     let steps = (4 * rk::beat_steps(s)).max(16);
     base_w(s) + STEP_W * (steps - 1) as f32
@@ -637,7 +637,7 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let br = Rect::new(sxc - 10.0, y + 5.0, 20.0, 20.0);
     let hov = ui.hit(br, Action::RackRollView, "Interactive step sequencer / piano roll overview");
     // On (§6): orange outline with a dark orange fill; hover draws the outline. Off under High visibility: always the
-    // hover look, in the Classic look the measured 2 px orange outline (spec: ui/settings-choices.md "Display: PPI
+    // hover look, in the Classic look the 2 px orange outline (spec: ui/settings-choices.md "Display: PPI
     // ruler, Force refreshes, Thick lines, High visibility").
     let hv = crate::high_visibility::on();
     if lemon {

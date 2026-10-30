@@ -72,7 +72,7 @@ fn buttons(ui: &mut Ui, r: Rect, main: &str, main_hint: &'static str) {
     button(ui, c, "Cancel", false, hov, down, false);
 }
 
-/// Rename project, FL's 469 x 246 (spec: ui/data-folder.md §6).
+/// Rename project, 469 x 246 (spec: ui/data-folder.md §6).
 fn rename(ui: &mut Ui, s: &State, m: &Modal, f: &Rename) {
     let r = place(s, m, 469.0, 246.0);
     frame(ui, r, Rename::TITLE);

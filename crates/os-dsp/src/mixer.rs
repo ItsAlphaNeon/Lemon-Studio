@@ -338,7 +338,7 @@ mod tests { // This code is a part of L e m o n S t u d i o.
         assert!((eq_response_db(s, 44100, 15.0) + 12.0).abs() < 0.3, "low shelf: {}", eq_response_db(s, 44100, 15.0));
     }
 
-    /// Centred at unity the matrix is the identity; the pan law matches the measured mixer pan (at -0.5:
+    /// Centred at unity the matrix is the identity; the pan law matches the spec's mixer pan (at -0.5:
     /// 1.0068 / 0.2997 / 0.5412, spec: audio/gain-laws.md).
     #[test]
     fn fader_matrix_points() {

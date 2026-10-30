@@ -315,7 +315,7 @@ mod tests {
         assert_eq!((w.lfo_amount, w.lfo_tension, w.speed, w.shape, w.phase), (256, 128, 200, 4, 65536));
     }
 
-    /// The laws, at the values measured from the original (spec: plugins/fruity-peak-controller.md).
+    /// The laws, at their values (spec: plugins/fruity-peak-controller.md).
     #[test]
     fn laws() {
         assert!(close(amount_factor(179), 1.0, 0.002));

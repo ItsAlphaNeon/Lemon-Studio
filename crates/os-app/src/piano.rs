@@ -74,7 +74,7 @@ pub struct PianoState {
     /// Length of the last note added, moved or resized; 0 = not yet (§8: first note is PPQ/2).
     pub last_len: u32,
     /// The last note clicked or edited in the event panel: new notes take its controls (velocity, pan, release, cutoff,
-    /// resonance, fine pitch, repeat, colour), as FL does; `None` = the defaults.
+    /// resonance, fine pitch, repeat, colour); `None` = the defaults.
     pub last_controls: Option<Note>,
     /// The project changed since the playing engine last got it (notes, steps, mixer, channel
     /// settings, tempo); `App::tick` sends it to the transport.
@@ -101,7 +101,7 @@ pub struct PianoState {
     /// Time selection made by right-dragging the ruler (ticks, start..end); the only selection
     /// that shades the grid (§10).
     pub range: Option<(u32, u32)>,
-    /// Key row pitch in pixels (vertical zoom, §3a; the measured default is [`ROW`]).
+    /// Key row pitch in pixels (vertical zoom, §3a; the default is [`ROW`]).
     pub row_h: f32,
     /// Ghost channels: other channels' notes of the pattern drawn dimmed (§5, Alt+V).
     pub ghosts: bool,
@@ -852,7 +852,7 @@ pub fn open_tick(s: &mut State) -> bool {
 }
 
 /// Zoom on the pattern and the channel's notes in a note grid `grid`: from bar 1, the pattern's length plus half a
-/// bar fills the width (FL: a 2-bar pattern shows 2.49 bars); the rows are the tallest that fit the channel's pitch
+/// bar fills the width (a 2-bar pattern shows 2.49 bars); the rows are the tallest that fit the channel's pitch
 /// range plus four spare rows, whole pixels between [`MIN_ROW`] and the default × 1.25, and the range is centred. A
 /// channel without notes: C5 centred at [`MIN_ROW`] rows.
 pub fn auto_zoom(s: &mut State, grid: Rect) {

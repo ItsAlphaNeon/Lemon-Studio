@@ -5,9 +5,9 @@
 //! `.flstheme` import: parse the file and turn it into a Lemon Studio palette.
 // spec: ui/flstheme.md
 //
-// Lemon Studio's default palette is the measured look of the stock "Dark" theme (spec §5). Importing a theme maps
-// every surface token back to the base look (inverse of the Dark adjustment) and then forward through the
-// theme's own adjustment (§4). Tokens that the file colours directly (accent, highlight, text, LEDs, steps,
+// Lemon Studio's default palette is the look of the stock "Dark" theme (spec §5). Importing a theme maps every
+// surface token back to the base look (inverse of the Dark adjustment) and then forward through the theme's own
+// adjustment (§4). Tokens that the file colours directly (accent, highlight, text, LEDs, steps,
 // grids) are re-keyed from the default key colour to the theme's (same hue / saturation / lightness offset).
 
 use crate::{Color, Palette};
@@ -21,15 +21,15 @@ pub struct Surface {
     pub contrast: f32,
 }
 
-/// The stock "Dark" theme: Lemon Studio's default palette was measured in it.
+/// The stock "Dark" theme: Lemon Studio's default palette is its look.
 pub const DARK: Surface = Surface { hue: 0.0, saturation: 0.0, lightness: -153.0, contrast: -8.0 };
 
-/// No adjustment (every parameter 0): surfaces stay in FL's base palette (spec §4, §5).
+/// No adjustment (every parameter 0): surfaces stay in the base palette (spec §4, §5).
 pub const BASE: Surface = Surface { hue: 0.0, saturation: 0.0, lightness: 0.0, contrast: 0.0 };
 
-/// The stock Dark theme's file text (its key colours; what Lemon Studio's default palette was measured with). A theme's
-/// `Lightmode` key is ignored: every theme is drawn as FL draws it with Light mode on (spec: ui/settings-choices.md
-/// "Light mode and clip note colours", removed 2026-10-18).
+/// The stock Dark theme's file text (its key colours, those of Lemon Studio's default palette). A theme's `Lightmode`
+/// key is ignored: every theme is drawn as with Light mode on (spec: ui/settings-choices.md "Light mode and clip note
+/// colours", removed 2026-10-18).
 pub const DARK_TEXT: &str = "Hue=0\nSaturation=0\nLightness=-153\nContrast=-8\nText=0\nSelected=11068490\nHighlight=-12283141\n\
      Mute=577656\nOption=-14135064\nStepEven=-13357016\nStepOdd=-12764317\nTextColor=-3551277\nBackMode=2\n";
 
@@ -175,7 +175,7 @@ impl FlTheme {
         }
     }
 
-    /// The stock Dark theme's key colours (what Lemon Studio's default palette was measured with).
+    /// The stock Dark theme's key colours (those of Lemon Studio's default palette).
     pub fn dark() -> FlTheme {
         FlTheme::parse(DARK_TEXT)
     }
@@ -304,7 +304,7 @@ pub fn shift(c: Color, from: Color, to: Color) -> Color {
     Color::from_hsl_pub(h2, s2.clamp(0.0, 1.0), (l + lt - lf).clamp(0.0, 1.0), c.a)
 }
 
-/// Mapping from Lemon Studio's measured default colours to a theme, per role. Default = identity.
+/// Mapping from Lemon Studio's default colours to a theme, per role. Default = identity.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Xform {
     /// Surface adjustment of the theme (`None` = the stock Dark look).
@@ -452,7 +452,7 @@ pub(crate) fn finish(out: &mut Palette, th: &FlTheme, note_from: Color, guard: b
         out.browser_folder = out.browser_folder.mix(target, k.abs() * 0.6);
     }
     // Readability guard: text-like tokens keep a minimum lightness gap from the surface they sit on
-    // (signal colours like category names were measured on a dark list and vanish on light themes).
+    // (signal colours like category names are set for a dark list and vanish on light themes).
     let pairs: [(&str, Color); 14] = [
         ("cat_project", out.browser_list), ("cat_recent", out.browser_list), ("cat_plugin_db", out.browser_list),
         ("cat_plugin_presets", out.browser_list), ("cat_channel_presets", out.browser_list),
@@ -569,7 +569,7 @@ WaveClr3=65280
 
     #[test]
     fn fitted_model_matches_fl_base_to_dark() {
-        // FL default-look grid #34444e becomes #22272b under Dark (spec §5), within a few levels.
+        // The base-look grid #34444e becomes #22272b under Dark (spec §5), within a few levels.
         let p = DARK.apply(Color::rgb(0x34444e));
         let want = Color::rgb(0x22272b);
         assert!(p.r.abs_diff(want.r) <= 6 && p.g.abs_diff(want.g) <= 6 && p.b.abs_diff(want.b) <= 6, "{p}");

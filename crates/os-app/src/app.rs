@@ -912,7 +912,7 @@ pub enum Drag {
     /// follows the mouse while the other end stays on the same time, so the view zooms. `fixed` = the other end and `units` = the
     /// whole bar, both in content pixels at zoom 1; `grab` = where the mouse held the end, relative to it.
     BarEdge { t: Scroll, right: bool, fixed: f32, units: f32, grab: f32 },
-    /// Right-drag on a vertical scroll bar: vertical movement scrolls (as in FL), horizontal movement resizes the
+    /// Right-drag on a vertical scroll bar: vertical movement scrolls, horizontal movement resizes the
     /// rows around the view centre where the bar has rows (right = taller). `last` = mouse at the previous move,
     /// `row` = unrounded row height so slow drags still add up (None: the bar only scrolls). Spec: ui/scroll-bars.md.
     BarRows { t: Scroll, last: (f32, f32), row: Option<f32> },
@@ -1057,8 +1057,8 @@ pub struct State {
     pub browser_index: crate::browser_index::Index,
     /// Plugin parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
-    /// "Copy value": a normalized value for "Paste value", one for every control and automation point, as in FL
-    /// (spec: ui/playlist.md §8 "Point menu").
+    /// "Copy value": a normalized value for "Paste value", one for every control and automation point (spec:
+    /// ui/playlist.md §8 "Point menu").
     pub value_clip: Option<f64>,
     pub tempo: f64,
     /// Where the tempo box's tenths, hundredths and thousandths digits start (x), as last painted: a drag from a digit
@@ -1621,12 +1621,11 @@ impl App {
                 s.rack.reset();
                 s.hide(Win::Plugin);
                 s.mixer_scroll = 0.0;
-                // As saved (event 9); a file without it opens in song mode, as in FL 26 (spec: flp/engine-events.md
-                // "Project").
+                // As saved (event 9); a file without it opens in song mode (spec: flp/engine-events.md "Project").
                 s.song_mode = project.song_mode.unwrap_or(true);
                 s.project = project;
-                // Opening in song mode sets the initial values, as FL 26 does (spec: flp/engine-events.md "Event
-                // 216"); the project is opened with them, not changed.
+                // Opening in song mode sets the initial values (spec: flp/engine-events.md "Event 216"); the project
+                // is opened with them, not changed.
                 crate::init::apply(s);
                 crate::project_info::opened(s);
                 crate::rack::from_model(s);
@@ -2189,7 +2188,7 @@ impl App {
         s.path = None;
         s.tempo = 130.0;
         s.pattern = 1;
-        // FL's default template is saved in pattern mode.
+        // The default template is saved in pattern mode.
         s.song_mode = false;
         s.piano.reset();
         s.playlist.reset();
@@ -4663,12 +4662,12 @@ impl App {
         let cfg = &st.audio;
         let rate = st.rate.unwrap_or(44100);
         let items: Vec<PItem> = match label {
-            // Project ▸ Time settings (spec: ui/settings-choices.md "Project"): the timebase, FL's list.
+            // Project ▸ Time settings (spec: ui/settings-choices.md "Project"): the timebase list.
             views::settings::TIMEBASE => {
                 let now = self.state.project.ppq;
                 views::settings::TIMEBASES.iter().map(|&v| PItem::new(v.to_string(), Cmd::Timebase(v)).mark(Mark::Radio(v == now))).collect()
             }
-            // The "Set as" mode (event 35), in FL's order.
+            // The "Set as" mode (event 35).
             views::settings::SET_AS => {
                 let sig = self.state.project.bar_is_signature();
                 vec![
@@ -4676,7 +4675,7 @@ impl App {
                     PItem::new(views::settings::SET_AS_SIGNATURE, Cmd::TimeMode(true)).mark(Mark::Radio(sig)),
                 ]
             }
-            // Project ▸ Advanced ▸ Panning law (event 23), FL's two choices.
+            // Project ▸ Advanced ▸ Panning law (event 23), two choices.
             views::settings::PANNING_LAW => {
                 let now = self.state.project.panning_law.unwrap_or(0);
                 views::settings::PANNING_LAWS.iter().map(|&(name, v)| PItem::new(name, Cmd::PanningLaw(v)).mark(Mark::Radio(v == now))).collect()
@@ -5192,8 +5191,8 @@ impl App {
                     }
                 }
                 Drag::BarRows { t, last, row } => {
-                    // The picker's bar resizes its previews either way, down / right = taller, as FL's resizes them
-                    // (spec: ui/scroll-bars.md §3); the others scroll up/down.
+                    // The picker's bar resizes its previews either way, down / right = taller (spec:
+                    // ui/scroll-bars.md §3); the others scroll up/down.
                     let picker = t == Scroll::PlPick;
                     // Only when it moved up/down: the clamp uses last frame's bar, stale once the rows were resized.
                     if let Some(b) = self.bar(t).filter(|_| y != last.1 && !picker) {
@@ -6102,8 +6101,7 @@ impl App {
         self.invalidate();
     }
 
-    /// Middle button: grab-scroll the Piano roll and Playlist (FL manual: middle-drag scrolls
-    /// both directions).
+    /// Middle button: grab-scroll the Piano roll and Playlist in both directions.
     pub fn mouse_down_middle(&mut self) {
         self.close_song_info();
         if crate::typein::is_open(&self.state) || crate::remote::is_open(&self.state) || self.modal_open() {
@@ -6508,7 +6506,7 @@ impl App {
         !(self.transport.playing() && !self.transport.paused())
     }
 
-    /// Velocity of a click on the piano roll's keyboard at `x`: soft at the keys' left end, loud at their tips (as FL).
+    /// Velocity of a click on the piano roll's keyboard at `x`: soft at the keys' left end, loud at their tips.
     fn key_click_velocity(&self, x: f32) -> u8 {
         let Some(g) = self.piano_grid else { return TYPING_VELOCITY };
         let (left, w) = (g.x - 73.0, 71.0);
@@ -6717,7 +6715,7 @@ impl App {
             let t0 = crate::piano_snap::cell(&self.state, g.tick_at(last_x));
             let t1 = crate::piano_snap::cell(&self.state, g.tick_at(x));
             // A point is set when the cursor enters a snap unit (its value is the path height at the
-            // unit's start, as in FL's captured ramps) and on the press; staying inside a unit keeps it.
+            // unit's start) and on the press; staying inside a unit keeps it.
             // Without a unit, one point at the pointer (spec: ui/piano-snap.md §8).
             let (lo, hi, step) = match crate::piano_snap::unit(&self.state) {
                 Some(u) => (t0.min(t1), t0.max(t1), u),
@@ -6744,8 +6742,8 @@ impl App {
         let (ta, tb) = (g.tick_at(last_x.min(x)), g.tick_at(last_x.max(x)));
         // The notes the cursor's path covers: those starting inside it, and the note already playing where the path
         // begins (the latest start at or before it; before the first note, the first one), so a click anywhere above
-        // or below a note's line sets it. A selection limits this to the selected notes (FL's manual: select first to
-        // reach one of several notes that start together).
+        // or below a note's line sets it. A selection limits this to the selected notes, so
+        // one of several notes that start together can be reached.
         let cand = piano::targets(&self.state);
         let starts = || cand.iter().filter_map(|&i| piano::notes(&self.state).get(i)).map(|n| n.position);
         let anchor = starts().filter(|&p| p as f32 <= ta).max().or_else(|| starts().min());
@@ -6801,7 +6799,7 @@ impl App {
         }
     }
 
-    /// The wheel over an open menu, as in FL (spec: ui/menus.md "The wheel in menus"): each notch lights the next row
+    /// The wheel over an open menu (spec: ui/menus.md "The wheel in menus"): each notch lights the next row
     /// down (or up) that can be picked, skipping separators, headings and greyed-out rows, on into the next column and
     /// round from the last row to the first; the cursor moves to the row's middle. Returns whether a menu was open (it
     /// takes the wheel).
@@ -7265,11 +7263,10 @@ impl App {
             return;
         }
         match key {
-            // Space starts and stops (rewinding); Ctrl+Space starts and pauses, like the Play button (FL's manual,
-            // keyboard shortcuts: "Start/Stop Playback", "Start/Pause Playback").
+            // Space starts and stops (rewinding); Ctrl+Space starts and pauses, like the Play button.
             Key::Named(NamedKey::Space) if ctrl => self.act(Action::Play),
             Key::Named(NamedKey::Space) => self.act(if self.transport.playing() { Action::Stop } else { Action::Play }),
-            // L flips the PAT / SONG switch, as in FL (the typing keyboard, when on, takes L first).
+            // L flips the PAT / SONG switch (the typing keyboard, when on, takes L first).
             Key::Character(c) if !ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("l") => self.act(Action::PatSong(!self.state.song_mode)),
             // spec: ui/tempo-tapper.md §1
             Key::Named(NamedKey::F5) if ctrl => self.act(Action::ToggleWin(Win::Tapper)),
@@ -7304,7 +7301,7 @@ impl App {
                 self.state.piano.clear_selection();
             }
             // Piano roll editing keys (spec: ui/piano-roll.md §8).
-            // Ctrl+A also makes the whole pattern the time selection, as FL does (spec: ui/piano-keys.md §4 rule 4).
+            // Ctrl+A also makes the whole pattern the time selection (spec: ui/piano-keys.md §4 rule 4).
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("a") && self.state.shown(Win::PianoRoll) => {
                 let s = &mut self.state;
                 if let Some(ch) = piano::channel(s) {
@@ -7439,7 +7436,7 @@ impl App {
         self.invalidate();
     }
 
-    /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G): the playlist's clips are deselected, as in FL.
+    /// Enable groups switch (toolbar, OPTIONS menu, Shift+Alt+G): the playlist's clips are deselected.
     pub fn toggle_groups(&mut self) {
         let on = crate::enable_groups::toggle();
         self.state.playlist.sel.clear();
@@ -9143,7 +9140,7 @@ pub fn test_project() -> Project {
 }
 
 /// Sampler channels named `names` (channel i on insert i + 1), 18 mixer tracks (master, Insert 1-16 and the hidden
-/// last one, as FL's default template stores them; spec: ui/mixer.md §1) routed to the master, pattern 1.
+/// last one, as the default template stores them; spec: ui/mixer.md §1) routed to the master, pattern 1.
 fn template_project(names: &[&str]) -> Project {
     let channel = |i: u16, name: &str| sampler_channel(i, name, i + 1);
     let mut mixer: Vec<MixerTrack> = (0..18u16).map(MixerTrack::new).collect();
@@ -9156,7 +9153,7 @@ fn template_project(names: &[&str]) -> Project {
         channels: names.iter().enumerate().map(|(i, n)| channel(i as u16, n)).collect(),
         patterns: vec![Pattern { number: 1, ..Pattern::default() }],
         mixer,
-        // FL's default template holds event 30 = 1: "Play truncated notes in clips" is on in a new project (spec:
+        // The default template holds event 30 = 1: "Play truncated notes in clips" is on in a new project (spec:
         // flp/engine-events.md "Project", "Event 30").
         play_truncated: true,
         // Automatic crossfades (event 44) as the program setting says, whatever the template holds (spec:
@@ -9900,7 +9897,7 @@ mod tests {
         assert_eq!(app.state.project.bar, Some((3, 2)), "an eighth is two sixteenths");
         assert_eq!((shown(&app, NUMERATOR).as_deref(), shown(&app, DENOMINATOR).as_deref()), (Some("3"), Some("8")));
         assert_eq!(crate::piano::pattern_length(&app.state, app.state.pattern), 432);
-        // Play truncated notes: on in a new project, as in FL's default template (spec: flp/engine-events.md "Event
+        // Play truncated notes: on in a new project, as in the default template (spec: flp/engine-events.md "Event
         // 30"), on File > New too; a click switches it.
         assert!(default_project().play_truncated);
         let r = hit_rect(&app, &Action::Settings(SAct::Group("Advanced")));
@@ -10374,7 +10371,7 @@ mod tests {
         let shown = |app: &App| (combo(app, SET_AS), combo(app, NUMERATOR), combo(app, DENOMINATOR), value(app, BEATS_PER_BAR), value(app, STEPS_PER_BEAT));
         let some = |v: &str| Some(v.to_string());
         assert_eq!(shown(&app), (some(SET_AS_SIGNATURE), some("4"), some("4"), None, None), "a file without event 35 is a time signature");
-        // The menu: FL's two choices, the current one marked.
+        // The menu: the two choices, the current one marked.
         let r = app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == SET_AS)).map(|h| h.rect).expect("Set as works");
         click(&mut app, &mut c, r);
         let items: Vec<_> = app.state.playlist.popup.as_ref().expect("a menu").items.iter().map(|it| (it.label.to_string(), it.mark.clone())).collect();
@@ -10434,7 +10431,7 @@ mod tests {
         assert_eq!(opened.state.project.bar_ticks(), 360);
     }
 
-    /// Settings > Project ▸ Timebase (PPQ) (spec: ui/settings-choices.md "Project"): FL's eleven choices, the
+    /// Settings > Project ▸ Timebase (PPQ) (spec: ui/settings-choices.md "Project"): the eleven choices, the
     /// project's marked; a pick rescales every tick count of the project at once (notes, pattern controls, clips,
     /// markers; automation data stays) and asks nothing. The editors follow (marker, song position, selections,
     /// clipboards, undo steps), so an undo after it restores the new timebase's ticks. Saved, the file's header holds
@@ -10680,7 +10677,7 @@ mod tests {
 
     // spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project"
     /// The mixer's "C" column: the default scale's +3, 0, 3 … 45; the alternate scale's 0, 3 … 30 with no +3, 0 at
-    /// the same height, each mark where the default scale has the level the measured table gives (30 where 45 is).
+    /// the same height, each mark where the default scale has the level the table gives (30 where 45 is).
     #[test]
     fn alternate_meter_scale_marks() {
         use crate::views::mixer::scale_marks;
@@ -10696,7 +10693,7 @@ mod tests {
     }
 
     // spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project"
-    /// "Create automation clips at the playback position", the measured run on an empty playlist: on at bar 5 the clip
+    /// "Create automation clips at the playback position", a run on an empty playlist: on at bar 5 the clip
     /// covers bars 5–6 (the song is empty: the pattern's length, 1 bar); off, bars 1–6 on the next track; on at bar
     /// 2, bars 2–6 on the track after that. A muted clip does not count for the song's end; a time selection sets
     /// the clip either way.
@@ -10844,7 +10841,7 @@ mod tests {
     }
 
     /// Settings > Project ▸ Advanced ▸ Panning law (spec: ui/settings-choices.md "Project", audio/gain-laws.md
-    /// "Panning law: Triangular"): FL's two choices with the project's marked; a pick changes event 23 at once (the
+    /// "Panning law: Triangular"): the two choices with the project's marked; a pick changes event 23 at once (the
     /// engine gets the project again, the project counts as changed), saved and opened again, also patched in an
     /// opened file.
     #[test]
@@ -13456,7 +13453,7 @@ mod tests {
         // The all tab lists the roots with content and the preset store, all closed.
         let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
         assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets"]);
-        // Project tab: Current project opened with its patterns (default like the screenshot), History above them.
+        // Project tab: Current project opened with its patterns by default, History above them.
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
         click(&mut app, &mut c, r0);
         let r = rows(&app.state);
@@ -13825,7 +13822,7 @@ mod tests {
         // The pitch record's amount is in cents (±2400).
         assert_eq!(ch.envelopes[os_model::Envelope::PITCH].amount, 600);
         assert_eq!(ch.envelopes[os_model::Envelope::PAN].flags & 0x20, 0x20, "global LFO");
-        // FL's new channel's flags (Load regions, Use loop points), loop points off, Keep on disk and Resample on.
+        // A new channel's flags (Load regions, Use loop points), loop points off, Keep on disk and Resample on.
         assert_eq!((ch.sound.cutoff, ch.sound.filter_type, ch.sound.declick, ch.sound.sampler_flags), (64, 3, 2, Some(0x103)));
         assert_eq!(ch.sound.start_offset(), 0.125);
         let m = ch.misc;
@@ -14444,7 +14441,7 @@ mod tests {
         app.state.project.patterns.push(os_model::Pattern { number: 2, name: Some("Kick + Clap".into()), ..Default::default() });
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
-        // The ▸ opens the menu; its items follow the screenshot.
+        // The ▸ opens the menu; its items follow the spec.
         let r0 = hit_rect(&app, &Action::BrowserMenu);
         click(&mut app, &mut c, r0);
         let labels: Vec<String> = app.state.playlist.popup.as_ref().expect("menu").items.iter().map(|i| i.label.to_string()).collect();
@@ -14593,7 +14590,7 @@ mod tests {
         click(&mut app, &mut a, hr);
         assert_eq!(crate::rack::pattern_steps(&app.state), 32);
 
-        // Sizes snap to whole steps / rows (FL's widths plus the wider name button), down to four beats of the
+        // Sizes snap to whole steps / rows (the base widths plus the wider name button), down to four beats of the
         // project's signature but never under 16 steps (the title bar's buttons would collide), and one row.
         let d = crate::rack::NAME_W - crate::rack::FL_NAME_W;
         assert_eq!(views::rack::snap_size(&app.state, 822.0 + d, 300.0), (819.0 + d, 306.0));
@@ -14750,7 +14747,7 @@ mod tests {
         step(&mut app, &mut a, &|ap| ap.mouse_up());
         assert!(!app.state.shown(Win::Mixer), "released over the button: closed");
 
-        // The mixer layout scales with its height only (1 at the measured size).
+        // The mixer layout scales with its height only (1 at its design size).
         assert_eq!(views::mixer::scale(Rect::new(209.0, 83.0, 1711.0, 997.0)), 1.0);
         assert!(views::mixer::scale(Rect::new(0.0, 0.0, 600.0, 435.0)) < 0.3);
 
@@ -14889,7 +14886,7 @@ mod tests {
         assert_eq!(app.state.piano.marker, 48);
     }
 
-    /// L flips the PAT / SONG switch (FL's key); with the typing keyboard on, L is a note instead.
+    /// L flips the PAT / SONG switch; with the typing keyboard on, L is a note instead.
     #[test]
     fn l_flips_pat_and_song() {
         use winit::keyboard::{Key, KeyCode};
@@ -15377,8 +15374,8 @@ mod tests {
         assert_eq!(starts(&app), [48, 72, 432, 816]);
     }
 
-    /// The piano roll's keys as FL 26 does them (spec: ui/piano-keys.md §2, §4), sent the way main.rs sends a key (the
-    /// typing keyboard first, then `App::key` with the repeat flag) to the project those measurements used.
+    /// The piano roll's keys (spec: ui/piano-keys.md §2, §4), sent the way main.rs sends a key (the typing keyboard
+    /// first, then `App::key` with the repeat flag) to the project the spec's cases use.
     mod piano_keys {
         use super::*;
         use winit::keyboard::{Key, KeyCode, NamedKey};
@@ -15490,7 +15487,7 @@ mod tests {
             v
         }
 
-        /// Held keys (§4 rule 1): FL's 5 key-downs of Shift+Up = 5 semitones, 4 of Shift+Right = 4 steps, 3 of Ctrl+B =
+        /// Held keys (§4 rule 1): 5 key-downs of Shift+Up = 5 semitones, 4 of Shift+Right = 4 steps, 3 of Ctrl+B =
         /// 3 copies; a held switch acts once; nothing repeats into the channel rack.
         #[test]
         fn held_keys_repeat_the_moving_and_copying_keys() {
@@ -15553,7 +15550,7 @@ mod tests {
             assert_eq!(selected(&app), [(800, 60)]);
         }
 
-        /// Ctrl+L, Ctrl+U and Ctrl+V as measured (§2 "Editing", "Paste"; §4 rules 5 to 7).
+        /// Ctrl+L, Ctrl+U and Ctrl+V (§2 "Editing", "Paste"; §4 rules 5 to 7).
         #[test]
         fn legato_chop_and_paste() {
             let Some((mut app, _c)) = setup() else { return };
@@ -16275,7 +16272,7 @@ mod tests {
         assert_eq!((m.items[0].label.as_ref(), m.items[0].mark), ("Main", Mark::Radio(true)));
         let n = m.items.len();
         assert_eq!(m.items[n - 2..].iter().map(|i| (i.label.as_ref(), i.enabled, i.cmd.clone())).collect::<Vec<_>>(), [("Events", true, pl::Cmd::Snap(EditorSnap::Events)), ("Markers", true, pl::Cmd::Snap(EditorSnap::Markers))]);
-        // Markers: a click within 7 px of a time marker lands on it (FL: 6.4 px did, 7.6 px did not), farther off on
+        // Markers: a click within 7 px of a time marker lands on it (6.4 px does, 7.6 px does not), farther off on
         // the tick under the pointer; Events: on a clip's start or end the same way. The song position on the ruler
         // follows Markers too.
         pl::arr_mut(&mut app.state).clips.clear();
@@ -17055,7 +17052,7 @@ mod tests {
     }
 
     /// Moving the song position in the playlist ruler switches to SONG mode without starting playback; a time
-    /// selection (right-drag) keeps PAT (spec: ui/playlist.md §7, as FL does).
+    /// selection (right-drag) keeps PAT (spec: ui/playlist.md §7).
     #[test]
     fn ruler_click_switches_to_song_mode() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
@@ -17187,7 +17184,7 @@ mod tests {
     }
 
     /// Audio clips follow their channel (spec: ui/playlist.md §9c): the length is worked out from the trims and the
-    /// channel's stretch, pitch and the tempo, each trim point rounded on its own. The numbers are FL 26's for a 6.4 s
+    /// channel's stretch, pitch and the tempo, each trim point rounded on its own. The numbers are for a 6.4 s
     /// sample at 130 BPM, PPQ 96: untrimmed, trimmed to 0..3200 ms and to 1600..4800 ms.
     #[test]
     fn audio_clips_follow_their_channel() {
@@ -17250,8 +17247,8 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
-    /// The tempo counts the bar's beats (spec: audio/timing.md "The tempo counts the bar's beats"): FL 26 gives a 4 s
-    /// sample at 140 BPM and PPQ 96 a clip of 448 ticks in 3/8, 896 in 4/4 (4 s × 140 / 60 × 96 × steps / 4). A
+    /// The tempo counts the bar's beats (spec: audio/timing.md "The tempo counts the bar's beats"): a 4 s sample
+    /// at 140 BPM and PPQ 96 makes a clip of 448 ticks in 3/8, 896 in 4/4 (4 s × 140 / 60 × 96 × steps / 4). A
     /// stretch TIME is in quarter notes and keeps its ticks.
     #[test]
     fn audio_clips_fit_the_bars_beat() {
@@ -18020,10 +18017,10 @@ mod tests {
         assert_eq!(app.state.z, vec![Win::Mixer]);
     }
 
-    /// The toolbar's song position slider (spec: ui/song-position-slider.md), with FL's measured numbers: an 8.25-bar
-    /// song; a click beside the handle steps 1/88 of it toward the pointer and holding repeats up to the pointer; the
-    /// handle drags; right-click jumps; the wheel moves 3/64 (down = later); PAT mode moves through the pattern (the
-    /// play-start marker); an empty playlist disables it in SONG mode.
+    /// The toolbar's song position slider (spec: ui/song-position-slider.md) on an 8.25-bar song: a click beside the
+    /// handle steps 1/88 of it toward the pointer and holding repeats up to the pointer; the handle drags; right-click
+    /// jumps; the wheel moves 3/64 (down = later); PAT mode moves through the pattern (the play-start marker); an empty
+    /// playlist disables it in SONG mode.
     #[test]
     fn song_position_slider() {
         use crate::song_pos::{handle_x, PANEL};
@@ -18092,7 +18089,7 @@ mod tests {
     }
 
     /// Playlist navigation and editing shortcuts (spec: ui/playlist.md §3, §3a, §4, §5, §6): Alt+wheel = track
-    /// height (FL's 6 px steps and limits), Ctrl+wheel and the plain wheel over the ruler = time zoom, End = zoom on
+    /// height (6 px steps and limits), Ctrl+wheel and the plain wheel over the ruler = time zoom, End = zoom on
     /// selection, Shift+G / Alt+G / Alt+U clip groups (lowest free number, move together, duplicates get their own
     /// group, ungroup deselects, saved), Right-Shift+drag slice in Draw, Shift+Tab snap cycle, Ctrl+Insert without a
     /// time selection, Ctrl+P / Ctrl+Shift+P not available yet, F5 raises, the view saved in the project (event 242).
@@ -18203,7 +18200,7 @@ mod tests {
         frame(&mut app, &mut c, None);
 
         // Right-Shift+drag across clips from empty grid (Draw tool) slices them; no clip is placed. The left Shift
-        // does not start a slice (FL places a clip there).
+        // does not start a slice (it places a clip there).
         let g = pl::PGeom::new(&app.state, grid);
         app.state.project.arrangements[0].clips.push(os_model::Clip::new(0, 2 * bar, 4, os_model::ClipSource::Pattern(1)));
         let n = pl::clips(&app.state).len();
@@ -18285,7 +18282,7 @@ mod tests {
         let after: Vec<u32> = on_track(&app, 4).iter().map(|c| c.position).collect();
         assert_eq!((before, after), (vec![0, bar], vec![0, 2 * bar]));
 
-        // Performance mode is not built yet: Ctrl+P (FL's key) and Ctrl+Shift+P say so.
+        // Performance mode is not built yet: Ctrl+P and Ctrl+Shift+P say so.
         app.state.message = None;
         app.key(&Key::Character("p".into()), true, false);
         assert!(app.state.message.as_deref().is_some_and(|m| m.contains("not available yet")), "{:?}", app.state.message);
@@ -18982,8 +18979,8 @@ mod tests {
     }
 
     /// Every drop-down entry fits its row in this font: the label is not clipped and stops before its shortcut or its
-    /// ▸ (the columns are FL's widths, widened where an entry needs it; macOS test of #61: TOOLS > Change declicking
-    /// for selected channels to ▸ was cut at "channels t").
+    /// ▸ (the columns are the base widths, widened where an entry needs it; macOS test of #61: TOOLS > Change
+    /// declicking for selected channels to ▸ was cut at "channels t").
     #[test]
     fn menu_entries_fit_their_columns() {
         use views::menus::{label_now, shortcut_now, Kind, MENUS};
@@ -19049,7 +19046,7 @@ mod tests {
         assert_ne!(second(&mut app, &mut c, long), empty, "the rest goes on the second line");
     }
 
-    /// The channel rack and time signatures (spec: ui/channel-rack.md §23, FL's numbers): the lit steps, the Auto
+    /// The channel rack and time signatures (spec: ui/channel-rack.md §23): the lit steps, the Auto
     /// length and the mini roll's bars are the pattern's own bars; the step colour groups (a beat) and Set to ▸ N bars
     /// are the project's; a step past an explicit length grows it to the end of the pattern's bar holding it.
     #[test]
@@ -19535,7 +19532,7 @@ mod tests {
 
     /// ADD > Audio clip / Automation clip (spec: ui/add-clip-channels.md §3): the channel goes last, named and routed to
     /// the master, alone selected, into its filter group (made before Unsorted) with the filter on it, as the
-    /// playlist's clip source; its window opens; the automation clip has FL's default points and no target and saves
+    /// playlist's clip source; its window opens; the automation clip has the default points and no target and saves
     /// so; each add is one undo step. Layer stays greyed out.
     #[test]
     fn add_audio_and_automation_clip_channels() {
@@ -20091,7 +20088,7 @@ mod tests {
     }
 
     /// The playlist's time markers (spec: ui/playlist.md §7a): the ▸ menu's Time markers items and the marker menus,
-    /// what they add, Move content (FL's measured case), the actions and the time signature dialog, Delete in the
+    /// what they add, Move content, the actions and the time signature dialog, Delete in the
     /// time selection, undo, position order, the song position on a click and on opening.
     #[test]
     fn playlist_time_markers() {
@@ -20108,7 +20105,7 @@ mod tests {
             pl::arr_mut(&mut app.state).markers = list.iter().map(|&(p, k, n)| M { kind: k, ..M::new(p, n) }).collect();
         };
 
-        // The ▸ menu's submenu in FL's order; Add two... is greyed without a time selection, as in FL.
+        // The ▸ menu's submenu; Add two... is greyed without a time selection.
         let menu = pl::options_menu(&app.state, 0.0, 0.0);
         let sub = &menu.items.iter().find(|it| it.label == "Time markers").expect("Time markers").children;
         let want = [
@@ -20155,7 +20152,7 @@ mod tests {
         pl::run(&mut app, Cmd::PlaceLoop);
         assert_eq!(marks(&app), [mk(792, M::LOOP, " ")]);
 
-        // Add one every bar over the selection, as FL measured: "Part #1" at 792, "Part #2" at 1176.
+        // Add one every bar over the selection: "Part #1" at 792, "Part #2" at 1176.
         set(&mut app, &[]);
         pl::run(&mut app, Cmd::MarkerEvery(1));
         app.state.playlist.edit.as_mut().expect("the base name box").text = "Part".into();
@@ -20172,7 +20169,7 @@ mod tests {
         pl::run(&mut app, Cmd::ToMarkerLoop);
         assert_eq!(marks(&app), [mk(384, M::MARKER_LOOP, "A"), mk(768, M::MARKER_LOOP, "B")]);
 
-        // Move content right on B (FL: A 384, B 768, C 1536, clips to 1920): B's section and C's trade places.
+        // Move content right on B (A 384, B 768, C 1536, clips to 1920): B's section and C's trade places.
         set(&mut app, &[(384, M::PLAIN, "A"), (768, M::PLAIN, "B"), (1536, M::PLAIN, "C")]);
         let before = app.state.project.arrangements[0].clone();
         pl::run(&mut app, Cmd::MoveContent(1, true));
@@ -20237,8 +20234,8 @@ mod tests {
         pl::load_view(&mut app.state);
         assert_eq!(app.state.playlist.pos, 768);
 
-        // Add two...: the base-name box, then FL's "<base> -  start" / "<base> -  end" (two spaces) at the time
-        // selection's ends (measured: bars 7 to 9 gave 2304 and 3072); one undo step.
+        // Add two...: the base-name box, then "<base> -  start" / "<base> -  end" (two spaces) at the time
+        // selection's ends (bars 7 to 9 give 2304 and 3072); one undo step.
         set(&mut app, &[]);
         app.state.playlist.range = Some((2304, 3072));
         let steps = app.state.history.len();
@@ -20265,7 +20262,7 @@ mod tests {
         frame(&mut app, &mut c, None);
     }
 
-    /// Add key marker ▸ (spec: ui/playlist.md §7a, flp/events/playlist.md "Key markers"): FL's two columns, a root
+    /// Add key marker ▸ (spec: ui/playlist.md §7a, flp/events/playlist.md "Key markers"): two columns, a root
     /// that keeps the list open, and key markers at the song position with the events FL saved for them.
     #[test]
     fn playlist_key_markers() {
@@ -20837,7 +20834,7 @@ mod tests {
         if !cfg!(windows) {
             return;
         }
-        // Exclusive, on this PC's Realtek endpoint as measured (only the page's copy of the settings: nothing opens).
+        // Exclusive, on this PC's Realtek endpoint (only the page's copy of the settings: nothing opens).
         let realtek = Periods { rate: 48000, shared: Some((480, 480, 480, 480)), shared_buffer: 1056, exclusive: (100_000, 30_000), exclusive_rates: vec![] };
         app.state.settings.audio = AudioCfg::default().with(Set::Mode(true));
         app.state.settings.periods = Some(realtek);

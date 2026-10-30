@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Views of the main window, laid out from the measured default layout.
+//! Views of the main window, in the default layout.
 // spec: ui/main-window.md
 
 pub mod browser;
@@ -487,7 +487,7 @@ impl Look {
     }
 }
 
-/// FL-style raised button face (spec §1): 1 px border with softened corners, an elliptical radial
+/// Raised button face (spec §1): 1 px border with softened corners, an elliptical radial
 /// face (light centre, darker edges) and a darker 1 px inner rim.
 pub fn button_face(ui: &mut Ui, r: Rect, look: Look) {
     kit::button(ui.c, ui.t, r, look.state());

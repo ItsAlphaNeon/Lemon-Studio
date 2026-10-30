@@ -20,7 +20,7 @@ use crate::icons::Icon;
 use crate::project_forms::FHit;
 use crate::save_form::{self as sf, SaveForm};
 
-/// The forms' sizes with Information folded, as measured (spec §7): Save as 485 x 404, New project 485 x 504.
+/// The forms' sizes with Information folded (spec §7): Save as 485 x 404, New project 485 x 504.
 const W: f32 = 485.0;
 const SAVE_H: f32 = 404.0;
 const NEW_H: f32 = 504.0;
@@ -48,7 +48,7 @@ fn info_place(f: &SaveForm) -> (f32, f32) {
     (y, if f.info_open { FOLD_H + sf::INFO_FIELDS.len() as f32 * INFO_ROW + 6.0 } else { FOLD_H })
 }
 
-/// The form's size: as measured while Information is folded, taller when it is unfolded.
+/// The form's size: the folded size while Information is folded, taller when it is unfolded.
 pub fn size(f: &SaveForm) -> (f32, f32) {
     let (y, h) = info_place(f);
     (W, (if f.new { NEW_H } else { SAVE_H }).max(y + h + 10.0 + BAND))

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Knobs: one value model for every rotary control, dragged vertically like FL's (spec: ui/knobs.md).
+//! Knobs: one value model for every rotary control, dragged vertically (spec: ui/knobs.md).
 //!
 //! Values are normalised 0..1. Every knob reads and writes the project model.
 

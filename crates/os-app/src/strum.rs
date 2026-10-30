@@ -361,7 +361,7 @@ mod tests {
         Note { length: len, key, velocity: vel, ..Note::step(0, pos) }
     }
 
-    /// The first FL test project (PPQ 96): a 3-note chord, a 4-note chord, a single note, a chord of unequal lengths
+    /// The first test project (PPQ 96): a 3-note chord, a 4-note chord, a single note, a chord of unequal lengths
     /// and a long note starting with a chord, then a chord under it.
     fn proj1() -> Vec<Note> {
         let mut v = vec![];
@@ -390,7 +390,7 @@ mod tests {
         s
     }
 
-    /// Knob positions as FL's wheel notches (1/32 of a strength's side, 1/16 of a tension's).
+    /// Knob positions as wheel notches (1/32 of a strength's side, 1/16 of a tension's).
     fn st(n: i32) -> f32 {
         n as f32 / 32.0
     }
@@ -398,7 +398,7 @@ mod tests {
         n as f32 / 16.0
     }
 
-    /// The starts of the 4-note chord at 384 (spec §3's measured table).
+    /// The starts of the 4-note chord at 384 (spec §3's table).
     fn chord4(s: &Settings) -> Vec<u32> {
         let mut v: Vec<_> = strum(proj1(), s, 96).iter().filter(|n| n.position >= 384 && n.position < 768 && n.key != 50).map(|n| n.position).collect();
         v.sort_unstable();
@@ -438,11 +438,11 @@ mod tests {
         assert_eq!(vels(&set(|s| s.vel = st(-16))), [88, 92, 96, 100]);
         assert_eq!(vels(&set(|s| (s.vel, s.vel_tension) = (st(16), tn(8)))), [100, 96, 90, 81]);
         assert_eq!(vels(&set(|s| (s.vel, s.vel_tension) = (st(16), tn(-8)))), [100, 96, 93, 91]);
-        // Each note's own velocity (FL: 40 / 120 / 80 at +16 -> 40, 116, 72; at -32 -> 8, 88, 80).
+        // Each note's own velocity (40 / 120 / 80 at +16 -> 40, 116, 72; at -32 -> 8, 88, 80).
         let mixed = vec![note(22, 192, 60, 40), note(22, 192, 64, 120), note(22, 192, 67, 80)];
         assert_eq!(by(&strum(mixed.clone(), &set(|s| s.vel = st(16)), 96)).iter().map(|n| n.3).collect::<Vec<_>>(), [40, 116, 72]);
         assert_eq!(by(&strum(mixed, &set(|s| s.vel = st(-32)), 96)).iter().map(|n| n.3).collect::<Vec<_>>(), [8, 88, 80]);
-        // Velocity follows the strum order (FL: Start -29 with Velocity +16 -> the top note keeps 100).
+        // Velocity follows the strum order (Start -29 with Velocity +16 -> the top note keeps 100).
         let out = by(&strum(proj1(), &set(|s| (s.time, s.vel) = (st(-29), st(16))), 96));
         assert!(out.contains(&(0, 384, 67, 100)) && out.contains(&(44, 384, 60, 92)));
     }
@@ -473,7 +473,7 @@ mod tests {
         let five: Vec<_> = [48, 52, 55, 59, 62].map(|k| note(384, 96, k, 100)).into();
         let out = by(&strum(five, &set(|s| (s.end_time, s.end_tension) = (1.0, 1.0)), 96));
         assert_eq!(out.iter().map(|n| n.1).collect::<Vec<_>>(), [1, 1, 1, 48, 96]);
-        // After Start and Preserve end (FL: 318, 329, 340 for the 3-note chord).
+        // After Start and Preserve end (318, 329, 340 for the 3-note chord).
         let out = by(&strum(proj1(), &set(|s| (s.time, s.preserve_end, s.end_time) = (st(29), true, st(29))), 96));
         assert_eq!(out[..3].iter().map(|n| n.1).collect::<Vec<_>>(), [318, 329, 340]);
     }

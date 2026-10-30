@@ -99,8 +99,8 @@ pub fn hint_bar_rect(s: &State) -> Rect {
 }
 
 /// The floating hint bar (§4): a near-black panel with the hint at its top left and a round grip at its right, over
-/// every window. Clicks on it go nowhere. A hint too long for a line wraps, as many lines as the panel holds (long
-/// hints were not measured on FL; the panel is tall enough for several lines: Lemon Studio's choice).
+/// every window. Clicks on it go nowhere. A hint too long for a line wraps, as many lines as the panel holds; the
+/// panel is tall enough for several lines.
 pub fn paint_hint_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let t = ui.t;
     let r = hint_bar_rect(s);
@@ -184,7 +184,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo, width: f32) {
             if !shows {
                 break;
             }
-            // Group separators (2 px gaps measured in row 1 and row 2), each at the left edge of the panel it comes
+            // Group separators (2 px gaps in row 1 and row 2), each at the left edge of the panel it comes
             // with, shown with that panel; none at a row's start.
             if seps && p.panel.separator() && p.idx > 0 {
                 separator(ui, p.x, p.row, lemon);
@@ -470,7 +470,7 @@ fn time(ui: &mut Ui, c: &Ctx) {
     let sig = s.project.signature().unwrap_or((s.project.bar().0, 4));
     let secs = f.tick / ppq * 60.0 / s.project.tick_tempo(s.tempo.max(1.0));
     let (bar, step, tick) = s.clock.reading(secs, f.tick * 96.0 / ppq, sig);
-    // Light digits drawn piece by piece (measured: big 36 px condensed to 14, small 24 to 9),
+    // Light digits drawn piece by piece (big 36 px condensed to 14, small 24 to 9),
     // right-aligned so long bar numbers grow to the left and never leave the panel.
     let (big, small) = (Font::light(32, 13), Font::light(22, 8));
     let bar_s = bar.to_string();
@@ -636,7 +636,7 @@ fn cpu(ui: &mut Ui, c: &Ctx) {
 }
 
 /// Utility buttons: "left / right" hints, right clicks in `App::toolbar_right` (spec: ui/toolbar-buttons.md §2).
-/// FL's last one, the content library's download, is left out (spec: ui/main-window.md §2).
+/// The content library's download button is left out (spec: ui/main-window.md §2).
 fn utilities(ui: &mut Ui, c: &Ctx) -> bool {
     let (a, s) = (c.a, c.s);
     let utils = [
@@ -750,7 +750,7 @@ fn song_pos(ui: &mut Ui, c: &Ctx) {
             None => ui.c.fill_rect(a.r(Rect::new(394.0, 58.0, 2.0, 8.0)), t.button),
         }
     } else {
-        // Classic: the measured colours (§1).
+        // Classic: the colours of §1.
         let x0 = a.x(394.0);
         ui.c.fill_rect(Rect::new(x0, y(60.0), 172.0, 4.0), ui.t.s(0x343739));
         match hx {
@@ -851,8 +851,7 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
         .find(|p| p.number == s.pattern)
         .and_then(|p| p.name.clone())
         .unwrap_or_else(|| format!("Pattern {}", s.pattern));
-    // Right-aligned before the spin arrow; a name too long for that keeps its start and is cut at the arrow, as FL
-    // cuts long labels (long names were not measured here: Lemon Studio's choice).
+    // Right-aligned before the spin arrow; a name too long for that keeps its start and is cut at the arrow.
     let pf = Font::condensed(21, 7);
     let end = pb.right() - 11.0;
     if ui.c.text_width(pf, &name) <= end - (pb.x + 2.0) {
@@ -881,7 +880,7 @@ fn window_buttons(ui: &mut Ui, c: &Ctx, which: Range<usize>) -> bool {
         (Icon::Plug, Action::PickerOpen, "Plugin palette (F8)"),
         (Icon::Kick, Action::ToggleWin(Win::Tapper), "Tap tempo (Ctrl+F5)"),
         (Icon::Touch, Action::ToggleWin(Win::Touch), "Touch controller (Alt+F7)"),
-        // FL's store button is hidden: its stand-in, a repository of free and open-source plugins (spec:
+        // The store button is hidden: its stand-in, a repository of free and open-source plugins (spec:
         // ui/main-window.md §3), had the plugin picker's icon. It is to come back with a shop icon.
     ];
     for (i, (icon, action, hint)) in wins.into_iter().enumerate().filter(|(i, _)| which.contains(i)) {
@@ -893,7 +892,7 @@ fn window_buttons(ui: &mut Ui, c: &Ctx, which: Range<usize>) -> bool {
         let ink = super::tool_face(ui, r, if hov { super::Look::Hot } else { super::Look::Off });
         icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), ink);
     }
-    // FL's news panel (x 1304..1470, with its separator) is left out: it suggested an online service Lemon Studio
+    // The news panel (x 1304..1470, with its separator) is left out: it suggested an online service Lemon Studio
     // does not have. A tips panel may take its place (spec: ui/main-window.md §3).
     true
 }

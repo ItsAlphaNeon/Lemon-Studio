@@ -365,7 +365,7 @@ fn inside(x: f64, lo: f64, hi: f64) -> bool {
     x >= lo - INTER_MARGIN && x <= hi + INTER_MARGIN
 }
 
-/// How far past its ends `Inter` still holds (measured: 0.000477 holds, 0.000521 does not).
+/// How far past its ends `Inter` still holds (0.000477 holds, 0.000521 does not).
 pub const INTER_MARGIN: f64 = 0.0005;
 
 /// Folds `x` back into 0..1 at its ends (a triangle: 1.2 gives 0.8, -0.3 gives 0.3).
@@ -713,8 +713,8 @@ mod tests {
         }
     }
 
-    /// The rules measured on the original (spec: plugins/fruity-formula-controller.md "Precedence" and "Operators"): each
-    /// formula with the value the original gives it.
+    /// The rules (spec: plugins/fruity-formula-controller.md "Precedence" and "Operators"): each formula with its
+    /// value.
     #[test]
     fn the_originals_rules() {
         for (s, want) in [
