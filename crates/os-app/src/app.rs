@@ -19955,6 +19955,30 @@ mod tests {
         frame(&mut app, &mut c, None);
     }
 
+    /// The ▸ menu's Quantize song jumps (spec: ui/playlist.md §7a): Off by default, each entry a radio; the unit is a
+    /// beat or 1, 2, 4 or 8 of the project's bars.
+    #[test]
+    fn playlist_quantize_song_jumps() {
+        use crate::playlist::Mark;
+        let mut app = App::new(None);
+        let items = |app: &App| {
+            let m = crate::playlist::options_menu(&app.state, 0.0, 0.0);
+            m.items.into_iter().find(|i| i.label == "Quantize song jumps").unwrap().children
+        };
+        let labels: Vec<String> = items(&app).iter().map(|i| i.label.to_string()).collect();
+        assert_eq!(labels, ["Off", "Beats", "Bars", "2 bars", "4 bars", "8 bars"]);
+        assert!(items(&app).iter().all(|i| i.enabled));
+        assert_eq!(items(&app)[0].mark, Mark::Radio(true));
+        assert_eq!(crate::playlist::jump_unit(&app.state), None);
+        let ppq = u32::from(app.state.project.ppq);
+        for (k, unit) in [(1, ppq), (2, ppq * 4), (5, ppq * 32)] {
+            let c = items(&app)[k].cmd.clone();
+            crate::playlist::run(&mut app, c);
+            assert_eq!(items(&app)[k].mark, Mark::Radio(true));
+            assert_eq!(crate::playlist::jump_unit(&app.state), Some(unit));
+        }
+    }
+
     /// The playlist's time markers (spec: ui/playlist.md §7a): the ▸ menu's Time markers items and the marker menus,
     /// what they add, Move content (FL's measured case), the actions and the time signature dialog, Delete in the
     /// time selection, undo, position order, the song position on a click and on opening.
@@ -19989,7 +20013,7 @@ mod tests {
             ("Change to marker loop", true),
         ];
         assert_eq!(sub.iter().map(|it| (&*it.label, it.enabled)).collect::<Vec<_>>(), want);
-        assert!(menu.items.iter().any(|it| it.label == "Quantize song jumps" && !it.enabled && it.children.len() == 6));
+        assert!(menu.items.iter().any(|it| it.label == "Quantize song jumps" && it.enabled && it.children.len() == 6));
         pl::run(&mut app, Cmd::MarkerEveryMenu);
         let every = app.state.playlist.popup.take().expect("its list");
         assert_eq!(every.items.iter().map(|it| it.cmd.clone()).collect::<Vec<_>>(), [1, 2, 4, 8].map(Cmd::MarkerEvery));

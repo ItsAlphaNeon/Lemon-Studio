@@ -1051,6 +1051,8 @@ pub struct Engine {
     marks: marks::Marks,
     /// The next tick was arrived at by a start or a jump: markers on it do not act.
     landed: bool,
+    /// A quantized song jump (`jump_on`): (unit, target) in ticks.
+    quantized_jump: Option<(u64, u64)>,
     /// A Start recording marker was passed: the song runs on past its end.
     punched: bool,
     /// The Marker pause the channels are fading out toward, and the one playback holds on until it is taken
@@ -1607,6 +1609,7 @@ impl Engine {
             run_on: None,
             marks,
             landed: true,
+            quantized_jump: None,
             punched: false,
             pause_at: None,
             marker_paused: None,
@@ -1917,6 +1920,13 @@ impl Engine {
     /// at the song's end when it started past the range.
     pub fn set_loop_range(&mut self, range: Option<(u64, u64)>) {
         self.loop_range = range.filter(|&(a, b)| b > a);
+    }
+
+    /// A song jump quantized to `unit` ticks (the playlist's Quantize song jumps): playback goes on to the next tick
+    /// that is a multiple of `unit` (this one if it is), then jumps to `to`, the way a marker jump lands. A later call
+    /// replaces one still waiting.
+    pub fn jump_on(&mut self, unit: u64, to: u64) {
+        self.quantized_jump = Some((unit.max(1), to));
     }
 
     /// "Play truncated notes on transport" (Settings > Audio > Mixer; spec: ui/settings-choices.md "Transport: Play
@@ -2711,6 +2721,14 @@ impl Engine {
         if self.spans.len() > 1 && self.tick == self.spans[0].1 {
             self.spans.remove(0);
             self.jump_to(self.spans[0].0, true);
+        }
+        // A quantized song jump waits for a tick on its unit; markers on the tick it lands on do not act.
+        if let Some((unit, to)) = self.quantized_jump {
+            if self.tick % unit == 0 && !self.landed {
+                self.quantized_jump = None;
+                self.jump_to(to, false);
+                self.landed = true;
+            }
         }
         // Time markers in live song playback (spec: audio/transport.md "Time markers in SONG mode"): they act on the
         // tick playback reaches by playing, not while the time selection loops.
@@ -7206,6 +7224,29 @@ mod tests {
         e.set_loop_range(Some((0, 960)));
         let t: Vec<u64> = (0..400).map(|_| e.next_tick().unwrap().1 as u64).collect();
         assert_eq!(&t[382..386], &[382, 383, 384, 385]);
+    }
+
+    /// A quantized song jump waits for the next multiple of its unit, then lands on its target; markers there do not
+    /// act. A tick on the unit jumps at once.
+    #[test]
+    fn a_quantized_jump_waits_for_its_unit() {
+        use os_model::TimeMarker as M;
+        let p = marker_song(&[(1152, M::SKIP), (1536, M::PLAIN)]);
+        let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+        e.set_looping(true);
+        let mut tick = || e.next_tick().unwrap().1 as u64;
+        let t: Vec<u64> = (0..100).map(|_| tick()).collect();
+        assert_eq!(t[99], 99);
+        e.jump_on(384, 1152);
+        let t: Vec<u64> = (0..300).map(|_| e.next_tick().unwrap().1 as u64).collect();
+        assert_eq!(&t[282..288], &[382, 383, 1152, 1153, 1154, 1155], "on to 384, then the target; its skip did not act");
+        let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+        e.set_looping(true);
+        for _ in 0..96 {
+            e.next_tick();
+        }
+        e.jump_on(96, 0);
+        assert_eq!(e.next_tick().unwrap().1 as u64, 0, "on the unit: at once");
     }
 
     /// A Marker pause holds playback on the marker (the fade ends there), once; Resume plays on from it. A Start

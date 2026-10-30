@@ -324,6 +324,8 @@ pub enum Cmd {
     InitControl(u32, f64),
     DeleteInit(u32),
     ResetEmptyTracks,
+    /// Quantize song jumps ▸ (`PlaylistState::jump_quantize`).
+    JumpQuantize(u8),
     /// Browser options menu (spec: ui/browser.md §4).
     Browser(crate::browser::BCmd),
     /// Plugin menus (spec: ui/plugin-menu.md).
@@ -574,6 +576,9 @@ pub struct PlaylistState {
     pub track: u16,
     /// Song position (ticks): song playback starts here.
     pub pos: u32,
+    /// The ▸ menu's Quantize song jumps (§7a): a move of the song position while the song plays waits for the next
+    /// beat (1), bar (2), 2, 4 or 8 bars (3 to 5); 0 = Off. Kept for the session only (Lemon Studio's choice).
+    pub jump_quantize: u8,
     /// Time selection (ticks).
     pub range: Option<(u32, u32)>,
     pub clipboard: Vec<Clip>,
@@ -627,6 +632,7 @@ impl Default for PlaylistState {
             sel: Vec::new(),
             track: 0,
             pos: 0,
+            jump_quantize: 0,
             range: None,
             clipboard: Vec::new(),
             overlay: None,
@@ -2374,18 +2380,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
             ],
         ),
         PItem::sub("Time markers", time_marker_items()),
-        // Not built yet: it opens to show its list (§7a).
-        PItem {
-            children: vec![
-                PItem::not_yet("Off").mark(Mark::Radio(true)),
-                PItem::not_yet("Beats"),
-                PItem::not_yet("Bars"),
-                PItem::not_yet("2 bars"),
-                PItem::not_yet("4 bars"),
-                PItem::not_yet("8 bars"),
-            ],
-            ..PItem::not_yet("Quantize song jumps")
-        },
+        PItem::sub("Quantize song jumps", jump_items(s)),
         PItem::sep(),
         PItem::new("Reset empty tracks", Cmd::ResetEmptyTracks),
     ];
@@ -2408,6 +2403,27 @@ fn time_marker_items() -> Vec<PItem> {
         PItem::new("Delete", Cmd::DeleteMarkers),
         PItem::new("Change to marker loop", Cmd::ToMarkerLoop),
     ]
+}
+
+/// Quantize song jumps ▸ (§7a): Off, Beats, Bars, 2, 4 or 8 bars.
+fn jump_items(s: &State) -> Vec<PItem> {
+    JUMP_UNITS.iter().enumerate().map(|(k, l)| PItem::new(*l, Cmd::JumpQuantize(k as u8)).mark(Mark::Radio(s.playlist.jump_quantize == k as u8))).collect()
+}
+
+const JUMP_UNITS: [&str; 6] = ["Off", "Beats", "Bars", "2 bars", "4 bars", "8 bars"];
+
+/// The unit a song position move waits for while the song plays (Quantize song jumps), in ticks; `None` = Off. Bars
+/// are the project's (time signature markers do not change them).
+pub(crate) fn jump_unit(s: &State) -> Option<u32> {
+    let bar = s.project.bar_ticks();
+    match s.playlist.jump_quantize {
+        1 => Some(u32::from(s.project.ppq.max(1))),
+        2 => Some(bar),
+        3 => Some(bar * 2),
+        4 => Some(bar * 4),
+        5 => Some(bar * 8),
+        _ => None,
+    }
 }
 
 /// Add one every ▸ (§7a): every bar, 2, 4 or 8 bars.
@@ -4505,6 +4521,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::DeleteInit(tgt) => {
             crate::init::delete(s, tgt);
+            None
+        }
+        Cmd::JumpQuantize(q) => {
+            s.playlist.jump_quantize = q;
             None
         }
         Cmd::ResetEmptyTracks => {
