@@ -807,6 +807,10 @@ const WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 /// else the current track's first free one) of the plugin the preset is for. Returns the status message.
 pub fn dropped(app: &mut App, path: &Path) -> Option<String> {
     use crate::app::{Action, Win};
+    // A channel state (listed with the presets in the browser) adds its channel.
+    if crate::channel_states::is_state_file(path) {
+        return crate::channel_states::add(app, path);
+    }
     #[cfg(any(windows, target_os = "macos"))]
     if let Some(row) = app.plugin_window_under_cursor() {
         return load_into(app, row, path);

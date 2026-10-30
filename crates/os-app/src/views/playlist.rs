@@ -356,6 +356,15 @@ fn kind_icon(kind: PickKind) -> Icon {
     }
 }
 
+/// The icon of clip source `src` (of kind `kind`): its channel's Change icon... choice, else its kind's.
+fn source_icon(s: &State, src: ClipSource, kind: PickKind) -> Icon {
+    let row = match src {
+        ClipSource::Channel(ch) => s.project.channels.iter().position(|c| c.index == ch),
+        ClipSource::Pattern(_) => None,
+    };
+    row.and_then(|r| pl::window_icon(&s.project, &s.playlist.icons, r)).unwrap_or_else(|| kind_icon(kind))
+}
+
 /// Picker panel: kind tabs, then the list of clip sources of that kind (§1).
 fn picker(ui: &mut Ui, s: &State, p: Rect) {
     let t = ui.t;
@@ -438,7 +447,7 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             ui.c.stroke_rrect(row.inset(0.5), if lemon { lk::r_btn(ui.t) } else { 0.0 }, 1.0, ui.t.a(0xa8e44a));
         }
         let ic = Color::rgb(if filled { TITLE_TEXT } else { 0xa6aaab });
-        icons::draw(ui.c, kind_icon(pl::source_kind(s, src)), Rect::new(row.x + 4.0, title.cy() - 6.0, 12.0, 12.0), ic);
+        icons::draw(ui.c, source_icon(s, src, pl::source_kind(s, src)), Rect::new(row.x + 4.0, title.cy() - 6.0, 12.0, 12.0), ic);
         ui.c.text_clip(Font::new(14), row.x + 20.0, title.cy() - 8.0, row.w - 23.0, ic, &pl::source_name(s, src));
         if src == cur {
             let ax = list.x - 1.0;
@@ -915,7 +924,7 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
             ui.c.line(ix + 7.0, iy + 1.0, ix, iy + 8.0, 1.2, ic);
         } else {
             // On whole pixels: a partial repaint draws it exactly as a full one (smooth scrolling stops between them).
-            icons::draw(ui.c, kind_icon(kind), Rect::new((ix - 0.5).round(), iy.round(), 10.0, 10.0), ic);
+            icons::draw(ui.c, source_icon(s, c.source, kind), Rect::new((ix - 0.5).round(), iy.round(), 10.0, 10.0), ic);
         }
     }
     if r.w > 16.0 {

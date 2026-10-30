@@ -155,7 +155,7 @@ pub fn target_of(s: &State, key: usize, index: usize) -> Option<u32> {
 }
 
 /// Who owns hosted instance `key`, as clip names write it (spec §4): the channel name, or "<slot plugin> - <track>".
-fn owner_name(s: &State, key: usize) -> String {
+pub(crate) fn owner_name(s: &State, key: usize) -> String {
     match fx_of(key) {
         Some((track, slot)) => {
             let plugin = crate::mixer::slot_name(s, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));

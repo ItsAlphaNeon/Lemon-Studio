@@ -126,6 +126,7 @@ mod strum;
 mod flam;
 mod flip;
 mod levels;
+mod channel_states;
 mod chords;
 mod claw;
 mod limit;

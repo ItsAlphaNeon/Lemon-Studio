@@ -81,11 +81,10 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   properties, Detached; slot menu Patcherize, Patcherize all, Link all parameters..., Change icon..., Scaling ▸ 100%,
   Help. Not counted: the
   layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs))
-- [ ] **Playlist right-click menus.** 5 entries greyed out on 2026-10-30, counted entry by entry after the plugin
-  window's CPU entries (Allow threaded processing, Smart disable) and an effect slot's Change color... and Random color
-  were enabled, and Piano roll left an effect slot's window (the original has none there): the picker's Change icon;
-  the plugin window's ▸ menu: Link all parameters..., Change icon..., Save channel state as... and Browse channel
-  states ([playlist.rs](../crates/os-app/src/playlist.rs))
+- [x] **Playlist right-click menus.** None greyed out since 2026-10-30: the last five, the picker's Change icon and
+  the plugin window's Link all parameters..., Change icon..., Save channel state as... and Browse channel states, work
+  as Lemon Studio's design (Change icon is kept for the session only)
+  ([playlist.rs](../crates/os-app/src/playlist.rs), [channel_states.rs](../crates/os-app/src/channel_states.rs))
 - [ ] **Channel rack right-click menus.** 15 of the rack's own entries greyed out on 2026-10-30, counted entry by
   entry after 20 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
   plugins on 2026-10-30): Loop starter and its 3 playlist-track options, Restretch all, Detached, Change icon, Show

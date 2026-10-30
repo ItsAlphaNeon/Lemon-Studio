@@ -2077,6 +2077,11 @@ impl App {
                     self.state.message = crate::presets::save_chosen(self, key, p);
                 }
             }
+            Then::SaveChannelState(row) => {
+                if let Some(p) = file {
+                    self.state.message = crate::channel_states::save_chosen(self, row, p);
+                }
+            }
             Then::ImportPreset(key) => {
                 if let Some(p) = file {
                     self.state.message = crate::presets::import_chosen(self, key, p);
@@ -2548,8 +2553,11 @@ impl App {
         // windows' requests come with it.
         #[cfg(plugin_windows)]
         let requests = {
-            let (project, mixer) = (&self.state.project, &self.state.mixer);
-            self.plugins.idle(|row| if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) })
+            let (project, mixer, icons) = (&self.state.project, &self.state.mixer, &self.state.playlist.icons);
+            self.plugins.idle(|row| {
+                let info = if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) };
+                info.map(|i| crate::plugin_window::ChannelInfo { icon: crate::playlist::window_icon(project, icons, row), ..i })
+            })
         };
         // No plugin windows here, so no requests.
         #[cfg(not(plugin_windows))]
@@ -4258,6 +4266,11 @@ impl App {
         // A MIDI file is imported as FILE ▸ Import ▸ MIDI file does (spec: ui/midi-files.md §10.6).
         if ext == "mid" || ext == "midi" {
             return self.midi_file_chosen(path, false);
+        }
+        // A channel state adds its channel (spec: ui/plugin-window.md "Channel states").
+        if crate::channel_states::is_state_file(&path) {
+            self.state.message = crate::channel_states::add(self, &path);
+            return self.invalidate();
         }
         // A preset goes into the plugin under the mouse, or a new instance of its plugin (spec: plugins/presets.md).
         if crate::presets::is_preset_file(&path) {
@@ -9130,6 +9143,7 @@ fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::Channel
         track: ch.mixer_track,
         max_track: crate::mixer::max_insert(p),
         misc: Some(crate::misc::vals_of(ch)),
+        icon: None,
     })
 }
 
@@ -13516,9 +13530,9 @@ mod tests {
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
-        // The all tab lists the roots with content and the preset store, all closed.
+        // The all tab lists the roots with content, the preset store and the channel states, all closed.
         let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
-        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets"]);
+        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets", "Channel presets"]);
         // Project tab: Current project opened with its patterns (default like the screenshot), History above them.
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
         click(&mut app, &mut c, r0);
@@ -14551,7 +14565,7 @@ mod tests {
         // Esc clears the search and leaves the box.
         app.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(app.state.browser_search.is_empty() && !app.state.browser_search_focus);
-        assert_eq!(rows(&app.state).len(), 3);
+        assert_eq!(rows(&app.state).len(), 4);
         // Search box on top moves the list down.
         app.browser_cmd(crate::browser::BCmd::Toggle("top"));
         frame(&mut app, &mut c, None);

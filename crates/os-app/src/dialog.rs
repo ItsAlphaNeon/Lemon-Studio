@@ -82,6 +82,8 @@ pub enum Then {
     ExportZip,
     /// Save preset as... for the plugin with this key (`plugins::Plugins::hosted`).
     SavePreset(usize),
+    /// Save channel state as... for this rack row (`crate::channel_states`).
+    SaveChannelState(usize),
     /// Import preset... for the plugin with this key.
     ImportPreset(usize),
     /// Rename preset... for the plugin with this key: its current preset file.

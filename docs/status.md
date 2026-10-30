@@ -163,6 +163,11 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   Controllers) and runs it again as soon as sound reaches it; what is heard is the same. Switch auto-bypass for all
   plugins (TOOLS, the mixer's and the rack's options menus) turns it on for every plugin when one is off, and off for
   all when all are on. Instruments are not bypassed yet (the switch is saved)
+- The plugin window's menu: Link all parameters... links every parameter of the plugin to consecutive MIDI
+  controllers in one go (the MIDI learn box); Change icon... gives a channel or effect an icon, shown in its window's
+  title, the playlist picker and its clips (for the session); Save channel state as... saves a channel with its plugin
+  and settings into Channel presets, which Browse channel states opens in the browser, and dropping one adds the
+  channel. The picker's Change icon... too
 - Import of `.ospreset`, `.vstpreset` and VST2 `.fxp` / `.fxb` files (a bank goes into a folder of its own); a preset
   file dropped onto a plugin window, rack row or mixer slot loads there, and anywhere else adds its plugin
 
