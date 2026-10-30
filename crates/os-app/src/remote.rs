@@ -144,6 +144,7 @@ fn target_text(t: Target) -> String {
         },
         Target::Fader(m) => format!("fader:{m}"),
         Target::Param(key, i) => format!("param:{key}:{i}"),
+        Target::Latency(..) => "none".into(),
     }
 }
 
@@ -549,6 +550,8 @@ impl App {
             Target::Param(key, index) => {
                 crate::params::set_param_value(&mut self.state, key, index, f64::from(v));
             }
+            // Never linked (no remote control).
+            Target::Latency(..) => {}
         }
         self.invalidate();
     }

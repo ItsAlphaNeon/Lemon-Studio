@@ -75,8 +75,8 @@ Greyed-out controls and partial features. These can land alongside the blockers.
 - [ ] **Performance mode.** Live clip launching on the playlist (Ctrl+P says it is not available yet), with MIDI
   settings' Performance mode MIDI channel and TOOLS ▸ Macros ▸ Prepare for performance mode
 - [ ] **Recording settings page.** The only settings page that doesn't work yet
-- [ ] **Editable mixer latency settings.** Plugin delay compensation reads, uses and saves them, but they can't be
-  edited
+- [x] **Editable mixer latency settings.** The input clock, the track latency combo and the strip's latency clock
+  (right click) set them in ms, samples or beats, one undo step each
 - [ ] **Browser: Favorites, the plugin database and Browser find**
 - [ ] **JACK on Linux**
 - [x] **ASIO output pairs.** Every track has an output menu with the pairs of the driver's first 16 outputs, and the

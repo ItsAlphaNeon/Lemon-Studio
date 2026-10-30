@@ -56,6 +56,11 @@ pub enum MHit {
     Output,
     /// A strip's disk-record button: arms / disarms the track.
     Arm(u16),
+    /// A strip's track latency clock (selects; right click: the latency menu), and the current track's input clock and
+    /// track latency combo in the right panel (spec: audio/track-io.md §2.6).
+    Latency(u16),
+    InLatency,
+    OutLatency,
 }
 
 /// Menu commands (`Cmd::Mixer`).
@@ -117,6 +122,8 @@ pub enum MCmd {
     Arm(u16, bool),
     /// Disk recording ▸ Auto-create audio clips (a program setting).
     AutoClips,
+    /// A track's input (true) or output latency setting: Reset (`None`), or Set in ms / samples / beats (the value box).
+    Latency(u16, bool, Option<crate::typein::LatUnit>),
 }
 
 /// What the plugin host does next tick for a mixer slot (`App::mixer_tick`).
@@ -425,6 +432,18 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             let on = !track(s, n)?.armed;
             app.arm_tracks(&[n], on)
         }
+        MHit::Latency(n) => {
+            select(s, n, ctrl);
+            None
+        }
+        MHit::InLatency => {
+            s.playlist.popup = Some(latency_menu(s, s.selected_mixer, true, at.0, at.1 + 10.0));
+            None
+        }
+        MHit::OutLatency => {
+            s.playlist.popup = Some(latency_menu(s, s.selected_mixer, false, at.0, at.1 + 10.0));
+            None
+        }
         MHit::Scale | MHit::EqGraph => None,
     }
 }
@@ -549,6 +568,67 @@ fn record_menu(s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
+/// A latency setting as the right panel's combo and the hints show it: "(none)", "12 ms", "-3.5 ms".
+pub fn latency_text(ms: f32) -> String {
+    if ms == 0.0 {
+        return "(none)".into();
+    }
+    let t = format!("{ms:.2}");
+    format!("{} ms", t.trim_end_matches('0').trim_end_matches('.'))
+}
+
+/// The input clock's (`input`) or the track latency combo's menu (spec: audio/track-io.md §1.1, §2.6): Reset, Set in
+/// ms / samples / beats; the original's other entries are greyed (its own greyed ones checked as it shows them).
+fn latency_menu(s: &State, t: u16, input: bool, x: f32, y: f32) -> Popup {
+    use crate::typein::LatUnit;
+    let now = track(s, t).map_or(0.0, |m| if input { m.latency_in } else { m.latency_out });
+    let set = |label: &'static str, u: LatUnit| PItem::new(label, Cmd::Mixer(MCmd::Latency(t, input, Some(u))));
+    let reset = PItem::new("Reset", Cmd::Mixer(MCmd::Latency(t, input, None)));
+    let mut items = vec![
+        PItem::head(format!("{} latency: {}", if input { "Input" } else { "Track" }, latency_text(now))),
+        if now == 0.0 { reset.off() } else { reset },
+        set("Set in ms...", LatUnit::Ms),
+        set("Set in samples...", LatUnit::Samples),
+        set("Set in beats...", LatUnit::Beats),
+    ];
+    if input {
+        items.extend([PItem::sep(), PItem::not_yet("Adjust position of recorded audio").mark(Mark::Check(true))]);
+    } else {
+        items.extend([
+            PItem::sub("Set from", vec![PItem::not_yet("(nothing to set it from)")]),
+            PItem::sep(),
+            PItem::not_yet("Delay audio output").mark(Mark::Check(true)),
+            PItem::head("Bypass track latency compensation"),
+            PItem::not_yet("Never").mark(Mark::Radio(true)),
+            PItem::not_yet("Always").mark(Mark::Radio(false)),
+            PItem::not_yet("When recording or not playing").mark(Mark::Radio(false)),
+        ]);
+    }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// Sets track `t`'s input (`input`) or output latency setting, in ms: one undo step, "Track latency"; playback takes it
+/// at once (delay compensation works it out again).
+pub(crate) fn set_latency(s: &mut State, t: u16, input: bool, ms: f32) {
+    if track(s, t).is_none_or(|m| (if input { m.latency_in } else { m.latency_out }) == ms) {
+        return;
+    }
+    edit(s, LATENCY, Region::Track(t), |s| {
+        if let Some(m) = track_mut(s, t) {
+            if input {
+                m.latency_in = ms;
+            } else {
+                m.latency_out = ms;
+            }
+        }
+        changed(s);
+    });
+    s.message = Some(format!("{} - {} latency: {}", name(s, t), if input { "Input" } else { "Track" }, latency_text(ms)));
+}
+
+/// The undo step of a latency setting.
+pub const LATENCY: &str = "Track latency";
+
 /// Track `t` takes its input alone (the External input question's Yes).
 pub(crate) fn external_only(s: &mut State, t: u16) {
     if let Some(m) = track_mut(s, t) {
@@ -656,6 +736,12 @@ pub fn right(app: &mut App, h: MHit) -> bool {
             });
         }
         MHit::Polarity(n) | MHit::Swap(n) => select(s, n, false),
+        MHit::Latency(n) => {
+            select(s, n, false);
+            s.playlist.popup = Some(latency_menu(s, n, false, at.0, at.1));
+        }
+        MHit::InLatency => s.playlist.popup = Some(latency_menu(s, s.selected_mixer, true, at.0, at.1)),
+        MHit::OutLatency => s.playlist.popup = Some(latency_menu(s, s.selected_mixer, false, at.0, at.1)),
         _ => return false,
     }
     true
@@ -1437,6 +1523,14 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             let tg = targets(s, n);
             app.arm_tracks(&tg, on)
         }
+        MCmd::Latency(t, input, None) => {
+            set_latency(s, t, input, 0.0);
+            None
+        }
+        MCmd::Latency(t, input, Some(u)) => {
+            crate::typein::open(s, crate::typein::Target::Latency(t, input, u), at);
+            None
+        }
         MCmd::AutoClips => {
             let on = !crate::settings_file::flag(crate::track_rec::AUTO_CLIPS, true);
             crate::settings_file::set_flag(crate::track_rec::AUTO_CLIPS, on);
@@ -1946,6 +2040,49 @@ mod tests {
         assert_eq!(output_choices(Some(&wasapi)), [(0, "Speakers".to_string())]);
         assert_eq!(choice_label(-1, &pairs), "(none)");
         assert_eq!(choice_label(4, &monos), "(not available)");
+    }
+
+    /// spec: audio/track-io.md §2.6: the latency menus; values typed in ms, samples or beats; one undo step each.
+    #[test]
+    fn latency_settings_are_typed_in_and_undo() {
+        use crate::typein::{accept, parse, LatUnit, Target};
+        let mut a = app();
+        a.state.project.tempo = Some(120.0);
+        // The app's tick gives the tracks their ids, which the undo steps name them by.
+        a.state.control.settle(&mut a.state.project);
+        let labels = |p: &Popup| p.items.iter().map(|i| (i.label.to_string(), i.enabled)).collect::<Vec<_>>();
+        let out = labels(&latency_menu(&a.state, 2, false, 0.0, 0.0));
+        assert_eq!(out[0].0, "Track latency: (none)");
+        assert_eq!(out[1], ("Reset".to_string(), false), "nothing to reset");
+        assert!(out[2..5].iter().all(|(_, on)| *on));
+        assert!(out.iter().any(|(l, on)| l == "Delay audio output" && !on));
+        let input = labels(&latency_menu(&a.state, 2, true, 0.0, 0.0));
+        assert_eq!(input[0].0, "Input latency: (none)");
+        assert_eq!(input.last().unwrap().0, "Adjust position of recorded audio");
+        // ms, beats (500 ms at 120 BPM), with or without the unit; text that is no number changes nothing.
+        let t = Target::Latency(2, false, LatUnit::Ms);
+        assert_eq!(parse(t, false, "12.5 ms"), Some(12.5));
+        assert_eq!(parse(t, false, "12.5%"), None);
+        accept(&mut a.state, t, false, "12.5");
+        assert_eq!(track(&a.state, 2).unwrap().latency_out, 12.5);
+        assert_eq!(crate::typein::text(&a.state, Target::Latency(2, false, LatUnit::Beats), false), "0.025");
+        accept(&mut a.state, Target::Latency(2, true, LatUnit::Beats), false, "0.5 beats");
+        assert_eq!(track(&a.state, 2).unwrap().latency_in, 250.0);
+        accept(&mut a.state, Target::Latency(2, true, LatUnit::Beats), false, "x");
+        accept(&mut a.state, t, false, "5000");
+        assert_eq!(track(&a.state, 2).unwrap().latency_out, 1000.0, "kept within a second");
+        assert!(labels(&latency_menu(&a.state, 2, false, 0.0, 0.0))[1].1, "Reset");
+        run(&mut a, MCmd::Latency(2, false, None));
+        assert_eq!(track(&a.state, 2).unwrap().latency_out, 0.0);
+        assert_eq!(latency_text(250.0), "250 ms");
+        assert_eq!(latency_text(-1.25), "-1.25 ms");
+        // Each change is one step, undone in turn.
+        crate::history::undo(&mut a.state);
+        assert_eq!(track(&a.state, 2).unwrap().latency_out, 1000.0);
+        crate::history::undo(&mut a.state);
+        crate::history::undo(&mut a.state);
+        assert_eq!(track(&a.state, 2).unwrap().latency_in, 0.0);
+        assert_eq!(track(&a.state, 2).unwrap().latency_out, 12.5);
     }
 
     /// spec: audio/track-io.md §1.3, §1.4, §2.3: the record menu; choosing an input asks once; the edits undo, arming

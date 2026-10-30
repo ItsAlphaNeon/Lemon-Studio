@@ -88,7 +88,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   are saved back
 - Automation of a mixer track or slot behind late audio waits for it, as in FL Studio
 - A sidechain input waits for the slot it feeds, so it lines up with the audio there
-- Not yet: editing the latency settings
+- The latency settings are edited from the input clock, the track latency combo and the strip's latency clock (right
+  click): Reset, or a value typed in ms, samples or beats; the clocks turn orange when set
 
 ## ✅ Plugin management
 
