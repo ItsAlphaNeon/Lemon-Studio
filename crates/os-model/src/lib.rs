@@ -1187,6 +1187,9 @@ pub struct ChannelRack {
     /// The colour event 128 holds, whether or not it is a custom colour: the playlist draws audio and automation
     /// clips with it (spec: ui/playlist.md §2, "Channel-colour rule"). Display only; saving writes `Channel::color`.
     pub stored_color: Option<Rgb>,
+    /// The icon number event 155 holds, 0 = none (spec: flp/events/channels.md, flp/events/mixer.md "Icon numbers").
+    /// Read only: saving keeps the file's own event.
+    pub icon: u32,
 }
 
 /// One channel envelope record, values as stored (spec: audio/channel-envelopes.md). Times are knob
