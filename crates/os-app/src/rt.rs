@@ -20,6 +20,7 @@
 
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::Once;
+use std::time::{Duration, Instant};
 
 /// The priority asked for (rtkit allows up to its `MaxRealtimePriority`, 20 by default).
 const PRIORITY: i32 = 20;
@@ -197,21 +198,69 @@ fn waits_and_cpu(tid: i32) -> Option<(u64, u64)> {
     Some((waits, cpu))
 }
 
+/// What the watchdog knows of one promoted thread.
+#[derive(Clone, Copy)]
+struct Watched {
+    tid: i32,
+    /// Its waits and CPU time (ns) when it was last seen to have waited.
+    waits: u64,
+    cpu: u64,
+    /// Real-time at the last look.
+    rt: bool,
+    /// Taken back to normal priority: since when it has stayed calm (none of its runs over `CALM_RUN_NS`).
+    calm_since: Option<Instant>,
+    /// How long it must stay calm to be promoted again: `CALM_FIRST`, doubled at each promotion again up to `CALM_MAX`.
+    calm_for: Duration,
+}
+
+/// A demoted thread is promoted again after this long calm, the first time.
+const CALM_FIRST: Duration = Duration::from_secs(5);
+const CALM_MAX: Duration = Duration::from_secs(80);
+/// Calm: no run between two waits longer than this.
+const CALM_RUN_NS: u64 = 20_000_000;
+
 /// The watchdog's loop: per promoted thread, its waits and its CPU time when it was last seen to have waited; one
-/// still real-time that has used `WATCH_LIMIT_NS` since is demoted.
+/// still real-time that has used `WATCH_LIMIT_NS` since is demoted. A demoted one (by the watchdog or the SIGXCPU
+/// handler) that then stays calm is promoted again, so one stall (a page fault after a long idle) does not leave the
+/// audio at normal priority for the rest of the session.
 fn watch() {
     let normal = libc::sched_param { sched_priority: 0 };
-    let mut seen: [(i32, u64, u64); 64] = [(0, 0, 0); 64];
+    let fresh = |tid: i32| Watched { tid, waits: 0, cpu: 0, rt: false, calm_since: None, calm_for: CALM_FIRST };
+    let mut seen: [Watched; 64] = [fresh(0); 64];
     loop {
         std::thread::sleep(WATCH_EVERY);
-        for (slot, last) in PROMOTED.iter().zip(seen.iter_mut()) {
+        let now = Instant::now();
+        for (slot, w) in PROMOTED.iter().zip(seen.iter_mut()) {
             let t = slot.load(Ordering::Acquire);
             let Some((waits, cpu)) = (t != 0).then(|| waits_and_cpu(t)).flatten() else { continue };
-            if last.0 != t || last.1 != waits {
-                *last = (t, waits, cpu);
-            } else if cpu.saturating_sub(last.2) >= WATCH_LIMIT_NS && is_realtime(t) {
-                demote(t, &normal);
-                crate::dropout_log::write(&format!("a real-time thread ran {} ms without waiting: normal priority", (cpu - last.2) / 1_000_000));
+            if w.tid != t {
+                *w = Watched { waits, cpu, ..fresh(t) };
+            }
+            let run = if w.waits != waits {
+                (w.waits, w.cpu) = (waits, cpu);
+                0
+            } else {
+                cpu.saturating_sub(w.cpu)
+            };
+            if is_realtime(t) {
+                w.rt = true;
+                if run >= WATCH_LIMIT_NS {
+                    demote(t, &normal);
+                    crate::dropout_log::write(&format!("a real-time thread ran {} ms without waiting: normal priority", run / 1_000_000));
+                    (w.rt, w.calm_since) = (false, Some(now));
+                }
+                continue;
+            }
+            if w.rt {
+                // Demoted since the last look (the SIGXCPU handler).
+                (w.rt, w.calm_since) = (false, Some(now));
+            }
+            let Some(since) = w.calm_since else { continue };
+            if run > CALM_RUN_NS {
+                w.calm_since = Some(now);
+            } else if now.duration_since(since) >= w.calm_for && promote(t).is_ok() {
+                crate::dropout_log::write(&format!("a real-time thread calm for {} s: real-time priority again", w.calm_for.as_secs()));
+                (w.rt, w.calm_since, w.calm_for) = (true, None, (w.calm_for * 2).min(CALM_MAX));
             }
         }
     }

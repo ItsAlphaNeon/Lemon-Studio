@@ -38,8 +38,8 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **Tiling layout, the default.** General settings ▸ Display ▸ Layout: Tiling or Classic. The tiling layout has:
   - a toolbar of one row (menus, transport, time, pattern, main volume and pitch, windows, utilities);
   - a status bar along the bottom (Lemon's mark, the title and hint, global snap, mode buttons, pickers, CPU and
-    memory): the dropouts since the program started show in a red pill, and the audio load turns yellow, orange and
-    red as it climbs;
+    memory): the dropouts heard since the program started (those that cut into sound; the audio log has every one)
+    show in a red pill, and the audio load turns yellow, orange and red as it climbs;
   - the workspace and the browser as rounded cards over a darker backdrop; the browser's splitter is the gap between
     them, and the mixer's routing cables hang over the gap below. With Animations on "Playful", the cables between
     tracks at most three apart (bus 3 into the master, say) hang on in front of the split window below the mixer;
@@ -103,9 +103,11 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **Real-time audio threads (Linux).** The feeder that renders and the device callback run at real-time priority
   (through rtkit, as PipeWire's do), so a busy machine no longer makes them late at small buffers. A thread that keeps
   the CPU too long (a project too heavy to play in time, or the kernel freeing memory for it on a full machine) goes
-  back to normal priority instead of the kernel ending the program. Reading a plugin's whole state (a save, an
-  autosave, the journal) waits for the moment just after the audio thread processed it, so it makes no plugin late. Under load (16 busy threads per core, 4 ms of work per 5.3 ms block) a normal-priority thread missed all of
-  1500 blocks, a real-time one none (`rt::tests::deadlines_under_load`).
+  back to normal priority instead of the kernel ending the program, and gets real-time priority back once it has
+  stayed calm for a few seconds. The UI touches a plugin only just after the audio thread processed it (reading its
+  state, its parameters, its window's work), so it makes no plugin late. Under load (16 busy threads per core, 4 ms
+  of work per 5.3 ms block) a normal-priority thread missed all of 1500 blocks, a real-time one none
+  (`rt::tests::deadlines_under_load`).
 - **A dropout log (Linux).** `Logs/audio.log` in the user folder says why playback dropped out: each playback's start
   (its audio settings), each audio thread's priority (real-time, or refused and why, or taken back by the safety cap),
   and dropouts at most once a second, by kind (the feeder late, a plugin late, the device's own underruns) with the

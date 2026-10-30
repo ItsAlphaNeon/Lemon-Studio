@@ -4461,7 +4461,8 @@ impl App {
             let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());
             // Every stream's engine voices and every hosted instrument's (spec: audio/voices.md §5).
             let voices = tp.engine_voices() + self.plugins.voices();
-            let dropouts = tp.underruns();
+            // The dropouts heard (over sound); the audio log has every one.
+            let dropouts = tp.heard_dropouts();
             if self.state.shown(Win::Perf) {
                 let src = self.perf_sources();
                 if self.state.perf.read(now, src) {
