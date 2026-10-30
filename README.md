@@ -80,7 +80,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Playback engine | 🚧 | Renders ahead of the audio device so edits do not cause dropouts; voice limits, cut groups, glides, layer channels; one audio thread for now |
 | Automation | 🚧 | Clips for channel, mixer and plugin parameters with every curve shape, their range and their LFO; channel volume and pan moves record into a pattern; not yet recording into automation clips |
 | Project files | 🚧 | Opens and saves projects from FL Studio 24.2 and later; older versions are on the roadmap. Keep backups |
-| Built-in instruments and effects | 🚧 | Instruments: Lemon Sampler (long samples can play straight from disk), Lemon Trio (three oscillators) and Citrus (a six-operator synth that plays Sytrus patches). Effects: Lemon Parametric EQ (all of FL's quality modes: HQ+, HQ Enhanced, linear phase), Limiter, Reverb, Delay, Chorus, Stereo Shaper, Stereo Enhancer, Balance, Soft Clipper, Fast Distortion, Transient Processor, Filter, Flanger and Phaser, plus Pulp Filter (a pattern-controlled multi-filter) and Press (a multiband maximiser). All built in, and also VST3 and CLAP plugins for other DAWs; a project's Fruity Limiter slots play Lemon Limiter's sound, sidechain included |
+| Built-in instruments and effects | 🚧 | Instruments: Lemon Sampler (long samples can play straight from disk), Lemon Trio (three oscillators), Citrus (a six-operator synth that plays Sytrus patches) and Lemon Slicer (a loop cut into slices that plays Fruity Slicer channels). Effects: Lemon Parametric EQ (all of FL's quality modes: HQ+, HQ Enhanced, linear phase), Limiter, Reverb, Delay, Chorus, Stereo Shaper, Stereo Enhancer, Balance, Soft Clipper, Fast Distortion, Transient Processor, Filter, Flanger and Phaser, plus Pulp Filter (a pattern-controlled multi-filter) and Press (a multiband maximiser). All built in, and also VST3 and CLAP plugins for other DAWs; a project's Fruity Limiter slots play Lemon Limiter's sound, sidechain included |
 | Exporting audio | ✅ | Song, pattern or selection to WAV, FLAC, MP3 and OGG at once; bit depth, sample rate, interpolation, dither, mono, tails, stems and WAV markers; a pattern rendered as an audio clip (Quick render, Render and replace) |
 | MIDI file import / export | ✅ | Import into a new project, the open one or a piano roll channel (tracks, channels, tempo changes, time signatures, markers); export a pattern or the song's patterns |
 | Note input | 🚧 | Mouse, computer keyboard, MIDI controllers (velocity curves, sustain pedal, pitch bend, aftertouch) and the touch controller; note recording into patterns with loop record, precount and Start on input; step edit |
@@ -389,6 +389,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`press`](plugins/press) | Press effect, a multiband maximiser (VST3 + CLAP) |
 | [`tesla`](plugins/tesla) | Tesla, the audio editor and recorder (VST3 + CLAP) |
 | [`citrus`](plugins/citrus) | Citrus instrument, a six-operator synthesizer (VST3 + CLAP) |
+| [`lemon-slicer`](plugins/lemon-slicer) | Lemon Slicer instrument, a loop cut into slices (VST3 + CLAP) |
 
 ## Roadmap
 

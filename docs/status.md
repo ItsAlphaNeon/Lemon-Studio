@@ -237,6 +237,11 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   and CLAP bundles for other hosts
 - Citrus, a six-operator synthesizer (a recreation of Sytrus) with its editor: it plays every Sytrus channel of a
   project and Sytrus patches, keeping their state byte for byte; also a VST3 and CLAP plugin
+- Lemon Slicer (Fruity Slicer) as a VST3 and CLAP plugin with a Pith editor: it loads a loop and slices it by the
+  file's markers, by beats or by transients, plays slice n on C5 + n (pitch, attack, decay, declick, reverse, play to
+  end), and dumps the slices to the piano roll as notes. A project's Fruity Slicer channels play and open in it and
+  are saved back byte for byte; a loop newly loaded and sliced in it opens in the original too. The time stretch and
+  the original's other dump modes aren't played or offered yet, and Slicex channels aren't supported
 - Lemon Limiter (Fruity Limiter: limiter, compressor and noise gate), Lemon Reverb (Fruity Reeverb 2) and Lemon
   Delay (Fruity Delay 3), also VST3 and CLAP plugins. A project's Fruity Reeverb 2, Fruity Delay 3 and Fruity Limiter
   slots play through the same sound (the Limiter's compressor, gate, look-ahead and sidechain included)

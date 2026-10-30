@@ -30,6 +30,7 @@ pub fn file_name(name: &str) -> &str {
     match name {
         LEMON_TRIO => FILE_NAME,
         crate::citrus::CITRUS => crate::citrus::FILE_NAME,
+        crate::slicer::LEMON_SLICER => crate::slicer::FILE_NAME,
         _ => name,
     }
 }
@@ -39,6 +40,7 @@ pub fn label(name: &str) -> &str {
     match name {
         FILE_NAME => LEMON_TRIO,
         crate::citrus::FILE_NAME => crate::citrus::CITRUS,
+        n if crate::slicer::is_file_name(n) => crate::slicer::LEMON_SLICER,
         _ => name,
     }
 }
