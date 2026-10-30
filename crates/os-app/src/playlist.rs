@@ -3147,10 +3147,9 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
             crate::perform::stop(s, t, now, alt);
             s.message = Some(format!("{}: stopping", track_name(s, t)));
         } else if app.ctrl {
-            // Ctrl+click: the clip's column as a scene (§3a).
-            let col = crate::perform::slot_of(s, ci).map_or(0, |x| x.1);
+            // Ctrl+click: the clip's clip group, track group or column as a scene (§3a).
             let plus = s.playlist.perf_plus_scene;
-            s.message = crate::perform::trigger_scene(s, col, now, alt, plus);
+            s.message = crate::perform::trigger_clip_scene(s, ci, now, alt, plus);
         } else {
             s.message = crate::perform::trigger(s, ci, now, alt, app.shift);
             if s.playlist.perform.held.is_some() {

@@ -33,6 +33,8 @@ pub struct Perform {
     pub paging: bool,
     /// Note 125 (Scene mode) or 126 (+Scene mode, `true`) held on the MIDI channel: notes trigger their column's scene.
     pub scene: Option<bool>,
+    /// Note 127 (Global Snap) held on the MIDI channel: triggers and stops sync to the global snap.
+    pub snap: bool,
 }
 
 /// The MIDI grid (§3): notes 0–119 are this many tracks of this many columns.
@@ -257,6 +259,7 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     }
     let first = next_in_slot(s, &cols, track, col)?;
     let p = ppq(s);
+    let unit = sync_unit(s, set.trigger_sync, first.length);
     let at = match now {
         None => s.playlist.pos.max(z),
         Some(t) if instant => t,
@@ -264,7 +267,7 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
             let playing = s.playlist.perform.live.get(&track).and_then(|l| l.pass_at(t)).map(Clip::end);
             match playing.filter(|_| queue || set.queue) {
                 Some(end) => end,
-                None => match PerfSettings::sync_ticks(set.trigger_sync, p, first.length, true) {
+                None => match unit {
                     Some(unit) => sync_point(t, z, unit, set.tolerant),
                     None => t,
                 },
@@ -287,32 +290,86 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     Some(format!("{}: {} at {bar}:{step:02}", crate::playlist::track_name(s, track), PerfSettings::PRESSES[usize::from(set.press)]))
 }
 
-/// A scene (§3a): the clips that start in column `col` on every track that has some there, triggered together, each
-/// track by its own settings. A Scene stops the tracks not in it; a +Scene (`plus`) leaves them playing. `None` when the
-/// column has no clips.
-pub fn trigger_scene(s: &mut State, col: usize, now: Option<u32>, instant: bool, plus: bool) -> Option<String> {
-    let z = zone(s)?;
+/// The Trigger sync unit (§3, §4): the track's `sync` setting for a clip of `len` ticks, or with note 127 held the
+/// global snap (Lemon Studio's reading of the manual's "Global Snap": Line and Cell count as a beat, (none) as no sync).
+fn sync_unit(s: &State, sync: u8, len: u32) -> Option<u32> {
+    use crate::playlist::Snap;
+    if !s.playlist.perform.snap {
+        return PerfSettings::sync_ticks(sync, ppq(s), len, true);
+    }
+    match s.global_snap.now {
+        Snap::None => None,
+        Snap::Line | Snap::Cell => Some(ppq(s)),
+        sn => Some(sn.ticks(ppq(s), 0.0)),
+    }
+}
+
+/// The tracks with clips starting in column `col` that pass `keep`, sorted.
+fn column_tracks(s: &State, col: usize, keep: impl Fn(u16) -> bool) -> Vec<u16> {
+    let Some(z) = zone(s) else { return Vec::new() };
     let cols = columns(s);
-    let mut tracks: Vec<u16> = clips(s).iter().filter(|c| c.position < z && column_of(&cols, c.position) == col).map(|c| c.track).collect();
+    let mut tracks: Vec<u16> = clips(s).iter().filter(|c| c.position < z && column_of(&cols, c.position) == col).map(|c| c.track).filter(|&t| keep(t)).collect();
     tracks.sort_unstable();
     tracks.dedup();
-    if tracks.is_empty() {
+    tracks
+}
+
+/// A column scene (§3a): the clips that start in column `col` on every track that has some there. `None` when the
+/// column has no clips.
+pub fn trigger_scene(s: &mut State, col: usize, now: Option<u32>, instant: bool, plus: bool) -> Option<String> {
+    let slots = column_tracks(s, col, |_| true).into_iter().map(|t| (t, col)).collect();
+    play_scene(s, slots, &(col + 1).to_string(), now, instant, plus)
+}
+
+/// The slots a Ctrl+click on zone clip `i` triggers (§3a), and the scene's name for the hint: the clip's clip group
+/// (each grouped clip's slot, the earliest on a track), else its column on its track group's tracks (the group track
+/// and those grouped under it), else its column on every track.
+pub fn scene_of(s: &State, i: usize) -> Option<(Vec<(u16, usize)>, String)> {
+    let z = zone(s)?;
+    let (track, col) = slot_of(s, i)?;
+    let all = clips(s);
+    let g = all.get(i)?.group();
+    if g != 0 {
+        let cols = columns(s);
+        let mut v: Vec<&Clip> = all.iter().filter(|c| c.group() == g && c.position < z).collect();
+        v.sort_by_key(|c| (c.track, c.position));
+        v.dedup_by_key(|c| c.track);
+        return Some((v.iter().map(|c| (c.track, column_of(&cols, c.position))).collect(), format!("(clip group {g})")));
+    }
+    let lead = crate::playlist::group_track(s, track).or(crate::playlist::is_group_track(s, track).then_some(track));
+    let Some(l) = lead else {
+        return Some((column_tracks(s, col, |_| true).into_iter().map(|t| (t, col)).collect(), (col + 1).to_string()));
+    };
+    let tracks = column_tracks(s, col, |t| t == l || crate::playlist::group_track(s, t) == Some(l));
+    Some((tracks.into_iter().map(|t| (t, col)).collect(), format!("{} ({})", col + 1, crate::playlist::track_name(s, l))))
+}
+
+/// Ctrl+click on zone clip `i` (§3a): the scene `scene_of` names.
+pub fn trigger_clip_scene(s: &mut State, i: usize, now: Option<u32>, instant: bool, plus: bool) -> Option<String> {
+    let (slots, name) = scene_of(s, i)?;
+    play_scene(s, slots, &name, now, instant, plus)
+}
+
+/// A scene (§3a): `slots` triggered together, each track by its own settings. A Scene stops the tracks not in it; a
+/// +Scene (`plus`) leaves them playing. `None` when there are none.
+fn play_scene(s: &mut State, slots: Vec<(u16, usize)>, name: &str, now: Option<u32>, instant: bool, plus: bool) -> Option<String> {
+    if slots.is_empty() {
         return None;
     }
     if !plus {
-        let others: Vec<u16> = s.playlist.perform.live.keys().copied().filter(|t| !tracks.contains(t)).collect();
+        let others: Vec<u16> = s.playlist.perform.live.keys().copied().filter(|t| !slots.iter().any(|x| x.0 == *t)).collect();
         for t in others {
             stop(s, t, now, instant);
         }
     }
     // A scene holds no track (its Press acts on the slot alone).
     let held = s.playlist.perform.held;
-    for &t in &tracks {
+    for &(t, col) in &slots {
         trigger_slot(s, t, col, now, instant, false);
     }
     s.playlist.perform.held = held;
-    let n = tracks.len();
-    Some(format!("{} {}: {n} track{}", if plus { "+Scene" } else { "Scene" }, col + 1, if n == 1 { "" } else { "s" }))
+    let n = slots.len();
+    Some(format!("{} {name}: {n} track{}", if plus { "+Scene" } else { "Scene" }, if n == 1 { "" } else { "s" }))
 }
 
 /// The track progress display (§3): each launched track's progress through its pass at `tick`, 0 to 1.
@@ -363,7 +420,7 @@ pub fn stop(s: &mut State, track: u16, now: Option<u32>, instant: bool) -> bool 
     let set = settings(s, track);
     let z = zone(s).unwrap_or(0);
     let len = l.pass_at(t).map_or(4 * ppq(s), |c| c.length);
-    let at = match PerfSettings::sync_ticks(set.trigger_sync, ppq(s), len, true).filter(|_| !instant) {
+    let at = match sync_unit(s, set.trigger_sync, len).filter(|_| !instant) {
         Some(unit) => sync_point(t, z, unit, false),
         None => t,
     };
@@ -395,6 +452,10 @@ pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option
                 s.playlist.perform.scene = if down { Some(key == 126) } else { None };
                 None
             }
+            127 => {
+                s.playlist.perform.snap = down;
+                None
+            }
             _ if down => scroll(s, key),
             _ => None,
         };
@@ -418,7 +479,7 @@ pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option
 }
 
 /// Notes 120–124 (§3): scroll the MIDI grid up, down, left or right, a track or column at a time or a page with paging
-/// on, which 124 toggles. 127 (Global Snap) does nothing yet.
+/// on, which 124 toggles.
 fn scroll(s: &mut State, key: u8) -> Option<String> {
     let cols = columns(s).len();
     let p = &mut s.playlist.perform;
@@ -744,6 +805,51 @@ mod tests {
         // Playing, the tracks left out stop at their sync point.
         trigger_scene(s, 0, Some(3100), true, false);
         assert_eq!(track_progress(s, 3100 + 96), vec![(0, 0.25), (2, 0.25)]);
+    }
+
+    /// §3a: Ctrl+click makes a clip group's clips a scene, else a track group's column, else the whole column.
+    #[test]
+    fn group_scenes() {
+        let mut app = app();
+        let s = &mut app.state;
+        let a = arr_mut(s);
+        a.clips.push(Clip::new(0, 384, 2, ClipSource::Pattern(1)));
+        a.clips.push(Clip::new(0, 384, 3, ClipSource::Pattern(1)));
+        a.tracks[3].grouped = true;
+        assert_eq!(scene_of(s, 0).map(|x| x.0), Some(vec![(0, 0), (2, 0), (3, 0)]), "track 1 is in no group");
+        assert_eq!(scene_of(s, 5).map(|x| x.0), Some(vec![(2, 0), (3, 0)]), "track 4 is grouped under track 3");
+        assert_eq!(scene_of(s, 4).map(|x| x.0), Some(vec![(2, 0), (3, 0)]), "track 3 leads the group");
+        assert_eq!(trigger_clip_scene(s, 4, None, false, false).as_deref(), Some("Scene 1 (Track 3): 2 tracks"));
+        let cols = |s: &State| s.playlist.perform.live.iter().map(|(&t, l)| (t, l.column)).collect::<Vec<_>>();
+        assert_eq!(cols(s), vec![(2, 0), (3, 0)]);
+        // A clip group: each grouped clip's slot.
+        arr_mut(s).clips[1].set_group(5);
+        arr_mut(s).clips[4].set_group(5);
+        assert_eq!(trigger_clip_scene(s, 1, None, false, false).as_deref(), Some("Scene (clip group 5): 2 tracks"));
+        assert_eq!(cols(s), vec![(0, 1), (2, 0)], "track 4 is not in it and stops");
+        assert_eq!(trigger_clip_scene(s, 4, None, false, true).as_deref(), Some("+Scene (clip group 5): 2 tracks"));
+        assert_eq!(scene_of(s, 2), None, "not in the zone");
+    }
+
+    /// §3: note 127 held: triggers sync to the global snap in place of the track's Trigger sync.
+    #[test]
+    fn global_snap_note() {
+        let mut app = app();
+        let s = &mut app.state;
+        let z = 3072;
+        s.global_snap.now = crate::playlist::Snap::Beat;
+        midi_note(s, 0, true, Some(z + 30));
+        assert_eq!(s.playlist.perform.live[&0].passes.iter().find(|c| c.position > z + 30).map(|c| c.position), Some(z + 384), "the track's 4 beats");
+        midi_note(s, 127, true, None);
+        assert!(s.playlist.perform.snap);
+        midi_note(s, 1, true, Some(z + 30));
+        let l = &s.playlist.perform.live[&0];
+        assert_eq!((l.column, l.passes.iter().find(|c| c.position > z + 30).map(|c| c.position)), (1, Some(z + 96)), "a beat");
+        s.global_snap.now = crate::playlist::Snap::None;
+        midi_note(s, 0, true, Some(z + 30));
+        assert_eq!(s.playlist.perform.live[&0].passes.iter().find(|c| c.position >= z + 30).map(|c| c.position), Some(z + 30), "(none): at once");
+        midi_note(s, 127, false, None);
+        assert!(!s.playlist.perform.snap);
     }
 
     #[test]
