@@ -16,7 +16,8 @@ use crate::knobs::KnobId;
 use crate::record::{Extra, Opt, RecCmd};
 use crate::step_edit::Src;
 
-/// A held arrow repeats after 6 ticks of 20 ms; banks then step every 6 ticks, the selected mixer track every 2.
+/// A held arrow repeats after 6 ticks; banks then step every 6 ticks, the selected mixer track every 2. A tick is taken
+/// as 20 ms, a guess (spec: controllers/launchkey-mk4.md "Mixer bank (Track ◀ / ▶ without Shift)").
 const REPEAT_DELAY: Duration = Duration::from_millis(6 * 20);
 const REPEAT_SLOW: Duration = Duration::from_millis(6 * 20);
 const REPEAT_FAST: Duration = Duration::from_millis(2 * 20);
@@ -776,7 +777,8 @@ impl App {
         self.notify("Mixer", MIXER_PAGES[new]);
     }
 
-    /// Plugin mode's pages: the encoder arrows step through the plugin's parameters, eight at a time.
+    /// Plugin mode's pages: the encoder arrows step through the plugin's parameters, eight at a time (a Lemon Studio
+    /// addition; spec: controllers/launchkey-mk4.md "Lemon Studio (cutting-edge)").
     fn plugin_page_step(&mut self, by: isize) {
         let page = self.drive().plugin_page;
         let Some(pt) = plugin_target(&self.state, page) else { return };

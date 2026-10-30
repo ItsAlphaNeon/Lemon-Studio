@@ -767,7 +767,7 @@ fn card_tabs(st: &State) -> Vec<(usize, Rect)> {
 }
 
 /// The card's volume knob, left of its tabs: the channel's volume, as the instrument rack's knob (a channel's window
-/// only).
+/// only): the one control of the old strip kept in the title row.
 fn card_knob(st: &State) -> Option<Rect> {
     st.channel().then(|| {
         let end = card_tabs(st).first().map_or(presets_rect(st).x, |&(_, r)| r.x);
