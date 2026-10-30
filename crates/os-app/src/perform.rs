@@ -27,7 +27,13 @@ pub struct Perform {
     pub turn: BTreeMap<(u16, usize), usize>,
     /// The track whose slot is held with the mouse (Press Hold & stop, Hold & motion).
     pub held: Option<u16>,
+    /// The MIDI grid's first (track, column) (notes 120–123 scroll it) and whether it scrolls a page at a time (124).
+    pub origin: (u16, usize),
+    pub paging: bool,
 }
+
+/// The MIDI grid (§3): notes 0–119 are this many tracks of this many columns.
+pub const GRID: (u16, usize) = (10, 12);
 
 /// A track's launched clip.
 #[derive(Debug, Clone, PartialEq)]
@@ -346,10 +352,11 @@ pub fn release(s: &mut State, now: Option<u32>) {
 /// and the note % 12 the column. A key's release ends Press Hold & stop and Hold & motion as the mouse button's does.
 pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option<String> {
     zone(s)?;
-    let (track, col) = (u16::from(key / 12), usize::from(key % 12));
     if key >= 120 {
-        return None;
+        return if down { scroll(s, key) } else { None };
     }
+    let o = s.playlist.perform.origin;
+    let (track, col) = (o.0 + u16::from(key / 12), o.1 + usize::from(key % 12));
     if !down {
         if s.playlist.perform.live.get(&track).is_some_and(|l| l.column == col) {
             release_track(s, track, now);
@@ -361,6 +368,37 @@ pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option
     let hint = trigger_slot(s, track, col, now, false, false);
     s.playlist.perform.held = held;
     hint
+}
+
+/// Notes 120–124 (§3): scroll the MIDI grid up, down, left or right, a track or column at a time or a page with paging
+/// on, which 124 toggles. 125–127 (scenes, Global Snap) do nothing yet.
+fn scroll(s: &mut State, key: u8) -> Option<String> {
+    let cols = columns(s).len();
+    let p = &mut s.playlist.perform;
+    let (dt, dc) = if p.paging { GRID } else { (1, 1) };
+    match key {
+        120 => p.origin.0 = p.origin.0.saturating_sub(dt),
+        121 => p.origin.0 = (p.origin.0 + dt).min(crate::playlist::TRACKS - GRID.0),
+        122 => p.origin.1 = p.origin.1.saturating_sub(dc),
+        123 => p.origin.1 = (p.origin.1 + dc).min(cols.saturating_sub(1)),
+        124 => p.paging = !p.paging,
+        _ => return None,
+    }
+    let (t, c) = (p.origin.0 + 1, p.origin.1 + 1);
+    let paging = if p.paging { ", paging" } else { "" };
+    s.piano.dirty = true;
+    Some(format!("Performance MIDI grid: tracks {t}–{}, columns {c}–{}{paging}", t + GRID.0 - 1, c + GRID.1 - 1))
+}
+
+/// The part of the zone the MIDI grid reaches, as (first track, track count, from tick, to tick), while the Performance
+/// mode MIDI channel is set (the playlist outlines it).
+pub fn grid_area(s: &State) -> Option<(u16, u16, u32, u32)> {
+    let z = zone(s)?;
+    (crate::prefs::number(&crate::prefs::PERFORMANCE_CHANNEL) != 0).then_some(())?;
+    let (cols, o) = (columns(s), s.playlist.perform.origin);
+    let from = *cols.get(o.1)?;
+    let to = cols.get(o.1 + GRID.1).copied().unwrap_or(z);
+    Some((o.0, GRID.0, from, to))
 }
 
 fn release_track(s: &mut State, track: u16, now: Option<u32>) {
@@ -527,6 +565,20 @@ mod tests {
         assert!(app.state.playlist.perform.live.contains_key(&0), "another key's release");
         app.midi_notes(vec![note(0, false)]);
         assert!(!app.state.playlist.perform.live.contains_key(&0), "Hold & stop: the release stops it");
+
+        // Scrolling: one column right, then note 0 is column 2.
+        assert_eq!(grid_area(&app.state), Some((0, 10, 0, 3072)));
+        app.midi_notes(vec![note(123, true), note(123, false)]);
+        assert_eq!(app.state.message.as_deref(), Some("Performance MIDI grid: tracks 1–10, columns 2–13"));
+        assert_eq!(grid_area(&app.state), Some((0, 10, 1536, 3072)));
+        app.midi_notes(vec![note(123, true), note(0, true)]);
+        assert_eq!(app.state.playlist.perform.origin, (0, 1), "the last column is the furthest");
+        assert_eq!(app.state.playlist.perform.live[&0].column, 1);
+        app.midi_notes(vec![note(124, true), note(121, true), note(120, true), note(120, true), note(122, true)]);
+        assert_eq!(app.state.playlist.perform, Perform { origin: (0, 0), paging: true, ..app.state.playlist.perform.clone() });
+        app.midi_notes(vec![note(121, true)]);
+        assert_eq!(app.state.playlist.perform.origin, (10, 0), "a page down");
+        app.state.playlist.perform = Perform::default();
         app.state.project.performance = Some(false);
         app.midi_notes(vec![note(0, true)]);
         assert!(app.state.playlist.perform.live.is_empty(), "off: nothing is triggered");
