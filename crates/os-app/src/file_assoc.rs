@@ -17,6 +17,9 @@ use crate::app::App;
 pub const PROG_ID: &str = "LemonStudio.Project";
 /// The extension it registers.
 pub const EXT: &str = ".flp";
+/// Lemon Studio's own project files (spec: flp/lemon-format.md): no other program has them, so they are simply ours
+/// while the box is ticked.
+pub const LEMON_EXT: &str = ".lemon";
 /// The type's description and the open verb's name (spec).
 const DESCRIPTION: &str = "Lemon Studio project";
 const FRIENDLY_NAME: &str = "Lemon Studio";
@@ -134,6 +137,8 @@ pub fn tick(program: &str, seen: &Seen) -> Vec<Op> {
         set(format!(r"{PROG_ID}\shell\open\command"), "", format!("\"{exe}\" \"%1\"")),
         set(EXT.into(), "", PROG_ID.into()),
         Op::Set { key: format!(r"{EXT}\OpenWithProgids"), name: PROG_ID, data: String::new() },
+        set(LEMON_EXT.into(), "", PROG_ID.into()),
+        Op::Set { key: format!(r"{LEMON_EXT}\OpenWithProgids"), name: PROG_ID, data: String::new() },
     ]);
     ops
 }
@@ -150,6 +155,8 @@ pub fn untick(seen: &Seen) -> Vec<Op> {
         });
     }
     ops.push(Op::DeleteValue { key: format!(r"{EXT}\OpenWithProgids"), name: PROG_ID });
+    ops.push(Op::DeleteValue { key: LEMON_EXT.into(), name: "" });
+    ops.push(Op::DeleteValue { key: format!(r"{LEMON_EXT}\OpenWithProgids"), name: PROG_ID });
     ops.push(Op::DeleteTree { key: PROG_ID.into() });
     ops
 }
@@ -392,6 +399,8 @@ mod tests {
                 set(r"LemonStudio.Project\shell\open\command", "", &format!("\"{PROGRAM}\" \"%1\"")),
                 set(".flp", "", PROG_ID),
                 set(r".flp\OpenWithProgids", PROG_ID, ""),
+                set(".lemon", "", PROG_ID),
+                set(r".lemon\OpenWithProgids", PROG_ID, ""),
             ]
         );
         assert!(reg::apply(&ops));
@@ -403,11 +412,13 @@ mod tests {
             [
                 Op::DeleteValue { key: ".flp".into(), name: "" },
                 Op::DeleteValue { key: r".flp\OpenWithProgids".into(), name: PROG_ID },
+                Op::DeleteValue { key: ".lemon".into(), name: "" },
+                Op::DeleteValue { key: r".lemon\OpenWithProgids".into(), name: PROG_ID },
                 Op::DeleteTree { key: PROG_ID.into() },
             ]
         );
         reg::apply(&untick(&s));
-        // What is left: the empty `.flp` and `OpenWithProgids` keys hold no values.
+        // What is left: the empty `.flp`, `.lemon` and `OpenWithProgids` keys hold no values (two applies).
         assert_eq!(reg::dump(), (vec![], 2));
         assert!(!ticked(PROGRAM, &seen()));
     }
