@@ -224,13 +224,15 @@ impl App {
                         self.midi_forward(ev.msg);
                     }
                 }
-                // A Launchkey MK4's pitch wheel turns the selected channel's pitch knob (FL's script for its keys).
+                // A Launchkey MK4's pitch wheel turns the selected channel's pitch knob (FL's script for its keys); the
+                // sounding notes follow it. A wheel is no edit: no undo step.
                 Msg::Bend { v, .. } if crate::surface::launchkey::Model::is_keys_port(&ev.dev) => {
                     let row = self.state.selected_channel;
-                    if let Some(range) = self.state.project.channels.get(row).map(|c| c.misc.pitch_range) {
+                    if let Some(c) = self.state.project.channels.get_mut(row) {
                         let x = f64::from(v) / 16384.0 * 2.0 - 1.0;
-                        let cents = (x * 100.0 * f64::from(range)).round() as i32;
-                        self.channel_control(row, crate::history::ChannelControl::Pitch, |c| c.pitch_cents = cents);
+                        c.pitch_cents = (x * 100.0 * f64::from(c.misc.pitch_range)).round() as i32;
+                        self.state.piano.dirty = true;
+                        self.invalidate();
                     }
                 }
                 Msg::Bend { .. } => {
@@ -723,6 +725,25 @@ mod tests {
         app.state.selected_channel = 0;
         assert!(app.state.project.channels.len() >= 2, "the new project has channels");
         app
+    }
+
+    /// A Launchkey MK4's pitch wheel turns the selected channel's pitch knob, which playback takes at once; no undo step.
+    #[test]
+    fn a_launchkey_wheel_turns_the_pitch_knob() {
+        let mut app = app();
+        let steps = app.state.history.len();
+        let dev: std::sync::Arc<str> = std::sync::Arc::from("Launchkey MK4 61:Launchkey MK4 61 MIDI In 24:0");
+        let bend = |v| Ev { dev: dev.clone(), msg: Msg::Bend { ch: 0, v } };
+        app.state.piano.dirty = false;
+        app.midi_events(vec![bend(16383)]);
+        assert_eq!(app.state.project.channels[0].pitch_cents, 200, "full up: the range, 2 semitones");
+        assert!(app.state.piano.dirty, "playback follows");
+        app.midi_events(vec![bend(8192)]);
+        assert_eq!(app.state.project.channels[0].pitch_cents, 0);
+        assert_eq!(app.state.history.len(), steps);
+        // Another keyboard's wheel bends the instrument instead.
+        app.midi_notes(vec![Msg::Bend { ch: 0, v: 0 }]);
+        assert_eq!(app.state.project.channels[0].pitch_cents, 0);
     }
 
     /// spec §3 Foot pedal controls note off.
