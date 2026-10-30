@@ -6,12 +6,15 @@
 //! made between saves is lost and every change can be read back (what, when, by whom). One file per session in the
 //! user folder's `Journal`, one JSON object per line (`docs/control-plane.md` "Journal"):
 //! - `session`: the app started;
-//! - `opened`, `new`, `saved`: the project was opened from a file, made new, or saved (with the path);
+//! - `opened`, `new`, `saved`: the project was opened from a file, made new, or saved (with the path); `copied`: a
+//!   copy of it was written (a backup, a zipped project);
 //! - `step`, `undo`, `redo`: an undo step was made (its name: who and what) or taken back or given again;
 //! - `changes`: what the project's reading (`control::query::project`) gained, lost or changed, by id;
 //! - `notes`: a pattern's notes added and removed (every stored field; a moved note is one removed and one added);
 //! - `plugin_state`: a hosted plugin's whole state (base64), each time it changes while its window is open, as the
 //!   window closes, and as the project is saved: a sound made in a plugin's window survives an unsaved project.
+//!
+//! - `closed`: the app closed normally (`crate::crash`).
 //!
 //! The control plane reads it back (`journal`). Journals older than [`KEEP_DAYS`] go at startup.
 
@@ -41,6 +44,8 @@ const MEMORY: usize = 20_000;
 pub struct Journal {
     file: Option<BufWriter<File>>,
     pub path: Option<PathBuf>,
+    /// The journal of the run before this one (`crate::crash`).
+    pub previous: Option<PathBuf>,
     /// The newest entries, numbered from 1 (`seq`).
     entries: VecDeque<Value>,
     seq: u64,
@@ -78,6 +83,7 @@ impl Journal {
         if !cfg!(test) {
             if let Some(dir) = os_paths::user_dir().map(|d| d.join("Journal")) {
                 prune(&dir);
+                j.previous = newest(&dir);
                 let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
                 let path = dir.join(format!("{stamp}-{}.jsonl", std::process::id()));
                 match std::fs::create_dir_all(&dir).and_then(|_| File::create(&path)) {
@@ -130,6 +136,13 @@ impl Journal {
         self.known.extend(entries.iter().filter(|e| e["kind"] == "plugin_state").filter_map(|e| e["hash"].as_str().map(str::to_string)));
         self.carried = entries;
         self.carried_from = Some(path.to_path_buf());
+    }
+
+    /// The history carried in is now project file `path`'s (a backup of it was opened as the project).
+    pub fn carried_by(&mut self, path: &std::path::Path) {
+        if self.carried_from.is_some() {
+            self.carried_from = Some(path.to_path_buf());
+        }
     }
 
     /// The project was saved into Lemon project file `path`: that file holds the history so far.
@@ -186,6 +199,16 @@ impl App {
     /// The project was saved to `path`.
     pub(crate) fn journal_saved(&mut self, path: &std::path::Path) {
         self.journal.write("saved", json!({ "path": path.display().to_string() }));
+    }
+
+    /// The app closes normally (`crate::crash` reads a run without this as one that ended otherwise).
+    pub(crate) fn journal_closed(&mut self) {
+        self.journal.write("closed", json!({}));
+    }
+
+    /// A copy of the project was written to `path` (`App::save_copy`: a backup, a zipped project...).
+    pub(crate) fn journal_copied(&mut self, path: &std::path::Path) {
+        self.journal.write("copied", json!({ "path": path.display().to_string() }));
     }
 
     /// Each tick: undo steps, the project's changes and the edited plugins' states into the journal.
@@ -456,6 +479,12 @@ fn note_json(p: &os_model::Project, n: &os_model::Note) -> Value {
 }
 
 /// Removes journals older than [`KEEP_DAYS`] from `dir`.
+/// The journal in `dir` written last.
+fn newest(dir: &std::path::Path) -> Option<PathBuf> {
+    let modified = |e: &std::fs::DirEntry| e.metadata().and_then(|m| m.modified()).ok();
+    std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "jsonl")).filter_map(|e| Some((modified(&e)?, e.path()))).max().map(|(_, p)| p)
+}
+
 fn prune(dir: &std::path::Path) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let keep = Duration::from_secs(KEEP_DAYS * 86_400);

@@ -7,7 +7,8 @@
 //! `<user folder>/Projects/Backup` as `<name> (autosaved on M-D-YYYY at HhMM).flp`, and the oldest autosaves of that
 //! name beyond Maximum are deleted. Saving over a file first copies the old file there as
 //! `<name> (overwritten on M-D-YYYY at HhMM).flp`. With Location's "project data folder" (the default), a project with a
-//! data folder backs up to `<data folder>/Backup` instead (`crate::data_folder::backup_folder`). Not yet: Never's
+//! data folder backs up to `<data folder>/Backup` instead (`crate::data_folder::backup_folder`). A Lemon project's
+//! backups are Lemon project files (`.lemon`), so they keep its undo history, ids and journal. Not yet: Never's
 //! reminder and the backups "before risky operations".
 // spec: ui/settings-choices.md "Backup files", ui/data-folder.md §3
 
@@ -76,7 +77,8 @@ fn autosaved_at(file: &str, name: &str) -> Option<(u32, u32, u32, u32, u32)> {
 /// When backup `file` of `name` was written, if it is one of kind `what` ("autosaved" or "overwritten"): (year,
 /// month, day, hour, minute).
 pub(crate) fn saved_at(file: &str, name: &str, what: &str) -> Option<(u32, u32, u32, u32, u32)> {
-    let rest = file.strip_prefix(name)?.strip_prefix(" (")?.strip_prefix(what)?.strip_prefix(" on ")?.strip_suffix(").flp")?;
+    let rest = file.strip_prefix(name)?.strip_prefix(" (")?.strip_prefix(what)?.strip_prefix(" on ")?;
+    let rest = rest.strip_suffix(").flp").or_else(|| rest.strip_suffix(&format!(").{}", crate::native::EXT)))?;
     let (date, time) = rest.split_once(" at ")?;
     let mut d = date.split('-').map(str::parse::<u32>);
     let (Some(Ok(m)), Some(Ok(day)), Some(Ok(y)), None) = (d.next(), d.next(), d.next(), d.next()) else { return None };
@@ -155,7 +157,11 @@ impl App {
     pub(crate) fn write_backup(&mut self, t: NaiveDateTime) -> Option<Result<PathBuf, String>> {
         let Some(dir) = crate::data_folder::backup_folder(&self.state, self.state.path.as_deref()) else { return Some(Err("no user folder".into())) };
         let name = project_name(self.state.path.as_deref());
-        let target = dir.join(file_name(&name, "autosaved", t));
+        let mut target = dir.join(file_name(&name, "autosaved", t));
+        // A Lemon project (a new one is one) backs up as one.
+        if crate::native::ext_for(self.state.path.as_deref()) == crate::native::EXT {
+            target.set_extension(crate::native::EXT);
+        }
         if target.exists() {
             return Some(Ok(target));
         }
@@ -306,6 +312,32 @@ mod tests {
         assert_eq!(auto, [file_name("song", "autosaved", at(10, 1, 12, 6)), file_name("song", "autosaved", at(10, 1, 13, 0))]);
         prefs::set_number(&prefs::BACKUP_MAXIMUM, prefs::BACKUP_MAXIMUM.default);
         assert_eq!(app.state.path.as_deref(), Some(song.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Lemon project's backup is a Lemon project file with its undo history; writing it leaves the project's file,
+    /// its unsaved changes (a plugin's included) and its undo history's file as they were, and Revert opens it.
+    #[test]
+    fn a_lemon_projects_backup_is_one() {
+        let dir = scratch("lemon");
+        let mut app = App::new(None);
+        let work = dir.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let song = work.join("song.lemon");
+        app.save_to(song.clone());
+        let snap = crate::history::Snap::pattern(&app.state, app.state.pattern);
+        crate::history::record(&mut app.state, "Piano roll add note", snap);
+        crate::rack::set_step(&mut app.state, 0, 3, true);
+        app.state.plugin_edited = true;
+        assert!(app.unsaved());
+        let t = at(10, 30, 5, 2);
+        let b = app.write_backup(t).unwrap().unwrap();
+        assert_eq!(b, dir.join(file_name("song", "autosaved", t)).with_extension(crate::native::EXT));
+        let (_, extra) = crate::native::read(&b).unwrap();
+        assert!(extra.and_then(|x| x.history).is_some_and(|h| h["steps"].as_array().is_some_and(|s| s.len() == 1)), "its undo step");
+        assert_eq!(app.state.path.as_deref(), Some(song.as_path()));
+        assert!(app.unsaved() && app.state.plugin_edited, "still unsaved");
+        assert_eq!(crate::project_files::newest_backup(&[dir.clone()], "song"), Some(b));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

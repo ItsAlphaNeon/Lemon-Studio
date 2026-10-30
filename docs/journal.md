@@ -11,6 +11,8 @@ not the project is saved: one file per session, `Journal/<start time>-<pid>.json
 |---|---|---|
 | `session` | `version`, `pid` | The app started |
 | `opened`, `new`, `saved` | `path` | A project was opened, made new or saved |
+| `copied` | `path` | A copy of the project was written (an autosave, a template, a zipped project); the project's own file is unchanged |
+| `closed` | | The app closed normally. A run without it ended otherwise; the next start offers its project's backup if it had unsaved changes, then adds `crash_seen` to it |
 | `step`, `undo`, `redo` | `name`, `done` | An undo step was made (its name: who and what), taken back or given again |
 | `changes` | `changes`: `path`, `before`, `after` | What the project's reading (`state`) changed, by id; at most four times a second |
 | `notes` | `pattern`, `number`, `added`, `removed` | A pattern's notes added and removed, with every stored field (a moved note is one removed and one added) |

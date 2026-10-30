@@ -129,6 +129,8 @@ pub enum Then {
     /// The External input question for this mixer track: Yes switches it to External input only (spec:
     /// audio/track-io.md §1.4).
     ExtInput(u16),
+    /// The question after a run that ended with unsaved changes: Yes opens this backup as that project (`crate::crash`).
+    CrashBackup(Option<PathBuf>, PathBuf),
 }
 
 /// What waits for the save-changes question.

@@ -143,8 +143,10 @@ impl App {
     pub(crate) fn revert_from(&mut self, b: PathBuf) {
         let Some(own) = self.state.path.clone() else { return };
         let (kept, recent) = (crate::templates::last_kept(), crate::recent::list());
-        // A Lemon project's history and ids stay with it (the copy opened has none of them).
-        let extra = crate::native::is_native(&own).then(|| crate::native::read(&own).ok()).flatten().and_then(|(_, x)| x);
+        // A Lemon project's history and ids stay with it when the copy opened has none of them (an FLP backup); a Lemon
+        // project backup brings its own, newer ones.
+        let native_copy = crate::native::is_native(&b);
+        let extra = (crate::native::is_native(&own) && !native_copy).then(|| crate::native::read(&own).ok()).flatten().and_then(|(_, x)| x);
         self.open(b.clone());
         crate::templates::restore_last(kept);
         crate::recent::restore(&recent);
@@ -157,6 +159,9 @@ impl App {
                 crate::control::ids::restore(&mut self.state.control.ids, &mut self.state.project, v);
             }
             self.journal.carry(&own, x.journal);
+        }
+        if native_copy {
+            self.journal.carried_by(&own);
         }
         self.state.versions = crate::native::versions(&own);
         self.state.path = Some(own);

@@ -1524,6 +1524,8 @@ pub struct App {
     pub(crate) saved: (Project, f64),
     /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
     pub(crate) backup: crate::backup::Backup,
+    /// A copy of the project is being written (`save_copy`): the save leaves the project's own file as it was.
+    pub(crate) copying: bool,
     /// Follow Omarchy: the system theme last applied (`omarchy::stamp`) and when to look again (`omarchy_tick`).
     pub(crate) omarchy: (Option<(String, Option<std::time::SystemTime>)>, std::time::Instant),
     /// Session restore (`crate::session`): the kept plugin windows still to open, and since when they wait.
@@ -1764,6 +1766,7 @@ impl App {
             device_opens: 0,
             saved: (Project::default(), 0.0),
             backup: Default::default(),
+            copying: false,
             omarchy: (None, std::time::Instant::now()),
             session_plugins: Vec::new(),
             session_since: None,
@@ -2126,13 +2129,19 @@ impl App {
             crate::templates::remember(&target);
             crate::recent::add(&target);
             s.path = Some(target.clone());
-            self.mark_saved();
-            if crate::native::is_native(&target) {
-                // The file holds the history from here on.
-                self.journal.saved_into(&target);
+            if self.copying {
+                // A copy (a backup, Save new version's...) is not the project's file: its saved point, history file and
+                // versions stay.
+                self.journal_copied(&target);
+            } else {
+                self.mark_saved();
+                if crate::native::is_native(&target) {
+                    // The file holds the history from here on.
+                    self.journal.saved_into(&target);
+                }
+                self.journal_saved(&target);
+                self.state.versions = crate::native::versions(&target);
             }
-            self.journal_saved(&target);
-            self.state.versions = crate::native::versions(&target);
         }
         result.ok()
     }
@@ -2150,11 +2159,13 @@ impl App {
         }
         let s = &mut self.state;
         let keep = (s.project.clone(), s.path.clone(), s.file.clone(), s.message.take(), self.saved.clone());
+        self.copying = true;
         // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project"), nor a
         // recent one (spec: ui/recent-projects.md §2).
         let (last, recent) = (crate::templates::last_kept(), crate::recent::list());
         // A copy never warns about its size.
         self.write_project(target, edit);
+        self.copying = false;
         crate::templates::restore_last(last);
         crate::recent::restore(&recent);
         let s = &mut self.state;
@@ -2451,6 +2462,11 @@ impl App {
             Then::ClientSave(p) => {
                 if reply == Reply::Button(Answer::Yes) {
                     self.save_to(p);
+                }
+            }
+            Then::CrashBackup(project, b) => {
+                if reply == Reply::Button(Answer::Yes) {
+                    self.open_crash_backup(project, b);
                 }
             }
             Then::Proposal(n) => {

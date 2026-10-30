@@ -23,6 +23,9 @@ own content. Side branches are named `cutting-edge-<topic>`.
   whole history across sessions (every change and every plugin state), so Recover from journal reaches any sound the
   project ever had. See [docs/native-format.md](docs/native-format.md).
 - **A converted older project keeps its original.** It opens without its path, so Save asks for a new file.
+- **After a crash, the backup is offered.** When the last run ended without closing while its project had unsaved
+  changes, the next start says so and offers the newest autosave written since the project was last saved. Opening it
+  works as Revert to last backup. A Lemon project's autosaves are `.lemon` files, so they keep its undo history.
 
 - **Wayland first.** On Linux the main window is native Wayland in a Wayland session; plugin windows open detached.
   `OPENSTUDIO_WAYLAND=0` brings back the X11 window, where plugin windows dock. CI runs on Linux only

@@ -38,6 +38,9 @@ history.
   they were made; one clicked (after the unsaved-changes question) becomes the project, in the same file and with the
   same history and ids, unsaved until saved, and that save keeps the newest as a version too. Revert to last backup
   keeps a Lemon project's history and ids the same way.
+- **Backups are Lemon project files too.** A Lemon project's autosaves and overwritten copies are `.lemon` files with
+  the undo history, ids and journal as they were then; Revert to last backup (and the backup offered after a crash)
+  brings those back with it.
 - **The same things keep the same ids** from session to session, so the journal and the control plane's clients name
   them alike over the project's whole life, and an id that is gone is never given to something else.
 

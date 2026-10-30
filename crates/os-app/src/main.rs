@@ -19,6 +19,7 @@ mod audio_cfg;
 mod auto_close;
 mod autoscroll;
 mod backup;
+mod crash;
 #[cfg(test)]
 mod audio_bench;
 #[cfg(target_os = "linux")]
@@ -818,6 +819,7 @@ impl ApplicationHandler for Shell {
         layout::save(&self.app.state);
         session::save(&self.app);
         self.app.surface_exit();
+        self.app.journal_closed();
         #[cfg(target_os = "macos")]
         {
             if os_host::guard::tripped() {
@@ -1881,6 +1883,8 @@ fn main() {
         // Ask for data folder "On startup": the New project form over it (spec: ui/data-folder.md §7).
         app.startup_form();
     }
+    // The run before ended with unsaved changes: its backup offered.
+    app.crash_notice();
     if let Some(at) = &control.control {
         app.state.message = Some(match control::server::start(at, level, wake_ui) {
             Ok(mut server) => {
