@@ -130,7 +130,9 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   plugins, starred rows and the Favorites tab; the Plugin database by category, and Installed by format; search finds
   files in closed folders through a folder index (Enable indexing, Re-index, Expand folders). Tags and the "New"
   folder come later
-- [ ] **JACK on Linux**
+- [x] **JACK on Linux.** Settings > Audio ▸ Mode ▸ JACK plays as a client of the JACK server (cpal's JACK host, libjack
+  loaded at run time; building needs the JACK development files). Not yet tried against a running JACK server
+  (2026-10-30)
 - [x] **ASIO output pairs.** Every track has an output menu with the pairs of the driver's first 16 outputs, and the
   master plays on the pair chosen for it (#182)
 
