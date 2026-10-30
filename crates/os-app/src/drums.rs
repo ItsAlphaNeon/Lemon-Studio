@@ -32,7 +32,7 @@ impl Plugins {
     /// The FPC state the Lemon Drum Sampler on rack row `row` plays, `None` when the row hosts something else.
     pub fn drums_file_state(&self, row: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&row)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != LEMON_DRUMS || !crate::project_plugins::is_builtin(p.desc()) {
             return None;
         }

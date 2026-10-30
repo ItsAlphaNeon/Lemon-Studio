@@ -392,7 +392,8 @@ fn plugin_texts(s: &State, pt: &PluginTarget) -> [String; 8] {
     let list = s.params.lists.get(&pt.key);
     let plugin = s.params.plugin(pt.key);
     let p = plugin.as_ref().and_then(|p| p.lock().ok());
-    std::array::from_fn(|i| {
+    let t0 = Instant::now();
+    let texts = std::array::from_fn(|i| {
         let Some((index, _, _, regions)) = &pt.slots[i] else { return String::new() };
         let Some(e) = list.and_then(|l| l.params.get(*index)) else { return String::new() };
         let v = p.as_ref().and_then(|p| p.param_value(e.id)).unwrap_or(0.0);
@@ -401,7 +402,11 @@ fn plugin_texts(s: &State, pt: &PluginTarget) -> [String; 8] {
         }
         let text = p.as_ref().and_then(|p| p.param_text(e.id, v));
         text.filter(|t| !t.is_empty()).unwrap_or_else(|| format!("{:.0}%", v * 100.0))
-    })
+    });
+    if let Some(p) = &p {
+        crate::dropout_log::held(&p.desc().name, "the keyboard's screen", t0.elapsed());
+    }
+    texts
 }
 
 impl App {

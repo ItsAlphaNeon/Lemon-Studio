@@ -99,7 +99,8 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **Real-time audio threads (Linux).** The feeder that renders and the device callback run at real-time priority
   (through rtkit, as PipeWire's do), so a busy machine no longer makes them late at small buffers. A thread that keeps
   the CPU too long (a project too heavy to play in time, or the kernel freeing memory for it on a full machine) goes
-  back to normal priority instead of the kernel ending the program. Under load (16 busy threads per core, 4 ms of work per 5.3 ms block) a normal-priority thread missed all of
+  back to normal priority instead of the kernel ending the program. Reading a plugin's whole state (a save, an
+  autosave, the journal) waits for the moment just after the audio thread processed it, so it makes no plugin late. Under load (16 busy threads per core, 4 ms of work per 5.3 ms block) a normal-priority thread missed all of
   1500 blocks, a real-time one none (`rt::tests::deadlines_under_load`).
 - **A dropout log (Linux).** `Logs/audio.log` in the user folder says why playback dropped out: each playback's start
   (its audio settings), each audio thread's priority (real-time, or refused and why, or taken back by the safety cap),
