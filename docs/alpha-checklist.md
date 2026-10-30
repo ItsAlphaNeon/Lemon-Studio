@@ -100,10 +100,11 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   10 minutes of what the device plays, the header showing the memory used; Dump puts them into the master track's
   Tesla. At its time limit Tesla now keeps the last minutes, as Edison does. What FL Studio's logger records and how
   long was not measured: Lemon Studio's design
-- [ ] **Tesla's later tools.** Equalize and blur, clean-up, drum(loop) stretch, slicing and beat detection, the
-  envelope tools with a dialog (group 5 of Tesla's roadmap in the specs). Time stretch / pitch shift with formant
-  preservation works (2026-10-29); the envelope modes with Mixdown amp envelopes and the simple envelope tools, and
-  Convolution reverb, work (2026-10-30)
+- [ ] **Tesla's later tools.** Noise gating (gate noise, trim side noise), the declicker, drum(loop) stretch, slicing
+  and beat detection, the envelope tools with a dialog (group 5 of Tesla's roadmap in the specs). Time stretch / pitch
+  shift with formant preservation works (2026-10-29); the envelope modes with Mixdown amp envelopes and the simple
+  envelope tools, Convolution reverb, Equalize, Blur, and Clean up (denoise with an acquired noise profile, and the
+  declipper) work (2026-10-30)
 - [x] **Value boxes.** All of them work, the last two being the autosave Maximum and Metronome track. MIDI settings'
   Performance mode MIDI channel stays greyed out until Performance mode is built
 - [ ] **Performance mode.** Live clip launching on the playlist (Ctrl+P says it is not available yet), with MIDI
