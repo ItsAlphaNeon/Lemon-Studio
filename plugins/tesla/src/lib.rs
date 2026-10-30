@@ -15,6 +15,7 @@ pub mod editor;
 pub mod env;
 pub mod peaks;
 pub mod rec;
+pub mod restore;
 pub mod sample;
 pub mod spectral;
 pub mod spectrum;
