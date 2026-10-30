@@ -389,6 +389,7 @@ pub fn edit_app<R>(app: &mut crate::app::App, name: &'static str, region: comman
 /// of the plugin's values just before them, as a knob's wheel notches do; a parameter not in that step yet joins it
 /// with its value before. The step comes from no press of the app's, so no release looks at it.
 pub fn param_edit(s: &mut State, owner: u32, before: &[(u32, f64)], run: bool) {
+    s.plugin_edited = true;
     if !crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
         return;
     }
@@ -425,6 +426,7 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
     let Some(owner) = command::key_owner(&s.project, key) else { return };
     // Known for the undo's other side (`Command::apply`).
     s.control.saw_param(owner, param, to);
+    s.plugin_edited |= before.is_some_and(|v| v != to);
     let Some(v) = before.filter(|&v| v != to && crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS)) else { return };
     let put = Command::Put(Box::new(command::Taken::Param(owner, param, v)));
     crate::history::record(s, command::PLUGIN_PARAMETER, crate::history::Snap::Commands(vec![put]));

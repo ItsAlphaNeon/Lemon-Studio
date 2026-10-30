@@ -281,7 +281,13 @@ impl App {
             state.hash(&mut h);
             h.finish()
         };
-        if self.journal.plugin_hash.insert(owner, hash) == Some(hash) || !self.journal.known.insert(format!("{hash:016x}")) {
+        let was = self.journal.plugin_hash.insert(owner, hash);
+        if was == Some(hash) {
+            return;
+        }
+        // Changed since it was first read after the project opened: an edit in the plugin's own window.
+        self.state.plugin_edited |= was.is_some();
+        if !self.journal.known.insert(format!("{hash:016x}")) {
             return;
         }
         let plugin = self.plugins.descriptor(key).map(|d| json!({ "name": d.name, "format": d.format.as_str(), "id": d.id }));

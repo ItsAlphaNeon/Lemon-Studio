@@ -1132,6 +1132,9 @@ pub struct State {
     /// The mixer tracks and rack rows a control surface's faders and pads take, marked while its Shift is held or a
     /// moment after its banks move.
     pub surface_marks: crate::surface::Marks,
+    /// A setting inside a hosted plugin changed since the project was opened or saved (its knobs, its own window, a
+    /// control surface): the project counts as unsaved, as the plugin's state is saved with it.
+    pub plugin_edited: bool,
     /// How muted each split window is now, 0 to 1, by `Win::slot` (`tiles::veil_target`; `App::veils_tick` fades it).
     pub veil: [f32; 3],
     /// The plugin windows drawn in the app's (Linux), by `Plugins::hosted` key: painted as `Win::Hosted` (kept by
@@ -1644,6 +1647,7 @@ impl App {
                 tiles: crate::tiles::Tiles::load(),
                 tile_anim: None,
                 surface_marks: Default::default(),
+                plugin_edited: false,
                 veil: [0.0; 3],
                 #[cfg(target_os = "linux")]
                 embeds: Default::default(),
@@ -2167,12 +2171,12 @@ impl App {
         // New things get their ids before the copy, so ids alone are no unsaved change.
         self.state.control.settle(&mut self.state.project);
         self.saved = (self.state.project.clone(), self.state.tempo);
+        self.state.plugin_edited = false;
     }
 
-    /// Whether the project changed since it was last opened, saved or created. Settings kept inside hosted plugins are
-    /// not compared.
+    /// Whether the project changed since it was last opened, saved or created, a hosted plugin's settings included.
     pub fn unsaved(&self) -> bool {
-        self.saved.0 != self.state.project || self.saved.1 != self.state.tempo
+        self.saved.0 != self.state.project || self.saved.1 != self.state.tempo || self.state.plugin_edited
     }
 
     /// The system asks the window to close (its close shortcut, a taskbar or dock). The dialog-like windows drawn

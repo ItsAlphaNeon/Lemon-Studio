@@ -778,6 +778,18 @@ mod tests {
     /// playlist; "MIDI learn..." is ticked while a clip drives the parameter or a controller is linked to it.
     /// Set... is one undo step, "Plugin parameter": Ctrl+Z puts the parameter back, redo sets it again; a pick of the
     /// value it has makes none (OS, `control::param_set`).
+    /// A plugin parameter set from the app makes the project unsaved, as its state is saved with it; saving clears it.
+    #[test]
+    fn a_plugin_parameter_change_is_unsaved() {
+        let (mut a, key) = eq_app();
+        a.mark_saved();
+        assert!(!a.unsaved());
+        crate::playlist::run(&mut a, Cmd::Param(PCmd::Set(key, 35, 1.0)));
+        assert!(a.unsaved(), "a parameter set");
+        a.mark_saved();
+        assert!(!a.unsaved(), "saved");
+    }
+
     #[test]
     fn parameter_set_is_an_undo_step() {
         let (mut a, key) = eq_app();
