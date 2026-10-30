@@ -53,7 +53,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Playlist with pattern, audio and automation clips
 - Clip groups, markers and several arrangements
 - Time markers with FL's actions (right-click a marker): Start, Loop, Marker loop, Marker skip and Marker pause
-  play in SONG mode; exports start at the Start marker and jump at skips. Move content left / right, Place loop
+  play in SONG mode; exports start at the Start marker and jump at skips, and the clock's bars count from the Start
+  marker. Move content left / right, Place loop
   (Shift+T), Add auto, Add one every, Add jump to next bar, time signature markers, and Delete or Change to marker
   loop in the time selection, Add two... (markers at the time selection's ends) and Add key marker (root and
   scale, saved as FL saves them). A click on a marker moves the song position there. A Stop recording marker ends
@@ -75,7 +76,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   performance lays out 16 columns and a Start marker): a click on a clip before the Start marker launches it on its
   track, looping, from the next sync point (Shift queues, Alt at once); a right click or the track header stops it.
   Notes 0–119 on Settings ▸ MIDI's Performance mode MIDI channel launch the first 10 tracks' 12 columns (a key's
-  release ends Hold & stop; notes 120–124 scroll the grid, outlined in the zone). A playing clip's zone clip is outlined and fills as it plays. Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant,
+  release ends Hold & stop; notes 120–124 scroll the grid, outlined in the zone). A playing clip's zone clip is outlined and fills as it plays (the clock's bars are negative in the zone). Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant,
   Position sync) are saved as FL saves them. Not yet: the typing keyboard, MIDI notes 125–127, scenes, recording a
   performance
 
