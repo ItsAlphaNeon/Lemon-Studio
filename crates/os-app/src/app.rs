@@ -1244,6 +1244,8 @@ pub struct App {
     pub warp: Option<(f32, f32)>,
     /// One-click audio recording under way (spec: ui/one-click-recording.md §2).
     pub(crate) audio_rec: Option<crate::one_click::AudioRec>,
+    /// Disk recording into the armed mixer tracks under way (spec: audio/track-io.md §2.5).
+    pub(crate) track_rec: Option<crate::track_rec::TrackRec>,
     /// Wheel movement in an open menu short of a whole notch (trackpads).
     menu_notch: f32,
     /// A Shift+press grabbed piano-roll notes: the drag's first move picks up copies of them (`App::pick_up_notes`).
@@ -1481,6 +1483,7 @@ impl App {
             smooth: Default::default(),
             warp: None,
             audio_rec: None,
+            track_rec: None,
             menu_notch: 0.0,
             shift_clone: false,
             auto_close: Default::default(),

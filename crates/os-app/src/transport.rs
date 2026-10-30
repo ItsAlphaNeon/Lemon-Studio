@@ -127,6 +127,8 @@ pub struct Shared {
     /// Each running stream's engine voices (its feeder writes them after every fill; a stream that closed drops its
     /// counter). Spec: audio/voices.md §5.
     engine_voices: Mutex<Vec<Weak<AtomicU32>>>,
+    /// Disk recording into mixer tracks: where the playback's armed tracks hand their takes (`Transport::record_tracks`).
+    record: Mutex<Option<Arc<dyn os_engine::RecordTap>>>,
 }
 
 /// The frames queued when the device asked for a block, since they were last taken (`AheadStats::take`): what the
@@ -412,6 +414,8 @@ enum Cmd {
     AsioPanel,
     /// The FL Studio factory content folder changed (`Transport::set_factory`).
     Factory(Option<PathBuf>),
+    /// Disk recording started or ended (`Transport::record_tracks`): the playback's engine takes it at once.
+    Record,
     /// Tests: the open device fails as if it went away.
     #[cfg(test)]
     FailDevice,
@@ -611,6 +615,28 @@ impl Transport {
     }
 
     /// Replace the playing project, continuing from the current position.
+    /// Disk recording into mixer tracks (spec: audio/track-io.md §2.5): the playback's armed tracks hand their takes to
+    /// `tap` from now on (and any playback started later), or no longer (`None`).
+    pub fn record_tracks(&self, tap: Option<Arc<dyn os_engine::RecordTap>>) {
+        if let Ok(mut slot) = self.shared.record.lock() {
+            *slot = tap;
+        }
+        let _ = self.tx.send(Cmd::Record);
+    }
+
+    /// Roughly how much later than the song it went with a device input reaches the engine, in frames at the device's
+    /// rate, for a tick of `tick` frames: the device's two latencies (an ASIO driver's; 0 for others), the time the
+    /// engine reads behind the newest input (two blocks, the longest margin and a tick), and the render-ahead (a block
+    /// and the margin) (spec: audio/track-io.md §2.2, §2.5).
+    pub fn input_delay(&self, tick: u64) -> u64 {
+        let info = self.opened();
+        let rate = info.as_ref().map_or(48000, |d| d.rate);
+        let block = u64::from(self.block().max(64));
+        let margin = (f64::from(rate) * MARGIN_MAX) as u64;
+        let device = info.filter(|d| d.host == crate::device::ASIO).map_or(0, |d| u64::from(d.latency.unwrap_or(0)) + u64::from(d.input_latency.unwrap_or(0)));
+        device + 2 * block + margin + tick + block + margin
+    }
+
     pub fn update(&self, project: &Project) {
         // Edits can come faster than engines are built: keep only the newest.
         if let Ok(mut slot) = self.latest.lock() {
@@ -1349,6 +1375,14 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     live_project = Some(project);
                 }
             }
+            Ok(Cmd::Record) => {
+                let tap = shared.record.lock().ok().and_then(|t| t.clone());
+                if let Some(s) = session.as_ref().filter(|s| s.kind == Kind::Song) {
+                    if let Ok(mut e) = s.engine.lock() {
+                        e.set_record_tap(tap);
+                    }
+                }
+            }
             Ok(Cmd::Instruments) => {
                 for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
                     swap(s, &mut library);
@@ -1946,6 +1980,7 @@ impl Session {
         if song {
             e.set_run_on(crate::record::run_on_flag());
             e.set_nudge(crate::tapper::nudge_flag());
+            e.set_record_tap(shared.record.lock().ok().and_then(|t| t.clone()));
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));

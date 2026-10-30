@@ -15,9 +15,9 @@ Systems a fully functional DAW can't ship without.
 - [x] **Audio editor.** Tesla, after FL's Edison, in a mixer slot (#158), with the app's audio-editor entries wired to
   it: Open audio editor and record, One-click recording and the Record question into it, Remove all instances.
   TOOLS ▸ Audio logger and Tesla's later tools are listed under Gaps and polish
-- [ ] **Audio recording into mixer tracks.** Tracks take device inputs and the disk-record button arms them (#182),
-  but nothing records into them yet; one-click recording into the playlist or Tesla is the only way in. The mixer
-  menu's Arm and Disarm selected track(s) are still greyed out ([mixer.rs](../crates/os-app/src/mixer.rs))
+- [x] **Audio recording into mixer tracks.** With Audio in Record's filter, armed tracks record at their record source
+  while the song plays; each take becomes a WAV and an audio clip where it started, the input's delay taken out. The
+  mixer menu's Arm and Disarm selected track(s) and Disk recording ▸ Auto-create audio clips work
 - [x] **Input monitoring.** A track's input plays through it while it is armed, or always, per its Monitor external
   input setting (Off / When armed / On), also while stopped (#182)
 - [ ] **Automation recording into clips.** Only channel volume and pan moves record, and only into the pattern
@@ -58,8 +58,8 @@ Greyed-out controls and partial features. These can land alongside the blockers.
 - [ ] **Undo for mixer track commands.** Mute, routing, names and slots are not in the history yet
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
-- [ ] **Mixer right-click menus.** 46 entries greyed out on 2026-10-29: the routing menu, groups, Render to wave
-  file, spare states, smart disable, Arm and Disarm selected track(s) ([mixer.rs](../crates/os-app/src/mixer.rs))
+- [ ] **Mixer right-click menus.** 43 entries greyed out on 2026-10-29: the routing menu, groups, Render to wave
+  file, spare states, smart disable ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [ ] **Playlist right-click menus.** 36 entries greyed out on 2026-10-29: key markers, Add two..., quantized song
   jumps, the Start / Stop recording markers' punch ([playlist.rs](../crates/os-app/src/playlist.rs))
 - [ ] **Channel rack right-click menus.** 25 entries greyed out on 2026-10-29: Type in value, Burn selected loops to
