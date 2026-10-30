@@ -278,6 +278,24 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     Some(format!("{}: {} at {bar}:{step:02}", crate::playlist::track_name(s, track), PerfSettings::PRESSES[usize::from(set.press)]))
 }
 
+/// The progress display (§3): each launched track's zone clip sounding at `tick` (the clip index) and how far into it
+/// the pass playing is, 0 to 1.
+pub fn progress(s: &State, tick: u32) -> Vec<(usize, f32)> {
+    let Some(z) = zone(s) else { return Vec::new() };
+    let (all, cols) = (clips(s), columns(s));
+    let mut out = Vec::new();
+    for (&track, l) in &s.playlist.perform.live {
+        let Some(p) = l.pass_at(tick) else { continue };
+        // The zone clip the pass is a copy of: same track and source, the launched column's first.
+        let found = all.iter().enumerate().filter(|(_, c)| c.track == track && c.position < z && c.source == p.source);
+        let Some((i, c)) = found.min_by_key(|(_, c)| (column_of(&cols, c.position) != l.column, c.position)) else { continue };
+        let len = c.length.max(1);
+        let done = len.saturating_sub(p.end() - tick);
+        out.push((i, done as f32 / len as f32));
+    }
+    out
+}
+
 /// `l`'s passes before `at` (or before it falls silent), the one sounding there cut short.
 fn cut_at(s: &State, l: &Live, at: u32) -> Vec<Clip> {
     let at = at.min(l.until());
@@ -513,6 +531,20 @@ mod tests {
         app.midi_notes(vec![note(0, true)]);
         assert!(app.state.playlist.perform.live.is_empty(), "off: nothing is triggered");
         prefs::set_number(&prefs::PERFORMANCE_CHANNEL, 0);
+    }
+
+    #[test]
+    fn progress_follows_the_pass() {
+        let mut app = app();
+        let s = &mut app.state;
+        trigger(s, 0, Some(3102), false, false);
+        assert_eq!(progress(s, 3200), vec![], "not started yet");
+        assert_eq!(progress(s, 3456 + 96), vec![(0, 0.25)]);
+        assert_eq!(progress(s, 3840 + 288), vec![(0, 0.75)], "the second pass");
+        // Position sync 1 beat: the first pass starts 10 ticks into the clip.
+        arr_mut(s).tracks[0].perf.position_sync = 3;
+        trigger(s, 1, Some(3082), true, false);
+        assert_eq!(progress(s, 3082), vec![(1, 10.0 / 768.0)]);
     }
 
     #[test]

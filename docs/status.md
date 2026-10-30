@@ -75,7 +75,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   performance lays out 16 columns and a Start marker): a click on a clip before the Start marker launches it on its
   track, looping, from the next sync point (Shift queues, Alt at once); a right click or the track header stops it.
   Notes 0–119 on Settings ▸ MIDI's Performance mode MIDI channel launch the first 10 tracks' 12 columns (a key's
-  release ends Hold & stop). Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant,
+  release ends Hold & stop). A playing clip's zone clip is outlined and fills as it plays. Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant,
   Position sync) are saved as FL saves them. Not yet: the typing keyboard, MIDI notes 120–127, scenes, recording a
   performance
 
