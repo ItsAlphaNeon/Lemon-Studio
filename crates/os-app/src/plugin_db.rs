@@ -755,6 +755,8 @@ pub struct Entry {
     pub format: Format,
     pub category: &'static str,
     pub favorite: bool,
+    /// Built into Lemon Studio (the browser's Installed ▸ Built-in, spec: ui/browser.md §2).
+    pub builtin: bool,
 }
 
 /// What the plugin menus list: shown plugins only, alphabetical by label.
@@ -777,7 +779,8 @@ fn entries(list: &[Available], prefs: &Prefs, missing: &HashSet<String>) -> Vec<
             let d = &list[i].desc;
             let twin = shown.iter().any(|&k| k != i && list[k].desc.format != d.format && base_name(&list[k].desc.name) == base_name(&d.name));
             let label = if twin { format!("{} ({})", strip_marker(&d.name), format_label(d.format)) } else { d.name.clone() };
-            let vendor = if crate::project_plugins::is_builtin(d) {
+            let builtin = crate::project_plugins::is_builtin(d);
+            let vendor = if builtin {
                 BUILTIN_VENDOR.to_string()
             } else if d.vendor.trim().is_empty() {
                 NO_VENDOR.to_string()
@@ -785,7 +788,7 @@ fn entries(list: &[Available], prefs: &Prefs, missing: &HashSet<String>) -> Vec<
                 d.vendor.trim().to_string()
             };
             let uid = d.uid();
-            Entry { index: i, name: d.name.clone(), label, favorite: prefs.is_favorite(&uid), uid, vendor, format: d.format, category: category(d) }
+            Entry { index: i, name: d.name.clone(), label, favorite: prefs.is_favorite(&uid), uid, vendor, format: d.format, category: category(d), builtin }
         })
         .collect();
     v.sort_by_key(|e| e.label.to_lowercase());

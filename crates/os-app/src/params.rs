@@ -269,6 +269,9 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         Some(ch) => PItem::new("Edit automation clip...", Cmd::Param(PCmd::EditClip(ch))),
         None => PItem::new("Edit automation clip...", Cmd::Nothing).off(),
     };
+    // spec: ui/event-editor.md §1
+    let range = param.and_then(|(key, index)| s.params.plugin(key).and_then(|p| p.lock().ok()?.param_info(index))).map(|i| (i.min, i.max));
+    let events = crate::events::menu_item(create.as_ref(), range);
     let create = match create {
         Some((tgt, name, v)) => PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, v)),
         None => PItem::new("Create automation clip", Cmd::Nothing).off(),
@@ -283,8 +286,8 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
     };
     let set = param.map(|(key, index)| set_items(s, key, index)).filter(|v| !v.is_empty());
     let mut v = vec![
-        // Lemon Studio has no event editor yet; FL showed the other two disabled.
-        PItem::not_yet("Edit automation"),
+        // FL showed the other two disabled.
+        events,
         PItem::new("Edit automation in a window", Cmd::Nothing).off(),
         PItem::new("Edit automation in piano roll", Cmd::Nothing).off(),
         init,
@@ -356,6 +359,7 @@ impl App {
         let mut moved = None;
         let mut edited = Vec::new();
         let mut automate = Vec::new();
+        let mut recorded = Vec::new();
         let mut stretch = Vec::new();
         let (mut seen, mut steps) = (Vec::new(), Vec::new());
         for (&key, h) in &self.plugins.hosted {
@@ -434,6 +438,10 @@ impl App {
                 edited.push(key);
                 if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
                     moved = Some(Tweak::Plugin { key, index });
+                    // What automation recording takes: the value with the parameter's stated range.
+                    if let (os_host::ParamEvent::Value(_, v), Some(info)) = (e, p.param_info(index)) {
+                        recorded.push((key, index, (info.min, info.max), v));
+                    }
                 }
             }
             // "Create automation clip" picked in the plugin's own menu (CLAP context menu).
@@ -476,9 +484,23 @@ impl App {
             self.state.params.note(t);
             self.tweak_hint();
         }
+        for (key, index, range, v) in recorded {
+            if let Some(target) = target_of(&self.state, key, index) {
+                self.record_param(target, range, v);
+            }
+        }
         for (key, index) in automate {
             self.state.message = self.params_automate(key, index);
             self.invalidate();
+        }
+    }
+
+    /// A plugin parameter set from outside its window (a remote control) to `level`, for automation recording.
+    pub(crate) fn record_plugin_param(&mut self, key: usize, index: usize, level: f64) {
+        let Some(target) = target_of(&self.state, key, index) else { return };
+        let range = self.state.params.plugin(key).and_then(|p| p.lock().ok()?.param_info(index)).map(|i| (i.min, i.max));
+        if let Some(range) = range {
+            self.record_param(target, range, level);
         }
     }
 
@@ -782,8 +804,9 @@ mod tests {
     fn parameter_menu_set_edit_clip_and_link() {
         let (mut a, key) = eq_app();
         let m = row_menu(&mut a, key, 35);
+        // spec: ui/event-editor.md §1: the parameter's events, in the range the plugin states.
         let ev = entry(&m, "Edit automation");
-        assert!(!ev.enabled && matches!(ev.cmd, Cmd::NotYet(_)));
+        assert!(ev.enabled && matches!(ev.cmd, Cmd::EditEvents(_, _, _, Some(_))), "{:?}", ev.cmd);
         for label in ["Edit automation in a window", "Edit automation in piano roll"] {
             let i = entry(&m, label);
             assert!(!i.enabled && i.cmd == Cmd::Nothing, "{label}");

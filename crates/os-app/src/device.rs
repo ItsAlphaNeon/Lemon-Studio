@@ -228,6 +228,7 @@ impl Mix {
             }
             i += 1;
         }
+        crate::audio_log::push(&self.sum, w);
         &self.sum
     }
 }
@@ -874,10 +875,10 @@ where
                     t => {
                         crate::rt::set_role(crate::rt::Role::Callback, t);
                         match crate::rt::promote(t) {
-                            Ok(()) => crate::audio_log::write("device callback: real-time priority"),
+                            Ok(()) => crate::dropout_log::write("device callback: real-time priority"),
                             Err(e) => {
                                 eprintln!("Audio: the device callback runs at normal priority ({e})");
-                                crate::audio_log::write(&format!("device callback: normal priority ({e})"));
+                                crate::dropout_log::write(&format!("device callback: normal priority ({e})"));
                             }
                         }
                         return;

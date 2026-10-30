@@ -113,6 +113,11 @@ pub struct Control {
     pub params: Vec<(u32, u32, f64)>,
     /// Rack rows whose Misc values an undo put back, for their Lemon Sampler to follow (`misc::follow`).
     pub misc: Vec<usize>,
+    /// Plugin states an undo or redo put back, for the app to load: (owner, the side put back, the `PluginSide::fill`
+    /// of its other side, which takes the state it replaces).
+    pub states: Vec<(u32, command::PluginSide, u64)>,
+    /// The last `PluginSide::fill` given.
+    fills: u64,
     /// The values parameters were last set to or read at (the undo of a parameter change puts the value back).
     known: HashMap<(u32, u32), f64>,
     events: VecDeque<Event>,
@@ -146,6 +151,14 @@ impl Control {
     pub fn set_param(&mut self, owner: u32, param: u32, v: f64) {
         self.params.push((owner, param, v));
         self.known.insert((owner, param), v);
+    }
+
+    /// Plugin `owner`'s state goes back to `side` on the app's next tick; returns the `PluginSide::fill` for the side it
+    /// replaces.
+    pub fn put_state(&mut self, owner: u32, side: command::PluginSide) -> u64 {
+        self.fills += 1;
+        self.states.push((owner, side, self.fills));
+        self.fills
     }
 
     /// A parameter's value as last set or read.
@@ -193,6 +206,7 @@ impl Control {
         ids::forget(&mut self.ids);
         self.host.clear();
         self.params.clear();
+        self.states.clear();
         self.known.clear();
         self.proposals.clear();
         self.seen = None;
@@ -417,6 +431,19 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
     crate::history::done_with(s);
 }
 
+/// Plugin instance `key` took a whole new state at the user's request (a preset from its window's Presets box, ◀ ▶ or
+/// window menu, a preset file dropped on it): one step, `name`, that puts `before` back (the state, the preset shown
+/// and its channel's or slot's name), keyed by the owner's id so it follows moves. The step comes from no change the
+/// release could judge.
+pub fn state_edit(s: &mut State, key: usize, name: &'static str, before: command::PluginSide) {
+    if command::key_owner(&s.project, key) == Some(0) {
+        s.control.settle(&mut s.project);
+    }
+    let Some(owner) = command::key_owner(&s.project, key).filter(|&o| o != 0) else { return };
+    crate::history::record(s, name, crate::history::Snap::Commands(vec![Command::Put(Box::new(command::Taken::Plugin(owner, Box::new(before))))]));
+    crate::history::done_with(s);
+}
+
 /// `edit_app` for a run of changes that make one step (the tempo tapper's taps, wheel notches on a value box): a change
 /// that joins the newest step of run `run` (`History::joins`) records none, as that step holds the region from before
 /// the run.
@@ -456,6 +483,7 @@ fn lower(t: &str) -> String {
 struct Queues {
     host: usize,
     params: usize,
+    states: usize,
     sample_loads: usize,
     fx: usize,
     dirty: bool,
@@ -476,6 +504,7 @@ impl Queues {
         Queues {
             host: s.control.host.len(),
             params: s.control.params.len(),
+            states: s.control.states.len(),
             sample_loads: s.sample_loads.len(),
             fx: s.mixer.pending.len(),
             dirty: s.piano.dirty,
@@ -495,6 +524,7 @@ impl Queues {
     fn put(self, s: &mut State) {
         s.control.host.truncate(self.host);
         s.control.params.truncate(self.params);
+        s.control.states.truncate(self.states);
         s.sample_loads.truncate(self.sample_loads);
         s.mixer.pending.truncate(self.fx);
         s.message = self.message;

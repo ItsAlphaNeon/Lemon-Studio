@@ -144,6 +144,7 @@ fn target_text(t: Target) -> String {
         },
         Target::Fader(m) => format!("fader:{m}"),
         Target::Param(key, i) => format!("param:{key}:{i}"),
+        Target::Latency(..) => "none".into(),
     }
 }
 
@@ -545,10 +546,14 @@ impl App {
                     tr.volume = Some(f64::from(v));
                     self.state.piano.dirty = true;
                 }
+                self.record_control(&crate::app::Action::Fader(m));
             }
             Target::Param(key, index) => {
                 crate::params::set_param_value(&mut self.state, key, index, f64::from(v));
+                self.record_plugin_param(key, index, f64::from(v));
             }
+            // Never linked (no remote control).
+            Target::Latency(..) => {}
         }
         self.invalidate();
     }

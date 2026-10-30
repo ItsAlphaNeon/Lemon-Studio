@@ -483,6 +483,47 @@ fn the_mixer_s_edits_are_undoable() {
         a.state.playlist.edit.as_mut().unwrap().text = "Drums".into();
         crate::playlist::commit_edit(&mut a.state);
     });
+    ui_round_trip(&mut a, "Mixer track reset", |a| {
+        run(a, MCmd::Reset(1));
+    });
+    crate::mixer::track_mut(&mut a.state, 3).unwrap().routes = vec![5];
+    ui_round_trip(&mut a, "Mixer routing", |a| {
+        a.state.mixer.sel.clear();
+        run(a, MCmd::ResetRouting(3));
+    });
+    ui_round_trip(&mut a, "Delete mixer track", |a| {
+        run(a, MCmd::Trim { non_empty: false });
+    });
+    ui_round_trip(&mut a, crate::history::MIXER_TRACK_IO, |a| {
+        run(a, MCmd::Monitor(2, os_model::MONITOR_ON));
+    });
+    ui_round_trip(&mut a, crate::mixer::LATENCY, |a| {
+        crate::mixer::set_latency(&mut a.state, 2, false, 20.0);
+    });
+    // Effect slots: added, moved, named, removed.
+    a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+    a.state.selected_mixer = 2;
+    a.state.mixer.sel.clear();
+    ui_round_trip(&mut a, "Add effect", |a| {
+        run(a, MCmd::AddEffect(0, 0));
+    });
+    run(&mut a, MCmd::AddEffect(0, 0));
+    a.state.control.settle(&mut a.state.project);
+    ui_round_trip(&mut a, "Move effect", |a| {
+        run(a, MCmd::SlotMove(0, 1));
+    });
+    // A slot's name is kept beside the project (the reading does not show it).
+    crate::playlist::start_edit(&mut a.state, crate::playlist::EditTarget::SlotName(2, 1), (0.0, 0.0));
+    a.state.playlist.edit.as_mut().unwrap().text = "Glue".into();
+    crate::playlist::commit_edit(&mut a.state);
+    assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some("Glue"));
+    assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Slot name"));
+    assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some("Test FX"));
+    assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some("Slot name"));
+    assert_eq!(crate::mixer::slot_name(&a.state, 2, 1).as_deref(), Some("Glue"));
+    ui_round_trip(&mut a, "Remove effect", |a| {
+        run(a, MCmd::SlotDelete(1));
+    });
     // A fader drag is one step; a press that doesn't move it is none.
     let steps = a.state.history.at();
     crate::control::edit_press(&mut a.state, "Mixer track volume", command::Region::Track(1));
@@ -675,7 +716,7 @@ fn ticks_past_the_last_are_refused() {
     }
 }
 
-/// A plugin with two parameters (ids 7 and 8) whose window's edits a test sends (`events`).
+/// A plugin with two parameters (ids 7 and 8) whose window's edits a test sends (`events`); its state is the two values.
 struct Knob {
     desc: os_host::Descriptor,
     value: [f64; 2],
@@ -714,10 +755,12 @@ impl os_host::Plugin for Knob {
     }
     fn close_editor(&mut self) {}
     fn save_state(&self) -> Option<Vec<u8>> {
-        None
+        Some(knob_state(self.value))
     }
-    fn load_state(&mut self, _: &[u8]) -> bool {
-        false
+    fn load_state(&mut self, b: &[u8]) -> bool {
+        let Some(v) = b.get(..16) else { return false };
+        self.value = [0, 8].map(|i| f64::from_le_bytes(v[i..i + 8].try_into().unwrap()));
+        true
     }
     fn param_count(&self) -> usize {
         2
@@ -808,6 +851,105 @@ fn edits_in_a_plugin_s_window_are_undo_steps() {
     assert_eq!(value(&mut a), [0.5, 0.5], "both back to before the run");
     crate::history::redo(&mut a.state);
     assert_eq!(value(&mut a), [0.15, 0.4]);
+}
+
+fn knob_state(v: [f64; 2]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// Lemon Studio's choice: a preset loaded into a plugin at the user's request (its window's Presets box, ◀ ▶, a file
+/// dropped on it) is one undo step, "Plugin preset". Undo brings back the state, the preset shown and the name the load
+/// gave the channel or slot; redo the state the undo replaced (edits since the load that made no step too). The step
+/// goes by the owner's id, so it follows the channel when it moves. A preset that goes into an instance just made for
+/// it makes none.
+#[test]
+fn preset_loads_are_undo_steps() {
+    use crate::presets::{load_into, save, Header};
+    let mut a = app();
+    a.plugins = crate::plugins::Plugins::default();
+    let desc = crate::plugins::builtin()[0].desc.clone();
+    let knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc: desc.clone(), value: [0.25, 0.5], events: Vec::new() }));
+    let mut h = crate::plugins::Hosted::new(knob.clone());
+    h.owner = a.state.project.channels[0].id;
+    a.plugins.hosted.insert(0, h);
+    a.state.project.channels[0].name = Some("808 Snare".into());
+    a.params_tick();
+    let dir = std::env::temp_dir().join(format!("os-preset-undo-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let header = Header { plugin: desc.name.clone(), id: desc.uid(), format: desc.format.as_str().into(), body: String::new() };
+    let preset = |name: &str, v: [f64; 2]| {
+        let p = dir.join(format!("{name}.ospreset"));
+        save(&p, &header, &knob_state(v)).unwrap();
+        p
+    };
+    let (bright, dark) = (preset("Bright", [0.9, 0.1]), preset("Dark", [0.1, 0.9]));
+    // What the instance on `row` and its channel hold, once the app's tick has put back what an undo or redo took.
+    let seen = |a: &mut App, row: usize| {
+        a.host_commands();
+        (knob.lock().unwrap().value, a.state.project.channels[row].name.clone().unwrap_or_default(), a.plugins.preset_name(row))
+    };
+    let at = |v: [f64; 2], name: &str, preset: Option<&str>| (v, name.to_string(), preset.map(str::to_string));
+
+    let steps = a.state.history.at();
+    assert_eq!(load_into(&mut a, 0, &bright).as_deref(), Some("Preset: Bright"));
+    assert_eq!((a.state.history.at(), a.state.history.newest_done()), (steps + 1, Some(command::PLUGIN_PRESET)));
+    assert_eq!(seen(&mut a, 0), at([0.9, 0.1], "Bright", Some("Bright")), "Auto name channels is on by default");
+    load_into(&mut a, 0, &dark);
+    load_into(&mut a, 0, &dark);
+    assert_eq!(a.state.history.at(), steps + 2, "the same preset again changes nothing");
+
+    // The channel moves without a step of its own: the instance follows it, and so does the undo.
+    a.state.project.channels.swap(0, 1);
+    a.follow_ids(true, false);
+    assert!(a.plugins.hosted.contains_key(&1));
+    assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(command::PLUGIN_PRESET));
+    assert_eq!(seen(&mut a, 1), at([0.9, 0.1], "Bright", Some("Bright")));
+    crate::history::undo(&mut a.state);
+    assert_eq!(seen(&mut a, 1), at([0.25, 0.5], "808 Snare", None), "back to before the first preset");
+    crate::history::redo(&mut a.state);
+    assert_eq!(seen(&mut a, 1), at([0.9, 0.1], "Bright", Some("Bright")));
+    crate::history::redo(&mut a.state);
+    assert_eq!(seen(&mut a, 1), at([0.1, 0.9], "Dark", Some("Dark")));
+
+    // Several undos and redos before the app's tick (the browser's History, a client) come out the same.
+    crate::history::undo(&mut a.state);
+    crate::history::undo(&mut a.state);
+    crate::history::redo(&mut a.state);
+    assert_eq!(seen(&mut a, 1), at([0.9, 0.1], "Bright", Some("Bright")));
+    crate::history::redo(&mut a.state);
+    assert_eq!(seen(&mut a, 1), at([0.1, 0.9], "Dark", Some("Dark")));
+
+    // An edit the host saw no step for (Undo knob tweaks off, a plugin's own page) comes back with the redo.
+    knob.lock().unwrap().value = [0.3, 0.7];
+    crate::history::undo(&mut a.state);
+    assert_eq!(seen(&mut a, 1).0, [0.9, 0.1]);
+    crate::history::redo(&mut a.state);
+    assert_eq!(seen(&mut a, 1).0, [0.3, 0.7]);
+
+    // A mixer slot: the name "Auto name effect slots" gave it goes with the undo.
+    crate::prefs::set_check(&crate::prefs::AUTO_NAME_EFFECT_SLOTS, true);
+    let fx = crate::plugins::fx_key(1, 0);
+    let slot_knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: [0.5, 0.5], events: Vec::new() }));
+    a.plugins.hosted.insert(fx, crate::plugins::Hosted::new(slot_knob.clone()));
+    crate::mixer::track_mut(&mut a.state, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Fruity Delay 3"));
+    let slot = |a: &App| crate::mixer::slot_name(&a.state, 1, 0).unwrap_or_default();
+    let plain = slot(&a);
+    let steps = a.state.history.at();
+    load_into(&mut a, fx, &bright);
+    assert_eq!((a.state.history.at(), slot(&a), slot_knob.lock().unwrap().value), (steps + 1, "Bright".to_string(), [0.9, 0.1]));
+    crate::history::undo(&mut a.state);
+    a.host_commands();
+    assert_eq!((slot(&a), slot_knob.lock().unwrap().value, a.plugins.preset_name(fx)), (plain.clone(), [0.5, 0.5], None));
+    crate::history::redo(&mut a.state);
+    a.host_commands();
+    assert_eq!((slot(&a), slot_knob.lock().unwrap().value), ("Bright".to_string(), [0.9, 0.1]));
+
+    // A preset dropped where a new instance was made loads into it as part of the step that made it.
+    let steps = a.state.history.at();
+    a.plugins.preset_waits.push((1, dark.clone(), std::time::Instant::now()));
+    crate::presets::pending_tick(&mut a);
+    assert_eq!((a.state.history.at(), knob.lock().unwrap().value), (steps, [0.1, 0.9]));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The interface edits the audit of 2026-10-28 found without an undo step have one now; a drag or a run of wheel

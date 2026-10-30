@@ -31,6 +31,7 @@ pub mod strum;
 pub mod piano_dlg;
 pub mod tapper;
 pub mod touch;
+pub mod events;
 pub mod theme_preview;
 pub mod toolbar;
 pub mod typein;
@@ -409,6 +410,7 @@ fn paint_window(ui: &mut Ui, s: &State, win: Win, r: Rect, a: Rect, f: &FrameInf
                     });
                 }
             }
+            Win::Events => ui.part(Seg::Win(win), a, |ui| events::paint(ui, s, f)),
             _ => {}
         }
 }

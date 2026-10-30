@@ -48,6 +48,8 @@ pub enum Win {
     /// The piano roll's Flam, Flip and Scale levels dialogs, one at a time (spec: ui/piano-flam.md, ui/piano-flip.md,
     /// ui/piano-level-scaling.md).
     PianoDlg,
+    /// The event editor (spec: ui/event-editor.md).
+    Events,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -176,6 +178,8 @@ pub enum Action {
     Arp(crate::arpeggiate::Act),
     /// The Flam, Flip and Scale levels dialogs' switches and buttons (spec: as `Win::PianoDlg`).
     PianoDlg(crate::piano_dlg::Act),
+    /// The event editor's buttons and areas (spec: ui/event-editor.md).
+    Events(crate::events::EvAct),
     /// Monitor debug panel: a slider (index into `monitor::PARAMS`), Reset, Save, Close.
     MonParam(usize),
     MonReset,
@@ -252,6 +256,8 @@ pub enum Action {
     BrowserMenu,
     /// The search field (focus it, §5).
     BrowserSearch,
+    /// The cross right of the search field while it has text: clears it (§5).
+    BrowserClear,
     /// The splitter right of the browser: drag to resize it, double-click for the default width (§9).
     BrowserSplitter,
     /// The tiling layout: the browser's title bar (drag it to the window's other side).
@@ -858,6 +864,8 @@ pub enum Drag {
     LinkBox { part: crate::remote::RAct, y0: f32, steps: i32 },
     /// A Touch controller pad or key held: the note follows the mouse (spec: ui/touch-controller.md §2).
     Touch,
+    /// A stroke in the event editor (spec: ui/event-editor.md §3).
+    Events(crate::events::Stroke),
     /// Vertical drag on the pattern name box steps the number (spec: ui/pattern-menu.md §1).
     PatternBox { y0: f32, p0: u16 },
     /// Move a floating window (offset of the mouse from its top-left).
@@ -985,6 +993,8 @@ pub struct State {
     /// The Tempo tapper: where it is, the count of taps, the pad's flash.
     pub tapper: crate::tapper::TapperUi,
     pub touch: crate::touch::TouchUi,
+    /// The event editor: the control it shows, its view, tool and selection.
+    pub events: crate::events::EventsUi,
     /// The piano roll's Strum dialog: where it is, its settings and its preview session.
     pub strum: crate::strum::StrumUi,
     /// The piano roll's Arpeggiate dialog: where it is, its settings and pattern, its preview session.
@@ -1082,6 +1092,9 @@ pub struct State {
     pub browser_split_click: Option<std::time::Instant>,
     /// The hovered row whose label is scrolling, as last painted (spec: ui/browser.md §9).
     pub browser_marquee: std::cell::RefCell<Option<views::browser::Marquee>>,
+    /// Favorite files (spec: ui/browser.md §10) and the index of the browser's disk folders (§11).
+    pub browser_favs: Vec<crate::browser::Fav>,
+    pub browser_index: crate::browser_index::Index,
     /// Plugin parameter lists and the last tweaked parameters (spec: plugins/plugin-parameters.md).
     pub params: crate::params::ParamUi,
     /// "Copy value": a normalized value for "Paste value", one for every control and automation point, as in FL
@@ -1419,6 +1432,10 @@ pub struct App {
     pub warp: Option<(f32, f32)>,
     /// One-click audio recording under way (spec: ui/one-click-recording.md §2).
     pub(crate) audio_rec: Option<crate::one_click::AudioRec>,
+    /// Disk recording into the armed mixer tracks under way (spec: audio/track-io.md §2.5).
+    pub(crate) track_rec: Option<crate::track_rec::TrackRec>,
+    /// TOOLS > Retro audio capture: the last minutes the device played (spec: ui/audio-logger.md).
+    pub(crate) audio_log: crate::audio_log::Log,
     /// Wheel movement in an open menu short of a whole notch (trackpads).
     menu_notch: f32,
     /// A Shift+press grabbed piano-roll notes: the drag's first move picks up copies of them (`App::pick_up_notes`).
@@ -1511,7 +1528,7 @@ pub struct App {
     pub(crate) session_since: Option<std::time::Instant>,
     /// The audio log's dropout watch (`crate::audio_log`).
     #[cfg(target_os = "linux")]
-    audio_watch: crate::audio_log::Watch,
+    audio_watch: crate::dropout_log::Watch,
     /// Whether the transport played at the last tick: a start is logged.
     #[cfg(target_os = "linux")]
     audio_playing: bool,
@@ -1589,13 +1606,15 @@ impl App {
                 browser_drag: None,
                 browser_search: String::new(),
                 browser_search_focus: false,
-                browser_opts: views::browser::DEFAULT_OPTS.iter().copied().collect(),
+                browser_opts: crate::browser::load_opts(),
                 browser_hist: Vec::new(),
                 browser_hist_pos: 0,
                 browser_w: crate::browser::load_width(),
                 browser_right: crate::settings_file::flag(crate::browser::BROWSER_RIGHT_KEY, false),
                 browser_split_click: None,
                 browser_marquee: Default::default(),
+                browser_favs: crate::browser::load_favs(),
+                browser_index: Default::default(),
                 tempo: 130.0,
                 tempo_digits: std::cell::Cell::new([f32::INFINITY; 3]),
                 message: None,
@@ -1604,6 +1623,7 @@ impl App {
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
                 touch: Default::default(),
+                events: Default::default(),
                 strum: Default::default(),
                 arp: Default::default(),
                 piano_dlg: Default::default(),
@@ -1697,6 +1717,8 @@ impl App {
             smooth: Default::default(),
             warp: None,
             audio_rec: None,
+            track_rec: None,
+            audio_log: Default::default(),
             menu_notch: 0.0,
             shift_clone: false,
             auto_close: Default::default(),
@@ -4380,6 +4402,7 @@ impl App {
         }
         self.follow_device();
         self.record_tick();
+        self.audio_log.tick();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
         let now = std::time::Instant::now();
@@ -4388,6 +4411,7 @@ impl App {
         self.ease_tick(now);
         self.cables_tick(now);
         self.marquee_tick(now);
+        self.browser_index_tick();
         self.backup_tick(now);
         self.work_tick(now);
         self.song_info_tick(now);
@@ -4959,13 +4983,13 @@ impl App {
         let playing = self.transport.playing();
         let context = |a: &App| format!("{} ({})", a.title(), crate::audio_cfg::AudioCfg::current().text().replace('\n', " ").trim());
         if playing && !self.audio_playing {
-            crate::audio_log::write(&format!("play: {}", context(self)));
+            crate::dropout_log::write(&format!("play: {}", context(self)));
         }
         self.audio_playing = playing;
         let (_, demoted) = crate::rt::counts();
         let drops = self.transport.drops();
         if let Some(line) = self.audio_watch.check(drops, demoted, crate::rt::roles(), "") {
-            crate::audio_log::write(&format!("{line}{}", context(self)));
+            crate::dropout_log::write(&format!("{line}{}", context(self)));
         }
     }
 
@@ -5873,6 +5897,7 @@ impl App {
                     self.drag = Some(Drag::ControlErase { last_x: x });
                 }
                 Drag::Touch => self.touch_drag(x, y),
+                Drag::Events(st) => self.events_drag(st, x, y),
                 Drag::PianoKeys { key } => {
                     if let Some(g) = self.piano_geom() {
                         let k = g.key_at(y).clamp(0, views::piano::TOP_KEY);
@@ -6008,6 +6033,7 @@ impl App {
                         t.volume = Some(v);
                         self.state.piano.dirty = true;
                     }
+                    self.record_control(&Action::Fader(track));
                     self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
                     let col = self.hits.iter().rev().find(|h| h.action == Action::Fader(track)).map(|h| h.rect);
                     match col {
@@ -6098,6 +6124,7 @@ impl App {
                 Drag::Tempo { y0, t0, step } => {
                     // Rounded to the box's thousandths, so repeated steps don't drift.
                     let t = self.set_tempo(((t0 + f64::from(y0 - y).round() * step) * 1000.0).round() / 1000.0);
+                    self.record_control(&Action::Tempo);
                     self.hint = Cow::Owned(format!("Tempo {t:.3} BPM"));
                     self.damage_band(TEMPO_RECT);
                     self.damage_band(HINT_RECT);
@@ -6254,6 +6281,7 @@ impl App {
             Action::Perf(p) => matches!(p, crate::perf::PerfAct::Sort(_) | crate::perf::PerfAct::ResetOnTransport | crate::perf::PerfAct::Freeze),
             Action::Tapper(t) => *t == crate::tapper::TapAct::Apply,
             Action::Touch(t) => !matches!(t, crate::touch::TouchAct::Note(_)),
+            Action::Events(a) => matches!(a, crate::events::EvAct::Tool(_)),
             Action::CableDebug(d) => !matches!(d, crate::cable::DebugAct::Param(_)),
             Action::TypeIn(t) => !matches!(t, crate::typein::TiAct::Field),
             Action::Pat(h) => {
@@ -6978,6 +7006,8 @@ impl App {
             }
             // The Limit dialog's keys take the right button too (spec: ui/piano-limit.md §1).
             Some(Action::PianoDlg(crate::piano_dlg::Act::Keys)) => return self.piano_dlg_act(crate::piano_dlg::Act::Keys),
+            // The event editor's right button draws a line (spec: ui/event-editor.md §3).
+            Some(Action::Events(crate::events::EvAct::Graph)) => return self.events_press(true, false),
             Some(Action::PianoTarget) => {
                 // spec: ui/piano-target-channel.md §4
                 let row = self.state.selected_channel;
@@ -7202,6 +7232,7 @@ impl App {
             }
             Some(Drag::SongRuler) => self.song_pos_release(),
             Some(Drag::Touch) => self.touch_hold(None),
+            Some(Drag::Events(st)) => self.events_release(st),
             Some(Drag::BarEdge { .. }) => self.state.piano.bar_span = None,
             Some(Drag::ThemeKnob { .. } | Drag::PickSv(_) | Drag::PickHue(_)) => self.theme_store(),
             _ => {}
@@ -7669,6 +7700,11 @@ impl App {
             self.invalidate();
             return None;
         }
+        // The event editor: time scrolls, Ctrl zooms (spec: ui/event-editor.md §3).
+        if let Some(Action::Events(crate::events::EvAct::Graph | crate::events::EvAct::Ruler)) = area {
+            self.events_wheel(dy + dx, ctrl);
+            return None;
+        }
         if matches!(area, Some(Action::Settings(views::settings::SAct::Plug(views::settings::Plug::Table | views::settings::Plug::Row(_) | views::settings::Plug::Star(_) | views::settings::Plug::Show(_)))) | Some(Action::Scrollbar(Scroll::PlugTable))) {
             let n = self.state.plugdb.rows.len();
             let top = self.state.plugdb.top as f32 - (dy + dx) * 3.0;
@@ -7822,6 +7858,7 @@ impl App {
                     m.volume = Some(v);
                 }
                 s.piano.dirty = true;
+                self.record_control(&Action::Fader(t));
             }
             self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
             return None;
@@ -8016,6 +8053,11 @@ impl App {
         let s = &self.state;
         if s.tiled() && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && s.playlist.popup.is_none() && self.window_key(key, ctrl, alt) {
             return;
+        }
+        // The event editor's keys while it is in front (spec: ui/event-editor.md §4).
+        let s = &self.state;
+        if s.z.last() == Some(&Win::Events) && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && s.playlist.popup.is_none() && self.events_key(key, ctrl, alt) {
+            return self.invalidate();
         }
         // The channel rack's keys while it is in front (spec: ui/channel-rack.md §20).
         let s = &self.state;
@@ -8713,6 +8755,7 @@ impl App {
             Action::Strum(a) => self.strum_act(a),
             Action::Arp(a) => self.arp_act(a),
             Action::PianoDlg(a) => self.piano_dlg_act(a),
+            Action::Events(a) => self.events_act(a),
             Action::Placeholder(name) => s.message = Some(off_text(name)),
             Action::Monitor => {
                 s.monitor.toggle();
@@ -9079,7 +9122,7 @@ impl App {
                 self.damage_win(Win::PianoRoll);
             }
             Action::CloseWin(w) => s.hide(w),
-            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserSplitter | Action::BrowserMove => {}
+            Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserClear | Action::BrowserSplitter | Action::BrowserMove => {}
             Action::TypeIn(t) => crate::typein::click(s, t),
             Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow | Action::Embed(_) => {}
             Action::PlTool(_)
@@ -9530,6 +9573,11 @@ impl App {
             MenuCmd::IntoWorkspace => self.move_into_workspace(),
             MenuCmd::Typing => self.toggle_typing(),
             MenuCmd::Metronome => self.toggle_metronome(),
+            MenuCmd::AudioLog => self.toggle_audio_log(),
+            MenuCmd::DumpAudioLog => {
+                let m = self.dump_audio_log();
+                self.state.message = Some(m);
+            }
             MenuCmd::ClearLog => {
                 if let Some(m) = self.rec_cmd(crate::record::RecCmd::ClearLog) {
                     self.state.message = Some(m);
@@ -9773,7 +9821,7 @@ pub(crate) fn lift_windows(s: &mut State, dy: f32) {
     for w in &mut s.wins {
         lift(&mut w.rect.y);
     }
-    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos, &mut s.strum.pos, &mut s.arp.pos] {
+    for pos in [&mut s.rack_pos, &mut s.plugin_pos, &mut s.perf.pos, &mut s.tapper.pos, &mut s.touch.pos, &mut s.strum.pos, &mut s.arp.pos, &mut s.events.pos] {
         lift(&mut pos.1);
     }
     for pos in &mut s.piano_dlg.pos {
@@ -10432,6 +10480,37 @@ mod tests {
             let slot = saved.mixer[usize::from(*t)].slots[usize::from(*k)].clone().unwrap();
             assert_eq!((slot.name.as_str(), &slot.state), (*file, fl));
         }
+    }
+
+    /// A project's Fruity Peak Controller slot opens as Lemon Peak Controller with its state, and a save keeps the FL
+    /// effect with that state and the project's controller links.
+    // spec: plugins/lemon-peak-controller.md "Opened projects"
+    #[test]
+    fn fl_peak_controller_slots_open_as_lemon_peak_controller() {
+        use crate::plugins::{fx_key, LEMON_PEAK_CONTROLLER};
+        let mut fl = lemon_small_fx::params::default_state(lemon_small_fx::peak_controller::SPEC);
+        lemon_small_fx::params::set_field(&mut fl, 3, 40);
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.project.mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Peak Controller".into(), state: fl.clone() });
+        let link = os_model::ControllerLink { formula: Some("1-Input".into()), ..os_model::ControllerLink::new(0x7000 + 64, 1, 0x40_0000) };
+        a.state.project.controller_links = vec![link.clone()];
+        a.sync_effects();
+        let key = fx_key(1, 0);
+        assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(LEMON_PEAK_CONTROLLER.to_string()));
+        assert_eq!(a.plugins.recreation_file_state(key, "Fruity Peak Controller").as_ref(), Some(&fl), "the state as it was opened");
+        let path = std::env::temp_dir().join(format!("lemon-fl-peak-controller-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let slot = saved.mixer[1].slots[0].clone().unwrap();
+        assert_eq!((slot.name.as_str(), &slot.state), ("Fruity Peak Controller", &fl));
+        assert_eq!(saved.controller_links, vec![link]);
     }
 
     /// The toolbar's audio editor button puts Tesla on the master track and shows it; another click shows the same
@@ -14640,14 +14719,17 @@ mod tests {
         click(&mut app, &mut c, r0);
         assert!(rows(&app.state).iter().all(|r| r.item != Item::Pattern(1)));
         assert_eq!(crate::playlist::clips(&app.state).len(), n0 + 1);
-        // Plugin database tab: open Generators, drag Lemon Sampler onto the playlist -> a new channel.
+        // Plugin database tab: open Generators and its Sampler category, drag Lemon Sampler onto the playlist -> a new
+        // channel.
         app.plugins = crate::plugins::Plugins::builtins();
         app.state.plugdb.rebuild(&app.plugins);
         let r0 = hit_rect(&app, &Action::BrowserTab(2));
         click(&mut app, &mut c, r0);
-        let gi = rows(&app.state).iter().position(|r| r.label == "Generators").unwrap();
-        let r0 = hit_rect(&app, &Action::BrowserRow(gi));
-        click(&mut app, &mut c, r0);
+        for label in ["Generators", "Sampler"] {
+            let gi = rows(&app.state).iter().position(|r| r.label == label).unwrap();
+            let r0 = hit_rect(&app, &Action::BrowserRow(gi));
+            click(&mut app, &mut c, r0);
+        }
         let si = rows(&app.state).iter().position(|r| r.item == Item::Generator(0)).expect("sampler row");
         let ch0 = app.state.project.channels.len();
         let src = hit_rect(&app, &Action::BrowserRow(si));
@@ -14657,11 +14739,10 @@ mod tests {
         app.mouse_move(grid.x + 210.0, grid.y + 60.0);
         app.mouse_up();
         assert_eq!(app.state.project.channels.len(), ch0 + 1);
-        // The favorites tab is not available yet: greyed out (no tab hit), its page empty; wheel never scrolls past
-        // the content. There is no online content tab.
-        assert!(!app.hits.iter().any(|h| h.action == Action::BrowserTab(3)));
-        assert!(app.hits.iter().any(|h| h.action == Action::Placeholder("Favorites")));
-        assert!(!app.hits.iter().any(|h| h.action == Action::Placeholder("Online content")));
+        // The favorites tab works (spec §10), empty without favorites; wheel never scrolls past the content. There is no
+        // online content tab.
+        assert!(app.hits.iter().any(|h| h.action == Action::BrowserTab(3)));
+        assert!(!app.hits.iter().any(|h| matches!(h.action, Action::Placeholder("Favorites" | "Online content"))));
         app.act(Action::BrowserTab(3));
         assert!(rows(&app.state).is_empty());
         let r0 = hit_rect(&app, &Action::BrowserTab(0));
@@ -15328,7 +15409,7 @@ mod tests {
         app.state.plugdb.rebuild(&app.plugins);
         app.state.z = vec![Win::Mixer];
         app.state.browser_tab = 2;
-        app.state.browser_open.insert("2:Plugin library/Effects".into());
+        app.state.browser_open.extend(["2:Plugin library/Effects".into(), "2:Plugin library/Effects/Other".into()]);
         frame(&mut app, &mut c, None);
         let i = rows(&app.state).iter().position(|r| r.item == Item::Effect(0)).expect("effect row");
         let src = hit_rect(&app, &Action::BrowserRow(i));
@@ -19938,11 +20019,20 @@ mod tests {
         crate::patterns::run(&mut app.state, crate::patterns::Cmd::Rename, (0.0, 0.0));
         app.key(&Key::Character("f".into()), true, false);
         assert!(!app.state.browser_search_focus);
-        // Greyed out: the section the tree does not list, and the plugin browsers. Undo history works: the tree lists History.
+        // Greyed out: the section the tree does not list. Undo history works: the tree lists History.
         assert!(works(VIEW, item_at(VIEW, index(VIEW, "Undo history")).unwrap()));
-        for (m, label) in [(VIEW, "Remote control"), (ADD_MENU, "Browse all installed plugins"), (ADD_MENU, "Browse presets")] {
-            assert!(!works(m, item_at(m, index(m, label)).unwrap()), "{label}");
-        }
+        assert!(!works(VIEW, item_at(VIEW, index(VIEW, "Remote control")).unwrap()));
+        // ADD > Browse all installed plugins: the Plugin database's Installed opened and selected; Browse presets: the
+        // All tab's Plugin presets (spec: ui/browser-commands.md §2).
+        app.state.show_browser = false;
+        app.menu_item(ADD_MENU, index(ADD_MENU, "Browse all installed plugins"));
+        let installed = format!("{PLUGIN_TAB}:Plugin library/Installed");
+        let s = &app.state;
+        assert!(s.show_browser && s.browser_tab == PLUGIN_TAB && s.browser_open.contains(&installed) && s.browser_sel.as_ref() == Some(&installed));
+        app.menu_item(ADD_MENU, index(ADD_MENU, "Browse presets"));
+        let presets = crate::views::browser::presets_key();
+        let s = &app.state;
+        assert!(s.browser_tab == 0 && s.browser_open.contains(&presets) && s.browser_sel.as_ref() == Some(&presets));
     }
 
     /// PATTERNS > Open in project browser (spec: ui/browser-commands.md §4-5): the browser shown on the Current project

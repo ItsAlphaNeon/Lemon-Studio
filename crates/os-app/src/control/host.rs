@@ -180,6 +180,32 @@ impl App {
                 self.state.params.set_by_host(key, param, v);
             }
         }
+        // Plugin states an undo or redo put back (`Taken::Plugin`): the state and preset each one replaces become the
+        // other side of its step (or of a redo still in this list), then it goes in. A side never filled (its plugin
+        // was not hosted) puts nothing back.
+        let mut states = std::mem::take(&mut self.state.control.states);
+        for i in 0..states.len() {
+            let (owner, fill) = (states[i].0, states[i].2);
+            let Some(key) = crate::control::command::owner_key(&self.state.project, owner).filter(|k| self.plugins.hosted.contains_key(k)) else { continue };
+            let (now, preset) = (self.plugins.state(key).unwrap_or_default(), self.plugins.presets.get(&key).cloned());
+            match states[i + 1..].iter_mut().find(|e| e.1.fill == fill) {
+                Some((_, side, _)) => (side.state, side.preset, side.fill) = (now, preset, 0),
+                None => crate::history::fill_plugin_side(&mut self.state, fill, &now, preset.as_deref()),
+            }
+            let side = &states[i].1;
+            if side.fill != 0 || side.state.is_empty() || !self.plugins.set_state(key, &side.state) {
+                continue;
+            }
+            self.plugins.set_preset(key, side.preset.clone());
+            // The parameters as the state left them: what the window's next edit and a parameter's undo move from.
+            self.state.params.reread(key);
+            for info in self.plugins.param_infos(key) {
+                if let Some(v) = self.plugins.param_value(key, info.id) {
+                    self.state.control.saw_param(owner, info.id, v);
+                }
+            }
+            self.invalidate();
+        }
         if relink.0 {
             self.transport.set_instruments(self.plugins.instruments());
         }

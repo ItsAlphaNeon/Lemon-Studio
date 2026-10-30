@@ -1,121 +1,170 @@
 // Copyright (C) 2026 ItsAlphaNeon
-// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The audio log: what went wrong with playback, and what was true when it did, so a dropout heard once can be
-//! explained afterwards. `Logs/audio.log` in the user folder, one line per event:
-//! - a playback starting (the audio settings it plays with);
-//! - an audio thread's real-time priority: given, refused (and why), or taken back by the safety cap (`crate::rt`);
-//! - dropouts, at most one line a second: how many of each kind (an empty block: the feeder was late; a plugin late
-//!   for its tick; the device's own underruns) and whether the feeder and the device callback were real-time then.
-//!
-//! Small by design: events only, never per block; at `CAP` bytes the file becomes `audio.log.1` (the one before is
-//! dropped), so the log never takes more than twice that.
+//! The audio logger (TOOLS > Retro audio capture): while it is enabled, what the audio device plays (its first output pair,
+//! playback, previews and live notes alike) is kept for the last few minutes; Open capture in audio editor puts it into Tesla
+//! on the master track. The device's callback pushes each block into one lock-free ring (`push`); the app's tick
+//! moves it into the log (`Log::tick`).
+// spec: ui/audio-logger.md
 
-use std::io::Write as _;
-use std::path::PathBuf;
-use std::sync::Mutex;
+use crate::app::{App, State};
+use crate::capture::Ring;
+use crate::playlist::{Cmd, Mark, PItem};
+use crate::record::RecCmd;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
-/// The largest the log grows before it is rotated.
-const CAP: u64 = 256 * 1024;
+/// Settings ▸'s choices: how many minutes the log keeps.
+pub const MINUTES: [u32; 4] = [1, 2, 5, 10];
+/// Kept in `settings.txt`: the switch (on by default, as in FL Studio) and the length.
+const ON: &str = "audio_logger";
+const LENGTH: &str = "audio_logger_minutes";
+const DEFAULT_MINUTES: u32 = 5;
+/// A sample at or below this is silence: a dump leaves it out at both ends.
+const SILENT: f32 = 1e-5;
 
-static LOCK: Mutex<()> = Mutex::new(());
-
-fn path() -> Option<PathBuf> {
-    #[cfg(test)]
-    return TEST_DIR.with(|d| d.borrow().clone()).map(|d| d.join("audio.log"));
-    #[cfg(not(test))]
-    Some(os_paths::user_dir()?.join("Logs").join("audio.log"))
+/// What the device's callback hands over: about 20 s of stereo at 48 kHz, drained on every tick of the app.
+struct Feed {
+    ring: Ring,
+    on: AtomicBool,
 }
 
-#[cfg(test)]
-thread_local! {
-    static TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+fn feed() -> &'static Feed {
+    static F: OnceLock<Feed> = OnceLock::new();
+    F.get_or_init(|| Feed { ring: Ring::new(1 << 21), on: AtomicBool::new(false) })
 }
 
-#[cfg(test)]
-pub fn set_test_dir(d: Option<PathBuf>) {
-    TEST_DIR.with(|t| *t.borrow_mut() = d);
+/// The device's block as it plays it (`width` channels interleaved; the first pair is kept), while the logger is on.
+/// The device's callback calls it; it neither locks nor allocates, and what finds no room is lost.
+pub(crate) fn push(sum: &[f32], width: usize) {
+    feed().push(sum, width);
 }
 
-/// Appends `line` with the local time. Not from the audio callback (it touches the disk).
-pub fn write(line: &str) {
-    let Some(p) = path() else { return };
-    let _g = LOCK.lock();
-    if let Some(d) = p.parent() {
-        let _ = std::fs::create_dir_all(d);
-    }
-    if std::fs::metadata(&p).is_ok_and(|m| m.len() >= CAP) {
-        let _ = std::fs::rename(&p, p.with_extension("log.1"));
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
-        let _ = writeln!(f, "{} {line}", now());
-    }
-}
-
-/// The local time, `YYYY-MM-DD HH:MM:SS`.
-fn now() -> String {
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
-    // SAFETY: localtime_r fills the struct given.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&t, &mut tm) };
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
-}
-
-/// Dropouts by kind, as the transport counts them.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Drops {
-    pub empty: u64,
-    pub plugin: u64,
-    pub device: u64,
-}
-
-impl Drops {
-    pub fn total(&self) -> u64 {
-        self.empty + self.plugin + self.device
-    }
-}
-
-/// The dropouts since the last line, and what the threads were: written when there are any, at most once a second.
-#[derive(Default)]
-pub struct Watch {
-    seen: Drops,
-    demoted: usize,
-    last: Option<std::time::Instant>,
-}
-
-impl Watch {
-    /// The transport's counts now (`now`) and the real-time state of the audio threads (`rt`: feeder, callback; `None`
-    /// when unknown): a line when something new happened and a second has passed since the last.
-    pub fn check(&mut self, now: Drops, demoted: usize, rt: (Option<bool>, Option<bool>), context: &str) -> Option<String> {
-        let new = Drops { empty: now.empty.saturating_sub(self.seen.empty), plugin: now.plugin.saturating_sub(self.seen.plugin), device: now.device.saturating_sub(self.seen.device) };
-        let demotions = demoted.saturating_sub(self.demoted);
-        if new.total() == 0 && demotions == 0 {
-            return None;
+impl Feed {
+    fn push(&self, sum: &[f32], width: usize) {
+        if !self.on.load(Ordering::Acquire) || width < 2 {
+            return;
         }
-        if self.last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1)) {
-            return None;
-        }
-        self.seen = now;
-        self.demoted = demoted;
-        self.last = Some(std::time::Instant::now());
-        let state = |s: Option<bool>| match s {
-            Some(true) => "real-time",
-            Some(false) => "normal priority",
-            None => "not running",
-        };
-        let mut line = String::new();
-        if new.total() > 0 {
-            line = format!("dropouts +{} ({} empty blocks: the feeder was late; {} plugins late; {} device underruns)", new.total(), new.empty, new.plugin, new.device);
-        }
-        if demotions > 0 {
-            if !line.is_empty() {
-                line.push_str("; ");
+        let frames = sum.len() / width;
+        self.ring.push_with(2 * frames, |k| sum[k / 2 * width + k % 2]);
+    }
+}
+
+pub fn enabled() -> bool {
+    crate::settings_file::flag(ON, true)
+}
+
+/// Bytes the log holds (the menu's header shows them).
+static HELD: AtomicUsize = AtomicUsize::new(0);
+
+/// The memory the log takes, in whole MB (the TOOLS menu's "Retro audio capture (memory used: 20MB)").
+pub fn memory_mb() -> usize {
+    HELD.load(Ordering::Relaxed) / (1024 * 1024)
+}
+
+pub fn minutes() -> u32 {
+    crate::settings_file::get(LENGTH).and_then(|v| v.parse().ok()).filter(|m| MINUTES.contains(m)).unwrap_or(DEFAULT_MINUTES)
+}
+
+/// TOOLS > Retro audio capture > Settings ▸.
+pub fn items(_: &State) -> Vec<PItem> {
+    let now = minutes();
+    let mut items = vec![PItem::head("Keep the last")];
+    items.extend(MINUTES.iter().map(|&m| {
+        PItem::new(format!("{m} minute{}", if m == 1 { "" } else { "s" }), Cmd::Rec(RecCmd::AudioLog(m))).mark(Mark::Radio(m == now))
+    }));
+    items
+}
+
+/// The log: interleaved stereo at `rate`, oldest first.
+#[derive(Debug, Default)]
+pub struct Log {
+    kept: VecDeque<f32>,
+    rate: u32,
+    incoming: Vec<f32>,
+}
+
+impl Log {
+    /// Keeps what the device played since the last tick, at the device's rate; off, the log empties.
+    pub fn tick(&mut self) {
+        let f = feed();
+        let on = enabled();
+        f.on.store(on, Ordering::Release);
+        if !on {
+            f.ring.clear();
+            if !self.kept.is_empty() || self.kept.capacity() > 0 {
+                *self = Log::default();
             }
-            line.push_str(&format!("{demotions} audio threads taken back to normal priority by the safety cap"));
+            HELD.store(0, Ordering::Relaxed);
+            return;
         }
-        Some(format!("{line}; feeder {}, device callback {}; {context}", state(rt.0), state(rt.1)))
+        let mut incoming = std::mem::take(&mut self.incoming);
+        incoming.clear();
+        f.ring.pop_into(&mut incoming);
+        self.keep(&incoming, crate::device::rate().unwrap_or(44100), minutes());
+        self.incoming = incoming;
+        HELD.store(self.kept.capacity() * std::mem::size_of::<f32>(), Ordering::Relaxed);
+    }
+
+    /// Adds `samples` played at `rate` and drops what is older than `minutes`; a new rate starts the log over.
+    fn keep(&mut self, samples: &[f32], rate: u32, minutes: u32) {
+        if rate != self.rate {
+            self.kept.clear();
+            self.rate = rate;
+        }
+        self.kept.extend(samples);
+        let cap = 2 * 60 * minutes as usize * rate as usize;
+        if self.kept.len() > cap {
+            let over = self.kept.len() - cap;
+            self.kept.drain(..over);
+        }
+    }
+
+    /// The log's left and right channels, without the silence at either end.
+    pub fn audio(&self) -> (Vec<f32>, Vec<f32>) {
+        let frames = self.kept.len() / 2;
+        let loud = |i: usize| self.kept[2 * i].abs() > SILENT || self.kept[2 * i + 1].abs() > SILENT;
+        let Some(first) = (0..frames).find(|&i| loud(i)) else { return (Vec::new(), Vec::new()) };
+        let last = (0..frames).rev().find(|&i| loud(i)).unwrap_or(first);
+        (first..=last).map(|i| (self.kept[2 * i], self.kept[2 * i + 1])).unzip()
+    }
+}
+
+impl App {
+    /// TOOLS > Retro audio capture > Enabled.
+    pub(crate) fn toggle_audio_log(&mut self) {
+        let on = !enabled();
+        crate::settings_file::set_flag(ON, on);
+        self.audio_log.tick();
+        self.state.message = Some(if on { format!("Retro audio capture on: keeps the last {} minute(s) of what plays", minutes()) } else { "Retro audio capture off".into() });
+    }
+
+    pub(crate) fn set_audio_log_minutes(&mut self, m: u32) -> String {
+        crate::settings_file::write(LENGTH, &m.to_string());
+        format!("Retro audio capture: keeps the last {m} minute(s)")
+    }
+
+    /// TOOLS > Retro audio capture > Open capture in audio editor: the log (silence at either end left out) into a WAV in the
+    /// `Recorded` folder, and into Tesla on the master track as One-click recording's takes go.
+    pub(crate) fn dump_audio_log(&mut self) -> String {
+        if !enabled() {
+            return "Retro audio capture is off: TOOLS > Retro audio capture > Enabled".into();
+        }
+        let (l, r) = self.audio_log.audio();
+        if l.is_empty() {
+            return "The audio logger has heard nothing yet".into();
+        }
+        let sample = tesla::sample::Sample::from_channels(self.audio_log.rate.max(1), vec![l, r], tesla::sample::Format::Float32);
+        let dir = crate::track_rec::folder(&self.state);
+        let name = format!("Audio log_{}.wav", chrono::Local::now().format("%Y-%m-%d %H-%M-%S"));
+        let path = dir.join(name);
+        let wrote = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, tesla::wav::write(&sample, tesla::wav::Depth::Own)));
+        match wrote {
+            Ok(()) => self.take_to_editor(&path),
+            Err(e) => format!("{} could not be written: {e}", path.display()),
+        }
     }
 }
 
@@ -123,31 +172,64 @@ impl Watch {
 mod tests {
     use super::*;
 
+    /// The log keeps the last minutes at the device's rate, starts over at a new rate, and a dump leaves the silence at
+    /// either end out.
     #[test]
-    fn a_line_per_burst_with_its_kinds() {
-        let mut w = Watch::default();
-        assert_eq!(w.check(Drops::default(), 0, (Some(true), Some(true)), "x"), None, "nothing new");
-        let l = w.check(Drops { empty: 3, plugin: 1, device: 0 }, 0, (Some(true), Some(false)), "buffer 256").unwrap();
-        assert!(l.starts_with("dropouts +4 (3 empty blocks") && l.contains("feeder real-time, device callback normal priority; buffer 256"), "{l}");
-        assert_eq!(w.check(Drops { empty: 5, plugin: 1, device: 0 }, 0, (Some(true), Some(true)), "x"), None, "within the second");
-        w.last = None;
-        let l = w.check(Drops { empty: 5, plugin: 1, device: 2 }, 1, (Some(false), None), "x").unwrap();
-        assert!(l.starts_with("dropouts +4 (2 empty") && l.contains("1 audio threads taken back") && l.contains("device callback not running"), "{l}");
+    fn keeps_the_last_minutes() {
+        let mut log = Log::default();
+        // 1 kHz: a minute is 60,000 frames.
+        let second = |v: f32| vec![v; 2000];
+        log.keep(&second(0.0), 1000, 1);
+        for s in 1..=70 {
+            log.keep(&second(s as f32 / 100.0), 1000, 1);
+        }
+        log.keep(&second(0.0), 1000, 1);
+        assert_eq!(log.kept.len(), 2 * 60_000);
+        let (l, r) = log.audio();
+        assert_eq!(l.len(), 59_000, "the silent second at the end is left out");
+        assert_eq!((l[0], r[0]), (0.12, 0.12), "the first 12 s are gone");
+        // A new rate starts over.
+        log.keep(&second(0.5), 2000, 1);
+        assert_eq!(log.kept.len(), 2000);
+        assert_eq!(Log::default().audio().0.len(), 0);
     }
 
+    /// Open capture in audio editor: off, a message; on, the log into a WAV in `Recorded` and into Tesla on the master track.
     #[test]
-    fn the_log_rotates_at_its_cap() {
-        let dir = std::env::temp_dir().join(format!("lemon-audio-log-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        set_test_dir(Some(dir.clone()));
-        let long = "x".repeat(1000);
-        for _ in 0..(CAP / 1000 + 5) {
-            write(&long);
-        }
-        let main = std::fs::metadata(dir.join("audio.log")).unwrap().len();
-        let old = std::fs::metadata(dir.join("audio.log.1")).unwrap().len();
-        assert!(main < CAP && old >= CAP && old < CAP + 2000, "{main} {old}");
-        set_test_dir(None);
-        let _ = std::fs::remove_dir_all(&dir);
+    fn a_dump_goes_into_the_audio_editor() {
+        use crate::mixer::FxReq;
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        app.plugins.effects = crate::plugins::builtin_effects();
+        crate::settings_file::set_flag(ON, false);
+        assert!(app.dump_audio_log().contains("off"));
+        crate::settings_file::set_flag(ON, true);
+        assert!(app.dump_audio_log().contains("nothing"));
+        let tone: Vec<f32> = (0..9600).map(|i| if i % 2 == 0 { (i / 2) as f32 / 4800.0 } else { 0.5 }).collect();
+        app.audio_log.keep(&tone, 48000, 5);
+        let msg = app.dump_audio_log();
+        assert!(msg.starts_with("Recorded Audio log_") && msg.ends_with(" into the audio editor"), "{msg}");
+        let Some(FxReq::Create { track: 0, state: Some(st), .. }) = app.state.mixer.pending.last().cloned() else {
+            panic!("{:?}", app.state.mixer.pending)
+        };
+        let saved = tesla::state::from_plugin_state(&st).unwrap();
+        assert_eq!((saved.sample.frames(), saved.sample.rate), (4800, 48000));
+        let path = std::path::PathBuf::from(&saved.path);
+        assert!(path.exists() && path.parent().unwrap().ends_with("Recorded"), "{path:?}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The device's block gives its first output pair, only while the logger is on.
+    #[test]
+    fn the_device_block_gives_its_first_pair() {
+        let f = Feed { ring: Ring::new(16), on: AtomicBool::new(false) };
+        let mut v = Vec::new();
+        // Four channels, two frames.
+        let sum = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        f.push(&sum, 4);
+        f.on.store(true, Ordering::Release);
+        f.push(&sum, 4);
+        f.ring.pop_into(&mut v);
+        assert_eq!(v, [1.0, 2.0, 5.0, 6.0]);
     }
 }

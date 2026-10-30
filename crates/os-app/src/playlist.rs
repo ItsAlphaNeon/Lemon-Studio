@@ -315,6 +315,10 @@ pub enum Cmd {
     TrackMuteClips(u16, bool),
     /// "Create automation clip" on a control: target, name, current value 0..1.
     CreateAutomation(u32, String, f64),
+    /// "Edit automation" on a control: target, name, current value 0..1, a plugin parameter's range (`crate::events`).
+    EditEvents(u32, String, f64, Option<(f64, f64)>),
+    /// An entry of the event editor's menu.
+    Events(crate::events::EvCmd),
     /// "Set as song start value" on a control: target, current value 0..1; "Remove start value": target
     /// (`crate::init`).
     InitControl(u32, f64),
@@ -1982,6 +1986,46 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
     index
 }
 
+/// Turn into automation clip (spec: ui/event-editor.md §5): an automation clip channel at the end of the rack named
+/// `name` (made unique), linked to `target`, with `points`, in the rack group "Automation" and the playlist's clip
+/// source, as ADD > Automation clip makes one. One undo step, which also holds the selected pattern (whose events
+/// the caller then takes away). Returns its rack row.
+pub fn automation_channel(s: &mut State, target: u32, name: &str, points: Vec<os_model::AutoPoint>) -> usize {
+    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    let before = crate::history::Snap::Several(vec![rack, crate::history::Snap::pattern(s, s.pattern)]);
+    snapshot_with(s, crate::events::TURN_INTO_CLIP, before);
+    let name = unique_channel_name(s, name);
+    let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
+    s.project.channels.push(Channel {
+        id: os_model::Id::NONE,
+        index,
+        kind: ChannelKind::Automation,
+        name: Some(name),
+        plugin: None,
+        plugin_state: None,
+        color: Some(s.clip_colors.new_channel(index)),
+        enabled: true,
+        // The clip's range 0..1, as `create_automation` makes it.
+        volume: 1.0,
+        pan: -1.0,
+        pitch_cents: 0,
+        mixer_track: 0,
+        sample_path: None,
+        layer_children: Vec::new(),
+        envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
+    });
+    let beats = points.last().map_or(0.0, |p| p.beat);
+    let mut a = os_flp::project::new_automation(index, target, points.first().map_or(0.0, |p| p.value), beats);
+    a.points = points;
+    s.project.automations.push(a);
+    let row = s.project.channels.len() - 1;
+    crate::rack::join_group(s, row, "Automation");
+    s.playlist.source = Some(ClipSource::Channel(index));
+    s.playlist.picker = PickKind::Automation;
+    s.piano.dirty = true;
+    row
+}
+
 /// Where a new automation clip goes without a time selection (spec: ui/settings-choices.md "Miscellaneous: seven
 /// more checks, Default template and Startup project", "Create automation clips at the playback position"): from the
 /// song position with the check on, from bar 1 with it off; to the song's end (the largest end of a clip that is not
@@ -2089,9 +2133,16 @@ pub fn add_audio_clip(s: &mut State, path: &str, track: u16, tick: u32) -> Optio
 pub fn add_audio_clip_as(s: &mut State, path: &str, track: u16, tick: u32, name: &'static str) -> Option<usize> {
     s.playlist.wave(path)?;
     snapshot_as(s, name);
+    add_audio_clip_in(s, path, track, tick, None)
+}
+
+/// `add_audio_clip_as` with no undo step of its own (the caller took one), its channel on mixer track `mixer` (`None`:
+/// the track after the highest any channel uses).
+pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer: Option<u16>) -> Option<usize> {
+    s.playlist.wave(path)?;
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
-    let mixer_track = (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project));
+    let mixer_track = mixer.unwrap_or_else(|| (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project)));
     s.project.channels.push(Channel {
         id: os_model::Id::NONE,
         index,
@@ -2617,6 +2668,7 @@ pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<cra
         _ => None,
     };
     let mut items: Vec<PItem> = reset.map(|c| PItem::new("Reset", Cmd::Reset(c))).into_iter().collect();
+    let events = crate::events::menu_item(auto.as_ref(), None);
     if let Some((tgt, name, value)) = auto {
         let [init, delete] = crate::init::items(s, Some((tgt, value)));
         items.extend([
@@ -2624,7 +2676,7 @@ pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<cra
             PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, value)),
             init,
             delete,
-            PItem::not_yet("Edit automation"),
+            events,
         ]);
     }
     if typein.is_some() {
@@ -3777,6 +3829,8 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
         Cmd::Param(c) => return app.params_cmd(c),
+        Cmd::EditEvents(tgt, name, v, range) => return app.edit_events(tgt, &name, v, range),
+        Cmd::Events(c) => return app.events_cmd(c),
         Cmd::Pattern(c) => {
             let m = app.pattern_cmd(c);
             app.invalidate();
@@ -4007,7 +4061,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Layout(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Layout(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;

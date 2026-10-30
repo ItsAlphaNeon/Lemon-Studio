@@ -131,6 +131,8 @@ pub struct Shared {
     /// Each running stream's engine voices (its feeder writes them after every fill; a stream that closed drops its
     /// counter). Spec: audio/voices.md §5.
     engine_voices: Mutex<Vec<Weak<AtomicU32>>>,
+    /// Disk recording into mixer tracks: where the playback's armed tracks hand their takes (`Transport::record_tracks`).
+    record: Mutex<Option<Arc<dyn os_engine::RecordTap>>>,
 }
 
 /// The frames queued when the device asked for a block, since they were last taken (`AheadStats::take`): what the
@@ -416,6 +418,8 @@ enum Cmd {
     AsioPanel,
     /// The FL Studio factory content folder changed (`Transport::set_factory`).
     Factory(Option<PathBuf>),
+    /// Disk recording started or ended (`Transport::record_tracks`): the playback's engine takes it at once.
+    Record,
     /// Tests: the open device fails as if it went away.
     #[cfg(test)]
     FailDevice,
@@ -615,6 +619,28 @@ impl Transport {
     }
 
     /// Replace the playing project, continuing from the current position.
+    /// Disk recording into mixer tracks (spec: audio/track-io.md §2.5): the playback's armed tracks hand their takes to
+    /// `tap` from now on (and any playback started later), or no longer (`None`).
+    pub fn record_tracks(&self, tap: Option<Arc<dyn os_engine::RecordTap>>) {
+        if let Ok(mut slot) = self.shared.record.lock() {
+            *slot = tap;
+        }
+        let _ = self.tx.send(Cmd::Record);
+    }
+
+    /// Roughly how much later than the song it went with a device input reaches the engine, in frames at the device's
+    /// rate, for a tick of `tick` frames: the device's two latencies (an ASIO driver's; 0 for others), the time the
+    /// engine reads behind the newest input (two blocks, the longest margin and a tick), and the render-ahead (a block
+    /// and the margin) (spec: audio/track-io.md §2.2, §2.5).
+    pub fn input_delay(&self, tick: u64) -> u64 {
+        let info = self.opened();
+        let rate = info.as_ref().map_or(48000, |d| d.rate);
+        let block = u64::from(self.block().max(64));
+        let margin = (f64::from(rate) * MARGIN_MAX) as u64;
+        let device = info.filter(|d| d.host == crate::device::ASIO).map_or(0, |d| u64::from(d.latency.unwrap_or(0)) + u64::from(d.input_latency.unwrap_or(0)));
+        device + 2 * block + margin + tick + block + margin
+    }
+
     pub fn update(&self, project: &Project) {
         // Edits can come faster than engines are built: keep only the newest.
         if let Ok(mut slot) = self.latest.lock() {
@@ -828,9 +854,9 @@ impl Transport {
     }
 
     /// The dropouts by kind (`crate::audio_log`).
-    pub fn drops(&self) -> crate::audio_log::Drops {
+    pub fn drops(&self) -> crate::dropout_log::Drops {
         let s = &self.shared;
-        crate::audio_log::Drops { empty: s.drops_empty.load(Ordering::Relaxed), plugin: s.drops_plugin.load(Ordering::Relaxed), device: s.drops_device.load(Ordering::Relaxed) }
+        crate::dropout_log::Drops { empty: s.drops_empty.load(Ordering::Relaxed), plugin: s.drops_plugin.load(Ordering::Relaxed), device: s.drops_device.load(Ordering::Relaxed) }
     }
 
     /// Time the engine spends rendering per second of audio, 0..1 (more than 1: it cannot keep up), over the last
@@ -1123,7 +1149,7 @@ impl FeedThread {
             .spawn({
                 let stop = stop.clone();
                 move || {
-                    raise_priority();
+                    raise_feeder_priority();
                     while !stop.load(Ordering::Acquire) {
                         feeder.fill(0);
                         std::thread::park_timeout(Duration::from_millis(5));
@@ -1158,7 +1184,7 @@ impl Drop for FeedThread {
 
 /// The feeder renders for the device: it runs above the UI.
 #[cfg(windows)]
-fn raise_priority() {
+pub(crate) fn raise_priority() {
     use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
     unsafe {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -1167,29 +1193,43 @@ fn raise_priority() {
 
 /// macOS: the user-interactive class keeps the feeder on the performance cores.
 #[cfg(target_os = "macos")]
-fn raise_priority() {
+pub(crate) fn raise_priority() {
     // SAFETY: changes the calling thread's own QoS class.
     unsafe {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
     }
 }
 
-/// Linux: real-time priority, by itself or through rtkit (`crate::rt`); at normal priority when neither allows it.
+/// Linux: real-time priority, by itself or through rtkit (`crate::rt`); at normal priority when neither allows it. The
+/// mixing threads (`crate::mix_threads`) take it too.
 #[cfg(target_os = "linux")]
-fn raise_priority() {
-    let tid = crate::rt::tid();
-    crate::rt::set_role(crate::rt::Role::Feeder, tid);
-    match crate::rt::promote(tid) {
-        Ok(()) => crate::audio_log::write("feeder: real-time priority"),
-        Err(e) => {
-            eprintln!("Audio: the feeder runs at normal priority ({e})");
-            crate::audio_log::write(&format!("feeder: normal priority ({e})"));
-        }
+pub(crate) fn raise_priority() {
+    if let Err(e) = crate::rt::promote(crate::rt::tid()) {
+        crate::dropout_log::write(&format!("mixing thread: normal priority ({e})"));
     }
 }
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-fn raise_priority() {}
+pub(crate) fn raise_priority() {}
+
+/// The feeder's priority; on Linux it is also named the feeder for the dropout log (`crate::rt::Role`).
+#[cfg(target_os = "linux")]
+fn raise_feeder_priority() {
+    let tid = crate::rt::tid();
+    crate::rt::set_role(crate::rt::Role::Feeder, tid);
+    match crate::rt::promote(tid) {
+        Ok(()) => crate::dropout_log::write("feeder: real-time priority"),
+        Err(e) => {
+            eprintln!("Audio: the feeder runs at normal priority ({e})");
+            crate::dropout_log::write(&format!("feeder: normal priority ({e})"));
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn raise_feeder_priority() {
+    raise_priority();
+}
 
 /// The sample library for engines whose sampler channels Lemon Sampler instances play. They stretch for themselves
 /// (spec: audio/time-stretch.md), and of a sample one of them plays the engine keeps only the length and rate Lemon
@@ -1372,6 +1412,14 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                         h.0 = project.clone();
                     }
                     live_project = Some(project);
+                }
+            }
+            Ok(Cmd::Record) => {
+                let tap = shared.record.lock().ok().and_then(|t| t.clone());
+                if let Some(s) = session.as_ref().filter(|s| s.kind == Kind::Song) {
+                    if let Ok(mut e) = s.engine.lock() {
+                        e.set_record_tap(tap);
+                    }
                 }
             }
             Ok(Cmd::Instruments) => {
@@ -1973,6 +2021,7 @@ impl Session {
         if song {
             e.set_run_on(crate::record::run_on_flag());
             e.set_nudge(crate::tapper::nudge_flag());
+            e.set_record_tap(shared.record.lock().ok().and_then(|t| t.clone()));
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));

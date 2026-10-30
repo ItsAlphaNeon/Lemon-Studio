@@ -20,3 +20,6 @@ lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", features
 lemon-sampler = { path = "../../plugins/lemon-sampler", features = ["linked"] }
 # The built-in Lemon Limiter, linked: a plugin with a sidechain input port.
 lemon-limiter = { path = "../../plugins/lemon-limiter", features = ["linked"] }
+# The built-in Lemon Peak Controller, linked: controller outputs as MIDI.
+lemon-peak-controller = { path = "../../plugins/lemon-peak-controller", features = ["linked"] }
+lemon-small-fx = { path = "../../plugins/lemon-small-fx" }

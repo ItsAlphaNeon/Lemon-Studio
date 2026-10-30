@@ -108,7 +108,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
   the CPU too long (a project too heavy to play in time) goes back to normal priority instead of the kernel ending the
   program. Under load (16 busy threads per core, 4 ms of work per 5.3 ms block) a normal-priority thread missed all of
   1500 blocks, a real-time one none (`rt::tests::deadlines_under_load`).
-- **An audio log (Linux).** `Logs/audio.log` in the user folder says why playback dropped out: each playback's start
+- **A dropout log (Linux).** `Logs/audio.log` in the user folder says why playback dropped out: each playback's start
   (its audio settings), each audio thread's priority (real-time, or refused and why, or taken back by the safety cap),
   and dropouts at most once a second, by kind (the feeder late, a plugin late, the device's own underruns) with the
   threads' priority at that moment. Events only, and at 256 KB it becomes `audio.log.1`: never more than half a MB.

@@ -73,6 +73,9 @@ pub enum MenuCmd {
     Groups,
     Multilink,
     ClearLog,
+    /// TOOLS > Retro audio capture: Enabled, and Open capture in audio editor.
+    AudioLog,
+    DumpAudioLog,
     /// The last tweaked parameters' entries.
     Params(crate::params::MenuEntry),
     StopSound,
@@ -94,6 +97,7 @@ pub enum Sub {
     Toolbars,
     OneClick,
     DumpLog,
+    AudioLog,
     ClipsAll,
     ClipsSel,
     Editors,
@@ -251,8 +255,8 @@ const ADD_OTHER: &[Item] = &[
     it("Effect", "").sub().cmd(MenuCmd::Sub(Sub::Effect)),
     it("Plugin palette", "F8").on().cmd(MenuCmd::PluginPalette),
     it("Browse plugin library", "").cmd(MenuCmd::Jump(crate::browser::Jump::PluginDb)),
-    it("Browse all installed plugins", ""),
-    it("Browse presets", ""),
+    it("Browse all installed plugins", "").cmd(MenuCmd::Jump(crate::browser::Jump::Installed)),
+    it("Browse presets", "").cmd(MenuCmd::Jump(crate::browser::Jump::Presets)),
     SEP,
     it("Rescan plugins (fast)", "").on().cmd(MenuCmd::Rescan),
     it("Manage plugins", "").cmd(MenuCmd::Settings(crate::views::settings::PLUGINS)),
@@ -363,10 +367,10 @@ const TOOLS_A: &[Item] = &[
     head("MIDI capture"),
     it(DUMP_LOG_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::DumpLog)),
     it(CLEAR_LOG_LABEL, "").on().cmd(MenuCmd::ClearLog),
-    head("Retro audio capture"),
-    it("Enabled", "").tick(),
-    it("Settings", "").sub(),
-    it("Open capture in audio editor", ""),
+    head(LOGGER_HEAD),
+    it(LOGGER_ON_LABEL, "").on().tick().cmd(MenuCmd::AudioLog),
+    it(LOGGER_SETTINGS_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::AudioLog)),
+    it(LOGGER_DUMP_LABEL, "").on().cmd(MenuCmd::DumpAudioLog),
     head("Recent parameters"),
     it("Most recent", "").sub().cmd(MenuCmd::Params(crate::params::MenuEntry::Last)),
     it("Second most recent", "").sub().cmd(MenuCmd::Params(crate::params::MenuEntry::NextToLast)),
@@ -481,6 +485,7 @@ pub fn label_now(s: &State, menu: usize, item: &Item) -> std::borrow::Cow<'stati
     match (menu, item.label) {
         (EDIT_MENU, "Undo") => crate::history::edit_label(s, false).into(),
         (EDIT_MENU, "Redo") => crate::history::edit_label(s, true).into(),
+        (TOOLS_MENU, LOGGER_HEAD) => format!("{LOGGER_HEAD} (memory used: {}MB)", crate::audio_log::memory_mb()).into(),
         _ => label_of(menu, item),
     }
 }
@@ -535,6 +540,11 @@ pub const ONE_CLICK_LABEL: &str = "Quick record";
 pub const REMOVE_TESLAS_LABEL: &str = "Remove all audio editor instances";
 pub const DUMP_LOG_LABEL: &str = "Capture MIDI into pattern";
 pub const CLEAR_LOG_LABEL: &str = "Clear log";
+/// TOOLS > Retro audio capture (spec: ui/audio-logger.md); its header shows the memory the capture takes.
+pub const LOGGER_HEAD: &str = "Retro audio capture";
+pub const LOGGER_ON_LABEL: &str = "Enabled";
+pub const LOGGER_SETTINGS_LABEL: &str = "Settings";
+pub const LOGGER_DUMP_LABEL: &str = "Open capture in audio editor";
 pub const EDITORS_LABEL: &str = "Set all plugin windows to";
 pub const DECLICK_LABEL: &str = "Change click removal of selected channels to";
 /// TOOLS > Switch all / selected audio clip channels to ▸, also in the channel rack's options menu (spec:
@@ -559,6 +569,7 @@ pub fn sub_items(cmd: MenuCmd) -> Option<fn(&State) -> Vec<crate::playlist::PIte
         Sub::OneClick => crate::one_click::items,
         // spec: ui/recording.md §6
         Sub::DumpLog => crate::score_log::items,
+        Sub::AudioLog => crate::audio_log::items,
         Sub::Declick => crate::rack::declick_items,
         Sub::ClipsAll => |_| crate::rack::stretch_items(true),
         Sub::ClipsSel => |_| crate::rack::stretch_items(false),
@@ -628,6 +639,7 @@ fn mark_of(s: &State, _menu: usize, item: &Item) -> Mark {
             MenuCmd::StepEdit => crate::step_edit::on(),
             MenuCmd::Multilink => s.multilink.on,
             MenuCmd::Midi(sw) => sw.on(),
+            MenuCmd::AudioLog => crate::audio_log::enabled(),
             _ => false,
         },
         (mk, _) => return mk,
@@ -848,7 +860,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
             let rr = Rect::new(col.x, y, col.w, h);
             match item.kind {
                 Kind::Sep => ui.c.fill_rect(Rect::new(col.x, y + mt.sep_line, col.w, mt.line), t.menu_pop_head),
-                Kind::Head => head_row(ui, rr, item.label),
+                Kind::Head => head_row(ui, rr, &label_now(s, menu, item)),
                 Kind::Item => {
                     let ok = active(s, menu, item);
                     // Greyed-out entries never light up; they only say they are not available yet (EDIT's without a
@@ -1071,7 +1083,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, LOGGER_SETTINGS_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Fade out only", "Transient", "Transient (tail continues)", "Standard (tail continues)", "Smooth (tail continues)", "Crossfade (tail continues)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");

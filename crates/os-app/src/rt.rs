@@ -43,7 +43,7 @@ pub fn enable_in_tests() {
     TEST_ON.store(true, Ordering::Release);
 }
 
-/// The audio threads by what they do, for the audio log (`crate::audio_log`).
+/// The audio threads by what they do, for the audio log (`crate::dropout_log`).
 #[derive(Clone, Copy)]
 pub enum Role {
     Feeder,

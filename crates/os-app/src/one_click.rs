@@ -249,7 +249,7 @@ impl App {
 
     /// The take into Tesla on the master track: its first Tesla if that holds no sample, else a new one (spec:
     /// plugins/tesla/README.md "Recording into Tesla from Lemon Studio"). The file stays in `Recorded` either way.
-    fn take_to_editor(&mut self, path: &std::path::Path) -> String {
+    pub(crate) fn take_to_editor(&mut self, path: &std::path::Path) -> String {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let sample = match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| tesla::wav::read(&b)) {
             Ok(s) => s,
