@@ -698,7 +698,7 @@ impl App {
         }
         let s = &mut self.state;
         crate::piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
-        s.message = Some(format!("Imported {} ({parts} channel{})", file_name(path), if parts == 1 { "" } else { "s" }));
+        s.message = Some(format!("Imported {}: {parts} channel{}", file_name(path), if parts == 1 { "" } else { "s" }));
         self.invalidate();
     }
 
@@ -729,7 +729,7 @@ impl App {
         }
         s.piano.select(n, ch, sel);
         s.piano.dirty = true;
-        s.message = Some(format!("Imported {} into the piano roll ({} notes)", file_name(path), new.len()));
+        s.message = Some(format!("Imported {} into the piano roll: {} notes", file_name(path), new.len()));
         self.invalidate();
     }
 

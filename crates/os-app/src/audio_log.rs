@@ -141,7 +141,7 @@ impl App {
         let on = !enabled();
         crate::settings_file::set_flag(ON, on);
         self.audio_log.tick();
-        self.state.message = Some(if on { format!("Retro audio capture on: keeps the last {} minute(s) of what plays", minutes()) } else { "Retro audio capture off".into() });
+        self.state.message = Some(if on { format!("Retro audio capture on: the last {} minute(s)", minutes()) } else { "Retro audio capture off".into() });
     }
 
     pub(crate) fn set_audio_log_minutes(&mut self, m: u32) -> String {

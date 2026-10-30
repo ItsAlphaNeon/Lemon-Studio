@@ -1837,7 +1837,7 @@ impl App {
             .and_then(|b| std::fs::write(&target, &b).map(|()| b.len() as u64).map_err(|e| e.to_string()));
         s.message = Some(match &result {
             Ok(_) if lost.is_empty() => format!("Saved {}", target.display()),
-            Ok(_) => format!("Saved {} (not stored yet: {})", target.display(), lost.join(", ")),
+            Ok(_) => format!("Saved {} without {}", target.display(), lost.join(", ")),
             Err(e) => format!("Save failed: {e}"),
         });
         if s.message.as_deref().is_some_and(|m| m.starts_with("Saved")) {
@@ -2516,7 +2516,7 @@ impl App {
                     self.transport.set_instruments(self.plugins.instruments());
                     self.state.piano.dirty = true;
                     let format = self.plugins.descriptor(row).map_or("", |d| crate::plugins::format_name(d.format));
-                    self.state.message = Some(format!("Added {name} (hosted {format} plugin)"));
+                    self.state.message = Some(format!("Added {name}"));
                     self.state.pending_open = Some(row);
                 }
                 Err(e) => self.state.message = Some(format!("Plugin: {e}")),
@@ -3499,7 +3499,7 @@ impl App {
     pub(crate) fn open_piano_tool(&mut self, tool: crate::piano_dlg::Tool) {
         let s = &mut self.state;
         if tool == crate::piano_dlg::Tool::Levels && s.piano.lane.is_channel() {
-            s.message = Some("Scale levels: show a note property in the Control lane first".into());
+            s.message = Some("Scale levels: no note property in the Control lane".into());
             self.invalidate();
             return;
         }
@@ -4119,7 +4119,6 @@ impl App {
         };
         let overlays = views::paint(&mut ui, &self.state, &info);
         if self.state.cables.get_mut().take_slowed() {
-            self.state.message = Some("Mixer cables hang still: the mixer is too slow to redraw them swinging (they try again with a new route or another current track)".into());
             self.damage_win(Win::Mixer);
         }
         self.keep.parts = std::mem::take(&mut self.keep.next);
@@ -4216,7 +4215,7 @@ impl App {
             if self.transport.playing() {
                 self.transport.stop();
             }
-            self.state.message = Some("The arranger is empty: nothing to play as a song".into());
+            self.state.message = Some("The arranger is empty".into());
             return self.invalidate();
         }
         // The initial values first (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
@@ -4477,7 +4476,7 @@ impl App {
                     }
                 }
                 self.sync_preset();
-                self.state.message = Some(if to_citrus { format!("Theme: {name} (Citrus skin)") } else { format!("Theme: {name}") });
+                self.state.message = Some(if to_citrus { format!("Theme: {name} with the Citrus skin") } else { format!("Theme: {name}") });
             }
             Err(e) => self.state.message = Some(format!("Could not load theme {name}: {e}")),
         }
@@ -5006,7 +5005,7 @@ impl App {
                 let on = !os_native::enabled();
                 os_native::set_enabled(on);
                 self.start_scan(crate::plugin_db::Mode::Changed);
-                self.state.message = Some(if on { "Experimental native plugin host on: looking for native plugins".into() } else { "Experimental native plugin host off".into() });
+                self.state.message = Some(if on { "Experimental native plugin host on".into() } else { "Experimental native plugin host off".into() });
                 // The hidden preference applies again (or stops applying) with the host.
                 if os_native::prefer_native_set() {
                     self.swap_builtin_overrides();
@@ -5018,8 +5017,8 @@ impl App {
                 os_native::set_prefer_native(on);
                 let n = self.swap_builtin_overrides();
                 self.state.message = Some(match (on, n) {
-                    (true, 0) => "Opened projects play their own native plugins, not the Lemon recreations".into(),
-                    (true, n) => format!("Opened projects play their own native plugins: {n} channels / slots switched from the Lemon recreations"),
+                    (true, 0) => "Opened projects play their own native plugins".into(),
+                    (true, n) => format!("Opened projects play their own native plugins: {n} channels and slots switched"),
                     (false, 0) => "Lemon recreations play their projects' plugins again".into(),
                     (false, n) => format!("Lemon recreations play their projects' plugins again: {n} channels / slots switched back"),
                 });
@@ -5063,7 +5062,7 @@ impl App {
                 self.state.fl_text = None;
                 self.state.theme_base = None;
                 self.sync_preset();
-                self.state.message = Some(format!("Theme: {} (the skin's own colours)", self.design().name()));
+                self.state.message = Some(format!("Theme: {}", self.design().name()));
             }
             SAct::Preset(i) => {
                 if let Some((name, text)) = st.themes.get(i).cloned() {
@@ -7401,7 +7400,7 @@ impl App {
     pub(crate) fn start_playback_counted(&mut self, bars: u32) {
         let song = self.state.song_mode;
         if song && !self.one_click_starting() && self.state.project.arrangement().is_none_or(|a| a.clips.is_empty()) {
-            self.state.message = Some("The arranger is empty: nothing to play as a song".into());
+            self.state.message = Some("The arranger is empty".into());
             self.invalidate();
             return;
         }
