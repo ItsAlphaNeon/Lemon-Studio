@@ -48,7 +48,7 @@ fn file_name(p: &str) -> &str {
 }
 
 fn is_project(p: &Path) -> bool {
-    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("flp"))
+    crate::project_files::is_project(p)
 }
 
 /// Starts `job` on a thread of its own, behind the panel.
@@ -243,13 +243,15 @@ impl Pack {
 /// The project file's bytes as Save writes them (with the samples' names in the zip) and the samples to put beside it.
 /// The project itself, its file and its unsaved changes stay as they are.
 fn prepare(app: &mut App, zip: &Path) -> Result<(Vec<u8>, Pack), String> {
-    let project = app.state.path.as_deref().and_then(Path::file_name).map_or_else(
-        || format!("{}.flp", zip.file_stem().map_or_else(|| "Untitled".into(), |s| s.to_string_lossy())),
-        |n| n.to_string_lossy().into_owned(),
+    // The project goes in as Save writes it: a .lemon file (an FLP's name with .lemon).
+    let ext = crate::project_files::EXT;
+    let project = app.state.path.as_deref().and_then(Path::file_stem).map_or_else(
+        || format!("{}.{ext}", zip.file_stem().map_or_else(|| "Untitled".into(), |s| s.to_string_lossy())),
+        |n| format!("{}.{ext}", n.to_string_lossy()),
     );
     let mut pack = Pack { project, ..Default::default() };
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let temp = std::env::temp_dir().join(format!("lemon-zip-{}-{nanos}.flp", std::process::id()));
+    let temp = std::env::temp_dir().join(format!("lemon-zip-{}-{nanos}.{ext}", std::process::id()));
     let saved = app.save_copy_with(temp.clone(), &mut |p| pack.gather(p));
     let bytes = std::fs::read(&temp);
     let _ = std::fs::remove_file(&temp);
@@ -448,7 +450,7 @@ mod tests {
         assert_eq!(pack.missing, vec!["Gone.wav".to_string()]);
         let (done, total) = (AtomicU64::new(0), AtomicU64::new(0));
         write_zip(&zip, &flp, &pack, &done, &total).unwrap();
-        assert_eq!(names(&zip), vec!["Song.flp", "Kick.wav", "Kick_2.wav"]);
+        assert_eq!(names(&zip), vec!["Song.lemon", "Kick.wav", "Kick_2.wav"], "the project goes in as a .lemon file");
         assert!(!d.join("out").join("Song.zip.part").exists());
         // On another computer: the original folders are gone.
         std::fs::remove_dir_all(d.join("one")).unwrap();

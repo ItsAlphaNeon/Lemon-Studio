@@ -102,13 +102,35 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// The files of data folder `dir` the project does not use (`used`: the files it refers to): those in its Samples,
+/// What Save writes: Lemon Studio's own project file (spec: flp/lemon-format.md).
+pub const EXT: &str = "lemon";
+
+/// The project files Lemon Studio opens: its own, and the FLPs it migrates from (spec: flp/lemon-format.md).
+pub const PROJECT_EXTS: [&str; 2] = [EXT, "flp"];
+
+/// Whether `p` is a project file by its extension (`.lemon` or `.flp`).
+pub fn is_project(p: &Path) -> bool {
+    p.extension().is_some_and(|e| PROJECT_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// Whether `p` is an FLP: Save does not write over it but asks for a `.lemon` name (spec: flp/lemon-format.md
+/// "Opening and saving").
+pub fn is_flp(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("flp"))
+}
+
+/// `p` with the `.lemon` extension.
+pub fn as_lemon(p: &Path) -> PathBuf {
+    p.with_extension(EXT)
+}
+
 /// Recorded and Rendered folders, project files never. Sorted by path.
 pub fn unused_files(dir: &Path, used: &[PathBuf]) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for sub in SCANNED {
         files_under(&dir.join(sub), &mut found);
     }
-    found.retain(|f| !f.extension().is_some_and(|e| e.eq_ignore_ascii_case("flp")) && !used.iter().any(|u| same_file(f, u)));
+    found.retain(|f| !is_project(f) && !used.iter().any(|u| same_file(f, u)));
     found.sort();
     found
 }
@@ -117,7 +139,7 @@ pub fn unused_files(dir: &Path, used: &[PathBuf]) -> Vec<PathBuf> {
 /// unused files leaves it alone.
 pub fn shared_folder(dir: &Path, own: &Path) -> bool {
     std::fs::read_dir(dir).is_ok_and(|r| {
-        r.flatten().any(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("flp")) && e.path().is_file() && !same_file(&e.path(), own))
+        r.flatten().any(|e| is_project(&e.path()) && e.path().is_file() && !same_file(&e.path(), own))
     })
 }
 
@@ -166,8 +188,8 @@ impl App {
         };
         let start = root.join(USER_CATEGORY);
         let _ = std::fs::create_dir_all(&start);
-        let name = format!("{}.flp", crate::backup::project_name(self.state.path.as_deref()));
-        let dlg = FileDlg::new(Mode::Save, "Save as template", "template", Then::SaveTemplate).filter("Lemon Studio project", &["flp"]).start(Some(&start)).name(&name);
+        let name = format!("{}.{EXT}", crate::backup::project_name(self.state.path.as_deref()));
+        let dlg = FileDlg::new(Mode::Save, "Save as template", "template", Then::SaveTemplate).filter("Lemon Studio project", &[EXT]).start(Some(&start)).name(&name);
         self.file_dialog(dlg);
     }
 
@@ -214,14 +236,14 @@ impl App {
         self.file_dialog(dlg);
     }
 
-    /// The place was picked (`root`): the project is saved as `<root>/<name>/<name>.flp`, named after the project, that
+    /// The place was picked (`root`): the project is saved as `<root>/<name>/<name>.lemon`, named after the project, that
     /// new folder its data folder (the used samples copied there while Copy used samples to the project folder is on). A
     /// project file already there is refused.
     pub(crate) fn new_folder_chosen(&mut self, root: PathBuf) {
         const TITLE: &str = "Save to new project folder";
         let name = crate::backup::project_name(self.state.path.as_deref());
         let dir = root.join(&name);
-        let file = dir.join(format!("{name}.flp"));
+        let file = dir.join(format!("{name}.{EXT}"));
         if file.exists() {
             return self.tell(Kind::Warning, TITLE, spans(&["", &file.display().to_string(), " already exists. Nothing was saved."]));
         }
@@ -374,21 +396,21 @@ mod tests {
     #[test]
     fn template_listing() {
         let root = scratch("tpl");
-        assert_eq!(template_target(&root, &root.join("User").join("Mine.flp")), root.join("User").join("Mine").join("Mine.flp"));
-        assert_eq!(template_target(&root, &root.join("Beats").join("Trap.flp")), root.join("Beats").join("Trap").join("Trap.flp"));
-        assert_eq!(template_target(&root, &root.join("Beats").join("Trap").join("Trap.flp")), root.join("Beats").join("Trap").join("Trap.flp"));
-        assert_eq!(template_target(&root, &std::env::temp_dir().join("Elsewhere.flp")), root.join("User").join("Elsewhere").join("Elsewhere.flp"));
+        assert_eq!(template_target(&root, &root.join("User").join("Mine.lemon")), root.join("User").join("Mine").join("Mine.lemon"));
+        assert_eq!(template_target(&root, &root.join("Beats").join("Trap.lemon")), root.join("Beats").join("Trap").join("Trap.lemon"));
+        assert_eq!(template_target(&root, &root.join("Beats").join("Trap").join("Trap.lemon")), root.join("Beats").join("Trap").join("Trap.lemon"));
+        assert_eq!(template_target(&root, &std::env::temp_dir().join("Elsewhere.lemon")), root.join("User").join("Elsewhere").join("Elsewhere.lemon"));
         crate::templates::TEST_DIR.with(|d| *d.borrow_mut() = Some(root.clone()));
         let rows = template_items(&App::new(None).state);
         assert_eq!(rows.iter().map(|r| r.label.to_string()).collect::<Vec<_>>(), ["Empty"], "no templates: Empty alone");
         let mut app = App::new(None);
         app.state.tempo = 97.0;
         let work = scratch("tpl_work");
-        let song = work.join("song.flp");
+        let song = work.join("song.lemon");
         app.save_to(song.clone());
-        app.template_chosen(root.join("User").join("Slow.flp"));
+        app.template_chosen(root.join("User").join("Slow.lemon"));
         assert_eq!(app.state.path.as_deref(), Some(song.as_path()), "the project keeps its file");
-        assert!(root.join("User").join("Slow").join("Slow.flp").is_file(), "{:?}", app.state.message);
+        assert!(root.join("User").join("Slow").join("Slow.lemon").is_file(), "{:?}", app.state.message);
         let rows = template_items(&app.state);
         assert_eq!(rows.iter().map(|r| r.label.to_string()).collect::<Vec<_>>(), ["User", "Empty"]);
         assert_eq!(rows[0].children.len(), 1);
@@ -398,6 +420,14 @@ mod tests {
         app.pick_new_template("User/Slow");
         assert_eq!((app.state.tempo, app.state.path.clone()), (97.0, None), "an untitled project from the template");
         assert!(!app.unsaved());
+        // A template saved by the original (an FLP) is listed and opens too.
+        let fl = root.join("User").join("Old");
+        std::fs::create_dir_all(&fl).unwrap();
+        app.state.tempo = 88.0;
+        app.save_to(fl.join("Old.flp"));
+        assert!(template_items(&app.state)[0].children.iter().any(|r| r.label.as_ref() == "Old"));
+        app.pick_new_template("User/Old");
+        assert_eq!((app.state.tempo, app.state.path.clone()), (88.0, None), "an untitled project from the FLP template");
         app.pick_new_template("Empty");
         assert_eq!((app.state.tempo, app.state.path.clone()), (130.0, None), "the built-in project");
         crate::templates::TEST_DIR.with(|d| *d.borrow_mut() = None);
@@ -405,7 +435,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&work);
     }
 
-    /// Save to new project folder: `<name>/<name>.flp` in the folder picked, the data folder there; one already there
+    /// Save to new project folder: `<name>/<name>.lemon` in the folder picked, the data folder there; one already there
     /// is refused.
     #[test]
     fn new_project_folder() {
@@ -413,7 +443,7 @@ mod tests {
         let mut app = App::new(None);
         app.save_to(dir.join("Tune.flp"));
         app.new_folder_chosen(dir.clone());
-        let file = dir.join("Tune").join("Tune.flp");
+        let file = dir.join("Tune").join("Tune.lemon");
         assert_eq!(app.state.path.as_deref(), Some(file.as_path()), "{:?}", app.state.message);
         assert!(file.is_file());
         assert_eq!(crate::data_folder::folder(&app.state), Some(dir.join("Tune")));
