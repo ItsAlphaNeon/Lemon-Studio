@@ -18,9 +18,6 @@ use crate::app::{App, State};
 use crate::capture::{Recorder, Ring};
 use crate::record::Opt;
 
-/// `settings.txt`: the mixer menu's Disk recording ▸ Auto-create audio clips (on by default).
-pub const AUTO_CLIPS: &str = "rec_auto_clips";
-
 /// About 20 s of stereo at 48 kHz per track: its writer drains it every few milliseconds.
 const RING: usize = 1 << 21;
 
@@ -159,7 +156,7 @@ impl App {
     /// the mixer track it was recorded on: one undo step (or, with Auto-create audio clips off, only the files).
     fn track_rec_place(&mut self) {
         let Some(r) = self.track_rec.take() else { return };
-        let auto = crate::settings_file::flag(AUTO_CLIPS, true);
+        let auto = crate::prefs::check(&crate::prefs::AUTO_AUDIO_CLIPS);
         let mut made: Vec<(u16, std::path::PathBuf, u64, u32)> = Vec::new();
         let mut errors = Vec::new();
         let mut lost = 0;

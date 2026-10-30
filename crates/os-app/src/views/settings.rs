@@ -4,7 +4,7 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Settings window (OPTIONS > MIDI / Audio / General / File / Theme settings, Project settings, Project info,
-//! Debugging log; F10 / F11): ten tabs of grouped controls. The controls that work today are listed in `LIVE` and
+//! Debugging log; F10 / F11): eleven tabs of grouped controls. The controls that work today are listed in `LIVE` and
 //! handled in `App::settings_act`, or are program settings declared in `crate::prefs`; every other control is drawn
 //! greyed out and only says it is not available yet.
 //! The Plugins tab is the plugin manager (search folders, scanning, the plugin table).
@@ -218,9 +218,10 @@ pub struct SettingsUi {
 
 /// Tabs: label, page title, group (0 system / 1 project / 2 info) (spec §2). Plugins takes the place of FL's Account
 /// tab (spec: ui/plugin-manager.md §2); tabs are laid out from their text widths (`tab_rects`).
-pub const TABS: [(&str, &str, u8); 10] = [
+pub const TABS: [(&str, &str, u8); 11] = [
     ("MIDI", "MIDI input / output devices", 0),
     ("Audio", "Audio devices / mixer", 0),
+    ("Recording", "Recording options", 0),
     ("General", "System / miscellaneous", 0),
     ("File", "Files & folders", 0),
     ("Plugins", "Plugin manager", 0),
@@ -232,9 +233,11 @@ pub const TABS: [(&str, &str, u8); 10] = [
 ];
 pub const MIDI: usize = 0;
 pub const AUDIO: usize = 1;
-pub const GENERAL: usize = 2;
-pub const FILE: usize = 3;
-pub const PLUGINS: usize = 4;
+/// Lemon Studio's own page (FL has none): the recording settings, spec ui/settings.md "Recording".
+pub const RECORDING: usize = 2;
+pub const GENERAL: usize = 3;
+pub const FILE: usize = 4;
+pub const PLUGINS: usize = 5;
 
 /// Opt in to the experimental FL native plugin host (spec plugins/fruity-abi.md), on the Plugins page only with
 /// `OPENSTUDIO_NATIVE_SETTINGS` (`SettingsUi::native`). Labels are the keys for `SAct::Check`; `App::settings_act`
@@ -405,10 +408,10 @@ pub fn buffer_text(frames: u32, rate: u32) -> String {
     format!("{frames} frames ({:.1} ms)", f64::from(frames) * 1000.0 / f64::from(rate.max(1)))
 }
 
-pub const THEME: usize = 5;
-pub const PROJECT: usize = 6;
-pub const INFO: usize = 7;
-pub const DEBUG: usize = 8;
+pub const THEME: usize = 6;
+pub const PROJECT: usize = 7;
+pub const INFO: usize = 8;
+pub const DEBUG: usize = 9;
 
 /// Plugin table rows shown at once (spec: ui/plugin-manager.md §2).
 pub const TABLE_ROWS: usize = 18;
@@ -661,6 +664,31 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     Value(crate::prefs::number_text(&crate::prefs::METRONOME_TRACK), "Metronome track"),
                     Check("Play truncated notes on transport", true),
                     Check("Reset plugins on transport", false),
+                ]),
+            ]
+        }
+        // Lemon Studio's own page (spec: ui/settings.md "Recording"): every control is a `crate::prefs` declaration that
+        // the Record button's menus, the toolbar's option buttons and the mixer's Disk recording menu share.
+        RECORDING => {
+            use crate::prefs as p;
+            // Where takes go now: the project's data folder's Recorded folder, else the user folder's.
+            let folder = crate::track_rec::folder(s).display().to_string();
+            vec![
+                g("Recording filter", vec![Check2(p::REC_NOTES.label, true, p::REC_AUTOMATION.label, true), Check(p::REC_AUDIO.label, false)]),
+                g("Options", vec![
+                    Check2(p::REC_ASK.label, true, p::REC_LOOP.label, false),
+                    Check2(p::REC_STARTS_PLAYBACK.label, false, p::REC_BLEND.label, false),
+                    Check(p::REC_DISARM_ON_STOP.label, false),
+                ]),
+                g("Quantize", vec![Check2(p::REC_QUANTIZE_START.label, true, p::REC_QUANTIZE_END.label, true)]),
+                g("Start on input", vec![Check(p::REC_WAIT.label, false), Check2(p::REC_WAIT_FILTER.label, true, p::REC_WAIT_ARMED.label, false)]),
+                g("Count-in", vec![Check(p::REC_COUNT_IN.label, false), combo(p::choice(&p::COUNT_IN_LENGTH), 80.0, p::COUNT_IN_LENGTH.label)]),
+                g("Audio recording", vec![
+                    Check(p::AUTO_AUDIO_CLIPS.label, true),
+                    combo(p::choice(&p::EXTERNAL_INPUT), 230.0, p::EXTERNAL_INPUT.label),
+                    Text("Recordings go to the project's data folder's Recorded folder, else the user folder's:".into(), true),
+                    Text(folder, true),
+                    Text("The input device is chosen on the Audio page.".into(), true),
                 ]),
             ]
         }
@@ -1233,18 +1261,31 @@ fn picker(ui: &mut Ui, s: &State, p: &crate::theme_adjust::Picker, win: Rect) {
     ui.c.text_center(Font::new(13), b, if hov { t.glyph } else { t.text }, "Revert");
 }
 
-/// Tab rects in window `r`: text width + 10 px each side, 4 px apart, 15 px more between groups.
+/// Tab rects in window `r`: text width + 10 px each side, 11 px apart, 15 px more between groups. When that is wider
+/// than the window (eleven tabs since Recording), the sides narrow first, to 4 px, then the gaps, to 8 px (Citrus's
+/// slanted edges need 7), so About stays inside.
 fn tab_rects(ui: &mut Ui, r: Rect) -> Vec<Rect> {
     let font = Font::new(13);
+    let texts: Vec<f32> = TABS.iter().map(|t| ui.c.text_width(font, t.0)).collect();
+    let n = TABS.len() as f32;
+    let groups = TABS.windows(2).filter(|w| w[0].2 != w[1].2).count() as f32;
+    // 3 px margins, and room for the last tab's slanted edge.
+    let room = r.w - 13.0 - texts.iter().sum::<f32>() - 15.0 * groups;
+    let (side, gap) = {
+        let over = (2.0 * 10.0 * n + 11.0 * (n - 1.0) - room).max(0.0);
+        let side = (10.0 - over / (2.0 * n)).max(4.0);
+        let over = (2.0 * side * n + 11.0 * (n - 1.0) - room).max(0.0);
+        (side, (11.0 - over / (n - 1.0)).max(8.0))
+    };
     let mut x = r.x + 3.0;
     let mut v = Vec::new();
-    for (i, &(label, _, grp)) in TABS.iter().enumerate() {
+    for (i, &(_, _, grp)) in TABS.iter().enumerate() {
         if i > 0 && TABS[i - 1].2 != grp {
             x += 15.0;
         }
-        let w = ui.c.text_width(font, label) + 20.0;
+        let w = texts[i] + 2.0 * side;
         v.push(Rect::new(x.round(), r.y + 34.0, w.round(), TABS_B - 34.0));
-        x += w + 11.0;
+        x += w + gap;
     }
     v
 }

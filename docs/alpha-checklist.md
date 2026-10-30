@@ -104,7 +104,10 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   Performance mode MIDI channel stays greyed out until Performance mode is built
 - [ ] **Performance mode.** Live clip launching on the playlist (Ctrl+P says it is not available yet), with MIDI
   settings' Performance mode MIDI channel and TOOLS ▸ Macros ▸ Prepare for performance mode
-- [ ] **Recording settings page.** The only settings page that doesn't work yet
+- [x] **Recording settings page.** Settings ▸ Recording, Lemon Studio's own page (the original keeps these in the
+  Record button's menus): the recording filter, the Record options and quantize, Start on input, Loop record, Blend,
+  Count-in and its length, Auto-create audio clips and the External input question's answer, shared with the menus
+  and buttons that also set them
 - [x] **Editable mixer latency settings.** The input clock, the track latency combo and the strip's latency clock
   (right click) set them in ms, samples or beats, one undo step each
 - [x] **Browser: Favorites, the plugin database and Browser find.** A Favorite check in the row menus of files and
