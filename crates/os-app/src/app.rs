@@ -926,7 +926,7 @@ pub enum Drag {
     RackSel { from: usize },
     RackDots { x0: f32, p0: u32 },
     RackLen { y0: f32, v0: u32 },
-    RackLoopLen { row: usize, y0: f32, v0: u32 },
+    RackLoopLen { row: usize, y0: f32, v0: i32 },
     RackGraph,
     /// A dialog's caption (offset of the mouse from its top-left), the file list's scroll bar (`ratio` = list pixels
     /// per pixel moved), spec: ui/dialogs.md.
@@ -3951,6 +3951,10 @@ impl App {
             self.invalidate();
         }
         self.follow_device();
+        // Options ▸ Focus selected channel on playback and Auto switch display filter (spec: ui/channel-rack.md §17).
+        if crate::rack::focus_tick(&mut self.state, self.transport.playing()) | crate::rack::filter_tick(&mut self.state) {
+            self.invalidate();
+        }
         self.record_tick();
         self.audio_log.tick();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
@@ -5396,7 +5400,7 @@ impl App {
                 }
                 Drag::RackDots { x0, p0 } => {
                     let w = p0 as f32 / 100.0 * crate::rack::NAME_W + (x - x0);
-                    let pct = (w / crate::rack::NAME_W * 100.0).round().clamp(30.0, 400.0) as u32;
+                    let pct = (w / crate::rack::NAME_W * 100.0).round().clamp(crate::rack::NAME_PCT_MIN as f32, crate::rack::NAME_PCT_MAX as f32) as u32;
                     crate::rack::relayout(&mut self.state, |s| s.rack.name_pct = pct);
                     self.hint = Cow::Owned(format!("Channel button width: {pct}%"));
                     self.invalidate();
@@ -5408,10 +5412,8 @@ impl App {
                     self.invalidate();
                 }
                 Drag::RackLoopLen { row, y0, v0 } => {
-                    let v = (v0 as i32 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32).clamp(1, crate::rack::MAX_STEPS as i32) as u32;
-                    self.state.rack.loop_len.insert(row, v);
-                    self.state.piano.dirty = true;
-                    self.hint = Cow::Owned(format!("Loop point: {v} steps"));
+                    let hint = crate::rack::set_loop_box(&mut self.state, row, v0 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32);
+                    self.hint = Cow::Owned(hint);
                     self.invalidate();
                 }
                 Drag::RackGraph => self.rack_graph_at((x, y)),
@@ -7070,9 +7072,8 @@ impl App {
                 return None;
             }
             Some(Action::RackLoopBox(i)) => {
-                let v = (crate::rack::row_len(&self.state, i) as i32 + d).clamp(1, crate::rack::MAX_STEPS as i32) as u32;
-                self.state.rack.loop_len.insert(i, v);
-                self.state.piano.dirty = true;
+                let v = crate::rack::loop_box_value(&self.state, i) + d;
+                crate::rack::set_loop_box(&mut self.state, i, v);
                 return None;
             }
             // Shift+wheel over a channel's name button moves the channel (spec: ui/channel-rack.md §13).
@@ -8488,7 +8489,7 @@ impl App {
                 s.piano.dirty = true;
             }
             Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,
-            Action::RackLoopBox(i) => self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::row_len(&self.state, i) }),
+            Action::RackLoopBox(i) => self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_value(&self.state, i) }),
             Action::RackGraphArea => {
                 self.rack_graph_at(mouse);
                 self.drag = Some(Drag::RackGraph);
@@ -19104,8 +19105,51 @@ mod tests {
         app.state.rack_roll_view = true;
         frame(&mut app, &mut c, None);
         let b = hit_rect(&app, &Action::RackRoll(1));
+        // Clear of the preview's mute button at its left end.
         let shade = |q: f32| at(&c, b.x + b.w * q, b.y + 15.0);
-        assert!(shade(0.05) == shade(0.45) && shade(0.45) != shade(0.55) && shade(0.55) == shade(0.95), "two bars over the width");
+        assert!(shade(0.1) == shade(0.45) && shade(0.45) != shade(0.55) && shade(0.55) == shade(0.95), "two bars over the width");
+    }
+
+    /// The rack's preview options (spec: ui/channel-rack.md §17): Show a mute button on the piano roll preview puts the
+    /// LED's switch on the preview; Show complete piano roll preview unticked lays the preview under the steps.
+    #[test]
+    fn rack_preview_mute_button_and_preview_under_the_steps() {
+        let mut app = App::new(None);
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        app.state.rack_roll_view = true;
+        app.state.rack_size.0 = views::rack::DEFAULT_SIZE.0 + 320.0;
+        let ch = app.state.project.channels[1].index;
+        let ps = crate::rack::per_step(&app.state);
+        let n = app.state.pattern.max(1);
+        crate::patterns::pat_mut(&mut app.state, n).notes.push(os_model::Note { length: ps, ..os_model::Note::step(ch, 12 * ps) });
+        app.state.raise(Win::ChannelRack);
+        frame(&mut app, &mut c, None);
+        let roll = hit_rect(&app, &Action::RackRoll(1));
+        let button = hit_rect(&app, &Action::ChannelEnable(1));
+        assert!(roll.contains(button.cx(), button.cy()), "the button is on the preview");
+        click(&mut app, &mut c, button);
+        assert!(!app.state.project.channels[1].enabled);
+        crate::rack::run(&mut app, crate::rack::RCmd::Opt(crate::rack::PREVIEW_MUTE));
+        frame(&mut app, &mut c, None);
+        let led = hit_rect(&app, &Action::ChannelEnable(1));
+        assert!(!roll.contains(led.cx(), led.cy()), "only the LED");
+
+        // The steps' columns, from the first row's steps (the second row, with a long note, shows its preview).
+        app.state.rack_roll_view = false;
+        frame(&mut app, &mut c, None);
+        let x = |k: u32| (hit_rect(&app, &Action::Step(0, k)).x + 6.0) as u32;
+        let (x10, x12) = (x(10), x(12));
+        app.state.rack_roll_view = true;
+        let column = |c: &Canvas, x: u32| (roll.y as u32 + 2..roll.bottom() as u32 - 2).map(|y| c.pixmap.pixel(x, y).unwrap()).collect::<Vec<_>>();
+        let both = |app: &mut App, c: &mut Canvas| {
+            frame(app, c, None);
+            (column(c, x10), column(c, x12))
+        };
+        let (a, b) = both(&mut app, &mut c);
+        assert_eq!(a, b, "complete: the note is not under its step");
+        crate::rack::run(&mut app, crate::rack::RCmd::Opt(crate::rack::COMPLETE_PREVIEW));
+        let (a, b) = both(&mut app, &mut c);
+        assert_ne!(a, b, "under the steps: the note is under step 12");
     }
 
     /// The Toolbars menu (spec: ui/toolbar-menu.md §8): on the hint panel, on bare toolbar background and as VIEW >

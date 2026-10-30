@@ -123,7 +123,7 @@ impl Link {
 
 /// Whether `t` can be linked: the piano roll tool dialogs' knobs live only while their dialog is open.
 fn linkable(t: Target) -> bool {
-    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)))
+    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)) | Target::RackTrack(_) | Target::RackLed(_))
 }
 
 /// A target as `settings.txt` keeps it (`none` for one that is not linkable, which reads back as nothing).
@@ -144,7 +144,7 @@ fn target_text(t: Target) -> String {
         },
         Target::Fader(m) => format!("fader:{m}"),
         Target::Param(key, i) => format!("param:{key}:{i}"),
-        Target::Latency(..) => "none".into(),
+        Target::Latency(..) | Target::RackTrack(_) | Target::RackLed(_) => "none".into(),
     }
 }
 
@@ -553,7 +553,7 @@ impl App {
                 self.record_plugin_param(key, index, f64::from(v));
             }
             // Never linked (no remote control).
-            Target::Latency(..) => {}
+            Target::Latency(..) | Target::RackTrack(_) | Target::RackLed(_) => {}
         }
         self.invalidate();
     }

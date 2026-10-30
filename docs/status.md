@@ -16,6 +16,13 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The rack's menu sets the selected channels' swing mix (0 to 100% or a typed value), turns their Truncate swing
   notes on or off (a swung note keeps its end, so it gets shorter) and gives them one colour (Color selected ▸
   All...); a channel's Cut itself gives it a cut group of its own, as the original does. One undo step each
+- The mixer box's and the mute LED's right-click menus type in, copy, paste and set their value (a mixer track, on or
+  off); Burn selected loops to pattern; Channel button width ▸ Custom (a typed percent); the options Auto switch
+  display filter, Focus selected channel on playback, Mute removed steps (a removed step keeps its note, muted), Show
+  complete piano roll preview, Show a mute button on the piano roll preview and the loop button's Always show advanced
+  controls
+- Advanced looping (the loop button's third loop type): each row's loop box takes a loop point, Step, Beat or Bar,
+  and the row loops at the end of its last used step rounded up to it
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)
 - Deleting channels or a pattern asks first, unless the box's Remember my choice was ticked or the question
   is turned off in General settings ▸ Hints and warnings ▸ Manage messages
