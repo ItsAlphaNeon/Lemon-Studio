@@ -100,11 +100,12 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   to new instrument track (instrument tracks, and how the original saves a track's link to its channel, not measured
   yet), Auto fill (the manual does not describe it), Create instrument (no multi-sample instrument to put the samples
   in yet), Burn MIDI to ▸ (2) (no plugin hands its notes back to the host yet). The knob, mixer box and LED menus'
-  Automation and Remote control groups add 19 more, after 4 were enabled on 2026-10-30 (Edit automation in piano roll
+  Automation and Remote control groups add 18 more, after 5 were enabled on 2026-10-30 (Edit automation in piano roll
   on the volume and panning knobs, the swing knob's Set as song start value, MIDI learn... on the mixer box and the
-  LED): Edit automation in a window on all four menus (one event editor window), Override global mapping... on all
-  four (one kind of link), and on the swing knob, the mixer box and the LED Edit automation, Create automation clip
-  and Edit automation in piano roll (the engine plays no automation of them, and the mixer box's and the LED's
+  LED, Edit automation in a window on the volume and panning knobs: a second event editor window): Override global
+  mapping... on all four (one kind of link, kept in the program's settings; what the original's override does is
+  not described), and on the swing knob, the mixer box and the LED Edit automation, Edit automation in a window,
+  Create automation clip and Edit automation in piano roll (the engine plays no automation of them, and the mixer box's and the LED's
   targets in the original's files are not measured), Set as song start value on the mixer box and the LED (the same)
   ([rack.rs](../crates/os-app/src/rack.rs))
 - [ ] **Main menu bar.** 3 of its 136 entries greyed out on 2026-10-30, counted entry by entry after Save audio
