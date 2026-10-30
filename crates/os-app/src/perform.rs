@@ -30,6 +30,8 @@ pub struct Perform {
     /// The MIDI grid's first (track, column) (notes 120–123 scroll it) and whether it scrolls a page at a time (124).
     pub origin: (u16, usize),
     pub paging: bool,
+    /// Note 125 (Scene mode) or 126 (+Scene mode, `true`) held on the MIDI channel: notes trigger their column's scene.
+    pub scene: Option<bool>,
 }
 
 /// The MIDI grid (§3): notes 0–119 are this many tracks of this many columns.
@@ -284,6 +286,40 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     Some(format!("{}: {} at {bar}:{step:02}", crate::playlist::track_name(s, track), PerfSettings::PRESSES[usize::from(set.press)]))
 }
 
+/// A scene (§3a): the clips that start in column `col` on every track that has some there, triggered together, each
+/// track by its own settings. A Scene stops the tracks not in it; a +Scene (`plus`) leaves them playing. `None` when the
+/// column has no clips.
+pub fn trigger_scene(s: &mut State, col: usize, now: Option<u32>, instant: bool, plus: bool) -> Option<String> {
+    let z = zone(s)?;
+    let cols = columns(s);
+    let mut tracks: Vec<u16> = clips(s).iter().filter(|c| c.position < z && column_of(&cols, c.position) == col).map(|c| c.track).collect();
+    tracks.sort_unstable();
+    tracks.dedup();
+    if tracks.is_empty() {
+        return None;
+    }
+    if !plus {
+        let others: Vec<u16> = s.playlist.perform.live.keys().copied().filter(|t| !tracks.contains(t)).collect();
+        for t in others {
+            stop(s, t, now, instant);
+        }
+    }
+    // A scene holds no track (its Press acts on the slot alone).
+    let held = s.playlist.perform.held;
+    for &t in &tracks {
+        trigger_slot(s, t, col, now, instant, false);
+    }
+    s.playlist.perform.held = held;
+    let n = tracks.len();
+    Some(format!("{} {}: {n} track{}", if plus { "+Scene" } else { "Scene" }, col + 1, if n == 1 { "" } else { "s" }))
+}
+
+/// The track progress display (§3): each launched track's progress through its pass at `tick`, 0 to 1.
+pub fn track_progress(s: &State, tick: u32) -> Vec<(u16, f32)> {
+    let all = clips(s);
+    progress(s, tick).into_iter().filter_map(|(i, k)| all.get(i).map(|c| (c.track, k))).collect()
+}
+
 /// The progress display (§3): each launched track's zone clip sounding at `tick` (the clip index) and how far into it
 /// the pass playing is, 0 to 1.
 pub fn progress(s: &State, tick: u32) -> Vec<(usize, f32)> {
@@ -353,10 +389,20 @@ pub fn release(s: &mut State, now: Option<u32>) {
 pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option<String> {
     zone(s)?;
     if key >= 120 {
-        return if down { scroll(s, key) } else { None };
+        return match key {
+            125 | 126 => {
+                s.playlist.perform.scene = if down { Some(key == 126) } else { None };
+                None
+            }
+            _ if down => scroll(s, key),
+            _ => None,
+        };
     }
     let o = s.playlist.perform.origin;
     let (track, col) = (o.0 + u16::from(key / 12), o.1 + usize::from(key % 12));
+    if let Some(plus) = s.playlist.perform.scene {
+        return if down { trigger_scene(s, col, now, false, plus) } else { None };
+    }
     if !down {
         if s.playlist.perform.live.get(&track).is_some_and(|l| l.column == col) {
             release_track(s, track, now);
@@ -371,7 +417,7 @@ pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option
 }
 
 /// Notes 120–124 (§3): scroll the MIDI grid up, down, left or right, a track or column at a time or a page with paging
-/// on, which 124 toggles. 125–127 (scenes, Global Snap) do nothing yet.
+/// on, which 124 toggles. 127 (Global Snap) does nothing yet.
 fn scroll(s: &mut State, key: u8) -> Option<String> {
     let cols = columns(s).len();
     let p = &mut s.playlist.perform;
@@ -579,6 +625,20 @@ mod tests {
         app.midi_notes(vec![note(121, true)]);
         assert_eq!(app.state.playlist.perform.origin, (10, 0), "a page down");
         app.state.playlist.perform = Perform::default();
+
+        // Notes 125 / 126 held: a note triggers its column's scene.
+        arr_mut(&mut app.state).tracks[0].perf.press = 0;
+        arr_mut(&mut app.state).clips.push(Clip::new(0, 384, 2, ClipSource::Pattern(1)));
+        app.midi_notes(vec![note(125, true), note(12, true)]);
+        assert_eq!(app.state.message.as_deref(), Some("Scene 1: 2 tracks"));
+        assert!(app.state.playlist.perform.live.contains_key(&2));
+        app.midi_notes(vec![note(125, false), note(1, true)]);
+        assert_eq!(app.state.playlist.perform.live[&0].column, 1, "released: a note is its slot again");
+        assert!(app.state.playlist.perform.live.contains_key(&2));
+        app.midi_notes(vec![note(126, true), note(1, true), note(126, false)]);
+        assert!(app.state.playlist.perform.live.contains_key(&2), "+Scene keeps the other tracks");
+        assert_eq!(app.state.playlist.perform.scene, None);
+        app.state.playlist.perform = Perform::default();
         app.state.project.performance = Some(false);
         app.midi_notes(vec![note(0, true)]);
         assert!(app.state.playlist.perform.live.is_empty(), "off: nothing is triggered");
@@ -597,6 +657,27 @@ mod tests {
         arr_mut(s).tracks[0].perf.position_sync = 3;
         trigger(s, 1, Some(3082), true, false);
         assert_eq!(progress(s, 3082), vec![(1, 10.0 / 768.0)]);
+    }
+
+    /// §3a: a Scene triggers its column on every track with clips there and stops the rest; a +Scene keeps them.
+    #[test]
+    fn scenes_trigger_columns() {
+        let mut app = app();
+        let s = &mut app.state;
+        arr_mut(s).clips.push(Clip::new(0, 384, 2, ClipSource::Pattern(1)));
+        trigger(s, 1, None, false, false);
+        assert_eq!(trigger_scene(s, 0, None, false, false).as_deref(), Some("Scene 1: 2 tracks"));
+        let cols = |s: &State| s.playlist.perform.live.iter().map(|(&t, l)| (t, l.column)).collect::<Vec<_>>();
+        assert_eq!(cols(s), vec![(0, 0), (2, 0)]);
+        assert_eq!(trigger_scene(s, 1, None, false, true).as_deref(), Some("+Scene 2: 1 track"));
+        assert_eq!(cols(s), vec![(0, 1), (2, 0)], "+Scene: track 3 plays on");
+        trigger_scene(s, 0, None, false, false);
+        trigger_scene(s, 1, None, false, false);
+        assert_eq!(cols(s), vec![(0, 1)], "Scene: track 3 stops");
+        assert_eq!(trigger_scene(s, 5, None, false, false), None, "no clips there");
+        // Playing, the tracks left out stop at their sync point.
+        trigger_scene(s, 0, Some(3100), true, false);
+        assert_eq!(track_progress(s, 3100 + 96), vec![(0, 0.25), (2, 0.25)]);
     }
 
     #[test]

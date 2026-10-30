@@ -244,7 +244,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     // Performance mode: a launched clip's zone clip is outlined and filled as far as its pass has played (spec:
     // ui/performance-mode.md §3).
-    if f.playing && f.song {
+    if f.playing && f.song && s.playlist.perf_clip_progress {
         for (i, k) in crate::perform::progress(s, f.tick.max(0.0) as u32) {
             let r = g.clip_rect(&pl::clips(s)[i]);
             ui.c.fill_rect(Rect::new(r.x, r.y, r.w * k, r.h), t.playhead.with_alpha(60));
@@ -284,6 +284,15 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.c.push_clip(heads);
     for &row in &visible {
         header(ui, s, &g, row, head_x, head_w);
+    }
+    // Performance track progress (spec: ui/performance-mode.md §3): a bar along the bottom of a launched track's header.
+    if f.playing && f.song && s.playlist.perf_track_progress {
+        for (row, k) in crate::perform::track_progress(s, f.tick.max(0.0) as u32) {
+            if visible.contains(&row) {
+                let y = g.y_of(row) + g.rows.height(row) - 6.0;
+                ui.c.fill_rect(Rect::new(head_x + 2.0, y, (head_w - 4.0) * k, 3.0), ui.t.playhead);
+            }
+        }
     }
     ui.c.pop_clip();
     resize_zones(ui, s, Win::Playlist, outer);

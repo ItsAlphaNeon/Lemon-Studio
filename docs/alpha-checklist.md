@@ -115,11 +115,12 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   roadmap in the specs) are not in Tesla yet
 - [x] **Value boxes.** All of them work, the last two being the autosave Maximum and Metronome track, and MIDI
   settings' Performance mode MIDI channel (2026-10-30)
-- [ ] **Performance mode.** The typing keyboard, the MIDI channel's scene and snap keys (notes 125–127), scenes,
-  recording a performance and the View menu's progress options. Launching the zone's clips with the mouse and with
-  notes 0–119 on the Performance mode MIDI channel (scrolled and paged with notes 120–124), each track's Performance
-  settings, Ctrl+P, Prepare for performance mode, the playing clip's progress and the clock counting bars from the
-  Start marker work (2026-10-30)
+- [ ] **Performance mode.** The typing keyboard (its key layout is only in a picture the original's manual no longer
+  serves), the MIDI channel's Global Snap key (note 127), clip and track group scenes and recording a performance.
+  Launching the zone's clips with the mouse and with notes 0–119 on the Performance mode MIDI channel (scrolled and
+  paged with notes 120–124), column scenes and +Scenes (Ctrl+click, notes 125 / 126 held), each track's Performance
+  settings, Ctrl+P, Prepare for performance mode, the clip and track progress displays and the clock counting bars
+  from the Start marker work (2026-10-30)
 - [x] **Recording settings page.** Settings ▸ Recording, Lemon Studio's own page (the original keeps these in the
   Record button's menus): the recording filter, the Record options and quantize, Start on input, Loop record, Blend,
   Count-in and its length, Auto-create audio clips and the External input question's answer, shared with the menus
