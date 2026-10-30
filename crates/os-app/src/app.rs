@@ -2249,6 +2249,7 @@ impl App {
         crate::osc3::store(&mut self.state.project, &self.plugins);
         crate::citrus::store(&mut self.state.project, &self.plugins);
         crate::slicer::store(&mut self.state.project, &self.plugins);
+        crate::drums::store(&mut self.state.project, &self.plugins);
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
@@ -2340,6 +2341,7 @@ impl App {
         self.sync_osc3();
         self.sync_citrus();
         self.sync_slicer();
+        self.sync_drums();
         self.sync_native();
         self.host_deadline = None;
         let samplers = self.state.hosted_rows.iter().filter(|&&r| self.state.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
@@ -2480,6 +2482,7 @@ impl App {
             self.follow_osc3_samples();
             self.sync_citrus();
             self.sync_slicer();
+            self.sync_drums();
             self.sync_native();
         }
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {

@@ -36,7 +36,9 @@ Systems a fully functional DAW can't ship without.
 Without third-party plugins, the built-in ones are the whole sound palette. Lemon Studio has three instruments,
 sixteen effects and the Tesla audio editor; these are the gaps a project made in FL Studio runs into most.
 
-- [ ] **Drum sampler (FPC).** A pad-based drum instrument
+- [x] **Drum sampler (FPC).** A pad-based drum instrument. Lemon Drum Sampler plays projects' FPC channels with their
+  pads and samples (layers by velocity, the original's level, pan and tune laws, cut groups) and saves them back
+  unchanged
 - [x] **Slicer (Slicex, Fruity Slicer).** A loop chopped into slices that the piano roll plays. Lemon Slicer
   recreates Fruity Slicer: it slices a loop by its markers, by beats or by transients, plays slice n on C5 + n, dumps
   the slices to the piano roll, and opens and saves a project's Fruity Slicer channels so the original still opens

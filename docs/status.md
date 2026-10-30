@@ -291,6 +291,12 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   sends and plugin parameters one tick late, as in the original, within the fader's resolution of FL Studio 2026's
   exports (93 cases). The link's smoothing is approximated; links can't be made or edited in the app yet, and the
   links of rack controllers (Envelope and Keyboard Controllers, Control Surface) are kept but not played
+- Drum sampler: a project's FPC channels open as Lemon Drum Sampler (VST3 and CLAP, Pith editor with the 4×4 pad
+  grid, banks A and B, the chosen pad's and layer's key, cut groups, volume, pan and tune) with their pads and
+  samples, and save back unchanged. It is in the generator list too. Pads play their layers by velocity through
+  Lemon Sampler's voices with the original's level, pan and tune laws, cut groups, mute, solo and layers taking
+  turns, measured from FL Studio 2026's renders; a sample is loaded with LOAD or dropped on a pad. The pads'
+  envelopes and the multi-output offsets are kept but not played, and the original's FPC presets aren't listed
 - Formula Controller: a project's Fruity Formula Controller slots open as Lemon Formula Controller (VST3 and CLAP,
   Pith editor with a formula field and its compile status) and save back with their knobs, formula and comments; the
   formula is worked out once per tick and its controller links drive their targets, matching FL Studio 2026's

@@ -68,6 +68,7 @@ mod mixer;
 mod osc3;
 mod citrus;
 mod slicer;
+mod drums;
 mod monitor;
 mod params;
 mod piano;
