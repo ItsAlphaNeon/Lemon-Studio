@@ -84,7 +84,8 @@ pub struct Cpu {
     /// Load readings, percent, oldest first.
     pub history: VecDeque<u32>,
     pub refresh: Refresh,
-    /// View FPS instead of the voice count.
+    /// View FPS instead of the voice count. While on, the app repaints the panel every frame (`App::tick`), so the
+    /// count is the rate the interface keeps up rather than how often something changed.
     pub fps_view: bool,
     /// Misc ticked: handles, threads and fonts in the history's place.
     pub misc: bool,

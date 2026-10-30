@@ -3850,7 +3850,8 @@ impl App {
         self.damage_win(Win::Mixer);
     }
 
-    /// The monitor is moving (a signal or a decay), or the tapper's pad fading: the shell should tick at animation rate.
+    /// The monitor is moving (a signal or a decay), or the tapper's pad fading, or the CPU panel counting frames (View
+    /// FPS): the shell should tick at animation rate.
     pub fn animating(&self) -> bool {
         self.transport.playing()
             || matches!(self.drag, Some(Drag::SongPosHold { .. }))
@@ -3866,6 +3867,7 @@ impl App {
             || self.midi_play.busy()
             || self.remote.busy()
             || self.state.browser_marquee.borrow().is_some()
+            || self.state.cpu.fps_view
     }
 
     /// Linux: a plugin window is open (its X11 events and the editor's run loop are served on the tick).
@@ -3995,6 +3997,11 @@ impl App {
                     self.invalidate();
                 }
             }
+        }
+        // View FPS: the panel is painted every frame, so it reads the rate the interface can keep up (the display's
+        // refresh while nothing is slow), not just how often something else changed.
+        if self.state.cpu.fps_view {
+            self.damage_band(CPU_RECT);
         }
         // The tapper's pad fades back after a tap (spec: ui/tempo-tapper.md §4).
         if self.state.tapper.fade(now) && self.state.shown(Win::Tapper) {
