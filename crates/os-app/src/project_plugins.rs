@@ -203,11 +203,17 @@ pub fn wrapped_slot(s: &SlotPlugin) -> Option<PluginRef> {
 }
 
 /// The input ports a mixer slot's wrapped plugin is saved with: its main and first auxiliary input bus, each the number
-/// of a track's input counted from 1, 0 for none (spec: audio/sidechain.md "Hosted plugins' input buses").
+/// of a track's input counted from 1, 0 for none (spec: audio/sidechain.md "Hosted plugins' input buses"). A Vocodex
+/// slot (played by Lemon Vocoder) feeds its sidechain bus the input its carrier selector names, or else its modulator
+/// selector's (spec: plugins/lemon-vocoder.md §1).
 pub fn slot_ports(project: &Project, track: usize, slot: usize) -> (usize, usize) {
     let Some(s) = project.mixer.iter().find(|m| usize::from(m.index) == track).and_then(|m| m.slots.get(slot)?.as_ref()) else {
         return (0, 0);
     };
+    if s.name.eq_ignore_ascii_case(crate::plugins::VOCODEX_FILE_NAME) {
+        let routing = os_engine::effects::vocoder::Settings::from_state(&s.state).unwrap_or_default().routing();
+        return (0, routing.key_input());
+    }
     if s.name != WRAPPER {
         return (0, 0);
     }

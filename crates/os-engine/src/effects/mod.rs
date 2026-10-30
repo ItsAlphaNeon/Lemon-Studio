@@ -24,6 +24,7 @@ pub mod soft_clipper;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
 pub mod transient_processor;
+pub mod vocoder;
 
 /// An insert effect processing interleaved stereo in place.
 pub trait Effect: Send {
@@ -90,6 +91,7 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
         "Fruity Formula Controller" => {
             formula_ctrl::FormulaController::from_state(state).map(|e| Box::new(e) as Box<dyn Effect>)
         }
+        "Vocodex" => vocoder::VocoderFx::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         _ => None,
     }
 }

@@ -9591,6 +9591,42 @@ mod tests {
         assert_eq!(saved.controller_links, vec![link]);
     }
 
+    /// A project's Vocodex slot opens as Lemon Vocoder with its state (the parts Lemon Vocoder does not play
+    /// included), its sidechain bus takes the input the carrier selector names, and a save writes the same bytes back.
+    // spec: plugins/lemon-vocoder.md "Opened projects"
+    #[test]
+    fn vocodex_slots_open_as_lemon_vocoder() {
+        use crate::plugins::{fx_key, LEMON_VOCODER, VOCODEX_FILE_NAME};
+        use os_engine::effects::vocoder as dsp;
+        let mut fl = dsp::default_state();
+        let at = dsp::settings_at(&fl).unwrap();
+        // The bands at 20, the carrier on the track's second input, the modulator on its own audio; one byte of a
+        // curve Lemon Vocoder does not play changed so the save must keep it.
+        fl[at + 4 * dsp::BANDS..at + 4 * dsp::BANDS + 4].copy_from_slice(&20i32.to_le_bytes());
+        fl[at + 4 * dsp::MOD_INPUT..at + 4 * dsp::MOD_INPUT + 4].copy_from_slice(&0i32.to_le_bytes());
+        fl[at + 4 * dsp::CAR_INPUT..at + 4 * dsp::CAR_INPUT + 4].copy_from_slice(&2i32.to_le_bytes());
+        fl[40] ^= 0x10;
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.project.mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: VOCODEX_FILE_NAME.into(), state: fl.clone() });
+        assert_eq!(crate::project_plugins::slot_ports(&a.state.project, 1, 0), (0, 2), "the sidechain bus takes the carrier's input");
+        a.sync_effects();
+        let key = fx_key(1, 0);
+        assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(LEMON_VOCODER.to_string()));
+        assert_eq!(a.plugins.recreation_file_state(key, VOCODEX_FILE_NAME).as_ref(), Some(&fl), "the state as it was opened");
+        let path = std::env::temp_dir().join(format!("lemon-vocodex-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let slot = saved.mixer[1].slots[0].clone().unwrap();
+        assert_eq!((slot.name.as_str(), &slot.state), (VOCODEX_FILE_NAME, &fl));
+    }
+
     /// A project's Fruity Formula Controller slot opens as Lemon Formula Controller with its state (the formula and the
     /// comments too), and a save keeps the FL effect with that state and the project's controller links.
     // spec: plugins/lemon-formula-controller.md "Opened projects"

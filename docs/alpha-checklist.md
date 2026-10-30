@@ -44,7 +44,8 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
 - [x] **Filter effect (Fruity Filter, Fruity Love Philter).** Lemon Filter and Pulp Filter, each also playing the
   original's slots in opened projects
 - [x] **Flanger and phaser.** Lemon Flanger and Lemon Phaser recreate Fruity Flanger and Fruity Phaser
-- [ ] **Vocoder (Vocodex)**
+- [x] **Vocoder (Vocodex).** Lemon Vocoder plays projects' Vocodex slots, with the carrier or the voice from another
+  track through its sidechain input; the original's built-in synth carrier isn't played yet
 - [x] **Peak Controller.** Common for sidechain pumping in projects. Lemon Peak Controller plays projects' Fruity Peak
   Controller slots and the engine plays their controller links (mixer and plugin targets, formulas)
 - [x] **Formula Controller.** Lemon Formula Controller plays projects' Fruity Formula Controller slots, with the

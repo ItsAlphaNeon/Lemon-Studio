@@ -385,6 +385,7 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`lemon-peak-controller`](plugins/lemon-peak-controller) | Lemon Peak Controller: a peak follower and LFO whose outputs drive linked controls (VST3 + CLAP) |
 | [`lemon-formula-controller`](plugins/lemon-formula-controller) | Lemon Formula Controller: a typed formula of three knobs and the song position whose output drives linked controls (VST3 + CLAP) |
 | [`lemon-phaser`](plugins/lemon-phaser) | Lemon Phaser effect (VST3 + CLAP) |
+| [`lemon-vocoder`](plugins/lemon-vocoder) | Lemon Vocoder: a band vocoder with a sidechain input for the carrier (VST3 + CLAP) |
 | [`pulp-filter`](plugins/pulp-filter) | Pulp Filter effect, a pattern-controlled multi-filter (VST3 + CLAP) |
 | [`press`](plugins/press) | Press effect, a multiband maximiser (VST3 + CLAP) |
 | [`tesla`](plugins/tesla) | Tesla, the audio editor and recorder (VST3 + CLAP) |

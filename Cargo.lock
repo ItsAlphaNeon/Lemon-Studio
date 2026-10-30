@@ -2062,6 +2062,7 @@ name = "lemon-small-fx"
 version = "0.0.1"
 dependencies = [
  "nih_plug",
+ "os-dsp",
  "os-engine",
  "os-hostlink",
  "os-plugkit",
@@ -2105,6 +2106,16 @@ version = "0.0.1"
 dependencies = [
  "lemon-small-fx",
  "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
+name = "lemon-vocoder"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-engine",
  "os-plugkit",
 ]
 
@@ -2925,6 +2936,7 @@ dependencies = [
  "lemon-stereo-enhancer",
  "lemon-stereo-shaper",
  "lemon-transient-processor",
+ "lemon-vocoder",
  "libc",
  "midir",
  "mp3lame-encoder",
