@@ -196,6 +196,40 @@ impl Doc {
         self.redo.clear();
     }
 
+    /// The sample as it was before the newest `n` steps, when Undo mix (envelope) can mix it in: as long as the sample
+    /// is now, with as many channels, at the same rate.
+    fn undo_state(&self, n: usize) -> Option<Arc<Sample>> {
+        let i = self.undo.len().checked_sub(n).filter(|_| n > 0)?;
+        let s = &self.undo[i].sample;
+        let same = s.channels() == self.sample.channels() && s.rate == self.sample.rate;
+        let fits = self.frames() > 0 && s.frames() == self.frames() && same;
+        fits.then(|| s.clone())
+    }
+
+    /// Whether Undo mix (envelope) can go back over the newest `n` steps (`undo_state`).
+    pub fn can_undo_mix(&self, n: usize) -> bool {
+        self.undo_state(n).is_some()
+    }
+
+    /// Edit > Undo mix (envelope): over the range (the selection, else the whole sample), the sample as it was before
+    /// the newest `n` steps is mixed back in by the **all-purpose envelope**, sample × (1 − v) + earlier × v (the top
+    /// undoes, the bottom keeps the change, mid height is equal parts). The markers stay as they are. One undo step
+    /// "Undo mix (envelope)"; false when that state has another length, channel count or rate. The original's manual
+    /// says only that the envelope guides the undo: the rule is Lemon Studio's design, the one Paste mix (envelope)
+    /// follows.
+    pub fn undo_mix(&mut self, n: usize) -> bool {
+        let Some(old) = self.undo_state(n) else { return false };
+        let p = self.env.points(env::ALL, self.frames());
+        self.tool("Undo mix (envelope)", |s, a, b| {
+            for (c, o) in s.ch.iter_mut().zip(&old.ch) {
+                for f in a..=b {
+                    let g = env::value(&p, f as f64);
+                    c[f] = c[f] * (1.0 - g) + o[f] * g;
+                }
+            }
+        })
+    }
+
     /// Undoes the newest `n` steps (picking a step in the undo history goes back to before it).
     pub fn undo_to(&mut self, n: usize) {
         for _ in 0..n {
@@ -841,7 +875,7 @@ impl Doc {
             .collect()
     }
 
-    /// Tools > Scratch (envelope): the selection (else the whole sample) played at the all-purpose envelope's speed
+    /// Tools > Scratch (envelope): the selection (else the whole sample) played at the all-purpose envelope's position
     /// (`env::scratch`). False while that envelope is flat.
     pub fn scratch(&mut self) -> bool {
         let n = self.frames();
