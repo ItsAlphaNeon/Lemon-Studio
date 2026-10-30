@@ -134,9 +134,11 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   moves the slot's effect into a container in the same slot, and Wrap all in container moves all of the track's
   effects into one container in that slot, in slot order. One undo step each. A container plays its effects one
   after the other, each with its own wet and dry levels (taken from the slot's mix knob and switch), and its delay
-  is the sum of theirs, made up as any plugin's. The slot menu's Container ▸ and opening the slot list the effects.
-  Not yet: windows, automation and links for the effects inside, adding, removing or reordering them, presets, and
-  the original's own Patcher slots (projects store containers as Lemon Studio's own, which the original won't open)
+  is the sum of theirs, made up as any plugin's. The container keeps the slot's name, colour and icon. Its list
+  (the slot menu's Container ▸ Edit list..., or opening the slot) opens each effect's own plugin window, and moves,
+  removes and adds effects (the effect list of an empty slot), one undo step each. Containers are saved in Lemon
+  Studio's projects with their effects' settings. Not yet: automation, links and presets for the effects inside,
+  changing their wet and dry, and the original's Patcher slots in imported projects
 
 ## ✅ Plugin hosting
 

@@ -2564,8 +2564,13 @@ impl App {
         // windows' requests come with it.
         #[cfg(plugin_windows)]
         let requests = {
+            let members = self.member_infos();
             let (project, mixer, icons) = (&self.state.project, &self.state.mixer, &self.state.playlist.icons);
             self.plugins.idle(|row| {
+                // A container's member (`crate::container`): its name over its slot's title.
+                if row >= crate::plugins::MEMBER_KEY {
+                    return members.get(&row).cloned();
+                }
                 let info = if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) };
                 info.map(|i| crate::plugin_window::ChannelInfo { icon: crate::playlist::window_icon(project, icons, row), ..i })
             })
@@ -2647,7 +2652,10 @@ impl App {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         let mut menu = crate::playlist::plugin_window_menu(row, detached, lx, ly);
-                        crate::presets::fill_window_menu(self, row, &mut menu);
+                        // A container's member has no presets, links or automation of its own yet: those stay greyed.
+                        if row < crate::plugins::MEMBER_KEY {
+                            crate::presets::fill_window_menu(self, row, &mut menu);
+                        }
                         crate::playlist::fill_plugin_window_menu(&self.state, row, &mut menu);
                         // A channel's window: Replace ▸ lists the generators (an effect slot's stays greyed here; the
                         // mixer's slot menu has its own Replace ▸).
@@ -2662,13 +2670,15 @@ impl App {
                         continue;
                     }
                     Request::Presets(row, x, y) => {
-                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
+                        let Some((_, detached)) = self.plugins.window_of(row).filter(|_| row < crate::plugins::MEMBER_KEY) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(crate::presets::popup(self, row, lx, ly));
                         self.popup_lift = detached.then_some(row);
                         self.invalidate();
                         continue;
                     }
+                    // A container's member has no presets of its own yet (`crate::container`).
+                    Request::PresetStep(row, _) | Request::DropFile(row, _) if row >= crate::plugins::MEMBER_KEY => continue,
                     Request::PresetStep(row, d) => {
                         self.state.message = crate::presets::run(self, crate::presets::PCmd::Step(row, d));
                         continue;
@@ -3337,6 +3347,7 @@ impl App {
             .iter()
             .map(|(&key, h)| {
                 let (synth, place) = match crate::plugins::fx_of(key) {
+                    None if key >= crate::plugins::MEMBER_KEY => (false, self.member_place(key).unwrap_or_default()),
                     None => (true, p.channels.get(key).map_or_else(|| format!("Channel {}", key + 1), |c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1)))),
                     Some((0, slot)) => (false, format!("Master, slot {}", slot + 1)),
                     Some((track, slot)) => (false, format!("Bus {track}, slot {}", slot + 1)),
@@ -3364,6 +3375,7 @@ impl App {
                     // The channel's plugin window, or the mixer slot's.
                     match crate::plugins::fx_of(key) {
                         Some((track, slot)) => self.open_fx(track, slot),
+                        None if key >= crate::plugins::MEMBER_KEY => self.state.message = self.open_member_key(key),
                         None => self.state.pending_open = Some(key),
                     }
                 }

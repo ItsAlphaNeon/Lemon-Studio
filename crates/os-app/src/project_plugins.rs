@@ -93,7 +93,9 @@ pub fn plugin_ref(d: &Descriptor, state: Vec<u8>) -> PluginRef {
 /// plugin keeps the wrapper records Lemon Studio does not edit. A copy in another format that stands in for the plugin
 /// the file names, and that the user has not edited, leaves the file's wrapper as it is ([`untouched_stand_in`]).
 pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
-    for key in plugins.hosted.keys().copied().collect::<Vec<_>>() {
+    // Containers keep their effects' states in their own slot state.
+    crate::container::store_members(proj, plugins);
+    for key in plugins.hosted.range(..crate::plugins::MEMBER_KEY).map(|(&k, _)| k).collect::<Vec<_>>() {
         let Some(d) = plugins.descriptor(key) else { continue };
         if d.format == Format::Native {
             // The plugin's own state stream is what the file stores for it (spec §1, event 213). An instance that
