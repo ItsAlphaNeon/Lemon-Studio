@@ -369,7 +369,13 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - TOOLS ▸ Audio logger: on by default, it keeps the last 1 to 10 minutes of what the audio device plays (Settings ▸;
   the header shows the memory used); Dump to audio editor puts them, silence at either end left out, into a WAV in
   the Recorded folder and into the master track's Tesla
-- Not yet: envelopes, the spectral and clean-up tools, time stretch and pitch shift in Tesla, slicing
+- Tesla draws panning, volume, stereo separation and all-purpose envelopes over the sample (the bottom bar's
+  modes): drag, add and delete points, flip, normalize, add points at the selection or regions, cancel them all, and
+  Mixdown amp envelopes (Ctrl+E) applies the first three to the audio, with undo
+- Tesla's Convolution reverb... (Ctrl+R, the tool grid's reverb button) adds a reverb to the selection from a
+  generated impulse (its decay set by a knob) or from what was copied, with dry and wet levels and the tail
+- Not yet: equalize, blur and the clean-up tools, the envelope tools with a dialog, the drum(loop) stretch,
+  slicing
 
 ## ✅ Exporting audio
 

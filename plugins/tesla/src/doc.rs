@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use crate::env::{self, Envs};
 use crate::sample::{q16, Format, Sample};
 use crate::state::{Rec, Saved, View};
 use crate::tools;
@@ -37,6 +38,7 @@ struct Step {
     name: String,
     sample: Arc<Sample>,
     sel: Option<(usize, usize)>,
+    env: Envs,
 }
 
 #[derive(Clone, Debug)]
@@ -46,6 +48,8 @@ pub struct Doc {
     pub rec: Rec,
     pub view: View,
     pub edison_env: Vec<u8>,
+    /// The four envelopes (the bottom bar's envelope modes).
+    pub env: Envs,
     /// The selection, first and last frame.
     pub sel: Option<(usize, usize)>,
     /// Where a click without a drag put the cursor (insert and paste go here with no selection).
@@ -74,11 +78,11 @@ fn rise(j: usize, k: usize) -> f32 {
 
 impl Doc {
     pub fn from_saved(s: Saved) -> Doc {
-        Doc { sample: Arc::new(s.sample), path: s.path, rec: s.rec, view: s.view, edison_env: s.edison_env, sel: None, cursor: 0, undo: Vec::new(), redo: Vec::new(), version: 1 }
+        Doc { sample: Arc::new(s.sample), path: s.path, rec: s.rec, view: s.view, edison_env: s.edison_env, env: s.env, sel: None, cursor: 0, undo: Vec::new(), redo: Vec::new(), version: 1 }
     }
 
     pub fn saved(&self) -> Saved {
-        Saved { sample: (*self.sample).clone(), path: self.path.clone(), rec: self.rec.clone(), view: self.view.clone(), edison_env: self.edison_env.clone() }
+        Saved { sample: (*self.sample).clone(), path: self.path.clone(), rec: self.rec.clone(), view: self.view.clone(), edison_env: self.edison_env.clone(), env: self.env.clone() }
     }
 
     /// The title: the file's name without extension.
@@ -127,9 +131,16 @@ impl Doc {
     /// Records the current sample as an undo step named `name` and returns it for editing (copied when the audio
     /// thread or the history still holds it).
     fn edit(&mut self, name: &str) -> &mut Sample {
+        self.push_step(name);
+        self.version += 1;
+        Arc::make_mut(&mut self.sample)
+    }
+
+    /// Records the current sample and envelopes as an undo step named `name` (forgetting the redo steps).
+    fn push_step(&mut self, name: &str) {
         let large = bytes(&self.sample) > LARGE;
         if !large || self.view.undo_large {
-            self.undo.push(Step { name: name.to_string(), sample: self.sample.clone(), sel: self.sel });
+            self.undo.push(Step { name: name.to_string(), sample: self.sample.clone(), sel: self.sel, env: self.env.clone() });
             while self.undo.len() > UNDO_STEPS || (self.undo.len() > 1 && self.undo.iter().map(|s| bytes(&s.sample)).sum::<usize>() > UNDO_BYTES) {
                 self.undo.remove(0);
             }
@@ -137,8 +148,6 @@ impl Doc {
             self.undo.clear();
         }
         self.redo.clear();
-        self.version += 1;
-        Arc::make_mut(&mut self.sample)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -157,18 +166,20 @@ impl Doc {
     /// Undoes the newest step; returns its name.
     pub fn undo(&mut self) -> Option<String> {
         let st = self.undo.pop()?;
-        self.redo.push(Step { name: st.name.clone(), sample: self.sample.clone(), sel: self.sel });
+        self.redo.push(Step { name: st.name.clone(), sample: self.sample.clone(), sel: self.sel, env: std::mem::take(&mut self.env) });
         self.sample = st.sample;
         self.sel = st.sel;
+        self.env = st.env;
         self.version += 1;
         Some(st.name)
     }
 
     pub fn redo(&mut self) -> Option<String> {
         let st = self.redo.pop()?;
-        self.undo.push(Step { name: st.name.clone(), sample: self.sample.clone(), sel: self.sel });
+        self.undo.push(Step { name: st.name.clone(), sample: self.sample.clone(), sel: self.sel, env: std::mem::take(&mut self.env) });
         self.sample = st.sample;
         self.sel = st.sel;
+        self.env = st.env;
         self.version += 1;
         Some(st.name)
     }
@@ -198,6 +209,7 @@ impl Doc {
     pub fn load_as(&mut self, s: Sample, path: &str, name: &str) {
         self.edit(name);
         self.sample = Arc::new(s);
+        self.env = Envs::default();
         self.path = path.to_string();
         self.sel = None;
         self.cursor = 0;
@@ -613,6 +625,80 @@ impl Doc {
         }
     }
 
+    // ------------------------------------------------------------------------------------------- envelopes
+
+    /// The envelope the edit mode shows (`None` in waveform mode).
+    pub fn env_shown(&self) -> Option<usize> {
+        (1..=4).contains(&self.view.mode).then(|| self.view.mode as usize - 1)
+    }
+
+    /// Records an undo step named `name` and returns the envelopes for editing (the sample isn't copied).
+    pub fn edit_env(&mut self, name: &str) -> &mut Envs {
+        self.push_step(name);
+        &mut self.env
+    }
+
+    /// Changes the envelopes without an undo step (a point being dragged after its step was recorded).
+    pub fn env_mut(&mut self) -> &mut Envs {
+        &mut self.env
+    }
+
+    /// Tools > Cancel all envelopes: the four back to the flat line.
+    pub fn cancel_envelopes(&mut self) -> bool {
+        if self.env == Envs::default() {
+            return false;
+        }
+        *self.edit_env("Cancel all envelopes") = Envs::default();
+        true
+    }
+
+    /// Runs an envelope tool on the shown envelope. False in waveform mode or with an empty sample.
+    pub fn env_tool(&mut self, name: &str, f: impl FnOnce(&mut Envs, usize, usize) -> bool) -> bool {
+        let (Some(k), n) = (self.env_shown(), self.frames()) else { return false };
+        if n == 0 {
+            return false;
+        }
+        let mut e = self.env.clone();
+        if !f(&mut e, k, n) || e == self.env {
+            return false;
+        }
+        *self.edit_env(name) = e;
+        true
+    }
+
+    /// Tools > Add points at selection (its two ends) or at regions (each region's two ends).
+    pub fn env_points_at(&mut self, regions: bool) -> bool {
+        let at: Vec<f64> = if regions {
+            self.regions().iter().flat_map(|&(a, b)| [a as f64, b as f64]).collect()
+        } else {
+            self.sel.map(|(a, b)| vec![a as f64, b as f64]).unwrap_or_default()
+        };
+        if at.is_empty() {
+            return false;
+        }
+        let name = if regions { "Add points at regions" } else { "Add points at selection" };
+        self.env_tool(name, |e, k, n| {
+            e.add_points(k, n, &at);
+            true
+        })
+    }
+
+    /// Tools > Mixdown amp envelopes: the panning, volume and stereo separation envelopes applied to the whole sample
+    /// (one undo step), then back to the flat line. False while they are flat.
+    pub fn mixdown(&mut self) -> bool {
+        if self.frames() == 0 || self.env.amp_flat() {
+            return false;
+        }
+        let envs = self.env.clone();
+        let s = self.edit("Mixdown amp envelopes");
+        env::mixdown(s, &envs);
+        s.quantize();
+        for k in [env::PAN, env::VOLUME, env::SEP] {
+            self.env.e[k].clear();
+        }
+        true
+    }
+
     // ------------------------------------------------------------------------------------------- select
 
     /// The regions' ranges by position.
@@ -800,6 +886,48 @@ mod tests {
         });
         assert_eq!(d.sample.ch[0][199], 1.0);
         assert_eq!(d.sample.ch[0][300], 300.0);
+    }
+
+    #[test]
+    fn envelopes_undo_and_mix_down() {
+        let mut d = doc(0);
+        d.sample = Arc::new(Sample::from_channels(44100, vec![vec![0.5; 101], vec![0.5; 101]], Format::Float32));
+        // Waveform mode: no envelope tools.
+        assert!(!d.env_tool("Flip vertically", |e, k, n| {
+            e.flip(k, n);
+            true
+        }));
+        assert!(!d.mixdown());
+        d.view.mode = 2;
+        assert_eq!(d.env_shown(), Some(env::VOLUME));
+        d.select(20, 80);
+        assert!(d.env_points_at(false));
+        let n = d.frames();
+        d.edit_env("Move point").move_point(env::VOLUME, n, 1, 20.0, 0.0);
+        d.env_mut().move_point(env::VOLUME, n, 2, 50.0, 0.0);
+        d.env_mut().move_point(env::VOLUME, n, 3, 80.0, 0.0);
+        assert_eq!(d.history(), vec!["Move point", "Add points at selection"]);
+        // Undo and redo carry the envelopes, and leave the sample's Arc alone.
+        let before = d.sample.clone();
+        d.undo();
+        assert_eq!(d.env.points(env::VOLUME, n).len(), 5);
+        assert!(d.env.is_flat(env::VOLUME));
+        assert!(Arc::ptr_eq(&before, &d.sample));
+        d.redo();
+        assert!(!d.env.is_flat(env::VOLUME));
+        // The mixdown silences 20..=80 (straight lines down into it), then the amp envelopes go flat.
+        assert!(d.mixdown());
+        assert_eq!(d.sample.ch[0][50], 0.0);
+        assert_eq!(d.sample.ch[1][0], 0.5);
+        assert!(d.sample.ch[0][10] > 0.0 && d.sample.ch[0][10] < 0.5);
+        assert!(d.env.amp_flat());
+        assert!(!d.mixdown());
+        d.undo();
+        assert_eq!(d.sample.ch[0][50], 0.5);
+        assert!(!d.env.is_flat(env::VOLUME), "undo brings the envelope back");
+        assert!(d.cancel_envelopes());
+        assert_eq!(d.env, Envs::default());
+        assert!(!d.cancel_envelopes());
     }
 
     #[test]

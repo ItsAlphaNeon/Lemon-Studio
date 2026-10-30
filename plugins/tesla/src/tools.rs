@@ -4,7 +4,8 @@
 
 //! The direct tools, on a range of the sample (the selection, or the whole sample): normalize, reverse polarity,
 //! center, reverse, swap channels, the mono conversions, generate noise, the fades and declicks with Edison's
-//! measured curves, and Amp with Edison's measured laws.
+//! measured curves, and Amp with Edison's measured laws. Convolution reverb, whose DSP the original's dialog doesn't
+//! give away, is Lemon Studio's design.
 //!
 // spec: plugins/edison/tools.md ("Measured direct tools", "Fade curves", "Declick tables", "Amp, measured"),
 // plugins/tesla/README.md "Version 1" (tools)
@@ -455,10 +456,170 @@ pub fn amp(s: &mut Sample, a: usize, b: usize, amp: &Amp) {
     }
 }
 
+/// Convolution reverb... settings (**Lemon Studio's design**: the original's dialog was listed in
+/// `plugins/edison/tools.md` but its DSP was not measured). Dry and Wet are knobs from −1 to 1 on the Amp fader's law
+/// over their upper half (silence at −1, ×1 at 0, ×4 at 1); Decay sets the default impulse's time to fall 60 dB, 0.2
+/// to 5 s (1 s at the centre); Add tail keeps the reverb's tail after the range (the range grows by the impulse's
+/// length less one frame); Clipboard uses Tesla's clipboard as the impulse instead of the default one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reverb {
+    pub dry: f32,
+    pub wet: f32,
+    pub decay: f32,
+    pub tail: bool,
+    pub clip: bool,
+}
+
+/// The Wet knob's default: ×0.5 (the knob at 2 · log9(2) − 1).
+pub const WET_DEFAULT: f32 = -0.369_070_3;
+
+impl Default for Reverb {
+    fn default() -> Self {
+        Reverb { dry: 0.0, wet: WET_DEFAULT, decay: 0.0, tail: true, clip: false }
+    }
+}
+
+impl Reverb {
+    /// A Dry or Wet knob's gain.
+    pub fn gain(knob: f32) -> f64 {
+        fader_gain((knob.clamp(-1.0, 1.0) + 1.0) / 2.0)
+    }
+
+    /// The default impulse's decay time (to −60 dB), in seconds.
+    pub fn seconds(&self) -> f64 {
+        0.2 * 25f64.powf((self.decay.clamp(-1.0, 1.0) as f64 + 1.0) / 2.0)
+    }
+}
+
+/// The default impulse (Lemon Studio's design): Gaussian noise under an exponential decay that falls 60 dB over
+/// `seconds`, as long as that, independent in each channel, each channel scaled to unit energy (white noise keeps its
+/// level through it). The same seed gives the same impulse.
+pub fn default_impulse(rate: u32, channels: usize, seconds: f64) -> Vec<Vec<f32>> {
+    let n = ((seconds * rate as f64).round() as usize).max(1);
+    let mut rng = Rng::new(0x7e51_a_c0de);
+    (0..channels.max(1))
+        .map(|_| {
+            let mut h: Vec<f64> = (0..n).map(|i| rng.gauss() * (-6.907_755_278_982_137 * i as f64 / n as f64).exp()).collect();
+            let e = h.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if e > 0.0 {
+                h.iter_mut().for_each(|v| *v /= e);
+            }
+            h.into_iter().map(|v| v as f32).collect()
+        })
+        .collect()
+}
+
+/// `x` convolved with `h` (length `x + h − 1`): directly for short impulses, else by FFT overlap-add.
+pub fn convolve(x: &[f32], h: &[f32]) -> Vec<f32> {
+    if x.is_empty() || h.is_empty() {
+        return Vec::new();
+    }
+    let out = x.len() + h.len() - 1;
+    let mut y = vec![0f32; out];
+    if h.len() <= 32 {
+        for (i, &xv) in x.iter().enumerate() {
+            for (j, &hv) in h.iter().enumerate() {
+                y[i + j] += xv * hv;
+            }
+        }
+        return y;
+    }
+    let n = (2 * h.len()).next_power_of_two();
+    let hop = n - h.len() + 1;
+    let fft = crate::spectrum::Fft::new(n);
+    let (mut hr, mut hi) = (vec![0f32; n], vec![0f32; n]);
+    hr[..h.len()].copy_from_slice(h);
+    fft.run(&mut hr, &mut hi);
+    let (mut re, mut im) = (vec![0f32; n], vec![0f32; n]);
+    let scale = 1.0 / n as f32;
+    for start in (0..x.len()).step_by(hop) {
+        let end = (start + hop).min(x.len());
+        re.fill(0.0);
+        im.fill(0.0);
+        re[..end - start].copy_from_slice(&x[start..end]);
+        fft.run(&mut re, &mut im);
+        for k in 0..n {
+            let (a, b) = (re[k], im[k]);
+            re[k] = a * hr[k] - b * hi[k];
+            // Conjugated, so the forward transform runs the inverse.
+            im[k] = -(a * hi[k] + b * hr[k]);
+        }
+        fft.run(&mut re, &mut im);
+        let m = (end - start + h.len() - 1).min(out - start);
+        for (o, v) in y[start..start + m].iter_mut().zip(&re[..m]) {
+            *o += v * scale;
+        }
+    }
+    y
+}
+
+/// The range through the convolution reverb: dry plus wet, each channel through its impulse channel (`impulse` has
+/// the sample's channel count). With Add tail the result runs on for the impulse's length less one frame.
+pub fn reverb(s: &Sample, a: usize, b: usize, r: &Reverb, impulse: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    let (dry, wet) = (Reverb::gain(r.dry) as f32, Reverb::gain(r.wet) as f32);
+    s.ch.iter()
+        .enumerate()
+        .map(|(c, ch)| {
+            let x = &ch[a..=b];
+            let h = &impulse[c.min(impulse.len() - 1)];
+            let mut y = convolve(x, h);
+            if !r.tail {
+                y.truncate(x.len());
+            }
+            for (i, v) in y.iter_mut().enumerate() {
+                *v = *v * wet + x.get(i).map_or(0.0, |d| d * dry);
+            }
+            y
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sample::Format;
+
+    #[test]
+    fn convolution_matches_the_direct_sum() {
+        let mut rng = Rng::new(5);
+        let x: Vec<f32> = (0..5000).map(|_| rng.gauss() as f32).collect();
+        let h: Vec<f32> = (0..700).map(|i| rng.gauss() as f32 * (-(i as f32) / 200.0).exp()).collect();
+        let y = convolve(&x, &h);
+        assert_eq!(y.len(), 5699);
+        for &i in &[0usize, 1, 699, 700, 2047, 2048, 4999, 5300, 5698] {
+            let d: f64 = (0..h.len()).filter(|&j| j <= i && i - j < x.len()).map(|j| h[j] as f64 * x[i - j] as f64).sum();
+            assert!((y[i] as f64 - d).abs() < 1e-3, "frame {i}: {} vs {d}", y[i]);
+        }
+        // A unit impulse gives the impulse back; short impulses are summed directly.
+        assert!(convolve(&[1.0], &h).iter().zip(&h).all(|(a, b)| (a - b).abs() < 1e-5));
+        assert_eq!(convolve(&[1.0, 2.0], &[1.0, -1.0]), vec![1.0, 1.0, -2.0]);
+    }
+
+    #[test]
+    fn reverb_mixes_dry_and_wet_and_adds_the_tail() {
+        let r = Reverb::default();
+        assert_eq!(Reverb::gain(r.dry), 1.0);
+        assert!((Reverb::gain(r.wet) - 0.5).abs() < 1e-6);
+        assert!((r.seconds() - 1.0).abs() < 1e-12);
+        let h = default_impulse(1000, 2, r.seconds());
+        assert_eq!((h.len(), h[0].len()), (2, 1000));
+        assert!((h[0].iter().map(|v| (*v as f64).powi(2)).sum::<f64>() - 1.0).abs() < 1e-4);
+        assert_ne!(h[0], h[1], "the channels are independent");
+        assert_eq!(h, default_impulse(1000, 2, 1.0), "the same impulse every time");
+        // A click through it: the click (dry), plus the impulse at half level (wet), tail and all.
+        let mut s = Sample::from_channels(1000, vec![vec![0.0; 100], vec![0.0; 100]], Format::Float32);
+        s.ch[0][10] = 1.0;
+        let out = reverb(&s, 0, 99, &r, &h);
+        assert_eq!(out[0].len(), 100 + 999);
+        assert!((out[0][10] - (1.0 + 0.5 * h[0][0])).abs() < 1e-5);
+        assert!((out[0][500] - 0.5 * h[0][490]).abs() < 1e-5);
+        assert!(out[1].iter().all(|v| *v == 0.0));
+        // Without the tail the range keeps its length; dry off leaves only the wet.
+        let r2 = Reverb { tail: false, dry: -1.0, ..r };
+        let out = reverb(&s, 0, 99, &r2, &h);
+        assert_eq!(out[0].len(), 100);
+        assert!((out[0][10] - 0.5 * h[0][0]).abs() < 1e-5);
+    }
 
     fn ones(n: usize, rate: u32) -> Sample {
         Sample::from_channels(rate, vec![vec![1.0; n], vec![1.0; n]], Format::Float32)
