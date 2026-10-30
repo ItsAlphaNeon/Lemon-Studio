@@ -31,6 +31,7 @@ pub mod strum;
 pub mod piano_dlg;
 pub mod tapper;
 pub mod touch;
+pub mod events;
 pub mod theme_preview;
 pub mod toolbar;
 pub mod typein;
@@ -226,6 +227,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::Strum => ui.part(Seg::Win(win), a, |ui| strum::paint(ui, s, f)),
             Win::Arp => ui.part(Seg::Win(win), a, |ui| arpeggiate::paint(ui, s, f)),
             Win::PianoDlg => ui.part(Seg::Win(win), a, |ui| piano_dlg::paint(ui, s, f)),
+            Win::Events => ui.part(Seg::Win(win), a, |ui| events::paint(ui, s, f)),
             _ => {}
         }
         ui.c.pop_clip();

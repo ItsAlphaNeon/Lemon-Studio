@@ -1437,7 +1437,7 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
     let [init, delete] = crate::init::items(s, auto.as_ref().map(|a| (a.0, a.2)));
     let mut v = vec![
         PItem::head("Automation"),
-        PItem::not_yet("Edit automation"),
+        crate::events::menu_item(auto.as_ref(), None),
         PItem::new("Edit automation in a window", Cmd::Nothing).off(),
         PItem::new("Edit automation in piano roll", Cmd::Nothing).off(),
         init,

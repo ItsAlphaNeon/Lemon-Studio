@@ -71,7 +71,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The parameter menu (a parameter in the browser after "Browse parameters", TOOLS ▸ Last tweaked): create or edit
   the parameter's automation clip, link a controller, copy, paste, type in or set a value (a submenu of its steps, or
   its default and minimum to maximum), remove an initial value read from a file
-- Not yet in the parameter menu: Edit events, and Init song with this position on a plugin parameter
+- Not yet in the parameter menu: Init song with this position on a plugin parameter
 - VST2 shells (one file offering several plugins); a VST2 plugin's state is saved in the layout FL Studio's projects use
 - On Windows, a plugin that crashes is stopped (its slot passes the sound through) instead of closing
   Lemon Studio
@@ -187,7 +187,15 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   LFO (on / off, multiply or add, amount, speed, tension, skew, pulse width, and its own envelope) shape what it
   hands on, in the original's arithmetic; the clip's channel window sets them, each change an undo step, and
   projects keep every LFO field
-- Not yet: recording of movements
+- The event editor (Edit events on a control's menu: channel volume, pan and pitch, mixer controls, the tempo, plugin
+  parameters) shows the control's events in the selected pattern as its level over time, in the setting's own unit: left
+  drag draws freehand on the global snap, right drag a straight line, Erase and Select tools, the wheel scrolls and
+  Ctrl+wheel zooms; its Edit menu has Cut, Copy, Paste, Select all, Delete, Insert current controller value and Turn
+  into automation clip, which moves the events into a new clip channel linked to the control, as the original does
+  (the control's earlier value until the first event, then the events, a recorded ramp as one straight segment, ending
+  on the last event). Each edit is an undo step
+- Not yet in the event editor: the Paint, Interpolate and Zoom tools, Scale levels and LFO, inserting and deleting time,
+  a second window
 
 ## 🚧 Project files
 
