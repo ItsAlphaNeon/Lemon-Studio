@@ -1714,7 +1714,7 @@ impl App {
         self.export_reveal = job.options.reveal;
         self.plugins.set_offline(job.options.hq);
         // Lemon Sampler voices playing from disk wait for their frames in every export, high quality or not.
-        lemon_sampler::stream::set_exporting(true);
+        lemon_sampler::stream::export_started();
         self.transport.export(&p, mode, rate, job);
         self.export = Some((name, 0.0));
         self.invalidate();
@@ -1733,7 +1733,7 @@ impl App {
                 self.export = None;
                 self.midi_after_export();
                 self.plugins.set_offline(false);
-                lemon_sampler::stream::set_exporting(false);
+                lemon_sampler::stream::export_finished();
                 if let Some(p) = self.pattern_render.take() {
                     return self.pattern_render_done(p, r);
                 }
@@ -11478,8 +11478,7 @@ mod tests {
         let w = 1920;
         let bbox = diffs.iter().fold((usize::MAX, usize::MAX, 0, 0), |m, &i| (m.0.min(i % w), m.1.min(i / w), m.2.max(i % w), m.3.max(i / w)));
         if !diffs.is_empty() {
-            let _ = a.pixmap.save_png(std::env::temp_dir().join("os_partial.png"));
-            let _ = b.pixmap.save_png(std::env::temp_dir().join("os_full.png"));
+            dump(&a, &b);
         }
         assert!(diffs.is_empty(), "{} differing pixels in x {}..{} y {}..{}", diffs.len(), bbox.0, bbox.2, bbox.1, bbox.3);
     }
@@ -11995,13 +11994,20 @@ mod tests {
         }
     }
 
+    /// Saves a failed comparison's two frames in the temp folder, named after the process: suites running side by side
+    /// would otherwise overwrite each other's.
+    fn dump(a: &Canvas, b: &Canvas) {
+        let id = std::process::id();
+        let _ = a.pixmap.save_png(std::env::temp_dir().join(format!("os_partial_{id}.png")));
+        let _ = b.pixmap.save_png(std::env::temp_dir().join(format!("os_full_{id}.png")));
+    }
+
     fn assert_same(a: &Canvas, b: &Canvas, what: &str) {
         let width = a.pixmap.width() as usize;
         let diffs = a.pixmap.data().iter().zip(b.pixmap.data()).enumerate().filter(|(_, (x, y))| x.abs_diff(**y) > 3).map(|(i, _)| i / 4);
         let (n, bbox) = diffs.fold((0, (usize::MAX, usize::MAX, 0, 0)), |(n, m), i| (n + 1, (m.0.min(i % width), m.1.min(i / width), m.2.max(i % width), m.3.max(i / width))));
         if n > 0 {
-            let _ = a.pixmap.save_png(std::env::temp_dir().join("os_partial.png"));
-            let _ = b.pixmap.save_png(std::env::temp_dir().join("os_full.png"));
+            dump(a, b);
         }
         assert_eq!(n, 0, "{what}: differing pixels in x {}..{} y {}..{}", bbox.0, bbox.2, bbox.1, bbox.3);
     }
@@ -13692,7 +13698,7 @@ mod tests {
         let mut app = App::new(None);
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
-        let wav = std::env::temp_dir().join("os-app-audio-clip-channel.wav");
+        let wav = std::env::temp_dir().join(format!("os-app-audio-clip-channel-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
         let path = wav.to_string_lossy().into_owned();
         crate::playlist::add_audio_clip(&mut app.state, &path, 0, 0).expect("audio clip added");
@@ -13804,7 +13810,7 @@ mod tests {
             let out = std::env::temp_dir().join(format!("os-app-keep-on-disk-{}-{keep}.wav", std::process::id()));
             // As `start_export` does with high quality off.
             a.plugins.set_offline(false);
-            lemon_sampler::stream::set_exporting(true);
+            lemon_sampler::stream::export_started();
             a.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
             let t0 = std::time::Instant::now();
             loop {
@@ -13814,7 +13820,7 @@ mod tests {
                     _ => std::thread::sleep(Duration::from_millis(10)),
                 }
             }
-            lemon_sampler::stream::set_exporting(false);
+            lemon_sampler::stream::export_finished();
             // Playing from disk, nothing holds the decoded file: the engine that rendered the export (and its sample
             // library, which plays on) kept only the length. From memory, the instance holds it.
             assert_eq!(os_engine::sample::held(&wav), !keep, "the decoded file is held: keep on disk {keep}");

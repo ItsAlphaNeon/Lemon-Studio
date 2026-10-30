@@ -2537,7 +2537,7 @@ mod tests {
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
-        let wav = std::env::temp_dir().join("os-app-knob-sound.wav");
+        let wav = std::env::temp_dir().join(format!("os-app-knob-sound-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..88200).flat_map(|i| { let v = ((i as f32 / 44100.0 * 220.0).fract() * 2.0 - 1.0) * 0.4; [v, v] }).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &tone).unwrap();
         // The persisted field is a JSON string holding JSON: forward slashes keep it free of escapes.
@@ -2620,7 +2620,7 @@ mod tests {
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
-        let wav = std::env::temp_dir().join("os-app-knob-sound.wav");
+        let wav = std::env::temp_dir().join(format!("os-app-app-knob-sound-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..88200).flat_map(|i| { let v = ((i as f32 / 44100.0 * 220.0).fract() * 2.0 - 1.0) * 0.4; [v, v] }).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &tone).unwrap();
         // The persisted field is a JSON string holding JSON: forward slashes keep it free of escapes.
@@ -3277,7 +3277,7 @@ mod tests {
         let index = pl.index_of(LEMON_SAMPLER).unwrap();
         pl.create_with(0, index, None).unwrap();
         // One second: silent first half, 0.5 in the second.
-        let wav = std::env::temp_dir().join("os-app-start-late.wav");
+        let wav = std::env::temp_dir().join(format!("os-app-start-late-{}.wav", std::process::id()));
         let frames: Vec<f32> = (0..48000).flat_map(|i| if i < 24000 { [0.0; 2] } else { [0.5; 2] }).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &frames).unwrap();
         assert!(pl.load_sample(0, &wav.to_string_lossy()));
@@ -3330,7 +3330,7 @@ mod tests {
         pump(&mut pl, 300);
         assert_eq!(pl.sampler_path(0).as_deref(), Some(mp3.as_str()));
         // The strip (no editor under the point): loaded through the state instead.
-        let wav = std::env::temp_dir().join("os-app-drop.wav");
+        let wav = std::env::temp_dir().join(format!("os-app-drop-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &[0.5; 2000]).unwrap();
         let wav = wav.to_string_lossy().into_owned();
         assert!(pl.drop_file(0, r.left + 12, r.top + 40, &wav, true));
@@ -3367,7 +3367,7 @@ mod tests {
         let d = pl.descriptor(0).unwrap();
         assert_eq!(d.format, os_host::Format::Vst3);
         assert!(d.uid().starts_with("vst3:") && d.uid().len() == 5 + 32);
-        let wav = std::env::temp_dir().join("os-app-vst3.wav");
+        let wav = std::env::temp_dir().join(format!("os-app-vst3-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
         // A VST3 instance takes a bare component state too (here Lemon Sampler's JSON with the sample).
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
@@ -3394,7 +3394,7 @@ mod tests {
             Available { desc: lib.plugins()[0].clone(), lib }
         };
         let path = std::env::temp_dir().join(format!("openstudio-vst3-{}.flp", std::process::id()));
-        let wav = std::env::temp_dir().join("os-app-vst3-save.wav");
+        let wav = std::env::temp_dir().join(format!("os-app-vst3-save-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.25; 4800]).unwrap();
         let mut a = crate::app::App::new(None);
         a.state.project = crate::app::test_project();
