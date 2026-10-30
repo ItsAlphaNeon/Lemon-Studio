@@ -1111,6 +1111,14 @@ impl Plugins {
         }
     }
 
+    /// Moves row `row`'s docked window to `(x, y)` (main-window client px; VIEW > Align all channel editors).
+    #[cfg(all(plugin_windows, windows))]
+    pub fn move_docked(&self, row: usize, x: i32, y: i32) {
+        if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
+            w.move_to(x, y);
+        }
+    }
+
     /// Clips row `row`'s docked window to `work` minus `covers` (main-window client px).
     #[cfg(plugin_windows)]
     pub fn clip(&self, row: usize, work: [i32; 4], covers: &[[i32; 4]]) {

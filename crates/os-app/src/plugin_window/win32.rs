@@ -312,6 +312,15 @@ impl FrameWindow {
         unsafe { apply_clip(self.hwnd, &self.state) };
     }
 
+    /// Moves the docked window's top-left to `(x, y)` in the parent's client area (physical px); a detached one stays.
+    pub fn move_to(&self, x: i32, y: i32) {
+        if self.detached() {
+            return;
+        }
+        self.place(|_| (x, y));
+        unsafe { apply_clip(self.hwnd, &self.state) };
+    }
+
     /// Moves the docked window to where `to` puts it, given its rect in the parent's client area (physical px).
     fn place(&self, to: impl FnOnce([i32; 4]) -> (i32, i32)) {
         unsafe {
