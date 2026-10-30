@@ -367,6 +367,7 @@ impl App {
             // is read again next tick (its events stay queued).
             let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen)) else { continue };
             let Ok(mut p) = h.plugin.try_lock() else { continue };
+            let t0 = std::time::Instant::now();
             let weak = Arc::downgrade(&h.plugin);
             let count = p.param_count();
             let stale = ui.lists.get(&key).is_none_or(|l| l.params.len() != count || !Weak::ptr_eq(&l.plugin, &weak));
@@ -450,6 +451,7 @@ impl App {
                     automate.push((key, index));
                 }
             }
+            crate::dropout_log::held(&p.desc().name, "reading its parameters", t0.elapsed());
         }
         // An edit in a plugin's window is an undo step (by the owner's id, so it follows moves): a gesture's from its
         // begin to its end, values sent without one joined while they come in a row.

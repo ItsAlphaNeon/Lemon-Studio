@@ -8,7 +8,9 @@
 //! - a playback starting (the audio settings it plays with);
 //! - an audio thread's real-time priority: given, refused (and why), or taken back by the safety cap (`crate::rt`);
 //! - dropouts, at most one line a second: how many of each kind (an empty block: the feeder was late; a plugin late
-//!   for its tick; the device's own underruns) and whether the feeder and the device callback were real-time then.
+//!   for its tick; the device's own underruns) and whether the feeder and the device callback were real-time then;
+//! - a hosted plugin held by the UI thread long enough to make the audio thread wait for it (`held`), at most one line
+//!   a second.
 //!
 //! Small by design: events only, never per block; at `CAP` bytes the file becomes `audio.log.1` (the one before is
 //! dropped), so the log never takes more than twice that.
@@ -16,9 +18,13 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// The largest the log grows before it is rotated.
 const CAP: u64 = 256 * 1024;
+/// The shortest hold of a plugin by the UI thread that is written: a block is 5.3 ms at 256 frames, and the feeder works
+/// a few ms ahead.
+const HELD_MIN: Duration = Duration::from_millis(2);
 
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -52,6 +58,31 @@ pub fn write(line: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
         let _ = writeln!(f, "{} {line}", now());
     }
+}
+
+/// The UI thread held hosted plugin `plugin` for `held` doing `what`. The audio thread waits for that lock and misses
+/// the plugin's tick past its wait: a long hold is written.
+pub fn held(plugin: &str, what: &str, held: Duration) {
+    if held < HELD_MIN {
+        return;
+    }
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let line = match LAST.lock() {
+        Ok(mut last) => held_line(&mut last, Instant::now(), plugin, what, held),
+        Err(_) => None,
+    };
+    if let Some(l) = line {
+        write(&l);
+    }
+}
+
+/// `held`'s line, unless a hold under `HELD_MIN`, or one was written less than a second before `now`.
+fn held_line(last: &mut Option<Instant>, now: Instant, plugin: &str, what: &str, held: Duration) -> Option<String> {
+    if held < HELD_MIN || last.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1)) {
+        return None;
+    }
+    *last = Some(now);
+    Some(format!("{plugin}: held {:.1} ms by {what}", held.as_secs_f64() * 1000.0))
 }
 
 /// The local time, `YYYY-MM-DD HH:MM:SS`.
@@ -133,6 +164,15 @@ mod tests {
         w.last = None;
         let l = w.check(Drops { empty: 5, plugin: 1, device: 2 }, 1, (Some(false), None), "x").unwrap();
         assert!(l.starts_with("dropouts +4 (2 empty") && l.contains("1 audio threads taken back") && l.contains("device callback not running"), "{l}");
+    }
+
+    #[test]
+    fn a_long_hold_is_written_at_most_once_a_second() {
+        let (mut last, t0) = (None, Instant::now());
+        assert_eq!(held_line(&mut last, t0, "Zest", "the UI's tick", Duration::from_micros(1500)), None, "short");
+        assert_eq!(held_line(&mut last, t0, "Zest", "the UI's tick", Duration::from_micros(4250)).as_deref(), Some("Zest: held 4.2 ms by the UI's tick"));
+        assert_eq!(held_line(&mut last, t0 + Duration::from_millis(500), "Zest", "x", Duration::from_millis(9)), None, "within the second");
+        assert!(held_line(&mut last, t0 + Duration::from_secs(1), "Zest", "x", Duration::from_millis(9)).is_some());
     }
 
     #[test]

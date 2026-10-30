@@ -712,6 +712,20 @@ impl Plugins {
         self.hosted.get(&key)?.plugin.lock().ok()?.save_state()
     }
 
+    /// The state of the instance under `key` if it is free now: `Err` when the audio thread has it.
+    pub fn state_if_free(&self, key: usize) -> Result<Option<Vec<u8>>, ()> {
+        let Some(h) = self.hosted.get(&key) else { return Ok(None) };
+        let p = match h.plugin.try_lock() {
+            Ok(p) => p,
+            Err(std::sync::TryLockError::WouldBlock) => return Err(()),
+            Err(std::sync::TryLockError::Poisoned(_)) => return Ok(None),
+        };
+        let t0 = Instant::now();
+        let state = p.save_state();
+        crate::dropout_log::held(&p.desc().name, "reading its state", t0.elapsed());
+        Ok(state)
+    }
+
     /// Marks the instance under `key`, just created, as a copy standing in for a plugin in another format
     /// (`Hosted::stand_in`).
     pub fn mark_stand_in(&mut self, key: usize) {
@@ -1236,6 +1250,7 @@ impl Plugins {
             let look = h.due(h.seen);
             let mut menu: Option<(os_host::Menu, (i32, i32))> = None;
             if let Some(mut p) = look.and_then(|_| h.plugin.try_lock().ok()) {
+                let t0 = Instant::now();
                 h.seen = look.unwrap_or(h.seen);
                 // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
                 if let (Some(code), false) = (p.stopped(), h.stop_told) {
@@ -1264,6 +1279,7 @@ impl Plugins {
                     let k = w.scale();
                     w.set_editor_size((ew as f32 / k, eh as f32 / k));
                 }
+                crate::dropout_log::held(&p.desc().name, "the UI's tick", t0.elapsed());
             }
             #[cfg(plugin_windows)]
             if let Some(w) = &h.window {

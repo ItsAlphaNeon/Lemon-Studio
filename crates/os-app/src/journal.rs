@@ -57,6 +57,8 @@ pub struct Journal {
     plugin_hash: HashMap<u32, u64>,
     open: Vec<usize>,
     attention: HashMap<usize, u64>,
+    /// Instances to read at the next plugin tick: the audio thread had them when they were due.
+    retry: Vec<usize>,
     /// The history a Lemon project file brought (`crate::native`), and that file; the number of this session's entry
     /// from which on its entries are the project's (its `opened` or `new`).
     carried: Vec<Value>,
@@ -175,7 +177,9 @@ impl App {
         self.journal_tick_project();
         let keys: Vec<usize> = self.plugins.hosted.keys().copied().collect();
         for key in keys {
-            self.journal_plugin(key);
+            if !self.journal_plugin(key) {
+                self.journal.retry.push(key);
+            }
         }
     }
 
@@ -242,12 +246,13 @@ impl App {
     }
 
     /// The plugins whose windows are open and that said something since they were last read (a parameter moved, a
-    /// preset loaded), and those whose windows just closed: their states, when changed. A plugin is locked only then:
-    /// the audio thread passes over an instance it finds locked.
+    /// preset loaded), and those whose windows just closed: their states, when changed. A plugin is locked only then,
+    /// and only when free: the audio thread waits for an instance the UI has, so one it has is read next time.
     fn journal_tick_plugins(&mut self) {
         let open = self.editing_plugins();
         let closed: Vec<usize> = self.journal.open.iter().copied().filter(|k| !open.contains(k)).collect();
-        let mut read = closed;
+        let mut read = std::mem::take(&mut self.journal.retry);
+        read.extend(closed);
         for &key in &open {
             let count = self.plugins.hosted.get(&key).and_then(|h| h.attention_count());
             // One that never asks for attention is read each time.
@@ -258,8 +263,12 @@ impl App {
                 self.journal.attention.insert(key, c);
             }
         }
+        read.sort_unstable();
+        read.dedup();
         for key in read {
-            self.journal_plugin(key);
+            if !self.journal_plugin(key) {
+                self.journal.retry.push(key);
+            }
         }
         self.journal.open = open;
     }
@@ -272,10 +281,12 @@ impl App {
         Vec::new()
     }
 
-    /// The state of the instance under `key`, into the journal when it differs from the last written.
-    pub(crate) fn journal_plugin(&mut self, key: usize) {
-        let Some(owner) = crate::control::command::key_owner(&self.state.project, key) else { return };
-        let Some(state) = self.plugins.state(key) else { return };
+    /// The state of the instance under `key`, into the journal when it differs from the last written. False when the
+    /// audio thread had the instance: not read.
+    pub(crate) fn journal_plugin(&mut self, key: usize) -> bool {
+        let Some(owner) = crate::control::command::key_owner(&self.state.project, key) else { return true };
+        let Ok(state) = self.plugins.state_if_free(key) else { return false };
+        let Some(state) = state else { return true };
         let hash = {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             state.hash(&mut h);
@@ -283,12 +294,12 @@ impl App {
         };
         let was = self.journal.plugin_hash.insert(owner, hash);
         if was == Some(hash) {
-            return;
+            return true;
         }
         // Changed since it was first read after the project opened: an edit in the plugin's own window.
         self.state.plugin_edited |= was.is_some();
         if !self.journal.known.insert(format!("{hash:016x}")) {
-            return;
+            return true;
         }
         let plugin = self.plugins.descriptor(key).map(|d| json!({ "name": d.name, "format": d.format.as_str(), "id": d.id }));
         let place = match crate::plugins::fx_of(key) {
@@ -297,6 +308,7 @@ impl App {
         };
         let data = (state.len() <= STATE_MAX).then(|| base64(&state));
         self.journal.write("plugin_state", json!({ "owner": owner, "at": place, "plugin": plugin, "size": state.len(), "hash": format!("{hash:016x}"), "state": data }));
+        true
     }
 }
 
@@ -381,7 +393,9 @@ impl App {
         }
         self.plugins.mark_edited(key);
         self.state.params.reread(key);
-        self.journal_plugin(key);
+        if !self.journal_plugin(key) {
+            self.journal.retry.push(key);
+        }
         self.invalidate();
         format!("{name} recovered from the journal")
     }
