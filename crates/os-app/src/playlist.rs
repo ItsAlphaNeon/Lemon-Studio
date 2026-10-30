@@ -1347,8 +1347,8 @@ pub fn grid_snap(s: &State) -> Snap {
     s.playlist.snap.grid(s.global_snap.now).unwrap_or(Snap::None)
 }
 
-/// Events and Markers catch a target this close: a click 6.4 px from a marker lands on it, 7.6 and 8.4 px away on
-/// the tick under the pointer (ui/playlist.md §4).
+/// Events and Markers catch a target this close: in the reference a click 6.4 px from a marker landed on it, 7.6 and
+/// 8.4 px away on the tick under the pointer (ui/playlist.md §4); 7 lies between.
 const CATCH_PX: f32 = 7.0;
 
 /// What Events and Markers catch in the playlist: its time markers, or the starts and ends of the
@@ -2019,8 +2019,8 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
         color: Some(s.clip_colors.new_channel(index)),
         enabled: true,
-        // The clip's range 0..1, a new clip's: stored pan 0 (minimum), volume 12800 (maximum)
-        // (spec: audio/automation.md "Range").
+        // The clip's range 0..1: stored pan 0 (minimum), volume 12800 (maximum), as FL stores a new clip's (spec:
+        // audio/automation.md "Range").
         volume: 1.0,
         pan: -1.0,
         pitch_cents: 0,
@@ -2441,9 +2441,9 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// The ▸ menu's Time markers submenu (§7a). Add auto has no Ctrl+T: Ctrl+T switches the typing keyboard. Add two...
-/// is greyed without a time selection. Add one every and Add key marker open their lists as menus of their own (a
-/// submenu holds no submenus here).
+/// The ▸ menu's Time markers submenu (§7a), in the reference's order. The reference's Ctrl+T for Add auto is
+/// deliberately not bound: Ctrl+T switches the typing keyboard. Add two... is greyed without a time selection. Add
+/// one every and Add key marker open their lists as menus of their own (a submenu holds no submenus here).
 fn time_marker_items(s: &State) -> Vec<PItem> {
     let two = PItem::new("Add two...", Cmd::AddTwoMarkers);
     vec![
@@ -2852,8 +2852,8 @@ pub enum Handle {
     Crossfade,
 }
 
-/// Tension per logical pixel of a tension-handle drag, and dB per pixel of a gain drag (§9a, OS: per-pixel steps
-/// at 150 %).
+/// Tension per logical pixel of a tension-handle drag, and dB per pixel of a gain drag (§9a, OS: the reference's
+/// per-pixel steps at 150 %).
 const TENSION_PER_PX: f32 = 0.28;
 const DB_PER_PX: f32 = 0.15;
 /// Logical pixels of a crossfade-handle drag per unit of the later clip's gain at the middle (§9a, OS: 1/120 per
@@ -3085,7 +3085,7 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 }
             }
             if edge(g.clip_rect(&c), x) == 0 && curve_dist(s, &g, ci, x, y).is_some_and(|d| d <= 6.0) {
-                // Left-click on the curve adds a point (owner).
+                // Left-click on the curve adds a point (owner); in the reference a right-click adds one too.
                 snapshot(s);
                 let beat = beat_at(s, &g, &c, x);
                 let v = value_at_y(g.body(&c), y);
@@ -3671,7 +3671,8 @@ pub fn zoom_on(s: &mut State, grid: (f32, f32), idx: &[usize]) {
     s.playlist_bar_w = (grid.0 / span).clamp(4.0, 600.0);
     s.playlist_scroll.0 = a as f32 / bar * s.playlist_bar_w;
     let top = cs.iter().map(|c| c.track).min().unwrap_or(0);
-    // The selected tracks fill the view's height, on 2 px height steps (§5).
+    // The selected tracks fill the view's height, on 2 px height steps (§5; checked only at the maximum, below it
+    // unverified: spec ui/playlist.md "Open questions").
     let n = f32::from(cs.iter().map(|c| c.track).max().unwrap_or(0) - top + 1);
     let fit = ROW_MIN + ((grid.1 / n - ROW_MIN) / 2.0).floor() * 2.0;
     s.playlist.row_h = fit.clamp(ROW_MIN, ROW_MAX);
@@ -3747,7 +3748,7 @@ pub fn press_ruler(app: &mut App, grid: Rect, right: bool) {
         s.playlist.last_ruler = None;
         app.drag = Some(Drag::Pl(PlDrag::TimeSel { t0: t }));
     } else {
-        // A double click clears the time selection, as a right click does.
+        // A double click clears the time selection (a Lemon Studio choice, besides the reference's right click).
         let now = std::time::Instant::now();
         let double = s.playlist.last_ruler.is_some_and(|t| now.duration_since(t).as_millis() < 450);
         s.playlist.last_ruler = (!double).then_some(now);
@@ -3904,7 +3905,7 @@ pub fn commit_edit(s: &mut State) {
             add_every(s, n, &base);
         }
         EditTarget::MarkerTwo(a, b) => {
-            // The names, two spaces included: "Sec -  start", "Sec -  end".
+            // The reference's names, two spaces included: "Sec -  start", "Sec -  end".
             let base = if text.is_empty() { "Marker".to_string() } else { text };
             add_marker(s, TimeMarker::new(a, &format!("{base} -  start")));
             add_marker(s, TimeMarker::new(b, &format!("{base} -  end")));
@@ -4409,8 +4410,9 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::AddKeyMarker(k) => {
-            // At the song position (at a time selection's start too, which the song position follows), named after
-            // the root and scale; one undo step.
+            // At the song position (seen with it at bar 5, and at a time selection's start, which the song position
+            // follows; tick 0 was also seen: spec ui/playlist.md "Open questions"), named after the root and scale;
+            // one undo step.
             snapshot(s);
             s.playlist.key_scale = k;
             let pos = s.playlist.pos;

@@ -484,7 +484,7 @@ pub enum Hit {
 /// Page UI state kept by the frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MiscUi {
-    /// Tracking page: false = Vol, true = Key.
+    /// Tracking page: false = Vol, true = Key (the reference opens on Key).
     pub track_key: bool,
     /// Keyboard scroll: window x of C0 (C3 sits at x 96 by default).
     pub kb_scroll: f32,

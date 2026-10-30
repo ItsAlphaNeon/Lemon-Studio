@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Lemon Studio's transient processor (the Transient Processor mixer effect), configured from its saved state.
+//! Lemon Studio's transient processor (a recreation of the Transient Processor mixer effect), configured from its
+//! saved state.
 //!
 //! The signal is split by a first-order crossover; the high band's attacks and tails are made louder or softer by one
 //! gain per sample from five level followers, then soft-saturated with a drive, mixed back with the low band by the
@@ -112,7 +113,7 @@ fn div(a: f32, b: f32) -> f32 {
     z(a / b)
 }
 
-/// A single power, correctly rounded (spec "Not covered").
+/// A single power, correctly rounded (spec "Not covered": the reference matches it but for one near-tie).
 fn powf(b: f32, e: f32) -> f32 {
     f64::from(b).powf(f64::from(e)) as f32
 }
@@ -382,7 +383,7 @@ impl TransientProcessor {
         self.reshape();
     }
 
-    /// Every gliding setting at its target at once (a plugin's start).
+    /// Every gliding setting at its target at once (a plugin's start; the reference has no such step).
     pub fn settle(&mut self) {
         for k in GLIDING {
             self.pos[k] = self.target[k];

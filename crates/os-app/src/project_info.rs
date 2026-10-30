@@ -26,9 +26,10 @@ use crate::control::command::{Region, SONG_INFO};
 use crate::dialog::Field;
 use crate::views::settings::{self, InfoEdit, InfoField};
 
-/// The time spent working on the project this session (spec: flp/events/project-info.md, event 237): it counts while
-/// a project is open and Lemon Studio's main window is the foreground window. The project keeps the time spent it was
-/// opened with; saving writes that plus this clock (`stamp`), so the counting itself is no unsaved change.
+/// The time spent working on the project this session. What the reference counts is an open question (spec:
+/// flp/events/project-info.md, event 237 and "Open questions"); Lemon Studio's rule: it counts while a project is open
+/// and Lemon Studio's main window is the foreground window. The project keeps the time spent it was opened with;
+/// saving writes that plus this clock (`stamp`), so the counting itself is no unsaved change.
 #[derive(Debug, Default)]
 pub struct WorkClock {
     /// Counted before the main window last left the foreground.
@@ -122,7 +123,7 @@ pub fn date_text(days: f64) -> Option<String> {
 }
 
 /// The time spent as the Info page words it (spec: ui/settings-choices.md "Info", footer line 2). One hour and one
-/// minute are worded "1 hour", "1 minute".
+/// minute are worded "1 hour", "1 minute", a guess: the reference's wording of them is unknown.
 pub fn spent_text(days: f64) -> String {
     let minutes = (days.max(0.0) * 1440.0 + 1e-6).floor() as u64;
     if minutes == 0 {
@@ -198,7 +199,7 @@ pub fn footer(s: &State, now: Instant) -> Vec<String> {
     lines
 }
 
-/// How long the Song info box stays, then how long it takes to fade out.
+/// How long the Song info box stays, then how long it takes to fade out (Lemon Studio's choice).
 const SONG_HOLD: f32 = 5.0;
 const SONG_FADE: f32 = 0.5;
 
@@ -400,7 +401,7 @@ impl App {
     }
 }
 
-/// The genre menu after "(none)", in its order (spec: ui/settings-choices.md "Info").
+/// The reference's genre menu after "(none)", in its order (spec: ui/settings-choices.md "Info").
 pub const GENRES: [&str; 56] = [
     "Acid House",
     "Afro House",
@@ -748,7 +749,7 @@ mod tests {
     }
 
     /// The footer's wording (spec: ui/settings-choices.md "Info"): the start in short date and time, the time spent in
-    /// hours and minutes with two spaces after the colon, "1 hour" / "1 minute" singular.
+    /// hours and minutes with two spaces after the colon, "1 hour" / "1 minute" singular (Lemon Studio's choice).
     #[test]
     fn footer_words() {
         assert_eq!(date_text(42_146.675_951_990_74).as_deref(), Some("5/22/2015 4:13 PM"));
@@ -845,7 +846,7 @@ mod tests {
     }
 
     /// The Song info box stays 5 s from the first tick after opening, then fades out over half a second and goes; a
-    /// left, right or middle press anywhere takes it away at once.
+    /// left, right or middle press anywhere takes it away at once (Lemon Studio's choice).
     #[test]
     fn song_info_fades_and_any_click_closes() {
         let secs = Duration::from_secs_f32;
@@ -876,7 +877,7 @@ mod tests {
         }
     }
 
-    /// The working time counts only while the main window is in front (`WorkClock`).
+    /// The working time counts only while the main window is in front (Lemon Studio's rule, `WorkClock`).
     #[test]
     fn work_clock_counts_in_front() {
         let t = Instant::now();

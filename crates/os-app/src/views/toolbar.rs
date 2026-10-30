@@ -99,8 +99,8 @@ pub fn hint_bar_rect(s: &State) -> Rect {
 }
 
 /// The floating hint bar (§4): a near-black panel with the hint at its top left and a round grip at its right, over
-/// every window. Clicks on it go nowhere. A hint too long for a line wraps, as many lines as the panel holds; the
-/// panel is tall enough for several lines.
+/// every window. Clicks on it go nowhere. A hint too long for a line wraps, as many lines as the panel holds (the
+/// reference's long hints are unverified; the panel is tall enough for several lines: Lemon Studio's choice).
 pub fn paint_hint_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let t = ui.t;
     let r = hint_bar_rect(s);
@@ -636,7 +636,7 @@ fn cpu(ui: &mut Ui, c: &Ctx) {
 }
 
 /// Utility buttons: "left / right" hints, right clicks in `App::toolbar_right` (spec: ui/toolbar-buttons.md §2).
-/// The content library's download button is left out (spec: ui/main-window.md §2).
+/// The reference's last one, the content library's download, is left out (spec: ui/main-window.md §2).
 fn utilities(ui: &mut Ui, c: &Ctx) -> bool {
     let (a, s) = (c.a, c.s);
     let utils = [
@@ -851,7 +851,8 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
         .find(|p| p.number == s.pattern)
         .and_then(|p| p.name.clone())
         .unwrap_or_else(|| format!("Pattern {}", s.pattern));
-    // Right-aligned before the spin arrow; a name too long for that keeps its start and is cut at the arrow.
+    // Right-aligned before the spin arrow; a name too long for that keeps its start and is cut at the arrow, as the
+    // reference cuts long labels (its long pattern names are unverified: Lemon Studio's choice).
     let pf = Font::condensed(21, 7);
     let end = pb.right() - 11.0;
     if ui.c.text_width(pf, &name) <= end - (pb.x + 2.0) {

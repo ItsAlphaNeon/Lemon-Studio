@@ -96,8 +96,8 @@ pub fn level(i: usize, step: i32, kind: i32) -> f64 {
 
 /// The curve a stored threshold and type pick, as (threshold 1..10, type): one of 20, A at thresholds 1..10 and then
 /// B at 1..10, number `type * 10 + threshold - 1`. So a stored threshold of 0 with type B is A at 10, and 11 with type
-/// A is B at 1 (spec "Values outside the ranges"). Beyond the 20, the nearest end is taken (A at 1 below, B at 10
-/// above).
+/// A is B at 1 (spec "Values outside the ranges"). Beyond the 20 the reference reads memory that holds no curve;
+/// Lemon Studio takes the nearest end (A at 1 below, B at 10 above).
 pub fn curve(threshold: i32, kind: i32) -> (i32, i32) {
     let n = (i64::from(kind) * 10 + i64::from(threshold) - 1).clamp(0, 19) as i32;
     (n % 10 + 1, n / 10)
@@ -114,11 +114,11 @@ pub fn table(threshold: i32, kind: i32, wet: f32) -> Vec<f64> {
     t
 }
 
-/// From `p = 2^31` on (and for NaN) the table's part of a sample is +0: the whole-number index overflows there (spec
-/// "Checked against FL", very loud input).
+/// From `p = 2^31` on (and for NaN) the table's part of a sample is +0: the reference's whole-number index overflows
+/// there (spec "Checked against FL", very loud input).
 const OVERFLOW: f64 = 2_147_483_648.0;
 
-/// Rounds toward zero to single, as a sample is stored (spec "Per sample").
+/// Rounds toward zero to single, as the reference stores a sample (spec "Per sample").
 #[inline]
 pub fn chop(y: f64) -> f32 {
     let s = y as f32;
@@ -176,7 +176,8 @@ impl FastDist {
     }
 
     /// One sample of either channel: the interpolated table at `p = |x * pre * 8191|`, with the sign of `x`, over `x *
-    /// dry`, all in doubles (as extended precision would give the same samples), rounded toward zero to single.
+    /// dry`, all in doubles (the reference works in extended precision; doubles give the same samples), rounded toward
+    /// zero to single.
     #[inline]
     pub fn sample(&self, x: f32) -> f32 {
         let x64 = f64::from(x);

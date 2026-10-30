@@ -12,7 +12,7 @@
 //! pass-through too.
 //!
 //! The band spacing, the filter shapes, the envelope laws and the level of the wet signal are Lemon Studio's own design
-//! (spec plugins/lemon-vocoder.md §4); the saved state's ints are in plugins/vocodex.md.
+//! (spec plugins/lemon-vocoder.md §4); what the saved state's ints mean: plugins/vocodex.md "The 27 ints".
 //!
 // spec: plugins/vocodex.md, plugins/lemon-vocoder.md
 
@@ -590,7 +590,7 @@ pub fn mouth(v: i32) -> f64 {
 
 /// A level of the band distribution curve as a frequency, a 24th of an octave per editor pixel:
 /// `20950 * 2^(9.275 * (u - 1))` Hz (85 Hz at the default's lowest level, 19.9 kHz at its highest). Below about 80 Hz
-/// it stays exponential, from 20 Hz.
+/// the original's scale bends down to 0 Hz at the bottom; Lemon Studio keeps the exponential, from 20 Hz.
 pub fn distribution_hz(u: f64) -> f64 {
     (20950.0 * (9.275 * (u - 1.0)).exp2()).max(20.0)
 }

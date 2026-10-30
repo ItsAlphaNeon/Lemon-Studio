@@ -83,7 +83,8 @@ pub struct Slider {
 }
 
 /// General ▸ Display: the UI's scale. System = the monitor's (the operating system's); a percentage replaces it.
-/// Read by `crate::gui_scale` at every event and paint, so it applies at once. Spec: ui/ui-scaling.md §1.
+/// Read by `crate::gui_scale` at every event and paint, so it applies at once (a deliberate difference: the reference
+/// needs a restart). Spec: ui/ui-scaling.md §1.
 pub const MAIN_GUI_SCALING: Combo = Combo {
     key: "main_gui_scaling",
     label: "Main GUI scaling",
@@ -92,7 +93,8 @@ pub const MAIN_GUI_SCALING: Combo = Combo {
 };
 
 /// General ▸ Display: the scale of popup menus and combo lists. Main = the main GUI's; a percentage replaces it. Read
-/// by `views::popup_scale` at every paint, so it applies at once. Spec: ui/ui-scaling.md §1–2.
+/// by `views::popup_scale` at every paint, so it applies at once (a deliberate difference: the reference needs a
+/// restart). Spec: ui/ui-scaling.md §1–2.
 pub const POPUPS_SCALING: Combo = Combo {
     key: "popups_scaling",
     label: "Pop-ups scaling",
@@ -117,7 +119,8 @@ pub const TOOLBARS_SCALING: Combo = Combo {
 pub const COLORFUL_WAVEFORMS: Combo =
     Combo { key: "colorful_waveforms", label: "Colorful waveforms", choices: &["Off", "Color map", "Multiband"], default: 0 };
 
-/// General ▸ Language: how note names read (`crate::note_names`; names change at once).
+/// General ▸ Language: how note names read (`crate::note_names`; names change at once, a deliberate difference: the
+/// reference asks for a restart).
 /// Spec: ui/settings-choices.md "Note names and Black notes".
 pub const NOTE_NAMES: Combo = Combo { key: "note_names", label: "Note names", choices: &["English", "Germanic", "Solfege (do, re, mi, ...)"], default: 0 };
 
@@ -150,8 +153,8 @@ pub const BACKUP_LOCATION: Combo = Combo {
 };
 
 /// File ▸ Backup: the most autosaves kept per project name; after a backup the oldest beyond it are deleted
-/// (`crate::backup::prune`). Lowering it deletes nothing until the next backup. 1 to 999.
-/// Spec: ui/settings-choices.md "Backup files".
+/// (`crate::backup::prune`). Lowering it deletes nothing until the next backup. The range, 1 to 999, is a guess:
+/// the reference's range is unverified. Spec: ui/settings-choices.md "Backup files".
 pub const BACKUP_MAXIMUM: Number = Number { key: "backup_maximum", label: "Maximum", min: 1, max: 999, default: 100 };
 
 /// General ▸ Miscellaneous: unsolo puts back the mute states from before the first solo (channel rack, playlist,
@@ -176,8 +179,8 @@ pub const AUTO_ZIP_EMPTY: Check = Check { key: "auto_zip_empty_channels", label:
 /// Spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project".
 pub const MONO_PAINTING: Check = Check { key: "monophonic_painting", label: "Monophonic painting in piano roll", default: false };
 
-/// Project ▸ Playlist: a new project's "Automatic crossfades" (event 44) takes this value, whatever the template file
-/// holds (`app::default_project`); opening a file keeps the file's. A program setting, on by default. Spec:
+/// Project ▸ Playlist: a new project's "Automatic crossfades" (event 44) takes this value, whatever the default
+/// template holds (`app::default_project`); opening a file keeps the file's. A program setting, on by default. Spec:
 /// ui/settings-choices.md "Project" (the storage table).
 pub const AUTO_CROSSFADES_NEW: Check =
     Check { key: "auto_crossfades_new_projects", label: "Enable automatic crossfades in new projects", default: true };
@@ -211,8 +214,8 @@ pub const AUTOMATION_AT_PLAYBACK_POSITION: Check =
 /// Startup project".
 pub const AUTO_SELECT_LINKED: Check = Check { key: "auto_select_linked_modules", label: "Select linked controls automatically", default: true };
 
-/// General ▸ Miscellaneous: stored and shown only. It has no effect until hosted plugin windows get a toolbar (spec:
-/// ui/settings-choices.md, as above).
+/// General ▸ Miscellaneous: stored and shown only. The reference shows no change on native plugin windows; it has no
+/// effect until hosted plugin windows get a toolbar (spec: ui/settings-choices.md, as above).
 pub const HIDE_PLUGIN_TOOLBAR: Check =
     Check { key: "hide_plugin_window_toolbar", label: "Hide plugin window strip by default", default: true };
 
@@ -250,8 +253,9 @@ pub const LIMIT_EDITORS: Check = Check { key: "limit_plugin_editors", label: "Li
 /// naming, detached plugins and startup".
 pub const SHOW_SPLASH: Check = Check { key: "show_startup_splash", label: "Show startup splash screen", default: true };
 
-/// General ▸ Miscellaneous: stored and shown only. Lemon Studio has no startup sound; if it ever gets one, this check
-/// silences it. Spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup".
+/// General ▸ Miscellaneous: stored and shown only. Lemon Studio has no startup sound (and does not use the
+/// reference's); if it ever gets one, this check silences it. Spec: ui/settings-choices.md "Miscellaneous: naming,
+/// detached plugins and startup".
 pub const SILENT_STARTUP: Check = Check { key: "silent_startup", label: "Silent startup", default: false };
 
 /// General ▸ Input: off, a left or a right click on a step of the step sequencer toggles it; on, the left button only
@@ -271,8 +275,8 @@ pub const STARTUP_PROJECT: Combo =
 pub const CLICK_AND_HOLD: Check = Check { key: "click_and_hold_gestures", label: "Click-and-hold gestures", default: false };
 
 /// General ▸ Undo history: the most steps the project's undo history keeps; past it the oldest step goes
-/// (`crate::history`). 1 to 999. Spec: ui/settings-choices.md "Undo
-/// history: the four checks (2026-10-16)".
+/// (`crate::history`). The range, 1 to 999, is a guess: the reference's range is unverified. Spec:
+/// ui/settings-choices.md "Undo history: the four checks (2026-10-16)".
 pub const MAX_UNDO_LEVELS: Number = Number { key: "max_undo_levels", label: "Maximum undo levels", min: 1, max: 999, default: 100 };
 
 /// General ▸ Undo history: knob turns are undo steps; off, they make none (`history::knob`). Spec: as above.
@@ -283,7 +287,7 @@ pub const UNDO_KNOB_TWEAKS: Check = Check { key: "undo_knob_tweaks", label: "Und
 pub const ALTERNATE_UNDO: Check = Check { key: "alternate_undo_mode", label: "Alternate undo mode", default: true };
 
 /// General ▸ Undo history: stored and shown only. Lemon Studio does not record audio yet, so no undone recording can
-/// go to the recycle bin; recording will read it. Spec: as above.
+/// go to the recycle bin; recording will read it. Spec: as above (unverified: it needs recording).
 pub const UNDONE_RECORDINGS_TO_BIN: Check =
     Check { key: "undone_recordings_to_recycle_bin", label: "Move undone recordings to the trash", default: true };
 
@@ -325,8 +329,8 @@ pub const DONT_LIMIT_WINDOWS: Check = Check { key: "dont_limit_windows_to_screen
 pub const INIT_CONTROLS: Check = Check { key: "init_controls_automatically", label: "Set start values automatically", default: true };
 
 /// General ▸ Advanced: stored and shown only. Lemon Studio's browser preview already starts as soon as the start of
-/// the file is decoded (ui/browser.md §7). Spec: ui/settings-choices.md "Advanced:
-/// Fast sample preview, Auto keep long audio on disk, Threaded project sample loading (2026-10-16)".
+/// the file is decoded (ui/browser.md §7), and the reference shows no difference either. Spec: ui/settings-choices.md
+/// "Advanced: Fast sample preview, Auto keep long audio on disk, Threaded project sample loading (2026-10-16)".
 pub const FAST_SAMPLE_PREVIEW: Check = Check { key: "fast_sample_preview", label: "Fast sample preview", default: true };
 
 /// General ▸ Advanced: a file of 30 s or more loaded into a sampler channel turns its Keep on disk on; nothing turns it
@@ -349,14 +353,14 @@ pub const CURSORS_SCALING: Combo = Combo {
 };
 
 /// General ▸ Advanced: stored and shown only; meant for hosted plugin windows that don't follow the display scale,
-/// which keep the size their plugin gives them. Spec: as above.
+/// which keep the size their plugin gives them until how the reference scales them is known. Spec: as above.
 pub const LEGACY_SCALING: Combo =
     Combo { key: "legacy_scaling", label: "Legacy scaling", choices: &["Main", "100%", "200%", "300%", "400%"], default: 0 };
 
-/// General ▸ Display: some controls drawn brighter, in both looks, at once: the record dot,
-/// the rack's names, track numbers and overview toggle, every scroll bar and the playlist's horizontal one
-/// (`crate::high_visibility`). Spec: ui/settings-choices.md "Display: PPI ruler, Force refreshes, Thick lines, High
-/// visibility (2026-10-16)".
+/// General ▸ Display: some controls drawn brighter, in both looks, at once (a deliberate difference: the reference
+/// asks for a restart): the record dot, the rack's names, track numbers and overview toggle, every scroll bar and the
+/// playlist's horizontal one (`crate::high_visibility`). Spec: ui/settings-choices.md "Display: PPI ruler, Force
+/// refreshes, Thick lines, High visibility (2026-10-16)".
 pub const HIGH_VISIBILITY: Check = Check { key: "high_visibility", label: "High visibility", default: false };
 
 /// General ▸ Display: stored and shown only. Lemon Studio redraws its whole window itself each frame, so there is
@@ -369,8 +373,9 @@ pub const FORCE_REFRESHES: Check = Check { key: "force_refreshes", label: "Force
 /// nothing yet. Spec: as above.
 pub const THICK_LINES: Check = Check { key: "thick_lines", label: "Thick lines", default: false };
 
-/// General ▸ Display: stored and shown only. Spec: ui/settings-choices.md "Display: Smoothing, Animation refresh rate,
-/// Transparent menus and windows (2026-10-16)".
+/// General ▸ Display: stored and shown only. The reference shows no change to its menus either way, so there is
+/// nothing to copy yet. Spec: ui/settings-choices.md "Display: Smoothing, Animation refresh rate, Transparent menus
+/// and windows (2026-10-16)".
 pub const TRANSPARENT_MENUS: Check = Check { key: "transparent_menus", label: "Transparent menus", default: true };
 
 /// General ▸ Display: stored and shown only, like Transparent menus. Spec: as above.
@@ -405,8 +410,8 @@ pub const MULTITHREADED_GENERATORS: Check =
     Check { key: "multithreaded_generators", label: "Multithreaded instrument processing", default: true };
 
 /// Audio ▸ Mixer: stored and shown only. The sampler keeps the one kernel audio/sampler.md gives, whatever is chosen;
-/// once there are more kernels, the choice will pick among them. Its menu groups the choices under grey
-/// headings (`headings`). Spec: as above.
+/// the live kernels are unknown, and once they are known the choice will pick among them. Its menu groups the
+/// choices under grey headings (`headings`). Spec: as above.
 pub const RESAMPLING_QUALITY: Combo = Combo {
     key: "resampling_quality",
     label: "Resampling quality",

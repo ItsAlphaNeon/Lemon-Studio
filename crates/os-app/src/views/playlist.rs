@@ -287,7 +287,7 @@ pub fn ruler_rect(s: &State, grid: Rect) -> Rect {
 }
 
 /// Thickness of the overview bar (the horizontal scroll bar) and of the vertical scroll bar: 18 px, or 9 and 10 px
-/// with "Small scrollbars in editors" (17 → 9 and about 19 → 10 px; spec: ui/settings-choices.md
+/// with "Small scrollbars in editors" (the reference's 17 → 9 and about 19 → 10 px; spec: ui/settings-choices.md
 /// "Miscellaneous").
 fn bar_sizes() -> (f32, f32) {
     if super::small_scrollbars() { (9.0, 10.0) } else { (18.0, 18.0) }
@@ -694,7 +694,7 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
     ui.c.pop_clip();
 }
 
-/// A time marker's action icon (§7a "Look"), Lemon Studio's own drawing: light grey, the
+/// A time marker's action icon (§7a "Look"), Lemon Studio's own drawing at the reference's sizes: light grey, the
 /// recording markers' dot red; none for a plain marker. `x` is the marker's place, `cy` the middle of its tab.
 fn marker_glyph(ui: &mut Ui, kind: u8, x: f32, cy: f32) {
     let grey = ui.t.s(0xa8abae);
@@ -1258,7 +1258,7 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     let bh = if joins_below { h } else { h - gap };
     let hr = Rect::new(bx, y, bw, bh);
     if member {
-        // The indent beside the members: a dark strip.
+        // The indent beside the members: a dark strip (the reference dithers it).
         ui.c.fill_rect(Rect::new(x, y, INDENT, bh), t.s(0x2b3439));
     }
     let (top, bottom) = if super::lemon(ui) { (base, base) } else { (base.shade(0.035), base.shade(-0.03)) };

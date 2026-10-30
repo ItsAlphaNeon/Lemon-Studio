@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Lemon Studio's soft clipper (the Fruity Soft Clipper mixer effect), configured from its saved state.
+//! Lemon Studio's soft clipper (a recreation of the Fruity Soft Clipper mixer effect), configured from its saved state.
 //!
 //! No memory: each sample above the threshold is bent onto an exponential curve that leaves the threshold with slope
 //! 1 and approaches full scale; samples below it pass unchanged. A post gain follows.
@@ -76,9 +76,9 @@ const TWO64: f64 = 18_446_744_073_709_551_616.0;
 /// doubles, rounded once, with the input's sign bit; below it the sample itself. `a > T` compares the singles as
 /// non-negative numbers, so a NaN counts as above.
 ///
-/// The exponential is an extended one: just below 1 its values lie 2^-64 apart, so `1 - exp` is a multiple of 2^-64
-/// there (taken here from `exp_m1`, rounded to that grid). Doubles alone would put it on a grid of 2^-53 and lose small
-/// results at threshold 0 (spec "Checked against FL", threshold 0).
+/// The exponential is the reference's extended one: just below 1 its values lie 2^-64 apart, so `1 - exp` is a
+/// multiple of 2^-64 there (taken here from `exp_m1`, rounded to that grid). Doubles alone would put it on a grid of
+/// 2^-53 and lose small results at threshold 0 (spec "Checked against FL", threshold 0).
 #[inline]
 pub fn clip(s: f32, t: f32, k: f32, r: f32) -> f32 {
     let a = s.abs();
@@ -209,8 +209,8 @@ mod tests {
         let z = SoftClipper::with_settings(&Settings { v: [0, 128] });
         assert_eq!(z.sample(1.0), (1.0 - (-1.0f64).exp()) as f32);
         assert_eq!(z.sample(0.0), 0.0);
-        // Tiny inputs at threshold 0 come out on the extended exponential's grid of 2^-64 (the null test's
-        // values: 9.808161e-17 gives 9.8066087e-17, 2.180811e-16 gives 2.1808727e-16, 4.5e-22 gives 0).
+        // Tiny inputs at threshold 0 come out on the extended exponential's grid of 2^-64 (the reference render of the
+        // null test's probe: 9.808161e-17 gives 9.8066087e-17, 2.180811e-16 gives 2.1808727e-16, 4.5e-22 gives 0).
         assert_eq!(z.sample(9.808161e-17), 9.8066087e-17);
         assert_eq!(z.sample(-2.180811e-16), -2.1808727e-16);
         assert_eq!(z.sample(4.5e-22), 0.0);

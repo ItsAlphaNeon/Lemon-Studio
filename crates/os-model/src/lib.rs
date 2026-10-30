@@ -360,7 +360,7 @@ impl Project {
 }
 
 /// A tick position at timebase `from` as one at `to`. A ratio that is not whole (96 to 72) rounds to the nearest
-/// tick, halves up (spec: ui/settings-choices.md "Project", Timebase).
+/// tick, halves up (how the reference rounds is unverified; spec: ui/settings-choices.md "Project", Timebase).
 pub fn rescale_tick(t: u32, from: u16, to: u16) -> u32 {
     let (from, to) = (u64::from(from.max(1)), u64::from(to.max(1)));
     ((u64::from(t) * to + from / 2) / from).min(u64::from(u32::MAX)) as u32
@@ -372,7 +372,7 @@ pub fn rescale_length(t: u32, from: u16, to: u16) -> u32 {
 }
 
 /// The playlist view a project stores: scroll, time zoom and track height (event 242, 28 bytes; spec:
-/// flp/events/playlist.md "Playlist view"). Pixels are at 100 % UI scale.
+/// flp/events/playlist.md "Playlist view"). Pixels are FL's at 100 % UI scale.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PlaylistView {
     pub raw: [u8; 28],
@@ -736,9 +736,9 @@ impl ChannelSound {
     pub const LOAD_SLICES: u32 = 4;
     pub const USE_LOOP: u32 = 8;
     pub const KEEP_ON_DISK: u32 = 0x100;
-    /// Flags of a channel without event 143 (a new sampler channel).
+    /// Flags of a channel without event 143 (FL's new sampler channel).
     pub const DEFAULT_FLAGS: u32 = Self::LOAD_REGIONS | Self::USE_LOOP;
-    /// Flags of audio clip channels (258, spec: audio/audio-clips.md): no Use loop points, so a clip plays a
+    /// Flags of FL's audio clip channels (258, spec: audio/audio-clips.md): no Use loop points, so a clip plays a
     /// file's `smpl` loop through once.
     pub const AUDIO_CLIP_FLAGS: u32 = Self::LOAD_REGIONS | Self::KEEP_ON_DISK;
 
@@ -880,7 +880,8 @@ pub enum Stretching {
 }
 
 impl ChannelSound {
-    /// The stretch multiplier `2^(stored / 10000)` (event 215 int 26), 1.0 when none; at single precision.
+    /// The stretch multiplier `2^(stored / 10000)` (event 215 int 26), 1.0 when none; at single precision, as FL
+    /// keeps it.
     pub fn stretch_multiplier(&self) -> f64 {
         f64::from(2f64.powf(f64::from(self.stretch[2] as i32) / 10000.0) as f32)
     }
@@ -1632,7 +1633,7 @@ pub struct Clip {
     pub source: ClipSource,
     pub muted: bool,
     pub window: Option<(f64, f64)>,
-    /// The stored record (fields not modeled are written back from here; a new clip gets the defaults).
+    /// The stored record (fields not modeled are written back from here; a new clip gets FL's defaults).
     pub raw: [u8; CLIP_RECORD_LEN],
 }
 
@@ -1938,7 +1939,8 @@ pub struct PlaylistTrack {
     pub grouped: bool,
     /// On a group track: its group is collapsed (byte 61 = 0).
     pub collapsed: bool,
-    /// Byte 47: a lock is drawn on such a group (kept and drawn).
+    /// Byte 47: FL draws a lock on such a group (meaning unknown; kept and drawn; spec: flp/events/playlist.md
+    /// "Event 238 layout").
     pub locked: bool,
 }
 
@@ -2152,8 +2154,9 @@ pub mod target {
     }
 
     /// A plugin parameter's control point holds the plain value as the plugin states its range when that range runs
-    /// between whole numbers at least 2 apart (the stock plugins keep whole values in their own unit), else the
-    /// normalized value times 65536 (a Lemon Studio choice). This is the level 0..1 such a value stands for.
+    /// between whole numbers at least 2 apart (FL's own plugins, and Lemon Studio's recreations of them, keep whole
+    /// values in their own unit), else the normalized value times 65536 (a Lemon Studio choice: the unit FL keeps for
+    /// other plugins is unverified). This is the level 0..1 such a value stands for.
     pub fn plugin_point_level(min: f64, max: f64, value: i32) -> f64 {
         let v = f64::from(value);
         let level = if whole_range(min, max) { (v - min) / (max - min) } else { v / 65536.0 };

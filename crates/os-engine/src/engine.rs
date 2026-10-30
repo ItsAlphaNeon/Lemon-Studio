@@ -989,7 +989,8 @@ pub struct EngineReport {
 pub struct Engine {
     rate: u32,
     /// The main volume's gain `curve(stored / 12800)` and its ramp (spec: audio/mixer.md "Main volume"). Playback
-    /// multiplies the master by it; an export does not (it applies after writing the tick), but the tail test sees it.
+    /// multiplies the master by it; an export does not (the reference applies it after writing the tick), but the tail
+    /// test sees it.
     main_gain: f32,
     main_glide: os_dsp::glide::Glide,
     /// Set while rendering an export (`render_ticks`), cleared by live playback (`process`).
@@ -1069,7 +1070,8 @@ pub struct Engine {
     steps: u16,
     /// The project's time signature, numerator and denominator (4/4 when the file has none): what hosted plugins are
     /// told (spec: plugins/vst3-hosting.md §1). A bar whose steps per beat make no signature (3) is told as its length
-    /// in sixteenths over 16 (spec: audio/song-structure.md, open questions).
+    /// in sixteenths over 16 (what the reference tells plugins is unverified: spec: audio/song-structure.md "Not
+    /// covered").
     signature: (u16, u16),
     bus: Vec<Vec<f32>>,
     /// The last rendered tick (interleaved L/R), how much of it has been handed out, the song position its first
@@ -1210,7 +1212,8 @@ impl Engine {
         let tick_tempo = project.tick_tempo(tempo);
         let n_tracks = project.mixer.len().max(1);
         // The panning law of the channel and mixer track pans (event 23; spec: audio/gain-laws.md "Panning law:
-        // Triangular"). Not of other pans. An edit is heard from the next tick, as any pan edit (`continue_from`).
+        // Triangular"). Not of other pans: whether it moves them is unverified. An edit is heard from the next tick, as
+        // any pan edit (`continue_from`).
         let pan_law = laws::PanLaw::from_event(project.panning_law);
 
         let mut channels: Vec<ChannelState> = project
@@ -1243,7 +1246,7 @@ impl Engine {
                             s
                         }
                         // Lemon Studio choice: an empty sampler channel plays a built-in tone so new
-                        // projects make sound.
+                        // projects make sound (the reference's empty sampler is silent).
                         None if ch.kind == ChannelKind::Sampler => {
                             Some(library.tones.entry(rate).or_insert_with(|| fallback_tone(rate)).clone())
                         }
@@ -1568,7 +1571,8 @@ impl Engine {
             exporting: false,
             params: param_auto::ParamAuto::new(autos.iter().flat_map(|a| &a.targets).any(|&t| param_auto::is_param(t))),
             // Seeded, one output taken, at every start of playback or of a render (spec: audio/channel-misc.md "FL's
-            // random generator"; live playback draws as a render does).
+            // random generator"; whether the reference's live playback draws as its render does is unverified, Lemon
+            // Studio does).
             rng: layers::Mt19937::for_playback(),
             autos,
             curves,
@@ -3377,7 +3381,8 @@ impl Engine {
 
     /// The transport hosted plugins see at `frame` (spec: plugins/vst3-hosting.md Â§1): playing at the project tempo,
     /// in the project's time signature, with the pattern loop while looping. The tempo is the one the ticks run at, in
-    /// quarter notes (`tick_tempo`), also in a bar of other than 4 steps per beat.
+    /// quarter notes (`tick_tempo`): what the reference tells plugins in a bar of other than 4 steps per beat is
+    /// unverified.
     fn transport_at(&self, frame: u64) -> TransportInfo {
         let mut start = TransportInfo {
             playing: true,
@@ -3437,7 +3442,8 @@ impl Engine {
         self.frame = self.clock.next_start();
         self.next_trigger = self.triggers.partition_point(|t| t.tick < to);
         // Control points replay from the top: until the first one the channel has its own settings, and mixer tracks
-        // glide back to theirs until automation hands its values on again (a Lemon Studio choice).
+        // glide back to theirs until automation hands its values on again (a Lemon Studio choice; the reference's
+        // behaviour at the loop point is unverified).
         for t in &mut self.tracks {
             t.restore(false);
         }
@@ -4016,7 +4022,7 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
 /// `(t, routes, out)`: the slot's track, its routes and its outbox, for an own effect's extra output, which is
 /// added to the input of one of the track's outputs (spec: audio/sidechain.md "Extra output"). It is not padded for
 /// delay compensation (audio/delay-compensation.md); it is connected from the first tick (the cleaner choice of
-/// audio/quirks.md for the late connection).
+/// audio/quirks.md for the reference's late connection).
 ///
 /// `key`: the output of the track the slot listens to as its sidechain input, and a buffer for it after the slot's
 /// pad, which runs also while the slot is off (spec: audio/sidechain.md "While the slot is off"). It is connected from
@@ -4448,7 +4454,7 @@ fn ctl_to(kind: u32) -> CtlTo {
 
 /// The automation level (0..1) a point's value in its setting's own unit stands for: the inverse of what a clip's
 /// level becomes (`Engine::auto_value`; spec: audio/automation.md "Pattern control points"). `None` for the targets a
-/// point does not move (a send).
+/// point does not move (a send, whose unit is unverified).
 fn point_level(t: Target, value: i32) -> Option<f64> {
     let v = f64::from(value);
     Some(match t {

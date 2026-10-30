@@ -450,9 +450,9 @@ fn track_name(t: u16) -> String {
     if t == 0 { "Master".into() } else { format!("Bus {t}") }
 }
 
-/// The RANGE box's live part and the TRACK box (window coordinates). Classic: fixed places, the PITCH knob
-/// covering the RANGE box's left end. Lemon: RANGE gets its own place right of the knob, both boxes centred over their
-/// captions (spec: ui/plugin-window.md "OpenStudio").
+/// The RANGE box's live part and the TRACK box (window coordinates). Classic: the reference's places, the PITCH
+/// knob covering the RANGE box's left end. Lemon: RANGE gets its own place right of the knob, both boxes centred over
+/// their captions (spec: ui/plugin-window.md "OpenStudio").
 fn range_rect(dx: f32) -> Rect {
     if lemon_look() { Rect::new(474.0 + dx, 35.0, 34.0, 23.0) } else { Rect::new(470.0 + dx, 35.0, 28.0, 23.0) }
 }

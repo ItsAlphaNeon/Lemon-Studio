@@ -189,7 +189,7 @@ impl Settings {
 }
 
 /// The engine's own slot effect: the original's processing for a project's saved state, with the buffers of silence
-/// run before a render already run (so LIN starts at full level in exports).
+/// the reference runs before a render already run (so LIN starts at full level, as in the reference's exports).
 pub struct ParametricEq {
     eq: Equalizer,
     l: Vec<f32>,

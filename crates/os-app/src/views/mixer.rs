@@ -20,8 +20,8 @@ use crate::icons::{self, Icon};
 pub const STRIP_W: f32 = 44.0;
 /// Fader travel: value units per pixel (handle centre 618 at 0 dB = value 0.8, 970 at value 0).
 pub const FADER_PER_PX: f64 = 1.0 / 440.0;
-/// Fader change per wheel notch: 4 px of drag (spec: ui/mixer.md §4): three notches up from unity read
-/// `103%  0.8dB  1.09`, which puts a notch between 0.0088 and 0.0092.
+/// Fader change per wheel notch: 4 px of drag, fitted to a single data point (spec: ui/mixer.md §4): three notches
+/// up from unity read `103%  0.8dB  1.09`, which puts a notch between 0.0088 and 0.0092.
 pub const FADER_NOTCH: f64 = 4.0 * FADER_PER_PX;
 
 // Vertical layout at the default 1080p window (spec §7): absolute y for a window top of 83;
@@ -480,8 +480,8 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     mixer_knob(ui, kx, ly.y(PAN_Y), 10.5, 15.0, s.knob(pan), Some(true));
 
     // Reverse polarity (⇕) and swap left / right (⇔) buttons, lit when on, then the separation knob (§4).
-    // They keep their size and spacing below the fader's top at any mixer height, so they are placed from the fader's
-    // top, not scaled with it.
+    // They keep their size and spacing below the fader's top at any mixer height (the reference's short mixer stacks
+    // them the same way), so they are placed from the fader's top, not scaled with it.
     let (pol, swp) = (track.is_some_and(|m| m.polarity), track.is_some_and(|m| m.swap));
     let top = ly.y(TRACK_Y0);
     let (sep_y, swap_y, ring_y) = (top + SEP_Y - TRACK_Y0, top + SWAP_Y - TRACK_Y0, top + RING_Y - TRACK_Y0);
@@ -721,7 +721,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         };
         // Lemon centres the name's capitals on the row, level with the chevron, knob and LED: the baseline sits half a
         // cap height (the face's is about 0.72 of its size) under the middle, measured on the face drawn (the italic
-        // one has its own ascent). Classic keeps a fixed place.
+        // one has its own ascent). Classic keeps the reference's place.
         let ty = if super::lemon(ui) { (row.cy() + 0.36 * f32::from(fs) - ui.c.ascent(f)).round() } else { row.y + 4.0 * kp };
         ui.c.text_clip(f, row.x + 19.0, ty, 140.0, ink, &name);
         let mix = KnobId::SlotMix(n, k);

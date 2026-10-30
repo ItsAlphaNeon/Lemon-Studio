@@ -15,7 +15,8 @@ use os_model::Note;
 use crate::arpeggiate::{Pattern, Row, TIME_MUL, TIME_MUL_NAMES};
 use crate::playlist::{Cmd, PItem};
 
-/// Wheel notches on the knobs' 0..1 positions (§1): Time mul one step, the Levels 1/32.
+/// Wheel notches on the knobs' 0..1 positions (a Lemon Studio addition; the reference's knobs take no wheel, §1):
+/// Time mul one step, the Levels 1/32.
 pub const TIME_MUL_NOTCH: f32 = 1.0 / 6.0;
 pub const LEVEL_NOTCH: f32 = 1.0 / 32.0;
 

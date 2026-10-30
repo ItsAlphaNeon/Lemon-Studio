@@ -202,7 +202,7 @@ pub fn score_items(cur: &Pattern, root: &Path, pick: impl Fn(Option<PathBuf>) ->
     items
 }
 
-/// A long menu goes on in further columns.
+/// A long menu goes on in further columns (the reference breaks where the screen ends).
 pub fn columns(items: &mut [PItem]) {
     for i in (MENU_COLUMN..items.len()).step_by(MENU_COLUMN) {
         items[i - 1].col = true;

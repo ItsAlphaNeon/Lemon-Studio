@@ -194,8 +194,8 @@ pub fn matrix(v: f32, separation: i32, mid_side: bool) -> [f32; 4] {
     } else if v == 0.0 {
         [0.0; 4]
     } else {
-        // The pan's cosine and sine stay double until the product is rounded (a single cosine leaves l one step
-        // below v and the separated cases 1 ulp off).
+        // The pan's cosine and sine stay double until the product is rounded (against the reference renders, a
+        // single cosine leaves l one step below v and the separated cases 1 ulp off).
         let u = v * (1.0 / (PI / 4.0).cos()) as f32;
         let l = (f64::from(u) * (PI / 4.0).cos()) as f32;
         let r = (f64::from(u) * (PI / 4.0).sin()) as f32;
@@ -423,7 +423,8 @@ struct Half {
     d: f32,
 }
 
-/// Level ramps for knob moves while the reverb plays.
+/// Level ramps for knob moves while the reverb plays (Lemon Studio's own: the reference's ramp rate is unknown, spec:
+/// plugins/lemon-reverb.md "6. Audio").
 #[derive(Clone, Debug)]
 struct Ramp {
     from: [f32; 9],

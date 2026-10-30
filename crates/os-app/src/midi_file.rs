@@ -809,9 +809,10 @@ impl App {
         project_file(&s.project, s.song_mode, s.pattern, s.tempo)
     }
 
-    /// TOOLS ▸ Save MIDI clipboard to browser (greyed while nothing is copied): the piano roll's clipboard goes to
-    /// "MIDI clipboard <n>.mid" in the user folder's "Clipboard files", the next free number; the folder joins the
-    /// browser and opens there.
+    /// TOOLS ▸ Save MIDI clipboard to browser (Lemon Studio's own design for the reference's entry; greyed while
+    /// nothing is copied): the piano roll's clipboard goes to "MIDI clipboard <n>.mid" in the user folder's "Clipboard
+    /// files" (the reference's browser has a folder of that name), the next free number; the folder joins the browser
+    /// and opens there.
     pub(crate) fn save_midi_clipboard(&mut self) {
         let s = &self.state;
         let Some(dir) = clipboard_dir() else { return };
@@ -974,7 +975,8 @@ mod tests {
         assert_eq!(notes(&zero), [(192, 148, 62, 50), (200, 100, 62, 70), (384, 384, 127, 127)]);
     }
 
-    /// §5, §6: one track or some channels; a type 0 file split per MIDI channel keeps every note.
+    /// §5, §6: one track or some channels; a type 0 file split per MIDI channel keeps every note (the reference loses
+    /// some).
     #[test]
     fn tracks_channels_and_type_0() {
         let only_bass = convert(&three(96), &Options { track: Some(2), ..Options::default() }, 96);

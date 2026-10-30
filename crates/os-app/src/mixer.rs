@@ -102,7 +102,7 @@ pub enum MCmd {
     CablePhysics,
     /// General settings ▸ Animations: simulate the cables (true) or hang them still; kept for the next start.
     Animations(bool),
-    /// Open audio editor: Tesla on this track (Tesla's own).
+    /// Open audio editor: Tesla on this track (Tesla's own, in Edison's place).
     AudioEditor(u16),
     /// Open audio editor and record: a Tesla on this track set up as an audio logger.
     AudioEditorRecord(u16),
@@ -301,7 +301,8 @@ pub fn level_text(label: &str, v: f64) -> String {
 }
 
 /// "Stereo separation: Original" / "40% separated" / "40% merged" (§4). A positive stored value merges towards mono
-/// (spec: audio/mixer.md "Fader matrix").
+/// (spec: audio/mixer.md "Fader matrix"); which way the reference's knob turns for it is an open question (spec:
+/// ui/mixer.md "Open questions").
 pub fn sep_text(sep: f64) -> String {
     let pct = (sep.abs() * 100.0).round();
     if pct == 0.0 {

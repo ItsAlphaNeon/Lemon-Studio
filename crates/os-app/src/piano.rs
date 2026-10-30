@@ -852,9 +852,9 @@ pub fn open_tick(s: &mut State) -> bool {
 }
 
 /// Zoom on the pattern and the channel's notes in a note grid `grid`: from bar 1, the pattern's length plus half a
-/// bar fills the width (a 2-bar pattern shows 2.49 bars); the rows are the tallest that fit the channel's pitch
-/// range plus four spare rows, whole pixels between [`MIN_ROW`] and the default × 1.25, and the range is centred. A
-/// channel without notes: C5 centred at [`MIN_ROW`] rows.
+/// bar fills the width (the reference shows a 2-bar pattern as 2.49 bars); the rows are the tallest that fit the
+/// channel's pitch range plus four spare rows, whole pixels between [`MIN_ROW`] and the default × 1.25, and the range
+/// is centred. A channel without notes: C5 centred at [`MIN_ROW`] rows.
 pub fn auto_zoom(s: &mut State, grid: Rect) {
     let ppq = f32::from(s.project.ppq.max(4));
     let span = pattern_length(s, s.pattern) as f32 + s.project.bar_ticks() as f32 / 2.0;

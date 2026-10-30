@@ -28,7 +28,7 @@ pub const DIFFERENCE: usize = 6;
 pub const POSITION: usize = 7;
 
 /// The settings' ranges (spec "Settings"; stored values are used as they are). The difference output's range is the
-/// editor's (the routes of the track; 126 is the most a track can have).
+/// editor's (the reference's lists the routes of the track; 126 is the most a track can have).
 pub const RANGES: [(i32, i32); PARAMS] =
     [(-25600, 25600), (-25600, 25600), (-25600, 25600), (-25600, 25600), (-4096, 4096), (-4096, 4096), (0, 126), (-1, 1)];
 

@@ -229,9 +229,9 @@ fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Optio
 /// Generator `index` in place of rack row `row`'s (channel menu and plugin window menu > Replace ▸: "the plugin list of
 /// Add one", spec ui/channel-rack.md §18). The channel keeps its row, notes and steps, mixer track, levels and
 /// Misc settings; its old instance goes, the new one starts from its defaults, and the channel takes the new
-/// plugin's name. One undo step, "Replace channel" (`control::edit_app`): the channel takes a new id, so its old
-/// instrument, kept by the old one's (`Plugins::keep`), comes back with an undo and the new one with a redo
-/// (`control::host`).
+/// plugin's name (a Lemon Studio choice; the reference's naming is unverified). One undo step, "Replace channel"
+/// (`control::edit_app`): the channel takes a new id, so its old instrument, kept by the old one's (`Plugins::keep`),
+/// comes back with an undo and the new one with a redo (`control::host`).
 pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<String> {
     crate::control::edit_app(app, crate::history::REPLACE_CHANNEL, crate::control::command::Region::Project, |app| replace_generator_now(app, index, row))
 }

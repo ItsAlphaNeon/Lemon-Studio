@@ -109,8 +109,8 @@ pub fn ms(ticks: u32, tempo: f64, ppq: u16) -> f32 {
     (f64::from(ticks) * 60_000.0 / (tempo.max(1.0) * f64::from(ppq.max(1)))) as f32
 }
 
-/// The tension a crossfade's fade-out takes from the later clip's fade-in tension `t`: `-t` (0, not -0, for 0; an
-/// unusable value counts as 0).
+/// The tension a crossfade's fade-out takes from the later clip's fade-in tension `t`: `-t` (0, not -0, for 0, so the
+/// stored bytes are the ones FL writes; an unusable value counts as 0).
 pub fn opposite(t: f32) -> f32 {
     if t == 0.0 || !t.is_finite() { 0.0 } else { -t }
 }
