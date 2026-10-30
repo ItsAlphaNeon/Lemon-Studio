@@ -118,6 +118,74 @@ pub struct Project {
     /// The project's initial values, in file order (event 216; spec: ui/settings-choices.md "Advanced: Initialize
     /// controls automatically"): controls that take a value when the song starts.
     pub init_controls: Vec<InitControl>,
+    /// Internal controller links, in file order (event 227 with 0x8000 and up in its first field; spec:
+    /// flp/events/automation.md "Controller links"): a controller plugin's output driving a target.
+    pub controller_links: Vec<ControllerLink>,
+}
+
+/// One internal controller link (spec: flp/events/automation.md "Controller links"): output `output` of the controller
+/// plugin at `source` drives `target`. The record's 20 bytes are kept as read, so the fields not understood are written
+/// back as they were.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerLink {
+    pub bytes: [u8; ControllerLink::LEN],
+    /// The link's mapping formula (event 230 right after the link, e.g. "1-Input"); `None` = the value as it is.
+    pub formula: Option<String>,
+}
+
+impl ControllerLink {
+    /// The record's size (event 227).
+    pub const LEN: usize = 20;
+    /// Bit set in the first field of every controller link (an automation clip's link has 0 there).
+    pub const FLAG: u16 = 0x8000;
+
+    /// A record read from event 227's bytes, if it is a controller link.
+    pub fn from_bytes(b: &[u8]) -> Option<ControllerLink> {
+        let bytes: [u8; Self::LEN] = b.get(..Self::LEN)?.try_into().ok()?;
+        (u16::from_le_bytes([bytes[0], bytes[1]]) & Self::FLAG != 0).then_some(ControllerLink { bytes, formula: None })
+    }
+
+    /// A new link from output `output` of the controller at place `source` to `target`, with the fields the original
+    /// writes for a plain link (bytes 12..15 = 8, 16..19 = 0x1D5).
+    pub fn new(source: u16, output: u16, target: u32) -> ControllerLink {
+        let mut bytes = [0u8; Self::LEN];
+        bytes[0..2].copy_from_slice(&(Self::FLAG | (output & 0x7FFF)).to_le_bytes());
+        bytes[2..4].copy_from_slice(&source.to_le_bytes());
+        bytes[8..12].copy_from_slice(&target.to_le_bytes());
+        bytes[12..16].copy_from_slice(&8u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&0x1D5u32.to_le_bytes());
+        ControllerLink { bytes, formula: None }
+    }
+
+    /// The link's Smoothing option (bit 0x02 of bytes 12..15).
+    pub fn smoothing(&self) -> bool {
+        self.bytes[12] & 0x02 != 0
+    }
+
+    /// The controller's output (the first field without its flag bit).
+    pub fn output(&self) -> u16 {
+        u16::from_le_bytes([self.bytes[0], self.bytes[1]]) & 0x7FFF
+    }
+
+    /// The controller's place: a mixer place (`0x7000 + track * 64 + slot`) or a rack channel's index.
+    pub fn source(&self) -> u16 {
+        u16::from_le_bytes([self.bytes[2], self.bytes[3]])
+    }
+
+    /// The controller's mixer track and slot, when it sits in a mixer slot (FL 24.2 places).
+    pub fn source_slot(&self) -> Option<(u16, u8)> {
+        let s = self.source();
+        (0x7000..0x7000 + 128 * 64).contains(&s).then(|| ((s - 0x7000) / 64, ((s - 0x7000) % 64) as u8)).filter(|&(_, k)| k < 10)
+    }
+
+    /// The driven target, as an automation target id ([`target`]).
+    pub fn target(&self) -> u32 {
+        u32::from_le_bytes([self.bytes[8], self.bytes[9], self.bytes[10], self.bytes[11]])
+    }
+
+    pub fn set_target(&mut self, t: u32) {
+        self.bytes[8..12].copy_from_slice(&t.to_le_bytes());
+    }
 }
 
 /// One of the project's initial values: a control and the value it takes when the song starts (spec:

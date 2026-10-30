@@ -822,3 +822,39 @@ fn every_automation_link_is_read() {
     }
     eprintln!("{files} files with clips on several targets rewritten ({several} found)");
 }
+
+/// Every controller link (event 227 with the bit 0x8000 in its first field) is read in file order with the formula
+/// (event 230) right after it; dropping a link and saving removes its two events, and the rest read back (spec:
+/// flp/events/automation.md "Controller links").
+#[test]
+fn every_controller_link_is_read() {
+    let Some(paths) = corpus() else { return };
+    let (mut files, mut total, mut formulas) = (0, 0, 0);
+    for path in &paths {
+        let bytes = std::fs::read(path).unwrap();
+        let mut file = FlpFile::parse(&bytes).unwrap();
+        let Ok(mut project) = load(&file) else { continue };
+        let ev: Vec<_> = file.events().collect();
+        let want: Vec<(Vec<u8>, bool)> = ev
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.id == 227)
+            .filter_map(|(i, e)| e.data().filter(|d| d.len() == 20 && d[1] & 0x80 != 0).map(|d| (d.to_vec(), ev.get(i + 1).is_some_and(|n| n.id == 230))))
+            .collect();
+        let got: Vec<(Vec<u8>, bool)> = project.controller_links.iter().map(|c| (c.bytes.to_vec(), c.formula.is_some())).collect();
+        assert_eq!(got, want, "{path}");
+        if want.is_empty() {
+            continue;
+        }
+        files += 1;
+        total += want.len();
+        formulas += want.iter().filter(|w| w.1).count();
+        let count = file.events().count();
+        let gone = project.controller_links.remove(0);
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(file.events().count(), count - 1 - usize::from(gone.formula.is_some()), "{path}");
+        assert_eq!(load(&file).unwrap().controller_links, project.controller_links, "{path}");
+    }
+    eprintln!("{total} controller links ({formulas} with a formula) in {files} files");
+}

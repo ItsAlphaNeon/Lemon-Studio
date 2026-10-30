@@ -706,6 +706,8 @@ pub struct Plugin {
     pvals: Vec<clap_event_param_value>,
     /// Changes the plugin reported (its editor): gesture begin / end and values, plain.
     param_out: Vec<OutEv>,
+    /// The controller outputs the plugin sent last, per MIDI channel: a pitch bend's bits and the CC's finer bits.
+    controls: [Option<(u16, Option<u8>)>; 16],
     _lib: Arc<Library>,
 }
 
@@ -716,7 +718,14 @@ enum OutEv {
     Value(u32, f64),
     End(u32),
     NoteEnd(i16, i32),
+    /// A controller output as MIDI (channel = output): a pitch bend's 14 bits, or the 7 bits below them as CC 63.
+    Bend(u8, u16),
+    Fine(u8, u8),
 }
+
+/// The CC number that carries a controller output's 7 bits below its pitch bend (spec: plugins/lemon-peak-controller.md
+/// "Links").
+pub const CONTROL_FINE_CC: u8 = 63;
 
 /// Most plugin -> host parameter events kept until the app takes them.
 const MAX_OUT: usize = 4096;
@@ -744,6 +753,18 @@ unsafe extern "C" fn push_out(l: *const clap_output_events, e: *const clap_event
             if v.len() < MAX_OUT + MAX_ENDS {
                 let n = &*(e as *const clap_event_note);
                 v.push(OutEv::NoteEnd(n.key, n.note_id));
+            }
+            return true;
+        }
+        // Controller outputs (taken right after the call, as voice ends).
+        if (*e).type_ == CLAP_EVENT_MIDI {
+            let d = (*(e as *const clap_event_midi)).data;
+            if v.len() < MAX_OUT + MAX_ENDS {
+                match d[0] & 0xF0 {
+                    0xE0 => v.push(OutEv::Bend(d[0] & 0x0F, u16::from(d[1] & 0x7F) | u16::from(d[2] & 0x7F) << 7)),
+                    0xB0 if d[1] == CONTROL_FINE_CC => v.push(OutEv::Fine(d[0] & 0x0F, d[2] & 0x7F)),
+                    _ => {}
+                }
             }
             return true;
         }
@@ -922,6 +943,7 @@ impl Plugin {
                 processed: false,
                 pvals: Vec::with_capacity(params::MAX_AUTO + 64),
                 param_out: Vec::new(),
+                controls: [None; 16],
                 _lib: lib.clone(),
             })
         }
@@ -1076,6 +1098,16 @@ impl Plugin {
                     if id >= 0 {
                         self.level_voices.retain(|v| v.id != id);
                         self.named.retain(|v| v.1 != id);
+                    }
+                }
+                OutEv::Bend(ch, bits) => {
+                    if let Some(c) = self.controls.get_mut(usize::from(ch)) {
+                        *c = Some((bits, None));
+                    }
+                }
+                OutEv::Fine(ch, bits) => {
+                    if let Some(Some(c)) = self.controls.get_mut(usize::from(ch)) {
+                        c.1 = Some(bits);
                     }
                 }
                 e => {
@@ -1819,7 +1851,7 @@ impl os_host::Plugin for Plugin {
                 OutEv::Begin(id) => Some(os_host::ParamEvent::Begin(id)),
                 OutEv::Value(id, v) => Some(os_host::ParamEvent::Value(id, self.normalize(id, v))),
                 OutEv::End(id) => Some(os_host::ParamEvent::End(id)),
-                OutEv::NoteEnd(..) => None,
+                OutEv::NoteEnd(..) | OutEv::Bend(..) | OutEv::Fine(..) => None,
             })
             .collect()
     }
@@ -2033,6 +2065,20 @@ impl os_engine::HostedEffect for Plugin {
 
     fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
         self.song = Some(*info);
+    }
+
+    fn control_fx(&self, k: usize) -> Option<f32> {
+        let (bend, fine) = (*self.controls.get(k)?)?;
+        Some(control_value(bend, fine))
+    }
+}
+
+/// A controller output from its MIDI: the pitch bend's 14 bits over 0..16383, or with the CC's 7 bits below them the 21
+/// bits over 0..2^21 - 1.
+fn control_value(bend: u16, fine: Option<u8>) -> f32 {
+    match fine {
+        Some(f) => ((f64::from(bend) * 128.0 + f64::from(f)) / f64::from((1u32 << 21) - 1)) as f32,
+        None => (f64::from(bend) / 16383.0) as f32,
     }
 }
 
@@ -2275,6 +2321,68 @@ mod tests {
         p.take_note_ends(0);
         p.channel_levels(os_engine::ChannelLevels { mod_x: 0.5, ..Default::default() });
         assert!(p.mod_resend.is_empty());
+    }
+
+    /// Controller outputs arrive as MIDI: a pitch bend per output channel, the CC 63 after it adding 7 finer bits; they
+    /// are taken right after the call and never reach the parameter events (spec: plugins/lemon-peak-controller.md
+    /// "Links").
+    #[test]
+    fn controller_outputs_from_midi() {
+        use os_engine::HostedEffect as _;
+        let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ.clap")) }.expect("linked EQ");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert_eq!(p.control_fx(1), None);
+        p.param_out.push(OutEv::Value(3, 0.5));
+        p.param_out.push(OutEv::Bend(1, 8192));
+        p.param_out.push(OutEv::Bend(2, 16383));
+        p.param_out.push(OutEv::Fine(2, 127));
+        p.take_note_ends(0);
+        assert_eq!(p.control_fx(1), Some((8192.0 / 16383.0) as f32));
+        assert_eq!(p.control_fx(2), Some(1.0));
+        assert_eq!(p.control_fx(0), None);
+        assert_eq!(p.param_out.len(), 1, "only the parameter event is kept");
+        // A new bend drops the old fine bits.
+        p.param_out.push(OutEv::Bend(2, 0));
+        p.take_note_ends(0);
+        assert_eq!(p.control_fx(2), Some(0.0));
+        assert_eq!(control_value(4096, Some(64)), ((4096.0 * 128.0 + 64.0) / 2097151.0) as f32);
+    }
+
+    /// Lemon Peak Controller hosted as the engine hosts a mixer slot (a call per tick, the song's transport): after each
+    /// tick its outputs are what the engine's own Fruity Peak Controller gives for the same sound, to the 21 bits they
+    /// travel in.
+    #[test]
+    fn hosted_peak_controller_matches_the_engines() {
+        use os_engine::effects::peak_ctrl::{Core, Settings};
+        use os_engine::HostedEffect as _;
+        let entry = &lemon_peak_controller::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Peak Controller.clap")) }.expect("linked peak controller");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 44100));
+        let s = Settings { lfo_amount: 128, lfo_base: 16384, speed: 13000, ..Settings::default() };
+        let state = lemon_small_fx::params::plugin_state_from_fl(lemon_small_fx::peak_controller::SPEC, &s.to_state());
+        assert!(os_host::Plugin::load_state(&mut p, &state));
+        let mut own = Core::new(s);
+        let (tempo, spt) = (130.0, 44100.0 * 60.0 / (130.0 * 96.0));
+        let mut worst = 0.0f64;
+        for j in 0..400u64 {
+            let (a, b) = ((j as f64 * spt).round() as u64, ((j + 1) as f64 * spt).round() as u64);
+            let n = (b - a) as usize;
+            // Bursts: a loud tick every 50, quiet between.
+            let level = if j % 50 < 3 { 0.8 } else { 0.05 };
+            let mut l: Vec<f32> = (0..n).map(|i| level * ((i as f32) * 0.3).sin()).collect();
+            let mut r = l.clone();
+            let peak = l.iter().fold(0f32, |m, x| m.max(x.abs()));
+            p.transport_fx(&os_engine::TransportInfo { playing: true, tempo, frame: a, beats: j as f64 / 96.0, bar_start: 0.0, bar: 0, numerator: 4, denominator: 4, looping: None });
+            p.process_fx(44100, &mut l, &mut r);
+            own.advance(f64::from(peak), 1.0);
+            for k in 0..3 {
+                let got = f64::from(p.control_fx(k).expect("an output"));
+                worst = worst.max((got - own.outputs()[k]).abs());
+            }
+        }
+        assert!(worst < 1e-6, "{worst}");
     }
 
     /// The UI locks an instance only when it has work (spec: audio/implementing.md "Playing live"): host edits waiting

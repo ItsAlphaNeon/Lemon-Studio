@@ -42,7 +42,8 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
   original's slots in opened projects
 - [x] **Flanger and phaser.** Lemon Flanger and Lemon Phaser recreate Fruity Flanger and Fruity Phaser
 - [ ] **Vocoder (Vocodex)**
-- [ ] **Peak Controller.** Common for sidechain pumping in projects; nothing in the code handles it yet
+- [x] **Peak Controller.** Common for sidechain pumping in projects. Lemon Peak Controller plays projects' Fruity Peak
+  Controller slots and the engine plays their controller links (mixer and plugin targets, formulas)
 - [ ] **Formula Controller**
 - [ ] **Patcher.** The mixer slot menu's Patcherize and Patcherize all are greyed out
 - [x] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** Six of the seven

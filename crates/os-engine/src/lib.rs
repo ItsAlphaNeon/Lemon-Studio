@@ -7,7 +7,8 @@
 //! - [`sample`]: decoding and resolving sample files.
 //! - [`laws`]: gain, pan and pitch laws measured from FL Studio.
 //! - [`effects`]: Lemon Studio's mixer-slot effects (EQ, limiter, reverb, delay, soft clipper, fast distortion,
-//!   balance, stereo enhancer, transient processor, chorus, stereo shaper, flanger, phaser).
+//!   balance, stereo enhancer, transient processor, chorus, stereo shaper, flanger, phaser, peak controller).
+//! - [`formula`]: links' mapping formulas.
 //! - [`clock`]: the sequencer's tick clock (ticks to samples).
 //! - [`engine`]: tick-based playback of patterns and the playlist through the mixer.
 //! - [`metronome`]: the click on every beat while playing live.
@@ -19,6 +20,7 @@ pub mod clock;
 pub mod effects;
 pub mod engine;
 pub mod envelope;
+pub mod formula;
 pub mod instrument;
 pub mod laws;
 pub mod metronome;
