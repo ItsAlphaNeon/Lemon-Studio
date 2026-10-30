@@ -22,7 +22,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   complete piano roll preview, Show a mute button on the piano roll preview and the loop button's Always show advanced
   controls
 - A channel's Receive notes from ▸ locks it to the computer keyboard or the Touch controller: their notes play it
-  whichever channel is selected (a padlock on its name button; Unlock ends the lock)
+  whichever channel is selected (a padlock on its name button; Unlock ends the lock; saved in `.lemon` projects)
 - A channel's menu: Change icon... puts an icon on its name button (the same icon as its plugin window and clips, saved
   in `.lemon` projects); Show waveform preview draws a sampler or audio clip channel's sample across its name button; MIDI
   channel through (ticked by default) gives a hosted VST, VST 3 or CLAP instrument a MIDI device's notes on the MIDI
@@ -348,8 +348,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Saves projects as `.lemon` files: Lemon Studio's own format, laid out like an FLP with room for Lemon Studio's own
   data (the channel, mixer track and slot icons, the slots' names and colours, Performance mode's ▸ menu checks, the
   mixer's Plugin delay compensation ▸ Automatic and View ▸ checks, plugin windows' Scaling ▸, the channels' waveform
-  preview and MIDI channel through checks, the plugins' keyboard focus and the playlist tracks' locks; saving to a
-  `.flp` name leaves them out). The original is not expected to open them
+  preview and MIDI channel through checks, the plugins' keyboard focus, the playlist tracks' locks and the channels'
+  Receive notes from ▸ locks; saving to a `.flp` name leaves them out). The original is not expected to open them
 - Opens `.lemon` files and `.flp` projects saved by FL Studio 24.2 and later, 25 and 26 included. A project opened
   from an FLP is never saved over: Save asks for a name, offering the FLP's name with `.lemon`. Backups, new versions,
   templates and zipped projects are `.lemon` too; FLP backups and templates still open. General ▸ System ▸

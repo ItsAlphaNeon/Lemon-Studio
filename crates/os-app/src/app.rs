@@ -9988,6 +9988,9 @@ mod tests {
         app.state.tempo = 111.0;
         app.state.project.patterns[0].notes.push(Note::step(2, 48));
         app.state.project.patterns.push(Pattern { number: 2, name: Some("Two".into()), notes: vec![Note::step(0, 0)], ..Pattern::default() });
+        // A changed mixer is kept: the save gives the new file a playlist, which the mixer is stored after.
+        app.state.project.mixer[3].name = Some("Drums".into());
+        app.state.project.mixer[3].volume = Some(0.5);
         let path = std::env::temp_dir().join(format!("openstudio-new-{}.flp", std::process::id()));
         app.save_to(path.clone());
         assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Saved") && !m.contains("not stored")), "{:?}", app.state.message);
@@ -10001,12 +10004,15 @@ mod tests {
         assert_eq!(back.channels.len(), 5);
         assert_eq!(back.patterns[0].notes.len(), 1);
         assert_eq!(back.patterns[1].name.as_deref(), Some("Two"));
+        assert_eq!(back.mixer.len(), 18);
+        assert_eq!((back.mixer[3].name.as_deref(), back.mixer[3].volume), (Some("Drums"), Some(0.5)));
         // Saving again goes through apply on the same file.
         app.state.project.patterns[0].notes.push(Note::step(1, 96));
         app.save_to(path.clone());
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(back.patterns[0].notes.len(), 2);
+        assert_eq!(back.mixer[3].name.as_deref(), Some("Drums"));
     }
 
     /// Settings > Project (spec: ui/settings-choices.md "Project", audio/song-structure.md): the Numerator and
