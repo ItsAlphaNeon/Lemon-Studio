@@ -72,12 +72,12 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
-- [ ] **Mixer right-click menus.** 11 entries greyed out on 2026-10-30, counted entry by entry after Insert from state
+- [ ] **Mixer right-click menus.** 8 entries greyed out on 2026-10-30, counted entry by entry after Insert from state
   (and File ▸ Open / Save mixer track state), Plugin delay compensation ▸ Automatic, View ▸ Waveforms and Extra
-  properties, and the slot menu's Scaling ▸ and Help were enabled: track menu Change icon (the icons are not drawn),
-  Assign to / Unassign from Audio track(s) and Select ▸ Channels and playlist tracks (no audio tracks in the playlist
-  yet), Compensate for master latency (greyed in the original too); Mixer options Link all parameters... (no
-  controller links yet), Detached; slot menu Patcherize, Patcherize all, Link all parameters..., Change icon...
+  properties, the slot menu's Scaling ▸ and Help, and the track and slot menus' Change icon... and the slot menu's
+  Link all parameters... were enabled: Assign to / Unassign from Audio track(s) and Select ▸ Channels and playlist
+  tracks (no audio tracks in the playlist yet), Compensate for master latency (greyed in the original too); Mixer
+  options Link all parameters... (no controller links yet), Detached; slot menu Patcherize, Patcherize all
   Scaling ▸ is greyed for a slot without a hosted plugin, "(no saved states)" when none is saved. Not counted: the
   layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [x] **Playlist right-click menus.** None greyed out since 2026-10-30: the last five, the picker's Change icon and

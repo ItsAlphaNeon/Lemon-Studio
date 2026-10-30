@@ -697,28 +697,33 @@ pub const ICONS: &[(&str, crate::icons::Icon)] = {
     ]
 };
 
-/// Whose icon: a channel (by id, so it follows the channel when rows move) or a mixer slot (track, slot).
+/// Whose icon: a channel (by id, so it follows the channel when rows move), a mixer slot (track, slot) or a mixer track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IconOwner {
     Channel(u32),
     Slot(u16, u8),
+    Track(u16),
 }
 
-/// The owner of a plugin window's icon: `key` a rack row or an `fx_key`.
+/// Icon keys from here up to `plugins::FX_KEY` are mixer tracks: `TRACK_ICON_KEY + track` (no rack has that many rows).
+pub const TRACK_ICON_KEY: usize = 1 << 23;
+
+/// The owner of an icon `key`: a rack row, a mixer track (`TRACK_ICON_KEY + track`) or an `fx_key`.
 fn icon_owner(p: &os_model::Project, key: usize) -> Option<IconOwner> {
     match crate::plugins::fx_of(key) {
         Some((t, k)) => Some(IconOwner::Slot(t, k)),
+        None if key >= TRACK_ICON_KEY => Some(IconOwner::Track((key - TRACK_ICON_KEY) as u16)),
         None => p.channels.get(key).map(|c| IconOwner::Channel(c.id.0)),
     }
 }
 
-/// The icon chosen for window `key` (a rack row or an `fx_key`), if any.
+/// The icon chosen for `key` (a rack row, a mixer track's `TRACK_ICON_KEY + track` or an `fx_key`), if any.
 pub fn window_icon(p: &os_model::Project, icons: &HashMap<IconOwner, crate::icons::Icon>, key: usize) -> Option<crate::icons::Icon> {
     icons.get(&icon_owner(p, key)?).copied()
 }
 
-/// Change icon... ▸: None, then [`ICONS`], the current one ticked; each sets the icon of `key` (a rack row or an
-/// `fx_key`).
+/// Change icon... ▸: None, then [`ICONS`], the current one ticked; each sets the icon of `key` (a rack row, a mixer
+/// track's `TRACK_ICON_KEY + track` or an `fx_key`).
 pub fn icon_items(s: &State, key: usize) -> Vec<PItem> {
     let cur = window_icon(&s.project, &s.playlist.icons, key);
     let mut v = vec![PItem::new("None", Cmd::SetIcon(key, None)).mark(Mark::Check(cur.is_none()))];

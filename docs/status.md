@@ -121,6 +121,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The mixer slot menu's Help opens the plugin's own help page (CLAP and VST3 plugins that name one; Lemon Studio's
   own effects open the list of built-in effects), and Scaling ▸ sizes a hosted plugin's window: Main (the program's
   scale) or 100 % to 200 %, for the session
+- Change icon... in the mixer track menu draws an icon under the track's name, and in the slot menu before the
+  slot's name and on its plugin window; the icons move with their tracks and slots, for the session. The slot menu's
+  Link all parameters... links the effect's parameters to consecutive controllers, as its window menu's
 
 ## ✅ Plugin hosting
 
