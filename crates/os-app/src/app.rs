@@ -2669,10 +2669,8 @@ impl App {
                         let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         let mut menu = crate::playlist::plugin_window_menu(row, detached, lx, ly);
-                        // A container's member has no presets, links or automation of its own yet: those stay greyed.
-                        if row < crate::plugins::MEMBER_KEY {
-                            crate::presets::fill_window_menu(self, row, &mut menu);
-                        }
+                        // A container's member has its presets too (plugins/patcher/README.md §4.2).
+                        crate::presets::fill_window_menu(self, row, &mut menu);
                         crate::playlist::fill_plugin_window_menu(&self.state, row, &mut menu);
                         // A channel's window: Replace ▸ lists the generators (an effect slot's stays greyed here; the
                         // mixer's slot menu has its own Replace ▸).
@@ -2687,15 +2685,13 @@ impl App {
                         continue;
                     }
                     Request::Presets(row, x, y) => {
-                        let Some((_, detached)) = self.plugins.window_of(row).filter(|_| row < crate::plugins::MEMBER_KEY) else { continue };
+                        let Some((_, detached)) = self.plugins.window_of(row) else { continue };
                         let (lx, ly) = self.screen_to_canvas(x, y);
                         self.state.playlist.popup = Some(crate::presets::popup(self, row, lx, ly));
                         self.popup_lift = detached.then_some(row);
                         self.invalidate();
                         continue;
                     }
-                    // A container's member has no presets of its own yet (`crate::container`).
-                    Request::PresetStep(row, _) | Request::DropFile(row, _) if row >= crate::plugins::MEMBER_KEY => continue,
                     Request::PresetStep(row, d) => {
                         self.state.message = crate::presets::run(self, crate::presets::PCmd::Step(row, d));
                         continue;

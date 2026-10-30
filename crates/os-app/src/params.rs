@@ -8,7 +8,7 @@
 //! (targets, names, value texts).
 //!
 // spec: plugins/plugin-parameters.md §3 (targets), §4 (clip names), §5 (last tweaked; §5.1, §5.2 the parameter
-// menu), §6 (browse parameters)
+// menu), §6 (browse parameters); plugins/patcher/README.md §4.2 (the effects inside a container)
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -17,7 +17,7 @@ use os_model::target::{self, Target};
 
 use crate::app::{Action, App, State};
 use crate::playlist::{Cmd, Mark, PItem, Popup};
-use crate::plugins::{fx_key, fx_of};
+use crate::plugins::{fx_key, fx_of, MEMBER_KEY};
 
 /// The values of an instance's parameters, by id.
 fn read_values(p: &dyn os_host::Plugin, params: &[Entry]) -> BTreeMap<u32, f64> {
@@ -95,6 +95,8 @@ pub struct ParamUi {
     pub lists: BTreeMap<usize, List>,
     /// Newest first: "Most recent", "Second most recent".
     pub last: Vec<Tweak>,
+    /// The effects inside containers, by hosted key: mixer track, slot and member id (`App::sync_containers`).
+    pub members: BTreeMap<usize, (u16, u8, u32)>,
 }
 
 impl ParamUi {
@@ -136,26 +138,56 @@ pub enum PCmd {
     EditClip(u16),
 }
 
-/// The hosted key of the instance an automation target points at, and the parameter index.
+/// The hosted key of the instance an automation target points at, and the parameter index. A container slot's
+/// parameter is its member's (`None` for a member's level, or a member whose effect is not loaded).
 pub fn key_of(s: &State, t: Target) -> Option<(usize, usize)> {
     match t {
         Target::ChannelParam(ch, k) => Some((s.project.channels.iter().position(|c| c.index == ch)?, usize::from(k))),
+        Target::SlotParam(track, slot, k) if is_container(s, track, slot) => {
+            let (id, item) = target::member_of(k).filter(|m| m.1 < target::MEMBER_WET)?;
+            Some((crate::container::member_key(s, fx_key(track, slot), id)?, usize::from(item)))
+        }
         Target::SlotParam(track, slot, k) => Some((fx_key(track, slot), usize::from(k))),
         _ => None,
     }
 }
 
-/// The automation target of parameter `index` of hosted instance `key` (spec §3).
+/// Whether slot `slot` of track `track` holds a container.
+fn is_container(s: &State, track: u16, slot: u8) -> bool {
+    crate::mixer::track(s, track).and_then(|m| m.slots.get(usize::from(slot))?.as_ref()).is_some_and(|p| p.name == crate::container::CONTAINER)
+}
+
+/// The automation target of parameter `index` of hosted instance `key` (spec §3). An effect inside a container's is
+/// the container slot's parameter that names the member and the index (`os_model::target::member_item`).
 pub fn target_of(s: &State, key: usize, index: usize) -> Option<u32> {
     let k = u16::try_from(index).ok().filter(|&k| k < 0x8000)?;
+    if key >= MEMBER_KEY {
+        let &(track, slot, id) = s.params.members.get(&key)?;
+        return Some(target::slot_param(track, slot, target::member_item(id, k).filter(|_| k < target::MEMBER_WET)?));
+    }
     Some(match fx_of(key) {
         Some((track, slot)) => target::slot_param(track, slot, k),
         None => target::channel_param(s.project.channels.get(key)?.index, k),
     })
 }
 
-/// Who owns hosted instance `key`, as clip names write it (spec §4): the channel name, or "<slot plugin> - <track>".
+/// What a remote control link and the value box take parameter `index` of instance `key` as: an effect inside a
+/// container by its place and id, which keep (its hosted key is the session's), the others by key.
+pub fn link_target(s: &State, key: usize, index: usize) -> crate::typein::Target {
+    match s.params.members.get(&key) {
+        Some(&(track, slot, id)) => crate::typein::Target::MemberParam(track, slot, id, index),
+        None => crate::typein::Target::Param(key, index),
+    }
+}
+
+/// Who owns hosted instance `key`, as clip names write it (spec §4): the channel name, or "<slot plugin> - <track>",
+/// or for an effect inside a container "<effect> in <container> - <track>".
 pub(crate) fn owner_name(s: &State, key: usize) -> String {
+    if let Some(&(track, slot, id)) = s.params.members.get(&key) {
+        let name = crate::container::members(s, track, slot).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.name);
+        let plugin = crate::mixer::slot_name(s, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));
+        return format!("{name} in {} - {}", crate::plugins::slot_label(&plugin), crate::mixer::name(s, track));
+    }
     match fx_of(key) {
         Some((track, slot)) => {
             let plugin = crate::mixer::slot_name(s, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));
@@ -257,10 +289,16 @@ fn set_items(s: &State, key: usize, index: usize) -> Vec<PItem> {
     v
 }
 
+/// The parameter menu of a container member's wet or dry level (`container::list_popup`, Lemon Studio's design): the
+/// parameter menu with `link` for remote control and Enter value..., and no Copy, Paste or Set.
+pub fn level_items(s: &State, create: Option<(u32, String, f64)>, link: crate::typein::Target) -> Vec<PItem> {
+    parameter_items(s, None, create, Some(link))
+}
+
 /// The parameter menu FL shows on a parameter row and in TOOLS ▸ Last tweaked (FL observed, spec §5, §5.1, §6):
 /// automation, remote control and value entries. `param` = (hosted key, index) of a plugin parameter; `create` = what
-/// "Create automation clip" makes (`None` = disabled).
-fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32, String, f64)>) -> Vec<PItem> {
+/// "Create automation clip" makes (`None` = disabled); `link` = what Link to controller... and Enter value... take.
+fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32, String, f64)>, link: Option<crate::typein::Target>) -> Vec<PItem> {
     // spec: ui/settings-choices.md "Advanced: Initialize controls automatically"
     let [init, delete] = crate::init::items(s, create.as_ref().map(|c| (c.0, c.2)));
     // Enabled only while a clip drives the parameter (FL observed); it shows that clip in the playlist (§5.2).
@@ -299,9 +337,8 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
     ];
     // spec: ui/remote-control.md §1. Ticked on a parameter an automation clip drives (FL observed) or a controller
     // is linked to.
-    let target = param.map(|(key, index)| crate::typein::Target::Param(key, index));
-    let linked = driven.is_some() || target.is_some_and(|t| crate::remote::link_of(t).is_some());
-    let mut remote = crate::remote::menu_items(target);
+    let linked = driven.is_some() || link.is_some_and(|t| crate::remote::link_of(t).is_some());
+    let mut remote = crate::remote::menu_items(link);
     if let Some(link) = remote.iter_mut().find(|i| i.label == "MIDI learn...") {
         link.mark = Mark::Check(linked);
     }
@@ -311,8 +348,8 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         copy,
         paste,
         // spec: ui/type-in-value.md §8 (normalized mode only)
-        match param {
-            Some((key, index)) => PItem::new("Enter value...", Cmd::TypeIn(crate::typein::Target::Param(key, index))),
+        match link {
+            Some(t) => PItem::new("Enter value...", Cmd::TypeIn(t)),
             None => PItem::not_yet("Enter value..."),
         },
         match set {
@@ -326,11 +363,14 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
 /// The menu of a parameter row (browser right-click, spec §6).
 pub fn param_menu(s: &State, key: usize, index: usize, x: f32, y: f32) -> Option<Popup> {
     let create = automation(s, key, index)?;
-    Some(Popup { x, y, items: parameter_items(s, Some((key, index)), Some(create)), sub: None, scroll: [0; 2] })
+    Some(Popup { x, y, items: parameter_items(s, Some((key, index)), Some(create), Some(link_target(s, key, index))), sub: None, scroll: [0; 2] })
 }
 
 /// The browser node key of instance `key` (spec §6): Generators ▸ channel, Effects ▸ "<track> - <slot>".
 pub fn node_key(s: &State, key: usize) -> Option<String> {
+    if key >= MEMBER_KEY {
+        return Some(format!("{ROOT}/Effects/{}", crate::container::member_label(s, key)?));
+    }
     Some(match fx_of(key) {
         Some((track, slot)) => format!("{ROOT}/Effects/{}", effect_label(s, track, slot)?),
         None => format!("{ROOT}/Generators/{}", crate::views::browser::channel_label(s, key)?),
@@ -551,7 +591,8 @@ impl App {
         };
         let head = create.as_ref().map_or_else(|| "No parameter".to_string(), |c| c.1.clone());
         let mut items = vec![PItem { head: true, ..PItem::new(head, Cmd::Nothing) }, PItem::head("Automation")];
-        items.extend(parameter_items(&self.state, param, create));
+        let link = param.map(|(key, index)| link_target(&self.state, key, index));
+        items.extend(parameter_items(&self.state, param, create, link));
         items.extend([PItem::sep(), PItem::not_yet("Override temporary mapping...")]);
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
         self.invalidate();

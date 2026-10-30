@@ -363,6 +363,8 @@ pub enum Run {
     /// Changes of control `.1` of the channel on row `.0` (`ChannelControl`): a plugin window's strip knob dragged or
     /// turned, the rack's mixer track box.
     Channel(usize, ChannelControl),
+    /// A controller moving the wet (`.3`) or dry level of member `.2` of the container in slot `.1` of track `.0`.
+    Member(u16, u8, u32, bool),
 }
 
 /// A channel control a run of changes goes to (`Run::Channel`).
