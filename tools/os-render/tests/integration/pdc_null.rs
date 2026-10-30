@@ -9,7 +9,7 @@
 //! Runs only when `OPENSTUDIO_PDC_EXPORTS` names a folder of `<name>.flp` projects next to FL's `<name>.wav` exports
 //! (32-bit float); prints each case's lag and how far its difference to FL's export lies below FL's peak.
 //!
-//! `OPENSTUDIO_PDC_EXPORTS=<folder> cargo test -p os-render --test pdc_null -- --nocapture`
+//! `OPENSTUDIO_PDC_EXPORTS=<folder> cargo test -p os-render --test integration pdc_null -- --nocapture`
 // spec: audio/delay-compensation.md, plugins/fruity-limiter.md
 
 use std::path::{Path, PathBuf};

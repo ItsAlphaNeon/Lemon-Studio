@@ -326,6 +326,11 @@ project files are never committed to this repository.
 The watermark test (`cargo test -p watermark`) checks that every source file opens with its header: a copyright line
 for each of its copyright holders, its SPDX licence identifier and the project's name.
 
+Every test binary is compiled and linked on its own, so a crate keeps its integration tests in one:
+`tests/integration/main.rs` names each file there as a module (run one with `cargo test -p os-engine --test integration
+fx_null`); a new file goes there, not beside it. The crates have no doc tests (`doctest = false`: code in doc comments is
+`text` or `ignore`), and a crate without tests has `test = false`; take that out when adding its first test.
+
 ### Scripting and assistants
 
 `--control <socket>` lets scripts, tests and AI assistants read and change the open project over a local socket

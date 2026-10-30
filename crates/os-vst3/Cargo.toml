@@ -6,6 +6,9 @@ version.workspace = true
 edition = "2021"
 license.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 # Same source as nih-plug's (already in Cargo.lock): GPLv3 bindings of the public VST3 interfaces.
 vst3-sys = { git = "https://github.com/robbert-vdh/vst3-sys.git", branch = "fix/drop-box-from-raw" }
