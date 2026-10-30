@@ -60,6 +60,12 @@ pub enum MenuCmd {
     Window(Win),
     CloseAll(crate::app::CloseAll),
     IntoWorkspace,
+    /// VIEW > Align all channel editors.
+    AlignEditors,
+    /// TOOLS > Save MIDI clipboard to browser.
+    SaveMidiClip,
+    /// HELP's entries that open a page in the web browser (`crate::help_links`).
+    Web(&'static str),
     /// The menu bar's ways into the browser.
     Jump(crate::browser::Jump),
     /// A settings tab.
@@ -95,6 +101,8 @@ pub enum Sub {
     Import,
     Effect,
     Toolbars,
+    Arrange,
+    Background,
     OneClick,
     DumpLog,
     AudioLog,
@@ -184,9 +192,10 @@ pub const STEP_EDIT_LABEL: &str = "Step edit";
 /// OPTIONS ▸ Switches: Multilink to controllers (spec: ui/remote-control.md §4).
 pub const MULTILINK_LABEL: &str = "Multi MIDI learn";
 /// VIEW > Into workspace: windows partly outside the workspace move fully back in (`App::move_into_workspace`). A plain
-/// entry after "Arrange windows", whose submenu isn't built (spec: ui/settings-choices.md "Advanced: Don't limit
+/// entry after "Arrange windows" (spec: ui/settings-choices.md "Advanced: Don't limit
 /// windows to screen (2026-10-16)").
 pub const INTO_WORKSPACE_LABEL: &str = "Into workspace";
+pub const ALIGN_LABEL: &str = "Align all channel editors";
 /// Index of the OPTIONS menu.
 pub const OPTIONS_MENU: usize = 5;
 /// OPTIONS > Project info (the toolbar's info button).
@@ -313,10 +322,10 @@ const VIEW_ITEMS: &[Item] = &[
     it("Close all windows", "F12").on().cmd(MenuCmd::CloseAll(crate::app::CloseAll::All)),
     it("Close all plugin windows", "Alt+F12").on().cmd(MenuCmd::CloseAll(crate::app::CloseAll::Plugins)),
     it("Close all unfocused windows", "Ctrl+F12").on().cmd(MenuCmd::CloseAll(crate::app::CloseAll::Unfocused)),
-    it("Align all channel editors", "Shift+F12"),
-    it("Arrange windows", "").sub(),
+    it(ALIGN_LABEL, "Shift+F12").on().cmd(MenuCmd::AlignEditors),
+    it("Arrange windows", "").sub().cmd(MenuCmd::Sub(Sub::Arrange)),
     it(INTO_WORKSPACE_LABEL, "").on().cmd(MenuCmd::IntoWorkspace),
-    it("Background", "").sub(),
+    it("Background", "").sub().cmd(MenuCmd::Sub(Sub::Background)),
     head("Browser"),
     it("Undo history", "").cmd(MenuCmd::Jump(crate::browser::Jump::Section("History"))),
     it("Patterns", "").cmd(MenuCmd::Jump(crate::browser::Jump::Section("Patterns"))),
@@ -363,7 +372,7 @@ const TOOLS_A: &[Item] = &[
     it("Control builder", ""),
     head("Clipboard"),
     it("Save audio clipboard to browser", ""),
-    it("Save MIDI clipboard to browser", ""),
+    it(SAVE_MIDI_CLIP_LABEL, "").on().cmd(MenuCmd::SaveMidiClip),
     head("MIDI capture"),
     it(DUMP_LOG_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::DumpLog)),
     it(CLEAR_LOG_LABEL, "").on().cmd(MenuCmd::ClearLog),
@@ -398,11 +407,11 @@ const TOOLS_B: &[Item] = &[
 ];
 
 const HELP: &[Item] = &[
-    it("Help index", ""),
+    it("Help index", "").on().cmd(MenuCmd::Web(crate::help_links::HELP_INDEX_URL)),
     it("Tutorials", "").sub(),
     head("Support"),
     it("Diagnostics", ""),
-    it("What's new", ""),
+    it("What's new", "").on().cmd(MenuCmd::Web(crate::help_links::WHATS_NEW_URL)),
     SEP,
     it("About...", "").on(),
 ];
@@ -496,11 +505,17 @@ pub fn in_menu(s: &State, menu: usize, item: &Item) -> bool {
     !(menu == EDIT_MENU && item.label == "Redo") || crate::history::redo_shown(s)
 }
 
-/// Whether an entry can be chosen now: it works (`works`), EDIT's have a step to act on, and the project file rows
-/// that need a saved project have one (`needs_file`).
+/// Whether an entry can be chosen now: it works (`works`), EDIT's have a step to act on, the project file rows
+/// that need a saved project have one (`needs_file`), and Save MIDI clipboard to browser has notes to save.
 pub fn active(s: &State, menu: usize, item: &Item) -> bool {
-    works(menu, item) && (menu != EDIT_MENU || crate::history::edit_enabled(s, item.label == "Redo")) && (s.path.is_some() || !needs_file(menu, item.label))
+    works(menu, item)
+        && (menu != EDIT_MENU || crate::history::edit_enabled(s, item.label == "Redo"))
+        && (s.path.is_some() || !needs_file(menu, item.label))
+        && (!matches!(item.cmd, MenuCmd::SaveMidiClip) || !s.piano.clipboard.is_empty())
 }
+
+/// TOOLS ▸ Save MIDI clipboard to browser (`App::save_midi_clipboard`).
+pub const SAVE_MIDI_CLIP_LABEL: &str = "Save MIDI clipboard to browser";
 
 /// FILE / TOOLS ▸ Delete unused files and save project.
 pub const DELETE_UNUSED_LABEL: &str = "Clean up and save";
@@ -575,6 +590,10 @@ pub fn sub_items(cmd: MenuCmd) -> Option<fn(&State) -> Vec<crate::playlist::PIte
         Sub::ClipsSel => |_| crate::rack::stretch_items(false),
         // spec: ui/toolbar-menu.md §8
         Sub::Toolbars => toolbar_items,
+        // spec: ui/menu-submenus.md §2
+        Sub::Arrange => crate::arrange::items,
+        // spec: ui/menu-submenus.md §3
+        Sub::Background => crate::wallpaper::items,
     })
 }
 
@@ -1083,7 +1102,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", ONE_CLICK_LABEL, DUMP_LOG_LABEL, LOGGER_SETTINGS_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", "Arrange windows", "Background", ONE_CLICK_LABEL, DUMP_LOG_LABEL, LOGGER_SETTINGS_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Fade out only", "Transient", "Transient (tail continues)", "Standard (tail continues)", "Smooth (tail continues)", "Crossfade (tail continues)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");

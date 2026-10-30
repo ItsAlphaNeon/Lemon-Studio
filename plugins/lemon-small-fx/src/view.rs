@@ -59,6 +59,8 @@ pub enum Target {
     Fader(String, f32),
     /// One position of a selector (click picks it).
     Choice(String, i32),
+    /// A text field (a click types in its text).
+    Text(String),
     /// The wordmark (the About menu).
     Logo,
 }
@@ -67,7 +69,7 @@ impl Target {
     /// The setting's id ("" for the wordmark).
     pub fn id(&self) -> &str {
         match self {
-            Target::Knob(id) | Target::Fader(id, _) | Target::Choice(id, _) => id,
+            Target::Knob(id) | Target::Fader(id, _) | Target::Choice(id, _) | Target::Text(id) => id,
             Target::Logo => "",
         }
     }
@@ -84,6 +86,8 @@ pub struct Hit {
 pub struct ViewState {
     pub mouse: Option<(f32, f32)>,
     pub pressed: Option<Target>,
+    /// The saved state the text fields show ([`Control::Text`]).
+    pub raw: Vec<u8>,
 }
 
 struct Ui<'a> {
@@ -135,6 +139,10 @@ pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewS
                 shape(&mut ui, id, cx, cy, range);
             }
             Control::Tile { id, x0, y0, x1, y1, caption } => tile(&mut ui, id, Rect::span(x0, x1, y0, y1), caption),
+            Control::Text { id, x0, y0, x1, y1, show, .. } => {
+                let (text, status) = show(&st.raw);
+                text_field(&mut ui, id, Rect::span(x0, x1, y0, y1), &text, &status);
+            }
         }
     }
     if let Some(d) = &spec.display {
@@ -287,6 +295,18 @@ fn tile(ui: &mut Ui, id: &str, r: Rect, caption: &str) {
     let vh = ui.c.line_height(VALUE);
     ui.c.text_clip(VALUE, x + 4.0, (r.bottom() - 13.0 - vh / 2.0).round(), band.w - 4.0, brand::TEXT, &text);
     ui.hit(hr, target);
+}
+
+/// A text field: the text in a field (clipped at its right end), the status under it in the caption's grey. A click
+/// types the text in.
+fn text_field(ui: &mut Ui, id: &str, r: Rect, text: &str, status: &str) {
+    let target = Target::Text(id.into());
+    let st = ui.state(r, &target);
+    lemon::field(ui.c, r, st);
+    let vh = ui.c.line_height(VALUE);
+    ui.c.text_clip(VALUE, r.x + 8.0, (r.cy() - vh / 2.0).round(), r.w - 16.0, brand::TEXT, text);
+    ui.c.text_clip(LABEL, r.x + 2.0, r.bottom() + 7.0, r.w - 4.0, plug::DIM, status);
+    ui.hit(r, target);
 }
 
 /// The wordmark (as Lemon Delay's): the lemon mark and "LEMON" in lemon beside the effect's name in large grey

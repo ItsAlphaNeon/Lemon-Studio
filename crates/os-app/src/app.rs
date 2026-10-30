@@ -962,7 +962,7 @@ pub enum Drag {
     RackSel { from: usize },
     RackDots { x0: f32, p0: u32 },
     RackLen { y0: f32, v0: u32 },
-    RackLoopLen { row: usize, y0: f32, v0: u32 },
+    RackLoopLen { row: usize, y0: f32, v0: i32 },
     RackGraph,
     /// A dialog's caption (offset of the mouse from its top-left), the file list's scroll bar (`ratio` = list pixels
     /// per pixel moved), spec: ui/dialogs.md.
@@ -1566,7 +1566,7 @@ impl App {
                 z: vec![Win::Playlist, Win::ChannelRack],
                 no_focus: false,
                 show_browser: true,
-                rack_pos: (317.0, 195.0),
+                rack_pos: crate::arrange::RACK_POS,
                 rack_size: views::rack::DEFAULT_SIZE,
                 rack_scroll_x: 0.0,
                 rack: Default::default(),
@@ -1649,11 +1649,7 @@ impl App {
                 embeds: Default::default(),
                 layout_wins: Default::default(),
                 pat_ui: Default::default(),
-                wins: [
-                    WinState { rect: Rect::new(693.0, 101.0, 1126.0, 378.0), maxed: true, mini: false },
-                    WinState { rect: Rect::new(231.0, 565.0, 1552.0, 435.0), maxed: true, mini: false },
-                    WinState { rect: Rect::new(480.0, 140.0, 1000.0, 640.0), maxed: true, mini: false },
-                ],
+                wins: crate::arrange::default_wins(),
                 screen: (1920.0, 1080.0),
                 display_scale: 1.0,
                 ui_scale: 1.0,
@@ -1817,10 +1813,10 @@ impl App {
             crate::zipped::import(self, path);
             return false;
         }
-        // A project in the layout used before version 24.2 is converted to the newer one as it is read, as FL 26 does
-        // (spec: flp/layouts.md "Saving a file of an older generation"), when FL 20 or later saved it; an older one
-        // gets a dialog that says what to do (spec: flp/events/channels.md "Version scope"), not just a line in the
-        // hint bar.
+        // A project in the layout used before version 24.2 is converted to the current one as it opens, and is saved in
+        // that layout (spec: flp/layouts.md "Converting to the newer layout"). One the conversion cannot handle gets a
+        // dialog that says so, not just a line in the hint bar.
+        // A converted project opens without its path: Save asks for a new file, so the original stays for its own version.
         let mut legacy = None;
         let mut converted = false;
         // A Lemon project file (`crate::native`): its snapshot is the project, its history goes on in the journal.
@@ -1837,11 +1833,10 @@ impl App {
                 b
             })
             .and_then(|b| os_flp::FlpFile::parse(&b).map_err(|e| e.to_string()))
-            .map(|mut f| {
-                converted = os_flp::project::legacy::upgrade(&mut f);
-                f
-            })
-            .and_then(|f| match os_flp::project::load(&f) {
+            .and_then(|mut f| match os_flp::project::upgrade(&mut f).and_then(|c| {
+                converted = c;
+                os_flp::project::load(&f)
+            }) {
                 Ok(p) => Ok((f, p)),
                 Err(os_flp::project::ProjectError::LegacyLayout(v)) => {
                     let e = os_flp::project::ProjectError::LegacyLayout(v.clone()).to_string();
@@ -1854,11 +1849,10 @@ impl App {
             let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
             let saved = if v.trim().is_empty() { "an older version".to_string() } else { format!("version {}", v.trim()) };
             let rest = format!(
-                " yet.\n\nIt was saved by {saved}. Lemon Studio reads projects saved by version {} or later.\n\nOpen the \
-                 project in version 24.2 or later, save it again, then open the new copy here.",
-                os_flp::project::legacy::OLDEST
+                ".\n\nIt was saved by {saved}, in an older file layout that Lemon Studio could not convert.\n\nOpen the project in \
+                 version 24.2 or later, save it again, then open the new copy here."
             );
-            self.tell(crate::dialog::Kind::Info, "Project not supported yet", crate::dialog::spans(&["Lemon Studio cannot open ", &name, &rest]));
+            self.tell(crate::dialog::Kind::Info, "Project not supported", crate::dialog::spans(&["Lemon Studio cannot open ", &name, &rest]));
         }
         match result {
             Ok((file, project)) => {
@@ -2326,6 +2320,11 @@ impl App {
                     self.load_theme_file(&p);
                 }
             }
+            Then::Wallpaper => {
+                if let Some(p) = file {
+                    self.set_wallpaper(&p);
+                }
+            }
             Then::ArpPattern => {
                 if let Some(p) = file {
                     self.arp_command(crate::arpeggiate::ACmd::Pattern(Some(p)));
@@ -2565,6 +2564,8 @@ impl App {
         }
         crate::osc3::store(&mut self.state.project, &self.plugins);
         crate::citrus::store(&mut self.state.project, &self.plugins);
+        crate::slicer::store(&mut self.state.project, &self.plugins);
+        crate::drums::store(&mut self.state.project, &self.plugins);
     }
 
     /// Drops every hosted instance (a new or opened project); `sync_samplers` hosts the new project's samplers.
@@ -2656,6 +2657,8 @@ impl App {
         self.sync_wrapped();
         self.sync_osc3();
         self.sync_citrus();
+        self.sync_slicer();
+        self.sync_drums();
         self.sync_native();
         self.host_deadline = None;
         let samplers = self.state.hosted_rows.iter().filter(|&&r| self.state.project.channels.get(r).is_some_and(|c| c.kind.is_sampler())).count();
@@ -2796,6 +2799,8 @@ impl App {
             self.sync_osc3();
             self.follow_osc3_samples();
             self.sync_citrus();
+            self.sync_slicer();
+            self.sync_drums();
             self.sync_native();
         }
         for (row, path) in std::mem::take(&mut self.state.sample_loads) {
@@ -2949,6 +2954,7 @@ impl App {
                             }
                         }
                         crate::presets::fill_window_menu(self, row, &mut menu);
+                        crate::playlist::fill_plugin_window_menu(&self.state, row, &mut menu);
                         // A channel's window: Replace ▸ lists the generators (an effect slot's stays greyed here; the
                         // mixer's slot menu has its own Replace ▸).
                         if row < self.state.project.channels.len() {
@@ -3052,6 +3058,10 @@ impl App {
                     }
                     Request::Audio(path, channel) => {
                         self.sample_from_plugin(path, channel);
+                        continue;
+                    }
+                    Request::Notes(row, notes) => {
+                        self.notes_from_plugin(row, &notes);
                         continue;
                     }
                     Request::NotAvailable(name) => {
@@ -4401,6 +4411,10 @@ impl App {
             self.invalidate();
         }
         self.follow_device();
+        // Options ▸ Focus selected channel on playback and Auto switch display filter (spec: ui/channel-rack.md §17).
+        if crate::rack::focus_tick(&mut self.state, self.transport.playing()) | crate::rack::filter_tick(&mut self.state) {
+            self.invalidate();
+        }
         self.record_tick();
         self.audio_log.tick();
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
@@ -5987,7 +6001,7 @@ impl App {
                 }
                 Drag::RackDots { x0, p0 } => {
                     let w = p0 as f32 / 100.0 * crate::rack::NAME_W + (x - x0);
-                    let pct = (w / crate::rack::NAME_W * 100.0).round().clamp(30.0, 400.0) as u32;
+                    let pct = (w / crate::rack::NAME_W * 100.0).round().clamp(crate::rack::NAME_PCT_MIN as f32, crate::rack::NAME_PCT_MAX as f32) as u32;
                     crate::rack::relayout(&mut self.state, |s| s.rack.name_pct = pct);
                     self.hint = Cow::Owned(format!("Channel button width: {pct}%"));
                     self.invalidate();
@@ -5999,10 +6013,8 @@ impl App {
                     self.invalidate();
                 }
                 Drag::RackLoopLen { row, y0, v0 } => {
-                    let v = (v0 as i32 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32).clamp(1, crate::rack::MAX_STEPS as i32) as u32;
-                    self.state.rack.loop_len.insert(row, v);
-                    self.state.piano.dirty = true;
-                    self.hint = Cow::Owned(format!("Loop point: {v} steps"));
+                    let hint = crate::rack::set_loop_box(&mut self.state, row, v0 + ((y0 - y) / crate::rack::LEN_DRAG).round() as i32);
+                    self.hint = Cow::Owned(hint);
                     self.invalidate();
                 }
                 Drag::RackGraph => self.rack_graph_at((x, y)),
@@ -7890,9 +7902,8 @@ impl App {
                 return None;
             }
             Some(Action::RackLoopBox(i)) => {
-                let v = (crate::rack::row_len(&self.state, i) as i32 + d).clamp(1, crate::rack::MAX_STEPS as i32) as u32;
-                self.state.rack.loop_len.insert(i, v);
-                self.state.piano.dirty = true;
+                let v = crate::rack::loop_box_value(&self.state, i) + d;
+                crate::rack::set_loop_box(&mut self.state, i, v);
                 return None;
             }
             // Shift+wheel over a channel's name button moves the channel (spec: ui/channel-rack.md §13).
@@ -8112,8 +8123,9 @@ impl App {
             Key::Named(NamedKey::F11) => self.open_settings(views::settings::INFO),
             // Monitor debug panel (views/mondebug.rs) parked 2026-10-09: its values are now the defaults. Uncomment to tune again.
             // Key::Named(NamedKey::F12) => self.state.monitor.debug = !self.state.monitor.debug,
-            // spec: ui/close-windows.md (Shift+F12, Align all channel editors, is not available yet).
-            Key::Named(NamedKey::F12) if !self.shift => self.close_windows(if ctrl {
+            // spec: ui/close-windows.md; Shift+F12 is Align all channel editors (arrange.rs).
+            Key::Named(NamedKey::F12) if self.shift => self.align_channel_editors(),
+            Key::Named(NamedKey::F12) => self.close_windows(if ctrl {
                 CloseAll::Unfocused
             } else if alt {
                 CloseAll::Plugins
@@ -8189,6 +8201,8 @@ impl App {
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("o") => self.act(Action::MenuItem(0, views::menus::FILE_OPEN)),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE)),
             Key::Character(c) if ctrl && self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_AS)),
+            // VIEW ▸ Arrange windows ▸ Realign (spec: ui/menu-submenus.md §2).
+            Key::Character(c) if ctrl && self.shift && !alt && c.eq_ignore_ascii_case("h") => self.arrange(crate::arrange::Layout::Realign),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
             Key::Character(c) if ctrl && self.shift && !alt && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT_MP3)),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
@@ -9179,8 +9193,7 @@ impl App {
             self.sampler_failed.retain(|&r| r != i);
         } else {
             if !s.shown(Win::Plugin) && !s.plugin_moved {
-                let r = views::rack::rect(s);
-                s.plugin_pos = ((r.right() + 8.0).min(1920.0 - 440.0), r.y.min(1080.0 - 210.0));
+                s.plugin_pos = crate::arrange::channel_home(s);
             }
             s.plugin_channel = i;
             s.raise(Win::Plugin);
@@ -9346,7 +9359,7 @@ impl App {
                 s.piano.dirty = true;
             }
             Action::RackGraph => self.state.rack.graph_open = !self.state.rack.graph_open,
-            Action::RackLoopBox(i) => self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::row_len(&self.state, i) }),
+            Action::RackLoopBox(i) => self.drag = Some(Drag::RackLoopLen { row: i, y0: mouse.1, v0: rk::loop_box_value(&self.state, i) }),
             Action::RackGraphArea => {
                 self.rack_graph_at(mouse);
                 self.drag = Some(Drag::RackGraph);
@@ -9526,6 +9539,11 @@ impl App {
             MenuCmd::Rescan => self.start_scan(crate::plugin_db::Mode::Changed),
             // The plugin menus' display mode, as their own radios set it (spec: ui/plugin-menu.md §2-3).
             MenuCmd::View(v) => self.state.message = crate::plugin_menu::run(self, crate::plugin_menu::PlugCmd::View(v)),
+            MenuCmd::Web(url) => {
+                crate::help_links::open(url);
+                self.state.message = Some(format!("Opening {url}"));
+            }
+            MenuCmd::SaveMidiClip => self.save_midi_clipboard(),
             MenuCmd::NewPattern => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
                 if let Some(m) = crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindFirst, at) {
@@ -9571,6 +9589,7 @@ impl App {
             }
             MenuCmd::CloseAll(what) => self.close_windows(what),
             MenuCmd::IntoWorkspace => self.move_into_workspace(),
+            MenuCmd::AlignEditors => self.align_channel_editors(),
             MenuCmd::Typing => self.toggle_typing(),
             MenuCmd::Metronome => self.toggle_metronome(),
             MenuCmd::AudioLog => self.toggle_audio_log(),
@@ -10510,6 +10529,77 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let slot = saved.mixer[1].slots[0].clone().unwrap();
         assert_eq!((slot.name.as_str(), &slot.state), ("Fruity Peak Controller", &fl));
+        assert_eq!(saved.controller_links, vec![link]);
+    }
+
+    /// A project's Vocodex slot opens as Lemon Vocoder with its state (the parts Lemon Vocoder does not play
+    /// included), its sidechain bus takes the input the carrier selector names, and a save writes the same bytes back.
+    // spec: plugins/lemon-vocoder.md "Opened projects"
+    #[test]
+    fn vocodex_slots_open_as_lemon_vocoder() {
+        use crate::plugins::{fx_key, LEMON_VOCODER, VOCODEX_FILE_NAME};
+        use os_engine::effects::vocoder as dsp;
+        let mut fl = dsp::default_state();
+        let at = dsp::settings_at(&fl).unwrap();
+        // The bands at 20, the carrier on the track's second input, the modulator on its own audio; one byte of a
+        // curve Lemon Vocoder does not play changed so the save must keep it.
+        fl[at + 4 * dsp::BANDS..at + 4 * dsp::BANDS + 4].copy_from_slice(&20i32.to_le_bytes());
+        fl[at + 4 * dsp::MOD_INPUT..at + 4 * dsp::MOD_INPUT + 4].copy_from_slice(&0i32.to_le_bytes());
+        fl[at + 4 * dsp::CAR_INPUT..at + 4 * dsp::CAR_INPUT + 4].copy_from_slice(&2i32.to_le_bytes());
+        fl[40] ^= 0x10;
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.project.mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: VOCODEX_FILE_NAME.into(), state: fl.clone() });
+        assert_eq!(crate::project_plugins::slot_ports(&a.state.project, 1, 0), (0, 2), "the sidechain bus takes the carrier's input");
+        a.sync_effects();
+        let key = fx_key(1, 0);
+        assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(LEMON_VOCODER.to_string()));
+        assert_eq!(a.plugins.recreation_file_state(key, VOCODEX_FILE_NAME).as_ref(), Some(&fl), "the state as it was opened");
+        let path = std::env::temp_dir().join(format!("lemon-vocodex-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let slot = saved.mixer[1].slots[0].clone().unwrap();
+        assert_eq!((slot.name.as_str(), &slot.state), (VOCODEX_FILE_NAME, &fl));
+    }
+
+    /// A project's Fruity Formula Controller slot opens as Lemon Formula Controller with its state (the formula and the
+    /// comments too), and a save keeps the FL effect with that state and the project's controller links.
+    // spec: plugins/lemon-formula-controller.md "Opened projects"
+    #[test]
+    fn fl_formula_controller_slots_open_as_lemon_formula_controller() {
+        use crate::plugins::{fx_key, LEMON_FORMULA_CONTROLLER};
+        use os_engine::effects::formula_ctrl::Settings;
+        let comment: Vec<u8> = "Sine".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut tail = vec![4];
+        tail.extend(comment);
+        tail.push(0);
+        let fl = Settings { knobs: [46592, 65536, 32768], formula: "a+Sin(SongTime*Pi)*b*0.5".into(), tail }.to_state();
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.project.mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Formula Controller".into(), state: fl.clone() });
+        let link = os_model::ControllerLink::new(0x7000 + 64, 0, 0x40_0000);
+        a.state.project.controller_links = vec![link.clone()];
+        a.sync_effects();
+        let key = fx_key(1, 0);
+        assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(LEMON_FORMULA_CONTROLLER.to_string()));
+        assert_eq!(a.plugins.recreation_file_state(key, "Fruity Formula Controller").as_ref(), Some(&fl), "the state as it was opened");
+        let path = std::env::temp_dir().join(format!("lemon-fl-formula-controller-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let slot = saved.mixer[1].slots[0].clone().unwrap();
+        assert_eq!((slot.name.as_str(), &slot.state), ("Fruity Formula Controller", &fl));
         assert_eq!(saved.controller_links, vec![link]);
     }
 
@@ -13448,24 +13538,22 @@ mod tests {
         path
     }
 
-    /// A project in the layout used before version 24.2, saved by a version before 20, is refused with a dialog that
-    /// says what to do.
+    /// A project in the layout used before version 24.2, saved by version 12, opens converted too: the file kept for
+    /// saving is the converted one.
     #[test]
-    fn older_projects_get_a_dialog() {
+    fn the_oldest_projects_open_converted() {
         let path = older_project_file("12.3.0.72", "old");
         let mut app = App::new(None);
-        let before = app.state.project.channels.len();
         app.open(path.clone());
         let _ = std::fs::remove_file(&path);
-        assert_eq!(app.state.dialogs.len(), 1);
-        let (title, text) = app.top_message().expect("a message box");
-        assert_eq!(title, "Project not supported yet");
-        assert!(text.contains("version 20 or later") && text.contains("lemon-legacy-"), "{text}");
-        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Could not open")));
-        assert_eq!(app.state.project.channels.len(), before, "the open project stays");
-        // Its Ok closes it (Enter presses the focused button).
-        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter), false, false);
-        assert!(!app.modal_open());
+        assert!(app.state.dialogs.is_empty() && !app.modal_open());
+        assert_eq!(app.state.project.channels.len(), test_project().channels.len());
+        // The file kept for saving is the converted one: every channel block has its end event again.
+        let open = app.state.file.as_ref().expect("the project's file");
+        let events: Vec<os_flp::Event> = open.events().cloned().collect();
+        assert_eq!(events.iter().filter(|e| e.id == 51).count(), test_project().channels.len());
+        assert!(!os_flp::project::is_legacy(&events));
+        assert_eq!(app.state.path, None, "Save asks for a file");
     }
 
     /// A project in the layout used before version 24.2, saved by version 20 or later, opens converted, and Save asks
@@ -13694,7 +13782,7 @@ mod tests {
                 (Kind::Question, "Confirm", spans(&["Save the changes to ", "Demo.flp", " before closing?"]), &[Answer::Yes, Answer::No, Answer::Cancel][..], "question"),
                 (Kind::Warning, "Confirm save as", spans(&["", "Demo.flp", " already exists.\nDo you want to replace it?"]), &[Answer::Yes, Answer::No][..], "warning"),
                 (Kind::Error, "Error", spans(&["The file doesn't exist or has been moved."]), &[Answer::Ok][..], "error"),
-                (Kind::Info, "Project not supported yet", spans(&["Lemon Studio cannot open ", "Old.flp", " yet.\n\nIt was saved by version 12.3. Lemon Studio reads projects saved by version 20 or later."]), &[Answer::Ok][..], "info"),
+                (Kind::Info, "Project not supported", spans(&["Lemon Studio cannot open ", "Old.flp", ".\n\nIt was saved by version 12.3, in an older file layout that Lemon Studio could not convert."]), &[Answer::Ok][..], "info"),
             ] {
                 let mut m = Msg::new(kind, title, text, buttons, Then::Nothing);
                 // As in the app, the replace question starts on No.
@@ -17550,10 +17638,29 @@ mod tests {
         assert_eq!(draw(&mut app, &mut c, 7.62, 2), 8 * 4 * ppq);
         app.state.global_snap.set(Snap::Beat);
         assert_eq!(draw(&mut app, &mut c, 2.78, 3), 11 * ppq);
-        // Its own menu: Main first and marked; Events and Markers are listed greyed.
+        // Its own menu: Main first and marked; Events and Markers last, radios that work.
         let m = pl::snap_menu(&app.state, 0.0, 0.0);
         assert_eq!((m.items[0].label.as_ref(), m.items[0].mark), ("Main", Mark::Radio(true)));
-        assert!(m.items.iter().filter(|i| i.label == "Events" || i.label == "Markers").all(|i| !i.enabled));
+        let n = m.items.len();
+        assert_eq!(m.items[n - 2..].iter().map(|i| (i.label.as_ref(), i.enabled, i.cmd.clone())).collect::<Vec<_>>(), [("Events", true, pl::Cmd::Snap(EditorSnap::Events)), ("Markers", true, pl::Cmd::Snap(EditorSnap::Markers))]);
+        // Markers: a click within 7 px of a time marker lands on it (FL: 6.4 px did, 7.6 px did not), farther off on
+        // the tick under the pointer; Events: on a clip's start or end the same way. The song position on the ruler
+        // follows Markers too.
+        pl::arr_mut(&mut app.state).clips.clear();
+        pl::arr_mut(&mut app.state).markers = vec![os_model::TimeMarker::new(1000, "M")];
+        app.state.playlist.snap = EditorSnap::Markers;
+        let at = |app: &App, px: f32| pl::snap_place(&app.state, &g, g.tick_at(g.x_of(1000.0) + px), false);
+        assert_eq!((at(&app, 4.0), at(&app, -5.0)), (1000, 1000));
+        assert_eq!(at(&app, 8.0), g.tick_at(g.x_of(1000.0) + 8.0) as u32, "farther off: no snapping");
+        assert_eq!(pl::snap_place(&app.state, &g, 1000.0 + 3.0 / g.ppt, true), (1000.0 + 3.0 / g.ppt) as u32, "Alt: no snapping");
+        assert_eq!(pl::grid_snap(&app.state), Snap::None);
+        app.state.playlist.snap = EditorSnap::Events;
+        assert_eq!(at(&app, 3.0), g.tick_at(g.x_of(1000.0) + 3.0) as u32, "markers are not events");
+        pl::arr_mut(&mut app.state).clips.push(os_model::Clip::new(500, 500, 9, os_model::ClipSource::Pattern(1)));
+        assert_eq!((at(&app, 3.0), at(&app, -4.0)), (1000, 1000), "the clip's end");
+        app.state.playlist.snap = EditorSnap::Main;
+        pl::arr_mut(&mut app.state).clips.clear();
+        pl::arr_mut(&mut app.state).markers.clear();
         // Backspace with the playlist focused toggles too.
         backspace(&mut app);
         assert_eq!(now(&app), Snap::None);
@@ -19756,7 +19863,7 @@ mod tests {
         app.state.playlist.popup = Some(mx::track_menu(&app.state, 3, 500.0, 200.0));
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(dir.join("mx_menu.png")).unwrap();
-        app.state.playlist.popup = Some(mx::slot_menu(&app.state, 0, 1500.0, 150.0));
+        app.state.playlist.popup = Some(mx::slot_menu(&app, 0, 1500.0, 150.0));
         frame(&mut app, &mut c, None);
         c.pixmap.save_png(dir.join("mx_slot_menu.png")).unwrap();
     }
@@ -20369,8 +20476,51 @@ mod tests {
         app.state.rack_roll_view = true;
         frame(&mut app, &mut c, None);
         let b = hit_rect(&app, &Action::RackRoll(1));
+        // Clear of the preview's mute button at its left end.
         let shade = |q: f32| at(&c, b.x + b.w * q, b.y + 15.0);
-        assert!(shade(0.05) == shade(0.45) && shade(0.45) != shade(0.55) && shade(0.55) == shade(0.95), "two bars over the width");
+        assert!(shade(0.1) == shade(0.45) && shade(0.45) != shade(0.55) && shade(0.55) == shade(0.95), "two bars over the width");
+    }
+
+    /// The rack's preview options (spec: ui/channel-rack.md §17): Show a mute button on the piano roll preview puts the
+    /// LED's switch on the preview; Show complete piano roll preview unticked lays the preview under the steps.
+    #[test]
+    fn rack_preview_mute_button_and_preview_under_the_steps() {
+        let mut app = App::new(None);
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        app.state.rack_roll_view = true;
+        app.state.rack_size.0 = views::rack::DEFAULT_SIZE.0 + 320.0;
+        let ch = app.state.project.channels[1].index;
+        let ps = crate::rack::per_step(&app.state);
+        let n = app.state.pattern.max(1);
+        crate::patterns::pat_mut(&mut app.state, n).notes.push(os_model::Note { length: ps, ..os_model::Note::step(ch, 12 * ps) });
+        app.state.raise(Win::ChannelRack);
+        frame(&mut app, &mut c, None);
+        let roll = hit_rect(&app, &Action::RackRoll(1));
+        let button = hit_rect(&app, &Action::ChannelEnable(1));
+        assert!(roll.contains(button.cx(), button.cy()), "the button is on the preview");
+        click(&mut app, &mut c, button);
+        assert!(!app.state.project.channels[1].enabled);
+        crate::rack::run(&mut app, crate::rack::RCmd::Opt(crate::rack::PREVIEW_MUTE));
+        frame(&mut app, &mut c, None);
+        let led = hit_rect(&app, &Action::ChannelEnable(1));
+        assert!(!roll.contains(led.cx(), led.cy()), "only the LED");
+
+        // The steps' columns, from the first row's steps (the second row, with a long note, shows its preview).
+        app.state.rack_roll_view = false;
+        frame(&mut app, &mut c, None);
+        let x = |k: u32| (hit_rect(&app, &Action::Step(0, k)).x + 6.0) as u32;
+        let (x10, x12) = (x(10), x(12));
+        app.state.rack_roll_view = true;
+        let column = |c: &Canvas, x: u32| (roll.y as u32 + 2..roll.bottom() as u32 - 2).map(|y| c.pixmap.pixel(x, y).unwrap()).collect::<Vec<_>>();
+        let both = |app: &mut App, c: &mut Canvas| {
+            frame(app, c, None);
+            (column(c, x10), column(c, x12))
+        };
+        let (a, b) = both(&mut app, &mut c);
+        assert_eq!(a, b, "complete: the note is not under its step");
+        crate::rack::run(&mut app, crate::rack::RCmd::Opt(crate::rack::COMPLETE_PREVIEW));
+        let (a, b) = both(&mut app, &mut c);
+        assert_ne!(a, b, "under the steps: the note is under step 12");
     }
 
     /// The Toolbars menu (spec: ui/toolbar-menu.md §8): on the hint panel, on bare toolbar background and as VIEW >
@@ -21342,6 +21492,30 @@ mod tests {
         frame(&mut app, &mut c, None);
     }
 
+    /// The ▸ menu's Quantize song jumps (spec: ui/playlist.md §7a): Off by default, each entry a radio; the unit is a
+    /// beat or 1, 2, 4 or 8 of the project's bars.
+    #[test]
+    fn playlist_quantize_song_jumps() {
+        use crate::playlist::Mark;
+        let mut app = App::new(None);
+        let items = |app: &App| {
+            let m = crate::playlist::options_menu(&app.state, 0.0, 0.0);
+            m.items.into_iter().find(|i| i.label == "Quantize song jumps").unwrap().children
+        };
+        let labels: Vec<String> = items(&app).iter().map(|i| i.label.to_string()).collect();
+        assert_eq!(labels, ["Off", "Beats", "Bars", "2 bars", "4 bars", "8 bars"]);
+        assert!(items(&app).iter().all(|i| i.enabled));
+        assert_eq!(items(&app)[0].mark, Mark::Radio(true));
+        assert_eq!(crate::playlist::jump_unit(&app.state), None);
+        let ppq = u32::from(app.state.project.ppq);
+        for (k, unit) in [(1, ppq), (2, ppq * 4), (5, ppq * 32)] {
+            let c = items(&app)[k].cmd.clone();
+            crate::playlist::run(&mut app, c);
+            assert_eq!(items(&app)[k].mark, Mark::Radio(true));
+            assert_eq!(crate::playlist::jump_unit(&app.state), Some(unit));
+        }
+    }
+
     /// The playlist's time markers (spec: ui/playlist.md §7a): the ▸ menu's Time markers items and the marker menus,
     /// what they add, Move content (FL's measured case), the actions and the time signature dialog, Delete in the
     /// time selection, undo, position order, the song position on a click and on opening.
@@ -21360,7 +21534,7 @@ mod tests {
             pl::arr_mut(&mut app.state).markers = list.iter().map(|&(p, k, n)| M { kind: k, ..M::new(p, n) }).collect();
         };
 
-        // The ▸ menu's submenu in FL's order; what is not built is greyed, Quantize song jumps too.
+        // The ▸ menu's submenu in FL's order; Add two... is greyed without a time selection, as in FL.
         let menu = pl::options_menu(&app.state, 0.0, 0.0);
         let sub = &menu.items.iter().find(|it| it.label == "Time markers").expect("Time markers").children;
         let want = [
@@ -21370,16 +21544,21 @@ mod tests {
             ("Add one every", true),
             ("Add jump to next bar", true),
             ("Add time signature change...", true),
-            ("Add key marker", false),
+            ("Add key marker", true),
             ("Place loop", true),
             ("Delete", true),
             ("Change to marker loop", true),
         ];
         assert_eq!(sub.iter().map(|it| (&*it.label, it.enabled)).collect::<Vec<_>>(), want);
-        assert!(menu.items.iter().any(|it| it.label == "Quantize song jumps" && !it.enabled && it.children.len() == 6));
+        assert!(menu.items.iter().any(|it| it.label == "Quantize song jumps" && it.enabled && it.children.len() == 6));
         pl::run(&mut app, Cmd::MarkerEveryMenu);
         let every = app.state.playlist.popup.take().expect("its list");
         assert_eq!(every.items.iter().map(|it| it.cmd.clone()).collect::<Vec<_>>(), [1, 2, 4, 8].map(Cmd::MarkerEvery));
+        app.state.playlist.range = Some((0, 384));
+        let menu = pl::options_menu(&app.state, 0.0, 0.0);
+        let sub = &menu.items.iter().find(|it| it.label == "Time markers").expect("Time markers").children;
+        assert!(sub[2].label == "Add two..." && sub[2].enabled, "enabled with a time selection");
+        app.state.playlist.range = None;
 
         // Add auto and Add jump to next bar, at the song position, kept in position order; each one undo step.
         let steps = app.state.history.len();
@@ -21484,11 +21663,92 @@ mod tests {
         pl::load_view(&mut app.state);
         assert_eq!(app.state.playlist.pos, 768);
 
+        // Add two...: the base-name box, then FL's "<base> -  start" / "<base> -  end" (two spaces) at the time
+        // selection's ends (measured: bars 7 to 9 gave 2304 and 3072); one undo step.
+        set(&mut app, &[]);
+        app.state.playlist.range = Some((2304, 3072));
+        let steps = app.state.history.len();
+        pl::run(&mut app, Cmd::AddTwoMarkers);
+        app.state.playlist.edit.as_mut().expect("the base name box").text = "Sec".into();
+        pl::commit_edit(&mut app.state);
+        assert_eq!(marks(&app), [mk(2304, M::PLAIN, "Sec -  start"), mk(3072, M::PLAIN, "Sec -  end")]);
+        assert_eq!(app.state.history.len(), steps + 1);
+        // Without a selection it does nothing.
+        app.state.playlist.range = None;
+        pl::run(&mut app, Cmd::AddTwoMarkers);
+        assert!(app.state.playlist.edit.is_none());
+        app.state.playlist.range = Some((2304, 3072));
+        pl::run(&mut app, Cmd::AddTwoMarkers);
+        app.state.playlist.edit.as_mut().expect("the box").text = String::new();
+        pl::commit_edit(&mut app.state);
+        assert_eq!(marks(&app)[1].2, "Marker -  start");
+        app.state.playlist.range = None;
+
         // Every kind's tab paints, with the Start marker's darker pre-roll.
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let kinds = [M::PLAIN, M::MARKER_LOOP, M::SKIP, M::PAUSE, M::LOOP, M::START, M::SIGNATURE, M::PUNCH_IN, M::PUNCH_OUT, M::KEY];
         pl::arr_mut(&mut app.state).markers = kinds.iter().enumerate().map(|(i, &k)| M { kind: k, ..M::new(192 * i as u32, "Name") }).collect();
         frame(&mut app, &mut c, None);
+    }
+
+    /// Add key marker ▸ (spec: ui/playlist.md §7a, flp/events/playlist.md "Key markers"): FL's two columns, a root
+    /// that keeps the list open, and key markers at the song position with the events FL saved for them.
+    #[test]
+    fn playlist_key_markers() {
+        use crate::playlist::{self as pl, Cmd, Mark};
+        use os_model::{Arrangement, TimeMarker as M};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.arrangements = vec![Arrangement::default()];
+        pl::arr_mut(&mut app.state);
+        // The list: Root note C … B (C checked), a column break, Scale: Default, Black notes (checked), the 37 scales.
+        pl::run(&mut app, Cmd::KeyMarkerMenu);
+        let list = app.state.playlist.popup.clone().expect("the list opens");
+        let labels: Vec<&str> = list.items.iter().map(|it| &*it.label).collect();
+        assert_eq!(labels[..3], ["Root note", "C", "C#"]);
+        assert_eq!(labels[13..18], ["", "Scale", "Default", "Black notes", ""]);
+        assert!(list.items[13].col && list.items[17].sep && list.items.len() == 18 + 37);
+        assert_eq!((labels[18], labels[54]), ("Major (Ionian)", "Other Whole Tone"));
+        assert_eq!((list.items[1].mark, list.items[16].mark), (Mark::Radio(true), Mark::Check(true)));
+        // It paints in two columns: the scales start right of the root notes, at the top.
+        if let Ok(mut c) = Canvas::new(1920, 1080, 1.0) {
+            app.state.playlist.popup.as_mut().expect("open").y = 100.0;
+            frame(&mut app, &mut c, None);
+            let (root, scale) = (hit_rect(&app, &Action::PlPopup(1)), hit_rect(&app, &Action::PlPopup(15)));
+            assert!(scale.x > root.x + root.w - 1.0 && scale.y < root.y + root.h, "{root:?} {scale:?}");
+        }
+        // A root note keeps the list open where it was.
+        let was = app.state.playlist.popup.as_ref().map(|p| (p.x, p.y));
+        app.mouse = (900.0, 900.0);
+        pl::run(&mut app, Cmd::KeyRoot(2));
+        let again = app.state.playlist.popup.clone().expect("still open");
+        assert_eq!((Some((again.x, again.y)), again.items[3].mark), (was, Mark::Radio(true)));
+        // A scale adds the marker at the song position and closes the list; one undo step.
+        app.state.playlist.pos = 1536;
+        let steps = app.state.history.len();
+        pl::run(&mut app, Cmd::AddKeyMarker(0));
+        assert!(app.state.playlist.popup.is_none());
+        assert_eq!(app.state.history.len(), steps + 1);
+        let m = pl::markers(&app.state)[0].clone();
+        assert_eq!((m.position, m.kind, m.name.as_str(), m.root, m.flag, m.scale_index, m.scale), (1536, M::KEY, "D Major (Ionian)", 2, 0, 0, 0x94A));
+        assert_eq!(pl::key_items(&app.state)[18].mark, Mark::Check(true), "the scale added is checked");
+        // FL's saves, each marker's events 46, 45, 168 and 101.
+        let ev = |root: u8, k: i32| {
+            let m = M::key(0, root, k);
+            (m.name, m.root, m.flag, m.scale_index, m.scale)
+        };
+        assert_eq!(ev(0, 0), ("C Major (Ionian)".into(), 0, 0, 0, 1322));
+        assert_eq!(ev(1, 0), ("C# Major (Ionian)".into(), 1, 0, 0, 661));
+        assert_eq!(ev(4, 0), ("E Major (Ionian)".into(), 4, 0, 0, 2642));
+        assert_eq!(ev(5, 0), ("F Major (Ionian)".into(), 5, 0, 0, 1321));
+        assert_eq!(ev(0, 10), ("C Minor Natural (Aeolian)".into(), 0, 0, 10, 1189));
+        assert_eq!(ev(11, 36), ("B Other Whole Tone".into(), 11, 0, 36, 2730));
+        assert_eq!(ev(0, 15), ("C Other Arabic".into(), 0, 0, 15, 806));
+        assert_eq!(ev(2, -2), ("Black notes".into(), 0, 0, -2, 1322));
+        assert_eq!(ev(2, -1), ("Default".into(), 2, 1, -1, 4095));
+        // Undo takes it away.
+        pl::run(&mut app, Cmd::Undo);
+        assert!(pl::markers(&app.state).is_empty());
     }
 
     /// Settings > Plugins (spec: ui/plugin-manager.md §2, §4): Add folder... keeps the folder and scans it in the

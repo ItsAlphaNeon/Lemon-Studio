@@ -150,9 +150,57 @@ pub fn paint(ui: &mut Ui, work: Rect) -> bool {
     })
 }
 
+/// VIEW ▸ Background ▸ (spec: ui/menu-submenus.md §3): Set image wallpaper... picks a PNG or JPEG for the applied
+/// theme's workspace picture. The HTML document and the background colour stay greyed (Lemon Studio draws no HTML;
+/// the colour has no picker outside Theme ▸ Adjustments yet).
+pub fn items(_: &crate::app::State) -> Vec<crate::playlist::PItem> {
+    use crate::playlist::{Cmd, PItem};
+    vec![
+        PItem::new("Set image wallpaper...", Cmd::Wallpaper),
+        PItem::new("Set dynamic wallpaper / HTML document...", Cmd::Nothing).off(),
+        PItem::new("Set background color...", Cmd::Nothing).off(),
+    ]
+}
+
+impl crate::app::App {
+    /// Set image wallpaper...: a file dialog for the picture.
+    pub(crate) fn wallpaper_dialog(&mut self) {
+        let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Set image wallpaper", "wallpaper", crate::dialog::Then::Wallpaper)
+            .filter("Picture", &["png", "jpg", "jpeg"])
+            .start(None);
+        self.file_dialog(dlg);
+    }
+
+    /// The applied theme shows picture `path` over the workspace (`BackMode` 2, `BackPicFilename` its absolute name),
+    /// live and kept for the next start, as Theme ▸ Adjustments keep their changes.
+    pub(crate) fn set_wallpaper(&mut self, path: &Path) {
+        let name = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let text = os_theme::fl::set_key(&self.theme_text(), "BackMode", "2");
+        let text = os_theme::fl::set_key(&text, "BackPicFilename", &name.to_string_lossy());
+        self.theme_edit(text);
+        self.theme_store();
+        forget();
+        self.state.message = Some(format!("Wallpaper: {}", name.display()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Set image wallpaper... puts the picture's absolute name in the applied theme with a picture BackMode, so the
+    /// palette shows it.
+    #[test]
+    fn set_image_wallpaper() {
+        let mut app = crate::app::App::new(None);
+        let items = items(&app.state);
+        assert_eq!(items.iter().map(|i| (i.label.to_string(), i.enabled)).collect::<Vec<_>>(), [("Set image wallpaper...".to_string(), true), ("Set dynamic wallpaper / HTML document...".to_string(), false), ("Set background color...".to_string(), false)]);
+        let pic = std::env::temp_dir().join("lemon-wall.png");
+        app.set_wallpaper(&pic);
+        let text = app.state.fl_text.clone().unwrap();
+        assert_eq!(os_theme::fl::get_key(&text, "BackMode").as_deref(), Some("2"));
+        assert_eq!(app.theme.colors.wallpaper.as_deref().map(PathBuf::from), Some(pic));
+    }
 
     /// A relative name is the theme file's folder's, with `\` read as a separator; absolute names and the rest of the
     /// text stay as they were.

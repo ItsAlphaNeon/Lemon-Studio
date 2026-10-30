@@ -149,9 +149,18 @@ pub fn ints(spec: &Spec) -> usize {
     spec.fields.iter().filter(|&&i| byte_of(i).is_none()).map(|&i| i + 1).max().unwrap_or(0).max(spec.settings.len() - bytes)
 }
 
+/// Where the settings' ints start in `b`: after the version and the head, or where the description finds them
+/// ([`Spec::locate`]); `None` when it cannot.
+pub fn base(spec: &Spec, b: &[u8]) -> Option<usize> {
+    match spec.locate {
+        Some(f) => f(b),
+        None => Some(4 * first(spec)),
+    }
+}
+
 /// Where the `n`-th byte setting is: that byte after the ints.
-fn byte_at(spec: &Spec, n: usize) -> usize {
-    4 * (first(spec) + ints(spec)) + n
+fn byte_at(spec: &Spec, b: &[u8], n: usize) -> usize {
+    base(spec, b).unwrap_or(usize::MAX / 2) + 4 * ints(spec) + n
 }
 
 /// The shortest readable saved state: the version field, if any, and the settings' ints.
@@ -163,15 +172,16 @@ pub fn state_len(spec: &Spec) -> usize {
 /// version is read), gives the start.
 pub fn normalized(spec: &Spec, b: Vec<u8>) -> Vec<u8> {
     let version_read = spec.any_version || spec.version.is_none_or(|v| field(&b, 0) <= v);
-    if b.len() >= state_len(spec) && version_read { b } else { default_state(spec) }
+    let whole = base(spec, &b).is_some_and(|o| b.len() >= o + 4 * ints(spec));
+    if whole && b.len() >= state_len(spec) && version_read { b } else { default_state(spec) }
 }
 
 /// Setting `k`'s stored value.
 pub fn setting(spec: &Spec, b: &[u8], k: usize) -> i32 {
     let i = int_of(spec, k);
     match byte_of(i) {
-        Some(n) => b.get(byte_at(spec, n)).map_or(0, |x| i32::from(x & 1)),
-        None => field(b, first(spec) + i),
+        Some(n) => b.get(byte_at(spec, b, n)).map_or(0, |x| i32::from(x & 1)),
+        None => base(spec, b).map_or(0, |o| int_at(b, o + 4 * i)),
     }
 }
 
@@ -180,12 +190,22 @@ pub fn set_setting(spec: &Spec, b: &mut [u8], k: usize, v: i32) {
     let i = int_of(spec, k);
     match byte_of(i) {
         Some(n) => {
-            if let Some(x) = b.get_mut(byte_at(spec, n)) {
+            let at = byte_at(spec, b, n);
+            if let Some(x) = b.get_mut(at) {
                 *x = (*x & !1) | (v & 1) as u8;
             }
         }
-        None => set_field(b, first(spec) + i, v),
+        None => {
+            if let Some(s) = base(spec, b).and_then(|o| b.get_mut(o + 4 * i..o + 4 * i + 4)) {
+                s.copy_from_slice(&v.to_le_bytes());
+            }
+        }
     }
+}
+
+/// The little-endian int32 at byte `o`.
+fn int_at(b: &[u8], o: usize) -> i32 {
+    b.get(o..o + 4).map_or(0, |s| i32::from_le_bytes(s.try_into().unwrap()))
 }
 
 /// Little-endian int32 field `k`.
@@ -201,6 +221,9 @@ pub fn set_field(b: &mut [u8], k: usize, v: i32) {
 
 /// A new instance's saved state (the version, every setting at its start, an int left out at 0, the tail).
 pub fn default_state(spec: &Spec) -> Vec<u8> {
+    if let Some(blank) = spec.blank {
+        return blank();
+    }
     let start = |i: usize| (0..spec.settings.len()).find(|&k| int_of(spec, k) == i).map_or(0, |k| spec.settings[k].start);
     let starts = (0..ints(spec)).flat_map(|i| start(i).to_le_bytes());
     spec.version.iter().flat_map(|v| v.to_le_bytes()).chain(starts).chain(spec.tail.iter().copied()).collect()
@@ -219,8 +242,8 @@ pub fn to_fl(spec: &Spec, vals: &[i32], raw: &[u8]) -> Vec<u8> {
     for (k, &v) in vals.iter().enumerate().take(spec.settings.len()) {
         if decode(spec, k, setting(spec, &b, k)) != v {
             // A state of the version before the byte gains it, and the version that has it.
-            if let Some(n) = byte_of(int_of(spec, k)).filter(|&n| b.len() <= byte_at(spec, n)) {
-                b.resize(byte_at(spec, n) + 1, 0);
+            if let Some(n) = byte_of(int_of(spec, k)).filter(|&n| b.len() <= byte_at(spec, &b, n)) {
+                b.resize(byte_at(spec, &b, n) + 1, 0);
                 if let Some(version) = spec.version {
                     set_field(&mut b, 0, version);
                 }
@@ -368,7 +391,9 @@ mod tests {
     fn a_new_instance_starts_on_the_originals_default_and_its_state_reads_back() {
         for spec in crate::tests::SPECS {
             let b = default_state(spec);
-            assert_eq!(b.len(), state_len(spec) + spec.tail.len());
+            if spec.blank.is_none() {
+                assert_eq!(b.len(), state_len(spec) + spec.tail.len());
+            }
             assert_eq!(values_of(spec, &b), spec.start());
             let p = FxParams::new(spec);
             assert_eq!(p.param_map().len(), spec.settings.len());

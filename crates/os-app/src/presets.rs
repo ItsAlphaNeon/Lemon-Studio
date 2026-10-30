@@ -430,7 +430,16 @@ pub enum PCmd {
     Browse(usize),
     /// Recover from journal: the state written as entry `.2` of journal file `.1` goes back into the instance.
     Recover(usize, PathBuf, u64),
+    /// Copy to B: a copy of the instance's state becomes its spare state (`Hosted::spare`).
+    StoreSpare(usize),
+    /// Swap A / B: the state in use and the spare state change places; one undo step.
+    FlipSpare(usize),
+    /// Display preset name in preset selector: tick (true) or untick it.
+    ShowName(usize, bool),
 }
+
+/// The undo step of Swap A / B.
+pub const FLIP_SPARE: &str = "Swap A / B";
 
 /// The preset header of the instance under `key`.
 fn header(app: &App, key: usize) -> Option<Header> {
@@ -491,10 +500,10 @@ pub fn items(app: &App, key: usize, nested: bool) -> Vec<PItem> {
     v
 }
 
-/// Fills the window menu's Presets section (spec: ui/plugin-window.md "Presets"): "Presets" becomes the list
-/// (a submenu), "Browse presets" and "Save preset as..." work.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// Fills the Presets section of the window menu and of the mixer's slot menu (spec: ui/plugin-window.md "Presets"):
+/// "Presets" becomes the list (a submenu), "Browse presets" and "Save preset as..." work.
 pub fn fill_window_menu(app: &App, key: usize, menu: &mut Popup) {
+    let on = |it: PItem, on: bool| if on { it } else { it.off() };
     for it in menu.items.iter_mut() {
         match &*it.label {
             "Presets" if !it.head => *it = PItem { children: items(app, key, false), ..PItem::new("Presets", Cmd::Nothing) },
@@ -502,6 +511,13 @@ pub fn fill_window_menu(app: &App, key: usize, menu: &mut Popup) {
             "Save preset as..." => *it = PItem::new("Save preset as...", Cmd::Preset(PCmd::SaveAs(key))),
             // The plugin's star in the plugin manager (spec: ui/browser.md §10).
             "Add to favourites" => *it = PItem::new(it.label.clone(), Cmd::Browser(crate::browser::BCmd::Star(key))),
+            "Display preset name in preset selector" => {
+                let shown = app.plugins.hosted.get(&key).map(|h| !h.hide_preset);
+                *it = on(PItem::new(it.label.clone(), Cmd::Preset(PCmd::ShowName(key, shown != Some(true)))).mark(Mark::Check(shown != Some(false))), shown.is_some());
+            }
+            // The spare state (spec: ui/plugin-window.md "Spare state"): Flip is greyed until a state is stored.
+            "Copy to B" => *it = on(PItem::new(it.label.clone(), Cmd::Preset(PCmd::StoreSpare(key))), app.plugins.hosted.contains_key(&key)),
+            "Swap A / B" => *it = on(PItem::new(it.label.clone(), Cmd::Preset(PCmd::FlipSpare(key))), app.plugins.hosted.get(&key).is_some_and(|h| h.spare.is_some())),
             _ => {}
         }
     }
@@ -579,6 +595,16 @@ pub fn run(app: &mut App, c: PCmd) -> Option<String> {
         }
         PCmd::Browse(key) => browse(app, key),
         PCmd::Recover(key, file, seq) => Some(app.recover_state(key, &file, seq)),
+        PCmd::StoreSpare(key) => {
+            let state = app.plugins.state(key)?;
+            app.plugins.hosted.get_mut(&key)?.spare = Some(state);
+            Some("Copied to B".into())
+        }
+        PCmd::FlipSpare(key) => flip_spare(app, key),
+        PCmd::ShowName(key, show) => {
+            app.plugins.show_preset_name(key, show);
+            None
+        }
     };
     app.invalidate();
     msg
@@ -629,6 +655,26 @@ fn load_with(app: &mut App, key: usize, path: &Path, step: bool) -> Option<Strin
         },
         Err(e) => e,
     })
+}
+
+/// Swap A / B: the instance under `key` takes its spare state, and the state it had becomes the spare one
+/// (an A/B compare). One undo step that puts the state in use back. Lemon Studio's choices: the spare state is not part
+/// of undo (undoing a flip leaves the spare state as the flip left it), and the preset shown and the channel's or slot's
+/// name stay as they are.
+fn flip_spare(app: &mut App, key: usize) -> Option<String> {
+    let spare = app.plugins.hosted.get(&key)?.spare.clone()?;
+    let now = app.plugins.state(key)?;
+    let before = side(app, key);
+    if !app.plugins.set_state(key, &spare) {
+        return Some(format!("{} did not take its spare state", app.plugins.hosted.get(&key)?.name));
+    }
+    app.plugins.hosted.get_mut(&key)?.spare = Some(now);
+    app.plugins.mark_edited(key);
+    app.state.params.reread(key);
+    if let Some(before) = before.filter(|b| side(app, key).as_ref() != Some(b)) {
+        crate::control::state_edit(&mut app.state, key, FLIP_SPARE, before);
+    }
+    Some("Swapped A / B".into())
 }
 
 /// Puts `body` into the instance under `key`: the names of listed parameters it does not have, `None` when it did
@@ -1113,6 +1159,66 @@ mod tests {
         assert!(p.children.iter().filter(|i| !i.head).count() >= 2);
         assert!(m.items.iter().any(|i| i.cmd == Cmd::Preset(PCmd::SaveAs(0))));
         assert!(m.items.iter().any(|i| i.cmd == Cmd::Preset(PCmd::Browse(0))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Copy to B keeps a copy of the state; Swap A / B (greyed until then) swaps the state in use
+    /// with it, one undo step that puts the state in use back. The plugin window menu and the mixer's slot menu have both.
+    #[test]
+    fn spare_state_store_and_flip() {
+        let (mut app, dir, _env) = hosted_sampler("spare");
+        let entry = |app: &App, label: &str| {
+            let mut m = crate::playlist::plugin_window_menu(0, false, 0.0, 0.0);
+            fill_window_menu(app, 0, &mut m);
+            m.items.into_iter().find(|i| i.label == label).unwrap()
+        };
+        assert_eq!(entry(&app, "Copy to B").cmd, Cmd::Preset(PCmd::StoreSpare(0)));
+        assert!(entry(&app, "Copy to B").enabled);
+        assert!(!entry(&app, "Swap A / B").enabled, "nothing stored yet");
+        let a = crate::plugins::with_sample_path(&app.plugins.state(0).unwrap(), "C:/x/a.wav").unwrap();
+        assert!(app.plugins.set_state(0, &a));
+        assert_eq!(run(&mut app, PCmd::StoreSpare(0)).as_deref(), Some("Copied to B"));
+        assert!(entry(&app, "Swap A / B").enabled);
+        let b = crate::plugins::with_sample_path(&a, "C:/x/b.wav").unwrap();
+        assert!(app.plugins.set_state(0, &b));
+        let steps = app.state.history.at();
+        assert_eq!(run(&mut app, PCmd::FlipSpare(0)).as_deref(), Some("Swapped A / B"));
+        assert_eq!(app.plugins.sampler_path(0).as_deref(), Some("C:/x/a.wav"), "the stored state is in use");
+        assert_eq!(app.state.history.newest_done(), Some(FLIP_SPARE));
+        assert_eq!(app.state.history.at(), steps + 1);
+        run(&mut app, PCmd::FlipSpare(0));
+        assert_eq!(app.plugins.sampler_path(0).as_deref(), Some("C:/x/b.wav"), "and back");
+        crate::history::undo(&mut app.state);
+        app.host_commands();
+        assert_eq!(app.plugins.sampler_path(0).as_deref(), Some("C:/x/a.wav"), "undo puts the state in use back");
+        // The mixer's slot menu fills the same entries for the slot's plugin.
+        let key = crate::plugins::fx_key(app.state.selected_mixer, 0);
+        let m = crate::mixer::slot_menu(&app, 0, 0.0, 0.0);
+        assert!(m.items.iter().any(|i| i.cmd == Cmd::Preset(PCmd::StoreSpare(key))));
+        assert!(m.items.iter().any(|i| i.cmd == Cmd::Preset(PCmd::FlipSpare(key)) && !i.enabled), "no instance in the slot");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Display preset name in preset selector: ticked by default; unticked, the window's Presets box shows no name.
+    #[test]
+    fn display_preset_name_switch() {
+        let (mut app, dir, _env) = hosted_sampler("shown-name");
+        app.plugins.set_preset(0, Some(dir.join("Rim.ospreset")));
+        let entry = |app: &App| {
+            let mut m = crate::playlist::plugin_window_menu(0, false, 0.0, 0.0);
+            fill_window_menu(app, 0, &mut m);
+            m.items.into_iter().find(|i| i.label == "Display preset name in preset selector").unwrap()
+        };
+        let it = entry(&app);
+        assert_eq!((it.mark, it.cmd, it.enabled), (Mark::Check(true), Cmd::Preset(PCmd::ShowName(0, false)), true));
+        assert_eq!(app.plugins.shown_preset(0).as_deref(), Some("Rim"));
+        run(&mut app, PCmd::ShowName(0, false));
+        assert_eq!(app.plugins.shown_preset(0), None);
+        assert_eq!(app.plugins.preset_name(0).as_deref(), Some("Rim"), "the preset is still known");
+        let it = entry(&app);
+        assert_eq!((it.mark, it.cmd), (Mark::Check(false), Cmd::Preset(PCmd::ShowName(0, true))));
+        run(&mut app, PCmd::ShowName(0, true));
+        assert_eq!(app.plugins.shown_preset(0).as_deref(), Some("Rim"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

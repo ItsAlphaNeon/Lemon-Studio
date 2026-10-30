@@ -257,6 +257,13 @@ pub enum Cmd {
     AddJumpMarker,
     MarkerEveryMenu,
     MarkerEvery(u32),
+    /// Add two... (§7a): the base-name box, then "<base> -  start" and "<base> -  end" at the time selection's ends.
+    AddTwoMarkers,
+    /// Add key marker ▸ (§7a): its two-column list as a menu of its own, a root note (the list stays open) and a scale
+    /// (`os_model::SCALES` index, −1 Default, −2 Black notes), which adds the key marker at the song position.
+    KeyMarkerMenu,
+    KeyRoot(u8),
+    AddKeyMarker(i32),
     AddSignature,
     PlaceLoop,
     DeleteMarkers,
@@ -324,6 +331,8 @@ pub enum Cmd {
     InitControl(u32, f64),
     DeleteInit(u32),
     ResetEmptyTracks,
+    /// Quantize song jumps ▸ (`PlaylistState::jump_quantize`).
+    JumpQuantize(u8),
     /// Browser options menu (spec: ui/browser.md §4).
     Browser(crate::browser::BCmd),
     /// Plugin menus (spec: ui/plugin-menu.md).
@@ -334,6 +343,9 @@ pub enum Cmd {
     Rack(crate::rack::RCmd),
     /// Mixer menus (spec: ui/mixer.md §6-7).
     Mixer(crate::mixer::MCmd),
+    /// A slot command from the plugin window menu of mixer track `.0`'s slot (a mixer or plugin menu command): the
+    /// track is the selected one for the command only.
+    SlotWin(u16, Box<Cmd>),
     /// Plugin parameter menus (spec: plugins/plugin-parameters.md §5-6).
     Param(crate::params::PCmd),
     /// "Enter value..." of a knob or parameter menu (spec: ui/type-in-value.md).
@@ -410,6 +422,10 @@ pub enum Cmd {
     ClockBeat(bool),
     /// A Toolbars menu switch (spec: ui/toolbar-menu.md §8).
     Toolbar(crate::views::toolbar::Switch),
+    /// VIEW ▸ Arrange windows ▸ (`crate::arrange`).
+    Arrange(crate::arrange::Layout),
+    /// VIEW ▸ Background ▸ Set image wallpaper... (`crate::wallpaper`).
+    Wallpaper,
     /// A toolbar preset picked (spec: ui/toolbar-menu.md §8).
     ToolbarPreset(crate::toolbar::PresetId),
     /// The toolbar editor's Save preset as... and Delete preset.
@@ -518,11 +534,15 @@ pub enum EditTarget {
     NewMarker(u32),
     /// Add one every n bars: the base name of "<base> #1", "<base> #2" … (§7a).
     MarkerBase(u32),
+    /// Add two...: the base name of the markers at the time selection's start and end (§7a).
+    MarkerTwo(u32, u32),
     PointValue(u16, usize),
     PatternName(u16),
     /// Mixer track name (spec: ui/mixer.md §2) and a mixer slot's plugin name (§7).
     MixerName(u16),
     SlotName(u16, u8),
+    /// The mixer track menu's Insert multiple...: how many tracks to insert in front of this one.
+    MixerInsert(u16),
     /// The current arrangement's name (§12).
     ArrangementName,
     /// The value box of "Enter value..." and whether it reads normalized values (spec: ui/type-in-value.md).
@@ -576,6 +596,13 @@ pub struct PlaylistState {
     pub track: u16,
     /// Song position (ticks): song playback starts here.
     pub pos: u32,
+    /// The ▸ menu's Quantize song jumps (§7a): a move of the song position while the song plays waits for the next
+    /// beat (1), bar (2), 2, 4 or 8 bars (3 to 5); 0 = Off. Kept for the session only (Lemon Studio's choice).
+    pub jump_quantize: u8,
+    /// Add key marker ▸ (§7a): the Root note radio (0 = C) and the scale last added (a place in `os_model::SCALES`,
+    /// −1 Default, −2 Black notes), which the list checks. Kept for the session only (Lemon Studio's choice).
+    pub key_root: u8,
+    pub key_scale: i32,
     /// Time selection (ticks).
     pub range: Option<(u32, u32)>,
     pub clipboard: Vec<Clip>,
@@ -629,6 +656,9 @@ impl Default for PlaylistState {
             sel: Vec::new(),
             track: 0,
             pos: 0,
+            jump_quantize: 0,
+            key_root: 0,
+            key_scale: -2,
             range: None,
             clipboard: Vec::new(),
             overlay: None,
@@ -1314,15 +1344,34 @@ pub fn clip_at(s: &State, g: &PGeom, x: f32, y: f32) -> Option<usize> {
     clips(s).iter().enumerate().rev().find(|(_, c)| g.clip_rect(c).contains(x, y)).map(|(i, _)| i)
 }
 
-/// The playlist's snap setting with Main read as the global snap (§4). Events and Markers are not available here.
+/// The playlist's snap setting with Main read as the global snap (§4); Events and Markers have no unit, as (none).
 pub fn grid_snap(s: &State) -> Snap {
-    s.playlist.snap.grid(s.global_snap.now).unwrap_or(Snap::Line)
+    s.playlist.snap.grid(s.global_snap.now).unwrap_or(Snap::None)
+}
+
+/// Events and Markers catch a target this close: in FL's playlist a click 6.4 px from a marker landed on it, 7.6 and
+/// 8.4 px away on the tick under the pointer (ui/playlist.md §4).
+const CATCH_PX: f32 = 7.0;
+
+/// What Events and Markers catch in the playlist: its time markers (measured), or the starts and ends of the
+/// arrangement's clips (`skip`: clips being dragged; Lemon Studio's reading of the piano roll's rule); the one nearest
+/// `tick` within 7 px.
+fn catch(s: &State, g: &PGeom, tick: f32, skip: &[usize]) -> Option<u32> {
+    let targets: Vec<u32> = match s.playlist.snap {
+        EditorSnap::Events => clips(s).iter().enumerate().filter(|(i, _)| !skip.contains(i)).flat_map(|(_, c)| [c.position, c.end()]).collect(),
+        EditorSnap::Markers => markers(s).iter().map(|m| m.position).collect(),
+        _ => return None,
+    };
+    targets.into_iter().map(|t| (t, (t as f32 - tick).abs() * g.ppt)).filter(|&(_, px)| px <= CATCH_PX).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(t, _)| t)
 }
 
 /// Where a click at `tick` lands (§4): the nearest unit (Cell: the start of the cell it is in), the tick under the
-/// pointer for (none). Alt: no snapping.
+/// pointer for (none); under Events and Markers a clip edge or marker within 7 px, else the tick. Alt: no snapping.
 pub fn snap_place(s: &State, g: &PGeom, tick: f32, alt: bool) -> u32 {
     let t = tick.max(0.0);
+    if !alt && let Some(c) = catch(s, g, t, &[]) {
+        return c;
+    }
     let sn = grid_snap(s);
     if alt || sn == Snap::None {
         return t as u32;
@@ -1337,8 +1386,20 @@ fn snap_down(s: &State, g: &PGeom, tick: f32, alt: bool) -> u32 {
     if alt {
         return t;
     }
+    if let Some(c) = catch(s, g, tick.max(0.0), &[]) {
+        return c;
+    }
     let u = grid_snap(s).ticks(g.ppq, g.bar_w);
     t - t % u
+}
+
+/// A drag's delta for the edge at `from` (a moved clip's start, a resized edge): under Events and Markers the edge goes
+/// to a clip edge or marker within 7 px (`skip`: the dragged clips); otherwise [`snap_delta`].
+fn snap_edge(s: &State, g: &PGeom, from: u32, dt: f32, alt: bool, skip: &[usize]) -> i64 {
+    match catch(s, g, from as f32 + dt, skip) {
+        Some(c) if !alt => i64::from(c) - i64::from(from),
+        _ => snap_delta(s, g, dt, alt),
+    }
 }
 
 /// Snap a tick delta to the nearest snap unit.
@@ -2375,19 +2436,8 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Zoom on selection", Cmd::ZoomSelection).key("Shift+5"),
             ],
         ),
-        PItem::sub("Time markers", time_marker_items()),
-        // Not built yet: it opens to show its list (§7a).
-        PItem {
-            children: vec![
-                PItem::not_yet("Off").mark(Mark::Radio(true)),
-                PItem::not_yet("Beats"),
-                PItem::not_yet("Bars"),
-                PItem::not_yet("2 bars"),
-                PItem::not_yet("4 bars"),
-                PItem::not_yet("8 bars"),
-            ],
-            ..PItem::not_yet("Quantize song jumps")
-        },
+        PItem::sub("Time markers", time_marker_items(s)),
+        PItem::sub("Quantize song jumps", jump_items(s)),
         PItem::sep(),
         PItem::new("Reset empty tracks", Cmd::ResetEmptyTracks),
     ];
@@ -2395,21 +2445,56 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
 }
 
 /// The ▸ menu's Time markers submenu (§7a), in FL's order. FL's Ctrl+T for Add auto is not bound: in Lemon Studio
-/// Ctrl+T switches the typing keyboard. Add two... and Add key marker are not built yet. Add one every opens its list
-/// as a menu of its own (a submenu holds no submenus here).
-fn time_marker_items() -> Vec<PItem> {
+/// Ctrl+T switches the typing keyboard. Add two... is greyed without a time selection, as in FL. Add one every and
+/// Add key marker open their lists as menus of their own (a submenu holds no submenus here).
+fn time_marker_items(s: &State) -> Vec<PItem> {
+    let two = PItem::new("Add two...", Cmd::AddTwoMarkers);
     vec![
         PItem::new("Add one...", Cmd::AddMarker).key("Alt+T"),
         PItem::new("Add auto", Cmd::AddAutoMarker),
-        PItem::not_yet("Add two..."),
+        if s.playlist.range.is_some() { two } else { two.off() },
         PItem { children: every_items(), ..PItem::new("Add one every", Cmd::MarkerEveryMenu) },
         PItem::new("Add jump to next bar", Cmd::AddJumpMarker),
         PItem::new("Add time signature change...", Cmd::AddSignature).key("Shift+Alt+T"),
-        PItem { children: vec![PItem::not_yet("Root note"), PItem::not_yet("Scale")], ..PItem::not_yet("Add key marker") },
+        PItem { children: key_items(s), ..PItem::new("Add key marker", Cmd::KeyMarkerMenu) },
         PItem::new("Place loop", Cmd::PlaceLoop).key("Shift+T"),
         PItem::new("Delete", Cmd::DeleteMarkers),
         PItem::new("Change to marker loop", Cmd::ToMarkerLoop),
     ]
+}
+
+/// Quantize song jumps ▸ (§7a): Off, Beats, Bars, 2, 4 or 8 bars.
+fn jump_items(s: &State) -> Vec<PItem> {
+    JUMP_UNITS.iter().enumerate().map(|(k, l)| PItem::new(*l, Cmd::JumpQuantize(k as u8)).mark(Mark::Radio(s.playlist.jump_quantize == k as u8))).collect()
+}
+
+const JUMP_UNITS: [&str; 6] = ["Off", "Beats", "Bars", "2 bars", "4 bars", "8 bars"];
+
+/// The unit a song position move waits for while the song plays (Quantize song jumps), in ticks; `None` = Off. Bars
+/// are the project's (time signature markers do not change them).
+pub(crate) fn jump_unit(s: &State) -> Option<u32> {
+    let bar = s.project.bar_ticks();
+    match s.playlist.jump_quantize {
+        1 => Some(u32::from(s.project.ppq.max(1))),
+        2 => Some(bar),
+        3 => Some(bar * 2),
+        4 => Some(bar * 4),
+        5 => Some(bar * 8),
+        _ => None,
+    }
+}
+
+/// Add key marker ▸ (§7a), FL's two columns: "Root note" with C … B (radio), then "Scale" with Default, Black notes
+/// and the scale list; the scale last added is checked.
+pub(crate) fn key_items(s: &State) -> Vec<PItem> {
+    let pl = &s.playlist;
+    let mut items = vec![PItem::head("Root note")];
+    items.extend(os_model::NOTE_NAMES.iter().enumerate().map(|(k, n)| PItem::new(*n, Cmd::KeyRoot(k as u8)).mark(Mark::Radio(pl.key_root == k as u8))));
+    items.extend([PItem::col(), PItem::head("Scale")]);
+    let check = |k: i32| Mark::Check(pl.key_scale == k);
+    items.extend([PItem::new("Default", Cmd::AddKeyMarker(-1)).mark(check(-1)), PItem::new("Black notes", Cmd::AddKeyMarker(-2)).mark(check(-2)), PItem::sep()]);
+    items.extend(os_model::SCALES.iter().enumerate().map(|(k, (n, _))| PItem::new(*n, Cmd::AddKeyMarker(k as i32)).mark(check(k as i32))));
+    items
 }
 
 /// Add one every ▸ (§7a): every bar, 2, 4 or 8 bars.
@@ -2417,14 +2502,13 @@ fn every_items() -> Vec<PItem> {
     [(1, "Bar"), (2, "2 bars"), (4, "4 bars"), (8, "8 bars")].into_iter().map(|(n, l)| PItem::new(l, Cmd::MarkerEvery(n))).collect()
 }
 
-/// The magnet's Snap menu and the ▸ menu's Snap submenu (§4): Main, Line, Cell, (none) to Bar; Events and Markers
-/// are not available yet.
+/// The magnet's Snap menu and the ▸ menu's Snap submenu (§4): Main, Line, Cell, (none) to Bar, Events and Markers.
 fn snap_items(s: &State) -> Vec<PItem> {
     let now = s.playlist.snap;
     let radio = |p: EditorSnap| PItem::new(p.label(), Cmd::Snap(p)).mark(Mark::Radio(now == p));
     let mut items = vec![radio(EditorSnap::Main), PItem::sep(), radio(EditorSnap::Grid(Snap::Line)), radio(EditorSnap::Grid(Snap::Cell)), PItem::sep()];
     items.extend(Snap::MENU.iter().filter(|sn| !matches!(sn, Snap::Line | Snap::Cell)).map(|&sn| radio(EditorSnap::Grid(sn))));
-    items.extend([PItem::sep(), PItem::not_yet("Events"), PItem::not_yet("Markers")]);
+    items.extend([PItem::sep(), radio(EditorSnap::Events), radio(EditorSnap::Markers)]);
     items
 }
 
@@ -2468,6 +2552,8 @@ pub enum PickCmd {
     ChangeColor,
     RandomColor,
     LoadSample,
+    EditSample,
+    CutItself,
     Clone,
     Delete,
 }
@@ -2491,9 +2577,14 @@ pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
         PItem::sep(),
     ]);
     if audio {
-        items.extend([it("Load sample...", PickCmd::LoadSample), PItem::not_yet("Edit sample...")]);
+        // Greyed while the channel has no sample to open.
+        let edit = it("Edit sample...", PickCmd::EditSample);
+        let has = s.project.channel(ch).is_some_and(|c| c.sample_path.as_deref().is_some_and(|p| !p.is_empty()));
+        items.extend([it("Load sample...", PickCmd::LoadSample), if has { edit } else { edit.off() }]);
     }
-    items.extend([PItem::not_yet("Chokes itself").mark(Mark::Check(true)), PItem::sep(), it("Clone", PickCmd::Clone)]);
+    // Ticked while the channel's cut and cut by are one group, as on the rack's channel menu (ui/channel-rack.md §18).
+    let cuts = s.project.channel(ch).is_some_and(|c| crate::rack::cuts_itself(&c.misc));
+    items.extend([it("Chokes itself", PickCmd::CutItself).mark(Mark::Check(cuts)), PItem::sep(), it("Clone", PickCmd::Clone)]);
     if !audio {
         items.push(it("Clone with links", PickCmd::Clone));
     }
@@ -2528,10 +2619,40 @@ fn pick(app: &mut App, c: PickCmd, ch: u16) -> Option<String> {
             s.piano.dirty = true;
         }
         PickCmd::LoadSample => return crate::rack::run(app, crate::rack::RCmd::LoadSample(row)),
+        PickCmd::EditSample => return edit_sample(app, row),
+        // Through the rack's command, so it is one undo step there too.
+        PickCmd::CutItself => return crate::rack::run(app, crate::rack::RCmd::CutItself(row)),
         PickCmd::Clone => crate::rack::clone_rows(app, &[row]),
         PickCmd::Delete => crate::rack::ask_delete(s, vec![row]),
     }
     None
+}
+
+/// Edit sample... of a picker item (Lemon Studio's design; the original opens its audio editor): rack row `row`'s
+/// sample goes into Tesla on the master track, its first Tesla when that holds no sample, else a new one in the first
+/// free slot, as Open capture in audio editor puts the retro audio capture there (spec: plugins/tesla/README.md
+/// "Recording into Tesla from Lemon Studio"). Tesla keeps the file's path; the channel keeps its sample as it was.
+fn edit_sample(app: &mut App, row: usize) -> Option<String> {
+    let path = app.state.project.channels.get(row)?.sample_path.clone().filter(|p| !p.is_empty())?;
+    let file = std::path::PathBuf::from(crate::plugins::resolve_sample(&path));
+    let name = file.file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+    // A WAV keeps its own sample format; other files are decoded as the engine plays them.
+    let sample = match std::fs::read(&file).map_err(|e| e.to_string()).and_then(|b| tesla::wav::read(&b)) {
+        Ok(s) => s,
+        Err(_) => match os_engine::sample::load(&file) {
+            Ok(s) => tesla::sample::Sample::from_channels(s.rate, vec![s.left, s.right], tesla::sample::Format::Float32),
+            Err(e) => return Some(format!("{name} could not be read: {e}")),
+        },
+    };
+    let text = file.to_string_lossy().into_owned();
+    if app.tesla_for_recording(0, |s| {
+        s.sample = sample;
+        s.path = text;
+    }) {
+        Some(format!("{name} is in the audio editor"))
+    } else {
+        app.state.message.take()
+    }
 }
 
 /// "Edit automation clip..." of a parameter menu (spec: plugins/plugin-parameters.md §5.2, a Lemon Studio choice): the
@@ -3228,7 +3349,8 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
     let g = PGeom::new(s, grid);
     match d {
         PlDrag::Move { x0, y0, orig, .. } => {
-            let mut dt = snap_delta(s, &g, (x - x0) / g.ppt, alt);
+            let skip: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
+            let mut dt = orig.first().map_or(0, |(_, c)| snap_edge(s, &g, c.position, (x - x0) / g.ppt, alt, &skip));
             let min_pos = orig.iter().map(|(_, c)| i64::from(c.position)).min().unwrap_or(0);
             dt = dt.max(-min_pos);
             let dk = i32::from(g.track_at(y)) - i32::from(g.track_at(y0));
@@ -3245,7 +3367,8 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             s.piano.dirty = true;
         }
         PlDrag::ResizeR { x0, orig } => {
-            let dt = snap_delta(s, &g, (x - x0) / g.ppt, alt);
+            let skip: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
+            let dt = orig.first().map_or(0, |(_, c)| snap_edge(s, &g, c.end(), (x - x0) / g.ppt, alt, &skip));
             let min = if alt { 1 } else { grid_snap(s).ticks(g.ppq, g.bar_w) } as i64;
             for &(i, o) in &orig {
                 let len = (i64::from(o.length) + dt).max(min) as u32;
@@ -3255,7 +3378,8 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             }
         }
         PlDrag::ResizeL { x0, orig } => {
-            let dt = snap_delta(s, &g, (x - x0) / g.ppt, alt);
+            let skip: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
+            let dt = orig.first().map_or(0, |(_, c)| snap_edge(s, &g, c.position, (x - x0) / g.ppt, alt, &skip));
             for &(i, o) in &orig {
                 let dt = dt.clamp(-i64::from(o.position), i64::from(o.length) - 1);
                 let (pos, len) = ((i64::from(o.position) + dt) as u32, (i64::from(o.length) - dt) as u32);
@@ -3734,7 +3858,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::TrackName(t) => track_name(s, t),
         EditTarget::ArrangementName => arrangement_name(s),
         EditTarget::MarkerName(i) => markers(s).get(i).map(|m| m.name.clone()).unwrap_or_default(),
-        EditTarget::NewMarker(_) | EditTarget::MarkerBase(_) => String::new(),
+        EditTarget::NewMarker(_) | EditTarget::MarkerBase(_) | EditTarget::MarkerTwo(..) => String::new(),
         EditTarget::PointValue(ch, i) => {
             let v = s.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.value);
             match s.project.automation(ch).and_then(|a| a.target()).map(target::decode) {
@@ -3745,6 +3869,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::PatternName(n) => source_name(s, ClipSource::Pattern(n)),
         EditTarget::MixerName(n) => crate::mixer::name(s, n),
         EditTarget::SlotName(t, k) => crate::mixer::slot_name(s, t, k).unwrap_or_default(),
+        EditTarget::MixerInsert(_) => "2".into(),
         EditTarget::TypeIn(t, norm) => crate::typein::text(s, t, norm),
     };
     s.playlist.edit = Some(TextEdit { target, text, at, sel: false });
@@ -3781,6 +3906,12 @@ pub fn commit_edit(s: &mut State) {
             let base = if text.is_empty() { "Marker".to_string() } else { text };
             add_every(s, n, &base);
         }
+        EditTarget::MarkerTwo(a, b) => {
+            // FL's names, two spaces included: "Sec -  start", "Sec -  end" (measured).
+            let base = if text.is_empty() { "Marker".to_string() } else { text };
+            add_marker(s, TimeMarker::new(a, &format!("{base} -  start")));
+            add_marker(s, TimeMarker::new(b, &format!("{base} -  end")));
+        }
         EditTarget::PointValue(ch, i) => {
             if let Some(v) = parse_value(s, ch, &text) {
                 let beat = s.project.automation(ch).and_then(|a| a.points.get(i)).map_or(0.0, |p| p.beat);
@@ -3803,6 +3934,7 @@ pub fn commit_edit(s: &mut State) {
             }
         }),
         EditTarget::TypeIn(t, norm) => crate::typein::accept(s, t, norm, &text),
+        EditTarget::MixerInsert(n) => s.message = crate::mixer::insert_many(s, n, &text),
         EditTarget::PatternName(n) => crate::control::edit(s, "Pattern name", crate::control::command::Region::Project, |s| {
             if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == n) {
                 p.name = (!text.is_empty()).then_some(text);
@@ -3820,7 +3952,7 @@ pub fn commit_edit(s: &mut State) {
 /// Run a menu / shortcut command. Returns a status message, if any.
 pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid = app.pl_grid();
-    app.state.playlist.popup = None;
+    let was = app.state.playlist.popup.take();
     // Commands that need the whole app.
     match cmd {
         Cmd::Browser(b) => return app.browser_cmd(b),
@@ -3828,6 +3960,12 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Project(c) => return crate::project_picker::run(app, c),
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
+        Cmd::SlotWin(t, c) => {
+            let was = std::mem::replace(&mut app.state.selected_mixer, t);
+            let m = run(app, *c);
+            app.state.selected_mixer = was;
+            return m;
+        }
         Cmd::Param(c) => return app.params_cmd(c),
         Cmd::EditEvents(tgt, name, v, range) => return app.edit_events(tgt, &name, v, range),
         Cmd::Events(c) => return app.events_cmd(c),
@@ -3844,6 +3982,14 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::Toolbar(sw) => {
             app.toolbar_switch(sw);
+            return None;
+        }
+        Cmd::Arrange(l) => {
+            app.arrange(l);
+            return None;
+        }
+        Cmd::Wallpaper => {
+            app.wallpaper_dialog();
             return None;
         }
         Cmd::ToolbarPreset(id) => {
@@ -3881,6 +4027,19 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::MarkerEveryMenu => {
             let (x, y) = app.mouse;
             app.state.playlist.popup = Some(Popup { x, y, items: every_items(), sub: None, scroll: [0; 2] });
+            app.invalidate();
+            return None;
+        }
+        // The key marker list opens as a menu of its own; a root note keeps it open where it was, as in FL.
+        Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => {
+            if let Cmd::KeyRoot(r) = cmd {
+                app.state.playlist.key_root = r % 12;
+            }
+            let (x, y) = match (&was, cmd) {
+                (Some(p), Cmd::KeyRoot(_)) if p.sub.is_none() => (p.x, p.y),
+                _ => app.mouse,
+            };
+            app.state.playlist.popup = Some(Popup { x, y, items: key_items(&app.state), sub: None, scroll: [0; 2] });
             app.invalidate();
             return None;
         }
@@ -4061,7 +4220,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Layout(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::Layout(_) | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::SlotWin(..) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -4248,6 +4407,21 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::MarkerEvery(n) => {
             let at = grid.map_or((600.0, 200.0), |g| (g.x + 40.0, g.y));
             start_edit(s, EditTarget::MarkerBase(n), at);
+            None
+        }
+        Cmd::AddTwoMarkers => {
+            let (a, b) = s.playlist.range?;
+            let at = grid.map_or((600.0, 200.0), |g| (PGeom::new(s, g).x_of(a as f32), g.y));
+            start_edit(s, EditTarget::MarkerTwo(a, b), at);
+            None
+        }
+        Cmd::AddKeyMarker(k) => {
+            // At the song position (measured: with it at bar 5, and at a time selection's start, which the song
+            // position follows), named after the root and scale; one undo step.
+            snapshot(s);
+            s.playlist.key_scale = k;
+            let pos = s.playlist.pos;
+            add_marker(s, TimeMarker::key(pos, s.playlist.key_root, k));
             None
         }
         Cmd::PlaceLoop | Cmd::PlaceLoopAt(_) => {
@@ -4511,6 +4685,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         }
         Cmd::DeleteInit(tgt) => {
             crate::init::delete(s, tgt);
+            None
+        }
+        Cmd::JumpQuantize(q) => {
+            s.playlist.jump_quantize = q;
             None
         }
         Cmd::ResetEmptyTracks => {
@@ -4843,8 +5021,8 @@ pub fn rescale(s: &mut State, from: u16, to: u16) {
     }
 }
 
-/// The plugin window's ▸ menu (spec: ui/plugin-window.md "Docking and the window menu"): FL's entries, only Detached
-/// works yet.
+/// The plugin window's ▸ menu (spec: ui/plugin-window.md "Docking and the window menu"): FL's entries; Detached and
+/// Browse parameters work here, `fill_plugin_window_menu` and `presets::fill_window_menu` enable more.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
     let items = vec![
@@ -4856,6 +5034,7 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::not_yet("Browse presets"),
         PItem::not_yet("Save preset as..."),
         PItem::not_yet("Add to favourites"),
+        PItem::not_yet("Display preset name in preset selector").mark(Mark::Check(true)),
         PItem::head("A/B compare"),
         PItem::not_yet("Copy to B"),
         PItem::not_yet("Swap A / B"),
@@ -4880,4 +5059,185 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::new("Route to free mixer track", Cmd::Rack(crate::rack::RCmd::AssignFree(row))).key("Ctrl+L"),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// Enables the window menu's entries that act on the window's channel or slot (`key`, a rack row or a `fx_key`; spec:
+/// ui/plugin-window.md "Lemon Studio: the channel and slot entries"). A channel's window: Piano roll, Delete...,
+/// Rename, color and icon..., Change color... and Random color are the rack's channel menu entries of those names
+/// (ui/channel-rack.md §18), the boxes opening at the mouse as the picker's do. An effect slot's window: Replace ▸,
+/// Delete... and Rename, color and icon... are the mixer slot menu's (ui/mixer.md §7.2), on that slot whichever track
+/// is selected; the others stay greyed there.
+pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
+    use crate::mixer::MCmd;
+    use crate::rack::RCmd;
+    let set = |it: &mut PItem, cmd: Cmd| {
+        it.cmd = cmd;
+        it.enabled = true;
+    };
+    if let Some((t, k)) = crate::plugins::fx_of(key) {
+        // Every command of the slot's entries runs with its track selected.
+        fn on_track(t: u16, items: &mut [PItem]) {
+            for it in items.iter_mut() {
+                if it.cmd != Cmd::Nothing {
+                    it.cmd = Cmd::SlotWin(t, Box::new(std::mem::replace(&mut it.cmd, Cmd::Nothing)));
+                }
+                on_track(t, &mut it.children);
+            }
+        }
+        for it in menu.items.iter_mut() {
+            match &*it.label {
+                "Replace" => {
+                    let mut replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(k)), true);
+                    on_track(t, &mut replace);
+                    *it = PItem::sub("Replace", replace);
+                }
+                "Delete..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::SlotDelete(k))))),
+                "Rename, color and icon..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::SlotRename(k))))),
+                _ => {}
+            }
+        }
+        return;
+    }
+    let Some(ch) = s.project.channels.get(key).map(|c| c.index) else { return };
+    for it in menu.items.iter_mut() {
+        match &*it.label {
+            "Piano roll" => set(it, Cmd::Rack(RCmd::PianoRoll(key))),
+            "Delete..." => set(it, Cmd::Rack(RCmd::Delete(key))),
+            "Rename, color and icon..." => set(it, Cmd::Pick(PickCmd::Rename, ch)),
+            "Change color..." => set(it, Cmd::Pick(PickCmd::ChangeColor, ch)),
+            "Random color" => set(it, Cmd::Rack(RCmd::RandomColor(key))),
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> App {
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        app
+    }
+
+    fn entry<'a>(m: &'a Popup, label: &str) -> &'a PItem {
+        m.items.iter().find(|i| i.label == label && !i.head).expect(label)
+    }
+
+    /// The picker's Chokes itself is the rack's (ui/channel-rack.md §18): ticked while the channel cuts itself, ticking
+    /// takes the lowest free cut group, unticking clears it, and each is one undo step.
+    #[test]
+    fn picker_cut_itself() {
+        let mut app = app();
+        app.state.project.channels[0].kind = os_model::ChannelKind::AudioClip;
+        let ch = app.state.project.channels[0].index;
+        let it = |app: &App| entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Chokes itself").clone();
+        assert!(it(&app).enabled);
+        assert_eq!(it(&app).mark, Mark::Check(false));
+        let cmd = it(&app).cmd;
+        run(&mut app, cmd);
+        let m = &app.state.project.channels[0].misc;
+        assert_eq!((m.cut, m.cut_by), (1, 1));
+        assert_eq!(it(&app).mark, Mark::Check(true));
+        let cmd = it(&app).cmd;
+        run(&mut app, cmd);
+        let m = &app.state.project.channels[0].misc;
+        assert_eq!((m.cut, m.cut_by), (0, 0));
+        crate::history::undo(&mut app.state);
+        assert_eq!(it(&app).mark, Mark::Check(true), "one undo step");
+    }
+
+    /// Edit sample... (Lemon Studio's design): greyed without a sample; with one, the sample goes into Tesla on the
+    /// master track.
+    #[test]
+    fn picker_edit_sample_opens_tesla() {
+        let mut app = app();
+        app.plugins.effects = crate::plugins::builtin_effects();
+        app.state.project.channels[0].kind = os_model::ChannelKind::AudioClip;
+        app.state.project.channels[0].sample_path = None;
+        let ch = app.state.project.channels[0].index;
+        assert!(!entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Edit sample...").enabled, "no sample");
+        let dir = std::env::temp_dir().join(format!("ls_edit_sample_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Tone.wav");
+        let tone = tesla::sample::Sample::from_channels(44100, vec![vec![0.25; 4410], vec![-0.25; 4410]], tesla::sample::Format::Int16);
+        std::fs::write(&file, tesla::wav::write(&tone, tesla::wav::Depth::Own)).unwrap();
+        app.state.project.channels[0].sample_path = Some(file.to_string_lossy().into_owned());
+        let it = entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Edit sample...").clone();
+        assert!(it.enabled);
+        assert_eq!(run(&mut app, it.cmd).as_deref(), Some("Tone.wav is in the audio editor"));
+        let Some(crate::mixer::FxReq::Create { track: 0, state: Some(st), .. }) = app.state.mixer.pending.last().cloned() else {
+            panic!("{:?}", app.state.mixer.pending)
+        };
+        let saved = tesla::state::from_plugin_state(&st).unwrap();
+        assert_eq!((saved.sample.frames(), saved.sample.rate), (4410, 44100));
+        assert_eq!(std::path::PathBuf::from(&saved.path), file);
+        assert_eq!(app.state.project.channels[0].sample_path.as_deref(), Some(file.to_string_lossy().as_ref()), "the channel keeps its sample");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A channel's plugin window menu: Piano roll, Delete..., Rename, color and icon..., Change color... and Random
+    /// color are the rack's channel entries.
+    #[test]
+    fn channel_window_menu_entries() {
+        use crate::app::Win;
+        let mut app = app();
+        let mut m = plugin_window_menu(1, false, 0.0, 0.0);
+        fill_plugin_window_menu(&app.state, 1, &mut m);
+        for label in ["Piano roll", "Delete...", "Rename, color and icon...", "Change color...", "Random color"] {
+            assert!(entry(&m, label).enabled, "{label}");
+        }
+        for label in ["Link all parameters...", "Allow threaded processing", "Auto-bypass when silent", "Change icon...", "Save channel state as...", "Browse channel states"] {
+            assert!(!entry(&m, label).enabled, "{label} stays greyed");
+        }
+        run(&mut app, entry(&m, "Piano roll").cmd.clone());
+        assert!(app.state.shown(Win::PianoRoll));
+        assert_eq!(app.state.selected_channel, 1);
+        let before = app.state.project.channels[1].color;
+        run(&mut app, entry(&m, "Random color").cmd.clone());
+        assert_ne!(app.state.project.channels[1].color, before);
+        run(&mut app, entry(&m, "Rename, color and icon...").cmd.clone());
+        assert!(app.state.pat_ui.name_box.is_some(), "the name box opens");
+        app.state.pat_ui.name_box = None;
+        run(&mut app, entry(&m, "Change color...").cmd.clone());
+        assert!(app.state.pat_ui.name_box.as_ref().is_some_and(|b| b.palette), "with its palette");
+        app.state.pat_ui.name_box = None;
+        run(&mut app, entry(&m, "Delete...").cmd.clone());
+        assert!(app.state.rack.pending_delete.is_some() || app.state.rack.delete_now.is_some(), "asks first");
+    }
+
+    /// An effect slot's window menu: Replace ▸, Delete... and Rename, color and icon... act on that slot, whichever
+    /// mixer track is selected; the channel entries stay greyed.
+    #[test]
+    fn slot_window_menu_entries() {
+        let mut app = app();
+        app.plugins.effects = crate::plugins::builtin_effects();
+        app.state.plugdb.rebuild(&app.plugins);
+        let (t, k) = (3u16, 2u8);
+        crate::mixer::track_mut(&mut app.state, t).unwrap().slots[usize::from(k)] = Some(crate::plugins::new_slot("Test FX"));
+        app.state.selected_mixer = 5;
+        let key = crate::plugins::fx_key(t, k);
+        let mut m = plugin_window_menu(key, false, 0.0, 0.0);
+        fill_plugin_window_menu(&app.state, key, &mut m);
+        for label in ["Piano roll", "Change color...", "Random color"] {
+            assert!(!entry(&m, label).enabled, "{label} stays greyed");
+        }
+        // Replace ▸: the effects, into this slot.
+        fn leaf(items: &[PItem]) -> Option<&PItem> {
+            items.iter().find_map(|i| if i.children.is_empty() { matches!(i.cmd, Cmd::SlotWin(..)).then_some(i) } else { leaf(&i.children) })
+        }
+        let replace = entry(&m, "Replace");
+        assert!(replace.enabled && !replace.children.is_empty());
+        let Some(Cmd::SlotWin(3, inner)) = leaf(&replace.children).map(|i| i.cmd.clone()) else { panic!("an effect to pick") };
+        assert!(matches!(*inner, Cmd::Plugin(crate::plugin_menu::PlugCmd::Effect { slot: Some(2), .. })), "{inner:?}");
+        run(&mut app, entry(&m, "Rename, color and icon...").cmd.clone());
+        assert_eq!(app.state.playlist.edit.as_ref().map(|e| e.target.clone()), Some(EditTarget::SlotName(t, k)));
+        app.state.playlist.edit = None;
+        run(&mut app, entry(&m, "Delete...").cmd.clone());
+        assert!(crate::mixer::track(&app.state, t).unwrap().slots[usize::from(k)].is_none(), "the slot is cleared");
+        assert_eq!(app.state.selected_mixer, 5, "the selection stays");
+        crate::history::undo(&mut app.state);
+        assert!(crate::mixer::track(&app.state, t).unwrap().slots[usize::from(k)].is_some(), "one undo step");
+    }
 }

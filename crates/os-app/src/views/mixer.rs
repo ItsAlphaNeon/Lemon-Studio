@@ -740,6 +740,10 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
             ui.c.fill_rect(row, ui.t.s(0x1f2224));
             ui.c.fill_rect(row.inset(1.0), if hov { ui.t.s(0x2f3335) } else { ui.t.s(0x2a2d2f) });
         }
+        // A coloured slot (Lemon Studio's design): a 3 px bar of its colour at the row's left edge.
+        if let Some(c) = mx::slot_color(s, n, k) {
+            ui.c.fill_rect(Rect::new(row.x + 3.0, row.y + 4.0 * kp, 3.0, row.h - 8.0 * kp), super::rgb(c));
+        }
         chevron(ui, row.x + 10.0, row.cy(), true, if ha { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
         let (f, name, ink) = match &plugin {
             Some(p) => (Font::new(fs), p.to_string(), ui.t.tx(0xc9d0d4)),

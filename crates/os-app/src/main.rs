@@ -10,6 +10,8 @@
 #![cfg_attr(not(plugin_windows), allow(dead_code))]
 
 mod app;
+mod arrange;
+mod help_links;
 mod audio_cfg;
 mod auto_close;
 mod autoscroll;
@@ -78,6 +80,8 @@ mod midi_play;
 mod mixer;
 mod osc3;
 mod citrus;
+mod slicer;
+mod drums;
 mod monitor;
 mod params;
 mod piano;

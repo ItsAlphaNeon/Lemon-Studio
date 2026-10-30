@@ -382,9 +382,20 @@ impl State {
 
     /// The hint-bar text of a knob at its current value.
     pub fn knob_text(&self, id: KnobId) -> String {
-        let n = self.knob(id);
-        let bipolar = (n - 0.5) * 2.0;
         match id {
+            KnobId::Strum(k) => self.strum.set.text(k, u32::from(self.project.ppq.max(4))),
+            KnobId::Arp(k) => self.arp.set.text(k),
+            KnobId::PianoDlg(k) => self.piano_dlg.text(k, u32::from(self.project.ppq.max(4))),
+            KnobId::AutoLfo(row, k) => k.text(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
+            _ => self.knob_text_at(id, self.knob(id)).unwrap_or_default(),
+        }
+    }
+
+    /// The hint-bar text of knob `id` at position `n` (0..1), whatever it holds now; `None` for the dialog knobs, whose
+    /// text comes from their settings.
+    pub fn knob_text_at(&self, id: KnobId, n: f32) -> Option<String> {
+        let bipolar = (n - 0.5) * 2.0;
+        Some(match id {
             KnobId::MasterVol => {
                 // The gain is the level curve of stored / 12800 (spec: audio/mixer.md "Main volume").
                 let g = os_dsp::level::curve(n / 0.8);
@@ -420,11 +431,8 @@ impl State {
                     _ => format!("{band} width: {n:.2}"),
                 }
             }
-            KnobId::Strum(k) => self.strum.set.text(k, u32::from(self.project.ppq.max(4))),
-            KnobId::Arp(k) => self.arp.set.text(k),
-            KnobId::PianoDlg(k) => self.piano_dlg.text(k, u32::from(self.project.ppq.max(4))),
-            KnobId::AutoLfo(row, k) => k.text(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
-        }
+            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) => return None,
+        })
     }
 }
 

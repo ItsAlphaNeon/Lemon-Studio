@@ -1923,6 +1923,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-drum-sampler"
+version = "0.0.1"
+dependencies = [
+ "lemon-sampler",
+ "nih_plug",
+ "os-dsp",
+ "os-engine",
+ "os-hostlink",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "rfd",
+ "serde_json",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "lemon-fast-distortion"
 version = "0.0.1"
 dependencies = [
@@ -1946,6 +1964,16 @@ version = "0.0.1"
 dependencies = [
  "lemon-small-fx",
  "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
+name = "lemon-formula-controller"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-engine",
  "os-plugkit",
 ]
 
@@ -2032,10 +2060,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-slicer"
+version = "0.0.1"
+dependencies = [
+ "nih_plug",
+ "os-engine",
+ "os-hostlink",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "rfd",
+ "serde_json",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "lemon-small-fx"
 version = "0.0.1"
 dependencies = [
  "nih_plug",
+ "os-dsp",
  "os-engine",
  "os-hostlink",
  "os-plugkit",
@@ -2079,6 +2124,16 @@ version = "0.0.1"
 dependencies = [
  "lemon-small-fx",
  "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
+name = "lemon-vocoder"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-engine",
  "os-plugkit",
 ]
 
@@ -2883,20 +2938,24 @@ dependencies = [
  "lemon-balance",
  "lemon-chorus",
  "lemon-delay",
+ "lemon-drum-sampler",
  "lemon-fast-distortion",
  "lemon-filter",
  "lemon-flanger",
+ "lemon-formula-controller",
  "lemon-limiter",
  "lemon-parametric-eq-2",
  "lemon-peak-controller",
  "lemon-phaser",
  "lemon-reverb",
  "lemon-sampler",
+ "lemon-slicer",
  "lemon-small-fx",
  "lemon-soft-clipper",
  "lemon-stereo-enhancer",
  "lemon-stereo-shaper",
  "lemon-transient-processor",
+ "lemon-vocoder",
  "libc",
  "midir",
  "mp3lame-encoder",
@@ -2943,6 +3002,7 @@ name = "os-clap"
 version = "0.0.1"
 dependencies = [
  "clap-sys 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lemon-formula-controller",
  "lemon-limiter",
  "lemon-parametric-eq-2",
  "lemon-peak-controller",
@@ -4052,6 +4112,7 @@ name = "tesla"
 version = "0.0.1"
 dependencies = [
  "nih_plug",
+ "os-dsp",
  "os-engine",
  "os-hostlink",
  "os-plugkit",

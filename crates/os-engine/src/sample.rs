@@ -112,8 +112,45 @@ pub fn load(path: &Path) -> Result<Sample, SampleError> {
         }
         return Ok(s);
     }
+    if let Some(audio) = wavpack_audio_first(&bytes) {
+        return decode(audio.to_vec(), Some("wv")).map_err(decode_err);
+    }
     let ext = path.extension().and_then(|e| e.to_str());
     decode(bytes, ext).map_err(decode_err)
+}
+
+/// The frames of a WavPack packet whose blocks all have magnitude 0 (flag bits 18 to 22): digital silence, which
+/// the WavPack decoder refuses in some encoders' files, kept as that many frames of silence. `None` for any other.
+fn wavpack_quiet_frames(p: &[u8]) -> Option<usize> {
+    let (mut pos, mut frames) = (0, None);
+    while pos < p.len() {
+        if p.get(pos..pos + 4)? != b"wvpk" {
+            return None;
+        }
+        let word = |at: usize| p.get(pos + at..pos + at + 4).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes);
+        if (word(24)? >> 18) & 0x1f != 0 {
+            return None;
+        }
+        frames = Some(word(20)? as usize);
+        pos += word(4)? as usize + 8;
+    }
+    frames.filter(|&n| n > 0)
+}
+
+/// A WavPack file whose first blocks hold no audio (a block carrying only the original RIFF header, its flags all 0,
+/// as in many sample packs): the WavPack reader takes the stream's rate, channels and depth from the first block, so
+/// those blocks are dropped and the rest decoded. `None` for any other file.
+fn wavpack_audio_first(b: &[u8]) -> Option<&[u8]> {
+    let mut pos = 0;
+    while b.get(pos..pos + 4)? == b"wvpk" {
+        let size = u32::from_le_bytes(b.get(pos + 4..pos + 8)?.try_into().ok()?) as usize + 8;
+        let samples = u32::from_le_bytes(b.get(pos + 20..pos + 24)?.try_into().ok()?);
+        if samples != 0 {
+            return (pos > 0).then(|| &b[pos..]);
+        }
+        pos += size;
+    }
+    None
 }
 
 /// The length of the audio file at `path`: its frames and their rate. Read from the file's headers where they give it
@@ -128,7 +165,13 @@ pub fn length(path: &Path) -> Option<(u64, u32)> {
 
 /// The length the file's headers give, without decoding it.
 fn header_length(path: &Path) -> Option<(u64, u32)> {
-    let file = std::fs::File::open(path).ok()?;
+    let mut file = std::fs::File::open(path).ok()?;
+    // A WavPack file that starts with a block without audio: that block's format is not the stream's.
+    let mut head = [0u8; 24];
+    if file.read_exact(&mut head).is_ok() && &head[..4] == b"wvpk" && head[20..24] == [0; 4] {
+        return None;
+    }
+    file.rewind().ok()?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -274,6 +317,7 @@ fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<Sample, String> {
         .and_then(|p| p.audio())
         .ok_or("no audio codec parameters")?;
     let mp3 = format.format_info().short_name == "mp3";
+    let wavpack = format.format_info().short_name == "wavpack";
     let mut decoder = codecs()
         .make_audio_decoder(params, &AudioDecoderOptions::default().gapless(!mp3))
         .map_err(|e| e.to_string())?;
@@ -294,7 +338,13 @@ fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<Sample, String> {
         }
         let audio = match decoder.decode(&packet) {
             Ok(a) => a,
-            Err(SymError::DecodeError(_)) => continue,
+            Err(SymError::DecodeError(_)) => {
+                if let Some(n) = wavpack.then(|| wavpack_quiet_frames(&packet.data)).flatten() {
+                    left.resize(left.len() + n, 0.0);
+                    right.resize(right.len() + n, 0.0);
+                }
+                continue;
+            }
             Err(e) => return Err(e.to_string()),
         };
         rate = audio.spec().rate();
@@ -674,6 +724,31 @@ impl SampleLibrary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tests/data/empty_first_block.wv`: 0.1 s of a 441 Hz sine at 44.1 kHz, mono 16-bit (made with ffmpeg), behind a
+    /// first block that holds only a RIFF header, its flags all 0, as in many sample packs' WavPack files.
+    #[test]
+    fn wavpack_with_an_empty_first_block_decodes() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/empty_first_block.wv");
+        let s = load(&path).expect("decodes");
+        assert_eq!((s.frames(), s.rate), (4410, 44100));
+        let peak = s.left.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.1, "peak {peak}");
+        let crossings = s.left.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        assert!((43..=45).contains(&crossings), "{crossings} upward zero crossings");
+        assert_eq!(length(&path), Some((4410, 44100)));
+    }
+
+    /// `tests/data/quiet_tail.wv`: 0.1 s of a 441 Hz sine at 44.1 kHz, mono 16-bit (made with ffmpeg), then a block of
+    /// 0.1 s of silence (magnitude 0) that the WavPack decoder refuses: it stays, as silence.
+    #[test]
+    fn wavpack_silence_the_decoder_refuses_stays() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/quiet_tail.wv");
+        let s = load(&path).expect("decodes");
+        assert_eq!((s.frames(), s.rate), (8820, 44100));
+        assert!(s.left[..4410].iter().any(|v| v.abs() > 0.1));
+        assert!(s.left[4410..].iter().chain(&s.right[4410..]).all(|&v| v == 0.0));
+    }
 
     /// `tests/data/click_sine.mp3` (made with ffmpeg + LAME, 64 kbit/s mono, ID3v2 tag, LAME info frame): 0.3 s at
     /// 44.1 kHz, a 10-frame click of 0.9 at frame 4410, then a 440 Hz sine of 0.25 from frame 8820.

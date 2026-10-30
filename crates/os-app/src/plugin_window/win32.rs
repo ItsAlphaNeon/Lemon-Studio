@@ -312,6 +312,15 @@ impl FrameWindow {
         unsafe { apply_clip(self.hwnd, &self.state) };
     }
 
+    /// Moves the docked window's top-left to `(x, y)` in the parent's client area (physical px); a detached one stays.
+    pub fn move_to(&self, x: i32, y: i32) {
+        if self.detached() {
+            return;
+        }
+        self.place(|_| (x, y));
+        unsafe { apply_clip(self.hwnd, &self.state) };
+    }
+
     /// Moves the docked window to where `to` puts it, given its rect in the parent's client area (physical px).
     fn place(&self, to: impl FnOnce([i32; 4]) -> (i32, i32)) {
         unsafe {
@@ -612,6 +621,7 @@ unsafe extern "system" fn area_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 }
                 Some(os_hostlink::Cmd::Automate) => LinkMsg::Automate(lp.max(0) as usize),
                 Some(os_hostlink::Cmd::Audio) => LinkMsg::Audio(lp != 0),
+                Some(os_hostlink::Cmd::Notes) => LinkMsg::Notes(lp),
                 _ => return 0,
             };
             if let Ok(mut q) = LINK.lock() {

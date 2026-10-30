@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Null test of Lemon Studio's Fruity Peak Controller against FL Studio's own exports, tick by tick. Skipped unless
-//! `OS_PC_NULL` names a directory of cases; nothing in it is needed to build or to run the other tests.
+//! Null test of Lemon Studio's Fruity Peak Controller and Fruity Formula Controller against FL Studio's own exports,
+//! tick by tick. Skipped unless `OS_PC_NULL` (Peak Controller) or `OS_FC_NULL` (Formula Controller) names a directory
+//! of cases; nothing in them is needed to build or to run the other tests.
 //!
-//! Each export is of a project whose master holds a Fruity Peak Controller in slot 0, linked to the master's volume.
+//! Each export is of a project whose master holds the controller in slot 0, linked to the master's volume.
 //! The probe is a stereo file: the sound the controller follows on the left, a small constant (the carrier) on the
 //! right. The master's fader is the only thing that changes the carrier, so the export's right side divided by the
 //! carrier and the chain's gain is the fader's gain, sample by sample; at every tick's start the fader starts its ramp
@@ -17,6 +18,7 @@
 //!
 //! | Key | Meaning |
 //! |---|---|
+//! | `plugin` | The slot's plugin (default `Fruity Peak Controller`) |
 //! | `state` | The slot's saved state, in hex |
 //! | `output` | The link's output: 0 Peak+LFO, 1 Peak, 2 LFO |
 //! | `smooth` | 1 when the link has Smoothing on (default 0) |
@@ -27,19 +29,24 @@
 //! | `carrier` | The right side's constant in `dry` (default 1e-4) |
 //! | `bpm`, `ppq` | The project's tempo and timebase (default 130, 96) |
 //! | `limit` | The largest difference allowed, in link value (default 2e-4) |
+//! | `ticks` | Compare only the ticks before this one (the song's end) |
 //! | `judge` | `no`: only report (the random shape) |
+//! | `rest` | The target's own value, held while the controller has no output (a formula that does not compile) |
 //!
 //! Paths are relative to the case file. The cases (FL's exports) are not part of the repository.
 //!
-// spec: plugins/lemon-peak-controller.md "Null test", flp/events/automation.md "Controller links"
+// spec: plugins/lemon-peak-controller.md "Null test", plugins/lemon-formula-controller.md "Null test",
+// flp/events/automation.md "Controller links"
 
 use std::path::{Path, PathBuf};
 
 use os_engine::clock::Clock;
 use os_engine::effects;
 use os_engine::formula::Formula;
+use os_engine::TransportInfo;
 
 struct Case {
+    plugin: String,
     state: Vec<u8>,
     output: usize,
     smooth: bool,
@@ -51,7 +58,9 @@ struct Case {
     bpm: f64,
     ppq: u16,
     limit: f64,
+    ticks: Option<usize>,
     judge: bool,
+    rest: Option<f64>,
 }
 
 fn hex(s: &str) -> Result<Vec<u8>, String> {
@@ -66,6 +75,7 @@ fn parse(path: &Path) -> Result<Case, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut case = Case {
+        plugin: "Fruity Peak Controller".into(),
         state: Vec::new(),
         output: 1,
         smooth: false,
@@ -77,7 +87,9 @@ fn parse(path: &Path) -> Result<Case, String> {
         bpm: 130.0,
         ppq: 96,
         limit: 2e-4,
+        ticks: None,
         judge: true,
+        rest: None,
     };
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -88,6 +100,7 @@ fn parse(path: &Path) -> Result<Case, String> {
         let value = value.trim();
         let num = |v: &str| v.parse::<f64>().map_err(|e| format!("{key}: {e}"));
         match key.trim() {
+            "plugin" => case.plugin = value.into(),
             "state" => case.state = hex(value)?,
             "output" => case.output = num(value)? as usize,
             "smooth" => case.smooth = num(value)? != 0.0,
@@ -99,7 +112,9 @@ fn parse(path: &Path) -> Result<Case, String> {
             "bpm" => case.bpm = num(value)?,
             "ppq" => case.ppq = num(value)? as u16,
             "limit" => case.limit = num(value)?,
+            "ticks" => case.ticks = Some(num(value)? as usize),
             "judge" => case.judge = value != "no",
+            "rest" => case.rest = Some(num(value)?),
             other => return Err(format!("unknown key {other}")),
         }
     }
@@ -127,16 +142,17 @@ fn run(case: &Case) -> Result<(f64, usize), String> {
     if dry.rate != fl.rate {
         return Err(format!("rates differ: {} and {}", dry.rate, fl.rate));
     }
-    let mut fx = effects::from_slot("Fruity Peak Controller", &case.state, dry.rate).ok_or("state too short")?;
+    let mut fx = effects::from_slot(&case.plugin, &case.state, dry.rate).ok_or("state too short")?;
     let g = |i: usize| f64::from(fl.right[i]) / case.carrier / case.gain;
     let n = dry.left.len().min(fl.right.len()).saturating_sub(2);
     let mut clock = Clock::new(dry.rate, case.ppq, case.bpm);
-    let (mut at, mut worst, mut compared) = (0usize, 0.0f64, 0usize);
+    let (mut at, mut worst, mut compared, mut tick) = (0usize, 0.0f64, 0usize, 0usize);
     let mut smooth: Option<[f64; 2]> = None;
     let mut buf = Vec::new();
     loop {
         // The value the link hands on at this tick's start: what the controller's last tick left.
-        let mut v = f64::from(fx.control(case.output).ok_or("no controller output")?).clamp(0.0, 1.0);
+        let out = fx.control(case.output).map(f64::from).or(case.rest).ok_or("no controller output")?;
+        let mut v = out.clamp(0.0, 1.0);
         if case.smooth {
             let s = smooth.get_or_insert([v, v]);
             s[0] += (v - s[0]) * 0.075;
@@ -148,7 +164,7 @@ fn run(case: &Case) -> Result<(f64, usize), String> {
         }
         let ours = as_volume(v);
         let len = clock.advance().1;
-        if at + len > n {
+        if at + len > n || case.ticks.is_some_and(|t| tick >= t) {
             break;
         }
         // The fader's step at the tick's start (its ramp lasts the tick); the first tick sets the value in place.
@@ -160,20 +176,33 @@ fn run(case: &Case) -> Result<(f64, usize), String> {
         }
         buf.clear();
         buf.extend((at..at + len).flat_map(|i| [(f64::from(dry.left[i]) * case.gain) as f32, (f64::from(dry.right[i]) * case.gain) as f32]));
+        let beats = tick as f64 / f64::from(case.ppq);
+        fx.transport(&TransportInfo { playing: true, tempo: case.bpm, frame: at as u64, beats, bar_start: 0.0, bar: 0, numerator: 4, denominator: 4, looping: None }, (tick as u64, case.ppq));
         fx.process(&mut buf);
         at += len;
+        tick += 1;
     }
     Ok((worst, compared))
 }
 
 #[test]
 fn peak_controller_nulls_against_fl_exports() {
-    let Some(dir) = std::env::var_os("OS_PC_NULL") else {
-        eprintln!("OS_PC_NULL not set: the null test against FL's exports is skipped");
+    run_dir("OS_PC_NULL");
+}
+
+#[test]
+fn formula_controller_nulls_against_fl_exports() {
+    run_dir("OS_FC_NULL");
+}
+
+/// Runs every case of the directory `var` names.
+fn run_dir(var: &str) {
+    let Some(dir) = std::env::var_os(var) else {
+        eprintln!("{var} not set: the null test against FL's exports is skipped");
         return;
     };
     let mut cases: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .expect("OS_PC_NULL is a directory")
+        .unwrap_or_else(|_| panic!("{var} is a directory"))
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "case"))
         .collect();

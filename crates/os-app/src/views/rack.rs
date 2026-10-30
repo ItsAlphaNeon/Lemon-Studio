@@ -54,7 +54,7 @@ pub fn cols(s: &State) -> Cols {
     let mix_off = if s.rack.show_mixer { 0.0 } else { rk::MIX_W };
     let name_w = (rk::NAME_W * s.rack.name_pct as f32 / 100.0).round();
     let dx = name_w - rk::FL_NAME_W - mix_off;
-    Cols { name_x: 108.0 - mix_off, name_w, dx, slot_x: 200.0 + dx, step_x: 217.0 + dx, loop_w: if s.rack.loop_mode { rk::LOOP_W } else { 0.0 } }
+    Cols { name_x: 108.0 - mix_off, name_w, dx, slot_x: 200.0 + dx, step_x: 217.0 + dx, loop_w: if rk::loop_boxes(s) { rk::LOOP_W } else { 0.0 } }
 }
 
 /// Width of a window showing one step (§5: W = 259 + 16·(n − 1) in the default layout).
@@ -419,8 +419,18 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let step_area = Rect::span(step_x0 - 1.0, steps_right, rows_clip.y, rows_clip.bottom());
         if s.rack_roll_view || !plain_steps(notes, ch.index) {
             let block = Rect::span(step_x0 - 2.0, steps_right + 2.0, ry - 2.0, ry + 28.0);
-            mini_roll(ui, block, notes, ch.index, per_step, &bars, focused);
+            // Show complete piano roll preview unticked: the preview follows the steps, showing the visible bars' notes.
+            let grid = (!s.rack.opts.contains(rk::COMPLETE_PREVIEW)).then(|| (step_x0 - sx, STEP_W / per_step.max(1) as f32));
+            mini_roll(ui, block, notes, ch.index, per_step, &bars, focused, grid);
             ui.hit(block.intersect(&rows_clip), Action::RackRoll(i), "Piano roll preview - click to open the Piano roll");
+            // Show a mute button on the piano roll preview (§17, on by default): the LED's switch at the preview's left
+            // end (Lemon Studio's design: a speaker, struck through while the channel is muted).
+            if s.rack.opts.contains(rk::PREVIEW_MUTE) {
+                let mb = Rect::new(block.x + 4.0, block.cy() - 7.0, 14.0, 14.0);
+                let hov = ui.hit(mb.intersect(&rows_clip), Action::ChannelEnable(i), "Mute / solo  (shift/ctrl+)0..9");
+                let col = if hov { ui.t.tx(0xffffff) } else if ch.enabled { t.glyph } else { t.glyph.shade(-0.3) };
+                ui.c.icon(if ch.enabled { &os_ui::tabler::VOLUME } else { &os_ui::tabler::VOLUME_OFF }, mb, col);
+            }
         } else {
             let row_len = rk::row_len(s, i);
             ui.c.push_clip(step_area);
@@ -432,8 +442,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
             }
             ui.c.pop_clip();
         }
-        // Loop length box (§15).
-        if s.rack.loop_mode {
+        // Loop length box (§15), also with loop mode off while Always show advanced controls is ticked.
+        if rk::loop_boxes(s) {
             let lb = Rect::new(steps_right + 10.0, ry + 2.0, 24.0, 22.0);
             let has = notes.iter().any(|n| n.channel == ch.index);
             let lhov = ui.hit(lb, Action::RackLoopBox(i), "Set loop point");
@@ -444,8 +454,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
                 ui.c.fill_rect_gradient(lb.inset(1.0), t.rack_row_box.shade(-0.04), t.rack_row_box, 2.5);
             }
             let tc = if !has { t.text_dim.shade(-0.3) } else if lhov { t.glyph } else { t.text_dim.shade(0.08) };
-            let txt = rk::row_len(s, i).to_string();
-            ui.c.text_center(Font::new(13), lb, tc, &txt);
+            // Advanced looping's words ("Beat") take a smaller font to fit.
+            let txt = rk::loop_box_text(s, i);
+            let font = if rk::advanced(s) { Font::new(10) } else { Font::new(13) };
+            ui.c.text_center(font, lb, tc, &txt);
         }
     }
     // The channels a control surface's pads play (crate::surface::Marks): their names outlined.
@@ -784,8 +796,11 @@ fn graph_editor(ui: &mut Ui, s: &State, sx: f32, first: u32, shown: u32) {
 }
 
 /// Mini piano roll of one channel (§6) in `block` (one 30 px row): the pattern's whole length spans the block,
-/// whatever the step scroll (§23). `bars`: the pattern's bars in ticks, the last ending at its length.
-fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_step: u32, bars: &[(u32, u32)], focused: bool) {
+/// whatever the step scroll (§23). `bars`: the pattern's bars in ticks, the last ending at its length. `grid`: with
+/// Show complete piano roll preview unticked (§17), the x of tick 0 and the pixels per tick of the steps, so the
+/// preview shows the notes of the bars in view, under their steps.
+#[allow(clippy::too_many_arguments)]
+fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_step: u32, bars: &[(u32, u32)], focused: bool, grid: Option<(f32, f32)>) {
     // (separator, fill) for odd and even bars.
     let shades = if focused {
         [(ui.t.s(0x040709), ui.t.s(0x111416)), (ui.t.s(0x000002), ui.t.s(0x0a0d0f))]
@@ -793,8 +808,12 @@ fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_st
         [(ui.t.s(0x0a0d0f), ui.t.s(0x171a1c)), (ui.t.s(0x030608), ui.t.s(0x101315))]
     };
     let end = bars.last().map_or(1, |b| b.1).max(1);
-    let scale = block.w / end as f32;
-    let x_of = |tick: u32| block.x + tick as f32 * scale;
+    let (x0, scale) = grid.unwrap_or((block.x, block.w / end as f32));
+    let x_of = |tick: u32| x0 + tick as f32 * scale;
+    ui.c.push_clip(block);
+    if grid.is_some() {
+        ui.c.fill_rect(block, shades[0].1);
+    }
     for (k, &(a, b)) in bars.iter().enumerate() {
         let span = Rect::span(x_of(a).round(), x_of(b).round(), block.y, block.bottom());
         let (sep, fill) = shades[k % 2];
@@ -805,7 +824,6 @@ fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_st
     let lo = mine.iter().map(|n| n.key).min().unwrap_or(60);
     let hi = mine.iter().map(|n| n.key).max().unwrap_or(60);
     let range = f32::from((hi - lo).max(1));
-    ui.c.push_clip(block);
     for n in mine {
         let nx = x_of(n.position);
         let len = if n.length == 0 { per_step } else { n.length };

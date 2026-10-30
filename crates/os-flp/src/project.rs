@@ -22,7 +22,8 @@ use os_model::{
 
 use crate::{Chunk, ChunkBody, Event, FlpFile, Header, Tag, Value};
 
-pub mod legacy;
+mod legacy;
+pub use legacy::{is_legacy, upgrade};
 
 // Event IDs (see the specs for meanings).
 mod id {
@@ -158,6 +159,10 @@ mod id {
     pub const MARKER_NAME: u8 = 205;
     /// A key marker's scale (spec: flp/events/playlist.md "Time markers").
     pub const MARKER_SCALE: u8 = 101;
+    /// A key marker's root note, flag (1 on Default) and scale list index (−1 Default, −2 Black notes).
+    pub const MARKER_ROOT: u8 = 46;
+    pub const MARKER_FLAG: u8 = 45;
+    pub const MARKER_SCALE_INDEX: u8 = 168;
     pub const MARKER_IDS: [u8; 8] = [148, 33, 34, 46, 45, 168, 101, 205];
     /// Automation clip points (in the channel block) and links (before the first channel)
     /// (spec: flp/events/automation.md).
@@ -205,9 +210,9 @@ pub enum ProjectError {
     NoHeader,
     #[error("{0}")]
     Structure(String),
-    /// Files saved before FL 24.2 use a channel layout that isn't specified yet
-    /// (specs REQUESTS.md #4).
-    #[error("legacy project layout (saved by {0}) is not supported yet")]
+    /// A stream in an older generation's layout (channel blocks without event 51) that [`upgrade`] has not converted,
+    /// or could not (spec: flp/layouts.md).
+    #[error("project in an older file layout (saved by {0}) that could not be converted")]
     LegacyLayout(String),
     #[error("model does not match the file layout: {0}")]
     Mismatch(String),
@@ -486,7 +491,8 @@ fn scan(events: &[Event]) -> Result<Layout, ProjectError> {
             (Region::Prelude | Region::Channels, id::CH_START) => {
                 region = Region::Channels;
                 // spec: flp/events/channels.md "Version scope": blocks end with 51 only in
-                // files saved by FL 24.2+; a block reaching the next 64 without one is legacy.
+                // files saved by FL 24.2+; a block reaching the next 64 without one is in an older layout,
+                // which [`upgrade`] converts first (spec: flp/layouts.md).
                 let end = (i + 1..events.len())
                     .take_while(|&k| events[k].id != id::CH_START && events[k].id != id::ARR_START)
                     .find(|&k| events[k].id == id::CH_END)
@@ -761,6 +767,13 @@ fn clip_len(events: &[Event], version: Option<usize>) -> usize {
 /// Reads the typed project from a parsed file.
 pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
     let events = events_of(file)?;
+    // A file of an older generation is read as its conversion to the current layout (spec: flp/layouts.md); [`apply`]
+    // needs the converted file itself ([`upgrade`]).
+    if is_legacy(events) {
+        let mut current = file.clone();
+        upgrade(&mut current)?;
+        return load(&current);
+    }
     let header = file.header().ok_or(ProjectError::NoHeader)?;
     let mut l = scan(events)?;
     let enc = text_enc(events, l.version);
@@ -1577,6 +1590,9 @@ fn decode_markers(events: &[Event], idx: &[usize], enc: TextEnc) -> Vec<TimeMark
             id::MARKER_NUM => out.last_mut().into_iter().for_each(|m| m.numerator = int(e) as u8),
             id::MARKER_SCALE => out.last_mut().into_iter().for_each(|m| m.scale = int(e) as u16),
             id::MARKER_DEN => out.last_mut().into_iter().for_each(|m| m.denominator = int(e) as u8),
+            id::MARKER_ROOT => out.last_mut().into_iter().for_each(|m| m.root = int(e) as u8),
+            id::MARKER_FLAG => out.last_mut().into_iter().for_each(|m| m.flag = int(e) as u8),
+            id::MARKER_SCALE_INDEX => out.last_mut().into_iter().for_each(|m| m.scale_index = int(e) as i32),
             id::MARKER_NAME => {
                 let name = e.data().map(|d| decode_text(d, enc)).unwrap_or_default();
                 out.last_mut().into_iter().for_each(|m| m.name = name.clone());
@@ -1592,9 +1608,9 @@ fn marker_events(m: &TimeMarker, enc: TextEnc) -> Vec<Event> {
         Event::new(id::MARKER_POS, Value::U32(m.position & 0x00FF_FFFF | u32::from(m.kind) << 24)),
         Event::new(id::MARKER_NUM, Value::U8(m.numerator)),
         Event::new(id::MARKER_DEN, Value::U8(m.denominator)),
-        Event::new(46, Value::U8(0)),
-        Event::new(45, Value::U8(0)),
-        Event::new(168, Value::U32(0)),
+        Event::new(id::MARKER_ROOT, Value::U8(m.root)),
+        Event::new(id::MARKER_FLAG, Value::U8(m.flag)),
+        Event::new(id::MARKER_SCALE_INDEX, Value::U32(m.scale_index as u32)),
         Event::new(id::MARKER_SCALE, Value::U16(m.scale)),
         Event::new(id::MARKER_NAME, Value::var(encode_text(&m.name, enc))),
     ]
@@ -1785,6 +1801,12 @@ fn load_pl_track(events: &[Event], t: &PlTrackLoc, enc: TextEnc) -> PlaylistTrac
     }
 }
 
+/// The slot a slot marker (98) closes: its low byte. Files hold the slot's number there; a few (an FL 20.8 file and its
+/// resaves) have 0x106 and 0x107 for slots 6 and 7 (spec: flp/layouts.md "Older files").
+fn slot_number(e: &Event) -> usize {
+    (int(e) & 0xFF) as usize
+}
+
 fn mixer_param_records(data: &[u8]) -> impl Iterator<Item = (usize, u8, u8, u16, i32)> + '_ {
     data.chunks_exact(MIXER_REC_LEN).enumerate().map(|(n, r)| {
         (
@@ -1824,7 +1846,7 @@ fn slot_state_events(events: &[Event], l: &Layout) -> Vec<[Option<usize>; 10]> {
                         }
                     }
                     id::MX_SLOT => {
-                        if let (Some(o), Some(p)) = (out.get_mut(int(e) as usize), pending.take()) {
+                        if let (Some(o), Some(p)) = (out.get_mut(slot_number(e)), pending.take()) {
                             *o = p;
                         }
                     }
@@ -1998,7 +2020,7 @@ fn slot_areas(events: &[Event], l: &Layout) -> Vec<Option<SlotArea>> {
                 match e.id {
                     id::PLUGIN_NAME => start = Some(i),
                     id::MX_SLOT => {
-                        if let (Some(r), Some(s)) = (runs.get_mut(int(e) as usize), start.take()) {
+                        if let (Some(r), Some(s)) = (runs.get_mut(slot_number(e)), start.take()) {
                             *r = Some((s, i));
                         }
                     }
@@ -2167,7 +2189,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
                     }
                 }
                 id::MX_SLOT => {
-                    if let Some(s) = slots.get_mut(int(e) as usize) {
+                    if let Some(s) = slots.get_mut(slot_number(e)) {
                         *s = pending_plugin.take();
                     }
                 }
@@ -2451,8 +2473,10 @@ fn write_sampler(
 /// Writes the model back into `file`, changing only the events that hold modeled values
 /// that differ from what's stored. Returns an error when the model's shape (number of
 /// channels, patterns with notes, mixer tracks, …) doesn't match the file: adding or
-/// removing objects isn't supported yet.
+/// removing objects isn't supported yet. A file of an older generation is first converted to the current layout
+/// ([`upgrade`]), which is the layout it is saved in.
 pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> {
+    upgrade(file)?;
     restructure(project, file)?;
     // The file's effect slots as they are before inserts are added or removed: a renumbered track takes its own.
     let (file_slots, file_tracks) = file_slot_runs(file)?;
@@ -4215,49 +4239,6 @@ mod tests {
             ],
             ..Project::default()
         }
-    }
-
-    /// `p` written in the layout used before FL 24.2: channel blocks without their end event, a channel's mixer track
-    /// in event 22.
-    fn older_of(p: &Project) -> FlpFile {
-        let mut f = create(p).unwrap();
-        for c in &mut f.chunks {
-            if let ChunkBody::Events(v) = &mut c.body {
-                v.retain(|e| e.id != id::CH_END);
-                for e in v.iter_mut() {
-                    if e.id == id::CH_TARGET {
-                        let track = e.int_value().unwrap_or(0) as u8;
-                        *e = Event::new(22, Value::U8(track));
-                    } else if e.id == id::VERSION {
-                        *e = Event::new(id::VERSION, Value::var(format!("{}\0", p.saved_by).into_bytes()));
-                    }
-                }
-            }
-        }
-        f
-    }
-
-    /// A project in the layout used before FL 24.2 (channel blocks without their end event 51, a channel's mixer track
-    /// in event 22) is converted to the newer one and reads as the same project; a newer file is left alone
-    /// (spec: flp/layouts.md "What differs", "Saving a file of an older generation"). Files of FL 20 and later only.
-    #[test]
-    fn older_layout_is_converted_on_reading() {
-        let p = Project { saved_by: "21.0.0.3290".into(), ..new_project() };
-        let newer = create(&p).unwrap();
-        let mut older = older_of(&p);
-        assert!(matches!(load(&older), Err(ProjectError::LegacyLayout(_))), "the older layout is refused as it is");
-        assert!(legacy::upgrade(&mut older), "converted");
-        let (a, b) = (load(&older).unwrap(), load(&newer).unwrap());
-        let chans = |p: &Project| p.channels.iter().map(|c| (c.index, c.name.clone(), c.mixer_track, c.kind)).collect::<Vec<_>>();
-        assert_eq!(chans(&a), chans(&b));
-        assert_eq!(a.patterns, b.patterns);
-        let mut again = newer.clone();
-        assert!(!legacy::upgrade(&mut again), "a newer file is not converted");
-        assert_eq!(again.to_bytes().unwrap(), newer.to_bytes().unwrap());
-        // A file of FL 12 in the older layout is left alone: still refused.
-        let mut twelve = older_of(&Project { saved_by: "12.3.0.72".into(), ..new_project() });
-        assert!(!legacy::upgrade(&mut twelve));
-        assert!(matches!(load(&twelve), Err(ProjectError::LegacyLayout(_))));
     }
 
     /// A project made from the model alone reads back the same, and `apply` can edit it afterwards
@@ -6201,7 +6182,8 @@ mod tests {
         assert_eq!(load(&file3).unwrap().info.url.as_deref(), Some("https://example.org"));
     }
 
-    /// Files saved by FL 11 and older hold 8-bit text (spec: flp/container.md "Text payloads").
+    /// Files saved by FL 11 and older hold 8-bit text (spec: flp/container.md "Text payloads"); saved, they are in the
+    /// current layout, whose text is UTF-16 (spec: flp/layouts.md "Converting to the newer layout").
     #[test]
     fn project_info_is_8_bit_in_old_files() {
         let mut p = new_project();
@@ -6211,13 +6193,16 @@ mod tests {
             if e.id == id::VERSION {
                 e.value = Value::var(b"11.1.1\0".to_vec());
             }
+            if e.id == id::TITLE {
+                e.value = Value::var(b"Caf\xe9\0".to_vec());
+            }
         }
         let mut m = load(&file).unwrap();
-        m.info.title = Some("Café".into());
+        assert_eq!(m.info.title.as_deref(), Some("Caf\u{e9}"));
         m.info.comments = Some("a\nb".into());
         apply(&m, &mut file).unwrap();
-        assert_eq!(event_data(&file, id::TITLE), Some(b"Caf\xe9\0".to_vec()));
-        assert_eq!(event_data(&file, id::COMMENTS), Some(b"a\rb\0".to_vec()));
+        assert_eq!(event_data(&file, id::TITLE), Some(utf16z("Caf\u{e9}")));
+        assert_eq!(event_data(&file, id::COMMENTS), Some(utf16z("a\rb")));
         assert_eq!(load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap().info, m.info);
     }
 
@@ -6411,6 +6396,9 @@ mod tests {
         let key = arr.markers.iter_mut().find(|m| m.kind == TimeMarker::KEY).unwrap();
         key.name = "C Major (Ionian)".into();
         key.scale = 0x52A;
+        // The original's Default and Other Arabic on D (events 46, 45 and 168 as it saved them).
+        arr.markers.push(TimeMarker::key(1200, 2, -1));
+        arr.markers.push(TimeMarker::key(1300, 2, 15));
         p.arrangements.push(arr);
         let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
         let back = load(&file).unwrap();
@@ -6418,6 +6406,11 @@ mod tests {
         let ev = events_of(&file).unwrap();
         let scales: Vec<u32> = ev.iter().filter(|e| e.id == id::MARKER_SCALE).map(int).collect();
         assert_eq!(scales.iter().filter(|&&v| v == 0x52A).count(), 1);
+        let of = |id: u8| ev.iter().filter(|e| e.id == id).map(int).collect::<Vec<u32>>();
+        let n = of(id::MARKER_POS).len();
+        assert_eq!(of(id::MARKER_ROOT)[n - 2..], [2, 2]);
+        assert_eq!(of(id::MARKER_FLAG)[n - 2..], [1, 0]);
+        assert_eq!(of(id::MARKER_SCALE_INDEX)[n - 2..], [0xFFFF_FFFF, 15]);
         let pos: Vec<u32> = ev.iter().filter(|e| e.id == id::MARKER_POS).map(int).collect();
         assert!(pos.contains(&(u32::from(TimeMarker::PUNCH_OUT) << 24 | 96 * 9)), "{pos:x?}");
 

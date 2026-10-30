@@ -69,6 +69,8 @@ pub enum MCmd {
     Rename(u16),
     Color(u16, Option<Rgb>),
     RandomColor(u16),
+    /// Gradient color...: the selected tracks, in track order, from the first one's colour to the last one's.
+    GradientColor,
     Reset(u16),
     ResetRouting(u16),
     UnrouteTo(u16),
@@ -88,6 +90,10 @@ pub enum MCmd {
     MoveRight(u16),
     Delete(u16),
     InsertOne(u16),
+    /// Insert multiple...: a box for how many tracks to insert in front of this one (`insert_many`).
+    InsertMultiple(u16),
+    /// File ▸ Render to wave file...: the Export form for the selected track(s)' outputs (`App::open_track_render`).
+    RenderWave(u16),
     /// Route the selected tracks to `dst`: only = drop their other routes, side = sidechain (level 0).
     Route { dst: u16, only: bool, side: bool },
     /// Layout menu: Wide (the only layout drawn; the others are greyed out).
@@ -108,6 +114,9 @@ pub enum MCmd {
     SlotDelete(u8),
     SlotMove(u8, i8),
     SlotRename(u8),
+    /// The slot menu's Change color... (`None`: Default) and Random color, on the current track's slot.
+    SlotColor(u8, Option<Rgb>),
+    SlotRandomColor(u8),
     SlotView(u8),
     /// Sidechain input ▸ (Lemon Studio's own): the input of the current track a hosted plugin's sidechain bus hears,
     /// counted from 1, 0 for none (spec: audio/sidechain.md "Hosted plugins' input buses").
@@ -149,6 +158,9 @@ pub struct MixerUi {
     pub layout: u8,
     /// Slot names typed in the rename box (session only).
     pub slot_names: HashMap<(u16, u8), String>,
+    /// Slot colours from the slot menu's Change color... / Random color (session only, as the names; Lemon Studio's
+    /// design: drawn as a bar at the slot's left edge).
+    pub slot_colors: HashMap<(u16, u8), Rgb>,
     pub pending: Vec<FxReq>,
     /// Meter state per track (`meters::Meter`), fed by `feed_meters`.
     pub meters: Vec<crate::meters::Meter>,
@@ -165,7 +177,7 @@ pub struct MixerUi {
 
 impl Default for MixerUi {
     fn default() -> Self {
-        MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), pending: Vec::new(), meters: Vec::new(),
+        MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), slot_colors: HashMap::new(), pending: Vec::new(), meters: Vec::new(),
             meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None }
     }
 }
@@ -225,6 +237,24 @@ pub fn slot_name(s: &State, t: u16, slot: u8) -> Option<String> {
     Some(s.mixer.slot_names.get(&(t, slot)).cloned().unwrap_or_else(|| crate::project_plugins::slot_title(p)))
 }
 
+/// The slot's colour, when it holds a plugin and was given one.
+pub fn slot_color(s: &State, t: u16, slot: u8) -> Option<Rgb> {
+    track(s, t)?.slots.get(usize::from(slot))?.as_ref()?;
+    s.mixer.slot_colors.get(&(t, slot)).copied()
+}
+
+/// The slots' session-only names and colours follow their slots: `f` says where (track, slot) goes, None drops it.
+fn remap_slot_ui(s: &mut State, f: impl Fn(u16, u8) -> Option<(u16, u8)>) {
+    let ui = &mut s.mixer;
+    ui.slot_names = std::mem::take(&mut ui.slot_names).into_iter().filter_map(|((t, k), v)| Some((f(t, k)?, v))).collect();
+    ui.slot_colors = std::mem::take(&mut ui.slot_colors).into_iter().filter_map(|((t, k), v)| Some((f(t, k)?, v))).collect();
+}
+
+/// Forgets slot `k` of track `t`'s name and colour (a new or removed plugin).
+fn forget_slot_ui(s: &mut State, t: u16, k: u8) {
+    remap_slot_ui(s, |a, b| ((a, b) != (t, k)).then_some((a, b)));
+}
+
 /// Tesla's "For" index of 5 minutes (Edison's menu: Forever, 1, 3, 5 minutes, ...), the audio logger's length.
 const AUDIO_LOG_5_MINUTES: u8 = 3;
 
@@ -259,7 +289,7 @@ fn clear_slot(s: &mut State, t: u16, k: u8) {
         m.slot_on[usize::from(k)] = true;
         m.slot_mix[usize::from(k)] = 1.0;
     }
-    s.mixer.slot_names.remove(&(t, k));
+    forget_slot_ui(s, t, k);
     s.mixer.pending.push(FxReq::Delete { track: t, slot: k });
 }
 
@@ -402,7 +432,8 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
         }
         MHit::SlotArrow(i) => {
             let t = s.selected_mixer;
-            s.playlist.popup = Some(if slot_name(s, t, i).is_some() { slot_menu(s, i, at.0, at.1) } else { effect_menu(s, i, at.0, at.1) });
+            let m = if slot_name(s, t, i).is_some() { slot_menu(app, i, at.0, at.1) } else { effect_menu(&app.state, i, at.0, at.1) };
+            app.state.playlist.popup = Some(m);
             None
         }
         MHit::SlotLed(i) => {
@@ -712,7 +743,8 @@ pub fn right(app: &mut App, h: MHit) -> bool {
         // The slot's plugin menu, like a left click (spec: ui/plugin-menu.md §1).
         MHit::SlotArrow(i) => {
             let t = s.selected_mixer;
-            s.playlist.popup = Some(if slot_name(s, t, i).is_some() { slot_menu(s, i, at.0, at.1) } else { effect_menu(s, i, at.0, at.1) });
+            let m = if slot_name(s, t, i).is_some() { slot_menu(app, i, at.0, at.1) } else { effect_menu(&app.state, i, at.0, at.1) };
+            app.state.playlist.popup = Some(m);
         }
         MHit::SlotName(i) => {
             let t = s.selected_mixer;
@@ -1015,7 +1047,7 @@ fn remove_tracks(s: &mut State, gone: &[u16]) -> Option<String> {
     }
     s.selected_mixer = m(s.selected_mixer).unwrap_or(1).min(inserts(s));
     s.mixer.sel = s.mixer.sel.iter().filter_map(|&t| m(t)).collect();
-    s.mixer.slot_names = std::mem::take(&mut s.mixer.slot_names).into_iter().filter_map(|((t, k), v)| Some(((m(t)?, k), v))).collect();
+    remap_slot_ui(s, |t, k| Some((m(t)?, k)));
     changed(s);
     Some(format!("Removed {} unused mixer track(s)", gone.len()))
 }
@@ -1069,6 +1101,24 @@ pub fn add_track(s: &mut State, at: Option<u16>) -> u16 {
     n
 }
 
+/// The most tracks one Insert multiple... adds (Lemon Studio's choice).
+pub const INSERT_MAX: u16 = 100;
+
+/// Insert multiple... (the track menu): `text` read as a count (1 to `INSERT_MAX`) of new tracks inserted in front of
+/// track `n`, as Insert one inserts one, in one undo step; the first new one becomes current. Spec: the original's
+/// manual says its insert entry asks how many tracks to insert in front of the selected one; the box is Lemon
+/// Studio's (ui/mixer-track-commands.md §6).
+pub fn insert_many(s: &mut State, n: u16, text: &str) -> Option<String> {
+    let Ok(k) = text.trim().parse::<u16>() else { return Some(format!("Insert multiple: \"{}\" is not a number", text.trim())) };
+    let k = k.clamp(1, INSERT_MAX);
+    edit(s, INSERT, Region::Project, |s| {
+        for _ in 0..k {
+            add_track(s, Some(n));
+        }
+    });
+    Some(format!("Inserted {k} mixer track{}", if k == 1 { "" } else { "s" }))
+}
+
 /// Moves tracks `from..to` (exclusive) by `d` places (+1 = right): contents, routes into them, channel targets and
 /// hosted slot instances. The track at the destination end is overwritten; callers make room first.
 fn shift_tracks(s: &mut State, from: u16, to: u16, d: i32) {
@@ -1102,7 +1152,7 @@ fn renumber(s: &mut State, m: &dyn Fn(u16) -> u16, from: u16, to: u16, d: i32) {
     }
     s.selected_mixer = m(s.selected_mixer);
     s.mixer.sel = s.mixer.sel.iter().map(|&t| m(t)).collect();
-    s.mixer.slot_names = std::mem::take(&mut s.mixer.slot_names).into_iter().map(|((t, k), v)| ((m(t), k), v)).collect();
+    remap_slot_ui(s, |t, k| Some((m(t), k)));
     let mut map = Vec::new();
     for t in &old {
         for k in 0..10u8 {
@@ -1144,7 +1194,7 @@ pub(crate) fn delete_track(s: &mut State, n: u16) -> Option<String> {
     for k in 0..10 {
         s.mixer.pending.push(FxReq::Delete { track: n, slot: k });
     }
-    s.mixer.slot_names.retain(|(t, _), _| *t != n);
+    remap_slot_ui(s, |t, k| (t != n).then_some((t, k)));
     // The hidden last track stays last; the default track comes before it (spec: flp/events/mixer.md "The last track").
     let hidden = len - 1;
     let m = move |t: u16| if t > n && t < hidden { t - 1 } else { t };
@@ -1177,7 +1227,7 @@ pub(crate) fn delete_track(s: &mut State, n: u16) -> Option<String> {
         }
     }
     s.mixer.pending.push(FxReq::Remap(map));
-    s.mixer.slot_names = std::mem::take(&mut s.mixer.slot_names).into_iter().map(|((t, k), v)| ((m(t), k), v)).collect();
+    remap_slot_ui(s, |t, k| Some((m(t), k)));
     s.mixer.sel.clear();
     s.selected_mixer = n.min(inserts(s)).max(1);
     changed(s);
@@ -1207,27 +1257,35 @@ const COLORS: [(&str, u32); 8] = [
     ("Grey", 0x7a8288),
 ];
 
+/// Change color... ▸: Default, then the palette.
+fn color_items(cmd: impl Fn(Option<Rgb>) -> Cmd) -> Vec<PItem> {
+    let mut items = vec![PItem::new("Default", cmd(None))];
+    items.extend(COLORS.iter().map(|&(l, c)| PItem::new(l, cmd(Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8))))));
+    items
+}
+
 /// Track menu (right click on a strip), §6.1.
 pub fn track_menu(s: &State, n: u16, x: f32, y: f32) -> Popup {
     let mut items = vec![PItem::head(format!("Mixer track ({})", name(s, n)))];
-    items.extend(track_items(n));
+    items.extend(track_items(s, n));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-fn track_items(n: u16) -> Vec<PItem> {
+fn track_items(s: &State, n: u16) -> Vec<PItem> {
     let mx = |c: MCmd| Cmd::Mixer(c);
-    let mut colors: Vec<PItem> = vec![PItem::new("Default", mx(MCmd::Color(n, None)))];
-    colors.extend(COLORS.iter().map(|&(l, c)| PItem::new(l, mx(MCmd::Color(n, Some(Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8)))))));
+    let colors = color_items(|c| mx(MCmd::Color(n, c)));
     vec![
         PItem::new("Rename, color and icon...", mx(MCmd::Rename(n))).key("F2"),
         PItem::sub("Change color...", colors),
         PItem::new("Random color", mx(MCmd::RandomColor(n))),
-        PItem::not_yet("Gradient color..."),
+        // Greyed with one track selected, as in the original's menu (§6.1); with several it is Lemon Studio's version of
+        // the channel rack's gradient (no dialog).
+        if is_selected(s, n) && selected(s).len() > 1 { PItem::new("Gradient color...", mx(MCmd::GradientColor)) } else { PItem::not_yet("Gradient color...") },
         PItem::not_yet("Change icon..."),
         PItem::not_yet("Assign to new Audio track(s)"),
         PItem::not_yet("Unassign from Audio track(s)"),
         PItem::sep(),
-        PItem::sub("File", vec![PItem::not_yet("Render to wave file...")]),
+        PItem::sub("File", vec![PItem::new("Render to wave file...", mx(MCmd::RenderWave(n)))]),
         PItem::new("Open audio editor", mx(MCmd::AudioEditor(n))).key("Ctrl+E"),
         PItem::new("Open audio editor and record", mx(MCmd::AudioEditorRecord(n))).key("Shift+E"),
         PItem::sep(),
@@ -1240,7 +1298,7 @@ fn track_items(n: u16) -> Vec<PItem> {
                 PItem::new("Route selected channels starting from this track", mx(MCmd::RouteChannels { dst: n, spread: true })).key("Shift+Ctrl+L"),
             ],
         ),
-        PItem::not_yet("Track routing"),
+        track_routing(s, n),
         PItem::sub(
             "Select",
             vec![
@@ -1274,11 +1332,27 @@ fn track_items(n: u16) -> Vec<PItem> {
         PItem::sep(),
         PItem::new("Delete", mx(MCmd::Delete(n))).key("Del"),
         PItem::new("Insert one", mx(MCmd::InsertOne(n))),
-        PItem::not_yet("Insert multiple..."),
+        PItem::new("Insert multiple...", mx(MCmd::InsertMultiple(n))),
         PItem::sub("Insert from state", vec![PItem::not_yet("(no saved states)")]),
         PItem::head("CPU"),
         PItem::not_yet("Allow threaded processing").mark(Mark::Check(true)),
     ]
+}
+
+/// Track routing ▸ (Lemon Studio's design; greyed in the original's menu as captured, its entries not seen): the ▲ menu's
+/// four entries (spec: ui/mixer.md §5) for the other selected tracks into track `n`. Greyed when no other track is
+/// selected (the master never sends).
+fn track_routing(s: &State, n: u16) -> PItem {
+    let mx = |only, side| Cmd::Mixer(MCmd::Route { dst: n, only, side });
+    let items = vec![
+        PItem::new("Route selected tracks to this track", mx(false, false)),
+        PItem::new("Route selected tracks to this track only", mx(true, false)),
+        PItem::sep(),
+        PItem::new("Sidechain selected tracks to this track", mx(false, true)),
+        PItem::new("Sidechain selected tracks to this track only", mx(true, true)),
+    ];
+    let it = PItem::sub("Track routing", items);
+    if is_selected(s, n) && selected(s).iter().any(|&t| t != n && t != 0) { it } else { it.off() }
 }
 
 /// Trim unused tracks ▸ (spec: ui/mixer-track-commands.md §6): each choice with the number of tracks it deletes.
@@ -1310,7 +1384,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         // PItem::new("Cable physics (debug)...", Cmd::Mixer(MCmd::CablePhysics)).mark(Mark::Check(s.cables.borrow().debug)),
         PItem::head(format!("Mixer track ({})", name(s, s.selected_mixer))),
     ];
-    items.extend(track_items(s.selected_mixer));
+    items.extend(track_items(s, s.selected_mixer));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
@@ -1334,8 +1408,9 @@ pub fn effect_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// Filled slot ▸ (§7.2).
-pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
+/// Filled slot ▸ (§7.2). Its Presets section works as in the plugin's window menu.
+pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
+    let s = &app.state;
     let mx = |c: MCmd| Cmd::Mixer(c);
     let replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), true);
     let items = vec![
@@ -1366,14 +1441,17 @@ pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
         PItem::sep(),
         PItem::new("View editor", mx(MCmd::SlotView(slot))).mark(Mark::Check(false)),
         PItem::new("Rename, color and icon...", mx(MCmd::SlotRename(slot))).key("F2"),
-        PItem::not_yet("Change color..."),
-        PItem::not_yet("Random color"),
+        // Lemon Studio's design (session only, as the slot's name): the track menu's colours, for the slot.
+        PItem::sub("Change color...", color_items(|c| mx(MCmd::SlotColor(slot, c)))),
+        PItem::new("Random color", mx(MCmd::SlotRandomColor(slot))),
         PItem::not_yet("Change icon..."),
         PItem::sep(),
         PItem::sub("Scaling", vec![PItem::not_yet("100%")]),
         PItem::not_yet("Help"),
     ];
-    Popup { x, y, items, sub: None, scroll: [0; 2] }
+    let mut menu = Popup { x, y, items, sub: None, scroll: [0; 2] };
+    crate::presets::fill_window_menu(app, crate::plugins::fx_key(s.selected_mixer, slot), &mut menu);
+    menu
 }
 
 /// The tracks routed into track `n`, in track order: its inputs, numbered from 1 (spec: audio/sidechain.md "Settings").
@@ -1402,7 +1480,7 @@ fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
 pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
     let step = match &c {
-        MCmd::Color(..) | MCmd::RandomColor(_) => Some("Mixer track color"),
+        MCmd::Color(..) | MCmd::RandomColor(_) | MCmd::GradientColor => Some("Mixer track color"),
         MCmd::Reset(_) => Some("Mixer track reset"),
         MCmd::ResetRouting(_) | MCmd::UnrouteTo(_) | MCmd::Route { .. } | MCmd::RouteChannels { .. } => Some(ROUTING),
         MCmd::Trim { .. } | MCmd::Delete(_) => Some("Delete mixer track"),
@@ -1446,6 +1524,19 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 let c = crate::patterns::random_color(u64::from(t).wrapping_mul(0x9e37_79b9) ^ u64::from(rand_seed()));
                 if let Some(m) = track_mut(s, t) {
                     m.color = Some(c);
+                }
+            }
+            None
+        }
+        MCmd::GradientColor => {
+            let mut t = selected(s);
+            t.sort_unstable();
+            if let (Some(&a), Some(&b)) = (t.first(), t.last()) {
+                let (a, b) = (track(s, a).and_then(|m| m.color), track(s, b).and_then(|m| m.color));
+                for (c, &n) in crate::rack::gradient_colors(a, b, t.len()).into_iter().zip(&t) {
+                    if let Some(m) = track_mut(s, n) {
+                        m.color = Some(c);
+                    }
                 }
             }
             None
@@ -1566,6 +1657,18 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             let n = add_track(s, Some(n.max(1)));
             Some(format!("Inserted {}", name(s, n)))
         }
+        MCmd::InsertMultiple(n) => {
+            crate::playlist::start_edit(s, EditTarget::MixerInsert(n.max(1)), at);
+            if let Some(e) = s.playlist.edit.as_mut() {
+                e.sel = true;
+            }
+            Some("How many tracks to insert: type a number, Enter inserts them".into())
+        }
+        MCmd::RenderWave(n) => {
+            let tracks = targets(s, n);
+            app.open_track_render(tracks);
+            return None;
+        }
         MCmd::Route { dst, only, side } => route(s, dst, only, side),
         // Wide is the layout shown; the others are greyed out in the menu.
         MCmd::Layout(_) => None,
@@ -1587,7 +1690,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 m.slot_on[usize::from(slot)] = true;
                 m.slot_mix[usize::from(slot)] = 1.0;
             }
-            s.mixer.slot_names.remove(&(t, slot));
+            forget_slot_ui(s, t, slot);
             s.mixer.pending.push(FxReq::Create { track: t, slot, index, state: None });
             changed(s);
             None
@@ -1609,15 +1712,24 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 m.slot_on.swap(a, b);
                 m.slot_mix.swap(a, b);
             }
-            let (na, nb) = (s.mixer.slot_names.remove(&(t, a as u8)), s.mixer.slot_names.remove(&(t, b as u8)));
-            if let Some(v) = na {
-                s.mixer.slot_names.insert((t, b as u8), v);
-            }
-            if let Some(v) = nb {
-                s.mixer.slot_names.insert((t, a as u8), v);
-            }
+            let (ka, kb) = (a as u8, b as u8);
+            remap_slot_ui(s, |u, k| Some((u, if u != t { k } else if k == ka { kb } else if k == kb { ka } else { k })));
             s.mixer.pending.push(FxReq::Remap(vec![((t, a as u8), (t, b as u8)), ((t, b as u8), (t, a as u8))]));
             changed(s);
+            None
+        }
+        MCmd::SlotColor(slot, c) => {
+            let t = s.selected_mixer;
+            match c {
+                Some(c) => s.mixer.slot_colors.insert((t, slot), c),
+                None => s.mixer.slot_colors.remove(&(t, slot)),
+            };
+            None
+        }
+        MCmd::SlotRandomColor(slot) => {
+            let t = s.selected_mixer;
+            let c = crate::patterns::random_color((u64::from(t) << 8 | u64::from(slot)).wrapping_mul(0x9e37_79b9) ^ u64::from(rand_seed()));
+            s.mixer.slot_colors.insert((t, slot), c);
             None
         }
         MCmd::SlotRename(slot) => {
@@ -1880,7 +1992,7 @@ impl App {
         m.slots[k] = Some(crate::plugins::new_slot(TESLA));
         m.slot_on[k] = true;
         m.slot_mix[k] = 1.0;
-        s.mixer.slot_names.remove(&(t, k as u8));
+        forget_slot_ui(s, t, k as u8);
         s.mixer.pending.push(FxReq::Create { track: t, slot: k as u8, index, state });
         changed(s);
         self.invalidate();
@@ -1997,6 +2109,21 @@ pub fn fx_info(p: &os_model::Project, ui: &MixerUi, key: usize) -> Option<crate:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The slot menu's Presets section works as in the plugin's window menu: the list, Browse presets and Save preset
+    /// as... on the slot's plugin (§7.2).
+    #[test]
+    fn slot_menu_presets_act_on_the_slot() {
+        let mut app = App::new(None);
+        app.state.selected_mixer = 2;
+        let key = crate::plugins::fx_key(2, 3);
+        let m = slot_menu(&app, 3, 0.0, 0.0);
+        let cmd = |label: &str| m.items.iter().find(|i| i.label == label && !i.head).map(|i| (i.enabled, i.cmd.clone())).unwrap();
+        assert_eq!(cmd("Browse presets"), (true, Cmd::Preset(crate::presets::PCmd::Browse(key))));
+        assert_eq!(cmd("Save preset as..."), (true, Cmd::Preset(crate::presets::PCmd::SaveAs(key))));
+        let p = m.items.iter().find(|i| i.label == "Presets" && !i.head).unwrap();
+        assert!(p.enabled, "a submenu of the plugin's presets (empty here: no plugin is hosted)");
+    }
 
     fn app() -> App {
         let mut app = App::new(None);
@@ -2494,7 +2621,7 @@ mod tests {
         a.plugins.effects = crate::plugins::builtin_effects();
         let logger = |b: &[u8]| from_plugin_state(b).map(|s| (s.rec.when, s.rec.max, s.rec.append, s.rec.slave, s.rec.armed));
         let want = Some((WHEN_ON_PLAY, 3, true, true, true));
-        assert!(track_items(2).iter().any(|i| i.label == "Open audio editor and record" && i.enabled));
+        assert!(track_items(&a.state, 2).iter().any(|i| i.label == "Open audio editor and record" && i.enabled));
         run(&mut a, MCmd::AudioEditorRecord(2));
         let Some(FxReq::Create { track: 2, slot: 0, index, state: Some(st) }) = a.state.mixer.pending.first().cloned() else {
             panic!("{:?}", a.state.mixer.pending)
@@ -2543,5 +2670,146 @@ mod tests {
         let i = (0..200).find(|&i| item_at(TOOLS_MENU, i).is_some_and(|it| it.label == REMOVE_TESLAS_LABEL)).expect("in TOOLS");
         a.menu_item(TOOLS_MENU, i);
         assert_eq!(a.state.message.as_deref(), Some("No audio editors in the mixer"));
+    }
+
+    /// Insert multiple... asks how many (a box opening on 2, selected) and inserts that many fresh tracks in front of
+    /// the track, one undo step; text that is not a number inserts none.
+    #[test]
+    fn insert_multiple_tracks() {
+        let mut a = app();
+        let len = a.state.project.mixer.len();
+        let it = track_items(&a.state, 3).into_iter().find(|i| i.label == "Insert multiple...").unwrap();
+        assert_eq!((it.enabled, it.cmd), (true, Cmd::Mixer(MCmd::InsertMultiple(3))));
+        track_mut(&mut a.state, 3).unwrap().name = Some("Three".into());
+        a.state.project.channels[0].mixer_track = 3;
+        run(&mut a, MCmd::InsertMultiple(3));
+        let e = a.state.playlist.edit.clone().expect("the box");
+        assert_eq!((e.target, e.text.as_str(), e.sel), (EditTarget::MixerInsert(3), "2", true));
+        a.state.playlist.edit.as_mut().unwrap().text = "3".into();
+        let steps = a.state.history.at();
+        crate::playlist::commit_edit(&mut a.state);
+        assert_eq!(a.state.project.mixer.len(), len + 3);
+        assert_eq!(name(&a.state, 6), "Three");
+        assert_eq!(a.state.project.channels[0].mixer_track, 6, "channels follow their track");
+        assert_eq!((name(&a.state, 3), a.state.selected_mixer), ("Bus 3".to_string(), 3));
+        assert_eq!(a.state.message.as_deref(), Some("Inserted 3 mixer tracks"));
+        assert_eq!((a.state.history.at(), a.state.history.newest_done()), (steps + 1, Some(INSERT)));
+        crate::history::undo(&mut a.state);
+        assert_eq!((a.state.project.mixer.len(), name(&a.state, 3)), (len, "Three".to_string()));
+        assert_eq!(insert_many(&mut a.state, 3, "lots").as_deref(), Some("Insert multiple: \"lots\" is not a number"));
+        assert_eq!(a.state.project.mixer.len(), len);
+        insert_many(&mut a.state, 1, "1000");
+        assert_eq!(a.state.project.mixer.len(), len + usize::from(INSERT_MAX), "at most INSERT_MAX at once");
+    }
+
+    /// Gradient color...: greyed with one track selected; with several, their colours run from the first one's to the
+    /// last one's in track order (a hue sweep when either has none), one undo step.
+    #[test]
+    fn gradient_color_over_the_selected_tracks() {
+        let mut a = app();
+        let entry = |a: &App, n: u16| track_items(&a.state, n).into_iter().find(|i| i.label == "Gradient color...").unwrap();
+        select(&mut a.state, 2, false);
+        assert!(!entry(&a, 2).enabled, "one track");
+        select(&mut a.state, 6, true);
+        select(&mut a.state, 4, true);
+        assert_eq!((entry(&a, 4).enabled, entry(&a, 4).cmd), (true, Cmd::Mixer(MCmd::GradientColor)));
+        assert!(!entry(&a, 9).enabled, "a track outside the selection");
+        let (red, blue) = (Rgb::new(200, 0, 0), Rgb::new(0, 0, 100));
+        track_mut(&mut a.state, 2).unwrap().color = Some(red);
+        track_mut(&mut a.state, 6).unwrap().color = Some(blue);
+        let steps = a.state.history.at();
+        run(&mut a, MCmd::GradientColor);
+        let col = |a: &App, n: u16| track(&a.state, n).unwrap().color;
+        assert_eq!((col(&a, 2), col(&a, 4), col(&a, 6)), (Some(red), Some(Rgb::new(100, 0, 50)), Some(blue)));
+        assert_eq!(col(&a, 3), None, "unselected tracks keep theirs");
+        assert_eq!(a.state.history.at(), steps + 1);
+        crate::history::undo(&mut a.state);
+        assert_eq!(col(&a, 4), None);
+    }
+
+    /// File ▸ Render to wave file...: the Export form for the selected tracks, or the one clicked, named after it and
+    /// with WAV ticked; its export writes those tracks' outputs (`export::Job::tracks`).
+    #[test]
+    fn render_to_wave_file_opens_the_form_for_the_tracks() {
+        let mut a = app();
+        a.state.project.patterns[0].notes.push(os_model::Note::step(0, 0));
+        a.state.song_mode = false;
+        let file = track_items(&a.state, 2).into_iter().find(|i| i.label == "File").unwrap();
+        assert_eq!(file.children[0].cmd, Cmd::Mixer(MCmd::RenderWave(2)));
+        track_mut(&mut a.state, 2).unwrap().name = Some("Bass: sub".into());
+        run(&mut a, MCmd::RenderWave(2));
+        let form = |a: &App| match &a.state.dialogs.last().expect("the form").body {
+            crate::dialog::Body::Project(crate::project_forms::Form::Export(f)) => (**f).clone(),
+            _ => panic!("not the Export form"),
+        };
+        let f = form(&a);
+        assert_eq!((f.tracks.clone(), f.name.text.as_str(), f.o.formats), (vec![2], "Bass_ sub", [true, false, false, false]));
+        assert!(!f.check(2).1 && !f.check(3).1, "Split mixer tracks does not apply");
+        let job = a.export_job(&f);
+        assert_eq!((job.tracks, job.options.split), (vec![2], true));
+        // The selection, when the track clicked is in it.
+        a.state.dialogs.clear();
+        select(&mut a.state, 2, false);
+        select(&mut a.state, 4, true);
+        run(&mut a, MCmd::RenderWave(4));
+        let mut t = form(&a).tracks;
+        t.sort_unstable();
+        assert_eq!(t, [2, 4]);
+    }
+
+    /// Track routing ▸ (Lemon Studio's design): greyed until another track is selected; then the ▲ menu's four entries
+    /// route or sidechain the other selected tracks into this one, one undo step each.
+    #[test]
+    fn track_routing_routes_the_selected_tracks_here() {
+        let mut a = app();
+        let entry = |a: &App, n: u16| track_items(&a.state, n).into_iter().find(|i| i.label == "Track routing").unwrap();
+        select(&mut a.state, 5, false);
+        assert!(!entry(&a, 5).enabled, "only this track selected");
+        select(&mut a.state, 2, true);
+        select(&mut a.state, 3, true);
+        select(&mut a.state, 5, true);
+        let e = entry(&a, 5);
+        assert!(e.enabled);
+        let labels: Vec<&str> = e.children.iter().filter(|i| !i.sep).map(|i| i.label.as_ref()).collect();
+        assert_eq!(labels, ["Route selected tracks to this track", "Route selected tracks to this track only", "Sidechain selected tracks to this track", "Sidechain selected tracks to this track only"]);
+        assert!(!entry(&a, 9).enabled, "a track outside the selection");
+        let steps = a.state.history.at();
+        crate::playlist::run(&mut a, e.children[0].cmd.clone());
+        assert_eq!((send(&a.state, 2, 5), send(&a.state, 3, 5), send(&a.state, 2, 0)), (Some(0.8), Some(0.8), Some(0.8)));
+        assert_eq!(a.state.history.at(), steps + 1);
+        crate::playlist::run(&mut a, e.children[4].cmd.clone());
+        assert_eq!((send(&a.state, 2, 5), send(&a.state, 2, 0)), (Some(0.0), None), "sidechained only: the master route goes");
+        assert_eq!(send(&a.state, 5, 5), None, "this track does not route to itself");
+    }
+
+    /// The slot menu's Change color... and Random color (Lemon Studio's design): the slot gets a colour (Default clears
+    /// it), which moves with the slot and goes with its plugin.
+    #[test]
+    fn slot_colors_follow_the_slot() {
+        let mut a = app();
+        a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        select(&mut a.state, 2, false);
+        run(&mut a, MCmd::AddEffect(0, 0));
+        let m = slot_menu(&a, 0, 0.0, 0.0);
+        let entry = |label: &str| m.items.iter().find(|i| i.label == label).unwrap().clone();
+        let change = entry("Change color...");
+        assert!(change.enabled && entry("Random color").enabled);
+        assert_eq!(change.children[0].cmd, Cmd::Mixer(MCmd::SlotColor(0, None)));
+        let red = Rgb::new(0xc8, 0x50, 0x4a);
+        assert_eq!((change.children[1].label.as_ref(), &change.children[1].cmd), ("Red", &Cmd::Mixer(MCmd::SlotColor(0, Some(red)))));
+        run(&mut a, MCmd::SlotColor(0, Some(red)));
+        assert_eq!(slot_color(&a.state, 2, 0), Some(red));
+        run(&mut a, MCmd::SlotMove(0, 1));
+        assert_eq!((slot_color(&a.state, 2, 0), slot_color(&a.state, 2, 1)), (None, Some(red)), "moves with the slot");
+        run(&mut a, MCmd::MoveRight(2));
+        assert_eq!(slot_color(&a.state, 3, 1), Some(red), "and with its track");
+        select(&mut a.state, 3, false);
+        run(&mut a, MCmd::SlotColor(1, None));
+        assert_eq!(slot_color(&a.state, 3, 1), None, "Default");
+        run(&mut a, MCmd::SlotRandomColor(1));
+        assert!(slot_color(&a.state, 3, 1).is_some());
+        run(&mut a, MCmd::SlotDelete(1));
+        assert_eq!(slot_color(&a.state, 3, 1), None, "goes with the plugin");
+        assert!(a.state.mixer.slot_colors.is_empty());
     }
 }

@@ -74,6 +74,8 @@ pub const SPEC: &Spec = &Spec {
     any_version: false,
     fields: &[],
     tail: &dsp::DISPLAY,
+    blank: None,
+    locate: None,
     size: (560, 200),
     cards: &CARDS,
     controls: &CONTROLS,

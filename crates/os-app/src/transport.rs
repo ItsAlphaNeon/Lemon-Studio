@@ -85,6 +85,8 @@ pub struct Shared {
     song: AtomicBool,
     /// The song's loop points, start << 32 | end in ticks (0 = the whole song): the playlist's time selection.
     loop_range: AtomicU64,
+    /// A quantized song jump for the playing song: unit << 32 | target in ticks (0 = none; `jump_on`).
+    jump: AtomicU64,
     /// Paused by a Marker pause: its tick + 1 (0 = not); after Resume, the same for the app to take as the playback's
     /// start (spec: audio/transport.md "Time markers in SONG mode").
     marker_hold: AtomicU64,
@@ -604,6 +606,7 @@ impl Transport {
         }
         let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.shared.marker_hold.store(0, Ordering::Relaxed);
+        self.shared.jump.store(0, Ordering::Relaxed);
         self.shared.song.store(matches!(mode, PlayMode::Song), Ordering::Relaxed);
         self.shared.rewind(start_tick);
         self.shared.state.store(PLAYING, Ordering::Release);
@@ -616,6 +619,12 @@ impl Transport {
     pub fn set_loop(&self, range: Option<(u32, u32)>) {
         let packed = range.filter(|&(a, b)| b > a).map_or(0, |(a, b)| u64::from(a) << 32 | u64::from(b));
         self.shared.loop_range.store(packed, Ordering::Relaxed);
+    }
+
+    /// The playing song jumps to tick `to` when it reaches the next multiple of `unit` ticks (the playlist's Quantize
+    /// song jumps); a later call replaces one still waiting.
+    pub fn jump_on(&self, unit: u32, to: u32) {
+        self.shared.jump.store(u64::from(unit.max(1)) << 32 | u64::from(to), Ordering::Relaxed);
     }
 
     /// Replace the playing project, continuing from the current position.
@@ -731,6 +740,7 @@ impl Transport {
     pub fn stop(&self) {
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.shared.marker_hold.store(0, Ordering::Relaxed);
+        self.shared.jump.store(0, Ordering::Relaxed);
         self.shared.marker_resumed.store(0, Ordering::Relaxed);
         self.shared.state.store(STOPPED, Ordering::Release);
         self.shared.rewind(0.0);
@@ -1047,6 +1057,10 @@ impl Feeder {
         if self.ctl.report.load(Ordering::Relaxed) {
             let r = self.shared.loop_range.load(Ordering::Relaxed);
             e.set_loop_range((r != 0).then(|| (r >> 32, r & 0xffff_ffff)));
+            match self.shared.jump.swap(0, Ordering::Relaxed) {
+                0 => {}
+                j => e.jump_on(j >> 32, j & 0xffff_ffff),
+            }
         }
         // A paused (or stopped) stream renders no more: its fade plays from what is queued, and the engine starts no
         // note that another stream (live notes, an open editor) would then hear ringing at the instruments.
