@@ -243,7 +243,7 @@ pub const TOOLS: [ToolDef; 18] = [
     ToolDef { glyph: Glyph::Stretch, hint: "Time stretch / pitch shift...", left: true, right: false },
     ToolDef { glyph: Glyph::Blur, hint: "Blur...", left: true, right: false },
     ToolDef { glyph: Glyph::Clean, hint: "Clean up (denoise)... / acquire noise profile", left: true, right: true },
-    ToolDef { glyph: Glyph::Slice, hint: "Auto-slicing (later version)", left: false, right: false },
+    ToolDef { glyph: Glyph::Slice, hint: "Medium auto-slicing / auto-slicing", left: true, right: true },
     ToolDef { glyph: Glyph::Save, hint: "Save as... / save as 24Bit .wav...", left: true, right: true },
     ToolDef { glyph: Glyph::Send, hint: "Send to playlist as audio clip / to selected channel", left: true, right: true },
 ];

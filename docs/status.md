@@ -395,8 +395,12 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   Equalize draws a gain curve over the selection's spectrum, Blur smears each frequency over time by an impulse
   curve, and Clean up takes away noise matching a profile acquired from a noise-only selection (Acquire noise
   profile, Alt+U), with a declipper that redraws flattened tops; all three preview, and mix with the original
+- Tesla slices: Regions > Auto-slice (dull, medium (Alt+S, the auto-slicing tool button) and sharp, with the
+  transient detector Lemon Slicer uses; small, medium and large grids at the sample's tempo), Detect beats (sets the
+  tempo and makes a region per beat) and Zero-cross check all regions; the slices are regions, so a saved file opens
+  in Lemon Slicer with them
 - Not yet: noise gating (gate noise, trim side noise), the declicker, the envelope tools with a dialog, the
-  drum(loop) stretch, slicing
+  drum(loop) stretch, detect pitch regions, convert to score
 
 ## ✅ Exporting audio
 

@@ -142,6 +142,12 @@ pub enum ToolCmd {
     Blur,
     CleanUp,
     AcquireNoise,
+    /// Regions > Detection: auto-slicing (0 dull, 1 medium, 2 sharp), grid-slicing (0 small, 1 medium, 2 large),
+    /// Detect beats, Zero-cross check all regions.
+    AutoSlice(u8),
+    GridSlice(u8),
+    DetectBeats,
+    ZeroCross,
     ReversePolarity,
     Normalize,
     FadeIn,
@@ -238,6 +244,8 @@ pub enum MenuReq {
     Slave,
     /// Right-click in the wave area.
     Wave,
+    /// The auto-slicing button's right click: Regions > Auto-slice and Detect beats.
+    Slice,
 }
 
 /// A name or value the user types.
@@ -1041,6 +1049,8 @@ impl Logic {
             (13, false) => Cmd::Tool(ToolCmd::Blur),
             (14, false) => Cmd::Tool(ToolCmd::CleanUp),
             (14, true) => Cmd::Tool(ToolCmd::AcquireNoise),
+            (15, false) => Cmd::Tool(ToolCmd::AutoSlice(1)),
+            (15, true) => return vec![Act::Menu(MenuReq::Slice, x, y)],
             (6, false) => {
                 let region = self.doc(|d| d.sel.is_some());
                 if region { Cmd::AddRegion } else { Cmd::AddMarker }
@@ -1113,7 +1123,35 @@ impl Logic {
                 true
             }),
             ToolCmd::NormalizeEnvelope => d.env_tool("Normalize envelope levels", |e, k, n| e.normalize(k, n)),
+            ToolCmd::AutoSlice(_) | ToolCmd::GridSlice(_) | ToolCmd::DetectBeats => false,
+            ToolCmd::ZeroCross => d.zero_cross_regions(),
         });
+        match t {
+            ToolCmd::AutoSlice(k) | ToolCmd::GridSlice(k) => {
+                let k = k.min(2) as usize;
+                let grid = matches!(t, ToolCmd::GridSlice(_));
+                let n = self.doc(|d| if grid { d.grid_slice(k) } else { d.auto_slice(k) });
+                if n > 0 {
+                    let name = if grid { doc::GRID_SLICING[k] } else { doc::AUTO_SLICING[k] };
+                    self.hint = format!("{name}: {n} slice{}", if n == 1 { "" } else { "s" });
+                }
+                return vec![Act::Repaint];
+            }
+            ToolCmd::DetectBeats => {
+                if self.doc(|d| d.frames()) > 0 {
+                    self.hint = match self.doc(|d| d.detect_beats()) {
+                        Some((bpm, n)) => format!("Detect beats: {bpm:.2} BPM, {n} beats"),
+                        None => "Detect beats: no beats found (it needs at least two hits)".into(),
+                    };
+                }
+                return vec![Act::Repaint];
+            }
+            ToolCmd::ZeroCross if !ok => {
+                self.hint = "Zero-cross check: every region already starts and ends at a zero crossing".into();
+                return vec![Act::Repaint];
+            }
+            _ => {}
+        }
         if t == ToolCmd::AcquireNoise {
             self.acquire_noise();
         } else if matches!(t, ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::Reverb | ToolCmd::Equalize | ToolCmd::Blur | ToolCmd::CleanUp) {
@@ -1667,6 +1705,7 @@ impl Logic {
             Key::Char('U') if c && !a => Cmd::Tool(ToolCmd::CleanUp),
             Key::Char('U') if a && !c => Cmd::Tool(ToolCmd::AcquireNoise),
             Key::Char('A') if a => Cmd::Tool(ToolCmd::Amp),
+            Key::Char('S') if a && !c => Cmd::Tool(ToolCmd::AutoSlice(1)),
             Key::Char('T') if a => Cmd::Tool(ToolCmd::Stretch),
             Key::Char('A') if c => Cmd::SelectZoomed,
             Key::Char('N') if c => Cmd::Tool(ToolCmd::Normalize),
@@ -1755,6 +1794,11 @@ impl Logic {
                 m.add(check("Ignore host selection", self.shared.ignore_host_sel.load(Ordering::Relaxed)), Cmd::IgnoreHostSel);
                 m.add(check("Ignore own selection", self.shared.ignore_own_sel.load(Ordering::Relaxed)), Cmd::IgnoreOwnSel);
             }
+            MenuReq::Slice => {
+                m = Self::slice_menu(has);
+                m.sep(Cmd::None);
+                m.add(item("Detect beats").enabled(has), Cmd::Tool(ToolCmd::DetectBeats));
+            }
             MenuReq::Wave => {
                 m.add(item("Cut").shortcut("Ctrl+X").enabled(has), Cmd::Cut);
                 m.add(item("Copy").shortcut("Ctrl+C").enabled(has), Cmd::Copy);
@@ -1769,6 +1813,19 @@ impl Logic {
                 m.add(item("Add marker...").shortcut("M").enabled(has), Cmd::AddMarker);
                 m.add(item("Set loop").shortcut("Alt+L").enabled(has), Cmd::SetLoop);
             }
+        }
+        m
+    }
+
+    /// Regions > Auto-slice: the three sensitivities, then the three grids.
+    fn slice_menu(has: bool) -> MenuDef<Cmd> {
+        let mut m = MenuDef::new(MenuStyle::Context);
+        for (i, n) in doc::AUTO_SLICING.iter().enumerate() {
+            m.add(MenuItem::item(n).shortcut(if i == 1 { "Alt+S" } else { "" }).enabled(has), Cmd::Tool(ToolCmd::AutoSlice(i as u8)));
+        }
+        m.sep(Cmd::None);
+        for (i, n) in doc::GRID_SLICING.iter().enumerate() {
+            m.add(MenuItem::item(n).enabled(has), Cmd::Tool(ToolCmd::GridSlice(i as u8)));
         }
         m
     }
@@ -1879,6 +1936,10 @@ impl Logic {
                 m.add(item("Remove loop").enabled(d.sample.looped.is_some()), Cmd::ClearLoop);
                 m.add(item("Delete").shortcut("Shift+Ctrl+Del").enabled(d.cue_at(d.insert_at()).is_some()), Cmd::DeleteCueHere);
                 m.add(item("Auto rename all").shortcut("Ctrl+F2").enabled(!d.sample.cues.is_empty()), Cmd::AutoRename);
+                m.head("Detection", Cmd::None);
+                m.submenu("Auto-slice", Self::slice_menu(has), Cmd::None);
+                m.add(item("Detect beats").enabled(has), Cmd::Tool(ToolCmd::DetectBeats));
+                m.add(item("Zero-cross check all regions").enabled(regions), Cmd::Tool(ToolCmd::ZeroCross));
                 m.sep(Cmd::None);
                 m.add(check("Freeze all", v.freeze), Cmd::Freeze);
             }
@@ -3244,9 +3305,9 @@ mod tests {
         let (x, y) = centre(&l, Target::Tool(9));
         l.down(x, y, Btn::Right, Mods::default(), false);
         assert!(l.doc(|d| d.sample.ch[0][10].abs() < d.sample.ch[1][10].abs()));
-        let (x, y) = centre(&l, Target::Tool(15));
+        let (x, y) = centre(&l, Target::Tool(10));
         l.down(x, y, Btn::Left, Mods::default(), false);
-        assert_eq!(l.hint, "Auto-slicing is not in this version");
+        assert_eq!(l.hint, "Trim side noise / gate noise is not in this version");
         let (x, y) = centre(&l, Target::Tool(0));
         assert!(matches!(l.down(x, y, Btn::Right, Mods::default(), false).last(), Some(Act::Menu(MenuReq::Undo, _, _))));
         assert_eq!(l.menu(&MenuReq::Undo).find("Swap channels"), Some(Cmd::UndoTo(1)));
@@ -3560,6 +3621,66 @@ mod tests {
         assert!(l.view.amp.is_some_and(|a| a.ready(false)));
     }
 
+    /// Auto-slicing (the tool grid's last-but-two button, Alt+S, Regions > Auto-slice), grid-slicing, Detect beats and
+    /// the zero-cross check, on a two-bar loop at 120 BPM with a hit on every beat.
+    #[test]
+    fn auto_slicing_and_detect_beats() {
+        let mut l = logic();
+        let rate = 44100;
+        let n = 4 * rate as usize;
+        let mut r = tools::Rng::new(3);
+        let mut x = vec![0f32; n];
+        for b in 0..8 {
+            let at = b * n / 8;
+            for i in 0..1500 {
+                x[at + i] = r.gauss() as f32 * 0.3 * (-(i as f32) / 300.0).exp();
+            }
+        }
+        let mut s = Sample::from_channels(rate, vec![x.clone(), x], Format::Float32);
+        s.add_cue("keep", 100, None);
+        s.add_cue("old region", 1000, Some(5000));
+        load(&mut l, s);
+        let (bx, by) = centre(&l, Target::Tool(15));
+        l.down(bx, by, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(l.hint, "Medium auto-slicing: 8 slices");
+        let regions = |l: &Logic| l.doc(|d| d.sample.cues.iter().filter(|c| c.is_region()).map(|c| (c.name.clone(), c.pos, c.end())).collect::<Vec<_>>());
+        let rg = regions(&l);
+        assert_eq!(rg.len(), 8);
+        assert_eq!(rg[0].0, "Slice 1");
+        assert_eq!(rg[0].1, 0);
+        assert_eq!(rg[7].2, n - 1, "the last slice runs to the end");
+        assert!(rg.windows(2).all(|w| w[0].2 + 1 == w[1].1), "the slices touch");
+        assert!(rg.iter().enumerate().all(|(i, g)| g.1.abs_diff(i * n / 8) < 300), "{rg:?}");
+        assert!(l.doc(|d| d.sample.cues.iter().any(|c| c.name == "keep") && d.view.regions), "markers stay");
+        l.doc(|d| d.undo());
+        assert_eq!(regions(&l)[0].0, "old region");
+        // The button's right click: the Auto-slice menu.
+        assert!(matches!(l.down(bx, by, Btn::Right, Mods::default(), false).last(), Some(Act::Menu(MenuReq::Slice, _, _))));
+        assert_eq!(l.menu(&MenuReq::Slice).find("Large grid-slicing"), Some(Cmd::Tool(ToolCmd::GridSlice(2))));
+        assert_eq!(l.menu(&MenuReq::Main(MenuId::Regions)).find("Detect beats"), Some(Cmd::Tool(ToolCmd::DetectBeats)));
+        // Small grid: quarter beats at the tempo Detect beats finds (none is set): 32 slices.
+        l.pick(&MenuReq::Slice, Cmd::Tool(ToolCmd::GridSlice(0)), 0.0, 0.0);
+        assert_eq!(l.hint, "Small grid-slicing: 32 slices");
+        assert_eq!(regions(&l)[1].1, (n as f64 / 32.0).round() as usize);
+        // Detect beats: the tempo set, a region per beat.
+        l.pick(&MenuReq::Main(MenuId::Regions), Cmd::Tool(ToolCmd::DetectBeats), 0.0, 0.0);
+        assert_eq!(l.hint, "Detect beats: 120.00 BPM, 8 beats");
+        assert_eq!(l.doc(|d| d.sample.tempo), 120.0);
+        let rg = regions(&l);
+        assert_eq!((rg.len(), rg[3].0.as_str(), rg[3].1), (8, "Beat 4", 3 * n / 8));
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Detect beats");
+        // Alt+S, then the zero-cross check (the slices already start at zero crossings: nothing moves).
+        l.key(Key::Char('S'), Mods { alt: true, ..Mods::default() });
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Medium auto-slicing");
+        l.pick(&MenuReq::Main(MenuId::Regions), Cmd::Tool(ToolCmd::ZeroCross), 0.0, 0.0);
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Medium auto-slicing");
+        // Silence: no beats.
+        load(&mut l, Sample::from_channels(rate, vec![vec![0.0; 44100]], Format::Float32));
+        l.pick(&MenuReq::Main(MenuId::Regions), Cmd::Tool(ToolCmd::DetectBeats), 0.0, 0.0);
+        assert!(l.hint.starts_with("Detect beats: no beats found"));
+    }
+
     /// Convolution reverb (the tool grid's reverb button, Ctrl+R): the default impulse or the clipboard, with the tail.
     #[test]
     fn convolution_reverb() {
@@ -3753,6 +3874,19 @@ mod tests {
         save(&mut l, "tesla_stretch", 1.0);
         save(&mut l, "tesla_stretch_x2", 2.0);
         l.view.amp = None;
+        // A drum loop's hits (two bars at 120 BPM, kick and hat), auto-sliced.
+        let mut b = logic();
+        let mut r = tools::Rng::new(11);
+        let mut x = vec![0f32; 4 * 44100];
+        for k in 0..16 {
+            let (at, amp, decay) = (k * x.len() / 16, if k % 4 == 0 { 0.9 } else { 0.35 }, if k % 4 == 0 { 3000.0 } else { 600.0 });
+            for i in 0..8000.min(x.len() - at) {
+                x[at + i] += r.gauss() as f32 * amp * (-(i as f32) / decay).exp() * 0.5;
+            }
+        }
+        load(&mut b, Sample::from_channels(44100, vec![x.clone(), x], Format::Float32));
+        b.pick(&MenuReq::Slice, Cmd::Tool(ToolCmd::AutoSlice(1)), 0.0, 0.0);
+        save(&mut b, "tesla_slices", 1.0);
         l.shared.armed.store(true, Ordering::Relaxed);
         l.shared.size.0.store(1000, Ordering::Relaxed);
         l.shared.size.1.store(600, Ordering::Relaxed);

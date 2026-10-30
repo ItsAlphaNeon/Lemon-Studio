@@ -17,6 +17,11 @@ use crate::env::{self, Envs};
 use crate::sample::{q16, Format, Sample};
 use crate::state::{Rec, Saved, View};
 use crate::tools;
+use os_dsp::transients;
+
+/// The auto-slicing and grid-slicing entries' names (their undo steps).
+pub const AUTO_SLICING: [&str; 3] = ["Dull auto-slicing", "Medium auto-slicing", "Sharp auto-slicing"];
+pub const GRID_SLICING: [&str; 3] = ["Small grid-slicing", "Medium grid-slicing", "Large grid-slicing"];
 
 /// The click-free crossfade at an edit's joints (Tesla's own: 4 ms, raised cosine).
 pub const CLICK_FREE_MS: f64 = 4.0;
@@ -587,6 +592,113 @@ impl Doc {
         true
     }
 
+    /// Replaces the regions (markers stay) with one from each start to the next (the last to the sample's end), named
+    /// `{prefix} 1`, `{prefix} 2`..., and sets the tempo when given: one undo step. The regions view turns on.
+    pub fn slice_regions(&mut self, name: &str, starts: &[usize], prefix: &str, tempo: Option<f32>) -> usize {
+        let n = self.frames();
+        let mut st: Vec<usize> = starts.iter().copied().filter(|&f| f < n).collect();
+        st.sort_unstable();
+        st.dedup();
+        if st.is_empty() {
+            return 0;
+        }
+        let s = self.edit(name);
+        s.cues.retain(|c| !c.is_region());
+        for (i, &a) in st.iter().enumerate() {
+            let b = st.get(i + 1).copied().unwrap_or(n);
+            s.add_cue(&format!("{prefix} {}", i + 1), a, Some(b - a));
+        }
+        if let Some(t) = tempo {
+            s.tempo = t;
+        }
+        self.view.regions = true;
+        st.len()
+    }
+
+    /// The sample's two channels for the detectors (a mono sample's one, twice).
+    fn pair(s: &Sample) -> (&[f32], &[f32]) {
+        (&s.ch[0], &s.ch[s.ch.len().min(2) - 1])
+    }
+
+    /// Regions > Auto-slice > Dull / Medium / Sharp auto-slicing (`k` 0 to 2): Lemon's transient detector over the
+    /// whole sample, each start moved to a zero crossing; the slices replace the regions. The number of slices.
+    pub fn auto_slice(&mut self, k: usize) -> usize {
+        if self.frames() == 0 {
+            return 0;
+        }
+        let s = self.sample.clone();
+        let (l, r) = Self::pair(&s);
+        let mut st = transients::detect(l, r, s.rate, transients::AUTO_DB[k.min(2)]);
+        transients::zero_cross(&mut st, l, r, s.rate);
+        st[0] = 0;
+        self.slice_regions(AUTO_SLICING[k.min(2)], &st, "Slice", None)
+    }
+
+    /// The tempo the grid slices by: the sample's, else the one Detect beats would find, else a whole number of bars.
+    pub fn grid_tempo(&self) -> f64 {
+        let s = &self.sample;
+        if s.tempo > 0.0 {
+            return s.tempo as f64;
+        }
+        let (l, r) = Self::pair(s);
+        transients::find_beats(l, r, s.rate).map_or_else(|| transients::guess_tempo(self.frames(), s.rate).1 as f64, |b| b.bpm)
+    }
+
+    /// Regions > Auto-slice > Small / Medium / Large grid-slicing (`k` 0 to 2): slices of a quarter, a half or a whole
+    /// beat at [`grid_tempo`](Self::grid_tempo), from the sample's start. The number of slices.
+    pub fn grid_slice(&mut self, k: usize) -> usize {
+        let n = self.frames();
+        if n == 0 {
+            return 0;
+        }
+        let step = 60.0 / self.grid_tempo() * self.sample.rate as f64 / [4.0, 2.0, 1.0][k.min(2)];
+        let st: Vec<usize> = (0..).map(|i| (i as f64 * step).round() as usize).take_while(|&f| f < n).collect();
+        self.slice_regions(GRID_SLICING[k.min(2)], &st, "Slice", None)
+    }
+
+    /// Regions > Detect beats: the sample's tempo and beats (`os_dsp::transients::find_beats`); the tempo is set and a
+    /// region per beat replaces the regions. The tempo and the number of beats, `None` when no beats were found.
+    pub fn detect_beats(&mut self) -> Option<(f64, usize)> {
+        let n = self.frames();
+        let s = self.sample.clone();
+        let (l, r) = Self::pair(&s);
+        let b = transients::find_beats(l, r, s.rate)?;
+        let bpm = (b.bpm * 1000.0).round() / 1000.0;
+        let k = self.slice_regions("Detect beats", &b.frames(n), "Beat", Some(bpm as f32));
+        (k > 0).then_some((bpm, k))
+    }
+
+    /// Regions > Zero-cross check all regions: each region's start and end move to the nearest zero crossing within
+    /// 2 ms (the end as the frame after it); a start at the sample's start and an end at its end stay. Whether anything
+    /// moved.
+    pub fn zero_cross_regions(&mut self) -> bool {
+        let n = self.frames();
+        let s = self.sample.clone();
+        let (l, r) = Self::pair(&s);
+        let mut moved = Vec::new();
+        for c in s.cues.iter().filter(|c| c.is_region()) {
+            let mut ends = [c.pos, c.end() + 1];
+            transients::zero_cross(&mut ends, l, r, s.rate);
+            // The sample's own start and end stay.
+            let a = if c.pos == 0 { 0 } else { ends[0].min(n - 1) };
+            let b = if c.end() + 1 >= n { n } else { ends[1].min(n) };
+            if (a, b) != (c.pos, c.end() + 1) && b > a {
+                moved.push((c.id, a, b - a));
+            }
+        }
+        if moved.is_empty() {
+            return false;
+        }
+        let s = self.edit("Zero-cross check all regions");
+        for (id, pos, len) in moved {
+            if let Some(c) = s.cues.iter_mut().find(|c| c.id == id) {
+                c.pos = pos;
+                c.len = Some(len);
+            }
+        }
+        true
+    }
+
     /// Auto rename all: regions "Region 1", "Region 2", markers "Marker 1"... by position.
     pub fn auto_rename(&mut self) -> bool {
         if self.sample.cues.is_empty() {
@@ -848,6 +960,23 @@ mod tests {
         d.delete();
         let c = &d.sample.ch[0];
         assert!(c.windows(2).all(|w| (w[1] - w[0]).abs() < 0.02));
+    }
+
+    #[test]
+    fn zero_cross_check_moves_region_ends_to_crossings() {
+        let mut d = Doc::default();
+        // A 441 Hz sine: crossings every 50 frames.
+        let l: Vec<f32> = (0..4410).map(|i| (std::f64::consts::TAU * i as f64 / 100.0).sin() as f32).collect();
+        d.sample = Arc::new(Sample::from_channels(44100, vec![l], Format::Float32));
+        d.select(1010, 2029);
+        d.add_cue("rg", true);
+        d.select(0, 4409);
+        d.add_cue("all", true);
+        assert!(d.zero_cross_regions());
+        let r: Vec<(usize, usize)> = d.sample.cues.iter().map(|c| (c.pos, c.end())).collect();
+        assert_eq!(r, vec![(1001, 2050), (0, 4409)], "to where the sine turns positive; the whole-sample region stays");
+        assert_eq!(d.history()[0], "Zero-cross check all regions");
+        assert!(!d.zero_cross_regions(), "nothing left to move");
     }
 
     #[test]
