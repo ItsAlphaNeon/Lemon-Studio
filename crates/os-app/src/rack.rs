@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use os_model::{target, ChannelKind, ClipSource, Note, Project, Rgb};
+use os_model::{target, ChannelKind, ClipSource, InitControl, Note, Project, Rgb};
 
 use crate::app::{App, State, Win};
 use crate::knobs::KnobId;
@@ -1486,6 +1486,9 @@ pub enum RCmd {
     SetBox(crate::typein::Target, f64),
     MixerReset(usize),
     AssignFree(usize),
+    /// Edit automation in piano roll (Lemon Studio's design): the piano roll on row `.0` with its event panel on the
+    /// channel control lane `.1`.
+    EventsInPiano(usize, crate::piano::Lane),
     // Display filter (§21).
     SetFilter(Filter),
     AddGroup,
@@ -1850,18 +1853,29 @@ fn burn_sel(s: &State) -> PItem {
 /// The Automation / Remote control / Value groups shared by knob and LED menus (§19). `other` is the mixer box or the
 /// LED when `knob` is `None`: its Value group works on it (Lemon Studio's design).
 fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Target>, auto: Option<(u32, String, f64)>) -> Vec<PItem> {
-    // spec: ui/settings-choices.md "Advanced: Initialize controls automatically"
-    let [init, delete] = crate::init::items(s, auto.as_ref().map(|a| (a.0, a.2)));
+    // spec: ui/settings-choices.md "Advanced: Initialize controls automatically". The swing knob has no automation
+    // clip of its own yet, but its start value is the project's main swing (Lemon Studio's design, ui/channel-rack.md
+    // §19).
+    let control = auto.as_ref().map(|a| (a.0, a.2)).or_else(|| (knob == Some(KnobId::Swing)).then(|| (InitControl::MAIN_SWING, f64::from(s.knob(KnobId::Swing)))));
+    let [init, delete] = crate::init::items(s, control);
+    // Edit automation in piano roll: the channel volume and panning knobs have a lane there (Lemon Studio's design).
+    let piano = match knob {
+        Some(KnobId::ChanVol(r)) => Some(it("Edit automation in piano roll", RCmd::EventsInPiano(r, crate::piano::Lane::ChanVolume))),
+        Some(KnobId::ChanPan(r)) => Some(it("Edit automation in piano roll", RCmd::EventsInPiano(r, crate::piano::Lane::ChanPan))),
+        _ => None,
+    };
     let mut v = vec![
         PItem::head("Automation"),
         crate::events::menu_item(auto.as_ref(), None),
+        // Lemon Studio has one event editor window, which Edit automation already opens floating.
         PItem::new("Edit automation in a window", Cmd::Nothing).off(),
-        PItem::new("Edit automation in piano roll", Cmd::Nothing).off(),
+        piano.unwrap_or_else(|| PItem::new("Edit automation in piano roll", Cmd::Nothing).off()),
         init,
         delete,
         PItem::sep(),
     ];
-    let driven = auto.as_ref().and_then(|a| crate::params::driving_clip(s, a.0));
+    // A clip that drives the main swing comes only from a file; Edit automation clip... still shows it.
+    let driven = control.and_then(|c| crate::params::driving_clip(s, c.0));
     v.push(match auto {
         Some((tgt, name, val)) => PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, val)),
         None => PItem::new("Create automation clip", Cmd::Nothing).off(),
@@ -1872,7 +1886,8 @@ fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Ta
         Some(ch) => PItem::new("Edit automation clip...", Cmd::Param(crate::params::PCmd::EditClip(ch))),
         None => PItem::new("Edit automation clip...", Cmd::Nothing).off(),
     });
-    v.extend(crate::remote::menu_items(knob.map(crate::typein::Target::Knob)));
+    // The mixer box and the LED take a controller too (Lemon Studio's design, ui/remote-control.md §1).
+    v.extend(crate::remote::menu_items(knob.map(crate::typein::Target::Knob).or(other)));
     v.push(PItem::head("Value"));
     match knob {
         Some(k) => {
@@ -2125,6 +2140,17 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::PianoRoll(r) => {
             app.focus_channel(r);
+            app.state.raise(Win::PianoRoll);
+        }
+        RCmd::EventsInPiano(r, lane) => {
+            app.focus_channel(r);
+            let p = &mut app.state.piano;
+            p.lane = lane;
+            // A collapsed event panel comes back, as a double click on the splitter brings it.
+            if p.split.panel_collapsed() {
+                p.split = p.split.toggled();
+                crate::piano_split::save(p.split);
+            }
             app.state.raise(Win::PianoRoll);
         }
         RCmd::DeclickSel(mode) => set_declick(app, &sel, mode),
@@ -2447,6 +2473,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::Sort(_)
         | RCmd::LoadSample(_)
         | RCmd::PianoRoll(_)
+        | RCmd::EventsInPiano(..)
         | RCmd::DeclickSel(_)
         | RCmd::DetachAll(_)
         | RCmd::StretchClips(..)
@@ -4200,6 +4227,92 @@ mod tests {
         run(&mut app, RCmd::Through(0));
         assert_eq!(entry(&app, 0, "MIDI channel through").mark, Mark::Check(false));
         assert!(!through(&app.state, 0) && through(&app.state, 1));
+    }
+
+    /// The knob, mixer box and LED menus' Automation and Remote control groups (§19, Lemon Studio's design): Edit
+    /// automation in piano roll opens the piano roll on the knob's channel lane, its event panel brought back; the swing
+    /// knob takes a song start value (the main swing, 0..128); the mixer box and the LED link to a controller, which
+    /// moves the box over Master..last insert and switches the channel at its middle. What stays greyed is listed.
+    #[test]
+    fn automation_and_remote_groups_of_the_rack_menus() {
+        use crate::app::Action;
+        use crate::typein::Target;
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        app.state.control.settle(&mut app.state.project);
+        let menu = |app: &App, which: u8| match which {
+            0 => knob_menu(&app.state, KnobId::ChanVol(1), app.automation_target(&Action::Knob(KnobId::ChanVol(1))), 0.0, 0.0),
+            1 => knob_menu(&app.state, KnobId::ChanPan(1), app.automation_target(&Action::Knob(KnobId::ChanPan(1))), 0.0, 0.0),
+            2 => knob_menu(&app.state, KnobId::Swing, None, 0.0, 0.0),
+            3 => mixer_menu(&app.state, 1, 0.0, 0.0),
+            _ => led_menu(&app.state, 1, 0.0, 0.0),
+        };
+        let entry = |app: &App, which: u8, label: &str| menu(app, which).items.into_iter().find(|i| i.label == label).unwrap_or_else(|| panic!("{label}"));
+
+        // Edit automation in piano roll: the channel's lane, a collapsed event panel opened again.
+        app.state.piano.split = app.state.piano.split.toggled();
+        assert!(app.state.piano.split.panel_collapsed());
+        for (which, lane) in [(0, crate::piano::Lane::ChanVolume), (1, crate::piano::Lane::ChanPan)] {
+            let item = entry(&app, which, "Edit automation in piano roll");
+            assert!(item.enabled);
+            crate::playlist::run(&mut app, item.cmd);
+            assert!(app.state.shown(Win::PianoRoll));
+            assert_eq!((app.state.selected_channel, app.state.piano.lane), (1, lane));
+            assert!(!app.state.piano.split.panel_collapsed());
+        }
+
+        // The swing knob's start value: the project's main swing, one undo step; Remove start value takes it out.
+        app.state.project.swing = Some(32);
+        let init = entry(&app, 2, crate::init::INIT_LABEL);
+        assert!(init.enabled && init.mark == Mark::Check(false));
+        crate::playlist::run(&mut app, init.cmd);
+        assert_eq!(crate::init::entry(&app.state, InitControl::MAIN_SWING).map(|c| c.value), Some(32));
+        assert_eq!(entry(&app, 2, crate::init::INIT_LABEL).mark, Mark::Check(true));
+        app.state.project.swing = Some(100);
+        app.state.song_mode = true;
+        assert!(crate::init::apply(&mut app.state));
+        assert_eq!(app.state.project.swing, Some(32), "the song starts with it");
+        let delete = entry(&app, 2, crate::init::DELETE_LABEL);
+        assert!(delete.enabled);
+        crate::playlist::run(&mut app, delete.cmd);
+        assert!(!crate::init::listed(&app.state, InitControl::MAIN_SWING));
+
+        // MIDI learn... on the mixer box and the LED: the link box, then the controller drives them.
+        crate::remote::set_links(&[]);
+        for (which, t) in [(3, Target::RackTrack(1)), (4, Target::RackLed(1))] {
+            let learn = entry(&app, which, "MIDI learn...");
+            assert!(learn.enabled);
+            crate::playlist::run(&mut app, learn.cmd);
+            assert_eq!(app.state.link_box.as_ref().map(|b| b.target), Some(t));
+            app.state.link_box = None;
+        }
+        crate::remote::add(crate::remote::Link::new(0, 20, Target::RackTrack(1)), true);
+        crate::remote::add(crate::remote::Link::new(0, 21, Target::RackLed(1)), true);
+        let last = crate::mixer::max_insert(&app.state.project);
+        assert!(app.remote_cc("Test", 0, 20, 127));
+        assert_eq!(app.state.project.channels[1].mixer_track, last);
+        assert!(app.remote_cc("Test", 0, 20, 0));
+        assert_eq!(app.state.project.channels[1].mixer_track, 0);
+        assert!(app.remote_cc("Test", 0, 21, 10));
+        assert!(!app.state.project.channels[1].enabled);
+        assert!(app.remote_cc("Test", 0, 21, 100));
+        assert!(app.state.project.channels[1].enabled);
+        // Linked: Remove link follows, and the links read back from the settings.
+        assert!(menu(&app, 4).items.iter().any(|i| i.label == "Remove link" && i.enabled));
+        assert_eq!(crate::remote::links().iter().map(|l| l.target).collect::<Vec<_>>(), [Target::RackTrack(1), Target::RackLed(1)]);
+
+        // What stays greyed whatever the state (§19 lists the reasons): 2 on the volume and panning knobs, 5 on the
+        // swing knob, 6 on the mixer box and on the LED.
+        let greyed = |which: u8| -> Vec<String> {
+            let state_bound = ["Remove start value", "Edit automation clip...", "Paste value"];
+            menu(&app, which).items.iter().filter(|i| !i.enabled && !i.label.is_empty() && !state_bound.contains(&i.label.as_ref())).map(|i| i.label.to_string()).collect()
+        };
+        assert_eq!(greyed(0), ["Edit automation in a window", "Override global mapping..."]);
+        assert_eq!(greyed(1), greyed(0));
+        assert_eq!(greyed(2), ["Edit automation", "Edit automation in a window", "Edit automation in piano roll", "Create automation clip", "Override global mapping..."]);
+        let boxes = ["Edit automation", "Edit automation in a window", "Edit automation in piano roll", "Set as song start value", "Create automation clip", "Override global mapping..."];
+        assert_eq!(greyed(3), boxes);
+        assert_eq!(greyed(4), boxes);
     }
 
     /// Restretch all (§17, Ctrl+Alt+R; Lemon Studio's design): the audio clips get their lengths at the tempo at once,
