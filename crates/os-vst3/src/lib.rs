@@ -455,6 +455,8 @@ struct Note {
     kind: NoteKind,
     key: u8,
     velocity: f32,
+    /// A note on's MIDI channel, 0..15 (`NoteLevels::channel`); a note off goes on its key's.
+    ch: u8,
 }
 
 // Event types and the tuning note expression (spec §5).
@@ -598,7 +600,7 @@ impl Plugin {
                 bus_in: Vec::new(),
                 bus_out: Vec::new(),
                 queue: Vec::with_capacity(256),
-                note_ids: NoteIds { ids: [-1; 128], next: 0 },
+                note_ids: NoteIds { ids: [-1; 128], next: 0, chs: [0; 128] },
                 fx_in: (Vec::new(), Vec::new()),
                 from_processor: Vec::with_capacity(256),
                 pending_since: None,
@@ -1265,10 +1267,12 @@ impl Plugin {
     }
 }
 
-/// Note id of each key's latest note on (-1 = none), and the next id to give.
+/// Note id of each key's latest note on (-1 = none), and the next id to give; the MIDI channel each key's latest note
+/// on went on (its note off goes on the same one).
 struct NoteIds {
     ids: [i32; 128],
     next: i32,
+    chs: [u8; 128],
 }
 
 impl NoteIds {
@@ -1282,11 +1286,12 @@ impl NoteIds {
                 let id = self.next;
                 self.next = (id + 1) & 0x7fff_ffff;
                 self.ids[key] = id;
-                let on = NoteOnEvent { channel: 0, pitch: i16::from(n.key), tuning: 0.0, velocity: n.velocity, length: 0, note_id: id };
+                self.chs[key] = n.ch & 15;
+                let on = NoteOnEvent { channel: i16::from(n.ch & 15), pitch: i16::from(n.key), tuning: 0.0, velocity: n.velocity, length: 0, note_id: id };
                 (NOTE_ON_EVENT, EventData { note_on: on })
             }
             NoteKind::Off => {
-                (NOTE_OFF_EVENT, EventData { note_off: NoteOffEvent { channel: 0, pitch: i16::from(n.key), velocity: 0.0, note_id: -1, tuning: 0.0 } })
+                (NOTE_OFF_EVENT, EventData { note_off: NoteOffEvent { channel: i16::from(self.chs[key]), pitch: i16::from(n.key), velocity: 0.0, note_id: -1, tuning: 0.0 } })
             }
             NoteKind::Tune => {
                 let id = self.ids[key];
@@ -1428,6 +1433,16 @@ impl os_host::Plugin for Plugin {
     }
 }
 
+impl Plugin {
+    /// A note on, on MIDI channel `ch` (0..15).
+    fn start(&mut self, offset: u32, key: u8, velocity: f32, ch: u8) {
+        if let Some(m) = self.bend.as_mut().and_then(|b| b.note_on(key)) {
+            os_engine::Instrument::midi(self, offset, m);
+        }
+        self.queue.push(Note { time: offset, kind: NoteKind::On, key, velocity: velocity.clamp(0.0, 1.0), ch });
+    }
+}
+
 impl os_engine::Instrument for Plugin {
     fn active(&self) -> bool {
         self.sounding
@@ -1452,7 +1467,7 @@ impl os_engine::Instrument for Plugin {
         let held: Vec<u8> = self.ledger.held().collect();
         for key in held {
             if !std::mem::replace(&mut sent[usize::from(key.min(127))], true) {
-                self.queue.push(Note { time: 0, kind: NoteKind::Off, key, velocity: 0.0 });
+                self.queue.push(Note { time: 0, kind: NoteKind::Off, key, velocity: 0.0, ch: 0 });
             }
         }
         self.ledger.clear();
@@ -1467,14 +1482,16 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
-        if let Some(m) = self.bend.as_mut().and_then(|b| b.note_on(key)) {
-            os_engine::Instrument::midi(self, offset, m);
-        }
-        self.queue.push(Note { time: offset, kind: NoteKind::On, key, velocity: velocity.clamp(0.0, 1.0) });
+        self.start(offset, key, velocity, 0);
+    }
+
+    /// The note's levels are dropped (VST 3 takes no pan or mod X / Y here), but not its MIDI channel.
+    fn note_start(&mut self, offset: u32, key: u8, velocity: f32, _start: f32, levels: os_engine::NoteLevels) {
+        self.start(offset, key, velocity, levels.channel);
     }
 
     fn note_off(&mut self, offset: u32, key: u8) {
-        self.queue.push(Note { time: offset, kind: NoteKind::Off, key, velocity: 0.0 });
+        self.queue.push(Note { time: offset, kind: NoteKind::Off, key, velocity: 0.0, ch: 0 });
     }
 
     /// A controller message (spec: ui/midi-settings.md §4): VST3 takes controllers, channel pressure and pitch bend as
@@ -1505,7 +1522,7 @@ impl os_engine::Instrument for Plugin {
                     os_engine::Instrument::midi(self, offset, m);
                 }
             }
-            None => self.queue.push(Note { time: offset, kind: NoteKind::Tune, key, velocity: semitones }),
+            None => self.queue.push(Note { time: offset, kind: NoteKind::Tune, key, velocity: semitones, ch: 0 }),
         }
     }
 

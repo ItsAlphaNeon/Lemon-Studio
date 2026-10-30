@@ -1110,7 +1110,9 @@ pub struct Engine {
     inst_shapes: Vec<InstClip>,
     /// The name the next audio clip voice on an instrument gets (`Instrument::voice_start`).
     next_voice: u32,
-    inst_live: Vec<(usize, u8, f32)>,
+    /// Live notes for instrument channels waiting for the next tick (channel, key, velocity or -1 for an end, MIDI
+    /// channel).
+    inst_live: Vec<(usize, u8, f32, u8)>,
     /// Controller messages for instrument channels waiting for the next tick (channel, message; `Engine::midi`).
     inst_midi: Vec<(usize, [u8; 3])>,
     inst_events: Vec<notes::Event>,
@@ -1840,7 +1842,7 @@ impl Engine {
         }
         let k = key.min(127) as u8;
         let ticks = (frames as f64 / self.clock.samples_per_tick()).ceil().max(1.0) as u64;
-        self.inst_live.push((channel, k, f32::from(velocity) / 128.0));
+        self.inst_live.push((channel, k, f32::from(velocity) / 128.0, 0));
         self.inst_offs.push((self.tick + ticks, channel, k, None));
         self.tail_done = false;
     }
@@ -2035,10 +2037,16 @@ impl Engine {
     /// Start a live note on channel `channel` (rack position) at the next tick; it rings until
     /// `note_off` (or the sample ends). Velocity 0..=128, 100 = unity.
     pub fn note_on(&mut self, channel: usize, key: u16, velocity: u8) {
+        self.note_on_midi(channel, key, velocity, 0);
+    }
+
+    /// `note_on` on MIDI channel `midi` (0..15): an instrument channel's plugin gets the note, and its end, on it (MIDI
+    /// channel through, spec: ui/channel-rack.md §18); other channels ignore it.
+    pub fn note_on_midi(&mut self, channel: usize, key: u16, velocity: u8, midi: u8) {
         let Some(ch) = self.channels.get(channel) else { return };
         self.tail_done = false;
         if ch.instrument.0.is_some() {
-            self.inst_live.push((channel, key.min(127) as u8, f32::from(velocity) / 128.0));
+            self.inst_live.push((channel, key.min(127) as u8, f32::from(velocity) / 128.0, midi & 15));
             self.sounding.push((channel, key, u64::MAX));
             return;
         }
@@ -2083,7 +2091,7 @@ impl Engine {
     /// Release a live note with a short fade.
     pub fn note_off(&mut self, channel: usize, key: u16) {
         if self.has_instrument(channel) && self.sounding.iter().any(|&(c, k, end)| c == channel && k == key && end == u64::MAX) {
-            self.inst_live.push((channel, key.min(127) as u8, -1.0));
+            self.inst_live.push((channel, key.min(127) as u8, -1.0, 0));
         }
         let fade = (f64::from(self.rate) * RELEASE_SECONDS) as u32;
         let vol_env = self.channels.get(channel).is_some_and(|c| c.vol_env.is_some());
@@ -3250,8 +3258,13 @@ impl Engine {
     /// renders its channel (`instrument_job`) and, with `voices`, the sampler voices render into their tracks' inputs,
     /// on the pool while the generator switch is on. What the instruments put out waits for `instruments_out`.
     fn render_generators(&mut self, n: usize, song: &TransportInfo, voices: bool) {
-        for (ch, key, vel) in self.inst_live.drain(..) {
-            self.inst_events.push(if vel < 0.0 { notes::Event::off(ch, 0, key) } else { notes::Event::on(ch, 0, key, vel) });
+        for (ch, key, vel, midi) in self.inst_live.drain(..) {
+            self.inst_events.push(if vel < 0.0 {
+                notes::Event::off(ch, 0, key)
+            } else {
+                let on = notes::Event::on(ch, 0, key, vel);
+                notes::Event { levels: crate::NoteLevels { channel: midi, ..on.levels }, ..on }
+            });
         }
         self.inst_events.sort_by_key(|e| e.off);
         let rules: Vec<notes::Rules> = self.channels.iter().map(|c| c.rules).collect();
@@ -5936,11 +5949,40 @@ mod tests {
         e.set_instrument(0, log.clone());
         e.render_all(480);
         let got = log.lock().unwrap().0.clone();
-        let half = crate::NoteLevels { pan: 0.5, mod_x: 0.5, mod_y: -0.5 };
+        let half = crate::NoteLevels { pan: 0.5, mod_x: 0.5, mod_y: -0.5, channel: 0 };
         let centred = crate::NoteLevels::of_bytes(64, 128, 128);
         assert_eq!(centred, crate::NoteLevels::default());
         assert_eq!(got, vec![(60, half), (62, centred)]);
-        assert_eq!(crate::NoteLevels::of_bytes(0, 0, 255), crate::NoteLevels { pan: -1.0, mod_x: -1.0, mod_y: 127.0 / 128.0 });
+        assert_eq!(crate::NoteLevels::of_bytes(0, 0, 255), crate::NoteLevels { pan: -1.0, mod_x: -1.0, mod_y: 127.0 / 128.0, channel: 0 });
+    }
+
+    /// MIDI channel through (spec: ui/channel-rack.md §18): a live note's MIDI channel reaches the hosted instrument
+    /// with the note; a plain live note is on channel 1.
+    #[test]
+    fn live_notes_carry_their_midi_channel() {
+        #[derive(Default)]
+        struct Log(Vec<(u8, u8)>);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {
+                panic!("notes start with their levels");
+            }
+            fn note_off(&mut self, _o: u32, _k: u8) {}
+            fn note_start(&mut self, _o: u32, key: u8, _v: f32, _start: f32, levels: crate::NoteLevels) {
+                self.0.push((key, levels.channel));
+            }
+            fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        }
+        let mut p = project(vec![], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut e = Engine::new(&p, &mut SampleLibrary::default(), 48000, PlayMode::Pattern(1));
+        let log = Arc::new(std::sync::Mutex::new(Log::default()));
+        e.set_instrument(0, log.clone());
+        e.note_on_midi(0, 64, 100, 5);
+        e.note_on(0, 67, 100);
+        e.note_on_midi(0, 69, 100, 0x13);
+        let mut out = vec![0.0f32; 256];
+        e.process(&mut out);
+        assert_eq!(log.lock().unwrap().0, [(64, 5), (67, 0), (69, 3)], "the channel's low nibble");
     }
 
     /// Records what a layer's child is given, by frame: note ons (velocity), offs, chokes and tunings (semitones); it

@@ -395,7 +395,8 @@ enum Cmd {
     /// The hosted instruments changed (in `Transport::instruments`): rebuild the engines.
     Instruments,
     /// Live note (typing keyboard): channel (rack position), key, velocity; `NoteOff` releases.
-    NoteOn(usize, u16, u8),
+    /// A live note: channel, key, velocity, MIDI channel (`Engine::note_on_midi`).
+    NoteOn(usize, u16, u8, u8),
     NoteOff(usize, u16),
     /// A controller message for a channel (rack position): message, pitch bend range in cents (`Engine::midi`).
     Midi(usize, [u8; 3], f64),
@@ -674,7 +675,13 @@ impl Transport {
     /// only the first note pays for opening the device). The live stream uses the project from the
     /// last `play` / `update`.
     pub fn note_on(&self, channel: usize, key: u16, velocity: u8) {
-        let _ = self.tx.send(Cmd::NoteOn(channel, key, velocity));
+        self.note_on_midi(channel, key, velocity, 0);
+    }
+
+    /// `note_on` on MIDI channel `midi` (0..15) for a hosted instrument (MIDI channel through, spec:
+    /// ui/channel-rack.md §18).
+    pub fn note_on_midi(&self, channel: usize, key: u16, velocity: u8, midi: u8) {
+        let _ = self.tx.send(Cmd::NoteOn(channel, key, velocity, midi));
     }
 
     pub fn note_off(&self, channel: usize, key: u16) {
@@ -1434,7 +1441,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 if let Some(s) = target {
                     if let Ok(mut e) = s.engine.lock() {
                         match cmd {
-                            Cmd::NoteOn(ch, key, vel) => e.note_on(ch, key, vel),
+                            Cmd::NoteOn(ch, key, vel, midi) => e.note_on_midi(ch, key, vel, midi),
                             Cmd::Midi(ch, bytes, bend) => e.midi(ch, bytes, bend),
                             Cmd::TapClick(accent, db) => e.tap_click(accent, db),
                             _ => {}

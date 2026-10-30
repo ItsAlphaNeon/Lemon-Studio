@@ -262,6 +262,11 @@ pub struct RackUi {
     /// The channel each live note source is locked to (§18 Receive notes from ▸), indexed by [`NoteSrc`]; a source
     /// without one plays the focused channel. Not saved (Lemon Studio's choice: the original's file was not measured).
     pub note_lock: [Option<usize>; 2],
+    /// Show waveform preview (§18, Lemon Studio's design): the channels, by id, whose name button shows their sample's
+    /// waveform. Not saved (the original's file was not measured).
+    pub wave_preview: BTreeSet<u32>,
+    /// MIDI channel through (§18): the channels, by id, with it unticked; it is ticked by default. Not saved.
+    pub through_off: BTreeSet<u32>,
 }
 
 /// A live note source a channel can be locked to (§18 Receive notes from ▸).
@@ -318,6 +323,8 @@ impl Default for RackUi {
             played: false,
             filter_seen: None,
             note_lock: [None; 2],
+            wave_preview: BTreeSet::new(),
+            through_off: BTreeSet::new(),
         }
     }
 }
@@ -1537,6 +1544,10 @@ pub enum RCmd {
     ReceiveFrom(usize, NoteSrc),
     /// Receive notes from ▸ Unlock (§18): the channel's locks end; their sources play the focused channel again.
     Unlock(usize),
+    /// Show waveform preview (§18): ticks or unticks the channel's waveform on its name button.
+    WavePreview(usize),
+    /// MIDI channel through (§18): ticks or unticks it on the channel.
+    Through(usize),
 }
 
 fn it(label: impl Into<std::borrow::Cow<'static, str>>, c: RCmd) -> PItem {
@@ -1746,11 +1757,11 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("Rename, color and icon...", RCmd::Rename(r)),
         it("Change color...", RCmd::ChangeColor(r)),
         it("Random color", RCmd::RandomColor(r)),
-        PItem::not_yet("Change icon..."),
+        PItem::sub("Change icon...", crate::playlist::icon_items(s, r)),
         PItem::sep(),
         if sampler { it("Load sample...", RCmd::LoadSample(r)) } else { PItem::new("Load sample...", Cmd::Nothing).off() },
         it("Chokes itself", RCmd::CutItself(r)).mark(Mark::Check(s.project.channels.get(r).is_some_and(|c| cuts_itself(&c.misc)))),
-        PItem::new("Show waveform preview", Cmd::Nothing).off(),
+        wave_item(s, r),
         PItem::sep(),
         PItem::sub("Insert", crate::plugin_menu::items(s, crate::plugin_menu::Target::Gen(Some(r)), true)),
         PItem::sub("Replace", crate::plugin_menu::items(s, crate::plugin_menu::Target::Replace(r), true)),
@@ -1776,12 +1787,40 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("Rotate left", RCmd::Rotate(r, -1)).key("Shift+Ctrl+Left"),
         it("Rotate right", RCmd::Rotate(r, 1)).key("Shift+Ctrl+Right"),
         PItem::sep(),
-        PItem::not_yet("MIDI channel through").mark(Mark::Check(true)),
+        it("MIDI channel through", RCmd::Through(r)).mark(Mark::Check(through(s, r))),
         PItem::sub("Receive notes from", receive_items(s, r)),
         PItem::not_yet("Create instrument..."),
         PItem::sub("Burn MIDI to", vec![PItem::not_yet("Current pattern"), PItem::not_yet("New pattern")]),
     ]);
     Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// Show waveform preview (§18): a check, on a channel with a sample (greyed on the others).
+fn wave_item(s: &State, r: usize) -> PItem {
+    let i = it("Show waveform preview", RCmd::WavePreview(r)).mark(Mark::Check(wave_preview(s, r).is_some()));
+    if s.project.channels.get(r).is_some_and(|c| c.sample_path.is_some()) { i } else { i.off() }
+}
+
+/// The sample whose waveform row `r`'s name button shows: Show waveform preview is ticked and the channel has one
+/// (Lemon Studio's design: the original's manual names the entry only).
+pub fn wave_preview(s: &State, r: usize) -> Option<&str> {
+    let c = s.project.channels.get(r)?;
+    s.rack.wave_preview.contains(&c.id.0).then_some(c.sample_path.as_deref()?)
+}
+
+/// MIDI channel through (§18) on row `r`: notes and controller messages from a MIDI device reach its plugin on the MIDI
+/// channel they came on; unticked, on channel 1. Ticked by default.
+pub fn through(s: &State, r: usize) -> bool {
+    s.project.channels.get(r).is_some_and(|c| !s.rack.through_off.contains(&c.id.0))
+}
+
+/// Ticks or unticks channel `r`'s entry in `set` (a set of channel ids).
+fn flip_id(s: &mut State, r: usize, which: fn(&mut RackUi) -> &mut BTreeSet<u32>) {
+    let Some(id) = s.project.channels.get(r).map(|c| c.id.0) else { return };
+    let set = which(&mut s.rack);
+    if !set.remove(&id) {
+        set.insert(id);
+    }
 }
 
 /// Receive notes from ▸ (§18): Unlock, enabled while the channel holds a lock, then the sources, each ticked while its
@@ -2090,6 +2129,12 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             lock_notes(app, &held, None);
         }
         RCmd::StretchClips(all, method) => ask_stretch(app, all, method, &sel),
+        RCmd::WavePreview(r) => flip_id(&mut app.state, r, |k| &mut k.wave_preview),
+        RCmd::Through(r) => {
+            // Notes held from a device end first, so none hangs on the MIDI channel it started on.
+            app.midi_release_all();
+            flip_id(&mut app.state, r, |k| &mut k.through_off);
+        }
         // spec: ui/plugin-window.md "Docking and the window menu"
         #[cfg(plugin_windows)]
         RCmd::DetachAll(on) => app.plugins.set_all_detached(on),
@@ -2401,7 +2446,9 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::DetachAll(_)
         | RCmd::StretchClips(..)
         | RCmd::ReceiveFrom(..)
-        | RCmd::Unlock(_) => None,
+        | RCmd::Unlock(_)
+        | RCmd::WavePreview(_)
+        | RCmd::Through(_) => None,
     };
     // Channels let go without asking (`ask_delete`) are deleted now.
     let msg = match app.state.rack.delete_now.take() {
@@ -4074,6 +4121,71 @@ mod tests {
         for p in [plain, both] {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    /// Change icon... ▸, Show waveform preview and MIDI channel through (§18; the first two are Lemon Studio's design):
+    /// the icon is the plugin window's, the waveform check is greyed on a channel without a sample and follows its
+    /// channel when the rows move, MIDI channel through is ticked by default.
+    #[test]
+    fn icon_waveform_and_through_entries() {
+        let mut app = lock_app();
+        app.state.project.channels[0].sample_path = Some("kick.wav".into());
+        app.state.project.channels[1].sample_path = None;
+        app.state.control.settle(&mut app.state.project);
+        let entry = |app: &App, r: usize, label: &str| {
+            let m = channel_menu(&app.state, r, 0.0, 0.0);
+            m.items.into_iter().find(|i| i.label == label).unwrap_or_else(|| panic!("{label}"))
+        };
+        let icons = entry(&app, 0, "Change icon...");
+        assert_eq!(icons.children.len(), 1 + crate::playlist::ICONS.len());
+        assert_eq!((icons.children[0].label.as_ref(), icons.children[0].mark), ("None", Mark::Check(true)));
+        crate::playlist::run(&mut app, icons.children[8].cmd.clone());
+        assert_eq!(crate::playlist::window_icon(&app.state.project, &app.state.playlist.icons, 0), Some(crate::icons::Icon::Star));
+        assert_eq!(entry(&app, 0, "Change icon...").children[8].mark, Mark::Check(true));
+
+        assert!(!entry(&app, 1, "Show waveform preview").enabled, "no sample");
+        let wave = entry(&app, 0, "Show waveform preview");
+        assert_eq!((wave.enabled, wave.mark), (true, Mark::Check(false)));
+        run(&mut app, RCmd::WavePreview(0));
+        assert_eq!(entry(&app, 0, "Show waveform preview").mark, Mark::Check(true));
+        assert_eq!(wave_preview(&app.state, 0), Some("kick.wav"));
+        app.state.rack.select_only(0);
+        run(&mut app, RCmd::MoveSel(1));
+        assert_eq!((wave_preview(&app.state, 0), wave_preview(&app.state, 1)), (None, Some("kick.wav")), "it follows its channel");
+        run(&mut app, RCmd::WavePreview(1));
+        assert_eq!(wave_preview(&app.state, 1), None);
+
+        assert_eq!(entry(&app, 0, "MIDI channel through").mark, Mark::Check(true), "ticked by default");
+        run(&mut app, RCmd::Through(0));
+        assert_eq!(entry(&app, 0, "MIDI channel through").mark, Mark::Check(false));
+        assert!(!through(&app.state, 0) && through(&app.state, 1));
+    }
+
+    /// The name button draws the channel's icon and, with Show waveform preview ticked, its sample's waveform.
+    #[test]
+    fn name_button_shows_the_icon_and_the_waveform() {
+        let wav = std::env::temp_dir().join(format!("os_rack_wave_{}.wav", std::process::id()));
+        let frames: Vec<f32> = (0..9600).flat_map(|i| [(i as f32 * 0.05).sin() * 0.8; 2]).collect();
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &frames).unwrap();
+        let mut app = lock_app();
+        app.state.project.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        app.state.control.settle(&mut app.state.project);
+        app.state.raise(Win::ChannelRack);
+        let button = |app: &mut App| -> Vec<u8> {
+            let mut c = os_ui::Canvas::new(1600, 1000, 1.0).unwrap();
+            app.paint(&mut c, None);
+            let r = crate::views::rack::name_rect(&app.state, 0).expect("row 0 shown");
+            let w = c.pixmap.width() as usize;
+            let data = c.pixmap.data();
+            (r.y as usize + 2..(r.y + r.h) as usize - 2).flat_map(|y| data[(y * w + r.x as usize + 2) * 4..(y * w + (r.x + r.w) as usize - 2) * 4].to_vec()).collect()
+        };
+        let plain = button(&mut app);
+        run(&mut app, RCmd::WavePreview(0));
+        let waved = button(&mut app);
+        assert_ne!(plain, waved, "the waveform shows");
+        crate::playlist::run(&mut app, crate::playlist::Cmd::SetIcon(0, Some(0)));
+        assert_ne!(button(&mut app), waved, "the icon shows");
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// The channel menu's Receive notes from ▸ for row `r`: (label, enabled, mark) of each entry.

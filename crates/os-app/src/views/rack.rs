@@ -383,12 +383,22 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let nf = Font::new(14);
         // A channel locked to a note source shows a padlock at the button's right end (§18 Receive notes from ▸).
         let locked = s.rack.note_lock.contains(&Some(i));
-        let tb = if locked { Rect::new(nb.x, nb.y, nb.w - 12.0, nb.h) } else { nb };
+        // Change icon... (§18, Lemon Studio's design): the icon at the button's left end, the name moved right of it.
+        let icon = crate::playlist::window_icon(&s.project, &s.playlist.icons, i);
+        let lead = if icon.is_some() { 16.0 } else { 0.0 };
+        let tb = Rect::new(nb.x + lead, nb.y, nb.w - lead - if locked { 12.0 } else { 0.0 }, nb.h);
         let label = shorten(ui, nf, &label, tb.w - 8.0);
         ui.c.push_clip(nb.inset(1.0));
+        // Show waveform preview (§18, Lemon Studio's design): the sample's waveform across the face, under the name.
+        if let Some(w) = rk::wave_preview(s, i).and_then(|p| s.playlist.wave(p)) {
+            name_wave(ui, nb.inset(2.0), &w, col.mix(base, 0.6));
+        }
+        if let Some(ic) = icon {
+            icons::draw(ui.c, ic, Rect::new(nb.x + if lemon { 6.0 } else { 4.0 }, nb.cy() - 6.0, 12.0, 12.0), col);
+        }
         if s.rack.align_left {
             let lh = ui.c.line_height(nf);
-            ui.c.text(nf, nb.x + if lemon { 9.0 } else { 5.0 }, (nb.cy() - lh / 2.0).round(), col, &label);
+            ui.c.text(nf, nb.x + lead + if lemon { 9.0 } else { 5.0 }, (nb.cy() - lh / 2.0).round(), col, &label);
         } else {
             ui.c.text_center(nf, tb, col, &label);
         }
@@ -815,6 +825,23 @@ fn row_knob(ui: &mut Ui, cx: f32, cy: f32, value: f32) {
 fn rack_led(ui: &mut Ui, cx: f32, cy: f32, on: bool) {
     let hov = ui.hovering(Rect::new(cx - 6.0, cy - 6.0, 12.0, 12.0));
     os_ui::kit::led(ui.c, ui.t, cx, cy, 5.0, os_ui::kit::State::hover(hov).with_on(on));
+}
+
+/// A sample's waveform in `r` (Show waveform preview, §18): one column a pixel wide each, the peaks of its share of the
+/// sample, both channels mixed, around the middle.
+fn name_wave(ui: &mut Ui, r: Rect, w: &crate::playlist::Wave, c: Color) {
+    let cols = r.w.floor().max(0.0) as usize;
+    if cols == 0 || w.peaks.is_empty() {
+        return;
+    }
+    let (mid, amp) = (r.cy(), r.h / 2.0);
+    for j in 0..cols {
+        let a = j * w.peaks.len() / cols;
+        let b = ((j + 1) * w.peaks.len() / cols).max(a + 1).min(w.peaks.len());
+        let (lo, hi) = w.peaks[a..b].iter().fold((f32::MAX, f32::MIN), |(lo, hi), &(x, y)| (lo.min(x), hi.max(y)));
+        let (top, bottom) = (mid - hi.clamp(-1.0, 1.0) * amp, mid - lo.clamp(-1.0, 1.0) * amp);
+        ui.c.fill_rect(Rect::span(r.x + j as f32, r.x + j as f32 + 1.0, top.min(mid - 0.5), bottom.max(mid + 0.5)), c);
+    }
 }
 
 /// The small green padlock of a locked channel (§10); dimmed when the channel is muted.

@@ -168,6 +168,9 @@ pub struct Extra {
     pub channel: Option<u16>,
     pub mod_x: Option<u8>,
     pub mod_y: Option<u8>,
+    /// The colour group a recorded note takes: the MIDI channel it came on, on a channel with MIDI channel through
+    /// ticked (spec: ui/channel-rack.md §18).
+    pub group: Option<u8>,
 }
 
 /// The take being recorded: the pattern's notes as they were before it, the channels it recorded, the span from its
@@ -670,6 +673,9 @@ impl App {
         let mut note = Note { length: b - a, key: h.key, velocity: h.velocity, ..Note::step(h.channel, a) };
         note.mod_x = h.extra.mod_x.unwrap_or(note.mod_x);
         note.mod_y = h.extra.mod_y.unwrap_or(note.mod_y);
+        if let Some(g) = h.extra.group {
+            note.group = note.group & !0x0F | g & 0x0F;
+        }
         note.release = h.release.unwrap_or(note.release);
         take.new.push(note);
         let (lo, hi) = take.span.map_or((a, b), |(lo, hi)| (lo.min(a), hi.max(b)));
@@ -1052,6 +1058,34 @@ mod tests {
         app.record_tick();
         stop(&mut app);
         assert!(notes(&app).contains(&(301, 32, 0)), "{:?}", notes(&app));
+    }
+
+    /// MIDI channel through (spec: ui/channel-rack.md §18): a note recorded from a MIDI device takes the MIDI channel it
+    /// came on as its colour group; with the entry unticked it keeps the first.
+    #[test]
+    fn midi_notes_record_their_channel_as_colour() {
+        use crate::midi_in::Msg;
+        let mut app = app();
+        app.toggle_record();
+        let groups = |app: &App| -> Vec<u8> { app.state.project.pattern(1).map_or(vec![], |p| p.notes.iter().map(|n| n.group & 0x0F).collect()) };
+        app.transport.pretend_at(0.0, false);
+        app.record_tick();
+        app.midi_notes(vec![Msg::On { ch: 4, key: 60, vel: 100 }]);
+        app.transport.pretend_at(24.0, false);
+        app.record_tick();
+        app.midi_notes(vec![Msg::Off { ch: 4, key: 60, vel: 64 }]);
+        stop(&mut app);
+        assert_eq!(groups(&app), [4]);
+        crate::rack::run(&mut app, crate::rack::RCmd::Through(0));
+        assert!(!crate::rack::through(&app.state, 0));
+        app.transport.pretend_at(48.0, false);
+        app.record_tick();
+        app.midi_notes(vec![Msg::On { ch: 4, key: 62, vel: 100 }]);
+        app.transport.pretend_at(72.0, false);
+        app.record_tick();
+        app.midi_notes(vec![Msg::Off { ch: 4, key: 62, vel: 64 }]);
+        stop(&mut app);
+        assert_eq!(groups(&app), [4, 0], "unticked: the first colour");
     }
 
     /// SONG mode: with no clip of the pattern at the song position, one is placed from the start of that bar on the
