@@ -475,7 +475,7 @@ pub fn owner_key(s: &State, owner: u32) -> Option<usize> {
         })
     };
     if owner & MEMBER_OWNER != 0 {
-        let (t, k) = slot(owner & MEMBER_SLOT)?;
+        let (t, k) = crate::container::id_place(s, owner & MEMBER_SLOT)?;
         let id = (owner & !MEMBER_OWNER) >> 24;
         return s.params.members.iter().find(|(_, m)| **m == (t, k, id)).map(|(&key, _)| key);
     }
@@ -492,7 +492,7 @@ pub fn key_owner(s: &State, key: usize) -> Option<u32> {
     let slot_id = |t: u16, k: u8| p.mixer.iter().find(|m| m.index == t)?.slots.get(usize::from(k))?.as_ref().map(|s| s.id.0);
     if key >= crate::plugins::MEMBER_KEY {
         let &(t, k, id) = s.params.members.get(&key)?;
-        return match slot_id(t, k)? {
+        return match crate::container::place_id(s, t, k)?.0 {
             0 => Some(0),
             slot => member_owner(slot, id),
         };
@@ -503,13 +503,14 @@ pub fn key_owner(s: &State, key: usize) -> Option<u32> {
     }
 }
 
-/// The owner ids of the effects inside containers (Lemon Studio's own, spec plugins/patcher/README.md §4.3): this bit,
-/// the member's id in its container (1 to 15) in bits 24 to 27 and its container's slot plugin id in the low 24 bits,
-/// so that a member's undo steps follow it when its container's slot moves and when the list is reordered.
+/// The owner ids of the plugins inside containers (Lemon Studio's own, spec plugins/patcher/README.md §4.3, §4.4): this
+/// bit, the member's id in its container (1 to 15) in bits 24 to 27 and its container's slot plugin id (or channel id)
+/// in the low 24 bits, so that a member's undo steps follow it when its container moves and when the list is reordered.
 pub const MEMBER_OWNER: u32 = 1 << 31;
 const MEMBER_SLOT: u32 = (1 << 24) - 1;
 
-/// The owner id of member `id` of the container whose slot plugin's id is `slot` (`None`: an id with no room).
+/// The owner id of member `id` of the container whose slot plugin's (or channel's) id is `slot` (`None`: an id with no
+/// room).
 pub fn member_owner(slot: u32, id: u32) -> Option<u32> {
     (slot != 0 && slot <= MEMBER_SLOT && (1..=os_model::target::MEMBER_IDS).contains(&id)).then_some(MEMBER_OWNER | id << 24 | slot)
 }

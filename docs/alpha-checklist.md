@@ -65,8 +65,11 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
   dry levels too (clips and controller links name the member by its container's slot and its id, so they follow it
   when it moves and are saved with the project), and their windows have their presets, a slot effect's menu
   (Replace, Delete) and undo steps for their edits and presets (2026-10-30). Left: the original's Patcher slots in
-  imported projects, moving a wrapped slot's own clips and links onto its member, the CPU switches per effect, the
-  channel's Patcherize (an instrument container, the Patcher's slice 3), and the graph editor
+  imported projects, moving a wrapped slot's own clips and links onto its member, the CPU switches per effect, and
+  the graph editor. The channel rack's Patcherize (Wrap in container) followed on 2026-10-30: the channel's instrument
+  goes into a container on the channel that plays its notes, instruments and effects can be added (instruments layer
+  at wet and dry 100 %), and members are automated, linked, undone and saved as a slot container's are; the old
+  instrument's clips and links are not moved onto its member yet
 - [x] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** Six of the seven
   small effects match sample for sample in the tests (98 cases for these three: `os-engine/tests/integration/fx_null.rs`); the
   Chorus uses the true pi where the original's is a hair off, so 10 of its 21 cases match and the rest are at least
@@ -98,10 +101,11 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   the plugin window's Link all parameters..., Change icon..., Save channel state as... and Browse channel states, work
   as Lemon Studio's design (Change icon is kept for the session only)
   ([playlist.rs](../crates/os-app/src/playlist.rs), [channel_states.rs](../crates/os-app/src/channel_states.rs))
-- [ ] **Channel rack right-click menus.** 10 of the rack's own entries greyed out on 2026-10-30, counted entry by
-  entry after 25 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
-  plugins, Change icon ▸, Show waveform preview, MIDI channel through, Restretch all and Detached on 2026-10-30): Loop
-  starter and its 3 playlist-track options (it is built on the original's online loop library), Patcherize, Assign
+- [ ] **Channel rack right-click menus.** 9 of the rack's own entries greyed out on 2026-10-30, counted entry by
+  entry after 26 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
+  plugins, Change icon ▸, Show waveform preview, MIDI channel through, Restretch all, Detached and Patcherize, as
+  Wrap in container, on 2026-10-30): Loop starter and its 3 playlist-track options (it is built on the original's
+  online loop library), Assign
   to new instrument track (instrument tracks, and how the original saves a track's link to its channel, not measured
   yet), Auto fill (greyed on every channel tried in the original; what it does is unknown), Create instrument (no multi-sample instrument to put the samples
   in yet), Burn MIDI to ▸ (2) (no plugin hands its notes back to the host yet). The knob, mixer box and LED menus'
