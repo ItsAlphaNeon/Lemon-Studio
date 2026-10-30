@@ -206,9 +206,15 @@ Custom brings it back. The Tablet layouts are greyed (they need the toolbar at t
 image wallpaper... makes a PNG or JPEG picture the theme's workspace wallpaper; the HTML document and the background
 colour are greyed. VIEW > Align all channel editors (Shift+F12) puts the channel window back right of the Channel
 rack and cascades the docked plugin windows of rack channels from there, each title showing. HELP > Help index and
-What's new open the project's README and its merged pull requests in the web browser. TOOLS > Save MIDI clipboard to
-browser writes the piano roll's copied notes to a numbered MIDI file in the user folder's Clipboard files, which the
-browser then shows.
+What's new open the project's README and its merged pull requests in the web browser, and Tutorials ▸ the README's
+how-to sections; HELP > Diagnostics writes a plain-text report (build, system, audio settings, plugins found, open
+project) to Diagnostics.txt in the user folder and opens it. TOOLS > Save MIDI clipboard to browser writes the piano
+roll's copied notes to a numbered MIDI file in the user folder's Clipboard files, which the browser then shows; Save
+audio clipboard to browser does the same with the audio on the clipboard (what Tesla copies; Windows and macOS).
+VIEW > Remote control opens the browser's Remote control section, one row per controller link.
+Not yet (greyed in the menu bar): TOOLS > Chord progression tool..., Control builder, Set up for live performance,
+Set up for MIDI export, Switch auto-bypass for all plugins, Lock / Unlock all tracks to / from their clips, Set
+keyboard focus of all plugins to ▸; VIEW > Script output.
 
 **Window positions.** Where the windows were when Lemon Studio closed comes back at the next start: the main
 window (its place and size, and whether it was maximized; brought back onto a screen if its screen is gone) and the

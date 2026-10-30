@@ -90,8 +90,12 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   track, Auto fill, MIDI channel through, Receive notes from ▸ Unlock and Typing keyboard, Create instrument, Burn
   MIDI to ▸ (2). The knob, mixer box and LED menus' Automation and Remote control groups add 23 more (events in a new
   window or the piano roll, initial values, automation clips, controller links) ([rack.rs](../crates/os-app/src/rack.rs))
-- [ ] **Main menu bar.** 13 of its 136 entries greyed out on 2026-10-29: 9 in TOOLS, 2 in VIEW, 2 in HELP
-  ([menus.rs](../crates/os-app/src/views/menus.rs))
+- [ ] **Main menu bar.** 9 of its 136 entries greyed out on 2026-10-30, counted entry by entry after Save audio
+  clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸ and Diagnostics were enabled: TOOLS > Chord
+  progression tool... and Control builder (no chord generator or control builder yet), Set up for live performance
+  (no performance mode), Set up for MIDI export (not observed yet), Switch auto-bypass for all plugins and Set keyboard
+  focus of all plugins to ▸ (no such per-plugin settings yet), Lock / Unlock all tracks to / from their clips (tracks
+  don't lock to a clip yet); VIEW > Script output (no scripting) ([menus.rs](../crates/os-app/src/views/menus.rs))
 - [x] **TOOLS ▸ Audio logger and Dump to audio editor.** Enabled (on by default, as in FL Studio) keeps the last 1 to
   10 minutes of what the device plays, the header showing the memory used; Dump puts them into the master track's
   Tesla. At its time limit Tesla now keeps the last minutes, as Edison does. What FL Studio's logger records and how

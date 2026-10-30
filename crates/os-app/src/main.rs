@@ -14,7 +14,9 @@
 
 mod app;
 mod arrange;
+mod audio_clipboard;
 mod help_links;
+mod diagnostics;
 mod audio_cfg;
 mod auto_close;
 mod autoscroll;

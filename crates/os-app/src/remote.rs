@@ -225,6 +225,23 @@ pub fn remove(t: Target) {
     set_links(&all);
 }
 
+/// A link's row in the browser's Remote control section (Lemon Studio's design: spec ui/browser.md "Current project
+/// children"): what it drives, named with its owner as automation clips are ("Kick - Channel volume", "Bus 1 - To
+/// Bus 2", "Lemon Reverb - Bus 3 - Mix"), then its controller as the Remote control settings box sets it ("channel 1,
+/// ctrl 7"), and "omni" for one that drives the selected channel's knob.
+pub fn label(s: &State, l: &Link) -> String {
+    let channel = |r: usize| crate::views::browser::channel_label(s, r).unwrap_or_else(|| format!("Channel {}", r + 1));
+    let name = crate::typein::target_name(s, l.target);
+    let what = match l.target {
+        Target::Knob(KnobId::ChanVol(r) | KnobId::ChanPan(r)) if !l.omni => format!("{} - {name}", channel(r)),
+        Target::Knob(KnobId::Send(a, _)) => format!("{} - {name}", crate::mixer::name(s, a)),
+        Target::Param(key, index) => crate::params::clip_name(s, key, index),
+        _ => name,
+    };
+    let omni = if l.omni { ", omni" } else { "" };
+    format!("{what}: channel {}, ctrl {}{omni}", l.ch + 1, l.cc)
+}
+
 /// The menu's Remote control part (spec §1): Link to controller..., Override global link... (greyed), and Remove link
 /// for a linked target.
 pub fn menu_items(t: Option<Target>) -> Vec<PItem> {
@@ -685,6 +702,30 @@ mod tests {
         for t in [Target::Knob(KnobId::Eq(1, 2, 0)), Target::Knob(KnobId::Send(1, 0)), Target::Knob(KnobId::MasterPitch)] {
             assert_eq!(parse_target(&target_text(t)), Some(t));
         }
+    }
+
+    /// VIEW > Remote control works: the browser on the Current project tab with its Remote control section open and
+    /// selected, one row per link, named after what it drives and its controller.
+    #[test]
+    fn view_remote_control_lists_the_links() {
+        use crate::views::browser::{rows, section_key, REMOTE_CONTROL};
+        use crate::views::menus::{item_at, works, VIEW};
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        set_links(&[]);
+        add(Link::new(0, 7, Target::Knob(KnobId::ChanVol(1))), true);
+        add(Link { omni: true, ..Link::new(1, 10, Target::Knob(KnobId::ChanPan(0))) }, true);
+        add(Link::new(15, 74, Target::Fader(2)), true);
+        let at = (0..40).find(|&i| item_at(VIEW, i).is_some_and(|it| it.label == "Remote control")).unwrap();
+        assert!(works(VIEW, item_at(VIEW, at).unwrap()));
+        app.state.show_browser = false;
+        app.menu_item(VIEW, at);
+        let key = section_key(REMOTE_CONTROL).unwrap();
+        assert!(app.state.show_browser && app.state.browser_open.contains(&key) && app.state.browser_sel.as_ref() == Some(&key));
+        let listed: Vec<String> = rows(&app.state).into_iter().filter(|r| r.key.starts_with(&format!("{key}/"))).map(|r| r.label).collect();
+        let bus2 = crate::mixer::name(&app.state, 2);
+        assert_eq!(listed, ["Clap - Channel volume: channel 1, ctrl 7".to_string(), "Channel panning: channel 2, ctrl 10, omni".into(), format!("{bus2} - Volume: channel 16, ctrl 74")]);
+        set_links(&[]);
     }
 
     #[test]

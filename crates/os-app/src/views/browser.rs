@@ -49,11 +49,14 @@ const PROJECT: &[(&str, Icon)] = &[
     ("Patterns", Icon::Note),
     ("Effects", Icon::Speaker),
     ("Generators", Icon::Plug),
+    (REMOTE_CONTROL, Icon::MidiControl),
     (INITIALIZED_CONTROLS, Icon::Slide),
     (PROJECT_DATA, Icon::Folder),
     ("Samples", Icon::Wave),
 ];
 pub const INITIALIZED_CONTROLS: &str = "Controls with a start value";
+/// The controller links, one row each (`crate::remote::label`); VIEW > Remote control opens it.
+pub const REMOTE_CONTROL: &str = "Remote control";
 pub const PROJECT_DATA: &str = "Project data";
 
 /// The Current project, Plugin database and Favorites tabs (spec §1).
@@ -427,6 +430,11 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                         let label = crate::params::effect_label(s, m.index, k as u8).unwrap_or_default();
                         plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, crate::plugins::fx_key(m.index, k as u8));
                     }
+                }
+            }
+            REMOTE_CONTROL => {
+                for l in crate::remote::links() {
+                    leaf(out, &parent, crate::remote::label(s, &l), Icon::MidiControl, cat, false, Item::None);
                 }
             }
             // "<owner> - <setting>", as the automation clip on the control is named.
