@@ -165,6 +165,10 @@ pub fn name(s: &State, t: u32) -> String {
         InitControl::MAIN_PITCH => return "Main pitch".into(),
         _ => {}
     }
+    // A container member's wet or dry level (spec: plugins/patcher/README.md §4.2).
+    if let Some((m, k, id, wet)) = crate::container::level_of(s, target::decode(t)) {
+        return crate::container::level_name(s, m, k, id, wet);
+    }
     match target::decode(t) {
         Target::Tempo => "Tempo".into(),
         Target::ChannelVolume(ch) => format!("{} - Channel volume", channel(ch)),

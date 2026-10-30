@@ -1146,6 +1146,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// An effect inside a container has its presets as a slot's effect has (Lemon Studio's design: spec
+    /// plugins/patcher/README.md §4.2): the window menu and the title-bar box list them and a preset loads into it; no
+    /// channel is renamed after it.
+    #[test]
+    fn presets_of_a_container_member() {
+        let (mut app, dir, _env) = hosted_sampler("member");
+        let key = crate::plugins::MEMBER_KEY;
+        let index = app.plugins.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
+        app.plugins.create(key, index).unwrap();
+        let h = header(&app, key).unwrap();
+        let other = crate::plugins::with_sample_path(&app.plugins.state(key).unwrap(), "C:/x/rim.wav").unwrap();
+        let rim = file_for(&dir_for(&h.plugin).unwrap(), "Rim");
+        save(&rim, &h, &other).unwrap();
+        let names: Vec<Option<String>> = app.state.project.channels.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(run(&mut app, PCmd::Load(key, rim.clone())).as_deref(), Some("Preset: Rim"));
+        assert_eq!(app.plugins.sampler_path(key).as_deref(), Some("C:/x/rim.wav"));
+        assert_eq!(app.plugins.preset_name(key).as_deref(), Some("Rim"));
+        assert_eq!(app.state.project.channels.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), names);
+        let mut m = crate::playlist::plugin_window_menu(key, false, 0.0, 0.0);
+        fill_window_menu(&app, key, &mut m);
+        let p = m.items.iter().find(|i| i.label == "Presets" && !i.head).unwrap();
+        assert!(p.children.iter().any(|i| i.cmd == Cmd::Preset(PCmd::Load(key, rim.clone())) && i.mark == Mark::Check(true)));
+        assert!(m.items.iter().any(|i| i.cmd == Cmd::Preset(PCmd::SaveAs(key))));
+        assert!(popup(&app, key, 0.0, 0.0).items.iter().any(|i| i.label == "Rim"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Copy to B keeps a copy of the state; Swap A / B (greyed until then) swaps the state in use
     /// with it, one undo step that puts the state in use back. The plugin window menu and the mixer's slot menu have both.
     #[test]

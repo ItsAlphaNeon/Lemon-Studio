@@ -147,9 +147,13 @@ impl ParamAuto {
                 self.last_tick.retain(|(tg, _)| !mine(tg));
                 continue;
             };
-            let list = if h.tick_params_fx() { &self.ticks } else { &self.events };
-            for e in list.iter().filter(|e| e.dest == dest) {
-                h.param_fx(e.offset, e.index, e.value);
+            // Each parameter from the list its plugin takes (a container's members may differ: `tick_params_at`).
+            for (list, ticks) in [(&self.events, false), (&self.ticks, true)] {
+                for e in list.iter().filter(|e| e.dest == dest) {
+                    if h.tick_params_at(e.index) == ticks {
+                        h.param_fx(e.offset, e.index, e.value);
+                    }
+                }
             }
         }
     }
@@ -424,6 +428,35 @@ mod tests {
         let seen = probe.lock().unwrap().seen.clone();
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert!((seen[0].2 - 0.25).abs() < 1e-9);
+    }
+
+    /// A clip on a container slot's parameters (Lemon Studio's member targets: spec plugins/patcher/README.md §4.2)
+    /// drives the member it names: a parameter of its effect as that effect takes values (events, or one per tick), its
+    /// wet level in the chain; another member hears nothing of it.
+    #[test]
+    fn a_container_slot_clip_drives_its_members() {
+        use os_model::target::{member_item, slot_param, MEMBER_WET};
+        let param = |id: u32, item: u16| slot_param(1, 3, member_item(id, item).unwrap());
+        let mut p = project(param(2, 12));
+        p.automations[0].targets.extend([param(5, 3), param(2, MEMBER_WET)]);
+        let mut e = Engine::new(&p, &mut SampleLibrary::new(None), 48000, PlayMode::Song);
+        let (events, ticks, quiet) = (Arc::new(Mutex::new(Probe::default())), Arc::new(Mutex::new(Probe { ticks: true, ..Probe::default() })), Arc::new(Mutex::new(Probe::default())));
+        let member = |id: u32, fx: &Arc<Mutex<Probe>>| crate::chain::Member::new(id, fx.clone(), 1.0, 0.0);
+        let chain = Arc::new(Mutex::new(crate::chain::Chain::new(vec![member(5, &ticks), member(7, &quiet), member(2, &events)])));
+        e.set_effect(1, 3, chain.clone());
+        run(&mut e, 24000, 1000);
+        let seen = events.lock().unwrap().seen.clone();
+        assert!(seen.len() > 300 && seen.iter().all(|&(_, i, _)| i == 12), "{}", seen.len());
+        let &(f, _, v) = seen.last().unwrap();
+        assert!((v - (f + 250) as f64 / 96000.0).abs() < 1e-6);
+        // One value per tick, at the tick start: one beat of 96 ticks.
+        let seen = ticks.lock().unwrap().seen.clone();
+        assert_eq!(seen.len(), 96);
+        assert!(seen.iter().enumerate().all(|(t, &(f, i, _))| (f, i) == (250 * t as u64, 3)));
+        assert!(quiet.lock().unwrap().seen.is_empty());
+        let wet = chain.lock().unwrap().members[2].wet;
+        assert!((0.24..0.26).contains(&wet), "the wet level follows the clip: {wet}");
+        assert_eq!(chain.lock().unwrap().members[0].wet, 1.0);
     }
 
     /// Passes the sound through and reports a delay.
