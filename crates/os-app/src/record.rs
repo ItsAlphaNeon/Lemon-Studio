@@ -13,7 +13,7 @@ use crate::app::{App, State};
 use crate::knobs::KnobId;
 use crate::playlist::Snap;
 use crate::step_edit::Src;
-use os_model::{ClipSource, Note};
+use os_model::{ClipSource, Note, TimeMarker};
 
 /// The undo step of a take (FL's name for it).
 pub const RECORDED: &str = "Recorded items";
@@ -207,6 +207,9 @@ pub struct Rec {
     pub log: crate::score_log::Log,
     /// The history's done steps when the playback that is recording started: TOOLS ▸ Cancel recording goes back to it.
     since: Option<usize>,
+    /// SONG mode: playback has passed a Stop recording marker (and no Start recording marker since), so notes are not
+    /// recorded until playback stops or goes back (spec: audio/transport.md "Time markers in SONG mode").
+    punched_out: bool,
 }
 
 impl Rec {
@@ -553,6 +556,9 @@ impl App {
         }
         let Some(channel) = target else { return };
         let song = self.transport.song();
+        if song && self.state.rec.punched_out {
+            return;
+        }
         let start = self.transport.tick();
         self.open_take(song);
         let Some(at) = self.rec_pattern_tick(start, song) else { return };
@@ -745,6 +751,32 @@ impl App {
                 self.write_held(h, Some(f64::MIN));
             }
             self.state.rec.take = None;
+        }
+        // SONG mode, Start / Stop recording markers (audio/transport.md): passing a Stop recording marker ends the take
+        // there (held notes end on it) and later notes are not recorded (measured in FL: notes after the marker were
+        // not); passing a Start recording marker records again (Lemon Studio's choice). Recording before any of them
+        // goes on as usual: FL recorded from the song's start with a Start recording marker later on.
+        if live && self.transport.song() {
+            let from = self.state.rec.last.filter(|&l| l <= now);
+            let mut passed: Vec<(u32, u8)> = crate::playlist::markers(&self.state)
+                .iter()
+                .filter(|m| matches!(m.kind, TimeMarker::PUNCH_IN | TimeMarker::PUNCH_OUT))
+                .filter(|m| from.is_some_and(|l| f64::from(m.position) > l && f64::from(m.position) <= now))
+                .map(|m| (m.position, m.kind))
+                .collect();
+            passed.sort_unstable();
+            for (at, kind) in passed {
+                let out = kind == TimeMarker::PUNCH_OUT;
+                if out && !self.state.rec.punched_out && self.state.rec.take.is_some() {
+                    self.state.rec.last = Some(f64::from(at));
+                    self.end_take();
+                    self.invalidate();
+                }
+                self.state.rec.punched_out = out;
+            }
+        }
+        if !live || self.state.rec.last.is_some_and(|l| now < l) {
+            self.state.rec.punched_out = false;
         }
         // SONG mode: a note held past the take's clip makes it longer as playback runs (spec §2).
         if live && self.transport.song() && !self.state.rec.held.is_empty() && grow_take_clip(&mut self.state, now).is_some_and(|(_, g)| g) {
@@ -1168,6 +1200,40 @@ mod tests {
         assert_eq!(app.state.piano.marker, 96);
         app.state.piano.range = None;
         assert_eq!(app.selection_loop(), None);
+    }
+
+    /// SONG mode, a Stop recording marker (audio/transport.md "Time markers in SONG mode"): the take ends on it, a note
+    /// held over it ends there, later notes are not recorded; a Start recording marker before playback reaches it
+    /// changes nothing, and one passed after the Stop records again. Stopping clears it.
+    #[test]
+    fn stop_recording_marker_punches_out() {
+        let mut app = app();
+        crate::playlist::arr_mut(&mut app.state).clips.clear();
+        crate::playlist::arr_mut(&mut app.state).markers = vec![
+            TimeMarker { kind: TimeMarker::PUNCH_IN, ..TimeMarker::new(768, "In") },
+            TimeMarker { kind: TimeMarker::PUNCH_OUT, ..TimeMarker::new(1536, "Out") },
+            TimeMarker { kind: TimeMarker::PUNCH_IN, ..TimeMarker::new(2304, "In") },
+        ];
+        app.toggle_record();
+        // From the song's start: recorded before the Start recording marker too, as FL did.
+        key(&mut app, KeyCode::KeyZ, true, 24.0, true);
+        key(&mut app, KeyCode::KeyZ, false, 72.0, true);
+        // Held over the Stop recording marker: it ends there.
+        key(&mut app, KeyCode::KeyX, true, 1488.0, true);
+        app.transport.pretend_at(1560.0, true);
+        app.record_tick();
+        assert!(!app.state.rec.recording(), "the take ended on the marker");
+        key(&mut app, KeyCode::KeyX, false, 1600.0, true);
+        // Past it: not recorded.
+        key(&mut app, KeyCode::KeyC, true, 1700.0, true);
+        key(&mut app, KeyCode::KeyC, false, 1750.0, true);
+        assert_eq!(notes(&app).iter().map(|n| (n.0, n.1)).collect::<Vec<_>>(), [(24, 48), (1488, 48)]);
+        // Past the next Start recording marker: recorded again.
+        key(&mut app, KeyCode::KeyV, true, 2400.0, true);
+        key(&mut app, KeyCode::KeyV, false, 2448.0, true);
+        assert_eq!(notes(&app).len(), 3);
+        stop(&mut app);
+        assert!(!app.state.rec.punched_out);
     }
 
     /// Dump score log: notes played (playing or not) go into the pattern at their real time offsets from the first,

@@ -16269,10 +16269,29 @@ mod tests {
         assert_eq!(draw(&mut app, &mut c, 7.62, 2), 8 * 4 * ppq);
         app.state.global_snap.set(Snap::Beat);
         assert_eq!(draw(&mut app, &mut c, 2.78, 3), 11 * ppq);
-        // Its own menu: Main first and marked; Events and Markers are listed greyed.
+        // Its own menu: Main first and marked; Events and Markers last, radios that work.
         let m = pl::snap_menu(&app.state, 0.0, 0.0);
         assert_eq!((m.items[0].label.as_ref(), m.items[0].mark), ("Main", Mark::Radio(true)));
-        assert!(m.items.iter().filter(|i| i.label == "Events" || i.label == "Markers").all(|i| !i.enabled));
+        let n = m.items.len();
+        assert_eq!(m.items[n - 2..].iter().map(|i| (i.label.as_ref(), i.enabled, i.cmd.clone())).collect::<Vec<_>>(), [("Events", true, pl::Cmd::Snap(EditorSnap::Events)), ("Markers", true, pl::Cmd::Snap(EditorSnap::Markers))]);
+        // Markers: a click within 7 px of a time marker lands on it (FL: 6.4 px did, 7.6 px did not), farther off on
+        // the tick under the pointer; Events: on a clip's start or end the same way. The song position on the ruler
+        // follows Markers too.
+        pl::arr_mut(&mut app.state).clips.clear();
+        pl::arr_mut(&mut app.state).markers = vec![os_model::TimeMarker::new(1000, "M")];
+        app.state.playlist.snap = EditorSnap::Markers;
+        let at = |app: &App, px: f32| pl::snap_place(&app.state, &g, g.tick_at(g.x_of(1000.0) + px), false);
+        assert_eq!((at(&app, 4.0), at(&app, -5.0)), (1000, 1000));
+        assert_eq!(at(&app, 8.0), g.tick_at(g.x_of(1000.0) + 8.0) as u32, "farther off: no snapping");
+        assert_eq!(pl::snap_place(&app.state, &g, 1000.0 + 3.0 / g.ppt, true), (1000.0 + 3.0 / g.ppt) as u32, "Alt: no snapping");
+        assert_eq!(pl::grid_snap(&app.state), Snap::None);
+        app.state.playlist.snap = EditorSnap::Events;
+        assert_eq!(at(&app, 3.0), g.tick_at(g.x_of(1000.0) + 3.0) as u32, "markers are not events");
+        pl::arr_mut(&mut app.state).clips.push(os_model::Clip::new(500, 500, 9, os_model::ClipSource::Pattern(1)));
+        assert_eq!((at(&app, 3.0), at(&app, -4.0)), (1000, 1000), "the clip's end");
+        app.state.playlist.snap = EditorSnap::Main;
+        pl::arr_mut(&mut app.state).clips.clear();
+        pl::arr_mut(&mut app.state).markers.clear();
         // Backspace with the playlist focused toggles too.
         backspace(&mut app);
         assert_eq!(now(&app), Snap::None);
@@ -20045,7 +20064,7 @@ mod tests {
             pl::arr_mut(&mut app.state).markers = list.iter().map(|&(p, k, n)| M { kind: k, ..M::new(p, n) }).collect();
         };
 
-        // The ▸ menu's submenu in FL's order; what is not built is greyed, Quantize song jumps too.
+        // The ▸ menu's submenu in FL's order; Add two... is greyed without a time selection, as in FL.
         let menu = pl::options_menu(&app.state, 0.0, 0.0);
         let sub = &menu.items.iter().find(|it| it.label == "Time markers").expect("Time markers").children;
         let want = [
@@ -20055,7 +20074,7 @@ mod tests {
             ("Add one every", true),
             ("Add jump to next bar", true),
             ("Add time signature change...", true),
-            ("Add key marker", false),
+            ("Add key marker", true),
             ("Place loop", true),
             ("Delete", true),
             ("Change to marker loop", true),
@@ -20065,6 +20084,11 @@ mod tests {
         pl::run(&mut app, Cmd::MarkerEveryMenu);
         let every = app.state.playlist.popup.take().expect("its list");
         assert_eq!(every.items.iter().map(|it| it.cmd.clone()).collect::<Vec<_>>(), [1, 2, 4, 8].map(Cmd::MarkerEvery));
+        app.state.playlist.range = Some((0, 384));
+        let menu = pl::options_menu(&app.state, 0.0, 0.0);
+        let sub = &menu.items.iter().find(|it| it.label == "Time markers").expect("Time markers").children;
+        assert!(sub[2].label == "Add two..." && sub[2].enabled, "enabled with a time selection");
+        app.state.playlist.range = None;
 
         // Add auto and Add jump to next bar, at the song position, kept in position order; each one undo step.
         let steps = app.state.history.len();
@@ -20169,11 +20193,92 @@ mod tests {
         pl::load_view(&mut app.state);
         assert_eq!(app.state.playlist.pos, 768);
 
+        // Add two...: the base-name box, then FL's "<base> -  start" / "<base> -  end" (two spaces) at the time
+        // selection's ends (measured: bars 7 to 9 gave 2304 and 3072); one undo step.
+        set(&mut app, &[]);
+        app.state.playlist.range = Some((2304, 3072));
+        let steps = app.state.history.len();
+        pl::run(&mut app, Cmd::AddTwoMarkers);
+        app.state.playlist.edit.as_mut().expect("the base name box").text = "Sec".into();
+        pl::commit_edit(&mut app.state);
+        assert_eq!(marks(&app), [mk(2304, M::PLAIN, "Sec -  start"), mk(3072, M::PLAIN, "Sec -  end")]);
+        assert_eq!(app.state.history.len(), steps + 1);
+        // Without a selection it does nothing.
+        app.state.playlist.range = None;
+        pl::run(&mut app, Cmd::AddTwoMarkers);
+        assert!(app.state.playlist.edit.is_none());
+        app.state.playlist.range = Some((2304, 3072));
+        pl::run(&mut app, Cmd::AddTwoMarkers);
+        app.state.playlist.edit.as_mut().expect("the box").text = String::new();
+        pl::commit_edit(&mut app.state);
+        assert_eq!(marks(&app)[1].2, "Marker -  start");
+        app.state.playlist.range = None;
+
         // Every kind's tab paints, with the Start marker's darker pre-roll.
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let kinds = [M::PLAIN, M::MARKER_LOOP, M::SKIP, M::PAUSE, M::LOOP, M::START, M::SIGNATURE, M::PUNCH_IN, M::PUNCH_OUT, M::KEY];
         pl::arr_mut(&mut app.state).markers = kinds.iter().enumerate().map(|(i, &k)| M { kind: k, ..M::new(192 * i as u32, "Name") }).collect();
         frame(&mut app, &mut c, None);
+    }
+
+    /// Add key marker ▸ (spec: ui/playlist.md §7a, flp/events/playlist.md "Key markers"): FL's two columns, a root
+    /// that keeps the list open, and key markers at the song position with the events FL saved for them.
+    #[test]
+    fn playlist_key_markers() {
+        use crate::playlist::{self as pl, Cmd, Mark};
+        use os_model::{Arrangement, TimeMarker as M};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.project.arrangements = vec![Arrangement::default()];
+        pl::arr_mut(&mut app.state);
+        // The list: Root note C … B (C checked), a column break, Scale: Default, Black notes (checked), the 37 scales.
+        pl::run(&mut app, Cmd::KeyMarkerMenu);
+        let list = app.state.playlist.popup.clone().expect("the list opens");
+        let labels: Vec<&str> = list.items.iter().map(|it| &*it.label).collect();
+        assert_eq!(labels[..3], ["Root note", "C", "C#"]);
+        assert_eq!(labels[13..18], ["", "Scale", "Default", "Black notes", ""]);
+        assert!(list.items[13].col && list.items[17].sep && list.items.len() == 18 + 37);
+        assert_eq!((labels[18], labels[54]), ("Major (Ionian)", "Other Whole Tone"));
+        assert_eq!((list.items[1].mark, list.items[16].mark), (Mark::Radio(true), Mark::Check(true)));
+        // It paints in two columns: the scales start right of the root notes, at the top.
+        if let Ok(mut c) = Canvas::new(1920, 1080, 1.0) {
+            app.state.playlist.popup.as_mut().expect("open").y = 100.0;
+            frame(&mut app, &mut c, None);
+            let (root, scale) = (hit_rect(&app, &Action::PlPopup(1)), hit_rect(&app, &Action::PlPopup(15)));
+            assert!(scale.x > root.x + root.w - 1.0 && scale.y < root.y + root.h, "{root:?} {scale:?}");
+        }
+        // A root note keeps the list open where it was.
+        let was = app.state.playlist.popup.as_ref().map(|p| (p.x, p.y));
+        app.mouse = (900.0, 900.0);
+        pl::run(&mut app, Cmd::KeyRoot(2));
+        let again = app.state.playlist.popup.clone().expect("still open");
+        assert_eq!((Some((again.x, again.y)), again.items[3].mark), (was, Mark::Radio(true)));
+        // A scale adds the marker at the song position and closes the list; one undo step.
+        app.state.playlist.pos = 1536;
+        let steps = app.state.history.len();
+        pl::run(&mut app, Cmd::AddKeyMarker(0));
+        assert!(app.state.playlist.popup.is_none());
+        assert_eq!(app.state.history.len(), steps + 1);
+        let m = pl::markers(&app.state)[0].clone();
+        assert_eq!((m.position, m.kind, m.name.as_str(), m.root, m.flag, m.scale_index, m.scale), (1536, M::KEY, "D Major (Ionian)", 2, 0, 0, 0x94A));
+        assert_eq!(pl::key_items(&app.state)[18].mark, Mark::Check(true), "the scale added is checked");
+        // FL's saves, each marker's events 46, 45, 168 and 101.
+        let ev = |root: u8, k: i32| {
+            let m = M::key(0, root, k);
+            (m.name, m.root, m.flag, m.scale_index, m.scale)
+        };
+        assert_eq!(ev(0, 0), ("C Major (Ionian)".into(), 0, 0, 0, 1322));
+        assert_eq!(ev(1, 0), ("C# Major (Ionian)".into(), 1, 0, 0, 661));
+        assert_eq!(ev(4, 0), ("E Major (Ionian)".into(), 4, 0, 0, 2642));
+        assert_eq!(ev(5, 0), ("F Major (Ionian)".into(), 5, 0, 0, 1321));
+        assert_eq!(ev(0, 10), ("C Minor Natural (Aeolian)".into(), 0, 0, 10, 1189));
+        assert_eq!(ev(11, 36), ("B Other Whole Tone".into(), 11, 0, 36, 2730));
+        assert_eq!(ev(0, 15), ("C Other Arabic".into(), 0, 0, 15, 806));
+        assert_eq!(ev(2, -2), ("Black notes".into(), 0, 0, -2, 1322));
+        assert_eq!(ev(2, -1), ("Default".into(), 2, 1, -1, 4095));
+        // Undo takes it away.
+        pl::run(&mut app, Cmd::Undo);
+        assert!(pl::markers(&app.state).is_empty());
     }
 
     /// Settings > Plugins (spec: ui/plugin-manager.md §2, §4): Add folder... keeps the folder and scans it in the

@@ -72,8 +72,9 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   timebase are each one step
 - [ ] **Mixer right-click menus.** 32 entries greyed out on 2026-10-29: the routing menu, groups, docking, smart
   disable and threaded processing, slot colours and icons, Patcherize ([mixer.rs](../crates/os-app/src/mixer.rs))
-- [ ] **Playlist right-click menus.** 29 entries greyed out on 2026-10-29: key markers, Add two..., the Start / Stop
-  recording markers' punch ([playlist.rs](../crates/os-app/src/playlist.rs))
+- [ ] **Playlist right-click menus.** 21 entries greyed out on 2026-10-29: the plugin window's ▸ menu (presets, spare
+  states, color and icon, channel states), the picker's Change icon, Edit sample and Cut itself
+  ([playlist.rs](../crates/os-app/src/playlist.rs))
 - [ ] **Channel rack right-click menus.** 14 entries greyed out on 2026-10-29: Type in value, Burn selected loops to
   pattern, instrument tracks, Advanced looping, Loop starter, Change icon ([rack.rs](../crates/os-app/src/rack.rs))
 - [ ] **Main menu bar.** 13 of its 136 entries greyed out on 2026-10-29: 9 in TOOLS, 2 in VIEW, 2 in HELP

@@ -156,6 +156,10 @@ mod id {
     pub const MARKER_NAME: u8 = 205;
     /// A key marker's scale (spec: flp/events/playlist.md "Time markers").
     pub const MARKER_SCALE: u8 = 101;
+    /// A key marker's root note, flag (1 on Default) and scale list index (−1 Default, −2 Black notes).
+    pub const MARKER_ROOT: u8 = 46;
+    pub const MARKER_FLAG: u8 = 45;
+    pub const MARKER_SCALE_INDEX: u8 = 168;
     pub const MARKER_IDS: [u8; 8] = [148, 33, 34, 46, 45, 168, 101, 205];
     /// Automation clip points (in the channel block) and links (before the first channel)
     /// (spec: flp/events/automation.md).
@@ -1575,6 +1579,9 @@ fn decode_markers(events: &[Event], idx: &[usize], enc: TextEnc) -> Vec<TimeMark
             id::MARKER_NUM => out.last_mut().into_iter().for_each(|m| m.numerator = int(e) as u8),
             id::MARKER_SCALE => out.last_mut().into_iter().for_each(|m| m.scale = int(e) as u16),
             id::MARKER_DEN => out.last_mut().into_iter().for_each(|m| m.denominator = int(e) as u8),
+            id::MARKER_ROOT => out.last_mut().into_iter().for_each(|m| m.root = int(e) as u8),
+            id::MARKER_FLAG => out.last_mut().into_iter().for_each(|m| m.flag = int(e) as u8),
+            id::MARKER_SCALE_INDEX => out.last_mut().into_iter().for_each(|m| m.scale_index = int(e) as i32),
             id::MARKER_NAME => {
                 let name = e.data().map(|d| decode_text(d, enc)).unwrap_or_default();
                 out.last_mut().into_iter().for_each(|m| m.name = name.clone());
@@ -1590,9 +1597,9 @@ fn marker_events(m: &TimeMarker, enc: TextEnc) -> Vec<Event> {
         Event::new(id::MARKER_POS, Value::U32(m.position & 0x00FF_FFFF | u32::from(m.kind) << 24)),
         Event::new(id::MARKER_NUM, Value::U8(m.numerator)),
         Event::new(id::MARKER_DEN, Value::U8(m.denominator)),
-        Event::new(46, Value::U8(0)),
-        Event::new(45, Value::U8(0)),
-        Event::new(168, Value::U32(0)),
+        Event::new(id::MARKER_ROOT, Value::U8(m.root)),
+        Event::new(id::MARKER_FLAG, Value::U8(m.flag)),
+        Event::new(id::MARKER_SCALE_INDEX, Value::U32(m.scale_index as u32)),
         Event::new(id::MARKER_SCALE, Value::U16(m.scale)),
         Event::new(id::MARKER_NAME, Value::var(encode_text(&m.name, enc))),
     ]
@@ -6366,6 +6373,9 @@ mod tests {
         let key = arr.markers.iter_mut().find(|m| m.kind == TimeMarker::KEY).unwrap();
         key.name = "C Major (Ionian)".into();
         key.scale = 0x52A;
+        // The original's Default and Other Arabic on D (events 46, 45 and 168 as it saved them).
+        arr.markers.push(TimeMarker::key(1200, 2, -1));
+        arr.markers.push(TimeMarker::key(1300, 2, 15));
         p.arrangements.push(arr);
         let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
         let back = load(&file).unwrap();
@@ -6373,6 +6383,11 @@ mod tests {
         let ev = events_of(&file).unwrap();
         let scales: Vec<u32> = ev.iter().filter(|e| e.id == id::MARKER_SCALE).map(int).collect();
         assert_eq!(scales.iter().filter(|&&v| v == 0x52A).count(), 1);
+        let of = |id: u8| ev.iter().filter(|e| e.id == id).map(int).collect::<Vec<u32>>();
+        let n = of(id::MARKER_POS).len();
+        assert_eq!(of(id::MARKER_ROOT)[n - 2..], [2, 2]);
+        assert_eq!(of(id::MARKER_FLAG)[n - 2..], [1, 0]);
+        assert_eq!(of(id::MARKER_SCALE_INDEX)[n - 2..], [0xFFFF_FFFF, 15]);
         let pos: Vec<u32> = ev.iter().filter(|e| e.id == id::MARKER_POS).map(int).collect();
         assert!(pos.contains(&(u32::from(TimeMarker::PUNCH_OUT) << 24 | 96 * 9)), "{pos:x?}");
 

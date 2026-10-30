@@ -46,8 +46,10 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Time markers with FL's actions (right-click a marker): Start, Loop, Marker loop, Marker skip and Marker pause
   play in SONG mode; exports start at the Start marker and jump at skips. Move content left / right, Place loop
   (Shift+T), Add auto, Add one every, Add jump to next bar, time signature markers, and Delete or Change to marker
-  loop in the time selection. A click on a marker moves the song position there. Not yet: Add two..., key
-  markers, the Start / Stop recording markers' punch
+  loop in the time selection, Add two... (markers at the time selection's ends) and Add key marker (root and
+  scale, saved as FL saves them). A click on a marker moves the song position there. A Stop recording marker ends
+  recording in SONG mode, a Start recording marker after it resumes it. The playlist's snap has Events and Markers
+  (clip edges or markers within 7 px)
 - Quantize song jumps (the playlist's ▸ menu): while the song plays, a click in the ruler waits for the next beat,
   bar, or 2, 4 or 8 bars, then jumps there exactly on it
 - Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
