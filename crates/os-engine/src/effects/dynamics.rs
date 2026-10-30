@@ -55,7 +55,7 @@ pub const RANGES: [(i32, i32); PARAMS] = [
     (0, 10000),
 ];
 
-/// FL's factory preset "Default" (= a fresh instance).
+/// The factory preset "Default" (= a fresh instance).
 pub const DEFAULTS: [i32; PARAMS] = [1000, 1000, 1000, 1115, 3, 5000, 3, 2882, 1000, 0, 0, 0, 6666, 1, 650, 1000, 0, 4187];
 
 /// Flags bit 0: the limiter aims at the ceiling itself instead of 0.975 of it.
@@ -581,7 +581,7 @@ mod tests {
         assert_eq!(level(1000, 7.0), 1.0);
         assert!((db(level(2000, 7.0)) - 18.06).abs() < 0.01);
         assert!((db(level(2000, 3.0)) - 12.04).abs() < 0.01);
-        // Times: FL's Default values as the editor shows them (releases doubled).
+        // Times: the Default values as the editor shows them (releases doubled).
         assert!((time_ms(1115) - 2.0).abs() < 0.005);
         assert!((2.0 * time_ms(5000) - 85.53).abs() < 0.005);
         assert!((time_ms(2882) - 10.0).abs() < 0.005);

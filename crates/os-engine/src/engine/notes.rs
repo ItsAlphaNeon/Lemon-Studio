@@ -208,7 +208,7 @@ struct Glide {
 /// One channel's voices and note state.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct Voices {
-    /// In FL's pool order: a new voice goes to the end, and when one is over the last takes its place.
+    /// In pool order: a new voice goes to the end, and when one is over the last takes its place.
     pool: Vec<Voice>,
     /// Mono: the keys of the notes that started and have not ended, oldest first, and the sounding voice (its
     /// instrument key and its own note's key).
@@ -240,7 +240,7 @@ impl Voices {
         self.glides.push(Glide { key, now, step, left: n + 1, at });
     }
 
-    /// Takes voice `i` out of the pool as FL does: the last voice takes its place.
+    /// Takes voice `i` out of the pool: the last voice takes its place.
     fn over(&mut self, i: usize) {
         let v = self.pool.swap_remove(i);
         self.voice_gone(v);

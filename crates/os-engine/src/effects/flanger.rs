@@ -379,7 +379,7 @@ impl Effect for Flanger {
         }
     }
 
-    /// A slot switched on during the song: FL enables the plugin again, which clears it and restarts the LFO.
+    /// A slot switched on during the song: the plugin is enabled again, which clears it and restarts the LFO.
     fn reset(&mut self) {
         self.start();
     }

@@ -386,8 +386,8 @@ impl Ramp {
 }
 
 /// Glide of a volume / pan control point on voices already sounding: the parameter moves linearly and the
-/// law is applied to it. FL's volume glide lasts about 9.3 ms (shorter for tiny changes) and its pan glide
-/// about 4.7 ms (measured; spec: audio/pattern-controls.md).
+/// law is applied to it. The volume glide lasts about 9.3 ms (shorter for tiny changes) and the pan glide
+/// about 4.7 ms (spec: audio/pattern-controls.md).
 const VOLUME_GLIDE_SECONDS: f64 = 0.0093;
 const PAN_GLIDE_SECONDS: f64 = 0.0047;
 
@@ -989,7 +989,7 @@ pub struct EngineReport {
 pub struct Engine {
     rate: u32,
     /// The main volume's gain `curve(stored / 12800)` and its ramp (spec: audio/mixer.md "Main volume"). Playback
-    /// multiplies the master by it; an export does not (FL applies it after writing the tick), but the tail test sees it.
+    /// multiplies the master by it; an export does not (it applies after writing the tick), but the tail test sees it.
     main_gain: f32,
     main_glide: os_dsp::glide::Glide,
     /// Set while rendering an export (`render_ticks`), cleared by live playback (`process`).
@@ -1069,7 +1069,7 @@ pub struct Engine {
     steps: u16,
     /// The project's time signature, numerator and denominator (4/4 when the file has none): what hosted plugins are
     /// told (spec: plugins/vst3-hosting.md §1). A bar whose steps per beat make no signature (3) is told as its length
-    /// in sixteenths over 16 (what FL tells plugins is not measured: spec: audio/song-structure.md, open questions).
+    /// in sixteenths over 16 (spec: audio/song-structure.md, open questions).
     signature: (u16, u16),
     bus: Vec<Vec<f32>>,
     /// The last rendered tick (interleaved L/R), how much of it has been handed out, the song position its first
@@ -1210,8 +1210,7 @@ impl Engine {
         let tick_tempo = project.tick_tempo(tempo);
         let n_tracks = project.mixer.len().max(1);
         // The panning law of the channel and mixer track pans (event 23; spec: audio/gain-laws.md "Panning law:
-        // Triangular"). Not of other pans: whether it moves them was not measured. An edit is heard from the next tick,
-        // as any pan edit (`continue_from`).
+        // Triangular"). Not of other pans. An edit is heard from the next tick, as any pan edit (`continue_from`).
         let pan_law = laws::PanLaw::from_event(project.panning_law);
 
         let mut channels: Vec<ChannelState> = project
@@ -1244,7 +1243,7 @@ impl Engine {
                             s
                         }
                         // Lemon Studio choice: an empty sampler channel plays a built-in tone so new
-                        // projects make sound (FL's empty sampler is silent).
+                        // projects make sound.
                         None if ch.kind == ChannelKind::Sampler => {
                             Some(library.tones.entry(rate).or_insert_with(|| fallback_tone(rate)).clone())
                         }
@@ -1569,8 +1568,7 @@ impl Engine {
             exporting: false,
             params: param_auto::ParamAuto::new(autos.iter().flat_map(|a| &a.targets).any(|&t| param_auto::is_param(t))),
             // Seeded, one output taken, at every start of playback or of a render (spec: audio/channel-misc.md "FL's
-            // random generator"; whether FL's live playback draws as its render does is not covered, Lemon Studio
-            // does).
+            // random generator"; live playback draws as a render does).
             rng: layers::Mt19937::for_playback(),
             autos,
             curves,
@@ -2969,7 +2967,7 @@ impl Engine {
                 continue;
             }
             let due = (song_end && v.cut.is_none()) || v.release_at.is_some_and(|r| r <= tick);
-            // A note's end only matters with the volume envelope on: otherwise the sampler plays on (measured).
+            // A note's end only matters with the volume envelope on: otherwise the sampler plays on.
             if due && self.channels[v.channel].vol_env.is_some() {
                 v.off = Some(v.age);
             }
@@ -3379,7 +3377,7 @@ impl Engine {
 
     /// The transport hosted plugins see at `frame` (spec: plugins/vst3-hosting.md Â§1): playing at the project tempo,
     /// in the project's time signature, with the pattern loop while looping. The tempo is the one the ticks run at, in
-    /// quarter notes (`tick_tempo`): what FL tells plugins in a bar of other than 4 steps per beat is not measured.
+    /// quarter notes (`tick_tempo`), also in a bar of other than 4 steps per beat.
     fn transport_at(&self, frame: u64) -> TransportInfo {
         let mut start = TransportInfo {
             playing: true,
@@ -3439,8 +3437,7 @@ impl Engine {
         self.frame = self.clock.next_start();
         self.next_trigger = self.triggers.partition_point(|t| t.tick < to);
         // Control points replay from the top: until the first one the channel has its own settings, and mixer tracks
-        // glide back to theirs until automation hands its values on again (a Lemon Studio choice; FL's behaviour at
-        // the loop point is not measured).
+        // glide back to theirs until automation hands its values on again (a Lemon Studio choice).
         for t in &mut self.tracks {
             t.restore(false);
         }
@@ -4019,7 +4016,7 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
 /// `(t, routes, out)`: the slot's track, its routes and its outbox, for an own effect's extra output, which is
 /// added to the input of one of the track's outputs (spec: audio/sidechain.md "Extra output"). It is not padded for
 /// delay compensation (audio/delay-compensation.md); it is connected from the first tick (the cleaner choice of
-/// audio/quirks.md for FL's late connection).
+/// audio/quirks.md for the late connection).
 ///
 /// `key`: the output of the track the slot listens to as its sidechain input, and a buffer for it after the slot's
 /// pad, which runs also while the slot is off (spec: audio/sidechain.md "While the slot is off"). It is connected from
@@ -4451,7 +4448,7 @@ fn ctl_to(kind: u32) -> CtlTo {
 
 /// The automation level (0..1) a point's value in its setting's own unit stands for: the inverse of what a clip's
 /// level becomes (`Engine::auto_value`; spec: audio/automation.md "Pattern control points"). `None` for the targets a
-/// point does not move (a send's unit is not measured).
+/// point does not move (a send).
 fn point_level(t: Target, value: i32) -> Option<f64> {
     let v = f64::from(value);
     Some(match t {
@@ -4590,7 +4587,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
 
 #[cfg(test)]
 mod tests {
-    // spec: audio/pattern-controls.md (note repeat and channel control points, measured in FL)
+    // spec: audio/pattern-controls.md (note repeat and channel control points)
     use super::*;
     use os_model::{Channel, Note, Pattern};
 
@@ -5244,7 +5241,7 @@ mod tests {
         assert_eq!(t.len(), 8);
         assert_eq!(t[1], (48, 336));
         assert_eq!(t[7], (336, 48));
-        // Counts measured in FL for a 384-tick note (index 1..=14).
+        // Counts for a 384-tick note (index 1..=14).
         let counts = [4, 6, 6, 8, 11, 12, 16, 22, 24, 32, 43, 48, 64, 96];
         for (i, want) in counts.iter().enumerate() {
             let got = ticks(&project(vec![long_note(0, 384, i as u8 + 1)], vec![])).len();
@@ -7590,7 +7587,7 @@ mod tests {
     }
 
     /// spec: audio/sidechain.md "Settings", "Sidechain input"; plugins/fruity-limiter-dsp.md: a Fruity Limiter on
-    /// insert 1 keyed from insert 2, which is routed into it at level 0 only (FL's "sidechain to this track"): its
+    /// insert 1 keyed from insert 2, which is routed into it at level 0 only ("sidechain to this track"): its
     /// compressor ducks insert 1 while insert 2 sounds and leaves it alone while insert 2 is silent.
     #[test]
     fn a_limiter_is_keyed_from_its_tracks_sidechain_input() {
@@ -7693,8 +7690,8 @@ mod tests {
         let c = laws::channel_pan(0.0).0;
         let (l, r) = laws::channel_pan_law(0.5, laws::PanLaw::Triangular);
         assert!((l / c - 0.5).abs() < 1e-12 && (r / c - 1.0).abs() < 1e-12);
-        // The insert: [[L←L, L←R], [R←L, R←R]] = [[0.75, 0.25], [0, 0.5]] under Triangular, the measured circular
-        // values otherwise.
+        // The insert: [[L←L, L←R], [R←L, R←R]] = [[0.75, 0.25], [0, 0.5]] under Triangular, the circular values
+        // otherwise.
         let m = engine(Some(2)).tracks[1].matrix;
         assert!(near(m[0][0], 0.75, 2e-4) && near(m[0][1], 0.25, 2e-4) && near(m[1][0], 0.0, 2e-4) && near(m[1][1], 0.5, 2e-4), "{m:?}");
         let m = engine(None).tracks[1].matrix;

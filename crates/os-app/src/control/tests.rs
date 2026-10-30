@@ -981,7 +981,7 @@ fn interface_edits_are_undo_steps() {
     });
 }
 
-/// As in FL (measured 2026-10-28): a channel muted, soloed or switched on or off is one step of its own (a knob tweak's:
+/// A channel muted, soloed or switched on or off is one step of its own (a knob tweak's:
 /// none with "Undo knob tweaks" off); a mixer track's mute and solo make none. An undo or redo of another step leaves
 /// every channel and track muted or not as it is (an undo of a channel's volume does not unmute it).
 #[test]

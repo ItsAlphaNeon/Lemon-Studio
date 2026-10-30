@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The piano roll's small tool dialogs, laid out as FL's: Flam ("Piano roll - flamer", 198 × 241), Flip ("Piano roll -
+//! The piano roll's small tool dialogs: Flam ("Piano roll - flamer", 198 × 241), Flip ("Piano roll -
 //! score flipper", 162 × 160), Scale levels ("Piano roll - level scaling", 172 × 277), Limit ("Piano roll - limiter /
 //! transposer", 432 × 295), Claw machine ("Piano roll - claw machine", 172 × 245), LFO ("Piano roll - LFO",
 //! 212 × 323), Quantize ("Piano roll - quantizer", 281 × 309), Chop ("Piano roll - chopper", 281 × 296) and Randomize
@@ -65,7 +65,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     }
     ui.hit(win, Action::Swallow, "");
     ui.hit(at(1.0, 1.0, w - 30.0, 26.0), Action::WinDrag(Win::PianoDlg), "");
-    // FL's narrow dialogs: the title condensed to end before ×.
+    // Narrow dialogs: the title condensed to end before ×.
     let name = d.tool.title_on(s.piano.lane);
     let title = ui.c.fit_font(Font::new(17), name, w - 31.0);
     label(ui, title, x0 + 7.0, y0 + 15.0, -1, t.text, name);
@@ -192,7 +192,7 @@ fn levels(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
         let id = KnobId::PianoDlg(k);
         let v = s.knob(id);
         let hy = if k == Knob::Center { zero - v * travel } else { zero - (v - 0.5) * travel };
-        // Multiply and Offset: an orange bar from zero to the handle and a line through it (FL's look).
+        // Multiply and Offset: an orange bar from zero to the handle and a line through it.
         if k != Knob::Center {
             let (a, b) = if hy < zero { (hy, zero) } else { (zero, hy) };
             ui.c.fill_rect(Rect::new(cx - 1.0, a, 2.0, b - a), orange);
@@ -226,7 +226,7 @@ fn claw(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
     let mark = if super::lemon(ui) { t.accent } else { t.h(0xc8872e) };
     ui.c.fill_rect(Rect::new(x0 + 95.0, y0 + 103.0, 2.0, 4.0), mark);
     knob(ui, s, x0, y0, 96.0, 124.0, Knob::ClawTime, true);
-    // FL's switch names are narrower than our 15 px: a size down keeps them inside the panel.
+    // A size down from 15 px keeps the switch names inside the panel.
     switch(ui, s, x0, y0, 21.0, 164.0, Act::Stretch, "Stretch to compensate", "Stretch the rest of each period over the cut", Font::new(14), false);
     switch(ui, s, x0, y0, 22.0, 186.0, Act::Short, "Remove short notes", "Remove notes left shorter than a 24th of a beat", Font::new(12), false);
 }
@@ -336,8 +336,8 @@ fn score_box(ui: &mut Ui, x0: f32, y0: f32, title: &str, name_x: f32, name: &str
     }
 }
 
-/// The six Levels knobs of Quantize, Chop and Randomize, their centres at window-relative `cy`: ringed in FL's colours,
-/// their names under them; Randomize's are centred (`bipolar`) and greyed with their section (`dim`).
+/// The six Levels knobs of Quantize, Chop and Randomize, their centres at window-relative `cy`: ringed in colour, their
+/// names under them; Randomize's are centred (`bipolar`) and greyed with their section (`dim`).
 #[allow(clippy::too_many_arguments)]
 fn level_knobs(ui: &mut Ui, s: &State, x0: f32, y0: f32, cy: f32, knob: fn(u8) -> Knob, bipolar: bool, dim: bool) {
     let t = ui.t;
@@ -446,7 +446,7 @@ fn rand(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
 }
 
 /// One of Randomize's sections: its panel from window-relative `y`, `h` high, and its heading band with the section's
-/// switch and name, and FL's ^ (drawn only: the sections do not collapse, piano-randomize.md §6).
+/// switch and name, and a ^ (drawn only: the sections do not collapse, piano-randomize.md §6).
 #[allow(clippy::too_many_arguments)]
 fn rand_section(ui: &mut Ui, s: &State, x0: f32, y0: f32, y: f32, h: f32, act: Act, name: &str, hint: &'static str) {
     let t = ui.t;

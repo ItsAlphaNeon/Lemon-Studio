@@ -3,7 +3,7 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The toolbar's layout: which panels its rows hold and in which order, the editor that changes it and the presets
-//! that set it (spec: ui/toolbar-menu.md §8). The panels paint in `views::toolbar`. Each was measured where the classic
+//! that set it (spec: ui/toolbar-menu.md §8). The panels paint in `views::toolbar`. Each is laid out where the classic
 //! layout has it (its home, `Panel::home`) and paints wherever its row and place put it, moved by whole band px (`At`).
 //!
 //! App-wide, kept in `settings.txt` (`toolbar_layout`: the layout's text, lines joined by `; `). A user preset is a

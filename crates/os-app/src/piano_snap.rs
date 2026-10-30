@@ -12,7 +12,7 @@ use crate::piano_tools::NCmd;
 use crate::playlist::{Cmd, Mark, PItem, Popup, Snap};
 use crate::snap::EditorSnap;
 
-/// From this zoom (px per beat) up, Line does not snap (§4: FL's maximum zoom; §8).
+/// From this zoom (px per beat) up, Line does not snap (§4: the maximum zoom; §8).
 const NO_LINE_PPB: f32 = 768.0;
 /// Line takes the smallest unit at least this wide (§4).
 const LINE_MIN_PX: f32 = 10.0;
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn line_follows_the_zoom() {
-        // §4 at PPQ 96: a step down to 10 px wide, then 1/2 beat, beat, bar; none at FL's maximum zoom.
+        // §4 at PPQ 96: a step down to 10 px wide, then 1/2 beat, beat, bar; none at the maximum zoom.
         assert_eq!(line_unit(96, 768.0), 1);
         assert_eq!(line_unit(96, 1600.0), 1);
         assert_eq!(line_unit(96, 747.8), 24);

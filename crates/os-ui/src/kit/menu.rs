@@ -3,9 +3,9 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Popup menus: layout and painting, independent of the window they live in (the app paints them in its frame, plugins
-//! in their own popup windows). Two looks, both measured on FL: the grey **context** menu (right-click menus, menu bar
-//! dropdowns: headers, separators, ticks, shortcuts, submenu arrows) and the dark **list** menu (choice boxes: the
-//! current entry is lit, section headers).
+//! in their own popup windows). Two looks: the grey **context** menu (right-click menus, menu bar dropdowns: headers,
+//! separators, ticks, shortcuts, submenu arrows) and the dark **list** menu (choice boxes: the current entry is lit,
+//! section headers).
 // spec: ui/menus.md (context look), plugins/lemon-sampler.md §Menus (list look, item lists)
 
 use os_theme::{Color, Palette};

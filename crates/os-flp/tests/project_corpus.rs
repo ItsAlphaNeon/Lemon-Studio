@@ -132,7 +132,7 @@ fn edits_survive_a_write_read_cycle() {
         apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
         let reread = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
 
-        // The channel color is clamped on write, as FL does.
+        // The channel color is clamped on write.
         let mut expected = project.clone();
         expected.channels[0].color = Some(Rgb::new(0x14, 0x80, 0xFF));
         // The colour the file holds now (shown on the channel's playlist clips).
@@ -255,7 +255,7 @@ fn control_points_survive_edits() {
 }
 
 /// Channel envelopes (event 218, spec: audio/channel-envelopes.md): every channel reads five records with
-/// values inside the measured ranges, and some files switch the volume envelope on.
+/// values inside the spec's ranges, and some files switch the volume envelope on.
 #[test]
 fn channel_envelopes_decode() {
     let Some(paths) = corpus() else { return };

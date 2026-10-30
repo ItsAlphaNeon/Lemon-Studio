@@ -188,8 +188,8 @@ impl Settings {
     }
 }
 
-/// The engine's own slot effect: the original's processing for a project's saved state, with the buffers of silence FL
-/// runs before a render already run (so LIN starts at full level, as in FL's exports).
+/// The engine's own slot effect: the original's processing for a project's saved state, with the buffers of silence
+/// run before a render already run (so LIN starts at full level in exports).
 pub struct ParametricEq {
     eq: Equalizer,
     l: Vec<f32>,

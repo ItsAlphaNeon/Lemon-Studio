@@ -339,7 +339,7 @@ impl Project {
     /// pattern control points, explicit pattern lengths and pattern markers, playlist clip positions, lengths and
     /// pattern-clip offsets, time markers; the stored playlist view keeps showing the same bars. Automation clip data
     /// (beats) and audio clip offsets (milliseconds) stay (spec: ui/settings-choices.md "Project", flp/engine-events.md
-    /// "The project settings, measured": FL rescales at once and asks nothing).
+    /// "The project settings, measured": the change applies at once and asks nothing).
     pub fn set_ppq(&mut self, ppq: u16) {
         let (from, to) = (self.ppq.max(1), ppq.max(1));
         if from == to {
@@ -365,8 +365,8 @@ impl Project {
     }
 }
 
-/// A tick position at timebase `from` as one at `to`. How FL rounds a ratio that is not whole (96 to 72) was not
-/// measured (spec: ui/settings-choices.md "Project", Timebase): to the nearest tick, halves up.
+/// A tick position at timebase `from` as one at `to`. A ratio that is not whole (96 to 72) rounds to the nearest
+/// tick, halves up (spec: ui/settings-choices.md "Project", Timebase).
 pub fn rescale_tick(t: u32, from: u16, to: u16) -> u32 {
     let (from, to) = (u64::from(from.max(1)), u64::from(to.max(1)));
     ((u64::from(t) * to + from / 2) / from).min(u64::from(u32::MAX)) as u32
@@ -378,7 +378,7 @@ pub fn rescale_length(t: u32, from: u16, to: u16) -> u32 {
 }
 
 /// The playlist view a project stores: scroll, time zoom and track height (event 242, 28 bytes; spec:
-/// flp/events/playlist.md "Playlist view"). Pixels are FL's at 100 % UI scale.
+/// flp/events/playlist.md "Playlist view"). Pixels are at 100 % UI scale.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PlaylistView {
@@ -704,7 +704,7 @@ pub struct Channel {
 }
 
 impl Channel {
-    /// Takes the channel's sample out, as the Sampler window's file box X does in FL: no sample path (event 196), no
+    /// Takes the channel's sample out, as the Sampler window's file box X does: no sample path (event 196), no
     /// loop points (event 251), and Resample off among the sampler flags; the other flags stay (spec:
     /// flp/events/channels.md "Loop points (event 251)", "Sampler flags (event 143)").
     pub fn clear_sample(&mut self) {
@@ -748,9 +748,9 @@ impl ChannelSound {
     pub const LOAD_SLICES: u32 = 4;
     pub const USE_LOOP: u32 = 8;
     pub const KEEP_ON_DISK: u32 = 0x100;
-    /// Flags of a channel without event 143 (FL's new sampler channel).
+    /// Flags of a channel without event 143 (a new sampler channel).
     pub const DEFAULT_FLAGS: u32 = Self::LOAD_REGIONS | Self::USE_LOOP;
-    /// Flags of FL's audio clip channels (258, spec: audio/audio-clips.md): no Use loop points, so a clip plays a
+    /// Flags of audio clip channels (258, spec: audio/audio-clips.md): no Use loop points, so a clip plays a
     /// file's `smpl` loop through once.
     pub const AUDIO_CLIP_FLAGS: u32 = Self::LOAD_REGIONS | Self::KEEP_ON_DISK;
 
@@ -894,8 +894,7 @@ pub enum Stretching {
 }
 
 impl ChannelSound {
-    /// The stretch multiplier `2^(stored / 10000)` (event 215 int 26), 1.0 when none; at single precision, as FL
-    /// keeps it.
+    /// The stretch multiplier `2^(stored / 10000)` (event 215 int 26), 1.0 when none; at single precision.
     pub fn stretch_multiplier(&self) -> f64 {
         f64::from(2f64.powf(f64::from(self.stretch[2] as i32) / 10000.0) as f32)
     }
@@ -1663,7 +1662,7 @@ pub struct Clip {
     pub source: ClipSource,
     pub muted: bool,
     pub window: Option<(f64, f64)>,
-    /// The stored record (fields not modeled are written back from here; a new clip gets FL's defaults).
+    /// The stored record (fields not modeled are written back from here; a new clip gets the defaults).
     #[cfg_attr(feature = "serde", serde(with = "crate::serde_big"))]
     pub raw: [u8; CLIP_RECORD_LEN],
 }
@@ -1972,7 +1971,7 @@ pub struct PlaylistTrack {
     pub grouped: bool,
     /// On a group track: its group is collapsed (byte 61 = 0).
     pub collapsed: bool,
-    /// Byte 47: FL draws a lock on such a group (meaning not measured; kept and drawn).
+    /// Byte 47: a lock is drawn on such a group (kept and drawn).
     pub locked: bool,
 }
 
@@ -2189,9 +2188,8 @@ pub mod target {
     }
 
     /// A plugin parameter's control point holds the plain value as the plugin states its range when that range runs
-    /// between whole numbers at least 2 apart (FL's own plugins, and Lemon Studio's recreations of them, keep whole
-    /// values in their own unit), else the normalized value times 65536 (a Lemon Studio choice: the unit FL keeps for
-    /// other plugins is not measured). This is the level 0..1 such a value stands for.
+    /// between whole numbers at least 2 apart (the stock plugins keep whole values in their own unit), else the
+    /// normalized value times 65536 (a Lemon Studio choice). This is the level 0..1 such a value stands for.
     pub fn plugin_point_level(min: f64, max: f64, value: i32) -> f64 {
         let v = f64::from(value);
         let level = if whole_range(min, max) { (v - min) / (max - min) } else { v / 65536.0 };
@@ -2366,7 +2364,7 @@ pub mod target {
         }
 
         /// Initial values in stored units and back (spec: ui/settings-choices.md "Advanced: Initialize controls
-        /// automatically"): the measured record is channel 0's volume at 10000, the knob's default.
+        /// automatically"): the record is channel 0's volume at 10000, the knob's default.
         #[test]
         fn initial_values_convert_to_and_from_automation_values() {
             use crate::InitControl;
@@ -2485,7 +2483,7 @@ mod fade_tests {
             let want = if t > 0.0 { r / (1.0 + r) } else { 1.0 / (1.0 + r) };
             assert!((fade_curve(0.5, t) - want).abs() < 1e-12, "t {t}");
         }
-        // The two values measured (spec): +3.36 gives 0.676, -4.83 gives 0.293.
+        // The spec's two values: +3.36 gives 0.676, -4.83 gives 0.293.
         assert!((fade_curve(0.5, 3.36) - 0.676).abs() < 5e-4);
         assert!((fade_curve(0.5, -4.83) - 0.293).abs() < 5e-4);
     }

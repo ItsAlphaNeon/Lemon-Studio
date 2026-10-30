@@ -13,7 +13,7 @@
 //! accent = #a8e44a  # override any token by name
 //! ```
 //!
-// spec: ui/main-window.md (default token values are the measured colors)
+// spec: ui/main-window.md (default token values)
 
 use std::fmt;
 
@@ -153,7 +153,7 @@ macro_rules! tokens {
         #[derive(Debug, Clone, PartialEq)]
         pub struct Palette {
             $(#[doc = $doc] pub $name: Color,)*
-            /// How measured default colours map to this theme (see `Palette::s`, `a`, `h`, `tx`, `led`).
+            /// How default colours map to this theme (see `Palette::s`, `a`, `h`, `tx`, `led`).
             pub xf: fl::Xform,
             /// Shape language of the design this palette belongs to (corner radii; spec: ui/lemon-design.md).
             pub style: Style,
@@ -355,7 +355,7 @@ tokens! {
     velocity_dot = 0x477a4e, "Velocity lollipop disc.";
 }
 
-/// Role-mapped literals: widgets that need a measured shade with no token of its own write it as
+/// Role-mapped literals: widgets that need a shade with no token of its own write it as
 /// `t.s(0x313436)` (surface), `t.a(..)` (accent green), `t.h(..)` (orange highlight), `t.tx(..)` (text),
 /// `t.led(..)` (enable LEDs). Under the default theme each returns the literal unchanged; under an imported theme
 /// it follows the same mapping as the named tokens of that role (spec: ui/flstheme.md §4).

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::app::{App, State};
 use crate::playlist::{Cmd, PItem};
 
-/// How many are kept, as FL keeps (spec §1).
+/// How many are kept (spec §1).
 pub const KEEP: usize = 50;
 /// How many FILE lists, each with its key; More ▸ has the others.
 pub const SHOWN: usize = 10;
@@ -64,7 +64,7 @@ fn remove(path: &Path) {
     restore(&paths);
 }
 
-/// What a row shows: the file's name with its extension, as FL's rows do.
+/// What a row shows: the file's name with its extension.
 pub fn label(path: &Path) -> String {
     path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned())
 }

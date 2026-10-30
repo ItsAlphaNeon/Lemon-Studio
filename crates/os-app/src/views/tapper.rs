@@ -3,7 +3,7 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The Tempo tapper window: the pad (taps and the tempo), the nudge pair, Sync, Mute, now, Apply tempo and the beat bar.
-// spec: ui/tempo-tapper.md §1, §3-5, §8 (Classic: the measured colours; Lemon: ui/lemon-design.md)
+// spec: ui/tempo-tapper.md §1, §3-5, §8 (Classic: the stock colours; Lemon: ui/lemon-design.md)
 
 use os_theme::design::lemon as brand;
 use os_ui::kit::lemon as lk;
@@ -154,7 +154,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     label(ui, nf, left.cx() + 2.0, left.cy(), true, text(hov_l, held < 0), "- nudge");
     label(ui, nf, right.cx() - 2.0, right.cy(), true, text(hov_r, held > 0), "nudge +");
 
-    // Sync, Mute (switches) and now (a button): not available yet (§6, §8); with Apply tempo off FL greys them too.
+    // Sync, Mute (switches) and now (a button): not available yet (§6, §8).
     let lf = Font::new(14);
     let cy = y0 + 231.0;
     ui.off(at(5.0, 222.0, 43.0, 18.0), "Resynchronize to taps");

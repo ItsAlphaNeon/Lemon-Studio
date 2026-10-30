@@ -6,8 +6,8 @@
 //!
 //! The input, at 0.7, is split by a one-pole crossover; one band goes into a short delay line per side and is read
 //! back at three places that three slow LFOs move; the three reads, at 0.6, are added to the input. There is no
-//! feedback. The LFOs start where a generator puts them each time the effect starts (FL seeds it from the clock;
-//! Lemon Studio from a fixed seed, so its renders repeat).
+//! feedback. The LFOs start where a generator puts them each time the effect starts (from a fixed seed, so renders
+//! repeat).
 //!
 // spec: plugins/fruity-chorus.md, plugins/lemon-chorus.md
 
@@ -33,7 +33,7 @@ pub const WET_ONLY: usize = 11;
 pub const RANGES: [(i32, i32); PARAMS] =
     [(0, 1024), (0, 5000), (0, 1024), (0, 5000), (0, 5000), (0, 5000), (0, 1024), (0, 1024), (0, 1024), (0, 100), (0, 5000), (0, 1024)];
 
-/// What a new Fruity Chorus holds (spec "Settings", the Default column). FL's "Default" preset differs in LFO 1's wave
+/// What a new Fruity Chorus holds (spec "Settings", the Default column). The "Default" preset differs in LFO 1's wave
 /// only (0 instead of 23: the same shape).
 pub const DEFAULTS: [i32; PARAMS] = [512, 2250, 341, 1500, 2500, 3500, 23, 0, 0, 0, 2500, 0];
 
@@ -45,8 +45,8 @@ pub const VERSION: i32 = 1;
 pub const LINE: usize = 4096;
 const MASK: u32 = LINE as u32 - 1;
 
-/// The generator's seed when the effect is created (Lemon Studio choice: FL seeds it from the clock, so any seed is one
-/// FL could have used; a fixed one makes renders repeat, spec "State and timing" and audio/quirks.md).
+/// The generator's seed when the effect is created: fixed, so renders repeat (spec "State and timing" and
+/// audio/quirks.md).
 pub const SEED: u32 = 0;
 
 /// LFO shapes (spec "LFO tables").
@@ -271,7 +271,7 @@ impl Chorus {
         self.phase = self.generator.phases();
     }
 
-    /// Puts the LFOs at given phases (FL's export to compare with started there).
+    /// Puts the LFOs at given phases (to compare with a render that started there).
     pub fn set_phases(&mut self, phase: [u32; 3]) {
         self.phase = phase;
     }
@@ -372,7 +372,7 @@ impl Effect for Chorus {
         self.end_block();
     }
 
-    /// A slot switched on during the song: FL enables the plugin again, which clears it and draws new phases.
+    /// A slot switched on during the song: the plugin is enabled again, which clears it and draws new phases.
     fn reset(&mut self) {
         self.start();
     }
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn states_round_trip_and_a_later_version_is_not_read() {
-        // FL's "50 Detune" preset.
+        // The "50 Detune" preset.
         let s = Settings { v: [40, 4375, 149, 3229, 0, 781, 587, 0, 1024, 65, 4531, 491] };
         let b = s.to_state();
         assert_eq!(b.len(), STATE_LEN);
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(Settings::from_state(&b[..48]), None);
     }
 
-    /// The working values of the spec's formulas (checked against an independent reading of the page).
+    /// The working values of the spec's formulas.
     #[test]
     fn knobs_become_working_values() {
         let w = Working::new(&DEFAULTS, 44100);

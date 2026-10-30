@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The piano roll's Limit tool (Tools ▸ Limit…, Alt+K, FL's "limiter / transposer"): its settings and the limiting
+//! The piano roll's Limit tool (Tools ▸ Limit…, Alt+K, "limiter / transposer"): its settings and the limiting
 //! itself, free of any window. The dialog's session is `piano_dlg.rs`, the window `views/piano_dlg.rs`.
 // spec: ui/piano-limit.md
 

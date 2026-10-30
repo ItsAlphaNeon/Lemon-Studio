@@ -880,8 +880,8 @@ mod tests {
         tags_of(Cursor::new(b))
     }
 
-    /// The chunk combinations of the measured table (spec: ui/settings-choices.md "Advanced: Read sample root note and
-    /// Read sample tempo information"), each read back.
+    /// The chunk combinations of the table (spec: ui/settings-choices.md "Advanced: Read sample root note and Read
+    /// sample tempo information"), each read back.
     #[test]
     fn wav_tags_read_the_sampler_and_loop_chunks() {
         let none = WavTags::default();

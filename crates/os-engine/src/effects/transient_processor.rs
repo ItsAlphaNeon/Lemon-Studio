@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Lemon Studio's transient processor (a recreation of FL's Transient Processor mixer effect), configured from its
-//! saved state.
+//! Lemon Studio's transient processor (the Transient Processor mixer effect), configured from its saved state.
 //!
 //! The signal is split by a first-order crossover; the high band's attacks and tails are made louder or softer by one
 //! gain per sample from five level followers, then soft-saturated with a drive, mixed back with the low band by the
@@ -31,7 +30,7 @@ pub const ON: usize = 8;
 pub const RANGES: [(i32, i32); PARAMS] =
     [(0, 160), (0, 160), (0, 160), (0, 160), (0, 2), (0, 2), (0, 160), (0, 160), (0, 1)];
 
-/// A fresh instance's settings, also FL's "Default" preset.
+/// A fresh instance's settings, also the "Default" preset.
 pub const DEFAULTS: [i32; PARAMS] = [80, 0, 80, 80, 1, 1, 80, 80, 1];
 
 /// Shapes: Sharp, Mid, Slow.
@@ -44,7 +43,7 @@ pub const SLOW: i32 = 2;
 pub const STATE_LEN: usize = 49;
 pub const VERSION: i32 = 1;
 
-/// Bytes 40..48 of a new state: display switches 5, not paused, scroll speed 50 (as in all of FL's presets).
+/// Bytes 40..48 of a new state: display switches 5, not paused, scroll speed 50 (as in all the presets).
 pub const DISPLAY: [u8; 9] = [5, 0, 0, 0, 0, 50, 0, 0, 0];
 
 /// The settings that glide (spec "Glide of the settings"), in index order.
@@ -113,7 +112,7 @@ fn div(a: f32, b: f32) -> f32 {
     z(a / b)
 }
 
-/// A single power, correctly rounded (spec "Not covered": FL's matched it but for one near-tie).
+/// A single power, correctly rounded (spec "Not covered").
 fn powf(b: f32, e: f32) -> f32 {
     f64::from(b).powf(f64::from(e)) as f32
 }
@@ -383,7 +382,7 @@ impl TransientProcessor {
         self.reshape();
     }
 
-    /// Every gliding setting at its target at once (a plugin's start; FL has no such step).
+    /// Every gliding setting at its target at once (a plugin's start).
     pub fn settle(&mut self) {
         for k in GLIDING {
             self.pos[k] = self.target[k];

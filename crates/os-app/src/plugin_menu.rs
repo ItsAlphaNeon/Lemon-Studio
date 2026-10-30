@@ -226,12 +226,12 @@ fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Optio
     sampler.then(|| "Added a sampler channel (Lemon Sampler)".into())
 }
 
-/// Generator `index` in place of rack row `row`'s (channel menu and plugin window menu > Replace ▸; FL: "the plugin list
-/// of Add one", spec ui/channel-rack.md §18). The channel keeps its row, notes and steps, mixer track, levels and
+/// Generator `index` in place of rack row `row`'s (channel menu and plugin window menu > Replace ▸: "the plugin list of
+/// Add one", spec ui/channel-rack.md §18). The channel keeps its row, notes and steps, mixer track, levels and
 /// Misc settings; its old instance goes, the new one starts from its defaults, and the channel takes the new
-/// plugin's name. Lemon Studio choice where FL was not measured: the name follows the plugin. One undo step, "Replace
-/// channel" (`control::edit_app`): the channel takes a new id, so its old instrument, kept by the old one's
-/// (`Plugins::keep`), comes back with an undo and the new one with a redo (`control::host`).
+/// plugin's name. One undo step, "Replace channel" (`control::edit_app`): the channel takes a new id, so its old
+/// instrument, kept by the old one's (`Plugins::keep`), comes back with an undo and the new one with a redo
+/// (`control::host`).
 pub fn replace_generator(app: &mut App, index: usize, row: usize) -> Option<String> {
     crate::control::edit_app(app, crate::history::REPLACE_CHANNEL, crate::control::command::Region::Project, |app| replace_generator_now(app, index, row))
 }

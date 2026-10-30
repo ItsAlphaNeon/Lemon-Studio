@@ -540,15 +540,15 @@ mod tests {
     fn legato_chop_glue() {
         let l = legato(vec![note(0, 10, 60), note(0, 10, 64), note(48, 10, 62), note(96, 5, 60)], 384);
         assert_eq!(spans(&l), vec![(0, 48, 60), (0, 48, 64), (48, 48, 62), (96, 288, 60)], "the last note: to the pattern's end");
-        // Ctrl+U counts from each note's start (FL 26: F5 581+30 -> 581+24, 605+6; D6 520+72 -> three of 24).
+        // Ctrl+U counts from each note's start (F5 581+30 -> 581+24, 605+6; D6 520+72 -> three of 24).
         let c = chop_from_start(vec![note(581, 30, 65), note(520, 72, 74), note(0, 24, 62), note(48, 0, 60)], 24);
         assert_eq!(spans(&c), vec![(581, 24, 65), (605, 6, 65), (520, 24, 74), (544, 24, 74), (568, 24, 74), (0, 24, 62), (48, 0, 60)]);
         let g = glue(vec![note(24, 24, 60), note(0, 24, 60), note(60, 10, 60), note(48, 10, 62)]);
         assert_eq!(spans(&g), vec![(0, 48, 60), (60, 10, 60), (48, 10, 62)]);
     }
 
-    /// Ctrl+L as FL 26 does it (spec: ui/piano-keys.md §2 "Editing"): slide notes stay and are no next start; the
-    /// last notes last until the pattern's end.
+    /// Ctrl+L (spec: ui/piano-keys.md §2 "Editing"): slide notes stay and are no next start; the last notes last
+    /// until the pattern's end.
     #[test]
     fn legato_skips_slides_and_ends_at_the_pattern_end() {
         let mut slide = note(96, 24, 64);

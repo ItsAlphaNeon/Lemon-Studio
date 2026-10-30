@@ -127,7 +127,7 @@ pub fn grip(c: &mut Canvas, t: &Palette, x: f32, y: f32) {
 
 // ---------------------------------------------------------------- buttons
 
-/// The FL-style raised button face (spec §1): 1 px border with softened corners, an elliptical radial face
+/// The raised button face (spec §1): 1 px border with softened corners, an elliptical radial face
 /// (light centre, darker edges) and a darker 1 px inner rim. `on`/pressed light it orange (Highlight role).
 pub fn button(c: &mut Canvas, t: &Palette, r: Rect, st: State) {
     if lemon::on(t) {
@@ -427,7 +427,7 @@ pub fn high_visibility() -> bool {
     HIGH_VISIBILITY.load(Ordering::Relaxed)
 }
 
-/// A scroll bar's thumb colour: the look's own, or with `high` (high visibility) a light grey, #b9bfc3 as measured
+/// A scroll bar's thumb colour: the look's own, or with `high` (high visibility) a light grey, #b9bfc3
 /// (in the Lemon look the same grey through the look's colour map, a neutral light grey); it lifts on hover / drag.
 pub fn scroll_thumb(t: &Palette, st: State, high: bool) -> Color {
     if high {
@@ -439,8 +439,8 @@ pub fn scroll_thumb(t: &Palette, st: State, high: bool) -> Color {
     if st.pressed { t.overview.shade(0.18) } else if st.hover { t.overview.shade(0.12) } else { t.overview }
 }
 
-/// A scroll bar's arrow colour with `high` (high visibility): light, #adb3b7 as measured (the look's own light grey
-/// in the Lemon look), the bright glyph colour on hover. `None` without it: the look's own arrows.
+/// A scroll bar's arrow colour with `high` (high visibility): light, #adb3b7 (the look's own light grey in the
+/// Lemon look), the bright glyph colour on hover. `None` without it: the look's own arrows.
 pub fn scroll_arrow(t: &Palette, st: State, high: bool) -> Option<Color> {
     high.then(|| if st.hover || st.pressed { t.glyph } else { t.s(0xadb3b7) })
 }

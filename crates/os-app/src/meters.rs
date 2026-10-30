@@ -3,8 +3,7 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Mixer peak meters: ballistics (rise, fall, peak hold), the level scale law and the colour zones. Every number lives
-//! in one table (`PARAMS`; values tuned by eye against FL by the owner, 2026-10-10). "Alternate meter scale" maps a
-//! level before the law (`alternate_db`).
+//! in one table (`PARAMS`). "Alternate meter scale" maps a level before the law (`alternate_db`).
 //!
 // spec: ui/mixer.md §9 (meters)
 
@@ -136,7 +135,7 @@ pub fn step(m: &mut Meter, peak: [f32; 2], dt: f32, c: &Settings) -> bool {
     m.active()
 }
 
-/// The level scale (label positions on the "C" column at the measured 1080p mixer, label centres; spec:
+/// The level scale (label positions on the "C" column at the 1080p mixer, label centres; spec:
 /// ui/main-window.md mixer scale) as (dB, y). Top of the column y 130, bottom y 924.
 const LAW: [(f32, f32); 17] = [
     (3.0, 181.0), (0.0, 241.0), (-3.0, 301.0), (-6.0, 360.0), (-9.0, 419.0), (-12.0, 479.0), (-15.0, 535.0), (-18.0, 588.0),
@@ -148,7 +147,7 @@ pub const LAW_BOTTOM: f32 = 924.0;
 
 /// The alternate scale ("Alternate meter scale", General ▸ Miscellaneous; spec: ui/settings-choices.md
 /// "Miscellaneous: seven more checks, Default template and Startup project"): each alternate mark (dB) and the level
-/// the default scale draws at its height, measured on both scales' tick rows.
+/// the default scale draws at its height, on both scales' tick rows.
 pub const ALTERNATE: [(f32, f32); 11] = [
     (0.0, 0.0), (-3.0, -6.6), (-6.0, -12.6), (-9.0, -17.9), (-12.0, -22.8), (-15.0, -27.1), (-18.0, -31.1), (-21.0, -34.9),
     (-24.0, -38.4), (-27.0, -41.6), (-30.0, -45.0),
@@ -172,7 +171,7 @@ pub fn alternate_db(db: f32, floor: f32) -> f32 {
     d + (floor - d) * (a - db) / (a - floor).max(1e-3)
 }
 
-/// Reference y (C column, 1080p) of level `db`: the measured marks, 20 px/dB above +3 dB, a straight run from −45 dB
+/// Reference y (C column, 1080p) of level `db`: the scale's marks, 20 px/dB above +3 dB, a straight run from −45 dB
 /// down to the floor at the column bottom. With `alt` ("Alternate meter scale") the level is mapped first
 /// (`alternate_db`).
 pub fn law_y(db: f32, floor: f32, alt: bool) -> f32 {
@@ -233,7 +232,7 @@ mod tests {
     }
 
     // spec: ui/settings-choices.md "Miscellaneous: seven more checks, Default template and Startup project"
-    /// "Alternate meter scale": a level is mapped through the measured table, then drawn with the default law. 0 dB
+    /// "Alternate meter scale": a level is mapped through the table, then drawn with the default law. 0 dB
     /// stays put, −30 dB sits where −45 dB does by default, levels above 0 dB and at the floor are unchanged, and the
     /// hover read-out inverts the mapping.
     #[test]
