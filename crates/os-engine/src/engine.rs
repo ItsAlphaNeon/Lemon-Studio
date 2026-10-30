@@ -286,6 +286,8 @@ struct ChannelState {
     frame_s: f64,
     /// A generator plugin channel; it sounds only once an instrument is attached (`Engine::set_instrument`).
     plugin: bool,
+    /// The channel plugin's Auto-bypass when silent (`os_model::PluginCpu::smart_disable`; `instrument_job`).
+    smart: bool,
     /// A sampler channel: the instrument playing it (Lemon Sampler) applies the root note and fine tune itself, so its
     /// notes' tuning leaves them out (spec: plugins/lemon-sampler.md §7), and takes the rest as tuning (its keys are
     /// never moved, `InstTuning::moves`).
@@ -1133,6 +1135,8 @@ pub struct Engine {
     inst_tail: u64,
     /// A hosted instrument reported sound still to come during the last tick.
     inst_active: bool,
+    /// Per channel, this tick: a note of it is held or due to end (its instrument is not auto-bypassed).
+    inst_held: Vec<bool>,
     /// Automation clips of the playlist and their curves (song mode).
     autos: Vec<AutoClip>,
     curves: Vec<os_model::Automation>,
@@ -1331,6 +1335,7 @@ impl Engine {
                     pitch_env: env_on.then(|| envelope::Params::new(&ch.envelopes[os_model::Envelope::PITCH])).flatten(),
                     frame_s: 1.0 / f64::from(rate),
                     plugin: ch.kind == ChannelKind::Plugin,
+                    smart: ch.misc.cpu.smart_disable,
                     own_tuning: ch.kind.is_sampler(),
                     instrument: Slot::default(),
                     rules: notes::Rules::new(&ch.misc, ppq),
@@ -1580,7 +1585,8 @@ impl Engine {
             Some(a) => marks::Marks::new(&a.markers),
             None => marks::Marks::default(),
         };
-        let pdc = pdc::Pdc::new(channels.len(), tracks.iter().map(|t| t.slot_on));
+        let mut pdc = pdc::Pdc::new(channels.len(), tracks.iter().map(|t| t.slot_on));
+        pdc.manual = project.pdc_off;
         Engine {
             main_gain,
             main_glide: os_dsp::glide::Glide::new(main_gain),
@@ -1666,6 +1672,7 @@ impl Engine {
             key_out: Vec::new(),
             inst_tail: 0,
             inst_active: false,
+            inst_held: Vec::new(),
             metronome: None,
             // Accent on every numerator-th beat (spec: ui/metronome.md §4): event 17, beats per bar.
             beats_per_accent: project.bar().0,
@@ -3258,6 +3265,13 @@ impl Engine {
             self.inst_tail = self.inst_tail.saturating_sub(n as u64);
         }
         let c = self.channels.len();
+        self.inst_held.clear();
+        self.inst_held.resize(c, false);
+        for ch in self.sounding.iter().map(|s| s.0).chain(self.inst_offs.iter().map(|o| o.1)) {
+            if let Some(h) = self.inst_held.get_mut(ch) {
+                *h = true;
+            }
+        }
         if self.inst_owed.len() < c {
             self.inst_owed.resize(c, 0);
         }
@@ -3276,6 +3290,8 @@ impl Engine {
             midi: &self.inst_midi,
             params: &self.params,
             shapes: multicore::Shapes::of(&mut self.inst_shapes),
+            held: &self.inst_held,
+            auto_bypass: auto_bypass::enabled(),
         };
         let parts = multicore::GenParts {
             tuning: &mut self.inst_tuning,
@@ -3889,6 +3905,9 @@ struct InstCx<'a> {
     midi: &'a [(usize, [u8; 3])],
     params: &'a param_auto::ParamAuto,
     shapes: multicore::Shapes,
+    /// Per channel: a note held or due to end (`Engine::inst_held`); the program's Auto-bypass when silent setting.
+    held: &'a [bool],
+    auto_bypass: bool,
 }
 
 // SAFETY: `shapes` is shared under its own rule (each channel's turn touches its own clips); the rest is read only.
@@ -3916,6 +3935,7 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
     let Some(inst) = ch.instrument.0.as_ref() else { return };
     let Some(mut inst) = lock_busy(inst, until, cx.wait, cx.export) else {
         *owed += n;
+        out.quiet.note(false, n);
         return;
     };
     out.ran = true;
@@ -3924,6 +3944,27 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
         sc.r.resize(n, 0.0);
     }
     let first = cx.notes.partition_point(|e| e.0 < c);
+    // Auto-bypass when silent (spec: audio/auto-bypass.md "Instruments", Lemon Studio's design): an instrument that has
+    // had nothing to play and put out silence for the hosted hold is not run, until a note, a controller message, a
+    // parameter value, an audio clip or a pitch change reaches it, or it says it still sounds. It adds nothing to its
+    // insert meanwhile.
+    let quiet_in = ch.smart
+        && cx.auto_bypass
+        && *owed == 0
+        && !cx.held.get(c).copied().unwrap_or(false)
+        && cx.notes.get(first).is_none_or(|e| e.0 != c)
+        && !cx.missed.iter().any(|m| m.0 == c)
+        && !cx.midi.iter().any(|m| m.0 == c)
+        && cx.params.channel_ticks(c).next().is_none()
+        && cx.params.channel_span(c, 0, n).next().is_none()
+        && fines.shift == ch.hosted_shift()
+        // SAFETY: only this channel's turn touches its clips.
+        && unsafe { cx.shapes.of_channel(c) }.next().is_none()
+        && !inst.active();
+    if quiet_in && out.quiet.skip(true, Some(auto_bypass::hold_frames(auto_bypass::HOSTED_HOLD, cx.rate, out.delay))) {
+        out.active = false;
+        return;
+    }
     let notes = cx.notes[first..].iter().take_while(|e| e.0 == c);
     // The channel's pitch (knob, control points, automation, fine tune, root note, main pitch; a sampler channel's
     // instrument applies root and fine itself) reaches the instrument as each note's tuning, with the note's fine
@@ -4032,6 +4073,7 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
     let cl = ch.clip_level;
     let (gl, gr) = if own_levels { (cl, cl) } else { ch.gain_via(f64::from(cl), 0.0, layer) };
     out.buf.extend(l.iter().zip(r.iter()).flat_map(|(&a, &b)| [a * gl, b * gr]));
+    out.quiet.note(quiet_in && !out.active && auto_bypass::silent(&out.buf), n);
     // Delay compensation: the channel waits for the latest path into its track.
     if let Some(pad) = pad.filter(|p| p.len() > 0) {
         pad.run(&mut out.buf);
@@ -7567,6 +7609,60 @@ mod tests {
         assert!(same(&render_with(&p, false), &plain, 1.0));
         p.mixer[0].slot_mix[0] = 0.0;
         assert!(same(&render_with(&p, false), &plain, 2.0));
+    }
+
+    /// Plays 1.0 on both sides while a key is held, and counts its process calls.
+    #[derive(Default)]
+    struct GateProbe {
+        held: usize,
+        calls: usize,
+    }
+
+    impl Instrument for GateProbe {
+        fn note_on(&mut self, _: u32, _: u8, _: f32) {
+            self.held += 1;
+        }
+        fn note_off(&mut self, _: u32, _: u8) {
+            self.held = self.held.saturating_sub(1);
+        }
+        fn process(&mut self, _: u32, left: &mut [f32], right: &mut [f32]) {
+            self.calls += 1;
+            let v = if self.held > 0 { 1.0 } else { 0.0 };
+            left.fill(v);
+            right.fill(v);
+        }
+    }
+
+    /// spec: audio/auto-bypass.md "Instruments": a plugin channel with Auto-bypass when silent on stops running its
+    /// instrument once it has had nothing to play and been silent for the hosted hold, and runs it again with the next
+    /// note; what is heard does not change. With the switch off it always runs.
+    #[test]
+    fn a_silent_instrument_is_bypassed_until_its_next_note() {
+        let run = |smart: bool| -> (Vec<f32>, usize) {
+            // A short note, about six seconds of silence, another note.
+            let mut p = insert_project();
+            p.patterns[0].notes = vec![long_note(0, 48, 0), long_note(32 * 96, 48, 0)];
+            p.channels[0].kind = ChannelKind::Plugin;
+            p.channels[0].misc.cpu.smart_disable = smart;
+            let mut lib = SampleLibrary::new(None);
+            let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+            let probe = Arc::new(Mutex::new(GateProbe::default()));
+            e.set_instrument(0, probe.clone());
+            let (mut out, mut block) = (Vec::new(), vec![0.0f32; 1024]);
+            for _ in 0..44100 * 16 / 512 {
+                e.process(&mut block);
+                out.extend_from_slice(&block);
+            }
+            let calls = probe.lock().unwrap().calls;
+            (out, calls)
+        };
+        let (plain, all) = run(false);
+        let (out, fewer) = run(true);
+        assert!(peak(&plain, 0) > 0.1, "the notes sound");
+        assert!(out.iter().zip(&plain).all(|(a, b)| a == b), "what is heard does not change");
+        // The pattern's two notes are 32 beats apart; the hold is four seconds of them.
+        assert!(fewer < all * 3 / 4, "bypassed while silent: {fewer} of {all} calls");
+        assert!(fewer > all / 4, "run again for the second note: {fewer} of {all}");
     }
 
     /// spec: audio/auto-bypass.md: with Auto-bypass when silent on, a slot stops running its effect once its track has

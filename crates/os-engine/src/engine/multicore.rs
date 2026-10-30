@@ -539,6 +539,8 @@ pub(super) struct InstOut {
     /// The delay it reported, and whether it said it still sounds.
     pub delay: u32,
     pub active: bool,
+    /// How long the instrument has had nothing to play and put out silence (`instrument_job`, auto-bypass).
+    pub quiet: super::auto_bypass::Quiet,
 }
 
 /// The audio clips with shapes on instrument channels (`Engine::inst_shapes`), shared by the channels of a tick: each

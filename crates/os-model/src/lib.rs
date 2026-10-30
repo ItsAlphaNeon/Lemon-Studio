@@ -123,6 +123,10 @@ pub struct Project {
     /// Internal controller links, in file order (event 227 with 0x8000 and up in its first field; spec:
     /// flp/events/automation.md "Controller links"): a controller plugin's output driving a target.
     pub controller_links: Vec<ControllerLink>,
+    /// Mixer options ▸ Plugin delay compensation ▸ Automatic unticked: the plugins' delays are not compensated, only
+    /// the tracks' latency settings are (spec: audio/delay-compensation.md "Automatic"). Not saved: where the original
+    /// keeps it was not found.
+    pub pdc_off: bool,
 }
 
 /// One internal controller link (spec: flp/events/automation.md "Controller links"): output `output` of the controller

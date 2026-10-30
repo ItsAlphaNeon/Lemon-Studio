@@ -42,6 +42,9 @@ pub enum MHit {
     AddAfter,
     Options,
     Layout,
+    /// The title bar's View waveforms and Extra volume / stereo properties buttons (Options ▸ View ▸).
+    Waveforms,
+    Extra,
     /// Effect slot `n` of the current track: name, ▸ arrow, LED.
     SlotName(u8),
     SlotArrow(u8),
@@ -146,6 +149,22 @@ pub enum MCmd {
     /// Switch auto-bypass for all plugins (Options, TOOLS and the instrument rack's options menu): every plugin's Auto-
     /// bypass when silent on when one is off, all off when all are on (`switch_auto_bypass`).
     AutoBypassAll,
+    /// Options ▸ Plugin delay compensation ▸ Automatic (`Project::pdc_off`; spec: audio/delay-compensation.md
+    /// "Automatic").
+    PdcAuto,
+    /// The slot menu's Help: the slot plugin's help page (`slot_help`).
+    SlotHelp(u8),
+    /// The slot menu's Scaling ▸: the hosted plugin's window at this percent, `None` = Main (`Plugins::editor_scales`).
+    SlotScale(u8, Option<u16>),
+    /// Options ▸ View ▸ Waveforms and Extra properties (`MixerUi::waveforms`, `MixerUi::extra`).
+    ViewWaveforms,
+    ViewExtra,
+    /// File ▸ Save mixer track state, File ▸ Open mixer track state ▸ and Insert from state ▸ (Lemon Studio's design,
+    /// `crate::mixer_state`): save track `n`'s state under its name; put a saved one on track `n` (its name and colour
+    /// stay); insert a new track in front of `n` from one (with the state's name and colour).
+    SaveState(u16),
+    OpenState(u16, std::path::PathBuf),
+    InsertState(u16, std::path::PathBuf),
 }
 
 /// What the plugin host does next tick for a mixer slot (`App::mixer_tick`).
@@ -186,12 +205,22 @@ pub struct MixerUi {
     pub solo: Option<(Vec<u16>, Vec<(u16, bool)>)>,
     /// The track and effect slot the wheel last moved, and where the mouse was then (`slot_wheel`).
     pub wheel_grab: Option<(u16, u8, (f32, f32))>,
+    /// View ▸ Waveforms (Lemon Studio's design, session only): each strip's meter shows its recent peaks as a waveform
+    /// scrolling up, newest at the bottom; `waves` holds them per track (L, R, linear), newest last.
+    pub waveforms: bool,
+    pub waves: Vec<std::collections::VecDeque<[f32; 2]>>,
+    /// View ▸ Extra properties (Lemon Studio's design, session only, on by default): the strips show the reverse
+    /// polarity and swap buttons and the stereo separation knob.
+    pub extra: bool,
 }
+
+/// How many meter readings a waveform keeps: more than the tallest meter has pixels.
+pub const WAVE_LEN: usize = 600;
 
 impl Default for MixerUi {
     fn default() -> Self {
         MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), slot_colors: HashMap::new(), pending: Vec::new(), meters: Vec::new(),
-            meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None }
+            meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None, waveforms: false, waves: Vec::new(), extra: true }
     }
 }
 
@@ -352,6 +381,44 @@ fn changed(s: &mut State) {
     s.piano.dirty = true;
 }
 
+/// The help page of the plugin in slot `slot` of the current track (spec: ui/plugin-window.md "Help", Lemon Studio's
+/// design): a hosted plugin's own page (`os_host::Plugin::help_url`); for Lemon Studio's own effects, and the effects
+/// the engine plays itself, the feature status page's section on them. `None`: an empty slot, or a hosted plugin that
+/// names no page.
+pub(crate) fn slot_help(app: &App, slot: u8) -> Option<String> {
+    let s = &app.state;
+    let t = s.selected_mixer;
+    let p = track(s, t)?.slots.get(usize::from(slot))?.as_ref()?;
+    match app.plugins.hosted.get(&crate::plugins::fx_key(t, slot)) {
+        Some(h) => {
+            let p = h.plugin.lock().ok()?;
+            let own = crate::plugins::builtin_effects().iter().chain(&crate::plugins::builtin()).any(|a| a.desc.id == p.desc().id);
+            p.help_url().or_else(|| own.then(|| crate::help_links::BUILTIN_PLUGINS_URL.to_owned()))
+        }
+        None => os_engine::effects::from_slot(&p.name, &p.state, 44100).map(|_| crate::help_links::BUILTIN_PLUGINS_URL.to_owned()),
+    }
+}
+
+/// Scaling ▸ choices (Lemon Studio's design): Main, then these percents.
+pub const SCALES: [u16; 5] = [100, 125, 150, 175, 200];
+
+/// The slot menu's Scaling ▸ (Lemon Studio's design, session only): Main (the program's scale) or a fixed scale for
+/// the hosted plugin's window and editor, radio items; greyed for an effect the engine plays itself (no editor).
+fn scaling_menu(app: &App, slot: u8) -> PItem {
+    let key = crate::plugins::fx_key(app.state.selected_mixer, slot);
+    let now = app.plugins.editor_scales.get(&key).map(|k| (k * 100.0).round() as u16);
+    let mut items = vec![PItem::new("Main", Cmd::Mixer(MCmd::SlotScale(slot, None))).mark(Mark::Radio(now.is_none()))];
+    items.extend(SCALES.iter().map(|&p| PItem::new(format!("{p}%"), Cmd::Mixer(MCmd::SlotScale(slot, Some(p)))).mark(Mark::Radio(now == Some(p)))));
+    let it = PItem::sub("Scaling", items);
+    if app.plugins.hosted.contains_key(&key) { it } else { it.off() }
+}
+
+/// View ▸ Waveforms on or off; the waveforms start empty.
+fn view_waveforms(s: &mut State) {
+    s.mixer.waveforms = !s.mixer.waveforms;
+    s.mixer.waves.clear();
+}
+
 /// The label of Switch auto-bypass for all plugins (mixer Options, TOOLS, the instrument rack's options menu).
 pub const AUTO_BYPASS_ALL_LABEL: &str = "Switch auto-bypass for all plugins";
 
@@ -456,6 +523,14 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
         }
         MHit::Layout => {
             s.playlist.popup = Some(layout_menu(s, at.0, at.1 + 10.0));
+            None
+        }
+        MHit::Waveforms => {
+            view_waveforms(s);
+            None
+        }
+        MHit::Extra => {
+            s.mixer.extra = !s.mixer.extra;
             None
         }
         MHit::SlotName(i) => {
@@ -1361,7 +1436,15 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
         PItem::not_yet("Assign to new Audio track(s)"),
         PItem::not_yet("Unassign from Audio track(s)"),
         PItem::sep(),
-        PItem::sub("File", vec![PItem::new("Render to wave file...", mx(MCmd::RenderWave(n)))]),
+        PItem::sub(
+            "File",
+            vec![
+                PItem::sub("Open mixer track state", state_items(|p| mx(MCmd::OpenState(n, p)))),
+                PItem::new("Save mixer track state", mx(MCmd::SaveState(n))),
+                PItem::sep(),
+                PItem::new("Render to wave file...", mx(MCmd::RenderWave(n))),
+            ],
+        ),
         PItem::new("Open audio editor", mx(MCmd::AudioEditor(n))).key("Ctrl+E"),
         PItem::new("Open audio editor and record", mx(MCmd::AudioEditorRecord(n))).key("Shift+E"),
         PItem::sep(),
@@ -1410,10 +1493,32 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
         PItem::new("Delete", mx(MCmd::Delete(n))).key("Del"),
         PItem::new("Insert one", mx(MCmd::InsertOne(n))),
         PItem::new("Insert multiple...", mx(MCmd::InsertMultiple(n))),
-        PItem::sub("Insert from state", vec![PItem::not_yet("(no saved states)")]),
+        PItem::sub("Insert from state", state_items(|p| mx(MCmd::InsertState(n, p)))),
         PItem::head("CPU"),
         PItem::new("Allow threaded processing", mx(MCmd::Threaded(n))).mark(Mark::Check(t.is_none_or(|m| m.threaded))),
     ]
+}
+
+/// The saved mixer track states, one entry each running `cmd` with its file; a greyed "(no saved states)" without any.
+fn state_items(cmd: impl Fn(std::path::PathBuf) -> Cmd) -> Vec<PItem> {
+    let v: Vec<PItem> = crate::mixer_state::list().into_iter().map(|(name, p)| PItem::new(name, cmd(p))).collect();
+    if v.is_empty() { vec![PItem::not_yet("(no saved states)")] } else { v }
+}
+
+/// Puts the saved state in `path` on track `n` (`named`: with its name and colour); the track's old effects go.
+fn open_state(s: &mut State, n: u16, path: &std::path::Path, named: bool) -> Option<String> {
+    let Some(st) = crate::mixer_state::load(path) else { return Some(format!("Couldn't read the mixer track state {}", path.display())) };
+    for k in 0..10u8 {
+        if track(s, n).is_some_and(|m| m.slots[usize::from(k)].is_some()) {
+            clear_slot(s, n, k);
+        }
+    }
+    if let Some(m) = track_mut(s, n) {
+        st.apply(m, named);
+    }
+    changed(s);
+    let file = path.file_stem().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    Some(format!("{} takes the mixer track state \"{file}\"", name(s, n)))
 }
 
 /// Entries that do not apply to the master (its strip is fixed and starts no group).
@@ -1454,9 +1559,15 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     let mut items = vec![
         PItem::head("Options"),
         PItem::sub("Disk recording", vec![PItem::new("Auto-create audio clips", Cmd::Mixer(MCmd::AutoClips)).mark(Mark::Check(crate::prefs::check(&crate::prefs::AUTO_AUDIO_CLIPS)))]),
-        PItem::sub("Plugin delay compensation", vec![PItem::not_yet("Automatic")]),
+        PItem::sub("Plugin delay compensation", vec![PItem::new("Automatic", Cmd::Mixer(MCmd::PdcAuto)).mark(Mark::Check(!s.project.pdc_off))]),
         PItem::not_yet("Link all parameters..."),
-        PItem::sub("View", vec![PItem::not_yet("Waveforms"), PItem::not_yet("Extra properties")]),
+        PItem::sub(
+            "View",
+            vec![
+                PItem::new("Waveforms", Cmd::Mixer(MCmd::ViewWaveforms)).key("Alt+W").mark(Mark::Check(s.mixer.waveforms)),
+                PItem::new("Extra properties", Cmd::Mixer(MCmd::ViewExtra)).mark(Mark::Check(s.mixer.extra)),
+            ],
+        ),
         PItem::not_yet("Detached").mark(Mark::Check(false)),
         PItem::sep(),
         PItem::sub("Trim unused tracks", trim_items(s)),
@@ -1531,8 +1642,8 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
         PItem::new("Random color", mx(MCmd::SlotRandomColor(slot))),
         PItem::not_yet("Change icon..."),
         PItem::sep(),
-        PItem::sub("Scaling", vec![PItem::not_yet("100%")]),
-        PItem::not_yet("Help"),
+        scaling_menu(app, slot),
+        PItem::new("Help", mx(MCmd::SlotHelp(slot))),
     ];
     let mut menu = Popup { x, y, items, sub: None, scroll: [0; 2] };
     crate::presets::fill_window_menu(app, crate::plugins::fx_key(s.selected_mixer, slot), &mut menu);
@@ -1563,6 +1674,31 @@ fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
 // Commands
 
 pub fn run(app: &mut App, c: MCmd) -> Option<String> {
+    if let MCmd::SlotScale(slot, pct) = c {
+        let key = crate::plugins::fx_key(app.state.selected_mixer, slot);
+        app.plugins.set_editor_scale(key, pct.map(|p| f32::from(p) / 100.0));
+        return None;
+    }
+    // A track's state takes its effects' settings from their instances.
+    if let MCmd::SaveState(n) = c {
+        let mut proj = app.state.project.clone();
+        crate::project_plugins::store_hosted(&mut proj, &app.plugins);
+        let m = proj.mixer.iter().find(|m| m.index == n)?;
+        return Some(match crate::mixer_state::save(&crate::mixer_state::TrackState::of(m), &name(&app.state, n)) {
+            Ok(p) => format!("Saved the mixer track state \"{}\"", p.file_stem().unwrap_or_default().to_string_lossy()),
+            Err(e) => format!("Couldn't save the mixer track state: {e}"),
+        });
+    }
+    if let MCmd::SlotHelp(slot) = c {
+        let name = slot_name(&app.state, app.state.selected_mixer, slot).unwrap_or_default();
+        return Some(match slot_help(app, slot) {
+            Some(url) => {
+                crate::help_links::open(&url);
+                format!("Opening {url}")
+            }
+            None => format!("{name} has no help page"),
+        });
+    }
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
     let step = match &c {
         MCmd::Color(..) | MCmd::RandomColor(_) | MCmd::GradientColor | MCmd::AutoColorGroup(_) => Some("Mixer track color"),
@@ -1570,6 +1706,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::Dock(..) => Some("Mixer track docking"),
         MCmd::Threaded(_) => Some("Mixer track threading"),
         MCmd::AutoBypassAll => Some("Auto-bypass for all plugins"),
+        MCmd::PdcAuto => Some("Plugin delay compensation"),
         MCmd::Reset(_) => Some("Mixer track reset"),
         MCmd::ResetRouting(_) | MCmd::UnrouteTo(_) | MCmd::Route { .. } | MCmd::RouteChannels { .. } => Some(ROUTING),
         MCmd::Trim { .. } | MCmd::Delete(_) => Some("Delete mixer track"),
@@ -1579,6 +1716,8 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::SlotDelete(_) => Some("Remove effect"),
         MCmd::SlotMove(..) => Some("Move effect"),
         MCmd::RemoveTeslasNow => Some("Remove audio editors"),
+        MCmd::OpenState(..) => Some("Open mixer track state"),
+        MCmd::InsertState(..) => Some(INSERT),
         _ => None,
     };
     if let Some(name) = step {
@@ -1764,6 +1903,26 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             switch_auto_bypass(s);
             None
         }
+        // Answered in `run`.
+        MCmd::SlotHelp(_) | MCmd::SlotScale(..) | MCmd::SaveState(_) => None,
+        MCmd::OpenState(n, p) => open_state(s, n, &p, false),
+        MCmd::InsertState(n, p) => {
+            let n = add_track(s, Some(n.max(1)));
+            open_state(s, n, &p, true)
+        }
+        MCmd::PdcAuto => {
+            s.project.pdc_off = !s.project.pdc_off;
+            changed(s);
+            Some(format!("Automatic plugin delay compensation {}", if s.project.pdc_off { "off" } else { "on" }))
+        }
+        MCmd::ViewWaveforms => {
+            view_waveforms(s);
+            None
+        }
+        MCmd::ViewExtra => {
+            s.mixer.extra = !s.mixer.extra;
+            None
+        }
         MCmd::AutoClips => {
             let on = crate::prefs::toggle(&crate::prefs::AUTO_AUDIO_CLIPS);
             Some(format!("Auto-create audio clips {}", if on { "on" } else { "off" }))
@@ -1934,6 +2093,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
     let msg = match key {
         Key::Character(c) if alt && letter(c, "s") => run(app, MCmd::AltSolo(n)),
         Key::Character(c) if alt && letter(c, "l") => run(app, MCmd::SelectChannels(n)),
+        Key::Character(c) if alt && letter(c, "w") => run(app, MCmd::ViewWaveforms),
         Key::Named(NamedKey::F2) => run(app, MCmd::Rename(n)),
         Key::Named(NamedKey::Delete) => run(app, MCmd::Delete(n)),
         Key::Named(NamedKey::ArrowLeft) if alt => run(app, MCmd::MoveLeft(n)),
@@ -1975,6 +2135,19 @@ pub fn feed_meters(s: &mut State, peaks: &[[f32; 2]]) -> bool {
     for (i, v) in m.iter_mut().enumerate() {
         let p = peaks.get(i).copied().unwrap_or([0.0; 2]);
         moving |= crate::meters::step(v, p, dt, &s.mixer.meter_cfg);
+    }
+    // View ▸ Waveforms: one reading per meter step; the waveforms keep scrolling until they have gone quiet.
+    if s.mixer.waveforms {
+        let w = &mut s.mixer.waves;
+        w.resize_with(peaks.len().max(w.len()), Default::default);
+        for (i, wave) in w.iter_mut().enumerate() {
+            let p = peaks.get(i).copied().unwrap_or([0.0; 2]);
+            wave.push_back(p.map(f32::abs));
+            if wave.len() > WAVE_LEN {
+                wave.pop_front();
+            }
+        }
+        moving |= w.iter().any(|wave| wave.iter().any(|p| p[0] > 1e-5 || p[1] > 1e-5));
     }
     if !moving {
         s.mixer.meter_at = None;
@@ -2977,6 +3150,48 @@ mod tests {
         assert_eq!(col(&a, 4), None);
     }
 
+    /// File ▸ Save mixer track state writes the track's state under its name; Open mixer track state ▸ puts it on another
+    /// track (its old effects go, its name stays) and Insert from state ▸ inserts a track from it, each one undo step.
+    #[test]
+    fn mixer_track_states_save_open_and_insert() {
+        let _ = std::fs::remove_dir_all(crate::mixer_state::dir().unwrap());
+        let mut a = app();
+        let file = |a: &App, n: u16| track_items(&a.state, n).into_iter().find(|i| i.label == "File").unwrap();
+        let ins = |a: &App, n: u16| track_items(&a.state, n).into_iter().find(|i| i.label == "Insert from state").unwrap();
+        assert_eq!((file(&a, 2).children[0].children[0].label.as_ref(), file(&a, 2).children[0].children[0].enabled), ("(no saved states)", false));
+        assert!(!ins(&a, 2).children[0].enabled);
+        let balance = os_engine::effects::balance::Settings { v: [0, 128] }.to_state();
+        {
+            let m = track_mut(&mut a.state, 2).unwrap();
+            (m.name, m.color, m.volume) = (Some("Lead".into()), Some(Rgb::new(10, 20, 30)), Some(0.5));
+            m.slots[1] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Balance".into(), state: balance.clone() });
+            m.slot_mix[1] = 0.6;
+        }
+        assert_eq!(run(&mut a, MCmd::SaveState(2)).as_deref(), Some("Saved the mixer track state \"Lead\""));
+        let path = crate::mixer_state::list()[0].1.clone();
+        assert_eq!(file(&a, 2).children[0].children[0].cmd, Cmd::Mixer(MCmd::OpenState(2, path.clone())));
+        assert_eq!(ins(&a, 5).children[0].cmd, Cmd::Mixer(MCmd::InsertState(5, path.clone())));
+        // Open on track 3: its own effect goes, its name stays.
+        track_mut(&mut a.state, 3).unwrap().slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Balance".into(), state: balance.clone() });
+        let steps = a.state.history.at();
+        a.state.mixer.pending.clear();
+        run(&mut a, MCmd::OpenState(3, path.clone()));
+        let t3 = track(&a.state, 3).unwrap();
+        assert_eq!((t3.name.as_deref(), t3.volume, t3.slots[0].is_none(), t3.slot_mix[1]), (None, Some(0.5), true, 0.6));
+        assert_eq!(t3.slots[1].as_ref().map(|p| p.state.clone()), Some(balance.clone()));
+        assert!(a.state.mixer.pending.contains(&FxReq::Delete { track: 3, slot: 0 }));
+        assert_eq!(a.state.history.at(), steps + 1);
+        // Insert in front of track 5: a new track 5 named after the state; the old 5 is now 6.
+        track_mut(&mut a.state, 5).unwrap().name = Some("Old five".into());
+        run(&mut a, MCmd::InsertState(5, path));
+        assert_eq!((name(&a.state, 5), name(&a.state, 6)), ("Lead".to_string(), "Old five".to_string()));
+        assert_eq!(track(&a.state, 5).unwrap().color, Some(Rgb::new(10, 20, 30)));
+        assert_eq!(a.state.history.at(), steps + 2);
+        crate::history::undo(&mut a.state);
+        assert_eq!(name(&a.state, 5), "Old five");
+        let _ = std::fs::remove_dir_all(crate::mixer_state::dir().unwrap());
+    }
+
     /// File ▸ Render to wave file...: the Export form for the selected tracks, or the one clicked, named after it and
     /// with WAV ticked; its export writes those tracks' outputs (`export::Job::tracks`).
     #[test]
@@ -2985,7 +3200,7 @@ mod tests {
         a.state.project.patterns[0].notes.push(os_model::Note::step(0, 0));
         a.state.song_mode = false;
         let file = track_items(&a.state, 2).into_iter().find(|i| i.label == "File").unwrap();
-        assert_eq!(file.children[0].cmd, Cmd::Mixer(MCmd::RenderWave(2)));
+        assert_eq!(file.children[3].cmd, Cmd::Mixer(MCmd::RenderWave(2)));
         track_mut(&mut a.state, 2).unwrap().name = Some("Bass: sub".into());
         run(&mut a, MCmd::RenderWave(2));
         let form = |a: &App| match &a.state.dialogs.last().expect("the form").body {
@@ -3109,5 +3324,69 @@ mod tests {
         assert!(menus::works(TOOLS_MENU, items[i]));
         a.menu_item(TOOLS_MENU, i);
         assert!(!smart(&a, 0) && !smart(&a, 1), "TOOLS: all on, so all off");
+    }
+
+    /// Options ▸ Plugin delay compensation ▸ Automatic (spec: audio/delay-compensation.md "Automatic"): ticked on a new
+    /// project; a pick flips it as one undo step and the engine follows it.
+    #[test]
+    fn automatic_delay_compensation_is_a_project_switch() {
+        let mut a = app();
+        let auto = |a: &App| {
+            let m = options_menu(&a.state, 0.0, 0.0);
+            let pdc = m.items.iter().find(|i| i.label == "Plugin delay compensation").unwrap();
+            pdc.children.iter().find(|i| i.label == "Automatic").map(|i| (i.enabled, i.mark.clone(), i.cmd.clone())).unwrap()
+        };
+        assert_eq!(auto(&a), (true, Mark::Check(true), Cmd::Mixer(MCmd::PdcAuto)));
+        assert_eq!(run(&mut a, MCmd::PdcAuto).as_deref(), Some("Automatic plugin delay compensation off"));
+        assert!(a.state.project.pdc_off);
+        assert_eq!(auto(&a).1, Mark::Check(false));
+        crate::history::undo(&mut a.state);
+        assert!(!a.state.project.pdc_off, "one undo step");
+    }
+
+    /// Options ▸ View ▸ Waveforms (Alt+W, the title bar's View waveforms) and Extra properties (Lemon Studio's design):
+    /// switches of the window; with Waveforms on each track keeps its recent peaks, newest last, and the meters keep
+    /// moving until the waveforms are quiet.
+    #[test]
+    fn view_waveforms_and_extra_properties() {
+        use winit::keyboard::Key;
+        let mut a = app();
+        let view = |a: &App| {
+            let m = options_menu(&a.state, 0.0, 0.0);
+            let v = m.items.iter().find(|i| i.label == "View").unwrap();
+            v.children.iter().map(|i| (i.label.to_string(), i.enabled, i.mark.clone())).collect::<Vec<_>>()
+        };
+        assert_eq!(view(&a), [("Waveforms".into(), true, Mark::Check(false)), ("Extra properties".into(), true, Mark::Check(true))]);
+        run(&mut a, MCmd::ViewExtra);
+        assert!(!a.state.mixer.extra);
+        assert!(key(&mut a, &Key::Character("w".into()), false, true), "Alt+W");
+        assert_eq!(view(&a)[0].2, Mark::Check(true));
+        assert!(feed_meters(&mut a.state, &[[0.5, -0.25], [0.0, 0.0]]));
+        assert_eq!(a.state.mixer.waves[0].back(), Some(&[0.5, 0.25]));
+        assert_eq!(a.state.mixer.waves[1].back(), Some(&[0.0, 0.0]));
+        for _ in 0..WAVE_LEN {
+            feed_meters(&mut a.state, &[[0.0, 0.0], [0.0, 0.0]]);
+        }
+        assert_eq!(a.state.mixer.waves[0].len(), WAVE_LEN);
+        assert!(!a.state.mixer.waves[0].iter().any(|p| p[0] > 0.0), "scrolled out");
+        a.state.mixer.meters.clear();
+        assert!(!feed_meters(&mut a.state, &[[0.0, 0.0], [0.0, 0.0]]), "quiet: still");
+        run(&mut a, MCmd::ViewWaveforms);
+        assert!(!a.state.mixer.waveforms && a.state.mixer.waves.is_empty());
+    }
+
+    /// The slot menu's Help (Lemon Studio's design): an effect the engine plays itself opens the page on Lemon Studio's
+    /// own effects; a plugin naming no page says so.
+    #[test]
+    fn slot_help_opens_the_plugins_page() {
+        let mut a = app();
+        a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        select(&mut a.state, 2, false);
+        run(&mut a, MCmd::AddEffect(0, 0));
+        track_mut(&mut a.state, 2).unwrap().slots[1] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Balance".into(), state: os_engine::effects::balance::Settings { v: [0, 128] }.to_state() });
+        let help = slot_menu(&a, 0, 0.0, 0.0).items.iter().find(|i| i.label == "Help").map(|i| (i.enabled, i.cmd.clone())).unwrap();
+        assert_eq!(help, (true, Cmd::Mixer(MCmd::SlotHelp(0))));
+        assert_eq!(run(&mut a, MCmd::SlotHelp(0)).as_deref(), Some("Test FX has no help page"));
+        assert_eq!(run(&mut a, MCmd::SlotHelp(1)), Some(format!("Opening {}", crate::help_links::BUILTIN_PLUGINS_URL)));
     }
 }

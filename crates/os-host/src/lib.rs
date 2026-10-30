@@ -191,6 +191,12 @@ pub const NOTE_MOD_Y: &str = "Filter bandwidth (modulation Y)";
 pub trait Plugin: Instrument + HostedEffect + Send {
     fn desc(&self) -> &Descriptor;
 
+    /// The plugin's help page, for its menu's Help (spec: ui/plugin-window.md "Help"): a CLAP plugin's manual URL, else
+    /// its URL; a VST3 plug-in's factory URL. `None`: the plugin names none.
+    fn help_url(&self) -> Option<String> {
+        None
+    }
+
     /// Activates at `rate` (UI thread); reactivates when the rate changes. The audio thread renders silence (an
     /// instrument) or passes the sound through (an effect) until the instance is active at the stream's rate, and asks
     /// for that rate; the next `idle` reactivates.
