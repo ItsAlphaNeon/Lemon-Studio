@@ -5,14 +5,18 @@
 //! Where the windows were when Lemon Studio last closed, put back at the next start: the main window (its restored
 //! frame and whether it was maximized) and, inside it, the Playlist, Mixer and Piano roll (their floating rects and
 //! whether each was maximized or collapsed to its title bar), the Channel rack (its place and size), the Plugin
-//! performance monitor, the Tempo tapper and the Touch controller. App-wide, kept in `settings.txt` (`settings_file`)
-//! as the app closes, never in the project. Which windows are open is not kept: a start shows its usual ones.
+//! performance monitor, the Tempo tapper and the Touch controller, and whether the Mixer and the Channel rack are
+//! detached (Options ▸ Detached) with their own native windows' frames. App-wide, kept in `settings.txt`
+//! (`settings_file`) as the app closes, never in the project. Which windows are open is not kept: a start shows its
+//! usual ones.
 //!
 //! Keys: `window_main` (`x,y,w,h,maximized`: outer top-left and inner size in the units the window system places
 //! windows in, points on macOS and pixels elsewhere), `window_playlist`, `window_mixer`, `window_piano_roll`
 //! (`x,y,w,h,maximized,collapsed`), `window_channel_rack` (`x,y,w,h`), `window_plugin_performance`,
-//! `window_tempo_tapper`, `window_touch_controller` (`x,y`); positions inside the main window are logical px, switches
-//! `1` / `0`. A value that cannot be read leaves that window as a first start has it. The first paint keeps every
+//! `window_tempo_tapper`, `window_touch_controller` (`x,y`), `window_mixer_detached`, `window_channel_rack_detached`
+//! (`detached,x,y,w,h`: the native window's frame in `window_main`'s units, `0,0,0,0` before it had one); positions
+//! inside the main window are logical px, switches `1` / `0`. A value that cannot be read leaves that window as a first
+//! start has it. The first paint keeps every
 //! window's part in the workspace, should the main window be smaller now (`win_clamp`).
 
 use os_ui::Rect;
@@ -28,6 +32,8 @@ const PERF: &str = "window_plugin_performance";
 const TAPPER: &str = "window_tempo_tapper";
 const TOUCH: &str = "window_touch_controller";
 const MAIN: &str = "window_main";
+/// The windows Options ▸ Detached can take out of the main window, and their keys.
+const DETACHABLE: [(Win, &str); 2] = [(Win::Mixer, "window_mixer_detached"), (Win::ChannelRack, "window_channel_rack_detached")];
 
 /// How tall a strip of the main window's top must be on a screen at the start, in `MainWin` units (`on_screens`).
 pub const MAIN_BAR_H: i32 = 32;
@@ -68,6 +74,22 @@ pub fn restore(s: &mut State) {
         // Not below the smallest size a resize leaves it (`views::rack::snap_size`).
         s.rack_size = (w.max(views::rack::min_w(s)), h.max(views::rack::MIN_H));
     }
+    for (w, key) in DETACHABLE {
+        let Some([on, x, y, fw, fh]) = numbers(key) else { continue };
+        s.detached.retain(|d| d.0 != w);
+        s.detached_frames.retain(|d| d.0 != w);
+        if on == 1.0 {
+            let r = s.float_rect(w);
+            if let Some(i) = w.slot() {
+                s.wins[i].maxed = false;
+                s.wins[i].mini = false;
+            }
+            s.detached.push((w, (r.w, r.h)));
+            if fw >= 1.0 && fh >= 1.0 {
+                s.detached_frames.push((w, [x.round() as i32, y.round() as i32, fw.round() as i32, fh.round() as i32]));
+            }
+        }
+    }
     // Placed: they open there, not centred.
     for (key, pos, placed) in [(PERF, &mut s.perf.pos, &mut s.perf.placed), (TAPPER, &mut s.tapper.pos, &mut s.tapper.placed), (TOUCH, &mut s.touch.pos, &mut s.touch.placed)] {
         if let Some([x, y]) = numbers(key) {
@@ -87,6 +109,10 @@ pub fn save(s: &State) {
         }
     }
     keep(RACK, &[s.rack_pos.0, s.rack_pos.1, s.rack_size.0, s.rack_size.1]);
+    for (w, key) in DETACHABLE {
+        let f = s.detached_frames.iter().find(|d| d.0 == w).map_or([0; 4], |d| d.1);
+        keep(key, &[switch(s.is_detached(w)), f[0] as f32, f[1] as f32, f[2] as f32, f[3] as f32]);
+    }
     for (key, pos, placed) in [(PERF, s.perf.pos, s.perf.placed), (TAPPER, s.tapper.pos, s.tapper.placed), (TOUCH, s.touch.pos, s.touch.placed)] {
         if placed {
             keep(key, &[pos.0, pos.1]);
@@ -154,6 +180,28 @@ mod tests {
         assert_eq!((b.rack_pos, b.rack_size), ((820.0, 330.0), (900.0, 400.0)));
         assert_eq!((b.perf.pos, b.perf.placed, b.tapper.pos, b.tapper.placed), ((500.0, 300.0), true, (700.0, 420.0), true));
         assert!(!b.touch.placed, "never opened: still centred the first time");
+    }
+
+    /// A detached Mixer (Options ▸ Detached) comes back detached, in a native window where it was left; re-attached, it
+    /// comes back in the main window.
+    #[test]
+    fn a_detached_mixer_comes_back_detached() {
+        let mut app = App::new(None);
+        app.set_detached(Win::Mixer, true);
+        app.set_detached_frame(Win::Mixer, [-1500, 200, 1280, 520]);
+        save(&app.state);
+        assert_eq!(get("window_mixer_detached").as_deref(), Some("1,-1500,200,1280,520"));
+        let mut next = App::new(None);
+        restore(&mut next.state);
+        assert!(next.state.is_detached(Win::Mixer));
+        assert_eq!(next.detached_frame(Win::Mixer), Some([-1500, 200, 1280, 520]));
+        assert!(!next.state.is_max(Win::Mixer), "a detached window floats in its own window");
+
+        app.set_detached(Win::Mixer, false);
+        save(&app.state);
+        let mut next = App::new(None);
+        restore(&mut next.state);
+        assert!(!next.state.is_detached(Win::Mixer));
     }
 
     /// A value that cannot be read leaves its window as a first start has it; a rack kept smaller than a resize allows
