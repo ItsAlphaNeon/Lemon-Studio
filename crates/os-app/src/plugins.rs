@@ -909,6 +909,8 @@ impl Plugins {
         self.presets.clear();
         self.stash.clear();
         self.preset_waits.clear();
+        // Scaling ▸ belongs to the project's windows: an opened project brings its own (`lemon_state`).
+        self.editor_scales.clear();
     }
 
     /// The sample file a Lemon Sampler instance holds (its persisted `sample-path`), `Some("")` when it has none.

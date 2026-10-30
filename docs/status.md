@@ -26,7 +26,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - A channel's menu: Change icon... puts an icon on its name button (the same icon as its plugin window and clips, saved
   in `.lemon` projects); Show waveform preview draws a sampler or audio clip channel's sample across its name button; MIDI
   channel through (ticked by default) gives a hosted VST, VST 3 or CLAP instrument a MIDI device's notes on the MIDI
-  channel they came on, and a recorded note takes that channel as its colour. The two checks last for the session
+  channel they came on, and a recorded note takes that channel as its colour. The two checks are saved in `.lemon`
+  projects
 - The rack's Restretch all (Ctrl+Alt+R) fits every stretched sample and audio clip to the project tempo at once
   (they follow the tempo by themselves too, also with tempo automation)
 - The rack's knob, mixer box and LED menus: Edit automation in piano roll opens the piano roll on the channel volume
@@ -124,10 +125,10 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   (`.lemontrack`), not the original's
 - Mixer options ▸ View ▸ Waveforms (Alt+W, also the title bar's button) draws each track's recent peaks as a scrolling
   waveform in place of its meter; Extra properties (the title bar's other button) shows or hides the polarity, swap
-  and separation controls. Both for the session
+  and separation controls. Both saved in `.lemon` projects
 - The mixer slot menu's Help opens the plugin's own help page (CLAP and VST3 plugins that name one; Lemon Studio's
   own effects open the list of built-in effects), and Scaling ▸ sizes a hosted plugin's window: Main (the program's
-  scale) or 100 % to 200 %, for the session
+  scale) or 100 % to 200 %, saved in `.lemon` projects
 - Change icon... in the mixer track menu draws an icon under the track's name, and in the slot menu before the
   slot's name and on its plugin window; the icons move with their tracks and slots and are saved in `.lemon` projects. The slot menu's
   Link all parameters... links the effect's parameters to consecutive controllers, as its window menu's
@@ -168,7 +169,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Automation of a mixer track or slot behind late audio waits for it, as in FL Studio
 - A sidechain input waits for the slot it feeds, so it lines up with the audio there
 - Mixer options ▸ Plugin delay compensation ▸ Automatic (on): unticked, plugins' delays are no longer made up, while
-  the tracks' latency settings still are. For the session (not yet saved in the project)
+  the tracks' latency settings still are. Saved in `.lemon` projects
 - The latency settings are edited from the input clock, the track latency combo and the strip's latency clock (right
   click): Reset, or a value typed in ms, samples or beats; the clocks turn orange when set
 
@@ -291,10 +292,10 @@ plugins switches every plugin's Auto-bypass when silent.
 TOOLS > Chord progression tool... (Lemon Studio's design) asks for a progression, one chord a bar, as chord names
 (C G Am F7 Dm/F) or numerals (I V vi IV, with "Am:" first for the key) and writes it into the piano roll's pattern
 after its last note, as one undo step. TOOLS > Set keyboard focus of all plugins to ▸ Disabled keeps plugin editors
-from taking typed keys, which then play and steer Lemon Studio instead (Windows and macOS; for the session). TOOLS >
+from taking typed keys, which then play and steer Lemon Studio instead (Windows and macOS; saved in `.lemon` projects). TOOLS >
 Lock all tracks to their clips locks each playlist track whose clips share one source to it, so Draw and Paint place
 that source there whatever the current one is (a lock shows in the track header); Unlock all tracks from their
-clips clears the locks. Both are one undo step, and kept for the session only.
+clips clears the locks. Both are one undo step, and the locks are saved in `.lemon` projects.
 Not yet (greyed in the menu bar): TOOLS > Control builder, Set up for MIDI export; VIEW > Script output.
 
 **Window positions.** Where the windows were when Lemon Studio closed comes back at the next start: the main
@@ -338,8 +339,10 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 ## 🚧 Project files
 
 - Saves projects as `.lemon` files: Lemon Studio's own format, laid out like an FLP with room for Lemon Studio's own
-  data (the channel, mixer track and slot icons, the slots' names and colours, Performance mode's ▸ menu checks;
-  saving to a `.flp` name leaves them out). The original is not expected to open them
+  data (the channel, mixer track and slot icons, the slots' names and colours, Performance mode's ▸ menu checks, the
+  mixer's Plugin delay compensation ▸ Automatic and View ▸ checks, plugin windows' Scaling ▸, the channels' waveform
+  preview and MIDI channel through checks, the plugins' keyboard focus and the playlist tracks' locks; saving to a
+  `.flp` name leaves them out). The original is not expected to open them
 - Opens `.lemon` files and `.flp` projects saved by FL Studio 24.2 and later, 25 and 26 included. A project opened
   from an FLP is never saved over: Save asks for a name, offering the FLP's name with `.lemon`. Backups, new versions,
   templates and zipped projects are `.lemon` too; FLP backups and templates still open. General ▸ System ▸

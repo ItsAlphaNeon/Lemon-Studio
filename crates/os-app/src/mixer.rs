@@ -213,11 +213,11 @@ pub struct MixerUi {
     pub solo: Option<(Vec<u16>, Vec<(u16, bool)>)>,
     /// The track and effect slot the wheel last moved, and where the mouse was then (`slot_wheel`).
     pub wheel_grab: Option<(u16, u8, (f32, f32))>,
-    /// View ▸ Waveforms (Lemon Studio's design, session only): each strip's meter shows its recent peaks as a waveform
+    /// View ▸ Waveforms (Lemon Studio's design, saved in `.lemon` files, `lemon_state`): each strip's meter shows its recent peaks as a waveform
     /// scrolling up, newest at the bottom; `waves` holds them per track (L, R, linear), newest last.
     pub waveforms: bool,
     pub waves: Vec<std::collections::VecDeque<[f32; 2]>>,
-    /// View ▸ Extra properties (Lemon Studio's design, session only, on by default): the strips show the reverse
+    /// View ▸ Extra properties (Lemon Studio's design, saved in `.lemon` files, on by default): the strips show the reverse
     /// polarity and swap buttons and the stereo separation knob.
     pub extra: bool,
 }
@@ -427,7 +427,7 @@ pub(crate) fn slot_help(app: &App, slot: u8) -> Option<String> {
 /// Scaling ▸ choices (Lemon Studio's design): Main, then these percents.
 pub const SCALES: [u16; 5] = [100, 125, 150, 175, 200];
 
-/// The slot menu's Scaling ▸ (Lemon Studio's design, session only): Main (the program's scale) or a fixed scale for
+/// The slot menu's Scaling ▸ (Lemon Studio's design, saved in `.lemon` files): Main (the program's scale) or a fixed scale for
 /// the hosted plugin's window and editor, radio items; greyed for an effect the engine plays itself (no editor).
 fn scaling_menu(app: &App, slot: u8) -> PItem {
     let key = crate::plugins::fx_key(app.state.selected_mixer, slot);
