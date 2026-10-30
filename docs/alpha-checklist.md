@@ -44,7 +44,8 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
 - [ ] **Vocoder (Vocodex)**
 - [x] **Peak Controller.** Common for sidechain pumping in projects. Lemon Peak Controller plays projects' Fruity Peak
   Controller slots and the engine plays their controller links (mixer and plugin targets, formulas)
-- [ ] **Formula Controller**
+- [x] **Formula Controller.** Lemon Formula Controller plays projects' Fruity Formula Controller slots, with the
+  original's formula language, and their controller links drive linked controls as the Peak Controller's do
 - [ ] **Patcher.** The mixer slot menu's Patcherize and Patcherize all are greyed out
 - [x] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** Six of the seven
   small effects match sample for sample in the tests (98 cases for these three: `os-engine/tests/fx_null.rs`); the

@@ -225,6 +225,35 @@ mod tests {
         assert_eq!(vols, (0..6).map(|k| want(k as f64)).collect::<Vec<_>>());
     }
 
+    /// The engine's own Fruity Formula Controller: in the song, the target holds the formula of the tick's start
+    /// (`SongTime/48` gives j/4608 in tick j); one that does not compile leaves the target as it is.
+    // spec: plugins/fruity-formula-controller.md "Ticks"
+    #[test]
+    fn a_formula_controller_follows_the_song() {
+        use crate::effects::formula_ctrl::Settings as Fc;
+        let with = |formula: &str| {
+            let mut p = project(Settings::default(), vec![pc_link(0, mixer(2, MIXER_VOLUME))]);
+            let s = Fc { formula: formula.into(), ..Fc::default() };
+            p.mixer[1].slots[0] = Some(SlotPlugin { id: Id::NONE, name: "Fruity Formula Controller".into(), state: s.to_state() });
+            p
+        };
+        let mut e = Engine::new(&with("SongTime/48"), &mut SampleLibrary::new(None), 44100, PlayMode::Song);
+        e.set_looping(true);
+        let mut out = vec![0.0f32; 2 * 212];
+        let mut vols = Vec::new();
+        for _ in 0..8 {
+            e.process(&mut out);
+            vols.push(vol(&e, 2));
+        }
+        // 212.02 frames per tick: the blocks of 212 frames start in ticks 0..7 (the 8th just short of tick 8).
+        let want: Vec<i32> = (0..8).map(|j| (16000.0 * f64::from(j) / 4608.0).round() as i32).collect();
+        assert_eq!(vols, want);
+        let mut e = Engine::new(&with("a*"), &mut SampleLibrary::new(None), 44100, PlayMode::Song);
+        let before = vol(&e, 2);
+        e.process(&mut out);
+        assert_eq!(vol(&e, 2), before);
+    }
+
     /// A smoothing link starts at its first value and moves to a new one gradually.
     #[test]
     fn smoothing_glides() {

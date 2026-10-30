@@ -3339,6 +3339,7 @@ impl Engine {
             wait: self.busy_wait,
             // The tick being mixed is the one before `tick`.
             record: self.record.as_deref().filter(|_| song.playing).map(|r| (r, self.tick.saturating_sub(1))),
+            tick: (self.tick.saturating_sub(1), self.ppq),
         };
         let parts = multicore::MixParts {
             order: &self.order,
@@ -3716,7 +3717,7 @@ fn mix_track(lane: Lane, cx: &multicore::MixCx, s: &mut multicore::MixScratch) {
             let key = feed(fx.key).map(|k| (k, &mut *key_buf));
             let main = feed(fx.main).map(|k| (k, &mut *main_buf));
             let extra = (t, &track.routes[..], &mut *out);
-            run_slot(fx, buf, cx.rate, limit, cx.song, dry, l, r, (&mut *until, cx.wait, cx.export, &mut *missed), &mut *moved, extra, (key, main));
+            run_slot(fx, buf, cx.rate, limit, (cx.song, cx.tick), dry, l, r, (&mut *until, cx.wait, cx.export, &mut *missed), &mut *moved, extra, (key, main));
         }
     }
     if let Some((r, at, rec::Arm { point: RecordPoint::PostFx, .. })) = tap {
@@ -4011,7 +4012,7 @@ fn run_slot(
     buf: &mut [f32],
     rate: u32,
     limit: f32,
-    song: &TransportInfo,
+    (song, tick): (&TransportInfo, (u64, u16)),
     dry: &mut Vec<f32>,
     l: &mut Vec<f32>,
     r: &mut Vec<f32>,
@@ -4057,6 +4058,7 @@ fn run_slot(
             if fresh {
                 e.reset();
             }
+            e.transport(song, tick);
             match key {
                 Some(key) => e.process_keyed(buf, key),
                 None => e.process(buf),

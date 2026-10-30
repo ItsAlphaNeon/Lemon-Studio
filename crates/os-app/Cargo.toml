@@ -46,6 +46,7 @@ press = { path = "../../plugins/press", features = ["linked"] }
 lemon-flanger = { path = "../../plugins/lemon-flanger", features = ["linked"] }
 lemon-phaser = { path = "../../plugins/lemon-phaser", features = ["linked"] }
 lemon-peak-controller = { path = "../../plugins/lemon-peak-controller", features = ["linked"] }
+lemon-formula-controller = { path = "../../plugins/lemon-formula-controller", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"

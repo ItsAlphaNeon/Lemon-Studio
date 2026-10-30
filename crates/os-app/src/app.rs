@@ -9584,6 +9584,41 @@ mod tests {
         assert_eq!(saved.controller_links, vec![link]);
     }
 
+    /// A project's Fruity Formula Controller slot opens as Lemon Formula Controller with its state (the formula and the
+    /// comments too), and a save keeps the FL effect with that state and the project's controller links.
+    // spec: plugins/lemon-formula-controller.md "Opened projects"
+    #[test]
+    fn fl_formula_controller_slots_open_as_lemon_formula_controller() {
+        use crate::plugins::{fx_key, LEMON_FORMULA_CONTROLLER};
+        use os_engine::effects::formula_ctrl::Settings;
+        let comment: Vec<u8> = "Sine".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut tail = vec![4];
+        tail.extend(comment);
+        tail.push(0);
+        let fl = Settings { knobs: [46592, 65536, 32768], formula: "a+Sin(SongTime*Pi)*b*0.5".into(), tail }.to_state();
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.project.mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Formula Controller".into(), state: fl.clone() });
+        let link = os_model::ControllerLink::new(0x7000 + 64, 0, 0x40_0000);
+        a.state.project.controller_links = vec![link.clone()];
+        a.sync_effects();
+        let key = fx_key(1, 0);
+        assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(LEMON_FORMULA_CONTROLLER.to_string()));
+        assert_eq!(a.plugins.recreation_file_state(key, "Fruity Formula Controller").as_ref(), Some(&fl), "the state as it was opened");
+        let path = std::env::temp_dir().join(format!("lemon-fl-formula-controller-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let slot = saved.mixer[1].slots[0].clone().unwrap();
+        assert_eq!((slot.name.as_str(), &slot.state), ("Fruity Formula Controller", &fl));
+        assert_eq!(saved.controller_links, vec![link]);
+    }
+
     /// The toolbar's audio editor button puts Tesla on the master track and shows it; another click shows the same
     /// one, the right click adds another (spec: plugins/tesla/requests.md #5).
     #[test]
