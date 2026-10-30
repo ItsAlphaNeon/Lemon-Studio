@@ -100,13 +100,18 @@ impl Look {
 const LOOK_EVERY: Duration = Duration::from_millis(250);
 
 
+/// How long a whole-state read waits for its moment (`lock_between_blocks`): two blocks of 256 frames and more.
+pub const STATE_WAIT: Duration = Duration::from_millis(12);
+/// How long the UI's per-tick work on an instance (its idle, its parameters, a keyboard's screen) waits for its moment:
+/// one block of 256 frames, so it nearly always comes, and a tick skipped otherwise.
+pub const TICK_WAIT: Duration = Duration::from_millis(6);
+
 /// Locks `m` for a UI call that may hold it a few ms: right after the audio thread processed it (`meter`), when it will
 /// not need it again for most of a block (it gives up on an instance it waits for over 2 ms: a late plugin), else at
-/// once when nothing is processing it. Waits up to `SLOT_WAIT` for that moment; `None` when it did not come.
-pub fn lock_between_blocks<'a, T: ?Sized>(m: &'a std::sync::Mutex<T>, meter: Option<&os_host::Meter>) -> Option<std::sync::MutexGuard<'a, T>> {
+/// once when nothing is processing it. Waits up to `wait` for that moment; `None` when it did not come.
+pub fn lock_between_blocks<'a, T: ?Sized>(m: &'a std::sync::Mutex<T>, meter: Option<&os_host::Meter>, wait: Duration) -> Option<std::sync::MutexGuard<'a, T>> {
     const JUST: Duration = Duration::from_millis(1);
     const IDLE: Duration = Duration::from_millis(50);
-    const SLOT_WAIT: Duration = Duration::from_millis(12);
     let t0 = Instant::now();
     loop {
         let free = match meter.and_then(|m| m.since_processed()) {
@@ -117,7 +122,7 @@ pub fn lock_between_blocks<'a, T: ?Sized>(m: &'a std::sync::Mutex<T>, meter: Opt
             // The audio thread holds it only while processing: a short wait if it just started another block.
             return m.lock().ok();
         }
-        if t0.elapsed() >= SLOT_WAIT {
+        if t0.elapsed() >= wait {
             return None;
         }
         std::thread::sleep(Duration::from_micros(200));
@@ -168,7 +173,7 @@ impl Hosted {
     /// Locks the instance for a UI call that may hold it a few ms (reading its state), between two of its blocks
     /// ([`lock_between_blocks`]).
     pub fn lock_between_blocks(&self) -> Option<std::sync::MutexGuard<'_, dyn os_host::Plugin + 'static>> {
-        lock_between_blocks(&self.plugin, self.meter.as_deref())
+        lock_between_blocks(&self.plugin, self.meter.as_deref(), STATE_WAIT)
     }
 
     pub fn attention_count(&self) -> Option<u64> {
@@ -1283,7 +1288,7 @@ impl Plugins {
         for (&row, h) in &mut self.hosted {
             let look = h.due(h.seen);
             let mut menu: Option<(os_host::Menu, (i32, i32))> = None;
-            if let Some(mut p) = look.and_then(|_| h.plugin.try_lock().ok()) {
+            if let Some(mut p) = look.and_then(|_| lock_between_blocks(&h.plugin, h.meter.as_deref(), TICK_WAIT)) {
                 let t0 = Instant::now();
                 h.seen = look.unwrap_or(h.seen);
                 // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
@@ -4426,7 +4431,7 @@ mod slot_tests {
             }
             let t0 = Instant::now();
             while t0.elapsed() < Duration::from_secs(3) {
-                let g = if between { lock_between_blocks(&plugin, Some(&meter)) } else { plugin.lock().ok() };
+                let g = if between { lock_between_blocks(&plugin, Some(&meter), STATE_WAIT) } else { plugin.lock().ok() };
                 if let Some(_g) = g {
                     std::thread::sleep(Duration::from_millis(3));
                 }

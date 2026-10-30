@@ -225,13 +225,15 @@ impl App {
                     }
                 }
                 // A Launchkey MK4's pitch wheel turns the selected channel's pitch knob; the sounding notes
-                // follow it. A wheel is no edit: no undo step.
+                // follow it. A wheel is no edit: no undo step, and the playing engines retune the channel in place
+                // (`Transport::channel_pitch`) instead of taking a new project at every move.
                 Msg::Bend { v, .. } if crate::surface::launchkey::Model::is_keys_port(&ev.dev) => {
                     let row = self.state.selected_channel;
                     if let Some(c) = self.state.project.channels.get_mut(row) {
                         let x = f64::from(v) / 16384.0 * 2.0 - 1.0;
                         c.pitch_cents = (x * 100.0 * f64::from(c.misc.pitch_range)).round() as i32;
-                        self.state.piano.dirty = true;
+                        let cents = c.pitch_cents;
+                        self.transport.channel_pitch(row, cents);
                         self.invalidate();
                     }
                 }
@@ -727,7 +729,8 @@ mod tests {
         app
     }
 
-    /// A Launchkey MK4's pitch wheel turns the selected channel's pitch knob, which playback takes at once; no undo step.
+    /// A Launchkey MK4's pitch wheel turns the selected channel's pitch knob, which playback takes at once in place
+    /// (no new project sent); no undo step.
     #[test]
     fn a_launchkey_wheel_turns_the_pitch_knob() {
         let mut app = app();
@@ -737,7 +740,7 @@ mod tests {
         app.state.piano.dirty = false;
         app.midi_events(vec![bend(16383)]);
         assert_eq!(app.state.project.channels[0].pitch_cents, 200, "full up: the range, 2 semitones");
-        assert!(app.state.piano.dirty, "playback follows");
+        assert!(!app.state.piano.dirty, "playback retunes in place: no new project");
         app.midi_events(vec![bend(8192)]);
         assert_eq!(app.state.project.channels[0].pitch_cents, 0);
         assert_eq!(app.state.history.len(), steps);

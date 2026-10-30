@@ -1985,6 +1985,14 @@ impl Engine {
 
     /// Keep a live-only engine running while nothing plays (an instrument's editor is open): its instruments are
     /// processed every tick, so notes from the editor's own keyboard sound. Off, it finishes again once silent.
+    /// Channel `channel`'s pitch knob moved live (a controller's pitch wheel): its sounding notes and the next follow
+    /// at once, as automation of the knob does, with no new engine.
+    pub fn set_channel_pitch(&mut self, channel: usize, cents: i32) {
+        if let Some(ch) = self.channels.get_mut(channel) {
+            ch.retune(f64::from(cents));
+        }
+    }
+
     pub fn set_awake(&mut self, on: bool) {
         self.awake = on;
     }
@@ -6772,6 +6780,25 @@ mod tests {
             assert!(rms(&left(&out, 48000.0, 1.5, 1.9)) > 0.1, "mode {mode}: still playing after the source's length");
             assert!(rms(&left(&out, 48000.0, 2.2, 2.6)) < 0.01, "mode {mode}: over after twice its length");
         }
+    }
+
+    /// A pitch knob moved while a note plays (`set_channel_pitch`, a controller's pitch wheel) moves the sounding note at
+    /// once, as an engine built with that pitch plays it.
+    #[test]
+    fn a_live_pitch_knob_retunes_the_sounding_note() {
+        let wav = Sines::new("live-pitch", &[(440.0, 2.0)]);
+        let mut p = project(vec![long_note(0, 384 * 4, 0)], vec![]);
+        p.channels[0].sample_path = wav.path();
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+        let mut out = Vec::new();
+        e.render_ticks(96, &mut out);
+        assert!((hz(&left(&out, 44100.0, 0.05, 0.2), 44100.0) - 440.0).abs() < 3.0);
+        e.set_channel_pitch(0, 1200);
+        let mut after = Vec::new();
+        e.render_ticks(192, &mut after);
+        let f = hz(&left(&after, 44100.0, 0.05, 0.3), 44100.0);
+        assert!((f - 880.0).abs() < 5.0, "an octave up at once: {f} Hz");
     }
 
     // spec: audio/time-stretch.md "How each method plays" (realtime methods: the key moves the pitch, not the length)

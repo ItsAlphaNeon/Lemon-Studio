@@ -388,10 +388,15 @@ fn page_name(pt: &PluginTarget) -> String {
 
 /// The plugin's text for its parameter's value, or the value in percent.
 /// The value texts of Plugin mode's eight slots, the plugin held once for all of them.
-fn plugin_texts(s: &State, pt: &PluginTarget) -> [String; 8] {
+/// `None` when the instance gave no moment between two of its blocks this tick (`plugins::lock_between_blocks`): the
+/// texts shown stay, read again at the next tick.
+fn plugin_texts(s: &State, pt: &PluginTarget, meter: Option<&os_host::Meter>) -> Option<[String; 8]> {
     let list = s.params.lists.get(&pt.key);
     let plugin = s.params.plugin(pt.key);
-    let p = plugin.as_ref().and_then(|p| p.lock().ok());
+    let p = match &plugin {
+        Some(m) => Some(crate::plugins::lock_between_blocks(m, meter, crate::plugins::TICK_WAIT)?),
+        None => None,
+    };
     let t0 = Instant::now();
     let texts = std::array::from_fn(|i| {
         let Some((index, _, _, regions)) = &pt.slots[i] else { return String::new() };
@@ -406,7 +411,7 @@ fn plugin_texts(s: &State, pt: &PluginTarget) -> [String; 8] {
     if let Some(p) = &p {
         crate::dropout_log::held(&p.desc().name, "the keyboard's screen", t0.elapsed());
     }
-    texts
+    Some(texts)
 }
 
 impl App {
@@ -1198,7 +1203,10 @@ impl App {
         let reread = plugin.as_ref().map(|pt| match &d.plugin_shown {
             Some((at, key, pg, texts)) if *key == pt.key && *pg == pt.page && now.duration_since(*at) < PLUGIN_REREAD
                 && !d.last_turn.iter().flatten().any(|(t, _)| t > at) => (false, texts.clone()),
-            _ => (true, plugin_texts(s, pt)),
+            shown => match plugin_texts(s, pt, self.plugins.hosted.get(&pt.key).and_then(|h| h.meter.as_deref())) {
+                Some(texts) => (true, texts),
+                None => (false, shown.as_ref().filter(|(_, key, pg, _)| *key == pt.key && *pg == pt.page).map(|x| x.3.clone()).unwrap_or_default()),
+            },
         });
         let held: Vec<u8> = d.held.iter().map(|h| h.0).collect();
         let pads_held: Vec<u8> = d.pads_held.iter().map(|h| h.0).collect();

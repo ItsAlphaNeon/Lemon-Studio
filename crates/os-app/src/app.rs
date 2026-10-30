@@ -1891,8 +1891,9 @@ impl App {
                 crate::recent::add(&path);
                 s.path = Some(path);
                 // A converted project is not saved over its original, which its own version can still open: Save asks
-                // for a new file.
-                if converted {
+                // for a new file. A Lemon project file keeps its path: it keeps its earlier saves as versions, the one
+                // opened among them (`crate::native`).
+                if converted && !s.path.as_deref().is_some_and(crate::native::is_native) {
                     s.message = s.path.take().map(|p| format!("Opened {} (converted from an older version: Save asks for a new file)", p.display()));
                 }
                 s.piano.reset();
@@ -13587,6 +13588,20 @@ mod tests {
         assert_eq!(app.state.project.channels.len(), test_project().channels.len());
         assert_eq!(app.state.path, None, "Save asks for a file");
         assert!(app.state.message.as_deref().is_some_and(|m| m.contains("converted from an older version")), "{:?}", app.state.message);
+    }
+
+    /// A Lemon project file whose project is in the older layout (made from a project of version 24.1, say) opens
+    /// converted with its path: Save writes over it, which keeps the save it was opened from as a version.
+    #[test]
+    fn an_older_lemon_project_keeps_its_path() {
+        let flp = older_project_file("24.1.1.4285", "lemon");
+        let path = flp.with_extension(crate::native::EXT);
+        crate::native::write(&path, &std::fs::read(&flp).unwrap(), &[], &serde_json::Value::Null, None).expect("write");
+        let _ = std::fs::remove_file(&flp);
+        let mut app = App::new(None);
+        app.open(path.clone());
+        assert_eq!(app.state.path.as_deref(), Some(path.as_path()), "{:?}", app.state.message);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Press `k` (a character or a named key) with the modifiers given.

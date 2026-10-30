@@ -391,6 +391,8 @@ enum Cmd {
     Resume,
     /// The newest edited project is in `Transport::latest` (older ones are skipped).
     Update,
+    /// A channel's pitch knob moved live (`Transport::channel_pitch`): row, cents.
+    ChannelPitch(usize, i32),
     Preview(Box<Project>),
     /// Play a project's playlist once on the preview stream (clip preview).
     PreviewSong(Box<Project>),
@@ -648,6 +650,13 @@ impl Transport {
         let margin = (f64::from(rate) * MARGIN_MAX) as u64;
         let device = info.filter(|d| d.host == crate::device::ASIO).map_or(0, |d| u64::from(d.latency.unwrap_or(0)) + u64::from(d.input_latency.unwrap_or(0)));
         device + 2 * block + margin + tick + block + margin
+    }
+
+    /// Channel `row`'s pitch knob moved to `cents` while playing live (a controller's pitch wheel): the playing engines
+    /// retune it in place. A whole project (`update`) would build new engines for each move of the wheel, and the feeder
+    /// would wait for every swap.
+    pub fn channel_pitch(&self, row: usize, cents: i32) {
+        let _ = self.tx.send(Cmd::ChannelPitch(row, cents));
     }
 
     pub fn update(&self, project: &Project) {
@@ -1426,6 +1435,21 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                         h.0 = project.clone();
                     }
                     live_project = Some(project);
+                }
+            }
+            Ok(Cmd::ChannelPitch(row, cents)) => {
+                for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
+                    if let Some(c) = s.project.channels.get_mut(row) {
+                        c.pitch_cents = cents;
+                    }
+                    if let Ok(mut e) = s.engine.lock() {
+                        e.set_channel_pitch(row, cents);
+                    }
+                }
+                for p in [held.as_mut().map(|h| &mut h.0), live_project.as_mut()].into_iter().flatten() {
+                    if let Some(c) = p.channels.get_mut(row) {
+                        c.pitch_cents = cents;
+                    }
                 }
             }
             Ok(Cmd::Record) => {
