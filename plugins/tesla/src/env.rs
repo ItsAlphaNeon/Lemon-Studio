@@ -159,6 +159,208 @@ impl Envs {
     }
 }
 
+/// The envelope tools with a dialog (Tools > Envelope; Lemon Studio's design, the original's dialogs were not opened).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnvTool {
+    Scale,
+    Decimate,
+    Filter,
+    SmoothUp,
+    Sequence,
+}
+
+impl EnvTool {
+    pub const ALL: [EnvTool; 5] = [EnvTool::Scale, EnvTool::Decimate, EnvTool::Filter, EnvTool::SmoothUp, EnvTool::Sequence];
+
+    /// The undo step's and the panel's name.
+    pub fn name(self) -> &'static str {
+        match self {
+            EnvTool::Scale => "Scale levels",
+            EnvTool::Decimate => "Decimate points",
+            EnvTool::Filter => "Filter",
+            EnvTool::SmoothUp => "Smooth up",
+            EnvTool::Sequence => "Create sequence",
+        }
+    }
+
+    /// The knobs' captions (the second `None` when the tool has one knob).
+    pub fn captions(self) -> (&'static str, Option<&'static str>) {
+        match self {
+            EnvTool::Scale => ("SCALE", Some("OFFSET")),
+            EnvTool::Decimate => ("TOLERANCE", None),
+            EnvTool::Filter => ("AMOUNT", None),
+            EnvTool::SmoothUp => ("POINTS", Some("SMOOTH")),
+            EnvTool::Sequence => ("STEPS", Some("DEPTH")),
+        }
+    }
+}
+
+/// An envelope tool's dialog: the tool and its two knobs, each −1 to 1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnvDlg {
+    pub tool: EnvTool,
+    pub a: f32,
+    pub b: f32,
+}
+
+impl EnvDlg {
+    /// The tool's dialog at its defaults: Scale 100 % and no offset; tolerance 5 %; ±3 points; 45 points smoothed
+    /// over ±2; 8 steps at half depth.
+    pub fn new(tool: EnvTool) -> EnvDlg {
+        let (a, b) = match tool {
+            EnvTool::Scale => (0.0, 0.0),
+            EnvTool::Decimate => (-0.6, 0.0),
+            EnvTool::Filter => (-0.5, 0.0),
+            EnvTool::SmoothUp => (0.0, 0.0),
+            EnvTool::Sequence => (-0.2, 0.0),
+        };
+        EnvDlg { tool, a, b }
+    }
+
+    fn u(v: f32) -> f32 {
+        (v.clamp(-1.0, 1.0) + 1.0) / 2.0
+    }
+
+    /// Scale levels: the factor about mid height (0 to 2) and the offset (± half the height).
+    pub fn scale(&self) -> (f32, f32) {
+        (1.0 + self.a.clamp(-1.0, 1.0), self.b.clamp(-1.0, 1.0) * 0.5)
+    }
+
+    /// Decimate points: the largest height error a removed point may leave (0 to ¼ of the height).
+    pub fn tolerance(&self) -> f32 {
+        Self::u(self.a) * 0.25
+    }
+
+    /// Filter: the points on each side averaged (1 to 8).
+    pub fn reach(&self) -> usize {
+        1 + (Self::u(self.a) * 7.0).round() as usize
+    }
+
+    /// Smooth up: the points made (8 to 256) and the points on each side averaged (0 to 4).
+    pub fn smooth_up(&self) -> (usize, usize) {
+        ((8.0 * 2f32.powf(Self::u(self.a) * 5.0)).round() as usize, (Self::u(self.b) * 4.0).round() as usize)
+    }
+
+    /// Create sequence: the steps (2 to 64) and the depth (0 to 1 of the height).
+    pub fn sequence(&self) -> (usize, f32) {
+        (2f32.powf(1.0 + Self::u(self.a) * 5.0).round() as usize, Self::u(self.b))
+    }
+
+    /// The knobs' readings.
+    pub fn texts(&self) -> (String, String) {
+        match self.tool {
+            EnvTool::Scale => {
+                let (g, o) = self.scale();
+                (format!("{:.0}%", g * 100.0), format!("{:+.0}%", o * 100.0))
+            }
+            EnvTool::Decimate => (format!("{:.1}%", self.tolerance() * 100.0), String::new()),
+            EnvTool::Filter => (format!("±{} points", self.reach()), String::new()),
+            EnvTool::SmoothUp => {
+                let (n, r) = self.smooth_up();
+                (format!("{n} points"), format!("±{r}"))
+            }
+            EnvTool::Sequence => {
+                let (n, d) = self.sequence();
+                (format!("{n} steps"), format!("{:.0}%", d * 100.0))
+            }
+        }
+    }
+}
+
+/// The heights of `v` averaged over ±`r` neighbours (fewer at the ends).
+fn average(v: &[f32], r: usize) -> Vec<f32> {
+    (0..v.len())
+        .map(|i| {
+            let (a, b) = (i.saturating_sub(r), (i + r + 1).min(v.len()));
+            v[a..b].iter().sum::<f32>() / (b - a) as f32
+        })
+        .collect()
+}
+
+/// Decimation: the points between `a` and `b` kept where one is farther than `tol` (in height) from the straight line
+/// between the kept ones (Douglas-Peucker on heights).
+fn keep(p: &[Point], a: usize, b: usize, tol: f32, out: &mut Vec<bool>) {
+    if b <= a + 1 {
+        return;
+    }
+    let line = |i: usize| {
+        let t = if p[b].pos > p[a].pos { ((p[i].pos - p[a].pos) / (p[b].pos - p[a].pos)) as f32 } else { 0.0 };
+        p[a].v + (p[b].v - p[a].v) * t
+    };
+    let (far, err) = (a + 1..b).map(|i| (i, (p[i].v - line(i)).abs())).fold((a, 0.0f32), |m, x| if x.1 > m.1 { x } else { m });
+    if err > tol {
+        out[far] = true;
+        keep(p, a, far, tol, out);
+        keep(p, far, b, tol, out);
+    }
+}
+
+impl Envs {
+    /// Runs an envelope tool's dialog on envelope `k` over `n` frames; Create sequence fills `range` (frames, first and
+    /// last). False when nothing changed.
+    pub fn apply_tool(&mut self, k: usize, n: usize, dlg: &EnvDlg, range: (usize, usize)) -> bool {
+        let before = self.points(k, n);
+        let last = n.saturating_sub(1) as f64;
+        let after: Vec<Point> = match dlg.tool {
+            EnvTool::Scale => {
+                let (g, o) = dlg.scale();
+                before.iter().map(|p| Point { pos: p.pos, v: (MID + (p.v - MID) * g + o).clamp(0.0, 1.0) }).collect()
+            }
+            EnvTool::Decimate => {
+                let mut kept = vec![false; before.len()];
+                kept[0] = true;
+                kept[before.len() - 1] = true;
+                keep(&before, 0, before.len() - 1, dlg.tolerance(), &mut kept);
+                before.iter().zip(kept).filter(|(_, k)| *k).map(|(p, _)| *p).collect()
+            }
+            EnvTool::Filter => {
+                let v = average(&before.iter().map(|p| p.v).collect::<Vec<_>>(), dlg.reach());
+                before.iter().zip(v).map(|(p, v)| Point { pos: p.pos, v }).collect()
+            }
+            EnvTool::SmoothUp => {
+                let (m, r) = dlg.smooth_up();
+                let m = m.max(2);
+                let pos: Vec<f64> = (0..m).map(|i| (last * i as f64 / (m - 1) as f64).round()).collect();
+                let v = average(&pos.iter().map(|&x| value(&before, x)).collect::<Vec<_>>(), r);
+                let mut p: Vec<Point> = pos.into_iter().zip(v).map(|(pos, v)| Point { pos, v }).collect();
+                p.dedup_by(|b, a| b.pos == a.pos);
+                p
+            }
+            EnvTool::Sequence => {
+                let (steps, depth) = dlg.sequence();
+                let (a, b) = (range.0.min(range.1) as f64, (range.1.max(range.0) as f64).min(last));
+                let (hi, lo) = (MID + depth / 2.0, MID - depth / 2.0);
+                let mut p: Vec<Point> = before.iter().copied().filter(|q| q.pos < a || q.pos > b).collect();
+                let len = b + 1.0 - a;
+                for i in 0..steps {
+                    let s0 = (a + len * i as f64 / steps as f64).round();
+                    let s1 = ((a + len * (i + 1) as f64 / steps as f64).round() - 1.0).max(s0);
+                    let v = if i % 2 == 0 { hi } else { lo };
+                    p.push(Point { pos: s0, v });
+                    if s1 > s0 {
+                        p.push(Point { pos: s1, v });
+                    }
+                }
+                // Past the range the envelope goes on where it was.
+                if b < last && !before.iter().any(|q| q.pos == b + 1.0) {
+                    p.push(Point { pos: b + 1.0, v: value(&before, b + 1.0) });
+                }
+                if a > 0.0 && !before.iter().any(|q| q.pos == a - 1.0) {
+                    p.push(Point { pos: a - 1.0, v: value(&before, a - 1.0) });
+                }
+                p.sort_by(|x, y| x.pos.total_cmp(&y.pos));
+                p.dedup_by(|b, a| b.pos == a.pos);
+                p
+            }
+        };
+        if after == before {
+            return false;
+        }
+        self.e[k] = after;
+        true
+    }
+}
+
 /// The envelope's height at `pos` (frames): straight lines between the points, flat beyond the ends.
 pub fn value(p: &[Point], pos: f64) -> f32 {
     let Some(first) = p.first() else { return MID };
@@ -336,6 +538,46 @@ mod tests {
         let p = e.points(SEP, 101);
         assert_eq!(p.len(), 5);
         assert!((p[1].v - 0.25).abs() < 1e-6, "added on the line");
+    }
+
+    #[test]
+    fn envelope_tools_with_a_dialog() {
+        let n = 1001;
+        let mut e = Envs::default();
+        e.move_point(VOLUME, n, 1, 500.0, 0.9);
+        // Scale levels: x50 % about mid height, then +10 % up.
+        let dlg = EnvDlg { tool: EnvTool::Scale, a: -0.5, b: 0.2 };
+        assert_eq!(dlg.texts(), ("50%".to_string(), "+10%".to_string()));
+        let mut s = e.clone();
+        assert!(s.apply_tool(VOLUME, n, &dlg, (0, n - 1)));
+        assert!((s.e[VOLUME][1].v - 0.8).abs() < 1e-6 && (s.e[VOLUME][0].v - 0.6).abs() < 1e-6);
+        assert!(!s.clone().apply_tool(VOLUME, n, &EnvDlg::new(EnvTool::Scale), (0, n - 1)), "the defaults change nothing");
+        // Smooth up: evenly spaced points on the old line, averaged.
+        let mut u = e.clone();
+        assert!(u.apply_tool(VOLUME, n, &EnvDlg { tool: EnvTool::SmoothUp, a: -1.0, b: -1.0 }, (0, n - 1)));
+        assert_eq!(u.e[VOLUME].len(), 8);
+        assert!(u.e[VOLUME].iter().all(|p| (p.v - value(&e.points(VOLUME, n), p.pos)).abs() < 1e-6), "no smoothing: on the line");
+        let mut v = e.clone();
+        assert!(v.apply_tool(VOLUME, n, &EnvDlg::new(EnvTool::SmoothUp), (0, n - 1)));
+        assert_eq!(v.e[VOLUME].len(), 45);
+        let peak = v.e[VOLUME].iter().map(|p| p.v).fold(0f32, f32::max);
+        assert!(peak < 0.9 && peak > 0.8, "the corner rounded off: {peak}");
+        // Decimate points: the evenly spaced points on straight lines go back to the corner.
+        assert!(u.apply_tool(VOLUME, n, &EnvDlg::new(EnvTool::Decimate), (0, n - 1)));
+        assert!(u.e[VOLUME].len() <= 4, "{:?}", u.e[VOLUME]);
+        // Filter: the corner averaged with its neighbours.
+        let mut f = e.clone();
+        assert!(f.apply_tool(VOLUME, n, &EnvDlg { tool: EnvTool::Filter, a: -1.0, b: 0.0 }, (0, n - 1)));
+        assert!((f.e[VOLUME][1].v - (0.5 + 0.9 + 0.5) / 3.0).abs() < 1e-6);
+        // Create sequence: 4 steps over frames 200 to 599, alternately up and down, the rest as it was.
+        let mut q = Envs::default();
+        let dlg = EnvDlg { tool: EnvTool::Sequence, a: -0.6, b: 1.0 };
+        assert_eq!(dlg.sequence(), (4, 1.0));
+        assert!(q.apply_tool(PAN, n, &dlg, (200, 599)));
+        let p = q.points(PAN, n);
+        let at = |x: f64| value(&p, x);
+        assert_eq!((at(200.0), at(299.0), at(300.0), at(399.0), at(400.0), at(599.0)), (1.0, 1.0, 0.0, 0.0, 1.0, 0.0));
+        assert_eq!((at(100.0), at(199.0), at(600.0), at(1000.0)), (0.5, 0.5, 0.5, 0.5));
     }
 
     #[test]
