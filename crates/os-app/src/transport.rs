@@ -149,6 +149,8 @@ pub struct Shared {
     block: AtomicU32,
     /// The output device the playback or live stream opened.
     opened: Mutex<Option<DeviceInfo>>,
+    /// The last playback's use of the workers: the next one, after a jump, starts from it (`Engine::set_load_gate`).
+    gate: Mutex<Option<os_engine::LoadGate>>,
     /// An instrument's editor is open (`Transport::listen`).
     listening: AtomicBool,
     /// Each running stream's engine voices (its feeder writes them after every fill; a stream that closed drops its
@@ -1650,12 +1652,20 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 closed = false;
                 held = None;
                 lost = None;
-                // The old playback is replaced, not faded; of what it leaves ringing only the hosted effects' tails
-                // go on, with "Reset plugins on transport" off (`reset_hosts`). A live stream left open would process
-                // the same plugin instances a second time (each stream would only hear every other chunk of a ringing
-                // sample): typed notes go into the playing engine instead.
-                session = None;
-                live = None;
+                // The old playback fades out from what it has queued and goes before the new one starts; of what it
+                // leaves ringing only the hosted effects' tails go on, with "Reset plugins on transport" off
+                // (`reset_hosts`). A live stream left open would process the same plugin instances a second time (each
+                // stream would only hear every other chunk of a ringing sample): typed notes go into the playing
+                // engine instead.
+                keep_gate(&shared, &session);
+                for s in [session.take(), live.take()].into_iter().flatten() {
+                    retire(s, &mut closing);
+                }
+                let fade = fade_time(&shared);
+                while closing.iter().any(|(_, since)| since.elapsed() < fade) {
+                    crate::device::pump();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 closing.clear();
                 // A jump while playing arrives as a Stop and this Play: the Stop's pending reset gives way to this one.
                 reset_hosts(&inst, starts.reset);
@@ -1737,6 +1747,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             Ok(Cmd::Stop) => {
                 // Everything fades out and goes; then the instruments and the effects are reset, so no tail rings on
                 // into the next Play (pause is where tails ring out, `Engine::pause`).
+                keep_gate(&shared, &session);
                 for s in [session.take(), live.take(), preview.take()].into_iter().flatten() {
                     retire(s, &mut closing);
                 }
@@ -2138,6 +2149,13 @@ impl Session {
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));
+        if song {
+            if let Some(gate) = shared.gate.lock().ok().and_then(|g| *g) {
+                if let Ok(mut e) = engine.lock() {
+                    e.set_load_gate(gate);
+                }
+            }
+        }
         let ctl = Arc::new(Ctl { paused: AtomicBool::new(at.paused), held: AtomicBool::new(false), report: AtomicBool::new(song) });
         if kind != Kind::Preview {
             publish(&shared, &info);
@@ -2151,6 +2169,10 @@ impl Session {
         let mut r = Renderer::new(queue, ctl.clone(), done.clone(), shared.clone(), rate);
         r.tap = kind != Kind::Preview;
         r.wake = feed.thread();
+        // Started in the middle of the song, it comes in from silence.
+        if song && at.tick > 0.0 && !at.paused {
+            r.gain = 0.0;
+        }
         let detach = Detach(r.detach.clone());
         device.add(Box::new(r))?;
         Ok(Session { _detach: detach, feed, kind, engine, done, ctl, generation, project: project.clone(), mode, rate, truncated: at.truncated })
@@ -2166,6 +2188,21 @@ impl Feeder {
         }
         Feeder { engine, queue, shared, ctl, meters: true, rate, busy: Duration::ZERO, rendered: 0, voices }
     }
+}
+
+/// Remembers how playback `session` uses the workers for the one that follows.
+fn keep_gate(shared: &Shared, session: &Option<Session>) {
+    let Some(s) = session else { return };
+    if let (Ok(e), Ok(mut g)) = (s.engine.lock(), shared.gate.lock()) {
+        *g = Some(e.load_gate());
+    }
+}
+
+/// How long a stream that fades out needs: the fade, in blocks of the device's.
+fn fade_time(shared: &Shared) -> Duration {
+    let rate = f64::from(shared.sample_rate.load(Ordering::Relaxed).max(1));
+    let block = f64::from(shared.block.load(Ordering::Relaxed)) / rate;
+    Duration::from_secs_f64(FADE_SECONDS + 2.0 * block).min(CLOSE_AFTER)
 }
 
 /// What one output stream does per block: copy the queued ticks, fade them for pause / stop, publish the position.
@@ -2548,6 +2585,24 @@ mod tests {
         assert!((frames as f64 / 48000.0 - secs).abs() < 0.01, "file holds {frames} frames");
         let samples = bytes[44..].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]).abs());
         assert!(samples.fold(0.0f32, f32::max) > 0.01, "the notes are heard");
+    }
+
+    /// Playback started in the middle of the song comes in from silence over the fade, then at full level.
+    #[test]
+    fn a_stream_that_starts_from_silence_fades_in() {
+        let (e, _) = looping_engine();
+        let (mut full, _, _) = renderer(e);
+        let (e, _) = looping_engine();
+        let (mut r, _, _) = renderer(e);
+        r.gain = 0.0;
+        let (mut a, mut b) = (vec![0.0f32; 512 * 2], vec![0.0f32; 512 * 2]);
+        full.render(&mut a);
+        r.render(&mut b);
+        assert!(b[0].abs() <= a[0].abs() * r.step * 2.0 + 1e-6, "from silence: {} against {}", b[0], a[0]);
+        full.render(&mut a);
+        r.render(&mut b);
+        assert_eq!(r.gain, 1.0, "over within two blocks");
+        assert_eq!(a, b, "then as it plays");
     }
 
     /// Pause fades out and then holds the engine exactly; resume continues from that frame (no restart, no jump).

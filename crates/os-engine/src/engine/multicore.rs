@@ -313,6 +313,15 @@ impl Multicore {
         self.gate = old.gate;
     }
 
+    /// The gate as it stands, for playback that restarts (`Engine::load_gate`).
+    pub fn gate(&self) -> LoadGate {
+        self.gate
+    }
+
+    pub fn set_gate(&mut self, gate: LoadGate) {
+        self.gate = gate;
+    }
+
     /// The workers are wanted now, as far as the load goes.
     fn wanted(&self) -> bool {
         self.offline || !crate::parallel::auto_on() || self.gate.is_open()
