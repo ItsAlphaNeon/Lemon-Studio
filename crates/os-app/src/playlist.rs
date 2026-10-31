@@ -347,6 +347,7 @@ pub enum Cmd {
     PerfClipProgress,
     PerfTrackProgress,
     PerfPlusScene,
+    PerfVelocitySubclips,
     /// A track's Performance settings ▸ entry (§4): track, which list (0 Press, 1 Motion, 2 Trigger sync, 3 Position
     /// sync, 4 Queue, 5 Tolerant), the choice.
     PerfSet(u16, u8, u8),
@@ -670,6 +671,8 @@ pub struct PlaylistState {
     pub perf_clip_progress: bool,
     pub perf_track_progress: bool,
     pub perf_plus_scene: bool,
+    /// A Performance mode MIDI note's velocity picks the slot's sub-clip (§3a).
+    pub perf_velocity_subclips: bool,
     /// Change icon... (Lemon Studio's design): the icon each channel or effect slot shows, for the session.
     pub icons: HashMap<IconOwner, crate::icons::Icon>,
 }
@@ -772,6 +775,7 @@ impl Default for PlaylistState {
             perf_clip_progress: true,
             perf_track_progress: false,
             perf_plus_scene: false,
+            perf_velocity_subclips: true,
             icons: HashMap::new(),
         }
     }
@@ -2539,6 +2543,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::new("Performance clip progress", Cmd::PerfClipProgress).mark(Mark::Check(s.playlist.perf_clip_progress)),
         PItem::new("Performance track progress", Cmd::PerfTrackProgress).mark(Mark::Check(s.playlist.perf_track_progress)),
         PItem::new("Ctrl+click triggers +Scene", Cmd::PerfPlusScene).mark(Mark::Check(s.playlist.perf_plus_scene)),
+        PItem::new("Velocity picks sub-clips", Cmd::PerfVelocitySubclips).mark(Mark::Check(s.playlist.perf_velocity_subclips)),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
@@ -4876,10 +4881,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             s.playlist.jump_quantize = q;
             None
         }
-        Cmd::PerfClipProgress | Cmd::PerfTrackProgress | Cmd::PerfPlusScene => {
+        Cmd::PerfClipProgress | Cmd::PerfTrackProgress | Cmd::PerfPlusScene | Cmd::PerfVelocitySubclips => {
             let (flag, name) = match cmd {
                 Cmd::PerfClipProgress => (&mut s.playlist.perf_clip_progress, "Performance clip progress"),
                 Cmd::PerfTrackProgress => (&mut s.playlist.perf_track_progress, "Performance track progress"),
+                Cmd::PerfVelocitySubclips => (&mut s.playlist.perf_velocity_subclips, "Velocity picks sub-clips"),
                 _ => (&mut s.playlist.perf_plus_scene, "Ctrl+click triggers +Scene"),
             };
             *flag = !*flag;
