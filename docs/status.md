@@ -81,13 +81,13 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   marker): a click on a clip before the Start marker launches it on its
   track, looping, from the next sync point (Shift queues, Alt at once); a right click or the track header stops it.
   Notes 0–119 on Settings ▸ MIDI's Performance mode MIDI channel launch the first 10 tracks' 12 columns (a key's
-  release ends Hold & stop; notes 120–124 scroll the grid, outlined in the zone). Ctrl+click on a zone clip launches
-  its column as a scene (every track with clips there; a Scene stops the others, a +Scene keeps them), as do notes
-  while 125 (Scene) or 126 (+Scene) is held. A playing clip's zone clip is outlined and fills as it plays, and the
+  release ends Hold & stop; notes 120–124 scroll the grid, outlined in the zone; while 127 is held, launches sync
+  to the global snap). Ctrl+click on a zone clip launches a scene (a Scene stops the other tracks, a +Scene keeps them):
+  its clip group's clips, else its column on its track group's tracks, else its whole column, as do notes while 125
+  (Scene) or 126 (+Scene) is held (columns). A playing clip's zone clip is outlined and fills as it plays, and the
   track header can show the pass's progress (the ▸ menu's Performance clip / track progress); the clock's bars are
   negative in the zone. Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant,
-  Position sync) are saved as FL saves them. Not yet: the typing keyboard, note 127 (Global Snap), clip and track
-  group scenes, recording a performance
+  Position sync) are saved as FL saves them. Not yet: the typing keyboard, sub-clips, recording a performance
 
 ## ✅ Mixing and routing
 
