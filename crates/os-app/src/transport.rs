@@ -85,6 +85,8 @@ pub struct Shared {
     song: AtomicBool,
     /// The song's loop points, start << 32 | end in ticks (0 = the whole song): the playlist's time selection.
     loop_range: AtomicU64,
+    /// A quantized song jump for the playing song: unit << 32 | target in ticks (0 = none; `jump_on`).
+    jump: AtomicU64,
     /// Paused by a Marker pause: its tick + 1 (0 = not); after Resume, the same for the app to take as the playback's
     /// start (spec: audio/transport.md "Time markers in SONG mode").
     marker_hold: AtomicU64,
@@ -127,6 +129,8 @@ pub struct Shared {
     /// Each running stream's engine voices (its feeder writes them after every fill; a stream that closed drops its
     /// counter). Spec: audio/voices.md §5.
     engine_voices: Mutex<Vec<Weak<AtomicU32>>>,
+    /// Disk recording into mixer tracks: where the playback's armed tracks hand their takes (`Transport::record_tracks`).
+    record: Mutex<Option<Arc<dyn os_engine::RecordTap>>>,
 }
 
 /// The frames queued when the device asked for a block, since they were last taken (`AheadStats::take`): what the
@@ -412,6 +416,8 @@ enum Cmd {
     AsioPanel,
     /// The FL Studio factory content folder changed (`Transport::set_factory`).
     Factory(Option<PathBuf>),
+    /// Disk recording started or ended (`Transport::record_tracks`): the playback's engine takes it at once.
+    Record,
     /// Tests: the open device fails as if it went away.
     #[cfg(test)]
     FailDevice,
@@ -596,6 +602,7 @@ impl Transport {
         }
         let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.shared.marker_hold.store(0, Ordering::Relaxed);
+        self.shared.jump.store(0, Ordering::Relaxed);
         self.shared.song.store(matches!(mode, PlayMode::Song), Ordering::Relaxed);
         self.shared.rewind(start_tick);
         self.shared.state.store(PLAYING, Ordering::Release);
@@ -610,7 +617,35 @@ impl Transport {
         self.shared.loop_range.store(packed, Ordering::Relaxed);
     }
 
+    /// The playing song jumps to tick `to` when it reaches the next multiple of `unit` ticks (the playlist's Quantize
+    /// song jumps); a later call replaces one still waiting.
+    pub fn jump_on(&self, unit: u32, to: u32) {
+        self.shared.jump.store(u64::from(unit.max(1)) << 32 | u64::from(to), Ordering::Relaxed);
+    }
+
     /// Replace the playing project, continuing from the current position.
+    /// Disk recording into mixer tracks (spec: audio/track-io.md §2.5): the playback's armed tracks hand their takes to
+    /// `tap` from now on (and any playback started later), or no longer (`None`).
+    pub fn record_tracks(&self, tap: Option<Arc<dyn os_engine::RecordTap>>) {
+        if let Ok(mut slot) = self.shared.record.lock() {
+            *slot = tap;
+        }
+        let _ = self.tx.send(Cmd::Record);
+    }
+
+    /// Roughly how much later than the song it went with a device input reaches the engine, in frames at the device's
+    /// rate, for a tick of `tick` frames: the device's two latencies (an ASIO driver's; 0 for others), the time the
+    /// engine reads behind the newest input (two blocks, the longest margin and a tick), and the render-ahead (a block
+    /// and the margin) (spec: audio/track-io.md §2.2, §2.5).
+    pub fn input_delay(&self, tick: u64) -> u64 {
+        let info = self.opened();
+        let rate = info.as_ref().map_or(48000, |d| d.rate);
+        let block = u64::from(self.block().max(64));
+        let margin = (f64::from(rate) * MARGIN_MAX) as u64;
+        let device = info.filter(|d| d.host == crate::device::ASIO).map_or(0, |d| u64::from(d.latency.unwrap_or(0)) + u64::from(d.input_latency.unwrap_or(0)));
+        device + 2 * block + margin + tick + block + margin
+    }
+
     pub fn update(&self, project: &Project) {
         // Edits can come faster than engines are built: keep only the newest.
         if let Ok(mut slot) = self.latest.lock() {
@@ -701,6 +736,7 @@ impl Transport {
     pub fn stop(&self) {
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.shared.marker_hold.store(0, Ordering::Relaxed);
+        self.shared.jump.store(0, Ordering::Relaxed);
         self.shared.marker_resumed.store(0, Ordering::Relaxed);
         self.shared.state.store(STOPPED, Ordering::Release);
         self.shared.rewind(0.0);
@@ -1011,6 +1047,10 @@ impl Feeder {
         if self.ctl.report.load(Ordering::Relaxed) {
             let r = self.shared.loop_range.load(Ordering::Relaxed);
             e.set_loop_range((r != 0).then(|| (r >> 32, r & 0xffff_ffff)));
+            match self.shared.jump.swap(0, Ordering::Relaxed) {
+                0 => {}
+                j => e.jump_on(j >> 32, j & 0xffff_ffff),
+            }
         }
         // A paused (or stopped) stream renders no more: its fade plays from what is queued, and the engine starts no
         // note that another stream (live notes, an open editor) would then hear ringing at the instruments.
@@ -1147,7 +1187,7 @@ impl Drop for FeedThread {
 
 /// The feeder renders for the device: it runs above the UI.
 #[cfg(windows)]
-fn raise_priority() {
+pub(crate) fn raise_priority() {
     use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
     unsafe {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -1156,7 +1196,7 @@ fn raise_priority() {
 
 /// macOS: the user-interactive class keeps the feeder on the performance cores.
 #[cfg(target_os = "macos")]
-fn raise_priority() {
+pub(crate) fn raise_priority() {
     // SAFETY: changes the calling thread's own QoS class.
     unsafe {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
@@ -1164,7 +1204,7 @@ fn raise_priority() {
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn raise_priority() {}
+pub(crate) fn raise_priority() {}
 
 /// The sample library for engines whose sampler channels Lemon Sampler instances play. They stretch for themselves
 /// (spec: audio/time-stretch.md), and of a sample one of them plays the engine keeps only the length and rate Lemon
@@ -1347,6 +1387,14 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                         h.0 = project.clone();
                     }
                     live_project = Some(project);
+                }
+            }
+            Ok(Cmd::Record) => {
+                let tap = shared.record.lock().ok().and_then(|t| t.clone());
+                if let Some(s) = session.as_ref().filter(|s| s.kind == Kind::Song) {
+                    if let Ok(mut e) = s.engine.lock() {
+                        e.set_record_tap(tap);
+                    }
                 }
             }
             Ok(Cmd::Instruments) => {
@@ -1946,6 +1994,7 @@ impl Session {
         if song {
             e.set_run_on(crate::record::run_on_flag());
             e.set_nudge(crate::tapper::nudge_flag());
+            e.set_record_tap(shared.record.lock().ok().and_then(|t| t.clone()));
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));

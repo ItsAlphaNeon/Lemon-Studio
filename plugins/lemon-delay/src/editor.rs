@@ -338,7 +338,7 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
-                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
+                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(id.clone()));
                 // Automation belongs to the host: offered when Lemon Studio hosts the editor (host link).
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
@@ -699,7 +699,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
             }
         }
 
@@ -1022,7 +1022,7 @@ mod tests {
         let mut l = logic();
         let m = l.menu(&MenuReq::Param("bits".into()));
         assert_eq!(m.find("Reset"), Some(Cmd::Reset("bits".into())));
-        assert_eq!(m.find("Type in value..."), Some(Cmd::TypeIn("bits".into())));
+        assert_eq!(m.find("Enter value..."), Some(Cmd::TypeIn("bits".into())));
         l.vals.edit_plain("bits", 100.0);
         l.pick(&MenuReq::Param("bits".into()), Cmd::Reset("bits".into()), 0.0, 0.0);
         assert_eq!(l.vals.plain("bits"), 6000.0);

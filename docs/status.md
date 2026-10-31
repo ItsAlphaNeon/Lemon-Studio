@@ -11,7 +11,18 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 - Channel rack with steps and mini piano rolls
 - Swing and per-channel loops
-- ADD ▸ Layer: a layer channel whose children are the channels selected in the rack
+- ADD ▸ Layer: a layer channel whose children are the channels selected in the rack; the rack's Create layer with
+  selected channels does the same
+- The rack's menu sets the selected channels' swing mix (0 to 100% or a typed value), turns their Truncate swing
+  notes on or off (a swung note keeps its end, so it gets shorter) and gives them one colour (Color selected ▸
+  All...); a channel's Cut itself gives it a cut group of its own, as the original does. One undo step each
+- The mixer box's and the mute LED's right-click menus type in, copy, paste and set their value (a mixer track, on or
+  off); Burn selected loops to pattern; Channel button width ▸ Custom (a typed percent); the options Auto switch
+  display filter, Focus selected channel on playback, Mute removed steps (a removed step keeps its note, muted), Show
+  complete piano roll preview, Show a mute button on the piano roll preview and the loop button's Always show advanced
+  controls
+- Advanced looping (the loop button's third loop type): each row's loop box takes a loop point, Step, Beat or Bar,
+  and the row loops at the end of its last used step rounded up to it
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)
 - Deleting channels or a pattern asks first, unless the box's Remember my choice was ticked or the question
   is turned off in General settings ▸ Hints and warnings ▸ Manage messages
@@ -42,10 +53,16 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Time markers with FL's actions (right-click a marker): Start, Loop, Marker loop, Marker skip and Marker pause
   play in SONG mode; exports start at the Start marker and jump at skips. Move content left / right, Place loop
   (Shift+T), Add auto, Add one every, Add jump to next bar, time signature markers, and Delete or Change to marker
-  loop in the time selection. A click on a marker moves the song position there. Not yet: Add two..., key
-  markers, quantized song jumps, the Start / Stop recording markers' punch
+  loop in the time selection, Add two... (markers at the time selection's ends) and Add key marker (root and
+  scale, saved as FL saves them). A click on a marker moves the song position there. A Stop recording marker ends
+  recording in SONG mode, a Start recording marker after it resumes it. The playlist's snap has Events and Markers
+  (clip edges or markers within 7 px)
+- Quantize song jumps (the playlist's ▸ menu): while the song plays, a click in the ruler waits for the next beat,
+  bar, or 2, 4 or 8 bars, then jumps there exactly on it
 - Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
 - Track height, zoom and scroll saved with the project
+- The clip source picker's item menu: Cut itself (the rack's, one undo step) and Edit sample..., which opens an audio
+  clip's sample in Tesla on the master track
 - Project picker (VIEW, Ctrl+F8 or the toolbar's project button): a menu of the patterns and channels; picking a
   pattern makes it current, picking a channel opens its window
 - Song position slider in the toolbar: drag, click to step, right-click to jump, wheel; it follows playback
@@ -62,6 +79,12 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - CLAP and VST3 effects get a sidechain input too: pick it in the slot menu's Sidechain input submenu, which lists
   the tracks routed into the track. The choice is saved where FL saves it, and projects saved by FL play their
   plugins' sidechain and input choices as FL plays them
+- The mixer track menu's Insert multiple... (type how many tracks to insert), Gradient color... (over the selected
+  tracks) and File ▸ Render to wave file... (the Export form for the selected tracks, writing each track's output to
+  its own file)
+- The mixer track menu's Track routing ▸ routes or sidechains the other selected tracks into the track clicked (only,
+  or besides their other routes), and an effect slot can be given a colour (Change color..., Random color), shown as a
+  bar at the slot's edge for the session
 
 ## ✅ Plugin hosting
 
@@ -71,7 +94,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The parameter menu (a parameter in the browser after "Browse parameters", TOOLS ▸ Last tweaked): create or edit
   the parameter's automation clip, link a controller, copy, paste, type in or set a value (a submenu of its steps, or
   its default and minimum to maximum), remove an initial value read from a file
-- Not yet in the parameter menu: Edit events, and Init song with this position on a plugin parameter
+- Not yet in the parameter menu: Init song with this position on a plugin parameter
 - VST2 shells (one file offering several plugins); a VST2 plugin's state is saved in the layout FL Studio's projects use
 - On Windows, a plugin that crashes is stopped (its slot passes the sound through) instead of closing
   Lemon Studio
@@ -88,7 +111,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   are saved back
 - Automation of a mixer track or slot behind late audio waits for it, as in FL Studio
 - A sidechain input waits for the slot it feeds, so it lines up with the audio there
-- Not yet: editing the latency settings
+- The latency settings are edited from the input clock, the track latency combo and the strip's latency clock (right
+  click): Reset, or a value typed in ms, samples or beats; the clocks turn orange when set
 
 ## ✅ Plugin management
 
@@ -98,9 +122,24 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - A background scan at startup; each file is tried in a separate scanner process, so a broken plugin
   cannot take Lemon Studio down
 - Favourites and hidden plugins
+- The browser's Favorites: right-click a file or a plugin ▸ Favorite; favorite rows show a star, and the Favorites
+  tab lists favorite plugins, then files. A plugin's favorite is its plugin-manager star, also toggled by "Add to
+  plugin database (flag as favorite)" in plugin windows and mixer slots
+- The browser's Plugin database: plugins by category, and by format under Installed; ADD ▸ Browse all installed
+  plugins / Browse presets and the mixer's Plugin database entry open it
+- Browser find (Ctrl+F): search finds files anywhere below the dropped folders and the data folder through a
+  background index; Expand folders, the indexing options and Configure extra folders work, the options are kept
+  between runs, and a × clears the search
 - One menu entry per plugin installed in several formats (VST3, CLAP, VST2: your preferred format wins)
 - Presets in the plugin window's title bar: your own presets, then factory presets (compiled in for Lemon Studio's
   own plugins), stepped with the arrows or the wheel; Save preset as..., Rename, Delete and Browse presets
+- The mixer's slot menu lists the effect's presets and has Browse presets and Save preset as..., as its window
+  menu does
+- Spare state in plugin windows and mixer slots: Store in spare state, then Flip with spare state swaps the two to
+  compare them (one undo step; the spare state is kept while the plugin is open, not in the project). Display preset
+  name in preset selector hides or shows the preset's name in the window
+- The plugin window's menu acts on its own channel (Piano roll, Delete..., Rename, color and icon..., Change color...,
+  Random color) or effect slot (Replace ▸, Delete..., Rename, color and icon...)
 - Import of `.ospreset`, `.vstpreset` and VST2 `.fxp` / `.fxb` files (a bank goes into a folder of its own); a preset
   file dropped onto a plugin window, rack row or mixer slot loads there, and anywhere else adds its plugin
 
@@ -134,7 +173,10 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The sampler's closing fades
 - A fast resampler while playing, and the exact one for export
 - Idle plugins are skipped; Stop ends every voice, also in hosted plugins
-- Not yet: multi-core mixing (there is one audio thread)
+- Multi-core mixing: the mixer's tracks, the generator channels and chunks of the sampler's voices render on a
+  pool of worker threads (the physical cores less one), along the routing's order, bit for bit as on one thread.
+  Audio ▸ CPU's two switches, Multithreaded mixer processing and Multithreaded generator processing, turn each
+  part on or off; dense projects render about 4.5 times faster on 8 cores
 
 **CPU panel.** Shows the audio load, the voices playing (the engine's and every plugin's), memory and
 dropouts. Its right-click menu has refresh rates, a frames-per-second view and handle / thread / font
@@ -155,7 +197,18 @@ until let go (the tempo stays). Not yet: Sync, Mute and now (drawn greyed out), 
 
 **Closing windows.** VIEW > Close all windows (F12), Close all unfocused windows (Ctrl+F12: all but the one
 in front) and Close all plugin windows (Alt+F12: channel settings and plugin editors); the browser stays.
-Not yet: Align all channel editors, Arrange windows.
+Not yet: Align all channel editors.
+
+**Arranging windows.** VIEW > Arrange windows: Realign (Shift+Ctrl+H) and Desktop (default) put the Playlist, Mixer,
+Piano roll and Channel rack back as a new install has them; Desktop (alternate) floats the Playlist over the top of
+the workspace with the Piano roll and Mixer side by side under it; Save custom layout keeps the current layout and
+Custom brings it back. The Tablet layouts are greyed (they need the toolbar at the bottom). VIEW > Background > Set
+image wallpaper... makes a PNG or JPEG picture the theme's workspace wallpaper; the HTML document and the background
+colour are greyed. VIEW > Align all channel editors (Shift+F12) puts the channel window back right of the Channel
+rack and cascades the docked plugin windows of rack channels from there, each title showing. HELP > Help index and
+What's new open the project's README and its merged pull requests in the web browser. TOOLS > Save MIDI clipboard to
+browser writes the piano roll's copied notes to a numbered MIDI file in the user folder's Clipboard files, which the
+browser then shows.
 
 **Window positions.** Where the windows were when Lemon Studio closed comes back at the next start: the main
 window (its place and size, and whether it was maximized; brought back onto a screen if its screen is gone) and the
@@ -167,20 +220,36 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Automation clips for channel, mixer and plugin parameters
 - A clip drives every target it is linked to, including mixer slot switches and mix levels, track EQ, send
   levels, stereo separation and the channel's level adjustments
+- A pattern's control points drive mixer volumes, pans, separation, equalisers, slot switches and mix levels, the
+  tempo and plugin parameters, besides the channel's own settings (sends and the main pitch not yet)
 - All thirteen curve shapes are walked exactly; values are taken one tick ahead and passed on only when
   they change
 - A clip's range (its channel's MIN and MAX knobs, minimum above maximum turning the curve upside down) and its
   LFO (on / off, multiply or add, amount, speed, tension, skew, pulse width, and its own envelope) shape what it
   hands on, in the original's arithmetic; the clip's channel window sets them, each change an undo step, and
   projects keep every LFO field
-- Not yet: recording of movements
+- The event editor (Edit events on a control's menu: channel volume, pan and pitch, mixer controls, the tempo, plugin
+  parameters) shows the control's events in the selected pattern as its level over time, in the setting's own unit: left
+  drag draws freehand on the global snap, right drag a straight line, Erase and Select tools, the wheel scrolls and
+  Ctrl+wheel zooms; its Edit menu has Cut, Copy, Paste, Select all, Delete, Insert current controller value and Turn
+  into automation clip, which moves the events into a new clip channel linked to the control, as the original does
+  (the control's earlier value until the first event, then the events, a recorded ramp as one straight segment, ending
+  on the last event). Each edit is an undo step
+- A knob's menu (channel volume and pan, mixer and main knobs): Edit automation clip... shows the clip that drives it,
+  as on a plugin parameter, and Set... puts it at its default, the minimum, 25, 50 or 75% or the maximum, each listed
+  with the knob's value there (one undo step)
+- Not yet in the event editor: the Paint, Interpolate and Zoom tools, Scale levels and LFO, inserting and deleting time,
+  a second window
 
 ## 🚧 Project files
 
 - Opens and saves `.flp` projects saved by FL Studio 24.2 and later, 25 and 26 included
+- Projects saved by FL Studio 10 to 24.1 open too: they are converted to the current layout as they open (channel
+  blocks, step sequencer dots as notes, playlist clip and track records, mixer places, send levels and slot
+  markers, a 105-track mixer grown to 127) and are saved in that layout, as the original does with an older file.
+  Fruity effects that an old project hosts through the plugin wrapper stay wrapped, and a 3x Osc saved before FL
+  Studio 21 opens with its envelope and filter settings at their defaults
 - Anything in a file that Lemon Studio does not understand yet is kept and written back unchanged
-- A project in the layout used before version 24.2 is refused with a dialog that explains how to re-save
-  it; support for older versions is on the roadmap
 - An opened project's samples load behind a progress panel, one file at a time or on up to 4 threads
   (General settings ▸ Advanced ▸ Threaded project sample loading)
 - A save that writes a file over General settings ▸ Hints and warnings ▸ Project data size warning (100 MB
@@ -206,6 +275,11 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   and CLAP bundles for other hosts
 - Citrus, a six-operator synthesizer (a recreation of Sytrus) with its editor: it plays every Sytrus channel of a
   project and Sytrus patches, keeping their state byte for byte; also a VST3 and CLAP plugin
+- Lemon Slicer (Fruity Slicer) as a VST3 and CLAP plugin with a Pith editor: it loads a loop and slices it by the
+  file's markers, by beats or by transients, plays slice n on C5 + n (pitch, attack, decay, declick, reverse, play to
+  end), and dumps the slices to the piano roll as notes. A project's Fruity Slicer channels play and open in it and
+  are saved back byte for byte; a loop newly loaded and sliced in it opens in the original too. The time stretch and
+  the original's other dump modes aren't played or offered yet, and Slicex channels aren't supported
 - Lemon Limiter (Fruity Limiter: limiter, compressor and noise gate), Lemon Reverb (Fruity Reeverb 2) and Lemon
   Delay (Fruity Delay 3), also VST3 and CLAP plugins. A project's Fruity Reeverb 2, Fruity Delay 3 and Fruity Limiter
   slots play through the same sound (the Limiter's compressor, gate, look-ahead and sidechain included)
@@ -228,6 +302,31 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   pi, where the original's is a hair off: the flanger still matches FL Studio 2026's exports sample for sample in the
   tests (36 cases), the phaser in 11 of 35 and the rest at least 86 dB below the test signal; the phaser's LFO starts
   as after 512 idle frames, one of the two starts (512 or 1024) FL's exports make
+- Vocoder: Lemon Vocoder (VST3 and CLAP, Pith editor) is a band vocoder with a sidechain input: the voice on the
+  track and the synth from another track, or the other way round. A project's Vocodex slots open as it and save back
+  unchanged. It plays the wet level, the pass-throughs, added noise, hold, attack and release (peak or RMS), band
+  count, width and order; the original's built-in synth carrier, unison, pitch shift, contour and the band curves
+  (other than where the bands start and end) are kept but not played. Its sound is Lemon Studio's own, not compared
+  with FL Studio's exports. Changing its input selectors reroutes the track only after the project is saved and
+  opened again
+- Peak Controller: a project's Fruity Peak Controller slots open as Lemon Peak Controller (VST3 and CLAP, Pith editor)
+  and save back unchanged; their controller links (kept byte for byte, formulas included) drive mixer volumes, pans,
+  sends and plugin parameters one tick late, as in the original, within the fader's resolution of FL Studio 2026's
+  exports (93 cases). The link's smoothing is approximated; links can't be made or edited in the app yet, and the
+  links of rack controllers (Envelope and Keyboard Controllers, Control Surface) are kept but not played
+- Drum sampler: a project's FPC channels open as Lemon Drum Sampler (VST3 and CLAP, Pith editor with the 4×4 pad
+  grid, banks A and B, the chosen pad's and layer's key, cut groups, volume, pan and tune) with their pads and
+  samples, and save back unchanged. It is in the generator list too. Pads play their layers by velocity through
+  Lemon Sampler's voices with the original's level, pan and tune laws, cut groups, mute, solo and layers taking
+  turns, measured from FL Studio 2026's renders; a sample is loaded with LOAD or dropped on a pad. The pads'
+  envelopes and the multi-output offsets are kept but not played, and the original's FPC presets aren't listed
+- Formula Controller: a project's Fruity Formula Controller slots open as Lemon Formula Controller (VST3 and CLAP,
+  Pith editor with a formula field and its compile status) and save back with their knobs, formula and comments; the
+  formula is worked out once per tick and its controller links drive their targets, matching FL Studio 2026's
+  exports within the fader's resolution (158 cases: every function, the original's precedence and rounding rules). A
+  formula that doesn't compile leaves its targets alone, as in the original. Rand and SeededRand use our own
+  generators, Time counts from the program's start, Date is the UTC day and the mouse reads 0; the comments are kept
+  but not shown
 - The Stereo Shaper's difference output plays in the mixer (added to the track it names, from the first tick, without
   delay compensation); Lemon Stereo Shaper as a plugin keeps the setting but has no output for it
 - Lemon Parametric EQ plays FL's Parametric EQ 2 in every quality mode, in a project's mixer slots and as a plugin:
@@ -259,11 +358,18 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - A project's Edison slots open as Tesla with their audio, and are saved back as Edison so the file still opens in
   FL Studio
 - The toolbar's audio editor button and the mixer's Open audio editor show Tesla on the track; Open audio editor and
-  record sets one up as an audio logger (records while the song plays, 5 minutes); One-click audio recording and the
-  Record button's question can record an input into the master track's Tesla; Remove all audio editor instances
-  (mixer options, TOOLS) clears them after asking
-- Not yet: envelopes, the spectral and clean-up tools, time stretch and pitch shift in Tesla, slicing; TOOLS ▸ Audio
-  logger and Dump to audio editor; a rolling recording (Tesla stops at its time limit, Edison keeps the last minutes)
+  record sets one up as an audio logger (records while the song plays, keeping the last 5 minutes); One-click audio
+  recording and the Record button's question can record an input into the master track's Tesla; Remove all audio
+  editor instances (mixer options, TOOLS) clears them after asking
+- At its time limit Tesla keeps recording and holds the last minutes (a rolling log, as Edison)
+- Tesla's Time stretch / pitch shift... (Alt+T, the tool grid's stretch button) changes the selection's pitch by up
+  to 24 semitones either way and its length from a quarter to four times, with a preview, on Lemon Studio's
+  stretcher, with formant preservation (the formants kept, or moved by their own knob); the drum(loop) stretch comes
+  later
+- TOOLS ▸ Audio logger: on by default, it keeps the last 1 to 10 minutes of what the audio device plays (Settings ▸;
+  the header shows the memory used); Dump to audio editor puts them, silence at either end left out, into a WAV in
+  the Recorded folder and into the master track's Tesla
+- Not yet: envelopes, the spectral and clean-up tools, time stretch and pitch shift in Tesla, slicing
 
 ## ✅ Exporting audio
 
@@ -305,7 +411,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   off it punches in and out (plays it once and stops back at its start)
 - Score logger (TOOLS): every note played is kept for 30 minutes; Dump score log writes the last 2 to 30 minutes into
   the pattern at their real timing (Merge / Replace when it has notes); Clear log
-- Automation recording: channel volume and pan knob moves while recording become the pattern's control points
+- Automation recording: moves of a channel's volume and pan, a mixer track's fader, pan, stereo separation, equaliser
+  and slot mix knobs, the tempo and any plugin parameter (in its own window) become the current pattern's control
+  points while recording, each in its setting's own unit, as in the original
 - Record options (toolbar, OPTIONS, Ctrl+I / Ctrl+P / Ctrl+B): Start on input (Play waits for the first note, which
   is recorded at the start), Recording precount (1 or 2 bars of metronome count-in, "REC IN n" on the clock; also
   set from the metronome's right-click menu) and Blend (a take keeps the notes it overlaps)
@@ -317,7 +425,13 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   through Into the audio editor, the take goes into Tesla on the master track instead (see Audio editing)
 - TOOLS ▸ Cancel recording: while recording, playback stops and the takes of that playback are undone (Redo brings
   them back)
-- Not yet: audio recording into mixer tracks, input monitoring
+- Recording into mixer tracks: arm tracks with their disk-record button or the track menu's Arm selected track(s)
+  (arming turns Audio on in Record's filter); with Record armed, every armed track records while the song plays,
+  taken at its record source (the input alone, with the mixer input, after the effects, after the EQ, after the
+  fader). On stop each take is a WAV in the `Recorded` folder named after the track and, with the mixer menu's Disk
+  recording ▸ Auto-create audio clips on, an audio clip channel on that track with its clip where the take started,
+  the input's delay taken out (one undo step)
+- Input monitoring: a track's input plays through it while armed, or always, per its Monitor external input setting
 
 ## 🚧 Undo
 
@@ -325,9 +439,10 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Covers the piano roll, the playlist, step-sequencer edits and knob turns (channel, main, mixer panning and
   stereo separation, effect mix, send levels, swing), sample loads, the project's initial values, PATTERNS ▸ Split
   by channel and ADD's audio and automation clip channels
-- The mixer: faders (a drag is one step, a typed value too), mute, polarity and swap buttons, the equaliser graph,
-  routing, colours, names, effect slots (adding, removing, moving, their lights) and adding, moving, deleting and
-  trimming tracks
+- The mixer: faders (a drag is one step, a typed value too), polarity and swap buttons, the equaliser graph,
+  routing, colours, names, resets, effect slots (adding, removing, moving, naming, their lights, sidechain inputs),
+  audio inputs and outputs, record source, monitoring, latency settings, and adding, moving, deleting and trimming
+  tracks. A track's mute and solo make no step, as in FL Studio
 - The channel rack: generators added, at the bottom or inserted higher up (the plugin picker, F8, ADD, Insert, a
   browser drop; undone, the instance is kept and comes back with a redo), Replace (with the old instrument's state),
   colours, names, cloning, moving, sorting, deleting (with notes, clips and the instruments'
@@ -339,13 +454,19 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Plugin parameters Lemon Studio sets ("Plugin parameter": Type in value, Set..., Paste value), and those changed in a
   plugin's own window: one step per gesture (mouse down to up on its knob), or per run of values from a plugin that
   sends them without one; mixer faders and parameters follow "Undo knob tweaks"
+- Presets loaded into a plugin ("Plugin preset": its window's Presets box, ◀ ▶ and window menu, Import preset..., a
+  preset file dropped on the window, its channel or its slot), one step each, by the owner's id so it follows moves:
+  the undo brings back the plugin's state, the preset its window showed and the name the load gave its channel or
+  slot; the redo the state as the undo found it. A preset that goes into an instance made for it is part of that
+  step. Lemon Studio's choice; the original's behaviour was not looked at
 - Changes made through the control plane (see Scripting and assistants), named after the client that made them
 - The browser's Current project ▸ History lists the steps from "Last reset"; undone steps are grey, and a click
   on one goes back or forward to it
 - General settings ▸ Undo history: Maximum undo levels, Undo knob tweaks, Alternate undo mode, and showing the
   history in the browser, newest first if wanted
 - Not yet: "Put undone recordings in the recycle bin", which waits for recording. A plugin's own undo inside its
-  window is the plugin's, apart from the app's history
+  window is the plugin's, apart from the app's history; a state a plugin changes by itself without parameter edits
+  (its own preset browser) makes no step, as the host is not told
 
 ## 🚧 Scripting and assistants
 

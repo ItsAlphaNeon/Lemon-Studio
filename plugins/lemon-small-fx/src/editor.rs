@@ -105,6 +105,11 @@ impl Editor for FxEditor {
     }
 }
 
+/// A text field's reader: its text and status from the saved state.
+type TextShow = fn(&[u8]) -> (String, String);
+/// A text field's writer: the saved state with a typed text.
+type TextEdit = fn(&[u8], &str) -> Vec<u8>;
+
 // ---------------------------------------------------------------------------------------------------------------
 // Laws (spec §4, as Lemon Delay's)
 
@@ -201,7 +206,26 @@ impl Logic {
     }
 
     fn hint_for(&self, t: Option<&Target>) -> String {
-        t.map(|t| view::hint(self.spec, t, &self.vals)).unwrap_or_default()
+        match t {
+            Some(Target::Text(id)) => match self.text_control(id) {
+                Some((show, _)) => {
+                    let mut name = id.clone();
+                    name[..1].make_ascii_uppercase();
+                    format!("{name}: {}", show(&self.params.raw_copy()).1)
+                }
+                None => String::new(),
+            },
+            Some(t) => view::hint(self.spec, t, &self.vals),
+            None => String::new(),
+        }
+    }
+
+    /// A text field's readers ([`crate::Control::Text`]).
+    fn text_control(&self, id: &str) -> Option<(TextShow, TextEdit)> {
+        self.spec.controls.iter().find_map(|c| match *c {
+            crate::Control::Text { id: i, show, edit, .. } if i == id => Some((show, edit)),
+            _ => None,
+        })
     }
 
     fn range(&self, id: &str) -> (i32, i32) {
@@ -243,6 +267,9 @@ impl Logic {
         match (&t, btn) {
             (Target::Logo, Btn::Left | Btn::Right) => acts.push(Act::Menu(MenuReq::About, x, y)),
             (Target::Logo, _) => {}
+            // A text field types its text in (it has no value to reset or automate).
+            (Target::Text(_), Btn::Left | Btn::Right) => acts.push(Act::TypeIn(id, x, y)),
+            (Target::Text(_), _) => {}
             (_, Btn::Left) if m.alt => self.reset(&id),
             (_, Btn::Middle) => self.reset(&id),
             (_, Btn::Right) => acts.push(Act::Menu(MenuReq::Param(id), x, y)),
@@ -295,7 +322,7 @@ impl Logic {
 
     /// Wheel: one step per notch (1/128 of the range for the settings with many steps).
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
-        let Some((t, _)) = self.hit(x, y).filter(|(t, _)| *t != Target::Logo) else { return vec![] };
+        let Some((t, _)) = self.hit(x, y).filter(|(t, _)| !matches!(t, Target::Logo | Target::Text(_))) else { return vec![] };
         let id = t.id().to_string();
         let (lo, hi) = self.range(&id);
         let steps = (hi - lo) as f32;
@@ -319,7 +346,7 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
-                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
+                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(id.clone()));
                 // Automation belongs to the host: offered when Lemon Studio hosts the editor (host link).
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
@@ -356,11 +383,21 @@ impl Logic {
 
     /// The value text a type-in box starts with.
     pub fn value_text(&self, id: &str) -> String {
-        self.vals.text(id)
+        match self.text_control(id) {
+            Some((show, _)) => show(&self.params.raw_copy()).0,
+            None => self.vals.text(id),
+        }
     }
 
-    /// Applies a typed value.
+    /// Applies a typed value (a text field's text goes into the saved state).
     pub fn typed(&mut self, id: &str, text: &str) {
+        if let Some((_, edit)) = self.text_control(id) {
+            let raw = edit(&self.params.raw_copy(), text);
+            self.params.set_raw(raw);
+            let t = Target::Text(id.into());
+            self.hint = self.hint_for(Some(&t));
+            return;
+        }
         if let Some(n) = self.vals.parse(id, text) {
             self.edit(id, n);
         }
@@ -369,6 +406,9 @@ impl Logic {
     /// Paints the editor; `hint` is drawn when the host does not show it.
     pub fn paint(&mut self, c: &mut os_ui::Canvas, palette: &os_theme::Palette) {
         let hint = if self.hosted { String::new() } else { self.hint.clone() };
+        if self.spec.controls.iter().any(|c| matches!(c, crate::Control::Text { .. })) {
+            self.view.raw = self.params.raw_copy();
+        }
         self.hits = view::paint(self.spec, c, palette, &self.vals, &self.view, &hint);
     }
 }
@@ -687,7 +727,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
             }
         }
 
@@ -895,7 +935,7 @@ mod gui {
 mod tests {
     use super::*;
     use crate::tests::SPECS;
-    use crate::{balance, chorus, fast_distortion, filter, flanger, phaser, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor, Control};
+    use crate::{balance, chorus, fast_distortion, filter, flanger, formula_controller, peak_controller, phaser, soft_clipper, stereo_enhancer, stereo_shaper, transient_processor, Control};
 
     fn logic(spec: &'static Spec) -> Logic {
         let mut l = Logic::new(spec, Arc::new(FxParams::new(spec)), Arc::new(Shared::default()), None);
@@ -1057,7 +1097,7 @@ mod tests {
         let mut l = logic(soft_clipper::SPEC);
         let m = l.menu(&MenuReq::Param("post".into()));
         assert_eq!(m.find("Reset"), Some(Cmd::Reset("post".into())));
-        assert_eq!(m.find("Type in value..."), Some(Cmd::TypeIn("post".into())));
+        assert_eq!(m.find("Enter value..."), Some(Cmd::TypeIn("post".into())));
         assert_eq!(m.find("About Lemon Soft Clipper..."), Some(Cmd::About));
         l.vals.edit_plain("post", 10.0);
         l.pick(&MenuReq::Param("post".into()), Cmd::Reset("post".into()), 0.0, 0.0);
@@ -1078,6 +1118,30 @@ mod tests {
         assert_eq!(about.find("Lemon Studio's soft clipper"), Some(Cmd::None));
     }
 
+    /// A text field (Lemon Formula Controller's formula): a click types its text in, the typed text goes into the
+    /// saved state, the hint and the field show whether it compiles; the wheel and middle clicks leave it.
+    #[test]
+    fn text_fields_type_into_the_saved_state() {
+        let mut l = logic(formula_controller::SPEC);
+        let t = Target::Text("formula".into());
+        let (x, y) = centre(&l, &t);
+        assert_eq!(l.down(x, y, Btn::Left, Mods::default(), false).last(), Some(&Act::TypeIn("formula".into(), x, y)));
+        assert_eq!(l.hint, "Formula: Syntax error: no formula");
+        assert_eq!(l.value_text("formula"), "");
+        l.typed("formula", "a*0.5+SongTime/48");
+        assert_eq!(l.value_text("formula"), "a*0.5+SongTime/48");
+        assert_eq!(l.hint, "Formula: Compiled ok");
+        let s = os_engine::effects::formula_ctrl::Settings::from_state(&l.params.raw_copy()).unwrap();
+        assert_eq!(s.formula, "a*0.5+SongTime/48");
+        assert!(l.wheel(x, y, 1.0, Mods::default()).is_empty());
+        l.down(x, y, Btn::Middle, Mods::default(), false);
+        assert_eq!(l.value_text("formula"), "a*0.5+SongTime/48");
+        paint(&mut l);
+        assert_eq!(l.view.raw, l.params.raw_copy());
+        l.typed("formula", "a*");
+        assert_eq!(l.hint, "Formula: Syntax error: function or operand has too few arguments");
+    }
+
     /// `SMALLFX_PNG=<dir> cargo test -p lemon-small-fx -- --ignored`: the editors at a few settings, as PNGs.
     #[test]
     #[ignore]
@@ -1095,7 +1159,7 @@ mod tests {
             }
             pm.save_png(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
         };
-        let settings: [(&Spec, &str, &[(&str, i32)]); 10] = [
+        let settings: [(&Spec, &str, &[(&str, i32)]); 13] = [
             (soft_clipper::SPEC, "soft_clipper", &[("threshold", 64), ("post", 150)]),
             (fast_distortion::SPEC, "fast_distortion", &[("pre", 192), ("threshold", 3), ("type", 1), ("mix", 100), ("post", 110)]),
             (balance::SPEC, "balance", &[("balance", -70), ("volume", 220)]),
@@ -1110,6 +1174,9 @@ mod tests {
             (filter::SPEC, "filter", &[("cutoff", 544), ("resonance", 900), ("low", 0), ("band", 1024), ("high", 464), ("x2", 1)]),
             (flanger::SPEC, "flanger", &[("delay", 300), ("depth", 4200), ("rate", 900), ("shape", 512), ("feed", 70), ("invert_feed", 0), ("damp", 1500), ("cross", 0)]),
             (phaser::SPEC, "phaser", &[("sweep", 4000), ("range", 1024), ("stages", 15), ("feedback", 850), ("dry_wet", 0), ("gain", 2500)]),
+            (peak_controller::SPEC, "peak_controller", &[("base", 13568), ("amount", -120), ("decay", 30), ("lfo_amount", 200), ("speed", 13000), ("shape", 3), ("ramp", 1)]),
+            (formula_controller::SPEC, "formula_controller", &[("a", 46592), ("b", 65536), ("c", 32768)]),
+            (crate::vocoder::SPEC, "vocoder", &[("car", 8000), ("noise", 6400), ("mod_input", 1), ("car_input", 0), ("rms", 1), ("order", 4), ("bands", 16), ("lr", 1)]),
         ];
         for (spec, name, values) in settings {
             let mut l = logic(spec);
@@ -1118,6 +1185,9 @@ mod tests {
             save(&mut l, &format!("{name}_default_x2"), 2.0);
             for (id, v) in values {
                 l.vals.edit_plain(id, *v as f32);
+            }
+            if spec.name == formula_controller::SPEC.name {
+                l.typed("formula", "a+Sin(SongTime*Pi/4)*b*0.5");
             }
             save(&mut l, &format!("{name}_set"), 1.0);
         }

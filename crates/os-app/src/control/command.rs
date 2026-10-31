@@ -271,10 +271,52 @@ pub enum Taken {
     Arrangement(Box<os_model::Arrangement>),
     /// A plugin parameter: (owner, parameter, value).
     Param(u32, u32, f64),
+    /// A plugin's whole state (a preset loaded into it): (owner, the state and what came with it).
+    Plugin(u32, Box<PluginSide>),
     /// The whole project and the rack's own state of it (adding or deleting channels, tracks, patterns).
     Project(Box<Side>),
     /// Which channels are on, by id (a channel muted or soloed).
     Mutes(Vec<(u32, bool)>),
+}
+
+/// What a preset load changes of a plugin (`Taken::Plugin`): its state in its format's own bytes, the preset its
+/// window's Presets box shows, and the name of its channel or slot ("Auto name channels", "Auto name effect slots";
+/// `None`: the default name, for a slot no name typed or given).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginSide {
+    pub state: Vec<u8>,
+    pub preset: Option<std::path::PathBuf>,
+    pub name: Option<String>,
+    /// Not 0: the state and preset are the app's to fill in, as the plugin has them when this side's other one goes in
+    /// (`Control::states`, `App::host_commands`). Only the app reads a plugin.
+    pub fill: u64,
+}
+
+impl PluginSide {
+    /// The name of plugin `owner`'s channel or slot as it is now; `None` when it has none of either.
+    fn name_of(s: &State, owner: u32) -> Option<Option<String>> {
+        let key = owner_key(&s.project, owner)?;
+        Some(match crate::plugins::fx_of(key) {
+            None => s.project.channels[key].name.clone(),
+            Some(slot) => s.mixer.slot_names.get(&slot).cloned(),
+        })
+    }
+
+    /// Puts the name back (`apply` sends the state and preset to the app).
+    fn put_name(&self, s: &mut State, owner: u32) {
+        let Some(key) = owner_key(&s.project, owner) else { return };
+        match crate::plugins::fx_of(key) {
+            None => s.project.channels[key].name = self.name.clone(),
+            Some(slot) => match &self.name {
+                Some(n) => {
+                    s.mixer.slot_names.insert(slot, n.clone());
+                }
+                None => {
+                    s.mixer.slot_names.remove(&slot);
+                }
+            },
+        }
+    }
 }
 
 /// The project settings commands change: the tempo (kept by the app beside the project), swing, main volume and
@@ -385,6 +427,8 @@ pub const TEMPO: &str = "Tempo";
 pub const TIME_SIGNATURE: &str = "Time signature";
 pub const SONG_INFO: &str = "Song info";
 pub const PLUGIN_PARAMETER: &str = "Plugin parameter";
+/// A preset loaded into a plugin from its window or dropped on it (`control::state_edit`).
+pub const PLUGIN_PRESET: &str = "Plugin preset";
 
 /// A command that can't be applied: an id that names nothing, a value out of range.
 pub type Error = String;
@@ -561,6 +605,7 @@ impl Command {
                 }
                 // The value now is the one this puts back's other side: the value the parameter was set to.
                 Taken::Param(..) => return Err("a parameter's undo is taken by `apply`".into()),
+                Taken::Plugin(..) => return Err("a plugin state's undo is taken by `apply`".into()),
                 Taken::Project(_) => Taken::Project(Box::new(Side::of(s))),
                 Taken::Mutes(_) => mutes(p),
             },
@@ -582,7 +627,7 @@ impl Command {
                 a.markers.iter_mut().for_each(|m| m.rescale(from, to));
             }
             Taken::Project(side) => side.project.set_ppq(to),
-            Taken::Settings(_) | Taken::Channel(_) | Taken::Track(_) | Taken::Param(..) | Taken::Mutes(_) => {}
+            Taken::Settings(_) | Taken::Channel(_) | Taken::Track(_) | Taken::Param(..) | Taken::Plugin(..) | Taken::Mutes(_) => {}
         }
     }
 
@@ -590,7 +635,7 @@ impl Command {
     /// check that a press changed something, `history::settle`). Others are as they are.
     pub fn now(&self, s: &State) -> Command {
         match self {
-            Command::Put(t) if !matches!(**t, Taken::Param(..)) => self.take(s).map_or_else(|_| self.clone(), |t| Command::Put(Box::new(t))),
+            Command::Put(t) if !matches!(**t, Taken::Param(..) | Taken::Plugin(..)) => self.take(s).map_or_else(|_| self.clone(), |t| Command::Put(Box::new(t))),
             _ => self.clone(),
         }
     }
@@ -603,6 +648,13 @@ impl Command {
                 Taken::Param(owner, param, v) => {
                     let now = s.control.param_value(*owner, *param).ok_or("the parameter's value is not known")?;
                     Taken::Param(*owner, *param, now).then_set(s, *v)
+                }
+                // A plugin's state: its other side is the state it replaces, which the app fills in as it puts this in.
+                Taken::Plugin(owner, side) => {
+                    let name = PluginSide::name_of(s, *owner).ok_or_else(|| format!("no plugin {owner}"))?;
+                    let fill = s.control.put_state(*owner, (**side).clone());
+                    side.put_name(s, *owner);
+                    Taken::Plugin(*owner, Box::new(PluginSide { state: Vec::new(), preset: None, name, fill }))
                 }
                 _ => self.take(s)?,
             },
@@ -1094,7 +1146,7 @@ fn put(s: &mut State, t: Taken) {
             reselect_clips(s, &sel);
         }
         // `apply` set it already.
-        Taken::Param(..) => {}
+        Taken::Param(..) | Taken::Plugin(..) => {}
         Taken::Project(side) => restore(s, *side),
         Taken::Mutes(on) => {
             for (id, v) in on {

@@ -693,7 +693,7 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(*k));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(*k));
-                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(*k));
+                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(*k));
                 m
             }
             MenuReq::Type => {
@@ -752,7 +752,7 @@ impl Logic {
         m.sep(Cmd::None);
         m.add(MenuItem::item("Copy value"), cmd(CurveCmd::CopyLevel(i)));
         m.add(MenuItem::item("Paste value").enabled(self.level_clip.is_some()), cmd(CurveCmd::PasteLevel(i)));
-        m.add(MenuItem::item("Type in value..."), cmd(CurveCmd::TypeIn(i)));
+        m.add(MenuItem::item("Enter value..."), cmd(CurveCmd::TypeIn(i)));
         m
     }
 
@@ -1185,7 +1185,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
             }
         }
 

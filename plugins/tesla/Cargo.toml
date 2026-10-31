@@ -7,6 +7,7 @@ license.workspace = true
 
 [lib]
 crate-type = ["cdylib", "lib"]
+doctest = false
 
 [features]
 # Compiled into Lemon Studio: no exported plugin entry points (they would clash with the other built-in plugins).
@@ -14,6 +15,7 @@ linked = []
 
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
+os-dsp.workspace = true
 os-engine.workspace = true
 os-hostlink.workspace = true
 os-plugkit = { path = "../../crates/os-plugkit" }

@@ -30,6 +30,8 @@ pub fn file_name(name: &str) -> &str {
     match name {
         LEMON_TRIO => FILE_NAME,
         crate::citrus::CITRUS => crate::citrus::FILE_NAME,
+        crate::slicer::LEMON_SLICER => crate::slicer::FILE_NAME,
+        crate::drums::LEMON_DRUMS => crate::drums::FILE_NAME,
         _ => name,
     }
 }
@@ -39,6 +41,8 @@ pub fn label(name: &str) -> &str {
     match name {
         FILE_NAME => LEMON_TRIO,
         crate::citrus::FILE_NAME => crate::citrus::CITRUS,
+        n if crate::slicer::is_file_name(n) => crate::slicer::LEMON_SLICER,
+        crate::drums::FILE_NAME => crate::drums::LEMON_DRUMS,
         _ => name,
     }
 }
@@ -395,7 +399,7 @@ mod tests {
     fn corpus_osc3_channels_survive_hosting_and_saving() {
         let Some(list) = std::env::var_os("OPENSTUDIO_FLP_CORPUS") else { return };
         let text = std::fs::read_to_string(list).unwrap();
-        let (mut files, mut channels) = (0, 0);
+        let (mut files, mut channels, mut older) = (0, 0, 0);
         let out = std::env::temp_dir().join(format!("openstudio-osc3-corpus-{}.flp", std::process::id()));
         for path in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let Some(project) = std::fs::read(path).ok().and_then(|b| os_flp::FlpFile::parse(&b).ok()).and_then(|f| os_flp::project::load(&f).ok())
@@ -412,8 +416,17 @@ mod tests {
             a.sync_osc3();
             for &r in &rows {
                 let st = project.channels[r].plugin_state.clone().expect("3x Osc state");
-                assert_eq!(st.len(), op::STATE_LEN, "{path}: channel {r}");
-                assert_eq!(a.plugins.osc3_file_state(r).as_ref(), Some(&st), "{path}: channel {r}");
+                let hosted = a.plugins.osc3_file_state(r).expect("a Lemon Trio");
+                if st.len() < op::STATE_LEN {
+                    // An older version's state (projects older than FL 21): its fields kept, the rest the defaults, at
+                    // the current version.
+                    assert_eq!((hosted.len(), op::field(&hosted, 0)), (op::STATE_LEN, op::STATE_VERSION), "{path}: channel {r}");
+                    assert_eq!(hosted[4..st.len()], st[4..], "{path}: channel {r}");
+                    older += 1;
+                } else {
+                    assert_eq!(st.len(), op::STATE_LEN, "{path}: channel {r}");
+                    assert_eq!(hosted, st, "{path}: channel {r}");
+                }
                 channels += 1;
             }
             let before = a.state.project.clone();
@@ -421,12 +434,16 @@ mod tests {
             assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{path}: {:?}", a.state.message);
             let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&out).unwrap()).unwrap()).unwrap();
             for &r in &rows {
-                assert_eq!(back.channels[r], before.channels[r], "{path}: channel {r}");
+                let (mut x, mut y) = (back.channels[r].clone(), before.channels[r].clone());
+                if y.plugin_state.as_ref().is_some_and(|s| s.len() < op::STATE_LEN) {
+                    (x.plugin_state, y.plugin_state) = (None, None);
+                }
+                assert_eq!(x, y, "{path}: channel {r}");
             }
             files += 1;
         }
         let _ = std::fs::remove_file(&out);
-        eprintln!("3x Osc: {channels} channels in {files} files");
+        eprintln!("3x Osc: {channels} channels ({older} with an older version's state) in {files} files");
         assert!(files > 0, "no corpus file with a 3x Osc channel");
     }
 }

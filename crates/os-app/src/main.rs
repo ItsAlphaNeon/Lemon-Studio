@@ -8,8 +8,13 @@
 // Plugin windows exist on Windows, Linux and macOS (`plugin_window`): elsewhere what only they reach (the Misc tab, the
 // window and preset menus, their requests) is built but unused. Those builds still report real dead code.
 #![cfg_attr(not(plugin_windows), allow(dead_code))]
+// Windows: a GUI program, so started from Explorer, the Start menu or a shortcut it opens no console window beside its
+// own. Started from a terminal it still writes there (`attach_console`).
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod app;
+mod arrange;
+mod help_links;
 mod audio_cfg;
 mod auto_close;
 mod autoscroll;
@@ -19,9 +24,12 @@ mod audio_bench;
 #[cfg(test)]
 mod open_bench;
 mod browser;
+mod browser_index;
 mod cable;
 mod capture;
 mod one_click;
+mod track_rec;
+mod audio_log;
 mod score_log;
 mod clip_colors;
 mod clock;
@@ -46,6 +54,7 @@ mod knobs;
 mod layout;
 mod loading;
 mod missing;
+mod mix_threads;
 mod zipped;
 mod logo;
 #[cfg(target_os = "macos")]
@@ -63,6 +72,8 @@ mod midi_play;
 mod mixer;
 mod osc3;
 mod citrus;
+mod slicer;
+mod drums;
 mod monitor;
 mod params;
 mod piano;
@@ -124,6 +135,7 @@ mod piano_dlg;
 mod arpeggiate;
 mod tapper;
 mod touch;
+mod events;
 mod record;
 mod recent;
 mod theme_adjust;
@@ -1725,7 +1737,22 @@ fn wake_ui() {
     }
 }
 
+/// Windows: a GUI program gets a console only through handles its parent passes it (`cargo run`, a pipe, the plugin
+/// scanner's parent). Without them, the terminal it was started from (if any) takes its output, so `--render` and the
+/// errors printed before the window opens still show there.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    unsafe {
+        if GetStdHandle(STD_OUTPUT_HANDLE).is_null() && GetStdHandle(STD_ERROR_HANDLE).is_null() {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    attach_console();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // A plugin scanner process (spec: ui/plugin-manager.md §4): loads one file, prints its plugins, ends.
     if args.first().map(String::as_str) == Some(plugin_scan::ARG) {
@@ -1746,6 +1773,8 @@ fn main() {
         std::process::exit(plugins::window_check::run(&args[1..]));
     }
     app::move_old_settings();
+    // The mixing threads every engine renders on, from here on (spec: audio/multicore.md).
+    mix_threads::start();
     // A render without a window (FILE > Export audio from the command line, `render`).
     if args.first().map(String::as_str) == Some("--render") {
         std::process::exit(render::cli(&args[1..]));
@@ -1784,6 +1813,8 @@ fn main() {
         *p = Some(event_loop.create_proxy());
     }
     os_clap::set_waker(wake_ui);
+    // CLAP plugins asking which thread they are on (`thread-check`): this one is the main thread.
+    os_clap::set_main_thread();
     // Lemon plugins' editors run on threads of their own off Windows and wake the app when they send something.
     #[cfg(not(windows))]
     os_hostlink::set_host_waker(wake_ui);

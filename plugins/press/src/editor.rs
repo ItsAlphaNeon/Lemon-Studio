@@ -345,7 +345,7 @@ impl Logic {
             Some(Target::Edge(i)) => self.param_hint(self.edge_param(*i)),
             Some(Target::DisplayTab(i)) => ["Display", "Display: bands"][*i].into(),
             Some(Target::Show(k)) => view::SHOW_NAMES[*k].into(),
-            Some(Target::Header(i)) => ["Store in spare state", "Flip with spare state (A/B compare)", "Options", "Show info"][(*i).min(3)].into(),
+            Some(Target::Header(i)) => ["Copy to B", "Swap A / B", "Options", "Show info"][(*i).min(3)].into(),
             Some(Target::Logo) => "Show info".into(),
         }
     }
@@ -545,7 +545,7 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(*k));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(*k));
-                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(*k));
+                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(*k));
                 m
             }
             MenuReq::Options => {
@@ -592,7 +592,7 @@ impl Logic {
             }
         }
         m.sep(Cmd::None);
-        m.add(MenuItem::item("Type in value..."), cmd(CurveCmd::TypeIn(i)));
+        m.add(MenuItem::item("Enter value..."), cmd(CurveCmd::TypeIn(i)));
         m
     }
 
@@ -982,7 +982,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
             }
         }
 

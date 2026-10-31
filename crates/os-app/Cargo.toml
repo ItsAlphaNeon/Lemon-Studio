@@ -28,6 +28,7 @@ lemon-sampler = { path = "../../plugins/lemon-sampler", features = ["linked"] }
 lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", features = ["linked"] }
 lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", features = ["linked"] }
 citrus = { path = "../../plugins/citrus", features = ["linked"] }
+lemon-drum-sampler = { path = "../../plugins/lemon-drum-sampler", features = ["linked"] }
 lemon-limiter = { path = "../../plugins/lemon-limiter", features = ["linked"] }
 lemon-reverb = { path = "../../plugins/lemon-reverb", features = ["linked"] }
 lemon-delay = { path = "../../plugins/lemon-delay", features = ["linked"] }
@@ -45,6 +46,10 @@ pulp-filter = { path = "../../plugins/pulp-filter", features = ["linked"] }
 press = { path = "../../plugins/press", features = ["linked"] }
 lemon-flanger = { path = "../../plugins/lemon-flanger", features = ["linked"] }
 lemon-phaser = { path = "../../plugins/lemon-phaser", features = ["linked"] }
+lemon-peak-controller = { path = "../../plugins/lemon-peak-controller", features = ["linked"] }
+lemon-formula-controller = { path = "../../plugins/lemon-formula-controller", features = ["linked"] }
+lemon-slicer = { path = "../../plugins/lemon-slicer", features = ["linked"] }
+lemon-vocoder = { path = "../../plugins/lemon-vocoder", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"
@@ -68,7 +73,7 @@ zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 asio-sys = "0.4"
 # WASAPI exclusive and low-latency shared output (`device::wasapi`): the version cpal is built with.
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_Devices_Properties", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Threading", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Diagnostics_Debug", "Win32_UI_HiDpi", "Win32_System_Registry"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Diagnostics_Debug", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_System_Registry", "Win32_System_SystemInformation"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Shared mode plays through the sound server (PulseAudio, or PipeWire's pipewire-pulse) as other programs do; the

@@ -34,7 +34,7 @@ const ITEM_H: f32 = 20.0;
 /// Paints form `f` of dialog `m`.
 pub fn paint(ui: &mut Ui, s: &State, m: &Modal, f: &ExportForm) {
     let r = place(s, m, W, H);
-    frame(ui, r, if f.to_clip { crate::pattern_render::TITLE } else { ef::TITLE });
+    frame(ui, r, if f.to_clip { crate::pattern_render::TITLE } else if !f.tracks.is_empty() { ef::TRACKS_TITLE } else { ef::TITLE });
     let t = ui.t;
     let font = Font::new(13);
     let lh = ui.c.line_height(font);
@@ -85,7 +85,7 @@ fn source(ui: &mut Ui, f: &ExportForm, g: Rect) {
         for (i, seg) in segs.iter().enumerate() {
             let b = Rect::new((strip.x + i as f32 * sw).round(), strip.y, sw.round(), strip.h);
             let (enabled, off) = match (row, i) {
-                (0, 0) => (f.song_ok, "The playlist is empty"),
+                (0, 0) => (f.song_ok, "The arranger is empty"),
                 (0, _) => (f.pat_ok, "The pattern has no notes"),
                 (1, 1) => (f.has_selection(), "There is no time selection"),
                 _ => (true, ""),

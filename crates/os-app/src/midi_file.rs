@@ -457,6 +457,23 @@ pub fn pattern_file(p: &Project, n: u16, ch: u16, tempo: f64) -> Smf {
     Smf { format: 1, ppq: p.ppq, tracks: vec![Track { events: conductor }, Track { events }] }
 }
 
+/// The user folder's "Clipboard files" (tests: a temporary folder).
+fn clipboard_dir() -> Option<PathBuf> {
+    if cfg!(test) {
+        return Some(std::env::temp_dir().join(format!("lemon-clipboard-{}", std::process::id())));
+    }
+    os_paths::user_dir().map(|d| d.join("Clipboard files"))
+}
+
+/// TOOLS ▸ Save MIDI clipboard to browser: the piano roll's copied notes as a type 1 file, the tempo then one track,
+/// the first note at the start.
+pub fn clipboard_file(notes: &[Note], ppq: u16, tempo: f64) -> Smf {
+    let first = notes.iter().map(|n| n.position).min().unwrap_or(0);
+    let conductor = vec![Event { tick: 0, kind: Ev::Tempo(os_smf::tempo_of_bpm(tempo)) }];
+    let events = note_events(notes.iter().map(|n| (n.position - first, end_of(n, ppq) - first, n)));
+    Smf { format: 1, ppq, tracks: vec![Track { events: conductor }, Track { events }] }
+}
+
 /// FILE ▸ Export MIDI...: the project's notes as a type 1 file (spec §10.8): a conductor track (the tempo, tempo
 /// control points, time signatures, markers), then a track per channel with notes. `song`: the current arrangement's
 /// pattern clips, each cut at its end; else pattern `n`.
@@ -792,6 +809,25 @@ impl App {
         project_file(&s.project, s.song_mode, s.pattern, s.tempo)
     }
 
+    /// TOOLS ▸ Save MIDI clipboard to browser (Lemon Studio's design after the original's entry; greyed while nothing
+    /// is copied): the piano roll's clipboard goes to "MIDI clipboard <n>.mid" in the user folder's "Clipboard files"
+    /// (the original's browser has a folder of that name), the next free number; the folder joins the browser and
+    /// opens there.
+    pub(crate) fn save_midi_clipboard(&mut self) {
+        let s = &self.state;
+        let Some(dir) = clipboard_dir() else { return };
+        let file = clipboard_file(&s.piano.clipboard, s.project.ppq, s.tempo);
+        let path = (1..).map(|n| dir.join(format!("MIDI clipboard {n}.mid"))).find(|p| !p.exists()).expect("a free name");
+        match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, os_smf::write(&file))) {
+            Ok(()) => {
+                self.add_browser_folder(dir);
+                self.state.message = Some(format!("Saved {}", path.display()));
+            }
+            Err(e) => self.state.message = Some(format!("Could not write {}: {e}", path.display())),
+        }
+        self.invalidate();
+    }
+
     /// The save dialog's file: written.
     pub(crate) fn midi_export_chosen(&mut self, path: PathBuf, piano: bool) {
         let path = if path.extension().is_none() { path.with_extension("mid") } else { path };
@@ -810,6 +846,28 @@ mod tests {
 
     fn ev(tick: u32, kind: Ev) -> Event {
         Event { tick, kind }
+    }
+
+    /// Save MIDI clipboard to browser is greyed until notes are copied, then writes them from the first note on
+    /// into a numbered file of the clipboard folder, which the browser then shows.
+    #[test]
+    fn save_midi_clipboard_to_browser() {
+        use crate::views::menus::{active, item_at, SAVE_MIDI_CLIP_LABEL, TOOLS_MENU};
+        let mut app = App::new(None);
+        let at = (0..60).find(|&i| item_at(TOOLS_MENU, i).is_some_and(|it| it.label == SAVE_MIDI_CLIP_LABEL)).unwrap();
+        assert!(!active(&app.state, TOOLS_MENU, item_at(TOOLS_MENU, at).unwrap()), "nothing copied");
+        app.state.piano.clipboard = vec![Note { position: 192, length: 96, key: 60, ..Note::step(0, 0) }, Note { position: 288, length: 48, key: 64, ..Note::step(0, 0) }];
+        assert!(active(&app.state, TOOLS_MENU, item_at(TOOLS_MENU, at).unwrap()));
+        let dir = clipboard_dir().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        app.menu_item(TOOLS_MENU, at);
+        app.menu_item(TOOLS_MENU, at);
+        let second = dir.join("MIDI clipboard 2.mid");
+        let f = os_smf::read(&std::fs::read(&second).unwrap()).unwrap();
+        let ons: Vec<(u32, u8)> = f.tracks[1].events.iter().filter_map(|e| if let Ev::NoteOn { key, velocity, .. } = e.kind { (velocity > 0).then_some((e.tick, key)) } else { None }).collect();
+        assert_eq!(ons, [(0, 60), (96, 64)]);
+        assert!(dir.join("MIDI clipboard 1.mid").exists() && app.state.browser_folders.contains(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn on(tick: u32, channel: u8, key: u8, velocity: u8) -> Event {

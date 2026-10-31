@@ -126,8 +126,8 @@ impl M {
         match self {
             M::LevelPan => "Panning adjustment",
             M::LevelVol => "Volume adjustment",
-            M::LevelModX => "Mod X adjustment",
-            M::LevelModY => "Mod Y adjustment",
+            M::LevelModX => "Mod A adjustment",
+            M::LevelModY => "Mod B adjustment",
             M::PolyMax => "Maximum polyphony",
             M::PolySlide => "Slide time",
             M::Porta => "Portamento",
@@ -135,13 +135,13 @@ impl M {
             M::TimeGate => "Note gate",
             M::TimeShift => "Note time shift",
             M::TimeSwing => "Note time swing",
-            M::FullPorta => "Full portamento",
+            M::FullPorta => "Always glide",
             M::VolMid | M::KeyMid => "Tracking middle point",
             M::VolPan | M::KeyPan => "Tracking to panning",
-            M::VolModX | M::KeyModX => "Tracking to Mod X",
-            M::VolModY | M::KeyModY => "Tracking to Mod Y",
-            M::Cut => "Cut group",
-            M::CutBy => "Cut by group",
+            M::VolModX | M::KeyModX => "Tracking to Mod A",
+            M::VolModY | M::KeyModY => "Tracking to Mod B",
+            M::Cut => "Choke group",
+            M::CutBy => "Choked by group",
             M::ArpDir => "Arpeggio direction",
             M::ArpTime => "Arpeggio time",
             M::ArpGate => "Arpeggio gate",
@@ -151,13 +151,13 @@ impl M {
             M::ArpChord => "Arpeggio chord",
             M::EchoFeed => "Echo feedback",
             M::EchoPan => "Echo panning",
-            M::EchoModX => "Echo Mod X",
-            M::EchoModY => "Echo Mod Y",
+            M::EchoModX => "Echo Mod A",
+            M::EchoModY => "Echo Mod B",
             M::EchoPitch => "Echo pitch",
             M::EchoTime => "Echo time",
             M::Echoes => "Number of echoes",
             M::PingPong => "Ping pong echoes",
-            M::FatMode => "Fat mode",
+            M::FatMode => "Thicken",
             M::Root => "Root note",
             M::MainPitch => "Affected by the main pitch",
             M::AddKey => "Add root note to the key",
@@ -338,7 +338,7 @@ fn kind(m: M) -> Kind {
 
 /// Panels: outline rect (inclusive FL x0, x1, y0, y1), header tab width, title.
 const PANELS: [(f32, f32, f32, f32, f32, &str); 8] = [
-    (11.0, 188.0, 78.0, 179.0, 106.0, "Levels adjustment"),
+    (11.0, 188.0, 78.0, 179.0, 106.0, "Level offsets"),
     (195.0, 316.0, 78.0, 179.0, 67.0, "Polyphony"),
     (323.0, 434.0, 78.0, 179.0, 40.0, "Time"),
     (441.0, 556.0, 78.0, 179.0, 108.0, ""),
@@ -376,10 +376,10 @@ const KNOBS: [(M, f32, f32, f32, f32, u32, &str, f32); 19] = [
 const RADIOS: [(M, f32, f32, &str, bool); 8] = [
     (M::Porta, 209.5, 161.5, "Porta", false),
     (M::Mono, 264.5, 161.5, "Mono", false),
-    (M::FullPorta, 337.5, 162.0, "Full porta", false),
+    (M::FullPorta, 337.5, 162.0, "Always glide", false),
     (M::ArpSlide, 99.5, 281.5, "Slide", false),
     (M::PingPong, 542.0, 272.0, "Ping pong", true),
-    (M::FatMode, 542.0, 292.0, "Fat mode", true),
+    (M::FatMode, 542.0, 292.0, "Thicken", true),
     (M::MainPitch, 80.0, 350.0, "Enable main pitch", false),
     (M::AddKey, 200.0, 350.0, "Add to key", false),
 ];
@@ -1224,7 +1224,7 @@ mod tests {
         assert_eq!(off_name(Hit::Value(M::AddKey), &v), None);
         assert_eq!(off_name(Hit::Value(M::EchoFeed), &v), Some("Echo feedback"));
         assert_eq!(off_name(Hit::Value(M::TimeGate), &v), Some("Note gate"));
-        assert_eq!(off_name(Hit::Value(M::FullPorta), &v), Some("Full portamento"));
+        assert_eq!(off_name(Hit::Value(M::FullPorta), &v), Some("Always glide"));
         assert_eq!(off_name(Hit::ArpDir(2), &v), Some("Arpeggiator"));
         assert_eq!(off_name(Hit::Touch, &v), Some("Multi-touch keyboard"));
         // Not a sampler: root note and fine tuning still tune the channel; only "Add to key" does nothing.

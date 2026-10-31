@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Docked browser (left): five tabs, a tree of the project / plugin database / folders, drag sources.
-// spec: ui/main-window.md §4, ui/browser.md (§4 options menu, §5 search, §6 dropped folders)
+//! Docked browser (left): four tabs, a tree of the project / plugin database / folders / favorites, drag sources.
+// spec: ui/main-window.md §4, ui/browser.md (§4 options menu, §5 search, §6 dropped folders, §10 favorites, §11 index)
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -31,7 +31,7 @@ pub const INFO_H: f32 = 84.0;
 /// (label, icon, category colour index). Only the roots with content: FL's other disk-folder roots (Recent files,
 /// Channel presets, Packs...) are left out until Lemon Studio has content for them (owner decision); dropped folders
 /// follow these. Plugin presets: the preset store, user and factory (spec: plugins/presets.md "Browser").
-const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin database", Icon::Speaker, 1), (PLUGIN_PRESETS, Icon::FilePreset, 1)];
+const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin library", Icon::Speaker, 1), (PLUGIN_PRESETS, Icon::FilePreset, 1)];
 pub const PLUGIN_PRESETS: &str = "Plugin presets";
 
 /// Tree key of the All tab's Plugin presets root; a plugin's node is `<this>/<plugin folder name>`.
@@ -53,12 +53,18 @@ const PROJECT: &[(&str, Icon)] = &[
     (PROJECT_DATA, Icon::Folder),
     ("Samples", Icon::Wave),
 ];
-pub const INITIALIZED_CONTROLS: &str = "Initialized controls";
+pub const INITIALIZED_CONTROLS: &str = "Controls with a start value";
 pub const PROJECT_DATA: &str = "Project data";
 
-/// The Current project and Plugin database tabs (spec §1).
+/// The Current project, Plugin database and Favorites tabs (spec §1).
 pub const PROJECT_TAB: usize = 1;
 pub const PLUGIN_TAB: usize = 2;
+pub const FAV_TAB: usize = 3;
+
+/// The Plugin database's section listing every plugin by format (spec §2).
+pub const INSTALLED: &str = "Installed";
+/// The format folder of the plugins built into Lemon Studio, under Installed.
+pub const BUILT_IN: &str = "Built-in";
 
 /// Tree key of the Current project tab's root.
 pub fn project_root() -> String {
@@ -120,7 +126,7 @@ pub struct Row {
 
 /// Keys of the rows that start opened (the project tab shows Patterns, like the screenshot).
 pub fn default_open() -> std::collections::HashSet<String> {
-    ["1:Current project", "1:Current project/Patterns", "2:Plugin database"].iter().map(|k| k.to_string()).collect()
+    ["1:Current project", "1:Current project/Patterns", "2:Plugin library"].iter().map(|k| k.to_string()).collect()
 }
 
 /// Options-menu toggles (spec §4); `DEFAULT_OPTS` are on in a fresh browser.
@@ -137,6 +143,8 @@ pub const OPT_HIDEDRAG: &str = "hidedrag";
 pub const OPT_CONTRAST: &str = "contrast";
 pub const OPT_PREVIEW: &str = "preview";
 pub const DEFAULT_OPTS: &[&str] = &[OPT_FOLDERS, OPT_TAGS, OPT_INDEX, OPT_REINDEX, OPT_HIDEDRAG];
+/// Every toggle, in menu order (`browser.txt` keeps the ones that are on).
+pub const ALL_OPTS: &[&str] = &[OPT_PARENTS, OPT_EXPAND, OPT_FOLDERS, OPT_TOP, OPT_TYPE, OPT_TAGS, OPT_INDEX, OPT_REINDEX, OPT_AUTOHIDE, OPT_HIDEDRAG, OPT_CONTRAST, OPT_PREVIEW];
 
 pub fn opt(s: &State, k: &str) -> bool {
     s.browser_opts.contains(k)
@@ -160,20 +168,36 @@ pub fn rows(s: &State) -> Vec<Row> {
     }
     let q = s.browser_search.to_lowercase();
     let hit: Vec<bool> = all.iter().map(|r| matches(s, r, &q)).collect();
+    // "Expand folders" (§4): what a found folder holds is listed under it; `inside[i]` = the depth of the found folder
+    // row i is in.
+    let mut inside: Vec<Option<u8>> = vec![None; all.len()];
+    if opt(s, OPT_EXPAND) {
+        let mut under: Option<u8> = None;
+        for (i, r) in all.iter().enumerate() {
+            if under.is_some_and(|d| r.depth <= d) {
+                under = None;
+            }
+            if under.is_some() {
+                inside[i] = under;
+            } else if hit[i] && r.open.is_some() {
+                under = Some(r.depth);
+            }
+        }
+    }
     if !opt(s, OPT_PARENTS) {
-        return all.into_iter().zip(hit).filter(|(_, h)| *h).map(|(mut r, _)| {
-            r.depth = 0;
+        return all.into_iter().zip(hit.into_iter().zip(inside)).filter(|(_, (h, n))| *h || n.is_some()).map(|(mut r, (_, n))| {
+            r.depth = n.map_or(0, |d| r.depth - d);
             r
         }).collect();
     }
-    // Keep matches and their ancestors.
-    let mut keep = hit.clone();
+    // Keep matches, what found folders hold, and their ancestors.
+    let mut keep: Vec<bool> = hit.iter().zip(&inside).map(|(h, n)| *h || n.is_some()).collect();
     let mut stack: Vec<usize> = Vec::new();
     for (i, r) in all.iter().enumerate() {
         while stack.last().is_some_and(|&p| all[p].depth >= r.depth) {
             stack.pop();
         }
-        if hit[i] {
+        if hit[i] && inside[i].is_none() {
             for &p in &stack {
                 keep[p] = true;
             }
@@ -190,7 +214,10 @@ fn tree(s: &State) -> Vec<Row> {
         0 => (0..ROOTS.len()).map(Ok).collect(),
         1 => vec![Ok(0)],
         2 => vec![Ok(1)],
-        _ => Vec::new(),
+        _ => {
+            fav_rows(s, &mut out);
+            return out;
+        }
     };
     if tab == 0 {
         // Dropped folders follow the roots, in alphabetical order of their labels (spec §6).
@@ -210,9 +237,10 @@ fn tree(s: &State) -> Vec<Row> {
             Err(f) => {
                 let path = &s.browser_folders[f];
                 let key = disk_key(path);
-                let open = s.browser_open.contains(&key);
+                let label = root_label(s, path);
+                let open = s.browser_open.contains(&key) || search_opens(s, path, &label);
                 let icon = if open { Icon::FolderOpen } else { Icon::Folder };
-                out.push(Row { key: key.clone(), depth: 0, label: root_label(s, path), icon, cat: FOLDER, open: Some(open), bright: true, item: Item::None, path: Some(path.clone()) });
+                out.push(Row { key: key.clone(), depth: 0, label, icon, cat: FOLDER, open: Some(open), bright: true, item: Item::None, path: Some(path.clone()) });
                 if open {
                     disk_rows(s, path, &key, 1, &mut out);
                 }
@@ -283,17 +311,8 @@ pub fn list_dir(s: &State, dir: &Path) -> Rc<Vec<Entry>> {
             rd.flatten()
                 .filter_map(|e| {
                     let name = e.file_name().to_string_lossy().into_owned();
-                    let low = name.to_ascii_lowercase();
                     let md = e.metadata().ok()?;
-                    #[cfg(windows)]
-                    {
-                        use std::os::windows::fs::MetadataExt;
-                        // FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
-                        if md.file_attributes() & 0x6 != 0 {
-                            return None;
-                        }
-                    }
-                    if name.starts_with('.') || low == "desktop.ini" || low == "thumbs.db" {
+                    if !crate::browser_index::listed(&name, &md) {
                         return None;
                     }
                     Some(Entry { name, path: e.path(), dir: md.is_dir(), size: md.len(), modified: md.modified().ok() })
@@ -321,29 +340,43 @@ pub fn file_icon(name: &str) -> Icon {
     }
 }
 
+/// What a file row stands for (spec §6): an audio file a sample, a preset file a preset, anything else a file.
+fn file_item(name: &str, path: &str) -> Item {
+    if file_icon(name) == Icon::FileAudio {
+        Item::Sample(path.into())
+    } else if crate::presets::is_preset_file(Path::new(path)) || crate::presets::is_factory(Path::new(path)) {
+        Item::Preset(path.into())
+    } else {
+        Item::File(path.into())
+    }
+}
+
+/// While searching, whether disk folder `path` (shown as `label`) shows open: it holds a match the index knows of
+/// (spec §11), or it matches itself with "Expand folders" on (§4).
+fn search_opens(s: &State, path: &Path, label: &str) -> bool {
+    if s.browser_search.is_empty() {
+        return false;
+    }
+    let q = s.browser_search.to_lowercase();
+    let folders = opt(s, OPT_FOLDERS);
+    (opt(s, OPT_EXPAND) && folders && label.to_lowercase().contains(&q))
+        || (opt(s, OPT_INDEX) && s.browser_index.match_dirs(&q, folders).is_some_and(|d| d.contains(path)))
+}
+
 /// Rows of an opened disk folder: its subfolders (recursing into opened ones), then its files.
 fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
     for e in list_dir(s, dir).iter() {
         let k = format!("{key}/{}", e.name);
         if e.dir {
-            let open = s.browser_open.contains(&k);
+            let open = s.browser_open.contains(&k) || search_opens(s, &e.path, &e.name);
             let icon = if open { Icon::FolderOpen } else { Icon::Folder };
             out.push(Row { key: k.clone(), depth, label: e.name.clone(), icon, cat: FOLDER, open: Some(open), bright: open, item: Item::None, path: Some(e.path.clone()) });
             if open {
                 disk_rows(s, &e.path, &k, depth.saturating_add(1), out);
             }
         } else {
-            let icon = file_icon(&e.name);
-            let p = e.path.to_string_lossy().into_owned();
-            let stem = || e.name.rsplit_once('.').map_or(e.name.as_str(), |(a, _)| a).to_string();
-            let (label, item) = if icon == Icon::FileAudio {
-                (stem(), Item::Sample(p))
-            } else if crate::presets::is_preset_file(&e.path) {
-                (stem(), Item::Preset(p))
-            } else {
-                (e.name.clone(), Item::File(p))
-            };
-            out.push(Row { key: k, depth, label, icon, cat: FILE, open: None, bright: false, item, path: Some(e.path.clone()) });
+            let (label, item) = (crate::browser_index::disk_label(&e.name, &e.path, false), file_item(&e.name, &e.path.to_string_lossy()));
+            out.push(Row { key: k, depth, label, icon: file_icon(&e.name), cat: FILE, open: None, bright: false, item, path: Some(e.path.clone()) });
         }
     }
 }
@@ -501,19 +534,85 @@ fn preset_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
     }
 }
 
-/// The plugin menus' generators and effects (spec: ui/plugin-menu.md §5).
+/// The plugin menus' generators and effects (spec §2, ui/plugin-menu.md §5): Generators and Effects by category, then
+/// Installed with both by format.
 fn plugin_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
-    if section(s, root, "Generators", Icon::Plug, cat, out) {
-        let parent = format!("{root}/Generators");
-        for e in &s.plugdb.lists.gens {
-            leaf(out, &parent, e.label.clone(), Icon::Plug, cat, false, Item::Generator(e.index));
+    let lists = [("Generators", Icon::Plug, &s.plugdb.lists.gens, false), ("Effects", Icon::Speaker, &s.plugdb.lists.fx, true)];
+    let folder = |out: &mut Vec<Row>, key: String, depth: u8, label: &str| -> bool {
+        let open = is_open(s, &key);
+        let icon = if open { Icon::FolderOpen } else { Icon::Folder };
+        out.push(Row { key, depth, label: label.into(), icon, cat, open: Some(open), bright: open, item: Item::None, path: None });
+        open
+    };
+    let plugin = |out: &mut Vec<Row>, parent: &str, depth: u8, e: &crate::plugin_db::Entry, icon: Icon, effect: bool| {
+        let item = if effect { Item::Effect(e.index) } else { Item::Generator(e.index) };
+        out.push(Row { key: format!("{parent}/{}", e.label), depth, label: e.label.clone(), icon, cat, open: None, bright: false, item, path: None });
+    };
+    for &(name, icon, list, effect) in &lists {
+        if !section(s, root, name, icon, cat, out) {
+            continue;
+        }
+        let parent = format!("{root}/{name}");
+        for c in crate::plugin_db::categories(effect) {
+            let key = format!("{parent}/{c}");
+            if list.iter().any(|e| e.category == c) && folder(out, key.clone(), 2, c) {
+                for e in list.iter().filter(|e| e.category == c) {
+                    plugin(out, &key, 3, e, icon, effect);
+                }
+            }
         }
     }
-    if section(s, root, "Effects", Icon::Speaker, cat, out) {
-        let parent = format!("{root}/Effects");
-        for e in &s.plugdb.lists.fx {
-            leaf(out, &parent, e.label.clone(), Icon::Speaker, cat, false, Item::Effect(e.index));
+    if !section(s, root, INSTALLED, Icon::Plug, cat, out) {
+        return;
+    }
+    for &(name, icon, list, effect) in &lists {
+        let parent = format!("{root}/{INSTALLED}/{name}");
+        if !folder(out, parent.clone(), 2, name) {
+            continue;
         }
+        for f in [BUILT_IN, "CLAP", "VST3", "VST2", "native"] {
+            let of = |e: &&crate::plugin_db::Entry| if e.builtin { f == BUILT_IN } else { f == crate::plugin_db::format_label(e.format) };
+            let key = format!("{parent}/{f}");
+            if list.iter().any(|e| of(&e)) && folder(out, key.clone(), 3, if f == "native" { "Native" } else { f }) {
+                for e in list.iter().filter(of) {
+                    plugin(out, &key, 4, e, icon, effect);
+                }
+            }
+        }
+    }
+}
+
+/// The Favorites tab (spec §10): the favorite generators, effects (the plugin manager's star) and files, flat, each
+/// group alphabetical.
+fn fav_rows(s: &State, out: &mut Vec<Row>) {
+    let root = format!("{FAV_TAB}:");
+    for (list, icon, effect) in [(&s.plugdb.lists.gens, Icon::Plug, false), (&s.plugdb.lists.fx, Icon::Speaker, true)] {
+        for e in list.iter().filter(|e| e.favorite) {
+            let item = if effect { Item::Effect(e.index) } else { Item::Generator(e.index) };
+            out.push(Row { key: format!("{root}plugin:{}", e.uid), depth: 0, label: e.label.clone(), icon, cat: 1, open: None, bright: false, item, path: None });
+        }
+    }
+    let mut files: Vec<&crate::browser::Fav> = s.browser_favs.iter().collect();
+    files.sort_by_cached_key(|f| f.label.to_lowercase());
+    for f in files {
+        let p = PathBuf::from(&f.path);
+        let name = p.file_name().map_or(f.path.clone(), |n| n.to_string_lossy().into_owned());
+        let factory = crate::presets::is_factory(&p);
+        let icon = if factory { Icon::FilePreset } else { file_icon(&name) };
+        let item = file_item(&name, &f.path);
+        // A factory preset has no file; a file that is gone is still listed, without its info.
+        let disk = (!factory && p.exists()).then_some(p);
+        out.push(Row { key: format!("{root}{}", f.path), depth: 0, label: f.label.clone(), icon, cat: FILE, open: None, bright: false, item, path: disk });
+    }
+}
+
+/// Whether `row` is a favorite (spec §10): a plugin the plugin manager stars, or a file in the favorites.
+pub fn is_favorite(s: &State, row: &Row) -> bool {
+    match &row.item {
+        Item::Generator(i) => s.plugdb.lists.gens.iter().any(|e| e.index == *i && e.favorite),
+        Item::Effect(i) => s.plugdb.lists.fx.iter().any(|e| e.index == *i && e.favorite),
+        Item::Sample(p) | Item::Preset(p) | Item::File(p) => s.browser_favs.iter().any(|f| f.path == *p),
+        _ => false,
     }
 }
 
@@ -675,21 +774,15 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     ui.c.text(os_ui::Font::new(14), 52.0, 85.0 + dy, t.text_dim, "Browser");
     // Tabs (spec ui/browser.md §1): FL's five without Online content, sharing the strip.
     ui.c.fill_rect(Rect::span(0.0, bw - 1.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
-    const TIPS: [&str; 4] = ["All", "Current project", "Plugin database", "Favorites"];
+    const TIPS: [&str; 4] = ["All", "Current project", "Plugin library", "Favorites"];
     for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Star].into_iter().enumerate() {
         let cx = 25.0 + 50.0 * i as f32;
         let rr = Rect::new(cx - 18.0, 108.0 + dy, 36.0, 30.0);
-        // Favorites: not available yet, greyed out.
-        let hov = if i >= OFF_TABS {
-            ui.off(rr, TIPS[i]);
-            false
-        } else {
-            ui.hit(rr, Action::BrowserTab(i), TIPS[i])
-        };
+        let hov = ui.hit(rr, Action::BrowserTab(i), TIPS[i]);
         if i == s.browser_tab {
             ui.c.stroke_rrect(rr, 4.0, 1.5, t.browser_tab_outline);
         }
-        let c = if i >= OFF_TABS { t.text_faint } else if hov || i == s.browser_tab { t.glyph } else { t.glyph.shade(-0.1) };
+        let c = if hov || i == s.browser_tab { t.glyph } else { t.glyph.shade(-0.1) };
         icons::draw(ui.c, icon, Rect::new(cx - 9.0, 114.0 + dy, 18.0, 18.0), c);
     }
     // List.
@@ -749,7 +842,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             _ => c,
         };
         icons::draw(ui.c, row.icon, Rect::new(x + 6.0, y + 3.0, 17.0, 17.0), ic);
-        let (f, w) = (os_ui::Font::new(17), bw - 1.0 - x - 27.0);
+        // A favorite's star at the row's right end (§10); the label stops before it.
+        let fav = is_favorite(s, row);
+        if fav {
+            let sc = if hov || sel == Some(row.key.as_str()) { t.glyph } else { t.text_dim };
+            icons::draw(ui.c, Icon::Star, Rect::new(bw - 19.0, y + 5.0, 13.0, 13.0), sc);
+        }
+        let (f, w) = (os_ui::Font::new(17), bw - 1.0 - x - 27.0 - if fav { 16.0 } else { 0.0 });
         let over = ui.c.text_width(f, &row.label) - w;
         // Hovered, a label that does not fit scrolls (§9) rather than being cut.
         if hov && over > 0.0 {
@@ -767,9 +866,18 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         ui.c.text_clip(f, x + 25.0, y, w, c, &label);
     }
     *s.browser_marquee.borrow_mut() = marquee;
-    let empty = if !s.browser_search.is_empty() { "No matches" } else { "No favorites yet" };
-    if rows.is_empty() && (s.browser_tab >= 3 || !s.browser_search.is_empty()) {
-        ui.c.text(os_ui::Font::new(14).italic(), 22.0, top + 6.0, t.text_faint, empty);
+    let indexing = opt(s, OPT_INDEX) && s.browser_index.building();
+    let empty: &[&str] = if s.browser_search.is_empty() {
+        &["No favorites yet: right-click a", "file or a plugin, tick Favorite"]
+    } else if indexing {
+        &["No matches yet (indexing folders)"]
+    } else {
+        &["No matches"]
+    };
+    if rows.is_empty() && (s.browser_tab == FAV_TAB || !s.browser_search.is_empty()) {
+        for (k, line) in empty.iter().enumerate() {
+            ui.c.text(os_ui::Font::new(14).italic(), 22.0, top + 6.0 + 18.0 * k as f32, t.text_faint, line);
+        }
     }
     ui.c.pop_clip();
     if let Some(p) = &info {
@@ -792,8 +900,14 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     }
     icons::draw(ui.c, Icon::Folder, Rect::new(field.right() - 18.0, fy + 7.0, 14.0, 14.0), t.text_faint);
     let glass = Rect::new(bw - 23.0, fy + 3.0, 21.0, 21.0);
-    let hov = ui.hit(glass, Action::BrowserSearch, "Search the browser (Enter = find next, Esc = clear)");
-    icons::draw(ui.c, Icon::Search, Rect::new(glass.x + 2.0, fy + 5.0, 17.0, 17.0), if hov { t.browser_search.shade(0.2) } else { t.browser_search });
+    // With text in the box the magnifier becomes a cross that clears it (§5).
+    if s.browser_search.is_empty() {
+        let hov = ui.hit(glass, Action::BrowserSearch, "Search the browser (Enter = find next, Esc = clear)");
+        icons::draw(ui.c, Icon::Search, Rect::new(glass.x + 2.0, fy + 5.0, 17.0, 17.0), if hov { t.browser_search.shade(0.2) } else { t.browser_search });
+    } else {
+        let hov = ui.hit(glass, Action::BrowserClear, "Clear the search");
+        icons::draw(ui.c, Icon::Close, Rect::new(glass.x + 3.0, fy + 6.0, 15.0, 15.0), if hov { t.browser_search.shade(0.2) } else { t.browser_search });
+    }
     // Splitter: drags the browser's width (§9).
     ui.c.fill_rect(Rect::new(bw, r.y, 6.0, r.h), t.splitter);
     ui.c.fill_rect(Rect::new(bw + 6.0, r.y, 2.0, r.h), t.splitter_dark);
@@ -818,9 +932,6 @@ fn middle_cut(ui: &mut Ui, f: os_ui::Font, text: &str, w: f32) -> String {
     }
     String::new()
 }
-
-/// Tabs from this one on (favorites) are not available yet (spec §1).
-const OFF_TABS: usize = 3;
 
 /// Where the options menu opens (just below the title bar's ▸, spec §4).
 pub fn menu_at(s: &State) -> (f32, f32) {

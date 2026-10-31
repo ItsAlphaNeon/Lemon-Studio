@@ -40,7 +40,7 @@ impl Filter {
         Filter { name: name.into(), exts: exts.iter().map(|e| e.to_ascii_lowercase()).collect() }
     }
 
-    /// The type combo's text: "FLP project (*.flp)".
+    /// The type combo's text: "Lemon Studio project (*.flp)".
     pub fn label(&self) -> String {
         if self.exts.is_empty() { self.name.clone() } else { format!("{} (*.{})", self.name, self.exts.join(", *.")) }
     }
@@ -745,7 +745,7 @@ mod tests {
         std::fs::write(d.join("b.flp"), b"x").unwrap();
         std::fs::write(d.join("A.flp"), b"xyz").unwrap();
         std::fs::write(d.join("notes.txt"), b"").unwrap();
-        let f = FileDlg::new(Mode::Open, "Open", "test-list", Then::Nothing).filter("FLP project", &["flp"]).start(Some(&d)).opened();
+        let f = FileDlg::new(Mode::Open, "Open", "test-list", Then::Nothing).filter("Lemon Studio project", &["flp"]).start(Some(&d)).opened();
         let names: Vec<_> = f.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["beats", "A.flp", "b.flp"]);
         assert_eq!(f.filters.last().unwrap().name, "All files");
@@ -766,7 +766,7 @@ mod tests {
         let d = tmp("save");
         std::fs::write(d.join("song.flp"), b"x").unwrap();
         std::fs::create_dir(d.join("sub")).unwrap();
-        let mut f = FileDlg::new(Mode::Save, "Save", "test-save", Then::Nothing).filter("FLP project", &["flp"]).start(Some(&d)).name("Untitled.flp").opened();
+        let mut f = FileDlg::new(Mode::Save, "Save", "test-save", Then::Nothing).filter("Lemon Studio project", &["flp"]).start(Some(&d)).name("Untitled.flp").opened();
         assert!(f.name.all, "the name starts selected");
         f.name.insert("tune");
         assert_eq!(f.name.text, "tune");

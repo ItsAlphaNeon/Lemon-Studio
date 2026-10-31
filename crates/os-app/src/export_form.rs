@@ -16,12 +16,14 @@ use crate::export::{self as ex, Options, Tail};
 use crate::project_forms::{FHit, Form};
 
 pub const TITLE: &str = "Export audio";
+/// The form's title for the mixer track menu's File ▸ Render to wave file....
+pub const TRACKS_TITLE: &str = "Render to wave file";
 pub const MAIN: &str = "Export";
 
 /// The segmented rows: their labels and segments.
 pub const SEGS: [(&str, &[&str]); 3] = [("Play", &["Song", "Pattern"]), ("Range", &["Whole", "Selection"]), ("Tail", &ex::TAILS)];
 pub const SEG_HINTS: [&str; 3] = [
-    "What to render: the playlist, or one pass of the current pattern",
+    "What to render: the arrangement, or one pass of the current pattern",
     "The whole song, or only the time selection",
     "The sound after the end: cut it, let it ring out, or wrap it to the start (a seamless loop)",
 ];
@@ -33,7 +35,7 @@ pub const CHECKS: [&str; 12] = [
     "Include the master",
     "Insert effects",
     "Master effects",
-    "Playlist markers",
+    "Arranger markers",
     "Loop points",
     "Note markers",
     "Tempo",
@@ -96,6 +98,9 @@ pub struct ExportForm {
     /// PATTERNS > Render as audio clip...: the current pattern only, and the file becomes an audio clip channel
     /// (spec: ui/pattern-render.md §1); the choices are not kept for the next export.
     pub to_clip: bool,
+    /// The mixer track menu's File ▸ Render to wave file...: these tracks' outputs are the files (`ex::Job::tracks`),
+    /// Split mixer tracks does not apply and the choices are not kept for the next export. Empty: an export.
+    pub tracks: Vec<u16>,
 }
 
 impl ExportForm {
@@ -128,8 +133,8 @@ impl ExportForm {
         match k {
             0 => (o.dither, o.ticked().any(|f| o.integer(f))),
             1 => (o.hq, true),
-            2 => (o.split, o.formats[ex::WAV] || o.formats[ex::FLAC]),
-            3 => (o.split_master, o.split),
+            2 => (o.split, self.tracks.is_empty() && (o.formats[ex::WAV] || o.formats[ex::FLAC])),
+            3 => (o.split_master, self.tracks.is_empty() && o.split),
             4 => (o.insert_fx, true),
             5 => (o.master_fx, true),
             6 => (o.markers, wav),
@@ -273,7 +278,7 @@ impl App {
         let song_ok = p.arrangement().is_some_and(|a| !a.clips.is_empty());
         let pat_ok = p.patterns.iter().find(|q| q.number == s.pattern).is_some_and(|q| !q.notes.is_empty());
         if !song_ok && !pat_ok {
-            let text = format!("Nothing to export: the playlist is empty and {} has no notes.", crate::patterns::name_of(s, s.pattern));
+            let text = format!("Nothing to export: the arranger is empty and {} has no notes.", crate::patterns::name_of(s, s.pattern));
             return self.tell(Kind::Warning, TITLE, spans(&[&text]));
         }
         let song = if song { song_ok } else { !pat_ok };
@@ -313,6 +318,7 @@ impl App {
             device_rate,
             list: None,
             to_clip: false,
+            tracks: Vec::new(),
         };
         self.show_form(Body::Project(Form::Export(Box::new(f))));
     }
@@ -408,6 +414,11 @@ impl App {
         if f.to_clip {
             return self.render_pattern_with(&f);
         }
+        if !f.tracks.is_empty() {
+            crate::settings_file::write("export_folder", &f.folder.to_string_lossy());
+            let job = self.export_job(&f);
+            return self.start_export(job, f.song);
+        }
         f.o.save();
         crate::settings_file::write("export_folder", &f.folder.to_string_lossy());
         let job = self.export_job(&f);
@@ -472,6 +483,8 @@ impl App {
             None => crate::piano::pattern_length(s, s.pattern),
         };
         let tracks = s.project.mixer.iter().map(|m| m.index).max().unwrap_or(0);
+        // Render to wave file... renders the tracks' outputs, as Split mixer tracks does.
+        let o = if f.tracks.is_empty() { o } else { Options { split: true, ..o } };
         ex::Job {
             options: o,
             folder: f.folder.clone(),
@@ -481,6 +494,30 @@ impl App {
             loop_frames,
             tempo: (tempo, f64::from(ticks) / f64::from(ppq.max(1))),
             track_names: (0..=tracks).map(|t| crate::mixer::name(s, t)).collect(),
+            tracks: f.tracks.clone(),
+        }
+    }
+
+    /// The mixer track menu's File ▸ Render to wave file... on `tracks` (the selected ones, or the one clicked): the
+    /// Export form with the last choices and WAV the only format ticked (others can be), named after the track when it
+    /// is one; Export writes each track's output (`ex::Job::tracks`). Lemon Studio's choice: the original renders the
+    /// selected tracks to wave files, through a form that was not looked at.
+    pub(crate) fn open_track_render(&mut self, tracks: Vec<u16>) {
+        if self.export.is_some() || tracks.is_empty() {
+            return;
+        }
+        let name = match tracks[..] {
+            [t] => Some(crate::mixer::name(&self.state, t)),
+            _ => None,
+        };
+        self.open_export(false);
+        let Some(crate::dialog::Modal { body: Body::Project(Form::Export(f)), .. }) = self.state.dialogs.last_mut() else { return };
+        f.tracks = tracks;
+        f.o.formats = [true, false, false, false];
+        if let Some(n) = name {
+            let n: String = n.chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
+            f.name.set(&n);
+            f.name.select_all();
         }
     }
 }

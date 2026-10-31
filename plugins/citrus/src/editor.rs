@@ -1087,7 +1087,7 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(*f));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(*f));
-                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(*f));
+                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(*f));
                 m
             }
             MenuReq::Options => self.options(),
@@ -1135,7 +1135,7 @@ impl Logic {
         m.sep(Cmd::None);
         m.add(MenuItem::item("Copy value"), cmd(CurveCmd::CopyLevel(i)));
         m.add(MenuItem::item("Paste value").enabled(self.level_clip.is_some()), cmd(CurveCmd::PasteLevel(i)));
-        m.add(MenuItem::item("Type in value..."), cmd(CurveCmd::TypeIn(i)));
+        m.add(MenuItem::item("Enter value..."), cmd(CurveCmd::TypeIn(i)));
         m
     }
 
@@ -1810,7 +1810,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
             }
         }
 
@@ -2192,7 +2192,7 @@ mod tests {
         l.pick(&MenuReq::Options, Cmd::Set(Field::Switch(3), 1), 0.0, 0.0);
         assert_eq!(saved(&l).switch(3), 1);
         let m = l.menu(&MenuReq::Param(Field::Main(0)));
-        assert_eq!(m.find("Type in value..."), Some(Cmd::TypeIn(Field::Main(0))));
+        assert_eq!(m.find("Enter value..."), Some(Cmd::TypeIn(Field::Main(0))));
         l.typed(&TypeTarget::Field(Field::Main(0)), "50%");
         assert_eq!(saved(&l).main_volume, 64);
         l.pick(&MenuReq::Param(Field::Main(0)), Cmd::Reset(Field::Main(0)), 0.0, 0.0);
