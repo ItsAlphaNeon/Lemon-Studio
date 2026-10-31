@@ -124,6 +124,8 @@ pub struct Shared {
     block: AtomicU32,
     /// The output device the playback or live stream opened.
     opened: Mutex<Option<DeviceInfo>>,
+    /// The last playback's use of the workers: the next one, after a jump, starts from it (`Engine::set_load_gate`).
+    gate: Mutex<Option<os_engine::LoadGate>>,
     /// An instrument's editor is open (`Transport::listen`).
     listening: AtomicBool,
     /// Each running stream's engine voices (its feeder writes them after every fill; a stream that closed drops its
@@ -1536,6 +1538,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 // go on, with "Reset plugins on transport" off (`reset_hosts`). A live stream left open would process
                 // the same plugin instances a second time (each stream would only hear every other chunk of a ringing
                 // sample): typed notes go into the playing engine instead.
+                keep_gate(&shared, &session);
                 session = None;
                 live = None;
                 closing.clear();
@@ -1619,6 +1622,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             Ok(Cmd::Stop) => {
                 // Everything fades out and goes; then the instruments and the effects are reset, so no tail rings on
                 // into the next Play (pause is where tails ring out, `Engine::pause`).
+                keep_gate(&shared, &session);
                 for s in [session.take(), live.take(), preview.take()].into_iter().flatten() {
                     retire(s, &mut closing);
                 }
@@ -2014,6 +2018,13 @@ impl Session {
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));
+        if song {
+            if let Some(gate) = shared.gate.lock().ok().and_then(|g| *g) {
+                if let Ok(mut e) = engine.lock() {
+                    e.set_load_gate(gate);
+                }
+            }
+        }
         let ctl = Arc::new(Ctl { paused: AtomicBool::new(at.paused), held: AtomicBool::new(false), report: AtomicBool::new(song) });
         if kind != Kind::Preview {
             publish(&shared, &info);
@@ -2041,6 +2052,14 @@ impl Feeder {
             v.push(Arc::downgrade(&voices));
         }
         Feeder { engine, queue, shared, ctl, meters: true, rate, busy: Duration::ZERO, rendered: 0, voices }
+    }
+}
+
+/// Remembers how playback `session` uses the workers for the one that follows.
+fn keep_gate(shared: &Shared, session: &Option<Session>) {
+    let Some(s) = session else { return };
+    if let (Ok(e), Ok(mut g)) = (s.engine.lock(), shared.gate.lock()) {
+        *g = Some(e.load_gate());
     }
 }
 

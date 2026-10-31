@@ -655,6 +655,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 g("CPU", vec![
                     Check2("Multithreaded instrument processing", true, "Auto-bypass when silent", true),
                     Check2("Multithreaded mixer processing", true, "Align tick lengths", false),
+                    Check("Extra cores only when needed", true),
                 ]),
                 g("Mixer", vec![
                     combo("24-point sinc", 122.0, "Resampling quality"),

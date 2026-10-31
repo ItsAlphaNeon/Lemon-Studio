@@ -35,6 +35,7 @@ mod marks;
 mod notes;
 mod param_auto;
 mod multicore;
+pub use multicore::LoadGate;
 mod pdc;
 mod rec;
 pub use param_auto::PARAM_STEP;
@@ -2347,6 +2348,16 @@ impl Engine {
         }
     }
 
+    /// Whether this engine uses the workers, as far as the load goes (`Multicore`): playback that restarts takes it on
+    /// with `set_load_gate`, or each jump would start on one thread until the load shows again.
+    pub fn load_gate(&self) -> LoadGate {
+        self.multicore.gate()
+    }
+
+    pub fn set_load_gate(&mut self, gate: LoadGate) {
+        self.multicore.set_gate(gate);
+    }
+
     /// Take over playback from `old` (built from an earlier version of the project) at its position: the tick it
     /// already rendered plays out, ringing voices keep playing, notes before the position are not retriggered, and
     /// effect states carry over when the mixer layout is unchanged. Edits are heard from the next tick: ringing voices
@@ -2462,6 +2473,7 @@ impl Engine {
         // The main volume glides from where it was.
         self.main_glide = old.main_glide;
         self.exporting = old.exporting;
+        self.multicore.keep_gate(&old.multicore);
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
                 new.gains = o.gains;
@@ -2749,6 +2761,13 @@ impl Engine {
     /// moves; control points, then automation clips; notes that end are released, then notes that start are
     /// triggered; then the tick's samples are produced.
     fn render_tick(&mut self) {
+        let t0 = std::time::Instant::now();
+        self.render_tick_now();
+        let length = self.out_len as f32 / self.rate.max(1) as f32;
+        self.multicore.note_tick(t0.elapsed().as_secs_f32(), length, self.exporting);
+    }
+
+    fn render_tick_now(&mut self) {
         // Plugins that ask are told they are on the audio thread (CLAP's thread-check), here as on the workers.
         let _audio = crate::parallel::AudioScope::enter();
         if self.held {

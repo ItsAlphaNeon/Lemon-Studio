@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The program's mixing threads (spec: audio/multicore.md): a pool of one fewer workers than the machine has physical
+//! The program's mixing threads (spec: audio/multicore.md): a pool of half as many workers as the machine has physical
 //! cores, which every engine the program builds renders on (playback, exports, renders from the command line), and
-//! Audio ▸ CPU's two switches, "Multithreaded mixer processing" and "Multithreaded instrument processing", which engines
-//! read every tick.
+//! Audio ▸ CPU's switches, "Multithreaded mixer processing", "Multithreaded instrument processing" and "Extra cores only
+//! when needed", which engines read every tick.
 
-use crate::prefs::{check, MULTITHREADED_GENERATORS, MULTITHREADED_MIXER};
+use crate::prefs::{check, MULTITHREADED_AUTO, MULTITHREADED_GENERATORS, MULTITHREADED_MIXER};
 use os_engine::parallel::{self, Pool};
 use std::sync::Arc;
 
@@ -30,6 +30,7 @@ pub fn start() {
 /// Applies the two switches as set (at startup, and when either is clicked).
 pub fn apply() {
     parallel::configure(check(&MULTITHREADED_MIXER), check(&MULTITHREADED_GENERATORS));
+    parallel::configure_auto(check(&MULTITHREADED_AUTO));
 }
 
 /// The machine's physical cores, when the system says.
