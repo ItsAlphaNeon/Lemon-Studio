@@ -41,6 +41,8 @@ pub enum EvAct {
     Ruler,
     /// The level graph.
     Graph,
+    /// The editor behind the one in front (Edit automation in a window): a click brings it in front.
+    Front,
 }
 
 /// An entry of the editor's menu (§4).
@@ -126,6 +128,11 @@ impl Default for EventsUi {
 /// The editor shows the control `target` named `name` at `value` (0..1); `range`: a plugin parameter's own (min,
 /// max), else the target's (`None` when the control takes no control points: the editor does not open).
 pub fn open(s: &mut State, target: u32, name: &str, value: f64, range: Option<(f64, f64)>) -> bool {
+    open_in(&mut s.events, target, name, value, range)
+}
+
+/// [`open`] on editor `e`.
+fn open_in(e: &mut EventsUi, target: u32, name: &str, value: f64, range: Option<(f64, f64)>) -> bool {
     use os_model::target;
     let range = match range {
         Some((min, max)) => (f64::from(target::plugin_point_value(min, max, 0.0)), f64::from(target::plugin_point_value(min, max, 1.0))),
@@ -134,7 +141,6 @@ pub fn open(s: &mut State, target: u32, name: &str, value: f64, range: Option<(f
             None => return false,
         },
     };
-    let e = &mut s.events;
     if e.target != target {
         e.scroll = 0.0;
     }
@@ -159,6 +165,28 @@ pub fn menu_item(auto: Option<&(u32, String, f64)>, range: Option<(f64, f64)>) -
     }
 }
 
+/// Edit automation in a window (§3a), on the menus that have Edit automation: enabled where Edit automation is.
+pub fn window_item(auto: Option<&(u32, String, f64)>, range: Option<(f64, f64)>) -> PItem {
+    let mut item = menu_item(auto, range);
+    item.label = "Edit automation in a window".into();
+    if let Cmd::EditEvents(t, name, v, range) = item.cmd {
+        item.cmd = Cmd::EditEventsWindow(t, name, v, range);
+    }
+    item
+}
+
+/// Closes the editor in front (§3a): the one behind it, if any, comes in front and keeps the clipboard; else the
+/// window closes.
+pub fn close(s: &mut State) {
+    match s.events_back.take() {
+        Some(mut back) => {
+            back.clipboard = s.events.clipboard.take();
+            s.events = back;
+        }
+        None => s.hide(Win::Events),
+    }
+}
+
 /// The level (0..1) of stored `value` in `range`.
 pub fn level(range: (f64, f64), value: i32) -> f64 {
     let (lo, hi) = range;
@@ -173,7 +201,12 @@ pub fn value(range: (f64, f64), level: f64) -> i32 {
 
 /// The control's events in the current pattern: (tick, stored value), in time order.
 pub fn points(s: &State) -> Vec<(u32, i32)> {
-    let kind = s.events.target;
+    points_of(s, s.events.target)
+}
+
+/// Control `target`'s events in the current pattern.
+pub fn points_of(s: &State, target: u32) -> Vec<(u32, i32)> {
+    let kind = target;
     piano::controls(s).iter().filter(|c| c.kind == kind).map(|c| (c.position, c.value)).collect()
 }
 
@@ -514,6 +547,10 @@ impl App {
         if !open(s, target, name, value, range) {
             return None;
         }
+        // A second window left from before the editor closed is not brought back.
+        if !s.shown(Win::Events) {
+            s.events_back = None;
+        }
         if !s.events.placed {
             let (w, h) = crate::views::events::SIZE;
             s.events.pos = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(crate::views::work_y(s)).round());
@@ -522,6 +559,37 @@ impl App {
         s.raise(Win::Events);
         self.invalidate();
         None
+    }
+
+    /// Edit automation in a window (§3a; Lemon Studio's design after the original's "Edit events in new window"): a
+    /// second editor window on the control, in front, 30 px right of and below the editor showing, which keeps its
+    /// control and goes behind. With no editor showing, this is Edit automation. A second window already open gives
+    /// way: there are two at most.
+    pub(crate) fn edit_events_window(&mut self, target: u32, name: &str, value: f64, range: Option<(f64, f64)>) -> Option<String> {
+        if !self.state.shown(Win::Events) {
+            return self.edit_events(target, name, value, range);
+        }
+        let s = &mut self.state;
+        let first = &s.events;
+        let mut e = EventsUi { pos: (first.pos.0 + 30.0, first.pos.1 + 30.0), placed: true, tool: first.tool, px_per_beat: first.px_per_beat, relocate: first.relocate, ..EventsUi::default() };
+        if !open_in(&mut e, target, name, value, range) {
+            return None;
+        }
+        e.clipboard = s.events.clipboard.take();
+        s.events_back = Some(std::mem::replace(&mut s.events, e));
+        s.raise(Win::Events);
+        self.invalidate();
+        None
+    }
+
+    /// A click on the editor behind (§3a): the two editors change places, the clipboard staying with the one in front.
+    fn events_front(&mut self) {
+        let s = &mut self.state;
+        let Some(back) = s.events_back.as_mut() else { return };
+        std::mem::swap(&mut s.events, back);
+        std::mem::swap(&mut s.events.clipboard, &mut back.clipboard);
+        s.raise(Win::Events);
+        self.damage_win(Win::Events);
     }
 
     /// A control of the window, pressed.
@@ -535,6 +603,7 @@ impl App {
             EvAct::Tool(t) => self.state.events.tool = t,
             EvAct::Ruler => self.events_press(false, true),
             EvAct::Graph => self.events_press(false, false),
+            EvAct::Front => return self.events_front(),
         }
         self.damage_win(Win::Events);
     }
@@ -816,7 +885,7 @@ pub fn turn_into_clip(s: &mut State) -> Option<String> {
     let (target, name) = (s.events.target, s.events.name.clone());
     let row = crate::playlist::automation_channel(s, target, &name, clip);
     erase(s, 0, u32::MAX);
-    s.hide(Win::Events);
+    close(s);
     let name = s.project.channels.get(row).and_then(|c| c.name.clone()).unwrap_or(name);
     Some(format!("Created automation clip \"{name}\""))
 }
@@ -1101,5 +1170,79 @@ mod tests {
         crate::history::undo(&mut app.state);
         assert_eq!(app.state.project.channels.len(), rows);
         assert_eq!(points(&app.state), pts, "undo brings the events back");
+    }
+
+    /// Edit automation in a window (§3a): with no editor showing it is Edit automation; with one, a second editor on the
+    /// panning knob comes in front, 30 px off the first, which keeps the volume knob behind it; both are drawn; a click
+    /// on the one behind brings it in front, the clipboard staying in front; closing the front one brings the other
+    /// back, and closing that one closes the window.
+    #[test]
+    fn edit_automation_in_a_window() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut d = Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let item = |app: &App, k: KnobId| {
+            let auto = app.automation_target(&Action::Knob(k));
+            crate::rack::knob_menu(&app.state, k, auto, 0.0, 0.0).items.into_iter().find(|i| i.label == "Edit automation in a window").expect("the entry")
+        };
+        let target = |app: &App, k: KnobId| app.automation_target(&Action::Knob(k)).expect("automated").0;
+        let (vol, pan) = (target(&app, KnobId::ChanVol(0)), target(&app, KnobId::ChanPan(0)));
+
+        let w = item(&app, KnobId::ChanVol(0));
+        assert!(w.enabled);
+        crate::playlist::run(&mut app, w.cmd);
+        assert!(app.state.shown(Win::Events) && app.state.in_front(Win::Events) && app.state.events_back.is_none());
+        assert_eq!(app.state.events.target, vol);
+        let first = crate::views::events::rect(&app.state);
+        // The editor is drawn (its paint area is the window's).
+        app.paint(&mut c, None);
+        app.state.z.retain(|w| *w != Win::Events);
+        app.paint(&mut d, None);
+        app.state.z.push(Win::Events);
+        let px = |c: &Canvas, x: f32, y: f32| c.pixmap.pixel(x as u32, y as u32).map(|p| (p.red(), p.green(), p.blue()));
+        assert_ne!(px(&c, first.cx(), first.y + 4.0), px(&d, first.cx(), first.y + 4.0), "the editor is drawn");
+
+        set(&mut app.state, 24, 0.75);
+        app.state.events.sel = Some((0, 48));
+        app.events_cmd(EvCmd::Copy);
+        assert!(app.state.events.clipboard.is_some());
+        let cmd = item(&app, KnobId::ChanPan(0)).cmd;
+        crate::playlist::run(&mut app, cmd);
+        assert_eq!(app.state.events.target, pan);
+        assert_eq!(app.state.events_back.as_ref().map(|b| b.target), Some(vol));
+        let second = crate::views::events::rect(&app.state);
+        assert_eq!((second.x - first.x, second.y - first.y), (30.0, 30.0));
+        assert!(app.state.events.clipboard.is_some(), "the clipboard is in front");
+
+        // Both are drawn: the first's title, left of the second, is the first's title.
+        app.paint(&mut c, None);
+        let back = app.state.events_back.take();
+        app.paint(&mut d, None);
+        app.state.events_back = back;
+        let (x, y) = (first.x + 12.0, first.y + 14.0);
+        assert!(!second.contains(x, y));
+        assert_ne!(px(&c, x, y), px(&d, x, y), "the editor behind is drawn");
+
+        // A click on the one behind brings it in front.
+        app.paint(&mut c, None);
+        app.mouse_move(first.x + 200.0, first.y + 10.0);
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!(app.state.events.target, vol);
+        assert_eq!(app.state.events_back.as_ref().map(|b| b.target), Some(pan));
+        assert_eq!(crate::views::events::rect(&app.state), first);
+        assert!(app.state.events.clipboard.is_some() && app.state.events_back.as_ref().unwrap().clipboard.is_none());
+
+        app.act(Action::CloseWin(Win::Events));
+        assert!(app.state.shown(Win::Events) && app.state.events_back.is_none());
+        assert_eq!(app.state.events.target, pan);
+        assert!(app.state.events.clipboard.is_some());
+        app.act(Action::CloseWin(Win::Events));
+        assert!(!app.state.shown(Win::Events));
+        // Opened again later: one window.
+        let cmd = item(&app, KnobId::ChanVol(0)).cmd;
+        crate::playlist::run(&mut app, cmd);
+        assert!(app.state.shown(Win::Events) && app.state.events_back.is_none());
     }
 }
