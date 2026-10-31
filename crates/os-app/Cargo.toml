@@ -83,6 +83,10 @@ cpal = { version = "0.18", features = ["pulseaudio"] }
 # protocol crate cpal's PulseAudio host is built on.
 pulseaudio = "0.3"
 x11rb = { version = "0.13", features = ["randr", "resource_manager", "shape"] }
+# Real-time priority for the audio threads (`rt`): rtkit on the system bus, through the zbus the file dialogs
+# already bring.
+libc = "0.2"
+zbus = "5"
 
 # The main window's chrome (`macos`), plugin windows (`plugin_window::cocoa`) and the startup splash (`splash`): the
 # objc2 crates softbuffer already uses.

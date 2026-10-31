@@ -27,6 +27,8 @@ mod browser;
 mod browser_index;
 mod cable;
 mod capture;
+#[cfg(target_os = "linux")]
+mod rt;
 mod one_click;
 mod track_rec;
 mod audio_log;

@@ -1203,7 +1203,16 @@ pub(crate) fn raise_priority() {
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+/// Linux: real-time priority, by itself or through rtkit (`crate::rt`); at normal priority when neither allows it. The
+/// mixing threads (`crate::mix_threads`) take it too.
+#[cfg(target_os = "linux")]
+pub(crate) fn raise_priority() {
+    if let Err(e) = crate::rt::promote(crate::rt::tid()) {
+        eprintln!("Audio: a rendering thread runs at normal priority ({e})");
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub(crate) fn raise_priority() {}
 
 /// The sample library for engines whose sampler channels Lemon Sampler instances play. They stretch for themselves
@@ -2527,6 +2536,40 @@ mod tests {
         t.note_off(4, 67);
         std::thread::sleep(Duration::from_millis(100));
         assert!(t.sounding().is_empty() && t.peaks() == (0.0, 0.0), "released: {:?}", t.peaks());
+    }
+
+    /// Linux: while a project plays, the feeder and the device callback run at real-time priority (`crate::rt`; needs an
+    /// audio device and rtkit or an rtprio limit): `hidden-tests cargo test -p os-app --bin lemonstudio
+    /// transport::tests::audio_threads_run_realtime -- --ignored --exact --nocapture`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn audio_threads_run_realtime() {
+        crate::rt::enable_in_tests();
+        let mut project = crate::app::test_project();
+        let ch = project.channels[0].index;
+        project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
+        let t = Transport::new(None);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        wait_for(|| t.seconds() >= 0.5);
+        std::thread::sleep(Duration::from_millis(300));
+        let threads: Vec<(i32, String, bool)> = std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .flatten()
+            .filter_map(|e| {
+                let tid: i32 = e.file_name().to_str()?.parse().ok()?;
+                let name = std::fs::read_to_string(e.path().join("comm")).ok()?.trim().to_string();
+                Some((tid, name, crate::rt::is_realtime(tid)))
+            })
+            .collect();
+        t.stop();
+        let rt: Vec<&str> = threads.iter().filter(|t| t.2).map(|t| t.1.as_str()).collect();
+        let (promoted, demoted) = crate::rt::counts();
+        println!("real-time threads now: {rt:?}; promoted {promoted}, demoted by the safety cap {demoted}");
+        // A device that paces playback keeps both real-time; one that does not (the null device) lets them spin, and the
+        // safety cap puts them back to normal priority instead of the kernel killing the program.
+        assert!(promoted >= 2, "the feeder and the device callback were promoted: {threads:?}");
+        assert!(rt.len() + demoted >= 2, "each is real-time still, or was demoted: {rt:?}");
     }
 
     /// Pause holds the position silently; resume continues from it; Stop rewinds (needs an audio device).
