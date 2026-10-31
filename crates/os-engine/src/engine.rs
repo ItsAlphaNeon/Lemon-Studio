@@ -2716,6 +2716,38 @@ impl Engine {
         Some((&self.out[from..], tick, frame, self.out_held, self.out_len))
     }
 
+    /// Takes a project edit in place (see [`LiveEdit`]), as a new engine for the edited project would have it.
+    pub fn apply_edit(&mut self, edit: LiveEdit) {
+        match edit {
+            LiveEdit::ChannelVolume(c, v) => {
+                if let Some(ch) = self.channels.get_mut(c) {
+                    ch.glide(Some(v), None, 0);
+                }
+            }
+            LiveEdit::ChannelPan(c, p) => {
+                if let Some(ch) = self.channels.get_mut(c) {
+                    ch.glide(None, Some(p), 0);
+                }
+            }
+            LiveEdit::ChannelPitch(c, cents) => {
+                if let Some(ch) = self.channels.get_mut(c) {
+                    ch.init_knob = f64::from(cents);
+                    ch.retune(f64::from(cents));
+                }
+            }
+            LiveEdit::MixerVolume(t, v) | LiveEdit::MixerPan(t, v) | LiveEdit::MixerSeparation(t, v) => {
+                if let Some(m) = self.tracks.get_mut(t) {
+                    match edit {
+                        LiveEdit::MixerVolume(..) => m.vol = (v * 16000.0).round() as i32,
+                        LiveEdit::MixerPan(..) => m.pan = (v * 6400.0).round() as i32,
+                        _ => m.sep = (v * 64.0).round() as i32,
+                    }
+                    m.matrix = m.compute_matrix();
+                }
+            }
+        }
+    }
+
     /// Renders the next tick into `self.out`, in the order of spec audio/timing.md ("What a tick does"): the clock
     /// moves; control points, then automation clips; notes that end are released, then notes that start are
     /// triggered; then the tick's samples are produced.
@@ -4239,6 +4271,89 @@ fn lock_busy<'a, T: ?Sized>(m: &'a Mutex<T>, until: &mut Option<Instant>, wait: 
         }
         std::thread::yield_now();
     }
+}
+
+/// A project edit a playing engine can take in place ([`Engine::apply_edit`]), so that moving a knob does not build a new
+/// engine: the channels' volume, pan and pitch knobs and the mixer tracks' volume, pan and separation, by index, as
+/// `Channel` and `MixerTrack` hold them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LiveEdit {
+    ChannelVolume(usize, f64),
+    ChannelPan(usize, f64),
+    ChannelPitch(usize, i32),
+    MixerVolume(usize, f64),
+    MixerPan(usize, f64),
+    MixerSeparation(usize, f64),
+}
+
+impl LiveEdit {
+    /// `project` as this edit leaves it.
+    pub fn apply_to(self, project: &mut Project) {
+        let channel = |p: &mut Project, c: usize, f: &mut dyn FnMut(&mut os_model::Channel)| {
+            if let Some(ch) = p.channels.get_mut(c) {
+                f(ch);
+            }
+        };
+        match self {
+            LiveEdit::ChannelVolume(c, v) => channel(project, c, &mut |ch| ch.volume = v),
+            LiveEdit::ChannelPan(c, p) => channel(project, c, &mut |ch| ch.pan = p),
+            LiveEdit::ChannelPitch(c, cents) => channel(project, c, &mut |ch| ch.pitch_cents = cents),
+            LiveEdit::MixerVolume(t, v) => {
+                if let Some(m) = project.mixer.get_mut(t) {
+                    m.volume = Some(v);
+                }
+            }
+            LiveEdit::MixerPan(t, v) => {
+                if let Some(m) = project.mixer.get_mut(t) {
+                    m.pan = Some(v);
+                }
+            }
+            LiveEdit::MixerSeparation(t, v) => {
+                if let Some(m) = project.mixer.get_mut(t) {
+                    m.stereo_separation = Some(v);
+                }
+            }
+        }
+    }
+}
+
+/// The edits that turn `sent` into `new`, when those are all that differ and there is one at least; `sent` is left with
+/// them applied. `None`: something else differs, or nothing does, and a new engine is built as ever (it also reads the
+/// program's settings). A track's level that goes unset is not such an edit.
+pub fn live_edits(sent: &mut Project, new: &Project) -> Option<Vec<LiveEdit>> {
+    if sent.channels.len() != new.channels.len() || sent.mixer.len() != new.mixer.len() {
+        return None;
+    }
+    let mut edits = Vec::new();
+    for (c, (a, b)) in sent.channels.iter().zip(&new.channels).enumerate() {
+        if a.volume != b.volume {
+            edits.push(LiveEdit::ChannelVolume(c, b.volume));
+        }
+        if a.pan != b.pan {
+            edits.push(LiveEdit::ChannelPan(c, b.pan));
+        }
+        if a.pitch_cents != b.pitch_cents {
+            edits.push(LiveEdit::ChannelPitch(c, b.pitch_cents));
+        }
+    }
+    for (t, (a, b)) in sent.mixer.iter().zip(&new.mixer).enumerate() {
+        if let (true, Some(v)) = (a.volume != b.volume, b.volume) {
+            edits.push(LiveEdit::MixerVolume(t, v));
+        }
+        if let (true, Some(v)) = (a.pan != b.pan, b.pan) {
+            edits.push(LiveEdit::MixerPan(t, v));
+        }
+        if let (true, Some(v)) = (a.stereo_separation != b.stereo_separation, b.stereo_separation) {
+            edits.push(LiveEdit::MixerSeparation(t, v));
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    for e in &edits {
+        e.apply_to(sent);
+    }
+    (*sent == *new).then_some(edits)
 }
 
 /// Orders tracks so that every track is processed before any track it routes to.
@@ -6790,6 +6905,7 @@ mod tests {
         }
     }
 
+<<<<<<< HEAD
     /// A pitch knob moved while a note plays (`set_channel_pitch`, a controller's pitch wheel) moves the sounding note at
     /// once, as an engine built with that pitch plays it.
     #[test]
@@ -6807,6 +6923,60 @@ mod tests {
         e.render_ticks(192, &mut after);
         let f = hz(&left(&after, 44100.0, 0.05, 0.3), 44100.0);
         assert!((f - 880.0).abs() < 5.0, "an octave up at once: {f} Hz");
+=======
+    /// Knobs moved while a note plays: the engine that takes them in place renders what a new engine takes over with.
+    #[test]
+    fn an_edit_in_place_sounds_as_a_new_engine() {
+        let wav = Sines::new("live-edit", &[(440.0, 3.0)]);
+        let mut p = project(vec![long_note(0, 384 * 4, 0)], vec![]);
+        p.channels[0].sample_path = wav.path();
+        p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        let mut edited = p.clone();
+        let edits = [LiveEdit::ChannelVolume(0, 0.3), LiveEdit::ChannelPan(0, -0.4), LiveEdit::ChannelPitch(0, 700), LiveEdit::MixerVolume(1, 0.5), LiveEdit::MixerPan(1, 0.25), LiveEdit::MixerSeparation(0, 0.5)];
+        for e in edits {
+            e.apply_to(&mut edited);
+        }
+        let mut lib = SampleLibrary::new(None);
+        let (mut a, mut b) = (Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1)), Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1)));
+        let (mut x, mut y) = (Vec::new(), Vec::new());
+        a.render_ticks(96, &mut x);
+        b.render_ticks(96, &mut y);
+        assert_eq!(x, y);
+        for e in edits {
+            a.apply_edit(e);
+        }
+        let mut c = Engine::new(&edited, &mut lib, 44100, PlayMode::Pattern(1));
+        c.continue_from(&mut b);
+        let (mut x, mut y) = (Vec::new(), Vec::new());
+        a.render_ticks(192, &mut x);
+        c.render_ticks(192, &mut y);
+        assert_eq!(x.len(), y.len());
+        let worst = x.iter().zip(&y).map(|(m, n)| (m - n).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-5, "differ by {worst}");
+        assert!(rms(&x) > 0.001, "something plays");
+    }
+
+    /// Levels alone are edits in place; anything else, or nothing at all, is a new engine.
+    #[test]
+    fn only_levels_are_edits_in_place() {
+        let mut p = project(vec![long_note(0, 384, 0)], vec![]);
+        p.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+        let mut sent = p.clone();
+        let mut new = p.clone();
+        new.channels[0].volume = 0.25;
+        new.mixer[1].pan = Some(0.5);
+        assert_eq!(live_edits(&mut sent, &new), Some(vec![LiveEdit::ChannelVolume(0, 0.25), LiveEdit::MixerPan(1, 0.5)]));
+        assert!(sent == new, "taken into what was sent");
+        assert_eq!(live_edits(&mut sent, &new), None, "nothing changed");
+        new.channels[0].volume = 0.5;
+        new.channels[0].name = Some("x".into());
+        assert_eq!(live_edits(&mut sent, &new), None, "a name too");
+        let mut sent = p.clone();
+        let mut new = p.clone();
+        new.channels[0].volume = 0.5;
+        new.patterns[0].notes.clear();
+        assert_eq!(live_edits(&mut sent, &new), None, "notes too");
+>>>>>>> d8ad064 (Knob edits reach the playing engines in place)
     }
 
     // spec: audio/time-stretch.md "How each method plays" (realtime methods: the key moves the pitch, not the length)
