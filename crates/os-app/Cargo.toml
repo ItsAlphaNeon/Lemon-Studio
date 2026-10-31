@@ -76,6 +76,7 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_ToolHelp", "Win32_System_DataExchange", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Diagnostics_Debug", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_System_Registry", "Win32_System_SystemInformation"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 # Shared mode plays through the sound server (PulseAudio, or PipeWire's pipewire-pulse) as other programs do; the
 # PulseAudio host speaks the protocol in Rust, so no system library is linked. Exclusive mode opens ALSA directly.
 cpal = { version = "0.18", features = ["pulseaudio"] }
