@@ -168,6 +168,8 @@ fn c_caption() -> Color {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelInfo {
     pub name: String,
+    /// The icon chosen with Change icon... (Lemon Studio's design, `crate::playlist::ICONS`), drawn before the name.
+    pub icon: Option<crate::icons::Icon>,
     /// "Bus 3" / "Master".
     pub target: String,
     pub enabled: bool,
@@ -627,7 +629,11 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     let p = presets_rect(st);
     let f = title_font();
     let ty = (19.0 - c.ascent(f)).round();
-    let nx = 48.0;
+    let mut nx = 48.0;
+    if let Some(i) = st.info.icon {
+        crate::icons::draw(c, i, Rect::new(nx, 8.0, 15.0, 15.0), c_text());
+        nx += 21.0;
+    }
     let room = (p.x - 8.0 - nx).max(0.0);
     let nw = c.text_width(f, &st.info.name).min(room);
     c.text_clip(f, nx, ty, room, c_text(), &st.info.name);
@@ -1248,7 +1254,7 @@ mod tests {
     use super::*;
 
     fn state(strip: bool, target: &str) -> State {
-        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: Some(Default::default()) };
+        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: Some(Default::default()), icon: None };
         State { strip, ..State::new(info, (480.0, 270.0), false) }
     }
 

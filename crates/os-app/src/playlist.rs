@@ -214,6 +214,10 @@ pub enum Cmd {
     /// Plugin window menu > Detached: rack row, new state (spec: ui/plugin-window.md "Docking and the window menu").
     #[cfg_attr(not(windows), allow(dead_code))]
     PluginDetach(usize, bool),
+    /// Change icon... ▸: a rack row or `fx_key`, and the index into `ICONS` (`None`: no icon).
+    SetIcon(usize, Option<usize>),
+    /// Plugin window menu > Channel: Save channel state as..., Browse channel states, and a channel state added.
+    ChannelState(crate::channel_states::CsCmd),
     /// Plugin window menu > CPU: the window's channel row or `fx_key`, and which switch (`true` = Smart disable, else
     /// Allow threaded processing) to flip (spec: ui/plugin-window.md "CPU").
     PluginCpu(usize, bool),
@@ -655,6 +659,66 @@ pub struct PlaylistState {
     pub wave_wait: bool,
     /// Performance mode's launched clips (spec: ui/performance-mode.md).
     pub perform: crate::perform::Perform,
+    /// Change icon... (Lemon Studio's design): the icon each channel or effect slot shows, for the session.
+    pub icons: HashMap<IconOwner, crate::icons::Icon>,
+}
+
+/// Change icon... (Lemon Studio's design, spec: ui/plugin-window.md "Change icon"): the icons a channel or an effect slot
+/// can show, by name.
+pub const ICONS: &[(&str, crate::icons::Icon)] = {
+    use crate::icons::Icon::*;
+    &[
+        ("Drum", Kick),
+        ("Keys", PianoRoll),
+        ("Microphone", Mic),
+        ("Wave", Wave),
+        ("Note", Note),
+        ("Speaker", Speaker),
+        ("Metronome", Metronome),
+        ("Star", Star),
+        ("Plug", Plug),
+        ("Slice", Slice),
+        ("Touch", Touch),
+        ("Blend", Blend),
+    ]
+};
+
+/// Whose icon: a channel (by id, so it follows the channel when rows move) or a mixer slot (track, slot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IconOwner {
+    Channel(u32),
+    Slot(u16, u8),
+}
+
+/// The owner of a plugin window's icon: `key` a rack row or an `fx_key`.
+fn icon_owner(p: &os_model::Project, key: usize) -> Option<IconOwner> {
+    match crate::plugins::fx_of(key) {
+        Some((t, k)) => Some(IconOwner::Slot(t, k)),
+        None => p.channels.get(key).map(|c| IconOwner::Channel(c.id.0)),
+    }
+}
+
+/// The icon chosen for window `key` (a rack row or an `fx_key`), if any.
+pub fn window_icon(p: &os_model::Project, icons: &HashMap<IconOwner, crate::icons::Icon>, key: usize) -> Option<crate::icons::Icon> {
+    icons.get(&icon_owner(p, key)?).copied()
+}
+
+/// Change icon... ▸: None, then [`ICONS`], the current one ticked; each sets the icon of `key` (a rack row or an
+/// `fx_key`).
+pub fn icon_items(s: &State, key: usize) -> Vec<PItem> {
+    let cur = window_icon(&s.project, &s.playlist.icons, key);
+    let mut v = vec![PItem::new("None", Cmd::SetIcon(key, None)).mark(Mark::Check(cur.is_none()))];
+    v.extend(ICONS.iter().enumerate().map(|(i, &(name, icon))| PItem::new(name, Cmd::SetIcon(key, Some(i))).mark(Mark::Check(cur == Some(icon)))));
+    v
+}
+
+/// Sets (or with `None` clears) the icon of `key`; no undo step (it is not part of the project).
+fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
+    let Some(owner) = icon_owner(&s.project, key) else { return };
+    match icon.and_then(|i| ICONS.get(i)) {
+        Some(&(_, i)) => s.playlist.icons.insert(owner, i),
+        None => s.playlist.icons.remove(&owner),
+    };
 }
 
 impl Default for PlaylistState {
@@ -694,6 +758,7 @@ impl Default for PlaylistState {
             tones: RefCell::new(HashMap::new()),
             wave_wait: false,
             perform: crate::perform::Perform::default(),
+            icons: HashMap::new(),
         }
     }
 }
@@ -2590,7 +2655,10 @@ pub fn pick_menu(s: &State, ch: u16, x: f32, y: f32) -> Popup {
         it("Rename, color and icon...", PickCmd::Rename),
         it("Change color...", PickCmd::ChangeColor),
         it("Random color", PickCmd::RandomColor),
-        PItem::not_yet("Change icon..."),
+        match s.project.channels.iter().position(|c| c.index == ch) {
+            Some(row) => PItem::sub("Change icon...", icon_items(s, row)),
+            None => PItem::not_yet("Change icon..."),
+        },
         PItem::sep(),
     ]);
     if audio {
@@ -4254,6 +4322,16 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return None;
         }
+        Cmd::SetIcon(key, icon) => {
+            set_icon(&mut app.state, key, icon);
+            app.invalidate();
+            return None;
+        }
+        Cmd::ChannelState(c) => {
+            let m = crate::channel_states::run(app, c);
+            app.invalidate();
+            return m;
+        }
         Cmd::PluginCpu(key, smart) => {
             flip_plugin_cpu(&mut app.state, key, smart);
             app.invalidate();
@@ -4297,7 +4375,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::SlotWin(..) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::PluginCpu(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::SlotWin(..) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::PluginCpu(..) | Cmd::ChannelState(_) | Cmd::SetIcon(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -5137,7 +5215,7 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::not_yet("Copy to B"),
         PItem::not_yet("Swap A / B"),
         PItem::head("Parameters"),
-        PItem::not_yet("Link all parameters..."),
+        PItem::new("Link all parameters...", Cmd::Remote(crate::remote::RCmd::LinkAll(row))),
         PItem::new("Show all parameters", Cmd::Param(crate::params::PCmd::Browse(row))),
         PItem::head("CPU"),
         PItem::not_yet("Allow threaded processing").mark(Mark::Check(true)),
@@ -5151,8 +5229,8 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
         PItem::new(if detached { "Attach" } else { "Detach" }, Cmd::PluginDetach(row, !detached)),
         PItem::col(),
         PItem::head("Channel"),
-        PItem::not_yet("Save channel state as..."),
-        PItem::not_yet("Browse channel states"),
+        PItem::new("Save channel state as...", Cmd::ChannelState(crate::channel_states::CsCmd::Save(row))),
+        PItem::new("Browse channel states", Cmd::ChannelState(crate::channel_states::CsCmd::Browse)),
         PItem::sep(),
         PItem::new("Route to free mixer track", Cmd::Rack(crate::rack::RCmd::AssignFree(row))).key("Ctrl+L"),
     ];
@@ -5188,7 +5266,7 @@ pub fn flip_plugin_cpu(s: &mut State, key: usize, smart: bool) {
         let b = if smart { &mut c.smart_disable } else { &mut c.threaded };
         *b = !*b;
     };
-    let name = if smart { "Smart disable" } else { "Threaded processing" };
+    let name = if smart { "Auto-bypass when silent" } else { "Threaded processing" };
     match crate::plugins::fx_of(key) {
         Some((t, k)) => crate::control::edit(s, name, Region::Track(t), |s| {
             if let Some(m) = s.project.mixer.iter_mut().find(|m| m.index == t) {
@@ -5238,6 +5316,7 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
                     *it = PItem::sub("Change color...", colors);
                 }
                 "Random color" => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::SlotRandomColor(k))))),
+                "Change icon..." => *it = PItem::sub("Change icon...", icon_items(s, key)),
                 _ => {}
             }
         }
@@ -5252,6 +5331,7 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
             "Rename, color and icon..." => set(it, Cmd::Pick(PickCmd::Rename, ch)),
             "Change color..." => set(it, Cmd::Pick(PickCmd::ChangeColor, ch)),
             "Random color" => set(it, Cmd::Rack(RCmd::RandomColor(key))),
+            "Change icon..." => *it = PItem::sub("Change icon...", icon_items(s, key)),
             _ => {}
         }
     }
@@ -5351,9 +5431,11 @@ mod tests {
         for label in ["Piano roll", "Delete...", "Rename, color and icon...", "Change color...", "Random color"] {
             assert!(entry(&m, label).enabled, "{label}");
         }
-        for label in ["Link all parameters...", "Change icon...", "Save channel state as...", "Browse channel states"] {
-            assert!(!entry(&m, label).enabled, "{label} stays greyed");
-        }
+        // Every entry of the menu's channel part works now.
+        assert_eq!(entry(&m, "Link all parameters...").cmd, Cmd::Remote(crate::remote::RCmd::LinkAll(1)));
+        assert_eq!(entry(&m, "Save channel state as...").cmd, Cmd::ChannelState(crate::channel_states::CsCmd::Save(1)));
+        assert_eq!(entry(&m, "Browse channel states").cmd, Cmd::ChannelState(crate::channel_states::CsCmd::Browse));
+        assert_eq!(entry(&m, "Change icon...").children.len(), 1 + ICONS.len());
         run(&mut app, entry(&m, "Piano roll").cmd.clone());
         assert!(app.state.shown(Win::PianoRoll));
         assert_eq!(app.state.selected_channel, 1);
@@ -5388,9 +5470,11 @@ mod tests {
             assert!(!m.items.iter().any(|i| i.label == label), "{label}");
         }
         assert!(!m.items.iter().any(|i| i.col));
-        for label in ["Link all parameters...", "Change icon..."] {
-            assert!(!entry(&m, label).enabled, "{label} stays greyed");
-        }
+        assert_eq!(entry(&m, "Link all parameters...").cmd, Cmd::Remote(crate::remote::RCmd::LinkAll(key)));
+        // Change icon... ▸: the slot's icon, its window's title draws it.
+        let star = entry(&m, "Change icon...").children.iter().find(|i| i.label == "Star").unwrap().cmd.clone();
+        run(&mut app, star);
+        assert_eq!(window_icon(&app.state.project, &app.state.playlist.icons, key), Some(crate::icons::Icon::Star));
         // Change color... ▸ and Random color: the slot's colour, on that slot.
         let change = entry(&m, "Change color...");
         assert!(change.enabled && change.children.len() > 1);
@@ -5419,6 +5503,34 @@ mod tests {
         assert!(crate::mixer::track(&app.state, t).unwrap().slots[usize::from(k)].is_some(), "one undo step");
     }
 
+    /// Change icon... (Lemon Studio's design, ui/plugin-window.md "Change icon"): the picker's and the window menu's
+    /// submenu set the channel's icon, ticked there; the picker item and the clips draw it, it follows the channel when
+    /// rows move, None clears it.
+    #[test]
+    fn change_icon() {
+        let mut app = app();
+        app.state.control.settle(&mut app.state.project);
+        app.state.project.channels[0].kind = os_model::ChannelKind::AudioClip;
+        let ch = app.state.project.channels[0].index;
+        let menu = |app: &App| entry(&pick_menu(&app.state, ch, 0.0, 0.0), "Change icon...").clone();
+        let m = menu(&app);
+        assert!(m.enabled && m.children[0].label == "None" && m.children[0].mark == Mark::Check(true));
+        let keys = m.children.iter().find(|i| i.label == "Keys").unwrap().cmd.clone();
+        run(&mut app, keys);
+        assert_eq!(window_icon(&app.state.project, &app.state.playlist.icons, 0), Some(crate::icons::Icon::PianoRoll));
+        assert_eq!(menu(&app).children.iter().find(|i| i.label == "Keys").unwrap().mark, Mark::Check(true));
+        // The window menu shows the same choice.
+        let mut w = plugin_window_menu(0, false, 0.0, 0.0);
+        fill_plugin_window_menu(&app.state, 0, &mut w);
+        assert_eq!(entry(&w, "Change icon...").children.iter().find(|i| i.label == "Keys").unwrap().mark, Mark::Check(true));
+        // It belongs to the channel, not the row.
+        app.state.project.channels.swap(0, 1);
+        assert_eq!(window_icon(&app.state.project, &app.state.playlist.icons, 1), Some(crate::icons::Icon::PianoRoll));
+        assert_eq!(window_icon(&app.state.project, &app.state.playlist.icons, 0), None);
+        run(&mut app, Cmd::SetIcon(1, None));
+        assert!(app.state.playlist.icons.is_empty());
+    }
+
     /// The window menu's CPU entries (ui/plugin-window.md "CPU"): ticked from the plugin's switches, each flip one undo
     /// step, for a plugin channel and an effect slot (whose switches follow it when it moves); greyed for a sampler.
     #[test]
@@ -5442,6 +5554,7 @@ mod tests {
         let cpu = app.state.project.channels[1].misc.cpu;
         assert_eq!((cpu.threaded, cpu.smart_disable), (true, true));
         assert_eq!(entry(&menu(&app, 1), "Auto-bypass when silent").mark, Mark::Check(true));
+        assert!(crate::history::edit_label(&app.state, false).to_lowercase().contains("auto-bypass when silent"), "the step's name");
         crate::history::undo(&mut app.state);
         assert!(!app.state.project.channels[1].misc.cpu.smart_disable, "one undo step");
 

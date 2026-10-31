@@ -265,6 +265,8 @@ pub fn menu_items(t: Option<Target>) -> Vec<PItem> {
 pub enum RCmd {
     Link(Target),
     Unlink(Target),
+    /// A plugin window menu's Link all parameters...: hosted instance key (spec §6).
+    LinkAll(usize),
 }
 
 /// The Remote control settings box (spec §2, §3), while open.
@@ -284,6 +286,9 @@ pub struct LinkBox {
     pub smooth: bool,
     pub time: u16,
     pub conflicts: bool,
+    /// Link all parameters... (spec §6): the instance's parameters to link, in order, to the controller set and the
+    /// ones after it (`target` is the first's); empty for a single link.
+    pub all: Vec<usize>,
 }
 
 impl LinkBox {
@@ -301,6 +306,7 @@ impl LinkBox {
             smooth: false,
             time: SMOOTH_DEFAULT,
             conflicts: true,
+            all: Vec::new(),
         };
         // An existing link opens with its settings.
         if let Some(l) = link_of(target) {
@@ -318,7 +324,7 @@ impl LinkBox {
 
     /// Reset: every field back to its default (spec §3).
     pub fn reset(&mut self) {
-        *self = LinkBox { target: self.target, at: self.at, ..LinkBox::new_blank(self.target) };
+        *self = LinkBox { target: self.target, at: self.at, all: std::mem::take(&mut self.all), ..LinkBox::new_blank(self.target) };
     }
 
     fn new_blank(target: Target) -> LinkBox {
@@ -335,7 +341,25 @@ impl LinkBox {
             smooth: false,
             time: SMOOTH_DEFAULT,
             conflicts: true,
+            all: Vec::new(),
         }
+    }
+
+    /// Link all parameters... of hosted instance `key` (spec §6): its visible parameters `params`, the box blank.
+    pub fn all(key: usize, params: Vec<usize>, at: (f32, f32)) -> LinkBox {
+        let first = params.first().copied().unwrap_or(0);
+        LinkBox { at, all: params, ..LinkBox::new_blank(Target::Param(key, first)) }
+    }
+
+    /// The links Accept makes: the one link, or for Link all parameters... one per parameter on the controller set and
+    /// the ones after it, as far as controller 127 goes.
+    pub fn links(&self) -> Vec<Link> {
+        let Some(l) = self.link() else { return Vec::new() };
+        let Target::Param(key, _) = self.target else { return vec![l] };
+        if self.all.is_empty() {
+            return vec![l];
+        }
+        self.all.iter().zip(l.cc..=127).map(|(&i, cc)| Link { cc, target: Target::Param(key, i), ..l }).collect()
     }
 
     /// The link it makes on Accept: none while Ctrl is "---".
@@ -589,6 +613,19 @@ impl App {
                 remove(t);
                 self.state.message = Some("Link removed".into());
             }
+            RCmd::LinkAll(key) => {
+                self.params_tick();
+                let params: Vec<usize> = self.state.params.visible(key).map(|(i, _)| i).collect();
+                if params.is_empty() {
+                    self.state.message = Some("This plugin has no parameters to link".into());
+                    return self.invalidate();
+                }
+                let (w, h) = crate::views::remote_box::SIZE;
+                let (sw, sh) = self.state.screen;
+                let at = ((self.mouse.0 - 20.0).clamp(0.0, (sw - w).max(0.0)), (self.mouse.1 - 20.0).clamp(0.0, (sh - h).max(0.0)));
+                self.state.link_box = Some(LinkBox::all(key, params, at));
+                self.state.message = Some("Move the MIDI controller for the first parameter".into());
+            }
         }
         self.invalidate();
     }
@@ -596,6 +633,24 @@ impl App {
     /// Accept: makes the link and closes the box (spec §3).
     pub(crate) fn link_accept(&mut self) {
         let Some(b) = self.state.link_box.take() else { return };
+        if let (false, Target::Param(key, _)) = (b.all.is_empty(), b.target) {
+            let made = b.links();
+            for l in &made {
+                add(*l, b.conflicts);
+            }
+            self.state.message = Some(match (made.first(), made.last()) {
+                (Some(a), Some(z)) => format!(
+                    "Linked {} parameters of {} to channel {}, controllers {} to {}",
+                    made.len(),
+                    crate::params::owner_name(&self.state, key),
+                    a.ch + 1,
+                    a.cc,
+                    z.cc
+                ),
+                _ => "No controller: nothing linked".into(),
+            });
+            return self.invalidate();
+        }
         match b.link() {
             Some(l) => {
                 add(l, b.conflicts);
@@ -733,6 +788,24 @@ mod tests {
         assert_eq!(Formula::Inverted.map(0.25), 0.75);
         assert_eq!(Formula::Square.map(0.5), 0.25);
         assert_eq!(Formula::Root.map(0.25), 0.5);
+    }
+
+    /// Link all parameters... (spec §6): one link per parameter, on the controller set and the ones after it, as far as
+    /// controller 127; Reset keeps the parameters.
+    #[test]
+    fn the_box_links_all_parameters() {
+        let mut b = LinkBox::all(7, vec![0, 2, 3, 5], (0.0, 0.0));
+        assert_eq!(b.target, Target::Param(7, 0));
+        assert!(b.links().is_empty(), "no controller yet");
+        b.cc = Some(20);
+        b.ch = 1;
+        let l = b.links();
+        assert_eq!(l.iter().map(|l| (l.cc, l.target)).collect::<Vec<_>>(), [(20, Target::Param(7, 0)), (21, Target::Param(7, 2)), (22, Target::Param(7, 3)), (23, Target::Param(7, 5))]);
+        assert!(l.iter().all(|l| l.ch == 1 && !l.omni));
+        b.cc = Some(126);
+        assert_eq!(b.links().len(), 2, "up to controller 127");
+        b.reset();
+        assert_eq!((b.cc, b.all.len()), (None, 4));
     }
 
     #[test]
