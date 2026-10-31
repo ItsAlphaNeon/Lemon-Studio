@@ -67,9 +67,16 @@ fn saved_by(events: &[Event]) -> (u32, u32) {
 }
 
 /// True when `events` are in an older generation's layout: saved before FL 24.2, or with channel blocks that no event
-/// 51 closes (spec: flp/layouts.md "How to tell the generation").
+/// 51 closes (spec: flp/layouts.md "How to tell the generation"). Blocks that event 51 closes are the current layout
+/// whatever the version says: an earlier cutting-edge converted older projects and kept their version, and converting
+/// such a file again would read its single stretch lengths as integers. Up to FL 11 the version still decides, as the
+/// text's encoding goes by it.
 pub fn is_legacy(events: &[Event]) -> bool {
-    saved_by(events) < (24, 2) || (events.iter().any(|e| e.id == id::CH_START) && !events.iter().any(|e| e.id == id::CH_END))
+    let version = saved_by(events);
+    if events.iter().any(|e| e.id == id::CH_END) {
+        return version.0 <= 11;
+    }
+    version < (24, 2) || events.iter().any(|e| e.id == id::CH_START)
 }
 
 /// Rewrites a file of an older generation into the current layout; `Ok(false)` leaves a current file as it is. What
@@ -815,6 +822,20 @@ mod tests {
                 (0, MX_KIND_PARAM, mixer_location(MX_SPECIAL_TRACK, 0), 12800),
             ]
         );
+    }
+
+    /// A file already in the current layout (its channel blocks closed) with an older version is not converted again.
+    #[test]
+    fn a_closed_layout_is_current_whatever_its_version() {
+        let ev = |id: u8, v: Value| Event::new(id, v);
+        let version = |t: &str| ev(id::VERSION, Value::var(format!("{t}\0").into_bytes()));
+        let closed = [version("20.7.1.1773"), ev(id::CH_START, Value::U16(0)), ev(id::CH_END, Value::U8(0))];
+        assert!(!is_legacy(&closed));
+        assert!(is_legacy(&[version("11.1.1"), ev(id::CH_START, Value::U16(0)), ev(id::CH_END, Value::U8(0))]), "8-bit text goes by the version");
+        let open = [version("26.1.7.5653"), ev(id::CH_START, Value::U16(0))];
+        assert!(is_legacy(&open), "blocks not closed");
+        assert!(is_legacy(&[version("24.1.1.4285")]), "an older version with no channels");
+        assert!(!is_legacy(&[version("26.1.7.5653")]));
     }
 
     /// The whole conversion of a small FL 11 file: it loads, and an unedited save keeps the converted stream.
