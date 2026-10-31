@@ -6,7 +6,7 @@
 //! keyboard, a MIDI keyboard or the Touch controller are written into the current pattern for the selected channel,
 //! each as long as it was held, and channel volume / pan knob moves become the pattern's control points. A take (from its first note to the stop, a pause, disarming or a pattern change) is one
 //! undo step and replaces the pattern's earlier notes that start inside it. The right-click menu's checks are program
-//! settings in `settings.txt`; the arm itself is not saved.
+//! settings in `settings.txt`, also shown on Settings ▸ Recording (`crate::prefs`); the arm itself is not saved.
 // spec: ui/recording.md
 
 use crate::app::{App, State};
@@ -59,34 +59,33 @@ pub enum RecCmd {
 }
 
 impl Opt {
-    fn key(self) -> (&'static str, bool) {
+    /// Its program setting, also on Settings ▸ Recording (`crate::prefs`, spec: ui/settings.md "Recording").
+    pub fn check(self) -> &'static crate::prefs::Check {
+        use crate::prefs as p;
         match self {
-            Opt::Notes => ("rec_notes", true),
-            Opt::Automation => ("rec_automation", true),
-            Opt::Audio => ("rec_audio", false),
-            Opt::StartsPlayback => ("rec_starts_play", false),
-            Opt::DisarmOnStop => ("rec_disarm_stop", false),
-            Opt::QuantizeStart => ("rec_q_start", true),
-            Opt::QuantizeEnd => ("rec_q_end", true),
-            Opt::Wait => ("rec_wait", false),
-            Opt::WaitFilter => ("rec_wait_filter", true),
-            Opt::WaitArmed => ("rec_wait_armed", false),
-            Opt::Precount => ("rec_precount", false),
-            Opt::Blend => ("rec_blend", false),
-            Opt::Loop => ("rec_loop", false),
-            Opt::Ask => ("rec_ask", true),
+            Opt::Notes => &p::REC_NOTES,
+            Opt::Automation => &p::REC_AUTOMATION,
+            Opt::Audio => &p::REC_AUDIO,
+            Opt::StartsPlayback => &p::REC_STARTS_PLAYBACK,
+            Opt::DisarmOnStop => &p::REC_DISARM_ON_STOP,
+            Opt::QuantizeStart => &p::REC_QUANTIZE_START,
+            Opt::QuantizeEnd => &p::REC_QUANTIZE_END,
+            Opt::Wait => &p::REC_WAIT,
+            Opt::WaitFilter => &p::REC_WAIT_FILTER,
+            Opt::WaitArmed => &p::REC_WAIT_ARMED,
+            Opt::Precount => &p::REC_COUNT_IN,
+            Opt::Blend => &p::REC_BLEND,
+            Opt::Loop => &p::REC_LOOP,
+            Opt::Ask => &p::REC_ASK,
         }
     }
 
     pub fn on(self) -> bool {
-        let (k, d) = self.key();
-        crate::settings_file::flag(k, d)
+        crate::prefs::check(self.check())
     }
 
     pub fn toggle(self) -> bool {
-        let on = !self.on();
-        crate::settings_file::set_flag(self.key().0, on);
-        on
+        crate::prefs::toggle(self.check())
     }
 }
 
@@ -97,13 +96,13 @@ pub fn hint() -> String {
     format!("Record ({what}) (R) - right-click for options")
 }
 
-/// Recording precount's length in bars: 1 or 2 (spec §3), in `settings.txt`.
+/// Recording precount's length in bars: 1 or 2 (spec §3), Settings ▸ Recording's Count-in length.
 pub fn precount_bars() -> u32 {
-    if crate::settings_file::get("rec_precount_bars").as_deref() == Some("2") { 2 } else { 1 }
+    crate::prefs::index(&crate::prefs::COUNT_IN_LENGTH) as u32 + 1
 }
 
 pub fn set_precount_bars(bars: u32) {
-    crate::settings_file::write("rec_precount_bars", if bars == 2 { "2" } else { "1" });
+    crate::prefs::set_choice(&crate::prefs::COUNT_IN_LENGTH, if bars == 2 { 1 } else { 0 });
 }
 
 /// The three option buttons' hints (spec §3).
@@ -169,6 +168,9 @@ pub struct Extra {
     pub channel: Option<u16>,
     pub mod_x: Option<u8>,
     pub mod_y: Option<u8>,
+    /// The colour group a recorded note takes: the MIDI channel it came on, on a channel with MIDI channel through
+    /// ticked (spec: ui/channel-rack.md §18).
+    pub group: Option<u8>,
 }
 
 /// The take being recorded: the pattern's notes as they were before it, the channels it recorded, the span from its
@@ -671,6 +673,9 @@ impl App {
         let mut note = Note { length: b - a, key: h.key, velocity: h.velocity, ..Note::step(h.channel, a) };
         note.mod_x = h.extra.mod_x.unwrap_or(note.mod_x);
         note.mod_y = h.extra.mod_y.unwrap_or(note.mod_y);
+        if let Some(g) = h.extra.group {
+            note.group = note.group & !0x0F | g & 0x0F;
+        }
         note.release = h.release.unwrap_or(note.release);
         take.new.push(note);
         let (lo, hi) = take.span.map_or((a, b), |(lo, hi)| (lo.min(a), hi.max(b)));
@@ -784,6 +789,18 @@ impl App {
         }
         if live {
             self.state.rec.last = Some(now);
+        }
+        // Performance mode (spec: ui/performance-mode.md §3b): a stop with Record armed (since playback started) writes
+        // what the launched tracks played.
+        let r = &self.state.rec;
+        if r.was_live && !live && r.armed && r.since.is_some() && self.transport.song()
+            && let Some(stop) = r.last
+        {
+            let n = crate::perform::record(&mut self.state, stop.max(0.0) as u32);
+            if n > 0 {
+                self.state.message = Some(format!("Performance recorded: {n} clip{}", if n == 1 { "" } else { "s" }));
+                self.invalidate();
+            }
         }
         let r = &self.state.rec;
         let changed = r.take.as_ref().is_some_and(|t| t.pattern != self.state.pattern);
@@ -1053,6 +1070,34 @@ mod tests {
         app.record_tick();
         stop(&mut app);
         assert!(notes(&app).contains(&(301, 32, 0)), "{:?}", notes(&app));
+    }
+
+    /// MIDI channel through (spec: ui/channel-rack.md §18): a note recorded from a MIDI device takes the MIDI channel it
+    /// came on as its colour group; with the entry unticked it keeps the first.
+    #[test]
+    fn midi_notes_record_their_channel_as_colour() {
+        use crate::midi_in::Msg;
+        let mut app = app();
+        app.toggle_record();
+        let groups = |app: &App| -> Vec<u8> { app.state.project.pattern(1).map_or(vec![], |p| p.notes.iter().map(|n| n.group & 0x0F).collect()) };
+        app.transport.pretend_at(0.0, false);
+        app.record_tick();
+        app.midi_notes(vec![Msg::On { ch: 4, key: 60, vel: 100 }]);
+        app.transport.pretend_at(24.0, false);
+        app.record_tick();
+        app.midi_notes(vec![Msg::Off { ch: 4, key: 60, vel: 64 }]);
+        stop(&mut app);
+        assert_eq!(groups(&app), [4]);
+        crate::rack::run(&mut app, crate::rack::RCmd::Through(0));
+        assert!(!crate::rack::through(&app.state, 0));
+        app.transport.pretend_at(48.0, false);
+        app.record_tick();
+        app.midi_notes(vec![Msg::On { ch: 4, key: 62, vel: 100 }]);
+        app.transport.pretend_at(72.0, false);
+        app.record_tick();
+        app.midi_notes(vec![Msg::Off { ch: 4, key: 62, vel: 64 }]);
+        stop(&mut app);
+        assert_eq!(groups(&app), [4, 0], "unticked: the first colour");
     }
 
     /// SONG mode: with no clip of the pattern at the song position, one is placed from the start of that bar on the

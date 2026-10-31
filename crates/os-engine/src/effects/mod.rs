@@ -63,6 +63,12 @@ pub trait Effect: Send {
     /// The song's position and tempo for the block that follows, and the song tick it is with the ticks per beat
     /// (controllers that work on the song: Fruity Formula Controller; spec: plugins/lemon-formula-controller.md "Links").
     fn transport(&mut self, _song: &crate::instrument::TransportInfo, _tick: (u64, u16)) {}
+    /// Auto-bypass when silent (spec: audio/auto-bypass.md): how long, in seconds, the effect's input and output must
+    /// stay silent before its slot stops running it, its delay added; `None`: never (an effect that acts or sounds
+    /// without input). Default: one second.
+    fn quiet_hold(&self) -> Option<f32> {
+        Some(1.0)
+    }
 }
 
 /// Creates a Lemon Studio effect for a slot plugin, if one exists for that plugin.

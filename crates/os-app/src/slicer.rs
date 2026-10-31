@@ -33,7 +33,7 @@ impl Plugins {
     /// The Fruity Slicer state the Lemon Slicer on rack row `row` plays, `None` when the row hosts something else.
     pub fn slicer_file_state(&self, row: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&row)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != LEMON_SLICER || !crate::project_plugins::is_builtin(p.desc()) {
             return None;
         }
@@ -109,8 +109,10 @@ impl crate::app::App {
     }
 
     /// Notes a plugin sent for channel row `row` (Lemon Slicer's dump): they replace the channel's notes in the
-    /// current pattern, positions rounded to the project's ticks, as one undo step.
+    /// current pattern, positions rounded to the project's ticks, as one undo step. An effect's notes (`row` a mixer
+    /// slot's key: Tesla's Convert to score) go to the selected channel.
     pub(crate) fn notes_from_plugin(&mut self, row: usize, notes: &[os_hostlink::NoteOut]) {
+        let row = if crate::plugins::fx_of(row).is_some() { self.state.selected_channel } else { row };
         let s = &mut self.state;
         let Some(ch) = s.project.channels.get(row).map(|c| c.index) else { return };
         if notes.is_empty() {
@@ -249,6 +251,38 @@ mod tests {
         let _ = std::fs::remove_file(wav);
     }
 
+    /// A file Tesla sends to a new Lemon Slicer channel: a hosted Fruity Slicer channel named after the file, sliced at
+    /// its regions, selected; undone, it goes (spec: plugins/tesla/README.md "Sending slices to Lemon Slicer").
+    #[test]
+    fn a_sent_file_becomes_a_sliced_slicer_channel() {
+        use tesla::sample::{Cue, Format, Sample};
+        let path = std::env::temp_dir().join(format!("openstudio-to-slicer-{}.wav", std::process::id()));
+        let mut s = Sample::from_channels(44100, vec![vec![0.25; 44100]], Format::Int16);
+        for (i, (pos, len)) in [(0usize, 11025usize), (11025, 11025), (22050, 22050)].into_iter().enumerate() {
+            s.cues.push(Cue { id: i as u32 + 1, name: format!("Part {}", i + 1), pos, len: Some(len) });
+        }
+        std::fs::write(&path, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.plugins.available = crate::plugins::builtin();
+        let before = a.state.project.channels.len();
+        a.sample_from_plugin(path.to_string_lossy().into_owned(), os_hostlink::AudioTo::Slicer);
+        assert_eq!(a.state.project.channels.len(), before + 1, "{:?}", a.state.message);
+        let row = before;
+        let ch = &a.state.project.channels[row];
+        assert!(is_slicer(ch));
+        assert_eq!(ch.name.as_deref(), Some(format!("openstudio-to-slicer-{}", std::process::id()).as_str()));
+        let st = State::parse(ch.plugin_state.as_deref().unwrap()).unwrap();
+        assert_eq!(st.slices.iter().map(|s| s.start).collect::<Vec<_>>(), [0, 11025, 22050]);
+        assert_eq!(st.slices[1].name(), "Part 2");
+        assert_eq!(a.state.selected_channel, row);
+        assert!(a.state.hosted_rows.contains(&row));
+        assert!(a.state.message.as_deref().is_some_and(|m| m.contains("3 slices")));
+        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(crate::history::ADD_CHANNEL));
+        assert_eq!(a.state.project.channels.len(), before);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The dump replaces the channel's notes in the current pattern (the other channels' stay), in ticks, as one undo
     /// step.
     #[test]
@@ -270,6 +304,14 @@ mod tests {
         assert_eq!(got, [(ch, 0, 54, 60), (other, 48, 0, 60), (ch, 54, 54, 61)]);
         assert!(crate::piano::undo(&mut a.state));
         assert_eq!(crate::piano::notes(&a.state).len(), 2);
+        // An effect's notes (Tesla's Convert to score, from a mixer slot) go to the selected channel.
+        a.state.selected_channel = 0;
+        a.notes_from_plugin(crate::plugins::fx_key(0, 3), &notes[..1]);
+        let mut got: Vec<(u16, u32, u16)> = crate::piano::notes(&a.state).iter().map(|n| (n.channel, n.position, n.key)).collect();
+        got.sort();
+        let mut want = vec![(ch, 0, 60), (other, 0, 60)];
+        want.sort();
+        assert_eq!(got, want);
     }
 
     /// `OS_SLICER_FLP=<a.flp>;<b.flp> cargo test -p os-app corpus_slicer -- --ignored`: every Fruity Slicer channel of

@@ -96,6 +96,56 @@ impl Look {
 /// An instance whose count did not move is still looked at this often (anything a plugin did not report).
 const LOOK_EVERY: Duration = Duration::from_millis(250);
 
+
+/// How long a whole-state read waits for its moment (`lock_between_blocks`): two blocks of 256 frames and more.
+pub const STATE_WAIT: Duration = Duration::from_millis(12);
+/// How long the UI's per-tick work may wait for such moments, all instances together, per `TICK_WINDOW`: the wait is on
+/// the UI thread, and a project has many instances. Past it, an instance not free at once skips the tick.
+const TICK_BUDGET: Duration = Duration::from_millis(3);
+const TICK_WINDOW: Duration = Duration::from_millis(16);
+
+thread_local! {
+    /// When the current `TICK_WINDOW` started and what it has waited.
+    static TICK_WAITED: std::cell::Cell<Option<(Instant, Duration)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Locks `m` for the UI's per-tick work on an instance (its idle, its parameters), `None` to skip
+/// the tick. One whose holds are short (`Meter::holds_long`) is taken if free, with no wait; a long one waits for the
+/// moment between two blocks (`lock_between_blocks`), out of `TICK_BUDGET`.
+pub fn lock_for_tick<'a, T: ?Sized>(m: &'a std::sync::Mutex<T>, meter: Option<&os_host::Meter>) -> Option<std::sync::MutexGuard<'a, T>> {
+    if !meter.is_some_and(os_host::Meter::holds_long) {
+        return m.try_lock().ok();
+    }
+    let t0 = Instant::now();
+    let (start, waited) = TICK_WAITED.get().filter(|(s, _)| t0.duration_since(*s) < TICK_WINDOW).unwrap_or((t0, Duration::ZERO));
+    let got = lock_between_blocks(m, meter, TICK_BUDGET.saturating_sub(waited));
+    TICK_WAITED.set(Some((start, waited + t0.elapsed())));
+    got
+}
+
+/// Locks `m` for a UI call that may hold it a few ms: right after the audio thread processed it (`meter`), when it will
+/// not need it again for most of a block (it gives up on an instance it waits for over 2 ms: a late plugin), else at
+/// once when nothing is processing it. Waits up to `wait` for that moment; `None` when it did not come.
+pub fn lock_between_blocks<'a, T: ?Sized>(m: &'a std::sync::Mutex<T>, meter: Option<&os_host::Meter>, wait: Duration) -> Option<std::sync::MutexGuard<'a, T>> {
+    const JUST: Duration = Duration::from_millis(1);
+    const IDLE: Duration = Duration::from_millis(50);
+    let t0 = Instant::now();
+    loop {
+        let free = match meter.and_then(|m| m.since_processed()) {
+            None => true,
+            Some(d) => d <= JUST || d >= IDLE,
+        };
+        if free {
+            // The audio thread holds it only while processing: a short wait if it just started another block.
+            return m.lock().ok();
+        }
+        if t0.elapsed() >= wait {
+            return None;
+        }
+        std::thread::sleep(Duration::from_micros(200));
+    }
+}
+
 impl Hosted {
     /// A newly hosted instance, without a window.
     pub fn new(plugin: SharedPlugin) -> Hosted {
@@ -124,9 +174,27 @@ impl Hosted {
         }
     }
 
+    /// Locks the instance to read its whole state (a save, an autosave): between two of its blocks
+    /// ([`lock_between_blocks`]), else once the audio thread lets go of it. Never fails for want of the moment.
+    pub fn lock_for_state(&self) -> Option<std::sync::MutexGuard<'_, dyn os_host::Plugin + 'static>> {
+        self.lock_between_blocks().or_else(|| self.plugin.lock().ok())
+    }
+
+    /// Locks the instance for a UI call that may hold it a few ms (reading its state), between two of its blocks
+    /// ([`lock_between_blocks`]).
+    pub fn lock_between_blocks(&self) -> Option<std::sync::MutexGuard<'_, dyn os_host::Plugin + 'static>> {
+        lock_between_blocks(&self.plugin, self.meter.as_deref(), STATE_WAIT)
+    }
+
     /// Whether a per-tick job last done at `last` should lock the instance now, and the look to remember if it does:
     /// its attention count moved, its editor is open, it has no count, or `LOOK_EVERY` passed. Otherwise the UI leaves
     /// it to the audio thread (spec: audio/implementing.md "Playing live").
+    /// How often the instance has asked for attention (a parameter changed in its window, a state to save...); None
+    /// for one that never says.
+    pub fn attention_count(&self) -> Option<u64> {
+        self.attention.as_ref().map(|a| a.count())
+    }
+
     pub fn due(&self, last: Look) -> Option<Look> {
         let now = Instant::now();
         let Some(a) = &self.attention else {
@@ -172,7 +240,7 @@ pub enum Request {
     /// A sample file a Lemon plugin sent (host link `Audio`, Tesla's Send): to the selected channel (true) or the
     /// playlist.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
-    Audio(String, bool),
+    Audio(String, os_hostlink::AudioTo),
     /// Notes a Lemon plugin sent for its channel's current pattern (host link `Notes`, Lemon Slicer's dump): row,
     /// notes.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
@@ -258,6 +326,9 @@ pub struct Plugins {
     /// Only those whose channel or slot went (`keep`); an undo that brings it back hosts it again from here
     /// (`App::follow_ids`); the oldest go past `STASH_MAX`.
     pub stash: Vec<(os_model::Id, bool, String, Vec<u8>)>,
+    /// A plugin menu's Scaling ▸ (Lemon Studio's design, session only), by `hosted` key: the scale its window and
+    /// editor are drawn at instead of the program's (`scale_for`).
+    pub editor_scales: BTreeMap<usize, f32>,
 }
 
 /// How many gone instances `Plugins::stash` keeps.
@@ -578,7 +649,7 @@ impl Plugins {
         if h.owner.is_none() || h.stopped() {
             return;
         }
-        let Some((uid, state)) = h.plugin.lock().ok().and_then(|p| Some((p.desc().uid(), p.save_state()?))) else { return };
+        let Some((uid, state)) = h.lock_for_state().and_then(|p| Some((p.desc().uid(), p.save_state()?))) else { return };
         let owner = h.owner;
         self.stash.retain(|e| e.0 .0 != owner.0);
         self.stash.push((owner, fx, uid, state));
@@ -686,8 +757,9 @@ impl Plugins {
 
     /// The saved state of the instance under `key`, in its format's own bytes.
     pub fn state(&self, key: usize) -> Option<Vec<u8>> {
-        self.hosted.get(&key)?.plugin.lock().ok()?.save_state()
+        self.hosted.get(&key)?.lock_for_state()?.save_state()
     }
+
 
     /// Marks the instance under `key`, just created, as a copy standing in for a plugin in another format
     /// (`Hosted::stand_in`).
@@ -757,7 +829,7 @@ impl Plugins {
     /// `None` when the slot hosts something else.
     pub fn eq_file_state(&self, key: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&key)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != LEMON_EQ {
             return None;
         }
@@ -767,7 +839,7 @@ impl Plugins {
     /// Edison's state (the project file's form) of the Tesla hosted under `key`; `None` for any other plugin.
     pub fn edison_file_state(&self, key: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&key)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != TESLA {
             return None;
         }
@@ -778,7 +850,7 @@ impl Plugins {
     /// plugin, and for one on its starting state that was never edited.
     pub fn love_philter_file_state(&self, key: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&key)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != PULP_FILTER {
             return None;
         }
@@ -789,7 +861,7 @@ impl Plugins {
     /// for one on its starting state that was never edited.
     pub fn maximus_file_state(&self, key: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&key)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != PRESS {
             return None;
         }
@@ -801,7 +873,7 @@ impl Plugins {
     pub fn recreation_file_state(&self, key: usize, file: &str) -> Option<Vec<u8>> {
         let lemon = recreation_of(file)?;
         let h = self.hosted.get(&key)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != lemon || !crate::project_plugins::is_builtin(p.desc()) {
             return None;
         }
@@ -893,7 +965,7 @@ impl Plugins {
     /// The sample file a Lemon Sampler instance holds (its persisted `sample-path`), `Some("")` when it has none.
     pub fn sampler_path(&self, row: usize) -> Option<String> {
         let h = self.hosted.get(&row)?;
-        let blob = h.plugin.lock().ok()?.save_state()?;
+        let blob = h.lock_for_state()?.save_state()?;
         sample_path_of(&blob)
     }
 
@@ -953,7 +1025,7 @@ impl Plugins {
     /// Opens (or raises) row `row`'s plugin window.
     #[cfg(plugin_windows)]
     pub fn open_window(&mut self, row: usize, info: ChannelInfo) -> Result<(), String> {
-        let (owner, scale) = (self.owner, self.scale);
+        let (owner, scale) = (self.owner, self.scale_for(row, self.scale));
         let h = self.hosted.get(&row).ok_or("not a plugin channel")?;
         if let Some(w) = &h.window {
             w.raise();
@@ -1002,6 +1074,24 @@ impl Plugins {
         Ok(())
     }
 
+    /// The scale row `row`'s window is drawn at where the program would use `scale`: its Scaling ▸ choice, if any.
+    pub fn scale_for(&self, row: usize, scale: f32) -> f32 {
+        self.editor_scales.get(&row).copied().unwrap_or(scale)
+    }
+
+    /// Scaling ▸ for row `row` (`None`: Main, the program's scale): an open window is drawn again at once.
+    pub fn set_editor_scale(&mut self, row: usize, scale: Option<f32>) {
+        match scale {
+            Some(k) => self.editor_scales.insert(row, k),
+            None => self.editor_scales.remove(&row),
+        };
+        #[cfg(any(windows, target_os = "macos"))]
+        if self.hosted.get(&row).is_some_and(|h| h.window.is_some()) {
+            let k = self.scale_for(row, self.scale);
+            self.rescale_window(row, k);
+        }
+    }
+
     /// The main window's DPI scale changed: docked windows follow it (detached ones follow their own monitor,
     /// `FrameEvent::Dpi`). Spec: ui/ui-scaling.md §3.
     pub fn set_scale(&mut self, scale: f32) {
@@ -1011,7 +1101,7 @@ impl Plugins {
         self.scale = scale;
         #[cfg(any(windows, target_os = "macos"))]
         for row in self.docked() {
-            self.rescale_window(row, scale);
+            self.rescale_window(row, self.scale_for(row, scale));
         }
     }
 
@@ -1189,7 +1279,8 @@ impl Plugins {
         for (&row, h) in &mut self.hosted {
             let look = h.due(h.seen);
             let mut menu: Option<(os_host::Menu, (i32, i32))> = None;
-            if let Some(mut p) = look.and_then(|_| h.plugin.try_lock().ok()) {
+            if let Some(mut p) = look.and_then(|_| lock_for_tick(&h.plugin, h.meter.as_deref())) {
+                let t0 = Instant::now();
                 h.seen = look.unwrap_or(h.seen);
                 // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
                 if let (Some(code), false) = (p.stopped(), h.stop_told) {
@@ -1217,6 +1308,9 @@ impl Plugins {
                 if let (Some(w), false, Some((ew, eh))) = (&h.window, h.linked(), p.editor_size()) {
                     let k = w.scale();
                     w.set_editor_size((ew as f32 / k, eh as f32 / k));
+                }
+                if let Some(m) = &h.meter {
+                    m.note_hold(t0.elapsed());
                 }
             }
             #[cfg(plugin_windows)]
@@ -1301,7 +1395,7 @@ impl Plugins {
         }
         #[cfg(any(windows, target_os = "macos"))]
         for (row, k) in rescale {
-            self.rescale_window(row, k);
+            self.rescale_window(row, self.scale_for(row, k));
         }
         #[cfg(target_os = "linux")]
         crate::plugin_window::paint_dirty();
@@ -2149,7 +2243,7 @@ mod tests {
         let mut pl = Plugins { available: builtin(), scale: 1.5, rate: 48000, ..Plugins::default() };
         let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         pl.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: LEMON_SAMPLER.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: LEMON_SAMPLER.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 200);
         let w = pl.hosted[&0].window.as_ref().unwrap();
@@ -2181,7 +2275,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let hwnd = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2210,7 +2304,7 @@ mod tests {
         let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
         pl.create_effect(1, 0, index, None).unwrap();
         let key = fx_key(1, 0);
-        let info = ChannelInfo { name: LEMON_EQ.into(), target: "Bus 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: LEMON_EQ.into(), target: "Bus 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(key, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
@@ -2236,7 +2330,7 @@ mod tests {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         let index = pl.index_of(crate::osc3::LEMON_TRIO).expect("built-in Lemon Trio");
         pl.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: crate::osc3::LEMON_TRIO.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: crate::osc3::LEMON_TRIO.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2288,7 +2382,7 @@ mod tests {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         let index = pl.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         pl.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: crate::citrus::CITRUS.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: crate::citrus::CITRUS.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2329,7 +2423,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2420,7 +2514,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2494,7 +2588,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
@@ -2577,7 +2671,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
@@ -2663,7 +2757,7 @@ mod tests {
         let name = desc.name.clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name, target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name, target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2719,7 +2813,7 @@ mod tests {
         let name = desc.name.clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: monitor, rate: 48000, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 500);
         let size = |h: HWND| unsafe {
@@ -3274,7 +3368,7 @@ mod tests {
         use windows_sys::Win32::Foundation::RECT;
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         pl.create(0, pl.index_of(LEMON_SAMPLER).unwrap()).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -3434,7 +3528,7 @@ mod tests {
                 pl.create(0, 0).unwrap();
                 0
             };
-            let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+            let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
             pl.open_window(key, info).unwrap();
             let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
             unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
@@ -3465,7 +3559,7 @@ mod tests {
             let mut pl = Plugins { scale: 1.0, rate: 48000, effects: vec![a], ..Plugins::default() };
             pl.create_effect(1, 0, 0, None).unwrap();
             let key = fx_key(1, 0);
-            let info = ChannelInfo { name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+            let info = ChannelInfo { name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
             for round in 0..2 {
                 pl.open_window(key, info.clone()).unwrap();
                 let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
@@ -3531,7 +3625,7 @@ mod tests {
             })
         };
         eprintln!("STEP window");
-        let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         match pl.open_window(key, info) {
             Ok(()) => {
                 let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
@@ -3725,7 +3819,7 @@ mod tests {
             (held, tail, finite)
         });
         eprintln!("STEP window");
-        let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { name: name.clone(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
         match pl.open_window(0, info) {
             Ok(()) => {
                 let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -3959,7 +4053,7 @@ mod tests {
             for i in 0..pl.effects.len() {
                 pl.create_effect(1, i as u8, i, None).unwrap();
                 let name = pl.effects[i].desc.name.clone();
-                let info = ChannelInfo { name, target: "Bus 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+                let info = ChannelInfo { name, target: "Bus 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None, icon: None };
                 pl.open_window(fx_key(1, i as u8), info).unwrap();
                 transport.set_effects(pl.effects());
                 pump(&mut pl, 400);
@@ -4017,7 +4111,7 @@ mod tests {
     fn editor_limit_and_reopen_place() {
         let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
         let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
-        let info = |t: u16| ChannelInfo { name: LEMON_EQ.into(), target: format!("Bus {t}"), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: t, max_track: 125, misc: None };
+        let info = |t: u16| ChannelInfo { name: LEMON_EQ.into(), target: format!("Bus {t}"), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: t, max_track: 125, misc: None, icon: None };
         let keys: Vec<usize> = (0..26u16).map(|i| fx_key(1 + i / 8, (i % 8) as u8)).collect();
         for &k in &keys {
             let (t, s) = fx_of(k).unwrap();
@@ -4048,5 +4142,117 @@ mod tests {
             pl.drop_key(k);
         }
         pump(&mut pl, 100);
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+
+    /// An instance whose holds are short is taken at once, or skipped; those with long holds wait, all of them together
+    /// no longer than the budget: a project with many instances keeps its frame rate during playback.
+    #[test]
+    fn the_ui_waits_little_for_many_instances() {
+        let meter = os_host::Meter::default();
+        // Mid-block: just processed a while ago, not yet idle.
+        meter.add(Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(2));
+        let fast = std::sync::Mutex::new(());
+        let t0 = Instant::now();
+        assert!(lock_for_tick(&fast, Some(&meter)).is_some(), "short holds: taken at once");
+        assert!(t0.elapsed() < Duration::from_millis(2));
+        meter.note_hold(Duration::from_millis(3));
+        assert!(meter.holds_long());
+        let t0 = Instant::now();
+        for _ in 0..30 {
+            assert!(lock_for_tick(&fast, Some(&meter)).is_none(), "not between blocks");
+        }
+        assert!(t0.elapsed() < Duration::from_millis(16), "{:?}: the budget, not 30 waits", t0.elapsed());
+    }
+
+    /// A long hold is remembered for a while, then fades.
+    #[test]
+    fn a_long_hold_fades() {
+        let m = os_host::Meter::default();
+        assert!(!m.holds_long());
+        m.note_hold(Duration::from_millis(2));
+        for _ in 0..100 {
+            m.note_hold(Duration::from_micros(50));
+        }
+        assert!(m.holds_long(), "still slow");
+        for _ in 0..400 {
+            m.note_hold(Duration::from_micros(50));
+        }
+        assert!(!m.holds_long(), "faded");
+    }
+
+    /// A UI call holding a plugin 3 ms every 40 ms beside an audio thread that processes it every 5.33 ms (256 frames at
+    /// 48 kHz) and gives up after waiting 2 ms, as the engine does: taken at any moment it makes the plugin late now and
+    /// then; taken between two blocks (`lock_between_blocks`), never. Timing on the real clock for 3 s per way:
+    /// `cargo test -p os-app --bin lemonstudio long_ui_calls_between_blocks -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn long_ui_calls_between_blocks_make_no_plugin_late() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::{Arc, Mutex};
+        fn run(between: bool) -> u32 {
+            let plugin = Arc::new(Mutex::new(()));
+            let meter = Arc::new(os_host::Meter::default());
+            let (late, stop) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicBool::new(false)));
+            let audio = {
+                let (plugin, meter, late, stop) = (plugin.clone(), meter.clone(), late.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let (period, start) = (Duration::from_micros(5333), Instant::now());
+                    for n in 1u32.. {
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let waited = Instant::now();
+                        let got = loop {
+                            match plugin.try_lock() {
+                                Ok(g) => break Some(g),
+                                Err(_) if waited.elapsed() >= Duration::from_millis(2) => break None,
+                                Err(_) => std::thread::yield_now(),
+                            }
+                        };
+                        match got {
+                            Some(_g) => {
+                                let t0 = Instant::now();
+                                while t0.elapsed() < Duration::from_micros(800) {
+                                    std::hint::spin_loop();
+                                }
+                                meter.add(t0.elapsed());
+                            }
+                            None => {
+                                late.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        let next = start + period * n;
+                        if let Some(d) = next.checked_duration_since(Instant::now()) {
+                            std::thread::sleep(d);
+                        }
+                    }
+                })
+            };
+            // Playing already: before its first block nothing processes the instance (`since_processed` is `None`).
+            while meter.since_processed().is_none() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs(3) {
+                let g = if between { lock_between_blocks(&plugin, Some(&meter), STATE_WAIT) } else { plugin.lock().ok() };
+                if let Some(_g) = g {
+                    std::thread::sleep(Duration::from_millis(3));
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            stop.store(true, Ordering::Relaxed);
+            audio.join().unwrap();
+            late.load(Ordering::Relaxed)
+        }
+        let (any, between) = (run(false), run(true));
+        println!("late blocks in 3 s: {any} with the lock taken at any moment, {between} between blocks");
+        assert!(any > 0, "the plain lock makes it late (else the test shows nothing)");
+        assert_eq!(between, 0);
     }
 }

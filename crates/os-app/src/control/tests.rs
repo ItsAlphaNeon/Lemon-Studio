@@ -1007,3 +1007,33 @@ fn mutes_follow_fl_s_history() {
     crate::history::undo(&mut a.state).unwrap();
     assert_eq!(on(&a), now, "the mute stays through an undo of the step before it");
 }
+
+/// A hosted mixer slot (spec: ui/mixer.md §7.2, Lemon Studio's design): Scaling ▸ is enabled, Main ticked, and a pick
+/// keeps the scale for the slot's window; Help opens Lemon Studio's page for its own plugins.
+#[test]
+fn a_hosted_slots_scaling_and_help() {
+    use crate::mixer::{run, slot_menu, MCmd};
+    use crate::playlist::{Cmd, Mark};
+    let mut a = app();
+    let desc = crate::plugins::builtin()[0].desc.clone();
+    let knob = std::sync::Arc::new(std::sync::Mutex::new(Knob { desc, value: [0.5, 0.5], events: Vec::new() }));
+    let fx = crate::plugins::fx_key(1, 0);
+    a.plugins.hosted.insert(fx, crate::plugins::Hosted::new(knob));
+    crate::mixer::track_mut(&mut a.state, 1).unwrap().slots[0] = Some(crate::plugins::new_slot("Lemon Sampler"));
+    crate::mixer::select(&mut a.state, 1, false);
+    let scaling = |a: &App| slot_menu(a, 0, 0.0, 0.0).items.into_iter().find(|i| i.label == "Scaling").unwrap();
+    let m = scaling(&a);
+    assert!(m.enabled);
+    let marks: Vec<_> = m.children.iter().map(|i| (i.label.to_string(), i.mark.clone())).collect();
+    assert_eq!(marks[0], ("Main".into(), Mark::Radio(true)));
+    assert_eq!(marks[2], ("125%".into(), Mark::Radio(false)));
+    assert_eq!(m.children[2].cmd, Cmd::Mixer(MCmd::SlotScale(0, Some(125))));
+    run(&mut a, MCmd::SlotScale(0, Some(125)));
+    assert_eq!((a.plugins.scale_for(fx, 1.0), scaling(&a).children[2].mark.clone()), (1.25, Mark::Radio(true)));
+    run(&mut a, MCmd::SlotScale(0, None));
+    assert_eq!(a.plugins.scale_for(fx, 1.5), 1.5, "Main");
+    assert_eq!(run(&mut a, MCmd::SlotHelp(0)), Some(format!("Opening {}", crate::help_links::BUILTIN_PLUGINS_URL)));
+    // No instance (an effect the engine plays itself has no editor): greyed.
+    a.plugins.hosted.clear();
+    assert!(!scaling(&a).enabled);
+}

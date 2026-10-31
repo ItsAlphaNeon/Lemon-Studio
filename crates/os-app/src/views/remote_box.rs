@@ -33,12 +33,16 @@ pub fn paint(ui: &mut Ui, s: &State, b: &LinkBox) {
     let f = Font::new(13);
     let dim = t.text_dim;
     // Title bar.
-    ui.c.text(f.bold(), r.x + 10.0, r.y + 7.0, t.text, "Remote control settings");
+    let all = !b.all.is_empty();
+    ui.c.text(f.bold(), r.x + 10.0, r.y + 7.0, t.text, if all { "Link all parameters" } else { "Remote control settings" });
     let x = Rect::new(r.right() - 24.0, r.y + 4.0, 20.0, 20.0);
     let hov = hit(ui, x, RAct::Close, "Close (Esc)");
     ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.glyph } else { t.text });
     // The target's name.
-    let name = crate::typein::caption(s, b.target);
+    let name = match b.target {
+        crate::typein::Target::Param(key, _) if all => format!("{}: {} parameters", crate::params::owner_name(s, key), b.all.len()),
+        t => crate::typein::caption(s, t),
+    };
     let field = Rect::new(r.x + 10.0, r.y + 32.0, r.w - 20.0, 22.0);
     kit::sunken(ui.c, t, field, t.s(0x141516));
     ui.c.text_clip(f, field.x + 6.0, field.y + 3.0, field.w - 12.0, t.text, name.trim_start_matches("Value for "));
@@ -52,7 +56,7 @@ pub fn paint(ui: &mut Ui, s: &State, b: &LinkBox) {
     for (i, (label, v, a, hint)) in [
         ("Port", port, RAct::Port, "MIDI input port number (--- = any device)"),
         ("Channel", ch, RAct::Channel, "MIDI channel number"),
-        ("Ctrl", cc, RAct::Ctrl, "Continuous Controller number"),
+        if all { ("First ctrl", cc, RAct::Ctrl, "Controller of the first parameter (the next ones follow)") } else { ("Ctrl", cc, RAct::Ctrl, "Continuous Controller number") },
     ]
     .into_iter()
     .enumerate()

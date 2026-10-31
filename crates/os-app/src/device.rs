@@ -861,10 +861,36 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let channels = usize::from(config.channels);
+    // Linux: the callback's thread at real-time priority (`crate::rt`). It cannot wait for rtkit itself: it hands its
+    // id over on its first block, and a helper asks for it.
+    #[cfg(target_os = "linux")]
+    let callback_tid = {
+        let tid = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let seen = tid.clone();
+        std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
+            while t0.elapsed() < std::time::Duration::from_secs(5) {
+                match seen.load(std::sync::atomic::Ordering::Acquire) {
+                    0 => std::thread::sleep(std::time::Duration::from_millis(5)),
+                    t => {
+                        if let Err(e) = crate::rt::promote(t) {
+                            eprintln!("Audio: the device callback runs at normal priority ({e})");
+                        }
+                        return;
+                    }
+                }
+            }
+        });
+        tid
+    };
     device
         .build_output_stream::<T, _, _>(
             config.clone(),
             move |out: &mut [T], _| {
+                #[cfg(target_os = "linux")]
+                if callback_tid.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                    callback_tid.store(crate::rt::tid(), std::sync::atomic::Ordering::Release);
+                }
                 let stereo = mix.block(out.len() / channels);
                 // Left and right on the first two channels (a mono device gets the left), silence on the others.
                 for (frame, s) in out.chunks_mut(channels).zip(stereo.chunks_exact(2)) {

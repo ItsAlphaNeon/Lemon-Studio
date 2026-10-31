@@ -91,7 +91,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Audio drivers | 🚧 | WASAPI (shared and exclusive) and ASIO® (output, and inputs for audio recording) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no JACK yet |
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
 | Look and themes | 🚧 | Lemon and Citrus (formerly Classic) skins; 25 built-in themes, your own themes and `.flstheme` files colour either skin, with live adjustments and a colour picker; Lemon plugin editors in the Lemon design only |
-| Settings | 🚧 | The General, Audio, MIDI, File, Theme, Project and Info pages work; not yet the recording settings |
+| Settings | 🚧 | Every page works: MIDI, Audio, Recording, General, File, Plugins, Theme, Project and Info |
 | Audio recording | 🚧 | Armed mixer tracks record into the playlist at their record source; one-click audio recording into the playlist or the audio editor, from ASIO or system inputs; Tesla records what reaches its mixer slot |
 | Audio editing | ✅ | Tesla, the audio editor and recorder after FL's Edison: a mixer effect (and VST3 / CLAP plugin) with markers, regions, destructive edits and tools; a project's Edison slots open in it |
 | Plugin delay compensation | 🚧 | Plugins' reported delays and the mixer tracks' latency settings, in playback and exports; the settings are edited from the mixer |

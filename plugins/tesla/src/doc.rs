@@ -13,9 +13,15 @@
 
 use std::sync::Arc;
 
+use crate::env::{self, Envs};
 use crate::sample::{q16, Format, Sample};
 use crate::state::{Rec, Saved, View};
 use crate::tools;
+use os_dsp::transients;
+
+/// The auto-slicing and grid-slicing entries' names (their undo steps).
+pub const AUTO_SLICING: [&str; 3] = ["Dull auto-slicing", "Medium auto-slicing", "Sharp auto-slicing"];
+pub const GRID_SLICING: [&str; 3] = ["Small grid-slicing", "Medium grid-slicing", "Large grid-slicing"];
 
 /// The click-free crossfade at an edit's joints (Tesla's own: 4 ms, raised cosine).
 pub const CLICK_FREE_MS: f64 = 4.0;
@@ -30,6 +36,8 @@ pub enum Paste {
     Insert,
     Replace,
     Mix,
+    /// Edit > Paste mix (envelope): the all-purpose envelope sets the mix.
+    MixEnv,
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +45,7 @@ struct Step {
     name: String,
     sample: Arc<Sample>,
     sel: Option<(usize, usize)>,
+    env: Envs,
 }
 
 #[derive(Clone, Debug)]
@@ -46,6 +55,8 @@ pub struct Doc {
     pub rec: Rec,
     pub view: View,
     pub edison_env: Vec<u8>,
+    /// The four envelopes (the bottom bar's envelope modes).
+    pub env: Envs,
     /// The selection, first and last frame.
     pub sel: Option<(usize, usize)>,
     /// Where a click without a drag put the cursor (insert and paste go here with no selection).
@@ -74,11 +85,11 @@ fn rise(j: usize, k: usize) -> f32 {
 
 impl Doc {
     pub fn from_saved(s: Saved) -> Doc {
-        Doc { sample: Arc::new(s.sample), path: s.path, rec: s.rec, view: s.view, edison_env: s.edison_env, sel: None, cursor: 0, undo: Vec::new(), redo: Vec::new(), version: 1 }
+        Doc { sample: Arc::new(s.sample), path: s.path, rec: s.rec, view: s.view, edison_env: s.edison_env, env: s.env, sel: None, cursor: 0, undo: Vec::new(), redo: Vec::new(), version: 1 }
     }
 
     pub fn saved(&self) -> Saved {
-        Saved { sample: (*self.sample).clone(), path: self.path.clone(), rec: self.rec.clone(), view: self.view.clone(), edison_env: self.edison_env.clone() }
+        Saved { sample: (*self.sample).clone(), path: self.path.clone(), rec: self.rec.clone(), view: self.view.clone(), edison_env: self.edison_env.clone(), env: self.env.clone() }
     }
 
     /// The title: the file's name without extension.
@@ -127,9 +138,16 @@ impl Doc {
     /// Records the current sample as an undo step named `name` and returns it for editing (copied when the audio
     /// thread or the history still holds it).
     fn edit(&mut self, name: &str) -> &mut Sample {
+        self.push_step(name);
+        self.version += 1;
+        Arc::make_mut(&mut self.sample)
+    }
+
+    /// Records the current sample and envelopes as an undo step named `name` (forgetting the redo steps).
+    fn push_step(&mut self, name: &str) {
         let large = bytes(&self.sample) > LARGE;
         if !large || self.view.undo_large {
-            self.undo.push(Step { name: name.to_string(), sample: self.sample.clone(), sel: self.sel });
+            self.undo.push(Step { name: name.to_string(), sample: self.sample.clone(), sel: self.sel, env: self.env.clone() });
             while self.undo.len() > UNDO_STEPS || (self.undo.len() > 1 && self.undo.iter().map(|s| bytes(&s.sample)).sum::<usize>() > UNDO_BYTES) {
                 self.undo.remove(0);
             }
@@ -137,8 +155,6 @@ impl Doc {
             self.undo.clear();
         }
         self.redo.clear();
-        self.version += 1;
-        Arc::make_mut(&mut self.sample)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -157,18 +173,20 @@ impl Doc {
     /// Undoes the newest step; returns its name.
     pub fn undo(&mut self) -> Option<String> {
         let st = self.undo.pop()?;
-        self.redo.push(Step { name: st.name.clone(), sample: self.sample.clone(), sel: self.sel });
+        self.redo.push(Step { name: st.name.clone(), sample: self.sample.clone(), sel: self.sel, env: std::mem::take(&mut self.env) });
         self.sample = st.sample;
         self.sel = st.sel;
+        self.env = st.env;
         self.version += 1;
         Some(st.name)
     }
 
     pub fn redo(&mut self) -> Option<String> {
         let st = self.redo.pop()?;
-        self.undo.push(Step { name: st.name.clone(), sample: self.sample.clone(), sel: self.sel });
+        self.undo.push(Step { name: st.name.clone(), sample: self.sample.clone(), sel: self.sel, env: std::mem::take(&mut self.env) });
         self.sample = st.sample;
         self.sel = st.sel;
+        self.env = st.env;
         self.version += 1;
         Some(st.name)
     }
@@ -198,6 +216,7 @@ impl Doc {
     pub fn load_as(&mut self, s: Sample, path: &str, name: &str) {
         self.edit(name);
         self.sample = Arc::new(s);
+        self.env = Envs::default();
         self.path = path.to_string();
         self.sel = None;
         self.cursor = 0;
@@ -474,6 +493,26 @@ impl Doc {
                 s.quantize();
                 self.sel = Some((at, at + m - 1));
             }
+            Paste::MixEnv => {
+                // Lemon Studio's design (the original's paste was not measured): at each frame the all-purpose
+                // envelope's height v mixes the clipboard in, sample × (1 − v) + clipboard × v (the bottom keeps the
+                // sample, mid height is equal parts, the top is the clipboard alone); past the end the sample is silence.
+                let at = self.insert_at();
+                let p = self.env.points(env::ALL, self.frames());
+                let s = self.edit("Paste mix (envelope)");
+                let n = s.frames();
+                for (c, src) in s.ch.iter_mut().zip(&clip.ch) {
+                    if at + m > n {
+                        c.resize(at + m, 0.0);
+                    }
+                    for (j, v) in src.iter().enumerate() {
+                        let g = env::value(&p, (at + j) as f64);
+                        c[at + j] = c[at + j] * (1.0 - g) + v * g;
+                    }
+                }
+                s.quantize();
+                self.sel = Some((at, at + m - 1));
+            }
         }
         true
     }
@@ -575,6 +614,296 @@ impl Doc {
         true
     }
 
+    /// Replaces the regions (markers stay) with one from each start to the next (the last to the sample's end), named
+    /// `{prefix} 1`, `{prefix} 2`..., and sets the tempo when given: one undo step. The regions view turns on.
+    pub fn slice_regions(&mut self, name: &str, starts: &[usize], prefix: &str, tempo: Option<f32>) -> usize {
+        let n = self.frames();
+        let mut st: Vec<usize> = starts.iter().copied().filter(|&f| f < n).collect();
+        st.sort_unstable();
+        st.dedup();
+        if st.is_empty() {
+            return 0;
+        }
+        let s = self.edit(name);
+        s.cues.retain(|c| !c.is_region());
+        for (i, &a) in st.iter().enumerate() {
+            let b = st.get(i + 1).copied().unwrap_or(n);
+            s.add_cue(&format!("{prefix} {}", i + 1), a, Some(b - a));
+        }
+        if let Some(t) = tempo {
+            s.tempo = t;
+        }
+        self.view.regions = true;
+        st.len()
+    }
+
+    /// The sample's two channels for the detectors (a mono sample's one, twice).
+    fn pair(s: &Sample) -> (&[f32], &[f32]) {
+        (&s.ch[0], &s.ch[s.ch.len().min(2) - 1])
+    }
+
+    /// Regions > Auto-slice > Dull / Medium / Sharp auto-slicing (`k` 0 to 2): Lemon's transient detector over the
+    /// whole sample, each start moved to a zero crossing; the slices replace the regions. The number of slices.
+    pub fn auto_slice(&mut self, k: usize) -> usize {
+        if self.frames() == 0 {
+            return 0;
+        }
+        let s = self.sample.clone();
+        let (l, r) = Self::pair(&s);
+        let mut st = transients::detect(l, r, s.rate, transients::AUTO_DB[k.min(2)]);
+        transients::zero_cross(&mut st, l, r, s.rate);
+        st[0] = 0;
+        self.slice_regions(AUTO_SLICING[k.min(2)], &st, "Slice", None)
+    }
+
+    /// Drum(loop) stretch of the range (spec: plugins/tesla/README.md "Drum(loop) stretch"): sliced at the regions and
+    /// markers inside it, or at the detected transients (Medium) with Auto-slice on or none there; the cues inside move
+    /// with their slices, the ones after with the end. False without a range.
+    pub fn drum_stretch(&mut self, ds: &tools::DrumStretch) -> bool {
+        let Some((a, b)) = self.range() else { return false };
+        let mut starts: Vec<usize> = if ds.auto { Vec::new() } else { self.sample.cues.iter().map(|c| c.pos).filter(|&p| p > a && p <= b).map(|p| p - a).collect() };
+        if starts.is_empty() {
+            let s = &self.sample;
+            let (l, r) = Self::pair(s);
+            starts = transients::detect(&l[a..=b], &r[a..=b], s.rate, transients::AUTO_DB[1]);
+            transients::zero_cross(&mut starts, &l[a..=b], &r[a..=b], s.rate);
+            // The first slice starts with the range, wherever its crossing is.
+            starts[0] = 0;
+        }
+        starts.push(0);
+        starts.sort_unstable();
+        starts.dedup();
+        let new = tools::drum_stretch(&self.sample, a, b, &starts, ds);
+        let m = new.first().map_or(0, |c| c.len());
+        let r = m as f64 / (b + 1 - a) as f64;
+        let inside: Vec<(u32, usize, Option<usize>)> = self.sample.cues.iter().filter(|c| c.pos >= a && c.pos <= b).map(|c| (c.id, c.pos, c.len)).collect();
+        if !self.replace_range("Drum(loop) stretch", |_, _, _| new) {
+            return false;
+        }
+        let s = Arc::make_mut(&mut self.sample);
+        for (id, pos, len) in inside {
+            if let Some(c) = s.cues.iter_mut().find(|c| c.id == id) {
+                c.pos = a + (((pos - a) as f64) * r).round() as usize;
+                c.len = len.map(|n| ((n as f64 * r).round() as usize).max(1));
+            }
+        }
+        true
+    }
+
+    /// Trim side noise (spec: plugins/tesla/README.md "Noise gating"): what is under threshold `thr` before the
+    /// range's first sound and after its last goes, the edges ramped as the gate ramps them. False when there is no
+    /// sound, or nothing to trim.
+    pub fn trim_side_noise(&mut self, thr: f32) -> bool {
+        let Some((a, b)) = self.range() else { return false };
+        let g = tools::gate_gain(&self.sample, a, b, thr);
+        let runs = tools::sound_runs(&g);
+        let (Some(&(f, _)), Some(&(_, l))) = (runs.first(), runs.last()) else { return false };
+        if f == 0 && l == b - a {
+            return false;
+        }
+        // Only the opening ramp before the first sound and the closing one after the last are applied.
+        let up = (f..=l).find(|&j| g[j] >= 1.0).unwrap_or(l + 1);
+        let down = (f..=l).rev().find(|&j| g[j] >= 1.0).map_or(f, |j| j + 1);
+        let selected = self.sel.is_some();
+        let s = self.edit("Trim side noise");
+        for c in &mut s.ch {
+            for j in (f..up).chain(down.max(up)..=l) {
+                c[a + j] *= g[j];
+            }
+            c.drain(a + l + 1..=b);
+            c.drain(a..a + f);
+        }
+        if l < b - a {
+            s.shift_after(a + l + 1, -((b - a - l) as isize));
+        }
+        if f > 0 {
+            s.shift_after(a, -(f as isize));
+        }
+        s.quantize();
+        let n = l + 1 - f;
+        if selected {
+            self.select(a, a + n - 1);
+        }
+        self.cursor = self.cursor.min(self.frames());
+        true
+    }
+
+    /// Trim all noise & slice up: every stretch of the range under threshold `thr` goes (the gate's ramps kept), and
+    /// each sound left becomes a region "Noise slice n"; the range's markers and regions go. The number of slices (0:
+    /// no sound, nothing done).
+    pub fn trim_all_noise(&mut self, thr: f32) -> usize {
+        let Some((a, b)) = self.range() else { return 0 };
+        let g = tools::gate_gain(&self.sample, a, b, thr);
+        let runs = tools::sound_runs(&g);
+        if runs.is_empty() {
+            return 0;
+        }
+        let new: Vec<Vec<f32>> = self.sample.ch.iter().map(|c| runs.iter().flat_map(|&(f, l)| (f..=l).map(|j| c[a + j] * g[j])).collect()).collect();
+        let m = new[0].len();
+        let selected = self.sel.is_some();
+        let s = self.edit("Trim all noise & slice up");
+        s.cues.retain(|c| c.pos < a || c.pos > b);
+        for (c, v) in s.ch.iter_mut().zip(new) {
+            c.splice(a..=b, v);
+        }
+        s.shift_after(b + 1, m as isize - (b + 1 - a) as isize);
+        let mut at = a;
+        for (i, &(f, l)) in runs.iter().enumerate() {
+            s.add_cue(&format!("Noise slice {}", i + 1), at, Some(l + 1 - f));
+            at += l + 1 - f;
+        }
+        s.quantize();
+        self.view.regions = true;
+        if selected {
+            self.select(a, a + m - 1);
+        }
+        self.cursor = self.cursor.min(self.frames());
+        runs.len()
+    }
+
+    /// The tempo the grid slices by: the sample's, else the one Detect beats would find, else a whole number of bars.
+    pub fn grid_tempo(&self) -> f64 {
+        let s = &self.sample;
+        if s.tempo > 0.0 {
+            return s.tempo as f64;
+        }
+        let (l, r) = Self::pair(s);
+        transients::find_beats(l, r, s.rate).map_or_else(|| transients::guess_tempo(self.frames(), s.rate).1 as f64, |b| b.bpm)
+    }
+
+    /// Regions > Auto-slice > Small / Medium / Large grid-slicing (`k` 0 to 2): slices of a quarter, a half or a whole
+    /// beat at [`grid_tempo`](Self::grid_tempo), from the sample's start. The number of slices.
+    pub fn grid_slice(&mut self, k: usize) -> usize {
+        let n = self.frames();
+        if n == 0 {
+            return 0;
+        }
+        let step = 60.0 / self.grid_tempo() * self.sample.rate as f64 / [4.0, 2.0, 1.0][k.min(2)];
+        // The grid runs through the first downbeat; a part before its first line is a slice of its own.
+        let first = self.sample.downbeat as f64 % step;
+        let mut st: Vec<usize> = (0..).map(|i| (first + i as f64 * step).round() as usize).take_while(|&f| f < n).collect();
+        if st.first().is_some_and(|&f| f > 0) {
+            st.insert(0, 0);
+        }
+        self.slice_regions(GRID_SLICING[k.min(2)], &st, "Slice", None)
+    }
+
+    /// Regions > Detect beats: the sample's tempo and beats (`os_dsp::transients::find_beats`); the tempo is set and a
+    /// region per beat replaces the regions. The tempo and the number of beats, `None` when no beats were found.
+    pub fn detect_beats(&mut self) -> Option<(f64, usize)> {
+        let n = self.frames();
+        let s = self.sample.clone();
+        let (l, r) = Self::pair(&s);
+        let b = transients::find_beats(l, r, s.rate)?;
+        let bpm = (b.bpm * 1000.0).round() / 1000.0;
+        let k = self.slice_regions("Detect beats", &b.frames(n), "Beat", Some(bpm as f32));
+        (k > 0).then_some((bpm, k))
+    }
+
+    /// Regions > Set first downbeat (Lemon Studio's design): bar 1 starts at the selection's start, else the cursor.
+    /// False when it already does.
+    pub fn set_downbeat(&mut self) -> bool {
+        let n = self.frames();
+        if n == 0 {
+            return false;
+        }
+        let at = self.insert_at().min(n - 1);
+        if at == self.sample.downbeat {
+            return false;
+        }
+        self.edit("Set first downbeat").downbeat = at;
+        true
+    }
+
+    /// Tools > Convert to score and dump to piano roll (Lemon Studio's design): the held notes of the selection (else
+    /// the whole sample) as `os_dsp::pitch` finds them, timed in seconds from the first downbeat (notes that start
+    /// before it are left out), each at a velocity of 127 × the square root of its peak.
+    pub fn score(&self) -> Vec<os_hostlink::NoteOut> {
+        let Some((a, b)) = self.range() else { return Vec::new() };
+        let s = &self.sample;
+        let (l, r) = Self::pair(s);
+        let (l, r) = (&l[a..=b], &r[a..=b]);
+        let rate = f64::from(s.rate.max(1));
+        let db = s.downbeat;
+        os_dsp::pitch::regions(l, r, s.rate)
+            .into_iter()
+            .filter_map(|(pos, len, note)| {
+                let start = a + pos;
+                let key = u8::try_from(note).ok().filter(|&k| k < 128)?;
+                if start < db {
+                    return None;
+                }
+                let peak = l[pos..pos + len].iter().chain(&r[pos..pos + len]).fold(0f32, |m, v| m.max(v.abs()));
+                let velocity = (127.0 * peak.min(1.0).sqrt()).round().clamp(1.0, 127.0) as u8;
+                let t = |f: usize| (f - db) as f64 / rate;
+                Some(os_hostlink::NoteOut { start: t(start), end: t(start + len), key, velocity })
+            })
+            .collect()
+    }
+
+    /// Tools > Scratch (envelope): the selection (else the whole sample) played at the all-purpose envelope's speed
+    /// (`env::scratch`). False while that envelope is flat.
+    pub fn scratch(&mut self) -> bool {
+        let n = self.frames();
+        if n == 0 || self.env.is_flat(env::ALL) {
+            return false;
+        }
+        let p = self.env.points(env::ALL, n);
+        self.tool("Scratch (envelope)", |s, a, b| env::scratch(s, a, b, &p))
+    }
+
+    /// Regions > Detect pitch regions (Lemon Studio's design, `os_dsp::pitch`): the sample's regions give way to one
+    /// per held note, named after it ("A5"; C5 = note 60). The number of regions (0: no note found, nothing done).
+    pub fn detect_pitch_regions(&mut self) -> usize {
+        if self.frames() == 0 {
+            return 0;
+        }
+        let s = self.sample.clone();
+        let (l, r) = Self::pair(&s);
+        let found = os_dsp::pitch::regions(l, r, s.rate);
+        if found.is_empty() {
+            return 0;
+        }
+        let e = self.edit("Detect pitch regions");
+        e.cues.retain(|c| !c.is_region());
+        for &(pos, len, note) in &found {
+            e.add_cue(&os_dsp::pitch::note_name(note), pos, Some(len));
+        }
+        self.view.regions = true;
+        found.len()
+    }
+
+    /// Regions > Zero-cross check all regions: each region's start and end move to the nearest zero crossing within
+    /// 2 ms (the end as the frame after it); a start at the sample's start and an end at its end stay. Whether anything
+    /// moved.
+    pub fn zero_cross_regions(&mut self) -> bool {
+        let n = self.frames();
+        let s = self.sample.clone();
+        let (l, r) = Self::pair(&s);
+        let mut moved = Vec::new();
+        for c in s.cues.iter().filter(|c| c.is_region()) {
+            let mut ends = [c.pos, c.end() + 1];
+            transients::zero_cross(&mut ends, l, r, s.rate);
+            // The sample's own start and end stay.
+            let a = if c.pos == 0 { 0 } else { ends[0].min(n - 1) };
+            let b = if c.end() + 1 >= n { n } else { ends[1].min(n) };
+            if (a, b) != (c.pos, c.end() + 1) && b > a {
+                moved.push((c.id, a, b - a));
+            }
+        }
+        if moved.is_empty() {
+            return false;
+        }
+        let s = self.edit("Zero-cross check all regions");
+        for (id, pos, len) in moved {
+            if let Some(c) = s.cues.iter_mut().find(|c| c.id == id) {
+                c.pos = pos;
+                c.len = Some(len);
+            }
+        }
+        true
+    }
+
     /// Auto rename all: regions "Region 1", "Region 2", markers "Marker 1"... by position.
     pub fn auto_rename(&mut self) -> bool {
         if self.sample.cues.is_empty() {
@@ -611,6 +940,80 @@ impl Doc {
             let len = c.len.unwrap_or(1);
             c.pos = pos.min(n - len.min(n));
         }
+    }
+
+    // ------------------------------------------------------------------------------------------- envelopes
+
+    /// The envelope the edit mode shows (`None` in waveform mode).
+    pub fn env_shown(&self) -> Option<usize> {
+        (1..=4).contains(&self.view.mode).then(|| self.view.mode as usize - 1)
+    }
+
+    /// Records an undo step named `name` and returns the envelopes for editing (the sample isn't copied).
+    pub fn edit_env(&mut self, name: &str) -> &mut Envs {
+        self.push_step(name);
+        &mut self.env
+    }
+
+    /// Changes the envelopes without an undo step (a point being dragged after its step was recorded).
+    pub fn env_mut(&mut self) -> &mut Envs {
+        &mut self.env
+    }
+
+    /// Tools > Cancel all envelopes: the four back to the flat line.
+    pub fn cancel_envelopes(&mut self) -> bool {
+        if self.env == Envs::default() {
+            return false;
+        }
+        *self.edit_env("Cancel all envelopes") = Envs::default();
+        true
+    }
+
+    /// Runs an envelope tool on the shown envelope. False in waveform mode or with an empty sample.
+    pub fn env_tool(&mut self, name: &str, f: impl FnOnce(&mut Envs, usize, usize) -> bool) -> bool {
+        let (Some(k), n) = (self.env_shown(), self.frames()) else { return false };
+        if n == 0 {
+            return false;
+        }
+        let mut e = self.env.clone();
+        if !f(&mut e, k, n) || e == self.env {
+            return false;
+        }
+        *self.edit_env(name) = e;
+        true
+    }
+
+    /// Tools > Add points at selection (its two ends) or at regions (each region's two ends).
+    pub fn env_points_at(&mut self, regions: bool) -> bool {
+        let at: Vec<f64> = if regions {
+            self.regions().iter().flat_map(|&(a, b)| [a as f64, b as f64]).collect()
+        } else {
+            self.sel.map(|(a, b)| vec![a as f64, b as f64]).unwrap_or_default()
+        };
+        if at.is_empty() {
+            return false;
+        }
+        let name = if regions { "Add points at regions" } else { "Add points at selection" };
+        self.env_tool(name, |e, k, n| {
+            e.add_points(k, n, &at);
+            true
+        })
+    }
+
+    /// Tools > Mixdown amp envelopes: the panning, volume and stereo separation envelopes applied to the whole sample
+    /// (one undo step), then back to the flat line. False while they are flat.
+    pub fn mixdown(&mut self) -> bool {
+        if self.frames() == 0 || self.env.amp_flat() {
+            return false;
+        }
+        let envs = self.env.clone();
+        let s = self.edit("Mixdown amp envelopes");
+        env::mixdown(s, &envs);
+        s.quantize();
+        for k in [env::PAN, env::VOLUME, env::SEP] {
+            self.env.e[k].clear();
+        }
+        true
     }
 
     // ------------------------------------------------------------------------------------------- select
@@ -764,6 +1167,109 @@ mod tests {
         assert!(c.windows(2).all(|w| (w[1] - w[0]).abs() < 0.02));
     }
 
+    /// Four hits a quarter apart, each a 0.8 burst decaying over its quarter.
+    fn hits(n: usize) -> Doc {
+        let mut d = Doc::default();
+        let mut x = vec![0f32; n];
+        for k in 0..4 {
+            for i in 0..n / 4 {
+                x[k * n / 4 + i] = 0.8 * (-(i as f32) / 4000.0).exp() * if i % 2 == 0 { 1.0 } else { -1.0 };
+            }
+        }
+        d.sample = Arc::new(Sample::from_channels(44100, vec![x], Format::Float32));
+        d
+    }
+
+    /// Where the hits start: the first frame over 0.5 after 50 quiet ones.
+    fn onsets(d: &Doc) -> Vec<usize> {
+        let x = &d.sample.ch[0];
+        (0..x.len()).filter(|&i| x[i].abs() > 0.5 && (i == 0 || (i >= 50 && x[i - 50..i].iter().all(|v| v.abs() < 0.1)))).collect()
+    }
+
+    #[test]
+    fn drum_loop_stretch_moves_the_slices_and_fills_the_gaps() {
+        let n = 44100;
+        // Twice as long, sliced at the regions: the hits twice as far apart, unchanged, the regions with them.
+        let mut d = hits(n);
+        for k in 0..4 {
+            d.select(k * n / 4, (k + 1) * n / 4 - 1);
+            d.add_cue(&format!("hit {k}"), true);
+        }
+        d.sel = None;
+        let ds = tools::DrumStretch { time: 0.5, ..tools::DrumStretch::default() };
+        assert!(d.drum_stretch(&ds));
+        assert_eq!(d.frames(), 2 * n);
+        assert_eq!(onsets(&d), vec![0, n / 2, n, 3 * n / 2]);
+        assert_eq!(d.sample.cues.iter().map(|c| (c.pos, c.len)).collect::<Vec<_>>(), (0..4).map(|k| (k * n / 2, Some(n / 2))).collect::<Vec<_>>());
+        assert!((d.sample.ch[0][n / 2 + 5] - 0.8 * (-5f32 / 4000.0).exp() * -1.0).abs() < 1e-6, "a hit keeps its samples");
+        assert_eq!(d.history()[0], "Drum(loop) stretch");
+        // Echo grains: the gap after a hit's audio rings on, fading to nothing by the next hit.
+        let gap = |d: &Doc, a: usize, b: usize| d.sample.ch[0][a..b].iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(gap(&d, n / 4 + 100, n / 4 + 2000) > 1e-4, "filled");
+        assert!(gap(&d, n / 2 - 20, n / 2) < 1e-3, "faded out before the next hit");
+        // Silence instead: nothing in the gaps.
+        let mut d = hits(n);
+        let ds = tools::DrumStretch { time: 0.5, fill: tools::Fill::Silence, ..tools::DrumStretch::default() };
+        assert!(d.drum_stretch(&ds), "no regions: sliced at the detected transients");
+        assert_eq!(onsets(&d).len(), 4);
+        assert!(onsets(&d).iter().zip([0, n / 2, n, 3 * n / 2]).all(|(&a, b)| a.abs_diff(b) < 64), "{:?}", onsets(&d));
+        assert_eq!(gap(&d, n / 4 + 64, n / 2 - 64), 0.0);
+        // Half as long: the hits closer, each cut short with a fade.
+        let mut d = hits(n);
+        assert!(d.drum_stretch(&tools::DrumStretch { time: -0.5, ..tools::DrumStretch::default() }));
+        assert_eq!(d.frames(), n / 2);
+        assert!(onsets(&d).iter().zip([0, n / 8, n / 4, 3 * n / 8]).all(|(&a, b)| a.abs_diff(b) < 64), "{:?}", onsets(&d));
+    }
+
+    #[test]
+    fn noise_gating_gates_and_trims() {
+        let n = 44100;
+        // Noise at 0.005 (−46 dBFS) with two bursts of 0.5.
+        let mut r = tools::Rng::new(9);
+        let x: Vec<f32> = (0..n).map(|i| if (10000..15000).contains(&i) || (30000..32000).contains(&i) { 0.5 } else { 0.005 * r.gauss().clamp(-1.0, 1.0) as f32 }).collect();
+        let base = Sample::from_channels(44100, vec![x], Format::Float32);
+        let mut d = Doc::default();
+        d.sample = Arc::new(base.clone());
+        // Gate noise at the default −40 dBFS: the noise far from the bursts goes, the bursts stay.
+        assert!(tools::gate(Arc::make_mut(&mut d.sample), 0, n - 1, tools::GATE_DEFAULT));
+        let s = &d.sample.ch[0];
+        assert!(s[..9000].iter().all(|&v| v == 0.0) && s[20000..29000].iter().all(|&v| v == 0.0));
+        assert!(s[10000..15000].iter().all(|&v| v == 0.5) && s[30000..32000].iter().all(|&v| v == 0.5));
+        assert!(s[9950] != 0.0 && s[9950].abs() < 0.005, "the look-ahead opens the gate before the burst");
+        // Trim side noise: from the look-ahead before the first burst to the release after the last.
+        d.sample = Arc::new(base.clone());
+        assert!(d.trim_side_noise(tools::GATE_DEFAULT));
+        let (look, tail) = (88, 1323 + 881);
+        assert_eq!(d.frames(), 32000 - 10000 + look + tail);
+        assert_eq!(d.sample.ch[0][look], 0.5);
+        assert!(!d.trim_side_noise(tools::GATE_DEFAULT), "nothing left to trim");
+        // Trim all noise & slice up: the bursts, a region each.
+        d.sample = Arc::new(base);
+        assert_eq!(d.trim_all_noise(tools::GATE_DEFAULT), 2);
+        let rg: Vec<(String, usize, usize)> = d.sample.cues.iter().map(|c| (c.name.clone(), c.pos, c.len.unwrap())).collect();
+        assert_eq!(rg, vec![("Noise slice 1".to_string(), 0, 5000 + look + tail), ("Noise slice 2".to_string(), 5000 + look + tail, 2000 + look + tail)]);
+        assert_eq!(d.frames(), 7000 + 2 * (look + tail));
+        // An acquired threshold over the bursts: no sound, nothing done.
+        assert_eq!(d.trim_all_noise(0.6), 0);
+    }
+
+    #[test]
+    fn zero_cross_check_moves_region_ends_to_crossings() {
+        let mut d = Doc::default();
+        // A 441 Hz sine: crossings every 50 frames.
+        let l: Vec<f32> = (0..4410).map(|i| (std::f64::consts::TAU * i as f64 / 100.0).sin() as f32).collect();
+        d.sample = Arc::new(Sample::from_channels(44100, vec![l], Format::Float32));
+        d.select(1010, 2029);
+        d.add_cue("rg", true);
+        d.select(0, 4409);
+        d.add_cue("all", true);
+        assert!(d.zero_cross_regions());
+        let r: Vec<(usize, usize)> = d.sample.cues.iter().map(|c| (c.pos, c.end())).collect();
+        assert_eq!(r, vec![(1001, 2050), (0, 4409)], "to where the sine turns positive; the whole-sample region stays");
+        assert_eq!(d.history()[0], "Zero-cross check all regions");
+        assert!(!d.zero_cross_regions(), "nothing left to move");
+    }
+
     #[test]
     fn regions_markers_loop_and_select() {
         let mut d = doc(1000);
@@ -803,11 +1309,109 @@ mod tests {
     }
 
     #[test]
+    fn envelopes_undo_and_mix_down() {
+        let mut d = doc(0);
+        d.sample = Arc::new(Sample::from_channels(44100, vec![vec![0.5; 101], vec![0.5; 101]], Format::Float32));
+        // Waveform mode: no envelope tools.
+        assert!(!d.env_tool("Flip vertically", |e, k, n| {
+            e.flip(k, n);
+            true
+        }));
+        assert!(!d.mixdown());
+        d.view.mode = 2;
+        assert_eq!(d.env_shown(), Some(env::VOLUME));
+        d.select(20, 80);
+        assert!(d.env_points_at(false));
+        let n = d.frames();
+        d.edit_env("Move point").move_point(env::VOLUME, n, 1, 20.0, 0.0);
+        d.env_mut().move_point(env::VOLUME, n, 2, 50.0, 0.0);
+        d.env_mut().move_point(env::VOLUME, n, 3, 80.0, 0.0);
+        assert_eq!(d.history(), vec!["Move point", "Add points at selection"]);
+        // Undo and redo carry the envelopes, and leave the sample's Arc alone.
+        let before = d.sample.clone();
+        d.undo();
+        assert_eq!(d.env.points(env::VOLUME, n).len(), 5);
+        assert!(d.env.is_flat(env::VOLUME));
+        assert!(Arc::ptr_eq(&before, &d.sample));
+        d.redo();
+        assert!(!d.env.is_flat(env::VOLUME));
+        // The mixdown silences 20..=80 (straight lines down into it), then the amp envelopes go flat.
+        assert!(d.mixdown());
+        assert_eq!(d.sample.ch[0][50], 0.0);
+        assert_eq!(d.sample.ch[1][0], 0.5);
+        assert!(d.sample.ch[0][10] > 0.0 && d.sample.ch[0][10] < 0.5);
+        assert!(d.env.amp_flat());
+        assert!(!d.mixdown());
+        d.undo();
+        assert_eq!(d.sample.ch[0][50], 0.5);
+        assert!(!d.env.is_flat(env::VOLUME), "undo brings the envelope back");
+        assert!(d.cancel_envelopes());
+        assert_eq!(d.env, Envs::default());
+        assert!(!d.cancel_envelopes());
+    }
+
+    #[test]
     fn conform_rate_and_channels() {
         let c = Sample::from_channels(22050, vec![vec![0.0, 1.0, 2.0]], Format::Float32);
         let r = conform(&c, 44100, 2);
         assert_eq!(r.channels(), 2);
         assert_eq!(r.frames(), 6);
         assert_eq!(r.ch[1][1], 0.5);
+    }
+
+    /// Paste mix (envelope), Set first downbeat (it moves with edits, grid-slicing and the score count from it), and
+    /// the score of a held note.
+    #[test]
+    fn paste_mix_envelope_downbeat_and_score() {
+        let mut d = Doc::default();
+        d.load(Sample::from_channels(1000, vec![vec![0.2; 100]], Format::Float32), "");
+        // The all-purpose envelope from the bottom (the sample) to the top (the clipboard).
+        d.env.move_point(env::ALL, 100, 0, 0.0, 0.0);
+        d.env.move_point(env::ALL, 100, 2, 99.0, 1.0);
+        let clip = Sample::from_channels(1000, vec![vec![0.6; 100]], Format::Float32);
+        d.cursor = 0;
+        assert!(d.paste(&clip, Paste::MixEnv));
+        assert_eq!(d.history()[0], "Paste mix (envelope)");
+        let c = &d.sample.ch[0];
+        assert!((c[0] - 0.2).abs() < 1e-6 && (c[99] - 0.6).abs() < 1e-6 && (c[50] - 0.4).abs() < 1e-6, "{} {} {}", c[0], c[50], c[99]);
+        // Set first downbeat at the cursor; an insert before it moves it.
+        d.sel = None;
+        d.cursor = 40;
+        assert!(d.set_downbeat());
+        assert!(!d.set_downbeat(), "already there");
+        assert_eq!(d.sample.downbeat, 40);
+        d.cursor = 10;
+        d.insert_silence(5);
+        assert_eq!(d.sample.downbeat, 45);
+        assert!(d.undo().is_some() && d.undo().is_some());
+        assert_eq!(d.sample.downbeat, 0);
+        // Grid-slicing runs through the downbeat: at 120 BPM and 1 kHz a quarter beat is 125 frames.
+        let mut g = Doc::default();
+        let mut s = Sample::from_channels(1000, vec![vec![0.1; 1000]], Format::Float32);
+        s.tempo = 120.0;
+        s.downbeat = 300;
+        g.load(s, "");
+        assert_eq!(g.grid_slice(0), 9);
+        let st: Vec<usize> = g.regions().iter().map(|r| r.0).collect();
+        assert_eq!(st, vec![0, 50, 175, 300, 425, 550, 675, 800, 925]);
+        // The score: one A5 (69) held from 0.5 s to 1.5 s, timed from a downbeat at 0.25 s.
+        let rate = 44100;
+        let mut x = vec![0.0f32; 2 * rate];
+        for (i, v) in x.iter_mut().enumerate().take(3 * rate / 2).skip(rate / 2) {
+            *v = (0.5 * (std::f64::consts::TAU * 440.0 * i as f64 / rate as f64).sin()) as f32;
+        }
+        let mut sc = Doc::default();
+        sc.load(Sample::from_channels(rate as u32, vec![x], Format::Float32), "");
+        sc.cursor = rate / 4;
+        sc.set_downbeat();
+        let notes = sc.score();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        let n = notes[0];
+        assert_eq!((n.key, n.velocity), (69, 90));
+        assert!((n.start - 0.25).abs() < 0.05 && (n.end - 1.25).abs() < 0.07, "{n:?}");
+        // Notes before the downbeat are left out.
+        sc.cursor = rate;
+        sc.set_downbeat();
+        assert!(sc.score().is_empty());
     }
 }

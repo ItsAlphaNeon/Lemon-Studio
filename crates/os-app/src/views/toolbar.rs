@@ -469,7 +469,16 @@ fn time(ui: &mut Ui, c: &Ctx) {
     // A bar that makes no signature (3 steps per beat) counts its beats as quarters.
     let sig = s.project.signature().unwrap_or((s.project.bar().0, 4));
     let secs = f.tick / ppq * 60.0 / s.project.tick_tempo(s.tempo.max(1.0));
-    let (bar, step, tick) = s.clock.reading(secs, f.tick * 96.0 / ppq, sig);
+    let ticks96 = f.tick * 96.0 / ppq;
+    // The bars count from the Start marker's bar (spec: ui/playlist.md §7a, ui/performance-mode.md §1).
+    let start = crate::playlist::start_marker(s).filter(|_| f.song && s.clock.mode == crate::clock::Mode::Bar);
+    let (bar, step, tick) = match start {
+        Some(z) => s.clock.bars_from(ticks96, (f64::from(z) * 96.0 / ppq / 384.0).floor() * 384.0, sig),
+        None => {
+            let (b, st, t) = s.clock.reading(secs, ticks96, sig);
+            (i64::from(b), st, t)
+        }
+    };
     // Light digits drawn piece by piece (measured: big 36 px condensed to 14, small 24 to 9),
     // right-aligned so long bar numbers grow to the left and never leave the panel.
     let (big, small) = (Font::light(32, 13), Font::light(22, 8));

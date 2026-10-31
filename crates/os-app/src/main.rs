@@ -14,7 +14,9 @@
 
 mod app;
 mod arrange;
+mod audio_clipboard;
 mod help_links;
+mod diagnostics;
 mod audio_cfg;
 mod auto_close;
 mod autoscroll;
@@ -27,6 +29,8 @@ mod browser;
 mod browser_index;
 mod cable;
 mod capture;
+#[cfg(target_os = "linux")]
+mod rt;
 mod one_click;
 mod track_rec;
 mod audio_log;
@@ -38,6 +42,7 @@ mod cpu;
 mod data_folder;
 mod device;
 mod dialog;
+mod floating;
 mod filedlg;
 mod enable_groups;
 mod export;
@@ -69,6 +74,7 @@ mod midi_in;
 mod midi_out;
 mod midi_play;
 mod mixer;
+mod mixer_state;
 mod osc3;
 mod citrus;
 mod slicer;
@@ -85,6 +91,7 @@ mod render;
 mod pattern_render;
 mod patterns;
 mod perf;
+mod perform;
 mod playlist;
 mod plugin_db;
 mod plugin_manager;
@@ -123,6 +130,7 @@ mod strum;
 mod flam;
 mod flip;
 mod levels;
+mod channel_states;
 mod chords;
 mod claw;
 mod limit;
@@ -581,6 +589,11 @@ impl Shell {
         if self.app.want_exit {
             el.exit();
         }
+        // Ctrl+C in the terminal, or a kill: closes without asking (`exiting` keeps unsaved changes as a backup).
+        #[cfg(unix)]
+        if stop_signal::asked() {
+            el.exit();
+        }
         // macOS: Quit from the menu bar or the Dock asks about unsaved changes as closing the window does; AppKit waits
         // for the answer. A Quit while a dialog is open is turned down (the dialog is answered first).
         #[cfg(target_os = "macos")]
@@ -789,6 +802,11 @@ impl ApplicationHandler for Shell {
             layout::save_main(m);
         }
         layout::save(&self.app.state);
+        // Stopped by a signal with changes unsaved: nobody was asked, so they go to a backup.
+        #[cfg(unix)]
+        if stop_signal::asked() && self.app.unsaved() {
+            let _ = self.app.write_backup(chrono::Local::now().naive_local());
+        }
         #[cfg(target_os = "macos")]
         {
             if os_host::guard::tripped() {
@@ -1372,7 +1390,7 @@ fn screenshot(args: &[String]) {
                 }
             }
             // The wheel turned `dy` notches at x,y after the first paint, before the clicks (scrolls a page, e.g.
-            // `--settings 5 --wheel 960,500,-40` shows the Theme page's buttons); may be given more than once.
+            // `--settings 6 --wheel 960,500,-40` shows the Theme page's buttons); may be given more than once.
             "--wheel" => {
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
                 if let [x, y, dy] = v[..] {
@@ -1382,7 +1400,7 @@ fn screenshot(args: &[String]) {
             "--lane" => lane = it.next().and_then(|v| v.parse().ok()),
             "--pans" => pans = it.next().map(|v| v.split(',').filter_map(|p| p.parse().ok()).collect()),
             "--settings" => settings = it.next().and_then(|v| v.parse().ok()),
-            // With --settings 7: that Info box (0 title .. 4 web link) being edited.
+            // With --settings 8: that Info box (0 title .. 4 web link) being edited.
             "--info-edit" => info_edit = it.next().and_then(|v| v.parse().ok()),
             "--lane-menu" => lane_menu = true,
             "--menu" => menu = it.next().and_then(|v| v.parse().ok()),
@@ -1726,6 +1744,37 @@ fn use_x11() -> bool {
     std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) && x11rb::rust_connection::RustConnection::connect(None).is_ok()
 }
 
+/// SIGINT (Ctrl+C in the terminal) and SIGTERM: the program closes as it does with its window, within a tick. A second
+/// one ends it at once, should the first not get through.
+#[cfg(unix)]
+mod stop_signal {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ASKED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn on_signal(_: libc::c_int) {
+        if ASKED.swap(true, Ordering::AcqRel) {
+            // SAFETY: ends the process; safe in a signal handler.
+            unsafe { libc::_exit(130) };
+        }
+    }
+
+    pub fn install() {
+        // SAFETY: installs a handler that only touches an atomic and may call `_exit`.
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
+            libc::sigemptyset(&mut sa.sa_mask);
+            libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+            libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        }
+    }
+
+    pub fn asked() -> bool {
+        ASKED.load(Ordering::Acquire)
+    }
+}
+
 fn wake_ui() {
     if !WAKE_PENDING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         if let Ok(p) = PROXY.lock() {
@@ -1888,6 +1937,8 @@ fn main() {
         ctrl_click: false,
         main_win: layout::main_win(),
     };
+    #[cfg(unix)]
+    stop_signal::install();
     event_loop.run_app(&mut shell).expect("run");
     // After a contained plugin crash the process ends here, before plugin files are unloaded (a stopped plugin's code
     // must not run again).

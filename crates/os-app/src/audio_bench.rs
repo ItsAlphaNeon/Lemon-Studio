@@ -8,7 +8,8 @@
 //!
 //! `OS_AUDIO_BENCH=<project.flp> cargo test -p os-app --bin lemonstudio audio_load -- --ignored --nocapture`
 //! (`OS_AUDIO_BENCH_SECS=n` stops after n seconds of song; `OS_MIX_THREADS=n` renders on n mixing workers beside the
-//! rendering thread, spec: audio/multicore.md, where the time is still the rendering thread's wall clock).
+//! rendering thread, spec: audio/multicore.md, where the time is still the rendering thread's wall clock;
+//! `OS_MIX_AUTO=1` uses them only when needed, as playing live does).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -105,6 +106,7 @@ fn audio_load() {
         eprintln!("set OS_AUDIO_BENCH to a project file");
         return;
     };
+    os_engine::parallel::configure_auto(std::env::var_os("OS_MIX_AUTO").is_some());
     let limit: f64 = std::env::var("OS_AUDIO_BENCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(f64::MAX);
     let mut app = crate::app::App::new(None);
     app.plugins = crate::plugins::Plugins::default();
@@ -150,7 +152,18 @@ fn audio_load() {
     let mut peak = 0.0f32;
     loop {
         let t = Instant::now();
-        let done = e.render_ticks(1, &mut out);
+        // Rendered as playing live does, not as an export, which always uses the workers.
+        let done = if os_engine::parallel::auto_on() {
+            match e.next_tick() {
+                Some((samples, ..)) => {
+                    out.extend_from_slice(samples);
+                    false
+                }
+                None => true,
+            }
+        } else {
+            e.render_ticks(1, &mut out)
+        };
         let d = t.elapsed();
         spent += d;
         total += d;

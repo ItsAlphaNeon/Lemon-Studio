@@ -31,8 +31,15 @@ pub const INFO_H: f32 = 84.0;
 /// (label, icon, category colour index). Only the roots with content: FL's other disk-folder roots (Recent files,
 /// Channel presets, Packs...) are left out until Lemon Studio has content for them (owner decision); dropped folders
 /// follow these. Plugin presets: the preset store, user and factory (spec: plugins/presets.md "Browser").
-const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin library", Icon::Speaker, 1), (PLUGIN_PRESETS, Icon::FilePreset, 1)];
+/// Channel presets: the channel state files (`crate::channel_states`; empty until one is saved).
+const ROOTS: &[(&str, Icon, u8)] = &[("Current project", Icon::Page, 0), ("Plugin library", Icon::Speaker, 1), (PLUGIN_PRESETS, Icon::FilePreset, 1), (CHANNEL_PRESETS, Icon::FilePreset, 1)];
 pub const PLUGIN_PRESETS: &str = "Plugin presets";
+pub const CHANNEL_PRESETS: &str = "Channel presets";
+
+/// Tree key of the All tab's Channel presets root.
+pub fn channel_presets_key() -> String {
+    format!("0:{CHANNEL_PRESETS}")
+}
 
 /// Tree key of the All tab's Plugin presets root; a plugin's node is `<this>/<plugin folder name>`.
 pub fn presets_key() -> String {
@@ -49,11 +56,14 @@ const PROJECT: &[(&str, Icon)] = &[
     ("Patterns", Icon::Note),
     ("Effects", Icon::Speaker),
     ("Generators", Icon::Plug),
+    (REMOTE_CONTROL, Icon::MidiControl),
     (INITIALIZED_CONTROLS, Icon::Slide),
     (PROJECT_DATA, Icon::Folder),
     ("Samples", Icon::Wave),
 ];
 pub const INITIALIZED_CONTROLS: &str = "Controls with a start value";
+/// The controller links, one row each (`crate::remote::label`); VIEW > Remote control opens it.
+pub const REMOTE_CONTROL: &str = "Remote control";
 pub const PROJECT_DATA: &str = "Project data";
 
 /// The Current project, Plugin database and Favorites tabs (spec §1).
@@ -225,9 +235,10 @@ fn tree(s: &State) -> Vec<Row> {
             Ok(i) => ROOTS[i].0.to_lowercase(),
             Err(f) => root_label(s, &s.browser_folders[f]).to_lowercase(),
         };
+        let fixed = roots.len();
         for f in 0..s.browser_folders.len() {
             let me = root_label(s, &s.browser_folders[f]).to_lowercase();
-            let at = (ROOTS.len()..roots.len()).find(|&j| name(&roots[j]) > me).unwrap_or(roots.len());
+            let at = (fixed..roots.len()).find(|&j| name(&roots[j]) > me).unwrap_or(roots.len());
             roots.insert(at, Err(f));
         }
     }
@@ -257,7 +268,12 @@ fn tree(s: &State) -> Vec<Row> {
         match r {
             0 => project_rows(s, &key, cat, &mut out),
             1 => plugin_rows(s, &key, cat, &mut out),
-            _ => preset_rows(s, &key, cat, &mut out),
+            2 => preset_rows(s, &key, cat, &mut out),
+            _ => {
+                if let Some(dir) = crate::channel_states::root().filter(|d| d.is_dir()) {
+                    disk_rows(s, &dir, &key, 1, &mut out);
+                }
+            }
         }
     }
     out
@@ -334,7 +350,7 @@ pub fn file_icon(name: &str) -> Icon {
         "mid" | "midi" => Icon::PianoRoll,
         "flp" => Icon::FileProject,
         "txt" | "url" | "pdf" | "nfo" | "rtf" | "htm" | "html" | "md" => Icon::FileText,
-        "fxp" | "fxb" | "fst" | "vstpreset" | "nmsv" | "spf" | "h2p" | "clap-preset" | "ospreset" => Icon::FilePreset,
+        "fxp" | "fxb" | "fst" | "vstpreset" | "nmsv" | "spf" | "h2p" | "clap-preset" | "ospreset" | "oschannel" => Icon::FilePreset,
         "zip" | "rar" | "7z" => Icon::FileZip,
         _ => Icon::FileBlank,
     }
@@ -344,7 +360,7 @@ pub fn file_icon(name: &str) -> Icon {
 fn file_item(name: &str, path: &str) -> Item {
     if file_icon(name) == Icon::FileAudio {
         Item::Sample(path.into())
-    } else if crate::presets::is_preset_file(Path::new(path)) || crate::presets::is_factory(Path::new(path)) {
+    } else if crate::presets::is_preset_file(Path::new(path)) || crate::presets::is_factory(Path::new(path)) || crate::channel_states::is_state_file(Path::new(path)) {
         Item::Preset(path.into())
     } else {
         Item::File(path.into())
@@ -427,6 +443,11 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                         let label = crate::params::effect_label(s, m.index, k as u8).unwrap_or_default();
                         plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, crate::plugins::fx_key(m.index, k as u8));
                     }
+                }
+            }
+            REMOTE_CONTROL => {
+                for l in crate::remote::links() {
+                    leaf(out, &parent, crate::remote::label(s, &l), Icon::MidiControl, cat, false, Item::None);
                 }
             }
             // "<owner> - <setting>", as the automation clip on the control is named.

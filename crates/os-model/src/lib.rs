@@ -99,6 +99,8 @@ pub struct Project {
     pub panning_law: Option<u8>,
     pub fast_declick: Option<bool>,
     pub auto_crossfades: Option<bool>,
+    /// Performance mode (event 31: 1 = on; spec: ui/performance-mode.md §5). `None` = not in the file (off).
+    pub performance: Option<bool>,
     /// Playlist scroll, time zoom and track height (event 242). `None` = not in the file.
     pub playlist_view: Option<PlaylistView>,
     /// Main volume 0..=16000, 12800 = unity (mixer record id 0 at place 0x4000; spec: audio/mixer.md "Main volume").
@@ -121,6 +123,10 @@ pub struct Project {
     /// Internal controller links, in file order (event 227 with 0x8000 and up in its first field; spec:
     /// flp/events/automation.md "Controller links"): a controller plugin's output driving a target.
     pub controller_links: Vec<ControllerLink>,
+    /// Mixer options ▸ Plugin delay compensation ▸ Automatic unticked: the plugins' delays are not compensated, only
+    /// the tracks' latency settings are (spec: audio/delay-compensation.md "Automatic"). Not saved: where the original
+    /// keeps it was not found.
+    pub pdc_off: bool,
 }
 
 /// One internal controller link (spec: flp/events/automation.md "Controller links"): output `output` of the controller
@@ -1016,6 +1022,24 @@ pub struct ChannelMisc {
     /// The pitch knob's range, semitones either way (1..=48; the plugin window's RANGE box). Not saved: where the file
     /// keeps it is not mapped yet (flp/events/channels.md).
     pub pitch_range: u8,
+    /// The channel plugin's CPU switches (its window menu's CPU entries).
+    pub cpu: PluginCpu,
+}
+
+/// A hosted plugin's CPU switches, its window menu's Allow threaded processing (on for a new plugin) and Smart disable
+/// (off), as event 212 stores them (flags 0x40 and 0x20; spec: flp/events/plugins.md §3, ui/plugin-window.md "CPU").
+/// Saved with the plugin. The engine passes a silent mixer slot by when its Smart disable is on (spec:
+/// audio/auto-bypass.md); what is heard is the same either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginCpu {
+    pub threaded: bool,
+    pub smart_disable: bool,
+}
+
+impl Default for PluginCpu {
+    fn default() -> Self {
+        PluginCpu { threaded: true, smart_disable: false }
+    }
 }
 
 /// A layer channel's settings besides its children (spec: audio/note-rules.md "Settings", "Layer channels").
@@ -1062,6 +1086,7 @@ impl Default for ChannelMisc {
             key_range: [0, 256],
             layer: LayerSettings::default(),
             pitch_range: 2,
+            cpu: PluginCpu::default(),
         }
     }
 }
@@ -1429,6 +1454,13 @@ pub struct MixerTrack {
     pub swap: bool,
     /// The track's "effects enabled" switch (event 236 flag 0x04): when off no slot runs.
     pub slots_enabled: bool,
+    /// The track menu's Separator (event 236 flag 0x0400: a gap before the strip; tracks from one separator to the
+    /// next form a group), Dock to (flags 0x00C0: `DOCK_LEFT`, `DOCK_MIDDLE`, `DOCK_RIGHT`) and Allow threaded
+    /// processing (flag 0x0010 clear). Separator and docking only change where the strip is drawn; a track without
+    /// threading renders on the rendering thread (spec: ui/mixer.md §6.1, audio/multicore.md §5).
+    pub separator: bool,
+    pub dock: u8,
+    pub threaded: bool,
     /// Per slot: enabled (the slot LED) and mix level 0..=1 (spec: ui/mixer.md §7).
     pub slot_on: [bool; 10],
     pub slot_mix: [f64; 10],
@@ -1451,6 +1483,8 @@ pub struct MixerTrack {
     /// input is heard (event 166: `MONITOR_OFF`, `MONITOR_ARMED`, `MONITOR_ON`).
     pub rec_source: u8,
     pub monitor: u8,
+    /// Per slot: the slot plugin's CPU switches (event 212 flags; they follow the plugin when it moves).
+    pub slot_cpu: [PluginCpu; 10],
     /// Armed for disk recording (the strip's record button). Not saved, and not part of the track: tracks that differ
     /// only here are equal (spec: audio/track-io.md §1.5).
     pub armed: bool,
@@ -1479,6 +1513,9 @@ impl PartialEq for MixerTrack {
             polarity,
             swap,
             slots_enabled,
+            separator,
+            dock,
+            threaded,
             slot_on,
             slot_mix,
             eq,
@@ -1489,6 +1526,7 @@ impl PartialEq for MixerTrack {
             audio_out,
             rec_source,
             monitor,
+            slot_cpu,
             armed: _,
             origin: _,
         } = self;
@@ -1505,6 +1543,9 @@ impl PartialEq for MixerTrack {
             && *polarity == o.polarity
             && *swap == o.swap
             && *slots_enabled == o.slots_enabled
+            && *separator == o.separator
+            && *dock == o.dock
+            && *threaded == o.threaded
             && *slot_on == o.slot_on
             && *slot_mix == o.slot_mix
             && *eq == o.eq
@@ -1515,6 +1556,7 @@ impl PartialEq for MixerTrack {
             && *audio_out == o.audio_out
             && *rec_source == o.rec_source
             && *monitor == o.monitor
+            && *slot_cpu == o.slot_cpu
     }
 }
 
@@ -1525,6 +1567,10 @@ pub const MONITOR_ON: u8 = 3;
 /// Record sources (event 165): External input only, and the default, Post EQ.
 pub const REC_EXTERNAL: u8 = 0;
 pub const REC_POST_EQ: u8 = 3;
+/// Where a track's strip is docked ([`MixerTrack::dock`]): the master is on the left, new tracks in the middle.
+pub const DOCK_LEFT: u8 = 0;
+pub const DOCK_MIDDLE: u8 = 1;
+pub const DOCK_RIGHT: u8 = 2;
 
 /// A new track's equaliser: flat, at the default frequencies and widths.
 pub const EQ_DEFAULT: [[i32; 3]; 3] = [[0, 5777, 17500], [0, 33145, 17500], [0, 55825, 17500]];
@@ -1547,6 +1593,9 @@ impl MixerTrack {
             polarity: false,
             swap: false,
             slots_enabled: true,
+            separator: false,
+            dock: if index == 0 { DOCK_LEFT } else { DOCK_MIDDLE },
+            threaded: true,
             slot_on: [true; 10],
             slot_mix: [1.0; 10],
             eq: EQ_DEFAULT,
@@ -1557,6 +1606,7 @@ impl MixerTrack {
             audio_out: if index == 0 { 0 } else { -1 },
             rec_source: REC_POST_EQ,
             monitor: MONITOR_ARMED,
+            slot_cpu: [PluginCpu::default(); 10],
             armed: false,
             origin: None,
         }
@@ -1941,12 +1991,60 @@ pub struct PlaylistTrack {
     pub collapsed: bool,
     /// Byte 47: FL draws a lock on such a group (meaning not measured; kept and drawn).
     pub locked: bool,
+    /// Performance settings (bytes 22..46; spec: ui/performance-mode.md §4).
+    pub perf: PerfSettings,
 }
 
 impl PlaylistTrack {
     /// Track `number` as a new project has it: unnamed, default colour, on, not grouped.
     pub fn new(number: u32) -> Self {
-        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false }
+        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false, perf: PerfSettings::default() }
+    }
+}
+
+/// A playlist track's Performance settings (spec: ui/performance-mode.md §4, §5), as the track record stores them:
+/// each an index into its list below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerfSettings {
+    /// [`PerfSettings::MOTIONS`].
+    pub motion: u8,
+    /// [`PerfSettings::PRESSES`].
+    pub press: u8,
+    /// [`PerfSettings::SYNCS`].
+    pub trigger_sync: u8,
+    pub queue: bool,
+    pub tolerant: bool,
+    /// [`PerfSettings::SYNCS`].
+    pub position_sync: u8,
+}
+
+impl Default for PerfSettings {
+    /// A new project's tracks: Retrigger, Stay, Trigger sync 4 beats, Tolerant, Position sync Off.
+    fn default() -> Self {
+        PerfSettings { motion: 0, press: 0, trigger_sync: 5, queue: false, tolerant: true, position_sync: 0 }
+    }
+}
+
+impl PerfSettings {
+    pub const MOTIONS: [&str; 7] = ["Stay", "One shot", "March & wrap", "March & stay", "March & stop", "Random", "Exclusive random"];
+    pub const PRESSES: [&str; 4] = ["Retrigger", "Hold & stop", "Hold & motion", "Latch"];
+    pub const SYNCS: [&str; 7] = ["Off", "1/4 beat", "1/2 beat", "1 beat", "2 beats", "4 beats", "Auto"];
+    pub const ONE_SHOT: u8 = 1;
+    pub const AUTO: u8 = 6;
+
+    /// A sync setting's length in ticks at `ppq`: `None` for Off, the clip's `len` capped at 4 beats for Auto (Trigger
+    /// sync) or the clip's length (Position sync, `cap` false).
+    pub fn sync_ticks(sync: u8, ppq: u32, len: u32, cap: bool) -> Option<u32> {
+        match sync {
+            1 => Some(ppq / 4),
+            2 => Some(ppq / 2),
+            3 => Some(ppq),
+            4 => Some(2 * ppq),
+            5 => Some(4 * ppq),
+            Self::AUTO if cap => Some(len.clamp(1, 4 * ppq)),
+            Self::AUTO => Some(len.max(1)),
+            _ => None,
+        }
     }
 }
 
