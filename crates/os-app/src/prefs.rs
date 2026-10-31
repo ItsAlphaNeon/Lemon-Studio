@@ -405,6 +405,9 @@ pub const ALIGN_TICK_LENGTHS: Check = Check { key: "align_tick_lengths", label: 
 pub const MULTITHREADED_MIXER: Check = Check { key: "multithreaded_mixer", label: "Multithreaded mixer processing", default: true };
 pub const MULTITHREADED_GENERATORS: Check =
     Check { key: "multithreaded_generators", label: "Multithreaded instrument processing", default: true };
+/// Audio ▸ CPU: live, the two above take the extra cores only when one thread would not keep up comfortably. Spec:
+/// audio/multicore.md "Only when needed".
+pub const MULTITHREADED_AUTO: Check = Check { key: "multithreaded_auto", label: "Extra cores only when needed", default: true };
 
 /// Audio ▸ Mixer: stored and shown only. The sampler keeps the one kernel audio/sampler.md gives, whatever is chosen;
 /// when the live kernels are measured, the choice will pick among them. Its menu groups the choices under grey
@@ -560,6 +563,7 @@ pub const CHECKS: &[&Check] = &[
     &ALIGN_TICK_LENGTHS,
     &MULTITHREADED_MIXER,
     &MULTITHREADED_GENERATORS,
+    &MULTITHREADED_AUTO,
     &INVERT_PENCIL_BUTTONS,
     &COPY_USED_SAMPLES,
     &PICKUP,
@@ -737,7 +741,7 @@ impl App {
     pub(crate) fn pref_toggle(&mut self, label: &str) {
         let Some(c) = find_check(label) else { return };
         let on = toggle(c);
-        if c.key == MULTITHREADED_MIXER.key || c.key == MULTITHREADED_GENERATORS.key {
+        if c.key == MULTITHREADED_MIXER.key || c.key == MULTITHREADED_GENERATORS.key || c.key == MULTITHREADED_AUTO.key {
             crate::mix_threads::apply();
         }
         self.state.message = Some(format!("{}: {}", c.label, if on { "on" } else { "off" }));

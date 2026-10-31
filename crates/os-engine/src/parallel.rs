@@ -51,6 +51,7 @@ impl Drop for AudioScope {
     }
 }
 
+static AUTO: AtomicBool = AtomicBool::new(false);
 static MIXER: AtomicBool = AtomicBool::new(true);
 static GENERATORS: AtomicBool = AtomicBool::new(true);
 static GLOBAL: Mutex<Option<Arc<Pool>>> = Mutex::new(None);
@@ -60,6 +61,17 @@ static GLOBAL: Mutex<Option<Arc<Pool>>> = Mutex::new(None);
 pub fn configure(mixer: bool, generators: bool) {
     MIXER.store(mixer, Ordering::Relaxed);
     GENERATORS.store(generators, Ordering::Relaxed);
+}
+
+/// Sets the program's "only when needed" switch: an engine playing live keeps to one thread until its load calls for
+/// more (`Multicore`'s gate; spec: audio/multicore.md "Only when needed"). Off by default, as in the tools.
+pub fn configure_auto(on: bool) {
+    AUTO.store(on, Ordering::Relaxed);
+}
+
+/// Whether engines playing live use the workers only when needed.
+pub fn auto_on() -> bool {
+    AUTO.load(Ordering::Relaxed)
 }
 
 /// Whether the mixer runs on several cores (the program's switch).
@@ -94,13 +106,13 @@ pub fn global() -> Option<Arc<Pool>> {
     g.clone()
 }
 
-/// Workers for a pool on this machine: one fewer than its physical cores (the rendering thread is the last), at least
-/// one. `physical` is what the caller found out (`None`: the logical count halved when it is even and above 4, a
+/// Workers for a pool on this machine: half its physical cores, at least one. On a 6-core machine, more workers made
+/// every project measured slower, and took several times the CPU (spec: audio/multicore.md "Size"). `physical` is what the caller found out (`None`: the logical count halved when it is even and above 4, a
 /// guess at hyper-threading).
 pub fn default_workers(physical: Option<usize>) -> usize {
     let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
     let cores = physical.unwrap_or(if logical > 4 && logical % 2 == 0 { logical / 2 } else { logical });
-    cores.clamp(1, logical).saturating_sub(1).max(1)
+    (cores.clamp(1, logical) / 2).max(1)
 }
 
 /// Jobs `0..n` and their edges (each from a lower job to a higher one), with the state of a run.
