@@ -251,6 +251,9 @@ pub const LIMIT_EDITORS: Check = Check { key: "limit_plugin_editors", label: "Li
 /// General ▸ Miscellaneous: at start, a borderless window centred on the primary monitor shows the logo mark until the
 /// main window shows (`crate::splash`). A program setting, read at start. Spec: ui/settings-choices.md "Miscellaneous:
 /// naming, detached plugins and startup".
+/// General ▸ Miscellaneous: windows of one plugin, drawn in the app's, are tabs of one window (`plugin_tabs`).
+pub const PLUGIN_TABS: Check = Check { key: "plugin_window_tabs", label: "Show windows of one plugin as tabs", default: true };
+
 pub const SHOW_SPLASH: Check = Check { key: "show_startup_splash", label: "Show startup splash screen", default: true };
 
 /// General ▸ Miscellaneous: stored and shown only. Lemon Studio has no startup sound (and does not use the
@@ -543,6 +546,7 @@ pub const CHECKS: &[&Check] = &[
     &TYPING_PRIORITY_OFF,
     &LIMIT_EDITORS,
     &SHOW_SPLASH,
+    &PLUGIN_TABS,
     &SILENT_STARTUP,
     &BOTH_MOUSE_BUTTONS,
     &CLICK_AND_HOLD,

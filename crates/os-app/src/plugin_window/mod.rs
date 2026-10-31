@@ -413,6 +413,9 @@ const BOX_DRAG: f32 = 10.0;
 /// The RANGE box's limit, semitones.
 const RANGE_MAX: i32 = 48;
 
+/// The height of the row of tabs (`State::tabs`).
+const TABS_H: f32 = 26.0;
+
 struct State {
     info: ChannelInfo,
     /// Drawn as a Lemon card (an editor drawn in the app's window, Lemon design; owner, 2026-10-27): one rounded panel
@@ -424,6 +427,8 @@ struct State {
     /// The theme a card paints with: the app's (`EmbedFrame::sync`), which the process-wide one may lag behind.
     look: Option<os_theme::Palette>,
     strip: bool,
+    /// A row of tabs under the title (`crate::plugin_tabs`).
+    tabs: bool,
     /// The plugin's page tabs, left to right (a plain plugin: the plug).
     pages: Vec<PageIcon>,
     /// The plugin's active page.
@@ -479,6 +484,7 @@ impl State {
             hover: None,
             look: None,
             strip: true,
+            tabs: false,
             pages: vec![PageIcon::Plugin],
             page: 0,
             misc: false,
@@ -577,10 +583,11 @@ impl State {
     }
     /// Top of the editor (below the strip, or the title bar, and the editor's 1 px outline).
     fn area_y(&self) -> f32 {
+        let tabs = if self.tabs { TABS_H } else { 0.0 };
         if self.card {
-            return CARD_TITLE_H;
+            return CARD_TITLE_H + tabs;
         }
-        TITLE_H + if self.strip { STRIP_H } else { 0.0 } + 1.0
+        TITLE_H + if self.strip { STRIP_H } else { 0.0 } + 1.0 + tabs
     }
 }
 

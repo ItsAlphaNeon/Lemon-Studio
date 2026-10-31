@@ -106,6 +106,8 @@ mod plugin_popup;
 mod plugin_rebuild;
 mod plugin_scan;
 #[cfg(plugin_windows)]
+#[cfg(target_os = "linux")]
+mod plugin_tabs;
 mod plugin_window;
 mod plugins;
 mod ppi;

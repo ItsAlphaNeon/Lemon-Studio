@@ -269,6 +269,8 @@ pub enum Action {
     /// A plugin window drawn in the app's (Linux; `plugin_window::EmbedFrame`), by its `Plugins::hosted` key: its input
     /// goes to it (`App::embed_down`).
     Embed(usize),
+    /// A tab of a window of plugin windows (`plugin_tabs`).
+    PluginTab(usize),
     /// The value box of "Enter value..." (spec: ui/type-in-value.md).
     TypeIn(crate::typein::TiAct),
     /// The Remote control settings box (spec: ui/remote-control.md).
@@ -1141,6 +1143,9 @@ pub struct State {
     /// `App::sync_embeds`).
     #[cfg(target_os = "linux")]
     pub embeds: std::collections::BTreeMap<usize, crate::plugin_window::EmbedFrame>,
+    /// Those of one plugin as tabs of one window.
+    #[cfg(target_os = "linux")]
+    pub plugin_tabs: crate::plugin_tabs::Tabs,
     /// Each layout's windows while the other is in use (classic, Lemon): the playlist, mixer and piano roll's states
     /// and the ones open, back to front (`App::set_tiling_layout`).
     pub layout_wins: [Option<([WinState; 3], Vec<Win>)>; 2],
@@ -1369,6 +1374,9 @@ pub struct App {
     /// Linux: the virtual pointer at the last move while an embedded editor holds the cursor (`App::embed_move`).
     #[cfg(target_os = "linux")]
     embed_virt: Option<(f32, f32)>,
+    /// Linux: a tab pressed (`plugin_tabs`): where, and once it has been dragged out, the mouse's offset in its window.
+    #[cfg(target_os = "linux")]
+    tab_press: Option<(usize, (f32, f32), Option<(f32, f32)>)>,
     /// The open popup belongs to this row's detached plugin window: it is shown lifted above that window.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
     popup_lift: Option<usize>,
@@ -1655,6 +1663,8 @@ impl App {
                 veil: [0.0; 3],
                 #[cfg(target_os = "linux")]
                 embeds: Default::default(),
+                #[cfg(target_os = "linux")]
+                plugin_tabs: Default::default(),
                 layout_wins: Default::default(),
                 pat_ui: Default::default(),
                 wins: crate::arrange::default_wins(),
@@ -1683,6 +1693,8 @@ impl App {
             embed_hover: None,
             #[cfg(target_os = "linux")]
             embed_virt: None,
+            #[cfg(target_os = "linux")]
+            tab_press: None,
             popup_lift: None,
             plugin_menu: None,
             bars: Vec::new(),
@@ -3107,6 +3119,28 @@ impl App {
         }
     }
 
+    /// Linux: the windows of one plugin as tabs of one window: each has its row of tabs and the group's place.
+    #[cfg(target_os = "linux")]
+    fn sync_plugin_tabs(&mut self, frames: &std::collections::BTreeMap<usize, crate::plugin_window::EmbedFrame>) {
+        let open: Vec<(usize, String)> = frames.keys().map(|&r| (r, self.plugins.descriptor(r).map_or(String::new(), |d| d.name.clone()))).collect();
+        let tabs = &mut self.state.plugin_tabs;
+        let joined = tabs.sync(&open, crate::prefs::check(&crate::prefs::PLUGIN_TABS));
+        let place = |r: usize| frames.get(&r).map(|f| { let a = f.rect(); (a.x, a.y) });
+        for j in joined {
+            if let (Some(f), Some(p)) = (frames.get(&j.row), place(j.from)) {
+                f.set_pos(p);
+            }
+        }
+        for (r, f) in frames {
+            f.set_tabs(tabs.group_of(*r).is_some());
+        }
+        for (r, active) in tabs.followers() {
+            if let (Some(f), Some(p)) = (frames.get(&r), place(active)) {
+                f.set_pos(p);
+            }
+        }
+    }
+
     /// Linux: the plugin windows drawn in the app's (`plugin_window::EmbedFrame`) go into `State::embeds` to be painted,
     /// follow the canvas and the workspace, and are repainted where they or their editors changed.
     #[cfg(target_os = "linux")]
@@ -3115,6 +3149,7 @@ impl App {
         let canvas = ((self.state.screen.0 * k).round() as u32, (self.state.screen.1 * k).round() as u32);
         let work = self.state.work_rect();
         let frames = self.plugins.embeds();
+        self.sync_plugin_tabs(&frames);
         let mut seen = std::mem::take(&mut self.embed_seen);
         for (row, (_, r, o)) in &seen {
             if !frames.contains_key(row) {
@@ -3234,7 +3269,16 @@ impl App {
     /// windows above them and the overlays (spec: ui/plugin-window.md "Docking"). Detached windows leave `State::z`.
     #[cfg(plugin_windows)]
     fn clip_docked(&mut self) {
-        let docked = self.plugins.docked();
+        let mut docked = self.plugins.docked();
+        // A hidden tab brought forward (from the rack, say) shows; the others stay out of the stack.
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(&Win::Hosted(r)) = self.state.z.last() {
+                self.state.plugin_tabs.activate(r);
+            }
+            let tabs = &self.state.plugin_tabs;
+            docked.retain(|&r| !tabs.hidden(r));
+        }
         self.state.z.retain(|w| !matches!(w, Win::Hosted(r) if !docked.contains(r)));
         for &r in &docked {
             if !self.state.z.contains(&Win::Hosted(r)) {
@@ -6619,6 +6663,16 @@ impl App {
             return false;
         }
         let (x, y) = self.mouse;
+        if let Some(&Action::PluginTab(r)) = self.top_hit(x, y).map(|h| &h.action) {
+            if btn == os_plugkit::input::Button::Left {
+                self.state.plugin_tabs.activate(r);
+                self.state.raise(Win::Hosted(r));
+                self.state.no_focus = false;
+                self.tab_press = Some((r, (x, y), None));
+                self.invalidate();
+            }
+            return true;
+        }
         let Some(row) = self.embed_modal().or_else(|| self.embed_at(x, y)) else { return false };
         let Some(e) = self.state.embeds.get(&row).cloned() else { return false };
         // Its title-row buttons act on the release: the close button never brings the window forward (it showed in
@@ -6640,6 +6694,29 @@ impl App {
     /// its editor holds the cursor), whose menu is open, or that it is over. Whether that window took it alone.
     #[cfg(target_os = "linux")]
     fn embed_move(&mut self, x: f32, y: f32) -> bool {
+        if let Some((row, from, apart)) = self.tab_press {
+            let Some(e) = self.state.embeds.get(&row).cloned() else {
+                self.tab_press = None;
+                return true;
+            };
+            // Out of the row, it stands alone and follows the mouse.
+            let strip = e.tabs_rect();
+            let offset = apart.or_else(|| {
+                let out = !strip.contains(x, y) && (x - from.0).hypot(y - from.1) > 12.0;
+                out.then(|| {
+                    self.state.plugin_tabs.pull_out(row);
+                    let r = e.rect();
+                    (from.0 - r.x, from.1 - r.y)
+                })
+            });
+            if let Some(d) = offset {
+                e.set_pos((x - d.0, y - d.1));
+                self.tab_press = Some((row, from, Some(d)));
+                self.state.raise(Win::Hosted(row));
+                self.invalidate();
+            }
+            return true;
+        }
         let mods = self.embed_mods();
         if let Some((row, _)) = self.embed_press {
             if let Some(e) = self.state.embeds.get(&row).cloned() {
@@ -6678,6 +6755,9 @@ impl App {
     /// Linux: the button went up: to the plugin window drawn in the app's that had the press (or the open menu).
     #[cfg(target_os = "linux")]
     fn embed_up(&mut self) -> bool {
+        if self.tab_press.take().is_some() {
+            return true;
+        }
         let (x, y) = self.mouse;
         let mods = self.embed_mods();
         let (row, btn) = match self.embed_press.take() {
@@ -9172,7 +9252,7 @@ impl App {
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserClear | Action::BrowserSplitter | Action::BrowserMove => {}
             Action::TypeIn(t) => crate::typein::click(s, t),
-            Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow | Action::Embed(_) => {}
+            Action::PluginTab(_) | Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow | Action::Embed(_) => {}
             Action::PlTool(_)
             | Action::PlSnap
             | Action::PlOptions
@@ -11578,6 +11658,67 @@ mod tests {
     /// Settings > Audio ▸ Mixer (spec: ui/settings-choices.md "Transport: Play truncated notes and Reset plugins"):
     /// "Play truncated notes on transport" is on and "Reset plugins on transport" off by default; a click switches
     /// each (kept as a program setting), and the next start of playback goes by them.
+    /// Two windows of one plugin are one window with tabs; a tab shows on a press, and a drag takes it out.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn windows_of_one_plugin_are_tabs() {
+        use crate::plugin_window::ChannelInfo;
+        use std::time::{Duration, Instant};
+        let Ok(mut c) = Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = App::new(None);
+        app.plugins.available = crate::plugins::builtin();
+        app.plugins.scale = 1.0;
+        app.state.project.channels.push(Channel::default());
+        frame(&mut app, &mut c, None);
+        let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
+        let info = |name: &str| ChannelInfo { name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let settle = |app: &mut App, rows: &[usize]| {
+            let t0 = Instant::now();
+            while !rows.iter().all(|r| app.state.embeds.get(r).is_some_and(|e| e.claimed())) && t0.elapsed() < Duration::from_secs(3) {
+                app.plugin_tick();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            app.plugin_tick();
+        };
+        app.plugins.create_with(0, index, None).unwrap();
+        app.plugins.open_window(0, info("One")).unwrap();
+        settle(&mut app, &[0]);
+        let alone = app.state.embeds[&0].rect();
+        app.plugins.create_with(1, index, None).unwrap();
+        app.plugins.open_window(1, info("Two")).unwrap();
+        settle(&mut app, &[0, 1]);
+        app.plugin_tick();
+        assert!(app.state.plugin_tabs.hidden(0) && !app.state.plugin_tabs.hidden(1), "the new one shows");
+        assert!(!app.state.z.contains(&Win::Hosted(0)) && app.state.z.contains(&Win::Hosted(1)));
+        let (a, b) = (app.state.embeds[&0].rect(), app.state.embeds[&1].rect());
+        assert_eq!((a.x, a.y), (b.x, b.y), "one place");
+        assert_eq!(b.h, alone.h + 26.0, "with its row of tabs");
+        frame(&mut app, &mut c, None);
+        let strip = app.state.embeds[&1].tabs_rect();
+        // A press on the first tab shows it.
+        let first = (strip.x + 20.0, strip.y + 10.0);
+        app.mouse_move(first.0, first.1);
+        assert!(matches!(app.top_hit(first.0, first.1).map(|h| h.action.clone()), Some(Action::PluginTab(0))));
+        assert!(app.embed_down(os_plugkit::input::Button::Left));
+        assert!(app.embed_up());
+        app.plugin_tick();
+        assert!(!app.state.plugin_tabs.hidden(0) && app.state.plugin_tabs.hidden(1));
+        frame(&mut app, &mut c, None);
+        // Dragged out, it stands alone where the mouse goes.
+        app.mouse_move(first.0, first.1);
+        assert!(app.embed_down(os_plugkit::input::Button::Left));
+        app.mouse_move(first.0 + 300.0, first.1 + 200.0);
+        assert!(app.embed_up());
+        app.plugin_tick();
+        assert!(app.state.plugin_tabs.group_of(0).is_none() && app.state.plugin_tabs.group_of(1).is_none());
+        assert!(app.state.z.contains(&Win::Hosted(0)) && app.state.z.contains(&Win::Hosted(1)), "both show");
+        let (a, b) = (app.state.embeds[&0].rect(), app.state.embeds[&1].rect());
+        assert_eq!(b.x, a.x - 300.0, "apart");
+        assert_eq!(a.h, alone.h, "no row of tabs");
+        app.plugins.close_window(0);
+        app.plugins.close_window(1);
+    }
+
     #[test]
     fn audio_settings_transport_checks() {
         use crate::prefs::{self, PLAY_TRUNCATED_ON_TRANSPORT as TRUNCATED, RESET_PLUGINS_ON_TRANSPORT as RESET};

@@ -333,6 +333,27 @@ impl EmbedFrame {
         }
     }
 
+    /// A row of tabs under the title, or none (`crate::plugin_tabs`).
+    pub fn set_tabs(&self, on: bool) {
+        let mut i = self.0.borrow_mut();
+        if i.st.tabs != on {
+            i.st.tabs = on;
+            i.chrome_dirty = true;
+        }
+    }
+
+    /// Where the row of tabs goes (logical px on the canvas).
+    pub fn tabs_rect(&self) -> Rect {
+        let i = self.0.borrow();
+        let (w, _) = i.size();
+        Rect::new(i.pos.0, i.pos.1 + i.st.area_y() - TABS_H, w, TABS_H)
+    }
+
+    /// The name in the title.
+    pub fn name(&self) -> String {
+        self.0.borrow().st.info.name.clone()
+    }
+
     pub fn take_events(&self) -> Vec<FrameEvent> {
         std::mem::take(&mut self.0.borrow_mut().st.events)
     }

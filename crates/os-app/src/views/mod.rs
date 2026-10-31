@@ -377,6 +377,36 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     n
 }
 
+/// The row of tabs of plugin window `row`, when it is one of several (`crate::plugin_tabs`).
+#[cfg(target_os = "linux")]
+fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_window::EmbedFrame) {
+    let Some(g) = s.plugin_tabs.group_of(row) else { return };
+    use os_ui::kit::lemon as lk;
+    let t = ui.t;
+    let strip = e.tabs_rect();
+    let font = os_ui::Font::new(13);
+    let w = (strip.w / g.rows.len() as f32).min(160.0);
+    ui.c.fill_rect(strip, t.sunken);
+    for (i, &r) in g.rows.iter().enumerate() {
+        let tab = Rect::new(strip.x + w * i as f32, strip.y, w, strip.h);
+        let on = r == g.active;
+        let hover = tab.contains(ui.mouse.0, ui.mouse.1);
+        let pill = tab.inset(2.0);
+        if on {
+            lk::lit_in(ui.c, t, pill, lk::r_btn(t), hover);
+        } else if hover {
+            ui.c.fill_rrect(pill, lk::r_btn(t), t.button_hi);
+        }
+        let name = s.embeds.get(&r).map_or(String::new(), |f| f.name());
+        let ink = if on { lk::ink_on_lit(t) } else { t.text_dim };
+        let ty = (tab.y + (tab.h - ui.c.line_height(font)) / 2.0).round();
+        ui.c.push_clip(pill);
+        ui.c.text(font, tab.x + 10.0, ty, ink, &name);
+        ui.c.pop_clip();
+        ui.hit(tab, Action::PluginTab(r), name);
+    }
+}
+
 /// Paints window `win` at `r` inside its paint area `a`.
 fn paint_window(ui: &mut Ui, s: &State, win: Win, r: Rect, a: Rect, f: &FrameInfo) {
         match win {
@@ -407,6 +437,7 @@ fn paint_window(ui: &mut Ui, s: &State, win: Win, r: Rect, a: Rect, f: &FrameInf
                     ui.part(Seg::Win(win), a, |ui| {
                         e.paint(ui.c);
                         ui.hit(e.rect(), Action::Embed(row), "");
+                        paint_plugin_tabs(ui, s, row, e);
                     });
                 }
             }
