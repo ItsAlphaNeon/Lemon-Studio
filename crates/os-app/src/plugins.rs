@@ -258,6 +258,9 @@ pub struct Plugins {
     /// Only those whose channel or slot went (`keep`); an undo that brings it back hosts it again from here
     /// (`App::follow_ids`); the oldest go past `STASH_MAX`.
     pub stash: Vec<(os_model::Id, bool, String, Vec<u8>)>,
+    /// A plugin menu's Scaling ▸ (Lemon Studio's design, session only), by `hosted` key: the scale its window and
+    /// editor are drawn at instead of the program's (`scale_for`).
+    pub editor_scales: BTreeMap<usize, f32>,
 }
 
 /// How many gone instances `Plugins::stash` keeps.
@@ -953,7 +956,7 @@ impl Plugins {
     /// Opens (or raises) row `row`'s plugin window.
     #[cfg(plugin_windows)]
     pub fn open_window(&mut self, row: usize, info: ChannelInfo) -> Result<(), String> {
-        let (owner, scale) = (self.owner, self.scale);
+        let (owner, scale) = (self.owner, self.scale_for(row, self.scale));
         let h = self.hosted.get(&row).ok_or("not a plugin channel")?;
         if let Some(w) = &h.window {
             w.raise();
@@ -1002,6 +1005,24 @@ impl Plugins {
         Ok(())
     }
 
+    /// The scale row `row`'s window is drawn at where the program would use `scale`: its Scaling ▸ choice, if any.
+    pub fn scale_for(&self, row: usize, scale: f32) -> f32 {
+        self.editor_scales.get(&row).copied().unwrap_or(scale)
+    }
+
+    /// Scaling ▸ for row `row` (`None`: Main, the program's scale): an open window is drawn again at once.
+    pub fn set_editor_scale(&mut self, row: usize, scale: Option<f32>) {
+        match scale {
+            Some(k) => self.editor_scales.insert(row, k),
+            None => self.editor_scales.remove(&row),
+        };
+        #[cfg(any(windows, target_os = "macos"))]
+        if self.hosted.get(&row).is_some_and(|h| h.window.is_some()) {
+            let k = self.scale_for(row, self.scale);
+            self.rescale_window(row, k);
+        }
+    }
+
     /// The main window's DPI scale changed: docked windows follow it (detached ones follow their own monitor,
     /// `FrameEvent::Dpi`). Spec: ui/ui-scaling.md §3.
     pub fn set_scale(&mut self, scale: f32) {
@@ -1011,7 +1032,7 @@ impl Plugins {
         self.scale = scale;
         #[cfg(any(windows, target_os = "macos"))]
         for row in self.docked() {
-            self.rescale_window(row, scale);
+            self.rescale_window(row, self.scale_for(row, scale));
         }
     }
 
@@ -1301,7 +1322,7 @@ impl Plugins {
         }
         #[cfg(any(windows, target_os = "macos"))]
         for (row, k) in rescale {
-            self.rescale_window(row, k);
+            self.rescale_window(row, self.scale_for(row, k));
         }
         #[cfg(target_os = "linux")]
         crate::plugin_window::paint_dirty();

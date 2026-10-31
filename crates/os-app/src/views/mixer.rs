@@ -363,25 +363,30 @@ fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
     let ob = Rect::new(r.x + 3.0, y - 9.0, 16.0, 18.0);
     let hov = ui.hit(ob, Action::Mix(MHit::Options), "Mixer options");
     chevron(ui, r.x + 11.0, y, true, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
-    // View buttons (multi-touch, waveforms, extra properties, track inspector): not available yet, greyed out (drawn
-    // in their colours faded into the title bar, like `Ui::veil`; a veil would show over the bar's gradient). Lemon
-    // centres them and the "+" 24 px apart: its inspector sits 10 px further right, the "+" and the combo 16 px.
+    // View buttons (multi-touch, waveforms, extra properties, track inspector). Multi-touch and the inspector are not
+    // available yet, greyed out (drawn in their colours faded into the title bar, like `Ui::veil`; a veil would show
+    // over the bar's gradient). View waveforms and Extra volume / stereo properties are Options ▸ View ▸'s switches
+    // (§6.5), white while on. Lemon centres them and the "+" 24 px apart: its inspector sits 10 px further right, the
+    // "+" and the combo 16 px.
     let bg = ui.t.window_title;
     let dim = |c: Color| c.mix(bg, f32::from(crate::app::OFF_VEIL) / 255.0);
-    for (icon, dx, name) in [(Icon::Touch, 37.0, "Multi-touch control"), (Icon::Plug, 61.0, "View waveforms")] {
-        let b = Rect::new(r.x + dx - 9.0, y - 9.0, 18.0, 18.0);
-        ui.off(b, name);
-        icons::draw(ui.c, icon, b.inset(1.0), dim(ui.t.tx(0xc4ccd0)));
-    }
+    let b = Rect::new(r.x + 37.0 - 9.0, y - 9.0, 18.0, 18.0);
+    ui.off(b, "Multi-touch control");
+    icons::draw(ui.c, Icon::Touch, b.inset(1.0), dim(ui.t.tx(0xc4ccd0)));
+    let b = Rect::new(r.x + 61.0 - 9.0, y - 9.0, 18.0, 18.0);
+    let hov = ui.hit(b, Action::Mix(MHit::Waveforms), "View waveforms (Alt+W)");
+    let on = s.mixer.waveforms;
+    icons::draw(ui.c, Icon::Plug, b.inset(1.0), if on || hov { ui.t.tx(0xffffff) } else { dim(ui.t.tx(0xc4ccd0)).mix(ui.t.tx(0xc4ccd0), 0.5) });
     let (ix, px) = if super::lemon(ui) { (10.0, 16.0) } else { (0.0, 0.0) };
-    ui.off(Rect::new(r.x + 76.0, y - 9.0, 16.0, 18.0), "Extra volume / stereo properties");
+    let hov = ui.hit(Rect::new(r.x + 76.0, y - 9.0, 16.0, 18.0), Action::Mix(MHit::Extra), "View extra volume / stereo properties");
     ui.off(Rect::new(r.x + 92.0 + ix, y - 9.0, 15.0, 18.0), "Track inspector");
     // Bow-tie (stereo) in blue, layout square in orange, then "+" and the view combo.
     let mut g = Glyph::new();
     let cx = r.x + 85.0;
     g.polygon(&[(cx - 8.0, y - 6.0), (cx - 1.0, y), (cx - 8.0, y + 6.0)]).polygon(&[(cx + 8.0, y - 6.0), (cx + 1.0, y), (cx + 8.0, y + 6.0)]);
     g.rect(cx - 8.5, y - 6.0, 1.5, 12.0);
-    ui.c.glyph(dim(Color::rgb(0x5fb6f0)), &g);
+    let blue = Color::rgb(0x5fb6f0);
+    ui.c.glyph(if hov { ui.t.tx(0xffffff) } else if s.mixer.extra { blue } else { dim(blue) }, &g);
     let mut g = Glyph::new();
     g.frame(Rect::new(r.x + 93.0 + ix, y - 6.0, 12.0, 12.0), 1.6);
     ui.c.glyph(dim(ui.t.h(0xf3b234)), &g);
@@ -391,7 +396,6 @@ fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
     icons::draw(ui.c, Icon::Plus, Rect::new(r.x + 110.0 + px, y - 7.0, 14.0, 14.0), if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
     let lb = Rect::new(r.x + 130.0 + px, r.y + 2.0, 50.0, 20.0);
     let hov = ui.hit(lb, Action::Mix(MHit::Layout), "Mixer layout");
-    let _ = s;
     ui.c.text(Font::new(17), r.x + 134.0 + px, r.y + 2.0, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xb8c4cb) }, "Wide");
 }
 
@@ -410,6 +414,30 @@ fn shade(c: Color, k: f32) -> Color {
 /// columns are darker, the next ones a touch lighter; a 1 px dark cap sits on the top and the peak-hold line is a
 /// 1 px orange line. `ys` maps a level to y; `bottom` is the bar's foot.
 #[allow(clippy::too_many_arguments)]
+/// View ▸ Waveforms (Lemon Studio's design): the track's recent peaks, one pixel row each, newest at the bottom,
+/// scrolling up; the left side's level grows leftwards from the middle, the right side's rightwards, in the meter's
+/// green (yellow above -6 dBFS, the clip colour above 0 dBFS).
+fn wave(ui: &mut Ui, s: &State, n: u16, r: Rect) {
+    let Some(w) = s.mixer.waves.get(usize::from(n)) else { return };
+    let mid = r.x + r.w / 2.0;
+    let half = r.w / 2.0;
+    for (i, p) in w.iter().rev().enumerate() {
+        let y = r.bottom() - 1.0 - i as f32;
+        if y < r.y {
+            break;
+        }
+        let peak = p[0].max(p[1]);
+        let c = if peak >= 1.0 { ui.t.meter_clip } else if peak >= 0.5 { ui.t.h(0xeec757) } else { ui.t.a(0xa0db40) };
+        let (l, rr) = (p[0].min(1.0) * half, p[1].min(1.0) * half);
+        if l >= 0.25 {
+            ui.c.fill_rect(Rect::new(mid - l, y, l, 1.0), c);
+        }
+        if rr >= 0.25 {
+            ui.c.fill_rect(Rect::new(mid, y, rr, 1.0), c);
+        }
+    }
+}
+
 fn meter_bar(ui: &mut Ui, x: f32, w: f32, bottom: f32, db: f32, hold: f32, cfg: &meters::Settings, ys: &dyn Fn(f32) -> f32) {
     use meters::k;
     let t = ui.t;
@@ -528,7 +556,9 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     }
     // Per-track peak meter (spec: ui/mixer.md §9): two 6 px bars on the same scale as the "C" column.
     ui.live(Live::Meter, meter);
-    if let Some(m) = s.mixer.meters.get(usize::from(n)) {
+    if s.mixer.waveforms {
+        wave(ui, s, n, Rect::new(meter.x + 2.0, meter.y + 2.0, 12.0, meter.h - 4.0));
+    } else if let Some(m) = s.mixer.meters.get(usize::from(n)) {
         let cfg = &s.mixer.meter_cfg;
         let (top, bot) = (meter.y + 2.0, meter.bottom() - 2.0);
         let floor = cfg.v[meters::k::FLOOR_DB];
@@ -564,25 +594,28 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     // Reverse polarity (⇕) and swap left / right (⇔) buttons, lit when on, then the separation knob (§4).
     // They keep their size and spacing below the fader's top at any mixer height (FL's short mixer stacks them the
     // same way), so they are placed from the fader's top, not scaled with it.
-    let (pol, swp) = (track.is_some_and(|m| m.polarity), track.is_some_and(|m| m.swap));
-    let top = ly.y(TRACK_Y0);
-    let (sep_y, swap_y, ring_y) = (top + SEP_Y - TRACK_Y0, top + SWAP_Y - TRACK_Y0, top + RING_Y - TRACK_Y0);
-    let pr = Rect::new(sx - 8.0, sep_y - 8.0, 16.0, 16.0);
-    let hp = ui.hit(pr, Action::Mix(MHit::Polarity(n)), "Reverse polarity");
-    let mut g = Glyph::new();
-    g.polygon(&[(sx - 5.0, sep_y - 1.5), (sx, sep_y - 6.0), (sx + 5.0, sep_y - 1.5)]);
-    g.polygon(&[(sx - 5.0, sep_y + 1.5), (sx, sep_y + 6.0), (sx + 5.0, sep_y + 1.5)]);
-    ui.c.glyph(if pol { ui.t.h(0xf3b234) } else if hp { ui.t.tx(0xffffff) } else { ui.t.tx(0xb7c3ca) }, &g);
-    let wr = Rect::new(sx - 8.0, swap_y - 8.0, 16.0, 16.0);
-    let hw = ui.hit(wr, Action::Mix(MHit::Swap(n)), "Swap left & right channels");
-    let mut g = Glyph::new();
-    g.polygon(&[(sx - 1.0, swap_y - 6.0), (sx - 7.0, swap_y), (sx - 1.0, swap_y + 6.0)]);
-    g.polygon(&[(sx + 1.5, swap_y - 6.0), (sx + 7.5, swap_y), (sx + 1.5, swap_y + 6.0)]);
-    ui.c.glyph(if swp { Color::rgb(0x5fb6f0) } else if hw { ui.t.tx(0xffffff) } else { ui.t.tx(0xb7c3ca) }, &g);
-    ui.c.fill_rect(Rect::new(sx - 0.5, swap_y - 6.0, 1.0, 12.0), ui.t.s(0x5a6266));
-    let sep = KnobId::MixSep(n);
-    ui.hit(Rect::new(sx - 9.0, ring_y - 9.0, 18.0, 18.0), Action::Knob(sep), s.knob_text(sep));
-    mixer_knob(ui, sx, ring_y, 6.0, 9.5, s.knob(sep), Some(true));
+    // View ▸ Extra properties off hides them (Lemon Studio's design).
+    if s.mixer.extra {
+        let (pol, swp) = (track.is_some_and(|m| m.polarity), track.is_some_and(|m| m.swap));
+        let top = ly.y(TRACK_Y0);
+        let (sep_y, swap_y, ring_y) = (top + SEP_Y - TRACK_Y0, top + SWAP_Y - TRACK_Y0, top + RING_Y - TRACK_Y0);
+        let pr = Rect::new(sx - 8.0, sep_y - 8.0, 16.0, 16.0);
+        let hp = ui.hit(pr, Action::Mix(MHit::Polarity(n)), "Reverse polarity");
+        let mut g = Glyph::new();
+        g.polygon(&[(sx - 5.0, sep_y - 1.5), (sx, sep_y - 6.0), (sx + 5.0, sep_y - 1.5)]);
+        g.polygon(&[(sx - 5.0, sep_y + 1.5), (sx, sep_y + 6.0), (sx + 5.0, sep_y + 1.5)]);
+        ui.c.glyph(if pol { ui.t.h(0xf3b234) } else if hp { ui.t.tx(0xffffff) } else { ui.t.tx(0xb7c3ca) }, &g);
+        let wr = Rect::new(sx - 8.0, swap_y - 8.0, 16.0, 16.0);
+        let hw = ui.hit(wr, Action::Mix(MHit::Swap(n)), "Swap left & right channels");
+        let mut g = Glyph::new();
+        g.polygon(&[(sx - 1.0, swap_y - 6.0), (sx - 7.0, swap_y), (sx - 1.0, swap_y + 6.0)]);
+        g.polygon(&[(sx + 1.5, swap_y - 6.0), (sx + 7.5, swap_y), (sx + 1.5, swap_y + 6.0)]);
+        ui.c.glyph(if swp { Color::rgb(0x5fb6f0) } else if hw { ui.t.tx(0xffffff) } else { ui.t.tx(0xb7c3ca) }, &g);
+        ui.c.fill_rect(Rect::new(sx - 0.5, swap_y - 6.0, 1.0, 12.0), ui.t.s(0x5a6266));
+        let sep = KnobId::MixSep(n);
+        ui.hit(Rect::new(sx - 9.0, ring_y - 9.0, 18.0, 18.0), Action::Knob(sep), s.knob_text(sep));
+        mixer_knob(ui, sx, ring_y, 6.0, 9.5, s.knob(sep), Some(true));
+    }
 
     // Fader: track, gain marks, handle (green on the selected strip, with the track lit below it).
     let track_y1 = bottom - 99.0;

@@ -229,6 +229,8 @@ pub struct Module {
     /// An address in the module's code (its factory's method table): which module the crash guard stops when it
     /// crashes.
     code: usize,
+    /// The factory's URL (the plug-ins' help page; `os_host::Plugin::help_url`).
+    url: String,
 }
 
 // SAFETY: the factory and host objects are only used from the UI thread (creating instances); VST 3 factories may be
@@ -258,13 +260,14 @@ impl Module {
         unsafe {
             let code = if factory.is_null() { 0 } else { *(factory as *const usize) };
             let factory = owned::<dyn IPluginFactory>(factory);
-            let mut m = Module { path: path.to_path_buf(), plugins: Vec::new(), classes: Vec::new(), factory: None, host: HostApp::create(), lib, code };
+            let mut m = Module { path: path.to_path_buf(), plugins: Vec::new(), classes: Vec::new(), factory: None, host: HostApp::create(), lib, code, url: String::new() };
             let Some(factory) = factory else { return Err(format!("{}: no plug-in factory", file.display())) };
             if let Some(f3) = factory.cast::<dyn IPluginFactory3>() {
                 f3.set_host_context(m.host.raw());
             }
             let mut finfo: PFactoryInfo = std::mem::zeroed();
             let fvendor = if factory.get_factory_info(&mut finfo) == kResultOk { c_arr(&finfo.vendor) } else { String::new() };
+            m.url = c_arr(&finfo.url);
             let f2 = factory.cast::<dyn IPluginFactory2>();
             let f3 = factory.cast::<dyn IPluginFactory3>();
             for i in 0..factory.count_classes() {
@@ -1302,6 +1305,10 @@ impl NoteIds {
 impl os_host::Plugin for Plugin {
     fn desc(&self) -> &Descriptor {
         &self.desc
+    }
+
+    fn help_url(&self) -> Option<String> {
+        Some(self._module.url.trim().to_owned()).filter(|u| !u.is_empty())
     }
 
     fn activate(&mut self, rate: u32) -> bool {

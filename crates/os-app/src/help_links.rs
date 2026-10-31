@@ -10,6 +10,10 @@
 pub const HELP_INDEX_URL: &str = "https://github.com/ItsAlphaNeon/Lemon-Studio#readme";
 pub const WHATS_NEW_URL: &str = "https://github.com/ItsAlphaNeon/Lemon-Studio/pulls?q=is%3Apr+is%3Amerged";
 
+/// A plugin menu's Help for Lemon Studio's own effects and instruments (and a plugin that names no page of its own is
+/// told apart from them): the feature status page's section on them.
+pub const BUILTIN_PLUGINS_URL: &str = "https://github.com/ItsAlphaNeon/Lemon-Studio/blob/main/docs/status.md#-built-in-instruments-and-effects";
+
 /// HELP ▸ Tutorials ▸: the README's how-to sections, as (entry, page).
 pub const TUTORIALS: [(&str, &str); 4] = [
     ("Getting started", "https://github.com/ItsAlphaNeon/Lemon-Studio#getting-started"),

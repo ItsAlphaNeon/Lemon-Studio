@@ -104,6 +104,16 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   separators around the selected tracks), Auto color group and Select ▸ Group; Dock to ▸ Left / Middle / Right keeps a
   strip after the master or at the right edge while the others scroll; Allow threaded processing off keeps the track
   on the rendering thread. All saved in the project as the original saves them
+- Mixer track states: the track menu's File ▸ Save mixer track state keeps a track's levels, switches, equaliser and
+  effects with their settings in the user folder's Mixer states; File ▸ Open mixer track state ▸ puts one on a track
+  (it keeps its name and colour) and Insert from state ▸ inserts a new track from one. Lemon Studio's own files
+  (`.lemontrack`), not the original's
+- Mixer options ▸ View ▸ Waveforms (Alt+W, also the title bar's button) draws each track's recent peaks as a scrolling
+  waveform in place of its meter; Extra properties (the title bar's other button) shows or hides the polarity, swap
+  and separation controls. Both for the session
+- The mixer slot menu's Help opens the plugin's own help page (CLAP and VST3 plugins that name one; Lemon Studio's
+  own effects open the list of built-in effects), and Scaling ▸ sizes a hosted plugin's window: Main (the program's
+  scale) or 100 % to 200 %, for the session
 
 ## ✅ Plugin hosting
 
@@ -130,6 +140,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   are saved back
 - Automation of a mixer track or slot behind late audio waits for it, as in FL Studio
 - A sidechain input waits for the slot it feeds, so it lines up with the audio there
+- Mixer options ▸ Plugin delay compensation ▸ Automatic (on): unticked, plugins' delays are no longer made up, while
+  the tracks' latency settings still are. For the session (not yet saved in the project)
 - The latency settings are edited from the input clock, the track latency combo and the strip's latency clock (right
   click): Reset, or a value typed in ms, samples or beats; the clocks turn orange when set
 
@@ -167,7 +179,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   effects, the whole delay line for Delay 3, four seconds for hosted plugins; never for the Peak and Formula
   Controllers) and runs it again as soon as sound reaches it; what is heard is the same. Switch auto-bypass for all
   plugins (TOOLS, the mixer's and the rack's options menus) turns it on for every plugin when one is off, and off for
-  all when all are on. Instruments are not bypassed yet (the switch is saved)
+  all when all are on. A plugin channel with the switch on stops running its instrument once it has had nothing to
+  play (no note held or arriving, no controller message, parameter value or audio clip) and been silent for four
+  seconds, and runs it again with the next one
 - The plugin window's menu: Link all parameters... links every parameter of the plugin to consecutive MIDI
   controllers in one go (the MIDI learn box); Change icon... gives a channel or effect an icon, shown in its window's
   title, the playlist picker and its clips (for the session); Save channel state as... saves a channel with its plugin

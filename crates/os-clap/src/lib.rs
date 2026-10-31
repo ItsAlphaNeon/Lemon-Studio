@@ -1716,6 +1716,17 @@ impl os_host::Plugin for Plugin {
         &self.desc
     }
 
+    fn help_url(&self) -> Option<String> {
+        // SAFETY: the instance and its descriptor live as long as `self`; null pointers are checked.
+        unsafe {
+            let d = if self.plugin.is_null() { ptr::null() } else { (*self.plugin).desc };
+            if d.is_null() {
+                return None;
+            }
+            [(*d).manual_url, (*d).url].into_iter().map(|p| cstr(p)).find(|u| !u.trim().is_empty())
+        }
+    }
+
     fn activate(&mut self, rate: u32) -> bool {
         Plugin::activate(self, rate)
     }
