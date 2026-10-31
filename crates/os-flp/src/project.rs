@@ -1963,14 +1963,24 @@ fn send_dest(kind: u8, pid: u8) -> u16 {
 }
 
 /// Event 236 flags (spec: flp/layouts.md "A mixer track's record (event 236)"): reverse polarity, swap left / right,
-/// effect slots enabled, track on. A 5-byte record (FL 10 and 11) holds no flags: all at their defaults.
+/// effect slots enabled, track on, threaded processing not allowed, docking (two bits: 0 left, 1 middle, 2 right) and,
+/// in the next byte, the separator. A 5-byte record (FL 10 and 11) holds no flags: all at their defaults.
 const MX_FLAG_POLARITY: u8 = 0x01;
 const MX_FLAG_SWAP: u8 = 0x02;
 const MX_FLAG_SLOTS: u8 = 0x04;
 const MX_FLAG_ON: u8 = 0x08;
+const MX_FLAG_UNTHREADED: u8 = 0x10;
+const MX_FLAG_DOCK: u8 = 0xC0;
+const MX_FLAG_DOCK_SHIFT: u8 = 6;
+const MX_FLAG5_SEPARATOR: u8 = 0x04;
 
 fn track_flags(d: Option<&[u8]>) -> Option<u8> {
     d.filter(|d| d.len() >= 8).map(|d| d[4])
+}
+
+/// The second flag byte (the separator) of a record that has flags.
+fn track_flags5(d: Option<&[u8]>) -> Option<u8> {
+    d.filter(|d| d.len() >= 8).map(|d| d[5])
 }
 
 /// Flag 0x20 of a record written before FL 12.8: its one latency value is the output setting.
@@ -2020,14 +2030,30 @@ fn with_latency(d: &[u8], old: bool, (out, inp): (f32, f32)) -> Vec<u8> {
     r
 }
 
-fn with_flags(b: u8, m: &MixerTrack) -> u8 {
-    let mut b = b & !(MX_FLAG_POLARITY | MX_FLAG_SWAP | MX_FLAG_SLOTS | MX_FLAG_ON);
-    for (on, f) in [(m.polarity, MX_FLAG_POLARITY), (m.swap, MX_FLAG_SWAP), (m.slots_enabled, MX_FLAG_SLOTS), (m.enabled, MX_FLAG_ON)] {
+/// Flag byte `b` with the track's switches. `last`: the file's last ("current") track, whose docking stays as stored
+/// (the track is not shown; FL writes it docked left, as the master).
+fn with_flags(b: u8, m: &MixerTrack, last: bool) -> u8 {
+    let mut b = b & !(MX_FLAG_POLARITY | MX_FLAG_SWAP | MX_FLAG_SLOTS | MX_FLAG_ON | MX_FLAG_UNTHREADED);
+    for (on, f) in [
+        (m.polarity, MX_FLAG_POLARITY),
+        (m.swap, MX_FLAG_SWAP),
+        (m.slots_enabled, MX_FLAG_SLOTS),
+        (m.enabled, MX_FLAG_ON),
+        (!m.threaded, MX_FLAG_UNTHREADED),
+    ] {
         if on {
             b |= f;
         }
     }
+    if !last {
+        b = (b & !MX_FLAG_DOCK) | ((m.dock.min(os_model::DOCK_RIGHT) << MX_FLAG_DOCK_SHIFT) & MX_FLAG_DOCK);
+    }
     b
+}
+
+/// The second flag byte with the track's separator.
+fn with_flags5(b: u8, m: &MixerTrack) -> u8 {
+    if m.separator { b | MX_FLAG5_SEPARATOR } else { b & !MX_FLAG5_SEPARATOR }
 }
 
 /// A mixer track's slot area (spec: flp/events/mixer.md "Slot sub-block"): the events between its flags (236) and its
@@ -2272,6 +2298,11 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
         }
         let flags = track_flags(m.flags.and_then(|i| events[i].data()));
         let flag = |f: u8, default: bool| flags.map_or(default, |b| b & f != 0);
+        let fresh = MixerTrack::new(index);
+        // The last ("current") track keeps a new track's docking (`with_flags`).
+        let last = index > 0 && n + 1 == l.mixer.len();
+        let dock = flags.filter(|_| !last).map_or(fresh.dock, |b| ((b & MX_FLAG_DOCK) >> MX_FLAG_DOCK_SHIFT).min(os_model::DOCK_RIGHT));
+        let separator = track_flags5(m.flags.and_then(|i| events[i].data())).is_some_and(|b| b & MX_FLAG5_SEPARATOR != 0);
         let (latency_out, latency_in) = m.flags.and_then(|i| events[i].data()).map_or((0.0, 0.0), |d| track_latency(d, old));
         out.push(MixerTrack {
             index,
@@ -2281,6 +2312,9 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             polarity: flag(MX_FLAG_POLARITY, false),
             swap: flag(MX_FLAG_SWAP, false),
             slots_enabled: flag(MX_FLAG_SLOTS, true),
+            threaded: !flag(MX_FLAG_UNTHREADED, false),
+            dock,
+            separator,
             slots,
             routes,
             send_levels: mixer_param_records(params)
@@ -2297,7 +2331,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             latency_in,
             icon: m.icon.map(|i| int(&events[i]) as u16),
             origin: Some(index),
-            ..io_of(events, m, MixerTrack::new(index))
+            ..io_of(events, m, fresh)
         });
     }
     out
@@ -3290,14 +3324,16 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             inserts.extend(block.into_iter().rev().map(|e| (area.to, e)));
         }
     }
-    for ((((m, old), ml), states), &rewritten) in project
+    for (t, ((((m, old), ml), states), &rewritten)) in project
         .mixer
         .iter()
         .zip(&current.mixer)
         .zip(&l.mixer)
         .zip(slot_states.iter().chain(std::iter::repeat(&[None; 10])))
         .zip(rewrite.iter())
+        .enumerate()
     {
+        let last = t > 0 && t + 1 == n;
         // spec: flp/events/mixer.md "Slot sub-block": a plugin kept in its slot gets its new state (213).
         for ((new, prev), &at) in m.slots.iter().zip(&old.slots).zip(states).filter(|_| !rewritten) {
             if let (Some(new), Some(prev), Some(i)) = (new, prev, at) {
@@ -3321,25 +3357,28 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         }
         let latency = (m.latency_out, m.latency_in);
         let relatency = latency != (old.latency_out, old.latency_in);
-        if relatency || (m.enabled, m.polarity, m.swap, m.slots_enabled) != (old.enabled, old.polarity, old.swap, old.slots_enabled) {
+        let switches = |m: &MixerTrack| (m.enabled, m.polarity, m.swap, m.slots_enabled, m.threaded, m.dock, m.separator);
+        if relatency || switches(m) != switches(old) {
             if let Some(i) = ml.flags {
-                match track_flags(events[i].data()) {
-                    Some(b) if !relatency => patch_bytes(&mut events[i], 4, &[with_flags(b, m)]),
-                    Some(_) => {
+                match (track_flags(events[i].data()), track_flags5(events[i].data())) {
+                    (Some(b), Some(b5)) if !relatency => patch_bytes(&mut events[i], 4, &[with_flags(b, m, last), with_flags5(b5, m)]),
+                    (Some(_), _) => {
                         let mut r = with_latency(events[i].data().unwrap_or(&[]), old_file, latency);
-                        r[4] = with_flags(r[4], m);
+                        r[4] = with_flags(r[4], m, last);
+                        r[5] = with_flags5(r[5], m);
                         set_data(&mut events[i], r);
                     }
                     // A 5-byte record (FL 10 / 11) has no flags: it becomes the 8-byte record of FL 12, its latency kept in
                     // the form the file's version reads (spec: flp/layouts.md "A mixer track's record (event 236)").
-                    None => {
+                    (None, _) => {
                         let d = events[i].data().unwrap_or(&[]);
                         let late = old_file && d.get(4).is_some_and(|&b| b != 0);
                         let base = if m.index == 0 { MX_FLAGS_MASTER } else { MX_FLAGS_INSERT };
                         let mut r = vec![0u8; 8];
                         r[4] = base | if late { MX_FLAG_LATE_OUT } else { 0 };
                         let mut r = with_latency(&r, old_file, latency);
-                        r[4] = with_flags(r[4], m);
+                        r[4] = with_flags(r[4], m, last);
+                        r[5] = with_flags5(r[5], m);
                         set_data(&mut events[i], r);
                     }
                 }
@@ -4151,7 +4190,8 @@ fn track_block_events(m: &MixerTrack, last: bool, enc: TextEnc) -> Vec<Event> {
     flags[8..].copy_from_slice(&m.latency_in.to_le_bytes());
     flags[4] = if m.index == 0 || last { MX_FLAGS_MASTER } else { MX_FLAGS_INSERT };
     let rt = if last && m.index > 0 { MX_SPECIAL_TRACK } else { m.index };
-    flags[4] = with_flags(flags[4], m);
+    flags[4] = with_flags(flags[4], m, last && m.index > 0);
+    flags[5] = with_flags5(flags[5], m);
     ev.push(Event::new(id::MX_FLAGS, Value::var(flags.to_vec())));
     for (k, slot) in m.slots.iter().enumerate() {
         if let Some(p) = slot {
@@ -4873,6 +4913,55 @@ mod tests {
         let at = ev.iter().position(|e| e.id == id::MAIN_PITCH).unwrap();
         assert_eq!([ev[at - 2].id, ev[at - 1].id], [id::TEMPO, id::CURRENT_PATTERN]);
         assert_eq!(load(&plain).unwrap().main_pitch, Some(250));
+    }
+
+    /// The track menu's Separator (flag 0x0400), Dock to (0x00C0) and Allow threaded processing (0x0010) are written by
+    /// `create` and `apply` and read back; the last ("current") track keeps the master's docking (spec: flp/layouts.md
+    /// "A mixer track's record (event 236)", ui/mixer.md §6.1).
+    #[test]
+    fn mixer_separator_docking_and_threading_round_trip() {
+        use os_model::{MixerTrack, DOCK_LEFT, DOCK_MIDDLE, DOCK_RIGHT};
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        p.mixer = (0..10).map(MixerTrack::new).collect();
+        p.mixer[9].routes.clear();
+        p.mixer[1].separator = true;
+        p.mixer[2].dock = DOCK_LEFT;
+        p.mixer[3].dock = DOCK_RIGHT;
+        p.mixer[4].threaded = false;
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let rec = |f: &FlpFile, t: usize| {
+            let d = events_of(f).unwrap().iter().filter(|e| e.id == id::MX_FLAGS).nth(t).unwrap().data().unwrap().to_vec();
+            (d[4], d[5])
+        };
+        // As FL saves them (OpenStudio-RE out/exp/mxm): inserts 0x4C, a separator 0x04 in the next byte.
+        assert_eq!([rec(&file, 0), rec(&file, 1), rec(&file, 2), rec(&file, 3), rec(&file, 4), rec(&file, 9)], [
+            (0x0C, 0),
+            (0x4C, 0x04),
+            (0x0C, 0),
+            (0x8C, 0),
+            (0x5C, 0),
+            (0x0C, 0)
+        ]);
+        let back = load(&file).unwrap();
+        assert_eq!(back.mixer, p.mixer);
+        assert_eq!((back.mixer[0].dock, back.mixer[9].dock), (DOCK_LEFT, DOCK_MIDDLE));
+        let mut edited = back.clone();
+        edited.mixer[1].separator = false;
+        edited.mixer[5].separator = true;
+        edited.mixer[3].dock = DOCK_MIDDLE;
+        edited.mixer[4].threaded = true;
+        edited.mixer[6].threaded = false;
+        apply(&edited, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(again.mixer, edited.mixer);
+        assert_eq!([rec(&file, 1), rec(&file, 3), rec(&file, 4), rec(&file, 5), rec(&file, 6)], [
+            (0x4C, 0),
+            (0x4C, 0),
+            (0x4C, 0),
+            (0x4C, 0x04),
+            (0x5C, 0)
+        ]);
     }
 
     /// Song or pattern mode (event 9, one byte right after 67; spec: flp/engine-events.md "Project"): `create` writes it

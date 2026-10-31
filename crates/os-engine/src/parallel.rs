@@ -6,7 +6,8 @@
 //! order a dependency graph allows, the rendering thread taking part and waiting for the last one.
 //!
 //! - [`Graph`]: jobs `0..n` and their edges, built once (when what it was built from changes) and run every tick.
-//!   Every edge goes from a lower job to a higher one, so job order is a valid serial order.
+//!   Every edge goes from a lower job to a higher one, so job order is a valid serial order. A job can be pinned to the
+//!   rendering thread ([`Graph::pin`]: a mixer track whose threaded processing is off).
 //! - [`Pool`]: the workers. [`Pool::run`] hands them a graph and the job function; a job whose last predecessor
 //!   finished is queued, any thread takes it. Nothing allocates, locks or spawns while it runs. Between runs a worker
 //!   spins a short while (the next tick usually follows at once while a stream fills its buffer), then parks.
@@ -113,12 +114,18 @@ pub struct Graph {
     next: Vec<u32>,
     /// Some two jobs can run at once (else running the jobs in order on one thread is as fast).
     wide: bool,
+    /// Per job: runs on the rendering thread only (lane 0).
+    pinned: Vec<bool>,
     /// A run: predecessors still to finish per job, the queue of jobs ready (job + 1; 0 = being written), its read and
     /// write ends, and the jobs finished.
     pending: Vec<AtomicU32>,
     ready: Vec<AtomicU32>,
     head: AtomicUsize,
     tail: AtomicUsize,
+    /// The queue of pinned jobs ready, which only the rendering thread reads (job + 1; 0 = being written).
+    ready0: Vec<AtomicU32>,
+    head0: AtomicUsize,
+    tail0: AtomicUsize,
     done: AtomicUsize,
     /// Scratch for `set`: each job's level, and the jobs per level.
     level: Vec<u32>,
@@ -157,9 +164,19 @@ impl Graph {
             self.per[l as usize] += 1;
         }
         self.wide = self.per.iter().any(|&c| c > 1);
+        self.pinned.clear();
+        self.pinned.resize(n, false);
         while self.pending.len() < n {
             self.pending.push(AtomicU32::new(0));
             self.ready.push(AtomicU32::new(0));
+            self.ready0.push(AtomicU32::new(0));
+        }
+    }
+
+    /// Job `j` runs on the rendering thread only (`on`), or on any (the default after `set`).
+    pub fn pin(&mut self, j: usize, on: bool) {
+        if let Some(p) = self.pinned.get_mut(j) {
+            *p = on;
         }
     }
 
@@ -185,10 +202,13 @@ impl Graph {
     fn reset(&self) {
         self.head.store(0, Ordering::Relaxed);
         self.tail.store(0, Ordering::Relaxed);
+        self.head0.store(0, Ordering::Relaxed);
+        self.tail0.store(0, Ordering::Relaxed);
         self.done.store(0, Ordering::Relaxed);
         for j in 0..self.n {
             self.pending[j].store(self.deps[j], Ordering::Relaxed);
             self.ready[j].store(0, Ordering::Relaxed);
+            self.ready0[j].store(0, Ordering::Relaxed);
         }
         for j in 0..self.n {
             if self.deps[j] == 0 {
@@ -198,8 +218,9 @@ impl Graph {
     }
 
     fn push(&self, j: usize) {
-        let i = self.tail.fetch_add(1, Ordering::AcqRel);
-        self.ready[i].store(j as u32 + 1, Ordering::Release);
+        let (tail, ready) = if self.pinned[j] { (&self.tail0, &self.ready0) } else { (&self.tail, &self.ready) };
+        let i = tail.fetch_add(1, Ordering::AcqRel);
+        ready[i].store(j as u32 + 1, Ordering::Release);
     }
 }
 
@@ -343,11 +364,27 @@ impl Drop for Pool {
 
 unsafe fn nothing(_: *const (), _: usize, _: usize) {}
 
-/// Takes ready jobs of the run and runs them until every job has finished.
+/// Takes ready jobs of the run and runs them until every job has finished. The rendering thread (lane 0) takes the
+/// pinned ones first; the workers never do.
 fn work(sh: &Shared, graph: &Graph, batch: Batch, lane: usize) {
     let n = graph.n;
     let mut idle = 0u32;
     while graph.done.load(Ordering::Acquire) < n {
+        if lane == 0 {
+            let h = graph.head0.load(Ordering::Relaxed);
+            if h < graph.tail0.load(Ordering::Acquire) {
+                graph.head0.store(h + 1, Ordering::Relaxed);
+                let j = loop {
+                    match graph.ready0[h].load(Ordering::Acquire) {
+                        0 => std::hint::spin_loop(),
+                        v => break v as usize - 1,
+                    }
+                };
+                run_job(sh, graph, batch, j, lane);
+                idle = 0;
+                continue;
+            }
+        }
         let h = graph.head.load(Ordering::Relaxed);
         if h >= graph.tail.load(Ordering::Acquire) {
             // Nothing ready: the jobs running now free the next ones.
@@ -369,20 +406,25 @@ fn work(sh: &Shared, graph: &Graph, batch: Batch, lane: usize) {
                 v => break v as usize - 1,
             }
         };
-        // SAFETY: the job function and its context live until the run is over (`Pool::run` waits for every job).
-        if let Err(p) = catch_unwind(AssertUnwindSafe(|| unsafe { (batch.call)(batch.ctx, j, lane) })) {
-            if let Ok(mut slot) = sh.panic.lock() {
-                slot.get_or_insert(p);
-            }
-        }
-        for &s in graph.successors(j) {
-            if graph.pending[s as usize].fetch_sub(1, Ordering::AcqRel) == 1 {
-                graph.push(s as usize);
-            }
-        }
-        graph.done.fetch_add(1, Ordering::AcqRel);
+        run_job(sh, graph, batch, j, lane);
         idle = 0;
     }
+}
+
+/// Runs job `j`, then queues its successors that were waiting for it alone.
+fn run_job(sh: &Shared, graph: &Graph, batch: Batch, j: usize, lane: usize) {
+    // SAFETY: the job function and its context live until the run is over (`Pool::run` waits for every job).
+    if let Err(p) = catch_unwind(AssertUnwindSafe(|| unsafe { (batch.call)(batch.ctx, j, lane) })) {
+        if let Ok(mut slot) = sh.panic.lock() {
+            slot.get_or_insert(p);
+        }
+    }
+    for &s in graph.successors(j) {
+        if graph.pending[s as usize].fetch_sub(1, Ordering::AcqRel) == 1 {
+            graph.push(s as usize);
+        }
+    }
+    graph.done.fetch_add(1, Ordering::AcqRel);
 }
 
 fn worker(sh: &Shared, w: usize) {
@@ -454,6 +496,38 @@ mod tests {
         assert!(g.wide());
         g.set(3, &mut vec![(0, 1), (1, 2)]);
         assert!(!g.wide(), "a chain");
+    }
+
+    /// Pinned jobs run on the rendering thread (lane 0) only, after their predecessors; the others on any lane.
+    #[test]
+    fn pinned_jobs_run_on_the_rendering_thread() {
+        let pool = Pool::new(3, None);
+        let n = 96;
+        let mut edges: Vec<(u32, u32)> = (1..n as u32).map(|b| (b / 4, b)).filter(|e| e.0 < e.1).collect();
+        let mut g = Graph::default();
+        g.set(n, &mut edges.clone());
+        for j in (0..n).filter(|j| j % 3 == 1) {
+            g.pin(j, true);
+        }
+        for _ in 0..50 {
+            let stamp: Vec<AtomicUsize> = (0..n).map(|_| AtomicUsize::new(0)).collect();
+            let lane_of: Vec<AtomicUsize> = (0..n).map(|_| AtomicUsize::new(usize::MAX)).collect();
+            let clock = AtomicUsize::new(1);
+            assert!(pool.run(&g, &|j, lane| {
+                lane_of[j].store(lane, Ordering::SeqCst);
+                assert_eq!(stamp[j].swap(clock.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst), 0, "job {j} ran twice");
+            }));
+            for j in (0..n).filter(|j| j % 3 == 1) {
+                assert_eq!(lane_of[j].load(Ordering::SeqCst), 0, "pinned job {j}");
+            }
+            for &(a, b) in &edges {
+                let (a, b) = (stamp[a as usize].load(Ordering::SeqCst), stamp[b as usize].load(Ordering::SeqCst));
+                assert!(a != 0 && b != 0 && a < b, "{a} before {b}");
+            }
+        }
+        // `set` unpins.
+        g.set(n, &mut edges);
+        assert!(!g.pinned.iter().any(|&p| p));
     }
 
     /// A pool in use by one thread is refused to another, which renders on its own.

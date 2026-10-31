@@ -1431,6 +1431,13 @@ pub struct MixerTrack {
     pub swap: bool,
     /// The track's "effects enabled" switch (event 236 flag 0x04): when off no slot runs.
     pub slots_enabled: bool,
+    /// The track menu's Separator (event 236 flag 0x0400: a gap before the strip; tracks from one separator to the
+    /// next form a group), Dock to (flags 0x00C0: `DOCK_LEFT`, `DOCK_MIDDLE`, `DOCK_RIGHT`) and Allow threaded
+    /// processing (flag 0x0010 clear). Separator and docking only change where the strip is drawn; a track without
+    /// threading renders on the rendering thread (spec: ui/mixer.md §6.1, audio/multicore.md §5).
+    pub separator: bool,
+    pub dock: u8,
+    pub threaded: bool,
     /// Per slot: enabled (the slot LED) and mix level 0..=1 (spec: ui/mixer.md §7).
     pub slot_on: [bool; 10],
     pub slot_mix: [f64; 10],
@@ -1481,6 +1488,9 @@ impl PartialEq for MixerTrack {
             polarity,
             swap,
             slots_enabled,
+            separator,
+            dock,
+            threaded,
             slot_on,
             slot_mix,
             eq,
@@ -1507,6 +1517,9 @@ impl PartialEq for MixerTrack {
             && *polarity == o.polarity
             && *swap == o.swap
             && *slots_enabled == o.slots_enabled
+            && *separator == o.separator
+            && *dock == o.dock
+            && *threaded == o.threaded
             && *slot_on == o.slot_on
             && *slot_mix == o.slot_mix
             && *eq == o.eq
@@ -1527,6 +1540,10 @@ pub const MONITOR_ON: u8 = 3;
 /// Record sources (event 165): External input only, and the default, Post EQ.
 pub const REC_EXTERNAL: u8 = 0;
 pub const REC_POST_EQ: u8 = 3;
+/// Where a track's strip is docked ([`MixerTrack::dock`]): the master is on the left, new tracks in the middle.
+pub const DOCK_LEFT: u8 = 0;
+pub const DOCK_MIDDLE: u8 = 1;
+pub const DOCK_RIGHT: u8 = 2;
 
 /// A new track's equaliser: flat, at the default frequencies and widths.
 pub const EQ_DEFAULT: [[i32; 3]; 3] = [[0, 5777, 17500], [0, 33145, 17500], [0, 55825, 17500]];
@@ -1549,6 +1566,9 @@ impl MixerTrack {
             polarity: false,
             swap: false,
             slots_enabled: true,
+            separator: false,
+            dock: if index == 0 { DOCK_LEFT } else { DOCK_MIDDLE },
+            threaded: true,
             slot_on: [true; 10],
             slot_mix: [1.0; 10],
             eq: EQ_DEFAULT,

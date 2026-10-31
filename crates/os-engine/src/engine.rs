@@ -702,6 +702,9 @@ struct MixTrack {
     polarity: bool,
     /// The track's "effect slots enabled" switch: when off no slot runs (spec: audio/mixer.md).
     slots_enabled: bool,
+    /// Allow threaded processing: off, the track renders on the rendering thread even on several cores (spec:
+    /// audio/multicore.md §5).
+    threaded: bool,
     /// The three-band equaliser, after the slots and before the fader.
     eq: os_dsp::mixer::TrackEq,
     /// Insert effects in slot order (applied before the fader).
@@ -863,6 +866,7 @@ impl MixTrack {
             swap: false,
             polarity: false,
             slots_enabled: true,
+            threaded: true,
             eq: os_dsp::mixer::TrackEq::default(),
             effects: Vec::new(),
             slot_on: [true; 10],
@@ -1392,6 +1396,7 @@ impl Engine {
                         swap: m.swap,
                         polarity: m.polarity,
                         slots_enabled: m.slots_enabled,
+                        threaded: m.threaded,
                         eq: os_dsp::mixer::TrackEq::new(m.eq, rate),
                         effects,
                         slot_on: m.slot_on,
