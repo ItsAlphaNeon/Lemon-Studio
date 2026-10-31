@@ -45,6 +45,9 @@ pub enum KnobId {
     /// A control of the LFO of the automation clip on channel row `.0` (model `Automation::lfo`; spec:
     /// audio/automation.md "The LFO"). Its switch and mode are two-position controls that a click flips.
     AutoLfo(usize, LfoKnob),
+    /// A setting of the Lemon MIDI Out on channel row `.0` (its plugin state; spec: plugins/midi-out.md §6). The checks
+    /// are two-position controls that a click flips.
+    MidiOut(usize, crate::lemon_midi_out::MoKnob),
 }
 
 /// The controls of an automation clip's LFO, each over its stored range: switch (off, on), mode (multiply, add),
@@ -140,6 +143,7 @@ impl KnobId {
             KnobId::Strum(k) => k.notch(),
             KnobId::Arp(k) => k.notch(),
             KnobId::PianoDlg(k) => k.notch(),
+            KnobId::MidiOut(_, k) => k.notch(),
             _ => PER_NOTCH,
         }
     }
@@ -158,6 +162,8 @@ impl KnobId {
             KnobId::Arp(k @ (crate::arpeggiate::Knob::TimeMul | crate::arpeggiate::Knob::Range)) => k.notch() / 12.0,
             // The level faders' handles follow the mouse.
             KnobId::PianoDlg(k) => k.travel().map_or(PER_PX, |t| 1.0 / t),
+            // One value per 6 px, or the knobs' usual rate for the long ranges.
+            KnobId::MidiOut(_, k) => (k.notch() / 6.0).max(PER_PX),
             _ => PER_PX,
         }
     }
@@ -172,6 +178,7 @@ impl KnobId {
             KnobId::Arp(k) => crate::arpeggiate::Settings::default().get(k),
             KnobId::PianoDlg(k) => k.default_pos(),
             KnobId::AutoLfo(_, k) => k.pos(&os_model::clip_lfo::ClipLfo::default()),
+            KnobId::MidiOut(_, k) => k.pos(&crate::lemon_midi_out::Settings::default()),
             KnobId::Eq(_, b, f) => eq_pos(f, os_model::EQ_DEFAULT[usize::from(b.min(2))][usize::from(f.min(2))]),
             _ => 0.5,
         }
@@ -254,6 +261,7 @@ impl State {
             KnobId::Arp(k) => self.arp.set.get(k),
             KnobId::PianoDlg(k) => self.piano_dlg.get(k),
             KnobId::AutoLfo(row, k) => k.pos(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
+            KnobId::MidiOut(row, k) => k.pos(&crate::lemon_midi_out::row_settings(&self.project, row).unwrap_or_default()),
         }
     }
 
@@ -371,6 +379,13 @@ impl State {
                     self.piano.dirty = true;
                 }
             }
+            KnobId::MidiOut(row, k) => {
+                let Some(mut st) = crate::lemon_midi_out::row_settings(&self.project, row) else { return };
+                k.store(&mut st, v);
+                if crate::lemon_midi_out::set_row_settings(&mut self.project, row, &st) {
+                    self.piano.dirty = true;
+                }
+            }
         }
     }
 
@@ -387,6 +402,7 @@ impl State {
             KnobId::Arp(k) => self.arp.set.text(k),
             KnobId::PianoDlg(k) => self.piano_dlg.text(k, u32::from(self.project.ppq.max(4))),
             KnobId::AutoLfo(row, k) => k.text(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
+            KnobId::MidiOut(row, k) => k.text(&crate::lemon_midi_out::row_settings(&self.project, row).unwrap_or_default()),
             _ => self.knob_text_at(id, self.knob(id)).unwrap_or_default(),
         }
     }
@@ -431,7 +447,7 @@ impl State {
                     _ => format!("{band} width: {n:.2}"),
                 }
             }
-            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) => return None,
+            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..) => return None,
         })
     }
 }

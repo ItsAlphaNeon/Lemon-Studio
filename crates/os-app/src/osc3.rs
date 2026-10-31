@@ -43,6 +43,7 @@ pub fn label(name: &str) -> &str {
         crate::citrus::FILE_NAME => crate::citrus::CITRUS,
         n if crate::slicer::is_file_name(n) => crate::slicer::LEMON_SLICER,
         crate::drums::FILE_NAME => crate::drums::LEMON_DRUMS,
+        n if n.eq_ignore_ascii_case(crate::lemon_midi_out::FILE_NAME) => "Lemon MIDI Out",
         _ => name,
     }
 }

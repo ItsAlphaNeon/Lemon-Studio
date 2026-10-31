@@ -133,6 +133,8 @@ pub enum Then {
     ExtInput(u16),
     /// Prepare for performance mode's question: Ok opens Marker settings (spec: ui/performance-mode.md §1).
     PerfConfirm,
+    /// Set up for MIDI export's question: Ok turns the channels into MIDI Out channels (spec: plugins/midi-out.md §6.6).
+    MidiExportConfirm,
     /// Marker settings: Accept (Ok) prepares with this count and spacing.
     PerfMarkers(u8, u8),
 }

@@ -45,6 +45,8 @@ pub enum MenuCmd {
     Redo,
     MorePlugins,
     Sampler,
+    /// ADD ▸ MIDI Out: a Lemon MIDI Out channel (spec: plugins/midi-out.md §6.2).
+    MidiOut,
     AudioClip,
     AutomationClip,
     Layer,
@@ -97,6 +99,9 @@ pub enum MenuCmd {
     ResetEmptyTracks,
     /// TOOLS ▸ Set up for live performance: Prepare for performance mode (spec: ui/performance-mode.md §1).
     PrepPerformance,
+    /// TOOLS ▸ Set up for MIDI export: every instrument channel becomes a MIDI Out channel (spec: plugins/midi-out.md
+    /// §6.6, ui/menus.md).
+    PrepMidiExport,
     /// TOOLS ▸ Chord progression tool...: the progression box (`crate::chord_tool`).
     Chords,
     /// TOOLS ▸ Lock all tracks to their clips / Unlock all tracks from their clips (`crate::playlist::Cmd::LockClips`).
@@ -265,6 +270,7 @@ const ADD_PLUGINS: &[Item] = &[
     SEP,
     head("Channel"),
     it("Sampler", "").on().cmd(MenuCmd::Sampler),
+    it(crate::lemon_midi_out::LEMON_MIDI_OUT, "").on().cmd(MenuCmd::MidiOut),
     head("Misc"),
     it("Audio clip", "").on().cmd(MenuCmd::AudioClip),
     it("Automation clip", "").on().cmd(MenuCmd::AutomationClip),
@@ -406,7 +412,7 @@ const TOOLS_B: &[Item] = &[
     it("Cancel recording", "").on().cmd(MenuCmd::CancelRecording),
     SEP,
     it("Set up for live performance", "").on().cmd(MenuCmd::PrepPerformance),
-    it("Set up for MIDI export", ""),
+    it(crate::lemon_midi_out::PREP_LABEL, "").on().cmd(MenuCmd::PrepMidiExport),
     it("Select unused instruments", "").on().cmd(MenuCmd::SelectUnused),
     it("Remove unused audio clips", "").on().cmd(MenuCmd::PurgeClips),
     it(crate::mixer::AUTO_BYPASS_ALL_LABEL, "").on().cmd(MenuCmd::AutoBypassAll),

@@ -21,7 +21,8 @@ pub const SIZE: (f32, f32) = (430.0, 200.0);
 pub const CLIP_SIZE: (f32, f32) = (430.0, 236.0);
 
 pub fn rect(s: &State) -> Rect {
-    let (w, h) = if s.is_clip_row(s.plugin_channel) { CLIP_SIZE } else { SIZE };
+    let mo = s.project.channels.get(s.plugin_channel).is_some_and(crate::lemon_midi_out::is_midi_out);
+    let (w, h) = if s.is_clip_row(s.plugin_channel) || mo { CLIP_SIZE } else { SIZE };
     Rect::new(s.plugin_pos.0, s.plugin_pos.1, w, h)
 }
 
@@ -65,6 +66,9 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     if ch.kind == ChannelKind::Automation {
         return paint_clip(ui, s, body, kind);
     }
+    if crate::lemon_midi_out::is_midi_out(ch) {
+        return paint_midi_out(ui, s, body);
+    }
     let lines = [
         ("Generator", kind),
         ("Sample", sample),
@@ -96,13 +100,53 @@ fn knob(ui: &mut Ui, s: &State, id: KnobId, cx: f32, cy: f32, caption: &str) {
     ui.c.text_center(Font::new(13), Rect::new(cx - 30.0, cy + 14.0, 60.0, 14.0), t.text_dim, caption);
 }
 
-/// A switch drawn as an LED with its label; a click flips it (`Action::Knob` on a two-position LFO control).
+/// A switch drawn as an LED with its label; a click flips it (`Action::Knob` on a two-position LFO or MIDI Out control).
 fn switch(ui: &mut Ui, s: &State, id: KnobId, x: f32, cy: f32, label: &str) {
     let t = ui.t;
     let w = 20.0 + ui.c.text_width(Font::new(13), label);
     ui.hit(Rect::new(x, cy - 9.0, w, 18.0), Action::Knob(id), s.knob_text(id));
     led(ui, x + 6.0, cy, s.knob(id) >= 0.5);
     ui.c.text(Font::new(13), x + 16.0, cy - 8.0, t.text, label);
+}
+
+/// Lemon MIDI Out's settings (spec: plugins/midi-out.md §6.3; Lemon Studio's layout): Channel, Port, Patch and the two
+/// Bank boxes as value boxes a drag or the wheel changes, the two checks, and the channel's volume and pan, which its
+/// reset messages send.
+fn paint_midi_out(ui: &mut Ui, s: &State, body: Rect) {
+    use crate::lemon_midi_out::{row_settings, MoKnob};
+    let t = ui.t;
+    let row = s.plugin_channel;
+    let st = row_settings(&s.project, row).unwrap_or_default();
+    let f = Font::new(15);
+    let lines: [(&str, &[MoKnob]); 5] = [("Generator", &[]), ("Channel", &[MoKnob::Channel]), ("Port", &[MoKnob::Port]), ("Patch", &[MoKnob::Patch]), ("Bank", &[MoKnob::Bank, MoKnob::Bank2])];
+    for (i, (k, knobs)) in lines.iter().enumerate() {
+        let ly = body.y + 10.0 + 24.0 * i as f32;
+        ui.c.text(f, body.x + 12.0, ly, t.text_dim, k);
+        if knobs.is_empty() {
+            ui.c.text(f, body.x + 100.0, ly, t.text, "Lemon MIDI Out");
+            continue;
+        }
+        for (j, &m) in knobs.iter().enumerate() {
+            let b = Rect::new(body.x + 100.0 + 56.0 * j as f32, ly - 2.0, 48.0, 20.0);
+            let id = KnobId::MidiOut(row, m);
+            ui.hit(b, Action::Knob(id), s.knob_text(id));
+            let v = match m {
+                MoKnob::Patch if st.patch == 0 => "---".to_string(),
+                MoKnob::Patch => st.patch.to_string(),
+                _ => m.value(&st),
+            };
+            super::settings::value_red(ui, b, &v);
+        }
+        if knobs[0] == MoKnob::Patch && st.patch > 0 {
+            let name = crate::lemon_midi_out::GM_NAMES[usize::from(st.patch - 1)];
+            ui.c.text_clip(Font::new(13), body.x + 156.0, ly + 1.0, body.w - 260.0, t.text, name);
+        }
+    }
+    let ly = body.y + 10.0 + 24.0 * 5.0 + 8.0;
+    switch(ui, s, KnobId::MidiOut(row, MoKnob::SendLevels), body.x + 12.0, ly + 8.0, MoKnob::SendLevels.caption());
+    switch(ui, s, KnobId::MidiOut(row, MoKnob::MapColor), body.x + 12.0, ly + 32.0, MoKnob::MapColor.caption());
+    knob(ui, s, KnobId::ChanVol(row), body.right() - 104.0, body.y + 34.0, "VOL");
+    knob(ui, s, KnobId::ChanPan(row), body.right() - 44.0, body.y + 34.0, "PAN");
 }
 
 /// An automation clip's settings: its curve, its range (the channel's pan knob is the minimum, its volume knob the
