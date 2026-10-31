@@ -114,7 +114,13 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
 
     // The toolbar: the menu, then the tools.
     button(ui, at(8.0, 34.0, 60.0, 24.0), Action::Events(EvAct::Menu), "Event editor menu", Ok("Edit"), false);
-    let tools = [(Tool::Draw, "Draw", "Draw (left: freehand, right: line)"), (Tool::Erase, "Erase", "Erase events"), (Tool::Select, "Select", "Select a stretch of time")];
+    let tools = [
+        (Tool::Draw, "Draw", "Draw (left: freehand, right: line)"),
+        (Tool::Paint, "Paint", "Paint (draw ignoring the snap)"),
+        (Tool::Erase, "Erase", "Erase events"),
+        (Tool::Interpolate, "Interp.", "Interpolate (left: straight, right: smooth)"),
+        (Tool::Select, "Select", "Select a stretch of time"),
+    ];
     for (i, (tool, text, hint)) in tools.into_iter().enumerate() {
         button(ui, at(80.0 + 64.0 * i as f32, 34.0, 60.0, 24.0), Action::Events(EvAct::Tool(tool)), hint, Ok(text), e.tool == tool);
     }

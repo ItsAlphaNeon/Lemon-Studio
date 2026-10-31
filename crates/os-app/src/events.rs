@@ -19,8 +19,12 @@ pub enum Tool {
     /// Left drag draws the level freehand on the snap; right drag draws a straight line.
     #[default]
     Draw,
+    /// Draw, ignoring the snap: an event on every tick.
+    Paint,
     /// Left drag deletes the events it passes over.
     Erase,
+    /// A drag gives the events under it the levels of a straight line (right drag: a smooth one).
+    Interpolate,
     /// Left drag selects a stretch of time.
     Select,
 }
@@ -51,6 +55,11 @@ pub enum EvCmd {
     /// An event with the control's value as it was when the editor opened, at the selection's start (or the
     /// pattern's).
     InsertValue,
+    /// The selection's events copied right after it.
+    Duplicate,
+    /// Moves the events from the selection's start on later by its length, or pulls those after it back over it.
+    InsertSpace,
+    DeleteSpace,
     TurnIntoClip,
 }
 
@@ -152,8 +161,18 @@ pub fn points(s: &State) -> Vec<(u32, i32)> {
 }
 
 fn set(s: &mut State, tick: u32, level: f64) {
-    let (kind, v) = (s.events.target, value(s.events.range, level));
+    let v = value(s.events.range, level);
+    set_value(s, tick, v);
+}
+
+fn set_value(s: &mut State, tick: u32, v: i32) {
+    let kind = s.events.target;
     piano::set_control(s, (kind >> 16) as u16, kind as u16, tick, v);
+}
+
+/// What Copy and Duplicate take without a selection: the pattern's length, or to the last event when that lies later.
+fn whole(s: &State) -> (u32, u32) {
+    (0, s.project.pattern_length(s.pattern).max(points(s).last().map_or(0, |p| p.0 + 1)).max(1))
 }
 
 /// Deletes the control's events from `from` to `to` (both included); returns how many went.
@@ -181,6 +200,52 @@ pub fn draw(s: &mut State, a: (u32, f64), b: (u32, f64), unit: u32) {
     s.piano.dirty = true;
 }
 
+/// The Interpolate tool (spec §1): the control's events from `a` to `b` (tick, level) keep their times and take the
+/// levels of the straight line between them, or with `smooth` of a half cosine from one to the other. Returns how many
+/// there were.
+pub fn interpolate(s: &mut State, a: (u32, f64), b: (u32, f64), smooth: bool) -> usize {
+    let ((t0, l0), (t1, l1)) = if a.0 <= b.0 { (a, b) } else { (b, a) };
+    let under: Vec<u32> = points(s).into_iter().map(|p| p.0).filter(|t| (t0..=t1).contains(t)).collect();
+    for &t in &under {
+        let k = if t1 == t0 { 1.0 } else { f64::from(t - t0) / f64::from(t1 - t0) };
+        let k = if smooth { (1.0 - (k * std::f64::consts::PI).cos()) / 2.0 } else { k };
+        set(s, t, l0 + (l1 - l0) * k);
+    }
+    s.piano.dirty = true;
+    under.len()
+}
+
+/// Edit ▸ Duplicate (Ctrl+B): the selection's events (all of them without one) copied right after it, in place of the
+/// control's events there; the copy becomes the selection.
+pub fn duplicate(s: &mut State) -> bool {
+    let (a, b) = s.events.sel.unwrap_or_else(|| whole(s));
+    let len = (b - a).max(1);
+    let events: Vec<(u32, i32)> = points(s).into_iter().filter(|p| (a..b).contains(&p.0)).collect();
+    if events.is_empty() {
+        return false;
+    }
+    erase(s, a + len, a + 2 * len - 1);
+    for (t, v) in events {
+        set_value(s, t + len, v);
+    }
+    s.events.sel = Some((a + len, a + 2 * len));
+    true
+}
+
+/// Edit ▸ Insert space (Ctrl+Ins): the events from the selection's start on move later by its length. Delete space
+/// (Ctrl+Del): the selection's events go and the later ones move back by its length. Both need a selection.
+pub fn space(s: &mut State, insert: bool) -> bool {
+    let Some((a, b)) = s.events.sel.filter(|(a, b)| b > a) else { return false };
+    let len = b - a;
+    let from = if insert { a } else { b };
+    let moved: Vec<(u32, i32)> = points(s).into_iter().filter(|p| p.0 >= from).collect();
+    erase(s, a, u32::MAX);
+    for (t, v) in moved {
+        set_value(s, if insert { t + len } else { t - len }, v);
+    }
+    true
+}
+
 /// Edit ▸ Delete: the selection's events, or all of them.
 pub fn delete(s: &mut State) -> usize {
     match s.events.sel {
@@ -198,7 +263,7 @@ pub fn select_all(s: &mut State) {
 /// Edit ▸ Copy: the selection's events (all of them without one) as levels, from the selection's start.
 pub fn copy(s: &mut State) -> bool {
     let range = s.events.range;
-    let (a, b) = s.events.sel.unwrap_or((0, s.project.pattern_length(s.pattern).max(points(s).last().map_or(0, |p| p.0 + 1))));
+    let (a, b) = s.events.sel.unwrap_or_else(|| whole(s));
     let events: Vec<(u32, f64)> = points(s).into_iter().filter(|p| (a..b).contains(&p.0)).map(|(t, v)| (t - a, level(range, v))).collect();
     if events.is_empty() {
         return false;
@@ -299,6 +364,8 @@ pub enum Stroke {
     Select(u32),
     /// A straight line from where the right button went down (`EventsUi::line`).
     Line,
+    /// The Interpolate tool's line (`EventsUi::line`), smooth with the right button: made on release.
+    Interpolate(bool),
 }
 
 /// The snap's unit in ticks at the editor's zoom: the global snap (none with Alt held).
@@ -330,6 +397,17 @@ pub fn menu(s: &State, x: f32, y: f32) -> Popup {
         },
         PItem::new("Select all", Cmd::Events(EvCmd::SelectAll)).key("Ctrl+A"),
         PItem::new("Delete", Cmd::Events(EvCmd::Delete)).key("Del"),
+        PItem::new("Duplicate", Cmd::Events(EvCmd::Duplicate)).key("Ctrl+B"),
+        PItem::sep(),
+        {
+            let p = PItem::new("Insert space", Cmd::Events(EvCmd::InsertSpace)).key("Ctrl+Ins");
+            if s.events.sel.is_some() { p } else { p.off() }
+        },
+        {
+            let p = PItem::new("Delete space", Cmd::Events(EvCmd::DeleteSpace)).key("Ctrl+Del");
+            if s.events.sel.is_some() { p } else { p.off() }
+        },
+        PItem::sep(),
         PItem::new("Insert current controller value", Cmd::Events(EvCmd::InsertValue)).key("Ctrl+I"),
         PItem::sep(),
         if any { turn } else { turn.off() },
@@ -373,13 +451,17 @@ impl App {
     /// A press on the graph (`right`: the right button) or the ruler (`ruler`): a stroke starts (§3).
     pub(crate) fn events_press(&mut self, right: bool, ruler: bool) {
         let (x, y) = self.mouse;
-        let (alt, ctrl) = (self.alt, self.ctrl);
+        let ctrl = self.ctrl;
         let s = &mut self.state;
+        let alt = self.alt || s.events.tool == Tool::Paint;
         let tick = snapped(s, crate::views::events::tick_at(s, x), alt);
         let level = crate::views::events::level_at(s, y);
         let stroke = if ruler || ctrl || (!right && s.events.tool == Tool::Select) {
             s.events.sel = None;
             Stroke::Select(tick)
+        } else if s.events.tool == Tool::Interpolate {
+            s.events.line = Some(((tick, level), (tick, level)));
+            Stroke::Interpolate(right)
         } else if right {
             s.events.line = Some(((tick, level), (tick, level)));
             Stroke::Line
@@ -400,8 +482,8 @@ impl App {
 
     /// The mouse moved during a stroke.
     pub(crate) fn events_drag(&mut self, stroke: Stroke, x: f32, y: f32) {
-        let alt = self.alt;
         let s = &mut self.state;
+        let alt = self.alt || s.events.tool == Tool::Paint;
         let tick = snapped(s, crate::views::events::tick_at(s, x), alt);
         let level = crate::views::events::level_at(s, y);
         let u = unit(s, alt);
@@ -418,7 +500,7 @@ impl App {
                 s.events.sel = Some((anchor.min(tick), anchor.max(tick) + u));
                 stroke
             }
-            Stroke::Line => {
+            Stroke::Line | Stroke::Interpolate(_) => {
                 if let Some(l) = &mut s.events.line {
                     l.1 = (tick, level);
                 }
@@ -429,17 +511,25 @@ impl App {
         self.damage_win(Win::Events);
     }
 
-    /// The button went up: a line is drawn (one undo step).
+    /// The button went up: a line is drawn, or the events under it interpolated (one undo step).
     pub(crate) fn events_release(&mut self, stroke: Stroke) {
-        if stroke != Stroke::Line {
-            return;
-        }
-        let alt = self.alt;
         let s = &mut self.state;
-        if let Some((a, b)) = s.events.line.take() {
+        let alt = self.alt || s.events.tool == Tool::Paint;
+        let line = match stroke {
+            Stroke::Line | Stroke::Interpolate(_) => s.events.line.take(),
+            _ => return,
+        };
+        if let Some((a, b)) = line {
             piano::snapshot_as(s, EDIT);
-            let u = unit(s, alt);
-            draw(s, a, b, u);
+            match stroke {
+                Stroke::Interpolate(smooth) => {
+                    interpolate(s, a, b, smooth);
+                }
+                _ => {
+                    let u = unit(s, alt);
+                    draw(s, a, b, u);
+                }
+            }
         }
         self.damage_win(Win::Events);
     }
@@ -480,17 +570,32 @@ impl App {
                 insert_value(s);
                 None
             }
+            EvCmd::Duplicate => {
+                piano::snapshot_as(s, EDIT);
+                duplicate(s);
+                None
+            }
+            EvCmd::InsertSpace | EvCmd::DeleteSpace => {
+                if s.events.sel.is_some() {
+                    piano::snapshot_as(s, EDIT);
+                    space(s, c == EvCmd::InsertSpace);
+                }
+                None
+            }
             EvCmd::TurnIntoClip => turn_into_clip(s),
         };
         self.invalidate();
         m
     }
 
-    /// The editor's keys while it is in front (§4): Del, Ctrl+X / C / V, Ctrl+A, Ctrl+I.
+    /// The editor's keys while it is in front (§4): Del, Ctrl+X / C / V, Ctrl+A, Ctrl+I, Ctrl+B, Ctrl+Ins / Del.
     pub(crate) fn events_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
         use winit::keyboard::{Key, NamedKey};
         let c = match key {
             Key::Named(NamedKey::Delete) if !ctrl && !alt => EvCmd::Delete,
+            Key::Named(NamedKey::Delete) if ctrl && !alt => EvCmd::DeleteSpace,
+            Key::Named(NamedKey::Insert) if ctrl && !alt => EvCmd::InsertSpace,
+            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("b") => EvCmd::Duplicate,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("x") => EvCmd::Cut,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("c") => EvCmd::Copy,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("v") => EvCmd::Paste,
@@ -599,6 +704,36 @@ mod tests {
         draw(s, (0, 0.0), (0, 0.0), 24);
         assert_eq!(points(s), vec![(0, -6400)]);
         assert!(!open(s, 0x4000_0000, "Main volume", 0.5, None), "no events for it");
+    }
+
+    /// Interpolate, Duplicate, Insert and Delete space (spec §1, §4).
+    #[test]
+    fn interpolate_duplicate_and_space() {
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let s = &mut app.state;
+        assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
+        for t in [0, 24, 48, 72, 96] {
+            set(s, t, 0.25);
+        }
+        assert_eq!(interpolate(s, (0, 0.0), (96, 1.0), false), 5);
+        assert_eq!(points(s), vec![(0, 0), (24, 3200), (48, 6400), (72, 9600), (96, 12800)]);
+        assert_eq!(interpolate(s, (0, 0.0), (96, 1.0), true), 5);
+        assert_eq!(point(s, 48), Some(6400), "smooth: the middle is the same");
+        assert_eq!(point(s, 24), Some(1875), "smooth: a slower start");
+        assert_eq!(interpolate(s, (200, 0.0), (300, 1.0), false), 0, "no events under it");
+
+        s.events.sel = Some((0, 48));
+        assert!(duplicate(s));
+        assert_eq!(points(s), vec![(0, 0), (24, 1875), (48, 0), (72, 1875), (96, 12800)]);
+        assert_eq!(s.events.sel, Some((48, 96)));
+        assert!(space(s, true), "insert space");
+        assert_eq!(points(s), vec![(0, 0), (24, 1875), (96, 0), (120, 1875), (144, 12800)]);
+        s.events.sel = Some((0, 96));
+        assert!(space(s, false), "delete space");
+        assert_eq!(points(s), vec![(0, 0), (24, 1875), (48, 12800)]);
+        s.events.sel = None;
+        assert!(!space(s, true), "needs a selection");
     }
 
     /// The clip follows the events: a ramp recorded every 4 ticks becomes one straight line ending on the last event
