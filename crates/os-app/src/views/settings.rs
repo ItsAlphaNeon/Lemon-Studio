@@ -303,7 +303,7 @@ pub const UPDATE_SCRIPTS: &str = "Update MIDI scripts";
 const NO_SCRIPTS: &str = "Lemon Studio has no MIDI scripts";
 /// MIDI: Performance mode MIDI channel stays greyed with its reason.
 pub const PERFORMANCE_CHANNEL: &str = "Performance mode MIDI channel";
-const NO_PERFORMANCE: &str = "Lemon Studio has no live performance mode for the arranger";
+const NO_PERFORMANCE: &str = "Performance mode is not played from MIDI yet";
 
 /// `LIVE`, and the checks declared in `crate::prefs`.
 fn live(key: &str) -> bool {

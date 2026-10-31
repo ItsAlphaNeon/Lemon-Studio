@@ -69,6 +69,11 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   (through the pattern in PAT mode)
 - Auto scrolling (toolbar, OPTIONS menu): while playing, the playlist follows the playhead (the piano roll in
   pattern mode), continuously or a quarter page at a time (right-click on the button)
+- Performance mode (Ctrl+P, the arranger's ▸ menu; Prepare for performance mode or TOOLS ▸ Set up for live
+  performance lays out 16 columns and a Start marker): a click on a clip before the Start marker launches it on its
+  track, looping, from the next sync point (Shift queues, Alt at once); a right click or the track header stops it.
+  Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant, Position sync) are saved as FL
+  saves them. Not yet: MIDI and the typing keyboard, scenes, recording a performance
 
 ## ✅ Mixing and routing
 
@@ -212,8 +217,8 @@ project) to Diagnostics.txt in the user folder and opens it. TOOLS > Save MIDI c
 roll's copied notes to a numbered MIDI file in the user folder's Clipboard files, which the browser then shows; Save
 audio clipboard to browser does the same with the audio on the clipboard (what Tesla copies; Windows and macOS).
 VIEW > Remote control opens the browser's Remote control section, one row per controller link.
-Not yet (greyed in the menu bar): TOOLS > Chord progression tool..., Control builder, Set up for live performance,
-Set up for MIDI export, Switch auto-bypass for all plugins, Lock / Unlock all tracks to / from their clips, Set
+TOOLS > Set up for live performance prepares the arranger for performance mode.
+Not yet (greyed in the menu bar): TOOLS > Chord progression tool..., Control builder, Set up for MIDI export, Switch auto-bypass for all plugins, Lock / Unlock all tracks to / from their clips, Set
 keyboard focus of all plugins to ▸; VIEW > Script output.
 
 **Window positions.** Where the windows were when Lemon Studio closed comes back at the next start: the main

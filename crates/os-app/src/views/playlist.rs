@@ -671,7 +671,7 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
     for m in pl::markers(s) {
         let x64 = g.x64(f64::from(m.position));
         let x = x64 as f32;
-        let w = pl::marker_w(m);
+        let w = pl::marker_w(s, m);
         if x > lane.right() || x + w < lane.x {
             continue;
         }
@@ -691,7 +691,8 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
         ui.c.fill_polygon(&tab, t.ruler.mix(t.track_header, 0.55));
         marker_glyph(ui, m.kind, x, top + 8.0);
         let tx = x + 3.0 + pl::marker_icon(m.kind).0;
-        ui.c.text_clip(Font::new(12), tx, lane.y + 1.0, right - tx, t.text, &marker_label(m));
+        let label = crate::perform::pad_name(s, m).unwrap_or_else(|| marker_label(m));
+        ui.c.text_clip(Font::new(12), tx, lane.y + 1.0, right - tx, t.text, &label);
     }
     ui.c.pop_clip();
 }

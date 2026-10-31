@@ -7399,6 +7399,9 @@ impl App {
         if crate::init::apply(&mut self.state) {
             self.invalidate();
         }
+        if song {
+            crate::perform::starting(&mut self.state);
+        }
         let p = crate::rack::play_project(&self.state);
         let start = if song { f64::from(self.state.playlist.pos) } else { f64::from(self.state.piano.marker) };
         // A looping time selection starts at its start unless the position is inside it (spec: ui/recording.md §5).
@@ -8678,6 +8681,11 @@ impl App {
             MenuCmd::PurgeClips => self.state.message = crate::rack::run(self, crate::rack::RCmd::Purge),
             MenuCmd::RemoveTeslas => {
                 if let Some(m) = self.ask_remove_teslas() {
+                    self.state.message = Some(m);
+                }
+            }
+            MenuCmd::PrepPerformance => {
+                if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::PerfPrepare) {
                     self.state.message = Some(m);
                 }
             }
@@ -12154,7 +12162,7 @@ mod tests {
         click(&mut app, &mut c, r);
         assert_eq!(app.state.message.as_deref(), Some("Soft takeover: on"));
         assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Lemon Studio has no MIDI scripts"));
-        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Lemon Studio has no live performance mode for the arranger"));
+        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Performance mode is not played from MIDI yet"));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(PROJECT)));
         click(&mut app, &mut c, r);
         assert!(app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo("Ask for data folder", ..)))), "Ask for data folder works");
@@ -18079,7 +18087,7 @@ mod tests {
     /// height (FL's 6 px steps and limits), Ctrl+wheel and the plain wheel over the ruler = time zoom, End = zoom on
     /// selection, Shift+G / Alt+G / Alt+U clip groups (lowest free number, move together, duplicates get their own
     /// group, ungroup deselects, saved), Right-Shift+drag slice in Draw, Shift+Tab snap cycle, Ctrl+Insert without a
-    /// time selection, Ctrl+P / Ctrl+Shift+P not available yet, F5 raises, the view saved in the project (event 242).
+    /// time selection, Ctrl+P / Ctrl+Shift+P switch performance mode, F5 raises, the view saved in the project (event 242).
     #[test]
     fn playlist_keybinds() {
         use crate::playlist::{self as pl, Snap};
@@ -18269,15 +18277,13 @@ mod tests {
         let after: Vec<u32> = on_track(&app, 4).iter().map(|c| c.position).collect();
         assert_eq!((before, after), (vec![0, bar], vec![0, 2 * bar]));
 
-        // Performance mode is not built yet: Ctrl+P (FL's key) and Ctrl+Shift+P say so.
-        app.state.message = None;
+        // Ctrl+P and Ctrl+Shift+P switch performance mode (spec: ui/performance-mode.md §1).
         app.key(&Key::Character("p".into()), true, false);
-        assert!(app.state.message.as_deref().is_some_and(|m| m.contains("not available yet")), "{:?}", app.state.message);
-        app.state.message = None;
+        assert_eq!((app.state.message.as_deref(), app.state.project.performance), (Some("Performance mode: on"), Some(true)));
         app.shift = true;
         app.key(&Key::Character("P".into()), true, false);
         app.shift = false;
-        assert!(app.state.message.as_deref().is_some_and(|m| m.contains("not available yet")), "{:?}", app.state.message);
+        assert_eq!((app.state.message.as_deref(), app.state.project.performance), (Some("Performance mode: off"), Some(false)));
 
         // The track height, time zoom and scroll are saved with the project and come back when it opens.
         app.state.playlist.row_h = 60.0;

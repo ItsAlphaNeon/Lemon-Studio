@@ -90,10 +90,10 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   track, Auto fill, MIDI channel through, Receive notes from ▸ Unlock and Typing keyboard, Create instrument, Burn
   MIDI to ▸ (2). The knob, mixer box and LED menus' Automation and Remote control groups add 23 more (events in a new
   window or the piano roll, initial values, automation clips, controller links) ([rack.rs](../crates/os-app/src/rack.rs))
-- [ ] **Main menu bar.** 9 of its 136 entries greyed out on 2026-10-30, counted entry by entry after Save audio
-  clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸ and Diagnostics were enabled: TOOLS > Chord
-  progression tool... and Control builder (no chord generator or control builder yet), Set up for live performance
-  (no performance mode), Set up for MIDI export (not observed yet), Switch auto-bypass for all plugins and Set keyboard
+- [ ] **Main menu bar.** 8 of its 136 entries greyed out on 2026-10-30, counted entry by entry after Save audio
+  clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics and TOOLS > Set up for live
+  performance were enabled: TOOLS > Chord progression tool... and Control builder (no chord generator or control
+  builder yet), Set up for MIDI export (not observed yet), Switch auto-bypass for all plugins and Set keyboard
   focus of all plugins to ▸ (no such per-plugin settings yet), Lock / Unlock all tracks to / from their clips (tracks
   don't lock to a clip yet); VIEW > Script output (no scripting) ([menus.rs](../crates/os-app/src/views/menus.rs))
 - [x] **TOOLS ▸ Audio logger and Dump to audio editor.** Enabled (on by default, as in FL Studio) keeps the last 1 to
@@ -107,8 +107,9 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   declipper) work (2026-10-30)
 - [x] **Value boxes.** All of them work, the last two being the autosave Maximum and Metronome track. MIDI settings'
   Performance mode MIDI channel stays greyed out until Performance mode is built
-- [ ] **Performance mode.** Live clip launching on the playlist (Ctrl+P says it is not available yet), with MIDI
-  settings' Performance mode MIDI channel and TOOLS ▸ Macros ▸ Prepare for performance mode
+- [ ] **Performance mode.** MIDI settings' Performance mode MIDI channel and the typing keyboard, scenes, recording a
+  performance, the progress displays and the clock in the zone. Launching the zone's clips with the mouse, each
+  track's Performance settings, Ctrl+P and Prepare for performance mode work (2026-10-30)
 - [x] **Recording settings page.** Settings ▸ Recording, Lemon Studio's own page (the original keeps these in the
   Record button's menus): the recording filter, the Record options and quantize, Start on input, Loop record, Blend,
   Count-in and its length, Auto-create audio clips and the External input question's answer, shared with the menus
