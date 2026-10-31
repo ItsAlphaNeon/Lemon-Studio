@@ -1011,7 +1011,8 @@ impl App {
             let at = (self.target_value(t) * n).round() + f64::from(steps);
             let first = self.gesture(i, t);
             self.target_set(t, at.clamp(0.0, n) / n, first);
-            return self.open_target_window(pt.key);
+            self.open_target_window(pt.key);
+            return self.reveal_param(pt.key, index);
         }
         // A stepped parameter takes the turns it could not show yet into the next.
         let carry = self.drive().carry[i];
@@ -1019,6 +1020,19 @@ impl App {
         let got = self.target_value(t);
         self.drive().carry[i] = if (got - wanted).abs() > 1e-9 { carry + wanted - got } else { 0.0 };
         self.open_target_window(pt.key);
+        self.reveal_param(pt.key, index);
+    }
+
+    /// The plugin's window shows the parameter being turned: the tab of its window, the page it is on, and what changes.
+    fn reveal_param(&mut self, key: usize, index: usize) {
+        #[cfg(target_os = "linux")]
+        if self.state.plugin_tabs.hidden(key) {
+            self.state.raise(Win::Hosted(key));
+        }
+        let id = self.state.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id);
+        if let (Some(id), Some(l)) = (id, self.plugins.hosted.get(&key).and_then(|h| h.link.as_ref())) {
+            l.reveal(id);
+        }
     }
 
     /// The selected channel's plugin window opens as its parameters turn, unless an effect's window is in front.
