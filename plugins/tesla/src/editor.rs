@@ -26,6 +26,7 @@ use crate::env;
 use crate::peaks::Peaks;
 use crate::sample::{Format, Sample};
 use crate::state;
+use crate::spectral::{self, Blur, Clean, Curve, Equalize, Profile};
 use crate::tools::{self, Amp, Law, Reverb, Stretch};
 use crate::view::{self, AmpCtl, AmpUi, Bt, Hit, Layout, MenuId, Part, Shown, Target, Tr, ViewState};
 use crate::wav::{self, Depth};
@@ -136,6 +137,11 @@ pub enum ToolCmd {
     Amp,
     Stretch,
     Reverb,
+    /// The spectral panels, and Acquire noise profile (Clean up's).
+    Equalize,
+    Blur,
+    CleanUp,
+    AcquireNoise,
     ReversePolarity,
     Normalize,
     FadeIn,
@@ -361,6 +367,8 @@ enum Drag {
     Fader(AmpCtl),
     /// Envelope `k`'s point `i`; `moved` once its undo step is recorded.
     Point { k: usize, i: usize, moved: bool },
+    /// A spectral panel's curve point.
+    CurvePoint(usize),
 }
 
 pub struct Logic {
@@ -373,6 +381,8 @@ pub struct Logic {
     drag: Option<Drag>,
     /// The editor's own clipboard (the system's is used where there is one).
     clip: Option<Sample>,
+    /// Clean up's noise profile (Acquire noise profile), kept until another is acquired.
+    noise: Option<Profile>,
     peaks: Peaks,
     peaks_ver: u64,
     take_peaks: Peaks,
@@ -394,6 +404,7 @@ impl Logic {
             hosted: false,
             drag: None,
             clip: None,
+            noise: None,
             peaks: Peaks::default(),
             peaks_ver: u64::MAX,
             take_peaks: Peaks::default(),
@@ -694,6 +705,18 @@ impl Logic {
                     None => acts.push(Act::Menu(MenuReq::Wave, x, y)),
                 }
             }
+            Target::Amp(AmpCtl::Curve) => {
+                let i = self.curve_point_at(x, y);
+                let removed = match (i, self.view.amp.as_mut()) {
+                    (Some(i), Some(ui)) => ui.curve.remove(i),
+                    _ => false,
+                };
+                if removed {
+                    self.amp_changed();
+                } else if i.is_some() {
+                    self.hint = "The first and last points stay (drag them up or down)".into();
+                }
+            }
             // Right-click resets a control.
             Target::Amp(c) => self.reset_amp(c),
             _ => {}
@@ -704,7 +727,11 @@ impl Logic {
     /// Amp panel control `c` back to its default (its knobs and faders; the panel's buttons have none).
     fn reset_amp(&mut self, c: AmpCtl) {
         let d = Amp::default();
+        let defaults = AmpUi { eq: Some(Equalize::default()), blur: Some(Blur::default()), clean: Some(Clean::default()), ..AmpUi::default() };
         let v = match c {
+            AmpCtl::Mix | AmpCtl::Amount | AmpCtl::Offset | AmpCtl::Threshold | AmpCtl::Reduction | AmpCtl::ClipLevel => {
+                Self::spectral_value(&defaults, c).unwrap_or(0.0)
+            }
             AmpCtl::Pan => d.pan,
             AmpCtl::Sep => d.sep,
             AmpCtl::Left => d.left,
@@ -894,6 +921,14 @@ impl Logic {
                 }
                 self.hint = format!("{}: {}", env::NAMES[k], env::text(k, v));
             }
+            Some(Drag::CurvePoint(i)) => {
+                if let Some(ui) = &mut self.view.amp {
+                    let (_, bx, _) = view::spectral_parts(&lay, ui);
+                    let (px, v) = (((x - bx.x) / bx.w).clamp(0.0, 1.0) as f64, ((bx.bottom() - y) / bx.h).clamp(0.0, 1.0));
+                    ui.curve.move_point(i, px, v);
+                }
+                self.hint = self.curve_hint();
+            }
             Some(Drag::Fader(ctl)) => {
                 let (_, parts) = view::amp_parts(&lay);
                 if let Some((_, r)) = parts.iter().find(|(c, _)| *c == ctl) {
@@ -915,7 +950,7 @@ impl Logic {
         self.view.pressed = None;
         match d {
             Some(Drag::Scrub) => self.shared.send(Play::Scrub(None)),
-            Some(Drag::Knob { .. } | Drag::Fader(_)) => self.amp_changed(),
+            Some(Drag::Knob { .. } | Drag::Fader(_) | Drag::CurvePoint(_)) => self.amp_changed(),
             _ => {}
         }
         vec![Act::Repaint]
@@ -928,7 +963,7 @@ impl Logic {
 
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
         match self.at(x, y) {
-            Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Dry | AmpCtl::Wet | AmpCtl::Decay))) => {
+            Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Dry | AmpCtl::Wet | AmpCtl::Decay | AmpCtl::Mix | AmpCtl::Amount | AmpCtl::Offset | AmpCtl::Threshold | AmpCtl::Reduction | AmpCtl::ClipLevel))) => {
                 let v = self.amp_value(c) + notches * 0.02;
                 self.set_amp_value(c, v.clamp(-1.0, 1.0));
                 self.hint = self.amp_hint(c);
@@ -1002,6 +1037,10 @@ impl Logic {
             (3, false) => Cmd::Tool(ToolCmd::Amp),
             (3, true) => Cmd::Tool(ToolCmd::Center),
             (4, false) => Cmd::Tool(ToolCmd::Reverb),
+            (5, false) => Cmd::Tool(ToolCmd::Equalize),
+            (13, false) => Cmd::Tool(ToolCmd::Blur),
+            (14, false) => Cmd::Tool(ToolCmd::CleanUp),
+            (14, true) => Cmd::Tool(ToolCmd::AcquireNoise),
             (6, false) => {
                 let region = self.doc(|d| d.sel.is_some());
                 if region { Cmd::AddRegion } else { Cmd::AddMarker }
@@ -1026,7 +1065,7 @@ impl Logic {
 
     fn run_tool(&mut self, t: ToolCmd) -> Vec<Act> {
         let ok = self.doc(|d| match t {
-            ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::Reverb => false,
+            ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::Reverb | ToolCmd::Equalize | ToolCmd::Blur | ToolCmd::CleanUp | ToolCmd::AcquireNoise => false,
             ToolCmd::ReversePolarity => d.tool("Reverse polarity", tools::reverse_polarity),
             ToolCmd::Normalize => {
                 let mut changed = false;
@@ -1075,14 +1114,25 @@ impl Logic {
             }),
             ToolCmd::NormalizeEnvelope => d.env_tool("Normalize envelope levels", |e, k, n| e.normalize(k, n)),
         });
-        if matches!(t, ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::Reverb) {
+        if t == ToolCmd::AcquireNoise {
+            self.acquire_noise();
+        } else if matches!(t, ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::Reverb | ToolCmd::Equalize | ToolCmd::Blur | ToolCmd::CleanUp) {
             if self.doc(|d| d.frames()) > 0 {
                 let stretch = (t == ToolCmd::Stretch).then(Stretch::default);
                 let reverb = (t == ToolCmd::Reverb).then(Reverb::default);
-                self.view.amp = Some(AmpUi { stretch, reverb, ..AmpUi::default() });
+                let eq = (t == ToolCmd::Equalize).then(Equalize::default);
+                let blur = (t == ToolCmd::Blur).then(Blur::default);
+                let clean = (t == ToolCmd::CleanUp).then(Clean::default);
+                let curve = if blur.is_some() { Curve::bell() } else { Curve::flat() };
+                self.view.amp = Some(AmpUi { stretch, reverb, eq, blur, clean, curve, ..AmpUi::default() });
+                self.backdrop();
                 self.hint = match t {
                     ToolCmd::Stretch => "Time stretch / pitch shift of the selection",
                     ToolCmd::Reverb => "Convolution reverb of the selection",
+                    ToolCmd::Equalize => "Equalize the selection: draw the curve over its spectrum",
+                    ToolCmd::Blur => "Blur the selection: each frequency smeared over time by the impulse",
+                    ToolCmd::CleanUp if self.noise.is_none() => "Clean up: select noise only and acquire a noise profile first (Alt+U)",
+                    ToolCmd::CleanUp => "Clean up (denoise) the selection against the noise profile",
                     _ => "Amp: pan, volume and stereo separation of the selection",
                 }
                 .into();
@@ -1091,6 +1141,116 @@ impl Logic {
             self.hint = self.doc(|d| d.history().first().cloned().unwrap_or_default());
         }
         vec![Act::Repaint]
+    }
+
+    /// Acquire noise profile: the range's mean spectrum, per channel, for Clean up.
+    fn acquire_noise(&mut self) {
+        let got = self.doc(|d| {
+            let (a, b) = d.range()?;
+            let ch: Vec<&[f32]> = d.sample.ch.iter().map(|c| &c[a..=b]).collect();
+            Some((spectral::acquire(&ch, d.sample.rate), view::time_text(state::TIME_MSM, (b + 1 - a) as f64, d.sample.rate, 0.0, 1.0)))
+        });
+        let Some((p, len)) = got else { return };
+        self.noise = Some(p);
+        self.view.profile = true;
+        self.hint = format!("Noise profile acquired ({len})");
+        self.backdrop();
+    }
+
+    /// What the open spectral panel draws behind its curve: Equalize, the spectrum of (the first 10 s of) the range;
+    /// Clean up, the noise profile.
+    fn backdrop(&mut self) {
+        const COLS: usize = 198;
+        let Some(ui) = self.view.amp else { return };
+        let mean = |p: &Profile| {
+            let k = p.mag.len().max(1) as f32;
+            let m: Vec<f32> = (0..p.mag.first().map_or(0, |c| c.len())).map(|i| p.mag.iter().map(|c| c[i]).sum::<f32>() / k).collect();
+            spectral::columns(&m, p.n, p.rate, COLS)
+        };
+        self.view.backdrop = if ui.eq.is_some() {
+            self.doc(|d| {
+                let Some((a, b)) = d.range() else { return Vec::new() };
+                let b = b.min(a + 10 * d.sample.rate as usize);
+                let ch: Vec<&[f32]> = d.sample.ch.iter().map(|c| &c[a..=b]).collect();
+                mean(&spectral::acquire(&ch, d.sample.rate))
+            })
+        } else if ui.clean.is_some() {
+            self.noise.as_ref().map(mean).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+    }
+
+    /// The open panel's curve point under (x, y).
+    fn curve_point_at(&self, x: f32, y: f32) -> Option<usize> {
+        let ui = self.view.amp.as_ref()?;
+        if ui.clean.is_some() {
+            return None;
+        }
+        let (_, bx, _) = view::spectral_parts(&self.layout(), ui);
+        ui.curve
+            .points()
+            .iter()
+            .enumerate()
+            .map(|(i, q)| (i, (bx.x + q.pos as f32 * bx.w - x).hypot(bx.bottom() - q.v * bx.h - y)))
+            .filter(|&(_, dist)| dist <= view::GRAB)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    }
+
+    /// A press in the curve box: on a point drags it (a double-click puts it back at mid height), elsewhere adds a
+    /// point there and drags it.
+    fn curve_down(&mut self, x: f32, y: f32, dbl: bool) -> Vec<Act> {
+        let lay = self.layout();
+        let hit = self.curve_point_at(x, y);
+        let Some(ui) = &mut self.view.amp else { return vec![] };
+        if ui.clean.is_some() {
+            return vec![Act::Repaint];
+        }
+        let (_, bx, _) = view::spectral_parts(&lay, ui);
+        let (px, v) = (((x - bx.x) / bx.w).clamp(0.0, 1.0) as f64, ((bx.bottom() - y) / bx.h).clamp(0.0, 1.0));
+        match hit {
+            Some(i) if dbl => {
+                let q = ui.curve.points()[i];
+                ui.curve.move_point(i, q.pos, 0.5);
+                self.amp_changed();
+            }
+            Some(i) => self.drag = Some(Drag::CurvePoint(i)),
+            None => match ui.curve.insert(px, v) {
+                Some(i) => self.drag = Some(Drag::CurvePoint(i)),
+                None => self.hint = format!("A curve has {} points at most", Curve::MAX),
+            },
+        }
+        self.hint = self.curve_hint();
+        vec![Act::Repaint]
+    }
+
+    /// The curve's reading under the pointer (at the point under it, if any).
+    fn curve_hint(&self) -> String {
+        let Some(ui) = self.view.amp else { return String::new() };
+        if ui.clean.is_some() {
+            return if self.noise.is_some() { "The noise profile, and the threshold over it".into() } else { "No noise profile yet".into() };
+        }
+        let (_, bx, _) = view::spectral_parts(&self.layout(), &ui);
+        let (mx, my) = self.view.mouse.unwrap_or((bx.cx(), bx.cy()));
+        let smooth = ui.eq.is_none_or(|e| e.smooth);
+        let (x, v) = match self.curve_point_at(mx, my).or(match self.drag {
+            Some(Drag::CurvePoint(i)) => Some(i),
+            _ => None,
+        }) {
+            Some(i) => (ui.curve.points()[i].pos, ui.curve.points()[i].v),
+            None => {
+                let x = ((mx - bx.x) / bx.w).clamp(0.0, 1.0) as f64;
+                (x, spectral::curve_at(ui.curve.points(), x, smooth))
+            }
+        };
+        if ui.eq.is_some() {
+            let hz = spectral::eq_hz(x);
+            let f = if hz >= 1000.0 { format!("{:.2} kHz", hz / 1000.0) } else { format!("{hz:.0} Hz") };
+            format!("{f}: {:+.1} dB \u{00b7} click to add a point, right-click one to delete it", spectral::eq_db(v))
+        } else {
+            format!("Impulse: {:.0}% \u{00b7} click to add a point, right-click one to delete it", v * 100.0)
+        }
     }
 
     fn drag_out(&mut self) -> Vec<Act> {
@@ -1105,7 +1265,26 @@ impl Logic {
 
     // ------------------------------------------------------------------------------------------- the Amp panel
 
+    /// A spectral panel knob's setting in the knobs' −1 to 1 (the 0 to 1 settings stretched over it).
+    fn spectral_value(ui: &AmpUi, c: AmpCtl) -> Option<f32> {
+        let (eq, bl, cl) = (ui.eq.unwrap_or_default(), ui.blur.unwrap_or_default(), ui.clean.unwrap_or_default());
+        let u = |v: f32| v * 2.0 - 1.0;
+        Some(match c {
+            AmpCtl::Mix if ui.eq.is_some() => u(eq.mix),
+            AmpCtl::Mix => u(bl.mix),
+            AmpCtl::Amount => u(bl.amount),
+            AmpCtl::Offset => bl.offset,
+            AmpCtl::Threshold => u(cl.denoise.threshold),
+            AmpCtl::Reduction => u(cl.denoise.amount),
+            AmpCtl::ClipLevel => u(cl.level),
+            _ => return None,
+        })
+    }
+
     fn amp_value(&self, c: AmpCtl) -> f32 {
+        if let Some(v) = self.view.amp.as_ref().and_then(|u| Self::spectral_value(u, c)) {
+            return v;
+        }
         let a = self.view.amp.map(|a| a.amp).unwrap_or_default();
         let st = self.view.amp.and_then(|a| a.stretch).unwrap_or_default();
         let rv = self.view.amp.and_then(|a| a.reverb).unwrap_or_default();
@@ -1127,6 +1306,28 @@ impl Logic {
 
     fn set_amp_value(&mut self, c: AmpCtl, v: f32) {
         if let Some(ui) = &mut self.view.amp {
+            let h = (v + 1.0) / 2.0;
+            if let Some(e) = &mut ui.eq {
+                if c == AmpCtl::Mix {
+                    e.mix = h;
+                }
+            }
+            if let Some(b) = &mut ui.blur {
+                match c {
+                    AmpCtl::Mix => b.mix = h,
+                    AmpCtl::Amount => b.amount = h,
+                    AmpCtl::Offset => b.offset = v,
+                    _ => {}
+                }
+            }
+            if let Some(cl) = &mut ui.clean {
+                match c {
+                    AmpCtl::Threshold => cl.denoise.threshold = h,
+                    AmpCtl::Reduction => cl.denoise.amount = h,
+                    AmpCtl::ClipLevel => cl.level = h,
+                    _ => {}
+                }
+            }
             if let Some(r) = &mut ui.reverb {
                 match c {
                     AmpCtl::Dry => r.dry = v,
@@ -1184,6 +1385,16 @@ impl Logic {
                     _ => "Formant: moves with the pitch (formant preservation off)".into(),
                 }
             }
+            AmpCtl::Mix => format!("Mix: {:.0}% processed", (v + 1.0) * 50.0),
+            AmpCtl::Amount => format!("Amount: the blur spreads over {:.0} ms", self.view.amp.and_then(|a| a.blur).unwrap_or_default().seconds() * 1000.0),
+            AmpCtl::Offset => {
+                let p = (v * 100.0).round() as i32;
+                if p == 0 { "Offset: centred on the sound".into() } else { format!("Offset: {}% {}", p.abs(), if p < 0 { "before the sound" } else { "after the sound" }) }
+            }
+            AmpCtl::Threshold => format!("Threshold: +{:.1} dB over the noise profile", self.view.amp.and_then(|a| a.clean).unwrap_or_default().denoise.threshold_db()),
+            AmpCtl::Reduction => format!("Amount: noise down by {:.0} dB", self.view.amp.and_then(|a| a.clean).unwrap_or_default().denoise.reduction_db()),
+            AmpCtl::ClipLevel => format!("Declipper: samples over {:.0}% of the peak count as clipped", self.view.amp.and_then(|a| a.clean).unwrap_or_default().clip_ratio() * 100.0),
+            AmpCtl::Curve => self.curve_hint(),
             AmpCtl::Dry => format!("Dry: x{:.2}", Reverb::gain(v)),
             AmpCtl::Wet => format!("Wet: x{:.2}", Reverb::gain(v)),
             AmpCtl::Decay => {
@@ -1195,7 +1406,19 @@ impl Logic {
     }
 
     /// Applies the open panel's tool to the range: Amp, or Time stretch / pitch shift.
-    fn apply_panel(d: &mut Doc, ui: &AmpUi, clip: Option<&Sample>) -> bool {
+    fn apply_panel(d: &mut Doc, ui: &AmpUi, clip: Option<&Sample>, noise: Option<&Profile>) -> bool {
+        if let Some(e) = ui.eq {
+            return d.tool("Equalize", |s, a, b| spectral::equalize_range(s, a, b, &ui.curve, &e));
+        }
+        if let Some(bl) = ui.blur {
+            return d.tool("Blur", |s, a, b| spectral::blur_range(s, a, b, &ui.curve, &bl));
+        }
+        if let Some(c) = ui.clean {
+            if !ui.ready(noise.is_some()) {
+                return false;
+            }
+            return d.tool("Clean up", |s, a, b| spectral::clean_range(s, a, b, noise, &c));
+        }
         if let Some(r) = ui.reverb {
             let impulse = match (r.clip, clip) {
                 (true, Some(c)) if c.frames() > 0 => doc::conform(c, d.sample.rate, d.sample.channels()).ch,
@@ -1215,7 +1438,7 @@ impl Logic {
         if ui.previewing {
             self.doc(|d| {
                 d.undo();
-                Self::apply_panel(d, &ui, self.clip.as_ref());
+                Self::apply_panel(d, &ui, self.clip.as_ref(), self.noise.as_ref());
             });
         }
     }
@@ -1227,7 +1450,7 @@ impl Logic {
                 self.doc(|d| d.undo());
             }
             (false, true) => {
-                self.doc(|d| Self::apply_panel(d, &ui, self.clip.as_ref()));
+                self.doc(|d| Self::apply_panel(d, &ui, self.clip.as_ref(), self.noise.as_ref()));
             }
             _ => {}
         }
@@ -1241,7 +1464,56 @@ impl Logic {
     }
 
     fn amp_down(&mut self, c: AmpCtl, y: f32, dbl: bool) -> Vec<Act> {
+        let ready = self.view.amp.is_some_and(|u| u.ready(self.noise.is_some()));
         match c {
+            AmpCtl::Curve => {
+                let (x, _) = self.view.mouse.unwrap_or((0.0, y));
+                return self.curve_down(x, y, dbl);
+            }
+            AmpCtl::Smooth | AmpCtl::NoiseOnly | AmpCtl::Declip => {
+                if let Some(ui) = &mut self.view.amp {
+                    if let Some(e) = &mut ui.eq {
+                        e.smooth = !e.smooth;
+                    }
+                    if let Some(cl) = &mut ui.clean {
+                        if c == AmpCtl::NoiseOnly {
+                            cl.denoise.noise_only = !cl.denoise.noise_only;
+                        } else {
+                            cl.declip = !cl.declip;
+                        }
+                    }
+                }
+                // The declipper alone can start a preview: a running one stops when nothing is left to do.
+                if self.view.amp.is_some_and(|u| u.previewing && !u.ready(self.noise.is_some())) {
+                    self.doc(|d| {
+                        d.undo();
+                        d.discard_redo();
+                    });
+                    self.shared.send(Play::Pause);
+                    if let Some(u) = &mut self.view.amp {
+                        u.previewing = false;
+                    }
+                } else {
+                    self.amp_changed();
+                }
+            }
+            AmpCtl::Acquire => {
+                if self.view.amp.is_some_and(|u| u.previewing) {
+                    self.hint = "Stop the preview before acquiring a noise profile".into();
+                } else {
+                    self.acquire_noise();
+                }
+            }
+            AmpCtl::Mix | AmpCtl::Amount | AmpCtl::Offset | AmpCtl::Threshold | AmpCtl::Reduction | AmpCtl::ClipLevel => {
+                if dbl {
+                    self.reset_amp(c);
+                } else {
+                    self.drag = Some(Drag::Knob { ctl: c, y, v: self.amp_value(c) });
+                }
+            }
+            AmpCtl::Preview | AmpCtl::Accept if !ready => {
+                self.hint = "Clean up needs a noise profile: select noise only and press ACQUIRE (Alt+U), or turn on the declipper".into();
+            }
             AmpCtl::Preserve => {
                 if let Some(st) = self.view.amp.as_mut().and_then(|u| u.stretch.as_mut()) {
                     st.preserve = !st.preserve;
@@ -1293,6 +1565,10 @@ impl Logic {
                     ui.amp = Amp::default();
                     ui.stretch = ui.stretch.map(|_| Stretch::default());
                     ui.reverb = ui.reverb.map(|_| Reverb::default());
+                    ui.eq = ui.eq.map(|_| Equalize::default());
+                    ui.blur = ui.blur.map(|_| Blur::default());
+                    ui.clean = ui.clean.map(|_| Clean::default());
+                    ui.curve = if ui.blur.is_some() { Curve::bell() } else { Curve::flat() };
                 }
                 self.amp_changed();
             }
@@ -1303,7 +1579,7 @@ impl Logic {
                     self.shared.send(Play::Pause);
                 } else {
                     let r = self.doc(|d| {
-                        Self::apply_panel(d, &ui, self.clip.as_ref());
+                        Self::apply_panel(d, &ui, self.clip.as_ref(), self.noise.as_ref());
                         d.range()
                     });
                     if let Some((a, b)) = r {
@@ -1386,6 +1662,10 @@ impl Logic {
             Key::Char('E') if a && !c => Cmd::Tool(ToolCmd::CancelEnvelopes),
             Key::Char('P') if !c && !a && !s => Cmd::Tool(ToolCmd::PointsAtSelection),
             Key::Char('R') if c && !a => Cmd::Tool(ToolCmd::Reverb),
+            Key::Char('Q') if c && !a => Cmd::Tool(ToolCmd::Equalize),
+            Key::Char('B') if c && !a => Cmd::Tool(ToolCmd::Blur),
+            Key::Char('U') if c && !a => Cmd::Tool(ToolCmd::CleanUp),
+            Key::Char('U') if a && !c => Cmd::Tool(ToolCmd::AcquireNoise),
             Key::Char('A') if a => Cmd::Tool(ToolCmd::Amp),
             Key::Char('T') if a => Cmd::Tool(ToolCmd::Stretch),
             Key::Char('A') if c => Cmd::SelectZoomed,
@@ -1580,6 +1860,10 @@ impl Logic {
                 t(&mut m, "Generate noise", "", ToolCmd::Noise, has);
                 m.head("Spectral", Cmd::None);
                 t(&mut m, "Convolution reverb...", "Ctrl+R", ToolCmd::Reverb, has);
+                t(&mut m, "Blur...", "Ctrl+B", ToolCmd::Blur, has);
+                t(&mut m, "Equalize...", "Ctrl+Q", ToolCmd::Equalize, has);
+                t(&mut m, "Acquire noise profile", "Alt+U", ToolCmd::AcquireNoise, has);
+                t(&mut m, "Clean up (denoise)...", "Ctrl+U", ToolCmd::CleanUp, has);
                 m.head("Regions", Cmd::None);
                 t(&mut m, "Normalize all regions", "", ToolCmd::NormalizeRegions, regions);
                 t(&mut m, "Declick in all regions", "", ToolCmd::DeclickInRegions, regions);
@@ -2960,9 +3244,9 @@ mod tests {
         let (x, y) = centre(&l, Target::Tool(9));
         l.down(x, y, Btn::Right, Mods::default(), false);
         assert!(l.doc(|d| d.sample.ch[0][10].abs() < d.sample.ch[1][10].abs()));
-        let (x, y) = centre(&l, Target::Tool(5));
+        let (x, y) = centre(&l, Target::Tool(15));
         l.down(x, y, Btn::Left, Mods::default(), false);
-        assert_eq!(l.hint, "Equalize... is not in this version");
+        assert_eq!(l.hint, "Auto-slicing is not in this version");
         let (x, y) = centre(&l, Target::Tool(0));
         assert!(matches!(l.down(x, y, Btn::Right, Mods::default(), false).last(), Some(Act::Menu(MenuReq::Undo, _, _))));
         assert_eq!(l.menu(&MenuReq::Undo).find("Swap channels"), Some(Cmd::UndoTo(1)));
@@ -3149,6 +3433,133 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn rms(x: &[f32]) -> f64 {
+        (x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / x.len().max(1) as f64).sqrt()
+    }
+
+    fn curve_box(l: &Logic) -> Rect {
+        l.hits.iter().rev().find(|h| h.t == Target::Amp(AmpCtl::Curve)).expect("the curve box").r
+    }
+
+    /// Equalize (the tool grid's EQ button, Ctrl+Q): a point added over 1 kHz near the top boosts a 1 kHz tone; a
+    /// right click deletes a point.
+    #[test]
+    fn equalize_draws_a_curve_and_boosts() {
+        let mut l = logic();
+        let rate = 44100;
+        let tone: Vec<f32> = (0..rate as usize).map(|i| (std::f64::consts::TAU * 1000.0 * i as f64 / rate as f64).sin() as f32 * 0.05).collect();
+        load(&mut l, Sample::from_channels(rate, vec![tone.clone()], Format::Float32));
+        let (x, y) = centre(&l, Target::Tool(5));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert!(l.view.amp.is_some_and(|a| a.eq.is_some() && a.curve.points().len() == 3), "the Equalize panel is open, flat");
+        // The tone shows in the backdrop at 1 kHz.
+        let at = (spectral::eq_x(1000.0) * l.view.backdrop.len() as f64) as usize;
+        assert!(l.view.backdrop[at] > l.view.backdrop[at / 2] + 0.3);
+        paint(&mut l);
+        let bx = curve_box(&l);
+        let px = bx.x + spectral::eq_x(1000.0) as f32 * bx.w;
+        l.down(px, bx.y + 40.0, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(l.view.amp.map(|a| a.curve.points().len()), Some(4));
+        l.view.mouse = Some((px, bx.y + 40.0));
+        assert!(l.curve_hint().starts_with("1.00 kHz: +"), "{}", l.curve_hint());
+        l.down(px, bx.y + 40.0, Btn::Right, Mods::default(), false);
+        assert_eq!(l.view.amp.map(|a| a.curve.points().len()), Some(3), "a right click deletes the point");
+        // Again, dragged to the top: +24 dB there.
+        l.down(px, bx.y + 40.0, Btn::Left, Mods::default(), false);
+        l.moved(px, bx.y - 30.0, Mods::default());
+        l.up(Btn::Left);
+        assert!(l.view.amp.is_some_and(|a| a.curve.points()[2].v == 1.0), "the new point is after the middle one");
+        let (x, y) = centre(&l, Target::Amp(AmpCtl::Accept));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(l.view.amp.is_none());
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Equalize");
+        let gain = l.doc(|d| 20.0 * (rms(&d.sample.ch[0][4000..40000]) / rms(&tone[4000..40000])).log10());
+        assert!((gain - 24.0).abs() < 1.0, "{gain} dB");
+    }
+
+    /// Blur (Ctrl+B): a click smeared after itself with the Offset at +100%.
+    #[test]
+    fn blur_smears_after_the_sound() {
+        let mut l = logic();
+        let mut x = vec![0f32; 44100];
+        x[10000] = 1.0;
+        load(&mut l, Sample::from_channels(44100, vec![x], Format::Float32));
+        l.key(Key::Char('B'), Mods { ctrl: true, ..Mods::default() });
+        assert!(l.view.amp.is_some_and(|a| a.blur.is_some() && a.curve.points().len() == 5), "the Blur panel is open with its bell");
+        paint(&mut l);
+        l.set_amp_value(AmpCtl::Offset, 1.0);
+        assert_eq!(l.amp_hint(AmpCtl::Offset), "Offset: 100% after the sound");
+        assert_eq!(l.amp_hint(AmpCtl::Amount), "Amount: the blur spreads over 141 ms");
+        let (x, y) = centre(&l, Target::Amp(AmpCtl::Accept));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Blur");
+        l.doc(|d| {
+            let e = |a: usize, b: usize| d.sample.ch[0][a..b].iter().map(|v| v * v).sum::<f32>();
+            assert!(e(12205, 16615) > 10.0 * e(3385, 7795));
+        });
+    }
+
+    /// Clean up (Ctrl+U): greyed Preview and Accept until a noise profile is acquired (Alt+U), then the noise goes and
+    /// the tone stays.
+    #[test]
+    fn clean_up_needs_a_profile_then_denoises() {
+        let mut l = logic();
+        let rate = 44100;
+        let mut r = tools::Rng::new(5);
+        let hiss: Vec<f32> = (0..2 * rate as usize).map(|_| r.gauss() as f32 * 0.05).collect();
+        let mut x = hiss.clone();
+        for (i, v) in x[rate as usize..].iter_mut().enumerate() {
+            *v += (std::f64::consts::TAU * 440.0 * i as f64 / rate as f64).sin() as f32 * 0.4;
+        }
+        load(&mut l, Sample::from_channels(rate, vec![x.clone(), x.clone()], Format::Float32));
+        let (bx, by) = centre(&l, Target::Tool(14));
+        l.down(bx, by, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert!(l.view.amp.is_some_and(|a| a.clean.is_some() && !a.ready(false)));
+        paint(&mut l);
+        let (x0, y0) = centre(&l, Target::Amp(AmpCtl::Accept));
+        l.down(x0, y0, Btn::Left, Mods::default(), false);
+        assert!(l.view.amp.is_some(), "Accept does nothing without a profile");
+        assert!(l.hint.starts_with("Clean up needs a noise profile"));
+        // ACQUIRE in the panel takes the selection's noise.
+        l.doc(|d| d.select(0, rate as usize - 1));
+        let (ax, ay) = centre(&l, Target::Amp(AmpCtl::Acquire));
+        l.down(ax, ay, Btn::Left, Mods::default(), false);
+        assert!(l.hint.starts_with("Noise profile acquired"), "{}", l.hint);
+        assert!(l.view.profile && !l.view.backdrop.is_empty());
+        paint(&mut l);
+        l.doc(|d| d.sel = None);
+        l.down(x0, y0, Btn::Left, Mods::default(), false);
+        assert!(l.view.amp.is_none());
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Clean up");
+        l.doc(|d| {
+            let n = rate as usize;
+            for c in 0..2 {
+                let y = &d.sample.ch[c];
+                let down = 20.0 * (rms(&y[4000..n - 4000]) / rms(&hiss[4000..n - 4000])).log10();
+                assert!(down < -18.0, "the noise alone: {down} dB");
+                let tone: Vec<f32> = (n + 4000..2 * n - 4000).map(|i| x[i] - hiss[i]).collect();
+                let kept = 20.0 * (rms(&y[n + 4000..2 * n - 4000]) / rms(&tone)).log10();
+                assert!(kept.abs() < 1.0, "the tone: {kept} dB");
+            }
+        });
+        // The right-click of the tool button acquires too; the declipper alone makes the panel ready.
+        l.noise = None;
+        l.view.profile = false;
+        l.doc(|d| d.select(0, 999));
+        l.down(bx, by, Btn::Right, Mods::default(), false);
+        assert!(l.noise.is_some());
+        l.noise = None;
+        l.view.profile = false;
+        l.key(Key::Char('U'), Mods { ctrl: true, ..Mods::default() });
+        paint(&mut l);
+        let (dx, dy) = centre(&l, Target::Amp(AmpCtl::Declip));
+        l.down(dx, dy, Btn::Left, Mods::default(), false);
+        assert!(l.view.amp.is_some_and(|a| a.ready(false)));
+    }
+
     /// Convolution reverb (the tool grid's reverb button, Ctrl+R): the default impulse or the clipboard, with the tail.
     #[test]
     fn convolution_reverb() {
@@ -3315,6 +3726,22 @@ mod tests {
         l.doc(|d| d.view.mode = 0);
         l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Reverb), 0.0, 0.0);
         save(&mut l, "tesla_reverb", 1.0);
+        l.view.amp = None;
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Equalize), 0.0, 0.0);
+        if let Some(a) = l.view.amp.as_mut() {
+            a.curve.insert(0.2, 0.75);
+            a.curve.insert(0.8, 0.3);
+        }
+        save(&mut l, "tesla_equalize", 1.0);
+        l.view.amp = None;
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Blur), 0.0, 0.0);
+        save(&mut l, "tesla_blur", 1.0);
+        l.view.amp = None;
+        l.doc(|d| d.select(0, 20000));
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::AcquireNoise), 0.0, 0.0);
+        l.doc(|d| d.sel = None);
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::CleanUp), 0.0, 0.0);
+        save(&mut l, "tesla_cleanup", 1.0);
         l.view.amp = None;
         l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Amp), 0.0, 0.0);
         save(&mut l, "tesla_amp", 1.0);

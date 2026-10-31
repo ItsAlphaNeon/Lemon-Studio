@@ -16,6 +16,7 @@ pub mod env;
 pub mod peaks;
 pub mod rec;
 pub mod sample;
+pub mod spectral;
 pub mod spectrum;
 pub mod state;
 pub mod tools;

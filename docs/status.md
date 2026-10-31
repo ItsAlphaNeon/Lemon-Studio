@@ -380,8 +380,12 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   Mixdown amp envelopes (Ctrl+E) applies the first three to the audio, with undo
 - Tesla's Convolution reverb... (Ctrl+R, the tool grid's reverb button) adds a reverb to the selection from a
   generated impulse (its decay set by a knob) or from what was copied, with dry and wet levels and the tail
-- Not yet: equalize, blur and the clean-up tools, the envelope tools with a dialog, the drum(loop) stretch,
-  slicing
+- Tesla's Equalize... (Ctrl+Q), Blur... (Ctrl+B) and Clean up (denoise)... (Ctrl+U) work on the selection:
+  Equalize draws a gain curve over the selection's spectrum, Blur smears each frequency over time by an impulse
+  curve, and Clean up takes away noise matching a profile acquired from a noise-only selection (Acquire noise
+  profile, Alt+U), with a declipper that redraws flattened tops; all three preview, and mix with the original
+- Not yet: noise gating (gate noise, trim side noise), the declicker, the envelope tools with a dialog, the
+  drum(loop) stretch, slicing
 
 ## ✅ Exporting audio
 
