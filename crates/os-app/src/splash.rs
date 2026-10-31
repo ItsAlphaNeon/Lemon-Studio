@@ -19,6 +19,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use os_ui::{Canvas, Color, Font};
 use tiny_skia::{
@@ -127,14 +128,59 @@ impl Shared {
     }
 }
 
+/// A second follower of the splash's animation, for what moves with the logo elsewhere (`surface::intro`): on any
+/// thread, from startup's own reports and the same clock.
+pub struct Follow {
+    shared: Arc<Shared>,
+    opened: Instant,
+    anim: Anim,
+}
+
+/// A moment of the logo's animation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Moment {
+    /// The logo's opacity, and how far its mark has popped (0..=1).
+    pub alpha: f32,
+    pub pop: f32,
+    /// How far round the lemon is filled, 0..=1.
+    pub progress: f32,
+    /// The groove light's opacity, and where it points (degrees clockwise).
+    pub light: f32,
+    pub angle: f32,
+}
+
+impl Follow {
+    /// The animation now; `None` once it has faded away, or the splash has been dropped.
+    pub fn moment(&mut self) -> Option<Moment> {
+        if self.shared.closed.load(Ordering::SeqCst) {
+            return None;
+        }
+        let (progress, what, done) = self.shared.feed();
+        self.anim.frame(self.opened.elapsed().as_secs_f32(), progress, &what, done).map(|l| Moment::of(&l))
+    }
+}
+
+impl Moment {
+    fn of(l: &Look) -> Moment {
+        let pop = if l.scale > 1.0 { (l.scale - 1.0) / 0.03 } else { 0.0 };
+        Moment { alpha: l.alpha, pop: pop.min(1.0), progress: l.progress, light: l.light, angle: l.angle }
+    }
+}
+
 /// The splash while it shows: dropping it closes the window.
 pub struct Splash {
     shared: Arc<Shared>,
+    opened: Instant,
     #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     window: platform::Window,
 }
 
 impl Splash {
+    /// A follower of this splash's animation.
+    pub fn follow(&self) -> Follow {
+        Follow { shared: self.shared.clone(), opened: self.opened, anim: Anim::default() }
+    }
+
     /// Startup has reached `progress` (0..1) and is on the step `what`.
     pub fn step(&self, progress: f32, what: &str) {
         let mut f = self.shared.feed.lock().unwrap_or_else(|e| e.into_inner());
@@ -184,8 +230,9 @@ pub fn open() -> Option<Splash> {
     #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     {
         let shared = Arc::new(Shared::default());
+        let opened = Instant::now();
         let window = platform::open(shared.clone())?;
-        Some(Splash { shared, window })
+        Some(Splash { shared, opened, window })
     }
     #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     None
@@ -303,6 +350,11 @@ fn bump(k: f32) -> f32 {
 
 // ---------------------------------------------------------------------------------------------------------------
 // The picture.
+
+/// The keyboard's lemon (`surface::intro`), as the logo's.
+pub fn lemon() -> os_model::Rgb {
+    os_model::Rgb::new((LEMON >> 16) as u8, (LEMON >> 8) as u8, LEMON as u8)
+}
 
 /// The window's size in device px at `scale` (device px per logical one).
 fn device(scale: f32) -> (u32, u32) {

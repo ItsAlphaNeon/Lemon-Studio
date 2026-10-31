@@ -10,10 +10,12 @@
 // spec: controllers/launchkey-mk4.md
 
 pub mod drive;
+pub mod intro;
 pub mod launchkey;
 
 use std::ops::Range;
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use launchkey::Model;
@@ -30,7 +32,7 @@ pub struct Port {
     pub name: String,
     rx: Receiver<Vec<u8>>,
     _input: midir::MidiInputConnection<()>,
-    output: midir::MidiOutputConnection,
+    pub(super) output: Arc<Mutex<midir::MidiOutputConnection>>,
 }
 
 impl Port {
@@ -55,7 +57,7 @@ impl Port {
             }
         };
         let input = input.connect(&ins[i], crate::midi_in::CLIENT, take, ()).ok()?;
-        Some(Port { model, name: in_names[i].clone(), rx, _input: input, output })
+        Some(Port { model, name: in_names[i].clone(), rx, _input: input, output: Arc::new(Mutex::new(output)) })
     }
 
     /// Messages received since the last call, oldest first.
@@ -64,7 +66,9 @@ impl Port {
     }
 
     pub fn send(&mut self, m: &[u8]) {
-        let _ = self.output.send(m);
+        if let Ok(mut o) = self.output.lock() {
+            let _ = o.send(m);
+        }
     }
 
     /// Whether the port is still listed (the keyboard was not unplugged).
@@ -108,6 +112,39 @@ mod tests {
     use super::launchkey::{self as lk, display, Colour, In, Led, Text};
     use super::*;
     use std::time::Duration;
+
+    /// How many steps a turn of an encoder sends: turn encoder 1 and read the running sum.
+    /// `cargo test -p os-app launchkey_turns -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn launchkey_turns() {
+        fn nothing() {}
+        let mut p = Port::open(nothing).expect("a Launchkey MK4's DAW port");
+        p.send(&lk::DAW_ON);
+        for msg in lk::START_LAYOUTS {
+            p.send(&msg);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        p.send(&lk::RELATIVE);
+        let (mut sum, mut most, mut last) = (0i64, 0i64, Instant::now());
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(90) {
+            for m in p.poll() {
+                if let Some(In::Encoder { i: 0, steps }) = lk::parse(&m) {
+                    if last.elapsed() > Duration::from_millis(1500) {
+                        println!("--- pause: {sum} steps, largest {most}");
+                        (sum, most) = (0, 0);
+                    }
+                    sum += i64::from(steps);
+                    most = most.max(i64::from(steps).abs());
+                    last = Instant::now();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        println!("--- end: {sum} steps, largest {most}");
+        p.send(&lk::DAW_OFF);
+    }
 
     /// A Launchkey MK4 plugged in: DAW mode is confirmed and the layouts reported, the pads light in the rack's
     /// colours, the screen shows text, and the keyboard goes back to its own mode. Needs the keyboard:

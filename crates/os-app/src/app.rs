@@ -1404,6 +1404,8 @@ pub struct App {
     pub(crate) midi_play: crate::midi_play::Play,
     /// The control surface (a Launchkey MK4) Lemon Studio drives, while one is connected.
     pub(crate) surface: Option<crate::surface::drive::Drive>,
+    /// The startup logo, for the keyboard to follow when it connects while the logo shows.
+    pub(crate) surface_intro: Option<crate::splash::Follow>,
     pub midi_out: crate::midi_out::MidiOut,
     pub(crate) remote: crate::remote::Remote,
     /// Step edit's chord being collected from the typing keyboard and MIDI notes (`crate::step_edit`).
@@ -1700,6 +1702,7 @@ impl App {
             midi: crate::midi_in::MidiIn::none(),
             midi_play: Default::default(),
             surface: None,
+            surface_intro: None,
             midi_out: crate::midi_out::MidiOut::none(),
             remote: Default::default(),
             step_chord: crate::step_edit::Chord::default(),

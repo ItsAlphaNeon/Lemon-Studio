@@ -8,6 +8,7 @@
 
 use std::time::{Duration, Instant};
 
+use super::intro::Intro;
 use super::launchkey::{self as lk, button, display, Colour, Encoders, Faders, In, Led, Model, Pads, Sticky, Text};
 use super::Port;
 use crate::app::{App, State, Win};
@@ -80,6 +81,8 @@ pub struct Drive {
     /// The tempo the Transport layout last showed.
     tempo_shown: Option<f64>,
     /// Plugin mode's value texts as last read: when, of which instance and page.
+    /// The startup snake, while it has the pads.
+    intro: Option<Intro>,
     plugin_shown: Option<(Instant, usize, usize, [String; 8])>,
 }
 
@@ -121,6 +124,7 @@ impl Drive {
             carry: [0.0; 8],
             tempo_shown: None,
             plugin_shown: None,
+            intro: None,
         }
     }
 
@@ -166,6 +170,7 @@ impl Drive {
 
     /// Everything dark, the stationary display back to the name, and the keyboard back to its own (standalone) mode.
     fn stop(&mut self) {
+        self.intro = None;
         self.lights.all_off();
         if let Some(m) = self.lights.flush(self.model()) {
             self.send(&m);
@@ -442,6 +447,9 @@ impl App {
             if let Some(port) = Port::open(crate::wake_ui) {
                 let mut d = Drive::new(port);
                 d.start();
+                if let Some(follow) = self.surface_intro.take() {
+                    d.intro = Intro::start(follow, d.port.output.clone(), d.model(), crate::wake_ui);
+                }
                 self.surface = Some(d);
                 self.surface_first_connect();
             }
@@ -481,6 +489,9 @@ impl App {
     /// The port's messages, the held buttons' repeats, then the lights and displays. From `midi_tick`.
     pub(crate) fn surface_tick(&mut self) {
         let Some(d) = &mut self.surface else { return };
+        if d.intro.as_ref().is_some_and(Intro::done) {
+            d.intro = None;
+        }
         let msgs = d.port.poll();
         for m in msgs {
             if let Some(ev) = lk::parse(&m) {
@@ -563,11 +574,13 @@ impl App {
     fn pad_layout(&mut self, p: Pads) {
         let d = self.drive();
         // The last layout's pads go dark.
-        for i in 0..16 {
-            d.lights.set(Led::Pad(i), lk::OFF, false);
-        }
-        for n in lk::DRUM_NOTES {
-            d.lights.set(Led::Drum(n), lk::OFF, false);
+        if d.intro.is_none() {
+            for i in 0..16 {
+                d.lights.set(Led::Pad(i), lk::OFF, false);
+            }
+            for n in lk::DRUM_NOTES {
+                d.lights.set(Led::Drum(n), lk::OFF, false);
+            }
         }
         d.pads = Some(p);
         d.pads_held.clear();
@@ -1377,7 +1390,10 @@ impl App {
             d.plugin_shown = shown;
         }
         for (led, c, shift) in lights {
-            d.lights.set(led, c, shift);
+            // The startup snake has the pads until it ends.
+            if d.intro.is_none() || matches!(led, Led::Button(_)) {
+                d.lights.set(led, c, shift);
+            }
         }
         let m = d.model();
         let now = Instant::now();

@@ -1949,6 +1949,7 @@ fn main() {
     layout::restore(&mut app.state);
     // MIDI devices (spec: ui/midi-settings.md §2): the enabled inputs play the selected channel; master sync goes out.
     splash::step(&splash, splash::MIDI, "Opening MIDI devices");
+    app.surface_intro = splash.as_ref().map(splash::Splash::follow);
     app.midi = midi_in::MidiIn::open(wake_ui);
     app.midi_out = midi_out::MidiOut::start(app.transport.watch());
     let message = app.state.message.clone();
