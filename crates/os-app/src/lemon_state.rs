@@ -4,12 +4,15 @@
 
 //! Lemon Studio's own state saved in a `.lemon` file's `LMex` chunk, where an FLP has no place for it (Lemon Studio's
 //! design, spec: flp/lemon-format.md "LMex"): the icons chosen with Change icon..., the effect slots' names and colours,
-//! and Performance mode's settings. Each kind is one event; its payload starts with a layout version (1), and numbers
-//! are little-endian. Save writes all four (empty ones too, so a file saved again holds no stale state); an FLP target
-//! drops them with the rest of `LMex`. Open reads them back from a `.lemon` file only.
+//! Performance mode's settings, the mixer's Plugin delay compensation ▸ Automatic and View ▸ checks, the plugin windows'
+//! Scaling ▸, the channels' Show waveform preview and MIDI channel through checks, Set keyboard focus of all plugins
+//! to ▸ and the playlist tracks' locks to their clips. Each kind is one event; its payload starts with a layout version
+//! (1), and numbers are little-endian. Save writes them all (empty ones too, so a file saved again holds no stale
+//! state); an FLP target drops them with the rest of `LMex`. Open reads them back from a `.lemon` file only.
 
 use crate::app::State;
 use crate::playlist::{ICONS, IconOwner};
+use crate::plugins::Plugins;
 use os_flp::{Event, FlpFile, Value, lemon};
 
 /// The payload layout written (the first byte of each event). A reader ignores an event with a layout it does not know.
@@ -26,27 +29,98 @@ const TRACK_PROGRESS: u8 = 2;
 const PLUS_SCENE: u8 = 4;
 const VELOCITY_SUBCLIPS: u8 = 8;
 
-/// The `LMex` events holding `s`'s Lemon Studio state, in ID order.
-pub fn events(s: &State) -> Vec<Event> {
-    vec![icons(s), slot_names(s), slot_colors(s), performance(s)]
+/// Mixer flags in [`lemon::MIXER`].
+const PDC_AUTO: u8 = 1;
+const WAVEFORMS: u8 = 2;
+const EXTRA_PROPS: u8 = 4;
+
+/// Channel flags in [`lemon::CHANNEL_CHECKS`].
+const WAVE_PREVIEW: u8 = 1;
+const MIDI_THROUGH: u8 = 2;
+
+/// Clip sources in [`lemon::TRACK_LOCKS`].
+const PATTERN: u8 = 0;
+const CLIP_CHANNEL: u8 = 1;
+
+/// The `LMex` events holding the Lemon Studio state of `s` and `plugins`, in ID order. Set keyboard focus of all
+/// plugins to ▸ is written only where it works (Windows and macOS); elsewhere the file's own event is kept.
+pub fn events(s: &State, plugins: &Plugins) -> Vec<Event> {
+    let mut v = vec![icons(s), slot_names(s), slot_colors(s), performance(s), mixer(s), scaling(s, plugins), channel_checks(s)];
+    #[cfg(any(windows, target_os = "macos"))]
+    v.push(Event::new(lemon::KEY_FOCUS, Value::var([LAYOUT, u8::from(editor_keys())])));
+    v.push(track_locks(s));
+    v
 }
 
-/// The bytes [`events`] would write: a change to them is an unsaved change, as an edit of the project is.
-pub fn saved_form(s: &State) -> Vec<u8> {
+/// The bytes [`events`] would write: a change to them is an unsaved change, as an edit of the project is. Set keyboard
+/// focus of all plugins to ▸ is left out: it is a switch for the whole program, with no undo step, so it marks no
+/// project changed.
+pub fn saved_form(s: &State, plugins: &Plugins) -> Vec<u8> {
     let mut b = Vec::new();
-    for e in events(s) {
+    for e in events(s, plugins).into_iter().filter(|e| e.id != lemon::KEY_FOCUS) {
         b.push(e.id);
         b.extend_from_slice(e.data().unwrap_or_default());
     }
     b
 }
 
-/// Puts the state a `.lemon` file holds into `s` (a project just opened, its ids given). An FLP has none.
-pub fn apply(s: &mut State, file: &FlpFile) {
+/// Puts the state a `.lemon` file holds into `s` and `plugins` (a project just opened, its ids given). An FLP has
+/// none.
+pub fn apply(s: &mut State, plugins: &mut Plugins, file: &FlpFile) {
     if !lemon::is_lemon(file) {
         return;
     }
     let read = |id| lemon::data(file, id).filter(|d| d.first() == Some(&LAYOUT));
+    if let Some(&flags) = read(lemon::MIXER).as_deref().and_then(|d| d.get(1)) {
+        s.project.pdc_off = flags & PDC_AUTO == 0;
+        s.mixer.waveforms = flags & WAVEFORMS != 0;
+        s.mixer.extra = flags & EXTRA_PROPS != 0;
+    }
+    if let Some(d) = read(lemon::SCALING) {
+        let mut r = Reader(&d[1..]);
+        for _ in 0..r.u32().unwrap_or(0) {
+            let (Some(kind), Some(n), Some(k), Some(pct)) = (r.u8(), r.u16(), r.u8(), r.u16()) else { break };
+            let key = match kind {
+                CHANNEL => usize::from(n),
+                SLOT => crate::plugins::fx_key(n, k),
+                _ => continue,
+            };
+            if pct > 0 {
+                plugins.editor_scales.insert(key, f32::from(pct) / 100.0);
+            }
+        }
+    }
+    if let Some(d) = read(lemon::CHANNEL_CHECKS) {
+        let mut r = Reader(&d[1..]);
+        for _ in 0..r.u32().unwrap_or(0) {
+            let (Some(n), Some(flags)) = (r.u16(), r.u8()) else { break };
+            let Some(id) = s.project.channels.get(usize::from(n)).map(|c| c.id.0) else { continue };
+            if flags & WAVE_PREVIEW != 0 {
+                s.rack.wave_preview.insert(id);
+            }
+            if flags & MIDI_THROUGH == 0 {
+                s.rack.through_off.insert(id);
+            }
+        }
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    if let Some(&on) = read(lemon::KEY_FOCUS).as_deref().and_then(|d| d.get(1)) {
+        set_editor_keys(on != 0);
+    }
+    if let Some(d) = read(lemon::TRACK_LOCKS) {
+        let mut r = Reader(&d[1..]);
+        for _ in 0..r.u32().unwrap_or(0) {
+            let (Some(a), Some(t), Some(kind), Some(v)) = (r.u16(), r.u16(), r.u8(), r.u16()) else { break };
+            let src = match kind {
+                PATTERN => os_model::ClipSource::Pattern(v),
+                CLIP_CHANNEL => os_model::ClipSource::Channel(v),
+                _ => continue,
+            };
+            if let Some(tr) = s.project.arrangements.get_mut(usize::from(a)).and_then(|a| a.tracks.get_mut(usize::from(t))) {
+                tr.clip_lock = Some(src);
+            }
+        }
+    }
     if let Some(d) = read(lemon::ICONS) {
         read_icons(s, &d[1..]);
     }
@@ -167,6 +241,97 @@ fn performance(s: &State) -> Event {
     Event::new(lemon::PERFORMANCE, Value::var([LAYOUT, flags]))
 }
 
+/// [`lemon::KEY_FOCUS`]: Set keyboard focus of all plugins to ▸ (`plugin_window::editor_keys`). The switch is one for
+/// the whole program, so tests keep their own, one per test thread.
+#[cfg(any(windows, target_os = "macos"))]
+fn editor_keys() -> bool {
+    #[cfg(test)]
+    return tests::KEYS.with(|k| k.get());
+    #[cfg(not(test))]
+    crate::plugin_window::editor_keys()
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn set_editor_keys(on: bool) {
+    #[cfg(test)]
+    tests::KEYS.with(|k| k.set(on));
+    #[cfg(not(test))]
+    crate::plugin_window::set_editor_keys(on);
+}
+
+/// [`lemon::MIXER`]: one u8 of flags: 1 Plugin delay compensation ▸ Automatic, 2 View ▸ Waveforms, 4 View ▸ Extra
+/// properties.
+fn mixer(s: &State) -> Event {
+    let flags = [(!s.project.pdc_off, PDC_AUTO), (s.mixer.waveforms, WAVEFORMS), (s.mixer.extra, EXTRA_PROPS)];
+    Event::new(lemon::MIXER, Value::var([LAYOUT, flags.iter().filter(|(on, _)| *on).fold(0, |f, (_, bit)| f | bit)]))
+}
+
+/// [`lemon::SCALING`]: a u32 count, then per plugin window its owner's kind (u8: 0 a channel, 2 an effect slot, as in
+/// [`lemon::ICONS`]), number (u16: the channel's rack position, or the mixer track), slot (u8, 0 for a channel) and
+/// scale (u16 percent). Windows at Main are not listed; a container's members are not kept.
+fn scaling(s: &State, plugins: &Plugins) -> Event {
+    let mut v = Vec::new();
+    for (&key, &k) in &plugins.editor_scales {
+        let pct = (k * 100.0).round() as u16;
+        match crate::plugins::fx_of(key) {
+            Some((t, slot)) => v.push((SLOT, t, slot, pct)),
+            None if key < s.project.channels.len() => v.push((CHANNEL, key as u16, 0, pct)),
+            None => {}
+        }
+    }
+    v.sort();
+    let mut b = start(v.len());
+    for (kind, n, slot, pct) in v {
+        b.push(kind);
+        b.extend_from_slice(&n.to_le_bytes());
+        b.push(slot);
+        b.extend_from_slice(&pct.to_le_bytes());
+    }
+    Event::new(lemon::SCALING, Value::var(b))
+}
+
+/// [`lemon::CHANNEL_CHECKS`]: a u32 count, then per channel in rack order its position (u16) and flags (u8: 1 Show
+/// waveform preview, 2 MIDI channel through).
+fn channel_checks(s: &State) -> Event {
+    let mut b = start(s.project.channels.len());
+    for (i, c) in s.project.channels.iter().enumerate() {
+        let mut flags = 0;
+        if s.rack.wave_preview.contains(&c.id.0) {
+            flags |= WAVE_PREVIEW;
+        }
+        if !s.rack.through_off.contains(&c.id.0) {
+            flags |= MIDI_THROUGH;
+        }
+        b.extend_from_slice(&(i as u16).to_le_bytes());
+        b.push(flags);
+    }
+    Event::new(lemon::CHANNEL_CHECKS, Value::var(b))
+}
+
+/// [`lemon::TRACK_LOCKS`]: a u32 count, then per locked playlist track its arrangement (u16, 0-based), track (u16,
+/// 0-based) and source (u8: 0 a pattern, 1 an audio or automation channel; u16: the 1-based pattern number or the
+/// channel's rack position).
+fn track_locks(s: &State) -> Event {
+    let mut v = Vec::new();
+    for (a, arr) in s.project.arrangements.iter().enumerate() {
+        for (t, tr) in arr.tracks.iter().enumerate() {
+            match tr.clip_lock {
+                Some(os_model::ClipSource::Pattern(p)) => v.push((a as u16, t as u16, PATTERN, p)),
+                Some(os_model::ClipSource::Channel(c)) => v.push((a as u16, t as u16, CLIP_CHANNEL, c)),
+                None => {}
+            }
+        }
+    }
+    let mut b = start(v.len());
+    for (a, t, kind, n) in v {
+        b.extend_from_slice(&a.to_le_bytes());
+        b.extend_from_slice(&t.to_le_bytes());
+        b.push(kind);
+        b.extend_from_slice(&n.to_le_bytes());
+    }
+    Event::new(lemon::TRACK_LOCKS, Value::var(b))
+}
+
 /// A payload's layout version and entry count.
 fn start(count: usize) -> Vec<u8> {
     let mut b = vec![LAYOUT];
@@ -202,6 +367,11 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::icons::Icon;
+
+    std::thread_local! {
+        /// This test thread's Set keyboard focus of all plugins to ▸ (`editor_keys`).
+        pub(super) static KEYS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    }
 
     fn dir(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("os_lemon_state_{name}_{}", std::process::id()));
@@ -242,7 +412,12 @@ mod tests {
         assert!(!app.unsaved());
         let file = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
         let ids: Vec<u8> = lemon::events(&file).unwrap().iter().map(|e| e.id).collect();
-        assert_eq!(ids, vec![lemon::SAVED_BY, lemon::ICONS, lemon::SLOT_NAMES, lemon::SLOT_COLORS, lemon::PERFORMANCE]);
+        let mut want = vec![lemon::SAVED_BY, lemon::ICONS, lemon::SLOT_NAMES, lemon::SLOT_COLORS, lemon::PERFORMANCE, lemon::MIXER];
+        want.extend([lemon::SCALING, lemon::CHANNEL_CHECKS]);
+        #[cfg(any(windows, target_os = "macos"))]
+        want.push(lemon::KEY_FOCUS);
+        want.push(lemon::TRACK_LOCKS);
+        assert_eq!(ids, want);
         let mut back = App::new(None);
         back.open(path.clone());
         assert!(!back.unsaved(), "the state read back is the saved state");
@@ -264,6 +439,78 @@ mod tests {
         again.open(path);
         assert_eq!(again.state.playlist.icons.len(), 2);
         assert!(!again.state.playlist.icons.contains_key(&IconOwner::Track(2)));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `with_state`, plus the settings of events 197-201: Plugin delay compensation ▸ Automatic off, View ▸ Waveforms
+    /// on and Extra properties off; Scaling ▸ 150 % on channel 0's window and 125 % on track 3's slot 2; Show waveform
+    /// preview on channel 1 and MIDI channel through off on channel 2; tracks 3 and 4 of the first arrangement locked to
+    /// pattern 1 and to channel 0.
+    fn with_settings() -> App {
+        let mut app = with_state();
+        let s = &mut app.state;
+        s.project.pdc_off = true;
+        s.mixer.waveforms = true;
+        s.mixer.extra = false;
+        s.rack.wave_preview.insert(s.project.channels[1].id.0);
+        s.rack.through_off.insert(s.project.channels[2].id.0);
+        if s.project.arrangements.is_empty() {
+            s.project.arrangements.push(os_flp::project::default_arrangement());
+        }
+        let tracks = &mut s.project.arrangements[0].tracks;
+        tracks[3].clip_lock = Some(os_model::ClipSource::Pattern(1));
+        tracks[4].clip_lock = Some(os_model::ClipSource::Channel(0));
+        app.plugins.editor_scales.insert(0, 1.5);
+        app.plugins.editor_scales.insert(crate::plugins::fx_key(3, 2), 1.25);
+        app
+    }
+
+    /// Saved to a .lemon file and opened again, the settings of events 197-201 come back (the checks on the channels
+    /// at the same rack positions), Set keyboard focus of all plugins to ▸ too; a project opened from an FLP has the
+    /// defaults (and a Scaling ▸ of the project opened before is gone). A changed Scaling ▸ is an unsaved change; the
+    /// keyboard focus switch is not.
+    #[test]
+    fn settings_round_trip_through_a_lemon_file() {
+        let d = dir("settings");
+        let (lemon_path, flp_path) = (d.join("Settings.lemon"), d.join("Settings.flp"));
+        let mut app = with_settings();
+        #[cfg(any(windows, target_os = "macos"))]
+        set_editor_keys(false);
+        app.save_to(lemon_path.clone());
+        app.save_to(flp_path.clone());
+        assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", app.state.message);
+        #[cfg(any(windows, target_os = "macos"))]
+        set_editor_keys(true);
+        let mut back = App::new(None);
+        back.open(lemon_path.clone());
+        #[cfg(any(windows, target_os = "macos"))]
+        assert!(!editor_keys(), "Disabled comes back");
+        assert!(!back.unsaved());
+        let s = &back.state;
+        assert!(s.project.pdc_off && s.mixer.waveforms && !s.mixer.extra);
+        let ids: Vec<u32> = s.project.channels.iter().map(|c| c.id.0).collect();
+        assert_eq!(s.rack.wave_preview.iter().copied().collect::<Vec<_>>(), [ids[1]]);
+        assert_eq!(s.rack.through_off.iter().copied().collect::<Vec<_>>(), [ids[2]]);
+        let locks: Vec<_> = s.project.arrangements[0].tracks.iter().enumerate().filter_map(|(t, tr)| Some((t, tr.clip_lock?))).collect();
+        assert_eq!(locks, [(3, os_model::ClipSource::Pattern(1)), (4, os_model::ClipSource::Channel(0))]);
+        let scales: Vec<(usize, f32)> = back.plugins.editor_scales.iter().map(|(&k, &v)| (k, v)).collect();
+        assert_eq!(scales, [(0, 1.5), (crate::plugins::fx_key(3, 2), 1.25)]);
+        back.plugins.editor_scales.remove(&0);
+        assert!(back.unsaved(), "a Scaling ▸ change is an unsaved change");
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            back.plugins.editor_scales.insert(0, 1.5);
+            set_editor_keys(true);
+            assert!(!back.unsaved(), "the keyboard focus switch is not");
+        }
+        // The FLP saved from the same state: no LMex, so the defaults (opened over the .lemon project).
+        back.open(flp_path);
+        let s = &back.state;
+        assert!(!s.project.pdc_off && !s.mixer.waveforms && s.mixer.extra);
+        assert!(s.rack.wave_preview.is_empty() && s.rack.through_off.is_empty() && back.plugins.editor_scales.is_empty());
+        assert!(s.project.arrangements.iter().flat_map(|a| &a.tracks).all(|t| t.clip_lock.is_none()));
+        #[cfg(any(windows, target_os = "macos"))]
+        assert!(editor_keys());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -315,7 +562,7 @@ mod tests {
         s.state.mixer.slot_colors.clear();
         let mut f = file.clone();
         lemon::to_lemon(&mut f, &[Event::new(lemon::SLOT_COLORS, Value::var(b))]).unwrap();
-        apply(&mut s.state, &f);
+        apply(&mut s.state, &mut s.plugins, &f);
         assert_eq!(s.state.mixer.slot_colors.len(), 1);
         assert_eq!(s.state.mixer.slot_colors.get(&(2, 0)), Some(&os_model::Rgb::new(10, 200, 30)));
         let _ = std::fs::remove_dir_all(&d);

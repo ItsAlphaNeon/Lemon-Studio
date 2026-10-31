@@ -1655,7 +1655,7 @@ impl App {
                 // name channels by position, which the ids given here then follow.
                 self.state.control.settle(&mut self.state.project);
                 if let Some(f) = self.state.file.take() {
-                    crate::lemon_state::apply(&mut self.state, &f);
+                    crate::lemon_state::apply(&mut self.state, &mut self.plugins, &f);
                     self.state.file = Some(f);
                 }
                 self.mark_saved();
@@ -1844,7 +1844,7 @@ impl App {
         // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
         // Lemon Studio's own state goes into `LMex` (a .lemon target only, `lemon_or_flp`).
-        let extra = crate::lemon_state::events(s);
+        let extra = crate::lemon_state::events(s, &self.plugins);
         crate::project_info::stamp(s, &mut proj);
         crate::data_folder::stamp(s, &mut proj);
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
@@ -1906,7 +1906,7 @@ impl App {
     pub(crate) fn mark_saved(&mut self) {
         // New things get their ids before the copy, so ids alone are no unsaved change.
         self.state.control.settle(&mut self.state.project);
-        self.saved = (self.state.project.clone(), self.state.tempo, crate::lemon_state::saved_form(&self.state));
+        self.saved = (self.state.project.clone(), self.state.tempo, crate::lemon_state::saved_form(&self.state, &self.plugins));
         self.state.plugin_edited = false;
     }
 
@@ -1914,7 +1914,7 @@ impl App {
     pub fn unsaved(&self) -> bool {
         self.saved.0 != self.state.project
             || self.saved.1 != self.state.tempo
-            || self.saved.2 != crate::lemon_state::saved_form(&self.state)
+            || self.saved.2 != crate::lemon_state::saved_form(&self.state, &self.plugins)
             || self.state.plugin_edited
     }
 
