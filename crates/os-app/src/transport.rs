@@ -389,6 +389,8 @@ enum Cmd {
     Resume,
     /// The newest edited project is in `Transport::latest` (older ones are skipped).
     Update,
+    /// Levels changed, and nothing else (`Transport::update`).
+    LiveEdits(Vec<os_engine::LiveEdit>),
     Preview(Box<Project>),
     /// Play a project's playlist once on the preview stream (clip preview).
     PreviewSong(Box<Project>),
@@ -483,6 +485,8 @@ pub fn headless() {
 pub struct Transport {
     tx: Sender<Cmd>,
     latest: Arc<Mutex<Option<Project>>>,
+    /// The project `update` last sent, with its edits; `None` once a playback starts from a project of its own.
+    sent: Mutex<Option<Project>>,
     instruments: Instruments,
     shared: Arc<Shared>,
     /// The audio thread: joined when the transport goes (see `Drop`).
@@ -507,7 +511,7 @@ impl Transport {
                 }
             })
             .expect("spawn audio thread");
-        Transport { tx, latest, instruments, shared, thread: Some(thread) }
+        Transport { tx, latest, sent: Mutex::new(None), instruments, shared, thread: Some(thread) }
     }
 
     /// Hosted generator plugins by rack row; playing engines pick them up at once.
@@ -573,6 +577,7 @@ impl Transport {
     /// the audio thread: playback, previews and live notes stop at once and nothing else processes the plugins
     /// meanwhile. Follow it with `export_status`.
     pub fn export(&self, project: &Project, mode: PlayMode, rate: u32, job: crate::export::Job) {
+        self.forget_sent();
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.shared.state.store(STOPPED, Ordering::Release);
         self.shared.export_permille.store(0, Ordering::Relaxed);
@@ -600,6 +605,7 @@ impl Transport {
     /// `play`, after a recording count-in of `bars` bars (spec: ui/recording.md §3): the position holds at
     /// `start_tick` while the metronome counts in.
     pub fn play_counted(&self, project: &Project, mode: PlayMode, start_tick: f64, bars: u32) {
+        self.forget_sent();
         if let Ok(mut slot) = self.latest.lock() {
             *slot = None;
         }
@@ -649,7 +655,23 @@ impl Transport {
         device + 2 * block + margin + tick + block + margin
     }
 
+    /// What plays next may not be what `update` last sent: its next project goes whole.
+    fn forget_sent(&self) {
+        if let Ok(mut sent) = self.sent.lock() {
+            *sent = None;
+        }
+    }
+
     pub fn update(&self, project: &Project) {
+        // Levels alone reach the playing engines in place: a new engine at every move of a knob takes milliseconds of
+        // building each time (up to some 70 in a large project). What was last sent says what changed.
+        if let Ok(mut sent) = self.sent.lock() {
+            if let Some(edits) = sent.as_mut().and_then(|s| os_engine::live_edits(s, project)) {
+                let _ = self.tx.send(Cmd::LiveEdits(edits));
+                return;
+            }
+            *sent = Some(project.clone());
+        }
         // Edits can come faster than engines are built: keep only the newest.
         if let Ok(mut slot) = self.latest.lock() {
             *slot = Some(project.clone());
@@ -743,6 +765,7 @@ impl Transport {
     /// Stop everything: playback rewinds, hosted instruments fall silent, live notes and previews end. Also works
     /// when already stopped (it silences notes still ringing from the typing keyboard or a preview).
     pub fn stop(&self) {
+        self.forget_sent();
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.shared.marker_hold.store(0, Ordering::Relaxed);
         self.shared.jump.store(0, Ordering::Relaxed);
@@ -1395,6 +1418,17 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             // The output is closed by Auto close: previews and live notes find no stream and open none.
             // So is a device that failed, until it opens again.
             Ok(Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(..)) if closed || lost.is_some() => {}
+            Ok(Cmd::LiveEdits(edits)) => {
+                for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
+                    if let Ok(mut e) = s.engine.lock() {
+                        edits.iter().for_each(|&x| e.apply_edit(x));
+                    }
+                    edits.iter().for_each(|x| x.apply_to(&mut s.project));
+                }
+                for p in [held.as_mut().map(|h| &mut h.0), live_project.as_mut()].into_iter().flatten() {
+                    edits.iter().for_each(|x| x.apply_to(p));
+                }
+            }
             Ok(Cmd::Update) => {
                 if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
                     for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
