@@ -399,8 +399,16 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   transient detector Lemon Slicer uses; small, medium and large grids at the sample's tempo), Detect beats (sets the
   tempo and makes a region per beat) and Zero-cross check all regions; the slices are regions, so a saved file opens
   in Lemon Slicer with them
-- Not yet: noise gating (gate noise, trim side noise), the declicker, the envelope tools with a dialog, the
-  drum(loop) stretch, detect pitch regions, convert to score
+- Tesla's Send to new Lemon Slicer channel (Tools > Sequencing, and the auto-slicing button's menu) puts the selection
+  or the whole sample in a new Lemon Slicer channel, sliced at its regions (auto-sliced when it has none); dragging
+  the sample out of Tesla carries its regions too
+- Tesla's Drum(loop) stretch... (Ctrl+T, the stretch button's right click) makes a loop longer or shorter by moving
+  its slices (its regions, or the detected hits) apart or together, each keeping its sound; the gaps are filled with
+  echo grains or a time-stretched slice, or left silent, under a tail fade
+- Tesla's noise gating: Acquire noise threshold (Alt+N, from a noise-only selection, else -40 dBFS), Gate noise (the
+  gate button's right click), Trim side noise (its left click) and Trim all noise & slice up (each sound left a
+  region); the bottom bar's threshold button shows the threshold over the waveform
+- Not yet: the declicker, the envelope tools with a dialog, detect pitch regions, convert to score
 
 ## ✅ Exporting audio
 

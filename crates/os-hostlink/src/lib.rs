@@ -57,9 +57,10 @@ pub enum Cmd {
     /// instance and answers 1; 0 = not handled (a plugin that never got the hello keeps the entry disabled).
     Automate = 10,
     /// Plugin -> host: an audio file for the project (Tesla's "Send to playlist as audio clip" / "Send to selected
-    /// channel"), `lparam` 0 = to the playlist as an audio clip, 1 = into the selected channel. The file's path waits in
-    /// the process's outbox ([`post_audio`]; the host takes it with [`take_audio`]). The host answers 1; 0 = not
-    /// handled (the plugin empties the outbox again).
+    /// channel" / "Send to new Lemon Slicer channel"), `lparam` = [`AudioTo`]: 0 = to the playlist as an audio clip,
+    /// 1 = into the selected channel, 2 = into a new Lemon Slicer channel (sliced at the file's cue points). The file's
+    /// path waits in the process's outbox ([`post_audio`]; the host takes it with [`take_audio`]). The host answers 1;
+    /// 0 = not handled (the plugin empties the outbox again).
     Audio = 11,
     /// Host -> plugin: whether the editor can be resized by the host's frame. Answer: its smallest content size in
     /// logical px ([`pack_size`]); 0 = a fixed size (unanswered messages return 0 too).
@@ -96,18 +97,39 @@ impl Cmd {
     }
 }
 
-static OUTBOX: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
+/// Where an audio file sent with [`Cmd::Audio`] goes (the message's `lparam`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioTo {
+    /// The playlist, as an audio clip at the song position.
+    Playlist = 0,
+    /// The selected channel's sample (a new sampler channel when it isn't a sampler).
+    Channel = 1,
+    /// A new Lemon Slicer channel, sliced at the file's cue points.
+    Slicer = 2,
+}
 
-/// Plugin: a file for the host to take with the next [`Cmd::Audio`] (`channel`: into the selected channel rather than
-/// the playlist). Plugins built into the host share its process, so the path need not travel in the message.
-pub fn post_audio(path: &str, channel: bool) {
+impl AudioTo {
+    pub fn from_isize(v: isize) -> AudioTo {
+        match v {
+            1 => AudioTo::Channel,
+            2 => AudioTo::Slicer,
+            _ => AudioTo::Playlist,
+        }
+    }
+}
+
+static OUTBOX: std::sync::Mutex<Vec<(String, AudioTo)>> = std::sync::Mutex::new(Vec::new());
+
+/// Plugin: a file for the host to take with the next [`Cmd::Audio`], and where it goes. Plugins built into the host
+/// share its process, so the path need not travel in the message.
+pub fn post_audio(path: &str, to: AudioTo) {
     if let Ok(mut o) = OUTBOX.lock() {
-        o.push((path.to_string(), channel));
+        o.push((path.to_string(), to));
     }
 }
 
 /// Host (or a plugin whose message went unanswered): the files posted since the last call, oldest first.
-pub fn take_audio() -> Vec<(String, bool)> {
+pub fn take_audio() -> Vec<(String, AudioTo)> {
     OUTBOX.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default()
 }
 

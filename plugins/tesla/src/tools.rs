@@ -373,6 +373,249 @@ pub fn stretch(s: &Sample, a: usize, b: usize, st: &Stretch) -> Vec<Vec<f32>> {
     if s.ch.len() == 1 { vec![ol] } else { vec![ol, or] }
 }
 
+/// Drum(loop) stretch's Filling method: what plays in the gap a slice leaves when the loop gets longer (Lemon
+/// Studio's set; the original's list was not opened).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Fill {
+    /// The slice's last grain repeated, overlapping, under the tail envelope.
+    #[default]
+    Echo,
+    /// The whole slice time-stretched to its new length (no gap; the tail envelope unused).
+    Stretch,
+    /// Silence after the slice.
+    Silence,
+}
+
+impl Fill {
+    pub const ALL: [Fill; 3] = [Fill::Echo, Fill::Stretch, Fill::Silence];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Fill::Echo => "Echo grains",
+            Fill::Stretch => "Time stretch",
+            Fill::Silence => "Silence",
+        }
+    }
+
+    pub fn next(self) -> Fill {
+        Fill::ALL[(Fill::ALL.iter().position(|&f| f == self).unwrap_or(0) + 1) % Fill::ALL.len()]
+    }
+}
+
+/// Drum(loop) stretch... settings (Lemon Studio's design, spec: plugins/tesla/README.md "Drum(loop) stretch"): Time
+/// as Time stretch's (−1 to 1, ×¼ to ×4 the length); Insert tails (on: the gaps are filled); Auto-slice (on: slice at
+/// the detected transients even where regions exist); the Filling method; Tail, the tail envelope's slope (−1 to 1,
+/// 0 a smooth fade).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrumStretch {
+    pub time: f32,
+    pub tails: bool,
+    pub auto: bool,
+    pub fill: Fill,
+    pub tail: f32,
+}
+
+impl Default for DrumStretch {
+    fn default() -> Self {
+        DrumStretch { time: 0.0, tails: true, auto: false, fill: Fill::Echo, tail: 0.0 }
+    }
+}
+
+impl DrumStretch {
+    /// The new length over the old.
+    pub fn ratio(&self) -> f64 {
+        2f64.powf(f64::from(self.time) * 2.0)
+    }
+
+    /// The tail envelope at `t` from 0 (the slice's end) to 1 (the next slice): a raised-cosine fade to the power
+    /// 4^−tail (turned left the tail dies sooner, turned right it rings longer).
+    pub fn envelope(&self, t: f64) -> f32 {
+        let c = 0.5 * (1.0 + (std::f64::consts::PI * t.clamp(0.0, 1.0)).cos());
+        c.powf(4f64.powf(-f64::from(self.tail))) as f32
+    }
+}
+
+/// Drum(loop) stretch of the range `a..=b`, sliced at `starts` (frames from `a`, rising, the first 0): every slice
+/// keeps its audio and moves to its start times the ratio. A slice that gets less room is cut, with a short smooth
+/// fade; one that gets more is followed by the Filling method (silence with Insert tails off), or stretched whole.
+/// The new range's channels, the ratio times as long.
+pub fn drum_stretch(s: &Sample, a: usize, b: usize, starts: &[usize], ds: &DrumStretch) -> Vec<Vec<f32>> {
+    let len = b + 1 - a;
+    let r = ds.ratio();
+    let out_len = ((len as f64) * r).round().max(1.0) as usize;
+    let rate = s.rate.max(1) as f64;
+    let ms = |m: f64| ((m * rate / 1000.0).round() as usize).max(1);
+    let mut cuts: Vec<usize> = starts.iter().copied().filter(|&p| p < len).collect();
+    if cuts.first() != Some(&0) {
+        cuts.insert(0, 0);
+    }
+    cuts.dedup();
+    let place = |p: usize| (((p as f64) * r).round() as usize).min(out_len);
+    let mut out = vec![vec![0.0f32; out_len]; s.ch.len()];
+    for (i, &st) in cuts.iter().enumerate() {
+        let end = cuts.get(i + 1).copied().unwrap_or(len);
+        let (d0, d1) = (place(st), if i + 1 < cuts.len() { place(end) } else { out_len });
+        let (seg, slot) = (end - st, d1.saturating_sub(d0));
+        if slot == 0 || seg == 0 {
+            continue;
+        }
+        if ds.tails && ds.fill == Fill::Stretch && slot != seg {
+            let l = &s.ch[0][a + st..a + end];
+            let rr = s.ch.get(1).map_or(l, |c| &c[a + st..a + end]);
+            let (ol, or) = os_dsp::stretch::whole(l, rr, s.rate, slot, 1.0);
+            for (c, o) in out.iter_mut().enumerate() {
+                o[d0..d1].copy_from_slice(if c == 0 { &ol } else { &or });
+            }
+            continue;
+        }
+        let keep = seg.min(slot);
+        for (c, o) in out.iter_mut().enumerate() {
+            o[d0..d0 + keep].copy_from_slice(&s.ch[c][a + st..a + st + keep]);
+        }
+        if slot <= seg {
+            // Cut: a smooth fade over the slice's last 4 ms.
+            let f = ms(4.0).min(keep);
+            for o in out.iter_mut() {
+                for j in 0..f {
+                    o[d0 + keep - f + j] *= ds.envelope((j + 1) as f64 / f as f64);
+                }
+            }
+            continue;
+        }
+        let gap = slot - seg;
+        if !ds.tails || ds.fill == Fill::Silence {
+            let f = ms(2.0).min(keep);
+            for o in out.iter_mut() {
+                for j in 0..f {
+                    o[d0 + keep - f + j] *= 0.5 * (1.0 + (std::f32::consts::PI * (j + 1) as f32 / f as f32).cos());
+                }
+            }
+            continue;
+        }
+        // Echo grains: the slice's last grain (a quarter of it, 5 to 50 ms) overlap-added at half-grain hops (Hann
+        // windows sum to one), crossfaded in over the slice's last part, under the tail envelope.
+        let g = (seg / 4).clamp(ms(5.0).min(seg), ms(50.0).min(seg)).max(2);
+        let h = (g / 2).max(1);
+        let x = h.min(keep);
+        let span = gap + x;
+        let hann: Vec<f32> = (0..g).map(|j| (0.5 - 0.5 * (std::f64::consts::TAU * j as f64 / g as f64).cos()) as f32).collect();
+        for (c, o) in out.iter_mut().enumerate() {
+            let grain = &s.ch[c][a + end - g..a + end];
+            let mut fill = vec![0.0f32; span + g];
+            let mut at = 0;
+            while at < span {
+                for j in 0..g {
+                    fill[at + j] += grain[j] * hann[j];
+                }
+                at += h;
+            }
+            // The first hop has only one window: the crossfade's fade-in covers it.
+            let from = d0 + keep - x;
+            for j in 0..span {
+                let env = ds.envelope(j as f64 / span as f64);
+                let v = fill[j + h.min(g)] * env;
+                if j < x {
+                    let t = (j as f32 + 0.5) / x as f32;
+                    let (fi, fo) = ((t * std::f32::consts::FRAC_PI_2).sin(), (t * std::f32::consts::FRAC_PI_2).cos());
+                    o[from + j] = o[from + j] * fo + v * fi;
+                } else {
+                    o[from + j] = v;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Noise gating's threshold until Acquire noise threshold sets one: −40 dBFS (Lemon Studio's choice; the original's
+/// default was not measured).
+pub const GATE_DEFAULT: f32 = 0.01;
+/// The gate opens this long before a sound (so its attack is kept whole), stays open this long after the last frame
+/// over the threshold, and closes over the release (Lemon Studio's design).
+const GATE_LOOK_MS: f64 = 2.0;
+const GATE_HOLD_MS: f64 = 30.0;
+const GATE_RELEASE_MS: f64 = 20.0;
+
+/// Acquire noise threshold: the range's peak (noise only selected) and 1 dB more, so the noise itself stays under it.
+pub fn noise_threshold(s: &Sample, a: usize, b: usize) -> f32 {
+    (s.peak(a, b) * 1.122).clamp(1e-5, 1.0)
+}
+
+/// The noise gate's gain over `a..=b`, 0 to 1: open where a frame of any channel is over `thr` (from the look-ahead
+/// before it to the hold after it), with raised-cosine ramps (the look-ahead's length opening, the release closing).
+pub fn gate_gain(s: &Sample, a: usize, b: usize, thr: f32) -> Vec<f32> {
+    let n = b + 1 - a;
+    let rate = f64::from(s.rate.max(1));
+    let frames = |ms: f64| ((ms * rate / 1000.0).round() as usize).max(1);
+    let (look, hold, release) = (frames(GATE_LOOK_MS), frames(GATE_HOLD_MS), frames(GATE_RELEASE_MS));
+    let loud: Vec<bool> = (0..n).map(|i| s.ch.iter().any(|c| c[a + i].abs() > thr)).collect();
+    // Held after each loud frame, then opened `look` frames early.
+    let mut open = vec![false; n];
+    let mut left = 0usize;
+    for i in 0..n {
+        if loud[i] {
+            left = hold + 1;
+        }
+        if left > 0 {
+            open[i] = true;
+            left -= 1;
+        }
+    }
+    let mut ahead = 0usize;
+    for i in (0..n).rev() {
+        if loud[i] {
+            ahead = look + 1;
+        }
+        if ahead > 0 {
+            open[i] = true;
+            ahead -= 1;
+        }
+    }
+    let (up, down) = (1.0 / look as f32, 1.0 / release as f32);
+    let mut g = if open.first() == Some(&true) { 1.0f32 } else { 0.0 };
+    // The opening ramp ends on the first loud frame: it starts `look` frames before it, where the mask opens.
+    open.iter()
+        .map(|&o| {
+            g = if o { (g + up).min(1.0) } else { (g - down).max(0.0) };
+            0.5 - 0.5 * (std::f32::consts::PI * g).cos()
+        })
+        .collect()
+}
+
+/// The runs (first, last, from the range's start) where the gate is open.
+pub fn sound_runs(gain: &[f32]) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut from = None;
+    for (i, &g) in gain.iter().enumerate() {
+        match (g > 0.0, from) {
+            (true, None) => from = Some(i),
+            (false, Some(f)) => {
+                runs.push((f, i - 1));
+                from = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(f) = from {
+        runs.push((f, gain.len() - 1));
+    }
+    runs
+}
+
+/// Gate noise: the range under the gate's gain; false when the gate stays open throughout.
+pub fn gate(s: &mut Sample, a: usize, b: usize, thr: f32) -> bool {
+    let g = gate_gain(s, a, b, thr);
+    if g.iter().all(|&v| v >= 1.0) {
+        return false;
+    }
+    for c in &mut s.ch {
+        for (v, &k) in c[a..=b].iter_mut().zip(&g) {
+            *v *= k;
+        }
+    }
+    true
+}
+
 /// The Amp dialog's panning law.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Law {
