@@ -507,6 +507,13 @@ pub const MAX_VOICES: usize = 128;
 
 impl Engine {
     pub fn new(rate: f32) -> Self {
+        Self::with_room(rate, MAX_VOICES)
+    }
+
+    /// An engine with room made for `voices` voices (it still plays up to `MAX_VOICES`): Lemon Drum Sampler keeps one
+    /// per layer, most of them quiet.
+    pub fn with_room(rate: f32, voices: usize) -> Self {
+        let voices = voices.clamp(1, MAX_VOICES);
         Engine {
             sample: None,
             disk: None,
@@ -515,10 +522,10 @@ impl Engine {
             file_frames: 0.0,
             quality: Quality::Table,
             rate,
-            voices: Vec::with_capacity(MAX_VOICES),
+            voices: Vec::with_capacity(voices),
             global_phase: [0.0; 5],
             streams: Vec::new(),
-            ended: Vec::with_capacity(MAX_VOICES * 2),
+            ended: Vec::with_capacity(voices * 2),
         }
     }
 

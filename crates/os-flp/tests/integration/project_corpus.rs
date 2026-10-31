@@ -5,13 +5,14 @@
 
 // spec: flp/events/*.md
 //
-// Typed-model tests over the corpus (OPENSTUDIO_FLP_CORPUS, see tests/corpus.rs):
-// 1. load → apply (no edits) → bytes identical to the input;
+// Typed-model tests over the corpus (OPENSTUDIO_FLP_CORPUS, see corpus.rs):
+// 1. load → apply (no edits) → bytes identical to the input (a file of an older generation: to its conversion to the
+//    current layout, which must itself load and re-serialize);
 // 2. edits survive apply → to_bytes → parse → load;
 // 3. structural sanity (channel count matches the header, notes sorted, …).
 
 use os_flp::FlpFile;
-use os_flp::project::{ProjectError, apply, load};
+use os_flp::project::{apply, is_legacy, load, upgrade};
 use os_model::Rgb;
 
 fn corpus() -> Option<Vec<String>> {
@@ -20,20 +21,40 @@ fn corpus() -> Option<Vec<String>> {
     Some(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
 }
 
+/// A file's bytes as the app opens it: one of an older generation converted to the current layout.
+fn opened(path: &str) -> Vec<u8> {
+    let bytes = std::fs::read(path).unwrap();
+    let mut file = FlpFile::parse(&bytes).unwrap();
+    match upgrade(&mut file) {
+        Ok(true) => file.to_bytes().unwrap(),
+        _ => bytes,
+    }
+}
+
 #[test]
 fn unedited_model_round_trips_and_is_sane() {
     let Some(paths) = corpus() else { return };
     let mut failures = Vec::new();
     let mut legacy = 0;
     for path in &paths {
-        let bytes = std::fs::read(path).unwrap();
+        let mut bytes = std::fs::read(path).unwrap();
         let mut file = FlpFile::parse(&bytes).unwrap();
-        let project = match load(&file) {
-            Ok(p) => p,
-            Err(ProjectError::LegacyLayout(_)) => {
-                legacy += 1;
+        // An older generation's file is converted as the app converts it on opening (spec: flp/layouts.md).
+        if file.events().next().is_some() && is_legacy(&file.events().cloned().collect::<Vec<_>>()) {
+            legacy += 1;
+            if let Err(e) = upgrade(&mut file) {
+                failures.push(format!("{path}: upgrade: {e}"));
                 continue;
             }
+            bytes = file.to_bytes().unwrap();
+            let again = FlpFile::parse(&bytes).unwrap();
+            let issues = os_flp::check_alignment(&again);
+            if !issues.is_empty() {
+                failures.push(format!("{path}: converted file misaligned: {issues:?}"));
+            }
+        }
+        let project = match load(&file) {
+            Ok(p) => p,
             Err(e) => {
                 failures.push(format!("{path}: load: {e}"));
                 continue;
@@ -63,7 +84,7 @@ fn unedited_model_round_trips_and_is_sane() {
         }
     }
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
-    eprintln!("{} files: load/apply round-trip OK; {legacy} legacy-layout files skipped", paths.len() - legacy);
+    eprintln!("{} files: load/apply round-trip OK, {legacy} of them converted from an older layout", paths.len());
 }
 
 #[test]
@@ -71,7 +92,7 @@ fn edits_survive_a_write_read_cycle() {
     let Some(paths) = corpus() else { return };
     let mut checked = 0;
     for path in &paths {
-        let bytes = std::fs::read(path).unwrap();
+        let bytes = opened(path);
         let mut file = FlpFile::parse(&bytes).unwrap();
         let Ok(mut project) = load(&file) else { continue };
         if project.saved_by.split('.').next() != Some("26") || project.channels.is_empty() {
@@ -142,7 +163,7 @@ fn playlist_edits_survive() {
     };
     let mut checked = 0;
     for path in &paths {
-        let bytes = std::fs::read(path).unwrap();
+        let bytes = opened(path);
         let mut file = FlpFile::parse(&bytes).unwrap();
         let Ok(mut project) = load(&file) else { continue };
         // FL 24.2 and 25 files too: their clip records are 80 bytes (spec: flp/layouts.md).
@@ -199,7 +220,7 @@ fn control_points_survive_edits() {
     let Some(paths) = corpus() else { return };
     let mut checked = 0;
     for path in &paths {
-        let bytes = std::fs::read(path).unwrap();
+        let bytes = opened(path);
         let mut file = FlpFile::parse(&bytes).unwrap();
         let Ok(original) = load(&file) else { continue };
         let Some(pi) = original.patterns.iter().position(|p| !p.notes.is_empty() && p.controls.is_empty()) else {
@@ -240,7 +261,7 @@ fn channel_envelopes_decode() {
     let Some(paths) = corpus() else { return };
     let (mut vol_on, mut pitch_on) = (0, 0);
     for path in &paths {
-        let file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let file = FlpFile::parse(&opened(path)).unwrap();
         let Ok(project) = load(&file) else { continue };
         for ch in &project.channels {
             for e in &ch.envelopes {
@@ -266,7 +287,7 @@ fn new_pattern_blocks_are_added() {
     let Some(paths) = corpus() else { return };
     let mut checked = 0;
     for path in &paths {
-        let bytes = std::fs::read(path).unwrap();
+        let bytes = opened(path);
         let mut file = FlpFile::parse(&bytes).unwrap();
         let Ok(original) = load(&file) else { continue };
         if original.channels.is_empty() {
@@ -325,7 +346,7 @@ fn new_pattern_blocks_are_added() {
     eprintln!("{checked} files: new pattern blocks added");
 }
 
-/// Manual helper: `OS_IN=a.flp OS_OUT=b.flp cargo test -p os-flp --test project_corpus -- --ignored new_pattern_file`
+/// Manual helper: `OS_IN=a.flp OS_OUT=b.flp cargo test -p os-flp --test integration -- --ignored new_pattern_file`
 /// writes `a.flp` with two new patterns (notes, points, name, colour) so FL can be asked to open it.
 #[test]
 #[ignore]
@@ -363,7 +384,7 @@ fn rack_settings_survive() {
     let Some(paths) = corpus() else { return };
     let mut checked = 0;
     for path in &paths {
-        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let mut file = FlpFile::parse(&opened(path)).unwrap();
         let Ok(mut project) = load(&file) else { continue };
         if project.channels.len() < 2 {
             continue;
@@ -412,7 +433,7 @@ fn project_info_edits_survive() {
     };
     let mut checked = 0;
     for path in &paths {
-        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let mut file = FlpFile::parse(&opened(path)).unwrap();
         let Ok(mut project) = load(&file) else { continue };
         let ordered = fl_order(&file);
         project.info = os_model::ProjectInfo {
@@ -439,7 +460,7 @@ fn mixer_switches_and_main_values_survive() {
     let Some(paths) = corpus() else { return };
     let mut checked = 0;
     for path in &paths {
-        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let mut file = FlpFile::parse(&opened(path)).unwrap();
         let Ok(mut project) = load(&file) else { continue };
         if project.mixer.len() < 3 {
             continue;
@@ -467,7 +488,7 @@ fn restructured_channels_survive() {
     let Some(paths) = corpus() else { return };
     let mut checked = 0;
     for path in &paths {
-        let bytes = std::fs::read(path).unwrap();
+        let bytes = opened(path);
         let mut file = FlpFile::parse(&bytes).unwrap();
         let Ok(project) = load(&file) else { continue };
         let n = project.channels.len();
@@ -508,7 +529,7 @@ fn slot_plugin_states_survive() {
     let Some(paths) = corpus() else { return };
     let mut checked = 0;
     for path in &paths {
-        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let mut file = FlpFile::parse(&opened(path)).unwrap();
         let Ok(mut project) = load(&file) else { continue };
         let mut any = false;
         for s in project.mixer.iter_mut().flat_map(|m| m.slots.iter_mut().flatten()) {
@@ -539,7 +560,7 @@ fn plugin_channel_states_survive() {
     let Some(paths) = corpus() else { return };
     let mut checked = 0;
     for path in &paths {
-        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let mut file = FlpFile::parse(&opened(path)).unwrap();
         let Ok(mut project) = load(&file) else { continue };
         let mut any = false;
         for c in project.channels.iter_mut().filter(|c| c.kind == ChannelKind::Plugin) {
@@ -598,7 +619,7 @@ fn slot_edits_survive() {
     let Some(paths) = corpus() else { return };
     let mut checked = 0;
     for path in &paths {
-        let bytes = std::fs::read(path).unwrap();
+        let bytes = opened(path);
         let mut file = FlpFile::parse(&bytes).unwrap();
         let Ok(project) = load(&file) else { continue };
         // A track with a plugin and an empty slot, and a second track with an empty slot.
@@ -648,7 +669,7 @@ fn added_mixer_tracks_survive() {
     let Some(paths) = corpus() else { return };
     let mut checked = 0;
     for path in &paths {
-        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let mut file = FlpFile::parse(&opened(path)).unwrap();
         let Ok(project) = load(&file) else { continue };
         let n = project.mixer.len();
         if n < 2 || n > 200 {
@@ -701,7 +722,7 @@ fn renumbered_mixer_tracks_survive() {
     let Some(paths) = corpus() else { return };
     let mut checked = 0;
     for path in &paths {
-        let bytes = std::fs::read(path).unwrap();
+        let bytes = opened(path);
         let Ok(project) = load(&FlpFile::parse(&bytes).unwrap()) else { continue };
         let n = project.mixer.len();
         if n < 4 || n > 200 {
@@ -790,7 +811,7 @@ fn every_automation_link_is_read() {
     let Some(paths) = corpus() else { return };
     let (mut files, mut several) = (0, 0);
     for path in &paths {
-        let bytes = std::fs::read(path).unwrap();
+        let bytes = opened(path);
         let mut file = FlpFile::parse(&bytes).unwrap();
         let Ok(mut project) = load(&file) else { continue };
         let links = |f: &FlpFile| -> Vec<(u16, u32)> {
@@ -821,4 +842,40 @@ fn every_automation_link_is_read() {
         files += 1;
     }
     eprintln!("{files} files with clips on several targets rewritten ({several} found)");
+}
+
+/// Every controller link (event 227 with the bit 0x8000 in its first field) is read in file order with the formula
+/// (event 230) right after it; dropping a link and saving removes its two events, and the rest read back (spec:
+/// flp/events/automation.md "Controller links").
+#[test]
+fn every_controller_link_is_read() {
+    let Some(paths) = corpus() else { return };
+    let (mut files, mut total, mut formulas) = (0, 0, 0);
+    for path in &paths {
+        let bytes = opened(path);
+        let mut file = FlpFile::parse(&bytes).unwrap();
+        let Ok(mut project) = load(&file) else { continue };
+        let ev: Vec<_> = file.events().collect();
+        let want: Vec<(Vec<u8>, bool)> = ev
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.id == 227)
+            .filter_map(|(i, e)| e.data().filter(|d| d.len() == 20 && d[1] & 0x80 != 0).map(|d| (d.to_vec(), ev.get(i + 1).is_some_and(|n| n.id == 230))))
+            .collect();
+        let got: Vec<(Vec<u8>, bool)> = project.controller_links.iter().map(|c| (c.bytes.to_vec(), c.formula.is_some())).collect();
+        assert_eq!(got, want, "{path}");
+        if want.is_empty() {
+            continue;
+        }
+        files += 1;
+        total += want.len();
+        formulas += want.iter().filter(|w| w.1).count();
+        let count = file.events().count();
+        let gone = project.controller_links.remove(0);
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        assert_eq!(file.events().count(), count - 1 - usize::from(gone.formula.is_some()), "{path}");
+        assert_eq!(load(&file).unwrap().controller_links, project.controller_links, "{path}");
+    }
+    eprintln!("{total} controller links ({formulas} with a formula) in {files} files");
 }

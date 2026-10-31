@@ -183,6 +183,9 @@ impl<P: Plugin> HostedEffect for Guarded<P> {
     fn reported_delay_fx(&self) -> u32 {
         self.look(0, |p| p.latency())
     }
+    fn control_fx(&self, k: usize) -> Option<f32> {
+        self.look(None, |p| p.control_fx(k))
+    }
 }
 
 impl<P: Plugin> Plugin for Guarded<P> {

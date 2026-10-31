@@ -228,6 +228,7 @@ impl Mix {
             }
             i += 1;
         }
+        crate::audio_log::push(&self.sum, w);
         &self.sum
     }
 }

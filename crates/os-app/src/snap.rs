@@ -22,9 +22,9 @@ pub enum EditorSnap {
     Main,
     /// Line, Cell, (none) and the fixed units.
     Grid(Snap),
-    /// The starts and ends of the pattern's notes (piano roll).
+    /// The starts and ends of the pattern's notes (piano roll), of the arrangement's clips (playlist).
     Events,
-    /// The time markers (piano roll).
+    /// The time markers (the pattern's in the piano roll, the arrangement's in the playlist).
     Markers,
 }
 
@@ -162,7 +162,7 @@ pub fn parse(text: &str) -> Saved {
                 }
             }
             "piano" => out.piano = EditorSnap::parse(v).unwrap_or_default(),
-            "playlist" => out.playlist = EditorSnap::parse(v).filter(|p| !matches!(p, EditorSnap::Events | EditorSnap::Markers)).unwrap_or_default(),
+            "playlist" => out.playlist = EditorSnap::parse(v).unwrap_or_default(),
             _ => {}
         }
     }
@@ -235,9 +235,9 @@ mod tests {
         let t = text(&s);
         assert_eq!(t, "global=(none)\nlast=1/2 beat\npiano=Markers\nplaylist=Cell\n");
         assert_eq!(parse(&t), s);
-        // Junk keeps the defaults; the playlist has no Events or Markers.
+        // Junk keeps the defaults; the playlist keeps Events and Markers too.
         let p = parse("global=Whole\nlast=(none)\npiano=1/3 step\nplaylist=Events\nother=1\njunk\n");
-        assert_eq!(p, Saved { piano: EditorSnap::Grid(Snap::ThirdStep), ..Saved::default() });
+        assert_eq!(p, Saved { piano: EditorSnap::Grid(Snap::ThirdStep), playlist: EditorSnap::Events, ..Saved::default() });
     }
 
     #[test]

@@ -246,6 +246,9 @@ pub struct Job {
     pub tempo: (f64, f64),
     /// Mixer track names by track number (master first).
     pub track_names: Vec<String>,
+    /// The mixer track menu's File ▸ Render to wave file...: these tracks' outputs are the files, without the mix
+    /// (empty: an export of the mix).
+    pub tracks: Vec<u16>,
 }
 
 impl Job {
@@ -262,12 +265,19 @@ impl Job {
             loop_frames: None,
             tempo: (120.0, 0.0),
             track_names: Vec::new(),
+            tracks: Vec::new(),
         }
     }
 
     /// The mix's file of format `f`.
     pub fn file(&self, f: usize) -> PathBuf {
         self.folder.join(format!("{}.{}", self.name, EXTENSIONS[f]))
+    }
+
+    /// Mixer track `t`'s name as a file name takes it (the characters one cannot hold as `_`).
+    fn track_name(&self, t: usize) -> String {
+        let name = self.track_names.get(t).cloned().unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Bus {t}") });
+        name.chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect()
     }
 
     /// The folder the split mixer tracks go to.
@@ -285,6 +295,9 @@ pub fn write(job: &Job, rate: u32, mix: Vec<f32>, tracks: Vec<Vec<f32>>, song: u
     let o = &job.options;
     let out_rate = if o.rate == 0 { rate } else { o.rate };
     let mut written = Vec::new();
+    if !job.tracks.is_empty() {
+        return write_tracks(job, rate, tracks, song);
+    }
     let mix = shape(o, mix, song, rate, out_rate);
     let scale = f64::from(out_rate) / f64::from(rate);
     let meta = Meta {
@@ -309,14 +322,36 @@ pub fn write(job: &Job, rate: u32, mix: Vec<f32>, tracks: Vec<Vec<f32>>, song: u
                 made = true;
             }
             let audio = shape(o, audio, song, rate, out_rate);
-            let name = job.track_names.get(t).cloned().unwrap_or_else(|| if t == 0 { "Master".into() } else { format!("Insert {t}") });
-            let name: String = name.chars().map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
+            let name = job.track_name(t);
             // As FL, only WAV and FLAC (spec §3 "Split mixer tracks").
             for f in o.ticked().filter(|&f| f == WAV || f == FLAC) {
                 let path = dir.join(format!("{t:02} {name}.{}", EXTENSIONS[f]));
                 encode(o, f, &path, &audio, out_rate, &Meta::default())?;
                 written.push(path);
             }
+        }
+    }
+    Ok(written)
+}
+
+/// Render to wave file... (the mixer track menu's File ▸): the outputs of `job.tracks` (from `tracks`, by track number),
+/// each in every format ticked, silent ones too. One track's file is named as the form's name; several are
+/// "<name> - <NN> <track name>". Lemon Studio's choice: the original's own naming and form were not looked at.
+fn write_tracks(job: &Job, rate: u32, mut tracks: Vec<Vec<f32>>, song: u64) -> Result<Vec<PathBuf>, String> {
+    let o = &job.options;
+    let out_rate = if o.rate == 0 { rate } else { o.rate };
+    let mut written = Vec::new();
+    for &t in &job.tracks {
+        let audio = tracks.get_mut(usize::from(t)).map(std::mem::take).unwrap_or_default();
+        let audio = shape(o, audio, song, rate, out_rate);
+        let stem = match job.tracks.len() {
+            1 => job.name.clone(),
+            _ => format!("{} - {t:02} {}", job.name, job.track_name(usize::from(t))),
+        };
+        for f in o.ticked() {
+            let path = job.folder.join(format!("{stem}.{}", EXTENSIONS[f]));
+            encode(o, f, &path, &audio, out_rate, &Meta::default())?;
+            written.push(path);
         }
     }
     Ok(written)
@@ -786,7 +821,7 @@ mod tests {
         // The mix in four formats, the master and Drums stems in WAV and FLAC; the silent track is left out.
         assert_eq!(files.len(), 8, "{files:?}");
         assert!(dir.join("mix stems").join("01 Drums.flac").exists());
-        assert!(!dir.join("mix stems").join("02 Insert 2.wav").exists());
+        assert!(!dir.join("mix stems").join("02 Bus 2.wav").exists());
         let wav = std::fs::read(dir.join("mix.wav")).unwrap();
         for id in [&b"cue "[..], b"labl", b"Verse", b"smpl", b"acid"] {
             assert!(wav.windows(id.len()).any(|w| w == id), "{}", String::from_utf8_lossy(id));
@@ -797,6 +832,31 @@ mod tests {
             // Lossy coders add a little padding.
             assert!((44100..44100 + 4096).contains(&frames), "{f}: {frames} frames");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Render to wave file... (the mixer track menu): only the tracks asked for, silent ones too, without the mix; one
+    /// track's file takes the form's name, several are "<name> - <NN> <track name>".
+    #[test]
+    fn render_to_wave_file_writes_the_tracks() {
+        let dir = std::env::temp_dir().join(format!("lemon-export-tracks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut job = Job::wav(&dir.join("Drums.wav"));
+        job.options.split = true;
+        job.track_names = vec!["Master".into(), "Drums".into(), "Bass/Sub".into()];
+        job.tracks = vec![1];
+        job.options.tail = Tail::Cut;
+        let mix = tone(4410, 44100, 440.0);
+        let tracks = vec![mix.clone(), mix.clone(), vec![0.0; mix.len()]];
+        let files = write(&job, 44100, mix.clone(), tracks.clone(), 4410).expect("render");
+        assert_eq!(files, [dir.join("Drums.wav")]);
+        assert_eq!(os_engine::sample::load(&files[0]).unwrap().frames(), 4410);
+        job.name = "Song".into();
+        job.tracks = vec![1, 2];
+        let files = write(&job, 44100, mix, tracks, 4410).expect("render");
+        assert_eq!(files, [dir.join("Song - 01 Drums.wav"), dir.join("Song - 02 Bass_Sub.wav")], "the silent track too");
+        assert!(!dir.join("Song.wav").exists() && !dir.join("Song stems").exists(), "no mix, no stems folder");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

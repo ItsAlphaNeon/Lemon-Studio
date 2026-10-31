@@ -37,6 +37,7 @@ use clap_sys::ext::params::{
 };
 use clap_sys::ext::render::{clap_plugin_render, CLAP_EXT_RENDER, CLAP_RENDER_OFFLINE, CLAP_RENDER_REALTIME};
 use clap_sys::ext::state::{clap_plugin_state, CLAP_EXT_STATE};
+use clap_sys::ext::thread_check::{clap_host_thread_check, CLAP_EXT_THREAD_CHECK};
 use clap_sys::ext::voice_info::{clap_host_voice_info, clap_plugin_voice_info, clap_voice_info, CLAP_EXT_VOICE_INFO};
 use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
 use clap_sys::host::clap_host;
@@ -315,6 +316,9 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
     if id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU || id == clap_sys::ext::context_menu::CLAP_EXT_CONTEXT_MENU_COMPAT {
         return &context_menu::HOST_CONTEXT_MENU as *const clap_sys::ext::context_menu::clap_host_context_menu as *const c_void;
     }
+    if id == CLAP_EXT_THREAD_CHECK {
+        return &HOST_THREAD_CHECK as *const clap_host_thread_check as *const c_void;
+    }
     #[cfg(all(unix, not(target_os = "macos")))]
     if let Some(ext) = run_loop::extension(id) {
         return ext;
@@ -464,6 +468,24 @@ static HOST_PARAMS: clap_host_params =
 /// The plugin's voice count changed (a patch with another polyphony): the voice list's limit is read again on the UI
 /// tick (spec: audio/voices.md §2.7).
 static HOST_VOICE_INFO: clap_host_voice_info = clap_host_voice_info { changed: Some(host_voice_info_changed) };
+/// Which thread asks (`thread-check`): the engine's rendering thread and its mixing workers are audio threads
+/// (`os_engine::parallel::on_audio_thread`; spec: audio/multicore.md "Plugins"); the main thread is the one
+/// `set_main_thread` named, or, before that, any thread that is not an audio thread.
+static HOST_THREAD_CHECK: clap_host_thread_check = clap_host_thread_check { is_main_thread: Some(host_is_main_thread), is_audio_thread: Some(host_is_audio_thread) };
+static MAIN_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+/// Names the calling thread the main thread (the app's UI thread) for plugins that ask.
+pub fn set_main_thread() {
+    let _ = MAIN_THREAD.set(std::thread::current().id());
+}
+unsafe extern "C" fn host_is_main_thread(_host: *const clap_host) -> bool {
+    match MAIN_THREAD.get() {
+        Some(id) => *id == std::thread::current().id(),
+        None => !os_engine::parallel::on_audio_thread(),
+    }
+}
+unsafe extern "C" fn host_is_audio_thread(_host: *const clap_host) -> bool {
+    os_engine::parallel::on_audio_thread()
+}
 unsafe extern "C" fn host_voice_info_changed(host: *const clap_host) {
     unsafe { (*((*host).host_data as *const HostData)).voice_info.store(true, Ordering::Release) };
     unsafe { attend(host) };
@@ -684,6 +706,8 @@ pub struct Plugin {
     pvals: Vec<clap_event_param_value>,
     /// Changes the plugin reported (its editor): gesture begin / end and values, plain.
     param_out: Vec<OutEv>,
+    /// The controller outputs the plugin sent last, per MIDI channel: a pitch bend's bits and the CC's finer bits.
+    controls: [Option<(u16, Option<u8>)>; 16],
     _lib: Arc<Library>,
 }
 
@@ -694,7 +718,14 @@ enum OutEv {
     Value(u32, f64),
     End(u32),
     NoteEnd(i16, i32),
+    /// A controller output as MIDI (channel = output): a pitch bend's 14 bits, or the 7 bits below them as CC 63.
+    Bend(u8, u16),
+    Fine(u8, u8),
 }
+
+/// The CC number that carries a controller output's 7 bits below its pitch bend (spec: plugins/lemon-peak-controller.md
+/// "Links").
+pub const CONTROL_FINE_CC: u8 = 63;
 
 /// Most plugin -> host parameter events kept until the app takes them.
 const MAX_OUT: usize = 4096;
@@ -722,6 +753,18 @@ unsafe extern "C" fn push_out(l: *const clap_output_events, e: *const clap_event
             if v.len() < MAX_OUT + MAX_ENDS {
                 let n = &*(e as *const clap_event_note);
                 v.push(OutEv::NoteEnd(n.key, n.note_id));
+            }
+            return true;
+        }
+        // Controller outputs (taken right after the call, as voice ends).
+        if (*e).type_ == CLAP_EVENT_MIDI {
+            let d = (*(e as *const clap_event_midi)).data;
+            if v.len() < MAX_OUT + MAX_ENDS {
+                match d[0] & 0xF0 {
+                    0xE0 => v.push(OutEv::Bend(d[0] & 0x0F, u16::from(d[1] & 0x7F) | u16::from(d[2] & 0x7F) << 7)),
+                    0xB0 if d[1] == CONTROL_FINE_CC => v.push(OutEv::Fine(d[0] & 0x0F, d[2] & 0x7F)),
+                    _ => {}
+                }
             }
             return true;
         }
@@ -900,6 +943,7 @@ impl Plugin {
                 processed: false,
                 pvals: Vec::with_capacity(params::MAX_AUTO + 64),
                 param_out: Vec::new(),
+                controls: [None; 16],
                 _lib: lib.clone(),
             })
         }
@@ -1054,6 +1098,16 @@ impl Plugin {
                     if id >= 0 {
                         self.level_voices.retain(|v| v.id != id);
                         self.named.retain(|v| v.1 != id);
+                    }
+                }
+                OutEv::Bend(ch, bits) => {
+                    if let Some(c) = self.controls.get_mut(usize::from(ch)) {
+                        *c = Some((bits, None));
+                    }
+                }
+                OutEv::Fine(ch, bits) => {
+                    if let Some(Some(c)) = self.controls.get_mut(usize::from(ch)) {
+                        c.1 = Some(bits);
                     }
                 }
                 e => {
@@ -1797,7 +1851,7 @@ impl os_host::Plugin for Plugin {
                 OutEv::Begin(id) => Some(os_host::ParamEvent::Begin(id)),
                 OutEv::Value(id, v) => Some(os_host::ParamEvent::Value(id, self.normalize(id, v))),
                 OutEv::End(id) => Some(os_host::ParamEvent::End(id)),
-                OutEv::NoteEnd(..) => None,
+                OutEv::NoteEnd(..) | OutEv::Bend(..) | OutEv::Fine(..) => None,
             })
             .collect()
     }
@@ -1810,6 +1864,10 @@ impl os_host::Plugin for Plugin {
 impl os_engine::Instrument for Plugin {
     fn active(&self) -> bool {
         self.sounding
+    }
+
+    fn param_range(&self, index: usize) -> Option<(f64, f64)> {
+        os_host::Plugin::param_info(self, index).map(|p| (p.min, p.max))
     }
 
     fn voices(&self) -> usize {
@@ -1989,6 +2047,10 @@ impl os_engine::HostedEffect for Plugin {
         self.effect(rate, left, right, None);
     }
 
+    fn param_range_fx(&self, index: usize) -> Option<(f64, f64)> {
+        os_host::Plugin::param_info(self, index).map(|p| (p.min, p.max))
+    }
+
     fn process_fx_keyed(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: (&[f32], &[f32])) {
         self.effect(rate, left, right, Some(key));
     }
@@ -2003,6 +2065,20 @@ impl os_engine::HostedEffect for Plugin {
 
     fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
         self.song = Some(*info);
+    }
+
+    fn control_fx(&self, k: usize) -> Option<f32> {
+        let (bend, fine) = (*self.controls.get(k)?)?;
+        Some(control_value(bend, fine))
+    }
+}
+
+/// A controller output from its MIDI: the pitch bend's 14 bits over 0..16383, or with the CC's 7 bits below them the 21
+/// bits over 0..2^21 - 1.
+fn control_value(bend: u16, fine: Option<u8>) -> f32 {
+    match fine {
+        Some(f) => ((f64::from(bend) * 128.0 + f64::from(f)) / f64::from((1u32 << 21) - 1)) as f32,
+        None => (f64::from(bend) / 16383.0) as f32,
     }
 }
 
@@ -2103,6 +2179,31 @@ mod mono_mock;
 mod tests {
     use super::*;
     use os_engine::Instrument;
+
+    // spec: audio/multicore.md "Plugins"
+    /// A plugin asking which thread it is on hears "audio" on the rendering thread and on the mixing workers, "main"
+    /// elsewhere.
+    #[test]
+    fn thread_check_knows_the_audio_threads() {
+        let host = ptr::null();
+        let ext = unsafe { host_get_extension(host, CLAP_EXT_THREAD_CHECK.as_ptr()) } as *const clap_host_thread_check;
+        assert!(!ext.is_null());
+        let ext = unsafe { &*ext };
+        let (main, audio) = (ext.is_main_thread.unwrap(), ext.is_audio_thread.unwrap());
+        assert!(unsafe { !audio(host) && main(host) });
+        // The engine renders a tick inside such a scope; the workers are audio threads of their own.
+        let pool = os_engine::parallel::Pool::new(2, None);
+        let mut graph = os_engine::parallel::Graph::default();
+        graph.set(4, &mut vec![]);
+        let seen = Mutex::new(Vec::new());
+        {
+            let _scope = os_engine::parallel::AudioScope::enter();
+            assert!(unsafe { audio(host) && !main(host) });
+            assert!(pool.run(&graph, &|_, _| seen.lock().unwrap().push(unsafe { (audio(ptr::null()), main(ptr::null())) })));
+        }
+        assert_eq!(*seen.lock().unwrap(), [(true, false); 4]);
+        assert!(unsafe { !audio(host) && main(host) });
+    }
 
     /// A plugin whose main ports are mono (DPF's Kars has a mono output) gets one channel each way: its output is
     /// heard on both sides, and an effect's input reaches it as the average of both sides. Without the audio-ports
@@ -2220,6 +2321,106 @@ mod tests {
         p.take_note_ends(0);
         p.channel_levels(os_engine::ChannelLevels { mod_x: 0.5, ..Default::default() });
         assert!(p.mod_resend.is_empty());
+    }
+
+    /// Controller outputs arrive as MIDI: a pitch bend per output channel, the CC 63 after it adding 7 finer bits; they
+    /// are taken right after the call and never reach the parameter events (spec: plugins/lemon-peak-controller.md
+    /// "Links").
+    #[test]
+    fn controller_outputs_from_midi() {
+        use os_engine::HostedEffect as _;
+        let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ.clap")) }.expect("linked EQ");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert_eq!(p.control_fx(1), None);
+        p.param_out.push(OutEv::Value(3, 0.5));
+        p.param_out.push(OutEv::Bend(1, 8192));
+        p.param_out.push(OutEv::Bend(2, 16383));
+        p.param_out.push(OutEv::Fine(2, 127));
+        p.take_note_ends(0);
+        assert_eq!(p.control_fx(1), Some((8192.0 / 16383.0) as f32));
+        assert_eq!(p.control_fx(2), Some(1.0));
+        assert_eq!(p.control_fx(0), None);
+        assert_eq!(p.param_out.len(), 1, "only the parameter event is kept");
+        // A new bend drops the old fine bits.
+        p.param_out.push(OutEv::Bend(2, 0));
+        p.take_note_ends(0);
+        assert_eq!(p.control_fx(2), Some(0.0));
+        assert_eq!(control_value(4096, Some(64)), ((4096.0 * 128.0 + 64.0) / 2097151.0) as f32);
+    }
+
+    /// Lemon Peak Controller hosted as the engine hosts a mixer slot (a call per tick, the song's transport): after each
+    /// tick its outputs are what the engine's own Fruity Peak Controller gives for the same sound, to the 21 bits they
+    /// travel in.
+    #[test]
+    fn hosted_peak_controller_matches_the_engines() {
+        use os_engine::effects::peak_ctrl::{Core, Settings};
+        use os_engine::HostedEffect as _;
+        let entry = &lemon_peak_controller::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Peak Controller.clap")) }.expect("linked peak controller");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 44100));
+        let s = Settings { lfo_amount: 128, lfo_base: 16384, speed: 13000, ..Settings::default() };
+        let state = lemon_small_fx::params::plugin_state_from_fl(lemon_small_fx::peak_controller::SPEC, &s.to_state());
+        assert!(os_host::Plugin::load_state(&mut p, &state));
+        let mut own = Core::new(s);
+        let (tempo, spt) = (130.0, 44100.0 * 60.0 / (130.0 * 96.0));
+        let mut worst = 0.0f64;
+        for j in 0..400u64 {
+            let (a, b) = ((j as f64 * spt).round() as u64, ((j + 1) as f64 * spt).round() as u64);
+            let n = (b - a) as usize;
+            // Bursts: a loud tick every 50, quiet between.
+            let level = if j % 50 < 3 { 0.8 } else { 0.05 };
+            let mut l: Vec<f32> = (0..n).map(|i| level * ((i as f32) * 0.3).sin()).collect();
+            let mut r = l.clone();
+            let peak = l.iter().fold(0f32, |m, x| m.max(x.abs()));
+            p.transport_fx(&os_engine::TransportInfo { playing: true, tempo, frame: a, beats: j as f64 / 96.0, bar_start: 0.0, bar: 0, numerator: 4, denominator: 4, looping: None });
+            p.process_fx(44100, &mut l, &mut r);
+            own.advance(f64::from(peak), 1.0);
+            for k in 0..3 {
+                let got = f64::from(p.control_fx(k).expect("an output"));
+                worst = worst.max((got - own.outputs()[k]).abs());
+            }
+        }
+        assert!(worst < 1e-6, "{worst}");
+    }
+
+    /// Lemon Formula Controller hosted as the engine hosts a mixer slot (a call per tick, the song's transport): after
+    /// each tick its output is what the engine's own Fruity Formula Controller gives for the next tick's start, to the
+    /// 21 bits it travels in; a formula that does not compile sends nothing.
+    #[test]
+    fn hosted_formula_controller_matches_the_engines() {
+        use os_engine::effects::formula_ctrl::{Core, Settings};
+        use os_engine::HostedEffect as _;
+        let entry = &lemon_formula_controller::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Formula Controller.clap")) }.expect("linked formula controller");
+        let spec = lemon_small_fx::formula_controller::SPEC;
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 44100));
+        let s = Settings { knobs: [16384, 49152, 0], formula: "a+Sin(SongTime*Pi/2)*b*0.5+Frac(SongTime)*0.1".into(), ..Settings::default() };
+        assert!(os_host::Plugin::load_state(&mut p, &lemon_small_fx::params::plugin_state_from_fl(spec, &s.to_state())));
+        let mut own = Core::new(s);
+        let (tempo, spt) = (130.0, 44100.0 * 60.0 / (130.0 * 96.0));
+        let mut worst = 0.0f64;
+        for j in 0..400u64 {
+            let (a, b) = ((j as f64 * spt).round() as u64, ((j + 1) as f64 * spt).round() as u64);
+            let (mut l, mut r) = (vec![0.1f32; (b - a) as usize], vec![0.1f32; (b - a) as usize]);
+            p.transport_fx(&os_engine::TransportInfo { playing: true, tempo, frame: a, beats: j as f64 / 96.0, bar_start: 0.0, bar: 0, numerator: 4, denominator: 4, looping: None });
+            p.process_fx(44100, &mut l, &mut r);
+            own.advance((j + 1) as f64 / 96.0, tempo);
+            let got = f64::from(p.control_fx(0).expect("an output"));
+            worst = worst.max((got - own.output().unwrap()).abs());
+            assert_eq!(l[0], 0.1, "the sound passes through");
+        }
+        assert!(worst < 1e-6, "{worst}");
+        let bad = Settings { formula: "a*".into(), ..Settings::default() };
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 44100));
+        assert!(os_host::Plugin::load_state(&mut p, &lemon_small_fx::params::plugin_state_from_fl(spec, &bad.to_state())));
+        let (mut l, mut r) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+        p.transport_fx(&os_engine::TransportInfo { playing: true, tempo, frame: 0, beats: 0.0, bar_start: 0.0, bar: 0, numerator: 4, denominator: 4, looping: None });
+        p.process_fx(44100, &mut l, &mut r);
+        assert_eq!(p.control_fx(0), None);
     }
 
     /// The UI locks an instance only when it has work (spec: audio/implementing.md "Playing live"): host edits waiting

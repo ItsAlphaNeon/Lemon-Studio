@@ -7,7 +7,8 @@
 //! same way during playback, so a second near 100 % here is a second that drops out live.
 //!
 //! `OS_AUDIO_BENCH=<project.flp> cargo test -p os-app --bin lemonstudio audio_load -- --ignored --nocapture`
-//! (`OS_AUDIO_BENCH_SECS=n` stops after n seconds of song).
+//! (`OS_AUDIO_BENCH_SECS=n` stops after n seconds of song; `OS_MIX_THREADS=n` renders on n mixing workers beside the
+//! rendering thread, spec: audio/multicore.md, where the time is still the rendering thread's wall clock).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Recording: which input frames to keep, by the When mode and the For limit (Tesla's own rule until Edison's is
-//! measured), and the lock-free ring that carries them from the audio thread to the thread that builds the take.
+//! Recording: which input frames to keep, by the When mode (Tesla's own rule until Edison's is measured), how much of
+//! the take the For limit leaves (the last of it: a rolling log), and the lock-free ring that carries the frames from
+//! the audio thread to the thread that builds the take.
 //!
 // spec: plugins/tesla/README.md "Version 1" (recording), plugins/tesla/requests.md #4, plugins/edison/state.md
 
@@ -21,8 +22,6 @@ pub const HOLD_SECONDS: f64 = 0.5;
 pub struct Block {
     /// Frames kept from this block.
     pub kept: usize,
-    /// The For limit was reached: recording stops and disarms.
-    pub done: bool,
 }
 
 /// The state of one armed recording.
@@ -32,8 +31,6 @@ pub struct Recorder {
     started: bool,
     /// Input: frames of hold left.
     hold: usize,
-    /// Frames kept so far in this take.
-    pub kept: u64,
 }
 
 impl Recorder {
@@ -52,9 +49,9 @@ impl Recorder {
         }
     }
 
-    /// Goes through a block of input (`l`, `r`), calling `keep(i)` for every frame to record, in order.
-    pub fn block(&mut self, when: u8, playing: bool, rate: u32, max: u8, l: &[f32], r: &[f32], mut keep: impl FnMut(usize)) -> Block {
-        let limit = Self::limit_frames(max, rate);
+    /// Goes through a block of input (`l`, `r`), calling `keep(i)` for every frame to record, in order. The For limit
+    /// does not stop it: the take keeps its last frames (`Shared::drain`).
+    pub fn block(&mut self, when: u8, playing: bool, rate: u32, l: &[f32], r: &[f32], mut keep: impl FnMut(usize)) -> Block {
         let hold = (HOLD_SECONDS * rate as f64) as usize;
         let mut out = Block::default();
         for i in 0..l.len().min(r.len()) {
@@ -82,16 +79,8 @@ impl Recorder {
             if !take {
                 continue;
             }
-            if self.kept >= limit {
-                out.done = true;
-                break;
-            }
             keep(i);
-            self.kept += 1;
             out.kept += 1;
-        }
-        if self.kept >= limit {
-            out.done = true;
         }
         out
     }
@@ -154,9 +143,9 @@ impl Ring {
 mod tests {
     use super::*;
 
-    fn run(r: &mut Recorder, when: u8, playing: bool, max: u8, l: &[f32]) -> (Vec<usize>, Block) {
+    fn run(r: &mut Recorder, when: u8, playing: bool, l: &[f32]) -> (Vec<usize>, Block) {
         let mut v = Vec::new();
-        let b = r.block(when, playing, 1000, max, l, &vec![0.0; l.len()], |i| v.push(i));
+        let b = r.block(when, playing, 1000, l, &vec![0.0; l.len()], |i| v.push(i));
         (v, b)
     }
 
@@ -164,31 +153,28 @@ mod tests {
     fn when_modes() {
         let quiet_loud: Vec<f32> = (0..2000).map(|i| if (500..600).contains(&i) { 0.5 } else { 0.0 }).collect();
         // Now: everything.
-        assert_eq!(run(&mut Recorder::default(), WHEN_NOW, false, 0, &quiet_loud).0.len(), 2000);
+        assert_eq!(run(&mut Recorder::default(), WHEN_NOW, false, &quiet_loud).0.len(), 2000);
         // On input: from the first loud frame on, continuously.
-        let (v, _) = run(&mut Recorder::default(), WHEN_ON_INPUT, false, 0, &quiet_loud);
+        let (v, _) = run(&mut Recorder::default(), WHEN_ON_INPUT, false, &quiet_loud);
         assert_eq!((v[0], v.len()), (500, 1500));
         // Input: the loud stretch plus a 0.5 s hold (500 frames at 1 kHz).
-        let (v, _) = run(&mut Recorder::default(), WHEN_INPUT, false, 0, &quiet_loud);
+        let (v, _) = run(&mut Recorder::default(), WHEN_INPUT, false, &quiet_loud);
         assert_eq!((v[0], *v.last().unwrap(), v.len()), (500, 1099, 600));
         // On play: while the host plays.
-        assert!(run(&mut Recorder::default(), WHEN_ON_PLAY, false, 0, &quiet_loud).0.is_empty());
-        assert_eq!(run(&mut Recorder::default(), WHEN_ON_PLAY, true, 0, &quiet_loud).0.len(), 2000);
+        assert!(run(&mut Recorder::default(), WHEN_ON_PLAY, false, &quiet_loud).0.is_empty());
+        assert_eq!(run(&mut Recorder::default(), WHEN_ON_PLAY, true, &quiet_loud).0.len(), 2000);
         // −60 dBFS is the line.
-        assert!(run(&mut Recorder::default(), WHEN_ON_INPUT, false, 0, &[0.001; 10]).0.is_empty());
+        assert!(run(&mut Recorder::default(), WHEN_ON_INPUT, false, &[0.001; 10]).0.is_empty());
     }
 
     #[test]
-    fn the_limit_stops_recording() {
-        // 1 minute at 1 kHz = 60,000 frames.
+    fn limits_in_frames() {
+        // 1 minute at 1 kHz = 60,000 frames; recording goes on past it (the take keeps the last minute).
+        assert_eq!(Recorder::limit_frames(1, 1000), 60_000);
         let mut r = Recorder::default();
-        let block = vec![0.0; 1000];
-        for _ in 0..59 {
-            assert!(!run(&mut r, WHEN_NOW, false, 1, &block).1.done);
+        for _ in 0..61 {
+            assert_eq!(run(&mut r, WHEN_NOW, false, &[0.0; 1000]).1.kept, 1000);
         }
-        let (v, b) = run(&mut r, WHEN_NOW, false, 1, &block);
-        assert_eq!((v.len(), b.done), (1000, true));
-        assert_eq!(run(&mut r, WHEN_NOW, false, 1, &block).0.len(), 0);
         // 50 MB of 32-bit float stereo.
         assert_eq!(Recorder::limit_frames(7, 44100), 50 * 1024 * 1024 / 8);
         assert_eq!(Recorder::limit_frames(0, 44100), u64::MAX);

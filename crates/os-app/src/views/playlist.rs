@@ -70,7 +70,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     window_body(ui, r);
     let outer = r;
     let arr = pl::arrangement_name(s);
-    let title = format!("Playlist - {arr}  \u{203a}  {}  \u{203a}", pl::source_name(s, pl::source(s)));
+    let title = format!("Arranger - {arr}  \u{203a}  {}  \u{203a}", pl::source_name(s, pl::source(s)));
     // The grid covers most of the window and is painted all over (rows and gaps): the frame skips it.
     let (fr, fc) = super::frame_rects(s, Win::Playlist, r);
     let cover = grid_rect(s, fr, fc);
@@ -80,10 +80,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // The arrangement name opens the arrangement menu; hovered it turns orange with a down arrow (§12, as FL).
     {
         let f = Font::new(17);
-        let x0 = r.x + 281.0 + ui.c.text_width(f, "Playlist - ");
+        let x0 = r.x + 281.0 + ui.c.text_width(f, "Arranger - ");
         let w = ui.c.text_width(f, &arr);
         let arrow_w = ui.c.text_width(f, "  \u{203a}  ");
-        let hit = Rect::new(x0 - 2.0, r.y, w + arrow_w * 0.7, 22.0);
+        // Short of the window buttons, as the title (a narrow window cuts it).
+        let room = Rect::new(r.x, r.y, super::title_room(r, true).max(0.0), 23.0);
+        let hit = Rect::new(x0 - 2.0, r.y, w + arrow_w * 0.7, 22.0).intersect(&room);
+        ui.c.push_clip(room);
         if ui.hit(hit, Action::PlArrangement, "Arrangements (switch, add, clone, rename, delete)") {
             let bg = ui.t.window_title;
             ui.c.fill_rect(Rect::new(x0 - 1.0, r.y + 1.0, w + arrow_w * 0.7, 20.0), bg);
@@ -92,12 +95,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             let ax = x0 + w + arrow_w * 0.35;
             ui.c.fill_polygon(&[(ax - 4.0, r.y + 9.0), (ax + 4.0, r.y + 9.0), (ax, r.y + 14.0)], hot);
         }
+        ui.c.pop_clip();
     }
 
     // Title-bar tools: ▸ options, snap magnet, then the nine tools (§1, §3).
     let ty = r.y + 2.0;
     let b = Rect::new(r.x + 13.0 - 9.0, ty, 18.0, 18.0);
-    let hov = ui.hit(b, Action::PlOptions, "Playlist options");
+    let hov = ui.hit(b, Action::PlOptions, "Arranger options");
     icons::draw(ui.c, Icon::ArrowRight, b, if hov { t.glyph } else { t.text });
     let b = Rect::new(r.x + 33.0 - 9.0, ty, 18.0, 18.0);
     let hov = ui.hit(b, Action::PlSnap, format!("Snap: {}", s.playlist.snap.label()));
@@ -185,7 +189,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
 
     // Grid background and lines; rows follow the track layout (collapsed groups' members are strips, §6a).
-    ui.hit(grid, Action::PlaylistArea, "Playlist");
+    ui.hit(grid, Action::PlaylistArea, "Arranger");
     let mut visible = Vec::new();
     let mut row = g.track_at(grid.y);
     while row < TRACKS && g.y_of(row) < grid.bottom() {
@@ -1355,7 +1359,8 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
     } else if let Some(e) = &s.playlist.edit {
         let t = ui.t;
         let r = Rect::new(e.at.0, e.at.1, 150.0, 20.0);
-        ui.hit(r, Action::Swallow, "Type, Enter accepts, Esc cancels");
+        let hint = if let pl::EditTarget::MixerInsert(_) = e.target { "How many mixer tracks to insert: type a number, Enter inserts, Esc cancels" } else { "Type, Enter accepts, Esc cancels" };
+        ui.hit(r, Action::Swallow, hint);
         ui.c.fill_rect(r, ui.t.s(0x0e1214));
         ui.c.stroke_rrect(r, 0.0, 1.0, t.glyph);
         ui.c.text_clip(Font::new(14), r.x + 4.0, r.y + 2.0, r.w - 8.0, t.text, &e.text);

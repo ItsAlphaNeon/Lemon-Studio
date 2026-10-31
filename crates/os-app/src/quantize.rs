@@ -52,8 +52,8 @@ pub const LEVELS: [(&str, &str); 6] = [
     ("PAN", "Panning"),
     ("VEL", "Velocity"),
     ("REL", "Release"),
-    ("MOD X", "Mod X"),
-    ("MOD Y", "Mod Y"),
+    ("MOD X", "Mod A"),
+    ("MOD Y", "Mod B"),
     ("PITCH", "Fine pitch"),
 ];
 

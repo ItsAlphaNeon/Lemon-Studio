@@ -221,7 +221,8 @@ impl Shared {
         self.loaded.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Moves recorded frames from the ring into the take; once disarmed, the take joins the document (appended, or
+    /// Moves recorded frames from the ring into the take, which keeps only its last frames up to the For limit (a
+    /// rolling log, as Edison "wraps and overwrites"); once disarmed, the take joins the document (appended, or
     /// replacing the sample with Append off). Called by the drain thread every 10 ms.
     pub fn drain(&self) {
         let mut t = self.take.lock().unwrap_or_else(|e| e.into_inner());
@@ -231,6 +232,12 @@ impl Shared {
         let mut l = std::mem::take(&mut t.l);
         let mut r = std::mem::take(&mut t.r);
         let n = self.ring.drain(&mut l, &mut r);
+        let limit = rec::Recorder::limit_frames(self.max.load(Ordering::Relaxed), t.rate.max(1));
+        if l.len() as u64 > limit {
+            let over = l.len() - limit as usize;
+            l.drain(..over);
+            r.drain(..over);
+        }
         t.l = l;
         t.r = r;
         if n > 0 {
@@ -526,16 +533,12 @@ impl Plugin for Tesla {
         s.level.store(peak.to_bits(), Ordering::Relaxed);
         if armed {
             let when = s.when.load(Ordering::Relaxed);
-            let max = s.max.load(Ordering::Relaxed);
             let ring = &s.ring;
             let (li, ri) = (&*l, &*r);
-            let b = p.rec.block(when, host_playing, host_rate, max, li, ri, |i| {
+            let b = p.rec.block(when, host_playing, host_rate, li, ri, |i| {
                 ring.push([li[i], ri[i]]);
             });
             s.capturing.store(b.kept > 0, Ordering::Relaxed);
-            if b.done {
-                s.armed.store(false, Ordering::Release);
-            }
         } else {
             s.capturing.store(false, Ordering::Relaxed);
         }
@@ -649,6 +652,32 @@ mod tests {
         sh.drain();
         sh.drain();
         assert_eq!(sh.doc.lock().unwrap().frames(), 1);
+    }
+
+    /// At its For limit a take goes on and keeps its last frames (Edison: a rolling log).
+    #[test]
+    fn a_take_keeps_its_last_minute() {
+        let sh = Shared::default();
+        sh.host_rate.store(1000, Ordering::Relaxed);
+        sh.max.store(1, Ordering::Relaxed);
+        sh.append.store(false, Ordering::Relaxed);
+        sh.armed.store(true, Ordering::Relaxed);
+        // 70 s at 1 kHz, in drains of 1 s (frame i is i / 100,000).
+        for s in 0..70 {
+            for i in 0..1000 {
+                let v = (s * 1000 + i) as f32 / 100_000.0;
+                assert!(sh.ring.push([v, -v]));
+            }
+            sh.drain();
+        }
+        assert!(sh.armed.load(Ordering::Relaxed), "still recording");
+        assert_eq!(sh.take.lock().unwrap().l.len(), 60_000);
+        sh.armed.store(false, Ordering::Relaxed);
+        sh.drain();
+        sh.drain();
+        let d = sh.doc.lock().unwrap();
+        assert_eq!(d.frames(), 60_000);
+        assert_eq!(d.sample.ch[0][0], 10_000.0 / 100_000.0, "the first 10 s are gone");
     }
 
     #[test]

@@ -109,8 +109,11 @@ impl App {
             return;
         }
         if self.state.song_mode {
-            if tp.song() || !tp.paused() {
-                let p = self.state.playlist.pos;
+            let p = self.state.playlist.pos;
+            // With Quantize song jumps the playing song goes on to the next unit, then jumps there (ui/playlist.md §7a).
+            if let Some(unit) = crate::playlist::jump_unit(&self.state).filter(|_| tp.song() && !tp.paused()) {
+                tp.jump_on(unit, p);
+            } else if tp.song() || !tp.paused() {
                 self.play_song_from(p);
             } else {
                 tp.stop();

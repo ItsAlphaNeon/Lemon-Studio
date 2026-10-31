@@ -487,7 +487,7 @@ fn walk(dir: &Path, depth: u32, formats: Formats, walked: &mut HashSet<(PathBuf,
 /// A file named like a built-in Lemon plugin, or like one by an earlier name (same plugin id): the built-in copy
 /// is used (a second copy in the process would share the built-in one's editor window class).
 fn builtin_file(p: &Path) -> bool {
-    let builtin = [crate::plugins::LEMON_SAMPLER, crate::plugins::LEMON_EQ, crate::plugins::PULP_FILTER, crate::plugins::PRESS, crate::osc3::LEMON_TRIO, crate::citrus::CITRUS];
+    let builtin = [crate::plugins::LEMON_SAMPLER, crate::plugins::LEMON_EQ, crate::plugins::PULP_FILTER, crate::plugins::PRESS, crate::osc3::LEMON_TRIO, crate::citrus::CITRUS, crate::slicer::LEMON_SLICER, crate::drums::LEMON_DRUMS];
     let old = crate::plugins::OLD_NAMES.map(|(old, _)| old);
     p.file_stem().is_some_and(|s| builtin.iter().chain(&crate::plugins::LINKED_EFFECTS).chain(&old).any(|b| s.eq_ignore_ascii_case(b)))
 }
@@ -727,7 +727,7 @@ pub fn categories(effects: bool) -> impl Iterator<Item = &'static str> {
 /// A plugin's category (§4): the first category in table order with a matching feature string.
 pub fn category(d: &Descriptor) -> &'static str {
     match d.name.as_str() {
-        n if n == crate::plugins::LEMON_SAMPLER => return "Sampler",
+        n if n == crate::plugins::LEMON_SAMPLER || n == crate::slicer::LEMON_SLICER || n == crate::drums::LEMON_DRUMS => return "Sampler",
         n if n == crate::osc3::LEMON_TRIO || n == crate::citrus::CITRUS => return "Synth",
         n if n == crate::plugins::LEMON_EQ => return "EQ",
         _ => {}
@@ -755,6 +755,8 @@ pub struct Entry {
     pub format: Format,
     pub category: &'static str,
     pub favorite: bool,
+    /// Built into Lemon Studio (the browser's Installed ▸ Built-in, spec: ui/browser.md §2).
+    pub builtin: bool,
 }
 
 /// What the plugin menus list: shown plugins only, alphabetical by label.
@@ -777,7 +779,8 @@ fn entries(list: &[Available], prefs: &Prefs, missing: &HashSet<String>) -> Vec<
             let d = &list[i].desc;
             let twin = shown.iter().any(|&k| k != i && list[k].desc.format != d.format && base_name(&list[k].desc.name) == base_name(&d.name));
             let label = if twin { format!("{} ({})", strip_marker(&d.name), format_label(d.format)) } else { d.name.clone() };
-            let vendor = if crate::project_plugins::is_builtin(d) {
+            let builtin = crate::project_plugins::is_builtin(d);
+            let vendor = if builtin {
                 BUILTIN_VENDOR.to_string()
             } else if d.vendor.trim().is_empty() {
                 NO_VENDOR.to_string()
@@ -785,7 +788,7 @@ fn entries(list: &[Available], prefs: &Prefs, missing: &HashSet<String>) -> Vec<
                 d.vendor.trim().to_string()
             };
             let uid = d.uid();
-            Entry { index: i, name: d.name.clone(), label, favorite: prefs.is_favorite(&uid), uid, vendor, format: d.format, category: category(d) }
+            Entry { index: i, name: d.name.clone(), label, favorite: prefs.is_favorite(&uid), uid, vendor, format: d.format, category: category(d), builtin }
         })
         .collect();
     v.sort_by_key(|e| e.label.to_lowercase());

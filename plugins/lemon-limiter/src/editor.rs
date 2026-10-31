@@ -461,7 +461,7 @@ impl Logic {
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
-                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
+                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(id.clone()));
                 // Automation belongs to the host: offered when Lemon Studio hosts the editor (host link).
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
@@ -844,7 +844,7 @@ mod win32 {
                     }
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Resizable | Cmd::SetSize | Cmd::Notes => 0,
             }
         }
 
@@ -1242,7 +1242,7 @@ mod tests {
             (Target::Knob("gain".into()), "Gain: 0.0dB  1.00"),
             (Target::Knob("g_thres".into()), "Noise threshold: -INFdB  0.00"),
             (Target::Knob("rel".into()), "Limiter release time: 85.53ms"),
-            (Target::Store, "Store in spare state"),
+            (Target::Store, "Copy to B"),
             (Target::Speed, "Scrolling speed"),
         ] {
             let (x, y) = centre(&l, &t);

@@ -68,6 +68,10 @@ pub enum Cmd {
     /// ([`pack_size`]). The plugin resizes its editor (to at least its smallest size) and answers 1; [`Cmd::Metrics`]
     /// then gives the size it took, and the frame follows.
     SetSize = 13,
+    /// Plugin -> host: notes for the plugin's channel in the current pattern (Lemon Slicer's dump), replacing the
+    /// channel's notes there. `lparam` = the token [`post_notes`] gave; the host takes the notes with [`take_notes`]
+    /// and answers 1; 0 = not handled (the plugin takes them back).
+    Notes = 14,
 }
 
 impl Cmd {
@@ -86,6 +90,7 @@ impl Cmd {
             11 => Cmd::Audio,
             12 => Cmd::Resizable,
             13 => Cmd::SetSize,
+            14 => Cmd::Notes,
             _ => return None,
         })
     }
@@ -104,6 +109,35 @@ pub fn post_audio(path: &str, channel: bool) {
 /// Host (or a plugin whose message went unanswered): the files posted since the last call, oldest first.
 pub fn take_audio() -> Vec<(String, bool)> {
     OUTBOX.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default()
+}
+
+/// A note for [`Cmd::Notes`]: start and end in beats from the pattern's start, key (60 = C5), velocity (0..=127).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NoteOut {
+    pub start: f64,
+    pub end: f64,
+    pub key: u8,
+    pub velocity: u8,
+}
+
+static NOTES: std::sync::Mutex<(isize, Vec<(isize, Vec<NoteOut>)>)> = std::sync::Mutex::new((0, Vec::new()));
+
+/// Plugin: notes for the host to take with the next [`Cmd::Notes`]; the token to send as its `lparam`.
+pub fn post_notes(notes: Vec<NoteOut>) -> isize {
+    let Ok(mut o) = NOTES.lock() else { return 0 };
+    o.0 = o.0 % 0x7fff_ffff + 1;
+    let token = o.0;
+    o.1.push((token, notes));
+    token
+}
+
+/// Host (or the plugin whose message went unanswered): the notes posted under `token` (empty when there are none).
+pub fn take_notes(token: isize) -> Vec<NoteOut> {
+    let Ok(mut o) = NOTES.lock() else { return Vec::new() };
+    match o.1.iter().position(|(t, _)| *t == token) {
+        Some(i) => o.1.remove(i).1,
+        None => Vec::new(),
+    }
 }
 
 /// The icon of a page tab. The ids are the protocol; the host maps them to its icon set.
@@ -527,6 +561,7 @@ mod tests {
         assert_eq!(Cmd::from_usize(Cmd::SetPage as usize), Some(Cmd::SetPage));
         assert_eq!(Cmd::from_usize(10), Some(Cmd::Automate));
         assert_eq!(Cmd::from_usize(13), Some(Cmd::SetSize));
+        assert_eq!(Cmd::from_usize(14), Some(Cmd::Notes));
         assert_eq!(PageIcon::from_id(99), PageIcon::Plugin);
         assert_eq!(unpack_note(pack_note(67, 100, true)), (67, 100, true));
         assert_eq!(unpack_note(pack_note(0, 0, false)), (0, 0, false));

@@ -110,8 +110,8 @@ impl Default for CitrusParams {
             edit: Mutex::new(None),
             previews: Mutex::new(Vec::new()),
             playing: [AtomicU64::new(0), AtomicU64::new(0)],
-            mod_x: FloatParam::new("Mod X", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }),
-            mod_y: FloatParam::new("Mod Y", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }),
+            mod_x: FloatParam::new("Mod A", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }),
+            mod_y: FloatParam::new("Mod B", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 }),
         }
     }
 }

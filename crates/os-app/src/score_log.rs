@@ -21,7 +21,7 @@ const KEEP: Duration = Duration::from_secs(30 * 60);
 pub const MINUTES: [u32; 5] = [2, 5, 10, 20, 30];
 
 /// The undo step of a dump.
-pub const DUMPED: &str = "Dump score log";
+pub const DUMPED: &str = "Capture MIDI";
 
 /// A logged note: what was played, on which channel (`Note::channel`), when it went down and up.
 #[derive(Debug, Clone, Copy)]

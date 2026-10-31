@@ -13,8 +13,9 @@
 //! covered too: their steps hold the commands that undo them (`Snap::Commands`), as do the interface's edits that go
 //! through `control::edit` (the mixer and its faders; the rack's channels added, moved and deleted, FILE ▸ Import ▸
 //! MIDI file into the open project among them; the tempo and Settings > Project's values), the plugin parameters
-//! Lemon Studio sets (`control::param_set`) and those moved in a plugin's own window (`control::param_edit`). The
-//! timebase has a step of its own (`timebase`), which brings back the ticks a lower timebase rounded.
+//! Lemon Studio sets (`control::param_set`), those moved in a plugin's own window (`control::param_edit`) and the
+//! presets loaded into a plugin from its window or dropped on it (`control::state_edit`). The timebase has a step of
+//! its own (`timebase`), which brings back the ticks a lower timebase rounded.
 //!
 //! The settings of General ▸ Undo history (`crate::prefs`): Maximum undo levels (past it the oldest step goes), Undo
 //! knob tweaks, Alternate undo mode (what Ctrl+Z and Ctrl+Alt+Z do), Show undo history in the browser when undoing
@@ -35,7 +36,7 @@ pub const LAST_RESET: &str = "Last reset";
 pub const STEP_SEQ_EDIT: &str = "Step seq edit";
 /// A sample loaded into a channel (FL's name; spec: ui/settings-choices.md "Undo history: the four checks").
 pub const LOAD_SAMPLE: &str = "Load channel sample(s)";
-/// "Create automation clip" (FL's name), with the control's initial value while "Initialize controls automatically" is
+/// "Create automation clip" (FL's name), with the control's initial value while "Set start values automatically" is
 /// on (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
 pub const CREATE_AUTOMATION: &str = "Create automation clip";
 /// A chord written by step edit (spec: ui/step-edit.md).
@@ -65,7 +66,7 @@ pub enum Snap {
     /// Mixer track `.0`'s audio input, output, record source and monitor mode (`MixerTrack::audio_in` ...); its armed
     /// state is no part of it (spec: audio/track-io.md §2.3).
     TrackIo(u16, [i32; 4]),
-    /// What a sample load changes on channel `row`: its sample, its name ("Auto name channels"), its root note and its
+    /// What a sample load changes on channel `row`: its sample, its name ("Name channels after their sample or plugin"), its root note and its
     /// stretch ("Read sample root note" and "Read sample tempo information", `rack::read_tags`) and its sampler flags
     /// (Keep on disk, "Auto keep long audio on disk").
     Sample { row: usize, path: Option<String>, name: Option<String>, root: u8, stretch: [u32; 4], flags: Option<u32> },
@@ -476,6 +477,25 @@ pub fn extend_newest(s: &mut State, f: impl FnOnce(&mut Vec<crate::control::Comm
     if h.done > 0 && h.done == h.steps.len() {
         if let Snap::Commands(c) = &mut h.steps[h.done - 1].snap {
             f(c);
+        }
+    }
+}
+
+/// The plugin state side numbered `fill` (`PluginSide::fill`), in whichever step holds it, takes the state and preset
+/// the app found in the plugin as it put the other side in (`App::host_commands`).
+pub fn fill_plugin_side(s: &mut State, fill: u64, state: &[u8], preset: Option<&std::path::Path>) {
+    use crate::control::command::Taken;
+    for st in &mut s.history.steps {
+        let Snap::Commands(v) = &mut st.snap else { continue };
+        for c in v {
+            if let crate::control::Command::Put(t) = c {
+                if let Taken::Plugin(_, side) = &mut **t {
+                    if side.fill == fill {
+                        (side.state, side.preset, side.fill) = (state.to_vec(), preset.map(Into::into), 0);
+                        return;
+                    }
+                }
+            }
         }
     }
 }

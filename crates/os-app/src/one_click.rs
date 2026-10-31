@@ -249,7 +249,7 @@ impl App {
 
     /// The take into Tesla on the master track: its first Tesla if that holds no sample, else a new one (spec:
     /// plugins/tesla/README.md "Recording into Tesla from Lemon Studio"). The file stays in `Recorded` either way.
-    fn take_to_editor(&mut self, path: &std::path::Path) -> String {
+    pub(crate) fn take_to_editor(&mut self, path: &std::path::Path) -> String {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let sample = match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| tesla::wav::read(&b)) {
             Ok(s) => s,
@@ -297,7 +297,7 @@ mod tests {
         assert!(v[0].enabled && v[0].cmd == Cmd::OneClickEditor && v[1].head && v[3].head);
         assert!(v.iter().all(|p| p.mark != Mark::Radio(true)), "nothing picked yet");
         capture::set_last_input(&Input { device: "Test ASIO".into(), asio: true, first: 1, stereo: false });
-        let v = submenu(TOOLS_MENU, "One-click audio recording").expect("TOOLS submenu")(&app.state);
+        let v = submenu(TOOLS_MENU, "Quick record").expect("TOOLS submenu")(&app.state);
         assert_eq!(v[5].mark, Mark::Radio(true), "In 2 dotted");
     }
 

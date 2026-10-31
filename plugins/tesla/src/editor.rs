@@ -25,7 +25,7 @@ use crate::doc::{Doc, Paste};
 use crate::peaks::Peaks;
 use crate::sample::{Format, Sample};
 use crate::state;
-use crate::tools::{self, Amp, Law};
+use crate::tools::{self, Amp, Law, Stretch};
 use crate::view::{self, AmpCtl, AmpUi, Bt, Hit, Layout, MenuId, Part, Shown, Target, Tr, ViewState};
 use crate::wav::{self, Depth};
 use crate::{Cmd as Play, Shared, TeslaParams};
@@ -133,6 +133,7 @@ fn out_path(title: &str) -> PathBuf {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolCmd {
     Amp,
+    Stretch,
     ReversePolarity,
     Normalize,
     FadeIn,
@@ -677,6 +678,7 @@ impl Logic {
             AmpCtl::Left => d.left,
             AmpCtl::Volume => d.volume,
             AmpCtl::Right => d.right,
+            AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant => 0.0,
             _ => return,
         };
         self.set_amp_value(c, v);
@@ -821,7 +823,7 @@ impl Logic {
 
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
         match self.at(x, y) {
-            Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right))) => {
+            Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant))) => {
                 let v = self.amp_value(c) + notches * 0.02;
                 self.set_amp_value(c, v.clamp(-1.0, 1.0));
                 self.hint = self.amp_hint(c);
@@ -901,6 +903,7 @@ impl Logic {
             (9, true) => Cmd::Tool(ToolCmd::Swap),
             (11, false) => Cmd::Tool(ToolCmd::FadeOut),
             (11, true) => Cmd::Tool(ToolCmd::DeclickOut),
+            (12, false) => Cmd::Tool(ToolCmd::Stretch),
             (16, false) => Cmd::Save(Depth::Own),
             (16, true) => Cmd::Save(Depth::Int24),
             (17, b) => Cmd::Send(b),
@@ -911,7 +914,7 @@ impl Logic {
 
     fn run_tool(&mut self, t: ToolCmd) -> Vec<Act> {
         let ok = self.doc(|d| match t {
-            ToolCmd::Amp => false,
+            ToolCmd::Amp | ToolCmd::Stretch => false,
             ToolCmd::ReversePolarity => d.tool("Reverse polarity", tools::reverse_polarity),
             ToolCmd::Normalize => {
                 let mut changed = false;
@@ -951,10 +954,11 @@ impl Logic {
             ToolCmd::DeclickInRegions => d.tool_regions("Declick in all regions", tools::declick_in),
             ToolCmd::DeclickOutRegions => d.tool_regions("Declick out all regions", tools::declick_out),
         });
-        if t == ToolCmd::Amp {
+        if t == ToolCmd::Amp || t == ToolCmd::Stretch {
             if self.doc(|d| d.frames()) > 0 {
-                self.view.amp = Some(AmpUi::default());
-                self.hint = "Amp: pan, volume and stereo separation of the selection".into();
+                let stretch = (t == ToolCmd::Stretch).then(Stretch::default);
+                self.view.amp = Some(AmpUi { stretch, ..AmpUi::default() });
+                self.hint = if stretch.is_some() { "Time stretch / pitch shift of the selection" } else { "Amp: pan, volume and stereo separation of the selection" }.into();
             }
         } else if ok {
             self.hint = self.doc(|d| d.history().first().cloned().unwrap_or_default());
@@ -976,7 +980,11 @@ impl Logic {
 
     fn amp_value(&self, c: AmpCtl) -> f32 {
         let a = self.view.amp.map(|a| a.amp).unwrap_or_default();
+        let st = self.view.amp.and_then(|a| a.stretch).unwrap_or_default();
         match c {
+            AmpCtl::Pitch => st.pitch,
+            AmpCtl::Time => st.time,
+            AmpCtl::Formant => st.formant,
             AmpCtl::Pan => a.pan,
             AmpCtl::Sep => a.sep,
             AmpCtl::Left => a.left,
@@ -988,6 +996,14 @@ impl Logic {
 
     fn set_amp_value(&mut self, c: AmpCtl, v: f32) {
         if let Some(ui) = &mut self.view.amp {
+            if let Some(st) = &mut ui.stretch {
+                match c {
+                    AmpCtl::Pitch => st.pitch = v,
+                    AmpCtl::Time => st.time = v,
+                    AmpCtl::Formant => st.formant = v,
+                    _ => {}
+                }
+            }
             let a = &mut ui.amp;
             match c {
                 AmpCtl::Pan => a.pan = v,
@@ -1020,17 +1036,34 @@ impl Logic {
                 };
                 format!("{name}: {:.0}%{}", g.abs() * 100.0, if g < 0.0 { " (inverted)" } else { "" })
             }
+            AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant => {
+                let st = self.view.amp.and_then(|a| a.stretch).unwrap_or_default();
+                match c {
+                    AmpCtl::Pitch => format!("Pitch: {:+.2} semitones", st.semitones()),
+                    AmpCtl::Time => format!("Length: x{:.3}", st.ratio()),
+                    _ if st.preserve => format!("Formant: {:+.2} semitones", st.formant_semitones()),
+                    _ => "Formant: moves with the pitch (formant preservation off)".into(),
+                }
+            }
             _ => view::hint(&Target::Amp(c), &view::HintCtx { when: 0, max: 0 }),
         }
     }
 
-    /// The Amp settings changed: a running preview is redone with them.
+    /// Applies the open panel's tool to the range: Amp, or Time stretch / pitch shift.
+    fn apply_panel(d: &mut Doc, ui: &AmpUi) -> bool {
+        match ui.stretch {
+            Some(st) => d.replace_range("Time stretch / pitch shift", |s, a, b| tools::stretch(s, a, b, &st)),
+            None => d.tool("Amp", |s, a, b| tools::amp(s, a, b, &ui.amp)),
+        }
+    }
+
+    /// The panel's settings changed: a running preview is redone with them.
     fn amp_changed(&mut self) {
         let Some(ui) = self.view.amp else { return };
         if ui.previewing {
             self.doc(|d| {
                 d.undo();
-                d.tool("Amp", |s, a, b| tools::amp(s, a, b, &ui.amp));
+                Self::apply_panel(d, &ui);
             });
         }
     }
@@ -1042,7 +1075,7 @@ impl Logic {
                 self.doc(|d| d.undo());
             }
             (false, true) => {
-                self.doc(|d| d.tool("Amp", |s, a, b| tools::amp(s, a, b, &ui.amp)));
+                self.doc(|d| Self::apply_panel(d, &ui));
             }
             _ => {}
         }
@@ -1057,7 +1090,13 @@ impl Logic {
 
     fn amp_down(&mut self, c: AmpCtl, y: f32, dbl: bool) -> Vec<Act> {
         match c {
-            AmpCtl::Pan | AmpCtl::Sep => {
+            AmpCtl::Preserve => {
+                if let Some(st) = self.view.amp.as_mut().and_then(|u| u.stretch.as_mut()) {
+                    st.preserve = !st.preserve;
+                }
+                self.amp_changed();
+            }
+            AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant => {
                 if dbl {
                     self.set_amp_value(c, 0.0);
                     self.amp_changed();
@@ -1079,6 +1118,7 @@ impl Logic {
             AmpCtl::Reset => {
                 if let Some(ui) = &mut self.view.amp {
                     ui.amp = Amp::default();
+                    ui.stretch = ui.stretch.map(|_| Stretch::default());
                 }
                 self.amp_changed();
             }
@@ -1089,7 +1129,7 @@ impl Logic {
                     self.shared.send(Play::Pause);
                 } else {
                     let r = self.doc(|d| {
-                        d.tool("Amp", |s, a, b| tools::amp(s, a, b, &ui.amp));
+                        Self::apply_panel(d, &ui);
                         d.range()
                     });
                     if let Some((a, b)) = r {
@@ -1169,6 +1209,7 @@ impl Logic {
             Key::Char('C') if s => Cmd::Send(false),
             Key::Char('C') if !a => Cmd::ClickFree,
             Key::Char('A') if a => Cmd::Tool(ToolCmd::Amp),
+            Key::Char('T') if a => Cmd::Tool(ToolCmd::Stretch),
             Key::Char('A') if c => Cmd::SelectZoomed,
             Key::Char('N') if c => Cmd::Tool(ToolCmd::Normalize),
             Key::Char('F') if c => Cmd::Tool(ToolCmd::FadeIn),
@@ -1340,6 +1381,7 @@ impl Logic {
                 t(&mut m, "Center", "", ToolCmd::Center, has);
                 m.head("Time", Cmd::None);
                 t(&mut m, "Reverse", "Alt+Left", ToolCmd::Reverse, has);
+                t(&mut m, "Time stretch / pitch shift...", "Alt+T", ToolCmd::Stretch, has);
                 m.head("Channels", Cmd::None);
                 t(&mut m, "Swap channels", "", ToolCmd::Swap, has && stereo);
                 t(&mut m, "Convert left channel to mono", "", ToolCmd::LeftToMono, has && stereo);
@@ -1353,7 +1395,7 @@ impl Logic {
                 t(&mut m, "Declick in all regions", "", ToolCmd::DeclickInRegions, regions);
                 t(&mut m, "Declick out all regions", "", ToolCmd::DeclickOutRegions, regions);
                 m.head("Sequencing", Cmd::None);
-                m.add(item("Send to playlist as audio clip").shortcut("Shift+C").enabled(has), Cmd::Send(false));
+                m.add(item("Send to arranger as audio clip").shortcut("Shift+C").enabled(has), Cmd::Send(false));
                 m.add(item("Send to selected channel").enabled(has), Cmd::Send(true));
             }
             MenuId::Regions => {
@@ -2189,7 +2231,7 @@ mod win32 {
                     self.run(acts);
                     1
                 }
-                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio => 0,
+                Cmd::Changed | Cmd::Note | Cmd::Automate | Cmd::Audio | Cmd::Notes => 0,
             }
         }
 
@@ -2767,6 +2809,75 @@ mod tests {
         assert_eq!(l.doc(|d| d.history()[0].clone()), "Amp");
     }
 
+    /// Time stretch / pitch shift (the tool grid's stretch button, Alt+T): the panel's Time knob sets the new length
+    /// of the selection, the marker after it moves with the audio, Accept is one undo step, and the pitch knob shifts
+    /// a tone by its semitones.
+    #[test]
+    fn time_stretch_and_pitch_shift() {
+        let mut l = logic();
+        let mut s = sine(44100);
+        s.add_cue("after", 30000, None);
+        load(&mut l, s);
+        l.doc(|d| d.select(10000, 19999));
+        let (x, y) = centre(&l, Target::Tool(12));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert!(l.view.amp.is_some_and(|a| a.stretch.is_some()), "the stretch panel is open");
+        paint(&mut l);
+        // Time +0.5: twice as long.
+        l.set_amp_value(AmpCtl::Time, 0.5);
+        assert_eq!(l.amp_hint(AmpCtl::Time), "Length: x2.000");
+        let (x, y) = centre(&l, Target::Amp(AmpCtl::Accept));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(l.view.amp.is_none());
+        assert_eq!(l.doc(|d| (d.frames(), d.sel, d.sample.cues[0].pos)), (54100, Some((10000, 29999)), 40000));
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Time stretch / pitch shift");
+        l.doc(|d| d.undo());
+        assert_eq!(l.doc(|d| d.frames()), 44100);
+        // Pitch +12 over the whole sample: the tone's zero crossings double, the length stays.
+        l.doc(|d| d.sel = None);
+        let crossings = |l: &mut Logic| l.doc(|d| d.sample.ch[0][8000..36000].windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count());
+        let before = crossings(&mut l);
+        l.key(Key::Char('T'), Mods { alt: true, ..Mods::default() });
+        paint(&mut l);
+        l.set_amp_value(AmpCtl::Pitch, 0.5);
+        assert_eq!(l.amp_hint(AmpCtl::Pitch), "Pitch: +12.00 semitones");
+        let (x, y) = centre(&l, Target::Amp(AmpCtl::Accept));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        let after = crossings(&mut l);
+        assert_eq!(l.doc(|d| d.frames()), 44100);
+        assert!((after as f32 / before as f32 - 2.0).abs() < 0.05, "{before} -> {after}");
+    }
+
+    /// Formant preservation (the panel's switch) changes how a pitch shift sounds; the Formant knob only says
+    /// "with pitch" while it is off.
+    #[test]
+    fn formant_preservation() {
+        // A buzz: a pulse train has formant-like harmonics for the stretcher to keep.
+        let ch: Vec<f32> = (0..44100).map(|i| if i % 200 < 4 { 0.8 } else { 0.0 }).collect();
+        let shifted = |preserve: bool| {
+            let mut l = logic();
+            load(&mut l, Sample::from_channels(44100, vec![ch.clone()], Format::Float32));
+            l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Stretch), 0.0, 0.0);
+            paint(&mut l);
+            l.set_amp_value(AmpCtl::Pitch, 0.25);
+            if preserve {
+                assert_eq!(l.amp_hint(AmpCtl::Formant), "Formant: moves with the pitch (formant preservation off)");
+                let (x, y) = centre(&l, Target::Amp(AmpCtl::Preserve));
+                l.down(x, y, Btn::Left, Mods::default(), false);
+                assert_eq!(l.amp_hint(AmpCtl::Formant), "Formant: +0.00 semitones");
+            }
+            let (x, y) = centre(&l, Target::Amp(AmpCtl::Accept));
+            l.down(x, y, Btn::Left, Mods::default(), false);
+            l.doc(|d| (d.sample.channels(), d.history()[0].clone(), d.sample.ch[0].clone()))
+        };
+        let (plain, kept) = (shifted(false), shifted(true));
+        assert_eq!((plain.0, kept.0), (1, 1), "a mono sample stays mono");
+        assert_eq!((plain.1.as_str(), kept.1.as_str()), ("Time stretch / pitch shift", "Time stretch / pitch shift"));
+        let diff: f32 = plain.2.iter().zip(&kept.2).map(|(a, b)| (a - b).abs()).sum::<f32>() / plain.2.len() as f32;
+        assert!(diff > 1e-3, "preservation changes the sound ({diff})");
+    }
+
     #[test]
     fn flags_move_and_resizing_keeps_a_minimum() {
         let mut l = logic();
@@ -2893,6 +3004,13 @@ mod tests {
         l.doc(|d| d.view.spectrum = false);
         l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Amp), 0.0, 0.0);
         save(&mut l, "tesla_amp", 1.0);
+        l.view.amp = None;
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Stretch), 0.0, 0.0);
+        l.set_amp_value(AmpCtl::Pitch, 0.125);
+        l.set_amp_value(AmpCtl::Time, 0.25);
+        l.view.amp.as_mut().unwrap().stretch.as_mut().unwrap().preserve = true;
+        save(&mut l, "tesla_stretch", 1.0);
+        save(&mut l, "tesla_stretch_x2", 2.0);
         l.view.amp = None;
         l.shared.armed.store(true, Ordering::Relaxed);
         l.shared.size.0.store(1000, Ordering::Relaxed);
