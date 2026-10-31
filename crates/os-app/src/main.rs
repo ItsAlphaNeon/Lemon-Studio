@@ -1653,7 +1653,7 @@ fn screenshot(args: &[String]) {
         // Set without keeping them (`cpu_panel.txt` stays as the user left it).
         app.state.cpu.fps_view = v == "fps";
         app.state.cpu.misc = v == "misc";
-        app.state.cpu.update(Instant::now(), None, 0, 0);
+        app.state.cpu.update(Instant::now(), None, 0, 0, 0);
     }
     // No "Opened <path>" in the title: the frame shows the project, not where it lives on disk.
     app.state.message = None;

@@ -658,7 +658,7 @@ fn cpu(ui: &mut Ui, c: &Ctx) {
         ui.c.text_right(Font::condensed(18, 6), a.x(1166.0), a.y(17.0), t.glyph, &r.voices.to_string());
     }
     if r.dropouts > 0 {
-        ui.c.text_right(Font::condensed(18, 6), a.x(1199.0), a.y(17.0), t.meter_clip, &format!("!{}", r.dropouts.min(9999)));
+        ui.c.text_right(Font::condensed(18, 6), a.x(1199.0), a.y(17.0), if r.lit { t.meter_clip } else { t.text_dim }, &format!("!{}", r.dropouts.min(9999)));
     }
 }
 
@@ -958,13 +958,15 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let ty = (cy - ui.c.line_height(small) / 2.0).round();
     ui.c.text_right(small, x, ty, t.text_dim, &mem);
     ui.c.text_right(small, x - mw - 10.0, ty, level, &load);
-    // The dropouts since the program started (as the classic CPU panel counts them), in red, in a slot of their own
-    // left of the load (empty while there are none).
+    // The dropouts since the program started (as the classic CPU panel counts them), in a slot of their own left of the
+    // load (empty while there are none): quiet, but for a moment after one is heard.
     let drops = cpu.dropouts;
     let dl = format!("!{}", drops.min(9999));
     let dw = ui.c.text_width(small, &dl).max(ui.c.text_width(small, "!888"));
     let dx = x - mw - 10.0 - lw - 8.0;
-    if drops > 0 {
+    if drops > 0 && !cpu.lit {
+        ui.c.text_right(small, dx, ty, t.text_dim, &dl);
+    } else if drops > 0 {
         // A red pill: it should catch the eye.
         let tw = ui.c.text_width(small, &dl);
         let pill = Rect::new((dx - tw - 6.0).round(), (cy - 9.0).round(), (tw + 12.0).round(), 18.0);
@@ -975,6 +977,7 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let hint = match drops {
         0 => "CPU load and memory, no dropouts - double-click for the performance monitor".to_string(),
         1 => "CPU load and memory, 1 dropout since the start - double-click for the performance monitor".to_string(),
+        n if cpu.heard > 0 => format!("CPU load and memory, {n} dropouts since the start, {} heard - double-click for the performance monitor", cpu.heard),
         n => format!("CPU load and memory, {n} dropouts since the start - double-click for the performance monitor"),
     };
     ui.hit(cpu_r, Action::CpuPanel, hint);

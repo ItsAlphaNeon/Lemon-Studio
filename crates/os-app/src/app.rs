@@ -4463,15 +4463,16 @@ impl App {
             let load = tp.playing().then(|| tp.load()).filter(|_| !tp.paused());
             // Every stream's engine voices and every hosted instrument's (spec: audio/voices.md §5).
             let voices = tp.engine_voices() + self.plugins.voices();
-            // The dropouts heard (over sound); the audio log has every one.
-            let dropouts = tp.heard_dropouts();
+            // Every dropout, and those heard (over sound), each of which turns the count red for a moment.
+            let heard = tp.heard_dropouts();
+            let dropouts = tp.underruns().max(heard);
             if self.state.shown(Win::Perf) {
                 let src = self.perf_sources();
                 if self.state.perf.read(now, src) {
                     self.damage_win(Win::Perf);
                 }
             }
-            if self.state.cpu.update(now, load, voices, dropouts) {
+            if self.state.cpu.update(now, load, voices, dropouts, heard) {
                 self.damage_band(CPU_RECT);
                 let (x, y) = self.mouse;
                 if self.top_hit(x, y).is_some_and(|h| h.action == Action::CpuPanel) {
@@ -14083,7 +14084,7 @@ mod tests {
         let mut app = App::new(None);
         frame(&mut app, &mut c, None);
         let r = hit_rect(&app, &Action::CpuPanel);
-        assert!(app.state.cpu.update(std::time::Instant::now(), Some(0.25), 3, 0));
+        assert!(app.state.cpu.update(std::time::Instant::now(), Some(0.25), 3, 0, 0));
         app.mouse_move(r.cx(), r.cy());
         assert!(app.hint.contains("Audio load 25%") && app.hint.contains("3 voices"), "{}", app.hint);
         // One click does nothing; the menu's Audio settings opens the Audio tab.
@@ -14350,11 +14351,11 @@ mod tests {
         app.state.cpu.frame();
         app.state.cpu.frame();
         let t0 = Instant::now();
-        assert!(app.state.cpu.update(t0, None, 4, 0));
+        assert!(app.state.cpu.update(t0, None, 4, 0, 0));
         assert!(app.state.cpu.hint().contains("frames per second"), "{}", app.state.cpu.hint());
         app.cpu_cmd(CpuCmd::Fps(false));
         app.cpu_cmd(CpuCmd::Misc);
-        assert!(app.state.cpu.update(t0, None, 4, 0), "a reading comes at once after a change");
+        assert!(app.state.cpu.update(t0, None, 4, 0, 0), "a reading comes at once after a change");
         let m = app.state.cpu.now.misc.expect("Misc reads the counts");
         assert!(m.threads > 0 && m.fonts > 0, "{m:?}");
         #[cfg(windows)]
@@ -14363,7 +14364,7 @@ mod tests {
         frame(&mut app, &mut c, None);
         app.cpu_cmd(CpuCmd::Misc);
         app.cpu_cmd(CpuCmd::Refresh(Refresh::Slow));
-        assert!(app.state.cpu.update(t0, None, 0, 0));
+        assert!(app.state.cpu.update(t0, None, 0, 0, 0));
         assert!(!app.state.cpu.due(t0 + Duration::from_millis(500)) && app.state.cpu.due(t0 + Duration::from_millis(1000)));
         // Double click: the monitor, with a row for each hosted instance.
         app.plugins = crate::plugins::Plugins::default();

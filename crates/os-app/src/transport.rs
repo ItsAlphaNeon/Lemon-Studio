@@ -917,8 +917,8 @@ impl Transport {
         self.shared.underruns.load(Ordering::Relaxed)
     }
 
-    /// The dropouts heard since the program started: those that cut into sound (`Shared::heard`). What the status bar
-    /// shows; `underruns` and `drops` count every one, for the audio log.
+    /// The dropouts heard since the program started: those that cut into sound (`Shared::heard`). Each one turns the
+    /// status bar's count of `underruns` red for a moment; `drops` has every one by kind, for the audio log.
     pub fn heard_dropouts(&self) -> u64 {
         self.shared.heard.load(Ordering::Relaxed)
     }
