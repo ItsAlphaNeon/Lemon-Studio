@@ -199,7 +199,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     let _ = work;
     for (i, &win) in s.z.iter().enumerate() {
-        if docked_at.is_some_and(|d| i < d) {
+        // A detached window paints in its own native window (`paint_detached`).
+        if docked_at.is_some_and(|d| i < d) || s.is_detached(win) {
             continue;
         }
         ui.win = Some(win);
@@ -258,14 +259,16 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     // A menu opened from the settings window (Audio page combos) goes over it; a dropdown's submenu over the dropdown;
     // the time signature dialog's value lists over the dialog.
     let over_dialog = crate::timesig::form_open(s);
-    if !s.settings.open && !over_dialog {
+    // The popups and boxes opened from a detached window are in that window (`paint_detached`).
+    let here = !s.overlay_on.is_some_and(|w| s.is_detached(w) && s.shown(w));
+    if !s.settings.open && !over_dialog && here {
         playlist::paint_overlays(ui, s);
     }
     rack::paint_fill(ui, s);
     patterns::paint(ui, s);
     if s.settings.open {
         settings::paint(ui, s);
-        if !over_dialog {
+        if !over_dialog && here {
             playlist::paint_overlays(ui, s);
         }
     }
@@ -284,7 +287,33 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
     dialog::paint(ui, s);
-    if over_dialog {
+    if over_dialog && here {
+        playlist::paint_overlays(ui, s);
+    }
+    overlays
+}
+
+/// Detached window `w` (Options ▸ Detached, Lemon Studio's design: spec ui/mixer.md §6.2), painted whole into its own
+/// native window's canvas: the window, then the popups and boxes opened from it (`State::overlay_on`). Returns where
+/// the overlays' hits start, as `paint` does.
+pub fn paint_detached(ui: &mut Ui, s: &State, f: &FrameInfo, w: Win) -> usize {
+    ui.c.clear(ui.t.workspace);
+    let r = s.win_rect(w);
+    let a = paint_area(s, w);
+    ui.win = Some(w);
+    ui.c.push_clip(a);
+    match w {
+        Win::Mixer => mixer::paint(ui, s, r, f),
+        Win::ChannelRack => rack::paint(ui, s, f),
+        _ => {}
+    }
+    ui.c.pop_clip();
+    ui.win = None;
+    let overlays = ui.hit_count();
+    if s.overlay_on == Some(w) {
+        if w == Win::ChannelRack {
+            rack::paint_fill(ui, s);
+        }
         playlist::paint_overlays(ui, s);
     }
     overlays
