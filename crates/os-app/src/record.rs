@@ -6,7 +6,7 @@
 //! keyboard, a MIDI keyboard or the Touch controller are written into the current pattern for the selected channel,
 //! each as long as it was held, and channel volume / pan knob moves become the pattern's control points. A take (from its first note to the stop, a pause, disarming or a pattern change) is one
 //! undo step and replaces the pattern's earlier notes that start inside it. The right-click menu's checks are program
-//! settings in `settings.txt`; the arm itself is not saved.
+//! settings in `settings.txt`, also shown on Settings ▸ Recording (`crate::prefs`); the arm itself is not saved.
 // spec: ui/recording.md
 
 use crate::app::{App, State};
@@ -59,34 +59,33 @@ pub enum RecCmd {
 }
 
 impl Opt {
-    fn key(self) -> (&'static str, bool) {
+    /// Its program setting, also on Settings ▸ Recording (`crate::prefs`, spec: ui/settings.md "Recording").
+    pub fn check(self) -> &'static crate::prefs::Check {
+        use crate::prefs as p;
         match self {
-            Opt::Notes => ("rec_notes", true),
-            Opt::Automation => ("rec_automation", true),
-            Opt::Audio => ("rec_audio", false),
-            Opt::StartsPlayback => ("rec_starts_play", false),
-            Opt::DisarmOnStop => ("rec_disarm_stop", false),
-            Opt::QuantizeStart => ("rec_q_start", true),
-            Opt::QuantizeEnd => ("rec_q_end", true),
-            Opt::Wait => ("rec_wait", false),
-            Opt::WaitFilter => ("rec_wait_filter", true),
-            Opt::WaitArmed => ("rec_wait_armed", false),
-            Opt::Precount => ("rec_precount", false),
-            Opt::Blend => ("rec_blend", false),
-            Opt::Loop => ("rec_loop", false),
-            Opt::Ask => ("rec_ask", true),
+            Opt::Notes => &p::REC_NOTES,
+            Opt::Automation => &p::REC_AUTOMATION,
+            Opt::Audio => &p::REC_AUDIO,
+            Opt::StartsPlayback => &p::REC_STARTS_PLAYBACK,
+            Opt::DisarmOnStop => &p::REC_DISARM_ON_STOP,
+            Opt::QuantizeStart => &p::REC_QUANTIZE_START,
+            Opt::QuantizeEnd => &p::REC_QUANTIZE_END,
+            Opt::Wait => &p::REC_WAIT,
+            Opt::WaitFilter => &p::REC_WAIT_FILTER,
+            Opt::WaitArmed => &p::REC_WAIT_ARMED,
+            Opt::Precount => &p::REC_COUNT_IN,
+            Opt::Blend => &p::REC_BLEND,
+            Opt::Loop => &p::REC_LOOP,
+            Opt::Ask => &p::REC_ASK,
         }
     }
 
     pub fn on(self) -> bool {
-        let (k, d) = self.key();
-        crate::settings_file::flag(k, d)
+        crate::prefs::check(self.check())
     }
 
     pub fn toggle(self) -> bool {
-        let on = !self.on();
-        crate::settings_file::set_flag(self.key().0, on);
-        on
+        crate::prefs::toggle(self.check())
     }
 }
 
@@ -97,13 +96,13 @@ pub fn hint() -> String {
     format!("Record ({what}) (R) - right-click for options")
 }
 
-/// Recording precount's length in bars: 1 or 2 (spec §3), in `settings.txt`.
+/// Recording precount's length in bars: 1 or 2 (spec §3), Settings ▸ Recording's Count-in length.
 pub fn precount_bars() -> u32 {
-    if crate::settings_file::get("rec_precount_bars").as_deref() == Some("2") { 2 } else { 1 }
+    crate::prefs::index(&crate::prefs::COUNT_IN_LENGTH) as u32 + 1
 }
 
 pub fn set_precount_bars(bars: u32) {
-    crate::settings_file::write("rec_precount_bars", if bars == 2 { "2" } else { "1" });
+    crate::prefs::set_choice(&crate::prefs::COUNT_IN_LENGTH, if bars == 2 { 1 } else { 0 });
 }
 
 /// The three option buttons' hints (spec §3).

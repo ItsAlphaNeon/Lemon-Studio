@@ -482,9 +482,6 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
 // ---------------------------------------------------------------------------------------------------------
 // Audio inputs and outputs (spec: audio/track-io.md)
 
-/// `settings.txt`'s answer to the External input question once Remember my choice was ticked: "yes" or "no".
-pub const EXT_INPUT_ANSWER: &str = "ext_input_answer";
-
 /// The record sources (event 165) with their menu names and the label under the record-source icon (§2.3).
 pub const REC_SOURCES: [(&str, &str); 6] = [
     ("External input only", "EXT"),
@@ -1371,7 +1368,7 @@ fn trim_items(s: &State) -> Vec<PItem> {
 pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     let mut items = vec![
         PItem::head("Options"),
-        PItem::sub("Disk recording", vec![PItem::new("Auto-create audio clips", Cmd::Mixer(MCmd::AutoClips)).mark(Mark::Check(crate::settings_file::flag(crate::track_rec::AUTO_CLIPS, true)))]),
+        PItem::sub("Disk recording", vec![PItem::new("Auto-create audio clips", Cmd::Mixer(MCmd::AutoClips)).mark(Mark::Check(crate::prefs::check(&crate::prefs::AUTO_AUDIO_CLIPS)))]),
         PItem::sub("Plugin delay compensation", vec![PItem::not_yet("Automatic")]),
         PItem::not_yet("Link all parameters..."),
         PItem::sub("View", vec![PItem::not_yet("Waveforms"), PItem::not_yet("Extra properties")]),
@@ -1623,8 +1620,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             None
         }
         MCmd::AutoClips => {
-            let on = !crate::settings_file::flag(crate::track_rec::AUTO_CLIPS, true);
-            crate::settings_file::set_flag(crate::track_rec::AUTO_CLIPS, on);
+            let on = crate::prefs::toggle(&crate::prefs::AUTO_AUDIO_CLIPS);
             Some(format!("Auto-create audio clips {}", if on { "on" } else { "off" }))
         }
         MCmd::AltSolo(n) => {
@@ -2004,9 +2000,10 @@ impl App {
     /// The External input question for track `t` (spec: audio/track-io.md §1.4), unless Remember my choice answered it.
     pub(crate) fn ask_external(&mut self, t: u16) {
         use crate::dialog::{spans, Answer, Kind, Msg, Then};
-        match crate::prefs::text(EXT_INPUT_ANSWER).as_deref() {
-            Some("yes") => external_only(&mut self.state, t),
-            Some("no") => {}
+        // Settings ▸ Recording's External input question: Ask, Switch to External input only, Keep the record source.
+        match crate::prefs::index(&crate::prefs::EXTERNAL_INPUT) {
+            1 => external_only(&mut self.state, t),
+            2 => {}
             _ => {
                 let text = "You've selected an external input. Do you want to switch to External input only to avoid recording internal audio on this track?";
                 let mut m = Msg::new(Kind::Question, "External input", spans(&[text]), &[Answer::Yes, Answer::No], Then::ExtInput(t));
@@ -2233,11 +2230,11 @@ mod tests {
         run(&mut a, MCmd::Input(2, 1));
         a.dialog_click(DHit::Remember);
         a.dialog_click(DHit::Button(1));
-        assert_eq!(crate::prefs::text(EXT_INPUT_ANSWER).as_deref(), Some("no"));
+        assert_eq!(crate::prefs::choice(&crate::prefs::EXTERNAL_INPUT), "Keep the record source");
         run(&mut a, MCmd::Input(3, 1));
         assert!(a.state.dialogs.is_empty());
         assert_eq!(track(&a.state, 3).unwrap().rec_source, os_model::REC_POST_EQ);
-        crate::prefs::set_text(EXT_INPUT_ANSWER, "");
+        crate::prefs::set_choice(&crate::prefs::EXTERNAL_INPUT, 0);
         // The edits undo; arming is kept through them.
         hit(&mut a, MHit::Arm(3));
         run(&mut a, MCmd::Monitor(3, os_model::MONITOR_ON));

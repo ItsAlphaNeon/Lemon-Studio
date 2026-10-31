@@ -526,7 +526,7 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 ## 🚧 Settings
 
-- The General, Audio, MIDI, File, Theme, Project and Info pages work: the controls that are not greyed out act, but for
+- Every page works: MIDI, Audio, Recording, General, File, Plugins, Theme, Project and Info. The controls that are not greyed out act, but for
   a few that are only kept for now (Smart disable, Resampling quality and others Lemon Studio has nothing to change
   with yet); the program's choices are kept in `settings.txt` in the user folder
 - General ▸ Input ▸ Manage shortcuts: the F8 keys (browser, plugin picker, plugin database) and the audio clip
@@ -537,4 +537,7 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
   leave an arrow
 - General ▸ System ▸ Associate project files (Windows): `.flp` files open with Lemon Studio, for your user
   only, and unticking puts the previous program back
-- Not yet: the recording settings
+- Recording, Lemon Studio's own page (the original has none): the recording filter, the Record button's options and
+  quantize, Start on input and its checks, Loop record, Blend, Count-in and its length, Auto-create audio clips and
+  the External input question's answer, each the same setting as the menu or button it is also set from, and where
+  recordings go

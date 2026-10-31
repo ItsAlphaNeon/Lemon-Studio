@@ -1375,7 +1375,7 @@ fn screenshot(args: &[String]) {
                 }
             }
             // The wheel turned `dy` notches at x,y after the first paint, before the clicks (scrolls a page, e.g.
-            // `--settings 5 --wheel 960,500,-40` shows the Theme page's buttons); may be given more than once.
+            // `--settings 6 --wheel 960,500,-40` shows the Theme page's buttons); may be given more than once.
             "--wheel" => {
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
                 if let [x, y, dy] = v[..] {
@@ -1385,7 +1385,7 @@ fn screenshot(args: &[String]) {
             "--lane" => lane = it.next().and_then(|v| v.parse().ok()),
             "--pans" => pans = it.next().map(|v| v.split(',').filter_map(|p| p.parse().ok()).collect()),
             "--settings" => settings = it.next().and_then(|v| v.parse().ok()),
-            // With --settings 7: that Info box (0 title .. 4 web link) being edited.
+            // With --settings 8: that Info box (0 title .. 4 web link) being edited.
             "--info-edit" => info_edit = it.next().and_then(|v| v.parse().ok()),
             "--lane-menu" => lane_menu = true,
             "--menu" => menu = it.next().and_then(|v| v.parse().ok()),

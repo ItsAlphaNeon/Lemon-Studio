@@ -469,9 +469,9 @@ impl App {
         self.modal_changed();
         let then = match m.body {
             Body::Msg(m) => {
-                // The External input question remembers either answer (`mixer::EXT_INPUT_ANSWER`).
+                // The External input question remembers either answer (`prefs::EXTERNAL_INPUT`, Settings ▸ Recording).
                 if let (Then::ExtInput(_), Some((_, true)), Reply::Button(a @ (Answer::Yes | Answer::No))) = (&m.then, m.remember, &reply) {
-                    crate::prefs::set_text(crate::mixer::EXT_INPUT_ANSWER, if *a == Answer::Yes { "yes" } else { "no" });
+                    crate::prefs::set_choice(&crate::prefs::EXTERNAL_INPUT, if *a == Answer::Yes { 1 } else { 2 });
                 }
                 // Ok with Remember my choice ticked turns the message off; Cancel never does.
                 else if let Some((entry, true)) = m.remember {
