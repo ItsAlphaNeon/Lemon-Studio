@@ -8659,6 +8659,8 @@ impl App {
                 self.state.message = Some(format!("Opening {url}"));
             }
             MenuCmd::SaveMidiClip => self.save_midi_clipboard(),
+            MenuCmd::SaveAudioClip => self.save_audio_clipboard(),
+            MenuCmd::Diagnostics => self.save_diagnostics(),
             MenuCmd::NewPattern => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
                 if let Some(m) = crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindFirst, at) {
@@ -18672,7 +18674,7 @@ mod tests {
     /// The menu bar's ways into the browser (spec: ui/browser-commands.md): VIEW's Browser entries show the browser on
     /// the Current project tab with only their section open, and selected; Plugin database (ADD > Browse plugin
     /// database, Shift+F8) shows that tab as it was left; Browser find (Ctrl+F) focuses the search field as a click
-    /// does. Text fields keep their keys; History and Remote control are not in the tree, their entries stay greyed out.
+    /// does. Text fields keep their keys.
     #[test]
     fn browser_commands_jump_into_the_browser() {
         use crate::views::browser::{project_root, rows, section_key, PLUGIN_TAB, PROJECT_TAB};
@@ -18696,7 +18698,7 @@ mod tests {
         assert!(s.browser_open.contains(&project_root()) && s.browser_open.contains(&pats) && !s.browser_open.contains(&gens));
         app.menu_item(VIEW, index(VIEW, "Effects in use"));
         let open: Vec<(String, Option<bool>)> = rows(&app.state).into_iter().filter(|r| r.depth == 1).map(|r| (r.label, r.open)).collect();
-        assert_eq!(open, [("History".into(), Some(false)), ("Patterns".into(), Some(false)), ("Effects".into(), Some(true)), ("Generators".into(), Some(false)), ("Samples".into(), Some(false))]);
+        assert_eq!(open, [("History".into(), Some(false)), ("Patterns".into(), Some(false)), ("Effects".into(), Some(true)), ("Generators".into(), Some(false)), ("Remote control".into(), Some(false)), ("Samples".into(), Some(false))]);
         assert_eq!(app.state.browser_sel.as_ref(), Some(&fx));
         app.menu_item(VIEW, index(VIEW, "Instruments in use"));
         assert_eq!(app.state.browser_sel.as_ref(), Some(&gens));
@@ -18740,9 +18742,8 @@ mod tests {
         crate::patterns::run(&mut app.state, crate::patterns::Cmd::Rename, (0.0, 0.0));
         app.key(&Key::Character("f".into()), true, false);
         assert!(!app.state.browser_search_focus);
-        // Greyed out: the section the tree does not list. Undo history works: the tree lists History.
+        // Undo history works: the tree lists History.
         assert!(works(VIEW, item_at(VIEW, index(VIEW, "Undo history")).unwrap()));
-        assert!(!works(VIEW, item_at(VIEW, index(VIEW, "Remote control")).unwrap()));
         // ADD > Browse all installed plugins: the Plugin database's Installed opened and selected; Browse presets: the
         // All tab's Plugin presets (spec: ui/browser-commands.md §2).
         app.state.show_browser = false;

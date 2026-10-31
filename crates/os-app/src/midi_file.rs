@@ -457,10 +457,12 @@ pub fn pattern_file(p: &Project, n: u16, ch: u16, tempo: f64) -> Smf {
     Smf { format: 1, ppq: p.ppq, tracks: vec![Track { events: conductor }, Track { events }] }
 }
 
-/// The user folder's "Clipboard files" (tests: a temporary folder).
-fn clipboard_dir() -> Option<PathBuf> {
+/// The user folder's "Clipboard files" (tests: a temporary folder of the test's own thread, so that two tests saving
+/// clipboards never share one).
+pub(crate) fn clipboard_dir() -> Option<PathBuf> {
     if cfg!(test) {
-        return Some(std::env::temp_dir().join(format!("lemon-clipboard-{}", std::process::id())));
+        let thread = format!("{:?}", std::thread::current().id()).chars().filter(char::is_ascii_digit).collect::<String>();
+        return Some(std::env::temp_dir().join(format!("lemon-clipboard-{}-{thread}", std::process::id())));
     }
     os_paths::user_dir().map(|d| d.join("Clipboard files"))
 }

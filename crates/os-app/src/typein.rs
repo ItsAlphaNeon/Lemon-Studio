@@ -151,8 +151,16 @@ fn opening_norm(t: Target, remembered: bool) -> bool {
 
 /// The caption under the field (spec §6, §7).
 pub fn caption(s: &State, t: Target) -> String {
-    let name = match t {
-        Target::Knob(KnobId::MasterPitch) => return "Master pitch (Hz)".into(),
+    match t {
+        Target::Knob(KnobId::MasterPitch) => "Master pitch (Hz)".into(),
+        _ => format!("Value for {}", target_name(s, t)),
+    }
+}
+
+/// What a target is called: "Bus 1 - Volume", "Channel volume", a plugin parameter's name (`crate::remote::label`
+/// names the owner of every kind).
+pub fn target_name(s: &State, t: Target) -> String {
+    match t {
         Target::Knob(k @ (KnobId::MixPan(m) | KnobId::MixSep(m) | KnobId::SlotMix(m, _))) => {
             let label = if let KnobId::MixSep(_) = k { "Stereo separation".to_string() } else { knob_label(s, k) };
             format!("{} - {label}", crate::mixer::name(s, m))
@@ -163,8 +171,7 @@ pub fn caption(s: &State, t: Target) -> String {
         Target::Latency(m, input, u) => format!("{} - {} latency ({})", crate::mixer::name(s, m), if input { "Input" } else { "Track" }, u.name()),
         Target::RackTrack(_) => "Target mixer track".into(),
         Target::RackLed(_) => "Channel on / off".into(),
-    };
-    format!("Value for {name}")
+    }
 }
 
 /// The knob's hint text up to its colon ("Channel volume").
