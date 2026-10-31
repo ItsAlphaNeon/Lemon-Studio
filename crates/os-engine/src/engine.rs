@@ -6905,7 +6905,6 @@ mod tests {
         }
     }
 
-<<<<<<< HEAD
     /// A pitch knob moved while a note plays (`set_channel_pitch`, a controller's pitch wheel) moves the sounding note at
     /// once, as an engine built with that pitch plays it.
     #[test]
@@ -6923,7 +6922,8 @@ mod tests {
         e.render_ticks(192, &mut after);
         let f = hz(&left(&after, 44100.0, 0.05, 0.3), 44100.0);
         assert!((f - 880.0).abs() < 5.0, "an octave up at once: {f} Hz");
-=======
+    }
+
     /// Knobs moved while a note plays: the engine that takes them in place renders what a new engine takes over with.
     #[test]
     fn an_edit_in_place_sounds_as_a_new_engine() {
@@ -6976,7 +6976,6 @@ mod tests {
         new.channels[0].volume = 0.5;
         new.patterns[0].notes.clear();
         assert_eq!(live_edits(&mut sent, &new), None, "notes too");
->>>>>>> d8ad064 (Knob edits reach the playing engines in place)
     }
 
     // spec: audio/time-stretch.md "How each method plays" (realtime methods: the key moves the pitch, not the length)

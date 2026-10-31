@@ -412,13 +412,10 @@ enum Cmd {
     Resume,
     /// The newest edited project is in `Transport::latest` (older ones are skipped).
     Update,
-<<<<<<< HEAD
     /// A channel's pitch knob moved live (`Transport::channel_pitch`): row, cents.
     ChannelPitch(usize, i32),
-=======
     /// Levels changed, and nothing else (`Transport::update`).
     LiveEdits(Vec<os_engine::LiveEdit>),
->>>>>>> d8ad064 (Knob edits reach the playing engines in place)
     Preview(Box<Project>),
     /// Play a project's playlist once on the preview stream (clip preview).
     PreviewSong(Box<Project>),
@@ -682,18 +679,17 @@ impl Transport {
         device + 2 * block + margin + tick + block + margin
     }
 
-<<<<<<< HEAD
     /// Channel `row`'s pitch knob moved to `cents` while playing live (a controller's pitch wheel): the playing engines
     /// retune it in place. The journal is left alone too: a wheel is no edit (`update` would read the project for it).
     pub fn channel_pitch(&self, row: usize, cents: i32) {
         let _ = self.tx.send(Cmd::ChannelPitch(row, cents));
-=======
+    }
+
     /// What plays next may not be what `update` last sent: its next project goes whole.
     fn forget_sent(&self) {
         if let Ok(mut sent) = self.sent.lock() {
             *sent = None;
         }
->>>>>>> d8ad064 (Knob edits reach the playing engines in place)
     }
 
     pub fn update(&self, project: &Project) {
