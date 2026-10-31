@@ -272,7 +272,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             playlist::paint_overlays(ui, s);
         }
     }
-    browser::paint_ghost(ui, s);
+    // A browser drag over a detached window draws its ghost there (`paint_detached`).
+    if s.drag_on.is_none_or(|w| !s.is_detached(w)) {
+        browser::paint_ghost(ui, s);
+    }
     if s.monitor.debug {
         mondebug::paint(ui, s);
     }
@@ -315,6 +318,9 @@ pub fn paint_detached(ui: &mut Ui, s: &State, f: &FrameInfo, w: Win) -> usize {
             rack::paint_fill(ui, s);
         }
         playlist::paint_overlays(ui, s);
+    }
+    if s.drag_on == Some(w) {
+        browser::paint_ghost(ui, s);
     }
     overlays
 }

@@ -190,6 +190,8 @@ struct Shell {
     /// The held cursor is locked by the window system (Wayland's pointer lock): it stays put by itself and cannot be
     /// warped. Otherwise (Windows, X11) it is warped back to the anchor after each move.
     pointer_locked: bool,
+    /// The held cursor's window: a detached window's (`detached_win`), or the main window's (`None`).
+    lock_on: Option<app::Win>,
     cursor: app::Cursor,
     /// Main-window border in device pixels (left, top, right, bottom); zero when maximized.
     inset: (u32, u32, u32, u32),
@@ -485,12 +487,25 @@ impl Shell {
     /// with raw motion driving the virtual position `virt` (`device_event`).
     fn lock_cursor(&mut self, window: &Window, anchor: (f64, f64), virt: (f32, f32)) {
         self.lock = Some((anchor, virt));
+        self.lock_on = None;
         self.pointer_locked = window.set_cursor_grab(CursorGrabMode::Locked).is_ok();
         window.set_cursor_visible(false);
     }
 
+    /// The window holding the cursor (`lock_on`).
+    fn lock_window(&self) -> Option<Rc<Window>> {
+        match self.lock_on {
+            Some(w) => self.detached.iter().find(|d| d.win == w).map(|d| d.window.clone()),
+            None => self.window.clone(),
+        }
+    }
+
     /// Ends a held drag: the cursor shows again where the drag started, as if it never moved.
-    fn unlock_cursor(&mut self, window: &Window) {
+    fn unlock_cursor(&mut self) {
+        let Some(window) = self.lock_window() else {
+            self.lock = None;
+            return;
+        };
         let Some((anchor, _)) = self.lock.take() else { return };
         // Under a pointer lock this is where the cursor reappears once unlocked.
         let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
@@ -827,15 +842,19 @@ impl ApplicationHandler for Shell {
         }
     }
 
-    /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor.
+    /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor. Held in a detached
+    /// window, the motion goes to that window's surface.
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
-        let (DeviceEvent::MouseMotion { delta }, Some((anchor, virt)), Some(window)) = (event, self.lock, self.window.clone()) else { return };
+        let (DeviceEvent::MouseMotion { delta }, Some((anchor, virt)), Some(window)) = (event, self.lock, self.lock_window()) else { return };
         let scale = ui_scale(&window);
         let v = (virt.0 + (delta.0 / scale) as f32, virt.1 + (delta.1 / scale) as f32);
         self.lock = Some((anchor, v));
-        self.app.mouse_move(v.0, v.1);
+        self.app.on(self.lock_on, |a| a.mouse_move(v.0, v.1));
         if !self.pointer_locked {
             let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
+        }
+        if self.lock_on.is_some_and(|w| self.app.detached_dirty(w)) {
+            window.request_redraw();
         }
         self.pending = true;
     }
@@ -917,6 +936,11 @@ impl ApplicationHandler for Shell {
                 if self.lock.is_some() {
                     return;
                 }
+                // A browser item dragged over a detached window goes to that window (`cross_move`).
+                if self.app.cross_drag() && self.cross_move(None, (position.x, position.y)) {
+                    self.sync_cursor(&window);
+                    return;
+                }
                 if let (Some((at, grab_y)), Some((cursor, (l, _, r, _)))) = (self.unmax, screen_state(&window)) {
                     if !past_drag_distance(at, cursor) {
                         return;
@@ -993,8 +1017,8 @@ impl ApplicationHandler for Shell {
                 } else {
                     self.grab = None;
                     self.unmax = None;
-                    self.unlock_cursor(&window);
-                    self.app.mouse_up();
+                    self.unlock_cursor();
+                    self.app.mouse_up_from(None);
                     if self.app.resize_cursor && self.app.drag.is_none() {
                         self.app.resize_cursor = false;
                     }
@@ -1016,8 +1040,8 @@ impl ApplicationHandler for Shell {
                 self.pending = true;
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Right | MouseButton::Middle, .. } => {
-                self.unlock_cursor(&window);
-                self.app.mouse_up();
+                self.unlock_cursor();
+                self.app.mouse_up_from(None);
                 self.pending = true;
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1087,11 +1111,10 @@ impl ApplicationHandler for Shell {
                         event
                     };
                     self.app.repeat = event.repeat;
+                    // The key acts in the window that has the keyboard (the one it came to), and a popup or box it
+                    // opens shows there.
                     let (key, c, alt) = (&event.logical_key, ctrl(self.mods), self.mods.alt_key());
-                    match self.key_on {
-                        Some(w) => self.app.on_surface(w, |a| a.key(key, c, alt)),
-                        None => self.app.key(key, c, alt),
-                    }
+                    self.app.key_on(self.key_on, key, c, alt);
                     self.app.repeat = false;
                     window.request_redraw();
                 }
@@ -1942,6 +1965,7 @@ fn main() {
         last_click: Instant::now() - Duration::from_secs(10),
         lock: None,
         pointer_locked: false,
+        lock_on: None,
         cursor: app::Cursor::Default,
         inset: (0, 0, 0, 0),
         edge: None,

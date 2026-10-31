@@ -35,7 +35,10 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The mixer options' Link all parameters... links the current track's volume, pan, separation, equaliser, sends and
   slot mix levels to consecutive MIDI controllers in one go
 - Options ▸ Detached takes the mixer or the channel rack out of the main window into a window of its own (to put it on
-  another screen, say); unticked, it goes back where it was. Kept with the window layout, not in the project
+  another screen, say); unticked, it goes back where it was. Kept with the window layout, not in the project.
+  A shortcut's popup or box shows in the window that has the keyboard; browser items (effects, generators, samples)
+  drag from the main window onto the detached window and drop there; scroll-bar and knob drags hold the cursor in
+  it; it stays above the main window on Windows, macOS and X11 (not under Wayland)
 - Advanced looping (the loop button's third loop type): each row's loop box takes a loop point, Step, Beat or Bar,
   and the row loops at the end of its last used step rounded up to it
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)

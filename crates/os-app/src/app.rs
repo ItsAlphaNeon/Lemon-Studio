@@ -1154,6 +1154,8 @@ pub struct State {
     pub surface: Option<Win>,
     /// The surface the last press came from: the popups and boxes it opens are drawn there (`App::on_surface`).
     pub overlay_on: Option<Win>,
+    /// The surface a drag between windows is over (`App::cross_drag`): its ghost is drawn there and it drops there.
+    pub drag_on: Option<Win>,
 }
 
 impl State {
@@ -1558,6 +1560,7 @@ impl App {
                 detached_frames: Vec::new(),
                 surface: None,
                 overlay_on: None,
+                drag_on: None,
             },
             theme: load_theme(),
             transport,
@@ -4330,6 +4333,40 @@ impl App {
         }))
     }
 
+    /// A drag that carries something from one window to another: a browser item (a sample, a plugin, a preset, a
+    /// pattern or a channel of the project). The shell gives its moves and its release to the surface under the
+    /// cursor on screen, the main window's or a detached window's (`State::drag_on`).
+    pub fn cross_drag(&self) -> bool {
+        matches!(self.drag, Some(Drag::Browser { .. }))
+    }
+
+    /// A key pressed while surface `on` has the keyboard focus (`None`: the main window, else that detached window's
+    /// native window): it acts on that surface, and a popup or type-in box it opens is drawn there.
+    pub fn key_on(&mut self, on: Option<Win>, key: &winit::keyboard::Key, ctrl: bool, alt: bool) {
+        let open = |a: &Self| a.state.playlist.popup.is_some() || a.state.playlist.edit.is_some();
+        let before = open(self);
+        self.on(on, |a| a.key(key, ctrl, alt));
+        if !before && open(self) {
+            self.state.overlay_on = on.filter(|&w| self.state.is_detached(w));
+            self.invalidate();
+        }
+    }
+
+    /// Runs `f` on surface `on`: a detached window's (`on_surface`), or the main window's (`None`).
+    pub fn on<R>(&mut self, on: Option<Win>, f: impl FnOnce(&mut Self) -> R) -> R {
+        match on {
+            Some(w) => self.on_surface(w, f),
+            None => f(self),
+        }
+    }
+
+    /// The button released in the native window of surface `from` (`None`: the main window's). A drag between windows
+    /// (`cross_drag`) ends on the surface it was last moved over, where it drops.
+    pub fn mouse_up_from(&mut self, from: Option<Win>) {
+        let to = if self.cross_drag() { self.state.drag_on.filter(|&w| self.state.is_detached(w)) } else { from };
+        self.on(to, Self::mouse_up);
+    }
+
     /// Whether detached window `w` has something new to show (painting it, `paint_detached`, clears that).
     pub fn detached_dirty(&self, w: Win) -> bool {
         self.state.is_detached(w) && self.screens.iter().find(|d| d.0 == w).is_none_or(|d| d.1.dirty)
@@ -5560,6 +5597,12 @@ impl App {
     pub fn mouse_move(&mut self, x: f32, y: f32) -> bool {
         self.mouse = (x, y);
         self.hold_moved(x, y);
+        // A drag between windows came onto another surface: its ghost leaves the one it was drawn on.
+        if self.cross_drag() && self.state.drag_on != self.state.surface {
+            self.state.drag_on = self.state.surface;
+            self.invalidate();
+            self.mark_detached(None);
+        }
         if let Some(d) = self.drag.clone() {
             match d {
                 Drag::Browser { item, label, m0, started } => self.browser_drag_move(label, m0, started, item),
@@ -21893,5 +21936,137 @@ mod detach_tests {
         assert_eq!(app.state.detached_size(Win::ChannelRack), Some((w + 96.0, h + 40.0)), "the rack takes its window's size");
         app.set_detached(Win::ChannelRack, false);
         assert_eq!(app.state.rack_pos, pos);
+    }
+
+    /// A shortcut pressed while the detached Mixer's window has the keyboard acts there, and the box it opens (F2's
+    /// rename) is painted in that window, though the last click was in the main window. Pressed while the main window
+    /// has the keyboard, the box is the main window's.
+    #[test]
+    fn keyboard_popups_go_to_the_window_with_the_keyboard() {
+        use winit::keyboard::{Key, NamedKey};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.raise(Win::Mixer);
+        app.set_detached(Win::Mixer, true);
+        let (w, h) = app.state.detached_size(Win::Mixer).unwrap();
+        let Ok(mut c) = Canvas::new(w as u32, h as u32, 1.0) else { return };
+        app.paint_detached(Win::Mixer, &mut c);
+        assert_eq!(app.state.overlay_on, None, "no click in it yet");
+        app.key_on(Some(Win::Mixer), &Key::Named(NamedKey::F2), false, false);
+        assert!(app.state.playlist.edit.is_some(), "F2 renames the mixer track");
+        assert_eq!(app.state.overlay_on, Some(Win::Mixer));
+        main_paint(&mut app);
+        assert!(app.overlays.is_empty(), "not in the main window");
+        app.paint_detached(Win::Mixer, &mut c);
+        assert!(!screen(&app, Win::Mixer).overlays.is_empty(), "in the Mixer's window");
+
+        app.key_on(Some(Win::Mixer), &Key::Named(NamedKey::Escape), false, false);
+        assert!(app.state.playlist.edit.is_none());
+        app.key_on(None, &Key::Named(NamedKey::F2), false, false);
+        assert!(app.state.playlist.edit.is_some());
+        assert_eq!(app.state.overlay_on, None, "opened with the main window's keyboard");
+    }
+
+    /// A browser effect dragged out of the main window over the detached Mixer's window moves there (its ghost with it)
+    /// and drops into the slot under the cursor, though the main window, which the drag started in, gets the release.
+    #[test]
+    fn a_browser_effect_drops_into_a_detached_mixer() {
+        use crate::views::browser::{rows, Item};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        app.state.plugdb.rebuild(&app.plugins);
+        app.state.browser_tab = 2;
+        app.state.browser_open.extend(["2:Plugin library/Effects".into(), "2:Plugin library/Effects/Other".into()]);
+        app.state.raise(Win::Mixer);
+        app.set_detached(Win::Mixer, true);
+        let Some(_) = main_paint(&mut app) else { return };
+        let (w, h) = app.state.detached_size(Win::Mixer).unwrap();
+        let mut c = Canvas::new(w as u32, h as u32, 1.0).unwrap();
+        app.paint_detached(Win::Mixer, &mut c);
+        let i = rows(&app.state).iter().position(|r| r.item == Item::Effect(0)).expect("effect row");
+        let src = hit_of(&app.hits, &Action::BrowserRow(i)).expect("the browser row");
+        let dst = hit_of(&screen(&app, Win::Mixer).hits, &Action::MixerArea).expect("the mixer");
+        app.mouse_move(src.cx(), src.cy());
+        app.mouse_down();
+        app.mouse_move(src.cx() + 30.0, src.cy());
+        assert!(app.cross_drag());
+        assert_eq!(app.state.drag_on, None, "over the main window");
+        app.on_surface(Win::Mixer, |a| a.mouse_move(dst.cx(), dst.cy()));
+        assert_eq!(app.state.drag_on, Some(Win::Mixer), "over the Mixer's window");
+        assert!(app.detached_dirty(Win::Mixer), "its ghost is drawn there");
+        app.paint_detached(Win::Mixer, &mut c);
+        app.mouse_up_from(None);
+        assert!(app.drag.is_none() && app.state.drag_on.is_none());
+        let t = app.state.selected_mixer;
+        assert_eq!(crate::mixer::slot_name(&app.state, t, 0).as_deref(), Some("Test FX"));
+    }
+
+    /// A browser generator dragged onto the detached Channel rack's window adds a channel; dragged back over the main
+    /// window before the release, it drops there instead.
+    #[test]
+    fn a_browser_generator_drops_into_a_detached_rack() {
+        use crate::views::browser::{rows, Item};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.plugins.available.push(crate::plugin_db::fake("Test Synth", os_host::Kind::Instrument));
+        let synth = app.plugins.available.len() - 1;
+        app.state.plugdb.rebuild(&app.plugins);
+        app.state.browser_tab = 2;
+        app.state.browser_open.extend(["2:Plugin library/Generators".into(), "2:Plugin library/Generators/Other".into()]);
+        app.state.raise(Win::ChannelRack);
+        app.set_detached(Win::ChannelRack, true);
+        let Some(_) = main_paint(&mut app) else { return };
+        let (w, h) = app.state.detached_size(Win::ChannelRack).unwrap();
+        let mut c = Canvas::new(w as u32, h as u32, 1.0).unwrap();
+        app.paint_detached(Win::ChannelRack, &mut c);
+        let Some(i) = rows(&app.state).iter().position(|r| r.item == Item::Generator(synth)) else { panic!("generator row") };
+        let src = hit_of(&app.hits, &Action::BrowserRow(i)).expect("the browser row");
+        let n = app.state.project.channels.len();
+        let drag = |app: &mut App, back: bool| {
+            app.mouse_move(src.cx(), src.cy());
+            app.mouse_down();
+            app.mouse_move(src.cx() + 30.0, src.cy());
+            app.on_surface(Win::ChannelRack, |a| a.mouse_move(w / 2.0, h / 2.0));
+            if back {
+                app.mouse_move(src.cx() + 30.0, src.cy());
+            }
+            app.mouse_up_from(None);
+        };
+        drag(&mut app, true);
+        assert_eq!(app.state.project.channels.len(), n, "dropped back on the browser");
+        drag(&mut app, false);
+        assert_eq!(app.state.project.channels.len(), n + 1, "a new channel");
+    }
+
+    /// A scroll-bar right-drag in the detached Mixer holds the cursor as in the main window: the moves the shell gives
+    /// that surface (`App::on`) scroll it, the main window's mouse stays put, and the release ends it.
+    #[test]
+    fn a_scroll_bar_holds_the_cursor_in_a_detached_window() {
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.raise(Win::Mixer);
+        app.set_detached(Win::Mixer, true);
+        app.set_detached_size(Win::Mixer, (500.0, 400.0));
+        let Ok(mut c) = Canvas::new(500, 400, 1.0) else { return };
+        app.paint_detached(Win::Mixer, &mut c);
+        let Some(bar) = screen(&app, Win::Mixer).bars.first().cloned() else { panic!("the mixer's scroll bar") };
+        app.mouse_move(3.0, 3.0);
+        let (x, y) = (bar.track.cx(), bar.track.cy());
+        app.on(Some(Win::Mixer), |a| {
+            a.mouse_move(x, y);
+            a.mouse_down_right();
+        });
+        assert!(app.cursor_locked(), "held");
+        let probe = |a: &App| format!("{:?}", (a.scroll_get(bar.target), a.zoom_get(bar.target), a.rows_get(bar.target)));
+        let before = probe(&app);
+        for k in 1..=10 {
+            let d = k as f32 * 8.0;
+            app.on(Some(Win::Mixer), |a| a.mouse_move(x + d, y + d));
+        }
+        assert_eq!(app.mouse, (3.0, 3.0), "the main window's mouse is its own");
+        assert_ne!(probe(&app), before, "it scrolled");
+        app.mouse_up_from(Some(Win::Mixer));
+        assert!(!app.cursor_locked());
     }
 }
