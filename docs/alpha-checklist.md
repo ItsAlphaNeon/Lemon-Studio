@@ -72,38 +72,58 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
-- [ ] **Mixer right-click menus.** 28 entries greyed out on 2026-10-29, counted entry by entry after Track routing and
-  the slot's Change color... and Random color were enabled: track menu Change icon, Assign to / Unassign from Audio
-  track(s), Select ▸ Channels and playlist tracks and Group, Compensate for master latency, the Group section
-  (Separator, Create group..., Auto color group), Dock to ▸ Left / Middle / Right, Insert from state, Allow threaded
-  processing; Mixer options Plugin delay compensation ▸ Automatic, Link all parameters..., View ▸ Waveforms and Extra
-  properties, Detached, Switch smart disable for all plugins; slot menu Patcherize, Patcherize all, Link all
-  parameters..., Allow threaded processing, Smart disable, Change icon..., Scaling ▸ 100%, Help. Not counted: the
+- [ ] **Mixer right-click menus.** 11 entries greyed out on 2026-10-30, counted entry by entry after Insert from state
+  (and File ▸ Open / Save mixer track state), Plugin delay compensation ▸ Automatic, View ▸ Waveforms and Extra
+  properties, and the slot menu's Scaling ▸ and Help were enabled: track menu Change icon (the icons are not drawn),
+  Assign to / Unassign from Audio track(s) and Select ▸ Channels and playlist tracks (no audio tracks in the playlist
+  yet), Compensate for master latency (greyed in the original too); Mixer options Link all parameters... (no
+  controller links yet), Detached; slot menu Patcherize, Patcherize all, Link all parameters..., Change icon...
+  Scaling ▸ is greyed for a slot without a hosted plugin, "(no saved states)" when none is saved. Not counted: the
   layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs))
-- [ ] **Playlist right-click menus.** 10 entries greyed out on 2026-10-29, counted entry by entry after 8 more were
-  enabled: the picker's Change icon; the plugin window's ▸ menu: Link all parameters..., Allow threaded processing,
-  Smart disable, Change icon..., Save channel state as... and Browse channel states, and in an effect slot's window
-  also Piano roll, Change color... and Random color ([playlist.rs](../crates/os-app/src/playlist.rs))
-- [ ] **Channel rack right-click menus.** 18 of the rack's own entries greyed out on 2026-10-29, counted entry by
-  entry after 17 more were enabled: Loop starter and its 3 playlist-track options, Restretch all, Detached,
-  Switch smart disable for all plugins, Change icon, Show waveform preview, Patcherize, Assign to new instrument
-  track, Auto fill, MIDI channel through, Receive notes from ▸ Unlock and Typing keyboard, Create instrument, Burn
-  MIDI to ▸ (2). The knob, mixer box and LED menus' Automation and Remote control groups add 23 more (events in a new
+- [x] **Playlist right-click menus.** None greyed out since 2026-10-30: the last five, the picker's Change icon and
+  the plugin window's Link all parameters..., Change icon..., Save channel state as... and Browse channel states, work
+  as Lemon Studio's design (Change icon is kept for the session only)
+  ([playlist.rs](../crates/os-app/src/playlist.rs), [channel_states.rs](../crates/os-app/src/channel_states.rs))
+- [ ] **Channel rack right-click menus.** 12 of the rack's own entries greyed out on 2026-10-30, counted entry by
+  entry after 23 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
+  plugins, Change icon ▸, Show waveform preview and MIDI channel through on 2026-10-30): Loop starter and its 3
+  playlist-track options, Restretch all, Detached, Patcherize, Assign to new instrument track, Auto fill (the manual
+  does not describe it), Create instrument, Burn MIDI to ▸ (2) (no plugin hands its notes back to the host yet). The knob, mixer box and LED menus' Automation and Remote control groups add 23 more (events in a new
   window or the piano roll, initial values, automation clips, controller links) ([rack.rs](../crates/os-app/src/rack.rs))
-- [ ] **Main menu bar.** 13 of its 136 entries greyed out on 2026-10-29: 9 in TOOLS, 2 in VIEW, 2 in HELP
-  ([menus.rs](../crates/os-app/src/views/menus.rs))
+- [ ] **Main menu bar.** 7 of its 136 entries greyed out on 2026-10-30, counted entry by entry after Save audio
+  clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics, TOOLS > Set up for live performance
+  and Switch auto-bypass for all plugins were enabled: TOOLS > Chord progression tool... and Control builder (no
+  chord generator or control builder yet), Set up for MIDI export (not observed yet), Set keyboard focus of all
+  plugins to ▸ (no such per-plugin setting yet), Lock / Unlock all tracks to / from their clips (tracks
+  don't lock to a clip yet); VIEW > Script output (no scripting) ([menus.rs](../crates/os-app/src/views/menus.rs))
 - [x] **TOOLS ▸ Audio logger and Dump to audio editor.** Enabled (on by default, as in FL Studio) keeps the last 1 to
   10 minutes of what the device plays, the header showing the memory used; Dump puts them into the master track's
   Tesla. At its time limit Tesla now keeps the last minutes, as Edison does. What FL Studio's logger records and how
   long was not measured: Lemon Studio's design
-- [ ] **Tesla's later tools.** Envelopes, equalize, blur and convolution reverb, clean-up, drum(loop) stretch, slicing
-  and beat detection (group 5 of Tesla's roadmap in the specs). Time stretch / pitch shift with formant preservation
-  works (2026-10-29)
-- [x] **Value boxes.** All of them work, the last two being the autosave Maximum and Metronome track. MIDI settings'
-  Performance mode MIDI channel stays greyed out until Performance mode is built
-- [ ] **Performance mode.** Live clip launching on the playlist (Ctrl+P says it is not available yet), with MIDI
-  settings' Performance mode MIDI channel and TOOLS ▸ Macros ▸ Prepare for performance mode
-- [ ] **Recording settings page.** The only settings page that doesn't work yet
+- [x] **Tesla's later tools** (group 5 of Tesla's roadmap in the specs). Time stretch / pitch shift with formant
+  preservation (2026-10-29); the envelope modes with Mixdown amp envelopes, heard while playing, the envelope tools
+  (with their dialogs: Scale levels, Decimate points, Filter, Smooth up, Create sequence; Turn all points smooth and
+  per-point curves), Paste mix (envelope) and Scratch (envelope), Convolution reverb, Equalize, Blur, Clean up
+  (denoise with an acquired noise profile, the declipper with its modes and Safe mode, the declicker), auto-slicing /
+  grid-slicing, Detect beats, Detect pitch regions, Set first downbeat, Convert to score and dump to piano roll and
+  the zero-cross check, Send to new Lemon Slicer channel, drum(loop) stretch and noise gating (Acquire noise
+  threshold, Gate noise, Trim side noise, Trim all noise & slice up, the threshold mark) work (2026-10-30). Most of
+  it is Lemon Studio's design, with measurement requests open in the specs. Vocal denoise / isolator and Deverb have
+  their own item below
+- [ ] **Tesla's Vocal denoise / isolator and Deverb.** Tools > Spectral's last two entries (group 5 of Tesla's
+  roadmap in the specs) are not in Tesla yet
+- [x] **Value boxes.** All of them work, the last two being the autosave Maximum and Metronome track, and MIDI
+  settings' Performance mode MIDI channel (2026-10-30)
+- [ ] **Performance mode.** The typing keyboard (its key layout is only in a picture the original's manual no longer
+  serves) and sub-clips. Launching the zone's clips with the mouse and with notes 0–119 on
+  the Performance mode MIDI channel (scrolled and paged with notes 120–124, synced to the global snap while 127 is
+  held), column, clip group and track group scenes and +Scenes (Ctrl+click, notes 125 / 126 held), each track's Performance
+  settings, Ctrl+P, Prepare for performance mode, the clip and track progress displays, the clock counting bars
+  from the Start marker and recording a performance (Record armed) work (2026-10-30)
+- [x] **Recording settings page.** Settings ▸ Recording, Lemon Studio's own page (the original keeps these in the
+  Record button's menus): the recording filter, the Record options and quantize, Start on input, Loop record, Blend,
+  Count-in and its length, Auto-create audio clips and the External input question's answer, shared with the menus
+  and buttons that also set them
 - [x] **Editable mixer latency settings.** The input clock, the track latency combo and the strip's latency clock
   (right click) set them in ms, samples or beats, one undo step each
 - [x] **Browser: Favorites, the plugin database and Browser find.** A Favorite check in the row menus of files and

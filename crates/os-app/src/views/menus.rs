@@ -64,6 +64,10 @@ pub enum MenuCmd {
     AlignEditors,
     /// TOOLS > Save MIDI clipboard to browser.
     SaveMidiClip,
+    /// TOOLS > Save audio clipboard to browser (`crate::audio_clipboard`).
+    SaveAudioClip,
+    /// HELP > Diagnostics (`crate::diagnostics`).
+    Diagnostics,
     /// HELP's entries that open a page in the web browser (`crate::help_links`).
     Web(&'static str),
     /// The menu bar's ways into the browser.
@@ -88,7 +92,11 @@ pub enum MenuCmd {
     CancelRecording,
     SelectUnused,
     PurgeClips,
+    /// TOOLS ▸ Switch auto-bypass for all plugins (`crate::mixer::MCmd::AutoBypassAll`).
+    AutoBypassAll,
     ResetEmptyTracks,
+    /// TOOLS ▸ Set up for live performance: Prepare for performance mode (spec: ui/performance-mode.md §1).
+    PrepPerformance,
     RemoveTeslas,
     /// A ▸ entry with a submenu built (`sub_items`).
     Sub(Sub),
@@ -110,6 +118,7 @@ pub enum Sub {
     ClipsSel,
     Editors,
     Declick,
+    Tutorials,
 }
 
 #[derive(Clone, Copy)]
@@ -331,7 +340,7 @@ const VIEW_ITEMS: &[Item] = &[
     it("Patterns", "").cmd(MenuCmd::Jump(crate::browser::Jump::Section("Patterns"))),
     it("Instruments in use", "").cmd(MenuCmd::Jump(crate::browser::Jump::Section("Generators"))),
     it("Effects in use", "").cmd(MenuCmd::Jump(crate::browser::Jump::Section("Effects"))),
-    it("Remote control", "").cmd(MenuCmd::Jump(crate::browser::Jump::Section("Remote control"))),
+    it("Remote control", "").cmd(MenuCmd::Jump(crate::browser::Jump::Section(crate::views::browser::REMOTE_CONTROL))),
     it("Plugin library", "Shift+F8").cmd(MenuCmd::Jump(crate::browser::Jump::PluginDb)),
 ];
 
@@ -371,7 +380,7 @@ const TOOLS_A: &[Item] = &[
     it("Chord progression tool...", ""),
     it("Control builder", ""),
     head("Clipboard"),
-    it("Save audio clipboard to browser", ""),
+    it(SAVE_AUDIO_CLIP_LABEL, "").on().cmd(MenuCmd::SaveAudioClip),
     it(SAVE_MIDI_CLIP_LABEL, "").on().cmd(MenuCmd::SaveMidiClip),
     head("MIDI capture"),
     it(DUMP_LOG_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::DumpLog)),
@@ -389,11 +398,11 @@ const TOOLS_B: &[Item] = &[
     it("Stop sound", "Ctrl+H").on().cmd(MenuCmd::StopSound),
     it("Cancel recording", "").on().cmd(MenuCmd::CancelRecording),
     SEP,
-    it("Set up for live performance", ""),
+    it("Set up for live performance", "").on().cmd(MenuCmd::PrepPerformance),
     it("Set up for MIDI export", ""),
     it("Select unused instruments", "").on().cmd(MenuCmd::SelectUnused),
     it("Remove unused audio clips", "").on().cmd(MenuCmd::PurgeClips),
-    it("Switch auto-bypass for all plugins", ""),
+    it(crate::mixer::AUTO_BYPASS_ALL_LABEL, "").on().cmd(MenuCmd::AutoBypassAll),
     it(CLIPS_ALL_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::ClipsAll)),
     it(CLIPS_SEL_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::ClipsSel)),
     it("Lock all tracks to their clips", ""),
@@ -408,9 +417,9 @@ const TOOLS_B: &[Item] = &[
 
 const HELP: &[Item] = &[
     it("Help index", "").on().cmd(MenuCmd::Web(crate::help_links::HELP_INDEX_URL)),
-    it("Tutorials", "").sub(),
+    it("Tutorials", "").sub().cmd(MenuCmd::Sub(Sub::Tutorials)),
     head("Support"),
-    it("Diagnostics", ""),
+    it("Diagnostics", "").on().cmd(MenuCmd::Diagnostics),
     it("What's new", "").on().cmd(MenuCmd::Web(crate::help_links::WHATS_NEW_URL)),
     SEP,
     it("About...", "").on(),
@@ -504,16 +513,20 @@ pub fn in_menu(s: &State, menu: usize, item: &Item) -> bool {
 }
 
 /// Whether an entry can be chosen now: it works (`works`), EDIT's have a step to act on, the project file rows
-/// that need a saved project have one (`needs_file`), and Save MIDI clipboard to browser has notes to save.
+/// that need a saved project have one (`needs_file`), Save MIDI clipboard to browser has notes to save and Save audio
+/// clipboard to browser audio.
 pub fn active(s: &State, menu: usize, item: &Item) -> bool {
     works(menu, item)
         && (menu != EDIT_MENU || crate::history::edit_enabled(s, item.label == "Redo"))
         && (s.path.is_some() || !needs_file(menu, item.label))
         && (!matches!(item.cmd, MenuCmd::SaveMidiClip) || !s.piano.clipboard.is_empty())
+        && (!matches!(item.cmd, MenuCmd::SaveAudioClip) || crate::audio_clipboard::has_audio())
 }
 
 /// TOOLS ▸ Save MIDI clipboard to browser (`App::save_midi_clipboard`).
 pub const SAVE_MIDI_CLIP_LABEL: &str = "Save MIDI clipboard to browser";
+/// TOOLS ▸ Save audio clipboard to browser (`App::save_audio_clipboard`).
+pub const SAVE_AUDIO_CLIP_LABEL: &str = "Save audio clipboard to browser";
 
 /// FILE / TOOLS ▸ Delete unused files and save project.
 pub const DELETE_UNUSED_LABEL: &str = "Clean up and save";
@@ -592,6 +605,8 @@ pub fn sub_items(cmd: MenuCmd) -> Option<fn(&State) -> Vec<crate::playlist::PIte
         Sub::Arrange => crate::arrange::items,
         // spec: ui/menu-submenus.md §3
         Sub::Background => crate::wallpaper::items,
+        // spec: ui/menus.md "HELP"
+        Sub::Tutorials => |_| crate::help_links::tutorial_items(),
     })
 }
 
@@ -1091,7 +1106,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", "Arrange windows", "Background", ONE_CLICK_LABEL, DUMP_LOG_LABEL, LOGGER_SETTINGS_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL]);
+        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", "Arrange windows", "Background", ONE_CLICK_LABEL, DUMP_LOG_LABEL, LOGGER_SETTINGS_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL, "Tutorials"]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Fade out only", "Transient", "Transient (tail continues)", "Standard (tail continues)", "Smooth (tail continues)", "Crossfade (tail continues)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");

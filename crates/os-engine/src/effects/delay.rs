@@ -1151,6 +1151,10 @@ impl Delay {
 }
 
 impl Effect for Delay {
+    /// Echoes may come after a long silence: the hold is the whole delay line.
+    fn quiet_hold(&self) -> Option<f32> {
+        Some((line_len(self.rate) as f64 / self.rate) as f32)
+    }
     fn process(&mut self, buf: &mut [f32]) {
         if !self.started {
             self.start();

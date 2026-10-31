@@ -82,6 +82,8 @@ pub enum Then {
     ExportZip,
     /// Save preset as... for the plugin with this key (`plugins::Plugins::hosted`).
     SavePreset(usize),
+    /// Save channel state as... for this rack row (`crate::channel_states`).
+    SaveChannelState(usize),
     /// Import preset... for the plugin with this key.
     ImportPreset(usize),
     /// Rename preset... for the plugin with this key: its current preset file.
@@ -129,6 +131,10 @@ pub enum Then {
     /// The External input question for this mixer track: Yes switches it to External input only (spec:
     /// audio/track-io.md §1.4).
     ExtInput(u16),
+    /// Prepare for performance mode's question: Ok opens Marker settings (spec: ui/performance-mode.md §1).
+    PerfConfirm,
+    /// Marker settings: Accept (Ok) prepares with this count and spacing.
+    PerfMarkers(u8, u8),
 }
 
 /// What waits for the save-changes question.
@@ -220,6 +226,8 @@ pub enum Body {
     TimeSig(crate::timesig::SigForm),
     /// Rename project, Save as and New project (`crate::project_forms`).
     Project(crate::project_forms::Form),
+    /// Prepare for performance mode's Marker settings (`crate::perform`).
+    Markers(crate::perform::MarkerForm),
 }
 
 /// A dialog on the stack (`State::dialogs`, bottom to top; only the top one takes input).
@@ -271,6 +279,8 @@ pub enum DHit {
     Apply,
     /// Time signature dialog: the denominator's value box (true) or the numerator's; Accept is `Accept`.
     SigValue(bool),
+    /// Marker settings: the Spacing box (true) or the Marker count box.
+    MarkerValue(bool),
     /// Rename project, Save as and New project: their parts (`crate::project_forms`).
     Form(crate::project_forms::FHit),
 }
@@ -469,9 +479,9 @@ impl App {
         self.modal_changed();
         let then = match m.body {
             Body::Msg(m) => {
-                // The External input question remembers either answer (`mixer::EXT_INPUT_ANSWER`).
+                // The External input question remembers either answer (`prefs::EXTERNAL_INPUT`, Settings ▸ Recording).
                 if let (Then::ExtInput(_), Some((_, true)), Reply::Button(a @ (Answer::Yes | Answer::No))) = (&m.then, m.remember, &reply) {
-                    crate::prefs::set_text(crate::mixer::EXT_INPUT_ANSWER, if *a == Answer::Yes { "yes" } else { "no" });
+                    crate::prefs::set_choice(&crate::prefs::EXTERNAL_INPUT, if *a == Answer::Yes { 1 } else { 2 });
                 }
                 // Ok with Remember my choice ticked turns the message off; Cancel never does.
                 else if let Some((entry, true)) = m.remember {
@@ -497,6 +507,10 @@ impl App {
                     None => Then::Signature(f.pattern, f.num, f.den),
                 }
             }
+            Body::Markers(f) => {
+                self.state.playlist.popup = None;
+                Then::PerfMarkers(f.count, f.spacing)
+            }
         };
         // The replace question answers the Save dialog under it.
         if let Then::Replace(p) = then {
@@ -514,7 +528,7 @@ impl App {
             Body::Msg(m) => Reply::Button(m.escape()),
             Body::File(_) => Reply::File(None),
             Body::Shortcuts(_) => Reply::Button(Answer::Cancel),
-            Body::TimeSig(_) => Reply::Button(Answer::Cancel),
+            Body::TimeSig(_) | Body::Markers(_) => Reply::Button(Answer::Cancel),
             Body::Project(_) => Reply::Button(Answer::Cancel),
         })
     }
@@ -522,7 +536,7 @@ impl App {
     fn top_file(&mut self) -> Option<&mut FileDlg> {
         match &mut self.state.dialogs.last_mut()?.body {
             Body::File(f) => Some(f),
-            Body::Msg(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) => None,
+            Body::Msg(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Markers(_) | Body::Project(_) => None,
         }
     }
 
@@ -576,7 +590,7 @@ impl App {
             DHit::Button(i) => {
                 let a = match &m.body {
                     Body::Msg(msg) => msg.buttons.get(i).copied(),
-                    Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) => None,
+                    Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Markers(_) | Body::Project(_) => None,
                 };
                 if let Some(a) = a {
                     self.answer(Reply::Button(a));
@@ -599,7 +613,9 @@ impl App {
             }
             // The time signature dialog (spec: ui/pattern-time-signature.md §1-2).
             DHit::SigValue(den) => self.sig_list(den),
-            DHit::Accept if matches!(m.body, Body::TimeSig(_)) => self.answer(Reply::Button(Answer::Ok)),
+            DHit::Accept if matches!(m.body, Body::TimeSig(_) | Body::Markers(_)) => self.answer(Reply::Button(Answer::Ok)),
+            // Prepare for performance mode's Marker settings (spec: ui/performance-mode.md §1).
+            DHit::MarkerValue(spacing) => self.marker_list(spacing),
             // Rename project, Save as and New project: a part that closes the form answers it.
             DHit::Form(h) => {
                 if let Some(reply) = self.form_click(h) {
@@ -722,7 +738,7 @@ impl App {
                 }
             }
             // Esc closes an open value list first, then the dialog (as its ×); Enter presses Accept, its only button.
-            Body::TimeSig(_) => {
+            Body::TimeSig(_) | Body::Markers(_) => {
                 let list = self.state.playlist.popup.is_some();
                 match key {
                     Key::Named(NamedKey::Escape) if list => self.state.playlist.popup = None,
@@ -780,7 +796,7 @@ impl App {
     pub fn top_message(&self) -> Option<(String, String)> {
         match &self.state.dialogs.last()?.body {
             Body::Msg(m) => Some((m.title.clone(), m.plain())),
-            Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Project(_) => None,
+            Body::File(_) | Body::Shortcuts(_) | Body::TimeSig(_) | Body::Markers(_) | Body::Project(_) => None,
         }
     }
 }

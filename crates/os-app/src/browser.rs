@@ -910,6 +910,9 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
         Item::Effect(index) => items.push(PItem::new("Add to selected mixer track", Cmd::Plugin(crate::plugin_menu::PlugCmd::Effect { index, slot: None }))),
         Item::History(_) => items.push(r("Go to this step", RowCmd::Activate)),
         // Into the selected channel's plugin (spec: plugins/presets.md "Browser").
+        Item::Preset(ref p) if crate::channel_states::is_state_file(std::path::Path::new(p)) => {
+            items.push(PItem::new("Add to channel rack", Cmd::ChannelState(crate::channel_states::CsCmd::Add(p.into()))));
+        }
         Item::Preset(ref p) => {
             let key = s.selected_channel;
             let it = PItem::new("Load into selected channel", Cmd::Preset(crate::presets::PCmd::Load(key, p.into())));

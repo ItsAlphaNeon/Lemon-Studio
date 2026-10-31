@@ -123,7 +123,8 @@ impl App {
     }
 
     /// The mouse holds note `key` (None: no note): the note held before ends, and the new one plays the selected
-    /// channel, lights on the piano roll's keyboard and goes to step edit, as a MIDI key does (spec §2 Playing).
+    /// channel (or the one locked to the Touch controller), lights on the piano roll's keyboard and goes to step edit,
+    /// as a MIDI key does (spec §2 Playing).
     pub(crate) fn touch_hold(&mut self, key: Option<u8>) {
         if self.state.touch.held.map(|h| h.0) == key {
             return;
@@ -132,8 +133,10 @@ impl App {
             self.transport.note_off(row, u16::from(k));
             self.step_edit_up(crate::step_edit::Src::Touch(k));
         }
-        let row = self.state.selected_channel;
+        // A channel locked to the Touch controller takes its notes (spec: ui/channel-rack.md §18 Receive notes from).
+        let row = self.state.rack.note_row(crate::rack::NoteSrc::Touch, self.state.selected_channel);
         if let Some(k) = key.filter(|_| row < self.state.project.channels.len()) {
+            self.locked_hint(crate::rack::NoteSrc::Touch, row);
             self.sync_live();
             self.transport.note_on(row, u16::from(k), VELOCITY);
             self.state.touch.held = Some((k, row));

@@ -283,8 +283,9 @@ pub const UNDO_KNOB_TWEAKS: Check = Check { key: "undo_knob_tweaks", label: "Und
 /// toggles the last move and Ctrl+Alt+Z steps back further (`history::ctrl_z`). EDIT follows. Spec: as above.
 pub const ALTERNATE_UNDO: Check = Check { key: "alternate_undo_mode", label: "Alternate undo mode", default: true };
 
-/// General ▸ Undo history: stored and shown only. Lemon Studio does not record audio yet, so no undone recording can
-/// go to the recycle bin; recording will read it. Spec: as above (not measured: it needs recording).
+/// General ▸ Undo history: stored and shown only. Undoing a recording ("Recorded items") keeps its files in the
+/// Recorded folder for now, since a redo puts its clips back; nothing moves them to the trash yet. Spec: as above (not
+/// measured).
 pub const UNDONE_RECORDINGS_TO_BIN: Check =
     Check { key: "undone_recordings_to_recycle_bin", label: "Move undone recordings to the trash", default: true };
 
@@ -394,7 +395,8 @@ pub const INVERT_PENCIL_BUTTONS: Check = Check { key: "invert_pencil_buttons", l
 /// and Mixer: Smart disable, Align tick lengths, Resampling quality (2026-10-16)".
 pub const AUTO_CLOSE: Check = Check { key: "auto_close", label: "Auto close", default: false };
 
-/// Audio ▸ CPU: stored and shown only. Lemon Studio has no smart disable yet. Spec: as above.
+/// Audio ▸ CPU: Auto-bypass when silent for every effect slot whose own switch is on (`os_engine::engine::auto_bypass`;
+/// spec: audio/auto-bypass.md).
 pub const SMART_DISABLE: Check = Check { key: "smart_disable", label: "Auto-bypass when silent", default: true };
 
 /// Audio ▸ CPU: stored and shown only. Lemon Studio's ticks follow audio/timing.md whatever it says. Spec: as above.
@@ -405,6 +407,9 @@ pub const ALIGN_TICK_LENGTHS: Check = Check { key: "align_tick_lengths", label: 
 pub const MULTITHREADED_MIXER: Check = Check { key: "multithreaded_mixer", label: "Multithreaded mixer processing", default: true };
 pub const MULTITHREADED_GENERATORS: Check =
     Check { key: "multithreaded_generators", label: "Multithreaded instrument processing", default: true };
+/// Audio ▸ CPU: live, the two above take the extra cores only when one thread would not keep up comfortably. Spec:
+/// audio/multicore.md "Only when needed".
+pub const MULTITHREADED_AUTO: Check = Check { key: "multithreaded_auto", label: "Extra cores only when needed", default: true };
 
 /// Audio ▸ Mixer: stored and shown only. The sampler keeps the one kernel audio/sampler.md gives, whatever is chosen;
 /// when the live kernels are measured, the choice will pick among them. Its menu groups the choices under grey
@@ -513,6 +518,52 @@ pub const SYNC_TYPE: Combo = Combo {
 pub const OMNI_CHANNEL: Number = Number { key: "midi_omni_channel", label: "Omni preview MIDI channel", min: 0, max: 16, default: 0 };
 pub const MARKER_CHANNEL: Number = Number { key: "midi_marker_channel", label: "Song marker jump MIDI channel", min: 0, max: 16, default: 0 };
 pub const MUTING_CHANNEL: Number = Number { key: "midi_muting_channel", label: "Instrument muting MIDI channel", min: 0, max: 16, default: 0 };
+/// Its notes launch the arranger's performance zone (spec: ui/performance-mode.md §3).
+pub const PERFORMANCE_CHANNEL: Number = Number { key: "midi_performance_channel", label: "Performance mode MIDI channel", min: 0, max: 16, default: 0 };
+
+// Recording (Lemon Studio's own page, spec: ui/settings.md "Recording"): the same settings the Record button's
+// right-click menu, the toolbar's option buttons and the mixer's Disk recording menu set (`crate::record::Opt` reads
+// them through these), so the page and those menus always agree.
+
+/// Recording ▸ Recording filter: notes played while recording are written into the pattern. Spec: ui/recording.md §2.
+pub const REC_NOTES: Check = Check { key: "rec_notes", label: "Notes", default: true };
+/// Recording ▸ Recording filter: control moves are written into the pattern as its control points.
+pub const REC_AUTOMATION: Check = Check { key: "rec_automation", label: "Automation", default: true };
+/// Recording ▸ Recording filter: the armed mixer tracks record (spec: audio/track-io.md §2.5).
+pub const REC_AUDIO: Check = Check { key: "rec_audio", label: "Audio (armed mixer tracks)", default: false };
+/// Recording ▸ Options: a click or R on the disarmed Record button asks what to record.
+pub const REC_ASK: Check = Check { key: "rec_ask", label: "Ask what to record", default: true };
+/// Recording ▸ Options: arming while stopped also starts playback.
+pub const REC_STARTS_PLAYBACK: Check = Check { key: "rec_starts_play", label: "Recording starts playback", default: false };
+/// Recording ▸ Options: Stop disarms Record.
+pub const REC_DISARM_ON_STOP: Check = Check { key: "rec_disarm_stop", label: "Disarm on stop", default: false };
+/// Recording ▸ Options: the toolbar's Loop record (spec: ui/recording.md §4); off, playback runs on past the end while
+/// recording (`record::run_on`, kept up to date by `App::record_tick`).
+pub const REC_LOOP: Check = Check { key: "rec_loop", label: "Loop record", default: false };
+/// Recording ▸ Options: the toolbar's Blend (spec: ui/recording.md §3): a take keeps the pattern's earlier notes.
+pub const REC_BLEND: Check = Check { key: "rec_blend", label: "Blend recorded notes", default: false };
+/// Recording ▸ Quantize: recorded note starts and ends snap to the main snap.
+pub const REC_QUANTIZE_START: Check = Check { key: "rec_q_start", label: "Note start time", default: true };
+pub const REC_QUANTIZE_END: Check = Check { key: "rec_q_end", label: "Note end time", default: true };
+/// Recording ▸ Start on input: the toolbar's Start on input and its right-click checks (spec: ui/recording.md §3).
+/// Turning it off ends a wait for input (`App::pref_toggle`).
+pub const REC_WAIT: Check = Check { key: "rec_wait", label: "Start on input", default: false };
+pub const REC_WAIT_FILTER: Check = Check { key: "rec_wait_filter", label: "Respect recording filter", default: true };
+pub const REC_WAIT_ARMED: Check = Check { key: "rec_wait_armed", label: "Only when recording", default: false };
+/// Recording ▸ Count-in: the toolbar's Count-in and its length (spec: ui/recording.md §3).
+pub const REC_COUNT_IN: Check = Check { key: "rec_precount", label: "Count-in", default: false };
+pub const COUNT_IN_LENGTH: Combo = Combo { key: "rec_precount_bars", label: "Count-in length", choices: &["1 bar", "2 bars"], default: 0 };
+/// Recording ▸ Audio recording: a take recorded into mixer tracks becomes audio clips (`crate::track_rec`; the mixer
+/// menu's Disk recording ▸ Auto-create audio clips). Spec: audio/track-io.md §2.5.
+pub const AUTO_AUDIO_CLIPS: Check = Check { key: "rec_auto_clips", label: "Auto-create audio clips", default: true };
+/// Recording ▸ Audio recording: the answer to the mixer's External input question (`App::ask_external`), which its
+/// Remember my choice sets; Ask asks again. Spec: audio/track-io.md §1.4, §2.3.
+pub const EXTERNAL_INPUT: Combo = Combo {
+    key: "ext_input_answer",
+    label: "External input question",
+    choices: &["Ask", "Switch to External input only", "Keep the record source"],
+    default: 0,
+};
 
 /// The declared checks.
 pub const CHECKS: &[&Check] = &[
@@ -560,22 +611,38 @@ pub const CHECKS: &[&Check] = &[
     &ALIGN_TICK_LENGTHS,
     &MULTITHREADED_MIXER,
     &MULTITHREADED_GENERATORS,
+    &MULTITHREADED_AUTO,
     &INVERT_PENCIL_BUTTONS,
     &COPY_USED_SAMPLES,
     &PICKUP,
     &AUTO_ACCEPT,
     &FOOT_PEDAL,
     &TOGGLE_ON_RELEASE,
+    &REC_NOTES,
+    &REC_AUTOMATION,
+    &REC_AUDIO,
+    &REC_ASK,
+    &REC_STARTS_PLAYBACK,
+    &REC_DISARM_ON_STOP,
+    &REC_LOOP,
+    &REC_BLEND,
+    &REC_QUANTIZE_START,
+    &REC_QUANTIZE_END,
+    &REC_WAIT,
+    &REC_WAIT_FILTER,
+    &REC_WAIT_ARMED,
+    &REC_COUNT_IN,
+    &AUTO_AUDIO_CLIPS,
 ];
 /// The declared combos.
-pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &TRANSPARENT_WINDOWS, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING, &TOOLBARS_SCALING, &ASK_DATA_FOLDER, &VELOCITY_LINK, &RELEASE_LINK, &CONTROLLER_TYPE, &SYNC_TYPE];
+pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES, &BLACK_NOTES, &AUTOSAVE, &BACKUP_LOCATION, &STARTUP_PROJECT, &COLORFUL_WAVEFORMS, &ANIMATION_REFRESH_RATE, &TRANSPARENT_WINDOWS, &CURSORS_SCALING, &LEGACY_SCALING, &OPTIMIZE_FOR, &RESAMPLING_QUALITY, &PROJECT_DATA_SIZE_WARNING, &TOOLBARS_SCALING, &ASK_DATA_FOLDER, &VELOCITY_LINK, &RELEASE_LINK, &CONTROLLER_TYPE, &SYNC_TYPE, &COUNT_IN_LENGTH, &EXTERNAL_INPUT];
 /// The declared combos no settings page shows (a window of their own does): General ▸ Input ▸ Manage shortcuts' rows
 /// (`crate::shortcuts`). Read by the declaration tests.
 #[cfg_attr(not(test), allow(dead_code))]
 pub const OFF_PAGE_COMBOS: &[&Combo] = &crate::shortcuts::ROWS;
 
 /// The declared value boxes.
-pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BACKUP_MAXIMUM, &BROWSER_PREVIEW_TRACK, &METRONOME_TRACK, &OMNI_CHANNEL, &MARKER_CHANNEL, &MUTING_CHANNEL];
+pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BACKUP_MAXIMUM, &BROWSER_PREVIEW_TRACK, &METRONOME_TRACK, &OMNI_CHANNEL, &MARKER_CHANNEL, &MUTING_CHANNEL, &PERFORMANCE_CHANNEL];
 
 /// General ▸ Input: the editors scroll by the vertical wheel's steps times value / 256 (`crate::scroll_speed`);
 /// Shift+wheel keeps its own step. Spec: ui/settings-choices.md "Input: Vertical and Horizontal scrolling speed".
@@ -737,8 +804,12 @@ impl App {
     pub(crate) fn pref_toggle(&mut self, label: &str) {
         let Some(c) = find_check(label) else { return };
         let on = toggle(c);
-        if c.key == MULTITHREADED_MIXER.key || c.key == MULTITHREADED_GENERATORS.key {
+        if c.key == MULTITHREADED_MIXER.key || c.key == MULTITHREADED_GENERATORS.key || c.key == MULTITHREADED_AUTO.key {
             crate::mix_threads::apply();
+        }
+        // Recording ▸ Start on input off ends a wait for input, as its toolbar button does.
+        if c.key == REC_WAIT.key && !on {
+            self.state.rec.waiting = false;
         }
         self.state.message = Some(format!("{}: {}", c.label, if on { "on" } else { "off" }));
         self.invalidate();
@@ -1523,5 +1594,95 @@ main_gui_scaling = 200%
         click(&mut app, &mut c, r);
         assert!(!check(&INVERT_PENCIL_BUTTONS));
         assert_eq!(app.state.message.as_deref(), Some("Swap mouse buttons for drawing: off"));
+    }
+
+    /// Settings ▸ Recording (spec: ui/settings.md "Recording"): every control works, and each is the setting the Record
+    /// button's menus, the toolbar's option buttons and the mixer's Disk recording menu set, so a change from either
+    /// side shows on the other and takes effect.
+    #[test]
+    fn recording_page_shares_the_record_settings() {
+        use crate::record::Opt;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(settings::RECORDING);
+        app.paint(&mut c, None);
+        assert_eq!(settings::TABS[settings::RECORDING].1, "Recording options");
+        // Nothing on the page is greyed out.
+        let win = settings::rect(&app.state);
+        let inside = |r: Rect| r.x >= win.x && r.right() <= win.right() && r.y >= win.y && r.bottom() <= win.bottom();
+        let greyed: Vec<&str> = app.hits.iter().filter(|h| inside(h.rect)).filter_map(|h| match h.action { Action::Placeholder(p) => Some(p), _ => None }).collect();
+        assert!(greyed.is_empty(), "greyed: {greyed:?}");
+        // Eleven tabs still fit: About ends inside the window.
+        let about = hit_rect(&app, &Action::Settings(SAct::Tab(settings::TABS.len() - 1)));
+        assert!(about.right() + 7.0 <= win.right(), "{about:?} in {win:?}");
+        let opts = [
+            Opt::Notes,
+            Opt::Automation,
+            Opt::Audio,
+            Opt::Ask,
+            Opt::StartsPlayback,
+            Opt::DisarmOnStop,
+            Opt::Loop,
+            Opt::Blend,
+            Opt::QuantizeStart,
+            Opt::QuantizeEnd,
+            Opt::Wait,
+            Opt::WaitFilter,
+            Opt::WaitArmed,
+            Opt::Precount,
+        ];
+        for o in opts {
+            let label = o.check().label;
+            let was = o.on();
+            let r = hit_rect(&app, &Action::Settings(SAct::Check(label)));
+            click(&mut app, &mut c, r);
+            assert_eq!(o.on(), !was, "{label}: the page's click changes what recording reads");
+            assert_eq!(app.state.message.as_deref(), Some(format!("{label}: {}", if was { "off" } else { "on" }).as_str()));
+            o.toggle();
+            assert_eq!(check(o.check()), was, "{label}: the menus' toggle is the page's check");
+        }
+        // Start on input off from the page ends a wait for input, as its button does.
+        Opt::Wait.toggle();
+        app.state.rec.waiting = true;
+        let r = hit_rect(&app, &Action::Settings(SAct::Check(REC_WAIT.label)));
+        click(&mut app, &mut c, r);
+        assert!(!Opt::Wait.on() && !app.state.rec.waiting);
+        // Loop record from the page reaches the playback at the next tick: armed with it off, playback runs on.
+        app.state.rec.armed = true;
+        app.record_tick();
+        assert!(crate::record::run_on_flag().load(std::sync::atomic::Ordering::Relaxed));
+        let r = hit_rect(&app, &Action::Settings(SAct::Check(REC_LOOP.label)));
+        click(&mut app, &mut c, r);
+        app.record_tick();
+        assert!(!crate::record::run_on_flag().load(std::sync::atomic::Ordering::Relaxed));
+        set_check(&REC_LOOP, false);
+        app.state.rec.armed = false;
+        // Count-in length: the page's combo is the count-in button's right-click choice.
+        let combo = |app: &App, l: &str| app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(k, ..)) if *k == l)).map(|h| h.rect).expect("the combo works");
+        let r = combo(&app, COUNT_IN_LENGTH.label);
+        click(&mut app, &mut c, r);
+        let labels: Vec<String> = app.state.playlist.popup.as_ref().expect("its menu").items.iter().map(|it| it.label.to_string()).collect();
+        assert_eq!(labels, ["1 bar", "2 bars"]);
+        let item = hit_rect(&app, &Action::PlPopup(1));
+        click(&mut app, &mut c, item);
+        assert_eq!(crate::record::precount_bars(), 2);
+        crate::record::set_precount_bars(1);
+        assert_eq!(choice(&COUNT_IN_LENGTH), "1 bar");
+        // Auto-create audio clips is the mixer menu's.
+        let r = hit_rect(&app, &Action::Settings(SAct::Check(AUTO_AUDIO_CLIPS.label)));
+        click(&mut app, &mut c, r);
+        assert!(!check(&AUTO_AUDIO_CLIPS));
+        set_check(&AUTO_AUDIO_CLIPS, true);
+        // The External input question's answer: chosen here, the mixer stops asking (`App::ask_external`).
+        let r = combo(&app, EXTERNAL_INPUT.label);
+        click(&mut app, &mut c, r);
+        let item = hit_rect(&app, &Action::PlPopup(2));
+        click(&mut app, &mut c, item);
+        assert_eq!(choice(&EXTERNAL_INPUT), "Keep the record source");
+        app.ask_external(1);
+        assert!(app.state.dialogs.is_empty(), "remembered: not asked");
+        set_choice(&EXTERNAL_INPUT, 0);
+        app.ask_external(1);
+        assert!(!app.state.dialogs.is_empty(), "Ask asks");
     }
 }

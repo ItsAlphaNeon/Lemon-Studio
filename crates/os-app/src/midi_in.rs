@@ -206,6 +206,12 @@ pub struct MidiIn {
 /// The name Lemon Studio's connections show in the system's MIDI routing (ALSA / JACK clients).
 pub const CLIENT: &str = "Lemon Studio";
 
+/// Whether `name` is one of Lemon Studio's own ports (ALSA lists the ports of its output connections as inputs too):
+/// read, it would hear everything Lemon Studio sends (its MIDI out, the clock) as if a device had played it.
+pub fn own(name: &str) -> bool {
+    name.strip_prefix(CLIENT).is_some_and(|rest| rest.starts_with(':'))
+}
+
 /// How often the watcher lists the devices.
 const WATCH: Duration = Duration::from_secs(2);
 
@@ -226,7 +232,7 @@ fn input_names() -> Vec<String> {
 
 fn output_names() -> Vec<String> {
     let Ok(m) = midir::MidiOutput::new(CLIENT) else { return Vec::new() };
-    unique(m.ports().iter().map(|p| m.port_name(p).unwrap_or_default()).collect())
+    unique(m.ports().iter().map(|p| m.port_name(p).unwrap_or_default()).collect()).into_iter().filter(|n| !own(n)).collect()
 }
 
 impl MidiIn {
@@ -276,10 +282,13 @@ impl MidiIn {
     pub fn refresh(&mut self) -> Vec<String> {
         let names = input_names();
         self.outputs = output_names();
-        self.conns.retain(|(n, _)| names.contains(n) && crate::midi_cfg::input(n).enabled);
+        self.conns.retain(|(n, _)| names.contains(n) && crate::midi_cfg::input(n).enabled && !own(n));
         let mut opened = Vec::new();
         let mut inputs = Vec::with_capacity(names.len());
         for (i, name) in names.iter().enumerate() {
+            if own(name) {
+                continue;
+            }
             let want = crate::midi_cfg::input(name).enabled;
             let mut failed = false;
             if want && !self.conns.iter().any(|(n, _)| n == name) {
@@ -353,6 +362,7 @@ mod tests {
         assert_eq!(parse(&[0xd2, 99]), Some(Msg::Pressure { ch: 2, v: 99 }));
         assert_eq!(parse(&[0xc0, 5]), Some(Msg::Program { ch: 0, p: 5 }));
         assert_eq!(parse(&[0xf2, 0x10, 0x01]), Some(Msg::Spp(144)));
+        assert!(own("Lemon Studio:Lemon Studio 131:0") && !own("Lemon Studio test:out 130:0") && !own("Launchkey MK4 61:Launchkey MK4 61 MIDI In 24:0"));
         assert_eq!(parse(&[0xfa]), Some(Msg::Start));
         assert_eq!(parse(&[0xf8]), None, "the clock is not a message here");
         assert_eq!(Msg::Bend { ch: 4, v: 8192 }.bytes(), Some([0xe0, 0, 64]), "sent on channel 1");

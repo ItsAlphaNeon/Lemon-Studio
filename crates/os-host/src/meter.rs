@@ -7,7 +7,8 @@
 // spec: ui/plugin-performance.md §3, audio/voices.md §5
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// A count an instance raises when it has work for the UI thread (callbacks it asked for, parameter events for the
 /// app, a flush, a restart, a new rate). The UI locks an instance only when its count moved since it last looked (or
@@ -33,12 +34,49 @@ pub struct Meter {
     busy: AtomicU64,
     /// Its voices after the last processed block (instruments).
     voices: AtomicU32,
+    /// When its last processing call ended, ns after `epoch` (0: never): the UI times its long calls by it
+    /// (`since_processed`).
+    done: AtomicU64,
+    /// The UI thread's long holds of the instance, ns: the longest, fading (`note_hold`).
+    held: AtomicU64,
+}
+
+/// A hold from this long on counts as long: it leaves the audio thread (which waits 2 ms for all its plugins together)
+/// little room.
+const HOLD_LONG_NS: u64 = 1_000_000;
+
+/// The time `Meter::done` counts from.
+fn epoch() -> Instant {
+    static E: OnceLock<Instant> = OnceLock::new();
+    *E.get_or_init(Instant::now)
 }
 
 impl Meter {
-    /// Adds the time of one processing call.
+    /// Adds the time of one processing call, which has just ended.
     pub fn add(&self, d: Duration) {
         self.busy.fetch_add(d.as_nanos().min(u128::from(u64::MAX)) as u64, Ordering::Relaxed);
+        self.done.store((epoch().elapsed().as_nanos() as u64).max(1), Ordering::Release);
+    }
+
+    /// The UI thread held the instance for `d`. Each hold fades the record by 1/256: a plugin stays slow for a few
+    /// hundred holds after a long one.
+    pub fn note_hold(&self, d: Duration) {
+        let old = self.held.load(Ordering::Relaxed);
+        self.held.store((old - old / 256).max(d.as_nanos().min(u128::from(u64::MAX)) as u64), Ordering::Relaxed);
+    }
+
+    /// The UI thread's holds of this instance can take long enough to make it late (`note_hold`).
+    pub fn holds_long(&self) -> bool {
+        self.held.load(Ordering::Relaxed) >= HOLD_LONG_NS
+    }
+
+    /// How long ago its last processing call ended (`None`: never processed). Just after one, the audio thread will
+    /// not need the instance for most of a block: the moment for a UI call that holds it a few ms.
+    pub fn since_processed(&self) -> Option<Duration> {
+        match self.done.load(Ordering::Acquire) {
+            0 => None,
+            t => Some(epoch().elapsed().saturating_sub(Duration::from_nanos(t))),
+        }
     }
 
     pub fn set_voices(&self, n: usize) {

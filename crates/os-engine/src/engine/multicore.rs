@@ -132,6 +132,8 @@ pub(super) struct MixCx<'a> {
     /// Whether the master's slots and the insert tracks' run (an export's switches).
     pub master_fx: bool,
     pub insert_fx: bool,
+    /// The program's Auto-bypass when silent setting (`super::auto_bypass`).
+    pub auto_bypass: bool,
     /// On a device: its inputs this tick (interleaved), how many, and its output pairs.
     pub io: Option<(&'a [f32], usize, usize)>,
     pub keys: Keys,
@@ -166,6 +168,10 @@ pub(super) struct Multicore {
     /// The pool came with the engine (`parallel::global`): it is used while the program's switch is on. A pool given
     /// with `Engine::set_threads` always is.
     follow: bool,
+    /// When the program uses the workers only when needed.
+    gate: LoadGate,
+    /// The last tick was an export's.
+    offline: bool,
     /// Scratch per lane (the rendering thread, then each worker).
     lanes: Vec<MixScratch>,
     outbox: Vec<Outbox>,
@@ -194,11 +200,78 @@ pub(super) struct Multicore {
     pub gen_ran: u64,
 }
 
+/// Whether an engine playing live uses the workers now, when the program uses them only when needed (spec:
+/// audio/multicore.md "Only when needed"). From each tick's rendering time against the tick's length: opens when the load
+/// has stayed over `OPEN_AT` for `SUSTAIN` (a heavy tick or two is no reason: the queue before the device has room for
+/// them). After `TRIAL` it keeps the workers only if they lowered the load by `GAIN`, or it is still `STILL_HEAVY`; else it
+/// closes for `RETRY` (some projects run no faster on them, at several times the CPU). It closes after `HOLD` under
+/// `CLOSE_AT`. The workers lower the load, so closing lies well under opening, or the gate would swing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LoadGate {
+    open: bool,
+    /// The load, over about 0.2 s (the usual tick is about 3 ms).
+    load: f32,
+    /// Seconds of audio: over `OPEN_AT`, under `CLOSE_AT`, in the trial (none once passed), left to `RETRY`.
+    over: f32,
+    calm: f32,
+    trial: Option<f32>,
+    wait: f32,
+    /// The load on one thread, when it opened.
+    before: f32,
+}
+
+impl LoadGate {
+    const OPEN_AT: f32 = 0.5;
+    const SUSTAIN: f32 = 0.5;
+    const CLOSE_AT: f32 = 0.15;
+    const HOLD: f32 = 5.0;
+    const TRIAL: f32 = 2.0;
+    const GAIN: f32 = 0.7;
+    const STILL_HEAVY: f32 = 0.9;
+    const RETRY: f32 = 30.0;
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// A tick of `length` seconds of audio took `spent` seconds to render.
+    pub fn note(&mut self, spent: f32, length: f32) {
+        if length <= 0.0 {
+            return;
+        }
+        self.load += (spent / length - self.load) / 64.0;
+        if !self.open {
+            self.wait = (self.wait - length).max(0.0);
+            self.over = if self.wait == 0.0 && self.load > Self::OPEN_AT { self.over + length } else { 0.0 };
+            if self.over >= Self::SUSTAIN {
+                (self.open, self.calm, self.trial, self.before, self.over) = (true, 0.0, Some(0.0), self.load, 0.0);
+            }
+            return;
+        }
+        if let Some(t) = self.trial {
+            let t = t + length;
+            self.trial = (t < Self::TRIAL).then_some(t);
+            if self.trial.is_none() && self.load > self.before * Self::GAIN && self.load < Self::STILL_HEAVY {
+                (self.open, self.wait) = (false, Self::RETRY);
+                return;
+            }
+        }
+        if self.load < Self::CLOSE_AT {
+            self.calm += length;
+            self.open = self.calm < Self::HOLD;
+        } else {
+            self.calm = 0.0;
+        }
+    }
+}
+
 impl Multicore {
     pub fn new(pool: Option<Arc<Pool>>) -> Multicore {
         let mut m = Multicore {
             pool: None,
             follow: true,
+            gate: LoadGate::default(),
+            offline: false,
             lanes: Vec::new(),
             outbox: Vec::new(),
             graph: Graph::default(),
@@ -230,14 +303,40 @@ impl Multicore {
         self.follow = follow;
     }
 
+    /// A tick took `spent` seconds to render, of `length` seconds of audio; `offline`: an export, which always uses the
+    /// workers (no deadline, and the sooner the better).
+    pub fn note_tick(&mut self, spent: f32, length: f32, offline: bool) {
+        self.offline = offline;
+        self.gate.note(spent, length);
+    }
+
+    /// The gate of the engine this one takes over from (an edit swaps engines while playing).
+    pub fn keep_gate(&mut self, old: &Multicore) {
+        self.gate = old.gate;
+    }
+
+    /// The gate as it stands, for playback that restarts (`Engine::load_gate`).
+    pub fn gate(&self) -> LoadGate {
+        self.gate
+    }
+
+    pub fn set_gate(&mut self, gate: LoadGate) {
+        self.gate = gate;
+    }
+
+    /// The workers are wanted now, as far as the load goes.
+    fn wanted(&self) -> bool {
+        self.offline || !crate::parallel::auto_on() || self.gate.is_open()
+    }
+
     /// The pool, while the mixer is to use it.
     fn mixer_pool(&self) -> Option<Arc<Pool>> {
-        self.pool.clone().filter(|p| p.workers() > 0 && (!self.follow || crate::parallel::mixer_on()))
+        self.pool.clone().filter(|p| p.workers() > 0 && (!self.follow || (crate::parallel::mixer_on() && self.wanted())))
     }
 
     /// The pool, while the generators are to use it.
     fn generator_pool(&self) -> Option<Arc<Pool>> {
-        self.pool.clone().filter(|p| p.workers() > 0 && (!self.follow || crate::parallel::generators_on()))
+        self.pool.clone().filter(|p| p.workers() > 0 && (!self.follow || (crate::parallel::generators_on() && self.wanted())))
     }
 
     /// The channels whose instrument ran this tick (`generators`) and what each put out, in channel order.
@@ -425,6 +524,7 @@ impl Multicore {
         sig.push(n as u32);
         sig.extend(order.iter().map(|&t| t as u32));
         for m in tracks {
+            sig.push(u32::from(m.threaded));
             sig.push(m.routes.len() as u32);
             sig.extend(m.routes.iter().map(|r| r.dest as u32));
             sig.push(m.effects.len() as u32);
@@ -469,6 +569,10 @@ impl Multicore {
             self.feed_at[j + 1] += self.feed_at[j];
         }
         self.graph.set(order.len(), &mut self.edges);
+        // A track whose threaded processing is off runs on the rendering thread.
+        for (j, &t) in order.iter().enumerate() {
+            self.graph.pin(j, !tracks[t].threaded);
+        }
     }
 
     /// The tracks on the pool. `Err` gives the parts back untouched when the pool is busy.
@@ -532,6 +636,8 @@ pub(super) struct InstOut {
     /// The delay it reported, and whether it said it still sounds.
     pub delay: u32,
     pub active: bool,
+    /// How long the instrument has had nothing to play and put out silence (`instrument_job`, auto-bypass).
+    pub quiet: super::auto_bypass::Quiet,
 }
 
 /// The audio clips with shapes on instrument channels (`Engine::inst_shapes`), shared by the channels of a tick: each
@@ -678,6 +784,7 @@ const _: () = {
 #[cfg(test)]
 pub(super) mod tests {
     use super::super::*;
+    use super::LoadGate;
     use crate::effects;
     use crate::parallel::Pool;
     use os_model::{Channel, MixerTrack, Note, Pattern, SlotPlugin};
@@ -929,6 +1036,76 @@ pub(super) mod tests {
     }
 
     /// spec: audio/multicore.md: a dense project renders sample for sample the same on several cores as on one.
+    const TICK: f32 = 0.003;
+
+    fn run(g: &mut LoadGate, load: f32, seconds: f32) {
+        for _ in 0..(seconds / TICK) as usize {
+            g.note(load * TICK, TICK);
+        }
+    }
+
+    /// A light project stays on one thread; a heavy one that the workers help keeps the gate open while they bring the load
+    /// down, until a long calm.
+    #[test]
+    fn the_load_gate_opens_when_needed_and_does_not_swing() {
+        let mut g = LoadGate::default();
+        run(&mut g, 0.4, 5.0);
+        assert!(!g.is_open(), "40 %: one thread keeps up");
+        run(&mut g, 0.7, 1.0);
+        assert!(g.is_open(), "70 %: the workers are wanted");
+        run(&mut g, 0.25, 30.0);
+        assert!(g.is_open(), "25 % with the workers is what they brought it down to");
+        run(&mut g, 0.1, 4.0);
+        assert!(g.is_open(), "calm, but not for long enough");
+        run(&mut g, 0.3, 0.5);
+        run(&mut g, 0.1, 4.0);
+        assert!(g.is_open(), "the calm starts over");
+        run(&mut g, 0.1, 6.0);
+        assert!(!g.is_open(), "a long calm: back to one thread");
+    }
+
+    /// A project the workers do not speed up goes back to one thread, and is tried again only after a while.
+    #[test]
+    fn the_load_gate_closes_when_the_workers_do_not_help() {
+        let mut g = LoadGate::default();
+        run(&mut g, 0.7, 1.0);
+        assert!(g.is_open());
+        run(&mut g, 0.7, 3.0);
+        assert!(!g.is_open(), "no faster on the workers");
+        run(&mut g, 0.7, 20.0);
+        assert!(!g.is_open(), "not tried again yet");
+        run(&mut g, 0.7, 9.5);
+        assert!(g.is_open(), "tried again");
+    }
+
+    /// Overloaded even on the workers, it stays open.
+    #[test]
+    fn a_project_still_heavy_keeps_the_workers() {
+        let mut g = LoadGate::default();
+        run(&mut g, 1.2, 3.0);
+        assert!(g.is_open());
+        run(&mut g, 1.2, 5.0);
+        assert!(g.is_open());
+    }
+
+    /// A burst of heavy ticks does not open it.
+    #[test]
+    fn the_load_gate_ignores_a_burst() {
+        let mut g = LoadGate::default();
+        run(&mut g, 0.2, 1.0);
+        run(&mut g, 3.0, 0.03);
+        run(&mut g, 0.2, 1.0);
+        assert!(!g.is_open());
+    }
+
+    /// Nothing asks for the gate's state where the engine has no ticks of audio.
+    #[test]
+    fn a_tick_of_no_length_leaves_the_gate() {
+        let mut g = LoadGate::default();
+        g.note(1.0, 0.0);
+        assert!(!g.is_open());
+    }
+
     #[test]
     fn a_dense_project_renders_the_same_on_several_cores() {
         let pool = Pool::new(3, None);
@@ -936,6 +1113,12 @@ pub(super) mod tests {
         check(&p, &pool, false, false, "own effects");
         check(&p, &pool, true, false, "hosted effects");
         check(&p, &pool, true, true, "on a device");
+        // Tracks whose threaded processing is off run on the rendering thread: the same sound.
+        let mut q = p.clone();
+        for m in q.mixer.iter_mut().step_by(3) {
+            m.threaded = false;
+        }
+        check(&q, &pool, true, false, "some tracks not threaded");
     }
 
     /// A hosted instrument with state: a saw per held key, its delay as reported, its clock in its output (so the

@@ -194,6 +194,9 @@ pub(super) struct Pdc {
     pub cap_skip: Vec<u64>,
     pub handed: u64,
     pub taken: u64,
+    /// Plugin delay compensation ▸ Automatic is unticked (`Project::pdc_off`): the plugins' delays count as none, the
+    /// tracks' latency settings still apply (spec: "Automatic").
+    pub manual: bool,
 }
 
 impl Pdc {
@@ -330,19 +333,19 @@ impl Engine {
         let mut ins: Vec<TrackIn> = (0..n)
             .map(|t| {
                 let m = &self.tracks[t];
-                let slots = if self.slots_run(t) { m.effects.iter().filter(|f| f.on).map(|f| u64::from(f.delay)).sum() } else { 0 };
+                let slots = if self.slots_run(t) && !self.pdc.manual { m.effects.iter().filter(|f| f.on).map(|f| u64::from(f.delay)).sum() } else { 0 };
                 TrackIn { out: m.latency.0, inp: m.latency.1, sends: m.routes.iter().map(|r| r.dest).collect(), chan: 0, slots }
             })
             .collect();
         // Engine voices report none; a plugin channel counts also while it is switched off.
         for (c, ch) in self.channels.iter().enumerate() {
-            if ch.instrument.0.is_some() {
+            if ch.instrument.0.is_some() && !self.pdc.manual {
                 let d = self.pdc.chan_delay.get(c).copied().unwrap_or(0);
                 ins[ch.insert].chan = ins[ch.insert].chan.max(d);
             }
         }
         let l = lateness(&ins, &self.order, self.rate);
-        let runs: Vec<bool> = (0..n).map(|t| self.slots_run(t)).collect();
+        let runs: Vec<bool> = (0..n).map(|t| self.slots_run(t) && !self.pdc.manual).collect();
         let on: Vec<bool> = (0..n).map(|t| self.slots_on(t)).collect();
         self.pdc.slot_late = vec![[0; 10]; n];
         for (t, m) in self.tracks.iter_mut().enumerate() {
@@ -397,7 +400,8 @@ impl Engine {
             }
         }
         for (c, ch) in self.channels.iter().enumerate() {
-            let len = if ch.instrument.0.is_some() { l.channel_pad(ch.insert, self.pdc.chan_delay.get(c).copied().unwrap_or(0)) } else { 0 };
+            let delay = if self.pdc.manual { 0 } else { self.pdc.chan_delay.get(c).copied().unwrap_or(0) };
+            let len = if ch.instrument.0.is_some() { l.channel_pad(ch.insert, delay) } else { 0 };
             if let Some(p) = self.pdc.chan_pad.get_mut(c) {
                 p.set_len(len);
             }
@@ -708,6 +712,25 @@ mod tests {
         off.mixer[1].slot_on[0] = false;
         let late = export(&off, vec![(1, 0, Late::new(100))]);
         assert!(late == export(&off, vec![(1, 0, Late::new(0))]));
+    }
+
+    /// spec: "Automatic": with Plugin delay compensation ▸ Automatic unticked a late slot is heard late (its track is
+    /// not waited for and the export starts at 0), while a track's own latency setting still counts.
+    #[test]
+    fn automatic_off_leaves_the_plugins_delays_alone() {
+        let mut p = project(&[1, 2], 3);
+        p.pdc_off = true;
+        let reference = export(&p, vec![(1, 0, Late::new(0))]);
+        let late = export(&p, vec![(1, 0, Late::new(100))]);
+        assert_eq!(late.len(), reference.len());
+        assert!(late != reference, "insert 1 is heard late");
+        let mut e = engine(&p, vec![(1, 0, Late::new(100))], false);
+        e.next_tick();
+        assert_eq!((e.pdc.lag, e.tracks[2].routes[0].pad.len()), (0, 0), "nothing waits for it");
+        p.mixer[1].latency_out = 5.0;
+        let mut e = engine(&p, vec![(1, 0, Late::new(100))], false);
+        e.next_tick();
+        assert_eq!((e.pdc.lag, e.tracks[2].routes[0].pad.len()), (240, 240), "the latency setting still counts");
     }
 
     #[test]

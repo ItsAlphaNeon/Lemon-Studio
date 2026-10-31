@@ -155,7 +155,7 @@ pub fn target_of(s: &State, key: usize, index: usize) -> Option<u32> {
 }
 
 /// Who owns hosted instance `key`, as clip names write it (spec §4): the channel name, or "<slot plugin> - <track>".
-fn owner_name(s: &State, key: usize) -> String {
+pub(crate) fn owner_name(s: &State, key: usize) -> String {
     match fx_of(key) {
         Some((track, slot)) => {
             let plugin = crate::mixer::slot_name(s, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));
@@ -366,7 +366,9 @@ impl App {
             // Only an instance with something new is locked, and never waited for: one the audio thread is rendering
             // is read again next tick (its events stay queued).
             let Some(look) = h.due(ui.lists.get(&key).map_or(crate::plugins::Look::never(), |l| l.seen)) else { continue };
-            let Ok(mut p) = h.plugin.try_lock() else { continue };
+            // A plugin's parameters can take a few ms to read (`lock_for_tick`).
+            let Some(mut p) = crate::plugins::lock_for_tick(&h.plugin, h.meter.as_deref()) else { continue };
+            let t0 = std::time::Instant::now();
             let weak = Arc::downgrade(&h.plugin);
             let count = p.param_count();
             let stale = ui.lists.get(&key).is_none_or(|l| l.params.len() != count || !Weak::ptr_eq(&l.plugin, &weak));
@@ -449,6 +451,9 @@ impl App {
                 if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
                     automate.push((key, index));
                 }
+            }
+            if let Some(m) = &h.meter {
+                m.note_hold(t0.elapsed());
             }
         }
         // An edit in a plugin's window is an undo step (by the owner's id, so it follows moves): a gesture's from its
@@ -778,6 +783,23 @@ mod tests {
     /// playlist; "MIDI learn..." is ticked while a clip drives the parameter or a controller is linked to it.
     /// Set... is one undo step, "Plugin parameter": Ctrl+Z puts the parameter back, redo sets it again; a pick of the
     /// value it has makes none (OS, `control::param_set`).
+    /// A plugin parameter set from the app makes the project unsaved, as its state is saved with it; a copy written (an
+    /// autosave) leaves it so, saving clears it.
+    #[test]
+    fn a_plugin_parameter_change_is_unsaved() {
+        let (mut a, key) = eq_app();
+        a.mark_saved();
+        assert!(!a.unsaved());
+        crate::playlist::run(&mut a, Cmd::Param(PCmd::Set(key, 35, 1.0)));
+        assert!(a.unsaved(), "a parameter set");
+        let copy = std::env::temp_dir().join(format!("lemon-unsaved-copy-{}.flp", std::process::id()));
+        assert_eq!(a.save_copy(copy.clone()), Some(Ok(())));
+        let _ = std::fs::remove_file(&copy);
+        assert!(a.unsaved(), "after a copy");
+        a.mark_saved();
+        assert!(!a.unsaved(), "saved");
+    }
+
     #[test]
     fn parameter_set_is_an_undo_step() {
         let (mut a, key) = eq_app();

@@ -19,10 +19,16 @@ pub enum Tool {
     /// Left drag draws the level freehand on the snap; right drag draws a straight line.
     #[default]
     Draw,
+    /// Draw, ignoring the snap: an event on every tick.
+    Paint,
     /// Left drag deletes the events it passes over.
     Erase,
+    /// A drag gives the events under it the levels of a straight line (right drag: a smooth one).
+    Interpolate,
     /// Left drag selects a stretch of time.
     Select,
+    /// A click zooms in about it, a drag zooms on the stretch dragged over, a right click zooms out.
+    Zoom,
 }
 
 /// The window's buttons and areas.
@@ -51,6 +57,23 @@ pub enum EvCmd {
     /// An event with the control's value as it was when the editor opened, at the selection's start (or the
     /// pattern's).
     InsertValue,
+    /// The selection's events copied right after it.
+    Duplicate,
+    /// Moves the events from the selection's start on later by its length, or pulls those after it back over it.
+    InsertSpace,
+    DeleteSpace,
+    /// The selection moved back or on by its own length.
+    SelectPrev,
+    SelectNext,
+    /// The Relocate events check: Paste inserts, and Cut and Delete close the gap.
+    Relocate,
+    /// Zoom in or out about the graph's middle, or to the selection.
+    ZoomIn,
+    ZoomOut,
+    ZoomSelection,
+    /// Tools ▸ Scale levels and LFO: the piano roll's dialogs on the control's events.
+    ScaleLevels,
+    Lfo,
     TurnIntoClip,
 }
 
@@ -76,6 +99,8 @@ pub struct EventsUi {
     pub line: Option<((u32, f64), (u32, f64))>,
     /// Cut or copied events: (ticks from the selection's start, level), and the selection's length.
     pub clipboard: Option<(Vec<(u32, f64)>, u32)>,
+    /// Relocate events (§4): Paste makes room for what it pastes, Cut and Delete pull the later events back.
+    pub relocate: bool,
 }
 
 impl Default for EventsUi {
@@ -93,6 +118,7 @@ impl Default for EventsUi {
             sel: None,
             line: None,
             clipboard: None,
+            relocate: false,
         }
     }
 }
@@ -152,8 +178,18 @@ pub fn points(s: &State) -> Vec<(u32, i32)> {
 }
 
 fn set(s: &mut State, tick: u32, level: f64) {
-    let (kind, v) = (s.events.target, value(s.events.range, level));
+    let v = value(s.events.range, level);
+    set_value(s, tick, v);
+}
+
+fn set_value(s: &mut State, tick: u32, v: i32) {
+    let kind = s.events.target;
     piano::set_control(s, (kind >> 16) as u16, kind as u16, tick, v);
+}
+
+/// What Copy and Duplicate take without a selection: the pattern's length, or to the last event when that lies later.
+fn whole(s: &State) -> (u32, u32) {
+    (0, s.project.pattern_length(s.pattern).max(points(s).last().map_or(0, |p| p.0 + 1)).max(1))
 }
 
 /// Deletes the control's events from `from` to `to` (both included); returns how many went.
@@ -181,8 +217,112 @@ pub fn draw(s: &mut State, a: (u32, f64), b: (u32, f64), unit: u32) {
     s.piano.dirty = true;
 }
 
-/// Edit ▸ Delete: the selection's events, or all of them.
+/// The Interpolate tool (spec §1): the control's events from `a` to `b` (tick, level) keep their times and take the
+/// levels of the straight line between them, or with `smooth` of a half cosine from one to the other. Returns how many
+/// there were.
+pub fn interpolate(s: &mut State, a: (u32, f64), b: (u32, f64), smooth: bool) -> usize {
+    let ((t0, l0), (t1, l1)) = if a.0 <= b.0 { (a, b) } else { (b, a) };
+    let under: Vec<u32> = points(s).into_iter().map(|p| p.0).filter(|t| (t0..=t1).contains(t)).collect();
+    for &t in &under {
+        let k = if t1 == t0 { 1.0 } else { f64::from(t - t0) / f64::from(t1 - t0) };
+        let k = if smooth { (1.0 - (k * std::f64::consts::PI).cos()) / 2.0 } else { k };
+        set(s, t, l0 + (l1 - l0) * k);
+    }
+    s.piano.dirty = true;
+    under.len()
+}
+
+/// Edit ▸ Duplicate (Ctrl+B): the selection's events (all of them without one) copied right after it, in place of the
+/// control's events there; the copy becomes the selection.
+pub fn duplicate(s: &mut State) -> bool {
+    let (a, b) = s.events.sel.unwrap_or_else(|| whole(s));
+    let len = (b - a).max(1);
+    let events: Vec<(u32, i32)> = points(s).into_iter().filter(|p| (a..b).contains(&p.0)).collect();
+    if events.is_empty() {
+        return false;
+    }
+    erase(s, a + len, a + 2 * len - 1);
+    for (t, v) in events {
+        set_value(s, t + len, v);
+    }
+    s.events.sel = Some((a + len, a + 2 * len));
+    true
+}
+
+/// Edit ▸ Insert space (Ctrl+Ins): the events from the selection's start on move later by its length. Delete space
+/// (Ctrl+Del): the selection's events go and the later ones move back by its length. Both need a selection.
+pub fn space(s: &mut State, insert: bool) -> bool {
+    let Some((a, b)) = s.events.sel.filter(|(a, b)| b > a) else { return false };
+    let len = b - a;
+    let from = if insert { a } else { b };
+    let moved: Vec<(u32, i32)> = points(s).into_iter().filter(|p| p.0 >= from).collect();
+    erase(s, a, u32::MAX);
+    for (t, v) in moved {
+        set_value(s, if insert { t + len } else { t - len }, v);
+    }
+    true
+}
+
+/// The control's events from `from` up to `to` give way to `points` (tick, stored value).
+pub fn replace(s: &mut State, from: u32, to: u32, points: &[(u32, i32)]) {
+    erase(s, from, to.saturating_sub(1).max(from));
+    for &(t, v) in points {
+        set_value(s, t, v);
+    }
+    s.piano.dirty = true;
+}
+
+/// Edit ▸ Select previous (Ctrl+Left) / Select next (Ctrl+Right): the selection moves back or on by its length (the
+/// original's manual); back stops at the pattern's start. Returns whether it moved.
+pub fn select_step(s: &mut State, next: bool) -> bool {
+    let Some((a, b)) = s.events.sel.filter(|(a, b)| b > a) else { return false };
+    let len = b - a;
+    let at = if next { b } else { a.saturating_sub(len) };
+    if at == a {
+        return false;
+    }
+    s.events.sel = Some((at, at + len));
+    true
+}
+
+/// Zoom in or out (`factor` times the pixels a beat) about the graph's middle.
+pub fn zoom(s: &mut State, factor: f32) {
+    let g = crate::views::events::graph(s);
+    zoom_about(s, factor, g.x + g.w / 2.0);
+}
+
+/// Zoom in or out about `x`: the tick there stays there.
+pub fn zoom_about(s: &mut State, factor: f32, x: f32) {
+    let at = crate::views::events::tick_at(s, x);
+    s.events.px_per_beat = (s.events.px_per_beat * factor).clamp(ZOOM.0, ZOOM.1);
+    let back = crate::views::events::tick_at(s, x) - s.events.scroll;
+    s.events.scroll = (at - back).max(0.0);
+}
+
+/// The Zoom tool's and the menu's zoom step.
+pub const ZOOM_STEP: f32 = 1.5;
+
+/// Zoom ▸ on selection: the selection fills the graph's width.
+pub fn zoom_selection(s: &mut State) -> bool {
+    let Some((a, b)) = s.events.sel.filter(|(a, b)| b > a) else { return false };
+    let w = crate::views::events::graph(s).w;
+    let ppq = f32::from(s.project.ppq.max(4));
+    s.events.px_per_beat = (w * ppq / (b - a) as f32).clamp(ZOOM.0, ZOOM.1);
+    s.events.scroll = f64::from(a);
+    true
+}
+
+/// The zoom's limits, pixels a beat.
+pub const ZOOM: (f32, f32) = (4.0, 600.0);
+
+/// Edit ▸ Delete: the selection's events, or all of them. With Relocate events on, the later events move back over a
+/// selection's place.
 pub fn delete(s: &mut State) -> usize {
+    if s.events.relocate && s.events.sel.is_some_and(|(a, b)| b > a) {
+        let n = points(s).iter().filter(|p| s.events.sel.is_some_and(|(a, b)| (a..b).contains(&p.0))).count();
+        space(s, false);
+        return n;
+    }
     match s.events.sel {
         Some((a, b)) => erase(s, a, b.saturating_sub(1).max(a)),
         None => erase(s, 0, u32::MAX),
@@ -198,7 +338,7 @@ pub fn select_all(s: &mut State) {
 /// Edit ▸ Copy: the selection's events (all of them without one) as levels, from the selection's start.
 pub fn copy(s: &mut State) -> bool {
     let range = s.events.range;
-    let (a, b) = s.events.sel.unwrap_or((0, s.project.pattern_length(s.pattern).max(points(s).last().map_or(0, |p| p.0 + 1))));
+    let (a, b) = s.events.sel.unwrap_or_else(|| whole(s));
     let events: Vec<(u32, f64)> = points(s).into_iter().filter(|p| (a..b).contains(&p.0)).map(|(t, v)| (t - a, level(range, v))).collect();
     if events.is_empty() {
         return false;
@@ -208,10 +348,15 @@ pub fn copy(s: &mut State) -> bool {
 }
 
 /// Edit ▸ Paste: the clipboard at the selection's start (the pattern's without one), the control's events in the
-/// stretch it covers replaced; the stretch becomes the selection.
+/// stretch it covers replaced; the stretch becomes the selection. With Relocate events on, the events from there on
+/// move later by its length first, so none is replaced.
 pub fn paste(s: &mut State) -> bool {
     let Some((events, len)) = s.events.clipboard.clone() else { return false };
     let at = s.events.sel.map_or(0, |(a, _)| a);
+    if s.events.relocate {
+        s.events.sel = Some((at, at + len.max(1)));
+        space(s, true);
+    }
     erase(s, at, at + len.max(1) - 1);
     for (t, l) in events {
         set(s, at + t, l);
@@ -299,6 +444,10 @@ pub enum Stroke {
     Select(u32),
     /// A straight line from where the right button went down (`EventsUi::line`).
     Line,
+    /// The Interpolate tool's line (`EventsUi::line`), smooth with the right button: made on release.
+    Interpolate(bool),
+    /// The Zoom tool's drag from the anchor tick; the selection it hides while the stretch shows.
+    Zoom(u32, Option<(u32, u32)>),
 }
 
 /// The snap's unit in ticks at the editor's zoom: the global snap (none with Alt held).
@@ -320,6 +469,7 @@ fn snapped(s: &State, tick: f64, alt: bool) -> u32 {
 pub fn menu(s: &State, x: f32, y: f32) -> Popup {
     let any = !points(s).is_empty();
     let turn = PItem::new("Turn into automation clip", Cmd::Events(EvCmd::TurnIntoClip));
+    let on_sel = |p: PItem| if s.events.sel.is_some() { p } else { p.off() };
     let items = vec![
         PItem::head("Edit"),
         PItem::new("Cut", Cmd::Events(EvCmd::Cut)).key("Ctrl+X"),
@@ -329,10 +479,29 @@ pub fn menu(s: &State, x: f32, y: f32) -> Popup {
             if s.events.clipboard.is_some() { p } else { p.off() }
         },
         PItem::new("Select all", Cmd::Events(EvCmd::SelectAll)).key("Ctrl+A"),
+        on_sel(PItem::new("Select previous", Cmd::Events(EvCmd::SelectPrev)).key("Ctrl+Left")),
+        on_sel(PItem::new("Select next", Cmd::Events(EvCmd::SelectNext)).key("Ctrl+Right")),
         PItem::new("Delete", Cmd::Events(EvCmd::Delete)).key("Del"),
+        PItem::new("Duplicate", Cmd::Events(EvCmd::Duplicate)).key("Ctrl+B"),
+        PItem::sep(),
+        on_sel(PItem::new("Insert space", Cmd::Events(EvCmd::InsertSpace)).key("Ctrl+Ins")),
+        on_sel(PItem::new("Delete space", Cmd::Events(EvCmd::DeleteSpace)).key("Ctrl+Del")),
+        PItem::sep(),
         PItem::new("Insert current controller value", Cmd::Events(EvCmd::InsertValue)).key("Ctrl+I"),
         PItem::sep(),
         if any { turn } else { turn.off() },
+        PItem::head("Tools"),
+        {
+            let p = PItem::new("Scale levels...", Cmd::Events(EvCmd::ScaleLevels));
+            if any { p } else { p.off() }
+        },
+        PItem::new("LFO...", Cmd::Events(EvCmd::Lfo)).key("Ctrl+L"),
+        PItem::head("Zoom"),
+        PItem::new("Zoom in", Cmd::Events(EvCmd::ZoomIn)).key("PgUp"),
+        PItem::new("Zoom out", Cmd::Events(EvCmd::ZoomOut)).key("PgDn"),
+        on_sel(PItem::new("Zoom on selection", Cmd::Events(EvCmd::ZoomSelection)).key("Shift+5")),
+        PItem::sep(),
+        PItem::new("Relocate events", Cmd::Events(EvCmd::Relocate)).mark(crate::playlist::Mark::Check(s.events.relocate)),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
@@ -373,13 +542,25 @@ impl App {
     /// A press on the graph (`right`: the right button) or the ruler (`ruler`): a stroke starts (§3).
     pub(crate) fn events_press(&mut self, right: bool, ruler: bool) {
         let (x, y) = self.mouse;
-        let (alt, ctrl) = (self.alt, self.ctrl);
+        let ctrl = self.ctrl;
         let s = &mut self.state;
+        let alt = self.alt || s.events.tool == Tool::Paint;
         let tick = snapped(s, crate::views::events::tick_at(s, x), alt);
         let level = crate::views::events::level_at(s, y);
         let stroke = if ruler || ctrl || (!right && s.events.tool == Tool::Select) {
             s.events.sel = None;
             Stroke::Select(tick)
+        } else if s.events.tool == Tool::Zoom {
+            if right {
+                zoom_about(s, 1.0 / ZOOM_STEP, x);
+                self.damage_win(Win::Events);
+                return;
+            }
+            let anchor = crate::views::events::tick_at(s, x).max(0.0) as u32;
+            Stroke::Zoom(anchor, s.events.sel.take())
+        } else if s.events.tool == Tool::Interpolate {
+            s.events.line = Some(((tick, level), (tick, level)));
+            Stroke::Interpolate(right)
         } else if right {
             s.events.line = Some(((tick, level), (tick, level)));
             Stroke::Line
@@ -400,8 +581,8 @@ impl App {
 
     /// The mouse moved during a stroke.
     pub(crate) fn events_drag(&mut self, stroke: Stroke, x: f32, y: f32) {
-        let alt = self.alt;
         let s = &mut self.state;
+        let alt = self.alt || s.events.tool == Tool::Paint;
         let tick = snapped(s, crate::views::events::tick_at(s, x), alt);
         let level = crate::views::events::level_at(s, y);
         let u = unit(s, alt);
@@ -418,7 +599,13 @@ impl App {
                 s.events.sel = Some((anchor.min(tick), anchor.max(tick) + u));
                 stroke
             }
-            Stroke::Line => {
+            // The stretch shows as the selection until the button goes up.
+            Stroke::Zoom(anchor, _) => {
+                let t = crate::views::events::tick_at(s, x).max(0.0) as u32;
+                s.events.sel = Some((anchor.min(t), anchor.max(t)));
+                stroke
+            }
+            Stroke::Line | Stroke::Interpolate(_) => {
                 if let Some(l) = &mut s.events.line {
                     l.1 = (tick, level);
                 }
@@ -429,17 +616,45 @@ impl App {
         self.damage_win(Win::Events);
     }
 
-    /// The button went up: a line is drawn (one undo step).
+    /// The button went up: a line is drawn, or the events under it interpolated (one undo step).
     pub(crate) fn events_release(&mut self, stroke: Stroke) {
-        if stroke != Stroke::Line {
+        let s = &mut self.state;
+        let alt = self.alt || s.events.tool == Tool::Paint;
+        // Zoom: a drag of 4 px or more zooms on its stretch, a click zooms in about it; the selection comes back.
+        if let Stroke::Zoom(anchor, kept) = stroke {
+            let dragged = s.events.sel.take().filter(|(a, b)| {
+                let px = f64::from(s.events.px_per_beat) / f64::from(s.project.ppq.max(4));
+                f64::from(b - a) * px >= 4.0
+            });
+            match dragged {
+                Some(r) => {
+                    s.events.sel = Some(r);
+                    zoom_selection(s);
+                }
+                None => {
+                    let x = crate::views::events::x_of(s, f64::from(anchor));
+                    zoom_about(s, ZOOM_STEP, x);
+                }
+            }
+            s.events.sel = kept;
+            self.damage_win(Win::Events);
             return;
         }
-        let alt = self.alt;
-        let s = &mut self.state;
-        if let Some((a, b)) = s.events.line.take() {
+        let line = match stroke {
+            Stroke::Line | Stroke::Interpolate(_) => s.events.line.take(),
+            _ => return,
+        };
+        if let Some((a, b)) = line {
             piano::snapshot_as(s, EDIT);
-            let u = unit(s, alt);
-            draw(s, a, b, u);
+            match stroke {
+                Stroke::Interpolate(smooth) => {
+                    interpolate(s, a, b, smooth);
+                }
+                _ => {
+                    let u = unit(s, alt);
+                    draw(s, a, b, u);
+                }
+            }
         }
         self.damage_win(Win::Events);
     }
@@ -480,22 +695,85 @@ impl App {
                 insert_value(s);
                 None
             }
+            EvCmd::Duplicate => {
+                piano::snapshot_as(s, EDIT);
+                duplicate(s);
+                None
+            }
+            EvCmd::InsertSpace | EvCmd::DeleteSpace => {
+                if s.events.sel.is_some() {
+                    piano::snapshot_as(s, EDIT);
+                    space(s, c == EvCmd::InsertSpace);
+                }
+                None
+            }
+            EvCmd::SelectPrev | EvCmd::SelectNext => {
+                select_step(s, c == EvCmd::SelectNext);
+                None
+            }
+            EvCmd::Relocate => {
+                s.events.relocate = !s.events.relocate;
+                Some(format!("Relocate events {}", if s.events.relocate { "on" } else { "off" }))
+            }
+            EvCmd::ZoomIn | EvCmd::ZoomOut => {
+                zoom(s, if c == EvCmd::ZoomIn { ZOOM_STEP } else { 1.0 / ZOOM_STEP });
+                None
+            }
+            EvCmd::ZoomSelection => {
+                zoom_selection(s);
+                None
+            }
+            EvCmd::ScaleLevels | EvCmd::Lfo => {
+                let tool = if c == EvCmd::Lfo { crate::piano_dlg::Tool::Lfo } else { crate::piano_dlg::Tool::Levels };
+                self.open_events_tool(tool);
+                None
+            }
             EvCmd::TurnIntoClip => turn_into_clip(s),
         };
         self.invalidate();
         m
     }
 
-    /// The editor's keys while it is in front (§4): Del, Ctrl+X / C / V, Ctrl+A, Ctrl+I.
+    /// Tools ▸ Scale levels / LFO: the piano roll's dialog, where it was last left (centred the first time), on the
+    /// control's events (§4).
+    fn open_events_tool(&mut self, tool: crate::piano_dlg::Tool) {
+        let s = &mut self.state;
+        let i = tool.index();
+        if !s.piano_dlg.placed[i] {
+            let (w, h) = crate::views::piano_dlg::size(&s.piano_dlg, tool);
+            s.piano_dlg.pos[i] = (((s.screen.0 - w) / 2.0).max(0.0).round(), ((s.screen.1 - h) / 2.0).max(crate::views::work_y(s)).round());
+            s.piano_dlg.placed[i] = true;
+        }
+        crate::piano_dlg::open_events(s, tool);
+        s.raise(Win::PianoDlg);
+    }
+
+    /// The editor's keys while it is in front (§4): Del, Ctrl+X / C / V, Ctrl+A, Ctrl+I, Ctrl+B, Ctrl+Ins / Del,
+    /// Ctrl+Left / Right, PgUp / PgDn, Shift+5.
     pub(crate) fn events_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
         use winit::keyboard::{Key, NamedKey};
+        let shift = self.shift;
         let c = match key {
+            Key::Named(NamedKey::ArrowLeft) if ctrl && !alt => EvCmd::SelectPrev,
+            Key::Named(NamedKey::ArrowRight) if ctrl && !alt => EvCmd::SelectNext,
+            Key::Named(NamedKey::PageUp) if !ctrl && !alt => EvCmd::ZoomIn,
+            Key::Named(NamedKey::PageDown) if !ctrl && !alt => EvCmd::ZoomOut,
+            Key::Character(c) if shift && !ctrl && !alt && (c == "5" || c == "%") => EvCmd::ZoomSelection,
             Key::Named(NamedKey::Delete) if !ctrl && !alt => EvCmd::Delete,
+            Key::Named(NamedKey::Delete) if ctrl && !alt => EvCmd::DeleteSpace,
+            Key::Named(NamedKey::Insert) if ctrl && !alt => EvCmd::InsertSpace,
+            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("b") => EvCmd::Duplicate,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("x") => EvCmd::Cut,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("c") => EvCmd::Copy,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("v") => EvCmd::Paste,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("a") => EvCmd::SelectAll,
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("i") => EvCmd::InsertValue,
+            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("l") => EvCmd::Lfo,
+            // Z: the Zoom tool (the original's key).
+            Key::Character(c) if !ctrl && !alt && !shift && c.eq_ignore_ascii_case("z") => {
+                self.state.events.tool = Tool::Zoom;
+                return true;
+            }
             _ => return false,
         };
         if let Some(m) = self.events_cmd(c) {
@@ -511,7 +789,7 @@ impl App {
         let ppq = f64::from(s.project.ppq.max(4));
         if ctrl {
             let at = crate::views::events::tick_at(s, x);
-            s.events.px_per_beat = (s.events.px_per_beat * 1.25f32.powf(d)).clamp(4.0, 600.0);
+            s.events.px_per_beat = (s.events.px_per_beat * 1.25f32.powf(d)).clamp(ZOOM.0, ZOOM.1);
             let back = crate::views::events::tick_at(s, x) - s.events.scroll;
             s.events.scroll = (at - back).max(0.0);
         } else {
@@ -599,6 +877,174 @@ mod tests {
         draw(s, (0, 0.0), (0, 0.0), 24);
         assert_eq!(points(s), vec![(0, -6400)]);
         assert!(!open(s, 0x4000_0000, "Main volume", 0.5, None), "no events for it");
+    }
+
+    /// Interpolate, Duplicate, Insert and Delete space (spec §1, §4).
+    #[test]
+    fn interpolate_duplicate_and_space() {
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let s = &mut app.state;
+        assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
+        for t in [0, 24, 48, 72, 96] {
+            set(s, t, 0.25);
+        }
+        assert_eq!(interpolate(s, (0, 0.0), (96, 1.0), false), 5);
+        assert_eq!(points(s), vec![(0, 0), (24, 3200), (48, 6400), (72, 9600), (96, 12800)]);
+        assert_eq!(interpolate(s, (0, 0.0), (96, 1.0), true), 5);
+        assert_eq!(point(s, 48), Some(6400), "smooth: the middle is the same");
+        assert_eq!(point(s, 24), Some(1875), "smooth: a slower start");
+        assert_eq!(interpolate(s, (200, 0.0), (300, 1.0), false), 0, "no events under it");
+
+        s.events.sel = Some((0, 48));
+        assert!(duplicate(s));
+        assert_eq!(points(s), vec![(0, 0), (24, 1875), (48, 0), (72, 1875), (96, 12800)]);
+        assert_eq!(s.events.sel, Some((48, 96)));
+        assert!(space(s, true), "insert space");
+        assert_eq!(points(s), vec![(0, 0), (24, 1875), (96, 0), (120, 1875), (144, 12800)]);
+        s.events.sel = Some((0, 96));
+        assert!(space(s, false), "delete space");
+        assert_eq!(points(s), vec![(0, 0), (24, 1875), (48, 12800)]);
+        s.events.sel = None;
+        assert!(!space(s, true), "needs a selection");
+    }
+
+    /// Tools ▸ Scale levels and LFO: the piano roll's dialogs preview on the control's events, Accept is one undo step
+    /// and × puts them back (§4).
+    #[test]
+    fn scale_levels_and_lfo() {
+        use crate::piano_dlg::{self as dlg, Tool as DTool};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let s = &mut app.state;
+        assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
+        for t in [0, 24, 48] {
+            set(s, t, 0.5);
+        }
+        set(s, 400, 0.25);
+        let before = points(s);
+        app.events_cmd(EvCmd::ScaleLevels);
+        let s = &mut app.state;
+        assert!(s.shown(Win::PianoDlg) && s.piano_dlg.on_events);
+        assert_eq!(s.piano_dlg.tool.events_title(), "Events - level scaling");
+        assert_eq!(points(s), before, "the settings kept: nothing changes yet");
+        s.piano_dlg.levels.mult = 0.5;
+        dlg::preview(s);
+        assert_eq!(point(s, 24), Some(3200), "half of 50 %");
+        assert_eq!(point(s, 400), Some(1600));
+        assert_eq!(dlg::accept(s), "Event editor: levels scaled");
+        assert!(piano::undo(s));
+        assert_eq!(points(s), before, "one undo step");
+
+        // LFO over the selection; × puts the events back.
+        s.events.sel = Some((0, 96));
+        app.events_cmd(EvCmd::Lfo);
+        let s = &mut app.state;
+        assert_eq!(s.piano_dlg.tool, DTool::Lfo);
+        let lfo: Vec<(u32, i32)> = points(s).into_iter().filter(|p| p.0 < 96).collect();
+        assert!(lfo.len() > 10 && lfo.windows(2).all(|w| w[0].1 != w[1].1), "an event wherever the value changes");
+        assert_eq!(point(s, 400), Some(3200), "outside the selection: kept");
+        app.act(crate::app::Action::CloseWin(Win::PianoDlg));
+        assert_eq!(points(&app.state), before);
+        // Without a selection: the first bar.
+        app.state.events.sel = None;
+        app.events_cmd(EvCmd::Lfo);
+        let s = &mut app.state;
+        let bar = 4 * u32::from(s.project.ppq);
+        assert!(points(s).iter().filter(|p| p.0 < bar).count() > 10);
+        assert_eq!(point(s, 400.max(bar)), if bar > 400 { None } else { Some(3200) });
+        dlg::accept(s);
+        assert!(!s.piano_dlg.session_open());
+    }
+
+    /// The Zoom tool (§3): a click zooms in about it, a drag on the stretch, a right click out; Z picks it.
+    #[test]
+    fn zoom_tool() {
+        use crate::app::Drag;
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        assert!(open(&mut app.state, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
+        app.state.z.push(Win::Events);
+        assert!(app.events_key(&winit::keyboard::Key::Character("z".into()), false, false));
+        assert_eq!(app.state.events.tool, Tool::Zoom);
+        let g = crate::views::events::graph(&app.state);
+        let ppq = f64::from(app.state.project.ppq);
+        app.state.events.sel = Some((0, 10));
+        // A click: in, the tick under it stays.
+        app.mouse = (g.x + 200.0, g.y + 20.0);
+        let (px, at) = (app.state.events.px_per_beat, crate::views::events::tick_at(&app.state, g.x + 200.0));
+        app.events_press(false, false);
+        let Some(Drag::Events(st)) = app.drag.take() else { panic!("a zoom stroke") };
+        app.events_release(st);
+        assert_eq!(app.state.events.px_per_beat, px * ZOOM_STEP);
+        assert!((crate::views::events::tick_at(&app.state, g.x + 200.0) - at).abs() < 1e-6);
+        assert_eq!(app.state.events.sel, Some((0, 10)), "the selection stays");
+        // A drag: on its stretch.
+        app.state.events.scroll = 0.0;
+        app.mouse = (g.x + 10.0, g.y + 20.0);
+        app.events_press(false, false);
+        let Some(Drag::Events(st)) = app.drag.take() else { panic!() };
+        let to = crate::views::events::x_of(&app.state, 8.0 * ppq);
+        let from = crate::views::events::tick_at(&app.state, g.x + 10.0).floor();
+        app.events_drag(st, to, g.y + 20.0);
+        let Some(Drag::Events(st)) = app.drag.take() else { panic!() };
+        app.events_release(st);
+        assert!((app.state.events.scroll - from).abs() < 1.0);
+        assert!((crate::views::events::x_of(&app.state, 8.0 * ppq) - (g.x + g.w)).abs() < 1.0, "the stretch fills the graph");
+        assert_eq!(app.state.events.sel, Some((0, 10)));
+        // A right click: out.
+        let px = app.state.events.px_per_beat;
+        app.events_press(true, false);
+        assert!(app.drag.is_none());
+        assert!((app.state.events.px_per_beat - px / ZOOM_STEP).abs() < 1e-3);
+    }
+
+    /// Select previous / next, Relocate events and the zoom (§4).
+    #[test]
+    fn select_step_relocate_and_zoom() {
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        let s = &mut app.state;
+        assert!(open(s, os_model::target::channel(0, 0), "Kick - Volume", 0.5, None));
+        assert!(!select_step(s, true), "needs a selection");
+        s.events.sel = Some((96, 144));
+        assert!(select_step(s, true));
+        assert_eq!(s.events.sel, Some((144, 192)));
+        assert!(select_step(s, false) && select_step(s, false));
+        assert_eq!(s.events.sel, Some((48, 96)));
+        assert!(select_step(s, false));
+        assert_eq!(s.events.sel, Some((0, 48)), "stops at the start");
+        assert!(!select_step(s, false));
+
+        for t in [0, 24, 48, 72] {
+            set(s, t, 0.25);
+        }
+        s.events.relocate = true;
+        s.events.sel = Some((0, 48));
+        assert!(copy(s));
+        assert_eq!(delete(s), 2);
+        assert_eq!(points(s), vec![(0, 3200), (24, 3200)], "the later events move back");
+        s.events.sel = Some((24, 30));
+        assert!(paste(s));
+        assert_eq!(points(s), vec![(0, 3200), (24, 3200), (48, 3200), (72, 3200)], "pasted in, the event at 24 moved on");
+        assert_eq!(s.events.sel, Some((24, 72)));
+
+        let px = s.events.px_per_beat;
+        zoom(s, 2.0);
+        assert_eq!(s.events.px_per_beat, px * 2.0);
+        let end = 96 + 8 * u32::from(s.project.ppq);
+        s.events.sel = Some((96, end));
+        assert!(zoom_selection(s));
+        assert_eq!(s.events.scroll, 96.0);
+        let g = crate::views::events::graph(s);
+        assert!((crate::views::events::x_of(s, f64::from(end)) - (g.x + g.w)).abs() < 0.01, "the selection fills the graph");
+
+        // The keys.
+        s.events.sel = Some((0, 48));
+        app.state.z.push(Win::Events);
+        assert!(app.events_key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowRight), true, false));
+        assert_eq!(app.state.events.sel, Some((48, 96)));
+        assert_eq!(app.events_cmd(EvCmd::Relocate).as_deref(), Some("Relocate events off"));
     }
 
     /// The clip follows the events: a ramp recorded every 4 ticks becomes one straight line ending on the last event
