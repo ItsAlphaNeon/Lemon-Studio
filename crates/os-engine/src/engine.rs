@@ -598,6 +598,16 @@ impl ChannelState {
         }
     }
 
+    /// `gain_via` of no note pan where the channel will be `frames` from now, a running glide that far along.
+    fn gain_after(&self, frames: u32, vel: f64, layer: Option<(LayerAdds, f64)>) -> (f32, f32) {
+        let Some(r) = self.ramp else { return self.gain_via(vel, 0.0, layer) };
+        let (lv, lp) = layer.map_or((1.0, 0.0), |(a, g)| (a.volume * g, a.pan));
+        let at = f64::from(r.pos.saturating_add(frames));
+        let g = self.vol_gain(r.v0 + (r.v1 - r.v0) * r.volume_at(at)) * vel * lv;
+        let (pl, pr) = laws::channel_pan_law(self.pan_of(r.p0 + (r.p1 - r.p0) * r.pan_at(at)) + lp, self.pan_law);
+        ((g * pl) as f32, (g * pr) as f32)
+    }
+
     /// Gain of a note on this channel: channel volume × velocity × pan.
     // spec: audio/sampler-playback.md (velocity multiplies volume; pans add, clamped)
     fn gain(&self, vel: f64, note_pan: f64) -> (f32, f32) {
@@ -2475,6 +2485,7 @@ impl Engine {
         self.main_glide = old.main_glide;
         self.exporting = old.exporting;
         self.multicore.keep_gate(&old.multicore);
+        self.multicore.keep_gains(&old.multicore);
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
                 new.gains = o.gains;
@@ -4096,8 +4107,19 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
     // An audio clip channel's voices are its playlist clips: their own level is on the channel's output, since a
     // hosted sampler takes velocities only up to 128 (spec: audio/audio-clips.md "Level").
     let cl = ch.clip_level;
-    let (gl, gr) = if own_levels { (cl, cl) } else { ch.gain_via(f64::from(cl), 0.0, layer) };
-    out.buf.extend(l.iter().zip(r.iter()).flat_map(|(&a, &b)| [a * gl, b * gr]));
+    let (gl, gr) = if own_levels { (cl, cl) } else { ch.gain_after(n as u32, f64::from(cl), layer) };
+    // A level that changed smooths over the tick, as a voice's does: it has arrived when the curve says so (spec:
+    // audio/automation.md).
+    let (sl, sr) = out.gain.replace((gl, gr)).unwrap_or((gl, gr));
+    if (sl, sr) == (gl, gr) {
+        out.buf.extend(l.iter().zip(r.iter()).flat_map(|(&a, &b)| [a * gl, b * gr]));
+    } else {
+        let (dl, dr) = ((gl - sl) / n as f32, (gr - sr) / n as f32);
+        out.buf.extend(l.iter().zip(r.iter()).enumerate().flat_map(|(f, (&a, &b))| {
+            let x = (f + 1) as f32;
+            [a * (sl + dl * x), b * (sr + dr * x)]
+        }));
+    }
     // Delay compensation: the channel waits for the latest path into its track.
     if let Some(pad) = pad.filter(|p| p.len() > 0) {
         pad.run(&mut out.buf);
@@ -7318,6 +7340,42 @@ mod tests {
         e.next_tick();
         assert!(e.channels[0].ramp.is_none());
         assert_eq!(e.channels[0].vol_v, 0.5);
+    }
+
+    /// A hosted instrument's output follows automated pan without a step at each tick.
+    // spec: audio/automation.md "When a clip acts"
+    #[test]
+    fn automated_levels_reach_a_hosted_instrument_without_steps() {
+        use os_model::{AutoPoint, Automation, ChannelKind, Clip, ClipSource, target};
+        let mut p = song(vec![long_note(0, 384 * 4, 0)], vec![Clip::new(0, 384 * 4, 0, ClipSource::Pattern(1))]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let run = |p: &Project| {
+            let mut lib = SampleLibrary::default();
+            let mut e = Engine::new(p, &mut lib, 48000, PlayMode::Song);
+            e.set_instrument(0, Arc::new(Mutex::new(LevelProbe(vec![]))));
+            (0..200).map(|_| e.next_tick().unwrap().0.to_vec()).collect::<Vec<_>>()
+        };
+        // Nothing automated: one gain throughout.
+        let still = run(&p).concat();
+        assert!(still.chunks_exact(2).all(|f| f == &still[..2]));
+        let mut auto_ch = channel();
+        auto_ch.index = 1;
+        auto_ch.kind = ChannelKind::Automation;
+        (auto_ch.pan, auto_ch.volume) = (-1.0, 1.0);
+        p.channels.push(auto_ch);
+        let points = vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(4.0, 1.0)];
+        p.automations.push(Automation { channel: 1, targets: vec![target::channel(0, target::CHANNEL_PAN)], points, header: vec![0; 21], ..Automation::default() });
+        p.arrangements[0].clips.push(Clip::new(0, 384 * 4, 1, ClipSource::Channel(1)));
+        // The pan sweeps: frame to frame the output moves by a small part of what it moves in a tick.
+        let ticks = run(&p);
+        for side in 0..2 {
+            let at = |o: &[f32], f: usize| o[f * 2 + side];
+            let ends: Vec<f32> = ticks.iter().map(|t| at(t, t.len() / 2 - 1)).collect();
+            let per_tick = ends.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+            let all = ticks.concat();
+            let per_frame = (1..all.len() / 2).map(|f| (at(&all, f) - at(&all, f - 1)).abs()).fold(0.0, f32::max);
+            assert!(per_tick > 0.0 && per_frame < per_tick / 8.0, "side {side}: {per_frame} a frame, {per_tick} a tick");
+        }
     }
 
     /// A clip's range and LFO, as the values handed on to a mixer volume, tick by tick, against the page's formulas
