@@ -2329,6 +2329,35 @@ impl Engine {
         }
     }
 
+    /// What the automation clips over before tick `tick` have left on their targets (spec: audio/automation.md "A new
+    /// position"): the one that ends last decides, the latest of those that end together. A clip going on at `tick` hands
+    /// on its own value on that tick.
+    fn chase_automation(&mut self, tick: u64) {
+        let mut last: Vec<(os_model::target::Target, usize)> = Vec::new();
+        for (i, a) in self.autos.iter().enumerate().filter(|(_, a)| a.end <= tick && a.end > a.start) {
+            for &t in &a.targets {
+                match last.iter_mut().find(|l| l.0 == t) {
+                    Some(l) if self.autos[l.1].end <= a.end => l.1 = i,
+                    Some(_) => {}
+                    None => last.push((t, i)),
+                }
+            }
+        }
+        let beat = os_model::curve::tick_step(self.ppq);
+        for (t, i) in last {
+            let a = &self.autos[i];
+            let steps = a.end - a.start;
+            let Some(level) = os_model::curve::value_at(&self.curves[a.curve].points, a.from_beat + steps as f64 * beat) else { continue };
+            let env = a.out.envelope(&mut None, steps, self.ppq);
+            let n = os_model::clip_lfo::handed_on(a.out.out(level as f32, steps, env));
+            if param_auto::is_param(t) {
+                self.params.point(t, n as f64 / 1_073_741_824.0);
+            } else {
+                self.auto_value(t, n, 0);
+            }
+        }
+    }
+
     /// Channels as they are at tick `tick`: their own settings with every control point before it applied.
     fn sync_controls(&mut self, tick: u64) {
         for ch in &mut self.channels {
@@ -2339,6 +2368,7 @@ impl Engine {
         self.auto_from = tick;
         self.next_ctl = 0;
         self.params.points.clear();
+        self.chase_automation(tick);
         while let Some(&e) = self.controls.get(self.next_ctl) {
             if e.tick >= tick {
                 break;
@@ -7752,6 +7782,44 @@ mod tests {
         to_loop(&mut e);
         assert!(e.init.is_empty());
         assert_eq!(e.channels[0].vol_v, 0.25);
+    }
+
+    /// A jump past a clip that is over finds its target at the clip's last value, as in the reference and as playing up
+    /// to there would, and a later clip on the same target decides. Before the first clip it finds the channel's own (a
+    /// Lemon Studio difference: the reference leaves the target as it was).
+    #[test]
+    fn seeking_past_a_finished_clip_keeps_its_last_value() {
+        use os_model::{target, AutoPoint, Automation, Clip, ClipSource};
+        let mut p = song(vec![long_note(0, 960, 0)], vec![Clip::new(0, 960, 0, ClipSource::Pattern(1))]);
+        for (index, level) in [(1, 0.75), (2, 0.25)] {
+            let mut auto_ch = channel();
+            auto_ch.index = index;
+            auto_ch.kind = ChannelKind::Automation;
+            (auto_ch.pan, auto_ch.volume) = (-1.0, 1.0);
+            p.channels.push(auto_ch);
+            let points = vec![AutoPoint::new(0.0, level), AutoPoint::new(4.0, level)];
+            p.automations.push(Automation { channel: index, targets: vec![target::channel(0, target::CHANNEL_PITCH)], points, header: vec![0; 21], tail: vec![], lfo: Default::default() });
+        }
+        p.arrangements[0].clips.push(Clip::new(96, 96, 1, ClipSource::Channel(1)));
+        p.arrangements[0].clips.push(Clip::new(480, 96, 1, ClipSource::Channel(2)));
+        let mut lib = SampleLibrary::new(None);
+        let played = |until: u64, lib: &mut SampleLibrary| {
+            let mut e = Engine::new(&p, lib, 48000, PlayMode::Song);
+            while e.tick < until {
+                e.next_tick();
+            }
+            e.channels[0].knob
+        };
+        assert_eq!((played(288, &mut lib), played(768, &mut lib)), (2400.0, -2400.0), "playing there");
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        e.seek_tick(48);
+        assert_eq!(e.channels[0].knob, 0.0, "before the clips");
+        e.seek_tick(288);
+        assert_eq!(e.channels[0].knob, 2400.0, "past the first");
+        e.seek_tick(768);
+        assert_eq!(e.channels[0].knob, -2400.0, "past the second");
+        e.seek_tick(48);
+        assert_eq!(e.channels[0].knob, 0.0, "back before them");
     }
 
     /// Halves what passes through (a stand-in for a hosted effect plugin).
