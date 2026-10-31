@@ -176,7 +176,7 @@ impl App {
         let s = &mut self.state;
         if s.browser_index.poll() {
             if s.browser_index.cut() {
-                s.message = Some(format!("Browser index: the folders hold more than {} entries; a search finds the first ones", crate::browser_index::MAX_ENTRIES));
+                s.message = Some(format!("Browser index: the first {} entries", crate::browser_index::MAX_ENTRIES));
             }
             if !s.browser_search.is_empty() {
                 s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
@@ -456,7 +456,7 @@ impl App {
                         let i = pl::place(s, track, tick);
                         s.playlist.sel = vec![i];
                     } else {
-                        s.message = Some("Only audio and automation channels go on the arranger; drop a pattern instead".into());
+                        s.message = Some("Only audio and automation channels go on the arranger".into());
                     }
                 } else if matches!(win, Some(Win::PianoRoll | Win::ChannelRack)) {
                     s.selected_channel = c;

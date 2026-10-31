@@ -297,9 +297,9 @@ impl App {
                 self.theme_mark(Step::Other);
                 self.theme_edit(t);
                 self.theme_store();
-                self.state.message = Some("Text colour changed so the text reads (Ctrl+Z undoes)".into());
+                self.state.message = Some("Text colour changed to stay readable".into());
             }
-            None => self.state.message = Some("No text colour reads on these surfaces: try the Brightness or Contrast knob".into()),
+            None => self.state.message = Some("No text colour is readable on these surfaces".into()),
         }
     }
 
@@ -406,7 +406,7 @@ impl App {
                 };
                 let builtin = themes[..user_from.min(themes.len())].iter().any(|(n, _)| n.eq_ignore_ascii_case(&name));
                 if builtin {
-                    self.state.message = Some(format!("\"{name}\" is a built-in theme's name: choose another"));
+                    self.state.message = Some(format!("\"{name}\" is a built-in theme's name"));
                     return self.invalidate();
                 }
                 match e.target {
