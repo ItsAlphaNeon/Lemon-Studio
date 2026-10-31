@@ -345,6 +345,27 @@ mod tests {
         assert!(!h.join().unwrap(), "demoted");
     }
 
+    /// A real-time thread the watchdog demoted gets its priority back once it has stayed calm.
+    #[test]
+    #[ignore]
+    fn a_demoted_thread_that_stays_calm_is_promoted_again() {
+        enable_in_tests();
+        let h = std::thread::spawn(|| {
+            promote(tid()).expect("real-time priority");
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_millis(400) {
+                std::hint::spin_loop();
+            }
+            assert!(!is_realtime(tid()), "demoted");
+            let t0 = Instant::now();
+            while t0.elapsed() < CALM_FIRST + Duration::from_secs(1) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            is_realtime(tid())
+        });
+        assert!(h.join().unwrap(), "promoted again");
+    }
+
     /// Deadlines met by a thread working like the audio feeder at 256 frames (48 kHz: a 5.33 ms period, 1.5 ms of work
     /// each) while every core is kept busy at normal priority, at normal priority and at real-time priority. Prints the
     /// misses; asserts the real-time thread misses fewer. Busies the machine for about 20 s:
