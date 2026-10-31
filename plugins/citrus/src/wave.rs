@@ -10,6 +10,7 @@
 // spec: plugins/sytrus.md ("The wave table", "Band limiting")
 
 use std::f64::consts::PI;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::num::{round, s, trunc, Expo, TINY};
 use crate::state::{OpBlock, ABSOLUTE, GATE, HALF_WAVE};
@@ -17,11 +18,22 @@ use crate::state::{OpBlock, ABSOLUTE, GATE, HALF_WAVE};
 pub const N: usize = 16384;
 
 /// A table and the spectrum it keeps for band limiting (bins 0..=N/2, divided by N).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Table {
     pub t: Vec<f32>,
     pub spectrum: Vec<(f64, f64)>,
+    /// Its band-limited copies as last used, the latest first (`band_limited`).
+    limited: Mutex<Vec<((usize, usize, bool), Arc<Vec<f32>>)>>,
 }
+
+impl Clone for Table {
+    fn clone(&self) -> Table {
+        Table { t: self.t.clone(), spectrum: self.spectrum.clone(), limited: Mutex::new(Vec::new()) }
+    }
+}
+
+/// Band-limited copies a table keeps. A chord up and down the keyboard fits; each is 64 KB.
+const KEPT: usize = 32;
 
 /// Builds an operator's table. `smooth` is switch 2 (band-limit smoothing).
 pub fn build(op: &OpBlock, smooth: bool) -> Table {
@@ -87,7 +99,9 @@ pub fn build(op: &OpBlock, smooth: bool) -> Table {
         }
     }
     t[N] = t[0];
-    Table { t, spectrum: spec }
+    // The note that first needs it does not pay for this.
+    twiddles(true);
+    Table { t, spectrum: spec, limited: Mutex::new(Vec::new()) }
 }
 
 /// The tone generator: each harmonic with a level adds a sine at `(h + 1) / N` cycles per sample.
@@ -215,8 +229,11 @@ fn shapes(op: &OpBlock, t: &mut [f32]) {
 }
 
 /// A band-limited copy of `table` for an operator at `hz` (spec "Band limiting"); `None` when the full table serves.
-pub fn band_limited(table: &Table, hz: f32, rate: u32, smooth: bool) -> Option<Vec<f32>> {
+/// Playing live (`live`) it is the copy of the next semitone up: the limits lie around 18 kHz, and the voices of a detuned
+/// unison then share one copy, where each would cost a transform in the note's first block. A render has the exact one.
+pub fn band_limited(table: &Table, hz: f32, rate: u32, smooth: bool, live: bool) -> Option<Arc<Vec<f32>>> {
     let hz = f64::from(hz.max(0.1));
+    let hz = if live { 2f64.powf((hz.log2() * 12.0).ceil() / 12.0) } else { hz };
     let top = if smooth { 22050.0 } else { f64::from(s(f64::from(rate) * 0.5)) };
     let d = (top - 18000.0) * 0.25;
     let ihz = f64::from(s(1.0 / hz));
@@ -226,6 +243,18 @@ pub fn band_limited(table: &Table, hz: f32, rate: u32, smooth: bool) -> Option<V
         return None;
     }
     let (lo, hi) = (lo.max(0) as usize, (hi.max(0) as usize).min(8192));
+    // Built in the note's first block, on the audio thread, one for each operator of each voice: many notes and most of
+    // a unison's voices share their limits, and a table costs milliseconds.
+    let key = (lo, hi, smooth);
+    let mut kept = table.limited.lock().ok();
+    if let Some(list) = kept.as_mut() {
+        if let Some(i) = list.iter().position(|k| k.0 == key) {
+            let hit = list.remove(i);
+            let t = hit.1.clone();
+            list.insert(0, hit);
+            return Some(t);
+        }
+    }
     let q = s(-1.0 / (hi as f64 - lo as f64 + 1.0));
     let mut spec = table.spectrum.clone();
     let mut weights = vec![0f32; spec.len()];
@@ -253,13 +282,22 @@ pub fn band_limited(table: &Table, hz: f32, rate: u32, smooth: bool) -> Option<V
         b.1 *= f64::from(*w);
     }
     let mut t = vec![0f32; N + 1];
-    inverse(&spec, &mut t[..N]);
+    if live {
+        inverse_half(&spec, &mut t[..N]);
+    } else {
+        inverse(&spec, &mut t[..N]);
+    }
     for x in t[..N].iter_mut() {
         if x.abs() < TINY {
             *x = 0.0;
         }
     }
     t[N] = t[0];
+    let t = Arc::new(t);
+    if let Some(list) = kept.as_mut() {
+        list.truncate(KEPT - 1);
+        list.insert(0, (key, t.clone()));
+    }
     Some(t)
 }
 
@@ -290,6 +328,45 @@ fn inverse(spec: &[(f64, f64)], out: &mut [f32]) {
     }
 }
 
+/// `inverse`, the even samples as the real part and the odd as the imaginary part of a transform of half the points:
+/// half the time, for a result that differs in the last digits.
+fn inverse_half(spec: &[(f64, f64)], out: &mut [f32]) {
+    let half = N / 2;
+    let rotation = &twiddles(true)[N.trailing_zeros() as usize - 1];
+    let mut re = vec![0f64; half];
+    let mut im = vec![0f64; half];
+    for k in 0..half {
+        let (ar, ai) = spec[k];
+        let (br, bi) = (spec[half - k].0, -spec[half - k].1);
+        let (dr, di) = (ar - br, ai - bi);
+        let (wr, wi) = rotation[k];
+        // (a + b) + j w (a - b)
+        re[k] = ar + br - (wr * di + wi * dr);
+        im[k] = ai + bi + (wr * dr - wi * di);
+    }
+    fft(&mut re, &mut im, true);
+    for n in 0..half {
+        out[2 * n] = re[n] as f32;
+        out[2 * n + 1] = im[n] as f32;
+    }
+}
+
+/// The rotations of each stage of a transform of `N` points, worked out once.
+fn twiddles(inverse: bool) -> &'static [Vec<(f64, f64)>] {
+    static TABLES: [OnceLock<Vec<Vec<(f64, f64)>>>; 2] = [OnceLock::new(), OnceLock::new()];
+    TABLES[usize::from(inverse)].get_or_init(|| {
+        let sign = if inverse { 1.0 } else { -1.0 };
+        let mut stages = Vec::new();
+        let mut len = 2;
+        while len <= N {
+            let ang = sign * 2.0 * PI / len as f64;
+            stages.push((0..len / 2).map(|k| ((ang * k as f64).cos(), (ang * k as f64).sin())).collect());
+            len <<= 1;
+        }
+        stages
+    })
+}
+
 /// An in-place radix-2 transform of `N` points (`inverse`: the conjugate kernel, not scaled).
 fn fft(re: &mut [f64], im: &mut [f64], inverse: bool) {
     let n = re.len();
@@ -306,12 +383,12 @@ fn fft(re: &mut [f64], im: &mut [f64], inverse: bool) {
             im.swap(i, j);
         }
     }
-    let sign = if inverse { 1.0 } else { -1.0 };
+    let tables = twiddles(inverse);
     let mut len = 2;
+    let mut stage = 0;
     while len <= n {
-        let ang = sign * 2.0 * PI / len as f64;
         let half = len / 2;
-        let tw: Vec<(f64, f64)> = (0..half).map(|k| ((ang * k as f64).cos(), (ang * k as f64).sin())).collect();
+        let tw = &tables[stage];
         for start in (0..n).step_by(len) {
             for k in 0..half {
                 let (wr, wi) = tw[k];
@@ -325,12 +402,58 @@ fn fft(re: &mut [f64], im: &mut [f64], inverse: bool) {
             }
         }
         len <<= 1;
+        stage += 1;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The quick inverse gives the same table to within what a table can tell.
+    #[test]
+    fn the_half_size_inverse_matches_the_whole_one() {
+        let mut t = vec![0f32; N];
+        for (i, x) in t.iter_mut().enumerate() {
+            let u = i as f32 / N as f32;
+            *x = (u * 2.0 - 1.0) * 0.5 + (u * 37.0 * 6.283).sin() * 0.2;
+        }
+        let spec = forward(&t);
+        let (mut a, mut b) = (vec![0f32; N], vec![0f32; N]);
+        inverse(&spec, &mut a);
+        inverse_half(&spec, &mut b);
+        let worst = a.iter().zip(&b).fold(0f32, |m, (x, y)| m.max((x - y).abs()));
+        assert!(worst < 1e-5, "{worst}");
+    }
+
+    /// A copy kept is the same copy, and the same as one worked out anew.
+    #[test]
+    fn a_band_limited_copy_is_kept_for_the_same_limits() {
+        let mut t = vec![0f32; N + 1];
+        for (i, x) in t.iter_mut().enumerate() {
+            *x = (i as f32 / N as f32 * 2.0 - 1.0) * 0.9;
+        }
+        let spectrum = forward(&t[..N]);
+        let table = Table { t, spectrum, limited: Mutex::new(Vec::new()) };
+        let a = band_limited(&table, 440.0, 48000, false, false).unwrap();
+        assert!(Arc::ptr_eq(&a, &band_limited(&table, 440.0, 48000, false, false).unwrap()));
+        // A hair higher has the same limits; an octave up does not.
+        assert!(Arc::ptr_eq(&a, &band_limited(&table, 440.001, 48000, false, false).unwrap()));
+        let b = band_limited(&table, 880.0, 48000, false, false).unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+        let fresh = band_limited(&table.clone(), 440.0, 48000, false, false).unwrap();
+        assert_eq!(*a, *fresh);
+        // Live, a detuned unison shares one copy of a semitone's limits; a render tells them apart.
+        let (u, v) = (band_limited(&table, 441.0, 48000, false, true).unwrap(), band_limited(&table, 449.0, 48000, false, true).unwrap());
+        assert!(Arc::ptr_eq(&u, &v));
+        let (u, v) = (band_limited(&table, 441.0, 48000, false, false).unwrap(), band_limited(&table, 449.0, 48000, false, false).unwrap());
+        assert!(!Arc::ptr_eq(&u, &v));
+        // It keeps no more than its limit.
+        for k in 0..2 * KEPT {
+            band_limited(&table, 200.0 + 40.0 * k as f32, 48000, false, false);
+        }
+        assert_eq!(table.limited.lock().unwrap().len(), KEPT);
+    }
 
     #[test]
     fn one_harmonic_is_a_normalised_sine() {
