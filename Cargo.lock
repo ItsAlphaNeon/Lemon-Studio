@@ -2064,6 +2064,7 @@ name = "lemon-slicer"
 version = "0.0.1"
 dependencies = [
  "nih_plug",
+ "os-dsp",
  "os-engine",
  "os-hostlink",
  "os-plugkit",
