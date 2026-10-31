@@ -270,14 +270,15 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   wheel scrolls and Ctrl+wheel zooms; its Edit menu has Cut, Copy, Paste, Select all, Select previous / next
   (Ctrl+Left / Right: the selection moves by its length), Delete, Duplicate (Ctrl+B), Insert space (Ctrl+Ins), Delete
   space (Ctrl+Del), Insert current controller value and Turn into automation clip, then Zoom in / out (PgUp / PgDn),
-  Zoom on selection (Shift+5) and Relocate events (Paste makes room, Cut and Delete close the gap). Turn
+  Zoom on selection (Shift+5) and Relocate events (Paste makes room, Cut and Delete close the gap), and its Tools
+  open the piano roll's Scale levels and LFO (Ctrl+L) dialogs on the control's events in the selection. Turn
   into automation clip moves the events into a new clip channel linked to the control, as the original does
   (the control's earlier value until the first event, then the events, a recorded ramp as one straight segment, ending
   on the last event). Each edit is an undo step
 - A knob's menu (channel volume and pan, mixer and main knobs): Edit automation clip... shows the clip that drives it,
   as on a plugin parameter, and Set... puts it at its default, the minimum, 25, 50 or 75% or the maximum, each listed
   with the knob's value there (one undo step)
-- Not yet in the event editor: the Zoom tool, Scale levels and LFO, Auto smoothing, Center, a second window
+- Not yet in the event editor: the Zoom tool, Auto smoothing, Center, a second window
 
 ## 🚧 Project files
 
