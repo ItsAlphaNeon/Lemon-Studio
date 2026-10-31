@@ -18,7 +18,7 @@ use os_ui::{tabler, Canvas, Color, Font, Rect};
 use crate::doc::Doc;
 use crate::peaks::Peaks;
 use crate::state::{self, Rec};
-use crate::tools::{Amp, Law, Stretch};
+use crate::tools::{Amp, Law, Reverb, Stretch};
 
 /// The default editor size (Edison's) and the smallest it may be resized to, in logical pixels.
 pub const W: u32 = 744;
@@ -134,8 +134,7 @@ pub const MENUS: [(MenuId, &str); 9] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bt {
     Undo,
-    /// Edit modes: 0 waveform, 1 pan, 2 volume, 3 stereo separation, 4 all-purpose envelope (only the waveform in
-    /// Tesla 1).
+    /// Edit modes: 0 waveform, 1 pan, 2 volume, 3 stereo separation, 4 all-purpose envelope.
     Mode(u8),
     Follow,
     Spectrum,
@@ -161,6 +160,12 @@ pub enum AmpCtl {
     Time,
     Formant,
     Preserve,
+    /// Convolution reverb's controls.
+    Dry,
+    Wet,
+    Decay,
+    Tail,
+    ClipImpulse,
     Reset,
     Preview,
     Accept,
@@ -214,7 +219,7 @@ pub const TOOLS: [ToolDef; 18] = [
     ToolDef { glyph: Glyph::Normalize, hint: "Normalize / normalize regions", left: true, right: true },
     ToolDef { glyph: Glyph::FadeIn, hint: "Fade in / declick in", left: true, right: true },
     ToolDef { glyph: Glyph::Amp, hint: "Amp... / center", left: true, right: true },
-    ToolDef { glyph: Glyph::Reverb, hint: "Reverb... (later version)", left: false, right: false },
+    ToolDef { glyph: Glyph::Reverb, hint: "Convolution reverb...", left: true, right: false },
     ToolDef { glyph: Glyph::Eq, hint: "Equalize... (later version)", left: false, right: false },
     ToolDef { glyph: Glyph::Flag, hint: "Add marker or region / remove marker or region", left: true, right: true },
     ToolDef { glyph: Glyph::Loop, hint: "Set loop / remove loop", left: true, right: true },
@@ -278,11 +283,12 @@ pub struct ViewState {
     pub amp: Option<AmpUi>,
 }
 
-/// The open tool panel: Amp, or Time stretch / pitch shift when `stretch` is set.
+/// The open tool panel: Amp, Time stretch / pitch shift when `stretch` is set, Convolution reverb when `reverb` is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AmpUi {
     pub amp: Amp,
     pub stretch: Option<Stretch>,
+    pub reverb: Option<Reverb>,
     pub previewing: bool,
 }
 
@@ -438,6 +444,19 @@ pub fn span(doc: &Doc, frames: usize, lane_w: f32) -> (f64, f64) {
 pub fn frame_x(lane: Rect, start: f64, per_px: f64, f: f64) -> f32 {
     lane.x + ((f - start) / per_px) as f32
 }
+
+/// The y of envelope height `v` (0 bottom, 1 top) in the lane, and back.
+pub fn env_y(lane: Rect, v: f32) -> f32 {
+    lane.bottom() - v.clamp(0.0, 1.0) * lane.h
+}
+
+pub fn env_v(lane: Rect, y: f32) -> f32 {
+    ((lane.bottom() - y) / lane.h.max(1.0)).clamp(0.0, 1.0)
+}
+
+/// The envelope points' handle radius, and how near the pointer must be to grab a point or the line.
+pub const POINT_R: f32 = 3.5;
+pub const GRAB: f32 = 5.0;
 
 pub fn paint(c: &mut Canvas, l: &Look, w: u32, h: u32) -> Vec<Hit> {
     let lay = Layout::new(w, h);
@@ -708,6 +727,8 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
         let y_of = |v: f32| mid - v.clamp(-1.0, 1.0) * amp;
         let chans = l.shown.channels;
         let colors = [LEFT_WAVE, RIGHT_WAVE];
+        // An envelope mode dims the waveform under its line.
+        let dim = if doc.env_shown().is_some() { 0.4 } else { 1.0 };
         // The right channel first, the left over it.
         for c in (0..chans).rev() {
             let col = if chans == 1 { LEFT_WAVE } else { colors[c] };
@@ -719,7 +740,7 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
                     if b > 0.0 && (a as usize) < n {
                         if let Some((lo, hi)) = l.shown.minmax(c, a.max(0.0) as usize, (b.ceil() as usize).max(a as usize + 1)) {
                             let (y0, y1) = (y_of(hi), y_of(lo));
-                            ui.c.fill_rect(Rect::new(x, y0, 1.0, (y1 - y0).max(1.0)), col.with_alpha(if c == 1 { 200 } else { 230 }));
+                            ui.c.fill_rect(Rect::new(x, y0, 1.0, (y1 - y0).max(1.0)), col.with_alpha(((if c == 1 { 200.0 } else { 230.0 }) * dim) as u8));
                         }
                     }
                     x += 1.0;
@@ -729,6 +750,7 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
                 let i0 = start.floor().max(0.0) as usize;
                 let i1 = (end.ceil() as usize + 1).min(n);
                 let pts: Vec<(f32, f32)> = (i0..i1).map(|i| (fx(i as f64), y_of(l.shown.at(c, i)))).collect();
+                let col = col.with_alpha((255.0 * dim) as u8);
                 ui.c.polyline(&pts, 1.2, col);
                 if per_px < 0.2 {
                     for &(x, y) in &pts {
@@ -773,6 +795,21 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
                 ui.c.fill_rect(fr, LOOP);
                 ui.c.text(SMALL, x0 + 4.0, y - 2.0, Color::rgb(0xffffff), "Loop");
                 ui.hit(fr, Target::LoopFlag);
+            }
+        }
+    }
+    // The envelope of the edit mode: an orange line with its points.
+    if let Some(k) = doc.env_shown() {
+        let n = doc.frames();
+        if n > 0 {
+            let p = doc.env.points(k, n);
+            let pts: Vec<(f32, f32)> = p.iter().map(|q| (fx(q.pos), env_y(lane, q.v))).collect();
+            ui.c.polyline(&pts, 1.6, FLAG);
+            for &(x, y) in &pts {
+                if x >= lane.x - POINT_R && x <= lane.right() + POINT_R {
+                    ui.c.fill_circle(x, y, POINT_R, plug::BG);
+                    ui.c.stroke_circle(x, y, POINT_R, 1.4, FLAG);
+                }
             }
         }
     }
@@ -857,8 +894,7 @@ fn bottom(ui: &mut Ui, l: &Look, lay: &Layout) {
     btn(ui, 8.0, 14.0, Target::Menu(MenuId::Options), Glyph::Down, false, true);
     btn(ui, 30.5, 22.0, Target::Bottom(Bt::Undo), Glyph::Undo, false, l.can_undo);
     for (i, g) in [Glyph::Wave, Glyph::Pan, Glyph::Ramp, Glyph::BowTie, Glyph::Chain].into_iter().enumerate() {
-        // Envelope modes come in a later version.
-        btn(ui, 59.0 + i as f32 * 23.5, 22.0, Target::Bottom(Bt::Mode(i as u8)), g, i == 0, i == 0);
+        btn(ui, 59.0 + i as f32 * 23.5, 22.0, Target::Bottom(Bt::Mode(i as u8)), g, l.doc.view.mode == i as u8, true);
     }
     let v = &l.doc.view;
     let right = [
@@ -953,6 +989,49 @@ fn stretch_panel(ui: &mut Ui, a: &AmpUi, st: &Stretch, lay: &Layout) {
     panel_buttons(ui, a, p);
 }
 
+/// The Convolution reverb panel's geometry: Dry, Wet and Decay knobs, then the Add tail and Clipboard switches.
+pub fn reverb_parts(lay: &Layout) -> (Rect, [(AmpCtl, Rect); 5]) {
+    let (w, h) = (208.0, 290.0f32.min(lay.h - 8.0));
+    let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
+    let knob = |cx: f32, cy: f32| Rect::new(p.x + cx - 22.0, p.y + cy - 22.0, 44.0, 44.0);
+    (p, [
+        (AmpCtl::Dry, knob(58.0, 72.0)),
+        (AmpCtl::Wet, knob(150.0, 72.0)),
+        (AmpCtl::Decay, knob(104.0, 160.0)),
+        (AmpCtl::Tail, Rect::new(p.x + 18.0, p.y + 204.0, 80.0, 18.0)),
+        (AmpCtl::ClipImpulse, Rect::new(p.x + 104.0, p.y + 204.0, 92.0, 18.0)),
+    ])
+}
+
+fn reverb_panel(ui: &mut Ui, a: &AmpUi, r: &Reverb, lay: &Layout) {
+    let (p, parts) = reverb_parts(lay);
+    ui.hit(p, Target::AmpPanel);
+    lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
+    lemon::plug_panel(ui.c, p);
+    ui.c.text(TITLE, p.x + 12.0, p.y + 7.0, brand::TEXT, "Convolution reverb");
+    lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
+    for (ctl, rr) in parts {
+        let t = Target::Amp(ctl);
+        ui.hit(rr, t);
+        let s = ui.state(rr, t, false);
+        if matches!(ctl, AmpCtl::Tail | AmpCtl::ClipImpulse) {
+            let (on, cap) = if ctl == AmpCtl::Tail { (r.tail, "ADD TAIL") } else { (r.clip, "CLIPBOARD") };
+            lemon::toggle(ui.c, rr.x + 7.0, rr.cy(), on, s);
+            ui.c.text(CAPTION, rr.x + 18.0, rr.y + 3.5, if s.hover { brand::TEXT } else { plug::DIM }, cap);
+            continue;
+        }
+        let (v, cap, val) = match ctl {
+            AmpCtl::Dry => (r.dry, "DRY", format!("x{:.2}", Reverb::gain(r.dry))),
+            AmpCtl::Wet => (r.wet, "WET", format!("x{:.2}", Reverb::gain(r.wet))),
+            _ => (r.decay, "DECAY", if r.clip { "clipboard".into() } else { format!("{:.2} s", r.seconds()) }),
+        };
+        lemon::dial(ui.c, rr.cx(), rr.cy(), rr.w / 2.0, 4.0, (v + 1.0) / 2.0, false, brand::MAIN, s);
+        ui.c.text_center(CAPTION, Rect::new(rr.x - 20.0, rr.y - 15.0, rr.w + 40.0, 12.0), plug::DIM, cap);
+        ui.c.text_center(CAPTION, Rect::new(rr.x - 20.0, rr.bottom() + 4.0, rr.w + 40.0, 12.0), brand::TEXT, &val);
+    }
+    panel_buttons(ui, a, p);
+}
+
 /// Reset, Preview and Accept along a tool panel's bottom, and its close box.
 fn panel_buttons(ui: &mut Ui, a: &AmpUi, p: Rect) {
     let by = p.bottom() - 37.0;
@@ -971,6 +1050,9 @@ fn amp_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
     ui.c.fill_rect(Rect::new(0.0, 0.0, lay.w, lay.h), plug::BG.with_alpha(140));
     if let Some(st) = &a.stretch {
         return stretch_panel(ui, a, st, lay);
+    }
+    if let Some(r) = &a.reverb {
+        return reverb_panel(ui, a, r, lay);
     }
     let (p, parts) = amp_parts(lay);
     ui.hit(p, Target::AmpPanel);
@@ -1214,10 +1296,10 @@ pub fn hint(t: &Target, l: &HintCtx) -> String {
         Target::ScrollStep(true) => "Scroll right".into(),
         Target::Bottom(Bt::Undo) => "Undo / undo history".into(),
         Target::Bottom(Bt::Mode(0)) => "Edit waveform".into(),
-        Target::Bottom(Bt::Mode(1)) => "Edit panning envelope (later version)".into(),
-        Target::Bottom(Bt::Mode(2)) => "Edit volume envelope (later version)".into(),
-        Target::Bottom(Bt::Mode(3)) => "Edit stereo separation envelope (later version)".into(),
-        Target::Bottom(Bt::Mode(_)) => "Edit all-purpose envelope (later version)".into(),
+        Target::Bottom(Bt::Mode(1)) => "Edit panning envelope".into(),
+        Target::Bottom(Bt::Mode(2)) => "Edit volume envelope".into(),
+        Target::Bottom(Bt::Mode(3)) => "Edit stereo separation envelope".into(),
+        Target::Bottom(Bt::Mode(_)) => "Edit all-purpose envelope".into(),
         Target::Bottom(Bt::Follow) => "Scroll to follow playback".into(),
         Target::Bottom(Bt::Spectrum) => "Display waveform / spectrum".into(),
         Target::Bottom(Bt::Threshold) => "View noise threshold mark (later version)".into(),
@@ -1237,6 +1319,11 @@ pub fn hint(t: &Target, l: &HintCtx) -> String {
         Target::Amp(AmpCtl::Time) => "Time (length)".into(),
         Target::Amp(AmpCtl::Formant) => "Formant".into(),
         Target::Amp(AmpCtl::Preserve) => "Formant preservation".into(),
+        Target::Amp(AmpCtl::Dry) => "Dry (the original)".into(),
+        Target::Amp(AmpCtl::Wet) => "Wet (the reverb)".into(),
+        Target::Amp(AmpCtl::Decay) => "Decay of the default impulse".into(),
+        Target::Amp(AmpCtl::Tail) => "Add tail (the range grows by the reverb's tail)".into(),
+        Target::Amp(AmpCtl::ClipImpulse) => "Use the clipboard as the impulse".into(),
         Target::Amp(AmpCtl::Reset) => "Reset".into(),
         Target::Amp(AmpCtl::Preview) => "Preview".into(),
         Target::Amp(AmpCtl::Accept) => "Accept".into(),

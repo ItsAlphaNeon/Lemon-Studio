@@ -13,6 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::env::Envs;
 use crate::sample::Sample;
 use crate::wav::{self, Depth};
 
@@ -119,6 +120,8 @@ pub struct View {
     /// Settings: slave playback ignores the host's / Tesla's own selection.
     pub ignore_host_sel: bool,
     pub ignore_own_sel: bool,
+    /// The edit mode (the bottom bar): 0 waveform, 1 panning, 2 volume, 3 stereo separation, 4 all-purpose envelope.
+    pub mode: u8,
 }
 
 impl Default for View {
@@ -143,6 +146,7 @@ impl Default for View {
             h: 0,
             ignore_host_sel: false,
             ignore_own_sel: false,
+            mode: 0,
         }
     }
 }
@@ -157,6 +161,8 @@ pub struct Saved {
     pub view: View,
     /// An Edison slot's envelope blocks, kept as they came when they are not the default (written back to FL).
     pub edison_env: Vec<u8>,
+    /// Tesla's four envelopes (`env.rs`).
+    pub env: Envs,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -169,6 +175,7 @@ struct Json {
     rec: Rec,
     view: View,
     edison_env: String,
+    env: Envs,
 }
 
 /// The persisted field holding Tesla's state.
@@ -183,6 +190,7 @@ pub fn to_json(s: &Saved) -> String {
         rec: s.rec.clone(),
         view: s.view.clone(),
         edison_env: b64_encode(&s.edison_env),
+        env: s.env.clone(),
     };
     serde_json::to_string(&j).unwrap_or_default()
 }
@@ -191,7 +199,7 @@ pub fn from_json(text: &str) -> Option<Saved> {
     let j: Json = serde_json::from_str(text).ok()?;
     let bytes = b64_decode(&j.wav)?;
     let sample = if bytes.is_empty() { Sample::default() } else { wav::read(&bytes).ok()? };
-    Some(Saved { sample, path: j.path, rec: j.rec, view: j.view, edison_env: b64_decode(&j.edison_env).unwrap_or_default() })
+    Some(Saved { sample, path: j.path, rec: j.rec, view: j.view, edison_env: b64_decode(&j.edison_env).unwrap_or_default(), env: j.env })
 }
 
 /// A plugin state blob (the host's: its length, then nih-plug's JSON) holding `s`.
@@ -396,7 +404,9 @@ mod tests {
         s.add_cue("mk1", 1, None);
         s.add_cue("rg1", 1, Some(2));
         s.looped = Some((0, 3));
-        Saved { sample: s, path: "C:\\samples\\dc.wav".into(), rec: Rec { when: WHEN_ON_PLAY, max: 3, append: false, slave: true, armed: true, mute: true }, view: View { spectrum: true, ..View::default() }, edison_env: Vec::new() }
+        let mut env = Envs::default();
+        env.insert(crate::env::VOLUME, 4, 1.5, 0.8);
+        Saved { sample: s, path: "C:\\samples\\dc.wav".into(), rec: Rec { when: WHEN_ON_PLAY, max: 3, append: false, slave: true, armed: true, mute: true }, view: View { spectrum: true, mode: 2, ..View::default() }, edison_env: Vec::new(), env }
     }
 
     #[test]
@@ -412,6 +422,8 @@ mod tests {
         let mut s = saved();
         s.rec.mute = false;
         s.view = View::default();
+        // Tesla's envelopes stay in Tesla's state: Edison's blocks with edited envelopes aren't decoded.
+        s.env = Envs::default();
         let b = to_edison(&s);
         let wave = u64::from_le_bytes(b[16..24].try_into().unwrap()) as usize;
         assert_eq!(&b[0..4], &EDISON_VERSION.to_le_bytes());

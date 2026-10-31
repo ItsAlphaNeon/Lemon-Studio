@@ -21,11 +21,12 @@ use os_plugkit::MenuDef;
 use os_ui::kit::menu::{Mark, MenuItem, MenuStyle};
 use os_ui::{Canvas, Rect};
 
-use crate::doc::{Doc, Paste};
+use crate::doc::{self, Doc, Paste};
+use crate::env;
 use crate::peaks::Peaks;
 use crate::sample::{Format, Sample};
 use crate::state;
-use crate::tools::{self, Amp, Law, Stretch};
+use crate::tools::{self, Amp, Law, Reverb, Stretch};
 use crate::view::{self, AmpCtl, AmpUi, Bt, Hit, Layout, MenuId, Part, Shown, Target, Tr, ViewState};
 use crate::wav::{self, Depth};
 use crate::{Cmd as Play, Shared, TeslaParams};
@@ -134,6 +135,7 @@ fn out_path(title: &str) -> PathBuf {
 pub enum ToolCmd {
     Amp,
     Stretch,
+    Reverb,
     ReversePolarity,
     Normalize,
     FadeIn,
@@ -150,6 +152,13 @@ pub enum ToolCmd {
     NormalizeRegions,
     DeclickInRegions,
     DeclickOutRegions,
+    /// Tools > Mixdown amp envelopes and the Envelope section.
+    Mixdown,
+    CancelEnvelopes,
+    PointsAtSelection,
+    PointsAtRegions,
+    FlipEnvelope,
+    NormalizeEnvelope,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -350,6 +359,8 @@ enum Drag {
     Resize { x: f32, y: f32, w: u32, h: u32 },
     Knob { ctl: AmpCtl, y: f32, v: f32 },
     Fader(AmpCtl),
+    /// Envelope `k`'s point `i`; `moved` once its undo step is recorded.
+    Point { k: usize, i: usize, moved: bool },
 }
 
 pub struct Logic {
@@ -596,7 +607,7 @@ impl Logic {
                 let n = self.doc(|d| d.sample.channels());
                 self.doc(|d| d.set_channels(if n == 1 { 2 } else { 1 }));
             }
-            Target::Wave => acts.extend(self.wave_down(x, m, dbl)),
+            Target::Wave => acts.extend(self.wave_down(x, y, m, dbl)),
             Target::Flag(id) => {
                 let (grab, pos) = self.doc(|d| (self.frame_at(d, x), d.sample.cues.iter().find(|c| c.id == id).map_or(0, |c| c.pos)));
                 if dbl {
@@ -661,7 +672,28 @@ impl Logic {
             Target::Format => acts.push(Act::Menu(MenuReq::Main(MenuId::Format), x, y)),
             Target::When => acts.push(Act::Menu(MenuReq::When, x, y)),
             Target::Max => acts.push(Act::Menu(MenuReq::Max, x, y)),
-            Target::Wave => acts.push(Act::Menu(MenuReq::Wave, x, y)),
+            Target::Wave => {
+                // In an envelope mode a right click on a point deletes it.
+                let k = self.doc(|d| if d.frames() > 0 { d.env_shown() } else { None });
+                let hit = k.and_then(|k| self.doc(|d| self.env_point_at(d, k, x, y)).map(|i| (k, i)));
+                match hit {
+                    Some((k, i)) => {
+                        let removed = self.doc(|d| {
+                            let n = d.frames();
+                            let mut e = d.env.clone();
+                            if !e.remove(k, n, i) {
+                                return false;
+                            }
+                            *d.edit_env("Delete envelope point") = e;
+                            true
+                        });
+                        if !removed {
+                            self.hint = "The first and last points stay (drag them, or double-click to reset)".into();
+                        }
+                    }
+                    None => acts.push(Act::Menu(MenuReq::Wave, x, y)),
+                }
+            }
             // Right-click resets a control.
             Target::Amp(c) => self.reset_amp(c),
             _ => {}
@@ -678,16 +710,72 @@ impl Logic {
             AmpCtl::Left => d.left,
             AmpCtl::Volume => d.volume,
             AmpCtl::Right => d.right,
-            AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant => 0.0,
+            AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Dry | AmpCtl::Decay => 0.0,
+            AmpCtl::Wet => tools::WET_DEFAULT,
             _ => return,
         };
         self.set_amp_value(c, v);
         self.amp_changed();
     }
 
-    fn wave_down(&mut self, x: f32, m: Mods, dbl: bool) -> Vec<Act> {
+    /// The point of envelope `k` under (`x`, `y`), the nearest within grabbing distance.
+    fn env_point_at(&self, d: &Doc, k: usize, x: f32, y: f32) -> Option<usize> {
+        let lane = self.layout().lane();
+        let n = d.frames();
+        let (start, per_px) = view::span(d, n, lane.w);
+        let p = d.env.points(k, n);
+        p.iter()
+            .enumerate()
+            .map(|(i, q)| (i, (view::frame_x(lane, start, per_px, q.pos) - x).hypot(view::env_y(lane, q.v) - y)))
+            .filter(|&(_, dist)| dist <= view::GRAB)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    }
+
+    /// A press in the wave area in an envelope mode: on a point drags it (a double-click puts it back at mid height),
+    /// on the line adds a point there and drags it. `None` elsewhere: the press selects, as in waveform mode.
+    fn env_down(&mut self, k: usize, x: f32, y: f32, dbl: bool) -> Option<Vec<Act>> {
+        let lane = self.layout().lane();
+        if let Some(i) = self.doc(|d| self.env_point_at(d, k, x, y)) {
+            if dbl {
+                self.doc(|d| {
+                    let n = d.frames();
+                    let p = d.env.points(k, n)[i];
+                    if p.v != env::MID {
+                        d.edit_env("Reset envelope point").move_point(k, n, i, p.pos, env::MID);
+                    }
+                });
+                self.drag = None;
+            } else {
+                self.drag = Some(Drag::Point { k, i, moved: false });
+            }
+            return Some(vec![Act::Repaint]);
+        }
+        let added = self.doc(|d| {
+            let n = d.frames();
+            let f = self.frame_at(d, x).round();
+            if f < 0.0 || f > (n - 1) as f64 {
+                return None;
+            }
+            let v = env::value(&d.env.points(k, n), f);
+            if (view::env_y(lane, v) - y).abs() > view::GRAB {
+                return None;
+            }
+            Some(d.edit_env("Add envelope point").insert(k, n, f, view::env_v(lane, y)))
+        })?;
+        self.drag = Some(Drag::Point { k, i: added, moved: true });
+        self.hint = format!("{}: {}", env::NAMES[k], env::text(k, view::env_v(lane, y)));
+        Some(vec![Act::Repaint])
+    }
+
+    fn wave_down(&mut self, x: f32, y: f32, m: Mods, dbl: bool) -> Vec<Act> {
         if self.doc(|d| d.frames()) == 0 {
             return vec![Act::Open];
+        }
+        if let Some(k) = self.doc(|d| d.env_shown()) {
+            if let Some(acts) = self.env_down(k, x, y, dbl) {
+                return acts;
+            }
         }
         if dbl {
             // Double-click: the region under the pointer, or the whole sample.
@@ -789,6 +877,23 @@ impl Logic {
                 self.set_amp_value(ctl, nv);
                 self.hint = self.amp_hint(ctl);
             }
+            Some(Drag::Point { k, i, moved }) => {
+                let lane = lay.lane();
+                let v = view::env_v(lane, y);
+                self.doc(|d| {
+                    let n = d.frames();
+                    if n == 0 {
+                        return;
+                    }
+                    let pos = self.frame_at(d, x).round().clamp(0.0, (n - 1) as f64);
+                    let e = if moved { d.env_mut() } else { d.edit_env("Move envelope point") };
+                    e.move_point(k, n, i, pos, v);
+                });
+                if let Some(Drag::Point { moved, .. }) = &mut self.drag {
+                    *moved = true;
+                }
+                self.hint = format!("{}: {}", env::NAMES[k], env::text(k, v));
+            }
             Some(Drag::Fader(ctl)) => {
                 let (_, parts) = view::amp_parts(&lay);
                 if let Some((_, r)) = parts.iter().find(|(c, _)| *c == ctl) {
@@ -823,7 +928,7 @@ impl Logic {
 
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
         match self.at(x, y) {
-            Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant))) => {
+            Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Dry | AmpCtl::Wet | AmpCtl::Decay))) => {
                 let v = self.amp_value(c) + notches * 0.02;
                 self.set_amp_value(c, v.clamp(-1.0, 1.0));
                 self.hint = self.amp_hint(c);
@@ -862,6 +967,12 @@ impl Logic {
                 if f < 0.0 || f >= n as f64 {
                     return String::new();
                 }
+                if let Some(k) = d.env_shown() {
+                    // The envelope's reading at the pointer (at the point under it, if any).
+                    let p = d.env.points(k, n);
+                    let v = self.env_point_at(d, k, x, y).map_or_else(|| env::value(&p, f), |i| p[i].v);
+                    return format!("{} envelope: {} \u{00b7} click the line to add a point, right-click one to delete it", env::NAMES[k], env::text(k, v));
+                }
                 let i = f as usize;
                 let v = (0..d.sample.channels()).map(|c| d.sample.ch[c][i]).fold(0f32, |m, v| if v.abs() > m.abs() { v } else { m });
                 let fmt = if d.view.time == state::TIME_AUTO { state::TIME_MSM } else { d.view.time };
@@ -890,6 +1001,7 @@ impl Logic {
             (2, true) => Cmd::Tool(ToolCmd::DeclickIn),
             (3, false) => Cmd::Tool(ToolCmd::Amp),
             (3, true) => Cmd::Tool(ToolCmd::Center),
+            (4, false) => Cmd::Tool(ToolCmd::Reverb),
             (6, false) => {
                 let region = self.doc(|d| d.sel.is_some());
                 if region { Cmd::AddRegion } else { Cmd::AddMarker }
@@ -914,7 +1026,7 @@ impl Logic {
 
     fn run_tool(&mut self, t: ToolCmd) -> Vec<Act> {
         let ok = self.doc(|d| match t {
-            ToolCmd::Amp | ToolCmd::Stretch => false,
+            ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::Reverb => false,
             ToolCmd::ReversePolarity => d.tool("Reverse polarity", tools::reverse_polarity),
             ToolCmd::Normalize => {
                 let mut changed = false;
@@ -953,12 +1065,27 @@ impl Logic {
             }),
             ToolCmd::DeclickInRegions => d.tool_regions("Declick in all regions", tools::declick_in),
             ToolCmd::DeclickOutRegions => d.tool_regions("Declick out all regions", tools::declick_out),
+            ToolCmd::Mixdown => d.mixdown(),
+            ToolCmd::CancelEnvelopes => d.env_shown().is_some() && d.cancel_envelopes(),
+            ToolCmd::PointsAtSelection => d.env_points_at(false),
+            ToolCmd::PointsAtRegions => d.env_points_at(true),
+            ToolCmd::FlipEnvelope => d.env_tool("Flip envelope vertically", |e, k, n| {
+                e.flip(k, n);
+                true
+            }),
+            ToolCmd::NormalizeEnvelope => d.env_tool("Normalize envelope levels", |e, k, n| e.normalize(k, n)),
         });
-        if t == ToolCmd::Amp || t == ToolCmd::Stretch {
+        if matches!(t, ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::Reverb) {
             if self.doc(|d| d.frames()) > 0 {
                 let stretch = (t == ToolCmd::Stretch).then(Stretch::default);
-                self.view.amp = Some(AmpUi { stretch, ..AmpUi::default() });
-                self.hint = if stretch.is_some() { "Time stretch / pitch shift of the selection" } else { "Amp: pan, volume and stereo separation of the selection" }.into();
+                let reverb = (t == ToolCmd::Reverb).then(Reverb::default);
+                self.view.amp = Some(AmpUi { stretch, reverb, ..AmpUi::default() });
+                self.hint = match t {
+                    ToolCmd::Stretch => "Time stretch / pitch shift of the selection",
+                    ToolCmd::Reverb => "Convolution reverb of the selection",
+                    _ => "Amp: pan, volume and stereo separation of the selection",
+                }
+                .into();
             }
         } else if ok {
             self.hint = self.doc(|d| d.history().first().cloned().unwrap_or_default());
@@ -981,7 +1108,11 @@ impl Logic {
     fn amp_value(&self, c: AmpCtl) -> f32 {
         let a = self.view.amp.map(|a| a.amp).unwrap_or_default();
         let st = self.view.amp.and_then(|a| a.stretch).unwrap_or_default();
+        let rv = self.view.amp.and_then(|a| a.reverb).unwrap_or_default();
         match c {
+            AmpCtl::Dry => rv.dry,
+            AmpCtl::Wet => rv.wet,
+            AmpCtl::Decay => rv.decay,
             AmpCtl::Pitch => st.pitch,
             AmpCtl::Time => st.time,
             AmpCtl::Formant => st.formant,
@@ -996,6 +1127,14 @@ impl Logic {
 
     fn set_amp_value(&mut self, c: AmpCtl, v: f32) {
         if let Some(ui) = &mut self.view.amp {
+            if let Some(r) = &mut ui.reverb {
+                match c {
+                    AmpCtl::Dry => r.dry = v,
+                    AmpCtl::Wet => r.wet = v,
+                    AmpCtl::Decay => r.decay = v,
+                    _ => {}
+                }
+            }
             if let Some(st) = &mut ui.stretch {
                 match c {
                     AmpCtl::Pitch => st.pitch = v,
@@ -1045,12 +1184,25 @@ impl Logic {
                     _ => "Formant: moves with the pitch (formant preservation off)".into(),
                 }
             }
+            AmpCtl::Dry => format!("Dry: x{:.2}", Reverb::gain(v)),
+            AmpCtl::Wet => format!("Wet: x{:.2}", Reverb::gain(v)),
+            AmpCtl::Decay => {
+                let r = self.view.amp.and_then(|a| a.reverb).unwrap_or_default();
+                format!("Decay of the default impulse: {:.2} s (to -60 dB){}", r.seconds(), if r.clip { ", unused with the clipboard's" } else { "" })
+            }
             _ => view::hint(&Target::Amp(c), &view::HintCtx { when: 0, max: 0 }),
         }
     }
 
     /// Applies the open panel's tool to the range: Amp, or Time stretch / pitch shift.
-    fn apply_panel(d: &mut Doc, ui: &AmpUi) -> bool {
+    fn apply_panel(d: &mut Doc, ui: &AmpUi, clip: Option<&Sample>) -> bool {
+        if let Some(r) = ui.reverb {
+            let impulse = match (r.clip, clip) {
+                (true, Some(c)) if c.frames() > 0 => doc::conform(c, d.sample.rate, d.sample.channels()).ch,
+                _ => tools::default_impulse(d.sample.rate, d.sample.channels(), r.seconds()),
+            };
+            return d.replace_range("Convolution reverb", |s, a, b| tools::reverb(s, a, b, &r, &impulse));
+        }
         match ui.stretch {
             Some(st) => d.replace_range("Time stretch / pitch shift", |s, a, b| tools::stretch(s, a, b, &st)),
             None => d.tool("Amp", |s, a, b| tools::amp(s, a, b, &ui.amp)),
@@ -1063,7 +1215,7 @@ impl Logic {
         if ui.previewing {
             self.doc(|d| {
                 d.undo();
-                Self::apply_panel(d, &ui);
+                Self::apply_panel(d, &ui, self.clip.as_ref());
             });
         }
     }
@@ -1075,7 +1227,7 @@ impl Logic {
                 self.doc(|d| d.undo());
             }
             (false, true) => {
-                self.doc(|d| Self::apply_panel(d, &ui));
+                self.doc(|d| Self::apply_panel(d, &ui, self.clip.as_ref()));
             }
             _ => {}
         }
@@ -1095,6 +1247,27 @@ impl Logic {
                     st.preserve = !st.preserve;
                 }
                 self.amp_changed();
+            }
+            AmpCtl::Tail | AmpCtl::ClipImpulse => {
+                let has_clip = self.clip.as_ref().is_some_and(|c| c.frames() > 0);
+                if let Some(r) = self.view.amp.as_mut().and_then(|u| u.reverb.as_mut()) {
+                    if c == AmpCtl::Tail {
+                        r.tail = !r.tail;
+                    } else if r.clip || has_clip {
+                        r.clip = !r.clip;
+                    } else {
+                        self.hint = "Copy an impulse response to Tesla's clipboard first (Ctrl+C)".into();
+                        return vec![Act::Repaint];
+                    }
+                }
+                self.amp_changed();
+            }
+            AmpCtl::Dry | AmpCtl::Wet | AmpCtl::Decay => {
+                if dbl {
+                    self.reset_amp(c);
+                } else {
+                    self.drag = Some(Drag::Knob { ctl: c, y, v: self.amp_value(c) });
+                }
             }
             AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant => {
                 if dbl {
@@ -1119,6 +1292,7 @@ impl Logic {
                 if let Some(ui) = &mut self.view.amp {
                     ui.amp = Amp::default();
                     ui.stretch = ui.stretch.map(|_| Stretch::default());
+                    ui.reverb = ui.reverb.map(|_| Reverb::default());
                 }
                 self.amp_changed();
             }
@@ -1129,7 +1303,7 @@ impl Logic {
                     self.shared.send(Play::Pause);
                 } else {
                     let r = self.doc(|d| {
-                        Self::apply_panel(d, &ui);
+                        Self::apply_panel(d, &ui, self.clip.as_ref());
                         d.range()
                     });
                     if let Some((a, b)) = r {
@@ -1154,8 +1328,8 @@ impl Logic {
     fn bottom(&mut self, b: Bt, x: f32, y: f32) -> Vec<Act> {
         match b {
             Bt::Undo => return self.pick(&MenuReq::Undo, Cmd::Undo, x, y),
-            Bt::Mode(0) => {}
-            Bt::Mode(_) | Bt::Threshold => self.hint = "Not in this version".into(),
+            Bt::Mode(i) => self.doc(|d| d.view.mode = i.min(4)),
+            Bt::Threshold => self.hint = "Not in this version".into(),
             Bt::Follow => self.doc(|d| d.view.follow = !d.view.follow),
             Bt::Spectrum => self.doc(|d| d.view.spectrum = !d.view.spectrum),
             Bt::Regions => self.doc(|d| {
@@ -1208,6 +1382,10 @@ impl Logic {
             Key::Insert => Cmd::InsertSilence,
             Key::Char('C') if s => Cmd::Send(false),
             Key::Char('C') if !a => Cmd::ClickFree,
+            Key::Char('E') if c && !a => Cmd::Tool(ToolCmd::Mixdown),
+            Key::Char('E') if a && !c => Cmd::Tool(ToolCmd::CancelEnvelopes),
+            Key::Char('P') if !c && !a && !s => Cmd::Tool(ToolCmd::PointsAtSelection),
+            Key::Char('R') if c && !a => Cmd::Tool(ToolCmd::Reverb),
             Key::Char('A') if a => Cmd::Tool(ToolCmd::Amp),
             Key::Char('T') if a => Cmd::Tool(ToolCmd::Stretch),
             Key::Char('A') if c => Cmd::SelectZoomed,
@@ -1369,7 +1547,17 @@ impl Logic {
                 let t = |m: &mut MenuDef<Cmd>, l: &str, k: &str, c: ToolCmd, on: bool| {
                     m.add(item(l).shortcut(k).enabled(on), Cmd::Tool(c));
                 };
+                // Edison greys the Envelope section in waveform mode; the mixdown is Tesla's to use whenever an amp
+                // envelope is drawn.
+                let envm = has && d.env_shown().is_some();
+                m.head("Envelope", Cmd::None);
+                t(&mut m, "Cancel all envelopes", "Alt+E", ToolCmd::CancelEnvelopes, envm && d.env != env::Envs::default());
+                t(&mut m, "Add points at selection", "P", ToolCmd::PointsAtSelection, envm && sel);
+                t(&mut m, "Add points at regions", "", ToolCmd::PointsAtRegions, envm && regions);
+                t(&mut m, "Flip vertically", "", ToolCmd::FlipEnvelope, envm);
+                t(&mut m, "Normalize levels", "", ToolCmd::NormalizeEnvelope, envm && d.env_shown().is_some_and(|k| !d.env.is_flat(k)));
                 m.head("Amp", Cmd::None);
+                t(&mut m, "Mixdown amp envelopes", "Ctrl+E", ToolCmd::Mixdown, has && !d.env.amp_flat());
                 t(&mut m, "Amp...", "Alt+A", ToolCmd::Amp, has);
                 t(&mut m, "Reverse polarity", "", ToolCmd::ReversePolarity, has);
                 t(&mut m, "Normalize", "Ctrl+N", ToolCmd::Normalize, has);
@@ -1390,6 +1578,8 @@ impl Logic {
                 m.add(MenuItem::Column, Cmd::None);
                 m.head("Synthesis", Cmd::None);
                 t(&mut m, "Generate noise", "", ToolCmd::Noise, has);
+                m.head("Spectral", Cmd::None);
+                t(&mut m, "Convolution reverb...", "Ctrl+R", ToolCmd::Reverb, has);
                 m.head("Regions", Cmd::None);
                 t(&mut m, "Normalize all regions", "", ToolCmd::NormalizeRegions, regions);
                 t(&mut m, "Declick in all regions", "", ToolCmd::DeclickInRegions, regions);
@@ -2770,9 +2960,9 @@ mod tests {
         let (x, y) = centre(&l, Target::Tool(9));
         l.down(x, y, Btn::Right, Mods::default(), false);
         assert!(l.doc(|d| d.sample.ch[0][10].abs() < d.sample.ch[1][10].abs()));
-        let (x, y) = centre(&l, Target::Tool(4));
+        let (x, y) = centre(&l, Target::Tool(5));
         l.down(x, y, Btn::Left, Mods::default(), false);
-        assert_eq!(l.hint, "Reverb... is not in this version");
+        assert_eq!(l.hint, "Equalize... is not in this version");
         let (x, y) = centre(&l, Target::Tool(0));
         assert!(matches!(l.down(x, y, Btn::Right, Mods::default(), false).last(), Some(Act::Menu(MenuReq::Undo, _, _))));
         assert_eq!(l.menu(&MenuReq::Undo).find("Swap channels"), Some(Cmd::UndoTo(1)));
@@ -2959,6 +3149,119 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Convolution reverb (the tool grid's reverb button, Ctrl+R): the default impulse or the clipboard, with the tail.
+    #[test]
+    fn convolution_reverb() {
+        let mut l = logic();
+        let rate = 44100;
+        let mut s = Sample::from_channels(rate, vec![vec![0.0; 44100], vec![0.0; 44100]], Format::Float32);
+        s.ch[0][1000] = 1.0;
+        s.add_cue("after", 30000, None);
+        load(&mut l, s);
+        l.doc(|d| d.select(0, 9999));
+        let (x, y) = centre(&l, Target::Tool(4));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert!(l.view.amp.is_some_and(|a| a.reverb.is_some()), "the reverb panel is open");
+        paint(&mut l);
+        assert_eq!(l.amp_hint(AmpCtl::Wet), "Wet: x0.50");
+        // Decay at its lowest: a 0.2 s impulse; Add tail grows the selection by its length less one frame.
+        l.set_amp_value(AmpCtl::Decay, -1.0);
+        assert!(l.amp_hint(AmpCtl::Decay).starts_with("Decay of the default impulse: 0.20 s"));
+        // No clipboard yet: the Clipboard switch stays off.
+        let (x, y) = centre(&l, Target::Amp(AmpCtl::ClipImpulse));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(l.view.amp.is_some_and(|a| a.reverb.is_some_and(|r| !r.clip)));
+        let (x, y) = centre(&l, Target::Amp(AmpCtl::Accept));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        assert!(l.view.amp.is_none());
+        let tail = (0.2 * rate as f64).round() as usize - 1;
+        assert_eq!(l.doc(|d| (d.frames(), d.sel, d.sample.cues[0].pos)), (44100 + tail, Some((0, 9999 + tail)), 30000 + tail));
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Convolution reverb");
+        let imp = tools::default_impulse(rate, 2, 0.2);
+        l.doc(|d| {
+            assert!((d.sample.ch[0][1000] - (1.0 + 0.5 * imp[0][0])).abs() < 1e-5);
+            assert!((d.sample.ch[0][5000] - 0.5 * imp[0][4000]).abs() < 1e-5);
+            assert!(d.sample.ch[1].iter().all(|v| *v == 0.0));
+        });
+        l.doc(|d| d.undo());
+        // The clipboard as the impulse: a copied two-frame echo, without the tail.
+        l.doc(|d| d.sel = None);
+        l.clip = Some(Sample::from_channels(rate, vec![vec![0.0, 0.0, 1.0]], Format::Float32));
+        l.key(Key::Char('R'), Mods { ctrl: true, ..Mods::default() });
+        paint(&mut l);
+        for c in [AmpCtl::ClipImpulse, AmpCtl::Tail] {
+            let (x, y) = centre(&l, Target::Amp(c));
+            l.down(x, y, Btn::Left, Mods::default(), false);
+        }
+        l.set_amp_value(AmpCtl::Dry, -1.0);
+        l.set_amp_value(AmpCtl::Wet, 0.0);
+        let (x, y) = centre(&l, Target::Amp(AmpCtl::Accept));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        l.doc(|d| {
+            assert_eq!(d.frames(), 44100);
+            assert_eq!((d.sample.ch[0][1000], d.sample.ch[0][1002]), (0.0, 1.0));
+        });
+    }
+
+    #[test]
+    fn envelope_modes_edit_points_and_mix_down() {
+        let mut l = logic();
+        let n = 44100;
+        load(&mut l, Sample::from_channels(44100, vec![vec![0.5; n], vec![0.5; n]], Format::Float32));
+        // The bottom bar's ramp: the volume envelope.
+        let (x, y) = centre(&l, Target::Bottom(Bt::Mode(2)));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(l.doc(|d| d.env_shown()), Some(env::VOLUME));
+        paint(&mut l);
+        let lane = l.layout().lane();
+        let (start, per) = l.doc(|d| view::span(d, n, lane.w));
+        let fx = |f: f64| view::frame_x(lane, start, per, f);
+        // Drag the middle point to the bottom (past it, then back to it): one undo step.
+        let (mx, my) = (fx(22050.0), view::env_y(lane, 0.5));
+        l.down(mx, my, Btn::Left, Mods::default(), false);
+        l.moved(mx, lane.bottom() + 20.0, Mods::default());
+        l.moved(mx, lane.bottom(), Mods::default());
+        assert_eq!(l.hint, "Volume: -inf dB");
+        l.up(Btn::Left);
+        let p = l.doc(|d| d.env.points(env::VOLUME, n));
+        assert_eq!((p[1].pos, p[1].v), (22050.0, 0.0));
+        assert_eq!(l.doc(|d| d.history()), vec!["Move envelope point", "Load"]);
+        // A click on the line adds a point; a right click on it deletes it; the ends can't be deleted.
+        let (ax, ay) = (fx(11025.0), view::env_y(lane, 0.25));
+        l.down(ax, ay, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(l.doc(|d| d.env.points(env::VOLUME, n).len()), 4);
+        l.down(ax, ay, Btn::Right, Mods::default(), false);
+        assert_eq!(l.doc(|d| d.env.points(env::VOLUME, n).len()), 3);
+        l.down(fx(0.0), view::env_y(lane, 0.5), Btn::Right, Mods::default(), false);
+        assert_eq!(l.doc(|d| d.env.points(env::VOLUME, n).len()), 3);
+        assert!(l.hint.starts_with("The first and last points stay"));
+        // Away from the line a drag still selects.
+        l.down(lane.x + 10.0, view::env_y(lane, 0.95), Btn::Left, Mods::default(), false);
+        l.moved(lane.x + 100.0, view::env_y(lane, 0.95), Mods::default());
+        l.up(Btn::Left);
+        assert!(l.doc(|d| d.sel.is_some()));
+        assert!(l.hover_hint(fx(22050.0), my).starts_with("Volume envelope: -inf dB"));
+        // Ctrl+E mixes the envelopes down and flattens them; Ctrl+Z brings both back.
+        l.key(Key::Char('E'), Mods { ctrl: true, ..Mods::default() });
+        assert_eq!(l.doc(|d| d.sample.ch[0][22050]), 0.0);
+        assert_eq!(l.doc(|d| d.sample.ch[1][0]), 0.5);
+        assert!(l.doc(|d| d.env.amp_flat()));
+        assert_eq!(l.doc(|d| d.history().first().cloned()), Some("Mixdown amp envelopes".into()));
+        l.key(Key::Char('Z'), Mods { ctrl: true, ..Mods::default() });
+        assert_eq!(l.doc(|d| d.sample.ch[0][22050]), 0.5);
+        assert!(!l.doc(|d| d.env.amp_flat()));
+        // Alt+E cancels them; the waveform button goes back to editing the waveform.
+        l.key(Key::Char('E'), Mods { alt: true, ..Mods::default() });
+        assert_eq!(l.doc(|d| d.env.clone()), env::Envs::default());
+        let (x, y) = centre(&l, Target::Bottom(Bt::Mode(0)));
+        l.down(x, y, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(l.doc(|d| d.env_shown()), None);
+    }
+
     /// `TESLA_PNG=<dir> cargo test -p tesla -- --ignored`: the editor in a few states, as PNGs.
     #[test]
     #[ignore]
@@ -3002,6 +3305,17 @@ mod tests {
         l.doc(|d| d.view.spectrum = true);
         save(&mut l, "tesla_spectrum", 1.0);
         l.doc(|d| d.view.spectrum = false);
+        l.doc(|d| {
+            d.view.mode = 2;
+            let e = d.edit_env("Draw");
+            e.move_point(crate::env::VOLUME, n, 1, 30000.0, 0.85);
+            e.insert(crate::env::VOLUME, n, 60000.0, 0.2);
+        });
+        save(&mut l, "tesla_envelope", 1.0);
+        l.doc(|d| d.view.mode = 0);
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Reverb), 0.0, 0.0);
+        save(&mut l, "tesla_reverb", 1.0);
+        l.view.amp = None;
         l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Amp), 0.0, 0.0);
         save(&mut l, "tesla_amp", 1.0);
         l.view.amp = None;

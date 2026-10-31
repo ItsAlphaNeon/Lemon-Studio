@@ -12,6 +12,7 @@
 
 pub mod doc;
 pub mod editor;
+pub mod env;
 pub mod peaks;
 pub mod rec;
 pub mod sample;
