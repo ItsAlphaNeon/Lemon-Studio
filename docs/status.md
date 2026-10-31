@@ -275,8 +275,14 @@ audio clipboard to browser does the same with the audio on the clipboard (what T
 VIEW > Remote control opens the browser's Remote control section, one row per controller link.
 TOOLS > Set up for live performance prepares the arranger for performance mode. TOOLS > Switch auto-bypass for all
 plugins switches every plugin's Auto-bypass when silent.
-Not yet (greyed in the menu bar): TOOLS > Chord progression tool..., Control builder, Set up for MIDI export, Lock / Unlock all tracks to / from their clips, Set
-keyboard focus of all plugins to ▸; VIEW > Script output.
+TOOLS > Chord progression tool... (Lemon Studio's design) asks for a progression, one chord a bar, as chord names
+(C G Am F7 Dm/F) or numerals (I V vi IV, with "Am:" first for the key) and writes it into the piano roll's pattern
+after its last note, as one undo step. TOOLS > Set keyboard focus of all plugins to ▸ Disabled keeps plugin editors
+from taking typed keys, which then play and steer Lemon Studio instead (Windows and macOS; for the session). TOOLS >
+Lock all tracks to their clips locks each playlist track whose clips share one source to it, so Draw and Paint place
+that source there whatever the current one is (a lock shows in the track header); Unlock all tracks from their
+clips clears the locks. Both are one undo step, and kept for the session only.
+Not yet (greyed in the menu bar): TOOLS > Control builder, Set up for MIDI export; VIEW > Script output.
 
 **Window positions.** Where the windows were when Lemon Studio closed comes back at the next start: the main
 window (its place and size, and whether it was maximized; brought back onto a screen if its screen is gone) and the
