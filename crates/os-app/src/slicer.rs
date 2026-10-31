@@ -33,7 +33,7 @@ impl Plugins {
     /// The Fruity Slicer state the Lemon Slicer on rack row `row` plays, `None` when the row hosts something else.
     pub fn slicer_file_state(&self, row: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&row)?;
-        let p = h.plugin.lock().ok()?;
+        let p = h.lock_for_state()?;
         if p.desc().name != LEMON_SLICER || !crate::project_plugins::is_builtin(p.desc()) {
             return None;
         }
