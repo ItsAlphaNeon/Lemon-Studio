@@ -703,6 +703,21 @@ pub const ICONS: &[(&str, crate::icons::Icon)] = {
     ]
 };
 
+/// The icon numbers of a project file (a channel's event 155, a mixer track's event 95) whose pictures [`ICONS`] has,
+/// and the icon each opens as (Lemon Studio's design, spec: ui/plugin-window.md "Change icon", the pictures in
+/// flp/events/mixer.md "Icon numbers"): a snare drum or a drum kit the drum, the piano keys the keys, the microphone,
+/// the waveform the wave, the note, a speaker (with a plug or without) the speaker, the jack cable the plug. Other
+/// numbers open with no icon.
+pub const FLP_ICONS: &[(u32, crate::icons::Icon)] = {
+    use crate::icons::Icon::*;
+    &[(4, Kick), (80, Kick), (71, PianoRoll), (30, Mic), (75, Wave), (70, Note), (27, Speaker), (29, Speaker), (31, Plug)]
+};
+
+/// The icon a project file's icon number opens as ([`FLP_ICONS`]), if it has one.
+pub fn flp_icon(n: u32) -> Option<crate::icons::Icon> {
+    FLP_ICONS.iter().find(|&&(k, _)| k == n).map(|&(_, i)| i)
+}
+
 /// Whose icon: a channel (by id, so it follows the channel when rows move), a mixer slot (track, slot) or a mixer track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IconOwner {
