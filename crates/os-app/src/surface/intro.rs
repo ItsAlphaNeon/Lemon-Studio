@@ -20,6 +20,9 @@ const RING: [u8; 16] = [8, 9, 10, 11, 12, 13, 14, 15, 7, 6, 5, 4, 3, 2, 1, 0];
 const SHORTEST: f32 = 3.0;
 /// The ring's level until the logo's mark pops.
 const WHOLE: f32 = 0.7;
+/// The two dims between the lemon at full brightness and off.
+const DIM: f32 = 0.4;
+const DIMMER: f32 = 0.15;
 const FRAME: Duration = Duration::from_millis(33);
 
 /// The level of each pad of `RING`, 0..=1.
@@ -38,10 +41,21 @@ fn levels(m: &Moment) -> [f32; 16] {
     })
 }
 
+/// A level as the lemon at full brightness, one of two dims or off. The dims scale the lit colour itself: only one hue.
 fn colour(level: f32) -> Colour {
-    let l = crate::splash::lemon();
-    let of = |c: u8| (f32::from(c) * level.clamp(0.0, 1.0)).round() as u8;
-    Colour::of(os_model::Rgb::new(of(l.r), of(l.g), of(l.b)))
+    let k = match level {
+        l if l > 0.66 => return Colour::of(crate::splash::lemon()),
+        l if l > 0.33 => DIM,
+        l if l > 0.02 => DIMMER,
+        _ => return Colour::Rgb(0, 0, 0),
+    };
+    match Colour::of(crate::splash::lemon()) {
+        Colour::Rgb(r, g, b) => {
+            let of = |c: u8| (f32::from(c) * k).round() as u8;
+            Colour::Rgb(of(r), of(g), of(b))
+        }
+        c => c,
+    }
 }
 
 /// The snake, while it runs: the pads are its, not the drive's. Dropping it ends it.
@@ -134,5 +148,21 @@ mod tests {
         pads.sort_unstable();
         assert_eq!(pads, (0..16).collect::<Vec<u8>>());
         assert_eq!(colour(0.0), Colour::Rgb(0, 0, 0));
+    }
+
+    /// Whatever the level: off, or the one lemon at one of three brightnesses.
+    #[test]
+    fn the_pads_show_one_colour_at_three_levels() {
+        let full = Colour::of(crate::splash::lemon());
+        let mut seen: Vec<Colour> = (0..=100).map(|l| colour(l as f32 / 100.0)).collect();
+        seen.dedup();
+        assert_eq!(seen.len(), 4, "{seen:?}");
+        assert_eq!((seen[0], seen[3]), (Colour::Rgb(0, 0, 0), full));
+        let Colour::Rgb(r, g, _) = full else { panic!() };
+        for c in &seen[1..3] {
+            let Colour::Rgb(a, b, _) = *c else { panic!() };
+            let (x, y) = (f32::from(g) / f32::from(r), f32::from(b) / f32::from(a));
+            assert!((x - y).abs() < 0.1, "the same hue: {c:?} against {full:?}");
+        }
     }
 }
