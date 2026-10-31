@@ -16,6 +16,7 @@
 //! - [`voices`]: a hosted instrument's voices as the host counts them.
 //! - [`wav`]: writing renders to disk.
 
+pub mod chain;
 pub mod clock;
 pub mod effects;
 pub mod engine;
