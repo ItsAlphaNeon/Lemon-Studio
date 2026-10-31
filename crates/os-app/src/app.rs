@@ -4466,12 +4466,14 @@ impl App {
             // Every dropout, and those heard (over sound), each of which turns the count red for a moment.
             let heard = tp.heard_dropouts();
             let dropouts = tp.underruns().max(heard);
+            let plugin_late = tp.drops().plugin > 0;
             if self.state.shown(Win::Perf) {
                 let src = self.perf_sources();
                 if self.state.perf.read(now, src) {
                     self.damage_win(Win::Perf);
                 }
             }
+            self.state.cpu.plugin_late = plugin_late;
             if self.state.cpu.update(now, load, voices, dropouts, heard) {
                 self.damage_band(CPU_RECT);
                 let (x, y) = self.mouse;

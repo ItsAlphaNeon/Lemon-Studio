@@ -81,6 +81,8 @@ pub struct Reading {
     pub heard: u64,
     /// One was heard just now: the count shows in red (`LIT`).
     pub lit: bool,
+    /// Some of them were a plugin arriving late: the count has its mark (`dropout_text`).
+    pub plugin_late: bool,
     /// Handles / threads / fonts, while Misc is ticked.
     pub misc: Option<Misc>,
 }
@@ -90,6 +92,8 @@ pub struct Cpu {
     pub now: Reading,
     /// Load readings, percent, oldest first.
     pub history: VecDeque<u32>,
+    /// A plugin has arrived late since the program started (`Reading::plugin_late`).
+    pub plugin_late: bool,
     /// The heard dropouts of the last reading, and how long the count stays red for the latest.
     heard: u64,
     lit_until: Option<Instant>,
@@ -206,10 +210,16 @@ impl Cpu {
         // Frames per second only matter while they are shown: else a repaint would cause the next one.
         let fps = if self.fps_view { fps } else { 0 };
         let lit = self.lit_until.is_some();
-        let r = Reading { load, voices, fps, mem_mb, dropouts, heard, lit, misc };
+        let r = Reading { load, voices, fps, mem_mb, dropouts, heard, lit, plugin_late: self.plugin_late, misc };
         let changed = moved || r != self.now;
         self.now = r;
         changed
+    }
+
+    /// The count as the panels show it.
+    pub fn dropout_text(&self) -> String {
+        let n = self.now.dropouts.min(9999);
+        if self.now.plugin_late { format!("!{n}") } else { n.to_string() }
     }
 
     /// The hint over the panel.
@@ -378,6 +388,17 @@ mod tests {
     }
 
     /// Refresh rates, the FPS view and Misc (spec: ui/main-window.md §13).
+    /// The mark is for a plugin that arrived late.
+    #[test]
+    fn the_dropout_count_has_a_mark_only_for_a_late_plugin() {
+        let mut c = Cpu::default();
+        c.read(None, 0, 0, None, 12, 0, None);
+        assert_eq!(c.dropout_text(), "12");
+        c.plugin_late = true;
+        assert!(c.read(None, 0, 0, None, 13, 0, None));
+        assert_eq!(c.dropout_text(), "!13");
+    }
+
     /// The count goes red when a dropout is heard, and quiet again after `LIT`; one over silence changes nothing.
     #[test]
     fn a_heard_dropout_lights_the_count_for_a_while() {

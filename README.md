@@ -41,7 +41,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
   - a toolbar of one row (menus, transport, time, pattern, main volume and pitch, windows, utilities);
   - a status bar along the bottom (Lemon's mark, the title and hint, global snap, mode buttons, pickers, CPU and
     memory): the dropouts since the program started show in a quiet colour, and in a red pill for a few seconds after
-    one cuts into sound (the audio log says why each happened), and the audio load turns yellow, orange and red as it climbs;
+    one cuts into sound, marked `!` when a plugin arrived late (the audio log says why each happened), and the audio load turns yellow, orange and red as it climbs;
   - the workspace and the browser as rounded cards over a darker backdrop; the browser's splitter is the gap between
     them, and the mixer's routing cables hang over the gap below. With Animations on "Playful", the cables between
     tracks at most three apart (bus 3 into the master, say) hang on in front of the split window below the mixer;
