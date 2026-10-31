@@ -51,4 +51,3 @@ history.
 - The snapshot is in FL's layout, so it holds only what an FLP holds; what Lemon Studio adds on top (anything not in
   an FLP) is not saved yet.
 - Samples are not inside the file (FILE ▸ Export ▸ Zipped project still gathers them).
-- Autosaves of a Lemon project are `.flp` files.
