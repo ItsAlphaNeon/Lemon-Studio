@@ -1104,6 +1104,9 @@ pub struct State {
     /// The current theme's rule for the colours of new audio and automation clips' channels (`App::clip_colors`, kept
     /// up to date by `App::follow_settings`).
     pub clip_colors: crate::clip_colors::ClipColors,
+    /// A setting inside a hosted plugin changed since the project was opened or saved (its knobs, its own window): the
+    /// project counts as unsaved, as the plugin's state is saved with it.
+    pub plugin_edited: bool,
 }
 
 impl State {
@@ -1457,6 +1460,7 @@ impl App {
                 dialogs: Vec::new(),
                 credits: Default::default(),
                 clip_colors: Default::default(),
+                plugin_edited: false,
             },
             theme: load_theme(),
             transport,
@@ -1865,7 +1869,7 @@ impl App {
             return None;
         }
         let s = &mut self.state;
-        let keep = (s.project.clone(), s.path.clone(), s.file.clone(), s.message.take(), self.saved.clone());
+        let keep = (s.project.clone(), s.path.clone(), s.file.clone(), s.message.take(), self.saved.clone(), s.plugin_edited);
         // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project"), nor a
         // recent one (spec: ui/recent-projects.md §2).
         let (last, recent) = (crate::templates::last_kept(), crate::recent::list());
@@ -1878,7 +1882,7 @@ impl App {
             Some(m) if m.starts_with("Saved") => Ok(()),
             m => Err(m.map_or_else(String::new, |m| m.trim_start_matches("Save failed: ").to_string())),
         };
-        (s.project, s.path, s.file, s.message, self.saved) = keep;
+        (s.project, s.path, s.file, s.message, self.saved, s.plugin_edited) = keep;
         Some(done)
     }
 
@@ -1887,12 +1891,12 @@ impl App {
         // New things get their ids before the copy, so ids alone are no unsaved change.
         self.state.control.settle(&mut self.state.project);
         self.saved = (self.state.project.clone(), self.state.tempo);
+        self.state.plugin_edited = false;
     }
 
-    /// Whether the project changed since it was last opened, saved or created. Settings kept inside hosted plugins are
-    /// not compared.
+    /// Whether the project changed since it was last opened, saved or created, a hosted plugin's settings included.
     pub fn unsaved(&self) -> bool {
-        self.saved.0 != self.state.project || self.saved.1 != self.state.tempo
+        self.saved.0 != self.state.project || self.saved.1 != self.state.tempo || self.state.plugin_edited
     }
 
     /// The system asks the window to close (its close shortcut, a taskbar or dock). The dialog-like windows drawn
