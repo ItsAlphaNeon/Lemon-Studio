@@ -1666,9 +1666,10 @@ impl App {
         }
     }
 
-    /// Saves the project to its file, or asks where (a project without one); then `next`, once it is saved.
+    /// Saves the project to its file, or asks where (a project without one, or one opened from an FLP, which is never
+    /// saved over: spec flp/lemon-format.md "Opening and saving"); then `next`, once it is saved.
     fn save_then(&mut self, next: Option<crate::dialog::Next>) {
-        let Some(path) = self.state.path.clone() else { return self.save_dialog(next) };
+        let Some(path) = self.state.path.clone().filter(|p| !crate::project_files::is_flp(p)) else { return self.save_dialog(next) };
         self.save_to(path);
         if let Some(n) = next {
             self.go_on_if_saved(n);
@@ -1684,13 +1685,14 @@ impl App {
         self.save_file_dialog(next);
     }
 
-    /// The Save project as dialog, starting in the project's folder with its name.
+    /// The Save project as dialog, starting in the project's folder with its name (an FLP's with `.lemon`).
     pub(crate) fn save_file_dialog(&mut self, next: Option<crate::dialog::Next>) {
         use crate::filedlg::{FileDlg, Mode};
+        use crate::project_files::{as_lemon, EXT};
         let path = self.state.path.clone();
-        let name = path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "Untitled.flp".to_string(), |n| n.to_string_lossy().into_owned());
+        let name = path.as_deref().map(as_lemon).and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| format!("Untitled.{EXT}"));
         let dlg = FileDlg::new(Mode::Save, "Save project as", "project", crate::dialog::Then::SaveProject(next))
-            .filter("Lemon Studio project", &["flp"])
+            .filter("Lemon Studio project", &[EXT])
             .start(path.as_deref().and_then(|p| p.parent()))
             .name(&name);
         self.file_dialog(dlg);
@@ -1837,6 +1839,7 @@ impl App {
         // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
         let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
+            .and_then(|()| lemon_or_flp(&mut file, &target))
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
             .and_then(|b| std::fs::write(&target, &b).map(|()| b.len() as u64).map_err(|e| e.to_string()));
         s.message = Some(match &result {
@@ -2228,13 +2231,13 @@ impl App {
     fn open_dialog(&mut self) {
         let start = self.state.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
         let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Open project", "project", crate::dialog::Then::OpenProject)
-            .filter("Lemon Studio project", &["flp", "zip"])
+            .filter("Lemon Studio project", &["lemon", "flp", "zip"])
             .start(start.as_deref());
         self.file_dialog(dlg);
     }
 
-    /// FILE > Save new version (Ctrl+N): saves next to the project as "name_2.flp", "name_3.flp", ... (the first free
-    /// number), which becomes the project's file. A project without a file asks for a name.
+    /// FILE > Save new version (Ctrl+N): saves next to the project as "name_2.lemon", "name_3.lemon", ... (the first
+    /// free number; an FLP's versions too), which becomes the project's file. A project without a file asks for a name.
     fn save_new_version(&mut self) {
         let Some(path) = self.state.path.clone() else { return self.save(true) };
         let stem = path.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -2243,7 +2246,8 @@ impl App {
             _ => (stem.clone(), 1),
         };
         let dir = path.parent().map(PathBuf::from).unwrap_or_default();
-        let target = (n + 1..).map(|k| dir.join(format!("{base}_{k}.flp"))).find(|p| !p.exists()).expect("a free name");
+        let ext = crate::project_files::EXT;
+        let target = (n + 1..).map(|k| dir.join(format!("{base}_{k}.{ext}"))).find(|p| !p.exists()).expect("a free name");
         self.save_to(target);
     }
 
@@ -4283,7 +4287,7 @@ impl App {
         // A drop accepts an Info box or a browser folder cell being edited, as a click does.
         crate::project_info::accept_info(&mut self.state);
         crate::search_folders::commit(&mut self.state);
-        if ext == "flp" || ext == "zip" {
+        if crate::project_files::is_project(&path) || ext == "zip" {
             return self.ask_discard("opening another project", crate::dialog::Next::Open(path));
         }
         // A MIDI file is imported as FILE ▸ Import ▸ MIDI file does (spec: ui/midi-files.md §10.6).
@@ -9112,6 +9116,17 @@ fn typing_semitone(code: KeyCode) -> Option<i32> {
 
 /// The file just written holds the model's channels and mixer tracks in order: each one's file block is its position
 /// (os-flp `apply` follows moved channels and the effect slots of moved mixer tracks by these).
+/// Makes the file written to `target` a `.lemon` file (Lemon Studio's chunks around the FLP's, saved by this version),
+/// or a plain FLP for a target named `.flp` (spec: flp/lemon-format.md).
+fn lemon_or_flp(file: &mut os_flp::FlpFile, target: &std::path::Path) -> Result<(), String> {
+    if crate::project_files::is_flp(target) {
+        os_flp::lemon::to_flp(file);
+        return Ok(());
+    }
+    let by = os_flp::lemon::saved_by(&format!("Lemon Studio {}", env!("CARGO_PKG_VERSION")));
+    os_flp::lemon::to_lemon(file, &[by]).map_err(|e| e.to_string())
+}
+
 fn settle_origins(p: &mut Project) {
     for (i, c) in p.channels.iter_mut().enumerate() {
         c.rack.origin = Some(i as u16);
@@ -12422,13 +12437,13 @@ mod tests {
             named(&mut app, NamedKey::Enter);
             assert_eq!(app.state.dialogs.len(), 1, "Tab went round to Yes");
             let f = top_file(&app);
-            assert_eq!((f.mode, f.name.text.as_str(), f.name.all), (crate::filedlg::Mode::Save, "Untitled.flp", true));
+            assert_eq!((f.mode, f.name.text.as_str(), f.name.all), (crate::filedlg::Mode::Save, "Untitled.lemon", true));
             frame(&mut app, &mut c, None);
             let target = dir.join(format!("Tune {design:?}"));
             typed(&mut app, &target.display().to_string());
             assert!(!app.want_exit);
             named(&mut app, NamedKey::Enter);
-            let saved = dir.join(format!("Tune {design:?}.flp"));
+            let saved = dir.join(format!("Tune {design:?}.lemon"));
             assert!(saved.exists() && !app.unsaved(), "saved with the type's extension: {:?}", app.state.message);
             assert!(app.want_exit && !app.modal_open(), "then the window closes");
             // Save as onto that file: the replace question starts on No; Yes replaces.
@@ -12439,7 +12454,7 @@ mod tests {
             assert_eq!(top_file(&app).dir, dir, "the dialog starts in the project's folder");
             named(&mut app, NamedKey::Enter);
             assert_eq!(app.state.dialogs.len(), 2);
-            assert_eq!(app.top_message().unwrap().1, format!("Tune {design:?}.flp already exists.\nDo you want to replace it?"));
+            assert_eq!(app.top_message().unwrap().1, format!("Tune {design:?}.lemon already exists.\nDo you want to replace it?"));
             frame(&mut app, &mut c, None);
             named(&mut app, NamedKey::Enter);
             assert_eq!(app.state.dialogs.len(), 1, "No goes back to the dialog");
@@ -14175,10 +14190,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut app = App::new(None);
         assert!(!app.unsaved(), "a fresh project");
-        app.save_to(dir.join("Song.flp"));
+        app.save_to(dir.join("Song.lemon"));
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
-        app.open(dir.join("Song.flp"));
+        app.open(dir.join("Song.lemon"));
         let mut canvas = Canvas::new(1920, 1080, 1.0).unwrap();
         let t0 = std::time::Instant::now();
         while app.loading() && t0.elapsed() < std::time::Duration::from_secs(20) {
@@ -14195,10 +14210,55 @@ mod tests {
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
         assert!(!app.unsaved(), "saved");
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION));
-        assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_2.flp").as_path()));
+        assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_2.lemon").as_path()));
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION));
-        assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_3.flp").as_path()));
-        assert!(dir.join("Song_2.flp").exists() && dir.join("Song_3.flp").exists());
+        assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_3.lemon").as_path()));
+        assert!(dir.join("Song_2.lemon").exists() && dir.join("Song_3.lemon").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Projects save as .lemon files that open again; one opened from an FLP is never saved over: Save asks for a name,
+    /// offering the FLP's with .lemon, and the project then lives there (spec: flp/lemon-format.md).
+    #[test]
+    fn flps_migrate_to_lemon_files() {
+        use crate::dialog::fake;
+        let dir = std::env::temp_dir().join(format!("os_lemon_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new(None);
+        app.state.tempo = 123.0;
+        let flp = dir.join("Old.flp");
+        app.save_to(flp.clone());
+        let plain = os_flp::FlpFile::parse(&std::fs::read(&flp).unwrap()).unwrap();
+        assert!(!os_flp::lemon::is_lemon(&plain), "a target named .flp is still written as an FLP");
+        let before = std::fs::read(&flp).unwrap();
+        let mut app = App::new(None);
+        app.open(flp.clone());
+        assert_eq!(app.state.tempo, 123.0);
+        app.state.tempo = 124.0;
+        let lemon = dir.join("Old.lemon");
+        let asked = fake::shown().1;
+        fake::answer(None);
+        app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
+        assert_eq!(fake::shown().1, asked + 1, "Save on an FLP asks for a name");
+        assert!(!lemon.exists(), "cancelled: nothing written");
+        assert_eq!(std::fs::read(&flp).unwrap(), before, "the FLP is not written");
+        assert!(app.unsaved());
+        fake::answer(Some(lemon.clone()));
+        app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
+        assert_eq!(app.state.path.as_deref(), Some(lemon.as_path()), "the project now lives in the .lemon file");
+        assert!(!app.unsaved());
+        assert_eq!(std::fs::read(&flp).unwrap(), before, "the FLP is still not written");
+        let file = os_flp::FlpFile::parse(&std::fs::read(&lemon).unwrap()).unwrap();
+        assert_eq!(os_flp::lemon::version(&file), Some(os_flp::lemon::VERSION));
+        assert_eq!(os_flp::lemon::saved_by_text(&file), Some(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))));
+        // Save again: in place, no dialog.
+        app.state.tempo = 125.0;
+        app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
+        assert_eq!(fake::shown().1, asked + 2);
+        let mut back = App::new(None);
+        back.open(lemon.clone());
+        assert_eq!((back.state.tempo, back.state.path.as_deref()), (125.0, Some(lemon.as_path())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -14215,7 +14275,7 @@ mod tests {
         app.state.project = test_project();
         // Something to export, so Ctrl+R gets as far as its file dialog.
         app.state.project.patterns[0].notes.push(Note::step(0, 0));
-        let song = dir.join("Song.flp");
+        let song = dir.join("Song.lemon");
         app.save_to(song.clone());
         let before = std::fs::read(&song).unwrap();
         let key = |app: &mut App, k: &str, shift: bool| {
@@ -14229,7 +14289,7 @@ mod tests {
         assert_eq!(fake::shown(), (0, 1), "Save as asks where");
         assert_eq!(std::fs::read(&song).unwrap(), before, "cancelled: the open file is not written");
         assert!(app.unsaved());
-        let other = dir.join("Other.flp");
+        let other = dir.join("Other.lemon");
         fake::answer(Some(other.clone()));
         key(&mut app, "S", true);
         assert_eq!(app.state.path.as_deref(), Some(other.as_path()));
@@ -14248,14 +14308,14 @@ mod tests {
         escape(&mut app);
         assert_eq!(fake::shown(), (0, 2), "no open or file dialog");
         assert!(app.export.is_none());
-        assert!(!dir.join("Other_2.flp").exists(), "no new version");
+        assert!(!dir.join("Other_2.lemon").exists(), "no new version");
 
         app.state.tempo = 100.0;
         key(&mut app, "s", false);
         assert_eq!(fake::shown(), (0, 2), "Ctrl+S does not ask");
         assert!(!app.unsaved(), "Ctrl+S saved in place");
         key(&mut app, "n", false);
-        assert!(dir.join("Other_2.flp").exists(), "Ctrl+N still saves a new version");
+        assert!(dir.join("Other_2.lemon").exists(), "Ctrl+N still saves a new version");
         key(&mut app, "o", false);
         assert_eq!(fake::shown(), (1, 2), "Ctrl+O still asks for a file");
         key(&mut app, "r", false);
@@ -18983,8 +19043,8 @@ mod tests {
         click(&mut app, &mut c, undo);
         assert_eq!(app.state.message.as_deref(), Some("Nothing to undo"));
         // Save: Save as... (the save dialog even with a file), Save new version on the right.
-        let path = std::env::temp_dir().join(format!("os_toolbar_save_{}_song.flp", std::process::id()));
-        let next = path.with_file_name(format!("os_toolbar_save_{}_song_2.flp", std::process::id()));
+        let path = std::env::temp_dir().join(format!("os_toolbar_save_{}_song.lemon", std::process::id()));
+        let next = path.with_file_name(format!("os_toolbar_save_{}_song_2.lemon", std::process::id()));
         let _ = std::fs::remove_file(&next);
         app.save_to(path.clone());
         let save = hit_rect(&app, &Action::Util(Util::Save));

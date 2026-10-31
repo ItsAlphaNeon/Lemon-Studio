@@ -57,9 +57,10 @@ pub fn stamp(t: NaiveDateTime) -> String {
     format!("{}-{}-{} at {}h{:02}", t.month(), t.day(), t.year(), t.hour(), t.minute())
 }
 
-/// A backup's file name: `<name> (<what> on <stamp>).flp`; `what` is "autosaved" or "overwritten".
+/// A backup's file name: `<name> (<what> on <stamp>).lemon`; `what` is "autosaved" or "overwritten" (FL's names,
+/// Lemon Studio's file: spec flp/lemon-format.md "Backups").
 pub fn file_name(name: &str, what: &str, t: NaiveDateTime) -> String {
-    format!("{name} ({what} on {}).flp", stamp(t))
+    format!("{name} ({what} on {}).{}", stamp(t), crate::project_files::EXT)
 }
 
 /// The name backups give the project: its file's, or `untitled` for a project never saved.
@@ -75,7 +76,9 @@ fn autosaved_at(file: &str, name: &str) -> Option<(u32, u32, u32, u32, u32)> {
 /// When backup `file` of `name` was written, if it is one of kind `what` ("autosaved" or "overwritten"): (year,
 /// month, day, hour, minute).
 pub(crate) fn saved_at(file: &str, name: &str, what: &str) -> Option<(u32, u32, u32, u32, u32)> {
-    let rest = file.strip_prefix(name)?.strip_prefix(" (")?.strip_prefix(what)?.strip_prefix(" on ")?.strip_suffix(").flp")?;
+    // Older backups are FLPs.
+    let rest = file.strip_prefix(name)?.strip_prefix(" (")?.strip_prefix(what)?.strip_prefix(" on ")?;
+    let rest = rest.strip_suffix(").lemon").or_else(|| rest.strip_suffix(").flp"))?;
     let (date, time) = rest.split_once(" at ")?;
     let mut d = date.split('-').map(str::parse::<u32>);
     let (Some(Ok(m)), Some(Ok(day)), Some(Ok(y)), None) = (d.next(), d.next(), d.next(), d.next()) else { return None };
@@ -193,11 +196,12 @@ mod tests {
 
     #[test]
     fn names_follow_fl() {
-        assert_eq!(file_name("gs7", "autosaved", at(10, 15, 0, 13)), "gs7 (autosaved on 10-15-2026 at 0h13).flp");
-        assert_eq!(file_name("untitled", "overwritten", at(3, 4, 18, 5)), "untitled (overwritten on 3-4-2026 at 18h05).flp");
+        assert_eq!(file_name("gs7", "autosaved", at(10, 15, 0, 13)), "gs7 (autosaved on 10-15-2026 at 0h13).lemon");
+        assert_eq!(file_name("untitled", "overwritten", at(3, 4, 18, 5)), "untitled (overwritten on 3-4-2026 at 18h05).lemon");
         assert_eq!(project_name(None), "untitled");
         assert_eq!(project_name(Some(Path::new("/music/My song.flp"))), "My song");
-        assert_eq!(autosaved_at("gs7 (autosaved on 10-15-2026 at 0h13).flp", "gs7"), Some((2026, 10, 15, 0, 13)));
+        assert_eq!(autosaved_at("gs7 (autosaved on 10-15-2026 at 0h13).lemon", "gs7"), Some((2026, 10, 15, 0, 13)));
+        assert_eq!(autosaved_at("gs7 (autosaved on 10-15-2026 at 0h13).flp", "gs7"), Some((2026, 10, 15, 0, 13)), "an older backup");
         for other in ["gs7 (overwritten on 10-15-2026 at 0h13).flp", "gs70 (autosaved on 10-15-2026 at 0h13).flp", "gs7.flp"] {
             assert_eq!(autosaved_at(other, "gs7"), None, "{other}");
         }
