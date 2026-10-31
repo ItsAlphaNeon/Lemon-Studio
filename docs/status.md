@@ -479,9 +479,17 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Tesla's Tools > Convert to score and dump to piano roll puts the held notes of the selection into the selected
   channel's piano roll (current pattern), at the project's tempo
 - Tesla's envelope points can be smooth (Alt+click one, or Tools > Turn all points smooth); the amp envelopes are
-  heard while Tesla plays, before a mixdown; Scratch (envelope) plays the selection at the all-purpose envelope's
-  speed, and Edit > Paste mix (envelope) (Shift+Ctrl+V) mixes the clipboard in by it
-- Not yet: Vocal denoise / isolator, Deverb
+  heard while Tesla plays, before a mixdown; Scratch (envelope) plays the selection at the position the all-purpose
+  envelope draws (bottom the start, top the end), and Edit > Paste mix (envelope) (Shift+Ctrl+V) mixes the clipboard
+  in by it
+- Tesla's volume envelope runs from silence to 200% (+6 dB) and its stereo separation envelope from double width at
+  the bottom to mono at the top, as the original's manual gives them
+- Tesla's Tools > Vocal denoise / isolator... keeps the voice (centred, harmonic, in the voice band, over the steady
+  noise) and takes out the rest, or the other way round, by one MIX knob; Deverb... takes the late reverb out of the
+  selection (General or Vocal) at a reverb time it measures there; both preview, with undo
+- Tesla's Edit > Undo mix (envelope) ▸ mixes an earlier state of the sample back in by the all-purpose envelope (the
+  top undoes, the bottom keeps the change)
+- Not yet: Edit > Undo mix (spectral)
 
 ## ✅ Exporting audio
 
