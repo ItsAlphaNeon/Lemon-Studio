@@ -808,7 +808,7 @@ mod tests {
         assert_eq!(i64::from(midi_value(n as f64 / 1_073_741_824.0)), n);
         assert_eq!(shown_name("^b^aCutoff"), "Cutoff");
         // A note's own pan and mod X / Y are its voice's own levels (spec: "Voices").
-        let own = NoteLevels { pan: -0.5, mod_x: 0.25, mod_y: -1.0 };
+        let own = NoteLevels { pan: -0.5, mod_x: 0.25, mod_y: -1.0, channel: 0 };
         let l = note_levels(64, 100.0 / 128.0, own);
         assert_eq!((l.pan, l.fcut, l.fres, l.pitch), (-0.5, 0.25, -1.0, 400.0));
         assert!((l.vol - 1.0).abs() < 1e-6, "velocity 100 gives 1: {}", l.vol);

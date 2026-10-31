@@ -657,6 +657,8 @@ pub struct Plugin {
     /// The voices the engine named (`Instrument::voice_start`): its name, the note id they were sent with, the key.
     named: Vec<(u32, i32, u8)>,
     next_note_id: i32,
+    /// The MIDI channel each key's last note started on (`NoteLevels::channel`): its end, choke and tuning go on it.
+    key_ch: [u8; 128],
     steady: i64,
     /// The song position for the next process call (the engine gives it while playing), and the current chunk's.
     song: Option<os_engine::TransportInfo>,
@@ -900,6 +902,7 @@ impl Plugin {
                 voice_gains: false,
                 named: Vec::new(),
                 next_note_id: 0,
+                key_ch: [0; 128],
                 steady: 0,
                 song: None,
                 chunk_song: None,
@@ -1433,6 +1436,11 @@ impl Plugin {
             seq.push(Seq::Mod(self.mods.len() - 1));
         }
         for e in self.queue.drain(..) {
+            // A note starts on its MIDI channel (MIDI channel through); what follows on its key goes on the same one.
+            if e.time < n && e.kind == Kind::On {
+                self.key_ch[usize::from(e.key & 127)] = e.levels.channel & 15;
+            }
+            let ch = i16::from(self.key_ch[usize::from(e.key & 127)]);
             if e.time < n && e.kind == Kind::Tune {
                 // Portamento glides (spec: audio/channel-voices.md): CLAP tuning expression, semitones.
                 self.exprs.push(clap_event_note_expression {
@@ -1446,7 +1454,7 @@ impl Plugin {
                     expression_id: CLAP_NOTE_EXPRESSION_TUNING,
                     note_id: -1,
                     port_index: 0,
-                    channel: 0,
+                    channel: ch,
                     key: i16::from(e.key),
                     value: f64::from(e.velocity),
                 });
@@ -1510,7 +1518,7 @@ impl Plugin {
                     },
                     note_id: id,
                     port_index: 0,
-                    channel: 0,
+                    channel: ch,
                     key: i16::from(e.key),
                     velocity: f64::from(e.velocity),
                 });
@@ -2287,6 +2295,25 @@ mod tests {
         os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap()
     }
 
+    /// MIDI channel through (spec: ui/channel-rack.md §18): a note on goes on its MIDI channel, and its key's note off
+    /// on the same one.
+    #[test]
+    fn notes_go_on_their_midi_channel() {
+        use os_engine::HostedEffect as _;
+        let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ.clap")) }.expect("linked EQ");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 48000));
+        let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        p.note_start(0, 60, 0.8, 0.0, os_engine::NoteLevels { channel: 3, ..Default::default() });
+        p.note_on(0, 62, 0.8);
+        p.process_fx(48000, &mut l, &mut r);
+        assert_eq!(p.notes.iter().map(|n| (n.key, n.channel)).collect::<Vec<_>>(), [(60, 3), (62, 0)]);
+        p.note_off(0, 60);
+        p.process_fx(48000, &mut l, &mut r);
+        assert_eq!(p.notes.iter().map(|n| (n.key, n.channel)).collect::<Vec<_>>(), [(60, 3)]);
+    }
+
     /// A note's own levels (`use_note_levels`): the pan as a pan note expression with the note's id right after its
     /// note on, the mods (plus the channel's) as per-note modulation of the mod parameters; when the channel's mods
     /// change, the sounding voice is sent its new amount. Without `use_note_levels` nothing of it is sent.
@@ -2298,7 +2325,7 @@ mod tests {
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         assert!(os_host::Plugin::activate(&mut p, 48000));
         let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
-        let own = os_engine::NoteLevels { pan: 0.5, mod_x: 0.25, mod_y: -0.5 };
+        let own = os_engine::NoteLevels { pan: 0.5, mod_x: 0.25, mod_y: -0.5, channel: 0 };
         // Off: a plain note.
         p.note_start(3, 60, 0.8, 0.0, own);
         p.process_fx(48000, &mut l, &mut r);

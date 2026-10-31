@@ -23,6 +23,10 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   controls
 - A channel's Receive notes from ▸ locks it to the computer keyboard or the Touch controller: their notes play it
   whichever channel is selected (a padlock on its name button; Unlock ends the lock)
+- A channel's menu: Change icon... puts an icon on its name button (the same icon as its plugin window and clips, for
+  the session); Show waveform preview draws a sampler or audio clip channel's sample across its name button; MIDI
+  channel through (ticked by default) gives a hosted VST, VST 3 or CLAP instrument a MIDI device's notes on the MIDI
+  channel they came on, and a recorded note takes that channel as its colour. The two checks last for the session
 - Advanced looping (the loop button's third loop type): each row's loop box takes a loop point, Step, Beat or Bar,
   and the row loops at the end of its last used step rounded up to it
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)

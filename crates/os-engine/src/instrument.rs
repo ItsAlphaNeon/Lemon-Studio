@@ -228,18 +228,22 @@ impl ChannelVoicing {
 }
 
 /// A note's own levels besides its velocity and pitch (spec: audio/voice-levels.md "The note's own levels"): pan
-/// -1..1 (`(pan byte - 64) / 64`), mod X / mod Y -1..0.992 (`(byte - 128) / 128`). Default: centred, no offsets.
+/// -1..1 (`(pan byte - 64) / 64`), mod X / mod Y -1..0.992 (`(byte - 128) / 128`), and the MIDI channel it is played on.
+/// Default: centred, no offsets, MIDI channel 1.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct NoteLevels {
     pub pan: f32,
     pub mod_x: f32,
     pub mod_y: f32,
+    /// The MIDI channel, 0..15 (0 = channel 1): a MIDI device's own for a live note on a channel with MIDI channel
+    /// through ticked (spec: ui/channel-rack.md §18), else 0. A hosted plugin gets the note, and its end, on it.
+    pub channel: u8,
 }
 
 impl NoteLevels {
     /// The levels of a note's pan, mod X and mod Y bytes.
     pub fn of_bytes(pan: u8, mod_x: u8, mod_y: u8) -> NoteLevels {
-        NoteLevels { pan: (f32::from(pan) - 64.0) / 64.0, mod_x: (f32::from(mod_x) - 128.0) / 128.0, mod_y: (f32::from(mod_y) - 128.0) / 128.0 }
+        NoteLevels { pan: (f32::from(pan) - 64.0) / 64.0, mod_x: (f32::from(mod_x) - 128.0) / 128.0, mod_y: (f32::from(mod_y) - 128.0) / 128.0, channel: 0 }
     }
 }
 

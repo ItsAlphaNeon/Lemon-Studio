@@ -84,11 +84,11 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   the plugin window's Link all parameters..., Change icon..., Save channel state as... and Browse channel states, work
   as Lemon Studio's design (Change icon is kept for the session only)
   ([playlist.rs](../crates/os-app/src/playlist.rs), [channel_states.rs](../crates/os-app/src/channel_states.rs))
-- [ ] **Channel rack right-click menus.** 15 of the rack's own entries greyed out on 2026-10-30, counted entry by
-  entry after 20 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
-  plugins on 2026-10-30): Loop starter and its 3 playlist-track options, Restretch all, Detached, Change icon, Show
-  waveform preview, Patcherize, Assign to new instrument track, Auto fill, MIDI channel through, Create instrument,
-  Burn MIDI to ▸ (2). The knob, mixer box and LED menus' Automation and Remote control groups add 23 more (events in a new
+- [ ] **Channel rack right-click menus.** 12 of the rack's own entries greyed out on 2026-10-30, counted entry by
+  entry after 23 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
+  plugins, Change icon ▸, Show waveform preview and MIDI channel through on 2026-10-30): Loop starter and its 3
+  playlist-track options, Restretch all, Detached, Patcherize, Assign to new instrument track, Auto fill (the manual
+  does not describe it), Create instrument, Burn MIDI to ▸ (2) (no plugin hands its notes back to the host yet). The knob, mixer box and LED menus' Automation and Remote control groups add 23 more (events in a new
   window or the piano roll, initial values, automation clips, controller links) ([rack.rs](../crates/os-app/src/rack.rs))
 - [ ] **Main menu bar.** 7 of its 136 entries greyed out on 2026-10-30, counted entry by entry after Save audio
   clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics, TOOLS > Set up for live performance
