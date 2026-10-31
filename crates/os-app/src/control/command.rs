@@ -919,6 +919,7 @@ impl Command {
                 m.slots[k] = Some(crate::plugins::new_slot(&plugin));
                 m.slot_on[k] = true;
                 m.slot_mix[k] = 1.0;
+                m.slot_cpu[k] = os_model::PluginCpu::default();
                 s.mixer.slot_names.remove(&(t, k as u8));
                 s.control.settle(&mut s.project);
                 let id = s.project.mixer[place].slots[k].as_ref().map_or(Id::NONE, |x| x.id);
@@ -935,6 +936,7 @@ impl Command {
                 m.slots[k] = None;
                 m.slot_on[k] = true;
                 m.slot_mix[k] = 1.0;
+                m.slot_cpu[k] = os_model::PluginCpu::default();
                 none
             }
             Command::SetSlot { track, slot, enabled, mix } => {
