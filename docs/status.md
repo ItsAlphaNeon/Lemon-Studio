@@ -87,7 +87,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   (Scene) or 126 (+Scene) is held (columns). A playing clip's zone clip is outlined and fills as it plays, and the
   track header can show the pass's progress (the ▸ menu's Performance clip / track progress); the clock's bars are
   negative in the zone. Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant,
-  Position sync) are saved as FL saves them. Not yet: the typing keyboard, sub-clips, recording a performance
+  Position sync) are saved as FL saves them. With Record armed, stopping the song writes what the launched tracks
+  played after the Start marker as clips on their tracks (one undo step). Not yet: the typing keyboard, sub-clips
 
 ## ✅ Mixing and routing
 

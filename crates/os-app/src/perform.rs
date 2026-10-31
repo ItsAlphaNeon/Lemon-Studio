@@ -535,6 +535,48 @@ fn release_track(s: &mut State, track: u16, now: Option<u32>) {
     }
 }
 
+/// Recording a performance (§3b, Lemon Studio's design): with Record armed, when the song stops, what each launched track
+/// played after the Start marker up to `stop` becomes ordinary clips on its track, a clip a pass, the last cut where
+/// it fell silent. On such a track the clips starting in the recorded stretch go and one running into it ends where it
+/// starts. One undo step ("Recorded items"); what was launched is over. Returns the clips made.
+pub fn record(s: &mut State, stop: u32) -> usize {
+    let Some(z) = zone(s).filter(|_| on(s)) else { return 0 };
+    let takes: Vec<(u16, Vec<Clip>)> = s
+        .playlist
+        .perform
+        .live
+        .iter()
+        .filter(|(_, l)| !l.armed)
+        .map(|(&t, l)| (t, cut_at(s, l, stop).into_iter().filter(|c| c.position >= z && c.length > 0).collect::<Vec<_>>()))
+        .filter(|(_, v)| !v.is_empty())
+        .collect();
+    if takes.is_empty() {
+        return 0;
+    }
+    let mut all = clips(s).to_vec();
+    let mut made = 0;
+    for (t, v) in takes {
+        let (from, to) = (v[0].position, v.last().map_or(0, Clip::end));
+        all.retain(|c| c.track != t || c.position < from || c.position >= to);
+        for c in all.iter_mut().filter(|c| c.track == t && c.position >= z && c.position < from && c.end() > from) {
+            let keep = from - c.position;
+            let (w0, _) = window(s, c);
+            c.window = Some((w0, w0 + to_src(s, c.source, f64::from(keep))));
+            c.length = keep;
+        }
+        made += v.len();
+        all.extend(v.into_iter().map(|mut c| {
+            c.set_group(0);
+            c
+        }));
+    }
+    crate::playlist::snapshot_as(s, crate::record::RECORDED);
+    arr_mut(s).clips = all;
+    s.playlist.perform.live.retain(|_, l| l.armed);
+    s.piano.dirty = true;
+    made
+}
+
 /// Playback starts (§3): clips triggered while stopped start with it; what played before is over.
 pub fn starting(s: &mut State) {
     let p = &mut s.playlist.perform;
@@ -850,6 +892,27 @@ mod tests {
         assert_eq!(s.playlist.perform.live[&0].passes.iter().find(|c| c.position >= z + 30).map(|c| c.position), Some(z + 30), "(none): at once");
         midi_note(s, 127, false, None);
         assert!(!s.playlist.perform.snap);
+    }
+
+    /// §3b: with Record armed, a stop writes what the launched tracks played as clips after the Start marker.
+    #[test]
+    fn recording_a_performance() {
+        let mut app = app();
+        let s = &mut app.state;
+        let z = 3072;
+        trigger(s, 0, Some(z + 128), true, false);
+        assert_eq!(record(s, z + 128 + 900), 3);
+        let on0: Vec<(u32, u32)> = clips(s).iter().filter(|c| c.track == 0 && c.position >= z).map(|c| (c.position, c.length)).collect();
+        assert_eq!(on0, vec![(z, 128), (z + 128, 384), (z + 512, 384), (z + 896, 132)], "the clip there ends where the recording starts");
+        assert_eq!(clips(s).iter().filter(|c| c.track == 1).count(), 1, "track 2 is left alone");
+        assert!(s.playlist.perform.live.is_empty());
+        assert_eq!(s.history.newest_done(), Some(crate::record::RECORDED));
+        assert_eq!(record(s, z + 2000), 0, "nothing launched");
+        // A stretch over a clip that starts in it: the clip goes.
+        trigger(s, 0, Some(z), true, false);
+        assert_eq!(record(s, z + 384), 1);
+        let on0: Vec<(u32, u32)> = clips(s).iter().filter(|c| c.track == 0 && c.position >= z).map(|c| (c.position, c.length)).collect();
+        assert_eq!(on0, vec![(z + 512, 384), (z + 896, 132), (z, 384)]);
     }
 
     #[test]

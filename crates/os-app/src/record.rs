@@ -790,6 +790,18 @@ impl App {
         if live {
             self.state.rec.last = Some(now);
         }
+        // Performance mode (spec: ui/performance-mode.md §3b): a stop with Record armed (since playback started) writes
+        // what the launched tracks played.
+        let r = &self.state.rec;
+        if r.was_live && !live && r.armed && r.since.is_some() && self.transport.song()
+            && let Some(stop) = r.last
+        {
+            let n = crate::perform::record(&mut self.state, stop.max(0.0) as u32);
+            if n > 0 {
+                self.state.message = Some(format!("Performance recorded: {n} clip{}", if n == 1 { "" } else { "s" }));
+                self.invalidate();
+            }
+        }
         let r = &self.state.rec;
         let changed = r.take.as_ref().is_some_and(|t| t.pattern != self.state.pattern);
         if (r.was_live && !live) || changed {
