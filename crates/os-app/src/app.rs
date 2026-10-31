@@ -1913,7 +1913,7 @@ impl App {
             self.invalidate();
             return;
         }
-        let tool = |w: &Win| matches!(w, Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg | Win::Events);
+        let tool = |w: &Win| crate::floating::is_tool(*w);
         if let Some(&w) = self.state.z.last().filter(|w| !self.state.no_focus && tool(w)) {
             self.act(Action::CloseWin(w));
             self.invalidate();
@@ -3010,7 +3010,7 @@ impl App {
             .iter()
             .skip_while(|&&w| w != Win::Playlist)
             .skip(1)
-            .filter(|w| matches!(w, Win::Mixer | Win::PianoRoll | Win::ChannelRack | Win::Plugin | Win::Perf | Win::Tapper | Win::Touch | Win::Strum | Win::Arp | Win::PianoDlg | Win::Events))
+            .filter(|&&w| matches!(w, Win::Mixer | Win::PianoRoll) || crate::floating::placed(w).is_some())
             .map(|&w| Cover { bounds: self.win_bounds(w).outset(1.0), win: Some(w), solid: self.win_solid(w) })
             .collect();
         if !s.toolbar.hidden {
@@ -3032,15 +3032,9 @@ impl App {
     fn win_solid(&self, w: Win) -> Option<Rect> {
         let s = &self.state;
         let r = match w {
-            Win::ChannelRack => Some(views::rack::rect(s)),
-            Win::Plugin => s.project.channels.get(s.plugin_channel).map(|_| views::channel_win::rect(s)),
-            Win::Perf => Some(views::perf::rect(s)),
-            Win::Tapper => Some(views::tapper::rect(s)),
-            Win::Touch => Some(views::touch::rect(s)),
-            Win::Strum => Some(views::strum::rect(s)),
-            Win::Arp => Some(views::arpeggiate::rect(s)),
-            Win::PianoDlg => Some(views::piano_dlg::rect(s)),
-            Win::Events => Some(views::events::rect(s)),
+            // The channel window without a channel draws no frame.
+            Win::Plugin if s.project.channels.get(s.plugin_channel).is_none() => None,
+            w if crate::floating::placed(w).is_some() => crate::floating::placed(w).map(|p| (p.rect)(s)),
             w => {
                 let ws = &s.wins[w.slot()?];
                 let r = s.win_rect(w);
@@ -3693,16 +3687,11 @@ impl App {
             return self.invalidate();
         }
         match w {
-            Win::ChannelRack => self.damage_rect(views::rack::bounds(&self.state)),
-            Win::Perf => self.damage_rect(views::perf::bounds(&self.state)),
-            Win::Tapper => self.damage_rect(views::tapper::bounds(&self.state)),
-            Win::Touch => self.damage_rect(views::touch::bounds(&self.state)),
-            Win::Strum => self.damage_rect(views::strum::bounds(&self.state)),
-            Win::Arp => self.damage_rect(views::arpeggiate::bounds(&self.state)),
-            Win::PianoDlg => self.damage_rect(views::piano_dlg::bounds(&self.state)),
-            Win::Events => self.damage_rect(views::events::bounds(&self.state)),
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
-            _ => self.invalidate(),
+            w => match crate::floating::placed(w) {
+                Some(p) => self.damage_rect((p.bounds)(&self.state)),
+                None => self.invalidate(),
+            },
         }
     }
 
@@ -5914,18 +5903,7 @@ impl App {
 
     /// Area a floating window paints (for damage).
     fn win_bounds(&self, w: Win) -> Rect {
-        match w {
-            Win::Plugin => views::channel_win::bounds(&self.state),
-            Win::Perf => views::perf::bounds(&self.state),
-            Win::Tapper => views::tapper::bounds(&self.state),
-            Win::Touch => views::touch::bounds(&self.state),
-            Win::Strum => views::strum::bounds(&self.state),
-            Win::Arp => views::arpeggiate::bounds(&self.state),
-            Win::PianoDlg => views::piano_dlg::bounds(&self.state),
-            Win::Events => views::events::bounds(&self.state),
-            Win::ChannelRack => views::rack::bounds(&self.state),
-            w => self.state.win_rect(w).outset(5.0),
-        }
+        crate::floating::placed(w).map_or_else(|| self.state.win_rect(w).outset(5.0), |p| (p.bounds)(&self.state))
     }
 
     /// Cursor for the current hover / drag.
@@ -8204,20 +8182,13 @@ impl App {
                 if s.is_max(win) {
                     return;
                 }
-                let pos = match win {
-                    Win::Plugin => {
-                        s.plugin_moved = true;
-                        s.plugin_pos
-                    }
-                    Win::Perf => s.perf.pos,
-                    Win::Tapper => s.tapper.pos,
-                    Win::Touch => s.touch.pos,
-                    Win::Strum => s.strum.pos,
-                    Win::Arp => s.arp.pos,
-                    Win::PianoDlg => s.piano_dlg.pos[s.piano_dlg.tool.index()],
-                    Win::Events => s.events.pos,
-                    Win::ChannelRack => s.rack_pos,
-                    w => {
+                if win == Win::Plugin {
+                    s.plugin_moved = true;
+                }
+                let pos = match crate::floating::placed(win) {
+                    Some(p) => (p.pos)(s),
+                    None => {
+                        let w = win;
                         // Start from the rect as shown (kept on screen), then move it.
                         let r = s.float_rect(w);
                         if let Some(i) = w.slot() {
