@@ -218,6 +218,12 @@ impl<P: Plugin> Plugin for Guarded<P> {
     fn close_editor(&mut self) {
         self.run((), |p| p.close_editor())
     }
+    fn can_resize_editor(&self) -> bool {
+        self.look(false, |p| p.can_resize_editor())
+    }
+    fn resize_editor(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        self.run(None, |p| p.resize_editor(w, h))
+    }
     fn save_state(&self) -> Option<Vec<u8>> {
         let saved = self.look(None, |p| p.save_state());
         match &saved {

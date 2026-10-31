@@ -209,6 +209,16 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     /// The editor's current size in pixels (when open). The host polls it: a plugin that resizes itself is followed.
     fn editor_size(&self) -> Option<(u32, u32)>;
     fn close_editor(&mut self);
+    /// The open editor lets the host resize it (the user drags the window's border).
+    fn can_resize_editor(&self) -> bool {
+        false
+    }
+    /// Asks the open editor to take `w` x `h` pixels; returns the size it took (it may round or clamp the request), or
+    /// `None` when it cannot be resized or refused.
+    fn resize_editor(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        let _ = (w, h);
+        None
+    }
 
     /// The plugin's whole state as bytes, in the format's own layout (UI thread). Round-trips through `load_state`
     /// of the same plugin; what a project file stores for the instance.
