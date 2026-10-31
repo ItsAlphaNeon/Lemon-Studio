@@ -28,6 +28,7 @@ use crate::instrument::{Instrument, SharedInstrument, Slot, TransportInfo};
 use crate::laws;
 use crate::sample::{Sample, SampleLibrary};
 
+pub mod auto_bypass;
 mod controllers;
 mod layers;
 mod marks;
@@ -712,6 +713,8 @@ struct MixTrack {
     /// Slot switches and stored mix levels (0..12800) by slot, for hosted effects attached later.
     slot_on: [bool; 10],
     slot_mix: [i32; 10],
+    /// Auto-bypass when silent, by slot (`auto_bypass`), for hosted effects attached later.
+    slot_smart: [bool; 10],
     /// Largest |sample| per side after the fader since the meters last read them.
     peak: [f32; 2],
     /// The fader matrix's target gains `[[L←L, L←R], [R←L, R←R]]`, and the gains as they glide towards them.
@@ -792,6 +795,11 @@ struct FxSlot {
     slot: usize,
     on: bool,
     mix: i32,
+    /// Auto-bypass when silent, and how long the slot has heard and put out silence (`auto_bypass`).
+    smart: bool,
+    quiet: auto_bypass::Quiet,
+    /// The last tick passed the effect by.
+    skipped: bool,
     dry: Glide,
     /// Switched on during the song: the effect is emptied before it runs again.
     fresh: bool,
@@ -813,7 +821,7 @@ struct FxSlot {
 }
 
 impl FxSlot {
-    fn new(slot: usize, on: bool, mix: i32, fx: Fx) -> FxSlot {
+    fn new(slot: usize, on: bool, mix: i32, smart: bool, fx: Fx) -> FxSlot {
         let delay = match &fx {
             Fx::Own(e) => e.latency() as u32,
             Fx::Hosted(_) => 0,
@@ -822,6 +830,9 @@ impl FxSlot {
             slot,
             on,
             mix,
+            smart,
+            quiet: auto_bypass::Quiet::default(),
+            skipped: false,
             dry: Glide::new(os_dsp::mixer::dry_level(mix)),
             fresh: false,
             fx,
@@ -871,6 +882,7 @@ impl MixTrack {
             effects: Vec::new(),
             slot_on: [true; 10],
             slot_mix: [12800; 10],
+            slot_smart: [false; 10],
             peak: [0.0; 2],
             matrix: unity,
             gains: unity.map(|r| r.map(Glide::new)),
@@ -1367,7 +1379,7 @@ impl Engine {
                         match crate::effects::from_slot(&slot.name, &slot.state, rate) {
                             Some(mut fx) => {
                                 fx.set_tempo(tempo);
-                                effects.push(FxSlot::new(k, m.slot_on[k], mix_level(m.slot_mix[k]), Fx::Own(fx)));
+                                effects.push(FxSlot::new(k, m.slot_on[k], mix_level(m.slot_mix[k]), m.slot_cpu[k].smart_disable, Fx::Own(fx)));
                                 report.effects_active += 1;
                             }
                             None => report.effects_bypassed += 1,
@@ -1401,6 +1413,7 @@ impl Engine {
                         effects,
                         slot_on: m.slot_on,
                         slot_mix: m.slot_mix.map(mix_level),
+                        slot_smart: m.slot_cpu.map(|c| c.smart_disable),
                         routes,
                         latency: (m.latency_out, m.latency_in),
                         input: if m.monitored() { m.audio_in } else { -1 },
@@ -1756,7 +1769,7 @@ impl Engine {
             let mine = |g: Target| matches!(g, Target::SlotParam(a, b, _) if usize::from(a) == track && usize::from(b) == slot);
             param_points(&mut self.controls, mine, |k| h.param_range_fx(k));
         }
-        t.effects.insert(at, FxSlot::new(slot, t.slot_on[slot], t.slot_mix[slot], Fx::Hosted(fx)));
+        t.effects.insert(at, FxSlot::new(slot, t.slot_on[slot], t.slot_mix[slot], t.slot_smart[slot], Fx::Hosted(fx)));
         self.pdc.due = true;
     }
 
@@ -1837,6 +1850,12 @@ impl Engine {
     /// starts with the program's pool (`parallel::global`), used while its switches are on (spec: audio/multicore.md).
     pub fn set_threads(&mut self, pool: Option<std::sync::Arc<crate::parallel::Pool>>) {
         self.multicore.set_pool(pool, false);
+    }
+
+    /// Whether the last tick passed the effect in slot `slot` of mixer track `track` by, silent with Auto-bypass when
+    /// silent on (spec: audio/auto-bypass.md).
+    pub fn slot_bypassed(&self, track: usize, slot: usize) -> bool {
+        self.tracks.get(track).is_some_and(|t| t.effects.iter().any(|e| e.slot == slot && e.skipped))
     }
 
     /// Runs the insert tracks' effect slots (`insert`) and the master's (`master`), or skips them.
@@ -2446,6 +2465,7 @@ impl Engine {
                 if same {
                     for (a, b) in new.effects.iter_mut().zip(&mut o.effects) {
                         a.dry = b.dry;
+                        a.quiet = b.quiet;
                         a.dry_pad = std::mem::take(&mut b.dry_pad);
                         a.key_pad = std::mem::take(&mut b.key_pad);
                         a.main_pad = std::mem::take(&mut b.main_pad);
@@ -3356,6 +3376,7 @@ impl Engine {
             frames,
             master_fx: self.master_fx,
             insert_fx: self.insert_fx,
+            auto_bypass: auto_bypass::enabled(),
             io,
             keys: multicore::Keys::of(&mut self.key_out),
             export: self.exporting,
@@ -3740,7 +3761,7 @@ fn mix_track(lane: Lane, cx: &multicore::MixCx, s: &mut multicore::MixScratch) {
             let key = feed(fx.key).map(|k| (k, &mut *key_buf));
             let main = feed(fx.main).map(|k| (k, &mut *main_buf));
             let extra = (t, &track.routes[..], &mut *out);
-            run_slot(fx, buf, cx.rate, limit, (cx.song, cx.tick), dry, l, r, (&mut *until, cx.wait, cx.export, &mut *missed), &mut *moved, extra, (key, main));
+            fx.skipped = run_slot(fx, buf, cx.rate, limit, (cx.song, cx.tick), dry, l, r, (&mut *until, cx.wait, cx.export, &mut *missed), &mut *moved, extra, (key, main), cx.auto_bypass);
         }
     }
     if let Some((r, at, rec::Arm { point: RecordPoint::PostFx, .. })) = tap {
@@ -4043,7 +4064,8 @@ fn run_slot(
     moved: &mut bool,
     (t, routes, out): (usize, &[Route], &mut multicore::Outbox),
     (key, main): (Option<(&[f32], &mut Vec<f32>)>, Option<(&[f32], &mut Vec<f32>)>),
-) {
+    auto: bool,
+) -> bool {
     let n = buf.len() / 2;
     let ramp = fx.dry.block(os_dsp::mixer::dry_level(fx.mix), n, limit);
     let fill = |(src, padded): (&[f32], &mut Vec<f32>), pad: &mut pdc::Pad| {
@@ -4060,8 +4082,23 @@ fn run_slot(
         &m.1[..]
     });
     if !fx.on {
-        return;
+        return false;
     }
+    // Auto-bypass when silent (spec: audio/auto-bypass.md): a slot that has heard and put out silence for its hold time
+    // passes its silent input on without running the effect, until sound reaches the effect again (its input, the
+    // sidechain or the main bus it takes).
+    let smart = fx.smart && auto;
+    let quiet_in = smart && auto_bypass::silent(buf) && key.is_none_or(auto_bypass::silent) && main.is_none_or(auto_bypass::silent);
+    if smart {
+        let hold = match &fx.fx {
+            Fx::Own(e) => e.quiet_hold(),
+            Fx::Hosted(_) => Some(auto_bypass::HOSTED_HOLD),
+        };
+        if fx.quiet.skip(quiet_in, hold.map(|h| auto_bypass::hold_frames(h, rate, fx.delay))) {
+            return true;
+        }
+    }
+    let mut loud_extra = false;
     let blend = !(ramp.is_flat() && ramp.first() == 0.0);
     let fresh = std::mem::take(&mut fx.fresh);
     // The dry part waits for the effect's delay (spec: audio/delay-compensation.md "A slot's dry part"): every tick,
@@ -4087,6 +4124,7 @@ fn run_slot(
                 None => e.process(buf),
             }
             if let Some((k, signal)) = e.extra() {
+                loud_extra = smart && !auto_bypass::silent(signal);
                 // On a track routed nowhere the extra output joins the track's own audio behind the effect, or the dry
                 // part when the slot's mix level is below 100 %.
                 let dest = output(routes, t, k);
@@ -4107,7 +4145,8 @@ fn run_slot(
             let Some(mut h) = lock_busy(h, until, wait, export) else {
                 *missed += u64::from(!h.is_poisoned());
                 fx.fresh |= fresh;
-                return;
+                fx.quiet.note(false, n);
+                return false;
             };
             if fresh {
                 h.reset_fx();
@@ -4147,6 +4186,10 @@ fn run_slot(
     if blend {
         os_dsp::mixer::slot_blend(buf, dry, ramp);
     }
+    if smart {
+        fx.quiet.note(quiet_in && !loud_extra && auto_bypass::silent(buf), n);
+    }
+    false
 }
 
 /// Input `k` (from 1) of track `t`: the tracks routed into it in track order, whatever the route's level, a number past
@@ -7524,6 +7567,49 @@ mod tests {
         assert!(same(&render_with(&p, false), &plain, 1.0));
         p.mixer[0].slot_mix[0] = 0.0;
         assert!(same(&render_with(&p, false), &plain, 2.0));
+    }
+
+    /// spec: audio/auto-bypass.md: with Auto-bypass when silent on, a slot stops running its effect once its track has
+    /// been silent for the hold (a second for Lemon Studio's own effects) and runs it again with the next note; what is
+    /// heard does not change. With the slot's switch off, or the program's setting off, the effect always runs.
+    #[test]
+    fn a_silent_slot_is_bypassed_until_sound_returns() {
+        let balance = os_model::SlotPlugin {
+            id: os_model::Id::NONE,
+            name: "Fruity Balance".into(),
+            state: crate::effects::balance::Settings { v: [0, 128] }.to_state(),
+        };
+        let run = |smart: bool| -> (Vec<f32>, Vec<bool>) {
+            // A note, about three seconds of silence after its release, and another note.
+            let mut p = insert_project();
+            p.patterns[0].notes.push(long_note(16 * 96, 96, 0));
+            p.mixer[1].slots[0] = Some(balance.clone());
+            p.mixer[1].slot_cpu[0].smart_disable = smart;
+            let mut lib = SampleLibrary::new(None);
+            let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+            let (mut out, mut skipped, mut block) = (Vec::new(), Vec::new(), vec![0.0f32; 1024]);
+            for _ in 0..44100 * 9 / 512 {
+                e.process(&mut block);
+                out.extend_from_slice(&block);
+                skipped.push(e.slot_bypassed(1, 0));
+            }
+            (out, skipped)
+        };
+        let (plain, never) = run(false);
+        assert!(peak(&plain, 0) > 0.01 && !never.contains(&true), "the switch off: always run");
+        let (out, skipped) = run(true);
+        let first = skipped.iter().position(|&s| s).expect("bypassed once the track is silent");
+        // The first note and its release sound for about three seconds: the hold starts when they end.
+        let silent_from = out.chunks(1024).position(|c| auto_bypass::silent(c)).unwrap();
+        // A second is 86 blocks; the silence may start inside the block before.
+        assert!((silent_from + 84..silent_from + 88).contains(&first), "after the hold: {first} vs {silent_from}");
+        assert!(skipped[first..].contains(&false), "the next note runs it again");
+        assert!(out.iter().zip(&plain).all(|(a, b)| (a - b).abs() <= auto_bypass::SILENT), "what is heard does not change");
+
+        auto_bypass::set_enabled(false);
+        let (_, off) = run(true);
+        auto_bypass::set_enabled(true);
+        assert!(!off.contains(&true), "the program's setting off: always run");
     }
 
     /// A hosted effect that puts out its sidechain bus, or with `own` its main input.

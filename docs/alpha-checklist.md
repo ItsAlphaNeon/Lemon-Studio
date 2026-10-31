@@ -72,30 +72,31 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
-- [ ] **Mixer right-click menus.** 20 entries greyed out on 2026-10-30, counted entry by entry after the track menu's
+- [ ] **Mixer right-click menus.** 17 entries greyed out on 2026-10-30, counted entry by entry after the track menu's
   Group section (Separator, Create group..., Auto color group), Select ▸ Group, Dock to ▸ Left / Middle / Right and
-  Allow threaded processing were enabled: track menu Change icon, Assign to / Unassign from Audio track(s), Select ▸
+  Allow threaded processing, the slot menu's Allow threaded processing and Auto-bypass when silent and the options'
+  Switch auto-bypass for all plugins were enabled: track menu Change icon, Assign to / Unassign from Audio track(s), Select ▸
   Channels and playlist tracks, Compensate for master latency (greyed in the original too), Insert from state; Mixer
   options Plugin delay compensation ▸ Automatic, Link all parameters..., View ▸ Waveforms and Extra
-  properties, Detached, Switch smart disable for all plugins; slot menu Patcherize, Patcherize all, Link all
-  parameters..., Allow threaded processing, Smart disable, Change icon..., Scaling ▸ 100%, Help. Not counted: the
+  properties, Detached; slot menu Patcherize, Patcherize all, Link all parameters..., Change icon..., Scaling ▸ 100%,
+  Help. Not counted: the
   layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [ ] **Playlist right-click menus.** 5 entries greyed out on 2026-10-30, counted entry by entry after the plugin
   window's CPU entries (Allow threaded processing, Smart disable) and an effect slot's Change color... and Random color
   were enabled, and Piano roll left an effect slot's window (the original has none there): the picker's Change icon;
   the plugin window's ▸ menu: Link all parameters..., Change icon..., Save channel state as... and Browse channel
   states ([playlist.rs](../crates/os-app/src/playlist.rs))
-- [ ] **Channel rack right-click menus.** 16 of the rack's own entries greyed out on 2026-10-30, counted entry by
-  entry after 19 more were enabled (Receive notes from ▸ Unlock and Computer keyboard on 2026-10-30): Loop starter
-  and its 3 playlist-track options, Restretch all, Detached, Switch smart disable for all plugins, Change icon, Show
+- [ ] **Channel rack right-click menus.** 15 of the rack's own entries greyed out on 2026-10-30, counted entry by
+  entry after 20 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
+  plugins on 2026-10-30): Loop starter and its 3 playlist-track options, Restretch all, Detached, Change icon, Show
   waveform preview, Patcherize, Assign to new instrument track, Auto fill, MIDI channel through, Create instrument,
   Burn MIDI to ▸ (2). The knob, mixer box and LED menus' Automation and Remote control groups add 23 more (events in a new
   window or the piano roll, initial values, automation clips, controller links) ([rack.rs](../crates/os-app/src/rack.rs))
-- [ ] **Main menu bar.** 8 of its 136 entries greyed out on 2026-10-30, counted entry by entry after Save audio
-  clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics and TOOLS > Set up for live
-  performance were enabled: TOOLS > Chord progression tool... and Control builder (no chord generator or control
-  builder yet), Set up for MIDI export (not observed yet), Switch auto-bypass for all plugins and Set keyboard
-  focus of all plugins to ▸ (no such per-plugin settings yet), Lock / Unlock all tracks to / from their clips (tracks
+- [ ] **Main menu bar.** 7 of its 136 entries greyed out on 2026-10-30, counted entry by entry after Save audio
+  clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics, TOOLS > Set up for live performance
+  and Switch auto-bypass for all plugins were enabled: TOOLS > Chord progression tool... and Control builder (no
+  chord generator or control builder yet), Set up for MIDI export (not observed yet), Set keyboard focus of all
+  plugins to ▸ (no such per-plugin setting yet), Lock / Unlock all tracks to / from their clips (tracks
   don't lock to a clip yet); VIEW > Script output (no scripting) ([menus.rs](../crates/os-app/src/views/menus.rs))
 - [x] **TOOLS ▸ Audio logger and Dump to audio editor.** Enabled (on by default, as in FL Studio) keeps the last 1 to
   10 minutes of what the device plays, the header showing the memory used; Dump puts them into the master track's

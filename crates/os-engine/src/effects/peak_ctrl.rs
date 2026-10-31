@@ -271,6 +271,10 @@ impl PeakController {
 }
 
 impl Effect for PeakController {
+    /// Its links move with silence too (its outputs fall back): never bypassed.
+    fn quiet_hold(&self) -> Option<f32> {
+        None
+    }
     fn process(&mut self, buf: &mut [f32]) {
         self.core.advance(block_peak(buf), 1.0);
         if self.core.s.mute {

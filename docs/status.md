@@ -155,9 +155,14 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The plugin window's menu acts on its own channel (Piano roll, Delete..., Rename, color and icon..., Change color...,
   Random color) or effect slot (Replace ▸, Delete..., Rename, color and icon..., Change color..., Random color); an
   effect's window menu has no Piano roll or Channel column, as in the original
-- Allow threaded processing and Auto-bypass when silent (the original's Smart disable) in a plugin's window menu: per
-  plugin switches, one undo step each, saved in the project the way the original saves them. The engine does not act
-  on them yet
+- Allow threaded processing and Auto-bypass when silent (the original's Smart disable) in a plugin's window menu and a
+  mixer slot's menu: per plugin switches, one undo step each, saved in the project the way the original saves them.
+  With Auto-bypass when silent on (and Audio settings ▸ CPU ▸ Auto-bypass when silent, on by default), a mixer slot
+  stops running its effect once its input and output have been silent for a hold time (a second for the built-in
+  effects, the whole delay line for Delay 3, four seconds for hosted plugins; never for the Peak and Formula
+  Controllers) and runs it again as soon as sound reaches it; what is heard is the same. Switch auto-bypass for all
+  plugins (TOOLS, the mixer's and the rack's options menus) turns it on for every plugin when one is off, and off for
+  all when all are on. Instruments are not bypassed yet (the switch is saved)
 - Import of `.ospreset`, `.vstpreset` and VST2 `.fxp` / `.fxb` files (a bank goes into a folder of its own); a preset
   file dropped onto a plugin window, rack row or mixer slot loads there, and anywhere else adds its plugin
 
@@ -230,8 +235,9 @@ project) to Diagnostics.txt in the user folder and opens it. TOOLS > Save MIDI c
 roll's copied notes to a numbered MIDI file in the user folder's Clipboard files, which the browser then shows; Save
 audio clipboard to browser does the same with the audio on the clipboard (what Tesla copies; Windows and macOS).
 VIEW > Remote control opens the browser's Remote control section, one row per controller link.
-TOOLS > Set up for live performance prepares the arranger for performance mode.
-Not yet (greyed in the menu bar): TOOLS > Chord progression tool..., Control builder, Set up for MIDI export, Switch auto-bypass for all plugins, Lock / Unlock all tracks to / from their clips, Set
+TOOLS > Set up for live performance prepares the arranger for performance mode. TOOLS > Switch auto-bypass for all
+plugins switches every plugin's Auto-bypass when silent.
+Not yet (greyed in the menu bar): TOOLS > Chord progression tool..., Control builder, Set up for MIDI export, Lock / Unlock all tracks to / from their clips, Set
 keyboard focus of all plugins to ▸; VIEW > Script output.
 
 **Window positions.** Where the windows were when Lemon Studio closed comes back at the next start: the main
@@ -572,7 +578,7 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 ## 🚧 Settings
 
 - Every page works: MIDI, Audio, Recording, General, File, Plugins, Theme, Project and Info. The controls that are not greyed out act, but for
-  a few that are only kept for now (Smart disable, Resampling quality and others Lemon Studio has nothing to change
+  a few that are only kept for now (Resampling quality and others Lemon Studio has nothing to change
   with yet); the program's choices are kept in `settings.txt` in the user folder
 - General ▸ Input ▸ Manage shortcuts: the F8 keys (browser, plugin picker, plugin database) and the audio clip
   double-click can be swapped

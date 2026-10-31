@@ -1024,7 +1024,8 @@ pub struct ChannelMisc {
 
 /// A hosted plugin's CPU switches, its window menu's Allow threaded processing (on for a new plugin) and Smart disable
 /// (off), as event 212 stores them (flags 0x40 and 0x20; spec: flp/events/plugins.md §3, ui/plugin-window.md "CPU").
-/// Saved with the plugin; Lemon Studio's engine renders the same either way.
+/// Saved with the plugin. The engine passes a silent mixer slot by when its Smart disable is on (spec:
+/// audio/auto-bypass.md); what is heard is the same either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PluginCpu {
     pub threaded: bool,
