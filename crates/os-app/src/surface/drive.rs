@@ -150,6 +150,20 @@ impl Drive {
         }
     }
 
+    /// A project opened: banks and pages start over, and every light and display is sent again for it. The keyboard
+    /// stays in DAW mode with its layouts: it reports them only on entering that mode, and `surface_paint` waits for the
+    /// report.
+    fn project_changed(&mut self) {
+        self.lights.forget();
+        self.screen.forget();
+        self.shift = false;
+        (self.mixer_bank, self.channel_bank, self.mixer_page, self.arm) = (0, 0, 0, true);
+        (self.plugin_page, self.plugin_shown) = (0, None);
+        self.pads_held.clear();
+        self.held.clear();
+        self.rearm = [true; 9];
+    }
+
     /// Everything dark, the stationary display back to the name, and the keyboard back to its own (standalone) mode.
     fn stop(&mut self) {
         self.lights.all_off();
@@ -460,7 +474,7 @@ impl App {
     /// A project opened: the keyboard starts over (banks, pages, button mode).
     pub(crate) fn surface_reload(&mut self) {
         if let Some(d) = &mut self.surface {
-            d.start();
+            d.project_changed();
         }
     }
 
