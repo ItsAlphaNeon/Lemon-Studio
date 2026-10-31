@@ -181,6 +181,7 @@ impl Citrus {
         let k44 = 44100.0 / f64::from(self.rate);
         Some(Ctx {
             patch: p,
+            offline: self.offline,
             rate: self.rate,
             k44,
             big_b: self.big_b,
