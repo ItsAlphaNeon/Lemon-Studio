@@ -581,6 +581,11 @@ impl Shell {
         if self.app.want_exit {
             el.exit();
         }
+        // Ctrl+C in the terminal, or a kill: closes without asking (`exiting` keeps unsaved changes as a backup).
+        #[cfg(unix)]
+        if stop_signal::asked() {
+            el.exit();
+        }
         // macOS: Quit from the menu bar or the Dock asks about unsaved changes as closing the window does; AppKit waits
         // for the answer. A Quit while a dialog is open is turned down (the dialog is answered first).
         #[cfg(target_os = "macos")]
@@ -789,6 +794,11 @@ impl ApplicationHandler for Shell {
             layout::save_main(m);
         }
         layout::save(&self.app.state);
+        // Stopped by a signal with changes unsaved: nobody was asked, so they go to a backup.
+        #[cfg(unix)]
+        if stop_signal::asked() && self.app.unsaved() {
+            let _ = self.app.write_backup(chrono::Local::now().naive_local());
+        }
         #[cfg(target_os = "macos")]
         {
             if os_host::guard::tripped() {
@@ -1726,6 +1736,37 @@ fn use_x11() -> bool {
     std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) && x11rb::rust_connection::RustConnection::connect(None).is_ok()
 }
 
+/// SIGINT (Ctrl+C in the terminal) and SIGTERM: the program closes as it does with its window, within a tick. A second
+/// one ends it at once, should the first not get through.
+#[cfg(unix)]
+mod stop_signal {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ASKED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn on_signal(_: libc::c_int) {
+        if ASKED.swap(true, Ordering::AcqRel) {
+            // SAFETY: ends the process; safe in a signal handler.
+            unsafe { libc::_exit(130) };
+        }
+    }
+
+    pub fn install() {
+        // SAFETY: installs a handler that only touches an atomic and may call `_exit`.
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
+            libc::sigemptyset(&mut sa.sa_mask);
+            libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+            libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        }
+    }
+
+    pub fn asked() -> bool {
+        ASKED.load(Ordering::Acquire)
+    }
+}
+
 fn wake_ui() {
     if !WAKE_PENDING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         if let Ok(p) = PROXY.lock() {
@@ -1888,6 +1929,8 @@ fn main() {
         ctrl_click: false,
         main_win: layout::main_win(),
     };
+    #[cfg(unix)]
+    stop_signal::install();
     event_loop.run_app(&mut shell).expect("run");
     // After a contained plugin crash the process ends here, before plugin files are unloaded (a stopped plugin's code
     // must not run again).
