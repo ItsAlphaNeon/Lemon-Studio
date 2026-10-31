@@ -138,32 +138,27 @@ pub enum PCmd {
     EditClip(u16),
 }
 
-/// The hosted key of the instance an automation target points at, and the parameter index. A container slot's
-/// parameter is its member's (`None` for a member's level, or a member whose effect is not loaded).
+/// The hosted key of the instance an automation target points at, and the parameter index. A container's parameter
+/// (a slot's or a channel's) is its member's (`None` for a member's level, or a member whose plugin is not loaded).
 pub fn key_of(s: &State, t: Target) -> Option<(usize, usize)> {
+    if let Some((track, slot, k)) = crate::container::target_place(s, t) {
+        let (id, item) = target::member_of(k).filter(|m| m.1 < target::MEMBER_WET)?;
+        return Some((crate::container::member_key(s, crate::container::place_key(track, slot), id)?, usize::from(item)));
+    }
     match t {
         Target::ChannelParam(ch, k) => Some((s.project.channels.iter().position(|c| c.index == ch)?, usize::from(k))),
-        Target::SlotParam(track, slot, k) if is_container(s, track, slot) => {
-            let (id, item) = target::member_of(k).filter(|m| m.1 < target::MEMBER_WET)?;
-            Some((crate::container::member_key(s, fx_key(track, slot), id)?, usize::from(item)))
-        }
         Target::SlotParam(track, slot, k) => Some((fx_key(track, slot), usize::from(k))),
         _ => None,
     }
 }
 
-/// Whether slot `slot` of track `track` holds a container.
-fn is_container(s: &State, track: u16, slot: u8) -> bool {
-    crate::mixer::track(s, track).and_then(|m| m.slots.get(usize::from(slot))?.as_ref()).is_some_and(|p| p.name == crate::container::CONTAINER)
-}
-
-/// The automation target of parameter `index` of hosted instance `key` (spec §3). An effect inside a container's is
-/// the container slot's parameter that names the member and the index (`os_model::target::member_item`).
+/// The automation target of parameter `index` of hosted instance `key` (spec §3). A plugin inside a container's is
+/// the container slot's or channel's parameter that names the member and the index (`os_model::target::member_item`).
 pub fn target_of(s: &State, key: usize, index: usize) -> Option<u32> {
     let k = u16::try_from(index).ok().filter(|&k| k < 0x8000)?;
     if key >= MEMBER_KEY {
         let &(track, slot, id) = s.params.members.get(&key)?;
-        return Some(target::slot_param(track, slot, target::member_item(id, k).filter(|_| k < target::MEMBER_WET)?));
+        return crate::container::item_target(s, track, slot, target::member_item(id, k).filter(|_| k < target::MEMBER_WET)?);
     }
     Some(match fx_of(key) {
         Some((track, slot)) => target::slot_param(track, slot, k),
@@ -185,6 +180,9 @@ pub fn link_target(s: &State, key: usize, index: usize) -> crate::typein::Target
 pub(crate) fn owner_name(s: &State, key: usize) -> String {
     if let Some(&(track, slot, id)) = s.params.members.get(&key) {
         let name = crate::container::members(s, track, slot).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.name);
+        if slot == crate::container::CHANNEL {
+            return format!("{name} in Container - {}", crate::container::place_name(s, track, slot));
+        }
         let plugin = crate::mixer::slot_name(s, track, slot).unwrap_or_else(|| format!("Slot {}", slot + 1));
         return format!("{name} in {} - {}", crate::plugins::slot_label(&plugin), crate::mixer::name(s, track));
     }

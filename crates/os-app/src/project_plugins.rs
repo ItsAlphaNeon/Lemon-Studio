@@ -442,8 +442,9 @@ impl crate::app::App {
             .filter(|&r| !self.state.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && !self.native_failed.contains(&r) && Some(r) != pending)
             .filter_map(|r| {
                 let ch = &self.state.project.channels[r];
-                // Lemon MIDI Out plays MIDI Out channels (`lemon_midi_out`).
-                if crate::lemon_midi_out::is_midi_out(ch) {
+                // Lemon MIDI Out plays MIDI Out channels (`lemon_midi_out`), a container's chain a container's
+                // (`container`).
+                if crate::lemon_midi_out::is_midi_out(ch) || crate::container::is_container_channel(ch) {
                     return None;
                 }
                 let name = ch.plugin.as_deref().filter(|n| ch.kind == ChannelKind::Plugin && !n.is_empty() && *n != WRAPPER)?;

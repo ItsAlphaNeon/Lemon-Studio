@@ -565,6 +565,14 @@ impl Plugins {
 
     /// `create` with a starting state (the plugin's own saved state format).
     pub fn create_with(&mut self, row: usize, index: usize, state: Option<&[u8]>) -> Result<String, String> {
+        let (plugin, name) = self.instantiate(index, state)?;
+        self.hosted.insert(row, Hosted::new(plugin));
+        Ok(name)
+    }
+
+    /// An instance of instrument `index` (of `available`) started from `state`, activated at the device rate, not
+    /// hosted under any key (`create_with` hosts it; a channel's container's member, `crate::container`).
+    pub fn instantiate(&mut self, index: usize, state: Option<&[u8]>) -> Result<(SharedPlugin, String), String> {
         let a = self.available.get(index).ok_or("no such plugin")?.clone();
         self.native_check(&a.desc)?;
         let plugin = a.lib.clone().create(&a.desc.id)?;
@@ -595,8 +603,7 @@ impl Plugins {
             }
         }
         drop(p);
-        self.hosted.insert(row, Hosted::new(plugin));
-        Ok(a.desc.name)
+        Ok((plugin, a.desc.name))
     }
 
     /// The pitch-bend range (semitones) instrument `row` takes glides over when it has no tuning of a note (spec:
@@ -739,8 +746,9 @@ impl Plugins {
     /// The mixer slot instances for the transport: (track, slot, effect).
     pub fn effects(&self) -> Vec<(usize, usize, SharedEffect)> {
         let hosted = self.hosted.range(FX_KEY..MEMBER_KEY).map(|(&k, h)| (k, h.plugin.clone() as SharedEffect));
-        // A container's chain plays its slot (after a hosted instance still under the key, which it replaces).
-        let chains = self.containers.iter().map(|(&k, c)| (k, c.fx.clone() as SharedEffect));
+        // A container's chain plays its slot (after a hosted instance still under the key, which it replaces); a
+        // channel's container is an instrument (`instruments`).
+        let chains = self.containers.range(FX_KEY..).map(|(&k, c)| (k, c.fx.clone() as SharedEffect));
         hosted
             .chain(chains)
             .map(|(k, fx)| {
@@ -1028,7 +1036,9 @@ impl Plugins {
 
     pub fn instruments(&self) -> Vec<(usize, SharedInstrument)> {
         let hosted = self.hosted.range(..FX_KEY).map(|(&r, h)| (r, h.plugin.clone() as SharedInstrument));
-        hosted.chain(self.midi_outs.iter().map(|(&r, m)| (r, m.clone() as SharedInstrument))).collect()
+        // A channel's container plays its channel (`crate::container`).
+        let chains = self.containers.range(..FX_KEY).map(|(&r, c)| (r, c.fx.clone() as SharedInstrument));
+        hosted.chain(self.midi_outs.iter().map(|(&r, m)| (r, m.clone() as SharedInstrument))).chain(chains).collect()
     }
 
     /// Tells instance `key` that its menu `id` closed, with the entry picked: a pick runs now, on this (the UI) thread

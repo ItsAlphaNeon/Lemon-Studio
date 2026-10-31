@@ -111,6 +111,12 @@ pub trait Instrument: Send {
     fn tick_params(&self) -> bool {
         false
     }
+    /// `tick_params` for parameter `index` alone: a channel's container's members each take theirs as their plugin does
+    /// (`crate::chain`).
+    fn tick_params_at(&self, index: u32) -> bool {
+        let _ = index;
+        self.tick_params()
+    }
     /// The plain range (min, max) of parameter `index` as the plugin states it: what a pattern control point on the
     /// parameter is read against (`os_model::target::plugin_point_level`). Default: unknown (such points do nothing).
     fn param_range(&self, index: usize) -> Option<(f64, f64)> {
