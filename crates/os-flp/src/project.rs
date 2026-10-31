@@ -3980,9 +3980,11 @@ fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -
     Ok(b)
 }
 
-/// Builds a new FLP file from the model: project info, tempo, patterns (notes, control points, names, colors)
-/// and channels, in FL's order. FL fills in everything not written (mixer, playlist, per-channel settings), which
-/// this version does not write yet: see [`unsaved_parts`]. Opens in FL 26 (checked 2026-10-09).
+/// Builds a new FLP file from the model: project info, tempo, patterns (notes, control points, names, colors),
+/// channels, the arrangements and the mixer, in FL's order. The mixer is stored after the playlist (spec:
+/// flp/events/mixer.md "Where the mixer sits"), so a project without arrangements gets no mixer: a caller saving a
+/// whole project gives it [`default_arrangement`] first, as the app's save does; [`unsaved_parts`] names what is left
+/// out. Opens in FL 26 (checked 2026-10-09).
 // spec: flp/container.md, flp/events/{project-info,channels,patterns}.md
 pub fn create(project: &Project) -> Result<FlpFile, ProjectError> {
     let enc = TextEnc::Utf16;
@@ -6042,6 +6044,26 @@ mod tests {
         assert!(unsaved_parts(&p, &file).is_empty(), "default mixer: nothing is lost");
         p.mixer[1].volume = Some(0.5);
         assert_eq!(unsaved_parts(&p, &file), vec!["mixer settings"]);
+    }
+
+    /// The mixer is stored after the playlist: a project with an arrangement keeps its mixer through `create` (a
+    /// new project saved from scratch), one without has none in its file and `unsaved_parts` says so.
+    #[test]
+    fn create_stores_the_mixer_after_the_playlist() {
+        use os_model::MixerTrack;
+        let mut p = new_project();
+        p.mixer = (0..4).map(MixerTrack::new).collect();
+        p.mixer[2].name = Some("Bass".into());
+        p.mixer[2].volume = Some(0.5);
+        let bare = create(&p).unwrap();
+        assert!(load(&bare).unwrap().mixer.is_empty());
+        assert_eq!(unsaved_parts(&p, &bare), vec!["mixer settings"]);
+        p.arrangements.push(default_arrangement());
+        let file = create(&p).unwrap();
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back.mixer.len(), 4);
+        assert_eq!((back.mixer[2].name.as_deref(), back.mixer[2].volume), (Some("Bass"), Some(0.5)));
+        assert!(unsaved_parts(&p, &file).is_empty());
     }
 
 

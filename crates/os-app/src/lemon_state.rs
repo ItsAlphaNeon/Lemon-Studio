@@ -6,10 +6,10 @@
 //! design, spec: flp/lemon-format.md "LMex"): the icons chosen with Change icon..., the effect slots' names and colours,
 //! Performance mode's settings, the mixer's Plugin delay compensation ▸ Automatic and View ▸ checks, the plugin windows'
 //! Scaling ▸, the channels' Show waveform preview and MIDI channel through checks, Set keyboard focus of all plugins
-//! to ▸ and the playlist tracks' locks to their clips. Each kind is one event; its payload starts with a layout version
-//! (1), and numbers are little-endian. Save writes them all (empty ones too, so a file saved again holds no stale
-//! state); an FLP target drops them with the rest of `LMex`. Open reads them back from a `.lemon` file only; an FLP's
-//! icons come from its icon numbers instead.
+//! to ▸, the playlist tracks' locks to their clips and the Receive notes from ▸ locks. Each kind is one event; its
+//! payload starts with a layout version (1), and numbers are little-endian. Save writes them all (empty ones too, so a
+//! file saved again holds no stale state); an FLP target drops them with the rest of `LMex`. Open reads them back from
+//! a `.lemon` file only; an FLP's icons come from its icon numbers instead.
 
 use crate::app::State;
 use crate::playlist::{ICONS, IconOwner};
@@ -50,6 +50,7 @@ pub fn events(s: &State, plugins: &Plugins) -> Vec<Event> {
     #[cfg(any(windows, target_os = "macos"))]
     v.push(Event::new(lemon::KEY_FOCUS, Value::var([LAYOUT, u8::from(editor_keys())])));
     v.push(track_locks(s));
+    v.push(note_locks(s));
     v
 }
 
@@ -120,6 +121,16 @@ pub fn apply(s: &mut State, plugins: &mut Plugins, file: &FlpFile) {
             };
             if let Some(tr) = s.project.arrangements.get_mut(usize::from(a)).and_then(|a| a.tracks.get_mut(usize::from(t))) {
                 tr.clip_lock = Some(src);
+            }
+        }
+    }
+    if let Some(d) = read(lemon::NOTE_LOCKS) {
+        let mut r = Reader(&d[1..]);
+        for _ in 0..r.u32().unwrap_or(0) {
+            let (Some(src), Some(row)) = (r.u8(), r.u16()) else { break };
+            let row = usize::from(row);
+            if let Some(lock) = s.rack.note_lock.get_mut(usize::from(src)).filter(|_| row < s.project.channels.len()) {
+                *lock = Some(row);
             }
         }
     }
@@ -345,6 +356,18 @@ fn track_locks(s: &State) -> Event {
     Event::new(lemon::TRACK_LOCKS, Value::var(b))
 }
 
+/// [`lemon::NOTE_LOCKS`]: a u32 count, then per locked note source its kind (u8: 0 the computer keyboard, 1 the Touch
+/// controller, as `rack::NoteSrc` orders them) and the channel's rack position (u16).
+fn note_locks(s: &State) -> Event {
+    let locks: Vec<(u8, u16)> = s.rack.note_lock.iter().enumerate().filter_map(|(src, row)| Some((src as u8, (*row)? as u16))).collect();
+    let mut b = start(locks.len());
+    for (src, row) in locks {
+        b.push(src);
+        b.extend_from_slice(&row.to_le_bytes());
+    }
+    Event::new(lemon::NOTE_LOCKS, Value::var(b))
+}
+
 /// A payload's layout version and entry count.
 fn start(count: usize) -> Vec<u8> {
     let mut b = vec![LAYOUT];
@@ -429,7 +452,7 @@ mod tests {
         want.extend([lemon::SCALING, lemon::CHANNEL_CHECKS]);
         #[cfg(any(windows, target_os = "macos"))]
         want.push(lemon::KEY_FOCUS);
-        want.push(lemon::TRACK_LOCKS);
+        want.extend([lemon::TRACK_LOCKS, lemon::NOTE_LOCKS]);
         assert_eq!(ids, want);
         let mut back = App::new(None);
         back.open(path.clone());
@@ -524,6 +547,41 @@ mod tests {
         assert!(s.project.arrangements.iter().flat_map(|a| &a.tracks).all(|t| t.clip_lock.is_none()));
         #[cfg(any(windows, target_os = "macos"))]
         assert!(editor_keys());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Receive notes from ▸ locks (event 202) come back on the channels at the same rack positions; one taken off is an
+    /// unsaved change and stays off once saved; an FLP saved from the same state opens with none.
+    #[test]
+    fn note_locks_round_trip_through_a_lemon_file() {
+        use crate::rack::NoteSrc;
+        let d = dir("note_locks");
+        let (lemon_path, flp_path) = (d.join("Locks.lemon"), d.join("Locks.flp"));
+        let mut app = with_state();
+        app.state.rack.note_lock[NoteSrc::Typing as usize] = Some(3);
+        app.state.rack.note_lock[NoteSrc::Touch as usize] = Some(1);
+        app.save_to(lemon_path.clone());
+        app.save_to(flp_path.clone());
+        let file = os_flp::FlpFile::parse(&std::fs::read(&lemon_path).unwrap()).unwrap();
+        assert_eq!(lemon::data(&file, lemon::NOTE_LOCKS), Some(vec![LAYOUT, 2, 0, 0, 0, 0, 3, 0, 1, 1, 0]));
+        let mut back = App::new(None);
+        back.open(lemon_path.clone());
+        assert!(!back.unsaved());
+        assert_eq!(back.state.rack.note_lock, [Some(3), Some(1)]);
+        back.state.rack.note_lock[NoteSrc::Typing as usize] = None;
+        assert!(back.unsaved(), "an unlock is an unsaved change");
+        back.save_to(lemon_path.clone());
+        let mut again = App::new(None);
+        again.open(lemon_path);
+        assert_eq!(again.state.rack.note_lock, [None, Some(1)]);
+        // A lock on a channel the file does not have is left out.
+        let mut f = file.clone();
+        lemon::to_lemon(&mut f, &[Event::new(lemon::NOTE_LOCKS, Value::var([LAYOUT, 1, 0, 0, 0, 0, 99, 0]))]).unwrap();
+        let mut s = with_state();
+        apply(&mut s.state, &mut s.plugins, &f);
+        assert_eq!(s.state.rack.note_lock, [None, None]);
+        again.open(flp_path);
+        assert_eq!(again.state.rack.note_lock, [None, None], "an FLP has no locks");
         let _ = std::fs::remove_dir_all(&d);
     }
 
