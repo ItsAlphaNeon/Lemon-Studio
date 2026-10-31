@@ -73,12 +73,17 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Auto scrolling (toolbar, OPTIONS menu): while playing, the playlist follows the playhead (the piano roll in
   pattern mode), continuously or a quarter page at a time (right-click on the button)
 - Performance mode (Ctrl+P, the arranger's ▸ menu; Prepare for performance mode or TOOLS ▸ Set up for live
-  performance lays out 16 columns and a Start marker): a click on a clip before the Start marker launches it on its
+  performance asks first, then lays out the Marker settings' columns, 16 four bars apart by default, and a Start
+  marker): a click on a clip before the Start marker launches it on its
   track, looping, from the next sync point (Shift queues, Alt at once); a right click or the track header stops it.
   Notes 0–119 on Settings ▸ MIDI's Performance mode MIDI channel launch the first 10 tracks' 12 columns (a key's
-  release ends Hold & stop; notes 120–124 scroll the grid, outlined in the zone). A playing clip's zone clip is outlined and fills as it plays (the clock's bars are negative in the zone). Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant,
-  Position sync) are saved as FL saves them. Not yet: the typing keyboard, MIDI notes 125–127, scenes, recording a
-  performance
+  release ends Hold & stop; notes 120–124 scroll the grid, outlined in the zone). Ctrl+click on a zone clip launches
+  its column as a scene (every track with clips there; a Scene stops the others, a +Scene keeps them), as do notes
+  while 125 (Scene) or 126 (+Scene) is held. A playing clip's zone clip is outlined and fills as it plays, and the
+  track header can show the pass's progress (the ▸ menu's Performance clip / track progress); the clock's bars are
+  negative in the zone. Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant,
+  Position sync) are saved as FL saves them. Not yet: the typing keyboard, note 127 (Global Snap), clip and track
+  group scenes, recording a performance
 
 ## ✅ Mixing and routing
 

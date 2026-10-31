@@ -340,7 +340,13 @@ pub enum Cmd {
     ResetEmptyTracks,
     /// The ▸ menu's Prepare for performance mode and Performance mode (Ctrl+P) (spec: ui/performance-mode.md §1).
     PerfPrepare,
+    /// A pick in Marker settings' Spacing list (true) or Marker count list.
+    PerfMarkerPick(bool, u8),
     PerfToggle,
+    /// Performance mode's view and scene checks (§3, §3a).
+    PerfClipProgress,
+    PerfTrackProgress,
+    PerfPlusScene,
     /// A track's Performance settings ▸ entry (§4): track, which list (0 Press, 1 Motion, 2 Trigger sync, 3 Position
     /// sync, 4 Queue, 5 Tolerant), the choice.
     PerfSet(u16, u8, u8),
@@ -659,6 +665,11 @@ pub struct PlaylistState {
     pub wave_wait: bool,
     /// Performance mode's launched clips (spec: ui/performance-mode.md).
     pub perform: crate::perform::Perform,
+    /// Performance mode's progress displays on the zone's clips and in the track headers, and whether Ctrl+click
+    /// triggers a +Scene instead of a Scene (spec: ui/performance-mode.md §3, §3a).
+    pub perf_clip_progress: bool,
+    pub perf_track_progress: bool,
+    pub perf_plus_scene: bool,
     /// Change icon... (Lemon Studio's design): the icon each channel or effect slot shows, for the session.
     pub icons: HashMap<IconOwner, crate::icons::Icon>,
 }
@@ -758,6 +769,9 @@ impl Default for PlaylistState {
             tones: RefCell::new(HashMap::new()),
             wave_wait: false,
             perform: crate::perform::Perform::default(),
+            perf_clip_progress: true,
+            perf_track_progress: false,
+            perf_plus_scene: false,
             icons: HashMap::new(),
         }
     }
@@ -2522,6 +2536,9 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sep(),
         PItem::new("Prepare for performance mode", Cmd::PerfPrepare),
         PItem::new("Performance mode", Cmd::PerfToggle).key("Ctrl+P").mark(Mark::Check(crate::perform::on(s))),
+        PItem::new("Performance clip progress", Cmd::PerfClipProgress).mark(Mark::Check(s.playlist.perf_clip_progress)),
+        PItem::new("Performance track progress", Cmd::PerfTrackProgress).mark(Mark::Check(s.playlist.perf_track_progress)),
+        PItem::new("Ctrl+click triggers +Scene", Cmd::PerfPlusScene).mark(Mark::Check(s.playlist.perf_plus_scene)),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
@@ -3129,6 +3146,11 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
         if right {
             crate::perform::stop(s, t, now, alt);
             s.message = Some(format!("{}: stopping", track_name(s, t)));
+        } else if app.ctrl {
+            // Ctrl+click: the clip's column as a scene (§3a).
+            let col = crate::perform::slot_of(s, ci).map_or(0, |x| x.1);
+            let plus = s.playlist.perf_plus_scene;
+            s.message = crate::perform::trigger_scene(s, col, now, alt, plus);
         } else {
             s.message = crate::perform::trigger(s, ci, now, alt, app.shift);
             if s.playlist.perform.held.is_some() {
@@ -4153,6 +4175,15 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.sig_pick(den, v);
             return None;
         }
+        // Prepare for performance mode asks first (spec: ui/performance-mode.md §1).
+        Cmd::PerfPrepare => {
+            app.ask_prepare();
+            return None;
+        }
+        Cmd::PerfMarkerPick(spacing, v) => {
+            app.marker_pick(spacing, v);
+            return None;
+        }
         // Time signature markers ask for their signature (§7a).
         Cmd::AddSignature | Cmd::MarkerSigAt(_) => {
             let pos = if let Cmd::MarkerSigAt(t) = cmd { t } else { app.state.playlist.pos };
@@ -4375,7 +4406,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::SlotWin(..) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::PluginCpu(..) | Cmd::ChannelState(_) | Cmd::SetIcon(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) => None,
+        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::SlotWin(..) | Cmd::Param(_) | Cmd::EditEvents(..) | Cmd::Events(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::PluginCpu(..) | Cmd::ChannelState(_) | Cmd::SetIcon(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::Arrange(_) | Cmd::Wallpaper | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) | Cmd::KeyMarkerMenu | Cmd::KeyRoot(_) | Cmd::PerfPrepare | Cmd::PerfMarkerPick(..) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -4846,7 +4877,15 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             s.playlist.jump_quantize = q;
             None
         }
-        Cmd::PerfPrepare => Some(crate::perform::prepare(s)),
+        Cmd::PerfClipProgress | Cmd::PerfTrackProgress | Cmd::PerfPlusScene => {
+            let (flag, name) = match cmd {
+                Cmd::PerfClipProgress => (&mut s.playlist.perf_clip_progress, "Performance clip progress"),
+                Cmd::PerfTrackProgress => (&mut s.playlist.perf_track_progress, "Performance track progress"),
+                _ => (&mut s.playlist.perf_plus_scene, "Ctrl+click triggers +Scene"),
+            };
+            *flag = !*flag;
+            Some(format!("{name}: {}", if *flag { "on" } else { "off" }))
+        }
         Cmd::PerfToggle => {
             snapshot_as(s, "Performance mode");
             Some(crate::perform::toggle(s))

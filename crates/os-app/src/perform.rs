@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use os_model::{Clip, PerfSettings, Project, TimeMarker};
 
 use crate::app::State;
+use crate::app::App;
 use crate::playlist::{arr_mut, clips, markers, start_marker, to_src, track_info, window};
 
 /// How far ahead of its start a launched clip's copies are placed, in bars of 4 beats (Lemon Studio's design: the
@@ -30,6 +31,8 @@ pub struct Perform {
     /// The MIDI grid's first (track, column) (notes 120–123 scroll it) and whether it scrolls a page at a time (124).
     pub origin: (u16, usize),
     pub paging: bool,
+    /// Note 125 (Scene mode) or 126 (+Scene mode, `true`) held on the MIDI channel: notes trigger their column's scene.
+    pub scene: Option<bool>,
 }
 
 /// The MIDI grid (§3): notes 0–119 are this many tracks of this many columns.
@@ -284,6 +287,40 @@ fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant
     Some(format!("{}: {} at {bar}:{step:02}", crate::playlist::track_name(s, track), PerfSettings::PRESSES[usize::from(set.press)]))
 }
 
+/// A scene (§3a): the clips that start in column `col` on every track that has some there, triggered together, each
+/// track by its own settings. A Scene stops the tracks not in it; a +Scene (`plus`) leaves them playing. `None` when the
+/// column has no clips.
+pub fn trigger_scene(s: &mut State, col: usize, now: Option<u32>, instant: bool, plus: bool) -> Option<String> {
+    let z = zone(s)?;
+    let cols = columns(s);
+    let mut tracks: Vec<u16> = clips(s).iter().filter(|c| c.position < z && column_of(&cols, c.position) == col).map(|c| c.track).collect();
+    tracks.sort_unstable();
+    tracks.dedup();
+    if tracks.is_empty() {
+        return None;
+    }
+    if !plus {
+        let others: Vec<u16> = s.playlist.perform.live.keys().copied().filter(|t| !tracks.contains(t)).collect();
+        for t in others {
+            stop(s, t, now, instant);
+        }
+    }
+    // A scene holds no track (its Press acts on the slot alone).
+    let held = s.playlist.perform.held;
+    for &t in &tracks {
+        trigger_slot(s, t, col, now, instant, false);
+    }
+    s.playlist.perform.held = held;
+    let n = tracks.len();
+    Some(format!("{} {}: {n} track{}", if plus { "+Scene" } else { "Scene" }, col + 1, if n == 1 { "" } else { "s" }))
+}
+
+/// The track progress display (§3): each launched track's progress through its pass at `tick`, 0 to 1.
+pub fn track_progress(s: &State, tick: u32) -> Vec<(u16, f32)> {
+    let all = clips(s);
+    progress(s, tick).into_iter().filter_map(|(i, k)| all.get(i).map(|c| (c.track, k))).collect()
+}
+
 /// The progress display (§3): each launched track's zone clip sounding at `tick` (the clip index) and how far into it
 /// the pass playing is, 0 to 1.
 pub fn progress(s: &State, tick: u32) -> Vec<(usize, f32)> {
@@ -353,10 +390,20 @@ pub fn release(s: &mut State, now: Option<u32>) {
 pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option<String> {
     zone(s)?;
     if key >= 120 {
-        return if down { scroll(s, key) } else { None };
+        return match key {
+            125 | 126 => {
+                s.playlist.perform.scene = if down { Some(key == 126) } else { None };
+                None
+            }
+            _ if down => scroll(s, key),
+            _ => None,
+        };
     }
     let o = s.playlist.perform.origin;
     let (track, col) = (o.0 + u16::from(key / 12), o.1 + usize::from(key % 12));
+    if let Some(plus) = s.playlist.perform.scene {
+        return if down { trigger_scene(s, col, now, false, plus) } else { None };
+    }
     if !down {
         if s.playlist.perform.live.get(&track).is_some_and(|l| l.column == col) {
             release_track(s, track, now);
@@ -371,7 +418,7 @@ pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option
 }
 
 /// Notes 120–124 (§3): scroll the MIDI grid up, down, left or right, a track or column at a time or a page with paging
-/// on, which 124 toggles. 125–127 (scenes, Global Snap) do nothing yet.
+/// on, which 124 toggles. 127 (Global Snap) does nothing yet.
 fn scroll(s: &mut State, key: u8) -> Option<String> {
     let cols = columns(s).len();
     let p = &mut s.playlist.perform;
@@ -450,19 +497,36 @@ pub fn toggle(s: &mut State) -> String {
     format!("Performance mode: {}", if on { "on" } else { "off" })
 }
 
-/// Prepare for performance mode (§1), one undo step: 16 unnamed markers 4 bars apart from bar 1, a Start marker one
-/// bar after the last column, SONG, performance mode on. Lemon Studio does not ask first or show the Marker settings
-/// dialog yet: it uses the dialog's defaults.
-pub fn prepare(s: &mut State) -> String {
-    const COUNT: u32 = 16;
-    const SPACING_BARS: u32 = 4;
+/// The Marker settings dialog (§1): how many columns and how many bars apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkerForm {
+    pub count: u8,
+    pub spacing: u8,
+}
+
+impl Default for MarkerForm {
+    fn default() -> Self {
+        MarkerForm { count: 16, spacing: 4 }
+    }
+}
+
+impl MarkerForm {
+    /// The values the boxes' lists offer (Lemon Studio's ranges; the original's were not measured).
+    pub const COUNTS: std::ops::RangeInclusive<u8> = 1..=64;
+    pub const SPACINGS: std::ops::RangeInclusive<u8> = 1..=16;
+}
+
+/// Prepare for performance mode (§1) with the Marker settings `f`, one undo step: `f.count` unnamed markers
+/// `f.spacing` bars apart from bar 1, a Start marker one bar after the last column, SONG, performance mode on.
+pub fn prepare_with(s: &mut State, f: MarkerForm) -> String {
+    let (count, spacing) = (u32::from(f.count.max(1)), u32::from(f.spacing.max(1)));
     crate::playlist::snapshot_as(s, "Prepare for performance mode");
     let bar = 4 * ppq(s);
-    let start = COUNT * SPACING_BARS * bar + bar;
+    let start = count * spacing * bar + bar;
     let a = arr_mut(s);
     a.markers.retain(|m| !(m.kind == TimeMarker::START || (m.kind == TimeMarker::PLAIN && m.position < start)));
-    for k in 0..COUNT {
-        a.markers.push(TimeMarker::new(k * SPACING_BARS * bar, ""));
+    for k in 0..count {
+        a.markers.push(TimeMarker::new(k * spacing * bar, ""));
     }
     a.markers.push(TimeMarker { kind: TimeMarker::START, ..TimeMarker::new(start, "Start") });
     a.markers.sort_by_key(|m| m.position);
@@ -470,7 +534,55 @@ pub fn prepare(s: &mut State) -> String {
     s.song_mode = true;
     s.playlist.pos = start;
     s.piano.dirty = true;
-    format!("Prepared for performance mode: {COUNT} columns, Start marker at bar {}", start / bar + 1)
+    format!("Prepared for performance mode: {count} columns, Start marker at bar {}", start / bar + 1)
+}
+
+/// The text of the question Prepare for performance mode asks first (§1).
+pub const CONFIRM: &str = "The project will be tweaked for best results in a live performance situation (no undo).";
+
+impl App {
+    /// Prepare for performance mode (§1): the question first, then Marker settings, then the markers.
+    pub(crate) fn ask_prepare(&mut self) {
+        use crate::dialog::{spans, Answer, Kind, Msg, Then};
+        self.show_msg(Msg::new(Kind::Question, "Confirm", spans(&[CONFIRM]), &[Answer::Ok, Answer::Cancel], Then::PerfConfirm));
+    }
+
+    /// Ok to the question: the Marker settings dialog at its defaults.
+    pub(crate) fn open_marker_settings(&mut self) {
+        self.state.playlist.popup = None;
+        self.show_form(crate::dialog::Body::Markers(MarkerForm::default()));
+    }
+
+    fn marker_form(&mut self) -> Option<&mut MarkerForm> {
+        match &mut self.state.dialogs.last_mut()?.body {
+            crate::dialog::Body::Markers(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// A click on a Marker settings box: its list under it, the current value marked.
+    pub(crate) fn marker_list(&mut self, spacing: bool) {
+        use crate::playlist::{Cmd, Mark, PItem, Popup};
+        let Some(f) = self.marker_form().copied() else { return };
+        let act = crate::app::Action::Dlg(crate::dialog::DHit::MarkerValue(spacing));
+        let Some(r) = self.hits.iter().rev().find(|h| h.action == act).map(|h| h.rect) else { return };
+        let (cur, values) = if spacing { (f.spacing, MarkerForm::SPACINGS) } else { (f.count, MarkerForm::COUNTS) };
+        let items = values.map(|v| PItem::new(v.to_string(), Cmd::PerfMarkerPick(spacing, v)).mark(Mark::Radio(v == cur))).collect();
+        self.state.playlist.popup = Some(Popup { x: r.x, y: r.bottom() + 1.0, items, sub: None, scroll: [0; 2] });
+        self.invalidate();
+    }
+
+    /// A pick in a Marker settings list sets its box.
+    pub(crate) fn marker_pick(&mut self, spacing: bool, v: u8) {
+        if let Some(f) = self.marker_form() {
+            if spacing {
+                f.spacing = v;
+            } else {
+                f.count = v;
+            }
+        }
+        self.invalidate();
+    }
 }
 
 /// The project as played (§3): the zone silent, each launched clip's passes on its track, and that track's own clips
@@ -579,6 +691,20 @@ mod tests {
         app.midi_notes(vec![note(121, true)]);
         assert_eq!(app.state.playlist.perform.origin, (10, 0), "a page down");
         app.state.playlist.perform = Perform::default();
+
+        // Notes 125 / 126 held: a note triggers its column's scene.
+        arr_mut(&mut app.state).tracks[0].perf.press = 0;
+        arr_mut(&mut app.state).clips.push(Clip::new(0, 384, 2, ClipSource::Pattern(1)));
+        app.midi_notes(vec![note(125, true), note(12, true)]);
+        assert_eq!(app.state.message.as_deref(), Some("Scene 1: 2 tracks"));
+        assert!(app.state.playlist.perform.live.contains_key(&2));
+        app.midi_notes(vec![note(125, false), note(1, true)]);
+        assert_eq!(app.state.playlist.perform.live[&0].column, 1, "released: a note is its slot again");
+        assert!(app.state.playlist.perform.live.contains_key(&2));
+        app.midi_notes(vec![note(126, true), note(1, true), note(126, false)]);
+        assert!(app.state.playlist.perform.live.contains_key(&2), "+Scene keeps the other tracks");
+        assert_eq!(app.state.playlist.perform.scene, None);
+        app.state.playlist.perform = Perform::default();
         app.state.project.performance = Some(false);
         app.midi_notes(vec![note(0, true)]);
         assert!(app.state.playlist.perform.live.is_empty(), "off: nothing is triggered");
@@ -597,6 +723,27 @@ mod tests {
         arr_mut(s).tracks[0].perf.position_sync = 3;
         trigger(s, 1, Some(3082), true, false);
         assert_eq!(progress(s, 3082), vec![(1, 10.0 / 768.0)]);
+    }
+
+    /// §3a: a Scene triggers its column on every track with clips there and stops the rest; a +Scene keeps them.
+    #[test]
+    fn scenes_trigger_columns() {
+        let mut app = app();
+        let s = &mut app.state;
+        arr_mut(s).clips.push(Clip::new(0, 384, 2, ClipSource::Pattern(1)));
+        trigger(s, 1, None, false, false);
+        assert_eq!(trigger_scene(s, 0, None, false, false).as_deref(), Some("Scene 1: 2 tracks"));
+        let cols = |s: &State| s.playlist.perform.live.iter().map(|(&t, l)| (t, l.column)).collect::<Vec<_>>();
+        assert_eq!(cols(s), vec![(0, 0), (2, 0)]);
+        assert_eq!(trigger_scene(s, 1, None, false, true).as_deref(), Some("+Scene 2: 1 track"));
+        assert_eq!(cols(s), vec![(0, 1), (2, 0)], "+Scene: track 3 plays on");
+        trigger_scene(s, 0, None, false, false);
+        trigger_scene(s, 1, None, false, false);
+        assert_eq!(cols(s), vec![(0, 1)], "Scene: track 3 stops");
+        assert_eq!(trigger_scene(s, 5, None, false, false), None, "no clips there");
+        // Playing, the tracks left out stop at their sync point.
+        trigger_scene(s, 0, Some(3100), true, false);
+        assert_eq!(track_progress(s, 3100 + 96), vec![(0, 0.25), (2, 0.25)]);
     }
 
     #[test]
@@ -731,7 +878,7 @@ mod tests {
         let mut app = App::new(None);
         let s = &mut app.state;
         s.project.ppq = 96;
-        let msg = prepare(s);
+        let msg = prepare_with(s, MarkerForm::default());
         assert!(msg.contains("bar 66"), "{msg}");
         let m = markers(s);
         assert_eq!(m.len(), 17);
@@ -743,5 +890,35 @@ mod tests {
         s.song_mode = false;
         assert_eq!(toggle(s), "Performance mode: on");
         assert!(s.song_mode);
+    }
+
+    /// §1: Prepare asks first, then Marker settings sets the count and spacing; Cancel leaves the project alone.
+    #[test]
+    fn prepare_asks_and_takes_marker_settings() {
+        use crate::dialog::{Body, DHit};
+        let mut app = App::new(None);
+        app.state.project.ppq = 96;
+        crate::playlist::run(&mut app, crate::playlist::Cmd::PerfPrepare);
+        assert_eq!(app.top_message().map(|m| m.1), Some(CONFIRM.to_string()));
+        app.act(crate::app::Action::Dlg(DHit::Button(1)));
+        assert!(app.state.dialogs.is_empty() && markers(&app.state).is_empty(), "Cancel");
+        crate::playlist::run(&mut app, crate::playlist::Cmd::PerfPrepare);
+        app.act(crate::app::Action::Dlg(DHit::Button(0)));
+        assert!(matches!(app.state.dialogs.last().map(|m| &m.body), Some(Body::Markers(f)) if *f == MarkerForm::default()));
+        // The count's box opens its list (where a canvas can be made).
+        if let Ok(mut c) = os_ui::Canvas::new(1280, 800, 1.0) {
+            app.paint(&mut c, None);
+            app.act(crate::app::Action::Dlg(DHit::MarkerValue(false)));
+            let pop = app.state.playlist.popup.take().expect("the count's list");
+            assert_eq!(pop.items.len(), 64);
+        }
+        crate::playlist::run(&mut app, crate::playlist::Cmd::PerfMarkerPick(false, 8));
+        crate::playlist::run(&mut app, crate::playlist::Cmd::PerfMarkerPick(true, 2));
+        app.act(crate::app::Action::Dlg(DHit::Accept));
+        assert!(app.state.dialogs.is_empty());
+        let s = &app.state;
+        assert_eq!(markers(s).len(), 9);
+        assert_eq!((markers(s)[1].position, markers(s)[8].position), (768, 8 * 768 + 384), "2 bars apart, Start a bar after");
+        assert_eq!(s.message.as_deref(), Some("Prepared for performance mode: 8 columns, Start marker at bar 18"));
     }
 }
