@@ -157,6 +157,11 @@ pub enum MCmd {
     SlotHelp(u8),
     /// Wrap in container (false) and Wrap all in container (true) on the current track's slot (`App::wrap_in_container`).
     Wrap(u8, bool),
+    /// The container list's entries on a member of the container in the current track's slot (`App::edit_member`), its
+    /// Add effect ▸ (`App::add_member`: the effect's index in `Plugins::effects`), and the list itself.
+    Member(u8, usize, crate::container::Op),
+    MemberAdd(u8, usize),
+    ContainerList(u8),
     /// The slot menu's Scaling ▸: the hosted plugin's window at this percent, `None` = Main (`Plugins::editor_scales`).
     SlotScale(u8, Option<u16>),
     /// Options ▸ View ▸ Waveforms and Extra properties (`MixerUi::waveforms`, `MixerUi::extra`).
@@ -1677,7 +1682,7 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
     ];
     let mut items = items;
     // A container's members, listed (slice 1 gives them no windows of their own).
-    if let Some(list) = crate::container::list_items(s, s.selected_mixer, slot) {
+    if let Some(list) = crate::container::list_items(s, slot) {
         items.insert(3, PItem::sub("Container", list));
     }
     let mut menu = Popup { x, y, items, sub: None, scroll: [0; 2] };
@@ -1752,12 +1757,19 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::SlotMove(..) => Some("Move effect"),
         MCmd::Wrap(_, false) => Some(crate::container::WRAP),
         MCmd::Wrap(_, true) => Some(crate::container::WRAP_ALL),
+        MCmd::Member(_, _, crate::container::Op::Up | crate::container::Op::Down) => Some(crate::container::MOVE),
+        MCmd::Member(_, _, crate::container::Op::Remove) => Some(crate::container::REMOVE),
+        MCmd::MemberAdd(..) => Some(crate::container::ADD),
         MCmd::RemoveTeslasNow => Some("Remove audio editors"),
         MCmd::OpenState(..) => Some("Open mixer track state"),
         MCmd::InsertState(..) => Some(INSERT),
         _ => None,
     };
     if let Some(name) = step {
+        // The containers' members as their windows left them: what the step keeps and an undo brings back.
+        if matches!(c, MCmd::Wrap(..) | MCmd::Member(..) | MCmd::MemberAdd(..)) {
+            crate::container::store_members(&mut app.state.project, &app.plugins);
+        }
         return crate::control::edit_app(app, name, Region::Project, |app| run_now(app, c));
     }
     // A slot's sidechain input is the track's own (its slot's saved state).
@@ -2042,6 +2054,20 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             let msg = app.wrap_in_container(slot, all);
             changed(&mut app.state);
             msg
+        }
+        MCmd::Member(slot, i, op) => {
+            let msg = app.edit_member(slot, i, op);
+            changed(&mut app.state);
+            msg
+        }
+        MCmd::MemberAdd(slot, index) => {
+            let msg = app.add_member(slot, index);
+            changed(&mut app.state);
+            msg
+        }
+        MCmd::ContainerList(slot) => {
+            s.playlist.popup = crate::container::list_popup(s, slot, at.0, at.1);
+            None
         }
         MCmd::SlotMove(slot, d) => {
             let t = s.selected_mixer;
@@ -2400,9 +2426,11 @@ impl App {
     pub(crate) fn open_fx(&mut self, track: u16, slot: u8) {
         let key = crate::plugins::fx_key(track, slot);
         // A container: its list of members (slice 1 has no container window).
-        if let Some(mut list) = crate::container::list_items(&self.state, track, slot) {
-            list.insert(0, PItem::head("Container"));
-            self.state.playlist.popup = Some(Popup { x: self.mouse.0, y: self.mouse.1, items: list, sub: None, scroll: [0; 2] });
+        if crate::container::members(&self.state, track, slot).is_some() {
+            if self.state.selected_mixer != track {
+                select(&mut self.state, track, false);
+            }
+            self.state.playlist.popup = crate::container::list_popup(&self.state, slot, self.mouse.0, self.mouse.1);
             return;
         }
         if !self.plugins.hosted.contains_key(&key) {
