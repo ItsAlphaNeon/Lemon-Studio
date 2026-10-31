@@ -34,6 +34,7 @@ mod marks;
 mod notes;
 mod param_auto;
 mod multicore;
+pub use multicore::LoadGate;
 mod pdc;
 mod rec;
 pub use param_auto::PARAM_STEP;
@@ -2306,6 +2307,16 @@ impl Engine {
             self.next_ctl += 1;
             self.apply_point(e, 0, 0);
         }
+    }
+
+    /// Whether this engine uses the workers, as far as the load goes (`Multicore`): playback that restarts takes it on
+    /// with `set_load_gate`, or each jump would start on one thread until the load shows again.
+    pub fn load_gate(&self) -> LoadGate {
+        self.multicore.gate()
+    }
+
+    pub fn set_load_gate(&mut self, gate: LoadGate) {
+        self.multicore.set_gate(gate);
     }
 
     /// Take over playback from `old` (built from an earlier version of the project) at its position: the tick it
