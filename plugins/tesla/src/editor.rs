@@ -187,6 +187,12 @@ pub enum ToolCmd {
     /// The envelope tools with a dialog (Scale levels..., Decimate points..., Filter..., Smooth up..., Create
     /// sequence...).
     EnvDialog(EnvTool),
+    /// Tools > Envelope > Turn all points smooth.
+    SmoothPoints,
+    /// Tools > Time > Scratch (envelope).
+    Scratch,
+    /// Tools > Analysis > Convert to score and dump to piano roll.
+    Score,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -219,6 +225,8 @@ pub enum Cmd {
     AddMarker,
     SetLoop,
     ClearLoop,
+    /// Regions > Set first downbeat.
+    SetDownbeat,
     DeleteCue(u32),
     DeleteCueHere,
     RenameCue(u32),
@@ -298,6 +306,8 @@ pub enum Act {
     Send(PathBuf, AudioTo),
     /// The editor's new size in logical px.
     Resize(u32, u32),
+    /// Notes for the host's piano roll (Convert to score): to the selected channel, in the current pattern.
+    Score(Vec<os_hostlink::NoteOut>),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -792,9 +802,24 @@ impl Logic {
 
     /// A press in the wave area in an envelope mode: on a point drags it (a double-click puts it back at mid height),
     /// on the line adds a point there and drags it. `None` elsewhere: the press selects, as in waveform mode.
-    fn env_down(&mut self, k: usize, x: f32, y: f32, dbl: bool) -> Option<Vec<Act>> {
+    fn env_down(&mut self, k: usize, x: f32, y: f32, dbl: bool, alt: bool) -> Option<Vec<Act>> {
         let lane = self.layout().lane();
         if let Some(i) = self.doc(|d| self.env_point_at(d, k, x, y)) {
+            if alt {
+                // Alt+click: the point's line becomes smooth, or straight again.
+                let on = self.doc(|d| {
+                    let n = d.frames();
+                    let mut e = d.env.clone();
+                    let on = e.toggle_smooth(k, n, i);
+                    if on.is_some() {
+                        *d.edit_env("Change envelope point curve") = e;
+                    }
+                    on
+                });
+                self.hint = if on == Some(true) { "Envelope point: smooth curve" } else { "Envelope point: straight line" }.into();
+                self.drag = None;
+                return Some(vec![Act::Repaint]);
+            }
             if dbl {
                 self.doc(|d| {
                     let n = d.frames();
@@ -831,7 +856,7 @@ impl Logic {
             return vec![Act::Open];
         }
         if let Some(k) = self.doc(|d| d.env_shown()) {
-            if let Some(acts) = self.env_down(k, x, y, dbl) {
+            if let Some(acts) = self.env_down(k, x, y, dbl, m.alt) {
                 return acts;
             }
         }
@@ -1037,12 +1062,15 @@ impl Logic {
                     // The envelope's reading at the pointer (at the point under it, if any).
                     let p = d.env.points(k, n);
                     let v = self.env_point_at(d, k, x, y).map_or_else(|| env::value(&p, f), |i| p[i].v);
-                    return format!("{} envelope: {} \u{00b7} click the line to add a point, right-click one to delete it", env::NAMES[k], env::text(k, v));
+                    return format!("{} envelope: {} \u{00b7} click the line to add a point, right-click one to delete it, Alt+click one for a smooth line", env::NAMES[k], env::text(k, v));
                 }
                 let i = f as usize;
                 let v = (0..d.sample.channels()).map(|c| d.sample.ch[c][i]).fold(0f32, |m, v| if v.abs() > m.abs() { v } else { m });
                 let fmt = if d.view.time == state::TIME_AUTO { state::TIME_MSM } else { d.view.time };
-                format!("{} | {} {:.2}", view::time_text(fmt, f, d.sample.rate, d.sample.tempo, 1.0), view::db_text(v), v)
+                // Bars count from the first downbeat.
+                let db = if fmt == state::TIME_BBT { d.sample.downbeat as f64 } else { 0.0 };
+                let at = if f < db { "before bar 1".to_string() } else { view::time_text(fmt, f - db, d.sample.rate, d.sample.tempo, 1.0) };
+                format!("{at} | {} {:.2}", view::db_text(v), v)
             });
         }
         let rec = self.shared.rec();
@@ -1103,7 +1131,9 @@ impl Logic {
         let thr = self.view.gate.unwrap_or(tools::GATE_DEFAULT);
         let ok = self.doc(|d| match t {
             ToolCmd::Amp | ToolCmd::Stretch | ToolCmd::DrumStretch | ToolCmd::Reverb | ToolCmd::Equalize | ToolCmd::Blur | ToolCmd::CleanUp | ToolCmd::AcquireNoise => false,
-            ToolCmd::AcquireThreshold | ToolCmd::TrimAllNoise | ToolCmd::EnvDialog(_) => false,
+            ToolCmd::AcquireThreshold | ToolCmd::TrimAllNoise | ToolCmd::EnvDialog(_) | ToolCmd::Score => false,
+            ToolCmd::SmoothPoints => d.env_tool("Turn all points smooth", |e, k, n| e.smooth_all(k, n)),
+            ToolCmd::Scratch => d.scratch(),
             ToolCmd::GateNoise => {
                 let gated = d.range().is_some_and(|(a, b)| tools::gate_gain(&d.sample, a, b, thr).iter().any(|&g| g < 1.0));
                 gated && d.tool("Gate noise", |s, a, b| {
@@ -1190,6 +1220,24 @@ impl Logic {
                         "Detect pitch regions: no held note found".into()
                     };
                 }
+                return vec![Act::Repaint];
+            }
+            ToolCmd::Score => {
+                if self.doc(|d| d.frames()) > 0 {
+                    let notes = self.doc(|d| d.score());
+                    if notes.is_empty() {
+                        self.hint = "Convert to score: no held note found".into();
+                    } else {
+                        let bpm = self.score_tempo();
+                        let beats = |t: f64| t * bpm / 60.0;
+                        let notes = notes.into_iter().map(|n| os_hostlink::NoteOut { start: beats(n.start), end: beats(n.end), ..n }).collect();
+                        return vec![Act::Repaint, Act::Score(notes)];
+                    }
+                }
+                return vec![Act::Repaint];
+            }
+            ToolCmd::Scratch if !ok && self.doc(|d| d.frames()) > 0 => {
+                self.hint = "Scratch (envelope) plays at the all-purpose envelope's speed: draw it first (the bottom bar's mode 4)".into();
                 return vec![Act::Repaint];
             }
             ToolCmd::ZeroCross if !ok => {
@@ -1840,6 +1888,7 @@ impl Logic {
             Key::Char('V') if c && !s && !a => Cmd::Paste(Paste::Insert),
             Key::Char('V') if a && !c => Cmd::Paste(Paste::Replace),
             Key::Char('V') if s && !c => Cmd::Paste(Paste::Mix),
+            Key::Char('V') if s && c && !a => Cmd::Paste(Paste::MixEnv),
             Key::Delete if s && c => Cmd::DeleteCueHere,
             Key::Delete if s => Cmd::Clear,
             Key::Delete if c => Cmd::Trim,
@@ -1959,6 +2008,7 @@ impl Logic {
                 m.add(item("Paste insert").shortcut("Ctrl+V"), Cmd::Paste(Paste::Insert));
                 m.add(item("Paste replace").shortcut("Alt+V"), Cmd::Paste(Paste::Replace));
                 m.add(item("Paste mix").shortcut("Shift+V"), Cmd::Paste(Paste::Mix));
+                m.add(item("Paste mix (envelope)").shortcut("Shift+Ctrl+V"), Cmd::Paste(Paste::MixEnv));
                 m.sep(Cmd::None);
                 m.add(item("Delete").shortcut("Del").enabled(has), Cmd::Delete);
                 m.add(item("Trim").shortcut("Ctrl+Del").enabled(sel), Cmd::Trim);
@@ -2027,6 +2077,7 @@ impl Logic {
                 m.add(item("Paste insert").shortcut("Ctrl+V"), Cmd::Paste(Paste::Insert));
                 m.add(item("Paste replace").shortcut("Alt+V"), Cmd::Paste(Paste::Replace));
                 m.add(item("Paste mix").shortcut("Shift+V"), Cmd::Paste(Paste::Mix));
+                m.add(item("Paste mix (envelope)").shortcut("Shift+Ctrl+V"), Cmd::Paste(Paste::MixEnv));
                 m.sep(Cmd::None);
                 m.add(item("Clear").shortcut("Shift+Del").enabled(has), Cmd::Clear);
                 m.add(item("Delete").shortcut("Del").enabled(has), Cmd::Delete);
@@ -2053,6 +2104,7 @@ impl Logic {
                 t(&mut m, "Decimate points...", "", ToolCmd::EnvDialog(EnvTool::Decimate), envm);
                 t(&mut m, "Filter...", "", ToolCmd::EnvDialog(EnvTool::Filter), envm);
                 t(&mut m, "Smooth up...", "", ToolCmd::EnvDialog(EnvTool::SmoothUp), envm);
+                t(&mut m, "Turn all points smooth", "", ToolCmd::SmoothPoints, envm);
                 t(&mut m, "Create sequence...", "", ToolCmd::EnvDialog(EnvTool::Sequence), envm);
                 m.head("Amp", Cmd::None);
                 t(&mut m, "Mixdown amp envelopes", "Ctrl+E", ToolCmd::Mixdown, has && !d.env.amp_flat());
@@ -2069,6 +2121,7 @@ impl Logic {
                 t(&mut m, "Reverse", "Alt+Left", ToolCmd::Reverse, has);
                 t(&mut m, "Time stretch / pitch shift...", "Alt+T", ToolCmd::Stretch, has);
                 t(&mut m, "Drum(loop) stretch...", "Ctrl+T", ToolCmd::DrumStretch, has);
+                t(&mut m, "Scratch (envelope)", "", ToolCmd::Scratch, has);
                 m.head("Channels", Cmd::None);
                 t(&mut m, "Swap channels", "", ToolCmd::Swap, has && stereo);
                 t(&mut m, "Convert left channel to mono", "", ToolCmd::LeftToMono, has && stereo);
@@ -2092,6 +2145,8 @@ impl Logic {
                 t(&mut m, "Normalize all regions", "", ToolCmd::NormalizeRegions, regions);
                 t(&mut m, "Declick in all regions", "", ToolCmd::DeclickInRegions, regions);
                 t(&mut m, "Declick out all regions", "", ToolCmd::DeclickOutRegions, regions);
+                m.head("Analysis", Cmd::None);
+                t(&mut m, "Convert to score and dump to piano roll", "", ToolCmd::Score, has);
                 m.head("Sequencing", Cmd::None);
                 m.add(item("Send to arranger as audio clip").shortcut("Shift+C").enabled(has), Cmd::Send(AudioTo::Playlist));
                 m.add(item("Send to selected channel").enabled(has), Cmd::Send(AudioTo::Channel));
@@ -2102,6 +2157,7 @@ impl Logic {
                 m.add(item("Add marker...").shortcut("M").enabled(has), Cmd::AddMarker);
                 m.add(item("Set loop").shortcut("Alt+L").enabled(has), Cmd::SetLoop);
                 m.add(item("Remove loop").enabled(d.sample.looped.is_some()), Cmd::ClearLoop);
+                m.add(item("Set first downbeat").enabled(has), Cmd::SetDownbeat);
                 m.add(item("Delete").shortcut("Shift+Ctrl+Del").enabled(d.cue_at(d.insert_at()).is_some()), Cmd::DeleteCueHere);
                 m.add(item("Auto rename all").shortcut("Ctrl+F2").enabled(!d.sample.cues.is_empty()), Cmd::AutoRename);
                 m.head("Detection", Cmd::None);
@@ -2260,6 +2316,12 @@ impl Logic {
             }
             Cmd::ClearLoop => {
                 self.doc(|d| d.clear_loop());
+            }
+            Cmd::SetDownbeat => {
+                if let Some(at) = self.doc(|d| d.set_downbeat().then_some(d.sample.downbeat)) {
+                    let t = self.doc(|d| view::time_text(state::TIME_MSM, at as f64, d.sample.rate, 0.0, 1.0));
+                    self.hint = format!("First downbeat at {t}: bar 1 starts here");
+                }
             }
             Cmd::DeleteCue(id) => {
                 self.doc(|d| d.delete_cue(id));
@@ -2424,6 +2486,25 @@ impl Logic {
             }
             None => self.hint = "The clipboard holds no audio".into(),
         }
+    }
+
+    /// The tempo Convert to score times its notes at: the host's, else the sample's, else 120 BPM.
+    fn score_tempo(&self) -> f64 {
+        let host = f64::from_bits(self.shared.tempo.load(std::sync::atomic::Ordering::Relaxed));
+        if host > 0.0 {
+            return host;
+        }
+        let own = self.doc(|d| d.sample.tempo);
+        if own > 0.0 { f64::from(own) } else { 120.0 }
+    }
+
+    /// The host took (true) or didn't take the notes of Convert to score.
+    pub fn scored(&mut self, ok: bool, n: usize) {
+        self.hint = if ok {
+            format!("Convert to score: {n} note{} in the selected channel's piano roll", if n == 1 { "" } else { "s" })
+        } else {
+            "Convert to score needs Lemon Studio".into()
+        };
     }
 
     /// The host answered (true) or didn't take a sample sent to it.
@@ -2886,6 +2967,16 @@ mod win32 {
                         self.logic.sent(ok, to);
                         repaint = true;
                     }
+                    Act::Score(notes) => {
+                        let n = notes.len();
+                        let token = os_hostlink::post_notes(notes);
+                        let ok = os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Notes, token) == 1;
+                        if !ok {
+                            os_hostlink::take_notes(token);
+                        }
+                        self.logic.scored(ok, n);
+                        repaint = true;
+                    }
                     Act::Resize(w, h) => {
                         self.size = (device(w, self.scale), device(h, self.scale));
                         self.canvas.resize(self.size.0, self.size.1, self.scale);
@@ -3279,6 +3370,16 @@ mod gui {
                             os_hostlink::take_audio();
                         }
                         self.logic.sent(ok, to);
+                        self.dirty = true;
+                    }
+                    Act::Score(notes) => {
+                        let n = notes.len();
+                        let token = os_hostlink::post_notes(notes);
+                        let ok = self.link.hosted() && self.link.to_host(Cmd::Notes, token) == 1;
+                        if !ok {
+                            os_hostlink::take_notes(token);
+                        }
+                        self.logic.scored(ok, n);
                         self.dirty = true;
                     }
                     Act::Resize(w, h) => {
@@ -3852,6 +3953,61 @@ mod tests {
         assert_eq!(l.hint, "Sent to a new Lemon Slicer channel");
     }
 
+    /// Group 5's last tools: Set first downbeat, Convert to score, Turn all points smooth (and Alt+click on a point),
+    /// Scratch (envelope) and the Paste mix (envelope) key.
+    #[test]
+    fn downbeat_score_smooth_points_and_scratch() {
+        let mut l = logic();
+        let rate = 44100;
+        let mut x = vec![0.0f32; 2 * rate];
+        for (i, v) in x.iter_mut().enumerate().take(3 * rate / 2).skip(rate / 2) {
+            *v = (0.5 * (std::f64::consts::TAU * 440.0 * i as f64 / rate as f64).sin()) as f32;
+        }
+        load(&mut l, Sample::from_channels(rate as u32, vec![x], Format::Float32));
+        l.doc(|d| d.cursor = rate / 4);
+        let m = l.menu(&MenuReq::Main(MenuId::Regions));
+        assert_eq!(m.find("Set first downbeat"), Some(Cmd::SetDownbeat));
+        l.pick(&MenuReq::Main(MenuId::Regions), Cmd::SetDownbeat, 0.0, 0.0);
+        assert_eq!(l.hint, "First downbeat at 0:250: bar 1 starts here");
+        assert_eq!(l.doc(|d| (d.sample.downbeat, d.history()[0].clone())), (rate / 4, "Set first downbeat".to_string()));
+        // Convert to score: one A5 at the host's tempo (120 BPM: 2 beats a second), half a beat after bar 1.
+        l.shared.tempo.store(120f64.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        let m = l.menu(&MenuReq::Main(MenuId::Tools));
+        assert_eq!(m.find("Convert to score and dump to piano roll"), Some(Cmd::Tool(ToolCmd::Score)));
+        let acts = l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Score), 0.0, 0.0);
+        let Some(Act::Score(n)) = acts.iter().find(|a| matches!(a, Act::Score(_))) else { panic!("{acts:?}") };
+        assert_eq!(n.len(), 1);
+        assert!(n[0].key == 69 && (n[0].start - 0.5).abs() < 0.1 && (n[0].end - 2.5).abs() < 0.14, "{n:?}");
+        l.scored(true, 1);
+        assert_eq!(l.hint, "Convert to score: 1 note in the selected channel's piano roll");
+        // Scratch (envelope) needs the all-purpose envelope.
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Scratch), 0.0, 0.0);
+        assert!(l.hint.starts_with("Scratch (envelope) plays at the all-purpose envelope's speed"), "{}", l.hint);
+        l.doc(|d| {
+            let n = d.frames();
+            d.env.move_point(env::ALL, n, 1, (n / 2) as f64, 0.25);
+        });
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Scratch), 0.0, 0.0);
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Scratch (envelope)");
+        // Turn all points smooth, in volume mode; Alt+click makes one straight again.
+        l.doc(|d| d.view.mode = 2);
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::SmoothPoints), 0.0, 0.0);
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Turn all points smooth");
+        assert!(l.doc(|d| d.env.e[env::VOLUME].iter().all(|p| p.smooth)));
+        paint(&mut l);
+        let lane = l.layout().lane();
+        let n = 2 * rate;
+        let (start, per) = l.doc(|d| view::span(d, n, lane.w));
+        let (mx, my) = (view::frame_x(lane, start, per, (n / 2) as f64), view::env_y(lane, 0.5));
+        l.down(mx, my, Btn::Left, Mods { alt: true, ..Mods::default() }, false);
+        l.up(Btn::Left);
+        assert_eq!(l.hint, "Envelope point: straight line");
+        assert!(l.doc(|d| !d.env.e[env::VOLUME][1].smooth && d.env.e[env::VOLUME][0].smooth));
+        assert_eq!(l.doc(|d| d.history()[0].clone()), "Change envelope point curve");
+        // Paste mix (envelope): Shift+Ctrl+V.
+        assert_eq!(l.key(Key::Char('V'), Mods { ctrl: true, shift: true, ..Mods::default() }).last(), Some(&Act::Paste(Paste::MixEnv)));
+    }
+
     /// Clean up's second row: the declicker alone makes Preview and Accept work; the declipper's mode cycles. The
     /// envelope tools' dialogs (volume mode); Detect pitch regions.
     #[test]
@@ -4156,6 +4312,16 @@ mod tests {
         l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::EnvDialog(EnvTool::SmoothUp)), 0.0, 0.0);
         save(&mut l, "tesla_env_smooth_up", 1.0);
         l.view.amp = None;
+        // Smooth points, and the first downbeat on a Bar : Beat : Tick ruler.
+        l.doc(|d| {
+            d.env = env::Envs::default();
+            d.env.move_point(env::VOLUME, n, 1, n as f64 / 2.0, 0.85);
+            d.env.smooth_all(env::VOLUME, n);
+            d.view.time = state::TIME_BBT;
+            Arc::make_mut(&mut d.sample).downbeat = 11025;
+        });
+        save(&mut l, "tesla_env_smooth_points", 1.0);
+        l.doc(|d| d.view.time = state::TIME_AUTO);
         l.doc(|d| {
             d.view.mode = 0;
             d.env = env::Envs::default();

@@ -101,13 +101,18 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   10 minutes of what the device plays, the header showing the memory used; Dump puts them into the master track's
   Tesla. At its time limit Tesla now keeps the last minutes, as Edison does. What FL Studio's logger records and how
   long was not measured: Lemon Studio's design
-- [ ] **Tesla's later tools.** Set first downbeat, Turn all points smooth and Convert to score (group 5 of Tesla's roadmap in the specs).
-  Time stretch / pitch shift with formant preservation works (2026-10-29); the envelope modes with Mixdown amp
-  envelopes, the envelope tools (with their dialogs: Scale levels, Decimate points, Filter, Smooth up, Create
-  sequence), Convolution reverb, Equalize, Blur, Clean up (denoise with an acquired noise profile, the declipper with
-  its modes and Safe mode, the declicker), auto-slicing / grid-slicing, Detect beats, Detect pitch regions and the
-  zero-cross check, Send to new Lemon Slicer channel, drum(loop) stretch and noise gating (Acquire noise threshold,
-  Gate noise, Trim side noise, Trim all noise & slice up, the threshold mark) work (2026-10-30)
+- [x] **Tesla's later tools** (group 5 of Tesla's roadmap in the specs). Time stretch / pitch shift with formant
+  preservation (2026-10-29); the envelope modes with Mixdown amp envelopes, heard while playing, the envelope tools
+  (with their dialogs: Scale levels, Decimate points, Filter, Smooth up, Create sequence; Turn all points smooth and
+  per-point curves), Paste mix (envelope) and Scratch (envelope), Convolution reverb, Equalize, Blur, Clean up
+  (denoise with an acquired noise profile, the declipper with its modes and Safe mode, the declicker), auto-slicing /
+  grid-slicing, Detect beats, Detect pitch regions, Set first downbeat, Convert to score and dump to piano roll and
+  the zero-cross check, Send to new Lemon Slicer channel, drum(loop) stretch and noise gating (Acquire noise
+  threshold, Gate noise, Trim side noise, Trim all noise & slice up, the threshold mark) work (2026-10-30). Most of
+  it is Lemon Studio's design, with measurement requests open in the specs. Vocal denoise / isolator and Deverb have
+  their own item below
+- [ ] **Tesla's Vocal denoise / isolator and Deverb.** Tools > Spectral's last two entries (group 5 of Tesla's
+  roadmap in the specs) are not in Tesla yet
 - [x] **Value boxes.** All of them work, the last two being the autosave Maximum and Metronome track, and MIDI
   settings' Performance mode MIDI channel (2026-10-30)
 - [ ] **Performance mode.** The typing keyboard, the MIDI channel's scene and snap keys (notes 125–127), scenes,

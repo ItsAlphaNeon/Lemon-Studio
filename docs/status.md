@@ -435,7 +435,14 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 - Tesla's envelope tools with a dialog, in an envelope mode: Scale levels..., Decimate points..., Filter..., Smooth
   up... and Create sequence... (steps over the selection), each with a preview
 - Tesla's Regions > Detect pitch regions makes a region per held note, named after it
-- Not yet: Set first downbeat, convert to score
+- Tesla's Regions > Set first downbeat starts bar 1 at the selection or cursor: the Bar : Beat : Tick ruler, grid
+  slicing and Convert to score count from it
+- Tesla's Tools > Convert to score and dump to piano roll puts the held notes of the selection into the selected
+  channel's piano roll (current pattern), at the project's tempo
+- Tesla's envelope points can be smooth (Alt+click one, or Tools > Turn all points smooth); the amp envelopes are
+  heard while Tesla plays, before a mixdown; Scratch (envelope) plays the selection at the all-purpose envelope's
+  speed, and Edit > Paste mix (envelope) (Shift+Ctrl+V) mixes the clipboard in by it
+- Not yet: Vocal denoise / isolator, Deverb
 
 ## ✅ Exporting audio
 
