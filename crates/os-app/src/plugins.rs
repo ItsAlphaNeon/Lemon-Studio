@@ -99,9 +99,29 @@ const LOOK_EVERY: Duration = Duration::from_millis(250);
 
 /// How long a whole-state read waits for its moment (`lock_between_blocks`): two blocks of 256 frames and more.
 pub const STATE_WAIT: Duration = Duration::from_millis(12);
-/// How long the UI's per-tick work on an instance (its idle, its parameters, a keyboard's screen) waits for its moment:
-/// one block of 256 frames, so it nearly always comes, and a tick skipped otherwise.
-pub const TICK_WAIT: Duration = Duration::from_millis(6);
+/// How long the UI's per-tick work may wait for such moments, all instances together, per `TICK_WINDOW`: the wait is on
+/// the UI thread, and a project has many instances. Past it, an instance not free at once skips the tick.
+const TICK_BUDGET: Duration = Duration::from_millis(3);
+const TICK_WINDOW: Duration = Duration::from_millis(16);
+
+thread_local! {
+    /// When the current `TICK_WINDOW` started and what it has waited.
+    static TICK_WAITED: std::cell::Cell<Option<(Instant, Duration)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Locks `m` for the UI's per-tick work on an instance (its idle, its parameters), `None` to skip
+/// the tick. One whose holds are short (`Meter::holds_long`) is taken if free, with no wait; a long one waits for the
+/// moment between two blocks (`lock_between_blocks`), out of `TICK_BUDGET`.
+pub fn lock_for_tick<'a, T: ?Sized>(m: &'a std::sync::Mutex<T>, meter: Option<&os_host::Meter>) -> Option<std::sync::MutexGuard<'a, T>> {
+    if !meter.is_some_and(os_host::Meter::holds_long) {
+        return m.try_lock().ok();
+    }
+    let t0 = Instant::now();
+    let (start, waited) = TICK_WAITED.get().filter(|(s, _)| t0.duration_since(*s) < TICK_WINDOW).unwrap_or((t0, Duration::ZERO));
+    let got = lock_between_blocks(m, meter, TICK_BUDGET.saturating_sub(waited));
+    TICK_WAITED.set(Some((start, waited + t0.elapsed())));
+    got
+}
 
 /// Locks `m` for a UI call that may hold it a few ms: right after the audio thread processed it (`meter`), when it will
 /// not need it again for most of a block (it gives up on an instance it waits for over 2 ms: a late plugin), else at
@@ -1238,7 +1258,8 @@ impl Plugins {
         for (&row, h) in &mut self.hosted {
             let look = h.due(h.seen);
             let mut menu: Option<(os_host::Menu, (i32, i32))> = None;
-            if let Some(mut p) = look.and_then(|_| lock_between_blocks(&h.plugin, h.meter.as_deref(), TICK_WAIT)) {
+            if let Some(mut p) = look.and_then(|_| lock_for_tick(&h.plugin, h.meter.as_deref())) {
+                let t0 = Instant::now();
                 h.seen = look.unwrap_or(h.seen);
                 // A crash stopped it (spec: plugins/plugin-formats.md, "Crash containment"): said once, window closed.
                 if let (Some(code), false) = (p.stopped(), h.stop_told) {
@@ -1266,6 +1287,9 @@ impl Plugins {
                 if let (Some(w), false, Some((ew, eh))) = (&h.window, h.linked(), p.editor_size()) {
                     let k = w.scale();
                     w.set_editor_size((ew as f32 / k, eh as f32 / k));
+                }
+                if let Some(m) = &h.meter {
+                    m.note_hold(t0.elapsed());
                 }
             }
             #[cfg(plugin_windows)]
@@ -4103,6 +4127,43 @@ mod tests {
 #[cfg(test)]
 mod slot_tests {
     use super::*;
+
+    /// An instance whose holds are short is taken at once, or skipped; those with long holds wait, all of them together
+    /// no longer than the budget: a project with many instances keeps its frame rate during playback.
+    #[test]
+    fn the_ui_waits_little_for_many_instances() {
+        let meter = os_host::Meter::default();
+        // Mid-block: just processed a while ago, not yet idle.
+        meter.add(Duration::ZERO);
+        std::thread::sleep(Duration::from_millis(2));
+        let fast = std::sync::Mutex::new(());
+        let t0 = Instant::now();
+        assert!(lock_for_tick(&fast, Some(&meter)).is_some(), "short holds: taken at once");
+        assert!(t0.elapsed() < Duration::from_millis(2));
+        meter.note_hold(Duration::from_millis(3));
+        assert!(meter.holds_long());
+        let t0 = Instant::now();
+        for _ in 0..30 {
+            assert!(lock_for_tick(&fast, Some(&meter)).is_none(), "not between blocks");
+        }
+        assert!(t0.elapsed() < Duration::from_millis(16), "{:?}: the budget, not 30 waits", t0.elapsed());
+    }
+
+    /// A long hold is remembered for a while, then fades.
+    #[test]
+    fn a_long_hold_fades() {
+        let m = os_host::Meter::default();
+        assert!(!m.holds_long());
+        m.note_hold(Duration::from_millis(2));
+        for _ in 0..100 {
+            m.note_hold(Duration::from_micros(50));
+        }
+        assert!(m.holds_long(), "still slow");
+        for _ in 0..400 {
+            m.note_hold(Duration::from_micros(50));
+        }
+        assert!(!m.holds_long(), "faded");
+    }
 
     /// A UI call holding a plugin 3 ms every 40 ms beside an audio thread that processes it every 5.33 ms (256 frames at
     /// 48 kHz) and gives up after waiting 2 ms, as the engine does: taken at any moment it makes the plugin late now and
