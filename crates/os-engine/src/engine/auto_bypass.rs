@@ -7,19 +7,39 @@
 //! The switch is per slot (`os_model::MixerTrack::slot_cpu`, `PluginCpu::smart_disable`) and, over all of them, the program's Audio ▸ CPU setting.
 //! How the original tells silence was not measured: the level and the hold times are Lemon Studio's.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 /// The program-wide switch (Audio settings ▸ CPU ▸ Auto-bypass when silent), on by default.
-static ENABLED: AtomicBool = AtomicBool::new(true);
+#[cfg(not(test))]
+static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[cfg(test)]
+thread_local! {
+    /// The switch, one per test thread: tests run side by side, and one turning it off turned it off for the engines
+    /// of the others.
+    static ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
 
 /// Turns auto-bypass on or off for every slot whose own switch is on (the program's setting).
+#[cfg(not(test))]
 pub fn set_enabled(on: bool) {
-    ENABLED.store(on, Ordering::Relaxed);
+    ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The program's setting.
+#[cfg(not(test))]
 pub fn enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+    ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turns auto-bypass on or off for this test thread.
+#[cfg(test)]
+pub fn set_enabled(on: bool) {
+    ENABLED.with(|e| e.set(on));
+}
+
+/// This test thread's setting.
+#[cfg(test)]
+pub fn enabled() -> bool {
+    ENABLED.with(|e| e.get())
 }
 
 /// A block whose samples all stay at or below this level counts as silent: -100 dBFS.

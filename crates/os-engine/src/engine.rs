@@ -5772,7 +5772,7 @@ mod tests {
             }
         }
         // A one-second sample; the first clip starts 250 ms into it, the second plays it from the top.
-        let wav = std::env::temp_dir().join("os-engine-clip-start.wav");
+        let wav = std::env::temp_dir().join(format!("os-engine-clip-start-{}.wav", std::process::id()));
         crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 96000]).unwrap();
         let mut trimmed = Clip::new(0, 96, 0, ClipSource::Channel(0));
         trimmed.window = Some((250.0, 711.0));
@@ -6002,7 +6002,7 @@ mod tests {
                 self.1 += l.len() as u64;
             }
         }
-        let wav = std::env::temp_dir().join("os-engine-pause-clip.wav");
+        let wav = std::env::temp_dir().join(format!("os-engine-pause-clip-{}.wav", std::process::id()));
         crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 4 * 96000]).unwrap();
         let mut p = song(vec![], vec![Clip::new(0, 384, 0, ClipSource::Channel(0))]);
         p.channels[0].kind = ChannelKind::AudioClip;
@@ -7711,7 +7711,7 @@ mod tests {
     #[test]
     fn audio_clips_end_at_the_loop_point() {
         use os_model::{Clip, ClipSource};
-        let wav = std::env::temp_dir().join("os-engine-loop-clip.wav");
+        let wav = std::env::temp_dir().join(format!("os-engine-loop-clip-{}.wav", std::process::id()));
         crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 2 * 48000 * 4]).unwrap();
         for range in [(0, 192), (96, 192)] {
             let mut p = song(vec![], vec![Clip::new(0, 384, 0, ClipSource::Channel(0))]);
