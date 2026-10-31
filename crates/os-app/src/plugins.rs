@@ -275,7 +275,8 @@ pub enum Request {
 pub const FX_KEY: usize = 1 << 24;
 
 /// Keys from here up are the effects inside containers (`crate::container`), numbered in the order they were made
-/// (`Plugins::next_member`): neither rack rows nor slots, hosted for their windows and housekeeping only.
+/// (`Plugins::next_member`): neither rack rows nor slots, hosted for their windows, parameters, presets and
+/// housekeeping. Automation and links name them by their container's slot and their id instead (`params::target_of`).
 pub const MEMBER_KEY: usize = 1 << 26;
 
 /// Plugin editor windows open at once under "Limit the number of open plugin editors" (FL's hint: 25; spec:
