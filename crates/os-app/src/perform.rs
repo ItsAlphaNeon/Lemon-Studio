@@ -497,6 +497,24 @@ pub fn midi_note(s: &mut State, key: u8, vel: u8, down: bool, now: Option<u32>) 
     hint
 }
 
+/// The typing keyboard's Performance mode layout (§3, the original's as measured): the note a physical key plays, by
+/// the MIDI rule above. The left hand's rows 1–5, Q–T, A–G and Z–B are tracks 1–4, the right hand's 6–0, Y–P, H–; and
+/// N–/ tracks 5–8, a row's five keys columns 1–5.
+pub fn typing_note(code: winit::keyboard::KeyCode) -> Option<u8> {
+    use winit::keyboard::KeyCode::*;
+    const ROWS: [[winit::keyboard::KeyCode; 5]; 8] = [
+        [Digit1, Digit2, Digit3, Digit4, Digit5],
+        [KeyQ, KeyW, KeyE, KeyR, KeyT],
+        [KeyA, KeyS, KeyD, KeyF, KeyG],
+        [KeyZ, KeyX, KeyC, KeyV, KeyB],
+        [Digit6, Digit7, Digit8, Digit9, Digit0],
+        [KeyY, KeyU, KeyI, KeyO, KeyP],
+        [KeyH, KeyJ, KeyK, KeyL, Semicolon],
+        [KeyN, KeyM, Comma, Period, Slash],
+    ];
+    ROWS.iter().enumerate().find_map(|(t, row)| row.iter().position(|&k| k == code).map(|c| (t * 12 + c) as u8))
+}
+
 /// Notes 120–124 (§3): scroll the MIDI grid up, down, left or right, a track or column at a time or a page with paging
 /// on, which 124 toggles.
 fn scroll(s: &mut State, key: u8) -> Option<String> {
@@ -960,6 +978,62 @@ mod tests {
         midi_note(s, 0, 127, true, Some(z));
         let pats: Vec<ClipSource> = s.playlist.perform.live[&0].passes.iter().take(4).map(|c| c.source).collect();
         assert_eq!(pats, vec![ClipSource::Pattern(1), ClipSource::Pattern(2), ClipSource::Pattern(1), ClipSource::Pattern(2)]);
+    }
+
+    /// §3: the typing keyboard's Performance mode layout, key by key.
+    #[test]
+    fn typing_layout() {
+        use winit::keyboard::KeyCode::*;
+        let rows = [
+            ([Digit1, Digit2, Digit3, Digit4, Digit5], 0),
+            ([KeyQ, KeyW, KeyE, KeyR, KeyT], 12),
+            ([KeyA, KeyS, KeyD, KeyF, KeyG], 24),
+            ([KeyZ, KeyX, KeyC, KeyV, KeyB], 36),
+            ([Digit6, Digit7, Digit8, Digit9, Digit0], 48),
+            ([KeyY, KeyU, KeyI, KeyO, KeyP], 60),
+            ([KeyH, KeyJ, KeyK, KeyL, Semicolon], 72),
+            ([KeyN, KeyM, Comma, Period, Slash], 84),
+        ];
+        for (keys, first) in rows {
+            for (c, k) in keys.into_iter().enumerate() {
+                assert_eq!(typing_note(k), Some(first + c as u8), "{k:?}");
+            }
+        }
+        for k in [Minus, Equal, BracketLeft, BracketRight, Quote, Backslash, Space, Tab] {
+            assert_eq!(typing_note(k), None, "{k:?}");
+        }
+    }
+
+    /// §3: in Performance mode the typing keyboard's keys launch slots through the MIDI notes' path, following the
+    /// grid's scroll, and play no note.
+    #[test]
+    fn typing_keys_launch_slots() {
+        use winit::keyboard::KeyCode::*;
+        let mut app = app();
+        assert!(app.typing_on());
+        assert!(app.typing_key(Digit2, true, false, false));
+        let l = &app.state.playlist.perform.live[&0];
+        assert_eq!((l.column, l.armed), (1, true), "2: track 1, column 2, armed while stopped");
+        assert!(app.typing_held.is_empty(), "no note played");
+        assert!(app.typing_key(Digit2, true, false, false), "auto-repeat");
+        assert!(app.typing_key(Digit2, false, false, false));
+        assert!(app.typing_key(KeyQ, true, false, false) && app.typing_key(KeyQ, false, false, false));
+        assert!(!app.state.playlist.perform.live.contains_key(&1), "Q: track 2, which has no clips in the zone");
+        assert!(app.typing_key(BracketLeft, true, false, false), "a note key outside the layout does nothing");
+        assert!(app.typing_held.is_empty());
+        // Hold & stop: the key's release stops it; the grid scrolled one column right, 1 is column 2.
+        arr_mut(&mut app.state).tracks[0].perf.press = 1;
+        app.state.playlist.perform = Perform { origin: (0, 1), ..Perform::default() };
+        assert!(app.typing_key(Digit1, true, false, false));
+        assert_eq!(app.state.playlist.perform.live[&0].column, 1);
+        app.typing_release_all();
+        assert!(!app.state.playlist.perform.live.contains_key(&0), "focus lost: the key is released");
+        // Out of Performance mode the keys are the piano layout's again.
+        app.state.project.performance = Some(false);
+        assert!(!app.typing_key(Digit1, true, false, false), "1 is no note key there");
+        assert!(app.typing_key(KeyQ, true, false, false));
+        assert_eq!(app.typing_held.len(), usize::from(!app.state.project.channels.is_empty()));
+        app.typing_release_all();
     }
 
     #[test]
