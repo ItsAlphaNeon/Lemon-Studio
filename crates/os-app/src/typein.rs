@@ -129,7 +129,7 @@ fn unit(t: Target) -> Unit {
         Target::Knob(KnobId::ChanVol(_)) => Unit::Db(Law::Channel),
         Target::Knob(KnobId::MasterVol) => Unit::Db(Law::Main),
         Target::Knob(KnobId::Send(..)) | Target::Fader(_) => Unit::Db(Law::Fader),
-        Target::Knob(KnobId::Swing | KnobId::SlotMix(..)) | Target::Member(..) => Unit::Percent,
+        Target::Knob(KnobId::Swing | KnobId::SlotMix(..) | KnobId::Member(..)) | Target::Member(..) => Unit::Percent,
         Target::Knob(KnobId::MasterPitch) => Unit::Hz,
         // The equaliser's settings take the plain 0..1 position for now.
         Target::Param(..) | Target::MemberParam(..) | Target::Knob(KnobId::Eq(..) | KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..)) => Unit::Plain,

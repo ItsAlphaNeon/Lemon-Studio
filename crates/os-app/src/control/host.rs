@@ -69,13 +69,17 @@ impl App {
             self.state.piano.dirty = true;
         }
 
-        // Instances without an owner (just hosted) take the id of what is under their key.
+        // Instances without an owner (just hosted) take the id of what is under their key; a container's effect, the id
+        // made of its container's slot's and its own (`member_owner`), once the slot has one.
         let p = &self.state.project;
         let row_id = |r: usize| p.channels.get(r).map(|c| c.id);
         let slot_id = |t: u16, k: u8| p.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.id);
+        let members = &self.state.params.members;
+        let member_id = |key: usize| members.get(&key).and_then(|&(t, k, id)| crate::control::command::member_owner(slot_id(t, k)?.0, id)).map(Id);
         for (&key, h) in self.plugins.hosted.iter_mut() {
             if h.owner.is_none() {
                 h.owner = match fx_of(key) {
+                    None if key >= crate::plugins::MEMBER_KEY => member_id(key),
                     None => row_id(key),
                     Some((t, k)) => slot_id(t, k),
                 }
@@ -173,7 +177,7 @@ impl App {
             crate::misc::follow(self, row);
         }
         for (owner, param, v) in std::mem::take(&mut self.state.control.params) {
-            let Some(key) = crate::control::command::owner_key(&self.state.project, owner) else { continue };
+            let Some(key) = crate::control::command::owner_key(&self.state, owner) else { continue };
             let set = self.plugins.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.set_param(param, v));
             if set {
                 self.plugins.mark_edited(key);
@@ -186,7 +190,7 @@ impl App {
         let mut states = std::mem::take(&mut self.state.control.states);
         for i in 0..states.len() {
             let (owner, fill) = (states[i].0, states[i].2);
-            let Some(key) = crate::control::command::owner_key(&self.state.project, owner).filter(|k| self.plugins.hosted.contains_key(k)) else { continue };
+            let Some(key) = crate::control::command::owner_key(&self.state, owner).filter(|k| self.plugins.hosted.contains_key(k)) else { continue };
             let (now, preset) = (self.plugins.state(key).unwrap_or_default(), self.plugins.presets.get(&key).cloned());
             match states[i + 1..].iter_mut().find(|e| e.1.fill == fill) {
                 Some((_, side, _)) => (side.state, side.preset, side.fill) = (now, preset, 0),

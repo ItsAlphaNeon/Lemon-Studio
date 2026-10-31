@@ -8,6 +8,7 @@
 pub mod browser;
 pub mod cabledebug;
 pub mod channel_win;
+pub mod container;
 pub mod data_folder;
 pub mod factory_folder;
 pub mod dialog;
@@ -228,6 +229,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::Arp => ui.part(Seg::Win(win), a, |ui| arpeggiate::paint(ui, s, f)),
             Win::PianoDlg => ui.part(Seg::Win(win), a, |ui| piano_dlg::paint(ui, s, f)),
             Win::Events => ui.part(Seg::Win(win), a, |ui| events::paint(ui, s, f)),
+            Win::Container => ui.part(Seg::Win(win), a, |ui| container::paint(ui, s, f)),
             _ => {}
         }
         ui.c.pop_clip();
