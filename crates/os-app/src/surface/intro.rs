@@ -15,7 +15,7 @@ use super::launchkey::{self as lk, Colour, Led, Model};
 use crate::splash::{Follow, Moment};
 
 /// The pads round the ring, clockwise from the top row's left.
-const RING: [u8; 16] = [8, 9, 10, 11, 12, 13, 14, 15, 7, 6, 5, 4, 3, 2, 1, 0];
+const RING: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 15, 14, 13, 12, 11, 10, 9, 8];
 /// The snake's length in pads at the start of the logo's gauge.
 const SHORTEST: f32 = 3.0;
 /// The ring's level until the logo's mark pops.
