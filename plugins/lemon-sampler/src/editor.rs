@@ -432,6 +432,9 @@ pub struct Logic {
     drag: Option<Drag>,
     /// Hint text (`Label: value`, a tab before a right-aligned part).
     pub hint: String,
+    /// A parameter the host turned (`reveal`): when its hint goes, and the views it was found on, by parameter.
+    revealed: Option<(std::time::Instant, String)>,
+    found: std::collections::HashMap<String, Option<(u8, u8, u8)>>,
     copied: Option<f32>,
     /// Key held in the editor (preview) and its velocity.
     held: Option<(u8, u8)>,
@@ -451,6 +454,8 @@ impl Logic {
             hits: Vec::new(),
             drag: None,
             hint: String::new(),
+            revealed: None,
+            found: std::collections::HashMap::new(),
             copied: None,
             held: None,
             hosted: false,
@@ -518,6 +523,54 @@ impl Logic {
         let units = (secs * self.shared.tempo() / 60.0 * 192.0).round();
         if units >= 1.0 {
             self.edit("ts_time", params::time_norm(units / 48.0));
+        }
+    }
+
+    /// The host turned parameter `id`: the view it is on shows, and the hint says what changes.
+    pub fn reveal(&mut self, id: &str) {
+        let here = |h: &view::Hit| h.t.param() == Some(id);
+        if !self.hits.iter().any(here) {
+            if !self.found.contains_key(id) {
+                let at = self.find_view(id);
+                self.found.insert(id.to_string(), at);
+            }
+            if let Some(&Some((tab, sub, fx))) = self.found.get(id) {
+                (self.view.tab, self.view.sub, self.view.fx_page) = (tab, sub, fx);
+            }
+        }
+        self.hint = self.param_hint(id);
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(os_hostlink::REVEAL_MS);
+        self.revealed = Some((until, self.hint.clone()));
+    }
+
+    /// The view that draws parameter `id`: tab, envelope target, effects page.
+    fn find_view(&self, id: &str) -> Option<(u8, u8, u8)> {
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).ok()?;
+        let palette = os_plugkit::palette();
+        let views = [(0, self.view.sub, 0), (0, self.view.sub, 1)].into_iter().chain((0..view::ENV_PREFIX.len() as u8).map(|s| (1, s, self.view.fx_page)));
+        for (tab, sub, fx) in views {
+            let st = view::ViewState { tab, sub, fx_page: fx, ..self.view.clone() };
+            let hits = self.with_sample(|sv| view::paint(&mut c, &palette, &self.vals, &st, sv, "", false));
+            if hits.iter().any(|h| h.t.param() == Some(id)) {
+                return Some((tab, sub, fx));
+            }
+        }
+        None
+    }
+
+    /// The time of a turned parameter's hint is up. Whether the hint changed.
+    pub fn reveal_over(&mut self) -> bool {
+        match &self.revealed {
+            Some((until, _)) if std::time::Instant::now() < *until => false,
+            Some((_, text)) => {
+                let same = *text == self.hint;
+                if same {
+                    self.hint.clear();
+                }
+                self.revealed = None;
+                same
+            }
+            None => false,
         }
     }
 
@@ -2490,6 +2543,8 @@ mod gui {
         link: Arc<Peer>,
         /// The page as last agreed with the host.
         last_page: usize,
+        /// Parameter ids by the id the host knows them by.
+        host_ids: std::collections::HashMap<u32, String>,
     }
 
     pub fn open(parent: px::Parent, scale: f32, params: Arc<SamplerParams>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Option<px::EditorThread> {
@@ -2497,6 +2552,7 @@ mod gui {
         let px = move |v: u32| (v as f32 * scale).round() as u32;
         // Two pages (sample, envelopes); joined, the editor is what lies below the strip row.
         let wake = slot.clone();
+        let host_ids = nih_plug::prelude::Params::param_map(&*params).into_iter().map(|(id, _, _)| (os_hostlink::host_param_id(&id), id)).collect();
         let link = Peer::register(parent as u64, vec![PageIcon::Sample, PageIcon::Envelope], (view::EDITOR_W, view::HOSTED_EDITOR_H), move || px::notify(&wake));
         let peer = link.clone();
         let thread = px::spawn(parent, (px(view::EDITOR_W), px(view::EDITOR_H)), slot, move |win| {
@@ -2525,6 +2581,7 @@ mod gui {
                 dirty: true,
                 link: peer,
                 last_page: 0,
+                host_ids,
             };
             // Sample files dropped on the editor load (as on Windows).
             #[cfg(target_os = "macos")]
@@ -2633,6 +2690,12 @@ mod gui {
         fn poll(&mut self) {
             let mut dirty = self.logic.vals.expire();
             dirty |= self.logic.refresh_lit();
+            // The host turned a parameter: its view, and what changes in the hint.
+            if let Some(key) = self.link.take_reveal().and_then(|id| self.host_ids.get(&id).cloned()) {
+                self.logic.reveal(&key);
+                dirty = true;
+            }
+            dirty |= self.logic.reveal_over();
             if self.shared.stale(&self.params) {
                 self.shared.precompute_async(&self.params);
             }
@@ -2872,6 +2935,30 @@ mod tests {
         l.view.sub = 4;
         paint(&mut l);
         l
+    }
+
+    /// A parameter the host turned shows its view: an envelope target's own, or the sample tab; and the hint says it.
+    #[test]
+    fn a_turned_parameter_shows_its_view_and_says_what_changes() {
+        let mut l = logic(0);
+        paint(&mut l);
+        assert_eq!(l.view.tab, 0);
+        l.reveal("envmodx_att");
+        assert_eq!((l.view.tab, l.view.sub), (1, 2));
+        assert!(!l.hint.is_empty());
+        paint(&mut l);
+        l.reveal("envpitch_att");
+        assert_eq!((l.view.tab, l.view.sub), (1, 4));
+        paint(&mut l);
+        let on_sample = logic(0).hits.iter().find_map(|h| h.t.param().map(str::to_string)).expect("a parameter there");
+        l.reveal(&on_sample);
+        assert_eq!(l.view.tab, 0, "back on the sample tab");
+        // A parameter the view already shows moves nothing.
+        paint(&mut l);
+        let shown = l.view.clone();
+        l.reveal(&on_sample);
+        assert_eq!(l.view, shown);
+        assert!(!l.reveal_over(), "the hint stays a while");
     }
 
     fn paint(l: &mut Logic) {

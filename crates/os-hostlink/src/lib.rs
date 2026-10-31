@@ -22,6 +22,19 @@
 //! Spec: `plugins/host-link.md`. This is a Lemon Studio design, not FL's protocol.
 // spec: plugins/host-link.md
 
+/// The id a nih-plug parameter has at the host, from its id string (nih-plug keeps its own copy of this inside its
+/// wrappers): for `Peer::take_reveal`.
+pub fn host_param_id(id: &str) -> u32 {
+    let mut hash: u32 = 0;
+    for c in id.bytes() {
+        hash = hash.wrapping_mul(31).wrapping_add(u32::from(c));
+    }
+    hash & !(1 << 31)
+}
+
+/// How long a plugin's hint says what a turn of the host's changed.
+pub const REVEAL_MS: u64 = 2500;
+
 /// Name passed to `RegisterWindowMessageW`.
 pub const MESSAGE_NAME: &str = "OpenStudio.HostLink.1";
 /// Protocol version answered to [`Cmd::Hello`].

@@ -178,6 +178,9 @@ pub struct Logic {
     pub hint: String,
     copied: Option<f32>,
     pub hosted: bool,
+    /// A parameter the host turned (`reveal`): when its hint goes, and the views it was found on, by parameter.
+    revealed: Option<(std::time::Instant, String)>,
+    found: std::collections::HashMap<String, Option<(u8, u8)>>,
 }
 
 /// The knobs an envelope node edits: horizontal first.
@@ -195,7 +198,7 @@ fn env_point_ids(p: &str, i: u8) -> Vec<String> {
 impl Logic {
     pub fn new(params: Arc<Osc3Params>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         let vals = Vals::new(&*params, params.live.clone(), ctx);
-        let mut l = Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false };
+        let mut l = Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false , revealed: None, found: std::collections::HashMap::new() };
         l.sync_sample();
         l
     }
@@ -228,6 +231,52 @@ impl Logic {
 
     fn name(&self, id: &str) -> String {
         self.params.defs.iter().find(|d| d.id == id).map_or_else(|| id.to_string(), |d| d.name.clone())
+    }
+
+    /// The host turned parameter `id`: the view it is on shows, and the hint says what changes.
+    pub fn reveal(&mut self, id: &str) {
+        if !self.hits.iter().any(|h| h.t.param() == Some(id)) {
+            if !self.found.contains_key(id) {
+                let at = self.find_view(id);
+                self.found.insert(id.to_string(), at);
+            }
+            if let Some(&Some((tab, sub))) = self.found.get(id) {
+                (self.view.tab, self.view.sub) = (tab, sub);
+            }
+        }
+        self.hint = self.hint_for(Some(&Target::Knob(id.to_string())));
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(os_hostlink::REVEAL_MS);
+        self.revealed = Some((until, self.hint.clone()));
+    }
+
+    /// The view that draws parameter `id`: page and envelope target.
+    fn find_view(&self, id: &str) -> Option<(u8, u8)> {
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).ok()?;
+        let palette = os_plugkit::palette();
+        let views = (0..view::PAGES).filter(|&t| t != 1).map(|t| (t, self.view.sub)).chain((0..5).map(|s| (1, s)));
+        for (tab, sub) in views {
+            let st = ViewState { tab, sub, ..self.view.clone() };
+            if view::paint(&mut c, &palette, &self.vals, &st, "", false).iter().any(|h| h.t.param() == Some(id)) {
+                return Some((tab, sub));
+            }
+        }
+        None
+    }
+
+    /// The time of a turned parameter's hint is up. Whether the hint changed.
+    pub fn reveal_over(&mut self) -> bool {
+        match &self.revealed {
+            Some((until, _)) if std::time::Instant::now() < *until => false,
+            Some((_, text)) => {
+                let same = *text == self.hint;
+                if same {
+                    self.hint.clear();
+                }
+                self.revealed = None;
+                same
+            }
+            None => false,
+        }
     }
 
     fn hint_for(&self, t: Option<&Target>) -> String {
@@ -902,6 +951,8 @@ mod gui {
         link: Arc<Peer>,
         /// The page as last agreed with the host.
         last_page: usize,
+        /// Parameter ids by the id the host knows them by.
+        host_ids: std::collections::HashMap<u32, String>,
     }
 
     pub fn open(parent: px::Parent, scale: f32, params: Arc<Osc3Params>, shared: Arc<Shared>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Option<px::EditorThread> {
@@ -910,6 +961,7 @@ mod gui {
         // Three pages (oscillators, envelopes, sample); joined, the editor is what lies below the strip row.
         let wake = slot.clone();
         let pages = vec![PageIcon::Plugin, PageIcon::Envelope, PageIcon::Sample];
+        let host_ids = nih_plug::prelude::Params::param_map(&*params).into_iter().map(|(id, _, _)| (os_hostlink::host_param_id(&id), id)).collect();
         let link = Peer::register(parent as u64, pages, (view::EDITOR_W, view::HOSTED_EDITOR_H), move || px::notify(&wake));
         let peer = link.clone();
         let thread = px::spawn(parent, (px(view::EDITOR_W), px(view::EDITOR_H)), slot, move |win| {
@@ -933,6 +985,7 @@ mod gui {
                 dirty: true,
                 link: peer,
                 last_page: 0,
+                host_ids,
             };
             ed.run();
         });
@@ -1030,6 +1083,14 @@ mod gui {
 
         /// Timer / parameter change: expire confirmed overlay values, repaint when anything shown changed.
         fn poll(&mut self) {
+            // The host turned a parameter: its view, and what changes in the hint.
+            if let Some(key) = self.link.take_reveal().and_then(|id| self.host_ids.get(&id).cloned()) {
+                self.logic.reveal(&key);
+                self.dirty = true;
+            }
+            if self.logic.reveal_over() {
+                self.dirty = true;
+            }
             let dirty = self.logic.vals.expire();
             self.logic.sync_sample();
             let sig = self.logic.vals.signature();
@@ -1148,6 +1209,18 @@ mod gui {
 mod tests {
     use super::*;
     use crate::params::{osc, rec, COARSE, R_ATT, R_SUS, SHAPE, T_VOL};
+
+    /// A parameter the host turned shows its view: an envelope target's own, or the oscillators; and the hint says it.
+    #[test]
+    fn a_turned_parameter_shows_its_view_and_says_what_changes() {
+        let mut l = logic();
+        paint(&mut l);
+        let id = format!("{}_att", view::ENV_PREFIX[3]);
+        l.reveal(&id);
+        assert_eq!((l.view.tab, l.view.sub), (1, 3));
+        assert!(!l.hint.is_empty());
+        assert!(!l.reveal_over(), "the hint stays a while");
+    }
 
     fn logic() -> Logic {
         let mut l = Logic::new(Arc::new(Osc3Params::default()), Arc::new(Shared::default()), None);

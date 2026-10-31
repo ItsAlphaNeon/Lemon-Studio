@@ -1033,6 +1033,9 @@ impl App {
         if let (Some(id), Some(l)) = (id, self.plugins.hosted.get(&key).and_then(|h| h.link.as_ref())) {
             l.reveal(id);
         }
+        // Any plugin: the app's own hint says what changes.
+        self.hint = std::borrow::Cow::Owned(crate::params::row_hint(&self.state, key, index));
+        self.damage_band(crate::app::HINT_RECT);
     }
 
     /// The selected channel's plugin window opens as its parameters turn, unless an effect's window is in front.
