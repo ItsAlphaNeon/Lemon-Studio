@@ -237,6 +237,20 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             clip_paint(ui, s, &g, i, c);
         }
     }
+    // Performance mode: the part of the zone the MIDI channel's notes reach (spec: ui/performance-mode.md §3).
+    if let Some((tr, n, a, b)) = crate::perform::grid_area(s) {
+        let (y0, y1) = (g.y_of(tr), g.y_of(tr + n));
+        ui.c.stroke_rrect(Rect::span(g.x_of(a as f32), g.x_of(b as f32), y0, y1), 0.0, 1.0, t.playhead.with_alpha(140));
+    }
+    // Performance mode: a launched clip's zone clip is outlined and filled as far as its pass has played (spec:
+    // ui/performance-mode.md §3).
+    if f.playing && f.song {
+        for (i, k) in crate::perform::progress(s, f.tick.max(0.0) as u32) {
+            let r = g.clip_rect(&pl::clips(s)[i]);
+            ui.c.fill_rect(Rect::new(r.x, r.y, r.w * k, r.h), t.playhead.with_alpha(60));
+            ui.c.stroke_rrect(r, 0.0, 1.0, t.playhead);
+        }
+    }
     // Overlays.
     match s.playlist.overlay {
         Some(Overlay::Marquee(m)) => {

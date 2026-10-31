@@ -12212,7 +12212,7 @@ mod tests {
         click(&mut app, &mut c, r);
         assert_eq!(app.state.message.as_deref(), Some("Soft takeover: on"));
         assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Lemon Studio has no MIDI scripts"));
-        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Performance mode is not played from MIDI yet"));
+        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Number("Performance mode MIDI channel"))));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(PROJECT)));
         click(&mut app, &mut c, r);
         assert!(app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo("Ask for data folder", ..)))), "Ask for data folder works");

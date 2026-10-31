@@ -27,7 +27,13 @@ pub struct Perform {
     pub turn: BTreeMap<(u16, usize), usize>,
     /// The track whose slot is held with the mouse (Press Hold & stop, Hold & motion).
     pub held: Option<u16>,
+    /// The MIDI grid's first (track, column) (notes 120–123 scroll it) and whether it scrolls a page at a time (124).
+    pub origin: (u16, usize),
+    pub paging: bool,
 }
+
+/// The MIDI grid (§3): notes 0–119 are this many tracks of this many columns.
+pub const GRID: (u16, usize) = (10, 12);
 
 /// A track's launched clip.
 #[derive(Debug, Clone, PartialEq)]
@@ -233,6 +239,11 @@ fn next_in_slot(s: &mut State, cols: &[u32], track: u16, col: usize) -> Option<C
 /// `queue` (Shift) waits for the playing clip to end its pass. Returns the hint, `None` when `i` is not in the zone.
 pub fn trigger(s: &mut State, i: usize, now: Option<u32>, instant: bool, queue: bool) -> Option<String> {
     let (track, col) = slot_of(s, i)?;
+    trigger_slot(s, track, col, now, instant, queue)
+}
+
+/// `trigger` for slot (`track`, `col`); `None` when the slot has no clips.
+fn trigger_slot(s: &mut State, track: u16, col: usize, now: Option<u32>, instant: bool, queue: bool) -> Option<String> {
     let z = zone(s)?;
     let set = settings(s, track);
     let cols = columns(s);
@@ -271,6 +282,24 @@ pub fn trigger(s: &mut State, i: usize, now: Option<u32>, instant: bool, queue: 
     s.piano.dirty = true;
     let (bar, step, _) = crate::views::toolbar::bst_ticks(f64::from(at) * 96.0 / f64::from(p));
     Some(format!("{}: {} at {bar}:{step:02}", crate::playlist::track_name(s, track), PerfSettings::PRESSES[usize::from(set.press)]))
+}
+
+/// The progress display (§3): each launched track's zone clip sounding at `tick` (the clip index) and how far into it
+/// the pass playing is, 0 to 1.
+pub fn progress(s: &State, tick: u32) -> Vec<(usize, f32)> {
+    let Some(z) = zone(s) else { return Vec::new() };
+    let (all, cols) = (clips(s), columns(s));
+    let mut out = Vec::new();
+    for (&track, l) in &s.playlist.perform.live {
+        let Some(p) = l.pass_at(tick) else { continue };
+        // The zone clip the pass is a copy of: same track and source, the launched column's first.
+        let found = all.iter().enumerate().filter(|(_, c)| c.track == track && c.position < z && c.source == p.source);
+        let Some((i, c)) = found.min_by_key(|(_, c)| (column_of(&cols, c.position) != l.column, c.position)) else { continue };
+        let len = c.length.max(1);
+        let done = len.saturating_sub(p.end() - tick);
+        out.push((i, done as f32 / len as f32));
+    }
+    out
 }
 
 /// `l`'s passes before `at` (or before it falls silent), the one sounding there cut short.
@@ -314,7 +343,65 @@ pub fn stop(s: &mut State, track: u16, now: Option<u32>, instant: bool) -> bool 
 /// The mouse button is up after a press on a slot (§4 Press): Hold & stop stops at once, Hold & motion moves on as
 /// Motion says when the pass playing ends.
 pub fn release(s: &mut State, now: Option<u32>) {
-    let Some(track) = s.playlist.perform.held.take() else { return };
+    if let Some(track) = s.playlist.perform.held.take() {
+        release_track(s, track, now);
+    }
+}
+
+/// A note on the Performance mode MIDI channel (§3): notes 0–119 are 10 tracks of 12 slots, the note / 12 the track
+/// and the note % 12 the column. A key's release ends Press Hold & stop and Hold & motion as the mouse button's does.
+pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option<String> {
+    zone(s)?;
+    if key >= 120 {
+        return if down { scroll(s, key) } else { None };
+    }
+    let o = s.playlist.perform.origin;
+    let (track, col) = (o.0 + u16::from(key / 12), o.1 + usize::from(key % 12));
+    if !down {
+        if s.playlist.perform.live.get(&track).is_some_and(|l| l.column == col) {
+            release_track(s, track, now);
+        }
+        return None;
+    }
+    // The mouse's held slot is not this key's.
+    let held = s.playlist.perform.held;
+    let hint = trigger_slot(s, track, col, now, false, false);
+    s.playlist.perform.held = held;
+    hint
+}
+
+/// Notes 120–124 (§3): scroll the MIDI grid up, down, left or right, a track or column at a time or a page with paging
+/// on, which 124 toggles. 125–127 (scenes, Global Snap) do nothing yet.
+fn scroll(s: &mut State, key: u8) -> Option<String> {
+    let cols = columns(s).len();
+    let p = &mut s.playlist.perform;
+    let (dt, dc) = if p.paging { GRID } else { (1, 1) };
+    match key {
+        120 => p.origin.0 = p.origin.0.saturating_sub(dt),
+        121 => p.origin.0 = (p.origin.0 + dt).min(crate::playlist::TRACKS - GRID.0),
+        122 => p.origin.1 = p.origin.1.saturating_sub(dc),
+        123 => p.origin.1 = (p.origin.1 + dc).min(cols.saturating_sub(1)),
+        124 => p.paging = !p.paging,
+        _ => return None,
+    }
+    let (t, c) = (p.origin.0 + 1, p.origin.1 + 1);
+    let paging = if p.paging { ", paging" } else { "" };
+    s.piano.dirty = true;
+    Some(format!("Performance MIDI grid: tracks {t}–{}, columns {c}–{}{paging}", t + GRID.0 - 1, c + GRID.1 - 1))
+}
+
+/// The part of the zone the MIDI grid reaches, as (first track, track count, from tick, to tick), while the Performance
+/// mode MIDI channel is set (the playlist outlines it).
+pub fn grid_area(s: &State) -> Option<(u16, u16, u32, u32)> {
+    let z = zone(s)?;
+    (crate::prefs::number(&crate::prefs::PERFORMANCE_CHANNEL) != 0).then_some(())?;
+    let (cols, o) = (columns(s), s.playlist.perform.origin);
+    let from = *cols.get(o.1)?;
+    let to = cols.get(o.1 + GRID.1).copied().unwrap_or(z);
+    Some((o.0, GRID.0, from, to))
+}
+
+fn release_track(s: &mut State, track: u16, now: Option<u32>) {
     let set = settings(s, track);
     match set.press {
         1 => {
@@ -425,6 +512,8 @@ pub fn apply(s: &State, p: &mut Project) {
 mod tests {
     use super::*;
     use crate::app::App;
+    use crate::midi_in::Msg;
+    use crate::prefs;
     use os_model::ClipSource;
 
     #[test]
@@ -456,6 +545,58 @@ mod tests {
         a.markers = vec![TimeMarker::new(0, ""), TimeMarker::new(1536, ""), TimeMarker { kind: TimeMarker::START, ..TimeMarker::new(3072, "Start") }];
         s.project.performance = Some(true);
         app
+    }
+
+    /// §3: the Performance mode MIDI channel's notes trigger slots; their release ends Hold & stop.
+    #[test]
+    fn midi_notes_trigger_slots() {
+        let mut app = app();
+        prefs::set_number(&prefs::PERFORMANCE_CHANNEL, 6);
+        let note = |key, down| if down { Msg::On { ch: 5, key, vel: 100 } } else { Msg::Off { ch: 5, key, vel: 64 } };
+        app.midi_notes(vec![note(1, true), note(1, false)]);
+        let l = &app.state.playlist.perform.live[&0];
+        assert_eq!((l.column, l.armed), (1, true), "note 1: track 1, column 2, armed while stopped");
+        app.midi_notes(vec![note(12, true), note(120, true)]);
+        assert!(!app.state.playlist.perform.live.contains_key(&1), "track 2 has no clips in the zone");
+        arr_mut(&mut app.state).tracks[0].perf.press = 1;
+        app.midi_notes(vec![note(0, true)]);
+        assert_eq!(app.state.playlist.perform.live[&0].column, 0);
+        app.midi_notes(vec![note(1, false)]);
+        assert!(app.state.playlist.perform.live.contains_key(&0), "another key's release");
+        app.midi_notes(vec![note(0, false)]);
+        assert!(!app.state.playlist.perform.live.contains_key(&0), "Hold & stop: the release stops it");
+
+        // Scrolling: one column right, then note 0 is column 2.
+        assert_eq!(grid_area(&app.state), Some((0, 10, 0, 3072)));
+        app.midi_notes(vec![note(123, true), note(123, false)]);
+        assert_eq!(app.state.message.as_deref(), Some("Performance MIDI grid: tracks 1–10, columns 2–13"));
+        assert_eq!(grid_area(&app.state), Some((0, 10, 1536, 3072)));
+        app.midi_notes(vec![note(123, true), note(0, true)]);
+        assert_eq!(app.state.playlist.perform.origin, (0, 1), "the last column is the furthest");
+        assert_eq!(app.state.playlist.perform.live[&0].column, 1);
+        app.midi_notes(vec![note(124, true), note(121, true), note(120, true), note(120, true), note(122, true)]);
+        assert_eq!(app.state.playlist.perform, Perform { origin: (0, 0), paging: true, ..app.state.playlist.perform.clone() });
+        app.midi_notes(vec![note(121, true)]);
+        assert_eq!(app.state.playlist.perform.origin, (10, 0), "a page down");
+        app.state.playlist.perform = Perform::default();
+        app.state.project.performance = Some(false);
+        app.midi_notes(vec![note(0, true)]);
+        assert!(app.state.playlist.perform.live.is_empty(), "off: nothing is triggered");
+        prefs::set_number(&prefs::PERFORMANCE_CHANNEL, 0);
+    }
+
+    #[test]
+    fn progress_follows_the_pass() {
+        let mut app = app();
+        let s = &mut app.state;
+        trigger(s, 0, Some(3102), false, false);
+        assert_eq!(progress(s, 3200), vec![], "not started yet");
+        assert_eq!(progress(s, 3456 + 96), vec![(0, 0.25)]);
+        assert_eq!(progress(s, 3840 + 288), vec![(0, 0.75)], "the second pass");
+        // Position sync 1 beat: the first pass starts 10 ticks into the clip.
+        arr_mut(s).tracks[0].perf.position_sync = 3;
+        trigger(s, 1, Some(3082), true, false);
+        assert_eq!(progress(s, 3082), vec![(1, 10.0 / 768.0)]);
     }
 
     #[test]

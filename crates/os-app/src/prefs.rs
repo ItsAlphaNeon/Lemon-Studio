@@ -514,6 +514,8 @@ pub const SYNC_TYPE: Combo = Combo {
 pub const OMNI_CHANNEL: Number = Number { key: "midi_omni_channel", label: "Omni preview MIDI channel", min: 0, max: 16, default: 0 };
 pub const MARKER_CHANNEL: Number = Number { key: "midi_marker_channel", label: "Song marker jump MIDI channel", min: 0, max: 16, default: 0 };
 pub const MUTING_CHANNEL: Number = Number { key: "midi_muting_channel", label: "Instrument muting MIDI channel", min: 0, max: 16, default: 0 };
+/// Its notes launch the arranger's performance zone (spec: ui/performance-mode.md §3).
+pub const PERFORMANCE_CHANNEL: Number = Number { key: "midi_performance_channel", label: "Performance mode MIDI channel", min: 0, max: 16, default: 0 };
 
 // Recording (Lemon Studio's own page, spec: ui/settings.md "Recording"): the same settings the Record button's
 // right-click menu, the toolbar's option buttons and the mixer's Disk recording menu set (`crate::record::Opt` reads
@@ -635,7 +637,7 @@ pub const COMBOS: &[&Combo] = &[&MAIN_GUI_SCALING, &POPUPS_SCALING, &NOTE_NAMES,
 pub const OFF_PAGE_COMBOS: &[&Combo] = &crate::shortcuts::ROWS;
 
 /// The declared value boxes.
-pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BACKUP_MAXIMUM, &BROWSER_PREVIEW_TRACK, &METRONOME_TRACK, &OMNI_CHANNEL, &MARKER_CHANNEL, &MUTING_CHANNEL];
+pub const NUMBERS: &[&Number] = &[&MAX_UNDO_LEVELS, &BACKUP_MAXIMUM, &BROWSER_PREVIEW_TRACK, &METRONOME_TRACK, &OMNI_CHANNEL, &MARKER_CHANNEL, &MUTING_CHANNEL, &PERFORMANCE_CHANNEL];
 
 /// General ▸ Input: the editors scroll by the vertical wheel's steps times value / 256 (`crate::scroll_speed`);
 /// Shift+wheel keeps its own step. Spec: ui/settings-choices.md "Input: Vertical and Horizontal scrolling speed".
