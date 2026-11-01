@@ -580,8 +580,14 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
         .map_or(if selected { ui.t.tx(0xaab2b7) } else if also { ui.t.tx(0xe4e8ea) } else { ui.t.s(0x7f868a) }, |c| {
             if also { c.mix(ui.t.tx(0xffffff), 0.5) } else { c.mix(ui.t.s(0x7f868a), 0.4) }
         });
+    // Change icon... (Lemon Studio's design): the icon at the bottom of the name's column, the name above it.
+    let icon = crate::playlist::window_icon(&s.project, &s.playlist.icons, crate::playlist::TRACK_ICON_KEY + usize::from(n));
+    if let Some(ic) = icon {
+        icons::draw(ui.c, ic, Rect::new(sx - 9.0, meter.bottom() - 12.0, 12.0, 12.0), name_c);
+    }
+    let lead = if icon.is_some() { 15.0 } else { 0.0 };
     ui.c.push_clip(Rect::new(left + 2.0, ly.y(PANEL_Y0), 20.0, ly.y(METER_Y1) - ly.y(PANEL_Y0)));
-    ui.c.text_vertical(Font::new(15), sx - 7.0, meter.bottom() - 1.0, name_c, &name);
+    ui.c.text_vertical(Font::new(15), sx - 7.0, meter.bottom() - 1.0 - lead, name_c, &name);
     ui.c.pop_clip();
 
     let enabled = track.is_none_or(|m| m.enabled);
@@ -838,7 +844,14 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         // cap height (the face's is about 0.72 of its size) under the middle, measured on the face drawn (the italic
         // one has its own ascent). Classic keeps FL's place.
         let ty = if super::lemon(ui) { (row.cy() + 0.36 * f32::from(fs) - ui.c.ascent(f)).round() } else { row.y + 4.0 * kp };
-        ui.c.text_clip(f, row.x + 19.0, ty, 140.0, ink, &name);
+        // Change icon... (Lemon Studio's design): the icon before the name.
+        let icon = crate::playlist::window_icon(&s.project, &s.playlist.icons, crate::plugins::fx_key(n, k));
+        if let Some(ic) = icon {
+            let sz = (12.0 * kp.max(0.62)).round();
+            icons::draw(ui.c, ic, Rect::new(row.x + 19.0, row.cy() - sz / 2.0, sz, sz), ink);
+        }
+        let lead = if icon.is_some() { (16.0 * kp.max(0.62)).round() } else { 0.0 };
+        ui.c.text_clip(f, row.x + 19.0 + lead, ty, 140.0 - lead, ink, &name);
         let mix = KnobId::SlotMix(n, k);
         ui.hit(Rect::new(row.right() - 46.0, row.y, 26.0, row.h), Action::Knob(mix), s.knob_text(mix));
         mixer_knob(ui, row.right() - 33.0, row.cy(), 10.5 * q, 12.0 * q, s.knob(mix), Some(false));
