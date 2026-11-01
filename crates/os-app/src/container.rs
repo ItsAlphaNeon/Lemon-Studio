@@ -2,20 +2,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Containers, Lemon Studio's Patcher (slice 1): a mixer slot holding a serial chain of effects, each with its own
-//! wet and dry levels. The slot menu's Wrap in container moves the slot's effect into a new container in the same
-//! slot; Wrap all in container moves the track's effects, in slot order, into one container in this slot and empties
-//! the others. The container's window (`ContainerUi`, `views::container`) lists the effects with their wet and dry
-//! knobs, removes, moves, adds and replaces effects and opens their windows. Each edit is one undo step.
+//! Containers, Lemon Studio's Patcher (slices 1 and 3): a mixer slot holding a serial chain of effects, or a channel
+//! whose instrument is such a chain led by instruments, each member with its own wet and dry levels. The slot menu's
+//! Wrap in container moves the slot's effect into a new container in the same slot; Wrap all in container moves the
+//! track's effects, in slot order, into one container in this slot and empties the others; the channel menu's Wrap in
+//! container moves the channel's instrument into a container on the channel, which plays the channel's notes. The
+//! container's window (`ContainerUi`, `views::container`) lists the members with their wet and dry knobs, removes,
+//! moves, adds and replaces them and opens their windows. Each edit is one undo step.
 //!
-//! The project keeps a container as a slot plugin of its own name whose state lists the members (`Member`): each
-//! effect's identity, name, levels and saved state. The slot's chain is built from that list (`App::sync_containers`)
-//! and plays as the slot's effect (`os_engine::chain::Chain`). The members' instances are hosted under keys of their
-//! own (`plugins::MEMBER_KEY`), for their windows, parameters and presets. A member's parameters and its wet and dry
-//! levels are automated and linked as parameters of the container's slot: the member's id and the item packed in the
-//! parameter index (`os_model::target::member_item`), so that clips and links follow the member when it moves. Their
-//! windows' edits and presets are undo steps by an owner id of their own (`control::command::member_owner`).
-// spec: plugins/patcher/README.md §3.1, §3.3, §4 slice 1, §4.1, §4.2, §4.3
+//! The project keeps a container as a slot or channel plugin of its own name whose state lists the members (`Member`):
+//! each plugin's identity, kind, name, levels and saved state. The chain is built from that list
+//! (`App::sync_containers`) and plays as the slot's effect or the channel's instrument (`os_engine::chain::Chain`). A
+//! container is named by its place, a track and a slot, the slot [`CHANNEL`] for a channel's (the track then being its
+//! rack row). The members' instances are hosted under keys of their own (`plugins::MEMBER_KEY`), for their windows,
+//! parameters and presets. A member's parameters and its wet and dry levels are automated and linked as parameters of
+//! the container's slot or channel: the member's id and the item packed in the parameter index
+//! (`os_model::target::member_item`), so that clips and links follow the member when it moves. Their windows' edits and
+//! presets are undo steps by an owner id of their own (`control::command::member_owner`).
+// spec: plugins/patcher/README.md §3.1, §3.3, §4 slices 1 and 3, §4.1, §4.2, §4.3, §4.4
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -27,21 +31,30 @@ use os_model::{Id, Project, SlotPlugin};
 use crate::app::{App, State, Win};
 use crate::knobs::KnobId;
 use crate::playlist::{Cmd, PItem, Popup};
-use crate::plugins::{fx_key, fx_of, Hosted, Plugins, MEMBER_KEY};
+use crate::plugins::{fx_key, fx_of, Hosted, Plugins, FX_KEY, MEMBER_KEY};
 
 /// The slot plugin name a container is kept under (Lemon Studio's own; the original's Patcher state is not read yet).
 pub const CONTAINER: &str = "Lemon Container";
 
-/// The state's first bytes and version (1: without the members' ids).
+/// The state's first bytes and version (1: without the members' ids; 2: without their kinds).
 const MAGIC: &[u8; 4] = b"LCNT";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
-/// One effect of a container, as the project keeps it.
+/// A member's kind in the state (version 3): bit 0 set for an instrument.
+const INSTRUMENT: u32 = 1;
+
+/// The slot a channel's container is named by: a container's place is (rack row, `CHANNEL`) on a channel, (track,
+/// slot) in the mixer.
+pub const CHANNEL: u8 = 0xFF;
+
+/// One plugin of a container, as the project keeps it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Member {
     /// Its number in the container, kept while it is moved (an edit keeps its instance and window).
     pub id: u32,
-    /// The effect plugin's identity (`os_host::Descriptor::uid`) and name.
+    /// An instrument (it plays the channel's notes; a channel's container only), else an effect.
+    pub instrument: bool,
+    /// The plugin's identity (`os_host::Descriptor::uid`) and name.
     pub uid: String,
     pub name: String,
     /// The output is `wet` times the effect's output plus `dry` times its input.
@@ -62,6 +75,7 @@ pub fn encode(members: &[Member]) -> Vec<u8> {
     };
     for m in members {
         b.extend(m.id.to_le_bytes());
+        b.extend((if m.instrument { INSTRUMENT } else { 0 }).to_le_bytes());
         bytes(&mut b, m.uid.as_bytes());
         bytes(&mut b, m.name.as_bytes());
         b.extend(m.wet.to_le_bytes());
@@ -96,28 +110,58 @@ pub fn decode(b: &[u8]) -> Option<Vec<Member>> {
     let mut v = Vec::new();
     for i in 0..count {
         let id = if version >= 2 { word(&mut at)? } else { i + 1 };
+        let instrument = version >= 3 && word(&mut at)? & INSTRUMENT != 0;
         let uid = String::from_utf8(bytes(&mut at)?).ok()?;
         let name = String::from_utf8(bytes(&mut at)?).ok()?;
         let wet = f32::from_bits(word(&mut at)?);
         let dry = f32::from_bits(word(&mut at)?);
         let state = bytes(&mut at)?;
-        v.push(Member { id, uid, name, wet, dry, state });
+        v.push(Member { id, instrument, uid, name, wet, dry, state });
     }
     Some(v)
 }
 
-/// The members of slot `slot` of track `t`, when it holds a container.
-pub fn members(s: &State, t: u16, slot: u8) -> Option<Vec<Member>> {
-    let p = crate::mixer::track(s, t)?.slots.get(usize::from(slot))?.as_ref()?;
-    (p.name == CONTAINER).then(|| decode(&p.state)).flatten()
+/// Whether channel `ch` is a container (its instrument a chain).
+pub fn is_container_channel(ch: &os_model::Channel) -> bool {
+    ch.kind == os_model::ChannelKind::Plugin && ch.plugin.as_deref() == Some(CONTAINER)
 }
 
-/// How many members the container in slot `slot` of track `t` holds, read from its state's header alone (the
-/// window's size, worked out on every frame without decoding the members' states).
-pub fn member_count(s: &State, t: u16, slot: u8) -> Option<usize> {
-    let p = crate::mixer::track(s, t)?.slots.get(usize::from(slot))?.as_ref().filter(|p| p.name == CONTAINER)?;
-    let word = |at: usize| Some(u32::from_le_bytes(p.state.get(at..at + 4)?.try_into().ok()?));
-    (p.state.get(..4)? == MAGIC && (1..=VERSION).contains(&word(4)?)).then(|| word(8).map(|n| n as usize)).flatten()
+/// The state of the container at place (`t`, `k`): slot `k` of track `t`, or rack row `t`'s for `k` = [`CHANNEL`].
+fn state_in(p: &Project, t: u16, k: u8) -> Option<&[u8]> {
+    if k == CHANNEL {
+        let ch = p.channels.get(usize::from(t)).filter(|c| is_container_channel(c))?;
+        return ch.plugin_state.as_deref().or(Some(&[][..]));
+    }
+    let slot = p.mixer.iter().find(|m| m.index == t)?.slots.get(usize::from(k))?.as_ref()?;
+    (slot.name == CONTAINER).then_some(slot.state.as_slice())
+}
+
+/// `state_in` to write.
+fn state_in_mut(p: &mut Project, t: u16, k: u8) -> Option<&mut Vec<u8>> {
+    if k == CHANNEL {
+        let ch = p.channels.get_mut(usize::from(t)).filter(|c| is_container_channel(c))?;
+        return Some(ch.plugin_state.get_or_insert_with(Vec::new));
+    }
+    let slot = p.mixer.iter_mut().find(|m| m.index == t)?.slots.get_mut(usize::from(k))?.as_mut()?;
+    (slot.name == CONTAINER).then_some(&mut slot.state)
+}
+
+/// The members of the container at place (`t`, `k`) (a mixer slot, or a channel's for `k` = [`CHANNEL`]).
+pub fn members(s: &State, t: u16, k: u8) -> Option<Vec<Member>> {
+    let b = state_in(&s.project, t, k)?;
+    // A channel just made a container and not saved yet holds no list: an empty one.
+    if b.is_empty() && k == CHANNEL {
+        return Some(Vec::new());
+    }
+    decode(b)
+}
+
+/// How many members the container at place (`t`, `k`) holds, read from its state's header alone (the window's size,
+/// worked out on every frame without decoding the members' states).
+pub fn member_count(s: &State, t: u16, k: u8) -> Option<usize> {
+    let b = state_in(&s.project, t, k)?;
+    let word = |at: usize| Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?));
+    (b.get(..4)? == MAGIC && (1..=VERSION).contains(&word(4)?)).then(|| word(8).map(|n| n as usize)).flatten()
 }
 
 /// A level knob's hint: "Lemon Limiter wet: 60%".
@@ -125,11 +169,83 @@ pub fn level_text(name: &str, wet: bool, v: f32) -> String {
     format!("{name} {}: {:.0}%", if wet { "wet" } else { "dry" }, v * 100.0)
 }
 
-/// Writes `list` as the state of the container in slot `slot` of track `t`.
-fn set_members(s: &mut State, t: u16, slot: u8, list: &[Member]) {
-    if let Some(p) = crate::mixer::track_mut(s, t).and_then(|m| m.slots[usize::from(slot)].as_mut()).filter(|p| p.name == CONTAINER) {
-        p.state = encode(list);
+/// Writes `list` as the state of the container at place (`t`, `k`).
+fn set_members(s: &mut State, t: u16, k: u8, list: &[Member]) {
+    if let Some(b) = state_in_mut(&mut s.project, t, k) {
+        *b = encode(list);
     }
+}
+
+/// The `Plugins::containers` key of the container at place (`t`, `k`): its slot's `fx_key`, or its channel's row.
+pub fn place_key(t: u16, k: u8) -> usize {
+    if k == CHANNEL {
+        usize::from(t)
+    } else {
+        fx_key(t, k)
+    }
+}
+
+/// The place of the container under `Plugins::containers` key `key` (`place_key`'s other way).
+pub fn key_place(key: usize) -> Option<(u16, u8)> {
+    if key < FX_KEY {
+        return Some((u16::try_from(key).ok()?, CHANNEL));
+    }
+    fx_of(key)
+}
+
+/// The project id of the slot plugin or channel holding the container at place (`t`, `k`).
+pub fn place_id(s: &State, t: u16, k: u8) -> Option<Id> {
+    let p = &s.project;
+    if k == CHANNEL {
+        return p.channels.get(usize::from(t)).map(|c| c.id);
+    }
+    p.mixer.iter().find(|m| m.index == t)?.slots.get(usize::from(k))?.as_ref().map(|s| s.id)
+}
+
+/// The place of the container held by the slot plugin or channel with project id `id` (`place_id`'s other way).
+pub fn id_place(s: &State, id: u32) -> Option<(u16, u8)> {
+    let p = &s.project;
+    if let Some(r) = p.channels.iter().position(|c| c.id.0 == id) {
+        return Some((u16::try_from(r).ok()?, CHANNEL));
+    }
+    p.mixer.iter().find_map(|m| Some((m.index, m.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.id.0 == id))? as u8)))
+}
+
+/// What the container at place (`t`, `k`) is shown as: its track's name for a slot's ("Bus 2"), its channel's name.
+pub fn place_name(s: &State, t: u16, k: u8) -> String {
+    if k != CHANNEL {
+        return crate::mixer::name(s, t);
+    }
+    let ch = s.project.channels.get(usize::from(t));
+    ch.and_then(|c| c.name.clone()).unwrap_or_else(|| format!("Channel {}", usize::from(t) + 1))
+}
+
+/// The container's title, "Container (Bus 2)": its slot's label, or for a channel's "Container (Lemon Trio)".
+pub fn title(s: &State, t: u16, k: u8) -> Option<String> {
+    if k != CHANNEL {
+        return crate::params::effect_label(s, t, k);
+    }
+    state_in(&s.project, t, k)?;
+    Some(format!("Container ({})", place_name(s, t, k)))
+}
+
+/// The automation target of item `item` of the container at place (`t`, `k`): a parameter of its slot or channel.
+pub fn item_target(s: &State, t: u16, k: u8, item: u16) -> Option<u32> {
+    if k == CHANNEL {
+        return Some(target::channel_param(s.project.channels.get(usize::from(t))?.index, item));
+    }
+    Some(target::slot_param(t, k, item))
+}
+
+/// The container at place (`t`, `k`) and the item an automation target on its slot's or channel's parameters names.
+pub fn target_place(s: &State, tg: Auto) -> Option<(u16, u8, u16)> {
+    let (t, k, i) = match tg {
+        Auto::SlotParam(m, k, i) => (m, k, i),
+        Auto::ChannelParam(ch, i) => (u16::try_from(s.project.channels.iter().position(|c| c.index == ch)?).ok()?, CHANNEL, i),
+        _ => return None,
+    };
+    state_in(&s.project, t, k)?;
+    Some((t, k, i))
 }
 
 /// The wet and dry levels of a slot at stored mix `mix` (0..1) and switch `on`, as the slot blends them (spec:
@@ -142,13 +258,16 @@ fn levels(mix: f64, on: bool) -> (f32, f32) {
     (1.0 - d, d)
 }
 
-/// A container being played: the slot's id, the state its chain was built from, the members' instances and the chain.
+/// A container being played: the slot's or channel's id, the state its chain was built from, the members' instances
+/// and the chain.
 pub struct Live {
     pub id: Id,
     /// The slot's state the chain was built from: compared every tick, decoded only when it changed.
     src: Vec<u8>,
     /// The members' ids and identities by position (another list rebuilds the chain; other levels only set them).
     shape: Vec<(u32, String)>,
+    /// Whether it plays a channel (its members' instruments play the channel's notes).
+    pub channel: bool,
     /// The members' `hosted` keys by position (`None`: its effect was not found, left out of the chain).
     pub keys: Vec<Option<usize>>,
     pub fx: Arc<Mutex<Chain>>,
@@ -159,13 +278,18 @@ fn shape(members: &[Member]) -> Vec<(u32, String)> {
 }
 
 /// The undo step names of the menu entries.
+/// The slot menu's Wrap in container and the channel menu's (the original's Patcherize) are named alike.
 pub const WRAP: &str = "Wrap in container";
 pub const WRAP_ALL: &str = "Wrap all in container";
 pub const REMOVE: &str = "Remove effect from container";
 pub const MOVE: &str = "Move effect in container";
 pub const ADD: &str = "Add effect to container";
+pub const ADD_INSTRUMENT: &str = "Add instrument to container";
 pub const REPLACE: &str = "Replace effect in container";
 pub const LEVEL: &str = "Effect level in container";
+
+/// A new instrument member's levels: its sound added to what the members before it put out (a layer).
+pub const INSTRUMENT_LEVELS: (f32, f32) = (1.0, 1.0);
 
 /// The most effects a container holds (the ids its members' automation targets have room for).
 pub const MAX_MEMBERS: usize = MEMBER_IDS as usize;
@@ -176,7 +300,7 @@ pub const MAX_MEMBERS: usize = MEMBER_IDS as usize;
 #[derive(Debug, Clone)]
 pub struct ContainerUi {
     pub pos: (f32, f32),
-    /// The track and slot of the container shown.
+    /// The place of the container shown: track and slot, or rack row and [`CHANNEL`].
     pub at: (u16, u8),
     /// The chain's wet and dry by member id, as last read.
     pub live: BTreeMap<u32, (f32, f32)>,
@@ -195,11 +319,11 @@ pub enum CAct {
     Open(usize),
     /// Member `.0`'s ▸ button: its menu.
     Menu(usize),
-    /// Add effect: the effect list of an empty slot.
+    /// Add effect: the effect list of an empty slot (a channel's container: the instruments too).
     Add,
 }
 
-/// Shows the window of the container in slot `slot` of track `t`.
+/// Shows the window of the container at place (`t`, `slot`).
 pub fn show(s: &mut State, t: u16, slot: u8) {
     if s.container.at != (t, slot) {
         s.container.live.clear();
@@ -235,7 +359,8 @@ pub fn knob_menu(s: &State, id: KnobId, x: f32, y: f32) -> Option<Popup> {
     Some(Popup { x, y, items, sub: None, scroll: [0; 2] })
 }
 
-/// The commands of the window's menus run with their container's track selected (as a slot window's do).
+/// The commands of the window's menus run with their container's track selected (as a slot window's do); a channel's
+/// container's run with its row in the track's place, which is how they find it.
 fn on_track(t: u16, items: &mut [PItem]) {
     for it in items.iter_mut() {
         if let Cmd::Mixer(_) = it.cmd {
@@ -261,6 +386,13 @@ pub fn can_wrap(app: &App, slot: u8, all: bool) -> bool {
     app.plugins.hosted.contains_key(&fx_key(t, slot)) || (all && members(&app.state, t, slot).is_some())
 }
 
+/// Whether rack row `row`'s instrument can be wrapped: a plugin channel whose plugin is hosted (not a sampler, whose
+/// sample is the channel's).
+pub fn can_wrap_channel(s: &State, row: usize) -> bool {
+    let ch = s.project.channels.get(row);
+    ch.is_some_and(|c| c.kind == os_model::ChannelKind::Plugin && !is_container_channel(c)) && s.hosted_rows.contains(&row)
+}
+
 fn pct(v: f32) -> i32 {
     (v * 100.0).round() as i32
 }
@@ -270,17 +402,17 @@ pub fn level(s: &State, t: u16, k: u8, id: u32, wet: bool) -> Option<f32> {
     members(s, t, k)?.into_iter().find(|m| m.id == id).map(|m| if wet { m.wet } else { m.dry })
 }
 
-/// The type-in box's caption: "Bus 2 - Lemon Limiter wet".
+/// The type-in box's caption: "Bus 2 - Lemon Limiter wet" (a channel's container: the channel's name first).
 pub fn level_name(s: &State, t: u16, k: u8, id: u32, wet: bool) -> String {
     let name = members(s, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.name);
-    format!("{} - {name} {}", crate::mixer::name(s, t), if wet { "wet" } else { "dry" })
+    format!("{} - {name} {}", place_name(s, t, k), if wet { "wet" } else { "dry" })
 }
 
 /// Sets the wet (`wet`) or dry level of member `id` of the container in slot `k` of track `t` to `v` (0..1): one undo
 /// step. The chain takes the level on the next tick, keeping its instances (`App::sync_containers`).
 pub fn set_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
     let Some(list) = leveled(s, t, k, id, wet, v) else { return };
-    crate::control::edit(s, LEVEL, crate::control::command::Region::Track(t), |s| set_members(s, t, k, &list));
+    crate::control::edit(s, LEVEL, region(t, k), |s| set_members(s, t, k, &list));
     s.piano.dirty = true;
 }
 
@@ -289,8 +421,18 @@ pub fn set_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
 pub fn set_level_run(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
     let Some(list) = leveled(s, t, k, id, wet, v) else { return };
     let run = crate::history::Run::Member(t, k, id, wet);
-    crate::control::run_edit(s, LEVEL, crate::control::command::Region::Track(t), run, true, |s| set_members(s, t, k, &list));
+    crate::control::run_edit(s, LEVEL, region(t, k), run, true, |s| set_members(s, t, k, &list));
     s.piano.dirty = true;
+}
+
+/// What an edit of the container at place (`t`, `k`) changes, for its undo step: its track, or its channel.
+fn region(t: u16, k: u8) -> crate::control::command::Region {
+    use crate::control::command::Region;
+    if k == CHANNEL {
+        Region::Channel(usize::from(t))
+    } else {
+        Region::Track(t)
+    }
 }
 
 /// The list with the level set (`None`: no such member, or the level is `v` already).
@@ -305,35 +447,41 @@ fn leveled(s: &State, t: u16, k: u8, id: u32, wet: bool, v: f32) -> Option<Vec<M
     Some(list)
 }
 
-/// The automation target of member `id`'s wet (`wet`) or dry level in the container in slot `k` of track `t` (spec:
-/// plugins/patcher/README.md §4.2).
-pub fn level_target(t: u16, k: u8, id: u32, wet: bool) -> Option<u32> {
-    Some(target::slot_param(t, k, target::member_item(id, if wet { MEMBER_WET } else { MEMBER_DRY })?))
+/// The automation target of member `id`'s wet (`wet`) or dry level in the container at place (`t`, `k`) (spec:
+/// plugins/patcher/README.md §4.2, §4.4).
+pub fn level_target(s: &State, t: u16, k: u8, id: u32, wet: bool) -> Option<u32> {
+    item_target(s, t, k, target::member_item(id, if wet { MEMBER_WET } else { MEMBER_DRY })?)
 }
 
-/// The member level an automation target names, when it is one: track, slot, member id, wet.
-pub fn level_of(s: &State, t: Auto) -> Option<(u16, u8, u32, bool)> {
-    let Auto::SlotParam(m, k, i) = t else { return None };
+/// The member level an automation target names, when it is one: track (or row), slot (or [`CHANNEL`]), member id, wet.
+pub fn level_of(s: &State, tg: Auto) -> Option<(u16, u8, u32, bool)> {
+    let (m, k, i) = target_place(s, tg)?;
     let (id, item) = target::member_of(i)?;
     (item >= MEMBER_WET && members(s, m, k)?.iter().any(|x| x.id == id)).then_some((m, k, id, item == MEMBER_WET))
 }
 
 /// "Create automation clip" on a member's level: target, clip name ("Bus 2 - Lemon Limiter wet"), current value.
 pub fn level_automation(s: &State, t: u16, k: u8, id: u32, wet: bool) -> Option<(u32, String, f64)> {
-    Some((level_target(t, k, id, wet)?, level_name(s, t, k, id, wet), f64::from(level(s, t, k, id, wet)?)))
+    Some((level_target(s, t, k, id, wet)?, level_name(s, t, k, id, wet), f64::from(level(s, t, k, id, wet)?)))
 }
 
-/// The member that container slot key `slot_key` holds under id `id`: its hosted key, when its effect is loaded.
-pub fn member_key(s: &State, slot_key: usize, id: u32) -> Option<usize> {
-    let (t, k) = fx_of(slot_key)?;
+/// The member that the container under `Plugins::containers` key `place` holds under id `id`: its hosted key, when its
+/// plugin is loaded.
+pub fn member_key(s: &State, place: usize, id: u32) -> Option<usize> {
+    let (t, k) = key_place(place)?;
     s.params.members.iter().find(|(_, m)| **m == (t, k, id)).map(|(&key, _)| key)
 }
 
-/// The name of the member hosted under `key` and its container's slot label, "Lemon Limiter in Container (Bus 2)".
+/// The name of the member hosted under `key` and its container's title, "Lemon Limiter in Container (Bus 2)".
 pub fn member_label(s: &State, key: usize) -> Option<String> {
     let &(t, k, id) = s.params.members.get(&key)?;
     let name = members(s, t, k)?.into_iter().find(|m| m.id == id)?.name;
-    Some(format!("{name} in {}", crate::params::effect_label(s, t, k)?))
+    Some(format!("{name} in {}", title(s, t, k)?))
+}
+
+/// Whether member `id` of the container at place (`t`, `k`) is an instrument.
+pub fn is_instrument(s: &State, t: u16, k: u8, id: u32) -> bool {
+    members(s, t, k).is_some_and(|l| l.iter().any(|m| m.id == id && m.instrument))
 }
 
 /// The smallest id no member of `list` has, up to the targets' limit (`None`: the container is full).
@@ -386,11 +534,9 @@ fn member_ops(s: &State, t: u16, slot: u8, m: &[Member], i: usize) -> Vec<PItem>
 /// undo) keeps what was set in the members' windows. A save stores them the same way (`project_plugins::store_hosted`).
 pub fn store_members(proj: &mut Project, plugins: &Plugins) {
     for (&key, live) in &plugins.containers {
-        let Some((t, k)) = fx_of(key) else { continue };
-        let Some(p) = proj.mixer.iter_mut().find(|m| m.index == t).and_then(|m| m.slots[usize::from(k)].as_mut()).filter(|p| p.name == CONTAINER) else {
-            continue;
-        };
-        let Some(mut list) = decode(&p.state) else { continue };
+        let Some((t, k)) = key_place(key) else { continue };
+        let Some(p) = state_in_mut(proj, t, k) else { continue };
+        let Some(mut list) = decode(p) else { continue };
         let mut changed = false;
         for m in &mut list {
             let Some(at) = live.shape.iter().position(|s| (s.0, s.1.as_str()) == (m.id, m.uid.as_str())) else { continue };
@@ -401,7 +547,7 @@ pub fn store_members(proj: &mut Project, plugins: &Plugins) {
             }
         }
         if changed {
-            p.state = encode(&list);
+            *p = encode(&list);
         }
     }
 }
@@ -436,7 +582,7 @@ impl App {
                 continue;
             };
             let (wet, dry) = levels(mix, on);
-            list.push(Member { id: 0, uid: p.desc().uid(), name: p.desc().name.clone(), wet, dry, state: p.save_state().unwrap_or_default() });
+            list.push(Member { id: 0, instrument: false, uid: p.desc().uid(), name: p.desc().name.clone(), wet, dry, state: p.save_state().unwrap_or_default() });
             taken.push(k);
         }
         if !taken.contains(&slot) {
@@ -500,33 +646,77 @@ impl App {
         None
     }
 
-    /// Add effect ▸ in the container's list: effect `index` (of `Plugins::effects`) at the end of the container in slot
-    /// `slot` of the current track, wet only, from the plugin's defaults. Inside the undo step (`mixer::run`).
-    pub(crate) fn add_member(&mut self, slot: u8, index: usize) -> Option<String> {
+    /// Add effect ▸ in the container's list: effect `index` (of `Plugins::effects`; an instrument of
+    /// `Plugins::available` for `instrument`, a channel's container only) at the end of the container in slot `slot` of
+    /// the current track (the row in the track's place for a channel's), from the plugin's defaults: an effect wet
+    /// only, an instrument at [`INSTRUMENT_LEVELS`]. Inside the undo step (`mixer::run`).
+    pub(crate) fn add_member(&mut self, slot: u8, index: usize, instrument: bool) -> Option<String> {
         let t = self.state.selected_mixer;
         let mut list = members(&self.state, t, slot)?;
-        let a = self.plugins.effects.get(index)?;
+        if instrument && slot != CHANNEL {
+            return None;
+        }
+        let a = if instrument { self.plugins.available.get(index)? } else { self.plugins.effects.get(index)? };
         // The smallest free id: a removed member's goes to the next one added (its clips and links would follow it).
         let Some(id) = free_id(&list) else { return Some(format!("A container holds at most {MEMBER_IDS} effects")) };
-        list.push(Member { id, uid: a.desc.uid(), name: a.desc.name.clone(), wet: 1.0, dry: 0.0, state: Vec::new() });
+        let (wet, dry) = if instrument { INSTRUMENT_LEVELS } else { (1.0, 0.0) };
+        list.push(Member { id, instrument, uid: a.desc.uid(), name: a.desc.name.clone(), wet, dry, state: Vec::new() });
         set_members(&mut self.state, t, slot, &list);
         self.state.piano.dirty = true;
         None
     }
 
-    /// A member window's Replace ▸: effect `index` (of `Plugins::effects`) in place of member `i` of the container in slot
-    /// `slot` of the current track, from the plugin's defaults; the member keeps its place, id and levels, so its
-    /// level's clips and links stay on it (as a slot's do when its effect is replaced). Inside the undo step
-    /// (`mixer::run`).
-    pub(crate) fn replace_member(&mut self, slot: u8, i: usize, index: usize) -> Option<String> {
+    /// A member window's Replace ▸: effect `index` (of `Plugins::effects`; an instrument of `Plugins::available` for
+    /// `instrument`) in place of member `i` of the container in slot `slot` of the current track, from the plugin's
+    /// defaults; the member keeps its place, id and levels, so its level's clips and links stay on it (as a slot's do
+    /// when its effect is replaced). Inside the undo step (`mixer::run`).
+    pub(crate) fn replace_member(&mut self, slot: u8, i: usize, index: usize, instrument: bool) -> Option<String> {
         let t = self.state.selected_mixer;
         let mut list = members(&self.state, t, slot)?;
-        let a = self.plugins.effects.get(index)?;
+        let a = if instrument { self.plugins.available.get(index)? } else { self.plugins.effects.get(index)? };
         let m = list.get_mut(i)?;
-        (m.uid, m.name, m.state) = (a.desc.uid(), a.desc.name.clone(), Vec::new());
+        (m.instrument, m.uid, m.name, m.state) = (instrument, a.desc.uid(), a.desc.name.clone(), Vec::new());
         set_members(&mut self.state, t, slot, &list);
         self.state.piano.dirty = true;
         None
+    }
+
+    /// The channel menu's Wrap in container (the original's Patcherize on a channel; spec: plugins/patcher/
+    /// README.md §3.3, §4.4): rack row `row`'s instrument becomes the first member of a container on the channel, at
+    /// [`INSTRUMENT_LEVELS`], with its state; the channel keeps its name, colour, notes, steps, mixer track and settings,
+    /// which act on the container's output. One undo step: the channel takes a new id, so the instrument kept under the
+    /// old one (`Plugins::keep`) comes back with an undo, as Replace's does.
+    pub(crate) fn wrap_channel(&mut self, row: usize) -> Option<String> {
+        crate::control::edit_app(self, WRAP, crate::control::command::Region::Project, |app| app.wrap_channel_now(row))
+    }
+
+    fn wrap_channel_now(&mut self, row: usize) -> Option<String> {
+        if !can_wrap_channel(&self.state, row) || !self.plugins.hosted.contains_key(&row) {
+            return Some("This channel's plugin is not hosted: nothing to wrap".into());
+        }
+        let member = {
+            let h = self.plugins.hosted.get(&row)?;
+            let p = h.plugin.lock().ok()?;
+            let (wet, dry) = INSTRUMENT_LEVELS;
+            Member { id: 1, instrument: true, uid: p.desc().uid(), name: p.desc().name.clone(), wet, dry, state: p.save_state().unwrap_or_default() }
+        };
+        let name = member.name.clone();
+        self.plugins.keep(row);
+        self.plugins.drop_key(row);
+        self.state.hosted_rows.retain(|&r| r != row);
+        self.transport.set_instruments(self.plugins.instruments());
+        let s = &mut self.state;
+        let ch = &mut s.project.channels[row];
+        // A new id at once, before the container plays the channel.
+        ch.id = Id::NONE;
+        s.control.settle(&mut s.project);
+        let ch = &mut s.project.channels[row];
+        ch.plugin = Some(CONTAINER.into());
+        ch.plugin_state = Some(encode(&[member]));
+        s.piano.dirty = true;
+        let t = u16::try_from(row).ok()?;
+        show(s, t, CHANNEL);
+        Some(format!("{name} in a container"))
     }
 
     /// The container window's controls (`CAct`).
@@ -580,7 +770,7 @@ impl App {
             self.invalidate();
             return;
         }
-        let Some(live) = self.plugins.containers.get(&fx_key(t, k)) else { return };
+        let Some(live) = self.plugins.containers.get(&place_key(t, k)) else { return };
         let Ok(c) = live.fx.try_lock() else { return };
         let now: BTreeMap<u32, (f32, f32)> = c.members.iter().map(|m| (m.id, (m.wet, m.dry))).collect();
         drop(c);
@@ -590,11 +780,11 @@ impl App {
         }
     }
 
-    /// Opens the window of member `id` of the container in slot `slot` of track `t`.
+    /// Opens the window of member `id` of the container at place (`t`, `slot`).
     pub(crate) fn open_member(&mut self, t: u16, slot: u8, id: u32) -> Option<String> {
-        let live = self.plugins.containers.get(&fx_key(t, slot))?;
+        let live = self.plugins.containers.get(&place_key(t, slot))?;
         let Some(key) = live.shape.iter().position(|s| s.0 == id).and_then(|at| live.keys[at]) else {
-            return Some("This effect is not loaded (its plugin was not found)".into());
+            return Some("This plugin is not loaded (it was not found)".into());
         };
         self.open_member_key(key)
     }
@@ -624,7 +814,11 @@ impl App {
     pub(crate) fn member_infos(&self) -> std::collections::HashMap<usize, crate::plugin_window::ChannelInfo> {
         let mut v = std::collections::HashMap::new();
         for (&slot_key, live) in &self.plugins.containers {
-            let Some(info) = crate::mixer::fx_info(&self.state.project, &self.state.mixer, slot_key) else { continue };
+            let info = match fx_of(slot_key) {
+                Some(_) => crate::mixer::fx_info(&self.state.project, &self.state.mixer, slot_key),
+                None => crate::app::channel_info(&self.state.project, slot_key),
+            };
+            let Some(info) = info else { continue };
             for key in live.keys.iter().flatten() {
                 let Some(h) = self.plugins.hosted.get(key) else { continue };
                 v.insert(*key, crate::plugin_window::ChannelInfo { name: format!("{} ({})", h.name, info.name), ..info.clone() });
@@ -633,20 +827,21 @@ impl App {
         v
     }
 
-    /// Where member `key` plays, for the performance monitor: "Bus 2, slot 1, container".
+    /// Where member `key` plays, for the performance monitor: "Bus 2, slot 1, container", "Lemon Trio, container".
     pub(crate) fn member_place(&self, key: usize) -> Option<String> {
         let slot_key = self.plugins.containers.iter().find(|(_, l)| l.keys.contains(&Some(key)))?.0;
-        Some(match fx_of(*slot_key)? {
+        Some(match key_place(*slot_key)? {
+            (r, CHANNEL) => format!("{}, container", place_name(&self.state, r, CHANNEL)),
             (0, k) => format!("Master, slot {}, container", k + 1),
             (t, k) => format!("Bus {t}, slot {}, container", k + 1),
         })
     }
 
-    /// Every tick: the containers played follow the project's container slots (a wrap, an edit of the list, an undo,
-    /// an opened project, a slot moved). A container whose list changed is built again from it: a member still there
-    /// (by its id and effect) keeps its instance and window; a new one is an instance of its effect started from its
-    /// saved state, or left out of the chain when its effect is not found (the list keeps it). A list whose levels alone
-    /// changed sets them on the chain.
+    /// Every tick: the containers played follow the project's container slots and channels (a wrap, an edit of the
+    /// list, an undo, an opened project, a slot or channel moved). A container whose list changed is built again from
+    /// it: a member still there (by its id and plugin) keeps its instance and window; a new one is an instance of its
+    /// plugin started from its saved state, or left out of the chain when its plugin is not found (the list keeps it). A
+    /// list whose levels alone changed sets them on the chain.
     pub(crate) fn sync_containers(&mut self) {
         let mut want: Vec<(usize, Id)> = Vec::new();
         for m in &self.state.project.mixer {
@@ -656,20 +851,27 @@ impl App {
                 }
             }
         }
+        for (r, ch) in self.state.project.channels.iter().enumerate() {
+            if is_container_channel(ch) && u16::try_from(r).is_ok() {
+                want.push((r, ch.id));
+            }
+        }
         if want.is_empty() && self.plugins.containers.is_empty() {
             self.state.params.members.clear();
             self.mirror_levels();
             return;
         }
         let mut changed = false;
-        // Gone, or moved to another slot (found by the slot's id).
+        let mut channels = false;
+        // Gone, or moved to another slot or row (found by the slot's or channel's id).
         let keys: Vec<usize> = self.plugins.containers.keys().copied().collect();
         for key in keys {
             if want.iter().any(|w| w.0 == key) {
                 continue;
             }
             let live = self.plugins.containers.remove(&key).unwrap();
-            let to = want.iter().find(|w| w.1 == live.id && !live.id.is_none() && !self.plugins.containers.contains_key(&w.0)).map(|w| w.0);
+            channels |= live.channel;
+            let to = want.iter().find(|w| w.1 == live.id && !live.id.is_none() && !self.plugins.containers.contains_key(&w.0) && (w.0 < FX_KEY) == live.channel).map(|w| w.0);
             match to {
                 Some(to) => {
                     self.plugins.containers.insert(to, live);
@@ -684,16 +886,16 @@ impl App {
         }
         let mut missing = Vec::new();
         for (key, id) in want {
-            let Some((t, k)) = fx_of(key) else { continue };
-            let Some(p) = crate::mixer::track(&self.state, t).and_then(|m| m.slots[usize::from(k)].as_ref()) else { continue };
+            let Some((t, k)) = key_place(key) else { continue };
+            let Some(p) = state_in(&self.state.project, t, k) else { continue };
             if let Some(live) = self.plugins.containers.get_mut(&key) {
                 live.id = id;
-                if live.src == p.state {
+                if live.src == p {
                     continue;
                 }
             }
-            let list = decode(&p.state).unwrap_or_default();
-            let src = p.state.clone();
+            let list = decode(p).unwrap_or_default();
+            let src = p.to_vec();
             if let Some(live) = self.plugins.containers.get_mut(&key).filter(|l| l.shape == shape(&list)) {
                 if let Ok(mut c) = live.fx.lock() {
                     let playing = list.iter().zip(&live.keys).filter(|(_, k)| k.is_some());
@@ -710,12 +912,21 @@ impl App {
                 None => Vec::new(),
             };
             let mut keys = Vec::new();
+            let channel = k == CHANNEL;
             for m in &list {
                 if let Some(at) = pool.iter().position(|(s, _)| (s.0, s.1.as_str()) == (m.id, m.uid.as_str())) {
                     keys.push(Some(pool.remove(at).1));
                     continue;
                 }
-                let made = self.plugins.effect_index_of_uid(&m.uid).and_then(|i| self.plugins.instantiate_effect(i, (!m.state.is_empty()).then_some(m.state.as_slice())).ok());
+                let state = (!m.state.is_empty()).then_some(m.state.as_slice());
+                // An instrument plays in a channel's container only.
+                let made = if !m.instrument {
+                    self.plugins.effect_index_of_uid(&m.uid).and_then(|i| self.plugins.instantiate_effect(i, state).ok())
+                } else if channel {
+                    self.plugins.index_of_uid(&m.uid).and_then(|i| self.plugins.instantiate(i, state).ok())
+                } else {
+                    None
+                };
                 match made {
                     Some((plugin, _)) => {
                         let k = MEMBER_KEY + self.plugins.next_member;
@@ -733,20 +944,35 @@ impl App {
                 self.plugins.drop_key(k);
             }
             let hosted = &self.plugins.hosted;
-            let fx = list.iter().zip(&keys).filter_map(|(m, k)| Some(chain::Member::new(m.id, hosted.get(&(*k)?)?.plugin.clone() as os_engine::SharedEffect, m.wet, m.dry))).collect();
-            let live = Live { id, src, shape: shape(&list), keys, fx: Arc::new(Mutex::new(Chain::new(fx))) };
+            let fx = list
+                .iter()
+                .zip(&keys)
+                .filter_map(|(m, k)| {
+                    let plugin = hosted.get(&(*k)?)?.plugin.clone();
+                    Some(if m.instrument {
+                        chain::Member::instrument(m.id, plugin as os_engine::SharedInstrument, m.wet, m.dry)
+                    } else {
+                        chain::Member::new(m.id, plugin as os_engine::SharedEffect, m.wet, m.dry)
+                    })
+                })
+                .collect();
+            let live = Live { id, src, shape: shape(&list), channel, keys, fx: Arc::new(Mutex::new(Chain::new(fx))) };
             self.plugins.containers.insert(key, live);
+            channels |= channel;
             changed = true;
         }
         if !missing.is_empty() {
             self.state.message = Some(format!("Container: not found, left out of the chain: {}", missing.join(", ")));
+        }
+        if channels {
+            self.transport.set_instruments(self.plugins.instruments());
         }
         if changed {
             // Which member each hosted key is, for its parameters' targets and links (`params::target_of`).
             let members = &mut self.state.params.members;
             members.clear();
             for (&slot_key, live) in &self.plugins.containers {
-                let Some((t, k)) = fx_of(slot_key) else { continue };
+                let Some((t, k)) = key_place(slot_key) else { continue };
                 for ((id, _), key) in live.shape.iter().zip(&live.keys) {
                     if let Some(key) = key {
                         members.insert(*key, (t, k, *id));
@@ -770,8 +996,8 @@ mod tests {
     #[test]
     fn the_list_is_kept() {
         let m = vec![
-            Member { id: 3, uid: "clap:a".into(), name: "A".into(), wet: 1.0, dry: 0.0, state: vec![1, 2, 3] },
-            Member { id: 1, uid: "vst3:b".into(), name: "B".into(), wet: 0.25, dry: 0.75, state: vec![] },
+            Member { id: 3, instrument: true, uid: "clap:a".into(), name: "A".into(), wet: 1.0, dry: 0.0, state: vec![1, 2, 3] },
+            Member { id: 1, instrument: false, uid: "vst3:b".into(), name: "B".into(), wet: 0.25, dry: 0.75, state: vec![] },
         ];
         assert_eq!(decode(&encode(&m)), Some(m.clone()));
         assert_eq!(decode(&encode(&[])), Some(vec![]));
@@ -785,7 +1011,7 @@ mod tests {
         v1.extend(0.5f32.to_le_bytes());
         v1.extend(0.5f32.to_le_bytes());
         v1.extend(0u32.to_le_bytes());
-        assert_eq!(decode(&v1), Some(vec![Member { id: 1, uid: "clap:a".into(), name: "A".into(), wet: 0.5, dry: 0.5, state: vec![] }]));
+        assert_eq!(decode(&v1), Some(vec![Member { id: 1, instrument: false, uid: "clap:a".into(), name: "A".into(), wet: 0.5, dry: 0.5, state: vec![] }]));
         assert_eq!(decode(b"LCNT"), None);
         assert_eq!(decode(&[0; 16]), None);
         assert_eq!(levels(1.0, true), (1.0, 0.0));
@@ -1053,7 +1279,7 @@ mod tests {
         let ops = menu_of(&mut a, 0);
         let wet = &ops[1];
         assert_eq!(wet.label, "Wet: 100%");
-        let level = level_target(2, 0, 2, true).unwrap();
+        let level = level_target(&a.state, 2, 0, 2, true).unwrap();
         let caption = level_name(&a.state, 2, 0, 2, true);
         assert_eq!(cmd_of(&wet.children, "Create automation clip"), Cmd::CreateAutomation(level, caption.clone(), 1.0));
         assert_eq!(cmd_of(&wet.children, "MIDI learn..."), Cmd::Remote(RCmd::Link(T::Member(2, 0, 2, true))));
@@ -1120,7 +1346,7 @@ mod tests {
         let menu = a.state.playlist.popup.take().unwrap().items;
         assert_eq!(menu[0].label, "Reset");
         assert_eq!(cmd_of(&menu, "Enter value..."), Cmd::TypeIn(T::Member(2, 0, 2, false)));
-        assert_eq!(cmd_of(&menu, "Create automation clip"), Cmd::CreateAutomation(level_target(2, 0, 2, false).unwrap(), level_name(&a.state, 2, 0, 2, false), 0.0));
+        assert_eq!(cmd_of(&menu, "Create automation clip"), Cmd::CreateAutomation(level_target(&a.state, 2, 0, 2, false).unwrap(), level_name(&a.state, 2, 0, 2, false), 0.0));
         a.state.set_knob(dry, 0.4);
         a.state.history.reset();
         crate::playlist::run(&mut a, menu[0].cmd.clone());
@@ -1236,5 +1462,162 @@ mod tests {
         a.host_commands();
         assert_eq!(a.plugins.presets.get(&key), None, "and the redo takes the preset away again");
         assert_eq!(a.state.mixer.slot_names, names);
+    }
+    /// An app with Lemon Studio's instruments and effects, rack row 0 played by Lemon Trio; its ticks.
+    fn trio_channel() -> App {
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::default();
+        a.plugins.available = crate::plugins::builtin();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.plugdb.rebuild(&a.plugins);
+        a.plugin_tick();
+        a.plugin_tick();
+        let trio = a.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap();
+        crate::plugin_menu::replace_generator(&mut a, trio, 0);
+        ticks(&mut a);
+        a
+    }
+
+    fn ticks(a: &mut App) {
+        (0..3).for_each(|_| a.plugin_tick());
+    }
+
+    /// The first leaf of `items` (and their submenus) labelled `label`.
+    fn leaf(items: &[PItem], label: &str) -> Option<Cmd> {
+        items.iter().find_map(|i| if i.children.is_empty() { (i.label == label).then(|| i.cmd.clone()) } else { leaf(&i.children, label) })
+    }
+
+    /// The channel menu's Wrap in container (spec plugins/patcher/README.md §4.4): the channel's instrument goes into a
+    /// container on the channel, with its state, at wet and dry 100 %; the channel stays (its name, notes, mixer track),
+    /// the container's chain plays it and its window opens; one undo step brings the instrument back, a redo the
+    /// container. Add ▸ in its window offers instruments and effects; an instrument added layers over the first, an
+    /// effect works on both. A member's parameters and levels are the channel's parameters naming it; its undo steps
+    /// go by the channel's id. Saved to a .lemon file and opened again, the container comes back.
+    #[test]
+    fn wrap_a_channels_instrument() {
+        use crate::typein::Target as T;
+        use os_engine::Instrument;
+        let mut a = App::new(None);
+        a.plugins = crate::plugins::Plugins::default();
+        a.plugins.available = crate::plugins::builtin();
+        a.plugin_tick();
+        let item = |a: &App| crate::rack::channel_menu(&a.state, 0, 0.0, 0.0).items.into_iter().find(|i| i.label == WRAP).expect("Wrap in container");
+        assert!(!item(&a).enabled, "a sampler channel's sample is the channel's");
+        let mut a = trio_channel();
+        let before = a.state.project.channels[0].clone();
+        let wrap = item(&a);
+        assert!(wrap.enabled);
+        crate::playlist::run(&mut a, wrap.cmd);
+        ticks(&mut a);
+        assert_eq!(a.state.history.newest_done(), Some(WRAP));
+        let ch = &a.state.project.channels[0];
+        assert!(is_container_channel(ch));
+        assert_eq!((&ch.name, ch.mixer_track, ch.volume), (&before.name, before.mixer_track, before.volume), "the channel stays");
+        let list = members(&a.state, 0, CHANNEL).unwrap();
+        assert_eq!(list.len(), 1);
+        let m = &list[0];
+        assert_eq!((m.id, m.instrument, m.name.as_str(), m.wet, m.dry), (1, true, crate::osc3::LEMON_TRIO, 1.0, 1.0));
+        assert!(!m.state.is_empty(), "with its state");
+        assert!(!a.state.hosted_rows.contains(&0) && !a.plugins.hosted.contains_key(&0), "no instance under the row");
+        assert!(a.state.shown(Win::Container) && a.state.container.at == (0, CHANNEL));
+        assert_eq!(title(&a.state, 0, CHANNEL), Some(format!("Container ({})", place_name(&a.state, 0, CHANNEL))));
+        assert!(!crate::rack::channel_menu(&a.state, 0, 0.0, 0.0).items.iter().any(|i| i.label == WRAP && i.enabled), "not twice");
+        // The chain plays the channel's notes.
+        let live = &a.plugins.containers[&0];
+        assert!(live.channel && live.keys[0].is_some_and(|k| k >= MEMBER_KEY));
+        assert!(a.plugins.instruments().iter().any(|(r, i)| *r == 0 && Arc::ptr_eq(i, &(live.fx.clone() as os_engine::SharedInstrument))));
+        assert!(a.plugins.effects().is_empty(), "not a slot's");
+        {
+            let mut c = live.fx.lock().unwrap();
+            c.note_on(0, 69, 0.8);
+            let mut peak = 0.0f32;
+            for _ in 0..8 {
+                let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+                Instrument::process(&mut *c, 48000, &mut l, &mut r);
+                peak = l.iter().chain(&r).fold(peak, |p, x| p.max(x.abs()));
+            }
+            assert!(peak > 0.01, "the instrument sounds through the chain: {peak}");
+            Instrument::reset(&mut *c);
+        }
+
+        // Undone: the channel and its instrument come back; redone, the container.
+        let wrapped = a.state.project.channels[0].clone();
+        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(WRAP));
+        ticks(&mut a);
+        assert_eq!(a.state.project.channels[0], before);
+        assert!(a.plugins.containers.is_empty() && a.state.hosted_rows.contains(&0));
+        assert_eq!(a.plugins.descriptor(0).map(|d| d.name), Some(crate::osc3::LEMON_TRIO.to_string()));
+        assert!(!a.state.shown(Win::Container), "the window goes with its container");
+        assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some(WRAP));
+        ticks(&mut a);
+        assert_eq!(a.state.project.channels[0], wrapped);
+        assert!(a.plugins.containers.contains_key(&0) && !a.plugins.hosted.contains_key(&0));
+
+        // Add ▸: instruments and effects; an instrument at wet and dry 100 % (a layer), an effect wet only.
+        a.open_channel_window(0);
+        assert!(a.state.shown(Win::Container) && a.state.container.at == (0, CHANNEL));
+        a.container_act(CAct::Add);
+        let add = a.state.playlist.popup.take().unwrap().items;
+        assert!(add.iter().any(|i| i.head && i.label == "Instruments") && add.iter().any(|i| i.head && i.label == "Effects"));
+        let lim = a.plugins.effects.iter().find(|e| e.desc.name.contains("Limiter")).unwrap().desc.name.clone();
+        let inst = leaf(&add, crate::osc3::LEMON_TRIO).expect("the instruments to pick");
+        assert!(matches!(&inst, Cmd::SlotWin(0, c) if matches!(**c, Cmd::Mixer(MCmd::MemberAddInst(CHANNEL, _)))));
+        let fx = leaf(&add, &lim).expect("the effects to pick");
+        assert!(matches!(&fx, Cmd::SlotWin(0, c) if matches!(**c, Cmd::Mixer(MCmd::MemberAdd(CHANNEL, _)))));
+        crate::playlist::run(&mut a, inst);
+        assert_eq!(a.state.history.newest_done(), Some(ADD_INSTRUMENT));
+        crate::playlist::run(&mut a, fx);
+        ticks(&mut a);
+        let list = members(&a.state, 0, CHANNEL).unwrap();
+        assert_eq!(list.iter().map(|m| (m.id, m.instrument, m.wet, m.dry)).collect::<Vec<_>>(), [(1, true, 1.0, 1.0), (2, true, 1.0, 1.0), (3, false, 1.0, 0.0)]);
+        let live = &a.plugins.containers[&0];
+        assert_eq!(live.fx.lock().unwrap().members.len(), 3);
+        assert!(matches!(live.fx.lock().unwrap().members[1].node, chain::Node::Inst(_)));
+
+        // Parameters and levels: the channel's parameters naming the member.
+        a.params_tick();
+        let key = a.plugins.containers[&0].keys[0].unwrap();
+        let index = a.state.project.channels[0].index;
+        assert_eq!(a.state.params.members.get(&key), Some(&(0, CHANNEL, 1)));
+        let tgt = target::channel_param(index, target::member_item(1, 0).unwrap());
+        assert_eq!(crate::params::target_of(&a.state, key, 0), Some(tgt));
+        assert_eq!(crate::params::key_of(&a.state, target::decode(tgt)), Some((key, 0)));
+        let level = level_target(&a.state, 0, CHANNEL, 2, false).unwrap();
+        assert_eq!(level, target::channel_param(index, target::member_item(2, MEMBER_DRY).unwrap()));
+        assert_eq!(level_of(&a.state, target::decode(level)), Some((0, CHANNEL, 2, false)));
+        assert_eq!(crate::typein::text(&a.state, T::Member(0, CHANNEL, 2, false), false), "100%");
+        assert!(crate::init::name(&a.state, level).starts_with(&place_name(&a.state, 0, CHANNEL)));
+        crate::typein::accept(&mut a.state, T::Member(0, CHANNEL, 2, false), false, "25");
+        assert_eq!(a.state.history.newest_done(), Some(LEVEL));
+        ticks(&mut a);
+        assert_eq!(a.plugins.containers[&0].fx.lock().unwrap().members[1].dry, 0.25, "the chain plays the level");
+        // Undo steps of its own edits go by the channel's id.
+        let owner = crate::control::command::member_owner(a.state.project.channels[0].id.0, 1).unwrap();
+        assert_eq!(crate::control::command::key_owner(&a.state, key), Some(owner));
+        assert_eq!(crate::control::command::owner_key(&a.state, owner), Some(key));
+        assert_eq!(a.plugins.hosted[&key].owner.0, owner);
+        // A member window's Replace ▸ lists instruments for an instrument.
+        let mut m = crate::playlist::plugin_window_menu(key, false, 0.0, 0.0);
+        crate::playlist::fill_plugin_window_menu(&a.state, key, &mut m);
+        let replace = m.items.iter().find(|i| i.label == "Replace").unwrap();
+        let pick = leaf(&replace.children, crate::osc3::LEMON_TRIO).expect("instruments");
+        assert!(matches!(&pick, Cmd::SlotWin(0, c) if matches!(**c, Cmd::Mixer(MCmd::MemberReplaceInst(CHANNEL, 0, _)))));
+
+        // Saved and opened again.
+        let d = std::env::temp_dir().join(format!("lemon-container-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("Channel.lemon");
+        a.save_to(path.clone());
+        let saved = members(&a.state, 0, CHANNEL).unwrap();
+        let mut back = App::new(None);
+        back.plugins = crate::plugins::Plugins::default();
+        back.plugins.available = crate::plugins::builtin();
+        back.plugins.effects = crate::plugins::builtin_effects();
+        back.open(path);
+        ticks(&mut back);
+        assert_eq!(members(&back.state, 0, CHANNEL), Some(saved));
+        assert_eq!(back.plugins.containers[&0].fx.lock().unwrap().members.len(), 3);
+        assert!(back.plugins.containers[&0].keys.iter().all(Option::is_some));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

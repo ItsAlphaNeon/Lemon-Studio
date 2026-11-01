@@ -39,7 +39,7 @@ pub enum Target {
 /// A member's parameter as the hosted instance's (`Target::Param`), while its effect is loaded.
 fn resolved(s: &State, t: Target) -> Option<Target> {
     match t {
-        Target::MemberParam(m, k, id, i) => Some(Target::Param(crate::container::member_key(s, crate::plugins::fx_key(m, k), id)?, i)),
+        Target::MemberParam(m, k, id, i) => Some(Target::Param(crate::container::member_key(s, crate::container::place_key(m, k), id)?, i)),
         t => Some(t),
     }
 }

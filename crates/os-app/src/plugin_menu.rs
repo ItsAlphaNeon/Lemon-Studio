@@ -42,25 +42,30 @@ pub enum Target {
     Replace(usize),
     /// Effects into the selected track: slot `k`, else its first empty slot.
     Fx(Option<u8>),
-    /// Effects added at the end of the container in the selected track's slot `k` (`crate::container`).
+    /// Effects added at the end of the container in the selected track's slot `k` (`crate::container`); for a
+    /// channel's container (`container::CHANNEL`), instruments and effects.
     Container(u8),
     /// Effects in place of member `.1` (its place in the list) of the container in the selected track's slot `.0`.
     Member(u8, usize),
+    /// Instruments in place of instrument member `.1` of a channel's container.
+    MemberInst(u8, usize),
 }
 
 fn pick(target: Target, effect: bool, index: usize) -> Cmd {
-    if let Target::Container(slot) = target {
-        return Cmd::Mixer(crate::mixer::MCmd::MemberAdd(slot, index));
-    }
-    if let Target::Member(slot, i) = target {
-        return Cmd::Mixer(crate::mixer::MCmd::MemberReplace(slot, i, index));
+    use crate::mixer::MCmd;
+    match target {
+        Target::Container(slot) if effect => return Cmd::Mixer(MCmd::MemberAdd(slot, index)),
+        Target::Container(slot) => return Cmd::Mixer(MCmd::MemberAddInst(slot, index)),
+        Target::Member(slot, i) => return Cmd::Mixer(MCmd::MemberReplace(slot, i, index)),
+        Target::MemberInst(slot, i) => return Cmd::Mixer(MCmd::MemberReplaceInst(slot, i, index)),
+        _ => {}
     }
     Cmd::Plugin(match (target, effect) {
         (Target::Fx(slot), _) => PlugCmd::Effect { index, slot },
         (_, true) => PlugCmd::Effect { index, slot: None },
         (Target::Gen(after), false) => PlugCmd::Generator { index, after },
         (Target::Replace(row), false) => PlugCmd::Replace { index, row },
-        (Target::All | Target::Container(_) | Target::Member(..), false) => PlugCmd::Generator { index, after: None },
+        (Target::All | Target::Container(_) | Target::Member(..) | Target::MemberInst(..), false) => PlugCmd::Generator { index, after: None },
     })
 }
 
@@ -139,7 +144,15 @@ pub fn items(s: &State, target: Target, nested: bool) -> Vec<PItem> {
             v.push(PItem::head("Effects"));
             v.extend(section(s, true, target, nested));
         }
-        Target::Gen(_) | Target::Replace(_) => v.extend(section(s, false, target, nested)),
+        // A channel's container takes instruments and effects (spec: plugins/patcher/README.md §4.4).
+        Target::Container(crate::container::CHANNEL) => {
+            v.push(PItem::head("Instruments"));
+            v.extend(section(s, false, target, nested));
+            v.push(PItem::col());
+            v.push(PItem::head("Effects"));
+            v.extend(section(s, true, target, nested));
+        }
+        Target::Gen(_) | Target::Replace(_) | Target::MemberInst(..) => v.extend(section(s, false, target, nested)),
         Target::Fx(_) | Target::Container(_) | Target::Member(..) => v.extend(section(s, true, target, nested)),
     }
     v.extend(footer(s));

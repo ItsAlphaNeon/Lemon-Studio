@@ -75,7 +75,8 @@ impl App {
         let row_id = |r: usize| p.channels.get(r).map(|c| c.id);
         let slot_id = |t: u16, k: u8| p.mixer.iter().find(|m| m.index == t).and_then(|m| m.slots.get(usize::from(k))?.as_ref()).map(|s| s.id);
         let members = &self.state.params.members;
-        let member_id = |key: usize| members.get(&key).and_then(|&(t, k, id)| crate::control::command::member_owner(slot_id(t, k)?.0, id)).map(Id);
+        let state = &self.state;
+        let member_id = |key: usize| members.get(&key).and_then(|&(t, k, id)| crate::control::command::member_owner(crate::container::place_id(state, t, k)?.0, id)).map(Id);
         for (&key, h) in self.plugins.hosted.iter_mut() {
             if h.owner.is_none() {
                 h.owner = match fx_of(key) {

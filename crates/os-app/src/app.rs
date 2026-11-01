@@ -8756,6 +8756,16 @@ impl App {
 
     /// Name button click (spec: ui/channel-rack.md §13): opens the channel's plugin window, or closes it when open.
     fn toggle_channel_window(&mut self, i: usize) {
+        // A channel's container: its window (spec: plugins/patcher/README.md §4.4).
+        if self.state.project.channels.get(i).is_some_and(crate::container::is_container_channel) {
+            let place = (i as u16, crate::container::CHANNEL);
+            if self.state.shown(Win::Container) && self.state.container.at == place {
+                self.state.hide(Win::Container);
+            } else {
+                crate::container::show(&mut self.state, place.0, place.1);
+            }
+            return;
+        }
         if self.state.hosted_rows.contains(&i) {
             if !self.plugins.close_if_open(i) {
                 self.state.pending_open = Some(i);
@@ -8774,7 +8784,9 @@ impl App {
     /// Open rack row `i`'s window (not hosted: Lemon Sampler's for a sampler or audio clip, else the channel window).
     pub(crate) fn open_channel_window(&mut self, i: usize) {
         let s = &mut self.state;
-        if s.project.channels.get(i).is_some_and(|c| c.kind.is_sampler()) {
+        if s.project.channels.get(i).is_some_and(crate::container::is_container_channel) {
+            crate::container::show(s, i as u16, crate::container::CHANNEL);
+        } else if s.project.channels.get(i).is_some_and(|c| c.kind.is_sampler()) {
             // Not hosted yet (just added): Lemon Sampler starts on the next tick and its window opens then.
             s.pending_open = Some(i);
             self.sampler_failed.retain(|&r| r != i);
@@ -9537,7 +9549,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
 
 /// What a plugin window's strip shows for rack row `row` (spec: ui/plugin-window.md).
 #[cfg(plugin_windows)]
-fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::ChannelInfo> {
+pub(crate) fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::ChannelInfo> {
     let ch = p.channels.get(row)?;
     Some(crate::plugin_window::ChannelInfo {
         name: ch.name.clone().unwrap_or_else(|| format!("Channel {}", ch.index + 1)),

@@ -5433,14 +5433,17 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
             on_track(t, &mut it.children);
         }
     }
-    // A container's effect: Replace ▸ puts another effect in its place, Delete... removes it from the container. It has
-    // no name, colour or icon of its own, and no CPU switches (the container's slot has them), so those stay greyed.
+    // A container's effect: Replace ▸ puts another effect in its place (an instrument, another instrument), Delete...
+    // removes it from the container. It has no name, colour or icon of its own, and no CPU switches (the container's
+    // slot or channel has them), so those stay greyed.
     if let Some(&(t, k, id)) = s.params.members.get(&key) {
-        let Some(i) = crate::container::members(s, t, k).and_then(|l| l.iter().position(|m| m.id == id)) else { return };
+        let Some(list) = crate::container::members(s, t, k) else { return };
+        let Some(i) = list.iter().position(|m| m.id == id) else { return };
+        let target = if list[i].instrument { crate::plugin_menu::Target::MemberInst(k, i) } else { crate::plugin_menu::Target::Member(k, i) };
         for it in menu.items.iter_mut() {
             match &*it.label {
                 "Replace" => {
-                    let mut replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Member(k, i), true);
+                    let mut replace = crate::plugin_menu::items(s, target, true);
                     on_track(t, &mut replace);
                     *it = PItem::sub("Replace", replace);
                 }

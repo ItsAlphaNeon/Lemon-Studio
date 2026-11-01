@@ -249,9 +249,9 @@ pub fn label(s: &State, l: &Link) -> String {
         Target::RackTrack(r) | Target::RackLed(r) => format!("{} - {name}", channel(r)),
         Target::Knob(KnobId::Send(a, _)) => format!("{} - {name}", crate::mixer::name(s, a)),
         Target::Param(key, index) => crate::params::clip_name(s, key, index),
-        Target::MemberParam(m, k, id, index) => match crate::container::member_key(s, crate::plugins::fx_key(m, k), id) {
+        Target::MemberParam(m, k, id, index) => match crate::container::member_key(s, crate::container::place_key(m, k), id) {
             Some(key) => crate::params::clip_name(s, key, index),
-            None => format!("{} - {name}", crate::mixer::name(s, m)),
+            None => format!("{} - {name}", crate::container::place_name(s, m, k)),
         },
         _ => name,
     };
@@ -621,7 +621,7 @@ impl App {
             }
             // An effect inside a container: its instance while it is loaded.
             Target::MemberParam(m, k, id, index) => {
-                if let Some(key) = crate::container::member_key(&self.state, crate::plugins::fx_key(m, k), id) {
+                if let Some(key) = crate::container::member_key(&self.state, crate::container::place_key(m, k), id) {
                     crate::params::set_param_value(&mut self.state, key, index, f64::from(v));
                     self.record_plugin_param(key, index, f64::from(v));
                 }
@@ -629,7 +629,7 @@ impl App {
             // A container member's level: one undo step while it keeps moving; recorded as its automation target.
             Target::Member(m, k, id, wet) => {
                 crate::container::set_level_run(&mut self.state, m, k, id, wet, v);
-                if let Some(target) = crate::container::level_target(m, k, id, wet) {
+                if let Some(target) = crate::container::level_target(&self.state, m, k, id, wet) {
                     self.record_param(target, (0.0, 1.0), f64::from(v));
                 }
             }
@@ -791,9 +791,9 @@ impl App {
 pub fn group_name(s: &State, b: &LinkBox) -> String {
     match b.target {
         Target::Param(key, _) => crate::params::owner_name(s, key),
-        Target::MemberParam(m, k, id, _) => match crate::container::member_key(s, crate::plugins::fx_key(m, k), id) {
+        Target::MemberParam(m, k, id, _) => match crate::container::member_key(s, crate::container::place_key(m, k), id) {
             Some(key) => crate::params::owner_name(s, key),
-            None => crate::mixer::name(s, m),
+            None => crate::container::place_name(s, m, k),
         },
         Target::Fader(t) => crate::mixer::name(s, t),
         t => crate::typein::caption(s, t).trim_start_matches("Value for ").to_string(),

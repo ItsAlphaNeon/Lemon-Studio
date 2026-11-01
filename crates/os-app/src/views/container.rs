@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! The container's window (Lemon Studio's design, the plain list window of the Patcher's slice 1): the effects in
-//! order, each with its name (a click opens its window), its wet and dry knobs and its menu button; Add effect under
-//! them.
-// spec: plugins/patcher/README.md §4 slice 1, §4.3
+//! The container's window (Lemon Studio's design, the plain list window of the Patcher's slice 1): the effects (and
+//! a channel's container's instruments) in order, each with its name (a click opens its window), its wet and dry knobs
+//! and its menu button; Add effect (Add plugin on a channel) under them.
+// spec: plugins/patcher/README.md §4 slice 1, §4.3, §4.4
 
 use os_ui::kit::lemon as lk;
 use os_ui::{Font, Rect};
@@ -57,7 +57,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     }
     ui.hit(win, Action::Swallow, "");
     let (track, slot) = s.container.at;
-    let title = crate::params::effect_label(s, track, slot).unwrap_or_else(|| "Container".into());
+    let title = crate::container::title(s, track, slot).unwrap_or_else(|| "Container".into());
     ui.hit(Rect::new(x0 + 1.0, y0 + 1.0, W - 30.0, TITLE_H - 4.0), Action::WinDrag(Win::Container), "");
     super::strum::label(ui, Font::new(17), x0 + 9.0, y0 + 15.0, -1, t.text, &title);
     let close = Rect::new(x0 + W - 20.0, y0 + 10.0, 10.0, 10.0);
@@ -79,7 +79,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
             ui.c.fill_rect(Rect::new(row.x, row.y, row.w, 1.0), t.s(0x272a2c));
         }
         // The name: a click opens the effect's window; a member whose plugin was not found is greyed.
-        let found = crate::container::member_key(s, crate::plugins::fx_key(track, slot), m.id).is_some();
+        let found = crate::container::member_key(s, crate::container::place_key(track, slot), m.id).is_some();
         let name_r = Rect::new(row.x, row.y, row.w - WET_X - 18.0, row.h);
         let hint = if found { format!("Open {}'s window (right-click: its menu)", m.name) } else { format!("{} was not found (right-click: its menu)", m.name) };
         let hov = ui.hit(name_r, Action::Container(CAct::Open(i)), hint);
@@ -103,10 +103,15 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     // Add effect: the effect list of an empty slot.
     let add = Rect::new(x0 + 10.0, win.bottom() - FOOT + 8.0, 112.0, 24.0);
     let full = list.len() >= crate::container::MAX_MEMBERS;
-    let hint = if full { "The container is full (15 effects)" } else { "Add an effect at the end of the chain" };
+    let channel = slot == crate::container::CHANNEL;
+    let hint = match (full, channel) {
+        (true, _) => "The container is full (15 plugins)",
+        (false, true) => "Add an instrument or an effect at the end of the chain",
+        (false, false) => "Add an effect at the end of the chain",
+    };
     let hov = ui.hit(add, Action::Container(CAct::Add), hint);
     super::button_face(ui, add, if hov { Look::Hover } else { Look::Off });
     let ink = if full { t.text_faint } else if hov { t.tx(0xffffff) } else { t.text };
     icons::draw(ui.c, Icon::Plus, Rect::new(add.x + 6.0, add.cy() - 6.0, 12.0, 12.0), ink);
-    super::strum::label(ui, lf, add.x + 22.0, add.cy(), -1, ink, "Add effect");
+    super::strum::label(ui, lf, add.x + 22.0, add.cy(), -1, ink, if channel { "Add plugin" } else { "Add effect" });
 }

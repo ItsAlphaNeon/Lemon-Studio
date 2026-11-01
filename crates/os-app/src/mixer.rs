@@ -159,10 +159,14 @@ pub enum MCmd {
     Wrap(u8, bool),
     /// The container list's entries on a member of the container in the current track's slot (`App::edit_member`), its
     /// Add effect ▸ (`App::add_member`: the effect's index in `Plugins::effects`), a member window's Replace ▸
-    /// (`App::replace_member`: the member's place, the effect's index), and the list's window.
+    /// (`App::replace_member`: the member's place, the effect's index), and the list's window. A channel's container
+    /// takes them as slot `container::CHANNEL` of its row in the track's place (`Cmd::SlotWin`), and instruments too:
+    /// `MemberAddInst` and `MemberReplaceInst` with the instrument's index in `Plugins::available`.
     Member(u8, usize, crate::container::Op),
     MemberAdd(u8, usize),
+    MemberAddInst(u8, usize),
     MemberReplace(u8, usize, usize),
+    MemberReplaceInst(u8, usize, usize),
     ContainerList(u8),
     /// The slot menu's Scaling ▸: the hosted plugin's window at this percent, `None` = Main (`Plugins::editor_scales`).
     SlotScale(u8, Option<u16>),
@@ -1762,7 +1766,8 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::Member(_, _, crate::container::Op::Up | crate::container::Op::Down) => Some(crate::container::MOVE),
         MCmd::Member(_, _, crate::container::Op::Remove) => Some(crate::container::REMOVE),
         MCmd::MemberAdd(..) => Some(crate::container::ADD),
-        MCmd::MemberReplace(..) => Some(crate::container::REPLACE),
+        MCmd::MemberAddInst(..) => Some(crate::container::ADD_INSTRUMENT),
+        MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..) => Some(crate::container::REPLACE),
         MCmd::RemoveTeslasNow => Some("Remove audio editors"),
         MCmd::OpenState(..) => Some("Open mixer track state"),
         MCmd::InsertState(..) => Some(INSERT),
@@ -1770,7 +1775,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     };
     if let Some(name) = step {
         // The containers' members as their windows left them: what the step keeps and an undo brings back.
-        if matches!(c, MCmd::Wrap(..) | MCmd::Member(..) | MCmd::MemberAdd(..) | MCmd::MemberReplace(..)) {
+        if matches!(c, MCmd::Wrap(..) | MCmd::Member(..) | MCmd::MemberAdd(..) | MCmd::MemberAddInst(..) | MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..)) {
             crate::container::store_members(&mut app.state.project, &app.plugins);
         }
         return crate::control::edit_app(app, name, Region::Project, |app| run_now(app, c));
@@ -2063,13 +2068,13 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             changed(&mut app.state);
             msg
         }
-        MCmd::MemberAdd(slot, index) => {
-            let msg = app.add_member(slot, index);
+        MCmd::MemberAdd(slot, index) | MCmd::MemberAddInst(slot, index) => {
+            let msg = app.add_member(slot, index, matches!(c, MCmd::MemberAddInst(..)));
             changed(&mut app.state);
             msg
         }
-        MCmd::MemberReplace(slot, i, index) => {
-            let msg = app.replace_member(slot, i, index);
+        MCmd::MemberReplace(slot, i, index) | MCmd::MemberReplaceInst(slot, i, index) => {
+            let msg = app.replace_member(slot, i, index, matches!(c, MCmd::MemberReplaceInst(..)));
             changed(&mut app.state);
             msg
         }

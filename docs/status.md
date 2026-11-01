@@ -151,8 +151,16 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   by its container's slot and its id in the container (at most 15 effects), so it follows the effect when the list
   is reordered, plays in playback and export, and is saved with the project. A member's window lists, steps, saves
   and loads its presets; its window edits and presets are undo steps, as a slot effect's are. Not yet: moving a
-  wrapped slot's own clips and links onto the member, the CPU switches per effect, the channel's Patcherize (it
-  needs instrument containers), and the original's Patcher slots in imported projects
+  wrapped slot's own clips and links onto the member, the CPU switches per effect, and the original's Patcher slots
+  in imported projects
+- Instrument containers: the channel rack menu's Wrap in container (the original's Patcherize) moves a plugin
+  channel's instrument, with its state, into a container on the channel, one undo step. The channel stays a channel
+  (its name, steps, piano roll, mixer track, volume and pan); the container plays its notes through its plugins in
+  order. Its window (a click on the channel's name button) lists them; Add plugin offers instruments and effects. An
+  instrument starts at wet and dry 100 %, so a second one layers over the first, and an effect after them works on
+  both. Members are automated, linked, typed in and undone as a slot container's are, named by the channel, listed in
+  the browser's Generators after their channel, and saved in Lemon projects. Not yet: moving the old instrument's
+  clips and links onto its member, the graph editor's several outputs and note processors
 
 ## ✅ Plugin hosting
 

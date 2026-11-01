@@ -1459,6 +1459,8 @@ pub enum RCmd {
     ChangeColor(usize),
     RandomColor(usize),
     LoadSample(usize),
+    /// Wrap instrument in container (the original's Patcherize; `App::wrap_channel`).
+    Wrap(usize),
     Clone(usize),
     Delete(usize),
     Cut(usize),
@@ -1792,9 +1794,12 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         PItem::sep(),
         PItem::sub("Insert", crate::plugin_menu::items(s, crate::plugin_menu::Target::Gen(Some(r)), true)),
         PItem::sub("Replace", crate::plugin_menu::items(s, crate::plugin_menu::Target::Replace(r), true)),
-        // Patcherize: the original moves the channel's plugin into an instrument patch (spec plugins/patcher/README.md
-        // §2.8, §3.3), slice 3's instrument containers; Lemon Studio's containers are effect chains in a mixer slot.
-        PItem::new("Wrap in container", Cmd::Nothing).off(),
+        // Patcherize: the channel's plugin goes into a container that plays the channel's notes (spec plugins/patcher/
+        // README.md §2.8, §3.3, §4.4).
+        {
+            let wrap = it(crate::container::WRAP, RCmd::Wrap(r));
+            if crate::container::can_wrap_channel(s, r) { wrap } else { wrap.off() }
+        },
         it("Clone", RCmd::Clone(r)),
         it("Delete...", RCmd::Delete(r)),
         PItem::sep(),
@@ -2146,6 +2151,11 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
 fn run_now(app: &mut App, c: RCmd) -> Option<String> {
     if let RCmd::Restretch = c {
         return restretch_all(app);
+    }
+    if let RCmd::Wrap(r) = c {
+        let msg = app.wrap_channel(r);
+        app.invalidate();
+        return msg;
     }
     let mouse = app.mouse;
     let sel: Vec<usize> = app.state.rack.sel.iter().copied().collect();
@@ -2509,7 +2519,8 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::Unlock(_)
         | RCmd::WavePreview(_)
         | RCmd::Through(_)
-        | RCmd::Restretch => None,
+        | RCmd::Restretch
+        | RCmd::Wrap(_) => None,
     };
     // Channels let go without asking (`ask_delete`) are deleted now.
     let msg = match app.state.rack.delete_now.take() {

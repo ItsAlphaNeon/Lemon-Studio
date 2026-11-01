@@ -4109,13 +4109,15 @@ fn instrument_job(cx: &InstCx, lane: InstLane, sc: &mut multicore::MixScratch) {
     let own_levels = inst.channel_levels(levels);
     inst.channel_voicing(&ch.voicing);
     // Parameter values before the notes at the same frame (spec: plugins/plugin-parameters.md §2); one per tick at its
-    // start for a plugin that takes them so (spec: plugins/fruity-abi.md "Parameters").
-    if inst.tick_params() {
-        for (index, value) in cx.params.channel_ticks(c) {
+    // start for a plugin that takes them so (spec: plugins/fruity-abi.md "Parameters"), parameter by parameter (a
+    // channel's container: each member as its plugin takes them).
+    for (index, value) in cx.params.channel_ticks(c) {
+        if inst.tick_params_at(index) {
             inst.param(0, index, value);
         }
-    } else {
-        for (off, index, value) in cx.params.channel_span(c, 0, n) {
+    }
+    for (off, index, value) in cx.params.channel_span(c, 0, n) {
+        if !inst.tick_params_at(index) {
             inst.param(off, index, value);
         }
     }

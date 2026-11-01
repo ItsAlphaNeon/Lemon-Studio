@@ -297,6 +297,8 @@ impl State {
         match id {
             KnobId::ChanVol(row) if self.is_clip_row(row) => 1.0,
             KnobId::ChanPan(row) if self.is_clip_row(row) => 0.0,
+            // An instrument member's levels as Add starts them: wet and dry (a layer).
+            KnobId::Member(t, k, member, false) if crate::container::is_instrument(self, t, k, member) => 1.0,
             _ => id.default_value(),
         }
     }
