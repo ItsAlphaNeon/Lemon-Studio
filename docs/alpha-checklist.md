@@ -84,24 +84,24 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
-- [ ] **Mixer right-click menus.** 5 entries greyed out on 2026-10-30, counted entry by entry after Insert from state
+- [ ] **Mixer right-click menus.** 4 entries greyed out on 2026-10-30, counted entry by entry after Insert from state
   (and File ▸ Open / Save mixer track state), Plugin delay compensation ▸ Automatic, View ▸ Waveforms and Extra
   properties, the slot menu's Scaling ▸ and Help, Mixer options ▸ Link all parameters... (the current track's own
   controls), the track and slot menus' Change icon..., the slot menu's Link all parameters... and its Patcherize and
-  Patcherize all (Wrap in container, Wrap all in container: see Patcher) were enabled:
+  Patcherize all (Wrap in container, Wrap all in container: see Patcher) and Mixer options ▸ Detached (the mixer in a
+  native window of its own) were enabled:
   Assign to / Unassign from Audio track(s) and Select ▸ Channels and playlist tracks (no audio tracks in the playlist
-  yet), Compensate for master latency (greyed in the original too); Mixer options Detached (the mixer is drawn in the
-  main window's one surface; only plugin windows, native windows around the plugin's own editor, detach).
+  yet), Compensate for master latency (greyed in the original too).
   Scaling ▸ is greyed for a slot without a hosted plugin, "(no saved states)" when none is saved. Not counted: the
   layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [x] **Playlist right-click menus.** None greyed out since 2026-10-30: the last five, the picker's Change icon and
   the plugin window's Link all parameters..., Change icon..., Save channel state as... and Browse channel states, work
   as Lemon Studio's design (Change icon is kept for the session only)
   ([playlist.rs](../crates/os-app/src/playlist.rs), [channel_states.rs](../crates/os-app/src/channel_states.rs))
-- [ ] **Channel rack right-click menus.** 11 of the rack's own entries greyed out on 2026-10-30, counted entry by
-  entry after 24 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
-  plugins, Change icon ▸, Show waveform preview, MIDI channel through and Restretch all on 2026-10-30): Loop starter
-  and its 3 playlist-track options (it is built on the original's online loop library), Detached (drawn in the main window's one surface, as the mixer), Patcherize, Assign
+- [ ] **Channel rack right-click menus.** 10 of the rack's own entries greyed out on 2026-10-30, counted entry by
+  entry after 25 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
+  plugins, Change icon ▸, Show waveform preview, MIDI channel through, Restretch all and Detached on 2026-10-30): Loop
+  starter and its 3 playlist-track options (it is built on the original's online loop library), Patcherize, Assign
   to new instrument track (instrument tracks, and how the original saves a track's link to its channel, not measured
   yet), Auto fill (greyed on every channel tried in the original; what it does is unknown), Create instrument (no multi-sample instrument to put the samples
   in yet), Burn MIDI to ▸ (2) (no plugin hands its notes back to the host yet). The knob, mixer box and LED menus'

@@ -1601,8 +1601,8 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Extra properties", Cmd::Mixer(MCmd::ViewExtra)).mark(Mark::Check(s.mixer.extra)),
             ],
         ),
-        // Greyed: the mixer is drawn in the main window's one surface (ui/mixer.md §6.1).
-        PItem::not_yet("Detached").mark(Mark::Check(false)),
+        // In a native window of its own (Lemon Studio's design: ui/mixer.md §6.2).
+        PItem::new("Detached", Cmd::Detach(crate::app::Win::Mixer, !s.is_detached(crate::app::Win::Mixer))).mark(Mark::Check(s.is_detached(crate::app::Win::Mixer))),
         PItem::sep(),
         PItem::sub("Trim unused tracks", trim_items(s)),
         PItem::new(AUTO_BYPASS_ALL_LABEL, Cmd::Mixer(MCmd::AutoBypassAll)),
