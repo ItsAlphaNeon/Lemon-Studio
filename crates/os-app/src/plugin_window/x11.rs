@@ -1153,6 +1153,21 @@ pub fn stack(parent: isize, hwnds: &[isize]) {
     let _ = conn.c.flush();
 }
 
+/// Makes X11 window `win` (a detached Mixer or Channel rack, `detached_win`; not shown yet) transient for the main
+/// window `owner`, as the plugin frames are: the window manager keeps it above the main window, out of the task list,
+/// and minimizes it with it. The round trip makes sure the server has the property before the window is shown over
+/// winit's own connection.
+pub fn set_transient(win: u32, owner: isize) {
+    let Ok(conn) = conn() else { return };
+    if win == 0 || owner == 0 {
+        return;
+    }
+    let c = &conn.c;
+    if c.change_property32(PropMode::REPLACE, win, AtomEnum::WM_TRANSIENT_FOR, AtomEnum::WINDOW, &[owner as u32]).is_ok() {
+        let _ = c.get_input_focus().ok().and_then(|r| r.reply().ok());
+    }
+}
+
 /// Gives the keyboard back to the main window when a plugin editor holds it, or nobody does. A plugin takes it with a
 /// click (for its text fields) and keeps it: X11 does not move it back when the user clicks elsewhere in the app (the
 /// window manager sees the same active window), nor when the plugin's window closes (it goes to nobody), and the
