@@ -296,6 +296,8 @@ fn knob_value(s: &State, id: KnobId) -> f64 {
     match id {
         KnobId::ChanVol(i) => s.project.channels.get(i).map_or(0.0, |c| c.volume),
         KnobId::ChanPan(i) => s.project.channels.get(i).map_or(0.0, |c| c.pan),
+        // The level the container's list holds (the knob shows the chain's, an automated one included).
+        KnobId::Member(t, k, id, wet) => crate::container::level(s, t, k, id, wet).map_or(0.0, f64::from),
         _ => f64::from(s.knob(id)),
     }
 }
@@ -326,6 +328,7 @@ fn knob_name(id: KnobId) -> &'static str {
         KnobId::PianoDlg(_) => "Piano roll tool",
         KnobId::AutoLfo(..) => "Automation clip LFO",
         KnobId::MidiOut(..) => "MIDI Out setting",
+        KnobId::Member(..) => crate::container::LEVEL,
     }
 }
 

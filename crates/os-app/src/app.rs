@@ -50,6 +50,9 @@ pub enum Win {
     PianoDlg,
     /// The event editor (spec: ui/event-editor.md).
     Events,
+    /// A container's window: its effects with their wet and dry knobs (Lemon Studio's design: spec
+    /// plugins/patcher/README.md §4.3).
+    Container,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -174,6 +177,8 @@ pub enum Action {
     Touch(crate::touch::TouchAct),
     /// The Strum dialog's switches and buttons (spec: ui/piano-strum.md).
     Strum(crate::strum::Act),
+    /// The container window's names and buttons (`crate::container::CAct`).
+    Container(crate::container::CAct),
     /// The Arpeggiate dialog's buttons, switches and menus (spec: ui/piano-arpeggiate.md).
     Arp(crate::arpeggiate::Act),
     /// The Flam, Flip and Scale levels dialogs' switches and buttons (spec: as `Win::PianoDlg`).
@@ -956,6 +961,8 @@ pub struct State {
     pub perf: crate::perf::Perf,
     /// The Tempo tapper: where it is, the count of taps, the pad's flash.
     pub tapper: crate::tapper::TapperUi,
+    /// The container's window: where it is, which container it shows, the levels its chain plays.
+    pub container: crate::container::ContainerUi,
     pub touch: crate::touch::TouchUi,
     /// The event editor: the control it shows, its view, tool and selection.
     pub events: crate::events::EventsUi,
@@ -1438,6 +1445,7 @@ impl App {
                 cpu: crate::cpu::Cpu::saved(),
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
+                container: Default::default(),
                 touch: Default::default(),
                 events: Default::default(),
                 events_back: None,
@@ -5562,7 +5570,7 @@ impl App {
                 Drag::Knob { id, y0, v0 } => {
                     self.state.set_knob(id, v0 - (y - y0) * id.drag_rate());
                     self.record_knob(id);
-                    self.multilink_knob(crate::typein::Target::Knob(id));
+                    self.multilink_knob(id.target());
                     self.hint = Cow::Owned(self.state.knob_text(id));
                     match self.hits.iter().rev().find(|h| h.action == Action::Knob(id)).map(|h| h.rect) {
                         Some(r) => self.damage_rect(r.outset(6.0)),
@@ -6355,7 +6363,7 @@ impl App {
             return self.scrollbar_press(t, true);
         }
         if let Some(a) = action.as_ref() {
-            if self.rack_right(a) {
+            if self.rack_right(a) || self.container_right(a) {
                 return self.invalidate();
             }
         }
@@ -7114,7 +7122,7 @@ impl App {
             }
             self.state.set_knob(id, v);
             self.record_knob(id);
-            self.multilink_knob(crate::typein::Target::Knob(id));
+            self.multilink_knob(id.target());
             self.hint = Cow::Owned(self.state.knob_text(id));
             return None;
         }
@@ -8061,6 +8069,7 @@ impl App {
             Action::Tapper(a) => self.tapper_act(a),
             Action::Touch(a) => self.touch_act(a),
             Action::Strum(a) => self.strum_act(a),
+            Action::Container(a) => self.container_act(a),
             Action::Arp(a) => self.arp_act(a),
             Action::PianoDlg(a) => self.piano_dlg_act(a),
             Action::Events(a) => self.events_act(a),

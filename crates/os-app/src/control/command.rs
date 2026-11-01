@@ -295,8 +295,10 @@ pub struct PluginSide {
 impl PluginSide {
     /// The name of plugin `owner`'s channel or slot as it is now; `None` when it has none of either.
     fn name_of(s: &State, owner: u32) -> Option<Option<String>> {
-        let key = owner_key(&s.project, owner)?;
+        let key = owner_key(s, owner)?;
         Some(match crate::plugins::fx_of(key) {
+            // A container's effect has no name of its own (a preset renames nothing).
+            None if key >= crate::plugins::MEMBER_KEY => None,
             None => s.project.channels[key].name.clone(),
             Some(slot) => s.mixer.slot_names.get(&slot).cloned(),
         })
@@ -304,7 +306,7 @@ impl PluginSide {
 
     /// Puts the name back (`apply` sends the state and preset to the app).
     fn put_name(&self, s: &mut State, owner: u32) {
-        let Some(key) = owner_key(&s.project, owner) else { return };
+        let Some(key) = owner_key(s, owner).filter(|&k| k < crate::plugins::MEMBER_KEY) else { return };
         match crate::plugins::fx_of(key) {
             None => s.project.channels[key].name = self.name.clone(),
             Some(slot) => match &self.name {
@@ -464,22 +466,52 @@ fn clip_place(p: &Project, id: u32) -> Result<usize, Error> {
 }
 
 /// The channel or slot plugin with id `owner`: its `Plugins::hosted` key.
-pub fn owner_key(p: &Project, owner: u32) -> Option<usize> {
+pub fn owner_key(s: &State, owner: u32) -> Option<usize> {
+    let p = &s.project;
+    let slot = |owner: u32| {
+        p.mixer.iter().find_map(|m| {
+            let k = m.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.id.0 == owner))?;
+            Some((m.index, k as u8))
+        })
+    };
+    if owner & MEMBER_OWNER != 0 {
+        let (t, k) = slot(owner & MEMBER_SLOT)?;
+        let id = (owner & !MEMBER_OWNER) >> 24;
+        return s.params.members.iter().find(|(_, m)| **m == (t, k, id)).map(|(&key, _)| key);
+    }
     if let Some(r) = p.channels.iter().position(|c| c.id.0 == owner) {
         return Some(r);
     }
-    p.mixer.iter().find_map(|m| {
-        let k = m.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.id.0 == owner))?;
-        Some(crate::plugins::fx_key(m.index, k as u8))
-    })
+    slot(owner).map(|(t, k)| crate::plugins::fx_key(t, k))
 }
 
-/// The id of the channel or slot plugin hosted under `Plugins::hosted` key `key` (`owner_key`'s other way).
-pub fn key_owner(p: &Project, key: usize) -> Option<u32> {
+/// The id of the channel or slot plugin hosted under `Plugins::hosted` key `key` (`owner_key`'s other way); for a
+/// container's effect, its `member_owner` (0 while its container's slot has no id yet).
+pub fn key_owner(s: &State, key: usize) -> Option<u32> {
+    let p = &s.project;
+    let slot_id = |t: u16, k: u8| p.mixer.iter().find(|m| m.index == t)?.slots.get(usize::from(k))?.as_ref().map(|s| s.id.0);
+    if key >= crate::plugins::MEMBER_KEY {
+        let &(t, k, id) = s.params.members.get(&key)?;
+        return match slot_id(t, k)? {
+            0 => Some(0),
+            slot => member_owner(slot, id),
+        };
+    }
     match crate::plugins::fx_of(key) {
         None => p.channels.get(key).map(|c| c.id.0),
-        Some((t, k)) => p.mixer.iter().find(|m| m.index == t)?.slots.get(usize::from(k))?.as_ref().map(|s| s.id.0),
+        Some((t, k)) => slot_id(t, k),
     }
+}
+
+/// The owner ids of the effects inside containers (Lemon Studio's own, spec plugins/patcher/README.md §4.3): this bit,
+/// the member's id in its container (1 to 15) in bits 24 to 27 and its container's slot plugin id in the low 24 bits,
+/// so that a member's undo steps follow it when its container's slot moves and when the list is reordered.
+pub const MEMBER_OWNER: u32 = 1 << 31;
+const MEMBER_SLOT: u32 = (1 << 24) - 1;
+
+/// The owner id of member `id` of the container whose slot plugin's id is `slot` (`None`: an id with no room).
+pub fn member_owner(slot: u32, id: u32) -> Option<u32> {
+    (slot != 0 && slot <= MEMBER_SLOT && (1..=os_model::target::MEMBER_IDS).contains(&id)).then_some(MEMBER_OWNER | id << 24 | slot)
 }
 
 /// `#rrggbb` (empty: `None`, the default colour).
@@ -1084,7 +1116,7 @@ impl Command {
 
             Command::SetParam { owner, param, value, .. } => {
                 unit("value", value, 0.0, 1.0)?;
-                owner_key(&s.project, owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
+                owner_key(s, owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
                 s.control.set_param(owner, param, value);
                 none
             }

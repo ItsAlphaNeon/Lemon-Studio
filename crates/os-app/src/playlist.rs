@@ -5326,7 +5326,8 @@ pub fn rescale(s: &mut State, from: u16, to: u16) {
 /// window (`row` an `fx_key`) has no Piano roll and no Channel column, as in the original.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
-    let slot = crate::plugins::fx_of(row).is_some();
+    // A container's effect has a slot effect's entries (Lemon Studio's design: spec plugins/patcher/README.md §4.3).
+    let slot = crate::plugins::fx_of(row).is_some() || row >= crate::plugins::MEMBER_KEY;
     let mut items = vec![
         PItem::not_yet("Piano roll"),
         PItem::not_yet("Replace"),
@@ -5417,16 +5418,33 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
         it.cmd = cmd;
         it.enabled = true;
     };
-    if let Some((t, k)) = crate::plugins::fx_of(key) {
-        // Every command of the slot's entries runs with its track selected.
-        fn on_track(t: u16, items: &mut [PItem]) {
-            for it in items.iter_mut() {
-                if it.cmd != Cmd::Nothing {
-                    it.cmd = Cmd::SlotWin(t, Box::new(std::mem::replace(&mut it.cmd, Cmd::Nothing)));
+    // Every command of a slot's entries runs with its track selected.
+    fn on_track(t: u16, items: &mut [PItem]) {
+        for it in items.iter_mut() {
+            if it.cmd != Cmd::Nothing {
+                it.cmd = Cmd::SlotWin(t, Box::new(std::mem::replace(&mut it.cmd, Cmd::Nothing)));
+            }
+            on_track(t, &mut it.children);
+        }
+    }
+    // A container's effect: Replace ▸ puts another effect in its place, Delete... removes it from the container. It has
+    // no name, colour or icon of its own, and no CPU switches (the container's slot has them), so those stay greyed.
+    if let Some(&(t, k, id)) = s.params.members.get(&key) {
+        let Some(i) = crate::container::members(s, t, k).and_then(|l| l.iter().position(|m| m.id == id)) else { return };
+        for it in menu.items.iter_mut() {
+            match &*it.label {
+                "Replace" => {
+                    let mut replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Member(k, i), true);
+                    on_track(t, &mut replace);
+                    *it = PItem::sub("Replace", replace);
                 }
-                on_track(t, &mut it.children);
+                "Delete..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::Member(k, i, crate::container::Op::Remove))))),
+                _ => {}
             }
         }
+        return;
+    }
+    if let Some((t, k)) = crate::plugins::fx_of(key) {
         for it in menu.items.iter_mut() {
             match &*it.label {
                 "Replace" => {

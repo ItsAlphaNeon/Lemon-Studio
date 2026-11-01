@@ -601,6 +601,8 @@ pub fn load_into(app: &mut App, key: usize, path: &Path) -> Option<String> {
 /// The state the instance under `key` would go back to on undo (`Taken::Plugin`); `None` when it has none to save.
 fn side(app: &App, key: usize) -> Option<crate::control::command::PluginSide> {
     let name = match crate::plugins::fx_of(key) {
+        // A container's effect: no name of its own to put back.
+        None if key >= crate::plugins::MEMBER_KEY => None,
         None => app.state.project.channels.get(key)?.name.clone(),
         Some(slot) => app.state.mixer.slot_names.get(&slot).cloned(),
     };

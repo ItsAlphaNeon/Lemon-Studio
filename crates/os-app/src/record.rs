@@ -502,6 +502,13 @@ impl App {
 
     /// A knob moved (`record_control`).
     pub(crate) fn record_knob(&mut self, id: KnobId) {
+        // A container member's level is recorded on its target, as its controller link records it.
+        if let KnobId::Member(t, k, m, wet) = id {
+            if let Some(target) = crate::container::level_target(t, k, m, wet) {
+                self.record_param(target, (0.0, 1.0), f64::from(self.state.knob(id)));
+            }
+            return;
+        }
         self.record_control(&crate::app::Action::Knob(id));
     }
 

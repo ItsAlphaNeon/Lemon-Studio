@@ -158,9 +158,11 @@ pub enum MCmd {
     /// Wrap in container (false) and Wrap all in container (true) on the current track's slot (`App::wrap_in_container`).
     Wrap(u8, bool),
     /// The container list's entries on a member of the container in the current track's slot (`App::edit_member`), its
-    /// Add effect ▸ (`App::add_member`: the effect's index in `Plugins::effects`), and the list itself.
+    /// Add effect ▸ (`App::add_member`: the effect's index in `Plugins::effects`), a member window's Replace ▸
+    /// (`App::replace_member`: the member's place, the effect's index), and the list's window.
     Member(u8, usize, crate::container::Op),
     MemberAdd(u8, usize),
+    MemberReplace(u8, usize, usize),
     ContainerList(u8),
     /// The slot menu's Scaling ▸: the hosted plugin's window at this percent, `None` = Main (`Plugins::editor_scales`).
     SlotScale(u8, Option<u16>),
@@ -1760,6 +1762,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::Member(_, _, crate::container::Op::Up | crate::container::Op::Down) => Some(crate::container::MOVE),
         MCmd::Member(_, _, crate::container::Op::Remove) => Some(crate::container::REMOVE),
         MCmd::MemberAdd(..) => Some(crate::container::ADD),
+        MCmd::MemberReplace(..) => Some(crate::container::REPLACE),
         MCmd::RemoveTeslasNow => Some("Remove audio editors"),
         MCmd::OpenState(..) => Some("Open mixer track state"),
         MCmd::InsertState(..) => Some(INSERT),
@@ -1767,7 +1770,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     };
     if let Some(name) = step {
         // The containers' members as their windows left them: what the step keeps and an undo brings back.
-        if matches!(c, MCmd::Wrap(..) | MCmd::Member(..) | MCmd::MemberAdd(..)) {
+        if matches!(c, MCmd::Wrap(..) | MCmd::Member(..) | MCmd::MemberAdd(..) | MCmd::MemberReplace(..)) {
             crate::container::store_members(&mut app.state.project, &app.plugins);
         }
         return crate::control::edit_app(app, name, Region::Project, |app| run_now(app, c));
@@ -2065,8 +2068,13 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             changed(&mut app.state);
             msg
         }
+        MCmd::MemberReplace(slot, i, index) => {
+            let msg = app.replace_member(slot, i, index);
+            changed(&mut app.state);
+            msg
+        }
         MCmd::ContainerList(slot) => {
-            s.playlist.popup = crate::container::list_popup(s, slot, at.0, at.1);
+            crate::container::show(s, s.selected_mixer, slot);
             None
         }
         MCmd::SlotMove(slot, d) => {
@@ -2425,12 +2433,9 @@ impl App {
 
     pub(crate) fn open_fx(&mut self, track: u16, slot: u8) {
         let key = crate::plugins::fx_key(track, slot);
-        // A container: its list of members (slice 1 has no container window).
+        // A container: its list's window.
         if crate::container::members(&self.state, track, slot).is_some() {
-            if self.state.selected_mixer != track {
-                select(&mut self.state, track, false);
-            }
-            self.state.playlist.popup = crate::container::list_popup(&self.state, slot, self.mouse.0, self.mouse.1);
+            crate::container::show(&mut self.state, track, slot);
             return;
         }
         if !self.plugins.hosted.contains_key(&key) {
