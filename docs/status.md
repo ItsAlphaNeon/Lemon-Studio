@@ -88,7 +88,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   track header can show the pass's progress (the ▸ menu's Performance clip / track progress); the clock's bars are
   negative in the zone. Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant,
   Position sync) are saved as FL saves them. With Record armed, stopping the song writes what the launched tracks
-  played after the Start marker as clips on their tracks (one undo step). Not yet: the typing keyboard, sub-clips
+  played after the Start marker as clips on their tracks (one undo step). A slot's later clips are sub-clips: the
+  mouse plays them in turn, a MIDI note's velocity picks one (the ▸ menu's Velocity picks sub-clips), and Motion
+  plays each slot's first clip. Not yet: the typing keyboard
 
 ## ✅ Mixing and routing
 

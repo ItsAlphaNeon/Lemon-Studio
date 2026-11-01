@@ -35,6 +35,8 @@ pub struct Perform {
     pub scene: Option<bool>,
     /// Note 127 (Global Snap) held on the MIDI channel: triggers and stops sync to the global snap.
     pub snap: bool,
+    /// The velocity of the MIDI note triggering, while it does: it picks the slot's sub-clip (§3a).
+    pub vel: Option<u8>,
 }
 
 /// The MIDI grid (§3): notes 0–119 are this many tracks of this many columns.
@@ -218,7 +220,7 @@ fn passes(s: &mut State, track: u16, col: usize, first: Clip, at: u32, skip: u32
         let Some(k) = step(motion, col, &used, &mut rng) else { break };
         if motion != 0 {
             col = k;
-            match next_in_slot(s, &cols, track, col) {
+            match first_in_slot(s, &cols, track, col) {
                 Some(c) => clip = c,
                 None => break,
             }
@@ -227,16 +229,25 @@ fn passes(s: &mut State, track: u16, col: usize, first: Clip, at: u32, skip: u32
     out
 }
 
-/// The slot's next clip by round robin (§2), and the turn moved on.
+/// The slot's next clip by round robin (§2), and the turn moved on. A MIDI note's velocity (`Perform::vel`, with the
+/// ▸ menu's Velocity picks sub-clips on) picks it instead: the velocity range split evenly over the slot's clips
+/// (§3a), and the turn goes on from there.
 fn next_in_slot(s: &mut State, cols: &[u32], track: u16, col: usize) -> Option<Clip> {
     let list = slot_clips(s, cols, track, col);
     if list.is_empty() {
         return None;
     }
+    let n = list.len();
+    let by_vel = s.playlist.perform.vel.filter(|_| s.playlist.perf_velocity_subclips).map(|v| (usize::from(v.clamp(1, 127)) - 1) * n / 127);
     let turn = s.playlist.perform.turn.entry((track, col)).or_insert(0);
-    let c = list[*turn % list.len()];
-    *turn = (*turn + 1) % list.len();
-    Some(c)
+    let i = by_vel.unwrap_or(*turn % n);
+    *turn = (i + 1) % n;
+    Some(list[i])
+}
+
+/// The slot's first clip: Motion moving on plays no sub-clips (§3a, §4).
+fn first_in_slot(s: &State, cols: &[u32], track: u16, col: usize) -> Option<Clip> {
+    slot_clips(s, cols, track, col).first().copied()
 }
 
 /// Left click on zone clip `i` (§3): its slot plays on its track, from the next Trigger sync point after `now` (the
@@ -444,7 +455,7 @@ pub fn release(s: &mut State, now: Option<u32>) {
 
 /// A note on the Performance mode MIDI channel (§3): notes 0–119 are 10 tracks of 12 slots, the note / 12 the track
 /// and the note % 12 the column. A key's release ends Press Hold & stop and Hold & motion as the mouse button's does.
-pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option<String> {
+pub fn midi_note(s: &mut State, key: u8, vel: u8, down: bool, now: Option<u32>) -> Option<String> {
     zone(s)?;
     if key >= 120 {
         return match key {
@@ -463,7 +474,13 @@ pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option
     let o = s.playlist.perform.origin;
     let (track, col) = (o.0 + u16::from(key / 12), o.1 + usize::from(key % 12));
     if let Some(plus) = s.playlist.perform.scene {
-        return if down { trigger_scene(s, col, now, false, plus) } else { None };
+        if !down {
+            return None;
+        }
+        s.playlist.perform.vel = Some(vel);
+        let hint = trigger_scene(s, col, now, false, plus);
+        s.playlist.perform.vel = None;
+        return hint;
     }
     if !down {
         if s.playlist.perform.live.get(&track).is_some_and(|l| l.column == col) {
@@ -473,7 +490,9 @@ pub fn midi_note(s: &mut State, key: u8, down: bool, now: Option<u32>) -> Option
     }
     // The mouse's held slot is not this key's.
     let held = s.playlist.perform.held;
+    s.playlist.perform.vel = Some(vel);
     let hint = trigger_slot(s, track, col, now, false, false);
+    s.playlist.perform.vel = None;
     s.playlist.perform.held = held;
     hint
 }
@@ -523,7 +542,7 @@ fn release_track(s: &mut State, track: u16, now: Option<u32>) {
             let mut kept = cut_at(s, &l, cur.end());
             let mut column = l.column;
             if let Some(col) = step(set.motion, l.column, &used(s, &cols, track), &mut rng(t, track)) {
-                if let Some(c) = next_in_slot(s, &cols, track, col) {
+                if let Some(c) = first_in_slot(s, &cols, track, col) {
                     kept.extend(passes(s, track, col, c, cur.end(), 0, set.motion));
                     column = col;
                 }
@@ -880,17 +899,17 @@ mod tests {
         let s = &mut app.state;
         let z = 3072;
         s.global_snap.now = crate::playlist::Snap::Beat;
-        midi_note(s, 0, true, Some(z + 30));
+        midi_note(s, 0, 100, true, Some(z + 30));
         assert_eq!(s.playlist.perform.live[&0].passes.iter().find(|c| c.position > z + 30).map(|c| c.position), Some(z + 384), "the track's 4 beats");
-        midi_note(s, 127, true, None);
+        midi_note(s, 127, 100, true, None);
         assert!(s.playlist.perform.snap);
-        midi_note(s, 1, true, Some(z + 30));
+        midi_note(s, 1, 100, true, Some(z + 30));
         let l = &s.playlist.perform.live[&0];
         assert_eq!((l.column, l.passes.iter().find(|c| c.position > z + 30).map(|c| c.position)), (1, Some(z + 96)), "a beat");
         s.global_snap.now = crate::playlist::Snap::None;
-        midi_note(s, 0, true, Some(z + 30));
+        midi_note(s, 0, 100, true, Some(z + 30));
         assert_eq!(s.playlist.perform.live[&0].passes.iter().find(|c| c.position >= z + 30).map(|c| c.position), Some(z + 30), "(none): at once");
-        midi_note(s, 127, false, None);
+        midi_note(s, 127, 100, false, None);
         assert!(!s.playlist.perform.snap);
     }
 
@@ -913,6 +932,34 @@ mod tests {
         assert_eq!(record(s, z + 384), 1);
         let on0: Vec<(u32, u32)> = clips(s).iter().filter(|c| c.track == 0 && c.position >= z).map(|c| (c.position, c.length)).collect();
         assert_eq!(on0, vec![(z + 512, 384), (z + 896, 132), (z, 384)]);
+    }
+
+    /// §3a: a MIDI note's velocity picks the slot's sub-clip; the mouse goes round robin; Motion plays no sub-clips.
+    #[test]
+    fn sub_clips() {
+        let mut app = app();
+        let s = &mut app.state;
+        let z = 3072;
+        // Column 0 of track 1 holds three clips: patterns 1, 4 and 5.
+        arr_mut(s).clips.push(Clip::new(384, 384, 0, ClipSource::Pattern(4)));
+        arr_mut(s).clips.push(Clip::new(768, 384, 0, ClipSource::Pattern(5)));
+        let src = |s: &State| s.playlist.perform.live[&0].passes[0].source;
+        for (vel, pat) in [(1, 1), (43, 1), (44, 4), (85, 4), (86, 5), (127, 5)] {
+            midi_note(s, 0, vel, true, Some(z));
+            assert_eq!(src(s), ClipSource::Pattern(pat), "velocity {vel}");
+        }
+        trigger(s, 0, Some(z), true, false);
+        assert_eq!(src(s), ClipSource::Pattern(1), "the mouse goes on from the last one picked");
+        trigger(s, 0, Some(z), true, false);
+        assert_eq!(src(s), ClipSource::Pattern(4));
+        s.playlist.perf_velocity_subclips = false;
+        midi_note(s, 0, 127, true, Some(z));
+        assert_eq!(src(s), ClipSource::Pattern(5), "off: round robin");
+        // March & wrap: each column's first clip, never a sub-clip.
+        arr_mut(s).tracks[0].perf.motion = 2;
+        midi_note(s, 0, 127, true, Some(z));
+        let pats: Vec<ClipSource> = s.playlist.perform.live[&0].passes.iter().take(4).map(|c| c.source).collect();
+        assert_eq!(pats, vec![ClipSource::Pattern(1), ClipSource::Pattern(2), ClipSource::Pattern(1), ClipSource::Pattern(2)]);
     }
 
     #[test]
