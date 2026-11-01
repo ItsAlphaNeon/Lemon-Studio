@@ -19,10 +19,11 @@ use os_model::ChannelKind;
 /// File extension of a channel state.
 pub const EXT: &str = "oschannel";
 
-/// `Channel presets` in the user folder (`OPENSTUDIO_CHANNEL_STATES` overrides it, used by tests).
+/// `Channel presets` in the user folder; in tests, the test thread's own folder when it set one (`tests::ROOT`).
 pub fn root() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("OPENSTUDIO_CHANNEL_STATES") {
-        return Some(PathBuf::from(p));
+    #[cfg(test)]
+    if let Some(p) = tests::ROOT.with(|r| r.borrow().clone()) {
+        return Some(p);
     }
     os_paths::user_file("Channel presets")
 }
@@ -165,8 +166,15 @@ fn browse(app: &mut App) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    thread_local! {
+        /// This test thread's Channel presets folder. One per thread, not a process-wide setting (it was an
+        /// environment variable): the browser lists this folder, and a folder set by one test showed in the browser
+        /// of the tests painting beside it.
+        pub(crate) static ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    }
 
     /// A channel state round trip (Lemon Studio's design): Save writes the channel, Add brings it back as the last row,
     /// selected, named and set as it was, and is one undo step; Browse opens Channel presets in the browser, listing it.
@@ -175,8 +183,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ls_channel_states_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: tests touching this variable all set it to the same value.
-        unsafe { std::env::set_var("OPENSTUDIO_CHANNEL_STATES", &dir) };
+        ROOT.with(|r| *r.borrow_mut() = Some(dir.clone()));
         let mut app = App::new(None);
         app.state.project = crate::app::test_project();
         let row = 1;

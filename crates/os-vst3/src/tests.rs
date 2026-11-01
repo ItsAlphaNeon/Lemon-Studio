@@ -40,7 +40,8 @@ fn sampler_state(wav: &Path, params: &str) -> Vec<u8> {
 }
 
 fn tone(name: &str, frames: usize) -> PathBuf {
-    let wav = std::env::temp_dir().join(name);
+    // One file per process: test runs side by side must not write each other's.
+    let wav = std::env::temp_dir().join(format!("{}-{name}", std::process::id()));
     let t: Vec<f32> = (0..frames).flat_map(|i| { let v = (i as f32 * 0.05).sin() * 0.5; [v, v] }).collect();
     os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &t).unwrap();
     wav
@@ -348,7 +349,7 @@ fn engine_plays_a_pattern() {
 fn mono_portamento_glides_through_the_tuning_expression() {
     let Some((_m, shared)) = sampler() else { return };
     // 4 s of a 441 Hz sine at 48 kHz.
-    let wav = std::env::temp_dir().join("os-vst3-porta.wav");
+    let wav = std::env::temp_dir().join(format!("os-vst3-porta-{}.wav", std::process::id()));
     let sine: Vec<f32> = (0..48000 * 4).flat_map(|i| { let v = (i as f32 / 48000.0 * 441.0 * std::f32::consts::TAU).sin() * 0.5; [v, v] }).collect();
     os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &sine).unwrap();
     {
