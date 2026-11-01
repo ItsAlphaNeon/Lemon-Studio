@@ -7613,9 +7613,9 @@ impl App {
         {
             return self.toggle_multilink();
         }
-        // A held key repeats only the piano roll's moving and copying keys; every other key acts on its first press
-        // (switches would flicker on and off; spec: ui/piano-keys.md §4 rule 1).
-        if self.repeat && !(self.piano_keys() && crate::piano_tools::repeats(key, ctrl, alt, self.shift)) {
+        // A held key repeats only the piano roll's moving and copying keys and the browser's Up / Down; every other key
+        // acts on its first press (switches would flicker on and off; spec: ui/piano-keys.md §4 rule 1).
+        if self.repeat && !(self.piano_keys() && crate::piano_tools::repeats(key, ctrl, alt, self.shift)) && !self.browser_repeats(key, ctrl, alt) {
             return;
         }
         // Shift+Alt+G: Enable groups (spec: ui/enable-groups.md §1), everywhere the main window has the keyboard.
@@ -14882,6 +14882,78 @@ mod tests {
         app.mouse_down_right();
         pick(&mut app, &mut c, "Remove from browser");
         assert!(app.state.browser_folders.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The arrows over the browser walk the tree (issue #169): Up / Down a row, Right opens a node and steps into it,
+    /// Left closes it and goes to the parent. Held, Up / Down repeat; with a modifier or away from the browser the
+    /// arrows are not the browser's.
+    #[test]
+    fn browser_arrow_keys_walk_the_tree() {
+        use crate::views::browser::{rows, Item};
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("os_browser_arrows_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Kicks")).unwrap();
+        std::fs::write(dir.join("Kicks").join("Kick 01.wav"), b"x").unwrap();
+        std::fs::write(dir.join("Kicks").join("Kick 02.wav"), b"x").unwrap();
+        std::fs::write(dir.join("readme.txt"), b"hello").unwrap();
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        app.drop_file(dir.clone());
+        frame(&mut app, &mut c, None);
+        let i = rows(&app.state).iter().position(|r| r.path.as_deref() == Some(dir.as_path())).expect("root row");
+        let over = hit_rect(&app, &Action::BrowserRow(0));
+        app.mouse_move(over.cx(), over.cy());
+        assert!(app.over_browser());
+        let arrow = |app: &mut App, k: NamedKey| app.key(&Key::Named(k), false, false);
+        let sel = |app: &App| {
+            let r = rows(&app.state);
+            let k = r.iter().position(|r| Some(&r.key) == app.state.browser_sel.as_ref()).expect("a row selected");
+            (k, r[k].label.clone())
+        };
+        // Nothing selected: Up selects the last row.
+        app.state.browser_sel = None;
+        arrow(&mut app, NamedKey::ArrowUp);
+        assert_eq!(sel(&app), (i + 2, "readme.txt".to_string()));
+        arrow(&mut app, NamedKey::ArrowUp);
+        assert_eq!(sel(&app), (i + 1, "Kicks".to_string()));
+        // Right opens the closed folder (the selection stays), then steps onto its first row.
+        arrow(&mut app, NamedKey::ArrowRight);
+        assert_eq!(rows(&app.state)[i + 1].open, Some(true));
+        assert_eq!(sel(&app).0, i + 1);
+        arrow(&mut app, NamedKey::ArrowRight);
+        assert_eq!(sel(&app), (i + 2, "Kick 01".to_string()));
+        assert!(matches!(rows(&app.state)[i + 2].item, Item::Sample(_)));
+        arrow(&mut app, NamedKey::ArrowDown);
+        assert_eq!(sel(&app), (i + 3, "Kick 02".to_string()));
+        // Held, Down repeats.
+        app.repeat = true;
+        arrow(&mut app, NamedKey::ArrowDown);
+        app.repeat = false;
+        assert_eq!(sel(&app), (i + 4, "readme.txt".to_string()));
+        // The last row stays selected.
+        arrow(&mut app, NamedKey::ArrowDown);
+        assert_eq!(sel(&app).0, i + 4);
+        // Left on a file goes to its parent; on an open node it closes it.
+        arrow(&mut app, NamedKey::ArrowLeft);
+        assert_eq!(sel(&app).0, i);
+        arrow(&mut app, NamedKey::ArrowLeft);
+        assert_eq!(rows(&app.state).len(), i + 1, "the root closed");
+        assert_eq!(sel(&app).0, i);
+        // Opened again, Kicks is still open.
+        arrow(&mut app, NamedKey::ArrowRight);
+        assert_eq!(rows(&app.state)[i + 1].open, Some(true));
+        // A modifier keeps the arrows' other meanings: Ctrl+Up collapses the structure.
+        app.key(&Key::Named(NamedKey::ArrowUp), true, false);
+        assert!(app.state.browser_open.iter().all(|k| !k.starts_with(&format!("{}:", app.state.browser_tab))));
+        // Away from the browser the arrows leave it alone.
+        let before = app.state.browser_sel.clone();
+        app.mouse_move(1500.0, 600.0);
+        assert!(!app.over_browser());
+        arrow(&mut app, NamedKey::ArrowUp);
+        assert_eq!(app.state.browser_sel, before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
