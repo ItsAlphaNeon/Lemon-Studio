@@ -27,6 +27,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   the session); Show waveform preview draws a sampler or audio clip channel's sample across its name button; MIDI
   channel through (ticked by default) gives a hosted VST, VST 3 or CLAP instrument a MIDI device's notes on the MIDI
   channel they came on, and a recorded note takes that channel as its colour. The two checks last for the session
+- The rack's Restretch all (Ctrl+Alt+R) fits every stretched sample and audio clip to the project tempo at once
+  (they follow the tempo by themselves too, also with tempo automation)
 - Advanced looping (the loop button's third loop type): each row's loop box takes a loop point, Step, Beat or Bar,
   and the row loops at the end of its last used step rounded up to it
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)

@@ -1548,6 +1548,8 @@ pub enum RCmd {
     WavePreview(usize),
     /// MIDI channel through (§18): ticks or unticks it on the channel.
     Through(usize),
+    /// Restretch all (§17, Ctrl+Alt+R): stretched samples and audio clips fitted to the project tempo at once.
+    Restretch,
 }
 
 fn it(label: impl Into<std::borrow::Cow<'static, str>>, c: RCmd) -> PItem {
@@ -1609,7 +1611,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         off(it("Collapse selected", RCmd::ZipSel).key("Alt+Z"), none),
         it("Expand all", RCmd::UnzipAll).key("Alt+U"),
         PItem::sep(),
-        PItem::not_yet("Restretch all").key("Ctrl+Alt+R"),
+        it("Restretch all", RCmd::Restretch).key("Ctrl+Alt+R"),
         PItem::head("Options"),
         PItem::sub(
             "Group arranger tracks created by Loop starter",
@@ -2103,6 +2105,9 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
 }
 
 fn run_now(app: &mut App, c: RCmd) -> Option<String> {
+    if let RCmd::Restretch = c {
+        return restretch_all(app);
+    }
     let mouse = app.mouse;
     let sel: Vec<usize> = app.state.rack.sel.iter().copied().collect();
     match c {
@@ -2448,7 +2453,8 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::ReceiveFrom(..)
         | RCmd::Unlock(_)
         | RCmd::WavePreview(_)
-        | RCmd::Through(_) => None,
+        | RCmd::Through(_)
+        | RCmd::Restretch => None,
     };
     // Channels let go without asking (`ask_delete`) are deleted now.
     let msg = match app.state.rack.delete_now.take() {
@@ -2470,6 +2476,40 @@ pub fn open_fill(s: &mut State, r: usize) {
     let steps = row_steps(s, r, len);
     let at = (((s.screen.0 - crate::views::rack::FILL_W) / 2.0).round(), ((s.screen.1 - crate::views::rack::FILL_H) / 2.0).round().max(90.0));
     s.rack.fill = Some(FillDlg { row: r, kind: FillType::Manual, len, amount: 4, rotate: 0, steps, at });
+}
+
+/// Restretch all (§17, Ctrl+Alt+R; Lemon Studio's design, the original's manual: it fits time-stretched samples to the
+/// set tempo, which the original stops doing by itself while the project has tempo automation). Lemon Studio fits them
+/// all the time, tempo automation or not, so this does it at once: the audio clips get their lengths, each channel
+/// whose sample is fitted to a time in beats gives its Lemon Sampler the settings again, and playback takes the
+/// stretches on its next tick. A hint counts the channels. No undo step: the lengths are worked out, not edited
+/// (ui/playlist.md §9c).
+fn restretch_all(app: &mut App) -> Option<String> {
+    let rows: Vec<usize> = (0..app.state.project.channels.len()).filter(|&r| tempo_fitted(&app.state.project.channels[r])).collect();
+    if let Some(fits) = crate::playlist::audio_fits(&app.state) {
+        if crate::playlist::fit_clips(&mut app.state.project.arrangements, &fits) {
+            crate::playlist::fit_clips(&mut app.saved.0.arrangements, &fits);
+            app.damage_win(Win::Playlist);
+        }
+    }
+    for &r in &rows {
+        let sound = app.state.project.channels[r].sound.clone();
+        app.plugins.set_sampler_stretch(r, &sound);
+    }
+    app.state.piano.dirty = true;
+    let tempo = format!("{:.3}", app.state.tempo);
+    let tempo = tempo.trim_end_matches('0').trim_end_matches('.');
+    Some(match rows.len() {
+        0 => "No stretched channels to restretch".to_string(),
+        1 => format!("Restretched 1 channel to {tempo} BPM"),
+        n => format!("Restretched {n} channels to {tempo} BPM"),
+    })
+}
+
+/// A channel whose sound the tempo stretches: an audio clip channel (its clips last its sample at the tempo) or one
+/// whose sample is fitted to a time in beats, with a sample.
+fn tempo_fitted(c: &os_model::Channel) -> bool {
+    c.sample_path.is_some() && (c.kind == ChannelKind::AudioClip || c.sound.stretch_time().is_some())
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -2600,6 +2640,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && letter(c, "u") => RCmd::UnzipAll,
         Key::Character(c) if alt && !ctrl && letter(c, "m") => RCmd::ShowMixer,
         Key::Character(c) if ctrl && !alt && letter(c, "l") => RCmd::AssignFreeSel,
+        Key::Character(c) if ctrl && alt && !shift && letter(c, "r") => RCmd::Restretch,
         Key::Character(c) if ctrl && !alt && !shift && letter(c, "x") => RCmd::CutSel,
         Key::Character(c) if ctrl && !alt && !shift && letter(c, "c") => RCmd::CopySel,
         Key::Character(c) if ctrl && !alt && !shift && letter(c, "v") => RCmd::PasteSel,
@@ -4159,6 +4200,35 @@ mod tests {
         run(&mut app, RCmd::Through(0));
         assert_eq!(entry(&app, 0, "MIDI channel through").mark, Mark::Check(false));
         assert!(!through(&app.state, 0) && through(&app.state, 1));
+    }
+
+    /// Restretch all (§17, Ctrl+Alt+R; Lemon Studio's design): the audio clips get their lengths at the tempo at once,
+    /// and the hint counts the channels the tempo stretches; with none it says so.
+    #[test]
+    fn restretch_all_fits_the_clips_at_once() {
+        use crate::playlist as pl;
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        app.state.project.ppq = 96;
+        app.state.tempo = 130.0;
+        app.state.playlist.reset();
+        let enabled = |app: &App| options_menu(&app.state, 0.0, 0.0).items.iter().find(|i| i.label == "Restretch all").map(|i| (i.enabled, i.key));
+        assert_eq!(enabled(&app), Some((true, "Ctrl+Alt+R")));
+        assert_eq!(run(&mut app, RCmd::Restretch).as_deref(), Some("No stretched channels to restretch"));
+        let wav = std::env::temp_dir().join(format!("os-rack-restretch-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &vec![0.25; 2 * 282240]).unwrap();
+        pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let src = os_model::ClipSource::Channel(app.state.project.channels.last().unwrap().index);
+        let len = |app: &App| pl::clips(&app.state).iter().find(|c| c.source == src).map(|c| c.length);
+        // 6.4 s at 130 BPM, PPQ 96 (ui/playlist.md §9c); at 120 BPM 1229 ticks.
+        pl::fit_audio(&mut app.state);
+        assert_eq!(len(&app), Some(1331));
+        app.state.tempo = 120.0;
+        assert_eq!(run(&mut app, RCmd::Restretch).as_deref(), Some("Restretched 1 channel to 120 BPM"));
+        assert_eq!(len(&app), Some(1229), "fitted at once");
+        app.state.tempo = 122.5;
+        assert_eq!(run(&mut app, RCmd::Restretch).as_deref(), Some("Restretched 1 channel to 122.5 BPM"));
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// The name button draws the channel's icon and, with Show waveform preview ticked, its sample's waveform.
