@@ -307,7 +307,7 @@ impl App {
     /// The state of the instance under `key`, into the journal when it differs from the last written. False when the
     /// audio thread had the instance: not read.
     pub(crate) fn journal_plugin(&mut self, key: usize) -> bool {
-        let Some(owner) = crate::control::command::key_owner(&self.state.project, key) else { return true };
+        let Some(owner) = crate::control::command::key_owner(&self.state, key) else { return true };
         let Ok(state) = self.plugins.state_if_free(key) else { return false };
         let Some(state) = state else { return true };
         let hash = {

@@ -193,6 +193,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     fn desc(&self) -> &Descriptor {
         self.inner.desc()
     }
+    fn help_url(&self) -> Option<String> {
+        self.look(None, |p| p.help_url())
+    }
     fn activate(&mut self, rate: u32) -> bool {
         self.run(false, |p| p.activate(rate))
     }

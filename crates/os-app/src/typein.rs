@@ -28,6 +28,20 @@ pub enum Target {
     RackTrack(usize),
     /// The mute LED of the channel on rack row `.0`: "On" (playing) or "Off" (muted) (Lemon Studio's design, as above).
     RackLed(usize),
+    /// The wet (`true`) or dry level of member `.2` (its id) of the container in slot `.1` of mixer track `.0`, as a
+    /// percent (Lemon Studio's design: `crate::container`).
+    Member(u16, u8, u32, bool),
+    /// Parameter `.3` of member `.2` (its id) of the container in slot `.1` of mixer track `.0`: a plugin parameter
+    /// named by what a project keeps, for remote control links (`crate::params::link_target`).
+    MemberParam(u16, u8, u32, usize),
+}
+
+/// A member's parameter as the hosted instance's (`Target::Param`), while its effect is loaded.
+fn resolved(s: &State, t: Target) -> Option<Target> {
+    match t {
+        Target::MemberParam(m, k, id, i) => Some(Target::Param(crate::container::member_key(s, crate::container::place_key(m, k), id)?, i)),
+        t => Some(t),
+    }
 }
 
 /// The units a latency setting is typed in: Set in ms / samples / beats.
@@ -115,10 +129,10 @@ fn unit(t: Target) -> Unit {
         Target::Knob(KnobId::ChanVol(_)) => Unit::Db(Law::Channel),
         Target::Knob(KnobId::MasterVol) => Unit::Db(Law::Main),
         Target::Knob(KnobId::Send(..)) | Target::Fader(_) => Unit::Db(Law::Fader),
-        Target::Knob(KnobId::Swing | KnobId::SlotMix(..)) => Unit::Percent,
+        Target::Knob(KnobId::Swing | KnobId::SlotMix(..) | KnobId::Member(..)) | Target::Member(..) => Unit::Percent,
         Target::Knob(KnobId::MasterPitch) => Unit::Hz,
         // The equaliser's settings take the plain 0..1 position for now.
-        Target::Param(..) | Target::Knob(KnobId::Eq(..) | KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)) => Unit::Plain,
+        Target::Param(..) | Target::MemberParam(..) | Target::Knob(KnobId::Eq(..) | KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..)) => Unit::Plain,
         Target::Latency(..) => Unit::Latency,
         Target::RackTrack(_) => Unit::Track,
         Target::RackLed(_) => Unit::Switch,
@@ -151,8 +165,16 @@ fn opening_norm(t: Target, remembered: bool) -> bool {
 
 /// The caption under the field (spec §6, §7).
 pub fn caption(s: &State, t: Target) -> String {
-    let name = match t {
-        Target::Knob(KnobId::MasterPitch) => return "Master pitch (Hz)".into(),
+    match t {
+        Target::Knob(KnobId::MasterPitch) => "Master pitch (Hz)".into(),
+        _ => format!("Value for {}", target_name(s, t)),
+    }
+}
+
+/// What a target is called: "Bus 1 - Volume", "Channel volume", a plugin parameter's name (`crate::remote::label`
+/// names the owner of every kind).
+pub fn target_name(s: &State, t: Target) -> String {
+    match t {
         Target::Knob(k @ (KnobId::MixPan(m) | KnobId::MixSep(m) | KnobId::SlotMix(m, _))) => {
             let label = if let KnobId::MixSep(_) = k { "Stereo separation".to_string() } else { knob_label(s, k) };
             format!("{} - {label}", crate::mixer::name(s, m))
@@ -163,8 +185,12 @@ pub fn caption(s: &State, t: Target) -> String {
         Target::Latency(m, input, u) => format!("{} - {} latency ({})", crate::mixer::name(s, m), if input { "Input" } else { "Track" }, u.name()),
         Target::RackTrack(_) => "Target mixer track".into(),
         Target::RackLed(_) => "Channel on / off".into(),
-    };
-    format!("Value for {name}")
+        Target::Member(m, k, id, wet) => crate::container::level_name(s, m, k, id, wet),
+        Target::MemberParam(.., i) => match resolved(s, t) {
+            Some(p @ Target::Param(..)) => target_name(s, p),
+            _ => format!("Parameter {}", i + 1),
+        },
+    }
 }
 
 /// The knob's hint text up to its colon ("Channel volume").
@@ -206,6 +232,11 @@ pub(crate) fn get(s: &State, t: Target) -> Option<f64> {
         Target::Latency(m, input, _) => crate::mixer::track(s, m).map(|t| f64::from(if input { t.latency_in } else { t.latency_out })),
         Target::RackTrack(r) => s.project.channels.get(r).map(|c| f64::from(c.mixer_track)),
         Target::RackLed(r) => s.project.channels.get(r).map(|c| if c.enabled { 1.0 } else { 0.0 }),
+        Target::Member(m, k, id, wet) => crate::container::level(s, m, k, id, wet).map(f64::from),
+        Target::MemberParam(..) => match resolved(s, t)? {
+            p @ Target::Param(..) => get(s, p),
+            _ => None,
+        },
     }
 }
 
@@ -248,6 +279,11 @@ fn set(s: &mut State, t: Target, v: f64) {
                 crate::rack::toggle_mute(s, r);
             }
         }
+        Target::Member(m, k, id, wet) => crate::container::set_level(s, m, k, id, wet, v.clamp(0.0, 1.0) as f32),
+        Target::MemberParam(..) => match resolved(s, t) {
+            Some(p @ Target::Param(..)) => set(s, p, v),
+            _ => s.message = Some("This effect is not loaded (its plugin was not found)".into()),
+        },
     }
 }
 

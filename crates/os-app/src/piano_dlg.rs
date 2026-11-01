@@ -50,6 +50,11 @@ impl Tool {
         }
     }
 
+    /// The title when opened from the event editor's Tools (event-editor.md §4).
+    pub fn events_title(self) -> &'static str {
+        if self == Tool::Lfo { "Events - LFO" } else { "Events - level scaling" }
+    }
+
     /// The title over the Control lane `lane`: LFO's says "Events" on a channel lane (piano-lfo.md §1).
     pub fn title_on(self, lane: Lane) -> &'static str {
         if self == Tool::Lfo && lane.is_channel() { "Events - LFO" } else { self.title() }
@@ -270,6 +275,8 @@ pub struct Ui {
     kept_rand: randomize::Settings,
     /// The Control lane Scale levels was last accepted on (its Center follows a new lane).
     kept_lane: Option<Lane>,
+    /// Scale levels or LFO opened from the event editor's Tools: it works on the editor's control (event-editor.md §4).
+    pub on_events: bool,
     session: Option<Session>,
 }
 
@@ -440,6 +447,7 @@ pub fn open(s: &mut State, tool: Tool) {
     let span = limit::span(&target_notes(s));
     let d = &mut s.piano_dlg;
     d.tool = tool;
+    d.on_events = false;
     match tool {
         Tool::Flam => d.flam = d.kept_flam,
         Tool::Flip => d.flip = d.kept_flip,
@@ -464,6 +472,63 @@ pub fn open(s: &mut State, tool: Tool) {
         Tool::Randomize => d.rand = randomize::Settings { pattern_seed: d.rand.pattern_seed, levels_seed: d.rand.levels_seed, ..d.kept_rand },
     }
     preview(s);
+}
+
+/// Start Scale levels or LFO from the event editor's Tools on its control, with the settings last accepted (Scale
+/// levels' Center in the middle for a bipolar control, else at the bottom).
+pub fn open_events(s: &mut State, tool: Tool) {
+    cancel(s);
+    let bipolar = os_model::target::bipolar(s.events.target);
+    let d = &mut s.piano_dlg;
+    d.tool = tool;
+    d.on_events = true;
+    match tool {
+        Tool::Levels => d.levels = levels::Settings { center: if bipolar { 0.5 } else { 0.0 }, ..d.kept_levels },
+        _ => d.lfo = d.kept_lfo,
+    }
+    preview(s);
+}
+
+/// Scale levels and LFO on the event editor's control (event-editor.md §4): Scale levels on its events in the
+/// selection (all of them without one), LFO drawn over the selection (the first bar without one), an event wherever
+/// the wave's stored value changes, in place of the events there.
+fn events_run(s: &mut State, step: Option<&'static str>) -> bool {
+    use crate::events::{level, value};
+    let (range, ppq) = (s.events.range, u32::from(s.project.ppq.max(4)));
+    let pts = crate::events::points(s);
+    let sel = s.events.sel.filter(|(a, b)| b > a);
+    let ((a, b), new): ((u32, u32), Vec<(u32, i32)>) = match s.piano_dlg.tool {
+        Tool::Levels => {
+            let set = s.piano_dlg.levels;
+            let (a, b) = sel.unwrap_or((0, u32::MAX));
+            let new = pts.iter().filter(|p| (a..b).contains(&p.0)).map(|&(t, v)| (t, value(range, levels::level(level(range, v), &set).clamp(0.0, 1.0)))).collect();
+            ((a, b), new)
+        }
+        Tool::Lfo => {
+            let set = s.piano_dlg.lfo;
+            let (num, den) = s.project.signature().unwrap_or((s.project.bar().0, 4));
+            let bar = (u32::from(num.max(1)) * ppq * 4 / u32::from(den.max(1))).max(1);
+            let (a, b) = sel.unwrap_or((0, bar));
+            let mut new: Vec<(u32, i32)> = Vec::new();
+            for (t, y) in lfo::levels(&set, ppq, b - a) {
+                let v = value(range, y);
+                if new.last().map(|p| p.1) != Some(v) {
+                    new.push((a + t, v));
+                }
+            }
+            ((a, b), new)
+        }
+        _ => return false,
+    };
+    let old: Vec<(u32, i32)> = pts.into_iter().filter(|p| (a..b).contains(&p.0)).collect();
+    if new == old {
+        return false;
+    }
+    if let Some(name) = step {
+        piano::snapshot_as(s, name);
+    }
+    crate::events::replace(s, a, b, &new);
+    true
 }
 
 /// The notes a tool would change now (`piano::targets`).
@@ -511,6 +576,9 @@ pub fn kb_max() -> f32 {
 
 /// Apply the open dialog to the targets; `step` names the undo step (none for a preview).
 fn run(s: &mut State, step: Option<&'static str>) -> bool {
+    if s.piano_dlg.on_events {
+        return events_run(s, step);
+    }
     let d = &s.piano_dlg;
     match d.tool {
         Tool::Flam => {
@@ -638,7 +706,11 @@ fn lfo_points(s: &mut State, set: &lfo::Settings, lane: Lane, ppq: u32, len: u32
 /// points changed by something else since the last preview (another pattern or channel, an edit, an undo) start the
 /// session again from them.
 pub fn preview(s: &mut State) {
-    let Some(ch) = piano::channel(s) else { return };
+    let ch = match piano::channel(s) {
+        Some(ch) => ch,
+        None if s.piano_dlg.on_events => 0,
+        None => return,
+    };
     let (now, now_ctl) = (piano::notes(s).to_vec(), piano::controls(s).to_vec());
     let fresh = match &s.piano_dlg.session {
         Some(se) => se.pattern != s.pattern || se.channel != ch || se.last != now || se.last_ctl != now_ctl,
@@ -677,16 +749,18 @@ fn restore(s: &mut State) -> bool {
 
 /// Accept: the result becomes one undo step, the settings are kept for the next opening. Returns the status text.
 pub fn accept(s: &mut State) -> String {
-    let tool = s.piano_dlg.tool;
+    let (tool, on_events) = (s.piano_dlg.tool, s.piano_dlg.on_events);
+    let who = if on_events { "Event editor" } else { "Piano roll" };
     if !restore(s) {
         s.piano_dlg.session = None;
-        return "Piano roll: nothing to change".into();
+        return format!("{who}: nothing to change");
     }
     let d = &mut s.piano_dlg;
     d.session = None;
     match tool {
         Tool::Flam => d.kept_flam = d.flam,
         Tool::Flip => d.kept_flip = d.flip,
+        Tool::Levels if on_events => d.kept_levels = d.levels,
         Tool::Levels => (d.kept_levels, d.kept_lane) = (d.levels, Some(s.piano.lane)),
         Tool::Limit => d.kept_limit = d.limit,
         Tool::Claw => d.kept_claw = d.claw,
@@ -695,10 +769,19 @@ pub fn accept(s: &mut State) -> String {
         Tool::Chop => (d.kept_chop, d.kept_chop_pat) = (d.chop, d.chop_pat.clone()),
         Tool::Randomize => d.kept_rand = d.rand,
     }
-    if run(s, Some(tool.step())) {
-        format!("Piano roll: {}", tool.done())
+    let step = if on_events { crate::events::EDIT } else { tool.step() };
+    if run(s, Some(step)) {
+        format!("{who}: {}", tool.done())
     } else {
-        format!("Piano roll: {}: nothing to change", tool.done())
+        format!("{who}: {}: nothing to change", tool.done())
+    }
+}
+
+/// Whether a dialog's preview is open, for tests.
+#[cfg(test)]
+impl Ui {
+    pub fn session_open(&self) -> bool {
+        self.session.is_some()
     }
 }
 
@@ -717,6 +800,7 @@ pub fn act(s: &mut State, a: Act) {
         Act::Reset => match d.tool {
             Tool::Flam => d.flam = flam::Settings::default(),
             Tool::Flip => d.flip = flip::Settings::default(),
+            Tool::Levels if d.on_events => d.levels = levels::Settings { center: if os_model::target::bipolar(s.events.target) { 0.5 } else { 0.0 }, ..levels::Settings::reset(lane) },
             Tool::Levels => d.levels = levels::Settings::reset(lane),
             Tool::Limit => {
                 d.limit = limit::Settings { range: span, ..limit::Settings::default() };

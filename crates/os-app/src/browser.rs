@@ -431,6 +431,7 @@ impl App {
     /// Release: drop the dragged item on whatever is under the mouse (spec §3).
     pub(crate) fn browser_drop(&mut self, item: Item, started: bool) {
         self.state.browser_drag = None;
+        self.state.drag_on = None;
         self.invalidate();
         if !started {
             return;
@@ -939,6 +940,9 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
         Item::History(_) => items.push(r("Go to this step", RowCmd::Activate)),
         Item::Version(_) => items.push(r("Open this version", RowCmd::Activate)),
         // Into the selected channel's plugin (spec: plugins/presets.md "Browser").
+        Item::Preset(ref p) if crate::channel_states::is_state_file(std::path::Path::new(p)) => {
+            items.push(PItem::new("Add to channel rack", Cmd::ChannelState(crate::channel_states::CsCmd::Add(p.into()))));
+        }
         Item::Preset(ref p) => {
             let key = s.selected_channel;
             let it = PItem::new("Load into selected channel", Cmd::Preset(crate::presets::PCmd::Load(key, p.into())));

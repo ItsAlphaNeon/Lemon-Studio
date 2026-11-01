@@ -330,6 +330,8 @@ fn knob_value(s: &State, id: KnobId) -> f64 {
     match id {
         KnobId::ChanVol(i) => s.project.channels.get(i).map_or(0.0, |c| c.volume),
         KnobId::ChanPan(i) => s.project.channels.get(i).map_or(0.0, |c| c.pan),
+        // The level the container's list holds (the knob shows the chain's, an automated one included).
+        KnobId::Member(t, k, id, wet) => crate::container::level(s, t, k, id, wet).map_or(0.0, f64::from),
         _ => f64::from(s.knob(id)),
     }
 }
@@ -359,6 +361,8 @@ fn knob_name(id: KnobId) -> &'static str {
         KnobId::Arp(_) => "Piano roll arpeggiate",
         KnobId::PianoDlg(_) => "Piano roll tool",
         KnobId::AutoLfo(..) => "Automation clip LFO",
+        KnobId::MidiOut(..) => "MIDI Out setting",
+        KnobId::Member(..) => crate::container::LEVEL,
     }
 }
 
@@ -399,6 +403,8 @@ pub enum Run {
     Channel(usize, ChannelControl),
     /// Pattern `.0`'s length box dragged or turned.
     PatternLength(u16),
+    /// A controller moving the wet (`.3`) or dry level of member `.2` of the container in slot `.1` of track `.0`.
+    Member(u16, u8, u32, bool),
 }
 
 /// A channel control a run of changes goes to (`Run::Channel`).

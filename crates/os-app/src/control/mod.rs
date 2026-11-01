@@ -420,10 +420,10 @@ pub fn param_edit(s: &mut State, owner: u32, before: &[(u32, f64)], run: bool) {
 pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, to: f64) {
     let Some(param) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return };
     // The owner's id (one hosted since the last settle has none yet).
-    if command::key_owner(&s.project, key) == Some(0) {
+    if command::key_owner(s, key) == Some(0) {
         s.control.settle(&mut s.project);
     }
-    let Some(owner) = command::key_owner(&s.project, key) else { return };
+    let Some(owner) = command::key_owner(s, key) else { return };
     // Known for the undo's other side (`Command::apply`).
     s.control.saw_param(owner, param, to);
     s.plugin_edited |= before.is_some_and(|v| v != to);
@@ -438,10 +438,10 @@ pub fn param_set(s: &mut State, key: usize, index: usize, before: Option<f64>, t
 /// and its channel's or slot's name), keyed by the owner's id so it follows moves. The step comes from no change the
 /// release could judge.
 pub fn state_edit(s: &mut State, key: usize, name: &'static str, before: command::PluginSide) {
-    if command::key_owner(&s.project, key) == Some(0) {
+    if command::key_owner(s, key) == Some(0) {
         s.control.settle(&mut s.project);
     }
-    let Some(owner) = command::key_owner(&s.project, key).filter(|&o| o != 0) else { return };
+    let Some(owner) = command::key_owner(s, key).filter(|&o| o != 0) else { return };
     crate::history::record(s, name, crate::history::Snap::Commands(vec![Command::Put(Box::new(command::Taken::Plugin(owner, Box::new(before))))]));
     crate::history::done_with(s);
 }

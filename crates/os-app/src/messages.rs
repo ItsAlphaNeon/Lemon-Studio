@@ -51,7 +51,7 @@ pub const PROJECT_DATA_SIZE: Message = Message {
 };
 
 /// The mixer's External input question (`mixer::ask_external`). Not listed: Remember my choice keeps its answer,
-/// either one, in `mixer::EXT_INPUT_ANSWER` instead (spec: audio/track-io.md §2.3).
+/// either one, in `prefs::EXTERNAL_INPUT` instead (Settings ▸ Recording) (spec: audio/track-io.md §2.3).
 pub const EXT_INPUT: Message =
     Message { check: Check { key: "msg_ext_input", label: "External input", default: true }, group: "Audio", kind: Kind::Question };
 

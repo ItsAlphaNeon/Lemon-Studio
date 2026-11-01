@@ -9,6 +9,7 @@
 // spec: plugins/lemon-slicer.md §3, plugins/fruity-slicer.md §3
 
 use crate::state::Slice;
+use os_dsp::transients;
 
 /// What a WAV file says about itself beyond its sound.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -112,73 +113,30 @@ pub fn whole(name: &str) -> Vec<Slice> {
 }
 
 /// The auto slicing's sensitivities: Dull, Medium, Sharp (the rise in dB a slice needs).
-pub const AUTO_DB: [f32; 3] = [12.0, 8.0, 5.0];
-/// The detector's frame (s), floor (dBFS) and the shortest slice (s).
-const FRAME_S: f64 = 0.005;
-const FLOOR_DB: f32 = -40.0;
-const MIN_GAP_S: f64 = 0.05;
+pub use os_dsp::transients::AUTO_DB;
 
-/// Lemon's transient detector: the level of both channels in 5 ms frames; a slice starts at a frame whose level is
-/// `rise_db` above the previous frame's and above −40 dBFS, at least 50 ms after the previous slice, at the frame's
-/// first sample that reaches a quarter of the frame's peak. The first slice starts at 0; auto slices have no names.
+/// Lemon's transient detector (`os_dsp::transients::detect`, shared with Tesla's auto-slicing): the level of both
+/// channels in 5 ms frames; a slice starts at a frame whose level is `rise_db` above the previous frame's and above
+/// −40 dBFS, at least 50 ms after the previous slice, at the frame's first sample that reaches a quarter of the frame's
+/// peak. The first slice starts at 0; auto slices have no names.
 pub fn auto(left: &[f32], right: &[f32], rate: u32, rise_db: f32) -> Vec<Slice> {
-    let hop = ((f64::from(rate) * FRAME_S).round() as usize).max(1);
-    let gap = (f64::from(rate) * MIN_GAP_S).round() as usize;
-    let n = left.len().min(right.len());
-    let mut out = vec![Slice::at(0)];
-    let mut last = 0usize;
-    let mut prev = f32::NEG_INFINITY;
-    for f in 0..n.div_ceil(hop) {
-        let (a, b) = (f * hop, ((f + 1) * hop).min(n));
-        let e: f64 = (a..b).map(|i| f64::from(left[i]).powi(2) + f64::from(right[i]).powi(2)).sum::<f64>() / (2 * (b - a)).max(1) as f64;
-        let db = (10.0 * (e + 1e-12).log10()) as f32;
-        if f > 0 && db > FLOOR_DB && db - prev >= rise_db && a >= last + gap {
-            let mag = |i: usize| left[i].abs().max(right[i].abs());
-            let peak = (a..b).map(mag).fold(0.0f32, f32::max);
-            let at = (a..b).find(|&i| mag(i) >= peak / 4.0).unwrap_or(a);
-            out.push(Slice::at(at as u32));
-            last = at;
-        }
-        prev = db;
-    }
-    out
+    transients::detect(left, right, rate, rise_db).into_iter().map(|f| Slice::at(f as u32)).collect()
 }
 
 /// The zero-cross check: every slice's start moves to the nearest sign change of the summed channels within 2 ms (the
 /// sample where the new sign starts); a start with none nearby stays.
 pub fn zero_cross(slices: &mut [Slice], left: &[f32], right: &[f32], rate: u32) {
-    let n = left.len().min(right.len());
-    if n < 2 {
-        return;
-    }
-    let reach = (f64::from(rate) * 0.002).round() as usize;
-    let s = |i: usize| left[i] + right[i];
-    let crosses = |i: usize| i > 0 && i < n && (s(i - 1) <= 0.0) != (s(i) <= 0.0);
-    for sl in slices.iter_mut() {
-        let at = (sl.start as usize).min(n - 1);
-        if let Some(i) = (0..=reach).find_map(|d| [at + d, at.wrapping_sub(d)].into_iter().find(|&i| i <= at + reach && crosses(i))) {
-            sl.start = i as u32;
-        }
+    let mut starts: Vec<usize> = slices.iter().map(|s| s.start as usize).collect();
+    transients::zero_cross(&mut starts, left, right, rate);
+    for (s, f) in slices.iter_mut().zip(starts) {
+        s.start = f as u32;
     }
 }
 
 /// The loop's beats and tempo when its file gives none: a whole number of 4/4 bars at 70..180 BPM, the most beats
 /// that keep the tempo at most 180; a loop too short for a bar is taken at 120 BPM in whole beats.
 pub fn guess_tempo(frames: usize, rate: u32) -> (f32, f32) {
-    let secs = frames as f64 / f64::from(rate.max(1));
-    if secs <= 0.0 {
-        return (4.0, 120.0);
-    }
-    let mut best = None;
-    let mut beats = 4.0;
-    while beats * 60.0 / secs <= 180.0 {
-        if beats * 60.0 / secs >= 70.0 {
-            best = Some(beats);
-        }
-        beats += 4.0;
-    }
-    let beats = best.unwrap_or_else(|| (secs * 2.0).round().max(1.0));
-    (beats as f32, (beats * 60.0 / secs) as f32)
+    transients::guess_tempo(frames, rate)
 }
 
 #[cfg(test)]

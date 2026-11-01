@@ -152,7 +152,7 @@ impl App {
             }
             "plugin_states" => {
                 let owner = uint(params, "owner")? as u32;
-                let key = super::command::owner_key(&self.state.project, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
+                let key = super::command::owner_key(&self.state, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
                 let name = self.plugins.descriptor(key).map(|d| d.name).ok_or_else(|| failed(format!("{owner} is not played by a hosted plugin")))?;
                 let found = self.journal.states_of(&name, 50);
                 let list: Vec<Value> = found.iter().map(|f| json!({ "file": f.file.display().to_string(), "seq": f.seq, "t": f.t, "at": f.at, "hash": f.hash })).collect();
@@ -161,7 +161,7 @@ impl App {
             "restore_state" => {
                 need(c, Level::Edit)?;
                 let owner = uint(params, "owner")? as u32;
-                let key = super::command::owner_key(&self.state.project, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
+                let key = super::command::owner_key(&self.state, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
                 let file = params.get("file").and_then(Value::as_str).map(std::path::PathBuf::from).or_else(|| self.journal.path.clone()).ok_or_else(|| bad("no journal file"))?;
                 let msg = self.recover_state(key, &file, uint(params, "seq")?);
                 Ok(json!({ "message": msg }))
@@ -235,7 +235,7 @@ impl App {
 
     /// The parameters of the plugin playing channel or slot `owner`.
     fn params_of(&mut self, owner: u32) -> Result<Value, Fail> {
-        let key = super::command::owner_key(&self.state.project, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
+        let key = super::command::owner_key(&self.state, owner).ok_or_else(|| bad(format!("no channel or slot plugin {owner}")))?;
         let h = self.plugins.hosted.get(&key).ok_or_else(|| failed(format!("{owner} is not played by a hosted plugin")))?;
         let p = h.plugin.lock().map_err(|_| failed("the plugin is busy"))?;
         let mut list = Vec::new();
@@ -271,7 +271,7 @@ impl App {
     pub(crate) fn fill_params(&mut self, cmds: &mut [Command]) -> Result<(), String> {
         for c in cmds.iter_mut() {
             if let Command::SetParam { owner, param, from: from @ None, .. } = c {
-                let key = super::command::owner_key(&self.state.project, *owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
+                let key = super::command::owner_key(&self.state, *owner).ok_or_else(|| format!("no channel or slot plugin {owner}"))?;
                 let v = self
                     .plugins
                     .hosted

@@ -40,7 +40,8 @@ fn sampler_state(wav: &Path, params: &str) -> Vec<u8> {
 }
 
 fn tone(name: &str, frames: usize) -> PathBuf {
-    let wav = std::env::temp_dir().join(name);
+    // One file per process: test runs side by side must not write each other's.
+    let wav = std::env::temp_dir().join(format!("{}-{name}", std::process::id()));
     let t: Vec<f32> = (0..frames).flat_map(|i| { let v = (i as f32 * 0.05).sin() * 0.5; [v, v] }).collect();
     os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &t).unwrap();
     wav
@@ -348,7 +349,7 @@ fn engine_plays_a_pattern() {
 fn mono_portamento_glides_through_the_tuning_expression() {
     let Some((_m, shared)) = sampler() else { return };
     // 4 s of a 441 Hz sine at 48 kHz.
-    let wav = std::env::temp_dir().join("os-vst3-porta.wav");
+    let wav = std::env::temp_dir().join(format!("os-vst3-porta-{}.wav", std::process::id()));
     let sine: Vec<f32> = (0..48000 * 4).flat_map(|i| { let v = (i as f32 / 48000.0 * 441.0 * std::f32::consts::TAU).sin() * 0.5; [v, v] }).collect();
     os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &sine).unwrap();
     {
@@ -1139,5 +1140,18 @@ mod window {
             p.close_editor();
             unsafe { DestroyWindow(hwnd) };
         }
+    }
+}
+
+/// MIDI channel through (spec: ui/channel-rack.md §18): a note on goes on its MIDI channel, and its key's note off on
+/// the same one.
+#[test]
+fn notes_go_on_their_midi_channel() {
+    let mut ids = NoteIds { ids: [-1; 128], next: 0, chs: [0; 128] };
+    let on = ids.event(Note { time: 0, kind: NoteKind::On, key: 60, velocity: 1.0, ch: 3 }).expect("on");
+    let off = ids.event(Note { time: 0, kind: NoteKind::Off, key: 60, velocity: 0.0, ch: 0 }).expect("off");
+    let plain = ids.event(Note { time: 0, kind: NoteKind::On, key: 62, velocity: 1.0, ch: 0 }).expect("on");
+    unsafe {
+        assert_eq!((on.event.note_on.channel, off.event.note_off.channel, plain.event.note_on.channel), (3, 3, 0));
     }
 }

@@ -123,6 +123,18 @@ impl Clock {
     }
 }
 
+impl Clock {
+    /// The bar reading counted from `origin96` (the Start marker's bar, spec: ui/playlist.md §7a): the bar starting
+    /// there is 1 and the bars before it 0, -1, ...
+    pub fn bars_from(&self, ticks96: f64, origin96: f64, sig: (u16, u16)) -> (i64, u32, u32) {
+        let bar = if self.beat { f64::from(sig.0.max(1)) * f64::from((384 / u32::from(sig.1.clamp(1, 64))).max(1)) } else { 384.0 };
+        let rel = ticks96 - origin96;
+        let back = if rel < 0.0 { (-rel / bar).ceil() } else { 0.0 };
+        let (b, s, t) = self.reading(0.0, rel + back * bar, sig);
+        (i64::from(b) - back as i64, s, t)
+    }
+}
+
 /// Bar:beat:tick of a position in 96-per-quarter ticks: bar and beat from 1, the beat a `1/den` note, `num` to the
 /// bar, the tick within the beat (§3).
 pub fn bbt(ticks96: f64, num: u16, den: u16) -> (u32, u32, u32) {
@@ -160,6 +172,22 @@ mod tests {
 
     fn rate_of(label: &str) -> &'static Rate {
         RATES.iter().find(|r| r.label == label).unwrap()
+    }
+
+    /// ui/performance-mode.md §1: with the Start marker at bar 66, bar 1 reads -64:01:00.
+    #[test]
+    fn bars_from_the_start_marker() {
+        let c = Clock::default();
+        let z = 65.0 * 384.0;
+        assert_eq!(c.bars_from(0.0, z, (4, 4)), (-64, 1, 0));
+        assert_eq!(c.bars_from(z, z, (4, 4)), (1, 1, 0));
+        assert_eq!(c.bars_from(z - 384.0, z, (4, 4)), (0, 1, 0));
+        assert_eq!(c.bars_from(z - 1.0, z, (4, 4)), (0, 16, 23));
+        // ui/playlist.md §7a: the Start marker at tick 768.
+        let read = |t: f64| c.bars_from(t, 768.0, (4, 4)).0;
+        assert_eq!([0.0, 384.0, 768.0, 1152.0].map(read), [-1, 0, 1, 2]);
+        let beats = Clock { beat: true, ..c };
+        assert_eq!(beats.bars_from(z - 96.0, z, (3, 4)), (0, 3, 0), "a 3/4 bar before it");
     }
 
     /// Every mode is kept as its menu entry and read back; an unknown entry or unit reads the default.

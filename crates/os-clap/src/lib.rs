@@ -255,7 +255,7 @@ impl os_host::Library for Library {
         // A plugin compiled into this program gets a guard of its own per instance (`module_of`).
         let guard = os_host::guard::module_of(self.entry.cast());
         let name = self.plugins.iter().find(|d| d.id == id).map_or(id, |d| d.name.as_str());
-        let plugin = os_host::guard::call(&guard, || Plugin::new(&self, id)).map_err(|c| os_host::guard::stopped_text(name, c))??;
+        let plugin = os_host::guard::call(&guard, || Plugin::with_guard(&self, id, guard.clone())).map_err(|c| os_host::guard::stopped_text(name, c))??;
         Ok(os_host::share(plugin, guard))
     }
 }
@@ -290,6 +290,10 @@ struct HostData {
     /// What the plugin registered with the UI run loop (Linux): timer id or descriptor, whether a timer, token.
     #[cfg(all(unix, not(target_os = "macos")))]
     run: Mutex<Vec<(u32, bool, u64)>>,
+    /// The crash guard the instance is called under, for the run loop's callbacks into it (Linux): a crash in one
+    /// stops the instance like a crash in any other call.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    guard: Arc<os_host::guard::Module>,
 }
 
 static HOST_NAME: &CStr = c"Lemon Studio";
@@ -330,6 +334,9 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
 /// connection) with the host (`timer-support`, `posix-fd-support`) and get the callbacks on the UI thread through
 /// `os_host::runloop`. Not offered on macOS: editors there run on the main thread's run loop, which the app's event
 /// loop (winit's) runs.
+///
+/// Every callback runs under the instance's crash guard (spec: plugins/plugin-formats.md, "Crash containment"). After
+/// a crash its registrations are removed and its attention raised, so the UI reports the stop and closes the editor.
 #[cfg(all(unix, not(target_os = "macos")))]
 mod run_loop {
     use super::*;
@@ -377,7 +384,8 @@ mod run_loop {
             return false;
         }
         let id = NEXT_TIMER.fetch_add(1, Ordering::Relaxed);
-        let token = runloop::add_timer(std::time::Duration::from_millis(u64::from(period_ms)), move || unsafe { on_timer(plugin, id) });
+        let dp = d as *const HostData;
+        let token = runloop::add_timer(std::time::Duration::from_millis(u64::from(period_ms)), move || unsafe { guarded(dp, || on_timer(plugin, id)) });
         if let Ok(mut r) = d.run.lock() {
             r.push((id, true, token));
         }
@@ -394,7 +402,8 @@ mod run_loop {
         let Some((plugin, ext)) = (unsafe { plugin_ext::<clap_plugin_posix_fd_support>(d, CLAP_EXT_POSIX_FD_SUPPORT) }) else { return false };
         let Some(on_fd) = (unsafe { (*ext).on_fd }) else { return false };
         // The run loop's flags are CLAP's.
-        let token = runloop::add_fd(fd, flags, move |fd, got| unsafe { on_fd(plugin, fd, got) });
+        let dp = d as *const HostData;
+        let token = runloop::add_fd(fd, flags, move |fd, got| unsafe { guarded(dp, || on_fd(plugin, fd, got)) });
         if let Ok(mut r) = d.run.lock() {
             r.push((fd as u32, false, token));
         }
@@ -422,6 +431,20 @@ mod run_loop {
             !hit
         });
         before != r.len()
+    }
+
+    /// Runs `f`, a run loop callback into the plugin of host data `dp`, under the instance's guard. Once it crashed (in
+    /// `f` or anywhere else) the plugin's registrations are removed and the UI is told.
+    ///
+    /// # Safety
+    /// `dp` is alive: a destroyed instance's registrations are removed first (`clear`), and a crashed instance's host
+    /// data is never freed.
+    unsafe fn guarded(dp: *const HostData, f: impl FnOnce()) {
+        let d = unsafe { &*dp };
+        if os_host::guard::call(&d.guard, f).is_err() {
+            clear(d);
+            d.attention.raise();
+        }
     }
 
     /// Removes whatever the plugin left registered (after it was destroyed: its callbacks must never run again).
@@ -657,6 +680,8 @@ pub struct Plugin {
     /// The voices the engine named (`Instrument::voice_start`): its name, the note id they were sent with, the key.
     named: Vec<(u32, i32, u8)>,
     next_note_id: i32,
+    /// The MIDI channel each key's last note started on (`NoteLevels::channel`): its end, choke and tuning go on it.
+    key_ch: [u8; 128],
     steady: i64,
     /// The song position for the next process call (the engine gives it while playing), and the current chunk's.
     song: Option<os_engine::TransportInfo>,
@@ -817,6 +842,14 @@ fn debug() -> bool {
 impl Plugin {
     /// Creates and initialises plugin `id` from `lib` (UI thread).
     pub fn new(lib: &Arc<Library>, id: &str) -> Result<Plugin, String> {
+        Self::with_guard(lib, id, os_host::guard::module_of(lib.entry.cast()))
+    }
+
+    /// [`Plugin::new`] for an instance called under `guard` ([`Library::create`]): the run loop's callbacks into it
+    /// run under the same guard (Linux).
+    fn with_guard(lib: &Arc<Library>, id: &str, guard: Arc<os_host::guard::Module>) -> Result<Plugin, String> {
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        drop(guard);
         let desc = lib.plugins.iter().find(|d| d.id == id).cloned().ok_or_else(|| format!("{}: no plugin {id}", lib.path.display()))?;
         let host_data = Box::new(HostData {
             attention: Arc::default(),
@@ -833,6 +866,8 @@ impl Plugin {
             plugin: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
             #[cfg(all(unix, not(target_os = "macos")))]
             run: Mutex::new(Vec::new()),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            guard,
         });
         let host = Box::new(clap_host {
             clap_version: CLAP_VERSION,
@@ -900,6 +935,7 @@ impl Plugin {
                 voice_gains: false,
                 named: Vec::new(),
                 next_note_id: 0,
+                key_ch: [0; 128],
                 steady: 0,
                 song: None,
                 chunk_song: None,
@@ -1458,6 +1494,11 @@ impl Plugin {
             seq.push(Seq::Mod(self.mods.len() - 1));
         }
         for e in self.queue.drain(..) {
+            // A note starts on its MIDI channel (MIDI channel through); what follows on its key goes on the same one.
+            if e.time < n && e.kind == Kind::On {
+                self.key_ch[usize::from(e.key & 127)] = e.levels.channel & 15;
+            }
+            let ch = i16::from(self.key_ch[usize::from(e.key & 127)]);
             if e.time < n && e.kind == Kind::Tune {
                 // Portamento glides (spec: audio/channel-voices.md): CLAP tuning expression, semitones.
                 self.exprs.push(clap_event_note_expression {
@@ -1471,7 +1512,7 @@ impl Plugin {
                     expression_id: CLAP_NOTE_EXPRESSION_TUNING,
                     note_id: -1,
                     port_index: 0,
-                    channel: 0,
+                    channel: ch,
                     key: i16::from(e.key),
                     value: f64::from(e.velocity),
                 });
@@ -1535,7 +1576,7 @@ impl Plugin {
                     },
                     note_id: id,
                     port_index: 0,
-                    channel: 0,
+                    channel: ch,
                     key: i16::from(e.key),
                     velocity: f64::from(e.velocity),
                 });
@@ -1739,6 +1780,17 @@ impl Plugin {
 impl os_host::Plugin for Plugin {
     fn desc(&self) -> &Descriptor {
         &self.desc
+    }
+
+    fn help_url(&self) -> Option<String> {
+        // SAFETY: the instance and its descriptor live as long as `self`; null pointers are checked.
+        unsafe {
+            let d = if self.plugin.is_null() { ptr::null() } else { (*self.plugin).desc };
+            if d.is_null() {
+                return None;
+            }
+            [(*d).manual_url, (*d).url].into_iter().map(|p| cstr(p)).find(|u| !u.trim().is_empty())
+        }
     }
 
     fn activate(&mut self, rate: u32) -> bool {
@@ -2208,9 +2260,43 @@ impl Drop for Plugin {
 
 #[cfg(test)]
 mod mono_mock;
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod timer_mock;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A crash in a run loop callback (an editor's timer, Linux) stops the instance like a crash in any other call: its
+    /// registrations are removed and it is never called again (spec: plugins/plugin-formats.md, "Crash containment").
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_crash_in_a_timer_stops_the_instance() {
+        use crate::timer_mock::{ENTRY, FAULT, ID, TICKS};
+        use os_host::Library as _;
+        use std::sync::atomic::Ordering::Relaxed;
+        if !os_host::guard::contained() {
+            return;
+        }
+        let entry = &ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Timer Test.clap")) }.expect("mock");
+        let shared = lib.create(ID.to_str().unwrap()).expect("created");
+        let stopped = || os_host::Plugin::stopped(&*shared.lock().unwrap());
+        let tick = || {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            os_host::runloop::dispatch();
+        };
+        tick();
+        assert!(TICKS.load(Relaxed) >= 1, "the timer runs");
+        assert_eq!(stopped(), None);
+        FAULT.store(true, Relaxed);
+        tick();
+        FAULT.store(false, Relaxed);
+        assert_eq!(stopped(), Some(0xC000_0005));
+        assert!(!os_host::runloop::active(), "its timer is removed");
+        let before = TICKS.load(Relaxed);
+        tick();
+        assert_eq!(TICKS.load(Relaxed), before, "never called again");
+    }
     use os_engine::Instrument;
 
     // spec: audio/multicore.md "Plugins"
@@ -2309,6 +2395,25 @@ mod tests {
         os_host::Library::create(lib.clone() as Arc<dyn os_host::Library>, &lib.plugins[0].id).unwrap()
     }
 
+    /// MIDI channel through (spec: ui/channel-rack.md §18): a note on goes on its MIDI channel, and its key's note off
+    /// on the same one.
+    #[test]
+    fn notes_go_on_their_midi_channel() {
+        use os_engine::HostedEffect as _;
+        let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ.clap")) }.expect("linked EQ");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(os_host::Plugin::activate(&mut p, 48000));
+        let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        p.note_start(0, 60, 0.8, 0.0, os_engine::NoteLevels { channel: 3, ..Default::default() });
+        p.note_on(0, 62, 0.8);
+        p.process_fx(48000, &mut l, &mut r);
+        assert_eq!(p.notes.iter().map(|n| (n.key, n.channel)).collect::<Vec<_>>(), [(60, 3), (62, 0)]);
+        p.note_off(0, 60);
+        p.process_fx(48000, &mut l, &mut r);
+        assert_eq!(p.notes.iter().map(|n| (n.key, n.channel)).collect::<Vec<_>>(), [(60, 3)]);
+    }
+
     /// A note's own levels (`use_note_levels`): the pan as a pan note expression with the note's id right after its
     /// note on, the mods (plus the channel's) as per-note modulation of the mod parameters; when the channel's mods
     /// change, the sounding voice is sent its new amount. Without `use_note_levels` nothing of it is sent.
@@ -2320,7 +2425,7 @@ mod tests {
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         assert!(os_host::Plugin::activate(&mut p, 48000));
         let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
-        let own = os_engine::NoteLevels { pan: 0.5, mod_x: 0.25, mod_y: -0.5 };
+        let own = os_engine::NoteLevels { pan: 0.5, mod_x: 0.25, mod_y: -0.5, channel: 0 };
         // Off: a plain note.
         p.note_start(3, 60, 0.8, 0.0, own);
         p.process_fx(48000, &mut l, &mut r);
@@ -2646,7 +2751,7 @@ mod tests {
         let mut p = Plugin::new(&lib, &d.id).unwrap();
         assert!(p.has_editor());
         // Give it a sample through its state (nih-plug JSON: persisted fields are JSON strings).
-        let wav = std::env::temp_dir().join("os-clap-test.wav");
+        let wav = std::env::temp_dir().join(format!("os-clap-test-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..4800).flat_map(|i| { let v = (i as f32 * 0.05).sin() * 0.5; [v, v] }).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
         let path = serde_string(&wav.to_string_lossy());
@@ -2663,7 +2768,7 @@ mod tests {
         let peak = l.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(peak > 0.05, "plays the sample (peak {peak})");
         let saved = String::from_utf8_lossy(&p.save_state().unwrap()[8..]).into_owned();
-        assert!(saved.contains("os-clap-test.wav"), "{saved}");
+        assert!(saved.contains(&*wav.file_name().unwrap().to_string_lossy()), "{saved}");
     }
 
     /// A CLAP effect in a mixer slot (spec: ui/mixer.md §7): `OS_CLAP_FX=<effect>.clap` names one (skipped when unset).
@@ -2692,7 +2797,7 @@ mod tests {
     fn engine_plays_a_pattern_through_lemon_sampler() {
         let Some(lib) = lemon_sampler() else { return };
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
-        let wav = std::env::temp_dir().join("os-clap-engine.wav");
+        let wav = std::env::temp_dir().join(format!("os-clap-engine-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..9600).flat_map(|i| { let v = (i as f32 * 0.03).sin() * 0.5; [v, v] }).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
         let state = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", serde_string(&wav.to_string_lossy()));
@@ -2773,7 +2878,7 @@ mod tests {
         let Some(lib) = lemon_sampler() else { return };
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         // 30 s of a 441 Hz sine at 44.1 kHz.
-        let wav = std::env::temp_dir().join("os-clap-long.wav");
+        let wav = std::env::temp_dir().join(format!("os-clap-long-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..44100 * 30).flat_map(|i| { let v = (i as f32 / 44100.0 * 441.0 * std::f32::consts::TAU).sin() * 0.5; [v, v] }).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 44100, &tone).unwrap();
         let state = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", serde_string(&wav.to_string_lossy()));
@@ -2824,7 +2929,7 @@ mod tests {
         let Some(lib) = lemon_sampler() else { return };
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         // A single-unit impulse then silence: every voice start is one spike.
-        let wav = std::env::temp_dir().join("os-clap-impulse.wav");
+        let wav = std::env::temp_dir().join(format!("os-clap-impulse-{}.wav", std::process::id()));
         let mut frame = vec![0.0f32; 48000 * 2];
         frame[0] = 1.0;
         frame[1] = 1.0;
@@ -2879,7 +2984,7 @@ mod tests {
     fn lemon_sampler_parameters_change_the_sound() {
         let Some(lib) = lemon_sampler() else { return };
         // A 2 s decaying saw-ish tone at 44.1 kHz, stereo with different channels.
-        let wav = std::env::temp_dir().join("os-clap-params.wav");
+        let wav = std::env::temp_dir().join(format!("os-clap-params-{}.wav", std::process::id()));
         let n = 44100 * 2;
         let tone: Vec<f32> = (0..n)
             .flat_map(|i| {
@@ -2968,7 +3073,7 @@ mod tests {
         let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Sampler.clap")) }.expect("linked Lemon Sampler");
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
         // 4 s of a 441 Hz sine at 48 kHz.
-        let wav = std::env::temp_dir().join("os-clap-porta.wav");
+        let wav = std::env::temp_dir().join(format!("os-clap-porta-{}.wav", std::process::id()));
         let tone: Vec<f32> = (0..48000 * 4).flat_map(|i| { let v = (i as f32 / 48000.0 * 441.0 * std::f32::consts::TAU).sin() * 0.5; [v, v] }).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &tone).unwrap();
         let state = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", serde_string(&wav.to_string_lossy()));

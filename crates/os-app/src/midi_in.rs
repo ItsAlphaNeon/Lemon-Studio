@@ -207,7 +207,8 @@ pub struct MidiIn {
 pub const CLIENT: &str = "Lemon Studio";
 
 /// Whether `name` is one of Lemon Studio's own ports (ALSA lists the ports of its output connections as inputs too):
-/// read, it would hear everything Lemon Studio sends, a control surface's messages as notes.
+/// read, it would hear everything Lemon Studio sends (its MIDI out, the clock, a control surface's messages) as if a device
+/// had played it.
 pub fn own(name: &str) -> bool {
     name.strip_prefix(CLIENT).is_some_and(|rest| rest.starts_with(':'))
 }

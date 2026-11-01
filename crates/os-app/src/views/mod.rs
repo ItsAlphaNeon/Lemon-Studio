@@ -8,6 +8,7 @@
 pub mod browser;
 pub mod cabledebug;
 pub mod channel_win;
+pub mod container;
 pub mod data_folder;
 pub mod factory_folder;
 pub mod dialog;
@@ -310,7 +311,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             }
         }
         // While windows move (the tiling layout's animation) they all show, the covered ones too.
-        if (docked_at.is_some_and(|d| i < d) && anim.is_none()) || anim.is_some_and(|m| m.opening().iter().any(|o| o.0 == win)) {
+        // A detached window paints in its own native window (`paint_detached`).
+        if s.is_detached(win) || (docked_at.is_some_and(|d| i < d) && anim.is_none()) || anim.is_some_and(|m| m.opening().iter().any(|o| o.0 == win)) {
             continue;
         }
         ui.win = Some(win);
@@ -442,6 +444,7 @@ fn paint_window(ui: &mut Ui, s: &State, win: Win, r: Rect, a: Rect, f: &FrameInf
                 }
             }
             Win::Events => ui.part(Seg::Win(win), a, |ui| events::paint(ui, s, f)),
+            Win::Container => ui.part(Seg::Win(win), a, |ui| container::paint(ui, s, f)),
             _ => {}
         }
 }
@@ -472,18 +475,23 @@ fn paint_rest(ui: &mut Ui, s: &State, f: &FrameInfo, w: f32) -> usize {
     // A menu opened from the settings window (Audio page combos) goes over it; a dropdown's submenu over the dropdown;
     // the time signature dialog's value lists over the dialog.
     let over_dialog = crate::timesig::form_open(s);
-    if !s.settings.open && !over_dialog {
+    // The popups and boxes opened from a detached window are in that window (`paint_detached`).
+    let here = !s.overlay_on.is_some_and(|w| s.is_detached(w) && s.shown(w));
+    if !s.settings.open && !over_dialog && here {
         playlist::paint_overlays(ui, s);
     }
     rack::paint_fill(ui, s);
     patterns::paint(ui, s);
     if s.settings.open {
         settings::paint(ui, s);
-        if !over_dialog {
+        if !over_dialog && here {
             playlist::paint_overlays(ui, s);
         }
     }
-    browser::paint_ghost(ui, s);
+    // A browser drag over a detached window draws its ghost there (`paint_detached`).
+    if s.drag_on.is_none_or(|w| !s.is_detached(w)) {
+        browser::paint_ghost(ui, s);
+    }
     if s.monitor.debug {
         mondebug::paint(ui, s);
     }
@@ -498,7 +506,7 @@ fn paint_rest(ui: &mut Ui, s: &State, f: &FrameInfo, w: f32) -> usize {
     }
     // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
     dialog::paint(ui, s);
-    if over_dialog {
+    if over_dialog && here {
         playlist::paint_overlays(ui, s);
     }
     overlays
@@ -547,6 +555,35 @@ fn card_corners(ui: &mut Ui, r: Rect) {
         pts.push((cx - sx * e, cy + sy * CARD_R));
         ui.c.fill_polygon(&pts, bg);
     }
+}
+
+/// Detached window `w` (Options ▸ Detached, Lemon Studio's design: spec ui/mixer.md §6.2), painted whole into its own
+/// native window's canvas: the window, then the popups and boxes opened from it (`State::overlay_on`). Returns where
+/// the overlays' hits start, as `paint` does.
+pub fn paint_detached(ui: &mut Ui, s: &State, f: &FrameInfo, w: Win) -> usize {
+    ui.c.clear(ui.t.workspace);
+    let r = s.win_rect(w);
+    let a = paint_area(s, w);
+    ui.win = Some(w);
+    ui.c.push_clip(a);
+    match w {
+        Win::Mixer => mixer::paint(ui, s, r, f),
+        Win::ChannelRack => rack::paint(ui, s, f),
+        _ => {}
+    }
+    ui.c.pop_clip();
+    ui.win = None;
+    let overlays = ui.hit_count();
+    if s.overlay_on == Some(w) {
+        if w == Win::ChannelRack {
+            rack::paint_fill(ui, s);
+        }
+        playlist::paint_overlays(ui, s);
+    }
+    if s.drag_on == Some(w) {
+        browser::paint_ghost(ui, s);
+    }
+    overlays
 }
 
 /// Where window `w` paints: its rect (and the channel rack's graph editor hanging below it). The resize zones past

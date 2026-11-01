@@ -173,6 +173,10 @@ impl FormulaController {
 }
 
 impl Effect for FormulaController {
+    /// Its formula runs on the song, not on the sound: never bypassed.
+    fn quiet_hold(&self) -> Option<f32> {
+        None
+    }
     fn transport(&mut self, t: &TransportInfo, (tick, ppq): (u64, u16)) {
         self.next = ((tick + 1) as f64 / f64::from(ppq.max(1)), t.tempo);
     }

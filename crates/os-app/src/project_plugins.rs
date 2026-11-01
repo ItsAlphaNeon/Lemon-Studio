@@ -93,7 +93,9 @@ pub fn plugin_ref(d: &Descriptor, state: Vec<u8>) -> PluginRef {
 /// plugin keeps the wrapper records Lemon Studio does not edit. A copy in another format that stands in for the plugin
 /// the file names, and that the user has not edited, leaves the file's wrapper as it is ([`untouched_stand_in`]).
 pub fn store_hosted(proj: &mut Project, plugins: &Plugins) {
-    for key in plugins.hosted.keys().copied().collect::<Vec<_>>() {
+    // Containers keep their effects' states in their own slot state.
+    crate::container::store_members(proj, plugins);
+    for key in plugins.hosted.range(..crate::plugins::MEMBER_KEY).map(|(&k, _)| k).collect::<Vec<_>>() {
         let Some(d) = plugins.descriptor(key) else { continue };
         if d.format == Format::Native {
             // The plugin's own state stream is what the file stores for it (spec §1, event 213). An instance that
@@ -440,6 +442,11 @@ impl crate::app::App {
             .filter(|&r| !self.state.hosted_rows.contains(&r) && !self.wrap_failed.contains(&r) && !self.native_failed.contains(&r) && Some(r) != pending)
             .filter_map(|r| {
                 let ch = &self.state.project.channels[r];
+                // Lemon MIDI Out plays MIDI Out channels (`lemon_midi_out`), a container's chain a container's
+                // (`container`).
+                if crate::lemon_midi_out::is_midi_out(ch) || crate::container::is_container_channel(ch) {
+                    return None;
+                }
                 let name = ch.plugin.as_deref().filter(|n| ch.kind == ChannelKind::Plugin && !n.is_empty() && *n != WRAPPER)?;
                 Some((r, name.to_string(), ch.plugin_state.clone()))
             })
@@ -482,7 +489,7 @@ impl crate::app::App {
             // Before the states are copied: this runs every tick, and an Edison slot's can be tens of megabytes.
             .filter(|&(t, k, s)| {
                 let key = fx_key(t, k);
-                !s.name.is_empty() && s.name != WRAPPER && !self.plugins.hosted.contains_key(&key) && !self.native_failed.contains(&key)
+                !s.name.is_empty() && s.name != WRAPPER && s.name != crate::container::CONTAINER && !self.plugins.hosted.contains_key(&key) && !self.native_failed.contains(&key)
             })
             .map(|(t, k, s)| (t, k, s.name.clone(), s.state.clone()))
             .collect();

@@ -132,6 +132,8 @@ pub(super) struct MixCx<'a> {
     /// Whether the master's slots and the insert tracks' run (an export's switches).
     pub master_fx: bool,
     pub insert_fx: bool,
+    /// The program's Auto-bypass when silent setting (`super::auto_bypass`).
+    pub auto_bypass: bool,
     /// On a device: its inputs this tick (interleaved), how many, and its output pairs.
     pub io: Option<(&'a [f32], usize, usize)>,
     pub keys: Keys,
@@ -530,6 +532,7 @@ impl Multicore {
         sig.push(n as u32);
         sig.extend(order.iter().map(|&t| t as u32));
         for m in tracks {
+            sig.push(u32::from(m.threaded));
             sig.push(m.routes.len() as u32);
             sig.extend(m.routes.iter().map(|r| r.dest as u32));
             sig.push(m.effects.len() as u32);
@@ -574,6 +577,10 @@ impl Multicore {
             self.feed_at[j + 1] += self.feed_at[j];
         }
         self.graph.set(order.len(), &mut self.edges);
+        // A track whose threaded processing is off runs on the rendering thread.
+        for (j, &t) in order.iter().enumerate() {
+            self.graph.pin(j, !tracks[t].threaded);
+        }
     }
 
     /// The tracks on the pool. `Err` gives the parts back untouched when the pool is busy.
@@ -639,6 +646,8 @@ pub(super) struct InstOut {
     pub active: bool,
     /// The gains its output ended the last tick on.
     pub gain: Option<(f32, f32)>,
+    /// How long the instrument has had nothing to play and put out silence (`instrument_job`, auto-bypass).
+    pub quiet: super::auto_bypass::Quiet,
 }
 
 /// The audio clips with shapes on instrument channels (`Engine::inst_shapes`), shared by the channels of a tick: each
@@ -1114,6 +1123,12 @@ pub(super) mod tests {
         check(&p, &pool, false, false, "own effects");
         check(&p, &pool, true, false, "hosted effects");
         check(&p, &pool, true, true, "on a device");
+        // Tracks whose threaded processing is off run on the rendering thread: the same sound.
+        let mut q = p.clone();
+        for m in q.mixer.iter_mut().step_by(3) {
+            m.threaded = false;
+        }
+        check(&q, &pool, true, false, "some tracks not threaded");
     }
 
     /// A hosted instrument with state: a saw per held key, its delay as reported, its clock in its output (so the

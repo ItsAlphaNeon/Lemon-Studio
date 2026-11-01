@@ -50,6 +50,9 @@ pub enum Win {
     PianoDlg,
     /// The event editor (spec: ui/event-editor.md).
     Events,
+    /// A container's window: its effects with their wet and dry knobs (Lemon Studio's design: spec
+    /// plugins/patcher/README.md §4.3).
+    Container,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -174,6 +177,8 @@ pub enum Action {
     Touch(crate::touch::TouchAct),
     /// The Strum dialog's switches and buttons (spec: ui/piano-strum.md).
     Strum(crate::strum::Act),
+    /// The container window's names and buttons (`crate::container::CAct`).
+    Container(crate::container::CAct),
     /// The Arpeggiate dialog's buttons, switches and menus (spec: ui/piano-arpeggiate.md).
     Arp(crate::arpeggiate::Act),
     /// The Flam, Flip and Scale levels dialogs' switches and buttons (spec: as `Win::PianoDlg`).
@@ -647,6 +652,33 @@ pub struct Keep {
     full: bool,
 }
 
+/// A detached window's part of the app's input and paint state (`App::on_surface`): swapped in while that window paints
+/// or takes input, so its hits, mouse position and hover are its own, in its own logical px.
+#[derive(Default)]
+struct Screen {
+    hits: Vec<Hit>,
+    bars: Vec<Bar>,
+    live: Vec<(Live, Rect)>,
+    keep: Keep,
+    overlays: Vec<Rect>,
+    mouse: (f32, f32),
+    hover: Option<Action>,
+    hover_rect: Option<Rect>,
+    /// Something it shows changed: the shell paints it again (`App::detached_dirty`).
+    dirty: bool,
+}
+
+/// What a detached window's drawn frame asks of its native window (Lemon Studio's design, spec: ui/mixer.md §6.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Native {
+    /// The title bar was pressed: the window system moves the window.
+    Move,
+    /// A resize zone was pressed (`EDGE_*` bits): the window system resizes the window.
+    Resize(u8),
+    Minimize,
+    Maximize,
+}
+
 struct Part {
     seg: Seg,
     hits: std::ops::Range<usize>,
@@ -994,9 +1026,13 @@ pub struct State {
     pub perf: crate::perf::Perf,
     /// The Tempo tapper: where it is, the count of taps, the pad's flash.
     pub tapper: crate::tapper::TapperUi,
+    /// The container's window: where it is, which container it shows, the levels its chain plays.
+    pub container: crate::container::ContainerUi,
     pub touch: crate::touch::TouchUi,
     /// The event editor: the control it shows, its view, tool and selection.
     pub events: crate::events::EventsUi,
+    /// Edit automation in a window: the second event editor, behind `events` (spec: ui/event-editor.md §3a).
+    pub events_back: Option<crate::events::EventsUi>,
     /// The piano roll's Strum dialog: where it is, its settings and its preview session.
     pub strum: crate::strum::StrumUi,
     /// The piano roll's Arpeggiate dialog: where it is, its settings and pattern, its preview session.
@@ -1167,6 +1203,19 @@ pub struct State {
     /// The current theme's rule for the colours of new audio and automation clips' channels (`App::clip_colors`, kept
     /// up to date by `App::follow_settings`).
     pub clip_colors: crate::clip_colors::ClipColors,
+    /// Windows shown in a native window of their own (Options ▸ Detached; spec: ui/mixer.md §6.2, ui/channel-rack.md
+    /// §17; Lemon Studio's design), each with that window's size in logical px. Being in `z` still says whether one is
+    /// shown; detached, it is drawn there at (0, 0) and the main window leaves it out (`App::on_surface`).
+    pub detached: Vec<(Win, (f32, f32))>,
+    /// The detached windows' native frames as the window system places them (outer x, y, inner w, h: points on macOS,
+    /// pixels elsewhere), kept for opening them there again (`layout`).
+    pub detached_frames: Vec<(Win, [i32; 4])>,
+    /// The surface being painted or taking input: `None` the main window, else that detached window.
+    pub surface: Option<Win>,
+    /// The surface the last press came from: the popups and boxes it opens are drawn there (`App::on_surface`).
+    pub overlay_on: Option<Win>,
+    /// The surface a drag between windows is over (`App::cross_drag`): its ghost is drawn there and it drops there.
+    pub drag_on: Option<Win>,
 }
 
 impl State {
@@ -1180,9 +1229,9 @@ impl State {
         self.z.contains(&w)
     }
 
-    /// Whether `w` is maximized and not collapsed (it fills the workspace).
+    /// Whether `w` is maximized and not collapsed (it fills the workspace). A detached window never is.
     pub fn is_max(&self, w: Win) -> bool {
-        w.slot().is_some_and(|i| self.wins[i].maxed && (!self.wins[i].mini || self.tiled()))
+        w.slot().is_some_and(|i| self.wins[i].maxed && (!self.wins[i].mini || self.tiled())) && !self.is_detached(w)
     }
 
     /// The tiling layout: the playlist, piano roll and mixer are maximized or snapped into a split, never floating or
@@ -1193,7 +1242,37 @@ impl State {
 
     /// Whether `w` is shown snapped into the split (the tiling layout, not maximized).
     pub fn snapped(&self, w: Win) -> bool {
-        self.tiled() && w.slot().is_some_and(|i| !self.wins[i].maxed) && self.shown(w)
+        self.tiled() && w.slot().is_some_and(|i| !self.wins[i].maxed) && self.shown(w) && !self.is_detached(w)
+    }
+
+    /// Whether `w` is shown in a native window of its own (Options ▸ Detached).
+    pub fn is_detached(&self, w: Win) -> bool {
+        self.detached.iter().any(|d| d.0 == w)
+    }
+
+    /// The size (logical px) of `w`'s own native window, when it is detached. The Channel rack's follows what it paints
+    /// (its size and the graph editor hanging below it, `rack_area`); the Mixer's is the native window's.
+    pub fn detached_size(&self, w: Win) -> Option<(f32, f32)> {
+        let d = self.detached.iter().find(|d| d.0 == w)?;
+        Some(if w == Win::ChannelRack { self.rack_area().1 } else { d.1 })
+    }
+
+    /// Smallest size (logical px) of `w`'s native window when detached.
+    pub fn detached_min(&self, w: Win) -> (f32, f32) {
+        match w {
+            Win::ChannelRack => {
+                let (_, (aw, ah)) = self.rack_area();
+                (views::rack::min_w(self) + (aw - self.rack_size.0).max(0.0), views::rack::MIN_H + (ah - self.rack_size.1).max(0.0))
+            }
+            w => w.min_size(),
+        }
+    }
+
+    /// The Channel rack's place in what it paints (`views::rack::paint_area`, with the graph editor hanging below it):
+    /// its offset in that area, and the area's size.
+    pub fn rack_area(&self) -> ((f32, f32), (f32, f32)) {
+        let (r, a) = (views::rack::rect(self), views::rack::paint_area(self));
+        ((r.x - a.x, r.y - a.y), (a.w, a.h))
     }
 
     /// The maximized window in front (the one filling the workspace), if any.
@@ -1223,6 +1302,9 @@ impl State {
     /// The window's floating rect, kept at least its minimum size and at most the screen's, with its part in the
     /// workspace (`win_clamp::keep`).
     pub fn float_rect(&self, w: Win) -> Rect {
+        if let (Some(_), Some((dw, dh))) = (w.slot(), self.detached_size(w)) {
+            return Rect::new(0.0, 0.0, dw, dh);
+        }
         let Some(i) = w.slot() else { return Rect::new(0.0, 0.0, 0.0, 0.0) };
         let r = self.wins[i].rect;
         let (mw, mh) = w.min_size();
@@ -1279,6 +1361,10 @@ impl State {
 
     /// Where the window is painted: the workspace when maximized, a title bar when minimized.
     pub fn win_rect(&self, w: Win) -> Rect {
+        // Detached: its whole native window (`App::on_surface`).
+        if let (Some(_), Some((dw, dh))) = (w.slot(), self.detached_size(w)) {
+            return Rect::new(0.0, 0.0, dw, dh);
+        }
         let Some(i) = w.slot() else { return Rect::new(0.0, 0.0, 0.0, 0.0) };
         let f = self.float_rect(w);
         let ws = self.wins[i];
@@ -1357,6 +1443,10 @@ pub struct App {
     shown: Shown,
     /// Rects of last frame's overlays (menus, popups...): docked plugin windows are clipped under them.
     overlays: Vec<Rect>,
+    /// Each detached window's own hits, mouse and hover while another surface is active (`on_surface`).
+    screens: Vec<(Win, Screen)>,
+    /// What the shell is to do with a detached window's native frame: its title bar dragged, its buttons pressed.
+    pub native: Vec<(Win, Native)>,
     /// Where the canvas sits in the main window's client area (physical px; the restored window's border).
     pub canvas_off: (i32, i32),
     /// Linux: what each plugin window drawn in the app's showed at the last tick (serials, place, menus), to repaint it
@@ -1397,7 +1487,9 @@ pub struct App {
     damage: Damage,
     /// Typing keyboard (spec: ui/typing-keyboard.md): keys held now as (physical key, rack row,
     /// note key), the octave shift, and whether the transport has the project for live notes.
-    typing_held: Vec<(KeyCode, usize, u16)>,
+    pub(crate) typing_held: Vec<(KeyCode, usize, u16)>,
+    /// Keys held now that launched Performance mode slots (spec: ui/performance-mode.md §3), as (physical key, note).
+    perf_typed: Vec<(KeyCode, u8)>,
     pub typing_octave: i32,
     typing_synced: bool,
     /// The piano-roll key held with the mouse, sounding as a live note until released: (rack row, key).
@@ -1495,7 +1587,7 @@ pub struct App {
     pub(crate) piano_grid: Option<Rect>,
     piano_panel: Option<Rect>,
     /// Sampler channel rows whose Lemon Sampler instance could not be created (not retried).
-    sampler_failed: Vec<usize>,
+    pub(crate) sampler_failed: Vec<usize>,
     /// The control plane's socket (`--control`), when it listens.
     pub rpc_server: Option<crate::control::server::Server>,
     /// Mixer slots (`plugins::fx_key`) whose Lemon Parametric EQ could not start (not retried).
@@ -1530,8 +1622,9 @@ pub struct App {
     pub(crate) pattern_render: Option<crate::pattern_render::Pending>,
     /// `device::opens` when the hosted plugins last followed the output device's rate (`follow_device`).
     device_opens: u64,
-    /// The project and tempo as last opened, saved or created: anything else has unsaved changes.
-    pub(crate) saved: (Project, f64),
+    /// The project, tempo and Lemon Studio's own saved state (`lemon_state::saved_form`) as last opened, saved or
+    /// created: anything else has unsaved changes.
+    pub(crate) saved: (Project, f64, Vec<u8>),
     /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
     pub(crate) backup: crate::backup::Backup,
     /// A copy of the project is being written (`save_copy`): the save leaves the project's own file as it was.
@@ -1637,8 +1730,10 @@ impl App {
                 cpu: crate::cpu::Cpu::saved(),
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
+                container: Default::default(),
                 touch: Default::default(),
                 events: Default::default(),
+                events_back: None,
                 strum: Default::default(),
                 arp: Default::default(),
                 piano_dlg: Default::default(),
@@ -1674,6 +1769,11 @@ impl App {
                 dialogs: Vec::new(),
                 credits: Default::default(),
                 clip_colors: Default::default(),
+                detached: Vec::new(),
+                detached_frames: Vec::new(),
+                surface: None,
+                overlay_on: None,
+                drag_on: None,
             },
             theme: load_theme(),
             transport,
@@ -1682,6 +1782,8 @@ impl App {
             live: Vec::new(),
             shown: Shown::default(),
             overlays: Vec::new(),
+            screens: Vec::new(),
+            native: Vec::new(),
             canvas_off: (0, 0),
             #[cfg(target_os = "linux")]
             embed_seen: std::collections::HashMap::new(),
@@ -1706,6 +1808,7 @@ impl App {
             hover_rect: None,
             damage: Damage::Full,
             typing_held: Vec::new(),
+            perf_typed: Vec::new(),
             typing_octave: 0,
             typing_synced: false,
             mouse_note: None,
@@ -1779,7 +1882,7 @@ impl App {
             export_reveal: false,
             pattern_render: None,
             device_opens: 0,
-            saved: (Project::default(), 0.0),
+            saved: (Project::default(), 0.0, Vec::new()),
             backup: Default::default(),
             copying: false,
             omarchy: (None, std::time::Instant::now()),
@@ -1927,6 +2030,13 @@ impl App {
                 crate::playlist::load_view(s);
                 s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
+                // A .lemon file's own state (icons, slot names and colours, Performance settings); its channel icons
+                // name channels by position, which the ids given here then follow.
+                self.state.control.settle(&mut self.state.project);
+                if let Some(f) = self.state.file.take() {
+                    crate::lemon_state::apply(&mut self.state, &mut self.plugins, &f);
+                    self.state.file = Some(f);
+                }
                 self.mark_saved();
                 self.journal_opened(Some(&opened), carried);
                 self.state.versions = crate::native::versions(&opened);
@@ -1952,9 +2062,10 @@ impl App {
         }
     }
 
-    /// Saves the project to its file, or asks where (a project without one); then `next`, once it is saved.
+    /// Saves the project to its file, or asks where (a project without one, or one opened from an FLP, which is never
+    /// saved over: spec flp/lemon-format.md "Opening and saving"); then `next`, once it is saved.
     fn save_then(&mut self, next: Option<crate::dialog::Next>) {
-        let Some(path) = self.state.path.clone() else { return self.save_dialog(next) };
+        let Some(path) = self.state.path.clone().filter(|p| !crate::project_files::is_flp(p)) else { return self.save_dialog(next) };
         self.save_to(path);
         if let Some(n) = next {
             self.go_on_if_saved(n);
@@ -1970,14 +2081,15 @@ impl App {
         self.save_file_dialog(next);
     }
 
-    /// The Save project as dialog, starting in the project's folder with its name.
+    /// The Save project as dialog, starting in the project's folder with its name (an FLP's with `.lemon`).
     pub(crate) fn save_file_dialog(&mut self, next: Option<crate::dialog::Next>) {
         use crate::filedlg::{FileDlg, Mode};
+        use crate::project_files::{as_lemon, EXT};
         let path = self.state.path.clone();
-        let name = path.as_ref().and_then(|p| p.file_name()).map_or_else(|| format!("Untitled.{}", crate::native::EXT), |n| n.to_string_lossy().into_owned());
+        let name = path.as_deref().map(as_lemon).and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| format!("Untitled.{EXT}"));
         // A Lemon project first: what a new project is saved as.
         let dlg = FileDlg::new(Mode::Save, "Save project as", "project", crate::dialog::Then::SaveProject(next))
-            .filter("Lemon project, with its history", &[crate::native::EXT])
+            .filter("Lemon project, with its history", &[EXT])
             .filter("FL Studio project", &["flp"])
             .start(path.as_deref().and_then(|p| p.parent()))
             .name(&name);
@@ -2004,7 +2116,7 @@ impl App {
         self.export_reveal = job.options.reveal;
         self.plugins.set_offline(job.options.hq);
         // Lemon Sampler voices playing from disk wait for their frames in every export, high quality or not.
-        lemon_sampler::stream::set_exporting(true);
+        lemon_sampler::stream::export_started();
         self.transport.export(&p, mode, rate, job);
         self.export = Some((name, 0.0));
         self.invalidate();
@@ -2023,7 +2135,7 @@ impl App {
                 self.export = None;
                 self.midi_after_export();
                 self.plugins.set_offline(false);
-                lemon_sampler::stream::set_exporting(false);
+                lemon_sampler::stream::export_finished();
                 if let Some(p) = self.pattern_render.take() {
                     return self.pattern_render_done(p, r);
                 }
@@ -2123,6 +2235,8 @@ impl App {
         // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, Lemon Studio status).
         // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
+        // Lemon Studio's own state goes into `LMex` (a .lemon target only, `lemon_or_flp`).
+        let extra = crate::lemon_state::events(s, &self.plugins);
         crate::project_info::stamp(s, &mut proj);
         crate::data_folder::stamp(s, &mut proj);
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
@@ -2130,6 +2244,7 @@ impl App {
         // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
         let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
+            .and_then(|()| lemon_or_flp(&mut file, &target, extra))
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
             .and_then(|b| crate::native::write(&target, &b, &history, &ids, undo.as_ref()));
         s.message = Some(match &result {
@@ -2174,7 +2289,7 @@ impl App {
             return None;
         }
         let s = &mut self.state;
-        let keep = (s.project.clone(), s.path.clone(), s.file.clone(), s.message.take(), self.saved.clone());
+        let keep = (s.project.clone(), s.path.clone(), s.file.clone(), s.message.take(), self.saved.clone(), s.plugin_edited);
         self.copying = true;
         // A copy is not the last used project (spec: ui/settings-choices.md "Miscellaneous: ... Startup project"), nor a
         // recent one (spec: ui/recent-projects.md §2).
@@ -2189,7 +2304,7 @@ impl App {
             Some(m) if m.starts_with("Saved") => Ok(()),
             m => Err(m.map_or_else(String::new, |m| m.trim_start_matches("Save failed: ").to_string())),
         };
-        (s.project, s.path, s.file, s.message, self.saved) = keep;
+        (s.project, s.path, s.file, s.message, self.saved, s.plugin_edited) = keep;
         Some(done)
     }
 
@@ -2197,13 +2312,16 @@ impl App {
     pub(crate) fn mark_saved(&mut self) {
         // New things get their ids before the copy, so ids alone are no unsaved change.
         self.state.control.settle(&mut self.state.project);
-        self.saved = (self.state.project.clone(), self.state.tempo);
+        self.saved = (self.state.project.clone(), self.state.tempo, crate::lemon_state::saved_form(&self.state, &self.plugins));
         self.state.plugin_edited = false;
     }
 
     /// Whether the project changed since it was last opened, saved or created, a hosted plugin's settings included.
     pub fn unsaved(&self) -> bool {
-        self.saved.0 != self.state.project || self.saved.1 != self.state.tempo || self.state.plugin_edited
+        self.saved.0 != self.state.project
+            || self.saved.1 != self.state.tempo
+            || self.saved.2 != crate::lemon_state::saved_form(&self.state, &self.plugins)
+            || self.state.plugin_edited
     }
 
     /// The system asks the window to close (its close shortcut, a taskbar or dock). The dialog-like windows drawn
@@ -2421,6 +2539,11 @@ impl App {
                     self.state.message = crate::presets::save_chosen(self, key, p);
                 }
             }
+            Then::SaveChannelState(row) => {
+                if let Some(p) = file {
+                    self.state.message = crate::channel_states::save_chosen(self, row, p);
+                }
+            }
             Then::ImportPreset(key) => {
                 if let Some(p) = file {
                     self.state.message = crate::presets::import_chosen(self, key, p);
@@ -2472,6 +2595,22 @@ impl App {
             Then::SongSignature(at, num, den) => {
                 if reply == Reply::Button(Answer::Ok) {
                     crate::timesig::set_song(&mut self.state, at, num, den);
+                }
+            }
+            Then::PerfConfirm => {
+                if reply == Reply::Button(Answer::Ok) {
+                    self.open_marker_settings();
+                }
+            }
+            Then::MidiExportConfirm => {
+                if reply == Reply::Button(Answer::Ok) {
+                    self.state.message = Some(self.prepare_midi_export());
+                }
+            }
+            Then::PerfMarkers(count, spacing) => {
+                if reply == Reply::Button(Answer::Ok) {
+                    let m = crate::perform::prepare_with(&mut self.state, crate::perform::MarkerForm { count, spacing });
+                    self.state.message = Some(m);
                 }
             }
             Then::DataFolder(d) => self.data_folder_done(d, reply),
@@ -2558,13 +2697,13 @@ impl App {
     fn open_dialog(&mut self) {
         let start = self.state.path.as_ref().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
         let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Open project", "project", crate::dialog::Then::OpenProject)
-            .filter("Lemon Studio project", &["flp", crate::native::EXT, "zip"])
+            .filter("Lemon Studio project", &["lemon", "flp", "zip"])
             .start(start.as_deref());
         self.file_dialog(dlg);
     }
 
-    /// FILE > Save new version (Ctrl+N): saves next to the project as "name_2.flp", "name_3.flp", ... (the first free
-    /// number), which becomes the project's file. A project without a file asks for a name.
+    /// FILE > Save new version (Ctrl+N): saves next to the project as "name_2.lemon", "name_3.lemon", ... (the first
+    /// free number; an FLP's versions too), which becomes the project's file. A project without a file asks for a name.
     fn save_new_version(&mut self) {
         let Some(path) = self.state.path.clone() else { return self.save(true) };
         let stem = path.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -2573,7 +2712,7 @@ impl App {
             _ => (stem.clone(), 1),
         };
         let dir = path.parent().map(PathBuf::from).unwrap_or_default();
-        let ext = crate::native::ext_for(Some(&path));
+        let ext = crate::project_files::EXT;
         let target = (n + 1..).map(|k| dir.join(format!("{base}_{k}.{ext}"))).find(|p| !p.exists()).expect("a free name");
         self.save_to(target);
     }
@@ -2822,6 +2961,7 @@ impl App {
         crate::missing::tick(self);
         crate::zipped::tick(self);
         self.midi_tick();
+        self.sync_midi_outs();
         self.mixer_tick();
         self.follow_ids(false, true);
         self.host_commands();
@@ -2901,8 +3041,16 @@ impl App {
         // windows' requests come with it.
         #[cfg(plugin_windows)]
         let requests = {
-            let (project, mixer) = (&self.state.project, &self.state.mixer);
-            self.plugins.idle(|row| if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) })
+            let members = self.member_infos();
+            let (project, mixer, icons) = (&self.state.project, &self.state.mixer, &self.state.playlist.icons);
+            self.plugins.idle(|row| {
+                // A container's member (`crate::container`): its name over its slot's title.
+                if row >= crate::plugins::MEMBER_KEY {
+                    return members.get(&row).cloned();
+                }
+                let info = if row >= crate::plugins::FX_KEY { crate::mixer::fx_info(project, mixer, row) } else { channel_info(project, row) };
+                info.map(|i| crate::plugin_window::ChannelInfo { icon: crate::playlist::window_icon(project, icons, row), ..i })
+            })
         };
         // No plugin windows here, so no requests.
         #[cfg(not(plugin_windows))]
@@ -2988,6 +3136,7 @@ impl App {
                                 *i = i.clone().off();
                             }
                         }
+                        // A container's member has its presets too (plugins/patcher/README.md §4.2).
                         crate::presets::fill_window_menu(self, row, &mut menu);
                         crate::playlist::fill_plugin_window_menu(&self.state, row, &mut menu);
                         // A channel's window: Replace ▸ lists the generators (an effect slot's stays greyed here; the
@@ -3091,8 +3240,8 @@ impl App {
                         self.invalidate();
                         continue;
                     }
-                    Request::Audio(path, channel) => {
-                        self.sample_from_plugin(path, channel);
+                    Request::Audio(path, to) => {
+                        self.sample_from_plugin(path, to);
                         continue;
                     }
                     Request::Notes(row, notes) => {
@@ -3298,7 +3447,7 @@ impl App {
             let Win::Hosted(row) = w else { continue };
             let mut covers = over.clone();
             for &a in &z[i + 1..] {
-                if !matches!(a, Win::Hosted(_)) {
+                if !matches!(a, Win::Hosted(_)) && !self.state.is_detached(a) {
                     covers.push(px(self.win_bounds(a)));
                 }
             }
@@ -3373,7 +3522,13 @@ impl App {
         self.follow_settings();
         self.resolve_scroll();
         self.tiles_motion();
-        match std::mem::replace(&mut self.damage, Damage::None) {
+        let damage = std::mem::replace(&mut self.damage, Damage::None);
+        // A change that repaints the whole main window may show in a detached one too (the colours, a project opened);
+        // the detached windows' own changes mark them (`damage_win`, `on_surface`).
+        if damage == Damage::Full {
+            self.mark_detached(None);
+        }
+        match damage {
             Damage::None => None,
             Damage::Full => Some(None),
             Damage::Rects(mut v) => {
@@ -3758,6 +3913,7 @@ impl App {
             .iter()
             .map(|(&key, h)| {
                 let (synth, place) = match crate::plugins::fx_of(key) {
+                    None if key >= crate::plugins::MEMBER_KEY => (false, self.member_place(key).unwrap_or_default()),
                     None => (true, p.channels.get(key).map_or_else(|| format!("Channel {}", key + 1), |c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1)))),
                     Some((0, slot)) => (false, format!("Master, slot {}", slot + 1)),
                     Some((track, slot)) => (false, format!("Bus {track}, slot {}", slot + 1)),
@@ -3785,6 +3941,7 @@ impl App {
                     // The channel's plugin window, or the mixer slot's.
                     match crate::plugins::fx_of(key) {
                         Some((track, slot)) => self.open_fx(track, slot),
+                        None if key >= crate::plugins::MEMBER_KEY => self.state.message = self.open_member_key(key),
                         None => self.state.pending_open = Some(key),
                     }
                 }
@@ -4131,6 +4288,9 @@ impl App {
     pub(crate) fn damage_win(&mut self, w: Win) {
         if !self.state.shown(w) {
             return self.invalidate();
+        }
+        if self.state.is_detached(w) {
+            return self.mark_detached(Some(w));
         }
         match w {
             Win::Playlist | Win::Mixer | Win::PianoRoll => self.damage_rect(self.state.win_area(w)),
@@ -4504,6 +4664,8 @@ impl App {
         self.mpris_tick();
         #[cfg(target_os = "linux")]
         self.audio_log_tick();
+        // Audio ▸ CPU ▸ Auto-bypass when silent, for every slot whose own switch is on (spec: audio/auto-bypass.md).
+        os_engine::engine::auto_bypass::set_enabled(crate::prefs::check(&crate::prefs::SMART_DISABLE));
         self.follow_settings();
         if self.state.cpu.due(now) {
             let tp = &self.transport;
@@ -4590,6 +4752,255 @@ impl App {
     }
 
     /// Paint the whole frame (None) or only the given rects, in one pass (see `Canvas::begin_region`).
+    /// What a paint shows of playback and the drags in progress.
+    fn frame_info(&self) -> views::FrameInfo {
+        views::FrameInfo {
+            title: self.title(),
+            hint: self.hint.clone(),
+            playing: self.shown.playing,
+            paused: self.shown.paused,
+            tick: self.shown.tick,
+            song: self.shown.song,
+            tempo: self.shown.tempo.unwrap_or(self.state.tempo),
+            peaks: self.transport.peaks(),
+            sounding: self.shown.sounding.clone(),
+            song_pos_drag: matches!(self.drag, Some(Drag::SongPos { .. })),
+            bar_drag: match self.drag {
+                Some(Drag::Bar(d)) => Some(d),
+                _ => None,
+            },
+        }
+    }
+
+    /// Options ▸ Detached on window `w` (the Mixer, the Channel rack; spec: ui/mixer.md §6.2, Lemon Studio's design):
+    /// `on` shows it in a native window of its own, at the size it has in the main window, and brings it to the front;
+    /// off puts it back in the main window where it was. A maximized or collapsed window detaches floating.
+    pub fn set_detached(&mut self, w: Win, on: bool) {
+        let s = &mut self.state;
+        if on == s.is_detached(w) {
+            return;
+        }
+        if on {
+            let r = s.float_rect(w);
+            if let Some(i) = w.slot() {
+                s.wins[i].rect = r;
+                s.wins[i].maxed = false;
+                s.wins[i].mini = false;
+            }
+            s.detached.push((w, (r.w, r.h)));
+            self.screen_of(w);
+        } else {
+            s.detached.retain(|d| d.0 != w);
+            // Re-attached from its own window (its menu): `on_surface` drops the surface once done with it.
+            if s.surface != Some(w) {
+                self.screens.retain(|d| d.0 != w);
+            }
+            if s.overlay_on == Some(w) {
+                s.overlay_on = None;
+            }
+        }
+        self.state.raise(w);
+        self.drag = None;
+        self.invalidate();
+    }
+
+    /// The detached windows that are shown: each needs its native window (the shell opens and closes them to match).
+    pub fn detached_windows(&self) -> Vec<Win> {
+        self.state.detached.iter().map(|d| d.0).filter(|&w| self.state.shown(w)).collect()
+    }
+
+    /// Where detached window `w` was in the main window (logical px), to open its native window over that place.
+    pub fn detached_origin(&self, w: Win) -> Option<Rect> {
+        let s = &self.state;
+        match w {
+            Win::ChannelRack => {
+                let ((dx, dy), (aw, ah)) = s.rack_area();
+                Some(Rect::new(s.rack_pos.0 - dx, s.rack_pos.1 - dy, aw, ah))
+            }
+            w => w.slot().map(|i| s.wins[i].rect),
+        }
+    }
+
+    /// The native window that `w` was last in (outer x, y and inner w, h in window-system px), from this run or the
+    /// settings.
+    pub fn detached_frame(&self, w: Win) -> Option<[i32; 4]> {
+        self.state.detached_frames.iter().find(|d| d.0 == w).map(|d| d.1)
+    }
+
+    /// The shell's native window for `w` now has this size (logical px): it is painted again at that size. The Channel
+    /// rack takes it as its own size, less the graph editor below it.
+    pub fn set_detached_size(&mut self, w: Win, size: (f32, f32)) {
+        let s = &mut self.state;
+        if w == Win::ChannelRack && s.is_detached(w) {
+            let (_, (aw, ah)) = s.rack_area();
+            let (ew, eh) = (aw - s.rack_size.0, ah - s.rack_size.1);
+            let to = ((size.0 - ew).max(views::rack::min_w(s)), (size.1 - eh).max(views::rack::MIN_H));
+            if to != s.rack_size {
+                s.rack_size = to;
+                self.mark_detached(Some(w));
+            }
+            return;
+        }
+        if let Some(d) = s.detached.iter_mut().find(|d| d.0 == w) {
+            if d.1 != size {
+                d.1 = size;
+                self.mark_detached(Some(w));
+            }
+        }
+    }
+
+    /// The native window for `w` sits at `frame` (outer x, y and inner w, h in window-system px), kept for `layout`.
+    pub fn set_detached_frame(&mut self, w: Win, frame: [i32; 4]) {
+        let f = &mut self.state.detached_frames;
+        f.retain(|d| d.0 != w);
+        f.push((w, frame));
+    }
+
+    /// Marks detached window `w` (all of them with `None`) for painting again.
+    pub(crate) fn mark_detached(&mut self, w: Option<Win>) {
+        for (win, sc) in &mut self.screens {
+            if w.is_none_or(|w| w == *win) {
+                sc.dirty = true;
+            }
+        }
+    }
+
+    /// Detached window `w`'s surface (`Screen`), made on first use (a window detached by the settings at the start,
+    /// `layout::restore`, has none yet).
+    fn screen_of(&mut self, w: Win) -> Option<usize> {
+        if !self.state.is_detached(w) {
+            return None;
+        }
+        Some(self.screens.iter().position(|d| d.0 == w).unwrap_or_else(|| {
+            self.screens.push((w, Screen { mouse: (-1.0, -1.0), dirty: true, ..Screen::default() }));
+            self.screens.len() - 1
+        }))
+    }
+
+    /// A drag that carries something from one window to another: a browser item (a sample, a plugin, a preset, a
+    /// pattern or a channel of the project). The shell gives its moves and its release to the surface under the
+    /// cursor on screen, the main window's or a detached window's (`State::drag_on`).
+    pub fn cross_drag(&self) -> bool {
+        matches!(self.drag, Some(Drag::Browser { .. }))
+    }
+
+    /// A key pressed while surface `on` has the keyboard focus (`None`: the main window, else that detached window's
+    /// native window): it acts on that surface, and a popup or type-in box it opens is drawn there.
+    pub fn key_on(&mut self, on: Option<Win>, key: &winit::keyboard::Key, ctrl: bool, alt: bool) {
+        let open = |a: &Self| a.state.playlist.popup.is_some() || a.state.playlist.edit.is_some();
+        let before = open(self);
+        self.on(on, |a| a.key(key, ctrl, alt));
+        if !before && open(self) {
+            self.state.overlay_on = on.filter(|&w| self.state.is_detached(w));
+            self.invalidate();
+        }
+    }
+
+    /// Runs `f` on surface `on`: a detached window's (`on_surface`), or the main window's (`None`).
+    pub fn on<R>(&mut self, on: Option<Win>, f: impl FnOnce(&mut Self) -> R) -> R {
+        match on {
+            Some(w) => self.on_surface(w, f),
+            None => f(self),
+        }
+    }
+
+    /// The button released in the native window of surface `from` (`None`: the main window's). A drag between windows
+    /// (`cross_drag`) ends on the surface it was last moved over, where it drops.
+    pub fn mouse_up_from(&mut self, from: Option<Win>) {
+        let to = if self.cross_drag() { self.state.drag_on.filter(|&w| self.state.is_detached(w)) } else { from };
+        self.on(to, Self::mouse_up);
+    }
+
+    /// Whether detached window `w` has something new to show (painting it, `paint_detached`, clears that).
+    pub fn detached_dirty(&self, w: Win) -> bool {
+        self.state.is_detached(w) && self.screens.iter().find(|d| d.0 == w).is_none_or(|d| d.1.dirty)
+    }
+
+    /// Runs `f` (input or a paint) on detached window `w`'s surface: its hits, mouse and hover are swapped in, the state
+    /// knows the surface (`State::surface`) and its screen is that window's size. Not detached: `f` runs on the main
+    /// window's.
+    pub fn on_surface<R>(&mut self, w: Win, f: impl FnOnce(&mut Self) -> R) -> R {
+        let (Some(i), Some(size)) = (self.screen_of(w), self.state.detached_size(w)) else {
+            return f(self);
+        };
+        self.swap_screen(i);
+        let main_screen = std::mem::replace(&mut self.state.screen, size);
+        self.state.surface = Some(w);
+        // The Channel rack is laid out from its place (`views::rack::rect`): at its window's top-left meanwhile.
+        let rack_pos = (w == Win::ChannelRack).then(|| {
+            let (off, _) = self.state.rack_area();
+            std::mem::replace(&mut self.state.rack_pos, off)
+        });
+        let r = f(self);
+        if let Some(p) = rack_pos {
+            self.state.rack_pos = p;
+        }
+        self.state.surface = None;
+        self.state.screen = main_screen;
+        // (`f` may have detached or re-attached other windows.)
+        let i = self.screens.iter().position(|d| d.0 == w).unwrap_or(i);
+        self.swap_screen(i);
+        // Its look changed with its hover or what was done there. Re-attached meanwhile (`set_detached`), its surface
+        // goes.
+        if self.state.is_detached(w) {
+            self.screens[i].1.dirty = true;
+        } else {
+            self.screens.remove(i);
+        }
+        r
+    }
+
+    fn swap_screen(&mut self, i: usize) {
+        let sc = &mut self.screens[i].1;
+        std::mem::swap(&mut self.hits, &mut sc.hits);
+        std::mem::swap(&mut self.bars, &mut sc.bars);
+        std::mem::swap(&mut self.live, &mut sc.live);
+        std::mem::swap(&mut self.keep, &mut sc.keep);
+        std::mem::swap(&mut self.overlays, &mut sc.overlays);
+        std::mem::swap(&mut self.mouse, &mut sc.mouse);
+        std::mem::swap(&mut self.hover, &mut sc.hover);
+        std::mem::swap(&mut self.hover_rect, &mut sc.hover_rect);
+    }
+
+    /// Paints detached window `w` whole into `canvas` (its native window's), with the popups and boxes opened from it.
+    pub fn paint_detached(&mut self, w: Win, canvas: &mut Canvas) {
+        if w != Win::ChannelRack {
+            if let Some(d) = self.state.detached.iter_mut().find(|d| d.0 == w) {
+                d.1 = canvas.size();
+            }
+        }
+        let info = self.frame_info();
+        self.on_surface(w, |app| {
+            canvas.begin_frame(None);
+            app.hits.clear();
+            app.bars.clear();
+            app.live.clear();
+            app.keep = Keep { full: true, ..Keep::default() };
+            let mut ui = Ui {
+                c: canvas,
+                t: &app.theme.colors,
+                hits: &mut app.hits,
+                bars: &mut app.bars,
+                hover: &app.hover,
+                pressed: &app.pressed,
+                mouse: app.mouse,
+                win: None,
+                keep: &mut app.keep,
+                live: &mut app.live,
+                flat: app.state.toolbar.flat,
+                tiled: app.state.tiled(),
+                alone: app.state.alone(),
+                maxed: app.state.wins.map(|w| w.maxed),
+            };
+            let overlays = views::paint_detached(&mut ui, &app.state, &info, w);
+            app.keep.next.clear();
+            app.overlays = app.hits[overlays.min(app.hits.len())..].iter().map(|h| h.rect).collect();
+        });
+        if let Some(d) = self.screens.iter_mut().find(|d| d.0 == w) {
+            d.1.dirty = false;
+        }
+    }
+
     pub fn paint_region(&mut self, canvas: &mut Canvas, damage: Option<&[Rect]>) {
         // The CPU panel's View FPS counts painted frames.
         self.state.cpu.frame();
@@ -4639,7 +5050,7 @@ impl App {
         self.bars.clear();
         self.live.clear();
         self.keep.full = damage.is_none();
-        let title = self.title();
+        let info = self.frame_info();
         let mut ui = Ui {
             c: canvas,
             t: &self.theme.colors,
@@ -4655,22 +5066,6 @@ impl App {
             tiled: self.state.tiled(),
             alone: self.state.alone(),
             maxed: self.state.wins.map(|w| w.maxed),
-        };
-        let info = views::FrameInfo {
-            title,
-            hint: self.hint.clone(),
-            playing: self.shown.playing,
-            paused: self.shown.paused,
-            tick: self.shown.tick,
-            song: self.shown.song,
-            tempo: self.shown.tempo.unwrap_or(self.state.tempo),
-            peaks: self.transport.peaks(),
-            sounding: self.shown.sounding.clone(),
-            song_pos_drag: matches!(self.drag, Some(Drag::SongPos { .. })),
-            bar_drag: match self.drag {
-                Some(Drag::Bar(d)) => Some(d),
-                _ => None,
-            },
         };
         let overlays = views::paint(&mut ui, &self.state, &info);
         if self.state.cables.get_mut().take_slowed() {
@@ -4804,12 +5199,17 @@ impl App {
         // A drop accepts an Info box or a browser folder cell being edited, as a click does.
         crate::project_info::accept_info(&mut self.state);
         crate::search_folders::commit(&mut self.state);
-        if ext == "flp" || ext == crate::native::EXT || ext == "zip" {
+        if crate::project_files::is_project(&path) || ext == "zip" {
             return self.ask_discard("opening another project", crate::dialog::Next::Open(path));
         }
         // A MIDI file is imported as FILE ▸ Import ▸ MIDI file does (spec: ui/midi-files.md §10.6).
         if ext == "mid" || ext == "midi" {
             return self.midi_file_chosen(path, false);
+        }
+        // A channel state adds its channel (spec: ui/plugin-window.md "Channel states").
+        if crate::channel_states::is_state_file(&path) {
+            self.state.message = crate::channel_states::add(self, &path);
+            return self.invalidate();
         }
         // A preset goes into the plugin under the mouse, or a new instance of its plugin (spec: plugins/presets.md).
         if crate::presets::is_preset_file(&path) {
@@ -4887,15 +5287,51 @@ impl App {
         self.invalidate();
     }
 
-    /// A sample a Lemon plugin sent (Tesla's "Send to arranger as audio clip" / "Send to selected channel", host link
-    /// `Audio`; spec: plugins/tesla/README.md "Version 1"): an audio clip at the song position on the first track
-    /// free over it (one "Arranger edit" step), or the selected channel's sample (a new sampler channel when the
-    /// selected one isn't a sampler), as a drop on the rack does.
-    pub(crate) fn sample_from_plugin(&mut self, path: String, channel: bool) {
-        if channel {
-            let s = &self.state;
-            let row = Some(s.selected_channel).filter(|&r| s.project.channels.get(r).is_some_and(|c| c.kind.is_sampler()));
-            return self.sample_to_channel(path, row);
+    /// Sample `path` in a new Lemon Slicer channel at the bottom of the rack (the file's Fruity Slicer), named after the
+    /// file and selected: sliced at the file's cue points (Tesla's regions), else auto-sliced, as Lemon Slicer's own
+    /// Load does (spec: plugins/tesla/README.md "Sending slices to Lemon Slicer"). One undo step, "Add channel", as the
+    /// plugin picker's.
+    pub(crate) fn sample_to_slicer(&mut self, path: String) {
+        let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let path = crate::data_folder::adopt(&mut self.state, &path);
+        let st = match lemon_slicer::file_state(&path, lemon_slicer::state::State::default()) {
+            Ok((st, _)) => st,
+            Err(e) => {
+                self.state.message = Some(format!("{}: {e}", crate::slicer::LEMON_SLICER));
+                return self.invalidate();
+            }
+        };
+        let n = st.slices.len();
+        crate::control::edit_app(self, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| {
+            let s = &mut app.state;
+            let row = add_plugin_channel(&mut s.project, crate::slicer::LEMON_SLICER);
+            let ch = &mut s.project.channels[row];
+            ch.name = Some(stem.clone());
+            ch.plugin_state = Some(st.to_bytes());
+            s.selected_channel = row;
+            s.rack.select_only(row);
+            crate::rack::autosize(s);
+            s.piano.dirty = true;
+        });
+        self.state.message = Some(format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER));
+        self.sync_slicer();
+        self.invalidate();
+    }
+
+    /// A sample a Lemon plugin sent (Tesla's "Send to arranger as audio clip" / "Send to selected channel" / "Send to
+    /// new Lemon Slicer channel", host link `Audio`; spec: plugins/tesla/README.md "Version 1", "Sending slices to
+    /// Lemon Slicer"): an audio clip at the song position on the first track free over it (one "Arranger edit" step),
+    /// the selected channel's sample (a new sampler channel when the selected one isn't a sampler), as a drop on the
+    /// rack does, or a new Lemon Slicer channel.
+    pub(crate) fn sample_from_plugin(&mut self, path: String, to: os_hostlink::AudioTo) {
+        match to {
+            os_hostlink::AudioTo::Channel => {
+                let s = &self.state;
+                let row = Some(s.selected_channel).filter(|&r| s.project.channels.get(r).is_some_and(|c| c.kind.is_sampler()));
+                return self.sample_to_channel(path, row);
+            }
+            os_hostlink::AudioTo::Slicer => return self.sample_to_slicer(path),
+            os_hostlink::AudioTo::Playlist => {}
         }
         let s = &mut self.state;
         let start = s.playlist.pos;
@@ -5376,10 +5812,14 @@ impl App {
                 .collect(),
             // Windows devices: shared or exclusive mode (spec: audio/wasapi-low-latency.md 4.2). Linux: the sound server,
             // or an ALSA device directly.
-            MODE => vec![
-                PItem::new(MODE_SHARED, Cmd::Audio(Set::Mode(false))).mark(Mark::Radio(!cfg.exclusive)),
-                PItem::new(MODE_EXCLUSIVE, Cmd::Audio(Set::Mode(true))).mark(Mark::Radio(cfg.exclusive)),
-            ],
+            MODE => [
+                PItem::new(MODE_SHARED, Cmd::Audio(Set::Mode(false))).mark(Mark::Radio(!cfg.exclusive && !cfg.jack)),
+                PItem::new(MODE_EXCLUSIVE, Cmd::Audio(Set::Mode(true))).mark(Mark::Radio(cfg.exclusive && !cfg.jack)),
+            ]
+            .into_iter()
+            // Linux: as a client of the JACK server (spec: audio/linux-output.md "JACK").
+            .chain(cfg!(target_os = "linux").then(|| PItem::new(views::settings::MODE_JACK, Cmd::Audio(Set::Jack)).mark(Mark::Radio(cfg.jack))))
+            .collect(),
             // Under an ASIO driver: the driver's own, then what it takes, once it has opened (spec: audio/devices.md,
             // "Sample rate and buffer length under ASIO"). In exclusive mode: the rates the device runs at itself
             // (audio/wasapi-low-latency.md 4.4).
@@ -5837,6 +6277,12 @@ impl App {
             return true;
         }
         self.hold_moved(x, y);
+        // A drag between windows came onto another surface: its ghost leaves the one it was drawn on.
+        if self.cross_drag() && self.state.drag_on != self.state.surface {
+            self.state.drag_on = self.state.surface;
+            self.invalidate();
+            self.mark_detached(None);
+        }
         if let Some(d) = self.drag.clone() {
             match d {
                 Drag::Browser { item, label, m0, started } => self.browser_drag_move(label, m0, started, item),
@@ -6137,7 +6583,7 @@ impl App {
                 Drag::Knob { id, y0, v0 } => {
                     self.state.set_knob(id, v0 - (y - y0) * id.drag_rate());
                     self.record_knob(id);
-                    self.multilink_knob(crate::typein::Target::Knob(id));
+                    self.multilink_knob(id.target());
                     self.hint = Cow::Owned(self.state.knob_text(id));
                     match self.hits.iter().rev().find(|h| h.action == Action::Knob(id)).map(|h| h.rect) {
                         Some(r) => self.damage_rect(r.outset(6.0)),
@@ -6437,6 +6883,8 @@ impl App {
     }
 
     pub fn mouse_down(&mut self) {
+        // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
+        self.state.overlay_on = self.state.surface;
         self.invalidate();
         #[cfg(target_os = "linux")]
         if self.embed_down(os_plugkit::input::Button::Left) {
@@ -7024,6 +7472,8 @@ impl App {
 
     /// Middle button: grab-scroll the Piano roll and Playlist in both directions.
     pub fn mouse_down_middle(&mut self) {
+        // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
+        self.state.overlay_on = self.state.surface;
         #[cfg(target_os = "linux")]
         if self.embed_down(os_plugkit::input::Button::Middle) {
             self.invalidate();
@@ -7069,6 +7519,8 @@ impl App {
     /// Right button: delete notes in the piano roll (spec: ui/piano-roll.md §8); right-drag on
     /// a scroll bar scrolls.
     pub fn mouse_down_right(&mut self) {
+        // The popups and boxes this press opens go on the surface it was made on (a detached window's, `on_surface`).
+        self.state.overlay_on = self.state.surface;
         #[cfg(target_os = "linux")]
         if self.embed_down(os_plugkit::input::Button::Right) {
             self.invalidate();
@@ -7192,7 +7644,7 @@ impl App {
             return self.scrollbar_press(t, true);
         }
         if let Some(a) = action.as_ref() {
-            if self.rack_right(a) {
+            if self.rack_right(a) || self.container_right(a) {
                 return self.invalidate();
             }
         }
@@ -7964,7 +8416,7 @@ impl App {
             }
             self.state.set_knob(id, v);
             self.record_knob(id);
-            self.multilink_knob(crate::typein::Target::Knob(id));
+            self.multilink_knob(id.target());
             self.hint = Cow::Owned(self.state.knob_text(id));
             return None;
         }
@@ -8361,6 +8813,9 @@ impl App {
         if crate::init::apply(&mut self.state) {
             self.invalidate();
         }
+        if song {
+            crate::perform::starting(&mut self.state);
+        }
         let p = crate::rack::play_project(&self.state);
         let start = if song { f64::from(self.state.playlist.pos) } else { f64::from(self.state.piano.marker) };
         // A looping time selection starts at its start unless the position is inside it (spec: ui/recording.md §5).
@@ -8415,6 +8870,11 @@ impl App {
             return false;
         }
         if !pressed {
+            if let Some(i) = self.perf_typed.iter().position(|h| h.0 == code) {
+                let (_, note) = self.perf_typed.remove(i);
+                self.perform_note(note, TYPING_VELOCITY, false);
+                return true;
+            }
             let Some(i) = self.typing_held.iter().position(|h| h.0 == code) else { return false };
             let (_, row, key) = self.typing_held.remove(i);
             self.transport.note_off(row, key);
@@ -8433,15 +8893,31 @@ impl App {
             self.invalidate();
             return true;
         }
+        // Performance mode (spec: ui/performance-mode.md §3): its layout's keys launch the zone's slots as the
+        // Performance mode MIDI channel's notes do, and play no note; the other note keys do nothing.
+        if crate::perform::zone(&self.state).is_some() {
+            if let Some(note) = crate::perform::typing_note(code) {
+                if !self.perf_typed.iter().any(|h| h.0 == code) {
+                    self.perf_typed.push((code, note));
+                    self.perform_note(note, TYPING_VELOCITY, true);
+                }
+                return true;
+            }
+            if typing_semitone(code).is_some() {
+                return true;
+            }
+        }
         let Some(semi) = typing_semitone(code) else { return false };
         if self.typing_held.iter().any(|h| h.0 == code) {
             return true; // auto-repeat
         }
         let key = 48 + semi + 12 * self.typing_octave;
-        let row = self.state.selected_channel;
+        // A channel locked to the computer keyboard takes its notes (spec: ui/channel-rack.md §18 Receive notes from).
+        let row = self.state.rack.note_row(crate::rack::NoteSrc::Typing, self.state.selected_channel);
         if !(0..=127).contains(&key) || row >= self.state.project.channels.len() {
             return true;
         }
+        self.locked_hint(crate::rack::NoteSrc::Typing, row);
         self.sync_live();
         let key = key as u16;
         self.transport.note_on(row, key, TYPING_VELOCITY);
@@ -8450,6 +8926,18 @@ impl App {
         self.typing_lit_changed();
         self.key_tap(); // spec: ui/tempo-tapper.md §8
         true
+    }
+
+    /// A note of `src` plays its locked channel `row` while another one is focused: the hint bar says so, as the
+    /// original's did ("808 Clap (Locked:Typing keyboard)", measured 2026-10-30).
+    pub(crate) fn locked_hint(&mut self, src: crate::rack::NoteSrc, row: usize) {
+        if row == self.state.selected_channel {
+            return;
+        }
+        let Some(c) = self.state.project.channels.get(row) else { return };
+        let name = c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1));
+        self.state.message = Some(format!("{name} (locked to {})", src.label().to_lowercase()));
+        self.invalidate();
     }
 
     /// The live stream needs the project before the first live note.
@@ -8466,6 +8954,9 @@ impl App {
         self.step_chord.clear();
         if let Some((row, key)) = self.mouse_note.take() {
             self.transport.note_off(row, key);
+        }
+        for (_, note) in std::mem::take(&mut self.perf_typed) {
+            self.perform_note(note, TYPING_VELOCITY, false);
         }
         if self.typing_held.is_empty() {
             return;
@@ -8881,6 +9372,7 @@ impl App {
             Action::Tapper(a) => self.tapper_act(a),
             Action::Touch(a) => self.touch_act(a),
             Action::Strum(a) => self.strum_act(a),
+            Action::Container(a) => self.container_act(a),
             Action::Arp(a) => self.arp_act(a),
             Action::PianoDlg(a) => self.piano_dlg_act(a),
             Action::Events(a) => self.events_act(a),
@@ -9098,6 +9590,12 @@ impl App {
                 s.set_knob(id, if s.knob(id) >= 0.5 { 0.0 } else { 1.0 });
                 self.hint = Cow::Owned(s.knob_text(id));
             }
+            // A MIDI Out check: a click flips it, one undo step.
+            Action::Knob(id @ crate::knobs::KnobId::MidiOut(_, k)) if k.switch() => {
+                crate::history::knob(s, id, false);
+                s.set_knob(id, if s.knob(id) >= 0.5 { 0.0 } else { 1.0 });
+                self.hint = Cow::Owned(s.knob_text(id));
+            }
             Action::Knob(id) => {
                 crate::history::knob(s, id, false);
                 self.drag = Some(Drag::Knob { id, y0: self.mouse.1, v0: s.knob(id) });
@@ -9131,6 +9629,12 @@ impl App {
                 s.lane_menu = false;
             }
             Action::Settings(_) => {}
+            // The rack's own edge mask (right, bottom) as a window's.
+            Action::RackResize(edges) if s.is_detached(Win::ChannelRack) => {
+                let r = if edges & views::rack::EDGE_RIGHT != 0 { EDGE_R } else { 0 };
+                let b = if edges & views::rack::EDGE_BOTTOM != 0 { EDGE_B } else { 0 };
+                self.native.push((Win::ChannelRack, Native::Resize(r | b)));
+            }
             Action::RackResize(edges) => {
                 self.drag = Some(Drag::RackResize { edges, m0: self.mouse, s0: s.rack_size });
             }
@@ -9160,6 +9664,11 @@ impl App {
                     return;
                 }
                 self.title_click = Some((win, now, m));
+                // A detached window's own title bar moves its native window (the window system drags it).
+                if self.state.is_detached(win) {
+                    self.native.push((win, Native::Move));
+                    return;
+                }
                 let s = &mut self.state;
                 if s.is_max(win) {
                     return;
@@ -9185,6 +9694,10 @@ impl App {
                 };
                 self.drag = Some(Drag::Window { win, dx: self.mouse.0 - pos.0, dy: self.mouse.1 - pos.1 });
             }
+            // A detached window's frame, buttons and edges work its native window.
+            Action::WinResize(win, edges) if s.is_detached(win) => self.native.push((win, Native::Resize(edges))),
+            Action::MinWin(w) if s.is_detached(w) => self.native.push((w, Native::Minimize)),
+            Action::MaxWin(w) if s.is_detached(w) => self.native.push((w, Native::Maximize)),
             Action::WinResize(win, edges) => {
                 let r0 = s.float_rect(win);
                 self.drag = Some(Drag::WinResize { win, edges, m0: self.mouse, r0 });
@@ -9249,6 +9762,10 @@ impl App {
                 s.hide(Win::PianoDlg);
                 self.damage_win(Win::PianoRoll);
             }
+            Action::CloseWin(Win::Events) => {
+                crate::events::close(s);
+                self.invalidate();
+            }
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserClear | Action::BrowserSplitter | Action::BrowserMove => {}
             Action::TypeIn(t) => crate::typein::click(s, t),
@@ -9283,6 +9800,16 @@ impl App {
 
     /// Name button click (spec: ui/channel-rack.md §13): opens the channel's plugin window, or closes it when open.
     fn toggle_channel_window(&mut self, i: usize) {
+        // A channel's container: its window (spec: plugins/patcher/README.md §4.4).
+        if self.state.project.channels.get(i).is_some_and(crate::container::is_container_channel) {
+            let place = (i as u16, crate::container::CHANNEL);
+            if self.state.shown(Win::Container) && self.state.container.at == place {
+                self.state.hide(Win::Container);
+            } else {
+                crate::container::show(&mut self.state, place.0, place.1);
+            }
+            return;
+        }
         if self.state.hosted_rows.contains(&i) {
             if !self.plugins.close_if_open(i) {
                 self.state.pending_open = Some(i);
@@ -9301,7 +9828,9 @@ impl App {
     /// Open rack row `i`'s window (not hosted: Lemon Sampler's for a sampler or audio clip, else the channel window).
     pub(crate) fn open_channel_window(&mut self, i: usize) {
         let s = &mut self.state;
-        if s.project.channels.get(i).is_some_and(|c| c.kind.is_sampler()) {
+        if s.project.channels.get(i).is_some_and(crate::container::is_container_channel) {
+            crate::container::show(s, i as u16, crate::container::CHANNEL);
+        } else if s.project.channels.get(i).is_some_and(|c| c.kind.is_sampler()) {
             // Not hosted yet (just added): Lemon Sampler starts on the next tick and its window opens then.
             s.pending_open = Some(i);
             self.sampler_failed.retain(|&r| r != i);
@@ -9658,6 +10187,8 @@ impl App {
                 self.state.message = Some(format!("Opening {url}"));
             }
             MenuCmd::SaveMidiClip => self.save_midi_clipboard(),
+            MenuCmd::SaveAudioClip => self.save_audio_clipboard(),
+            MenuCmd::Diagnostics => self.save_diagnostics(),
             MenuCmd::NewPattern => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
                 if let Some(m) = crate::patterns::run(&mut self.state, crate::patterns::Cmd::FindFirst, at) {
@@ -9673,8 +10204,30 @@ impl App {
             // spec: ui/unused-channels.md
             MenuCmd::SelectUnused => self.state.message = crate::rack::run(self, crate::rack::RCmd::SelectUnused),
             MenuCmd::PurgeClips => self.state.message = crate::rack::run(self, crate::rack::RCmd::Purge),
+            MenuCmd::AutoBypassAll => self.state.message = crate::mixer::run(self, crate::mixer::MCmd::AutoBypassAll),
             MenuCmd::RemoveTeslas => {
                 if let Some(m) = self.ask_remove_teslas() {
+                    self.state.message = Some(m);
+                }
+            }
+            MenuCmd::MidiOut => self.state.message = self.add_midi_out(),
+            MenuCmd::PrepMidiExport => self.ask_midi_export(),
+            MenuCmd::PrepPerformance => {
+                if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::PerfPrepare) {
+                    self.state.message = Some(m);
+                }
+            }
+            // spec: ui/piano-tools.md §4 "Lemon Studio"
+            MenuCmd::Chords => {
+                let at = self.mouse;
+                crate::playlist::start_edit(&mut self.state, crate::playlist::EditTarget::Chords, at);
+                if let Some(e) = self.state.playlist.edit.as_mut() {
+                    e.sel = true;
+                }
+            }
+            // spec: ui/playlist.md "Locking tracks to their clips"
+            MenuCmd::LockClips(on) => {
+                if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::LockClips(on)) {
                     self.state.message = Some(m);
                 }
             }
@@ -10052,6 +10605,18 @@ fn typing_semitone(code: KeyCode) -> Option<i32> {
 
 /// The file just written holds the model's channels and mixer tracks in order: each one's file block is its position
 /// (os-flp `apply` follows moved channels and the effect slots of moved mixer tracks by these).
+/// Makes the file written to `target` a `.lemon` file (Lemon Studio's chunks around the FLP's, saved by this version,
+/// with `extra`: Lemon Studio's own state, `crate::lemon_state`), or a plain FLP for a target named `.flp`, which has no
+/// place for `extra` (spec: flp/lemon-format.md).
+fn lemon_or_flp(file: &mut os_flp::FlpFile, target: &std::path::Path, mut extra: Vec<os_flp::Event>) -> Result<(), String> {
+    if crate::project_files::is_flp(target) {
+        os_flp::lemon::to_flp(file);
+        return Ok(());
+    }
+    extra.insert(0, os_flp::lemon::saved_by(&format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))));
+    os_flp::lemon::to_lemon(file, &extra).map_err(|e| e.to_string())
+}
+
 fn settle_origins(p: &mut Project) {
     for (i, c) in p.channels.iter_mut().enumerate() {
         c.rack.origin = Some(i as u16);
@@ -10086,7 +10651,7 @@ fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
 
 /// What a plugin window's strip shows for rack row `row` (spec: ui/plugin-window.md).
 #[cfg(plugin_windows)]
-fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::ChannelInfo> {
+pub(crate) fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::ChannelInfo> {
     let ch = p.channels.get(row)?;
     Some(crate::plugin_window::ChannelInfo {
         name: ch.name.clone().unwrap_or_else(|| format!("Channel {}", ch.index + 1)),
@@ -10106,6 +10671,7 @@ fn channel_info(p: &Project, row: usize) -> Option<crate::plugin_window::Channel
         track: ch.mixer_track,
         max_track: crate::mixer::max_insert(p),
         misc: Some(crate::misc::vals_of(ch)),
+        icon: None,
     })
 }
 
@@ -10753,7 +11319,7 @@ mod tests {
         a.state.project = test_project();
         a.state.playlist.pos = 384;
         let before = a.state.project.channels.len();
-        a.sample_from_plugin(p.clone(), false);
+        a.sample_from_plugin(p.clone(), os_hostlink::AudioTo::Playlist);
         assert_eq!(a.state.project.channels.len(), before + 1);
         let clips = crate::playlist::clips(&a.state);
         let i = *a.state.playlist.sel.first().expect("the new clip, selected");
@@ -10765,7 +11331,7 @@ mod tests {
         // To the selected channel: a sampler takes it.
         let row = a.state.project.channels.iter().position(|c| c.kind.is_sampler()).unwrap();
         a.state.selected_channel = row;
-        a.sample_from_plugin(p.clone(), true);
+        a.sample_from_plugin(p.clone(), os_hostlink::AudioTo::Channel);
         assert!(a.state.project.channels[row].sample_path.as_deref().is_some_and(|s| s.ends_with(".wav")));
         let _ = std::fs::remove_file(&path);
     }
@@ -10878,6 +11444,9 @@ mod tests {
         app.state.tempo = 111.0;
         app.state.project.patterns[0].notes.push(Note::step(2, 48));
         app.state.project.patterns.push(Pattern { number: 2, name: Some("Two".into()), notes: vec![Note::step(0, 0)], ..Pattern::default() });
+        // A changed mixer is kept: the save gives the new file a playlist, which the mixer is stored after.
+        app.state.project.mixer[3].name = Some("Drums".into());
+        app.state.project.mixer[3].volume = Some(0.5);
         let path = std::env::temp_dir().join(format!("openstudio-new-{}.flp", std::process::id()));
         app.save_to(path.clone());
         assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Saved") && !m.contains("not stored")), "{:?}", app.state.message);
@@ -10891,12 +11460,15 @@ mod tests {
         assert_eq!(back.channels.len(), 5);
         assert_eq!(back.patterns[0].notes.len(), 1);
         assert_eq!(back.patterns[1].name.as_deref(), Some("Two"));
+        assert_eq!(back.mixer.len(), 18);
+        assert_eq!((back.mixer[3].name.as_deref(), back.mixer[3].volume), (Some("Drums"), Some(0.5)));
         // Saving again goes through apply on the same file.
         app.state.project.patterns[0].notes.push(Note::step(1, 96));
         app.save_to(path.clone());
         let back = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(back.patterns[0].notes.len(), 2);
+        assert_eq!(back.mixer[3].name.as_deref(), Some("Drums"));
     }
 
     /// Settings > Project (spec: ui/settings-choices.md "Project", audio/song-structure.md): the Numerator and
@@ -11671,7 +12243,7 @@ mod tests {
         app.state.project.channels.push(Channel::default());
         frame(&mut app, &mut c, None);
         let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
-        let info = |name: &str| ChannelInfo { name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = |name: &str| ChannelInfo { icon: None, name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         let settle = |app: &mut App, rows: &[usize]| {
             let t0 = Instant::now();
             while !rows.iter().all(|r| app.state.embeds.get(r).is_some_and(|e| e.claimed())) && t0.elapsed() < Duration::from_secs(3) {
@@ -12482,8 +13054,7 @@ mod tests {
         let w = 1920;
         let bbox = diffs.iter().fold((usize::MAX, usize::MAX, 0, 0), |m, &i| (m.0.min(i % w), m.1.min(i / w), m.2.max(i % w), m.3.max(i / w)));
         if !diffs.is_empty() {
-            let _ = a.pixmap.save_png(std::env::temp_dir().join("os_partial.png"));
-            let _ = b.pixmap.save_png(std::env::temp_dir().join("os_full.png"));
+            dump(&a, &b);
         }
         assert!(diffs.is_empty(), "{} differing pixels in x {}..{} y {}..{}", diffs.len(), bbox.0, bbox.2, bbox.1, bbox.3);
     }
@@ -12762,7 +13333,7 @@ mod tests {
         app.plugins.scale = 1.0;
         let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         app.plugins.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { icon: None, name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         app.plugins.open_window(0, info).unwrap();
         let t0 = Instant::now();
         while !app.state.embeds.get(&0).is_some_and(|e| e.view().frame.is_some()) && t0.elapsed() < Duration::from_secs(3) {
@@ -13048,13 +13619,20 @@ mod tests {
         }
     }
 
+    /// Saves a failed comparison's two frames in the temp folder, named after the process: suites running side by side
+    /// would otherwise overwrite each other's.
+    fn dump(a: &Canvas, b: &Canvas) {
+        let id = std::process::id();
+        let _ = a.pixmap.save_png(std::env::temp_dir().join(format!("os_partial_{id}.png")));
+        let _ = b.pixmap.save_png(std::env::temp_dir().join(format!("os_full_{id}.png")));
+    }
+
     fn assert_same(a: &Canvas, b: &Canvas, what: &str) {
         let width = a.pixmap.width() as usize;
         let diffs = a.pixmap.data().iter().zip(b.pixmap.data()).enumerate().filter(|(_, (x, y))| x.abs_diff(**y) > 3).map(|(i, _)| i / 4);
         let (n, bbox) = diffs.fold((0, (usize::MAX, usize::MAX, 0, 0)), |(n, m), i| (n + 1, (m.0.min(i % width), m.1.min(i / width), m.2.max(i % width), m.3.max(i / width))));
         if n > 0 {
-            let _ = a.pixmap.save_png(std::env::temp_dir().join("os_partial.png"));
-            let _ = b.pixmap.save_png(std::env::temp_dir().join("os_full.png"));
+            dump(a, b);
         }
         assert_eq!(n, 0, "{what}: differing pixels in x {}..{} y {}..{}", bbox.0, bbox.2, bbox.1, bbox.3);
     }
@@ -13346,7 +13924,7 @@ mod tests {
         frame(&mut app, &mut c, None);
         let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         app.plugins.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { icon: None, name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         app.plugins.open_window(0, info).unwrap();
         let settle = |app: &mut App, f: &dyn Fn(&App) -> bool| {
             let t0 = Instant::now();
@@ -13395,7 +13973,7 @@ mod tests {
         settle(&mut app, &|a| a.state.embeds.is_empty());
         assert!(app.state.embeds.is_empty() && app.plugins.hosted[&0].window.is_none(), "closed by its button");
         // the window manager's close shortcut closes it in front, not the app
-        let info = ChannelInfo { name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let info = ChannelInfo { icon: None, name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         app.plugins.open_window(0, info).unwrap();
         settle(&mut app, &|a| a.state.embeds.contains_key(&0));
         app.state.raise(Win::Hosted(0));
@@ -13420,7 +13998,7 @@ mod tests {
         frame(&mut app, &mut c, None);
         let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         app.plugins.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: Some(Default::default()) };
+        let info = ChannelInfo { icon: None, name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: Some(Default::default()) };
         app.plugins.open_window(0, info).unwrap();
         let t0 = Instant::now();
         while !app.state.embeds.get(&0).is_some_and(|e| e.claimed() && e.view().frame.is_some()) && t0.elapsed() < Duration::from_secs(3) {
@@ -13487,7 +14065,7 @@ mod tests {
             app.plugin_tick();
         };
         let open = |app: &mut App| {
-            let info = ChannelInfo { name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+            let info = ChannelInfo { icon: None, name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
             app.plugins.open_window(0, info).unwrap();
             settle(app, &|a| a.state.embeds.contains_key(&0));
             app.state.raise(Win::Hosted(0));
@@ -13542,7 +14120,7 @@ mod tests {
         let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
         app.plugins.create_with(0, index, None).unwrap();
         let open = |app: &mut App| {
-            let info = ChannelInfo { name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+            let info = ChannelInfo { icon: None, name: "Citrus".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
             app.plugins.open_window(0, info).unwrap();
             let t0 = Instant::now();
             while !app.state.embeds.contains_key(&0) && t0.elapsed() < Duration::from_secs(3) {
@@ -13642,7 +14220,7 @@ mod tests {
         click(&mut app, &mut c, r);
         assert_eq!(app.state.message.as_deref(), Some("Soft takeover: on"));
         assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Lemon Studio has no MIDI scripts"));
-        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Body) && h.hint == "Lemon Studio has no live performance mode for the arranger"));
+        assert!(app.hits.iter().any(|h| h.action == Action::Settings(SAct::Number("Performance mode MIDI channel"))));
         let r = hit_rect(&app, &Action::Settings(SAct::Tab(PROJECT)));
         click(&mut app, &mut c, r);
         assert!(app.hits.iter().any(|h| matches!(h.action, Action::Settings(SAct::Combo("Ask for data folder", ..)))), "Ask for data folder works");
@@ -13778,6 +14356,7 @@ mod tests {
             crate::dialog::Body::Msg(m) => panic!("a message box is on top: {}", m.plain()),
             crate::dialog::Body::Shortcuts(_) => panic!("Manage shortcuts is on top"),
             crate::dialog::Body::TimeSig(_) => panic!("the time signature dialog is on top"),
+            crate::dialog::Body::Markers(_) => panic!("Marker settings is on top"),
             crate::dialog::Body::Project(_) => panic!("a project form is on top"),
         }
     }
@@ -14827,7 +15406,7 @@ mod tests {
         eprintln!("driver | block | rate | tick | ahead min / mean / max (frames) | mean ms | driver latency | longest gap ms | load | dropouts");
         for &b in &buffers {
             for _ in 0..runs {
-                AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b), exclusive: false, input: None }.apply();
+                AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b), exclusive: false, input: None, jack: false }.apply();
                 app.transport.reopen();
                 let t0 = Instant::now();
                 let info = loop {
@@ -14964,9 +15543,9 @@ mod tests {
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
-        // The all tab lists the roots with content and the preset store, all closed.
+        // The all tab lists the roots with content, the preset store and the channel states, all closed.
         let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
-        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets"]);
+        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets", "Channel presets"]);
         // Project tab: Current project opened with its patterns by default, History above them.
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
         click(&mut app, &mut c, r0);
@@ -15069,7 +15648,7 @@ mod tests {
         let mut app = App::new(None);
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
-        let wav = std::env::temp_dir().join("os-app-audio-clip-channel.wav");
+        let wav = std::env::temp_dir().join(format!("os-app-audio-clip-channel-{}.wav", std::process::id()));
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 9600]).unwrap();
         let path = wav.to_string_lossy().into_owned();
         crate::playlist::add_audio_clip(&mut app.state, &path, 0, 0).expect("audio clip added");
@@ -15181,7 +15760,7 @@ mod tests {
             let out = std::env::temp_dir().join(format!("os-app-keep-on-disk-{}-{keep}.wav", std::process::id()));
             // As `start_export` does with high quality off.
             a.plugins.set_offline(false);
-            lemon_sampler::stream::set_exporting(true);
+            lemon_sampler::stream::export_started();
             a.transport.export(&p, PlayMode::Song, 48000, crate::export::Job::wav(&out));
             let t0 = std::time::Instant::now();
             loop {
@@ -15191,7 +15770,7 @@ mod tests {
                     _ => std::thread::sleep(Duration::from_millis(10)),
                 }
             }
-            lemon_sampler::stream::set_exporting(false);
+            lemon_sampler::stream::export_finished();
             // Playing from disk, nothing holds the decoded file: the engine that rendered the export (and its sample
             // library, which plays on) kept only the length. From memory, the instance holds it.
             assert_eq!(os_engine::sample::held(&wav), !keep, "the decoded file is held: keep on disk {keep}");
@@ -15586,10 +16165,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut app = App::new(None);
         assert!(!app.unsaved(), "a fresh project");
-        app.save_to(dir.join("Song.flp"));
+        app.save_to(dir.join("Song.lemon"));
         app.plugins = crate::plugins::Plugins::default();
         app.plugins.available = crate::plugins::builtin();
-        app.open(dir.join("Song.flp"));
+        app.open(dir.join("Song.lemon"));
         let mut canvas = Canvas::new(1920, 1080, 1.0).unwrap();
         let t0 = std::time::Instant::now();
         while app.loading() && t0.elapsed() < std::time::Duration::from_secs(20) {
@@ -15606,10 +16185,55 @@ mod tests {
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
         assert!(!app.unsaved(), "saved");
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION));
-        assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_2.flp").as_path()));
+        assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_2.lemon").as_path()));
         app.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION));
-        assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_3.flp").as_path()));
-        assert!(dir.join("Song_2.flp").exists() && dir.join("Song_3.flp").exists());
+        assert_eq!(app.state.path.as_deref(), Some(dir.join("Song_3.lemon").as_path()));
+        assert!(dir.join("Song_2.lemon").exists() && dir.join("Song_3.lemon").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Projects save as .lemon files that open again; one opened from an FLP is never saved over: Save asks for a name,
+    /// offering the FLP's with .lemon, and the project then lives there (spec: flp/lemon-format.md).
+    #[test]
+    fn flps_migrate_to_lemon_files() {
+        use crate::dialog::fake;
+        let dir = std::env::temp_dir().join(format!("os_lemon_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new(None);
+        app.state.tempo = 123.0;
+        let flp = dir.join("Old.flp");
+        app.save_to(flp.clone());
+        let plain = os_flp::FlpFile::parse(&std::fs::read(&flp).unwrap()).unwrap();
+        assert!(!os_flp::lemon::is_lemon(&plain), "a target named .flp is still written as an FLP");
+        let before = std::fs::read(&flp).unwrap();
+        let mut app = App::new(None);
+        app.open(flp.clone());
+        assert_eq!(app.state.tempo, 123.0);
+        app.state.tempo = 124.0;
+        let lemon = dir.join("Old.lemon");
+        let asked = fake::shown().1;
+        fake::answer(None);
+        app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
+        assert_eq!(fake::shown().1, asked + 1, "Save on an FLP asks for a name");
+        assert!(!lemon.exists(), "cancelled: nothing written");
+        assert_eq!(std::fs::read(&flp).unwrap(), before, "the FLP is not written");
+        assert!(app.unsaved());
+        fake::answer(Some(lemon.clone()));
+        app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
+        assert_eq!(app.state.path.as_deref(), Some(lemon.as_path()), "the project now lives in the .lemon file");
+        assert!(!app.unsaved());
+        assert_eq!(std::fs::read(&flp).unwrap(), before, "the FLP is still not written");
+        let file = os_flp::FlpFile::parse(&crate::native::read(&lemon).unwrap().0).unwrap();
+        assert_eq!(os_flp::lemon::version(&file), Some(os_flp::lemon::VERSION));
+        assert_eq!(os_flp::lemon::saved_by_text(&file), Some(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))));
+        // Save again: in place, no dialog.
+        app.state.tempo = 125.0;
+        app.act(Action::MenuItem(0, views::menus::FILE_SAVE));
+        assert_eq!(fake::shown().1, asked + 2);
+        let mut back = App::new(None);
+        back.open(lemon.clone());
+        assert_eq!((back.state.tempo, back.state.path.as_deref()), (125.0, Some(lemon.as_path())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -15626,7 +16250,7 @@ mod tests {
         app.state.project = test_project();
         // Something to export, so Ctrl+R gets as far as its file dialog.
         app.state.project.patterns[0].notes.push(Note::step(0, 0));
-        let song = dir.join("Song.flp");
+        let song = dir.join("Song.lemon");
         app.save_to(song.clone());
         let before = std::fs::read(&song).unwrap();
         let key = |app: &mut App, k: &str, shift: bool| {
@@ -15640,7 +16264,7 @@ mod tests {
         assert_eq!(fake::shown(), (0, 1), "Save as asks where");
         assert_eq!(std::fs::read(&song).unwrap(), before, "cancelled: the open file is not written");
         assert!(app.unsaved());
-        let other = dir.join("Other.flp");
+        let other = dir.join("Other.lemon");
         fake::answer(Some(other.clone()));
         key(&mut app, "S", true);
         assert_eq!(app.state.path.as_deref(), Some(other.as_path()));
@@ -15659,14 +16283,14 @@ mod tests {
         escape(&mut app);
         assert_eq!(fake::shown(), (0, 2), "no open or file dialog");
         assert!(app.export.is_none());
-        assert!(!dir.join("Other_2.flp").exists(), "no new version");
+        assert!(!dir.join("Other_2.lemon").exists(), "no new version");
 
         app.state.tempo = 100.0;
         key(&mut app, "s", false);
         assert_eq!(fake::shown(), (0, 2), "Ctrl+S does not ask");
         assert!(!app.unsaved(), "Ctrl+S saved in place");
         key(&mut app, "n", false);
-        assert!(dir.join("Other_2.flp").exists(), "Ctrl+N still saves a new version");
+        assert!(dir.join("Other_2.lemon").exists(), "Ctrl+N still saves a new version");
         key(&mut app, "o", false);
         assert_eq!(fake::shown(), (1, 2), "Ctrl+O still asks for a file");
         key(&mut app, "r", false);
@@ -16046,7 +16670,7 @@ mod tests {
         // Esc clears the search and leaves the box.
         app.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(app.state.browser_search.is_empty() && !app.state.browser_search_focus);
-        assert_eq!(rows(&app.state).len(), 3);
+        assert_eq!(rows(&app.state).len(), 4);
         // Search box on top moves the list down.
         app.browser_cmd(crate::browser::BCmd::Toggle("top"));
         frame(&mut app, &mut c, None);
@@ -19653,7 +20277,7 @@ mod tests {
     /// height (6 px steps and limits), Ctrl+wheel and the plain wheel over the ruler = time zoom, End = zoom on
     /// selection, Shift+G / Alt+G / Alt+U clip groups (lowest free number, move together, duplicates get their own
     /// group, ungroup deselects, saved), Right-Shift+drag slice in Draw, Shift+Tab snap cycle, Ctrl+Insert without a
-    /// time selection, Ctrl+P / Ctrl+Shift+P not available yet, F5 raises, the view saved in the project (event 242).
+    /// time selection, Ctrl+P / Ctrl+Shift+P switch performance mode, F5 raises, the view saved in the project (event 242).
     #[test]
     fn playlist_keybinds() {
         use crate::playlist::{self as pl, Snap};
@@ -19843,15 +20467,13 @@ mod tests {
         let after: Vec<u32> = on_track(&app, 4).iter().map(|c| c.position).collect();
         assert_eq!((before, after), (vec![0, bar], vec![0, 2 * bar]));
 
-        // Performance mode is not built yet: Ctrl+P and Ctrl+Shift+P say so.
-        app.state.message = None;
+        // Ctrl+P and Ctrl+Shift+P switch performance mode (spec: ui/performance-mode.md §1).
         app.key(&Key::Character("p".into()), true, false);
-        assert!(app.state.message.as_deref().is_some_and(|m| m.contains("not available yet")), "{:?}", app.state.message);
-        app.state.message = None;
+        assert_eq!((app.state.message.as_deref(), app.state.project.performance), (Some("Performance mode: on"), Some(true)));
         app.shift = true;
         app.key(&Key::Character("P".into()), true, false);
         app.shift = false;
-        assert!(app.state.message.as_deref().is_some_and(|m| m.contains("not available yet")), "{:?}", app.state.message);
+        assert_eq!((app.state.message.as_deref(), app.state.project.performance), (Some("Performance mode: off"), Some(false)));
 
         // The track height, time zoom and scroll are saved with the project and come back when it opens.
         app.state.playlist.row_h = 60.0;
@@ -20248,7 +20870,7 @@ mod tests {
     /// The menu bar's ways into the browser (spec: ui/browser-commands.md): VIEW's Browser entries show the browser on
     /// the Current project tab with only their section open, and selected; Plugin database (ADD > Browse plugin
     /// database, Shift+F8) shows that tab as it was left; Browser find (Ctrl+F) focuses the search field as a click
-    /// does. Text fields keep their keys; History and Remote control are not in the tree, their entries stay greyed out.
+    /// does. Text fields keep their keys.
     #[test]
     fn browser_commands_jump_into_the_browser() {
         use crate::views::browser::{project_root, rows, section_key, PLUGIN_TAB, PROJECT_TAB};
@@ -20272,7 +20894,7 @@ mod tests {
         assert!(s.browser_open.contains(&project_root()) && s.browser_open.contains(&pats) && !s.browser_open.contains(&gens));
         app.menu_item(VIEW, index(VIEW, "Effects in use"));
         let open: Vec<(String, Option<bool>)> = rows(&app.state).into_iter().filter(|r| r.depth == 1).map(|r| (r.label, r.open)).collect();
-        assert_eq!(open, [("History".into(), Some(false)), ("Patterns".into(), Some(false)), ("Effects".into(), Some(true)), ("Generators".into(), Some(false)), ("Samples".into(), Some(false))]);
+        assert_eq!(open, [("History".into(), Some(false)), ("Patterns".into(), Some(false)), ("Effects".into(), Some(true)), ("Generators".into(), Some(false)), ("Remote control".into(), Some(false)), ("Samples".into(), Some(false))]);
         assert_eq!(app.state.browser_sel.as_ref(), Some(&fx));
         app.menu_item(VIEW, index(VIEW, "Instruments in use"));
         assert_eq!(app.state.browser_sel.as_ref(), Some(&gens));
@@ -20316,9 +20938,8 @@ mod tests {
         crate::patterns::run(&mut app.state, crate::patterns::Cmd::Rename, (0.0, 0.0));
         app.key(&Key::Character("f".into()), true, false);
         assert!(!app.state.browser_search_focus);
-        // Greyed out: the section the tree does not list. Undo history works: the tree lists History.
+        // Undo history works: the tree lists History.
         assert!(works(VIEW, item_at(VIEW, index(VIEW, "Undo history")).unwrap()));
-        assert!(!works(VIEW, item_at(VIEW, index(VIEW, "Remote control")).unwrap()));
         // ADD > Browse all installed plugins: the Plugin database's Installed opened and selected; Browse presets: the
         // All tab's Plugin presets (spec: ui/browser-commands.md §2).
         app.state.show_browser = false;
@@ -20443,8 +21064,8 @@ mod tests {
         click(&mut app, &mut c, undo);
         assert_eq!(app.state.message.as_deref(), Some("Nothing to undo"));
         // Save: Save as... (the save dialog even with a file), Save new version on the right.
-        let path = std::env::temp_dir().join(format!("os_toolbar_save_{}_song.flp", std::process::id()));
-        let next = path.with_file_name(format!("os_toolbar_save_{}_song_2.flp", std::process::id()));
+        let path = std::env::temp_dir().join(format!("os_toolbar_save_{}_song.lemon", std::process::id()));
+        let next = path.with_file_name(format!("os_toolbar_save_{}_song_2.lemon", std::process::id()));
         let _ = std::fs::remove_file(&next);
         app.save_to(path.clone());
         let save = hit_rect(&app, &Action::Util(Util::Save));
@@ -22755,5 +23376,333 @@ mod tests {
         app.state.plugin_pos = (beside.0 + 120.0, beside.1 + 40.0);
         app.open_channel_window(row);
         assert_eq!(app.state.plugin_pos, (beside.0 + 120.0, beside.1 + 40.0), "the channel window reopens where it was moved");
+    }
+}
+
+/// Options ▸ Detached (Lemon Studio's design, spec: ui/mixer.md §6.2, ui/channel-rack.md §17): the window bookkeeping,
+/// the menu entries, the paints and the input routed by surface. The native windows themselves are the shell's
+/// (`detached_win`).
+#[cfg(test)]
+mod detach_tests {
+    use super::*;
+
+    fn main_paint(app: &mut App) -> Option<Canvas> {
+        let mut c = Canvas::new(1600, 900, 1.0).ok()?;
+        app.invalidate();
+        app.paint(&mut c, None);
+        Some(c)
+    }
+
+    fn hit_of(hits: &[Hit], a: &Action) -> Option<Rect> {
+        hits.iter().rev().find(|h| &h.action == a).map(|h| h.rect)
+    }
+
+    fn screen(app: &App, w: Win) -> &Screen {
+        &app.screens.iter().find(|d| d.0 == w).expect("its surface").1
+    }
+
+    /// The Mixer's Options ▸ Detached works and is ticked while detached; unticked, the Mixer is back in the main window
+    /// where it was, as it was there.
+    #[test]
+    fn the_mixer_menu_detaches_and_reattaches() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        let r = app.state.float_rect(Win::Mixer);
+        let entry = |app: &App| {
+            let m = crate::mixer::options_menu(&app.state, 0.0, 0.0);
+            m.items.iter().find(|i| i.label == "Detached").map(|i| (i.enabled, i.mark.clone(), i.cmd.clone())).expect("the entry")
+        };
+        let (enabled, mark, cmd) = entry(&app);
+        assert_eq!((enabled, mark), (true, crate::playlist::Mark::Check(false)));
+        assert_eq!(cmd, crate::playlist::Cmd::Detach(Win::Mixer, true));
+        crate::playlist::run(&mut app, cmd);
+        assert!(app.state.is_detached(Win::Mixer));
+        assert_eq!(app.detached_windows(), vec![Win::Mixer]);
+        assert_eq!(app.state.detached_size(Win::Mixer), Some((r.w, r.h)), "at the size it had");
+        assert_eq!(app.state.win_rect(Win::Mixer), Rect::new(0.0, 0.0, r.w, r.h), "its whole native window");
+        assert!(!app.state.is_max(Win::Mixer), "it floats in its own window");
+        assert_eq!(app.state.z.last(), Some(&Win::Mixer), "brought to the front");
+        let (_, mark, cmd) = entry(&app);
+        assert_eq!((mark, cmd.clone()), (crate::playlist::Mark::Check(true), crate::playlist::Cmd::Detach(Win::Mixer, false)));
+        crate::playlist::run(&mut app, cmd);
+        assert!(!app.state.is_detached(Win::Mixer) && app.detached_windows().is_empty());
+        assert_eq!(app.state.win_rect(Win::Mixer), r, "back where it was");
+    }
+
+    /// Unticking Detached in the detached Mixer's own menu puts it back with the main window's mouse and hits intact.
+    #[test]
+    fn reattaching_from_its_own_window_keeps_the_main_surface() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        app.set_detached(Win::Mixer, true);
+        app.mouse_move(640.0, 480.0);
+        app.hits.push(Hit { rect: Rect::new(1.0, 2.0, 3.0, 4.0), action: Action::Swallow, hint: "".into(), win: None, menu: 0, reveal: None });
+        let n = app.hits.len();
+        app.on_surface(Win::Mixer, |a| {
+            a.mouse_move(10.0, 10.0);
+            crate::playlist::run(a, crate::playlist::Cmd::Detach(Win::Mixer, false));
+        });
+        assert!(!app.state.is_detached(Win::Mixer) && app.screens.is_empty());
+        assert_eq!((app.mouse, app.hits.len()), ((640.0, 480.0), n));
+    }
+
+    /// Closing a detached window takes its native window away (it stays detached); showing it again brings it back.
+    #[test]
+    fn a_detached_window_follows_show_and_hide() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        app.set_detached(Win::Mixer, true);
+        app.act(Action::CloseWin(Win::Mixer));
+        assert!(app.detached_windows().is_empty() && app.state.is_detached(Win::Mixer));
+        app.state.raise(Win::Mixer);
+        assert_eq!(app.detached_windows(), vec![Win::Mixer]);
+    }
+
+    /// Detached, the Mixer is painted in its own surface at (0, 0), not in the main window: its hits are that surface's,
+    /// and input given to that surface reaches them (its title bar asks the shell to move the native window), while the
+    /// main window's mouse stays where it was.
+    #[test]
+    fn a_detached_mixer_paints_and_takes_input_on_its_own_surface() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        let Some(_) = main_paint(&mut app) else { return };
+        assert!(app.hits.iter().any(|h| h.win == Some(Win::Mixer)), "in the main window");
+        app.set_detached(Win::Mixer, true);
+        main_paint(&mut app);
+        assert!(!app.hits.iter().any(|h| h.win == Some(Win::Mixer)), "out of the main window");
+        assert!(app.detached_dirty(Win::Mixer), "its window has something to show");
+
+        let (w, h) = app.state.detached_size(Win::Mixer).unwrap();
+        let mut c = Canvas::new(w as u32, h as u32, 1.0).unwrap();
+        app.paint_detached(Win::Mixer, &mut c);
+        assert!(!app.detached_dirty(Win::Mixer));
+        let title = hit_of(&screen(&app, Win::Mixer).hits, &Action::WinDrag(Win::Mixer)).expect("the title bar");
+        assert!(title.y < 30.0 && title.right() <= w, "at the window's top, inside it: {title:?}");
+        assert!(hit_of(&app.hits, &Action::WinDrag(Win::Mixer)).is_none(), "not among the main window's hits");
+
+        app.mouse_move(3.0, 3.0);
+        let (x, y) = (title.cx(), title.cy());
+        app.on_surface(Win::Mixer, |a| {
+            a.mouse_move(x, y);
+            a.mouse_down();
+            assert_eq!(a.state.surface, Some(Win::Mixer));
+        });
+        assert_eq!(app.native, vec![(Win::Mixer, Native::Move)], "the window system moves it");
+        assert_eq!(app.mouse, (3.0, 3.0), "the main window's mouse is its own");
+        assert_eq!(screen(&app, Win::Mixer).mouse, (x, y));
+        assert_eq!((app.state.surface, app.state.overlay_on), (None, Some(Win::Mixer)));
+        assert!(app.detached_dirty(Win::Mixer), "input on it paints it again");
+        app.on_surface(Win::Mixer, App::mouse_up);
+        app.native.clear();
+
+        // Its frame's buttons work the native window.
+        if let Some(m) = hit_of(&screen(&app, Win::Mixer).hits, &Action::MaxWin(Win::Mixer)) {
+            app.on_surface(Win::Mixer, |a| {
+                a.mouse_move(m.cx(), m.cy());
+                a.mouse_down();
+                a.mouse_up();
+            });
+            assert_eq!(app.native, vec![(Win::Mixer, Native::Maximize)]);
+            assert!(!app.state.is_max(Win::Mixer));
+        }
+    }
+
+    /// A popup opened from the detached Mixer is painted there, not in the main window; one opened from the main window
+    /// stays in the main window.
+    #[test]
+    fn popups_go_to_the_surface_they_were_opened_from() {
+        let mut app = App::new(None);
+        app.state.raise(Win::Mixer);
+        app.set_detached(Win::Mixer, true);
+        let (w, h) = app.state.detached_size(Win::Mixer).unwrap();
+        let Ok(mut c) = Canvas::new(w as u32, h as u32, 1.0) else { return };
+        app.paint_detached(Win::Mixer, &mut c);
+        app.on_surface(Win::Mixer, |a| {
+            a.mouse_move(w / 2.0, h / 2.0);
+            a.mouse_down_right();
+            a.mouse_up();
+            a.state.playlist.popup = Some(crate::mixer::options_menu(&a.state, 20.0, 30.0));
+        });
+        main_paint(&mut app);
+        assert!(app.overlays.is_empty(), "not in the main window");
+        app.paint_detached(Win::Mixer, &mut c);
+        assert!(!screen(&app, Win::Mixer).overlays.is_empty(), "in the Mixer's window");
+
+        app.state.playlist.popup = None;
+        app.mouse_move(800.0, 600.0);
+        app.mouse_down();
+        app.mouse_up();
+        assert_eq!(app.state.overlay_on, None);
+        app.state.playlist.popup = Some(crate::mixer::options_menu(&app.state, 800.0, 600.0));
+        main_paint(&mut app);
+        assert!(!app.overlays.is_empty(), "in the main window");
+    }
+
+    /// The Channel rack detaches the same way: its window is the size of what it paints, it is laid out at that window's
+    /// top-left while painted or clicked there (and back at its place afterwards), and its resize edges and title bar
+    /// work the native window. The native window's size becomes the rack's.
+    #[test]
+    fn the_channel_rack_detaches_too() {
+        let mut app = App::new(None);
+        app.state.raise(Win::ChannelRack);
+        let pos = app.state.rack_pos;
+        app.set_detached(Win::ChannelRack, true);
+        let (w, h) = app.state.detached_size(Win::ChannelRack).unwrap();
+        let area = views::rack::paint_area(&app.state);
+        assert_eq!((w, h), (area.w, area.h));
+        assert_eq!(app.detached_origin(Win::ChannelRack).map(|r| (r.x, r.y)), Some((area.x, area.y)));
+        let Ok(mut c) = Canvas::new(w as u32, h as u32, 1.0) else { return };
+        app.paint_detached(Win::ChannelRack, &mut c);
+        assert_eq!(app.state.rack_pos, pos, "its place in the main window is kept");
+        let sc = screen(&app, Win::ChannelRack);
+        let title = hit_of(&sc.hits, &Action::WinDrag(Win::ChannelRack)).expect("the title bar");
+        assert!(title.x < 40.0 && title.y < 30.0, "{title:?}");
+        let corner = hit_of(&sc.hits, &Action::RackResize(views::rack::EDGE_RIGHT | views::rack::EDGE_BOTTOM)).expect("the corner");
+        app.on_surface(Win::ChannelRack, |a| {
+            a.mouse_move(corner.cx(), corner.cy());
+            a.mouse_down();
+        });
+        assert_eq!(app.native, vec![(Win::ChannelRack, Native::Resize(EDGE_R | EDGE_B))]);
+        assert!(app.drag.is_none(), "the window system resizes it");
+        app.on_surface(Win::ChannelRack, App::mouse_up);
+        main_paint(&mut app);
+        assert!(!app.hits.iter().any(|h| h.win == Some(Win::ChannelRack)), "out of the main window");
+
+        app.set_detached_size(Win::ChannelRack, (w + 96.0, h + 40.0));
+        assert_eq!(app.state.detached_size(Win::ChannelRack), Some((w + 96.0, h + 40.0)), "the rack takes its window's size");
+        app.set_detached(Win::ChannelRack, false);
+        assert_eq!(app.state.rack_pos, pos);
+    }
+
+    /// A shortcut pressed while the detached Mixer's window has the keyboard acts there, and the box it opens (F2's
+    /// rename) is painted in that window, though the last click was in the main window. Pressed while the main window
+    /// has the keyboard, the box is the main window's.
+    #[test]
+    fn keyboard_popups_go_to_the_window_with_the_keyboard() {
+        use winit::keyboard::{Key, NamedKey};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.raise(Win::Mixer);
+        app.set_detached(Win::Mixer, true);
+        let (w, h) = app.state.detached_size(Win::Mixer).unwrap();
+        let Ok(mut c) = Canvas::new(w as u32, h as u32, 1.0) else { return };
+        app.paint_detached(Win::Mixer, &mut c);
+        assert_eq!(app.state.overlay_on, None, "no click in it yet");
+        app.key_on(Some(Win::Mixer), &Key::Named(NamedKey::F2), false, false);
+        assert!(app.state.playlist.edit.is_some(), "F2 renames the mixer track");
+        assert_eq!(app.state.overlay_on, Some(Win::Mixer));
+        main_paint(&mut app);
+        assert!(app.overlays.is_empty(), "not in the main window");
+        app.paint_detached(Win::Mixer, &mut c);
+        assert!(!screen(&app, Win::Mixer).overlays.is_empty(), "in the Mixer's window");
+
+        app.key_on(Some(Win::Mixer), &Key::Named(NamedKey::Escape), false, false);
+        assert!(app.state.playlist.edit.is_none());
+        app.key_on(None, &Key::Named(NamedKey::F2), false, false);
+        assert!(app.state.playlist.edit.is_some());
+        assert_eq!(app.state.overlay_on, None, "opened with the main window's keyboard");
+    }
+
+    /// A browser effect dragged out of the main window over the detached Mixer's window moves there (its ghost with it)
+    /// and drops into the slot under the cursor, though the main window, which the drag started in, gets the release.
+    #[test]
+    fn a_browser_effect_drops_into_a_detached_mixer() {
+        use crate::views::browser::{rows, Item};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        app.state.plugdb.rebuild(&app.plugins);
+        app.state.browser_tab = 2;
+        app.state.browser_open.extend(["2:Plugin library/Effects".into(), "2:Plugin library/Effects/Other".into()]);
+        app.state.raise(Win::Mixer);
+        app.set_detached(Win::Mixer, true);
+        let Some(_) = main_paint(&mut app) else { return };
+        let (w, h) = app.state.detached_size(Win::Mixer).unwrap();
+        let mut c = Canvas::new(w as u32, h as u32, 1.0).unwrap();
+        app.paint_detached(Win::Mixer, &mut c);
+        let i = rows(&app.state).iter().position(|r| r.item == Item::Effect(0)).expect("effect row");
+        let src = hit_of(&app.hits, &Action::BrowserRow(i)).expect("the browser row");
+        let dst = hit_of(&screen(&app, Win::Mixer).hits, &Action::MixerArea).expect("the mixer");
+        app.mouse_move(src.cx(), src.cy());
+        app.mouse_down();
+        app.mouse_move(src.cx() + 30.0, src.cy());
+        assert!(app.cross_drag());
+        assert_eq!(app.state.drag_on, None, "over the main window");
+        app.on_surface(Win::Mixer, |a| a.mouse_move(dst.cx(), dst.cy()));
+        assert_eq!(app.state.drag_on, Some(Win::Mixer), "over the Mixer's window");
+        assert!(app.detached_dirty(Win::Mixer), "its ghost is drawn there");
+        app.paint_detached(Win::Mixer, &mut c);
+        app.mouse_up_from(None);
+        assert!(app.drag.is_none() && app.state.drag_on.is_none());
+        let t = app.state.selected_mixer;
+        assert_eq!(crate::mixer::slot_name(&app.state, t, 0).as_deref(), Some("Test FX"));
+    }
+
+    /// A browser generator dragged onto the detached Channel rack's window adds a channel; dragged back over the main
+    /// window before the release, it drops there instead.
+    #[test]
+    fn a_browser_generator_drops_into_a_detached_rack() {
+        use crate::views::browser::{rows, Item};
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.plugins.available.push(crate::plugin_db::fake("Test Synth", os_host::Kind::Instrument));
+        let synth = app.plugins.available.len() - 1;
+        app.state.plugdb.rebuild(&app.plugins);
+        app.state.browser_tab = 2;
+        app.state.browser_open.extend(["2:Plugin library/Generators".into(), "2:Plugin library/Generators/Other".into()]);
+        app.state.raise(Win::ChannelRack);
+        app.set_detached(Win::ChannelRack, true);
+        let Some(_) = main_paint(&mut app) else { return };
+        let (w, h) = app.state.detached_size(Win::ChannelRack).unwrap();
+        let mut c = Canvas::new(w as u32, h as u32, 1.0).unwrap();
+        app.paint_detached(Win::ChannelRack, &mut c);
+        let Some(i) = rows(&app.state).iter().position(|r| r.item == Item::Generator(synth)) else { panic!("generator row") };
+        let src = hit_of(&app.hits, &Action::BrowserRow(i)).expect("the browser row");
+        let n = app.state.project.channels.len();
+        let drag = |app: &mut App, back: bool| {
+            app.mouse_move(src.cx(), src.cy());
+            app.mouse_down();
+            app.mouse_move(src.cx() + 30.0, src.cy());
+            app.on_surface(Win::ChannelRack, |a| a.mouse_move(w / 2.0, h / 2.0));
+            if back {
+                app.mouse_move(src.cx() + 30.0, src.cy());
+            }
+            app.mouse_up_from(None);
+        };
+        drag(&mut app, true);
+        assert_eq!(app.state.project.channels.len(), n, "dropped back on the browser");
+        drag(&mut app, false);
+        assert_eq!(app.state.project.channels.len(), n + 1, "a new channel");
+    }
+
+    /// A scroll-bar right-drag in the detached Mixer holds the cursor as in the main window: the moves the shell gives
+    /// that surface (`App::on`) scroll it, the main window's mouse stays put, and the release ends it.
+    #[test]
+    fn a_scroll_bar_holds_the_cursor_in_a_detached_window() {
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.raise(Win::Mixer);
+        app.set_detached(Win::Mixer, true);
+        app.set_detached_size(Win::Mixer, (500.0, 400.0));
+        let Ok(mut c) = Canvas::new(500, 400, 1.0) else { return };
+        app.paint_detached(Win::Mixer, &mut c);
+        let Some(bar) = screen(&app, Win::Mixer).bars.first().cloned() else { panic!("the mixer's scroll bar") };
+        app.mouse_move(3.0, 3.0);
+        let (x, y) = (bar.track.cx(), bar.track.cy());
+        app.on(Some(Win::Mixer), |a| {
+            a.mouse_move(x, y);
+            a.mouse_down_right();
+        });
+        assert!(app.cursor_locked(), "held");
+        let probe = |a: &App| format!("{:?}", (a.scroll_get(bar.target), a.zoom_get(bar.target), a.rows_get(bar.target)));
+        let before = probe(&app);
+        for k in 1..=10 {
+            let d = k as f32 * 8.0;
+            app.on(Some(Win::Mixer), |a| a.mouse_move(x + d, y + d));
+        }
+        assert_eq!(app.mouse, (3.0, 3.0), "the main window's mouse is its own");
+        assert_ne!(probe(&app), before, "it scrolled");
+        app.mouse_up_from(Some(Win::Mixer));
+        assert!(!app.cursor_locked());
     }
 }

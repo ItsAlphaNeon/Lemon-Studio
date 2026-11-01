@@ -165,6 +165,10 @@ pub fn name(s: &State, t: u32) -> String {
         InitControl::MAIN_PITCH => return "Main pitch".into(),
         _ => {}
     }
+    // A container member's wet or dry level (spec: plugins/patcher/README.md §4.2).
+    if let Some((m, k, id, wet)) = crate::container::level_of(s, target::decode(t)) {
+        return crate::container::level_name(s, m, k, id, wet);
+    }
     match target::decode(t) {
         Target::Tempo => "Tempo".into(),
         Target::ChannelVolume(ch) => format!("{} - Channel volume", channel(ch)),
@@ -463,7 +467,7 @@ mod tests {
         ];
         let list = rows(&a.state);
         let at = list.iter().position(|r| r.key == folder).expect("the folder");
-        assert_eq!(list[at - 1].label, "Generators");
+        assert_eq!(list[at - 1].label, crate::views::browser::REMOTE_CONTROL, "after Remote control (spec: ui/browser.md)");
         let inside = format!("{folder}/");
         let names: Vec<&str> = list.iter().filter(|r| r.key.starts_with(&inside)).map(|r| r.label.as_str()).collect();
         assert_eq!(names, ["Clap - Channel volume", "Bus 1 - Volume", "Tempo", "Bus 2 - Slot 1 mix level", "Kick - Parameter 4"]);

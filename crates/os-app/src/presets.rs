@@ -621,6 +621,8 @@ pub fn load_into(app: &mut App, key: usize, path: &Path) -> Option<String> {
 /// The state the instance under `key` would go back to on undo (`Taken::Plugin`); `None` when it has none to save.
 fn side(app: &App, key: usize) -> Option<crate::control::command::PluginSide> {
     let name = match crate::plugins::fx_of(key) {
+        // A container's effect: no name of its own to put back.
+        None if key >= crate::plugins::MEMBER_KEY => None,
         None => app.state.project.channels.get(key)?.name.clone(),
         Some(slot) => app.state.mixer.slot_names.get(&slot).cloned(),
     };
@@ -827,6 +829,10 @@ const WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 /// else the current track's first free one) of the plugin the preset is for. Returns the status message.
 pub fn dropped(app: &mut App, path: &Path) -> Option<String> {
     use crate::app::{Action, Win};
+    // A channel state (listed with the presets in the browser) adds its channel.
+    if crate::channel_states::is_state_file(path) {
+        return crate::channel_states::add(app, path);
+    }
     #[cfg(any(windows, target_os = "macos"))]
     if let Some(row) = app.plugin_window_under_cursor() {
         return load_into(app, row, path);
@@ -1159,6 +1165,33 @@ mod tests {
         assert!(p.children.iter().filter(|i| !i.head).count() >= 2);
         assert!(m.items.iter().any(|i| i.cmd == Cmd::Preset(PCmd::SaveAs(0))));
         assert!(m.items.iter().any(|i| i.cmd == Cmd::Preset(PCmd::Browse(0))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An effect inside a container has its presets as a slot's effect has (Lemon Studio's design: spec
+    /// plugins/patcher/README.md §4.2): the window menu and the title-bar box list them and a preset loads into it; no
+    /// channel is renamed after it.
+    #[test]
+    fn presets_of_a_container_member() {
+        let (mut app, dir, _env) = hosted_sampler("member");
+        let key = crate::plugins::MEMBER_KEY;
+        let index = app.plugins.index_of(crate::plugins::LEMON_SAMPLER).unwrap();
+        app.plugins.create(key, index).unwrap();
+        let h = header(&app, key).unwrap();
+        let other = crate::plugins::with_sample_path(&app.plugins.state(key).unwrap(), "C:/x/rim.wav").unwrap();
+        let rim = file_for(&dir_for(&h.plugin).unwrap(), "Rim");
+        save(&rim, &h, &other).unwrap();
+        let names: Vec<Option<String>> = app.state.project.channels.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(run(&mut app, PCmd::Load(key, rim.clone())).as_deref(), Some("Preset: Rim"));
+        assert_eq!(app.plugins.sampler_path(key).as_deref(), Some("C:/x/rim.wav"));
+        assert_eq!(app.plugins.preset_name(key).as_deref(), Some("Rim"));
+        assert_eq!(app.state.project.channels.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), names);
+        let mut m = crate::playlist::plugin_window_menu(key, false, 0.0, 0.0);
+        fill_window_menu(&app, key, &mut m);
+        let p = m.items.iter().find(|i| i.label == "Presets" && !i.head).unwrap();
+        assert!(p.children.iter().any(|i| i.cmd == Cmd::Preset(PCmd::Load(key, rim.clone())) && i.mark == Mark::Check(true)));
+        assert!(m.items.iter().any(|i| i.cmd == Cmd::Preset(PCmd::SaveAs(key))));
+        assert!(popup(&app, key, 0.0, 0.0).items.iter().any(|i| i.label == "Rim"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

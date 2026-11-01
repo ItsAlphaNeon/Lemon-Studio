@@ -2,11 +2,12 @@
 
 Lemon Studio's own project file, and what a new project is saved as (Save as's first choice, "Lemon project, with its
 history"; the Save as form names `<name>.lemon`). Open and a drop onto the window open it. A project opened from a
-`.flp` keeps saving as one (Save new version and renaming keep the file's type), and Save as offers "FL Studio project"
-too.
+`.flp` is never saved over: Save asks, offering the name with `.lemon` (as on `main`), and Save as offers "FL Studio
+project" too. `main` has a `.lemon` of its own, which is what the snapshot here holds; a `.lemon` written by `main` opens
+here, and is saved as the zip.
 
 > Like everything on this branch, the format may change or be dropped. Its `project.flp` is the way out: taken out of
-> the zip, it opens in Lemon Studio's `main` and in FL.
+> the zip and named `.lemon`, it opens in Lemon Studio's `main`. For FL, Save as "FL Studio project".
 
 ## What it holds
 
@@ -15,7 +16,7 @@ A zip with these files:
 | File | What |
 |---|---|
 | `lemon.json` | `format: "lemon"`, `version` (1), `app` (the version that saved it), `saved` (Unix ms), `snapshot` and `journal` (the names below), `entries` |
-| `project.flp` | The project as it is now, in FL's layout, byte for byte what saving it as a `.flp` writes. Taken out of the zip, FL opens it. |
+| `project.flp` | The project as it is now, as `main` writes a `.lemon`: FL's chunks with Lemon Studio's `LMhd` and `LMex` around them (icons, slot names and the like; spec: `flp/lemon-format.md`). Files saved before that hold a plain FLP, and open too. |
 | `journal.jsonl` | The project's whole history: the journal's entries ([journal.md](journal.md)) from every session it was edited in, oldest first, each session starting with its `session` entry |
 | `ids.json` | Each channel's, pattern's, mixer track's, arrangement's, clip's and slot plugin's id, with what finds the thing again (index, number, place), and the next id to give out |
 | `history.json` | The undo history: each step's name and what it puts back, and how many are done |
@@ -48,6 +49,5 @@ history.
 
 - A plugin instance an undone step brings back (a deleted channel) starts from the state the step holds, which may be
   older than the instance's last state in that session.
-- The snapshot is in FL's layout, so it holds only what an FLP holds; what Lemon Studio adds on top (anything not in
-  an FLP) is not saved yet.
+- What Lemon Studio adds on top of an FLP is saved only as far as `LMex` holds it.
 - Samples are not inside the file (FILE ▸ Export ▸ Zipped project still gathers them).

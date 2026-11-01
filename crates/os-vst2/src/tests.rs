@@ -125,6 +125,22 @@ fn effects_process_their_input_and_host_edits_are_not_reported_as_the_plugins() 
     assert!(p.take_param_events().is_empty(), "the plugin's echo of a host edit is no edit");
 }
 
+/// MIDI channel through (spec: ui/channel-rack.md §18): a note started on a MIDI channel goes on it, and so does its end.
+#[test]
+fn notes_go_on_their_midi_channel() {
+    let (_m, mut p) = synth();
+    p.activate(48000);
+    let on_4 = os_engine::NoteLevels { channel: 3, ..Default::default() };
+    p.note_start(0, 60, 1.0, 0.0, on_4);
+    p.note_on(0, 62, 1.0);
+    let (mut l, mut r) = (vec![0.0; 64], vec![0.0; 64]);
+    p.process(48000, &mut l, &mut r);
+    p.note_off(0, 60);
+    p.note_off(0, 62);
+    p.process(48000, &mut l, &mut r);
+    assert_eq!(probe(|p| p.midi.iter().map(|m| (m.1, m.2)).collect::<Vec<_>>()), [(0x93, 60), (0x90, 62), (0x83, 60), (0x80, 62)]);
+}
+
 #[test]
 fn notes_reach_the_plugin_at_their_frames() {
     let (_m, mut p) = synth();

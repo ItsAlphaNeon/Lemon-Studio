@@ -382,13 +382,15 @@ struct Note {
     kind: NoteKind,
     key: u8,
     value: u8,
+    /// A note's MIDI channel, 0..15 (`NoteLevels::channel`); controllers and raw messages carry their own.
+    ch: u8,
 }
 
 impl Note {
     fn bytes(&self) -> [u8; 3] {
         match self.kind {
-            NoteKind::On => [0x90, self.key, self.value],
-            NoteKind::Off => [0x80, self.key, self.value],
+            NoteKind::On => [0x90 | self.ch & 15, self.key, self.value],
+            NoteKind::Off => [0x80 | self.ch & 15, self.key, self.value],
             NoteKind::Control => [0xB0, self.key, self.value],
             NoteKind::Raw(status) => [status, self.key, self.value],
         }
@@ -436,6 +438,8 @@ pub struct Plugin {
     ledger: os_engine::voices::VoiceLedger,
     /// Glides as pitch bend: VST 2 has no tuning of a note (spec: audio/channel-voices.md).
     bend: os_engine::TuningBend,
+    /// The MIDI channel each key's last note started on: its end goes on the same one (MIDI channel through).
+    key_ch: [u8; 128],
     /// Frames processed since activation.
     steady: u64,
     /// The song position for the next process call (the engine gives it while playing).
@@ -490,6 +494,7 @@ impl Plugin {
             sounding: false,
             ledger: os_engine::voices::VoiceLedger::new(),
             bend: os_engine::TuningBend::default(),
+            key_ch: [0; 128],
             steady: 0,
             song: None,
             restarted: false,
@@ -594,6 +599,17 @@ impl Plugin {
         if index < self.inst.num_params() && self.auto.len() < MAX_AUTO {
             self.auto.push((offset, index, value.clamp(0.0, 1.0) as f32));
         }
+    }
+
+    /// A note on, on MIDI channel `ch` (0..15).
+    fn start(&mut self, offset: u32, key: u8, velocity: f32, ch: u8) {
+        let (key, v) = (key.min(127), (velocity.clamp(0.0, 1.0) * 127.0).round().max(1.0) as u8);
+        // The bend is centred for the new note first (it may still hold the last glide's end).
+        if let Some(m) = self.bend.note_on(key) {
+            os_engine::Instrument::midi(self, offset, m);
+        }
+        self.key_ch[usize::from(key)] = ch & 15;
+        self.queue(Note { time: offset, kind: NoteKind::On, key, value: v, ch: ch & 15 });
     }
 
     fn queue(&mut self, n: Note) {
@@ -1050,11 +1066,12 @@ impl os_engine::Instrument for Plugin {
         let held: Vec<u8> = self.ledger.held().collect();
         for key in held {
             if !std::mem::replace(&mut sent[usize::from(key.min(127))], true) {
-                self.queue(Note { time: 0, kind: NoteKind::Off, key, value: 0 });
+                let ch = self.key_ch[usize::from(key.min(127))];
+                self.queue(Note { time: 0, kind: NoteKind::Off, key, value: 0, ch });
             }
         }
         for c in [ALL_SOUND_OFF, ALL_NOTES_OFF] {
-            self.queue(Note { time: 0, kind: NoteKind::Control, key: c, value: 0 });
+            self.queue(Note { time: 0, kind: NoteKind::Control, key: c, value: 0, ch: 0 });
         }
         self.ledger.clear();
         if let Some(m) = self.bend.reset() {
@@ -1068,16 +1085,17 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
-        let v = (velocity.clamp(0.0, 1.0) * 127.0).round().max(1.0) as u8;
-        // The bend is centred for the new note first (it may still hold the last glide's end).
-        if let Some(m) = self.bend.note_on(key.min(127)) {
-            os_engine::Instrument::midi(self, offset, m);
-        }
-        self.queue(Note { time: offset, kind: NoteKind::On, key: key.min(127), value: v });
+        self.start(offset, key, velocity, 0);
+    }
+
+    /// The note's levels are dropped (VST 2 has no way to take them), but not its MIDI channel.
+    fn note_start(&mut self, offset: u32, key: u8, velocity: f32, _start: f32, levels: os_engine::NoteLevels) {
+        self.start(offset, key, velocity, levels.channel);
     }
 
     fn note_off(&mut self, offset: u32, key: u8) {
-        self.queue(Note { time: offset, kind: NoteKind::Off, key: key.min(127), value: 64 });
+        let key = key.min(127);
+        self.queue(Note { time: offset, kind: NoteKind::Off, key, value: 64, ch: self.key_ch[usize::from(key)] });
     }
 
     /// A glide step as pitch bend (`TuningBend`).
@@ -1098,7 +1116,7 @@ impl os_engine::Instrument for Plugin {
     fn midi(&mut self, offset: u32, bytes: [u8; 3]) {
         let (key, value) = (bytes[1] & 0x7F, bytes[2] & 0x7F);
         let kind = if bytes[0] & 0xF0 == 0xB0 { NoteKind::Control } else { NoteKind::Raw(bytes[0]) };
-        self.queue(Note { time: offset, kind, key, value });
+        self.queue(Note { time: offset, kind, key, value, ch: 0 });
     }
 
     fn transport(&mut self, info: &os_engine::TransportInfo) {

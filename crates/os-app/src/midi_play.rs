@@ -278,13 +278,16 @@ impl App {
         if Some(ch) == channel_of(&prefs::OMNI_CHANNEL) {
             let Some(row) = white_index(key).filter(|&r| r < n) else { return };
             extra.channel = Some(self.state.project.channels[row].index);
-            return self.midi_start(Src::Omni(key), key, row, 60, vel, extra);
+            return self.midi_start(Src::Omni(key), key, row, 60, vel, extra, 0);
         }
         if Some(ch) == channel_of(&prefs::MARKER_CHANNEL) {
             if let Some(i) = white_index(key) {
                 self.marker_jump(i);
             }
             return;
+        }
+        if Some(ch) == channel_of(&prefs::PERFORMANCE_CHANNEL) {
+            return self.perform_note(key, vel, true);
         }
         if Some(ch) == channel_of(&prefs::MUTING_CHANNEL) {
             if let Some(row) = white_index(key).filter(|&r| r < n) {
@@ -300,24 +303,31 @@ impl App {
         if row >= n {
             return;
         }
-        self.midi_start(Src::Midi(key), key, row, u16::from(key), vel, extra);
+        // MIDI channel through (spec: ui/channel-rack.md §18): the plugin gets the note on the channel it came on, and a
+        // recorded note takes that channel as its colour; unticked, channel 1.
+        let midi = if crate::rack::through(&self.state, row) { ch & 15 } else { 0 };
+        if midi > 0 {
+            extra.group = Some(midi);
+        }
+        self.midi_start(Src::Midi(key), key, row, u16::from(key), vel, extra, midi);
     }
 
-    /// Starts a note; a key the pedal still holds ends its earlier note first (spec §3).
-    fn midi_start(&mut self, src: Src, key: u8, row: usize, play: u16, vel: u8, extra: Extra) {
+    /// Starts a note, on MIDI channel `midi` for a hosted plugin; a key the pedal still holds ends its earlier note
+    /// first (spec §3).
+    fn midi_start(&mut self, src: Src, key: u8, row: usize, play: u16, vel: u8, extra: Extra, midi: u8) {
         while let Some(i) = self.midi_play.held.iter().position(|h| h.src == src) {
             let h = self.midi_play.held.remove(i);
             self.midi_end(h, h.up.unwrap_or(64));
         }
         self.sync_live();
-        self.transport.note_on(row, play, vel);
+        self.transport.note_on_midi(row, play, vel, midi);
         self.midi_play.held.push(Held { key, src, row, play, up: None });
         self.step_edit_down_with(src, play, vel, extra);
     }
 
     /// A note started from a control surface's pad, as a MIDI keyboard's would be (recorded, in the score log).
     pub(crate) fn midi_play_note(&mut self, src: Src, key: u8, row: usize, play: u16, vel: u8, extra: Extra) {
-        self.midi_start(src, key, row, play, vel, extra);
+        self.midi_start(src, key, row, play, vel, extra, 0);
     }
 
     /// The notes `src` started end.
@@ -333,7 +343,19 @@ impl App {
         self.step_edit_up_with(h.src, Some(release));
     }
 
+    /// A key of the Performance mode MIDI channel (spec: ui/performance-mode.md §3).
+    pub(crate) fn perform_note(&mut self, key: u8, vel: u8, down: bool) {
+        let now = self.transport.playing().then(|| self.transport.tick().max(0.0) as u32);
+        if let Some(m) = crate::perform::midi_note(&mut self.state, key, vel, down, now) {
+            self.state.message = Some(m);
+        }
+        self.invalidate();
+    }
+
     fn midi_note_off(&mut self, ch: u8, key: u8, vel: u8) {
+        if Some(ch) == channel_of(&prefs::PERFORMANCE_CHANNEL) {
+            return self.perform_note(key, vel, false);
+        }
         if Some(ch) == channel_of(&prefs::MUTING_CHANNEL) {
             while let Some(i) = self.midi_play.muted.iter().position(|m| m.0 == key) {
                 let (_, row) = self.midi_play.muted.remove(i);
@@ -485,7 +507,8 @@ impl App {
         }
     }
 
-    /// Master sync (spec §7): the outputs with Send master sync while Enable MIDI output and master sync are on.
+    /// Master sync (spec §7): the outputs with Send master sync while Enable MIDI output and master sync are on; and
+    /// while Enable MIDI output is on, the outputs with a port, for Lemon MIDI Out (spec: plugins/midi-out.md §6.4).
     fn midi_out_tick(&mut self) {
         let send = Switch::Output.on() && Switch::MasterSync.on();
         let sync = if send {
@@ -500,8 +523,22 @@ impl App {
         } else {
             Vec::new()
         };
+        let (mut ports, mut ports_off) = (Vec::new(), Vec::new());
+        if Switch::Output.on() {
+            for name in &self.midi.outputs {
+                let c = cfg::output(name);
+                if let Some(p) = c.port {
+                    ports.push((name.clone(), p));
+                    if c.notes_off {
+                        ports_off.push(name.clone());
+                    }
+                }
+            }
+        }
         let c = crate::midi_out::Config {
             sync,
+            ports,
+            ports_off,
             kind: crate::midi_out::SyncKind::of(prefs::index(&prefs::SYNC_TYPE)),
             offset_ms: cfg::offset(Offset::MasterSync),
             ppq: self.state.project.ppq.max(1),

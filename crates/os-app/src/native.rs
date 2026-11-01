@@ -4,8 +4,8 @@
 
 //! Lemon Studio's own project file (`.lemon`, `docs/native-format.md`): a zip holding
 //! - `lemon.json`: what the file is (format, its version, the app that saved it, when);
-//! - `project.flp`: the project as it is now, in FL's layout, written as a `.flp` save writes it (so everything that
-//!   reads a project reads this, and taking it out of the zip gives FL its project);
+//! - `project.flp`: the project as it is now, as `main` writes a `.lemon`: FL's chunks with Lemon Studio's around them
+//!   (`os_flp::lemon`), so everything that reads a project reads this;
 //! - `journal.jsonl`: the project's whole history, every session it was edited in (`crate::journal`): what changed,
 //!   when and by whom, and every state its plugins had;
 //! - `ids.json`: its things' ids (`control::ids::stored`), so they keep them from session to session;
@@ -116,10 +116,11 @@ pub struct Extra {
     pub history: Option<Value>,
 }
 
-/// Reads a project file: a `.flp`'s bytes; a `.lemon`'s snapshot, and its history.
+/// Reads a project file: a `.flp`'s bytes; a `.lemon`'s snapshot, and its history. A `.lemon` that is not a zip is `main`'s
+/// file (spec: flp/lemon-format.md), the same bytes a snapshot holds, without a history.
 pub fn read(path: &Path) -> Result<(Vec<u8>, Option<Extra>), String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    if !is_native(path) {
+    if !is_native(path) || !bytes.starts_with(b"PK") {
         return Ok((bytes, None));
     }
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a Lemon project: {e}"))?;
@@ -216,6 +217,11 @@ mod tests {
         write(&f, b"FLhd", &journal, &json!({}), None).unwrap();
         let (b, x) = read(&f).unwrap();
         assert!(b == b"FLhd" && x.is_none());
+        // A .lemon written by `main` is its bytes too.
+        let m = dir.join("main.lemon");
+        std::fs::write(&m, b"LMhd").unwrap();
+        let (b, x) = read(&m).unwrap();
+        assert!(b == b"LMhd" && x.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

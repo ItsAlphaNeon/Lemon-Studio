@@ -53,6 +53,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
             Body::File(f) => file_box(ui, s, m, f),
             Body::Shortcuts(f) => shortcuts_box(ui, s, m, f),
             Body::TimeSig(f) => sig_box(ui, s, m, f),
+            Body::Markers(f) => markers_box(ui, s, m, f),
             Body::Project(f) => super::project_forms::paint(ui, s, m, f),
         }
     }
@@ -309,6 +310,35 @@ fn sig_box(ui: &mut Ui, s: &State, m: &Modal, f: &SigForm) {
         let b = Rect::new(r.right() - 12.0 - box_w, (cy - 10.0).round(), box_w, 20.0);
         let hov = hit(ui, b, DHit::SigValue(den), if den { "Denominator: click to choose" } else { "Numerator: click to choose" });
         kit::combo(ui.c, t, b, &value.to_string(), font, kit::State::new(hov, open == Some(den), false));
+    }
+    let bw = (ui.c.text_width(font, "Accept") + 28.0).max(BTN_W).round();
+    let b = Rect::new(r.right() - 12.0 - bw, r.y + 105.0, bw, BTN_H);
+    let act = Action::Dlg(DHit::Accept);
+    let down = ui.down(b, &act);
+    let hov = ui.hit(b, act, "Enter");
+    button(ui, b, "Accept", true, hov, down, false);
+}
+
+/// Prepare for performance mode's Marker settings (spec: ui/performance-mode.md §1): Marker count and Spacing (in
+/// bars), each a value box with a list, and Accept; laid out as the time signature dialog.
+fn markers_box(ui: &mut Ui, s: &State, m: &Modal, f: &crate::perform::MarkerForm) {
+    let t = ui.t;
+    let font = Font::new(13);
+    let labels = ["Marker count", "Spacing (bars)"];
+    let label_w = labels.iter().map(|l| ui.c.text_width(font, l)).fold(0.0, f32::max).ceil();
+    let box_w = 48.0;
+    let r = place(s, m, (12.0 + label_w + 10.0 + box_w + 12.0).max(156.0), 143.0);
+    frame(ui, r, "Marker settings");
+    panel(ui, Rect::new(r.x + 5.0, r.y + 28.0, r.w - 10.0, 72.0));
+    let lh = ui.c.line_height(font);
+    let open = s.playlist.popup.is_some();
+    for (i, (label, value)) in labels.into_iter().zip([f.count, f.spacing]).enumerate() {
+        let spacing = i == 1;
+        let cy = r.y + if spacing { 75.0 } else { 49.0 };
+        ui.c.text(font, r.x + 12.0, (cy - lh / 2.0).round(), t.text, label);
+        let b = Rect::new(r.right() - 12.0 - box_w, (cy - 10.0).round(), box_w, 20.0);
+        let hov = hit(ui, b, DHit::MarkerValue(spacing), if spacing { "Spacing in bars: click to choose" } else { "Marker count: click to choose" });
+        kit::combo(ui.c, t, b, &value.to_string(), font, kit::State::new(hov, open, false));
     }
     let bw = (ui.c.text_width(font, "Accept") + 28.0).max(BTN_W).round();
     let b = Rect::new(r.right() - 12.0 - bw, r.y + 105.0, bw, BTN_H);

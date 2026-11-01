@@ -60,6 +60,9 @@ pub struct Sample {
     pub note: u8,
     /// Tempo in BPM, 0 when none is set.
     pub tempo: f32,
+    /// Regions > Set first downbeat: the frame bar 1 starts at (0, the start, when none is set). Grid-slicing, the
+    /// Bar : Beat : Tick ruler and Convert to score count from it.
+    pub downbeat: usize,
 }
 
 impl Default for Sample {
@@ -71,7 +74,7 @@ impl Default for Sample {
 
 impl Sample {
     pub fn new(rate: u32, channels: usize, format: Format) -> Sample {
-        Sample { rate, ch: vec![Vec::new(); channels.clamp(1, 2)], format, cues: Vec::new(), looped: None, note: 60, tempo: 0.0 }
+        Sample { rate, ch: vec![Vec::new(); channels.clamp(1, 2)], format, cues: Vec::new(), looped: None, note: 60, tempo: 0.0, downbeat: 0 }
     }
 
     pub fn from_channels(rate: u32, ch: Vec<Vec<f32>>, format: Format) -> Sample {
@@ -185,12 +188,14 @@ impl Sample {
             let nb = if delta >= 0 && a < at && b >= at { b + delta as usize } else { mv(b + 1).saturating_sub(1) };
             self.looped = if nb >= na { Some((na, nb)) } else { None };
         }
+        self.downbeat = mv(self.downbeat);
         self.clip_marks();
     }
 
     /// Keeps markers, regions and the loop inside the sample.
     pub fn clip_marks(&mut self) {
         let n = self.frames();
+        self.downbeat = self.downbeat.min(n.saturating_sub(1));
         if n == 0 {
             self.looped = None;
             for c in &mut self.cues {

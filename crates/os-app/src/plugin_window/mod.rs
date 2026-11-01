@@ -36,8 +36,8 @@ pub(crate) mod hyprland;
 mod x11;
 #[cfg(target_os = "linux")]
 pub use x11::{
-    busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main, stack, take_exposed, take_lift_input, unpinned,
-    Unpinned,
+    busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main, set_transient, stack, take_exposed,
+    take_lift_input, unpinned, Unpinned,
 };
 #[cfg(target_os = "linux")]
 mod embed;
@@ -172,6 +172,20 @@ impl FrameWindow {
 mod cocoa;
 #[cfg(target_os = "macos")]
 pub use cocoa::{default_position, lift_hide, lift_show, pointer, row_window_at, screen_to_main, stack, take_exposed, take_keys, take_lift_input, FrameWindow};
+
+/// TOOLS > Set keyboard focus of all plugins to ▸ (Lemon Studio's design; spec: ui/channel-switches.md §6): whether
+/// plugin editors take the computer keyboard (Enabled, the default) or never get it (Disabled), the keys then going to
+/// Lemon Studio as those pressed in an editor already do (`take_keys`: the typing keyboard, Space). Saved in `.lemon` files (`lemon_state`).
+static EDITOR_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether plugin editors take the keyboard.
+pub fn editor_keys() -> bool {
+    EDITOR_KEYS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_editor_keys(on: bool) {
+    EDITOR_KEYS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Where a detached window opening for the first time goes: where a new window opens. Only Windows places it by
 /// monitor (Settings "Open detached plugins with the main window"; spec: ui/settings-choices.md "Miscellaneous:
@@ -315,6 +329,8 @@ fn c_caption() -> Color {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelInfo {
     pub name: String,
+    /// The icon chosen with Change icon... (Lemon Studio's design, `crate::playlist::ICONS`), drawn before the name.
+    pub icon: Option<crate::icons::Icon>,
     /// "Bus 3" / "Master".
     pub target: String,
     pub enabled: bool,
@@ -959,7 +975,11 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     let p = presets_rect(st);
     let f = title_font();
     let ty = (19.0 - c.ascent(f)).round();
-    let nx = 48.0;
+    let mut nx = 48.0;
+    if let Some(i) = st.info.icon {
+        crate::icons::draw(c, i, Rect::new(nx, 8.0, 15.0, 15.0), c_text());
+        nx += 21.0;
+    }
     let room = (p.x - 8.0 - nx).max(0.0);
     let nw = c.text_width(f, &st.info.name).min(room);
     c.text_clip(f, nx, ty, room, c_text(), &st.info.name);
@@ -1592,7 +1612,7 @@ mod tests {
     use super::*;
 
     fn state(strip: bool, target: &str) -> State {
-        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: Some(Default::default()) };
+        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: Some(Default::default()), icon: None };
         State { strip, ..State::new(info, (480.0, 270.0), false) }
     }
 
