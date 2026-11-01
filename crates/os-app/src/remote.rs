@@ -121,9 +121,11 @@ impl Link {
     }
 }
 
-/// Whether `t` can be linked: the piano roll tool dialogs' knobs live only while their dialog is open.
+/// Whether `t` can be linked: the piano roll tool dialogs' knobs live only while their dialog is open. A rack row's
+/// mixer track box and LED can be (Lemon Studio's design): the controller's travel spans Master to the last insert,
+/// and turns the channel on from its middle.
 fn linkable(t: Target) -> bool {
-    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)) | Target::RackTrack(_) | Target::RackLed(_))
+    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)) | Target::Latency(..))
 }
 
 /// A target as `settings.txt` keeps it (`none` for one that is not linkable, which reads back as nothing).
@@ -144,7 +146,9 @@ fn target_text(t: Target) -> String {
         },
         Target::Fader(m) => format!("fader:{m}"),
         Target::Param(key, i) => format!("param:{key}:{i}"),
-        Target::Latency(..) | Target::RackTrack(_) | Target::RackLed(_) => "none".into(),
+        Target::RackTrack(r) => format!("racktrack:{r}"),
+        Target::RackLed(r) => format!("rackled:{r}"),
+        Target::Latency(..) => "none".into(),
     }
 }
 
@@ -165,6 +169,8 @@ fn parse_target(s: &str) -> Option<Target> {
         "eq" => Target::Knob(KnobId::Eq(n()? as u16, n()? as u8, n()? as u8)),
         "fader" => Target::Fader(n()? as u16),
         "param" => Target::Param(n()?, n()?),
+        "racktrack" => Target::RackTrack(n()?),
+        "rackled" => Target::RackLed(n()?),
         _ => return None,
     })
 }
@@ -234,6 +240,7 @@ pub fn label(s: &State, l: &Link) -> String {
     let name = crate::typein::target_name(s, l.target);
     let what = match l.target {
         Target::Knob(KnobId::ChanVol(r) | KnobId::ChanPan(r)) if !l.omni => format!("{} - {name}", channel(r)),
+        Target::RackTrack(r) | Target::RackLed(r) => format!("{} - {name}", channel(r)),
         Target::Knob(KnobId::Send(a, _)) => format!("{} - {name}", crate::mixer::name(s, a)),
         Target::Param(key, index) => crate::params::clip_name(s, key, index),
         _ => name,
@@ -510,7 +517,9 @@ impl App {
     fn remote_drive(&mut self, i: usize, v: u8) {
         let l = self.remote.links[i];
         let t = self.remote_target(&l);
-        let Some(now) = crate::typein::get(&self.state, t).map(|x| x as f32) else { return };
+        // A rack box's position over its travel (its track over the last insert, the LED 0 / 1), a knob's value.
+        let now = crate::typein::position(&self.state, t).or_else(|| crate::typein::get(&self.state, t));
+        let Some(now) = now.map(|x| x as f32) else { return };
         let x = l.formula.map(f32::from(v) / 127.0);
         let pressed = v > 0;
         let val = match l.mode {
@@ -593,8 +602,13 @@ impl App {
                 crate::params::set_param_value(&mut self.state, key, index, f64::from(v));
                 self.record_plugin_param(key, index, f64::from(v));
             }
+            // One undo step for each track the box moves to, and each switch of the LED (`typein::set_value`).
+            Target::RackTrack(_) | Target::RackLed(_) => {
+                let to = crate::typein::at_position(&self.state, t, f64::from(v));
+                crate::typein::set_value(&mut self.state, t, to);
+            }
             // Never linked (no remote control).
-            Target::Latency(..) | Target::RackTrack(_) | Target::RackLed(_) => {}
+            Target::Latency(..) => {}
         }
         self.invalidate();
     }
@@ -754,7 +768,7 @@ mod tests {
         assert_eq!(links(), vec![p, m]);
         remove(Target::Param(1, 12));
         assert_eq!(links(), vec![m]);
-        for t in [Target::Knob(KnobId::Eq(1, 2, 0)), Target::Knob(KnobId::Send(1, 0)), Target::Knob(KnobId::MasterPitch)] {
+        for t in [Target::Knob(KnobId::Eq(1, 2, 0)), Target::Knob(KnobId::Send(1, 0)), Target::Knob(KnobId::MasterPitch), Target::RackTrack(4), Target::RackLed(2)] {
             assert_eq!(parse_target(&target_text(t)), Some(t));
         }
     }
