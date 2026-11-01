@@ -78,7 +78,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 [target.'cfg(target_os = "linux")'.dependencies]
 # Shared mode plays through the sound server (PulseAudio, or PipeWire's pipewire-pulse) as other programs do; the
 # PulseAudio host speaks the protocol in Rust, so no system library is linked. Exclusive mode opens ALSA directly.
-cpal = { version = "0.18", features = ["pulseaudio"] }
+cpal = { version = "0.18", features = ["pulseaudio", "jack"] }
 # The cards the sound server gave up on while Lemon Studio had them through ALSA (`device::sound_server`): the
 # protocol crate cpal's PulseAudio host is built on.
 pulseaudio = "0.3"

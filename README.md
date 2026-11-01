@@ -189,16 +189,17 @@ and `...\CLAP`, where DAWs find them. To build and install them without starting
 
 x64, on X11 or a Wayland desktop.
 
-**Prerequisites:** a C++ compiler and libclang (for the time stretcher), the ALSA development files, the Wayland
-development files (which Lemon Sampler's file dialogs link against when it is built as a plugin) and `pkg-config`:
+**Prerequisites:** a C++ compiler and libclang (for the time stretcher), the ALSA and JACK development files (JACK
+itself is loaded only when JACK mode is chosen), the Wayland development files (which Lemon Sampler's file dialogs
+link against when it is built as a plugin) and `pkg-config`:
 
 ```bash
 # Debian / Ubuntu
-sudo apt install g++ libclang-dev libasound2-dev libwayland-dev pkg-config
-# Arch
-sudo pacman -S gcc clang alsa-lib wayland pkgconf
+sudo apt install g++ libclang-dev libasound2-dev libjack-jackd2-dev libwayland-dev pkg-config
+# Arch (pipewire-jack or jack2)
+sudo pacman -S gcc clang alsa-lib pipewire-jack wayland pkgconf
 # Fedora
-sudo dnf install gcc-c++ clang-devel alsa-lib-devel wayland-devel pkgconf-pkg-config
+sudo dnf install gcc-c++ clang-devel alsa-lib-devel pipewire-jack-audio-connection-kit-devel wayland-devel pkgconf-pkg-config
 ```
 
 For the "save changes?" prompt, `zenity` or KDE's `kdialog` (a stock KDE desktop has the latter).

@@ -37,7 +37,7 @@ jobs:
       # libclang: the time stretcher's bindings are generated at build time (the Windows image ships LLVM, the macOS one Xcode's).
       - name: Install Linux packages
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libwayland-dev libclang-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libjack-jackd2-dev libwayland-dev libclang-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
 

@@ -585,7 +585,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   period); a device that refuses exclusive mode plays in shared mode, and the page says why
 - ASIO® on Windows, output only: the installed drivers are in Settings > Audio's Output device list; the master plays
   to the driver's first two outputs, and Show ASIO panel opens the driver's own settings
-- ALSA (and PipeWire / PulseAudio through it) on Linux
+- On Linux: the sound server (PulseAudio, or PipeWire through pipewire-pulse), ALSA directly, or JACK (Settings > Audio
+  ▸ Mode ▸ JACK: a JACK client at the server's rate and buffer length, its ports connected to the system's; with no
+  JACK server running it plays as in shared mode)
 - Core Audio on macOS
 - Output device, sample rate and buffer length in Settings > Audio
 - Auto close (Settings > Audio): the output closes while another program is in front, and a playing song pauses

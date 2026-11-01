@@ -328,6 +328,8 @@ pub const MODE_SHARED: &str = "Shared (other programs play too)";
 pub const MODE_EXCLUSIVE: &str = "Exclusive (Lemon Studio alone, smaller buffers)";
 #[cfg(target_os = "linux")]
 pub const MODE_EXCLUSIVE: &str = "Exclusive (ALSA directly, past the sound server)";
+/// Linux: as a client of the JACK server (`audio_cfg::AudioCfg::jack`).
+pub const MODE_JACK: &str = "JACK (the JACK server's rate and buffer length)";
 const MODE_ASIO: &str = "Mode: for Windows devices (an ASIO driver plays on its own terms)";
 /// With an ASIO driver: its own settings window, where its buffer length is set.
 pub const SHOW_ASIO_PANEL: &str = "Show ASIO panel";
@@ -611,7 +613,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     // Windows devices play shared or exclusive (greyed under an ASIO driver, `MODE_ASIO`); so do Linux
                     // ones, through the sound server or ALSA.
                     if cfg!(windows) || cfg!(target_os = "linux") {
-                        let mode = combo(if st.audio.exclusive { "Exclusive" } else { "Shared" }, 120.0, MODE);
+                        let mode = combo(if st.audio.jack() { "JACK" } else if st.audio.exclusive { "Exclusive" } else { "Shared" }, 120.0, MODE);
                         let device = st.audio.device.as_deref().unwrap_or("the default device");
                         let alone = exclusive.then(|| {
                             let line = if cfg!(windows) {
@@ -621,7 +623,11 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                             };
                             Text(line, true)
                         });
-                        std::iter::once(mode).chain(alone).collect()
+                        // JACK: its server sets the rate and buffer length; the ports connect to the system's own.
+                        let jack = st.audio.jack().then(|| {
+                            Text("Lemon Studio plays as a JACK client at the server's rate and buffer length (set them in the server, e.g. qjackctl); its ports connect to the system playback and capture ports. With no JACK server running it plays as in shared mode.".into(), true)
+                        });
+                        std::iter::once(mode).chain(alone).chain(jack).collect()
                     } else {
                         Vec::new()
                     },

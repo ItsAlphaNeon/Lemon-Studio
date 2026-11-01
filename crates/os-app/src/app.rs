@@ -4777,10 +4777,14 @@ impl App {
                 .collect(),
             // Windows devices: shared or exclusive mode (spec: audio/wasapi-low-latency.md 4.2). Linux: the sound server,
             // or an ALSA device directly.
-            MODE => vec![
-                PItem::new(MODE_SHARED, Cmd::Audio(Set::Mode(false))).mark(Mark::Radio(!cfg.exclusive)),
-                PItem::new(MODE_EXCLUSIVE, Cmd::Audio(Set::Mode(true))).mark(Mark::Radio(cfg.exclusive)),
-            ],
+            MODE => [
+                PItem::new(MODE_SHARED, Cmd::Audio(Set::Mode(false))).mark(Mark::Radio(!cfg.exclusive && !cfg.jack)),
+                PItem::new(MODE_EXCLUSIVE, Cmd::Audio(Set::Mode(true))).mark(Mark::Radio(cfg.exclusive && !cfg.jack)),
+            ]
+            .into_iter()
+            // Linux: as a client of the JACK server (spec: audio/linux-output.md "JACK").
+            .chain(cfg!(target_os = "linux").then(|| PItem::new(views::settings::MODE_JACK, Cmd::Audio(Set::Jack)).mark(Mark::Radio(cfg.jack))))
+            .collect(),
             // Under an ASIO driver: the driver's own, then what it takes, once it has opened (spec: audio/devices.md,
             // "Sample rate and buffer length under ASIO"). In exclusive mode: the rates the device runs at itself
             // (audio/wasapi-low-latency.md 4.4).
@@ -13387,7 +13391,7 @@ mod tests {
         eprintln!("driver | block | rate | tick | ahead min / mean / max (frames) | mean ms | driver latency | longest gap ms | load | dropouts");
         for &b in &buffers {
             for _ in 0..runs {
-                AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b), exclusive: false, input: None }.apply();
+                AudioCfg { asio: true, device: Some(driver.clone()), rate: None, buffer: Some(b), exclusive: false, input: None, jack: false }.apply();
                 app.transport.reopen();
                 let t0 = Instant::now();
                 let info = loop {
