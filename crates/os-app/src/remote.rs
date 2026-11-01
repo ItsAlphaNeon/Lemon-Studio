@@ -274,6 +274,8 @@ pub enum RCmd {
     Unlink(Target),
     /// A plugin window menu's Link all parameters...: hosted instance key (spec §6).
     LinkAll(usize),
+    /// Mixer options ▸ Link all parameters...: the mixer track's own controls (`track_targets`).
+    LinkTrack(u16),
 }
 
 /// The Remote control settings box (spec §2, §3), while open.
@@ -293,9 +295,10 @@ pub struct LinkBox {
     pub smooth: bool,
     pub time: u16,
     pub conflicts: bool,
-    /// Link all parameters... (spec §6): the instance's parameters to link, in order, to the controller set and the
-    /// ones after it (`target` is the first's); empty for a single link.
-    pub all: Vec<usize>,
+    /// Link all parameters... (spec §6): the instance's parameters, or a mixer track's controls (the mixer's Link all
+    /// parameters..., Lemon Studio's design), to link in order to the controller set and the ones after it (`target`
+    /// is the first); empty for a single link.
+    pub all: Vec<Target>,
 }
 
 impl LinkBox {
@@ -354,19 +357,23 @@ impl LinkBox {
 
     /// Link all parameters... of hosted instance `key` (spec §6): its visible parameters `params`, the box blank.
     pub fn all(key: usize, params: Vec<usize>, at: (f32, f32)) -> LinkBox {
-        let first = params.first().copied().unwrap_or(0);
-        LinkBox { at, all: params, ..LinkBox::new_blank(Target::Param(key, first)) }
+        LinkBox::group(params.into_iter().map(|i| Target::Param(key, i)).collect(), at)
+    }
+
+    /// Link all parameters... over `targets` (at least one), the box blank.
+    pub fn group(targets: Vec<Target>, at: (f32, f32)) -> LinkBox {
+        let first = targets.first().copied().unwrap_or(Target::Param(0, 0));
+        LinkBox { at, all: targets, ..LinkBox::new_blank(first) }
     }
 
     /// The links Accept makes: the one link, or for Link all parameters... one per parameter on the controller set and
     /// the ones after it, as far as controller 127 goes.
     pub fn links(&self) -> Vec<Link> {
         let Some(l) = self.link() else { return Vec::new() };
-        let Target::Param(key, _) = self.target else { return vec![l] };
         if self.all.is_empty() {
             return vec![l];
         }
-        self.all.iter().zip(l.cc..=127).map(|(&i, cc)| Link { cc, target: Target::Param(key, i), ..l }).collect()
+        self.all.iter().zip(l.cc..=127).map(|(&target, cc)| Link { cc, target, ..l }).collect()
     }
 
     /// The link it makes on Accept: none while Ctrl is "---".
@@ -640,6 +647,17 @@ impl App {
                 self.state.link_box = Some(LinkBox::all(key, params, at));
                 self.state.message = Some("Move the MIDI controller for the first parameter".into());
             }
+            RCmd::LinkTrack(t) => {
+                let targets = track_targets(&self.state, t);
+                if targets.is_empty() {
+                    return self.invalidate();
+                }
+                let (w, h) = crate::views::remote_box::SIZE;
+                let (sw, sh) = self.state.screen;
+                let at = ((self.mouse.0 - 20.0).clamp(0.0, (sw - w).max(0.0)), (self.mouse.1 - 20.0).clamp(0.0, (sh - h).max(0.0)));
+                self.state.link_box = Some(LinkBox::group(targets, at));
+                self.state.message = Some("Move the MIDI controller for the track's volume".into());
+            }
         }
         self.invalidate();
     }
@@ -647,7 +665,7 @@ impl App {
     /// Accept: makes the link and closes the box (spec §3).
     pub(crate) fn link_accept(&mut self) {
         let Some(b) = self.state.link_box.take() else { return };
-        if let (false, Target::Param(key, _)) = (b.all.is_empty(), b.target) {
+        if !b.all.is_empty() {
             let made = b.links();
             for l in &made {
                 add(*l, b.conflicts);
@@ -656,7 +674,7 @@ impl App {
                 (Some(a), Some(z)) => format!(
                     "Linked {} parameters of {} to channel {}, controllers {} to {}",
                     made.len(),
-                    crate::params::owner_name(&self.state, key),
+                    group_name(&self.state, &b),
                     a.ch + 1,
                     a.cc,
                     z.cc
@@ -743,6 +761,30 @@ impl App {
     }
 }
 
+/// What Link all parameters... links (the box's field, its hint): the plugin's name, or the mixer track's.
+pub fn group_name(s: &State, b: &LinkBox) -> String {
+    match b.target {
+        Target::Param(key, _) => crate::params::owner_name(s, key),
+        Target::Fader(t) => crate::mixer::name(s, t),
+        t => crate::typein::caption(s, t).trim_start_matches("Value for ").to_string(),
+    }
+}
+
+/// The mixer's Link all parameters... (Lemon Studio's design): track `t`'s own controls in the strip's order: volume,
+/// pan, stereo separation, the equaliser's three bands (gain, frequency, width each), the send levels of its routes,
+/// then the mix levels of its filled slots.
+pub fn track_targets(s: &State, t: u16) -> Vec<Target> {
+    let Some(track) = crate::mixer::track(s, t) else { return Vec::new() };
+    let mut v = vec![Target::Fader(t), Target::Knob(KnobId::MixPan(t)), Target::Knob(KnobId::MixSep(t))];
+    v.extend((0..3).flat_map(|b| (0..3).map(move |f| Target::Knob(KnobId::Eq(t, b, f)))));
+    let mut routes: Vec<u16> = track.routes.iter().copied().filter(|&d| d != t).collect();
+    routes.sort_unstable();
+    routes.dedup();
+    v.extend(routes.into_iter().map(|d| Target::Knob(KnobId::Send(t, d))));
+    v.extend((0..10u8).filter(|&k| crate::mixer::slot_name(s, t, k).is_some()).map(|k| Target::Knob(KnobId::SlotMix(t, k))));
+    v
+}
+
 /// Whether the box is open (it is modal).
 pub fn is_open(s: &State) -> bool {
     s.link_box.is_some()
@@ -820,6 +862,42 @@ mod tests {
         assert_eq!(b.links().len(), 2, "up to controller 127");
         b.reset();
         assert_eq!((b.cc, b.all.len()), (None, 4));
+    }
+
+    /// The mixer's Link all parameters... (Lemon Studio's design): the current track's volume, pan, separation, nine
+    /// equaliser knobs, its sends and its filled slots' mix levels, linked on the first controller and the ones after it.
+    #[test]
+    fn the_mixer_links_a_tracks_controls() {
+        use crate::playlist::Cmd;
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        set_links(&[]);
+        app.state.selected_mixer = 1;
+        if let Some(t) = crate::mixer::track_mut(&mut app.state, 1) {
+            t.routes = vec![2, 0];
+        }
+        let menu = crate::mixer::options_menu(&app.state, 0.0, 0.0);
+        let item = menu.items.iter().find(|i| i.label == "Link all parameters...").unwrap();
+        assert!(item.enabled);
+        assert_eq!(item.cmd, Cmd::Remote(RCmd::LinkTrack(1)));
+        crate::playlist::run(&mut app, item.cmd.clone());
+        let b = app.state.link_box.clone().expect("the box");
+        let mut want = vec![Target::Fader(1), Target::Knob(KnobId::MixPan(1)), Target::Knob(KnobId::MixSep(1))];
+        want.extend((0..3).flat_map(|b| (0..3).map(move |f| Target::Knob(KnobId::Eq(1, b, f)))));
+        want.extend([Target::Knob(KnobId::Send(1, 0)), Target::Knob(KnobId::Send(1, 2))]);
+        want.extend((0..10u8).filter(|&k| crate::mixer::slot_name(&app.state, 1, k).is_some()).map(|k| Target::Knob(KnobId::SlotMix(1, k))));
+        assert_eq!((b.target, &b.all), (Target::Fader(1), &want));
+        // The controller moved: every control linked, controllers 20 and on.
+        app.remote_cc("Test", 0, 20, 64);
+        assert!(app.state.link_box.is_none(), "auto accepted");
+        let made = links();
+        assert_eq!(made.iter().map(|l| l.target).collect::<Vec<_>>(), want);
+        assert_eq!(made.iter().map(|l| l.cc).collect::<Vec<_>>(), (20..20 + want.len() as u8).collect::<Vec<_>>());
+        assert!(app.state.message.as_deref().is_some_and(|m| m.contains(&crate::mixer::name(&app.state, 1))), "{:?}", app.state.message);
+        // The volume follows its controller.
+        assert!(app.remote_cc("Test", 0, 20, 127));
+        assert_eq!(crate::mixer::track(&app.state, 1).and_then(|t| t.volume), Some(1.0));
+        set_links(&[]);
     }
 
     #[test]

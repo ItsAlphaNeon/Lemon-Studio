@@ -31,6 +31,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   (they follow the tempo by themselves too, also with tempo automation)
 - The rack's knob, mixer box and LED menus: Edit automation in piano roll opens the piano roll on the channel volume
   or panning lane, the swing knob takes a song start value, and the mixer box and the LED link to a MIDI controller
+- The mixer options' Link all parameters... links the current track's volume, pan, separation, equaliser, sends and
+  slot mix levels to consecutive MIDI controllers in one go
 - Advanced looping (the loop button's third loop type): each row's loop box takes a loop point, Step, Beat or Bar,
   and the row loops at the end of its last used step rounded up to it
 - Select unused channels and Purge unused audio clips (TOOLS menu and the rack's menu; purge asks first)

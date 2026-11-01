@@ -1583,7 +1583,8 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::head("Options"),
         PItem::sub("Disk recording", vec![PItem::new("Auto-create audio clips", Cmd::Mixer(MCmd::AutoClips)).mark(Mark::Check(crate::prefs::check(&crate::prefs::AUTO_AUDIO_CLIPS)))]),
         PItem::sub("Plugin delay compensation", vec![PItem::new("Automatic", Cmd::Mixer(MCmd::PdcAuto)).mark(Mark::Check(!s.project.pdc_off))]),
-        PItem::not_yet("Link all parameters..."),
+        // The current track's own controls (Lemon Studio's design, ui/mixer.md §6.1; spec: ui/remote-control.md §6).
+        PItem::new("Link all parameters...", Cmd::Remote(crate::remote::RCmd::LinkTrack(s.selected_mixer))),
         PItem::sub(
             "View",
             vec![
@@ -1591,6 +1592,7 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
                 PItem::new("Extra properties", Cmd::Mixer(MCmd::ViewExtra)).mark(Mark::Check(s.mixer.extra)),
             ],
         ),
+        // Greyed: the mixer is drawn in the main window's one surface (ui/mixer.md §6.1).
         PItem::not_yet("Detached").mark(Mark::Check(false)),
         PItem::sep(),
         PItem::sub("Trim unused tracks", trim_items(s)),
