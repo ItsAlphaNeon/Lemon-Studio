@@ -140,8 +140,13 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   (the slot menu's Container ▸ Edit list..., or opening the slot) opens each effect's own plugin window, sets its
   wet and dry levels in the value box (in percent), and moves, removes and adds effects (the effect list of an empty
   slot), one undo step each. Containers are saved in Lemon
-  Studio's projects with their effects' settings. Not yet: automation, links and presets for the effects inside,
-  and the original's Patcher slots in imported projects
+  Studio's projects with their effects' settings. The effects inside are listed with their parameters in the
+  browser's Effects (after their container), and their parameters' menu makes automation clips, controller links and
+  event editors as a slot's effect's does; each level in the list has that menu too. A clip or link names the effect
+  by its container's slot and its id in the container (at most 15 effects), so it follows the effect when the list
+  is reordered, plays in playback and export, and is saved with the project. A member's window lists, steps, saves
+  and loads its presets. Not yet: undo steps for a member's window edits and presets, moving a wrapped slot's own
+  clips and links onto the member, and the original's Patcher slots in imported projects
 
 ## ✅ Plugin hosting
 

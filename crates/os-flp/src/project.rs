@@ -6804,6 +6804,29 @@ mod tests {
         assert_eq!(again.automations[1].target().map(decode), Some(Target::SlotParam(1, 0, 8)));
     }
 
+    /// A clip on an effect inside a container (Lemon Studio's member targets: the container slot's parameter packing
+    /// the member's id and the item, spec plugins/patcher/README.md §4.2) is a slot parameter link like any other: up
+    /// to the last member's dry level, 0x7FFF, it is written and read back as it is.
+    #[test]
+    fn container_member_targets_round_trip() {
+        use os_model::target::{decode, member_item, slot_param, Target, MEMBER_DRY, MEMBER_WET};
+        let mut p = new_project();
+        for (i, name) in [(2u16, "Lemon Limiter in Container - Bus 1 - Ceiling"), (3, "Bus 1 - Lemon Delay dry")] {
+            p.channels.push(Channel { kind: ChannelKind::Automation, ..sampler(i, name, 0) });
+        }
+        let (param, dry) = (slot_param(1, 2, member_item(1, 4).unwrap()), slot_param(1, 2, member_item(15, MEMBER_DRY).unwrap()));
+        p.automations.push(new_automation(2, param, 0.5, 4.0));
+        p.automations.push(new_automation(3, dry, 0.25, 4.0));
+        p.automations[1].targets.push(slot_param(1, 2, member_item(15, MEMBER_WET).unwrap()));
+        let mut arr = default_arrangement();
+        arr.clips = vec![Clip::new(0, 384, 0, ClipSource::Channel(2)), Clip::new(0, 384, 1, ClipSource::Channel(3))];
+        p.arrangements = vec![arr];
+        let back = load(&FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back.automations, p.automations);
+        assert_eq!(dry, 0x7042_FFFF);
+        assert_eq!(back.automations[0].target().map(decode), Some(Target::SlotParam(1, 2, 2048 + 4)));
+    }
+
     /// A clip with several targets has one link each: all are read in file order, an unchanged model writes the file
     /// back byte for byte, and changed targets patch, add or remove links; controller links stay as they are (spec:
     /// flp/events/automation.md "Event 227").

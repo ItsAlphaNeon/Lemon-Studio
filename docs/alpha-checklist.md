@@ -60,8 +60,11 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
   colour and icon. Its list (the slot menu's Container ▸ Edit list..., or opening the slot) opens each effect's
   plugin window, types in its wet and dry levels, and removes, moves and adds effects, one undo step each
   ([container.rs](../crates/os-app/src/container.rs), [chain.rs](../crates/os-engine/src/chain.rs)). Containers are
-  saved in Lemon Studio's projects. Left: the original's Patcher slots in imported projects, automation, links and
-  presets for the effects inside, the channel's Patcherize, and the graph editor
+  saved in Lemon Studio's projects. The effects inside are automated and linked as a slot's effect is, their wet and
+  dry levels too (clips and controller links name the member by its container's slot and its id, so they follow it
+  when it moves and are saved with the project), and their windows have their presets (2026-10-30). Left: the
+  original's Patcher slots in imported projects, moving a wrapped slot's own clips and links onto its member, undo
+  steps for a member's window edits and presets, the channel's Patcherize, and the graph editor
 - [x] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** Six of the seven
   small effects match sample for sample in the tests (98 cases for these three: `os-engine/tests/integration/fx_null.rs`); the
   Chorus uses the true pi where the original's is a hair off, so 10 of its 21 cases match and the rest are at least

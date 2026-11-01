@@ -123,9 +123,10 @@ impl Link {
 
 /// Whether `t` can be linked: the piano roll tool dialogs' knobs live only while their dialog is open. A rack row's
 /// mixer track box and LED can be (Lemon Studio's design): the controller's travel spans Master to the last insert,
-/// and turns the channel on from its middle.
+/// and turns the channel on from its middle. So can the effects inside a container, their parameters and their wet
+/// and dry levels (Lemon Studio's design: spec plugins/patcher/README.md §4.2).
 fn linkable(t: Target) -> bool {
-    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)) | Target::Latency(..) | Target::Member(..))
+    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)) | Target::Latency(..))
 }
 
 /// A target as `settings.txt` keeps it (`none` for one that is not linkable, which reads back as nothing).
@@ -148,7 +149,9 @@ fn target_text(t: Target) -> String {
         Target::Param(key, i) => format!("param:{key}:{i}"),
         Target::RackTrack(r) => format!("racktrack:{r}"),
         Target::RackLed(r) => format!("rackled:{r}"),
-        Target::Latency(..) | Target::Member(..) => "none".into(),
+        Target::Member(m, k, id, wet) => format!("{}:{m}:{k}:{id}", if wet { "memberwet" } else { "memberdry" }),
+        Target::MemberParam(m, k, id, i) => format!("memberparam:{m}:{k}:{id}:{i}"),
+        Target::Latency(..) => "none".into(),
     }
 }
 
@@ -171,6 +174,8 @@ fn parse_target(s: &str) -> Option<Target> {
         "param" => Target::Param(n()?, n()?),
         "racktrack" => Target::RackTrack(n()?),
         "rackled" => Target::RackLed(n()?),
+        "memberwet" | "memberdry" => Target::Member(n()? as u16, n()? as u8, n()? as u32, kind == "memberwet"),
+        "memberparam" => Target::MemberParam(n()? as u16, n()? as u8, n()? as u32, n()?),
         _ => return None,
     })
 }
@@ -243,6 +248,10 @@ pub fn label(s: &State, l: &Link) -> String {
         Target::RackTrack(r) | Target::RackLed(r) => format!("{} - {name}", channel(r)),
         Target::Knob(KnobId::Send(a, _)) => format!("{} - {name}", crate::mixer::name(s, a)),
         Target::Param(key, index) => crate::params::clip_name(s, key, index),
+        Target::MemberParam(m, k, id, index) => match crate::container::member_key(s, crate::plugins::fx_key(m, k), id) {
+            Some(key) => crate::params::clip_name(s, key, index),
+            None => format!("{} - {name}", crate::mixer::name(s, m)),
+        },
         _ => name,
     };
     let omni = if l.omni { ", omni" } else { "" };
@@ -609,13 +618,27 @@ impl App {
                 crate::params::set_param_value(&mut self.state, key, index, f64::from(v));
                 self.record_plugin_param(key, index, f64::from(v));
             }
+            // An effect inside a container: its instance while it is loaded.
+            Target::MemberParam(m, k, id, index) => {
+                if let Some(key) = crate::container::member_key(&self.state, crate::plugins::fx_key(m, k), id) {
+                    crate::params::set_param_value(&mut self.state, key, index, f64::from(v));
+                    self.record_plugin_param(key, index, f64::from(v));
+                }
+            }
+            // A container member's level: one undo step while it keeps moving; recorded as its automation target.
+            Target::Member(m, k, id, wet) => {
+                crate::container::set_level_run(&mut self.state, m, k, id, wet, v);
+                if let Some(target) = crate::container::level_target(m, k, id, wet) {
+                    self.record_param(target, (0.0, 1.0), f64::from(v));
+                }
+            }
             // One undo step for each track the box moves to, and each switch of the LED (`typein::set_value`).
             Target::RackTrack(_) | Target::RackLed(_) => {
                 let to = crate::typein::at_position(&self.state, t, f64::from(v));
                 crate::typein::set_value(&mut self.state, t, to);
             }
             // Never linked (no remote control).
-            Target::Latency(..) | Target::Member(..) => {}
+            Target::Latency(..) => {}
         }
         self.invalidate();
     }
@@ -644,7 +667,9 @@ impl App {
                 let (w, h) = crate::views::remote_box::SIZE;
                 let (sw, sh) = self.state.screen;
                 let at = ((self.mouse.0 - 20.0).clamp(0.0, (sw - w).max(0.0)), (self.mouse.1 - 20.0).clamp(0.0, (sh - h).max(0.0)));
-                self.state.link_box = Some(LinkBox::all(key, params, at));
+                // An effect inside a container links by its place and id (`params::link_target`).
+                let targets = params.into_iter().map(|i| crate::params::link_target(&self.state, key, i)).collect();
+                self.state.link_box = Some(LinkBox::group(targets, at));
                 self.state.message = Some("Move the MIDI controller for the first parameter".into());
             }
             RCmd::LinkTrack(t) => {
@@ -765,6 +790,10 @@ impl App {
 pub fn group_name(s: &State, b: &LinkBox) -> String {
     match b.target {
         Target::Param(key, _) => crate::params::owner_name(s, key),
+        Target::MemberParam(m, k, id, _) => match crate::container::member_key(s, crate::plugins::fx_key(m, k), id) {
+            Some(key) => crate::params::owner_name(s, key),
+            None => crate::mixer::name(s, m),
+        },
         Target::Fader(t) => crate::mixer::name(s, t),
         t => crate::typein::caption(s, t).trim_start_matches("Value for ").to_string(),
     }
@@ -813,6 +842,12 @@ mod tests {
         for t in [Target::Knob(KnobId::Eq(1, 2, 0)), Target::Knob(KnobId::Send(1, 0)), Target::Knob(KnobId::MasterPitch), Target::RackTrack(4), Target::RackLed(2)] {
             assert_eq!(parse_target(&target_text(t)), Some(t));
         }
+        // The effects inside a container, by place and id (their hosted keys are the session's).
+        for t in [Target::Member(3, 9, 15, true), Target::Member(0, 0, 1, false), Target::MemberParam(2, 4, 7, 1999)] {
+            assert!(linkable(t));
+            assert_eq!(parse_target(&target_text(t)), Some(t));
+        }
+        assert_eq!(target_text(Target::MemberParam(2, 4, 7, 19)), "memberparam:2:4:7:19");
     }
 
     /// VIEW > Remote control works: the browser on the Current project tab with its Remote control section open and

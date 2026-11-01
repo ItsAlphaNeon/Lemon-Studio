@@ -11,12 +11,15 @@
 //! The project keeps a container as a slot plugin of its own name whose state lists the members (`Member`): each
 //! effect's identity, name, levels and saved state. The slot's chain is built from that list (`App::sync_containers`)
 //! and plays as the slot's effect (`os_engine::chain::Chain`). The members' instances are hosted under keys of their
-//! own (`plugins::MEMBER_KEY`), for their windows and housekeeping; they have no automation, links or presets yet.
-// spec: plugins/patcher/README.md §3.1, §3.3, §4 slice 1, §4.1
+//! own (`plugins::MEMBER_KEY`), for their windows, parameters and presets. A member's parameters and its wet and dry
+//! levels are automated and linked as parameters of the container's slot: the member's id and the item packed in the
+//! parameter index (`os_model::target::member_item`), so that clips and links follow the member when it moves.
+// spec: plugins/patcher/README.md §3.1, §3.3, §4 slice 1, §4.1, §4.2
 
 use std::sync::{Arc, Mutex};
 
 use os_engine::chain::{self, Chain};
+use os_model::target::{self, Target as Auto, MEMBER_DRY, MEMBER_IDS, MEMBER_WET};
 use os_model::{Id, Project, SlotPlugin};
 
 use crate::app::{App, State};
@@ -181,15 +184,66 @@ pub fn level_name(s: &State, t: u16, k: u8, id: u32, wet: bool) -> String {
 /// Sets the wet (`wet`) or dry level of member `id` of the container in slot `k` of track `t` to `v` (0..1): one undo
 /// step. The chain takes the level on the next tick, keeping its instances (`App::sync_containers`).
 pub fn set_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
-    let Some(mut list) = members(s, t, k) else { return };
-    let Some(m) = list.iter_mut().find(|m| m.id == id) else { return };
-    let level = if wet { &mut m.wet } else { &mut m.dry };
-    if *level == v {
-        return;
-    }
-    *level = v;
+    let Some(list) = leveled(s, t, k, id, wet, v) else { return };
     crate::control::edit(s, LEVEL, crate::control::command::Region::Track(t), |s| set_members(s, t, k, &list));
     s.piano.dirty = true;
+}
+
+/// `set_level` from a controller (a remote link): one undo step while the same level keeps moving, none while Undo
+/// knob tweaks is off, as a knob's.
+pub fn set_level_run(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
+    let Some(list) = leveled(s, t, k, id, wet, v) else { return };
+    let run = crate::history::Run::Member(t, k, id, wet);
+    crate::control::run_edit(s, LEVEL, crate::control::command::Region::Track(t), run, true, |s| set_members(s, t, k, &list));
+    s.piano.dirty = true;
+}
+
+/// The list with the level set (`None`: no such member, or the level is `v` already).
+fn leveled(s: &State, t: u16, k: u8, id: u32, wet: bool, v: f32) -> Option<Vec<Member>> {
+    let mut list = members(s, t, k)?;
+    let m = list.iter_mut().find(|m| m.id == id)?;
+    let level = if wet { &mut m.wet } else { &mut m.dry };
+    if *level == v {
+        return None;
+    }
+    *level = v;
+    Some(list)
+}
+
+/// The automation target of member `id`'s wet (`wet`) or dry level in the container in slot `k` of track `t` (spec:
+/// plugins/patcher/README.md §4.2).
+pub fn level_target(t: u16, k: u8, id: u32, wet: bool) -> Option<u32> {
+    Some(target::slot_param(t, k, target::member_item(id, if wet { MEMBER_WET } else { MEMBER_DRY })?))
+}
+
+/// The member level an automation target names, when it is one: track, slot, member id, wet.
+pub fn level_of(s: &State, t: Auto) -> Option<(u16, u8, u32, bool)> {
+    let Auto::SlotParam(m, k, i) = t else { return None };
+    let (id, item) = target::member_of(i)?;
+    (item >= MEMBER_WET && members(s, m, k)?.iter().any(|x| x.id == id)).then_some((m, k, id, item == MEMBER_WET))
+}
+
+/// "Create automation clip" on a member's level: target, clip name ("Bus 2 - Lemon Limiter wet"), current value.
+pub fn level_automation(s: &State, t: u16, k: u8, id: u32, wet: bool) -> Option<(u32, String, f64)> {
+    Some((level_target(t, k, id, wet)?, level_name(s, t, k, id, wet), f64::from(level(s, t, k, id, wet)?)))
+}
+
+/// The member that container slot key `slot_key` holds under id `id`: its hosted key, when its effect is loaded.
+pub fn member_key(s: &State, slot_key: usize, id: u32) -> Option<usize> {
+    let (t, k) = fx_of(slot_key)?;
+    s.params.members.iter().find(|(_, m)| **m == (t, k, id)).map(|(&key, _)| key)
+}
+
+/// The name of the member hosted under `key` and its container's slot label, "Lemon Limiter in Container (Bus 2)".
+pub fn member_label(s: &State, key: usize) -> Option<String> {
+    let &(t, k, id) = s.params.members.get(&key)?;
+    let name = members(s, t, k)?.into_iter().find(|m| m.id == id)?.name;
+    Some(format!("{name} in {}", crate::params::effect_label(s, t, k)?))
+}
+
+/// The smallest id no member of `list` has, up to the targets' limit (`None`: the container is full).
+fn free_id(list: &[Member]) -> Option<u32> {
+    (1..=MEMBER_IDS).find(|id| list.iter().all(|m| m.id != *id))
 }
 
 fn label(i: usize, m: &Member) -> String {
@@ -210,22 +264,27 @@ pub fn list_items(s: &State, slot: u8) -> Option<Vec<PItem>> {
     Some(v)
 }
 
-/// The container's list (Lemon Studio's plain list window of slice 1, as a menu): each member ▸ Open editor, Wet: …%...
-/// and Dry: …%... (the value box), Move up, Move down, Remove; then Add effect ▸, the effect picker of an empty slot.
+/// The container's list (Lemon Studio's plain list window of slice 1, as a menu): each member ▸ Open editor, Wet: …% ▸
+/// and Dry: …% ▸ (the parameter menu: automation, remote control, the value box), Move up, Move down, Remove; then Add
+/// effect ▸, the effect picker of an empty slot.
 pub fn list_popup(s: &State, slot: u8, x: f32, y: f32) -> Option<Popup> {
     let m = members(s, s.selected_mixer, slot)?;
     let n = m.len();
     let mx = |i: usize, op: Op| Cmd::Mixer(crate::mixer::MCmd::Member(slot, i, op));
     let on = |it: PItem, yes: bool| if yes { it } else { it.off() };
     let t = s.selected_mixer;
-    let typein = |id: u32, wet: bool| Cmd::TypeIn(crate::typein::Target::Member(t, slot, id, wet));
+    // A level's submenu: the parameter menu of a knob (automation, remote control, value), Enter value... in percents.
+    let level = |id: u32, wet: bool, v: f32| {
+        let label = format!("{}: {}%", if wet { "Wet" } else { "Dry" }, pct(v));
+        let create = level_automation(s, t, slot, id, wet);
+        PItem::sub(label, crate::params::level_items(s, create, crate::typein::Target::Member(t, slot, id, wet)))
+    };
     let mut items = vec![PItem::head("Container")];
     for (i, mem) in m.iter().enumerate() {
         let ops = vec![
             PItem::new("Open editor", mx(i, Op::Open)),
-            // The levels in the value box of the knobs' Enter value..., as percents.
-            PItem::new(format!("Wet: {}%...", pct(mem.wet)), typein(mem.id, true)),
-            PItem::new(format!("Dry: {}%...", pct(mem.dry)), typein(mem.id, false)),
+            level(mem.id, true, mem.wet),
+            level(mem.id, false, mem.dry),
             on(PItem::new("Move up", mx(i, Op::Up)), i > 0),
             on(PItem::new("Move down", mx(i, Op::Down)), i + 1 < n),
             PItem::new("Remove", mx(i, Op::Remove)),
@@ -300,6 +359,9 @@ impl App {
         if !taken.contains(&slot) {
             return Some("This slot's plugin is not hosted: nothing to wrap".into());
         }
+        if list.len() > MEMBER_IDS as usize {
+            return Some(format!("A container holds at most {MEMBER_IDS} effects"));
+        }
         for (i, m) in list.iter_mut().enumerate() {
             m.id = i as u32 + 1;
         }
@@ -361,7 +423,8 @@ impl App {
         let t = self.state.selected_mixer;
         let mut list = members(&self.state, t, slot)?;
         let a = self.plugins.effects.get(index)?;
-        let id = list.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+        // The smallest free id: a removed member's goes to the next one added (its clips and links would follow it).
+        let Some(id) = free_id(&list) else { return Some(format!("A container holds at most {MEMBER_IDS} effects")) };
         list.push(Member { id, uid: a.desc.uid(), name: a.desc.name.clone(), wet: 1.0, dry: 0.0, state: Vec::new() });
         set_members(&mut self.state, t, slot, &list);
         self.state.piano.dirty = true;
@@ -435,6 +498,7 @@ impl App {
             }
         }
         if want.is_empty() && self.plugins.containers.is_empty() {
+            self.state.params.members.clear();
             return;
         }
         let mut changed = false;
@@ -509,7 +573,7 @@ impl App {
                 self.plugins.drop_key(k);
             }
             let hosted = &self.plugins.hosted;
-            let fx = list.iter().zip(&keys).filter_map(|(m, k)| Some(chain::Member::new(hosted.get(&(*k)?)?.plugin.clone() as os_engine::SharedEffect, m.wet, m.dry))).collect();
+            let fx = list.iter().zip(&keys).filter_map(|(m, k)| Some(chain::Member::new(m.id, hosted.get(&(*k)?)?.plugin.clone() as os_engine::SharedEffect, m.wet, m.dry))).collect();
             let live = Live { id, src, shape: shape(&list), keys, fx: Arc::new(Mutex::new(Chain::new(fx))) };
             self.plugins.containers.insert(key, live);
             changed = true;
@@ -518,6 +582,17 @@ impl App {
             self.state.message = Some(format!("Container: not found, left out of the chain: {}", missing.join(", ")));
         }
         if changed {
+            // Which member each hosted key is, for its parameters' targets and links (`params::target_of`).
+            let members = &mut self.state.params.members;
+            members.clear();
+            for (&slot_key, live) in &self.plugins.containers {
+                let Some((t, k)) = fx_of(slot_key) else { continue };
+                for ((id, _), key) in live.shape.iter().zip(&live.keys) {
+                    if let Some(key) = key {
+                        members.insert(*key, (t, k, *id));
+                    }
+                }
+            }
             self.transport.set_effects(self.plugins.effects());
             self.state.piano.dirty = true;
         }
@@ -663,7 +738,7 @@ mod tests {
         let pop = list_popup(&a.state, 0, 0.0, 0.0).unwrap();
         let ops = &pop.items[2].children;
         assert_eq!(pop.items[2].label, format!("2. {second} (wet 100%, dry 0%)"));
-        assert_eq!(ops.iter().map(|i| i.label.as_ref()).collect::<Vec<_>>(), ["Open editor", "Wet: 100%...", "Dry: 0%...", "Move up", "Move down", "Remove"]);
+        assert_eq!(ops.iter().map(|i| i.label.as_ref()).collect::<Vec<_>>(), ["Open editor", "Wet: 100%", "Dry: 0%", "Move up", "Move down", "Remove"]);
         assert!(ops[3].enabled && !ops[4].enabled, "the last one moves up only");
         // Move up.
         crate::playlist::run(&mut a, ops[3].cmd.clone());
@@ -694,6 +769,11 @@ mod tests {
         tick(&mut a);
         assert_eq!(names(&a, 0), [second, first.clone(), first]);
         assert_eq!(members(&a.state, 2, 0).unwrap()[2].id, 3);
+        // The smallest free id: a removed member's comes back to the next one added.
+        let with = |ids: &[u32]| -> Vec<Member> { ids.iter().map(|&id| Member { id, ..members(&a.state, 2, 0).unwrap()[0].clone() }).collect() };
+        assert_eq!(free_id(&with(&[2, 3])), Some(1));
+        assert_eq!(free_id(&with(&[1, 2, 4])), Some(3));
+        assert_eq!(free_id(&with(&(1..=MEMBER_IDS).collect::<Vec<_>>())), None, "at most 15");
         assert_eq!(a.plugins.containers[&fx_key(2, 0)].fx.lock().unwrap().members.len(), 3);
         assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(ADD));
         assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some(ADD));
@@ -708,8 +788,13 @@ mod tests {
         assert_eq!(a.member_infos().len(), 3);
     }
 
-    /// A member's wet and dry: the list's Wet: …%... and Dry: …%... open the value box in percent; each typed value is
-    /// one undo step; the chain takes the levels and keeps its instances.
+    /// The command of entry `label` of a menu's items.
+    fn cmd_of(items: &[PItem], label: &str) -> Cmd {
+        items.iter().find(|i| i.label == label).unwrap_or_else(|| panic!("no {label:?}")).cmd.clone()
+    }
+
+    /// A member's wet and dry: the list's Wet: …% ▸ and Dry: …% ▸ Enter value... open the value box in percent; each
+    /// typed value is one undo step; the chain takes the levels and keeps its instances.
     #[test]
     fn a_members_wet_and_dry() {
         use crate::typein::{accept, text, Target};
@@ -720,8 +805,8 @@ mod tests {
         let pop = list_popup(&a.state, 0, 0.0, 0.0).unwrap();
         let ops = &pop.items[2].children;
         let (wet, dry) = (Target::Member(2, 0, 2, true), Target::Member(2, 0, 2, false));
-        assert_eq!((ops[1].label.as_ref(), &ops[1].cmd), ("Wet: 100%...", &Cmd::TypeIn(wet)));
-        assert_eq!((ops[2].label.as_ref(), &ops[2].cmd), ("Dry: 0%...", &Cmd::TypeIn(dry)));
+        assert_eq!((ops[1].label.as_ref(), cmd_of(&ops[1].children, "Enter value...")), ("Wet: 100%", Cmd::TypeIn(wet)));
+        assert_eq!((ops[2].label.as_ref(), cmd_of(&ops[2].children, "Enter value...")), ("Dry: 0%", Cmd::TypeIn(dry)));
         assert_eq!(text(&a.state, wet, false), "100%");
         assert_eq!(crate::typein::caption(&a.state, dry), format!("Value for {} - {second} dry", crate::mixer::name(&a.state, 2)));
         accept(&mut a.state, wet, false, "60");
@@ -739,5 +824,80 @@ mod tests {
         assert_eq!(members(&a.state, 2, 0).unwrap()[1].dry, 0.0);
         assert_eq!(a.plugins.containers[&fx_key(2, 0)].fx.lock().unwrap().members[1].dry, 0.0);
         assert_eq!(a.plugins.containers[&fx_key(2, 0)].keys, keys);
+    }
+
+    /// The effects inside a container automate and link as a slot's effect does (spec: plugins/patcher/README.md §4.2):
+    /// a member's parameter is a parameter of the container's slot naming the member and the index; the browser lists
+    /// the member with its parameters, whose menu makes a clip on that target, links it by place and id and enters its
+    /// value; the clip keeps naming the member when it moves; a controller drives it. Its levels have the parameter
+    /// menu too, their clip named as the value box names them; a controller on one is one undo step while it moves.
+    #[test]
+    fn members_automate_and_link() {
+        use crate::remote::{Link, RCmd};
+        use crate::typein::Target as T;
+        use crate::views::browser::{rows, Item};
+        let (mut a, _, second) = two_effects();
+        crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(0, true)));
+        tick(&mut a);
+        a.params_tick();
+        let key = a.plugins.containers[&fx_key(2, 0)].keys[1].unwrap();
+        assert_eq!(a.state.params.members.get(&key), Some(&(2, 0, 2)));
+        let tgt = target::slot_param(2, 0, target::member_item(2, 0).unwrap());
+        assert_eq!(crate::params::target_of(&a.state, key, 0), Some(tgt));
+        assert_eq!(crate::params::key_of(&a.state, target::decode(tgt)), Some((key, 0)));
+        assert_eq!(crate::params::target_of(&a.state, key, usize::from(MEMBER_WET)), None, "past the parameters' room");
+        let pname = crate::params::param_name(&a.state, key, 0).unwrap();
+
+        // Show all parameters: the member's node under Effects, after its container.
+        assert_eq!(a.browse_params(key), None);
+        let node = format!("1:Current project/Effects/{second} in {}", crate::params::effect_label(&a.state, 2, 0).unwrap());
+        assert_eq!(a.state.browser_sel.as_deref(), Some(node.as_str()));
+        let row = rows(&a.state).iter().position(|r| r.item == Item::Param(key, 0)).expect("the parameter row");
+        assert!(a.params_browser_right(row, 0.0, 0.0));
+        let menu = a.state.playlist.popup.take().unwrap();
+        let Cmd::CreateAutomation(t, name, _) = cmd_of(&menu.items, "Create automation clip") else { panic!() };
+        assert_eq!(t, tgt);
+        assert_eq!(name, format!("{second} in {} - {} - {pname}", crate::plugins::slot_label(&crate::mixer::slot_name(&a.state, 2, 0).unwrap()), crate::mixer::name(&a.state, 2)));
+        let link = T::MemberParam(2, 0, 2, 0);
+        assert_eq!(cmd_of(&menu.items, "MIDI learn..."), Cmd::Remote(RCmd::Link(link)));
+        assert_eq!(cmd_of(&menu.items, "Enter value..."), Cmd::TypeIn(link));
+        assert_eq!(crate::typein::get(&a.state, link), crate::params::param_value(&a.state, key, 0));
+        crate::playlist::run(&mut a, Cmd::CreateAutomation(t, name.clone(), 0.5));
+        assert_eq!(crate::params::driving_clip(&a.state, tgt), Some(a.state.project.channels.last().unwrap().index));
+        assert_eq!(crate::init::name(&a.state, tgt), name, "the clip's name, from its target");
+        // Moved to the front of the list: the same member, the same target.
+        crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Member(0, 1, Op::Up)));
+        tick(&mut a);
+        assert_eq!(a.plugins.containers[&fx_key(2, 0)].keys[0], Some(key));
+        assert_eq!(crate::params::key_of(&a.state, target::decode(tgt)), Some((key, 0)));
+        assert_eq!(crate::params::target_of(&a.state, key, 0), Some(tgt));
+
+        // A controller on the parameter, kept by place and id.
+        crate::remote::set_links(&[]);
+        crate::remote::add(Link::new(0, 20, link), true);
+        assert_eq!(crate::remote::links().iter().map(|l| l.target).collect::<Vec<_>>(), [link]);
+        assert!(a.remote_cc("Test", 0, 20, 127));
+        a.plugins.hosted[&key].plugin.lock().unwrap().idle();
+        assert!((crate::params::param_value(&a.state, key, 0).unwrap() - 1.0).abs() < 1e-6);
+        assert!(crate::remote::label(&a.state, &crate::remote::links()[0]).starts_with(&format!("{second} in ")));
+
+        // The levels: the parameter menu, a clip named as the value box names them, a controller.
+        let pop = list_popup(&a.state, 0, 0.0, 0.0).unwrap();
+        let wet = &pop.items[1].children[1];
+        assert_eq!(wet.label, "Wet: 100%");
+        let level = level_target(2, 0, 2, true).unwrap();
+        let caption = level_name(&a.state, 2, 0, 2, true);
+        assert_eq!(cmd_of(&wet.children, "Create automation clip"), Cmd::CreateAutomation(level, caption.clone(), 1.0));
+        assert_eq!(cmd_of(&wet.children, "MIDI learn..."), Cmd::Remote(RCmd::Link(T::Member(2, 0, 2, true))));
+        assert_eq!(crate::init::name(&a.state, level), caption);
+        assert_eq!(level_of(&a.state, target::decode(level)), Some((2, 0, 2, true)));
+        assert_eq!(crate::params::key_of(&a.state, target::decode(level)), None, "not a parameter of the effect");
+        crate::remote::add(Link::new(0, 21, T::Member(2, 0, 2, false)), true);
+        a.state.history.reset();
+        assert!(a.remote_cc("Test", 0, 21, 64));
+        assert!(a.remote_cc("Test", 0, 21, 127));
+        assert_eq!(members(&a.state, 2, 0).unwrap()[0].dry, 1.0);
+        assert_eq!(a.state.history.len(), 1, "one step while it moves");
+        crate::remote::set_links(&[]);
     }
 }

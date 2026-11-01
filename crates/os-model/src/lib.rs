@@ -2259,6 +2259,25 @@ pub mod target {
         u32::from(0x7000 + track * 64 + u16::from(slot)) << 16 | u32::from(PLUGIN_PARAM | (k & 0x7FFF))
     }
 
+    /// Lemon Studio's targets inside a container (spec: plugins/patcher/README.md §4.2): parameter `k` of a container
+    /// slot packs the member's id (1..=[`MEMBER_IDS`]) times [`MEMBER_ITEMS`] plus an item, which is the member's
+    /// parameter index (below [`MEMBER_WET`]), its wet level ([`MEMBER_WET`]) or its dry level ([`MEMBER_DRY`]).
+    pub const MEMBER_ITEMS: u16 = 2048;
+    pub const MEMBER_WET: u16 = 2046;
+    pub const MEMBER_DRY: u16 = 2047;
+    pub const MEMBER_IDS: u32 = 15;
+
+    /// The container slot parameter of item `item` of member `id` (`None`: an id or item out of range).
+    pub fn member_item(id: u32, item: u16) -> Option<u16> {
+        ((1..=MEMBER_IDS).contains(&id) && item < MEMBER_ITEMS).then(|| id as u16 * MEMBER_ITEMS + item)
+    }
+
+    /// The member's id and the item that container slot parameter `k` names (`None` below the first member's).
+    pub fn member_of(k: u16) -> Option<(u32, u16)> {
+        let id = u32::from(k / MEMBER_ITEMS);
+        (1..=MEMBER_IDS).contains(&id).then_some((id, k % MEMBER_ITEMS))
+    }
+
     /// A plugin parameter's control point holds the plain value as the plugin states its range when that range runs
     /// between whole numbers at least 2 apart (FL's own plugins, and Lemon Studio's recreations of them, keep whole
     /// values in their own unit), else the normalized value times 65536 (a Lemon Studio choice: the unit FL keeps for
@@ -2403,6 +2422,15 @@ pub mod target {
             assert_eq!(decode(0x7040_800D), Target::SlotParam(1, 0, 13));
             assert_eq!(decode(slot_param(0, 9, 0)), Target::SlotParam(0, 9, 0));
             assert_eq!(decode(slot_param(125, 3, 0x7FFF)), Target::SlotParam(125, 3, 0x7FFF));
+            // A container's members (Lemon Studio's): id times 2048 plus the item.
+            assert_eq!(member_item(1, 0), Some(2048));
+            assert_eq!(member_item(15, MEMBER_DRY), Some(0x7FFF));
+            assert_eq!(member_item(16, 0), None);
+            assert_eq!(member_item(0, 3), None);
+            assert_eq!(member_item(2, MEMBER_ITEMS), None);
+            assert_eq!(member_of(2 * 2048 + 7), Some((2, 7)));
+            assert_eq!(member_of(2047), None);
+            assert_eq!(decode(slot_param(3, 1, member_item(15, MEMBER_WET).unwrap())), Target::SlotParam(3, 1, 15 * 2048 + MEMBER_WET));
             // The mixer track's own controls are not slot parameters.
             assert_eq!(decode(mixer(1, MIXER_VOLUME)), Target::MixerVolume(1));
             assert_eq!(decode(channel(3, CHANNEL_PAN)), Target::ChannelPan(3));

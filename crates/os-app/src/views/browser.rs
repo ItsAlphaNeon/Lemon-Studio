@@ -442,6 +442,13 @@ fn project_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                     for k in (0..m.slots.len()).filter(|&k| m.slots[k].is_some()) {
                         let label = crate::params::effect_label(s, m.index, k as u8).unwrap_or_default();
                         plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, crate::plugins::fx_key(m.index, k as u8));
+                        // A container's effects follow it, in its order (Lemon Studio's design: plugins/patcher §4.2).
+                        let list = crate::container::members(s, m.index, k as u8).unwrap_or_default();
+                        for mem in &list {
+                            let Some(key) = crate::container::member_key(s, crate::plugins::fx_key(m.index, k as u8), mem.id) else { continue };
+                            let label = crate::container::member_label(s, key).unwrap_or_default();
+                            plugin_node(s, out, &parent, label, Icon::Speaker, cat, false, Item::None, key);
+                        }
                     }
                 }
             }

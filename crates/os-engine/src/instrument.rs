@@ -386,6 +386,12 @@ pub trait HostedEffect: Send {
     fn tick_params_fx(&self) -> bool {
         false
     }
+    /// `tick_params_fx` for parameter `index` alone: a container's members each take theirs as their effect does
+    /// (`crate::chain`).
+    fn tick_params_at(&self, index: u32) -> bool {
+        let _ = index;
+        self.tick_params_fx()
+    }
     /// [`Instrument::param_range`] for effects.
     fn param_range_fx(&self, index: usize) -> Option<(f64, f64)> {
         let _ = index;
