@@ -47,7 +47,7 @@ pub use cocoa::{default_position, lift_hide, lift_show, pointer, row_window_at, 
 
 /// TOOLS > Set keyboard focus of all plugins to ▸ (Lemon Studio's design; spec: ui/channel-switches.md §6): whether
 /// plugin editors take the computer keyboard (Enabled, the default) or never get it (Disabled), the keys then going to
-/// Lemon Studio as those pressed in an editor already do (`take_keys`: the typing keyboard, Space). For the session.
+/// Lemon Studio as those pressed in an editor already do (`take_keys`: the typing keyboard, Space). Saved in `.lemon` files (`lemon_state`).
 static EDITOR_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Whether plugin editors take the keyboard.

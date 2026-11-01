@@ -124,8 +124,8 @@ pub struct Project {
     /// flp/events/automation.md "Controller links"): a controller plugin's output driving a target.
     pub controller_links: Vec<ControllerLink>,
     /// Mixer options ▸ Plugin delay compensation ▸ Automatic unticked: the plugins' delays are not compensated, only
-    /// the tracks' latency settings are (spec: audio/delay-compensation.md "Automatic"). Not saved: where the original
-    /// keeps it was not found.
+    /// the tracks' latency settings are (spec: audio/delay-compensation.md "Automatic"). Not in the FLP (where the
+    /// original keeps it was not found): a `.lemon` file keeps it in its own events (os-app `lemon_state`).
     pub pdc_off: bool,
 }
 
@@ -1999,8 +1999,8 @@ pub struct PlaylistTrack {
     /// Performance settings (bytes 22..46; spec: ui/performance-mode.md §4).
     pub perf: PerfSettings,
     /// The source this track is locked to: Draw and Paint place it here whatever the picker's current source is
-    /// (TOOLS ▸ Lock all tracks to their clips). Lemon Studio's design, for the session only: no file stores it
-    /// (spec: ui/playlist.md "Locking tracks to their clips").
+    /// (TOOLS ▸ Lock all tracks to their clips). Lemon Studio's design: no FLP field stores it, a `.lemon`
+    /// file's own events do (os-app `lemon_state`; spec: ui/playlist.md "Locking tracks to their clips").
     pub clip_lock: Option<ClipSource>,
 }
 

@@ -263,9 +263,10 @@ pub struct RackUi {
     /// without one plays the focused channel. Not saved (Lemon Studio's choice: the original's file was not measured).
     pub note_lock: [Option<usize>; 2],
     /// Show waveform preview (§18, Lemon Studio's design): the channels, by id, whose name button shows their sample's
-    /// waveform. Not saved (the original's file was not measured).
+    /// waveform. Saved in `.lemon` files only (`lemon_state`; the original's file was not measured).
     pub wave_preview: BTreeSet<u32>,
-    /// MIDI channel through (§18): the channels, by id, with it unticked; it is ticked by default. Not saved.
+    /// MIDI channel through (§18): the channels, by id, with it unticked; it is ticked by default. Saved in `.lemon` files
+    /// only (`lemon_state`).
     pub through_off: BTreeSet<u32>,
 }
 

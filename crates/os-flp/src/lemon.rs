@@ -27,6 +27,16 @@ pub const SLOT_NAMES: u8 = 194;
 pub const SLOT_COLORS: u8 = 195;
 /// `LMex` event: Performance mode's settings (the playlist ▸ menu's checks).
 pub const PERFORMANCE: u8 = 196;
+/// `LMex` event: the mixer's Plugin delay compensation ▸ Automatic and View ▸ checks.
+pub const MIXER: u8 = 197;
+/// `LMex` event: the plugin windows' Scaling ▸ (channels and effect slots).
+pub const SCALING: u8 = 198;
+/// `LMex` event: each channel's Show waveform preview and MIDI channel through checks.
+pub const CHANNEL_CHECKS: u8 = 199;
+/// `LMex` event: Set keyboard focus of all plugins to ▸.
+pub const KEY_FOCUS: u8 = 200;
+/// `LMex` event: the playlist tracks locked to their clips.
+pub const TRACK_LOCKS: u8 = 201;
 
 /// Whether `file` is a `.lemon` file (its first chunk is `LMhd`).
 pub fn is_lemon(file: &FlpFile) -> bool {
