@@ -276,6 +276,8 @@ pub enum Action {
     Embed(usize),
     /// A tab of a window of plugin windows (`plugin_tabs`).
     PluginTab(usize),
+    /// The little x on such a tab.
+    PluginTabClose(usize),
     /// The value box of "Enter value..." (spec: ui/type-in-value.md).
     TypeIn(crate::typein::TiAct),
     /// The Remote control settings box (spec: ui/remote-control.md).
@@ -1467,6 +1469,8 @@ pub struct App {
     /// Linux: a tab pressed (`plugin_tabs`): where, and once it has been dragged out, the mouse's offset in its window.
     #[cfg(target_os = "linux")]
     tab_press: Option<(usize, (f32, f32), Option<(f32, f32)>)>,
+    /// Linux: a tab's little x pressed.
+    tab_close_press: Option<usize>,
     /// The open popup belongs to this row's detached plugin window: it is shown lifted above that window.
     #[cfg_attr(not(plugin_windows), allow(dead_code))]
     popup_lift: Option<usize>,
@@ -1797,6 +1801,7 @@ impl App {
             embed_virt: None,
             #[cfg(target_os = "linux")]
             tab_press: None,
+            tab_close_press: None,
             popup_lift: None,
             plugin_menu: None,
             bars: Vec::new(),
@@ -3088,6 +3093,16 @@ impl App {
                 use crate::plugins::Request;
                 let chans = &mut self.state.project.channels;
                 match r {
+                    // The window's own close: all its tabs (a tab's little x closes only that one).
+                    #[cfg(target_os = "linux")]
+                    Request::Close(row) => {
+                        let others: Vec<usize> = self.state.plugin_tabs.group_of(row).map_or(Vec::new(), |g| g.rows.iter().copied().filter(|&o| o != row).collect());
+                        for o in others {
+                            self.plugins.close_window(o);
+                        }
+                        continue;
+                    }
+                    #[cfg(not(target_os = "linux"))]
                     Request::Close(_) => continue,
                     Request::Raise(row) => {
                         // A click in a plugin window closes an open app popup and the Song info box, as a click elsewhere
@@ -7111,6 +7126,12 @@ impl App {
             return false;
         }
         let (x, y) = self.mouse;
+        if let Some(&Action::PluginTabClose(r)) = self.top_hit(x, y).map(|h| &h.action) {
+            if btn == os_plugkit::input::Button::Left {
+                self.tab_close_press = Some(r);
+            }
+            return true;
+        }
         if let Some(&Action::PluginTab(r)) = self.top_hit(x, y).map(|h| &h.action) {
             if btn == os_plugkit::input::Button::Left {
                 self.state.plugin_tabs.activate(r);
@@ -7207,6 +7228,14 @@ impl App {
             return true;
         }
         let (x, y) = self.mouse;
+        // A tab's little x acts on the release, over it still.
+        if let Some(r) = self.tab_close_press.take() {
+            if self.top_hit(x, y).is_some_and(|h| h.action == Action::PluginTabClose(r)) {
+                self.plugins.close_window(r);
+                self.invalidate();
+            }
+            return true;
+        }
         let mods = self.embed_mods();
         let (row, btn) = match self.embed_press.take() {
             Some(p) => p,
@@ -9769,7 +9798,7 @@ impl App {
             Action::CloseWin(w) => s.hide(w),
             Action::BrowserRow(_) | Action::BrowserTab(_) | Action::BrowserList | Action::BrowserCollapse | Action::BrowserReread | Action::BrowserMenu | Action::BrowserSearch | Action::BrowserClear | Action::BrowserSplitter | Action::BrowserMove => {}
             Action::TypeIn(t) => crate::typein::click(s, t),
-            Action::PluginTab(_) | Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow | Action::Embed(_) => {}
+            Action::PluginTab(_) | Action::PluginTabClose(_) | Action::PlaylistArea | Action::MixerArea | Action::RackArea | Action::Swallow | Action::Embed(_) => {}
             Action::PlTool(_)
             | Action::PlSnap
             | Action::PlOptions
@@ -12289,6 +12318,58 @@ mod tests {
         assert_eq!(a.h, alone.h, "no row of tabs");
         app.plugins.close_window(0);
         app.plugins.close_window(1);
+    }
+
+    /// A tab's little x closes that tab; the window's close closes them all, in either layout.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tab_closes_alone_and_the_window_closes_all() {
+        use crate::plugin_window::ChannelInfo;
+        use std::time::{Duration, Instant};
+        let Ok(mut c) = Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = App::new(None);
+        app.plugins.available = crate::plugins::builtin();
+        app.plugins.scale = 1.0;
+        app.state.project.channels.extend([Channel::default(), Channel::default()]);
+        frame(&mut app, &mut c, None);
+        let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
+        let info = |name: &str| ChannelInfo { icon: None, name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let rows = [0, 1, 2];
+        for r in rows {
+            app.plugins.create_with(r, index, None).unwrap();
+            app.plugins.open_window(r, info("Tab")).unwrap();
+        }
+        let t0 = Instant::now();
+        while !rows.iter().all(|r| app.state.embeds.get(r).is_some_and(|e| e.claimed())) && t0.elapsed() < Duration::from_secs(3) {
+            app.plugin_tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        app.plugin_tick();
+        assert_eq!(app.state.plugin_tabs.group_of(0).map(|g| g.rows.len()), Some(3));
+        frame(&mut app, &mut c, None);
+        // The little x of the first tab, not showing: it goes, and the one showing stays.
+        let strip = app.state.embeds[&2].tabs_rect();
+        let close = crate::plugin_tabs::row_shapes(strip, 3, 2, crate::prefs::check(&crate::prefs::PLUGIN_TABS_STACKED)).into_iter().find(|t| t.index == 0).and_then(|t| t.close()).unwrap();
+        let at = (close.cx(), close.cy());
+        app.mouse_move(at.0, at.1);
+        assert_eq!(app.top_hit(at.0, at.1).map(|h| h.action.clone()), Some(Action::PluginTabClose(0)));
+        assert!(app.embed_down(os_plugkit::input::Button::Left));
+        assert!(app.embed_up());
+        app.plugin_tick();
+        assert!(!app.state.embeds.contains_key(&0), "that tab closed");
+        assert!(app.state.embeds.contains_key(&1) && app.state.embeds.contains_key(&2), "the others stay");
+        assert_eq!(app.state.plugin_tabs.group_of(1).map(|g| (g.rows.len(), g.active)), Some((2, 2)));
+        frame(&mut app, &mut c, None);
+        // The window's close, top right: every tab goes.
+        let e = app.state.embeds[&2].clone();
+        let r = e.rect();
+        let button = (0..r.w as i32).map(|d| (r.right() - d as f32, r.y + 15.0)).find(|&(x, y)| e.button_at(x, y) == Some(true)).expect("the close button");
+        app.mouse_move(button.0, button.1);
+        assert!(app.embed_down(os_plugkit::input::Button::Left));
+        assert!(app.embed_up());
+        app.plugin_tick();
+        app.plugin_tick();
+        assert!(app.state.embeds.is_empty(), "all of them closed");
     }
 
     #[test]

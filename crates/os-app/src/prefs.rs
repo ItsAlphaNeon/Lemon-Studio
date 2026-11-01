@@ -254,6 +254,9 @@ pub const LIMIT_EDITORS: Check = Check { key: "limit_plugin_editors", label: "Li
 /// General ▸ Miscellaneous: windows of one plugin, drawn in the app's, are tabs of one window (`plugin_tabs`).
 pub const PLUGIN_TABS: Check = Check { key: "plugin_window_tabs", label: "Show windows of one plugin as tabs", default: true };
 
+/// General ▸ Miscellaneous: those tabs lie partly over each other instead of side by side.
+pub const PLUGIN_TABS_STACKED: Check = Check { key: "plugin_window_tabs_stacked", label: "Stack plugin tabs", default: false };
+
 pub const SHOW_SPLASH: Check = Check { key: "show_startup_splash", label: "Show startup splash screen", default: true };
 
 /// General ▸ Miscellaneous: stored and shown only. Lemon Studio has no startup sound (and does not use the
@@ -595,6 +598,7 @@ pub const CHECKS: &[&Check] = &[
     &LIMIT_EDITORS,
     &SHOW_SPLASH,
     &PLUGIN_TABS,
+    &PLUGIN_TABS_STACKED,
     &SILENT_STARTUP,
     &BOTH_MOUSE_BUTTONS,
     &CLICK_AND_HOLD,

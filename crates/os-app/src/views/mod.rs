@@ -387,26 +387,52 @@ fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_windo
     let t = ui.t;
     let strip = e.tabs_rect();
     let font = os_ui::Font::new(13);
-    let w = (strip.w / g.rows.len() as f32).min(160.0);
+    let active = g.rows.iter().position(|&r| r == g.active).unwrap_or(0);
+    let stacked = crate::prefs::check(&crate::prefs::PLUGIN_TABS_STACKED);
+    let shapes = crate::plugin_tabs::row_shapes(strip, g.rows.len(), active, stacked);
+    let under = crate::plugin_tabs::tab_at(&shapes, ui.mouse.0, ui.mouse.1);
     ui.c.fill_rect(strip, t.sunken);
-    for (i, &r) in g.rows.iter().enumerate() {
-        let tab = Rect::new(strip.x + w * i as f32, strip.y, w, strip.h);
+    ui.c.push_clip(strip);
+    for tab in &shapes {
+        let r = g.rows[tab.index];
         let on = r == g.active;
-        let hover = tab.contains(ui.mouse.0, ui.mouse.1);
-        let pill = tab.inset(2.0);
-        if on {
-            lk::lit_in(ui.c, t, pill, lk::r_btn(t), hover);
-        } else if hover {
-            ui.c.fill_rrect(pill, lk::r_btn(t), t.button_hi);
+        let hover = under == Some(tab.index);
+        let face = match (on, hover) {
+            (true, false) => t.brand_lit(os_theme::design::lemon::MAIN),
+            (true, true) => t.brand_lit(os_theme::design::lemon::MAIN).mix(t.brand_lit(os_theme::design::lemon::HIGHLIGHT), 0.35),
+            (false, false) => t.button,
+            (false, true) => t.button_hi,
+        };
+        // Stacked, each tab further down is a little darker.
+        let face = face.mix(t.sunken, (0.22 * tab.depth as f32).min(0.66));
+        let edge = t.button.mix(t.text_dim, 0.5);
+        let outline = tab.outline();
+        ui.c.fill_polygon(&outline, face);
+        ui.c.line(outline[3].0, outline[3].1, outline[2].0, outline[2].1, 1.2, edge);
+        if tab.index > 0 {
+            ui.c.line(outline[0].0, outline[0].1, outline[1].0, outline[1].1, 1.2, edge);
         }
         let name = s.embeds.get(&r).map_or(String::new(), |f| f.name());
         let ink = if on { lk::ink_on_lit(t) } else { t.text_dim };
-        let ty = (tab.y + (tab.h - ui.c.line_height(font)) / 2.0).round();
-        ui.c.push_clip(pill);
-        ui.c.text(font, tab.x + 10.0, ty, ink, &name);
-        ui.c.pop_clip();
-        ui.hit(tab, Action::PluginTab(r), name);
+        let (lx, lr) = tab.label();
+        let ty = (strip.y + (strip.h - ui.c.line_height(font)) / 2.0).round();
+        if lr > lx {
+            ui.c.text_clip(font, lx, ty, lr - lx, ink, &name);
+        }
+        for band in tab.bands() {
+            ui.hit(band, Action::PluginTab(r), name.clone());
+        }
+        if let Some(c) = tab.close() {
+            let over = hover && c.contains(ui.mouse.0, ui.mouse.1);
+            let x = if over { if on { ink } else { t.text } } else { ink };
+            let m = c.inset(3.5);
+            let width = if over { 1.8 } else { 1.2 };
+            ui.c.line(m.x, m.y, m.right(), m.bottom(), width, x);
+            ui.c.line(m.x, m.bottom(), m.right(), m.y, width, x);
+            ui.hit(c, Action::PluginTabClose(r), "Close");
+        }
     }
+    ui.c.pop_clip();
 }
 
 /// Paints window `win` at `r` inside its paint area `a`.

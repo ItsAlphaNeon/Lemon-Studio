@@ -84,8 +84,9 @@ own content. Side branches are named `cutting-edge-<topic>`.
   controls), no frame around the editor. Third-party plugins keep windows of their own.
   `LEMONSTUDIO_PLUGIN_WINDOWS=1` gives the built-in ones their own windows again.
 - **Windows of one plugin as tabs (Linux).** A second window of a plugin drawn in the app's joins the first, with a row of
-  tabs under the title; a tab dragged out of the row stands alone, to compare side by side. General ▸ Miscellaneous
-  "Show windows of one plugin as tabs" turns it off.
+  tabs under the title: square, divided by slanted edges, each with its own close button, while the window's close closes
+  them all. A tab dragged out of the row stands alone, to compare side by side. General ▸ Miscellaneous "Show windows of
+  one plugin as tabs" turns it off, and "Stack plugin tabs" lays them partly over each other.
 - **Tiling desktops leave the window to the window manager.** On a tiling desktop (Hyprland, sway, i3, niri, river
   and the like, read from `XDG_CURRENT_DESKTOP`), the tiling layout's toolbar has no minimize, maximize and close
   buttons: the window manager places, sizes and closes the window with its own keys. The flexible spaces take their

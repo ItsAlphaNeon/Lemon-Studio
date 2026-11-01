@@ -776,6 +776,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Check("Alternate meter scale", false),
                 Check("Show startup splash screen", true),
                 Check("Show windows of one plugin as tabs", true),
+                Check("Stack plugin tabs", false),
                 Check("Restore previous state after solo", false),
                 Check("Hide plugin window strip by default", true),
                 Check("Silent startup", false),

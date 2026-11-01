@@ -11,6 +11,123 @@
 
 use std::collections::BTreeSet;
 
+use os_ui::Rect;
+
+/// How far a tab's slanted edge leans over the row's height: well past a "/".
+const SLANT: f32 = 18.0;
+/// The widest a tab gets.
+const TAB_W: f32 = 190.0;
+/// Stacked: the least of each tab the next one lies over.
+const MIN_OVERLAP: f32 = 72.0;
+/// The least of a tab that has room for its close button.
+const CLOSE_ROOM: f32 = 36.0;
+const CLOSE: f32 = 14.0;
+
+/// One tab of a row, in the row's coordinates (`row_shapes`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TabShape {
+    /// Its place in `Group::rows`.
+    pub index: usize,
+    /// The row's rectangle, top and bottom.
+    y: f32,
+    h: f32,
+    /// Where its left and right edges meet the bottom; they lean right by `SLANT` at the top.
+    left: f32,
+    right: f32,
+    /// The left edge is upright (the row's first tab, against the window's edge).
+    upright: bool,
+    /// What shows of it halfway up, when others lie over it.
+    pub shown: (f32, f32),
+    /// How many tabs lie between it and the one showing, when stacked.
+    pub depth: usize,
+}
+
+impl TabShape {
+    /// Its outline.
+    pub fn outline(&self) -> [(f32, f32); 4] {
+        let top = self.y;
+        let bottom = self.y + self.h;
+        let top_left = if self.upright { self.left } else { self.left + SLANT };
+        [(self.left, bottom), (top_left, top), (self.right + SLANT, top), (self.right, bottom)]
+    }
+
+    /// Its span at height `y`.
+    fn span_at(&self, y: f32) -> (f32, f32) {
+        let up = ((self.y + self.h - y) / self.h).clamp(0.0, 1.0) * SLANT;
+        (if self.upright { self.left } else { self.left + up }, self.right + up)
+    }
+
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        let (a, b) = self.span_at(y);
+        y >= self.y && y < self.y + self.h && x >= a && x < b
+    }
+
+    /// Its area as thin rectangles (a hit is a rectangle).
+    pub fn bands(&self) -> impl Iterator<Item = Rect> + '_ {
+        const BANDS: usize = 6;
+        (0..BANDS).map(move |k| {
+            let bh = self.h / BANDS as f32;
+            let y = self.y + bh * k as f32;
+            let (a, b) = self.span_at(y + bh / 2.0);
+            Rect::new(a, y, b - a, bh)
+        })
+    }
+
+    /// Its close button, when enough of it shows.
+    pub fn close(&self) -> Option<Rect> {
+        let (a, b) = self.shown;
+        // The edge leans away from the middle by this much at the button's corners.
+        let lean = SLANT * CLOSE / 2.0 / self.h;
+        (b - a >= CLOSE_ROOM).then(|| Rect::new(b - lean - CLOSE - 3.0, self.y + (self.h - CLOSE) / 2.0, CLOSE, CLOSE))
+    }
+
+    /// Where its name may go, halfway up.
+    pub fn label(&self) -> (f32, f32) {
+        let start = self.shown.0 + 8.0;
+        (start, self.close().map_or(self.shown.1 - 4.0, |c| c.x - 3.0))
+    }
+}
+
+/// The tabs of a row of `n`, `active` showing, in painting order: the last lies over the others. Side by side, or
+/// `stacked`: each lies partly under its neighbour towards the one showing.
+pub fn row_shapes(row: Rect, n: usize, active: usize, stacked: bool) -> Vec<TabShape> {
+    let room = (row.w - SLANT).max(1.0);
+    let count = n.max(1) as f32;
+    let (w, step) = if stacked {
+        let w = room.min(TAB_W);
+        let most = (w - MIN_OVERLAP).max(1.0);
+        (w, if n > 1 { ((room - w) / (count - 1.0)).min(most) } else { most })
+    } else {
+        let w = (room / count).min(TAB_W);
+        (w, w)
+    };
+    let edge = |i: usize| row.x + step * i as f32;
+    let mid = SLANT / 2.0;
+    let shape = |i: usize| {
+        let left = edge(i);
+        let right = left + w;
+        let shown = if !stacked || i == active {
+            (left + mid, right + mid)
+        } else if i < active {
+            (left + mid, edge(i + 1) + mid)
+        } else {
+            (edge(i - 1) + w + mid, right + mid)
+        };
+        TabShape { index: i, y: row.y, h: row.h, left, right, upright: i == 0, shown, depth: if stacked { i.abs_diff(active) } else { 0 } }
+    };
+    let mut order: Vec<usize> = (0..active.min(n)).collect();
+    order.extend((active + 1..n).rev());
+    if active < n {
+        order.push(active);
+    }
+    order.into_iter().map(shape).collect()
+}
+
+/// The tab at (`x`, `y`) among `shapes`: the one lying on top.
+pub fn tab_at(shapes: &[TabShape], x: f32, y: f32) -> Option<usize> {
+    shapes.iter().rev().find(|s| s.contains(x, y)).map(|s| s.index)
+}
+
 /// Windows of one plugin shown as tabs: two or more.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Group {
@@ -124,6 +241,67 @@ impl Tabs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ROW: Rect = Rect { x: 100.0, y: 50.0, w: 500.0, h: 26.0 };
+
+    #[test]
+    fn side_by_side_tabs_touch_along_their_slices() {
+        let s = row_shapes(ROW, 3, 1, false);
+        let by = |i: usize| s.iter().find(|t| t.index == i).unwrap();
+        assert_eq!(by(0).outline()[3], by(1).outline()[0], "no gap at the bottom");
+        assert_eq!(by(0).outline()[2], by(1).outline()[1], "no gap at the top");
+        assert!(by(1).outline()[1].0 - by(1).outline()[0].0 > ROW.h / 2.0, "leans well past a slash");
+        assert_eq!(by(0).outline()[0].0, by(0).outline()[1].0, "the first stands against the window's edge");
+        // A point just either side of the slice, high up and low down.
+        for y in [ROW.y + 2.0, ROW.y + 24.0] {
+            let (_, b) = by(0).span_at(y);
+            assert_eq!(tab_at(&s, b - 1.0, y), Some(0));
+            assert_eq!(tab_at(&s, b + 1.0, y), Some(1));
+        }
+    }
+
+    #[test]
+    fn stacked_tabs_can_all_be_clicked_and_the_showing_one_lies_on_top() {
+        for n in 2..=9 {
+            for active in 0..n {
+                let s = row_shapes(ROW, n, active, true);
+                assert_eq!(s.last().unwrap().index, active);
+                assert_eq!(s.len(), n);
+                for t in &s {
+                    let (a, b) = t.shown;
+                    assert!(b > a, "{n} tabs, {active} showing: tab {} hidden", t.index);
+                    assert_eq!(tab_at(&s, (a + b) / 2.0, ROW.cy()), Some(t.index), "{n} tabs, {active} showing");
+                    if let Some(c) = t.close() {
+                        assert_eq!(tab_at(&s, c.cx(), c.cy()), Some(t.index), "{n} tabs, {active} showing: its close button");
+                        assert_eq!(tab_at(&s, c.x, c.y), Some(t.index), "{n} tabs, {active} showing: the button's corner");
+                    }
+                }
+            }
+        }
+        let few = row_shapes(ROW, 2, 0, true);
+        let (first, second) = (few[1], few[0]);
+        assert!(second.left < first.right, "they overlap even with room to spare");
+    }
+
+    #[test]
+    fn every_tab_has_a_close_button_with_room_for_a_name() {
+        for stacked in [false, true] {
+            for t in row_shapes(ROW, 4, 2, stacked) {
+                let c = t.close().unwrap();
+                assert!(t.contains(c.x, c.y) && t.contains(c.right(), c.bottom() - 0.5), "stacked {stacked}: tab {}", t.index);
+                let (a, b) = t.label();
+                assert!(b - a > 10.0, "stacked {stacked}: tab {}", t.index);
+            }
+        }
+    }
+
+    #[test]
+    fn the_hit_bands_cover_the_shape() {
+        let s = row_shapes(ROW, 3, 1, false)[0];
+        let bands: Vec<Rect> = s.bands().collect();
+        assert_eq!(bands.first().unwrap().y, ROW.y);
+        assert!((bands.last().unwrap().bottom() - ROW.bottom()).abs() < 0.01);
+    }
 
     fn open(rows: &[(usize, &str)]) -> Vec<(usize, String)> {
         rows.iter().map(|&(r, k)| (r, k.to_string())).collect()
