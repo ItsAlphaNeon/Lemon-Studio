@@ -274,6 +274,10 @@ pub enum Request {
 /// Keys from here up are mixer slots, not rack rows: `FX_KEY + track * 16 + slot` (spec: ui/mixer.md §7).
 pub const FX_KEY: usize = 1 << 24;
 
+/// Keys from here up are the effects inside containers (`crate::container`), numbered in the order they were made
+/// (`Plugins::next_member`): neither rack rows nor slots, hosted for their windows and housekeeping only.
+pub const MEMBER_KEY: usize = 1 << 26;
+
 /// Plugin editor windows open at once under "Limit the number of open plugin editors" (FL's hint: 25; spec:
 /// ui/settings-choices.md "Miscellaneous: naming, detached plugins and startup").
 pub const MAX_EDITORS: usize = 25;
@@ -291,9 +295,9 @@ pub fn fx_key(track: u16, slot: u8) -> usize {
     FX_KEY + usize::from(track) * 16 + usize::from(slot)
 }
 
-/// The mixer (track, slot) of a `hosted` key, `None` for rack rows.
+/// The mixer (track, slot) of a `hosted` key, `None` for rack rows and container members.
 pub fn fx_of(key: usize) -> Option<(u16, u8)> {
-    (key >= FX_KEY).then(|| (((key - FX_KEY) / 16) as u16, ((key - FX_KEY) % 16) as u8))
+    (FX_KEY..MEMBER_KEY).contains(&key).then(|| (((key - FX_KEY) / 16) as u16, ((key - FX_KEY) % 16) as u8))
 }
 
 #[derive(Default)]
@@ -331,6 +335,8 @@ pub struct Plugins {
     pub editor_scales: BTreeMap<usize, f32>,
     /// The containers playing mixer slots, by `fx_key` (`crate::container`).
     pub containers: BTreeMap<usize, crate::container::Live>,
+    /// The next container member's key, counted from `MEMBER_KEY`.
+    pub next_member: usize,
 }
 
 /// How many gone instances `Plugins::stash` keeps.
@@ -702,7 +708,7 @@ impl Plugins {
 
     /// Moves mixer slot instances: `m(track, slot)` gives the new place, `None` drops the instance.
     pub fn remap_fx(&mut self, m: &dyn Fn(u16, u8) -> Option<(u16, u8)>) {
-        let keys: Vec<usize> = self.hosted.keys().copied().filter(|&k| k >= FX_KEY).collect();
+        let keys: Vec<usize> = self.hosted.keys().copied().filter(|&k| fx_of(k).is_some()).collect();
         let mut moved = Vec::new();
         for k in keys {
             let (t, s) = fx_of(k).unwrap();
@@ -729,7 +735,7 @@ impl Plugins {
 
     /// The mixer slot instances for the transport: (track, slot, effect).
     pub fn effects(&self) -> Vec<(usize, usize, SharedEffect)> {
-        let hosted = self.hosted.range(FX_KEY..).map(|(&k, h)| (k, h.plugin.clone() as SharedEffect));
+        let hosted = self.hosted.range(FX_KEY..MEMBER_KEY).map(|(&k, h)| (k, h.plugin.clone() as SharedEffect));
         // A container's chain plays its slot (after a hosted instance still under the key, which it replaces).
         let chains = self.containers.iter().map(|(&k, c)| (k, c.fx.clone() as SharedEffect));
         hosted
@@ -1286,14 +1292,6 @@ impl Plugins {
                 (Some(row), crate::plugin_window::LinkMsg::Notes(token)) => out.push(Request::Notes(row, os_hostlink::take_notes(token))),
                 (None, crate::plugin_window::LinkMsg::Notes(token)) => drop(os_hostlink::take_notes(token)),
                 _ => {}
-            }
-        }
-        // A container's members get their housekeeping too (`crate::container`); they have no window or menu yet.
-        for c in self.containers.values() {
-            for p in c.plugins.iter().flatten() {
-                if let Ok(mut p) = p.try_lock() {
-                    p.idle();
-                }
             }
         }
         for (&row, h) in &mut self.hosted {
