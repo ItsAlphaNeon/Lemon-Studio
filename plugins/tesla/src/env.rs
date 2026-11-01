@@ -435,9 +435,10 @@ pub fn render(p: &[Point], n: usize) -> Vec<f32> {
     out
 }
 
-/// The volume envelope's gain at height `v` (the Amp fader's law).
+/// The volume envelope's gain at height `v`: 2v, from silence at the bottom through ×1 at mid height to ×2 (+6 dB)
+/// at the top (the original's manual: 0% to 200%).
 pub fn gain(v: f32) -> f64 {
-    tools::fader_gain(v.clamp(0.0, 1.0))
+    2.0 * f64::from(v.clamp(0.0, 1.0))
 }
 
 /// The panning envelope's pan at height `v`: −1 (left, the top) to 1 (right, the bottom).
@@ -445,9 +446,10 @@ pub fn pan(v: f32) -> f32 {
     1.0 - 2.0 * v.clamp(0.0, 1.0)
 }
 
-/// The stereo separation envelope's Amp knob at height `v`: −1 (double width, the top) to 1 (mono, the bottom).
+/// The stereo separation envelope's Amp knob at height `v`: 1 (mono, the top) to −1 (double width, the bottom), mid
+/// height unchanged (the original's manual: top mono, bottom maximum separation).
 pub fn sep(v: f32) -> f32 {
-    1.0 - 2.0 * v.clamp(0.0, 1.0)
+    2.0 * v.clamp(0.0, 1.0) - 1.0
 }
 
 /// What envelope `k` at height `v` reads, for the hints.
@@ -538,32 +540,27 @@ impl Playback {
     }
 }
 
-/// Tools > Scratch (envelope): the all-purpose envelope `p` (over the whole sample) is the playing speed along
-/// frames `a..=b`: 4v − 1 times normal (mid height ×1, the top ×3, a quarter of the way up stopped, the bottom
-/// backwards at ×1). The range keeps its length; the reading starts at `a` and stays within the sample. Lemon
-/// Studio's design (the original's tool was not measured).
+/// Tools > Scratch (envelope): the all-purpose envelope `p` (over the whole sample) is the playing **position** within
+/// frames `a..=b` (the original's manual: the vertical axis is the position, the bottom the start, the top the end).
+/// Frame i of the range plays the frame at a + (b − a) · v(i), read with linear interpolation: a line rising from
+/// the bottom to the top plays the range as it is, a falling one backwards, a level one holds a frame. The range keeps
+/// its length. How the original reads between frames was not measured: Lemon Studio's design.
 pub fn scratch(s: &mut Sample, a: usize, b: usize, p: &[Point]) {
     let n = s.frames();
     if n == 0 || a > b {
         return;
     }
+    let b = b.min(n - 1);
     let src = s.clone();
-    let last = (n - 1) as f64;
-    let mut pos = a as f64;
-    for i in a..=b.min(n - 1) {
-        let x = pos.clamp(0.0, last);
+    let span = (b - a) as f64;
+    for i in a..=b {
+        let x = a as f64 + span * f64::from(value(p, i as f64).clamp(0.0, 1.0));
         let (j, t) = (x.floor() as usize, (x - x.floor()) as f32);
         for (c, out) in s.ch.iter_mut().enumerate() {
-            let (u, w) = (src.at(c, j), src.at(c, (j + 1).min(n - 1)));
+            let (u, w) = (src.at(c, j), src.at(c, (j + 1).min(b)));
             out[i] = u + (w - u) * t;
         }
-        pos = (pos + scratch_speed(value(p, i as f64))).clamp(0.0, last);
     }
-}
-
-/// Scratch (envelope)'s speed at height `v`.
-pub fn scratch_speed(v: f32) -> f64 {
-    4.0 * f64::from(v.clamp(0.0, 1.0)) - 1.0
 }
 
 #[cfg(test)]
@@ -622,32 +619,28 @@ mod tests {
             assert!((s.ch[0][i] as f64 - l).abs() < 1e-6 && (s.ch[1][i] as f64 - r).abs() < 1e-6, "{i}");
         }
         assert!(s.ch[0][100] > 0.5, "louder at the top");
-        // Scratch: flat plays the range as it is; a quarter of the way up holds the first frame.
+        // Scratch: the height is the position. A line from the bottom to the top plays the range as it is.
         let ramp = Sample::from_channels(44100, vec![(0..100).map(|i| i as f32).collect()], Format::Float32);
+        let line = |v0: f32, v1: f32| {
+            let mut e = Envs::default();
+            for i in 0..3 {
+                let x = [0.0, 50.0, 99.0][i];
+                e.move_point(ALL, 100, i, x, v0 + (v1 - v0) * (x / 99.0) as f32);
+            }
+            e.points(ALL, 100)
+        };
         let mut r = ramp.clone();
-        scratch(&mut r, 10, 50, &Envs::default().points(ALL, 100));
-        assert_eq!(r, ramp);
-        let mut a = Envs::default();
-        for i in 0..3 {
-            a.move_point(ALL, 100, i, [0.0, 50.0, 99.0][i], 0.25);
-        }
-        scratch(&mut r, 10, 50, &a.points(ALL, 100));
-        assert!(r.ch[0][10..=50].iter().all(|&x| x == 10.0) && r.ch[0][51] == 51.0);
-        // The top plays at x3, the bottom backwards.
-        let mut f = ramp.clone();
-        let mut up = Envs::default();
-        for i in 0..3 {
-            up.move_point(ALL, 100, i, [0.0, 50.0, 99.0][i], 1.0);
-        }
-        scratch(&mut f, 0, 9, &up.points(ALL, 100));
-        assert_eq!(&f.ch[0][..4], &[0.0, 3.0, 6.0, 9.0]);
+        scratch(&mut r, 0, 99, &line(0.0, 1.0));
+        assert!(r.ch[0].iter().zip(&ramp.ch[0]).all(|(a, b)| (a - b).abs() < 1e-3));
+        // Falling: backwards.
         let mut back = ramp.clone();
-        let mut down = Envs::default();
-        for i in 0..3 {
-            down.move_point(ALL, 100, i, [0.0, 50.0, 99.0][i], 0.0);
-        }
-        scratch(&mut back, 20, 30, &down.points(ALL, 100));
-        assert_eq!(&back.ch[0][20..24], &[20.0, 19.0, 18.0, 17.0]);
+        scratch(&mut back, 0, 99, &line(1.0, 0.0));
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        assert!(near(back.ch[0][0], 99.0) && near(back.ch[0][99], 0.0) && near(back.ch[0][40], 59.0));
+        // Level a quarter of the way up: holds the frame a quarter into the range; outside the range nothing moves.
+        let mut h = ramp.clone();
+        scratch(&mut h, 10, 50, &line(0.25, 0.25));
+        assert!(h.ch[0][10..=50].iter().all(|&x| x == 20.0) && h.ch[0][9] == 9.0 && h.ch[0][51] == 51.0);
     }
 
     #[test]
@@ -746,14 +739,15 @@ mod tests {
     fn volume_pan_and_width_laws() {
         assert_eq!(gain(0.5), 1.0);
         assert_eq!(gain(0.0), 0.0);
-        assert!((gain(1.0) - 4.0).abs() < 1e-12);
+        assert_eq!(gain(1.0), 2.0);
         assert_eq!(pan(1.0), -1.0);
-        assert_eq!(sep(0.0), 1.0);
+        assert_eq!((sep(1.0), sep(0.5), sep(0.0)), (1.0, 0.0, -1.0));
         assert_eq!(text(VOLUME, 0.5), "+0.0 dB");
+        assert_eq!(text(VOLUME, 1.0), "+6.0 dB");
         assert_eq!(text(PAN, 0.5), "Centred");
         assert_eq!(text(PAN, 0.0), "100% right");
-        assert_eq!(text(SEP, 1.0), "Width 200%");
-        assert_eq!(text(SEP, 0.0), "Width 0%");
+        assert_eq!(text(SEP, 0.0), "Width 200%");
+        assert_eq!(text(SEP, 1.0), "Width 0%");
     }
 
     #[test]
@@ -776,10 +770,10 @@ mod tests {
         mixdown(&mut s, &e);
         assert!((s.ch[0][5] as f64 - 0.5 * 2f64.sqrt()).abs() < 1e-6);
         assert!(s.ch[1][5].abs() < 1e-6);
-        // Separation at the bottom: mono.
+        // Separation at the top: mono.
         let mut e = Envs::default();
         for i in 0..3 {
-            e.move_point(SEP, 10, i, 0.0, 0.0);
+            e.move_point(SEP, 10, i, 0.0, 1.0);
         }
         let mut s = st(10, 1.0, -1.0);
         mixdown(&mut s, &e);
@@ -792,6 +786,6 @@ mod tests {
         }
         let mut m = Sample::from_channels(44100, vec![vec![0.25; 4]], Format::Float32);
         mixdown(&mut m, &e);
-        assert!((m.ch[0][2] - 1.0).abs() < 1e-6);
+        assert!((m.ch[0][2] - 0.5).abs() < 1e-6);
     }
 }

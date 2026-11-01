@@ -192,6 +192,10 @@ pub enum AmpCtl {
     /// An envelope tool's two knobs.
     EnvA,
     EnvB,
+    /// Vocal denoise / isolator's MIX knob; Deverb's MIX knob and SOURCE button.
+    VoiceMix,
+    DeverbMix,
+    Source,
     Acquire,
     Reset,
     Preview,
@@ -320,7 +324,8 @@ pub struct ViewState {
 
 /// The open tool panel: Amp, Time stretch / pitch shift when `stretch` is set, Drum(loop) stretch when `drum` is,
 /// Convolution reverb when `reverb` is,
-/// Equalize, Blur or Clean up (denoise) when `eq`, `blur` or `clean` is (`curve`: Equalize's and Blur's curve).
+/// Equalize, Blur or Clean up (denoise) when `eq`, `blur` or `clean` is (`curve`: Equalize's and Blur's curve),
+/// Vocal denoise / isolator or Deverb when `voice` or `deverb` is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AmpUi {
     pub amp: Amp,
@@ -331,6 +336,8 @@ pub struct AmpUi {
     pub eq: Option<Equalize>,
     pub blur: Option<Blur>,
     pub clean: Option<Clean>,
+    pub voice: Option<crate::restore::Isolate>,
+    pub deverb: Option<crate::restore::Deverb>,
     pub curve: Curve,
     pub previewing: bool,
 }
@@ -1199,6 +1206,56 @@ fn reverb_panel(ui: &mut Ui, a: &AmpUi, r: &Reverb, lay: &Layout) {
     panel_buttons(ui, a, p);
 }
 
+/// Vocal denoise / isolator's and Deverb's panel geometry: the MIX knob, and Deverb's SOURCE button.
+pub fn restore_parts(lay: &Layout, a: &AmpUi) -> (Rect, Vec<(AmpCtl, Rect)>) {
+    let (w, h) = (240.0, 190.0f32.min(lay.h - 8.0));
+    let p = Rect::new((lay.wave.cx() - w / 2.0).round(), ((lay.h - h) / 2.0).round(), w, h);
+    let knob = |cx: f32| Rect::new(p.x + cx - 22.0, p.y + 50.0, 44.0, 44.0);
+    let parts = if a.deverb.is_some() {
+        vec![(AmpCtl::DeverbMix, knob(66.0)), (AmpCtl::Source, Rect::new(p.x + 122.0, p.y + 61.0, 102.0, 22.0))]
+    } else {
+        vec![(AmpCtl::VoiceMix, knob(120.0))]
+    };
+    (p, parts)
+}
+
+fn restore_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
+    let (p, parts) = restore_parts(lay, a);
+    ui.hit(p, Target::AmpPanel);
+    lemon::outlined(ui.c, p.outset(1.0), 11.0, Color::rgb(0x111111), plug::PANEL_LINE);
+    lemon::plug_panel(ui.c, p);
+    let title = if a.deverb.is_some() { "Deverb" } else { "Vocal denoise / isolator" };
+    ui.c.text(TITLE, p.x + 12.0, p.y + 7.0, brand::TEXT, title);
+    lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
+    let dv = a.deverb.unwrap_or_default();
+    for (ctl, r) in parts {
+        let t = Target::Amp(ctl);
+        ui.hit(r, t);
+        let s = ui.state(r, t, false);
+        if ctl == AmpCtl::Source {
+            let col = ui.button(r, t, false, true);
+            ui.c.text_center(CAPTION, r, col, &format!("SOURCE: {}", dv.source().to_uppercase()));
+            continue;
+        }
+        let (v, centred, val) = match a.voice {
+            Some(iso) => {
+                let pc = (iso.mix * 100.0).round() as i32;
+                let val = match pc {
+                    0 => "original".to_string(),
+                    p if p > 0 => format!("{p}% vocal"),
+                    p => format!("{}% noise", -p),
+                };
+                (iso.mix, true, val)
+            }
+            None => (dv.mix * 2.0 - 1.0, false, format!("{:.0}%", dv.mix * 100.0)),
+        };
+        lemon::dial(ui.c, r.cx(), r.cy(), r.w / 2.0, 4.0, (v + 1.0) / 2.0, centred, brand::MAIN, s);
+        ui.c.text_center(CAPTION, Rect::new(r.x - 20.0, r.y - 15.0, r.w + 40.0, 12.0), plug::DIM, "MIX");
+        ui.c.text_center(CAPTION, Rect::new(r.x - 30.0, r.bottom() + 4.0, r.w + 60.0, 12.0), brand::TEXT, &val);
+    }
+    panel_buttons(ui, a, p);
+}
+
 /// The spectral panels' geometry (Equalize, Blur, Clean up): the panel, its curve box, and the controls under the box.
 pub fn spectral_parts(lay: &Layout, a: &AmpUi) -> (Rect, Rect, Vec<(AmpCtl, Rect)>) {
     // Clean up has a second row of controls.
@@ -1377,6 +1434,9 @@ fn amp_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
     }
     if let Some(r) = &a.reverb {
         return reverb_panel(ui, a, r, lay);
+    }
+    if a.voice.is_some() || a.deverb.is_some() {
+        return restore_panel(ui, a, lay);
     }
     if a.eq.is_some() || a.blur.is_some() || a.clean.is_some() {
         return spectral_panel(ui, a, lay);
@@ -1670,6 +1730,8 @@ pub fn hint(t: &Target, l: &HintCtx) -> String {
         Target::Amp(AmpCtl::Declick) => "Declicker (redraws clicks and pops)".into(),
         Target::Amp(AmpCtl::Sensitivity) => "Declicker sensitivity".into(),
         Target::Amp(AmpCtl::EnvA) | Target::Amp(AmpCtl::EnvB) => "Drag to change, double-click to reset".into(),
+        Target::Amp(AmpCtl::VoiceMix) | Target::Amp(AmpCtl::DeverbMix) => "Mix: drag to change, double-click to reset".into(),
+        Target::Amp(AmpCtl::Source) => "Source: General (music, drums) or Vocal (a voice, spoken or sung)".into(),
         Target::Amp(AmpCtl::Acquire) => "Acquire noise profile from the selection (Alt+U)".into(),
         Target::Amp(AmpCtl::Reset) => "Reset".into(),
         Target::Amp(AmpCtl::Preview) => "Preview".into(),

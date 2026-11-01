@@ -118,8 +118,11 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   threshold, Gate noise, Trim side noise, Trim all noise & slice up, the threshold mark) work (2026-10-30). Most of
   it is Lemon Studio's design, with measurement requests open in the specs. Vocal denoise / isolator and Deverb have
   their own item below
-- [ ] **Tesla's Vocal denoise / isolator and Deverb.** Tools > Spectral's last two entries (group 5 of Tesla's
-  roadmap in the specs) are not in Tesla yet
+- [x] **Tesla's Vocal denoise / isolator and Deverb.** Tools > Spectral's last two entries (group 5 of Tesla's
+  roadmap in the specs) work (2026-10-30): Vocal denoise / isolator's MIX goes from the noise alone through the
+  original to the voice alone, Deverb takes the late reverb out (General or Vocal, with a MIX) at a reverb time it
+  reads from the selection. Both are Lemon Studio's spectral design, not the original's trained model; what the
+  entries do is from the original's manual. Edit > Undo mix (envelope) came with them
 - [x] **Value boxes.** All of them work, the last two being the autosave Maximum and Metronome track, and MIDI
   settings' Performance mode MIDI channel (2026-10-30)
 - [ ] **Performance mode.** The typing keyboard (its key layout is only in a picture the original's manual no longer
