@@ -434,7 +434,7 @@ impl os_host::Library for Module {
     fn create(self: Arc<Self>, id: &str) -> Result<os_host::SharedPlugin, String> {
         let guard = os_host::guard::module_of(self.code as *const c_void);
         let name = self.plugins.iter().find(|d| d.id.eq_ignore_ascii_case(id)).map_or(id, |d| d.name.as_str());
-        let plugin = os_host::guard::call(&guard, || Plugin::new(&self, id)).map_err(|c| os_host::guard::stopped_text(name, c))??;
+        let plugin = os_host::guard::call(&guard, || Plugin::with_guard(&self, id, guard.clone())).map_err(|c| os_host::guard::stopped_text(name, c))??;
         Ok(os_host::share(plugin, guard))
     }
 }
@@ -545,6 +545,12 @@ unsafe impl Send for Plugin {}
 impl Plugin {
     /// Creates and initialises class `id` of `module` (spec §4.1-4.4); buses are set up, not active yet.
     pub fn new(module: &Arc<Module>, id: &str) -> Result<Plugin, String> {
+        Self::with_guard(module, id, os_host::guard::module_of(module.code as *const c_void))
+    }
+
+    /// [`Plugin::new`] for an instance called under `guard` ([`Module::create`]): its editor's run loop callbacks run
+    /// under the same guard (Linux).
+    fn with_guard(module: &Arc<Module>, id: &str, guard: Arc<os_host::guard::Module>) -> Result<Plugin, String> {
         let i = module.plugins.iter().position(|d| d.id.eq_ignore_ascii_case(id)).ok_or_else(|| format!("no plug-in {id} in {}", module.path.display()))?;
         let desc = module.plugins[i].clone();
         let cid = module.classes[i];
@@ -570,7 +576,13 @@ impl Plugin {
                     }
                 }
             };
-            let shared = Arc::new(Shared::default());
+            #[cfg(target_os = "linux")]
+            let shared = Arc::new(Shared { guard, ..Shared::default() });
+            #[cfg(not(target_os = "linux"))]
+            let shared = {
+                drop(guard);
+                Arc::new(Shared::default())
+            };
             let mut p = Plugin {
                 view: None,
                 points: None,

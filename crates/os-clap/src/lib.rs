@@ -255,7 +255,7 @@ impl os_host::Library for Library {
         // A plugin compiled into this program gets a guard of its own per instance (`module_of`).
         let guard = os_host::guard::module_of(self.entry.cast());
         let name = self.plugins.iter().find(|d| d.id == id).map_or(id, |d| d.name.as_str());
-        let plugin = os_host::guard::call(&guard, || Plugin::new(&self, id)).map_err(|c| os_host::guard::stopped_text(name, c))??;
+        let plugin = os_host::guard::call(&guard, || Plugin::with_guard(&self, id, guard.clone())).map_err(|c| os_host::guard::stopped_text(name, c))??;
         Ok(os_host::share(plugin, guard))
     }
 }
@@ -290,6 +290,10 @@ struct HostData {
     /// What the plugin registered with the UI run loop (Linux): timer id or descriptor, whether a timer, token.
     #[cfg(all(unix, not(target_os = "macos")))]
     run: Mutex<Vec<(u32, bool, u64)>>,
+    /// The crash guard the instance is called under, for the run loop's callbacks into it (Linux): a crash in one
+    /// stops the instance like a crash in any other call.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    guard: Arc<os_host::guard::Module>,
 }
 
 static HOST_NAME: &CStr = c"Lemon Studio";
@@ -330,6 +334,9 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
 /// connection) with the host (`timer-support`, `posix-fd-support`) and get the callbacks on the UI thread through
 /// `os_host::runloop`. Not offered on macOS: editors there run on the main thread's run loop, which the app's event
 /// loop (winit's) runs.
+///
+/// Every callback runs under the instance's crash guard (spec: plugins/plugin-formats.md, "Crash containment"). After
+/// a crash its registrations are removed and its attention raised, so the UI reports the stop and closes the editor.
 #[cfg(all(unix, not(target_os = "macos")))]
 mod run_loop {
     use super::*;
@@ -377,7 +384,8 @@ mod run_loop {
             return false;
         }
         let id = NEXT_TIMER.fetch_add(1, Ordering::Relaxed);
-        let token = runloop::add_timer(std::time::Duration::from_millis(u64::from(period_ms)), move || unsafe { on_timer(plugin, id) });
+        let dp = d as *const HostData;
+        let token = runloop::add_timer(std::time::Duration::from_millis(u64::from(period_ms)), move || unsafe { guarded(dp, || on_timer(plugin, id)) });
         if let Ok(mut r) = d.run.lock() {
             r.push((id, true, token));
         }
@@ -394,7 +402,8 @@ mod run_loop {
         let Some((plugin, ext)) = (unsafe { plugin_ext::<clap_plugin_posix_fd_support>(d, CLAP_EXT_POSIX_FD_SUPPORT) }) else { return false };
         let Some(on_fd) = (unsafe { (*ext).on_fd }) else { return false };
         // The run loop's flags are CLAP's.
-        let token = runloop::add_fd(fd, flags, move |fd, got| unsafe { on_fd(plugin, fd, got) });
+        let dp = d as *const HostData;
+        let token = runloop::add_fd(fd, flags, move |fd, got| unsafe { guarded(dp, || on_fd(plugin, fd, got)) });
         if let Ok(mut r) = d.run.lock() {
             r.push((fd as u32, false, token));
         }
@@ -422,6 +431,20 @@ mod run_loop {
             !hit
         });
         before != r.len()
+    }
+
+    /// Runs `f`, a run loop callback into the plugin of host data `dp`, under the instance's guard. Once it crashed (in
+    /// `f` or anywhere else) the plugin's registrations are removed and the UI is told.
+    ///
+    /// # Safety
+    /// `dp` is alive: a destroyed instance's registrations are removed first (`clear`), and a crashed instance's host
+    /// data is never freed.
+    unsafe fn guarded(dp: *const HostData, f: impl FnOnce()) {
+        let d = unsafe { &*dp };
+        if os_host::guard::call(&d.guard, f).is_err() {
+            clear(d);
+            d.attention.raise();
+        }
     }
 
     /// Removes whatever the plugin left registered (after it was destroyed: its callbacks must never run again).
@@ -819,6 +842,14 @@ fn debug() -> bool {
 impl Plugin {
     /// Creates and initialises plugin `id` from `lib` (UI thread).
     pub fn new(lib: &Arc<Library>, id: &str) -> Result<Plugin, String> {
+        Self::with_guard(lib, id, os_host::guard::module_of(lib.entry.cast()))
+    }
+
+    /// [`Plugin::new`] for an instance called under `guard` ([`Library::create`]): the run loop's callbacks into it
+    /// run under the same guard (Linux).
+    fn with_guard(lib: &Arc<Library>, id: &str, guard: Arc<os_host::guard::Module>) -> Result<Plugin, String> {
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        drop(guard);
         let desc = lib.plugins.iter().find(|d| d.id == id).cloned().ok_or_else(|| format!("{}: no plugin {id}", lib.path.display()))?;
         let host_data = Box::new(HostData {
             attention: Arc::default(),
@@ -835,6 +866,8 @@ impl Plugin {
             plugin: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
             #[cfg(all(unix, not(target_os = "macos")))]
             run: Mutex::new(Vec::new()),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            guard,
         });
         let host = Box::new(clap_host {
             clap_version: CLAP_VERSION,
@@ -2194,9 +2227,43 @@ impl Drop for Plugin {
 
 #[cfg(test)]
 mod mono_mock;
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod timer_mock;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A crash in a run loop callback (an editor's timer, Linux) stops the instance like a crash in any other call: its
+    /// registrations are removed and it is never called again (spec: plugins/plugin-formats.md, "Crash containment").
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_crash_in_a_timer_stops_the_instance() {
+        use crate::timer_mock::{ENTRY, FAULT, ID, TICKS};
+        use os_host::Library as _;
+        use std::sync::atomic::Ordering::Relaxed;
+        if !os_host::guard::contained() {
+            return;
+        }
+        let entry = &ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Timer Test.clap")) }.expect("mock");
+        let shared = lib.create(ID.to_str().unwrap()).expect("created");
+        let stopped = || os_host::Plugin::stopped(&*shared.lock().unwrap());
+        let tick = || {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            os_host::runloop::dispatch();
+        };
+        tick();
+        assert!(TICKS.load(Relaxed) >= 1, "the timer runs");
+        assert_eq!(stopped(), None);
+        FAULT.store(true, Relaxed);
+        tick();
+        FAULT.store(false, Relaxed);
+        assert_eq!(stopped(), Some(0xC000_0005));
+        assert!(!os_host::runloop::active(), "its timer is removed");
+        let before = TICKS.load(Relaxed);
+        tick();
+        assert_eq!(TICKS.load(Relaxed), before, "never called again");
+    }
     use os_engine::Instrument;
 
     // spec: audio/multicore.md "Plugins"
