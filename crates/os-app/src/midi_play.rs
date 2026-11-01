@@ -316,7 +316,7 @@ impl App {
     }
 
     /// A key of the Performance mode MIDI channel (spec: ui/performance-mode.md §3).
-    fn perform_note(&mut self, key: u8, vel: u8, down: bool) {
+    pub(crate) fn perform_note(&mut self, key: u8, vel: u8, down: bool) {
         let now = self.transport.playing().then(|| self.transport.tick().max(0.0) as u32);
         if let Some(m) = crate::perform::midi_note(&mut self.state, key, vel, down, now) {
             self.state.message = Some(m);
