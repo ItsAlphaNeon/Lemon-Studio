@@ -23,8 +23,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   controls
 - A channel's Receive notes from ▸ locks it to the computer keyboard or the Touch controller: their notes play it
   whichever channel is selected (a padlock on its name button; Unlock ends the lock)
-- A channel's menu: Change icon... puts an icon on its name button (the same icon as its plugin window and clips, for
-  the session); Show waveform preview draws a sampler or audio clip channel's sample across its name button; MIDI
+- A channel's menu: Change icon... puts an icon on its name button (the same icon as its plugin window and clips, saved
+  in `.lemon` projects); Show waveform preview draws a sampler or audio clip channel's sample across its name button; MIDI
   channel through (ticked by default) gives a hosted VST, VST 3 or CLAP instrument a MIDI device's notes on the MIDI
   channel they came on, and a recorded note takes that channel as its colour. The two checks last for the session
 - The rack's Restretch all (Ctrl+Alt+R) fits every stretched sample and audio clip to the project tempo at once
@@ -91,7 +91,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   to the global snap). Ctrl+click on a zone clip launches a scene (a Scene stops the other tracks, a +Scene keeps them):
   its clip group's clips, else its column on its track group's tracks, else its whole column, as do notes while 125
   (Scene) or 126 (+Scene) is held (columns). A playing clip's zone clip is outlined and fills as it plays, and the
-  track header can show the pass's progress (the ▸ menu's Performance clip / track progress); the clock's bars are
+  track header can show the pass's progress (the ▸ menu's Performance clip / track progress; these checks, Ctrl+click triggers +Scene and Velocity picks
+  sub-clips are saved in `.lemon` projects); the clock's bars are
   negative in the zone. Each track's Performance settings ▸ (Press, Motion, Trigger sync, Queue, Tolerant,
   Position sync) are saved as FL saves them. With Record armed, stopping the song writes what the launched tracks
   played after the Start marker as clips on their tracks (one undo step). A slot's later clips are sub-clips: the
@@ -112,7 +113,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   its own file)
 - The mixer track menu's Track routing ▸ routes or sidechains the other selected tracks into the track clicked (only,
   or besides their other routes), and an effect slot can be given a colour (Change color..., Random color), shown as a
-  bar at the slot's edge for the session
+  bar at the slot's edge and saved in `.lemon` projects, as are the names slots are given
 - The mixer track menu's Group section: Separator (a gap before the strip), Create group... (names the track and puts
   separators around the selected tracks), Auto color group and Select ▸ Group; Dock to ▸ Left / Middle / Right keeps a
   strip after the master or at the right edge while the others scroll; Allow threaded processing off keeps the track
@@ -128,7 +129,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   own effects open the list of built-in effects), and Scaling ▸ sizes a hosted plugin's window: Main (the program's
   scale) or 100 % to 200 %, for the session
 - Change icon... in the mixer track menu draws an icon under the track's name, and in the slot menu before the
-  slot's name and on its plugin window; the icons move with their tracks and slots, for the session. The slot menu's
+  slot's name and on its plugin window; the icons move with their tracks and slots and are saved in `.lemon` projects. The slot menu's
   Link all parameters... links the effect's parameters to consecutive controllers, as its window menu's
 - Containers (a first part of the original's Patcher, in Lemon Studio's own form): the slot menu's Wrap in container
   moves the slot's effect into a container in the same slot, and Wrap all in container moves all of the track's
@@ -210,7 +211,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   seconds, and runs it again with the next one
 - The plugin window's menu: Link all parameters... links every parameter of the plugin to consecutive MIDI
   controllers in one go (the MIDI learn box); Change icon... gives a channel or effect an icon, shown in its window's
-  title, the playlist picker and its clips (for the session); Save channel state as... saves a channel with its plugin
+  title, the playlist picker and its clips (saved in `.lemon` projects); Save channel state as... saves a channel with its plugin
   and settings into Channel presets, which Browse channel states opens in the browser, and dropping one adds the
   channel. The picker's Change icon... too
 - Import of `.ospreset`, `.vstpreset` and VST2 `.fxp` / `.fxb` files (a bank goes into a folder of its own); a preset
@@ -337,7 +338,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 ## 🚧 Project files
 
 - Saves projects as `.lemon` files: Lemon Studio's own format, laid out like an FLP with room for Lemon Studio's own
-  data. The original is not expected to open them
+  data (the channel, mixer track and slot icons, the slots' names and colours, Performance mode's ▸ menu checks;
+  saving to a `.flp` name leaves them out). The original is not expected to open them
 - Opens `.lemon` files and `.flp` projects saved by FL Studio 24.2 and later, 25 and 26 included. A project opened
   from an FLP is never saved over: Save asks for a name, offering the FLP's name with `.lemon`. Backups, new versions,
   templates and zipped projects are `.lemon` too; FLP backups and templates still open. General ▸ System ▸

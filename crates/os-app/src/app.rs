@@ -1347,8 +1347,9 @@ pub struct App {
     pub(crate) pattern_render: Option<crate::pattern_render::Pending>,
     /// `device::opens` when the hosted plugins last followed the output device's rate (`follow_device`).
     device_opens: u64,
-    /// The project and tempo as last opened, saved or created: anything else has unsaved changes.
-    pub(crate) saved: (Project, f64),
+    /// The project, tempo and Lemon Studio's own saved state (`lemon_state::saved_form`) as last opened, saved or
+    /// created: anything else has unsaved changes.
+    pub(crate) saved: (Project, f64, Vec<u8>),
     /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
     pub(crate) backup: crate::backup::Backup,
 }
@@ -1549,7 +1550,7 @@ impl App {
             export_reveal: false,
             pattern_render: None,
             device_opens: 0,
-            saved: (Project::default(), 0.0),
+            saved: (Project::default(), 0.0, Vec::new()),
             backup: Default::default(),
         };
         // The snap settings are program settings, kept in the user folder (spec: ui/global-snap.md §6).
@@ -1650,6 +1651,13 @@ impl App {
                 crate::playlist::load_view(s);
                 s.piano.dirty = true; // live notes use the new project
                 piano::center_keys(s, self.piano_grid.map_or(700.0, |g| g.h));
+                // A .lemon file's own state (icons, slot names and colours, Performance settings); its channel icons
+                // name channels by position, which the ids given here then follow.
+                self.state.control.settle(&mut self.state.project);
+                if let Some(f) = self.state.file.take() {
+                    crate::lemon_state::apply(&mut self.state, &f);
+                    self.state.file = Some(f);
+                }
                 self.mark_saved();
                 crate::missing::opened(self);
                 self.loading = Some(crate::loading::Loading::start(&self.state.project));
@@ -1835,6 +1843,8 @@ impl App {
         // Mixer parts the file format mapping does not write yet (spec: ui/mixer.md, Lemon Studio status).
         // Hosted CLAP / VST3 plugins are written as wrapped plugins with their current state (spec: flp/events/plugins.md).
         let mut proj = s.project.clone();
+        // Lemon Studio's own state goes into `LMex` (a .lemon target only, `lemon_or_flp`).
+        let extra = crate::lemon_state::events(s);
         crate::project_info::stamp(s, &mut proj);
         crate::data_folder::stamp(s, &mut proj);
         crate::project_plugins::store_hosted(&mut proj, &self.plugins);
@@ -1842,7 +1852,7 @@ impl App {
         // Added mixer tracks are written before the hidden last track (spec: flp/events/mixer.md "Adding tracks").
         let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
-            .and_then(|()| lemon_or_flp(&mut file, &target))
+            .and_then(|()| lemon_or_flp(&mut file, &target, extra))
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
             .and_then(|b| std::fs::write(&target, &b).map(|()| b.len() as u64).map_err(|e| e.to_string()));
         s.message = Some(match &result {
@@ -1896,13 +1906,16 @@ impl App {
     pub(crate) fn mark_saved(&mut self) {
         // New things get their ids before the copy, so ids alone are no unsaved change.
         self.state.control.settle(&mut self.state.project);
-        self.saved = (self.state.project.clone(), self.state.tempo);
+        self.saved = (self.state.project.clone(), self.state.tempo, crate::lemon_state::saved_form(&self.state));
         self.state.plugin_edited = false;
     }
 
     /// Whether the project changed since it was last opened, saved or created, a hosted plugin's settings included.
     pub fn unsaved(&self) -> bool {
-        self.saved.0 != self.state.project || self.saved.1 != self.state.tempo || self.state.plugin_edited
+        self.saved.0 != self.state.project
+            || self.saved.1 != self.state.tempo
+            || self.saved.2 != crate::lemon_state::saved_form(&self.state)
+            || self.state.plugin_edited
     }
 
     /// The system asks the window to close (its close shortcut, a taskbar or dock). The dialog-like windows drawn
@@ -9123,15 +9136,16 @@ fn typing_semitone(code: KeyCode) -> Option<i32> {
 
 /// The file just written holds the model's channels and mixer tracks in order: each one's file block is its position
 /// (os-flp `apply` follows moved channels and the effect slots of moved mixer tracks by these).
-/// Makes the file written to `target` a `.lemon` file (Lemon Studio's chunks around the FLP's, saved by this version),
-/// or a plain FLP for a target named `.flp` (spec: flp/lemon-format.md).
-fn lemon_or_flp(file: &mut os_flp::FlpFile, target: &std::path::Path) -> Result<(), String> {
+/// Makes the file written to `target` a `.lemon` file (Lemon Studio's chunks around the FLP's, saved by this version,
+/// with `extra`: Lemon Studio's own state, `crate::lemon_state`), or a plain FLP for a target named `.flp`, which has no
+/// place for `extra` (spec: flp/lemon-format.md).
+fn lemon_or_flp(file: &mut os_flp::FlpFile, target: &std::path::Path, mut extra: Vec<os_flp::Event>) -> Result<(), String> {
     if crate::project_files::is_flp(target) {
         os_flp::lemon::to_flp(file);
         return Ok(());
     }
-    let by = os_flp::lemon::saved_by(&format!("Lemon Studio {}", env!("CARGO_PKG_VERSION")));
-    os_flp::lemon::to_lemon(file, &[by]).map_err(|e| e.to_string())
+    extra.insert(0, os_flp::lemon::saved_by(&format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))));
+    os_flp::lemon::to_lemon(file, &extra).map_err(|e| e.to_string())
 }
 
 fn settle_origins(p: &mut Project) {
