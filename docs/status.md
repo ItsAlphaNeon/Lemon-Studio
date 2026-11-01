@@ -333,7 +333,12 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 
 ## 🚧 Project files
 
-- Opens and saves `.flp` projects saved by FL Studio 24.2 and later, 25 and 26 included
+- Saves projects as `.lemon` files: Lemon Studio's own format, laid out like an FLP with room for Lemon Studio's own
+  data. The original is not expected to open them
+- Opens `.lemon` files and `.flp` projects saved by FL Studio 24.2 and later, 25 and 26 included. A project opened
+  from an FLP is never saved over: Save asks for a name, offering the FLP's name with `.lemon`. Backups, new versions,
+  templates and zipped projects are `.lemon` too; FLP backups and templates still open. General ▸ System ▸
+  Associate project files covers `.lemon` along with `.flp`
 - Projects saved by FL Studio 10 to 24.1 open too: they are converted to the current layout as they open (channel
   blocks, step sequencer dots as notes, playlist clip and track records, mixer places, send levels and slot
   markers, a 105-track mixer grown to 127) and are saved in that layout, as the original does with an older file.
@@ -663,7 +668,7 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 - General ▸ Display ▸ High visibility: a white record dot, brighter channel names and light scroll bar thumbs
 - General ▸ Display ▸ Toolbars scaling: the main window's top band at its own size; panels that don't fit
   leave an arrow
-- General ▸ System ▸ Associate project files (Windows): `.flp` files open with Lemon Studio, for your user
+- General ▸ System ▸ Associate project files (Windows): `.lemon` and `.flp` files open with Lemon Studio, for your user
   only, and unticking puts the previous program back
 - Recording, Lemon Studio's own page (the original has none): the recording filter, the Record button's options and
   quantize, Start on input and its checks, Loop record, Blend, Count-in and its length, Auto-create audio clips and

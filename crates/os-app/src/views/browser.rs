@@ -348,7 +348,7 @@ pub fn file_icon(name: &str) -> Icon {
     match ext.as_str() {
         "wav" | "mp3" | "ogg" | "flac" | "aif" | "aiff" => Icon::FileAudio,
         "mid" | "midi" => Icon::PianoRoll,
-        "flp" => Icon::FileProject,
+        "flp" | "lemon" => Icon::FileProject,
         "txt" | "url" | "pdf" | "nfo" | "rtf" | "htm" | "html" | "md" => Icon::FileText,
         "fxp" | "fxb" | "fst" | "vstpreset" | "nmsv" | "spf" | "h2p" | "clap-preset" | "ospreset" | "oschannel" => Icon::FilePreset,
         "zip" | "rar" | "7z" => Icon::FileZip,
