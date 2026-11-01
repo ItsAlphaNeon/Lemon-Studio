@@ -45,6 +45,20 @@ mod cocoa;
 #[cfg(target_os = "macos")]
 pub use cocoa::{default_position, lift_hide, lift_show, pointer, row_window_at, screen_to_main, stack, take_exposed, take_keys, take_lift_input, FrameWindow};
 
+/// TOOLS > Set keyboard focus of all plugins to ▸ (Lemon Studio's design; spec: ui/channel-switches.md §6): whether
+/// plugin editors take the computer keyboard (Enabled, the default) or never get it (Disabled), the keys then going to
+/// Lemon Studio as those pressed in an editor already do (`take_keys`: the typing keyboard, Space). For the session.
+static EDITOR_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether plugin editors take the keyboard.
+pub fn editor_keys() -> bool {
+    EDITOR_KEYS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_editor_keys(on: bool) {
+    EDITOR_KEYS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Where a detached window opening for the first time goes: where a new window opens. Only Windows places it by
 /// monitor (Settings "Open detached plugins with the main window"; spec: ui/settings-choices.md "Miscellaneous:
 /// naming, detached plugins and startup").

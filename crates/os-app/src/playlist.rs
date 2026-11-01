@@ -338,6 +338,8 @@ pub enum Cmd {
     InitControl(u32, f64),
     DeleteInit(u32),
     ResetEmptyTracks,
+    /// TOOLS ▸ Lock all tracks to their clips (true) / Unlock all tracks from their clips (false) (`lock_tracks`).
+    LockClips(bool),
     /// The ▸ menu's Prepare for performance mode and Performance mode (Ctrl+P) (spec: ui/performance-mode.md §1).
     PerfPrepare,
     /// A pick in Marker settings' Spacing list (true) or Marker count list.
@@ -565,6 +567,8 @@ pub enum EditTarget {
     MixerInsert(u16),
     /// The mixer track menu's Create group...: the track's name, then the group's separators (`mixer::create_group`).
     MixerGroup(u16),
+    /// TOOLS > Chord progression tool...: the progression written into the piano roll (`chord_tool::write`).
+    Chords,
     /// The current arrangement's name (§12).
     ArrangementName,
     /// The value box of "Enter value..." and whether it reads normalized values (spec: ui/type-in-value.md).
@@ -1153,6 +1157,39 @@ pub fn source(s: &State) -> ClipSource {
     s.playlist.source.unwrap_or(ClipSource::Pattern(s.pattern.max(1)))
 }
 
+/// The source Draw and Paint place on `track`: the one it is locked to, else the current one (`source`).
+pub fn source_for(s: &State, track: u16) -> ClipSource {
+    track_info(s, track).and_then(|t| t.clip_lock).unwrap_or_else(|| source(s))
+}
+
+/// TOOLS ▸ Lock all tracks to their clips (Lemon Studio's design; spec: ui/playlist.md "Locking tracks to their
+/// clips"): each track of the arrangement whose clips all share one source is locked to it; a track without clips or
+/// with clips of several sources is left as it is. Returns (tracks locked, tracks skipped for mixed sources).
+pub fn lock_tracks(s: &mut State) -> (usize, usize) {
+    let mut one: std::collections::BTreeMap<u16, Option<ClipSource>> = std::collections::BTreeMap::new();
+    for c in clips(s) {
+        one.entry(c.track).and_modify(|e| if *e != Some(c.source) { *e = None }).or_insert(Some(c.source));
+    }
+    let tracks = &mut arr_mut(s).tracks;
+    let (mut locked, mut mixed) = (0, 0);
+    for (t, src) in one {
+        match (src, tracks.get_mut(usize::from(t))) {
+            (Some(src), Some(tr)) => {
+                tr.clip_lock = Some(src);
+                locked += 1;
+            }
+            (None, Some(_)) => mixed += 1,
+            _ => {}
+        }
+    }
+    (locked, mixed)
+}
+
+/// TOOLS ▸ Unlock all tracks from their clips: clears every lock of the arrangement; returns how many there were.
+pub fn unlock_tracks(s: &mut State) -> usize {
+    arr_mut(s).tracks.iter_mut().filter_map(|t| t.clip_lock.take()).count()
+}
+
 fn ppq(s: &State) -> u32 {
     u32::from(s.project.ppq.max(4))
 }
@@ -1515,7 +1552,7 @@ pub fn snap_delta(s: &State, g: &PGeom, dt: f32, alt: bool) -> i64 {
 
 /// Place a clip of the current source on `track` at `tick`; returns its index.
 pub fn place(s: &mut State, track: u16, tick: u32) -> usize {
-    let src = source(s);
+    let src = source_for(s, track);
     let len = match s.playlist.lock_len {
         Some((l, n)) if l == src => n,
         _ => source_len(s, src),
@@ -3554,7 +3591,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             // Clips back to back along the track from the first, up to the mouse (either direction).
             let t = g.tick_at(x).max(0.0) as i64;
             let k = (t - i64::from(start)).div_euclid(i64::from(len));
-            let src = source(s);
+            let src = source_for(s, track);
             for j in k.min(0)..=k.max(0) {
                 let pos = i64::from(start) + j * i64::from(len);
                 if pos < 0 {
@@ -4039,6 +4076,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::SlotName(t, k) => crate::mixer::slot_name(s, t, k).unwrap_or_default(),
         EditTarget::MixerInsert(_) => "2".into(),
         EditTarget::MixerGroup(_) => String::new(),
+        EditTarget::Chords => crate::chord_tool::last(),
         EditTarget::TypeIn(t, norm) => crate::typein::text(s, t, norm),
     };
     s.playlist.edit = Some(TextEdit { target, text, at, sel: false });
@@ -4105,6 +4143,7 @@ pub fn commit_edit(s: &mut State) {
         EditTarget::TypeIn(t, norm) => crate::typein::accept(s, t, norm, &text),
         EditTarget::MixerInsert(n) => s.message = crate::mixer::insert_many(s, n, &text),
         EditTarget::MixerGroup(n) => crate::mixer::create_group(s, n, &text),
+        EditTarget::Chords => s.message = Some(crate::chord_tool::write(s, &text)),
         EditTarget::PatternName(n) => crate::control::edit(s, "Pattern name", crate::control::command::Region::Project, |s| {
             if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == n) {
                 p.name = (!text.is_empty()).then_some(text);
@@ -4925,6 +4964,26 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             s.piano.dirty = true;
             None
         }
+        Cmd::LockClips(on) => {
+            let before = s.project.arrangement().map(|a| a.tracks.iter().map(|t| t.clip_lock).collect::<Vec<_>>());
+            snapshot_as(s, if on { "Lock tracks to clips" } else { "Unlock tracks from clips" });
+            let m = if on {
+                match lock_tracks(s) {
+                    (0, 0) => "No track has clips to lock to".to_string(),
+                    (n, 0) => format!("Locked {n} track(s) to their clips"),
+                    (n, k) => format!("Locked {n} track(s) to their clips; {k} with clips of several sources left unlocked"),
+                }
+            } else {
+                match unlock_tracks(s) {
+                    0 => "No track is locked to a clip".to_string(),
+                    n => format!("Unlocked {n} track(s)"),
+                }
+            };
+            if s.project.arrangement().map(|a| a.tracks.iter().map(|t| t.clip_lock).collect::<Vec<_>>()) == before {
+                crate::history::unrecord(s);
+            }
+            Some(m)
+        }
         // Run above.
         Cmd::Pref(..) => None,
         Cmd::Genre(_) => None,
@@ -5411,6 +5470,36 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::app::test_project();
         app
+    }
+
+    /// TOOLS ▸ Lock / Unlock all tracks (Lemon Studio's design): a track whose clips share one source is locked to it
+    /// and Draw places that source there whatever is current; a track of mixed sources stays free; each is one undo
+    /// step, and one that changes nothing makes none.
+    #[test]
+    fn lock_tracks_to_their_clips() {
+        let mut app = app();
+        let s = &mut app.state;
+        arr_mut(s).clips.clear();
+        let (p1, p2) = (ClipSource::Pattern(1), ClipSource::Pattern(2));
+        arr_mut(s).clips.extend([Clip::new(0, 96, 0, p1), Clip::new(384, 96, 0, p1), Clip::new(0, 96, 1, p1), Clip::new(96, 96, 1, p2)]);
+        s.playlist.source = Some(p2);
+        let steps = s.history.len();
+        assert_eq!(run(&mut app, Cmd::LockClips(true)).as_deref(), Some("Locked 1 track(s) to their clips; 1 with clips of several sources left unlocked"));
+        let s = &mut app.state;
+        assert_eq!((track_info(s, 0).unwrap().clip_lock, track_info(s, 1).unwrap().clip_lock), (Some(p1), None));
+        assert_eq!((source_for(s, 0), source_for(s, 1), source_for(s, 2)), (p1, p2, p2));
+        let i = place(s, 0, 768);
+        assert_eq!(clips(s)[i].source, p1, "Draw on a locked track places its source");
+        let i = place(s, 2, 0);
+        assert_eq!(clips(s)[i].source, p2);
+        assert_eq!(s.history.len(), steps + 1);
+        assert_eq!(run(&mut app, Cmd::LockClips(false)).as_deref(), Some("Unlocked 1 track(s)"));
+        assert!(track_info(&app.state, 0).unwrap().clip_lock.is_none());
+        let steps = app.state.history.len();
+        assert_eq!(run(&mut app, Cmd::LockClips(false)).as_deref(), Some("No track is locked to a clip"));
+        assert_eq!(app.state.history.len(), steps, "nothing to unlock: no step");
+        crate::history::undo(&mut app.state);
+        assert_eq!(track_info(&app.state, 0).unwrap().clip_lock, Some(p1), "undo brings the lock back");
     }
 
     fn entry<'a>(m: &'a Popup, label: &str) -> &'a PItem {

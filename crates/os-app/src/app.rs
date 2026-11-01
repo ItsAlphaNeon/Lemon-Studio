@@ -8770,6 +8770,20 @@ impl App {
                     self.state.message = Some(m);
                 }
             }
+            // spec: ui/piano-tools.md §4 "Lemon Studio"
+            MenuCmd::Chords => {
+                let at = self.mouse;
+                crate::playlist::start_edit(&mut self.state, crate::playlist::EditTarget::Chords, at);
+                if let Some(e) = self.state.playlist.edit.as_mut() {
+                    e.sel = true;
+                }
+            }
+            // spec: ui/playlist.md "Locking tracks to their clips"
+            MenuCmd::LockClips(on) => {
+                if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::LockClips(on)) {
+                    self.state.message = Some(m);
+                }
+            }
             MenuCmd::ResetEmptyTracks => {
                 if let Some(m) = crate::playlist::run(self, crate::playlist::Cmd::ResetEmptyTracks) {
                     self.state.message = Some(m);

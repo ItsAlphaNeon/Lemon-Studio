@@ -69,7 +69,8 @@ pub fn take_keys() -> Vec<KeyMsg> {
 static KEY_HOOK: Once = Once::new();
 
 /// Thread-wide keyboard hook: a plugin's editor (any plugin, any child window) swallows key messages, so the key
-/// events are copied here whenever the focus is inside one of our plugin frames, and the app plays them.
+/// events are copied here whenever the focus is inside one of our plugin frames, and the app plays them. With the
+/// editors' keyboard focus off (`editor_keys`), the editor never gets them.
 unsafe extern "system" fn key_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         if code == 0 {
@@ -87,6 +88,9 @@ unsafe extern "system" fn key_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
                     if let Ok(mut k) = KEYS.lock() {
                         k.push(KeyMsg { scancode: sc, pressed: !up, ctrl: down(VK_CONTROL), alt: down(VK_MENU) });
                     }
+                }
+                if in_frame && !super::editor_keys() {
+                    return 1;
                 }
             }
         }

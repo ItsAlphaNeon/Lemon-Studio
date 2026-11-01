@@ -98,12 +98,12 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   and Edit automation in piano roll (the engine plays no automation of them, and the mixer box's and the LED's
   targets in the original's files are not measured), Set as song start value on the mixer box and the LED (the same)
   ([rack.rs](../crates/os-app/src/rack.rs))
-- [ ] **Main menu bar.** 7 of its 136 entries greyed out on 2026-10-30, counted entry by entry after Save audio
-  clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics, TOOLS > Set up for live performance
-  and Switch auto-bypass for all plugins were enabled: TOOLS > Chord progression tool... and Control builder (no
-  chord generator or control builder yet), Set up for MIDI export (not observed yet), Set keyboard focus of all
-  plugins to ▸ (no such per-plugin setting yet), Lock / Unlock all tracks to / from their clips (tracks
-  don't lock to a clip yet); VIEW > Script output (no scripting) ([menus.rs](../crates/os-app/src/views/menus.rs))
+- [ ] **Main menu bar.** 3 of its 136 entries greyed out on 2026-10-30, counted entry by entry after Save audio
+  clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics, TOOLS > Set up for live performance,
+  Switch auto-bypass for all plugins, Chord progression tool..., Set keyboard focus of all plugins to ▸ (its Enabled
+  and Disabled not counted; greyed on Linux) and Lock / Unlock all tracks to / from their clips were enabled (the last
+  four as Lemon Studio's design): TOOLS > Control builder (no control builder yet), Set up for MIDI export (what it
+  does was not observed); VIEW > Script output (no scripting) ([menus.rs](../crates/os-app/src/views/menus.rs))
 - [x] **TOOLS ▸ Audio logger and Dump to audio editor.** Enabled (on by default, as in FL Studio) keeps the last 1 to
   10 minutes of what the device plays, the header showing the memory used; Dump puts them into the master track's
   Tesla. At its time limit Tesla now keeps the last minutes, as Edison does. What FL Studio's logger records and how

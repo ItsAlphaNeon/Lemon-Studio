@@ -1527,6 +1527,8 @@ pub enum RCmd {
     DeclickSel(u8),
     /// Switch all plugin editors to ▸: detached (true) or attached.
     DetachAll(bool),
+    /// Set keyboard focus of all plugins to ▸: Enabled (true) or Disabled (`plugin_window::set_editor_keys`).
+    EditorKeys(bool),
     /// Switch all (true) / selected audio clip channels to ▸: a stretch method as stored (event 215 int 27).
     StretchClips(bool, i32),
     ZipSel,
@@ -1676,6 +1678,20 @@ pub(crate) fn declick_items(s: &State) -> Vec<PItem> {
 pub(crate) fn editor_items() -> Vec<PItem> {
     let item = |label: &'static str, on: bool| if cfg!(plugin_windows) { it(label, RCmd::DetachAll(on)) } else { it(label, RCmd::DetachAll(on)).off() };
     vec![item("Attached", false), item("Detached", true)]
+}
+
+/// Set keyboard focus of all plugins to ▸ (TOOLS; spec: ui/channel-switches.md §3, §6): Enabled or Disabled, the
+/// current one dotted (Lemon Studio's), greyed where Lemon Studio cannot keep keys from an editor (Linux).
+pub(crate) fn key_focus_items() -> Vec<PItem> {
+    #[cfg(any(windows, target_os = "macos"))]
+    let (works, on) = (true, crate::plugin_window::editor_keys());
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let (works, on) = (false, true);
+    let item = |label: &'static str, v: bool| {
+        let i = it(label, RCmd::EditorKeys(v)).mark(Mark::Radio(on == v));
+        if works { i } else { i.off() }
+    };
+    vec![item("Enabled", true), item("Disabled", false)]
 }
 
 /// Switch all (`all`) / selected audio clip channels to ▸ (§17 "Switch", also TOOLS; spec: ui/channel-switches.md §1):
@@ -2169,6 +2185,9 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         // spec: ui/plugin-window.md "Docking and the window menu"
         #[cfg(plugin_windows)]
         RCmd::DetachAll(on) => app.plugins.set_all_detached(on),
+        // spec: ui/channel-switches.md §6
+        #[cfg(any(windows, target_os = "macos"))]
+        RCmd::EditorKeys(on) => crate::plugin_window::set_editor_keys(on),
         _ => {}
     }
     let s = &mut app.state;
@@ -2476,6 +2495,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::EventsInPiano(..)
         | RCmd::DeclickSel(_)
         | RCmd::DetachAll(_)
+        | RCmd::EditorKeys(_)
         | RCmd::StretchClips(..)
         | RCmd::ReceiveFrom(..)
         | RCmd::Unlock(_)
@@ -4342,6 +4362,26 @@ mod tests {
         app.state.tempo = 122.5;
         assert_eq!(run(&mut app, RCmd::Restretch).as_deref(), Some("Restretched 1 channel to 122.5 BPM"));
         let _ = std::fs::remove_file(&wav);
+    }
+
+    /// TOOLS > Set keyboard focus of all plugins to ▸: Enabled / Disabled set the editors' keyboard switch, the current
+    /// one dotted; greyed where editors' keys cannot be held back (spec: ui/channel-switches.md §6).
+    #[test]
+    fn keyboard_focus_of_all_plugins() {
+        let marks = || key_focus_items().iter().map(|i| (i.label.to_string(), i.enabled, i.mark)).collect::<Vec<_>>();
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            let mut app = crate::app::App::new(None);
+            assert_eq!(marks(), [("Enabled".into(), true, Mark::Radio(true)), ("Disabled".into(), true, Mark::Radio(false))]);
+            assert_eq!(key_focus_items()[1].cmd, Cmd::Rack(RCmd::EditorKeys(false)));
+            run(&mut app, RCmd::EditorKeys(false));
+            assert!(!crate::plugin_window::editor_keys());
+            assert_eq!(marks()[1].2, Mark::Radio(true));
+            run(&mut app, RCmd::EditorKeys(true));
+            assert!(crate::plugin_window::editor_keys());
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        assert!(marks().iter().all(|m| !m.1));
     }
 
     /// The name button draws the channel's icon and, with Show waveform preview ticked, its sample's waveform.

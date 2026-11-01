@@ -97,6 +97,10 @@ pub enum MenuCmd {
     ResetEmptyTracks,
     /// TOOLS ▸ Set up for live performance: Prepare for performance mode (spec: ui/performance-mode.md §1).
     PrepPerformance,
+    /// TOOLS ▸ Chord progression tool...: the progression box (`crate::chord_tool`).
+    Chords,
+    /// TOOLS ▸ Lock all tracks to their clips / Unlock all tracks from their clips (`crate::playlist::Cmd::LockClips`).
+    LockClips(bool),
     RemoveTeslas,
     /// A ▸ entry with a submenu built (`sub_items`).
     Sub(Sub),
@@ -117,6 +121,7 @@ pub enum Sub {
     ClipsAll,
     ClipsSel,
     Editors,
+    KeyFocus,
     Declick,
     Tutorials,
 }
@@ -184,6 +189,8 @@ pub const FILE_EXIT: usize = 19;
 /// OPTIONS > Theme settings (flat index: header counts).
 #[cfg(test)]
 pub const OPT_THEME: usize = 5;
+/// TOOLS > Set keyboard focus of all plugins to ▸ (`rack::key_focus_items`).
+pub const KEY_FOCUS_LABEL: &str = "Set keyboard focus of all plugins to";
 /// OPTIONS > Metronome (spec: ui/metronome.md §1).
 pub const METRONOME_LABEL: &str = "Metronome";
 /// OPTIONS > the record options (spec: ui/recording.md §3).
@@ -377,7 +384,7 @@ const OPTIONS: &[Item] = &[
 const TOOLS_A: &[Item] = &[
     it("Browser find...", "Ctrl+F").cmd(MenuCmd::Jump(crate::browser::Jump::Find)),
     it(ONE_CLICK_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::OneClick)),
-    it("Chord progression tool...", ""),
+    it("Chord progression tool...", "").on().cmd(MenuCmd::Chords),
     it("Control builder", ""),
     head("Clipboard"),
     it(SAVE_AUDIO_CLIP_LABEL, "").on().cmd(MenuCmd::SaveAudioClip),
@@ -405,13 +412,13 @@ const TOOLS_B: &[Item] = &[
     it(crate::mixer::AUTO_BYPASS_ALL_LABEL, "").on().cmd(MenuCmd::AutoBypassAll),
     it(CLIPS_ALL_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::ClipsAll)),
     it(CLIPS_SEL_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::ClipsSel)),
-    it("Lock all tracks to their clips", ""),
-    it("Unlock all tracks from their clips", ""),
+    it("Lock all tracks to their clips", "").on().cmd(MenuCmd::LockClips(true)),
+    it("Unlock all tracks from their clips", "").on().cmd(MenuCmd::LockClips(false)),
     it("Reset empty tracks", "").on().cmd(MenuCmd::ResetEmptyTracks),
     it(REMOVE_TESLAS_LABEL, "").on().cmd(MenuCmd::RemoveTeslas),
     it(DELETE_UNUSED_LABEL, "").on().cmd(MenuCmd::DeleteUnused),
     it(EDITORS_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::Editors)),
-    it("Set keyboard focus of all plugins to", "").sub(),
+    it(KEY_FOCUS_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::KeyFocus)),
     it(DECLICK_LABEL, "").sub().cmd(MenuCmd::Sub(Sub::Declick)),
 ];
 
@@ -591,6 +598,8 @@ pub fn sub_items(cmd: MenuCmd) -> Option<fn(&State) -> Vec<crate::playlist::PIte
         // spec: ui/plugin-menu.md §1: the effects, a pick into the selected mixer track's first empty slot as from F8.
         Sub::Effect => |s| crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(None), true),
         Sub::Editors => |_| crate::rack::editor_items(),
+        // spec: ui/channel-switches.md §3, §6
+        Sub::KeyFocus => |_| crate::rack::key_focus_items(),
         // spec: ui/one-click-recording.md §2
         Sub::OneClick => crate::one_click::items,
         // spec: ui/recording.md §6
@@ -1106,7 +1115,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", "Arrange windows", "Background", ONE_CLICK_LABEL, DUMP_LOG_LABEL, LOGGER_SETTINGS_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, DECLICK_LABEL, "Tutorials"]);
+        assert_eq!(built, ["New from template", "Import", "Effect", "Toolbars", "Arrange windows", "Background", ONE_CLICK_LABEL, DUMP_LOG_LABEL, LOGGER_SETTINGS_LABEL, CLIPS_ALL_LABEL, CLIPS_SEL_LABEL, EDITORS_LABEL, KEY_FOCUS_LABEL, DECLICK_LABEL, "Tutorials"]);
         let labels = |menu, label| submenu(menu, label).unwrap()(&app.state).iter().map(|p| p.label.to_string()).collect::<Vec<_>>();
         let modes = ["Fade out only", "Transient", "Transient (tail continues)", "Standard (tail continues)", "Smooth (tail continues)", "Crossfade (tail continues)"];
         assert_eq!(labels(TOOLS_MENU, DECLICK_LABEL), modes, "the six declick modes in order (spec: audio/declick.md)");
@@ -1114,10 +1123,7 @@ mod tests {
         // ADD > Effect: the effect plugin menu as a submenu (spec: ui/plugin-menu.md §1-2).
         let fx = submenu(ADD_MENU, "Effect").unwrap()(&app.state);
         assert_eq!(fx, crate::plugin_menu::items(&app.state, crate::plugin_menu::Target::Fx(None), true));
-        for label in ["Set keyboard focus of all plugins to"] {
-            let (mi, it) = MENUS.iter().enumerate().find_map(|(mi, m)| m.cols.iter().flat_map(|(_, items)| items.iter()).find(|it| it.label == label).map(|it| (mi, it))).unwrap();
-            assert!(!works(mi, it), "{label} stays greyed out");
-        }
+        assert_eq!(labels(TOOLS_MENU, KEY_FOCUS_LABEL), ["Enabled", "Disabled"]);
     }
 
     /// ADD's Categories / Simple / By vendor are the plugin menus' display mode: the dot follows it, a pick sets it as
