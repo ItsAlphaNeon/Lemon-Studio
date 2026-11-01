@@ -2721,8 +2721,9 @@ impl App {
             self.sync_live();
         }
         self.transport.listen(listen);
-        // Keys pressed while a plugin window has the focus still play the typing keyboard.
-        #[cfg(any(windows, target_os = "macos"))]
+        // Keys pressed while a plugin window has the focus still play the typing keyboard (Linux: keys a plugin's
+        // editor gets, the pointer over it or the editor holding the focus).
+        #[cfg(plugin_windows)]
         for k in crate::plugin_window::take_keys() {
             use winit::platform::scancode::PhysicalKeyExtScancode;
             if let winit::keyboard::PhysicalKey::Code(code) = winit::keyboard::PhysicalKey::from_scancode(k.scancode) {
@@ -2732,7 +2733,8 @@ impl App {
                 }
             }
         }
-        // X11 gives a key let go of over a docked editor to the editor: its typed note ends once the key is up.
+        // X11 gives a key let go of over a docked editor to the editor: its typed note ends once the key is up, though
+        // the release did not come above either (an editor taking keys through XInput 2, unseen by `take_keys`).
         #[cfg(all(plugin_windows, target_os = "linux"))]
         if !self.typing_held.is_empty() || !self.perf_typed.is_empty() {
             if let Some(map) = crate::plugin_window::keys_down() {
