@@ -155,6 +155,8 @@ pub enum MCmd {
     PdcAuto,
     /// The slot menu's Help: the slot plugin's help page (`slot_help`).
     SlotHelp(u8),
+    /// Wrap in container (false) and Wrap all in container (true) on the current track's slot (`App::wrap_in_container`).
+    Wrap(u8, bool),
     /// The slot menu's Scaling ▸: the hosted plugin's window at this percent, `None` = Main (`Plugins::editor_scales`).
     SlotScale(u8, Option<u16>),
     /// Options ▸ View ▸ Waveforms and Extra properties (`MixerUi::waveforms`, `MixerUi::extra`).
@@ -343,7 +345,7 @@ fn remove_question(n: usize) -> String {
 }
 
 /// Empties slot `k` of track `t` and drops its instance (the slot menu's Delete).
-fn clear_slot(s: &mut State, t: u16, k: u8) {
+pub(crate) fn clear_slot(s: &mut State, t: u16, k: u8) {
     if let Some(m) = track_mut(s, t) {
         m.slots[usize::from(k)] = None;
         m.slot_on[usize::from(k)] = true;
@@ -1638,8 +1640,9 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
         PItem::sub("Replace", replace),
         PItem::new("Delete...", mx(MCmd::SlotDelete(slot))),
         PItem::sep(),
-        PItem::not_yet("Wrap in container"),
-        PItem::not_yet("Wrap all in container"),
+        // Lemon Studio's Patcher, slice 1 (`crate::container`).
+        PItem { enabled: crate::container::can_wrap(app, slot, false), ..PItem::new(crate::container::WRAP, mx(MCmd::Wrap(slot, false))) },
+        PItem { enabled: crate::container::can_wrap(app, slot, true), ..PItem::new(crate::container::WRAP_ALL, mx(MCmd::Wrap(slot, true))) },
         PItem::head("Presets"),
         PItem::sub("Presets", vec![PItem::not_yet("(none)")]),
         PItem::not_yet("Browse presets"),
@@ -1672,6 +1675,11 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
         scaling_menu(app, slot),
         PItem::new("Help", mx(MCmd::SlotHelp(slot))),
     ];
+    let mut items = items;
+    // A container's members, listed (slice 1 gives them no windows of their own).
+    if let Some(list) = crate::container::list_items(s, s.selected_mixer, slot) {
+        items.insert(3, PItem::sub("Container", list));
+    }
     let mut menu = Popup { x, y, items, sub: None, scroll: [0; 2] };
     crate::presets::fill_window_menu(app, crate::plugins::fx_key(s.selected_mixer, slot), &mut menu);
     menu
@@ -1742,6 +1750,8 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::AddEffect(..) => Some("Add effect"),
         MCmd::SlotDelete(_) => Some("Remove effect"),
         MCmd::SlotMove(..) => Some("Move effect"),
+        MCmd::Wrap(_, false) => Some(crate::container::WRAP),
+        MCmd::Wrap(_, true) => Some(crate::container::WRAP_ALL),
         MCmd::RemoveTeslasNow => Some("Remove audio editors"),
         MCmd::OpenState(..) => Some("Open mixer track state"),
         MCmd::InsertState(..) => Some(INSERT),
@@ -2028,6 +2038,11 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             changed(s);
             None
         }
+        MCmd::Wrap(slot, all) => {
+            let msg = app.wrap_in_container(slot, all);
+            changed(&mut app.state);
+            msg
+        }
         MCmd::SlotMove(slot, d) => {
             let t = s.selected_mixer;
             let o = i32::from(slot) + i32::from(d);
@@ -2185,6 +2200,11 @@ pub fn feed_meters(s: &mut State, peaks: &[[f32; 2]]) -> bool {
 impl App {
     /// Mixer slot work on the UI thread (`plugin_tick`): create / open / close / drop hosted effect instances.
     pub(crate) fn mixer_tick(&mut self) {
+        self.mixer_requests();
+        self.sync_containers();
+    }
+
+    fn mixer_requests(&mut self) {
         let reqs = std::mem::take(&mut self.state.mixer.pending);
         if reqs.is_empty() {
             return;
@@ -2379,6 +2399,12 @@ impl App {
 
     pub(crate) fn open_fx(&mut self, track: u16, slot: u8) {
         let key = crate::plugins::fx_key(track, slot);
+        // A container: its list of members (slice 1 has no container window).
+        if let Some(mut list) = crate::container::list_items(&self.state, track, slot) {
+            list.insert(0, PItem::head("Container"));
+            self.state.playlist.popup = Some(Popup { x: self.mouse.0, y: self.mouse.1, items: list, sub: None, scroll: [0; 2] });
+            return;
+        }
         if !self.plugins.hosted.contains_key(&key) {
             self.state.message = Some("This slot's plugin is not hosted (no Lemon Studio version of it yet)".into());
             return;

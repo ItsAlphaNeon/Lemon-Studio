@@ -130,6 +130,13 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Change icon... in the mixer track menu draws an icon under the track's name, and in the slot menu before the
   slot's name and on its plugin window; the icons move with their tracks and slots, for the session. The slot menu's
   Link all parameters... links the effect's parameters to consecutive controllers, as its window menu's
+- Containers (a first part of the original's Patcher, in Lemon Studio's own form): the slot menu's Wrap in container
+  moves the slot's effect into a container in the same slot, and Wrap all in container moves all of the track's
+  effects into one container in that slot, in slot order. One undo step each. A container plays its effects one
+  after the other, each with its own wet and dry levels (taken from the slot's mix knob and switch), and its delay
+  is the sum of theirs, made up as any plugin's. The slot menu's Container ▸ and opening the slot list the effects.
+  Not yet: windows, automation and links for the effects inside, adding, removing or reordering them, presets, and
+  the original's own Patcher slots (projects store containers as Lemon Studio's own, which the original won't open)
 
 ## ✅ Plugin hosting
 
