@@ -956,6 +956,7 @@ fn load_channel(events: &[Event], loc: &ChannelLoc, enc: TextEnc) -> Channel {
             zipped: loc.zipped.is_some_and(|i| int(&events[i]) != 0),
             group: loc.group.map_or(0, |i| int(&events[i])),
             stored_color: loc.color.map(|i| rgb_from_bgr(int(&events[i]))),
+            icon: find(id::PLUGIN_ICON).map_or(0, int),
         },
         misc: load_misc(block),
         sound: load_sound(block, &i32_at),
@@ -6004,6 +6005,30 @@ mod tests {
         assert_eq!(back.mixer, edited.mixer);
         assert_eq!(back.mixer[4].icon, Some(43));
         assert_eq!(events_of(&file).unwrap().iter().filter(|e| e.id == id::MX_ICON).count(), 1);
+    }
+
+    /// A channel's icon number (event 155) is read into the rack settings; a new channel's block holds 0 (none), and a
+    /// save keeps the file's number (spec: flp/events/channels.md, flp/events/mixer.md "Icon numbers").
+    #[test]
+    fn channel_icon_is_read_and_kept() {
+        let mut p = new_project();
+        let mut ch = sampler(2, "Lead", 3);
+        ch.kind = ChannelKind::Plugin;
+        ch.plugin = Some(crate::wrapper::WRAPPER.into());
+        p.channels.push(ch);
+        let mut file = create(&p).unwrap();
+        assert!(load(&file).unwrap().channels.iter().all(|c| c.rack.icon == 0));
+        let ev = events_of_mut(&mut file).unwrap();
+        let start = ev.iter().rposition(|e| e.id == id::CH_START).unwrap();
+        let at = start + ev[start..].iter().position(|e| e.id == id::PLUGIN_ICON).unwrap();
+        ev[at] = Event::new(id::PLUGIN_ICON, Value::U32(30));
+        let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(back.channels[2].rack.icon, 30);
+        let mut edited = back.clone();
+        edited.channels[2].name = Some("Vocal".into());
+        apply(&edited, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!((again.channels[2].rack.icon, again.channels[2].name.as_deref()), (30, Some("Vocal")));
     }
 
     #[test]
