@@ -314,6 +314,8 @@ struct ChannelLoc {
     end: usize,
     name: Option<usize>,
     plugin_rec: Option<usize>,
+    /// Event 21, the channel type (spec: flp/events/channels.md).
+    kind: Option<usize>,
     /// Events 201 (plugin name) and 213 (plugin state) (spec: flp/events/plugins.md).
     plugin_name: Option<usize>,
     state: Option<usize>,
@@ -705,6 +707,7 @@ fn scan_channel(events: &[Event], start: usize, end: usize) -> ChannelLoc {
         match events[k].id {
             id::DISPLAY_NAME => c.name = Some(k),
             id::PLUGIN_REC => c.plugin_rec = Some(k),
+            id::CH_TYPE if c.kind.is_none() => c.kind = Some(k),
             id::PLUGIN_NAME => c.plugin_name = Some(k),
             id::PLUGIN_STATE => c.state = Some(k),
             id::COLOR => c.color = Some(k),
@@ -3010,9 +3013,18 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
         }
         // A plugin channel's plugin (201) and state (213) (spec: flp/events/plugins.md §1-2). A state for a channel
         // that had none goes after the colour flag (41), where FL keeps it.
+        // A channel that changed type (a sampler turned into a plugin channel: Set up for MIDI export, Replace) has its
+        // type event rewritten; a plugin name the block lacks goes right after it, where FL writes it.
+        if ch.kind != old.kind {
+            if let Some(i) = loc.kind {
+                set_int(&mut events[i], channel_type_code(ch.kind).into());
+            }
+        }
         if ch.kind == ChannelKind::Plugin && ch.plugin != old.plugin {
-            if let (Some(i), Some(n)) = (loc.plugin_name, &ch.plugin) {
-                set_data(&mut events[i], encode_text(n, enc));
+            match (loc.plugin_name, &ch.plugin, loc.kind) {
+                (Some(i), Some(n), _) => set_data(&mut events[i], encode_text(n, enc)),
+                (None, Some(n), Some(k)) => inserts.push((k + 1, Event::new(id::PLUGIN_NAME, Value::var(encode_text(n, enc))))),
+                _ => {}
             }
         }
         if ch.plugin_state != old.plugin_state {

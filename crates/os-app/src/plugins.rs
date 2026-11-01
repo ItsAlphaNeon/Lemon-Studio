@@ -338,6 +338,8 @@ pub struct Plugins {
     pub containers: BTreeMap<usize, crate::container::Live>,
     /// The next container member's key, counted from `MEMBER_KEY`.
     pub next_member: usize,
+    /// The Lemon MIDI Out instruments, by rack row (`App::sync_midi_outs`; spec: plugins/midi-out.md §6).
+    pub midi_outs: BTreeMap<usize, std::sync::Arc<std::sync::Mutex<crate::lemon_midi_out::MidiOutInstrument>>>,
 }
 
 /// How many gone instances `Plugins::stash` keeps.
@@ -981,6 +983,7 @@ impl Plugins {
         self.preset_waits.clear();
         // Scaling ▸ belongs to the project's windows: an opened project brings its own (`lemon_state`).
         self.editor_scales.clear();
+        self.midi_outs.clear();
     }
 
     /// The sample file a Lemon Sampler instance holds (its persisted `sample-path`), `Some("")` when it has none.
@@ -994,6 +997,8 @@ impl Plugins {
     /// Switches every hosted instance to offline rendering (an export) or back to live playback: plugins that know
     /// the difference use their best quality offline (Lemon Sampler: the resampler's exact weights).
     pub fn set_offline(&mut self, offline: bool) {
+        // Lemon MIDI Out sends nothing while a render or export runs.
+        crate::lemon_midi_out::set_offline(offline);
         for h in self.hosted.values() {
             if let Ok(mut p) = h.plugin.lock() {
                 p.set_offline(offline);
@@ -1022,7 +1027,8 @@ impl Plugins {
     }
 
     pub fn instruments(&self) -> Vec<(usize, SharedInstrument)> {
-        self.hosted.range(..FX_KEY).map(|(&r, h)| (r, h.plugin.clone() as SharedInstrument)).collect()
+        let hosted = self.hosted.range(..FX_KEY).map(|(&r, h)| (r, h.plugin.clone() as SharedInstrument));
+        hosted.chain(self.midi_outs.iter().map(|(&r, m)| (r, m.clone() as SharedInstrument))).collect()
     }
 
     /// Tells instance `key` that its menu `id` closed, with the entry picked: a pick runs now, on this (the UI) thread
@@ -1241,6 +1247,7 @@ impl Plugins {
     /// Rack rows were renumbered (`m(old) = new`; `None` drops the instance and its window). The presets the instances
     /// hold go with them.
     pub fn remap(&mut self, m: &dyn Fn(usize) -> Option<usize>) {
+        self.midi_outs = std::mem::take(&mut self.midi_outs).into_iter().filter_map(|(r, i)| Some((m(r)?, i))).collect();
         let rows: Vec<usize> = self.presets.range(..FX_KEY).map(|(&r, _)| r).collect();
         let presets: Vec<(usize, PathBuf)> = rows.into_iter().filter_map(|r| Some((r, self.presets.remove(&r)?))).filter_map(|(r, p)| Some((m(r)?, p))).collect();
         self.presets.extend(presets);

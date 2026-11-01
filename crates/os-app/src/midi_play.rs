@@ -479,7 +479,8 @@ impl App {
         }
     }
 
-    /// Master sync (spec §7): the outputs with Send master sync while Enable MIDI output and master sync are on.
+    /// Master sync (spec §7): the outputs with Send master sync while Enable MIDI output and master sync are on; and
+    /// while Enable MIDI output is on, the outputs with a port, for Lemon MIDI Out (spec: plugins/midi-out.md §6.4).
     fn midi_out_tick(&mut self) {
         let send = Switch::Output.on() && Switch::MasterSync.on();
         let sync = if send {
@@ -494,8 +495,22 @@ impl App {
         } else {
             Vec::new()
         };
+        let (mut ports, mut ports_off) = (Vec::new(), Vec::new());
+        if Switch::Output.on() {
+            for name in &self.midi.outputs {
+                let c = cfg::output(name);
+                if let Some(p) = c.port {
+                    ports.push((name.clone(), p));
+                    if c.notes_off {
+                        ports_off.push(name.clone());
+                    }
+                }
+            }
+        }
         let c = crate::midi_out::Config {
             sync,
+            ports,
+            ports_off,
             kind: crate::midi_out::SyncKind::of(prefs::index(&prefs::SYNC_TYPE)),
             offset_ms: cfg::offset(Offset::MasterSync),
             ppq: self.state.project.ppq.max(1),
