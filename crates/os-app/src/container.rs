@@ -145,6 +145,7 @@ pub const WRAP_ALL: &str = "Wrap all in container";
 pub const REMOVE: &str = "Remove effect from container";
 pub const MOVE: &str = "Move effect in container";
 pub const ADD: &str = "Add effect to container";
+pub const LEVEL: &str = "Effect level in container";
 
 /// What the container's list does to a member.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -166,6 +167,31 @@ fn pct(v: f32) -> i32 {
     (v * 100.0).round() as i32
 }
 
+/// The wet (`wet`) or dry level of member `id` of the container in slot `k` of track `t`.
+pub fn level(s: &State, t: u16, k: u8, id: u32, wet: bool) -> Option<f32> {
+    members(s, t, k)?.into_iter().find(|m| m.id == id).map(|m| if wet { m.wet } else { m.dry })
+}
+
+/// The type-in box's caption: "Bus 2 - Lemon Limiter wet".
+pub fn level_name(s: &State, t: u16, k: u8, id: u32, wet: bool) -> String {
+    let name = members(s, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.name);
+    format!("{} - {name} {}", crate::mixer::name(s, t), if wet { "wet" } else { "dry" })
+}
+
+/// Sets the wet (`wet`) or dry level of member `id` of the container in slot `k` of track `t` to `v` (0..1): one undo
+/// step. The chain takes the level on the next tick, keeping its instances (`App::sync_containers`).
+pub fn set_level(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
+    let Some(mut list) = members(s, t, k) else { return };
+    let Some(m) = list.iter_mut().find(|m| m.id == id) else { return };
+    let level = if wet { &mut m.wet } else { &mut m.dry };
+    if *level == v {
+        return;
+    }
+    *level = v;
+    crate::control::edit(s, LEVEL, crate::control::command::Region::Track(t), |s| set_members(s, t, k, &list));
+    s.piano.dirty = true;
+}
+
 fn label(i: usize, m: &Member) -> String {
     format!("{}. {} (wet {}%, dry {}%)", i + 1, m.name, pct(m.wet), pct(m.dry))
 }
@@ -184,17 +210,22 @@ pub fn list_items(s: &State, slot: u8) -> Option<Vec<PItem>> {
     Some(v)
 }
 
-/// The container's list (Lemon Studio's plain list window of slice 1, as a menu): each member ▸ Open editor, Move up,
-/// Move down, Remove; then Add effect ▸, the effect picker of an empty slot.
+/// The container's list (Lemon Studio's plain list window of slice 1, as a menu): each member ▸ Open editor, Wet: …%...
+/// and Dry: …%... (the value box), Move up, Move down, Remove; then Add effect ▸, the effect picker of an empty slot.
 pub fn list_popup(s: &State, slot: u8, x: f32, y: f32) -> Option<Popup> {
     let m = members(s, s.selected_mixer, slot)?;
     let n = m.len();
     let mx = |i: usize, op: Op| Cmd::Mixer(crate::mixer::MCmd::Member(slot, i, op));
     let on = |it: PItem, yes: bool| if yes { it } else { it.off() };
+    let t = s.selected_mixer;
+    let typein = |id: u32, wet: bool| Cmd::TypeIn(crate::typein::Target::Member(t, slot, id, wet));
     let mut items = vec![PItem::head("Container")];
     for (i, mem) in m.iter().enumerate() {
         let ops = vec![
             PItem::new("Open editor", mx(i, Op::Open)),
+            // The levels in the value box of the knobs' Enter value..., as percents.
+            PItem::new(format!("Wet: {}%...", pct(mem.wet)), typein(mem.id, true)),
+            PItem::new(format!("Dry: {}%...", pct(mem.dry)), typein(mem.id, false)),
             on(PItem::new("Move up", mx(i, Op::Up)), i > 0),
             on(PItem::new("Move down", mx(i, Op::Down)), i + 1 < n),
             PItem::new("Remove", mx(i, Op::Remove)),
@@ -632,9 +663,10 @@ mod tests {
         let pop = list_popup(&a.state, 0, 0.0, 0.0).unwrap();
         let ops = &pop.items[2].children;
         assert_eq!(pop.items[2].label, format!("2. {second} (wet 100%, dry 0%)"));
-        assert!(ops[1].enabled && !ops[2].enabled, "the last one moves up only");
+        assert_eq!(ops.iter().map(|i| i.label.as_ref()).collect::<Vec<_>>(), ["Open editor", "Wet: 100%...", "Dry: 0%...", "Move up", "Move down", "Remove"]);
+        assert!(ops[3].enabled && !ops[4].enabled, "the last one moves up only");
         // Move up.
-        crate::playlist::run(&mut a, ops[1].cmd.clone());
+        crate::playlist::run(&mut a, ops[3].cmd.clone());
         tick(&mut a);
         assert_eq!(names(&a, 0), [second.clone(), first.clone()]);
         assert_eq!(keys(&a), vec![before[1], before[0]], "the instances are kept");
@@ -674,5 +706,38 @@ mod tests {
         // Every member window has a title.
         #[cfg(plugin_windows)]
         assert_eq!(a.member_infos().len(), 3);
+    }
+
+    /// A member's wet and dry: the list's Wet: …%... and Dry: …%... open the value box in percent; each typed value is
+    /// one undo step; the chain takes the levels and keeps its instances.
+    #[test]
+    fn a_members_wet_and_dry() {
+        use crate::typein::{accept, text, Target};
+        let (mut a, _, second) = two_effects();
+        crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(0, true)));
+        tick(&mut a);
+        let keys = a.plugins.containers[&fx_key(2, 0)].keys.clone();
+        let pop = list_popup(&a.state, 0, 0.0, 0.0).unwrap();
+        let ops = &pop.items[2].children;
+        let (wet, dry) = (Target::Member(2, 0, 2, true), Target::Member(2, 0, 2, false));
+        assert_eq!((ops[1].label.as_ref(), &ops[1].cmd), ("Wet: 100%...", &Cmd::TypeIn(wet)));
+        assert_eq!((ops[2].label.as_ref(), &ops[2].cmd), ("Dry: 0%...", &Cmd::TypeIn(dry)));
+        assert_eq!(text(&a.state, wet, false), "100%");
+        assert_eq!(crate::typein::caption(&a.state, dry), format!("Value for {} - {second} dry", crate::mixer::name(&a.state, 2)));
+        accept(&mut a.state, wet, false, "60");
+        accept(&mut a.state, dry, false, "40%");
+        tick(&mut a);
+        let m = &members(&a.state, 2, 0).unwrap()[1];
+        assert!((m.wet - 0.6).abs() < 1e-6 && (m.dry - 0.4).abs() < 1e-6);
+        let live = &a.plugins.containers[&fx_key(2, 0)];
+        assert_eq!(live.keys, keys, "the instances are kept");
+        let c = live.fx.lock().unwrap();
+        assert!((c.members[1].wet - 0.6).abs() < 1e-6 && (c.members[1].dry - 0.4).abs() < 1e-6, "the chain plays the levels");
+        drop(c);
+        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(LEVEL));
+        tick(&mut a);
+        assert_eq!(members(&a.state, 2, 0).unwrap()[1].dry, 0.0);
+        assert_eq!(a.plugins.containers[&fx_key(2, 0)].fx.lock().unwrap().members[1].dry, 0.0);
+        assert_eq!(a.plugins.containers[&fx_key(2, 0)].keys, keys);
     }
 }

@@ -125,7 +125,7 @@ impl Link {
 /// mixer track box and LED can be (Lemon Studio's design): the controller's travel spans Master to the last insert,
 /// and turns the channel on from its middle.
 fn linkable(t: Target) -> bool {
-    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)) | Target::Latency(..))
+    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)) | Target::Latency(..) | Target::Member(..))
 }
 
 /// A target as `settings.txt` keeps it (`none` for one that is not linkable, which reads back as nothing).
@@ -148,7 +148,7 @@ fn target_text(t: Target) -> String {
         Target::Param(key, i) => format!("param:{key}:{i}"),
         Target::RackTrack(r) => format!("racktrack:{r}"),
         Target::RackLed(r) => format!("rackled:{r}"),
-        Target::Latency(..) => "none".into(),
+        Target::Latency(..) | Target::Member(..) => "none".into(),
     }
 }
 
@@ -615,7 +615,7 @@ impl App {
                 crate::typein::set_value(&mut self.state, t, to);
             }
             // Never linked (no remote control).
-            Target::Latency(..) => {}
+            Target::Latency(..) | Target::Member(..) => {}
         }
         self.invalidate();
     }

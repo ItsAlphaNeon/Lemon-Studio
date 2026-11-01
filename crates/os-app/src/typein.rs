@@ -28,6 +28,9 @@ pub enum Target {
     RackTrack(usize),
     /// The mute LED of the channel on rack row `.0`: "On" (playing) or "Off" (muted) (Lemon Studio's design, as above).
     RackLed(usize),
+    /// The wet (`true`) or dry level of member `.2` (its id) of the container in slot `.1` of mixer track `.0`, as a
+    /// percent (Lemon Studio's design: `crate::container`).
+    Member(u16, u8, u32, bool),
 }
 
 /// The units a latency setting is typed in: Set in ms / samples / beats.
@@ -115,7 +118,7 @@ fn unit(t: Target) -> Unit {
         Target::Knob(KnobId::ChanVol(_)) => Unit::Db(Law::Channel),
         Target::Knob(KnobId::MasterVol) => Unit::Db(Law::Main),
         Target::Knob(KnobId::Send(..)) | Target::Fader(_) => Unit::Db(Law::Fader),
-        Target::Knob(KnobId::Swing | KnobId::SlotMix(..)) => Unit::Percent,
+        Target::Knob(KnobId::Swing | KnobId::SlotMix(..)) | Target::Member(..) => Unit::Percent,
         Target::Knob(KnobId::MasterPitch) => Unit::Hz,
         // The equaliser's settings take the plain 0..1 position for now.
         Target::Param(..) | Target::Knob(KnobId::Eq(..) | KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..)) => Unit::Plain,
@@ -171,6 +174,7 @@ pub fn target_name(s: &State, t: Target) -> String {
         Target::Latency(m, input, u) => format!("{} - {} latency ({})", crate::mixer::name(s, m), if input { "Input" } else { "Track" }, u.name()),
         Target::RackTrack(_) => "Target mixer track".into(),
         Target::RackLed(_) => "Channel on / off".into(),
+        Target::Member(m, k, id, wet) => crate::container::level_name(s, m, k, id, wet),
     }
 }
 
@@ -213,6 +217,7 @@ pub(crate) fn get(s: &State, t: Target) -> Option<f64> {
         Target::Latency(m, input, _) => crate::mixer::track(s, m).map(|t| f64::from(if input { t.latency_in } else { t.latency_out })),
         Target::RackTrack(r) => s.project.channels.get(r).map(|c| f64::from(c.mixer_track)),
         Target::RackLed(r) => s.project.channels.get(r).map(|c| if c.enabled { 1.0 } else { 0.0 }),
+        Target::Member(m, k, id, wet) => crate::container::level(s, m, k, id, wet).map(f64::from),
     }
 }
 
@@ -255,6 +260,7 @@ fn set(s: &mut State, t: Target, v: f64) {
                 crate::rack::toggle_mute(s, r);
             }
         }
+        Target::Member(m, k, id, wet) => crate::container::set_level(s, m, k, id, wet, v.clamp(0.0, 1.0) as f32),
     }
 }
 
