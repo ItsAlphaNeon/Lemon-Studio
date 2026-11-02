@@ -339,6 +339,14 @@ impl Multicore {
         self.pool.clone().filter(|p| p.workers() > 0 && (!self.follow || (crate::parallel::generators_on() && self.wanted())))
     }
 
+    /// An engine taking over from `old` goes on from the gains its channels' instruments ended on.
+    pub fn keep_gains(&mut self, old: &Multicore) {
+        self.inst_out.resize_with(old.inst_out.len(), InstOut::default);
+        for (new, o) in self.inst_out.iter_mut().zip(&old.inst_out) {
+            new.gain = o.gain;
+        }
+    }
+
     /// The channels whose instrument ran this tick (`generators`) and what each put out, in channel order.
     pub fn instruments(&self) -> impl Iterator<Item = (usize, &InstOut)> + '_ {
         self.gen_jobs.iter().map(|&c| (c, &self.inst_out[c]))
@@ -638,6 +646,8 @@ pub(super) struct InstOut {
     pub active: bool,
     /// How long the instrument has had nothing to play and put out silence (`instrument_job`, auto-bypass).
     pub quiet: super::auto_bypass::Quiet,
+    /// The gains its output ended the last tick on.
+    pub gain: Option<(f32, f32)>,
 }
 
 /// The audio clips with shapes on instrument channels (`Engine::inst_shapes`), shared by the channels of a tick: each
