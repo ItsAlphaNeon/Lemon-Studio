@@ -1,0 +1,8 @@
+[package]
+name = "zest-preset"
+description = "Zest's preset file format (.zest) and the banks built into the plugin"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[dependencies]

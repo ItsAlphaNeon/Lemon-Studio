@@ -1,0 +1,13 @@
+[package]
+name = "zest-core"
+description = "Zest's engine, written from the pages in pages/"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[features]
+# The lane-by-lane vector operations other processors use (`simd`), on x86-64 too: to compare renders.
+portable = []
+
+[dependencies]
+zest-preset = { path = "../zest-preset" }
