@@ -518,9 +518,14 @@ impl ChannelState {
     }
 
     /// The channel's levels for a hosted instrument.
+    ///
+    /// A control point or automation value is handed on whole from its tick: the instrument takes it into its voices'
+    /// gain ramp, one limited ramp per tick (spec: audio/sampler.md "Gains"); the engine's glide is its own voices'
+    /// and its output gain's.
     fn levels(&self) -> crate::instrument::ChannelLevels {
         let (mod_x, mod_y) = self.adjust.mods();
-        crate::instrument::ChannelLevels { volume: self.volume as f32, pan: self.pan_of(self.pan) as f32, mod_x, mod_y }
+        let (v, p) = self.ramp.map_or((self.vol_v, self.pan), |r| (r.v1, r.p1));
+        crate::instrument::ChannelLevels { volume: self.vol_gain(v) as f32, pan: self.pan_of(p) as f32, mod_x, mod_y }
     }
 
     /// A value for one of the channel's filter knobs or level adjustments from an automation clip (`v` 0..1, spec:
@@ -5499,6 +5504,30 @@ mod tests {
         let mut ch = Engine::new(&p, &mut lib, 48000, PlayMode::Song).channels.remove(0);
         ch.apply(target::CHANNEL_RESONANCE, 64, 48000);
         assert_eq!(ch.levels().mod_y, -0.25);
+    }
+
+    // spec: audio/sampler.md "Gains": a control point's change reaches the voices as one gain ramp per tick, limited by
+    // the instrument, not over a fixed glide time.
+    #[test]
+    fn instruments_get_a_control_points_value_on_its_tick() {
+        let mut p = project(vec![long_note(0, 384, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        p.patterns[0].controls = vec![ControlPoint::new(24, 0, ControlPoint::VOLUME, 3200), ControlPoint::new(48, 0, ControlPoint::PAN, 9600)];
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let probe = Arc::new(Mutex::new(LevelProbe(vec![])));
+        e.set_instrument(0, probe.clone());
+        while e.tick <= 60 {
+            e.next_tick();
+        }
+        let levels = probe.lock().unwrap().0.clone();
+        let ch = &e.channels[0];
+        let quarter = (laws::channel_gain(0.25) * f64::from(ch.adjust.mult)) as f32;
+        let vols: Vec<f32> = levels.iter().map(|l| l.volume).collect();
+        let pans: Vec<f32> = levels.iter().map(|l| l.pan).collect();
+        assert_eq!(vols.iter().filter(|&&v| v != vols[0]).collect::<Vec<_>>(), vec![&quarter; 2], "no value on the way");
+        assert_eq!(pans.iter().filter(|&&p| p != pans[0]).count(), 1, "{pans:?}");
+        assert_eq!(*pans.last().unwrap(), ch.pan_of(0.5) as f32);
     }
 
     /// spec: audio/implementing.md "Playing live": an instrument the UI thread holds for a moment is waited for, so it
