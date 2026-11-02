@@ -121,7 +121,8 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   engine plays clips and control points on the main swing, a channel's mixer track and its switch): Override global
   mapping... on all four (one kind of link, kept in the program's settings; what the original's override does is
   not described), and Edit automation in piano roll on the swing knob, the mixer box and the LED (the piano roll has
-  no lane for the main swing, a channel's mixer track or its switch)
+  no lane for the main swing, a channel's mixer track or its switch; greyed in the original too, which also greys Edit
+  events in new window there, 2026-11-02)
   ([rack.rs](../crates/os-app/src/rack.rs), [burn_midi.rs](../crates/os-app/src/burn_midi.rs))
 - [ ] **Main menu bar.** 2 of its 137 entries greyed out on 2026-10-30, counted entry by entry after Save audio
   clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics, TOOLS > Set up for live performance,
