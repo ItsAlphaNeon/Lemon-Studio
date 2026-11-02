@@ -250,6 +250,14 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         false
     }
 
+    /// Sends each audio clip voice's end (`Instrument::voice_start`) as per-note modulation of the parameter named
+    /// `name`; the instance then ends the voice there itself (`Instrument::voice_ends`; UI thread). For Lemon Sampler
+    /// only (spec: audio/audio-clips.md "What a clip plays"). False when the plugin or format cannot.
+    fn use_end_param(&mut self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+
     /// Sends the channel's volume and pan (`Instrument::channel_levels`) to the instance, which works them into its
     /// voices' final levels; the engine then leaves its output as it is (UI thread). For Lemon Sampler only (spec:
     /// plugins/host-link.md "Channel levels"). False when the format cannot.

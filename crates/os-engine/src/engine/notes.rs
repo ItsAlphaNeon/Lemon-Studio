@@ -99,7 +99,8 @@ pub(super) enum Note {
     /// `fine`: the note's fine pitch in semitones, a tuning of its own on top of the channel's; `levels`: its pan and
     /// mod X / Y.
     /// `voice`: an audio clip's voice, named for its gains and its end (`Instrument::voice_start`).
-    On { key: u8, vel: f32, start: f32, fine: f32, levels: crate::NoteLevels, voice: Option<u32> },
+    /// `end`: an audio clip's trimmed end (0..1 of the sample, 0 = none).
+    On { key: u8, vel: f32, start: f32, end: f32, fine: f32, levels: crate::NoteLevels, voice: Option<u32> },
     /// The note's end: a plugin's own release, a sampler voice's envelope release.
     Off(u8),
     /// A sampler voice's closing fade: the voice named when it is an audio clip's, else the key's voices.
@@ -125,6 +126,8 @@ pub(super) struct Event {
     pub vel: f32,
     /// Sample start (0..1 of the sample).
     pub start: f32,
+    /// An audio clip's trimmed end (0..1 of the sample, 0 = none).
+    pub end: f32,
     /// The note's fine pitch, semitones.
     pub fine: f32,
     /// The note has a length (a step's note has none).
@@ -147,7 +150,7 @@ pub(super) struct Event {
 
 impl Event {
     pub fn on(ch: usize, off: u32, key: u8, vel: f32) -> Event {
-        Event { ch, off, key, vel, start: 0.0, fine: 0.0, long: true, glide: 0, levels: crate::NoteLevels::default(), cuts: None, layer: None, porta: false, voice: None }
+        Event { ch, off, key, vel, start: 0.0, end: 0.0, fine: 0.0, long: true, glide: 0, levels: crate::NoteLevels::default(), cuts: None, layer: None, porta: false, voice: None }
     }
     /// A layer note's own cut group (spec: audio/note-rules.md "Layer channels": it acts before the note is handed on).
     pub fn cut(ch: usize, off: u32, group: u32) -> Event {
@@ -522,7 +525,7 @@ fn note_start(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, N
     };
     // A retriggered key: its old tuning ends with it.
     v.glides.retain(|g| g.key != key);
-    out.push((e.ch, e.off, Note::On { key, vel: e.vel, start: e.start, fine: e.fine, levels: e.levels, voice: e.voice }));
+    out.push((e.ch, e.off, Note::On { key, vel: e.vel, start: e.start, end: e.end, fine: e.fine, levels: e.levels, voice: e.voice }));
     v.pool.push(Voice { sent: key, born: v.tick, group, state: State::Held, left, layer: e.layer, voice: e.voice });
     if r.mono {
         v.sounding = Some((key, key));
@@ -551,7 +554,7 @@ mod tests {
     }
 
     fn on(key: u8) -> Note {
-        Note::On { key, vel: 0.8, start: 0.0, fine: 0.0, levels: crate::NoteLevels::default(), voice: None }
+        Note::On { key, vel: 0.8, start: 0.0, end: 0.0, fine: 0.0, levels: crate::NoteLevels::default(), voice: None }
     }
 
     fn sampler() -> Rules {

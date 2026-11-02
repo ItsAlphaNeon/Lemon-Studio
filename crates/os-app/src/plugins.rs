@@ -601,6 +601,9 @@ impl Plugins {
             p.use_note_levels();
             if a.desc.name == LEMON_SAMPLER {
                 p.use_voice_gains();
+                // Each audio clip's voice ends at its trimmed end, in the sampler (spec: audio/audio-clips.md "What a
+                // clip plays").
+                p.use_end_param(CLIP_END);
             }
             if [LEMON_SAMPLER, crate::osc3::LEMON_TRIO, crate::citrus::CITRUS].contains(&a.desc.name.as_str()) {
                 p.use_channel_levels();
@@ -1686,6 +1689,8 @@ pub fn new_slot(name: &str) -> os_model::SlotPlugin {
 const NATIVE_CHECKS: &str = "native-checks.txt";
 /// The sampler parameter a note's sample start modulates per note (Lemon Sampler's START OFFSET).
 const SAMPLE_START: &str = "Sample start offset";
+/// Lemon Sampler's hidden parameter an audio clip voice's end modulates per note.
+const CLIP_END: &str = "Clip end";
 
 /// Lemon Sampler's starting state for a sampler channel of the project: its sample, its five envelope records, its
 /// stretch settings, the sample's start, length, loop points, loop options and precomputed effects, the channel

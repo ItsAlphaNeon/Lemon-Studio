@@ -682,6 +682,7 @@ impl LemonSampler {
             NoteEvent::PolyPan { voice_id, note, pan, .. } => self.engine.pan(voice_id, note, pan),
             NoteEvent::PolyModulation { voice_id, poly_modulation_id, normalized_offset, .. } => match poly_modulation_id {
                 params::START_OFFSET_POLY => self.engine.start_later(voice_id, normalized_offset, blk),
+                params::CLIP_END_POLY => self.engine.end_at(voice_id, normalized_offset, blk),
                 // The note's mod X / mod Y in knob units (the filter knobs' 0..1), added to the knobs for its voice.
                 params::MOD_X_POLY => self.engine.modulate(voice_id, Some(normalized_offset), None),
                 params::MOD_Y_POLY => self.engine.modulate(voice_id, None, Some(normalized_offset)),

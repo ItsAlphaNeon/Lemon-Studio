@@ -44,10 +44,26 @@ pub trait Instrument: Send {
         self.note_off(offset, key);
     }
     /// Starts an audio clip's voice as `note_start` does, named `voice` for `voice_gain` and `voice_choke` (two clips
-    /// of one channel overlap on the same key). Default: `note_start`.
-    fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: NoteLevels, voice: u32) {
-        let _ = voice;
+    /// of one channel overlap on the same key). `end` (0..1 of the sample, 0 = none) is the clip's trimmed end, where
+    /// an instrument that [`voice_ends`](Self::voice_ends) ends the voice. Default: `note_start`.
+    fn voice_start(
+        &mut self,
+        offset: u32,
+        key: u8,
+        velocity: f32,
+        start: f32,
+        end: f32,
+        levels: NoteLevels,
+        voice: u32,
+    ) {
+        let _ = (voice, end);
         self.note_start(offset, key, velocity, start, levels);
+    }
+    /// True for an instrument that ends an audio clip's voice at the `end` `voice_start` gives it, through its declick
+    /// closing (spec: audio/audio-clips.md "What a clip plays"): the engine then chokes the voice only at the song's
+    /// end. Default false: the engine chokes it at the clip's end tick.
+    fn voice_ends(&self) -> bool {
+        false
     }
     /// True for an instrument that puts `voice_gain` on its voices one by one. Default false: the engine puts an audio
     /// clip's fades and gain on the instrument's whole output, which is right only while one clip plays at a time.

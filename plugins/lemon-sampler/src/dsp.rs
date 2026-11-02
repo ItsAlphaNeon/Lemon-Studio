@@ -153,6 +153,18 @@ fn fade_len(ms: f64, rate: f64) -> u32 {
     ((ms * 0.001 * rate).round() as u32).max(1)
 }
 
+/// Samples in a mode's opening at `rate`: none in modes 0 and 6.
+fn open_len(d: &Declick, rate: f64) -> u32 {
+    if d.open_ms > 0.0 { fade_len(d.open_ms, rate) } else { 0 }
+}
+
+/// The step removal's share of the first sample taken off at output sample `i` of an opening of `n` samples: a falling
+/// raised cosine with the exact cosine, `single((cos((i + 1) * (1 / (n + 1)) * pi) + 1) * 0.5)` in doubles (spec:
+/// audio/declick.md "Step removal").
+fn step_gain(i: u32, n: u32) -> f32 {
+    (((f64::from(i + 1) * (1.0 / f64::from(n + 1)) * std::f64::consts::PI).cos() + 1.0) * 0.5) as f32
+}
+
 /// A gain fade's value at table index `j` (1..=n) of a fade of `n` samples: a raised cosine, bent by the tension.
 /// Closing: `j = i + 1`; opening: `j = n - i` (spec: audio/declick.md "Gain fade").
 fn fade_gain(j: u32, n: u32, tension: f32) -> f32 {
@@ -343,6 +355,12 @@ struct Voice {
     released: bool,
     /// Opening length in samples: only a voice that starts inside its sample has one (0 = none).
     open: u32,
+    /// A trimmed audio clip's end frame, in the played sample's frames (`None`: the sample's end).
+    end: Option<f64>,
+    /// The fades are worked on: from the tick in which the voice reaches its end or is released.
+    fades: bool,
+    /// The step removal's first sample per side, taken when the fades are worked on from the voice's first sample.
+    step: Option<(f32, f32)>,
     /// The closing, once it has started (note end, choke, the end of the sample).
     close: Option<Close>,
     /// The volume envelope ran out in the last tick: the closing starts with this one.
@@ -850,7 +868,7 @@ impl Engine {
         // FL velocity byte = plugin velocity × 128; 100 = unity (spec: audio/sampler-playback.md).
         let vel = laws::velocity_gain((velocity.clamp(0.0, 1.0) * 128.0).round() as u8) as f32;
         let pos = (b.start_offset.clamp(0.0, 1.0) * frames as f64).floor();
-        let open = if pos > 0.0 { fade_len(declick(b.declick).open_ms, f64::from(self.rate)) } else { 0 };
+        let open = if pos > 0.0 { open_len(&declick(b.declick), f64::from(self.rate)) } else { 0 };
         self.retime(&b.records);
         let art = Articulators::start(&b.records, &self.timing);
         // A volume envelope that starts in its delay or attack ramps the gain in from 0 (spec: audio/sampler.md "Gains").
@@ -877,6 +895,9 @@ impl Engine {
             age: 0,
             released: false,
             open,
+            end: None,
+            fades: false,
+            step: None,
             close: None,
             close_next: false,
             art,
@@ -907,6 +928,7 @@ impl Engine {
             // envelopes too (spec: audio/sampler.md "The end of a voice").
             if vol_env {
                 v.art.release(&b.records, &self.timing);
+                v.fades = true;
             } else if looped && v.close.is_none() {
                 v.close = Some(close);
             }
@@ -920,7 +942,7 @@ impl Engine {
         let Some((n, _)) = self.shape() else { return };
         let n = n as f64;
         let file = if self.file_frames > 0.0 { self.file_frames } else { n };
-        let open = fade_len(declick(b.declick).open_ms, f64::from(self.rate));
+        let open = open_len(&declick(b.declick), f64::from(self.rate));
         for v in self.voices.iter_mut().filter(|v| v.id == Some(id) && v.age == 0) {
             let at = b.start_offset.clamp(0.0, 1.0) * n + f64::from(extra.max(0.0)) * file;
             v.pos = at.min(n).floor();
@@ -930,6 +952,19 @@ impl Engine {
             if let Some(d) = &self.disk {
                 d.start_at(&mut v.feed, v.pos, true);
             }
+        }
+    }
+
+    /// A note that has not played yet ends at `frac` of the loaded file, on top of START OFFSET, in the played sample's
+    /// frames: a trimmed audio clip's end frame, limited to the sample and at least where the voice starts. The voice
+    /// closes there through the declick mode (spec §7, audio/audio-clips.md "What a clip plays").
+    pub fn end_at(&mut self, id: i32, frac: f32, b: &Block) {
+        let Some((n, _)) = self.shape() else { return };
+        let n = n as f64;
+        let file = if self.file_frames > 0.0 { self.file_frames } else { n };
+        for v in self.voices.iter_mut().filter(|v| v.id == Some(id) && v.age == 0) {
+            let at = b.start_offset.clamp(0.0, 1.0) * n + f64::from(frac.max(0.0)) * file;
+            v.end = Some(at.round_ties_even().clamp(v.pos, n));
         }
     }
 
@@ -1178,8 +1213,14 @@ fn start_tick(v: &mut Voice, mut rt: Option<&mut Rt>, src: &Src, b: &Block, cx: 
     let (ls, le) = cx.lp;
     let n = resample::half_width(ratio) as f64;
     let first = if v.looped { ls } else { 0.0 };
-    let end = le.unwrap_or(src.frames() as f64);
+    let end = le.unwrap_or_else(|| v.end.unwrap_or(src.frames() as f64));
     let near = v.pos.round_ties_even() < first + n + 2.0 || v.pos + ratio * f64::from(len) >= end - n - 3.0;
+    // The fades are worked on from the tick at whose end the position is at or past the end frame (spec:
+    // audio/declick.md "When the opening applies").
+    let advance = if stretching { cx.speed } else { ratio };
+    if le.is_none() && v.pos + advance * f64::from(len) >= end {
+        v.fades = true;
+    }
     let from = (!near && !stretching).then_some(v.pos);
     let copy = from.is_some() && ratio == 1.0 && (v.pos as f32).fract() == 0.0 && matches!(src, Src::Ram(_));
     v.tick = TickState { len, done: 0, ratio, from, copy, ramp: [ramp(0), ramp(1)] };
@@ -1193,6 +1234,11 @@ fn render_voice(v: &mut Voice, mut rt: Option<&mut Rt>, src: &Src, b: &Block, cx
         v.serial = cx.serial;
     }
     let n = src.frames() as f64;
+    // A trimmed audio clip ends at its end frame. Without bleeding the frames past it read the last kept frame, as at
+    // the end of the sample; with it the voice plays on into the sample under the closing (spec: audio/audio-clips.md
+    // "What a clip plays", audio/declick.md "When the closing starts").
+    let end = v.end.unwrap_or(n);
+    let kept = if cx.dc.bleed { src.frames() } else { (end as usize).max(1) };
     let (ls, le) = cx.lp;
     let stretching = rt.as_ref().is_some_and(|x| x.started);
     let ratio = v.tick.ratio;
@@ -1217,10 +1263,14 @@ fn render_voice(v: &mut Voice, mut rt: Option<&mut Rt>, src: &Src, b: &Block, cx
         if pos < 0.0 {
             return false;
         }
-        // The end of the sample: the closing starts on the first sample at or past it and works on the held last
-        // frame (spec: audio/declick.md "When the closing starts").
-        if pos >= n && v.close.is_none() {
+        // The end of the sample or of a trimmed clip: the closing starts on the first sample at or past it (spec:
+        // audio/declick.md "When the closing starts"). A clip whose start and end frame coincide plays nothing.
+        if pos >= end && v.close.is_none() {
+            if v.age == 0 && v.end.is_some() {
+                return false;
+            }
             v.close = Some(Close::new(&cx.dc, cx.rate));
+            v.fades = true;
         }
         let (mut l, mut r) = match (rt.as_mut(), src) {
             (Some(x), Src::Ram(s)) if stretching => {
@@ -1240,7 +1290,7 @@ fn render_voice(v: &mut Voice, mut rt: Option<&mut Rt>, src: &Src, b: &Block, cx
                 let i = pos.round_ties_even() as usize;
                 (s.left[i], s.right[i])
             }
-            (_, Src::Ram(s)) => resample::read(&s.left, &s.right, pos, ratio, cx.quality),
+            (_, Src::Ram(s)) => resample::read(&s.left[..kept], &s.right[..kept], pos, ratio, cx.quality),
             // From disk: the same frames read the same way. While its frames are late (live playback) the voice is
             // silent and keeps time (the frames are skipped); it fades back in once they are there.
             (_, Src::Disk(d)) => match d.read(&mut v.feed, pos, ratio, cx.quality, cx.wait) {
@@ -1259,13 +1309,25 @@ fn render_voice(v: &mut Voice, mut rt: Option<&mut Rt>, src: &Src, b: &Block, cx
         l = v.filt.run(0, k as usize, l);
         r = v.filt.run(1, k as usize, r);
         // The fades act on the signal before the gains (spec: audio/declick.md "Where the fades sit"). FL works on a
-        // voice's fades only once it closes, so an opening shows only on a voice that closes while it is younger than
-        // its opening ("When the opening applies"); the step removal of modes 1 and 2 is not done here.
-        if let Some(c) = v.close.as_mut() {
-            if v.open > 0 && !cx.dc.step_removal && v.age < u64::from(v.open) {
+        // voice's fades only from the tick in which it reaches its end or is released, so an opening shows only on a
+        // voice that gets there while it is younger than its opening ("When the opening applies").
+        if (v.fades || v.close.is_some()) && v.age < u64::from(v.open) {
+            if cx.dc.step_removal {
+                // Modes 1 and 2 take the voice's first sample off the signal along a falling raised cosine, when the
+                // fades are worked on from that sample on ("Step removal").
+                if v.age == 0 {
+                    v.step = Some((l, r));
+                }
+                if let Some((fl, fr)) = v.step {
+                    let h = step_gain(v.age as u32, v.open);
+                    (l, r) = (l - fl * h, r - fr * h);
+                }
+            } else {
                 let o = fade_gain(v.open - v.age as u32, v.open, cx.dc.tension);
                 (l, r) = (l * o, r * o);
             }
+        }
+        if let Some(c) = v.close.as_mut() {
             match c.apply(l, r, cx.rate) {
                 Some(x) => (l, r) = x,
                 None => return false,
@@ -1607,6 +1669,94 @@ mod tests {
         e.render(&mut l, &mut r, &b);
         assert!(l[960..].iter().all(|v| (v - 0.25).abs() < 1e-6), "the other voice plays on: {}", l[1439]);
         assert_eq!(e.voices.iter().map(|v| v.id).collect::<Vec<_>>(), vec![Some(2)]);
+    }
+
+    /// A voice of note id 1 started `start` and ended `end` of the way into `s` (a trimmed audio clip), rendered for
+    /// `len` samples.
+    fn clip(s: &Sample, mode: i32, start: f32, end: f32, len: usize) -> (Engine, Vec<f32>) {
+        let mut e = Engine::new(48000.0);
+        e.sample = Some(Arc::new(s.clone()));
+        let b = Block { declick: mode, ..Block::default() };
+        e.note_on_id(60, 100.0 / 128.0, Some(1), &b);
+        e.start_later(1, start, &b);
+        e.end_at(1, end, &b);
+        let (mut l, mut r) = (vec![0.0; len], vec![0.0; len]);
+        e.render(&mut l, &mut r, &b);
+        (e, l)
+    }
+
+    // spec: audio/audio-clips.md "What a clip plays", audio/declick.md "When the closing starts": a trimmed clip closes
+    // on the first sample at or past its end frame. Under the closing it holds the last kept frame without bleeding
+    // (mode 0) and plays on into the sample with it (mode 3).
+    #[test]
+    fn a_trimmed_voice_closes_at_its_end_frame() {
+        let s = ramp(4800);
+        for (mode, bleed) in [(0, false), (3, true)] {
+            let (e, l) = clip(&s, mode, 0.25, 0.75, 4800);
+            for j in [0, 600, 2399] {
+                assert!((l[j] - s.left[1200 + j]).abs() < 1e-5, "mode {mode}, sample {j}: {}", l[j]);
+            }
+            let n = fade_len(declick(mode).close_ms, 48000.0);
+            for i in 0..n {
+                let from = if bleed { s.left[3600 + i as usize] } else { s.left[3599] };
+                let want = from * fade_gain(i + 1, n, 0.0);
+                let got = l[2400 + i as usize];
+                assert!((got - want).abs() < 1e-5, "mode {mode}, closing sample {i}: {got} vs {want}");
+            }
+            assert!(l[2400 + n as usize..].iter().all(|v| *v == 0.0), "mode {mode}: over after the closing");
+            assert!(!e.has_voices());
+        }
+        // A clip whose start and end frame coincide plays nothing.
+        let (e, l) = clip(&s, 3, 0.25, 0.25, 480);
+        assert!(l.iter().all(|v| *v == 0.0) && !e.has_voices());
+    }
+
+    // spec: audio/declick.md "Step removal", "When the opening applies": a clip in mode 1 or 2 that ends in its first
+    // tick has its first sample taken off along a falling raised cosine over 4 ms; one that ends in a later tick keeps
+    // its start.
+    #[test]
+    fn step_removal_opens_a_clip_that_ends_in_its_first_tick() {
+        let s = Sample { rate: 48000, left: vec![0.5; 4800], right: vec![0.5; 4800] };
+        let n = fade_len(4.0, 48000.0);
+        assert_eq!(n, 192);
+        assert!(step_gain(0, n) > 0.9999 && step_gain(n - 1, n) < 1e-4);
+        for mode in [1, 2] {
+            // From frame 480 to 528: 48 samples, within the first tick (230.8 samples).
+            let (_, l) = clip(&s, mode, 0.1, 0.11, 960);
+            assert!(l[0].abs() < 1e-4, "mode {mode}: starts from zero: {}", l[0]);
+            for i in 0..48 {
+                let want = 0.5 - 0.5 * step_gain(i, n);
+                assert!((l[i as usize] - want).abs() < 1e-5, "mode {mode}, sample {i}: {} vs {want}", l[i as usize]);
+            }
+            let (_, l) = clip(&s, mode, 0.1, 0.5, 960);
+            assert!((l[0] - 0.5).abs() < 1e-5 && (l[100] - 0.5).abs() < 1e-5, "mode {mode}: {} {}", l[0], l[100]);
+        }
+        // Modes 0 and 6 have no opening.
+        for mode in [0, 6] {
+            let (_, l) = clip(&s, mode, 0.1, 0.11, 960);
+            assert!((l[0] - 0.5).abs() < 1e-5, "mode {mode}: {}", l[0]);
+        }
+    }
+
+    // spec: audio/declick.md "When the opening applies": the fades are worked on from the tick in which the voice
+    // reaches its end, so a clip shorter than its gain-fade opening shows the opening's later part in its last tick
+    // only, and the opening runs on under the closing.
+    #[test]
+    fn a_short_clip_opens_in_the_tick_it_ends_in() {
+        let s = Sample { rate: 48000, left: vec![0.5; 4800], right: vec![0.5; 4800] };
+        // Frames 480 to 1080: 600 samples in mode 3, whose opening is 960.
+        let (_, l) = clip(&s, 3, 0.1, 0.225, 1600);
+        let spt = Time::default().samples_per_tick(48000.0);
+        let ends = (1..).map(|k| (k as f64 * spt).round_ties_even() as usize);
+        let last = ends.take_while(|&e| 480 + e < 1080).last().unwrap_or(0);
+        assert_eq!(last, 462);
+        let open = |age: usize| fade_gain(960 - age as u32, 960, 0.0);
+        assert!((l[last - 1] - 0.5).abs() < 1e-5, "untouched before the tick: {}", l[last - 1]);
+        for age in [last, 500, 599] {
+            assert!((l[age] - 0.5 * open(age)).abs() < 1e-5, "sample {age}: {}", l[age]);
+        }
+        let want = 0.5 * open(600) * fade_gain(1, 960, 0.0);
+        assert!((l[600] - want).abs() < 1e-5, "the closing's first sample: {} vs {want}", l[600]);
     }
 
     // spec: audio/declick.md "Gain fade": the closing falls from just under 1 to just over 0; tension 5 bends it.
