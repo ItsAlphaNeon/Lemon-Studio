@@ -80,6 +80,12 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   bar, or 2, 4 or 8 bars, then jumps there exactly on it
 - Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
 - Track height, zoom and scroll saved with the project
+- Audio tracks and instrument tracks, saved as FL saves them: the mixer track menu's Assign to new / Unassign from
+  Audio track(s), the channel menu's Assign to new instrument track and the track menu's Track mode ▸ link a playlist
+  track to a mixer track or a channel ("A" / "I" on the header, "I" on the rack's name button). Audio clips placed or
+  moved onto an audio track play through its mixer track, and recordings land on it; an instrument track takes no
+  audio clips (a dropped one goes to the next free track below). The mixer's Select ▸ Channels and playlist tracks
+  routed to this track also finds the linked tracks
 - The clip source picker's item menu: Cut itself (the rack's, one undo step) and Edit sample..., which opens an audio
   clip's sample in Tesla on the master track
 - Project picker (VIEW, Ctrl+F8 or the toolbar's project button): a menu of the patterns and channels; picking a

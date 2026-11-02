@@ -308,6 +308,8 @@ pub enum Cmd {
     TrackSolo(u16),
     /// Group the track with the one above it, or take it out of its group (§6a).
     TrackGroup(u16),
+    /// Track mode ▸ (§6c): unassigned, an audio track, an instrument track.
+    TrackMode(u16, crate::track_links::Mode),
     /// Arrangements (§12): show arrangement `n`, add an empty one, clone / rename / delete the current one, copy
     /// arrangement `n`'s clips into the current one.
     ArrSelect(u16),
@@ -605,8 +607,9 @@ impl Wave {
 }
 
 /// What a playlist undo step keeps (`crate::history`): the shown arrangement's clips, markers and tracks, the
-/// automation data and the channels' stretch settings.
-pub(crate) type Snapshot = (Vec<Clip>, Vec<TimeMarker>, Vec<PlaylistTrack>, Vec<Automation>, Vec<[u32; 4]>);
+/// automation data and the channels' stretch settings and mixer tracks (an audio clip placed on an audio track moves
+/// its channel to the track's mixer track, `track_links::route_clips`).
+pub(crate) type Snapshot = (Vec<Clip>, Vec<TimeMarker>, Vec<PlaylistTrack>, Vec<Automation>, Vec<([u32; 4], u16)>);
 
 pub struct PlaylistState {
     pub tool: PlTool,
@@ -1479,7 +1482,7 @@ pub fn snapshot_with(s: &mut State, name: &'static str, extra: crate::history::S
 /// The playlist's undo state now (`snapshot`).
 pub(crate) fn capture(s: &State) -> Snapshot {
     let (clips, markers, tracks) = s.project.arrangement().map(|a| (a.clips.clone(), a.markers.clone(), a.tracks.clone())).unwrap_or_default();
-    let stretch = s.project.channels.iter().map(|c| c.sound.stretch).collect();
+    let stretch = s.project.channels.iter().map(|c| (c.sound.stretch, c.mixer_track)).collect();
     (clips, markers, tracks, s.project.automations.clone(), stretch)
 }
 
@@ -1490,8 +1493,9 @@ pub(crate) fn restore(s: &mut State, (c, m, t, a, st): Snapshot) {
     arr.markers = m;
     arr.tracks = t;
     s.project.automations = a;
-    for (ch, v) in s.project.channels.iter_mut().zip(st) {
+    for (ch, (v, m)) in s.project.channels.iter_mut().zip(st) {
         ch.sound.stretch = v;
+        ch.mixer_track = m;
     }
     s.playlist.sel.clear();
     s.piano.dirty = true;
@@ -2359,6 +2363,9 @@ pub fn add_audio_clip_as(s: &mut State, path: &str, track: u16, tick: u32, name:
 /// the track after the highest any channel uses).
 pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer: Option<u16>) -> Option<usize> {
     s.playlist.wave(path)?;
+    // Not on an instrument track: the next free track below it (§6c); on an audio track, through its mixer track.
+    let track = crate::track_links::audio_drop_track(s, track, tick, tick + 1);
+    let mixer = mixer.or_else(|| crate::track_links::audio_mixer(s, track));
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
     let mixer_track = mixer.unwrap_or_else(|| (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project)));
@@ -2882,6 +2889,7 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         PItem::head("Track"),
         PItem::new("Rename...", Cmd::TrackRename(t)),
         PItem::sub("Color", colors),
+        PItem::sub("Track mode", crate::track_links::mode_items(s, t, |m| Cmd::TrackMode(t, m))),
         PItem::sep(),
         PItem::new("Mute", Cmd::TrackMute(t)).mark(Mark::Check(!on)),
         PItem::new("Solo", Cmd::TrackSolo(t)).mark(Mark::Check(s.playlist.solo.as_ref().is_some_and(|x| x.0 == t))),
@@ -3405,6 +3413,10 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 let t = snap_round(s, &g, tick, alt);
                 s.playlist.overlay = Some(Overlay::Slice { tick: t, t0: track, t1: track });
             }
+            // An instrument track takes no audio clips (§6c).
+            None if !crate::track_links::fits(s, source_for(s, track), track) => {
+                s.message = Some(crate::track_links::NOT_FOR_AUDIO.into());
+            }
             None => {
                 // FL's name for placing the current source's clip (spec: ui/settings-choices.md "Undo history").
                 snapshot_as(s, "Arranger fill paint clip");
@@ -3569,11 +3581,19 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             let lo = orig.iter().map(|(_, c)| i32::from(c.track)).min().unwrap_or(0);
             let hi = orig.iter().map(|(_, c)| i32::from(c.track)).max().unwrap_or(0);
             let dk = dk.clamp(-lo, i32::from(TRACKS) - 1 - hi);
+            // A clip an instrument track can't take (an audio clip) stays on its own track (§6c).
+            let to: Vec<u16> = orig
+                .iter()
+                .map(|(_, o)| {
+                    let t = (i32::from(o.track) + dk) as u16;
+                    if crate::track_links::fits(s, o.source, t) { t } else { o.track }
+                })
+                .collect();
             let arr = arr_mut(s);
-            for &(i, o) in &orig {
+            for (&(i, o), t) in orig.iter().zip(to) {
                 if let Some(c) = arr.clips.get_mut(i) {
                     c.position = (i64::from(o.position) + dt) as u32;
-                    c.track = (i32::from(o.track) + dk) as u16;
+                    c.track = t;
                 }
             }
             s.piano.dirty = true;
@@ -3784,6 +3804,11 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
         && let Some(c) = orig.first().and_then(|&(i, _)| clips(s).get(i))
     {
         s.playlist.lock_len = Some((c.source, c.length));
+    }
+    // Audio clips that land on an audio track play through its mixer track (§6c).
+    if let PlDrag::Move { orig, .. } = &d {
+        let idx: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
+        crate::track_links::route_clips(s, &idx);
     }
     match d {
         PlDrag::Perform => {
@@ -4160,8 +4185,16 @@ pub fn commit_edit(s: &mut State) {
             }
         }),
         EditTarget::TypeIn(t, norm) => crate::typein::accept(s, t, norm, &text),
-        EditTarget::MixerInsert(n) => s.message = crate::mixer::insert_many(s, n, &text),
-        EditTarget::MixerGroup(n) => crate::mixer::create_group(s, n, &text),
+        // Their own steps too. Settled first: they renumber mixer tracks, which moves channels' mixer tracks, part of
+        // the playlist's step since audio tracks (`capture`), so the step above would no longer be empty.
+        EditTarget::MixerInsert(n) => {
+            crate::history::settle(s);
+            s.message = crate::mixer::insert_many(s, n, &text);
+        }
+        EditTarget::MixerGroup(n) => {
+            crate::history::settle(s);
+            crate::mixer::create_group(s, n, &text);
+        }
         EditTarget::Chords => s.message = Some(crate::chord_tool::write(s, &text)),
         EditTarget::PatternName(n) => crate::control::edit(s, "Pattern name", crate::control::command::Region::Project, |s| {
             if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == n) {
@@ -4845,6 +4878,9 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::TrackGroup(_) => None,
+        Cmd::TrackMode(t, m) => crate::control::edit(s, crate::track_links::TRACK_MODE, crate::control::command::Region::Project, |s| {
+            crate::track_links::set_mode(s, t, m)
+        }),
         Cmd::GroupCollapse(t) => {
             toggle_collapse(s, t);
             None

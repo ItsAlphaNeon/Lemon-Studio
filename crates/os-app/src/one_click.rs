@@ -233,7 +233,8 @@ impl App {
         self.invalidate();
     }
 
-    /// The take's audio clip channel and clip at `start`, on the first track free over it: one undo step.
+    /// The take's audio clip channel and clip at `start`, on the first track free over it, which becomes an audio track
+    /// on the take's mixer track: one undo step.
     fn place_take(&mut self, path: &std::path::Path, frames: u64, rate: u32, start: u32) -> String {
         let s = &mut self.state;
         let p = &s.project;
@@ -242,7 +243,12 @@ impl App {
         let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
         let text = path.to_string_lossy();
         match crate::playlist::add_audio_clip_as(s, &text, track, start, RECORDED) {
-            Some(_) => format!("Recorded {}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()),
+            Some(i) => {
+                // The take's track becomes an audio track on the take's mixer track, as the original binds the track
+                // it records into to a mixer track (spec: ui/one-click-recording.md §1, ui/playlist.md §6c).
+                crate::track_links::bind_take(s, i);
+                format!("Recorded {}", path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default())
+            }
             None => format!("{text} could not be read"),
         }
     }

@@ -1145,6 +1145,8 @@ pub fn remap_project(p: &mut Project, map: &[Option<usize>]) {
             ClipSource::Pattern(_) => true,
         });
     }
+    // Instrument tracks follow their channel; one whose channel goes is unassigned (spec: ui/playlist.md §6c).
+    p.remap_link_channels(|c| idx.get(&c).copied());
     // Initial values: a place below 0x2000 is a channel's index (spec: flp/layouts.md "Mixer places").
     p.init_controls.retain_mut(|c| {
         let hi = (c.target >> 16) as u16;
@@ -1463,6 +1465,9 @@ pub enum RCmd {
     Wrap(usize),
     Clone(usize),
     Delete(usize),
+    /// Assign to new instrument track: the row's channel (the selected ones when it is selected) gets a playlist track
+    /// of its own (spec: ui/channel-rack.md §18, `track_links::assign_instrument`).
+    AssignInstrument(usize),
     Cut(usize),
     Copy(usize),
     Paste(usize),
@@ -1775,6 +1780,11 @@ fn lock_notes(app: &mut App, srcs: &[NoteSrc], row: Option<usize>) {
 /// Lemon Sampler's declick mode parameter (its index is the mode).
 const SAMPLER_DECLICK: &str = "Click removal";
 
+/// The rows a channel menu command on row `r` acts on: the selection when `r` is in it, else `r` alone.
+fn menu_rows(s: &State, r: usize) -> Vec<usize> {
+    if s.rack.sel.contains(&r) { s.rack.sel.iter().copied().collect() } else { vec![r] }
+}
+
 /// Right click on a name button (§18): two columns.
 pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
     let sampler = s.project.channels.get(r).is_some_and(|c| c.kind.is_sampler());
@@ -1803,7 +1813,10 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("Clone", RCmd::Clone(r)),
         it("Delete...", RCmd::Delete(r)),
         PItem::sep(),
-        PItem::not_yet("Assign to new instrument track"),
+        {
+            let it = it("Assign to new instrument track", RCmd::AssignInstrument(r));
+            if crate::track_links::can_assign_instrument(s, &menu_rows(s, r)) { it } else { it.off() }
+        },
         PItem::col(),
         it("Cut", RCmd::Cut(r)),
         it("Copy", RCmd::Copy(r)),
@@ -2140,6 +2153,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::DeclickSel(_) | RCmd::SwingSel(Some(_)) | RCmd::TruncSel(_) | RCmd::CutItself(_) => Some("Channel settings"),
         RCmd::AddGroup | RCmd::DeleteGroup | RCmd::GroupSel => Some("Channel group"),
         RCmd::Burn(_) => Some("Burn loops"),
+        RCmd::AssignInstrument(_) => Some(crate::track_links::ASSIGN_INSTRUMENT),
         _ => None,
     };
     if let Some(name) = step {
@@ -2156,6 +2170,12 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         let msg = app.wrap_channel(r);
         app.invalidate();
         return msg;
+    }
+    if let RCmd::AssignInstrument(r) = c {
+        let rows = menu_rows(&app.state, r);
+        let m = crate::track_links::assign_instrument(&mut app.state, &rows);
+        app.invalidate();
+        return m;
     }
     let mouse = app.mouse;
     let sel: Vec<usize> = app.state.rack.sel.iter().copied().collect();
@@ -2506,6 +2526,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::Clone(_)
         | RCmd::CloneSel
+        | RCmd::AssignInstrument(_)
         | RCmd::MoveSel(_)
         | RCmd::Sort(_)
         | RCmd::LoadSample(_)

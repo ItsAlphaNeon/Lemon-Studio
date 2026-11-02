@@ -2005,12 +2005,94 @@ pub struct PlaylistTrack {
     /// (TOOLS ▸ Lock all tracks to their clips). Lemon Studio's design: no FLP field stores it, a `.lemon`
     /// file's own events do (os-app `lemon_state`; spec: ui/playlist.md "Locking tracks to their clips").
     pub clip_lock: Option<ClipSource>,
+    /// The track's link to a mixer track or a channel: the original's audio and instrument tracks (event 238 bytes 49 to
+    /// 60; spec: flp/events/playlist.md, ui/playlist.md §6c).
+    pub link: TrackLink,
 }
 
 impl PlaylistTrack {
-    /// Track `number` as a new project has it: unnamed, default colour, on, not grouped.
+    /// Track `number` as a new project has it: unnamed, default colour, on, not grouped, not linked.
     pub fn new(number: u32) -> Self {
-        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false, perf: PerfSettings::default(), clip_lock: None }
+        PlaylistTrack {
+            number,
+            name: None,
+            color: None,
+            enabled: true,
+            grouped: false,
+            collapsed: false,
+            locked: false,
+            perf: PerfSettings::default(),
+            clip_lock: None,
+            link: TrackLink::NONE,
+        }
+    }
+}
+
+/// What a playlist track is linked to (spec: flp/events/playlist.md "Event 238 layout", bytes 49 to 60): an **audio
+/// track** names a mixer track, an **instrument track** a channel (and sometimes a mixer track too). Kinds other than
+/// the two known ones are kept as read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TrackLink {
+    /// 0 unassigned, [`TrackLink::AUDIO`], [`TrackLink::INSTRUMENT`].
+    pub kind: u32,
+    /// The mixer track (an audio track's, 0 = master).
+    pub mixer: Option<u16>,
+    /// An instrument track's channel, by its index as clips name channels.
+    pub channel: Option<u16>,
+}
+
+impl TrackLink {
+    pub const AUDIO: u32 = 1;
+    pub const INSTRUMENT: u32 = 3;
+    pub const NONE: TrackLink = TrackLink { kind: 0, mixer: None, channel: None };
+
+    pub fn audio(mixer: u16) -> Self {
+        TrackLink { kind: Self::AUDIO, mixer: Some(mixer), channel: None }
+    }
+
+    pub fn instrument(channel: u16) -> Self {
+        TrackLink { kind: Self::INSTRUMENT, mixer: None, channel: Some(channel) }
+    }
+
+    pub fn is_none(&self) -> bool {
+        *self == Self::NONE
+    }
+
+    /// An audio track's mixer track.
+    pub fn audio_mixer(&self) -> Option<u16> {
+        self.mixer.filter(|_| self.kind == Self::AUDIO)
+    }
+
+    /// An instrument track's channel.
+    pub fn instrument_channel(&self) -> Option<u16> {
+        self.channel.filter(|_| self.kind == Self::INSTRUMENT)
+    }
+}
+
+impl Project {
+    /// Every track link's mixer track follows `m` (`None`: the track is gone, and a link to it goes with it), in every
+    /// arrangement (mixer tracks deleted, moved or inserted).
+    pub fn remap_link_mixers(&mut self, m: impl Fn(u16) -> Option<u16>) {
+        for t in self.arrangements.iter_mut().flat_map(|a| a.tracks.iter_mut()) {
+            if let Some(x) = t.link.mixer {
+                t.link.mixer = m(x);
+                if t.link.mixer.is_none() && t.link.kind == TrackLink::AUDIO {
+                    t.link = TrackLink::NONE;
+                }
+            }
+        }
+    }
+
+    /// Every track link's channel follows `m` (`None`: the channel is gone, and an instrument track's link with it).
+    pub fn remap_link_channels(&mut self, m: impl Fn(u16) -> Option<u16>) {
+        for t in self.arrangements.iter_mut().flat_map(|a| a.tracks.iter_mut()) {
+            if let Some(c) = t.link.channel {
+                t.link.channel = m(c);
+                if t.link.channel.is_none() && t.link.kind == TrackLink::INSTRUMENT {
+                    t.link = TrackLink::NONE;
+                }
+            }
+        }
     }
 }
 

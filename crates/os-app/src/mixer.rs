@@ -85,6 +85,12 @@ pub enum MCmd {
     RouteChannels { dst: u16, spread: bool },
     /// Select ▸ (§3): the channels using the tracks, the tracks they send to, the tracks sending to them, all.
     SelectChannels(u16),
+    /// Select ▸ Channels and playlist tracks routed to this track: as `SelectChannels`, and the playlist selects the
+    /// first audio or instrument track linked to the tracks (spec: ui/mixer-track-commands.md §3).
+    SelectChannelsTracks(u16),
+    /// Assign to new Audio track(s) / Unassign from Audio track(s) on the track (the selection when it is in it).
+    AssignAudio(u16),
+    UnassignAudio(u16),
     SelectDest(u16),
     SelectSources(u16),
     SelectAll,
@@ -1218,6 +1224,8 @@ fn remove_tracks(s: &mut State, gone: &[u16]) -> Option<String> {
     for c in s.project.channels.iter_mut() {
         c.mixer_track = m(c.mixer_track).unwrap_or(0);
     }
+    // Audio tracks follow their mixer track; one whose track goes is unassigned (spec: ui/playlist.md §6c).
+    s.project.remap_link_mixers(m);
     s.selected_mixer = m(s.selected_mixer).unwrap_or(1).min(inserts(s));
     s.mixer.sel = s.mixer.sel.iter().filter_map(|&t| m(t)).collect();
     remap_slot_ui(s, |t, k| Some((m(t)?, k)));
@@ -1324,6 +1332,7 @@ fn renumber(s: &mut State, m: &dyn Fn(u16) -> u16, from: u16, to: u16, d: i32) {
     for c in s.project.channels.iter_mut() {
         c.mixer_track = m(c.mixer_track);
     }
+    s.project.remap_link_mixers(|t| Some(m(t)));
     s.selected_mixer = m(s.selected_mixer);
     s.mixer.sel = s.mixer.sel.iter().map(|&t| m(t)).collect();
     remap_slot_ui(s, |t, k| Some((m(t), k)));
@@ -1366,6 +1375,7 @@ pub(crate) fn delete_track(s: &mut State, n: u16) -> Option<String> {
     for c in s.project.channels.iter_mut().filter(|c| c.mixer_track == n) {
         c.mixer_track = 0;
     }
+    s.project.remap_link_mixers(|t| (t != n).then_some(t));
     for k in 0..10 {
         s.mixer.pending.push(FxReq::Delete { track: n, slot: k });
     }
@@ -1396,6 +1406,7 @@ pub(crate) fn delete_track(s: &mut State, n: u16) -> Option<String> {
     for c in s.project.channels.iter_mut() {
         c.mixer_track = m(c.mixer_track);
     }
+    s.project.remap_link_mixers(|t| Some(m(t)));
     let mut map = Vec::new();
     for t in n + 1..hidden {
         for k in 0..10u8 {
@@ -1469,8 +1480,17 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
         if is_selected(s, n) && selected(s).len() > 1 { PItem::new("Gradient color...", mx(MCmd::GradientColor)) } else { PItem::not_yet("Gradient color...") },
         // Lemon Studio's design (session only, as the rack's): drawn under the track's name.
         PItem::sub("Change icon...", crate::playlist::icon_items(s, crate::playlist::TRACK_ICON_KEY + usize::from(n))),
-        PItem::not_yet("Assign to new Audio track(s)"),
-        PItem::not_yet("Unassign from Audio track(s)"),
+        // Greyed on tracks that have an audio track already (Assign) or none (Unassign), as in the original.
+        {
+            let tg = targets(s, n);
+            let it = PItem::new("Assign to new Audio track(s)", mx(MCmd::AssignAudio(n)));
+            if crate::track_links::can_assign_audio(s, &tg) { it } else { it.off() }
+        },
+        {
+            let tg = targets(s, n);
+            let it = PItem::new("Unassign from Audio track(s)", mx(MCmd::UnassignAudio(n)));
+            if crate::track_links::can_unassign_audio(s, &tg) { it } else { it.off() }
+        },
         PItem::sep(),
         PItem::sub(
             "File",
@@ -1498,7 +1518,7 @@ fn track_items(s: &State, n: u16) -> Vec<PItem> {
             "Select",
             vec![
                 PItem::new("Channels routed to this track", mx(MCmd::SelectChannels(n))).key("Alt+L"),
-                PItem::not_yet("Channels and arranger tracks routed to this bus"),
+                PItem::new("Channels and playlist tracks routed to this track", mx(MCmd::SelectChannelsTracks(n))),
                 PItem::sep(),
                 PItem::new("Tracks this one is routed to", mx(MCmd::SelectDest(n))),
                 PItem::new("Tracks routed to this one", mx(MCmd::SelectSources(n))).key("Ctrl+Alt+L"),
@@ -1756,6 +1776,9 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::Reset(_) => Some("Mixer track reset"),
         MCmd::ResetRouting(_) | MCmd::UnrouteTo(_) | MCmd::Route { .. } | MCmd::RouteChannels { .. } => Some(ROUTING),
         MCmd::Trim { .. } | MCmd::Delete(_) => Some("Delete mixer track"),
+        // The original's History names (spec: ui/one-click-recording.md §1).
+        MCmd::AssignAudio(_) => Some(crate::track_links::ASSIGN_AUDIO),
+        MCmd::UnassignAudio(_) => Some(crate::track_links::UNASSIGN_AUDIO),
         MCmd::MoveLeft(_) | MCmd::MoveRight(_) => Some("Move mixer track"),
         MCmd::InsertOne(_) => Some(INSERT),
         MCmd::AddEffect(..) => Some("Add effect"),
@@ -1996,6 +2019,26 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             let k = rows.len();
             s.rack.sel = rows;
             Some(format!("Selected {k} channel(s)"))
+        }
+        MCmd::SelectChannelsTracks(n) => {
+            let tg = targets(s, n);
+            let rows: std::collections::BTreeSet<usize> =
+                s.project.channels.iter().enumerate().filter(|(_, c)| tg.contains(&c.mixer_track)).map(|(i, _)| i).collect();
+            let k = rows.len();
+            s.rack.sel = rows;
+            let tracks = crate::track_links::tracks_routed_to(s, &tg);
+            if let Some(&t) = tracks.first() {
+                s.playlist.track = t;
+            }
+            Some(format!("Selected {k} channel(s) and {} playlist track(s)", tracks.len()))
+        }
+        MCmd::AssignAudio(n) => {
+            let tg = targets(s, n);
+            crate::track_links::assign_audio(s, &tg)
+        }
+        MCmd::UnassignAudio(n) => {
+            let tg = targets(s, n);
+            crate::track_links::unassign_audio(s, &tg)
         }
         MCmd::SelectDest(n) => select_linked(s, n, true),
         MCmd::SelectSources(n) => select_linked(s, n, false),
