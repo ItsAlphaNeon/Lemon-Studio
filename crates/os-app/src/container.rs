@@ -18,8 +18,10 @@
 //! parameters and presets. A member's parameters and its wet and dry levels are automated and linked as parameters of
 //! the container's slot or channel: the member's id and the item packed in the parameter index
 //! (`os_model::target::member_item`), so that clips and links follow the member when it moves. Their windows' edits and
-//! presets are undo steps by an owner id of their own (`control::command::member_owner`).
-// spec: plugins/patcher/README.md §3.1, §3.3, §4 slices 1 and 3, §4.1, §4.2, §4.3, §4.4
+//! presets are undo steps by an owner id of their own (`control::command::member_owner`). A wrap points the clips,
+//! recorded pattern events and links on the wrapped plugins' parameters at their members (`Moved`). A member has its
+//! own name, colour, icon and CPU switches, as a slot's plugin has, saved with the container.
+// spec: plugins/patcher/README.md §3.1, §3.3, §4 slices 1 and 3, §4.1, §4.2, §4.3, §4.4, §4.5
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -36,19 +38,28 @@ use crate::plugins::{fx_key, fx_of, Hosted, Plugins, FX_KEY, MEMBER_KEY};
 /// The slot plugin name a container is kept under (Lemon Studio's own; the original's Patcher state is not read yet).
 pub const CONTAINER: &str = "Lemon Container";
 
-/// The state's first bytes and version (1: without the members' ids; 2: without their kinds).
+/// The state's first bytes and version (1: without the members' ids; 2: without their kinds; 3: without their CPU
+/// switches, names, colours and icons).
 const MAGIC: &[u8; 4] = b"LCNT";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 /// A member's kind in the state (version 3): bit 0 set for an instrument.
 const INSTRUMENT: u32 = 1;
+
+/// A member's CPU switches in the state (version 4), the bits of a plugin window record's flags (spec: ui/plugin-
+/// window.md "CPU"): Smart disable (Auto-bypass when silent) and Allow threaded processing.
+const SMART_DISABLE: u32 = 0x20;
+const THREADED: u32 = 0x40;
+
+/// A member's colour in the state (version 4): this bit over 0xRRGGBB, 0 for none.
+const HAS_COLOR: u32 = 0x0100_0000;
 
 /// The slot a channel's container is named by: a container's place is (rack row, `CHANNEL`) on a channel, (track,
 /// slot) in the mixer.
 pub const CHANNEL: u8 = 0xFF;
 
 /// One plugin of a container, as the project keeps it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Member {
     /// Its number in the container, kept while it is moved (an edit keeps its instance and window).
     pub id: u32,
@@ -62,6 +73,20 @@ pub struct Member {
     pub dry: f32,
     /// The plugin's own saved state (empty: the plugin's defaults).
     pub state: Vec<u8>,
+    /// Its CPU switches, as a slot's plugin has them (spec: plugins/patcher/README.md §4.5): Auto-bypass when silent
+    /// passes an effect member by while it is silent (`os_engine::chain`); Allow threaded processing is kept.
+    pub cpu: os_model::PluginCpu,
+    /// A name typed for it (Rename, color and icon...), shown in place of its plugin's; its colour and icon (§4.5).
+    pub label: Option<String>,
+    pub color: Option<os_model::Rgb>,
+    pub icon: Option<crate::icons::Icon>,
+}
+
+impl Member {
+    /// What the member is shown as: the name typed for it, else its plugin's.
+    pub fn shown(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// The state of a container slot: the members in order.
@@ -81,8 +106,25 @@ pub fn encode(members: &[Member]) -> Vec<u8> {
         b.extend(m.wet.to_le_bytes());
         b.extend(m.dry.to_le_bytes());
         bytes(&mut b, &m.state);
+        // Version 4: the CPU switches, the name typed, the colour and the icon's name (empty: none).
+        let cpu = if m.cpu.smart_disable { SMART_DISABLE } else { 0 } | if m.cpu.threaded { THREADED } else { 0 };
+        b.extend(cpu.to_le_bytes());
+        bytes(&mut b, m.label.as_deref().unwrap_or_default().as_bytes());
+        let color = m.color.map_or(0, |c| HAS_COLOR | u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b));
+        b.extend(color.to_le_bytes());
+        bytes(&mut b, icon_name(m.icon).as_bytes());
     }
     b
+}
+
+/// The name an icon is saved by: its name in the Change icon... list (empty: none).
+fn icon_name(icon: Option<crate::icons::Icon>) -> &'static str {
+    icon.and_then(|i| crate::playlist::ICONS.iter().find(|(_, x)| *x == i)).map_or("", |(name, _)| name)
+}
+
+/// The icon saved as `name` (a name the list does not have: none).
+fn icon_named(name: &str) -> Option<crate::icons::Icon> {
+    crate::playlist::ICONS.iter().find(|(n, _)| *n == name).map(|(_, i)| *i)
 }
 
 /// The members a container slot's state lists; `None` for bytes that are not one.
@@ -116,7 +158,16 @@ pub fn decode(b: &[u8]) -> Option<Vec<Member>> {
         let wet = f32::from_bits(word(&mut at)?);
         let dry = f32::from_bits(word(&mut at)?);
         let state = bytes(&mut at)?;
-        v.push(Member { id, instrument, uid, name, wet, dry, state });
+        let mut m = Member { id, instrument, uid, name, wet, dry, state, ..Member::default() };
+        if version >= 4 {
+            let cpu = word(&mut at)?;
+            m.cpu = os_model::PluginCpu { threaded: cpu & THREADED != 0, smart_disable: cpu & SMART_DISABLE != 0 };
+            m.label = Some(String::from_utf8(bytes(&mut at)?).ok()?).filter(|l| !l.is_empty());
+            let c = word(&mut at)?;
+            m.color = (c & HAS_COLOR != 0).then(|| os_model::Rgb::new((c >> 16) as u8, (c >> 8) as u8, c as u8));
+            m.icon = icon_named(std::str::from_utf8(&bytes(&mut at)?).ok()?);
+        }
+        v.push(m);
     }
     Some(v)
 }
@@ -288,6 +339,12 @@ pub const ADD_INSTRUMENT: &str = "Add instrument to container";
 pub const REPLACE: &str = "Replace effect in container";
 pub const LEVEL: &str = "Effect level in container";
 
+/// The undo step names of a member's own name, colour and icon (its CPU switches' are a slot's: `playlist::
+/// flip_plugin_cpu`).
+pub const NAME: &str = "Effect name in container";
+pub const COLOR: &str = "Effect color in container";
+pub const ICON: &str = "Effect icon in container";
+
 /// A new instrument member's levels: its sound added to what the members before it put out (a layer).
 pub const INSTRUMENT_LEVELS: (f32, f32) = (1.0, 1.0);
 
@@ -404,7 +461,7 @@ pub fn level(s: &State, t: u16, k: u8, id: u32, wet: bool) -> Option<f32> {
 
 /// The type-in box's caption: "Bus 2 - Lemon Limiter wet" (a channel's container: the channel's name first).
 pub fn level_name(s: &State, t: u16, k: u8, id: u32, wet: bool) -> String {
-    let name = members(s, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.name);
+    let name = members(s, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
     format!("{} - {name} {}", place_name(s, t, k), if wet { "wet" } else { "dry" })
 }
 
@@ -423,6 +480,49 @@ pub fn set_level_run(s: &mut State, t: u16, k: u8, id: u32, wet: bool, v: f32) {
     let run = crate::history::Run::Member(t, k, id, wet);
     crate::control::run_edit(s, LEVEL, region(t, k), run, true, |s| set_members(s, t, k, &list));
     s.piano.dirty = true;
+}
+
+/// Member `id` of the container at place (`t`, `k`) as `f` changes its own settings (its CPU switches, name, colour or
+/// icon; spec: plugins/patcher/README.md §4.5): one undo step `name`, none when nothing changed. Saved with the
+/// container; the chain takes an Auto-bypass switch on the next tick, keeping its instances.
+pub fn edit_own(s: &mut State, t: u16, k: u8, id: u32, name: &'static str, f: impl FnOnce(&mut Member)) {
+    let Some(mut list) = members(s, t, k) else { return };
+    let Some(m) = list.iter_mut().find(|m| m.id == id) else { return };
+    f(m);
+    crate::control::edit(s, name, region(t, k), |s| set_members(s, t, k, &list));
+    s.piano.dirty = true;
+}
+
+/// Every container member's CPU switches in project `p`, for `f` to read or change (Switch auto-bypass for all plugins,
+/// `mixer::switch_auto_bypass`); a container whose members `f` changed is written again.
+pub fn each_member_cpu(p: &mut Project, mut f: impl FnMut(&mut os_model::PluginCpu)) {
+    let slots = p.mixer.iter_mut().flat_map(|m| m.slots.iter_mut().flatten()).filter(|s| s.name == CONTAINER).map(|s| &mut s.state);
+    let channels = p.channels.iter_mut().filter(|c| is_container_channel(c)).filter_map(|c| c.plugin_state.as_mut());
+    for b in slots.chain(channels) {
+        let Some(mut list) = decode(b) else { continue };
+        let before = list.clone();
+        list.iter_mut().for_each(|m| f(&mut m.cpu));
+        if list != before {
+            *b = encode(&list);
+        }
+    }
+}
+
+/// The member hosted under `key`: its container's place and its id.
+pub fn of_key(s: &State, key: usize) -> Option<(u16, u8, u32)> {
+    s.params.members.get(&key).copied()
+}
+
+/// The member with id `id` of the container at place (`t`, `k`).
+pub fn member(s: &State, t: u16, k: u8, id: u32) -> Option<Member> {
+    members(s, t, k)?.into_iter().find(|m| m.id == id)
+}
+
+/// A name typed for member `id` (the inline box of Rename, color and icon...): an empty one, or its plugin's name,
+/// clears it.
+pub fn rename(s: &mut State, t: u16, k: u8, id: u32, text: &str) {
+    let text = text.trim();
+    edit_own(s, t, k, id, NAME, |m| m.label = (!text.is_empty() && text != m.name).then(|| text.to_string()));
 }
 
 /// What an edit of the container at place (`t`, `k`) changes, for its undo step: its track, or its channel.
@@ -475,7 +575,7 @@ pub fn member_key(s: &State, place: usize, id: u32) -> Option<usize> {
 /// The name of the member hosted under `key` and its container's title, "Lemon Limiter in Container (Bus 2)".
 pub fn member_label(s: &State, key: usize) -> Option<String> {
     let &(t, k, id) = s.params.members.get(&key)?;
-    let name = members(s, t, k)?.into_iter().find(|m| m.id == id)?.name;
+    let name = member(s, t, k, id)?.shown().to_string();
     Some(format!("{name} in {}", title(s, t, k)?))
 }
 
@@ -490,7 +590,7 @@ fn free_id(list: &[Member]) -> Option<u32> {
 }
 
 fn label(i: usize, m: &Member) -> String {
-    format!("{}. {} (wet {}%, dry {}%)", i + 1, m.name, pct(m.wet), pct(m.dry))
+    format!("{}. {} (wet {}%, dry {}%)", i + 1, m.shown(), pct(m.wet), pct(m.dry))
 }
 
 /// The slot menu's Container ▸ for a container in slot `slot` of the current track: its members, "1. Lemon Limiter
@@ -552,23 +652,207 @@ pub fn store_members(proj: &mut Project, plugins: &Plugins) {
     }
 }
 
+/// A plugin a wrap moved into a container (Lemon Studio's design, spec: plugins/patcher/README.md §4.5): where it was,
+/// and which member it became.
+#[derive(Debug, Clone)]
+pub(crate) struct Move {
+    /// Its place before: slot `.1` of mixer track `.0`, or rack row `.0`'s channel for [`CHANNEL`].
+    from: (u16, u8),
+    ids: Ids,
+}
+
+/// The member a moved plugin became: one member's id, or for a container wrapped again (Wrap all) its members' ids, old
+/// and new.
+#[derive(Debug, Clone)]
+enum Ids {
+    Plugin(u32),
+    Members(Vec<(u32, u32)>),
+}
+
+impl Ids {
+    /// The container item that parameter `i` of the moved plugin (or item `i` of the moved container) is now; `None`
+    /// for a plugin parameter past a member's room (index 2046 and up, spec §4.2) or a member that is not there.
+    fn item(&self, i: u16) -> Option<u16> {
+        match self {
+            Ids::Plugin(id) => target::member_item(*id, i).filter(|_| i < MEMBER_WET),
+            Ids::Members(ids) => {
+                let (old, item) = target::member_of(i)?;
+                target::member_item(ids.iter().find(|p| p.0 == old)?.1, item)
+            }
+        }
+    }
+}
+
+/// What a wrap moved into the container at place `to` (a slot, or a rack row's channel of index `index`): the
+/// automation targets and remote control links naming the moved plugins' parameters follow them onto the members.
+pub(crate) struct Moved {
+    to: (u16, u8),
+    /// The channel's index (automation names a channel by it), for a channel's container.
+    index: u16,
+    moves: Vec<Move>,
+}
+
+impl Moved {
+    /// The move whose plugin's parameters automation target `tg` names, and the parameter (or container item).
+    fn named(&self, tg: u32) -> Option<(&Move, u16)> {
+        match target::decode(tg) {
+            Auto::SlotParam(t, k, i) => Some((self.moves.iter().find(|m| m.from == (t, k) && k != CHANNEL)?, i)),
+            Auto::ChannelParam(ch, i) if ch == self.index => Some((self.moves.iter().find(|m| m.from.1 == CHANNEL)?, i)),
+            _ => None,
+        }
+    }
+
+    /// The automation target of item `item` of the container.
+    fn item_target(&self, item: u16) -> u32 {
+        if self.to.1 == CHANNEL {
+            target::channel_param(self.index, item)
+        } else {
+            target::slot_param(self.to.0, self.to.1, item)
+        }
+    }
+
+    /// Where target `tg` goes: `None` when it names nothing moved, `Some(None)` for a moved plugin's parameter with no
+    /// room as a member's (it stays as it is), else its member's target.
+    fn target(&self, tg: u32) -> Option<Option<u32>> {
+        let (m, i) = self.named(tg)?;
+        Some(m.ids.item(i).map(|item| self.item_target(item)))
+    }
+
+    /// Where remote control link target `l` goes (`None`: it stays): a moved plugin's parameter, kept by its hosted key,
+    /// becomes its member's (kept by place and id), and a moved container's member's follows it.
+    fn link(&self, l: crate::typein::Target) -> Option<crate::typein::Target> {
+        use crate::typein::Target as T;
+        let (t, k) = self.to;
+        let key = |m: &Move| if m.from.1 == CHANNEL { usize::from(m.from.0) } else { fx_key(m.from.0, m.from.1) };
+        let new_id = |m: &Move, old: u32| match &m.ids {
+            Ids::Members(ids) => ids.iter().find(|p| p.0 == old).map(|p| p.1),
+            Ids::Plugin(_) => None,
+        };
+        match l {
+            T::Param(at, i) => {
+                let m = self.moves.iter().find(|m| key(m) == at)?;
+                let Ids::Plugin(id) = m.ids else { return None };
+                (i < usize::from(MEMBER_WET)).then_some(T::MemberParam(t, k, id, i))
+            }
+            T::MemberParam(mt, mk, old, i) => Some(T::MemberParam(t, k, new_id(self.moves.iter().find(|m| m.from == (mt, mk))?, old)?, i)),
+            T::Member(mt, mk, old, wet) => Some(T::Member(t, k, new_id(self.moves.iter().find(|m| m.from == (mt, mk))?, old)?, wet)),
+            _ => None,
+        }
+    }
+
+    /// Points the project's automation clips, recorded pattern events, controller links and initial values (and the
+    /// event editor's control) on the moved plugins' parameters at the members. Returns how many different targets
+    /// could not move (parameters past a member's room), which stay as they are.
+    fn retarget(&self, s: &mut State) -> usize {
+        let mut stuck = std::collections::BTreeSet::new();
+        let mut f = |t: &mut u32| match self.target(*t) {
+            Some(Some(n)) => *t = n,
+            Some(None) => {
+                stuck.insert(*t);
+            }
+            None => {}
+        };
+        let p = &mut s.project;
+        p.automations.iter_mut().flat_map(|a| a.targets.iter_mut()).for_each(&mut f);
+        p.patterns.iter_mut().flat_map(|q| q.controls.iter_mut()).for_each(|c| f(&mut c.kind));
+        for l in &mut p.controller_links {
+            let mut t = l.target();
+            f(&mut t);
+            l.set_target(t);
+        }
+        p.init_controls.iter_mut().for_each(|c| f(&mut c.target));
+        if let Some(Some(n)) = self.target(s.events.target) {
+            s.events.target = n;
+        }
+        stuck.len()
+    }
+}
+
+/// The hint bar's note on the targets a wrap could not move ("" for none).
+fn stuck_text(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => "; 1 automation target past parameter 2046 left as it was".into(),
+        n => format!("; {n} automation targets past parameter 2046 left as they were"),
+    }
+}
+
+/// Whether an automation clip, a recorded pattern event or a controller link drives target `tg`, or (a slot's mix) a
+/// remote control link.
+fn driven(s: &State, tg: u32) -> bool {
+    let p = &s.project;
+    let linked = match target::decode(tg) {
+        Auto::SlotMix(t, k) => crate::remote::link_of(crate::typein::Target::Knob(KnobId::SlotMix(t, k))).is_some(),
+        _ => false,
+    };
+    linked
+        || p.automations.iter().any(|a| a.targets.contains(&tg))
+        || p.patterns.iter().any(|q| q.controls.iter().any(|c| c.kind == tg))
+        || p.controller_links.iter().any(|l| l.target() == tg)
+}
+
+/// After the wrap's undo step `name`: the remote control links on what moved follow it (they are the program's
+/// settings, not the project's), and the step puts them back (`Taken::Links`).
+fn relink(s: &mut State, name: &str, moved: &Moved) {
+    let mut all = crate::remote::links();
+    let mut pairs = Vec::new();
+    for l in &mut all {
+        if let Some(to) = moved.link(l.target) {
+            pairs.push((l.target, to));
+            l.target = to;
+        }
+    }
+    if pairs.is_empty() || s.history.newest_done() != Some(name) {
+        return;
+    }
+    crate::remote::set_links(&all);
+    let back = pairs.into_iter().map(|(a, b)| (b, a)).collect();
+    crate::history::extend_newest(s, |cmds| cmds.push(crate::control::Command::Put(Box::new(crate::control::command::Taken::Links(back)))));
+}
+
 impl App {
+    /// Wrap in container and Wrap all in container (`all`) on slot `slot` of the current track as one undo step, then
+    /// the remote control links of what moved follow it, in the same step (`relink`).
+    pub(crate) fn wrap_slot(&mut self, slot: u8, all: bool) -> Option<String> {
+        let name = if all { WRAP_ALL } else { WRAP };
+        let mut moved = None;
+        let msg = crate::control::edit_app(self, name, crate::control::command::Region::Project, |app| {
+            let (msg, m) = app.wrap_in_container(slot, all);
+            moved = m;
+            msg
+        });
+        if let Some(m) = moved {
+            relink(&mut self.state, name, &m);
+        }
+        msg
+    }
+
     /// Wrap in container (`all` = false) and Wrap all in container on slot `slot` of the current track (spec: plugins/
-    /// patcher/README.md §3.3). The slot's effect, or every effect of the track in slot order, becomes a member with the
-    /// levels its slot blended it at; the container takes the slot, switched on at full mix, and keeps the slot's name,
-    /// colour and icon; the other wrapped slots are emptied with theirs. A slot whose plugin is not hosted stays where it
-    /// is (it has no state to move); a container wrapped by Wrap all brings its members. Run inside the undo step
-    /// (`mixer::run`).
-    pub(crate) fn wrap_in_container(&mut self, slot: u8, all: bool) -> Option<String> {
+    /// patcher/README.md §3.3, §4.5). The slot's effect, or every effect of the track in slot order, becomes a member
+    /// with the levels its slot blended it at and its slot's CPU switches; the container takes the slot, switched on at
+    /// full mix, and keeps the slot's name, colour and icon; the other wrapped slots are emptied, their names, colours
+    /// and icons going to their members. A slot whose plugin is not hosted stays where it is (it has no state to move); a
+    /// container wrapped by Wrap all brings its members, renumbered. The automation clips, recorded pattern events,
+    /// controller links and initial values on the wrapped plugins' parameters (and on a wrapped container's members)
+    /// are pointed at the members (`Moved`), which are returned for the remote control links. Wrap in container on a slot
+    /// whose own switch or mix a clip or link drives keeps the slot's switch and mix, its effect starting at wet 100 %,
+    /// dry 0 %, so the clip blends it as before. Run inside the undo step (`wrap_slot`).
+    pub(crate) fn wrap_in_container(&mut self, slot: u8, all: bool) -> (Option<String>, Option<Moved>) {
         let t = self.state.selected_mixer;
-        let track = crate::mixer::track(&self.state, t)?;
+        let Some(track) = crate::mixer::track(&self.state, t) else { return (None, None) };
         let slots: Vec<u8> = if all { (0..10u8).filter(|&k| track.slots[usize::from(k)].is_some()).collect() } else { vec![slot] };
+        // A single slot whose switch or mix is driven keeps them: they blend the container as they blended the effect.
+        let keep_mix = !all && (driven(&self.state, target::slot(t, slot, target::SLOT_MIX)) || driven(&self.state, target::slot(t, slot, target::SLOT_ON)));
+        let kept = (track.slot_mix[usize::from(slot)], track.slot_on[usize::from(slot)]);
         let mut list = Vec::new();
         let mut taken = Vec::new();
         let mut left = Vec::new();
+        let mut moves = Vec::new();
         for k in slots {
             let (mix, on) = (track.slot_mix[usize::from(k)], track.slot_on[usize::from(k)]);
             if let Some(inner) = members(&self.state, t, k) {
+                let first = list.len() as u32 + 1;
+                moves.push(Move { from: (t, k), ids: Ids::Members(inner.iter().zip(first..).map(|(m, new)| (m.id, new)).collect()) });
                 list.extend(inner);
                 taken.push(k);
                 continue;
@@ -581,15 +865,24 @@ impl App {
                 left.push(k);
                 continue;
             };
-            let (wet, dry) = levels(mix, on);
-            list.push(Member { id: 0, instrument: false, uid: p.desc().uid(), name: p.desc().name.clone(), wet, dry, state: p.save_state().unwrap_or_default() });
+            let (wet, dry) = if keep_mix { (1.0, 0.0) } else { levels(mix, on) };
+            let mut m = Member { uid: p.desc().uid(), name: p.desc().name.clone(), wet, dry, state: p.save_state().unwrap_or_default(), ..Member::default() };
+            m.cpu = track.slot_cpu[usize::from(k)];
+            // An emptied slot's name, colour and icon go with its effect; the container's slot keeps its own.
+            if k != slot {
+                m.label = self.state.mixer.slot_names.get(&(t, k)).cloned();
+                m.color = self.state.mixer.slot_colors.get(&(t, k)).copied();
+                m.icon = self.state.playlist.icons.get(&crate::playlist::IconOwner::Slot(t, k)).copied();
+            }
+            moves.push(Move { from: (t, k), ids: Ids::Plugin(list.len() as u32 + 1) });
+            list.push(m);
             taken.push(k);
         }
         if !taken.contains(&slot) {
-            return Some("This slot's plugin is not hosted: nothing to wrap".into());
+            return (Some("This slot's plugin is not hosted: nothing to wrap".into()), None);
         }
         if list.len() > MEMBER_IDS as usize {
-            return Some(format!("A container holds at most {MEMBER_IDS} effects"));
+            return (Some(format!("A container holds at most {MEMBER_IDS} effects")), None);
         }
         for (i, m) in list.iter_mut().enumerate() {
             m.id = i as u32 + 1;
@@ -605,7 +898,12 @@ impl App {
         }
         if let Some(m) = crate::mixer::track_mut(&mut self.state, t) {
             m.slots[usize::from(slot)] = Some(SlotPlugin { id: Id::NONE, name: CONTAINER.into(), state: encode(&list) });
+            if keep_mix {
+                (m.slot_mix[usize::from(slot)], m.slot_on[usize::from(slot)]) = kept;
+            }
         }
+        let moved = Moved { to: (t, slot), index: 0, moves };
+        let stuck = moved.retarget(&mut self.state);
         if let Some(v) = name {
             self.state.mixer.slot_names.insert((t, slot), v);
         }
@@ -621,7 +919,8 @@ impl App {
             let list: Vec<String> = left.iter().map(|k| (k + 1).to_string()).collect();
             msg += &format!("; not hosted, left in place: slot {}", list.join(", "));
         }
-        Some(msg)
+        msg += &stuck_text(stuck);
+        (Some(msg), Some(moved))
     }
 
     /// The container list's entries on member `i` of the container in slot `slot` of the current track: Open editor, or
@@ -660,7 +959,7 @@ impl App {
         // The smallest free id: a removed member's goes to the next one added (its clips and links would follow it).
         let Some(id) = free_id(&list) else { return Some(format!("A container holds at most {MEMBER_IDS} effects")) };
         let (wet, dry) = if instrument { INSTRUMENT_LEVELS } else { (1.0, 0.0) };
-        list.push(Member { id, instrument, uid: a.desc.uid(), name: a.desc.name.clone(), wet, dry, state: Vec::new() });
+        list.push(Member { id, instrument, uid: a.desc.uid(), name: a.desc.name.clone(), wet, dry, state: Vec::new(), ..Member::default() });
         set_members(&mut self.state, t, slot, &list);
         self.state.piano.dirty = true;
         None
@@ -676,6 +975,8 @@ impl App {
         let a = if instrument { self.plugins.available.get(index)? } else { self.plugins.effects.get(index)? };
         let m = list.get_mut(i)?;
         (m.instrument, m.uid, m.name, m.state) = (instrument, a.desc.uid(), a.desc.name.clone(), Vec::new());
+        // The new plugin's own: no name, colour or icon, the switches a new plugin starts with (as a slot's on Replace).
+        (m.cpu, m.label, m.color, m.icon) = (os_model::PluginCpu::default(), None, None, None);
         set_members(&mut self.state, t, slot, &list);
         self.state.piano.dirty = true;
         None
@@ -685,21 +986,34 @@ impl App {
     /// README.md §3.3, §4.4): rack row `row`'s instrument becomes the first member of a container on the channel, at
     /// [`INSTRUMENT_LEVELS`], with its state; the channel keeps its name, colour, notes, steps, mixer track and settings,
     /// which act on the container's output. One undo step: the channel takes a new id, so the instrument kept under the
-    /// old one (`Plugins::keep`) comes back with an undo, as Replace's does.
+    /// old one (`Plugins::keep`) comes back with an undo, as Replace's does. The clips, recorded pattern events and links
+    /// on the instrument's parameters follow it onto its member (spec §4.5); those on the channel's own settings stay.
     pub(crate) fn wrap_channel(&mut self, row: usize) -> Option<String> {
-        crate::control::edit_app(self, WRAP, crate::control::command::Region::Project, |app| app.wrap_channel_now(row))
+        let mut moved = None;
+        let msg = crate::control::edit_app(self, WRAP, crate::control::command::Region::Project, |app| {
+            let (msg, m) = app.wrap_channel_now(row);
+            moved = m;
+            msg
+        });
+        if let Some(m) = moved {
+            relink(&mut self.state, WRAP, &m);
+        }
+        msg
     }
 
-    fn wrap_channel_now(&mut self, row: usize) -> Option<String> {
+    fn wrap_channel_now(&mut self, row: usize) -> (Option<String>, Option<Moved>) {
         if !can_wrap_channel(&self.state, row) || !self.plugins.hosted.contains_key(&row) {
-            return Some("This channel's plugin is not hosted: nothing to wrap".into());
+            return (Some("This channel's plugin is not hosted: nothing to wrap".into()), None);
         }
-        let member = {
-            let h = self.plugins.hosted.get(&row)?;
+        let Some(member) = self.plugins.hosted.get(&row).and_then(|h| {
             let p = h.plugin.lock().ok()?;
             let (wet, dry) = INSTRUMENT_LEVELS;
-            Member { id: 1, instrument: true, uid: p.desc().uid(), name: p.desc().name.clone(), wet, dry, state: p.save_state().unwrap_or_default() }
+            Some(Member { id: 1, instrument: true, uid: p.desc().uid(), name: p.desc().name.clone(), wet, dry, state: p.save_state().unwrap_or_default(), ..Member::default() })
+        }) else {
+            return (None, None);
         };
+        let (Ok(t), Some(index)) = (u16::try_from(row), self.state.project.channels.get(row).map(|c| c.index)) else { return (None, None) };
+        let moved = Moved { to: (t, CHANNEL), index, moves: vec![Move { from: (t, CHANNEL), ids: Ids::Plugin(1) }] };
         let name = member.name.clone();
         self.plugins.keep(row);
         self.plugins.drop_key(row);
@@ -714,9 +1028,9 @@ impl App {
         ch.plugin = Some(CONTAINER.into());
         ch.plugin_state = Some(encode(&[member]));
         s.piano.dirty = true;
-        let t = u16::try_from(row).ok()?;
+        let stuck = moved.retarget(s);
         show(s, t, CHANNEL);
-        Some(format!("{name} in a container"))
+        (Some(format!("{name} in a container{}", stuck_text(stuck))), Some(moved))
     }
 
     /// The container window's controls (`CAct`).
@@ -809,7 +1123,8 @@ impl App {
         }
     }
 
-    /// The plugin frame's title of every member hosted, by key: the member's name over its container's slot's title.
+    /// The plugin frame's title of every member hosted, by key: the member's name (the one typed for it, else its
+    /// plugin's) over its container's slot's title, with the member's own icon.
     #[cfg(plugin_windows)]
     pub(crate) fn member_infos(&self) -> std::collections::HashMap<usize, crate::plugin_window::ChannelInfo> {
         let mut v = std::collections::HashMap::new();
@@ -819,9 +1134,13 @@ impl App {
                 None => crate::app::channel_info(&self.state.project, slot_key),
             };
             let Some(info) = info else { continue };
-            for key in live.keys.iter().flatten() {
+            let list = key_place(slot_key).and_then(|(t, k)| members(&self.state, t, k)).unwrap_or_default();
+            for ((id, _), key) in live.shape.iter().zip(&live.keys) {
+                let Some(key) = key else { continue };
                 let Some(h) = self.plugins.hosted.get(key) else { continue };
-                v.insert(*key, crate::plugin_window::ChannelInfo { name: format!("{} ({})", h.name, info.name), ..info.clone() });
+                let m = list.iter().find(|m| m.id == *id);
+                let name = m.map_or(h.name.as_str(), Member::shown);
+                v.insert(*key, crate::plugin_window::ChannelInfo { name: format!("{name} ({})", info.name), icon: m.and_then(|m| m.icon), ..info.clone() });
             }
         }
         v
@@ -841,7 +1160,7 @@ impl App {
     /// list, an undo, an opened project, a slot or channel moved). A container whose list changed is built again from
     /// it: a member still there (by its id and plugin) keeps its instance and window; a new one is an instance of its
     /// plugin started from its saved state, or left out of the chain when its plugin is not found (the list keeps it). A
-    /// list whose levels alone changed sets them on the chain.
+    /// list whose levels or Auto-bypass switches alone changed sets them on the chain.
     pub(crate) fn sync_containers(&mut self) {
         let mut want: Vec<(usize, Id)> = Vec::new();
         for m in &self.state.project.mixer {
@@ -901,6 +1220,7 @@ impl App {
                     let playing = list.iter().zip(&live.keys).filter(|(_, k)| k.is_some());
                     for (at, (m, _)) in playing.enumerate() {
                         c.set_levels(at, m.wet, m.dry);
+                        c.set_smart(at, m.cpu.smart_disable);
                     }
                 }
                 live.src = src;
@@ -952,7 +1272,7 @@ impl App {
                     Some(if m.instrument {
                         chain::Member::instrument(m.id, plugin as os_engine::SharedInstrument, m.wet, m.dry)
                     } else {
-                        chain::Member::new(m.id, plugin as os_engine::SharedEffect, m.wet, m.dry)
+                        chain::Member::new(m.id, plugin as os_engine::SharedEffect, m.wet, m.dry).with_smart(m.cpu.smart_disable)
                     })
                 })
                 .collect();
@@ -996,8 +1316,13 @@ mod tests {
     #[test]
     fn the_list_is_kept() {
         let m = vec![
-            Member { id: 3, instrument: true, uid: "clap:a".into(), name: "A".into(), wet: 1.0, dry: 0.0, state: vec![1, 2, 3] },
-            Member { id: 1, instrument: false, uid: "vst3:b".into(), name: "B".into(), wet: 0.25, dry: 0.75, state: vec![] },
+            Member { id: 3, instrument: true, uid: "clap:a".into(), name: "A".into(), wet: 1.0, dry: 0.0, state: vec![1, 2, 3],
+                cpu: os_model::PluginCpu { threaded: false, smart_disable: true },
+                label: Some("Lead".into()),
+                color: Some(os_model::Rgb::new(1, 2, 3)),
+                icon: Some(crate::playlist::ICONS[0].1),
+            },
+            Member { id: 1, instrument: false, uid: "vst3:b".into(), name: "B".into(), wet: 0.25, dry: 0.75, state: vec![], ..Member::default() },
         ];
         assert_eq!(decode(&encode(&m)), Some(m.clone()));
         assert_eq!(decode(&encode(&[])), Some(vec![]));
@@ -1011,7 +1336,7 @@ mod tests {
         v1.extend(0.5f32.to_le_bytes());
         v1.extend(0.5f32.to_le_bytes());
         v1.extend(0u32.to_le_bytes());
-        assert_eq!(decode(&v1), Some(vec![Member { id: 1, instrument: false, uid: "clap:a".into(), name: "A".into(), wet: 0.5, dry: 0.5, state: vec![] }]));
+        assert_eq!(decode(&v1), Some(vec![Member { id: 1, instrument: false, uid: "clap:a".into(), name: "A".into(), wet: 0.5, dry: 0.5, state: vec![], ..Member::default() }]));
         assert_eq!(decode(b"LCNT"), None);
         assert_eq!(decode(&[0; 16]), None);
         assert_eq!(levels(1.0, true), (1.0, 0.0));
@@ -1619,5 +1944,274 @@ mod tests {
         assert_eq!(back.plugins.containers[&0].fx.lock().unwrap().members.len(), 3);
         assert!(back.plugins.containers[&0].keys.iter().all(Option::is_some));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Wrapping moves the wrapped effects' automation and links onto their members (spec §4.5): an automation clip, a
+    /// recorded pattern event, an internal controller link, an initial value and the remote control links on a slot's
+    /// effect's parameters name its member's afterwards and keep driving the same parameter; a parameter past a
+    /// member's room and the slot's own mix stay as they were. One undo puts all of them back, a redo moves them again.
+    /// A container wrapped again by Wrap all brings its members' clips and links, renumbered.
+    #[test]
+    fn wrapping_moves_automation_and_links() {
+        use crate::remote::Link;
+        use crate::typein::Target as T;
+        let (mut a, _, _) = two_effects();
+        a.params_tick();
+        let (lim, del) = (fx_key(2, 0), fx_key(2, 1));
+        // The delay's parameter 0 automated by a clip, its parameter 3 by pattern events; the limiter's parameter 1 by
+        // a controller, its parameter 2 by an initial value; the delay's parameter 2046 (no member room); slot 2's mix.
+        let clip = target::slot_param(2, 1, 0);
+        crate::playlist::run(&mut a, Cmd::CreateAutomation(clip, "Delay".into(), 0.5));
+        let ch = a.state.project.channels.last().unwrap().index;
+        let mix = target::slot(2, 1, target::SLOT_MIX);
+        crate::playlist::run(&mut a, Cmd::CreateAutomation(mix, "Mix".into(), 0.5));
+        let p = &mut a.state.project;
+        p.patterns[0].controls.push(os_model::ControlPoint { position: 0, kind: target::slot_param(2, 1, 3), value: 9 });
+        p.controller_links.push(os_model::ControllerLink::new(0x7000 + 3 * 64, 0, target::slot_param(2, 0, 1)));
+        p.init_controls.push(os_model::InitControl { head: 0, target: target::slot_param(2, 0, 2), value: 7 });
+        p.init_controls.push(os_model::InitControl { head: 0, target: target::slot_param(2, 1, 2046), value: 1 });
+        let links = [Link::new(0, 20, T::Param(del, 0)), Link::new(0, 21, T::Param(lim, 5)), Link::new(0, 22, T::Knob(KnobId::SlotMix(2, 1)))];
+        crate::remote::set_links(&links);
+        let before = a.state.project.clone();
+        let targets = |a: &App| {
+            let p = &a.state.project;
+            (
+                p.automations.iter().flat_map(|x| x.targets.clone()).collect::<Vec<_>>(),
+                p.patterns[0].controls.iter().map(|c| c.kind).collect::<Vec<_>>(),
+                p.controller_links.iter().map(|l| l.target()).collect::<Vec<_>>(),
+                p.init_controls.iter().map(|c| c.target).collect::<Vec<_>>(),
+                crate::remote::links().iter().map(|l| l.target).collect::<Vec<_>>(),
+            )
+        };
+        let was = targets(&a);
+
+        // Wrap all on slot 1: the limiter is member 1, the delay member 2.
+        let msg = crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(0, true)));
+        assert!(msg.as_deref().is_some_and(|m| m.ends_with("1 automation target past parameter 2046 left as it was")), "{msg:?}");
+        tick(&mut a);
+        a.params_tick();
+        let item = |id: u32, i: u16| target::slot_param(2, 0, target::member_item(id, i).unwrap());
+        let moved = (
+            vec![item(2, 0), mix],
+            vec![item(2, 3)],
+            vec![item(1, 1)],
+            // (Creating the mix's clip gave the mix an initial value, which stays.)
+            was.3.iter().map(|&t| if t == target::slot_param(2, 0, 2) { item(1, 2) } else { t }).collect::<Vec<_>>(),
+            vec![T::MemberParam(2, 0, 2, 0), T::MemberParam(2, 0, 1, 5), T::Knob(KnobId::SlotMix(2, 1))],
+        );
+        assert_eq!(targets(&a), moved);
+        assert_eq!(a.state.history.newest_done(), Some(WRAP_ALL), "one step");
+        // The clip still drives the delay's parameter 0: its member's, found by its target.
+        let key = a.plugins.containers[&fx_key(2, 0)].keys[1].unwrap();
+        assert_eq!(crate::params::key_of(&a.state, target::decode(item(2, 0))), Some((key, 0)));
+        assert_eq!(crate::params::driving_clip(&a.state, item(2, 0)), Some(ch));
+        // And the remote link drives it.
+        assert!(a.remote_cc("Test", 0, 20, 127));
+        a.plugins.hosted[&key].plugin.lock().unwrap().idle();
+        assert!((crate::params::param_value(&a.state, key, 0).unwrap() - 1.0).abs() < 1e-6);
+
+        // Undone: everything back on the slots; redone: on the members again.
+        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(WRAP_ALL));
+        tick(&mut a);
+        assert_eq!(targets(&a), was);
+        assert_eq!((&a.state.project.automations, &a.state.project.patterns), (&before.automations, &before.patterns));
+        assert_eq!(crate::history::redo(&mut a.state).as_deref(), Some(WRAP_ALL));
+        tick(&mut a);
+        assert_eq!(targets(&a), moved);
+        crate::history::undo(&mut a.state);
+        tick(&mut a);
+
+        // The delay wrapped alone (member 1 of slot 2's container), then Wrap all on slot 1: its clip and link follow
+        // it to member 2 of slot 1's container.
+        crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(1, false)));
+        tick(&mut a);
+        let alone = target::slot_param(2, 1, target::member_item(1, 0).unwrap());
+        assert_eq!(targets(&a).0, vec![alone, mix], "the slot's own mix stays the slot's");
+        assert_eq!(targets(&a).4[0], T::MemberParam(2, 1, 1, 0));
+        crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(0, true)));
+        tick(&mut a);
+        assert_eq!(targets(&a).0, vec![item(2, 0), mix]);
+        assert_eq!(targets(&a).4[0], T::MemberParam(2, 0, 2, 0));
+        crate::remote::set_links(&[]);
+    }
+
+    /// Wrap in container on a slot whose own mix a clip drives keeps the slot's switch and mix (the clip goes on
+    /// blending the effect), the effect starting at wet 100 %, dry 0 %; without one, the mix moves into the member.
+    #[test]
+    fn a_driven_slot_mix_stays_on_the_slot() {
+        let (mut a, _, _) = two_effects();
+        if let Some(m) = crate::mixer::track_mut(&mut a.state, 2) {
+            (m.slot_mix[0], m.slot_mix[1]) = (0.5, 0.5);
+        }
+        crate::playlist::run(&mut a, Cmd::CreateAutomation(target::slot(2, 1, target::SLOT_MIX), "Mix".into(), 0.5));
+        crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(1, false)));
+        crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(0, false)));
+        tick(&mut a);
+        let t = crate::mixer::track(&a.state, 2).unwrap();
+        assert_eq!((t.slot_mix[1], t.slot_mix[0]), (0.5, 1.0));
+        assert_eq!(members(&a.state, 2, 1).map(|l| (l[0].wet, l[0].dry)), Some((1.0, 0.0)));
+        assert!(members(&a.state, 2, 0).is_some_and(|l| (l[0].wet - 0.5).abs() < 1e-6 && (l[0].dry - 0.5).abs() < 1e-6));
+    }
+
+    /// The channel's Wrap in container moves the instrument's clips and links onto member 1 (spec §4.5); the channel's
+    /// own volume clip stays the channel's; one undo puts them back.
+    #[test]
+    fn wrapping_a_channel_moves_its_automation() {
+        use crate::remote::Link;
+        use crate::typein::Target as T;
+        let mut a = trio_channel();
+        a.params_tick();
+        let index = a.state.project.channels[0].index;
+        let param = target::channel_param(index, 3);
+        let volume = target::channel(index, target::CHANNEL_VOLUME);
+        crate::playlist::run(&mut a, Cmd::CreateAutomation(param, "Param".into(), 0.5));
+        crate::playlist::run(&mut a, Cmd::CreateAutomation(volume, "Volume".into(), 0.5));
+        crate::remote::set_links(&[Link::new(0, 30, T::Param(0, 3)), Link::new(0, 31, T::Knob(KnobId::ChanVol(0)))]);
+        let clips = |a: &App| a.state.project.automations.iter().flat_map(|x| x.targets.clone()).collect::<Vec<_>>();
+        let links = || crate::remote::links().iter().map(|l| l.target).collect::<Vec<_>>();
+        let wrap = crate::rack::channel_menu(&a.state, 0, 0.0, 0.0).items.into_iter().find(|i| i.label == WRAP).unwrap().cmd;
+        crate::playlist::run(&mut a, wrap);
+        ticks(&mut a);
+        a.params_tick();
+        assert_eq!(a.state.project.channels[0].index, index);
+        let moved = target::channel_param(index, target::member_item(1, 3).unwrap());
+        assert_eq!(clips(&a), vec![moved, volume]);
+        assert_eq!(links(), vec![T::MemberParam(0, CHANNEL, 1, 3), T::Knob(KnobId::ChanVol(0))]);
+        let key = a.plugins.containers[&0].keys[0].unwrap();
+        assert_eq!(crate::params::key_of(&a.state, target::decode(moved)), Some((key, 3)));
+        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(WRAP));
+        ticks(&mut a);
+        assert_eq!(clips(&a), vec![param, volume]);
+        assert_eq!(links(), vec![T::Param(0, 3), T::Knob(KnobId::ChanVol(0))]);
+        crate::remote::set_links(&[]);
+    }
+
+    /// A member's own name, colour, icon and CPU switches (spec §4.5): the member window's entries set them, one undo
+    /// step each; the name shows in the container's list, the window's title and clip names; Auto-bypass when silent
+    /// reaches the chain without rebuilding it; Wrap all gives an emptied slot's name, colour, icon and switches to its
+    /// member; all of it is saved with the container (state version 4) and opened again from a .lemon file. A version 3
+    /// state opens with the defaults.
+    #[test]
+    fn a_members_own_name_colour_icon_and_cpu() {
+        use crate::playlist::{fill_plugin_window_menu, plugin_window_menu};
+        let (mut a, first, second) = two_effects();
+        let red = os_model::Rgb::new(0xc8, 0x50, 0x4a);
+        a.state.mixer.slot_names.insert((2, 0), "Glue".into());
+        a.state.mixer.slot_colors.insert((2, 0), red);
+        if let Some(m) = crate::mixer::track_mut(&mut a.state, 2) {
+            m.slot_cpu[0].smart_disable = true;
+        }
+        crate::playlist::run(&mut a, Cmd::Mixer(MCmd::Wrap(1, true)));
+        tick(&mut a);
+        let list = members(&a.state, 2, 1).unwrap();
+        assert_eq!((list[0].label.as_deref(), list[0].color, list[0].cpu.smart_disable), (Some("Glue"), Some(red), true), "the emptied slot's go with its effect");
+        assert_eq!((list[1].label.as_deref(), list[1].cpu.smart_disable), (None, false));
+        assert_eq!((list[0].shown(), list[1].shown()), ("Glue", second.as_str()));
+        assert!(a.plugins.containers[&fx_key(2, 1)].fx.lock().unwrap().members[0].smart, "the chain plays the switch");
+        let key = a.plugins.containers[&fx_key(2, 1)].keys[1].unwrap();
+        crate::mixer::select(&mut a.state, 1, false);
+        let menu = |a: &App| {
+            let mut m = plugin_window_menu(key, false, 0.0, 0.0);
+            fill_plugin_window_menu(&a.state, key, &mut m);
+            m.items
+        };
+        let entry = |items: &[PItem], label: &str| items.iter().find(|i| i.label == label && !i.head).unwrap_or_else(|| panic!("{label}")).clone();
+        let items = menu(&a);
+        for label in ["Rename, color and icon...", "Change color...", "Random color", "Change icon...", "Allow threaded processing", "Auto-bypass when silent"] {
+            assert!(entry(&items, label).enabled, "{label} works");
+        }
+
+        // Rename: the inline box, one step; shown in the list and the window's title, and in clip names.
+        let rename = entry(&items, "Rename, color and icon...").cmd;
+        assert_eq!(rename, Cmd::SlotWin(2, Box::new(Cmd::Mixer(MCmd::MemberRename(1, 1)))));
+        crate::playlist::run(&mut a, rename);
+        let e = a.state.playlist.edit.as_ref().unwrap();
+        assert_eq!((e.target, e.text.as_str()), (crate::playlist::EditTarget::MemberName(2, 1, 2), second.as_str()));
+        a.state.playlist.edit.as_mut().unwrap().text = "Echo".into();
+        crate::playlist::commit_edit(&mut a.state);
+        assert_eq!(a.state.history.newest_done(), Some(NAME));
+        assert_eq!(label(1, &members(&a.state, 2, 1).unwrap()[1]), "2. Echo (wet 100%, dry 0%)");
+        assert!(crate::params::owner_name(&a.state, key).starts_with("Echo in "));
+        #[cfg(plugin_windows)]
+        assert!(a.member_infos()[&key].name.starts_with("Echo ("));
+        crate::history::undo(&mut a.state);
+        assert_eq!(members(&a.state, 2, 1).unwrap()[1].label, None);
+        crate::history::redo(&mut a.state);
+
+        // Change color... ▸ and Random color, Change icon... ▸: one step each.
+        let colors = entry(&menu(&a), "Change color...");
+        crate::playlist::run(&mut a, colors.children[1].cmd.clone());
+        assert_eq!((members(&a.state, 2, 1).unwrap()[1].color, a.state.history.newest_done()), (Some(red), Some(COLOR)));
+        let random = entry(&menu(&a), "Random color").cmd;
+        crate::playlist::run(&mut a, random);
+        assert!(members(&a.state, 2, 1).unwrap()[1].color.is_some());
+        let icons = entry(&menu(&a), "Change icon...");
+        let (name, icon) = crate::playlist::ICONS[2];
+        let pick = icons.children.iter().find(|i| i.label == name).unwrap().cmd.clone();
+        crate::playlist::run(&mut a, pick);
+        assert_eq!((members(&a.state, 2, 1).unwrap()[1].icon, a.state.history.newest_done()), (Some(icon), Some(ICON)));
+        assert_eq!(entry(&menu(&a), "Change icon...").children.iter().find(|i| i.label == name).unwrap().mark, crate::playlist::Mark::Check(true));
+        crate::history::undo(&mut a.state);
+        assert_eq!(members(&a.state, 2, 1).unwrap()[1].icon, None);
+        crate::history::redo(&mut a.state);
+
+        // The CPU switches: one step each; Auto-bypass reaches the chain, keeping its instances.
+        let keys = a.plugins.containers[&fx_key(2, 1)].keys.clone();
+        let smart = entry(&menu(&a), "Auto-bypass when silent");
+        assert_eq!((smart.cmd.clone(), smart.mark), (Cmd::PluginCpu(key, true), crate::playlist::Mark::Check(false)));
+        crate::playlist::run(&mut a, smart.cmd);
+        crate::playlist::run(&mut a, Cmd::PluginCpu(key, false));
+        tick(&mut a);
+        assert_eq!(members(&a.state, 2, 1).unwrap()[1].cpu, os_model::PluginCpu { threaded: false, smart_disable: true });
+        assert!(a.plugins.containers[&fx_key(2, 1)].fx.lock().unwrap().members[1].smart);
+        assert_eq!(a.plugins.containers[&fx_key(2, 1)].keys, keys);
+        assert_eq!(entry(&menu(&a), "Allow threaded processing").mark, crate::playlist::Mark::Check(false));
+        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Threaded processing"));
+        assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some("Auto-bypass when silent"));
+        tick(&mut a);
+        assert!(!a.plugins.containers[&fx_key(2, 1)].fx.lock().unwrap().members[1].smart);
+        crate::history::redo(&mut a.state);
+        crate::history::redo(&mut a.state);
+        tick(&mut a);
+        // Switch auto-bypass for all plugins switches the members' too (all on, then all off), one step.
+        crate::playlist::run(&mut a, Cmd::Mixer(MCmd::AutoBypassAll));
+        crate::playlist::run(&mut a, Cmd::Mixer(MCmd::AutoBypassAll));
+        assert!(members(&a.state, 2, 1).unwrap().iter().all(|m| !m.cpu.smart_disable));
+        crate::history::undo(&mut a.state);
+        assert!(members(&a.state, 2, 1).unwrap().iter().all(|m| m.cpu.smart_disable));
+        tick(&mut a);
+
+        // Replace ▸ starts the new effect afresh: no name, colour or icon, a new plugin's switches.
+        let saved = members(&a.state, 2, 1).unwrap();
+        let lim = a.plugins.effects.iter().position(|e| e.desc.name == first).unwrap();
+        crate::playlist::run(&mut a, Cmd::SlotWin(2, Box::new(Cmd::Mixer(MCmd::MemberReplace(1, 0, lim)))));
+        let m = &members(&a.state, 2, 1).unwrap()[0];
+        assert_eq!((m.label.as_ref(), m.color, m.icon, m.cpu), (None, None, None, os_model::PluginCpu::default()));
+        crate::history::undo(&mut a.state);
+        tick(&mut a);
+        assert_eq!(members(&a.state, 2, 1).unwrap(), saved);
+
+        // Saved in a .lemon file and opened again.
+        let d = std::env::temp_dir().join(format!("lemon-container-own-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("Own.lemon");
+        a.save_to(path.clone());
+        let saved = members(&a.state, 2, 1).unwrap();
+        let mut back = App::new(None);
+        back.plugins = crate::plugins::Plugins::default();
+        back.plugins.effects = crate::plugins::builtin_effects();
+        back.open(path);
+        tick(&mut back);
+        let opened = members(&back.state, 2, 1).unwrap();
+        assert_eq!(opened, saved);
+        assert_eq!((opened[1].label.as_deref(), opened[1].icon, opened[1].cpu.smart_disable), (Some("Echo"), Some(icon), true));
+        let _ = std::fs::remove_dir_all(&d);
+
+        // A version 3 state: the members' defaults.
+        let mut v3 = encode(&[Member { id: 1, uid: "clap:a".into(), name: "A".into(), wet: 1.0, ..Member::default() }]);
+        v3[4..8].copy_from_slice(&3u32.to_le_bytes());
+        v3.truncate(v3.len() - 16);
+        let m = &decode(&v3).unwrap()[0];
+        assert_eq!((m.cpu, m.label.as_ref(), m.color, m.icon), (os_model::PluginCpu::default(), None, None, None));
     }
 }

@@ -9,9 +9,9 @@
 use os_model::{Channel, LayerSettings};
 
 /// The Mersenne Twister MT19937 with 32-bit outputs (Matsumoto and Nishimura's published algorithm), one for the
-/// whole project.
+/// whole project. Public for the app's Burn MIDI to, whose random arpeggio draws from one as playback would.
 #[derive(Clone)]
-pub(super) struct Mt19937 {
+pub struct Mt19937 {
     state: [u32; 624],
     index: usize,
 }

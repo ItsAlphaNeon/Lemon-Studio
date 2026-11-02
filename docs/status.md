@@ -28,10 +28,17 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   channel through (ticked by default) gives a hosted VST, VST 3 or CLAP instrument a MIDI device's notes on the MIDI
   channel they came on, and a recorded note takes that channel as its colour. The two checks are saved in `.lemon`
   projects
+- A channel's Burn MIDI to ▸ Current pattern / New pattern writes the notes the channel generates from its notes in
+  the current pattern: its Misc tab's arpeggiator and echo delay (worked out as the original plays them; switched off
+  afterwards, since the engine does not play them yet), or the notes its CLAP or VST 3 instrument puts out (an
+  arpeggiator or sequencer plugin, played the pattern offline). New pattern puts them into the next empty pattern.
+  One undo step
 - The rack's Restretch all (Ctrl+Alt+R) fits every stretched sample and audio clip to the project tempo at once
   (they follow the tempo by themselves too, also with tempo automation)
 - The rack's knob, mixer box and LED menus: Edit automation in piano roll opens the piano roll on the channel volume
-  or panning lane, the swing knob takes a song start value, and the mixer box and the LED link to a MIDI controller
+  or panning lane, the swing knob takes a song start value, and the mixer box and the LED link to a MIDI controller.
+  The swing knob, the mixer box and the LED make automation clips ("Main swing", "<channel> - Target mixer track",
+  "<channel> - Mute / solo"), open the event editor and take song start values, as the original's files keep them
 - The mixer options' Link all parameters... links the current track's volume, pan, separation, equaliser, sends and
   slot mix levels to consecutive MIDI controllers in one go
 - Options ▸ Detached takes the mixer or the channel rack out of the main window into a window of its own (to put it on
@@ -80,6 +87,15 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   bar, or 2, 4 or 8 bars, then jumps there exactly on it
 - Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
 - Track height, zoom and scroll saved with the project
+- Audio tracks and instrument tracks, saved as FL saves them: the mixer track menu's Assign to new / Unassign from
+  Audio track(s), the channel menu's Assign to new instrument track and the track menu's Track mode ▸ link a playlist
+  track to a mixer track or a channel ("A" / "I" on the header, "I" on the rack's name button). An audio track's
+  Track mode ▸ also has its options, as the original's: Select audio input ▸, Arm recording and Disarm recording act
+  on its mixer track. Instrument track ▸ offers Use existing channel ▸ and the generators: a generator makes a new
+  channel and the track its instrument track Audio clips placed or
+  moved onto an audio track play through its mixer track, and recordings land on it; an instrument track takes no
+  audio clips (a dropped one goes to the next free track below). The mixer's Select ▸ Channels and playlist tracks
+  routed to this track also finds the linked tracks
 - The clip source picker's item menu: Cut itself (the rack's, one undo step) and Edit sample..., which opens an audio
   clip's sample in Tesla on the master track
 - Project picker (VIEW, Ctrl+F8 or the toolbar's project button): a menu of the patterns and channels; picking a
@@ -153,17 +169,21 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   event editors as a slot's effect's does; each level in the list has that menu too. A clip or link names the effect
   by its container's slot and its id in the container (at most 15 effects), so it follows the effect when the list
   is reordered, plays in playback and export, and is saved with the project. A member's window lists, steps, saves
-  and loads its presets; its window edits and presets are undo steps, as a slot effect's are. Not yet: moving a
-  wrapped slot's own clips and links onto the member, the CPU switches per effect, and the original's Patcher slots
-  in imported projects
+  and loads its presets; its window edits and presets are undo steps, as a slot effect's are. Wrapping moves the
+  clips, recorded pattern events and links on a wrapped effect's parameters onto its member, in the same undo step;
+  the slot's own switch and mix stay the slot's (a slot whose mix a clip drives keeps it, its effect starting at wet
+  100 %). A member window's menu sets the effect's own name, colour, icon and CPU switches (Auto-bypass when silent
+  passes a silent effect by), one undo step each, shown in the container's window and the effect's window title and
+  saved with the container. Not yet: the original's Patcher slots in imported projects
 - Instrument containers: the channel rack menu's Wrap in container (the original's Patcherize) moves a plugin
   channel's instrument, with its state, into a container on the channel, one undo step. The channel stays a channel
   (its name, steps, piano roll, mixer track, volume and pan); the container plays its notes through its plugins in
   order. Its window (a click on the channel's name button) lists them; Add plugin offers instruments and effects. An
   instrument starts at wet and dry 100 %, so a second one layers over the first, and an effect after them works on
   both. Members are automated, linked, typed in and undone as a slot container's are, named by the channel, listed in
-  the browser's Generators after their channel, and saved in Lemon projects. Not yet: moving the old instrument's
-  clips and links onto its member, the graph editor's several outputs and note processors
+  the browser's Generators after their channel, and saved in Lemon projects. Wrapping moves the instrument's clips
+  and links onto its member; those on the channel's own knobs stay the channel's. Not yet: the graph editor's several
+  outputs and note processors
 
 ## ✅ Plugin hosting
 
@@ -270,6 +290,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   clips, so their crossfade dips
 - MP3 samples are placed as the original encoder output (the info frame plays as silence)
 - The sampler's closing fades
+- The sampler's voices change at tick starts, as the original's do: the channel's envelopes and LFOs step once per
+  tick (the global LFO counts the song's ticks), and each voice's pitch, filter and gains are worked out there, the
+  gains ramping over the tick by at most the original's step
 - A fast resampler while playing, and the exact one for export
 - Idle plugins are skipped; Stop ends every voice, also in hosted plugins
 - Multi-core mixing: the mixer's tracks, the generator channels and chunks of the sampler's voices render on a
@@ -332,19 +355,23 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 
 ## 🚧 Automation
 
-- Automation clips for channel, mixer and plugin parameters
+- Automation clips for channel, mixer and plugin parameters. Create automation clip selects the clip's channel and
+  shows the channel rack's "Automation" group, as the original does; its undo takes the channel away again
 - A clip drives every target it is linked to, including mixer slot switches and mix levels, track EQ, send
-  levels, stereo separation and the channel's level adjustments
+  levels, stereo separation, the channel's level adjustments, the main swing, a channel's mixer track and its switch
+- The main swing moves the notes not started yet when it changes; a channel's voices go to its new mixer track from
+  that tick; a channel switched off ends its sounding notes and starts no new ones until it is on again
 - A pattern's control points drive mixer volumes, pans, separation, equalisers, slot switches and mix levels, the
-  tempo and plugin parameters, besides the channel's own settings (sends and the main pitch not yet)
+  tempo, the main swing and plugin parameters, besides the channel's own settings, its mixer track and switch
+  included (sends and the main pitch not yet)
 - All thirteen curve shapes are walked exactly; values are taken one tick ahead and passed on only when
   they change
 - A clip's range (its channel's MIN and MAX knobs, minimum above maximum turning the curve upside down) and its
   LFO (on / off, multiply or add, amount, speed, tension, skew, pulse width, and its own envelope) shape what it
   hands on, in the original's arithmetic; the clip's channel window sets them, each change an undo step, and
   projects keep every LFO field
-- The event editor (Edit events on a control's menu: channel volume, pan and pitch, mixer controls, the tempo, plugin
-  parameters) shows the control's events in the selected pattern as its level over time, in the setting's own unit: left
+- The event editor (Edit events on a control's menu: channel volume, pan and pitch, the rack's swing knob, mixer box
+  and LED, mixer controls, the tempo, plugin parameters) shows the control's events in the selected pattern as its level over time, in the setting's own unit: left
   drag draws freehand on the global snap, right drag a straight line, Paint (drawing off the snap), Erase,
   Interpolate (a drag lays the events under it on a straight line, right drag a smooth one), Select and Zoom (Z:
   a click zooms in about it, a drag on the stretch dragged over, a right click out) tools, the wheel scrolls and Ctrl+wheel zooms; its Edit menu has Cut, Copy, Paste, Select all, Select previous / next

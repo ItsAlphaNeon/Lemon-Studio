@@ -231,6 +231,22 @@ pub fn add(l: Link, remove_conflicts: bool) {
     set_links(&all);
 }
 
+/// Each link on the first target of a pair goes onto the second (an undo or redo of a wrap into a container, which
+/// moved the links of the plugins it wrapped: `crate::container`).
+pub fn retarget(pairs: &[(Target, Target)]) {
+    let mut all = links();
+    let mut moved = false;
+    for l in &mut all {
+        if let Some(&(_, to)) = pairs.iter().find(|p| p.0 == l.target) {
+            l.target = to;
+            moved = true;
+        }
+    }
+    if moved {
+        set_links(&all);
+    }
+}
+
 pub fn remove(t: Target) {
     let mut all = links();
     all.retain(|o| o.target != t);

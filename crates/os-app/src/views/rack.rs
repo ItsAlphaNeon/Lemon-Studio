@@ -385,7 +385,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let locked = s.rack.note_lock.contains(&Some(i));
         // Change icon... (§18, Lemon Studio's design): the icon at the button's left end, the name moved right of it.
         let icon = crate::playlist::window_icon(&s.project, &s.playlist.icons, i);
-        let lead = if icon.is_some() { 16.0 } else { 0.0 };
+        let icon_lead = if icon.is_some() { 16.0 } else { 0.0 };
+        // A channel with an instrument track (playlist §6c): the "I" disc before the name, as on the track header.
+        let inst = crate::track_links::instrument_track_of(s, ch.index).is_some();
+        let lead = icon_lead + if inst { 14.0 } else { 0.0 };
         let tb = Rect::new(nb.x + lead, nb.y, nb.w - lead - if locked { 12.0 } else { 0.0 }, nb.h);
         let label = shorten(ui, nf, &label, tb.w - 8.0);
         ui.c.push_clip(nb.inset(1.0));
@@ -395,6 +398,11 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         }
         if let Some(ic) = icon {
             icons::draw(ui.c, ic, Rect::new(nb.x + if lemon { 6.0 } else { 4.0 }, nb.cy() - 6.0, 12.0, 12.0), col);
+        }
+        if inst {
+            let br = Rect::new(nb.x + icon_lead + if lemon { 6.0 } else { 4.0 }, nb.cy() - 5.5, 11.0, 11.0);
+            ui.c.fill_circle(br.cx(), br.cy(), 5.5, col);
+            ui.c.text_center(Font::new(10), br, base.shade(-0.25), "I");
         }
         if s.rack.align_left {
             let lh = ui.c.line_height(nf);

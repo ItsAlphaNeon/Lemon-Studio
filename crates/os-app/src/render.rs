@@ -142,6 +142,7 @@ pub fn render(o: &Opts) -> Result<(), String> {
     app.plugins.set_offline(true);
     let project = crate::rack::play_project(&app.state);
     let mut library = crate::transport::host_library(crate::factory_folder::dir());
+    lemon_sampler::set_host_ticks(project.ppq);
     let mut e = Engine::with_instruments(&project, &mut library, o.rate, PlayMode::Song, &app.plugins.instruments());
     crate::project_plugins::attach_effects(&mut e, &project, app.plugins.effects());
     if o.from > 0 {

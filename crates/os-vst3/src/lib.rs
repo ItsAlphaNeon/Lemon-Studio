@@ -479,6 +479,13 @@ pub struct Plugin {
     handler: Com<Handler>,
     frame: Com<Frame>,
     events: Com<EventList>,
+    /// The processor's output events while capturing notes (`os_host::Plugin::capture_notes`), and the notes taken
+    /// from them.
+    events_out: Com<EventList>,
+    capture: bool,
+    notes_out: Vec<os_host::NoteOut>,
+    /// It has an event output bus (`os_host::Plugin::puts_out_notes`).
+    note_outputs: bool,
     params_in: Com<ParamChanges>,
     params_out: Com<ParamChanges>,
     shared: Arc<Shared>,
@@ -593,6 +600,10 @@ impl Plugin {
                 handler: Handler::create(shared.clone()),
                 frame: Frame::create(shared.clone()),
                 events: EventList::create(),
+                events_out: EventList::create(),
+                capture: false,
+                notes_out: Vec::new(),
+                note_outputs: false,
                 params_in: ParamChanges::create(),
                 params_out: ParamChanges::create(),
                 shared,
@@ -694,6 +705,7 @@ impl Plugin {
                 c.activate_bus(AUDIO, OUTPUT, 0, 1);
             }
             self.takes_notes = c.get_bus_count(EVENT, INPUT) > 0;
+            self.note_outputs = c.get_bus_count(EVENT, OUTPUT) > 0;
             if self.takes_notes {
                 c.activate_bus(EVENT, INPUT, 0, 1);
             }
@@ -1249,10 +1261,14 @@ impl Plugin {
             input_param_changes: self.params_in.static_ptr(),
             output_param_changes: self.params_out.static_ptr(),
             input_events: if self.takes_notes { self.events.static_ptr() } else { null_static() },
-            output_events: null_static(),
+            output_events: if self.capture { self.events_out.static_ptr() } else { null_static() },
             context: &mut self.context,
         };
         unsafe { self.processor.process(&mut data) };
+        if self.capture {
+            let room = MAX_NOTES_OUT.saturating_sub(self.notes_out.len());
+            self.notes_out.extend(notes_of(&self.events_out.get().take()).take(room));
+        }
         if self.outs.first() == Some(&1) {
             right.copy_from_slice(left);
         }
@@ -1319,9 +1335,46 @@ impl NoteIds {
     }
 }
 
+/// Most notes put out kept until they are taken.
+const MAX_NOTES_OUT: usize = 4096;
+
+/// The notes among a processor's output events: note ons (a velocity of 0 is a note off) and offs.
+fn notes_of(events: &[Event]) -> impl Iterator<Item = os_host::NoteOut> + '_ {
+    events.iter().filter_map(|e| {
+        let offset = e.sample_offset.max(0) as u32;
+        // SAFETY: the union member read is the one the event's type names.
+        let (on, key, channel, velocity) = match e.type_ {
+            NOTE_ON_EVENT => {
+                let n = unsafe { e.event.note_on };
+                (n.velocity > 0.0, n.pitch, n.channel, n.velocity)
+            }
+            NOTE_OFF_EVENT => {
+                let n = unsafe { e.event.note_off };
+                (false, n.pitch, n.channel, n.velocity)
+            }
+            _ => return None,
+        };
+        Some(os_host::NoteOut { offset, key: key.clamp(0, 127) as u8, channel: channel.clamp(0, 15) as u8, velocity, on })
+    })
+}
+
 impl os_host::Plugin for Plugin {
     fn desc(&self) -> &Descriptor {
         &self.desc
+    }
+
+    fn capture_notes(&mut self, on: bool) {
+        self.capture = on;
+        self.notes_out.clear();
+        self.events_out.get().take();
+    }
+
+    fn take_notes_out(&mut self) -> Vec<os_host::NoteOut> {
+        std::mem::take(&mut self.notes_out)
+    }
+
+    fn puts_out_notes(&self) -> bool {
+        self.note_outputs
     }
 
     fn help_url(&self) -> Option<String> {

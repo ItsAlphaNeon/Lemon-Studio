@@ -64,12 +64,15 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
   saved in Lemon Studio's projects. The effects inside are automated and linked as a slot's effect is, their wet and
   dry levels too (clips and controller links name the member by its container's slot and its id, so they follow it
   when it moves and are saved with the project), and their windows have their presets, a slot effect's menu
-  (Replace, Delete) and undo steps for their edits and presets (2026-10-30). Left: the original's Patcher slots in
-  imported projects, moving a wrapped slot's own clips and links onto its member, the CPU switches per effect, and
-  the graph editor. The channel rack's Patcherize (Wrap in container) followed on 2026-10-30: the channel's instrument
-  goes into a container on the channel that plays its notes, instruments and effects can be added (instruments layer
-  at wet and dry 100 %), and members are automated, linked, undone and saved as a slot container's are; the old
-  instrument's clips and links are not moved onto its member yet
+  (Replace, Delete) and undo steps for their edits and presets (2026-10-30). The channel rack's Patcherize (Wrap in
+  container) followed on 2026-10-30: the channel's instrument goes into a container on the channel that plays its
+  notes, instruments and effects can be added (instruments layer at wet and dry 100 %), and members are automated,
+  linked, undone and saved as a slot container's are. Since 2026-11-02 a wrap moves the wrapped effect's (or
+  instrument's) automation clips, recorded pattern events, controller links, initial values and remote control links
+  onto its member, in the same undo step (the slot's own switch and mix and the channel's own settings stay theirs),
+  and each member has its own CPU switches (Auto-bypass when silent passes a silent effect by), name, colour and icon
+  from its window menu, one undo step each, saved with the container. Left: the original's Patcher slots in imported
+  projects, Shift+drop of Patcher, and the graph editor
 - [x] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** Six of the seven
   small effects match sample for sample in the tests (98 cases for these three: `os-engine/tests/integration/fx_null.rs`); the
   Chorus uses the true pi where the original's is a hair off, so 10 of its 21 cases match and the rest are at least
@@ -87,36 +90,40 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   latency settings, adding, moving, deleting and trimming tracks. Mute and solo make no step, as in FL Studio
 - [x] **Undo for the remaining edits.** A generator inserted higher up the rack, Replace, project info and the
   timebase are each one step
-- [ ] **Mixer right-click menus.** 4 entries greyed out on 2026-10-30, counted entry by entry after Insert from state
+- [x] **Mixer right-click menus.** None greyed out but Compensate for master latency, greyed in the original too
+  (2026-11-02). Counted entry by entry after Insert from state
   (and File ▸ Open / Save mixer track state), Plugin delay compensation ▸ Automatic, View ▸ Waveforms and Extra
   properties, the slot menu's Scaling ▸ and Help, Mixer options ▸ Link all parameters... (the current track's own
   controls), the track and slot menus' Change icon..., the slot menu's Link all parameters... and its Patcherize and
-  Patcherize all (Wrap in container, Wrap all in container: see Patcher) and Mixer options ▸ Detached (the mixer in a
-  native window of its own) were enabled:
-  Assign to / Unassign from Audio track(s) and Select ▸ Channels and playlist tracks (no audio tracks in the playlist
-  yet), Compensate for master latency (greyed in the original too).
+  Patcherize all (Wrap in container, Wrap all in container: see Patcher), Mixer options ▸ Detached (the mixer in a
+  native window of its own), and last Assign to new / Unassign from Audio track(s) and Select ▸ Channels and playlist
+  tracks routed to this track (audio tracks, [track_links.rs](../crates/os-app/src/track_links.rs)) were enabled.
   Scaling ▸ is greyed for a slot without a hosted plugin, "(no saved states)" when none is saved. Not counted: the
   layout combo's seven other layouts ([mixer.rs](../crates/os-app/src/mixer.rs))
 - [x] **Playlist right-click menus.** None greyed out since 2026-10-30: the last five, the picker's Change icon and
   the plugin window's Link all parameters..., Change icon..., Save channel state as... and Browse channel states, work
   as Lemon Studio's design (Change icon is kept for the session only)
   ([playlist.rs](../crates/os-app/src/playlist.rs), [channel_states.rs](../crates/os-app/src/channel_states.rs))
-- [ ] **Channel rack right-click menus.** 9 of the rack's own entries greyed out on 2026-10-30, counted entry by
-  entry after 26 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
+- [ ] **Channel rack right-click menus.** 6 of the rack's own entries greyed out on 2026-11-02, counted entry by
+  entry after 29 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
   plugins, Change icon ▸, Show waveform preview, MIDI channel through, Restretch all, Detached and Patcherize, as
-  Wrap in container, on 2026-10-30): Loop starter and its 3 playlist-track options (it is built on the original's
-  online loop library), Assign
-  to new instrument track (instrument tracks, and how the original saves a track's link to its channel, not measured
-  yet), Auto fill (greyed on every channel tried in the original; what it does is unknown), Create instrument (no multi-sample instrument to put the samples
-  in yet), Burn MIDI to ▸ (2) (no plugin hands its notes back to the host yet). The knob, mixer box and LED menus'
-  Automation and Remote control groups add 18 more, after 5 were enabled on 2026-10-30 (Edit automation in piano roll
-  on the volume and panning knobs, the swing knob's Set as song start value, MIDI learn... on the mixer box and the
-  LED, Edit automation in a window on the volume and panning knobs: a second event editor window): Override global
+  Wrap in container, on 2026-10-30; Assign to new instrument track, with the playlist's instrument tracks, and Burn
+  MIDI to ▸ Current pattern and New pattern, from the channel's arpeggiator and echo delay or the notes its CLAP or
+  VST 3 plugin puts out ([burn_midi.rs](../crates/os-app/src/burn_midi.rs)), on 2026-11-02): Loop starter and its 3
+  playlist-track options (it is built on the original's online loop library), Auto fill (greyed on every channel
+  tried in the original; what it does is unknown), Create instrument (no multi-sample instrument to put the samples
+  in yet). The knob, mixer box and LED menus'
+  Automation and Remote control groups add 7 more, after 5 were enabled on 2026-10-30 (Edit automation
+  in piano roll on the volume and panning knobs, the swing knob's Set as song start value, MIDI learn... on the mixer
+  box and the LED, Edit automation in a window on the volume and panning knobs: a second event editor window) and 11
+  on 2026-11-02, from the targets measured that day (Create automation clip, Edit automation and Edit automation in a
+  window on the swing knob, the mixer box and the LED, Set as song start value on the mixer box and the LED; the
+  engine plays clips and control points on the main swing, a channel's mixer track and its switch): Override global
   mapping... on all four (one kind of link, kept in the program's settings; what the original's override does is
-  not described), and on the swing knob, the mixer box and the LED Edit automation, Edit automation in a window,
-  Create automation clip and Edit automation in piano roll (the engine plays no automation of them, and the mixer box's and the LED's
-  targets in the original's files are not measured), Set as song start value on the mixer box and the LED (the same)
-  ([rack.rs](../crates/os-app/src/rack.rs))
+  not described), and Edit automation in piano roll on the swing knob, the mixer box and the LED (the piano roll has
+  no lane for the main swing, a channel's mixer track or its switch; greyed in the original too, which also greys Edit
+  events in new window there, 2026-11-02)
+  ([rack.rs](../crates/os-app/src/rack.rs), [burn_midi.rs](../crates/os-app/src/burn_midi.rs))
 - [ ] **Main menu bar.** 2 of its 137 entries greyed out on 2026-10-30, counted entry by entry after Save audio
   clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics, TOOLS > Set up for live performance,
   Switch auto-bypass for all plugins, Chord progression tool..., Set keyboard focus of all plugins to ▸ (its Enabled

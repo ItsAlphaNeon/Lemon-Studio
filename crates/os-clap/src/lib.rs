@@ -733,6 +733,11 @@ pub struct Plugin {
     param_out: Vec<OutEv>,
     /// The controller outputs the plugin sent last, per MIDI channel: a pitch bend's bits and the CC's finer bits.
     controls: [Option<(u16, Option<u8>)>; 16],
+    /// The notes it put out, kept while capturing (`os_host::Plugin::capture_notes`).
+    capture: bool,
+    notes_out: Vec<os_host::NoteOut>,
+    /// It declares a note output port (`os_host::Plugin::puts_out_notes`).
+    note_outputs: bool,
     _lib: Arc<Library>,
 }
 
@@ -746,6 +751,8 @@ enum OutEv {
     /// A controller output as MIDI (channel = output): a pitch bend's 14 bits, or the 7 bits below them as CC 63.
     Bend(u8, u16),
     Fine(u8, u8),
+    /// A note the plugin put out (CLAP note on / off, or MIDI): on, key, MIDI channel, velocity, frame in the call.
+    Note(bool, u8, u8, f32, u32),
 }
 
 /// The CC number that carries a controller output's 7 bits below its pitch bend (spec: plugins/lemon-peak-controller.md
@@ -781,6 +788,15 @@ unsafe extern "C" fn push_out(l: *const clap_output_events, e: *const clap_event
             }
             return true;
         }
+        // Notes the plugin puts out (Burn MIDI to; taken right after the call, as voice ends).
+        if (*e).type_ == CLAP_EVENT_NOTE_ON || (*e).type_ == CLAP_EVENT_NOTE_OFF {
+            if v.len() < MAX_OUT + MAX_ENDS {
+                let n = &*(e as *const clap_event_note);
+                let on = (*e).type_ == CLAP_EVENT_NOTE_ON;
+                v.push(OutEv::Note(on, n.key.clamp(0, 127) as u8, n.channel.clamp(0, 15) as u8, n.velocity as f32, (*e).time));
+            }
+            return true;
+        }
         // Controller outputs (taken right after the call, as voice ends).
         if (*e).type_ == CLAP_EVENT_MIDI {
             let d = (*(e as *const clap_event_midi)).data;
@@ -788,6 +804,10 @@ unsafe extern "C" fn push_out(l: *const clap_output_events, e: *const clap_event
                 match d[0] & 0xF0 {
                     0xE0 => v.push(OutEv::Bend(d[0] & 0x0F, u16::from(d[1] & 0x7F) | u16::from(d[2] & 0x7F) << 7)),
                     0xB0 if d[1] == CONTROL_FINE_CC => v.push(OutEv::Fine(d[0] & 0x0F, d[2] & 0x7F)),
+                    s @ (0x80 | 0x90) => {
+                        let on = s == 0x90 && d[2] & 0x7F > 0;
+                        v.push(OutEv::Note(on, d[1] & 0x7F, d[0] & 0x0F, f32::from(d[2] & 0x7F) / 127.0, (*e).time));
+                    }
                     _ => {}
                 }
             }
@@ -906,7 +926,9 @@ impl Plugin {
             let render = ext(CLAP_EXT_RENDER) as *const clap_plugin_render;
             let voice_info = ext(CLAP_EXT_VOICE_INFO) as *const clap_plugin_voice_info;
             let audio_ports = ext(CLAP_EXT_AUDIO_PORTS) as *const clap_plugin_audio_ports;
-            let bend = (!takes_clap_notes(ext(CLAP_EXT_NOTE_PORTS) as *const clap_plugin_note_ports, plugin)).then(os_engine::TuningBend::default);
+            let note_ports = ext(CLAP_EXT_NOTE_PORTS) as *const clap_plugin_note_ports;
+            let bend = (!takes_clap_notes(note_ports, plugin)).then(os_engine::TuningBend::default);
+            let note_outputs = note_ports.as_ref().and_then(|n| n.count).is_some_and(|count| count(plugin, false) > 0);
             let ranges = params::read_ranges(params, plugin);
             Ok(Plugin {
                 desc,
@@ -980,6 +1002,9 @@ impl Plugin {
                 pvals: Vec::with_capacity(params::MAX_AUTO + 64),
                 param_out: Vec::new(),
                 controls: [None; 16],
+                capture: false,
+                notes_out: Vec::new(),
+                note_outputs,
                 _lib: lib.clone(),
             })
         }
@@ -1144,6 +1169,11 @@ impl Plugin {
                 OutEv::Fine(ch, bits) => {
                     if let Some(Some(c)) = self.controls.get_mut(usize::from(ch)) {
                         c.1 = Some(bits);
+                    }
+                }
+                OutEv::Note(on, key, channel, velocity, offset) => {
+                    if self.capture && self.notes_out.len() < MAX_OUT {
+                        self.notes_out.push(os_host::NoteOut { offset, key, channel, velocity, on });
                     }
                 }
                 e => {
@@ -1892,6 +1922,19 @@ impl os_host::Plugin for Plugin {
         true
     }
 
+    fn capture_notes(&mut self, on: bool) {
+        self.capture = on;
+        self.notes_out.clear();
+    }
+
+    fn take_notes_out(&mut self) -> Vec<os_host::NoteOut> {
+        std::mem::take(&mut self.notes_out)
+    }
+
+    fn puts_out_notes(&self) -> bool {
+        self.note_outputs
+    }
+
     fn take_automation_requests(&mut self) -> Vec<u32> {
         self.automation_requests()
     }
@@ -1903,7 +1946,7 @@ impl os_host::Plugin for Plugin {
                 OutEv::Begin(id) => Some(os_host::ParamEvent::Begin(id)),
                 OutEv::Value(id, v) => Some(os_host::ParamEvent::Value(id, self.normalize(id, v))),
                 OutEv::End(id) => Some(os_host::ParamEvent::End(id)),
-                OutEv::NoteEnd(..) | OutEv::Bend(..) | OutEv::Fine(..) => None,
+                OutEv::NoteEnd(..) | OutEv::Bend(..) | OutEv::Fine(..) | OutEv::Note(..) => None,
             })
             .collect()
     }
@@ -2452,6 +2495,46 @@ mod tests {
         p.take_note_ends(0);
         assert_eq!(p.control_fx(2), Some(0.0));
         assert_eq!(control_value(4096, Some(64)), ((4096.0 * 128.0 + 64.0) / 2097151.0) as f32);
+    }
+
+    /// The notes a plugin puts out (CLAP note events or MIDI) are kept while capturing, with their frames, and dropped
+    /// otherwise; they never reach the parameter events (Burn MIDI to, spec: ui/channel-rack.md §18).
+    #[test]
+    fn notes_out_are_captured() {
+        use os_host::Plugin as _;
+        let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
+        let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ.clap")) }.expect("linked EQ");
+        let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(!p.puts_out_notes(), "an effect without a note output port");
+        let head = |time: u32, type_: u16, size: usize| clap_event_header { size: size as u32, time, space_id: CLAP_CORE_EVENT_SPACE_ID, type_, flags: 0 };
+        let note = |time: u32, type_: u16, key: i16, velocity: f64| clap_event_note {
+            header: head(time, type_, std::mem::size_of::<clap_event_note>()),
+            note_id: -1,
+            port_index: 0,
+            channel: 2,
+            key,
+            velocity,
+        };
+        let midi = |time: u32, data: [u8; 3]| clap_event_midi { header: head(time, CLAP_EVENT_MIDI, std::mem::size_of::<clap_event_midi>()), port_index: 0, data };
+        let push = |p: &mut Plugin| {
+            let outs = clap_output_events { ctx: &mut p.param_out as *mut Vec<OutEv> as *mut c_void, try_push: Some(push_out) };
+            let (on, off) = (note(3, CLAP_EVENT_NOTE_ON, 60, 0.5), note(9, CLAP_EVENT_NOTE_OFF, 60, 0.0));
+            let (mon, moff) = (midi(4, [0x91, 64, 127]), midi(7, [0x91, 64, 0]));
+            for h in [&on.header, &mon.header, &moff.header, &off.header] {
+                assert!(unsafe { push_out(&outs, h) });
+            }
+            p.take_note_ends(0);
+        };
+        push(&mut p);
+        assert!(p.take_notes_out().is_empty() && p.param_out.is_empty(), "not capturing");
+        p.capture_notes(true);
+        push(&mut p);
+        let got: Vec<_> = p.take_notes_out().iter().map(|n| (n.offset, n.key, n.channel, n.on, n.velocity)).collect();
+        assert_eq!(got, [(3, 60, 2, true, 0.5), (4, 64, 1, true, 1.0), (7, 64, 1, false, 0.0), (9, 60, 2, false, 0.0)]);
+        assert!(p.param_out.is_empty() && p.take_param_events().is_empty());
+        p.capture_notes(false);
+        push(&mut p);
+        assert!(p.take_notes_out().is_empty());
     }
 
     /// Lemon Peak Controller hosted as the engine hosts a mixer slot (a call per tick, the song's transport): after each

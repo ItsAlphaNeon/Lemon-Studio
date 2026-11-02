@@ -2,20 +2,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Lemon Sampler voices: pitch, loop, declicking, envelopes and LFOs of the five targets, the channel filter, and the
-//! realtime stretch methods. The played sample itself is built in `fx`.
+//! Lemon Sampler voices: pitch, loop, declicking, the channel's envelopes and LFOs, the channel filter, the gains, and
+//! the realtime stretch methods. The played sample itself is built in `fx`.
 //!
-// spec: plugins/lemon-sampler.md (§5 Sound), audio/sampler-playback.md (pitch, velocity, resampling),
-// spec: audio/channel-envelopes.md (envelope laws), audio/sampler.md (the resampler, the loop, the end of a voice),
-// spec: audio/declick.md (opening and closing fades), audio/channel-filter.md, audio/voice-levels.md
+//! Everything that changes during a note changes at tick starts, as in FL: the envelopes and LFOs step, the ratio, the
+//! filter's knob positions and the gain targets are worked out, and the gains ramp to their targets over the tick.
+//! Lemon Studio hands the plugin one tick per `process` call ([`Time::host_ticks`]); in another host the voices keep a
+//! tick clock of their own.
+//!
+// spec: plugins/lemon-sampler.md (§5 Sound), audio/sampler.md (a voice, the resampler, the ratio, the loop, the end of
+// spec: a voice, the gains), audio/envelopes-and-lfos.md, audio/timing.md (samples per tick), audio/declick.md (opening
+// spec: and closing fades), audio/channel-filter.md, audio/voice-levels.md, audio/conventions.md (pan split)
 
 use std::f64::consts::PI;
 use std::sync::Arc;
 
+use os_dsp::articulator::{Record, Shared, Timing, Voice as Articulators};
 use os_dsp::resample::{self, Quality};
 use os_dsp::stretch::Stream;
 use os_engine::instrument::VOICE_GAIN_FRAMES;
-use os_engine::{envelope, laws, Sample};
+use os_engine::{laws, Sample};
 
 use crate::stream::{Feed, Played};
 
@@ -29,62 +35,11 @@ pub fn stretch(s: &Sample, ratio: f64, shift: f64) -> Sample {
 // ---------------------------------------------------------------------------------------------------------------
 // Voices (spec §5.1 - §5.3)
 
-/// One LFO (spec §5.2).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Lfo {
-    /// 0 sine, 1 triangle, 2 pulse.
-    pub shape: u8,
-    pub delay: f64,
-    pub attack: f64,
-    pub amount: f64,
-    pub hz: f64,
-    pub global: bool,
-}
-
-impl Lfo {
-    pub fn active(&self) -> bool {
-        self.amount.abs() > 1e-4
-    }
-
-    fn wave(&self, phase: f64) -> f64 {
-        let ph = phase.fract();
-        match self.shape {
-            0 => (2.0 * PI * ph).sin(),
-            1 => 1.0 - 4.0 * ((ph + 0.25).fract() - 0.5).abs(),
-            _ => {
-                if ph < 0.5 {
-                    1.0
-                } else {
-                    -1.0
-                }
-            }
-        }
-    }
-
-    /// Value −amount..amount at voice time `t` with the given phase.
-    fn value(&self, t: f64, phase: f64) -> f64 {
-        if !self.active() || t < self.delay {
-            return 0.0;
-        }
-        let fade = if self.attack > 0.0 { ((t - self.delay) / self.attack).min(1.0) } else { 1.0 };
-        self.amount * fade * self.wave(phase)
-    }
-}
-
-/// An envelope target: the envelope (when on) with its amount, and its LFO.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Target {
-    pub env: Option<envelope::Params>,
-    /// Envelope amount (−1..1; the Volume target ignores it).
-    pub amount: f64,
-    pub lfo: Lfo,
-}
-
-pub const PAN: usize = 0;
-pub const VOL: usize = 1;
-pub const MODX: usize = 2;
-pub const MODY: usize = 3;
-pub const PITCH: usize = 4;
+pub const PAN: usize = Record::PAN;
+pub const VOL: usize = Record::VOLUME;
+pub const MODX: usize = Record::MOD_X;
+pub const MODY: usize = Record::MOD_Y;
+pub const PITCH: usize = Record::PITCH;
 
 /// Settings read once per block.
 #[derive(Clone, Copy, Debug)]
@@ -99,7 +54,9 @@ pub struct Block {
     pub ts_time: Option<f64>,
     /// A realtime stretch method: voices stretch while they play.
     pub realtime: bool,
-    pub targets: [Target; 5],
+    /// The channel's five envelope and LFO records: pan, volume, mod X, mod Y, pitch (spec:
+    /// audio/envelopes-and-lfos.md "Settings").
+    pub records: [Record; 5],
     /// Filter type (index into `params::FILTERS`), MOD X / MOD Y knob positions.
     pub f_type: u8,
     pub f_cut: f32,
@@ -121,7 +78,7 @@ impl Default for Block {
             ts_ratio: 1.0,
             ts_time: None,
             realtime: false,
-            targets: [Target::default(); 5],
+            records: Record::new_channel_records(),
             f_type: 0,
             f_cut: 1.0,
             f_res: 0.0,
@@ -131,6 +88,36 @@ impl Default for Block {
             zone: (0, crate::params::KEY_MAX),
             add_key: false,
         }
+    }
+}
+
+/// The song's timing as the voices need it (spec: audio/timing.md "Samples per tick").
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Time {
+    pub tempo: f64,
+    /// Ticks per quarter note.
+    pub ppq: u16,
+    /// Steps (sixteenths) per beat of the bar: 4 in x/4, 2 in x/8 (spec "The tempo counts the bar's beats").
+    pub steps: u32,
+    /// The song tick the next `process` call starts on, while the song plays: the global LFOs' shared phase starts
+    /// from it (spec: audio/envelopes-and-lfos.md "The global LFO").
+    pub song_tick: Option<u64>,
+    /// The host hands the voices one tick per `process` call (Lemon Studio's engine); otherwise the voices count the
+    /// ticks themselves from their first call. **(OS)**
+    pub host_ticks: bool,
+}
+
+impl Default for Time {
+    fn default() -> Self {
+        Time { tempo: 130.0, ppq: 96, steps: 4, song_tick: None, host_ticks: false }
+    }
+}
+
+impl Time {
+    /// Samples per tick at `rate`: `rate * 60 * 4 / (tempo * steps * PPQ)`, the tempo first rounded to a single.
+    pub fn samples_per_tick(&self, rate: f64) -> f64 {
+        let tempo = f64::from(self.tempo.max(1.0) as f32);
+        rate * 60.0 * 4.0 / (tempo * f64::from(self.steps.max(1)) * f64::from(self.ppq.max(1)))
     }
 }
 
@@ -236,20 +223,99 @@ impl Close {
     }
 }
 
-/// Frames between modulation updates: the voices' "tick" (**Lemon Studio**: a fixed 32 frames, where FL uses the
-/// sequencer's tick; filter coefficients, gain and pan targets change at these points).
-const CTL: usize = 32;
-// The engine sends a voice's gains every `VOICE_GAIN_FRAMES` frames from a block's start, and a voice glides to each over
-// that many frames: equal to `CTL`, they split no control span.
-const _: () = assert!(CTL == VOICE_GAIN_FRAMES as usize, "VOICE_GAIN_FRAMES (os-engine) and CTL must stay equal");
+/// `ln 2 / 12 / 100` in doubles: the ratio is `exp(cents * C) * q` (spec: audio/sampler.md "The ratio").
+const C: f64 = std::f64::consts::LN_2 / 12.0 / 100.0;
+
+/// A gain closer to zero than this (2^-24) is 0 (spec: audio/conventions.md "Glide", rule 3).
+const TINY: f32 = 5.960_464_5e-8;
 
 /// A voice's pan gains for a pan position (−1..1, clamped): the constant-power split at √2, so a centred pan is 1 on
 /// both sides. The host applies the channel's own pan split on the instrument's output, so with either pan centred
 /// the product is the split of their sum (spec: audio/voice-levels.md "Final levels", audio/conventions.md
 /// "Pan split").
 pub fn pan_gains(pan: f64) -> (f32, f32) {
-    let a = (pan.clamp(-1.0, 1.0) + 1.0) * PI / 4.0;
-    ((std::f64::consts::SQRT_2 * a.cos()) as f32, (std::f64::consts::SQRT_2 * a.sin()) as f32)
+    let [l, r] = split(pan as f32, 1.0);
+    (l, r)
+}
+
+/// The pan split of `level` at `pan` (spec: audio/conventions.md "Pan split"), the level passed as `level * sqrt(2)` in
+/// single so that a centred pan gives it on both sides: the angle and the products in doubles, each gain rounded once.
+fn split(pan: f32, level: f32) -> [f32; 2] {
+    let lv = f64::from(level * std::f32::consts::SQRT_2);
+    let a = (f64::from(pan.clamp(-1.0, 1.0)) + 1.0) * (PI / 4.0);
+    [(lv * a.cos()) as f32, (lv * a.sin()) as f32]
+}
+
+/// The step that moves `gain` towards `target` over a tick of nominal length `n` (spec: audio/sampler.md "Gains"):
+/// `(target - gain) / n` within `±limit`. A limited step whose end, `gain + step * n`, would come closer to zero than
+/// 2^-24 becomes `-gain / n`.
+fn glide_step(gain: f32, target: f32, n: u32, limit: f32) -> f32 {
+    let n = n.max(1) as f32;
+    let step = (target - gain) / n;
+    if step.abs() <= limit {
+        return step;
+    }
+    let step = limit.copysign(step);
+    if (gain + step * n).abs() < TINY {
+        -gain / n
+    } else {
+        step
+    }
+}
+
+/// One side's gain through a tick, by sums in single precision as FL builds it (spec: audio/sampler.md "Gains"): the
+/// even samples from the gain at the tick's start, the odd ones from that plus a step, each series advancing by two
+/// steps, for the first `L - L mod 8` samples of a tick of `L`; the samples after them carry the even series on by one
+/// step each.
+#[derive(Clone, Copy, Debug)]
+struct Ramp {
+    even: f32,
+    odd: f32,
+    step: f32,
+    /// Samples done in the tick, and the interleaved ones (`L - L mod 8`).
+    j: u32,
+    pairs: u32,
+}
+
+impl Ramp {
+    fn new(gain: f32, step: f32, len: u32) -> Ramp {
+        Ramp { even: gain, odd: gain + step, step, j: 0, pairs: len - len % 8 }
+    }
+
+    #[inline]
+    fn next(&mut self) -> f32 {
+        let j = self.j;
+        self.j += 1;
+        if j >= self.pairs {
+            let g = self.even;
+            self.even += self.step;
+            return g;
+        }
+        let two = self.step * 2.0;
+        let s = if j % 2 == 0 { &mut self.even } else { &mut self.odd };
+        let g = *s;
+        *s += two;
+        g
+    }
+}
+
+/// Where a voice is in its current tick.
+#[derive(Clone, Copy, Debug)]
+struct TickState {
+    /// Samples of the tick the voice plays (fewer in the tick it starts in, when it starts inside one), and done.
+    len: u32,
+    done: u32,
+    /// The playback ratio, set at the tick's start.
+    ratio: f64,
+    /// Away from the sample's edges the tick's positions are `p + k * R` from its start `p`, which then moves on by
+    /// `R * L` at once; near an edge (`None`) they are summed sample by sample (spec: audio/sampler.md "How the
+    /// position moves").
+    from: Option<f64>,
+    /// At a ratio of exactly 1, from a whole position away from the edges, the frames are handed on unchanged
+    /// ("The copy").
+    copy: bool,
+    /// Each side's gain.
+    ramp: [Ramp; 2],
 }
 
 #[derive(Clone, Copy)]
@@ -259,10 +325,12 @@ struct Voice {
     host: bool,
     /// Host note id (per-note modulation), if the host gave one.
     id: Option<i32>,
+    /// The note's volume (its velocity on the level curve).
     vel: f32,
     pos: f64,
-    /// Key rate times the sample / host rate ratio.
-    key_step: f64,
+    /// Cents from the root key, and the played sample's rate over the output rate (`q`).
+    key_cents: f32,
+    q: f64,
     /// Host tuning of this key's voices, semitones (portamento glides; spec: audio/channel-voices.md).
     tune: f64,
     /// The note's own pan (−1..1) and its filter offsets in knob units, from the host per note (CLAP note expression
@@ -270,17 +338,29 @@ struct Voice {
     note_pan: f64,
     mod_x: f32,
     mod_y: f32,
+    /// Samples played.
     age: u64,
-    off: Option<u64>,
+    /// The note has ended.
+    released: bool,
     /// Opening length in samples: only a voice that starts inside its sample has one (0 = none).
     open: u32,
     /// The closing, once it has started (note end, choke, the end of the sample).
     close: Option<Close>,
-    phase: [f64; 5],
+    /// The volume envelope ran out in the last tick: the closing starts with this one.
+    close_next: bool,
+    /// The five envelopes and LFOs; ticks stepped.
+    art: Articulators,
+    ticks: u32,
+    /// The volume envelope starts in its delay or attack: the gain ramps in from 0 in the first tick.
+    ramp_in: bool,
+    /// The voice has gone round its loop: the loop's start is an edge from then on.
+    looped: bool,
     filt: Filter,
-    /// Gain at the end of the last control span (ramps start here).
-    gain: f32,
-    pan: (f32, f32),
+    /// Each side's gain at the start of the current tick.
+    gain: [f32; 2],
+    /// The tick the voice is in (its number) and where in it.
+    serial: u64,
+    tick: TickState,
     /// Its stretcher in `Engine::streams` (realtime stretch methods).
     rt: Option<u16>,
     /// Frames left of the crossfade from the plain reading to the stretcher (a voice that starts stretching while it
@@ -495,8 +575,22 @@ pub struct Engine {
     pub quality: Quality,
     rate: f32,
     voices: Vec<Voice>,
-    /// Free-running phases of the global LFOs.
-    global_phase: [f64; 5],
+    /// The song's timing; the records' times in ticks, and the records, PPQ and tempo they were worked out for.
+    time: Time,
+    timing: [Timing; 5],
+    timed: Option<([Record; 5], u16, f32)>,
+    /// The global LFOs' shared phases, and the song tick they start from when the song starts playing.
+    shared: Shared,
+    start_at: Option<u64>,
+    /// The current tick: its number (counted from 1), the samples left of it, its nominal length.
+    serial: u64,
+    left: u32,
+    nominal: u32,
+    /// The voices' own tick clock (another host): the running sum of samples per tick and the samples counted.
+    clock: f64,
+    counted: u64,
+    /// Samples left of the `process` call (host ticks: the call is one tick).
+    call: u32,
     /// Stretchers of the realtime stretch voices (made when first needed, then reused).
     streams: Vec<Rt>,
     /// Host voices that ended since the last `take_ended`: (key, host note id).
@@ -523,7 +617,17 @@ impl Engine {
             quality: Quality::Table,
             rate,
             voices: Vec::with_capacity(voices),
-            global_phase: [0.0; 5],
+            time: Time::default(),
+            timing: Timing::all(&Record::new_channel_records(), 96, 130.0),
+            timed: None,
+            shared: Shared::from_tick(0, &[0; 5]),
+            start_at: None,
+            serial: 0,
+            left: 0,
+            nominal: 1,
+            clock: 0.0,
+            counted: 0,
+            call: 0,
             streams: Vec::new(),
             ended: Vec::with_capacity(voices * 2),
         }
@@ -545,6 +649,64 @@ impl Engine {
         self.voices.clear();
         self.streams.iter_mut().for_each(|r| r.busy = false);
         self.ended.clear();
+    }
+
+    /// The song's timing for the next `process` call, of `len` samples. With [`Time::host_ticks`] the call is one tick,
+    /// which starts on its first sample. The global LFOs' shared phases start again when the song starts playing.
+    pub fn begin(&mut self, len: usize, time: Time) {
+        match (time.song_tick, self.time.song_tick) {
+            (Some(t), None) => self.start_at = Some(t),
+            (None, _) => self.start_at = None,
+            _ => {}
+        }
+        self.time = time;
+        if time.host_ticks && len > 0 {
+            if self.left > 0 {
+                // The last call ended inside its tick: the voices close it where it stands.
+                for v in self.voices.iter_mut() {
+                    end_tick(v);
+                }
+                self.left = 0;
+            }
+            self.call = len as u32;
+        }
+    }
+
+    /// The records' times in ticks for the records, the PPQ and the tempo in force (spec: audio/envelopes-and-lfos.md
+    /// "Time knobs": the tempo held as a single). Voices carry on from where they are.
+    fn retime(&mut self, records: &[Record; 5]) {
+        let key = (*records, self.time.ppq.max(1), self.time.tempo.max(1.0) as f32);
+        if self.timed != Some(key) {
+            self.timing = Timing::all(records, key.1, f64::from(key.2));
+            self.timed = Some(key);
+        }
+    }
+
+    /// A tick starts: its length (the rest of the `process` call with host ticks, or a nominal tick of it when the call
+    /// is longer than a tick; else from the running sum of samples per tick, spec: audio/timing.md "The tick clock"),
+    /// and the shared phases move on before any voice steps.
+    fn start_tick(&mut self, b: &Block) {
+        self.retime(&b.records);
+        if let Some(t) = self.start_at.take() {
+            self.shared = Shared::from_tick(t, &self.timing.map(|t| t.lfo_step()));
+        }
+        self.shared.tick(&self.timing);
+        let spt = self.time.samples_per_tick(f64::from(self.rate));
+        self.nominal = (spt.round_ties_even() as u32).max(1);
+        self.left = if self.time.host_ticks && self.call > 0 {
+            if self.call <= self.nominal + 1 {
+                self.call
+            } else {
+                self.nominal
+            }
+        } else {
+            self.clock += spt;
+            let end = self.clock.round_ties_even().max(0.0) as u64;
+            let len = end.saturating_sub(self.counted).max(1);
+            self.counted += len;
+            len as u32
+        };
+        self.serial += 1;
     }
 
     /// Host voices that ended since the last call, and host notes that started none: (key, host note id).
@@ -586,13 +748,7 @@ impl Engine {
 
     /// A voice is over: its stretcher and its ring are free and a host voice's end is noted.
     fn end(&mut self, v: &Voice) {
-        self.free(v);
-        if let Some(d) = &self.disk {
-            d.release(&mut v.feed.clone());
-        }
-        if v.host {
-            self.ended.push((v.key, v.id));
-        }
+        retire(v, &mut self.streams, self.disk.as_ref(), &mut self.ended);
     }
 
     /// Ends every voice at once (no sample to play).
@@ -618,13 +774,6 @@ impl Engine {
         let r = &mut self.streams[i];
         (r.busy, r.started) = (true, false);
         Some(i as u16)
-    }
-
-    /// Frees the stretcher of a voice that ended.
-    fn free(&mut self, v: &Voice) {
-        if let Some(r) = v.rt.and_then(|i| self.streams.get_mut(usize::from(i))) {
-            r.busy = false;
-        }
     }
 
     /// True while any voice is playing.
@@ -684,18 +833,17 @@ impl Engine {
             let v = self.voices.remove(0);
             self.end(&v);
         }
-        let ratio = f64::from(rate) / f64::from(self.rate);
-        let key_step = 2f64.powf((f64::from(key) - f64::from(b.root)) / 12.0) * ratio;
+        // The played sample's rate times the reciprocal of the output rate (spec: audio/sampler.md "The ratio").
+        let q = f64::from(rate) * (1.0 / f64::from(self.rate));
+        let key_cents = ((i32::from(key) - b.root) * 100) as f32;
         // FL velocity byte = plugin velocity × 128; 100 = unity (spec: audio/sampler-playback.md).
         let vel = laws::velocity_gain((velocity.clamp(0.0, 1.0) * 128.0).round() as u8) as f32;
         let pos = (b.start_offset.clamp(0.0, 1.0) * frames as f64).floor();
         let open = if pos > 0.0 { fade_len(declick(b.declick).open_ms, f64::from(self.rate)) } else { 0 };
-        let mut phase = [0.0; 5];
-        for (i, t) in b.targets.iter().enumerate() {
-            if t.lfo.global {
-                phase[i] = self.global_phase[i];
-            }
-        }
+        self.retime(&b.records);
+        let art = Articulators::start(&b.records, &self.timing);
+        // A volume envelope that starts in its delay or attack ramps the gain in from 0 (spec: audio/sampler.md "Gains").
+        let ramp_in = art.envelope(VOL).out() == 0.0;
         // The realtime methods stretch a sample in memory (one kept on disk is decoded for them).
         let rt = if b.realtime && self.disk.is_none() { self.take_stream() } else { None };
         // From disk: START OFFSET's frames are held, unless the knob just moved (the frames there start coming now).
@@ -709,19 +857,25 @@ impl Engine {
             id,
             vel,
             pos,
-            key_step,
+            key_cents,
+            q,
             tune: 0.0,
             note_pan: 0.0,
             mod_x: 0.0,
             mod_y: 0.0,
             age: 0,
-            off: None,
+            released: false,
             open,
             close: None,
-            phase,
+            close_next: false,
+            art,
+            ticks: 0,
+            ramp_in,
+            looped: false,
             filt: Filter::default(),
-            gain: -1.0,
-            pan: (1.0, 1.0),
+            gain: [0.0; 2],
+            serial: 0,
+            tick: TickState::DONE,
             rt,
             xf: 0,
             vol: None,
@@ -731,14 +885,18 @@ impl Engine {
     }
 
     pub fn note_off(&mut self, key: u8, b: &Block) {
+        self.retime(&b.records);
         let close = Close::new(&declick(b.declick), f64::from(self.rate));
-        let vol_env = b.targets[VOL].env.is_some();
+        let vol_env = b.records[VOL].on;
         let looped = self.shape().is_some_and(|(n, _)| self.loop_frames(b, n).1.is_some());
-        for v in self.voices.iter_mut().filter(|v| v.key == key && v.off.is_none()) {
-            v.off = Some(v.age);
-            // A looping voice without a volume envelope closes at the note's end; a one-shot voice without one
-            // ignores it (spec: audio/sampler.md "The end of a voice").
-            if looped && !vol_env && v.close.is_none() {
+        for v in self.voices.iter_mut().filter(|v| v.key == key && !v.released) {
+            v.released = true;
+            // With the volume envelope on, the envelopes go into their release and the voice closes when it has run
+            // out; without it a looping voice closes at the note's end, and a one-shot voice ignores the end, its other
+            // envelopes too (spec: audio/sampler.md "The end of a voice").
+            if vol_env {
+                v.art.release(&b.records, &self.timing);
+            } else if looped && v.close.is_none() {
                 v.close = Some(close);
             }
         }
@@ -810,7 +968,7 @@ impl Engine {
     /// The host's gain on a note's voices (CLAP volume expression: an audio clip's fades and gain, spec:
     /// audio/audio-clips.md "Fades and clip gain"). A voice takes the first at once and glides to each later one in a
     /// straight line over `VOICE_GAIN_FRAMES` frames, as the engine gives them: one every that many frames from a
-    /// block's start, which is also where `CTL`'s spans start, so they split no span.
+    /// block's start. **(OS)** It multiplies the voice's output after the voice's own gains.
     pub fn volume(&mut self, id: Option<i32>, key: u8, gain: f32) {
         let (to, n) = (gain.max(0.0), VOICE_GAIN_FRAMES);
         for v in self.of_note(id, key) {
@@ -829,49 +987,65 @@ impl Engine {
         }
     }
 
-    /// Adds the voices into `out_l` / `out_r`.
+    /// Adds the voices into `out_l` / `out_r`, newest voice first (spec: audio/sampler.md "A voice"), tick by tick.
     pub fn render(&mut self, out_l: &mut [f32], out_r: &mut [f32], b: &Block) {
         let len = out_l.len();
         let rate = f64::from(self.rate);
-        for (i, t) in b.targets.iter().enumerate() {
-            self.global_phase[i] = (self.global_phase[i] + t.lfo.hz * len as f64 / rate).fract();
-        }
-        let s = match (&self.disk, &self.sample) {
-            (Some(d), _) => Src::Disk(d.clone()),
-            (None, Some(s)) => Src::Ram(s.clone()),
-            _ => {
-                self.end_all();
-                return;
-            }
+        let src = match (&self.disk, &self.sample) {
+            (Some(d), _) => Some(Src::Disk(d.clone())),
+            (None, Some(s)) => Some(Src::Ram(s.clone())),
+            _ => None,
         };
-        let n = s.frames();
-        if n == 0 {
+        let src = src.filter(|s| s.frames() > 0);
+        if src.is_none() {
             self.end_all();
-            return;
         }
-        // Resample plays the sample faster or slower; a realtime voice reads `speed` input frames per output frame
-        // and its stretcher keeps the pitch.
-        let factor = Self::stretch_factor(b, (n, s.rate()));
-        let rs = if b.realtime { 1.0 } else { 1.0 / factor };
-        let speed = f64::from(s.rate()) / rate / factor;
-        let lp = self.loop_frames(b, n);
-        let mut i = 0;
-        while i < self.voices.len() {
-            let v = &mut self.voices[i];
-            let rt = match s {
-                Src::Ram(_) => v.rt.and_then(|k| self.streams.get_mut(usize::from(k))),
-                Src::Disk(_) => None,
-            };
-            let alive = render_voice(v, rt, &s, b, (rs, speed), lp, rate, (self.quality, self.wait), out_l, out_r);
-            if alive {
-                i += 1;
-            } else {
-                let v = self.voices.swap_remove(i);
-                self.end(&v);
+        let mut f = 0;
+        while f < len {
+            if self.left == 0 {
+                self.start_tick(b);
             }
+            let chunk = (self.left as usize).min(len - f);
+            if let Some(s) = &src {
+                // Resample plays the sample faster or slower; a realtime voice reads `speed` input frames per output
+                // frame and its stretcher keeps the pitch.
+                let factor = Self::stretch_factor(b, (s.frames(), s.rate()));
+                let cx = Cx {
+                    serial: self.serial,
+                    left: self.left,
+                    nominal: self.nominal,
+                    rate,
+                    limit: ((44100.0 / rate) as f32) * 0.001,
+                    records: b.records,
+                    timing: self.timing,
+                    phases: self.shared.phases(&b.records),
+                    rs: if b.realtime { 1.0 } else { 1.0 / factor },
+                    speed: f64::from(s.rate()) / rate / factor,
+                    lp: self.loop_frames(b, s.frames()),
+                    dc: declick(b.declick),
+                    quality: self.quality,
+                    wait: self.wait,
+                };
+                let mut i = self.voices.len();
+                while i > 0 {
+                    i -= 1;
+                    let v = &mut self.voices[i];
+                    let rt = match s {
+                        Src::Ram(_) => v.rt.and_then(|k| self.streams.get_mut(usize::from(k))),
+                        Src::Disk(_) => None,
+                    };
+                    if !render_voice(v, rt, s, b, &cx, &mut out_l[f..f + chunk], &mut out_r[f..f + chunk]) {
+                        let v = self.voices.remove(i);
+                        retire(&v, &mut self.streams, self.disk.as_ref(), &mut self.ended);
+                    }
+                }
+            }
+            self.left -= chunk as u32;
+            self.call = self.call.saturating_sub(chunk as u32);
+            f += chunk;
         }
         // The reader tops up the rings the block read from.
-        if let Src::Disk(d) = &s {
+        if let Some(Src::Disk(d)) = &src {
             if self.voices.iter().any(|v| v.feed.active()) {
                 d.disk().wake();
             }
@@ -879,172 +1053,223 @@ impl Engine {
     }
 }
 
-/// Modulation at a voice time: gain, pan, extra cents, and the envelope and LFO parts of the filter knobs (singles).
-/// `None` = the envelope has ended.
-struct Mods {
-    gain: f64,
-    pan: f64,
-    cents: f64,
-    part_x: f32,
-    part_y: f32,
+/// A voice is over: its stretcher and its ring are free and a host voice's end is noted.
+fn retire(v: &Voice, streams: &mut [Rt], disk: Option<&Arc<Played>>, ended: &mut Vec<(u8, Option<i32>)>) {
+    if let Some(r) = v.rt.and_then(|i| streams.get_mut(usize::from(i))) {
+        r.busy = false;
+    }
+    if let Some(d) = disk {
+        d.release(&mut v.feed.clone());
+    }
+    if v.host {
+        ended.push((v.key, v.id));
+    }
 }
 
-fn mods(v: &Voice, b: &Block, t: f64, off: Option<f64>) -> Option<Mods> {
-    let tg = &b.targets;
-    let lfo = |i: usize| tg[i].lfo.value(t, v.phase[i]);
-    let env = |i: usize| tg[i].env.map(|p| p.level(t, off));
-    let mut gain = 1.0;
-    if let Some(l) = env(VOL) {
-        gain = l?;
-    }
-    let lv = lfo(VOL);
-    if lv != 0.0 {
-        // Tremolo: down to 1 − |amount| (spec §5.2).
-        let a = tg[VOL].lfo.amount.abs();
-        let w = lv / a.max(1e-9);
-        gain *= 1.0 - a * (1.0 - w) / 2.0;
-    }
-    let pan = v.note_pan + lfo(PAN);
-    // The amounts at full scale are 2400 cents, as FL stores them (spec: audio/envelopes-and-lfos.md).
-    let mut cents = lfo(PITCH) * 2400.0;
-    if let Some(l) = env(PITCH) {
-        cents += l.unwrap_or(0.0) * tg[PITCH].amount * 2400.0;
-    }
-    let mut part_x = lfo(MODX) * 0.5;
-    if let Some(l) = env(MODX) {
-        part_x += l.unwrap_or(0.0) * tg[MODX].amount;
-    }
-    let mut part_y = lfo(MODY) * 0.5;
-    if let Some(l) = env(MODY) {
-        part_y += l.unwrap_or(0.0) * tg[MODY].amount;
-    }
-    Some(Mods { gain, pan, cents, part_x: part_x as f32, part_y: part_y as f32 })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_voice(
-    v: &mut Voice,
-    mut rt: Option<&mut Rt>,
-    src: &Src,
-    b: &Block,
-    (rs, speed): (f64, f64),
-    (ls, le): (f64, Option<f64>),
+/// What every voice of a tick shares.
+struct Cx {
+    /// The tick's number and the samples left of it.
+    serial: u64,
+    left: u32,
+    /// The tick's nominal length (`Round(samples per tick)`) and the gains' step limit
+    /// (`single(single(44100 / rate) * 0.001)`).
+    nominal: u32,
     rate: f64,
-    (quality, wait): (Quality, bool),
-    out_l: &mut [f32],
-    out_r: &mut [f32],
-) -> bool {
-    let len = out_l.len();
+    limit: f32,
+    records: [Record; 5],
+    timing: [Timing; 5],
+    phases: [Option<u32>; 5],
+    /// The resample stretch on the ratio, and a realtime voice's input frames per output frame.
+    rs: f64,
+    speed: f64,
+    /// The loop: start and one past the end.
+    lp: (f64, Option<f64>),
+    dc: Declick,
+    quality: Quality,
+    wait: bool,
+}
+
+impl TickState {
+    /// Between ticks, and before a voice's first.
+    const DONE: TickState = TickState { len: 0, done: 0, ratio: 1.0, from: None, copy: false, ramp: [Ramp::FLAT; 2] };
+}
+
+impl Ramp {
+    const FLAT: Ramp = Ramp { even: 0.0, odd: 0.0, step: 0.0, j: 0, pairs: 0 };
+}
+
+/// A voice's tick ends after `done` samples: each gain ends at `gain + step * done` (one product), the position at
+/// `p + R * done` away from the edges, and the filter takes the tick's end (spec: audio/sampler.md "Gains", "How the
+/// position moves"; audio/channel-filter.md).
+fn end_tick(v: &mut Voice) {
+    let t = v.tick;
+    if t.len == 0 {
+        return;
+    }
+    let d = t.done;
+    for (g, r) in v.gain.iter_mut().zip(&t.ramp) {
+        *g += r.step * d as f32;
+    }
+    if let Some(p) = t.from {
+        v.pos = p + t.ratio * f64::from(d);
+    }
+    v.filt.end(d as usize);
+    v.tick = TickState::DONE;
+}
+
+/// A voice's tick starts, `len` samples of it left (spec: audio/sampler.md "A voice", in its order): the envelopes and
+/// LFOs step, the ratio is worked out, the filter takes its knob positions, and the gains get their targets and steps.
+fn start_tick(v: &mut Voice, mut rt: Option<&mut Rt>, src: &Src, b: &Block, cx: &Cx, len: u32) {
+    end_tick(v);
+    // The volume envelope ran out in the last tick: the closing starts with this one's first sample.
+    if v.close_next && v.close.is_none() {
+        v.close = Some(Close::new(&cx.dc, cx.rate));
+    }
+    v.art.step(&cx.records, &cx.timing, &cx.phases);
+    let parts = v.art.parts(&cx.records);
+    if v.art.volume_ended(&cx.records) {
+        v.close_next = true;
+    }
+    // The ratio: the voice's pitch and the envelope's and LFO's cents as one single (spec: audio/sampler.md "The
+    // ratio"); a realtime voice's transposition (with the stretch's PITCH).
+    let cents = (f64::from(v.key_cents) + b.cents + v.tune * 100.0 + b.ts_cents) as f32 + parts.pitch;
+    let ratio = (f64::from(cents) * C).exp() * v.q * cx.rs;
+    // A realtime voice plays the sample by resampling while there is nothing to stretch (the root key, no PITCH, MUL 1
+    // or TIME the sample's own duration); its stretcher starts the first time there is, and stays. **(OS)**
+    if let (Some(x), Src::Ram(s)) = (rt.as_mut(), src) {
+        if !x.started && !nothing_to_stretch(src.frames() as f64, ratio, cx.speed, cx.rate) {
+            x.start(s, v.pos, ratio, cx.speed, cx.lp);
+            v.xf = if v.age > 0 { SWITCH } else { 0 };
+        }
+    }
+    let stretching = rt.as_ref().is_some_and(|x| x.started);
+    // The filter's knob positions: the knob plus the note's offset, then the envelope and LFO part (spec:
+    // audio/channel-filter.md "Knob positions"; the host hands the note's mod X with the channel's offset in it).
+    let x = (b.f_cut + v.mod_x) + parts.mod_x;
+    let y = (b.f_res + v.mod_y) + parts.mod_y;
+    let corr = v.filt.tick(b.f_type, x, y, cx.nominal as usize, cx.rate);
+    // The gains: the pan split of the volume, times the filter's correction (type 5). The first tick starts at the
+    // plain gain, or at 0 when the volume envelope starts in its delay or attack.
+    let plain = split(v.note_pan as f32 + parts.pan, v.vel * parts.volume);
+    if v.ticks == 0 {
+        v.gain = if v.ramp_in { [0.0; 2] } else { plain };
+    }
+    v.ticks += 1;
+    let gain = v.gain;
+    let ramp = |k: usize| Ramp::new(gain[k], glide_step(gain[k], plain[k] * corr, cx.nominal, cx.limit), len);
+    // Near an edge of the sample or of its loop the positions are summed sample by sample.
+    let (ls, le) = cx.lp;
+    let n = resample::half_width(ratio) as f64;
+    let first = if v.looped { ls } else { 0.0 };
+    let end = le.unwrap_or(src.frames() as f64);
+    let near = v.pos.round_ties_even() < first + n + 2.0 || v.pos + ratio * f64::from(len) >= end - n - 3.0;
+    let from = (!near && !stretching).then_some(v.pos);
+    let copy = from.is_some() && ratio == 1.0 && (v.pos as f32).fract() == 0.0 && matches!(src, Src::Ram(_));
+    v.tick = TickState { len, done: 0, ratio, from, copy, ramp: [ramp(0), ramp(1)] };
+}
+
+/// Plays the next `out_l.len()` samples of the voice's current tick, starting the tick when it has not yet. False once
+/// the voice is over.
+fn render_voice(v: &mut Voice, mut rt: Option<&mut Rt>, src: &Src, b: &Block, cx: &Cx, out_l: &mut [f32], out_r: &mut [f32]) -> bool {
+    if v.serial != cx.serial {
+        start_tick(v, rt.as_deref_mut(), src, b, cx, cx.left);
+        v.serial = cx.serial;
+    }
     let n = src.frames() as f64;
-    let dc = declick(b.declick);
-    let frame_s = 1.0 / rate;
-    let mut f = 0;
-    while f < len {
-        let chunk = CTL.min(len - f);
-        let t0 = v.age as f64 * frame_s;
-        let off = v.off.map(|o| o as f64 * frame_s);
-        let Some(m0) = mods(v, b, t0, off) else { return false };
-        let g1 = match mods(v, b, t0 + chunk as f64 * frame_s, off) {
-            Some(m) => m.gain,
-            None => 0.0,
+    let (ls, le) = cx.lp;
+    let stretching = rt.as_ref().is_some_and(|x| x.started);
+    let ratio = v.tick.ratio;
+    // What is heard moves on by the ratio, or by `speed` in a stretching voice.
+    let advance = if stretching { cx.speed } else { ratio };
+    for j in 0..out_l.len() {
+        let k = v.tick.done;
+        let pos = match v.tick.from {
+            Some(p) => p + f64::from(k) * ratio,
+            None => {
+                // The loop: past its end the position goes back by the loop's length (spec: audio/sampler.md "In a
+                // sustain loop").
+                if let Some(le) = le {
+                    while v.pos >= le {
+                        v.pos -= le - ls;
+                        v.looped = true;
+                    }
+                }
+                v.pos
+            }
         };
-        // The filter's knob positions: the knob plus the note's offset, then the envelope and LFO part (spec:
-        // audio/channel-filter.md "Knob positions"; the host hands the note's mod X with the channel's offset in it).
-        let x = (b.f_cut + v.mod_x) + m0.part_x;
-        let y = (b.f_res + v.mod_y) + m0.part_y;
-        let corr = v.filt.tick(b.f_type, x, y, CTL, rate);
-        // The first span starts at the plain gain; type 5's correction is reached through the ramp.
-        let g0 = if v.gain < 0.0 { m0.gain as f32 } else { v.gain };
-        let g1 = g1 as f32 * corr;
-        let pan = pan_gains(m0.pan);
-        let (p0, p1) = (if v.gain < 0.0 { pan } else { v.pan }, pan);
-        // The pitch factor: a resampling step, or a realtime voice's transposition (with the stretch's PITCH).
-        let step = v.key_step * 2f64.powf((b.cents + m0.cents + v.tune * 100.0 + b.ts_cents) / 1200.0) * rs;
-        // A realtime voice plays the sample by resampling while there is nothing to stretch (the root key, no PITCH,
-        // MUL 1 or TIME the sample's own duration); its stretcher starts the first time there is, and stays. **(OS)**
-        if let (Some(x), Src::Ram(s)) = (rt.as_mut(), src) {
-            if !x.started && !nothing_to_stretch(n, step, speed, rate) {
-                x.start(s, v.pos, step, speed, (ls, le));
-                v.xf = if v.age > 0 { SWITCH } else { 0 };
+        if pos < 0.0 {
+            return false;
+        }
+        // The end of the sample: the closing starts on the first sample at or past it and works on the held last
+        // frame (spec: audio/declick.md "When the closing starts").
+        if pos >= n && v.close.is_none() {
+            v.close = Some(Close::new(&cx.dc, cx.rate));
+        }
+        let (mut l, mut r) = match (rt.as_mut(), src) {
+            (Some(x), Src::Ram(s)) if stretching => {
+                let (a, b) = x.frame(s, ratio, cx.speed, cx.lp);
+                if v.xf > 0 {
+                    let (pa, pb) = resample::read(&s.left, &s.right, pos, cx.speed, cx.quality);
+                    let u = v.xf as f32 / SWITCH as f32;
+                    v.xf -= 1;
+                    (a + (pa - a) * u, b + (pb - b) * u)
+                } else {
+                    (a, b)
+                }
+            }
+            // A ratio of exactly 1 from a whole position hands the frames on unchanged (spec: audio/sampler.md "The
+            // copy").
+            (_, Src::Ram(s)) if v.tick.copy => {
+                let i = pos.round_ties_even() as usize;
+                (s.left[i], s.right[i])
+            }
+            (_, Src::Ram(s)) => resample::read(&s.left, &s.right, pos, ratio, cx.quality),
+            // From disk: the same frames read the same way. While its frames are late (live playback) the voice is
+            // silent and keeps time (the frames are skipped); it fades back in once they are there.
+            (_, Src::Disk(d)) => match d.read(&mut v.feed, pos, ratio, cx.quality, cx.wait) {
+                Some((a, b)) if v.gap > 0 => {
+                    let g = 1.0 - v.gap as f32 / GAP as f32;
+                    v.gap -= 1;
+                    (a * g, b * g)
+                }
+                Some(x) => x,
+                None => {
+                    v.gap = GAP;
+                    (0.0, 0.0)
+                }
+            },
+        };
+        l = v.filt.run(0, k as usize, l);
+        r = v.filt.run(1, k as usize, r);
+        // The fades act on the signal before the gains (spec: audio/declick.md "Where the fades sit"). FL works on a
+        // voice's fades only once it closes, so an opening shows only on a voice that closes while it is younger than
+        // its opening ("When the opening applies"); the step removal of modes 1 and 2 is not done here.
+        if let Some(c) = v.close.as_mut() {
+            if v.open > 0 && !cx.dc.step_removal && v.age < u64::from(v.open) {
+                let o = fade_gain(v.open - v.age as u32, v.open, cx.dc.tension);
+                (l, r) = (l * o, r * o);
+            }
+            match c.apply(l, r, cx.rate) {
+                Some(x) => (l, r) = x,
+                None => return false,
             }
         }
-        let stretching = rt.as_ref().is_some_and(|x| x.started);
-        // What is heard moves on by `step` source frames per frame, or by `speed` in a stretching voice.
-        let advance = if stretching { speed } else { step };
-        for j in 0..chunk {
-            // The loop: past its end the position goes back by the loop's length (spec: audio/sampler.md "In a
-            // sustain loop").
-            if let Some(le) = le {
-                while v.pos >= le {
-                    v.pos -= le - ls;
-                }
-            }
-            if v.pos < 0.0 {
-                return false;
-            }
-            // The end of the sample: the closing starts on the first sample at or past it and works on the held
-            // last frame (spec: audio/declick.md "When the closing starts").
-            if v.pos >= n && v.close.is_none() {
-                v.close = Some(Close::new(&dc, rate));
-            }
-            let (mut l, mut r) = match (rt.as_mut(), src) {
-                (Some(x), Src::Ram(s)) if stretching => {
-                    let (a, b) = x.frame(s, step, speed, (ls, le));
-                    if v.xf > 0 {
-                        let (pa, pb) = resample::read(&s.left, &s.right, v.pos, speed, quality);
-                        let u = v.xf as f32 / SWITCH as f32;
-                        v.xf -= 1;
-                        (a + (pa - a) * u, b + (pb - b) * u)
-                    } else {
-                        (a, b)
-                    }
-                }
-                (_, Src::Ram(s)) => resample::read(&s.left, &s.right, v.pos, step.abs(), quality),
-                // From disk: the same frames read the same way. While its frames are late (live playback) the voice
-                // is silent and keeps time (the frames are skipped); it fades back in once they are there.
-                (_, Src::Disk(d)) => match d.read(&mut v.feed, v.pos, step.abs(), quality, wait) {
-                    Some((a, b)) if v.gap > 0 => {
-                        let g = 1.0 - v.gap as f32 / GAP as f32;
-                        v.gap -= 1;
-                        (a * g, b * g)
-                    }
-                    Some(x) => x,
-                    None => {
-                        v.gap = GAP;
-                        (0.0, 0.0)
-                    }
-                },
-            };
-            l = v.filt.run(0, j, l);
-            r = v.filt.run(1, j, r);
-            // The fades act on the signal before the gains (spec: audio/declick.md "Where the fades sit"). FL works on
-            // a voice's fades only once it closes, so an opening shows only on a voice that closes while it is younger
-            // than its opening ("When the opening applies"); the step removal of modes 1 and 2 is not done here.
-            if let Some(c) = v.close.as_mut() {
-                if v.open > 0 && !dc.step_removal && v.age < u64::from(v.open) {
-                    let o = fade_gain(v.open - v.age as u32, v.open, dc.tension);
-                    (l, r) = (l * o, r * o);
-                }
-                match c.apply(l, r, rate) {
-                    Some(x) => (l, r) = x,
-                    None => return false,
-                }
-            }
-            let u = j as f32 / chunk as f32;
-            let g = v.vel * (g0 + (g1 - g0) * u) * v.vol.as_mut().map_or(1.0, HostGain::next);
-            let (pl, pr) = (p0.0 + (p1.0 - p0.0) * u, p0.1 + (p1.1 - p0.1) * u);
-            out_l[f + j] += l * g * pl;
-            out_r[f + j] += r * g * pr;
+        // `out = (resampled * fade) * gain`, each product a single; an audio clip's gain from the host after that.
+        let (mut ol, mut or) = (l * v.tick.ramp[0].next(), r * v.tick.ramp[1].next());
+        if let Some(h) = v.vol.as_mut() {
+            let h = h.next();
+            (ol, or) = (ol * h, or * h);
+        }
+        out_l[j] += ol;
+        out_r[j] += or;
+        if v.tick.from.is_none() {
             v.pos += advance;
-            v.age += 1;
         }
-        v.filt.end(chunk);
-        v.gain = g1;
-        v.pan = p1;
-        for (i, t) in b.targets.iter().enumerate() {
-            v.phase[i] = (v.phase[i] + t.lfo.hz * chunk as f64 * frame_s).fract();
-        }
-        f += chunk;
+        v.age += 1;
+        v.tick.done += 1;
+    }
+    if v.tick.done == v.tick.len {
+        end_tick(v);
     }
     true
 }
@@ -1265,6 +1490,9 @@ fn svf(m: &mut Svf, f: f64, d: f64, x: f64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tick's length in the filter's tests.
+    const CTL: usize = 32;
 
     fn ramp(n: usize) -> Sample {
         let left: Vec<f32> = (0..n).map(|i| i as f32 / n as f32).collect();
@@ -1717,5 +1945,198 @@ mod tests {
         // By key when the host names no note.
         let (_, right) = level(9000.0, &Block::default(), |e| e.pan(None, 60, -1.0));
         assert!(right < 1e-6);
+    }
+
+    /// Host ticks of the given lengths (Lemon Studio's engine: one tick per call), at 130 BPM and 96 PPQ; the left
+    /// side of each.
+    fn host(e: &mut Engine, b: &Block, lens: &[usize]) -> Vec<Vec<f32>> {
+        let time = Time { host_ticks: true, ..Time::default() };
+        lens.iter()
+            .map(|&len| {
+                let (mut l, mut r) = (vec![0.0; len], vec![0.0; len]);
+                e.begin(len, time);
+                e.render(&mut l, &mut r, b);
+                l
+            })
+            .collect()
+    }
+
+    /// A 44100 Hz sample of `n` frames that changes from frame to frame.
+    fn wobble(n: usize) -> Sample {
+        let left: Vec<f32> = (0..n).map(|i| ((i as f64 * 0.01).sin() * 0.5) as f32).collect();
+        Sample { rate: 44100, right: left.clone(), left }
+    }
+
+    // spec: audio/timing.md "Samples per tick", "The tick clock": without host ticks the voices count ticks of
+    // `Round(T)` from their first call, whatever the calls' lengths.
+    #[test]
+    fn the_voices_count_ticks_by_the_running_sum() {
+        let mut e = Engine::new(44100.0);
+        let time = Time { tempo: 185.0, ..Time::default() };
+        assert!((time.samples_per_tick(44100.0) - 148.986).abs() < 1e-3);
+        let b = Block::default();
+        let (mut l, mut r) = (vec![0.0; 100], vec![0.0; 100]);
+        let mut done = 0;
+        let ten = (10.0 * time.samples_per_tick(44100.0)).round_ties_even() as usize;
+        while done < ten {
+            let n = 100.min(ten - done);
+            e.begin(n, time);
+            e.render(&mut l[..n], &mut r[..n], &b);
+            done += n;
+        }
+        assert_eq!((e.serial, e.left, e.nominal), (10, 0, 149));
+    }
+
+    // Lemon Studio's engine calls once per tick: every call is a tick, and a call longer than a tick is cut into
+    // nominal ticks. **(OS)**
+    #[test]
+    fn host_calls_are_ticks() {
+        let mut e = Engine::new(44100.0);
+        e.sample = Some(Arc::new(wobble(44100)));
+        let b = Block::default();
+        e.note_on(60, 100.0 / 128.0, &b);
+        // 44100 * 60 / (130 * 96) = 212.0 samples per tick.
+        host(&mut e, &b, &[150, 213, 1, 212]);
+        assert_eq!((e.serial, e.voices[0].ticks), (4, 4));
+        host(&mut e, &b, &[1000]);
+        assert_eq!(e.serial, 9, "212 * 4 + 152");
+    }
+
+    // spec: audio/sampler.md "The ratio": `exp(cents * ln 2 / 1200) * q`, constant within the tick; three octaves up
+    // falls one double short of 8.
+    #[test]
+    fn the_ratio_is_an_exponential_of_the_cents() {
+        let mut e = Engine::new(44100.0);
+        e.sample = Some(Arc::new(wobble(44100)));
+        let b = Block::default();
+        let (mut l, mut r) = (vec![0.0; 10], vec![0.0; 10]);
+        for (key, want) in [(60, 1.0), (72, 2.0), (96, 7.999_999_999_999_998)] {
+            e.reset();
+            e.note_on(key, 0.5, &b);
+            e.render(&mut l, &mut r, &b);
+            assert_eq!(e.voices[0].tick.ratio, want, "key {key}");
+        }
+    }
+
+    // spec: audio/sampler.md "Gains": a gain moves by at most `single(single(44100 / rate) * 0.001)` per sample
+    // towards its target, in a step worked out from the tick's nominal length.
+    #[test]
+    fn gains_glide_by_a_limited_step() {
+        assert_eq!(glide_step(0.0, 0.1, 149, 0.001), 0.1 / 149.0);
+        assert_eq!(glide_step(0.0, 1.0, 149, 0.001), 0.001);
+        assert_eq!(glide_step(1.0, 0.0, 149, 0.001), -0.001);
+        let limit = ((44100.0 / 48000.0) as f32) * 0.001;
+        assert_eq!(limit, 0.000_918_75);
+    }
+
+    // spec: audio/sampler.md "Gains": within a tick the even samples run from the gain, the odd ones from the gain plus
+    // a step, both by two steps, for the first `L - L mod 8` samples; the rest go on from the even series by single
+    // steps.
+    #[test]
+    fn a_tick_gain_is_built_by_interleaved_sums() {
+        let (g, step) = (0.3f32, 1.234_5e-4f32);
+        for len in [151u32, 152] {
+            let mut r = Ramp::new(g, step, len);
+            let got: Vec<f32> = (0..len).map(|_| r.next()).collect();
+            assert_eq!(got[..3], [g, g + step, g + step * 2.0]);
+            let (mut even, mut odd) = (g, g + step);
+            let pairs = (len - len % 8) as usize;
+            for (j, &x) in got[..pairs].iter().enumerate() {
+                let s = if j % 2 == 0 { &mut even } else { &mut odd };
+                assert_eq!(x, *s, "tick of {len}, sample {j}");
+                *s += step * 2.0;
+            }
+            for &x in &got[pairs..] {
+                assert_eq!(x, even);
+                even += step;
+            }
+            // The two series round differently from one running sum.
+            let mut sum = g;
+            let plain: Vec<f32> = (0..len)
+                .map(|_| {
+                    let x = sum;
+                    sum += step;
+                    x
+                })
+                .collect();
+            assert_ne!(got, plain);
+        }
+    }
+
+    // spec: audio/sampler.md "The copy": at a ratio of exactly 1, from a whole position away from the edges, a tick's
+    // frames are handed on unchanged. The voice's first tick, near the sample's start, goes through the weights.
+    #[test]
+    fn a_ratio_of_one_copies_the_frames() {
+        let mut e = Engine::new(44100.0);
+        let s = wobble(44100);
+        e.sample = Some(Arc::new(s.clone()));
+        let b = Block::default();
+        // Velocity 100 and the centred split give the voice a gain of exactly 1.
+        e.note_on(60, 100.0 / 128.0, &b);
+        let (mut l, mut r) = (vec![0.0; 212], vec![0.0; 212]);
+        e.begin(212, Time { host_ticks: true, ..Time::default() });
+        e.render(&mut l[..10], &mut r[..10], &b);
+        assert!(!e.voices[0].tick.copy);
+        e.render(&mut l[10..], &mut r[10..], &b);
+        let out = host(&mut e, &b, &[212]);
+        assert_eq!(out[0], s.left[212..424]);
+        let v = &e.voices[0];
+        assert_eq!((v.tick.len, v.pos), (0, 424.0), "the position moved on by R * L");
+    }
+
+    // spec: audio/envelopes-and-lfos.md "State and timing", audio/sampler.md "Gains", "The end of a voice": a volume
+    // envelope that starts in its attack ramps the gain in from 0; released, it runs its release, and the voice closes
+    // after the envelope has run out.
+    #[test]
+    fn the_volume_envelope_steps_per_tick() {
+        let mut e = Engine::new(44100.0);
+        e.sample = Some(Arc::new(Sample { rate: 44100, left: vec![0.5; 441000], right: vec![0.5; 441000] }));
+        let mut b = Block::default();
+        let vol = &mut b.records[VOL];
+        (vol.on, vol.attack, vol.release) = (true, 1000, 1000);
+        e.note_on(60, 100.0 / 128.0, &b);
+        let out = host(&mut e, &b, &[212; 40]);
+        assert_eq!(out[0][0], 0.0, "the gain starts at 0");
+        // Steps of at most 0.001 per sample (on a signal of 0.5). A tick ends at `gain + step * L`, a product, not the
+        // running sums: a step at a tick's end may be a little longer.
+        let all: Vec<f32> = out.concat();
+        assert!(all.windows(2).all(|w| (w[1] - w[0]).abs() <= 0.5 * 0.001 * 1.01));
+        assert!(out[39][0] > 0.1, "{}", out[39][0]);
+        e.note_off(60, &b);
+        let mut ticks = 0;
+        while e.has_voices() {
+            host(&mut e, &b, &[212]);
+            ticks += 1;
+            assert!(ticks < 200);
+        }
+        assert!(ticks > 2, "the release plays out first: {ticks}");
+    }
+
+    // spec: audio/envelopes-and-lfos.md "The global LFO": with the flag every voice of the channel reads one phase,
+    // which moves on every tick of the song from the tick playback starts on; without it each voice has its own.
+    #[test]
+    fn the_global_lfo_shares_one_phase() {
+        for global in [true, false] {
+            let mut e = Engine::new(44100.0);
+            e.sample = Some(Arc::new(wobble(441000)));
+            let mut b = Block::default();
+            let p = &mut b.records[PITCH];
+            (p.lfo_amount, p.lfo_delay, p.lfo_attack) = (100, 0, 100);
+            p.flags = if global { Record::GLOBAL_LFO } else { 0 };
+            let time = Time { host_ticks: true, song_tick: Some(0), ..Time::default() };
+            let tick = |e: &mut Engine| {
+                let (mut l, mut r) = (vec![0.0; 212], vec![0.0; 212]);
+                e.begin(212, time);
+                e.render(&mut l, &mut r, &b);
+            };
+            e.note_on(60, 0.5, &b);
+            for _ in 0..30 {
+                tick(&mut e);
+            }
+            e.note_on(64, 0.5, &b);
+            tick(&mut e);
+            let (old, new) = (e.voices[0].art.lfo(PITCH).value(), e.voices[1].art.lfo(PITCH).value());
+            assert_eq!(old == new, global, "{old} {new}");
+        }
     }
 }

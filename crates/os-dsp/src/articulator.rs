@@ -460,6 +460,13 @@ impl Shared {
         }
     }
 
+    /// A sampler channel's phases at the start of a render or playback from song tick `tick` (spec "The global LFO"):
+    /// `tick * step` (a 32-bit product, wrapping), with `steps` the records' LFO steps; they move on every tick from
+    /// then on.
+    pub fn from_tick(tick: u64, steps: &[u32; 5]) -> Shared {
+        Shared { phase: steps.map(|s| (tick as u32).wrapping_mul(s)), started: true }
+    }
+
     /// A note starts (the first one starts the phases).
     pub fn note(&mut self) {
         self.started = true;

@@ -4,7 +4,8 @@
 
 //! The container's window (Lemon Studio's design, the plain list window of the Patcher's slice 1): the effects (and
 //! a channel's container's instruments) in order, each with its name (a click opens its window), its wet and dry knobs
-//! and its menu button; Add effect (Add plugin on a channel) under them.
+//! and its menu button; Add effect (Add plugin on a channel) under them. A member's own colour and icon are drawn as a
+//! slot's are: a bar at the row's left, the icon before the name.
 // spec: plugins/patcher/README.md §4 slice 1, §4.3, §4.4
 
 use os_ui::kit::lemon as lk;
@@ -78,20 +79,31 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
         if i > 0 {
             ui.c.fill_rect(Rect::new(row.x, row.y, row.w, 1.0), t.s(0x272a2c));
         }
-        // The name: a click opens the effect's window; a member whose plugin was not found is greyed.
+        // The name (the one typed for it, else its plugin's), after its colour and icon: a click opens the effect's
+        // window; a member whose plugin was not found is greyed.
+        let name = m.shown();
         let found = crate::container::member_key(s, crate::container::place_key(track, slot), m.id).is_some();
         let name_r = Rect::new(row.x, row.y, row.w - WET_X - 18.0, row.h);
-        let hint = if found { format!("Open {}'s window (right-click: its menu)", m.name) } else { format!("{} was not found (right-click: its menu)", m.name) };
+        let hint = if found { format!("Open {name}'s window (right-click: its menu)") } else { format!("{name} was not found (right-click: its menu)") };
         let hov = ui.hit(name_r, Action::Container(CAct::Open(i)), hint);
         let ink = if !found { t.text_faint } else if hov { t.tx(0xffffff) } else { t.text };
+        // A coloured member: a 3 px bar of its colour at the row's left edge, as a coloured slot's.
+        if let Some(c) = m.color {
+            ui.c.fill_rect(Rect::new(row.x, row.y + 6.0, 3.0, row.h - 12.0), super::rgb(c));
+        }
         super::strum::label(ui, lf, row.x + 6.0, row.cy(), -1, t.text_dim, &format!("{}.", i + 1));
+        let mut nx = row.x + 26.0;
+        if let Some(icon) = m.icon {
+            icons::draw(ui.c, icon, Rect::new(nx, row.cy() - 7.0, 14.0, 14.0), ink);
+            nx += 18.0;
+        }
         let ty = (row.cy() - ui.c.line_height(lf) / 2.0).round();
-        ui.c.text_clip(lf, row.x + 26.0, ty, name_r.w - 28.0, ink, &m.name);
+        ui.c.text_clip(lf, nx, ty, name_r.right() - nx - 2.0, ink, name);
         // The wet and dry knobs, at the levels the chain plays.
         for (cx, wet) in [(wx, true), (dx, false)] {
             let id = KnobId::Member(track, slot, m.id, wet);
             let v = s.knob(id);
-            ui.hit(Rect::new(cx - 15.0, row.cy() - 15.0, 30.0, 30.0), Action::Knob(id), level_text(&m.name, wet, v));
+            ui.hit(Rect::new(cx - 15.0, row.cy() - 15.0, 30.0, 30.0), Action::Knob(id), level_text(name, wet, v));
             super::knob(ui, cx, row.cy(), 11.0, v, false, t.text, t.text_dim);
         }
         // Its menu: Open editor, the levels' parameter menus, Move up, Move down, Remove.

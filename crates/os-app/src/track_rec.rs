@@ -189,7 +189,8 @@ impl App {
                 let mut placed = 0;
                 for (t, path, frames, at) in &made {
                     let len = (*frames as f64 / f64::from(r.rate) * tempo / 60.0 * ppq).ceil() as u32;
-                    let track = crate::playlist::free_track(s, 0, *at, at + len.max(1));
+                    // Into the mixer track's audio track when it has one free over the take (spec: ui/playlist.md §6c).
+                    let track = crate::track_links::record_track(s, *t, *at, at + len.max(1));
                     if crate::playlist::add_audio_clip_in(s, &path.to_string_lossy(), track, *at, Some(*t)).is_some() {
                         placed += 1;
                     }

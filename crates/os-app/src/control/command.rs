@@ -277,6 +277,9 @@ pub enum Taken {
     Project(Box<Side>),
     /// Which channels are on, by id (a channel muted or soloed).
     Mutes(Vec<(u32, bool)>),
+    /// Remote control links re-pointed (a wrap moving plugins into a container, `crate::container`): each link on the
+    /// first target of a pair goes onto the second. They are the program's settings, so this puts back only those links.
+    Links(Vec<(crate::typein::Target, crate::typein::Target)>),
 }
 
 /// What a preset load changes of a plugin (`Taken::Plugin`): its state in its format's own bytes, the preset its
@@ -641,6 +644,8 @@ impl Command {
                 Taken::Plugin(..) => return Err("a plugin state's undo is taken by `apply`".into()),
                 Taken::Project(_) => Taken::Project(Box::new(Side::of(s))),
                 Taken::Mutes(_) => mutes(p),
+                // The other way: the links back onto what they were on.
+                Taken::Links(pairs) => Taken::Links(pairs.iter().map(|&(a, b)| (b, a)).collect()),
             },
         })
     }
@@ -660,7 +665,7 @@ impl Command {
                 a.markers.iter_mut().for_each(|m| m.rescale(from, to));
             }
             Taken::Project(side) => side.project.set_ppq(to),
-            Taken::Settings(_) | Taken::Channel(_) | Taken::Track(_) | Taken::Param(..) | Taken::Plugin(..) | Taken::Mutes(_) => {}
+            Taken::Settings(_) | Taken::Channel(_) | Taken::Track(_) | Taken::Param(..) | Taken::Plugin(..) | Taken::Mutes(_) | Taken::Links(_) => {}
         }
     }
 
@@ -1183,6 +1188,7 @@ fn put(s: &mut State, t: Taken) {
         // `apply` set it already.
         Taken::Param(..) | Taken::Plugin(..) => {}
         Taken::Project(side) => restore(s, *side),
+        Taken::Links(pairs) => crate::remote::retarget(&pairs),
         Taken::Mutes(on) => {
             for (id, v) in on {
                 if let Some(c) = s.project.channels.iter_mut().find(|c| c.id.0 == id) {

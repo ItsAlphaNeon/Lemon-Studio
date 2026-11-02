@@ -317,6 +317,33 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     fn attention(&self) -> Option<Arc<Attention>> {
         None
     }
+
+    /// Keeps the notes the plugin puts out (a CLAP note output port, VST 3 output events) from now on, for
+    /// [`Plugin::take_notes_out`]; off drops them again. The channel menu's Burn MIDI to records them (spec:
+    /// ui/channel-rack.md §18). Default: a plugin that puts out no notes.
+    fn capture_notes(&mut self, on: bool) {
+        let _ = on;
+    }
+    /// Whether it can put out notes at all: it declares a CLAP note output port or a VST 3 event output bus. Burn MIDI
+    /// to plays only those through a pass. Default: none.
+    fn puts_out_notes(&self) -> bool {
+        false
+    }
+    /// The notes put out during the `process` calls since the last call, oldest first, while capturing.
+    fn take_notes_out(&mut self) -> Vec<NoteOut> {
+        Vec::new()
+    }
+}
+
+/// A note a plugin put out: a note on (velocity 0..1; a MIDI note on of velocity 0 is a note off) or off, on `key`
+/// and MIDI `channel` (0..15), `offset` frames into the `process` call it came in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NoteOut {
+    pub offset: u32,
+    pub key: u8,
+    pub channel: u8,
+    pub velocity: f32,
+    pub on: bool,
 }
 
 pub type SharedPlugin = Arc<Mutex<dyn Plugin>>;

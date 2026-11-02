@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::guard::{self, Module};
-use crate::{Attention, Descriptor, HostedEffect, Instrument, Menu, Meter, ParamEvent, ParamInfo, Plugin, SharedPlugin};
+use crate::{Attention, Descriptor, HostedEffect, Instrument, Menu, Meter, NoteOut, ParamEvent, ParamInfo, Plugin, SharedPlugin};
 use os_engine::{ChannelLevels, ChannelVoicing, TransportInfo};
 
 /// A plugin instance of any format, called through the crash guard. Once its code crashed (this instance, or another
@@ -272,6 +272,15 @@ impl<P: Plugin> Plugin for Guarded<P> {
     }
     fn take_automation_requests(&mut self) -> Vec<u32> {
         self.run(Vec::new(), |p| p.take_automation_requests())
+    }
+    fn capture_notes(&mut self, on: bool) {
+        self.run((), |p| p.capture_notes(on))
+    }
+    fn take_notes_out(&mut self) -> Vec<NoteOut> {
+        self.run(Vec::new(), |p| p.take_notes_out())
+    }
+    fn puts_out_notes(&self) -> bool {
+        self.look(false, |p| p.puts_out_notes())
     }
     fn take_menu(&mut self) -> Option<Menu> {
         self.run(None, |p| p.take_menu())
