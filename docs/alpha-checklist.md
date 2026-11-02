@@ -31,7 +31,13 @@ Systems a fully functional DAW can't ship without.
   its envelope and filter settings at their defaults
 - [x] **Multi-core mixing.** The engine renders on one audio thread, which limits dense projects
 - [ ] **Engine rework (sampler voice, automation).** The README's roadmap names it as the next big step; land it
-  before the alpha rather than after
+  before the alpha rather than after. For the alpha (decided 2026-11-02): what the engine does against FL, the four
+  rows of section 1 of the specs' engine roadmap (slide notes bend only the notes of their colour, a length-0 step on
+  a hosted instrument has no end, a control point's change as one limited gain ramp per tick, Lemon Trio's 3x Osc
+  DSP), and the mixer's separation term in single precision. The other engine pages (the arpeggiator, echo delay,
+  tracking, gate time, time shift, glides on all five levels, control points on sends, tempo by control point) come
+  after the alpha, under "After the alpha". The engine's own voice (the browser's previews, the engine's tests and
+  `os-render`) stays Lemon Studio's own and is not held to the voice pages
 
 ## Built-in instruments and effects
 
@@ -72,7 +78,8 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
   onto its member, in the same undo step (the slot's own switch and mix and the channel's own settings stay theirs),
   and each member has its own CPU switches (Auto-bypass when silent passes a silent effect by), name, colour and icon
   from its window menu, one undo step each, saved with the container. Left: the original's Patcher slots in imported
-  projects, Shift+drop of Patcher, and the graph editor
+  projects, Shift+drop of Patcher, and the graph editor. For the alpha (decided 2026-11-02): the first two; the graph
+  editor comes after, under "After the alpha"
 - [x] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** Six of the seven
   small effects match sample for sample in the tests (98 cases for these three: `os-engine/tests/integration/fx_null.rs`); the
   Chorus uses the true pi where the original's is a hair off, so 10 of its 21 cases match and the rest are at least
@@ -104,7 +111,7 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   the plugin window's Link all parameters..., Change icon..., Save channel state as... and Browse channel states, work
   as Lemon Studio's design (Change icon is kept for the session only)
   ([playlist.rs](../crates/os-app/src/playlist.rs), [channel_states.rs](../crates/os-app/src/channel_states.rs))
-- [ ] **Channel rack right-click menus.** 6 of the rack's own entries greyed out on 2026-11-02, counted entry by
+- [x] **Channel rack right-click menus.** 6 of the rack's own entries greyed out on 2026-11-02, counted entry by
   entry after 29 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
   plugins, Change icon ▸, Show waveform preview, MIDI channel through, Restretch all, Detached and Patcherize, as
   Wrap in container, on 2026-10-30; Assign to new instrument track, with the playlist's instrument tracks, and Burn
@@ -123,14 +130,17 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   not described), and Edit automation in piano roll on the swing knob, the mixer box and the LED (the piano roll has
   no lane for the main swing, a channel's mixer track or its switch; greyed in the original too, which also greys Edit
   events in new window there, 2026-11-02)
-  ([rack.rs](../crates/os-app/src/rack.rs), [burn_midi.rs](../crates/os-app/src/burn_midi.rs))
-- [ ] **Main menu bar.** 2 of its 137 entries greyed out on 2026-10-30, counted entry by entry after Save audio
+  ([rack.rs](../crates/os-app/src/rack.rs), [burn_midi.rs](../crates/os-app/src/burn_midi.rs)). These stay greyed
+  for the alpha (decided 2026-11-02): each waits on something Lemon Studio does not have yet or on what the original
+  does, listed under "After the alpha"
+- [x] **Main menu bar.** 2 of its 137 entries greyed out on 2026-10-30, counted entry by entry after Save audio
   clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics, TOOLS > Set up for live performance,
   Switch auto-bypass for all plugins, Chord progression tool..., Set keyboard focus of all plugins to ▸ (its Enabled
   and Disabled not counted; greyed on Linux), Lock / Unlock all tracks to / from their clips (the last four as Lemon
   Studio's design) and Set up for MIDI export (with the new ADD ▸ MIDI Out, Lemon MIDI Out) were enabled: TOOLS >
   Control builder (no control builder yet); VIEW > Script output (no scripting)
-  ([menus.rs](../crates/os-app/src/views/menus.rs))
+  ([menus.rs](../crates/os-app/src/views/menus.rs)). Both stay greyed for the alpha (decided 2026-11-02), listed
+  under "After the alpha"
 - [x] **TOOLS ▸ Audio logger and Dump to audio editor.** Enabled (on by default, as in FL Studio) keeps the last 1 to
   10 minutes of what the device plays, the header showing the memory used; Dump puts them into the master track's
   Tesla. At its time limit Tesla now keeps the last minutes, as Edison does. What FL Studio's logger records and how
@@ -173,6 +183,22 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   (2026-10-30)
 - [x] **ASIO output pairs.** Every track has an output menu with the pairs of the driver's first 16 outputs, and the
   master plays on the pair chosen for it (#182)
+
+## After the alpha
+
+Left out of the alpha on 2026-11-02; each stays open here until it is done.
+
+- [ ] **The other engine pages.** The arpeggiator with the chords file, echo delay, tracking, gate time, time shift
+  and the time law (`audio/channel-misc.md` in the specs), glides on all five levels for hosted instruments
+  (`audio/note-rules.md`), control points on sends (their unit not measured yet), tempo by control point, the
+  mixer's "current" track and summing order, Full porta, and the rest of the specs' engine roadmap sections 2 and 3
+- [ ] **Patcher's graph editor.** Free routing between a container's members
+- [ ] **Greyed channel rack entries.** Loop starter and its 3 playlist-track options (the original's is built on its
+  online loop library), Auto fill (what it does is unknown), Create instrument (no multi-sample instrument yet),
+  Override global mapping... on the knob, mixer box and LED menus (what the original's override does is not
+  described), and Edit automation in piano roll on the swing knob, the mixer box and the LED (no piano roll lane for
+  them; greyed in the original too)
+- [ ] **TOOLS > Control builder and VIEW > Script output.** Lemon Studio has neither a control builder nor scripting
 
 ## Shipping a build
 
