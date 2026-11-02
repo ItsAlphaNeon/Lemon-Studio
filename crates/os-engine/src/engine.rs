@@ -304,6 +304,7 @@ struct ChannelState {
     fine: i32,
     root: u8,
     main: Option<i32>,
+    init_main: Option<i32>,
     pitched: bool,
     /// Values at the start of playback, restored when control points are replayed from the top.
     init: (f64, f64, f64),
@@ -480,7 +481,7 @@ impl ChannelState {
     fn reset(&mut self) {
         (self.volume, self.pan, self.base_rate) = self.init;
         (self.enabled, self.insert) = self.stored;
-        self.knob = self.init_knob;
+        (self.knob, self.main) = (self.init_knob, self.init_main);
         self.vol_v = self.init_v;
         self.ramp = None;
         self.adjust = self.init_adjust;
@@ -1378,6 +1379,7 @@ impl Engine {
                     fine: ch.misc.fine,
                     root: ch.misc.root,
                     main,
+                    init_main: main,
                     pitched,
                     init: (volume, ch.pan, src_ratio),
                     vol_v: ch.volume,
@@ -2804,12 +2806,23 @@ impl Engine {
             // swing `v × 128` to the nearest step, the mixer track `v × 500` to the nearest track up to the last insert,
             // the switch on from 0.5.
             Target::MainSwing => self.set_swing(os_model::target::swing_of(v)),
+            Target::MainPitch => self.set_main_pitch(os_model::target::main_pitch_of(v)),
             Target::ChannelMixerTrack(c) => {
                 let last = self.tracks.len().saturating_sub(2).max(1).min(self.tracks.len() - 1);
                 self.route_channel(usize::from(c), usize::from(os_model::target::mixer_track_of(v, last as u16)));
             }
             Target::ChannelOn(c) => self.switch_channel(usize::from(c), os_model::target::channel_on(v)),
             Target::ChannelParam(..) | Target::SlotParam(..) | Target::Other(_) => {}
+        }
+    }
+
+    /// The project's main pitch (cents) from this tick on (spec: audio/voice-levels.md "The main pitch"): every channel
+    /// that follows it has its pitch worked out again and its sounding voices follow, as for a change of the channel's
+    /// own pitch; a channel that does not follow it is not touched.
+    fn set_main_pitch(&mut self, cents: i32) {
+        for ch in self.channels.iter_mut().filter(|c| c.main.is_some_and(|m| m != cents)) {
+            ch.main = Some(cents);
+            ch.retune(ch.knob);
         }
     }
 
@@ -4933,6 +4946,8 @@ fn point_level(t: Target, value: i32) -> Option<f64> {
         Target::ChannelOn(_) => v.clamp(0.0, 1.0),
         Target::ChannelMixerTrack(_) => os_model::target::mixer_track_level(value.clamp(0, 500) as u16),
         Target::MainSwing => v.clamp(0.0, 128.0) / 128.0,
+        // The main pitch in cents (spec: audio/voice-levels.md "The main pitch").
+        Target::MainPitch => (v.clamp(-1200.0, 1200.0) + 1200.0) / 2400.0,
         _ => return None,
     })
 }
@@ -6732,6 +6747,53 @@ mod tests {
         e3.continue_from(&mut e2);
         e3.render_ticks(48, &mut out);
         assert_eq!(log.lock().unwrap().0, vec![(60, 3.0), (60, 0.0)], "back to its own pitch");
+    }
+
+    // spec: audio/voice-levels.md "The main pitch", audio/automation.md "Project targets": a control point holds the
+    // cents, a clip's value v gives -1200 + Round(2400 v); a channel that follows the main pitch has its sounding notes
+    // retuned, one that does not is left alone.
+    #[test]
+    fn main_pitch_automation_retunes_the_channels_that_follow_it() {
+        use os_model::{target, Clip, ClipSource, ControlPoint};
+        #[derive(Default)]
+        struct Log(Vec<(u8, f32)>);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {}
+            fn note_off(&mut self, _o: u32, _k: u8) {}
+            fn tune(&mut self, _o: u32, key: u8, semitones: f32) {
+                self.0.push((key, semitones));
+            }
+            fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        }
+        assert_eq!(target::decode(target::MAIN_PITCH), target::Target::MainPitch);
+        assert_eq!([0.0, 0.25, 0.5, 0.75, 1.0].map(target::main_pitch_of), [-1200, -600, 0, 600, 1200]);
+        assert_eq!(point_level(target::Target::MainPitch, 700).map(target::main_pitch_of), Some(700));
+        let mut p = song(vec![long_note(0, 384 * 2, 0)], vec![Clip::new(0, 384 * 2, 0, ClipSource::Pattern(1))]);
+        p.channels[0].sound.stretch = [0, 0, 0, os_model::stretch_mode::STRETCH as u32];
+        p.patterns[0].controls.push(ControlPoint::new(48, 0x4000, 2, 700));
+        add_auto(&mut p, target::MAIN_PITCH, flat(0.25), 192, 96);
+        let run = |p: &Project| {
+            let mut lib = SampleLibrary::new(None);
+            lib.resample_stretches = true;
+            let log = Arc::new(std::sync::Mutex::new(Log::default()));
+            let mut e = Engine::new(p, &mut lib, 48000, PlayMode::Song);
+            e.set_instrument(0, log.clone());
+            e.render_ticks(384, &mut Vec::new());
+            let tunes = log.lock().unwrap().0.clone();
+            tunes
+        };
+        assert_eq!(run(&p), vec![(60, 7.0), (60, -6.0)], "the point's 700 cents, then the clip's -600");
+        // Back before the point: the stored main pitch (0) again.
+        let mut e = Engine::new(&p, &mut SampleLibrary::default(), 48000, PlayMode::Song);
+        e.render_ticks(96, &mut Vec::new());
+        assert_eq!(e.channels[0].main, Some(700));
+        e.seek(0);
+        assert_eq!(e.channels[0].main, Some(0));
+        // Past it again: the point is replayed.
+        e.seek_tick(120);
+        assert_eq!(e.channels[0].main, Some(700));
+        p.channels[0].misc.main_pitch = false;
+        assert_eq!(run(&p), vec![], "a channel that does not follow the main pitch");
     }
 
     // spec: audio/audio-clips.md "Starting inside a clip"
