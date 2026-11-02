@@ -36,8 +36,8 @@ mod x11;
 mod hyprland;
 #[cfg(target_os = "linux")]
 pub use x11::{
-    busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main, set_transient, stack, take_exposed,
-    take_lift_input, unpinned, FrameWindow, Unpinned,
+    busy, default_position, exposed, focus_main, in_keymap, keys_down, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main,
+    set_transient, stack, take_exposed, take_lift_input, unpinned, FrameWindow, Unpinned,
 };
 
 #[cfg(target_os = "macos")]
@@ -1266,6 +1266,19 @@ fn misc_hint(st: &mut State, h: Option<crate::misc_page::Hit>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The X server's keymap has a bit per X key code, the evdev scancode winit reads plus 8 (issue #274).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn keymap_bits_follow_x_key_codes() {
+        use winit::keyboard::KeyCode;
+        let mut map = [0u8; 32];
+        // Z: evdev 44, X key code 52.
+        map[52 / 8] |= 1 << (52 % 8);
+        assert!(in_keymap(&map, KeyCode::KeyZ));
+        assert!(!in_keymap(&map, KeyCode::KeyX));
+        assert!(!in_keymap(&[0; 32], KeyCode::KeyZ));
+    }
 
     fn state(strip: bool, target: &str) -> State {
         let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: Some(Default::default()), icon: None };

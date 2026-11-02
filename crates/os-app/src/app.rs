@@ -2732,6 +2732,13 @@ impl App {
                 }
             }
         }
+        // X11 gives a key let go of over a docked editor to the editor: its typed note ends once the key is up.
+        #[cfg(all(plugin_windows, target_os = "linux"))]
+        if !self.typing_held.is_empty() || !self.perf_typed.is_empty() {
+            if let Some(map) = crate::plugin_window::keys_down() {
+                self.release_keys_up(|code| crate::plugin_window::in_keymap(&map, code));
+            }
+        }
         // A plugin's menu closed without a pick since the last tick.
         self.plugin_menu_tick();
         #[cfg(plugin_windows)]
@@ -8001,6 +8008,16 @@ impl App {
             self.transport.note_off(row, key);
         }
         self.typing_lit_changed();
+    }
+
+    /// Ends the typed notes (and Performance mode keys) whose key `down` says is no longer down, as their release would
+    /// have: on Linux the release of a key let go of over a docked plugin editor goes to the editor (issue #274).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn release_keys_up(&mut self, down: impl Fn(KeyCode) -> bool) {
+        let up: Vec<KeyCode> = self.typing_held.iter().map(|h| h.0).chain(self.perf_typed.iter().map(|h| h.0)).filter(|&c| !down(c)).collect();
+        for code in up {
+            self.typing_key(code, false, false, false);
+        }
     }
 
     /// Held typing-keyboard keys and MIDI notes light on the piano roll's keyboard (§4).
@@ -21812,6 +21829,30 @@ mod tests {
         app.state.plugin_pos = (beside.0 + 120.0, beside.1 + 40.0);
         app.open_channel_window(row);
         assert_eq!(app.state.plugin_pos, (beside.0 + 120.0, beside.1 + 40.0), "the channel window reopens where it was moved");
+    }
+
+    /// A typed note whose key is up ends though its release never came (issue #274: on Linux a key let go of over a
+    /// docked plugin editor goes to the editor); the keys still down keep playing.
+    #[test]
+    fn typed_notes_end_when_their_key_is_up() {
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.selected_channel = 1;
+        app.state.toggles.push("typing");
+        assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
+        assert!(app.typing_key(KeyCode::KeyX, true, false, false));
+        assert_eq!(app.typing_held.len(), 2);
+        // All keys still down: nothing ends.
+        app.release_keys_up(|_| true);
+        assert_eq!(app.typing_held.len(), 2);
+        // Z let go of where the app did not see it.
+        app.release_keys_up(|code| code == KeyCode::KeyX);
+        assert_eq!(app.typing_held.iter().map(|h| h.0).collect::<Vec<_>>(), [KeyCode::KeyX]);
+        assert_eq!(app.state.piano.typed.len(), 1, "the piano roll's keyboard lights the held key alone");
+        // Its own release, coming late, changes nothing.
+        assert!(!app.typing_key(KeyCode::KeyZ, false, false, false));
+        app.release_keys_up(|_| false);
+        assert!(app.typing_held.is_empty());
     }
 }
 
