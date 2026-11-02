@@ -76,7 +76,7 @@ pub fn plugin_state_from_fl(fl: &[u8]) -> Vec<u8> {
 /// The Sytrus state inside a plugin state blob (see [`plugin_state_from_fl`]); `Some(empty)` for an instance that
 /// still plays its default patch, `None` when the blob is not a Citrus state.
 pub fn fl_from_plugin_state(blob: &[u8]) -> Option<Vec<u8>> {
-    let json = if blob.len() > 8 && blob[0] != b'{' { &blob[8..] } else { blob };
+    let (_, json) = os_hostlink::state::json(blob);
     let v: serde_json::Value = serde_json::from_str(std::str::from_utf8(json).ok()?).ok()?;
     let field = v.get("fields")?.get(STATE_FIELD)?.as_str()?;
     serde_json::from_str::<StateBytes>(field).ok().map(|s| s.0)

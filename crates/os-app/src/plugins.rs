@@ -2188,14 +2188,7 @@ fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
 }
 
 /// The `sample-path` field of a Lemon Sampler (or Lemon Trio) state blob.
-/// The JSON of a nih-plug state `blob`, and whether an 8-byte little-endian length came before it. The length is
-/// told by its value, not by the first byte: a length's low byte can itself be `{`.
-pub(crate) fn state_json(blob: &[u8]) -> (bool, &[u8]) {
-    match blob.split_first_chunk::<8>() {
-        Some((len, json)) if u64::from_le_bytes(*len) == json.len() as u64 => (true, json),
-        _ => (false, blob),
-    }
-}
+pub(crate) use os_hostlink::state::json as state_json;
 
 pub(crate) fn sample_path_of(blob: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(state_json(blob).1).ok()?;

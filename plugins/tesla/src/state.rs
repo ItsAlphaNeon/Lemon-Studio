@@ -216,7 +216,7 @@ pub fn plugin_state(s: &Saved) -> Vec<u8> {
 
 /// The state inside a plugin state blob (see [`plugin_state`]); `None` when the blob is not a Tesla state.
 pub fn from_plugin_state(blob: &[u8]) -> Option<Saved> {
-    let json = if blob.len() > 8 && blob[0] != b'{' { &blob[8..] } else { blob };
+    let (_, json) = os_hostlink::state::json(blob);
     let v: serde_json::Value = serde_json::from_slice(json).ok()?;
     from_json(v.get("fields")?.get(STATE_FIELD)?.as_str()?)
 }

@@ -369,7 +369,7 @@ pub fn plugin_state_from_fl(spec: &Spec, fl: &[u8]) -> Vec<u8> {
 
 /// The original's saved state for a plugin state blob (see [`plugin_state_from_fl`]); `None` when it is not one.
 pub fn fl_from_plugin_state(spec: &Spec, blob: &[u8]) -> Option<Vec<u8>> {
-    let json = if blob.len() > 8 && blob[0] != b'{' { &blob[8..] } else { blob };
+    let (_, json) = os_hostlink::state::json(blob);
     let v: serde_json::Value = serde_json::from_str(std::str::from_utf8(json).ok()?).ok()?;
     let raw = normalized(spec, from_hex(v.get("fields")?.get(STATE_FIELD)?.as_str()?.trim_matches('"'))?);
     let params = v.get("params")?;
