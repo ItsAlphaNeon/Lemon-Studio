@@ -84,8 +84,14 @@ impl Shared {
     }
 }
 
-/// The per-block settings of the voices from the parameters (spec: plugins/3x-osc.md §1, §2).
-pub fn block(p: &Osc3Params, bend: f64) -> dsp::Block {
+/// Seconds in a tick at `tempo` BPM: the plugin is not told the project's PPQ and takes FL's default of 96.
+pub fn tick_seconds(tempo: f64) -> f64 {
+    60.0 / (tempo.max(1.0) * 96.0)
+}
+
+/// The per-block settings of the voices from the parameters (spec: plugins/3x-osc.md §1, §2), `tick` the
+/// length of a tick in seconds (the LFO's shortest period).
+pub fn block(p: &Osc3Params, bend: f64, tick: f64) -> dsp::Block {
     let v = |k: usize| p.v(k);
     let f = |k: usize| f64::from(p.v(k));
     let osc = |n: usize| {
@@ -126,7 +132,7 @@ pub fn block(p: &Osc3Params, bend: f64) -> dsp::Block {
                 delay: envelope::knob_seconds(v(r + R_LFO_DELAY)),
                 attack: envelope::knob_seconds(v(r + R_LFO_ATT)),
                 amount: f(r + R_LFO_AMT),
-                hz: dsp::lfo_hz(v(r + R_LFO_SPEED)),
+                hz: dsp::lfo_hz(v(r + R_LFO_SPEED), tick),
             },
         }
     };
@@ -235,7 +241,8 @@ impl Plugin for LemonTrio {
 
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
         self.take_custom();
-        let mut blk = block(&self.params, self.bend);
+        let tick = tick_seconds(ctx.transport().tempo.unwrap_or(140.0));
+        let mut blk = block(&self.params, self.bend, tick);
         if let Ok(mut q) = self.shared.previews.try_lock() {
             for (key, vel, on) in q.drain(..) {
                 if on {
@@ -330,12 +337,12 @@ mod tests {
     #[test]
     fn default_block_is_the_default_patch() {
         let p = Osc3Params::default();
-        let b = block(&p, 0.0);
+        let b = block(&p, 0.0, 0.0);
         let d = dsp::Block::default();
         assert_eq!((b.osc, b.m2, b.m3, b.am, b.hq, b.rand), (d.osc, d.m2, d.m3, d.am, d.hq, d.rand));
         assert_eq!((b.filter, b.cutoff, b.resonance), (0, 256.0, 0.0));
         assert!(b.filter_off());
         assert!(b.targets.iter().all(|t| t.env.is_none() && t.lfo.amount == 0.0));
-        assert!((b.targets[1].lfo.hz - 0.505).abs() < 1e-9);
+        assert!((b.targets[1].lfo.hz - 0.5).abs() < 1e-3);
     }
 }

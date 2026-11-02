@@ -30,14 +30,15 @@ Systems a fully functional DAW can't ship without.
   Fruity effects stay wrapped instead of becoming the native plugins, and a 3x Osc saved before FL Studio 21 has
   its envelope and filter settings at their defaults
 - [x] **Multi-core mixing.** The engine renders on one audio thread, which limits dense projects
-- [ ] **Engine rework (sampler voice, automation).** The README's roadmap names it as the next big step; land it
+- [x] **Engine rework (sampler voice, automation).** The README's roadmap names it as the next big step; land it
   before the alpha rather than after. For the alpha (decided 2026-11-02): what the engine does against FL, the four
   rows of section 1 of the specs' engine roadmap (slide notes bend only the notes of their colour, a length-0 step on
   a hosted instrument has no end, a control point's change as one limited gain ramp per tick, Lemon Trio's 3x Osc
   DSP), and the mixer's separation term in single precision. The other engine pages (the arpeggiator, echo delay,
   tracking, gate time, time shift, glides on all five levels, control points on sends, tempo by control point) come
   after the alpha, under "After the alpha". The engine's own voice (the browser's previews, the engine's tests and
-  `os-render`) stays Lemon Studio's own and is not held to the voice pages
+  `os-render`) stays Lemon Studio's own and is not held to the voice pages. Lemon Trio keeps FL 26's averaged edges
+  with HQ off: FL 24.1's exports show a plain table lookup, and the specs leave open which version is right
 
 ## Built-in instruments and effects
 

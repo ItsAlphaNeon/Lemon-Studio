@@ -14,11 +14,13 @@ use os_engine::{envelope, laws};
 
 /// Key 60 sounds C6 (spec §2.1).
 pub const KEY60_HZ: f64 = 523.251_130_601_197_2;
-/// Note-off fade without a volume envelope (raised cosine, spec §2.5).
-pub const FADE_SECONDS: f64 = 0.010;
+/// The closing fade's length: 441 samples at every sample rate (spec: plugins/3x-osc-dsp.md "The closing fade").
+pub const FADE_SAMPLES: u64 = 441;
 /// Modulation (envelopes, LFOs, pitch, filter) is updated every this many samples.
 pub const CTL: usize = 32;
-pub const MAX_VOICES: usize = 64;
+/// A backstop only: the host keeps the channel's voice limit and ends the oldest held note
+/// (spec: audio/note-rules.md "Voice limit"); 256 is the host's own pool cap.
+pub const MAX_VOICES: usize = 256;
 
 pub const T_PAN: usize = 0;
 pub const T_VOL: usize = 1;
@@ -93,9 +95,11 @@ impl Lfo {
     }
 }
 
-/// LFO speed law: 32950 = 0.505 Hz, 8 octaves over the range (spec §2.6).
-pub fn lfo_hz(speed: i32) -> f64 {
-    0.505 * 2f64.powf(8.0 * f64::from(speed - 32950) / 65536.0)
+/// LFO speed law: the knob holds the period, `(1001^(speed / 65536) - 1) * 64` ms and at least 3 ticks of
+/// `tick` seconds, so a higher value is slower; 32950 is 2 s (spec: plugins/3x-osc-dsp.md, plugins/3x-osc.md).
+pub fn lfo_hz(speed: i32, tick: f64) -> f64 {
+    let ms = (1001f64.powf(f64::from(speed) / 65536.0) - 1.0) * 64.0;
+    1.0 / (ms / 1000.0).max(3.0 * tick).max(1e-6)
 }
 
 /// An envelope / LFO record's settings.
@@ -240,6 +244,8 @@ fn prim(shape: u8, x: f64) -> f64 {
 }
 
 /// The wave's average over the next sample interval (phase `u` .. `u + dt`): the plain oscillators (spec §2.2 "Edges").
+/// That is FL 26's plugin; FL 24.1's exports show a table lookup without averaging (spec: plugins/3x-osc-dsp.md), and
+/// which is right is open.
 pub fn boxed(shape: u8, u: f64, dt: f64) -> f64 {
     if dt < 1e-9 {
         return wave(shape, u);
@@ -535,15 +541,13 @@ fn split(pan: f32, level: f32) -> [f64; 2] {
     [f64::from((lv * a.cos()) as f32), f64::from((lv * a.sin()) as f32)]
 }
 
-/// Raised-cosine fade factor `s` seconds into a 10 ms fade.
-fn fade(s: f64) -> f64 {
-    if s <= 0.0 {
-        1.0
-    } else if s >= FADE_SECONDS {
-        0.0
-    } else {
-        0.5 + 0.5 * (PI * s / FADE_SECONDS).cos()
+/// The closing fade's factor on its sample `j` (from 0): `(cos(single(j + 1) * single(pi / 442)) + 1) * 0.5`.
+fn fade(j: u64) -> f64 {
+    if j >= FADE_SAMPLES {
+        return 0.0;
     }
+    let x = (j + 1) as f32 * (PI / 442.0) as f32;
+    (f64::from(x).cos() + 1.0) * 0.5
 }
 
 pub struct Engine {
@@ -727,30 +731,25 @@ impl Engine {
         }
     }
 
-    /// Voice gain at sample `n` (velocity, volume envelope and LFO, note-off fade); `None` once the voice is over.
+    /// The sample on which a voice's closing fade starts: its note's end without a volume envelope, or a cut.
+    fn closing(v: &Voice, b: &Block) -> Option<u64> {
+        let off = if b.targets[T_VOL].env.is_none() { v.off } else { None };
+        match (off, v.cut) {
+            (Some(o), Some(c)) => Some(o.min(c)),
+            (o, c) => o.or(c),
+        }
+    }
+
+    /// Voice gain at sample `n` (velocity, volume envelope and LFO; the closing fade is applied per sample);
+    /// `None` once the volume envelope is over.
     fn gain_at(&self, v: &Voice, b: &Block, n: u64) -> Option<f64> {
         let sr = self.rate;
         let t = n as f64 / sr;
         let off = v.off.map(|o| o as f64 / sr);
         let vol = &b.targets[T_VOL];
         let mut g = v.vel;
-        match vol.env {
-            Some(e) => g *= e.level(t, off)?,
-            None => {
-                if let Some(o) = off {
-                    if t - o >= FADE_SECONDS {
-                        return None;
-                    }
-                    g *= fade(t - o);
-                }
-            }
-        }
-        if let Some(c) = v.cut {
-            let s = (n.saturating_sub(c)) as f64 / sr;
-            if s >= FADE_SECONDS {
-                return None;
-            }
-            g *= fade(s);
+        if let Some(e) = vol.env {
+            g *= e.level(t, off)?;
         }
         // Volume LFO: gain × (1 + a·w), a = amount / 128.
         g *= 1.0 + vol.lfo.value(t) / 128.0;
@@ -794,7 +793,8 @@ impl Engine {
         for v in voices.iter_mut().filter(|v| !v.done) {
             let t0 = v.n as f64 / sr;
             let off = v.off.map(|o| o as f64 / sr);
-            let Some(g0) = self.gain_at(v, b, v.n) else {
+            let close = Self::closing(v, b);
+            let Some(g0) = self.gain_at(v, b, v.n).filter(|_| close.is_none_or(|c| v.n < c + FADE_SAMPLES)) else {
                 v.done = true;
                 continue;
             };
@@ -824,7 +824,8 @@ impl Engine {
             let from = v.sides.replace(to).unwrap_or(to);
             let ds = [(to[0] - from[0]) / len as f64, (to[1] - from[1]) / len as f64];
             for i in 0..len {
-                let g = g0 + dg * i as f64;
+                let a = v.n + i as u64;
+                let g = (g0 + dg * i as f64) * close.map_or(1.0, |c| if a < c { 1.0 } else { fade(a - c) });
                 let k = (i + 1) as f64;
                 let side = [from[0] + ds[0] * k, from[1] + ds[1] * k];
                 let mut out = [0.0f64; 2];
@@ -859,6 +860,9 @@ impl Engine {
                 r[i] += out[1] as f32;
             }
             v.n += len as u64;
+            if close.is_some_and(|c| v.n >= c + FADE_SAMPLES) {
+                v.done = true;
+            }
         }
         self.voices = voices;
         self.custom = custom;
@@ -1093,6 +1097,22 @@ mod tests {
         assert!((l[ms(5.0)].abs() / 0.70711 - 0.5).abs() < 0.02, "{}", l[ms(5.0)]);
         assert!((l[ms(2.0)].abs() / 0.70711 - 0.905).abs() < 0.02);
         assert!(l[ms(10.5)..].iter().all(|x| *x == 0.0));
+        assert_eq!(fade(0), f64::from((PI / 442.0) as f32).cos() * 0.5 + 0.5);
+    }
+
+    /// The closing fade is 441 samples at every rate, not 10 ms.
+    #[test]
+    fn the_closing_fade_is_441_samples_at_48000_hz() {
+        let b = solo(SQUARE);
+        let mut e = Engine::new(48000.0);
+        e.note_on(60, 100.0 / 128.0, None, &b);
+        let (mut l, mut r) = (vec![0.0; 2000], vec![0.0; 2000]);
+        e.render(&mut l[..1000], &mut r[..1000], &b);
+        e.note_off(60);
+        e.render(&mut l[1000..], &mut r[1000..], &b);
+        assert!(l[1000 + 430] != 0.0);
+        assert!(l[1000 + 441..].iter().all(|x| *x == 0.0));
+        assert!(!e.has_voices());
     }
 
     #[test]
@@ -1121,7 +1141,9 @@ mod tests {
         b.targets[T_PITCH].env = envelope::Params::new(&rec);
         let (l, _) = render(&b, 60, 0.78, 22050, None);
         assert!((freq(&l[4410..]) - 1046.5).abs() < 0.5, "{}", freq(&l[4410..]));
-        assert!((lfo_hz(32950) - 0.505).abs() < 1e-9);
+        assert!((lfo_hz(32950, 0.0) - 0.5).abs() < 1e-3, "{}", lfo_hz(32950, 0.0));
+        assert!((lfo_hz(20000, 0.0) - 2.2).abs() < 0.05, "a higher value is slower: {}", lfo_hz(20000, 0.0));
+        assert!((lfo_hz(0, 0.01) - 1.0 / 0.03).abs() < 1e-9, "at least 3 ticks");
         let lfo = Lfo { shape: 0, amount: 100.0, hz: 0.505, ..Lfo::default() };
         assert!((lfo.value(0.495) - 100.0).abs() < 0.1, "a quarter period after the start: the top");
     }
