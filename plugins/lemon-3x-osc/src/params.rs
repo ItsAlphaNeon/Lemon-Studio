@@ -363,6 +363,32 @@ fn normalized(mut b: Vec<u8>) -> Vec<u8> {
     b
 }
 
+/// An older version's state (shorter than the current one, so without envelope records or filter) completed with the
+/// channel's own voicing, which FL plays for such a state (spec: plugins/lemon-3x-osc.md §6.1): `records` are the
+/// channel's five event 218 records in record order (`T_*`), 17 fields each as stored (`None` keeps the default
+/// record), `filter` its event 219 cutoff, resonance and type. The state's own fields are kept; a current state is
+/// returned as it is.
+pub fn with_channel_voicing(fl: &[u8], records: &[Option<[i32; 17]>; 5], filter: [i32; 3]) -> Vec<u8> {
+    if fl.len() >= STATE_LEN {
+        return fl.to_vec();
+    }
+    let mut b = normalized(fl.to_vec());
+    let mut set = |k: usize, v: i32| {
+        if 4 * k >= fl.len() {
+            set_field(&mut b, k, v);
+        }
+    };
+    for (t, r) in records.iter().enumerate() {
+        for (i, &v) in r.iter().flatten().enumerate() {
+            set(rec(t) + i + 1, v);
+        }
+    }
+    for (k, v) in [CUTOFF, RESONANCE, FILTER].into_iter().zip(filter) {
+        set(k + 1, v);
+    }
+    b
+}
+
 /// Little-endian int32 field `k`.
 pub fn field(b: &[u8], k: usize) -> i32 {
     b.get(4 * k..4 * k + 4).map_or(0, |s| i32::from_le_bytes(s.try_into().unwrap()))
@@ -485,6 +511,27 @@ mod tests {
         let vol = rec_fields(T_VOL);
         assert_eq!((vol[0], vol[16]), (4, -101));
         assert_eq!((109..115).map(|k| field(&b, k)).collect::<Vec<_>>(), vec![0, 0, 256, 0, 0, 0]);
+    }
+
+    /// An older version's state takes the channel's records and filter for the fields it does not have; its own
+    /// fields stay, and a current state is not touched.
+    #[test]
+    fn an_older_state_takes_the_channels_voicing() {
+        let mut old = default_state()[..92].to_vec();
+        set_field(&mut old, 0, 12);
+        set_field(&mut old, osc(1) + COARSE + 1, 5);
+        let mut pitch = [0; 17];
+        pitch[1] = -1;
+        pitch[8] = 1200;
+        let b = with_channel_voicing(&old, &[None, None, None, None, Some(pitch)], [64, 32, 3]);
+        assert_eq!((b.len(), field(&b, 0)), (STATE_LEN, STATE_VERSION));
+        assert_eq!(b[4..92], old[4..]);
+        assert_eq!((0..17).map(|i| field(&b, rec(T_PITCH) + i + 1)).collect::<Vec<_>>(), pitch.to_vec());
+        let others = 4 * (rec(0) + 1)..4 * (rec(T_PITCH) + 1);
+        assert_eq!(b[others.clone()], default_state()[others]);
+        assert_eq!([CUTOFF, RESONANCE, FILTER].map(|k| field(&b, k + 1)), [64, 32, 3]);
+        let full = default_state();
+        assert_eq!(with_channel_voicing(&full, &[Some(pitch); 5], [64, 32, 3]), full);
     }
 
     #[test]

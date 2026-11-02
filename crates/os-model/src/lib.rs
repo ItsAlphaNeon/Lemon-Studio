@@ -1231,6 +1231,32 @@ impl Envelope {
     pub const CUTOFF: usize = 2;
     pub const RESONANCE: usize = 3;
     pub const PITCH: usize = 4;
+
+    /// The record's 17 ints in stored order (spec: audio/channel-envelopes.md): flags, on (−1) / off (0), delay,
+    /// attack, hold, decay, sustain, release, amount, the LFO's delay, attack, amount, speed and shape, then the
+    /// attack, decay and release tensions.
+    pub fn fields(&self) -> [i32; 17] {
+        [
+            self.flags,
+            // FL writes -1 for an envelope that is on (spec: audio/envelopes-and-lfos.md).
+            -i32::from(self.enabled),
+            self.delay,
+            self.attack,
+            self.hold,
+            self.decay,
+            self.sustain,
+            self.release,
+            self.amount,
+            self.lfo_delay,
+            self.lfo_attack,
+            self.lfo_amount,
+            self.lfo_speed,
+            self.lfo_shape,
+            self.attack_tension,
+            self.decay_tension,
+            self.release_tension,
+        ]
+    }
 }
 
 impl Default for Envelope {
