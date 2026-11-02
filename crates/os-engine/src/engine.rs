@@ -108,8 +108,10 @@ struct Trigger {
     buf: u16,
     /// An audio clip's fades, gain and late-start declick (`None` = plays as it is).
     shape: Option<ClipShape>,
-    /// A slide note: no sound of its own, it glides the channel's voices.
+    /// A slide note: no sound of its own, it glides the channel's voices of its colour.
     slide: bool,
+    /// The note's colour group (0..=15).
+    colour: u8,
     /// The note's own portamento switch (spec: audio/note-rules.md, "A note's own portamento switch").
     porta: bool,
     /// A note a layer handed on: the layer and the child's crossfade gain.
@@ -694,6 +696,8 @@ struct Voice {
     /// Its note's key, and where slide notes have moved it.
     key: u16,
     slide: VoiceSlide,
+    /// Its note's colour group: slide notes of that colour move it.
+    colour: u8,
     /// The layer its note came through.
     via: Option<Via>,
 }
@@ -1554,6 +1558,7 @@ impl Engine {
                         }
                     }),
                     slide: n.slide,
+                    colour: n.colour,
                     porta: n.porta,
                     via: None,
                     cuts: None,
@@ -2144,6 +2149,7 @@ impl Engine {
             buf,
             key,
             slide: VoiceSlide::new(step, velocity, pan),
+            colour: 0,
             via: None,
         });
         self.sounding.push((channel, key, u64::MAX));
@@ -3350,17 +3356,18 @@ impl Engine {
             for (i, &c) in layer.children.iter().enumerate() {
                 let hosted = self.channels.get(c).is_some_and(|ch| ch.plugin && ch.instrument.0.is_some());
                 if hosted && !layer.children[..i].contains(&c) {
-                    self.inst_events.push(notes::Event { layer: Some(t.channel), ..notes::Event::slide(c, 0, key, n) });
+                    let slide = notes::Event::slide(c, 0, key, n);
+                    self.inst_events.push(notes::Event { layer: Some(t.channel), colour: t.colour, ..slide });
                 }
             }
         } else if self.channels[t.channel].plugin {
             if self.channels[t.channel].instrument.0.is_some() {
-                self.inst_events.push(notes::Event::slide(t.channel, 0, key, n));
+                self.inst_events.push(notes::Event { colour: t.colour, ..notes::Event::slide(t.channel, 0, key, n) });
             }
             return;
         }
         let own = |v: &Voice| if is_layer { v.via.is_some_and(|w| w.layer == t.channel) } else { v.channel == t.channel && v.via.is_none() };
-        let moves = |v: &Voice| own(v) && v.cut.is_none() && v.release.is_none();
+        let moves = |v: &Voice| own(v) && v.colour == t.colour && v.cut.is_none() && v.release.is_none();
         let top = self.voices.iter().filter(|v| moves(v) && v.off.is_none()).map(|v| f32::from(v.key) * 100.0 + v.slide.cents).reduce(f32::max);
         let Some(top) = top else { return };
         let by = f32::from(t.key) * 100.0 - top;
@@ -3433,6 +3440,7 @@ impl Engine {
                     layer: t.via.map(|w| w.layer),
                     porta: t.porta,
                     voice,
+                    colour: t.colour,
                 });
                 if let (Some(shape), Some(voice)) = (t.shape, voice) {
                     self.inst_shapes.push(InstClip { channel: t.channel, voice, shape, age: 0, sent: None });
@@ -3478,6 +3486,7 @@ impl Engine {
             buf: t.buf,
             key: t.key,
             slide: VoiceSlide::new(t.rate, t.velocity, t.pan),
+            colour: t.colour,
             via: t.via,
         });
     }
@@ -4745,6 +4754,8 @@ struct Sched {
     clip: Option<ClipFx>,
     /// A slide note.
     slide: bool,
+    /// The note's colour group.
+    colour: u8,
     /// The note's own portamento switch.
     porta: bool,
     /// A note the main swing can move.
@@ -4768,6 +4779,7 @@ impl Sched {
             to_s: None,
             clip: None,
             slide: n.slide(),
+            colour: n.colour(),
             porta: n.porta(),
             swing: None,
         }
@@ -5083,7 +5095,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
                             let from_s = c.window.map_or(0.0, |w| w.0.max(0.0) / 1000.0);
                             let to_s = c.window.filter(|w| w.0 >= 0.0 && w.1 >= 0.0).map(|w| w.1 / 1000.0);
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, to_s, clip: ClipFx::of(c, fx), slide: false, porta: false, swing: None });
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, to_s, clip: ClipFx::of(c, fx), slide: false, colour: 0, porta: false, swing: None });
                         }
                         Some(ChannelKind::Automation) => {}
                         _ => report.automation_clips_ignored += 1,
@@ -5737,6 +5749,11 @@ mod tests {
         // Without a sounding voice a slide note does nothing and is not heard.
         let quiet = project(vec![slide(0, 96, 72, 100)], vec![]);
         assert_eq!(peak(&render(&quiet), 0), 0.0);
+        // Only the voices of the slide note's colour move: one of colour 2 leaves a voice of colour 0 where it is.
+        let other = Note { group: 2, ..slide(96, 0, 72, 50) };
+        let p = project(vec![long_note(0, 384, 0), other], vec![]);
+        let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+        assert_eq!(after(&mut e, 95), after(&mut e, 120), "another colour's slide moves nothing");
     }
 
     #[test]
