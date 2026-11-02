@@ -49,6 +49,9 @@ pub enum Target {
     Member(u8, usize),
     /// Instruments in place of instrument member `.1` of a channel's container.
     MemberInst(u8, usize),
+    /// Generators for playlist track `.0`'s Track mode ▸ Instrument track ▸: a new channel, the track's instrument track
+    /// (spec: ui/playlist.md §6c).
+    Track(u16),
 }
 
 fn pick(target: Target, effect: bool, index: usize) -> Cmd {
@@ -58,6 +61,7 @@ fn pick(target: Target, effect: bool, index: usize) -> Cmd {
         Target::Container(slot) => return Cmd::Mixer(MCmd::MemberAddInst(slot, index)),
         Target::Member(slot, i) => return Cmd::Mixer(MCmd::MemberReplace(slot, i, index)),
         Target::MemberInst(slot, i) => return Cmd::Mixer(MCmd::MemberReplaceInst(slot, i, index)),
+        Target::Track(t) => return Cmd::TrackMode(t, crate::track_links::Mode::NewInstrument(index)),
         _ => {}
     }
     Cmd::Plugin(match (target, effect) {
@@ -65,7 +69,7 @@ fn pick(target: Target, effect: bool, index: usize) -> Cmd {
         (_, true) => PlugCmd::Effect { index, slot: None },
         (Target::Gen(after), false) => PlugCmd::Generator { index, after },
         (Target::Replace(row), false) => PlugCmd::Replace { index, row },
-        (Target::All | Target::Container(_) | Target::Member(..) | Target::MemberInst(..), false) => PlugCmd::Generator { index, after: None },
+        (Target::All | Target::Container(_) | Target::Member(..) | Target::MemberInst(..) | Target::Track(_), false) => PlugCmd::Generator { index, after: None },
     })
 }
 
@@ -152,11 +156,17 @@ pub fn items(s: &State, target: Target, nested: bool) -> Vec<PItem> {
             v.push(PItem::head("Effects"));
             v.extend(section(s, true, target, nested));
         }
-        Target::Gen(_) | Target::Replace(_) | Target::MemberInst(..) => v.extend(section(s, false, target, nested)),
+        Target::Gen(_) | Target::Replace(_) | Target::MemberInst(..) | Target::Track(_) => v.extend(section(s, false, target, nested)),
         Target::Fx(_) | Target::Container(_) | Target::Member(..) => v.extend(section(s, true, target, nested)),
     }
     v.extend(footer(s));
     v
+}
+
+/// The generators an instrument track can be made with (Track mode ▸ Instrument track ▸, spec: ui/playlist.md §6c): the
+/// plugin menu's generator list, picks making a new channel for playlist track `t`.
+pub fn track_generators(s: &State, t: u16) -> Vec<PItem> {
+    section(s, false, Target::Track(t), true)
 }
 
 /// A plugin menu for `target` at (x, y).
@@ -220,7 +230,7 @@ pub fn add_generator(app: &mut App, index: usize, after: Option<usize>) -> Optio
     crate::control::edit_app(app, crate::history::ADD_CHANNEL, crate::control::command::Region::Project, |app| add_generator_now(app, index, after))
 }
 
-fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
+pub(crate) fn add_generator_now(app: &mut App, index: usize, after: Option<usize>) -> Option<String> {
     let d = app.plugins.available.get(index)?.desc.clone();
     let s = &mut app.state;
     let sampler = d.name == crate::plugins::LEMON_SAMPLER && crate::project_plugins::is_builtin(&d);

@@ -4248,6 +4248,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Project(c) => return crate::project_picker::run(app, c),
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
+        Cmd::TrackMode(t, crate::track_links::Mode::NewInstrument(i)) => return crate::track_links::new_instrument(app, t, i),
         Cmd::SlotWin(t, c) => {
             let was = std::mem::replace(&mut app.state.selected_mixer, t);
             let m = run(app, *c);

@@ -179,6 +179,8 @@ pub enum Mode {
     NewAudio,
     /// An instrument track of this rack row.
     Instrument(usize),
+    /// An instrument track of a new channel playing generator `.0` (an index of the available plugins).
+    NewInstrument(usize),
 }
 
 /// Track mode ▸ on track `t`: an audio track takes its mixer track's name, an instrument track its channel's name and
@@ -196,9 +198,29 @@ pub fn set_mode(s: &mut State, t: u16, mode: Mode) -> Option<String> {
             arr_mut(s).tracks[usize::from(t)].name = Some(name);
         }
         Mode::Instrument(r) => link_instrument(s, t, r),
+        // Needs the app to host the plugin (`new_instrument`).
+        Mode::NewInstrument(_) => return None,
     }
     s.piano.dirty = true;
     None
+}
+
+/// Track mode ▸ Instrument track ▸ and a generator (spec: ui/playlist.md §6c, measured): a new channel with that plugin,
+/// as ADD makes one (`plugin_menu::add_generator_now`), and track `t` becomes its instrument track, named and coloured
+/// after it, its insert named after it. One undo step, "Playlist track mode".
+pub fn new_instrument(app: &mut crate::app::App, t: u16, index: usize) -> Option<String> {
+    crate::control::edit_app(app, TRACK_MODE, crate::control::command::Region::Project, |app| {
+        let rows = app.state.project.channels.len();
+        let msg = crate::plugin_menu::add_generator_now(app, index, None);
+        if app.state.project.channels.len() == rows {
+            return msg;
+        }
+        let row = app.state.selected_channel;
+        link_instrument(&mut app.state, t, row);
+        app.state.playlist.track = t;
+        app.state.piano.dirty = true;
+        Some(format!("Added {} on {}", crate::rack::channel_name(&app.state, row), crate::playlist::track_name(&app.state, t)))
+    })
 }
 
 /// The Track mode ▸ submenu for track `t`: Unassigned, Audio track ▸ (a new mixer track, then every insert), Instrument
@@ -220,7 +242,10 @@ pub fn mode_items(s: &State, t: u16, cmd: impl Fn(Mode) -> crate::playlist::Cmd)
         .filter(|(_, c)| instrument_kind(c.kind))
         .map(|(r, c)| PItem::new(crate::rack::channel_name(s, r), cmd(Mode::Instrument(r))).mark(Mark::Check(l.instrument_channel() == Some(c.index))))
         .collect();
-    let chans = if chans.is_empty() { vec![PItem::new("(no instrument channels)", crate::playlist::Cmd::Nothing).off()] } else { chans };
+    // As the original's: Use existing channel ▸, then the generators, each making a new channel (§6c, measured).
+    let existing = if chans.is_empty() { PItem::new("Use existing channel", crate::playlist::Cmd::Nothing).off() } else { PItem::sub("Use existing channel", chans) };
+    let mut chans = vec![existing, PItem::sep()];
+    chans.extend(crate::plugin_menu::track_generators(s, t));
     let mut items = vec![
         PItem::new("Unassigned", cmd(Mode::Unassigned)).mark(Mark::Check(l.is_none())),
         PItem::sub("Audio track", audio).mark(Mark::Check(l.kind == TrackLink::AUDIO)),
@@ -421,6 +446,32 @@ mod tests {
         assert_eq!(crate::playlist::track_name(&app.state, 4), "Snare");
         crate::history::undo(&mut app.state);
         assert_eq!(link(&app.state, 4), TrackLink::instrument(3));
+    }
+
+    /// Track mode ▸ Instrument track ▸ (ui/playlist.md §6c, measured): Use existing channel ▸ first, then the generators;
+    /// a generator makes a new channel whose instrument track the track becomes, one undo step.
+    #[test]
+    fn instrument_track_with_a_new_channel() {
+        let mut app = app();
+        let items = mode_items(&app.state, 6, |m| Cmd::TrackMode(6, m));
+        let inst = entry(&items, "Instrument track");
+        assert_eq!(inst.children[0].label, "Use existing channel");
+        assert!(entry(&inst.children[0].children, "Snare").enabled);
+        app.plugins.available = crate::plugins::builtin();
+        let i = app.plugins.index_of(crate::plugins::LEMON_SAMPLER).expect("the built-in sampler");
+        let rows = app.state.project.channels.len();
+        let steps = app.state.history.at();
+        let msg = crate::playlist::run(&mut app, Cmd::TrackMode(6, Mode::NewInstrument(i)));
+        assert_eq!(app.state.project.channels.len(), rows + 1);
+        let ch = app.state.project.channels[rows].index;
+        assert_eq!(link(&app.state, 6), TrackLink::instrument(ch));
+        let name = crate::rack::channel_name(&app.state, rows);
+        assert_eq!(crate::playlist::track_name(&app.state, 6), name);
+        assert_eq!(msg, Some(format!("Added {name} on {name}")));
+        assert_eq!((app.state.history.at(), app.state.history.newest_done()), (steps + 1, Some(TRACK_MODE)));
+        crate::history::undo(&mut app.state);
+        assert_eq!(app.state.project.channels.len(), rows);
+        assert!(link(&app.state, 6).is_none());
     }
 
     /// An audio track's options in Track mode ▸ (ui/playlist.md §6c, measured): only on an audio track; Arm recording and
