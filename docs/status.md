@@ -36,7 +36,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - The rack's Restretch all (Ctrl+Alt+R) fits every stretched sample and audio clip to the project tempo at once
   (they follow the tempo by themselves too, also with tempo automation)
 - The rack's knob, mixer box and LED menus: Edit automation in piano roll opens the piano roll on the channel volume
-  or panning lane, the swing knob takes a song start value, and the mixer box and the LED link to a MIDI controller
+  or panning lane, the swing knob takes a song start value, and the mixer box and the LED link to a MIDI controller.
+  The swing knob, the mixer box and the LED make automation clips ("Main swing", "<channel> - Target mixer track",
+  "<channel> - Mute / solo"), open the event editor and take song start values, as the original's files keep them
 - The mixer options' Link all parameters... links the current track's volume, pan, separation, equaliser, sends and
   slot mix levels to consecutive MIDI controllers in one go
 - Options ▸ Detached takes the mixer or the channel rack out of the main window into a window of its own (to put it on
@@ -349,17 +351,20 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 
 - Automation clips for channel, mixer and plugin parameters
 - A clip drives every target it is linked to, including mixer slot switches and mix levels, track EQ, send
-  levels, stereo separation and the channel's level adjustments
+  levels, stereo separation, the channel's level adjustments, the main swing, a channel's mixer track and its switch
+- The main swing moves the notes not started yet when it changes; a channel's voices go to its new mixer track from
+  that tick; a channel switched off ends its sounding notes and starts no new ones until it is on again
 - A pattern's control points drive mixer volumes, pans, separation, equalisers, slot switches and mix levels, the
-  tempo and plugin parameters, besides the channel's own settings (sends and the main pitch not yet)
+  tempo, the main swing and plugin parameters, besides the channel's own settings, its mixer track and switch
+  included (sends and the main pitch not yet)
 - All thirteen curve shapes are walked exactly; values are taken one tick ahead and passed on only when
   they change
 - A clip's range (its channel's MIN and MAX knobs, minimum above maximum turning the curve upside down) and its
   LFO (on / off, multiply or add, amount, speed, tension, skew, pulse width, and its own envelope) shape what it
   hands on, in the original's arithmetic; the clip's channel window sets them, each change an undo step, and
   projects keep every LFO field
-- The event editor (Edit events on a control's menu: channel volume, pan and pitch, mixer controls, the tempo, plugin
-  parameters) shows the control's events in the selected pattern as its level over time, in the setting's own unit: left
+- The event editor (Edit events on a control's menu: channel volume, pan and pitch, the rack's swing knob, mixer box
+  and LED, mixer controls, the tempo, plugin parameters) shows the control's events in the selected pattern as its level over time, in the setting's own unit: left
   drag draws freehand on the global snap, right drag a straight line, Paint (drawing off the snap), Erase,
   Interpolate (a drag lays the events under it on a straight line, right drag a smooth one), Select and Zoom (Z:
   a click zooms in about it, a drag on the stretch dragged over, a right click out) tools, the wheel scrolls and Ctrl+wheel zooms; its Edit menu has Cut, Copy, Paste, Select all, Select previous / next

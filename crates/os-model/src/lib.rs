@@ -215,7 +215,7 @@ impl InitControl {
     /// The project's main volume (stored 0..=16000), main swing (0..=128) and main pitch (cents) at the project's place
     /// (spec: flp/layouts.md "Parameter ids in an automation link").
     pub const MAIN_VOLUME: u32 = 0x4000_0000;
-    pub const MAIN_SWING: u32 = 0x4000_0001;
+    pub const MAIN_SWING: u32 = target::MAIN_SWING;
     pub const MAIN_PITCH: u32 = 0x4000_0002;
 
     /// A record read from event 216's bytes.
@@ -234,16 +234,16 @@ impl InitControl {
     }
 
     /// Control `t` at the automation value `v` (0..1), in the setting's stored units; `None` for a control whose stored
-    /// units aren't known (plugin parameters, see [`InitControl::unit`]).
+    /// units aren't known (plugin parameters, see [`InitControl::unit`]). The channel rack's controls keep their own
+    /// units (spec: flp/engine-events.md "Event 216", "Channel rack records"): the main swing event 11's 0..128, a
+    /// channel's mixer track the track number, its switch 1 = on.
     pub fn from_unit(t: u32, v: f64) -> Option<InitControl> {
         use target::Target;
         let v = v.clamp(0.0, 1.0);
-        // The main swing's start value, in event 11's unit (the rack's swing knob: 0..128). Lemon Studio's design: what
-        // the original writes for it was not measured, and no automation clip drives it yet (`unit` gives `None`).
-        if t == Self::MAIN_SWING {
-            return Some(InitControl { head: 0, target: t, value: (128.0 * v).round() as i32 });
-        }
         let value = match target::decode(t) {
+            Target::MainSwing => f64::from(target::swing_of(v)),
+            Target::ChannelMixerTrack(_) => f64::from(target::mixer_track_of(v, u16::MAX)),
+            Target::ChannelOn(_) => f64::from(u8::from(target::channel_on(v))),
             Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => 12800.0 * v,
             Target::ChannelPitch(_) => 9600.0 * v - 4800.0,
             Target::MixerVolume(_) | Target::MixerSend(..) => 16000.0 * v,
@@ -261,11 +261,14 @@ impl InitControl {
     /// The value as an automation clip hands it on (0..1), for the settings whose stored units are known: the inverse
     /// of [`InitControl::from_unit`] (spec: audio/voice-levels.md "Values from automation", audio/mixer.md "Changes
     /// while the song plays", audio/timing.md "Tempo that changes"). Plugin parameters, a channel's other levels and
-    /// the project's main volume, swing and pitch give `None`.
+    /// the project's main volume and pitch give `None`.
     pub fn unit(&self) -> Option<f64> {
         use target::Target;
         let v = f64::from(self.value);
         let unit = match target::decode(self.target) {
+            Target::MainSwing => v / 128.0,
+            Target::ChannelMixerTrack(_) => target::mixer_track_level(self.value.clamp(0, 500) as u16),
+            Target::ChannelOn(_) => f64::from(u8::from(self.value != 0)),
             Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => v / 12800.0,
             Target::ChannelPitch(_) => (v + 4800.0) / 9600.0,
             Target::MixerVolume(_) | Target::MixerSend(..) => v / 16000.0,
@@ -571,9 +574,10 @@ impl Project {
             .collect();
         for p in &mut self.patterns {
             p.notes.retain_mut(|x| m(x.channel).map(|c| x.channel = c).is_some());
-            // Only channel parameters (0 volume, 1 pan, 4 pitch) hold a channel; other targets stay as read.
+            // Only channel parameters (0 volume, 1 pan, 4 pitch, 7 switch, 8 mixer track) hold a channel; other targets
+            // stay as read.
             p.controls.retain_mut(|x| {
-                !matches!(x.param(), 0 | 1 | 4) || m(x.channel()).map(|c| *x = ControlPoint::new(x.position, c, x.param(), x.value)).is_some()
+                !matches!(x.param(), 0 | 1 | 4 | 7 | 8) || m(x.channel()).map(|c| *x = ControlPoint::new(x.position, c, x.param(), x.value)).is_some()
             });
             p.loops.retain_mut(|l| m(l.0).map(|c| l.0 = c).is_some());
         }
@@ -2298,7 +2302,13 @@ pub mod target {
     pub const CHANNEL_VOLUME_MULT: u16 = 0x11;
     pub const CHANNEL_MOD_X: u16 = 0x13;
     pub const CHANNEL_MOD_Y: u16 = 0x14;
+    /// The channel's switch (the rack's LED) and the mixer track it plays into (the rack's mixer box) (spec:
+    /// flp/events/automation.md "Targets", audio/voice-levels.md "The other ids of a channel").
+    pub const CHANNEL_ON: u16 = 7;
+    pub const CHANNEL_MIXER_TRACK: u16 = 8;
     pub const TEMPO: u32 = 0x4000_0005;
+    /// The project's main swing, the channel rack's swing knob (event 11's unit 0..128).
+    pub const MAIN_SWING: u32 = 0x4000_0001;
     pub const MIXER_VOLUME: u8 = 0xC0;
     pub const MIXER_PAN: u8 = 0xC1;
     pub const MIXER_SEPARATION: u8 = 0xC2;
@@ -2391,10 +2401,40 @@ pub mod target {
             Target::MixerSeparation(_) => (-64.0, 64.0),
             Target::MixerEq(_, _, 0) => (-1800.0, 1800.0),
             Target::MixerEq(..) => (0.0, 65536.0),
-            Target::SlotOn(..) => (0.0, 1.0),
+            Target::SlotOn(..) | Target::ChannelOn(_) => (0.0, 1.0),
             Target::Tempo => (10000.0, 522000.0),
+            Target::MainSwing => (0.0, 128.0),
+            // The track number on a clip's scale (`mixer_track_of`): level 1 is track 500, past any project's last
+            // insert, so events turned into a clip play the same tracks (Lemon Studio's design).
+            Target::ChannelMixerTrack(_) => (0.0, 500.0),
             _ => return None,
         })
+    }
+
+    /// The main swing (0..=128, event 11's unit) an automation value `v` (0..1) gives: `v × 128` to the nearest step
+    /// (spec: flp/events/automation.md "Targets": 0.25 → 32, 0.333 → 43, 0.01 → 1, 1 → 128).
+    pub fn swing_of(v: f64) -> u8 {
+        (v.clamp(0.0, 1.0) * 128.0).round() as u8
+    }
+
+    /// The mixer track (0 = Master) an automation value `v` (0..1) sends a channel to: `v × 500` to the nearest track,
+    /// at most `last`, the project's last insert. The value is taken as a 32-bit float and the half rounds up (spec:
+    /// flp/events/automation.md "Targets": 0.0029 → 1, 0.0031 → 2, 0.005 → 2, as a float just under 2.5).
+    pub fn mixer_track_of(v: f64, last: u16) -> u16 {
+        let track = (f64::from(v.clamp(0.0, 1.0) as f32) * 500.0 + 0.5).floor();
+        (track as u16).min(last)
+    }
+
+    /// The automation value of mixer track `track` (a new clip on the rack's mixer box stores the current track: Insert
+    /// 2 → 0.004).
+    pub fn mixer_track_level(track: u16) -> f64 {
+        (f64::from(track) / 500.0).min(1.0)
+    }
+
+    /// Whether automation value `v` switches a channel on: from 0.5 (spec: flp/events/automation.md "Targets": 0.5 and
+    /// 0.5001 on, 0.4999 off).
+    pub fn channel_on(v: f64) -> bool {
+        v >= 0.5
     }
 
     fn whole_range(min: f64, max: f64) -> bool {
@@ -2410,6 +2450,10 @@ pub mod target {
         /// Channel, one of its filter knobs or level adjustments ([`CHANNEL_CUTOFF`], [`CHANNEL_RESONANCE`],
         /// [`CHANNEL_PAN_OFFSET`], [`CHANNEL_VOLUME_MULT`], [`CHANNEL_MOD_X`], [`CHANNEL_MOD_Y`]).
         ChannelLevel(u16, u16),
+        /// Channel: its switch (the rack's LED, [`CHANNEL_ON`]) / the mixer track it plays into (the rack's mixer box,
+        /// [`CHANNEL_MIXER_TRACK`]).
+        ChannelOn(u16),
+        ChannelMixerTrack(u16),
         MixerVolume(u16),
         MixerPan(u16),
         MixerSeparation(u16),
@@ -2421,6 +2465,8 @@ pub mod target {
         SlotOn(u16, u8),
         SlotMix(u16, u8),
         Tempo,
+        /// The main swing ([`MAIN_SWING`]).
+        MainSwing,
         /// Channel, parameter index of its plugin.
         ChannelParam(u16, u16),
         /// Mixer track, slot, parameter index of the slot's plugin.
@@ -2431,6 +2477,9 @@ pub mod target {
     pub fn decode(t: u32) -> Target {
         if t == TEMPO {
             return Target::Tempo;
+        }
+        if t == MAIN_SWING {
+            return Target::MainSwing;
         }
         let hi = (t >> 16) as u16;
         let lo = t as u16;
@@ -2471,6 +2520,8 @@ pub mod target {
                 CHANNEL_VOLUME => Target::ChannelVolume(hi),
                 CHANNEL_PAN => Target::ChannelPan(hi),
                 CHANNEL_PITCH => Target::ChannelPitch(hi),
+                CHANNEL_ON => Target::ChannelOn(hi),
+                CHANNEL_MIXER_TRACK => Target::ChannelMixerTrack(hi),
                 CHANNEL_CUTOFF | CHANNEL_RESONANCE | CHANNEL_PAN_OFFSET | CHANNEL_VOLUME_MULT | CHANNEL_MOD_X | CHANNEL_MOD_Y => {
                     Target::ChannelLevel(hi, lo)
                 }
@@ -2549,6 +2600,46 @@ pub mod target {
             assert!(bipolar(channel(0, CHANNEL_VOLUME_MULT)) && !bipolar(channel(0, CHANNEL_CUTOFF)));
         }
 
+        /// The channel rack's swing knob, mixer box and LED as targets (spec: flp/events/automation.md "Targets", measured
+        /// 2026-11-02): ids, names in both directions, and the values a clip's level gives, with the measured examples.
+        #[test]
+        fn rack_targets_and_their_scales() {
+            assert_eq!(decode(0x4000_0001), Target::MainSwing);
+            assert_eq!(MAIN_SWING, 0x4000_0001);
+            assert_eq!(channel(3, CHANNEL_MIXER_TRACK), 0x0003_0008);
+            assert_eq!(decode(0x0003_0008), Target::ChannelMixerTrack(3));
+            assert_eq!(channel(2, CHANNEL_ON), 0x0002_0007);
+            assert_eq!(decode(0x0002_0007), Target::ChannelOn(2));
+            // Neighbours stay what they were.
+            assert_eq!(decode(0x4000_0002), Target::Other(0x4000_0002), "the main pitch");
+            assert_eq!(decode(channel(2, 9)), Target::Other(0x0002_0009));
+            for t in [MAIN_SWING, channel(0, CHANNEL_ON), channel(0, CHANNEL_MIXER_TRACK)] {
+                assert!(!bipolar(t), "{t:#010x}");
+            }
+            assert_eq!(point_range(Target::MainSwing), Some((0.0, 128.0)));
+            assert_eq!(point_range(Target::ChannelOn(0)), Some((0.0, 1.0)));
+            assert_eq!(point_range(Target::ChannelMixerTrack(0)), Some((0.0, 500.0)));
+
+            // Main swing: v × 128 to the nearest step.
+            for (v, swing) in [(0.25, 32), (0.333, 43), (0.01, 1), (1.0, 128), (0.0, 0), (0.5, 64)] {
+                assert_eq!(swing_of(v), swing, "{v}");
+            }
+            // The mixer track: v × 500 as a 32-bit float, half up, at most the last insert.
+            for (v, track) in [(0.001, 1), (0.0029, 1), (0.0031, 2), (0.004, 2), (0.005, 2), (0.0051, 3), (0.01, 5), (0.0, 0)] {
+                assert_eq!(mixer_track_of(v, 125), track, "{v}");
+            }
+            assert_eq!(mixer_track_of(0.05, 16), 16, "0.05 and more: the last insert of a 16-insert project");
+            assert_eq!(mixer_track_of(1.0, 16), 16);
+            assert_eq!(mixer_track_level(2), 0.004, "a new clip at Insert 2");
+            for track in 0..=125 {
+                assert_eq!(mixer_track_of(mixer_track_level(track), 125), track);
+            }
+            // The switch: on from 0.5.
+            for (v, on) in [(0.5, true), (0.5001, true), (0.4999, false), (0.0, false), (1.0, true)] {
+                assert_eq!(channel_on(v), on, "{v}");
+            }
+        }
+
         /// Initial values in stored units and back (spec: ui/settings-choices.md "Advanced: Initialize controls
         /// automatically"): the measured record is channel 0's volume at 10000, the knob's default.
         #[test]
@@ -2576,8 +2667,18 @@ pub mod target {
                 let v = c.unit().unwrap();
                 assert_eq!(InitControl::from_unit(t, v), Some(c), "{t:#010x}");
             }
-            // The main swing's start value: 0..128, as event 11 keeps it.
+            // The channel rack's controls in their own units (spec: flp/engine-events.md "Channel rack records"): the main
+            // swing 0..128 as event 11 keeps it (swing 64 → 64), the mixer box's track number (Insert 2 → 2), the LED's
+            // 1 = on.
             assert_eq!(InitControl::from_unit(InitControl::MAIN_SWING, 0.5), Some(InitControl { head: 0, target: InitControl::MAIN_SWING, value: 64 }));
+            assert_eq!(InitControl::from_unit(channel(1, CHANNEL_MIXER_TRACK), 0.004).map(|c| c.value), Some(2));
+            assert_eq!(InitControl::from_unit(channel(1, CHANNEL_ON), 1.0).map(|c| c.value), Some(1));
+            assert_eq!(InitControl::from_unit(channel(1, CHANNEL_ON), 0.4999).map(|c| c.value), Some(0));
+            for (t, stored) in [(MAIN_SWING, 64), (MAIN_SWING, 128), (channel(1, CHANNEL_MIXER_TRACK), 2), (channel(1, CHANNEL_MIXER_TRACK), 125), (channel(1, CHANNEL_ON), 1), (channel(1, CHANNEL_ON), 0)] {
+                let c = InitControl { head: 0, target: t, value: stored };
+                assert_eq!(InitControl::from_unit(t, c.unit().unwrap()), Some(c), "{t:#010x} {stored}");
+            }
+            assert_eq!(InitControl { head: 0, target: channel(1, CHANNEL_MIXER_TRACK), value: 2 }.unit(), Some(0.004));
             // Units not known: kept, not converted.
             for t in [channel_param(0, 4), slot_param(1, 0, 2), InitControl::MAIN_VOLUME, channel(0, CHANNEL_CUTOFF)] {
                 assert_eq!(InitControl::from_unit(t, 0.5), None);

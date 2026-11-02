@@ -5575,6 +5575,18 @@ impl App {
                 (target::mixer(t, target::MIXER_VOLUME), format!("{} - Volume", mix_name(t)), v)
             }
             Action::Tempo => (target::TEMPO, "Tempo".into(), crate::playlist::tempo_value(s.tempo)),
+            // The channel rack's swing knob, mixer box and LED, named as the original names their clips (spec:
+            // ui/channel-rack.md §19, measured 2026-11-02); a new clip stores the knob's level, the track over 500
+            // (Insert 2 → 0.004) and 1 for a channel that is on.
+            Action::Knob(crate::knobs::KnobId::Swing) => (target::MAIN_SWING, "Main swing".into(), f64::from(s.knob(crate::knobs::KnobId::Swing))),
+            Action::RackMixer(row) => (
+                target::channel(chan(row)?.index, target::CHANNEL_MIXER_TRACK),
+                format!("{} - Target mixer track", chan_name(row)),
+                target::mixer_track_level(chan(row)?.mixer_track),
+            ),
+            Action::ChannelEnable(row) => {
+                (target::channel(chan(row)?.index, target::CHANNEL_ON), format!("{} - Mute / solo", chan_name(row)), if chan(row)?.enabled { 1.0 } else { 0.0 })
+            }
             Action::Knob(k @ crate::knobs::KnobId::Eq(t, b, f)) => {
                 s.project.mixer.iter().find(|m| m.index == t)?;
                 let param = [target::EQ_GAIN, target::EQ_FREQ, target::EQ_WIDTH][usize::from(f.min(2))] + b.min(2);
@@ -9039,8 +9051,8 @@ impl App {
         let s = &self.state;
         let popup = match *a {
             Action::ChannelSelect(i) => rk::channel_menu(s, i, x, y),
-            Action::ChannelEnable(i) => rk::led_menu(s, i, x, y),
-            Action::RackMixer(i) => rk::mixer_menu(s, i, x, y),
+            Action::ChannelEnable(i) => rk::led_menu(s, i, self.automation_target(a), x, y),
+            Action::RackMixer(i) => rk::mixer_menu(s, i, self.automation_target(a), x, y),
             Action::Knob(k @ (KnobId::ChanVol(_) | KnobId::ChanPan(_) | KnobId::Swing)) => rk::knob_menu(s, k, self.automation_target(a), x, y),
             Action::RackFilter => rk::filter_edit_menu(s, x, y),
             Action::RackLen => rk::length_menu(s, x, y),

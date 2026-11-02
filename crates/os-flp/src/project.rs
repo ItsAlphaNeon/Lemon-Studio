@@ -6916,6 +6916,48 @@ mod tests {
         assert_eq!(again.automations[1].target().map(decode), Some(Target::SlotParam(1, 0, 8)));
     }
 
+    /// The channel rack's swing knob, mixer box and LED as targets (spec: flp/events/automation.md "Targets",
+    /// flp/engine-events.md "Event 216", "Channel rack records"; measured 2026-11-02): a clip on each is written as a 227
+    /// link with target 0x4000_0001, `channel << 16 | 8` or `channel << 16 | 7` and read back as it was, and their
+    /// initial values are 12-byte records in the controls' own units (swing 64 → 64, Insert 2 → 2, on → 1). Moving the
+    /// channels moves the channel targets with them.
+    #[test]
+    fn rack_control_automation_and_initial_values_round_trip() {
+        use os_model::target::{self, decode, Target};
+        let mut p = new_project();
+        for (i, name) in [(2u16, "Main swing"), (3, "Kick - Target mixer track"), (4, "Clap - Mute / solo")] {
+            p.channels.push(Channel { kind: ChannelKind::Automation, ..sampler(i, name, 0) });
+        }
+        let (swing, track, on) = (target::MAIN_SWING, target::channel(0, target::CHANNEL_MIXER_TRACK), target::channel(1, target::CHANNEL_ON));
+        p.automations.push(new_automation(2, swing, 0.5, 4.0));
+        p.automations.push(new_automation(3, track, 0.004, 4.0));
+        p.automations.push(new_automation(4, on, 1.0, 4.0));
+        let mut arr = default_arrangement();
+        arr.clips = (0..3).map(|k| Clip::new(0, 384, k, ClipSource::Channel(2 + k))).collect();
+        p.arrangements = vec![arr];
+        p.init_controls = [(track, 2), (on, 1), (swing, 64)].map(|(target, value)| InitControl { head: 0, target, value }).to_vec();
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.automations, p.automations);
+        assert_eq!(back.init_controls, p.init_controls);
+        let links = events_of(&file).unwrap().iter().filter(|e| e.id == id::AUTO_LINK).filter_map(|e| e.data()).map(|d| d[8..12].to_vec()).collect::<Vec<_>>();
+        assert_eq!(links, [[0x01, 0, 0, 0x40], [8, 0, 0, 0], [7, 0, 1, 0]]);
+        let data = event_data(&file, id::INIT_CONTROLS).unwrap();
+        assert_eq!(data, [[0u8; 4], [8, 0, 0, 0], [2, 0, 0, 0], [0; 4], [7, 0, 1, 0], [1, 0, 0, 0], [0; 4], [1, 0, 0, 0x40], [64, 0, 0, 0]].concat());
+        let read: Vec<Option<Target>> = back.automations.iter().map(|a| a.target().map(decode)).collect();
+        assert_eq!(read, [Some(Target::MainSwing), Some(Target::ChannelMixerTrack(0)), Some(Target::ChannelOn(1))]);
+        // The two sampler channels swapped: the mixer box's and the LED's targets follow, their control points too; the
+        // swing stays.
+        let mut m = back.clone();
+        m.patterns[0].controls = vec![ControlPoint::new(0, 0, target::CHANNEL_MIXER_TRACK, 2), ControlPoint::new(0, 1, target::CHANNEL_ON, 0)];
+        m.reorder_channels(&[1, 0, 2, 3, 4]);
+        assert_eq!(m.patterns[0].controls.iter().map(|c| c.kind).collect::<Vec<_>>(), [target::channel(1, 8), target::channel(0, 7)]);
+        apply(&m, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        let read: Vec<Option<Target>> = again.automations.iter().map(|a| a.target().map(decode)).collect();
+        assert_eq!(read, [Some(Target::MainSwing), Some(Target::ChannelMixerTrack(1)), Some(Target::ChannelOn(0))]);
+    }
+
     /// A clip on an effect inside a container (Lemon Studio's member targets: the container slot's parameter packing
     /// the member's id and the item, spec plugins/patcher/README.md §4.2) is a slot parameter link like any other: up
     /// to the last member's dry level, 0x7FFF, it is written and read back as it is.
