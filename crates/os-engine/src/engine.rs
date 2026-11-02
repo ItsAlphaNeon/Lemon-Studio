@@ -38,6 +38,7 @@ mod multicore;
 pub use multicore::LoadGate;
 mod pdc;
 mod rec;
+pub use layers::Mt19937;
 pub use param_auto::PARAM_STEP;
 pub use rec::{Point as RecordPoint, RecordTap};
 

@@ -28,6 +28,11 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   channel through (ticked by default) gives a hosted VST, VST 3 or CLAP instrument a MIDI device's notes on the MIDI
   channel they came on, and a recorded note takes that channel as its colour. The two checks are saved in `.lemon`
   projects
+- A channel's Burn MIDI to ▸ Current pattern / New pattern writes the notes the channel generates from its notes in
+  the current pattern: its Misc tab's arpeggiator and echo delay (worked out as the original plays them; switched off
+  afterwards, since the engine does not play them yet), or the notes its CLAP or VST 3 instrument puts out (an
+  arpeggiator or sequencer plugin, played the pattern offline). New pattern puts them into the next empty pattern.
+  One undo step
 - The rack's Restretch all (Ctrl+Alt+R) fits every stretched sample and audio clip to the project tempo at once
   (they follow the tempo by themselves too, also with tempo automation)
 - The rack's knob, mixer box and LED menus: Edit automation in piano roll opens the piano roll on the channel volume

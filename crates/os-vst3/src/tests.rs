@@ -1155,3 +1155,26 @@ fn notes_go_on_their_midi_channel() {
         assert_eq!((on.event.note_on.channel, off.event.note_off.channel, plain.event.note_on.channel), (3, 3, 0));
     }
 }
+
+/// The notes among a processor's output events: ons, offs and a note on of velocity 0 as an off; other events are
+/// passed over (Burn MIDI to, spec: ui/channel-rack.md §18).
+#[test]
+fn notes_among_output_events() {
+    let on = |at: i32, pitch: i16, velocity: f32| Event {
+        bus_index: 0,
+        sample_offset: at,
+        ppq_position: 0.0,
+        flags: 0,
+        type_: NOTE_ON_EVENT,
+        event: EventData { note_on: NoteOnEvent { channel: 3, pitch, tuning: 0.0, velocity, length: 0, note_id: -1 } },
+    };
+    let off = Event { type_: NOTE_OFF_EVENT, event: EventData { note_off: NoteOffEvent { channel: 3, pitch: 60, velocity: 0.0, note_id: -1, tuning: 0.0 } }, ..on(9, 0, 0.0) };
+    let other = Event { type_: 4, ..on(5, 61, 1.0) };
+    let list = EventList::create();
+    for e in [on(2, 60, 0.5), other, on(6, 64, 0.0), off] {
+        list.get().push(e);
+    }
+    let got: Vec<_> = notes_of(&list.get().take()).map(|n| (n.offset, n.key, n.channel, n.on, n.velocity)).collect();
+    assert_eq!(got, [(2, 60, 3, true, 0.5), (6, 64, 3, false, 0.0), (9, 60, 3, false, 0.0)]);
+    assert!(list.get().take().is_empty());
+}

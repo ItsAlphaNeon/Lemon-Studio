@@ -589,6 +589,11 @@ impl EventList {
     pub fn push(&self, e: Event) {
         self.events.borrow_mut().push(e);
     }
+
+    /// The events added since the last call (a processor's output events), oldest first.
+    pub fn take(&self) -> Vec<Event> {
+        std::mem::take(&mut *self.events.borrow_mut())
+    }
 }
 
 impl IEventList for EventList {

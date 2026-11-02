@@ -1463,6 +1463,8 @@ pub enum RCmd {
     LoadSample(usize),
     /// Wrap instrument in container (the original's Patcherize; `App::wrap_channel`).
     Wrap(usize),
+    /// Burn MIDI to ▸ Current pattern (false) / New pattern (true) (`App::burn_midi`).
+    BurnMidi(usize, bool),
     Clone(usize),
     Delete(usize),
     /// Assign to new instrument track: the row's channel (the selected ones when it is selected) gets a playlist track
@@ -1837,7 +1839,15 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("MIDI channel through", RCmd::Through(r)).mark(Mark::Check(through(s, r))),
         PItem::sub("Receive notes from", receive_items(s, r)),
         PItem::not_yet("Create instrument..."),
-        PItem::sub("Burn MIDI to", vec![PItem::not_yet("Current pattern"), PItem::not_yet("New pattern")]),
+        // Burn MIDI to (§18; Lemon Studio's design, `burn_midi`): the notes the channel's arpeggiator, echo delay or
+        // plugin generates, into the current pattern or a new one.
+        {
+            let burn = |label: &'static str, new: bool| {
+                let i = it(label, RCmd::BurnMidi(r, new));
+                if crate::burn_midi::can_burn(s, r) { i } else { i.off() }
+            };
+            PItem::sub("Burn MIDI to", vec![burn("Current pattern", false), burn("New pattern", true)])
+        },
     ]);
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
@@ -2176,6 +2186,9 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         let m = crate::track_links::assign_instrument(&mut app.state, &rows);
         app.invalidate();
         return m;
+    }
+    if let RCmd::BurnMidi(r, new) = c {
+        return app.burn_midi(r, new);
     }
     let mouse = app.mouse;
     let sel: Vec<usize> = app.state.rack.sel.iter().copied().collect();
@@ -2541,7 +2554,8 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::WavePreview(_)
         | RCmd::Through(_)
         | RCmd::Restretch
-        | RCmd::Wrap(_) => None,
+        | RCmd::Wrap(_)
+        | RCmd::BurnMidi(..) => None,
     };
     // Channels let go without asking (`ask_delete`) are deleted now.
     let msg = match app.state.rack.delete_now.take() {
@@ -3122,6 +3136,39 @@ mod tests {
         let Cmd::Rack(c) = c else { panic!() };
         run(&mut app, c);
         assert_eq!(app.state.rack.loop_len, BTreeMap::from([(0, 3)]), "only the selected channel's loop burned");
+    }
+
+    /// The channel menu's Burn MIDI to ▸ (§18): Current pattern and New pattern on the right-clicked channel, enabled on
+    /// a channel that plays notes and greyed on an automation clip's; New pattern burns into the next empty pattern.
+    #[test]
+    fn channel_menu_burn_midi() {
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        let burn = |app: &App, r: usize| {
+            let m = channel_menu(&app.state, r, 0.0, 0.0);
+            let sub = m.items.iter().find(|i| i.label == "Burn MIDI to").map(|i| i.children.clone()).unwrap();
+            sub.iter().map(|i| (i.label.to_string(), i.enabled, i.cmd.clone())).collect::<Vec<_>>()
+        };
+        let row = |new: bool| Cmd::Rack(RCmd::BurnMidi(1, new));
+        assert_eq!(burn(&app, 1), [("Current pattern".to_string(), true, row(false)), ("New pattern".to_string(), true, row(true))]);
+        let knob = crate::knobs::KnobId::ChanVol(0);
+        let (tgt, name, v) = app.automation_target(&crate::app::Action::Knob(knob)).unwrap();
+        crate::playlist::run(&mut app, Cmd::CreateAutomation(tgt, name, v));
+        let auto = app.state.project.channels.len() - 1;
+        assert!(burn(&app, auto).iter().all(|(_, on, _)| !on), "greyed on an automation clip's channel");
+
+        // Burn a two-echo row of channel 1's step into a new pattern.
+        let cur = app.state.pattern.max(1);
+        app.state.pattern = cur;
+        let ch = app.state.project.channels[1].index;
+        crate::patterns::pat_mut(&mut app.state, cur).notes.push(os_model::Note::step(ch, 0));
+        let e = &mut app.state.project.channels[1].misc.echo;
+        (e.feed, e.echoes, e.time) = (0.25, 2, 48.0 / 384.0);
+        let Cmd::Rack(c) = burn(&app, 1)[1].2.clone() else { panic!() };
+        run(&mut app, c);
+        assert_ne!(app.state.pattern, cur);
+        let p = app.state.project.pattern(app.state.pattern).unwrap();
+        assert_eq!(p.notes.iter().map(|n| (n.channel, n.position)).collect::<Vec<_>>(), [(ch, 0), (ch, 24), (ch, 48)]);
     }
 
     /// The check options that work are enabled and tick on a click; Always show advanced controls shows the loop boxes

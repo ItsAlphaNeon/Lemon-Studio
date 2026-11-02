@@ -27,6 +27,7 @@ mod audio_bench;
 mod open_bench;
 mod browser;
 mod browser_index;
+mod burn_midi;
 mod cable;
 mod capture;
 #[cfg(target_os = "linux")]

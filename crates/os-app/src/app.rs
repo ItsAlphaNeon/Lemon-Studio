@@ -9585,7 +9585,7 @@ fn settle_origins(p: &mut Project) {
 }
 
 /// An empty sampler channel at rack position `i`.
-fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
+pub(crate) fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
     Channel {
         id: os_model::Id::NONE,
         index: i,

@@ -101,13 +101,15 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   the plugin window's Link all parameters..., Change icon..., Save channel state as... and Browse channel states, work
   as Lemon Studio's design (Change icon is kept for the session only)
   ([playlist.rs](../crates/os-app/src/playlist.rs), [channel_states.rs](../crates/os-app/src/channel_states.rs))
-- [ ] **Channel rack right-click menus.** 8 of the rack's own entries greyed out on 2026-11-02, counted entry by
-  entry after 27 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
+- [ ] **Channel rack right-click menus.** 6 of the rack's own entries greyed out on 2026-11-02, counted entry by
+  entry after 29 more were enabled (Receive notes from ▸ Unlock and Computer keyboard, Switch auto-bypass for all
   plugins, Change icon ▸, Show waveform preview, MIDI channel through, Restretch all, Detached and Patcherize, as
-  Wrap in container, on 2026-10-30; Assign to new instrument track, with the playlist's instrument tracks, on
-  2026-11-02): Loop starter and its 3 playlist-track options (it is built on the original's online loop library),
-  Auto fill (greyed on every channel tried in the original; what it does is unknown), Create instrument (no multi-sample instrument to put the samples
-  in yet), Burn MIDI to ▸ (2) (no plugin hands its notes back to the host yet). The knob, mixer box and LED menus'
+  Wrap in container, on 2026-10-30; Assign to new instrument track, with the playlist's instrument tracks, and Burn
+  MIDI to ▸ Current pattern and New pattern, from the channel's arpeggiator and echo delay or the notes its CLAP or
+  VST 3 plugin puts out ([burn_midi.rs](../crates/os-app/src/burn_midi.rs)), on 2026-11-02): Loop starter and its 3
+  playlist-track options (it is built on the original's online loop library), Auto fill (greyed on every channel
+  tried in the original; what it does is unknown), Create instrument (no multi-sample instrument to put the samples
+  in yet). The knob, mixer box and LED menus'
   Automation and Remote control groups add 18 more, after 5 were enabled on 2026-10-30 (Edit automation in piano roll
   on the volume and panning knobs, the swing knob's Set as song start value, MIDI learn... on the mixer box and the
   LED, Edit automation in a window on the volume and panning knobs: a second event editor window): Override global
@@ -115,7 +117,7 @@ Greyed-out controls and partial features. These can land alongside the blockers.
   not described), and on the swing knob, the mixer box and the LED Edit automation, Edit automation in a window,
   Create automation clip and Edit automation in piano roll (the engine plays no automation of them, and the mixer box's and the LED's
   targets in the original's files are not measured), Set as song start value on the mixer box and the LED (the same)
-  ([rack.rs](../crates/os-app/src/rack.rs))
+  ([rack.rs](../crates/os-app/src/rack.rs), [burn_midi.rs](../crates/os-app/src/burn_midi.rs))
 - [ ] **Main menu bar.** 2 of its 137 entries greyed out on 2026-10-30, counted entry by entry after Save audio
   clipboard to browser, VIEW > Remote control, HELP > Tutorials ▸, Diagnostics, TOOLS > Set up for live performance,
   Switch auto-bypass for all plugins, Chord progression tool..., Set keyboard focus of all plugins to ▸ (its Enabled
