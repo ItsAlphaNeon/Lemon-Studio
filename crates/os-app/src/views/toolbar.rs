@@ -1005,6 +1005,7 @@ pub fn paint_status_bar(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
     x -= 8.0;
     split_button(ui, s, &mut x, cy);
+    float_button(ui, s, &mut x, cy);
     x -= 8.0;
     for (icon, on, action, hint) in mode_buttons(s).into_iter().rev() {
         button(ui, &mut x, icon, on, action, hint);
@@ -1052,6 +1053,21 @@ fn split_button(ui: &mut Ui, s: &State, x: &mut f32, cy: f32) {
     for pane in panes {
         ui.c.fill_rrect(pane, 1.0, ink);
     }
+    *x = b.x - 2.0;
+}
+
+/// The status bar's button for the floating windows' slide (`crate::float_layer`): a window with an arrow the way it
+/// goes next.
+fn float_button(ui: &mut Ui, s: &State, x: &mut f32, cy: f32) {
+    let b = Rect::new(*x - 24.0, (cy - 11.0).round(), 24.0, 22.0);
+    let down = s.float_layer.is_down();
+    let hov = ui.hit(b, Action::FloatLayer, "Floating windows - Shift+L");
+    let look = if ui.down(b, &Action::FloatLayer) { super::Look::Hot } else if down { super::Look::On } else if hov { super::Look::Hover } else { super::Look::Off };
+    let ink = super::tool_face(ui, b, look);
+    ui.c.stroke_rrect(Rect::new(b.x + 6.5, b.y + 4.5, 11.0, 7.0), 1.0, 1.0, ink);
+    let (cx, y0, y1) = (b.cx(), b.y + 14.0, b.y + 17.0);
+    let (tip, wing) = if down { (y0, y1) } else { (y1, y0) };
+    ui.c.polyline(&[(cx - 3.5, wing), (cx, tip), (cx + 3.5, wing)], 1.2, ink);
     *x = b.x - 2.0;
 }
 

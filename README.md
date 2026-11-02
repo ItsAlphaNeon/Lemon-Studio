@@ -60,7 +60,9 @@ own content. Side branches are named `cutting-edge-<topic>`.
   - window keys: split windows other than the one last in front are muted a little, fading as Omarchy's borders do
     (floating windows change nothing). Ctrl+Alt+arrows move the keyboard to the split window that way (floating windows
     are no stops; while one is maximized, the one that way is maximized instead), Ctrl+Alt+Shift+arrows swap split
-    windows, and F maximizes the window under the mouse or brings the split back. The window manager's close shortcut
+    windows, and F maximizes the window under the mouse or brings the split back. Shift+L, or the status bar's button
+    next to the split button, slides the floating windows and plugin windows down out of sight and back up, together, as
+    Omarchy's scratchpad does (Classic has the key). A floating window that opens meanwhile brings them back. The window manager's close shortcut
     closes the floating windows first, the one in front first (plugin windows, the instrument rack, the channel window,
     tool windows), whichever window has the keyboard; the app closes only when none is open.
 

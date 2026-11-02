@@ -176,6 +176,8 @@ struct Frame {
     plain: Cell<bool>,
     /// A title-bar drag Hyprland carries out (`hyprland::Drag`).
     hypr_drag: RefCell<Option<super::hyprland::Drag>>,
+    /// Where it rests while the floating windows slide (`FrameWindow::slide`).
+    slide_home: Cell<Option<(i32, i32)>>,
 }
 
 /// A plugin window. Dropping it destroys the native window (close the plugin's editor first).
@@ -289,6 +291,7 @@ impl FrameWindow {
             last_press: Cell::new(None),
             plain: Cell::new(false),
             hypr_drag: RefCell::new(None),
+            slide_home: Cell::new(None),
         });
         conn.frames.borrow_mut().insert(win, Rc::downgrade(&f));
         Ok(FrameWindow { f })
@@ -357,6 +360,22 @@ impl FrameWindow {
             self.f.refit();
         }
         self.f.apply_clip();
+    }
+
+    /// The floating windows slide (`crate::float_layer`): `at` of the screen's height below where it rests (0: back
+    /// there). It stays mapped, out of sight, at the bottom.
+    pub fn slide(&self, at: f32) {
+        let f = &self.f;
+        if at == 0.0 {
+            if let Some(home) = f.slide_home.take() {
+                f.place(home);
+            }
+            return;
+        }
+        let home = f.slide_home.get().unwrap_or_else(|| f.top_left());
+        f.slide_home.set(Some(home));
+        let height = f.conn.c.setup().roots.iter().find(|r| r.root == f.conn.root).map_or(0, |r| i32::from(r.height_in_pixels));
+        f.place((home.0, home.1 + (at * height as f32).round() as i32));
     }
 
     /// The native frame window (an X11 window id).

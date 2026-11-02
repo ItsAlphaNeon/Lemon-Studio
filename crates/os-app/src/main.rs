@@ -50,6 +50,7 @@ mod data_folder;
 mod desktop;
 mod device;
 mod dialog;
+mod float_layer;
 mod floating;
 mod journal;
 mod native;

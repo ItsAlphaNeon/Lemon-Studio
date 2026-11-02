@@ -90,6 +90,14 @@ impl FrameWindow {
         frame_call!(self, w => w.detached())
     }
 
+    /// The floating windows slide (`crate::float_layer`): a window of its own moves; one drawn in the app's slides as it
+    /// is painted.
+    pub fn slide(&self, at: f32) {
+        if let FrameWindow::X11(w) = self {
+            w.slide(at);
+        }
+    }
+
     pub fn set_detached(&self, owner: isize, on: bool) {
         frame_call!(self, w => w.set_detached(owner, on))
     }

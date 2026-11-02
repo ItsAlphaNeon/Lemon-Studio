@@ -66,7 +66,8 @@ fn text(t: &Token) -> String {
 /// The open windows of `app`, back to front.
 pub fn tokens(app: &App) -> Vec<Token> {
     let s = &app.state;
-    s.z.iter()
+    let z = crate::float_layer::whole_z(s);
+    z.iter()
         .filter_map(|&w| match w {
             Win::Plugin => Some(Token::Channel(s.plugin_channel)),
             Win::Hosted(k) => app.plugins.hosted.get(&k).filter(|h| h.window.is_some()).map(|_| Token::Plugin(k)),
@@ -74,7 +75,7 @@ pub fn tokens(app: &App) -> Vec<Token> {
         })
         .chain(
             // Plugin windows of their own (not in the window stack): after the rest.
-            app.plugins.hosted.iter().filter(|(k, h)| h.window.is_some() && !s.z.contains(&Win::Hosted(**k))).map(|(k, _)| Token::Plugin(*k)),
+            app.plugins.hosted.iter().filter(|(k, h)| h.window.is_some() && !z.contains(&Win::Hosted(**k))).map(|(k, _)| Token::Plugin(*k)),
         )
         .collect()
 }

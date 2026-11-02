@@ -240,6 +240,8 @@ pub enum Action {
     /// status bar's button for the next preset.
     TileSplit(usize),
     TilePreset,
+    /// The status bar's button for the floating windows' slide (`crate::float_layer`).
+    FloatLayer,
     /// Floating window title bar (drag to move) and close button.
     WinDrag(Win),
     CloseWin(Win),
@@ -1169,6 +1171,8 @@ pub struct State {
     /// The tiling layout's split views (`crate::tiles`), and their animation under way.
     pub tiles: crate::tiles::Tiles,
     pub tile_anim: Option<crate::tiles::Anim>,
+    /// The floating windows slid away or under way (`crate::float_layer`).
+    pub float_layer: crate::float_layer::FloatLayer,
     /// The mixer tracks and rack rows a control surface's faders and pads take, marked while its Shift is held or a
     /// moment after its banks move.
     pub surface_marks: crate::surface::Marks,
@@ -1757,6 +1761,7 @@ impl App {
                 global_snap: Default::default(),
                 tiles: crate::tiles::Tiles::load(),
                 tile_anim: None,
+                float_layer: Default::default(),
                 surface_marks: Default::default(),
                 plugin_edited: false,
                 veil: [0.0; 3],
@@ -2344,6 +2349,12 @@ impl App {
             return;
         }
         if self.state.link_box.take().is_some() {
+            self.invalidate();
+            return;
+        }
+        // The floating windows slid away come back first: the app does not close behind them.
+        if self.state.float_layer.is_down() {
+            self.state.float_layer.pressed = true;
             self.invalidate();
             return;
         }
@@ -3445,7 +3456,7 @@ impl App {
         }
         self.state.z.retain(|w| !matches!(w, Win::Hosted(r) if !docked.contains(r)));
         for &r in &docked {
-            if !self.state.z.contains(&Win::Hosted(r)) {
+            if !self.state.z.contains(&Win::Hosted(r)) && !self.state.float_layer.keeps(r) {
                 self.state.z.push(Win::Hosted(r));
             }
         }
@@ -4482,6 +4493,7 @@ impl App {
             || self.state.cpu.fps_view
             || self.state.tile_anim.is_some()
             || self.veil_fade.is_some()
+            || self.state.float_layer.sliding()
     }
 
     /// The tiling layout's windows changed places (shown, hidden, swapped, restored, another preset): the frame repaints
@@ -4524,6 +4536,34 @@ impl App {
             self.invalidate();
         }
         self.veils_tick(now);
+        self.float_layer_tick(now);
+    }
+
+    /// Shift+L or the button pressed, a floating window opened while they are down, and the slide on its way
+    /// (`crate::float_layer`). Plugin windows of their own move with it, on their own screen's height.
+    fn float_layer_tick(&mut self, now: std::time::Instant) {
+        use crate::float_layer as layer;
+        #[cfg(target_os = "linux")]
+        let native = self.plugins.native_rows();
+        #[cfg(not(target_os = "linux"))]
+        let native: Vec<usize> = Vec::new();
+        let motion = !cfg!(test) && self.state.cables.borrow().animations();
+        let pressed = std::mem::take(&mut self.state.float_layer.pressed);
+        let down = self.state.float_layer.is_down();
+        let moved = if pressed && down || layer::wanted_back(&self.state, &native) {
+            layer::go(&mut self.state, false, Vec::new(), motion, now);
+            true
+        } else if pressed && layer::has_windows(&self.state, &native) {
+            layer::go(&mut self.state, true, native, motion, now);
+            true
+        } else {
+            false
+        };
+        if layer::step(&mut self.state, now) || moved {
+            #[cfg(target_os = "linux")]
+            self.plugins.slide_native(self.state.float_layer.at());
+            self.invalidate();
+        }
     }
 
     /// The split windows without the keyboard mute (`tiles::veil_target`): with "Playful", fading as Hyprland's
@@ -4758,7 +4798,7 @@ impl App {
         self.playback_damage();
         self.journal_tick();
         // The tiling layout's windows moving, or its veils fading: the next frame of it.
-        self.has_damage() || self.state.tile_anim.is_some() || self.veil_fade.is_some()
+        self.has_damage() || self.state.tile_anim.is_some() || self.veil_fade.is_some() || self.state.float_layer.sliding()
     }
 
     /// Paint the whole frame (`damage` None) or just the damaged rect.
@@ -5082,7 +5122,9 @@ impl App {
             alone: self.state.alone(),
             maxed: self.state.wins.map(|w| w.maxed),
         };
+        let lifted = crate::float_layer::lift(&mut self.state);
         let overlays = views::paint(&mut ui, &self.state, &info);
+        crate::float_layer::unlift(&mut self.state, lifted);
         if self.state.cables.get_mut().take_slowed() {
             self.damage_win(Win::Mixer);
         }
@@ -8656,6 +8698,27 @@ impl App {
             }
             return self.undo_key(alt);
         }
+        // Shift+L: the floating windows slide away or come back (`crate::float_layer`); once for a held key.
+        if let Key::Character(c) = key
+            && c.eq_ignore_ascii_case("l")
+            && self.shift
+            && !ctrl
+            && !alt
+            && self.state.menu_open.is_none()
+            && !self.state.settings.open
+            && self.state.playlist.edit.is_none()
+            && self.state.playlist.popup.is_none()
+            && !self.state.plugdb.finding
+            && self.state.pat_ui.name_box.is_none()
+            && !self.state.pat_ui.confirm
+            && !self.browser_takes_typing()
+            && !self.state.perf.finding
+        {
+            if !self.repeat {
+                self.state.float_layer.pressed = true;
+            }
+            return;
+        }
         // The tiling layout's window keys: Ctrl+Alt+arrows, F (`window_key`).
         let s = &self.state;
         if s.tiled() && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && s.playlist.popup.is_none() && self.window_key(key, ctrl, alt) {
@@ -9759,6 +9822,7 @@ impl App {
                 }
             }
             Action::TilePreset => crate::tiles::next_preset(s),
+            Action::FloatLayer => s.float_layer.pressed = true,
             // A second one leaves it maximized (spec: ui/toolbar-buttons.md §2).
             Action::ShowMax(w) => {
                 s.raise(w);

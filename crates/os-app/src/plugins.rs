@@ -1260,6 +1260,20 @@ impl Plugins {
         }
     }
 
+    /// Linux: the open plugin windows of their own, by key (`crate::float_layer`).
+    #[cfg(target_os = "linux")]
+    pub fn native_rows(&self) -> Vec<usize> {
+        self.hosted.iter().filter(|(_, h)| h.window.as_ref().is_some_and(|w| w.embed().is_none())).map(|(&r, _)| r).collect()
+    }
+
+    /// Linux: the plugin windows of their own at `at` of their slide (`crate::float_layer`).
+    #[cfg(target_os = "linux")]
+    pub fn slide_native(&self, at: f32) {
+        for w in self.hosted.values().filter_map(|h| h.window.as_ref()) {
+            w.slide(at);
+        }
+    }
+
     /// Rows whose plugin window is open and docked in the main window.
     #[cfg(plugin_windows)]
     /// Linux: the open plugin windows drawn in the app's, by key.
