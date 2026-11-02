@@ -235,6 +235,16 @@ impl Voices {
         self.pool.iter().filter(|v| v.state == State::Held).map(|v| v.sent)
     }
 
+    /// The keys whose note offs end every note that has not ended: the held voices' keys and a mono channel's
+    /// listed notes (an off for a key with nothing left to end does nothing). Audio clips' voices are left out: they
+    /// end with a choke of their own.
+    pub fn ending_keys(&self) -> Vec<u8> {
+        let held = self.pool.iter().filter(|v| v.state == State::Held && v.voice.is_none()).map(|v| v.sent);
+        let mut keys: Vec<u8> = self.list.iter().copied().chain(held).collect();
+        keys.sort_unstable();
+        keys
+    }
+
     /// Current tuning of instrument key `key`.
     fn tuning(&self, key: u8) -> f32 {
         self.glides.iter().find(|g| g.key == key).map_or(0.0, |g| g.now)

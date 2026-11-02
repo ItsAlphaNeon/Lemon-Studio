@@ -3296,13 +3296,19 @@ impl Engine {
                 i += 1;
             }
         }
+        // Steps (length 0) have no end of their own: with the notes whose offs are pending, every note an instrument
+        // still holds is released with the song (spec: audio/song-structure.md "A note").
+        if song_end {
+            for (c, v) in self.note_voices.iter().enumerate() {
+                self.inst_events.extend(v.ending_keys().into_iter().map(|key| notes::Event::off(c, 0, key)));
+            }
+        }
         self.sounding.retain(|&(_, _, end)| end == u64::MAX || (end > tick && !song_end));
     }
 
     /// Triggers the notes that start on `tick`.
     fn start_notes(&mut self, tick: u64) {
-        // A plain step lights its key for one step (instrument channels: it ends after one step, a Lemon Studio choice
-        // for hosted plugins, which have no song-length release).
+        // A plain step lights its key for one step; it sounds on until the song's end (`release_notes`).
         let step = u64::from(self.ppq / 4).max(1);
         for t in std::mem::take(&mut self.late) {
             if t.tick != tick {
@@ -3457,7 +3463,12 @@ impl Engine {
                         self.inst_offs.push((if song { self.end_tick } else { u64::MAX }, t.channel, k, voice));
                     }
                     Some(c) => self.inst_offs.push((c, t.channel, k, voice)),
-                    None => self.inst_offs.push((t.end.unwrap_or(t.tick + step), t.channel, k, None)),
+                    // A step has no end of its own: released with the song (`release_notes`).
+                    None => {
+                        if let Some(end) = t.end {
+                            self.inst_offs.push((end, t.channel, k, None));
+                        }
+                    }
                 }
             }
             return;
@@ -5314,6 +5325,25 @@ mod tests {
         let ons: Vec<u64> = probe.lock().unwrap().log.iter().filter(|l| l.1).map(|l| l.0).collect();
         assert_eq!(ons[0], laws::tick_to_frame(36.0, 96, 130.0, 48000), "{ons:?}");
         assert_eq!(ons[1], laws::tick_to_frame(48.0, 96, 130.0, 48000), "{ons:?}");
+    }
+
+    // spec: audio/song-structure.md "A note": a step has no end of its own and is released with the song.
+    #[test]
+    fn a_step_on_an_instrument_is_released_with_the_song() {
+        use os_model::{Clip, ClipSource};
+        let mut p = song(vec![Note::step(0, 0), long_note(96, 48, 0)], vec![Clip::new(0, 384, 0, ClipSource::Pattern(1))]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        let end = e.end_tick();
+        e.render_all(512);
+        drop(e);
+        let at = |t: u64| laws::tick_to_frame(t as f64, 96, 130.0, 48000);
+        let offs: Vec<(u64, u8)> = probe.lock().unwrap().log.iter().filter(|l| !l.1).map(|l| (l.0, l.2)).collect();
+        // The long note ends at its end; the step only on the song's last tick, not after a sixteenth.
+        assert_eq!(offs, vec![(at(144), 60), (at(end - 1), 60)], "song end at tick {end}");
     }
 
     /// Truncate swing notes: a swung note with a length keeps its end; without it the whole note moves (spec:
