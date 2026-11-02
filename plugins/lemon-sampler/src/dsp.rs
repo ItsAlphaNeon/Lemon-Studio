@@ -229,19 +229,18 @@ const C: f64 = std::f64::consts::LN_2 / 12.0 / 100.0;
 /// A gain closer to zero than this (2^-24) is 0 (spec: audio/conventions.md "Glide", rule 3).
 const TINY: f32 = 5.960_464_5e-8;
 
-/// A voice's pan gains for a pan position (−1..1, clamped): the constant-power split at √2, so a centred pan is 1 on
-/// both sides. The host applies the channel's own pan split on the instrument's output, so with either pan centred
-/// the product is the split of their sum (spec: audio/voice-levels.md "Final levels", audio/conventions.md
-/// "Pan split").
+/// A voice's pan gains for a pan position (−1..1, clamped) when the host splits the channel's pan after the voice: the
+/// constant-power split of `sqrt(2)`, so a centred pan is 1 on both sides, and with either pan centred the product is
+/// the split of their sum (spec: audio/voice-levels.md "Final levels", audio/conventions.md "Pan split").
 pub fn pan_gains(pan: f64) -> (f32, f32) {
-    let [l, r] = split(pan as f32, 1.0);
+    let [l, r] = split(pan as f32, std::f32::consts::SQRT_2);
     (l, r)
 }
 
-/// The pan split of `level` at `pan` (spec: audio/conventions.md "Pan split"), the level passed as `level * sqrt(2)` in
-/// single so that a centred pan gives it on both sides: the angle and the products in doubles, each gain rounded once.
+/// The pan split of `level` at `pan` (spec: audio/conventions.md "Pan split"): the angle and the products in doubles,
+/// each gain rounded once. A centred pan gives `level * 0.7071...` on each side.
 fn split(pan: f32, level: f32) -> [f32; 2] {
-    let lv = f64::from(level * std::f32::consts::SQRT_2);
+    let lv = f64::from(level);
     let a = (f64::from(pan.clamp(-1.0, 1.0)) + 1.0) * (PI / 4.0);
     [(lv * a.cos()) as f32, (lv * a.sin()) as f32]
 }
@@ -591,6 +590,8 @@ pub struct Engine {
     counted: u64,
     /// Samples left of the `process` call (host ticks: the call is one tick).
     call: u32,
+    /// The channel's volume (with its multiplier) and pan (with its offset), as the host hands them (`set_levels`).
+    levels: (f32, f32),
     /// Stretchers of the realtime stretch voices (made when first needed, then reused).
     streams: Vec<Rt>,
     /// Host voices that ended since the last `take_ended`: (key, host note id).
@@ -628,6 +629,7 @@ impl Engine {
             clock: 0.0,
             counted: 0,
             call: 0,
+            levels: (std::f32::consts::SQRT_2, 0.0),
             streams: Vec::new(),
             ended: Vec::with_capacity(voices * 2),
         }
@@ -641,6 +643,15 @@ impl Engine {
             self.ended.clear();
         }
         self.rate = rate;
+    }
+
+    /// The channel's levels: its volume times its volume multiplier, and its pan plus its pan offset (spec:
+    /// audio/voice-levels.md "The channel's levels"). Every voice's final levels take them from the next tick start
+    /// on, sounding voices included ("Changes while a note sounds"). Without a call they are `sqrt(2)` (a single) and
+    /// 0, for a host that puts the channel's levels on the output itself with a split of its own: a centred voice is
+    /// then at its note's volume on both sides, and the host's split makes it the split of the sum of the pans.
+    pub fn set_levels(&mut self, volume: f32, pan: f32) {
+        self.levels = (volume, pan);
     }
 
     /// Drops every voice. Not reported: a host resetting the instrument forgets its voices itself.
@@ -1025,6 +1036,7 @@ impl Engine {
                     dc: declick(b.declick),
                     quality: self.quality,
                     wait: self.wait,
+                    levels: self.levels,
                 };
                 let mut i = self.voices.len();
                 while i > 0 {
@@ -1087,6 +1099,8 @@ struct Cx {
     dc: Declick,
     quality: Quality,
     wait: bool,
+    /// The channel's volume and pan.
+    levels: (f32, f32),
 }
 
 impl TickState {
@@ -1148,9 +1162,12 @@ fn start_tick(v: &mut Voice, mut rt: Option<&mut Rt>, src: &Src, b: &Block, cx: 
     let x = (b.f_cut + v.mod_x) + parts.mod_x;
     let y = (b.f_res + v.mod_y) + parts.mod_y;
     let corr = v.filt.tick(b.f_type, x, y, cx.nominal as usize, cx.rate);
-    // The gains: the pan split of the volume, times the filter's correction (type 5). The first tick starts at the
-    // plain gain, or at 0 when the volume envelope starts in its delay or attack.
-    let plain = split(v.note_pan as f32 + parts.pan, v.vel * parts.volume);
+    // The gains: the pan split of the final volume, times the filter's correction (type 5). The final levels are the
+    // note's with the channel's (spec: audio/voice-levels.md "Final levels"): `note volume * channel volume`,
+    // `note pan + channel pan`. The first tick starts at the plain gain, or at 0 when the volume envelope starts in
+    // its delay or attack.
+    let (volume, pan) = cx.levels;
+    let plain = split((v.note_pan as f32 + pan) + parts.pan, (v.vel * volume) * parts.volume);
     if v.ticks == 0 {
         v.gain = if v.ramp_in { [0.0; 2] } else { plain };
     }
@@ -2137,6 +2154,32 @@ mod tests {
             tick(&mut e);
             let (old, new) = (e.voices[0].art.lfo(PITCH).value(), e.voices[1].art.lfo(PITCH).value());
             assert_eq!(old == new, global, "{old} {new}");
+        }
+    }
+
+    // spec: audio/voice-levels.md "Final levels", "Changes while a note sounds"; audio/sampler.md "Gains": the channel's
+    // volume multiplies the note's and its pan adds to the note's in the voice's gains; a change reaches a sounding
+    // voice at the next tick start, through the limited gain ramp.
+    #[test]
+    fn the_channel_levels_are_part_of_the_voice() {
+        let mut e = Engine::new(44100.0);
+        e.sample = Some(Arc::new(Sample { rate: 44100, left: vec![0.5; 44100], right: vec![0.5; 44100] }));
+        let b = Block::default();
+        e.set_levels(0.5, 0.25);
+        e.note_on(60, 100.0 / 128.0, &b);
+        host(&mut e, &b, &[212]);
+        let at = split(0.25, e.voices[0].vel * 0.5);
+        assert_eq!(e.voices[0].gain, at, "the first tick starts at the plain gain");
+        e.set_levels(1.0, 0.25);
+        host(&mut e, &b, &[212]);
+        let target = split(0.25, e.voices[0].vel);
+        for k in 0..2 {
+            assert!(target[k] - at[k] > 0.212, "{target:?} {at:?}");
+            assert!((e.voices[0].gain[k] - (at[k] + 0.001 * 212.0)).abs() < 1e-5, "one tick at the limit");
+        }
+        host(&mut e, &b, &[212; 4]);
+        for k in 0..2 {
+            assert!((e.voices[0].gain[k] - target[k]).abs() < 1e-6, "arrived");
         }
     }
 }

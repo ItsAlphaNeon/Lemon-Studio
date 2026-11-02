@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex};
 use clap_sys::audio_buffer::clap_audio_buffer;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::events::{
-    clap_event_header, clap_event_midi, clap_event_note, clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value,
+    clap_event_header, clap_event_midi, clap_event_midi_sysex, clap_event_note, clap_event_note_expression, clap_event_param_gesture, clap_event_param_mod, clap_event_param_value,
     clap_event_transport, clap_input_events, clap_output_events, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_EXPRESSION,
-    CLAP_EVENT_MIDI, CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_TUNING, CLAP_NOTE_EXPRESSION_VOLUME, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
+    CLAP_EVENT_MIDI, CLAP_EVENT_MIDI_SYSEX, CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_TUNING, CLAP_NOTE_EXPRESSION_VOLUME, CLAP_EVENT_PARAM_GESTURE_BEGIN, CLAP_EVENT_PARAM_GESTURE_END,
     CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_TRANSPORT, CLAP_TRANSPORT_HAS_BEATS_TIMELINE, CLAP_TRANSPORT_HAS_SECONDS_TIMELINE,
     CLAP_TRANSPORT_HAS_TEMPO, CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE, CLAP_TRANSPORT_IS_PLAYING,
 };
@@ -559,6 +559,7 @@ enum Seq {
     Mod(usize),
     Expr(usize),
     Midi(usize),
+    Levels,
 }
 
 /// One queued note event.
@@ -677,6 +678,13 @@ pub struct Plugin {
     mod_resend: Vec<(i32, u8, u32, f64)>,
     /// Voices get their gains as volume note expressions (`use_voice_gains`).
     voice_gains: bool,
+    /// The channel's volume and pan go to the plugin (`use_channel_levels`): the levels it was last sent, and the
+    /// message for the next block when they changed, with the event that carries it.
+    channel_levels: bool,
+    levels_sent: Option<(f32, f32)>,
+    levels_due: Option<[u8; os_hostlink::levels::LEN]>,
+    levels_msg: [u8; os_hostlink::levels::LEN],
+    levels_ev: Option<clap_event_midi_sysex>,
     /// The voices the engine named (`Instrument::voice_start`): its name, the note id they were sent with, the key.
     named: Vec<(u32, i32, u8)>,
     next_note_id: i32,
@@ -955,6 +963,11 @@ impl Plugin {
                 level_voices: Vec::new(),
                 mod_resend: Vec::new(),
                 voice_gains: false,
+                channel_levels: false,
+                levels_sent: None,
+                levels_due: None,
+                levels_msg: [0; os_hostlink::levels::LEN],
+                levels_ev: None,
                 named: Vec::new(),
                 next_note_id: 0,
                 key_ch: [0; 128],
@@ -1121,6 +1134,8 @@ impl Plugin {
         self.ledger.clear();
         self.level_voices.clear();
         self.mod_resend.clear();
+        // Activated again, the plugin gets the levels again.
+        self.levels_sent = None;
     }
 
     /// Lets the plugin apply the parameter edits its editor queued (and drops the events it reports back: the
@@ -1298,6 +1313,15 @@ impl Plugin {
         true
     }
 
+    /// Sends the channel's volume and pan (`Instrument::channel_levels`) as the SysEx message of
+    /// `os_hostlink::levels`, at the start of the block they apply from, when they change: for Lemon Sampler, which
+    /// works them into its voices' final levels (spec: plugins/host-link.md "Channel levels"). The engine then leaves
+    /// the instance's output as it is.
+    pub fn use_channel_levels(&mut self) -> bool {
+        self.channel_levels = true;
+        true
+    }
+
     /// UI-thread housekeeping: callbacks the plugin asked for, restarts, rate changes, a closed editor window.
     pub fn idle(&mut self) {
         unsafe {
@@ -1456,7 +1480,7 @@ impl Plugin {
             && !self.editor
             && !self.host_data.process.load(Ordering::Acquire)
             && self.queue.is_empty() && self.param_queue.is_empty() && self.auto.is_empty() && self.mod_resend.is_empty()
-            && self.midi_queue.is_empty()
+            && self.midi_queue.is_empty() && self.levels_due.is_none()
     }
 
     /// `process_chunk` with an audio input (effects): `input` holds the frames to process, `left` / `right` receive
@@ -1472,6 +1496,25 @@ impl Plugin {
         let mut rest = Vec::new();
         // Event order; a note's modulation follows its note on at the same time.
         let mut seq: Vec<Seq> = Vec::new();
+        // The channel's levels first: they apply from the block's first frame, to the notes that start there too.
+        // `levels_msg` holds the message's bytes while the call is made.
+        self.levels_ev = None;
+        if let Some(m) = self.levels_due.take() {
+            self.levels_msg = m;
+            self.levels_ev = Some(clap_event_midi_sysex {
+                header: clap_event_header {
+                    size: std::mem::size_of::<clap_event_midi_sysex>() as u32,
+                    time: 0,
+                    space_id: CLAP_CORE_EVENT_SPACE_ID,
+                    type_: CLAP_EVENT_MIDI_SYSEX,
+                    flags: 0,
+                },
+                port_index: 0,
+                buffer: self.levels_msg.as_ptr(),
+                size: m.len() as u32,
+            });
+            seq.push(Seq::Levels);
+        }
         // Controller messages go before the block's notes (their frames are where the controller moved).
         let mut later = Vec::new();
         for &(time, data) in &self.midi_queue {
@@ -1645,6 +1688,7 @@ impl Plugin {
                 Seq::Note(i) => self.notes[i].header.time,
                 Seq::Expr(x) => self.exprs[x].header.time,
                 Seq::Midi(m) => self.midis[m].header.time,
+                Seq::Levels => 0,
             };
             seq.sort_by_key(time);
         }
@@ -1656,6 +1700,7 @@ impl Plugin {
                 Seq::Note(i) => &self.notes[i].header as *const clap_event_header,
                 Seq::Expr(x) => &self.exprs[x].header as *const clap_event_header,
                 Seq::Midi(m) => &self.midis[m].header as *const clap_event_header,
+                Seq::Levels => self.levels_ev.as_ref().map_or(std::ptr::null(), |e| &e.header as *const clap_event_header),
             };
             let t = unsafe { (*h).time };
             while pi < self.pvals.len() && self.pvals[pi].header.time <= t {
@@ -1849,6 +1894,10 @@ impl os_host::Plugin for Plugin {
 
     fn use_voice_gains(&mut self) -> bool {
         Plugin::use_voice_gains(self)
+    }
+
+    fn use_channel_levels(&mut self) -> bool {
+        Plugin::use_channel_levels(self)
     }
 
     fn set_offline(&mut self, offline: bool) {
@@ -2055,16 +2104,24 @@ impl os_engine::Instrument for Plugin {
         }
     }
 
-    /// The engine still applies the channel's volume and pan to the output (false); the channel's mod X / Y join each
-    /// note's in its modulation, and sounding voices are sent their new amounts (spec: audio/voice-levels.md "Changes
-    /// while a note sounds").
+    /// The engine applies the channel's volume and pan to the output (false), unless the plugin takes them
+    /// (`use_channel_levels`, true); the channel's mod X / Y join each note's in its modulation, and sounding voices
+    /// are sent their new amounts (spec: audio/voice-levels.md "Changes while a note sounds").
     fn channel_levels(&mut self, levels: os_engine::ChannelLevels) -> bool {
+        if self.channel_levels {
+            let now = (levels.volume, levels.pan);
+            if self.levels_sent != Some(now) {
+                self.levels_sent = Some(now);
+                self.levels_due = Some(os_hostlink::levels::encode(now.0, now.1));
+            }
+        }
+        let own = self.channel_levels;
         let mods = [levels.mod_x, levels.mod_y];
         if mods == self.chan_mods {
-            return false;
+            return own;
         }
         self.chan_mods = mods;
-        let Some(np) = self.note_levels else { return false };
+        let Some(np) = self.note_levels else { return own };
         for v in &mut self.level_voices {
             for k in 0..2 {
                 let Some((param, span)) = np.mods[k] else { continue };
@@ -2075,7 +2132,7 @@ impl os_engine::Instrument for Plugin {
                 }
             }
         }
-        false
+        own
     }
 
     fn param(&mut self, offset: u32, index: u32, value: f64) {
@@ -3256,6 +3313,65 @@ mod tests {
         let notes: Vec<(u16, i32, i16, u32)> = p.notes.iter().map(|n| (n.header.type_, n.note_id, n.key, n.header.time)).collect();
         assert_eq!(notes, vec![(CLAP_EVENT_NOTE_CHOKE, a, 60, 5)]);
         assert_eq!(p.exprs.iter().map(|x| (x.note_id, x.value)).collect::<Vec<_>>(), vec![(b, 0.5)]);
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    /// The channel's levels (`use_channel_levels`): Lemon Sampler is sent the volume and pan as the host-link message,
+    /// at the block's start and ahead of its notes, only when they change, and again after it is activated; it works
+    /// them into its voices, so the engine is told to leave the output alone. Without the switch it is told otherwise.
+    #[test]
+    fn lemon_sampler_takes_the_channel_levels() {
+        use os_engine::{ChannelLevels, Instrument as _};
+        let wav = dc_wav("levels");
+        let render = |levels: Option<ChannelLevels>| {
+            let mut p = sampler_of(&wav);
+            if let Some(levels) = levels {
+                assert!(p.use_channel_levels());
+                assert!(p.channel_levels(levels));
+            } else {
+                assert!(!p.channel_levels(ChannelLevels::default()));
+            }
+            let (mut l, mut r) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+            p.note_on(0, 60, 0.8);
+            p.process(48000, &mut l, &mut r);
+            (p, l, r)
+        };
+        let (_, l0, r0) = render(None);
+        let (mut p, l, r) = render(Some(ChannelLevels { volume: 0.5, ..ChannelLevels::default() }));
+        // Without the levels a centred voice is at its note's volume (the engine's split comes after); with them, at the
+        // split of the channel's volume, `0.5 * 0.7071...` on each side.
+        assert!(l0[100] > 0.1);
+        let k = 0.5 * std::f32::consts::FRAC_1_SQRT_2;
+        for f in 0..512 {
+            assert!((l[f] - l0[f] * k).abs() <= 1e-6 && (r[f] - r0[f] * k).abs() <= 1e-6, "frame {f}: {} {}", l[f], l0[f]);
+        }
+        // The message went first, ahead of the note on at the same frame.
+        let ev = p.levels_ev.as_ref().expect("sent");
+        assert_eq!((ev.header.time, ev.header.type_), (0, CLAP_EVENT_MIDI_SYSEX));
+        assert_eq!(os_hostlink::levels::decode(&p.levels_msg), Some((0.5, 0.0)));
+        // (The plugin moved since the call: the order's pointers are stale, so the kinds are compared, from the copies
+        // the plugin read.)
+        assert_eq!(p.order.len(), 2, "the message, then the note on");
+        assert_eq!((p.notes[0].header.type_, p.notes[0].header.time), (CLAP_EVENT_NOTE_ON, 0));
+        let mut q = sampler_of(&wav);
+        q.use_channel_levels();
+        q.channel_levels(ChannelLevels { volume: 0.5, ..ChannelLevels::default() });
+        q.note_on(0, 60, 0.8);
+        let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        q.process(48000, &mut l, &mut r);
+        assert_eq!(q.order.first().copied(), Some(&q.levels_ev.as_ref().unwrap().header as *const clap_event_header));
+        // Not again while they stay; again when they change, and after the plugin is activated anew.
+        let (mut l, mut r) = (vec![0.0f32; 64], vec![0.0f32; 64]);
+        assert!(p.channel_levels(ChannelLevels { volume: 0.5, ..ChannelLevels::default() }));
+        p.process(48000, &mut l, &mut r);
+        assert!(p.levels_ev.is_none());
+        assert!(p.channel_levels(ChannelLevels { volume: 0.5, pan: -1.0, ..ChannelLevels::default() }));
+        p.process(48000, &mut l, &mut r);
+        assert_eq!(os_hostlink::levels::decode(&p.levels_msg), Some((0.5, -1.0)));
+        p.deactivate();
+        assert!(p.activate(48000));
+        assert!(p.channel_levels(ChannelLevels { volume: 0.5, pan: -1.0, ..ChannelLevels::default() }));
+        assert!(p.levels_due.is_some());
         let _ = std::fs::remove_file(&wav);
     }
 

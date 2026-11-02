@@ -249,6 +249,13 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         false
     }
 
+    /// Sends the channel's volume and pan (`Instrument::channel_levels`) to the instance, which works them into its
+    /// voices' final levels; the engine then leaves its output as it is (UI thread). For Lemon Sampler only (spec:
+    /// plugins/host-link.md "Channel levels"). False when the format cannot.
+    fn use_channel_levels(&mut self) -> bool {
+        false
+    }
+
     /// Tells the instance whether it renders offline (an export: no deadline, the plugin's best quality) or for live
     /// playback (UI thread, with no stream processing the instance). Formats without such a switch ignore it.
     fn set_offline(&mut self, offline: bool) {

@@ -4140,7 +4140,7 @@ mod tests {
         assert!(app.state.hosted_rows.contains(&r), "Lemon Sampler hosts the row");
         let params = |app: &App| {
             let st = app.plugins.state(r).expect("state");
-            let json = if st.first() == Some(&b'{') { &st[..] } else { &st[8..] };
+            let (_, json) = crate::plugins::state_json(&st);
             serde_json::from_slice::<serde_json::Value>(json).unwrap()["params"].clone()
         };
         let read = |app: &App| {
@@ -4167,7 +4167,7 @@ mod tests {
     /// Row `r`'s Lemon Sampler: its sample, root note, stretch method (its menu index) and TIME in steps.
     fn sampler_side(app: &App, r: usize) -> (String, i64, i64, i64) {
         let st = app.plugins.state(r).expect("hosted");
-        let json = if st.first() == Some(&b'{') { &st[..] } else { &st[8..] };
+        let (_, json) = crate::plugins::state_json(&st);
         let p = serde_json::from_slice::<serde_json::Value>(json).unwrap()["params"].clone();
         let steps = lemon_sampler::params::time_steps(p["ts_time"]["f32"].as_f64().unwrap() as f32);
         let path = app.plugins.sampler_path(r).unwrap_or_default();
