@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use nih_plug::prelude::*;
 use os_engine::Sample;
+use os_plugkit::levels::Levels;
 
 use params::{DiskKey, FxKey, Live, SamplerParams};
 
@@ -197,24 +198,6 @@ static HOST_PPQ: AtomicU32 = AtomicU32::new(0);
 /// this process.
 pub fn set_host_ticks(ppq: u16) {
     HOST_PPQ.store(u32::from(ppq), Ordering::Relaxed);
-}
-
-/// The channel's volume and pan from Lemon Studio, which the voices work into their final levels (`dsp::Engine::
-/// set_levels`; spec: plugins/host-link.md "Channel levels"). Another host sends none: its levels act on the output.
-/// **(OS)**
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Levels(f32, f32);
-
-impl SysExMessage for Levels {
-    type Buffer = [u8; os_hostlink::levels::LEN];
-
-    fn from_buffer(buffer: &[u8]) -> Option<Self> {
-        os_hostlink::levels::decode(buffer).map(|(volume, pan)| Levels(volume, pan))
-    }
-
-    fn to_buffer(self) -> (Self::Buffer, usize) {
-        (os_hostlink::levels::encode(self.0, self.1), os_hostlink::levels::LEN)
-    }
 }
 
 /// The song's timing for the voices from the transport: steps per beat from the time signature's denominator (16 /

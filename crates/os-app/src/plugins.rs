@@ -595,12 +595,14 @@ impl Plugins {
         p.use_start_param(SAMPLE_START);
         // A note's own pan and mod X / Y reach the built-in Lemon instruments only (spec: audio/voice-levels.md); audio
         // clips' fades and gain reach Lemon Sampler's voices one by one, so overlapping clips of one sample crossfade
-        // (spec: audio/audio-clips.md "Fades and clip gain"); Lemon Sampler works the channel's volume and pan into its
-        // voices' final levels (spec: audio/voice-levels.md "Final levels").
+        // (spec: audio/audio-clips.md "Fades and clip gain"); the instruments work the channel's volume and pan into
+        // their voices' final levels (spec: audio/voice-levels.md "Final levels").
         if crate::project_plugins::is_builtin(&a.desc) {
             p.use_note_levels();
             if a.desc.name == LEMON_SAMPLER {
                 p.use_voice_gains();
+            }
+            if [LEMON_SAMPLER, crate::osc3::LEMON_TRIO, crate::citrus::CITRUS].contains(&a.desc.name.as_str()) {
                 p.use_channel_levels();
             }
         }

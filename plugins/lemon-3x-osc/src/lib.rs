@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use nih_plug::prelude::*;
 use os_engine::envelope;
+use os_plugkit::levels::Levels;
 
 use params::*;
 
@@ -199,7 +200,7 @@ impl Plugin for LemonTrio {
     const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
-    type SysExMessage = ();
+    type SysExMessage = Levels;
     type BackgroundTask = ();
 
     fn params(&self) -> Arc<dyn Params> {
@@ -266,6 +267,10 @@ impl Plugin for LemonTrio {
                 NoteEvent::Choke { note, .. } => self.engine.choke(note),
                 // Portamento and slide notes (spec: audio/channel-voices.md): the host's tuning of a key's voices.
                 NoteEvent::PolyTuning { note, voice_id, tuning, .. } => self.engine.tune(note, voice_id, f64::from(tuning)),
+                // A note's own pan, and the channel's volume and pan from Lemon Studio: the voices' final levels (spec:
+                // plugins/lemon-3x-osc.md §6.1).
+                NoteEvent::PolyPan { note, voice_id, pan, .. } => self.engine.pan(note, voice_id, pan),
+                NoteEvent::MidiSysEx { message: Levels(volume, pan), .. } => self.engine.set_levels(volume, pan),
                 NoteEvent::MidiPitchBend { value, .. } => {
                     // ±2 semitones, as Lemon Sampler.
                     self.bend = f64::from(value * 2.0 - 1.0) * 200.0;

@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use nih_plug::prelude::*;
+use os_plugkit::levels::Levels as ChannelLevels;
 
 use engine::{Citrus, NoteOn};
 use voice::Levels;
@@ -258,8 +259,8 @@ impl CitrusPlugin {
         }
     }
 
-    /// A note's levels. The host sends FL's velocity byte / 128; the channel's volume is the host's to apply (after the
-    /// plugin, as for Lemon Studio's other instruments), so the voice takes the velocity's level alone.
+    /// A note's own levels. The host sends FL's velocity byte / 128; the engine joins the volume and pan with the
+    /// channel's, which Lemon Studio sends (spec: plugins/citrus.md §2).
     fn levels(&self, note: u8, velocity: f32) -> Levels {
         let link = self.engine.state().is_none_or(|s| s.switch(8) != 0);
         let v = if link { (velocity * 128.0).round().min(128.0) * 0.01 } else { 1.0 };
@@ -285,7 +286,7 @@ impl Plugin for CitrusPlugin {
     const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
-    type SysExMessage = ();
+    type SysExMessage = ChannelLevels;
     type BackgroundTask = ();
 
     fn params(&self) -> Arc<dyn Params> {
@@ -369,6 +370,17 @@ impl Plugin for CitrusPlugin {
                         }
                     }
                 }
+                // A note's own pan (a note expression): the note its id names, or else every note of the key.
+                NoteEvent::PolyPan { note, voice_id, channel, pan, .. } => {
+                    let named = voice_id.is_some_and(|v| self.held.iter().chain(&self.ringing).any(|h| h.voice_id == Some(v)));
+                    for h in self.held.iter().chain(&self.ringing) {
+                        if if named { h.voice_id == voice_id } else { h.note == note && h.channel == channel } {
+                            self.engine.note_pan(h.id, pan);
+                        }
+                    }
+                }
+                // The channel's volume and pan from Lemon Studio (spec: plugins/host-link.md "Channel levels").
+                NoteEvent::MidiSysEx { message: ChannelLevels(volume, pan), .. } => self.engine.set_channel(volume, pan),
                 NoteEvent::MidiPitchBend { value, .. } => {
                     // ±2 semitones, as the other Lemon instruments.
                     self.bend = (value * 2.0 - 1.0) * 200.0;

@@ -515,10 +515,22 @@ struct Voice {
     cut: Option<u64>,
     /// The host's tuning of the voice in semitones (portamento and slide notes: a note expression).
     tune: f64,
+    /// The note's own pan (a note expression).
+    pan: f32,
+    /// The gains of the final levels per side at the end of the last span; `None` before the first.
+    sides: Option<[f64; 2]>,
     /// Phase per oscillator and side (cycles, 0..1).
     ph: [[f64; 2]; 3],
     filt: [Filter; 2],
     done: bool,
+}
+
+/// A final level split by a final pan: the host's pan law (spec: audio/conventions.md), 0.7071 of the level per side
+/// at the centre.
+fn split(pan: f32, level: f32) -> [f64; 2] {
+    let lv = f64::from(level);
+    let a = (f64::from(pan.clamp(-1.0, 1.0)) + 1.0) * (PI / 4.0);
+    [f64::from((lv * a.cos()) as f32), f64::from((lv * a.sin()) as f32)]
 }
 
 /// Raised-cosine fade factor `s` seconds into a 10 ms fade.
@@ -540,6 +552,8 @@ pub struct Engine {
     ended: Vec<(u8, Option<i32>)>,
     /// The custom shape's wave; without one the custom shape is silent.
     pub custom: Option<Arc<Wave>>,
+    /// The channel's volume and pan ([`Engine::set_levels`]).
+    levels: (f32, f32),
 }
 
 impl Engine {
@@ -550,7 +564,15 @@ impl Engine {
             rng: 0x9e37_79b9_7f4a_7c15,
             ended: Vec::with_capacity(MAX_VOICES * 2),
             custom: None,
+            levels: (std::f32::consts::SQRT_2, 0.0),
         }
+    }
+
+    /// The channel's volume and pan, part of every voice's final levels (spec: audio/voice-levels.md "Final levels"):
+    /// sounding voices glide to them over their next control span. Without a call they are √2 and 0, unity at the
+    /// centre, so that in another host, whose own levels act on the output, the voices keep their level.
+    pub fn set_levels(&mut self, volume: f32, pan: f32) {
+        self.levels = (volume, pan);
     }
 
     pub fn set_rate(&mut self, rate: f32) {
@@ -628,6 +650,8 @@ impl Engine {
             off: None,
             cut: None,
             tune: 0.0,
+            pan: 0.0,
+            sides: None,
             ph,
             filt: [Filter::default(); 2],
             done: false,
@@ -663,6 +687,19 @@ impl Engine {
         }
         for v in self.voices.iter_mut().filter(|v| v.key == key) {
             v.tune = semitones;
+        }
+    }
+
+    /// A voice's own pan (a host's pan expression), the voice its id names or else every voice of `key`.
+    pub fn pan(&mut self, key: u8, id: Option<i32>, pan: f32) {
+        if let Some(i) = id
+            && let Some(v) = self.voices.iter_mut().find(|v| v.id == Some(i))
+        {
+            v.pan = pan;
+            return;
+        }
+        for v in self.voices.iter_mut().filter(|v| v.key == key) {
+            v.pan = pan;
         }
     }
 
@@ -741,6 +778,7 @@ impl Engine {
         let use3 = b.m3 != 0.0;
         let filter_off = b.filter_off();
         let custom = self.custom.take();
+        let (volume, lpan) = self.levels;
         let mut voices = std::mem::take(&mut self.voices);
         for v in voices.iter_mut().filter(|v| !v.done) {
             let t0 = v.n as f64 / sr;
@@ -769,8 +807,15 @@ impl Engine {
                 coefs(b.filter, c, q, sr)
             };
             let dg = (g1 - g0) / len as f64;
+            // The final levels: the note's pan plus the channel's, split with the channel's volume (the note's volume is
+            // the velocity in `g`); a change glides over the span.
+            let to = split(v.pan + lpan, volume);
+            let from = v.sides.replace(to).unwrap_or(to);
+            let ds = [(to[0] - from[0]) / len as f64, (to[1] - from[1]) / len as f64];
             for i in 0..len {
                 let g = g0 + dg * i as f64;
+                let k = (i + 1) as f64;
+                let side = [from[0] + ds[0] * k, from[1] + ds[1] * k];
                 let mut out = [0.0f64; 2];
                 for (s, o) in out.iter_mut().enumerate() {
                     let mut osc = [0.0f64; 3];
@@ -797,7 +842,7 @@ impl Engine {
                     }
                     let mix12 = w[0] * osc[0] + w[1] * osc[1];
                     let y = if b.am { mix12 * (1.0 - b.m3 * osc[2]) } else { (1.0 - b.m3) * mix12 + b.m3 * osc[2] };
-                    *o = v.filt[s].tick(&co, y) * g;
+                    *o = v.filt[s].tick(&co, y) * g * side[s];
                 }
                 l[i] += out[0] as f32;
                 r[i] += out[1] as f32;
@@ -933,6 +978,43 @@ mod tests {
         b.osc[0].pan = -0.5;
         let (l, r) = render(&b, 60, 100.0 / 128.0, 512, None);
         assert!((peak(&l) - 0.9239).abs() < 1e-3 && (peak(&r) - 0.3827).abs() < 1e-3);
+    }
+
+    /// The channel's volume and pan and the note's own pan make the voice's final levels, split once by the host's pan
+    /// law; a change glides in over the next control span.
+    #[test]
+    fn the_final_levels_split_the_voice() {
+        let b = solo(SINE);
+        let play = |levels: (f32, f32), pan: f32, change: Option<(f32, f32)>| {
+            let mut e = Engine::new(SR);
+            e.set_levels(levels.0, levels.1);
+            e.note_on(60, 100.0 / 128.0, Some(7), &b);
+            e.pan(60, Some(7), pan);
+            let (mut l, mut r) = (vec![0.0; 4 * CTL], vec![0.0; 4 * CTL]);
+            e.render(&mut l[..2 * CTL], &mut r[..2 * CTL], &b);
+            if let Some((v, p)) = change {
+                e.set_levels(v, p);
+            }
+            e.render(&mut l[2 * CTL..], &mut r[2 * CTL..], &b);
+            (l, r)
+        };
+        let (l0, r0) = play((std::f32::consts::SQRT_2, 0.0), 0.0, None);
+        // A note panned -0.5 on a channel at 0.5, panned 0.25: one split of -0.25.
+        let (l, r) = play((0.5, 0.25), -0.5, None);
+        let [gl, gr] = split(-0.25, 0.5);
+        for i in 0..4 * CTL {
+            assert!((f64::from(l[i]) - f64::from(l0[i]) * gl).abs() < 1e-6, "{i}");
+            assert!((f64::from(r[i]) - f64::from(r0[i]) * gr).abs() < 1e-6, "{i}");
+        }
+        // The channel moves to 1, centre: the third span glides from the old split to the new one.
+        let (l, _) = play((0.5, 0.25), -0.5, Some((1.0, 0.0)));
+        let to = split(-0.5, 1.0)[0];
+        for k in 0..CTL {
+            let i = 2 * CTL + k;
+            let g = gl + (to - gl) * (k + 1) as f64 / CTL as f64;
+            assert!((f64::from(l[i]) - f64::from(l0[i]) * g).abs() < 1e-6, "{i}");
+            assert!((f64::from(l[i + CTL]) - f64::from(l0[i + CTL]) * to).abs() < 1e-6, "{i}");
+        }
     }
 
     #[test]

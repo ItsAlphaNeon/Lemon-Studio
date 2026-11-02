@@ -6,10 +6,11 @@
 //! confirms them ([`live`]), menu definitions shown with the app's own popup look ([`MenuDef`], `os_ui::kit::menu`),
 //! and the native parts every editor needs: popups, type-in boxes, painting a canvas into a window ([`win`] on Windows,
 //! `x11` on Linux, `mac` on macOS). Linux and macOS share one API and input type ([`gui`]), so a plugin's editor loop
-//! is the same on both.
+//! is the same on both. A Lemon instrument takes the channel's volume and pan as [`levels::Levels`].
 //!
 // spec: plugins/lemon-sampler.md §4 (edits apply at once, menus), plugins/lemon-parametric-eq-2.md, plugins/plugin-formats.md
 
+pub mod levels;
 pub mod linked;
 pub mod live;
 pub mod vals;
