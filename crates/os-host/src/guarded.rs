@@ -279,6 +279,9 @@ impl<P: Plugin> Plugin for Guarded<P> {
     fn take_notes_out(&mut self) -> Vec<NoteOut> {
         self.run(Vec::new(), |p| p.take_notes_out())
     }
+    fn puts_out_notes(&self) -> bool {
+        self.look(false, |p| p.puts_out_notes())
+    }
     fn take_menu(&mut self) -> Option<Menu> {
         self.run(None, |p| p.take_menu())
     }

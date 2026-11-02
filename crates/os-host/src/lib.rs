@@ -324,6 +324,11 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     fn capture_notes(&mut self, on: bool) {
         let _ = on;
     }
+    /// Whether it can put out notes at all: it declares a CLAP note output port or a VST 3 event output bus. Burn MIDI
+    /// to plays only those through a pass. Default: none.
+    fn puts_out_notes(&self) -> bool {
+        false
+    }
     /// The notes put out during the `process` calls since the last call, oldest first, while capturing.
     fn take_notes_out(&mut self) -> Vec<NoteOut> {
         Vec::new()

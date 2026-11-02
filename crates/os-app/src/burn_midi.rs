@@ -692,8 +692,10 @@ impl App {
             return Some(format!("{name} has no notes in this pattern to burn"));
         }
         let own = generate(ch, &src, ppq);
-        // A hosted instrument plays what the channel's own arpeggiator made, and what it puts out is what is burnt.
-        let hosted = self.plugins.hosted.get(&row).map(|h| Arc::clone(&h.plugin));
+        // A hosted instrument plays what the channel's own arpeggiator made, and what it puts out is what is burnt. One
+        // that declares no note output (Lemon Sampler on every sampler channel, most instruments) is not played: the
+        // pass would only keep the channel silent for nothing.
+        let hosted = self.plugins.hosted.get(&row).map(|h| Arc::clone(&h.plugin)).filter(|h| h.lock().is_ok_and(|p| p.puts_out_notes()));
         let from_plugin = hosted.map(|h| {
             let input = own.as_deref().unwrap_or(&src);
             let end = s.project.pattern_length(cur).max(input.iter().map(|n| n.position + n.length.max(1)).max().unwrap_or(0));
@@ -918,6 +920,8 @@ mod tests {
         capture: bool,
         out: Vec<os_host::NoteOut>,
         resets: u32,
+        /// Whether it declares a note output.
+        outputs: bool,
     }
 
     impl Fifths {
@@ -979,6 +983,9 @@ mod tests {
         fn take_notes_out(&mut self) -> Vec<os_host::NoteOut> {
             std::mem::take(&mut self.out)
         }
+        fn puts_out_notes(&self) -> bool {
+            self.outputs
+        }
     }
 
     /// A hosted instrument's notes are what is burnt: it is played the pattern's notes after the channel's own
@@ -988,7 +995,7 @@ mod tests {
     fn burning_the_notes_a_plugin_puts_out() {
         let mut app = app_with(&[note(0, 48, 60), note(48, 0, 62)]);
         let desc = crate::plugins::builtin()[0].desc.clone();
-        let fifths = Arc::new(std::sync::Mutex::new(Fifths { desc, capture: false, out: Vec::new(), resets: 0 }));
+        let fifths = Arc::new(std::sync::Mutex::new(Fifths { desc, capture: false, out: Vec::new(), resets: 0, outputs: true }));
         let mut h = crate::plugins::Hosted::new(fifths.clone());
         h.owner = app.state.project.channels[0].id;
         app.plugins.hosted.insert(0, h);
@@ -1009,5 +1016,23 @@ mod tests {
         crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, false));
         assert_eq!(keys(&notes_of(&app, cur, 0)), [(0, 24, 67), (24, 24, 71)]);
         assert_eq!(app.state.project.channels[0].misc.arp.direction, 0);
+    }
+
+    /// A hosted instrument that declares no note output (Lemon Sampler, most instruments) is not played: the channel's
+    /// own arpeggio is what is burnt, and the instrument is never reset.
+    #[test]
+    fn an_instrument_without_note_outputs_is_not_played() {
+        let mut app = app_with(&[note(0, 48, 60), note(0, 48, 64)]);
+        let desc = crate::plugins::builtin()[0].desc.clone();
+        let silent = Arc::new(std::sync::Mutex::new(Fifths { desc, capture: false, out: Vec::new(), resets: 0, outputs: false }));
+        let mut h = crate::plugins::Hosted::new(silent.clone());
+        h.owner = app.state.project.channels[0].id;
+        app.plugins.hosted.insert(0, h);
+        (app.state.project.channels[0].misc.arp.direction, app.state.project.channels[0].misc.arp.chord) = (1, 1);
+        let cur = app.state.pattern;
+        let own = generate(&app.state.project.channels[0], &notes_of(&app, cur, 0), app.state.project.ppq).expect("an arpeggio");
+        crate::rack::run(&mut app, crate::rack::RCmd::BurnMidi(0, false));
+        assert_eq!(keys(&notes_of(&app, cur, 0)), keys(&own), "the channel's own arpeggio, nothing a fifth up");
+        assert_eq!(silent.lock().unwrap().resets, 0, "never played");
     }
 }

@@ -736,6 +736,8 @@ pub struct Plugin {
     /// The notes it put out, kept while capturing (`os_host::Plugin::capture_notes`).
     capture: bool,
     notes_out: Vec<os_host::NoteOut>,
+    /// It declares a note output port (`os_host::Plugin::puts_out_notes`).
+    note_outputs: bool,
     _lib: Arc<Library>,
 }
 
@@ -924,7 +926,9 @@ impl Plugin {
             let render = ext(CLAP_EXT_RENDER) as *const clap_plugin_render;
             let voice_info = ext(CLAP_EXT_VOICE_INFO) as *const clap_plugin_voice_info;
             let audio_ports = ext(CLAP_EXT_AUDIO_PORTS) as *const clap_plugin_audio_ports;
-            let bend = (!takes_clap_notes(ext(CLAP_EXT_NOTE_PORTS) as *const clap_plugin_note_ports, plugin)).then(os_engine::TuningBend::default);
+            let note_ports = ext(CLAP_EXT_NOTE_PORTS) as *const clap_plugin_note_ports;
+            let bend = (!takes_clap_notes(note_ports, plugin)).then(os_engine::TuningBend::default);
+            let note_outputs = note_ports.as_ref().and_then(|n| n.count).is_some_and(|count| count(plugin, false) > 0);
             let ranges = params::read_ranges(params, plugin);
             Ok(Plugin {
                 desc,
@@ -1000,6 +1004,7 @@ impl Plugin {
                 controls: [None; 16],
                 capture: false,
                 notes_out: Vec::new(),
+                note_outputs,
                 _lib: lib.clone(),
             })
         }
@@ -1926,6 +1931,10 @@ impl os_host::Plugin for Plugin {
         std::mem::take(&mut self.notes_out)
     }
 
+    fn puts_out_notes(&self) -> bool {
+        self.note_outputs
+    }
+
     fn take_automation_requests(&mut self) -> Vec<u32> {
         self.automation_requests()
     }
@@ -2496,6 +2505,7 @@ mod tests {
         let entry = &lemon_parametric_eq_2::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void;
         let lib = unsafe { Library::from_entry(entry, Path::new("Lemon Parametric EQ.clap")) }.expect("linked EQ");
         let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+        assert!(!p.puts_out_notes(), "an effect without a note output port");
         let head = |time: u32, type_: u16, size: usize| clap_event_header { size: size as u32, time, space_id: CLAP_CORE_EVENT_SPACE_ID, type_, flags: 0 };
         let note = |time: u32, type_: u16, key: i16, velocity: f64| clap_event_note {
             header: head(time, type_, std::mem::size_of::<clap_event_note>()),

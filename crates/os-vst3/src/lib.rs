@@ -484,6 +484,8 @@ pub struct Plugin {
     events_out: Com<EventList>,
     capture: bool,
     notes_out: Vec<os_host::NoteOut>,
+    /// It has an event output bus (`os_host::Plugin::puts_out_notes`).
+    note_outputs: bool,
     params_in: Com<ParamChanges>,
     params_out: Com<ParamChanges>,
     shared: Arc<Shared>,
@@ -601,6 +603,7 @@ impl Plugin {
                 events_out: EventList::create(),
                 capture: false,
                 notes_out: Vec::new(),
+                note_outputs: false,
                 params_in: ParamChanges::create(),
                 params_out: ParamChanges::create(),
                 shared,
@@ -702,6 +705,7 @@ impl Plugin {
                 c.activate_bus(AUDIO, OUTPUT, 0, 1);
             }
             self.takes_notes = c.get_bus_count(EVENT, INPUT) > 0;
+            self.note_outputs = c.get_bus_count(EVENT, OUTPUT) > 0;
             if self.takes_notes {
                 c.activate_bus(EVENT, INPUT, 0, 1);
             }
@@ -1367,6 +1371,10 @@ impl os_host::Plugin for Plugin {
 
     fn take_notes_out(&mut self) -> Vec<os_host::NoteOut> {
         std::mem::take(&mut self.notes_out)
+    }
+
+    fn puts_out_notes(&self) -> bool {
+        self.note_outputs
     }
 
     fn help_url(&self) -> Option<String> {
