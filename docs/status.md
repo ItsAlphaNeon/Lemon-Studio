@@ -290,6 +290,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   clips, so their crossfade dips
 - MP3 samples are placed as the original encoder output (the info frame plays as silence)
 - The sampler's closing fades
+- The sampler's voices change at tick starts, as the original's do: the channel's envelopes and LFOs step once per
+  tick (the global LFO counts the song's ticks), and each voice's pitch, filter and gains are worked out there, the
+  gains ramping over the tick by at most the original's step
 - A fast resampler while playing, and the exact one for export
 - Idle plugins are skipped; Stop ends every voice, also in hosted plugins
 - Multi-core mixing: the mixer's tracks, the generator channels and chunks of the sampler's voices render on a
