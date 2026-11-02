@@ -2169,17 +2169,21 @@ pub fn track_after_used(s: &State) -> u16 {
 /// Create an automation clip for `target` (§8): a new type-5 channel named `name` (its colour from
 /// `State::clip_colors`), two flat points at `value`,
 /// a clip over the time selection, else `automation_span` (spec: plugins/plugin-parameters.md §5), on the first free
-/// track below the last used one.
+/// track below the last used one. The channel becomes the rack's only selected one, in the filter group "Automation"
+/// with the filter on it, as the original's rack shows after every Create automation clip (spec: ui/channel-rack.md
+/// §19, measured 2026-11-02).
 pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16 {
-    // One undo step, "Create automation clip": the playlist, and the control's initial value while "Initialize controls
-    // automatically" is on (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
+    // One undo step, "Create automation clip": the playlist, the rack's side (the channel, its group, the filter and the
+    // selection) and the control's initial value while "Initialize controls automatically" is on (spec:
+    // ui/settings-choices.md "Advanced: Initialize controls automatically").
     let init = crate::init::automatic(tgt, value);
     arr_mut(s);
-    let mut snap = crate::history::Snap::Playlist(Box::new(capture(s)));
+    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    let mut snaps = vec![crate::history::Snap::Playlist(Box::new(capture(s))), rack];
     if init.is_some() {
-        snap = crate::history::Snap::Several(vec![snap, crate::history::Snap::Init(tgt, crate::init::entry(s, tgt))]);
+        snaps.push(crate::history::Snap::Init(tgt, crate::init::entry(s, tgt)));
     }
-    crate::history::record(s, crate::history::CREATE_AUTOMATION, snap);
+    crate::history::record(s, crate::history::CREATE_AUTOMATION, crate::history::Snap::Several(snaps));
     let name = &unique_channel_name(s, name);
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let (a, b) = match s.playlist.range {
@@ -2208,6 +2212,10 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
     });
     s.project.automations.push(os_flp::project::new_automation(index, tgt, value.clamp(0.0, 1.0), beats));
+    let row = s.project.channels.len() - 1;
+    s.selected_channel = row;
+    s.rack.select_only(row);
+    crate::rack::join_group(s, row, "Automation");
     let track = free_track(s, track_after_used(s), a, b);
     let arr = arr_mut(s);
     arr.clips.push(Clip::new(a, b - a, track, ClipSource::Channel(index)));

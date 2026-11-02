@@ -349,7 +349,8 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 
 ## 🚧 Automation
 
-- Automation clips for channel, mixer and plugin parameters
+- Automation clips for channel, mixer and plugin parameters. Create automation clip selects the clip's channel and
+  shows the channel rack's "Automation" group, as the original does; its undo takes the channel away again
 - A clip drives every target it is linked to, including mixer slot switches and mix levels, track EQ, send
   levels, stereo separation, the channel's level adjustments, the main swing, a channel's mixer track and its switch
 - The main swing moves the notes not started yet when it changes; a channel's voices go to its new mixer track from

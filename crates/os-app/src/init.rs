@@ -321,9 +321,19 @@ mod tests {
         pl::run(&mut a, Cmd::CreateAutomation(t, name, v));
         assert_eq!(a.state.project.init_controls, vec![rec(vol, 10000)]);
         assert_eq!((a.state.history.len(), pl::clips(&a.state).len()), (1, 1));
+        // The clip's channel: the only selected one, in the "Automation" group with the filter on it, as the original's
+        // rack shows after every Create automation clip.
+        let row = a.state.project.channels.len() - 1;
+        let g = a.state.rack.groups.iter().position(|g| g.name == "Automation").expect("the group");
+        assert_eq!((a.state.selected_channel, a.state.rack.filter), (row, crate::rack::Filter::Group(g)));
+        assert!(a.state.rack.groups[g].members.contains(&row) && a.state.rack.sel.iter().eq([&row]));
+        let channels = a.state.project.channels.len();
         assert_eq!(history::undo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
         assert!(a.state.project.init_controls.is_empty() && pl::clips(&a.state).is_empty());
+        assert_eq!(a.state.project.channels.len(), channels - 1, "the clip's channel goes with the undo");
+        assert!(a.state.rack.groups.iter().all(|g| g.name != "Automation") && a.state.rack.filter == crate::rack::Filter::All);
         assert_eq!(history::redo(&mut a.state).as_deref(), Some(history::CREATE_AUTOMATION));
+        assert_eq!((a.state.project.channels.len(), a.state.rack.filter), (channels, crate::rack::Filter::Group(g)));
         assert_eq!((a.state.project.init_controls.clone(), pl::clips(&a.state).len()), (vec![rec(vol, 10000)], 1));
         // A second clip on the moved knob: its new value replaces the old one; undo brings that back.
         a.state.project.channels[0].volume = 0.5;
