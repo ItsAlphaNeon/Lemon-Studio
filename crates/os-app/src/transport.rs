@@ -1338,6 +1338,8 @@ fn engine(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayM
     if plugins && std::env::var_os("OS_DEBUG").is_some() {
         eprintln!("[transport] attach {} instrument(s), {} effect(s)", list.len(), fx.len());
     }
+    // The engine hands its instruments one tick per call: Lemon Sampler's voices step on those calls.
+    lemon_sampler::set_host_ticks(project.ppq);
     let mut e = Engine::with_instruments(project, library, rate, mode, &list);
     crate::project_plugins::attach_effects(&mut e, project, fx);
     e

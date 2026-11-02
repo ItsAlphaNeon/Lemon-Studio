@@ -11,7 +11,8 @@
 //! only; the channel's notes, controllers, voicing and mod X / Y reach every instrument member, while its volume and pan
 //! stay the engine's, on the chain's output. Automation and controller links reach a member as the container's
 //! parameters: the member's id and an item packed in the parameter index (`os_model::target::member_item`), the item a
-//! parameter of the member's plugin or the member's wet or dry level.
+//! parameter of the member's plugin or the member's wet or dry level. An effect member with its own Auto-bypass when
+//! silent on is passed by while it hears and puts out silence, as a slot's effect is.
 // spec: plugins/patcher/README.md Â§3.2, Â§3.3, Â§4 slices 1 and 3, Â§4.2, Â§4.4; audio/mixer.md "An effect slot";
 // audio/delay-compensation.md
 
@@ -19,6 +20,7 @@ use std::collections::VecDeque;
 
 use os_model::target::{member_of, MEMBER_DRY, MEMBER_WET};
 
+use crate::engine::auto_bypass::{self, Quiet};
 use crate::instrument::{ChannelLevels, ChannelVoicing, HostedEffect, Instrument, NoteLevels, SharedEffect, SharedInstrument, TransportInfo};
 
 /// What a member plays: an effect on the chain's signal, or an instrument whose sound takes the signal's place.
@@ -35,6 +37,12 @@ pub struct Member {
     pub node: Node,
     pub wet: f32,
     pub dry: f32,
+    /// Its own Auto-bypass when silent (Lemon Studio's design, spec: plugins/patcher/README.md §4.5): an effect member
+    /// that has heard and put out silence for the hosted hold is not run, as a slot's effect is not (audio/
+    /// auto-bypass.md). An instrument member's switch is kept, not acted on (the channel's acts on the whole chain).
+    pub smart: bool,
+    /// How long the member has heard and put out silence.
+    quiet: Quiet,
     /// The delay the plugin reported after its last block, and the dry part's line as long as that.
     delay: u32,
     line: [VecDeque<f32>; 2],
@@ -52,7 +60,13 @@ impl Member {
     }
 
     fn of(id: u32, node: Node, wet: f32, dry: f32) -> Member {
-        Member { id, node, wet, dry, delay: 0, line: [VecDeque::new(), VecDeque::new()] }
+        Member { id, node, wet, dry, smart: false, quiet: Quiet::default(), delay: 0, line: [VecDeque::new(), VecDeque::new()] }
+    }
+
+    /// The member with its Auto-bypass when silent switched on (`smart`) or off.
+    pub fn with_smart(mut self, smart: bool) -> Member {
+        self.smart = smart;
+        self
     }
 
     /// Whether the member's input reaches its output beside the plugin.
@@ -124,6 +138,14 @@ impl Chain {
         }
     }
 
+    /// Member `i`'s Auto-bypass when silent (a change in the container's list); switched off, it runs again at once.
+    pub fn set_smart(&mut self, i: usize, smart: bool) {
+        if let Some(m) = self.members.get_mut(i).filter(|m| m.smart != smart) {
+            m.smart = smart;
+            m.quiet = Quiet::default();
+        }
+    }
+
     /// The member and item that parameter `index` of the container names.
     fn item(&self, index: u32) -> Option<(&Member, u16)> {
         let (id, item) = member_of(u16::try_from(index).ok()?)?;
@@ -143,7 +165,17 @@ impl Chain {
 
     fn run(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], mut key: Option<(&[f32], &[f32])>) {
         let n = left.len().min(right.len());
+        let auto = auto_bypass::enabled();
         for m in &mut self.members {
+            // The sidechain input is the first effect's, run or not.
+            let k = if matches!(m.node, Node::Fx(_)) { key.take() } else { None };
+            // Auto-bypass when silent: an effect member that has heard and put out silence for the hold passes its
+            // silent input on without running (its dry line holds silence by then: the hold covers its delay).
+            let smart = m.smart && auto && matches!(m.node, Node::Fx(_));
+            let quiet_in = smart && auto_bypass::silent(&left[..n]) && auto_bypass::silent(&right[..n]) && k.is_none_or(|k| auto_bypass::silent(k.0) && auto_bypass::silent(k.1));
+            if smart && m.quiet.skip(quiet_in, Some(auto_bypass::hold_frames(auto_bypass::HOSTED_HOLD, rate, m.delay))) {
+                continue;
+            }
             let blend = m.blends();
             if blend {
                 for (d, src) in self.dry.iter_mut().zip([&left[..n], &right[..n]]) {
@@ -152,16 +184,20 @@ impl Chain {
                 }
             }
             // A member still busy elsewhere passes the block through (as a busy slot does); a busy instrument is silent.
+            let mut ran = true;
             let delay = match &m.node {
                 Node::Fx(fx) => match fx.try_lock() {
                     Ok(mut fx) => {
-                        match key.take() {
+                        match k {
                             Some(k) => fx.process_fx_keyed(rate, &mut left[..n], &mut right[..n], k),
                             None => fx.process_fx(rate, &mut left[..n], &mut right[..n]),
                         }
                         fx.reported_delay_fx()
                     }
-                    Err(_) => m.delay,
+                    Err(_) => {
+                        ran = false;
+                        m.delay
+                    }
                 },
                 Node::Inst(inst) => match inst.try_lock() {
                     Ok(mut i) => {
@@ -177,6 +213,10 @@ impl Chain {
             };
             if delay != m.delay {
                 m.set_delay(delay);
+            }
+            if smart {
+                // A busy effect passed the block through: not counted as silence it made.
+                m.quiet.note(ran && quiet_in && auto_bypass::silent(&left[..n]) && auto_bypass::silent(&right[..n]), n);
             }
             if !blend {
                 continue;
@@ -240,6 +280,7 @@ impl Chain {
             }
             let d = m.delay;
             m.set_delay(d);
+            m.quiet = Quiet::default();
         }
         self.sounding = false;
     }
@@ -416,6 +457,8 @@ mod tests {
         line: [VecDeque<f32>; 2],
         ticks: bool,
         got: Vec<(u32, u32, f64)>,
+        /// How many blocks it ran.
+        runs: usize,
     }
 
     impl Late {
@@ -424,7 +467,7 @@ mod tests {
         }
 
         fn new(gain: f32, late: usize) -> Late {
-            Late { gain, late, line: [VecDeque::from(vec![0.0; late]), VecDeque::from(vec![0.0; late])], ticks: false, got: Vec::new() }
+            Late { gain, late, line: [VecDeque::from(vec![0.0; late]), VecDeque::from(vec![0.0; late])], ticks: false, got: Vec::new(), runs: 0 }
         }
     }
 
@@ -442,6 +485,7 @@ mod tests {
             (index == 0).then_some((0.0, 4.0))
         }
         fn process_fx(&mut self, _rate: u32, left: &mut [f32], right: &mut [f32]) {
+            self.runs += 1;
             for (c, buf) in [left, right].into_iter().enumerate() {
                 for x in buf.iter_mut() {
                     self.line[c].push_back(*x * self.gain);
@@ -531,6 +575,49 @@ mod tests {
         c.process_fx(48000, &mut l, &mut r);
         assert_eq!(l, vec![(0.5 + 1.0) * 2.0; 4]);
     }
+    /// A member's own Auto-bypass when silent: switched on, an effect member that has heard and put out silence for the
+    /// hosted hold is not run (its input passes on), and runs again on the block sound reaches it; switched off, or
+    /// with the program's setting off, it always runs. The other members run either way.
+    #[test]
+    fn a_members_auto_bypass() {
+        let (a, b) = (Arc::new(Mutex::new(Late::new(1.0, 0))), Arc::new(Mutex::new(Late::new(0.5, 0))));
+        let mut c = Chain::new(vec![Member::new(1, a.clone(), 1.0, 0.0).with_smart(true), Member::new(2, b.clone(), 1.0, 0.0)]);
+        // At 1000 Hz the hold is 4000 frames: four silent blocks of 1000, then it is passed by.
+        let block = |c: &mut Chain, v: f32| {
+            let (mut l, mut r) = (vec![v; 1000], vec![v; 1000]);
+            c.process_fx(1000, &mut l, &mut r);
+            l[999]
+        };
+        let runs = |x: &Arc<Mutex<Late>>| x.lock().unwrap().runs;
+        for _ in 0..4 {
+            block(&mut c, 0.0);
+        }
+        assert_eq!((runs(&a), runs(&b)), (4, 4));
+        // Silent in, held long enough: passed by; the second member still runs.
+        assert_eq!(block(&mut c, 0.0), 0.0);
+        assert_eq!((runs(&a), runs(&b)), (4, 5));
+        // Sound in: it runs at once (gain 1, then the second's 0.5).
+        assert_eq!(block(&mut c, 1.0), 0.5);
+        assert_eq!(runs(&a), 5);
+        // Switched off: it runs on silence too.
+        for _ in 0..5 {
+            block(&mut c, 0.0);
+        }
+        assert_eq!(runs(&a), 9, "four more runs, then passed by");
+        c.set_smart(0, false);
+        block(&mut c, 0.0);
+        assert_eq!(runs(&a), 10);
+        // The program's setting off: always run.
+        c.set_smart(0, true);
+        auto_bypass::set_enabled(false);
+        for _ in 0..6 {
+            block(&mut c, 0.0);
+        }
+        auto_bypass::set_enabled(true);
+        assert_eq!(runs(&a), 16);
+        assert!(!c.members[1].smart);
+    }
+
     /// A test instrument: while a key is held it puts out `level` times the velocity on both sides, `late` samples late;
     /// it notes what it was given.
     struct Tone {

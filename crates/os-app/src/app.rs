@@ -3096,6 +3096,13 @@ impl App {
                 }
             }
         }
+        // X11 gives a key let go of over a docked editor to the editor: its typed note ends once the key is up.
+        #[cfg(all(plugin_windows, target_os = "linux"))]
+        if !self.typing_held.is_empty() || !self.perf_typed.is_empty() {
+            if let Some(map) = crate::plugin_window::keys_down() {
+                self.release_keys_up(|code| crate::plugin_window::in_keymap(&map, code));
+            }
+        }
         // A plugin's menu closed without a pick since the last tick.
         self.plugin_menu_tick();
         #[cfg(plugin_windows)]
@@ -6301,6 +6308,18 @@ impl App {
                 (target::mixer(t, target::MIXER_VOLUME), format!("{} - Volume", mix_name(t)), v)
             }
             Action::Tempo => (target::TEMPO, "Tempo".into(), crate::playlist::tempo_value(s.tempo)),
+            // The channel rack's swing knob, mixer box and LED, named as the original names their clips (spec:
+            // ui/channel-rack.md §19, measured 2026-11-02); a new clip stores the knob's level, the track over 500
+            // (Insert 2 → 0.004) and 1 for a channel that is on.
+            Action::Knob(crate::knobs::KnobId::Swing) => (target::MAIN_SWING, "Main swing".into(), f64::from(s.knob(crate::knobs::KnobId::Swing))),
+            Action::RackMixer(row) => (
+                target::channel(chan(row)?.index, target::CHANNEL_MIXER_TRACK),
+                format!("{} - Target mixer track", chan_name(row)),
+                target::mixer_track_level(chan(row)?.mixer_track),
+            ),
+            Action::ChannelEnable(row) => {
+                (target::channel(chan(row)?.index, target::CHANNEL_ON), format!("{} - Mute / solo", chan_name(row)), if chan(row)?.enabled { 1.0 } else { 0.0 })
+            }
             Action::Knob(k @ crate::knobs::KnobId::Eq(t, b, f)) => {
                 s.project.mixer.iter().find(|m| m.index == t)?;
                 let param = [target::EQ_GAIN, target::EQ_FREQ, target::EQ_WIDTH][usize::from(f.min(2))] + b.min(2);
@@ -8652,9 +8671,9 @@ impl App {
         {
             return self.toggle_multilink();
         }
-        // A held key repeats only the piano roll's moving and copying keys; every other key acts on its first press
-        // (switches would flicker on and off; spec: ui/piano-keys.md §4 rule 1).
-        if self.repeat && !(self.piano_keys() && crate::piano_tools::repeats(key, ctrl, alt, self.shift)) {
+        // A held key repeats only the piano roll's moving and copying keys and the browser's Up / Down; every other key
+        // acts on its first press (switches would flicker on and off; spec: ui/piano-keys.md §4 rule 1).
+        if self.repeat && !(self.piano_keys() && crate::piano_tools::repeats(key, ctrl, alt, self.shift)) && !self.browser_repeats(key, ctrl, alt) {
             return;
         }
         // Shift+Alt+G: Enable groups (spec: ui/enable-groups.md §1), everywhere the main window has the keyboard.
@@ -9065,6 +9084,16 @@ impl App {
             self.transport.note_off(row, key);
         }
         self.typing_lit_changed();
+    }
+
+    /// Ends the typed notes (and Performance mode keys) whose key `down` says is no longer down, as their release would
+    /// have: on Linux the release of a key let go of over a docked plugin editor goes to the editor (issue #274).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn release_keys_up(&mut self, down: impl Fn(KeyCode) -> bool) {
+        let up: Vec<KeyCode> = self.typing_held.iter().map(|h| h.0).chain(self.perf_typed.iter().map(|h| h.0)).filter(|&c| !down(c)).collect();
+        for code in up {
+            self.typing_key(code, false, false, false);
+        }
     }
 
     /// Held typing-keyboard keys and MIDI notes light on the piano roll's keyboard (§4).
@@ -10124,8 +10153,8 @@ impl App {
         let s = &self.state;
         let popup = match *a {
             Action::ChannelSelect(i) => rk::channel_menu(s, i, x, y),
-            Action::ChannelEnable(i) => rk::led_menu(s, i, x, y),
-            Action::RackMixer(i) => rk::mixer_menu(s, i, x, y),
+            Action::ChannelEnable(i) => rk::led_menu(s, i, self.automation_target(a), x, y),
+            Action::RackMixer(i) => rk::mixer_menu(s, i, self.automation_target(a), x, y),
             Action::Knob(k @ (KnobId::ChanVol(_) | KnobId::ChanPan(_) | KnobId::Swing)) => rk::knob_menu(s, k, self.automation_target(a), x, y),
             Action::RackFilter => rk::filter_edit_menu(s, x, y),
             Action::RackLen => rk::length_menu(s, x, y),
@@ -10728,7 +10757,7 @@ fn settle_origins(p: &mut Project) {
 }
 
 /// An empty sampler channel at rack position `i`.
-fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
+pub(crate) fn sampler_channel(i: u16, name: &str, mixer_track: u16) -> Channel {
     Channel {
         id: os_model::Id::NONE,
         index: i,
@@ -16617,6 +16646,78 @@ mod tests {
         app.mouse_down_right();
         pick(&mut app, &mut c, "Remove from browser");
         assert!(app.state.browser_folders.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The arrows over the browser walk the tree (issue #169): Up / Down a row, Right opens a node and steps into it,
+    /// Left closes it and goes to the parent. Held, Up / Down repeat; with a modifier or away from the browser the
+    /// arrows are not the browser's.
+    #[test]
+    fn browser_arrow_keys_walk_the_tree() {
+        use crate::views::browser::{rows, Item};
+        use winit::keyboard::{Key, NamedKey};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let dir = std::env::temp_dir().join(format!("os_browser_arrows_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Kicks")).unwrap();
+        std::fs::write(dir.join("Kicks").join("Kick 01.wav"), b"x").unwrap();
+        std::fs::write(dir.join("Kicks").join("Kick 02.wav"), b"x").unwrap();
+        std::fs::write(dir.join("readme.txt"), b"hello").unwrap();
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        app.drop_file(dir.clone());
+        frame(&mut app, &mut c, None);
+        let i = rows(&app.state).iter().position(|r| r.path.as_deref() == Some(dir.as_path())).expect("root row");
+        let over = hit_rect(&app, &Action::BrowserRow(0));
+        app.mouse_move(over.cx(), over.cy());
+        assert!(app.over_browser());
+        let arrow = |app: &mut App, k: NamedKey| app.key(&Key::Named(k), false, false);
+        let sel = |app: &App| {
+            let r = rows(&app.state);
+            let k = r.iter().position(|r| Some(&r.key) == app.state.browser_sel.as_ref()).expect("a row selected");
+            (k, r[k].label.clone())
+        };
+        // Nothing selected: Up selects the last row.
+        app.state.browser_sel = None;
+        arrow(&mut app, NamedKey::ArrowUp);
+        assert_eq!(sel(&app), (i + 2, "readme.txt".to_string()));
+        arrow(&mut app, NamedKey::ArrowUp);
+        assert_eq!(sel(&app), (i + 1, "Kicks".to_string()));
+        // Right opens the closed folder (the selection stays), then steps onto its first row.
+        arrow(&mut app, NamedKey::ArrowRight);
+        assert_eq!(rows(&app.state)[i + 1].open, Some(true));
+        assert_eq!(sel(&app).0, i + 1);
+        arrow(&mut app, NamedKey::ArrowRight);
+        assert_eq!(sel(&app), (i + 2, "Kick 01".to_string()));
+        assert!(matches!(rows(&app.state)[i + 2].item, Item::Sample(_)));
+        arrow(&mut app, NamedKey::ArrowDown);
+        assert_eq!(sel(&app), (i + 3, "Kick 02".to_string()));
+        // Held, Down repeats.
+        app.repeat = true;
+        arrow(&mut app, NamedKey::ArrowDown);
+        app.repeat = false;
+        assert_eq!(sel(&app), (i + 4, "readme.txt".to_string()));
+        // The last row stays selected.
+        arrow(&mut app, NamedKey::ArrowDown);
+        assert_eq!(sel(&app).0, i + 4);
+        // Left on a file goes to its parent; on an open node it closes it.
+        arrow(&mut app, NamedKey::ArrowLeft);
+        assert_eq!(sel(&app).0, i);
+        arrow(&mut app, NamedKey::ArrowLeft);
+        assert_eq!(rows(&app.state).len(), i + 1, "the root closed");
+        assert_eq!(sel(&app).0, i);
+        // Opened again, Kicks is still open.
+        arrow(&mut app, NamedKey::ArrowRight);
+        assert_eq!(rows(&app.state)[i + 1].open, Some(true));
+        // A modifier keeps the arrows' other meanings: Ctrl+Up collapses the structure.
+        app.key(&Key::Named(NamedKey::ArrowUp), true, false);
+        assert!(app.state.browser_open.iter().all(|k| !k.starts_with(&format!("{}:", app.state.browser_tab))));
+        // Away from the browser the arrows leave it alone.
+        let before = app.state.browser_sel.clone();
+        app.mouse_move(1500.0, 600.0);
+        assert!(!app.over_browser());
+        arrow(&mut app, NamedKey::ArrowUp);
+        assert_eq!(app.state.browser_sel, before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -23533,6 +23634,30 @@ mod tests {
         app.state.plugin_pos = (beside.0 + 120.0, beside.1 + 40.0);
         app.open_channel_window(row);
         assert_eq!(app.state.plugin_pos, (beside.0 + 120.0, beside.1 + 40.0), "the channel window reopens where it was moved");
+    }
+
+    /// A typed note whose key is up ends though its release never came (issue #274: on Linux a key let go of over a
+    /// docked plugin editor goes to the editor); the keys still down keep playing.
+    #[test]
+    fn typed_notes_end_when_their_key_is_up() {
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.selected_channel = 1;
+        app.state.toggles.push("typing");
+        assert!(app.typing_key(KeyCode::KeyZ, true, false, false));
+        assert!(app.typing_key(KeyCode::KeyX, true, false, false));
+        assert_eq!(app.typing_held.len(), 2);
+        // All keys still down: nothing ends.
+        app.release_keys_up(|_| true);
+        assert_eq!(app.typing_held.len(), 2);
+        // Z let go of where the app did not see it.
+        app.release_keys_up(|code| code == KeyCode::KeyX);
+        assert_eq!(app.typing_held.iter().map(|h| h.0).collect::<Vec<_>>(), [KeyCode::KeyX]);
+        assert_eq!(app.state.piano.typed.len(), 1, "the piano roll's keyboard lights the held key alone");
+        // Its own release, coming late, changes nothing.
+        assert!(!app.typing_key(KeyCode::KeyZ, false, false, false));
+        app.release_keys_up(|_| false);
+        assert!(app.typing_held.is_empty());
     }
 }
 

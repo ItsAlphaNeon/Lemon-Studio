@@ -1067,6 +1067,25 @@ pub fn pointer_in_docked() -> bool {
     conn.frames.borrow().get(&r.child).and_then(Weak::upgrade).is_some_and(|f| !f.state.borrow().detached)
 }
 
+/// The keys down now, as the X server's keymap (a bit per X key code), while the main window is an X11 one. A key goes
+/// to the window under the pointer when that lies inside the focused window: over a docked editor its release reaches
+/// the editor, not the main window, so the typing keyboard asks here which of its keys are still down (issue #274).
+/// Under a native Wayland main window the X server does not see the keys it gets: None (UI thread).
+pub fn keys_down() -> Option<[u8; 32]> {
+    let conn = CONN.with(|c| c.borrow().clone())?;
+    if conn.owner.get() == 0 {
+        return None;
+    }
+    Some(conn.c.query_keymap().ok()?.reply().ok()?.keys)
+}
+
+/// Whether `code` is down in `keymap` (`keys_down`): the X key code is the evdev scancode winit reads, plus 8.
+pub fn in_keymap(keymap: &[u8; 32], code: winit::keyboard::KeyCode) -> bool {
+    use winit::platform::scancode::PhysicalKeyExtScancode;
+    let Some(k) = code.to_scancode().map(|s| s as usize + 8) else { return false };
+    keymap.get(k / 8).is_some_and(|&b| b >> (k % 8) & 1 != 0)
+}
+
 /// The window an event is about.
 fn window_of(e: &Event) -> Option<xproto::Window> {
     Some(match e {

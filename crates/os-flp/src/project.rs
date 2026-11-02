@@ -17,7 +17,7 @@ use os_model::clip_lfo::ClipLfo;
 use os_model::{
     Arrangement, AutoMode, AutoPoint, Automation, Channel, ChannelKind, ChannelMisc, ChannelRack, ChannelSound, Clip, ClipSource, ControlPoint,
     DataFolder, Envelope, InitControl, MixerTrack,
-    Note, Pattern, PerfSettings, PlaylistTrack, PlaylistView, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, WorkTime, CLIP_RECORD_LEN,
+    Note, Pattern, PerfSettings, PlaylistTrack, PlaylistView, TrackLink, Project, ProjectInfo, Rgb, SampleFx, SlotPlugin, TimeMarker, WorkTime, CLIP_RECORD_LEN,
 };
 
 use crate::{Chunk, ChunkBody, Event, FlpFile, Header, Tag, Value};
@@ -1819,7 +1819,26 @@ fn load_pl_track(events: &[Event], t: &PlTrackLoc, enc: TextEnc) -> PlaylistTrac
         locked: r.get(47).is_some_and(|&b| b != 0),
         clip_lock: None,
         perf: perf_settings(r),
+        link: track_link(r),
     }
+}
+
+/// A track record's link, bytes 49 to 60: kind (u32), mixer track and channel (i32, −1 = none); spec:
+/// flp/events/playlist.md "Event 238 layout". A short record is unlinked.
+fn track_link(r: &[u8]) -> TrackLink {
+    let at = |o: usize| r.get(o..o + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()));
+    let (Some(kind), Some(mixer), Some(channel)) = (at(49), at(53), at(57)) else { return TrackLink::NONE };
+    let opt = |v: i32| u16::try_from(v).ok();
+    TrackLink { kind: kind as u32, mixer: opt(mixer), channel: opt(channel) }
+}
+
+/// `track_link`'s 12 bytes.
+fn link_bytes(l: &TrackLink) -> [u8; 12] {
+    let mut b = [0u8; 12];
+    b[0..4].copy_from_slice(&l.kind.to_le_bytes());
+    b[4..8].copy_from_slice(&l.mixer.map_or(-1, i32::from).to_le_bytes());
+    b[8..12].copy_from_slice(&l.channel.map_or(-1, i32::from).to_le_bytes());
+    b
 }
 
 /// A track record's Performance settings, u32s at 22, 26, 30, 34, 38 and 42 (spec: ui/performance-mode.md §5); a
@@ -3312,6 +3331,9 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             if t.collapsed != old.collapsed {
                 patch_bytes(&mut events[tl.record], 61, &[u8::from(!t.collapsed)]);
             }
+            if t.link != old.link {
+                patch_bytes(&mut events[tl.record], 49, &link_bytes(&t.link));
+            }
             if t.color != old.color {
                 if let Some(c) = t.color {
                     patch_bytes(&mut events[tl.record], 4, &bgr_from_rgb(c, 0).to_le_bytes());
@@ -4148,7 +4170,7 @@ fn track_record(t: &PlaylistTrack) -> Vec<u8> {
     r[22..46].copy_from_slice(&perf_bytes(&t.perf));
     r[46] = u8::from(t.grouped);
     r[47] = u8::from(t.locked);
-    r[53..61].fill(0xff);
+    r[49..61].copy_from_slice(&link_bytes(&t.link));
     r[61] = u8::from(!t.collapsed);
     r
 }
@@ -5061,6 +5083,37 @@ mod tests {
             assert_eq!(ev[at].id, id::SONG_MODE, "in place");
             assert_eq!(load(&file).unwrap().song_mode, Some(!on));
         }
+    }
+
+    /// Audio and instrument tracks (track record bytes 49..61; spec: flp/events/playlist.md): a new track is unlinked
+    /// (kind 0, two −1s), and links are written, read and patched in place as the original saved them (Assign to new
+    /// Audio track on Insert 3: kind 1, mixer 3; Assign to new instrument track on the second channel: kind 3, channel 1).
+    #[test]
+    fn track_links_round_trip() {
+        let reparse = |f: &FlpFile| FlpFile::parse(&f.to_bytes().unwrap()).unwrap();
+        let mut p = new_project();
+        p.arrangements.push(default_arrangement());
+        let file = reparse(&create(&p).unwrap());
+        let rec = events_of(&file).unwrap().iter().find(|e| e.id == id::PL_TRACK).and_then(|e| e.data()).unwrap().to_vec();
+        assert_eq!(rec[49..61], [0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        let mut q = load(&file).unwrap();
+        assert!(q.arrangements[0].tracks.iter().all(|t| t.link.is_none()));
+
+        let mut file = file;
+        q.arrangements[0].tracks[0].link = TrackLink::audio(3);
+        q.arrangements[0].tracks[1].link = TrackLink::instrument(1);
+        q.arrangements[0].tracks[2].link = TrackLink { kind: 3, mixer: Some(24), channel: Some(198) };
+        apply(&q, &mut file).unwrap();
+        let file = reparse(&file);
+        let recs: Vec<Vec<u8>> = events_of(&file).unwrap().iter().filter(|e| e.id == id::PL_TRACK).take(3).map(|e| e.data().unwrap().to_vec()).collect();
+        assert_eq!(recs[0][49..61], [1, 0, 0, 0, 3, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(recs[1][49..61], [3, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 1, 0, 0, 0]);
+        assert_eq!(recs[1][..49], rec[..49].iter().enumerate().map(|(k, &b)| if k == 0 { 2 } else { b }).collect::<Vec<u8>>()[..]);
+        let back = load(&file).unwrap();
+        let links: Vec<TrackLink> = back.arrangements[0].tracks.iter().take(4).map(|t| t.link).collect();
+        assert_eq!(links, [TrackLink::audio(3), TrackLink::instrument(1), TrackLink { kind: 3, mixer: Some(24), channel: Some(198) }, TrackLink::NONE]);
+        let made = reparse(&create(&back).unwrap());
+        assert_eq!(load(&made).unwrap().arrangements[0].tracks[0].link, TrackLink::audio(3), "a new file writes them too");
     }
 
     /// Performance mode (event 31, after 100 and 40) and each track's Performance settings (track record u32s at 22..46;
@@ -6861,6 +6914,48 @@ mod tests {
         let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
         assert_eq!(again.automations[0].target().map(decode), Some(Target::ChannelParam(0, 35)));
         assert_eq!(again.automations[1].target().map(decode), Some(Target::SlotParam(1, 0, 8)));
+    }
+
+    /// The channel rack's swing knob, mixer box and LED as targets (spec: flp/events/automation.md "Targets",
+    /// flp/engine-events.md "Event 216", "Channel rack records"; measured 2026-11-02): a clip on each is written as a 227
+    /// link with target 0x4000_0001, `channel << 16 | 8` or `channel << 16 | 7` and read back as it was, and their
+    /// initial values are 12-byte records in the controls' own units (swing 64 → 64, Insert 2 → 2, on → 1). Moving the
+    /// channels moves the channel targets with them.
+    #[test]
+    fn rack_control_automation_and_initial_values_round_trip() {
+        use os_model::target::{self, decode, Target};
+        let mut p = new_project();
+        for (i, name) in [(2u16, "Main swing"), (3, "Kick - Target mixer track"), (4, "Clap - Mute / solo")] {
+            p.channels.push(Channel { kind: ChannelKind::Automation, ..sampler(i, name, 0) });
+        }
+        let (swing, track, on) = (target::MAIN_SWING, target::channel(0, target::CHANNEL_MIXER_TRACK), target::channel(1, target::CHANNEL_ON));
+        p.automations.push(new_automation(2, swing, 0.5, 4.0));
+        p.automations.push(new_automation(3, track, 0.004, 4.0));
+        p.automations.push(new_automation(4, on, 1.0, 4.0));
+        let mut arr = default_arrangement();
+        arr.clips = (0..3).map(|k| Clip::new(0, 384, k, ClipSource::Channel(2 + k))).collect();
+        p.arrangements = vec![arr];
+        p.init_controls = [(track, 2), (on, 1), (swing, 64)].map(|(target, value)| InitControl { head: 0, target, value }).to_vec();
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back.automations, p.automations);
+        assert_eq!(back.init_controls, p.init_controls);
+        let links = events_of(&file).unwrap().iter().filter(|e| e.id == id::AUTO_LINK).filter_map(|e| e.data()).map(|d| d[8..12].to_vec()).collect::<Vec<_>>();
+        assert_eq!(links, [[0x01, 0, 0, 0x40], [8, 0, 0, 0], [7, 0, 1, 0]]);
+        let data = event_data(&file, id::INIT_CONTROLS).unwrap();
+        assert_eq!(data, [[0u8; 4], [8, 0, 0, 0], [2, 0, 0, 0], [0; 4], [7, 0, 1, 0], [1, 0, 0, 0], [0; 4], [1, 0, 0, 0x40], [64, 0, 0, 0]].concat());
+        let read: Vec<Option<Target>> = back.automations.iter().map(|a| a.target().map(decode)).collect();
+        assert_eq!(read, [Some(Target::MainSwing), Some(Target::ChannelMixerTrack(0)), Some(Target::ChannelOn(1))]);
+        // The two sampler channels swapped: the mixer box's and the LED's targets follow, their control points too; the
+        // swing stays.
+        let mut m = back.clone();
+        m.patterns[0].controls = vec![ControlPoint::new(0, 0, target::CHANNEL_MIXER_TRACK, 2), ControlPoint::new(0, 1, target::CHANNEL_ON, 0)];
+        m.reorder_channels(&[1, 0, 2, 3, 4]);
+        assert_eq!(m.patterns[0].controls.iter().map(|c| c.kind).collect::<Vec<_>>(), [target::channel(1, 8), target::channel(0, 7)]);
+        apply(&m, &mut file).unwrap();
+        let again = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        let read: Vec<Option<Target>> = again.automations.iter().map(|a| a.target().map(decode)).collect();
+        assert_eq!(read, [Some(Target::MainSwing), Some(Target::ChannelMixerTrack(1)), Some(Target::ChannelOn(0))]);
     }
 
     /// A clip on an effect inside a container (Lemon Studio's member targets: the container slot's parameter packing

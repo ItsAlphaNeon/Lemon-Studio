@@ -300,6 +300,15 @@ impl App {
         let shift = self.shift;
         let focus = self.state.browser_search_focus;
         let over = self.over_browser() || focus;
+        if let Key::Named(k @ (NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::ArrowLeft | NamedKey::ArrowRight)) = key
+            && over
+            && !ctrl
+            && !alt
+            && !shift
+        {
+            self.browser_arrow(*k);
+            return true;
+        }
         let cmd = match key {
             Key::Named(NamedKey::F2) if !self.state.browser_search.is_empty() => Some(BCmd::Find(-1)),
             Key::Named(NamedKey::F3) if !self.state.browser_search.is_empty() => Some(BCmd::Find(1)),
@@ -362,6 +371,70 @@ impl App {
             self.state.message = Some(format!("Browser: {}", if right { "right" } else { "left" }));
             self.invalidate();
         }
+    }
+
+    /// The arrows over the browser: Up / Down select the row above / below; Right opens a closed node, steps into an
+    /// open one and plays a sample again; Left closes an open node, else selects the row's parent. With nothing selected
+    /// Up selects the last row, the others the first. A sample the selection lands on plays (§7), as a click does; other
+    /// rows are only selected, not acted on (a history step is not gone to, a pattern not made current).
+    fn browser_arrow(&mut self, k: winit::keyboard::NamedKey) {
+        use winit::keyboard::NamedKey::*;
+        let s = &mut self.state;
+        let rows = view::rows(s);
+        if rows.is_empty() {
+            return;
+        }
+        // While searching every node shows open and stays so.
+        let searching = !s.browser_search.is_empty();
+        let mut play = None;
+        let to = match rows.iter().position(|r| Some(&r.key) == s.browser_sel.as_ref()) {
+            None => Some(if k == ArrowUp { rows.len() - 1 } else { 0 }),
+            Some(i) => {
+                let row = &rows[i];
+                match k {
+                    ArrowUp => i.checked_sub(1),
+                    ArrowDown => Some(i + 1).filter(|&j| j < rows.len()),
+                    ArrowRight => match row.open {
+                        Some(false) if !searching => {
+                            s.browser_open.insert(row.key.clone());
+                            None
+                        }
+                        Some(_) => Some(i + 1).filter(|&j| rows.get(j).is_some_and(|r| r.depth > row.depth)),
+                        None => {
+                            if let Item::Sample(path) = &row.item {
+                                play = Some(path.clone());
+                            }
+                            None
+                        }
+                    },
+                    ArrowLeft => match row.open {
+                        Some(true) if !searching => {
+                            s.browser_open.remove(&row.key);
+                            None
+                        }
+                        _ => (0..i).rev().find(|&j| rows[j].depth < row.depth),
+                    },
+                    _ => None,
+                }
+            }
+        };
+        if let Some(j) = to {
+            select(s, &rows[j].key);
+            if let Item::Sample(path) = &rows[j].item {
+                play = Some(path.clone());
+            }
+        }
+        reveal(s);
+        if let Some(path) = play {
+            self.preview_sample(&path);
+        }
+        self.invalidate();
+    }
+
+    /// Whether a held key repeats in the browser: Up and Down go on walking the rows (`browser_arrow`).
+    pub(crate) fn browser_repeats(&self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        matches!(key, Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)) && !ctrl && !alt && !self.shift && (self.over_browser() || self.state.browser_search_focus)
     }
 
     /// A press on the browser's splitter: drags it; a double click gives the browser its default width (spec §9).

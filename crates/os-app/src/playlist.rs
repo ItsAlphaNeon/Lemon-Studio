@@ -308,6 +308,8 @@ pub enum Cmd {
     TrackSolo(u16),
     /// Group the track with the one above it, or take it out of its group (§6a).
     TrackGroup(u16),
+    /// Track mode ▸ (§6c): unassigned, an audio track, an instrument track.
+    TrackMode(u16, crate::track_links::Mode),
     /// Arrangements (§12): show arrangement `n`, add an empty one, clone / rename / delete the current one, copy
     /// arrangement `n`'s clips into the current one.
     ArrSelect(u16),
@@ -569,6 +571,9 @@ pub enum EditTarget {
     /// Mixer track name (spec: ui/mixer.md §2) and a mixer slot's plugin name (§7).
     MixerName(u16),
     SlotName(u16, u8),
+    /// The name of member `.2` (its id) of the container at place (`.0`, `.1`): a track and slot, or a rack row and
+    /// `container::CHANNEL` (Lemon Studio's design, `crate::container::rename`).
+    MemberName(u16, u8, u32),
     /// The mixer track menu's Insert multiple...: how many tracks to insert in front of this one.
     MixerInsert(u16),
     /// The mixer track menu's Create group...: the track's name, then the group's separators (`mixer::create_group`).
@@ -607,8 +612,9 @@ impl Wave {
 }
 
 /// What a playlist undo step keeps (`crate::history`): the shown arrangement's clips, markers and tracks, the
-/// automation data and the channels' stretch settings.
-pub(crate) type Snapshot = (Vec<Clip>, Vec<TimeMarker>, Vec<PlaylistTrack>, Vec<Automation>, Vec<[u32; 4]>);
+/// automation data and the channels' stretch settings and mixer tracks (an audio clip placed on an audio track moves
+/// its channel to the track's mixer track, `track_links::route_clips`).
+pub(crate) type Snapshot = (Vec<Clip>, Vec<TimeMarker>, Vec<PlaylistTrack>, Vec<Automation>, Vec<([u32; 4], u16)>);
 
 pub struct PlaylistState {
     pub tool: PlTool,
@@ -750,14 +756,24 @@ pub fn window_icon(p: &os_model::Project, icons: &HashMap<IconOwner, crate::icon
 /// Change icon... ▸: None, then [`ICONS`], the current one ticked; each sets the icon of `key` (a rack row, a mixer
 /// track's `TRACK_ICON_KEY + track` or an `fx_key`).
 pub fn icon_items(s: &State, key: usize) -> Vec<PItem> {
-    let cur = window_icon(&s.project, &s.playlist.icons, key);
+    // A container's member: its own icon, saved with the container (`crate::container::Member::icon`).
+    let cur = match crate::container::of_key(s, key) {
+        Some((t, k, id)) => crate::container::member(s, t, k, id).and_then(|m| m.icon),
+        None => window_icon(&s.project, &s.playlist.icons, key),
+    };
     let mut v = vec![PItem::new("None", Cmd::SetIcon(key, None)).mark(Mark::Check(cur.is_none()))];
     v.extend(ICONS.iter().enumerate().map(|(i, &(name, icon))| PItem::new(name, Cmd::SetIcon(key, Some(i))).mark(Mark::Check(cur == Some(icon)))));
     v
 }
 
-/// Sets (or with `None` clears) the icon of `key`; no undo step (it is not part of the project).
+/// Sets (or with `None` clears) the icon of `key`; no undo step (it is not part of the project). A container member's
+/// icon is part of its container's state: one undo step.
 fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
+    if let Some((t, k, id)) = crate::container::of_key(s, key) {
+        let icon = icon.and_then(|i| ICONS.get(i)).map(|&(_, i)| i);
+        crate::container::edit_own(s, t, k, id, crate::container::ICON, |m| m.icon = icon);
+        return;
+    }
     let Some(owner) = icon_owner(&s.project, key) else { return };
     match icon.and_then(|i| ICONS.get(i)) {
         Some(&(_, i)) => s.playlist.icons.insert(owner, i),
@@ -1481,7 +1497,7 @@ pub fn snapshot_with(s: &mut State, name: &'static str, extra: crate::history::S
 /// The playlist's undo state now (`snapshot`).
 pub(crate) fn capture(s: &State) -> Snapshot {
     let (clips, markers, tracks) = s.project.arrangement().map(|a| (a.clips.clone(), a.markers.clone(), a.tracks.clone())).unwrap_or_default();
-    let stretch = s.project.channels.iter().map(|c| c.sound.stretch).collect();
+    let stretch = s.project.channels.iter().map(|c| (c.sound.stretch, c.mixer_track)).collect();
     (clips, markers, tracks, s.project.automations.clone(), stretch)
 }
 
@@ -1492,8 +1508,9 @@ pub(crate) fn restore(s: &mut State, (c, m, t, a, st): Snapshot) {
     arr.markers = m;
     arr.tracks = t;
     s.project.automations = a;
-    for (ch, v) in s.project.channels.iter_mut().zip(st) {
+    for (ch, (v, m)) in s.project.channels.iter_mut().zip(st) {
         ch.sound.stretch = v;
+        ch.mixer_track = m;
     }
     s.playlist.sel.clear();
     s.piano.dirty = true;
@@ -2153,17 +2170,21 @@ pub fn track_after_used(s: &State) -> u16 {
 /// Create an automation clip for `target` (§8): a new type-5 channel named `name` (its colour from
 /// `State::clip_colors`), two flat points at `value`,
 /// a clip over the time selection, else `automation_span` (spec: plugins/plugin-parameters.md §5), on the first free
-/// track below the last used one.
+/// track below the last used one. The channel becomes the rack's only selected one, in the filter group "Automation"
+/// with the filter on it, as the original's rack shows after every Create automation clip (spec: ui/channel-rack.md
+/// §19, measured 2026-11-02).
 pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16 {
-    // One undo step, "Create automation clip": the playlist, and the control's initial value while "Initialize controls
-    // automatically" is on (spec: ui/settings-choices.md "Advanced: Initialize controls automatically").
+    // One undo step, "Create automation clip": the playlist, the rack's side (the channel, its group, the filter and the
+    // selection) and the control's initial value while "Initialize controls automatically" is on (spec:
+    // ui/settings-choices.md "Advanced: Initialize controls automatically").
     let init = crate::init::automatic(tgt, value);
     arr_mut(s);
-    let mut snap = crate::history::Snap::Playlist(Box::new(capture(s)));
+    let rack = crate::history::Snap::Rack(Box::new(crate::history::RackSide::now(s, s.project.channels.len())));
+    let mut snaps = vec![crate::history::Snap::Playlist(Box::new(capture(s))), rack];
     if init.is_some() {
-        snap = crate::history::Snap::Several(vec![snap, crate::history::Snap::Init(tgt, crate::init::entry(s, tgt))]);
+        snaps.push(crate::history::Snap::Init(tgt, crate::init::entry(s, tgt)));
     }
-    crate::history::record(s, crate::history::CREATE_AUTOMATION, snap);
+    crate::history::record(s, crate::history::CREATE_AUTOMATION, crate::history::Snap::Several(snaps));
     let name = &unique_channel_name(s, name);
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let (a, b) = match s.playlist.range {
@@ -2192,6 +2213,10 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         envelopes: Default::default(), rack: Default::default(), misc: Default::default(), sound: Default::default(),
     });
     s.project.automations.push(os_flp::project::new_automation(index, tgt, value.clamp(0.0, 1.0), beats));
+    let row = s.project.channels.len() - 1;
+    s.selected_channel = row;
+    s.rack.select_only(row);
+    crate::rack::join_group(s, row, "Automation");
     let track = free_track(s, track_after_used(s), a, b);
     let arr = arr_mut(s);
     arr.clips.push(Clip::new(a, b - a, track, ClipSource::Channel(index)));
@@ -2360,6 +2385,9 @@ pub fn add_audio_clip_as(s: &mut State, path: &str, track: u16, tick: u32, name:
 /// the track after the highest any channel uses).
 pub fn add_audio_clip_in(s: &mut State, path: &str, track: u16, tick: u32, mixer: Option<u16>) -> Option<usize> {
     s.playlist.wave(path)?;
+    // Not on an instrument track: the next free track below it (§6c); on an audio track, through its mixer track.
+    let track = crate::track_links::audio_drop_track(s, track, tick, tick + 1);
+    let mixer = mixer.or_else(|| crate::track_links::audio_mixer(s, track));
     let index = s.project.channels.iter().map(|c| c.index + 1).max().unwrap_or(0);
     let name = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into());
     let mixer_track = mixer.unwrap_or_else(|| (s.project.channels.iter().map(|c| c.mixer_track).max().unwrap_or(0) + 1).min(crate::mixer::max_insert(&s.project)));
@@ -2510,6 +2538,10 @@ pub fn value_text(s: &State, ch: u16, v: f64) -> String {
         Some(target::Target::ChannelPan(_) | target::Target::MixerPan(_)) => crate::knobs::pan_text(((v - 0.5) * 2.0) as f32),
         Some(target::Target::ChannelPitch(_)) => format!("{:+} cents", os_engine::laws::auto_pitch_cents(v)),
         Some(target::Target::MixerVolume(_)) => crate::views::mixer::fader_db_text(v),
+        // The rack's swing knob, mixer box and LED as they show the value (spec: flp/events/automation.md "Targets").
+        Some(target::Target::MainSwing) => format!("{:.0}%", f64::from(target::swing_of(v)) / 1.28),
+        Some(target::Target::ChannelMixerTrack(_)) => crate::views::rack::insert_name(target::mixer_track_of(v, crate::mixer::max_insert(&s.project))),
+        Some(target::Target::ChannelOn(_)) => (if target::channel_on(v) { "On" } else { "Off" }).into(),
         Some(t @ (target::Target::ChannelParam(..) | target::Target::SlotParam(..))) => {
             crate::params::value_text(s, t, v).unwrap_or_else(|| format!("{:.0}%", v * 100.0))
         }
@@ -2883,6 +2915,7 @@ pub fn track_menu(s: &State, t: u16, x: f32, y: f32) -> Popup {
         PItem::head("Track"),
         PItem::new("Rename...", Cmd::TrackRename(t)),
         PItem::sub("Color", colors),
+        PItem::sub("Track mode", crate::track_links::mode_items(s, t, |m| Cmd::TrackMode(t, m))),
         PItem::sep(),
         PItem::new("Mute", Cmd::TrackMute(t)).mark(Mark::Check(!on)),
         PItem::new("Solo", Cmd::TrackSolo(t)).mark(Mark::Check(s.playlist.solo.as_ref().is_some_and(|x| x.0 == t))),
@@ -3406,6 +3439,10 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 let t = snap_round(s, &g, tick, alt);
                 s.playlist.overlay = Some(Overlay::Slice { tick: t, t0: track, t1: track });
             }
+            // An instrument track takes no audio clips (§6c).
+            None if !crate::track_links::fits(s, source_for(s, track), track) => {
+                s.message = Some(crate::track_links::NOT_FOR_AUDIO.into());
+            }
             None => {
                 // The undo name for placing the current source's clip (spec: ui/settings-choices.md "Undo history").
                 snapshot_as(s, "Arranger fill paint clip");
@@ -3570,11 +3607,19 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             let lo = orig.iter().map(|(_, c)| i32::from(c.track)).min().unwrap_or(0);
             let hi = orig.iter().map(|(_, c)| i32::from(c.track)).max().unwrap_or(0);
             let dk = dk.clamp(-lo, i32::from(TRACKS) - 1 - hi);
+            // A clip an instrument track can't take (an audio clip) stays on its own track (§6c).
+            let to: Vec<u16> = orig
+                .iter()
+                .map(|(_, o)| {
+                    let t = (i32::from(o.track) + dk) as u16;
+                    if crate::track_links::fits(s, o.source, t) { t } else { o.track }
+                })
+                .collect();
             let arr = arr_mut(s);
-            for &(i, o) in &orig {
+            for (&(i, o), t) in orig.iter().zip(to) {
                 if let Some(c) = arr.clips.get_mut(i) {
                     c.position = (i64::from(o.position) + dt) as u32;
-                    c.track = (i32::from(o.track) + dk) as u16;
+                    c.track = t;
                 }
             }
             s.piano.dirty = true;
@@ -3785,6 +3830,11 @@ pub fn drag_end(app: &mut App, d: PlDrag, grid: Rect) {
         && let Some(c) = orig.first().and_then(|&(i, _)| clips(s).get(i))
     {
         s.playlist.lock_len = Some((c.source, c.length));
+    }
+    // Audio clips that land on an audio track play through its mixer track (§6c).
+    if let PlDrag::Move { orig, .. } = &d {
+        let idx: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
+        crate::track_links::route_clips(s, &idx);
     }
     match d {
         PlDrag::Perform => {
@@ -4095,6 +4145,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::PatternName(n) => source_name(s, ClipSource::Pattern(n)),
         EditTarget::MixerName(n) => crate::mixer::name(s, n),
         EditTarget::SlotName(t, k) => crate::mixer::slot_name(s, t, k).unwrap_or_default(),
+        EditTarget::MemberName(t, k, id) => crate::container::member(s, t, k, id).map(|m| m.shown().to_string()).unwrap_or_default(),
         EditTarget::MixerInsert(_) => "2".into(),
         EditTarget::MixerGroup(_) => String::new(),
         EditTarget::Chords => crate::chord_tool::last(),
@@ -4161,9 +4212,18 @@ pub fn commit_edit(s: &mut State) {
                 s.mixer.slot_names.insert((t, k), text);
             }
         }),
+        EditTarget::MemberName(t, k, id) => crate::container::rename(s, t, k, id, &text),
         EditTarget::TypeIn(t, norm) => crate::typein::accept(s, t, norm, &text),
-        EditTarget::MixerInsert(n) => s.message = crate::mixer::insert_many(s, n, &text),
-        EditTarget::MixerGroup(n) => crate::mixer::create_group(s, n, &text),
+        // Their own steps too. Settled first: they renumber mixer tracks, which moves channels' mixer tracks, part of
+        // the playlist's step since audio tracks (`capture`), so the step above would no longer be empty.
+        EditTarget::MixerInsert(n) => {
+            crate::history::settle(s);
+            s.message = crate::mixer::insert_many(s, n, &text);
+        }
+        EditTarget::MixerGroup(n) => {
+            crate::history::settle(s);
+            crate::mixer::create_group(s, n, &text);
+        }
         EditTarget::Chords => s.message = Some(crate::chord_tool::write(s, &text)),
         EditTarget::PatternName(n) => crate::control::edit(s, "Pattern name", crate::control::command::Region::Project, |s| {
             if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == n) {
@@ -4190,6 +4250,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
         Cmd::Project(c) => return crate::project_picker::run(app, c),
         Cmd::Rack(c) => return crate::rack::run(app, c),
         Cmd::Mixer(c) => return crate::mixer::run(app, c),
+        Cmd::TrackMode(t, crate::track_links::Mode::NewInstrument(i)) => return crate::track_links::new_instrument(app, t, i),
         Cmd::SlotWin(t, c) => {
             let was = std::mem::replace(&mut app.state.selected_mixer, t);
             let m = run(app, *c);
@@ -4852,6 +4913,9 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             None
         }
         Cmd::TrackGroup(_) => None,
+        Cmd::TrackMode(t, m) => crate::control::edit(s, crate::track_links::TRACK_MODE, crate::control::command::Region::Project, |s| {
+            crate::track_links::set_mode(s, t, m)
+        }),
         Cmd::GroupCollapse(t) => {
             toggle_collapse(s, t);
             None
@@ -5386,6 +5450,10 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
 /// The CPU switches of the plugin in window `key` (a channel row or an `fx_key`; `None`: no plugin there, or a
 /// channel that hosts none, a sampler's or an audio clip's).
 pub fn plugin_cpu(s: &State, key: usize) -> Option<os_model::PluginCpu> {
+    // A container's member: its own (Lemon Studio's design, `crate::container::Member::cpu`).
+    if let Some((t, k, id)) = crate::container::of_key(s, key) {
+        return crate::container::member(s, t, k, id).map(|m| m.cpu);
+    }
     match crate::plugins::fx_of(key) {
         Some((t, k)) => {
             let m = s.project.mixer.iter().find(|m| m.index == t)?;
@@ -5407,6 +5475,10 @@ pub fn flip_plugin_cpu(s: &mut State, key: usize, smart: bool) {
         *b = !*b;
     };
     let name = if smart { "Auto-bypass when silent" } else { "Threaded processing" };
+    if let Some((t, k, id)) = crate::container::of_key(s, key) {
+        crate::container::edit_own(s, t, k, id, name, |m| flip(&mut m.cpu));
+        return;
+    }
     match crate::plugins::fx_of(key) {
         Some((t, k)) => crate::control::edit(s, name, Region::Track(t), |s| {
             if let Some(m) = s.project.mixer.iter_mut().find(|m| m.index == t) {
@@ -5441,8 +5513,8 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
         }
     }
     // A container's effect: Replace ▸ puts another effect in its place (an instrument, another instrument), Delete...
-    // removes it from the container. It has no name, colour or icon of its own, and no CPU switches (the container's
-    // slot or channel has them), so those stay greyed.
+    // removes it from the container. Its own name, colour, icon and CPU switches are a slot's entries on the member
+    // (Lemon Studio's design, spec: plugins/patcher/README.md §4.5), each one undo step, saved with the container.
     if let Some(&(t, k, id)) = s.params.members.get(&key) {
         let Some(list) = crate::container::members(s, t, k) else { return };
         let Some(i) = list.iter().position(|m| m.id == id) else { return };
@@ -5455,9 +5527,18 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
                     *it = PItem::sub("Replace", replace);
                 }
                 "Delete..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::Member(k, i, crate::container::Op::Remove))))),
+                "Rename, color and icon..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::MemberRename(k, i))))),
+                "Change color..." => {
+                    let mut colors = crate::mixer::color_items(|c| Cmd::Mixer(MCmd::MemberColor(k, i, c)));
+                    on_track(t, &mut colors);
+                    *it = PItem::sub("Change color...", colors);
+                }
+                "Random color" => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::MemberRandomColor(k, i))))),
+                "Change icon..." => *it = PItem::sub("Change icon...", icon_items(s, key)),
                 _ => {}
             }
         }
+        fill_cpu(s, key, menu);
         return;
     }
     if let Some((t, k)) = crate::plugins::fx_of(key) {

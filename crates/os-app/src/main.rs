@@ -30,6 +30,7 @@ mod dropout_log;
 mod open_bench;
 mod browser;
 mod browser_index;
+mod burn_midi;
 mod cable;
 mod capture;
 #[cfg(target_os = "linux")]
@@ -85,6 +86,7 @@ mod midi_file;
 mod midi_in;
 mod midi_out;
 mod lemon_midi_out;
+mod track_links;
 mod midi_play;
 mod container;
 mod mixer;

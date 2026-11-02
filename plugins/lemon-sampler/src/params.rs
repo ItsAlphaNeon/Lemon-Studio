@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use nih_plug::prelude::*;
-use os_engine::envelope;
+use os_dsp::articulator::Record;
 use os_model::SampleFx;
 
 pub type Fmt = Arc<dyn Fn(f32) -> String + Send + Sync>;
@@ -346,23 +346,36 @@ impl EnvParams {
         }
     }
 
-    /// The record in channel-envelope units, `None` when off. `amount_scale` = units of the amount at full scale.
-    pub fn envelope(&self, amount_scale: f32) -> Option<envelope::Params> {
-        let rec = os_model::Envelope {
-            enabled: self.on.live(),
+    /// The channel's record of this target (spec: audio/envelopes-and-lfos.md "Settings"), the knobs back in the record's
+    /// units: `which` is its place (pan, volume, mod X, mod Y, pitch; the pitch amounts in cents, 2400 at full scale).
+    /// The volume record's envelope is 1 while it is off (the flag of value 4, which FL sets on every volume record).
+    pub fn record(&self, which: usize) -> Record {
+        let unit = |v: f32| (v * 128.0).round() as i32;
+        let scale = if which == Record::PITCH { 2400.0 } else { 128.0 };
+        let amount = |v: f32| (v * scale).round() as i32;
+        let flag = |on: bool, bit: i32| if on { bit } else { 0 };
+        Record {
+            flags: flag(self.tempo.live(), Record::TIMES_FOLLOW_TEMPO)
+                | flag(self.lfo_tempo.live(), Record::LFO_FOLLOWS_TEMPO)
+                | flag(which == Record::VOLUME, Record::ONE_WHILE_OFF)
+                | flag(self.lfo_global.live(), Record::GLOBAL_LFO),
+            on: self.on.live(),
             delay: time_field(self.delay.live()),
             attack: time_field(self.att.live()),
             hold: time_field(self.hold.live()),
             decay: time_field(self.dec.live()),
-            sustain: (self.sus.live() * 128.0).round() as i32,
+            sustain: unit(self.sus.live()),
             release: time_field(self.rel.live()),
-            amount: (self.amt.live() * amount_scale).round() as i32,
-            attack_tension: (self.att_t.live() * 128.0).round() as i32,
-            decay_tension: (self.dec_t.live() * 128.0).round() as i32,
-            release_tension: (self.rel_t.live() * 128.0).round() as i32,
-            ..Default::default()
-        };
-        envelope::Params::new(&rec)
+            amount: amount(self.amt.live()),
+            lfo_delay: time_field(self.lfo_delay.live()),
+            lfo_attack: time_field(self.lfo_att.live()),
+            lfo_amount: amount(self.lfo_amt.live()),
+            lfo_speed: time_field(self.lfo_speed.live()),
+            lfo_shape: self.lfo_shape.live().clamp(0, 2),
+            attack_tension: unit(self.att_t.live()),
+            decay_tension: unit(self.dec_t.live()),
+            release_tension: unit(self.rel_t.live()),
+        }
     }
 }
 

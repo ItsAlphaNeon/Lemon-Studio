@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use os_model::{target, ChannelKind, ClipSource, InitControl, Note, Project, Rgb};
+use os_model::{target, ChannelKind, ClipSource, Note, Project, Rgb};
 
 use crate::app::{App, State, Win};
 use crate::knobs::KnobId;
@@ -1147,6 +1147,8 @@ pub fn remap_project(p: &mut Project, map: &[Option<usize>]) {
             ClipSource::Pattern(_) => true,
         });
     }
+    // Instrument tracks follow their channel; one whose channel goes is unassigned (spec: ui/playlist.md §6c).
+    p.remap_link_channels(|c| idx.get(&c).copied());
     // Initial values: a place below 0x2000 is a channel's index (spec: flp/layouts.md "Mixer places").
     p.init_controls.retain_mut(|c| {
         let hi = (c.target >> 16) as u16;
@@ -1463,8 +1465,13 @@ pub enum RCmd {
     LoadSample(usize),
     /// Wrap instrument in container (the original's Patcherize; `App::wrap_channel`).
     Wrap(usize),
+    /// Burn MIDI to ▸ Current pattern (false) / New pattern (true) (`App::burn_midi`).
+    BurnMidi(usize, bool),
     Clone(usize),
     Delete(usize),
+    /// Assign to new instrument track: the row's channel (the selected ones when it is selected) gets a playlist track
+    /// of its own (spec: ui/channel-rack.md §18, `track_links::assign_instrument`).
+    AssignInstrument(usize),
     Cut(usize),
     Copy(usize),
     Paste(usize),
@@ -1777,6 +1784,11 @@ fn lock_notes(app: &mut App, srcs: &[NoteSrc], row: Option<usize>) {
 /// Lemon Sampler's declick mode parameter (its index is the mode).
 const SAMPLER_DECLICK: &str = "Click removal";
 
+/// The rows a channel menu command on row `r` acts on: the selection when `r` is in it, else `r` alone.
+fn menu_rows(s: &State, r: usize) -> Vec<usize> {
+    if s.rack.sel.contains(&r) { s.rack.sel.iter().copied().collect() } else { vec![r] }
+}
+
 /// Right click on a name button (§18): two columns.
 pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
     let sampler = s.project.channels.get(r).is_some_and(|c| c.kind.is_sampler());
@@ -1805,7 +1817,10 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("Clone", RCmd::Clone(r)),
         it("Delete...", RCmd::Delete(r)),
         PItem::sep(),
-        PItem::not_yet("Assign to new instrument track"),
+        {
+            let it = it("Assign to new instrument track", RCmd::AssignInstrument(r));
+            if crate::track_links::can_assign_instrument(s, &menu_rows(s, r)) { it } else { it.off() }
+        },
         PItem::col(),
         it("Cut", RCmd::Cut(r)),
         it("Copy", RCmd::Copy(r)),
@@ -1826,7 +1841,15 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         it("MIDI channel through", RCmd::Through(r)).mark(Mark::Check(through(s, r))),
         PItem::sub("Receive notes from", receive_items(s, r)),
         PItem::not_yet("Create instrument..."),
-        PItem::sub("Burn MIDI to", vec![PItem::not_yet("Current pattern"), PItem::not_yet("New pattern")]),
+        // Burn MIDI to (§18; Lemon Studio's design, `burn_midi`): the notes the channel's arpeggiator, echo delay or
+        // plugin generates, into the current pattern or a new one.
+        {
+            let burn = |label: &'static str, new: bool| {
+                let i = it(label, RCmd::BurnMidi(r, new));
+                if crate::burn_midi::can_burn(s, r) { i } else { i.off() }
+            };
+            PItem::sub("Burn MIDI to", vec![burn("Current pattern", false), burn("New pattern", true)])
+        },
     ]);
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
@@ -1884,12 +1907,13 @@ fn burn_sel(s: &State) -> PItem {
 /// The Automation / Remote control / Value groups shared by knob and LED menus (§19). `other` is the mixer box or the
 /// LED when `knob` is `None`: its Value group works on it (Lemon Studio's design).
 fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Target>, auto: Option<(u32, String, f64)>) -> Vec<PItem> {
-    // spec: ui/settings-choices.md "Advanced: Initialize controls automatically". The swing knob has no automation
-    // clip of its own yet, but its start value is the project's main swing (Lemon Studio's design, ui/channel-rack.md
-    // §19).
-    let control = auto.as_ref().map(|a| (a.0, a.2)).or_else(|| (knob == Some(KnobId::Swing)).then(|| (InitControl::MAIN_SWING, f64::from(s.knob(KnobId::Swing)))));
+    // spec: ui/settings-choices.md "Advanced: Initialize controls automatically". Every control here has a target
+    // (`App::automation_target`), the swing knob, the mixer box and the LED included (measured 2026-11-02, §19).
+    let control = auto.as_ref().map(|a| (a.0, a.2));
     let [init, delete] = crate::init::items(s, control);
-    // Edit automation in piano roll: the channel volume and panning knobs have a lane there (Lemon Studio's design).
+    // Edit automation in piano roll: the channel volume and panning knobs have a lane there (Lemon Studio's design). The
+    // piano roll has no lane for the main swing, a channel's mixer track or its switch, so it stays greyed on the swing
+    // knob, the mixer box and the LED.
     let piano = match knob {
         Some(KnobId::ChanVol(r)) => Some(it("Edit automation in piano roll", RCmd::EventsInPiano(r, crate::piano::Lane::ChanVolume))),
         Some(KnobId::ChanPan(r)) => Some(it("Edit automation in piano roll", RCmd::EventsInPiano(r, crate::piano::Lane::ChanPan))),
@@ -1905,7 +1929,6 @@ fn value_groups(s: &State, knob: Option<KnobId>, other: Option<crate::typein::Ta
         delete,
         PItem::sep(),
     ];
-    // A clip that drives the main swing comes only from a file; Edit automation clip... still shows it.
     let driven = control.and_then(|c| crate::params::driving_clip(s, c.0));
     v.push(match auto {
         Some((tgt, name, val)) => PItem::new("Create automation clip", Cmd::CreateAutomation(tgt, name, val)),
@@ -2000,23 +2023,23 @@ pub fn knob_menu(s: &State, k: KnobId, auto: Option<(u32, String, f64)>, x: f32,
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// Right click on the mixer box (§12).
-pub fn mixer_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
+/// Right click on the mixer box (§12). `auto`: its automation target, clip name and value (`App::automation_target`).
+pub fn mixer_menu(s: &State, r: usize, auto: Option<(u32, String, f64)>, x: f32, y: f32) -> Popup {
     let mut items = vec![it("Reset", RCmd::MixerReset(r))];
-    items.extend(value_groups(s, None, Some(crate::typein::Target::RackTrack(r)), None));
+    items.extend(value_groups(s, None, Some(crate::typein::Target::RackTrack(r)), auto));
     items.push(PItem::sep());
     items.push(it("Assign to free mixer track", RCmd::AssignFree(r)));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// Right click on a LED (§10).
-pub fn led_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
+/// Right click on a LED (§10). `auto`: its automation target, clip name and value (`App::automation_target`).
+pub fn led_menu(s: &State, r: usize, auto: Option<(u32, String, f64)>, x: f32, y: f32) -> Popup {
     let soloed = s.rack.soloed == Some(r);
     let mut items = vec![
         it("Solo", RCmd::Solo(r)).mark(Mark::Check(soloed)),
         it("Lock active/mute state", RCmd::Lock(r)).mark(Mark::Check(s.rack.locked.contains(&r))),
     ];
-    items.extend(value_groups(s, None, Some(crate::typein::Target::RackLed(r)), None));
+    items.extend(value_groups(s, None, Some(crate::typein::Target::RackLed(r)), auto));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
@@ -2142,6 +2165,7 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::DeclickSel(_) | RCmd::SwingSel(Some(_)) | RCmd::TruncSel(_) | RCmd::CutItself(_) => Some("Channel settings"),
         RCmd::AddGroup | RCmd::DeleteGroup | RCmd::GroupSel => Some("Channel group"),
         RCmd::Burn(_) => Some("Burn loops"),
+        RCmd::AssignInstrument(_) => Some(crate::track_links::ASSIGN_INSTRUMENT),
         _ => None,
     };
     if let Some(name) = step {
@@ -2158,6 +2182,15 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         let msg = app.wrap_channel(r);
         app.invalidate();
         return msg;
+    }
+    if let RCmd::AssignInstrument(r) = c {
+        let rows = menu_rows(&app.state, r);
+        let m = crate::track_links::assign_instrument(&mut app.state, &rows);
+        app.invalidate();
+        return m;
+    }
+    if let RCmd::BurnMidi(r, new) = c {
+        return app.burn_midi(r, new);
     }
     let mouse = app.mouse;
     let sel: Vec<usize> = app.state.rack.sel.iter().copied().collect();
@@ -2508,6 +2541,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::Clone(_)
         | RCmd::CloneSel
+        | RCmd::AssignInstrument(_)
         | RCmd::MoveSel(_)
         | RCmd::Sort(_)
         | RCmd::LoadSample(_)
@@ -2522,7 +2556,8 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::WavePreview(_)
         | RCmd::Through(_)
         | RCmd::Restretch
-        | RCmd::Wrap(_) => None,
+        | RCmd::Wrap(_)
+        | RCmd::BurnMidi(..) => None,
     };
     // Channels let go without asking (`ask_delete`) are deleted now.
     let msg = match app.state.rack.delete_now.take() {
@@ -3005,8 +3040,8 @@ mod tests {
         use crate::typein::{accept, caption, text, Target};
         let mut app = App::new(None);
         let type_in = |m: Popup| m.items.iter().find(|i| i.label == "Enter value...").map(|i| (i.enabled, i.cmd.clone())).unwrap();
-        assert_eq!(type_in(mixer_menu(&app.state, 0, 0.0, 0.0)), (true, Cmd::TypeIn(Target::RackTrack(0))));
-        assert_eq!(type_in(led_menu(&app.state, 1, 0.0, 0.0)), (true, Cmd::TypeIn(Target::RackLed(1))));
+        assert_eq!(type_in(mixer_menu(&app.state, 0, None, 0.0, 0.0)), (true, Cmd::TypeIn(Target::RackTrack(0))));
+        assert_eq!(type_in(led_menu(&app.state, 1, None, 0.0, 0.0)), (true, Cmd::TypeIn(Target::RackLed(1))));
 
         let (box_, led) = (Target::RackTrack(0), Target::RackLed(1));
         let track = |app: &App| app.state.project.channels[0].mixer_track;
@@ -3053,14 +3088,14 @@ mod tests {
             c => panic!("{c:?}"),
         };
         app.state.project.channels[0].mixer_track = 4;
-        let m = mixer_menu(&app.state, 0, 0.0, 0.0);
+        let m = mixer_menu(&app.state, 0, None, 0.0, 0.0);
         assert!(find(&m, "Copy value").enabled && !find(&m, "Paste value").enabled);
         run(&mut app, cmd(&find(&m, "Copy value")));
-        let m = mixer_menu(&app.state, 2, 0.0, 0.0);
+        let m = mixer_menu(&app.state, 2, None, 0.0, 0.0);
         run(&mut app, cmd(&find(&m, "Paste value")));
         assert_eq!(app.state.project.channels[2].mixer_track, 4);
 
-        let set = find(&mixer_menu(&app.state, 2, 0.0, 0.0), "Set...").children;
+        let set = find(&mixer_menu(&app.state, 2, None, 0.0, 0.0), "Set...").children;
         let labels: Vec<_> = set.iter().map(|i| i.label.to_string()).collect();
         let max = crate::mixer::max_insert(&app.state.project);
         let default = (app.state.project.channels[2].index + 1).min(max);
@@ -3069,13 +3104,13 @@ mod tests {
         assert_eq!(labels[6], format!("Maximum (Bus {max})"));
         run(&mut app, cmd(&set[2]));
         assert_eq!(app.state.project.channels[2].mixer_track, 0);
-        let set = find(&mixer_menu(&app.state, 2, 0.0, 0.0), "Set...").children;
+        let set = find(&mixer_menu(&app.state, 2, None, 0.0, 0.0), "Set...").children;
         assert_eq!(set.iter().position(|i| i.mark == Mark::Radio(true)), Some(2));
         crate::history::undo(&mut app.state);
         assert_eq!(app.state.project.channels[2].mixer_track, 4, "one undo step");
 
         // The LED: Set... ▸ Off mutes; a copied off pastes as off.
-        let set = find(&led_menu(&app.state, 1, 0.0, 0.0), "Set...").children;
+        let set = find(&led_menu(&app.state, 1, None, 0.0, 0.0), "Set...").children;
         let labels: Vec<_> = set.iter().map(|i| i.label.to_string()).collect();
         assert_eq!(labels, ["Default (On)", "", "Off", "On"]);
         run(&mut app, cmd(&set[2]));
@@ -3103,6 +3138,39 @@ mod tests {
         let Cmd::Rack(c) = c else { panic!() };
         run(&mut app, c);
         assert_eq!(app.state.rack.loop_len, BTreeMap::from([(0, 3)]), "only the selected channel's loop burned");
+    }
+
+    /// The channel menu's Burn MIDI to ▸ (§18): Current pattern and New pattern on the right-clicked channel, enabled on
+    /// a channel that plays notes and greyed on an automation clip's; New pattern burns into the next empty pattern.
+    #[test]
+    fn channel_menu_burn_midi() {
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        let burn = |app: &App, r: usize| {
+            let m = channel_menu(&app.state, r, 0.0, 0.0);
+            let sub = m.items.iter().find(|i| i.label == "Burn MIDI to").map(|i| i.children.clone()).unwrap();
+            sub.iter().map(|i| (i.label.to_string(), i.enabled, i.cmd.clone())).collect::<Vec<_>>()
+        };
+        let row = |new: bool| Cmd::Rack(RCmd::BurnMidi(1, new));
+        assert_eq!(burn(&app, 1), [("Current pattern".to_string(), true, row(false)), ("New pattern".to_string(), true, row(true))]);
+        let knob = crate::knobs::KnobId::ChanVol(0);
+        let (tgt, name, v) = app.automation_target(&crate::app::Action::Knob(knob)).unwrap();
+        crate::playlist::run(&mut app, Cmd::CreateAutomation(tgt, name, v));
+        let auto = app.state.project.channels.len() - 1;
+        assert!(burn(&app, auto).iter().all(|(_, on, _)| !on), "greyed on an automation clip's channel");
+
+        // Burn a two-echo row of channel 1's step into a new pattern.
+        let cur = app.state.pattern.max(1);
+        app.state.pattern = cur;
+        let ch = app.state.project.channels[1].index;
+        crate::patterns::pat_mut(&mut app.state, cur).notes.push(os_model::Note::step(ch, 0));
+        let e = &mut app.state.project.channels[1].misc.echo;
+        (e.feed, e.echoes, e.time) = (0.25, 2, 48.0 / 384.0);
+        let Cmd::Rack(c) = burn(&app, 1)[1].2.clone() else { panic!() };
+        run(&mut app, c);
+        assert_ne!(app.state.pattern, cur);
+        let p = app.state.project.pattern(app.state.pattern).unwrap();
+        assert_eq!(p.notes.iter().map(|n| (n.channel, n.position)).collect::<Vec<_>>(), [(ch, 0), (ch, 24), (ch, 48)]);
     }
 
     /// The check options that work are enabled and tick on a click; Always show advanced controls shows the loop boxes
@@ -4287,9 +4355,9 @@ mod tests {
         let menu = |app: &App, which: u8| match which {
             0 => knob_menu(&app.state, KnobId::ChanVol(1), app.automation_target(&Action::Knob(KnobId::ChanVol(1))), 0.0, 0.0),
             1 => knob_menu(&app.state, KnobId::ChanPan(1), app.automation_target(&Action::Knob(KnobId::ChanPan(1))), 0.0, 0.0),
-            2 => knob_menu(&app.state, KnobId::Swing, None, 0.0, 0.0),
-            3 => mixer_menu(&app.state, 1, 0.0, 0.0),
-            _ => led_menu(&app.state, 1, 0.0, 0.0),
+            2 => knob_menu(&app.state, KnobId::Swing, app.automation_target(&Action::Knob(KnobId::Swing)), 0.0, 0.0),
+            3 => mixer_menu(&app.state, 1, app.automation_target(&Action::RackMixer(1)), 0.0, 0.0),
+            _ => led_menu(&app.state, 1, app.automation_target(&Action::ChannelEnable(1)), 0.0, 0.0),
         };
         let entry = |app: &App, which: u8, label: &str| menu(app, which).items.into_iter().find(|i| i.label == label).unwrap_or_else(|| panic!("{label}"));
 
@@ -4310,7 +4378,7 @@ mod tests {
         let init = entry(&app, 2, crate::init::INIT_LABEL);
         assert!(init.enabled && init.mark == Mark::Check(false));
         crate::playlist::run(&mut app, init.cmd);
-        assert_eq!(crate::init::entry(&app.state, InitControl::MAIN_SWING).map(|c| c.value), Some(32));
+        assert_eq!(crate::init::entry(&app.state, target::MAIN_SWING).map(|c| c.value), Some(32));
         assert_eq!(entry(&app, 2, crate::init::INIT_LABEL).mark, Mark::Check(true));
         app.state.project.swing = Some(100);
         app.state.song_mode = true;
@@ -4319,7 +4387,7 @@ mod tests {
         let delete = entry(&app, 2, crate::init::DELETE_LABEL);
         assert!(delete.enabled);
         crate::playlist::run(&mut app, delete.cmd);
-        assert!(!crate::init::listed(&app.state, InitControl::MAIN_SWING));
+        assert!(!crate::init::listed(&app.state, target::MAIN_SWING));
 
         // MIDI learn... on the mixer box and the LED: the link box, then the controller drives them.
         crate::remote::set_links(&[]);
@@ -4345,18 +4413,107 @@ mod tests {
         assert!(menu(&app, 4).items.iter().any(|i| i.label == "Remove link" && i.enabled));
         assert_eq!(crate::remote::links().iter().map(|l| l.target).collect::<Vec<_>>(), [Target::RackTrack(1), Target::RackLed(1)]);
 
-        // What stays greyed whatever the state (§19 lists the reasons): 1 on the volume and panning knobs, 5 on the
-        // swing knob, 6 on the mixer box and on the LED.
+        // What stays greyed whatever the state (§19 lists the reasons): 1 on the volume and panning knobs, 2 on the
+        // swing knob, the mixer box and the LED (no piano roll lane for them; one kind of link).
         let greyed = |which: u8| -> Vec<String> {
             let state_bound = ["Remove start value", "Edit automation clip...", "Paste value"];
             menu(&app, which).items.iter().filter(|i| !i.enabled && !i.label.is_empty() && !state_bound.contains(&i.label.as_ref())).map(|i| i.label.to_string()).collect()
         };
         assert_eq!(greyed(0), ["Override global mapping..."]);
         assert_eq!(greyed(1), greyed(0));
-        assert_eq!(greyed(2), ["Edit automation", "Edit automation in a window", "Edit automation in piano roll", "Create automation clip", "Override global mapping..."]);
-        let boxes = ["Edit automation", "Edit automation in a window", "Edit automation in piano roll", "Set as song start value", "Create automation clip", "Override global mapping..."];
-        assert_eq!(greyed(3), boxes);
-        assert_eq!(greyed(4), boxes);
+        for which in 2..=4 {
+            assert_eq!(greyed(which), ["Edit automation in piano roll", "Override global mapping..."], "menu {which}");
+        }
+    }
+
+    /// The swing knob's, mixer box's and LED's Automation groups (§19; measured 2026-11-02): Create automation clip makes
+    /// "Main swing", "<channel> - Target mixer track" and "<channel> - Mute / solo" on targets 0x4000_0001,
+    /// `channel << 16 | 8` and `channel << 16 | 7` at the control's value (the track over 500, 1 = on), with the start
+    /// value in the control's own unit; Edit automation clip... then shows it. Edit automation and Edit automation in a
+    /// window open the event editor on the control's own units; Set as song start value and Remove start value work on
+    /// the box and the LED, and the song start sets them.
+    #[test]
+    fn swing_mixer_box_and_led_automation_entries() {
+        use crate::app::Action;
+        use crate::playlist::{self as pl, Cmd};
+        use os_model::target;
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        app.state.control.settle(&mut app.state.project);
+        let (row, ch) = (1, app.state.project.channels[1].index);
+        app.state.project.channels[row].mixer_track = 2;
+        app.state.project.swing = Some(64);
+        let name = app.state.project.channels[row].name.clone().unwrap();
+        let actions = [Action::Knob(KnobId::Swing), Action::RackMixer(row), Action::ChannelEnable(row)];
+        let menu = |app: &App, a: &Action| {
+            let auto = app.automation_target(a);
+            match *a {
+                Action::RackMixer(r) => mixer_menu(&app.state, r, auto, 0.0, 0.0),
+                Action::ChannelEnable(r) => led_menu(&app.state, r, auto, 0.0, 0.0),
+                _ => knob_menu(&app.state, KnobId::Swing, auto, 0.0, 0.0),
+            }
+        };
+        let entry = |app: &App, a: &Action, label: &str| menu(app, a).items.into_iter().find(|i| i.label == label).unwrap_or_else(|| panic!("{label}"));
+        let want = [
+            (target::MAIN_SWING, "Main swing".to_string(), 0.5, 64, (0.0, 128.0)),
+            (target::channel(ch, target::CHANNEL_MIXER_TRACK), format!("{name} - Target mixer track"), 0.004, 2, (0.0, 500.0)),
+            (target::channel(ch, target::CHANNEL_ON), format!("{name} - Mute / solo"), 1.0, 1, (0.0, 1.0)),
+        ];
+        for (a, (tgt, clip, v, stored, range)) in actions.iter().zip(want) {
+            assert_eq!(entry(&app, a, "Create automation clip").cmd, Cmd::CreateAutomation(tgt, clip.clone(), v), "{a:?}");
+            assert!(!entry(&app, a, "Edit automation clip...").enabled);
+            // The event editor, in the control's own units.
+            let edit = entry(&app, a, "Edit automation");
+            assert_eq!(edit.cmd, Cmd::EditEvents(tgt, clip.clone(), v, None));
+            assert!(matches!(entry(&app, a, "Edit automation in a window").cmd, Cmd::EditEventsWindow(t, ..) if t == tgt));
+            pl::run(&mut app, edit.cmd);
+            assert_eq!((app.state.events.target, app.state.events.range), (tgt, range));
+            // The clip and, with "Initialize controls automatically" on, the start value in the control's unit.
+            let made = pl::create_automation(&mut app.state, tgt, &clip, v);
+            assert_eq!(app.state.project.channels.iter().find(|c| c.index == made).and_then(|c| c.name.clone()), Some(clip.clone()));
+            assert_eq!(app.state.project.automation(made).map(|x| (x.target(), x.points[0].value)), Some((Some(tgt), v)));
+            assert_eq!(crate::init::entry(&app.state, tgt).map(|c| c.value), Some(stored), "{clip}");
+            assert_eq!(crate::init::name(&app.state, tgt), clip);
+            assert_eq!(entry(&app, a, "Edit automation clip...").cmd, Cmd::Param(crate::params::PCmd::EditClip(made)));
+        }
+        // The values as the playlist shows them.
+        let shown = |app: &App, tgt: u32, v: f64| {
+            let c = app.state.project.automations.iter().find(|x| x.target() == Some(tgt)).unwrap().channel;
+            pl::value_text(&app.state, c, v)
+        };
+        assert_eq!(shown(&app, want_target(0, ch), 0.25), "25%");
+        assert_eq!(shown(&app, want_target(1, ch), 0.004), "Bus 2");
+        assert_eq!(shown(&app, want_target(1, ch), 0.0), "Master");
+        assert_eq!(shown(&app, want_target(2, ch), 0.4999), "Off");
+        assert_eq!(shown(&app, want_target(2, ch), 0.5), "On");
+
+        // Set as song start value and Remove start value on the box and the LED; the song start sets them.
+        app.state.project.init_controls.clear();
+        for a in &actions[1..] {
+            let init = entry(&app, a, crate::init::INIT_LABEL);
+            assert!(init.enabled && init.mark == Mark::Check(false), "{a:?}");
+            pl::run(&mut app, init.cmd);
+            assert_eq!(entry(&app, a, crate::init::INIT_LABEL).mark, Mark::Check(true));
+        }
+        assert_eq!(app.state.project.init_controls.iter().map(|c| c.value).collect::<Vec<_>>(), [2, 1]);
+        app.state.project.channels[row].mixer_track = 5;
+        app.state.project.channels[row].enabled = false;
+        app.state.song_mode = true;
+        assert!(crate::init::apply(&mut app.state));
+        assert_eq!((app.state.project.channels[row].mixer_track, app.state.project.channels[row].enabled), (2, true));
+        for a in &actions[1..] {
+            let delete = entry(&app, a, crate::init::DELETE_LABEL);
+            assert!(delete.enabled);
+            pl::run(&mut app, delete.cmd);
+        }
+        assert!(app.state.project.init_controls.is_empty());
+    }
+
+    /// Target `k` of [`swing_mixer_box_and_led_automation_entries`]: the main swing, channel `ch`'s mixer track, its
+    /// switch.
+    fn want_target(k: usize, ch: u16) -> u32 {
+        use os_model::target;
+        [target::MAIN_SWING, target::channel(ch, target::CHANNEL_MIXER_TRACK), target::channel(ch, target::CHANNEL_ON)][k]
     }
 
     /// Restretch all (§17, Ctrl+Alt+R; Lemon Studio's design): the audio clips get their lengths at the tempo at once,
