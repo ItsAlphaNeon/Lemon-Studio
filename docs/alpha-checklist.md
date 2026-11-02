@@ -64,12 +64,15 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
   saved in Lemon Studio's projects. The effects inside are automated and linked as a slot's effect is, their wet and
   dry levels too (clips and controller links name the member by its container's slot and its id, so they follow it
   when it moves and are saved with the project), and their windows have their presets, a slot effect's menu
-  (Replace, Delete) and undo steps for their edits and presets (2026-10-30). Left: the original's Patcher slots in
-  imported projects, moving a wrapped slot's own clips and links onto its member, the CPU switches per effect, and
-  the graph editor. The channel rack's Patcherize (Wrap in container) followed on 2026-10-30: the channel's instrument
-  goes into a container on the channel that plays its notes, instruments and effects can be added (instruments layer
-  at wet and dry 100 %), and members are automated, linked, undone and saved as a slot container's are; the old
-  instrument's clips and links are not moved onto its member yet
+  (Replace, Delete) and undo steps for their edits and presets (2026-10-30). The channel rack's Patcherize (Wrap in
+  container) followed on 2026-10-30: the channel's instrument goes into a container on the channel that plays its
+  notes, instruments and effects can be added (instruments layer at wet and dry 100 %), and members are automated,
+  linked, undone and saved as a slot container's are. Since 2026-11-02 a wrap moves the wrapped effect's (or
+  instrument's) automation clips, recorded pattern events, controller links, initial values and remote control links
+  onto its member, in the same undo step (the slot's own switch and mix and the channel's own settings stay theirs),
+  and each member has its own CPU switches (Auto-bypass when silent passes a silent effect by), name, colour and icon
+  from its window menu, one undo step each, saved with the container. Left: the original's Patcher slots in imported
+  projects, Shift+drop of Patcher, and the graph editor
 - [x] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** Six of the seven
   small effects match sample for sample in the tests (98 cases for these three: `os-engine/tests/integration/fx_null.rs`); the
   Chorus uses the true pi where the original's is a hair off, so 10 of its 21 cases match and the rest are at least

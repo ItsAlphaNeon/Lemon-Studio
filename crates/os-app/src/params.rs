@@ -179,7 +179,7 @@ pub fn link_target(s: &State, key: usize, index: usize) -> crate::typein::Target
 /// or for an effect inside a container "<effect> in <container> - <track>".
 pub(crate) fn owner_name(s: &State, key: usize) -> String {
     if let Some(&(track, slot, id)) = s.params.members.get(&key) {
-        let name = crate::container::members(s, track, slot).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.name);
+        let name = crate::container::members(s, track, slot).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
         if slot == crate::container::CHANNEL {
             return format!("{name} in Container - {}", crate::container::place_name(s, track, slot));
         }

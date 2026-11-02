@@ -569,6 +569,9 @@ pub enum EditTarget {
     /// Mixer track name (spec: ui/mixer.md §2) and a mixer slot's plugin name (§7).
     MixerName(u16),
     SlotName(u16, u8),
+    /// The name of member `.2` (its id) of the container at place (`.0`, `.1`): a track and slot, or a rack row and
+    /// `container::CHANNEL` (Lemon Studio's design, `crate::container::rename`).
+    MemberName(u16, u8, u32),
     /// The mixer track menu's Insert multiple...: how many tracks to insert in front of this one.
     MixerInsert(u16),
     /// The mixer track menu's Create group...: the track's name, then the group's separators (`mixer::create_group`).
@@ -751,14 +754,24 @@ pub fn window_icon(p: &os_model::Project, icons: &HashMap<IconOwner, crate::icon
 /// Change icon... ▸: None, then [`ICONS`], the current one ticked; each sets the icon of `key` (a rack row, a mixer
 /// track's `TRACK_ICON_KEY + track` or an `fx_key`).
 pub fn icon_items(s: &State, key: usize) -> Vec<PItem> {
-    let cur = window_icon(&s.project, &s.playlist.icons, key);
+    // A container's member: its own icon, saved with the container (`crate::container::Member::icon`).
+    let cur = match crate::container::of_key(s, key) {
+        Some((t, k, id)) => crate::container::member(s, t, k, id).and_then(|m| m.icon),
+        None => window_icon(&s.project, &s.playlist.icons, key),
+    };
     let mut v = vec![PItem::new("None", Cmd::SetIcon(key, None)).mark(Mark::Check(cur.is_none()))];
     v.extend(ICONS.iter().enumerate().map(|(i, &(name, icon))| PItem::new(name, Cmd::SetIcon(key, Some(i))).mark(Mark::Check(cur == Some(icon)))));
     v
 }
 
-/// Sets (or with `None` clears) the icon of `key`; no undo step (it is not part of the project).
+/// Sets (or with `None` clears) the icon of `key`; no undo step (it is not part of the project). A container member's
+/// icon is part of its container's state: one undo step.
 fn set_icon(s: &mut State, key: usize, icon: Option<usize>) {
+    if let Some((t, k, id)) = crate::container::of_key(s, key) {
+        let icon = icon.and_then(|i| ICONS.get(i)).map(|&(_, i)| i);
+        crate::container::edit_own(s, t, k, id, crate::container::ICON, |m| m.icon = icon);
+        return;
+    }
     let Some(owner) = icon_owner(&s.project, key) else { return };
     match icon.and_then(|i| ICONS.get(i)) {
         Some(&(_, i)) => s.playlist.icons.insert(owner, i),
@@ -4118,6 +4131,7 @@ pub fn start_edit(s: &mut State, target: EditTarget, at: (f32, f32)) {
         EditTarget::PatternName(n) => source_name(s, ClipSource::Pattern(n)),
         EditTarget::MixerName(n) => crate::mixer::name(s, n),
         EditTarget::SlotName(t, k) => crate::mixer::slot_name(s, t, k).unwrap_or_default(),
+        EditTarget::MemberName(t, k, id) => crate::container::member(s, t, k, id).map(|m| m.shown().to_string()).unwrap_or_default(),
         EditTarget::MixerInsert(_) => "2".into(),
         EditTarget::MixerGroup(_) => String::new(),
         EditTarget::Chords => crate::chord_tool::last(),
@@ -4184,6 +4198,7 @@ pub fn commit_edit(s: &mut State) {
                 s.mixer.slot_names.insert((t, k), text);
             }
         }),
+        EditTarget::MemberName(t, k, id) => crate::container::rename(s, t, k, id, &text),
         EditTarget::TypeIn(t, norm) => crate::typein::accept(s, t, norm, &text),
         // Their own steps too. Settled first: they renumber mixer tracks, which moves channels' mixer tracks, part of
         // the playlist's step since audio tracks (`capture`), so the step above would no longer be empty.
@@ -5415,6 +5430,10 @@ pub fn plugin_window_menu(row: usize, detached: bool, x: f32, y: f32) -> Popup {
 /// The CPU switches of the plugin in window `key` (a channel row or an `fx_key`; `None`: no plugin there, or a
 /// channel that hosts none, a sampler's or an audio clip's).
 pub fn plugin_cpu(s: &State, key: usize) -> Option<os_model::PluginCpu> {
+    // A container's member: its own (Lemon Studio's design, `crate::container::Member::cpu`).
+    if let Some((t, k, id)) = crate::container::of_key(s, key) {
+        return crate::container::member(s, t, k, id).map(|m| m.cpu);
+    }
     match crate::plugins::fx_of(key) {
         Some((t, k)) => {
             let m = s.project.mixer.iter().find(|m| m.index == t)?;
@@ -5436,6 +5455,10 @@ pub fn flip_plugin_cpu(s: &mut State, key: usize, smart: bool) {
         *b = !*b;
     };
     let name = if smart { "Auto-bypass when silent" } else { "Threaded processing" };
+    if let Some((t, k, id)) = crate::container::of_key(s, key) {
+        crate::container::edit_own(s, t, k, id, name, |m| flip(&mut m.cpu));
+        return;
+    }
     match crate::plugins::fx_of(key) {
         Some((t, k)) => crate::control::edit(s, name, Region::Track(t), |s| {
             if let Some(m) = s.project.mixer.iter_mut().find(|m| m.index == t) {
@@ -5470,8 +5493,8 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
         }
     }
     // A container's effect: Replace ▸ puts another effect in its place (an instrument, another instrument), Delete...
-    // removes it from the container. It has no name, colour or icon of its own, and no CPU switches (the container's
-    // slot or channel has them), so those stay greyed.
+    // removes it from the container. Its own name, colour, icon and CPU switches are a slot's entries on the member
+    // (Lemon Studio's design, spec: plugins/patcher/README.md §4.5), each one undo step, saved with the container.
     if let Some(&(t, k, id)) = s.params.members.get(&key) {
         let Some(list) = crate::container::members(s, t, k) else { return };
         let Some(i) = list.iter().position(|m| m.id == id) else { return };
@@ -5484,9 +5507,18 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
                     *it = PItem::sub("Replace", replace);
                 }
                 "Delete..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::Member(k, i, crate::container::Op::Remove))))),
+                "Rename, color and icon..." => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::MemberRename(k, i))))),
+                "Change color..." => {
+                    let mut colors = crate::mixer::color_items(|c| Cmd::Mixer(MCmd::MemberColor(k, i, c)));
+                    on_track(t, &mut colors);
+                    *it = PItem::sub("Change color...", colors);
+                }
+                "Random color" => set(it, Cmd::SlotWin(t, Box::new(Cmd::Mixer(MCmd::MemberRandomColor(k, i))))),
+                "Change icon..." => *it = PItem::sub("Change icon...", icon_items(s, key)),
                 _ => {}
             }
         }
+        fill_cpu(s, key, menu);
         return;
     }
     if let Some((t, k)) = crate::plugins::fx_of(key) {

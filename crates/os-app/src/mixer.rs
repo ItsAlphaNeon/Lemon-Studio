@@ -161,7 +161,7 @@ pub enum MCmd {
     PdcAuto,
     /// The slot menu's Help: the slot plugin's help page (`slot_help`).
     SlotHelp(u8),
-    /// Wrap in container (false) and Wrap all in container (true) on the current track's slot (`App::wrap_in_container`).
+    /// Wrap in container (false) and Wrap all in container (true) on the current track's slot (`App::wrap_slot`).
     Wrap(u8, bool),
     /// The container list's entries on a member of the container in the current track's slot (`App::edit_member`), its
     /// Add effect ▸ (`App::add_member`: the effect's index in `Plugins::effects`), a member window's Replace ▸
@@ -174,6 +174,12 @@ pub enum MCmd {
     MemberReplace(u8, usize, usize),
     MemberReplaceInst(u8, usize, usize),
     ContainerList(u8),
+    /// A member window's Rename, color and icon..., Change color... ▸ and Random color on member `.1` (its place) of the
+    /// container in the current track's slot `.0`, as `Member` addresses it: the member's own name and colour, one undo
+    /// step each (`crate::container::edit_own`).
+    MemberRename(u8, usize),
+    MemberColor(u8, usize, Option<Rgb>),
+    MemberRandomColor(u8, usize),
     /// The slot menu's Scaling ▸: the hosted plugin's window at this percent, `None` = Main (`Plugins::editor_scales`).
     SlotScale(u8, Option<u16>),
     /// Options ▸ View ▸ Waveforms and Extra properties (`MixerUi::waveforms`, `MixerUi::extra`).
@@ -461,20 +467,27 @@ pub const AUTO_BYPASS_ALL_LABEL: &str = "Switch auto-bypass for all plugins";
 
 /// Switch auto-bypass for all plugins (spec: ui/channel-switches.md §5): every plugin's Auto-bypass when silent (the
 /// mixer slots' and the plugin channels', `os_model::PluginCpu::smart_disable`) on when one is off, as the original
-/// does; with all of them on, all off (Lemon Studio's choice: the original's answer there was not observed). No
-/// message, as in the original. Returns whether there was a plugin to switch.
+/// does; with all of them on, all off (Lemon Studio's choice: the original's answer there was not observed). The
+/// plugins inside containers have switches of their own (`crate::container::Member::cpu`) and are switched with them.
+/// No message, as in the original. Returns whether there was a plugin to switch.
 pub(crate) fn switch_auto_bypass(s: &mut State) -> bool {
+    let (mut members, mut off) = (0, false);
+    crate::container::each_member_cpu(&mut s.project, |c| {
+        members += 1;
+        off |= !c.smart_disable;
+    });
     let p = &mut s.project;
     let slots = p.mixer.iter_mut().flat_map(|m| m.slot_cpu.iter_mut().zip(&m.slots).filter(|(_, p)| p.is_some()).map(|(c, _)| c));
     let channels = p.channels.iter_mut().filter(|c| c.kind == os_model::ChannelKind::Plugin).map(|c| &mut c.misc.cpu);
     let mut all: Vec<&mut os_model::PluginCpu> = slots.chain(channels).collect();
-    if all.is_empty() {
+    if all.is_empty() && members == 0 {
         return false;
     }
-    let on = all.iter().any(|c| !c.smart_disable);
+    let on = off || all.iter().any(|c| !c.smart_disable);
     for c in &mut all {
         c.smart_disable = on;
     }
+    crate::container::each_member_cpu(&mut s.project, |c| c.smart_disable = on);
     changed(s);
     true
 }
@@ -1765,6 +1778,11 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
             None => format!("{name} has no help page"),
         });
     }
+    // Wrap in container and Wrap all in container: one step, with the remote control links they move (`App::wrap_slot`).
+    if let MCmd::Wrap(slot, all) = c {
+        crate::container::store_members(&mut app.state.project, &app.plugins);
+        return app.wrap_slot(slot, all);
+    }
     // The commands that change the project are one undo step each (spec: roadmap/control-plane.md).
     let step = match &c {
         MCmd::Color(..) | MCmd::RandomColor(_) | MCmd::GradientColor | MCmd::AutoColorGroup(_) => Some("Mixer track color"),
@@ -1784,8 +1802,6 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::AddEffect(..) => Some("Add effect"),
         MCmd::SlotDelete(_) => Some("Remove effect"),
         MCmd::SlotMove(..) => Some("Move effect"),
-        MCmd::Wrap(_, false) => Some(crate::container::WRAP),
-        MCmd::Wrap(_, true) => Some(crate::container::WRAP_ALL),
         MCmd::Member(_, _, crate::container::Op::Up | crate::container::Op::Down) => Some(crate::container::MOVE),
         MCmd::Member(_, _, crate::container::Op::Remove) => Some(crate::container::REMOVE),
         MCmd::MemberAdd(..) => Some(crate::container::ADD),
@@ -1798,7 +1814,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     };
     if let Some(name) = step {
         // The containers' members as their windows left them: what the step keeps and an undo brings back.
-        if matches!(c, MCmd::Wrap(..) | MCmd::Member(..) | MCmd::MemberAdd(..) | MCmd::MemberAddInst(..) | MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..)) {
+        if matches!(c, MCmd::Member(..) | MCmd::MemberAdd(..) | MCmd::MemberAddInst(..) | MCmd::MemberReplace(..) | MCmd::MemberReplaceInst(..)) {
             crate::container::store_members(&mut app.state.project, &app.plugins);
         }
         return crate::control::edit_app(app, name, Region::Project, |app| run_now(app, c));
@@ -2101,11 +2117,8 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             changed(s);
             None
         }
-        MCmd::Wrap(slot, all) => {
-            let msg = app.wrap_in_container(slot, all);
-            changed(&mut app.state);
-            msg
-        }
+        // `run` makes it a step of its own.
+        MCmd::Wrap(..) => None,
         MCmd::Member(slot, i, op) => {
             let msg = app.edit_member(slot, i, op);
             changed(&mut app.state);
@@ -2120,6 +2133,29 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             let msg = app.replace_member(slot, i, index, matches!(c, MCmd::MemberReplaceInst(..)));
             changed(&mut app.state);
             msg
+        }
+        MCmd::MemberRename(slot, i) => {
+            let t = s.selected_mixer;
+            if let Some(m) = crate::container::members(s, t, slot).and_then(|l| l.get(i).cloned()) {
+                crate::playlist::start_edit(s, EditTarget::MemberName(t, slot, m.id), at);
+            }
+            None
+        }
+        MCmd::MemberColor(slot, i, c) => {
+            let t = s.selected_mixer;
+            if let Some(m) = crate::container::members(s, t, slot).and_then(|l| l.get(i).cloned()) {
+                crate::container::edit_own(s, t, slot, m.id, crate::container::COLOR, |m| m.color = c);
+            }
+            None
+        }
+        MCmd::MemberRandomColor(slot, i) => {
+            let t = s.selected_mixer;
+            if let Some(m) = crate::container::members(s, t, slot).and_then(|l| l.get(i).cloned()) {
+                let seed = (u64::from(t) << 16 | u64::from(slot) << 8 | u64::from(m.id)).wrapping_mul(0x9e37_79b9) ^ u64::from(rand_seed());
+                let c = crate::patterns::random_color(seed);
+                crate::container::edit_own(s, t, slot, m.id, crate::container::COLOR, |m| m.color = Some(c));
+            }
+            None
         }
         MCmd::ContainerList(slot) => {
             crate::container::show(s, s.selected_mixer, slot);

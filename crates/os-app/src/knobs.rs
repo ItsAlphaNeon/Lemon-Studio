@@ -459,7 +459,7 @@ impl State {
             KnobId::Swing => format!("Main swing: {:.0}%", n * 100.0),
             // "Lemon Limiter wet: 60%".
             KnobId::Member(t, k, id, wet) => {
-                let name = crate::container::members(self, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.name);
+                let name = crate::container::members(self, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.shown().to_string());
                 crate::container::level_text(&name, wet, n)
             }
             // "EQ band 1 (low shelf) level: 0.0dB", "... freq: 90Hz", "... width: 0.27" (spec: ui/mixer.md §8).
