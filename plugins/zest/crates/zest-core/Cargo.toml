@@ -1,0 +1,9 @@
+[package]
+name = "zest-core"
+description = "Zest's engine, written from the pages in pages/"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+zest-preset = { path = "../zest-preset" }

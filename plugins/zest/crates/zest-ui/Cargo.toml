@@ -1,0 +1,18 @@
+[package]
+name = "zest-ui"
+description = "Zest's editor without its window: pages, layout, painting, input, the preset library, favourites and macros"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+# No dependency on zest-core: the editor talks to parameters through `params::Model` and the metadata the plugin
+# hands it (`params::ParamTable`), so a new engine can replace zest-core without touching this crate.
+[dependencies]
+# Lemon Studio's UI kit.
+os-ui = { path = "../../../../crates/os-ui" }
+os-theme = { path = "../../../../crates/os-theme" }
+zest-preset = { path = "../zest-preset" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tiny-skia = "0.11"

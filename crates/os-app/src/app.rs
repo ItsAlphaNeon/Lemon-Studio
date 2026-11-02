@@ -13011,6 +13011,52 @@ mod tests {
 
     /// The tiling layout's split gaps drag only where no floating window lies over them: over a floating window, its
     /// own clicks and cursor come first.
+    /// Zest, compiled in, draws its editor in the app's window as the stock plugins do.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn zest_draws_in_the_app() {
+        use crate::plugin_window::ChannelInfo;
+        use std::time::{Duration, Instant};
+        for name in ["Zest"] {
+            let Ok(mut c) = Canvas::new(1536, 864, 1.0) else { return };
+            let mut app = App::new(None);
+            // as Lemon cards (the app's own theme, not the process-wide one)
+            app.state.bar.tiling = true;
+            app.theme = design_theme(Design::Lemon, false);
+            app.plugins.available = crate::plugins::builtin();
+            app.plugins.scale = 1.0;
+            frame(&mut app, &mut c, None);
+            let index = app.plugins.index_of(name).unwrap_or_else(|| panic!("built-in {name}"));
+            app.plugins.create_with(0, index, None).unwrap();
+            let info = ChannelInfo { icon: None, name: name.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+            app.plugins.open_window(0, info).unwrap();
+            let t0 = Instant::now();
+            while !app.state.embeds.get(&0).is_some_and(|e| e.view().frame.is_some()) && t0.elapsed() < Duration::from_secs(5) {
+                app.plugin_tick();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            app.plugin_tick();
+            let e = app.state.embeds.get(&0).cloned().unwrap_or_else(|| panic!("{name} drawn in the app"));
+            assert!(e.claimed(), "{name}: its editor took the app's surface");
+            let f = e.view().frame.unwrap_or_else(|| panic!("{name}: a frame"));
+            app.take_damage();
+            frame(&mut app, &mut c, None);
+            if let Some(dir) = std::env::var_os("EMBED_DIR") {
+                c.pixmap.save_png(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
+            }
+            let ed = e.editor_rect().unwrap();
+            let (x, y) = (20u32.min(f.w - 1), 20u32.min(f.h - 1));
+            let p = c.pixmap.pixel(ed.x as u32 + x, ed.y as u32 + y).unwrap();
+            let want = f.px[(y * f.w + x) as usize];
+            assert_eq!((p.red(), p.green(), p.blue()), ((want >> 16) as u8, (want >> 8) as u8, want as u8), "{name}: its pixels on the canvas");
+            app.mouse_move(ed.cx(), ed.cy());
+            app.mouse_down();
+            app.mouse_up();
+            app.plugins.close_window(0);
+            app.plugin_tick();
+        }
+    }
+
     #[test]
     fn floating_windows_cover_split_gaps() {
         let Ok(mut c) = Canvas::new(1600, 900, 1.0) else { return };

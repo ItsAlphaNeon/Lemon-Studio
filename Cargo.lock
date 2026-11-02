@@ -3023,6 +3023,7 @@ dependencies = [
  "winit",
  "x11rb",
  "zbus",
+ "zest-plugin",
  "zip",
 ]
 
@@ -5322,6 +5323,45 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "zest-core"
+version = "0.0.1"
+dependencies = [
+ "zest-preset",
+]
+
+[[package]]
+name = "zest-plugin"
+version = "0.0.1"
+dependencies = [
+ "nih_plug",
+ "os-hostlink",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "serde",
+ "serde_json",
+ "tiny-skia",
+ "zest-core",
+ "zest-preset",
+ "zest-ui",
+]
+
+[[package]]
+name = "zest-preset"
+version = "0.0.1"
+
+[[package]]
+name = "zest-ui"
+version = "0.0.1"
+dependencies = [
+ "os-theme",
+ "os-ui",
+ "serde",
+ "tiny-skia",
+ "zest-preset",
 ]
 
 [[package]]
