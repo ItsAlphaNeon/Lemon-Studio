@@ -25,6 +25,19 @@ pub fn is_osc3(ch: &Channel) -> bool {
     ch.kind == ChannelKind::Plugin && ch.plugin.as_deref() == Some(FILE_NAME)
 }
 
+/// The state Lemon Trio starts from for channel `ch` holding 3x Osc state `fl`: an older version's state, without
+/// envelope records or filter of its own, takes the channel's (spec: plugins/lemon-3x-osc.md §6.1). A volume record
+/// exactly as the model fills a record the file does not have keeps the plugin's default one, as `ChannelVoicing::of`
+/// does for the channel.
+pub fn channel_voicing(ch: &Channel, fl: &[u8]) -> Vec<u8> {
+    let records = std::array::from_fn(|k| {
+        let e = &ch.envelopes[k];
+        (k != os_model::Envelope::VOLUME || *e != os_model::Envelope::default()).then(|| e.fields())
+    });
+    let s = &ch.sound;
+    lemon_3x_osc::params::with_channel_voicing(fl, &records, [s.cutoff, s.resonance, s.filter_type])
+}
+
 /// The plugin id a new channel of picker plugin `name` stores (the built-in recreations store the original's id).
 pub fn file_name(name: &str) -> &str {
     match name {
@@ -131,7 +144,7 @@ impl crate::app::App {
             }
             let ch = &self.state.project.channels[row];
             let fl = ch.plugin_state.clone().unwrap_or_else(lemon_3x_osc::params::default_state);
-            let mut st = lemon_3x_osc::params::plugin_state_from_fl(&fl);
+            let mut st = lemon_3x_osc::params::plugin_state_from_fl(&channel_voicing(ch, &fl));
             // The channel's sample is the custom shape's (spec: plugins/3x-osc.md §1); the plugin opens the file
             // directly, so factory placeholders become real paths.
             let sample = crate::plugins::resolve_sample(ch.sample_path.as_deref().unwrap_or(""));
@@ -263,6 +276,33 @@ mod tests {
         let again = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(again.channels[row], saved.channels[row]);
+    }
+
+    /// A channel with an older version's 3x Osc state (no records or filter of its own) is hosted with the channel's
+    /// envelope records and filter, as FL plays it; a new channel's volume record keeps the plugin's default (spec:
+    /// plugins/lemon-3x-osc.md §6.1).
+    #[test]
+    fn an_older_osc3_state_takes_the_channels_voicing() {
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.plugins.available = crate::plugins::builtin();
+        let row = crate::app::add_plugin_channel(&mut a.state.project, LEMON_TRIO);
+        let mut old = default_state()[..92].to_vec();
+        set_field(&mut old, 0, 12);
+        set_field(&mut old, op::osc(0) + op::COARSE + 1, 5);
+        let ch = &mut a.state.project.channels[row];
+        ch.plugin_state = Some(old.clone());
+        ch.envelopes[os_model::Envelope::PITCH].enabled = true;
+        ch.envelopes[os_model::Envelope::PITCH].amount = 1200;
+        (ch.sound.cutoff, ch.sound.resonance, ch.sound.filter_type) = (64, 32, 3);
+        a.sync_osc3();
+        let st = a.plugins.osc3_file_state(row).expect("hosted");
+        assert_eq!(st[4..92], old[4..]);
+        let pitch = op::rec(op::T_PITCH) + 1;
+        assert_eq!((field(&st, pitch + 1), field(&st, pitch + 8)), (-1, 1200));
+        let vol = op::rec(op::T_VOL) + 1;
+        assert_eq!(st[4 * vol..4 * (vol + 17)], default_state()[4 * vol..4 * (vol + 17)]);
+        assert_eq!([op::CUTOFF, op::RESONANCE, op::FILTER].map(|k| field(&st, k + 1)), [64, 32, 3]);
     }
 
     /// A 3x Osc channel's sample is the custom shape's: Lemon Trio starts with it and plays it as one period; a sample
@@ -419,10 +459,11 @@ mod tests {
                 let st = project.channels[r].plugin_state.clone().expect("3x Osc state");
                 let hosted = a.plugins.osc3_file_state(r).expect("a Lemon Trio");
                 if st.len() < op::STATE_LEN {
-                    // An older version's state (projects older than FL 21): its fields kept, the rest the defaults, at
-                    // the current version.
+                    // An older version's state (projects older than FL 21): its fields kept, the channel's records
+                    // and filter added, the rest the defaults, at the current version.
                     assert_eq!((hosted.len(), op::field(&hosted, 0)), (op::STATE_LEN, op::STATE_VERSION), "{path}: channel {r}");
                     assert_eq!(hosted[4..st.len()], st[4..], "{path}: channel {r}");
+                    assert_eq!(hosted, channel_voicing(&project.channels[r], &st), "{path}: channel {r}");
                     older += 1;
                 } else {
                     assert_eq!(st.len(), op::STATE_LEN, "{path}: channel {r}");

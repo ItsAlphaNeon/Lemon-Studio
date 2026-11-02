@@ -170,7 +170,7 @@ mod tests {
         assert!(app.state.hosted_rows.contains(&r), "Lemon Sampler hosts the row");
         let keep_disk = |app: &App| {
             let st = app.plugins.state(r).expect("state");
-            let json = if st.first() == Some(&b'{') { &st[..] } else { &st[8..] };
+            let (_, json) = crate::plugins::state_json(&st);
             serde_json::from_slice::<serde_json::Value>(json).unwrap()["params"]["keep_disk"]["bool"].as_bool()
         };
         assert_eq!(keep_disk(&app), Some(false));

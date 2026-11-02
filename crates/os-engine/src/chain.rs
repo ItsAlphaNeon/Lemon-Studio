@@ -417,10 +417,12 @@ impl Instrument for Chain {
         self.range(index)
     }
 
-    /// The instruments inside get the channel's mod X and mod Y, at full volume and centred: the engine puts the
-    /// channel's volume and pan on the chain's output (the channel's settings act after the container).
+    /// The instruments inside get the channel's mod X and mod Y, centred, at a volume of `sqrt(2)`: the engine puts the
+    /// channel's volume and pan on the chain's output (the channel's settings act after the container), with a split
+    /// of its own, so an instrument that splits its levels itself (spec: audio/conventions.md "Pan split") is at unity
+    /// when centred.
     fn channel_levels(&mut self, levels: ChannelLevels) -> bool {
-        let inner = ChannelLevels { volume: 1.0, pan: 0.0, ..levels };
+        let inner = ChannelLevels { volume: os_dsp::level::unity_at_centre(1.0), pan: 0.0, ..levels };
         self.instruments(|i| {
             i.channel_levels(inner);
         });
@@ -692,7 +694,7 @@ mod tests {
         assert!(inst.active());
         assert!(!inst.takes_tuning(), "the second does not take a tuning");
         assert!(!inst.channel_levels(ChannelLevels { volume: 0.5, pan: -1.0, mod_x: 0.25, mod_y: 0.0 }), "the engine applies the volume");
-        assert_eq!(a.lock().unwrap().got, vec!["levels 1 0 0.25".to_string()]);
+        assert_eq!(a.lock().unwrap().got, vec!["levels 1.4142135 0 0.25".to_string()]);
         let k = |id: u32, item: u16| u32::from(member_item(id, item).unwrap());
         inst.param(7, k(3, 12), 0.5);
         inst.param(0, k(1, MEMBER_DRY), 1.0);

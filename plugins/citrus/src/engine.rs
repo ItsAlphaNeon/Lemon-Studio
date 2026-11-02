@@ -24,6 +24,7 @@ pub const MAX_VOICES: usize = 512;
 /// A note-on from the host.
 #[derive(Debug, Clone, Copy)]
 pub struct NoteOn {
+    /// The note's own levels: its volume and pan are joined with the channel's ([`Citrus::set_channel`]).
     pub levels: Levels,
     /// Velocity 0..1 (velocity / 128).
     pub velocity: f32,
@@ -34,6 +35,8 @@ pub struct NoteOn {
 struct Playing {
     id: u64,
     shared: bool,
+    /// The note's own volume and pan.
+    own: (f32, f32),
     voices: Vec<Voice>,
 }
 
@@ -58,6 +61,14 @@ pub struct Citrus {
     ranks_dirty: bool,
     dry: Bus,
     fx: Bus,
+    /// The channel's volume and pan, part of every voice's final levels.
+    channel: (f32, f32),
+}
+
+/// A voice's final volume and pan: the note's volume times the channel's, the note's pan plus the channel's (spec:
+/// audio/voice-levels.md "Final levels").
+fn final_levels(own: (f32, f32), channel: (f32, f32)) -> (f32, f32) {
+    (own.0 * channel.0, own.1 + channel.1)
 }
 
 impl Citrus {
@@ -82,6 +93,7 @@ impl Citrus {
             ranks_dirty: false,
             dry: [Vec::new(), Vec::new()],
             fx: [Vec::new(), Vec::new()],
+            channel: (1.0, 0.0),
         }
     }
 
@@ -205,7 +217,9 @@ impl Citrus {
         let unis = unison(st);
         let o = st.s[8].max(1);
         let shared = st.switch(0) != 0 && (o > 1 || st.s[12] != 0);
-        let note = Note { levels: n.levels, velocity: n.velocity, release: n.release, previous: self.previous };
+        let own = (n.levels.vol, n.levels.pan);
+        let (vol, pan) = final_levels(own, self.channel);
+        let note = Note { levels: Levels { vol, pan, ..n.levels }, velocity: n.velocity, release: n.release, previous: self.previous };
         let mut random = Random(self.random.0);
         let mut voices = Vec::with_capacity(unis.len());
         for (j, u) in unis.into_iter().enumerate() {
@@ -226,7 +240,7 @@ impl Citrus {
                 sec.started_send = true;
             }
         }
-        self.notes.push(Playing { id, shared, voices });
+        self.notes.push(Playing { id, shared, own, voices });
         let count: usize = self.notes.iter().map(|p| p.voices.len()).sum();
         if count > MAX_VOICES && self.notes.len() > 1 {
             self.notes.remove(0);
@@ -265,6 +279,43 @@ impl Citrus {
             for v in n.voices.iter_mut() {
                 v.set_levels(l);
             }
+        }
+    }
+
+    /// The channel's volume and pan (1 and 0 until the host sends them): every voice's final levels follow, ringing
+    /// ones too (read at the next render call).
+    pub fn set_channel(&mut self, volume: f32, pan: f32) {
+        self.channel = (volume, pan);
+        for n in 0..self.notes.len() {
+            self.refresh(n);
+        }
+    }
+
+    /// A playing note's own pan (a note expression).
+    pub fn note_pan(&mut self, id: u64, pan: f32) {
+        for n in 0..self.notes.len() {
+            if self.notes[n].id == id {
+                self.notes[n].own.1 = pan;
+                self.refresh(n);
+            }
+        }
+    }
+
+    /// A playing note's final mod X (`k` 0) or mod Y (`k` 1), read at the voices' next control block.
+    pub fn note_mod(&mut self, id: u64, k: usize, value: f32) {
+        for n in self.notes.iter_mut().filter(|n| n.id == id) {
+            for v in n.voices.iter_mut() {
+                let mut l = v.levels;
+                *[&mut l.mod_x, &mut l.mod_y][k.min(1)] = value;
+                v.set_levels(l);
+            }
+        }
+    }
+
+    fn refresh(&mut self, n: usize) {
+        let (vol, pan) = final_levels(self.notes[n].own, self.channel);
+        for v in self.notes[n].voices.iter_mut() {
+            v.set_levels(Levels { vol, pan, ..v.levels });
         }
     }
 
@@ -393,9 +444,63 @@ mod tests {
     }
 
     fn peak(c: &mut Citrus) -> f32 {
+        sides(c)[0]
+    }
+
+    /// The peak of each side over 480 frames.
+    fn sides(c: &mut Citrus) -> [f32; 2] {
         let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
         c.render(&mut l, &mut r);
-        l.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+        [&l, &r].map(|x| x.iter().fold(0.0f32, |m, v| m.max(v.abs())))
+    }
+
+    /// The channel's volume and pan are part of the voice's final levels, a note's own pan too; sounding voices follow
+    /// a change, which glides in.
+    #[test]
+    fn the_channel_levels_are_part_of_the_voice() {
+        let settle = |c: &mut Citrus| {
+            for _ in 0..40 {
+                sides(c);
+            }
+            (0..10).map(|_| sides(c)).fold([0.0f32; 2], |m, s| [m[0].max(s[0]), m[1].max(s[1])])
+        };
+        let mut c = Citrus::new(48000);
+        c.set_state(default_patch());
+        note(&mut c);
+        let plain = settle(&mut c);
+        assert!(plain[0] > 0.1 && (plain[0] - plain[1]).abs() < 1e-6, "{plain:?}");
+        // A channel at half volume, panned right: the note sounds right only, at half its level there.
+        c.set_channel(0.5, 1.0);
+        let right = settle(&mut c);
+        assert!(right[0] < 1e-6, "{right:?}");
+        assert!((right[1] - 0.5 * plain[1] * std::f32::consts::SQRT_2).abs() < 1e-3, "{right:?} {plain:?}");
+        // The note's own pan of -1 brings it back to the centre.
+        let id = c.notes[0].id;
+        c.note_pan(id, -1.0);
+        let centre = settle(&mut c);
+        assert!((centre[0] - 0.5 * plain[0]).abs() < 1e-3 && (centre[1] - 0.5 * plain[1]).abs() < 1e-3, "{centre:?}");
+        // A new note starts at the channel's levels.
+        c.panic();
+        c.set_channel(0.25, 0.0);
+        note(&mut c);
+        let quiet = settle(&mut c);
+        assert!((quiet[0] - 0.25 * plain[0]).abs() < 1e-3, "{quiet:?}");
+    }
+
+    /// A note's mod X / Y reach every voice of the note only, and stay through a change of the channel's levels.
+    #[test]
+    fn a_notes_mods_reach_its_voices() {
+        let mut c = Citrus::new(48000);
+        c.set_state(default_patch());
+        note(&mut c);
+        note(&mut c);
+        let a = c.notes[0].id;
+        c.note_mod(a, 0, 0.25);
+        c.note_mod(a, 1, -0.5);
+        c.set_channel(0.5, 0.0);
+        let mods = |c: &Citrus, i: usize| c.notes[i].voices.iter().map(|v| (v.levels.mod_x, v.levels.mod_y)).collect::<Vec<_>>();
+        assert!(!mods(&c, 0).is_empty() && mods(&c, 0).iter().all(|&m| m == (0.25, -0.5)), "{:?}", mods(&c, 0));
+        assert!(mods(&c, 1).iter().all(|&m| m == (0.0, 0.0)), "{:?}", mods(&c, 1));
     }
 
     /// An edit is heard on the playing note; one that uses another module stops it.
