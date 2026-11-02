@@ -382,20 +382,25 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
 /// The row of tabs of plugin window `row`, when it is one of several (`crate::plugin_tabs`).
 #[cfg(target_os = "linux")]
 fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_window::EmbedFrame) {
-    let Some(g) = s.plugin_tabs.group_of(row) else { return };
+    // A window held over another shows the group it would make (`plugin_tabs::Preview`).
+    let (rows, showing) = match (s.tab_preview.as_ref().filter(|p| p.row == row), s.plugin_tabs.group_of(row)) {
+        (Some(p), _) => (p.rows.as_slice(), p.row),
+        (None, Some(g)) => (g.rows.as_slice(), g.active),
+        (None, None) => return,
+    };
     use os_ui::kit::lemon as lk;
     let t = ui.t;
     let strip = e.tabs_rect();
     let font = os_ui::Font::new(13);
-    let active = g.rows.iter().position(|&r| r == g.active).unwrap_or(0);
+    let active = rows.iter().position(|&r| r == showing).unwrap_or(0);
     let stacked = crate::prefs::check(&crate::prefs::PLUGIN_TABS_STACKED);
-    let shapes = crate::plugin_tabs::row_shapes(strip, g.rows.len(), active, stacked);
+    let shapes = crate::plugin_tabs::row_shapes(strip, rows.len(), active, stacked);
     let under = crate::plugin_tabs::tab_at(&shapes, ui.mouse.0, ui.mouse.1);
     ui.c.fill_rect(strip, t.sunken);
     ui.c.push_clip(strip);
     for tab in &shapes {
-        let r = g.rows[tab.index];
-        let on = r == g.active;
+        let r = rows[tab.index];
+        let on = r == showing;
         let hover = under == Some(tab.index);
         let face = match (on, hover) {
             (true, false) => t.brand_lit(os_theme::design::lemon::MAIN),

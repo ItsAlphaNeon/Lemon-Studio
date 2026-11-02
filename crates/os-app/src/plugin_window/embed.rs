@@ -349,6 +349,18 @@ impl EmbedFrame {
         Rect::new(i.pos.0, i.pos.1 + i.st.area_y() - TABS_H, w, TABS_H)
     }
 
+    /// The title and any row of tabs (logical px on the canvas).
+    pub fn head_rect(&self) -> Rect {
+        let i = self.0.borrow();
+        let (w, _) = i.size();
+        Rect::new(i.pos.0, i.pos.1, w, i.st.area_y())
+    }
+
+    /// Its title bar is moving it.
+    pub fn moving(&self) -> bool {
+        matches!(self.0.borrow().grab, Some(Grab::Move { .. }))
+    }
+
     /// The name in the title.
     pub fn name(&self) -> String {
         self.0.borrow().st.info.name.clone()

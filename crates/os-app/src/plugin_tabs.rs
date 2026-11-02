@@ -6,10 +6,14 @@
 //! Miscellaneous "Show windows of one plugin as tabs". A second window of a plugin joins the first, and the window shows
 //! one of them at a time; a tab dragged out of the row stands alone, to compare side by side, until it is closed.
 //!
+//! Dragged back: a window held over the title of another window of its plugin shows, after a moment, what letting go
+//! gives, in its own row of tabs rather than on the window below (`Held`, `Preview`).
+//!
 //! Every window of a group keeps its frame, with the group's place and a tab row (`EmbedFrame::set_tabs`). Those not
 //! showing leave `State::z`, so they are neither painted nor clicked.
 
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use os_ui::Rect;
 
@@ -22,6 +26,52 @@ const MIN_OVERLAP: f32 = 72.0;
 /// The least of a tab that has room for its close button.
 const CLOSE_ROOM: f32 = 36.0;
 const CLOSE: f32 = 14.0;
+
+/// How long a window is held over another's title before it shows what letting go gives.
+pub const MERGE_HOLD: Duration = Duration::from_millis(350);
+/// How far the mouse may move (logical px) while that time runs.
+pub const MERGE_SLOP: f32 = 6.0;
+/// How far past the title the mouse may go once the window shows it.
+pub const MERGE_KEEP: f32 = 10.0;
+
+/// A window being dragged, over the title of another window of its plugin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Held {
+    pub row: usize,
+    pub into: usize,
+    pub at: (f32, f32),
+    pub since: Instant,
+    /// The hold is over: the window shows what letting go gives.
+    pub ripe: bool,
+}
+
+impl Held {
+    pub fn new(row: usize, into: usize, at: (f32, f32), since: Instant) -> Held {
+        Held { row, into, at, since, ripe: false }
+    }
+
+    /// The mouse moved to `at`, still over the same window: too far and the hold starts again.
+    pub fn moved(&mut self, at: (f32, f32), now: Instant) {
+        if !self.ripe && (at.0 - self.at.0).hypot(at.1 - self.at.1) > MERGE_SLOP {
+            self.at = at;
+            self.since = now;
+        }
+    }
+
+    /// Whether the hold has just come to its end.
+    pub fn ripen(&mut self, now: Instant) -> bool {
+        let done = !self.ripe && now.duration_since(self.since) >= MERGE_HOLD;
+        self.ripe |= done;
+        done
+    }
+}
+
+/// What the held window shows in its row of tabs: the group it would make, itself showing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Preview {
+    pub row: usize,
+    pub rows: Vec<usize>,
+}
 
 /// One tab of a row, in the row's coordinates (`row_shapes`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -221,6 +271,24 @@ impl Tabs {
         }
     }
 
+    /// The windows `row` (with its tabs) and `into` (with its tabs) would make, in the order of their rows.
+    pub fn merged(&self, row: usize, into: usize) -> Vec<usize> {
+        let of = |r: usize| self.group_of(r).map_or(vec![r], |g| g.rows.clone());
+        let mut rows = of(into);
+        rows.extend(of(row).into_iter().filter(|r| !rows.contains(r)).collect::<Vec<_>>());
+        rows
+    }
+
+    /// `row` (with its tabs) joins `into` (with its tabs), `row` showing.
+    pub fn merge(&mut self, row: usize, into: usize, kind: &str) {
+        let rows = self.merged(row, into);
+        self.groups.retain(|g| !g.rows.contains(&row) && !g.rows.contains(&into));
+        for r in &rows {
+            self.apart.remove(r);
+        }
+        self.groups.push(Group { kind: kind.to_string(), rows, active: row });
+    }
+
     /// Tab `row` leaves its group, to stand alone.
     pub fn pull_out(&mut self, row: usize) {
         for g in &mut self.groups {
@@ -357,6 +425,44 @@ mod tests {
         assert!(t.sync(&open(&[(1, "Zest")]), true).is_empty());
         let j = t.sync(&open(&[(1, "Zest"), (5, "Zest")]), true);
         assert_eq!(j, [Joined { row: 5, from: 1 }]);
+    }
+
+    #[test]
+    fn windows_apart_go_back_together() {
+        let mut t = Tabs::default();
+        let all = open(&[(1, "Zest"), (5, "Zest"), (7, "Zest"), (9, "Zest")]);
+        t.sync(&all, true);
+        t.pull_out(7);
+        t.pull_out(9);
+        assert_eq!(t.merged(9, 7), [7, 9]);
+        t.merge(9, 7, "Zest");
+        let g = t.group_of(7).unwrap();
+        assert_eq!((g.rows.as_slice(), g.active), (&[7, 9][..], 9), "the one let go shows");
+        assert!(t.sync(&all, true).is_empty(), "and they stay");
+        assert_eq!(t.group_of(9).unwrap().rows, [7, 9]);
+        // A whole group onto another: all its tabs go with it.
+        assert_eq!(t.merged(5, 7), [7, 9, 1, 5]);
+        t.merge(5, 7, "Zest");
+        let g = t.group_of(1).unwrap();
+        assert_eq!((g.rows.as_slice(), g.active), (&[7, 9, 1, 5][..], 5));
+        assert_eq!(t.followers().len(), 3);
+    }
+
+    #[test]
+    fn the_hold_waits_for_the_mouse_to_rest() {
+        let t0 = Instant::now();
+        let later = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut h = Held::new(1, 5, (100.0, 100.0), t0);
+        assert!(!h.ripen(later(349)));
+        h.moved((103.0, 102.0), later(200));
+        assert!(h.ripen(later(350)), "a small move leaves the time running");
+        assert!(!h.ripen(later(400)), "once");
+        let mut h = Held::new(1, 5, (100.0, 100.0), t0);
+        h.moved((120.0, 100.0), later(300));
+        assert!(!h.ripen(later(400)), "a real move starts it again");
+        assert!(h.ripen(later(650)));
+        h.moved((200.0, 100.0), later(700));
+        assert!(h.ripe, "it stays once shown");
     }
 
     #[test]

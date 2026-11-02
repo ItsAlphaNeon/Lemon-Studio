@@ -251,6 +251,81 @@ mod tests {
         assert_eq!(crate::views::rack::rect(&a.state), before);
     }
 
+    /// Each frame of the slide, down and up: how long its tick and paint take and how far the windows jump, with
+    /// floating windows and plugin editors open. `hidden-tests cargo test -p os-app --bin lemonstudio slide_frames -- --ignored --nocapture`
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn slide_frames() {
+        use crate::plugin_window::ChannelInfo;
+        use std::time::Duration;
+        let mut c = os_ui::Canvas::new(1920, 1080, 1.0).unwrap();
+        let mut a = App::new(None);
+        a.state.bar.tiling = true;
+        a.plugins.available = crate::plugins::builtin();
+        a.plugins.scale = 1.0;
+        a.state.project.channels.push(Default::default());
+        a.paint(&mut c, None);
+        crate::prefs::set_check(&crate::prefs::PLUGIN_TABS, false);
+        for (row, name) in [(0, "Zest"), (1, crate::citrus::CITRUS)] {
+            let index = a.plugins.index_of(name).unwrap();
+            a.plugins.create_with(row, index, None).unwrap();
+            let info = ChannelInfo { icon: None, name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+            a.plugins.open_window(row, info).unwrap();
+        }
+        let t0 = Instant::now();
+        while !(0..2).all(|r| a.state.embeds.get(&r).is_some_and(|e| e.view().frame.is_some())) && t0.elapsed() < Duration::from_secs(5) {
+            a.plugin_tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        a.state.raise(Win::ChannelRack);
+        a.state.raise(Win::Tapper);
+        for _ in 0..5 {
+            a.tick();
+            a.paint(&mut c, None);
+        }
+        let run = |a: &mut App, c: &mut os_ui::Canvas, down: bool| {
+            let native = Vec::new();
+            let start = Instant::now();
+            go(&mut a.state, down, native, true, start);
+            let mut rows = Vec::new();
+            let mut last = a.state.float_layer.at();
+            loop {
+                let t = Instant::now();
+                a.tick();
+                let ticked = t.elapsed();
+                a.take_damage();
+                a.paint(c, None);
+                let total = t.elapsed();
+                let at = a.state.float_layer.at();
+                rows.push((t.duration_since(start).as_secs_f32() * 1000.0, ticked.as_secs_f32() * 1000.0, total.as_secs_f32() * 1000.0, ((at - last).abs() * 1080.0)));
+                last = at;
+                if !a.state.float_layer.sliding() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(16).saturating_sub(t.elapsed()));
+            }
+            rows
+        };
+        for round in 0..6 {
+            let down = round % 2 == 0;
+            let rows = run(&mut a, &mut c, down);
+            let work = |r: &(f32, f32, f32, f32)| r.2;
+            let worst = rows.iter().map(work).fold(0.0, f32::max);
+            let mean = rows.iter().map(work).sum::<f32>() / rows.len() as f32;
+            let jump = rows.iter().map(|r| r.3).fold(0.0, f32::max);
+            println!("{} frames {:2}  paint+tick mean {mean:5.1} ms  worst {worst:5.1} ms  biggest jump {jump:5.0} px", if down { "down" } else { "up  " }, rows.len());
+            for r in rows.iter().take(if round < 2 { rows.len() } else { 0 }) {
+                println!("   at {:6.1} ms  tick {:5.1}  tick+paint {:5.1}  moved {:5.0} px", r.0, r.1, r.2, r.3);
+            }
+            for _ in 0..30 {
+                a.tick();
+                a.take_damage();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
     /// Shift+F, once for a held key; F alone stays the tiling layout's.
     #[test]
     fn shift_f_presses_the_layer() {

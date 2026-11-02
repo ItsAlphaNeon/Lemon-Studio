@@ -1186,6 +1186,8 @@ pub struct State {
     /// Those of one plugin as tabs of one window.
     #[cfg(target_os = "linux")]
     pub plugin_tabs: crate::plugin_tabs::Tabs,
+    /// A plugin window held over another's title shows what letting go gives.
+    pub tab_preview: Option<crate::plugin_tabs::Preview>,
     /// Each layout's windows while the other is in use (classic, Lemon): the playlist, mixer and piano roll's states
     /// and the ones open, back to front (`App::set_tiling_layout`).
     pub layout_wins: [Option<([WinState; 3], Vec<Win>)>; 2],
@@ -1471,6 +1473,9 @@ pub struct App {
     /// Linux: a tab pressed (`plugin_tabs`): where, and once it has been dragged out, the mouse's offset in its window.
     #[cfg(target_os = "linux")]
     tab_press: Option<(usize, (f32, f32), Option<(f32, f32)>)>,
+    /// Linux: the window being dragged rests over another of its plugin (`plugin_tabs::Held`).
+    #[cfg(target_os = "linux")]
+    tab_held: Option<crate::plugin_tabs::Held>,
     /// Linux: a tab's little x pressed.
     tab_close_press: Option<usize>,
     /// The open popup belongs to this row's detached plugin window: it is shown lifted above that window.
@@ -1766,6 +1771,7 @@ impl App {
                 embeds: Default::default(),
                 #[cfg(target_os = "linux")]
                 plugin_tabs: Default::default(),
+                tab_preview: None,
                 layout_wins: Default::default(),
                 pat_ui: Default::default(),
                 wins: crate::arrange::default_wins(),
@@ -1803,6 +1809,8 @@ impl App {
             embed_virt: None,
             #[cfg(target_os = "linux")]
             tab_press: None,
+            #[cfg(target_os = "linux")]
+            tab_held: None,
             tab_close_press: None,
             popup_lift: None,
             plugin_menu: None,
@@ -3277,8 +3285,9 @@ impl App {
                 f.set_pos(p);
             }
         }
+        let previewing = self.state.tab_preview.as_ref().map(|p| p.row);
         for (r, f) in frames {
-            f.set_tabs(tabs.group_of(*r).is_some());
+            f.set_tabs(tabs.group_of(*r).is_some() || previewing == Some(*r));
         }
         for (r, active) in tabs.followers() {
             if let (Some(f), Some(p)) = (frames.get(&r), place(active)) {
@@ -4465,6 +4474,18 @@ impl App {
             || self.state.tile_anim.is_some()
             || self.veil_fade.is_some()
             || self.state.float_layer.sliding()
+            || self.tab_holding()
+    }
+
+    /// A dragged plugin window is waiting out its hold over another (`plugin_tabs::Held`).
+    #[cfg(target_os = "linux")]
+    fn tab_holding(&self) -> bool {
+        self.tab_held.is_some_and(|h| !h.ripe)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn tab_holding(&self) -> bool {
+        false
     }
 
     /// The tiling layout's windows changed places (shown, hidden, swapped, restored, another preset): the frame repaints
@@ -4508,6 +4529,8 @@ impl App {
         }
         self.veils_tick(now);
         self.float_layer_tick(now);
+        #[cfg(target_os = "linux")]
+        self.tab_hold_tick(now);
     }
 
     /// Shift+F or the button pressed, a floating window opened while they are down, and the slide on its way
@@ -7216,6 +7239,7 @@ impl App {
                 self.tab_press = Some((row, from, Some(d)));
                 self.state.raise(Win::Hosted(row));
                 self.invalidate();
+                self.tab_hold_track(row, x, y);
             }
             return true;
         }
@@ -7231,6 +7255,9 @@ impl App {
                 } else {
                     self.embed_virt = None;
                     e.motion(x, y, mods);
+                    if e.moving() {
+                        self.tab_hold_track(row, x, y);
+                    }
                 }
             }
             return true;
@@ -7258,6 +7285,7 @@ impl App {
     #[cfg(target_os = "linux")]
     fn embed_up(&mut self) -> bool {
         if self.tab_press.take().is_some() {
+            self.tab_hold_finish();
             return true;
         }
         let (x, y) = self.mouse;
@@ -7285,7 +7313,92 @@ impl App {
         if let Some(e) = self.state.embeds.get(&row) {
             e.release(x, y, btn, mods);
         }
+        self.tab_hold_finish();
         true
+    }
+
+    /// Linux: the window of another of `row`'s plugin whose title the mouse is over, with nothing lying over it there.
+    #[cfg(target_os = "linux")]
+    fn tab_target(&self, row: usize, x: f32, y: f32) -> Option<usize> {
+        if !crate::prefs::check(&crate::prefs::PLUGIN_TABS) {
+            return None;
+        }
+        let kind = self.plugins.descriptor(row)?.name;
+        let own = self.state.plugin_tabs.merged(row, row);
+        for w in self.state.paint_order().into_iter().rev() {
+            if w == Win::Hosted(row) {
+                continue;
+            }
+            if let Win::Hosted(r) = w {
+                let Some(e) = self.state.embeds.get(&r) else { continue };
+                if !e.rect().contains(x, y) {
+                    continue;
+                }
+                let margin = if self.tab_held.is_some_and(|h| h.ripe && h.into == r) { crate::plugin_tabs::MERGE_KEEP } else { 0.0 };
+                let over = e.head_rect().outset(margin).contains(x, y);
+                let same = self.plugins.descriptor(r).is_some_and(|d| d.name == kind);
+                return (over && same && !own.contains(&r)).then_some(r);
+            }
+            if crate::floating::floats(w) && crate::floating::paint_area(&self.state, w).is_some_and(|a| a.contains(x, y)) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Linux: a window dragged to (`x`, `y`): the hold over another window starts, goes on or ends.
+    #[cfg(target_os = "linux")]
+    fn tab_hold_track(&mut self, row: usize, x: f32, y: f32) {
+        let now = std::time::Instant::now();
+        match (self.tab_target(row, x, y), &mut self.tab_held) {
+            (Some(t), Some(h)) if h.into == t => h.moved((x, y), now),
+            (Some(t), _) => {
+                self.tab_preview_off();
+                self.tab_held = Some(crate::plugin_tabs::Held::new(row, t, (x, y), now));
+            }
+            (None, _) => {
+                self.tab_preview_off();
+                self.tab_held = None;
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn tab_preview_off(&mut self) {
+        if self.state.tab_preview.take().is_some() {
+            self.invalidate();
+        }
+    }
+
+    /// Linux: the hold's time is up: the held window shows the group it would make.
+    #[cfg(target_os = "linux")]
+    fn tab_hold_tick(&mut self, now: std::time::Instant) {
+        let Some(mut h) = self.tab_held else { return };
+        if !self.state.embeds.contains_key(&h.row) || !self.state.embeds.contains_key(&h.into) {
+            self.tab_held = None;
+            self.tab_preview_off();
+            return;
+        }
+        if h.ripen(now) {
+            let rows = self.state.plugin_tabs.merged(h.row, h.into);
+            self.state.tab_preview = Some(crate::plugin_tabs::Preview { row: h.row, rows });
+            self.invalidate();
+        }
+        self.tab_held = Some(h);
+    }
+
+    /// Linux: the button came up: a held window that was showing the group makes it, at the other's place.
+    #[cfg(target_os = "linux")]
+    fn tab_hold_finish(&mut self) {
+        let held = self.tab_held.take();
+        self.tab_preview_off();
+        let Some(h) = held.filter(|h| h.ripe) else { return };
+        let (Some(e), Some(into), Some(kind)) = (self.state.embeds.get(&h.row), self.state.embeds.get(&h.into), self.plugins.descriptor(h.row).map(|d| d.name)) else { return };
+        let r = into.rect();
+        e.set_pos((r.x, r.y));
+        self.state.plugin_tabs.merge(h.row, h.into, &kind);
+        self.state.raise(Win::Hosted(h.row));
+        self.invalidate();
     }
 
     /// Linux: the wheel over a plugin window drawn in the app's (or with its editor's menu open) turns there.
@@ -11049,6 +11162,50 @@ mod tests {
         app.paint(c, damage);
     }
 
+    /// Two windows of one plugin apart: one dragged onto the other's title and held shows the group in its own row of
+    /// tabs, the other unchanged; moved away the row goes, and held again and let go they are one window.
+    #[cfg(target_os = "linux")]
+    fn tabs_go_back_together(app: &mut App, c: &mut Canvas) {
+        use std::time::{Duration, Instant};
+        let (e0, e1) = (app.state.embeds[&0].clone(), app.state.embeds[&1].clone());
+        e1.set_pos((e0.rect().x + 40.0, e0.rect().y + 300.0));
+        app.plugin_tick();
+        frame(app, c, None);
+        let (r0, r1) = (e0.rect(), e1.rect());
+        let (title, over) = ((r1.x + 150.0, r1.y + 8.0), (r0.x + 150.0, r0.y + 8.0));
+        app.mouse_move(title.0, title.1);
+        assert!(app.embed_down(os_plugkit::input::Button::Left));
+        app.mouse_move(over.0, over.1);
+        assert!(e1.moving(), "its title moves it");
+        assert!(app.tab_held.is_some_and(|h| h.into == 0 && !h.ripe) && app.animating(), "the hold has begun");
+        app.tab_hold_tick(Instant::now());
+        assert!(app.state.tab_preview.is_none(), "not yet");
+        app.tab_hold_tick(Instant::now() + Duration::from_millis(400));
+        assert_eq!(app.state.tab_preview, Some(crate::plugin_tabs::Preview { row: 1, rows: vec![0, 1] }));
+        app.plugin_tick();
+        assert_eq!(e1.rect().h, r1.h + 26.0, "the held window has the row");
+        assert_eq!(e0.rect().h, r0.h, "the one below is as it was");
+        frame(app, c, None);
+        // Away: it goes, and letting go there leaves them apart.
+        app.mouse_move(over.0 + 700.0, over.1 + 400.0);
+        assert!(app.state.tab_preview.is_none() && app.tab_held.is_none());
+        app.plugin_tick();
+        assert_eq!(e1.rect().h, r1.h);
+        // Back and held, let go: one window, at the place of the one below.
+        app.mouse_move(over.0, over.1);
+        app.tab_hold_tick(Instant::now() + Duration::from_millis(400));
+        assert!(app.embed_up());
+        assert!(app.state.tab_preview.is_none());
+        app.plugin_tick();
+        assert_eq!(app.state.plugin_tabs.group_of(0).map(|g| (g.rows.clone(), g.active)), Some((vec![0, 1], 1)));
+        assert_eq!((e1.rect().x, e1.rect().y), (r0.x, r0.y));
+        assert_eq!((e0.rect().x, e0.rect().y), (r0.x, r0.y));
+        assert!(!app.state.z.contains(&Win::Hosted(0)) && app.state.z.contains(&Win::Hosted(1)));
+        // Pulled out for what follows.
+        app.state.plugin_tabs.pull_out(1);
+        app.plugin_tick();
+    }
+
     /// Paint what `App::take_damage` returned, as the shell does: each rect, or the whole frame.
     fn frame_damage(app: &mut App, c: &mut Canvas, damage: Option<Option<Vec<Rect>>>) {
         match damage {
@@ -12385,6 +12542,7 @@ mod tests {
         let (a, b) = (app.state.embeds[&0].rect(), app.state.embeds[&1].rect());
         assert_eq!(b.x, a.x - 300.0, "apart");
         assert_eq!(a.h, alone.h, "no row of tabs");
+        tabs_go_back_together(&mut app, &mut c);
         app.plugins.close_window(0);
         app.plugins.close_window(1);
     }
