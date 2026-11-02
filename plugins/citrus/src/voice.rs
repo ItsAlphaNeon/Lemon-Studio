@@ -11,6 +11,7 @@
 
 use std::f64::consts::PI;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use crate::curve::{map_at, Lfo, Walk, GLOBAL, SYNCED};
 use crate::filter::{FilterRun, Glide, Inputs, Ramp, Shaper, SvfTables};
@@ -39,6 +40,8 @@ pub struct Ctx<'a> {
     pub ramp_o: f32,
     pub kf: f32,
     pub svf: &'a SvfTables,
+    /// Rendering, not playing live.
+    pub offline: bool,
     /// The plugin's sample counter at the voice's start (free-running phases).
     pub counter: u64,
     /// Mod X / Y knobs.
@@ -133,7 +136,7 @@ struct OpRun {
     started: bool,
     /// Cycles before the first stretch, table entries after it.
     phase: f64,
-    table: Option<Vec<f32>>,
+    table: Option<Arc<Vec<f32>>>,
     freq: f64,
     factor: f32,
     inc_cycles: f32,
@@ -693,7 +696,7 @@ impl Voice {
                 let op = &st.modules[o].op;
                 if op.flags[BAND_LIMIT] != 0 && op.flags[PLUCKED] == 0 {
                     if let Some(t) = &p.tables[o] {
-                        r.table = wave::band_limited(t, s(f64::from(inc) * f64::from(ctx.rate)), ctx.rate, st.switch(2) != 0);
+                        r.table = wave::band_limited(t, s(f64::from(inc) * f64::from(ctx.rate)), ctx.rate, st.switch(2) != 0, !ctx.offline);
                     }
                 }
                 r.phase *= nn;
@@ -736,7 +739,7 @@ impl Voice {
                         let mut y = if let Some(pl) = &mut r.pluck {
                             pluck_sample(pl, r.inc_cycles)
                         } else {
-                            let t = r.table.as_deref().or(p.tables[o].as_ref().map(|t| t.t.as_slice())).unwrap();
+                            let t = r.table.as_ref().map(|t| t.as_slice()).or(p.tables[o].as_ref().map(|t| t.t.as_slice())).unwrap();
                             let k = round(pos - 0.5);
                             let i = k.rem_euclid(N as i64) as usize;
                             let a = f64::from(t[i]);
@@ -792,7 +795,7 @@ impl Voice {
                 r.phase += f64::from(s(n as f64 * f64::from(inc)));
                 continue;
             }
-            let t = r.table.as_deref().or(p.tables[o].as_ref().map(|t| t.t.as_slice())).unwrap();
+            let t = r.table.as_ref().map(|t| t.as_slice()).or(p.tables[o].as_ref().map(|t| t.t.as_slice())).unwrap();
             let pp = r.phase as f32;
             let mut lane = [pp, pp + inc, pp + 2.0 * inc, pp + 3.0 * inc];
             let s4 = 4.0 * inc;
