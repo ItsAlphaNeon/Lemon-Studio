@@ -636,6 +636,8 @@ fn slot_edits_survive() {
         m.slots.swap(from, to);
         m.slot_on.swap(from, to);
         m.slot_mix.swap(from, to);
+        // The plugin's CPU switches go with it (its window record, event 212).
+        m.slot_cpu.swap(from, to);
         m.slot_on[from] = false;
         m.slot_mix[to] = 0.25;
         apply(&moved, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -646,11 +648,16 @@ fn slot_edits_survive() {
 
         // Move to another track, remove one, add one.
         let mut edited = project.clone();
+        // A slot's CPU switches go with its plugin; an emptied slot and a new plugin have the defaults.
         let p = edited.mixer[t].slots[from].take().unwrap();
+        let cpu = std::mem::take(&mut edited.mixer[t].slot_cpu[from]);
         edited.mixer[u].slots[9] = Some(p);
+        edited.mixer[u].slot_cpu[9] = cpu;
         edited.mixer[t].slots[to] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Parametric EQ 2".into(), state: vec![1, 2, 3, 4] });
+        edited.mixer[t].slot_cpu[to] = Default::default();
         if let Some(k) = (0..10).find(|&k| k != to && edited.mixer[u].slots[k].is_some() && k != 9) {
             edited.mixer[u].slots[k] = None;
+            edited.mixer[u].slot_cpu[k] = Default::default();
         }
         apply(&edited, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
         let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
