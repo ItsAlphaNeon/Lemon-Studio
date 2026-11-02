@@ -10,6 +10,7 @@ doctest = false
 
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
+os-hostlink.workspace = true
 os-ui = { path = "../os-ui" }
 os-theme = { path = "../os-theme" }
 

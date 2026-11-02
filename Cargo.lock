@@ -3031,7 +3031,9 @@ dependencies = [
 name = "os-clap"
 version = "0.0.1"
 dependencies = [
+ "citrus",
  "clap-sys 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lemon-3x-osc",
  "lemon-formula-controller",
  "lemon-limiter",
  "lemon-parametric-eq-2",
@@ -3041,6 +3043,7 @@ dependencies = [
  "libloading 0.8.9",
  "os-engine",
  "os-host",
+ "os-hostlink",
  "os-model",
 ]
 
@@ -3145,6 +3148,7 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
+ "os-hostlink",
  "os-theme",
  "os-ui",
  "windows-sys 0.61.2",

@@ -101,6 +101,9 @@ struct Trigger {
     from: f64,
     /// The same as a fraction of the sample (instrument channels: the sampler plugin starts there).
     start: f32,
+    /// An audio clip's trimmed end as a fraction of the sample (0 = none; instrument channels: the sampler plugin
+    /// ends the voice there).
+    stop: f32,
     /// Which buffer of the channel it plays: 0 = the channel's sample, `k` = `keyed[k - 1]` (realtime stretch).
     buf: u16,
     /// An audio clip's fades, gain and late-start declick (`None` = plays as it is).
@@ -304,6 +307,7 @@ struct ChannelState {
     fine: i32,
     root: u8,
     main: Option<i32>,
+    init_main: Option<i32>,
     pitched: bool,
     /// Values at the start of playback, restored when control points are replayed from the top.
     init: (f64, f64, f64),
@@ -480,7 +484,7 @@ impl ChannelState {
     fn reset(&mut self) {
         (self.volume, self.pan, self.base_rate) = self.init;
         (self.enabled, self.insert) = self.stored;
-        self.knob = self.init_knob;
+        (self.knob, self.main) = (self.init_knob, self.init_main);
         self.vol_v = self.init_v;
         self.ramp = None;
         self.adjust = self.init_adjust;
@@ -1380,6 +1384,7 @@ impl Engine {
                     fine: ch.misc.fine,
                     root: ch.misc.root,
                     main,
+                    init_main: main,
                     pitched,
                     init: (volume, ch.pan, src_ratio),
                     vol_v: ch.volume,
@@ -1506,15 +1511,16 @@ impl Engine {
                 if state.played().is_none() && !state.plugin && state.layer.is_none() {
                     return None;
                 }
-                let (from, start) = match state.played() {
+                let (from, start, stop) = match state.played() {
                     // Trims are source time: in a stretched copy they come `from_scale` times later (spec:
                     // audio/time-stretch.md "Trims").
                     Some((frames, r)) if frames > 0 => {
-                        let from = n.from_s * f64::from(r) * state.from_scale;
+                        let at = |s: f64| s * f64::from(r) * state.from_scale;
                         let played = frames as f64 * if state.realtime.is_some() { state.from_scale } else { 1.0 };
-                        (from, (from / played) as f32)
+                        let from = at(n.from_s);
+                        (from, (from / played) as f32, n.to_s.map_or(0.0, |s| (at(s) / played).max(1e-9) as f32))
                     }
-                    _ => (0.0, 0.0),
+                    _ => (0.0, 0.0, 0.0),
                 };
                 Some(Trigger {
                     tick: n.tick,
@@ -1533,6 +1539,7 @@ impl Engine {
                     levels: crate::NoteLevels::of_bytes(n.pan, n.mod_x, n.mod_y),
                     from,
                     start,
+                    stop,
                     buf: 0,
                     shape: n.clip.map(|fx| {
                         let ms = |v: f32| (f64::from(v.max(0.0)) * f64::from(rate) / 1000.0).round() as u64;
@@ -2814,12 +2821,23 @@ impl Engine {
             // swing `v × 128` to the nearest step, the mixer track `v × 500` to the nearest track up to the last insert,
             // the switch on from 0.5.
             Target::MainSwing => self.set_swing(os_model::target::swing_of(v)),
+            Target::MainPitch => self.set_main_pitch(os_model::target::main_pitch_of(v)),
             Target::ChannelMixerTrack(c) => {
                 let last = self.tracks.len().saturating_sub(2).max(1).min(self.tracks.len() - 1);
                 self.route_channel(usize::from(c), usize::from(os_model::target::mixer_track_of(v, last as u16)));
             }
             Target::ChannelOn(c) => self.switch_channel(usize::from(c), os_model::target::channel_on(v)),
             Target::ChannelParam(..) | Target::SlotParam(..) | Target::Other(_) => {}
+        }
+    }
+
+    /// The project's main pitch (cents) from this tick on (spec: audio/voice-levels.md "The main pitch"): every channel
+    /// that follows it has its pitch worked out again and its sounding voices follow, as for a change of the channel's
+    /// own pitch; a channel that does not follow it is not touched.
+    fn set_main_pitch(&mut self, cents: i32) {
+        for ch in self.channels.iter_mut().filter(|c| c.main.is_some_and(|m| m != cents)) {
+            ch.main = Some(cents);
+            ch.retune(ch.knob);
         }
     }
 
@@ -3416,6 +3434,7 @@ impl Engine {
                     key: k,
                     vel: f32::from(t.velocity) / 128.0,
                     start: t.start,
+                    end: t.stop,
                     fine: t.fine,
                     long: t.end.is_some(),
                     glide: 0,
@@ -3428,8 +3447,17 @@ impl Engine {
                 if let (Some(shape), Some(voice)) = (t.shape, voice) {
                     self.inst_shapes.push(InstClip { channel: t.channel, voice, shape, age: 0, sent: None });
                 }
-                // An audio clip ends at its cut (spec: plugins/lemon-sampler.md Â§7); notes end with a note off.
+                // An audio clip ends at its cut (spec: plugins/lemon-sampler.md Â§7), or by itself at its end frame
+                // on an instrument that ends it there (spec: audio/audio-clips.md "What a clip plays"): that one is
+                // choked on the song's last tick if it still sounds then ("The end of the song"), and when it is looped
+                // or the song ends otherwise, as every clip is. Notes end with a note off.
+                let inst = self.channels[t.channel].instrument.0.as_ref();
+                let ends = t.stop > 0.0 && inst.and_then(|i| i.lock().ok()).is_some_and(|i| i.voice_ends());
                 match t.cut {
+                    Some(_) if ends => {
+                        let song = !self.looping && !self.live_only && self.end_tick > t.tick;
+                        self.inst_offs.push((if song { self.end_tick } else { u64::MAX }, t.channel, k, voice));
+                    }
                     Some(c) => self.inst_offs.push((c, t.channel, k, voice)),
                     None => self.inst_offs.push((t.end.unwrap_or(t.tick + step), t.channel, k, None)),
                 }
@@ -4554,12 +4582,12 @@ fn send_note(inst: &mut dyn Instrument, off: u32, note: notes::Note, fines: &mut
         notes::Note::Choke(key, None) => inst.choke(off, fines.sent(key)),
         notes::Note::Choke(key, Some(voice)) => inst.voice_choke(off, fines.sent(key), voice),
         notes::Note::Off(key) => inst.note_off(off, fines.sent(key)),
-        notes::Note::On { key, vel, start, fine, levels, voice } => {
+        notes::Note::On { key, vel, start, end, fine, levels, voice } => {
             // An instrument that ignores a tuning plays the note's pitch to the nearest semitone on a moved key.
             let sent = if fines.moves { (i32::from(key) + (fines.shift + fine).round() as i32).clamp(0, 127) as u8 } else { key };
             // The note's own pan and mod X / Y go with it (spec: audio/voice-levels.md "The note's own levels").
             match voice {
-                Some(v) => inst.voice_start(off, sent, vel, start, levels, v),
+                Some(v) => inst.voice_start(off, sent, vel, start, end, levels, v),
                 None => inst.note_start(off, sent, vel, start, levels),
             }
             let k = key & 127;
@@ -4722,6 +4750,8 @@ struct Sched {
     len: u64,
     /// Seconds into the sample where the voice starts (audio clip window start).
     from_s: f64,
+    /// Seconds into the sample where an audio clip's window ends (`None`: the sample's end).
+    to_s: Option<f64>,
     /// An audio clip's fades and gain.
     clip: Option<ClipFx>,
     /// A slide note.
@@ -4746,6 +4776,7 @@ impl Sched {
             cut: None,
             len: u64::from(n.length),
             from_s: 0.0,
+            to_s: None,
             clip: None,
             slide: n.slide(),
             porta: n.porta(),
@@ -4944,6 +4975,8 @@ fn point_level(t: Target, value: i32) -> Option<f64> {
         Target::ChannelOn(_) => v.clamp(0.0, 1.0),
         Target::ChannelMixerTrack(_) => os_model::target::mixer_track_level(value.clamp(0, 500) as u16),
         Target::MainSwing => v.clamp(0.0, 128.0) / 128.0,
+        // The main pitch in cents (spec: audio/voice-levels.md "The main pitch").
+        Target::MainPitch => (v.clamp(-1200.0, 1200.0) + 1200.0) / 2400.0,
         _ => return None,
     })
 }
@@ -5055,10 +5088,13 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                     // Pattern clips were placed above.
                     ClipSource::Pattern(_) => {}
                     ClipSource::Channel(ch) => match project.channels.get(usize::from(ch)).map(|c| c.kind) {
-                        // An audio clip plays its channel's sample from the window start (milliseconds), cut at the clip end.
+                        // An audio clip plays its channel's sample from the window start (milliseconds) to the
+                        // window end, either one negative meaning the whole sample (spec: audio/audio-clips.md
+                        // "Settings"), cut at the clip end where the instrument does not end it there.
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
                             let from_s = c.window.map_or(0.0, |w| w.0.max(0.0) / 1000.0);
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, clip: ClipFx::of(c, fx), slide: false, porta: false, swing: None });
+                            let to_s = c.window.filter(|w| w.0 >= 0.0 && w.1 >= 0.0).map(|w| w.1 / 1000.0);
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, to_s, clip: ClipFx::of(c, fx), slide: false, porta: false, swing: None });
                         }
                         Some(ChannelKind::Automation) => {}
                         _ => report.automation_clips_ignored += 1,
@@ -6745,6 +6781,53 @@ mod tests {
         assert_eq!(log.lock().unwrap().0, vec![(60, 3.0), (60, 0.0)], "back to its own pitch");
     }
 
+    // spec: audio/voice-levels.md "The main pitch", audio/automation.md "Project targets": a control point holds the
+    // cents, a clip's value v gives -1200 + Round(2400 v); a channel that follows the main pitch has its sounding notes
+    // retuned, one that does not is left alone.
+    #[test]
+    fn main_pitch_automation_retunes_the_channels_that_follow_it() {
+        use os_model::{target, Clip, ClipSource, ControlPoint};
+        #[derive(Default)]
+        struct Log(Vec<(u8, f32)>);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {}
+            fn note_off(&mut self, _o: u32, _k: u8) {}
+            fn tune(&mut self, _o: u32, key: u8, semitones: f32) {
+                self.0.push((key, semitones));
+            }
+            fn process(&mut self, _rate: u32, _l: &mut [f32], _r: &mut [f32]) {}
+        }
+        assert_eq!(target::decode(target::MAIN_PITCH), target::Target::MainPitch);
+        assert_eq!([0.0, 0.25, 0.5, 0.75, 1.0].map(target::main_pitch_of), [-1200, -600, 0, 600, 1200]);
+        assert_eq!(point_level(target::Target::MainPitch, 700).map(target::main_pitch_of), Some(700));
+        let mut p = song(vec![long_note(0, 384 * 2, 0)], vec![Clip::new(0, 384 * 2, 0, ClipSource::Pattern(1))]);
+        p.channels[0].sound.stretch = [0, 0, 0, os_model::stretch_mode::STRETCH as u32];
+        p.patterns[0].controls.push(ControlPoint::new(48, 0x4000, 2, 700));
+        add_auto(&mut p, target::MAIN_PITCH, flat(0.25), 192, 96);
+        let run = |p: &Project| {
+            let mut lib = SampleLibrary::new(None);
+            lib.resample_stretches = true;
+            let log = Arc::new(std::sync::Mutex::new(Log::default()));
+            let mut e = Engine::new(p, &mut lib, 48000, PlayMode::Song);
+            e.set_instrument(0, log.clone());
+            e.render_ticks(384, &mut Vec::new());
+            let tunes = log.lock().unwrap().0.clone();
+            tunes
+        };
+        assert_eq!(run(&p), vec![(60, 7.0), (60, -6.0)], "the point's 700 cents, then the clip's -600");
+        // Back before the point: the stored main pitch (0) again.
+        let mut e = Engine::new(&p, &mut SampleLibrary::default(), 48000, PlayMode::Song);
+        e.render_ticks(96, &mut Vec::new());
+        assert_eq!(e.channels[0].main, Some(700));
+        e.seek(0);
+        assert_eq!(e.channels[0].main, Some(0));
+        // Past it again: the point is replayed.
+        e.seek_tick(120);
+        assert_eq!(e.channels[0].main, Some(700));
+        p.channels[0].misc.main_pitch = false;
+        assert_eq!(run(&p), vec![], "a channel that does not follow the main pitch");
+    }
+
     // spec: audio/audio-clips.md "Starting inside a clip"
     #[test]
     fn playback_started_inside_an_audio_clip_plays_it_from_there() {
@@ -7042,6 +7125,12 @@ mod tests {
     struct VoicedSampler {
         /// Takes no voice gains (chokes still reach one voice): the engine shapes the whole output.
         no_gains: bool,
+        /// Ends its clip voices at their end itself (`Instrument::voice_ends`; this one does not, it only says so).
+        ends: bool,
+        /// The ends its voices were given, the voices choked and the frame each choke came on, the frames played.
+        stops: Vec<f32>,
+        chokes: Vec<(u32, u64)>,
+        frames: u64,
         queue: Vec<(u32, VoicedEvent)>,
         /// (name, gain, glide step, glide target, frames left of the glide, a gain was given)
         voices: Vec<(Option<u32>, f32, f32, f32, u32, bool)>,
@@ -7062,17 +7151,22 @@ mod tests {
             self.queue.push((o, VoicedEvent::Start(None)));
         }
         fn note_off(&mut self, _o: u32, _k: u8) {}
-        fn voice_start(&mut self, o: u32, _k: u8, _v: f32, _start: f32, _l: crate::NoteLevels, voice: u32) {
+        fn voice_start(&mut self, o: u32, _k: u8, _v: f32, _start: f32, end: f32, _l: crate::NoteLevels, voice: u32) {
             self.queue.push((o, VoicedEvent::Start(Some(voice))));
+            self.stops.push(end);
         }
         fn voice_gains(&self) -> bool {
             !self.no_gains
+        }
+        fn voice_ends(&self) -> bool {
+            self.ends
         }
         fn voice_gain(&mut self, o: u32, voice: u32, gain: f32) {
             self.queue.push((o, VoicedEvent::Gain(voice, gain)));
         }
         fn voice_choke(&mut self, o: u32, _k: u8, voice: u32) {
             self.queue.push((o, VoicedEvent::End(voice)));
+            self.chokes.push((voice, self.frames + u64::from(o)));
         }
         fn choke(&mut self, o: u32, _k: u8) {
             self.queue.push((o, VoicedEvent::EndAll));
@@ -7114,7 +7208,41 @@ mod tests {
                 }
                 (l[f], r[f]) = (sum, sum);
             }
+            self.frames += l.len() as u64;
         }
+    }
+
+    // spec: audio/audio-clips.md "What a clip plays", "The end of the song"
+    /// An instrument that ends a clip's voice at its trimmed end (Lemon Sampler's way) gets that end with the voice, as
+    /// a fraction of the sample, and no choke at the clip's end tick: the voice ends by itself. One still sounding at
+    /// the song's end is choked on that tick. An instrument that does not is choked at the clip's end tick.
+    #[test]
+    fn a_clip_voice_that_ends_itself_is_choked_only_at_the_song_end() {
+        use os_model::{Clip, ClipSource};
+        let wav = std::env::temp_dir().join(format!("os-engine-clip-ends-{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 2 * 96000]).unwrap();
+        let mut first = Clip::new(0, 192, 0, ClipSource::Channel(0));
+        first.window = Some((250.0, 1000.0));
+        let mut p = song(vec![], vec![first, Clip::new(384, 192, 0, ClipSource::Channel(0))]);
+        p.channels[0].kind = ChannelKind::AudioClip;
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        let mut lib = SampleLibrary::new(None);
+        let at = |t: u64| crate::clock::Clock::frame_of_tick(48000, 96, 130.0, t);
+        for ends in [true, false] {
+            let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+            let inst = Arc::new(std::sync::Mutex::new(VoicedSampler { ends, ..Default::default() }));
+            e.set_instrument(0, inst.clone());
+            e.render_all(480);
+            drop(e);
+            let s = inst.lock().unwrap();
+            assert_eq!(s.stops, vec![0.5, 0.0], "the first clip ends 1 s into 2");
+            let (a, b) = (s.started[0].unwrap(), s.started[1].unwrap());
+            let first_end = if ends { at(576) } else { at(192) };
+            let mut chokes = s.chokes.clone();
+            chokes.sort_unstable();
+            assert_eq!(chokes, vec![(a, first_end), (b, at(576))], "ends {ends}");
+        }
+        let _ = std::fs::remove_file(&wav);
     }
 
     // spec: audio/audio-clips.md "Automatic crossfades", "Fades and clip gain"

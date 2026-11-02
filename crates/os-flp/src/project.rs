@@ -2459,28 +2459,8 @@ fn int_event(id: u8, v: u32) -> Event {
 
 /// One 68-byte envelope record (the inverse of `decode_envelopes`).
 fn encode_envelope(e: &Envelope) -> [u8; 68] {
-    let ints = [
-        e.flags,
-        // FL writes -1 for an envelope that is on (spec: audio/envelopes-and-lfos.md).
-        -i32::from(e.enabled),
-        e.delay,
-        e.attack,
-        e.hold,
-        e.decay,
-        e.sustain,
-        e.release,
-        e.amount,
-        e.lfo_delay,
-        e.lfo_attack,
-        e.lfo_amount,
-        e.lfo_speed,
-        e.lfo_shape,
-        e.attack_tension,
-        e.decay_tension,
-        e.release_tension,
-    ];
     let mut d = [0u8; 68];
-    for (k, v) in ints.iter().enumerate() {
+    for (k, v) in e.fields().iter().enumerate() {
         d[4 * k..4 * k + 4].copy_from_slice(&v.to_le_bytes());
     }
     d

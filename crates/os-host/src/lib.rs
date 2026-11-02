@@ -179,11 +179,12 @@ pub trait Library: Send + Sync {
     fn create(self: Arc<Self>, id: &str) -> Result<SharedPlugin, String>;
 }
 
-/// The parameter of a built-in Lemon instrument that takes a note's mod X as per-note modulation (`use_note_levels`;
-/// spec: plugins/lemon-sampler.md, plugins/3x-osc.md parameter names).
-pub const NOTE_MOD_X: &str = "Filter frequency (modulation X)";
+/// The names of the parameters through which the built-in Lemon instruments take a note's mod X as per-note
+/// modulation (`use_note_levels`): Lemon Sampler's and Lemon Trio's filter frequency (spec: plugins/lemon-sampler.md,
+/// plugins/3x-osc.md parameter names), Citrus's Mod X (spec: plugins/citrus.md §2).
+pub const NOTE_MOD_X: [&str; 2] = ["Filter frequency (modulation X)", "Mod A"];
 /// The same for a note's mod Y.
-pub const NOTE_MOD_Y: &str = "Filter bandwidth (modulation Y)";
+pub const NOTE_MOD_Y: [&str; 2] = ["Filter bandwidth (modulation Y)", "Mod B"];
 
 /// A plugin instance, whatever its format.
 ///
@@ -245,9 +246,9 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     }
 
     /// Sends each note's own pan and mod X / Y (`Instrument::note_start`) to the instance: the pan as a per-note
-    /// expression, the mods as per-note modulation of the parameters named [`NOTE_MOD_X`] / [`NOTE_MOD_Y`] where it has
-    /// them (UI thread). For the built-in Lemon plugins only (an OpenStudio choice: other plugins have no agreed way to
-    /// take FL-style note levels). False when the format cannot.
+    /// expression, the mods as per-note modulation of the parameters named in [`NOTE_MOD_X`] / [`NOTE_MOD_Y`] where it
+    /// has them (UI thread). For the built-in Lemon plugins only (an OpenStudio choice: other plugins have no agreed way
+    /// to take FL-style note levels). False when the format cannot.
     fn use_note_levels(&mut self) -> bool {
         false
     }
@@ -256,6 +257,21 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     /// each clip's fades and gain on that clip's voice (UI thread). For Lemon Sampler only (it moves to them as the
     /// engine expects). False when the format cannot.
     fn use_voice_gains(&mut self) -> bool {
+        false
+    }
+
+    /// Sends each audio clip voice's end (`Instrument::voice_start`) as per-note modulation of the parameter named
+    /// `name`; the instance then ends the voice there itself (`Instrument::voice_ends`; UI thread). For Lemon Sampler
+    /// only (spec: audio/audio-clips.md "What a clip plays"). False when the plugin or format cannot.
+    fn use_end_param(&mut self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+
+    /// Sends the channel's volume and pan (`Instrument::channel_levels`) to the instance, which works them into its
+    /// voices' final levels; the engine then leaves its output as it is (UI thread). For Lemon Sampler only (spec:
+    /// plugins/host-link.md "Channel levels"). False when the format cannot.
+    fn use_channel_levels(&mut self) -> bool {
         false
     }
 

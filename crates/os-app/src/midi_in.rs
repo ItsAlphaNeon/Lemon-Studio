@@ -386,13 +386,17 @@ mod tests {
         c.choose(Some("Keys".into()));
         assert_eq!(c.status().text(), "Status: ready");
         c.feed("Keys", 0xfa, &[0xfa], nothing);
+        let start = Instant::now();
         for _ in 0..30 {
             c.feed("Keys", 0xf8, &[0xf8], nothing);
             std::thread::sleep(Duration::from_millis(2));
         }
+        let took = start.elapsed().as_secs_f64();
         let s = c.status();
         assert_eq!(s.beat, Some(2), "30 clocks after Start: beat 2");
-        assert!(s.tempo.is_some_and(|t| t > 100.0 && t < 1300.0), "{s:?}");
+        // The tempo of the clocks as they came: at least 2 ms apart (1250 BPM at most), and on a loaded machine
+        // perhaps much further, but never slower than the whole loop's time gives.
+        assert!(s.tempo.is_some_and(|t| t < 1300.0 && t >= 0.999 * 60.0 / took), "{s:?} over {took} s");
         c.feed("Keys", 0xfc, &[0xfc], nothing);
         assert_eq!(c.status().text(), "Status: ready");
         assert!(!c.feed("Other", 0xfa, &[0xfa], nothing), "another device's clock is not followed");

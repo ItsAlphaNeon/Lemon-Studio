@@ -177,6 +177,7 @@ pub fn name(s: &State, t: u32) -> String {
     match target::decode(t) {
         Target::Tempo => "Tempo".into(),
         Target::MainSwing => "Main swing".into(),
+        Target::MainPitch => "Main pitch".into(),
         Target::ChannelVolume(ch) => format!("{} - Channel volume", channel(ch)),
         // As the original names the clips on the rack's mixer box and LED (spec: ui/channel-rack.md §19).
         Target::ChannelMixerTrack(ch) => format!("{} - Target mixer track", channel(ch)),

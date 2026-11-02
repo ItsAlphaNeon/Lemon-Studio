@@ -45,11 +45,23 @@ impl Instrument for TimedInst {
     fn choke(&mut self, offset: u32, key: u8) {
         self.0.lock().unwrap().choke(offset, key)
     }
-    fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32) {
-        self.0.lock().unwrap().voice_start(offset, key, velocity, start, levels, voice)
+    fn voice_start(
+        &mut self,
+        offset: u32,
+        key: u8,
+        velocity: f32,
+        start: f32,
+        end: f32,
+        levels: os_engine::NoteLevels,
+        voice: u32,
+    ) {
+        self.0.lock().unwrap().voice_start(offset, key, velocity, start, end, levels, voice)
     }
     fn voice_gains(&self) -> bool {
         self.0.lock().unwrap().voice_gains()
+    }
+    fn voice_ends(&self) -> bool {
+        self.0.lock().unwrap().voice_ends()
     }
     fn voice_gain(&mut self, offset: u32, voice: u32, gain: f32) {
         self.0.lock().unwrap().voice_gain(offset, voice, gain)

@@ -2540,6 +2540,7 @@ pub fn value_text(s: &State, ch: u16, v: f64) -> String {
         Some(target::Target::MixerVolume(_)) => crate::views::mixer::fader_db_text(v),
         // The rack's swing knob, mixer box and LED as they show the value (spec: flp/events/automation.md "Targets").
         Some(target::Target::MainSwing) => format!("{:.0}%", f64::from(target::swing_of(v)) / 1.28),
+        Some(target::Target::MainPitch) => format!("{:+} cents", target::main_pitch_of(v)),
         Some(target::Target::ChannelMixerTrack(_)) => crate::views::rack::insert_name(target::mixer_track_of(v, crate::mixer::max_insert(&s.project))),
         Some(target::Target::ChannelOn(_)) => (if target::channel_on(v) { "On" } else { "Off" }).into(),
         Some(t @ (target::Target::ChannelParam(..) | target::Target::SlotParam(..))) => {
