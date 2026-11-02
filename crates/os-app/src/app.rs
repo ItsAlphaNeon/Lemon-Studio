@@ -4795,6 +4795,53 @@ impl App {
         self.has_damage() || self.state.tile_anim.is_some() || self.veil_fade.is_some() || self.state.float_layer.sliding()
     }
 
+    /// The slide's picture: the layer's windows painted once on a clear canvas, with the app's text engine, and cut down
+    /// to their part (`crate::float_layer`).
+    fn capture_float_layer(&mut self, canvas: &mut Canvas) {
+        let k = canvas.scale;
+        let (cw, ch) = (canvas.pixmap.width(), canvas.pixmap.height());
+        let areas: Vec<Rect> = self.state.z.iter().filter(|&&w| crate::float_layer::member(&self.state, w)).filter_map(|&w| crate::floating::paint_area(&self.state, w)).collect();
+        let bounds = areas.iter().copied().reduce(|a, b| a.union(&b));
+        let image = bounds.and_then(|b| {
+            let x0 = ((b.x * k).floor().max(0.0) as u32).min(cw);
+            let y0 = ((b.y * k).floor().max(0.0) as u32).min(ch);
+            let x1 = ((b.right() * k).ceil().max(0.0) as u32).min(cw);
+            let y1 = ((b.bottom() * k).ceil().max(0.0) as u32).min(ch);
+            let mut out = tiny_skia::Pixmap::new(x1.checked_sub(x0).filter(|&w| w > 0)?, y1.checked_sub(y0).filter(|&h| h > 0)?)?;
+            let clear = tiny_skia::Pixmap::new(cw, ch)?;
+            let main = std::mem::replace(&mut canvas.pixmap, clear);
+            canvas.begin_frame(None);
+            let info = self.frame_info();
+            let (mut hits, mut bars, mut live) = (Vec::new(), Vec::new(), Vec::new());
+            let mut keep = Keep { full: true, ..Default::default() };
+            let mut ui = Ui {
+                c: canvas,
+                t: &self.theme.colors,
+                hits: &mut hits,
+                bars: &mut bars,
+                hover: &self.hover,
+                pressed: &self.pressed,
+                mouse: self.mouse,
+                win: None,
+                keep: &mut keep,
+                live: &mut live,
+                flat: self.state.toolbar.flat,
+                tiled: self.state.tiled(),
+                alone: self.state.alone(),
+                maxed: self.state.wins.map(|w| w.maxed),
+            };
+            views::paint_float_layer(&mut ui, &self.state, &info);
+            let whole = std::mem::replace(&mut canvas.pixmap, main);
+            let w = out.width() as usize;
+            for (y, row) in out.pixels_mut().chunks_exact_mut(w).enumerate() {
+                let from = (y0 as usize + y) * cw as usize + x0 as usize;
+                row.copy_from_slice(&whole.pixels()[from..from + w]);
+            }
+            Some(crate::float_layer::Image { pixels: out, at: (x0 as i32, y0 as i32) })
+        });
+        self.state.float_layer.set_image(image, std::time::Instant::now());
+    }
+
     /// Paint the whole frame (`damage` None) or just the damaged rect.
     pub fn paint(&mut self, canvas: &mut Canvas, damage: Option<Rect>) {
         self.paint_region(canvas, damage.as_ref().map(std::slice::from_ref));
@@ -5074,6 +5121,9 @@ impl App {
                 *snap = canvas.snapshot(*r);
             }
         }
+        if self.state.float_layer.wants_image() {
+            self.capture_float_layer(canvas);
+        }
         match damage {
             Some(rects) => canvas.begin_region(rects),
             None => canvas.begin_frame(None),
@@ -5116,9 +5166,7 @@ impl App {
             alone: self.state.alone(),
             maxed: self.state.wins.map(|w| w.maxed),
         };
-        let lifted = crate::float_layer::lift(&mut self.state);
         let overlays = views::paint(&mut ui, &self.state, &info);
-        crate::float_layer::unlift(&mut self.state, lifted);
         if self.state.cables.get_mut().take_slowed() {
             self.damage_win(Win::Mixer);
         }

@@ -3,8 +3,12 @@
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Shift+F and the status bar's button: the floating windows (`crate::floating`) and the plugin windows of their own
-//! slide away together and come back together, as a scratchpad does on Hyprland. Moved windows keep their places: the
-//! slide is added while they paint (`lift`), and those down leave `State::z`, so they are neither painted nor clicked.
+//! slide away together and come back together, as a scratchpad does on Hyprland. Moved windows keep their places, and
+//! those down leave `State::z`, so they are neither painted nor clicked.
+//!
+//! The windows are painted once as a slide starts (`App::capture_float_layer`) and that picture moves (`Image`), behind
+//! the toolbar and over everything else, which stays live. Painted anew each frame, the way up cost twice the way down:
+//! the windows are on the canvas nearly the whole way, slowing into place in full view at half the frame rate.
 //!
 //! Timed as Omarchy's Hyprland `specialWorkspace` animation (`hypr/looknfeel.lua`): speed 3 (300 ms), easeOutQuint,
 //! style slidevert: down one plane's height, and back up from there. With Animations off they go at once.
@@ -19,6 +23,14 @@ use crate::floating;
 
 /// How long a slide takes (seconds).
 pub const SLIDE: f32 = 0.3;
+
+/// The layer's windows as they were when the slide began: transparent around them, device px.
+#[derive(Debug)]
+pub struct Image {
+    pub pixels: tiny_skia::Pixmap,
+    /// Its top-left on the canvas, at rest.
+    pub at: (i32, i32),
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Slide {
@@ -40,6 +52,8 @@ pub struct FloatLayer {
     kept: Option<Vec<Win>>,
     /// While down: the plugin windows of their own that went with it.
     native: Vec<usize>,
+    /// The picture that moves, while it slides.
+    image: Option<Image>,
 }
 
 impl FloatLayer {
@@ -56,6 +70,26 @@ impl FloatLayer {
         self.at
     }
 
+    /// The picture to paint in place of the layer's windows.
+    pub fn image(&self) -> Option<&Image> {
+        self.image.as_ref()
+    }
+
+    /// A slide has begun with no picture yet.
+    pub fn wants_image(&self) -> bool {
+        self.slide.is_some() && self.image.is_none()
+    }
+
+    /// The picture is ready: the slide's time runs from here, so the painting of it is not a jump at the start.
+    pub fn set_image(&mut self, image: Option<Image>, now: Instant) {
+        self.image = image;
+        if let Some(s) = &mut self.slide {
+            if self.at == s.from {
+                s.start = now;
+            }
+        }
+    }
+
     /// Plugin window `row` is down with the layer and stays out of `State::z`.
     pub fn keeps(&self, row: usize) -> bool {
         self.kept.as_ref().is_some_and(|k| k.contains(&Win::Hosted(row)))
@@ -63,7 +97,7 @@ impl FloatLayer {
 }
 
 /// Floating window `w` is in the layer: it floats in the app's own window.
-fn member(s: &State, w: Win) -> bool {
+pub fn member(s: &State, w: Win) -> bool {
     floating::floats(w) && !s.is_detached(w)
 }
 
@@ -99,6 +133,7 @@ pub fn go(s: &mut State, down: bool, native: Vec<usize>, motion: bool, now: Inst
     } else {
         s.float_layer.at = goal;
         s.float_layer.slide = None;
+        s.float_layer.image = None;
         settle(s);
     }
 }
@@ -111,6 +146,7 @@ pub fn step(s: &mut State, now: Instant) -> bool {
     if t >= 1.0 {
         s.float_layer.at = goal;
         s.float_layer.slide = None;
+        s.float_layer.image = None;
         settle(s);
     } else {
         s.float_layer.at = slide.from + (goal - slide.from) * crate::tiles::ease(t);
@@ -133,49 +169,10 @@ pub fn wanted_back(s: &State, native: &[usize]) -> bool {
     l.down && l.slide.is_none() && (s.z.iter().any(|&w| member(s, w)) || native.iter().any(|r| !l.native.contains(r)))
 }
 
-/// Puts the layer's windows where the slide shows them, for a paint; `unlift` puts them back.
-pub fn lift(s: &mut State) -> Vec<(Win, (f32, f32))> {
-    if s.float_layer.at == 0.0 {
-        return Vec::new();
-    }
-    // Whole device px, as Hyprland's windows land: a window between two would blur.
+/// How far down the picture is now: whole device px, as Hyprland's windows land (a window between two would blur).
+pub fn drop_px(s: &State) -> i32 {
     let k = s.ui_scale.max(0.01);
-    let dy = (s.float_layer.at * s.screen.1 * k).round() / k;
-    let mut moved = Vec::new();
-    for w in s.z.clone() {
-        if !member(s, w) {
-            continue;
-        }
-        if let Some(p) = floating::placed(w) {
-            let at = (p.pos)(s);
-            (p.set_pos)(s, (at.0, at.1 + dy));
-            moved.push((w, at));
-        }
-        #[cfg(target_os = "linux")]
-        if let Win::Hosted(row) = w
-            && let Some(e) = s.embeds.get(&row)
-        {
-            let r = e.rect();
-            e.set_pos((r.x, r.y + dy));
-            moved.push((w, (r.x, r.y)));
-        }
-    }
-    moved
-}
-
-/// After the paint: the windows back at their own places.
-pub fn unlift(s: &mut State, moved: Vec<(Win, (f32, f32))>) {
-    for (w, at) in moved {
-        if let Some(p) = floating::placed(w) {
-            (p.set_pos)(s, at);
-        }
-        #[cfg(target_os = "linux")]
-        if let Win::Hosted(row) = w
-            && let Some(e) = s.embeds.get(&row)
-        {
-            e.set_pos(at);
-        }
-    }
+    (s.float_layer.at * s.screen.1 * k).round() as i32
 }
 
 #[cfg(test)]
@@ -236,19 +233,47 @@ mod tests {
         assert_eq!(a.state.z, [Win::Playlist, Win::Mixer, Win::Tapper, Win::ChannelRack]);
     }
 
-    /// A slide moves what paints and leaves every window's own place alone.
+    /// The picture at rest looks as the windows do painted live, and it moves by whole device px; nothing keeps
+    /// moving the windows' own places, and it goes when the slide ends.
     #[test]
-    fn lift_moves_windows_only_for_the_paint() {
+    fn the_picture_is_the_windows() {
         let mut a = app();
+        let mut c = os_ui::Canvas::new(1600, 900, 1.0).unwrap();
         a.state.screen = (1600.0, 900.0);
         a.state.ui_scale = 1.0;
+        a.paint(&mut c, None);
+        a.paint(&mut c, None);
+        let live = c.pixmap.clone();
         let before = crate::views::rack::rect(&a.state);
-        go(&mut a.state, true, Vec::new(), true, Instant::now());
-        a.state.float_layer.at = 0.5;
-        let moved = lift(&mut a.state);
-        assert_eq!(crate::views::rack::rect(&a.state).y, before.y + 450.0);
-        unlift(&mut a.state, moved);
-        assert_eq!(crate::views::rack::rect(&a.state), before);
+        let t0 = Instant::now();
+        go(&mut a.state, true, Vec::new(), true, t0);
+        assert!(a.state.float_layer.wants_image());
+        a.paint(&mut c, None);
+        let img = a.state.float_layer.image().expect("the picture");
+        assert!(img.pixels.width() < 1600, "only the windows' part: {}", img.pixels.width());
+        let differs = live.pixels().iter().zip(c.pixmap.pixels()).filter(|(p, q)| p.red().abs_diff(q.red()) > 2 || p.green().abs_diff(q.green()) > 2 || p.blue().abs_diff(q.blue()) > 2).count();
+        assert_eq!(differs, 0, "at rest, the same picture");
+        a.state.float_layer.at = 0.05;
+        assert_eq!(drop_px(&a.state), 45);
+        a.paint(&mut c, None);
+        assert_eq!(crate::views::rack::rect(&a.state), before, "the window stays where it is");
+        let (x, y) = (before.x as u32 + 40, before.y as u32 + 40);
+        assert_eq!(c.pixmap.pixel(x, y + 45), live.pixel(x, y), "its pixels, further down");
+        step(&mut a.state, Instant::now() + std::time::Duration::from_secs(1));
+        assert!(a.state.float_layer.image().is_none());
+    }
+
+    /// The clock starts once the picture is painted, unless the slide was already moving.
+    #[test]
+    fn painting_the_picture_is_not_a_jump() {
+        let mut a = app();
+        let t0 = Instant::now();
+        go(&mut a.state, true, Vec::new(), true, t0);
+        let later = t0 + std::time::Duration::from_millis(100);
+        let pixels = tiny_skia::Pixmap::new(1, 1).unwrap();
+        a.state.float_layer.set_image(Some(Image { pixels, at: (0, 0) }), later);
+        step(&mut a.state, later);
+        assert_eq!(a.state.float_layer.at(), 0.0);
     }
 
     /// Each frame of the slide, down and up: how long its tick and paint take and how far the windows jump, with

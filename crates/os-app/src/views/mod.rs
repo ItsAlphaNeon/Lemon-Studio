@@ -310,6 +310,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
                 paint_cables_over(ui, s, r);
             }
         }
+        // The slide's picture stands in for these (`crate::float_layer`).
+        if s.float_layer.image().is_some() && crate::float_layer::member(s, win) {
+            continue;
+        }
         // While windows move (the tiling layout's animation) they all show, the covered ones too.
         // A detached window paints in its own native window (`paint_detached`).
         if s.is_detached(win) || (docked_at.is_some_and(|d| i < d) && anim.is_none()) || anim.is_some_and(|m| m.opening().iter().any(|o| o.0 == win)) {
@@ -364,6 +368,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         }
     }
     let _ = docked;
+    if let Some(i) = s.float_layer.image() {
+        ui.c.paint_pixmap(&i.pixels, (i.at.0, i.at.1 + crate::float_layer::drop_px(s)));
+    }
     if s.bar.tiling {
         toolbar::paint_status_bar(ui, s, f);
     }
@@ -377,6 +384,23 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         }
     }
     n
+}
+
+/// The floating windows of the slide's layer alone (`App::capture_float_layer`), at their places.
+pub fn paint_float_layer(ui: &mut Ui, s: &State, f: &FrameInfo) {
+    let order = s.paint_order();
+    let docked_at = order.iter().rposition(|&w| s.is_max(w));
+    for (i, &win) in order.iter().enumerate() {
+        if !crate::float_layer::member(s, win) || docked_at.is_some_and(|d| i < d) {
+            continue;
+        }
+        ui.win = Some(win);
+        let (r, a) = (s.win_rect(win), paint_area(s, win));
+        ui.c.push_clip(a);
+        paint_window(ui, s, win, r, a, f);
+        ui.c.pop_clip();
+        ui.win = None;
+    }
 }
 
 /// The row of tabs of plugin window `row`, when it is one of several (`crate::plugin_tabs`).
