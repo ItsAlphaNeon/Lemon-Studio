@@ -216,7 +216,7 @@ impl InitControl {
     /// (spec: flp/layouts.md "Parameter ids in an automation link").
     pub const MAIN_VOLUME: u32 = 0x4000_0000;
     pub const MAIN_SWING: u32 = target::MAIN_SWING;
-    pub const MAIN_PITCH: u32 = 0x4000_0002;
+    pub const MAIN_PITCH: u32 = target::MAIN_PITCH;
 
     /// A record read from event 216's bytes.
     pub fn from_bytes(b: &[u8; Self::LEN]) -> InitControl {
@@ -242,6 +242,7 @@ impl InitControl {
         let v = v.clamp(0.0, 1.0);
         let value = match target::decode(t) {
             Target::MainSwing => f64::from(target::swing_of(v)),
+            Target::MainPitch => f64::from(target::main_pitch_of(v)),
             Target::ChannelMixerTrack(_) => f64::from(target::mixer_track_of(v, u16::MAX)),
             Target::ChannelOn(_) => f64::from(u8::from(target::channel_on(v))),
             Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => 12800.0 * v,
@@ -261,12 +262,13 @@ impl InitControl {
     /// The value as an automation clip hands it on (0..1), for the settings whose stored units are known: the inverse
     /// of [`InitControl::from_unit`] (spec: audio/voice-levels.md "Values from automation", audio/mixer.md "Changes
     /// while the song plays", audio/timing.md "Tempo that changes"). Plugin parameters, a channel's other levels and
-    /// the project's main volume and pitch give `None`.
+    /// the project's main volume give `None`.
     pub fn unit(&self) -> Option<f64> {
         use target::Target;
         let v = f64::from(self.value);
         let unit = match target::decode(self.target) {
             Target::MainSwing => v / 128.0,
+            Target::MainPitch => (v + 1200.0) / 2400.0,
             Target::ChannelMixerTrack(_) => target::mixer_track_level(self.value.clamp(0, 500) as u16),
             Target::ChannelOn(_) => f64::from(u8::from(self.value != 0)),
             Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => v / 12800.0,
@@ -1231,6 +1233,32 @@ impl Envelope {
     pub const CUTOFF: usize = 2;
     pub const RESONANCE: usize = 3;
     pub const PITCH: usize = 4;
+
+    /// The record's 17 ints in stored order (spec: audio/channel-envelopes.md): flags, on (−1) / off (0), delay,
+    /// attack, hold, decay, sustain, release, amount, the LFO's delay, attack, amount, speed and shape, then the
+    /// attack, decay and release tensions.
+    pub fn fields(&self) -> [i32; 17] {
+        [
+            self.flags,
+            // FL writes -1 for an envelope that is on (spec: audio/envelopes-and-lfos.md).
+            -i32::from(self.enabled),
+            self.delay,
+            self.attack,
+            self.hold,
+            self.decay,
+            self.sustain,
+            self.release,
+            self.amount,
+            self.lfo_delay,
+            self.lfo_attack,
+            self.lfo_amount,
+            self.lfo_speed,
+            self.lfo_shape,
+            self.attack_tension,
+            self.decay_tension,
+            self.release_tension,
+        ]
+    }
 }
 
 impl Default for Envelope {
@@ -2309,6 +2337,8 @@ pub mod target {
     pub const TEMPO: u32 = 0x4000_0005;
     /// The project's main swing, the channel rack's swing knob (event 11's unit 0..128).
     pub const MAIN_SWING: u32 = 0x4000_0001;
+    /// The project's main pitch, the toolbar's master pitch knob (event 80's cents, -1200..1200).
+    pub const MAIN_PITCH: u32 = 0x4000_0002;
     pub const MIXER_VOLUME: u8 = 0xC0;
     pub const MIXER_PAN: u8 = 0xC1;
     pub const MIXER_SEPARATION: u8 = 0xC2;
@@ -2404,11 +2434,18 @@ pub mod target {
             Target::SlotOn(..) | Target::ChannelOn(_) => (0.0, 1.0),
             Target::Tempo => (10000.0, 522000.0),
             Target::MainSwing => (0.0, 128.0),
+            Target::MainPitch => (-1200.0, 1200.0),
             // The track number on a clip's scale (`mixer_track_of`): level 1 is track 500, past any project's last
             // insert, so events turned into a clip play the same tracks (Lemon Studio's design).
             Target::ChannelMixerTrack(_) => (0.0, 500.0),
             _ => return None,
         })
+    }
+
+    /// The main pitch (cents) an automation value `v` (0..1) gives: `-1200 + Round(2400 v)` (spec:
+    /// audio/voice-levels.md "The main pitch").
+    pub fn main_pitch_of(v: f64) -> i32 {
+        -1200 + (v.clamp(0.0, 1.0) * 2400.0).round_ties_even() as i32
     }
 
     /// The main swing (0..=128, event 11's unit) an automation value `v` (0..1) gives: `v × 128` to the nearest step
@@ -2467,6 +2504,8 @@ pub mod target {
         Tempo,
         /// The main swing ([`MAIN_SWING`]).
         MainSwing,
+        /// The main pitch ([`MAIN_PITCH`]).
+        MainPitch,
         /// Channel, parameter index of its plugin.
         ChannelParam(u16, u16),
         /// Mixer track, slot, parameter index of the slot's plugin.
@@ -2480,6 +2519,9 @@ pub mod target {
         }
         if t == MAIN_SWING {
             return Target::MainSwing;
+        }
+        if t == MAIN_PITCH {
+            return Target::MainPitch;
         }
         let hi = (t >> 16) as u16;
         let lo = t as u16;
@@ -2541,6 +2583,7 @@ pub mod target {
                 | Target::MixerPan(_)
                 | Target::MixerSeparation(_)
                 | Target::MixerEq(_, _, 0)
+                | Target::MainPitch
         )
     }
 
@@ -2611,7 +2654,7 @@ pub mod target {
             assert_eq!(channel(2, CHANNEL_ON), 0x0002_0007);
             assert_eq!(decode(0x0002_0007), Target::ChannelOn(2));
             // Neighbours stay what they were.
-            assert_eq!(decode(0x4000_0002), Target::Other(0x4000_0002), "the main pitch");
+            assert_eq!(decode(0x4000_0003), Target::Other(0x4000_0003));
             assert_eq!(decode(channel(2, 9)), Target::Other(0x0002_0009));
             for t in [MAIN_SWING, channel(0, CHANNEL_ON), channel(0, CHANNEL_MIXER_TRACK)] {
                 assert!(!bipolar(t), "{t:#010x}");

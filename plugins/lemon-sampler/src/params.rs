@@ -148,6 +148,9 @@ pub const START_OFFSET_POLY: u32 = 0;
 /// audio/voice-levels.md "Final levels", audio/channel-filter.md "Knob positions").
 pub const MOD_X_POLY: u32 = 1;
 pub const MOD_Y_POLY: u32 = 2;
+/// Poly modulation id of the hidden "Clip end": a host ends one note's voice that far into the sample (a trimmed audio
+/// clip's end, spec §7).
+pub const CLIP_END_POLY: u32 = 3;
 
 /// A 0..1 knob shown in percent.
 pub fn knob(name: &str, default: f32) -> FloatParam {
@@ -405,6 +408,8 @@ pub struct SamplerParams {
     pub declick: IntParam,
     #[id = "start_offset"]
     pub start_offset: FloatParam,
+    #[id = "clip_end"]
+    pub clip_end: FloatParam,
     #[id = "loop_start"]
     pub loop_start: FloatParam,
     #[id = "loop_end"]
@@ -530,6 +535,9 @@ impl Default for SamplerParams {
             declick: choice("Click removal", 0, DECLICK),
             // A host can start one note further into the sample (a trimmed audio clip, spec §7).
             start_offset: knob("Sample start offset", 0.0).with_poly_modulation_id(START_OFFSET_POLY),
+            // ... and end one note's voice further on (a trimmed audio clip's end): per note only, the value itself
+            // does nothing. Hidden: it is the host's link, not a setting.
+            clip_end: knob("Clip end", 0.0).with_poly_modulation_id(CLIP_END_POLY).hide(),
             loop_start: FloatParam::new("Loop start position", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_value_to_string(samples(frames.clone())),
             loop_end: FloatParam::new("Loop end position", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })

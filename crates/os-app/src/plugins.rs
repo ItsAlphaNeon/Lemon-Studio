@@ -601,11 +601,18 @@ impl Plugins {
         p.use_start_param(SAMPLE_START);
         // A note's own pan and mod X / Y reach the built-in Lemon instruments only (spec: audio/voice-levels.md); audio
         // clips' fades and gain reach Lemon Sampler's voices one by one, so overlapping clips of one sample crossfade
-        // (spec: audio/audio-clips.md "Fades and clip gain").
+        // (spec: audio/audio-clips.md "Fades and clip gain"); the instruments work the channel's volume and pan into
+        // their voices' final levels (spec: audio/voice-levels.md "Final levels").
         if crate::project_plugins::is_builtin(&a.desc) {
             p.use_note_levels();
             if a.desc.name == LEMON_SAMPLER {
                 p.use_voice_gains();
+                // Each audio clip's voice ends at its trimmed end, in the sampler (spec: audio/audio-clips.md "What a
+                // clip plays").
+                p.use_end_param(CLIP_END);
+            }
+            if [LEMON_SAMPLER, crate::osc3::LEMON_TRIO, crate::citrus::CITRUS].contains(&a.desc.name.as_str()) {
+                p.use_channel_levels();
             }
         }
         drop(p);
@@ -1688,6 +1695,8 @@ pub fn new_slot(name: &str) -> os_model::SlotPlugin {
 const NATIVE_CHECKS: &str = "native-checks.txt";
 /// The sampler parameter a note's sample start modulates per note (Lemon Sampler's START OFFSET).
 const SAMPLE_START: &str = "Sample start offset";
+/// Lemon Sampler's hidden parameter an audio clip voice's end modulates per note.
+const CLIP_END: &str = "Clip end";
 
 /// Lemon Sampler's starting state for a sampler channel of the project: its sample, its five envelope records, its
 /// stretch settings, the sample's start, length, loop points, loop options and precomputed effects, the channel
@@ -1762,7 +1771,7 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
 /// happen (`params_tick`).
 pub fn store_sampler(ch: &mut os_model::Channel, state: &[u8]) {
     use lemon_sampler::params as sp;
-    let json = state.get(8..).filter(|_| state.len() > 8 && state[0] != b'{').unwrap_or(state);
+    let (_, json) = state_json(state);
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(json) else { return };
     let Some(params) = v.get("params").and_then(|p| p.as_object()) else { return };
     let f = |id: &str| params.get(id)?.get("f32")?.as_f64().map(|x| x as f32);
@@ -2116,8 +2125,7 @@ pub fn stretch_param(name: &str, norm: f64, stretch: &mut [u32; 4]) -> bool {
 
 /// `blob` (a Lemon Sampler state) with parameters set to the given JSON values.
 pub(crate) fn with_params(blob: &[u8], set: &[(&str, serde_json::Value)]) -> Option<Vec<u8>> {
-    let prefixed = blob.len() > 8 && blob[0] != b'{';
-    let json = if prefixed { &blob[8..] } else { blob };
+    let (prefixed, json) = state_json(blob);
     let mut v: serde_json::Value = serde_json::from_slice(json).ok()?;
     let params = v.get_mut("params")?.as_object_mut()?;
     for (k, val) in set {
@@ -2130,8 +2138,7 @@ pub(crate) fn with_params(blob: &[u8], set: &[(&str, serde_json::Value)]) -> Opt
 }
 
 pub(crate) fn with_sample_path(blob: &[u8], path: &str) -> Option<Vec<u8>> {
-    let prefixed = blob.len() > 8 && blob[0] != b'{';
-    let json = if prefixed { &blob[8..] } else { blob };
+    let (prefixed, json) = state_json(blob);
     let mut v: serde_json::Value = serde_json::from_slice(json).ok()?;
     let inner = serde_json::to_string(path).ok()?;
     v.get_mut("fields")?.as_object_mut()?.insert("sample-path".into(), serde_json::Value::String(inner));
@@ -2194,9 +2201,10 @@ fn post_drop(x: i32, y: i32, path: &str, frame: isize) -> bool {
 }
 
 /// The `sample-path` field of a Lemon Sampler (or Lemon Trio) state blob.
+pub(crate) use os_hostlink::state::json as state_json;
+
 pub(crate) fn sample_path_of(blob: &[u8]) -> Option<String> {
-    let json = blob.get(8..).filter(|_| blob.len() > 8 && blob[0] != b'{').unwrap_or(blob);
-    let v: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(state_json(blob).1).ok()?;
     let field = v.get("fields")?.get("sample-path")?.as_str()?;
     serde_json::from_str::<String>(field).ok()
 }
@@ -4192,6 +4200,23 @@ mod tests {
 #[cfg(test)]
 mod slot_tests {
     use super::*;
+
+    /// A state's length prefix is told by its value: one whose low byte is `{` (a 0x7B-byte JSON) still counts, and a
+    /// bare JSON state is read whole.
+    #[test]
+    fn a_state_prefix_is_told_by_its_length() {
+        let with = |path: &str| format!(r#"{{"fields":{{"sample-path":"\"{path}\""}}}}"#);
+        let path = "a".repeat(0x7B - with("").len());
+        let json = with(&path);
+        assert_eq!(json.len(), 0x7B);
+        let mut blob = (json.len() as u64).to_le_bytes().to_vec();
+        blob.extend_from_slice(json.as_bytes());
+        assert_eq!(blob[0], b'{');
+        assert_eq!(state_json(&blob), (true, json.as_bytes()));
+        assert_eq!(sample_path_of(&blob), Some(path.clone()));
+        assert_eq!(state_json(json.as_bytes()), (false, json.as_bytes()));
+        assert_eq!(sample_path_of(json.as_bytes()), Some(path));
+    }
 
     /// An instance whose holds are short is taken at once, or skipped; those with long holds wait, all of them together
     /// no longer than the budget: a project with many instances keeps its frame rate during playback.
