@@ -61,7 +61,7 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
   Controller slots and the engine plays their controller links (mixer and plugin targets, formulas)
 - [x] **Formula Controller.** Lemon Formula Controller plays projects' Fruity Formula Controller slots, with the
   original's formula language, and their controller links drive linked controls as the Peak Controller's do
-- [ ] **Patcher.** Slice 1 on 2026-10-30: the mixer slot menu's Patcherize and Patcherize all (Wrap in container,
+- [x] **Patcher.** Slice 1 on 2026-10-30: the mixer slot menu's Patcherize and Patcherize all (Wrap in container,
   Wrap all in container) put the slot's effect, or all of the track's, into a container that plays them in series,
   each with its own wet and dry, with their delays made up and one undo step. The container keeps the slot's name,
   colour and icon. Its window (the slot menu's Container ▸ Edit list..., or opening the slot) opens each effect's
@@ -80,7 +80,10 @@ sixteen effects and the Tesla audio editor; these are the gaps a project made in
   and each member has its own CPU switches (Auto-bypass when silent passes a silent effect by), name, colour and icon
   from its window menu, one undo step each, saved with the container. Left: the original's Patcher slots in imported
   projects, Shift+drop of Patcher, and the graph editor. For the alpha (decided 2026-11-02): the first two; the graph
-  editor comes after, under "After the alpha"
+  editor comes after, under "After the alpha". Done 2026-11-02: an opened project's Patcher slots whose patch is one
+  plain serial chain of effects open as containers, members in chain order; other patches (parallel paths, link
+  levels, controllers, sidechains, instruments) and Patcher channels stay as they were and the hint names each with
+  its reason. The browser's Lemon Container entry dropped with Shift wraps a slot's effect or a channel's instrument
 - [x] **Transient Processor, Chorus and Stereo Shaper compared with FL Studio 2026's exports.** Six of the seven
   small effects match sample for sample in the tests (98 cases for these three: `os-engine/tests/integration/fx_null.rs`); the
   Chorus uses the true pi where the original's is a hair off, so 10 of its 21 cases match and the rest are at least
