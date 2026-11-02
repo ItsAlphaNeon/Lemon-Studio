@@ -162,9 +162,14 @@ fn link_instrument(s: &mut State, t: u16, r: usize) {
     if color.is_some() {
         tr.color = color;
     }
+    // The channel's insert takes its name and colour (measured: Assign to new instrument track on 808 Clap wrote both to
+    // Insert 2, events 204 and 149); the master keeps its own.
     if mixer != 0 {
         if let Some(m) = crate::mixer::track_mut(s, mixer) {
             m.name = Some(name);
+            if color.is_some() {
+                m.color = color;
+            }
         }
     }
 }
@@ -417,6 +422,8 @@ mod tests {
         let tr = track_info(&app.state, 0).unwrap();
         assert_eq!((tr.name.as_deref(), tr.color), (Some("Clap"), Some(os_model::Rgb::new(0xaa, 0x33, 0x55))));
         assert_eq!(crate::mixer::name(&app.state, 2), "Clap", "the channel's insert takes its name");
+        let insert = crate::mixer::track(&app.state, 2).unwrap().color;
+        assert_eq!(insert, Some(os_model::Rgb::new(0xaa, 0x33, 0x55)), "and its colour");
         assert_eq!(app.state.project.channels[1].mixer_track, 2, "its routing stays");
         assert!(!entry(&menu(&app), "Assign to new instrument track").enabled);
         crate::history::undo(&mut app.state);
