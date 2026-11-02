@@ -1,0 +1,104 @@
+#zest 1
+name: FMR Juno 37 Xylophone
+author: Fernando M. Rodrigues
+categories: Keys:Mallets, Keys:Plucks
+pots cutoff: -12.784769 18.943205 -84.289604 -22.181784 61.691822 44.138878 -26.055695 20.538004
+pots glide: -17.832895 37.853294 38.929893 -51.59492 15.137014 22.7725 -56.46703 11.202116
+pots pw: -61.71882 66.03181 39.69577 -7.459202 14.103992 30.396002 -62.004036 -19.045544
+pots env: -32.002857 -18.766798 -27.470284 99.99999 29.067297 -25.701786 -1.8446404 -23.280947
+---
+main/Output = 82
+VCC/Voices = 5
+VCC/Glide = 0
+VCC/PitchBend Up = 2
+VCC/PitchBend Down = 2
+VCC/Transpose = 0
+VCC/MTunN = 5
+VCC/MTunT = 6
+OPT/TuneSlop = 10
+OPT/CutoffSlop = 10
+OPT/GlideSlop = 10
+OPT/PWSlop = 1
+OPT/EnvrateSlop = 10
+OPT/V1T1 = 0
+OPT/V3T1 = -8
+OPT/V4T1 = 6.69
+OPT/V5T1 = 2.41
+OPT/V6T1 = -8.91
+OPT/V7T1 = -4.07
+OPT/V8T1 = -1.11
+OPT/V1T2 = 72.62
+OPT/V2T2 = 51.44
+OPT/V3T2 = 55.19
+OPT/V4T2 = 74.82
+OPT/V6T2 = 3.94
+OPT/TPots = 7
+OSC/Model = 2
+OSC/Tune1 = 24
+OSC/Tune2 = 1.3
+OSC/Vibrato = 15.5
+OSC/Shape2 = 5.1
+OSC/OscMix = 65.5
+OSC/Volume1 = 77
+OSC/Volume3 = 100
+OSC/SawShape = 0
+OSC/SuboscShape = 4
+OSC/PWModSrc = 0
+OSC/PWModDepth = -50
+OSC/ShapeDepth = 30.5
+OSC/Sync3 = 1
+OSC/ShapeModOsc2 = 1
+OSC/ShapeModOsc3 = 1
+OSC/Drift = 20
+OSC/FmModSrc = 15
+HPF/Model = 1
+HPF/Post-HPF Freq = 1
+VCF1/Model = 1
+VCF1/Frequency = 79
+VCF1/FreqModSrc = 15
+VCF1/FreqModDepth = 36
+VCF1/FreqMod2Src = 17
+VCF1/FreqMod2Depth = 0
+VCF1/KeyFollow = 60
+VCF1/Feedback = 0
+VCA1/Volume = 40
+VCA1/Modulation = 17
+VCA1/ModDepth = 2
+VCA1/PanModulation = 17
+VCA1/PanModDepth = 0
+ENV1/Attack = 1
+ENV1/Decay = 30
+ENV1/Sustain = 0
+ENV1/Release = 36
+ENV1/Model = 1
+ENV1/Release On = 0
+ENV1/KeyFollow = 30
+ENV2/Decay = 31
+ENV2/Sustain = 0
+ENV2/Release = 0
+ENV2/Velocity = 0
+ENV2/Model = 1
+ENV2/KeyFollow = 0
+LFO1/Restart = 1
+LFO1/Delay = 0
+LFO1/DepthMod Dpt1 = 0
+LFO1/Rate = 0
+LFO1/FreqMod Src1 = 12
+LFO1/FreqMod Dpt = 0
+LFO2/Waveform = 0
+LFO2/Delay = 0
+LFO2/DepthMod Src1 = 2
+LFO2/FreqMod Src1 = 12
+MOD/LagSource = 0
+MOD/AddSource1 = 0
+MOD/AddSource2 = 0
+Chrs1/Rate = 40
+Chrs1/Depth = 50
+Chrs1/Wet = 100
+FX2/Module = 0
+Plate2/Diffusion = 100
+Plate2/Damp = 80
+Plate2/Decay = 50
+Plate2/Size = 150
+Plate2/Dry = 90
+Plate2/Wet = 40
