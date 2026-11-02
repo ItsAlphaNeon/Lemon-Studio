@@ -1020,7 +1020,7 @@ mod tests {
         paint(&mut f.ui, &f.m);
         click(&mut f, &Target::Star);
         assert!(f.ui.current.favourite);
-        assert_eq!(std::fs::read_to_string(f.root.join("favorites.txt")).unwrap().trim(), deep.to_string_lossy());
+        assert_eq!(std::path::PathBuf::from(std::fs::read_to_string(f.root.join("favorites.txt")).unwrap().trim()), deep);
         click(&mut f, &Target::Chip(Chip::Favorites));
         assert_eq!(f.ui.shown.len(), 1);
         click(&mut f, &Target::Chip(Chip::Kind(crate::library::Kind::Lead)));
