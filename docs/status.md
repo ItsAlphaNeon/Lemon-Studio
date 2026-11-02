@@ -89,7 +89,9 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Track height, zoom and scroll saved with the project
 - Audio tracks and instrument tracks, saved as FL saves them: the mixer track menu's Assign to new / Unassign from
   Audio track(s), the channel menu's Assign to new instrument track and the track menu's Track mode ▸ link a playlist
-  track to a mixer track or a channel ("A" / "I" on the header, "I" on the rack's name button). Audio clips placed or
+  track to a mixer track or a channel ("A" / "I" on the header, "I" on the rack's name button). An audio track's
+  Track mode ▸ also has its options, as the original's: Select audio input ▸, Arm recording and Disarm recording act
+  on its mixer track. Audio clips placed or
   moved onto an audio track play through its mixer track, and recordings land on it; an instrument track takes no
   audio clips (a dropped one goes to the next free track below). The mixer's Select ▸ Channels and playlist tracks
   routed to this track also finds the linked tracks

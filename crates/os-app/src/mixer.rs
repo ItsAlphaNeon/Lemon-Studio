@@ -139,6 +139,8 @@ pub enum MCmd {
     Monitor(u16, u8),
     /// Arm selected track(s) (true) / Disarm selected track(s) for disk recording (spec: audio/track-io.md §2.5).
     Arm(u16, bool),
+    /// Arm recording / Disarm recording in an audio track's options: that mixer track alone (spec: ui/playlist.md §6c).
+    ArmTrack(u16, bool),
     /// Disk recording ▸ Auto-create audio clips (a program setting).
     AutoClips,
     /// A track's input (true) or output latency setting: Reset (`None`), or Set in ms / samples / beats (the value box).
@@ -710,14 +712,24 @@ pub fn output_label(s: &State, n: u16) -> String {
 /// The input menu of the current track (§1.2): `<driver> - stereo` and its pairs, `<driver> - mono` and the inputs,
 /// then "(none)". `None` when the device has no inputs.
 fn input_menu(s: &State, x: f32, y: f32) -> Option<Popup> {
+    let items = input_items(s, s.selected_mixer, false)?;
+    Some(Popup { x, y, items, sub: None, scroll: [0; 2] })
+}
+
+/// The input choices for track `t`, as its input menu lists them; `marked`: the track's current input marked (an
+/// audio track's Select audio input ▸, spec: ui/playlist.md §6c). `None` when the device has no inputs.
+pub fn input_items(s: &State, t: u16, marked: bool) -> Option<Vec<PItem>> {
     let d = crate::device::input_source();
     let (pairs, monos) = input_choices(d.as_ref());
     let driver = d.map(|d| d.name).unwrap_or_default();
     if pairs.is_empty() && monos.is_empty() {
         return None;
     }
-    let t = s.selected_mixer;
-    let item = |(v, name): (i32, String)| PItem::new(name, Cmd::Mixer(MCmd::Input(t, v)));
+    let now = track(s, t).map_or(-1, |m| m.audio_in);
+    let item = |(v, name): (i32, String)| {
+        let it = PItem::new(name, Cmd::Mixer(MCmd::Input(t, v)));
+        if marked { it.mark(Mark::Radio(v == now)) } else { it }
+    };
     let mut items = Vec::new();
     if !pairs.is_empty() {
         items.push(PItem::head(format!("{driver} - stereo")));
@@ -725,8 +737,8 @@ fn input_menu(s: &State, x: f32, y: f32) -> Option<Popup> {
     }
     items.push(PItem::head(format!("{driver} - mono")));
     items.extend(monos.into_iter().map(item));
-    items.extend([PItem::sep(), PItem::new("(none)", Cmd::Mixer(MCmd::Input(t, -1)))]);
-    Some(Popup { x, y, items, sub: None, scroll: [0; 2] })
+    items.extend([PItem::sep(), item((-1, "(none)".into()))]);
+    Some(items)
 }
 
 /// The output menu of the current track (§1.2): an ASIO driver's `<driver> - stereo` and its pairs (a Windows device:
@@ -1938,6 +1950,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             let tg = targets(s, n);
             app.arm_tracks(&tg, on)
         }
+        MCmd::ArmTrack(t, on) => app.arm_tracks(&[t], on),
         MCmd::Latency(t, input, None) => {
             set_latency(s, t, input, 0.0);
             None
