@@ -1061,7 +1061,7 @@ fn split_button(ui: &mut Ui, s: &State, x: &mut f32, cy: f32) {
 fn float_button(ui: &mut Ui, s: &State, x: &mut f32, cy: f32) {
     let b = Rect::new(*x - 24.0, (cy - 11.0).round(), 24.0, 22.0);
     let down = s.float_layer.is_down();
-    let hov = ui.hit(b, Action::FloatLayer, "Floating windows - Shift+L");
+    let hov = ui.hit(b, Action::FloatLayer, "Floating windows - Shift+F");
     let look = if ui.down(b, &Action::FloatLayer) { super::Look::Hot } else if down { super::Look::On } else if hov { super::Look::Hover } else { super::Look::Off };
     let ink = super::tool_face(ui, b, look);
     ui.c.stroke_rrect(Rect::new(b.x + 6.5, b.y + 4.5, 11.0, 7.0), 1.0, 1.0, ink);

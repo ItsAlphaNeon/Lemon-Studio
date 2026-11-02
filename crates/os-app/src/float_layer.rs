@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Shift+L and the status bar's button: the floating windows (`crate::floating`) and the plugin windows of their own
+//! Shift+F and the status bar's button: the floating windows (`crate::floating`) and the plugin windows of their own
 //! slide away together and come back together, as a scratchpad does on Hyprland. Moved windows keep their places: the
 //! slide is added while they paint (`lift`), and those down leave `State::z`, so they are neither painted nor clicked.
 //!
@@ -29,7 +29,7 @@ struct Slide {
 /// Where the layer is.
 #[derive(Debug, Default)]
 pub struct FloatLayer {
-    /// Shift+L or the button was pressed; the next tick acts on it.
+    /// Shift+F or the button was pressed; the next tick acts on it.
     pub pressed: bool,
     down: bool,
     /// The slide under way.
@@ -251,21 +251,21 @@ mod tests {
         assert_eq!(crate::views::rack::rect(&a.state), before);
     }
 
-    /// Shift+L and the button: the key leaves a text box alone.
+    /// Shift+F, once for a held key; F alone stays the tiling layout's.
     #[test]
-    fn shift_l_presses_the_layer() {
+    fn shift_f_presses_the_layer() {
         use winit::keyboard::Key;
         let mut a = app();
         a.shift = true;
-        a.key(&Key::Character("L".into()), false, false);
+        a.key(&Key::Character("F".into()), false, false);
         assert!(a.state.float_layer.pressed);
         a.state.float_layer.pressed = false;
         a.repeat = true;
-        a.key(&Key::Character("L".into()), false, false);
+        a.key(&Key::Character("F".into()), false, false);
         assert!(!a.state.float_layer.pressed, "a held key does it once");
         a.repeat = false;
         a.shift = false;
-        a.key(&Key::Character("l".into()), false, false);
+        a.key(&Key::Character("f".into()), false, false);
         assert!(!a.state.float_layer.pressed, "not without Shift");
     }
 }

@@ -4539,7 +4539,7 @@ impl App {
         self.float_layer_tick(now);
     }
 
-    /// Shift+L or the button pressed, a floating window opened while they are down, and the slide on its way
+    /// Shift+F or the button pressed, a floating window opened while they are down, and the slide on its way
     /// (`crate::float_layer`). Plugin windows of their own move with it, on their own screen's height.
     fn float_layer_tick(&mut self, now: std::time::Instant) {
         use crate::float_layer as layer;
@@ -6809,6 +6809,14 @@ impl App {
             let mut dirty = Vec::new();
             for (a, r) in [(&self.hover, self.hover_rect), (&hover, rect)] {
                 if let (Some(a), Some(r)) = (a, r) {
+                    // A plugin tab's hit is one thin band of it, and its neighbours lie over each other: the whole row.
+                    #[cfg(target_os = "linux")]
+                    if let Action::PluginTab(t) | Action::PluginTabClose(t) = a
+                        && let Some(e) = self.state.plugin_tabs.group_of(*t).and_then(|g| self.state.embeds.get(&g.active))
+                    {
+                        dirty.push(e.tabs_rect());
+                        continue;
+                    }
                     if hover_is_visible(a) {
                         dirty.push(r.outset(3.0));
                     }
@@ -8698,9 +8706,9 @@ impl App {
             }
             return self.undo_key(alt);
         }
-        // Shift+L: the floating windows slide away or come back (`crate::float_layer`); once for a held key.
+        // Shift+F: the floating windows slide away or come back (`crate::float_layer`); once for a held key.
         if let Key::Character(c) = key
-            && c.eq_ignore_ascii_case("l")
+            && c.eq_ignore_ascii_case("f")
             && self.shift
             && !ctrl
             && !alt
@@ -12363,6 +12371,10 @@ mod tests {
         // A press on the first tab shows it.
         let first = (strip.x + 20.0, strip.y + 10.0);
         app.mouse_move(first.0, first.1);
+        if let Some(Some(rects)) = app.take_damage() {
+            let whole = |r: &Rect| r.x <= strip.x && r.right() >= strip.right() && r.y <= strip.y && r.bottom() >= strip.bottom();
+            assert!(rects.iter().any(whole), "a hover repaints the whole row: {rects:?} {strip:?}");
+        }
         assert!(matches!(app.top_hit(first.0, first.1).map(|h| h.action.clone()), Some(Action::PluginTab(0))));
         assert!(app.embed_down(os_plugkit::input::Button::Left));
         assert!(app.embed_up());
