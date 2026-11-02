@@ -19,14 +19,11 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **A project journal.** Every edit, undo, save and plugin state is written to disk as it happens, saved or not, and
   readable through the control plane: a sound made in a plugin's window survives an unsaved project. See
   [docs/journal.md](docs/journal.md).
-- **Lemon project files (`.lemon`), the default for new projects.** A project file of Lemon Studio's own: the project as an FLP plus its
-  whole history across sessions (every change and every plugin state), so Recover from journal reaches any sound the
-  project ever had. See [docs/native-format.md](docs/native-format.md).
 - **A converted older project keeps its original.** An FLP in the layout before 24.2 opens without its path, so Save
-  asks for a new file. A Lemon project file keeps its path: its earlier saves stay in it as versions.
+  asks for a new file.
 - **After a crash, the backup is offered.** When the last run ended without closing while its project had unsaved
   changes, the next start says so and offers the newest autosave written since the project was last saved. Opening it
-  works as Revert to last backup. A Lemon project's autosaves are `.lemon` files, so they keep its undo history.
+  works as Revert to last backup.
 - **Ctrl+C in the terminal closes properly.** The keyboard is let go and the session kept, as closing the window does;
   unsaved changes go to a backup, which the next start offers. A second Ctrl+C ends the program at once.
 

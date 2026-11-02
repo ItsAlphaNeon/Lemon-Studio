@@ -64,15 +64,8 @@ pub struct Journal {
     attention: HashMap<usize, u64>,
     /// Instances to read at the next plugin tick: the audio thread had them when they were due.
     retry: Vec<usize>,
-    /// The history a Lemon project file brought (`crate::native`), and that file; the number of this session's entry
-    /// from which on its entries are the project's (its `opened` or `new`).
-    carried: Vec<Value>,
-    carried_from: Option<PathBuf>,
-    project_from: u64,
-    /// The plugin states the project's history holds already (by hash): not written again.
+    /// The plugin states the project's entries hold already (by hash): not written again.
     known: std::collections::HashSet<String>,
-    /// This session's `session` entry is in `carried` already (the project was saved into a Lemon project file).
-    session_carried: bool,
     plugins_at: Option<Instant>,
 }
 
@@ -120,39 +113,6 @@ impl Journal {
         }
     }
 
-    /// The project's whole history, as a Lemon project file keeps it: what its file brought, then this session's start
-    /// and its entries since the project was opened or made (from the journal's file, which holds them all).
-    pub fn project_history(&self) -> Vec<Value> {
-        let mine = |e: &Value| e["seq"].as_u64().is_some_and(|n| n >= self.project_from);
-        let session = self.entries.iter().find(|e| e["kind"] == "session").cloned().filter(|_| !self.session_carried);
-        let from_file = self.path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| t.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(mine).collect::<Vec<_>>());
-        let here = from_file.unwrap_or_else(|| self.entries.iter().filter(|e| mine(e)).cloned().collect());
-        self.carried.iter().cloned().chain(session).chain(here).collect()
-    }
-
-    /// The project's file is Lemon project file `path` with history `entries` (an earlier save or a backup of it was
-    /// opened as the project): the history goes on from that file's.
-    pub fn carry(&mut self, path: &std::path::Path, entries: Vec<Value>) {
-        self.known.extend(entries.iter().filter(|e| e["kind"] == "plugin_state").filter_map(|e| e["hash"].as_str().map(str::to_string)));
-        self.carried = entries;
-        self.carried_from = Some(path.to_path_buf());
-    }
-
-    /// The history carried in is now project file `path`'s (a backup of it was opened as the project).
-    pub fn carried_by(&mut self, path: &std::path::Path) {
-        if self.carried_from.is_some() {
-            self.carried_from = Some(path.to_path_buf());
-        }
-    }
-
-    /// The project was saved into Lemon project file `path`: that file holds the history so far.
-    pub fn saved_into(&mut self, path: &std::path::Path) {
-        self.carried = self.project_history();
-        self.carried_from = Some(path.to_path_buf());
-        self.project_from = self.seq + 1;
-        self.session_carried = true;
-    }
-
     /// The entries after `since`, oldest first, and the newest number.
     pub fn since(&self, since: u64) -> (Vec<Value>, u64) {
         (self.entries.iter().filter(|e| e["seq"].as_u64().is_some_and(|n| n > since)).cloned().collect(), self.seq)
@@ -165,19 +125,14 @@ impl Journal {
 }
 
 impl App {
-    /// The project was opened from `path` (None: made new), with the history its file brought (a Lemon project's): the
-    /// journal says so and reads it afresh.
-    pub(crate) fn journal_opened(&mut self, path: Option<&std::path::Path>, carried: Vec<Value>) {
+    /// The project was opened from `path` (None: made new): the journal says so and reads it afresh.
+    pub(crate) fn journal_opened(&mut self, path: Option<&std::path::Path>) {
         let j = &mut self.journal;
         match path {
-            Some(p) => j.write("opened", json!({ "path": p.display().to_string(), "history": carried.len() })),
+            Some(p) => j.write("opened", json!({ "path": p.display().to_string() })),
             None => j.write("new", json!({})),
         }
-        j.project_from = j.seq;
-        j.carried_from = (!carried.is_empty()).then(|| path.map(std::path::Path::to_path_buf)).flatten();
-        j.known = carried.iter().filter(|e| e["kind"] == "plugin_state").filter_map(|e| e["hash"].as_str().map(str::to_string)).collect();
-        j.carried = carried;
-        j.session_carried = false;
+        j.known.clear();
         j.reading = Some(crate::control::query::project(&self.state));
         j.notes = self.state.project.patterns.iter().map(|p| (p.id.0, p.notes.clone())).collect();
         j.dirty = false;
@@ -366,16 +321,6 @@ impl Journal {
         for e in self.entries.iter().rev() {
             take(&here, e, &mut out);
         }
-        // The project file's own history: an entry is known by its place in it.
-        if let Some(from) = &self.carried_from {
-            for (i, e) in self.carried.iter().enumerate().rev() {
-                let n = out.len();
-                take(from, e, &mut out);
-                if out.len() > n {
-                    out[n].seq = i as u64;
-                }
-            }
-        }
         for file in older_journals(self.path.as_deref()) {
             let Ok(text) = std::fs::read_to_string(&file) else { continue };
             let mut found: Vec<Value> = text.lines().filter(|l| l.contains("\"plugin_state\"") && l.contains(name)).filter_map(|l| serde_json::from_str(l).ok()).collect();
@@ -393,9 +338,7 @@ impl Journal {
 
     /// The state written as entry `seq` of journal `file` (this session's when it is this journal's file).
     pub fn state_at(&self, file: &std::path::Path, seq: u64) -> Option<Vec<u8>> {
-        let e = if self.carried_from.as_deref() == Some(file) {
-            self.carried.get(seq as usize).cloned()?
-        } else if self.path.as_deref() == Some(file) || file.as_os_str().is_empty() {
+        let e = if self.path.as_deref() == Some(file) || file.as_os_str().is_empty() {
             self.entries.iter().find(|e| e["seq"] == seq).cloned()?
         } else {
             let text = std::fs::read_to_string(file).ok()?;
@@ -558,7 +501,7 @@ mod tests {
     fn the_journal_follows_the_project() {
         let mut a = App::new(None);
         a.state.project = crate::app::test_project();
-        a.journal_opened(None, Vec::new());
+        a.journal_opened(None);
         let kinds = |a: &App, from: u64| a.journal.since(from).0.iter().map(|e| e["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         let start = a.journal.since(0).1;
         // A tempo change in the interface: a step and its change.

@@ -94,7 +94,7 @@ thread_local! {
 
 /// The first `Project_N` (N from 1) that names nothing in `root`, as a folder or as a project file.
 pub fn free_name(root: &Path) -> String {
-    let taken = |n: &str| !root.as_os_str().is_empty() && (root.join(n).exists() || root.join(format!("{n}.flp")).exists() || root.join(format!("{n}.{}", crate::native::EXT)).exists());
+    let taken = |n: &str| !root.as_os_str().is_empty() && (root.join(n).exists() || root.join(format!("{n}.flp")).exists() || root.join(format!("{n}.{}", crate::project_files::EXT)).exists());
     (1u32..).map(|n| format!("Project_{n}")).find(|n| !taken(n)).expect("a free name")
 }
 
@@ -176,9 +176,9 @@ impl SaveForm {
         if self.new_folder { self.root.join(self.name.text.trim()) } else { self.root.clone() }
     }
 
-    /// The project's file: `<folder>/<name>.lemon` (a Lemon project, `crate::native`).
+    /// The project's file: `<folder>/<name>.lemon`.
     pub fn file(&self) -> PathBuf {
-        self.folder().join(format!("{}.{}", self.name.text.trim(), crate::native::EXT))
+        self.folder().join(format!("{}.{}", self.name.text.trim(), crate::project_files::EXT))
     }
 
     /// Location's text: the folder with a trailing separator (nothing without a root).

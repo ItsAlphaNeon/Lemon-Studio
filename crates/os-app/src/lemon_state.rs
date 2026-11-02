@@ -446,7 +446,7 @@ mod tests {
         let mut app = with_state();
         app.save_to(path.clone());
         assert!(!app.unsaved());
-        let file = os_flp::FlpFile::parse(&crate::native::read(&path).unwrap().0).unwrap();
+        let file = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
         let ids: Vec<u8> = lemon::events(&file).unwrap().iter().map(|e| e.id).collect();
         let mut want = vec![lemon::SAVED_BY, lemon::ICONS, lemon::SLOT_NAMES, lemon::SLOT_COLORS, lemon::PERFORMANCE, lemon::MIXER];
         want.extend([lemon::SCALING, lemon::CHANNEL_CHECKS]);
@@ -562,7 +562,7 @@ mod tests {
         app.state.rack.note_lock[NoteSrc::Touch as usize] = Some(1);
         app.save_to(lemon_path.clone());
         app.save_to(flp_path.clone());
-        let file = os_flp::FlpFile::parse(&crate::native::read(&lemon_path).unwrap().0).unwrap();
+        let file = os_flp::FlpFile::parse(&std::fs::read(&lemon_path).unwrap()).unwrap();
         assert_eq!(lemon::data(&file, lemon::NOTE_LOCKS), Some(vec![LAYOUT, 2, 0, 0, 0, 0, 3, 0, 1, 1, 0]));
         let mut back = App::new(None);
         back.open(lemon_path.clone());
@@ -600,7 +600,7 @@ mod tests {
         m[3].icon = Some(74); // the automation clip's nodes: no picture of Lemon Studio's
         m[4].icon = Some(80);
         made.save_to(path.clone());
-        let mut file = os_flp::FlpFile::parse(&crate::native::read(&path).unwrap().0).unwrap();
+        let mut file = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
         // The second channel's icon number, before its colour: 30, the microphone.
         let ev = file.chunks.iter_mut().find_map(|c| match &mut c.body {
             os_flp::ChunkBody::Events(v) => Some(v),
@@ -627,7 +627,7 @@ mod tests {
         app.state.playlist.icons.remove(&IconOwner::Track(2));
         let lemon_path = d.join("Icons.lemon");
         app.save_to(lemon_path.clone());
-        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&crate::native::read(&lemon_path).unwrap().0).unwrap()).unwrap();
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&lemon_path).unwrap()).unwrap()).unwrap();
         assert_eq!((saved.channels[1].rack.icon, saved.mixer[2].icon, saved.mixer[3].icon), (30, Some(75), Some(74)));
         let mut back = App::new(None);
         back.open(lemon_path);
@@ -647,7 +647,7 @@ mod tests {
         let mut app = with_state();
         app.save_to(path.clone());
         assert!(app.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", app.state.message);
-        let file = os_flp::FlpFile::parse(&crate::native::read(&path).unwrap().0).unwrap();
+        let file = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
         assert!(!lemon::is_lemon(&file) && lemon::events(&file).unwrap().is_empty());
         let mut back = App::new(None);
         back.open(path);
@@ -666,7 +666,7 @@ mod tests {
         let path = d.join("State.lemon");
         let mut app = with_state();
         app.save_to(path.clone());
-        let mut file = os_flp::FlpFile::parse(&crate::native::read(&path).unwrap().0).unwrap();
+        let mut file = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
         let future = Event::new(240, Value::var([7, 7]));
         let later = Event::new(lemon::PERFORMANCE, Value::var([2, 0]));
         lemon::to_lemon(&mut file, &[future.clone(), later]).unwrap();
@@ -676,7 +676,7 @@ mod tests {
         assert!(back.state.playlist.perf_clip_progress, "a layout 2 Performance event is not read: the defaults stay");
         assert_eq!(back.state.playlist.icons.len(), 3);
         back.save_to(path.clone());
-        let file = os_flp::FlpFile::parse(&crate::native::read(&path).unwrap().0).unwrap();
+        let file = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(lemon::data(&file, 240), Some(vec![7, 7]), "the unknown event is kept");
         // Two colours, the second cut short: the first is read.
         let mut s = with_state();

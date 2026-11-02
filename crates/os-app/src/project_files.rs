@@ -165,10 +165,6 @@ impl App {
     pub(crate) fn revert_from(&mut self, b: PathBuf) {
         let Some(own) = self.state.path.clone() else { return };
         let (kept, recent) = (crate::templates::last_kept(), crate::recent::list());
-        // A Lemon project's history and ids stay with it when the copy opened has none of them (an FLP backup); a Lemon
-        // project backup brings its own, newer ones.
-        let native_copy = crate::native::is_native(&b);
-        let extra = (crate::native::is_native(&own) && !native_copy).then(|| crate::native::read(&own).ok()).flatten().and_then(|(_, x)| x);
         self.open(b.clone());
         crate::templates::restore_last(kept);
         crate::recent::restore(&recent);
@@ -176,46 +172,11 @@ impl App {
         if self.state.path.as_deref() != Some(b.as_path()) {
             return;
         }
-        if let Some(x) = extra {
-            if let Some(v) = &x.ids {
-                crate::control::ids::restore(&mut self.state.control.ids, &mut self.state.project, v);
-            }
-            self.journal.carry(&own, x.journal);
-        }
-        if native_copy {
-            self.journal.carried_by(&own);
-        }
-        self.state.versions = crate::native::versions(&own);
         self.state.path = Some(own);
         // The project file still holds the last save: unsaved until saved again.
         self.saved.1 = f64::NAN;
         let n = b.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         self.state.message = Some(format!("Reverted to {n}"));
-    }
-
-    /// Current project ▸ Versions: the earlier save `file` of the project's Lemon project file opened as the project,
-    /// as Revert to last backup opens a backup (the file keeps its newest save until the project is saved again).
-    pub(crate) fn open_version(&mut self, file: &str) {
-        let Some(own) = self.state.path.clone().filter(|p| crate::native::is_native(p)) else { return };
-        let saved = self.state.versions.iter().find(|v| v.file == file).map_or(0, |v| v.saved);
-        let bytes = match crate::native::version(&own, file) {
-            Ok(b) => b,
-            Err(e) => {
-                self.state.message = Some(format!("That version could not be read: {e}"));
-                return;
-            }
-        };
-        let tmp = std::env::temp_dir().join(format!("lemon-version-{}.flp", std::process::id()));
-        if let Err(e) = std::fs::write(&tmp, &bytes) {
-            self.state.message = Some(format!("That version could not be opened: {e}"));
-            return;
-        }
-        self.revert_from(tmp.clone());
-        let _ = std::fs::remove_file(&tmp);
-        if self.state.path.as_ref() == Some(&own) {
-            self.journal.write("version", serde_json::json!({ "file": file, "saved": saved }));
-            self.state.message = Some(format!("Opened the version saved {}", crate::journal::when(saved)));
-        }
     }
 
     /// FILE ▸ Save as template...: the save dialog, in the Templates folder's User category, for the template's name.

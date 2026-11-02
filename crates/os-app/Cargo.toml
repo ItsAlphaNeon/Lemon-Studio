@@ -10,7 +10,7 @@ name = "lemonstudio"
 path = "src/main.rs"
 
 [dependencies]
-os-model = { workspace = true, features = ["serde"] }
+os-model.workspace = true
 os-dsp.workspace = true
 os-flp.workspace = true
 os-engine.workspace = true
@@ -61,7 +61,7 @@ tiny-skia = "0.11"
 # JPEG workspace pictures of theme files (`wallpaper`; PNG goes through tiny-skia). Pure Rust, no threads.
 jpeg-decoder = { version = "0.3", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 # Export encoders (`export::encode`): FLAC (pure Rust), MP3 (LAME, built from source) and Ogg Vorbis (libvorbis, built
 # from source).

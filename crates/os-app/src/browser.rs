@@ -72,11 +72,6 @@ impl App {
                         s.rack.select_only(c);
                     }
                     Item::History(e) => s.message = crate::history::go_to(s, e),
-                    Item::Version(ref f) => {
-                        let f = f.clone();
-                        self.ask_discard("opening an earlier version", crate::dialog::Next::Version(f));
-                        return true;
-                    }
                     _ => {}
                 }
                 if let Item::Sample(path) = &row.item {
@@ -84,7 +79,7 @@ impl App {
                 }
                 let s = &mut self.state;
                 s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
-                if !matches!(row.item, Item::None | Item::File(_) | Item::History(_) | Item::Version(_)) {
+                if !matches!(row.item, Item::None | Item::File(_) | Item::History(_)) {
                     self.drag = Some(Drag::Browser { item: row.item, label: row.label, m0: self.mouse, started: false });
                 }
             }
@@ -599,7 +594,7 @@ impl App {
                     self.state.message = msg;
                 }
             }
-            Item::None | Item::File(_) | Item::History(_) | Item::Version(_) | Item::Preset(_) => {}
+            Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) => {}
         }
     }
 
@@ -666,10 +661,6 @@ impl App {
                     s.rack.select_only(c);
                 }
                 Item::History(e) => return crate::history::go_to(s, e),
-                Item::Version(f) => {
-                    self.ask_discard("opening an earlier version", crate::dialog::Next::Version(f));
-                    return None;
-                }
                 _ => {}
             },
             RowCmd::Pattern(pc) => {
@@ -1011,7 +1002,6 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
         Item::Generator(index) => items.push(PItem::new("Add to instrument rack", Cmd::Plugin(crate::plugin_menu::PlugCmd::Generator { index, after: None }))),
         Item::Effect(index) => items.push(PItem::new("Add to selected mixer track", Cmd::Plugin(crate::plugin_menu::PlugCmd::Effect { index, slot: None }))),
         Item::History(_) => items.push(r("Go to this step", RowCmd::Activate)),
-        Item::Version(_) => items.push(r("Open this version", RowCmd::Activate)),
         // Into the selected channel's plugin (spec: plugins/presets.md "Browser").
         Item::Preset(ref p) if crate::channel_states::is_state_file(std::path::Path::new(p)) => {
             items.push(PItem::new("Add to channel rack", Cmd::ChannelState(crate::channel_states::CsCmd::Add(p.into()))));

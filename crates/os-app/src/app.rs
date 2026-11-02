@@ -1057,8 +1057,6 @@ pub struct State {
     pub retimed: bool,
     pub file: Option<os_flp::FlpFile>,
     pub path: Option<PathBuf>,
-    /// The earlier saves the project's file keeps, newest first (a Lemon project's; `crate::native`).
-    pub versions: Vec<crate::native::Version>,
     /// Open child windows, bottom to top.
     pub z: Vec<Win>,
     /// The empty workspace took the last click: no window has the focus (Ctrl+F12 closes them all,
@@ -1678,7 +1676,6 @@ impl App {
                 retimed: false,
                 file: None,
                 path: None,
-                versions: Vec::new(),
                 z: vec![Win::Playlist, Win::ChannelRack],
                 no_focus: false,
                 show_browser: true,
@@ -1954,19 +1951,8 @@ impl App {
         // A converted project opens without its path: Save asks for a new file, so the original stays for its own version.
         let mut legacy = None;
         let mut converted = false;
-        // A Lemon project file (`crate::native`): its snapshot is the project, its history goes on in the journal.
-        let mut carried = Vec::new();
-        let mut stored_ids = None;
-        let mut stored_history = None;
-        let result = crate::native::read(&path)
-            .map(|(b, extra)| {
-                if let Some(x) = extra {
-                    carried = x.journal;
-                    stored_ids = x.ids;
-                    stored_history = x.history;
-                }
-                b
-            })
+        let result = std::fs::read(&path)
+            .map_err(|e| e.to_string())
             .and_then(|b| os_flp::FlpFile::parse(&b).map_err(|e| e.to_string()))
             .and_then(|mut f| match os_flp::project::upgrade(&mut f).and_then(|c| {
                 converted = c;
@@ -2019,23 +2005,14 @@ impl App {
                 crate::recent::add(&path);
                 s.path = Some(path);
                 // A converted project is not saved over its original, which its own version can still open: Save asks
-                // for a new file. A Lemon project file keeps its path: it keeps its earlier saves as versions, the one
-                // opened among them (`crate::native`).
-                if converted && !s.path.as_deref().is_some_and(crate::native::is_native) {
+                // for a new file. A `.lemon` keeps its path.
+                if converted && s.path.as_deref().is_some_and(crate::project_files::is_flp) {
                     s.message = s.path.take().map(|p| format!("Opened {}, converted from an older version", p.display()));
                 }
                 s.piano.reset();
                 s.playlist.reset();
                 s.history.reset();
                 s.control.reset();
-                // A Lemon project's things keep the ids they had.
-                if let Some(v) = &stored_ids {
-                    crate::control::ids::restore(&mut s.control.ids, &mut s.project, v);
-                }
-                // And its undo history goes on.
-                if let Some(h) = &stored_history {
-                    s.history.restore(h);
-                }
                 s.control.event(&crate::control::By::User, "opened", s.path.as_ref().map_or(String::new(), |p| p.display().to_string()), Vec::new());
                 crate::playlist::load_view(s);
                 s.piano.dirty = true; // live notes use the new project
@@ -2048,8 +2025,7 @@ impl App {
                     self.state.file = Some(f);
                 }
                 self.mark_saved();
-                self.journal_opened(Some(&opened), carried);
-                self.state.versions = crate::native::versions(&opened);
+                self.journal_opened(Some(&opened));
                 crate::missing::opened(self);
                 self.loading = Some(crate::loading::Loading::start(&self.state.project));
                 self.state.playlist.wave_wait = true;
@@ -2097,10 +2073,8 @@ impl App {
         use crate::project_files::{as_lemon, EXT};
         let path = self.state.path.clone();
         let name = path.as_deref().map(as_lemon).and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| format!("Untitled.{EXT}"));
-        // A Lemon project first: what a new project is saved as.
         let dlg = FileDlg::new(Mode::Save, "Save project as", "project", crate::dialog::Then::SaveProject(next))
-            .filter("Lemon project, with its history", &[EXT])
-            .filter("FL Studio project", &["flp"])
+            .filter("Lemon Studio project", &[EXT])
             .start(path.as_deref().and_then(|p| p.parent()))
             .name(&name);
         self.file_dialog(dlg);
@@ -2177,11 +2151,8 @@ impl App {
     /// Writes the project to `target`: the size of the file written, None when the save failed. `edit` changes what is
     /// written (not the project), once the project's state is gathered.
     fn write_project(&mut self, target: PathBuf, edit: &mut dyn FnMut(&mut os_model::Project)) -> Option<u64> {
-        // The journal has the project and its plugins as saved; a Lemon project file holds that history.
+        // The journal has the project and its plugins as saved.
         self.journal_saving();
-        let history = if crate::native::is_native(&target) { self.journal.project_history() } else { Vec::new() };
-        let ids = crate::control::ids::stored(&self.state.control.ids, &self.state.project);
-        let undo = if crate::native::is_native(&target) { self.state.history.stored() } else { None };
         // A file saved over is kept as an "overwritten on" backup (spec: ui/settings-choices.md "Backup files").
         crate::backup::keep_overwritten(&target, crate::data_folder::backup_folder(&self.state, Some(&target)));
         // Sampler channels keep their sample and settings in Lemon Sampler: copy them to the channel so the FLP stores
@@ -2256,7 +2227,7 @@ impl App {
             .map_err(|e| e.to_string())
             .and_then(|()| lemon_or_flp(&mut file, &target, extra))
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
-            .and_then(|b| crate::native::write(&target, &b, &history, &ids, undo.as_ref()));
+            .and_then(|b| std::fs::write(&target, &b).map(|()| b.len() as u64).map_err(|e| e.to_string()));
         s.message = Some(match &result {
             Ok(_) if lost.is_empty() => format!("Saved {}", target.display()),
             Ok(_) => format!("Saved {} without {}", target.display(), lost.join(", ")),
@@ -2271,17 +2242,11 @@ impl App {
             crate::recent::add(&target);
             s.path = Some(target.clone());
             if self.copying {
-                // A copy (a backup, Save new version's...) is not the project's file: its saved point, history file and
-                // versions stay.
+                // A copy (a backup, Save new version's...) is not the project's file: its saved point stays.
                 self.journal_copied(&target);
             } else {
                 self.mark_saved();
-                if crate::native::is_native(&target) {
-                    // The file holds the history from here on.
-                    self.journal.saved_into(&target);
-                }
                 self.journal_saved(&target);
-                self.state.versions = crate::native::versions(&target);
             }
         }
         result.ok()
@@ -2432,7 +2397,6 @@ impl App {
             }
             Next::ImportMidi(p) => self.import_pending(p),
             Next::Revert(b) => self.revert_from(b),
-            Next::Version(f) => self.open_version(&f),
             Next::Template(f) => self.new_from_pick(f),
         }
         self.invalidate();
@@ -2706,7 +2670,7 @@ impl App {
         s.piano.dirty = true;
         s.message = Some("New project".into());
         self.mark_saved();
-        self.journal_opened(None, Vec::new());
+        self.journal_opened(None);
     }
 
     /// FILE > Open: the open dialog, starting in the project's folder.
@@ -14555,14 +14519,13 @@ mod tests {
         assert!(app.state.message.as_deref().is_some_and(|m| m.contains("converted from an older version")), "{:?}", app.state.message);
     }
 
-    /// A Lemon project file whose project is in the older layout (made from a project of version 24.1, say) opens
-    /// converted with its path: Save writes over it, which keeps the save it was opened from as a version.
+    /// A `.lemon` whose project is in the older layout (made from a project of version 24.1, say) opens converted with
+    /// its path: Save writes over it.
     #[test]
     fn an_older_lemon_project_keeps_its_path() {
         let flp = older_project_file("24.1.1.4285", "lemon");
-        let path = flp.with_extension(crate::native::EXT);
-        crate::native::write(&path, &std::fs::read(&flp).unwrap(), &[], &serde_json::Value::Null, None).expect("write");
-        let _ = std::fs::remove_file(&flp);
+        let path = flp.with_extension(crate::project_files::EXT);
+        std::fs::rename(&flp, &path).expect("rename");
         let mut app = App::new(None);
         app.open(path.clone());
         assert_eq!(app.state.path.as_deref(), Some(path.as_path()), "{:?}", app.state.message);
@@ -16456,7 +16419,7 @@ mod tests {
         assert_eq!(app.state.path.as_deref(), Some(lemon.as_path()), "the project now lives in the .lemon file");
         assert!(!app.unsaved());
         assert_eq!(std::fs::read(&flp).unwrap(), before, "the FLP is still not written");
-        let file = os_flp::FlpFile::parse(&crate::native::read(&lemon).unwrap().0).unwrap();
+        let file = os_flp::FlpFile::parse(&std::fs::read(&lemon).unwrap()).unwrap();
         assert_eq!(os_flp::lemon::version(&file), Some(os_flp::lemon::VERSION));
         assert_eq!(os_flp::lemon::saved_by_text(&file), Some(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))));
         // Save again: in place, no dialog.

@@ -38,6 +38,6 @@ or a run of wheel notches on one box or knob is one step); on main they make non
 
 ## Not yet
 
-- Ids, the undo history and the journal stay with a project only in a Lemon project file (`.lemon`,
-  [native-format.md](native-format.md)); a project saved as an FLP keeps none of them.
+- The journal stays on this computer, 30 days. Ids and the undo history end with the session: the project's file holds
+  neither.
 - The journal has no automation points or event lanes yet, and nothing in the app replays it beyond plugin states.

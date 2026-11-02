@@ -13,7 +13,7 @@ use crate::knobs::KnobId;
 use crate::playlist::EditTarget;
 
 /// What a value box sets.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Target {
     Knob(KnobId),
     /// A mixer track's volume fader (0..1, the fader law; spec: ui/mixer.md §4).
@@ -45,7 +45,7 @@ fn resolved(s: &State, t: Target) -> Option<Target> {
 }
 
 /// The units a latency setting is typed in: Set in ms / samples / beats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LatUnit {
     Ms,
     Samples,
