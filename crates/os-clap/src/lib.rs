@@ -1272,9 +1272,9 @@ impl Plugin {
 
     /// Sends each note's own levels (`Instrument::note_start`; UI thread): its pan as a CLAP pan note expression
     /// `(pan + 1) / 2` right after the note on, with the note's id, and its mod X / Y plus the channel's as per-note
-    /// modulation of the parameters named `os_host::NOTE_MOD_X` / `NOTE_MOD_Y` when the plugin has them modulatable
-    /// per note id, the amount being the mod value times the parameter's range (an OpenStudio choice: a mod of 1 is
-    /// the knob's whole range). Sounding voices get the new amounts when the channel's mods change.
+    /// modulation of the parameters named in `os_host::NOTE_MOD_X` / `NOTE_MOD_Y` when the plugin has them
+    /// modulatable per note id, the amount being the mod value times the parameter's range (an OpenStudio choice: a
+    /// mod of 1 is the knob's whole range). Sounding voices get the new amounts when the channel's mods change.
     pub fn use_note_levels(&mut self) -> bool {
         let mut np = NoteParams::default();
         if !self.params.is_null() {
@@ -1289,9 +1289,9 @@ impl Plugin {
                         continue;
                     }
                     let n = CStr::from_ptr(info.name.as_ptr()).to_string_lossy();
-                    let k = if n == os_host::NOTE_MOD_X {
+                    let k = if os_host::NOTE_MOD_X.contains(&&*n) {
                         0
-                    } else if n == os_host::NOTE_MOD_Y {
+                    } else if os_host::NOTE_MOD_Y.contains(&&*n) {
                         1
                     } else {
                         continue;
@@ -2526,6 +2526,39 @@ mod tests {
         p.take_note_ends(0);
         p.channel_levels(os_engine::ChannelLevels { mod_x: 0.5, ..Default::default() });
         assert!(p.mod_resend.is_empty());
+    }
+
+    /// Lemon Trio and Citrus take a note's mod X / Y (`use_note_levels`): the host finds their mod parameters, whose
+    /// ranges make a modulation amount of mod × range a normalized offset of the mod itself, and a note's mod X closes
+    /// Lemon Trio's filter (spec: plugins/lemon-3x-osc.md §6.1, plugins/citrus.md §2).
+    #[test]
+    fn lemon_trio_and_citrus_take_a_notes_mods() {
+        use os_engine::Instrument as _;
+        let linked = |entry: *const std::ffi::c_void, file: &str| {
+            let lib = unsafe { Library::from_entry(entry, Path::new(file)) }.expect("linked plugin");
+            let mut p = Plugin::new(&lib, &lib.plugins[0].id).unwrap();
+            assert!(p.activate(48000) && p.use_note_levels());
+            p
+        };
+        let trio = || linked(&lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, "Lemon Trio.clap");
+        let citrus = linked(&citrus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, "Citrus.clap");
+        let spans = |p: &Plugin| p.note_levels.map(|n| n.mods.map(|m| m.map(|(_, span)| span)));
+        assert_eq!(spans(&trio()), Some([Some(256.0), Some(256.0)]), "the cutoff and resonance knobs, 0..256");
+        assert_eq!(spans(&citrus), Some([Some(1.0), Some(1.0)]), "Mod X and Mod Y, normalized");
+        // Lemon Trio's default sines at key 60 through its fast low-pass, cutoff 256 - 0.75 × 256 = 64 (−3 dB at 46 Hz).
+        let peak = |mod_x: f32| {
+            let mut p = trio();
+            p.note_start(0, 60, 0.8, 0.0, os_engine::NoteLevels { mod_x, ..Default::default() });
+            let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
+            let mut peak = 0.0f32;
+            for _ in 0..20 {
+                p.process(48000, &mut l, &mut r);
+                peak = l.iter().fold(0.0, |m, v| m.max(v.abs()));
+            }
+            peak
+        };
+        let (open, shut) = (peak(0.0), peak(-0.75));
+        assert!(open > 0.1 && shut < open * 0.25, "{shut} {open}");
     }
 
     /// Controller outputs arrive as MIDI: a pitch bend per output channel, the CC 63 after it adding 7 finer bits; they

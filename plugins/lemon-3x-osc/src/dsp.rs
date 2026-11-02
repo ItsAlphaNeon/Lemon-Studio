@@ -517,6 +517,8 @@ struct Voice {
     tune: f64,
     /// The note's own pan (a note expression).
     pan: f32,
+    /// The note's mod X / mod Y (the host's per-note modulation of the cutoff and resonance), 1 = 256 knob steps.
+    mods: [f64; 2],
     /// The gains of the final levels per side at the end of the last span; `None` before the first.
     sides: Option<[f64; 2]>,
     /// Phase per oscillator and side (cycles, 0..1).
@@ -651,6 +653,7 @@ impl Engine {
             cut: None,
             tune: 0.0,
             pan: 0.0,
+            mods: [0.0; 2],
             sides: None,
             ph,
             filt: [Filter::default(); 2],
@@ -700,6 +703,14 @@ impl Engine {
         }
         for v in self.voices.iter_mut().filter(|v| v.key == key) {
             v.pan = pan;
+        }
+    }
+
+    /// A voice's own mod X (`k` 0) or mod Y (`k` 1), the voice its id names: added to the cutoff or resonance knob,
+    /// 256 steps per unit (spec: plugins/lemon-3x-osc.md §6.1).
+    pub fn modulate(&mut self, id: i32, k: usize, amount: f32) {
+        for v in self.voices.iter_mut().filter(|v| v.id == Some(id)) {
+            v.mods[k.min(1)] = f64::from(amount);
         }
     }
 
@@ -799,11 +810,11 @@ impl Engine {
                 let f = base * 2f64.powf(b.osc[n].semis / 12.0) / sr;
                 [f, f * 2f64.powf(b.osc[n].detune / 1200.0)]
             });
-            let co = if filter_off {
+            let co = if filter_off && v.mods == [0.0; 2] {
                 Coefs::Off
             } else {
-                let c = b.cutoff + b.targets[T_CUT].mod_at(t0, off) / 128.0 * 256.0;
-                let q = b.resonance + b.targets[T_RES].mod_at(t0, off) / 128.0 * 256.0;
+                let c = b.cutoff + v.mods[0] * 256.0 + b.targets[T_CUT].mod_at(t0, off) / 128.0 * 256.0;
+                let q = b.resonance + v.mods[1] * 256.0 + b.targets[T_RES].mod_at(t0, off) / 128.0 * 256.0;
                 coefs(b.filter, c, q, sr)
             };
             let dg = (g1 - g0) / len as f64;
@@ -1015,6 +1026,27 @@ mod tests {
             assert!((f64::from(l[i]) - f64::from(l0[i]) * g).abs() < 1e-6, "{i}");
             assert!((f64::from(l[i + CTL]) - f64::from(l0[i + CTL]) * to).abs() < 1e-6, "{i}");
         }
+    }
+
+    /// A note's mod X / Y move its own filter's cutoff and resonance, 256 knob steps per unit: the default cutoff
+    /// 256 with a mod X of -0.5 sounds as cutoff 128. Another voice's mods leave it alone.
+    #[test]
+    fn a_notes_mods_move_its_filter() {
+        let mut open = solo(SAW);
+        open.filter = 1;
+        let shut = Block { cutoff: 128.0, resonance: 64.0, ..open };
+        let play = |b: &Block, id: i32| {
+            let mut e = Engine::new(SR);
+            e.note_on(60, 100.0 / 128.0, Some(7), b);
+            e.modulate(id, 0, -0.5);
+            e.modulate(id, 1, 0.25);
+            let (mut l, mut r) = (vec![0.0; 4 * CTL], vec![0.0; 4 * CTL]);
+            e.render(&mut l, &mut r, b);
+            l
+        };
+        assert_eq!(play(&open, 7), play(&shut, 8));
+        assert_ne!(play(&open, 8), play(&shut, 8));
+        assert_eq!(play(&open, 8), play(&solo(SAW), 8), "cutoff 256 without mods: no filter");
     }
 
     #[test]

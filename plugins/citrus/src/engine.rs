@@ -301,6 +301,17 @@ impl Citrus {
         }
     }
 
+    /// A playing note's final mod X (`k` 0) or mod Y (`k` 1), read at the voices' next control block.
+    pub fn note_mod(&mut self, id: u64, k: usize, value: f32) {
+        for n in self.notes.iter_mut().filter(|n| n.id == id) {
+            for v in n.voices.iter_mut() {
+                let mut l = v.levels;
+                *[&mut l.mod_x, &mut l.mod_y][k.min(1)] = value;
+                v.set_levels(l);
+            }
+        }
+    }
+
     fn refresh(&mut self, n: usize) {
         let (vol, pan) = final_levels(self.notes[n].own, self.channel);
         for v in self.notes[n].voices.iter_mut() {
@@ -474,6 +485,22 @@ mod tests {
         note(&mut c);
         let quiet = settle(&mut c);
         assert!((quiet[0] - 0.25 * plain[0]).abs() < 1e-3, "{quiet:?}");
+    }
+
+    /// A note's mod X / Y reach every voice of the note only, and stay through a change of the channel's levels.
+    #[test]
+    fn a_notes_mods_reach_its_voices() {
+        let mut c = Citrus::new(48000);
+        c.set_state(default_patch());
+        note(&mut c);
+        note(&mut c);
+        let a = c.notes[0].id;
+        c.note_mod(a, 0, 0.25);
+        c.note_mod(a, 1, -0.5);
+        c.set_channel(0.5, 0.0);
+        let mods = |c: &Citrus, i: usize| c.notes[i].voices.iter().map(|v| (v.levels.mod_x, v.levels.mod_y)).collect::<Vec<_>>();
+        assert!(!mods(&c, 0).is_empty() && mods(&c, 0).iter().all(|&m| m == (0.25, -0.5)), "{:?}", mods(&c, 0));
+        assert!(mods(&c, 1).iter().all(|&m| m == (0.0, 0.0)), "{:?}", mods(&c, 1));
     }
 
     /// An edit is heard on the playing note; one that uses another module stops it.

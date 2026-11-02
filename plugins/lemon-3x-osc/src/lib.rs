@@ -271,6 +271,12 @@ impl Plugin for LemonTrio {
                 // plugins/lemon-3x-osc.md §6.1).
                 NoteEvent::PolyPan { note, voice_id, pan, .. } => self.engine.pan(note, voice_id, pan),
                 NoteEvent::MidiSysEx { message: Levels(volume, pan), .. } => self.engine.set_levels(volume, pan),
+                // A note's mod X / Y: the host's per-note modulation of the filter knobs, in mod units.
+                NoteEvent::PolyModulation { voice_id, poly_modulation_id, normalized_offset, .. } => match poly_modulation_id {
+                    params::MOD_X_POLY => self.engine.modulate(voice_id, 0, normalized_offset),
+                    params::MOD_Y_POLY => self.engine.modulate(voice_id, 1, normalized_offset),
+                    _ => {}
+                },
                 NoteEvent::MidiPitchBend { value, .. } => {
                     // ±2 semitones, as Lemon Sampler.
                     self.bend = f64::from(value * 2.0 - 1.0) * 200.0;

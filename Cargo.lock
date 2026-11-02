@@ -3029,7 +3029,9 @@ dependencies = [
 name = "os-clap"
 version = "0.0.1"
 dependencies = [
+ "citrus",
  "clap-sys 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lemon-3x-osc",
  "lemon-formula-controller",
  "lemon-limiter",
  "lemon-parametric-eq-2",

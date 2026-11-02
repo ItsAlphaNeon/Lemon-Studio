@@ -21,6 +21,9 @@ use os_plugkit::live::LiveEdits;
 
 /// Parameters (fields 1..=114 of the saved state).
 pub const COUNT: usize = 114;
+/// The poly modulation ids of the cutoff (a note's mod X) and the resonance (its mod Y).
+pub const MOD_X_POLY: u32 = 1;
+pub const MOD_Y_POLY: u32 = 2;
 /// Saved state size: 115 int32 fields.
 pub const STATE_LEN: usize = 460;
 /// Field 0.
@@ -274,7 +277,13 @@ impl Default for Osc3Params {
                 if d.hidden {
                     ip = ip.hide().non_automatable();
                 }
-                ip
+                // A note's mod X / Y as the host's per-note modulation of the filter knobs (spec:
+                // plugins/lemon-3x-osc.md §6.1).
+                match d.id.as_str() {
+                    "cutoff" => ip.with_poly_modulation_id(MOD_X_POLY),
+                    "resonance" => ip.with_poly_modulation_id(MOD_Y_POLY),
+                    _ => ip,
+                }
             })
             .collect();
         Osc3Params { p, defs, raw: RwLock::new(default_state()), raw_version: AtomicU64::new(0), live: Arc::default(), sample_path: RwLock::default() }
