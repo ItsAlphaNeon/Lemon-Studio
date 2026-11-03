@@ -845,7 +845,7 @@ mod win32 {
             return None;
         }
         let mut file = vec![0u16; 1024];
-        let filter: Vec<u16> = "Audio files\0*.wav;*.flac;*.ogg;*.wv;*.aif;*.aiff;*.mp3\0All files\0*.*\0\0".encode_utf16().collect();
+        let filter: Vec<u16> = "Audio files\0*.wav;*.flac;*.ogg;*.wv;*.aif;*.aiff;*.mp3;*.m4a\0All files\0*.*\0\0".encode_utf16().collect();
         let title = pw::wide("Sample for the custom shape");
         unsafe {
             let mut ofn: OPENFILENAMEW = std::mem::zeroed();
@@ -1137,7 +1137,7 @@ mod gui {
         let path = win.dialog(move || {
             rfd::FileDialog::new()
                 .set_title("Sample for the custom shape")
-                .add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3"])
+                .add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3", "m4a"])
                 .pick_file()
         });
         path.flatten().map(|p| p.to_string_lossy().into_owned())

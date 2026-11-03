@@ -2233,7 +2233,7 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
             // Starts in the folder of the channel's sample, when it has one.
             let dir = app.state.project.channels.get(r).and_then(|c| c.sample_path.as_deref()).map(crate::plugins::resolve_sample).map(std::path::PathBuf::from);
             let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Load sample", "audio", crate::dialog::Then::RackSample(r))
-                .filter("Audio", &["wav", "mp3", "flac", "ogg", "aif", "aiff"])
+                .filter("Audio", &["wav", "mp3", "flac", "ogg", "aif", "aiff", "m4a"])
                 .start(dir.as_deref().and_then(std::path::Path::parent));
             app.file_dialog(dlg);
         }
