@@ -79,6 +79,8 @@ struct State {
     /// Where overlays may go (left, top, right, bottom; device px from the editor's top-left): the app's window.
     room: [i32; 4],
     claimed: bool,
+    /// The window does not show: the editor does not paint (`Surface::set_shown`).
+    hidden: bool,
 }
 
 /// The meeting point of the app and one editor.
@@ -158,6 +160,22 @@ impl Surface {
         self.lock().room = room;
     }
 
+    /// Whether the window shows: one that does not (a tab behind another, a slid-away window) has its editor stop
+    /// painting. Its last picture stays, and what changed meanwhile paints once it shows again.
+    pub fn set_shown(&self, shown: bool) {
+        let mut st = self.lock();
+        if st.hidden == !shown {
+            return;
+        }
+        st.hidden = !shown;
+        drop(st);
+        if shown {
+            if let Some(w) = self.0.editor.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                w.wake();
+            }
+        }
+    }
+
     /// The editor is gone: no new editor claims this surface.
     pub fn withdraw(&self) {
         offers().remove(&self.0.token);
@@ -180,8 +198,10 @@ impl Window {
         Window { s, waker, mods: (false, false, false), pointer: (0, 0), next_tick: Instant::now() + TICK }
     }
 
+    /// A good moment to paint: no input waiting, and the window shows (`Surface::set_shown`).
     pub fn idle(&self) -> bool {
-        self.s.lock().inputs.is_empty()
+        let st = self.s.lock();
+        st.inputs.is_empty() && !st.hidden
     }
 
     pub fn mods(&self) -> (bool, bool, bool) {
@@ -214,7 +234,7 @@ impl Window {
             }
             let ms = (self.next_tick - now).as_millis() as i32 + 1;
             // A wake with no input waiting: a parameter changed.
-            if self.waker.wait(ms) && self.idle() {
+            if self.waker.wait(ms) && self.s.lock().inputs.is_empty() {
                 return if self.waker.quitting() { None } else { Some(Input::Tick) };
             }
         }
@@ -559,6 +579,33 @@ mod tests {
         let woken = Arc::new(AtomicUsize::new(0));
         let w = woken.clone();
         (offer(size, move || drop(w.fetch_add(1, Ordering::Relaxed))), woken)
+    }
+
+    /// A window that does not show tells its editor not to paint, input or none, and it may again once it shows.
+    #[test]
+    fn a_hidden_window_does_not_paint() {
+        let (s, _) = editor((40, 30));
+        let slot = crate::x11::Slot::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let t = crate::x11::spawn(s.token(), (40, 30), &slot, move |win| {
+            // The editor's own test before it paints.
+            while wait.recv().is_ok() {
+                tx.send(win.idle()).unwrap();
+            }
+        })
+        .unwrap();
+        let ask = || {
+            go.send(()).unwrap();
+            rx.recv().unwrap()
+        };
+        assert!(ask(), "shown");
+        s.set_shown(false);
+        assert!(!ask(), "hidden");
+        s.set_shown(true);
+        assert!(ask(), "shown again");
+        drop(go);
+        drop(t);
     }
 
     /// The editor claims what the app offered; its frames and size reach the app, the app's input reaches it.

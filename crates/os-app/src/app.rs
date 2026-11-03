@@ -3319,6 +3319,8 @@ impl App {
             }
         }
         for (&row, f) in &frames {
+            // A tab behind another and a window slid away do not paint.
+            f.set_shown(!self.state.plugin_tabs.hidden(row) && !self.state.float_layer.keeps(row));
             f.sync(k, canvas, self.canvas_off, work, &self.theme.colors);
             let now = (f.serial(), f.rect(), f.overlays_rect());
             if seen.get(&row) != Some(&now) {

@@ -333,6 +333,11 @@ impl EmbedFrame {
         }
     }
 
+    /// Whether the window shows: its editor paints only then (`Surface::set_shown`).
+    pub fn set_shown(&self, shown: bool) {
+        self.0.borrow().surface.set_shown(shown);
+    }
+
     /// A row of tabs under the title, or none (`crate::plugin_tabs`).
     pub fn set_tabs(&self, on: bool) {
         let mut i = self.0.borrow_mut();
