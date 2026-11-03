@@ -575,6 +575,29 @@ impl App {
                     self.state.message = msg;
                 }
             }
+            // The container (Lemon Studio's Patcher): Shift+dropped on a slot or channel it wraps the plugin there, as
+            // the menus' Wrap in container; dropped without Shift it goes there as an effect or a generator would
+            // (spec: plugins/patcher/README.md §3.3 "Shift+drop").
+            Item::Container => {
+                let shift = self.shift;
+                let msg = if win == Some(Win::Mixer) {
+                    let slot = match self.top_hit(x, y).map(|h| &h.action) {
+                        Some(Action::Mix(crate::mixer::MHit::SlotName(k) | crate::mixer::MHit::SlotArrow(k))) => Some(*k),
+                        _ => None,
+                    };
+                    self.drop_container_on_slot(slot, shift)
+                } else if win == Some(Win::ChannelRack) {
+                    let row = crate::views::rack::row_at(&self.state, y);
+                    self.drop_container_on_rack(row, shift)
+                } else if spot.is_some() {
+                    self.drop_container_on_rack(None, false)
+                } else {
+                    None
+                };
+                if let Some(m) = msg {
+                    self.state.message = Some(m);
+                }
+            }
             Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) => {}
         }
     }
@@ -992,7 +1015,7 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
             let it = PItem::new("Load into selected channel", Cmd::Preset(crate::presets::PCmd::Load(key, p.into())));
             items.push(if s.hosted_rows.contains(&key) { it } else { it.off() });
         }
-        Item::None | Item::File(_) | Item::Param(..) => {}
+        Item::None | Item::File(_) | Item::Param(..) | Item::Container => {}
     }
     if let Some(path) = &row.path {
         sep(&mut items);
@@ -1348,6 +1371,8 @@ mod tests {
         let at = |depth: u8| rows.iter().filter(|r| r.depth == depth).map(|r| r.label.as_str()).collect::<Vec<_>>();
         assert_eq!(at(1), ["Generators", "Effects", view::INSTALLED]);
         assert!(at(2).starts_with(&["Sampler", "Synth"]), "{:?}", at(2));
+        // The container after the categories (spec: plugins/patcher/README.md §3.3 "Shift+drop").
+        assert!(rows.iter().any(|r| r.depth == 2 && r.item == view::Item::Container && r.label == crate::container::CONTAINER));
         assert!(at(3).contains(&view::BUILT_IN));
         app.state.browser_open.insert(format!("{root}/{}/Generators/{}", view::INSTALLED, view::BUILT_IN));
         let built_in: Vec<String> = view::rows(&app.state).into_iter().filter(|r| r.depth == 4).map(|r| r.label).collect();

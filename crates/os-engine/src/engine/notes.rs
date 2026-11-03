@@ -146,11 +146,13 @@ pub(super) struct Event {
     pub porta: bool,
     /// An audio clip's voice (its start, its end): the engine's name for it (`Instrument::voice_start`).
     pub voice: Option<u32>,
+    /// The note's colour group (0..=15): a slide note moves only the voices of its colour.
+    pub colour: u8,
 }
 
 impl Event {
     pub fn on(ch: usize, off: u32, key: u8, vel: f32) -> Event {
-        Event { ch, off, key, vel, start: 0.0, end: 0.0, fine: 0.0, long: true, glide: 0, levels: crate::NoteLevels::default(), cuts: None, layer: None, porta: false, voice: None }
+        Event { ch, off, key, vel, start: 0.0, end: 0.0, fine: 0.0, long: true, glide: 0, levels: crate::NoteLevels::default(), cuts: None, layer: None, porta: false, voice: None, colour: 0 }
     }
     /// A layer note's own cut group (spec: audio/note-rules.md "Layer channels": it acts before the note is handed on).
     pub fn cut(ch: usize, off: u32, group: u32) -> Event {
@@ -194,6 +196,8 @@ struct Voice {
     layer: Option<usize>,
     /// An audio clip's voice: the engine's name for it.
     voice: Option<u32>,
+    /// Its note's colour group.
+    colour: u8,
 }
 
 /// A glide of the tuning of instrument key `key` (spec "Glides": `n + 1` equal steps, the first on the tick it
@@ -217,8 +221,9 @@ pub(super) struct Voices {
     /// instrument key and its own note's key).
     list: Vec<u8>,
     sounding: Option<(u8, u8)>,
-    /// Portamento's last levels: the key of the last note that started, or the target of the last glide.
-    last: Option<f32>,
+    /// Portamento's last levels per colour group: the key of the last note of that colour that started, or the target
+    /// of its last glide (spec: audio/note-rules.md "State and timing").
+    last: [Option<f32>; 16],
     glides: Vec<Glide>,
     /// Ticks done.
     tick: u64,
@@ -228,6 +233,16 @@ impl Voices {
     /// Instrument keys of the voices whose notes have not ended (they get a note off when the engine goes away).
     pub fn held_keys(&self) -> impl Iterator<Item = u8> + '_ {
         self.pool.iter().filter(|v| v.state == State::Held).map(|v| v.sent)
+    }
+
+    /// The keys whose note offs end every note that has not ended: the held voices' keys and a mono channel's
+    /// listed notes (an off for a key with nothing left to end does nothing). Audio clips' voices are left out: they
+    /// end with a choke of their own.
+    pub fn ending_keys(&self) -> Vec<u8> {
+        let held = self.pool.iter().filter(|v| v.state == State::Held && v.voice.is_none()).map(|v| v.sent);
+        let mut keys: Vec<u8> = self.list.iter().copied().chain(held).collect();
+        keys.sort_unstable();
+        keys
     }
 
     /// Current tuning of instrument key `key`.
@@ -378,31 +393,36 @@ fn cut(group: u32, voices: &mut [Voices], rules: &[Rules], off: u32, out: &mut V
 /// channel not in its closing fade, released ones and ones started on this tick too, glides by `key - the pitch of the
 /// highest held voice` in `len + 1` steps, replacing a glide under way from where it is. A one-shot voice counts as held
 /// while it sounds; on a mono channel the notes that only wait count too. Without a held voice nothing moves. The
-/// slide's key becomes the last levels for portamento. (The note's colour, velocity, pan and mod X / Y are not used
+/// slide's key becomes the last levels of its colour for portamento. Only the voices of the slide note's colour move
+/// and count (spec "Slide notes": "only voices of the slide note's colour do"); the tuning is the instrument key's, so
+/// a voice of another colour on the same key moves with them. (The note's velocity, pan and mod X / Y are not used
 /// here: instruments take the pitch only.) A layer's slide note moves only the voices its notes started; a slide note
 /// of the channel's own only the others (spec "Layer channels").
 fn slide(v: &mut Voices, r: &Rules, e: &Event) {
-    let held = |p: &Voice| p.layer == e.layer && (p.state == State::Held || (r.one_shot && p.state == State::Released));
+    let mine = |p: &Voice| p.layer == e.layer && p.colour == e.colour;
+    let held = |p: &Voice| mine(p) && (p.state == State::Held || (r.one_shot && p.state == State::Released));
     let mut top: Option<f32> = None;
     for p in v.pool.iter().filter(|p| held(p)) {
         let pitch = f32::from(p.sent) + v.tuning(p.sent);
         top = Some(top.map_or(pitch, |t| t.max(pitch)));
     }
-    if r.mono {
+    // The mono notes that only wait, when the sounding voice is of the slide's colour.
+    let sounding = v.sounding.is_some_and(|(sent, _)| v.pool.iter().any(|p| p.sent == sent && mine(p)));
+    if r.mono && sounding {
         for &k in &v.list {
             top = Some(top.map_or(f32::from(k), |t| t.max(f32::from(k))));
         }
     }
     let Some(top) = top else { return };
     let by = f32::from(e.key) - top;
-    let mut keys: Vec<u8> = v.pool.iter().filter(|p| p.state != State::Closing && p.layer == e.layer).map(|p| p.sent).collect();
+    let mut keys: Vec<u8> = v.pool.iter().filter(|p| p.state != State::Closing && mine(p)).map(|p| p.sent).collect();
     keys.sort_unstable();
     keys.dedup();
     for k in keys {
         let to = v.tuning(k) + by;
         v.glide(k, to, e.glide, e.off);
     }
-    v.last = Some(f32::from(e.key));
+    v.last[usize::from(e.colour & 0x0F)] = Some(f32::from(e.key));
 }
 
 /// An audio clip's end: its voice closes (the one the event names; another clip's voice on the key plays on).
@@ -438,7 +458,8 @@ fn note_end(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, Not
                 }
                 let to = f32::from(newest) - f32::from(sent);
                 v.glide(sent, to, r.glide, e.off);
-                v.last = Some(f32::from(newest));
+                let colour = v.pool.iter().find(|p| p.sent == sent).map_or(0, |p| p.colour);
+                v.last[usize::from(colour & 0x0F)] = Some(f32::from(newest));
             }
         }
         return;
@@ -477,7 +498,7 @@ fn note_start(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, N
             // The note only waits for its end; the sounding voice glides to it.
             if let Some((sent, _)) = v.sounding {
                 v.glide(sent, f32::from(key) - f32::from(sent), r.glide, e.off);
-                v.last = Some(f32::from(key));
+                v.last[usize::from(e.colour & 0x0F)] = Some(f32::from(key));
             }
             return;
         }
@@ -526,12 +547,13 @@ fn note_start(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, N
     // A retriggered key: its old tuning ends with it.
     v.glides.retain(|g| g.key != key);
     out.push((e.ch, e.off, Note::On { key, vel: e.vel, start: e.start, end: e.end, fine: e.fine, levels: e.levels, voice: e.voice }));
-    v.pool.push(Voice { sent: key, born: v.tick, group, state: State::Held, left, layer: e.layer, voice: e.voice });
+    v.pool.push(Voice { sent: key, born: v.tick, group, state: State::Held, left, layer: e.layer, voice: e.voice, colour: e.colour });
     if r.mono {
         v.sounding = Some((key, key));
     }
-    // Portamento: the voice starts at the last levels and glides to its own.
-    match v.last {
+    // Portamento: the voice starts at the last levels of its colour and glides to its own.
+    let colour = usize::from(e.colour & 0x0F);
+    match v.last[colour] {
         // The channel's setting and the note's own switch differ (spec: audio/note-rules.md "Portamento").
         Some(last) if r.porta != e.porta && r.glide >= 1 && last != f32::from(key) => {
             let from = last - f32::from(key);
@@ -539,7 +561,7 @@ fn note_start(v: &mut Voices, r: &Rules, e: &Event, out: &mut Vec<(usize, u32, N
         }
         _ => {}
     }
-    v.last = Some(f32::from(key));
+    v.last[colour] = Some(f32::from(key));
 }
 
 #[cfg(test)]
@@ -836,7 +858,7 @@ mod tests {
         let out = tick(&r, &mut v, &[Event::slide(0, 0, 62, 0)], 100);
         assert_eq!(out, vec![(0, 0, Note::Tune(60, 2.0)), (0, 0, Note::Tune(64, 2.0))]);
         // The slide's key is the last level: a portamento note glides from it.
-        assert_eq!(v[0].last, Some(62.0));
+        assert_eq!(v[0].last[0], Some(62.0));
         // Without a held voice nothing moves.
         tick(&r, &mut v, &[Event::off(0, 0, 60)], 100);
         assert!(tick(&r, &mut v, &[Event::slide(0, 0, 72, 0)], 100).is_empty());
@@ -846,5 +868,26 @@ mod tests {
         tick(&r, &mut v, &[Event::on(0, 0, 60, 0.8)], 100);
         tick(&r, &mut v, &[Event::off(0, 0, 60)], 100);
         assert_eq!(tick(&r, &mut v, &[Event::slide(0, 0, 65, 0)], 100), vec![(0, 0, Note::Tune(60, 5.0))]);
+    }
+
+    // spec: audio/song-structure.md "Slide notes" (only voices of the slide note's colour move), audio/note-rules.md
+    // "State and timing" (the last levels per colour)
+    #[test]
+    fn slide_notes_move_only_the_voices_of_their_colour() {
+        let r = [sampler()];
+        let mut v = vec![Voices::default()];
+        let coloured = |key: u8, colour: u8| Event { colour, ..Event::on(0, 0, key, 0.8) };
+        tick(&r, &mut v, &[coloured(60, 0), coloured(64, 3)], 100);
+        // Colour 3's slide measures from 64 alone and moves 64 alone.
+        let out = tick(&r, &mut v, &[Event { colour: 3, ..Event::slide(0, 0, 66, 0) }], 100);
+        assert_eq!(out, vec![(0, 0, Note::Tune(64, 2.0))]);
+        assert_eq!((v[0].last[3], v[0].last[0]), (Some(66.0), Some(60.0)));
+        // A slide of a colour no voice has moves nothing.
+        assert!(tick(&r, &mut v, &[Event { colour: 5, ..Event::slide(0, 0, 70, 0) }], 100).is_empty());
+        // Portamento starts from the last levels of the note's own colour: from 66, 4 semitones over 2 steps, the
+        // first at once (from colour 0's 60 it would be -1).
+        let r = [Rules { porta: true, glide: 1, ..sampler() }];
+        let out = tick(&r, &mut v, &[coloured(62, 3)], 100);
+        assert_eq!(out, vec![(0, 0, on(62)), (0, 0, Note::Tune(62, 2.0))]);
     }
 }

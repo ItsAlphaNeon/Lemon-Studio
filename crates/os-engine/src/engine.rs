@@ -108,8 +108,10 @@ struct Trigger {
     buf: u16,
     /// An audio clip's fades, gain and late-start declick (`None` = plays as it is).
     shape: Option<ClipShape>,
-    /// A slide note: no sound of its own, it glides the channel's voices.
+    /// A slide note: no sound of its own, it glides the channel's voices of its colour.
     slide: bool,
+    /// The note's colour group (0..=15).
+    colour: u8,
     /// The note's own portamento switch (spec: audio/note-rules.md, "A note's own portamento switch").
     porta: bool,
     /// A note a layer handed on: the layer and the child's crossfade gain.
@@ -516,9 +518,14 @@ impl ChannelState {
     }
 
     /// The channel's levels for a hosted instrument.
+    ///
+    /// A control point or automation value is handed on whole from its tick: the instrument takes it into its voices'
+    /// gain ramp, one limited ramp per tick (spec: audio/sampler.md "Gains"); the engine's glide is its own voices'
+    /// and its output gain's.
     fn levels(&self) -> crate::instrument::ChannelLevels {
         let (mod_x, mod_y) = self.adjust.mods();
-        crate::instrument::ChannelLevels { volume: self.volume as f32, pan: self.pan_of(self.pan) as f32, mod_x, mod_y }
+        let (v, p) = self.ramp.map_or((self.vol_v, self.pan), |r| (r.v1, r.p1));
+        crate::instrument::ChannelLevels { volume: self.vol_gain(v) as f32, pan: self.pan_of(p) as f32, mod_x, mod_y }
     }
 
     /// A value for one of the channel's filter knobs or level adjustments from an automation clip (`v` 0..1, spec:
@@ -694,6 +701,8 @@ struct Voice {
     /// Its note's key, and where slide notes have moved it.
     key: u16,
     slide: VoiceSlide,
+    /// Its note's colour group: slide notes of that colour move it.
+    colour: u8,
     /// The layer its note came through.
     via: Option<Via>,
 }
@@ -1554,6 +1563,7 @@ impl Engine {
                         }
                     }),
                     slide: n.slide,
+                    colour: n.colour,
                     porta: n.porta,
                     via: None,
                     cuts: None,
@@ -2144,6 +2154,7 @@ impl Engine {
             buf,
             key,
             slide: VoiceSlide::new(step, velocity, pan),
+            colour: 0,
             via: None,
         });
         self.sounding.push((channel, key, u64::MAX));
@@ -3290,13 +3301,19 @@ impl Engine {
                 i += 1;
             }
         }
+        // Steps (length 0) have no end of their own: with the notes whose offs are pending, every note an instrument
+        // still holds is released with the song (spec: audio/song-structure.md "A note").
+        if song_end {
+            for (c, v) in self.note_voices.iter().enumerate() {
+                self.inst_events.extend(v.ending_keys().into_iter().map(|key| notes::Event::off(c, 0, key)));
+            }
+        }
         self.sounding.retain(|&(_, _, end)| end == u64::MAX || (end > tick && !song_end));
     }
 
     /// Triggers the notes that start on `tick`.
     fn start_notes(&mut self, tick: u64) {
-        // A plain step lights its key for one step (instrument channels: it ends after one step, a Lemon Studio choice
-        // for hosted plugins, which have no song-length release).
+        // A plain step lights its key for one step; it sounds on until the song's end (`release_notes`).
         let step = u64::from(self.ppq / 4).max(1);
         for t in std::mem::take(&mut self.late) {
             if t.tick != tick {
@@ -3350,17 +3367,18 @@ impl Engine {
             for (i, &c) in layer.children.iter().enumerate() {
                 let hosted = self.channels.get(c).is_some_and(|ch| ch.plugin && ch.instrument.0.is_some());
                 if hosted && !layer.children[..i].contains(&c) {
-                    self.inst_events.push(notes::Event { layer: Some(t.channel), ..notes::Event::slide(c, 0, key, n) });
+                    let slide = notes::Event::slide(c, 0, key, n);
+                    self.inst_events.push(notes::Event { layer: Some(t.channel), colour: t.colour, ..slide });
                 }
             }
         } else if self.channels[t.channel].plugin {
             if self.channels[t.channel].instrument.0.is_some() {
-                self.inst_events.push(notes::Event::slide(t.channel, 0, key, n));
+                self.inst_events.push(notes::Event { colour: t.colour, ..notes::Event::slide(t.channel, 0, key, n) });
             }
             return;
         }
         let own = |v: &Voice| if is_layer { v.via.is_some_and(|w| w.layer == t.channel) } else { v.channel == t.channel && v.via.is_none() };
-        let moves = |v: &Voice| own(v) && v.cut.is_none() && v.release.is_none();
+        let moves = |v: &Voice| own(v) && v.colour == t.colour && v.cut.is_none() && v.release.is_none();
         let top = self.voices.iter().filter(|v| moves(v) && v.off.is_none()).map(|v| f32::from(v.key) * 100.0 + v.slide.cents).reduce(f32::max);
         let Some(top) = top else { return };
         let by = f32::from(t.key) * 100.0 - top;
@@ -3433,6 +3451,7 @@ impl Engine {
                     layer: t.via.map(|w| w.layer),
                     porta: t.porta,
                     voice,
+                    colour: t.colour,
                 });
                 if let (Some(shape), Some(voice)) = (t.shape, voice) {
                     self.inst_shapes.push(InstClip { channel: t.channel, voice, shape, age: 0, sent: None });
@@ -3449,7 +3468,12 @@ impl Engine {
                         self.inst_offs.push((if song { self.end_tick } else { u64::MAX }, t.channel, k, voice));
                     }
                     Some(c) => self.inst_offs.push((c, t.channel, k, voice)),
-                    None => self.inst_offs.push((t.end.unwrap_or(t.tick + step), t.channel, k, None)),
+                    // A step has no end of its own: released with the song (`release_notes`).
+                    None => {
+                        if let Some(end) = t.end {
+                            self.inst_offs.push((end, t.channel, k, None));
+                        }
+                    }
                 }
             }
             return;
@@ -3478,6 +3502,7 @@ impl Engine {
             buf: t.buf,
             key: t.key,
             slide: VoiceSlide::new(t.rate, t.velocity, t.pan),
+            colour: t.colour,
             via: t.via,
         });
     }
@@ -4745,6 +4770,8 @@ struct Sched {
     clip: Option<ClipFx>,
     /// A slide note.
     slide: bool,
+    /// The note's colour group.
+    colour: u8,
     /// The note's own portamento switch.
     porta: bool,
     /// A note the main swing can move.
@@ -4768,6 +4795,7 @@ impl Sched {
             to_s: None,
             clip: None,
             slide: n.slide(),
+            colour: n.colour(),
             porta: n.porta(),
             swing: None,
         }
@@ -5083,7 +5111,7 @@ fn schedule(project: &Project, mode: PlayMode, report: &mut EngineReport) -> (Ve
                         Some(ChannelKind::AudioClip | ChannelKind::Sampler) => {
                             let from_s = c.window.map_or(0.0, |w| w.0.max(0.0) / 1000.0);
                             let to_s = c.window.filter(|w| w.0 >= 0.0 && w.1 >= 0.0).map(|w| w.1 / 1000.0);
-                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, to_s, clip: ClipFx::of(c, fx), slide: false, porta: false, swing: None });
+                            out.push(Sched { tick: start, channel: usize::from(ch), key: 60, fine: 120, velocity: 100, pan: 64, mod_x: 128, mod_y: 128, cut: Some(start + len), len, from_s, to_s, clip: ClipFx::of(c, fx), slide: false, colour: 0, porta: false, swing: None });
                         }
                         Some(ChannelKind::Automation) => {}
                         _ => report.automation_clips_ignored += 1,
@@ -5304,6 +5332,25 @@ mod tests {
         assert_eq!(ons[1], laws::tick_to_frame(48.0, 96, 130.0, 48000), "{ons:?}");
     }
 
+    // spec: audio/song-structure.md "A note": a step has no end of its own and is released with the song.
+    #[test]
+    fn a_step_on_an_instrument_is_released_with_the_song() {
+        use os_model::{Clip, ClipSource};
+        let mut p = song(vec![Note::step(0, 0), long_note(96, 48, 0)], vec![Clip::new(0, 384, 0, ClipSource::Pattern(1))]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Song);
+        let probe = Arc::new(std::sync::Mutex::new(Probe { log: vec![], held: vec![], at: 0 }));
+        e.set_instrument(0, probe.clone());
+        let end = e.end_tick();
+        e.render_all(512);
+        drop(e);
+        let at = |t: u64| laws::tick_to_frame(t as f64, 96, 130.0, 48000);
+        let offs: Vec<(u64, u8)> = probe.lock().unwrap().log.iter().filter(|l| !l.1).map(|l| (l.0, l.2)).collect();
+        // The long note ends at its end; the step only on the song's last tick, not after a sixteenth.
+        assert_eq!(offs, vec![(at(144), 60), (at(end - 1), 60)], "song end at tick {end}");
+    }
+
     /// Truncate swing notes: a swung note with a length keeps its end; without it the whole note moves (spec:
     /// audio/swing.md).
     #[test]
@@ -5457,6 +5504,30 @@ mod tests {
         let mut ch = Engine::new(&p, &mut lib, 48000, PlayMode::Song).channels.remove(0);
         ch.apply(target::CHANNEL_RESONANCE, 64, 48000);
         assert_eq!(ch.levels().mod_y, -0.25);
+    }
+
+    // spec: audio/sampler.md "Gains": a control point's change reaches the voices as one gain ramp per tick, limited by
+    // the instrument, not over a fixed glide time.
+    #[test]
+    fn instruments_get_a_control_points_value_on_its_tick() {
+        let mut p = project(vec![long_note(0, 384, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        p.patterns[0].controls = vec![ControlPoint::new(24, 0, ControlPoint::VOLUME, 3200), ControlPoint::new(48, 0, ControlPoint::PAN, 9600)];
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let probe = Arc::new(Mutex::new(LevelProbe(vec![])));
+        e.set_instrument(0, probe.clone());
+        while e.tick <= 60 {
+            e.next_tick();
+        }
+        let levels = probe.lock().unwrap().0.clone();
+        let ch = &e.channels[0];
+        let quarter = (laws::channel_gain(0.25) * f64::from(ch.adjust.mult)) as f32;
+        let vols: Vec<f32> = levels.iter().map(|l| l.volume).collect();
+        let pans: Vec<f32> = levels.iter().map(|l| l.pan).collect();
+        assert_eq!(vols.iter().filter(|&&v| v != vols[0]).collect::<Vec<_>>(), vec![&quarter; 2], "no value on the way");
+        assert_eq!(pans.iter().filter(|&&p| p != pans[0]).count(), 1, "{pans:?}");
+        assert_eq!(*pans.last().unwrap(), ch.pan_of(0.5) as f32);
     }
 
     /// spec: audio/implementing.md "Playing live": an instrument the UI thread holds for a moment is waited for, so it
@@ -5737,6 +5808,11 @@ mod tests {
         // Without a sounding voice a slide note does nothing and is not heard.
         let quiet = project(vec![slide(0, 96, 72, 100)], vec![]);
         assert_eq!(peak(&render(&quiet), 0), 0.0);
+        // Only the voices of the slide note's colour move: one of colour 2 leaves a voice of colour 0 where it is.
+        let other = Note { group: 2, ..slide(96, 0, 72, 50) };
+        let p = project(vec![long_note(0, 384, 0), other], vec![]);
+        let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+        assert_eq!(after(&mut e, 95), after(&mut e, 120), "another colour's slide moves nothing");
     }
 
     #[test]

@@ -19,6 +19,7 @@ mod container;
 mod error;
 mod event;
 pub mod lemon;
+pub mod patcher;
 pub mod project;
 pub mod wrapper;
 
