@@ -137,7 +137,7 @@ fn paint_one(ui: &mut Ui, s: &State, e: &EventsUi, front: bool) {
     let hov = if front {
         ui.hit(win, Action::Swallow, "");
         ui.hit(at(1.0, 1.0, SIZE.0 - 2.0, 29.0), Action::WinDrag(Win::Events), "");
-        ui.hit(close.outset(3.0), Action::CloseWin(Win::Events), "Close")
+        super::close_button(ui, close.outset(3.0), close.outset(3.0), Action::CloseWin(Win::Events), "Close")
     } else {
         ui.hit(win, Action::Events(EvAct::Front), "Event editor: click to bring it in front");
         false

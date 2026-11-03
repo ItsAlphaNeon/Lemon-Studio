@@ -44,7 +44,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     icons::draw(ui.c, Icon::Plug, Rect::new(win.x + 9.0, win.y + 7.0, 15.0, 15.0), t.glyph);
     ui.c.text_clip(Font::new(17), win.x + 30.0, win.y + 5.0, win.w - 60.0, t.text, &name);
     let close = Rect::new(win.right() - 22.0, win.y + 6.0, 16.0, 16.0);
-    let hov = ui.hit(close, Action::CloseWin(Win::Plugin), "Close");
+    let hov = super::close_button(ui, close, close, Action::CloseWin(Win::Plugin), "Close");
     icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
 
     let body = Rect::span(win.x + 5.0, win.right() - 6.0, win.y + 30.0, win.bottom() - 6.0);

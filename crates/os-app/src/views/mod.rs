@@ -364,7 +364,7 @@ pub fn resize_zones(ui: &mut Ui, s: &State, win: Win, r: Rect) {
 
 /// Minimize / maximize / close buttons from `x0` at the title bar of a window at top `y`.
 pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _hover: Color) {
-    let mut hovered = None;
+    let (mut hovered, mut down) = (None, None);
     for (i, (hint, action)) in [
         ("Minimize window", Action::MinWin(win)),
         ("Maximize / restore window", Action::MaxWin(win)),
@@ -373,11 +373,24 @@ pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _h
     .into_iter()
     .enumerate()
     {
-        if ui.hit(Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0), action, hint) {
+        let b = Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0);
+        if ui.down(b, &action) {
+            down = Some(i);
+        }
+        if ui.hit(b, action, hint) {
             hovered = Some(i);
         }
     }
-    kit::window_buttons(ui.c, ui.t, x0, y, hovered);
+    kit::window_buttons(ui.c, ui.t, x0, y, hovered, down);
+}
+
+/// A window's own close ✕ in its title bar: the hit on `hit`, then the hover / pressed back of every title bar button
+/// on `back` (`kit::title_button_back`), under the glyph the caller draws. Whether the mouse is over it.
+pub fn close_button(ui: &mut Ui, hit: Rect, back: Rect, action: Action, hint: &'static str) -> bool {
+    let down = ui.down(hit, &action);
+    let hov = ui.hit(hit, action, hint);
+    kit::title_button_back(ui.c, ui.t, back, true, hov, down);
+    hov || down
 }
 
 /// Window frame with a title bar (§5); the bar drags the window. `buttons` = draw the window

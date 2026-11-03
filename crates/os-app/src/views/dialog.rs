@@ -90,11 +90,8 @@ pub(super) fn frame(ui: &mut Ui, r: Rect, title: &str) {
     ui.c.text_clip(f, r.x + if lemon { 11.0 } else { 7.0 }, (r.y + 1.0 + (CAP_H - lh) / 2.0).round(), r.w - 40.0, t.text, title);
     hit(ui, Rect::new(r.x, r.y, r.w - 30.0, CAP_H), DHit::Caption, "Drag to move");
     let x = Rect::new(r.right() - 26.0, r.y + 3.0, 21.0, 21.0);
-    let hov = hit(ui, x, DHit::Close, "Close (Esc)");
-    if hov && lemon {
-        lk::window_button_hover(ui.c, t, x, true);
-    }
-    ui.c.icon(&tabler::X, x.inset(5.0), if hov { t.glyph } else { t.text_dim });
+    let hov = super::close_button(ui, x, x, Action::Dlg(DHit::Close), "Close (Esc)");
+    ui.c.icon(&tabler::X, x.inset(5.0), if hov { t.tx(0xffffff) } else { t.text_dim });
 }
 
 /// A body panel: square with darker lines along its top and bottom (Classic), an outlined rounded panel (Lemon).

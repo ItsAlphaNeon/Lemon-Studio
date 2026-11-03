@@ -691,7 +691,7 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
         }
     }
     let close = Rect::new(r - 22.0, y + 6.0, 16.0, 16.0);
-    let hov = ui.hit(close, Action::CloseWin(Win::ChannelRack), "Close");
+    let hov = super::close_button(ui, close, close, Action::CloseWin(Win::ChannelRack), "Close");
     icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
 }
 
@@ -902,7 +902,7 @@ pub fn paint_fill(ui: &mut Ui, s: &State) {
     ui.c.fill_rect(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, 26.0), t.window_title_hi.shade(-0.05));
     ui.c.text(Font::new(15), r.x + 10.0, r.y + 5.0, t.text, "Advanced fill");
     let close = Rect::new(r.right() - 22.0, r.y + 6.0, 16.0, 16.0);
-    let hov = ui.hit(close, Action::RackFill(FillHit::Close), "Close");
+    let hov = super::close_button(ui, close, close, Action::RackFill(FillHit::Close), "Close");
     icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
     // Preview row: the channel.
     let name = s.project.channels.get(fd.row).map(|c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1))).unwrap_or_default();
