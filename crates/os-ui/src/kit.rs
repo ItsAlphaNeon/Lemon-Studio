@@ -597,20 +597,24 @@ mod tests {
 
     /// Every title bar button shows the mouse over it and a press on it (feedback 2026-10-17: the Settings window's
     /// close button did not change on hover): nothing at rest, a fill on hover, a darker one held down; in both looks.
+    /// Painted over an opaque title bar, as in a window (the blends assume an opaque canvas).
     #[test]
     fn title_buttons_show_hover_and_press() {
+        let bar = Color::rgb(0x202020);
         for t in [Palette::default(), os_theme::design::palette(os_theme::Design::Lemon, None)] {
             let paint = |close: bool, hover: bool, down: bool| {
                 let mut c = Canvas::new(20, 20, 1.0).unwrap();
+                c.clear(bar);
                 title_button_back(&mut c, &t, Rect::new(0.0, 0.0, 20.0, 20.0), close, hover, down);
                 let p = c.pixmap.pixel(10, 10).unwrap();
-                (p.red() as i32 + p.green() as i32 + p.blue() as i32, p.alpha())
+                [p.red(), p.green(), p.blue()]
             };
+            let sum = |p: [u8; 3]| p.iter().map(|&v| i32::from(v)).sum::<i32>();
             for close in [false, true] {
                 let (rest, hover, down) = (paint(close, false, false), paint(close, true, false), paint(close, true, true));
-                assert_eq!(rest.1, 0, "nothing at rest");
-                assert!(hover.1 > 0, "a fill on hover (close {close})");
-                assert!(down.0 < hover.0, "darker held down (close {close}): {down:?} vs {hover:?}");
+                assert_eq!(rest, [0x20; 3], "nothing at rest");
+                assert_ne!(hover, rest, "a fill on hover (close {close})");
+                assert!(sum(down) < sum(hover), "darker held down (close {close}): {down:?} vs {hover:?}");
             }
         }
     }
