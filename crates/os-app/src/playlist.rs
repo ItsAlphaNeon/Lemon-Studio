@@ -5302,6 +5302,9 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         return true;
     }
     let cmd = match key {
+        // Shift+4 and Shift+5 by the key, whatever the layout types with it (a Turkish Shift+4 is "+").
+        _ if shift && !ctrl && !alt && app.shift_digit(key, 4) => Cmd::ZoomAll,
+        _ if shift && !ctrl && !alt && app.shift_digit(key, 5) => Cmd::ZoomSelection,
         Key::Character(c) if ctrl && alt && c.eq_ignore_ascii_case("c") => Cmd::Consolidate,
         Key::Character(c) if ctrl && shift && c.eq_ignore_ascii_case("c") => Cmd::MakeUnique,
         // Performance mode, also with Shift (spec: ui/playlist.md, ui/performance-mode.md §1).
@@ -5320,8 +5323,6 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("z") => Cmd::ZoomSelection,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("m") => Cmd::StretchMode,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("i") => Cmd::InvertSelection,
-        Key::Character(c) if shift && !ctrl && !alt && (c == "4" || c == "$") => Cmd::ZoomAll,
-        Key::Character(c) if shift && !ctrl && !alt && (c == "5" || c == "%") => Cmd::ZoomSelection,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("g") => Cmd::GroupClips,
         Key::Character(c) if alt && !ctrl && (c.eq_ignore_ascii_case("g") || c.eq_ignore_ascii_case("u")) => Cmd::UngroupClips,
         Key::Named(NamedKey::End) if !ctrl && !alt => Cmd::ZoomSelection,

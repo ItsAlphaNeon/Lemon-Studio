@@ -827,7 +827,7 @@ impl App {
             Key::Named(NamedKey::ArrowRight) if ctrl && !alt => EvCmd::SelectNext,
             Key::Named(NamedKey::PageUp) if !ctrl && !alt => EvCmd::ZoomIn,
             Key::Named(NamedKey::PageDown) if !ctrl && !alt => EvCmd::ZoomOut,
-            Key::Character(c) if shift && !ctrl && !alt && (c == "5" || c == "%") => EvCmd::ZoomSelection,
+            _ if shift && !ctrl && !alt && self.shift_digit(key, 5) => EvCmd::ZoomSelection,
             Key::Named(NamedKey::Delete) if !ctrl && !alt => EvCmd::Delete,
             Key::Named(NamedKey::Delete) if ctrl && !alt => EvCmd::DeleteSpace,
             Key::Named(NamedKey::Insert) if ctrl && !alt => EvCmd::InsertSpace,

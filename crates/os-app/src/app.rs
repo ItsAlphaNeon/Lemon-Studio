@@ -1384,6 +1384,9 @@ pub struct App {
     pub rshift: bool,
     /// The key now passed to [`App::key`] is an auto-repeat of a held key (spec: ui/piano-keys.md §4 rule 1).
     pub repeat: bool,
+    /// The physical key behind the key now passed to [`App::key`], when known: shortcuts named by a digit key (Shift+4,
+    /// Shift+5) go by the key, not by the character the layout gives it with Shift.
+    pub code: Option<winit::keyboard::KeyCode>,
     /// Playlist regions from the last paint (grid, ruler, marker lane).
     pl_grid: Option<Rect>,
     /// Playlist scrolls since the last paint: how far the content moved (logical px, right and down), see
@@ -1623,6 +1626,7 @@ impl App {
             alt: false,
             rshift: false,
             repeat: false,
+            code: None,
             pl_grid: None,
             scrolled: None,
             shifts: Vec::new(),
@@ -7828,6 +7832,8 @@ impl App {
             Key::Character(c) if ctrl && self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_AS)),
             // VIEW ▸ Arrange windows ▸ Realign (spec: ui/menu-submenus.md §2).
             Key::Character(c) if ctrl && self.shift && !alt && c.eq_ignore_ascii_case("h") => self.arrange(crate::arrange::Layout::Realign),
+            // TOOLS > Stop sound (Ctrl+H, views/menus.rs).
+            Key::Character(c) if ctrl && !self.shift && !alt && c.eq_ignore_ascii_case("h") => self.stop_sound(),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
             Key::Character(c) if ctrl && self.shift && !alt && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT_MP3)),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
@@ -7885,6 +7891,25 @@ impl App {
         // The engine gets the loop range before its first tick.
         self.sync_loop_range();
         self.transport.play_counted(&p, self.play_mode(), start, bars);
+    }
+
+    /// TOOLS > Stop sound (Ctrl+H): stops playback and every voice.
+    fn stop_sound(&mut self) {
+        self.transport.stop();
+        self.state.message = Some("Sound stopped".into());
+    }
+
+    /// Shift with the digit key `d` (the key in the number row, on any layout): the physical key when it is known, else
+    /// the character it types on a US layout.
+    pub(crate) fn shift_digit(&self, key: &winit::keyboard::Key, d: u8) -> bool {
+        use winit::keyboard::{Key, KeyCode::*};
+        const ROW: [winit::keyboard::KeyCode; 10] = [Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9];
+        const US: [&str; 10] = [")", "!", "@", "#", "$", "%", "^", "&", "*", "("];
+        let d = usize::from(d.min(9));
+        match self.code {
+            Some(code) => code == ROW[d],
+            None => matches!(key, Key::Character(c) if c == US[d] || c.as_str() == d.to_string()),
+        }
     }
 
     fn play_mode(&self) -> PlayMode {
@@ -9229,10 +9254,7 @@ impl App {
             }
             // spec: ui/cancel-recording.md
             MenuCmd::CancelRecording => self.state.message = Some(self.cancel_recording()),
-            MenuCmd::StopSound => {
-                self.transport.stop();
-                self.state.message = Some("Sound stopped".into());
-            }
+            MenuCmd::StopSound => self.stop_sound(),
             // spec: ui/unused-channels.md
             MenuCmd::SelectUnused => self.state.message = crate::rack::run(self, crate::rack::RCmd::SelectUnused),
             MenuCmd::PurgeClips => self.state.message = crate::rack::run(self, crate::rack::RCmd::Purge),
@@ -14736,6 +14758,43 @@ mod tests {
         back.open(lemon.clone());
         assert_eq!((back.state.tempo, back.state.path.as_deref()), (125.0, Some(lemon.as_path())));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ctrl+H is TOOLS > Stop sound, the key its menu entry shows; Shift+Ctrl+H stays Realign.
+    #[test]
+    fn ctrl_h_stops_the_sound() {
+        use winit::keyboard::Key;
+        let mut app = App::new(None);
+        app.state.message = None;
+        app.key(&Key::Character("h".into()), true, false);
+        assert_eq!(app.state.message.as_deref(), Some("Sound stopped"));
+        assert!(!app.transport.playing());
+    }
+
+    /// Shift+4 and Shift+5 go by the number row's key: a Turkish layout's Shift+4 types "+" and is still Shift+4.
+    /// Without the key (a synthesized key) the US characters stand in.
+    #[test]
+    fn shift_digits_go_by_the_key_on_any_layout() {
+        use winit::keyboard::{Key, KeyCode};
+        let mut app = App::new(None);
+        let plus = Key::Character("+".into());
+        app.code = Some(KeyCode::Digit4);
+        assert!(app.shift_digit(&plus, 4));
+        assert!(!app.shift_digit(&plus, 5));
+        app.code = Some(KeyCode::Equal);
+        assert!(!app.shift_digit(&plus, 4), "the US layout's Shift+= is not Shift+4");
+        app.code = None;
+        assert!(app.shift_digit(&Key::Character("$".into()), 4));
+        assert!(app.shift_digit(&Key::Character("%".into()), 5));
+        assert!(!app.shift_digit(&plus, 4));
+        // In the playlist: a Turkish Shift+4 zooms out far.
+        app.state.project = test_project();
+        app.state.z = vec![Win::Playlist];
+        app.shift = true;
+        app.code = Some(KeyCode::Digit4);
+        let pattern = app.state.pattern;
+        assert!(crate::playlist::key(&mut app, &plus, false, false));
+        assert_eq!(app.state.pattern, pattern);
     }
 
     /// Shift+Ctrl+S is Save as: it asks where and leaves the open file as it was. Ctrl+S saves in place without asking.
