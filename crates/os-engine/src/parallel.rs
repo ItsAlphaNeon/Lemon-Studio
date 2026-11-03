@@ -281,6 +281,12 @@ pub struct Pool {
 /// A worker's start: the program's own setup for rendering threads (priority, platform registration).
 pub type ThreadInit = Arc<dyn Fn() + Send + Sync>;
 
+/// A thread with no job ready sleeps once it has waited this long (a job taking long: a plugin's first block), and for
+/// this long at a time. The kernel's cap on a real-time thread and the program's watchdog count from a thread's last
+/// sleep: spinning here, every thread waiting for one slow job looks like a runaway, and all of them lose their priority.
+const WAIT_BEFORE_REST: Duration = Duration::from_millis(2);
+const REST: Duration = Duration::from_micros(50);
+
 /// How long workers spin after a run before parking: the next tick of a stream filling its buffer comes within it.
 const SPIN: Duration = Duration::from_micros(200);
 
@@ -381,6 +387,7 @@ unsafe fn nothing(_: *const (), _: usize, _: usize) {}
 fn work(sh: &Shared, graph: &Graph, batch: Batch, lane: usize) {
     let n = graph.n;
     let mut idle = 0u32;
+    let mut waiting: Option<Instant> = None;
     while graph.done.load(Ordering::Acquire) < n {
         if lane == 0 {
             let h = graph.head0.load(Ordering::Relaxed);
@@ -394,6 +401,7 @@ fn work(sh: &Shared, graph: &Graph, batch: Batch, lane: usize) {
                 };
                 run_job(sh, graph, batch, j, lane);
                 idle = 0;
+                waiting = None;
                 continue;
             }
         }
@@ -403,8 +411,10 @@ fn work(sh: &Shared, graph: &Graph, batch: Batch, lane: usize) {
             idle += 1;
             if idle < 4096 {
                 std::hint::spin_loop();
-            } else {
+            } else if waiting.get_or_insert_with(Instant::now).elapsed() < WAIT_BEFORE_REST {
                 std::thread::yield_now();
+            } else {
+                std::thread::sleep(REST);
             }
             continue;
         }
@@ -420,6 +430,7 @@ fn work(sh: &Shared, graph: &Graph, batch: Batch, lane: usize) {
         };
         run_job(sh, graph, batch, j, lane);
         idle = 0;
+        waiting = None;
     }
 }
 
@@ -480,6 +491,49 @@ fn worker(sh: &Shared, w: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Workers with nothing to do while one job takes long (a plugin's first block) sleep: the kernel's cap on a real-time
+    /// thread and the watchdog count from a thread's last sleep, and it is not these that are stuck.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workers_waiting_for_a_long_job_sleep() {
+        // The worker says which thread it is: other tests run pools of their own.
+        let id = Arc::new(Mutex::new(String::new()));
+        let seen = id.clone();
+        let init: ThreadInit = Arc::new(move || {
+            let stat = std::fs::read_to_string("/proc/thread-self/stat").unwrap();
+            *seen.lock().unwrap() = stat.split_whitespace().next().unwrap().to_string();
+        });
+        let pool = Pool::new(1, Some(init));
+        let mut g = Graph::default();
+        // The long job is pinned to the rendering thread, so the worker can only wait for it.
+        g.set(3, &mut vec![(0, 1), (1, 2)]);
+        g.pin(1, true);
+        let t0 = Instant::now();
+        while id.lock().unwrap().is_empty() {
+            assert!(t0.elapsed() < Duration::from_secs(5), "the worker never started");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let task = std::path::Path::new("/proc/self/task").join(id.lock().unwrap().as_str());
+        let sleeps = || {
+            let text = std::fs::read_to_string(task.join("status")).unwrap();
+            text.lines().find_map(|l| l.strip_prefix("voluntary_ctxt_switches:")).unwrap().trim().parse::<u64>().unwrap()
+        };
+        let before = std::sync::Mutex::new(None);
+        pool.run(&g, &|j, _| {
+            if j == 1 {
+                // The worker has woken for the run by now.
+                std::thread::sleep(Duration::from_millis(1));
+                *before.lock().unwrap() = Some(sleeps());
+                let t0 = Instant::now();
+                while t0.elapsed() < Duration::from_millis(150) {
+                    std::hint::spin_loop();
+                }
+                let slept = sleeps() - before.lock().unwrap().unwrap();
+                assert!(slept >= 3, "{slept} sleeps while waiting 150 ms");
+            }
+        });
+    }
 
     /// Every job runs once, after all its predecessors.
     #[test]
