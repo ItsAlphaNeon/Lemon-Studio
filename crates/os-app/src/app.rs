@@ -1733,7 +1733,7 @@ impl App {
         }
         match result {
             Ok((file, project)) => {
-                self.transport.stop();
+                self.transport.silence();
                 self.reset_hosted();
                 let s = &mut self.state;
                 s.tempo = project.tempo.unwrap_or(130.0);
@@ -2346,7 +2346,7 @@ impl App {
 
     /// The built-in new project (FILE ▸ New with Empty, New from template ▸ Empty).
     pub(crate) fn empty_project(&mut self) {
-        self.transport.stop();
+        self.transport.silence();
         self.reset_hosted();
         let s = &mut self.state;
         s.project = default_project();
@@ -7955,9 +7955,9 @@ impl App {
         self.transport.play_counted(&p, self.play_mode(), start, bars);
     }
 
-    /// TOOLS > Stop sound (Ctrl+H): stops playback and every voice.
+    /// TOOLS > Stop sound (Ctrl+H): stops playback and every voice, and the effects' tails.
     fn stop_sound(&mut self) {
-        self.transport.stop();
+        self.transport.silence();
         self.state.message = Some("Sound stopped".into());
     }
 
