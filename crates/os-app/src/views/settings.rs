@@ -1067,8 +1067,8 @@ pub fn paint(ui: &mut Ui, s: &State) {
     let (_, title, _) = TABS[st.tab.min(TABS.len() - 1)];
     ui.c.text(Font::new(13), r.x + 28.0, r.y + 7.0, t.text, &format!("Settings - {title}"));
     let x = Rect::new(r.right() - 26.0, r.y + 5.0, 20.0, 20.0);
-    let hov = ui.hit(x, Action::Settings(SAct::Close), "Close");
-    ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.glyph } else { t.text });
+    let hov = super::close_button(ui, x, x, Action::Settings(SAct::Close), "Close");
+    ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.tx(0xffffff) } else { t.text });
     // Tabs (spec §2): active text coloured by group.
     let font = Font::new(13);
     let rects = tab_rects(ui, r);
@@ -1225,8 +1225,8 @@ fn picker(ui: &mut Ui, s: &State, p: &crate::theme_adjust::Picker, win: Rect) {
         _ => format!("{} colour", SWATCHES[p.swatch]),
     };
     ui.c.text(Font::new(13).bold(), rr.panel.x + 10.0, rr.panel.y + 9.0, t.text, &title);
-    let hov = ui.hit(rr.close, Action::Settings(SAct::PickClose), "Close (Esc)");
-    ui.c.icon(&os_ui::tabler::X, rr.close.inset(3.0), if hov { t.glyph } else { t.text });
+    let hov = super::close_button(ui, rr.close, rr.close, Action::Settings(SAct::PickClose), "Close (Esc)");
+    ui.c.icon(&os_ui::tabler::X, rr.close.inset(3.0), if hov { t.tx(0xffffff) } else { t.text });
     for (k, (b, part)) in rr.chips.iter().zip(&parts).enumerate() {
         let hov = ui.hit(*b, Action::Settings(SAct::PickPart(k as u8)), "Pick this colour");
         let frame = if k == p.part {

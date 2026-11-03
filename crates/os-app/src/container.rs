@@ -1215,7 +1215,8 @@ impl App {
                 self.state.message = Some(format!("A container holds at most {MEMBER_IDS} effects"));
                 return;
             }
-            CAct::Add => crate::plugin_menu::items(s, crate::plugin_menu::Target::Container(k), true),
+            // The plugin palette, its picks going to this container's track (spec: ui/plugin-menu.md §6).
+            CAct::Add => return self.open_plugin_palette(crate::plugin_menu::Target::Container(k), (x, y), Some(t)),
         };
         on_track(t, &mut items);
         self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
@@ -1640,10 +1641,9 @@ mod tests {
         tick(&mut a);
         assert_eq!(names(&a, 0), [second.clone(), first.clone()]);
         assert_eq!(members(&a.state, 2, 0).unwrap()[0].state, state);
-        // Add effect: the picker of an empty slot, adding at the end.
+        // Add effect: the plugin palette of an empty slot, adding at the end.
         a.container_act(CAct::Add);
-        let add = a.state.playlist.popup.take().unwrap().items;
-        let lim = add.iter().find(|i| i.label == first).expect("the limiter in the picker").cmd.clone();
+        let lim = crate::plugin_palette::cmd_of(&a.state, &first).expect("the limiter in the palette");
         assert!(matches!(&lim, Cmd::SlotWin(2, c) if matches!(**c, Cmd::Mixer(MCmd::MemberAdd(0, _)))));
         crate::playlist::run(&mut a, lim);
         tick(&mut a);
@@ -2049,12 +2049,13 @@ mod tests {
         a.open_channel_window(0);
         assert!(a.state.shown(Win::Container) && a.state.container.at == (0, CHANNEL));
         a.container_act(CAct::Add);
-        let add = a.state.playlist.popup.take().unwrap().items;
-        assert!(add.iter().any(|i| i.head && i.label == "Instruments") && add.iter().any(|i| i.head && i.label == "Effects"));
+        let heads = crate::plugin_palette::rows(&a.state);
+        let head = |label: &str| heads.contains(&crate::plugin_palette::Row::Head { label: label.into(), major: true });
+        assert!(head("Instruments") && head("Effects"));
         let lim = a.plugins.effects.iter().find(|e| e.desc.name.contains("Limiter")).unwrap().desc.name.clone();
-        let inst = leaf(&add, crate::osc3::LEMON_TRIO).expect("the instruments to pick");
+        let inst = crate::plugin_palette::cmd_of(&a.state, crate::osc3::LEMON_TRIO).expect("the instruments to pick");
         assert!(matches!(&inst, Cmd::SlotWin(0, c) if matches!(**c, Cmd::Mixer(MCmd::MemberAddInst(CHANNEL, _)))));
-        let fx = leaf(&add, &lim).expect("the effects to pick");
+        let fx = crate::plugin_palette::cmd_of(&a.state, &lim).expect("the effects to pick");
         assert!(matches!(&fx, Cmd::SlotWin(0, c) if matches!(**c, Cmd::Mixer(MCmd::MemberAdd(CHANNEL, _)))));
         crate::playlist::run(&mut a, inst);
         assert_eq!(a.state.history.newest_done(), Some(ADD_INSTRUMENT));

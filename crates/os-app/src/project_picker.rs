@@ -175,6 +175,6 @@ mod tests {
         app.mouse_move(b.cx(), b.cy());
         app.mouse_down_right();
         app.mouse_up();
-        assert!(crate::plugin_menu::is_open(&app.state), "right click: the plugin menu");
+        assert!(crate::plugin_palette::is_open(&app.state), "right click: the plugin menu");
     }
 }

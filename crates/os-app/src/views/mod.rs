@@ -21,6 +21,7 @@ pub mod mixer;
 pub mod piano;
 pub mod patterns;
 pub mod perf;
+pub mod plugin_palette;
 pub mod playlist;
 pub mod project_forms;
 pub mod rack;
@@ -500,6 +501,7 @@ fn paint_window(ui: &mut Ui, s: &State, win: Win, r: Rect, a: Rect, f: &FrameInf
             }
             Win::Events => ui.part(Seg::Win(win), a, |ui| events::paint(ui, s, f)),
             Win::Container => ui.part(Seg::Win(win), a, |ui| container::paint(ui, s, f)),
+            Win::PluginPalette => ui.part(Seg::Win(win), a, |ui| plugin_palette::paint(ui, s, f)),
             _ => {}
         }
 }
@@ -698,7 +700,7 @@ pub fn resize_zones(ui: &mut Ui, s: &State, win: Win, r: Rect) {
 /// Minimize / maximize / close buttons from `x0` at the title bar of a window at top `y`.
 /// The tiling layout's split views have no minimize: the other two keep their places.
 pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _hover: Color) {
-    let mut hovered = None;
+    let (mut hovered, mut down) = (None, None);
     let maxed = win.slot().is_some_and(|i| ui.maxed[i]);
     // A window alone in the tiling layout has only its close button.
     let skip = if ui.alone { 2 } else { usize::from(ui.tiled) };
@@ -712,7 +714,11 @@ pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _h
         .enumerate()
         .skip(skip)
     {
-        if ui.hit(Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0), action, hint) {
+        let b = Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0);
+        if ui.down(b, &action) {
+            down = Some(i);
+        }
+        if ui.hit(b, action, hint) {
             hovered = Some(i);
         }
     }
@@ -725,7 +731,7 @@ pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _h
     if kit::lemon::on(ui.t) {
         lights(ui.c, ui.t, x0, y, hovered, glyph);
     } else {
-        kit::window_buttons(ui.c, ui.t, x0, y, hovered, glyph);
+        kit::window_buttons(ui.c, ui.t, x0, y, hovered, down, glyph);
     }
 }
 
@@ -782,6 +788,15 @@ pub fn window_light(c: &mut os_ui::Canvas, t: &os_theme::Palette, b: Rect, which
         }
         Light::Max(_) => c.line(cx - d, cy, cx + d, cy, 1.4, ink),
     }
+}
+
+/// A window's own close ✕ in its title bar: the hit on `hit`, then the hover / pressed back of every title bar button
+/// on `back` (`kit::title_button_back`), under the glyph the caller draws. Whether the mouse is over it.
+pub fn close_button(ui: &mut Ui, hit: Rect, back: Rect, action: Action, hint: &'static str) -> bool {
+    let down = ui.down(hit, &action);
+    let hov = ui.hit(hit, action, hint);
+    kit::title_button_back(ui.c, ui.t, back, true, hov, down);
+    hov || down
 }
 
 /// Window frame with a title bar (§5); the bar drags the window. `buttons` = draw the window

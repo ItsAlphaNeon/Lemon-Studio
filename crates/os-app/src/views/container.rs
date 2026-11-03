@@ -62,7 +62,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     ui.hit(Rect::new(x0 + 1.0, y0 + 1.0, W - 30.0, TITLE_H - 4.0), Action::WinDrag(Win::Container), "");
     super::strum::label(ui, Font::new(17), x0 + 9.0, y0 + 15.0, -1, t.text, &title);
     let close = Rect::new(x0 + W - 20.0, y0 + 10.0, 10.0, 10.0);
-    let hov = ui.hit(close.outset(4.0), Action::CloseWin(Win::Container), "Close");
+    let hov = super::close_button(ui, close.outset(4.0), close.outset(3.0), Action::CloseWin(Win::Container), "Close");
     icons::draw(ui.c, Icon::Close, close.outset(1.0), if hov { t.tx(0xffffff) } else { t.glyph });
 
     let small = Font::new(9);

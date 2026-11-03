@@ -527,7 +527,6 @@ pub fn tooltip(c: &mut Canvas, t: &Palette, at: (f32, f32), name: &str, caption:
     b
 }
 
-/// Minimize / maximize / close glyphs (drawn with Tabler icons) in a row from `x0`; `hovered` = index under the mouse.
 /// What a window's middle title-bar button shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaxGlyph {
@@ -541,7 +540,25 @@ pub enum MaxGlyph {
     None,
 }
 
-pub fn window_buttons(c: &mut Canvas, t: &Palette, x0: f32, y: f32, hovered: Option<usize>, max: MaxGlyph) -> [Rect; 3] {
+/// The back of a title bar button (minimize / maximize / close, or a window's own close ✕) under its glyph: a rounded
+/// fill while the mouse is over it (red for `close`), darker while it is held down; nothing otherwise.
+pub fn title_button_back(c: &mut Canvas, t: &Palette, b: Rect, close: bool, hover: bool, down: bool) {
+    if !hover && !down {
+        return;
+    }
+    if lemon::on(t) {
+        lemon::window_button_hover(c, t, b, close);
+    } else {
+        c.fill_rrect(b, 3.0, if close { t.record.with_alpha(170) } else { t.button_hi });
+    }
+    if down {
+        c.fill_rrect(b, if lemon::on(t) { 4.0 } else { 3.0 }, Color::rgb(0).with_alpha(70));
+    }
+}
+
+/// Minimize / maximize / close glyphs (drawn with Tabler icons) in a row from `x0`; `hovered` = index under the mouse,
+/// `down` = index held down with the mouse still over it.
+pub fn window_buttons(c: &mut Canvas, t: &Palette, x0: f32, y: f32, hovered: Option<usize>, down: Option<usize>, max: MaxGlyph) -> [Rect; 3] {
     use crate::tabler as tb;
     let mut out = [Rect::default(); 3];
     for (i, icon) in [&tb::MINUS, &tb::SQUARES, &tb::X].into_iter().enumerate().skip(match max {
@@ -550,12 +567,8 @@ pub fn window_buttons(c: &mut Canvas, t: &Palette, x0: f32, y: f32, hovered: Opt
         _ => 1,
     }) {
         let b = Rect::new(x0 + i as f32 * 19.5, y + 3.0, 17.0, 17.0);
-        let hov = hovered == Some(i);
-        if hov && lemon::on(t) {
-            lemon::window_button_hover(c, t, b, i == 2);
-        } else if hov {
-            c.fill_rrect(b, 3.0, if i == 2 { t.record.with_alpha(170) } else { t.button_hi });
-        }
+        let hov = hovered == Some(i) || down == Some(i);
+        title_button_back(c, t, b, i == 2, hov, down == Some(i));
         let ink = if hov { t.tx(0xffffff) } else { t.text_dim.mix(t.glyph, 0.6) };
         match (i, max) {
             (1, MaxGlyph::Full) => c.stroke_rrect(Rect::new(b.x + 3.5, b.y + 3.5, 10.0, 10.0), 2.0, 1.5, ink),
@@ -605,6 +618,30 @@ mod tests {
         let arrow = scroll_arrow(&l, State::NORMAL, true).unwrap();
         assert!(arrow.r > 0xa0 && arrow.r == arrow.b, "{arrow:?}");
         assert!(!high_visibility(), "off unless the app turns it on");
+    }
+
+    /// Every title bar button shows the mouse over it and a press on it (feedback 2026-10-17: the Settings window's
+    /// close button did not change on hover): nothing at rest, a fill on hover, a darker one held down; in both looks.
+    /// Painted over an opaque title bar, as in a window (the blends assume an opaque canvas).
+    #[test]
+    fn title_buttons_show_hover_and_press() {
+        let bar = Color::rgb(0x202020);
+        for t in [Palette::default(), os_theme::design::palette(os_theme::Design::Lemon, None)] {
+            let paint = |close: bool, hover: bool, down: bool| {
+                let mut c = Canvas::new(20, 20, 1.0).unwrap();
+                c.clear(bar);
+                title_button_back(&mut c, &t, Rect::new(0.0, 0.0, 20.0, 20.0), close, hover, down);
+                let p = c.pixmap.pixel(10, 10).unwrap();
+                [p.red(), p.green(), p.blue()]
+            };
+            let sum = |p: [u8; 3]| p.iter().map(|&v| i32::from(v)).sum::<i32>();
+            for close in [false, true] {
+                let (rest, hover, down) = (paint(close, false, false), paint(close, true, false), paint(close, true, true));
+                assert_eq!(rest, [0x20; 3], "nothing at rest");
+                assert_ne!(hover, rest, "a fill on hover (close {close})");
+                assert!(sum(down) < sum(hover), "darker held down (close {close}): {down:?} vs {hover:?}");
+            }
+        }
     }
 
     #[test]

@@ -77,6 +77,11 @@ fn now_ms() -> u64 {
 }
 /// How long a stopped stream stays alive to finish its fade before it is dropped.
 const CLOSE_AFTER: Duration = Duration::from_millis(40);
+/// A stopped playback rings out its effects' tails (spec: audio/transport.md "Stop") until its output has stayed below
+/// -96 dB (the engine's quiet, as an export's tail) for `RING_QUIET`, at most `RING_MAX` (an export's longest tail).
+const RING_QUIET: Duration = Duration::from_secs(3);
+const RING_MAX: Duration = Duration::from_secs(30);
+const RING_QUIET_LEVEL: f32 = 1.584_893_1e-5;
 /// What a stream keeps queued beyond the block its device is about to take (spec: audio/devices.md "Render-ahead"):
 /// one block more, since some drivers ask for two blocks back to back, but at least `MARGIN_MIN` seconds (the feeder
 /// has to wake and render a tick between two blocks) and at most `MARGIN_MAX`. Together with the block and part of a
@@ -435,7 +440,8 @@ enum Cmd {
     TapClick(bool, i8),
     /// An instrument's editor opened or the last one closed (`Transport::listen`).
     Listen(bool),
-    Stop,
+    /// Stop; true: the hosted effects' tails ring out (`Transport::stop`), false: they are silenced too.
+    Stop(bool),
     /// Render with the hosted plugins and write the files (FILE > Export): project, mode, sample rate, the export.
     Export(Box<Project>, PlayMode, u32, Box<crate::export::Job>),
     /// The audio settings changed: move the playback to a new stream, close the live and preview streams.
@@ -795,9 +801,19 @@ impl Transport {
         (t != 0).then(|| (t - 1).min(u64::from(u32::MAX)) as u32)
     }
 
-    /// Stop everything: playback rewinds, hosted instruments fall silent, live notes and previews end. Also works
-    /// when already stopped (it silences notes still ringing from the typing keyboard or a preview).
+    /// Stop everything: playback rewinds, hosted instruments fall silent, live notes and previews end; the hosted
+    /// effects' tails (reverb, delay) ring out, as in FL (spec: audio/transport.md "Stop"). Also works when already
+    /// stopped: it silences notes still ringing from the typing keyboard or a preview, and tails still ringing.
     pub fn stop(&self) {
+        self.stop_with(true);
+    }
+
+    /// `stop`, the effects' tails silenced too (TOOLS > Stop sound; a project opened or made new).
+    pub fn silence(&self) {
+        self.stop_with(false);
+    }
+
+    fn stop_with(&self, ring: bool) {
         self.forget_sent();
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.shared.marker_hold.store(0, Ordering::Relaxed);
@@ -805,7 +821,7 @@ impl Transport {
         self.shared.marker_resumed.store(0, Ordering::Relaxed);
         self.shared.state.store(STOPPED, Ordering::Release);
         self.shared.rewind(0.0);
-        let _ = self.tx.send(Cmd::Stop);
+        let _ = self.tx.send(Cmd::Stop(ring));
     }
 
     /// A view of the playback's state, position and tempo for another thread (the MIDI master clock, `crate::midi_out`).
@@ -1424,6 +1440,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     let mut live_project: Option<Project> = None;
     // Streams that were stopped and finish their fade before they are dropped.
     let mut closing: Vec<(Session, Instant)> = Vec::new();
+    // The stopped playback while its effects' tails ring out (`Cmd::Stop`).
+    let mut ringing: Option<(Session, Ringing)> = None;
     let mut reset_pending = false;
     // The pending reset also silences the hosted effects (Stop).
     let mut reset_fx_pending = false;
@@ -1503,7 +1521,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             }
             Ok(Cmd::Update) => {
                 if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
-                    for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
+                    for s in [session.as_mut(), live.as_mut(), ringing.as_mut().map(|r| &mut r.0)].into_iter().flatten() {
                         s.project = project.clone();
                         swap(s, &mut library);
                     }
@@ -1537,7 +1555,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 }
             }
             Ok(Cmd::Instruments) => {
-                for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
+                for s in [session.as_mut(), live.as_mut(), ringing.as_mut().map(|r| &mut r.0)].into_iter().flatten() {
                     swap(s, &mut library);
                 }
             }
@@ -1558,6 +1576,12 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 let target = match session.as_ref() {
                     Some(s) if !s.paused() => Some(s),
                     _ => {
+                        // Tails still ringing after Stop ring on in the live stream, which takes their effects over.
+                        if live.is_none() && project.is_some() {
+                            if let Some((s, _)) = ringing.take() {
+                                retire(s, &mut closing);
+                            }
+                        }
                         if live.is_none() {
                             if let Some(p) = project {
                                 crate::dropout_log::write(&match &cmd {
@@ -1619,6 +1643,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 if let (true, Some(n), Some(r)) = (hosted, note, row) {
                     let running = session.as_ref().is_some_and(|s| !s.paused());
                     if !running && live.is_none() {
+                        if let Some((s, _)) = ringing.take() {
+                            retire(s, &mut closing);
+                        }
+                    }
+                    if !running && live.is_none() {
                         if let Some(p) = live_project.as_ref().or(Some(&*project)) {
                             crate::dropout_log::write(&format!("live stream: a preview of channel {}", r));
                             match open_live(p, listen, &mut library, &mut device) {
@@ -1667,7 +1696,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 // stream would only hear every other chunk of a ringing sample): typed notes go into the playing
                 // engine instead.
                 keep_gate(&shared, &session);
-                for s in [session.take(), live.take()].into_iter().flatten() {
+                for s in [session.take(), live.take(), ringing.take().map(|r| r.0)].into_iter().flatten() {
                     retire(s, &mut closing);
                 }
                 let fade = fade_time(&shared);
@@ -1706,6 +1735,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 }
                 if let Some(l) = lost.as_mut() {
                     (l.next, l.tries) = (Instant::now(), 0);
+                }
+                // Tails ringing after Stop go with their stream; their effects start again from silence.
+                if ringing.take().is_some() {
+                    reset_instruments(&inst);
                 }
                 if let Some(old) = session.take() {
                     let at = At { tick: f64::from_bits(shared.tick.load(Ordering::Relaxed)), paused: old.paused(), truncated: old.truncated, count_in: 0 };
@@ -1753,21 +1786,40 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     s.feed.wake();
                 }
             }
-            Ok(Cmd::Stop) => {
-                // Everything fades out and goes; then the instruments and the effects are reset, so no tail rings on
-                // into the next Play (pause is where tails ring out, `Engine::pause`).
+            Ok(Cmd::Stop(ring)) => {
+                // Everything fades out and goes, and the instruments are reset. The playback's hosted effects ring out
+                // their tails (reverb, delay) as in FL: its channels are held as at Pause (`Engine::pause`) while its
+                // mixer runs on, until the tails are quiet (`Ringing`), and the effects are reset then, so no frozen
+                // tail comes back with the next stream. Without `ring` (Stop sound), with no hosted effect, or at a
+                // Stop while tails ring, the effects are reset at once.
                 keep_gate(&shared, &session);
-                for s in [session.take(), live.take(), preview.take()].into_iter().flatten() {
+                let old = session.take();
+                for s in [live.take(), preview.take(), ringing.take().map(|r| r.0)].into_iter().flatten() {
                     retire(s, &mut closing);
+                }
+                let effects = inst.lock().is_ok_and(|l| !l.fx.is_empty());
+                match old {
+                    // Paused with another stream processing its plugins (`release_paused`): its effects rang there.
+                    Some(s) if ring && effects && !s.ctl.paused.load(Ordering::Relaxed) => {
+                        s.ctl.report.store(false, Ordering::Relaxed);
+                        s.ctl.held.store(true, Ordering::Relaxed);
+                        if let Ok(mut e) = s.engine.lock() {
+                            e.pause();
+                        }
+                        s.feed.wake();
+                        ringing = Some((s, Ringing::new(Instant::now())));
+                    }
+                    Some(s) => retire(s, &mut closing),
+                    None => {}
                 }
                 held = None;
                 reset_pending = true;
-                reset_fx_pending = true;
+                reset_fx_pending = ringing.is_none();
                 listen_retry = true;
             }
             Ok(Cmd::Factory(dir)) => {
                 library.set_factory_dir(dir);
-                for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
+                for s in [session.as_mut(), live.as_mut(), ringing.as_mut().map(|r| &mut r.0)].into_iter().flatten() {
                     swap(s, &mut library);
                 }
             }
@@ -1786,6 +1838,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     held = Some((s.project.clone(), s.mode, s.generation, at));
                     retire(s, &mut closing);
                     reset_pending = true;
+                }
+                if let Some((s, _)) = ringing.take() {
+                    retire(s, &mut closing);
+                    reset_pending = true;
+                    reset_fx_pending = true;
                 }
                 for s in [live.take(), preview.take()].into_iter().flatten() {
                     retire(s, &mut closing);
@@ -1826,6 +1883,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 preview = None;
                 preview_until = None;
                 held = None;
+                ringing = None;
                 closing.clear();
                 device.close_idle();
                 reset_instruments(&inst);
@@ -1853,6 +1911,15 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         }
         // Stopped streams are dropped once their fade is over; then the instruments are silenced for good.
         closing.retain(|(_, since)| since.elapsed() < CLOSE_AFTER);
+        // Tails rung out after Stop: the stream goes, and its effects are reset (silently: they are quiet).
+        let rung = ringing.as_mut().is_some_and(|(s, r)| r.over(f32::from_bits(s.ctl.level.swap(0, Ordering::Relaxed)), Instant::now()) || s.done.load(Ordering::Relaxed));
+        if rung {
+            if let Some((s, _)) = ringing.take() {
+                retire(s, &mut closing);
+            }
+            reset_pending = true;
+            reset_fx_pending = true;
+        }
         let xruns = device.take_xruns();
         shared.underruns.fetch_add(xruns, Ordering::Relaxed);
         shared.drops_device.fetch_add(xruns, Ordering::Relaxed);
@@ -1870,6 +1937,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 live = None;
                 preview = None;
                 preview_until = None;
+                ringing = None;
                 closing.clear();
                 device.close();
                 // As after Reopen: the new engines do not know the notes the old ones held at the instruments.
@@ -1942,7 +2010,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         // The device frees the streams it let go of; with none left it lets go of the device (Auto close: also one
         // that would stay open).
         device.collect();
-        if session.is_none() && live.is_none() && preview.is_none() && closing.is_empty() {
+        if session.is_none() && live.is_none() && preview.is_none() && ringing.is_none() && closing.is_empty() {
             if closed {
                 device.close();
             } else {
@@ -1966,15 +2034,27 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 }
             }
         }
-        if reset_pending && closing.is_empty() {
+        // While tails ring, the instruments are reset once the playback's channels have faded out (the effects only
+        // when the tails are over).
+        if reset_pending && closing.is_empty() && ringing.as_ref().is_none_or(|r| r.1.since.elapsed() >= CLOSE_AFTER) {
             reset_pending = false;
+            if let Some((s, _)) = &ringing {
+                if let Ok(mut e) = s.engine.lock() {
+                    e.forget_voices();
+                }
+            }
             reset_hosts(&inst, std::mem::take(&mut reset_fx_pending));
             if session.is_none() && shared.state.load(Ordering::Acquire) == STOPPED {
                 shared.rewind(0.0);
             }
         }
         // While an editor is open and nothing plays, the live stream processes the instruments (once the stopped
-        // streams are gone and the instruments reset).
+        // streams are gone and the instruments reset). Tails ringing after Stop ring on there.
+        if listen && listen_retry && !closed && lost.is_none() && live.is_none() && session.is_none() {
+            if let Some((s, _)) = ringing.take() {
+                retire(s, &mut closing);
+            }
+        }
         if listen && listen_retry && !closed && lost.is_none() && live.is_none() && !reset_pending && closing.is_empty() && session.as_ref().is_none_or(|s| s.paused()) {
             listen_retry = false;
             if let Some(p) = live_project.as_ref() {
@@ -2084,6 +2164,32 @@ struct Ctl {
     held: AtomicBool,
     /// Publish position, meters and sounding notes (the playback stream until it is stopped).
     report: AtomicBool,
+    /// The largest output peak since the audio thread last took it (f32 bits): how a stopped playback's tails ring.
+    level: AtomicU32,
+}
+
+/// A stopped playback ringing out its effects' tails: its channels held as at Pause, its mixer running on.
+struct Ringing {
+    since: Instant,
+    /// Since when its output has been quiet.
+    quiet: Option<Instant>,
+}
+
+impl Ringing {
+    fn new(since: Instant) -> Ringing {
+        Ringing { since, quiet: None }
+    }
+
+    /// Its output's peak since the last call, at `now`: true once the tails are over (quiet for `RING_QUIET`, or
+    /// rung for `RING_MAX`).
+    fn over(&mut self, level: f32, now: Instant) -> bool {
+        if level >= RING_QUIET_LEVEL {
+            self.quiet = None;
+        } else {
+            self.quiet.get_or_insert(now);
+        }
+        self.quiet.is_some_and(|q| now - q >= RING_QUIET) || now - self.since >= RING_MAX
+    }
 }
 
 /// Takes a stream off the device when its session goes: the device's callback stops playing it at its next block.
@@ -2165,7 +2271,7 @@ impl Session {
                 }
             }
         }
-        let ctl = Arc::new(Ctl { paused: AtomicBool::new(at.paused), held: AtomicBool::new(false), report: AtomicBool::new(song) });
+        let ctl = Arc::new(Ctl { paused: AtomicBool::new(at.paused), held: AtomicBool::new(false), report: AtomicBool::new(song), level: AtomicU32::new(0) });
         if kind != Kind::Preview {
             publish(&shared, &info);
         }
@@ -2357,6 +2463,7 @@ impl Source for Renderer {
             pr = pr.max(s[1].abs());
         }
         // Meter peaks: the largest since the monitor last read them (non-negative f32 bits order like u32s).
+        self.ctl.level.fetch_max(pl.max(pr).to_bits(), Ordering::Relaxed);
         if self.ctl.report.load(Ordering::Relaxed) {
             self.shared.peak_l.store(pl.to_bits(), Ordering::Relaxed);
             self.shared.peak_r.store(pr.to_bits(), Ordering::Relaxed);
@@ -2389,7 +2496,7 @@ mod tests {
 
     /// A stream's callback with its queue filled in the callback (no feeder thread).
     fn renderer(e: Engine) -> (Renderer, Arc<Ctl>, Arc<Shared>) {
-        let ctl = Arc::new(Ctl { paused: AtomicBool::new(false), held: AtomicBool::new(false), report: AtomicBool::new(true) });
+        let ctl = Arc::new(Ctl { paused: AtomicBool::new(false), held: AtomicBool::new(false), report: AtomicBool::new(true), level: AtomicU32::new(0) });
         let shared = Arc::new(Shared::default());
         let queue = Arc::new(Queue::new(2));
         let mut r = Renderer::new(queue.clone(), ctl.clone(), Arc::new(AtomicBool::new(false)), shared.clone(), 48000);
@@ -2411,7 +2518,7 @@ mod tests {
     /// was playing: the block before it, or what it did get, not silent.
     #[test]
     fn only_gaps_in_sound_are_heard() {
-        let ctl = Arc::new(Ctl { paused: AtomicBool::new(false), held: AtomicBool::new(false), report: AtomicBool::new(true) });
+        let ctl = Arc::new(Ctl { paused: AtomicBool::new(false), held: AtomicBool::new(false), report: AtomicBool::new(true), level: AtomicU32::new(0) });
         let shared = Arc::new(Shared::default());
         let queue = Arc::new(Queue::new(2));
         let mut r = Renderer::new(queue.clone(), ctl, Arc::new(AtomicBool::new(false)), shared.clone(), 48000);
@@ -3258,7 +3365,7 @@ mod tests {
 
     /// A start of playback (Play, a jump while playing) resets the hosted instruments, and the hosted effects only
     /// with "Reset plugins on transport" (spec: ui/settings-choices.md "Transport: Play truncated notes and Reset
-    /// plugins"); Stop resets both.
+    /// plugins"); Stop sound, and the end of the tails a Stop let ring, reset both.
     #[test]
     fn a_start_resets_hosted_effects_only_with_the_setting() {
         let (synth, fx) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
@@ -3273,6 +3380,25 @@ mod tests {
         assert_eq!(counts(), (2, 1), "on: every hosted plugin");
         reset_instruments(&hosts);
         assert_eq!(counts(), (3, 2), "Stop");
+    }
+
+    /// The tails a Stop lets ring are over once the output has been quiet (below -96 dB) for `RING_QUIET`, a peak
+    /// starting the wait again, or after `RING_MAX` whatever they do (spec: audio/transport.md "Stop").
+    #[test]
+    fn stopped_tails_ring_until_quiet() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut r = Ringing::new(t0);
+        assert!(!r.over(0.2, at(10)), "a reverb's tail");
+        assert!(!r.over(1e-6, at(20)), "quiet from here");
+        assert!(!r.over(1e-6, at(20 + 2900)));
+        assert!(!r.over(0.01, at(2950)), "an echo: the wait starts again");
+        assert!(!r.over(0.0, at(3000)));
+        assert!(!r.over(0.0, at(5900)));
+        assert!(r.over(0.0, at(6000)), "quiet for {RING_QUIET:?}");
+        let mut r = Ringing::new(t0);
+        assert!(!r.over(0.5, at(29_990)));
+        assert!(r.over(0.5, at(30_000)), "an endless feedback stops after {RING_MAX:?}");
     }
 
     /// The same through the audio thread (needs an audio device: `cargo test -p os-app -- --ignored a_jump_resets`):
@@ -3309,7 +3435,88 @@ mod tests {
             assert_eq!(fx.load(Ordering::Relaxed), resets(3), "pause and resume, setting {on}");
             t.stop();
             std::thread::sleep(Duration::from_millis(200));
-            assert_eq!(fx.load(Ordering::Relaxed), resets(3) + 1, "Stop, setting {on}");
+            assert_eq!(fx.load(Ordering::Relaxed), resets(3), "Stop lets the tail ring, setting {on}");
+            // The effect is silent: it is reset once it has been quiet for `RING_QUIET`.
+            let t0 = Instant::now();
+            while fx.load(Ordering::Relaxed) == resets(3) && t0.elapsed() < RING_QUIET + Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(fx.load(Ordering::Relaxed), resets(3) + 1, "reset once quiet, setting {on}");
+            assert!(t0.elapsed() + Duration::from_millis(250) >= RING_QUIET, "not before");
+            // Stop sound, and a second Stop while tails ring, reset at once.
+            t.play(&project, PlayMode::Pattern(1), 0.0);
+            wait_for(|| t.seconds() > 0.0);
+            t.silence();
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(fx.load(Ordering::Relaxed), resets(4) + 2, "Stop sound, setting {on}");
+            t.play(&project, PlayMode::Pattern(1), 0.0);
+            wait_for(|| t.seconds() > 0.0);
+            t.stop();
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(fx.load(Ordering::Relaxed), resets(5) + 2, "ringing, setting {on}");
+            t.stop();
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(fx.load(Ordering::Relaxed), resets(5) + 3, "a second Stop, setting {on}");
         }
+    }
+
+    /// A delay-like effect whose tail rings on after its input: Stop lets it ring (it is processed, its output heard
+    /// on the monitor), Play with "Reset plugins on transport" off carries it on, and it is reset once quiet (needs an
+    /// audio device: `cargo test -p os-app -- --ignored stop_lets`).
+    #[test]
+    #[ignore]
+    fn stop_lets_effect_tails_ring() {
+        use crate::prefs::{set_check, RESET_PLUGINS_ON_TRANSPORT};
+        struct Tail {
+            level: f32,
+            calls: Arc<AtomicU32>,
+            resets: Arc<AtomicU32>,
+        }
+        impl os_engine::HostedEffect for Tail {
+            fn process_fx(&mut self, _rate: u32, l: &mut [f32], r: &mut [f32]) {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                let input = l.iter().chain(r.iter()).fold(0.0f32, |m, s| m.max(s.abs()));
+                // Rings at 0.25 while fed, then falls by half every 50 ms or so.
+                self.level = if input > 1e-3 { 0.25 } else { self.level * 0.5f32.powf(l.len() as f32 / 2400.0) };
+                l.fill(self.level);
+                r.fill(self.level);
+            }
+            fn reset_fx(&mut self) {
+                self.level = 0.0;
+                self.resets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        set_check(&RESET_PLUGINS_ON_TRANSPORT, false);
+        let (_, project) = looping_engine();
+        let (calls, resets) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let fx = Arc::new(Mutex::new(Tail { level: 0.0, calls: calls.clone(), resets: resets.clone() }));
+        let t = Transport::new(None);
+        t.set_effects(vec![(0, 0, fx.clone() as SharedEffect)]);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        wait_for(|| t.seconds() > 0.3 && fx.lock().unwrap().level > 0.2);
+        assert!(fx.lock().unwrap().level > 0.2, "fed");
+        t.stop();
+        std::thread::sleep(Duration::from_millis(40));
+        let (c0, ringing) = (calls.load(Ordering::Relaxed), fx.lock().unwrap().level);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(calls.load(Ordering::Relaxed) > c0, "still processed after Stop");
+        assert!(ringing > 0.0 && fx.lock().unwrap().level < ringing, "the tail falls: {ringing}");
+        assert_eq!(resets.load(Ordering::Relaxed), 0, "not reset while it rings");
+        assert_eq!((t.state(), t.tick()), (State::Stopped, 0.0), "rewound");
+        // Play while it rings: the tail carries on (the setting is off), fed again by the pattern.
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        wait_for(|| t.seconds() > 0.0);
+        assert_eq!(resets.load(Ordering::Relaxed), 0, "Play with the setting off");
+        t.stop();
+        let t0 = Instant::now();
+        while resets.load(Ordering::Relaxed) == 0 && t0.elapsed() < Duration::from_secs(8) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(resets.load(Ordering::Relaxed), 1, "reset once rung out");
+        std::thread::sleep(Duration::from_millis(100));
+        let c1 = calls.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(calls.load(Ordering::Relaxed), c1, "no longer processed");
+        assert_eq!(t.streams(), 0, "its stream is gone");
     }
 }

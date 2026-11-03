@@ -31,7 +31,7 @@ pub struct Placed {
 }
 
 /// The app's own windows placed by position: the channel rack, the channel window and the tool windows.
-pub const PLACED: [Placed; 10] = [
+pub const PLACED: [Placed; 11] = [
     Placed {
         win: Win::ChannelRack,
         rect: views::rack::rect,
@@ -55,6 +55,14 @@ pub const PLACED: [Placed; 10] = [
     Placed { win: Win::Strum, rect: views::strum::rect, paint: views::strum::bounds, bounds: views::strum::bounds, pos: |s| s.strum.pos, set_pos: |s, p| s.strum.pos = p },
     Placed { win: Win::Arp, rect: views::arpeggiate::rect, paint: views::arpeggiate::bounds, bounds: views::arpeggiate::bounds, pos: |s| s.arp.pos, set_pos: |s, p| s.arp.pos = p },
     Placed { win: Win::Container, rect: views::container::rect, paint: views::container::bounds, bounds: views::container::bounds, pos: |s| s.container.pos, set_pos: |s, p| s.container.pos = p },
+    Placed {
+        win: Win::PluginPalette,
+        rect: views::plugin_palette::rect,
+        paint: views::plugin_palette::bounds,
+        bounds: views::plugin_palette::bounds,
+        pos: |s| s.palette.pos,
+        set_pos: |s, p| s.palette.pos = p,
+    },
     Placed {
         win: Win::PianoDlg,
         rect: views::piano_dlg::rect,

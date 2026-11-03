@@ -327,6 +327,54 @@ fn remap_slot_ui(s: &mut State, f: impl Fn(u16, u8) -> Option<(u16, u8)>) {
     });
 }
 
+/// Automation and controllers follow mixer places that moved (`track` and `slot` as `target::moved` takes them; spec:
+/// audio/automation.md "Targets follow moves"): the project's targets (`Project::follow_mixer_places`), the event
+/// editor's, and the remote control links (`remote::follow`). A link whose place went goes.
+fn follow_places(s: &mut State, track: &dyn Fn(u16) -> Option<u16>, slot: &dyn Fn(u16, u8) -> Option<(u16, u8)>) {
+    s.project.follow_mixer_places(track, slot);
+    if let Some(t) = os_model::target::moved(s.events.target, track, slot) {
+        s.events.target = t;
+    }
+    crate::remote::follow(s, |l| moved_link(l, track, slot));
+}
+
+/// Where remote control link target `l` goes as mixer places move (`follow_places`); `None`: its place went.
+fn moved_link(l: crate::typein::Target, track: &dyn Fn(u16) -> Option<u16>, slot: &dyn Fn(u16, u8) -> Option<(u16, u8)>) -> Option<crate::typein::Target> {
+    use crate::typein::Target as T;
+    Some(match l {
+        T::Knob(KnobId::MixPan(t)) => T::Knob(KnobId::MixPan(track(t)?)),
+        T::Knob(KnobId::MixSep(t)) => T::Knob(KnobId::MixSep(track(t)?)),
+        T::Knob(KnobId::Send(t, d)) => T::Knob(KnobId::Send(track(t)?, track(d)?)),
+        T::Knob(KnobId::Eq(t, b, k)) => T::Knob(KnobId::Eq(track(t)?, b, k)),
+        T::Knob(KnobId::SlotMix(t, k)) => {
+            let (t, k) = slot(t, k)?;
+            T::Knob(KnobId::SlotMix(t, k))
+        }
+        T::Knob(KnobId::Member(t, k, id, wet)) => {
+            let (t, k) = slot(t, k)?;
+            T::Knob(KnobId::Member(t, k, id, wet))
+        }
+        T::Fader(t) => T::Fader(track(t)?),
+        T::Latency(t, input, unit) => T::Latency(track(t)?, input, unit),
+        T::Param(key, i) => match crate::plugins::fx_of(key) {
+            Some((t, k)) => {
+                let (t, k) = slot(t, k)?;
+                T::Param(crate::plugins::fx_key(t, k), i)
+            }
+            None => l,
+        },
+        T::Member(t, k, id, wet) => {
+            let (t, k) = slot(t, k)?;
+            T::Member(t, k, id, wet)
+        }
+        T::MemberParam(t, k, id, i) => {
+            let (t, k) = slot(t, k)?;
+            T::MemberParam(t, k, id, i)
+        }
+        l => l,
+    })
+}
+
 /// Moves the tracks' icons as the tracks move (`m`: old index to new, `None` deleted).
 fn remap_track_ui(s: &mut State, m: impl Fn(u16) -> Option<u16>) {
     remap_icons(s, |o| match o {
@@ -594,14 +642,17 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             if slot_name(s, t, i).is_some() {
                 s.mixer.pending.push(FxReq::Toggle { track: t, slot: i });
             } else {
-                s.playlist.popup = Some(effect_menu(s, i, at.0, at.1));
+                effect_palette(app, i, at);
             }
             None
         }
         MHit::SlotArrow(i) => {
             let t = s.selected_mixer;
-            let m = if slot_name(s, t, i).is_some() { slot_menu(app, i, at.0, at.1) } else { effect_menu(&app.state, i, at.0, at.1) };
-            app.state.playlist.popup = Some(m);
+            if slot_name(s, t, i).is_some() {
+                app.state.playlist.popup = Some(slot_menu(app, i, at.0, at.1));
+            } else {
+                effect_palette(app, i, at);
+            }
             None
         }
         MHit::SlotLed(i) => {
@@ -918,15 +969,18 @@ pub fn right(app: &mut App, h: MHit) -> bool {
         // The slot's plugin menu, like a left click (spec: ui/plugin-menu.md §1).
         MHit::SlotArrow(i) => {
             let t = s.selected_mixer;
-            let m = if slot_name(s, t, i).is_some() { slot_menu(app, i, at.0, at.1) } else { effect_menu(&app.state, i, at.0, at.1) };
-            app.state.playlist.popup = Some(m);
+            if slot_name(s, t, i).is_some() {
+                app.state.playlist.popup = Some(slot_menu(app, i, at.0, at.1));
+            } else {
+                effect_palette(app, i, at);
+            }
         }
         MHit::SlotName(i) => {
             let t = s.selected_mixer;
             if slot_name(s, t, i).is_some() {
                 s.mixer.pending.push(FxReq::Show { track: t, slot: i });
             } else {
-                s.playlist.popup = Some(effect_menu(s, i, at.0, at.1));
+                effect_palette(app, i, at);
             }
         }
         MHit::SlotLed(i) => {
@@ -1255,6 +1309,7 @@ fn remove_tracks(s: &mut State, gone: &[u16]) -> Option<String> {
     }
     // Audio tracks follow their mixer track; one whose track goes is unassigned (spec: ui/playlist.md §6c).
     s.project.remap_link_mixers(m);
+    follow_places(s, &m, &|t, k| Some((m(t)?, k)));
     s.selected_mixer = m(s.selected_mixer).unwrap_or(1).min(inserts(s));
     s.mixer.sel = s.mixer.sel.iter().filter_map(|&t| m(t)).collect();
     remap_slot_ui(s, |t, k| Some((m(t)?, k)));
@@ -1362,6 +1417,7 @@ fn renumber(s: &mut State, m: &dyn Fn(u16) -> u16, from: u16, to: u16, d: i32) {
         c.mixer_track = m(c.mixer_track);
     }
     s.project.remap_link_mixers(|t| Some(m(t)));
+    follow_places(s, &|t| Some(m(t)), &|t, k| Some((m(t), k)));
     s.selected_mixer = m(s.selected_mixer);
     s.mixer.sel = s.mixer.sel.iter().map(|&t| m(t)).collect();
     remap_slot_ui(s, |t, k| Some((m(t), k)));
@@ -1436,6 +1492,7 @@ pub(crate) fn delete_track(s: &mut State, n: u16) -> Option<String> {
         c.mixer_track = m(c.mixer_track);
     }
     s.project.remap_link_mixers(|t| Some(m(t)));
+    follow_places(s, &|t| (t != n).then(|| m(t)), &|t, k| (t != n).then(|| (m(t), k)));
     let mut map = Vec::new();
     for t in n + 1..hidden {
         for k in 0..10u8 {
@@ -1681,11 +1738,10 @@ pub fn layout_menu(s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// Empty slot: the effect list (§7.1), the plugin menu for this slot (spec: ui/plugin-menu.md).
-pub fn effect_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
-    let mut items = vec![PItem::new("Plugin library", Cmd::Browser(crate::browser::BCmd::Jump(crate::browser::Jump::DbEffects))).key(crate::shortcuts::menu_key("Plugin library", "Shift+F8")), PItem::sep()];
-    items.extend(crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), false));
-    Popup { x, y, items, sub: None, scroll: [0; 2] }
+/// Empty slot: the effect list (§7.1), the plugin palette for this slot at the click (spec: ui/plugin-menu.md §1, §6;
+/// its footer has the Plugin library).
+fn effect_palette(app: &mut App, slot: u8, at: (f32, f32)) {
+    app.open_plugin_palette(crate::plugin_menu::Target::Fx(Some(slot)), at, None);
 }
 
 /// Filled slot ▸ (§7.2). Its Presets section works as in the plugin's window menu.
@@ -2203,7 +2259,9 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
                 m.slot_cpu.swap(a, b);
             }
             let (ka, kb) = (a as u8, b as u8);
-            remap_slot_ui(s, |u, k| Some((u, if u != t { k } else if k == ka { kb } else if k == kb { ka } else { k })));
+            let swap = move |u: u16, k: u8| Some((u, if u != t { k } else if k == ka { kb } else if k == kb { ka } else { k }));
+            remap_slot_ui(s, swap);
+            follow_places(s, &Some, &swap);
             s.mixer.pending.push(FxReq::Remap(vec![((t, a as u8), (t, b as u8)), ((t, b as u8), (t, a as u8))]));
             changed(s);
             None
@@ -3005,6 +3063,98 @@ mod tests {
         run(&mut a, MCmd::SlotDelete(1));
         assert_eq!(slot_name(&a.state, 2, 1), None);
         assert!(a.state.mixer.pending.iter().any(|r| matches!(r, FxReq::Create { track: 2, slot: 0, index: 0, .. })));
+    }
+
+    /// spec: audio/automation.md "Targets follow moves": an automation clip, a recorded pattern event, an initial value,
+    /// a controller link (and its controller in a slot) and the remote control links on a slot's or a track's settings
+    /// follow the slot moved, the track moved, tracks inserted before it and a track deleted before it; the undo of each
+    /// puts them back, and redo moves them again. A deleted track's targets go.
+    #[test]
+    fn automation_follows_moved_slots_and_tracks() {
+        use crate::remote::Link;
+        use crate::typein::Target as T;
+        use os_model::target::{self, MIXER_PAN, MIXER_VOLUME, SLOT_MIX};
+        let mut a = app();
+        a.plugins.effects = vec![crate::plugin_db::fake("Test FX", os_host::Kind::Effect)];
+        select(&mut a.state, 3, false);
+        run(&mut a, MCmd::AddEffect(0, 0));
+        crate::playlist::automation_channel(&mut a.state, target::slot_param(3, 0, 5), "FX", Vec::new());
+        let p = &mut a.state.project;
+        p.automations.last_mut().unwrap().targets.push(target::mixer(4, MIXER_VOLUME));
+        p.patterns[0].controls.push(os_model::ControlPoint { position: 0, kind: target::send(4, 5), value: 0 });
+        p.init_controls.push(os_model::InitControl { head: 0, target: target::slot(3, 0, SLOT_MIX), value: 1 });
+        p.controller_links.push(os_model::ControllerLink::new(0x7000 + 3 * 64 + 1, 0, target::mixer(4, MIXER_PAN)));
+        crate::remote::set_links(&[
+            Link::new(0, 20, T::Param(crate::plugins::fx_key(3, 0), 5)),
+            Link::new(0, 21, T::Fader(4)),
+            Link::new(0, 22, T::Knob(KnobId::SlotMix(3, 1))),
+            Link::new(0, 23, T::Knob(KnobId::Send(4, 5))),
+        ]);
+        a.state.history.reset();
+        // (clip targets, pattern event, initial value, controller link's source and target, remote links' targets)
+        type Places = (Vec<u32>, Vec<u32>, Vec<u32>, Vec<(u16, u32)>, Vec<T>);
+        let places = |a: &App| -> Places {
+            let p = &a.state.project;
+            (
+                p.automations.last().unwrap().targets.clone(),
+                p.patterns[0].controls.iter().map(|c| c.kind).collect(),
+                p.init_controls.iter().map(|c| c.target).collect(),
+                p.controller_links.iter().map(|l| (l.source(), l.target())).collect(),
+                crate::remote::links().iter().map(|l| l.target).collect(),
+            )
+        };
+        // Where everything is with tracks 3 and 4 (and 5, the send's destination) at `t3`, `t4`, `t5`, and track 3's
+        // slots 0 and 1 at `k0`, `k1`.
+        let at = |t3: u16, t4: u16, t5: u16, k0: u8, k1: u8| -> Places {
+            (
+                vec![target::slot_param(t3, k0, 5), target::mixer(t4, MIXER_VOLUME)],
+                vec![target::send(t4, t5)],
+                vec![target::slot(t3, k0, SLOT_MIX)],
+                vec![(0x7000 + t3 * 64 + u16::from(k1), target::mixer(t4, MIXER_PAN))],
+                vec![T::Param(crate::plugins::fx_key(t3, k0), 5), T::Fader(t4), T::Knob(KnobId::SlotMix(t3, k1)), T::Knob(KnobId::Send(t4, t5))],
+            )
+        };
+        let start = at(3, 4, 5, 0, 1);
+        assert_eq!(places(&a), start);
+
+        // Move effect: slots 0 and 1 of track 3 swap.
+        run(&mut a, MCmd::SlotMove(0, 1));
+        assert_eq!(slot_name(&a.state, 3, 1).as_deref(), Some("Test FX"));
+        assert_eq!(places(&a), at(3, 4, 5, 1, 0));
+        crate::history::undo(&mut a.state);
+        assert_eq!(places(&a), start, "undo puts them back");
+        crate::history::redo(&mut a.state);
+        assert_eq!(places(&a), at(3, 4, 5, 1, 0), "redo moves them again");
+        crate::history::undo(&mut a.state);
+
+        // Move right: tracks 3 and 4 swap.
+        run(&mut a, MCmd::MoveRight(3));
+        assert_eq!(places(&a), at(4, 3, 5, 0, 1));
+        crate::history::undo(&mut a.state);
+        assert_eq!(places(&a), start);
+
+        // Insert multiple... before track 2: three tracks, one step.
+        insert_many(&mut a.state, 2, "3");
+        assert_eq!(places(&a), at(6, 7, 8, 0, 1));
+        crate::history::undo(&mut a.state);
+        assert_eq!(places(&a), start, "one step puts back three moves");
+
+        // Delete track 2: the later ones move one left.
+        run(&mut a, MCmd::Delete(2));
+        assert_eq!(places(&a), at(2, 3, 4, 0, 1));
+        crate::history::undo(&mut a.state);
+        assert_eq!(places(&a), start);
+
+        // Delete track 4: its targets go; the clip stays with track 3's.
+        run(&mut a, MCmd::Delete(4));
+        let (clip, events, init, ctl, links) = places(&a);
+        assert_eq!(clip, [target::slot_param(3, 0, 5)]);
+        assert_eq!((events, init, ctl), (vec![], vec![target::slot(3, 0, SLOT_MIX)], vec![]));
+        assert_eq!(links, [T::Param(crate::plugins::fx_key(3, 0), 5), T::Knob(KnobId::SlotMix(3, 1))]);
+        crate::history::undo(&mut a.state);
+        let (clip, events, init, ctl, _) = places(&a);
+        assert_eq!((clip, events, init, ctl), (start.0, start.1, start.2, start.3), "the project's come back");
+        crate::remote::set_links(&[]);
     }
 
     /// spec: audio/sidechain.md "Hosted plugins' input buses": Sidechain input ▸ lists None and the tracks routed into

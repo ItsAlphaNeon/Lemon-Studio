@@ -36,8 +36,8 @@ pub fn paint(ui: &mut Ui, s: &State, b: &LinkBox) {
     let all = !b.all.is_empty();
     ui.c.text(f.bold(), r.x + 10.0, r.y + 7.0, t.text, if all { "Link all parameters" } else { "Remote control settings" });
     let x = Rect::new(r.right() - 24.0, r.y + 4.0, 20.0, 20.0);
-    let hov = hit(ui, x, RAct::Close, "Close (Esc)");
-    ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.glyph } else { t.text });
+    let hov = super::close_button(ui, x, x, Action::Remote(RAct::Close), "Close (Esc)");
+    ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.tx(0xffffff) } else { t.text });
     // The target's name.
     let name = match b.target {
         _ if all => format!("{}: {} parameters", crate::remote::group_name(s, b), b.all.len()),

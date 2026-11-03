@@ -192,6 +192,10 @@ impl ControllerLink {
     pub fn set_target(&mut self, t: u32) {
         self.bytes[8..12].copy_from_slice(&t.to_le_bytes());
     }
+
+    pub fn set_source(&mut self, place: u16) {
+        self.bytes[2..4].copy_from_slice(&place.to_le_bytes());
+    }
 }
 
 /// One of the project's initial values: a control and the value it takes when the song starts (spec:
@@ -2134,6 +2138,32 @@ impl Project {
         }
     }
 
+    /// The automation targets follow mixer places that moved ([`target::moved`]: `track` and `slot` give a place's new
+    /// one, `None` for one that went): the automation clips', recorded pattern events', initial values' and controller
+    /// links', and a controller's own place in a slot. A target whose place went goes (its clip stays), and so does a
+    /// controller link whose controller went.
+    pub fn follow_mixer_places(&mut self, track: &dyn Fn(u16) -> Option<u16>, slot: &dyn Fn(u16, u8) -> Option<(u16, u8)>) {
+        let moved = |t: &mut u32| target::moved(*t, track, slot).map(|n| *t = n).is_some();
+        for a in &mut self.automations {
+            a.targets.retain_mut(moved);
+        }
+        for p in &mut self.patterns {
+            p.controls.retain_mut(|c| moved(&mut c.kind));
+        }
+        self.init_controls.retain_mut(|c| moved(&mut c.target));
+        self.controller_links.retain_mut(|l| {
+            let mut t = l.target();
+            if !moved(&mut t) {
+                return false;
+            }
+            l.set_target(t);
+            match l.source_slot() {
+                Some((tr, k)) => slot(tr, k).map(|(tr, k)| l.set_source(0x7000 + tr * 64 + u16::from(k))).is_some(),
+                None => true,
+            }
+        });
+    }
+
     /// Every track link's channel follows `m` (`None`: the channel is gone, and an instrument track's link with it).
     pub fn remap_link_channels(&mut self, m: impl Fn(u16) -> Option<u16>) {
         for t in self.arrangements.iter_mut().flat_map(|a| a.tracks.iter_mut()) {
@@ -2593,6 +2623,25 @@ pub mod target {
         Target::Other(t)
     }
 
+    /// Target `t` after mixer places moved: `track` gives a track's new index (its own settings: volume, pan, stereo
+    /// separation, equaliser, sends, and a send's destination), `slot` a slot's new track and slot (its switch, mix
+    /// level and plugin parameters). `None` from either: the place is gone, and so is the target. Other targets stay.
+    pub fn moved(t: u32, track: &dyn Fn(u16) -> Option<u16>, slot: &dyn Fn(u16, u8) -> Option<(u16, u8)>) -> Option<u32> {
+        let place = |track: u16| u32::from(0x7000 + track * 64) << 16;
+        Some(match decode(t) {
+            Target::SlotParam(tr, k, p) => slot(tr, k).map(|(tr, k)| slot_param(tr, k, p))?,
+            Target::SlotOn(tr, k) => slot(tr, k).map(|(tr, k)| self::slot(tr, k, SLOT_ON))?,
+            Target::SlotMix(tr, k) => slot(tr, k).map(|(tr, k)| self::slot(tr, k, SLOT_MIX))?,
+            Target::MixerVolume(tr) | Target::MixerPan(tr) | Target::MixerSeparation(tr) | Target::MixerEq(tr, ..) => place(track(tr)?) | (t & 0xFFFF),
+            // Both forms of a send keep theirs: 0x2000 + d, or 0x1F00 + 64 + d.
+            Target::MixerSend(tr, d) => {
+                let d = track(d)?;
+                place(track(tr)?) | u32::from(if (t >> 8) as u8 == 0x20 { SEND + d } else { 0x1F00 | (64 + d) })
+            }
+            _ => t,
+        })
+    }
+
     /// Bipolar targets centre at 0.5.
     pub fn bipolar(t: u32) -> bool {
         matches!(
@@ -2610,6 +2659,36 @@ pub mod target {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// Targets follow mixer places that move: a slot's to its new track and slot, a track's own (and a send's
+        /// destination) to its new index; a place that goes takes its targets with it; other targets stay.
+        #[test]
+        fn targets_follow_moved_mixer_places() {
+            // Track 3 and 5 swap; slot 2 of track 3 moves to slot 7 of track 4; track 6 goes.
+            let track = |t: u16| match t {
+                3 => Some(5),
+                5 => Some(3),
+                6 => None,
+                t => Some(t),
+            };
+            let slot = |t: u16, k: u8| if (t, k) == (3, 2) { Some((4, 7)) } else { track(t).map(|t| (t, k)) };
+            let m = |t: u32| moved(t, &track, &slot);
+            assert_eq!(m(slot_param(3, 2, 40)), Some(slot_param(4, 7, 40)));
+            assert_eq!(m(self::slot(3, 2, SLOT_MIX)), Some(self::slot(4, 7, SLOT_MIX)));
+            assert_eq!(m(self::slot(3, 0, SLOT_ON)), Some(self::slot(5, 0, SLOT_ON)), "slot 0 is a slot, not the track");
+            assert_eq!(m(self::slot(5, 9, SLOT_ON)), Some(self::slot(3, 9, SLOT_ON)));
+            assert_eq!(m(mixer(3, MIXER_VOLUME)), Some(mixer(5, MIXER_VOLUME)));
+            assert_eq!(m(mixer(5, EQ_FREQ + 1)), Some(mixer(3, EQ_FREQ + 1)));
+            assert_eq!(m(send(3, 5)), Some(send(5, 3)), "the send's destination too");
+            let old_send = u32::from(0x7000 + 3 * 64u16) << 16 | 0x1F00 | (64 + 1);
+            assert_eq!(decode(m(old_send).unwrap()), Target::MixerSend(5, 1));
+            assert_eq!(m(mixer(6, MIXER_PAN)), None);
+            assert_eq!(m(send(1, 6)), None);
+            assert_eq!(m(slot_param(6, 1, 0)), None);
+            for t in [channel(3, CHANNEL_VOLUME), channel_param(5, 2), TEMPO, mixer(1, MIXER_VOLUME)] {
+                assert_eq!(m(t), Some(t));
+            }
+        }
 
         // spec: plugins/plugin-parameters.md §3
         #[test]

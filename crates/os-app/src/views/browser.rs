@@ -349,7 +349,7 @@ pub fn list_dir(s: &State, dir: &Path) -> Rc<Vec<Entry>> {
 pub fn file_icon(name: &str) -> Icon {
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
-        "wav" | "mp3" | "ogg" | "flac" | "aif" | "aiff" => Icon::FileAudio,
+        "wav" | "mp3" | "ogg" | "flac" | "aif" | "aiff" | "m4a" => Icon::FileAudio,
         "mid" | "midi" => Icon::PianoRoll,
         "flp" | "lemon" => Icon::FileProject,
         "txt" | "url" | "pdf" | "nfo" | "rtf" | "htm" | "html" | "md" => Icon::FileText,
