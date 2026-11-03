@@ -2120,6 +2120,13 @@ impl Engine {
         }
     }
 
+    /// A stopped playback that rings out its effects' tails (its channels held, `pause`): the voices it holds will
+    /// never sound again; they go, so they are not counted.
+    pub fn forget_voices(&mut self) {
+        self.voices.clear();
+        self.sounding.clear();
+    }
+
     /// Start a live note on channel `channel` (rack position) at the next tick; it rings until
     /// `note_off` (or the sample ends). Velocity 0..=128, 100 = unity.
     pub fn note_on(&mut self, channel: usize, key: u16, velocity: u8) {
