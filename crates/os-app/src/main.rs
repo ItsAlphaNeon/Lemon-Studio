@@ -1114,11 +1114,16 @@ impl ApplicationHandler for Shell {
                         event
                     };
                     self.app.repeat = event.repeat;
+                    self.app.code = match event.physical_key {
+                        winit::keyboard::PhysicalKey::Code(code) => Some(code),
+                        _ => None,
+                    };
                     // The key acts in the window that has the keyboard (the one it came to), and a popup or box it
                     // opens shows there.
                     let (key, c, alt) = (&event.logical_key, ctrl(self.mods), self.mods.alt_key());
                     self.app.key_on(self.key_on, key, c, alt);
                     self.app.repeat = false;
+                    self.app.code = None;
                     window.request_redraw();
                 }
             }

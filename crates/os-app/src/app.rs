@@ -1394,6 +1394,9 @@ pub struct App {
     pub rshift: bool,
     /// The key now passed to [`App::key`] is an auto-repeat of a held key (spec: ui/piano-keys.md §4 rule 1).
     pub repeat: bool,
+    /// The physical key behind the key now passed to [`App::key`], when known: shortcuts named by a digit key (Shift+4,
+    /// Shift+5) go by the key, not by the character the layout gives it with Shift.
+    pub code: Option<winit::keyboard::KeyCode>,
     /// Playlist regions from the last paint (grid, ruler, marker lane).
     pl_grid: Option<Rect>,
     /// Playlist scrolls since the last paint: how far the content moved (logical px, right and down), see
@@ -1634,6 +1637,7 @@ impl App {
             alt: false,
             rshift: false,
             repeat: false,
+            code: None,
             pl_grid: None,
             scrolled: None,
             shifts: Vec::new(),
@@ -7850,6 +7854,8 @@ impl App {
             Key::Character(c) if ctrl && self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_AS)),
             // VIEW ▸ Arrange windows ▸ Realign (spec: ui/menu-submenus.md §2).
             Key::Character(c) if ctrl && self.shift && !alt && c.eq_ignore_ascii_case("h") => self.arrange(crate::arrange::Layout::Realign),
+            // TOOLS > Stop sound (Ctrl+H, views/menus.rs).
+            Key::Character(c) if ctrl && !self.shift && !alt && c.eq_ignore_ascii_case("h") => self.stop_sound(),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
             Key::Character(c) if ctrl && self.shift && !alt && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT_MP3)),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
@@ -7907,6 +7913,25 @@ impl App {
         // The engine gets the loop range before its first tick.
         self.sync_loop_range();
         self.transport.play_counted(&p, self.play_mode(), start, bars);
+    }
+
+    /// TOOLS > Stop sound (Ctrl+H): stops playback and every voice.
+    fn stop_sound(&mut self) {
+        self.transport.stop();
+        self.state.message = Some("Sound stopped".into());
+    }
+
+    /// Shift with the digit key `d` (the key in the number row, on any layout): the physical key when it is known, else
+    /// the character it types on a US layout.
+    pub(crate) fn shift_digit(&self, key: &winit::keyboard::Key, d: u8) -> bool {
+        use winit::keyboard::{Key, KeyCode::*};
+        const ROW: [winit::keyboard::KeyCode; 10] = [Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9];
+        const US: [&str; 10] = [")", "!", "@", "#", "$", "%", "^", "&", "*", "("];
+        let d = usize::from(d.min(9));
+        match self.code {
+            Some(code) => code == ROW[d],
+            None => matches!(key, Key::Character(c) if c == US[d] || c.as_str() == d.to_string()),
+        }
     }
 
     fn play_mode(&self) -> PlayMode {
@@ -8141,6 +8166,16 @@ impl App {
             return;
         };
         let tool = self.state.piano.tool;
+        // Ctrl in the Draw and Paint tools selects without switching tools (issue #315): a Ctrl+drag draws the Select
+        // tool's marquee, and a Ctrl+click on a note selects that note only (spec: ui/piano-keys.md "Selecting").
+        if self.ctrl && matches!(tool, Tool::Draw | Tool::Paint) && matches!(a, Action::PianoGrid | Action::PianoNote(_)) {
+            let s = &mut self.state;
+            let base = if let Action::PianoNote(i) = *a { vec![i] } else { Vec::new() };
+            s.piano.select(s.pattern, ch, base.clone());
+            self.drag = Some(Drag::Marquee { x0: x, y0: y, base });
+            self.damage_piano();
+            return;
+        }
         if matches!(a, Action::PianoGrid | Action::PianoNote(_)) && tool != Tool::Draw {
             let s = &mut self.state;
             let note = if let Action::PianoNote(i) = *a { Some(i) } else { None };
@@ -9252,10 +9287,7 @@ impl App {
             }
             // spec: ui/cancel-recording.md
             MenuCmd::CancelRecording => self.state.message = Some(self.cancel_recording()),
-            MenuCmd::StopSound => {
-                self.transport.stop();
-                self.state.message = Some("Sound stopped".into());
-            }
+            MenuCmd::StopSound => self.stop_sound(),
             // spec: ui/unused-channels.md
             MenuCmd::SelectUnused => self.state.message = crate::rack::run(self, crate::rack::RCmd::SelectUnused),
             MenuCmd::PurgeClips => self.state.message = crate::rack::run(self, crate::rack::RCmd::Purge),
@@ -14761,6 +14793,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Ctrl+H is TOOLS > Stop sound, the key its menu entry shows; Shift+Ctrl+H stays Realign.
+    #[test]
+    fn ctrl_h_stops_the_sound() {
+        use winit::keyboard::Key;
+        let mut app = App::new(None);
+        app.state.message = None;
+        app.key(&Key::Character("h".into()), true, false);
+        assert_eq!(app.state.message.as_deref(), Some("Sound stopped"));
+        assert!(!app.transport.playing());
+    }
+
+    /// Shift+4 and Shift+5 go by the number row's key: a Turkish layout's Shift+4 types "+" and is still Shift+4.
+    /// Without the key (a synthesized key) the US characters stand in.
+    #[test]
+    fn shift_digits_go_by_the_key_on_any_layout() {
+        use winit::keyboard::{Key, KeyCode};
+        let mut app = App::new(None);
+        let plus = Key::Character("+".into());
+        app.code = Some(KeyCode::Digit4);
+        assert!(app.shift_digit(&plus, 4));
+        assert!(!app.shift_digit(&plus, 5));
+        app.code = Some(KeyCode::Equal);
+        assert!(!app.shift_digit(&plus, 4), "the US layout's Shift+= is not Shift+4");
+        app.code = None;
+        assert!(app.shift_digit(&Key::Character("$".into()), 4));
+        assert!(app.shift_digit(&Key::Character("%".into()), 5));
+        assert!(!app.shift_digit(&plus, 4));
+        // In the playlist: a Turkish Shift+4 zooms out far.
+        app.state.project = test_project();
+        app.state.z = vec![Win::Playlist];
+        app.shift = true;
+        app.code = Some(KeyCode::Digit4);
+        let pattern = app.state.pattern;
+        assert!(crate::playlist::key(&mut app, &plus, false, false));
+        assert_eq!(app.state.pattern, pattern);
+    }
+
     /// Shift+Ctrl+S is Save as: it asks where and leaves the open file as it was. Ctrl+S saves in place without asking.
     /// Shift+Ctrl+O / R / N have no command: they neither open, export nor write a new version.
     #[test]
@@ -15992,6 +16061,62 @@ mod tests {
         app.mouse_up();
         let v = piano::controls(&app.state).iter().find(|p| p.param() == os_model::ControlPoint::PITCH).map(|p| p.value);
         assert!(v.is_some_and(|v| (v - 1365).abs() <= 2), "{v:?}");
+    }
+
+    /// Ctrl in the Draw and Paint tools (issue #315): a Ctrl+drag selects the notes in its box, adding and moving none;
+    /// a Ctrl+click on a note selects that note only; without Ctrl the tool draws as before.
+    #[test]
+    fn piano_ctrl_drag_selects_in_draw() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        app.state.selected_channel = 0;
+        app.state.piano.scroll_x = 0.0;
+        frame(&mut app, &mut c, None);
+        let ch = piano::channel(&app.state);
+        let mine = |app: &App| -> Vec<Note> { piano::notes(&app.state).iter().filter(|n| Some(n.channel) == ch).copied().collect() };
+        let g = app.piano_geom().unwrap();
+        let row = |k: i32| g.y_of(k) + 8.0;
+        let click = |app: &mut App, c: &mut Canvas, x: f32, y: f32| {
+            app.mouse_move(x, y);
+            app.mouse_down();
+            app.mouse_up();
+            frame(app, c, None);
+        };
+        for t in [0.0, 96.0, 192.0] {
+            click(&mut app, &mut c, g.x_of(t) + 2.0, row(60));
+        }
+        let drawn = mine(&app);
+        for tool in [Tool::Draw, Tool::Paint] {
+            app.state.piano.tool = tool;
+            app.state.piano.clear_selection();
+            // Ctrl+drag from empty grid over the first two notes.
+            app.ctrl = true;
+            app.mouse_move(g.x_of(0.0) + 1.0, row(62));
+            app.mouse_down();
+            for i in 1..=20 {
+                let k = i as f32 / 20.0;
+                app.mouse_move(g.x_of(0.0) + 1.0 + (g.x_of(120.0) - g.x_of(0.0) - 1.0) * k, row(62) + (row(58) - row(62)) * k);
+            }
+            app.mouse_up();
+            app.ctrl = false;
+            frame(&mut app, &mut c, None);
+            assert_eq!(mine(&app), drawn, "{tool:?}: no note added or moved");
+            assert_eq!(app.state.piano.selection(app.state.pattern, ch).len(), 2, "{tool:?}");
+            assert!(app.state.piano.overlay.is_none(), "marquee gone after release");
+            // Ctrl+click on the third note: that note only.
+            app.ctrl = true;
+            click(&mut app, &mut c, g.x_of(192.0) + 4.0, row(60));
+            app.ctrl = false;
+            let sel = app.state.piano.selection(app.state.pattern, ch);
+            assert_eq!(sel.len(), 1, "{tool:?}");
+            assert_eq!(piano::notes(&app.state)[sel[0]].position, 192);
+            assert_eq!(mine(&app), drawn);
+        }
+        // Without Ctrl, Draw still adds a note.
+        app.state.piano.tool = Tool::Draw;
+        click(&mut app, &mut c, g.x_of(384.0) + 2.0, row(60));
+        assert_eq!(mine(&app).len(), drawn.len() + 1);
     }
 
     /// Piano-roll tools driven with the mouse and keys (spec: ui/piano-roll.md §9).
