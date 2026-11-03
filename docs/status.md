@@ -301,7 +301,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
   part on or off; dense projects render about 4.5 times faster on 8 cores
 
 **CPU panel.** Shows the audio load, the voices playing (the engine's and every plugin's), memory and
-dropouts. Its right-click menu has refresh rates, a frames-per-second view and handle / thread / font
+dropouts: the count in a quiet colour, red for a few seconds after one cuts into sound, marked "!" once a plugin
+has arrived late. Its right-click menu has refresh rates, a frames-per-second view and handle / thread / font
 counts. Double-clicking it opens the plugin performance monitor: each plugin's processing time, peak, total
 and voices, with sorting, find and freeze.
 
