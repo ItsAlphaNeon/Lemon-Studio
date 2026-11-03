@@ -247,6 +247,29 @@ pub fn retarget(pairs: &[(Target, Target)]) {
     }
 }
 
+/// The links follow what they drive as it moves (mixer places, rack rows): `f` gives a target's new one, `None` when
+/// what it drove went, and the link with it. The moves join the edit's (`State::link_moves`), so its undo step puts
+/// them back; a link that went does not come back.
+pub fn follow(s: &mut State, f: impl Fn(Target) -> Option<Target>) {
+    let old = links();
+    let mut all = old.clone();
+    let before = std::mem::take(&mut s.link_moves);
+    let mut moves = Vec::new();
+    all.retain_mut(|l| {
+        let Some(to) = f(l.target) else { return false };
+        let from = before.iter().find(|m| m.1 == l.target).map_or(l.target, |m| m.0);
+        if from != to {
+            moves.push((from, to));
+        }
+        l.target = to;
+        true
+    });
+    if all != old {
+        set_links(&all);
+    }
+    s.link_moves = moves;
+}
+
 pub fn remove(t: Target) {
     let mut all = links();
     all.retain(|o| o.target != t);

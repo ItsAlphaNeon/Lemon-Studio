@@ -1152,6 +1152,20 @@ pub fn remap_project(p: &mut Project, map: &[Option<usize>]) {
         let hi = (c.target >> 16) as u16;
         hi >= 0x2000 || idx.get(&hi).map(|&n| c.target = u32::from(n) << 16 | (c.target & 0xFFFF)).is_some()
     });
+    // Controller links: a channel's target, and a controller that is a channel, follow it; a link whose channel goes
+    // goes (spec: audio/automation.md "Targets follow moves").
+    p.controller_links.retain_mut(|l| {
+        let (hi, source) = ((l.target() >> 16) as u16, l.source());
+        if hi < 0x2000 {
+            let Some(&n) = idx.get(&hi) else { return false };
+            l.set_target(u32::from(n) << 16 | (l.target() & 0xFFFF));
+        }
+        if source < 0x2000 {
+            let Some(&n) = idx.get(&source) else { return false };
+            l.set_source(n);
+        }
+        true
+    });
 }
 
 /// Apply a new channel order (`order` = old rows top to bottom; rows left out are deleted) to the project, the
@@ -1166,8 +1180,26 @@ pub fn reorder(app: &mut App, order: &[usize]) {
     }
     let m = |r: usize| map.get(r).copied().flatten();
     remap_state(&mut app.state, &map);
+    crate::remote::follow(&mut app.state, |l| moved_link(l, &m));
     app.remap_rows(&m);
     app.invalidate();
+}
+
+/// Where remote control link target `l` goes as rack rows move (`m`: a row's new row, `None` for one deleted; spec:
+/// audio/automation.md "Targets follow moves"); `None`: its row went.
+fn moved_link(l: crate::typein::Target, m: &dyn Fn(usize) -> Option<usize>) -> Option<crate::typein::Target> {
+    use crate::typein::Target as T;
+    Some(match l {
+        T::Knob(KnobId::ChanVol(r)) => T::Knob(KnobId::ChanVol(m(r)?)),
+        T::Knob(KnobId::ChanPan(r)) => T::Knob(KnobId::ChanPan(m(r)?)),
+        T::Knob(KnobId::AutoLfo(r, k)) => T::Knob(KnobId::AutoLfo(m(r)?, k)),
+        T::Knob(KnobId::MidiOut(r, k)) => T::Knob(KnobId::MidiOut(m(r)?, k)),
+        T::RackTrack(r) => T::RackTrack(m(r)?),
+        T::RackLed(r) => T::RackLed(m(r)?),
+        // A channel's plugin is hosted by its row.
+        T::Param(key, i) if key < crate::plugins::FX_KEY => T::Param(m(key)?, i),
+        l => l,
+    })
 }
 
 /// The last row's channel goes (an undone drop that made it, `history`): `reorder` without the app, whose instrument
@@ -4603,6 +4635,55 @@ mod tests {
         app.state.toggles.push("typing");
         app.state.selected_channel = 0;
         app
+    }
+
+    /// spec: audio/automation.md "Targets follow moves": an automation clip, an initial value, a controller link (and a
+    /// controller that is a channel) and the remote control links on a channel follow it when the rows move; the undo
+    /// puts them back, and a deleted channel's go.
+    #[test]
+    fn automation_follows_moved_channels() {
+        use crate::remote::Link;
+        use crate::typein::Target as T;
+        use os_model::target::{self, CHANNEL_VOLUME};
+        let mut app = lock_app();
+        crate::playlist::automation_channel(&mut app.state, target::channel(1, CHANNEL_VOLUME), "Vol", Vec::new());
+        let p = &mut app.state.project;
+        p.init_controls.push(os_model::InitControl { head: 0, target: target::channel(1, CHANNEL_VOLUME), value: 1 });
+        p.controller_links.push(os_model::ControllerLink::new(2, 0, target::channel(1, CHANNEL_VOLUME)));
+        crate::remote::set_links(&[Link::new(0, 20, T::Knob(KnobId::ChanVol(1))), Link::new(0, 21, T::Param(1, 3)), Link::new(0, 22, T::RackLed(2))]);
+        app.state.history.reset();
+        type Places = (Vec<u32>, Vec<u32>, Vec<(u16, u32)>, Vec<T>);
+        let places = |app: &App| -> Places {
+            let p = &app.state.project;
+            (
+                p.automations.last().unwrap().targets.clone(),
+                p.init_controls.iter().map(|c| c.target).collect(),
+                p.controller_links.iter().map(|l| (l.source(), l.target())).collect(),
+                crate::remote::links().iter().map(|l| l.target).collect(),
+            )
+        };
+        // Channel 1 on row `a`, channel 2 on row `b`.
+        let at = |a: u16, b: u16| -> Places {
+            (
+                vec![target::channel(a, CHANNEL_VOLUME)],
+                vec![target::channel(a, CHANNEL_VOLUME)],
+                vec![(b, target::channel(a, CHANNEL_VOLUME))],
+                vec![T::Knob(KnobId::ChanVol(usize::from(a))), T::Param(usize::from(a), 3), T::RackLed(usize::from(b))],
+            )
+        };
+        assert_eq!(places(&app), at(1, 2));
+        app.state.rack.select_only(1);
+        run(&mut app, RCmd::MoveSel(1));
+        assert_eq!(places(&app), at(2, 1));
+        crate::history::undo(&mut app.state);
+        assert_eq!(places(&app), at(1, 2), "undo puts them back");
+
+        // Deleting the channel the clip drives: its targets and links go (the clip stays).
+        delete_step(&mut app, &[1]);
+        let (clip, init, ctl, links) = places(&app);
+        assert_eq!((clip, init, ctl), (vec![], vec![], vec![]));
+        assert_eq!(links, [T::RackLed(1)], "channel 2 is on row 1 now");
+        crate::remote::set_links(&[]);
     }
 
     /// Receive notes from ▸ Computer keyboard (§18, measured on the original 2026-10-30): the locked channel takes the
