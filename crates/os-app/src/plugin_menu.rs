@@ -3,15 +3,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Plugin menus (the full-screen plugin picker is retired): F8, the toolbar's plugin button, the channel rack's "+",
-//! Add one ▸ / Insert ▸ and the mixer slots open the app's own popup listing the installed plugins, and a pick adds
-//! the plugin where that menu says.
+//! Plugin menus (the full-screen plugin picker is retired): Add one ▸, Insert ▸, Replace ▸ and the other submenus list
+//! the installed plugins in the app's own popup, and a pick adds the plugin where that menu says. What opened a plugin
+//! menu on its own (F8, the toolbar's plugin button, the channel rack's "+", an empty mixer slot) opens the plugin
+//! palette (`crate::plugin_palette`), which lists the same plugins and picks the same way.
 // spec: ui/plugin-menu.md
 
 use std::collections::BTreeMap;
 
 use crate::app::{App, State};
-use crate::playlist::{Cmd, Mark, PItem, Popup};
+use crate::playlist::{Cmd, Mark, PItem};
 use crate::plugin_db::{self as db, Entry, MenuView, Mode};
 
 /// What a plugin menu entry does (`Cmd::Plugin`).
@@ -54,7 +55,8 @@ pub enum Target {
     Track(u16),
 }
 
-fn pick(target: Target, effect: bool, index: usize) -> Cmd {
+/// What picking plugin `index` (a generator, or an effect with `effect`) runs for `target`.
+pub(crate) fn pick(target: Target, effect: bool, index: usize) -> Cmd {
     use crate::mixer::MCmd;
     match target {
         Target::Container(slot) if effect => return Cmd::Mixer(MCmd::MemberAdd(slot, index)),
@@ -167,35 +169,6 @@ pub fn items(s: &State, target: Target, nested: bool) -> Vec<PItem> {
 /// plugin menu's generator list, picks making a new channel for playlist track `t`.
 pub fn track_generators(s: &State, t: u16) -> Vec<PItem> {
     section(s, false, Target::Track(t), true)
-}
-
-/// A plugin menu for `target` at (x, y).
-pub fn menu(s: &State, target: Target, x: f32, y: f32) -> Popup {
-    Popup { x, y, items: items(s, target, false), sub: None, scroll: [0; 2] }
-}
-
-/// Whether the open popup is a plugin menu (F8 closes it).
-pub fn is_open(s: &State) -> bool {
-    s.playlist.popup.as_ref().is_some_and(|p| p.items.iter().any(|i| i.cmd == Cmd::Plugin(PlugCmd::Manage)))
-}
-
-impl App {
-    /// Opens the plugin menu for `target` at (x, y); F8 while one is open closes it.
-    pub fn open_plugin_menu(&mut self, target: Target, at: (f32, f32)) {
-        self.state.menu_open = None;
-        self.state.playlist.popup = Some(menu(&self.state, target, at.0, at.1));
-        self.invalidate();
-    }
-
-    /// F8 (spec §1): the all-plugins menu at the mouse, or closes an open plugin menu.
-    pub fn toggle_plugin_menu(&mut self) {
-        if is_open(&self.state) {
-            self.state.playlist.popup = None;
-            self.invalidate();
-        } else {
-            self.open_plugin_menu(Target::All, self.mouse);
-        }
-    }
 }
 
 /// Runs a plugin menu command. Returns a status message.

@@ -593,14 +593,17 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             if slot_name(s, t, i).is_some() {
                 s.mixer.pending.push(FxReq::Toggle { track: t, slot: i });
             } else {
-                s.playlist.popup = Some(effect_menu(s, i, at.0, at.1));
+                effect_palette(app, i, at);
             }
             None
         }
         MHit::SlotArrow(i) => {
             let t = s.selected_mixer;
-            let m = if slot_name(s, t, i).is_some() { slot_menu(app, i, at.0, at.1) } else { effect_menu(&app.state, i, at.0, at.1) };
-            app.state.playlist.popup = Some(m);
+            if slot_name(s, t, i).is_some() {
+                app.state.playlist.popup = Some(slot_menu(app, i, at.0, at.1));
+            } else {
+                effect_palette(app, i, at);
+            }
             None
         }
         MHit::SlotLed(i) => {
@@ -917,15 +920,18 @@ pub fn right(app: &mut App, h: MHit) -> bool {
         // The slot's plugin menu, like a left click (spec: ui/plugin-menu.md §1).
         MHit::SlotArrow(i) => {
             let t = s.selected_mixer;
-            let m = if slot_name(s, t, i).is_some() { slot_menu(app, i, at.0, at.1) } else { effect_menu(&app.state, i, at.0, at.1) };
-            app.state.playlist.popup = Some(m);
+            if slot_name(s, t, i).is_some() {
+                app.state.playlist.popup = Some(slot_menu(app, i, at.0, at.1));
+            } else {
+                effect_palette(app, i, at);
+            }
         }
         MHit::SlotName(i) => {
             let t = s.selected_mixer;
             if slot_name(s, t, i).is_some() {
                 s.mixer.pending.push(FxReq::Show { track: t, slot: i });
             } else {
-                s.playlist.popup = Some(effect_menu(s, i, at.0, at.1));
+                effect_palette(app, i, at);
             }
         }
         MHit::SlotLed(i) => {
@@ -1680,11 +1686,10 @@ pub fn layout_menu(s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// Empty slot: the effect list (§7.1), the plugin menu for this slot (spec: ui/plugin-menu.md).
-pub fn effect_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
-    let mut items = vec![PItem::new("Plugin library", Cmd::Browser(crate::browser::BCmd::Jump(crate::browser::Jump::DbEffects))).key(crate::shortcuts::menu_key("Plugin library", "Shift+F8")), PItem::sep()];
-    items.extend(crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), false));
-    Popup { x, y, items, sub: None, scroll: [0; 2] }
+/// Empty slot: the effect list (§7.1), the plugin palette for this slot at the click (spec: ui/plugin-menu.md §1, §6;
+/// its footer has the Plugin library).
+fn effect_palette(app: &mut App, slot: u8, at: (f32, f32)) {
+    app.open_plugin_palette(crate::plugin_menu::Target::Fx(Some(slot)), at, None);
 }
 
 /// Filled slot ▸ (§7.2). Its Presets section works as in the plugin's window menu.

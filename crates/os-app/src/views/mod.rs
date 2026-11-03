@@ -21,6 +21,7 @@ pub mod mixer;
 pub mod piano;
 pub mod patterns;
 pub mod perf;
+pub mod plugin_palette;
 pub mod playlist;
 pub mod project_forms;
 pub mod rack;
@@ -231,6 +232,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::PianoDlg => ui.part(Seg::Win(win), a, |ui| piano_dlg::paint(ui, s, f)),
             Win::Events => ui.part(Seg::Win(win), a, |ui| events::paint(ui, s, f)),
             Win::Container => ui.part(Seg::Win(win), a, |ui| container::paint(ui, s, f)),
+            Win::PluginPalette => ui.part(Seg::Win(win), a, |ui| plugin_palette::paint(ui, s, f)),
             _ => {}
         }
         ui.c.pop_clip();

@@ -1377,12 +1377,10 @@ mod tests {
         app.state.browser_open.insert(format!("{root}/{}/Generators/{}", view::INSTALLED, view::BUILT_IN));
         let built_in: Vec<String> = view::rows(&app.state).into_iter().filter(|r| r.depth == 4).map(|r| r.label).collect();
         assert!(built_in.iter().any(|l| l == crate::plugins::LEMON_SAMPLER), "{built_in:?}");
-        // The mixer's empty-slot menu: Plugin database works and opens the Effects section.
-        let menu = crate::mixer::effect_menu(&app.state, 0, 0.0, 0.0);
-        let first = &menu.items[0];
-        assert!(first.label == "Plugin library" && first.enabled);
+        // An empty mixer slot's plugin palette: its Plugin library button opens the Effects section.
         app.state.browser_tab = 0;
-        app.browser_cmd(BCmd::Jump(Jump::DbEffects));
+        app.open_plugin_palette(crate::plugin_menu::Target::Fx(Some(0)), (0.0, 0.0), None);
+        app.palette_act(crate::plugin_palette::PalAct::Library);
         let fx = format!("{root}/Effects");
         assert!(app.state.browser_tab == view::PLUGIN_TAB && app.state.browser_open.contains(&fx) && app.state.browser_sel.as_ref() == Some(&fx));
         // The options menu: Expand folders and the indexing options work; tags stay greyed out.

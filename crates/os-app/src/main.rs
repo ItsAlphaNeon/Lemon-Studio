@@ -102,6 +102,7 @@ mod playlist;
 mod plugin_db;
 mod plugin_manager;
 mod plugin_menu;
+mod plugin_palette;
 mod plugin_popup;
 mod plugin_rebuild;
 mod plugin_scan;
@@ -1409,7 +1410,7 @@ fn screenshot(args: &[String]) {
             "--browser-tab" => browser_tab = it.next().and_then(|v| v.parse().ok()),
             // The browser's width incl. its splitter, as dragged (spec: ui/browser.md §9).
             "--browser-width" => browser_w = it.next().and_then(|v| v.parse().ok()),
-            // "all" / "gen" / "fx": that plugin menu at the window's centre (spec: ui/plugin-menu.md §5).
+            // "all" / "gen" / "fx": the plugin palette of that list near the window's top centre (spec: ui/plugin-menu.md §5, §6).
             "--plugin-menu" => {
                 plugin_menu = Some(match it.next().map(String::as_str) {
                     Some("gen") => plugin_menu::Target::Gen(None),
@@ -1599,7 +1600,7 @@ fn screenshot(args: &[String]) {
     }
     if let Some(target) = plugin_menu {
         let (w, h) = app.state.screen;
-        app.open_plugin_menu(target, ((w / 2.0).round(), (h / 3.0).round()));
+        app.open_plugin_palette(target, ((w / 2.0 - crate::plugin_palette::W / 2.0).round(), (h / 4.0).round()), None);
     }
     if let Some((p, piano)) = import_midi {
         // Alt: the MIDI import window's "Show every time" row as it comes.
