@@ -24,6 +24,8 @@ mod backup;
 #[cfg(test)]
 mod audio_bench;
 #[cfg(test)]
+mod checks;
+#[cfg(test)]
 mod open_bench;
 mod browser;
 mod browser_index;
