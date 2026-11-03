@@ -4697,6 +4697,14 @@ impl App {
             self.load_theme_file(&path);
             return;
         }
+        // macOS: a file dropped on Lemon Slicer's window comes to the main window; it goes into the Slicer, as on
+        // Windows, where the window's frame takes it (`Request::DropFile`). Other plugin windows are left as they were.
+        #[cfg(target_os = "macos")]
+        if let Some(row) = self.plugin_window_under_cursor() {
+            if self.loop_to_slicer(row, &path.to_string_lossy()) {
+                return;
+            }
+        }
         let (x, y) = self.mouse;
         if self.top_hit(x, y).and_then(|h| h.win) == Some(Win::ChannelRack) {
             self.sample_to_rack(path.to_string_lossy().into_owned(), y);
@@ -4850,6 +4858,9 @@ impl App {
     pub(crate) fn sample_to_plugin_window(&mut self, path: &str) -> bool {
         let Some((x, y)) = Self::pointer_on_screen() else { return false };
         let Some(row) = self.plugins.row_at_screen(x, y) else { return false };
+        if self.loop_to_slicer(row, path) {
+            return true;
+        }
         let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
         let taken = self.plugins.drop_file(row, x, y, path, sampler);
         self.sample_taken(row, path, sampler, taken);
@@ -4886,10 +4897,35 @@ impl App {
             self.state.message = crate::presets::load_into(self, row, &path);
             return self.invalidate();
         }
-        let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
         let p = path.to_string_lossy().into_owned();
+        if self.loop_to_slicer(row, &p) {
+            return;
+        }
+        let sampler = self.state.project.channels.get(row).is_some_and(|c| c.kind.is_sampler());
         let taken = sampler && self.plugins.load_sample(row, &p);
         self.sample_taken(row, &p, sampler, taken);
+    }
+
+    /// A file dropped on Lemon Slicer's window, from the system or the browser (spec: plugins/lemon-slicer.md §6): it
+    /// replaces the loop and is sliced, as the window's own Load does. False when row `row` hosts no Lemon Slicer.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn loop_to_slicer(&mut self, row: usize, path: &str) -> bool {
+        if self.plugins.slicer_file_state(row).is_none() {
+            return false;
+        }
+        let stem = std::path::Path::new(path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // With Copy used samples to the project folder: the sample's copy in the data folder (`data_folder::adopt`).
+        let path = crate::data_folder::adopt(&mut self.state, path);
+        self.state.message = Some(match self.plugins.load_slicer_loop(row, &path) {
+            Some(Ok(n)) => {
+                self.state.plugin_edited = true;
+                format!("{stem} loaded in {} ({n} slices)", crate::slicer::LEMON_SLICER)
+            }
+            Some(Err(e)) => format!("{}: {e}", crate::slicer::LEMON_SLICER),
+            None => return false,
+        });
+        self.invalidate();
+        true
     }
 
     /// Load a theme: a `.flstheme` (spec ui/flstheme.md) or a Lemon Studio `theme.txt`. A `.flstheme` is also

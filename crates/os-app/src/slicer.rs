@@ -39,6 +39,21 @@ impl Plugins {
         }
         lemon_slicer::params::fl_from_plugin_state(&p.save_state()?)
     }
+
+    /// Loads loop file `path` into the Lemon Slicer on rack row `row` as its own Load does (a file dropped on its
+    /// window): the file's beats, tempo and slices, the settings kept. The number of slices, or why the file was not
+    /// taken; `None` when the row hosts no Lemon Slicer.
+    pub fn load_slicer_loop(&mut self, row: usize, path: &str) -> Option<Result<usize, String>> {
+        let st = lemon_slicer::state::State::parse(&self.slicer_file_state(row)?)?;
+        let st = match lemon_slicer::file_state(path, st) {
+            Ok((st, _)) => st,
+            Err(e) => return Some(Err(e)),
+        };
+        let state = lemon_slicer::params::plugin_state_from_fl(&st.to_bytes());
+        let state = crate::plugins::with_sample_path(&state, path).unwrap_or(state);
+        let loaded = self.hosted.get(&row).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.load_state(&state));
+        Some(if loaded { Ok(st.slices.len()) } else { Err(format!("{path}: the plugin did not take it")) })
+    }
 }
 
 /// Before a save: every hosted Lemon Slicer writes the state it plays into its channel as the file's Fruity Slicer
@@ -281,6 +296,47 @@ mod tests {
         assert_eq!(crate::history::undo(&mut a.state).as_deref(), Some(crate::history::ADD_CHANNEL));
         assert_eq!(a.state.project.channels.len(), before);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A loop dropped on Lemon Slicer's window, from the system or the browser (Discord feedback 2026-10-30), replaces its
+    /// loop and is sliced as its own Load does, on the same channel; a file it can't read leaves the loop as it was and
+    /// says why; another plugin's window doesn't take it this way.
+    #[test]
+    fn a_dropped_loop_goes_into_the_slicer() {
+        use tesla::sample::{Cue, Format, Sample};
+        let first = std::env::temp_dir().join(format!("openstudio-drop-slicer-{}.wav", std::process::id()));
+        let mut s = Sample::from_channels(44100, vec![vec![0.25; 44100]], Format::Int16);
+        s.cues.push(Cue { id: 1, name: "Part 1".into(), pos: 0, len: Some(22050) });
+        s.cues.push(Cue { id: 2, name: "Part 2".into(), pos: 22050, len: Some(22050) });
+        std::fs::write(&first, tesla::wav::write(&s, tesla::wav::Depth::Own)).unwrap();
+        let mut a = App::new(None);
+        a.state.project = crate::app::test_project();
+        a.plugins.available = crate::plugins::builtin();
+        a.sample_from_plugin(first.to_string_lossy().into_owned(), os_hostlink::AudioTo::Slicer);
+        let row = a.state.project.channels.len() - 1;
+        let channels = a.state.project.channels.len();
+        let loaded = |a: &App| State::parse(&a.plugins.slicer_file_state(row).unwrap()).unwrap();
+        assert_eq!(loaded(&a).slices.len(), 2);
+
+        let dropped = loop_file("dropped");
+        a.state.plugin_edited = false;
+        a.file_on_plugin_window(row, dropped.clone());
+        let st = loaded(&a);
+        assert_eq!(st.path(), dropped.to_string_lossy());
+        assert!(!st.slices.is_empty() && st.slices.iter().all(|s| s.name() != "Part 2"), "sliced anew");
+        assert_eq!(a.state.project.channels.len(), channels, "no new channel");
+        assert!(a.state.message.as_deref().is_some_and(|m| m.contains("loaded in Lemon Slicer")), "{:?}", a.state.message);
+        assert!(a.state.plugin_edited, "the project counts as changed");
+
+        let bad = std::env::temp_dir().join(format!("openstudio-drop-slicer-{}.wav.txt", std::process::id()));
+        std::fs::write(&bad, b"not audio").unwrap();
+        assert!(a.loop_to_slicer(row, &bad.to_string_lossy()));
+        assert_eq!(loaded(&a).path(), dropped.to_string_lossy(), "the loop stays");
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Lemon Slicer: ")), "{:?}", a.state.message);
+        assert!(!a.loop_to_slicer(0, &dropped.to_string_lossy()), "row 0 hosts no Lemon Slicer");
+        for p in [first, dropped, bad] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     /// The dump replaces the channel's notes in the current pattern (the other channels' stay), in ticks, as one undo
