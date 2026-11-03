@@ -14259,6 +14259,28 @@ mod tests {
         assert_eq!(app.state.pending_open, Some(row), "Lemon Sampler's window opens");
     }
 
+    /// An M4A (AAC or ALAC) dropped on the playlist becomes an audio clip there, as a WAV does.
+    #[test]
+    fn dropped_m4a_becomes_an_audio_clip() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let g = app.pl_grid.expect("playlist shown");
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../os-engine/tests/data");
+        for name in ["sine_aac_itunes.m4a", "sine_alac.m4a"] {
+            let channels = app.state.project.channels.len();
+            app.mouse_move(g.x + 40.0, g.y + 10.0);
+            app.drop_file(data.join(name));
+            let message = app.state.message.clone().unwrap_or_default();
+            assert!(message.starts_with("Added audio clip"), "{name}: {message}");
+            assert_eq!(app.state.project.channels.len(), channels + 1, "{name}");
+            let ch = app.state.project.channels.last().unwrap();
+            assert_eq!(ch.kind, ChannelKind::AudioClip, "{name}");
+            assert_eq!(ch.sample_path.as_deref().map(|p| p.ends_with(name)), Some(true), "{name}");
+        }
+    }
+
     /// A minute-long audio clip whose file has a `smpl` loop (as FL's exports write), exported as the whole song: the
     /// clip plays the file through once, frame for frame to its end, without jumping back at the loop's end (FL's
     /// clip channels never use loop points: sampler flags 258, spec: audio/audio-clips.md). Also for a clip channel

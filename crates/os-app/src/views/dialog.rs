@@ -671,7 +671,7 @@ fn file_icon(name: &str) -> Icon {
     let ext = std::path::Path::new(name).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
         "flp" | "lemon" => Icon::FileProject,
-        "wav" | "mp3" | "flac" | "ogg" | "aif" | "aiff" => Icon::FileAudio,
+        "wav" | "mp3" | "flac" | "ogg" | "aif" | "aiff" | "m4a" => Icon::FileAudio,
         "zip" => Icon::FileZip,
         "txt" | "flstheme" => Icon::FileText,
         e if e == crate::presets::EXT => Icon::FilePreset,

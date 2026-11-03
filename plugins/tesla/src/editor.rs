@@ -3134,7 +3134,7 @@ mod win32 {
                 *o = c;
             }
         }
-        let filter: Vec<u16> = if save.is_some() { "WAV files\0*.wav\0\0" } else { "Audio files\0*.wav;*.flac;*.ogg;*.wv;*.aif;*.aiff;*.mp3\0All files\0*.*\0\0" }
+        let filter: Vec<u16> = if save.is_some() { "WAV files\0*.wav\0\0" } else { "Audio files\0*.wav;*.flac;*.ogg;*.wv;*.aif;*.aiff;*.mp3;*.m4a\0All files\0*.*\0\0" }
             .encode_utf16()
             .collect();
         let title = pw::wide(if save.is_some() { "Save sample as" } else { "Load sample" });
@@ -3495,7 +3495,7 @@ mod gui {
             let d = rfd::FileDialog::new();
             match save {
                 Some(name) => d.set_title("Save sample as").set_file_name(name).add_filter("WAV files", &["wav"]).save_file(),
-                None => d.set_title("Load sample").add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3"]).pick_file(),
+                None => d.set_title("Load sample").add_filter("Audio files", &["wav", "flac", "ogg", "wv", "aif", "aiff", "mp3", "m4a"]).pick_file(),
             }
         });
         path.flatten().map(|p| p.to_string_lossy().into_owned())
