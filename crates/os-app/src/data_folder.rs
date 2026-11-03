@@ -316,7 +316,7 @@ impl App {
                         self.copy_used_samples();
                     }
                     let name = crate::backup::project_name(self.state.path.as_deref());
-                    self.save_to(dir.join(format!("{name}.flp")));
+                    self.save_to(dir.join(format!("{name}.{}", crate::project_files::EXT)));
                     reread(&self.state);
                 }
             }
@@ -350,7 +350,7 @@ impl App {
             Some((old, new)) => file.strip_prefix(old).map_or_else(|_| file.clone(), |rel| new.join(rel)),
             None => file.clone(),
         };
-        let target = file_after.with_file_name(format!("{}.flp", name.trim()));
+        let target = file_after.with_file_name(format!("{}.{}", name.trim(), file.extension().map_or_else(|| crate::project_files::EXT.to_string(), |e| e.to_string_lossy().into_owned())));
         // Both names are checked before anything is renamed (the file's new name where the file is now).
         if let Some((_, new)) = folder_move.as_ref().filter(|(_, new)| new.exists()) {
             return self.rename_refused(new);
@@ -714,9 +714,9 @@ mod tests {
         crate::dialog::fake::answer(Some(other.clone()));
         app.data_folder_pick();
         app.dialog_click(crate::dialog::DHit::Button(0));
-        assert_eq!(app.state.path, Some(other.join("song.flp")));
+        assert_eq!(app.state.path, Some(other.join("song.lemon")));
         assert!(!app.unsaved());
-        let opened = App::new(Some(other.join("song.flp")));
+        let opened = App::new(Some(other.join("song.lemon")));
         assert_eq!(opened.state.project.data_folder, Some(DataFolder { choice: DataFolder::SPECIFIED, folder: folder_text(&other) }));
         let copy = other.join(SAMPLES_DIR).join("kick.wav");
         assert_eq!(opened.state.project.channels[0].sample_path.as_deref(), Some(copy.to_string_lossy().as_ref()));
