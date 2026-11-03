@@ -142,6 +142,11 @@ pub struct Shared {
     heard: AtomicU64,
     /// Those of them where a hosted plugin missed its tick.
     plugin_late: AtomicU64,
+    /// Those of them where the queue was empty (the feeder was late), and the device's own.
+    feeder_late: AtomicU64,
+    device_late: AtomicU64,
+    /// Nanoseconds the playback and live streams' feeders spent rendering since the program started.
+    render_ns: AtomicU64,
     /// When a stream last handed the device a block that was not silent (`now_ms`; 0: never).
     sound_at: AtomicU64,
     /// How far the playback and live streams render ahead of the device.
@@ -941,6 +946,26 @@ impl Transport {
         self.shared.plugin_late.load(Ordering::Relaxed) > 0
     }
 
+    /// The dropouts by kind since the program started (the playback checks read them: `crate::checks`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn drops(&self) -> Drops {
+        let s = &self.shared;
+        let n = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        Drops { feeder: n(&s.feeder_late), plugin: n(&s.plugin_late), device: n(&s.device_late), heard: n(&s.heard) }
+    }
+
+    /// Readers of the dropout counters and the render time, for a simulated device to sample with every block
+    /// (`crate::device::sim`): feeder, plugin, device, heard, render ns.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn probes(&self) -> Vec<crate::device::sim::Probe> {
+        let s = &self.shared;
+        let p = |name: &str, f: fn(&Shared) -> &AtomicU64| {
+            let s = s.clone();
+            crate::device::sim::Probe::new(name, move || f(&s).load(Ordering::Relaxed))
+        };
+        vec![p("feeder", |s| &s.feeder_late), p("plugin", |s| &s.plugin_late), p("device", |s| &s.device_late), p("heard", |s| &s.heard), p("render", |s| &s.render_ns)]
+    }
+
     /// Time the engine spends rendering per second of audio, 0..1 (more than 1: it cannot keep up), over the last
     /// quarter second of playback or live notes.
     pub fn load(&self) -> f32 {
@@ -992,6 +1017,17 @@ impl Transport {
     fn streams(&self) -> usize {
         self.shared.engine_voices.lock().map_or(0, |v| v.iter().filter(|w| w.strong_count() > 0).count())
     }
+}
+
+/// Dropouts by kind (`Transport::drops`): device blocks the queue could not fill (the feeder was late), ticks a hosted
+/// plugin missed (busy elsewhere), the device's own underruns; and of all of them, those heard over sound.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct Drops {
+    pub feeder: u64,
+    pub plugin: u64,
+    pub device: u64,
+    pub heard: u64,
 }
 
 /// Whole ticks handed from a stream's feeder thread to its device callback: one writer, one reader, no locks. With
@@ -1185,7 +1221,9 @@ impl Feeder {
             }
         }
         if frames > 0 && self.meters {
-            self.busy += t0.elapsed();
+            let spent = t0.elapsed();
+            self.shared.render_ns.fetch_add(spent.as_nanos() as u64, Ordering::Relaxed);
+            self.busy += spent;
             self.rendered += frames;
             if self.rendered >= u64::from(self.rate / 4) {
                 let load = self.busy.as_secs_f64() * f64::from(self.rate) / self.rendered as f64;
@@ -1871,6 +1909,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         }
         let xruns = device.take_xruns();
         shared.underruns.fetch_add(xruns, Ordering::Relaxed);
+        shared.device_late.fetch_add(xruns, Ordering::Relaxed);
         if xruns > 0 && sound_lately(&shared) {
             shared.heard.fetch_add(xruns, Ordering::Relaxed);
         }
@@ -2343,6 +2382,7 @@ impl Renderer {
             stereo[got..].fill(0.0);
             if !ended {
                 self.shared.underruns.fetch_add(1, Ordering::Relaxed);
+                self.shared.feeder_late.fetch_add(1, Ordering::Relaxed);
                 if peak > SILENT || self.peak > SILENT {
                     self.shared.heard.fetch_add(1, Ordering::Relaxed);
                 }

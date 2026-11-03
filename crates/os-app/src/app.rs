@@ -3495,7 +3495,7 @@ impl App {
     }
 
     /// Every hosted instance for the monitor, rack rows then mixer slots.
-    fn perf_sources(&self) -> Vec<crate::perf::Source> {
+    pub(crate) fn perf_sources(&self) -> Vec<crate::perf::Source> {
         let p = &self.state.project;
         self.plugins
             .hosted
