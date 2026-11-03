@@ -121,6 +121,9 @@ pub enum MCmd {
     RemoveTeslasNow,
     /// Effect slots of the current track.
     AddEffect(u8, usize),
+    /// An empty container in place of the slot's plugin (the browser's container entry dropped without Shift,
+    /// `App::drop_container_on_slot`).
+    AddContainer(u8),
     SlotDelete(u8),
     SlotMove(u8, i8),
     SlotRename(u8),
@@ -1812,7 +1815,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::UnassignAudio(_) => Some(crate::track_links::UNASSIGN_AUDIO),
         MCmd::MoveLeft(_) | MCmd::MoveRight(_) => Some("Move mixer track"),
         MCmd::InsertOne(_) => Some(INSERT),
-        MCmd::AddEffect(..) => Some("Add effect"),
+        MCmd::AddEffect(..) | MCmd::AddContainer(_) => Some("Add effect"),
         MCmd::SlotDelete(_) => Some("Remove effect"),
         MCmd::SlotMove(..) => Some("Move effect"),
         MCmd::Member(_, _, crate::container::Op::Up | crate::container::Op::Down) => Some(crate::container::MOVE),
@@ -2123,6 +2126,17 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             }
             forget_slot_ui(s, t, slot);
             s.mixer.pending.push(FxReq::Create { track: t, slot, index, state: None });
+            changed(s);
+            None
+        }
+        MCmd::AddContainer(slot) => {
+            // The slot's instance goes as a replaced effect's does; the container plays from the next tick
+            // (`App::sync_containers`).
+            let t = s.selected_mixer;
+            clear_slot(s, t, slot);
+            if let Some(m) = track_mut(s, t) {
+                m.slots[usize::from(slot)] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::container::CONTAINER.into(), state: crate::container::encode(&[]) });
+            }
             changed(s);
             None
         }

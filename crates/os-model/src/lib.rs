@@ -1398,6 +1398,11 @@ impl Note {
         self.flags & Self::SLIDE != 0
     }
 
+    /// The note's colour group, 0..=15 (the low nibble of byte 19).
+    pub fn colour(&self) -> u8 {
+        self.group & 0x0F
+    }
+
     /// Byte-19 value of a note's own portamento switch (spec: audio/note-rules.md, "A note's own portamento switch").
     pub const PORTA: u8 = 0x10;
 

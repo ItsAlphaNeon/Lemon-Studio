@@ -2032,6 +2032,10 @@ impl App {
                     crate::lemon_state::apply(&mut self.state, &mut self.plugins, &f);
                     self.state.file = Some(f);
                 }
+                // The original's Patcher slots that are a plain serial chain open as containers (README.md slice 5).
+                if let Some(m) = crate::container::open_patchers(&mut self.state, &self.plugins.effects) {
+                    self.state.message = Some(format!("{}. {m}", self.state.message.take().unwrap_or_default()));
+                }
                 self.mark_saved();
                 self.journal_opened(Some(&opened));
                 crate::missing::opened(self);
@@ -16724,6 +16728,50 @@ mod tests {
         app.mouse_up();
         let t = app.state.selected_mixer;
         assert_eq!(crate::mixer::slot_name(&app.state, t, 0).as_deref(), Some("Test FX"));
+    }
+
+    // spec: plugins/patcher/README.md "3.3 Patcherize (slot menu, channel menu)" (Shift+drop)
+    /// The browser's container entry Shift+dragged onto a mixer slot wraps the slot's effect, one undo step as the slot
+    /// menu's Wrap in container; dragged without Shift onto another slot it puts an empty container there.
+    #[test]
+    fn browser_container_shift_drops_onto_a_slot() {
+        use crate::mixer::{run, MCmd, MHit};
+        use crate::views::browser::{rows, Item};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.reset_hosted();
+        app.plugins.effects = crate::plugins::builtin_effects();
+        app.state.plugdb.rebuild(&app.plugins);
+        app.state.z = vec![Win::Mixer];
+        let lim = app.plugins.effects.iter().position(|e| e.desc.name == "Lemon Limiter").unwrap();
+        run(&mut app, MCmd::AddEffect(0, lim));
+        app.state.control.settle(&mut app.state.project);
+        app.mixer_tick();
+        app.follow_ids(false, true);
+        app.state.browser_tab = 2;
+        app.state.browser_open.insert("2:Plugin library/Effects".into());
+        let t = app.state.selected_mixer;
+        let drop = |app: &mut App, c: &mut Canvas, slot: u8, shift: bool| {
+            frame(app, c, None);
+            let i = rows(&app.state).iter().position(|r| r.item == Item::Container).expect("the container's row");
+            let src = hit_rect(app, &Action::BrowserRow(i));
+            let dst = hit_rect(app, &Action::Mix(MHit::SlotName(slot)));
+            app.mouse_move(src.cx(), src.cy());
+            app.mouse_down();
+            app.mouse_move(src.cx() + 30.0, src.cy());
+            app.mouse_move(dst.cx(), dst.cy());
+            app.shift = shift;
+            app.mouse_up();
+            app.shift = false;
+        };
+        drop(&mut app, &mut c, 0, true);
+        assert_eq!(app.state.history.newest_done(), Some(crate::container::WRAP));
+        let list = crate::container::members(&app.state, t, 0).expect("a container");
+        assert_eq!(list.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["Lemon Limiter"]);
+        drop(&mut app, &mut c, 3, false);
+        assert_eq!(app.state.history.newest_done(), Some("Add effect"));
+        assert_eq!(crate::container::members(&app.state, t, 3), Some(vec![]));
     }
 
     /// The wheel over a mixer effect slot moves the effect a slot a notch, up for wheel up, trading places with its
