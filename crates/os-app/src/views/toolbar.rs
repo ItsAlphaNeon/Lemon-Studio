@@ -640,7 +640,7 @@ fn cpu(ui: &mut Ui, c: &Ctx) {
         ui.c.text_right(Font::condensed(18, 6), a.x(1166.0), a.y(17.0), t.glyph, &r.voices.to_string());
     }
     if r.dropouts > 0 {
-        ui.c.text_right(Font::condensed(18, 6), a.x(1199.0), a.y(17.0), t.meter_clip, &format!("!{}", r.dropouts.min(9999)));
+        ui.c.text_right(Font::condensed(18, 6), a.x(1199.0), a.y(17.0), if r.lit { t.meter_clip } else { t.text_dim }, &s.cpu.dropout_text());
     }
 }
 

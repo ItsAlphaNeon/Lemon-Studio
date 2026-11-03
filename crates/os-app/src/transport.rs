@@ -59,6 +59,22 @@ const PAUSED: u8 = 2;
 
 /// Seconds a stream takes to fade out (pause, stop) or in (resume): no clicks.
 const FADE_SECONDS: f64 = 0.006;
+/// Below this peak (-60 dBFS) a block is silence: a dropout there is not heard (`Transport::heard_dropouts`).
+const SILENT: f32 = 0.001;
+/// A device underrun this soon after a block that was not silent is heard.
+const HEARD_WITHIN: Duration = Duration::from_millis(250);
+
+/// Sound reached the device within `HEARD_WITHIN` (`Shared::sound_at`).
+fn sound_lately(shared: &Shared) -> bool {
+    let at = shared.sound_at.load(Ordering::Relaxed);
+    at != 0 && now_ms().saturating_sub(at) <= HEARD_WITHIN.as_millis() as u64
+}
+
+/// Milliseconds since the first call, for `Shared::sound_at`.
+fn now_ms() -> u64 {
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    T0.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
 /// How long a stopped stream stays alive to finish its fade before it is dropped.
 const CLOSE_AFTER: Duration = Duration::from_millis(40);
 /// A stopped playback rings out its effects' tails (spec: audio/transport.md "Stop") until its output has stayed below
@@ -121,6 +137,13 @@ pub struct Shared {
     tracks: Mutex<TrackPeaks>,
     /// Device blocks the queue could not fill since the program started.
     underruns: AtomicU64,
+    /// Those of them that cut into sound: the block before the gap, or the one rendered with it, was not silent
+    /// (`SILENT`). The rest happened over silence and were not heard.
+    heard: AtomicU64,
+    /// Those of them where a hosted plugin missed its tick.
+    plugin_late: AtomicU64,
+    /// When a stream last handed the device a block that was not silent (`now_ms`; 0: never).
+    sound_at: AtomicU64,
     /// How far the playback and live streams render ahead of the device.
     ahead: AheadStats,
     /// Time spent rendering per second of audio (f32 bits), over the last quarter second of playback.
@@ -902,9 +925,20 @@ impl Transport {
         v.iter().filter_map(Weak::upgrade).map(|n| n.load(Ordering::Relaxed) as usize).sum()
     }
 
-    /// Device blocks that could not be filled in time (heard as a gap) since the program started.
+    /// Device blocks that could not be filled in time since the program started.
     pub fn underruns(&self) -> u64 {
         self.shared.underruns.load(Ordering::Relaxed)
+    }
+
+    /// The dropouts heard since the program started: those that cut into sound (`Shared::heard`). Each one turns the
+    /// CPU panel's count of `underruns` red for a moment.
+    pub fn heard_dropouts(&self) -> u64 {
+        self.shared.heard.load(Ordering::Relaxed)
+    }
+
+    /// A hosted plugin has missed its tick since the program started: the count has its mark.
+    pub fn plugin_late(&self) -> bool {
+        self.shared.plugin_late.load(Ordering::Relaxed) > 0
     }
 
     /// Time the engine spends rendering per second of audio, 0..1 (more than 1: it cannot keep up), over the last
@@ -1107,6 +1141,7 @@ impl Feeder {
         }
         let t0 = Instant::now();
         let mut frames = 0u64;
+        let mut peak = 0.0f32;
         while self.queue.queued() < want && self.queue.has_room() {
             match e.next_tick() {
                 None => {
@@ -1115,6 +1150,7 @@ impl Feeder {
                 }
                 Some((s, tick, frame, held, tick_frames)) => {
                     frames += s.len() as u64 / w;
+                    peak = s.iter().fold(peak, |m, x| m.max(x.abs()));
                     let at = self.queue.written.load(Ordering::Relaxed) / w;
                     self.queue.push(s, tick, frame, held, tick_frames);
                     // The playback's meters wait for the device to play this tick.
@@ -1143,6 +1179,10 @@ impl Feeder {
         let missed = e.take_missed();
         if missed > 0 {
             self.shared.underruns.fetch_add(missed, Ordering::Relaxed);
+            self.shared.plugin_late.fetch_add(missed, Ordering::Relaxed);
+            if peak > SILENT || sound_lately(&self.shared) {
+                self.shared.heard.fetch_add(missed, Ordering::Relaxed);
+            }
         }
         if frames > 0 && self.meters {
             self.busy += t0.elapsed();
@@ -1829,7 +1869,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             reset_pending = true;
             reset_fx_pending = true;
         }
-        shared.underruns.fetch_add(device.take_xruns(), Ordering::Relaxed);
+        let xruns = device.take_xruns();
+        shared.underruns.fetch_add(xruns, Ordering::Relaxed);
+        if xruns > 0 && sound_lately(&shared) {
+            shared.heard.fetch_add(xruns, Ordering::Relaxed);
+        }
         // A device that failed (it went away, a driver asked to be reset): the playback is held where it was heard and
         // the other streams go; it goes on when the device opens again (spec: audio/devices.md).
         if lost.is_none() {
@@ -2244,6 +2288,8 @@ struct Renderer {
     asked: Option<Instant>,
     /// A block in the queue's width, for a device of another (opened anew with other pairs while it plays).
     other: Vec<f32>,
+    /// The peak of the last block it handed the device: a gap after a silent one is not heard.
+    peak: f32,
 }
 
 impl Renderer {
@@ -2252,7 +2298,7 @@ impl Renderer {
         // A stream that starts paused (moved to new audio settings while paused) starts silent.
         let gain = if ctl.paused.load(Ordering::Relaxed) { 0.0 } else { 1.0 };
         let other = Vec::with_capacity(queue.w * 2 * 8192);
-        Renderer { queue, wake: None, inline: None, ctl, done, shared, gain, step, tap: false, detach: Arc::new(AtomicBool::new(false)), asked: None, other }
+        Renderer { queue, wake: None, inline: None, ctl, done, shared, gain, step, tap: false, detach: Arc::new(AtomicBool::new(false)), asked: None, other, peak: 0.0 }
     }
 
     /// Renders one block (see `render_block`) and copies it to the monitor tap, unless the stream is held.
@@ -2292,11 +2338,19 @@ impl Renderer {
         let read = self.queue.read.load(Ordering::Relaxed) / w as u64;
         let got = self.queue.pop(stereo);
         let ended = self.queue.ended.load(Ordering::Acquire);
+        let peak = stereo[..got].iter().fold(0.0f32, |m, x| m.max(x.abs()));
         if got < stereo.len() {
             stereo[got..].fill(0.0);
             if !ended {
                 self.shared.underruns.fetch_add(1, Ordering::Relaxed);
+                if peak > SILENT || self.peak > SILENT {
+                    self.shared.heard.fetch_add(1, Ordering::Relaxed);
+                }
             }
+        }
+        self.peak = peak;
+        if peak > SILENT {
+            self.shared.sound_at.store(now_ms(), Ordering::Relaxed);
         }
         if let Some(t) = &self.wake {
             t.unpark();
@@ -2510,6 +2564,30 @@ mod tests {
         r.render(&mut block);
         assert!(block.iter().all(|v| *v == 0.0));
         assert_eq!(shared.underruns.load(Ordering::Relaxed), 1);
+    }
+
+    /// A block the queue could not fill counts as a dropout every time; as one heard only when sound was playing: the
+    /// block before it, or what it did get, not silent.
+    #[test]
+    fn only_gaps_in_sound_are_heard() {
+        let ctl = Arc::new(Ctl { paused: AtomicBool::new(false), held: AtomicBool::new(false), report: AtomicBool::new(true), level: AtomicU32::new(0) });
+        let shared = Arc::new(Shared::default());
+        let queue = Arc::new(Queue::new(2));
+        let mut r = Renderer::new(queue.clone(), ctl, Arc::new(AtomicBool::new(false)), shared.clone(), 48000);
+        let mut block = vec![0.0f32; 2 * 256];
+        // Over silence: counted, not heard.
+        queue.push(&vec![0.0; 2 * 100], 0.0, 0, false, 100);
+        r.render_block(&mut block);
+        assert_eq!((shared.underruns.load(Ordering::Relaxed), shared.heard.load(Ordering::Relaxed)), (1, 0));
+        // Cutting into sound: heard.
+        queue.push(&vec![0.5; 2 * 100], 0.0, 0, false, 100);
+        r.render_block(&mut block);
+        assert_eq!((shared.underruns.load(Ordering::Relaxed), shared.heard.load(Ordering::Relaxed)), (2, 1));
+        // Right after sound, even an empty block is heard; after a silent one, not.
+        r.render_block(&mut block);
+        assert_eq!(shared.heard.load(Ordering::Relaxed), 2);
+        r.render_block(&mut block);
+        assert_eq!((shared.underruns.load(Ordering::Relaxed), shared.heard.load(Ordering::Relaxed)), (4, 2));
     }
 
     /// Dropping the transport waits for the audio thread: once it is gone, nothing but the app holds a hosted effect,
