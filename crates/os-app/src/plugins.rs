@@ -3768,9 +3768,9 @@ mod tests {
         a.state.plugdb.rebuild(&a.plugins);
         use crate::plugin_menu::PlugCmd;
         let fx = a.plugins.effects.iter().position(|e| e.desc.format == os_host::Format::Native).expect("a native effect");
-        let fx_menu = crate::mixer::effect_menu(&a.state, 0, 0.0, 0.0);
+        let fx_menu = crate::plugin_menu::items(&a.state, crate::plugin_menu::Target::Fx(Some(0)), true);
         let fx_cmd = crate::playlist::Cmd::Plugin(PlugCmd::Effect { index: fx, slot: Some(0) });
-        assert!(fx_menu.items.iter().any(|it| it.cmd == fx_cmd), "slot menu lists it");
+        assert!(fx_menu.iter().any(|it| it.cmd == fx_cmd), "the slot's list has it");
         let pick = a.plugins.available.iter().position(|x| x.desc.name == name).expect("the plugin is found");
         let add = crate::rack::add_one_items(&a.state).into_iter().find(|it| it.label == name).expect("Add one lists it");
         assert!(add.cmd == crate::playlist::Cmd::Plugin(PlugCmd::Generator { index: pick, after: None }));

@@ -25,7 +25,7 @@ pub const CLIP_MODS: &[&str] = &["(disabled)", "(none)", "Alt"];
 
 /// Browser and pickers: shows or hides the browser.
 pub const TOGGLE_BROWSER: Combo = Combo { key: "shortcut_toggle_browser", label: "Toggle browser", choices: F8_KEYS, default: 3 };
-/// Opens or closes the plugin menu (`App::toggle_plugin_menu`).
+/// Opens or closes the plugin palette (`App::toggle_plugin_palette`).
 pub const TOGGLE_PLUGIN_PICKER: Combo =
     Combo { key: "shortcut_toggle_plugin_picker", label: "Toggle plugin picker", choices: F8_KEYS, default: 0 };
 /// Opens or closes the project picker (`App::toggle_project_picker`).
@@ -204,7 +204,7 @@ impl App {
     pub(crate) fn f8_key(&mut self, ctrl: bool, alt: bool) {
         match f8(self.shift, ctrl, alt) {
             Some(F8::Browser) => self.act(Action::ToggleWin(Win::Browser)),
-            Some(F8::PluginPicker) => self.toggle_plugin_menu(),
+            Some(F8::PluginPicker) => self.toggle_plugin_palette(),
             Some(F8::PluginDatabase) => self.show_plugin_database(),
             Some(F8::ProjectPicker) => self.toggle_project_picker(),
             None => {}
@@ -389,7 +389,7 @@ mod tests {
         app.paint(&mut c, None);
         let f8 = Key::Named(NamedKey::F8);
         let browser = |app: &App| app.state.show_browser;
-        let picker = |app: &App| crate::plugin_menu::is_open(&app.state);
+        let picker = |app: &App| crate::plugin_palette::is_open(&app.state);
         let shown = browser(&app);
         // Defaults: Alt+F8 the browser, F8 the plugin picker.
         app.key(&f8, false, true);

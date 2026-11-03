@@ -53,6 +53,9 @@ pub enum Win {
     /// A container's window: its effects with their wet and dry knobs (Lemon Studio's design: spec
     /// plugins/patcher/README.md §4.3).
     Container,
+    /// The plugin palette: the searchable list of the installed plugins a pick adds from (Lemon Studio's design: spec
+    /// ui/plugin-menu.md §6).
+    PluginPalette,
     /// A docked hosted-plugin window (a native child window; rack row), stacked with the drawn windows.
     Hosted(usize),
 }
@@ -179,6 +182,8 @@ pub enum Action {
     Strum(crate::strum::Act),
     /// The container window's names and buttons (`crate::container::CAct`).
     Container(crate::container::CAct),
+    /// The plugin palette's controls (spec: ui/plugin-menu.md §6).
+    Palette(crate::plugin_palette::PalAct),
     /// The Arpeggiate dialog's buttons, switches and menus (spec: ui/piano-arpeggiate.md).
     Arp(crate::arpeggiate::Act),
     /// The Flam, Flip and Scale levels dialogs' switches and buttons (spec: as `Win::PianoDlg`).
@@ -364,6 +369,8 @@ pub enum Scroll {
     /// the window").
     Popup,
     PopupSub,
+    /// The plugin palette's list (spec: ui/plugin-menu.md §6.2).
+    Palette,
 }
 
 /// A scroll bar painted this frame.
@@ -442,6 +449,7 @@ pub(crate) fn scroll_win(t: Scroll) -> Option<Win> {
         Scroll::PlaylistX | Scroll::PlaylistY | Scroll::PlPick => Some(Win::Playlist),
         Scroll::MixerX => Some(Win::Mixer),
         Scroll::RackX | Scroll::RackY => Some(Win::ChannelRack),
+        Scroll::Palette => Some(Win::PluginPalette),
         Scroll::Settings | Scroll::PlugTable | Scroll::Popup | Scroll::PopupSub => None,
     }
 }
@@ -990,6 +998,8 @@ pub struct State {
     pub tapper: crate::tapper::TapperUi,
     /// The container's window: where it is, which container it shows, the levels its chain plays.
     pub container: crate::container::ContainerUi,
+    /// The plugin palette: where it is, what it adds, its search (spec: ui/plugin-menu.md §6).
+    pub palette: crate::plugin_palette::PaletteUi,
     pub touch: crate::touch::TouchUi,
     /// The event editor: the control it shows, its view, tool and selection.
     pub events: crate::events::EventsUi,
@@ -1527,6 +1537,7 @@ impl App {
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
                 container: Default::default(),
+                palette: Default::default(),
                 touch: Default::default(),
                 events: Default::default(),
                 events_back: None,
@@ -6155,6 +6166,7 @@ impl App {
                     | DHit::Form(FHit::Check(_) | FHit::Main | FHit::Skip | FHit::Auto | FHit::Folder | FHit::Item(_) | FHit::Fold)
             ),
             Action::Perf(p) => matches!(p, crate::perf::PerfAct::Sort(_) | crate::perf::PerfAct::ResetOnTransport | crate::perf::PerfAct::Freeze),
+            Action::Palette(p) => !matches!(p, crate::plugin_palette::PalAct::Search | crate::plugin_palette::PalAct::List),
             Action::Tapper(t) => *t == crate::tapper::TapAct::Apply,
             Action::Touch(t) => !matches!(t, crate::touch::TouchAct::Note(_)),
             Action::Events(a) => matches!(a, crate::events::EvAct::Tool(_)),
@@ -6439,6 +6451,7 @@ impl App {
             Scroll::PlPick => s.playlist.pick_scroll,
             Scroll::Settings => s.settings.scroll,
             Scroll::PlugTable => s.plugdb.top as f32 * views::settings::TABLE_ROW_H,
+            Scroll::Palette => s.palette.scroll,
             Scroll::Popup | Scroll::PopupSub => s.playlist.popup.as_ref().map_or(0.0, |p| p.scroll[usize::from(t == Scroll::PopupSub)] as f32),
         }
     }
@@ -6461,6 +6474,7 @@ impl App {
             Scroll::PlPick => s.playlist.pick_scroll = v,
             Scroll::Settings => s.settings.scroll = v,
             Scroll::PlugTable => s.plugdb.top = (v / views::settings::TABLE_ROW_H).round() as usize,
+            Scroll::Palette => s.palette.scroll = v,
             Scroll::Popup | Scroll::PopupSub => {
                 let Some(p) = s.playlist.popup.as_mut() else { return };
                 let (k, col) = (usize::from(t == Scroll::PopupSub), v.round() as usize);
@@ -7409,6 +7423,10 @@ impl App {
             self.state.settings.scroll = (self.state.settings.scroll - (dy + dx) * 63.0).min(max).max(0.0);
             return None;
         }
+        if matches!(area, Some(Action::Palette(crate::plugin_palette::PalAct::List | crate::plugin_palette::PalAct::Row(_)) | Action::Scrollbar(Scroll::Palette))) {
+            self.palette_wheel(dy + dx);
+            return Some(Win::PluginPalette);
+        }
         if matches!(area, Some(Action::Perf(crate::perf::PerfAct::List | crate::perf::PerfAct::Row(_)))) {
             self.perf_wheel(dy + dx);
             return Some(Win::Perf);
@@ -7615,6 +7633,10 @@ impl App {
         // So does a box of the settings window's Info page while it is edited, and a cell of File ▸ Browser extra
         // search folders.
         if self.info_key(key, ctrl, alt) || self.folder_cell_key(key, ctrl, alt) || self.name_key(key, ctrl, alt) {
+            return;
+        }
+        // So does the plugin palette's search while the palette is in front (spec: ui/plugin-menu.md §6.1).
+        if self.palette_key(key, ctrl, alt) {
             return;
         }
         use winit::keyboard::{Key, NamedKey};
@@ -7921,7 +7943,7 @@ impl App {
     /// skips the normal shortcut handling. Spec: ui/typing-keyboard.md.
     pub fn typing_key(&mut self, code: KeyCode, pressed: bool, ctrl: bool, alt: bool) -> bool {
         // A playlist text box (track / marker name, point value) takes the letters.
-        if pressed && (self.modal_open() || self.state.playlist.edit.is_some() || self.state.plugdb.finding || self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm || self.browser_takes_typing() || self.state.perf.finding) {
+        if pressed && (self.modal_open() || self.state.playlist.edit.is_some() || self.state.plugdb.finding || self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm || self.browser_takes_typing() || self.state.perf.finding || crate::plugin_palette::has_keys(&self.state)) {
             return false;
         }
         // So does a box of the settings window's Info page, and a browser folder cell.
@@ -8442,6 +8464,7 @@ impl App {
             Action::Touch(a) => self.touch_act(a),
             Action::Strum(a) => self.strum_act(a),
             Action::Container(a) => self.container_act(a),
+            Action::Palette(a) => self.palette_act(a),
             Action::Arp(a) => self.arp_act(a),
             Action::PianoDlg(a) => self.piano_dlg_act(a),
             Action::Events(a) => self.events_act(a),
@@ -8628,13 +8651,13 @@ impl App {
             Action::RackMixer(_) => {}
             Action::RackAdd => {
                 let at = self.mouse;
-                self.open_plugin_menu(crate::plugin_menu::Target::Gen(None), at);
+                self.open_plugin_palette(crate::plugin_menu::Target::Gen(None), at, None);
             }
             // Under the button (spec: ui/plugin-menu.md §1).
             Action::PickerOpen => {
                 let (x, y) = self.mouse;
                 let at = self.top_hit(x, y).map_or((x, y), |h| (h.rect.x, h.rect.bottom() + 2.0));
-                self.open_plugin_menu(crate::plugin_menu::Target::All, at);
+                self.open_plugin_palette(crate::plugin_menu::Target::All, at, None);
             }
             // Under the button (spec: ui/project-picker.md §2).
             Action::ProjectPicker => {
@@ -9209,7 +9232,7 @@ impl App {
             }
             MenuCmd::MorePlugins => {
                 let at = self.mouse;
-                self.open_plugin_menu(crate::plugin_menu::Target::Gen(None), at);
+                self.open_plugin_palette(crate::plugin_menu::Target::Gen(None), at, None);
             }
             MenuCmd::Rescan => self.start_scan(crate::plugin_db::Mode::Changed),
             // The plugin menus' display mode, as their own radios set it (spec: ui/plugin-menu.md §2-3).
@@ -9279,7 +9302,7 @@ impl App {
             }
             MenuCmd::PluginPalette => {
                 let at = self.mouse;
-                self.open_plugin_menu(crate::plugin_menu::Target::All, at);
+                self.open_plugin_palette(crate::plugin_menu::Target::All, at, None);
             }
             MenuCmd::Pattern(cmd) => {
                 if let Some(m) = self.pattern_cmd(cmd) {
@@ -13241,10 +13264,11 @@ mod tests {
         assert_eq!(sub(&app), Some((Some(0), [0, 2])));
     }
 
-    /// With hundreds of plugins (issue #134) the F8 menu is wider than the window: its footer is out of view at first;
-    /// the scroll bar brings it in, and Manage plugins... works there (spec: ui/menus.md "Menus wider than the window").
+    /// With hundreds of plugins (issue #134) F8's plugin palette keeps its own size inside the window (the menu it
+    /// replaced grew wider than the window): its list scrolls, and Manage works (spec: ui/plugin-menu.md §6).
     #[test]
-    fn plugin_menu_with_many_plugins_scrolls_to_its_footer() {
+    fn plugin_palette_with_many_plugins_keeps_its_size() {
+        use crate::plugin_palette::{self as pal, PalAct};
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1366, 768, 1.0) else { return };
         let mut app = App::new(None);
@@ -13257,15 +13281,14 @@ mod tests {
         frame(&mut app, &mut c, None);
         app.key(&Key::Named(NamedKey::F8), false, false);
         frame(&mut app, &mut c, None);
-        let manage = app.state.playlist.popup.as_ref().and_then(|p| p.items.iter().position(|i| i.label == "Manage plugins...")).expect("the F8 menu");
-        let row = |app: &App| app.hits.iter().find(|h| h.action == Action::PlPopup(manage) && h.rect.h > 0.0).map(|h| h.rect);
-        assert_eq!(row(&app), None, "out of view at first");
-        let track = app.bar(Scroll::Popup).expect("a scroll bar").track;
-        click(&mut app, &mut c, Rect::new(track.right() - 2.0, track.y, 1.0, track.h));
-        assert!(crate::plugin_menu::is_open(&app.state), "the bar keeps the menu open");
-        let r = row(&app).expect("in view at the end");
-        assert!(r.x >= 0.0 && r.right() <= 1366.0);
-        click(&mut app, &mut c, r);
+        let win = pal::rect(&app.state);
+        assert!(win.w == pal::W && win.h <= pal::H && win.x >= 0.0 && win.right() <= 1366.0 && win.bottom() <= 768.0, "{win:?}");
+        let bar = app.bar(Scroll::Palette).expect("the list scrolls");
+        assert!(bar.max > 0.0 && bar.track.x > win.x && bar.track.right() < win.right());
+        click(&mut app, &mut c, Rect::new(bar.track.x, bar.track.bottom() - 3.0, bar.track.w, 1.0));
+        assert!(pal::is_open(&app.state) && app.state.palette.scroll > 0.0, "the bar scrolls the list");
+        let manage = hit_rect(&app, &Action::Palette(PalAct::Manage));
+        click(&mut app, &mut c, manage);
         assert!(app.state.settings.open && app.state.settings.tab == views::settings::PLUGINS);
     }
 
@@ -15375,17 +15398,17 @@ mod tests {
         app.act(Action::ToggleWin(Win::ChannelRack));
         frame(&mut app, &mut a, None);
 
-        // Add channels until the rows overflow: a vertical scroll bar appears. "+" opens the generator menu
-        // (spec: ui/plugin-menu.md §1); Lemon Sampler adds a sampler channel at the bottom.
+        // Add channels until the rows overflow: a vertical scroll bar appears. "+" opens the plugin palette of generators
+        // (spec: ui/plugin-menu.md §1, §6); Lemon Sampler adds a sampler channel at the bottom.
         app.plugins = crate::plugins::Plugins::builtins();
         app.state.plugdb.rebuild(&app.plugins);
         let n = app.state.project.channels.len();
         for _ in 0..6 {
             let hr = hit_rect(&app, &Action::RackAdd);
             click(&mut app, &mut a, hr);
-            let pick = app.state.playlist.popup.as_ref().and_then(|p| p.items.iter().find(|i| i.label == crate::plugins::LEMON_SAMPLER)).map(|i| i.cmd.clone());
-            crate::playlist::run(&mut app, pick.expect("the generator menu lists Lemon Sampler"));
-            assert!(app.state.playlist.popup.is_none());
+            let pick = crate::plugin_palette::cmd_of(&app.state, crate::plugins::LEMON_SAMPLER);
+            crate::playlist::run(&mut app, pick.expect("the palette lists Lemon Sampler"));
+            app.close_plugin_palette();
             frame(&mut app, &mut a, None);
         }
         assert_eq!(app.state.project.channels.len(), n + 6);
@@ -19251,13 +19274,12 @@ mod tests {
         c.pixmap.save_png(dir.join("mx_slot_menu.png")).unwrap();
     }
 
-    /// F8 and the toolbar's plugin button open the menu of every plugin: an effect goes into the selected mixer track's
-    /// first empty slot, a generator to the bottom of the channel rack; F8 again closes the menu (spec:
-    /// ui/plugin-menu.md §1).
+    /// F8, the toolbar's plugin button and an empty mixer slot open the plugin palette: an effect picked from F8's goes
+    /// into the selected track's first empty slot, a generator to the bottom of the channel rack, an empty slot's
+    /// effect into that slot; F8 again closes it (spec: ui/plugin-menu.md §1, §6).
     #[test]
-    fn plugin_menu_adds_plugins_where_they_belong() {
-        use crate::playlist::Cmd;
-        use crate::plugin_menu::PlugCmd;
+    fn plugin_palette_adds_plugins_where_they_belong() {
+        use crate::plugin_palette::{self as pal, PalAct, Row};
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
         let mut app = App::new(None);
@@ -19267,42 +19289,52 @@ mod tests {
         app.state.plugdb.rebuild(&app.plugins);
         frame(&mut app, &mut c, None);
         let f8 = Key::Named(NamedKey::F8);
-        let pick = |app: &App, label: &str| app.state.playlist.popup.as_ref().and_then(|p| p.items.iter().find(|i| i.label == label)).map(|i| i.cmd.clone());
+        // Types `label` into the search and clicks its row.
+        let pick = |app: &mut App, c: &mut Canvas, label: &str| {
+            for ch in label.chars() {
+                let k = if ch == ' ' { Key::Named(NamedKey::Space) } else { Key::Character(ch.to_string().into()) };
+                app.key(&k, false, false);
+            }
+            frame(app, c, None);
+            let rows = pal::rows(&app.state);
+            let i = rows
+                .iter()
+                .position(|r| matches!(*r, Row::Plugin { effect, at } if pal::entry(&app.state, effect, at).is_some_and(|e| e.label == label)))
+                .unwrap_or_else(|| panic!("{label} is listed"));
+            let r = hit_rect(app, &Action::Palette(PalAct::Row(i)));
+            click(app, c, r);
+        };
         app.key(&f8, false, false);
-        {
-            let p = app.state.playlist.popup.as_ref().expect("F8 opens the plugin menu");
-            assert!(p.items.iter().any(|i| i.head && i.label == "Generators"));
-            assert!(p.items.iter().any(|i| i.head && i.label == "Effects"));
-        }
+        assert!(pal::is_open(&app.state) && app.state.playlist.popup.is_none(), "F8 opens the palette, not a menu");
+        let heads: Vec<Row> = pal::rows(&app.state).into_iter().filter(|r| matches!(r, Row::Head { major: true, .. })).collect();
+        assert_eq!(heads, [Row::Head { label: "Instruments".into(), major: true }, Row::Head { label: "Effects".into(), major: true }]);
         // An effect: the selected track's first empty slot.
         crate::mixer::select(&mut app.state, 2, false);
         app.state.project.mixer[2].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Taken".into(), state: Vec::new() });
-        let fx = pick(&app, "Test FX").expect("the effects are listed");
-        let index = app.plugins.effects.len() - 1;
-        assert_eq!(fx, Cmd::Plugin(PlugCmd::Effect { index, slot: None }));
-        crate::playlist::run(&mut app, fx);
-        assert!(app.state.playlist.popup.is_none());
+        pick(&mut app, &mut c, "Test FX");
+        assert!(!pal::is_open(&app.state), "a pick closes it");
         assert_eq!(crate::mixer::slot_name(&app.state, 2, 1).as_deref(), Some("Test FX"));
         // F8 twice: open, then closed.
         app.key(&f8, false, false);
-        assert!(crate::plugin_menu::is_open(&app.state));
+        assert!(pal::is_open(&app.state));
         app.key(&f8, false, false);
-        assert!(app.state.playlist.popup.is_none());
+        assert!(!pal::is_open(&app.state));
         // The toolbar button opens it under the button; a generator goes to the bottom of the rack and is selected.
         frame(&mut app, &mut c, None);
         let b = hit_rect(&app, &Action::PickerOpen);
         click(&mut app, &mut c, b);
-        let p = app.state.playlist.popup.as_ref().expect("the toolbar button opens the plugin menu");
-        assert!(p.y >= b.bottom(), "under the button");
+        assert!(pal::is_open(&app.state) && pal::rect(&app.state).y >= b.bottom(), "under the button");
         let n = app.state.project.channels.len();
-        let osc = pick(&app, crate::osc3::LEMON_TRIO).expect("the generators are listed");
-        crate::playlist::run(&mut app, osc);
+        pick(&mut app, &mut c, crate::osc3::LEMON_TRIO);
         assert_eq!(app.state.project.channels.len(), n + 1);
         assert_eq!(app.state.selected_channel, n);
         assert_eq!(app.state.pending_plugin, Some((n, app.plugins.index_of(crate::osc3::LEMON_TRIO).unwrap())));
-        // An empty mixer slot's menu lists the effects for that slot.
-        let m = crate::mixer::effect_menu(&app.state, 4, 0.0, 0.0);
-        assert!(m.items.iter().any(|i| i.cmd == Cmd::Plugin(PlugCmd::Effect { index, slot: Some(4) })));
+        // An empty mixer slot's palette: effects only, into that slot.
+        app.open_plugin_palette(crate::plugin_menu::Target::Fx(Some(4)), (100.0, 100.0), None);
+        assert_eq!(pal::title(&app.state.palette), "Add effect");
+        assert!(pal::rows(&app.state).iter().all(|r| !matches!(r, Row::Plugin { effect: false, .. })));
+        pick(&mut app, &mut c, "Test FX");
+        assert_eq!(crate::mixer::slot_name(&app.state, 2, 4).as_deref(), Some("Test FX"));
     }
 
     /// The menu bar dropdown's ▸ entries (spec: ui/menus.md "Look"): a click opens the submenu, the app's popup, to the
@@ -19664,7 +19696,7 @@ mod tests {
         let shown = app.state.show_browser;
         let b = hit_rect(&app, &Action::ToggleWin(Win::Browser));
         right(&mut app, &mut c, b, (b.cx(), b.cy()));
-        assert!(crate::plugin_menu::is_open(&app.state) && app.state.show_browser == shown);
+        assert!(crate::plugin_palette::is_open(&app.state) && app.state.show_browser == shown);
     }
 
     /// The time display's right-click menu (spec: ui/time-display.md §1, §3): every mode and middle unit works, one
@@ -21253,9 +21285,9 @@ mod tests {
         let track = a.state.project.channels[row].mixer_track;
         crate::mixer::select(&mut a.state, track, false);
         let eq = a.plugins.effects.iter().position(|e| e.desc.format == Format::Vst2 && e.desc.name.replace(' ', "") == "3BandEQ").expect("3BandEQ");
-        let menu = crate::mixer::effect_menu(&a.state, 0, 0.0, 0.0);
+        let menu = crate::plugin_menu::items(&a.state, crate::plugin_menu::Target::Fx(Some(0)), true);
         let cmd = Cmd::Plugin(PlugCmd::Effect { index: eq, slot: Some(0) });
-        assert!(menu.items.iter().any(|it| it.cmd == cmd), "the slot menu lists the VST2 copy");
+        assert!(menu.iter().any(|it| it.cmd == cmd), "the slot's list has the VST2 copy");
         pl::run(&mut a, cmd);
         let key = fx_key(track, 0);
         for _ in 0..200 {
