@@ -68,7 +68,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     button(ui, at(250.0, 5.0, 60.0, 21.0), Action::Touch(TouchAct::Mode(false)), "Keyboard", Ok("Keys"), !tc.pads);
     button(ui, at(314.0, 5.0, 60.0, 21.0), Action::Touch(TouchAct::Mode(true)), "Pads", Ok("Pads"), tc.pads);
     let close = at(400.0, 10.0, 10.0, 10.0);
-    let hov = ui.hit(close.outset(3.0), Action::CloseWin(Win::Touch), "Close");
+    let hov = super::close_button(ui, close.outset(3.0), close.outset(3.0), Action::CloseWin(Win::Touch), "Close");
     icons::draw(ui.c, Icon::Close, close.outset(1.0), if hov { t.tx(0xffffff) } else { t.glyph });
 
     // The octave bar: ◀ range ▶.

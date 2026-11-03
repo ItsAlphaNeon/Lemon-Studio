@@ -345,8 +345,8 @@ pub fn paint_curve(ui: &mut Ui, e: &CurveEdit, win: Rect) {
     ui.c.fill_rrect(panel, rad, t.s(0x1c1e21));
     ui.c.fill_rrect(panel.inset(1.0), (rad - 1.0).max(0.0), t.s(0x2b2d30));
     ui.c.text(Font::new(13).bold(), panel.x + 10.0, panel.y + 8.0, t.text, e.of.title());
-    let hov = ui.hit(close, act(MAct::CurveClose), "Close (drops the changes)");
-    ui.c.icon(&os_ui::tabler::X, close.inset(3.0), if hov { t.glyph } else { t.text });
+    let hov = super::close_button(ui, close, close, act(MAct::CurveClose), "Close (drops the changes)");
+    ui.c.icon(&os_ui::tabler::X, close.inset(3.0), if hov { t.tx(0xffffff) } else { t.text });
     kit::sunken(ui.c, t, graph, t.s(0x141516));
     for k in 1..4 {
         let k = k as f32 / 4.0;
