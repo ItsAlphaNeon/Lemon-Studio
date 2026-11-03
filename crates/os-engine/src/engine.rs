@@ -3298,6 +3298,9 @@ impl Engine {
         let len = (self.clock.samples_per_tick().round() as usize).max(1);
         let mut song = self.transport_at(self.frame);
         song.playing = false;
+        // Each held tick waits for its busy plugins anew, as a playing one does: a wait used up on an earlier tick
+        // would leave every later moment the UI holds an effect a missed tick (heard as dropouts while tails ring).
+        self.busy_until = None;
         for b in &mut self.bus {
             b.clear();
             b.resize(len * 2, 0.0);
@@ -5671,6 +5674,38 @@ mod tests {
         fn reset_fx(&mut self) {
             self.0 = 0.0;
         }
+    }
+
+    /// While held (paused, or a Stop's tails ringing out), an effect the UI thread holds for a moment is waited for on
+    /// every tick, not only until the first tick's wait is used up.
+    #[test]
+    fn held_ticks_wait_for_busy_effects() {
+        let mut p = project(vec![long_note(0, 384, 0)], vec![]);
+        p.channels[0].mixer_track = 1;
+        p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.busy_wait = Duration::from_secs(30);
+        let fx = Arc::new(Mutex::new(Ring(0.0)));
+        e.set_effect(1, 0, fx.clone());
+        for _ in 0..4 {
+            e.next_tick();
+        }
+        e.pause();
+        while !e.held {
+            e.next_tick();
+        }
+        // The wait of an earlier tick, used up.
+        e.busy_until = Some(Instant::now());
+        let held = fx.lock().unwrap();
+        let render = std::thread::spawn(move || {
+            e.next_tick();
+            e
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        drop(held);
+        let mut e = render.join().unwrap();
+        assert_eq!(e.take_missed(), 0, "the held tick waited for the effect");
     }
 
     // spec: audio/transport.md "Pause"

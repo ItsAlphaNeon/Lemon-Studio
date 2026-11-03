@@ -219,7 +219,7 @@ fn space_play_stop() {
     let d = app.transport.drops();
     eprintln!("\n{}", report(&rec, &presses, fixed));
     eprintln!(
-        "the transport counted: {} feeder late, {} plugin late, {} device; {} heard (the status bar's count: {})",
+        "the transport counted: {} feeder late, {} plugin late, {} device; {} heard (since the app started: {} dropouts)",
         d.feeder - d0.feeder,
         d.plugin - d0.plugin,
         d.device - d0.device,
