@@ -17,6 +17,10 @@
 //! too (a page fault that has to free memory first, after a long idle on a full machine), and can run past the hard cap
 //! before the handler ever runs: the program was killed that way. So a watchdog at normal priority (`watch`) also reads
 //! how long each promoted thread has run since it last waited, and demotes it from outside well before the hard cap.
+//!
+//! rtkit refuses more than about 25 promotions in 20 s ("busy"), and each new stream's threads ask: stopping and playing
+//! often gets there. The watchdog asks again for a thread that was refused, so a refusal does not last as long as the
+//! stream.
 
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::Once;
@@ -187,6 +191,8 @@ struct Watched {
     calm_since: Option<Instant>,
     /// How long it must stay calm to be promoted again: `CALM_FIRST`, doubled at each promotion again up to `CALM_MAX`.
     calm_for: Duration,
+    /// It has not been real-time yet: rtkit refused it.
+    refused: bool,
 }
 
 /// A demoted thread is promoted again after this long calm, the first time.
@@ -195,13 +201,19 @@ const CALM_MAX: Duration = Duration::from_secs(80);
 /// Calm: no run between two waits longer than this.
 const CALM_RUN_NS: u64 = 20_000_000;
 
+/// How long a thread waits to ask again after `why`: rtkit being busy passes within its 20 s, what else went wrong
+/// (no rtkit on this machine) is asked about less and less.
+fn after_refusal(calm_for: Duration, why: &str) -> Duration {
+    if why.contains("busy") { calm_for } else { (calm_for * 2).min(CALM_MAX) }
+}
+
 /// The watchdog's loop: per promoted thread, its waits and its CPU time when it was last seen to have waited; one
 /// still real-time that has used `WATCH_LIMIT_NS` since is demoted. A demoted one (by the watchdog or the SIGXCPU
 /// handler) that then stays calm is promoted again, so one stall (a page fault after a long idle) does not leave the
-/// audio at normal priority for the rest of the session.
+/// audio at normal priority for the rest of the session. One refused (`promote` failed) is asked for again the same way.
 fn watch() {
     let normal = libc::sched_param { sched_priority: 0 };
-    let fresh = |tid: i32| Watched { tid, waits: 0, cpu: 0, rt: false, calm_since: None, calm_for: CALM_FIRST };
+    let fresh = |tid: i32| Watched { tid, waits: 0, cpu: 0, rt: false, calm_since: None, calm_for: CALM_FIRST, refused: false };
     let mut seen: [Watched; 64] = [fresh(0); 64];
     loop {
         std::thread::sleep(WATCH_EVERY);
@@ -219,7 +231,7 @@ fn watch() {
                 cpu.saturating_sub(w.cpu)
             };
             if is_realtime(t) {
-                w.rt = true;
+                (w.rt, w.calm_since, w.refused) = (true, None, false);
                 if run >= WATCH_LIMIT_NS {
                     demote(t, &normal);
                     eprintln!("Audio: a real-time thread ran {} ms without waiting: normal priority", run / 1_000_000);
@@ -231,12 +243,25 @@ fn watch() {
                 // Demoted since the last look (the SIGXCPU handler).
                 (w.rt, w.calm_since) = (false, Some(now));
             }
-            let Some(since) = w.calm_since else { continue };
+            // Listed and never real-time: refused (or rtkit is still answering, and the next look finds it real-time).
+            let Some(since) = w.calm_since else {
+                (w.calm_since, w.refused) = (Some(now), true);
+                continue;
+            };
             if run > CALM_RUN_NS {
                 w.calm_since = Some(now);
-            } else if now.duration_since(since) >= w.calm_for && promote(t).is_ok() {
-                eprintln!("Audio: a real-time thread calm for {} s: real-time priority again", w.calm_for.as_secs());
-                (w.rt, w.calm_since, w.calm_for) = (true, None, (w.calm_for * 2).min(CALM_MAX));
+            } else if now.duration_since(since) >= w.calm_for {
+                match promote(t) {
+                    Ok(()) if w.refused => {
+                        eprintln!("Audio: a thread rtkit refused: real-time priority now");
+                        (w.rt, w.calm_since, w.refused) = (true, None, false);
+                    }
+                    Ok(()) => {
+                        eprintln!("Audio: a real-time thread calm for {} s: real-time priority again", w.calm_for.as_secs());
+                        (w.rt, w.calm_since, w.calm_for) = (true, None, (w.calm_for * 2).min(CALM_MAX));
+                    }
+                    Err(e) => (w.calm_since, w.calm_for) = (Some(now), after_refusal(w.calm_for, &e)),
+                }
             }
         }
     }
@@ -319,6 +344,44 @@ mod tests {
             is_realtime(tid())
         });
         assert!(!h.join().unwrap(), "demoted");
+    }
+
+    /// Busy rtkit is asked again at the same pace; a machine without it less and less.
+    #[test]
+    fn asking_again_after_a_refusal() {
+        assert_eq!(after_refusal(CALM_FIRST, "rtkit: org.freedesktop.DBus.Error.AccessDenied: Device or resource busy"), CALM_FIRST);
+        assert_eq!(after_refusal(CALM_FIRST, "no system bus: x"), CALM_FIRST * 2);
+        assert_eq!(after_refusal(CALM_MAX, "no system bus: x"), CALM_MAX);
+    }
+
+    /// With rtkit's promotions used up, a thread it refuses gets real-time priority once rtkit agrees again. Uses the
+    /// machine's rtkit for up to a minute: `hidden-tests cargo test -p os-app --bin lemonstudio rt::tests::a_refused_thread -- --ignored --exact --nocapture`
+    #[test]
+    #[ignore]
+    fn a_refused_thread_gets_its_priority_later() {
+        enable_in_tests();
+        // Threads that ask and end, until rtkit says no.
+        let mut asked = 0;
+        loop {
+            let refused = std::thread::spawn(|| promote(tid()).is_err()).join().unwrap();
+            asked += 1;
+            if refused {
+                break;
+            }
+            assert!(asked < 200, "rtkit never refused");
+        }
+        println!("refused after {asked} promotions");
+        let h = std::thread::spawn(|| {
+            let refused = promote(tid()).is_err();
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs(60) && !is_realtime(tid()) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            (refused, is_realtime(tid()), t0.elapsed())
+        });
+        let (refused, now, took) = h.join().unwrap();
+        println!("refused {refused}, real-time {now} after {took:?}");
+        assert!(refused && now);
     }
 
     /// A real-time thread the watchdog demoted gets its priority back once it has stayed calm.
