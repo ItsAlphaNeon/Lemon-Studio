@@ -35,6 +35,8 @@ struct Press {
 fn open(path: &std::path::Path) -> App {
     let c = sim::Config { block: var("OS_CHECK_BLOCK", 256), rate: var("OS_CHECK_RATE", 48000) };
     sim::set(Some(c));
+    // Linux: the audio threads at real-time priority, as the app has them (`crate::rt`).
+    #[cfg(target_os = "linux")]
     if std::env::var("OS_CHECK_RT").as_deref() != Ok("0") {
         crate::rt::enable_in_tests();
     }
