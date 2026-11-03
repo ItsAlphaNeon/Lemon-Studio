@@ -4834,7 +4834,13 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             });
             match src {
                 Some(ClipSource::Pattern(n)) => start_edit(s, EditTarget::PatternName(n), at),
-                _ => return Some("Rename: only pattern clips can be renamed here".into()),
+                // An audio or automation clip is named after its channel: the rack's Rename, color and icon... box
+                // (spec: ui/playlist.md §10a, the picker's clip entries open their channel's menu).
+                Some(ClipSource::Channel(ch)) => match s.project.channels.iter().position(|c| c.index == ch) {
+                    Some(r) => crate::rack::open_box(s, crate::rack::RBox::Channel(r), at),
+                    None => return Some("Rename: the clip's channel is not in the rack".into()),
+                },
+                None => {}
             }
             None
         }
@@ -5598,6 +5604,23 @@ mod tests {
         let mut app = App::new(None);
         app.state.project = crate::app::test_project();
         app
+    }
+
+    /// Rename... on an audio or automation clip renames its channel in the rack's name box; a pattern clip still edits
+    /// its pattern's name in place.
+    #[test]
+    fn renaming_a_channel_clip_renames_its_channel() {
+        let mut app = app();
+        let ch = app.state.project.channels[1].index;
+        arr_mut(&mut app.state).clips.push(Clip::new(0, 96, 0, ClipSource::Channel(ch)));
+        let i = clips(&app.state).len() - 1;
+        assert_eq!(run(&mut app, Cmd::ClipRename(i)), None);
+        let b = app.state.pat_ui.name_box.as_mut().expect("the channel's name box opens");
+        assert_eq!(b.target, crate::patterns::BoxTarget::Rack(crate::rack::RBox::Channel(1)));
+        b.text = "Vocals".into();
+        crate::patterns::accept(&mut app.state);
+        assert_eq!(app.state.project.channels[1].name.as_deref(), Some("Vocals"));
+        assert_eq!(source_name(&app.state, ClipSource::Channel(ch)), "Vocals");
     }
 
     /// TOOLS ▸ Lock / Unlock all tracks (Lemon Studio's design): a track whose clips share one source is locked to it
