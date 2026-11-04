@@ -10,6 +10,14 @@
 //! (`OS_CHECK_BLOCK=256`, `OS_CHECK_RATE=48000`: the device; `OS_CHECK_ROUNDS=20`; `OS_CHECK_RT=0` leaves the audio
 //! threads at normal priority; `OS_CHECK_UI_IDLE=1` stops the app's loop while the tails ring out after each Stop, to
 //! tell what the UI thread causes). Run it on an idle machine, on a hidden display: the timing is the machine's.
+//!
+//! `space_with_an_instrument_open` plays and stops quickly with an instrument's window open. Run under `ulimit -r 0`
+//! it takes rtkit's path, as for a user outside the `realtime` group; `OS_CHECK_PLAY_MS` (1000) is how long each Play
+//! lasts.
+//!
+//! Both end with what every Play and Stop cost: the render time of the first blocks after Play and how soon it was
+//! heard, the largest step between two samples after each Stop against the largest while playing (a click), the
+//! real-time promotions (refused by rtkit, taken back by the safety cap) and the device's opens.
 
 use std::time::{Duration, Instant};
 
@@ -178,10 +186,97 @@ fn report(rec: &Recording, presses: &[Press], fixed: usize) -> String {
         let share = format!("{:.0} % of a block", ms(rec.moved(b, render)) / (period.as_secs_f64() * 1e3) * 100.0);
         line(&mut out, b, &share);
     }
+    let _ = write!(out, "{}", costs(rec, presses, render));
     let late = rec.blocks.iter().map(|b| b.late).max().unwrap_or_default();
     let took = rec.blocks.iter().map(|b| b.took).max().unwrap_or_default();
     let _ = writeln!(out, "\nthe device's callback: woke at most {:.2} ms late, mixed in at most {:.2} ms", late.as_secs_f64() * 1e3, took.as_secs_f64() * 1e3);
     out
+}
+
+/// What each Play and Stop cost (see the module's docs), from a recording.
+fn costs(rec: &Recording, presses: &[Press], render: usize) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let (Some(c), Some(started)) = (rec.config, rec.started) else { return out };
+    let period = Duration::from_nanos(u64::from(c.block) * 1_000_000_000 / u64::from(c.rate));
+    let at = |b: usize| started + rec.blocks[b].due;
+    // The blocks from `from` for `d` (the first after a press: due at or after it).
+    let span = |from: Instant, d: Duration| (0..rec.blocks.len()).filter(move |&b| at(b) >= from && at(b) < from + d);
+    let ms = |d: f64| d * 1e3;
+    // The first 25 ms of blocks after each Play: their render time, and the first block with sound.
+    let first = Duration::from_millis(25);
+    let (mut sums, mut worst, mut heard) = (Vec::new(), Vec::new(), Vec::new());
+    for p in presses.iter().filter(|p| p.play) {
+        let blocks: Vec<usize> = span(p.at, first).collect();
+        sums.push(blocks.iter().map(|&b| rec.moved(b, render)).sum::<u64>() as f64 * 1e-9);
+        worst.push(blocks.iter().map(|&b| rec.moved(b, render)).max().unwrap_or(0) as f64 * 1e-9);
+        if let Some(b) = span(p.at, Duration::from_secs(1)).find(|&b| rec.blocks[b].peak > SILENT) {
+            heard.push((at(b) - p.at).as_secs_f64());
+        }
+    }
+    let stats = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        if v.is_empty() {
+            return "-".to_string();
+        }
+        format!("median {:.2} ms, worst {:.2} ms", ms(v[v.len() / 2]), ms(v[v.len() - 1]))
+    };
+    let _ = writeln!(out, "\nafter Play ({} of them):", sums.len());
+    let _ = writeln!(out, "  render time of the first {:.0} ms of blocks: {}", ms(first.as_secs_f64()), stats(&mut sums));
+    let _ = writeln!(out, "  the longest of those blocks: {} ({:.2} ms a block)", stats(&mut worst), ms(period.as_secs_f64()));
+    let _ = writeln!(out, "  first sound: {} after the press ({} of them sounded)", stats(&mut heard.clone()), heard.len());
+    // Clicks: the largest step in the 200 ms after each Stop, and while playing (from 200 ms after Play to the Stop).
+    let mut play_step = 0.0f32;
+    let mut stops = Vec::new();
+    for (i, p) in presses.iter().enumerate() {
+        let next = presses.get(i + 1).map_or(Duration::from_secs(5), |n| n.at - p.at);
+        if p.play {
+            let from = p.at + Duration::from_millis(200);
+            play_step = span(from, next.saturating_sub(Duration::from_millis(200))).map(|b| rec.blocks[b].step).fold(play_step, f32::max);
+        } else {
+            stops.push(span(p.at, Duration::from_millis(200).min(next)).map(|b| rec.blocks[b].step).fold(0.0f32, f32::max));
+        }
+    }
+    let louder = stops.iter().filter(|&&s| s > play_step).count();
+    stops.sort_by(f32::total_cmp);
+    if let (Some(&med), Some(&top)) = (stops.get(stops.len() / 2), stops.last()) {
+        let _ = writeln!(out, "\nsample steps (clicks): while playing at most {play_step:.4}; in the 200 ms after Stop median {med:.4}, worst {top:.4}; {louder} of {} Stops above the playing maximum", stops.len());
+    }
+    out
+}
+
+/// The counters a check reads before and after: real-time promotions, rtkit's refusals, the safety cap's demotions,
+/// the device's opens.
+struct Counters {
+    at: Instant,
+    promoted: usize,
+    refused: usize,
+    demoted: usize,
+    opens: u64,
+}
+
+impl Counters {
+    fn now() -> Counters {
+        #[cfg(target_os = "linux")]
+        let ((promoted, demoted), refused) = (crate::rt::counts(), crate::rt::refused());
+        #[cfg(not(target_os = "linux"))]
+        let ((promoted, demoted), refused) = ((0, 0), 0);
+        Counters { at: Instant::now(), promoted, refused, demoted, opens: crate::device::opens() }
+    }
+
+    /// What moved since `self`.
+    fn since(&self) -> String {
+        let n = Counters::now();
+        let minutes = self.at.elapsed().as_secs_f64() / 60.0;
+        let opens = n.opens - self.opens;
+        format!(
+            "real-time: {} promotions, {} refused by rtkit, {} taken back by the safety cap; the device opened {opens} times ({:.1} a minute)",
+            n.promoted - self.promoted,
+            n.refused - self.refused,
+            n.demoted - self.demoted,
+            opens as f64 / minutes.max(1e-9)
+        )
+    }
 }
 
 /// Play and Stop by Space, as the Discord report did: 20 times with the tails left to ring out after each Stop, then
@@ -198,6 +293,7 @@ fn space_play_stop() {
     let mut presses = Vec::new();
     let fixed = record(&app);
     let d0 = app.transport.drops();
+    let c0 = Counters::now();
     for _ in 0..rounds {
         space(&mut app, &mut presses, "space");
         run(&mut app, Duration::from_secs(2));
@@ -228,5 +324,39 @@ fn space_play_stop() {
         d.heard - d0.heard,
         app.transport.underruns()
     );
+    eprintln!("{}", c0.since());
+    sim::set(None);
+}
+
+/// Play and Stop by Space in quick turns (a second of play, half a second stopped), 30 times, with an instrument's
+/// window open, so that the instruments are processed while stopped too. Reports as `space_play_stop` does.
+#[test]
+#[ignore]
+fn space_with_an_instrument_open() {
+    let Some(path) = std::env::var_os("OS_CHECK_PROJECT") else {
+        eprintln!("set OS_CHECK_PROJECT to a project file");
+        return;
+    };
+    let rounds: usize = var("OS_CHECK_ROUNDS", 30);
+    let mut app = open(std::path::Path::new(&path));
+    app.transport.listen(true);
+    run(&mut app, Duration::from_millis(500));
+    let mut presses = Vec::new();
+    let fixed = record(&app);
+    let d0 = app.transport.drops();
+    let c0 = Counters::now();
+    for _ in 0..rounds {
+        space(&mut app, &mut presses, "quick");
+        run(&mut app, Duration::from_millis(var("OS_CHECK_PLAY_MS", 1000)));
+        space(&mut app, &mut presses, "quick");
+        run(&mut app, Duration::from_millis(500));
+    }
+    run(&mut app, Duration::from_millis(1000));
+    let rec = sim::take();
+    let d = app.transport.drops();
+    eprintln!("\n{}", report(&rec, &presses, fixed));
+    eprintln!("the transport counted: {} feeder late, {} plugin late, {} device; {} heard", d.feeder - d0.feeder, d.plugin - d0.plugin, d.device - d0.device, d.heard - d0.heard);
+    eprintln!("{}", c0.since());
+    app.transport.listen(false);
     sim::set(None);
 }
