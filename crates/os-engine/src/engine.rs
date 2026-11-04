@@ -2102,6 +2102,12 @@ impl Engine {
         self.held || self.fade_out > 0
     }
 
+    /// Paused, and the channels' fade is over: nothing but the mixer is processed (`render_held`), no hosted
+    /// instrument.
+    pub fn held(&self) -> bool {
+        self.held
+    }
+
     /// Keep a live-only engine running while nothing plays (an instrument's editor is open): its instruments are
     /// processed every tick, so notes from the editor's own keyboard sound. Off, it finishes again once silent.
     /// Channel `channel`'s pitch knob moved live (a controller's pitch wheel): its sounding notes and the next follow
