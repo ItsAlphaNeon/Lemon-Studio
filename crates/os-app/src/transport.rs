@@ -1564,6 +1564,8 @@ struct Audio {
     closed: bool,
     closing: Option<Instant>,
     held: Option<(Project, PlayMode, u64, At)>,
+    /// When a Stop's rewind is made again, once the callback can no longer publish a position from before it.
+    rewind_at: Option<Instant>,
     /// The device failed while in use; the playback waits in `held` until it opens again.
     lost: Option<Lost>,
     /// An ASIO driver chosen opens at once (at the start, with new settings), not with the first note: it stays open,
@@ -1592,6 +1594,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         closed: false,
         closing: None,
         held: None,
+        rewind_at: None,
         lost: None,
         open_asio: (!HEADLESS.load(Ordering::Acquire)).then(|| (Instant::now(), 0)),
         device: OutputDevice::default(),
@@ -2034,6 +2037,7 @@ impl Audio {
             }
             _ => self.hand(None, false, RESET_INST | RESET_FX, false),
         }
+        self.rewind_at = Some(Instant::now() + CLOSE_AFTER);
         self.listen_retry = true;
     }
 
@@ -2159,6 +2163,13 @@ impl Audio {
             self.pre = None;
             self.device.close();
             reset_some(&self.inst, std::mem::take(&mut self.pend));
+        }
+        // The block the callback was playing as Stop came may have published its position after the UI's rewind.
+        if self.rewind_at.is_some_and(|t| Instant::now() >= t) {
+            self.rewind_at = None;
+            if !matches!(self.role, Role::Song(_)) && self.shared.state.load(Ordering::Acquire) == STOPPED {
+                self.shared.rewind(0.0);
+            }
         }
         self.ring();
         let xruns = self.device.take_xruns();
