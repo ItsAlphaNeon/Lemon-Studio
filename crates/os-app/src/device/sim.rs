@@ -81,6 +81,9 @@ pub struct Block {
     pub peak: f32,
     /// The callback ended after the block before had played out: the device's own underrun.
     pub xrun: bool,
+    /// The largest step between two frames following each other on one side, from the block before's last frame on
+    /// (a click shows as a step far larger than the music's own).
+    pub step: f32,
 }
 
 /// What a recording kept: the probes' names, the blocks, and per block what each probe moved since the block before
@@ -189,6 +192,7 @@ pub(super) fn open(c: Config, xruns: &Arc<std::sync::atomic::AtomicU64>) -> Resu
                     eprintln!("Audio: the simulated device runs at normal priority ({e})");
                 }
                 let (mut t0, mut k) = (Instant::now(), 0u64);
+                let mut last = [0.0f32; 2];
                 while !stop.load(Ordering::Acquire) {
                     let at = due(t0, k, c);
                     let now = Instant::now();
@@ -196,10 +200,16 @@ pub(super) fn open(c: Config, xruns: &Arc<std::sync::atomic::AtomicU64>) -> Resu
                         std::thread::sleep(at - now);
                     }
                     let woke = Instant::now();
-                    let peak = mix.block(c.block as usize).iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                    let out = mix.block(c.block as usize);
+                    let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                    let mut step = 0.0f32;
+                    for f in out.chunks_exact(2) {
+                        step = step.max((f[0] - last[0]).abs()).max((f[1] - last[1]).abs());
+                        last = [f[0], f[1]];
+                    }
                     let done = Instant::now();
                     let xrun = done > at + period;
-                    keep(at, Block { due: Duration::ZERO, late: woke - at, took: done - woke, peak, xrun });
+                    keep(at, Block { due: Duration::ZERO, late: woke - at, took: done - woke, peak, xrun, step });
                     if xrun {
                         errors.xrun();
                         (t0, k) = (done, 0);
