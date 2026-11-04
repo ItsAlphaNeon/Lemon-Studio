@@ -13,10 +13,8 @@
 //! The device opens with the audio settings (`audio_cfg`) when first needed: a Windows (or Linux, Core Audio) device
 //! through cpal (on Linux the sound server's in shared mode, ALSA's in exclusive mode: `audio_cfg::host`), an ASIO
 //! driver through `asio`, and a Windows device in exclusive mode, or in shared mode at a period
-//! shorter than its default, through `wasapi`. A Windows device closes again once nothing plays (`close_idle`), as the
-//! streams did when each sound had its own: an open stream keeps the computer from sleeping (and in exclusive mode
-//! silences every other program). An ASIO driver stays open (another program could take it meanwhile) until Auto close
-//! or new settings let go of it. A stream that failed (the device went away, a driver asked to be reset) reports it
+//! shorter than its default, through `wasapi`. Once open it stays open, silent when nothing plays (spec:
+//! audio/devices.md §2.3), until Auto close or new settings let go of it; an ASIO driver opens at once. A stream that failed (the device went away, a driver asked to be reset) reports it
 //! (`failure`) and is opened anew the next time it is needed.
 //!
 //! A simulated device (`sim`) opens in place of all of these while one is set: playback checks without a sound card.
@@ -561,13 +559,6 @@ impl OutputDevice {
         self.open = None;
         if alsa {
             heal_sound_server();
-        }
-    }
-
-    /// Nothing plays any more: lets go of a Windows device (an ASIO driver stays open).
-    pub(crate) fn close_idle(&mut self) {
-        if !self.is_asio() {
-            self.close();
         }
     }
 
