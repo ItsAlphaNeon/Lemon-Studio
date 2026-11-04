@@ -10,6 +10,10 @@
 //! (`OS_CHECK_BLOCK=256`, `OS_CHECK_RATE=48000`: the device; `OS_CHECK_ROUNDS=20`; `OS_CHECK_RT=0` leaves the audio
 //! threads at normal priority; `OS_CHECK_UI_IDLE=1` stops the app's loop while the tails ring out after each Stop, to
 //! tell what the UI thread causes). Run it on an idle machine, on a hidden display: the timing is the machine's.
+//!
+//! `space_with_an_instrument_open` plays and stops quickly with an instrument's window open, which opens the live
+//! stream at every Stop. Run under `ulimit -r 0` it takes rtkit's path, as for a user outside the `realtime` group;
+//! `OS_CHECK_PLAY_MS` (1000) is how long each Play lasts.
 
 use std::time::{Duration, Instant};
 
@@ -228,5 +232,51 @@ fn space_play_stop() {
         d.heard - d0.heard,
         app.transport.underruns()
     );
+    sim::set(None);
+}
+
+/// Play and Stop by Space in quick turns (a second of play, half a second stopped), 30 times, with an instrument's
+/// window open: each Stop opens the live stream and each Play the playback, every one with new audio threads asking for
+/// real-time priority. Reports the dropouts, and how many promotions rtkit refused and how many audio threads the
+/// safety cap took back.
+#[test]
+#[ignore]
+fn space_with_an_instrument_open() {
+    let Some(path) = std::env::var_os("OS_CHECK_PROJECT") else {
+        eprintln!("set OS_CHECK_PROJECT to a project file");
+        return;
+    };
+    let rounds: usize = var("OS_CHECK_ROUNDS", 30);
+    let mut app = open(std::path::Path::new(&path));
+    app.transport.listen(true);
+    run(&mut app, Duration::from_millis(500));
+    let mut presses = Vec::new();
+    let fixed = record(&app);
+    let d0 = app.transport.drops();
+    #[cfg(target_os = "linux")]
+    let (r0, (p0, x0)) = (crate::rt::refused(), crate::rt::counts());
+    for _ in 0..rounds {
+        space(&mut app, &mut presses, "quick");
+        run(&mut app, Duration::from_millis(var("OS_CHECK_PLAY_MS", 1000)));
+        space(&mut app, &mut presses, "quick");
+        run(&mut app, Duration::from_millis(500));
+    }
+    run(&mut app, Duration::from_millis(1000));
+    let rec = sim::take();
+    let d = app.transport.drops();
+    eprintln!("\n{}", report(&rec, &presses, fixed));
+    eprintln!(
+        "the transport counted: {} feeder late, {} plugin late, {} device; {} heard",
+        d.feeder - d0.feeder,
+        d.plugin - d0.plugin,
+        d.device - d0.device,
+        d.heard - d0.heard,
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let (p, x) = crate::rt::counts();
+        eprintln!("real-time: {} promotions, {} refused by rtkit, {} taken back by the safety cap", p - p0, crate::rt::refused() - r0, x - x0);
+    }
+    app.transport.listen(false);
     sim::set(None);
 }

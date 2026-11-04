@@ -43,6 +43,14 @@ static PROMOTED: [AtomicI32; 64] = [const { AtomicI32::new(0) }; 64];
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Threads put back to normal priority by the SIGXCPU handler or the watchdog.
 static DEMOTED: AtomicUsize = AtomicUsize::new(0);
+/// Promotions rtkit refused.
+static REFUSED: AtomicUsize = AtomicUsize::new(0);
+
+/// How many promotions rtkit refused (the playback checks report it: `crate::checks`).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn refused() -> usize {
+    REFUSED.load(Ordering::Acquire)
+}
 
 /// How many threads were promoted, and how many of them demoted since (`demote_all`).
 pub fn counts() -> (usize, usize) {
@@ -113,7 +121,9 @@ pub fn promote(tid: i32) -> Result<(), String> {
     // SAFETY: sets the scheduling policy of a thread of this process.
     let direct = unsafe { libc::sched_setscheduler(tid, libc::SCHED_FIFO | libc::SCHED_RESET_ON_FORK, &param) } == 0;
     if !direct {
-        rtkit(tid)?;
+        rtkit(tid).inspect_err(|_| {
+            REFUSED.fetch_add(1, Ordering::AcqRel);
+        })?;
     }
     COUNT.fetch_add(1, Ordering::AcqRel);
     Ok(())
