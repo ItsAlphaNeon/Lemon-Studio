@@ -6,7 +6,7 @@
 //! Miscellaneous "Show windows of one plugin as tabs". A second window of a plugin joins the first, and the window shows
 //! one of them at a time; a tab dragged out of the row stands alone, to compare side by side, until it is closed.
 //!
-//! Dragged back: a window held over the title of another window of its plugin shows, after a moment, what letting go
+//! Dragged back: a window held over another window of its plugin shows, after a moment, what letting go
 //! gives, in its own row of tabs rather than on the window below (`Held`, `Preview`).
 //!
 //! Every window of a group keeps its frame, with the group's place and a tab row (`EmbedFrame::set_tabs`). Those not
@@ -27,35 +27,25 @@ const MIN_OVERLAP: f32 = 72.0;
 const CLOSE_ROOM: f32 = 36.0;
 const CLOSE: f32 = 14.0;
 
-/// How long a window is held over another's title before it shows what letting go gives.
-pub const MERGE_HOLD: Duration = Duration::from_millis(350);
-/// How far the mouse may move (logical px) while that time runs.
-pub const MERGE_SLOP: f32 = 6.0;
-/// How far past the title the mouse may go once the window shows it.
+/// How long a window is held over another before it shows what letting go gives.
+pub const MERGE_HOLD: Duration = Duration::from_millis(200);
+/// How far past the other window the mouse may go once the window shows it.
 pub const MERGE_KEEP: f32 = 10.0;
 
-/// A window being dragged, over the title of another window of its plugin.
+/// A window being dragged, over another window of its plugin.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Held {
     pub row: usize,
     pub into: usize,
-    pub at: (f32, f32),
     pub since: Instant,
     /// The hold is over: the window shows what letting go gives.
     pub ripe: bool,
 }
 
 impl Held {
-    pub fn new(row: usize, into: usize, at: (f32, f32), since: Instant) -> Held {
-        Held { row, into, at, since, ripe: false }
-    }
-
-    /// The mouse moved to `at`, still over the same window: too far and the hold starts again.
-    pub fn moved(&mut self, at: (f32, f32), now: Instant) {
-        if !self.ripe && (at.0 - self.at.0).hypot(at.1 - self.at.1) > MERGE_SLOP {
-            self.at = at;
-            self.since = now;
-        }
+    /// The time runs while the mouse stays over window `into`, moving or not.
+    pub fn new(row: usize, into: usize, since: Instant) -> Held {
+        Held { row, into, since, ripe: false }
     }
 
     /// Whether the hold has just come to its end.
@@ -449,20 +439,13 @@ mod tests {
     }
 
     #[test]
-    fn the_hold_waits_for_the_mouse_to_rest() {
+    fn the_hold_shows_the_group_after_a_moment() {
         let t0 = Instant::now();
         let later = |ms: u64| t0 + Duration::from_millis(ms);
-        let mut h = Held::new(1, 5, (100.0, 100.0), t0);
-        assert!(!h.ripen(later(349)));
-        h.moved((103.0, 102.0), later(200));
-        assert!(h.ripen(later(350)), "a small move leaves the time running");
-        assert!(!h.ripen(later(400)), "once");
-        let mut h = Held::new(1, 5, (100.0, 100.0), t0);
-        h.moved((120.0, 100.0), later(300));
-        assert!(!h.ripen(later(400)), "a real move starts it again");
-        assert!(h.ripen(later(650)));
-        h.moved((200.0, 100.0), later(700));
-        assert!(h.ripe, "it stays once shown");
+        let mut h = Held::new(1, 5, t0);
+        assert!(!h.ripen(later(199)));
+        assert!(h.ripen(later(200)), "a moment over the other window");
+        assert!(!h.ripen(later(400)) && h.ripe, "once, and it stays");
     }
 
     #[test]

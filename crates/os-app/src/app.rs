@@ -7427,7 +7427,8 @@ impl App {
         true
     }
 
-    /// Linux: the window of another of `row`'s plugin whose title the mouse is over, with nothing lying over it there.
+    /// Linux: the window of another of `row`'s plugin that the mouse is over, with nothing lying over it there. Anywhere
+    /// on it: the window being dragged hides its title.
     #[cfg(target_os = "linux")]
     fn tab_target(&self, row: usize, x: f32, y: f32) -> Option<usize> {
         if !crate::prefs::check(&crate::prefs::PLUGIN_TABS) {
@@ -7441,13 +7442,12 @@ impl App {
             }
             if let Win::Hosted(r) = w {
                 let Some(e) = self.state.embeds.get(&r) else { continue };
-                if !e.rect().contains(x, y) {
+                let margin = if self.tab_held.is_some_and(|h| h.ripe && h.into == r) { crate::plugin_tabs::MERGE_KEEP } else { 0.0 };
+                if !e.rect().outset(margin).contains(x, y) {
                     continue;
                 }
-                let margin = if self.tab_held.is_some_and(|h| h.ripe && h.into == r) { crate::plugin_tabs::MERGE_KEEP } else { 0.0 };
-                let over = e.head_rect().outset(margin).contains(x, y);
                 let same = self.plugins.descriptor(r).is_some_and(|d| d.name == kind);
-                return (over && same && !own.contains(&r)).then_some(r);
+                return (same && !own.contains(&r)).then_some(r);
             }
             if crate::floating::floats(w) && crate::floating::paint_area(&self.state, w).is_some_and(|a| a.contains(x, y)) {
                 return None;
@@ -7461,10 +7461,10 @@ impl App {
     fn tab_hold_track(&mut self, row: usize, x: f32, y: f32) {
         let now = std::time::Instant::now();
         match (self.tab_target(row, x, y), &mut self.tab_held) {
-            (Some(t), Some(h)) if h.into == t => h.moved((x, y), now),
+            (Some(t), Some(h)) if h.into == t => {}
             (Some(t), _) => {
                 self.tab_preview_off();
-                self.tab_held = Some(crate::plugin_tabs::Held::new(row, t, (x, y), now));
+                self.tab_held = Some(crate::plugin_tabs::Held::new(row, t, now));
             }
             (None, _) => {
                 self.tab_preview_off();
@@ -7497,15 +7497,14 @@ impl App {
         self.tab_held = Some(h);
     }
 
-    /// Linux: the button came up: a held window that was showing the group makes it, at the other's place.
+    /// Linux: the button came up: a held window that was showing the group makes it, where it was let go (the other
+    /// window comes to it).
     #[cfg(target_os = "linux")]
     fn tab_hold_finish(&mut self) {
         let held = self.tab_held.take();
         self.tab_preview_off();
         let Some(h) = held.filter(|h| h.ripe) else { return };
-        let (Some(e), Some(into), Some(kind)) = (self.state.embeds.get(&h.row), self.state.embeds.get(&h.into), self.plugins.descriptor(h.row).map(|d| d.name)) else { return };
-        let r = into.rect();
-        e.set_pos((r.x, r.y));
+        let (true, true, Some(kind)) = (self.state.embeds.contains_key(&h.row), self.state.embeds.contains_key(&h.into), self.plugins.descriptor(h.row).map(|d| d.name)) else { return };
         self.state.plugin_tabs.merge(h.row, h.into, &kind);
         self.state.raise(Win::Hosted(h.row));
         self.invalidate();
@@ -11311,8 +11310,8 @@ mod tests {
         app.paint(c, damage);
     }
 
-    /// Two windows of one plugin apart: one dragged onto the other's title and held shows the group in its own row of
-    /// tabs, the other unchanged; moved away the row goes, and held again and let go they are one window.
+    /// Two windows of one plugin apart: one dragged onto the other and held shows the group in its own row of tabs, the
+    /// other unchanged; moved away the row goes, and held again and let go they are one window.
     #[cfg(target_os = "linux")]
     fn tabs_go_back_together(app: &mut App, c: &mut Canvas) {
         use std::time::{Duration, Instant};
@@ -11336,21 +11335,80 @@ mod tests {
         assert_eq!(e0.rect().h, r0.h, "the one below is as it was");
         frame(app, c, None);
         // Away: it goes, and letting go there leaves them apart.
-        app.mouse_move(over.0 + 700.0, over.1 + 400.0);
+        let away = if r0.right() + 60.0 < 1536.0 { (r0.right() + 40.0, over.1) } else { (r0.x - 40.0, over.1) };
+        app.mouse_move(away.0, away.1);
         assert!(app.state.tab_preview.is_none() && app.tab_held.is_none());
         app.plugin_tick();
         assert_eq!(e1.rect().h, r1.h);
-        // Back and held, let go: one window, at the place of the one below.
+        // Back and held, let go: one window, where it was let go.
         app.mouse_move(over.0, over.1);
         app.tab_hold_tick(Instant::now() + Duration::from_millis(400));
+        let dropped = (e1.rect().x, e1.rect().y);
         assert!(app.embed_up());
         assert!(app.state.tab_preview.is_none());
         app.plugin_tick();
         assert_eq!(app.state.plugin_tabs.group_of(0).map(|g| (g.rows.clone(), g.active)), Some((vec![0, 1], 1)));
-        assert_eq!((e1.rect().x, e1.rect().y), (r0.x, r0.y));
-        assert_eq!((e0.rect().x, e0.rect().y), (r0.x, r0.y));
+        assert_eq!((e1.rect().x, e1.rect().y), dropped, "it stays where it was let go");
+        assert_eq!((e0.rect().x, e0.rect().y), dropped, "the other comes to it");
         assert!(!app.state.z.contains(&Win::Hosted(0)) && app.state.z.contains(&Win::Hosted(1)));
         // Pulled out for what follows.
+        app.state.plugin_tabs.pull_out(1);
+        app.plugin_tick();
+    }
+
+    /// As `tabs_go_back_together`, through the shell's own calls and clock: presses, motion in steps, the hold waited
+    /// out in real time with frames between, the release. Then a tab dragged out of the group and, in the same drag,
+    /// held over the window it came from goes back.
+    #[cfg(target_os = "linux")]
+    fn tabs_rejoin_as_the_shell_drives_it(app: &mut App, c: &mut Canvas) {
+        use std::time::Duration;
+        let (e0, e1) = (app.state.embeds[&0].clone(), app.state.embeds[&1].clone());
+        let wait = |app: &mut App, c: &mut Canvas| {
+            for _ in 0..30 {
+                std::thread::sleep(Duration::from_millis(20));
+                app.tick();
+                app.plugin_tick();
+                let d = app.take_damage();
+                frame_damage(app, c, d);
+            }
+        };
+        let walk = |app: &mut App, from: (f32, f32), to: (f32, f32)| {
+            for i in 1..=10 {
+                let k = i as f32 / 10.0;
+                app.mouse_move(from.0 + (to.0 - from.0) * k, from.1 + (to.1 - from.1) * k);
+            }
+        };
+        e1.set_pos((e0.rect().x + 40.0, e0.rect().y + 300.0));
+        app.state.raise(Win::Hosted(1));
+        app.plugin_tick();
+        frame(app, c, None);
+        let (r0, r1) = (e0.rect(), e1.rect());
+        // (not where the last test pressed: that would be a double click)
+        let (title, over) = ((r1.x + 220.0, r1.y + 8.0), (r0.x + 220.0, r0.y + 8.0));
+        app.mouse_move(title.0, title.1);
+        app.mouse_down();
+        walk(app, title, over);
+        wait(app, c);
+        assert_eq!(app.state.tab_preview.as_ref().map(|p| p.row), Some(1), "held over the other, it shows the group");
+        app.mouse_up();
+        app.plugin_tick();
+        assert_eq!(app.state.plugin_tabs.group_of(0).map(|g| g.rows.clone()), Some(vec![0, 1]), "let go: one window");
+        frame(app, c, None);
+        // A tab dragged out, then back over the window it left and held there.
+        let strip = e1.tabs_rect();
+        let tab = (strip.x + 20.0, strip.y + 10.0);
+        app.mouse_move(tab.0, tab.1);
+        app.mouse_down();
+        walk(app, tab, (tab.0 + 300.0, tab.1 + 250.0));
+        app.plugin_tick();
+        assert!(app.state.plugin_tabs.group_of(1).is_none(), "out of the group");
+        let back = (e1.rect().x + 150.0, e1.rect().y + 8.0);
+        walk(app, (tab.0 + 300.0, tab.1 + 250.0), back);
+        wait(app, c);
+        assert!(app.state.tab_preview.is_some(), "held over the window it came from, it shows the group");
+        app.mouse_up();
+        app.plugin_tick();
+        assert!(app.state.plugin_tabs.group_of(0).is_some_and(|g| g.rows.len() == 2), "back together");
         app.state.plugin_tabs.pull_out(1);
         app.plugin_tick();
     }
@@ -12692,6 +12750,7 @@ mod tests {
         assert_eq!(b.x, a.x - 300.0, "apart");
         assert_eq!(a.h, alone.h, "no row of tabs");
         tabs_go_back_together(&mut app, &mut c);
+        tabs_rejoin_as_the_shell_drives_it(&mut app, &mut c);
         app.plugins.close_window(0);
         app.plugins.close_window(1);
     }
