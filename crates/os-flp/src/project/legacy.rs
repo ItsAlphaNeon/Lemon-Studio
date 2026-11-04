@@ -68,8 +68,8 @@ fn saved_by(events: &[Event]) -> (u32, u32) {
 
 /// True when `events` are in an older generation's layout: saved before FL 24.2, or with channel blocks that no event
 /// 51 closes (spec: flp/layouts.md "How to tell the generation"). Blocks that event 51 closes are the current layout
-/// whatever the version says: an earlier cutting-edge converted older projects and kept their version, and converting
-/// such a file again would read its single stretch lengths as integers. Up to FL 11 the version still decides, as the
+/// whatever the version says: a build that converted older projects and kept their version wrote such files, and
+/// converting one again would read its single stretch lengths as integers. Up to FL 11 the version still decides, as the
 /// text's encoding goes by it.
 pub fn is_legacy(events: &[Event]) -> bool {
     let version = saved_by(events);

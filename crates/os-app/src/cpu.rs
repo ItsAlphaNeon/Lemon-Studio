@@ -54,10 +54,10 @@ pub enum CpuCmd {
     AudioSettings,
 }
 
-/// The troubleshooting readings shown with Misc: handles, threads, fonts.
 /// How long the dropout count stays red after one is heard.
 const LIT: Duration = Duration::from_millis(3500);
 
+/// The troubleshooting readings shown with Misc: handles, threads, fonts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Misc {
     pub handles: u32,

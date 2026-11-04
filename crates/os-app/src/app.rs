@@ -3937,7 +3937,7 @@ impl App {
     }
 
     /// Every hosted instance for the monitor, rack rows then mixer slots.
-    fn perf_sources(&self) -> Vec<crate::perf::Source> {
+    pub(crate) fn perf_sources(&self) -> Vec<crate::perf::Source> {
         let p = &self.state.project;
         self.plugins
             .hosted
@@ -4749,7 +4749,7 @@ impl App {
             // Every dropout, and those heard (over sound), each of which turns the count red for a moment.
             let heard = tp.heard_dropouts();
             let dropouts = tp.underruns().max(heard);
-            let plugin_late = tp.drops().plugin > 0;
+            let plugin_late = tp.plugin_late();
             if self.state.shown(Win::Perf) {
                 let src = self.perf_sources();
                 if self.state.perf.read(now, src) {
@@ -5675,7 +5675,7 @@ impl App {
         }
         self.audio_playing = playing;
         let (_, demoted) = crate::rt::counts();
-        let drops = self.transport.drops();
+        let drops = self.transport.drops().into();
         if let Some(line) = self.audio_watch.check(drops, demoted, crate::rt::roles(), "") {
             crate::dropout_log::write(&format!("{line}{}", context(self)));
         }

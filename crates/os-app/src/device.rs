@@ -19,6 +19,8 @@
 //! or new settings let go of it. A stream that failed (the device went away, a driver asked to be reset) reports it
 //! (`failure`) and is opened anew the next time it is needed.
 //!
+//! A simulated device (`sim`) opens in place of all of these while one is set: playback checks without a sound card.
+//!
 //! What opened is published (`last`, `rate`), so the settings page and the hosted plugins never have to ask the device
 //! themselves: asking an ASIO driver means loading it, and only the thread that drives the device may.
 
@@ -38,6 +40,7 @@ mod wasapi;
 #[cfg(target_os = "linux")]
 mod sound_server;
 pub(crate) mod system_input;
+pub(crate) mod sim;
 
 /// Tests leave the sound server's cards alone, but for the one that checks they are given back.
 static HEAL_IN_TESTS: AtomicBool = AtomicBool::new(false);
@@ -402,6 +405,9 @@ pub fn opens() -> u64 {
 /// The sample rate the device plays at with the audio settings in use: the rate it last opened at with them, else what
 /// the settings' device says it would open at (`audio_cfg::rate`).
 pub fn rate() -> Option<u32> {
+    if let Some(c) = sim::config() {
+        return Some(c.rate);
+    }
     let cfg = AudioCfg::current();
     let opened = LAST.lock().ok().and_then(|l| l.as_ref().filter(|(c, _)| *c == cfg).map(|(_, i)| i.rate));
     opened.or_else(audio_cfg::rate)
@@ -439,6 +445,7 @@ enum Stream {
     Asio(#[allow(dead_code)] asio::AsioOut),
     #[cfg(windows)]
     Wasapi(#[allow(dead_code)] wasapi::WasapiOut),
+    Sim(#[allow(dead_code)] sim::SimOut),
 }
 
 /// The open stream and what it was opened with.
@@ -655,6 +662,9 @@ impl OutputDevice {
 /// driver, which is tried again with the next open (spec: audio/devices.md, "Driver reset, lost device, fallback"). A
 /// Windows device in exclusive mode that refuses it plays in shared mode, saying why (`open_exclusive`).
 fn open(cfg: &AudioCfg, xruns: &Arc<AtomicU64>, wait: bool) -> Result<Open, String> {
+    if let Some(c) = sim::config() {
+        return sim::open(c, xruns);
+    }
     #[cfg(windows)]
     if let Some(name) = cfg.asio_driver() {
         let e = match open_asio(name, cfg, xruns) {

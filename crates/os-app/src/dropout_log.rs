@@ -102,6 +102,12 @@ pub struct Drops {
     pub device: u64,
 }
 
+impl From<crate::transport::Drops> for Drops {
+    fn from(d: crate::transport::Drops) -> Drops {
+        Drops { empty: d.feeder, plugin: d.plugin, device: d.device }
+    }
+}
+
 impl Drops {
     pub fn total(&self) -> u64 {
         self.empty + self.plugin + self.device
