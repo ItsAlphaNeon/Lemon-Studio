@@ -408,7 +408,9 @@ pub fn paint_float_layer(ui: &mut Ui, s: &State, f: &FrameInfo) {
 #[cfg(target_os = "linux")]
 fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_window::EmbedFrame) {
     // A window held over another shows the group it would make (`plugin_tabs::Preview`).
-    let (rows, showing) = match (s.tab_preview.as_ref().filter(|p| p.row == row), s.plugin_tabs.group_of(row)) {
+    // Its own tab is then only outlined, dashed, and no tab is lit: the group is not made yet.
+    let preview = s.tab_preview.as_ref().filter(|p| p.row == row);
+    let (rows, showing) = match (preview, s.plugin_tabs.group_of(row)) {
         (Some(p), _) => (p.rows.as_slice(), p.row),
         (None, Some(g)) => (g.rows.as_slice(), g.active),
         (None, None) => return,
@@ -425,8 +427,9 @@ fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_windo
     ui.c.push_clip(strip);
     for tab in &shapes {
         let r = rows[tab.index];
-        let on = r == showing;
-        let hover = under == Some(tab.index);
+        let joining = preview.is_some() && r == showing;
+        let on = r == showing && !joining;
+        let hover = under == Some(tab.index) && preview.is_none();
         let face = match (on, hover) {
             (true, false) => t.brand_lit(os_theme::design::lemon::MAIN),
             (true, true) => t.brand_lit(os_theme::design::lemon::MAIN).mix(t.brand_lit(os_theme::design::lemon::HIGHLIGHT), 0.35),
@@ -437,13 +440,23 @@ fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_windo
         let face = face.mix(t.sunken, (0.22 * tab.depth as f32).min(0.66));
         let edge = t.button.mix(t.text_dim, 0.5);
         let outline = tab.outline();
-        ui.c.fill_polygon(&outline, face);
-        ui.c.line(outline[3].0, outline[3].1, outline[2].0, outline[2].1, 1.2, edge);
-        if tab.index > 0 {
-            ui.c.line(outline[0].0, outline[0].1, outline[1].0, outline[1].1, 1.2, edge);
+        if joining {
+            ui.c.fill_polygon(&outline, t.sunken);
+            let lemon = t.brand_lit(os_theme::design::lemon::MAIN);
+            let o = inset_outline(outline, 1.5);
+            for k in 0..4 {
+                let (a, b) = (o[k], o[(k + 1) % 4]);
+                dashed(ui, a, b, lemon);
+            }
+        } else {
+            ui.c.fill_polygon(&outline, face);
+            ui.c.line(outline[3].0, outline[3].1, outline[2].0, outline[2].1, 1.2, edge);
+            if tab.index > 0 {
+                ui.c.line(outline[0].0, outline[0].1, outline[1].0, outline[1].1, 1.2, edge);
+            }
         }
         let name = s.embeds.get(&r).map_or(String::new(), |f| f.name());
-        let ink = if on { lk::ink_on_lit(t) } else { t.text_dim };
+        let ink = if on { lk::ink_on_lit(t) } else if joining { t.text } else { t.text_dim };
         let (lx, lr) = tab.label();
         let ty = (strip.y + (strip.h - ui.c.line_height(font)) / 2.0).round();
         if lr > lx {
@@ -463,6 +476,29 @@ fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_windo
         }
     }
     ui.c.pop_clip();
+}
+
+/// A tab's outline (`plugin_tabs::Tab::outline`: bottom left, top left, top right, bottom right) moved `d` inwards.
+#[cfg(target_os = "linux")]
+fn inset_outline(o: [(f32, f32); 4], d: f32) -> [(f32, f32); 4] {
+    [(o[0].0 + d, o[0].1 - d), (o[1].0 + d, o[1].1 + d), (o[2].0 - d, o[2].1 + d), (o[3].0 - d, o[3].1 - d)]
+}
+
+/// A dashed line from `a` to `b`: 3 px dashes, 3 px apart.
+#[cfg(target_os = "linux")]
+fn dashed(ui: &mut Ui, a: (f32, f32), b: (f32, f32), c: os_theme::Color) {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = dx.hypot(dy);
+    if len <= 0.0 {
+        return;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let mut t = 0.0;
+    while t < len {
+        let e = (t + 3.0).min(len);
+        ui.c.line(a.0 + ux * t, a.1 + uy * t, a.0 + ux * e, a.1 + uy * e, 1.2, c);
+        t += 6.0;
+    }
 }
 
 /// Paints window `win` at `r` inside its paint area `a`.

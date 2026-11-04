@@ -29,8 +29,17 @@ const CLOSE: f32 = 14.0;
 
 /// How long a window is held over another before it shows what letting go gives.
 pub const MERGE_HOLD: Duration = Duration::from_millis(200);
-/// How far past the other window the mouse may go once the window shows it.
+/// How far past the other window's title the mouse may go once the window shows it.
 pub const MERGE_KEEP: f32 = 10.0;
+/// How far below the other window's title (and its row of tabs) the mouse may be for the hold: the dragged window's
+/// own title lies over it, so its top cannot be seen, but well inside the window is too low.
+pub const MERGE_BELOW: f32 = 28.0;
+
+/// Where the mouse holds a dragged window over `head`, another window's title bar and row of tabs, to join it.
+pub fn join_zone(head: os_ui::Rect, keep: bool) -> os_ui::Rect {
+    let margin = if keep { MERGE_KEEP } else { 0.0 };
+    os_ui::Rect::new(head.x - margin, head.y - margin, head.w + 2.0 * margin, head.h + MERGE_BELOW + margin)
+}
 
 /// A window being dragged, over another window of its plugin.
 #[derive(Debug, Clone, Copy, PartialEq)]

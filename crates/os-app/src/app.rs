@@ -7427,8 +7427,8 @@ impl App {
         true
     }
 
-    /// Linux: the window of another of `row`'s plugin that the mouse is over, with nothing lying over it there. Anywhere
-    /// on it: the window being dragged hides its title.
+    /// Linux: the window of another of `row`'s plugin whose title the mouse is near (`plugin_tabs::join_zone`), with
+    /// nothing lying over it there.
     #[cfg(target_os = "linux")]
     fn tab_target(&self, row: usize, x: f32, y: f32) -> Option<usize> {
         if !crate::prefs::check(&crate::prefs::PLUGIN_TABS) {
@@ -7442,8 +7442,11 @@ impl App {
             }
             if let Win::Hosted(r) = w {
                 let Some(e) = self.state.embeds.get(&r) else { continue };
-                let margin = if self.tab_held.is_some_and(|h| h.ripe && h.into == r) { crate::plugin_tabs::MERGE_KEEP } else { 0.0 };
-                if !e.rect().outset(margin).contains(x, y) {
+                let keep = self.tab_held.is_some_and(|h| h.ripe && h.into == r);
+                if !crate::plugin_tabs::join_zone(e.head_rect(), keep).contains(x, y) {
+                    if e.rect().contains(x, y) {
+                        return None;
+                    }
                     continue;
                 }
                 let same = self.plugins.descriptor(r).is_some_and(|d| d.name == kind);
@@ -11334,6 +11337,14 @@ mod tests {
         assert_eq!(e1.rect().h, r1.h + 26.0, "the held window has the row");
         assert_eq!(e0.rect().h, r0.h, "the one below is as it was");
         frame(app, c, None);
+        // Well inside the other window, below its title, is no place to join.
+        app.mouse_move(over.0, r0.y + r0.h / 2.0);
+        assert!(app.state.tab_preview.is_none() && app.tab_held.is_none(), "too low to join");
+        app.plugin_tick();
+        // Just below the title still is: the dragged window hides it.
+        app.mouse_move(over.0, e0.head_rect().bottom() + 12.0);
+        app.tab_hold_tick(Instant::now() + Duration::from_millis(400));
+        assert!(app.state.tab_preview.is_some(), "a little below the title joins");
         // Away: it goes, and letting go there leaves them apart.
         let away = if r0.right() + 60.0 < 1536.0 { (r0.right() + 40.0, over.1) } else { (r0.x - 40.0, over.1) };
         app.mouse_move(away.0, away.1);

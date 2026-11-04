@@ -85,7 +85,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
 - **Zest.** An analog-style synthesizer, compiled in on x86-64 (`plugins/zest`). It aims at the sound of u-he Diva and loads Diva's presets when they are installed. Its Space bank holds borrowed Diva presets for now; further banks go in `plugins/zest/banks/` or `~/.local/share/zest/banks/` as `.zest` files.
 - **Windows of one plugin as tabs (Linux).** A second window of a plugin drawn in the app's joins the first, with a row of
   tabs under the title: square, divided by slanted edges, each with its own close button, while the window's close closes
-  them all. A tab dragged out of the row stands alone, to compare side by side. Held for a moment over another window of its plugin, a dragged window shows in its own row of tabs the group it would make, and letting go there makes it. General ▸ Miscellaneous "Show windows of
+  them all. A tab dragged out of the row stands alone, to compare side by side. Held for a moment over another window of its plugin's title, or just below it, a dragged window shows in its own row of tabs the group it would make, its own tab outlined, and letting go there makes it where it was let go. General ▸ Miscellaneous "Show windows of
   one plugin as tabs" turns it off, and "Stack plugin tabs" lays them partly over each other.
 - **Tiling desktops leave the window to the window manager.** On a tiling desktop (Hyprland, sway, i3, niri, river
   and the like, read from `XDG_CURRENT_DESKTOP`), the tiling layout's toolbar has no minimize, maximize and close
