@@ -2042,9 +2042,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             report(&shared, note);
         }
         // The device frees the streams it let go of; with none left it lets go of the device (Auto close: also one
-        // that would stay open).
+        // that would stay open). Not while an instrument's editor is open: the live stream is about to take it, and an
+        // exclusive device closed and opened again between the two streams pops.
         device.collect();
-        if session.is_none() && live.is_none() && preview.is_none() && ringing.is_none() && closing.is_empty() {
+        if session.is_none() && live.is_none() && preview.is_none() && ringing.is_none() && closing.is_empty() && (closed || !listen) {
             if closed {
                 device.close();
             } else {
@@ -3053,6 +3054,36 @@ mod tests {
         assert!(still <= steps.len() / 10, "the position moves every frame: {ticks:?}");
         assert!(silent <= meters.len() / 10, "the meter reads every frame: {meters:?}");
         assert!(master_silent <= master.len() / 10, "the mixer's meters read every frame: {master:?}");
+    }
+
+    /// With an instrument's editor open, Stop hands the device from the playback to the live stream without closing it
+    /// in between (an exclusive device closed and opened again pops); closing the editor lets it go (needs an audio
+    /// device).
+    #[test]
+    #[ignore]
+    fn stop_with_an_editor_open_keeps_the_device_open() {
+        let mut project = crate::app::test_project();
+        let ch = project.channels[0].index;
+        project.patterns = vec![os_model::Pattern { number: 1, notes: (0..8).map(|i| os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, i * 48) }).collect(), ..Default::default() }];
+        let t = Transport::new(None);
+        t.listen(true);
+        for round in 0..3 {
+            t.play(&project, PlayMode::Pattern(1), 0.0);
+            let start = Instant::now();
+            while t.seconds() < 0.2 && start.elapsed() < Duration::from_secs(3) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let opens = crate::device::opens();
+            t.stop();
+            let start = Instant::now();
+            while t.streams() == 0 && start.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            assert_eq!(crate::device::opens(), opens, "round {round}: not opened anew");
+            assert!(t.streams() >= 1, "round {round}: the live stream plays");
+        }
+        t.listen(false);
     }
 
     /// A device that fails while in use (unplugged, an ASIO driver asking to be reset) opens again: the playback goes on
