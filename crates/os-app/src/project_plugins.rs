@@ -364,8 +364,10 @@ impl crate::app::App {
             .project
             .mixer
             .iter()
-            .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| Some((m.index, k as u8, wrapped_slot(s.as_ref()?)?))))
+            .flat_map(|m| m.slots.iter().enumerate().filter_map(move |(k, s)| Some((m.index, k as u8, s.as_ref()?))))
+            // Hosted and failed slots first: decoding a slot copies its whole saved state, and this runs every tick.
             .filter(|&(t, k, _)| !self.plugins.hosted.contains_key(&fx_key(t, k)) && !self.wrap_failed.contains(&fx_key(t, k)))
+            .filter_map(|(t, k, s)| Some((t, k, wrapped_slot(s)?)))
             .collect();
         for (t, k, r) in slots {
             if self.past_deadline() {
