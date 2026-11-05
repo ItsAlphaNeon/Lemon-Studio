@@ -144,8 +144,25 @@ pub fn text(st: &State, k: usize, v: i32) -> String {
     }
 }
 
-/// A typed value: a number in the text's unit (percent, ms, Hz or per beat), or "center" for a pan.
-pub fn parse(st: &State, k: usize, s: &str) -> Option<i32> {
+/// The number value `v` of setting `k` shows before its text rounds it (signed: a pan to the left below 0).
+fn amount(k: usize, v: i32) -> f64 {
+    let f = f64::from(v);
+    match k {
+        FOLLOW_ATTACK | FOLLOW_RELEASE => follower_ms(v),
+        PATTERN => f,
+        6 | 7 => f / 1024.0 * 100.0,
+        _ => match filter_param(k) {
+            Some((_, FilterParam::Control(C_ENV | C_CUT | C_RES))) => f / 256.0 * 100.0,
+            Some((_, FilterParam::Lfo(_, 0))) => lfo_rate(v),
+            _ => f / 128.0 * 100.0,
+        },
+    }
+}
+
+/// A typed value: a number in the text's unit (percent, ms, Hz or per beat), or "center" for a pan. When several
+/// values show the typed text, the current value `cur` stays, else the default is taken, else the one nearest the
+/// typed number before rounding (so "100%" is the end of the range, not the lowest value shown as 100%).
+pub fn parse(st: &State, k: usize, s: &str, cur: i32) -> Option<i32> {
     let t = s.trim().to_ascii_lowercase();
     if t.starts_with("cent") {
         return Some(0);
@@ -153,7 +170,7 @@ pub fn parse(st: &State, k: usize, s: &str) -> Option<i32> {
     let num: String = t.chars().take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
     let x: f64 = num.parse().ok()?;
     let (lo, hi) = range(k);
-    // The nearest value whose text reads as the typed number.
+    // The number a value's text reads as.
     let reads = |v: i32| -> f64 {
         let s = text(st, k, v);
         let n: String = s.chars().take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-')).collect();
@@ -164,7 +181,12 @@ pub fn parse(st: &State, k: usize, s: &str) -> Option<i32> {
         r
     };
     let x = if t.ends_with("left") || t.ends_with('l') { -x.abs() } else { x };
-    (lo..=hi).min_by(|&a, &b| (reads(a) - x).abs().total_cmp(&(reads(b) - x).abs()))
+    let same: Vec<i32> = (lo..=hi).filter(|&v| reads(v) == x).collect();
+    if let Some(v) = [cur, default(k)].into_iter().find(|v| same.contains(v)) {
+        return Some(v);
+    }
+    let near = |v: &i32| (amount(k, *v) - x).abs();
+    if same.is_empty() { (lo..=hi).min_by(|a, b| near(a).total_cmp(&near(b))) } else { same.into_iter().min_by(|a, b| near(a).total_cmp(&near(b))) }
 }
 
 #[cfg(test)]
@@ -182,12 +204,27 @@ mod tests {
         assert_eq!(text(&st, control_index(0, C_PAN).unwrap(), -64), "50% left");
         assert_eq!(name(&st, control_index(1, C_NEXT).unwrap()), "To next filter");
         assert_eq!(name(&st, lfo_index(1, T_CUT, 0)), "LFO speed");
-        assert_eq!(parse(&st, control_index(0, C_VOL).unwrap(), "50"), Some(64));
-        assert_eq!(parse(&st, control_index(0, C_PAN).unwrap(), "center"), Some(0));
-        assert_eq!(parse(&st, FOLLOW_ATTACK, "25 ms").map(|v| text(&st, FOLLOW_ATTACK, v)), Some("25ms".into()));
+        let p = |k, s| parse(&st, k, s, default(k));
+        assert_eq!(p(control_index(0, C_VOL).unwrap(), "50"), Some(64));
+        assert_eq!(p(control_index(0, C_PAN).unwrap(), "center"), Some(0));
+        assert_eq!(p(FOLLOW_ATTACK, "25 ms").map(|v| text(&st, FOLLOW_ATTACK, v)), Some("25ms".into()));
         for k in 0..PARAMS {
             let (lo, hi) = range(k);
             assert!((lo..=hi).contains(&default(k)), "{k}");
         }
+    }
+
+    /// When several values show the typed text, the current one stays, else the default, else the nearest before
+    /// rounding: "100%" is the top, "50%" the default.
+    #[test]
+    fn typed_ties_keep_the_current_value_then_the_default() {
+        let st = State::new_default();
+        let k = control_index(0, C_CUT).unwrap();
+        assert_eq!(default(k), 128);
+        assert_eq!(parse(&st, k, "100%", 0), Some(256));
+        assert_eq!(parse(&st, k, "50%", 0), Some(128));
+        assert_eq!(text(&st, k, 127), "50%");
+        assert_eq!(parse(&st, k, "50%", 127), Some(127));
+        assert_eq!(parse(&st, control_index(0, C_PAN).unwrap(), "50% left", 0), Some(-64));
     }
 }

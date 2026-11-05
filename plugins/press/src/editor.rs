@@ -664,17 +664,23 @@ impl Logic {
         }
     }
 
-    /// Applies a typed value; text that does not read leaves it as it was. A point's output level is typed in dB.
+    /// Applies a typed value; text that does not read leaves it as it was, and so does the text the box opened on. A
+    /// point's output level is typed in dB.
     pub fn typed(&mut self, t: &TypeTarget, text: &str) {
+        let cur = self.value_text(t);
+        if text.trim() == cur {
+            return;
+        }
         match *t {
             TypeTarget::Param(k) => {
-                if let Some(v) = ctl::parse(k, text) {
+                if let Some(v) = ctl::parse(k, text, ctl::shown(&self.st, k)) {
                     self.set(k, v);
                 }
             }
             TypeTarget::Point(i) => {
                 let num: String = text.trim().chars().take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
-                let Some(db) = num.parse::<f64>().ok().filter(|d| d.is_finite()) else { return };
+                // A level that shows as the point's own leaves the point where it is.
+                let Some(db) = num.parse::<f64>().ok().filter(|d| d.is_finite() && format!("{d:.1}") != cur) else { return };
                 let Some(&(x, _)) = self.st.map(self.b()).places().get(i) else { return };
                 let l = edit::level_to_scale(10f64.powf(db / 20.0));
                 self.edit_map(|m| edit::move_point(m, i, x, l));
@@ -1321,6 +1327,72 @@ mod tests {
         l.params.set_state(st.to_bytes());
         assert!(l.poll());
         assert_eq!(l.st.params[P_LMH_MIX], 500);
+    }
+
+    /// The editor's pixels at 1x and a reader for them.
+    fn pixels(l: &mut Logic) -> impl Fn(f32, f32) -> u32 + use<> {
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+        l.paint(&mut c);
+        let mut px = vec![0u32; (view::W * view::H) as usize];
+        c.copy_to_xrgb(&mut px);
+        move |x, y| px[y as usize * view::W as usize + x as usize] & 0xff_ffff
+    }
+
+    /// The columns of `r` (rows `y0 .. y1`) holding a pixel far from the fill just inside its left edge (ink).
+    fn ink(px: &impl Fn(f32, f32) -> u32, r: os_ui::Rect, y0: f32, y1: f32) -> Vec<f32> {
+        let far = |a: u32, b: u32| (0..3).any(|i| ((a >> (8 * i)) & 0xff).abs_diff((b >> (8 * i)) & 0xff) > 48);
+        let bg = px(r.x + 1.0, r.cy().floor());
+        (r.x as i32 + 1..r.right() as i32 - 1).map(|x| x as f32).filter(|&x| (y0 as i32..y1 as i32).any(|y| far(px(x, y as f32), bg))).collect()
+    }
+
+    /// The curve spinners have no menu (spec §4), so no arrow; "24dB" leaves its box room and its letters apart.
+    #[test]
+    fn value_boxes_read() {
+        let mut l = logic();
+        let px = pixels(&mut l);
+        let hit = |t: Target| l.hits.iter().rev().find(|h| h.t == t).unwrap().r;
+        let s = hit(Target::Steps(band(MASTER, B_REL_STAGES)));
+        assert!(ink(&px, s, s.cy() - 3.0, s.cy() + 3.0).iter().all(|&x| x < s.right() - 9.0), "an arrow in {s:?}");
+        let r = hit(Target::Slope(P_LOW_SLOPE));
+        assert_eq!(ctl::text(P_LOW_SLOPE, saved(&l).params[P_LOW_SLOPE]), "24dB");
+        let cols = ink(&px, r, r.cy() - 3.0, r.cy() + 3.0);
+        assert!(cols[0] >= r.x + 4.0 && *cols.last().unwrap() <= r.right() - 5.0, "{cols:?} in {r:?}");
+        assert!(cols.windows(2).filter(|w| w[1] - w[0] > 1.0).count() >= 3, "letters run together: {cols:?}");
+    }
+
+    /// The display's labels are drawn over its data (the monitor's level at full scale) and over the crossover's
+    /// edges: the same pixels with or without them, a gap between the letters of "-12" and "-18".
+    #[test]
+    fn display_labels_read_over_the_data() {
+        let mut l = logic();
+        let empty = pixels(&mut l);
+        for _ in 0..400 {
+            l.history.push([[4.0, 0.1]; BANDS]);
+        }
+        let full = pixels(&mut l);
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+        let small = os_ui::Font::new(9);
+        let lh = c.line_height(small);
+        let d = view::DISPLAY;
+        let same = |a: &dyn Fn(f32, f32) -> u32, b: &dyn Fn(f32, f32) -> u32, x0: f32, w: f32, y0: f32| {
+            (x0 as i32..(x0 + w) as i32).all(|x| (y0 as i32..(y0 + lh) as i32).all(|y| a(x as f32, y as f32) == b(x as f32, y as f32)))
+        };
+        for db in [9.0, 0.0, -6.0, -12.0, -18.0] {
+            let s = format!("{db}");
+            let w = os_ui::kit::lemon::spaced_width(&mut c, small, &s, 1.0);
+            let (x, y) = ((d.right() - 5.0 - w).round(), view::db_y(db).round() - 11.0);
+            assert!(same(&empty, &full, x, w, y), "{s} under the data");
+            let gaps = ink(&empty, os_ui::Rect::new(x - 2.0, y, w + 4.0, lh), y, y + lh).windows(2).filter(|p| p[1] - p[0] > 1.0).count();
+            assert!(gaps + 1 >= s.len(), "{s}: {gaps} gaps");
+        }
+        // The bands view: "200" the same with the low edge at 200 Hz and without it.
+        l.view.display = 1;
+        let edged = pixels(&mut l);
+        assert_eq!(saved(&l).params[P_LOW_FREQ], 19800);
+        l.st.params[band(LOW, B_MODE)] = MODE_OFF;
+        let plain = pixels(&mut l);
+        let w = os_ui::kit::lemon::spaced_width(&mut c, small, "200", 1.0);
+        assert!(same(&edged, &plain, view::hz_to_x(200.0).round() + 3.0, w, d.bottom() - 16.0), "the edge over \"200\"");
     }
 
     /// `PRESS_PNG=<dir> cargo test -p press -- --ignored render_editor`: the editor as PNGs.

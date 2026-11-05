@@ -1434,11 +1434,14 @@ impl Logic {
         }
     }
 
-    /// Applies a typed value; text that does not read leaves it as it was.
+    /// Applies a typed value; text that does not read leaves it as it was, and so does the text the box opened on.
     pub fn typed(&mut self, t: &TypeTarget, text: &str) {
+        if text.trim() == self.value_text(t) {
+            return;
+        }
         match *t {
             TypeTarget::Field(f) => {
-                if let Some(v) = ctl::parse(f, text) {
+                if let Some(v) = ctl::parse(f, text, ctl::get(&self.st, f)) {
                     self.set(f, v);
                 }
             }
@@ -2483,6 +2486,41 @@ mod tests {
         let (x, y) = centre(&l, &Target::Box(Field::S(24)));
         l.wheel(x, y, 1.0, Mods::default());
         assert_eq!(saved(&l).s[24], ctl::get(&crate::preset::default_patch(), Field::S(24)) + 1);
+    }
+
+    /// No control's area takes part of another's (the last painted would win it): the bar's enable switch and ATT
+    /// knob, its GLOBAL switch and the Options arrow, the reverb's TEMPO switch and LC slider among them.
+    #[test]
+    fn control_hits_do_not_overlap() {
+        let mut l = logic();
+        let check = |l: &Logic| {
+            let controls: Vec<_> = l
+                .hits
+                .iter()
+                .filter(|h| matches!(h.t, Target::Switch(_) | Target::Knob(_) | Target::Slider(_) | Target::Box(_) | Target::Choice(..) | Target::CurveOptions | Target::Tool(_) | Target::FxUnit(_)))
+                .collect();
+            for (i, a) in controls.iter().enumerate() {
+                for b in &controls[i + 1..] {
+                    let (p, q) = (a.r, b.r);
+                    let apart = p.right() <= q.x || q.right() <= p.x || p.bottom() <= q.y || q.bottom() <= p.y;
+                    assert!(apart, "page {} part {:?} unit {}: {:?} {p:?} and {:?} {q:?}", l.view.page, l.view.part, l.view.fx_unit, a.t, b.t);
+                }
+            }
+        };
+        l.view.page = 1;
+        for p in 0..2 {
+            l.view.part[1] = p;
+            paint(&mut l);
+            assert!(l.hits.iter().any(|h| matches!(h.t, Target::Switch(Field::Part(_, _, _, 0)))));
+            check(&l);
+        }
+        l.view.page = view::PAGE_FX;
+        for u in 0..4 {
+            l.view.fx_unit = u;
+            paint(&mut l);
+            check(&l);
+        }
+        assert!(l.hits.iter().any(|h| h.t == Target::Switch(Field::Reverb(10))));
     }
 
     /// The curve view: a right click on empty space adds a point, a drag moves it, its menu sets its mode and a

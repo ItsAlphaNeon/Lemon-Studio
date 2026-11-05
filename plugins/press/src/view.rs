@@ -288,17 +288,27 @@ fn lamp(ui: &mut Ui, t: Target, on: bool, cx: f32, cy: f32, label: &str) {
     ui.hit(hr, t);
 }
 
-/// A box showing a value: a spinner's number or a slope, a small arrow on its right for spinners.
-fn value_box(ui: &mut Ui, r: Rect, t: Target, text: &str, arrow: bool) {
+/// A box showing a value: a spinner's number or a slope. The spinners have no menu (spec §4: drag or wheel), so no
+/// arrow. A pixel between the letters keeps "24dB" from running together at 1x.
+fn value_box(ui: &mut Ui, r: Rect, t: Target, text: &str) {
     let st = ui.state(r, &t);
     lemon::field(ui.c, r, st);
-    let tr = if arrow { Rect::new(r.x, r.y, r.w - 7.0, r.h) } else { r };
-    ui.c.text_center(SMALL.bold(), tr, if st.hover { TEXT } else { ACCENT }, text);
-    if arrow {
-        let (x, y) = (r.right() - 7.0, r.cy());
-        ui.c.fill_polygon(&[(x - 2.5, y - 1.5), (x + 2.5, y - 1.5), (x, y + 1.5)], DIM);
-    }
+    spaced_center(ui, SMALL, r, if st.hover { TEXT } else { ACCENT }, text);
     ui.hit(r, t);
+}
+
+/// Text centred in `r` with a pixel between its letters (the small fonts' digits touch at 1x otherwise).
+fn spaced_center(ui: &mut Ui, f: Font, r: Rect, col: Color, s: &str) {
+    let (w, lh) = (lemon::spaced_width(ui.c, f, s, 1.0), ui.c.line_height(f));
+    lemon::spaced(ui.c, f, (r.cx() - w / 2.0).round(), (r.cy() - lh / 2.0).round(), col, s, 1.0);
+}
+
+/// A display axis label with its left edge at `x`, top at `y`: a pixel between its letters, on a patch of the well so
+/// it reads over the data and the crossover's edges.
+fn axis_label(ui: &mut Ui, x: f32, y: f32, s: &str) {
+    let (w, lh) = (lemon::spaced_width(ui.c, SMALL, s, 1.0), ui.c.line_height(SMALL));
+    ui.c.fill_rrect(Rect::new(x - 2.0, y, w + 4.0, lh), 2.0, WELL);
+    lemon::spaced(ui.c, SMALL, x, y, FAINT, s, 1.0);
 }
 
 /// A tab: the chosen one a dark rounded pill with its name in lemon (Pith's sets of choices).
@@ -483,7 +493,7 @@ fn display_inner() -> Rect {
     DISPLAY.inset(6.0)
 }
 
-fn db_y(db: f32) -> f32 {
+pub fn db_y(db: f32) -> f32 {
     let r = display_inner();
     let n = ((DISPLAY_DB.0 - db) / (DISPLAY_DB.0 - DISPLAY_DB.1)).clamp(0.0, 1.0);
     r.y + r.h * n
@@ -522,7 +532,6 @@ fn display(ui: &mut Ui, hint: &str) {
     for db in DISPLAY_GRID {
         let y = db_y(db).round();
         ui.c.fill_rect(Rect::new(r.x + 1.0, y, r.w - 2.0, 1.0), if db == 0.0 { plug::TICK } else { plug::GRID });
-        ui.c.text_right(SMALL, r.right() - 5.0, y - 11.0, FAINT, &format!("{db}"));
     }
     ui.c.push_clip(r.inset(1.0));
     if ui.st.display == 0 {
@@ -531,6 +540,12 @@ fn display(ui: &mut Ui, hint: &str) {
         bands_view(ui, inner);
     }
     ui.c.pop_clip();
+    // The dB values over what the display shows.
+    for db in DISPLAY_GRID {
+        let s = format!("{db}");
+        let w = lemon::spaced_width(ui.c, SMALL, &s, 1.0);
+        axis_label(ui, (r.right() - 5.0 - w).round(), db_y(db).round() - 11.0, &s);
+    }
     if !hint.is_empty() {
         let (left, right) = hint.split_once('\t').unwrap_or((hint, ""));
         let text = if right.is_empty() { left.to_string() } else { format!("{left}  {right}") };
@@ -568,10 +583,10 @@ fn monitor(ui: &mut Ui, r: Rect) {
 
 /// The bands: LOW, MID and HIGH over the frequency axis, each with its gain now, the crossover edges to drag.
 fn bands_view(ui: &mut Ui, r: Rect) {
-    for (f, l) in [(50.0, "50"), (100.0, "100"), (200.0, "200"), (500.0, "500"), (1000.0, "1k"), (2000.0, "2k"), (5000.0, "5k"), (10000.0, "10k")] {
+    const AXIS: [(f32, &str); 8] = [(50.0, "50"), (100.0, "100"), (200.0, "200"), (500.0, "500"), (1000.0, "1k"), (2000.0, "2k"), (5000.0, "5k"), (10000.0, "10k")];
+    for (f, _) in AXIS {
         let x = hz_to_x(f).round();
         ui.c.fill_rect(Rect::new(x, DISPLAY.y + 1.0, 1.0, DISPLAY.h - 2.0), plug::GRID);
-        ui.c.text(SMALL, x + 3.0, DISPLAY.bottom() - 16.0, FAINT, l);
     }
     let (lo, hi) = edges_hz(ui.m.st);
     let xs = [r.x, lo.map_or(r.x, hz_to_x), hi.map_or(r.right(), hz_to_x), r.right()];
@@ -603,6 +618,10 @@ fn bands_view(ui: &mut Ui, r: Rect) {
         let hot = ui.hot(hr, &t);
         ui.c.fill_rect(Rect::new(x, DISPLAY.y + 1.0, 1.0, DISPLAY.h - 2.0), if hot { TEXT } else { DIM });
         ui.hit(hr, t);
+    }
+    // The frequencies over the regions and the edges (an edge at 200 Hz runs just left of "200").
+    for (f, l) in AXIS {
+        axis_label(ui, hz_to_x(f).round() + 3.0, DISPLAY.bottom() - 16.0, l);
     }
 }
 
@@ -673,7 +692,7 @@ fn env_card(ui: &mut Ui) {
     // The stage counts under ATT and REL, the CURVE caption between them.
     for (k, x) in [(B_ATT_STAGES, ENV_X[0]), (B_REL_STAGES, ENV_X[1])] {
         let v = ctl::shown(ui.m.st, band(b, k));
-        value_box(ui, spinner(x), Target::Steps(band(b, k)), &v.to_string(), true);
+        value_box(ui, spinner(x), Target::Steps(band(b, k)), &v.to_string());
     }
     ui.label(SMALL, (ENV_X[0] + ENV_X[1]) / 2.0, MIDDLE, DIM, "CURVE");
     let rms = ui.m.st.params[band(b, B_RMS)] != 0;
@@ -696,7 +715,7 @@ fn xover_card(ui: &mut Ui) {
     knob(ui, P_HIGH_FREQ, XOVER_X[2], UPPER.0, "HIGH", UPPER.1);
     for (k, x) in [(P_LOW_SLOPE, XOVER_X[0]), (P_HIGH_SLOPE, XOVER_X[2])] {
         let t = ctl::text(k, ctl::shown(ui.m.st, k));
-        value_box(ui, slope_box(x), Target::Slope(k), &t, false);
+        value_box(ui, slope_box(x), Target::Slope(k), &t);
     }
     // Version 14's linear-phase mode: shown as stored, greyed out (not played yet).
     let x = XOVER_X[1];

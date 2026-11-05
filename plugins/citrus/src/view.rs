@@ -312,10 +312,17 @@ fn value_box(ui: &mut Ui, f: Field, r: Rect, text: &str) {
 }
 
 /// A switch at (cx, cy): the kit's rounded-square toggle, lemon when on, its label to the right (or under it). A
-/// control whose setting was not identified (`Target::Inert`) is greyed out.
+/// control whose setting was not identified (`Target::Inert`) is greyed out. Without a label it takes the toggle's
+/// square alone.
 fn lamp(ui: &mut Ui, t: Target, on: bool, cx: f32, cy: f32, label: &str, under: bool) {
     let w = ui.c.text_width(SMALL, label);
-    let hr = if under { Rect::new(cx - 10.0, cy - 7.0, 20.0, 22.0) } else { Rect::new(cx - 7.0, cy - 7.0, w + 18.0, 14.0) };
+    let hr = if under {
+        Rect::new(cx - 10.0, cy - 7.0, 20.0, 22.0)
+    } else if label.is_empty() {
+        Rect::new(cx - 7.0, cy - 7.0, 14.0, 14.0)
+    } else {
+        Rect::new(cx - 7.0, cy - 7.0, w + 18.0, 14.0)
+    };
     let mut st = ui.state(hr, &t);
     st.disabled = matches!(t, Target::Inert(_));
     lemon::toggle(ui.c, cx, cy, on, st);
@@ -926,8 +933,9 @@ fn effects(ui: &mut Ui) {
         let c = (ui.get(f) + 1).to_string();
         value_box(ui, f, Rect::new(329.0, 59.0, 24.0, 22.0), &c);
         ui.label(SMALL, 341.0, 50.0, DIM, "COLOR");
-        switch(ui, Field::Reverb(10), 333.0, foot - 16.0, "TEMPO");
-        switch(ui, Field::Reverb(9), 333.0, foot, "ON");
+        // The switches' labels end before the LC slider's lane.
+        switch(ui, Field::Reverb(10), 329.0, foot - 16.0, "TEMPO");
+        switch(ui, Field::Reverb(9), 329.0, foot, "ON");
         for (k, x, l) in [(0, 373.0, "LC"), (1, 394.0, "HC"), (2, 415.0, "PD"), (3, 436.0, "RS"), (4, 457.0, "DF"), (5, 478.0, "DE"), (6, 499.0, "HD"), (8, 520.0, "VL")] {
             slider(ui, Field::Reverb(k), x, t0, t1, l);
         }
@@ -1242,9 +1250,9 @@ fn harmonics(ui: &mut Ui, m: usize) {
     lamp(ui, Target::Inert("Smooth"), false, 190.0, 335.0, "SMOOTH", false);
 }
 
-/// The Options arrow under the view, centred on `cy`.
+/// The Options arrow under the view, centred on `cy`; its area starts at the arrow, clear of the GLOBAL switch's label.
 fn options_arrow(ui: &mut Ui, t: Target, cy: f32) {
-    let r = Rect::new(160.0, cy - 7.0, 14.0, 14.0);
+    let r = Rect::new(163.0, cy - 7.0, 11.0, 14.0);
     let hot = ui.hot(r, &t);
     ui.c.fill_polygon(&[(163.0, cy - 2.5), (171.0, cy - 2.5), (167.0, cy + 2.5)], if hot { TEXT } else { DIM });
     ui.hit(r, t);
