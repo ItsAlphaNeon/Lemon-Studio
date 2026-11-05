@@ -18583,6 +18583,61 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// While a project's samples load, its audio clips show a highlight sweeping across them left to right every
+    /// 1.2 s, each frame repainted as a whole frame would; at Off there is none (spec: ui/animations.md §4.8).
+    #[test]
+    fn loading_clips_sweep() {
+        use crate::playlist as pl;
+        let (Ok(mut c), Ok(mut whole)) = (Canvas::new(1920, 1080, 1.0), Canvas::new(1920, 1080, 1.0)) else { return };
+        let (mut app, _, _, _) = ruler_app(&mut c);
+        app.state.playlist_bar_w = 400.0;
+        let wav = std::env::temp_dir().join(format!("os-app-loading-sweep-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
+        pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let ci = pl::clips(&app.state).len() - 1;
+        app.state.playlist.wave_wait = true;
+        frame(&mut app, &mut c, None);
+        let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
+        let body = g.body(&pl::clips(&app.state)[ci]);
+        let still = c.pixmap.clone();
+        // Where along the body's middle row the frame is brightest above the still one.
+        let lit_x = |c: &Canvas| {
+            let y = body.cy() as u32;
+            (body.x as u32..body.right() as u32)
+                .map(|x| {
+                    let (a, b) = (c.pixmap.pixel(x, y).unwrap(), still.pixel(x, y).unwrap());
+                    (u32::from(a.red()).saturating_sub(u32::from(b.red())), x)
+                })
+                .max()
+                .filter(|(d, _)| *d > 0)
+                .map(|(_, x)| x)
+        };
+        crate::anim::set_clock(true);
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        let mut seen = Vec::new();
+        for _ in 0..75 {
+            crate::anim::advance(16);
+            assert!(app.tick(), "each tick repaints it");
+            let d = app.take_damage();
+            frame_damage(&mut app, &mut c, d);
+            frame(&mut app, &mut whole, None);
+            assert_same(&c, &whole, "a frame of the sweep");
+            seen.push(lit_x(&c));
+        }
+        assert!(seen.iter().filter(|x| x.is_some()).count() > 55, "it shows most of the time: {seen:?}");
+        assert!(seen[10] < seen[30] && seen[30] < seen[50], "left to right: {seen:?}");
+        assert!(seen[74] < seen[50], "and round again: {seen:?}");
+        crate::anim::set_level(crate::anim::Level::Off);
+        app.invalidate();
+        frame(&mut app, &mut c, None);
+        assert!(!app.animating() && lit_x(&c).is_none(), "none at Off");
+        crate::anim::set_level(crate::anim::Level::Playful);
+        crate::anim::set_clock(false);
+        app.state.playlist.wave_wait = false;
+        let _ = std::fs::remove_file(&wav);
+    }
+
     /// Audio clip handles (spec: ui/playlist.md §9a): dragging the fade triangles sets the fades, the tension ring
     /// bends the curve, the gain half-circle changes the gain; one undo step each.
     #[test]

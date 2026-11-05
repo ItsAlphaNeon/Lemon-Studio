@@ -42,6 +42,8 @@ const HOVER_OUT: f64 = 0.200;
 /// A functional flash lasts 400 ms and peaks at 60 % (§4.7).
 pub const FLASH: Duration = Duration::from_millis(400);
 const FLASH_PEAK: f32 = 0.6;
+/// A loading sweep crosses a clip every 1.2 s (§4.8).
+pub const SWEEP: Duration = Duration::from_millis(1200);
 /// The drag tag: where it hangs from (below and right of the mouse), its height, and how wide it may grow (§4.1).
 pub const TAG_PIN: (f32, f32) = (12.0, 14.0);
 pub const TAG_H: f32 = 24.0;
@@ -59,6 +61,8 @@ pub struct Motion {
     tag: Option<Tag>,
     hovers: Vec<Hover>,
     flash: Option<Flash>,
+    /// When loading sweeps started (they all go in step).
+    sweeps: Option<Instant>,
 }
 
 struct Opened {
@@ -362,6 +366,21 @@ impl Motion {
         // Up quickly, down slowly.
         let a = if u < 0.25 { u / 0.25 } else { 1.0 - (u - 0.25) / 0.75 };
         FLASH_PEAK * anim::ease_out(a) as f32
+    }
+
+    // ------------------------------------------------------------------------------------------------ status motion
+
+    /// Where a loading sweep is in its cycle (`SWEEP`), 0 to 1, or None where it is hidden: decoration goes at
+    /// Animations Off (spec: ui/animations.md §4.8). `area` (window px) is painted again while it shows.
+    pub fn sweep(&mut self, area: Rect) -> Option<f32> {
+        if anim::instant() {
+            self.sweeps = None;
+            return None;
+        }
+        let now = anim::now();
+        let start = *self.sweeps.get_or_insert(now);
+        self.live(area);
+        Some((since(now, start) / SWEEP.as_secs_f64()).fract() as f32)
     }
 }
 

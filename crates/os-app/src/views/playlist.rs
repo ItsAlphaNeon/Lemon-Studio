@@ -955,6 +955,9 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
                 if !c.muted {
                     fades(ui, s, g, i, c, body_at, dim(wave));
                 }
+                if s.playlist.wave_wait {
+                    loading(ui, s, body_at.r);
+                }
             }
             (PickKind::Automation, ClipSource::Channel(ch)) => {
                 let col = if c.muted { content } else { dim(cc(t, CURVE)) };
@@ -965,6 +968,28 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
     }
     ui.c.pop_clip();
     flash(ui, s, g, c, r, if lemon { lk::r_btn(t).min(r.w / 2.0).min(r.h / 2.0) } else { 0.0 });
+}
+
+/// An audio clip whose sample is still loading (spec: ui/project-loading.md): a soft highlight sweeps across its body
+/// every 1.2 s, hidden at Animations Off (spec: ui/animations.md §4.8).
+fn loading(ui: &mut Ui, s: &State, body: Rect) {
+    if body.w < 8.0 {
+        return;
+    }
+    let Some(u) = s.motion.borrow_mut().sweep(body) else { return };
+    let band = (body.w * 0.35).clamp(24.0, 140.0).round();
+    let x0 = (body.x - band + u * (body.w + band)).round();
+    let white = ui.t.tx(0xffffff);
+    // 2 px columns, brightest in the middle.
+    for k in 0..(band / 2.0) as usize {
+        let x = x0 + 2.0 * k as f32;
+        let col = Rect::new(x.max(body.x), body.y, (x + 2.0).min(body.right()) - x.max(body.x), body.h);
+        if col.w <= 0.0 {
+            continue;
+        }
+        let a = (std::f32::consts::PI * (k as f32 + 0.5) / (band / 2.0)).sin();
+        ui.c.fill_rect(col, white.with_alpha((a * a * 46.0).round() as u8));
+    }
 }
 
 /// A clip sharing the source of the clip just double-clicked flashes: a white tint up to 60 % and back over 400 ms,
