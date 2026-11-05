@@ -351,11 +351,13 @@ impl EmbedFrame {
     }
 
     /// Where the row of tabs goes, on top of the frame (logical px on the canvas). Only the tabs are drawn there: past
-    /// the last one the window has no part, and what lies behind it shows.
+    /// the last one the window has no part, and what lies behind it shows. It starts past the frame's rounded corner,
+    /// and its bottom lies over the frame's top edge, so no gap shows between a tab and the frame.
     pub fn tabs_rect(&self) -> Rect {
         let i = self.0.borrow();
         let (w, _) = i.size();
-        Rect::new(i.pos.0, i.pos.1 - TABS_H, w, TABS_H)
+        let corner = i.st.look.as_ref().map_or_else(|| os_theme::current().style.radius_panel, |t| t.style.radius_panel);
+        Rect::new(i.pos.0 + corner, i.pos.1 - TABS_H + TAB_OVERLAP, (w - 2.0 * corner).max(0.0), TABS_H)
     }
 
     /// Whether it has a row of tabs.

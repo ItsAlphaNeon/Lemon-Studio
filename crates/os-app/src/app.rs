@@ -12751,7 +12751,8 @@ mod tests {
         assert_eq!((a.x, a.y), (b.x, b.y), "one place");
         assert_eq!((b.w, b.h), (alone.w, alone.h), "the frame keeps its size: no row is added to it");
         let row = app.state.embeds[&1].tabs_rect();
-        assert_eq!((row.bottom(), row.h), (b.y, 26.0), "the tabs sit on top of the frame");
+        assert_eq!((row.bottom(), row.h), (b.y + 1.0, 26.0), "the tabs sit on top of the frame, over its top edge");
+        assert!(row.x > b.x && row.right() < b.right(), "clear of the frame's rounded corners: {row:?} on {b:?}");
         frame(&mut app, &mut c, None);
         let strip = app.state.embeds[&1].tabs_rect();
         // A press on the first tab shows it.
@@ -17100,6 +17101,43 @@ mod tests {
             }
             assert_eq!(crate::piano::off_view_notes(&g, &notes, Some(ch)).len(), 2, "{w}x{h}: an arrow each way");
         }
+    }
+
+    /// Notes of one key at once show stacked: a layer above the one lying on another, over the time they share only;
+    /// the notes keep their places.
+    #[test]
+    fn notes_on_one_key_at_once_look_stacked() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        let ch = app.state.project.channels[app.state.selected_channel].index;
+        let grid = views::piano::grid_rect(&app.state);
+        crate::piano::center_keys(&mut app.state, grid.h);
+        let g = crate::piano::Geom::new(&app.state, grid);
+        let at = |x: f32| g.tick_at(x) as u32;
+        let (a, b, d) = (at(grid.x + 100.0), at(grid.x + 400.0), at(grid.x + 250.0) - at(grid.x + 100.0));
+        let pattern = app.state.pattern;
+        let pat = app.state.project.patterns.iter_mut().find(|p| p.number == pattern).unwrap();
+        // Two copies of one note on C5; on D5 a note, and one starting halfway along it.
+        pat.notes = vec![
+            Note { key: 60, length: d, ..Note::step(ch, a) },
+            Note { key: 60, length: d, ..Note::step(ch, a) },
+            Note { key: 62, length: d, ..Note::step(ch, b) },
+            Note { key: 62, length: d, ..Note::step(ch, b + d / 2) },
+        ];
+        let notes = pat.notes.clone();
+        frame(&mut app, &mut c, None);
+        let rim = app.theme.colors.note_rim;
+        let is_rim = |c: &Canvas, x: f32, y: f32| {
+            let p = c.pixmap.pixel(x as u32, y as u32).unwrap();
+            (p.red(), p.green(), p.blue()) == (rim.r, rim.g, rim.b)
+        };
+        let copy = g.note_rect(&notes[1]).unwrap();
+        assert!(is_rim(&c, copy.cx(), copy.y - 2.0), "a layer above the copy");
+        let (first, second) = (g.note_rect(&notes[2]).unwrap(), g.note_rect(&notes[3]).unwrap());
+        assert!(is_rim(&c, (second.x + first.right()) / 2.0, second.y - 2.0), "over the time they share");
+        assert!(!is_rim(&c, (first.right() + second.right()) / 2.0, second.y - 2.0), "not past it");
+        assert!(!is_rim(&c, (first.x + second.x) / 2.0, first.y - 2.0), "none where it lies alone");
     }
 
     /// The piano roll's scroll-bar arrows step their axis (spec: ui/piano-roll.md §1a).

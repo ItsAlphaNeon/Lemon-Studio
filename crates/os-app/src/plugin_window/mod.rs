@@ -439,6 +439,8 @@ const RANGE_MAX: i32 = 48;
 
 /// The height of the row of tabs above the frame (`State::tabs`).
 pub(crate) const TABS_H: f32 = 26.0;
+/// How far the row of tabs lies over the frame's top edge (its 1 px border).
+pub(crate) const TAB_OVERLAP: f32 = 1.0;
 
 struct State {
     info: ChannelInfo,
