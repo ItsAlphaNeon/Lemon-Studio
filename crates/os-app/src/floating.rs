@@ -101,8 +101,9 @@ pub fn rect(s: &State, w: Win) -> Option<Rect> {
 /// What floating window `w` paints.
 pub fn paint_area(s: &State, w: Win) -> Option<Rect> {
     match w {
+        // With the row of tabs on top of its frame.
         #[cfg(target_os = "linux")]
-        Win::Hosted(_) => rect(s, w),
+        Win::Hosted(row) => s.embeds.get(&row).map(|e| e.paint_rect()),
         w => placed(w).map(|p| (p.paint)(s)),
     }
 }
@@ -111,7 +112,7 @@ pub fn paint_area(s: &State, w: Win) -> Option<Rect> {
 pub fn bounds(s: &State, w: Win) -> Option<Rect> {
     match w {
         #[cfg(target_os = "linux")]
-        Win::Hosted(_) => rect(s, w),
+        Win::Hosted(row) => s.embeds.get(&row).map(|e| e.paint_rect()),
         w => placed(w).map(|p| (p.bounds)(s)),
     }
 }

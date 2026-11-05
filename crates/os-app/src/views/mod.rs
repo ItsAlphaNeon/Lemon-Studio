@@ -404,7 +404,8 @@ pub fn paint_float_layer(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
 }
 
-/// The row of tabs of plugin window `row`, when it is one of several (`crate::plugin_tabs`).
+/// The row of tabs of plugin window `row`, when it is one of several (`crate::plugin_tabs`): on top of its frame, the
+/// tabs alone, with nothing drawn between or past them.
 #[cfg(target_os = "linux")]
 fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_window::EmbedFrame) {
     // A window held over another shows the group it would make (`plugin_tabs::Preview`).
@@ -423,7 +424,6 @@ fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_windo
     let stacked = crate::prefs::check(&crate::prefs::PLUGIN_TABS_STACKED);
     let shapes = crate::plugin_tabs::row_shapes(strip, rows.len(), active, stacked);
     let under = crate::plugin_tabs::tab_at(&shapes, ui.mouse.0, ui.mouse.1);
-    ui.c.fill_rect(strip, t.sunken);
     ui.c.push_clip(strip);
     for tab in &shapes {
         let r = rows[tab.index];
@@ -450,9 +450,9 @@ fn paint_plugin_tabs(ui: &mut Ui, s: &State, row: usize, e: &crate::plugin_windo
             }
         } else {
             ui.c.fill_polygon(&outline, face);
-            ui.c.line(outline[3].0, outline[3].1, outline[2].0, outline[2].1, 1.2, edge);
-            if tab.index > 0 {
-                ui.c.line(outline[0].0, outline[0].1, outline[1].0, outline[1].1, 1.2, edge);
+            for k in 0..3 {
+                let (a, b) = (outline[k], outline[k + 1]);
+                ui.c.line(a.0, a.1, b.0, b.1, 1.2, edge);
             }
         }
         let name = s.embeds.get(&r).map_or(String::new(), |f| f.name());

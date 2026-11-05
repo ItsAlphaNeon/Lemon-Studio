@@ -142,7 +142,10 @@ impl Inner {
         if self.work.w <= 0.0 {
             return p;
         }
-        crate::win_clamp::keep(p.0, p.1, self.size().0, self.work)
+        // A row of tabs on top of the frame stays in the workspace with it.
+        let tabs = if self.st.tabs { TABS_H } else { 0.0 };
+        let work = Rect::new(self.work.x, self.work.y + tabs, self.work.w, (self.work.h - tabs).max(0.0));
+        crate::win_clamp::keep(p.0, p.1, self.size().0, work)
     }
 
     /// Paints the frame again into its canvas when it changed.
@@ -338,7 +341,7 @@ impl EmbedFrame {
         self.0.borrow().surface.set_shown(shown);
     }
 
-    /// A row of tabs under the title, or none (`crate::plugin_tabs`).
+    /// A row of tabs on top of the frame, or none (`crate::plugin_tabs`).
     pub fn set_tabs(&self, on: bool) {
         let mut i = self.0.borrow_mut();
         if i.st.tabs != on {
@@ -347,18 +350,30 @@ impl EmbedFrame {
         }
     }
 
-    /// Where the row of tabs goes (logical px on the canvas).
+    /// Where the row of tabs goes, on top of the frame (logical px on the canvas). Only the tabs are drawn there: past
+    /// the last one the window has no part, and what lies behind it shows.
     pub fn tabs_rect(&self) -> Rect {
         let i = self.0.borrow();
         let (w, _) = i.size();
-        Rect::new(i.pos.0, i.pos.1 + i.st.area_y() - TABS_H, w, TABS_H)
+        Rect::new(i.pos.0, i.pos.1 - TABS_H, w, TABS_H)
     }
 
-    /// The title bar and any row of tabs (logical px on the canvas).
+    /// Whether it has a row of tabs.
+    pub fn has_tabs(&self) -> bool {
+        self.0.borrow().st.tabs
+    }
+
+    /// Where it paints: the frame, and the row of tabs on top of it when it has one.
+    pub fn paint_rect(&self) -> Rect {
+        if self.has_tabs() { self.rect().union(&self.tabs_rect()) } else { self.rect() }
+    }
+
+    /// The title bar and any row of tabs over it (logical px on the canvas).
     pub fn head_rect(&self) -> Rect {
         let i = self.0.borrow();
         let (w, _) = i.size();
-        Rect::new(i.pos.0, i.pos.1, w, i.st.area_y())
+        let tabs = if i.st.tabs { TABS_H } else { 0.0 };
+        Rect::new(i.pos.0, i.pos.1 - tabs, w, i.st.area_y() + tabs)
     }
 
     /// Its title bar is moving it.

@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use os_ui::Rect;
 
-/// How far a tab's slanted edge leans over the row's height: well past a "/".
-const SLANT: f32 = 18.0;
+/// How far each of a tab's slanted edges leans in over the row's height: a tab is narrower at the top, "/  \".
+const SLANT: f32 = 12.0;
 /// The widest a tab gets.
 const TAB_W: f32 = 190.0;
 /// Stacked: the least of each tab the next one lies over.
@@ -80,11 +80,9 @@ pub struct TabShape {
     /// The row's rectangle, top and bottom.
     y: f32,
     h: f32,
-    /// Where its left and right edges meet the bottom; they lean right by `SLANT` at the top.
+    /// Where its left and right edges meet the bottom; each leans in by `SLANT` at the top.
     left: f32,
     right: f32,
-    /// The left edge is upright (the row's first tab, against the window's edge).
-    upright: bool,
     /// What shows of it halfway up, when others lie over it.
     pub shown: (f32, f32),
     /// How many tabs lie between it and the one showing, when stacked.
@@ -96,14 +94,13 @@ impl TabShape {
     pub fn outline(&self) -> [(f32, f32); 4] {
         let top = self.y;
         let bottom = self.y + self.h;
-        let top_left = if self.upright { self.left } else { self.left + SLANT };
-        [(self.left, bottom), (top_left, top), (self.right + SLANT, top), (self.right, bottom)]
+        [(self.left, bottom), (self.left + SLANT, top), (self.right - SLANT, top), (self.right, bottom)]
     }
 
     /// Its span at height `y`.
     fn span_at(&self, y: f32) -> (f32, f32) {
         let up = ((self.y + self.h - y) / self.h).clamp(0.0, 1.0) * SLANT;
-        (if self.upright { self.left } else { self.left + up }, self.right + up)
+        (self.left + up, self.right - up)
     }
 
     pub fn contains(&self, x: f32, y: f32) -> bool {
@@ -125,7 +122,7 @@ impl TabShape {
     /// Its close button, when enough of it shows.
     pub fn close(&self) -> Option<Rect> {
         let (a, b) = self.shown;
-        // The edge leans away from the middle by this much at the button's corners.
+        // The edge leans in from the middle by this much at the button's top corner.
         let lean = SLANT * CLOSE / 2.0 / self.h;
         (b - a >= CLOSE_ROOM).then(|| Rect::new(b - lean - CLOSE - 3.0, self.y + (self.h - CLOSE) / 2.0, CLOSE, CLOSE))
     }
@@ -140,7 +137,7 @@ impl TabShape {
 /// The tabs of a row of `n`, `active` showing, in painting order: the last lies over the others. Side by side, or
 /// `stacked`: each lies partly under its neighbour towards the one showing.
 pub fn row_shapes(row: Rect, n: usize, active: usize, stacked: bool) -> Vec<TabShape> {
-    let room = (row.w - SLANT).max(1.0);
+    let room = row.w.max(1.0);
     let count = n.max(1) as f32;
     let (w, step) = if stacked {
         let w = room.min(TAB_W);
@@ -156,13 +153,13 @@ pub fn row_shapes(row: Rect, n: usize, active: usize, stacked: bool) -> Vec<TabS
         let left = edge(i);
         let right = left + w;
         let shown = if !stacked || i == active {
-            (left + mid, right + mid)
+            (left + mid, right - mid)
         } else if i < active {
             (left + mid, edge(i + 1) + mid)
         } else {
-            (edge(i - 1) + w + mid, right + mid)
+            (edge(i - 1) + w - mid, right - mid)
         };
-        TabShape { index: i, y: row.y, h: row.h, left, right, upright: i == 0, shown, depth: if stacked { i.abs_diff(active) } else { 0 } }
+        TabShape { index: i, y: row.y, h: row.h, left, right, shown, depth: if stacked { i.abs_diff(active) } else { 0 } }
     };
     let mut order: Vec<usize> = (0..active.min(n)).collect();
     order.extend((active + 1..n).rev());
@@ -312,19 +309,26 @@ mod tests {
     const ROW: Rect = Rect { x: 100.0, y: 50.0, w: 500.0, h: 26.0 };
 
     #[test]
-    fn side_by_side_tabs_touch_along_their_slices() {
+    fn side_by_side_tabs_meet_at_the_bottom_and_narrow_upwards() {
         let s = row_shapes(ROW, 3, 1, false);
         let by = |i: usize| s.iter().find(|t| t.index == i).unwrap();
         assert_eq!(by(0).outline()[3], by(1).outline()[0], "no gap at the bottom");
-        assert_eq!(by(0).outline()[2], by(1).outline()[1], "no gap at the top");
-        assert!(by(1).outline()[1].0 - by(1).outline()[0].0 > ROW.h / 2.0, "leans well past a slash");
-        assert_eq!(by(0).outline()[0].0, by(0).outline()[1].0, "the first stands against the window's edge");
-        // A point just either side of the slice, high up and low down.
-        for y in [ROW.y + 2.0, ROW.y + 24.0] {
-            let (_, b) = by(0).span_at(y);
-            assert_eq!(tab_at(&s, b - 1.0, y), Some(0));
-            assert_eq!(tab_at(&s, b + 1.0, y), Some(1));
-        }
+        let o = by(1).outline();
+        assert!(o[1].0 > o[0].0 && o[2].0 < o[3].0, "narrower at the top: {o:?}");
+        assert_eq!(by(0).outline()[0].0, ROW.x, "the first starts at the window's edge");
+        // At the bottom, the meeting point splits them; high up, the notch between them belongs to neither.
+        let low = ROW.bottom() - 0.1;
+        assert_eq!(tab_at(&s, by(0).right - 0.5, low), Some(0));
+        assert_eq!(tab_at(&s, by(0).right + 0.5, low), Some(1));
+        assert_eq!(tab_at(&s, by(0).right, ROW.y + 2.0), None, "the notch at the top");
+    }
+
+    #[test]
+    fn a_few_tabs_leave_the_rest_of_the_row_empty() {
+        let s = row_shapes(ROW, 2, 0, false);
+        let end = s.iter().map(|t| t.outline()[3].0).fold(0.0, f32::max);
+        assert!(end <= ROW.x + 2.0 * TAB_W + 0.01 && end < ROW.right(), "tabs end at {end}");
+        assert_eq!(tab_at(&s, ROW.right() - 5.0, ROW.cy()), None, "nothing past the last tab");
     }
 
     #[test]

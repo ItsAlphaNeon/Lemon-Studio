@@ -3341,7 +3341,8 @@ impl App {
             // A tab behind another and a window slid away do not paint.
             f.set_shown(!self.state.plugin_tabs.hidden(row) && !self.state.float_layer.keeps(row));
             f.sync(k, canvas, self.canvas_off, work, &self.theme.colors);
-            let now = (f.serial(), f.rect(), f.overlays_rect());
+            // Where it paints, with its row of tabs: the row coming or going repaints what lies under it.
+            let now = (f.serial(), f.paint_rect(), f.overlays_rect());
             if seen.get(&row) != Some(&now) {
                 if let Some((_, r, o)) = seen.get(&row) {
                     self.damage_rect(*r);
@@ -11334,7 +11335,7 @@ mod tests {
         app.tab_hold_tick(Instant::now() + Duration::from_millis(400));
         assert_eq!(app.state.tab_preview, Some(crate::plugin_tabs::Preview { row: 1, rows: vec![0, 1] }));
         app.plugin_tick();
-        assert_eq!(e1.rect().h, r1.h + 26.0, "the held window has the row");
+        assert!(e1.has_tabs() && e1.rect().h == r1.h, "the held window has the row, on top of its frame");
         assert_eq!(e0.rect().h, r0.h, "the one below is as it was");
         frame(app, c, None);
         // Well inside the other window, below its title, is no place to join.
@@ -12733,7 +12734,9 @@ mod tests {
         assert!(!app.state.z.contains(&Win::Hosted(0)) && app.state.z.contains(&Win::Hosted(1)));
         let (a, b) = (app.state.embeds[&0].rect(), app.state.embeds[&1].rect());
         assert_eq!((a.x, a.y), (b.x, b.y), "one place");
-        assert_eq!(b.h, alone.h + 26.0, "with its row of tabs");
+        assert_eq!((b.w, b.h), (alone.w, alone.h), "the frame keeps its size: no row is added to it");
+        let row = app.state.embeds[&1].tabs_rect();
+        assert_eq!((row.bottom(), row.h), (b.y, 26.0), "the tabs sit on top of the frame");
         frame(&mut app, &mut c, None);
         let strip = app.state.embeds[&1].tabs_rect();
         // A press on the first tab shows it.

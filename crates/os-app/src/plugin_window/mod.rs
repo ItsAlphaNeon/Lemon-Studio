@@ -437,8 +437,8 @@ const BOX_DRAG: f32 = 10.0;
 /// The RANGE box's limit, semitones.
 const RANGE_MAX: i32 = 48;
 
-/// The height of the row of tabs (`State::tabs`).
-const TABS_H: f32 = 26.0;
+/// The height of the row of tabs above the frame (`State::tabs`).
+pub(crate) const TABS_H: f32 = 26.0;
 
 struct State {
     info: ChannelInfo,
@@ -451,7 +451,8 @@ struct State {
     /// The theme a card paints with: the app's (`EmbedFrame::sync`), which the process-wide one may lag behind.
     look: Option<os_theme::Palette>,
     strip: bool,
-    /// A row of tabs under the title (`crate::plugin_tabs`).
+    /// A row of tabs on top of the frame, above its title (`crate::plugin_tabs`): the frame and its editor stay where
+    /// they are.
     tabs: bool,
     /// The plugin's page tabs, left to right (a plain plugin: the plug).
     pages: Vec<PageIcon>,
@@ -607,11 +608,10 @@ impl State {
     }
     /// Top of the editor (below the strip, or the title bar, and the editor's 1 px outline).
     fn area_y(&self) -> f32 {
-        let tabs = if self.tabs { TABS_H } else { 0.0 };
         if self.card {
-            return CARD_TITLE_H + tabs;
+            return CARD_TITLE_H;
         }
-        TITLE_H + if self.strip { STRIP_H } else { 0.0 } + 1.0 + tabs
+        TITLE_H + if self.strip { STRIP_H } else { 0.0 } + 1.0
     }
 }
 
