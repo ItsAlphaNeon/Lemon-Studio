@@ -389,7 +389,16 @@ impl Logic {
         }
     }
 
-    /// Applies a typed value (a text field's text goes into the saved state).
+    /// The type-in box that opened on `start` closed with Enter on `text`: an unchanged box changes nothing (re-reading
+    /// a text several values show could pick another of them).
+    pub fn entered(&mut self, id: &str, start: &str, text: &str) {
+        if text != start {
+            self.typed(id, text);
+        }
+    }
+
+    /// Applies a typed value (a text field's text goes into the saved state). Where several values show the text of
+    /// the one picked, the current value stays if it is one of them, else the default if it is.
     pub fn typed(&mut self, id: &str, text: &str) {
         if let Some((_, edit)) = self.text_control(id) {
             let raw = edit(&self.params.raw_copy(), text);
@@ -398,8 +407,13 @@ impl Logic {
             self.hint = self.hint_for(Some(&t));
             return;
         }
-        if let Some(n) = self.vals.parse(id, text) {
-            self.edit(id, n);
+        let Some(k) = self.spec.index(id) else { return };
+        let Some(picked) = (self.spec.parse)(k, text) else { return };
+        let shown = (self.spec.text)(k, picked);
+        let cur = self.vals.plain(id).round() as i32;
+        let v = [cur, self.spec.settings[k].start].into_iter().find(|&v| (self.spec.text)(k, v) == shown).unwrap_or(picked);
+        if v != cur {
+            self.vals.edit_plain(id, v as f32);
         }
     }
 
@@ -408,6 +422,11 @@ impl Logic {
         let hint = if self.hosted { String::new() } else { self.hint.clone() };
         if self.spec.controls.iter().any(|c| matches!(c, crate::Control::Text { .. })) {
             self.view.raw = self.params.raw_copy();
+        }
+        // The display pictures the settings as they play, stored values outside the ranges included (spec §2 Display).
+        if self.spec.display.is_some() {
+            let n = self.spec.settings.len();
+            self.view.settings = self.params.settings(&self.params.raw_copy())[..n].to_vec();
         }
         self.hits = view::paint(self.spec, c, palette, &self.vals, &self.view, &hint);
     }
@@ -692,7 +711,7 @@ mod win32 {
                         let (sx, sy) = self.screen(x, y);
                         let cur = self.logic.value_text(&id);
                         if let Some(t) = pw::type_in(self.hwnd, sx, sy, &cur, self.scale) {
-                            self.logic.typed(&id, &t);
+                            self.logic.entered(&id, &cur, &t);
                         }
                         repaint = true;
                     }
@@ -909,7 +928,7 @@ mod gui {
                         let (sx, sy) = self.screen(x, y);
                         let cur = self.logic.value_text(&id);
                         if let Some(t) = self.win.type_in(sx, sy, &cur, self.scale) {
-                            self.logic.typed(&id, &t);
+                            self.logic.entered(&id, &cur, &t);
                         }
                         self.dirty = true;
                     }
@@ -1140,6 +1159,152 @@ mod tests {
         assert_eq!(l.view.raw, l.params.raw_copy());
         l.typed("formula", "a*");
         assert_eq!(l.hint, "Formula: Syntax error: function or operand has too few arguments");
+    }
+
+    /// The editor painted at `scale`: its pixels (`0xRRGGBB`) and their row length.
+    fn pixels(l: &mut Logic, scale: f32) -> (Vec<u32>, usize) {
+        let (w, h) = ((l.spec.size.0 as f32 * scale) as u32, (l.spec.size.1 as f32 * scale) as u32);
+        let mut c = os_ui::Canvas::new(w, h, scale).unwrap();
+        l.paint(&mut c, &os_plugkit::palette());
+        let mut px = vec![0u32; (w * h) as usize];
+        c.copy_to_xrgb(&mut px);
+        (px.iter().map(|p| p & 0xff_ffff).collect(), w as usize)
+    }
+
+    /// The displays picture the settings as they play: stored values outside the ranges as stored, not as the knobs
+    /// (which keep to their ranges) show them.
+    #[test]
+    fn displays_draw_stored_values_outside_the_ranges() {
+        let cases: [(&'static Spec, &[(&str, i32)]); 3] = [
+            (balance::SPEC, &[("balance", -300), ("volume", 400)]),
+            (fast_distortion::SPEC, &[("threshold", 0), ("type", 1)]),
+            (soft_clipper::SPEC, &[("threshold", 0), ("post", 300)]),
+        ];
+        for (spec, stored) in cases {
+            let mut l = logic(spec);
+            let mut raw = l.params.raw_copy();
+            let mut v: Vec<i32> = spec.settings.iter().map(|s| s.start).collect();
+            for &(id, x) in stored {
+                let k = spec.index(id).unwrap();
+                crate::params::set_setting(spec, &mut raw, k, x);
+                v[k] = x;
+            }
+            l.params.set_raw(raw.clone());
+            // The knobs at the stored values as their ranges keep them (as a loaded state sets them).
+            let knobs = crate::params::values_of(spec, &raw);
+            for (k, x) in knobs.iter().enumerate() {
+                l.vals.edit_plain(spec.settings[k].id, *x as f32);
+            }
+            // The display's inside (clear of the well's rounded corners), as painted and as drawn over from `values`.
+            let d = spec.display.as_ref().unwrap();
+            let inside = |px: &[u32]| -> Vec<u32> {
+                let w = spec.size.0 as usize;
+                let (x0, y0) = (d.r.x as usize + 6, d.r.y as usize + 6);
+                (y0..(d.r.bottom() as usize - 6)).flat_map(|y| px[y * w + x0..y * w + d.r.right() as usize - 6].to_vec()).collect()
+            };
+            let (px, _) = pixels(&mut l, 1.0);
+            let mut drawn = |values: &[i32]| {
+                let mut c = os_ui::Canvas::new(spec.size.0, spec.size.1, 1.0).unwrap();
+                l.paint(&mut c, &os_plugkit::palette());
+                os_ui::kit::lemon::plug_well(&mut c, d.r, 6.0);
+                (d.draw)(&mut c, d.r, values);
+                let mut px = vec![0u32; (spec.size.0 * spec.size.1) as usize];
+                c.copy_to_xrgb(&mut px);
+                inside(&px.iter().map(|p| p & 0xff_ffff).collect::<Vec<u32>>())
+            };
+            assert!(inside(&px) == drawn(&v), "{}", spec.name);
+            assert!(inside(&px) != drawn(&knobs), "{}", spec.name);
+        }
+    }
+
+    /// Enter on a type-in box left as it opened changes nothing, also where its text reads back as another value.
+    #[test]
+    fn enter_on_an_unchanged_type_in_box_changes_nothing() {
+        let spec = soft_clipper::SPEC;
+        let k = spec.index("threshold").unwrap();
+        let (lo, hi) = spec.settings[k].range;
+        let v = (lo..=hi).find(|&v| v != spec.settings[k].start && (spec.parse)(k, &(spec.text)(k, v)) != Some(v)).unwrap();
+        let mut l = logic(spec);
+        l.vals.edit_plain("threshold", v as f32);
+        let t = l.vals.text("threshold");
+        l.entered("threshold", &t, &t);
+        assert_eq!(l.vals.plain("threshold"), v as f32);
+    }
+
+    /// A typed text that several values show keeps the current value if it is one of them, else the default if it is
+    /// (else the nearest, as the effect's parse picks).
+    #[test]
+    fn a_typed_text_several_values_show_keeps_the_current_or_the_default() {
+        let spec = soft_clipper::SPEC;
+        let k = spec.index("threshold").unwrap();
+        let (lo, hi) = spec.settings[k].range;
+        let (text, parse, start) = (spec.text, spec.parse, spec.settings[k].start);
+        let v = (lo..=hi).find(|&v| v != start && parse(k, &text(k, v)) != Some(v)).unwrap();
+        let mut l = logic(spec);
+        l.vals.edit_plain("threshold", v as f32);
+        // The text changed (no unit), the value it shows the same: the current value stays.
+        let t = text(k, v);
+        l.entered("threshold", &t, t.trim_end_matches("dB"));
+        assert_eq!(l.vals.plain("threshold"), v as f32);
+        // The default's text, which reads back as another value, from elsewhere: the default.
+        assert_ne!(parse(k, &text(k, start)), Some(start));
+        l.vals.edit_plain("threshold", 64.0);
+        l.entered("threshold", &text(k, 64), &text(k, start));
+        assert_eq!(l.vals.plain("threshold"), start as f32);
+        // A text only one value shows: that value.
+        l.entered("threshold", &text(k, start), &text(k, 64));
+        assert_eq!(l.vals.plain("threshold"), 64.0);
+    }
+
+    /// A heading's rules are there at every scale or at none.
+    #[test]
+    fn heading_rules_do_not_come_and_go_with_the_scale() {
+        for spec in SPECS {
+            let mut l = logic(spec);
+            // Whether each heading has its rule: the rule's grey 5 px into the card on the rule's lower row.
+            let mut rules = |s: f32| -> Vec<bool> {
+                let (px, w) = pixels(&mut l, s);
+                let cards = spec.cards.iter().filter(|k| !k.heading.is_empty());
+                cards.map(|k| px[((k.y0 - 11.0) * s) as usize * w + ((k.x0 + 5.5) * s) as usize] == 0x3c3c3c).collect()
+            };
+            let one = rules(1.0);
+            assert_eq!(rules(1.5), one, "{}", spec.name);
+            assert_eq!(rules(2.0), one, "{}", spec.name);
+        }
+    }
+
+    /// The newer pages' wordmarks end 6 px clear of the right edge (Lemon Filter's at x 480, spec
+    /// plugins/lemon-filter.md §2).
+    #[test]
+    fn the_newer_pages_wordmarks_end_6_px_from_the_right_edge() {
+        let specs = [filter::SPEC, flanger::SPEC, phaser::SPEC, peak_controller::SPEC, formula_controller::SPEC, crate::vocoder::SPEC];
+        for spec in specs {
+            let mut l = logic(spec);
+            let (px, w) = pixels(&mut l, 1.0);
+            let logo = l.hits.iter().find(|h| h.t == Target::Logo).unwrap().r;
+            // The wordmark's ink: anything but the background in its rows.
+            let ink = |x: usize| (logo.y as usize..logo.bottom() as usize).any(|y| px[y * w + x] != 0x2b2b2b);
+            let last = (0..w).rev().find(|&x| ink(x)).unwrap();
+            assert_eq!(last, w - 7, "{}", spec.name);
+        }
+        assert_eq!(filter::SPEC.size.0 - 7, 480);
+    }
+
+    /// A hint or status too wide for its well ends in "…" after a whole character, and fits (Lemon Balance's longest
+    /// hint, in its 86 px).
+    #[test]
+    fn texts_too_wide_for_their_wells_end_in_an_ellipsis() {
+        let mut c = os_ui::Canvas::new(100, 40, 1.0).unwrap();
+        let f = os_ui::Font::new(11);
+        let s = "Balance: 100.0% right";
+        let whole = c.text_width(f, s);
+        assert_eq!(view::fitted(&mut c, f, s, whole), s);
+        for max in [86.0, 60.0, 30.0] {
+            let t = view::fitted(&mut c, f, s, max);
+            assert!(c.text_width(f, &t) <= max, "{t}");
+            let kept = t.strip_suffix('…').unwrap();
+            assert!(!kept.is_empty() && s.starts_with(kept), "{t}");
+        }
     }
 
     /// `SMALLFX_PNG=<dir> cargo test -p lemon-small-fx -- --ignored`: the editors at a few settings, as PNGs.

@@ -109,9 +109,10 @@ const NOISE_X0: f32 = next(MIX_X1);
 const NOISE_X1: f32 = knobs_x1(NOISE_X0, 2.0);
 const IN_X0: f32 = next(NOISE_X1);
 const IN_X1: f32 = knobs_x1(IN_X0, 2.0);
+/// The editor's width (spec §4: 593); the L/R card takes what is left of the row, up to 6 px from the edge.
+const WIDTH_PX: f32 = 593.0;
 const LR_X0: f32 = next(IN_X1);
-const LR_X1: f32 = LR_X0 + 62.0 - 1.0;
-const WIDTH_PX: f32 = next(LR_X1);
+const LR_X1: f32 = WIDTH_PX - GAP - 1.0;
 
 const ENV_X0: f32 = GAP;
 const ENV_LIST_X: f32 = ENV_X0 + SIDE + 2.0 * PITCH + 40.0;
@@ -329,6 +330,14 @@ fn sound(rate: u32, v: &[i32]) -> Box<dyn Sound> {
 mod tests {
     use super::*;
     use crate::params::{default_state, fl_from_plugin_state, plugin_state_from_fl, to_fl, values_of};
+
+    /// The editor is 593 x 284 (spec §4), the L/R card ending 6 px from its right edge.
+    #[test]
+    fn the_editor_is_593_by_284() {
+        assert_eq!(SPEC.size, (593, 284));
+        assert_eq!(WIDTH_PX - (LR_X1 + 1.0), GAP);
+        assert_eq!(LR_X0 - (IN_X1 + 1.0), GAP);
+    }
 
     /// The saved state is the original's whole state: a new instance's is FL 2026's default (with Lemon Studio's
     /// inputs), the settings read from and write to their ints, and everything else is kept.
