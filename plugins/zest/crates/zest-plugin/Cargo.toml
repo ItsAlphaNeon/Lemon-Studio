@@ -1,0 +1,33 @@
+[package]
+name = "zest-plugin"
+description = "Zest as a VST3 / CLAP instrument"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Compiled into Lemon Studio: no exported plugin entry points, which
+# would clash with the other plugins linked into the same program. The app makes the plugin's entry table itself.
+linked = []
+
+[dependencies]
+zest-core = { path = "../zest-core" }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
+zest-ui = { path = "../zest-ui" }
+zest-preset = { path = "../zest-preset" }
+# Lemon Studio's plugin editor kit.
+os-plugkit = { path = "../../../../crates/os-plugkit" }
+os-hostlink = { path = "../../../../crates/os-hostlink" }
+os-ui = { path = "../../../../crates/os-ui" }
+os-theme = { path = "../../../../crates/os-theme" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_System_LibraryLoader"] }
+
+[dev-dependencies]
+tiny-skia = "0.11"

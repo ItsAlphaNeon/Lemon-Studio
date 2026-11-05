@@ -28,6 +28,19 @@
 pub mod levels;
 pub mod state;
 
+/// The id a nih-plug parameter has at the host, from its id string (nih-plug keeps its own copy of this inside its
+/// wrappers): for `Peer::take_reveal`.
+pub fn host_param_id(id: &str) -> u32 {
+    let mut hash: u32 = 0;
+    for c in id.bytes() {
+        hash = hash.wrapping_mul(31).wrapping_add(u32::from(c));
+    }
+    hash & !(1 << 31)
+}
+
+/// How long a plugin's hint says what a turn of the host's changed.
+pub const REVEAL_MS: u64 = 2500;
+
 /// Name passed to `RegisterWindowMessageW`.
 pub const MESSAGE_NAME: &str = "OpenStudio.HostLink.1";
 /// Protocol version answered to [`Cmd::Hello`].
@@ -300,6 +313,9 @@ mod win {
             send(self.editor, Cmd::Metrics, 0).map(unpack_size).filter(|&(w, h)| w > 0 && h > 0)
         }
 
+        /// The host turned a parameter: no editor listens for it here yet.
+        pub fn reveal(&self, _id: u32) {}
+
         /// The active page as last seen.
         pub fn page_now(&self) -> usize {
             self.page
@@ -362,6 +378,8 @@ mod local {
         hosted: AtomicBool,
         page: AtomicUsize,
         hint: Mutex<String>,
+        /// The parameter (its host id) the host turned: the editor shows it.
+        reveal: Mutex<Option<u32>>,
         /// Wakes the editor's thread (the host said hello or changed the page).
         wake: Box<dyn Fn() + Send + Sync>,
     }
@@ -378,6 +396,7 @@ mod local {
                 hosted: AtomicBool::new(false),
                 page: AtomicUsize::new(0),
                 hint: Mutex::new(String::new()),
+                reveal: Mutex::new(None),
                 wake: Box::new(wake),
             });
             if let Ok(mut r) = REGISTRY.lock() {
@@ -407,6 +426,11 @@ mod local {
         /// The editor switched pages itself; the host follows on its next tick.
         pub fn set_page(&self, i: usize) {
             self.page.store(i.min(self.pages.len().saturating_sub(1)), Ordering::Release);
+        }
+
+        /// The parameter the host turned since the last call (its host id): the editor shows it and says so.
+        pub fn take_reveal(&self) -> Option<u32> {
+            self.reveal.lock().ok()?.take()
         }
 
         /// The editor's hint line, for the host's title bar.
@@ -511,6 +535,14 @@ mod local {
             (self.peer.wake)();
         }
 
+        /// The host turned the parameter with host id `id`: the editor shows it (`Peer::take_reveal`).
+        pub fn reveal(&self, id: u32) {
+            if let Ok(mut r) = self.peer.reveal.lock() {
+                *r = Some(id);
+            }
+            (self.peer.wake)();
+        }
+
         /// The active page as last seen.
         pub fn page_now(&self) -> usize {
             self.page
@@ -568,6 +600,10 @@ mod tests {
         assert_eq!(peer.take_size_request(), None);
         peer.set_size(800, 500);
         assert_eq!(link.size(), Some((800, 500)));
+        assert_eq!(peer.take_reveal(), None);
+        link.reveal(77);
+        assert_eq!(peer.take_reveal(), Some(77));
+        assert_eq!(peer.take_reveal(), None, "once");
         link.set_page(1);
         assert_eq!(peer.page(), 1);
         assert!(WAKES.load(Ordering::Relaxed) >= 2, "hello and the page change wake the editor");

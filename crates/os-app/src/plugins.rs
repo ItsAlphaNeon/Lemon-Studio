@@ -355,13 +355,19 @@ pub fn builtin() -> Vec<Available> {
     static CITRUS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static SLICER: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static DRUMS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    static ZEST: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
     v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_TRIO));
     v.extend(linked(&CITRUS, &citrus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::citrus::CITRUS));
     v.extend(linked(&SLICER, &lemon_slicer::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::slicer::LEMON_SLICER));
     v.extend(linked(&DRUMS, &lemon_drum_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::drums::LEMON_DRUMS));
+    v.extend(linked(&ZEST, &zest_plugin::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, ZEST_NAME));
     v
 }
+
+/// Zest. Saved as a wrapped CLAP plugin naming `Zest.clap` in the per-user CLAP folder, as the compiled-in effects are
+/// (`project_plugins::is_wrapped`): without it a project keeps no state for it, not even which plugin played the channel.
+pub const ZEST_NAME: &str = "Zest";
 
 /// Lemon Parametric EQ, Pulp Filter and Press, compiled in the same way (`FILE_MAPPED`): offered for every mixer slot,
 /// and they play the slots a project saved with the original EQ, Love Philter and Maximus (spec:
