@@ -7559,16 +7559,19 @@ impl App {
         }
         // Piano roll (spec: ui/piano-roll.md §3a): Alt+wheel over the ruler zooms time; the keyboard takes the wheel
         // like the grid (scroll, Ctrl = time zoom); the keys zoom with Ctrl+middle-drag.
+        // A time zoom by the wheel eases (`crate::smooth`): a notch during its ease zooms on from where it is going.
         if matches!(area, Some(Action::PianoRuler)) && self.alt {
             let Some(g) = self.piano_geom() else { return None };
-            piano::zoom_time(&mut self.state, &g, x, dy + dx);
+            let from = self.zoom_from(crate::smooth::TimeZoom::Piano);
+            piano::zoom_time(&mut self.state, &g, x, from, dy + dx);
             return Some(Win::PianoRoll);
         }
         if matches!(area, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoKeys | Action::PianoVelocity)) {
             let Some(g) = self.piano_geom() else { return None };
             if ctrl {
                 // Zoom time around the mouse.
-                piano::zoom_time(&mut self.state, &g, x, dy + dx);
+                let from = self.zoom_from(crate::smooth::TimeZoom::Piano);
+                piano::zoom_time(&mut self.state, &g, x, from, dy + dx);
                 piano::clamp_scroll(&mut self.state, g.grid.h);
                 return Some(Win::PianoRoll);
             }
@@ -7669,6 +7672,7 @@ impl App {
         }
         let alt = self.alt;
         let pl_grid = self.pl_grid;
+        let zoom_from = self.zoom_from(crate::smooth::TimeZoom::Playlist);
         let pl_area = matches!(
             area,
             Some(Action::PlaylistArea | Action::PlRuler | Action::PlMarkers | Action::PlHeader(_) | Action::PlLed(_) | Action::PlGroupArrow(_))
@@ -7683,17 +7687,19 @@ impl App {
                 s.mixer_scroll = (s.mixer_scroll - (sy + sx) * 44.0).max(0.0);
                 Some(Win::Mixer)
             }
-            // Alt+wheel anywhere in the playlist: track height (spec: ui/playlist.md §3, §6).
+            // Alt+wheel anywhere in the playlist: track height (spec: ui/playlist.md §3, §6), at once (only the time
+            // zoom eases, `crate::smooth`).
             _ if pl_area && alt => {
                 let grid = pl_grid.unwrap_or(Rect::new(481.0, 150.0, 1400.0, 800.0));
                 crate::playlist::zoom_rows(s, grid, y, dy + dx);
                 Some(Win::Playlist)
             }
-            // Ctrl+wheel anywhere in the playlist, the plain wheel over the ruler: time zoom around the mouse (§3).
+            // Ctrl+wheel anywhere in the playlist, the plain wheel over the ruler: time zoom around the mouse (§3). It
+            // eases (`crate::smooth`): a notch during its ease zooms on from where it is going.
             _ if pl_area && (ctrl || (!shift && matches!(area, Some(Action::PlRuler | Action::PlMarkers)))) => {
                 let gx = self.pl_grid.map_or(481.0, |g| g.x);
                 let bar = (s.playlist_scroll.0 + x - gx) / s.playlist_bar_w;
-                s.playlist_bar_w = (s.playlist_bar_w * 1.25f32.powf(dy + dx)).clamp(4.0, 600.0);
+                s.playlist_bar_w = (zoom_from * 1.25f32.powf(dy + dx)).clamp(4.0, 600.0);
                 s.playlist_scroll.0 = (bar * s.playlist_bar_w - (x - gx)).max(0.0);
                 Some(Win::Playlist)
             }
@@ -12210,7 +12216,7 @@ mod tests {
         frame_damage(&mut app, &mut a, Some(None));
         let _ = app.take_damage();
         // Wheel over the grid: scroll down, then right, each easing over 10 ms frames (General ▸ Display ▸ Smoothing at
-        // its default); Ctrl zooms at once.
+        // its default); Ctrl zooms, easing too (every frame repaints the playlist).
         app.mouse_move(g.x + 300.0, g.y + 100.0);
         frame(&mut app, &mut a, None);
         let _ = app.take_damage();
@@ -12232,8 +12238,7 @@ mod tests {
         app.wheel(-3.0, 0.0, false, false);
         eases(&mut app, &mut a, &mut b, "wheel sideways");
         app.wheel(0.0, 1.0, false, true);
-        assert!(!app.smooth.running(), "a zoom doesn't ease");
-        check(&mut app, &mut a, &mut b, "ctrl+wheel zoom");
+        eases(&mut app, &mut a, &mut b, "ctrl+wheel zoom");
         // Drag the horizontal scroll bar.
         let bar = app.bar(Scroll::PlaylistX).unwrap();
         app.mouse_move(bar.track.x + 3.0, bar.track.cy());
@@ -18007,6 +18012,7 @@ mod tests {
         assert_eq!(app.state.piano.row_h, views::piano::ROW);
         let z = app.state.piano.px_per_beat;
         app.wheel(0.0, 1.0, false, true);
+        app.ease_to_end();
         assert!(app.state.piano.px_per_beat > z, "Ctrl+wheel over the keys zooms time");
         assert_eq!(app.state.piano.row_h, views::piano::ROW);
         frame(&mut app, &mut c, None);
@@ -18042,6 +18048,7 @@ mod tests {
         app.alt = true;
         app.wheel(0.0, 1.0, false, false);
         app.alt = false;
+        app.ease_to_end();
         assert!(app.state.piano.px_per_beat > z);
         let z = app.state.piano.px_per_beat;
         app.key(&Key::Named(NamedKey::PageDown), false, false);
@@ -19358,6 +19365,7 @@ mod tests {
         let header = hit_rect(&app, &Action::PlHeader(2));
         app.mouse_move(header.cx(), header.cy());
         app.wheel(0.0, 1.0, false, true);
+        app.ease_to_end();
         assert!(app.state.playlist_bar_w > w0 && app.state.playlist.row_h == pl::ROW_H, "Ctrl+wheel over the headers zooms time");
         app.state.playlist_bar_w = w0;
         app.state.playlist_scroll = (0.0, 0.0);
@@ -19365,6 +19373,7 @@ mod tests {
         let ruler = hit_rect(&app, &Action::PlRuler);
         app.mouse_move(ruler.cx(), ruler.cy());
         app.wheel(0.0, 1.0, false, false);
+        app.ease_to_end();
         assert!(app.state.playlist_bar_w > w0, "the plain wheel over the ruler zooms in");
         app.alt = true;
         let w1 = app.state.playlist_bar_w;
