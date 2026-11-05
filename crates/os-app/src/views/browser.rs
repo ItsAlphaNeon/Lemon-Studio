@@ -1058,7 +1058,10 @@ fn paint_tag(ui: &mut Ui, label: &str, x: f32, y: f32, angle: f32, alpha: f32) {
     }
     ui.c.fill_rrect(card, 4.0, t.browser_row_hi.shade(0.08));
     ui.c.stroke_rrect(card, 4.0, 1.0, t.browser_tab_outline);
+    // Text writes every pixel around it too: on the card, or it would leave a black line on the cleared layer.
+    ui.c.push_clip(card.inset(1.0));
     ui.c.text_clip(f, card.x + 9.0, card.y + 3.0, card.w - 14.0, t.glyph, label);
+    ui.c.pop_clip();
     if let Some(tag) = ui.c.take_layer(layer) {
         ui.c.sprite(&tag, px, py, angle, 1.0, 0.0, 0.0, alpha);
     }

@@ -13699,6 +13699,45 @@ mod tests {
         crate::anim::set_clock(false);
     }
 
+    /// Nothing of the drag tag shows above its card: its text stays on the card (spec: ui/animations.md §3.3).
+    #[test]
+    fn nothing_of_the_drag_tag_shows_above_its_card() {
+        use crate::anim::Level;
+        use crate::motion::TAG_PIN;
+        use crate::views::browser::{rows, Item};
+        let Ok(mut c) = Canvas::new(1600, 900, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let r0 = hit_rect(&app, &Action::BrowserTab(1));
+        click(&mut app, &mut c, r0);
+        let pi = rows(&app.state).iter().position(|r| r.item == Item::Pattern(1)).expect("pattern row");
+        let src = hit_rect(&app, &Action::BrowserRow(pi));
+        let grid = app.pl_grid().expect("grid");
+        // At Off it hangs straight, with no shadow.
+        crate::anim::set_level(Level::Off);
+        app.mouse_move(src.cx(), src.cy());
+        app.mouse_down();
+        app.mouse_move(src.cx() + 30.0, src.cy());
+        let (x, y) = (grid.x + 200.0, grid.y + 40.0);
+        let top = (y + TAG_PIN.1).round() as u32 - 1;
+        let above = |c: &Canvas| (x as u32 - 60..x as u32 + 60).map(|x| c.pixmap.pixel(x, top).map(|p| (p.red(), p.green(), p.blue()))).collect::<Vec<_>>();
+        app.mouse_move(x, y);
+        frame(&mut app, &mut c, None);
+        assert!(app.state.browser_drag.is_some(), "dragging");
+        let with = above(&c);
+        // Further along the same track, the same glow and the tag well away.
+        app.mouse_move(x + 500.0, y);
+        frame(&mut app, &mut c, None);
+        assert_eq!(with, above(&c), "the row above the card");
+        app.mouse_up();
+        crate::anim::set_level(Level::Playful);
+    }
+
     /// A scroll under something fading away over the playlist repaints, rather than move its pixels with the rest.
     #[test]
     fn a_scroll_under_a_falling_tag_leaves_nothing_behind() {
