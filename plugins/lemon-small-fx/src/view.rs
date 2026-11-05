@@ -88,6 +88,9 @@ pub struct ViewState {
     pub pressed: Option<Target>,
     /// The saved state the text fields show ([`Control::Text`]).
     pub raw: Vec<u8>,
+    /// The settings as the sound plays them, stored values outside the ranges included: the display pictures these
+    /// (spec §2 Display). Empty: the parameters' values.
+    pub settings: Vec<i32>,
 }
 
 struct Ui<'a> {
@@ -147,8 +150,9 @@ pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewS
     }
     if let Some(d) = &spec.display {
         lemon::plug_well(ui.c, d.r, 6.0);
-        let v = values(spec, m);
-        (d.draw)(ui.c, d.r, &v[..spec.settings.len()]);
+        let n = spec.settings.len();
+        let v = if st.settings.len() == n { st.settings.clone() } else { values(spec, m)[..n].to_vec() };
+        (d.draw)(ui.c, d.r, &v);
     }
     for &(cx, top, s) in spec.labels {
         inst::caption(ui.c, ui.t, cx, top, s, false);
@@ -162,14 +166,16 @@ pub fn paint(spec: &Spec, c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewS
             }
             lemon::plug_well(ui.c, well, 6.0);
             if !hint.is_empty() {
-                ui.c.text_clip(HINT, well.x + 8.0, (well.cy() - lh / 2.0).round(), well.w - 16.0, brand::TEXT, hint);
+                let hint = fitted(ui.c, HINT, hint, well.w - 16.0);
+                ui.c.text_clip(HINT, well.x + 8.0, (well.cy() - lh / 2.0).round(), well.w - 16.0, brand::TEXT, &hint);
             }
         }
         (None, Some(d)) if !hint.is_empty() => {
-            let w = (ui.c.text_width(HINT, hint) + 12.0).min(d.r.w - 8.0);
+            let hint = fitted(ui.c, HINT, hint, d.r.w - 20.0);
+            let w = ui.c.text_width(HINT, &hint) + 12.0;
             let r = Rect::new(d.r.x + 4.0, d.r.y + 4.0, w, lh + 6.0);
             ui.c.fill_rrect(r, 4.0, plug::WELL.with_alpha(220));
-            ui.c.text_clip(HINT, r.x + 6.0, r.y + 3.0, r.w - 12.0, brand::TEXT, hint);
+            ui.c.text_clip(HINT, r.x + 6.0, r.y + 3.0, r.w - 12.0, brand::TEXT, &hint);
         }
         _ => {}
     }
@@ -183,7 +189,12 @@ fn heading(ui: &mut Ui, x0: f32, x1: f32, y: f32, s: &str) {
     let w = lemon::spaced_width(ui.c, HEADING, s, 2.0);
     let tx = ((x0 + x1 + 1.0) / 2.0 - w / 2.0).round();
     lemon::spaced(ui.c, HEADING, tx, (y - lh / 2.0).round(), plug::DIM, s, 2.0);
-    if tx - 7.0 > x0 + 8.0 {
+    // Whether the card has room for the rule goes by the text's width at 1x (text widths differ a little with the
+    // scale), so the rule is there at every scale or at none.
+    let old = ui.c.rescale(1.0);
+    let w1 = lemon::spaced_width(ui.c, HEADING, s, 2.0);
+    ui.c.unscale(old);
+    if ((x0 + x1 + 1.0) / 2.0 - w1 / 2.0).round() - 7.0 > x0 + 8.0 {
         ui.c.fill_rect(Rect::span(x0 + 4.0, tx - 7.0, y, y + 1.0), RULE);
         ui.c.fill_rect(Rect::span((tx + w + 6.0).round(), x1 - 4.0, y, y + 1.0), RULE);
     }
@@ -305,8 +316,26 @@ fn text_field(ui: &mut Ui, id: &str, r: Rect, text: &str, status: &str) {
     lemon::field(ui.c, r, st);
     let vh = ui.c.line_height(VALUE);
     ui.c.text_clip(VALUE, r.x + 8.0, (r.cy() - vh / 2.0).round(), r.w - 16.0, brand::TEXT, text);
-    ui.c.text_clip(LABEL, r.x + 2.0, r.bottom() + 7.0, r.w - 4.0, plug::DIM, status);
+    let status = fitted(ui.c, LABEL, status, r.w - 4.0);
+    ui.c.text_clip(LABEL, r.x + 2.0, r.bottom() + 7.0, r.w - 4.0, plug::DIM, &status);
     ui.hit(r, target);
+}
+
+/// `s` as it fits in `max_w` px of `f`: when it is wider, cut after a whole character and ended with "…" (never cut
+/// through a glyph).
+pub(crate) fn fitted(c: &mut Canvas, f: Font, s: &str, max_w: f32) -> String {
+    if s.is_empty() || c.text_width(f, s) <= max_w {
+        return s.to_string();
+    }
+    // `n` characters and the ellipsis; the most that fit (a binary search: the width grows with them).
+    let ends: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
+    let cut = |n: usize| format!("{}…", s[..ends[n]].trim_end());
+    let (mut lo, mut hi) = (0, ends.len() - 1);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if c.text_width(f, &cut(mid)) <= max_w { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
 }
 
 /// The wordmark (as Lemon Delay's): the lemon mark and "LEMON" in lemon beside the effect's name in large grey

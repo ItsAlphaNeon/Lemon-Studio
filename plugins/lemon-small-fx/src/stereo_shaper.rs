@@ -52,10 +52,11 @@ const PHASE: usize = 5;
 const POSITION: usize = 6;
 
 /// Editor layout (spec §2), as the original's: the four level faders of the matrix (what reaches the left output, then
-/// the right), and the effects: the position, the delay and the phase.
+/// the right), and the effects: the position, the delay and the phase. The page's ranges end before their last number
+/// (6 px apart, 8 px from the edges); a card's `x1` and `y1` are its last pixels.
 const CARDS: [Card; 2] = [
-    Card { x0: 8.0, x1: 216.0, y0: 28.0, y1: 306.0, heading: "MIXER MATRIX" },
-    Card { x0: 222.0, x1: 352.0, y0: 28.0, y1: 306.0, heading: "EFFECTS" },
+    Card { x0: 8.0, x1: 215.0, y0: 28.0, y1: 305.0, heading: "MIXER MATRIX" },
+    Card { x0: 222.0, x1: 351.0, y0: 28.0, y1: 305.0, heading: "EFFECTS" },
 ];
 
 /// A fader carrying the right input (the left's are lemon).
