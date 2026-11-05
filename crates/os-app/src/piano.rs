@@ -871,12 +871,15 @@ pub fn auto_zoom(s: &mut State, grid: Rect) {
 }
 
 /// When the channel `ch` has notes in `notes` but none shows in the note grid (`g.grid`): the nearest one (its index),
-/// its point nearest the grid's centre (window px) and how far that is; then, when notes also lie the other way (more
-/// than 120° from it, seen from the centre), the nearest of those. At most two: the arrows that point at them
-/// (`views::piano`) bring them into view (`show_note`).
+/// its point nearest the grid's centre (window px) and how far that is; then, when notes also lie the other way (past
+/// the grid's opposite edge: left against right, above against below), the nearest of those. At most two: the arrows
+/// that point at them (`views::piano`) bring them into view (`show_note`). The sides, not an angle, tell the ways
+/// apart, so a narrow, tall grid finds the second as a wide one does.
 pub fn off_view_notes(g: &Geom, notes: &[Note], ch: Option<u16>) -> Vec<(usize, (f32, f32), f32)> {
     let grid = g.grid;
     let c = (grid.cx(), grid.cy());
+    // Each note's sides of the grid: -1 left / above, 1 right / below, 0 within.
+    let side = |a: f32, b: f32, lo: f32, hi: f32| if b <= lo { -1 } else if a >= hi { 1 } else { 0 };
     let mut all = Vec::new();
     for (i, n) in notes.iter().enumerate().filter(|(_, n)| Some(n.channel) == ch) {
         let Some(r) = g.note_rect(n) else { continue };
@@ -885,17 +888,14 @@ pub fn off_view_notes(g: &Geom, notes: &[Note], ch: Option<u16>) -> Vec<(usize, 
             return Vec::new();
         }
         let p = (c.0.clamp(r.x, r.right()), c.1.clamp(r.y, r.bottom()));
-        all.push((i, p, (p.0 - c.0).hypot(p.1 - c.1)));
+        let sides = (side(r.x, r.right(), grid.x, grid.right()), side(r.y, r.bottom(), grid.y, grid.bottom()));
+        all.push((i, p, (p.0 - c.0).hypot(p.1 - c.1), sides));
     }
     let Some(&first) = all.iter().min_by(|a, b| a.2.total_cmp(&b.2)) else { return Vec::new() };
-    let way = |p: (f32, f32), d: f32| ((p.0 - c.0) / d.max(1.0), (p.1 - c.1) / d.max(1.0));
-    let u = way(first.1, first.2);
-    let other = all.iter().filter(|o| {
-        let w = way(o.1, o.2);
-        u.0 * w.0 + u.1 * w.1 < -0.5
-    });
-    let mut v = vec![first];
-    v.extend(other.min_by(|a, b| a.2.total_cmp(&b.2)).copied());
+    let opposite = |a: i32, b: i32| a != 0 && a == -b;
+    let other = all.iter().filter(|o| opposite(first.3.0, o.3.0) || opposite(first.3.1, o.3.1));
+    let mut v = vec![(first.0, first.1, first.2)];
+    v.extend(other.min_by(|a, b| a.2.total_cmp(&b.2)).map(|o| (o.0, o.1, o.2)));
     v
 }
 

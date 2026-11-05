@@ -17031,6 +17031,28 @@ mod tests {
         assert_eq!(slots(&app)[..4], ["FX B", "", "", "FX A"], "up, and no further than the first slot");
     }
 
+    /// In a narrow, tall note grid (a split view) notes above it on its left and on its right lie opposite ways: both get
+    /// an arrow, as they do with the grid maximized.
+    #[test]
+    fn piano_arrows_tell_left_from_right_in_a_narrow_grid() {
+        let mut app = App::new(None);
+        let ch = app.state.project.channels[app.state.selected_channel].index;
+        let ppq = u32::from(app.state.project.ppq.max(4));
+        crate::piano::center_keys(&mut app.state, 900.0);
+        app.scroll_set(Scroll::PianoX, 2000.0);
+        for (w, h) in [(300.0, 900.0), (1600.0, 700.0)] {
+            let grid = Rect::new(100.0, 100.0, w, h);
+            let g = crate::piano::Geom::new(&app.state, grid);
+            let right = g.tick_at(grid.right() + 200.0) as u32;
+            let notes = vec![Note { key: 127, length: ppq, ..Note::step(ch, 0) }, Note { key: 127, length: ppq, ..Note::step(ch, right) }];
+            for n in &notes {
+                let r = g.note_rect(n).expect("a row");
+                assert!(r.bottom() <= grid.y && (r.right() <= grid.x || r.x >= grid.right()), "{w}x{h}: {r:?} above and to a side of {grid:?}");
+            }
+            assert_eq!(crate::piano::off_view_notes(&g, &notes, Some(ch)).len(), 2, "{w}x{h}: an arrow each way");
+        }
+    }
+
     /// The piano roll's scroll-bar arrows step their axis (spec: ui/piano-roll.md §1a).
     /// The channel's notes are all out of view: an arrow at the grid's edge points at the nearest and names it; a click
     /// brings it into view, and the arrow goes.
