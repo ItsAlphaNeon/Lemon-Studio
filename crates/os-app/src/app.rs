@@ -12656,7 +12656,7 @@ mod tests {
             crate::anim::advance(16);
             assert!(app.tick(), "each tick repaints it");
             let d = app.take_damage();
-        frame_damage(&mut app, &mut c, d);
+            frame_damage(&mut app, &mut c, d);
             frame(&mut app, &mut whole, None);
             assert_same(&c, &whole, "a partial repaint of a frame of it");
             frames += 1;
@@ -12687,7 +12687,7 @@ mod tests {
             crate::anim::advance(16);
             app.tick();
             let d = app.take_damage();
-        frame_damage(&mut app, &mut c, d);
+            frame_damage(&mut app, &mut c, d);
         }
         assert!(!app.animating() && lit(&c, b) && !lit(&c, a), "and gets to the last");
         // At Off: there at once, in the plain look.
@@ -12703,6 +12703,55 @@ mod tests {
         frame(&mut app, &mut want, None);
         assert_same(&c, &want, "at Off");
         crate::anim::set_level(crate::anim::Level::Playful);
+    }
+
+    /// The browser's drag tag swings as the mouse moves and sways to rest when it stops (spec: ui/animations.md §4.1);
+    /// each frame of it repaints as a whole frame would.
+    #[test]
+    fn the_drag_tag_swings_and_settles() {
+        use crate::views::browser::{rows, Item};
+        let size = (1600, 900);
+        let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.plugins.effects = vec![crate::plugin_db::fake("A long effect name", os_host::Kind::Effect)];
+        app.state.plugdb.rebuild(&app.plugins);
+        app.state.browser_tab = 2;
+        app.state.browser_open.extend(["2:Plugin library/Effects".into(), "2:Plugin library/Effects/Other".into()]);
+        frame(&mut app, &mut c, None);
+        let i = rows(&app.state).iter().position(|r| r.item == Item::Effect(0)).expect("effect row");
+        let src = hit_rect(&app, &Action::BrowserRow(i));
+        crate::anim::set_clock(true);
+        let step = |app: &mut App, c: &mut Canvas, whole: &mut Canvas, what: &str| {
+            crate::anim::advance(16);
+            app.tick();
+            let d = app.take_damage();
+            frame_damage(app, c, d);
+            frame(app, whole, None);
+            assert_same(c, whole, what);
+        };
+        app.mouse_move(src.cx(), src.cy());
+        app.mouse_down();
+        let (mut x, y) = (src.cx() + 30.0, src.cy() + 200.0);
+        app.mouse_move(x, y);
+        step(&mut app, &mut c, &mut whole, "picked up");
+        for _ in 0..12 {
+            x += 14.0;
+            app.mouse_move(x, y);
+            step(&mut app, &mut c, &mut whole, "a frame of the swing");
+        }
+        let lean = app.state.motion.borrow().tag_angle();
+        assert!(lean > 0.15, "dragged right, it leans clockwise: {lean}");
+        let mut frames = 0;
+        while app.animating() {
+            step(&mut app, &mut c, &mut whole, "a frame of the sway");
+            frames += 1;
+            assert!(frames < 200, "it comes to rest");
+        }
+        assert!(frames > 20, "it sways for a while: {frames} frames");
+        assert!(app.state.motion.borrow().tag_angle().abs() < 0.01);
+        app.mouse_up();
+        crate::anim::set_clock(false);
     }
 
     /// The ends of the Playlist's and Piano roll's horizontal thumbs zoom (spec: ui/scroll-bars.md §4): the dragged end

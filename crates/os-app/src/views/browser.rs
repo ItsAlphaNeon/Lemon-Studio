@@ -1004,22 +1004,38 @@ fn search_box(ui: &mut Ui, s: &State, r: Rect) {
     }
 }
 
-/// Rect of the drag label at mouse position (x, y).
+/// Everything the drag tag can cover with the mouse at (x, y), however it swings.
 pub fn ghost_rect(x: f32, y: f32) -> Rect {
-    Rect::new(x + 12.0, y + 6.0, 190.0, 22.0)
+    crate::motion::tag_reach(x, y)
 }
 
-/// The label that follows the cursor during a browser drag (spec §3).
+/// The tag that follows the cursor during a browser drag (spec §3): a card with the item's name hanging by its top
+/// centre just below and right of the mouse, slightly see-through, with a soft shadow. From Animations ▸ Polished up
+/// it swings after the mouse like a sign on a nail (spec: ui/animations.md §4.1, `crate::motion`); below, it hangs
+/// rigid.
 pub fn paint_ghost(ui: &mut Ui, s: &State) {
+    use crate::motion::{TAG_H, TAG_MAX_W, TAG_PIN};
     let Some((label, x, y)) = &s.browser_drag else { return };
     let t = ui.t;
-    let r = ghost_rect(*x, *y);
     let f = os_ui::Font::new(15);
-    let w = (ui.c.text_width(f, label) + 14.0).min(r.w);
-    let r = Rect::new(r.x, r.y, w, r.h);
-    ui.c.fill_rrect(r, 3.0, t.browser_row_hi.shade(0.08));
-    ui.c.stroke_rrect(r, 3.0, 1.0, t.browser_tab_outline);
-    ui.c.text_clip(f, r.x + 7.0, r.y + 2.0, r.w - 10.0, t.glyph, label);
+    let w = (ui.c.text_width(f, label) + 18.0).clamp(40.0, TAG_MAX_W).round();
+    let (px, py) = ((x + TAG_PIN.0).round(), (y + TAG_PIN.1).round());
+    let card = Rect::new((px - w / 2.0).round(), py, w, TAG_H);
+    let layer = ui.c.begin_layer(Rect::new(card.x - 6.0, card.y - 2.0, card.w + 12.0, card.h + 10.0), true);
+    // A soft shadow, from Subtle up (at Off the tag is the plain card).
+    if crate::anim::level() > crate::anim::Level::Off {
+        for (grow, alpha) in [(3.0, 28), (1.5, 42)] {
+            let sh = Rect::new(card.x - grow, card.y + 2.0 - grow / 2.0, card.w + 2.0 * grow, card.h + grow);
+            ui.c.fill_rrect(sh, 4.0 + grow, Color::rgb(0).with_alpha(alpha));
+        }
+    }
+    ui.c.fill_rrect(card, 4.0, t.browser_row_hi.shade(0.08));
+    ui.c.stroke_rrect(card, 4.0, 1.0, t.browser_tab_outline);
+    ui.c.text_clip(f, card.x + 9.0, card.y + 3.0, card.w - 14.0, t.glyph, label);
+    let angle = s.motion.borrow().tag_angle();
+    if let Some(tag) = ui.c.take_layer(layer) {
+        ui.c.sprite(&tag, px, py, angle, 1.0, 0.0, 0.0, 0.9);
+    }
 }
 
 #[cfg(test)]

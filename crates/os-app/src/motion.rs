@@ -349,11 +349,12 @@ impl Motion {
     }
 }
 
-/// Everything the drag tag hanging from the mouse at (`x`, `y`) can cover, whichever way it swings.
+/// Everything the drag tag hanging from the mouse at (`x`, `y`) can cover, whichever way it swings: turned, a wide
+/// card's top corner rises above its pin.
 pub fn tag_reach(x: f32, y: f32) -> Rect {
-    let r = (TAG_MAX_W / 2.0).hypot(TAG_H) + 8.0;
+    let r = (TAG_MAX_W / 2.0 + 6.0).hypot(TAG_H + 8.0) + 2.0;
     let (px, py) = (x + TAG_PIN.0, y + TAG_PIN.1);
-    Rect::new(px - r, py - 8.0, 2.0 * r, r + 8.0 + 6.0)
+    Rect::new(px - r, py - r, 2.0 * r, 2.0 * r)
 }
 
 #[cfg(test)]
