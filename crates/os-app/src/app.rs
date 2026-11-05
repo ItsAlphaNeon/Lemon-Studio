@@ -3400,6 +3400,12 @@ impl App {
         self.invalidate();
     }
 
+    /// Continuous auto scrolling is moving the views with playback now (on every frame, `auto_scroll`).
+    pub(crate) fn scrolls_with_playback(&self) -> bool {
+        let set = crate::autoscroll::get();
+        set.on && set.continuous && self.shown.playing && !self.shown.paused
+    }
+
     /// Auto scrolling (spec: ui/auto-scrolling.md §5): the playlist (song) or the piano roll (pattern) scrolls so the
     /// shown playing position stays in view; in song mode the piano roll too, while a clip of its pattern plays. Left
     /// alone while the mouse drags a scroll bar.

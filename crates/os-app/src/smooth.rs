@@ -21,7 +21,7 @@
 //! zoom moved under it ends. A press of any mouse button stops every ease where it is, but on a scroll bar's arrow,
 //! which steps on from the target.
 // spec: ui/settings-choices.md "Display: Smoothing, Animation refresh rate, Transparent menus and windows (2026-10-16)"
-// spec: ui/animations.md §3.7
+// spec: ui/animations.md §4.4
 
 use std::time::{Duration, Instant};
 
@@ -117,7 +117,7 @@ const TIME_ZOOMS: [TimeZoom; 2] = [TimeZoom::Playlist, TimeZoom::Piano];
 
 /// A time zoom on its way to `target`, the zoom and scroll the wheel left. On every frame the zoom moves on and the
 /// scroll follows it, so that the time under the mouse at the notch stays under it.
-// spec: ui/animations.md §3.7
+// spec: ui/animations.md §4.4
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZoomEase {
     pub win: TimeZoom,
@@ -303,7 +303,7 @@ impl App {
     /// keeping the time under the mouse under it. A notch during that ease zooms on from its target (`zoom_from`) and
     /// anchors at the mouse again; a scroll of that time axis ends it where it is. A time zoom at once, or a track or
     /// key row height (Alt+wheel: not eased), keeps `f`'s values for the axes it moves, and their eases end.
-    // spec: ui/animations.md §3.7
+    // spec: ui/animations.md §4.4
     pub(crate) fn eased<R>(&mut self, f: impl FnOnce(&mut App) -> R) -> R {
         self.zooms_moved();
         let before = AXES.map(|a| self.axis_get(a));
@@ -312,7 +312,9 @@ impl App {
         let r = f(self);
         let zoomed = self.zooms().iter().zip(zooms).map(|(a, b)| *a != b).collect::<Vec<_>>();
         let value = smoothing();
-        let ease_zoom = value > 0.0 && anim::level() > Level::Off;
+        // Continuous scrolling during playback sets the time scroll on every frame, which would end an ease at once:
+        // there the zoom jumps, as at Off.
+        let ease_zoom = value > 0.0 && anim::level() > Level::Off && !self.scrolls_with_playback();
         for (w, (v0, (at, time))) in TIME_ZOOMS.into_iter().zip(views) {
             let v1 = self.time_view(w);
             let i = self.smooth.zooms.iter().position(|e| e.win == w);
@@ -388,7 +390,7 @@ impl App {
         });
         self.smooth.list = list;
         // The zooms: each moves on and its scroll follows, keeping the time under the mouse there (spec:
-        // ui/animations.md §3.7).
+        // ui/animations.md §4.4).
         self.zooms_moved();
         let mut zooms = std::mem::take(&mut self.smooth.zooms);
         let mut zoomed = Vec::new();

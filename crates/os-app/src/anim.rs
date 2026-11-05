@@ -262,7 +262,7 @@ impl Spring {
 }
 
 /// The drag tag: a card hanging from a pivot that follows the mouse, swinging like a damped pendulum driven by the
-/// mouse's sideways motion (spec: ui/animations.md §3.4). `theta` is the card's angle from hanging straight down,
+/// mouse's sideways motion (spec: ui/animations.md §4.1). `theta` is the card's angle from hanging straight down,
 /// positive with its bottom to the right.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pendulum {
