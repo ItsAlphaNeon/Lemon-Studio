@@ -12,6 +12,7 @@
 // own. Started from a terminal it still writes there (`attach_console`).
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
+mod anim;
 mod app;
 mod arrange;
 mod audio_clipboard;

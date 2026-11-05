@@ -1519,7 +1519,11 @@ impl App {
                 browser_dirs: Default::default(),
                 cables: std::cell::RefCell::new({
                     let mut c = crate::cable::Cables::with(load_cable_cfg());
-                    c.animate(load_animations());
+                    // General settings ▸ Animations, kept from the last run (tests keep their own thread's level).
+                    if !cfg!(test) {
+                        crate::anim::set_level(crate::anim::load());
+                    }
+                    c.animate(crate::anim::cables_swing(crate::anim::level()));
                     c
                 }),
                 browser_scroll: 0.0,
@@ -5161,7 +5165,6 @@ impl App {
         use crate::audio_cfg::{Set, BUFFERS, RATES, SMALLEST};
         use crate::playlist::{Cmd, Mark, PItem, Popup};
         use views::settings::{ANIMATIONS, BUFFER_LENGTH, INPUT_DEVICE, MODE, MODE_EXCLUSIVE, MODE_SHARED, OUTPUT_DEVICE, SAMPLE_RATE};
-        let still = !self.state.cables.borrow().animations();
         let st = &self.state.settings;
         let cfg = &st.audio;
         let rate = st.rate.unwrap_or(44100);
@@ -5269,8 +5272,8 @@ impl App {
                     .collect()
             }
             ANIMATIONS => {
-                let item = |label: &'static str, on: bool| PItem::new(label, Cmd::Mixer(crate::mixer::MCmd::Animations(on))).mark(Mark::Radio(still != on));
-                vec![item("Playful", true), item("Off", false)]
+                let now = crate::anim::level();
+                crate::anim::Level::MENU.into_iter().map(|l| PItem::new(l.name(), Cmd::Mixer(crate::mixer::MCmd::Animations(l))).mark(Mark::Radio(l == now))).collect()
             }
             _ => return,
         };
@@ -9870,25 +9873,6 @@ fn load_cable_cfg() -> crate::cable::Tuning {
     t
 }
 
-/// General settings ▸ Animations from `animations.txt` in the user folder: on unless it says "Off". Tests always
-/// animate.
-fn load_animations() -> bool {
-    if cfg!(test) {
-        return true;
-    }
-    os_paths::user_file("animations.txt").and_then(|f| std::fs::read_to_string(f).ok()).is_none_or(|t| t.trim() != "Off")
-}
-
-pub fn save_animations(on: bool) {
-    if cfg!(test) {
-        return;
-    }
-    if let Some(dir) = os_paths::user_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("animations.txt"), if on { "Playful" } else { "Off" });
-    }
-}
-
 fn save_cable_cfg(t: &crate::cable::Tuning) -> Result<PathBuf, String> {
     let p = cable_cfg_path().ok_or("no user folder")?;
     if let Some(d) = p.parent() {
@@ -11011,6 +10995,34 @@ mod tests {
         assert!(app.state.settings.picker.is_none());
         THEME_DIR.with(|d| *d.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// General settings ▸ Animations (spec: ui/animations.md "Levels"): four levels, highest first, the current one
+    /// marked; a pick sets the level every animation reads, and the mixer's cables swing from Polished up.
+    #[test]
+    fn animations_combo_picks_a_level() {
+        use crate::anim::Level;
+        use crate::playlist::Mark;
+        use crate::views::settings::{ANIMATIONS, GENERAL, SAct};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.open_settings(GENERAL);
+        frame(&mut app, &mut c, None);
+        assert_eq!(crate::anim::level(), Level::Playful, "the default");
+        for (choice, want, swing) in [("Subtle", Level::Subtle, false), ("Off", Level::Off, false), ("Polished", Level::Polished, true), ("Playful", Level::Playful, true)] {
+            let r = app.hits.iter().rev().find(|h| matches!(&h.action, Action::Settings(SAct::Combo(l, ..)) if *l == ANIMATIONS)).map(|h| h.rect).expect("Animations works");
+            click(&mut app, &mut c, r);
+            let p = app.state.playlist.popup.as_ref().expect("a menu");
+            assert_eq!(p.items.iter().map(|it| &*it.label).collect::<Vec<&str>>(), ["Playful", "Polished", "Subtle", "Off"]);
+            let now = crate::anim::level().name();
+            assert!(p.items.iter().all(|it| it.mark == Mark::Radio(it.label == now)), "{now} is marked");
+            let i = p.items.iter().position(|it| it.label == choice).unwrap();
+            let r = hit_rect(&app, &Action::PlPopup(i));
+            click(&mut app, &mut c, r);
+            assert_eq!(crate::anim::level(), want);
+            assert_eq!(app.state.cables.borrow().animations(), swing, "{choice}: cables");
+            frame(&mut app, &mut c, None);
+        }
     }
 
     /// The rows of the Project page, flattened.

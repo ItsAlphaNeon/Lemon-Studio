@@ -1163,6 +1163,166 @@ impl Canvas {
             *o = (u32::from(p[0]) << 16) | (u32::from(p[1]) << 8) | u32::from(p[2]);
         }
     }
+
+    /// Starts a layer over `r` (logical): the pixels under it are kept, so what is painted over `r` next can be shown
+    /// at an opacity (`end_layer`) or taken away as a picture and drawn moved, scaled or turned (`take_layer`,
+    /// `sprite`). With `clear`, `r` is emptied (transparent) first, so the picture holds only what is painted.
+    /// Layers are how animations fade and move a part of the frame that is painted the ordinary way.
+    pub fn begin_layer(&mut self, r: Rect, clear: bool) -> Layer {
+        let (x, y, w, h) = self.device_rect(r);
+        let pw = self.pixmap.width() as usize;
+        let mut px = Vec::with_capacity(w * h);
+        let data = self.pixmap.pixels_mut();
+        for row in y..y + h {
+            let line = &mut data[row * pw + x..row * pw + x + w];
+            px.extend_from_slice(line);
+            if clear {
+                line.fill(PremultipliedColorU8::TRANSPARENT);
+            }
+        }
+        Layer { x, y, w, h, px }
+    }
+
+    /// Ends a layer: within it, the frame shows what was painted since `begin_layer` at `alpha` (0 = as before it,
+    /// 1 = as painted) over what was there before. Only the frame's damage region changes.
+    pub fn end_layer(&mut self, l: Layer, alpha: f32) {
+        let a = (alpha.clamp(0.0, 1.0) * 256.0).round() as u32;
+        if a >= 256 {
+            return;
+        }
+        let pw = self.pixmap.width() as usize;
+        let lerp = |old: u8, new: u8| ((u32::from(old) * (256 - a) + u32::from(new) * a + 128) >> 8) as u8;
+        for i in 0..self.clip_count() {
+            let (cx0, cy0, cx1, cy1) = self.clip_at(i);
+            let (x0, x1) = ((l.x as i32).max(cx0), ((l.x + l.w) as i32).min(cx1));
+            let (y0, y1) = ((l.y as i32).max(cy0), ((l.y + l.h) as i32).min(cy1));
+            if x0 >= x1 || y0 >= y1 {
+                continue;
+            }
+            let data = self.pixmap.pixels_mut();
+            for y in y0 as usize..y1 as usize {
+                for x in x0 as usize..x1 as usize {
+                    let old = l.px[(y - l.y) * l.w + (x - l.x)];
+                    let d = &mut data[y * pw + x];
+                    let new = *d;
+                    let al = lerp(old.alpha(), new.alpha());
+                    let ch = |o: u8, n: u8| lerp(o, n).min(al);
+                    *d = PremultipliedColorU8::from_rgba(ch(old.red(), new.red()), ch(old.green(), new.green()), ch(old.blue(), new.blue()), al)
+                        .unwrap_or(new);
+                }
+            }
+        }
+    }
+
+    /// Ends a layer started with `clear`: what was painted over it becomes a picture (premultiplied, transparent where
+    /// nothing was painted) and the frame gets back what was under it.
+    pub fn take_layer(&mut self, l: Layer) -> Option<Sprite> {
+        let mut pm = Pixmap::new(l.w.max(1) as u32, l.h.max(1) as u32)?;
+        let pw = self.pixmap.width() as usize;
+        let data = self.pixmap.pixels_mut();
+        let out = pm.pixels_mut();
+        for row in 0..l.h {
+            let line = &mut data[(l.y + row) * pw + l.x..(l.y + row) * pw + l.x + l.w];
+            out[row * l.w..(row + 1) * l.w].copy_from_slice(line);
+            line.copy_from_slice(&l.px[row * l.w..(row + 1) * l.w]);
+        }
+        let k = self.scale;
+        Some(Sprite { x: l.x as f32 / k, y: l.y as f32 / k, pm })
+    }
+
+    /// Draws a picture taken with `take_layer`: turned by `angle` (radians, clockwise on screen) and scaled by `zoom`
+    /// about the logical point (`px`, `py`), moved by (`dx`, `dy`), at `alpha`, filtered. Clipped like any drawing.
+    /// Returns the logical bounds it can reach (for damage).
+    #[allow(clippy::too_many_arguments)]
+    pub fn sprite(&mut self, s: &Sprite, px: f32, py: f32, angle: f32, zoom: f32, dx: f32, dy: f32, alpha: f32) -> Rect {
+        let k = self.scale;
+        // Device transform: sprite pixels -> canvas pixels.
+        let (sx, sy) = (s.x * k, s.y * k);
+        let (cx, cy) = (px * k, py * k);
+        let t = Transform::from_translate(sx - cx, sy - cy)
+            .post_scale(zoom, zoom)
+            .post_rotate(angle.to_degrees())
+            .post_translate(cx + dx * k, cy + dy * k);
+        let (w, h) = (s.pm.width() as f32, s.pm.height() as f32);
+        let corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)].map(|(x, y)| {
+            let mut p = [tiny_skia::Point::from_xy(x, y)];
+            t.map_points(&mut p);
+            (p[0].x, p[0].y)
+        });
+        let x0 = corners.iter().map(|c| c.0).fold(f32::MAX, f32::min).floor() as i32 - 1;
+        let y0 = corners.iter().map(|c| c.1).fold(f32::MAX, f32::min).floor() as i32 - 1;
+        let x1 = corners.iter().map(|c| c.0).fold(f32::MIN, f32::max).ceil() as i32 + 1;
+        let y1 = corners.iter().map(|c| c.1).fold(f32::MIN, f32::max).ceil() as i32 + 1;
+        let bounds = Rect::new(x0 as f32 / k, y0 as f32 / k, (x1 - x0) as f32 / k, (y1 - y0) as f32 / k);
+        let (cb0, cb1, cb2, cb3) = self.clip_bounds();
+        let (bx0, by0, bx1, by1) = (x0.max(cb0), y0.max(cb1), x1.min(cb2), y1.min(cb3));
+        if bx0 >= bx1 || by0 >= by1 || alpha <= 0.0 {
+            return bounds;
+        }
+        // Drawn into a picture of the reachable box first, then blended through the clips.
+        let Some(mut tmp) = Pixmap::new((bx1 - bx0) as u32, (by1 - by0) as u32) else { return bounds };
+        let paint = tiny_skia::PixmapPaint { opacity: alpha.min(1.0), blend_mode: tiny_skia::BlendMode::SourceOver, quality: tiny_skia::FilterQuality::Bilinear };
+        tmp.draw_pixmap(0, 0, s.pm.as_ref(), &paint, t.post_translate(-bx0 as f32, -by0 as f32), None);
+        let tw = tmp.width() as usize;
+        for i in 0..self.clip_count() {
+            let (cx0, cy0, cx1, cy1) = self.clip_at(i);
+            let (x0, x1) = (bx0.max(cx0), bx1.min(cx1));
+            let (y0, y1) = (by0.max(cy0), by1.min(cy1));
+            if x0 >= x1 || y0 >= y1 {
+                continue;
+            }
+            self.mark(x0, y0, x1, y1);
+            let pw = self.pixmap.width() as usize;
+            let src = tmp.pixels();
+            let data = self.pixmap.pixels_mut();
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let s = src[(y - by0) as usize * tw + (x - bx0) as usize];
+                    let sa = u32::from(s.alpha());
+                    if sa == 0 {
+                        continue;
+                    }
+                    let d = &mut data[y as usize * pw + x as usize];
+                    let inv = 255 - sa;
+                    let ch = |sv: u8, dv: u8| (u32::from(sv) + (u32::from(dv) * inv + 127) / 255).min(255) as u8;
+                    let a = ch(s.alpha(), d.alpha());
+                    *d = PremultipliedColorU8::from_rgba(ch(s.red(), d.red()).min(a), ch(s.green(), d.green()).min(a), ch(s.blue(), d.blue()).min(a), a)
+                        .unwrap_or(*d);
+                }
+            }
+        }
+        bounds
+    }
+}
+
+/// The pixels under a rect, kept by `Canvas::begin_layer` (device pixels).
+pub struct Layer {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    px: Vec<PremultipliedColorU8>,
+}
+
+impl Layer {
+    /// The layer's logical rect at scale `k`.
+    pub fn rect(&self, k: f32) -> Rect {
+        Rect::new(self.x as f32 / k, self.y as f32 / k, self.w as f32 / k, self.h as f32 / k)
+    }
+}
+
+/// A picture taken from the frame by `Canvas::take_layer`: premultiplied pixels, and where it was (logical).
+pub struct Sprite {
+    pub x: f32,
+    pub y: f32,
+    pm: Pixmap,
+}
+
+impl Sprite {
+    /// Logical size at scale `k`.
+    pub fn size(&self, k: f32) -> (f32, f32) {
+        (self.pm.width() as f32 / k, self.pm.height() as f32 / k)
+    }
 }
 
 /// Blend `c` (straight alpha) over a row of opaque pixels: `(c * a + d * (255 - a)) / 255` per channel, truncated.
@@ -1461,6 +1621,51 @@ fn poly_path(pts: &[(f32, f32)], close: bool) -> Option<tiny_skia::Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A layer at 0 shows what was there, at 1 what was painted, in between a mix; only the damage region changes.
+    #[test]
+    fn layers_fade_what_is_painted() {
+        let Ok(mut c) = Canvas::new(10, 4, 1.0) else { return };
+        let px = |c: &Canvas, x: usize| c.pixmap.data()[x * 4];
+        c.fill_rect(Rect::new(0.0, 0.0, 10.0, 4.0), Color::rgb(0x000000));
+        for (alpha, want) in [(0.0, 0), (1.0, 200), (0.5, 100)] {
+            c.fill_rect(Rect::new(0.0, 0.0, 10.0, 4.0), Color::rgb(0x000000));
+            let l = c.begin_layer(Rect::new(0.0, 0.0, 10.0, 4.0), false);
+            c.fill_rect(Rect::new(0.0, 0.0, 10.0, 4.0), Color::rgb(0xc80000));
+            c.end_layer(l, alpha);
+            assert_eq!(px(&c, 3), want, "alpha {alpha}");
+        }
+        // Only the region: a pixel outside it keeps the painted value (the layer can't reach it to fade it).
+        c.fill_rect(Rect::new(0.0, 0.0, 10.0, 4.0), Color::rgb(0x000000));
+        c.begin_region(&[Rect::new(0.0, 0.0, 5.0, 4.0)]);
+        let l = c.begin_layer(Rect::new(0.0, 0.0, 10.0, 4.0), false);
+        c.fill_rect(Rect::new(0.0, 0.0, 10.0, 4.0), Color::rgb(0xc80000));
+        c.end_layer(l, 0.5);
+        assert_eq!((px(&c, 2), px(&c, 7)), (100, 0));
+    }
+
+    /// A cleared layer becomes a picture of what was painted on it; the frame gets back what was under it; the
+    /// picture drawn turned half a turn about its centre lands mirrored, and drawn at an opacity mixes.
+    #[test]
+    fn sprites_are_taken_and_turned() {
+        let Ok(mut c) = Canvas::new(20, 10, 1.0) else { return };
+        let px = |c: &Canvas, x: usize, y: usize| -> [u8; 4] { c.pixmap.data()[(y * 20 + x) * 4..][..4].try_into().unwrap() };
+        c.fill_rect(Rect::new(0.0, 0.0, 20.0, 10.0), Color::rgb(0x102030));
+        let l = c.begin_layer(Rect::new(4.0, 2.0, 8.0, 4.0), true);
+        assert_eq!(px(&c, 5, 3), [0, 0, 0, 0], "cleared");
+        c.fill_rect(Rect::new(4.0, 2.0, 2.0, 4.0), Color::rgb(0xff0000));
+        let s = c.take_layer(l).expect("a picture");
+        assert_eq!((px(&c, 5, 3), s.size(1.0)), ([0x10, 0x20, 0x30, 255], (8.0, 4.0)), "back as it was");
+        // Half a turn about the picture's centre (8, 4): the red strip at x 4..6 lands at x 10..12.
+        let b = c.sprite(&s, 8.0, 4.0, std::f32::consts::PI, 1.0, 0.0, 0.0, 1.0);
+        assert!(b.x <= 4.0 && b.right() >= 12.0, "{b:?}");
+        assert_eq!(px(&c, 11, 3)[..3], [255, 0, 0]);
+        assert_eq!(px(&c, 5, 3)[..3], [0x10, 0x20, 0x30], "the transparent part leaves the frame alone");
+        // Moved 4 px left at half opacity: the strip lands at x 0..2, half over the background.
+        c.sprite(&s, 8.0, 4.0, 0.0, 1.0, -4.0, 0.0, 0.5);
+        let p = px(&c, 1, 3);
+        assert!((130..=140).contains(&p[0]) && p[3] == 255, "{p:?}");
+    }
 
     #[test]
     fn present_copy_is_xrgb() {

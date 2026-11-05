@@ -110,8 +110,9 @@ pub enum MCmd {
     Layout(u8),
     /// Options ▸ Cable physics: open / close the cables' debug panel (Lemon Studio's own).
     CablePhysics,
-    /// General settings ▸ Animations: simulate the cables (true) or hang them still; kept for the next start.
-    Animations(bool),
+    /// General settings ▸ Animations: the level every animation reads (`crate::anim`); the cables swing from Polished
+    /// up and hang still below. Kept for the next start.
+    Animations(crate::anim::Level),
     /// Open audio editor: Tesla on this track (Tesla's own, as FL's Edison).
     AudioEditor(u16),
     /// Open audio editor and record: a Tesla on this track set up as an audio logger.
@@ -2165,9 +2166,12 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             c.debug = !c.debug;
             None
         }
-        MCmd::Animations(on) => {
-            s.cables.get_mut().animate(on);
-            crate::app::save_animations(on);
+        MCmd::Animations(l) => {
+            crate::anim::set_level(l);
+            crate::anim::save(l);
+            s.cables.get_mut().animate(crate::anim::cables_swing(l));
+            // Everything restyles at once (menus' borders, what animates): the whole window repaints.
+            app.invalidate();
             None
         }
         MCmd::AddEffect(slot, index) => {
