@@ -6,8 +6,8 @@
 //! menus appearing and their highlight gliding, the drag tag swinging, hover helpers fading, clips flashing.
 //!
 //! Painting reads and moves them (the state keeps them in a `RefCell`, as it does the cables) and notes where it drew
-//! one that still moves (`Motion::live`); every tick repaints there (`App::motion_tick`) and the shell ticks at
-//! animation rate while there is any (`App::animating`). A paint of the main window starts the list afresh
+//! one that still moves (`Motion::live`), and in which window; every tick repaints there (`App::motion_tick`) and the
+//! shell ticks at animation rate while there is any (`App::animating`). A paint of a window starts its list afresh
 //! (`Motion::begin_frame`), so a motion that has ended stops asking for frames by itself.
 // spec: ui/animations.md
 
@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use os_ui::{Canvas, Layer, Rect};
 
 use crate::anim::{self, Level, Pendulum, Spring, Tween};
+use crate::app::Win;
 
 /// The menus that can be open at once: a popup menu, its submenu, and a menu bar dropdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,8 +49,11 @@ pub const TAG_MAX_W: f32 = 220.0;
 
 #[derive(Default)]
 pub struct Motion {
-    /// Where motions that still move were drawn by this frame (logical px of the main window).
-    live: Vec<Rect>,
+    /// The window being painted: None for the main one, or a detached one.
+    win: Option<Win>,
+    /// Where motions that still move were drawn by the last paint of each window (logical px of that window), and
+    /// when.
+    live: Vec<Live>,
     menus: [Option<Opened>; 3],
     glides: [Option<Glide>; 3],
     tag: Option<Tag>,
@@ -75,6 +79,14 @@ struct Tag {
     pend: Pendulum,
     level: Level,
     last: Instant,
+}
+
+/// Something drawn in `r` of window `win` (None: the main one) at `at` still moves.
+#[derive(Debug, Clone, Copy)]
+pub struct Live {
+    pub win: Option<Win>,
+    pub r: Rect,
+    at: Instant,
 }
 
 /// A hover helper's opacity, 0 to 1, and which way it goes.
@@ -118,10 +130,11 @@ fn since(now: Instant, then: Instant) -> f64 {
 }
 
 impl Motion {
-    /// The main window paints: what moves is noted again as it is drawn. Hover fades no paint has asked about for a
-    /// second are forgotten (their clip scrolled away).
-    pub fn begin_frame(&mut self) {
-        self.live.clear();
+    /// Window `win` (None: the main one) paints: what moves there is noted again as it is drawn. Hover fades no paint
+    /// has asked about for a second are forgotten (their clip scrolled away).
+    pub fn begin_frame(&mut self, win: Option<Win>) {
+        self.win = win;
+        self.live.retain(|l| l.win != win);
         let now = anim::now();
         self.hovers.retain(|h| since(now, h.last) < 1.0);
         if self.flash.as_ref().is_some_and(|f| since(now, f.at) > FLASH.as_secs_f64()) {
@@ -129,15 +142,18 @@ impl Motion {
         }
     }
 
-    /// Something drawn in `r` still moves: the next frame paints it again.
+    /// Something drawn in `r` (of the window being painted) still moves: the next frame paints it again.
     pub fn live(&mut self, r: Rect) {
         if r.w > 0.0 && r.h > 0.0 {
-            self.live.push(r);
+            self.live.push(Live { win: self.win, r, at: anim::now() });
         }
     }
 
-    /// Where to paint again on this tick.
-    pub fn damage(&self) -> &[Rect] {
+    /// Where to paint again on this tick. A window that has not painted what it noted for a second (closed, hidden)
+    /// is no longer asked to.
+    pub fn damage(&mut self) -> &[Live] {
+        let now = anim::now();
+        self.live.retain(|l| since(now, l.at) < 1.0);
         &self.live
     }
 
@@ -372,12 +388,12 @@ mod tests {
         Motion::menu_end(&mut c, d);
         assert!(m.moving());
         anim::advance(60);
-        m.begin_frame();
+        m.begin_frame(None);
         let d = m.menu_begin(&mut c, Slot::Popup, 1, r, (20.0, 20.0), 1.0);
         assert!(d.alpha > 0.8 && d.alpha < 1.0 && d.dy < 0.0 && d.dy > -1.0, "eased: most of the way at half time ({}, {})", d.alpha, d.dy);
         Motion::menu_end(&mut c, d);
         anim::advance(61);
-        m.begin_frame();
+        m.begin_frame(None);
         let d = m.menu_begin(&mut c, Slot::Popup, 1, r, (20.0, 20.0), 1.0);
         assert!(d.layer.is_none() && !m.moving(), "open after 120 ms");
         // Another menu (other entries, or opened elsewhere) appears afresh; Subtle only fades, quicker.
@@ -386,7 +402,7 @@ mod tests {
         assert!(d.layer.is_some() && d.dy == 0.0 && d.zoom == 1.0);
         Motion::menu_end(&mut c, d);
         anim::advance(75);
-        m.begin_frame();
+        m.begin_frame(None);
         assert!(m.menu_begin(&mut c, Slot::Popup, 2, r, (20.0, 20.0), 1.0).layer.is_none(), "70 ms at Subtle");
         // A submenu opening to the right of its row comes out of it from the left.
         anim::set_level(Level::Polished);
@@ -412,7 +428,7 @@ mod tests {
         let mut ys = vec![];
         for _ in 0..10 {
             anim::advance(16);
-            m.begin_frame();
+            m.begin_frame(None);
             ys.push(m.glide(Slot::Popup, 1, Some(b), area).unwrap().y);
         }
         assert!(ys[0] > 10.0 && ys[0] < 70.0 && ys.windows(2).all(|w| w[1] >= w[0]) && ys.iter().all(|&y| y <= 70.0), "no overshoot: {ys:?}");
@@ -437,7 +453,7 @@ mod tests {
         assert!(half > 0.5 && half < 1.0, "{half}");
         anim::advance(70);
         assert_eq!(m.hover(7, true, area), 1.0);
-        m.begin_frame();
+        m.begin_frame(None);
         assert_eq!(m.hover(7, true, area), 1.0);
         assert!(!m.moving(), "still once in");
         anim::advance(100);
@@ -470,7 +486,7 @@ mod tests {
         let late = m.flash_of(5, area);
         assert!(late > 0.0 && late < FLASH_PEAK);
         anim::advance(101);
-        m.begin_frame();
+        m.begin_frame(None);
         assert_eq!(m.flash_of(5, area), 0.0);
         assert!(!m.moving());
         anim::set_level(Level::Off);

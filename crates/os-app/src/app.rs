@@ -4135,17 +4135,18 @@ impl App {
             m.menu_closed(crate::motion::Slot::Dropdown);
         }
         let tag = m.tag_tick(drag);
-        let rects = m.damage().to_vec();
-        let any = !rects.is_empty() || tag.is_some();
-        for r in rects.into_iter().chain(tag) {
-            self.damage_rect(r);
+        let live = m.damage().to_vec();
+        for l in live {
+            match l.win {
+                None => self.damage_rect(l.r),
+                w => self.mark_detached(w),
+            }
         }
-        // Menus and the drag tag in a detached window move there.
-        if any {
-            for w in [self.state.overlay_on, self.state.drag_on].into_iter().flatten() {
-                if self.state.is_detached(w) {
-                    self.mark_detached(Some(w));
-                }
+        if let Some(r) = tag {
+            match self.state.drag_on.filter(|&w| self.state.is_detached(w)) {
+                // The drag tag over a detached window swings there.
+                Some(w) => self.mark_detached(Some(w)),
+                None => self.damage_rect(r),
             }
         }
     }
@@ -4511,6 +4512,7 @@ impl App {
             }
         }
         let info = self.frame_info();
+        self.state.motion.get_mut().begin_frame(Some(w));
         self.on_surface(w, |app| {
             canvas.begin_frame(None);
             app.hits.clear();
@@ -4562,7 +4564,7 @@ impl App {
         }
         self.state.screen = canvas.size();
         self.state.ui_scale = canvas.scale;
-        self.state.motion.get_mut().begin_frame();
+        self.state.motion.get_mut().begin_frame(None);
         // The main window or the workspace shrank: the windows keep their part in it (`win_clamp::keep_all`). Moved
         // during a partial paint, the next frame is painted whole.
         if crate::win_clamp::keep_all(&mut self.state) && damage.is_some() {
@@ -18530,6 +18532,55 @@ mod tests {
         assert_eq!(names, vec!["Verse".to_string(), "Arrangement 2".to_string()], "removed and added in an existing file");
         assert!(back.arrangements[0].clips.iter().any(|c| c.position == bar), "the kept arrangement keeps its clips");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// An audio clip's handles fade in over 120 ms as the mouse comes over the clip and out over 200 ms as it leaves
+    /// (spec: ui/animations.md §4.6); each frame repaints as a whole frame would.
+    #[test]
+    fn clip_handles_fade_in_and_out() {
+        use crate::playlist as pl;
+        let (Ok(mut c), Ok(mut whole)) = (Canvas::new(1920, 1080, 1.0), Canvas::new(1920, 1080, 1.0)) else { return };
+        let (mut app, _, _, _) = ruler_app(&mut c);
+        app.state.playlist_bar_w = 400.0;
+        let wav = std::env::temp_dir().join(format!("os-app-handle-fades-{}.wav", std::process::id()));
+        os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &[0.5; 96000]).unwrap();
+        pl::add_audio_clip(&mut app.state, &wav.to_string_lossy(), 0, 0).expect("audio clip added");
+        let ci = pl::clips(&app.state).len() - 1;
+        frame(&mut app, &mut c, None);
+        let g = pl::PGeom::new(&app.state, app.pl_grid().unwrap());
+        let body = g.body(&pl::clips(&app.state)[ci]);
+        // How bright the gain handle's spot is.
+        let spot = |c: &Canvas| c.pixmap.pixel(body.cx() as u32, (body.bottom() - 1.5) as u32).map_or(0, |p| u32::from(p.red()) + u32::from(p.green()) + u32::from(p.blue()));
+        let off = spot(&c);
+        crate::anim::set_clock(true);
+        let mut fade = |app: &mut App, c: &mut Canvas, (x, y): (f32, f32), what: &str| {
+            app.mouse_move(x, y);
+            let d = app.take_damage();
+            frame_damage(app, c, d);
+            let mut seen = vec![spot(c)];
+            while app.animating() {
+                crate::anim::advance(16);
+                app.tick();
+                let d = app.take_damage();
+                frame_damage(app, c, d);
+                frame(app, &mut whole, None);
+                assert_same(c, &whole, what);
+                seen.push(spot(c));
+                assert!(seen.len() < 40, "{what} ends");
+            }
+            seen
+        };
+        let seen = fade(&mut app, &mut c, (body.cx() + 40.0, body.cy()), "a frame of the fade-in");
+        let on = *seen.last().unwrap();
+        assert!(on > off + 100, "the handle shows: {seen:?}");
+        assert!((7..=10).contains(&seen.len()), "about 120 ms: {seen:?}");
+        assert!(seen.windows(2).all(|w| w[1] >= w[0]) && seen[3] > off && seen[3] < on, "it fades in: {seen:?}");
+        let seen = fade(&mut app, &mut c, (body.cx() + 40.0, body.bottom() + 60.0), "a frame of the fade-out");
+        assert!((12..=15).contains(&seen.len()), "about 200 ms: {seen:?}");
+        assert!(seen.windows(2).all(|w| w[1] <= w[0]) && seen[5] < on && seen[5] > off, "it fades out: {seen:?}");
+        assert_eq!(*seen.last().unwrap(), off);
+        crate::anim::set_clock(false);
+        let _ = std::fs::remove_file(&wav);
     }
 
     /// Audio clip handles (spec: ui/playlist.md §9a): dragging the fade triangles sets the fades, the tension ring

@@ -1162,11 +1162,25 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
         curve(ui, edges.x, f64::from(xf.x1), xf.t_in, false);
         curve(ui, edges.x, f64::from(xf.x1), xf.t_out, true);
     }
-    // Handles only while the mouse is over the clip (as FL): white, brighter on the one under the mouse.
-    if !hovered {
+    // Handles only while the mouse is over the clip (as FL): white, brighter on the one under the mouse. They fade in
+    // and out (spec: ui/animations.md §4.6).
+    let area = body.outset(8.0);
+    let shown = s.motion.borrow_mut().hover(crate::motion::key(("clip handles", i)), hovered, area);
+    if shown <= 0.0 {
         return;
     }
+    let fading = (shown < 1.0).then(|| ui.c.begin_layer(area, false));
+    handles(ui, s, g, c, body, xf, &lit, white);
+    if let Some(l) = fading {
+        ui.c.end_layer(l, shown);
+    }
     let _ = wave;
+}
+
+/// An audio clip's handles (`fades`): `lit` says which is under the mouse.
+#[allow(clippy::too_many_arguments)]
+fn handles(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, body: Rect, xf: Option<pl::Xfade>, lit: &dyn Fn(pl::Handle) -> bool, white: Color) {
+    let (fx_in, fx_out) = pl::fade_xs(s, g, c);
     let col = |h: pl::Handle| if lit(h) { white } else { white.with_alpha(215) };
     let k = 6.0;
     ui.c.fill_polygon(&[(fx_in, body.y), (fx_in + k, body.y), (fx_in, body.y + k)], col(pl::Handle::FadeIn));
@@ -1179,32 +1193,30 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
         (gx - r * a.cos(), gy - r * a.sin())
     }).collect();
     ui.c.fill_polygon(&half, col(pl::Handle::Gain));
-    if hovered {
-        // The crossfade's handle: a big filled circle at the later clip's gain in the middle, a small ring at the
-        // earlier clip's (§9a); where they meet the ring shows inside the circle.
-        if let Some(xf) = xf.filter(|xf| xf.x1 - xf.x0 > 10.0) {
-            let (hx, hy, ry) = pl::xfade_handle(g, c, &xf);
-            let on = lit(pl::Handle::Crossfade);
-            ui.c.fill_circle(hx, hy, if on { pl::XFADE_R + 1.0 } else { pl::XFADE_R }, col(pl::Handle::Crossfade));
-            ui.c.fill_circle(hx, ry, 2.5, ui.t.s(0x1c2328).with_alpha(200));
-            ui.c.stroke_circle(hx, ry, 2.5, 1.1, white);
+    // The crossfade's handle: a big filled circle at the later clip's gain in the middle, a small ring at the earlier
+    // clip's (§9a); where they meet the ring shows inside the circle.
+    if let Some(xf) = xf.filter(|xf| xf.x1 - xf.x0 > 10.0) {
+        let (hx, hy, ry) = pl::xfade_handle(g, c, &xf);
+        let on = lit(pl::Handle::Crossfade);
+        ui.c.fill_circle(hx, hy, if on { pl::XFADE_R + 1.0 } else { pl::XFADE_R }, col(pl::Handle::Crossfade));
+        ui.c.fill_circle(hx, ry, 2.5, ui.t.s(0x1c2328).with_alpha(200));
+        ui.c.stroke_circle(hx, ry, 2.5, 1.1, white);
+    }
+    for (h, on, xa, xb, out) in [
+        (pl::Handle::TensionIn, c.stored_fade_in().filter(|_| !pl::managed(s, c, false)), body.x, fx_in, false),
+        (pl::Handle::TensionOut, c.stored_fade_out().filter(|_| !pl::managed(s, c, true)), fx_out, body.right(), true),
+    ] {
+        let Some((_, t)) = on else { continue };
+        if xb - xa <= 10.0 {
+            continue;
         }
-        for (h, on, xa, xb, out) in [
-            (pl::Handle::TensionIn, c.stored_fade_in().filter(|_| !pl::managed(s, c, false)), body.x, fx_in, false),
-            (pl::Handle::TensionOut, c.stored_fade_out().filter(|_| !pl::managed(s, c, true)), fx_out, body.right(), true),
-        ] {
-            let Some((_, t)) = on else { continue };
-            if xb - xa <= 10.0 {
-                continue;
-            }
-            let (mx, my) = pl::fade_mid(body, xa, xb, t, out);
-            if lit(h) {
-                ui.c.fill_circle(mx, my, 5.5, white);
-            } else {
-                ui.c.fill_circle(mx, my, 4.0, ui.t.s(0x1c2328).with_alpha(200));
-                ui.c.stroke_circle(mx, my, 4.0, 1.3, white);
-                ui.c.line(mx - 2.2, my + 2.2, mx + 2.2, my - 2.2, 1.1, white);
-            }
+        let (mx, my) = pl::fade_mid(body, xa, xb, t, out);
+        if lit(h) {
+            ui.c.fill_circle(mx, my, 5.5, white);
+        } else {
+            ui.c.fill_circle(mx, my, 4.0, ui.t.s(0x1c2328).with_alpha(200));
+            ui.c.stroke_circle(mx, my, 4.0, 1.3, white);
+            ui.c.line(mx - 2.2, my + 2.2, mx + 2.2, my - 2.2, 1.1, white);
         }
     }
 }
