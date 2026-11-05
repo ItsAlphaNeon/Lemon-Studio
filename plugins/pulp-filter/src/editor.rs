@@ -857,24 +857,53 @@ impl Logic {
         vec![Act::Repaint]
     }
 
+    /// The text a type-in box opens on: the value's text, a point's level as its hint shows it.
     pub fn value_text(&self, t: &TypeTarget) -> String {
         match *t {
             TypeTarget::Param(k) => ctl::text(&self.st, k, ctl::shown(&self.st, k)),
-            TypeTarget::Point(i) => self.curve().and_then(|c| c.points.get(i)).map(|p| format!("{}", p.level)).unwrap_or_default(),
+            TypeTarget::Point(i) => self.curve().and_then(|c| c.points.get(i)).map(|p| self.level_text(p.level)).unwrap_or_default(),
         }
     }
 
-    /// Applies a typed value; text that does not read leaves it as it was. A point's level is typed 0 .. 1.
+    /// A typed level in its target's form (the inverse of `level_text`): a number in percent, a pan's "left" below
+    /// the centre or "center", an additive target's or a bipolar shaper's signed around the middle.
+    fn parse_level(&self, s: &str) -> Option<f32> {
+        let s = s.trim().to_ascii_lowercase();
+        let shown = view::shown(&self.view);
+        if matches!(shown, Shown::Part(T_PAN, _)) && s.starts_with("cent") {
+            return Some(0.5);
+        }
+        let num: String = s.chars().take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
+        let x = num.parse::<f32>().ok().filter(|x| x.is_finite())? / 100.0;
+        let l = match shown {
+            Shown::Part(T_PAN, _) => {
+                let x = if s.ends_with("left") || s.ends_with('l') { -x.abs() } else { x };
+                0.5 + x / 2.0
+            }
+            Shown::Part(t, _) if additive(t) => (x + 1.0) / 2.0,
+            Shown::Ws if self.st.filters[self.f()].ws_bipolar != 0 => (x + 1.0) / 2.0,
+            _ => x,
+        };
+        Some(l.clamp(0.0, 1.0))
+    }
+
+    /// Applies a typed value; text that does not read leaves it as it was, and so does the text the box opened on. A
+    /// point's level is typed as its hint shows it.
     pub fn typed(&mut self, t: &TypeTarget, text: &str) {
+        if text.trim() == self.value_text(t) {
+            return;
+        }
         match *t {
             TypeTarget::Param(k) => {
-                if let Some(v) = ctl::parse(&self.st, k, text) {
+                if let Some(v) = ctl::parse(&self.st, k, text, ctl::shown(&self.st, k)) {
                     self.set(k, v);
                 }
             }
             TypeTarget::Point(i) => {
                 let n = self.curve().map_or(0, |c| c.points.len());
-                if let Some(l) = text.trim().parse::<f32>().ok().filter(|l| l.is_finite() && i < n) {
+                // A level that shows as the point's own leaves the point where it is.
+                let cur = self.value_text(t);
+                if let Some(l) = self.parse_level(text).filter(|&l| i < n && self.level_text(l) != cur) {
                     self.edit_curve(|c| {
                         let t = edit::times(c)[i];
                         edit::move_point(c, i, t, l, false);
@@ -1522,6 +1551,103 @@ mod tests {
         l.params.set_state(st.to_bytes());
         assert!(l.poll());
         assert_eq!(l.st.globals[MASTER], 64);
+    }
+
+    /// A point's type-in box opens on the level its hint shows; that text leaves the point as it is, and a level typed
+    /// in that form moves it; a value's own text leaves its value as it is.
+    #[test]
+    fn levels_type_as_their_hints_show_them() {
+        let mut l = logic();
+        l.view.target = 2;
+        paint(&mut l);
+        let (x, y) = centre(&l, &Target::CurveArea);
+        l.down(x, y - 20.0, Btn::Right, Mods::default(), false);
+        let t = TypeTarget::Point(1);
+        let shown = l.value_text(&t);
+        assert!(shown.ends_with('%') && l.point_hint(1).ends_with(&format!("\t{shown}")), "{shown}");
+        let levels = |l: &Logic| saved(l).filters[0].arts[T_CUT].patterns[0].points.iter().map(|p| p.level).collect::<Vec<_>>();
+        let before = levels(&l);
+        l.typed(&t, &shown);
+        assert_eq!(levels(&l), before);
+        l.typed(&t, "75%");
+        assert_eq!(l.value_text(&t), "75%");
+        let k = control_index(0, C_CUT).unwrap();
+        l.typed(&TypeTarget::Param(k), "100%");
+        assert_eq!(saved(&l).filters[0].controls[C_CUT], 256);
+        l.typed(&TypeTarget::Param(k), "100%");
+        assert_eq!(saved(&l).filters[0].controls[C_CUT], 256);
+    }
+
+    /// The editor's pixels at 1x and a reader for them.
+    fn pixels(l: &mut Logic) -> impl Fn(f32, f32) -> u32 + use<> {
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+        l.paint(&mut c);
+        let mut px = vec![0u32; (view::W * view::H) as usize];
+        c.copy_to_xrgb(&mut px);
+        move |x, y| px[y as usize * view::W as usize + x as usize] & 0xff_ffff
+    }
+
+    fn far(a: u32, b: u32, by: u32) -> bool {
+        (0..3).any(|i| ((a >> (8 * i)) & 0xff).abs_diff((b >> (8 * i)) & 0xff) > by)
+    }
+
+    /// The pattern's number reads over the curve; the loop end is tagged "S" as FL tags it (plugins/image-line-curves.md:
+    /// the sustain point); "16x" has its letters apart, clear of the box's arrow; a long description line is elided.
+    #[test]
+    fn curve_labels_and_boxes_read() {
+        let mut l = logic();
+        l.view.target = 2;
+        let c = &mut l.st.filters[0].arts[T_CUT].patterns[0];
+        c.enabled = true;
+        c.points[0].level = 0.955;
+        let mut p = c.points[0].clone();
+        p.dist = 1.0;
+        c.points.push(p);
+        c.sustain = 1;
+        c.prepare();
+        l.st.set_switch_int(SW_OVERSAMPLING, 4);
+        let px = pixels(&mut l);
+        let r = view::CURVE;
+        let accent = {
+            let a = view::ACCENT;
+            u32::from(a.r) << 16 | u32::from(a.g) << 8 | u32::from(a.b)
+        };
+        let y = view::level_to_y(r, 0.955);
+        assert!((r.y + 7.0..r.y + 15.0).contains(&y), "{y}");
+        for x in r.x as i32 + 13..r.x as i32 + 19 {
+            for y in r.y as i32 + 5..r.y as i32 + 15 {
+                assert!(far(px(x as f32, y as f32), accent, 60), "the curve over the pattern's number at {x},{y}");
+            }
+        }
+        // The tag as drawn against "S" and "E" drawn alone in its place.
+        let ts = edit::times(&l.st.filters[0].arts[T_CUT].patterns[0]);
+        let span = view::curve_span(&l.st.filters[0].arts[T_CUT].patterns[0]);
+        let x = view::t_to_x(r, ts[1], span).round();
+        let tag_r = os_ui::Rect::new(x - 5.0, r.bottom() - 14.0, 11.0, 11.0);
+        let alone = |s: &str| {
+            let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+            c.fill_rrect(tag_r, 3.0, os_ui::kit::lemon::plug::FACE);
+            c.text_center(os_ui::Font::new(9).bold(), tag_r, os_theme::design::lemon::TEXT, s);
+            let mut px = vec![0u32; (view::W * view::H) as usize];
+            c.copy_to_xrgb(&mut px);
+            move |x: f32, y: f32| px[y as usize * view::W as usize + x as usize] & 0xff_ffff
+        };
+        let same = |b: &dyn Fn(f32, f32) -> u32| {
+            (tag_r.x as i32 + 2..tag_r.right() as i32 - 2).all(|x| (tag_r.y as i32 + 2..tag_r.bottom() as i32 - 2).all(|y| px(x as f32, y as f32) == b(x as f32, y as f32)))
+        };
+        assert!(same(&alone("S")) && !same(&alone("E")));
+        // "16x": three letters and the arrow apart.
+        let o = view::OVERSAMPLING;
+        let bg = px(o.x + 2.0, o.cy().floor());
+        let cols: Vec<i32> = (o.x as i32 + 2..o.right() as i32 - 2).filter(|&x| (o.cy() as i32 - 3..o.cy() as i32 + 3).any(|y| far(px(x as f32, y as f32), bg, 48))).collect();
+        assert!(cols.windows(2).filter(|w| w[1] - w[0] > 1).count() >= 3, "{cols:?}");
+        // The description.
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+        let f = os_ui::Font::new(10);
+        let long = "A description line far longer than the box it is shown in";
+        let e = view::elide(&mut c, f, long, 120.0);
+        assert!(e.ends_with('…') && c.text_width(f, &e) <= 120.0 && long.starts_with(e.trim_end_matches('…')), "{e}");
+        assert_eq!(view::elide(&mut c, f, "Short", 120.0), "Short");
     }
 
     /// `PULP_PNG=<dir> cargo test -p pulp-filter -- --ignored render_editor`: the editor as PNGs.
