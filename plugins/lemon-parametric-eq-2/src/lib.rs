@@ -26,12 +26,14 @@ use params::EqParams;
 /// Samples kept for the analyzer.
 pub const SCOPE_LEN: usize = 1 << 15;
 
-/// What the audio thread hands the editor: the monitored signal for the analyzer.
+/// What the audio thread hands the editor: the monitored signal for the analyzer; and the instance's unsaved editor state.
 pub struct Shared {
     pub scope: Mutex<Scope>,
     pub rate: AtomicU32,
     /// Set while an editor is open (the audio thread feeds the analyzer only then).
     pub editor_open: AtomicBool,
+    /// "Lock B" (Options menu): this instance's, not saved; it lasts while the instance lives.
+    pub lock_spare: AtomicBool,
 }
 
 pub struct Scope {
@@ -47,6 +49,7 @@ impl Default for Shared {
             scope: Mutex::new(Scope { buf: vec![0.0; SCOPE_LEN], pos: 0, written: 0 }),
             rate: AtomicU32::new(44100),
             editor_open: AtomicBool::new(false),
+            lock_spare: AtomicBool::new(false),
         }
     }
 }

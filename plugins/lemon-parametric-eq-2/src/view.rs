@@ -126,6 +126,13 @@ pub fn token_pos(s: &Settings, k: usize) -> (f32, f32) {
     (x_of(b.freq), y_of(db))
 }
 
+/// The chip of the readout under a token at (x, y) (spec §2), over the token where the plot ends below; kept inside
+/// the plot, clear of the dB scale and the main fader.
+fn readout_chip(x: f32, y: f32) -> Rect {
+    let ry = if y + 13.0 + 26.0 <= PLOT.bottom() { y + 13.0 } else { y - 13.0 - 26.0 };
+    Rect::new(x.clamp(PLOT.x + 26.0, PLOT.right() - 26.0) - 26.0, ry + 1.0, 52.0, 25.0)
+}
+
 /// Hover / pressed look of a control.
 fn st(vs: &ViewState, r: Rect, t: Target) -> State {
     let hover = vs.pressed.is_none() && vs.mouse.is_some_and(|(x, y)| r.contains(x, y));
@@ -290,12 +297,13 @@ pub fn paint(c: &mut Canvas, look: &Look, vs: &ViewState) -> Vec<Hit> {
             hits.push(Hit { r: Rect::new(x - 10.0, y - 10.0, 20.0, 20.0), t: Target::Token(k) });
             if big {
                 let f = Font::new(11);
-                let ry = (y + 13.0).min(PLOT.bottom() - 26.0);
                 // The readout on a dark chip.
-                c.fill_rrect(Rect::new(x - 26.0, ry + 1.0, 52.0, 25.0), 5.0, Color::rgb(0x141414).with_alpha(210));
+                let chip = readout_chip(x, y);
+                c.fill_rrect(chip, 5.0, Color::rgb(0x141414).with_alpha(210));
                 let col = band_color(k);
-                c.text_center(f.bold(), Rect::new(x - 30.0, ry, 60.0, 13.0), col, &params::hz_text(b.hz()));
-                c.text_center(f, Rect::new(x - 30.0, ry + 12.0, 60.0, 13.0), col, &format!("{:.0}%", b.width * 100.0));
+                let (rx, ry) = (chip.cx(), chip.y - 1.0);
+                c.text_center(f.bold(), Rect::new(rx - 30.0, ry, 60.0, 13.0), col, &params::hz_text(b.hz()));
+                c.text_center(f, Rect::new(rx - 30.0, ry + 12.0, 60.0, 13.0), col, &format!("{:.0}%", b.width * 100.0));
             }
         }
     }
@@ -312,11 +320,11 @@ pub fn paint(c: &mut Canvas, look: &Look, vs: &ViewState) -> Vec<Hit> {
         let b = &s.bands[k];
         let x = band_x(k);
         let col = band_color(k);
-        let track = Rect::new(x, 18.0, 13.0, TRACK_BOTTOM - 18.0 + 1.0);
+        // The slot starts under the type tab; it lights only when the slot itself is hovered.
+        let track = Rect::new(x, TRACK_TOP + 2.0, 13.0, TRACK_BOTTOM - TRACK_TOP - 1.0);
         let fst = st(vs, track, Target::Fader(k));
-        // The slot starts under the type tab.
-        keq::slot(c, Rect::new(x, 27.0, 13.0, TRACK_BOTTOM - 27.0 + 1.0), fst);
-        let tab = Rect::new(x, 4.0, 13.0, 22.0);
+        keq::slot(c, track, fst);
+        let tab = Rect::new(x, 4.0, 13.0, TRACK_TOP + 2.0 - 4.0);
         let tab_st = st(vs, tab, Target::TypeTab(k));
         let tab_col = if tab_st.hover || tab_st.pressed { col.shade(0.15) } else { col };
         c.fill_rrect(Rect::new(x, 4.0, 13.0, 21.0), 4.0, tab_col);
@@ -324,10 +332,11 @@ pub fn paint(c: &mut Canvas, look: &Look, vs: &ViewState) -> Vec<Hit> {
         type_icon(c, b.kind, x + 6.5, 10.5, ink);
         order_mark(c, b.order, x + 6.5, 17.5, ink, b.kind);
         hits.push(Hit { r: Rect::new(x, 4.0, 13.0, 12.0), t: Target::TypeTab(k) });
-        hits.push(Hit { r: Rect::new(x, 16.0, 13.0, 5.0), t: Target::OrderMark(k) });
+        // The order mark takes the tab below the type icon, down to the slot (spec §3: the tab is y 4..26).
+        hits.push(Hit { r: Rect::new(x, 16.0, 13.0, TRACK_TOP + 2.0 - 16.0), t: Target::OrderMark(k) });
         if has_level(b.kind) {
             keq::handle(c, track.cx(), y_of(b.db), col, fst);
-            hits.push(Hit { r: Rect::new(x, TRACK_TOP + 2.0, 13.0, TRACK_BOTTOM - TRACK_TOP - 1.0), t: Target::Fader(k) });
+            hits.push(Hit { r: track, t: Target::Fader(k) });
         }
         // Mute / solo switch.
         let sw = Rect::new(x, 294.0, 13.0, 5.0);
@@ -345,8 +354,9 @@ pub fn paint(c: &mut Canvas, look: &Look, vs: &ViewState) -> Vec<Hit> {
     }
     let cap = Font::condensed(12, 0).bold();
     let cap_col = Color::rgb(0x7a7a7a);
-    c.text_right(cap, 545.0, FREQ_Y - 8.0, cap_col, "FREQ");
-    c.text_right(cap, 545.0, BW_Y - 8.0, cap_col, "BW");
+    // Right-aligned at x ~545 (spec §3), 2 px clear of band 1's knobs (their arcs reach x 546).
+    c.text_right(cap, 543.0, FREQ_Y - 8.0, cap_col, "FREQ");
+    c.text_right(cap, 543.0, BW_Y - 8.0, cap_col, "BW");
     let ph = Rect::new(524.0, 289.0, 16.0, 14.0);
     let pst = st(vs, ph, Target::Phones);
     let on = flag(look.extra, params::F_SOLO_SHIFT);
@@ -457,16 +467,25 @@ fn order_mark(c: &mut Canvas, order: i32, cx: f32, cy: f32, col: Color, kind: i3
         c.fill_rect(Rect::new(cx - 1.0, cy - 1.0, 2.0, 2.0), col);
         return;
     }
-    let dots: &[(f32, f32)] = match order.abs() {
-        1 => &[(-1.6, 0.0), (1.6, 0.0)],
-        2 => &[(-3.0, 0.0), (0.0, 0.0), (3.0, 0.0)],
-        3 => &[(-1.6, -1.4), (1.6, -1.4), (-1.6, 1.4), (1.6, 1.4)],
+    let steep = order < 0;
+    let dots: &[(f32, f32)] = match (order.abs(), steep) {
+        // Hollow dots are 3 px rings, 4 px apart; the 2 x 2 sits a pixel lower, clear of the type icon.
+        (1, true) => &[(-2.0, 0.0), (2.0, 0.0)],
+        (2, true) => &[(-4.0, 0.0), (0.0, 0.0), (4.0, 0.0)],
+        (3, true) => &[(-2.0, -1.0), (2.0, -1.0), (-2.0, 3.0), (2.0, 3.0)],
+        (1, _) => &[(-1.6, 0.0), (1.6, 0.0)],
+        (2, _) => &[(-3.0, 0.0), (0.0, 0.0), (3.0, 0.0)],
+        (3, _) => &[(-1.6, -1.4), (1.6, -1.4), (-1.6, 1.4), (1.6, 1.4)],
         _ => &[(0.0, 0.0)],
     };
     for &(dx, dy) in dots {
         let (x, y) = (cx + dx, cy + dy);
-        if order < 0 {
-            c.stroke_rrect(Rect::new(x - 1.0, y - 1.0, 2.0, 2.0), 0.5, 0.8, col);
+        if steep {
+            // A ring on whole pixels around a 1 px hole (a smaller outline fills in).
+            let (l, t) = ((x - 1.5).round(), (y - 1.5).round());
+            for r in [Rect::new(l, t, 3.0, 1.0), Rect::new(l, t + 2.0, 3.0, 1.0), Rect::new(l, t + 1.0, 1.0, 1.0), Rect::new(l + 2.0, t + 1.0, 1.0, 1.0)] {
+                c.fill_rect(r, col);
+            }
         } else {
             c.fill_rect(Rect::new(x - 1.0, y - 1.0, 2.0, 2.0), col);
         }
@@ -494,5 +513,33 @@ mod tests {
         assert!((x_of(eq::freq_pos(200.0)) - x_of(eq::freq_pos(20.0)) - 166.3).abs() < 0.5);
         // C1 box starts near x 42.
         assert!((x_of(eq::freq_pos(c_hz(1))) - 42.5).abs() < 1.0);
+    }
+
+    /// The token readout stays in the plot and off its (grown) token, in the corners too.
+    #[test]
+    fn the_token_readout_stays_inside_the_plot() {
+        for (x, y) in [(7.0, 33.0), (506.0, 33.0), (7.0, 279.0), (506.0, 279.0), (256.0, 156.0), (300.0, 250.0)] {
+            let r = readout_chip(x, y);
+            assert!(r.x >= PLOT.x && r.right() <= PLOT.right() && r.y >= PLOT.y && r.bottom() <= PLOT.bottom(), "({x}, {y}): {r:?}");
+            assert!(r.bottom() <= y - 12.0 || r.y >= y + 12.0, "({x}, {y}): {r:?}");
+        }
+    }
+
+    /// Steep order marks are hollow, Gentle ones filled (spec §3): count the enclosed holes.
+    #[test]
+    fn steep_order_marks_are_hollow() {
+        for (order, holes) in [(-3, 4), (-2, 3), (-1, 2), (0, 0), (1, 0), (2, 0), (3, 0)] {
+            let (w, h) = (13usize, 30usize);
+            let mut c = Canvas::new(w as u32, h as u32, 1.0).unwrap();
+            c.begin_frame(None);
+            c.fill_rect(Rect::new(0.0, 0.0, w as f32, h as f32), Color::rgb(0xffffff));
+            order_mark(&mut c, order, 6.5, 17.5, Color::rgb(0x000000), eq::LOW_PASS);
+            let mut px = vec![0u32; w * h];
+            c.copy_to_xrgb(&mut px);
+            let ink = |x: usize, y: usize| px[y * w + x] & 0xff < 0x80;
+            let found = (1..h - 1).flat_map(|y| (1..w - 1).map(move |x| (x, y)));
+            let n = found.filter(|&(x, y)| !ink(x, y) && ink(x - 1, y) && ink(x + 1, y) && ink(x, y - 1) && ink(x, y + 1)).count();
+            assert_eq!(n, holes, "order {order}");
+        }
     }
 }

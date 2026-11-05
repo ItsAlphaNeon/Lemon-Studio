@@ -203,6 +203,9 @@ Left out of the alpha on 2026-11-02; each stays open here until it is done.
   described), and Edit automation in piano roll on the swing knob, the mixer box and the LED (no piano roll lane for
   them; greyed in the original too)
 - [ ] **TOOLS > Control builder and VIEW > Script output.** Lemon Studio has neither a control builder nor scripting
+- [ ] **Lemon Parametric EQ 2's greyed options.** Band solo on Shift's Adaptive and Bandpass listening (and Inherit
+  bandwidth), Minimum phase mod speed, Phase rotation, and the heatmap's Enhanced frequency and High precision. They
+  show and keep their stored values, but nothing reads them yet; Shift+click solos the band alone (2026-11-05 audit)
 
 ## Shipping a build
 

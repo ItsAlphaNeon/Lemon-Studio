@@ -156,14 +156,19 @@ pub fn level_h(a: f32) -> f32 {
     ((2.0 * a.max(0.0) + 1.0).ln() / (2.0 * 3f32.ln())).clamp(0.0, 1.0)
 }
 
+/// The display's level scale (spec §3): height `h = (SCALE_Y0 − y) / SCALE_H`, 0 just below the display's bottom row
+/// and 1 just above its top row, so its rows run from about +11.8 dB to about −39.7 dB and none reads −∞.
+const SCALE_Y0: f32 = 159.5;
+const SCALE_H: f32 = 160.0;
+
 /// Amplitude at display y.
 pub fn display_amp(y: f32) -> f32 {
-    let h = ((DISPLAY.bottom() - 1.0 - y) / (DISPLAY.h - 1.0)).clamp(0.0, 1.0);
+    let h = ((SCALE_Y0 - y) / SCALE_H).clamp(0.0, 1.0);
     (9f32.powf(h) - 1.0) / 2.0
 }
 
 fn level_y(a: f32) -> f32 {
-    DISPLAY.bottom() - 1.0 - level_h(a) * (DISPLAY.h - 1.0)
+    SCALE_Y0 - level_h(a) * SCALE_H
 }
 
 /// Paints the editor. `hint` (not hosted: the host shows it otherwise) goes in the display's top-left corner.
@@ -301,12 +306,13 @@ fn comp_page(ui: &mut Ui, look: &Look) {
     spinner(ui, 369.0, 282.0, 34.0, &s, Target::Sidechain);
 }
 
-/// LIMIT / COMP: a button group in the mode card's bottom-left corner, the shown page lit.
+/// LIMIT / COMP: a button group in the mode card's bottom-left corner ("Look": x 118..196, y 274..292), the shown page
+/// lit. Each tab takes the click over its cell and its side of the group.
 fn page_tabs(ui: &mut Ui) {
     lemon::outlined(ui.c, Rect::span(118.0, 196.0, 274.0, 292.0), 6.0, plug::FIELD_LINE, plug::FIELD);
     let cells = [Rect::span(120.0, 155.0, 276.0, 290.0), Rect::span(157.0, 194.0, 276.0, 290.0)];
-    for (i, (x0, x1, s)) in [(113.0, 152.0, "LIMIT"), (153.0, 196.0, "COMP")].into_iter().enumerate() {
-        let r = Rect::span(x0, x1, 276.0, 295.0);
+    for (i, (x0, x1, s)) in [(118.0, 156.0, "LIMIT"), (157.0, 196.0, "COMP")].into_iter().enumerate() {
+        let r = Rect::span(x0, x1, 274.0, 292.0);
         let cell = cells[i];
         let target = Target::Page(i as u8);
         let st = ui.state(r, &target);
@@ -443,8 +449,10 @@ fn display(ui: &mut Ui, look: &Look) {
         ui.c.polyline(&gain, 1.2, brand::HIGHLIGHT.with_alpha(210));
     }
     if show_marks {
+        // Kept inside the well's edge, so the marker still shows at the top (+12 dB) and the bottom.
         let ceil = dsp::level(ui.m.plain("ceil").round() as i32, 3.0);
-        ui.c.fill_rect(Rect::new(d.x, level_y(ceil).round() - 1.0, d.w, 2.0), brand::TEXT.with_alpha(190));
+        let y = (level_y(ceil).round() - 1.0).clamp(d.y + 1.0, d.bottom() - 3.0);
+        ui.c.fill_rect(Rect::new(d.x, y, d.w, 2.0), brand::TEXT.with_alpha(190));
         if comp_on(ui.m) {
             let thr = dsp::level(ui.m.plain("c_thres").round() as i32, 7.0);
             ui.c.fill_rect(Rect::new(d.x, level_y(thr).round(), d.w, 1.0), SKY);
