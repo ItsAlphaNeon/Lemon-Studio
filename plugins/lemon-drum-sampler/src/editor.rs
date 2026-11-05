@@ -350,7 +350,7 @@ impl Logic {
             MenuReq::Value(f) => {
                 m.head(f.name(), Cmd::None);
                 m.add(MenuItem::item("Reset"), Cmd::Reset(*f));
-                m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(*f));
+                m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(*f));
             }
             MenuReq::Pad => {
                 let n = self.view.pad;
@@ -382,18 +382,29 @@ impl Logic {
         vec![Act::Repaint]
     }
 
-    /// The value text a type-in box starts with.
+    /// The value text a type-in box starts with: the text its box shows.
     pub fn value_text(&self, f: Field) -> String {
-        self.value(f).map_or_else(String::new, |v| if f == Field::Key { view::key_name(v) } else { v.to_string() })
+        self.value(f).map_or_else(String::new, |v| f.text(v))
     }
 
-    /// Applies a typed value: a number, or a key name for the key ("C3", "F#5").
+    /// Applies a typed value in the units its box shows (`parse_value`). A box left as it opened changes nothing; a
+    /// text several values show keeps the current value, else the default when it shows it, else the nearest.
     pub fn typed(&mut self, f: Field, text: &str) {
         let t = text.trim();
-        let v = if f == Field::Key { parse_key(t).or_else(|| t.parse().ok()) } else { t.trim_end_matches(|c: char| !c.is_ascii_digit()).parse().ok() };
-        if let Some(v) = v {
-            self.set(f, v);
+        if t == self.value_text(f) {
+            return;
         }
+        let Some(n) = parse_value(f, t) else { return };
+        let (lo, hi) = f.range();
+        let n = n.clamp(lo, hi);
+        let shown = f.text(n);
+        // A text finer than the box ("29.8%") names its own value.
+        let v = if !reads_as(t, &shown) {
+            n
+        } else {
+            self.value(f).into_iter().chain([Self::default_of(f)]).find(|&v| f.text(v) == shown).unwrap_or(n)
+        };
+        self.set(f, v);
     }
 
     /// Loads sample file `path` onto pad `n` (the chosen one when `None`), which becomes the chosen pad.
@@ -432,9 +443,42 @@ impl Logic {
         let loaded: Vec<bool> = st.pads().iter().enumerate().map(|(i, p)| p.sounding().any(|(j, _)| self.shared.loaded(i, j))).collect();
         let lit: Vec<bool> = self.lit.iter().map(|&l| l > 0).collect();
         let hint = if self.hosted { String::new() } else { self.hint.clone() };
-        let look = view::Look { state: &st, loaded: &loaded, lit: &lit };
+        let layer_loaded = self.shared.loaded(self.view.pad, self.view.layer);
+        let look = view::Look { state: &st, loaded: &loaded, lit: &lit, layer_loaded };
         self.hits = view::paint(c, palette, &self.view, &look, &hint);
     }
+}
+
+/// A typed value of field `f` in the units its box shows, as the nearest stored value (not yet clamped): the key as a
+/// number or a name ("C3", "F#5"), cut groups from 1 ("--" = none), volumes in percent, pans in percent left / right
+/// ("Centered", "50% left", or a signed number), tunes in cents, velocities as they are.
+pub fn parse_value(f: Field, s: &str) -> Option<i32> {
+    let s = s.trim();
+    let lower = s.to_ascii_lowercase();
+    let num = || -> Option<f64> {
+        let is_num = |c: &char| c.is_ascii_digit() || matches!(c, '-' | '+' | '.');
+        s.chars().skip_while(|c| !is_num(c)).take_while(is_num).collect::<String>().parse().ok()
+    };
+    let x = match f {
+        Field::Key => return parse_key(s).or_else(|| s.parse().ok()),
+        Field::Cut | Field::CutBy if !s.is_empty() && s.chars().all(|c| c == '-') => return Some(-1),
+        Field::Cut | Field::CutBy => num()? - 1.0,
+        Field::PadVolume | Field::LayerVolume => num()? * 128.0 / 100.0,
+        Field::PadPan | Field::LayerPan if lower.starts_with("cent") => return Some(0),
+        Field::PadPan | Field::LayerPan => {
+            let x = num()? * 128.0 / 100.0;
+            if lower.contains("left") { -x.abs() } else { x }
+        }
+        Field::PadTune | Field::LayerTune => num()? * 128.0 / 1200.0,
+        Field::VelLo | Field::VelHi => num()?,
+    };
+    x.is_finite().then(|| x.round() as i32)
+}
+
+/// Whether a typed text reads as `shown`: the same words, or their number without the unit ("31" for "31%").
+fn reads_as(typed: &str, shown: &str) -> bool {
+    let (t, s) = (typed.trim().to_lowercase(), shown.trim().to_lowercase());
+    !t.is_empty() && s.strip_prefix(t.as_str()).is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit() || c == '.'))
 }
 
 /// A key name ("C5" = 60, "F#3", "Db4") as a key number.
@@ -1080,7 +1124,8 @@ mod tests {
         assert_eq!(l.value(Field::Key), Some(38));
         l.typed(Field::Key, "C5");
         assert_eq!(l.value(Field::Key), Some(60));
-        l.typed(Field::Cut, "3");
+        // Cut groups show from 1: the "4" typed is group 4 (stored 3).
+        l.typed(Field::Cut, "4");
         assert_eq!(l.value(Field::Cut), Some(3));
         l.typed(Field::PadPan, "-200");
         assert_eq!(l.value(Field::PadPan), Some(-128));
@@ -1089,6 +1134,103 @@ mod tests {
         let st = l.state();
         assert_eq!(st.pad(0).unwrap().pan, -128);
         assert_eq!(st.pad(1).unwrap(), State::default().pad(1).unwrap());
+    }
+
+    /// A type-in box opens on the text its box shows and takes the units shown (spec §3: groups from 1, volumes in
+    /// percent, pans in percent left / right, tunes in cents).
+    #[test]
+    fn typed_values_read_the_units_their_boxes_show() {
+        let mut l = logic();
+        assert_eq!(l.value_text(Field::Cut), "--");
+        l.typed(Field::Cut, "4");
+        assert_eq!((l.value(Field::Cut), l.value_text(Field::Cut).as_str()), (Some(3), "4"));
+        l.typed(Field::Cut, "--");
+        assert_eq!(l.value(Field::Cut), Some(-1));
+        l.typed(Field::CutBy, "1");
+        assert_eq!(l.value(Field::CutBy), Some(0));
+        l.typed(Field::PadVolume, "50%");
+        assert_eq!((l.value(Field::PadVolume), l.value_text(Field::PadVolume).as_str()), (Some(64), "50%"));
+        for (text, v) in [("50% left", -64), ("25% right", 32), ("-100", -128), ("Centered", 0)] {
+            l.typed(Field::PadPan, text);
+            assert_eq!(l.value(Field::PadPan), Some(v), "{text}");
+        }
+        l.typed(Field::PadTune, "+300 cents");
+        assert_eq!((l.value(Field::PadTune), l.value_text(Field::PadTune).as_str()), (Some(32), "+300 cents"));
+        l.typed(Field::PadTune, "-1200");
+        assert_eq!(l.value(Field::PadTune), Some(-128));
+        assert_eq!(l.value_text(Field::Key), "C#3");
+        l.typed(Field::Key, "F#3");
+        assert_eq!(l.value(Field::Key), Some(42));
+    }
+
+    /// A text several values show keeps the current value; a finer text names the nearest; an unchanged box is no edit.
+    #[test]
+    fn typed_values_keep_the_current_value_on_a_tie() {
+        let mut l = logic();
+        // 38 and 39 both show 30%.
+        assert_eq!((Field::PadVolume.text(38), Field::PadVolume.text(39)), ("30%".into(), "30%".into()));
+        l.set(Field::PadVolume, 39);
+        l.typed(Field::PadVolume, "30%");
+        assert_eq!(l.value(Field::PadVolume), Some(39));
+        l.typed(Field::PadVolume, "30");
+        assert_eq!(l.value(Field::PadVolume), Some(39));
+        l.typed(Field::PadVolume, "29.8%");
+        assert_eq!(l.value(Field::PadVolume), Some(38));
+        l.set(Field::PadVolume, 39);
+        let open = l.value_text(Field::PadVolume);
+        l.typed(Field::PadVolume, &open);
+        assert_eq!(l.value(Field::PadVolume), Some(39));
+    }
+
+    /// The value menu names the item as every plugin does (naming review).
+    #[test]
+    fn the_value_menu_offers_enter_value() {
+        let l = logic();
+        let m = l.menu(&MenuReq::Value(Field::PadTune));
+        assert_eq!(m.find("Enter value..."), Some(Cmd::TypeIn(Field::PadTune)));
+    }
+
+    fn pixels(l: &mut Logic) -> Vec<u32> {
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+        l.paint(&mut c, &os_plugkit::palette());
+        let mut px = vec![0u32; (view::W * view::H) as usize];
+        c.copy_to_xrgb(&mut px);
+        px
+    }
+
+    fn area(px: &[u32], r: os_ui::Rect) -> Vec<u32> {
+        (r.y as usize..r.bottom() as usize).flat_map(|y| (r.x as usize..r.right() as usize).map(move |x| px[y * view::W as usize + x])).collect()
+    }
+
+    /// Not hosted, the hint sits in the head right of the banks: the pads and their colour bars stay clear.
+    #[test]
+    fn the_hint_leaves_the_pads_clear() {
+        let mut l = logic();
+        let mut st = l.state();
+        st.set_pad(0, state::PAD_COLOR, 0x00a19145);
+        l.shared.set_state(&l.params, &st);
+        let bare = pixels(&mut l);
+        l.hint = "Pad A1: Kick_Hard_Room_Long_Tail_Version_Two.wav, 1 layer\tleft click plays, right click: Clear pad".into();
+        let with = pixels(&mut l);
+        assert_eq!(area(&bare, view::GRID), area(&with, view::GRID));
+        assert_ne!(area(&bare, view::HINT), area(&with, view::HINT));
+        assert!(view::HINT.x >= view::BANK_B.right() && view::HINT.bottom() <= view::GRID.y);
+    }
+
+    /// A layer whose file did not open shows it red, as its pad does.
+    #[test]
+    fn a_missing_layer_file_is_red() {
+        let mut l = logic();
+        let mut st = l.state();
+        st.set_sample(0, "C:/nowhere/missing.wav");
+        l.shared.set_state(&l.params, &st);
+        assert!(!l.shared.loaded(0, 0));
+        let px = pixels(&mut l);
+        let red = |p: &u32| {
+            let (r, g, b) = ((p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff);
+            r > 150 && r > g + 60 && r > b + 60
+        };
+        assert!(area(&px, view::SAMPLE).iter().filter(|p| red(p)).count() > 20);
     }
 
     /// Renders the editor with a few pads loaded to `OS_SHOT_DIR` (for a look by eye).

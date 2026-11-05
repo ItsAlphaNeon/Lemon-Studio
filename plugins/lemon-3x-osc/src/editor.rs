@@ -18,7 +18,7 @@ use os_plugkit::vals::Vals;
 use os_plugkit::MenuDef;
 use os_ui::kit::menu::{MenuItem, MenuStyle};
 
-use crate::params::{Osc3Params, FILTERS};
+use crate::params::{Osc3Params, Text, FILTERS};
 use crate::view::{self, Hit, Target, ViewState};
 use crate::Shared;
 
@@ -105,7 +105,8 @@ impl Editor for Osc3Editor {
 /// Pixels of drag for a knob's whole range.
 pub const KNOB_PX: f32 = 200.0;
 const FINE: f32 = 0.25;
-/// Parameters with more steps than this move by 1/`WHEEL_STEPS` of their range per wheel notch (times, speeds).
+/// Parameters with more steps than this move by 1/`WHEEL_STEPS` of their range per wheel notch (times, speeds);
+/// cents always move 1 cent (spec §5: "fine: 1 cent").
 const WHEEL_STEPS: f32 = 128.0;
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -374,7 +375,8 @@ impl Logic {
             Target::Knob(id) | Target::List(id) | Target::Set(id, _) => {
                 let (lo, hi) = self.range(id);
                 let steps = (hi - lo) as f32;
-                let step = if steps > WHEEL_STEPS { (steps / WHEEL_STEPS).round() } else { 1.0 };
+                let cents = self.params.defs.iter().any(|d| d.id == *id && d.text == Text::Cents);
+                let step = if steps > WHEEL_STEPS && !cents { (steps / WHEEL_STEPS).round() } else { 1.0 };
                 let plain = (self.vals.plain(id) + notches.signum() * step).clamp(lo as f32, hi as f32);
                 self.vals.edit_plain(id, plain);
             }
@@ -440,12 +442,35 @@ impl Logic {
         self.vals.text(id)
     }
 
-    /// Applies a typed value.
+    /// Applies a typed value. A box left as it opened changes nothing; a text several values show keeps the current
+    /// value, else the default when it shows it (`type_in_tie`).
     pub fn typed(&mut self, id: &str, text: &str) {
+        if text.trim() == self.value_text(id).trim() {
+            return;
+        }
         if let Some(n) = self.vals.parse(id, text) {
-            self.vals.edit(id, n);
+            let v = type_in_tie(&self.vals, id, text, n);
+            if v != self.vals.norm(id) {
+                self.vals.edit(id, v);
+            }
         }
     }
+}
+
+/// The value a typed text names. `n` is the nearest value; when the text reads as what it shows ("31%" for a time)
+/// and the current value or else the default shows that too, that one is kept.
+fn type_in_tie(vals: &Vals, id: &str, typed: &str, n: f32) -> f32 {
+    let shown = vals.text_of(id, n);
+    if !reads_as(typed, &shown) {
+        return n;
+    }
+    [vals.norm(id), vals.default_norm(id)].into_iter().find(|&v| vals.text_of(id, v) == shown).unwrap_or(n)
+}
+
+/// Whether a typed text reads as `shown`: the same words, or their number without the unit ("31" for "31%").
+fn reads_as(typed: &str, shown: &str) -> bool {
+    let (t, s) = (typed.trim().to_lowercase(), shown.trim().to_lowercase());
+    !t.is_empty() && s.strip_prefix(t.as_str()).is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit() || c == '.'))
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1165,6 +1190,17 @@ mod tests {
         (h.r.cx(), h.r.cy())
     }
 
+    /// The page tabs' hit cells meet edge to edge: none overlaps the next (2026-11-05 audit).
+    #[test]
+    fn page_tabs_do_not_overlap() {
+        let l = logic();
+        let tab = |i| l.hits.iter().find(|h| h.t == Target::Tab(i)).map(|h| h.r).unwrap();
+        for i in 0..view::PAGES - 1 {
+            assert!(tab(i).right() <= tab(i + 1).x, "{:?} {:?}", tab(i), tab(i + 1));
+        }
+        assert!(tab(0).contains(25.0, 30.0) && tab(1).contains(70.0, 30.0));
+    }
+
     #[test]
     fn knob_drags_wheel_and_reset() {
         let mut l = logic();
@@ -1425,5 +1461,85 @@ mod tests {
         // Every control lies inside the area shown when hosted.
         let top = view::HOSTED_CROP_Y as f32;
         assert!(l.hits.iter().all(|h| h.r.y >= top), "{:?}", l.hits.iter().find(|h| h.r.y < top));
+    }
+
+    // spec §5: the wheel moves fine (and detune) 1 cent per notch; times keep 1/128 of their range.
+    #[test]
+    fn wheel_moves_cents_by_one() {
+        let mut l = logic();
+        for id in ["o1_fine", "o2_detune"] {
+            let (x, y) = centre(&l, &Target::Knob(id.into()));
+            l.wheel(x, y, 1.0, Mods::default());
+            assert_eq!(l.vals.plain(id), 1.0, "{id}");
+            l.wheel(x, y, -1.0, Mods::default());
+            assert_eq!(l.vals.plain(id), 0.0, "{id}");
+        }
+        l.view.tab = 1;
+        paint(&mut l);
+        let (x, y) = centre(&l, &Target::Knob("vol_rel".into()));
+        let v0 = l.vals.plain("vol_rel");
+        l.wheel(x, y, 1.0, Mods::default());
+        assert_eq!(l.vals.plain("vol_rel") - v0, 512.0);
+    }
+
+    // spec §3: the Tempo / Global switches and the Envelope ▸ arrow are drawn, inert.
+    #[test]
+    fn envelope_page_draws_its_inert_switches() {
+        let mut l = logic();
+        l.view.tab = 1;
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+        l.hits = view::paint(&mut c, &os_plugkit::palette(), &l.vals, &l.view, "", false);
+        let mut px = vec![0u32; (view::W * view::H) as usize];
+        c.copy_to_xrgb(&mut px);
+        let at = |x: f32, y: f32| px[y as usize * view::W as usize + x as usize];
+        // The Tempo / LFO Tempo / Global switches and the arrow: ink on the panel, and nothing to click.
+        for (cx, cy, dx) in [(284.0, 292.0, 12.0), (380.0, 292.0, 12.0), (436.0, 292.0, 11.0), (284.0, 126.0, 7.0)] {
+            let (cx, cy) = (cx, view::y(cy));
+            assert!((-8..=8).any(|d| at(cx + d as f32, cy) != at(cx + dx, cy)), "nothing drawn at ({cx}, {cy})");
+            assert!(!l.hits.iter().any(|h| h.r.contains(cx, cy)), "({cx}, {cy}) has a hit");
+        }
+        for label in [240.0, 336.0, 394.0] {
+            let ink = (0..30).filter(|i| at(label + *i as f32, view::y(292.0)) != at(label - 2.0, view::y(292.0))).count();
+            assert!(ink > 3, "label at {label}");
+        }
+    }
+
+    // spec §5 (envelope page as Lemon Sampler's): hovering a graph node names the knob it drags and its value.
+    #[test]
+    fn envelope_points_have_a_hint() {
+        let mut l = logic();
+        l.view.tab = 1;
+        paint(&mut l);
+        for (i, id) in [(1, "vol_att"), (3, "vol_dec"), (4, "vol_rel")] {
+            let (x, y) = centre(&l, &Target::EnvPoint(i));
+            l.moved(x, y, Mods::default());
+            assert_eq!(l.hint, format!("{}: {}", l.name(id), l.vals.text(id)));
+            assert!(l.hint.starts_with("Volume envelope - "), "{}", l.hint);
+        }
+    }
+
+    /// A typed text several values show keeps the current value, else the default; finer texts name their own
+    /// value; a box left as it opened changes nothing.
+    #[test]
+    fn typed_values_keep_the_current_value_or_the_default_on_a_tie() {
+        let mut l = logic();
+        let id = "vol_att";
+        let def = l.vals.default_norm(id);
+        let shown = l.vals.text_of(id, def);
+        assert_eq!(shown, "31%");
+        l.vals.edit_plain(id, 20100.0);
+        assert_eq!(l.value_text(id), "31%");
+        l.typed(id, "31%");
+        assert_eq!(l.vals.plain(id), 20100.0, "the current value shows 31%");
+        l.vals.edit_plain(id, 40000.0);
+        l.typed(id, "31");
+        assert_eq!(l.vals.norm(id), def, "the default shows 31%");
+        l.typed(id, "30.5%");
+        assert_eq!(l.vals.plain(id), 19988.0);
+        let open = l.value_text(id);
+        l.typed(id, &open);
+        assert_eq!(l.vals.plain(id), 19988.0);
+        l.typed("o1_fine", "+3 cents");
+        assert_eq!(l.vals.plain("o1_fine"), 3.0);
     }
 }
