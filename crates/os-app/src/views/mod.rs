@@ -764,10 +764,36 @@ pub fn window_buttons(ui: &mut Ui, win: Win, x0: f32, y: f32, _normal: Color, _h
         (true, false) => kit::MaxGlyph::Full,
         (true, true) => kit::MaxGlyph::Split,
     };
-    if kit::lemon::on(ui.t) {
+    // The Lemon skin's round lights belong to the workspace's own views (the playlist, piano roll and mixer, and the
+    // browser's close); every other window, floating ones included, has the glyphs, as the settings window does.
+    if kit::lemon::on(ui.t) && lit(win) {
         lights(ui.c, ui.t, x0, y, hovered, glyph);
     } else {
         kit::window_buttons(ui.c, ui.t, x0, y, hovered, down, glyph);
+    }
+}
+
+/// Whether window `w`'s buttons are the Lemon skin's round lights (`window_light`): the playlist, piano roll and mixer.
+pub fn lit(w: Win) -> bool {
+    matches!(w, Win::Playlist | Win::PianoRoll | Win::Mixer)
+}
+
+/// One window button as the windows without lights have it (`lit`), centred in `b`: its glyph, on the title bar
+/// buttons' hover back when `hover` (`kit::window_buttons`).
+pub fn window_glyph(c: &mut os_ui::Canvas, t: &os_theme::Palette, b: Rect, which: Light, hover: bool) {
+    use os_ui::tabler as tb;
+    let b = Rect::new(b.cx() - 8.5, b.cy() - 8.5, 17.0, 17.0);
+    kit::title_button_back(c, t, b, matches!(which, Light::Close), hover, false);
+    let ink = if hover { t.tx(0xffffff) } else { t.text_dim.mix(t.glyph, 0.6) };
+    match which {
+        Light::Close => c.icon(&tb::X, b.inset(2.0), ink),
+        Light::Min => c.icon(&tb::MINUS, b.inset(2.0), ink),
+        Light::Max(kit::MaxGlyph::Full) => c.stroke_rrect(Rect::new(b.x + 3.5, b.y + 3.5, 10.0, 10.0), 2.0, 1.5, ink),
+        Light::Max(kit::MaxGlyph::Split) => {
+            c.stroke_rrect(Rect::new(b.x + 3.5, b.y + 3.0, 10.0, 4.5), 1.5, 1.5, ink);
+            c.stroke_rrect(Rect::new(b.x + 3.5, b.y + 9.5, 10.0, 4.5), 1.5, 1.5, ink);
+        }
+        Light::Max(_) => c.icon(&tb::SQUARES, b.inset(2.0), ink),
     }
 }
 

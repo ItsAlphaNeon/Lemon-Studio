@@ -7210,6 +7210,7 @@ impl App {
     /// - Ctrl+Alt+Shift+arrows: the split window with the keyboard changes places with the one that way.
     /// - F: maximizes the split window under the mouse, or brings the split back (the one with the keyboard when the
     ///   mouse is over none).
+    /// - Ctrl+Shift+F: closes the window under the mouse, split or floating.
     ///
     /// Returns whether the key was one of them.
     fn window_key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
@@ -7258,6 +7259,20 @@ impl App {
             let s = &self.state;
             if let Some(w) = under.or(s.docked()).or(s.focused().filter(|w| w.slot().is_some())) {
                 self.act(Action::MaxWin(w));
+            }
+            return true;
+        }
+        // Ctrl+Shift+F: closes the window under the mouse, as its close button does: a split window, or a floating
+        // one (Ctrl+F is FL's browser search).
+        if f && ctrl && !alt && self.shift {
+            let (x, y) = self.mouse;
+            if let Some(w) = self.top_hit(x, y).and_then(|h| h.win) {
+                if self.closes_first(w) {
+                    self.close_floating(w);
+                } else if w.slot().is_some() {
+                    self.act(Action::CloseWin(w));
+                    self.invalidate();
+                }
             }
             return true;
         }
@@ -8946,7 +8961,7 @@ impl App {
             }
             return;
         }
-        // The tiling layout's window keys: Ctrl+Alt+arrows, F (`window_key`).
+        // The tiling layout's window keys: Ctrl+Alt+arrows, F, Ctrl+Shift+F (`window_key`).
         let s = &self.state;
         if s.tiled() && s.menu_open.is_none() && !s.settings.open && s.playlist.edit.is_none() && s.playlist.popup.is_none() && self.window_key(key, ctrl, alt) {
             return;
@@ -14560,6 +14575,37 @@ mod tests {
 
     /// The Lemon design draws a built-in editor's window as a card (owner, 2026-10-27): rounded like the channel rack,
     /// the editor edge to edge below a title row, no strip and no minimize button. `OS_EMBED_SHOT=<file.png>` saves it.
+    /// The tiling layout's Ctrl+Shift+F closes the window under the mouse, as its close button does: a split window,
+    /// then a floating one over the split (Ctrl+F stays the browser's search).
+    #[test]
+    fn ctrl_shift_f_closes_the_window_under_the_mouse() {
+        use winit::keyboard::Key;
+        let Ok(mut c) = Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.bar.tiling = true;
+        for w in [Win::Playlist, Win::PianoRoll, Win::ChannelRack] {
+            app.state.raise(w);
+        }
+        frame(&mut app, &mut c, None);
+        let over = |app: &App, w: Win| app.hits.iter().rev().find(|h| h.win == Some(w)).map(|h| (h.rect.cx(), h.rect.cy())).unwrap();
+        let ctrl_shift_f = |app: &mut App, c: &mut Canvas, at: (f32, f32)| {
+            app.mouse_move(at.0, at.1);
+            app.shift = true;
+            app.key(&Key::Character("f".into()), true, false);
+            app.shift = false;
+            frame(app, c, None);
+        };
+        let rack = over(&app, Win::ChannelRack);
+        assert_eq!(app.top_hit(rack.0, rack.1).and_then(|h| h.win), Some(Win::ChannelRack));
+        ctrl_shift_f(&mut app, &mut c, rack);
+        assert!(!app.state.shown(Win::ChannelRack), "the floating window under the mouse closed");
+        assert!(app.state.shown(Win::PianoRoll) && app.state.shown(Win::Playlist));
+        let piano = over(&app, Win::PianoRoll);
+        ctrl_shift_f(&mut app, &mut c, piano);
+        assert!(!app.state.shown(Win::PianoRoll), "the split window under the mouse closed");
+        assert!(app.state.shown(Win::Playlist), "the other stays");
+    }
+
     #[test]
     fn built_in_editors_are_lemon_cards() {
         use crate::plugin_window::ChannelInfo;

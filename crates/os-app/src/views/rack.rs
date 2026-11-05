@@ -700,12 +700,9 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
         }
     }
     let close = Rect::new(r - 22.0, y + 6.0, 16.0, 16.0);
-    let hov = if lemon { ui.hit(close, Action::CloseWin(Win::ChannelRack), "Close") } else { super::close_button(ui, close, close, Action::CloseWin(Win::ChannelRack), "Close") };
-    if lemon {
-        super::window_light(ui.c, t, close, super::Light::Close, hov);
-    } else {
-        icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
-    }
+    // A floating window: its close is the glyph, in either skin (`views::lit`).
+    let hov = super::close_button(ui, close, close, Action::CloseWin(Win::ChannelRack), "Close");
+    icons::draw(ui.c, Icon::Close, close.inset(1.5), if hov { ui.t.tx(0xffffff) } else { t.glyph });
 }
 
 /// One step button (§3): bordered, lighter at the top, a dark dash below the top edge (red at the play position).

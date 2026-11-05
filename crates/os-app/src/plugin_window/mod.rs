@@ -928,10 +928,10 @@ fn paint_card(c: &mut Canvas, st: &State) {
     icon_at(c, &tb::CARET_RIGHT, p.right() - 8.5, p.cy(), 16.0, ink(Part::PresetNext));
     if max_w(st) > 0.0 {
         let glyph = if st.maxed.is_some() { os_ui::kit::MaxGlyph::Restore } else { os_ui::kit::MaxGlyph::Full };
-        crate::views::window_light(c, &t, card_slot(w, 1), crate::views::Light::Max(glyph), hov(Part::Maximize));
+        crate::views::window_glyph(c, &t, card_slot(w, 1), crate::views::Light::Max(glyph), hov(Part::Maximize));
     }
-    // The window buttons' lights, as the app's windows have them in the Lemon skin.
-    crate::views::window_light(c, &t, card_slot(w, 0), crate::views::Light::Close, hov(Part::Close));
+    // A floating window: its buttons are glyphs, as the settings window's, not the lights (`views::lit`).
+    crate::views::window_glyph(c, &t, card_slot(w, 0), crate::views::Light::Close, hov(Part::Close));
     // The volume knob (the channel's volume).
     if let Some(k) = card_knob(st) {
         let look = os_ui::kit::KnobLook::Mixer { halo: 9.5, arc: true };
