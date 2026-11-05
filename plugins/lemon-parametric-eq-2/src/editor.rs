@@ -10,7 +10,7 @@
 // spec: plugins/lemon-parametric-eq-2.md (§5 hints, §6 menus, §7 interaction), plugins/host-link.md
 
 use std::any::Any;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use nih_plug::prelude::*;
@@ -22,9 +22,6 @@ use os_ui::kit::menu::{Mark, MenuItem, MenuStyle};
 use crate::params::{self, byte, flag, freq_id, level_id, order_id, set_byte, set_flag, type_id, width_id, EqParams, Opt, MAIN_ID, ORDER_NAMES, TYPE_NAMES};
 use crate::view::{self, Hit, Target, ViewState, MAIN_FADER};
 use crate::Shared;
-
-/// "Lock B" (Options menu) is not saved; it lasts while the plugin instance lives.
-static LOCK_SPARE: AtomicBool = AtomicBool::new(false);
 
 pub struct EqEditor {
     pub params: Arc<EqParams>,
@@ -187,6 +184,12 @@ fn greyed(mut m: MenuDef<Cmd>) -> MenuDef<Cmd> {
     m
 }
 
+/// Whether a value text shows the typed text (case and spaces aside).
+fn shows(text: &str, typed: &str) -> bool {
+    let key = |s: &str| s.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect::<String>();
+    key(text) == key(typed)
+}
+
 fn opt_menu(extra: &[u8], o: Opt, names: &[&str], first: i32) -> MenuDef<Cmd> {
     let mut m = MenuDef::new(MenuStyle::Context);
     let cur = params::opt(extra, o);
@@ -264,12 +267,14 @@ pub struct Logic {
     pub hint: String,
     copied: Option<f32>,
     pub hosted: bool,
+    /// Wheel notches not yet a whole step on a type tab or order mark (fine wheels and trackpads send fractions).
+    notch: Option<(Target, f32)>,
 }
 
 impl Logic {
     pub fn new(params: Arc<EqParams>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         let vals = Vals::new(&*params, params.live.clone(), ctx);
-        Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false }
+        Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, notch: None }
     }
 
     pub fn dragging(&self) -> bool {
@@ -326,7 +331,7 @@ impl Logic {
             Some(Target::Tokens) => "View band tokens".into(),
             Some(Target::Phones) => "Band solo on shift".into(),
             Some(Target::Monitor(m)) => format!("Monitor: {}", ["off", "input", "output"][usize::from(m.min(2))]),
-            Some(Target::Store) => if LOCK_SPARE.load(Ordering::Relaxed) { "Copy to B (locked)".into() } else { "Copy to B".into() },
+            Some(Target::Store) => if self.shared.lock_spare.load(Ordering::Relaxed) { "Copy to B (locked)".into() } else { "Copy to B".into() },
             Some(Target::Flip) => "Swap A / B".into(),
             _ => {
                 let _ = extra;
@@ -382,7 +387,7 @@ impl Logic {
         let cur = self.shown();
         let fields = params::fields_of(&cur);
         if !flip {
-            if LOCK_SPARE.load(Ordering::Relaxed) {
+            if self.shared.lock_spare.load(Ordering::Relaxed) {
                 return;
             }
             self.params.edit_extra(|b| fields.iter().enumerate().for_each(|(i, &v)| params::set_field(b, 37 + i, v)));
@@ -578,10 +583,16 @@ impl Logic {
             Target::Token(k) | Target::Bw(k) if k < BANDS => step(self, &width_id(k), 0.05),
             Target::Fader(k) => step(self, &if k == MAIN_FADER { MAIN_ID.to_string() } else { level_id(k) }, 0.5 / 36.0),
             Target::Freq(k) => step(self, &freq_id(k), 1.0 / 128.0),
+            // One step per notch (spec §7); fractions of a notch add up until they make one.
             Target::TypeTab(k) | Target::OrderMark(k) => {
+                let acc = self.notch.take().filter(|(n, _)| *n == t).map_or(0.0, |(_, a)| a) + notches;
+                let d = acc.trunc();
+                self.notch = Some((t, acc - d));
+                if d == 0.0 {
+                    return vec![];
+                }
                 let id = if matches!(t, Target::TypeTab(_)) { type_id(k) } else { order_id(k) };
-                let plain = self.vals.plain(&id) + notches.signum();
-                let n = self.vals.plain_to_norm(&id, plain);
+                let n = self.vals.plain_to_norm(&id, self.vals.plain(&id) + d);
                 self.vals.edit(&id, n);
             }
             _ => return vec![],
@@ -631,7 +642,7 @@ impl Logic {
             }
             MenuReq::Options => {
                 m.head("Options", Cmd::None);
-                check(&mut m, "Lock B", LOCK_SPARE.load(Ordering::Relaxed), Cmd::LockSpare);
+                check(&mut m, "Lock B", self.shared.lock_spare.load(Ordering::Relaxed), Cmd::LockSpare);
                 m.submenu("Band solo on Shift", self.solo_menu(&extra), Cmd::None);
                 // Greyed out: nothing reads the minimum phase mod speed (parameter smoothing), phase rotation or the
                 // heatmap's enhanced frequency and high precision yet. The linear phase mod speed is LIN's crossfade time.
@@ -717,7 +728,7 @@ impl Logic {
                 set_byte(b, params::ENHANCED_OFF_BYTE, u8::from(off == 0));
             }),
             Cmd::LockSpare => {
-                LOCK_SPARE.fetch_xor(true, Ordering::Relaxed);
+                self.shared.lock_spare.fetch_xor(true, Ordering::Relaxed);
             }
         }
         vec![Act::Repaint]
@@ -728,9 +739,15 @@ impl Logic {
         self.vals.text(id)
     }
 
-    /// Applies a typed value.
+    /// Applies a typed value. Of the values that show the typed text, the current one stays (an unchanged box does
+    /// nothing) and the default comes next; otherwise the nearest value.
     pub fn typed(&mut self, id: &str, text: &str) {
-        if let Some(n) = self.vals.parse(id, text) {
+        let typed_at = |l: &Self, n: f32| shows(&l.vals.text_of(id, n), text);
+        if typed_at(self, self.vals.norm(id)) {
+            return;
+        }
+        let d = self.vals.default_norm(id);
+        if let Some(n) = if typed_at(self, d) { Some(d) } else { self.vals.parse(id, text) } {
             self.vals.edit(id, n);
         }
     }
@@ -1366,6 +1383,21 @@ mod tests {
         l.hits = view::paint(&mut c, &look, &l.view);
     }
 
+    /// The editor as `0x00RRGGBB` pixels, and the one at (x, y).
+    fn pixels(l: &mut Logic) -> Vec<u32> {
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+        let extra = l.params.extra_copy();
+        let look = view::Look { s: l.shown(), extra: &extra, spectrum: None, rate: 48000.0 };
+        l.hits = view::paint(&mut c, &look, &l.view);
+        let mut px = vec![0u32; (view::W * view::H) as usize];
+        c.copy_to_xrgb(&mut px);
+        px
+    }
+
+    fn at(px: &[u32], x: f32, y: f32) -> u32 {
+        px[y as usize * view::W as usize + x as usize]
+    }
+
     fn centre(l: &Logic, t: Target) -> (f32, f32) {
         let h = l.hits.iter().rev().find(|h| h.t == t).unwrap_or_else(|| panic!("no hit {t:?}"));
         (h.r.cx(), h.r.cy())
@@ -1501,6 +1533,94 @@ mod tests {
         assert_eq!(l.vals.plain(&level_id(4)), 0.0);
         l.compare(true);
         assert_eq!(l.vals.plain(&level_id(4)), 6.0);
+    }
+
+    /// "Lock B" is the instance's (spec §6): another instance still stores, and a reopened editor keeps it.
+    #[test]
+    fn lock_b_belongs_to_its_instance() {
+        let (mut a, mut b) = (logic(), logic());
+        a.pick(&MenuReq::Options, Cmd::LockSpare, 0.0, 0.0);
+        let spare = |l: &Logic| params::settings_at(&l.params.extra_copy(), 37).bands[4].db;
+        for l in [&mut a, &mut b] {
+            l.vals.edit_plain(&level_id(4), 6.0);
+            l.compare(false);
+        }
+        assert_eq!((spare(&a), spare(&b)), (0.0, 6.0));
+        let reopened = Logic::new(a.params.clone(), a.shared.clone(), None);
+        assert_eq!(reopened.hint_for(Some(Target::Store), 0.0, 0.0), "Copy to B (locked)");
+        assert_eq!(b.hint_for(Some(Target::Store), 0.0, 0.0), "Copy to B");
+    }
+
+    /// The type tab and order mark wheel one step per notch (spec §7); fractions of a notch add up per control.
+    #[test]
+    fn tab_wheel_moves_a_step_per_notch_and_adds_up_fractions() {
+        let mut l = logic();
+        let (tab, mark) = (centre(&l, Target::TypeTab(1)), centre(&l, Target::OrderMark(1)));
+        let at = |l: &Logic| (l.vals.plain(&type_id(1)) as i32, l.vals.plain(&order_id(1)) as i32);
+        let k0 = at(&l).0;
+        l.wheel(tab.0, tab.1, 0.5, Mods::default());
+        assert_eq!(at(&l), (k0, 0));
+        l.wheel(tab.0, tab.1, 0.5, Mods::default());
+        assert_eq!(at(&l), (k0 + 1, 0));
+        l.wheel(tab.0, tab.1, -2.0, Mods::default());
+        assert_eq!(at(&l), (k0 - 1, 0));
+        // Half a notch on the tab and half on the order mark make no step.
+        l.wheel(tab.0, tab.1, 0.5, Mods::default());
+        l.wheel(mark.0, mark.1, 0.5, Mods::default());
+        assert_eq!(at(&l), (k0 - 1, 0));
+        l.wheel(mark.0, mark.1, 0.5, Mods::default());
+        assert_eq!(at(&l), (k0 - 1, 1));
+    }
+
+    /// The tab (y 4..26, spec §3) is the type tab over the order mark with no gap above the slot; hovering it lights
+    /// the tab, not the fader under it.
+    #[test]
+    fn the_tab_has_no_dead_zone_and_its_hover_leaves_the_fader() {
+        let mut l = logic();
+        let x = view::band_x(1) + 6.0;
+        for y in 4..27 {
+            assert!(matches!(l.hit(x, y as f32 + 0.5), Some(Target::TypeTab(1) | Target::OrderMark(1))), "y {y}");
+        }
+        assert_eq!(l.hit(x, 24.0), Some(Target::OrderMark(1)));
+        // The tab body, and the slot's outline (which hover darkens).
+        let (tab, slot) = ((view::band_x(1) + 1.0, 6.0), (view::band_x(1), 100.0));
+        let none = pixels(&mut l);
+        for (y, tab_lit, slot_lit) in [(8.0, true, false), (24.0, true, false), (200.0, false, true)] {
+            l.view.mouse = Some((x, y));
+            let p = pixels(&mut l);
+            assert_eq!(at(&p, tab.0, tab.1) != at(&none, tab.0, tab.1), tab_lit, "y {y}: tab");
+            assert_eq!(at(&p, slot.0, slot.1) != at(&none, slot.0, slot.1), slot_lit, "y {y}: slot");
+        }
+    }
+
+    /// The FREQ and BW captions (right-aligned at x ~545, spec §3) stay clear of band 1's knobs.
+    #[test]
+    fn the_knob_captions_stay_clear_of_band_1s_knobs() {
+        let mut l = logic();
+        let p = pixels(&mut l);
+        let bg = at(&p, 544.0, 303.0);
+        for y in (306..323).chain(328..345) {
+            for x in [544.0, 545.0] {
+                assert_eq!(at(&p, x, y as f32), bg, "({x}, {y})");
+            }
+        }
+    }
+
+    /// Of the values that show a typed text the current one stays, then the default; else the nearest.
+    #[test]
+    fn typed_values_keep_the_current_or_default_value_that_shows_the_text() {
+        let mut l = logic();
+        let id = width_id(0);
+        l.vals.edit_plain(&id, 0.613);
+        l.typed(&id, "61%");
+        assert!((l.vals.plain(&id) - 0.613).abs() < 1e-6);
+        let d = l.vals.default_norm(&id);
+        let text = l.vals.text_of(&id, d);
+        l.vals.edit_plain(&id, 0.3);
+        l.typed(&id, &text);
+        assert_eq!(l.vals.norm(&id), d);
+        l.typed(&id, "45%");
+        assert!((l.vals.plain(&id) - 0.45).abs() < 1e-6);
     }
 
     #[test]
