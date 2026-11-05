@@ -315,6 +315,13 @@ fn value_box(ui: &mut Ui, f: Field, r: Rect, text: &str) {
 /// control whose setting was not identified (`Target::Inert`) is greyed out. Without a label it takes the toggle's
 /// square alone.
 fn lamp(ui: &mut Ui, t: Target, on: bool, cx: f32, cy: f32, label: &str, under: bool) {
+    lamp_in(ui, t, on, cx, cy, label, under, Rect::new(0.0, 0.0, W as f32, 10_000.0));
+}
+
+/// [`lamp`], its hit kept inside `room`: a label's width depends on the face the platform draws it in (Barlow on
+/// Linux and macOS), so a switch beside another control stops at that control's edge, not 1 px past its label.
+#[allow(clippy::too_many_arguments)]
+fn lamp_in(ui: &mut Ui, t: Target, on: bool, cx: f32, cy: f32, label: &str, under: bool, room: Rect) {
     let w = ui.c.text_width(SMALL, label);
     let hr = if under {
         Rect::new(cx - 10.0, cy - 7.0, 20.0, 22.0)
@@ -322,7 +329,8 @@ fn lamp(ui: &mut Ui, t: Target, on: bool, cx: f32, cy: f32, label: &str, under: 
         Rect::new(cx - 7.0, cy - 7.0, 14.0, 14.0)
     } else {
         Rect::new(cx - 7.0, cy - 7.0, w + 18.0, 14.0)
-    };
+    }
+    .intersect(&room);
     let mut st = ui.state(hr, &t);
     st.disabled = matches!(t, Target::Inert(_));
     lemon::toggle(ui.c, cx, cy, on, st);
@@ -339,6 +347,12 @@ fn lamp(ui: &mut Ui, t: Target, on: bool, cx: f32, cy: f32, label: &str, under: 
 fn switch(ui: &mut Ui, f: Field, cx: f32, cy: f32, label: &str) {
     let on = ui.get(f) != 0;
     lamp(ui, Target::Switch(f), on, cx, cy, label, false);
+}
+
+/// [`switch`] beside a control whose area starts at `stop`: its hit ends there.
+fn switch_to(ui: &mut Ui, f: Field, cx: f32, cy: f32, label: &str, stop: f32) {
+    let on = ui.get(f) != 0;
+    lamp_in(ui, Target::Switch(f), on, cx, cy, label, false, Rect::new(0.0, 0.0, stop, 10_000.0));
 }
 
 /// A caption at a panel's foot.
@@ -859,7 +873,11 @@ fn filter(ui: &mut Ui, m: usize) {
     ui.hit(Rect::new(52.0, 43.0, 10.0, 25.0), Target::Box(f));
     let stages = ui.get(Field::Head(m, 0));
     for (k, l) in ctl::STAGE_LABELS.into_iter().enumerate() {
-        lamp(ui, Target::Choice(Field::Head(m, 0), k as i32), stages == k as i32, 86.0, 47.0 + 13.8 * k as f32, l, false);
+        // Each stage's hit is its row, 13.8 px on whole pixels, so the rows' hits stay apart.
+        let top = |k: usize| (40.0 + 13.8 * k as f32).round();
+        let row = Rect::new(0.0, top(k), W as f32, top(k + 1) - top(k));
+        let y = 47.0 + 13.8 * k as f32;
+        lamp_in(ui, Target::Choice(Field::Head(m, 0), k as i32), stages == k as i32, 86.0, y, l, false, row);
     }
     switch(ui, Field::Filt(m, 1), 20.0, 98.0, "FLAT");
     switch(ui, Field::Filt(m, 0), 20.0, 116.0, "HQ");
@@ -917,9 +935,11 @@ fn effects(ui: &mut Ui) {
     }
     if unit < 3 {
         let d = unit;
-        switch(ui, Field::Delay(d, 6), 341.0, foot - 32.0, "SERIAL");
-        switch(ui, Field::Delay(d, 5), 341.0, foot - 16.0, "TEMPO");
-        switch(ui, Field::Delay(d, 7), 341.0, foot, "ON");
+        // The switches' hits end at FB's.
+        let stop = 386.0 - 10.0;
+        switch_to(ui, Field::Delay(d, 6), 341.0, foot - 32.0, "SERIAL", stop);
+        switch_to(ui, Field::Delay(d, 5), 341.0, foot - 16.0, "TEMPO", stop);
+        switch_to(ui, Field::Delay(d, 7), 341.0, foot, "ON", stop);
         for (k, x, l) in [(0, 386.0, "FB"), (1, 412.0, "TM"), (2, 438.0, "SO"), (3, 464.0, "VL")] {
             slider(ui, Field::Delay(d, k), x, t0, t1, l);
         }
@@ -933,9 +953,10 @@ fn effects(ui: &mut Ui) {
         let c = (ui.get(f) + 1).to_string();
         value_box(ui, f, Rect::new(329.0, 59.0, 24.0, 22.0), &c);
         ui.label(SMALL, 341.0, 50.0, DIM, "COLOR");
-        // The switches' labels end before the LC slider's lane.
-        switch(ui, Field::Reverb(10), 329.0, foot - 16.0, "TEMPO");
-        switch(ui, Field::Reverb(9), 329.0, foot, "ON");
+        // The switches' labels end before the LC slider's lane, their hits at its hit.
+        let stop = 373.0 - 10.0;
+        switch_to(ui, Field::Reverb(10), 329.0, foot - 16.0, "TEMPO", stop);
+        switch_to(ui, Field::Reverb(9), 329.0, foot, "ON", stop);
         for (k, x, l) in [(0, 373.0, "LC"), (1, 394.0, "HC"), (2, 415.0, "PD"), (3, 436.0, "RS"), (4, 457.0, "DF"), (5, 478.0, "DE"), (6, 499.0, "HD"), (8, 520.0, "VL")] {
             slider(ui, Field::Reverb(k), x, t0, t1, l);
         }
@@ -1250,11 +1271,14 @@ fn harmonics(ui: &mut Ui, m: usize) {
     lamp(ui, Target::Inert("Smooth"), false, 190.0, 335.0, "SMOOTH", false);
 }
 
+/// Where the Options arrow and its hit start.
+const OPTIONS_X: f32 = 163.0;
+
 /// The Options arrow under the view, centred on `cy`; its area starts at the arrow, clear of the GLOBAL switch's label.
 fn options_arrow(ui: &mut Ui, t: Target, cy: f32) {
-    let r = Rect::new(163.0, cy - 7.0, 11.0, 14.0);
+    let r = Rect::new(OPTIONS_X, cy - 7.0, 11.0, 14.0);
     let hot = ui.hot(r, &t);
-    ui.c.fill_polygon(&[(163.0, cy - 2.5), (171.0, cy - 2.5), (167.0, cy + 2.5)], if hot { TEXT } else { DIM });
+    ui.c.fill_polygon(&[(OPTIONS_X, cy - 2.5), (OPTIONS_X + 8.0, cy - 2.5), (OPTIONS_X + 4.0, cy + 2.5)], if hot { TEXT } else { DIM });
     ui.hit(r, t);
 }
 
@@ -1272,8 +1296,9 @@ fn bar(ui: &mut Ui, m: usize, a: usize, p: usize) {
         for (k, (x, l)) in [40.0, 62.0, 84.0, 106.0].into_iter().zip(labels).enumerate() {
             knob(ui, Field::Part(m, a, p, k + 1), x, BAR_Y - 6.0, 8.0, l);
         }
-        switch(ui, Field::Part(m, a, p, 5), 126.0, BAR_Y - 8.0, "TEMPO");
-        switch(ui, Field::Part(m, a, p, 6), 126.0, BAR_Y + 8.0, "GLOBAL");
+        // Their hits end at the Options arrow's.
+        switch_to(ui, Field::Part(m, a, p, 5), 126.0, BAR_Y - 8.0, "TEMPO", OPTIONS_X);
+        switch_to(ui, Field::Part(m, a, p, 6), 126.0, BAR_Y + 8.0, "GLOBAL", OPTIONS_X);
     }
     tools(ui);
 }
