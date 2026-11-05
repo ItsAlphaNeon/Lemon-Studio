@@ -1180,6 +1180,14 @@ pub struct State {
 }
 
 impl State {
+    /// Tells the motions which menus are closed now (Motion::menus_closed): on every tick and before every paint, so
+    /// what closed is known while the canvas still shows it.
+    pub(crate) fn note_closed_menus(&mut self) {
+        let popup = self.playlist.popup.as_ref();
+        let closed = [popup.is_none(), popup.is_none_or(|p| p.sub.is_none()), self.menu_open.is_none(), !self.shown(Win::PluginPalette)];
+        self.motion.get_mut().menus_closed(closed);
+    }
+
     /// The applied `.flstheme` (the stock Dark theme when there is none): its option `override_clips` ("Audio and
     /// automation clips use note colors"; spec: ui/settings-choices.md "Light mode and clip note colours").
     pub fn fl_theme(&self) -> os_theme::FlTheme {
@@ -4124,16 +4132,8 @@ impl App {
     fn motion_tick(&mut self) {
         let s = &mut self.state;
         let drag = s.browser_drag.as_ref().map(|(_, x, y)| (*x, *y));
+        s.note_closed_menus();
         let m = s.motion.get_mut();
-        if s.playlist.popup.is_none() {
-            m.menu_closed(crate::motion::Slot::Popup);
-            m.menu_closed(crate::motion::Slot::Sub);
-        } else if s.playlist.popup.as_ref().is_some_and(|p| p.sub.is_none()) {
-            m.menu_closed(crate::motion::Slot::Sub);
-        }
-        if s.menu_open.is_none() {
-            m.menu_closed(crate::motion::Slot::Dropdown);
-        }
         let tag = m.tag_tick(drag);
         let live = m.damage().to_vec();
         for l in live {
@@ -4506,6 +4506,8 @@ impl App {
 
     /// Paints detached window `w` whole into `canvas` (its native window's), with the popups and boxes opened from it.
     pub fn paint_detached(&mut self, w: Win, canvas: &mut Canvas) {
+        self.state.note_closed_menus();
+        self.state.motion.get_mut().before_paint(canvas, Some(w));
         if w != Win::ChannelRack {
             if let Some(d) = self.state.detached.iter_mut().find(|d| d.0 == w) {
                 d.1 = canvas.size();
@@ -4542,6 +4544,8 @@ impl App {
     }
 
     pub fn paint_region(&mut self, canvas: &mut Canvas, damage: Option<&[Rect]>) {
+        self.state.note_closed_menus();
+        self.state.motion.get_mut().before_paint(canvas, None);
         // The CPU panel's View FPS counts painted frames.
         self.state.cpu.frame();
         // A playlist scroll's moves (`take_damage`) go first; the damage they left is painted with the rest.
@@ -8532,7 +8536,23 @@ impl App {
         true
     }
 
+    /// A row of a menu is about to act: where it is, for the ghost it leaves if that closes the menu (spec:
+    /// ui/animations.md §4.2).
+    fn note_chosen_row(&mut self, a: &Action) {
+        use crate::motion::Slot;
+        let slot = match a {
+            Action::MenuItem(..) => Slot::Dropdown,
+            Action::PlPopup(_) => Slot::Popup,
+            Action::PlPopupSub(_) => Slot::Sub,
+            _ => return,
+        };
+        if let Some(h) = self.hits.iter().rev().find(|h| h.action == *a) {
+            self.state.motion.get_mut().chose(slot, h.rect);
+        }
+    }
+
     pub fn act(&mut self, a: Action) {
+        self.note_chosen_row(&a);
         if let Action::Settings(sa) = a {
             return self.settings_act(sa);
         }
@@ -13012,6 +13032,121 @@ mod tests {
 
     fn hit_rect(app: &App, a: &Action) -> Rect {
         app.hits.iter().rev().find(|h| &h.action == a).map(|h| h.rect).unwrap_or_else(|| panic!("no hit for {a:?}"))
+    }
+
+    /// A menu goes at once when a row is chosen, and the row stays a moment, fading with FL's time constant; Esc fades
+    /// the whole menu in 70 ms; the plugin palette opens over 180 ms (its rows after it at Playful) and closes in 120 ms
+    /// (spec: ui/animations.md §4.2, §4.3). Each frame's partial repaint matches a whole one, and the frame ends as it
+    /// was before. At Off all of it happens at once.
+    #[test]
+    fn closing_menus_and_the_palette_fade() {
+        use crate::anim::Level;
+        use crate::playlist::{self as pl, PItem, Popup};
+        use winit::keyboard::{Key, NamedKey};
+        let size = (1280, 800);
+        let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Playlist];
+        app.mouse_move(5.0, 700.0);
+        crate::anim::set_clock(true);
+        // Paints until nothing moves, showing each frame to `each`; how many frames that took.
+        fn settle(app: &mut App, c: &mut Canvas, whole: &mut Canvas, what: &str, mut each: impl FnMut(&Canvas)) -> usize {
+            let d = app.take_damage();
+            frame_damage(app, c, d);
+            each(c);
+            let mut frames = 0;
+            while app.animating() {
+                crate::anim::advance(16);
+                app.tick();
+                let d = app.take_damage();
+                frame_damage(app, c, d);
+                frame(app, whole, None);
+                assert_same(c, whole, what);
+                each(c);
+                frames += 1;
+                assert!(frames < 60, "{what} ends");
+            }
+            frames
+        }
+        let open_menu = |app: &mut App| {
+            let items = (0..8).map(|i| PItem::new(format!("Item {i}"), pl::Cmd::Nothing)).collect();
+            app.state.playlist.popup = Some(Popup { x: 400.0, y: 300.0, items, sub: None, scroll: [0; 2] });
+            app.invalidate();
+        };
+        let sum = |p: Option<tiny_skia::PremultipliedColorU8>| p.map_or(0, |p| i32::from(p.red()) + i32::from(p.green()) + i32::from(p.blue()));
+        for (level, row_frames, esc_frames, pal_open, pal_close) in [(Level::Playful, 33..=38, 3..=6, 12..=17, 6..=9), (Level::Off, 0..=0, 0..=0, 0..=0, 0..=0)] {
+            crate::anim::set_level(level);
+            app.invalidate();
+            settle(&mut app, &mut c, &mut whole, "before", |_| {});
+            let before = c.pixmap.clone();
+            // Pixels of `r` not as they are in `b` (the hint line changes with the mouse, elsewhere).
+            fn differs(c: &Canvas, b: &tiny_skia::Pixmap, r: Rect) -> usize {
+                let (x0, y0, x1, y1) = (r.x as u32, r.y as u32, r.right() as u32, r.bottom() as u32);
+                (y0..y1).flat_map(|y| (x0..x1).map(move |x| (x, y))).filter(|&(x, y)| c.pixmap.pixel(x, y) != b.pixel(x, y)).count()
+            }
+
+            // Choosing a row.
+            open_menu(&mut app);
+            settle(&mut app, &mut c, &mut whole, "opening", |_| {});
+            let (row, other) = (hit_rect(&app, &Action::PlPopup(2)), hit_rect(&app, &Action::PlPopup(6)));
+            app.mouse_move(row.right() - 6.0, row.cy());
+            settle(&mut app, &mut c, &mut whole, "the bar moving", |_| {});
+            let spot = ((row.right() - 6.0) as u32, row.cy() as u32);
+            let far = ((other.right() - 6.0) as u32, other.cy() as u32);
+            let lit = sum(c.pixmap.pixel(spot.0, spot.1));
+            let base = sum(before.pixel(spot.0, spot.1));
+            assert_ne!(lit, base, "the row is lit");
+            app.mouse_down();
+            app.mouse_up();
+            assert!(app.state.playlist.popup.is_none(), "choosing closes the menu at once");
+            let mut seen = Vec::new();
+            let mut rest = Vec::new();
+            let frames = settle(&mut app, &mut c, &mut whole, "the chosen row fading", |c| {
+                seen.push((sum(c.pixmap.pixel(spot.0, spot.1)) - base) as f32 / (lit - base) as f32);
+                rest.push(sum(c.pixmap.pixel(far.0, far.1)));
+            });
+            assert!(row_frames.contains(&frames), "the ghost's length at {level:?}: {frames} frames");
+            let far_base = sum(before.pixel(far.0, far.1));
+            assert!(rest.iter().all(|&v| v == far_base), "the rest of the menu goes at once: {rest:?}");
+            if level == Level::Playful {
+                assert!(seen[0] > 0.9, "the row is there on the first frame: {seen:?}");
+                assert!((0.5..0.72).contains(&seen[4]), "about 60 % at 64 ms: {seen:?}");
+                assert!((0.13..0.3).contains(&seen[14]), "about 20 % at 224 ms: {seen:?}");
+                assert!(seen.windows(2).all(|w| w[1] <= w[0] + 0.01), "it only fades: {seen:?}");
+            }
+            assert_eq!(differs(&c, &before, row.union(&other)), 0, "the ghost leaves nothing behind");
+
+            // Sent away with Esc.
+            open_menu(&mut app);
+            settle(&mut app, &mut c, &mut whole, "opening", |_| {});
+            app.key(&Key::Named(NamedKey::Escape), false, false);
+            assert!(app.state.playlist.popup.is_none(), "Esc closes the menu");
+            let frames = settle(&mut app, &mut c, &mut whole, "a menu fading away", |_| {});
+            assert!(esc_frames.contains(&frames), "the fade's length at {level:?}: {frames} frames");
+            assert_eq!(differs(&c, &before, row.union(&other)), 0, "the closed menu leaves nothing behind");
+
+            // The palette.
+            app.mouse_move(300.0, 200.0);
+            settle(&mut app, &mut c, &mut whole, "the mouse", |_| {});
+            let before = c.pixmap.clone();
+            app.toggle_plugin_palette();
+            let frames = settle(&mut app, &mut c, &mut whole, "the palette opening", |_| {});
+            assert!(pal_open.contains(&frames), "the palette's opening at {level:?}: {frames} frames");
+            let pal_rect = crate::views::plugin_palette::bounds(&app.state);
+            assert!(hit_rect(&app, &Action::CloseWin(Win::PluginPalette)).w > 0.0, "it is there");
+            app.toggle_plugin_palette();
+            assert!(!app.state.shown(Win::PluginPalette), "it closes at once");
+            let frames = settle(&mut app, &mut c, &mut whole, "the palette closing", |_| {});
+            assert!(pal_close.contains(&frames), "the palette's closing at {level:?}: {frames} frames");
+            let n = differs(&c, &before, pal_rect);
+            assert_eq!(n, 0, "the closed palette leaves nothing behind");
+        }
+        crate::anim::set_level(Level::Polished);
+        crate::anim::set_clock(false);
     }
 
     fn click(app: &mut App, c: &mut Canvas, r: Rect) {

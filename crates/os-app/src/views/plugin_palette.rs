@@ -13,6 +13,7 @@ use os_ui::{kit, Font, Rect};
 use super::{FrameInfo, Look};
 use crate::app::{Action, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
+use crate::motion::{Motion, Slot};
 use crate::plugin_palette::{self as pal, PalAct, Row, KINDS, VIEWS};
 
 /// Shortest the window gets in a short workspace.
@@ -62,6 +63,8 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     let p = &s.palette;
     let lemon = super::lemon(ui);
     let keys = pal::has_keys(s);
+    // It appears as a menu does (spec: ui/animations.md §4.3), growing from where it opened: its top left.
+    let draw = s.motion.borrow_mut().menu_begin(ui.c, Slot::Palette, 0, win, (win.x, win.y), 1.0);
     // The frame: a rounded tool window, a flat title bar with a hairline under it (Lemon, spec: ui/lemon-design.md §3).
     if lemon {
         lk::outlined(ui.c, win, lk::r_panel(t), t.window_border, t.window_body);
@@ -86,6 +89,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     pills(ui, s);
     list(ui, s);
     footer(ui, s);
+    Motion::menu_end(ui.c, draw);
 }
 
 /// The search field (§6.2): a magnifier, the text or the placeholder, the caret while the palette has the keyboard,
@@ -194,6 +198,9 @@ fn list(ui: &mut Ui, s: &State) {
     let lh = ui.c.line_height(name_f);
     let slh = ui.c.line_height(small);
     ui.c.push_clip(area);
+    // The rows showing, in order, for their fade at Playful (spec: ui/animations.md §4.3).
+    let mut showing = 0;
+    let mut fading = false;
     for (i, row) in rows.iter().enumerate() {
         let ry = area.y + tops[i] - scroll;
         let h = row.height();
@@ -201,6 +208,8 @@ fn list(ui: &mut Ui, s: &State) {
             continue;
         }
         let r = Rect::new(area.x, ry, area.w, h);
+        let shows = s.motion.borrow().palette_row(showing);
+        showing += 1;
         match row {
             Row::Head { label, major: true } => {
                 let f = Font::new(14).bold();
@@ -241,8 +250,15 @@ fn list(ui: &mut Ui, s: &State) {
                 ui.c.text_clip(name_f, nx, (r.cy() - lh / 2.0).round(), dx - 10.0 - nx, ink, &e.label);
             }
         }
+        if shows < 1.0 {
+            ui.c.fill_rect(r, t.rack_inset.with_alpha(((1.0 - shows) * 255.0) as u8));
+            fading = true;
+        }
     }
     ui.c.pop_clip();
+    if fading {
+        s.motion.borrow_mut().live(area);
+    }
 }
 
 /// The footer (§6.2): the count, then Scan, Manage and the browser's Plugin library at the right.

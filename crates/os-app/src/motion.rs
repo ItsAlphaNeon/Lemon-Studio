@@ -14,17 +14,19 @@
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
-use os_ui::{Canvas, Layer, Rect};
+use os_ui::{Canvas, Layer, Rect, Sprite};
 
 use crate::anim::{self, Level, Pendulum, Spring, Tween};
 use crate::app::Win;
 
-/// The menus that can be open at once: a popup menu, its submenu, and a menu bar dropdown.
+/// What can be open at once and appears and goes the same way: a popup menu, its submenu, a menu bar dropdown and the
+/// plugin palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     Popup = 0,
     Sub = 1,
     Dropdown = 2,
+    Palette = 3,
 }
 
 /// A popup menu opens in 120 ms, a submenu in 100 ms (spec: ui/animations.md §4.2).
@@ -34,6 +36,20 @@ const SUB_OPEN: Duration = Duration::from_millis(100);
 const MENU_SLIDE: f32 = 6.0;
 const SUB_SLIDE: f32 = 8.0;
 const MENU_ZOOM: f32 = 0.97;
+/// A menu sent away (Esc, a click elsewhere) fades in 70 ms; one chosen from goes at once and leaves the chosen row
+/// fading with FL's time constant (§4.2). Under 2 % it is gone.
+const MENU_CLOSE: Duration = Duration::from_millis(70);
+const ROW_TAU: Duration = Duration::from_millis(145);
+const ROW_GONE: f64 = 0.02;
+/// The plugin palette opens in 180 ms from 96 % and closes in 120 ms to 97 % (§4.3). At Playful its rows also fade in
+/// one after another, 12 ms apart for the first ten, over 120 ms each.
+const PALETTE_OPEN: Duration = Duration::from_millis(180);
+const PALETTE_ZOOM: f32 = 0.96;
+const PALETTE_CLOSE: Duration = Duration::from_millis(120);
+const PALETTE_CLOSE_ZOOM: f32 = 0.97;
+const ROW_STAGGER: f64 = 0.012;
+const ROW_STAGGERED: usize = 10;
+const ROW_FADE: f64 = 0.120;
 /// The highlight bar's spring: critically damped, settled in about 60 ms.
 const GLIDE_HZ: f64 = 15.5;
 /// Hover helpers fade in over 120 ms and out over 200 ms (§4.6).
@@ -59,8 +75,14 @@ pub struct Motion {
     /// Where motions that still move were drawn by the last paint of each window (logical px of that window), and
     /// when.
     live: Vec<Live>,
-    menus: [Option<Opened>; 3],
-    glides: [Option<Glide>; 3],
+    menus: [Option<Opened>; 4],
+    glides: [Option<Glide>; 4],
+    /// The menu row just chosen: its menu and where it is (window px). It leaves a ghost if that closes the menu.
+    chosen: Option<(Slot, Rect)>,
+    /// What closed and has its picture taken from the last frame when its window next paints (`before_paint`).
+    takes: Vec<Take>,
+    /// Pictures of what closed, fading over the frame.
+    ghosts: Vec<Ghost>,
     tag: Option<Tag>,
     /// The tag of a cancelled drag, falling away.
     fall: Option<Fall>,
@@ -70,9 +92,60 @@ pub struct Motion {
     sweeps: Option<Instant>,
 }
 
+/// An open menu: what it is, when it opened, where it was last painted (window px) and in which window.
 struct Opened {
     key: u64,
     at: Instant,
+    rect: Rect,
+    win: Option<Win>,
+}
+
+/// How a picture of something closed goes away.
+#[derive(Debug, Clone, Copy)]
+enum Fade {
+    /// A chosen menu row: an exponential fade.
+    Row,
+    /// A menu or the palette: faded out over this long, shrinking to this much of its size.
+    Close(Duration, f32),
+}
+
+/// A picture to take from window `win`'s last frame.
+struct Take {
+    r: Rect,
+    win: Option<Win>,
+    fade: Fade,
+    noted: Instant,
+}
+
+/// A picture of something closed, over the frame of window `win`, since `at`.
+struct Ghost {
+    sprite: Sprite,
+    r: Rect,
+    win: Option<Win>,
+    fade: Fade,
+    at: Instant,
+}
+
+impl Ghost {
+    /// How it shows at `now`: its opacity and size. None: it is gone.
+    fn show(&self, now: Instant) -> Option<(f32, f32)> {
+        if anim::instant() {
+            return None;
+        }
+        let t = since(now, self.at);
+        let level = anim::level();
+        match self.fade {
+            Fade::Row => {
+                let a = (-t / level.dur(ROW_TAU).as_secs_f64()).exp();
+                (a > ROW_GONE).then_some((a as f32, 1.0))
+            }
+            Fade::Close(dur, zoom) => {
+                let u = t / level.dur(dur).as_secs_f64();
+                let e = anim::ease_out(u) as f32;
+                (u < 1.0).then_some((1.0 - e, 1.0 + (zoom - 1.0) * e))
+            }
+        }
+    }
 }
 
 /// A highlight bar: x, y, width, height, each on its spring; the row it goes to and when it was last stepped.
@@ -160,6 +233,9 @@ impl Motion {
         if self.flash.as_ref().is_some_and(|f| since(now, f.at) > FLASH.as_secs_f64()) {
             self.flash = None;
         }
+        // Of a window that was closed meanwhile.
+        self.takes.retain(|t| since(now, t.noted) < 1.0);
+        self.ghosts.retain(|g| since(now, g.at) < 1.0);
     }
 
     /// Something drawn in `r` (of the window being painted) still moves: the next frame paints it again.
@@ -184,26 +260,113 @@ impl Motion {
 
     // ------------------------------------------------------------------------------------------------ menus
 
-    /// The menu in `slot` closed (or was never open): it opens afresh next time.
-    pub fn menu_closed(&mut self, slot: Slot) {
-        self.menus[slot as usize] = None;
-        self.glides[slot as usize] = None;
+    /// Row `r` (window px) of the menu in `slot` was chosen. If that closes the menu, the row stays a moment as a
+    /// fading picture (FL's ghost, spec: ui/animations.md §4.2).
+    pub fn chose(&mut self, slot: Slot, r: Rect) {
+        self.chosen = Some((slot, r));
+    }
+
+    /// Which of the `Slot`s are closed now. What was open and painted closes: it opens afresh next time, and unless it
+    /// was closed by choosing from it, its picture fades away. Choosing closes a menu and any others open at once, and
+    /// only the chosen row fades. At Off everything just goes.
+    pub fn menus_closed(&mut self, closed: [bool; 4]) {
+        let now = anim::now();
+        let chosen = self.chosen.take();
+        let was_open = |s: &Self, c: Slot| s.menus[c as usize].as_ref().map(|o| o.win);
+        let picked = chosen.filter(|c| closed[c.0 as usize]).and_then(|c| was_open(self, c.0).map(|win| (c.1, win)));
+        let quiet = picked.is_some() || anim::instant();
+        for (i, shut) in closed.into_iter().enumerate() {
+            if !shut {
+                continue;
+            }
+            self.glides[i] = None;
+            let Some(o) = self.menus[i].take() else { continue };
+            if !quiet {
+                let fade = if i == Slot::Palette as usize { Fade::Close(PALETTE_CLOSE, PALETTE_CLOSE_ZOOM) } else { Fade::Close(MENU_CLOSE, 1.0) };
+                self.takes.push(Take { r: o.rect, win: o.win, fade, noted: now });
+            }
+        }
+        if let Some((r, win)) = picked
+            && !anim::instant()
+        {
+            self.takes.push(Take { r, win, fade: Fade::Row, noted: now });
+        }
+    }
+
+    /// Window `win` is about to paint and its canvas still shows the last frame: the pictures noted for it are taken
+    /// now. Their fades count from here, so a chosen item that takes long to run doesn't use them up.
+    pub fn before_paint(&mut self, c: &mut Canvas, win: Option<Win>) {
+        if self.takes.iter().all(|t| t.win != win) {
+            return;
+        }
+        let now = anim::now();
+        let (here, rest): (Vec<Take>, Vec<Take>) = std::mem::take(&mut self.takes).into_iter().partition(|t| t.win == win);
+        self.takes = rest;
+        for t in here {
+            let l = c.begin_layer(t.r, false);
+            if let Some(sprite) = c.take_layer(l) {
+                self.ghosts.push(Ghost { sprite, r: t.r, win, fade: t.fade, at: now });
+            }
+        }
+    }
+
+    /// Draws what is fading over the frame of the window being painted, last of all.
+    pub fn paint_ghosts(&mut self, c: &mut Canvas) {
+        let now = anim::now();
+        let win = self.win;
+        let live = &mut self.live;
+        self.ghosts.retain(|g| {
+            if g.win != win {
+                return true;
+            }
+            let Some((alpha, zoom)) = g.show(now) else { return false };
+            c.sprite(&g.sprite, g.r.cx(), g.r.cy(), 0.0, zoom, 0.0, 0.0, alpha);
+            live.push(Live { win, r: g.r.outset(1.0), at: now });
+            true
+        });
+    }
+
+    /// How far row `i` of those showing in the plugin palette has faded in, 0 to 1: at Playful they come one after
+    /// another as the palette opens (spec: ui/animations.md §4.3).
+    pub fn palette_row(&self, i: usize) -> f32 {
+        if anim::instant() || anim::level() != Level::Playful {
+            return 1.0;
+        }
+        let Some(o) = &self.menus[Slot::Palette as usize] else { return 1.0 };
+        let t = since(anim::now(), o.at) - i.min(ROW_STAGGERED) as f64 * ROW_STAGGER;
+        anim::ease_out(t / ROW_FADE) as f32
     }
 
     /// Menu `slot`, which is `key` (its entries and where it opened), is about to be painted in `r` (the canvas's
     /// logical px, `k` times the window's), opened from `anchor`. While it appears, it is painted into a layer that
     /// `menu_end` draws faded, slid and scaled (spec: ui/animations.md §4.2): Subtle fades it in, Polished slides it
-    /// from the anchor too, Playful also grows it from 97 %. A submenu slides out sideways from its row. At Off it is
-    /// there at once.
+    /// from the anchor too, Playful also grows it from 97 %. A submenu slides out sideways from its row. The plugin
+    /// palette (§4.3) fades in, and from Polished up grows from 96 %. At Off it is there at once.
     pub fn menu_begin(&mut self, c: &mut Canvas, slot: Slot, key: u64, r: Rect, anchor: (f32, f32), k: f32) -> MenuDraw {
         let now = anim::now();
         let i = slot as usize;
-        if self.menus[i].as_ref().is_none_or(|o| o.key != key) {
-            self.menus[i] = Some(Opened { key, at: now });
-        }
+        let rect = {
+            let o = r.outset(1.0);
+            Rect::new(o.x * k, o.y * k, o.w * k, o.h * k)
+        };
+        let win = self.win;
+        let at = match &mut self.menus[i] {
+            Some(o) if o.key == key => {
+                o.rect = rect;
+                o.win = win;
+                o.at
+            }
+            m => {
+                *m = Some(Opened { key, at: now, rect, win });
+                now
+            }
+        };
         let level = anim::level();
-        let full = if slot == Slot::Sub { SUB_OPEN } else { MENU_OPEN };
-        let at = self.menus[i].as_ref().map_or(now, |o| o.at);
+        let full = match slot {
+            Slot::Sub => SUB_OPEN,
+            Slot::Palette => PALETTE_OPEN,
+            Slot::Popup | Slot::Dropdown => MENU_OPEN,
+        };
         let tw = Tween::new(at, level.dur(full));
         let pivot = (anchor.0.clamp(r.x, r.right()), anchor.1.clamp(r.y, r.bottom()));
         let mut d = MenuDraw { layer: None, alpha: 1.0, zoom: 1.0, dx: 0.0, dy: 0.0, pivot };
@@ -212,19 +375,24 @@ impl Motion {
         }
         let u = tw.eased(now) as f32;
         d.alpha = u;
-        if level >= Level::Polished {
-            if slot == Slot::Sub {
-                // Out of its row: from the left when it opens to the right of it.
+        match slot {
+            // Out of its row: from the left when it opens to the right of it.
+            Slot::Sub if level >= Level::Polished => {
                 let side = if r.cx() >= anchor.0 { 1.0 } else { -1.0 };
                 d.dx = -SUB_SLIDE * (1.0 - u) * side;
-            } else {
-                // Away from where it was opened: a menu below its anchor starts higher up.
-                let side = if r.cy() >= anchor.1 { 1.0 } else { -1.0 };
-                d.dy = -MENU_SLIDE * (1.0 - u) * side;
             }
-        }
-        if level == Level::Playful && slot != Slot::Sub {
-            d.zoom = MENU_ZOOM + (1.0 - MENU_ZOOM) * u;
+            Slot::Palette if level >= Level::Polished => d.zoom = PALETTE_ZOOM + (1.0 - PALETTE_ZOOM) * u,
+            Slot::Popup | Slot::Dropdown => {
+                // Away from where it was opened: a menu below its anchor starts higher up.
+                if level >= Level::Polished {
+                    let side = if r.cy() >= anchor.1 { 1.0 } else { -1.0 };
+                    d.dy = -MENU_SLIDE * (1.0 - u) * side;
+                }
+                if level == Level::Playful {
+                    d.zoom = MENU_ZOOM + (1.0 - MENU_ZOOM) * u;
+                }
+            }
+            _ => {}
         }
         let reach = r.outset(SUB_SLIDE + 2.0);
         self.live(Rect::new(reach.x * k, reach.y * k, reach.w * k, reach.h * k));

@@ -296,6 +296,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if over_dialog && here {
         playlist::paint_overlays(ui, s);
     }
+    s.motion.borrow_mut().paint_ghosts(ui.c);
     overlays
 }
 
@@ -326,6 +327,7 @@ pub fn paint_detached(ui: &mut Ui, s: &State, f: &FrameInfo, w: Win) -> usize {
         browser::paint_ghost(ui, s);
     }
     browser::paint_fall(ui, s, Some(w));
+    s.motion.borrow_mut().paint_ghosts(ui.c);
     overlays
 }
 
