@@ -740,7 +740,9 @@ impl Ui<'_> { // This code is a part of L e m o n S t u d i o.
         let (h0, b0, l0, mouse) = (self.hits.len(), self.bars.len(), self.live.len(), self.mouse);
         self.mouse = (mouse.0 / k, mouse.1 / k);
         let old = self.c.rescale(scale);
+        self.k = k;
         paint(self, k);
+        self.k = 1.0;
         self.c.unscale(old);
         self.mouse = mouse;
         let up = |r: Rect| Rect::new(r.x * k, r.y * k, r.w * k, r.h * k);
@@ -771,6 +773,9 @@ pub struct Ui<'a> {
     live: &'a mut Vec<(Live, Rect)>,
     /// Square toolbar buttons are drawn flat (the Toolbars menu, spec: ui/toolbar-menu.md §3).
     pub flat: bool,
+    pub motion: &'a std::cell::RefCell<crate::motion::Motion>,
+    /// How many of the window's px one of the canvas's is now (`scaled`).
+    pub k: f32,
 }
 
 impl Ui<'_> {
@@ -782,6 +787,13 @@ impl Ui<'_> {
     /// Whether `action` is held down by the left button, wherever the cursor is (a drag that began on it).
     pub fn held(&self, action: &Action) -> bool {
         self.pressed.as_ref() == Some(action)
+    }
+
+    /// How far the hover look of what is `key`, drawn in `r`, has come, 0 to 1: it fades in over `times.0` s and out
+    /// over `times.1` s (spec: ui/animations.md §4.6), at once at Off.
+    pub fn hover_fade(&self, key: u64, on: bool, r: Rect, times: (f64, f64)) -> f32 {
+        let k = self.k;
+        self.motion.borrow_mut().hover_timed(key, on, Rect::new(r.x * k, r.y * k, r.w * k, r.h * k), times)
     }
 
     /// Whether the mouse is over `rect` and last frame's topmost hit there was registered by this window
@@ -1177,6 +1189,9 @@ pub struct State {
     pub overlay_on: Option<Win>,
     /// The surface a drag between windows is over (`App::cross_drag`): its ghost is drawn there and it drops there.
     pub drag_on: Option<Win>,
+    /// Where a browser drag would drop now: a window and a part of it (window px), which glows (spec: ui/animations.md
+    /// §4.6).
+    pub drop_on: Option<(Win, Rect)>,
 }
 
 impl State {
@@ -1600,6 +1615,7 @@ impl App {
                 surface: None,
                 overlay_on: None,
                 drag_on: None,
+                drop_on: None,
             },
             theme: load_theme(),
             transport,
@@ -4534,6 +4550,8 @@ impl App {
                 keep: &mut app.keep,
                 live: &mut app.live,
                 flat: app.state.toolbar.flat,
+                motion: &app.state.motion,
+                k: 1.0,
             };
             let overlays = views::paint_detached(&mut ui, &app.state, &info, w);
             app.keep.next.clear();
@@ -4603,6 +4621,8 @@ impl App {
             keep: &mut self.keep,
             live: &mut self.live,
             flat: self.state.toolbar.flat,
+            motion: &self.state.motion,
+            k: 1.0,
         };
         let overlays = views::paint(&mut ui, &self.state, &info);
         if self.state.cables.get_mut().take_slowed() {
@@ -13242,6 +13262,149 @@ mod tests {
         assert_eq!(jump(&mut app, &mut c, Level::Off, 128, knob, set_pan, true, "at Off").0, 0);
         assert_eq!(jump(&mut app, &mut c, Level::Polished, 0, knob, set_pan, true, "at Smoothing 0").0, 0);
         set_slider(&SMOOTHING, 128);
+        crate::anim::set_level(Level::Polished);
+        crate::anim::set_clock(false);
+    }
+
+    /// A browser drag lights where it would drop: a playlist track for a pattern, fading in and out as a hover helper
+    /// does, and nothing on a part of the window that takes nothing; dropping or Esc lets the glow go. An effect lights
+    /// the mixer slot under the mouse (spec: ui/animations.md §4.6). Each frame's partial repaint matches a whole one.
+    #[test]
+    fn a_browser_drag_lights_where_it_would_drop() {
+        use crate::anim::Level;
+        use crate::mixer::MHit;
+        use crate::views::browser::{rows, Item};
+        let size = (1600, 900);
+        let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let r0 = hit_rect(&app, &Action::BrowserTab(1));
+        click(&mut app, &mut c, r0);
+        let pi = rows(&app.state).iter().position(|r| r.item == Item::Pattern(1)).expect("pattern row");
+        let src = hit_rect(&app, &Action::BrowserRow(pi));
+        let grid = app.pl_grid().expect("grid");
+        crate::anim::set_clock(true);
+        crate::anim::set_level(Level::Polished);
+        fn settle(app: &mut App, c: &mut Canvas, whole: &mut Canvas, what: &str, mut each: impl FnMut(&Canvas)) -> usize {
+            let d = app.take_damage();
+            frame_damage(app, c, d);
+            let mut frames = 0;
+            while app.state.motion.borrow().moving() {
+                crate::anim::advance(16);
+                app.tick();
+                let d = app.take_damage();
+                frame_damage(app, c, d);
+                frame(app, whole, None);
+                assert_same(c, whole, what);
+                each(c);
+                frames += 1;
+                assert!(frames < 90, "{what} ends");
+            }
+            frames
+        }
+        settle(&mut app, &mut c, &mut whole, "before", |_| {});
+        app.mouse_move(src.cx(), src.cy());
+        app.mouse_down();
+        app.mouse_move(src.cx() + 30.0, src.cy() + 10.0);
+        settle(&mut app, &mut c, &mut whole, "the tag sets off", |_| {});
+        assert!(app.state.drop_on.is_none(), "the browser takes nothing");
+        let (spot_x, spot_y) = (grid.cx() as u32, grid.y as u32 + 8);
+        let before = c.pixmap.pixel(spot_x, spot_y);
+        app.mouse_move(grid.cx() + 200.0, grid.y + 8.0);
+        let target = app.state.drop_on.expect("over the playlist");
+        assert_eq!(target.0, Win::Playlist);
+        assert!(target.1.contains(grid.cx(), grid.y + 8.0) && target.1.h < 120.0, "a track: {:?}", target.1);
+        let mut seen = 0;
+        let frames = settle(&mut app, &mut c, &mut whole, "the glow fading in", |c| seen += usize::from(c.pixmap.pixel(spot_x, spot_y) != before));
+        assert!(frames >= 7, "it fades in: {frames} frames");
+        assert!(seen > 3, "the wash shows: {seen}");
+        let on = c.pixmap.pixel(spot_x, spot_y);
+        assert_ne!(on, before, "the track glows");
+        // Off the playlist, nothing takes it: it fades out.
+        app.mouse_move(src.cx() + 30.0, src.cy() + 10.0);
+        assert!(app.state.drop_on.is_none());
+        let frames = settle(&mut app, &mut c, &mut whole, "the glow fading out", |_| {});
+        assert!(frames >= 12, "it fades out: {frames} frames");
+        assert_eq!(c.pixmap.pixel(spot_x, spot_y), before, "and leaves nothing");
+        // Released over the playlist, it goes too.
+        app.mouse_move(grid.cx() + 200.0, grid.y + 8.0);
+        settle(&mut app, &mut c, &mut whole, "the glow again", |_| {});
+        app.mouse_up();
+        assert!(app.state.drop_on.is_none(), "dropped");
+        settle(&mut app, &mut c, &mut whole, "the glow after the drop", |_| {});
+        // An effect lights the slot under the mouse in the mixer.
+        crate::anim::set_level(Level::Off);
+        app.state.z = vec![Win::Mixer];
+        app.invalidate();
+        settle(&mut app, &mut c, &mut whole, "the mixer", |_| {});
+        let (name, arrow) = (hit_rect(&app, &Action::Mix(MHit::SlotName(2))), hit_rect(&app, &Action::Mix(MHit::SlotArrow(2))));
+        app.drag = Some(Drag::Browser { item: Item::Effect(0), label: "Effect".into(), m0: (0.0, 0.0), started: true });
+        app.mouse_move(name.cx(), name.cy());
+        assert_eq!(app.state.drop_on, Some((Win::Mixer, arrow.union(&name))), "the slot under the mouse");
+        app.drag = None;
+        app.state.browser_drag = None;
+        app.state.drop_on = None;
+        crate::anim::set_level(Level::Polished);
+        crate::anim::set_clock(false);
+    }
+
+    /// A toolbar button's hover look fades in over 145 ms and out over 340 ms, and a mixer slot's arrow over 120 and
+    /// 200 ms, each after any time at rest (spec: ui/animations.md §4.6). At Off they switch at once.
+    #[test]
+    fn toolbar_buttons_and_slot_arrows_fade() {
+        use crate::anim::Level;
+        use crate::mixer::MHit;
+        let size = (1600, 900);
+        let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut c, None);
+        let button = hit_rect(&app, &Action::Metronome);
+        let arrow = hit_rect(&app, &Action::Mix(MHit::SlotArrow(0)));
+        crate::anim::set_clock(true);
+        // Goes to (`x`, `y`) and paints until nothing moves; how many frames that took.
+        let mut go = |app: &mut App, c: &mut Canvas, x: f32, y: f32, what: &str| {
+            app.mouse_move(x, y);
+            let d = app.take_damage();
+            frame_damage(app, c, d);
+            let mut frames = 0;
+            while app.state.motion.borrow().moving() {
+                crate::anim::advance(16);
+                app.tick();
+                let d = app.take_damage();
+                frame_damage(app, c, d);
+                frame(app, &mut whole, None);
+                assert_same(c, &whole, what);
+                frames += 1;
+                assert!(frames < 60, "{what} ends");
+            }
+            frames
+        };
+        let away = (700.0, 880.0);
+        crate::anim::set_level(Level::Polished);
+        go(&mut app, &mut c, away.0, away.1, "away");
+        let frames = go(&mut app, &mut c, button.cx(), button.cy(), "a button lighting");
+        assert!((8..=11).contains(&frames), "about 145 ms: {frames} frames");
+        // Past a long rest it still fades out.
+        crate::anim::advance(5000);
+        let frames = go(&mut app, &mut c, away.0, away.1, "a button going out");
+        assert!((20..=23).contains(&frames), "about 340 ms: {frames} frames");
+        let frames = go(&mut app, &mut c, arrow.cx(), arrow.cy(), "a slot's arrow brightening");
+        assert!((7..=9).contains(&frames), "about 120 ms: {frames} frames");
+        let frames = go(&mut app, &mut c, away.0, away.1, "a slot's arrow dimming");
+        assert!((12..=14).contains(&frames), "about 200 ms: {frames} frames");
+        crate::anim::set_level(Level::Off);
+        assert_eq!(go(&mut app, &mut c, button.cx(), button.cy(), "at Off"), 0);
+        assert_eq!(go(&mut app, &mut c, away.0, away.1, "at Off"), 0);
         crate::anim::set_level(Level::Polished);
         crate::anim::set_clock(false);
     }

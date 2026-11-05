@@ -235,6 +235,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::PluginPalette => ui.part(Seg::Win(win), a, |ui| plugin_palette::paint(ui, s, f)),
             _ => {}
         }
+        browser::paint_drop_glows(ui, s, win);
         ui.c.pop_clip();
         ui.win = None;
     }
@@ -314,6 +315,7 @@ pub fn paint_detached(ui: &mut Ui, s: &State, f: &FrameInfo, w: Win) -> usize {
         Win::ChannelRack => rack::paint(ui, s, f),
         _ => {}
     }
+    browser::paint_drop_glows(ui, s, w);
     ui.c.pop_clip();
     ui.win = None;
     let overlays = ui.hit_count();
@@ -574,9 +576,19 @@ pub fn tool_button(ui: &mut Ui, r: Rect, icon: Icon, on: bool, action: Action, h
     }
     let hov = ui.hit(r, action.clone(), hint);
     let down = ui.down(r, &action);
-    let look = if on { Look::On } else if down { Look::Hot } else if hov { Look::Hover } else { Look::Off };
+    let look = if on { Look::On } else if down { Look::Hot } else { Look::Off };
     let c = tool_face(ui, r, look);
-    icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), c);
+    let place = Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0);
+    icons::draw(ui.c, icon, place, c);
+    // Its hover look comes and goes over that (spec: ui/animations.md §4.6).
+    let key = crate::motion::key((r.x.to_bits(), r.y.to_bits()));
+    let glow = ui.hover_fade(key, hov && !on && !down, r, crate::motion::BUTTON_HOVER);
+    if glow > 0.0 && !on && !down {
+        let l = ui.c.begin_layer(r.outset(1.0), false);
+        let c = tool_face(ui, r, Look::Hover);
+        icons::draw(ui.c, icon, place, c);
+        ui.c.end_layer(l, glow);
+    }
 }
 
 /// A sunken panel (hint bar, monitors): flat fill inside a 1 px dark border.

@@ -1020,6 +1020,17 @@ pub fn paint_ghost(ui: &mut Ui, s: &State) {
     }
 }
 
+/// The glow on where a browser drag would drop in window `win` (spec: ui/animations.md §4.6): a faint wash of the
+/// accent colour with an outline, drawn with the window so that what covers the window covers it.
+pub fn paint_drop_glows(ui: &mut Ui, s: &State, win: crate::app::Win) {
+    let glows = s.motion.borrow_mut().drop_glows(s.drop_on, win);
+    for (r, a) in glows {
+        let c = ui.t.accent;
+        ui.c.fill_rect(r, c.with_alpha((a * 26.0) as u8));
+        ui.c.stroke_rrect(r.inset(0.75), 2.0, 1.5, c.with_alpha((a * 200.0) as u8));
+    }
+}
+
 /// The tag of a cancelled drag in window `win` (None: the main one), falling away (spec: ui/animations.md §4.1).
 pub fn paint_fall(ui: &mut Ui, s: &State, win: Option<crate::app::Win>) {
     let fall = s.motion.borrow_mut().falling(win);

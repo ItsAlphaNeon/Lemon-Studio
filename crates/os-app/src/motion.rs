@@ -64,6 +64,9 @@ const GLIDE_HZ: f64 = 15.5;
 /// Hover helpers fade in over 120 ms and out over 200 ms (§4.6).
 const HOVER_IN: f64 = 0.120;
 const HOVER_OUT: f64 = 0.200;
+/// Toolbar buttons light in 145 ms and go out in 340 ms (FL's, §2.2).
+pub const BUTTON_HOVER: (f64, f64) = (0.145, 0.340);
+pub const SLOT_HOVER: (f64, f64) = (HOVER_IN, HOVER_OUT);
 /// A functional flash lasts 400 ms and peaks at 60 % (§4.7).
 pub const FLASH: Duration = Duration::from_millis(400);
 const FLASH_PEAK: f32 = 0.6;
@@ -96,6 +99,8 @@ pub struct Motion {
     drawn: HashMap<u64, Drawn>,
     /// Something is being dragged with the mouse: controls follow closely.
     dragging: bool,
+    /// Where a drag would drop, and where it just would have, glowing.
+    glows: Vec<Glow>,
     tag: Option<Tag>,
     /// The tag of a cancelled drag, falling away.
     fall: Option<Fall>,
@@ -103,6 +108,15 @@ pub struct Motion {
     flash: Option<Flash>,
     /// When loading sweeps started (they all go in step).
     sweeps: Option<Instant>,
+}
+
+/// A drop target's glow, in window `win`: its opacity, 0 to 1, and which way it goes.
+struct Glow {
+    win: Win,
+    r: Rect,
+    val: f64,
+    on: bool,
+    last: Instant,
 }
 
 /// A control's picture: the value it shows, the value it goes to, and when it was last stepped.
@@ -249,7 +263,8 @@ impl Motion {
         self.win = win;
         self.live.retain(|l| l.win != win);
         let now = anim::now();
-        self.hovers.retain(|h| since(now, h.last) < 1.0);
+        // One still on is kept while it rests unpainted, to fade out when the mouse leaves it.
+        self.hovers.retain(|h| since(now, h.last) < if h.on { 60.0 } else { 1.0 });
         if self.flash.as_ref().is_some_and(|f| since(now, f.at) > FLASH.as_secs_f64()) {
             self.flash = None;
         }
@@ -571,6 +586,11 @@ impl Motion {
     /// over it (`on`) or not: 120 ms in, 200 ms out from Subtle up, at once at Off (spec: ui/animations.md §4.6).
     /// `area` (window px) is painted again while it fades.
     pub fn hover(&mut self, key: u64, on: bool, area: Rect) -> f32 {
+        self.hover_timed(key, on, area, (HOVER_IN, HOVER_OUT))
+    }
+
+    /// As `hover`, fading in over `times.0` s and out over `times.1` s.
+    pub fn hover_timed(&mut self, key: u64, on: bool, area: Rect, times: (f64, f64)) -> f32 {
         let now = anim::now();
         let pos = self.hovers.iter().position(|h| h.key == key);
         if anim::instant() {
@@ -595,7 +615,7 @@ impl Motion {
         }
         let dt = since(now, h.last);
         h.last = now;
-        h.val = if on { (h.val + dt / HOVER_IN).min(1.0) } else { (h.val - dt / HOVER_OUT).max(0.0) };
+        h.val = if on { (h.val + dt / times.0).min(1.0) } else { (h.val - dt / times.1).max(0.0) };
         let v = h.val;
         if (on && v < 1.0) || (!on && v > 0.0) {
             self.live(area);
@@ -604,6 +624,49 @@ impl Motion {
             self.hovers.swap_remove(i);
         }
         anim::ease_out(v) as f32
+    }
+
+    /// The glows to draw over window `win`: the drop target `target` (a window and a part of it) fades in as a hover
+    /// helper does, the one it was fades out (spec: ui/animations.md §4.6). At Off the target just shows.
+    pub fn drop_glows(&mut self, target: Option<(Win, Rect)>, win: Win) -> Vec<(Rect, f32)> {
+        let here = target.filter(|t| t.0 == win).map(|t| t.1);
+        if anim::instant() {
+            self.glows.clear();
+            return here.map(|r| (r, 1.0)).into_iter().collect();
+        }
+        if here.is_none() && self.glows.is_empty() {
+            return Vec::new();
+        }
+        let now = anim::now();
+        if let Some(r) = here
+            && !self.glows.iter().any(|g| g.win == win && g.r == r)
+        {
+            self.glows.push(Glow { win, r, val: 0.0, on: true, last: now });
+        }
+        let mut out = Vec::new();
+        let live = &mut self.live;
+        let surface = self.win;
+        self.glows.retain_mut(|g| {
+            if g.win != win {
+                return true;
+            }
+            let on = here == Some(g.r);
+            if g.on != on {
+                (g.on, g.last) = (on, now);
+            }
+            let dt = since(now, g.last);
+            g.last = now;
+            g.val = if on { (g.val + dt / HOVER_IN).min(1.0) } else { (g.val - dt / HOVER_OUT).max(0.0) };
+            if (on && g.val < 1.0) || (!on && g.val > 0.0) {
+                live.push(Live { win: surface, r: g.r.outset(1.0), at: now });
+            }
+            if !on && g.val <= 0.0 {
+                return false;
+            }
+            out.push((g.r, anim::ease_out(g.val) as f32));
+            true
+        });
+        out
     }
 
     // ------------------------------------------------------------------------------------------------ flashes

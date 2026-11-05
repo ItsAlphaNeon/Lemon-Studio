@@ -709,7 +709,7 @@ fn menu_bar(ui: &mut Ui, c: &Ctx) {
 /// What a knob on the band at (`cx`, `cy`) draws this frame (`State::knob_in`, which takes window px; the band has its
 /// own scale).
 fn shown_on_band(ui: &Ui, s: &State, id: crate::knobs::KnobId, cx: f32, cy: f32) -> f32 {
-    let k = ui.c.scale / s.ui_scale;
+    let k = ui.k;
     let r = 16.0;
     s.knob_in(id, Rect::new((cx - r) * k, (cy - r) * k, 2.0 * r * k, 2.0 * r * k))
 }
