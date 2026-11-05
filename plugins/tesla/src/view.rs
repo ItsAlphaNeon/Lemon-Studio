@@ -22,11 +22,19 @@ use crate::env::EnvDlg;
 use crate::spectral::{self, Blur, Clean, Curve, Equalize};
 use crate::tools::{Amp, DrumStretch, Law, Reverb, Stretch};
 
-/// The default editor size (Edison's) and the smallest it may be resized to, in logical pixels.
+/// The default editor size (Edison's) and the smallest it may be resized to, in logical pixels. At the smallest width
+/// the tool grid (kept at the right) still starts 6 px clear of the For selector.
 pub const W: u32 = 744;
 pub const H: u32 = 487;
-pub const MIN_W: u32 = 680;
+pub const MIN_W: u32 = (MAX_SEL.x + MAX_SEL.w + 6.0 + GRID_RIGHT) as u32;
 pub const MIN_H: u32 = 360;
+
+/// The For selector, the tool grid's buttons and how far the grid's left edge sits from the right edge (Edison's
+/// 364 to 723 at 744: spec plugins/edison/window.md "Tool grid").
+pub const MAX_SEL: Rect = Rect::new(274.0, 11.0, 48.0, 20.0);
+pub const TOOL_W: f32 = 40.0;
+pub const TOOL_H: f32 = 32.0;
+const GRID_RIGHT: f32 = W as f32 - 364.0;
 
 pub const TOOLBAR_H: f32 = 92.0;
 pub const INFO_H: f32 = 30.0;
@@ -79,7 +87,7 @@ impl Layout {
             wave: Rect::new(4.0, wave_top, w - 8.0, wave_bot - wave_top),
             scroll: Rect::new(4.0, wave_bot + 1.0, w - 8.0, SCROLL_H - 2.0),
             bottom: Rect::new(0.0, h - BOTTOM_H, w, BOTTOM_H),
-            grid_x: w - 376.0,
+            grid_x: w - GRID_RIGHT,
             meter: Rect::new(w - 12.0, 5.0, 7.0, TOOLBAR_H + INFO_H - 9.0),
         }
     }
@@ -263,7 +271,7 @@ pub const TOOLS: [ToolDef; 18] = [
     ToolDef { glyph: Glyph::Clean, hint: "Clean up (denoise)... / acquire noise profile", left: true, right: true },
     ToolDef { glyph: Glyph::Slice, hint: "Medium auto-slicing / auto-slicing", left: true, right: true },
     ToolDef { glyph: Glyph::Save, hint: "Save as... / save as 24Bit .wav...", left: true, right: true },
-    ToolDef { glyph: Glyph::Send, hint: "Send to playlist as audio clip / to selected channel", left: true, right: true },
+    ToolDef { glyph: Glyph::Send, hint: "Send to arranger as audio clip / to selected channel", left: true, right: true },
 ];
 
 /// Tesla's own glyphs.
@@ -596,7 +604,7 @@ fn toolbar(ui: &mut Ui, l: &Look, lay: &Layout) {
     ui.c.text_clip(LABEL, wr.x + 6.0, wr.y + 4.0, wr.w - 16.0, brand::TEXT, &when);
     caret(ui.c, wr, plug::DIM);
     ui.c.text(CAPTION, 257.0, 16.0, plug::DIM, "FOR");
-    let mr = Rect::new(274.0, 11.0, 48.0, 20.0);
+    let mr = MAX_SEL;
     let st = ui.state(mr, Target::Max, false);
     ui.hit(mr, Target::Max);
     lemon::field(ui.c, mr, st);
@@ -625,9 +633,10 @@ fn toolbar(ui: &mut Ui, l: &Look, lay: &Layout) {
         }
     }
 
-    // The tool grid.
+    // The tool grid: two rows of nine 40 × 32 buttons side by side, rows at y 25 and 57 (spec:
+    // plugins/edison/window.md "Tool grid").
     for (i, t) in TOOLS.iter().enumerate() {
-        let r = Rect::new((lay.grid_x + (i % 9) as f32 * 39.25).round(), 27.0 + (i / 9) as f32 * 31.0, 38.0, 30.0);
+        let r = Rect::new(lay.grid_x + (i % 9) as f32 * TOOL_W, 25.0 + (i / 9) as f32 * TOOL_H, TOOL_W, TOOL_H);
         let col = ui.button(r, Target::Tool(i), false, t.left || t.right);
         glyph(ui.c, t.glyph, Rect::new(r.cx() - 9.0, r.cy() - 9.0, 18.0, 18.0), col);
     }
@@ -652,6 +661,22 @@ fn toolbar(ui: &mut Ui, l: &Look, lay: &Layout) {
         let h = (lv.h - 2.0) * f;
         ui.c.fill_rrect(Rect::new(lv.x + 1.0, lv.bottom() - 1.0 - h, lv.w - 2.0, h), 2.0, col);
     }
+}
+
+/// `s` cut to `max_w`, "…" in place of what is cut from its end (whole when it fits).
+pub fn elide(c: &mut Canvas, f: Font, s: &str, max_w: f32) -> String {
+    if c.text_width(f, s) <= max_w {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let cut = |n: usize| format!("{}…", chars[..n].iter().collect::<String>().trim_end());
+    // The longest head that fits with its "…".
+    let (mut lo, mut hi) = (0, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if c.text_width(f, &cut(mid)) <= max_w { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
 }
 
 /// The small arrow at a selector field's right end.
@@ -693,7 +718,11 @@ fn info_row(ui: &mut Ui, l: &Look, lay: &Layout) {
     }
     let tempo = if s.tempo > 0.0 { format!("{:.1}", s.tempo) } else { "-".into() };
     field(ui, 119.0, "TEMPO", &tempo, brand::TEXT);
-    field(ui, 162.0, "FREE", &l.free, brand::TEXT);
+    // FREE stays in its column, before TITLE's separator (narrowed, then cut, when long).
+    let room = 193.0 - 2.0 - 162.0;
+    ui.c.text(CAPTION, 162.0, cap_y, plug::FAINT, "FREE");
+    let f = ui.c.fit_font(VALUE, &l.free, room);
+    ui.c.text_clip(f, 162.0, val_y, room, brand::TEXT, &l.free);
     // Length, at the right: "LENGTH", then the time format's name over the value.
     let fmt = l.doc.view.time;
     let unit = time_unit(fmt);
@@ -709,6 +738,7 @@ fn info_row(ui: &mut Ui, l: &Look, lay: &Layout) {
     let (title, col) = if l.armed { ("RECORDING".to_string(), RECORD) } else { (l.doc.title(), brand::TEXT) };
     ui.c.text(CAPTION, title_x, cap_y, plug::FAINT, "TITLE");
     let title_end = if l.hosted { len_x - 10.0 } else { (title_x + 150.0).min(len_x - 10.0) };
+    let title = elide(ui.c, TITLE, &title, title_end - title_x);
     ui.c.text_clip(TITLE, title_x, val_y - 1.0, title_end - title_x, col, &title);
     if !l.hosted {
         let hr = Rect::new(title_end + 6.0, r.y + 5.0, len_x - title_end - 18.0, r.h - 10.0);
@@ -742,7 +772,8 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
     let n = l.shown.frames();
     let doc = l.doc;
     if n == 0 && !l.armed {
-        ui.c.text_center(SMALL, Rect::new(wr.x, wr.bottom() - 40.0, wr.w, 20.0), plug::FAINT, "Click to load a sample");
+        // Near the bottom, where Edison has it: 16 px over the wave area's bottom (y 421 at the default size).
+        ui.c.text_center(SMALL, Rect::new(wr.x, wr.bottom() - 26.0, wr.w, 20.0), plug::FAINT, "Click to load a sample");
         return;
     }
     let (start, per_px) = span(doc, n, lane.w);
@@ -778,7 +809,12 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
             ui.c.fill_rect(Rect::new(x, lane.y, 1.0, lane.h), plug::GRID);
             if g >= db - 0.5 {
                 let t = time_text(fmt, (g - db).max(0.0), l.shown.rate, doc.sample.tempo, per_px);
-                ui.c.text(SMALL, x + 3.0, lane.bottom() - 13.0, plug::OFF, &t);
+                // Over the spectrogram's bright low band the times sit on a dark backing.
+                if l.spectrum.is_some() {
+                    let (tw, lh) = (ui.c.text_width(SMALL, &t), ui.c.line_height(SMALL));
+                    ui.c.fill_rrect(Rect::new(x + 1.0, lane.bottom() - 14.0, tw + 4.0, lh + 2.0), 2.0, Color::rgb(0x1a1a1a).with_alpha(190));
+                }
+                ui.c.text(SMALL, x + 3.0, lane.bottom() - 13.0, if l.spectrum.is_some() { plug::DIM } else { plug::OFF }, &t);
             }
         }
         g += step;
@@ -810,7 +846,8 @@ fn wave(ui: &mut Ui, l: &Look, lay: &Layout) {
                     if b > 0.0 && (a as usize) < n {
                         if let Some((lo, hi)) = l.shown.minmax(c, a.max(0.0) as usize, (b.ceil() as usize).max(a as usize + 1)) {
                             let (y0, y1) = (y_of(hi), y_of(lo));
-                            ui.c.fill_rect(Rect::new(x, y0, 1.0, (y1 - y0).max(1.0)), col.with_alpha(((if c == 1 { 200.0 } else { 230.0 }) * dim) as u8));
+                            // Adjacent columns: cells, so they tile at any scale (spec: ui/ui-scaling.md §4).
+                            ui.c.fill_cell(Rect::new(x, y0, 1.0, (y1 - y0).max(1.0)), col.with_alpha(((if c == 1 { 200.0 } else { 230.0 }) * dim) as u8));
                         }
                     }
                     x += 1.0;
@@ -948,7 +985,7 @@ fn scroll(ui: &mut Ui, l: &Look, lay: &Layout) {
             let b = (((x - inner.x + 1.0) as f64 * per) as usize).max(a + 1);
             if let Some((lo, hi)) = l.shown.minmax(c, a, b) {
                 let (y0, y1) = (mid - hi.clamp(-1.0, 1.0) * amp, mid - lo.clamp(-1.0, 1.0) * amp);
-                ui.c.fill_rect(Rect::new(x, y0, 1.0, (y1 - y0).max(1.0)), col);
+                ui.c.fill_cell(Rect::new(x, y0, 1.0, (y1 - y0).max(1.0)), col);
             }
             x += 1.0;
         }
@@ -1104,7 +1141,10 @@ fn drum_panel(ui: &mut Ui, a: &AmpUi, ds: &DrumStretch, lay: &Layout) {
     lemon::plug_well(ui.c, Rect::new(p.x + 8.0, p.y + 30.0, p.w - 16.0, p.h - 74.0), 7.0);
     for (ctl, r) in parts {
         let t = Target::Amp(ctl);
-        ui.hit(r, t);
+        // The Filling button pushes its own hit.
+        if ctl != AmpCtl::Filling {
+            ui.hit(r, t);
+        }
         let s = ui.state(r, t, false);
         match ctl {
             AmpCtl::Tails | AmpCtl::AutoSlice => {
@@ -1230,13 +1270,14 @@ fn restore_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
     let dv = a.deverb.unwrap_or_default();
     for (ctl, r) in parts {
         let t = Target::Amp(ctl);
-        ui.hit(r, t);
-        let s = ui.state(r, t, false);
         if ctl == AmpCtl::Source {
+            // The button pushes its own hit.
             let col = ui.button(r, t, false, true);
             ui.c.text_center(CAPTION, r, col, &format!("SOURCE: {}", dv.source().to_uppercase()));
             continue;
         }
+        ui.hit(r, t);
+        let s = ui.state(r, t, false);
         let (v, centred, val) = match a.voice {
             Some(iso) => {
                 let pc = (iso.mix * 100.0).round() as i32;
@@ -1333,7 +1374,11 @@ fn spectral_panel(ui: &mut Ui, a: &AmpUi, lay: &Layout) {
         for (x, label) in [(0.0, "BEFORE"), (0.5, "CENTRE"), (1.0, "AFTER")] {
             let px = bx_x(x).round();
             ui.c.fill_rect(Rect::new(px.min(bx.right() - 1.0), bx.y, 1.0, bx.h), plug::TICK.with_alpha(60));
-            ui.c.text_center(CAPTION, Rect::new(px - 30.0, bx.bottom() + 3.0, 60.0, 11.0), plug::DIM, label);
+            // The ends' labels start at the box's left edge and end at its right one, inside the well.
+            let tw = ui.c.text_width(CAPTION, label);
+            let lx = (px - tw / 2.0).clamp(bx.x, bx.right() - tw).round();
+            let ly = (bx.bottom() + 3.0 + (11.0 - ui.c.line_height(CAPTION)) / 2.0).round();
+            ui.c.text(CAPTION, lx, ly, plug::DIM, label);
         }
     }
     ui.c.fill_rect(Rect::new(bx.x, (bx.y + bx.h / 2.0).round(), bx.w, 1.0), plug::TICK.with_alpha(90));

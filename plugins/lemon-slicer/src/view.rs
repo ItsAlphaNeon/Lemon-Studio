@@ -161,6 +161,66 @@ fn x_of(frame: u32, frames: usize) -> f32 {
     (WAVE.x + f64::from(frame) as f32 / frames.max(1) as f32 * WAVE.w).round()
 }
 
+/// `s` cut to `max_w`, "…" in place of what is cut from its end (whole when it fits).
+fn elide(c: &mut Canvas, f: Font, s: &str, max_w: f32) -> String {
+    if c.text_width(f, s) <= max_w {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let cut = |n: usize| format!("{}…", chars[..n].iter().collect::<String>().trim_end());
+    // The longest head that fits with its "…".
+    let (mut lo, mut hi) = (0, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if c.text_width(f, &cut(mid)) <= max_w { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
+}
+
+/// File path `p` cut to `max_w`: folders go first ("C:/Users/…/loop.wav"), so the file's name stays; a name too long
+/// on its own loses its end.
+fn elide_path(c: &mut Canvas, f: Font, p: &str, max_w: f32) -> String {
+    if c.text_width(f, p) <= max_w {
+        return p.to_string();
+    }
+    let Some(sep) = p.rfind(['/', '\\']) else { return elide(c, f, p, max_w) };
+    let (dir, name) = (&p[..sep], &p[sep..]);
+    let dir: Vec<char> = dir.chars().collect();
+    let cut = |n: usize| format!("{}…{name}", dir[..n].iter().collect::<String>());
+    if c.text_width(f, &cut(0)) > max_w {
+        return elide(c, f, &cut(0), max_w);
+    }
+    let (mut lo, mut hi) = (0, dir.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if c.text_width(f, &cut(mid)) <= max_w { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
+}
+
+/// A hint cut to `max_w`: a file's path at its start ("<path>: why") loses folders first, so the file's name and the
+/// reason stay; anything else loses its end.
+fn fit_hint(c: &mut Canvas, f: Font, s: &str, max_w: f32) -> String {
+    if c.text_width(f, s) <= max_w {
+        return s.to_string();
+    }
+    if let Some((path, why)) = s.split_once(": ").filter(|(p, _)| p.contains(['/', '\\'])) {
+        let rest = format!(": {why}");
+        let room = max_w - c.text_width(f, &rest);
+        if room > c.text_width(f, "…/name.wav") {
+            return elide_path(c, f, path, room) + &rest;
+        }
+    }
+    elide(c, f, s, max_w)
+}
+
+/// The well's message when the loop's file is missing: "<path> could not be read", the path cut to fit the well.
+pub(crate) fn unread(c: &mut Canvas, path: &str) -> String {
+    const TAIL: &str = " could not be read";
+    let room = WAVE.w - 24.0 - c.text_width(LABEL, TAIL);
+    elide_path(c, LABEL, path, room) + TAIL
+}
+
 /// Paints the editor. `hint` (not hosted: the host shows it otherwise) goes in the well's top-left corner.
 pub fn paint(c: &mut Canvas, t: &Palette, m: &dyn Model, st: &ViewState, look: &Look, hint: &str) -> Vec<Hit> {
     let mut ui = Ui { c, t, m, st, hits: Vec::new() };
@@ -240,7 +300,7 @@ fn well(ui: &mut Ui, look: &Look, hint: &str) {
     lemon::plug_well(ui.c, WELL, 8.0);
     let st = look.state;
     if look.frames == 0 || look.peaks.is_empty() {
-        let msg = if st.path.is_empty() { "No loop: LOAD opens one".to_string() } else { format!("{} could not be read", st.path()) };
+        let msg = if st.path.is_empty() { "No loop: LOAD opens one".to_string() } else { unread(ui.c, &st.path()) };
         ui.c.text_center(LABEL, WAVE, plug::FAINT, &msg);
     } else {
         let n = st.slices.len();
@@ -252,10 +312,11 @@ fn well(ui: &mut Ui, look: &Look, hint: &str) {
         }
         let mid = WAVE.cy();
         let half = WAVE.h / 2.0 - 2.0;
+        // Adjacent columns: cells, so they tile at any scale (spec: ui/ui-scaling.md §4).
         for (i, &(lo, hi)) in look.peaks.iter().enumerate() {
             let x = WAVE.x + i as f32;
             let (y0, y1) = ((mid - hi.clamp(-1.0, 1.0) * half).floor(), (mid - lo.clamp(-1.0, 1.0) * half).ceil());
-            ui.c.fill_rect(Rect::new(x, y0, 1.0, (y1 - y0).max(1.0)), plug::DIM.with_alpha(200));
+            ui.c.fill_cell(Rect::new(x, y0, 1.0, (y1 - y0).max(1.0)), plug::DIM.with_alpha(200));
         }
         let mut last_label = f32::NEG_INFINITY;
         for (i, s) in st.slices.iter().enumerate() {
@@ -273,6 +334,7 @@ fn well(ui: &mut Ui, look: &Look, hint: &str) {
     if !hint.is_empty() {
         let (left, right) = hint.split_once('\t').unwrap_or((hint, ""));
         let s = if right.is_empty() { left.to_string() } else { format!("{left}  ({right})") };
+        let s = fit_hint(ui.c, SMALL, &s, WAVE.w - 12.0);
         let tw = ui.c.text_width(SMALL, &s).min(WAVE.w - 12.0);
         let lh = ui.c.line_height(SMALL);
         let y = WAVE.bottom() - lh - 5.0;
@@ -292,7 +354,9 @@ fn slice_card(ui: &mut Ui, look: &Look) {
     let slice = st.slices.get(chosen);
     lemon::field(ui.c, NAME, Kst { disabled: slice.is_none(), ..Kst::NORMAL });
     let name = slice.map(|s| s.name()).filter(|s| !s.is_empty()).unwrap_or_else(|| if slice.is_some() { "(no name)".into() } else { String::new() });
-    ui.c.text_center(LABEL, NAME, if slice.is_some_and(|s| !s.name.is_empty()) { brand::TEXT } else { plug::FAINT }, &name);
+    // A long name ends in "…" inside the field.
+    let name = elide(ui.c, LABEL, &name, NAME.w - 12.0);
+    ui.c.text_center(LABEL, NAME,if slice.is_some_and(|s| !s.name.is_empty()) { brand::TEXT } else { plug::FAINT }, &name);
     // The key box: the key it plays on, lemon when set apart from its own.
     let mut kst = ui.state(KEY_BOX, &Target::Key);
     kst.disabled = slice.is_none();
@@ -346,5 +410,84 @@ mod tests {
         assert_eq!(SLICE_CARD.y - WELL.bottom(), GAP);
         assert_eq!(WELL.y - HEAD.1, GAP);
         assert_eq!((key_name(60), key_name(36), key_name(61)), ("C5".into(), "C3".into(), "C#5".into()));
+    }
+
+    struct Flat;
+    impl Model for Flat {
+        fn norm(&self, _: &str) -> f32 {
+            0.0
+        }
+        fn text(&self, _: &str) -> String {
+            String::new()
+        }
+    }
+
+    /// The editor at `scale` showing `st` (a loop `frames` long, drawn from `peaks`): its width and device pixels.
+    fn pixels(st: &State, frames: usize, peaks: &[(f32, f32)], scale: f32) -> (usize, Vec<u32>) {
+        let (w, h) = ((W as f32 * scale).round() as u32, (H as f32 * scale).round() as u32);
+        let mut c = Canvas::new(w, h, scale).unwrap();
+        let look = Look { state: st, frames, peaks, can_dump: false };
+        paint(&mut c, &os_plugkit::palette(), &Flat, &ViewState::default(), &look, "");
+        let mut px = vec![0; (w * h) as usize];
+        c.copy_to_xrgb(&mut px);
+        (w as usize, px)
+    }
+
+    /// Two paints differ only inside `r` (logical px, give or take one).
+    fn same_outside(a: &(usize, Vec<u32>), b: &(usize, Vec<u32>), r: Rect, k: f32) -> bool {
+        let r = r.outset(1.0);
+        a.1.iter().zip(&b.1).enumerate().all(|(i, (p, q))| p == q || r.contains((i % a.0) as f32 / k, (i / a.0) as f32 / k))
+    }
+
+    const LONG_PATH: &str = "C:/Users/Someone/Documents/Image-Line/Data/Patches/Packs/Loops/A folder with a long name/Breakbeat loop at 174 BPM (master).wav";
+
+    /// A missing loop's long path stays inside the well, its folders cut and its file's name kept.
+    #[test]
+    fn a_missing_files_message_stays_in_the_well() {
+        let mut st = State::default();
+        st.set_path(LONG_PATH);
+        assert!(same_outside(&pixels(&st, 0, &[], 1.0), &pixels(&State::default(), 0, &[], 1.0), WELL, 1.0));
+        let mut c = Canvas::new(W, H, 1.0).unwrap();
+        let msg = unread(&mut c, LONG_PATH);
+        assert!(c.text_width(LABEL, &msg) <= WAVE.w - 24.0, "{msg}");
+        assert!(msg.starts_with("C:/Users/") && msg.ends_with("…/Breakbeat loop at 174 BPM (master).wav could not be read"), "{msg}");
+    }
+
+    /// A long slice name ends in "…" inside its field.
+    #[test]
+    fn a_long_slice_name_stays_in_its_field() {
+        let named = |name: &str| {
+            let mut st = State::default();
+            st.slices = vec![crate::state::Slice { name: name.as_bytes().to_vec(), ..crate::state::Slice::at(0) }, crate::state::Slice::at(100)];
+            pixels(&st, 0, &[], 1.0)
+        };
+        let long = format!("Slice 1 {}", "with a name far longer than the field can hold ".repeat(2));
+        assert!(same_outside(&named(&long), &named("x"), NAME, 1.0));
+        let mut c = Canvas::new(W, H, 1.0).unwrap();
+        let shown = elide(&mut c, LABEL, &long, NAME.w - 12.0);
+        assert!(shown.starts_with("Slice 1 with") && shown.ends_with('…') && c.text_width(LABEL, &shown) <= NAME.w - 12.0, "{shown}");
+    }
+
+    /// A bad file's hint fits the well: the path loses folders, the file's name and the reason stay.
+    #[test]
+    fn a_bad_files_hint_fits_the_well() {
+        let mut c = Canvas::new(W, H, 1.0).unwrap();
+        let why = ": unsupported feature: core (probe): no suitable format reader found";
+        let s = fit_hint(&mut c, SMALL, &format!("{LONG_PATH}{why}"), WAVE.w - 12.0);
+        assert!(c.text_width(SMALL, &s) <= WAVE.w - 12.0, "{s}");
+        assert!(s.starts_with("C:/Users/") && s.ends_with(&format!("…/Breakbeat loop at 174 BPM (master).wav{why}")), "{s}");
+        // Other hints are whole when they fit.
+        assert_eq!(fit_hint(&mut c, SMALL, "Slice 2  (C#5)", WAVE.w - 12.0), "Slice 2  (C#5)");
+    }
+
+    /// At 150 % the waveform's columns tile: a full-scale loop paints its middle row in one colour, no stripes.
+    #[test]
+    fn the_waveform_has_no_stripes_at_150_percent() {
+        let k = 1.5;
+        let peaks = vec![(-1.0, 1.0); WAVE.w as usize];
+        let (w, px) = pixels(&State::default(), 1000, &peaks, k);
+        let y = (WAVE.cy() * k) as usize;
+        let row = &px[y * w + (WAVE.x * k).ceil() as usize..y * w + (WAVE.right() * k).floor() as usize];
+        assert!(row.iter().all(|&p| p == row[0]), "{:x?}", row.iter().position(|&p| p != row[0]));
     }
 }

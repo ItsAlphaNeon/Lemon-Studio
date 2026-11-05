@@ -202,8 +202,10 @@ impl Shared {
         self.mute.store(r.mute, Ordering::Relaxed);
         self.ignore_host_sel.store(v.ignore_host_sel, Ordering::Relaxed);
         self.ignore_own_sel.store(v.ignore_own_sel, Ordering::Relaxed);
-        if v.w >= view::MIN_W && v.h >= view::MIN_H {
-            self.size.0.store(v.w, Ordering::Relaxed);
+        // A size saved when the smallest width was still 680 opens at today's smallest (the tool grid grew,
+        // 2026-11-05); smaller sizes are not Tesla's and leave the default.
+        if v.w >= OLD_MIN_W && v.h >= view::MIN_H {
+            self.size.0.store(v.w.max(view::MIN_W), Ordering::Relaxed);
             self.size.1.store(v.h, Ordering::Relaxed);
         }
     }
@@ -685,9 +687,29 @@ pub fn edison_from_plugin_state(blob: &[u8]) -> Option<Vec<u8>> {
     state::from_plugin_state(blob).map(|s| state::to_edison(&s))
 }
 
+/// The smallest window width before the tool grid grew to 40 x 32 buttons (2026-11-05); see `restore_settings`.
+const OLD_MIN_W: u32 = 680;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A saved window size: kept when Tesla could open at it, widened to today's smallest when it was saved at the
+    /// smallest width before the tool grid grew, the default when it is not one Tesla saves.
+    #[test]
+    fn a_saved_size_opens_at_least_at_the_smallest() {
+        for ((w, h), want) in [
+            ((900, 500), (900, 500)),
+            ((OLD_MIN_W, view::MIN_H), (view::MIN_W, view::MIN_H)),
+            ((OLD_MIN_W - 1, 500), (view::W, view::H)),
+            ((800, view::MIN_H - 1), (view::W, view::H)),
+        ] {
+            let sh = Shared::default();
+            sh.restore_settings(&state::Rec::default(), &state::View { w, h, ..state::View::default() });
+            assert_eq!((sh.size.0.load(Ordering::Relaxed), sh.size.1.load(Ordering::Relaxed)), want, "{w} x {h}");
+        }
+        assert!(view::MIN_W > OLD_MIN_W);
+    }
 
     #[test]
     fn a_take_joins_the_document_when_disarmed() {

@@ -74,9 +74,9 @@ impl Shared {
     }
 
     /// Opens sample file `path` for the state as it is (a restored state's sample); `path` stays named when it cannot
-    /// be read, and the slicer plays silence.
+    /// be read, and the slicer plays silence. The error names the path (once) and why.
     pub fn open(&self, path: &str, params: &SlicerParams) -> Result<(), String> {
-        let s = if path.is_empty() { Ok(None) } else { os_engine::sample::load_shared(Path::new(path)).map(Some).map_err(|e| format!("{path}: {e}")) };
+        let s = if path.is_empty() { Ok(None) } else { os_engine::sample::load_shared(Path::new(path)).map(Some).map_err(|e| e.to_string()) };
         if let Ok(mut l) = self.loaded_path.lock() {
             *l = path.to_string();
         }
@@ -110,9 +110,9 @@ impl Shared {
 /// State `st` with loop file `path` loaded: its beats and tempo from its `acid` chunk (else guessed), its own slices
 /// when it has cue points, else Medium auto slicing (spec: plugins/lemon-slicer.md §3); the settings stay. Also the
 /// sample read. The editor's Load, and a new channel for a file sent from Tesla (spec: plugins/tesla/README.md
-/// "Sending slices to Lemon Slicer").
+/// "Sending slices to Lemon Slicer"). The error names the path (once: the decoder's own error starts with it) and why.
 pub fn file_state(path: &str, mut st: State) -> Result<(State, Arc<Sample>), String> {
-    let s = os_engine::sample::load_shared(Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
+    let s = os_engine::sample::load_shared(Path::new(path)).map_err(|e| e.to_string())?;
     let info = std::fs::read(path).map(|b| slicing::wav_info(&b)).unwrap_or_default();
     st.set_path(path);
     let (gb, gt) = slicing::guess_tempo(s.frames(), s.rate);
