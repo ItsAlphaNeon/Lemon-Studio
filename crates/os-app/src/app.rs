@@ -4507,7 +4507,8 @@ impl App {
     /// Paints detached window `w` whole into `canvas` (its native window's), with the popups and boxes opened from it.
     pub fn paint_detached(&mut self, w: Win, canvas: &mut Canvas) {
         self.state.note_closed_menus();
-        self.state.motion.get_mut().before_paint(canvas, Some(w));
+        let dragging = self.drag.is_some();
+        self.state.motion.get_mut().before_paint(canvas, Some(w), dragging);
         if w != Win::ChannelRack {
             if let Some(d) = self.state.detached.iter_mut().find(|d| d.0 == w) {
                 d.1 = canvas.size();
@@ -4545,7 +4546,8 @@ impl App {
 
     pub fn paint_region(&mut self, canvas: &mut Canvas, damage: Option<&[Rect]>) {
         self.state.note_closed_menus();
-        self.state.motion.get_mut().before_paint(canvas, None);
+        let dragging = self.drag.is_some();
+        self.state.motion.get_mut().before_paint(canvas, None, dragging);
         // The CPU panel's View FPS counts painted frames.
         self.state.cpu.frame();
         // A playlist scroll's moves (`take_damage`) go first; the damage they left is painted with the rest.
@@ -13145,6 +13147,101 @@ mod tests {
             let n = differs(&c, &before, pal_rect);
             assert_eq!(n, 0, "the closed palette leaves nothing behind");
         }
+        crate::anim::set_level(Level::Polished);
+        crate::anim::set_clock(false);
+    }
+
+    /// A knob or fader whose value jumps shows the new value on the next frames by a glide at the Smoothing slider's
+    /// time constant, closer while something is dragged, and the value itself is there at once (spec:
+    /// ui/animations.md §4.5). Each frame's partial repaint matches a whole one; it ends as a still frame does. At Off
+    /// and at Smoothing 0 it jumps.
+    #[test]
+    fn knobs_and_faders_glide() {
+        use crate::anim::Level;
+        use crate::knobs::KnobId;
+        use crate::prefs::{set_slider, SMOOTHING};
+        let size = (1600, 900);
+        let (Ok(mut c), Ok(mut whole), Ok(mut want)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut c, None);
+        let pan = KnobId::MixPan(1);
+        let knob = hit_rect(&app, &Action::Knob(pan));
+        let fader = hit_rect(&app, &Action::Fader(1));
+        crate::anim::set_clock(true);
+        fn pixels(c: &Canvas, r: Rect) -> Vec<u8> {
+            (r.y as u32..r.bottom() as u32).flat_map(|y| (r.x as u32..r.right() as u32).map(move |x| (x, y))).filter_map(|(x, y)| c.pixmap.pixel(x, y)).flat_map(|p| [p.red(), p.green(), p.blue()]).collect()
+        }
+        let mut jump = |app: &mut App, c: &mut Canvas, level: Level, smoothing: u16, r: Rect, set: &dyn Fn(&mut App, bool), hi: bool, what: &str| {
+            crate::anim::set_level(level);
+            set_slider(&SMOOTHING, smoothing);
+            set(app, !hi);
+            app.invalidate();
+            let d = app.take_damage();
+            frame_damage(app, c, d);
+            let mut guard = 0;
+            while app.state.motion.borrow().moving() {
+                crate::anim::advance(16);
+                app.tick();
+                let d = app.take_damage();
+                frame_damage(app, c, d);
+                guard += 1;
+                assert!(guard < 60, "{what} settles first");
+            }
+            let from = pixels(c, r);
+            set(app, hi);
+            app.invalidate();
+            let d = app.take_damage();
+            frame_damage(app, c, d);
+            let mut frames = 0;
+            let mut shots = vec![pixels(c, r)];
+            while app.state.motion.borrow().moving() {
+                crate::anim::advance(16);
+                app.tick();
+                let d = app.take_damage();
+                frame_damage(app, c, d);
+                frame(app, &mut whole, None);
+                assert_same(c, &whole, what);
+                shots.push(pixels(c, r));
+                frames += 1;
+                assert!(frames < 60, "{what} arrives");
+            }
+            let to = shots.last().cloned().unwrap_or_default();
+            assert_ne!(from, to, "{what} shows the new value");
+            let between = shots.iter().filter(|s| **s != from && **s != to).count();
+            let t = crate::anim::now();
+            crate::anim::set_clock(false);
+            frame(app, &mut want, None);
+            assert_same(c, &want, what);
+            crate::anim::set_clock_at(t);
+            (frames, between)
+        };
+        let set_pan: &dyn Fn(&mut App, bool) = &|app, hi| app.state.set_knob(pan, if hi { 1.0 } else { 0.5 });
+        let set_fader: &dyn Fn(&mut App, bool) = &|app, hi| {
+            let m = app.state.project.mixer.iter_mut().find(|m| m.index == 1).expect("track 1");
+            m.volume = Some(if hi { 0.9 } else { 0.3 });
+        };
+        // The value is there at once, whatever the picture does.
+        crate::anim::set_level(Level::Polished);
+        set_pan(&mut app, true);
+        assert_eq!(app.state.knob(pan), 1.0, "the value doesn't wait");
+        let (frames, between) = jump(&mut app, &mut c, Level::Polished, 128, knob, set_pan, true, "a knob's glide");
+        assert!((12..=20).contains(&frames) && between > 3, "about 46 ms a time constant: {frames} frames, {between} between");
+        let (frames, between) = jump(&mut app, &mut c, Level::Playful, 128, fader, set_fader, true, "a fader's glide");
+        assert!((12..=22).contains(&frames) && between > 3, "the fader too: {frames} frames, {between} between");
+        // Dragging, it keeps close.
+        app.drag = Some(Drag::Knob { id: pan, y0: 0.0, v0: 1.0 });
+        let (frames, _) = jump(&mut app, &mut c, Level::Polished, 128, knob, set_pan, true, "a dragged knob");
+        assert!((3..=8).contains(&frames), "about 15 ms a time constant: {frames} frames");
+        app.drag = None;
+        // No glide when asked for none.
+        assert_eq!(jump(&mut app, &mut c, Level::Off, 128, knob, set_pan, true, "at Off").0, 0);
+        assert_eq!(jump(&mut app, &mut c, Level::Polished, 0, knob, set_pan, true, "at Smoothing 0").0, 0);
+        set_slider(&SMOOTHING, 128);
         crate::anim::set_level(Level::Polished);
         crate::anim::set_clock(false);
     }

@@ -595,7 +595,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     led(ui, kx, ly.y(LED_Y), enabled);
     let pan = KnobId::MixPan(n);
     ui.hit(Rect::new(kx - 14.0, ly.y(PAN_Y) - 14.0, 28.0, 28.0), Action::Knob(pan), s.knob_text(pan));
-    mixer_knob(ui, kx, ly.y(PAN_Y), 10.5, 15.0, s.knob(pan), Some(true));
+    mixer_knob(ui, kx, ly.y(PAN_Y), 10.5, 15.0, s.knob_at(pan, kx, ly.y(PAN_Y), 16.0), Some(true));
 
     // Reverse polarity (⇕) and swap left / right (⇔) buttons, lit when on, then the separation knob (§4).
     // They keep their size and spacing below the fader's top at any mixer height (FL's short mixer stacks them the
@@ -620,7 +620,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
         ui.c.fill_rect(Rect::new(sx - 0.5, swap_y - 6.0, 1.0, 12.0), ui.t.s(0x5a6266));
         let sep = KnobId::MixSep(n);
         ui.hit(Rect::new(sx - 9.0, ring_y - 9.0, 18.0, 18.0), Action::Knob(sep), s.knob_text(sep));
-        mixer_knob(ui, sx, ring_y, 6.0, 9.5, s.knob(sep), Some(true));
+        mixer_knob(ui, sx, ring_y, 6.0, 9.5, s.knob_at(sep, sx, ring_y, 10.0), Some(true));
     }
 
     // Fader: track, gain marks, handle (green on the selected strip, with the track lit below it).
@@ -633,7 +633,10 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     fader_marks(ui, mx, track_y1, ly);
     let v = track.and_then(|m| m.volume).unwrap_or(0.8) as f32;
     // max/min, not clamp: a very short window gives track_y1 < ly.y(TRACK_Y0) (clamp would panic).
-    let hy = (ly.y(HANDLE_0DB + (0.8 - v) * 440.0)).min(track_y1 - 5.0).max(ly.y(TRACK_Y0) + 5.0);
+    // The handle glides to a new value (spec: ui/animations.md §4.5); it reaches 12 px around its place.
+    let travel = Rect::new(mx - 11.0, ly.y(TRACK_Y0) - 8.0, 22.0, track_y1 - ly.y(TRACK_Y0) + 16.0);
+    let drawn = s.motion.borrow_mut().value(crate::motion::key(("fader", n)), v, travel);
+    let hy = (ly.y(HANDLE_0DB + (0.8 - drawn) * 440.0)).min(track_y1 - 5.0).max(ly.y(TRACK_Y0) + 5.0);
     if selected {
         if lemon {
             ui.c.fill_rrect(Rect::new(mx - 1.5, hy, 3.0, track_y1 - hy), 1.5, t.accent);
@@ -854,7 +857,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         ui.c.text_clip(f, row.x + 19.0 + lead, ty, 140.0 - lead, ink, &name);
         let mix = KnobId::SlotMix(n, k);
         ui.hit(Rect::new(row.right() - 46.0, row.y, 26.0, row.h), Action::Knob(mix), s.knob_text(mix));
-        mixer_knob(ui, row.right() - 33.0, row.cy(), 10.5 * q, 12.0 * q, s.knob(mix), Some(false));
+        mixer_knob(ui, row.right() - 33.0, row.cy(), 10.5 * q, 12.0 * q, s.knob_at(mix, row.right() - 33.0, row.cy(), 13.0 * q), Some(false));
         ui.c.stroke_circle(row.right() - 33.0, row.cy(), 11.8 * q, 1.5, ui.t.s(0x55595c));
         ui.hit(Rect::new(row.right() - 18.0, row.y, 18.0, row.h), Action::Mix(MHit::SlotLed(k)), "Mute / solo  (ctrl)0..9");
         led(ui, row.right() - 10.0, row.cy(), track.is_none_or(|m| m.slot_on[i]));
@@ -901,7 +904,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         let id = KnobId::Eq(n, k as u8, 0);
         let hov = ui.hit(Rect::new(fx - 9.0, eq.y, 18.0, eq.h), Action::Knob(id), s.knob_text(id));
         // The handle travels ±(half-height − 8) for ±18 dB.
-        let hy = eq.cy() - (s.knob(id) * 2.0 - 1.0) * (eq.h / 2.0 - 8.0);
+        let hy = eq.cy() - (s.knob_in(id, Rect::new(fx - 9.0, eq.y, 18.0, eq.h)) * 2.0 - 1.0) * (eq.h / 2.0 - 8.0);
         let h = Rect::new(fx - 6.0, hy - 6.0, 12.0, 13.0);
         let face = if hov { 0x585c5f } else { 0x4a4e51 };
         if super::lemon(ui) {
@@ -925,7 +928,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
             let (kx, ky) = (r.x + 162.0 + 22.0 * k as f32, ly + 20.0 + 20.0 * row as f32);
             let id = KnobId::Eq(n, k as u8, 1 + row as u8);
             ui.hit(Rect::new(kx - 9.0, ky - 9.0, 18.0, 18.0), Action::Knob(id), s.knob_text(id));
-            mixer_knob(ui, kx, ky, 7.0, 8.0, s.knob(id), Some(false));
+            mixer_knob(ui, kx, ky, 7.0, 8.0, s.knob_at(id, kx, ky, 9.0), Some(false));
         }
     }
     let mut g = Glyph::new();

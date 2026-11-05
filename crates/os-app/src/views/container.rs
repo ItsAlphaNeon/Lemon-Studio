@@ -104,7 +104,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
             let id = KnobId::Member(track, slot, m.id, wet);
             let v = s.knob(id);
             ui.hit(Rect::new(cx - 15.0, row.cy() - 15.0, 30.0, 30.0), Action::Knob(id), level_text(name, wet, v));
-            super::knob(ui, cx, row.cy(), 11.0, v, false, t.text, t.text_dim);
+            super::knob(ui, cx, row.cy(), 11.0, s.knob_at(id, cx, row.cy(), 13.0), false, t.text, t.text_dim);
         }
         // Its menu: Open editor, the levels' parameter menus, Move up, Move down, Remove.
         let b = Rect::new(mx - 12.0, row.cy() - 11.0, 24.0, 22.0);

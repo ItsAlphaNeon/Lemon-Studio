@@ -11,6 +11,7 @@
 //! (`Motion::begin_frame`), so a motion that has ended stops asking for frames by itself.
 // spec: ui/animations.md
 
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
@@ -50,6 +51,14 @@ const PALETTE_CLOSE_ZOOM: f32 = 0.97;
 const ROW_STAGGER: f64 = 0.012;
 const ROW_STAGGERED: usize = 10;
 const ROW_FADE: f64 = 0.120;
+/// A control's drawn value follows its value with the time constant Smoothing gives (half-life value x 0.25 ms, so
+/// 46 ms at the default 128), at most 15 ms while something is dragged, and has arrived within 0.1 % of its travel
+/// (§4.5). It sets off with one frame's move, so a jump shows on the frame it happens.
+const DRAG_TAU: f64 = 0.015;
+const FIRST_STEP: f64 = 0.016;
+const ARRIVED: f32 = 0.001;
+/// Controls' drawn values are forgotten past this many (they are few; this is only a bound).
+const MAX_DRAWN: usize = 4096;
 /// The highlight bar's spring: critically damped, settled in about 60 ms.
 const GLIDE_HZ: f64 = 15.5;
 /// Hover helpers fade in over 120 ms and out over 200 ms (§4.6).
@@ -83,6 +92,10 @@ pub struct Motion {
     takes: Vec<Take>,
     /// Pictures of what closed, fading over the frame.
     ghosts: Vec<Ghost>,
+    /// What controls last drew, by what they are. Kept while they rest, so that a jump after any time still glides.
+    drawn: HashMap<u64, Drawn>,
+    /// Something is being dragged with the mouse: controls follow closely.
+    dragging: bool,
     tag: Option<Tag>,
     /// The tag of a cancelled drag, falling away.
     fall: Option<Fall>,
@@ -90,6 +103,13 @@ pub struct Motion {
     flash: Option<Flash>,
     /// When loading sweeps started (they all go in step).
     sweeps: Option<Instant>,
+}
+
+/// A control's picture: the value it shows, the value it goes to, and when it was last stepped.
+struct Drawn {
+    shown: f32,
+    to: f32,
+    last: Instant,
 }
 
 /// An open menu: what it is, when it opened, where it was last painted (window px) and in which window.
@@ -293,9 +313,43 @@ impl Motion {
         }
     }
 
+    /// What a control that is `key` and whose value is `v` (0 to 1) draws this frame (spec: ui/animations.md §4.5): `v`
+    /// when it first shows or rests; after a jump it follows `v` by the Smoothing slider, closer while something is
+    /// being dragged. `area` (window px) is painted again until it has arrived. At Off or Smoothing 0, always `v`.
+    pub fn value(&mut self, key: u64, v: f32, area: Rect) -> f32 {
+        let mut tau = f64::from(crate::smooth::smoothing()) * 0.000_25 / std::f64::consts::LN_2;
+        if self.dragging {
+            tau = tau.min(DRAG_TAU);
+        }
+        if anim::instant() || tau <= 0.0 {
+            self.drawn.clear();
+            return v;
+        }
+        if self.drawn.len() >= MAX_DRAWN {
+            self.drawn.clear();
+        }
+        let now = anim::now();
+        let d = self.drawn.entry(key).or_insert(Drawn { shown: v, to: v, last: now });
+        if d.shown == v {
+            *d = Drawn { shown: v, to: v, last: now };
+            return v;
+        }
+        let dt = if d.shown == d.to { FIRST_STEP } else { since(now, d.last) };
+        (d.to, d.last) = (v, now);
+        let x = anim::follow(f64::from(d.shown), f64::from(v), dt, tau) as f32;
+        d.shown = if (x - v).abs() < ARRIVED { v } else { x };
+        let shown = d.shown;
+        if shown != v {
+            self.live(area);
+        }
+        shown
+    }
+
     /// Window `win` is about to paint and its canvas still shows the last frame: the pictures noted for it are taken
-    /// now. Their fades count from here, so a chosen item that takes long to run doesn't use them up.
-    pub fn before_paint(&mut self, c: &mut Canvas, win: Option<Win>) {
+    /// now. Their fades count from here, so a chosen item that takes long to run doesn't use them up. `dragging`: the
+    /// mouse is dragging something.
+    pub fn before_paint(&mut self, c: &mut Canvas, win: Option<Win>, dragging: bool) {
+        self.dragging = dragging;
         if self.takes.iter().all(|t| t.win != win) {
             return;
         }

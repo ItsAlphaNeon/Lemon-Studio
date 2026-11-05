@@ -706,12 +706,21 @@ fn menu_bar(ui: &mut Ui, c: &Ctx) {
     }
 }
 
+/// What a knob on the band at (`cx`, `cy`) draws this frame (`State::knob_in`, which takes window px; the band has its
+/// own scale).
+fn shown_on_band(ui: &Ui, s: &State, id: crate::knobs::KnobId, cx: f32, cy: f32) -> f32 {
+    let k = ui.c.scale / s.ui_scale;
+    let r = 16.0;
+    s.knob_in(id, Rect::new((cx - r) * k, (cy - r) * k, 2.0 * r * k, 2.0 * r * k))
+}
+
 /// Main volume (project value; spec: audio/mixer.md "Main volume").
 fn volume(ui: &mut Ui, c: &Ctx) {
     use crate::knobs::KnobId;
     let (t, a, s) = (ui.t, c.a, c.s);
     ui.hit(a.span(303.0, 337.0, 45.0, 77.0), Action::Knob(KnobId::MasterVol), s.knob_text(KnobId::MasterVol));
-    super::knob(ui, a.x(319.0), a.y(61.0), 14.0, s.knob(KnobId::MasterVol), false, t.glyph, t.button_hi);
+    let shown = shown_on_band(ui, s, KnobId::MasterVol, a.x(319.0), a.y(61.0));
+    super::knob(ui, a.x(319.0), a.y(61.0), 14.0, shown, false, t.glyph, t.button_hi);
 }
 
 /// Main pitch (project value; spec: audio/voice-levels.md).
@@ -720,7 +729,8 @@ fn pitch(ui: &mut Ui, c: &Ctx) {
     let (t, a, s) = (ui.t, c.a, c.s);
     ui.hit(a.span(340.0, 376.0, 45.0, 77.0), Action::Knob(KnobId::MasterPitch), s.knob_text(KnobId::MasterPitch));
     let (cx, cy) = (a.x(358.0), a.y(61.0));
-    super::knob(ui, cx, cy, 14.0, s.knob(KnobId::MasterPitch), true, t.glyph, t.button_hi);
+    let shown = shown_on_band(ui, s, KnobId::MasterPitch, cx, cy);
+    super::knob(ui, cx, cy, 14.0, shown, true, t.glyph, t.button_hi);
     for k in 0..20 {
         let ang = 0.75 * std::f32::consts::PI + 1.5 * std::f32::consts::PI * k as f32 / 19.0;
         ui.c.fill_circle(cx + 17.5 * ang.cos(), cy + 17.5 * ang.sin(), 0.7, t.glyph_dim);

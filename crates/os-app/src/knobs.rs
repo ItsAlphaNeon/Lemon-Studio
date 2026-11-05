@@ -6,6 +6,8 @@
 //!
 //! Values are normalised 0..1. Every knob reads and writes the project model.
 
+use os_ui::Rect;
+
 use crate::app::State;
 
 /// Normalised value change per logical pixel of vertical drag (1/1024: 512 px sweeps a bipolar knob's range).
@@ -248,6 +250,17 @@ pub fn pan_text(p: f32) -> String {
 }
 
 impl State {
+    /// What knob `id`, reaching `r` around (`cx`, `cy`), draws this frame (`knob_in`).
+    pub fn knob_at(&self, id: KnobId, cx: f32, cy: f32, r: f32) -> f32 {
+        self.knob_in(id, Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r))
+    }
+
+    /// What control `id`, drawn within `area` (window px), draws this frame: its value, reached by a glide when it
+    /// jumps (spec: ui/animations.md §4.5). Only the picture eases: `knob` is the value and what plays.
+    pub fn knob_in(&self, id: KnobId, area: Rect) -> f32 {
+        self.motion.borrow_mut().value(crate::motion::key(id), self.knob(id), area)
+    }
+
     pub fn knob(&self, id: KnobId) -> f32 {
         match id {
             KnobId::MixPan(t) => {

@@ -120,7 +120,7 @@ fn knob(ui: &mut Ui, s: &State, x0: f32, y0: f32, cx: f32, cy: f32, k: Knob, bip
     let id = KnobId::PianoDlg(k);
     let (cx, cy) = (x0 + cx, y0 + cy);
     ui.hit(Rect::new(cx - 17.0, cy - 17.0, 34.0, 34.0), Action::Knob(id), s.knob_text(id));
-    super::knob(ui, cx, cy, 15.0, s.knob(id), bipolar, t.text, t.text_dim);
+    super::knob(ui, cx, cy, 15.0, s.knob_at(id, cx, cy, 17.0), bipolar, t.text, t.text_dim);
 }
 
 /// Flam (piano-flam.md §1): Options ▸, Time, Absolute, Before, Velocity, Group notes.
@@ -190,7 +190,7 @@ fn levels(ui: &mut Ui, s: &State, x0: f32, y0: f32) {
             ui.c.fill_rect(Rect::new(cx - 1.5, top, 3.0, bottom - top), t.s(0x141618));
         }
         let id = KnobId::PianoDlg(k);
-        let v = s.knob(id);
+        let v = s.knob_in(id, Rect::new(cx - 21.0, top - 12.0, 42.0, bottom - top + 24.0));
         let hy = if k == Knob::Center { zero - v * travel } else { zero - (v - 0.5) * travel };
         // Multiply and Offset: an orange bar from zero to the handle and a line through it (FL's look).
         if k != Knob::Center {
@@ -348,9 +348,9 @@ fn level_knobs(ui: &mut Ui, s: &State, x0: f32, y0: f32, cy: f32, knob: fn(u8) -
             ui.hit(Rect::new(cx - 15.0, cy - 15.0, 30.0, 30.0), Action::Knob(id), s.knob_text(id));
         }
         if dim {
-            kit::knob(ui.c, t, cx, cy, 13.0, s.knob(id), bipolar, kit::KnobLook::Ring, kit::State::hover(false).with_disabled(true));
+            kit::knob(ui.c, t, cx, cy, 13.0, s.knob_at(id, cx, cy, 16.0), bipolar, kit::KnobLook::Ring, kit::State::hover(false).with_disabled(true));
         } else {
-            super::knob(ui, cx, cy, 13.0, s.knob(id), bipolar, t.text, t.text_dim);
+            super::knob(ui, cx, cy, 13.0, s.knob_at(id, cx, cy, 16.0), bipolar, t.text, t.text_dim);
         }
         ui.c.stroke_circle(cx, cy, 14.5, 1.5, if dim { t.text_faint } else { t.h(super::arpeggiate::LEVEL_COLOURS[i]) });
         label(ui, Font::new(9), cx, cy + 23.0, 0, if dim { t.text_faint } else { t.text_dim }, name);
@@ -508,7 +508,7 @@ fn lfo_knob(ui: &mut Ui, s: &State, cx: f32, cy: f32, r: f32, k: Knob, bipolar: 
     let id = KnobId::PianoDlg(k);
     let area = Rect::new(cx - r - 2.0, cy - r - 2.0, 2.0 * r + 4.0, 2.0 * r + 4.0);
     let hov = !dim && ui.hit(area, Action::Knob(id), s.knob_text(id));
-    kit::knob(ui.c, ui.t, cx, cy, r, s.knob(id), bipolar, look, kit::State::hover(hov).with_disabled(dim));
+    kit::knob(ui.c, ui.t, cx, cy, r, s.knob_at(id, cx, cy, r + 2.0), bipolar, look, kit::State::hover(hov).with_disabled(dim));
 }
 
 /// One cycle of `shape` drawn into `r`.
