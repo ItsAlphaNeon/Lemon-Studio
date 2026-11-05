@@ -193,6 +193,11 @@ impl Canvas {
         self.clips = old.clips;
     }
 
+    /// Device pixels per logical pixel (1.5 at 150 %).
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
     /// Logical size.
     pub fn size(&self) -> (f32, f32) {
         (self.pixmap.width() as f32 / self.scale, self.pixmap.height() as f32 / self.scale)
