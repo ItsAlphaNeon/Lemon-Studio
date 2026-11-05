@@ -2521,6 +2521,13 @@ mod tests {
             check(&l);
         }
         assert!(l.hits.iter().any(|h| h.t == Target::Switch(Field::Reverb(10))));
+        // The main page, and a filter page's stage rows (13.8 px apart).
+        for page in [0, 7] {
+            l.view.page = page;
+            paint(&mut l);
+            check(&l);
+        }
+        assert!(l.hits.iter().any(|h| matches!(h.t, Target::Choice(Field::Head(_, 0), 5))));
     }
 
     /// The curve view: a right click on empty space adds a point, a drag moves it, its menu sets its mode and a
