@@ -1015,7 +1015,6 @@ fn off_combo(ui: &mut Ui, r: Rect, name: &'static str, text: &str, bg: Color) {
     ui.veil(r, bg);
 }
 
-/// Small solid chevron centred on (x, y), pointing right or left.
 /// A chevron pointing right, turned clockwise by `angle` about (`x`, `y`).
 fn turned_chevron(ui: &mut Ui, x: f32, y: f32, angle: f32, c: Color) {
     let (sin, cos) = angle.sin_cos();
@@ -1025,6 +1024,7 @@ fn turned_chevron(ui: &mut Ui, x: f32, y: f32, angle: f32, c: Color) {
     ui.c.glyph(c, &g);
 }
 
+/// Small solid chevron centred on (x, y), pointing right or left.
 pub fn chevron(ui: &mut Ui, x: f32, y: f32, right: bool, c: Color) {
     let d = if right { 1.0 } else { -1.0 };
     let mut g = Glyph::new();

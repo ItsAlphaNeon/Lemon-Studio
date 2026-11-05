@@ -1203,7 +1203,8 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
     // Handles only while the mouse is over the clip (as FL): white, brighter on the one under the mouse. They fade in
     // and out (spec: ui/animations.md §4.6).
     let area = body.outset(8.0);
-    let shown = s.motion.borrow_mut().hover(crate::motion::key(("clip handles", i)), hovered, area);
+    // Not lasting past a change in the list: the next clip would take this one's place, handles and all.
+    let shown = s.motion.borrow_mut().hover(crate::motion::key(("clip handles", i, crate::playlist::clips(s).len())), hovered, area);
     if shown <= 0.0 {
         return;
     }
@@ -1548,7 +1549,8 @@ pub fn menu_panel(ui: &mut Ui, r: Rect, m: &os_ui::kit::menu::Metrics) {
 
 /// A menu row's highlight bar.
 pub fn menu_highlight(ui: &mut Ui, rr: Rect, lemon: bool) {
-    if lemon {
+    // At Animations Off, menus are plain and square (`menu_panel`).
+    if lemon && crate::anim::level() != crate::anim::Level::Off {
         os_ui::kit::row_highlight(ui.c, ui.t, rr);
     } else {
         ui.c.fill_rect(rr, ui.t.menu_pop_hi);

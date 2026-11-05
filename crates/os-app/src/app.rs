@@ -3176,6 +3176,12 @@ impl App {
         // An input's paint can come before the next tick (Windows paints before `about_to_wait`): what follows the
         // settings is brought up to date first, so the frame shows it.
         self.follow_settings();
+        // What moves paints with it: this paint forgets what it doesn't draw (`Motion::begin_frame`), which would stop
+        // there, half way.
+        let live = self.state.motion.get_mut().damage().to_vec();
+        for l in live.iter().filter(|l| l.win.is_none()) {
+            self.damage_rect(l.r);
+        }
         self.resolve_scroll();
         let damage = std::mem::replace(&mut self.damage, Damage::None);
         // A change that repaints the whole main window may show in a detached one too (the colours, a project opened);
@@ -3302,7 +3308,8 @@ impl App {
     /// to; a window that did not change keeps the pixels inside its frame, so only its edge and the content it
     /// uncovers paint), the hovered control. The window is repainted instead when moving would not equal a repaint: a
     /// distance off the drawing grid (`PGeom::xs64`) or not whole device pixels, a window moved or resized since the
-    /// last paint, an open popup or menu, a drag other than scrolling, a progress panel, the monitor debug panel.
+    /// last paint, an open popup or menu, something fading away over the frame, a drag other than scrolling, a progress
+    /// panel, the monitor debug panel.
     fn resolve_scroll(&mut self) {
         self.shifts.clear();
         let Some(d) = self.scrolled.take() else { return };
@@ -3321,6 +3328,7 @@ impl App {
             && self.export.is_none()
             && self.state.playlist.overlay.is_none()
             && !self.state.monitor.debug
+            && !self.state.motion.get_mut().over_frame(None)
             // A see-through window's pixels aren't its own to move, nor those of what shows through one.
             && crate::prefs::index(&crate::prefs::TRANSPARENT_WINDOWS) != 1;
         if !can {
@@ -4564,6 +4572,8 @@ impl App {
         }
         let info = self.frame_info();
         self.state.motion.get_mut().begin_frame(Some(w));
+        // Its opacity fades between paints, and goes on asking for them.
+        let _ = self.detached_opacity(w);
         self.on_surface(w, |app| {
             canvas.begin_frame(None);
             app.hits.clear();
@@ -13653,6 +13663,139 @@ mod tests {
         app.invalidate();
         settle(&mut app, &mut c, &mut whole, "off again");
         crate::anim::set_level(Level::Playful);
+        crate::anim::set_clock(false);
+    }
+
+    /// A detached window's fade asks for frames until it is done, past the paints between them (spec:
+    /// ui/animations.md §4.9).
+    #[test]
+    fn a_detached_windows_fade_goes_on_past_its_paints() {
+        use crate::prefs::TRANSPARENT_WINDOWS;
+        let mut app = App::new(None);
+        app.set_detached(Win::Mixer, true);
+        let (w, h) = app.state.detached_size(Win::Mixer).expect("a size");
+        let Ok(mut c) = Canvas::new(w as u32, h as u32, 1.0) else { return };
+        app.state.z = vec![Win::Playlist];
+        crate::prefs::set_choice(&TRANSPARENT_WINDOWS, 1);
+        crate::anim::set_clock(true);
+        assert_eq!(app.detached_opacity(Win::Mixer), 1.0, "it sets off");
+        let mut last = 1.0;
+        let mut frames = 0;
+        loop {
+            crate::anim::advance(16);
+            let shown = app.detached_opacity(Win::Mixer);
+            assert!(shown < last, "{shown} after {last}");
+            last = shown;
+            app.paint_detached(Win::Mixer, &mut c);
+            frames += 1;
+            assert!(frames < 20, "it ends");
+            if !app.state.motion.borrow().moving() {
+                break;
+            }
+        }
+        assert!((last - 0.85).abs() < 0.001, "it ends see-through: {last}");
+        assert!((9..=11).contains(&frames), "about 150 ms: {frames} frames");
+        crate::prefs::set_choice(&TRANSPARENT_WINDOWS, 0);
+        crate::anim::set_clock(false);
+    }
+
+    /// A scroll under something fading away over the playlist repaints, rather than move its pixels with the rest.
+    #[test]
+    fn a_scroll_under_a_falling_tag_leaves_nothing_behind() {
+        use crate::views::browser::{rows, Item};
+        use winit::keyboard::{Key, NamedKey};
+        let size = (1600, 900);
+        let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let r0 = hit_rect(&app, &Action::BrowserTab(1));
+        click(&mut app, &mut c, r0);
+        let pi = rows(&app.state).iter().position(|r| r.item == Item::Pattern(1)).expect("pattern row");
+        let src = hit_rect(&app, &Action::BrowserRow(pi));
+        let grid = app.pl_grid().expect("grid");
+        crate::anim::set_clock(true);
+        crate::anim::set_level(crate::anim::Level::Playful);
+        let step = |app: &mut App, c: &mut Canvas, whole: &mut Canvas, what: &str| {
+            crate::anim::advance(16);
+            app.tick();
+            let d = app.take_damage();
+            frame_damage(app, c, d);
+            frame(app, whole, None);
+            assert_same(c, whole, what);
+        };
+        app.mouse_move(src.cx(), src.cy());
+        app.mouse_down();
+        app.mouse_move(src.cx() + 30.0, src.cy());
+        for k in 1..=6 {
+            app.mouse_move(grid.x + 60.0 * k as f32, grid.y + 40.0);
+            step(&mut app, &mut c, &mut whole, "a frame of the drag");
+        }
+        app.key(&Key::Named(NamedKey::Escape), false, false);
+        app.mouse_up();
+        step(&mut app, &mut c, &mut whole, "the fall");
+        step(&mut app, &mut c, &mut whole, "the fall");
+        // Scrolls and paints, and says whether pixels moved.
+        let scroll = |app: &mut App, c: &mut Canvas, whole: &mut Canvas, what: &str| {
+            let before = app.state.playlist_scroll;
+            app.state.playlist_scroll.0 += 64.0;
+            app.playlist_scrolled(before);
+            crate::anim::advance(16);
+            app.tick();
+            let d = app.take_damage();
+            frame_damage(app, c, d);
+            let moved = !app.take_moved().is_empty();
+            frame(app, whole, None);
+            assert_same(c, whole, what);
+            moved
+        };
+        assert!(!scroll(&mut app, &mut c, &mut whole, "the scroll during the fall"), "repainted");
+        let mut frames = 0;
+        while app.animating() {
+            step(&mut app, &mut c, &mut whole, "the rest of the fall");
+            frames += 1;
+            assert!(frames < 100, "it ends");
+        }
+        assert!(scroll(&mut app, &mut c, &mut whole, "the scroll after the fall"), "with nothing over the frame, pixels move");
+        crate::anim::set_clock(false);
+    }
+
+    /// A paint for an input can come before the next tick (Windows paints it at once). What is moving elsewhere paints
+    /// with it and goes on, rather than stop half way.
+    #[test]
+    fn a_paint_before_the_tick_keeps_what_moves() {
+        let size = (1600, 900);
+        let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        frame(&mut app, &mut c, None);
+        let button = hit_rect(&app, &Action::Metronome);
+        crate::anim::set_clock(true);
+        crate::anim::set_level(crate::anim::Level::Playful);
+        app.mouse_move(button.cx(), button.cy());
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        crate::anim::advance(16);
+        assert!(app.state.motion.borrow().moving(), "the button lights");
+        // No tick: only a far corner is new.
+        app.damage_rect(Rect::new(1500.0, 850.0, 10.0, 10.0));
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        assert!(app.state.motion.borrow().moving(), "it goes on");
+        let mut frames = 0;
+        while app.state.motion.borrow().moving() {
+            crate::anim::advance(16);
+            app.tick();
+            let d = app.take_damage();
+            frame_damage(&mut app, &mut c, d);
+            frames += 1;
+            assert!(frames < 60, "it ends");
+        }
+        frame(&mut app, &mut whole, None);
+        assert_same(&c, &whole, "the button, lit");
         crate::anim::set_clock(false);
     }
 

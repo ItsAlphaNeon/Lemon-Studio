@@ -256,6 +256,7 @@ impl Spring {
         still
     }
 
+    #[cfg(test)]
     pub fn moving(&self) -> bool {
         self.x != self.target || self.v != 0.0
     }

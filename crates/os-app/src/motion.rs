@@ -54,8 +54,8 @@ const ROW_STAGGERED: usize = 10;
 const ROW_FADE: f64 = 0.120;
 /// When the palette's list rearranges, its rows go to their new places in this time (spec: ui/animations.md §4.3).
 const LIST_MOVE: Duration = Duration::from_millis(160);
-/// A control's drawn value follows its value with the time constant Smoothing gives (half-life value x 0.25 ms, so
-/// 46 ms at the default 128), at most 15 ms while something is dragged, and has arrived within 0.1 % of its travel
+/// A control's drawn value follows its value with the time constant Smoothing gives (value x 0.25 ms, so
+/// 32 ms at the default 128), at most 15 ms while something is dragged, and has arrived within 0.1 % of its travel
 /// (§4.5). It sets off with one frame's move, so a jump shows on the frame it happens.
 const DRAG_TAU: f64 = 0.015;
 const FIRST_STEP: f64 = 0.016;
@@ -93,6 +93,9 @@ pub const NAME_SHIFT: (f64, f64) = (0.150, 0.220);
 const KNOB_HOVER: (f64, f64) = (0.060, 0.170);
 /// A follow this close to its end is there.
 const HOVER_ARRIVED: f64 = 0.01;
+/// How long a hover that is on is kept unpainted (s), to fade out when the mouse leaves it, however long it rests there.
+/// Past that, its control is taken to be gone.
+const HOVER_REST: f64 = 3600.0;
 /// A functional flash lasts 400 ms and peaks at 60 % (§4.7).
 pub const FLASH: Duration = Duration::from_millis(400);
 const FLASH_PEAK: f32 = 0.6;
@@ -241,7 +244,7 @@ impl Ghost {
         let level = anim::level();
         match self.fade {
             Fade::Row => {
-                let a = (-t / level.dur(ROW_TAU).as_secs_f64()).exp();
+                let a = (-t / ROW_TAU.as_secs_f64()).exp();
                 (a > ROW_GONE).then_some((a as f32, 1.0))
             }
             Fade::Close(dur, zoom) => {
@@ -289,6 +292,8 @@ pub struct Live {
 
 /// A hover helper's opacity, 0 to 1, and which way it goes.
 struct Hover {
+    /// What it is, and the window it is in: controls in two windows can be at the same place in each.
+    win: Option<Win>,
     key: u64,
     val: f64,
     on: bool,
@@ -335,7 +340,7 @@ impl Motion {
         self.live.retain(|l| l.win != win);
         let now = anim::now();
         // One still on is kept while it rests unpainted, to fade out when the mouse leaves it.
-        self.hovers.retain(|h| since(now, h.last) < if h.on { 60.0 } else { 1.0 });
+        self.hovers.retain(|h| since(now, h.last) < if h.on { HOVER_REST } else { 1.0 });
         if self.flash.as_ref().is_some_and(|f| since(now, f.at) > FLASH.as_secs_f64()) {
             self.flash = None;
         }
@@ -357,6 +362,15 @@ impl Motion {
         let now = anim::now();
         self.live.retain(|l| since(now, l.at) < 1.0);
         &self.live
+    }
+
+    /// Whether something fading or falling is drawn over window `win`'s frame. It is no part of what the frame's pixels
+    /// show, so they can't simply be moved.
+    pub fn over_frame(&self, win: Option<Win>) -> bool {
+        self.takes.iter().any(|t| t.win == win)
+            || self.ghosts.iter().any(|g| g.win == win)
+            || self.fall.as_ref().is_some_and(|f| f.win == win)
+            || (win.is_none() && !self.glows.is_empty())
     }
 
     /// Whether anything still moves: the shell keeps ticking at animation rate.
@@ -388,7 +402,8 @@ impl Motion {
             self.glides[i] = None;
             let Some(o) = self.menus[i].take() else { continue };
             if !quiet {
-                let fade = if i == Slot::Palette as usize { Fade::Close(PALETTE_CLOSE, PALETTE_CLOSE_ZOOM) } else { Fade::Close(MENU_CLOSE, 1.0) };
+                let shrink = if anim::level() >= Level::Polished { PALETTE_CLOSE_ZOOM } else { 1.0 };
+                let fade = if i == Slot::Palette as usize { Fade::Close(PALETTE_CLOSE, shrink) } else { Fade::Close(MENU_CLOSE, 1.0) };
                 self.takes.push(Take { r: o.rect, win: o.win, fade, noted: now });
             }
         }
@@ -811,7 +826,8 @@ impl Motion {
     /// The fade `key` moves on by `step` (its value and the time since the last paint give the new value).
     fn hover_step(&mut self, key: u64, on: bool, area: Rect, step: impl Fn(f64, f64) -> f64) -> f64 {
         let now = anim::now();
-        let pos = self.hovers.iter().position(|h| h.key == key);
+        let win = self.win;
+        let pos = self.hovers.iter().position(|h| h.key == key && h.win == win);
         if anim::instant() {
             if let Some(i) = pos {
                 self.hovers.swap_remove(i);
@@ -821,7 +837,7 @@ impl Motion {
         let i = match pos {
             Some(i) => i,
             None if on => {
-                self.hovers.push(Hover { key, val: 0.0, on, last: now });
+                self.hovers.push(Hover { win, key, val: 0.0, on, last: now });
                 self.hovers.len() - 1
             }
             None => return 0.0,

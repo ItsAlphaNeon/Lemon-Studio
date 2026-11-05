@@ -1003,12 +1003,8 @@ fn head_row(ui: &mut Ui, rr: Rect, label: &str) {
 
 /// A row under the mouse, or the ▸ row whose submenu is open.
 fn light(ui: &mut Ui, rr: Rect) {
-    let t = ui.t;
-    if super::lemon(ui) {
-        os_ui::kit::row_highlight(ui.c, t, rr);
-    } else {
-        ui.c.fill_rect(rr, t.menu_pop_hi);
-    }
+    let lemon = super::lemon(ui);
+    super::playlist::menu_highlight(ui, rr, lemon);
 }
 
 /// A row's text: its label, its key (italic, at the right) and its ▸ (`sub`); dim when it cannot be chosen (`ok`).

@@ -1169,7 +1169,15 @@ impl Canvas {
     /// `sprite`). With `clear`, `r` is emptied (transparent) first, so the picture holds only what is painted.
     /// Layers are how animations fade and move a part of the frame that is painted the ordinary way.
     pub fn begin_layer(&mut self, r: Rect, clear: bool) -> Layer {
-        let (x, y, w, h) = self.device_rect(r);
+        let (mut x, mut y, mut w, mut h) = self.device_rect(r);
+        // Shown at an opacity, only what the clip lets through changes: a big layer under a small repaint keeps no more
+        // than that.
+        if !clear {
+            let (cx0, cy0, cx1, cy1) = self.clip_bounds();
+            let (x0, y0) = ((x as i32).max(cx0), (y as i32).max(cy0));
+            let (x1, y1) = (((x + w) as i32).min(cx1), ((y + h) as i32).min(cy1));
+            (x, y, w, h) = if x0 < x1 && y0 < y1 { (x0 as usize, y0 as usize, (x1 - x0) as usize, (y1 - y0) as usize) } else { (0, 0, 0, 0) };
+        }
         let pw = self.pixmap.width() as usize;
         let mut px = Vec::with_capacity(w * h);
         let data = self.pixmap.pixels_mut();
@@ -1325,7 +1333,8 @@ impl Sprite {
     }
 }
 
-/// Blend `c` (straight alpha) over a row of opaque pixels: `(c * a + d * (255 - a)) / 255` per channel, truncated.
+/// Blend `c` (straight alpha) over a row of pixels: `(c * a + d * (255 - a)) / 255` per channel, truncated, alpha
+/// included (a cleared layer isn't opaque).
 /// `x / 255 == (x * 0x8081) >> 23` for every x up to 255 * 255; four pixels at a time with SSE2 (x86-64 baseline).
 fn blend_row(row: &mut [u32], c: Color) {
     let sa = u32::from(c.a);
@@ -1357,8 +1366,8 @@ fn blend_row(row: &mut [u32], c: Color) {
     };
     let div = |x: u32| (x * 0x8081) >> 23;
     for p in row {
-        let [r, g, b, _] = p.to_ne_bytes();
-        *p = u32::from_ne_bytes([div(pr + u32::from(r) * inv) as u8, div(pg + u32::from(g) * inv) as u8, div(pb + u32::from(b) * inv) as u8, 255]);
+        let [r, g, b, a] = p.to_ne_bytes();
+        *p = u32::from_ne_bytes([div(pr + u32::from(r) * inv) as u8, div(pg + u32::from(g) * inv) as u8, div(pb + u32::from(b) * inv) as u8, div(255 * sa + u32::from(a) * inv) as u8]);
     }
 }
 
@@ -1392,8 +1401,9 @@ fn rebuild_path(path: &tiny_skia::Path, pts: &[(i32, i32)]) -> Option<tiny_skia:
     pb.finish()
 }
 
-/// Blend `c` over a row of opaque pixels through per-pixel coverage `cov`: with `al = (cov * a + 127) / 255`, each
-/// channel becomes `(c * al + d * (255 - al) + 127) / 255`. Four pixels at a time with SSE2 (x86-64 baseline); the
+/// Blend `c` over a row of pixels through per-pixel coverage `cov`: with `al = (cov * a + 127) / 255`, each channel
+/// becomes `(c * al + d * (255 - al) + 127) / 255`, and alpha as if `c` were 255 (a cleared layer isn't opaque). Four
+/// pixels at a time with SSE2 (x86-64 baseline); the
 /// division is `(x * 0x8081) >> 23`, exact for every 16-bit x.
 fn blend_cov_row(row: &mut [[u8; 4]], cov: &[u8], c: Color) {
     let ca = u32::from(c.a);
@@ -1441,7 +1451,7 @@ fn blend_cov_row(row: &mut [[u8; 4]], cov: &[u8], c: Color) {
         }
         let al = div(u32::from(a) * ca + 127);
         let inv = 255 - al;
-        for (k, s) in [c.r, c.g, c.b].into_iter().enumerate() {
+        for (k, s) in [c.r, c.g, c.b, 255].into_iter().enumerate() {
             d[k] = div(u32::from(s) * al + u32::from(d[k]) * inv + 127) as u8;
         }
     }
@@ -1789,6 +1799,73 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// On a cleared layer both blends leave proper premultiplied pixels, in every row length: some go through SSE2 on
+    /// x86-64, and the scalar code is all there is elsewhere. Without alpha, a sprite taken from the layer loses them.
+    #[test]
+    fn blends_keep_alpha_on_a_cleared_layer() {
+        let c = Color { r: 200, g: 100, b: 50, a: 128 };
+        for n in 0..14 {
+            let mut row = vec![0u32; n];
+            blend_row(&mut row, c);
+            for p in &row {
+                let [r, g, b, a] = p.to_ne_bytes();
+                assert_eq!(a, 128, "fill, {n} pixels");
+                assert_eq!((r, g, b), (100, 50, 25), "fill, {n} pixels");
+            }
+            let cov = vec![255u8; n];
+            let mut row = vec![[0u8; 4]; n];
+            blend_cov_row(&mut row, &cov, c);
+            for p in &row {
+                assert_eq!(p[3], 128, "coverage, {n} pixels");
+                assert_eq!(&p[..3], &[100, 50, 25], "coverage, {n} pixels");
+            }
+        }
+    }
+
+    /// A small rounded card painted on a cleared layer, taken and drawn back, looks as it does painted straight on the
+    /// frame: the drag tag and the menus are drawn this way.
+    #[test]
+    fn a_small_shape_comes_back_from_a_cleared_layer() {
+        let (Ok(mut direct), Ok(mut layered)) = (Canvas::new(60, 40, 1.0), Canvas::new(60, 40, 1.0)) else { return };
+        let card = Rect::new(8.0, 8.0, 41.0, 21.0);
+        for c in [&mut direct, &mut layered] {
+            c.fill_rect(Rect::new(0.0, 0.0, 60.0, 40.0), Color::rgb(0x204060));
+        }
+        direct.fill_rrect(card, 4.0, Color::rgb(0xc0d0e0));
+        let l = layered.begin_layer(Rect::new(0.0, 0.0, 60.0, 40.0), true);
+        layered.fill_rrect(card, 4.0, Color::rgb(0xc0d0e0));
+        let sprite = layered.take_layer(l).expect("a picture");
+        layered.sprite(&sprite, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
+        for y in 0..40 {
+            for x in 0..60 {
+                let (a, b) = (direct.pixmap.pixel(x, y).expect("in"), layered.pixmap.pixel(x, y).expect("in"));
+                assert_eq!(b.alpha(), 255, "({x}, {y})");
+                for (p, q) in [(a.red(), b.red()), (a.green(), b.green()), (a.blue(), b.blue())] {
+                    assert!(p.abs_diff(q) <= 2, "({x}, {y}): {a:?} and {b:?}");
+                }
+            }
+        }
+    }
+
+    /// A layer shown at an opacity under a small repaint keeps only what that repaint can change, and shows it right.
+    #[test]
+    fn a_big_layer_under_a_small_repaint_keeps_little() {
+        let Ok(mut c) = Canvas::new(100, 100, 1.0) else { return };
+        c.fill_rect(Rect::new(0.0, 0.0, 100.0, 100.0), Color::rgb(0x000000));
+        c.begin_region(&[Rect::new(10.0, 10.0, 4.0, 4.0)]);
+        let l = c.begin_layer(Rect::new(0.0, 0.0, 100.0, 100.0), false);
+        assert_eq!((l.w, l.h), (4, 4));
+        c.fill_rect(Rect::new(0.0, 0.0, 100.0, 100.0), Color::rgb(0xffffff));
+        c.end_layer(l, 0.5);
+        let inside = c.pixmap.pixel(11, 11).expect("in");
+        assert!((126..=129).contains(&inside.red()), "half way: {inside:?}");
+        assert_eq!(c.pixmap.pixel(20, 20).expect("in").red(), 0, "outside the repaint");
+        // Nothing of it in the repaint: nothing kept, and nothing goes wrong.
+        let l = c.begin_layer(Rect::new(50.0, 50.0, 10.0, 10.0), false);
+        assert_eq!((l.w, l.h), (0, 0));
+        c.end_layer(l, 0.5);
     }
 
     // spec: ui/settings-choices.md "Display: Colorful waveforms (2026-10-16)"
