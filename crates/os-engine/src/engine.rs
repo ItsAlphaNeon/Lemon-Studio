@@ -3933,15 +3933,20 @@ impl Engine {
                 inst.voice_choke(0, sent(c, key), v);
             }
         }
-        let mut held: Vec<(usize, u8)> = self.inst_offs.iter().filter(|o| o.3.is_none()).map(|&(_, c, key, _, _)| (c, key)).collect();
-        held.extend(self.sounding.iter().filter(|s| s.2 == u64::MAX).map(|&(c, key, _)| (c, key.min(127) as u8)));
+        let mut notes: Vec<(usize, u8)> = self.inst_offs.iter().filter(|o| o.3.is_none()).map(|&(_, c, key, _, _)| (c, key)).collect();
+        notes.extend(self.sounding.iter().filter(|s| s.2 == u64::MAX).map(|&(c, key, _)| (c, key.min(127) as u8)));
         // Voices whose notes have not ended (a mono voice sounds under its first key).
+        let mut voices: Vec<(usize, u8)> = Vec::new();
         for (c, v) in self.note_voices.iter().enumerate() {
-            held.extend(v.held_keys().map(|key| (c, key)));
+            voices.extend(v.held_keys().map(|key| (c, key)));
         }
-        // A note can be held in more than one of these: one note off each.
-        held.sort_unstable();
-        held.dedup();
+        // A note is held in both lists: one note off each. A key held twice (a clip's note still sounding as the next
+        // clip starts the same key) gets two, or its second voice rings on.
+        let count = |v: &[(usize, u8)], k: (usize, u8)| v.iter().filter(|&&x| x == k).count();
+        let mut keys: Vec<(usize, u8)> = notes.iter().chain(&voices).copied().collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let held = keys.into_iter().flat_map(|k| std::iter::repeat_n(k, count(&notes, k).max(count(&voices, k))));
         for (c, key) in held {
             if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
                 inst.note_off(0, sent(c, key));
@@ -5769,6 +5774,45 @@ mod tests {
         assert_eq!((t, f, held), (tick as f64, frame, false), "goes on from the held tick and frame");
         peak(&mut e, 20);
         assert!(e.tick > tick && probe.lock().unwrap().held.is_empty(), "the note is not started again");
+    }
+
+    /// A key held twice at a pause (a note still sounding as another starts the same key, as two clips meeting do):
+    /// the instrument gets a note off for each, so neither voice rings on while paused.
+    #[test]
+    fn a_key_held_twice_gets_two_note_offs_at_a_pause() {
+        /// Holds one voice per note on, and lets one go per note off.
+        struct Voices(Vec<u8>);
+        impl crate::Instrument for Voices {
+            fn note_on(&mut self, _offset: u32, key: u8, _velocity: f32) {
+                self.0.push(key);
+            }
+            fn note_off(&mut self, _offset: u32, key: u8) {
+                if let Some(i) = self.0.iter().position(|&k| k == key) {
+                    self.0.remove(i);
+                }
+            }
+            fn process(&mut self, _rate: u32, l: &mut [f32], r: &mut [f32]) {
+                let v = if self.0.is_empty() { 0.0 } else { 1.0 };
+                l.fill(v);
+                r.fill(v);
+            }
+        }
+        let mut p = project(vec![long_note(0, 384, 0), long_note(96, 384, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let inst = Arc::new(std::sync::Mutex::new(Voices(Vec::new())));
+        e.set_instrument(0, inst.clone());
+        while e.tick < 120 {
+            e.next_tick();
+        }
+        assert_eq!(inst.lock().unwrap().0.len(), 2, "both notes sound");
+        e.pause();
+        for _ in 0..10 {
+            e.next_tick();
+        }
+        assert!(e.held());
+        assert_eq!(inst.lock().unwrap().0, Vec::<u8>::new(), "every voice let go of");
     }
 
     /// An instrument whose notes fade out over its release: a level that falls by `fall` each frame once let go of.
