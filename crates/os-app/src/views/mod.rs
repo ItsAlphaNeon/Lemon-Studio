@@ -278,6 +278,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if s.drag_on.is_none_or(|w| !s.is_detached(w)) {
         browser::paint_ghost(ui, s);
     }
+    browser::paint_fall(ui, s, None);
     if s.monitor.debug {
         mondebug::paint(ui, s);
     }
@@ -324,6 +325,7 @@ pub fn paint_detached(ui: &mut Ui, s: &State, f: &FrameInfo, w: Win) -> usize {
     if s.drag_on == Some(w) {
         browser::paint_ghost(ui, s);
     }
+    browser::paint_fall(ui, s, Some(w));
     overlays
 }
 

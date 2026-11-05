@@ -48,6 +48,9 @@ pub const SWEEP: Duration = Duration::from_millis(1200);
 pub const TAG_PIN: (f32, f32) = (12.0, 14.0);
 pub const TAG_H: f32 = 24.0;
 pub const TAG_MAX_W: f32 = 220.0;
+/// A cancelled drag's tag falls 48 px and fades out over 400 ms (FL's: about 47 px and 400 ms).
+const FALL: Duration = Duration::from_millis(400);
+const FALL_DROP: f32 = 48.0;
 
 #[derive(Default)]
 pub struct Motion {
@@ -59,6 +62,8 @@ pub struct Motion {
     menus: [Option<Opened>; 3],
     glides: [Option<Glide>; 3],
     tag: Option<Tag>,
+    /// The tag of a cancelled drag, falling away.
+    fall: Option<Fall>,
     hovers: Vec<Hover>,
     flash: Option<Flash>,
     /// When loading sweeps started (they all go in step).
@@ -83,6 +88,17 @@ struct Tag {
     pend: Pendulum,
     level: Level,
     last: Instant,
+}
+
+/// A cancelled drag's tag: its name, the mouse it hung from, its angle then, its window (None: the main one) and
+/// when it was let go.
+struct Fall {
+    label: String,
+    x: f32,
+    y: f32,
+    angle: f32,
+    win: Option<Win>,
+    at: Instant,
 }
 
 /// Something drawn in `r` of window `win` (None: the main one) at `at` still moves.
@@ -295,6 +311,36 @@ impl Motion {
     pub fn tag_angle(&self) -> f32 {
         // The pendulum's angle is positive with the card's bottom to the right, which is a turn the other way.
         self.tag.as_ref().map_or(0.0, |t| -(t.pend.theta as f32))
+    }
+
+    /// A browser drag was cancelled with the tag `label` hanging from the mouse at (`x`, `y`) of window `win` (None:
+    /// the main one): from Subtle up it falls away, fading out, at the angle it had (spec: ui/animations.md §4.1). At
+    /// Off it is gone at once.
+    pub fn tag_fall(&mut self, label: String, x: f32, y: f32, win: Option<Win>) {
+        let angle = self.tag_angle();
+        self.tag = None;
+        self.fall = (!anim::instant()).then(|| Fall { label, x, y, angle, win, at: anim::now() });
+    }
+
+    /// The falling tag, if one falls in window `win` this frame: its name, where it hangs from now, its angle and
+    /// opacity. Where it falls is painted again until it is gone.
+    pub fn falling(&mut self, win: Option<Win>) -> Option<(String, f32, f32, f32, f32)> {
+        let f = self.fall.as_ref().filter(|f| f.win == win)?;
+        let u = since(anim::now(), f.at) / anim::level().dur(FALL).as_secs_f64();
+        let area = tag_reach(f.x, f.y);
+        let area = Rect::new(area.x, area.y, area.w, area.h + FALL_DROP);
+        if u >= 1.0 {
+            // One more frame clears it.
+            self.fall = None;
+            return None;
+        }
+        // It sets off slowly and eases in, as a critically damped spring let go; it fades faster than it falls.
+        let k = 5.6 * u;
+        let drop = FALL_DROP as f64 * (1.0 - (1.0 + k) * (-k).exp());
+        let alpha = (1.0 - u) * (1.0 - u);
+        let out = (f.label.clone(), f.x, f.y + drop as f32, f.angle, alpha as f32);
+        self.live(area);
+        Some(out)
     }
 
     // ------------------------------------------------------------------------------------------------ hover fades

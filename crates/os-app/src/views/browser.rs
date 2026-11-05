@@ -1014,8 +1014,24 @@ pub fn ghost_rect(x: f32, y: f32) -> Rect {
 /// it swings after the mouse like a sign on a nail (spec: ui/animations.md §4.1, `crate::motion`); below, it hangs
 /// rigid.
 pub fn paint_ghost(ui: &mut Ui, s: &State) {
+    if let Some((label, x, y)) = &s.browser_drag {
+        let angle = s.motion.borrow().tag_angle();
+        paint_tag(ui, label, *x, *y, angle, 0.9);
+    }
+}
+
+/// The tag of a cancelled drag in window `win` (None: the main one), falling away (spec: ui/animations.md §4.1).
+pub fn paint_fall(ui: &mut Ui, s: &State, win: Option<crate::app::Win>) {
+    let fall = s.motion.borrow_mut().falling(win);
+    if let Some((label, x, y, angle, alpha)) = fall {
+        paint_tag(ui, &label, x, y, angle, 0.9 * alpha);
+    }
+}
+
+/// The drag tag `label` hanging from the mouse at (`x`, `y`), turned by `angle` (radians, clockwise), at opacity
+/// `alpha`.
+fn paint_tag(ui: &mut Ui, label: &str, x: f32, y: f32, angle: f32, alpha: f32) {
     use crate::motion::{TAG_H, TAG_MAX_W, TAG_PIN};
-    let Some((label, x, y)) = &s.browser_drag else { return };
     let t = ui.t;
     let f = os_ui::Font::new(15);
     let w = (ui.c.text_width(f, label) + 18.0).clamp(40.0, TAG_MAX_W).round();
@@ -1032,9 +1048,8 @@ pub fn paint_ghost(ui: &mut Ui, s: &State) {
     ui.c.fill_rrect(card, 4.0, t.browser_row_hi.shade(0.08));
     ui.c.stroke_rrect(card, 4.0, 1.0, t.browser_tab_outline);
     ui.c.text_clip(f, card.x + 9.0, card.y + 3.0, card.w - 14.0, t.glyph, label);
-    let angle = s.motion.borrow().tag_angle();
     if let Some(tag) = ui.c.take_layer(layer) {
-        ui.c.sprite(&tag, px, py, angle, 1.0, 0.0, 0.0, 0.9);
+        ui.c.sprite(&tag, px, py, angle, 1.0, 0.0, 0.0, alpha);
     }
 }
 

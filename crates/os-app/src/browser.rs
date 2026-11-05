@@ -477,6 +477,24 @@ impl App {
         self.damage_rect(view::ghost_rect(x, y));
     }
 
+    /// Esc during a browser drag cancels it: nothing is dropped when the button comes up, and the tag falls away
+    /// (spec §3, ui/animations.md §4.1). False when no item is being dragged.
+    pub(crate) fn browser_cancel(&mut self) -> bool {
+        if !matches!(self.drag, Some(Drag::Browser { started: true, .. })) {
+            return false;
+        }
+        self.drag = None;
+        let s = &mut self.state;
+        let on = s.drag_on.filter(|&w| s.is_detached(w));
+        if let Some((label, x, y)) = s.browser_drag.take() {
+            s.motion.get_mut().tag_fall(label, x, y, on);
+        }
+        s.drag_on = None;
+        self.mark_detached(on);
+        self.invalidate();
+        true
+    }
+
     /// Release: drop the dragged item on whatever is under the mouse (spec §3).
     pub(crate) fn browser_drop(&mut self, item: Item, started: bool) {
         self.state.browser_drag = None;

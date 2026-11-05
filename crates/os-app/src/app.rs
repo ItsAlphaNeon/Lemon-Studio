@@ -7747,6 +7747,10 @@ impl App {
             return;
         }
         use winit::keyboard::{Key, NamedKey};
+        // Esc cancels a browser drag (spec: ui/browser.md §3).
+        if matches!(key, Key::Named(NamedKey::Escape)) && self.browser_cancel() {
+            return;
+        }
         // The Remote control settings box takes Esc (drops it) and Enter (accepts).
         if crate::remote::is_open(&self.state) {
             match key {
@@ -12753,6 +12757,68 @@ mod tests {
         assert!(frames > 20, "it sways for a while: {frames} frames");
         assert!(app.state.motion.borrow().tag_angle().abs() < 0.01);
         app.mouse_up();
+        crate::anim::set_clock(false);
+    }
+
+    /// Esc during a browser drag cancels it: the release drops nothing, and the tag falls away, fading out over
+    /// 400 ms; at Off it is gone at once (spec: ui/browser.md §3, ui/animations.md §4.1). Each frame of the fall
+    /// repaints as a whole frame would.
+    #[test]
+    fn escape_cancels_a_browser_drag() {
+        use crate::anim::Level;
+        use crate::views::browser::{rows, Item};
+        use winit::keyboard::{Key, NamedKey};
+        let size = (1600, 900);
+        let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.state.playlist.reset();
+        app.state.z = vec![Win::Playlist];
+        frame(&mut app, &mut c, None);
+        let r0 = hit_rect(&app, &Action::BrowserTab(1));
+        click(&mut app, &mut c, r0);
+        let pi = rows(&app.state).iter().position(|r| r.item == Item::Pattern(1)).expect("pattern row");
+        let src = hit_rect(&app, &Action::BrowserRow(pi));
+        let grid = app.pl_grid().expect("grid");
+        let n0 = crate::playlist::clips(&app.state).len();
+        crate::anim::set_clock(true);
+        let step = |app: &mut App, c: &mut Canvas, whole: &mut Canvas, what: &str| {
+            crate::anim::advance(16);
+            app.tick();
+            let d = app.take_damage();
+            frame_damage(app, c, d);
+            frame(app, whole, None);
+            assert_same(c, whole, what);
+        };
+        for (level, falls) in [(Level::Playful, 24..=28), (Level::Off, 1..=1)] {
+            crate::anim::set_level(level);
+            app.mouse_move(src.cx(), src.cy());
+            app.mouse_down();
+            app.mouse_move(src.cx() + 30.0, src.cy());
+            for k in 1..=10 {
+                app.mouse_move(grid.x + 30.0 * k as f32, grid.y + 40.0);
+                step(&mut app, &mut c, &mut whole, "a frame of the drag");
+            }
+            assert!(app.state.browser_drag.is_some(), "dragging");
+            app.key(&Key::Named(NamedKey::Escape), false, false);
+            assert!(app.state.browser_drag.is_none() && app.drag.is_none(), "cancelled");
+            let mut frames = 0;
+            loop {
+                app.mouse_move(grid.x + 300.0, grid.y + 60.0);
+                step(&mut app, &mut c, &mut whole, "a frame of the fall");
+                frames += 1;
+                if !app.animating() {
+                    break;
+                }
+                assert!(frames < 100, "it ends");
+            }
+            assert!(falls.contains(&frames), "{level:?}: the tag falls for {frames} frames");
+            app.mouse_up();
+            assert_eq!(crate::playlist::clips(&app.state).len(), n0, "{level:?}: nothing dropped");
+        }
+        crate::anim::set_level(Level::Playful);
         crate::anim::set_clock(false);
     }
 
