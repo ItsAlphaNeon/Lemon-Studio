@@ -19,6 +19,7 @@ use os_ui::{Canvas, Layer, Rect, Sprite};
 
 use crate::anim::{self, Level, Pendulum, Spring, Tween};
 use crate::app::Win;
+use crate::plugin_palette::Row;
 
 /// What can be open at once and appears and goes the same way: a popup menu, its submenu, a menu bar dropdown and the
 /// plugin palette.
@@ -51,6 +52,8 @@ const PALETTE_CLOSE_ZOOM: f32 = 0.97;
 const ROW_STAGGER: f64 = 0.012;
 const ROW_STAGGERED: usize = 10;
 const ROW_FADE: f64 = 0.120;
+/// When the palette's list rearranges, its rows go to their new places in this time (spec: ui/animations.md §4.3).
+const LIST_MOVE: Duration = Duration::from_millis(160);
 /// A control's drawn value follows its value with the time constant Smoothing gives (half-life value x 0.25 ms, so
 /// 46 ms at the default 128), at most 15 ms while something is dragged, and has arrived within 0.1 % of its travel
 /// (§4.5). It sets off with one frame's move, so a jump shows on the frame it happens.
@@ -64,9 +67,32 @@ const GLIDE_HZ: f64 = 15.5;
 /// Hover helpers fade in over 120 ms and out over 200 ms (§4.6).
 const HOVER_IN: f64 = 0.120;
 const HOVER_OUT: f64 = 0.200;
+/// A menu behind its open submenu shows at this opacity (General ▸ Display ▸ Transparent menus, spec: ui/animations.md
+/// §4.2), going there and back in this time.
+const MENU_BEHIND: f32 = 0.7;
+const MENU_BEHIND_TIME: f64 = 0.120;
+/// With General ▸ Display ▸ Transparent windows on, a window that isn't the active one shows at this opacity, going
+/// there and back in this time (spec: ui/animations.md §4.9).
+const WINDOW_SEE: f32 = 0.85;
+const WINDOW_FADE: f64 = 0.150;
+/// At Playful a menu's captions enter one after another: this much later per row, up to the last, each from this far
+/// left, going half way in 80 ms (FL's at Entertain me, §2.2) and showing over 120 ms.
+const CAPTION_STAGGER: f64 = 0.003;
+const CAPTION_STAGGER_MAX: f64 = 0.090;
+const CAPTION_SLIDE: f32 = 5.0;
+const CAPTION_TAU: f64 = 0.115;
+const CAPTION_SHOW: f64 = 0.120;
+/// It is close enough to its place this long after it sets off (a quarter px).
+const CAPTION_TIME: f64 = 0.350;
 /// Toolbar buttons light in 145 ms and go out in 340 ms (FL's, §2.2).
 pub const BUTTON_HOVER: (f64, f64) = (0.145, 0.340);
 pub const SLOT_HOVER: (f64, f64) = (HOVER_IN, HOVER_OUT);
+/// A filled slot's name shifts in and back in these times, FL's (§2.2).
+pub const NAME_SHIFT: (f64, f64) = (0.150, 0.220);
+/// Knobs' rings light and go out as time constants, as FL's do (§2.2).
+const KNOB_HOVER: (f64, f64) = (0.060, 0.170);
+/// A follow this close to its end is there.
+const HOVER_ARRIVED: f64 = 0.01;
 /// A functional flash lasts 400 ms and peaks at 60 % (§4.7).
 pub const FLASH: Duration = Duration::from_millis(400);
 const FLASH_PEAK: f32 = 0.6;
@@ -101,6 +127,8 @@ pub struct Motion {
     dragging: bool,
     /// Where a drag would drop, and where it just would have, glowing.
     glows: Vec<Glow>,
+    /// The palette's list as last painted and its rows on their way.
+    list: PaletteList,
     tag: Option<Tag>,
     /// The tag of a cancelled drag, falling away.
     fall: Option<Fall>,
@@ -108,6 +136,49 @@ pub struct Motion {
     flash: Option<Flash>,
     /// When loading sweeps started (they all go in step).
     sweeps: Option<Instant>,
+}
+
+/// The plugin palette's list as last painted, and how it goes to a new arrangement: what stays slides, what is new
+/// fades in, what went fades out (spec: ui/animations.md §4.3).
+#[derive(Default)]
+struct PaletteList {
+    rows: Vec<Row>,
+    tops: Vec<f32>,
+    scroll: f32,
+    /// Rows on their way: how far from their place they set off (px), or None for one fading in.
+    moves: HashMap<u64, Option<f32>>,
+    /// Rows fading out, and how far they are below the list's top (px).
+    gone: Vec<(Row, f32)>,
+    at: Option<(Instant, Duration)>,
+}
+
+impl PaletteList {
+    /// How far the move is, 0 to 1 (eased), now: None when none is under way.
+    fn progress(&self, now: Instant) -> Option<f32> {
+        self.at.map(|(at, len)| Tween::new(at, len).eased(now) as f32)
+    }
+
+    /// How far row `key` is from its place now.
+    fn off(&self, key: u64, u: f32) -> f32 {
+        match self.moves.get(&key) {
+            Some(Some(from)) => from * (1.0 - u),
+            _ => 0.0,
+        }
+    }
+}
+
+/// What a row of the palette's list is known by as the list rearranges.
+fn row_key(row: &Row) -> u64 {
+    match row {
+        Row::Head { label, major } => key(("head", label, major)),
+        Row::Plugin { effect, at } => key(("plugin", effect, at)),
+        Row::Note(text) => key(("note", text)),
+    }
+}
+
+/// What the see-through of the menu in `slot` is known by among the hover fades.
+fn behind_key(slot: Slot) -> u64 {
+    key(("menu behind", slot as u32))
 }
 
 /// A drop target's glow, in window `win`: its opacity, 0 to 1, and which way it goes.
@@ -332,7 +403,8 @@ impl Motion {
     /// when it first shows or rests; after a jump it follows `v` by the Smoothing slider, closer while something is
     /// being dragged. `area` (window px) is painted again until it has arrived. At Off or Smoothing 0, always `v`.
     pub fn value(&mut self, key: u64, v: f32, area: Rect) -> f32 {
-        let mut tau = f64::from(crate::smooth::smoothing()) * 0.000_25 / std::f64::consts::LN_2;
+        // A quarter of a ms for each unit of Smoothing: FL's, measured from 0 to 100 % of the slider (§2.2).
+        let mut tau = f64::from(crate::smooth::smoothing()) * 0.000_25;
         if self.dragging {
             tau = tau.min(DRAG_TAU);
         }
@@ -406,6 +478,87 @@ impl Motion {
         anim::ease_out(t / ROW_FADE) as f32
     }
 
+    /// The palette's list is about to be painted as `rows` at `tops`, scrolled by `scroll`, `view` px of it showing.
+    /// A new arrangement sets the rows off from where they are drawn; a scroll doesn't, nor one while it opens.
+    pub fn palette_list(&mut self, rows: &[Row], tops: &[f32], scroll: f32, view: f32) {
+        let now = anim::now();
+        let opening = self.menus[Slot::Palette as usize].as_ref().is_none_or(|o| since(now, o.at) < anim::level().dur(PALETTE_OPEN).as_secs_f64());
+        let list = &mut self.list;
+        if list.at.is_some_and(|(at, len)| now >= at + len) {
+            list.at = None;
+            list.moves.clear();
+            list.gone.clear();
+        }
+        if list.rows == rows {
+            list.scroll = scroll;
+            return;
+        }
+        if anim::instant() || opening {
+            list.at = None;
+            list.moves.clear();
+            list.gone.clear();
+        } else {
+            let u = list.progress(now).unwrap_or(0.0);
+            let was: HashMap<u64, f32> = list.rows.iter().zip(&list.tops).map(|(r, top)| {
+                let k = row_key(r);
+                (k, top - list.scroll + list.off(k, u))
+            }).collect();
+            let mut moves = HashMap::new();
+            for (r, top) in rows.iter().zip(tops) {
+                let k = row_key(r);
+                match was.get(&k) {
+                    Some(y) if (y - (top - scroll)).abs() >= 0.5 => {
+                        moves.insert(k, Some(y - (top - scroll)));
+                    }
+                    Some(_) => {}
+                    None => {
+                        moves.insert(k, None);
+                    }
+                }
+            }
+            let stays: std::collections::HashSet<u64> = rows.iter().map(row_key).collect();
+            list.gone = list.rows.iter().filter(|r| !stays.contains(&row_key(r))).filter_map(|r| {
+                let y = was.get(&row_key(r)).copied()?;
+                (y + r.height() > 0.0 && y < view).then(|| (r.clone(), y))
+            }).collect();
+            list.moves = moves;
+            list.at = Some((now, anim::level().dur(LIST_MOVE)));
+        }
+        list.rows = rows.to_vec();
+        list.tops = tops.to_vec();
+        list.scroll = scroll;
+    }
+
+    /// How far above or below its place `row` of the palette's list is drawn now, and its opacity.
+    pub fn list_row(&self, row: &Row) -> (f32, f32) {
+        let Some(u) = self.list.progress(anim::now()) else { return (0.0, 1.0) };
+        match self.list.moves.get(&row_key(row)) {
+            Some(Some(from)) => (from * (1.0 - u), 1.0),
+            Some(None) => (0.0, u),
+            None => (0.0, 1.0),
+        }
+    }
+
+    /// The rows fading out of the palette's list: each, how far below the list's top it is, and its opacity.
+    pub fn list_gone(&self) -> Vec<(Row, f32, f32)> {
+        let Some(u) = self.list.progress(anim::now()) else { return Vec::new() };
+        self.list.gone.iter().map(|(r, y)| (r.clone(), *y, 1.0 - u)).collect()
+    }
+
+    /// How opaque window `win` shows this frame, going see-through while it is `inactive` and back when it isn't
+    /// (spec: ui/animations.md §4.9). `area`, in surface `on` (None: the main window), is painted again while it moves.
+    pub fn window_opacity(&mut self, win: Win, on: Option<Win>, inactive: bool, area: Rect) -> f32 {
+        let surface = std::mem::replace(&mut self.win, on);
+        let fade = self.hover_timed(key(("window", win)), inactive, area, (WINDOW_FADE, WINDOW_FADE));
+        self.win = surface;
+        1.0 - fade * (1.0 - WINDOW_SEE)
+    }
+
+    /// Whether the palette's list is on its way to a new arrangement.
+    pub fn list_moving(&self) -> bool {
+        self.list.at.is_some()
+    }
+
     /// Menu `slot`, which is `key` (its entries and where it opened), is about to be painted in `r` (the canvas's
     /// logical px, `k` times the window's), opened from `anchor`. While it appears, it is painted into a layer that
     /// `menu_end` draws faded, slid and scaled (spec: ui/animations.md §4.2): Subtle fades it in, Polished slides it
@@ -427,6 +580,9 @@ impl Motion {
             }
             m => {
                 *m = Some(Opened { key, at: now, rect, win });
+                // A new menu starts opaque, whatever the last one in its place had open.
+                let behind = behind_key(slot);
+                self.hovers.retain(|h| h.key != behind);
                 now
             }
         };
@@ -467,6 +623,50 @@ impl Motion {
         self.live(Rect::new(reach.x * k, reach.y * k, reach.w * k, reach.h * k));
         d.layer = Some(c.begin_layer(r.outset(1.0), true));
         d
+    }
+
+    /// While menu `slot` has a submenu open (`open`) it goes see-through behind it, and back when that closes, with
+    /// General ▸ Display ▸ Transparent menus on, from Subtle up (spec: ui/animations.md §4.2). Call it right after
+    /// `menu_begin`, before the menu paints.
+    pub fn menu_behind(&mut self, c: &mut Canvas, d: &mut MenuDraw, slot: Slot, open: bool, r: Rect, k: f32) {
+        if anim::instant() || !crate::prefs::check(&crate::prefs::TRANSPARENT_MENUS) {
+            return;
+        }
+        let reach = r.outset(1.0);
+        let area = Rect::new(reach.x * k, reach.y * k, reach.w * k, reach.h * k);
+        let fade = self.hover_timed(behind_key(slot), open, area, (MENU_BEHIND_TIME, MENU_BEHIND_TIME));
+        if fade > 0.0 {
+            d.alpha *= 1.0 - fade * (1.0 - MENU_BEHIND);
+            if d.layer.is_none() {
+                d.layer = Some(c.begin_layer(reach, true));
+            }
+        }
+    }
+
+    /// Where caption `row` of menu `slot` is this frame, entering at Playful (spec: ui/animations.md §4.2): how far
+    /// left of its place, and its opacity. Rows from the first on come after one another, up to a limit.
+    pub fn caption(&self, slot: Slot, row: usize) -> (f32, f32) {
+        if anim::instant() || anim::level() != Level::Playful {
+            return (0.0, 1.0);
+        }
+        let Some(o) = &self.menus[slot as usize] else { return (0.0, 1.0) };
+        let t = since(anim::now(), o.at) - (row as f64 * CAPTION_STAGGER).min(CAPTION_STAGGER_MAX);
+        if t >= CAPTION_TIME {
+            return (0.0, 1.0);
+        }
+        let t = t.max(0.0);
+        (CAPTION_SLIDE * (-t / CAPTION_TAU).exp() as f32, (t / CAPTION_SHOW).min(1.0) as f32)
+    }
+
+    /// Paints menu `slot`, in canvas px `r` with `k` window px each, again while its captions enter.
+    pub fn captions_live(&mut self, slot: Slot, r: Rect, k: f32) {
+        if anim::instant() || anim::level() != Level::Playful {
+            return;
+        }
+        let Some(o) = &self.menus[slot as usize] else { return };
+        if since(anim::now(), o.at) < CAPTION_TIME + CAPTION_STAGGER_MAX {
+            self.live(Rect::new(r.x * k, r.y * k, r.w * k, r.h * k));
+        }
     }
 
     /// Draws the menu painted since `menu_begin` as it shows this frame.
@@ -591,6 +791,25 @@ impl Motion {
 
     /// As `hover`, fading in over `times.0` s and out over `times.1` s.
     pub fn hover_timed(&mut self, key: u64, on: bool, area: Rect, times: (f64, f64)) -> f32 {
+        anim::ease_out(f64::from(self.hover_linear(key, on, area, times))) as f32
+    }
+
+    /// As `hover_timed`, going at an even pace: for what is shaped by its own curve.
+    pub fn hover_linear(&mut self, key: u64, on: bool, area: Rect, times: (f64, f64)) -> f32 {
+        self.hover_step(key, on, area, |v, dt| if on { (v + dt / times.0).min(1.0) } else { (v - dt / times.1).max(0.0) }) as f32
+    }
+
+    /// A knob's ring, as `hover`: it goes most of the way at once and takes its time over the rest.
+    pub fn hover_knob(&mut self, key: u64, on: bool, area: Rect) -> f32 {
+        self.hover_step(key, on, area, |v, dt| {
+            let (to, tau) = if on { (1.0, KNOB_HOVER.0) } else { (0.0, KNOB_HOVER.1) };
+            let next = anim::follow(v, to, dt, tau);
+            if (next - to).abs() < HOVER_ARRIVED { to } else { next }
+        }) as f32
+    }
+
+    /// The fade `key` moves on by `step` (its value and the time since the last paint give the new value).
+    fn hover_step(&mut self, key: u64, on: bool, area: Rect, step: impl Fn(f64, f64) -> f64) -> f64 {
         let now = anim::now();
         let pos = self.hovers.iter().position(|h| h.key == key);
         if anim::instant() {
@@ -615,7 +834,7 @@ impl Motion {
         }
         let dt = since(now, h.last);
         h.last = now;
-        h.val = if on { (h.val + dt / times.0).min(1.0) } else { (h.val - dt / times.1).max(0.0) };
+        h.val = step(h.val, dt);
         let v = h.val;
         if (on && v < 1.0) || (!on && v > 0.0) {
             self.live(area);
@@ -623,7 +842,7 @@ impl Motion {
         if !on && v <= 0.0 {
             self.hovers.swap_remove(i);
         }
-        anim::ease_out(v) as f32
+        v
     }
 
     /// The glows to draw over window `win`: the drop target `target` (a window and a part of it) fades in as a hover

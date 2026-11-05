@@ -1592,7 +1592,9 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     let menu = if sub { crate::app::MENU_SUB } else { crate::app::MENU_POPUP };
     let mut rows = Vec::with_capacity(items.len());
     let lemon = super::lemon(ui);
-    let draw = fx.s.motion.borrow_mut().menu_begin(ui.c, fx.slot, fx.key, r, fx.anchor, fx.k);
+    let mut draw = fx.s.motion.borrow_mut().menu_begin(ui.c, fx.slot, fx.key, r, fx.anchor, fx.k);
+    fx.s.motion.borrow_mut().menu_behind(ui.c, &mut draw, fx.slot, open.is_some(), r, fx.k);
+    fx.s.motion.borrow_mut().captions_live(fx.slot, r, fx.k);
     menu_panel(ui, r, &m);
     ui.hit(r, Action::Swallow, "");
     // A column out of view is placed beside the shown ones.
@@ -1675,7 +1677,10 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             Mark::Radio(false) => ui.c.stroke_circle(mx, my, 3.5, 1.0, t.menu_pop_dim),
             _ => {}
         }
-        ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, lw + 4.0, color, &it.label);
+        // At Playful the captions enter one after another; the rest of a row is there at once.
+        let (left, shows) = fx.s.motion.borrow().caption(fx.slot, i);
+        let color = color.with_alpha((f32::from(color.a) * shows) as u8);
+        ui.c.text_clip(font, rr.x + 20.0 - left, rr.y + 2.0 + dy, lw + 4.0, color, &it.label);
         let right = rr.right() - if it.children.is_empty() { 8.0 } else { 16.0 };
         if !it.key.is_empty() {
             let sc = if live { t.menu_pop_shortcut } else { t.menu_pop_dim.mix(t.menu_pop, 0.35) };

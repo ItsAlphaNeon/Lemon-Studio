@@ -371,12 +371,12 @@ pub const FORCE_REFRESHES: Check = Check { key: "force_refreshes", label: "Force
 /// nothing yet. Spec: as above.
 pub const THICK_LINES: Check = Check { key: "thick_lines", label: "Thick lines", default: false };
 
-/// General ▸ Display: stored and shown only. FL showed no change to its menus either way, so there is nothing to copy
-/// yet. Spec: ui/settings-choices.md "Display: Smoothing, Animation refresh rate, Transparent menus and windows
-/// (2026-10-16)".
+/// General ▸ Display: a menu goes see-through behind its open submenu (`Motion::menu_behind`). Spec: ui/animations.md
+/// §4.2.
 pub const TRANSPARENT_MENUS: Check = Check { key: "transparent_menus", label: "Transparent menus", default: true };
 
-/// General ▸ Display: stored and shown only, like Transparent menus. Spec: as above.
+/// General ▸ Display: a window that isn't the active one shows what is behind it (`Motion::window_opacity`). Spec:
+/// ui/animations.md §4.9.
 pub const TRANSPARENT_WINDOWS: Combo = Combo { key: "transparent_windows", label: "Transparent windows", choices: &["Off", "On"], default: 0 };
 
 /// General ▸ Input: stored and shown only. Lemon Studio has no pen or touch input yet; when it does, these choices are

@@ -27,7 +27,7 @@ use crate::views;
 /// Child windows. Playlist, Mixer and Piano roll float by default and can be moved, resized,
 /// minimized (title bar only) and maximized (filling the workspace); the Channel rack and the
 /// channel plugin window float. All share one stacking order (`State::z`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Win {
     Playlist,
     Mixer,
@@ -796,6 +796,19 @@ impl Ui<'_> {
         self.motion.borrow_mut().hover_timed(key, on, Rect::new(r.x * k, r.y * k, r.w * k, r.h * k), times)
     }
 
+    /// As `hover_fade`, going at an even pace.
+    pub fn hover_linear(&self, key: u64, on: bool, r: Rect, times: (f64, f64)) -> f32 {
+        let k = self.k;
+        self.motion.borrow_mut().hover_linear(key, on, Rect::new(r.x * k, r.y * k, r.w * k, r.h * k), times)
+    }
+
+    /// A small button's ink: `off`, going to `on` while the mouse is over it and fading back as a hover helper does
+    /// (spec: ui/animations.md §4.6). `r` is what it is known by and painted again in.
+    pub fn hover_ink(&self, hov: bool, r: Rect, off: os_ui::Color, on: os_ui::Color) -> os_ui::Color {
+        let key = crate::motion::key(("ink", r.x.to_bits(), r.y.to_bits()));
+        off.mix(on, self.hover_fade(key, hov, r, crate::motion::SLOT_HOVER))
+    }
+
     /// Whether the mouse is over `rect` and last frame's topmost hit there was registered by this window
     /// (for decorations without their own action, e.g. a knob drawn under its hit region).
     pub fn hovering(&self, rect: Rect) -> bool {
@@ -829,6 +842,15 @@ impl Ui<'_> {
     /// Whether `ui.hit(rect, action, ..)` would say the mouse is over it (without registering it).
     pub fn hovers(&self, rect: Rect, action: &Action) -> bool {
         self.hover.as_ref() == Some(action) && rect.contains(self.mouse.0, self.mouse.1)
+    }
+
+    /// Runs `f` painting nothing and registering nothing: what it finds out is all that stays.
+    pub fn dry(&mut self, f: impl FnOnce(&mut Self)) {
+        let hits = self.hits.len();
+        self.c.push_clip(Rect::default());
+        f(self);
+        self.c.pop_clip();
+        self.hits.truncate(hits);
     }
 
     /// Marks the hit just registered as a row of menu `menu` (1 or more) that the wheel steps to.
@@ -3298,7 +3320,9 @@ impl App {
             && self.loading.is_none()
             && self.export.is_none()
             && self.state.playlist.overlay.is_none()
-            && !self.state.monitor.debug;
+            && !self.state.monitor.debug
+            // A see-through window's pixels aren't its own to move, nor those of what shows through one.
+            && crate::prefs::index(&crate::prefs::TRANSPARENT_WINDOWS) != 1;
         if !can {
             return self.damage_win(Win::Playlist);
         }
@@ -4467,6 +4491,14 @@ impl App {
     pub fn mouse_up_from(&mut self, from: Option<Win>) {
         let to = if self.cross_drag() { self.state.drag_on.filter(|&w| self.state.is_detached(w)) } else { from };
         self.on(to, Self::mouse_up);
+    }
+
+    /// How opaque detached window `w` shows now (General ▸ Display ▸ Transparent windows, spec: ui/animations.md §4.9).
+    pub fn detached_opacity(&mut self, w: Win) -> f32 {
+        let s = &self.state;
+        let inactive = s.z.last() != Some(&w) && crate::prefs::index(&crate::prefs::TRANSPARENT_WINDOWS) == 1;
+        let (width, height) = s.detached_size(w).unwrap_or((1.0, 1.0));
+        s.motion.borrow_mut().window_opacity(w, Some(w), inactive, Rect::new(0.0, 0.0, width, height))
     }
 
     /// Whether detached window `w` has something new to show (painting it, `paint_detached`, clears that).
@@ -12668,6 +12700,8 @@ mod tests {
 
     fn assert_same(a: &Canvas, b: &Canvas, what: &str) {
         let width = a.pixmap.width() as usize;
+        let clear = a.pixmap.data().chunks_exact(4).filter(|p| p[3] != 255).count();
+        assert_eq!(clear, 0, "{what}: pixels that aren't opaque");
         let diffs = a.pixmap.data().iter().zip(b.pixmap.data()).enumerate().filter(|(_, (x, y))| x.abs_diff(**y) > 3).map(|(i, _)| i / 4);
         let (n, bbox) = diffs.fold((0, (usize::MAX, usize::MAX, 0, 0)), |(n, m), i| (n + 1, (m.0.min(i % width), m.1.min(i / width), m.2.max(i % width), m.3.max(i / width))));
         if n > 0 {
@@ -12685,6 +12719,8 @@ mod tests {
         use crate::playlist::{Cmd, PItem, Popup};
         let size = (1280, 800);
         let (Ok(mut c), Ok(mut whole), Ok(mut want)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        // At Playful its captions go on entering (`captions_enter_and_the_menu_behind_goes_see_through`).
+        crate::anim::set_level(crate::anim::Level::Polished);
         let mut app = App::new(None);
         let items = (0..8).map(|i| PItem::new(format!("Entry number {i}"), Cmd::Nothing)).collect::<Vec<_>>();
         app.mouse_move(5.0, 790.0);
@@ -13353,8 +13389,8 @@ mod tests {
         crate::anim::set_clock(false);
     }
 
-    /// A toolbar button's hover look fades in over 145 ms and out over 340 ms, and a mixer slot's arrow over 120 and
-    /// 200 ms, each after any time at rest (spec: ui/animations.md §4.6). At Off they switch at once.
+    /// A toolbar button's hover look fades in over 145 ms and out over 340 ms and a mixer slot's arrow turns in and back
+    /// in those times, each after any time at rest (spec: ui/animations.md §4.6). At Off they switch at once.
     #[test]
     fn toolbar_buttons_and_slot_arrows_fade() {
         use crate::anim::Level;
@@ -13370,6 +13406,7 @@ mod tests {
         frame(&mut app, &mut c, None);
         let button = hit_rect(&app, &Action::Metronome);
         let arrow = hit_rect(&app, &Action::Mix(MHit::SlotArrow(0)));
+        let arrow_ink = |c: &Canvas| (0..arrow.w as u32).flat_map(|x| (0..arrow.h as u32).map(move |y| (x, y))).filter_map(|(x, y)| c.pixmap.pixel(arrow.x as u32 + x, arrow.y as u32 + y)).map(|p| (p.red(), p.green(), p.blue())).collect::<Vec<_>>();
         crate::anim::set_clock(true);
         // Goes to (`x`, `y`) and paints until nothing moves; how many frames that took.
         let mut go = |app: &mut App, c: &mut Canvas, x: f32, y: f32, what: &str| {
@@ -13398,13 +13435,297 @@ mod tests {
         crate::anim::advance(5000);
         let frames = go(&mut app, &mut c, away.0, away.1, "a button going out");
         assert!((20..=23).contains(&frames), "about 340 ms: {frames} frames");
-        let frames = go(&mut app, &mut c, arrow.cx(), arrow.cy(), "a slot's arrow brightening");
-        assert!((7..=9).contains(&frames), "about 120 ms: {frames} frames");
-        let frames = go(&mut app, &mut c, away.0, away.1, "a slot's arrow dimming");
-        assert!((12..=14).contains(&frames), "about 200 ms: {frames} frames");
+        // So do the toolbar's other kinds of button.
+        for action in [Action::ToggleWin(Win::ChannelRack), Action::Play, Action::Stop, Action::Record] {
+            let r = hit_rect(&app, &action);
+            let frames = go(&mut app, &mut c, r.cx(), r.cy(), "a button lighting");
+            assert!((8..=11).contains(&frames), "{action:?}, about 145 ms: {frames} frames");
+            let frames = go(&mut app, &mut c, away.0, away.1, "a button going out");
+            assert!((20..=23).contains(&frames), "{action:?}, about 340 ms: {frames} frames");
+        }
+        // An empty slot's arrow turns a quarter of the way round, and back.
+        let rest = arrow_ink(&c);
+        let frames = go(&mut app, &mut c, arrow.cx(), arrow.cy(), "a slot's arrow turning");
+        assert!((8..=11).contains(&frames), "about 145 ms: {frames} frames");
+        assert_ne!(arrow_ink(&c), rest, "it points down");
+        let frames = go(&mut app, &mut c, away.0, away.1, "a slot's arrow turning back");
+        assert!((20..=23).contains(&frames), "about 340 ms: {frames} frames");
+        assert_eq!(arrow_ink(&c), rest, "and is as it was");
         crate::anim::set_level(Level::Off);
         assert_eq!(go(&mut app, &mut c, button.cx(), button.cy(), "at Off"), 0);
         assert_eq!(go(&mut app, &mut c, away.0, away.1, "at Off"), 0);
+        crate::anim::set_level(Level::Polished);
+        crate::anim::set_clock(false);
+    }
+
+    /// A dropdown from the menu bar, its bar on a row, settles on what is painted with no motion: its rows' text doesn't
+    /// depend on the bar having moved (spec: ui/animations.md §4.2). Each frame's partial repaint matches a whole one.
+    #[test]
+    fn a_dropdown_settles_on_what_no_motion_paints() {
+        use crate::anim::Level;
+        let size = (1280, 800);
+        let (Ok(mut c), Ok(mut whole), Ok(mut still)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        app.mouse_move(1200.0, 790.0);
+        frame(&mut app, &mut c, None);
+        crate::anim::set_clock(true);
+        for level in [Level::Polished, Level::Playful] {
+            crate::anim::set_level(level);
+            app.state.menu_open = Some(0);
+            app.invalidate();
+            let d = app.take_damage();
+            frame_damage(&mut app, &mut c, d);
+            let row = app.hits.iter().find(|h| matches!(h.action, Action::MenuItem(0, _)) && h.rect.h > 0.0).map(|h| h.rect).expect("a row");
+            app.mouse_move(row.cx(), row.cy());
+            let mut frames = 0;
+            while { let d = app.take_damage(); frame_damage(&mut app, &mut c, d); app.state.motion.borrow().moving() } {
+                crate::anim::advance(16);
+                app.tick();
+                let d = app.take_damage();
+                frame_damage(&mut app, &mut c, d);
+                frame(&mut app, &mut whole, None);
+                assert_same(&c, &whole, "a dropdown opening");
+                frames += 1;
+                assert!(frames < 60, "it ends");
+            }
+            let at = crate::anim::now();
+            crate::anim::set_clock(false);
+            frame(&mut app, &mut still, None);
+            assert_same(&c, &still, "settled, it is what no motion paints");
+            crate::anim::set_clock_at(at);
+            app.state.menu_open = None;
+            app.invalidate();
+            let d = app.take_damage();
+            frame_damage(&mut app, &mut c, d);
+            app.mouse_move(1200.0, 790.0);
+            while { let d = app.take_damage(); frame_damage(&mut app, &mut c, d); app.state.motion.borrow().moving() } {
+                crate::anim::advance(16);
+                app.tick();
+            }
+        }
+        crate::anim::set_level(Level::Playful);
+        crate::anim::set_clock(false);
+    }
+
+    /// At Playful a menu's captions enter one after another, and at the end it is the settled menu. With Transparent
+    /// menus on, a menu goes see-through behind its open submenu and comes back when that closes; with it off, it
+    /// doesn't (spec: ui/animations.md §4.2). Each frame's partial repaint matches a whole one.
+    #[test]
+    fn captions_enter_and_the_menu_behind_goes_see_through() {
+        use crate::anim::Level;
+        use crate::motion::Slot;
+        use crate::playlist::{Cmd, PItem, Popup};
+        let size = (1280, 800);
+        let (Ok(mut c), Ok(mut whole), Ok(mut want)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        app.mouse_move(5.0, 790.0);
+        frame(&mut app, &mut c, None);
+        let inner = vec![PItem::new("Inner", Cmd::Nothing)];
+        let mut items: Vec<PItem> = (0..8).map(|i| PItem::new(format!("Entry number {i}"), Cmd::Nothing)).collect();
+        items.push(PItem::sub("More", inner));
+        crate::anim::set_clock(true);
+        crate::anim::set_level(Level::Playful);
+        app.state.playlist.popup = Some(Popup { x: 400.0, y: 300.0, items, sub: None, scroll: [0; 2] });
+        app.invalidate();
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        fn settle(app: &mut App, c: &mut Canvas, whole: &mut Canvas, what: &str, mut each: impl FnMut(&App)) -> usize {
+            let mut frames = 0;
+            while app.state.motion.borrow().moving() {
+                crate::anim::advance(16);
+                app.tick();
+                let d = app.take_damage();
+                frame_damage(app, c, d);
+                frame(app, whole, None);
+                assert_same(c, whole, what);
+                each(app);
+                frames += 1;
+                assert!(frames < 60, "{what} ends");
+            }
+            frames
+        }
+        let mut order = false;
+        let frames = settle(&mut app, &mut c, &mut whole, "captions entering", |app| {
+            let m = app.state.motion.borrow();
+            let (first, last) = (m.caption(Slot::Popup, 0), m.caption(Slot::Popup, 8));
+            order |= last.0 > first.0 && last.1 < first.1 && first.1 > 0.0;
+        });
+        assert!(order, "the last caption comes after the first");
+        assert!((26..=29).contains(&frames), "about 440 ms: {frames} frames");
+        let t = crate::anim::now();
+        crate::anim::set_clock(false);
+        frame(&mut app, &mut want, None);
+        assert_same(&c, &want, "entered, it is the settled menu");
+        crate::anim::set_clock_at(t);
+        // Its submenu opens: it goes see-through, where the submenu doesn't cover it (no captions to wait for here).
+        crate::anim::set_level(Level::Polished);
+        let row = hit_rect(&app, &Action::PlPopup(0));
+        let spot = (row.x as u32 + 4, row.cy() as u32);
+        let open = c.pixmap.pixel(spot.0, spot.1);
+        let popup = app.state.playlist.popup.as_mut().expect("open");
+        popup.sub = Some(8);
+        app.invalidate();
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        let frames = settle(&mut app, &mut c, &mut whole, "the menu fading behind its submenu", |_| {});
+        assert!((7..=9).contains(&frames), "about 120 ms: {frames} frames");
+        assert_ne!(c.pixmap.pixel(spot.0, spot.1), open, "see-through");
+        // It closes: back.
+        app.state.playlist.popup.as_mut().expect("open").sub = None;
+        app.invalidate();
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        let frames = settle(&mut app, &mut c, &mut whole, "the menu coming back", |_| {});
+        assert!((7..=9).contains(&frames), "about 120 ms: {frames} frames");
+        assert_eq!(c.pixmap.pixel(spot.0, spot.1), open, "opaque again");
+        // Transparent menus off: it stays.
+        crate::prefs::set_check(&crate::prefs::TRANSPARENT_MENUS, false);
+        app.state.playlist.popup.as_mut().expect("open").sub = Some(8);
+        app.invalidate();
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        let frames = settle(&mut app, &mut c, &mut whole, "no see-through", |_| {});
+        assert!(frames <= 7, "only the submenu moves: {frames} frames");
+        assert_eq!(c.pixmap.pixel(spot.0, spot.1), open, "opaque");
+        crate::prefs::set_check(&crate::prefs::TRANSPARENT_MENUS, true);
+        app.state.playlist.popup = None;
+        crate::anim::set_level(Level::Playful);
+        crate::anim::set_clock(false);
+    }
+
+    /// With Transparent windows on, a window that isn't the active one goes see-through over 150 ms and comes back when
+    /// it is raised; with it off, windows stay opaque (spec: ui/animations.md §4.9). A partial repaint of each frame
+    /// matches a whole one, also where a repaint of what is behind shows through.
+    #[test]
+    fn inactive_windows_go_see_through() {
+        use crate::anim::Level;
+        use crate::prefs::TRANSPARENT_WINDOWS;
+        let size = (1600, 900);
+        let (Ok(mut c), Ok(mut whole)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.file = None;
+        app.state.path = None;
+        // A floating mixer over the playlist, and the palette over both: it is the active one.
+        let slot = Win::Mixer.slot().expect("a slot");
+        app.state.wins[slot].maxed = false;
+        app.state.z = vec![Win::Playlist, Win::Mixer];
+        app.mouse_move(5.0, 890.0);
+        frame(&mut app, &mut c, None);
+        crate::anim::set_clock(true);
+        crate::anim::set_level(Level::Polished);
+        fn settle(app: &mut App, c: &mut Canvas, whole: &mut Canvas, what: &str) -> usize {
+            let d = app.take_damage();
+            frame_damage(app, c, d);
+            let mut frames = 0;
+            while app.state.motion.borrow().moving() {
+                crate::anim::advance(16);
+                app.tick();
+                let d = app.take_damage();
+                frame_damage(app, c, d);
+                frame(app, whole, None);
+                assert_same(c, whole, what);
+                frames += 1;
+                assert!(frames < 40, "{what} ends");
+            }
+            frames
+        }
+        app.open_plugin_palette(crate::plugin_menu::Target::All, (1100.0, 400.0), None);
+        settle(&mut app, &mut c, &mut whole, "off");
+        // A spot of the mixer that the palette doesn't cover.
+        let mixer = app.state.win_rect(Win::Mixer);
+        let spot = (mixer.x as u32 + 40, mixer.y as u32 + 8);
+        assert!(!crate::views::plugin_palette::rect(&app.state).contains(spot.0 as f32, spot.1 as f32), "the mixer shows");
+        let opaque = c.pixmap.pixel(spot.0, spot.1);
+        crate::prefs::set_choice(&TRANSPARENT_WINDOWS, 1);
+        app.invalidate();
+        let frames = settle(&mut app, &mut c, &mut whole, "the mixer going see-through");
+        assert!((9..=11).contains(&frames), "about 150 ms: {frames} frames");
+        let see = c.pixmap.pixel(spot.0, spot.1);
+        assert_ne!(see, opaque, "see-through");
+        // Raised, it comes back and the rack goes.
+        app.state.z = vec![Win::Playlist, Win::PluginPalette, Win::Mixer];
+        app.invalidate();
+        let frames = settle(&mut app, &mut c, &mut whole, "the mixer coming back");
+        assert!((9..=11).contains(&frames), "about 150 ms: {frames} frames");
+        assert_eq!(c.pixmap.pixel(spot.0, spot.1), opaque, "opaque again");
+        crate::prefs::set_choice(&TRANSPARENT_WINDOWS, 0);
+        app.invalidate();
+        settle(&mut app, &mut c, &mut whole, "off again");
+        crate::anim::set_level(Level::Playful);
+        crate::anim::set_clock(false);
+    }
+
+    /// When the palette's list rearranges, what stays slides to its place, what is new fades in and what went fades out
+    /// in 160 ms; rows take clicks at their places from the first frame; a scroll doesn't set them off (spec:
+    /// ui/animations.md §4.3).
+    #[test]
+    fn the_palettes_rows_go_to_a_new_arrangement() {
+        use crate::anim::Level;
+        use crate::plugin_db as db;
+        use crate::plugin_menu::Target;
+        use crate::plugin_palette::{Kind, PalAct};
+        let size = (1280, 800);
+        let (Ok(mut c), Ok(mut whole), Ok(mut want)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        for name in ["Alpha Synth", "Beta Synth"] {
+            app.plugins.available.push(db::fake(name, os_host::Kind::Instrument));
+        }
+        for name in ["Gamma Delay", "Delta Reverb"] {
+            app.plugins.effects.push(db::fake(name, os_host::Kind::Effect));
+        }
+        app.state.plugdb.rebuild(&app.plugins);
+        app.mouse_move(5.0, 790.0);
+        frame(&mut app, &mut c, None);
+        crate::anim::set_clock(true);
+        crate::anim::set_level(Level::Polished);
+        app.open_plugin_palette(Target::All, (300.0, 100.0), None);
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        fn settle(app: &mut App, c: &mut Canvas, whole: &mut Canvas, what: &str) -> usize {
+            let mut frames = 0;
+            while app.state.motion.borrow().moving() {
+                crate::anim::advance(16);
+                app.tick();
+                let d = app.take_damage();
+                frame_damage(app, c, d);
+                frame(app, whole, None);
+                assert_same(c, whole, what);
+                frames += 1;
+                assert!(frames < 60, "{what} ends");
+            }
+            frames
+        }
+        settle(&mut app, &mut c, &mut whole, "opening");
+        assert!(!app.state.motion.borrow().list_moving(), "opening isn't a new arrangement");
+        let pos = |app: &App, effect: bool| {
+            let rows = crate::plugin_palette::rows(&app.state);
+            rows.iter().position(|r| matches!(r, crate::plugin_palette::Row::Plugin { effect: e, .. } if *e == effect)).expect("a row")
+        };
+        // Effects only: an effect row moves up from where it is, and takes clicks at its new place at once.
+        let was = hit_rect(&app, &Action::Palette(PalAct::Row(pos(&app, true))));
+        app.palette_act(PalAct::Kind(Kind::Effects));
+        app.invalidate();
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        assert!(app.state.motion.borrow().list_moving(), "it goes");
+        let now = hit_rect(&app, &Action::Palette(PalAct::Row(pos(&app, true))));
+        assert!(now.y < was.y, "the effect's new place is higher: {} from {}", now.y, was.y);
+        let frames = settle(&mut app, &mut c, &mut whole, "the rows on their way");
+        assert!((9..=11).contains(&frames), "about 160 ms: {frames} frames");
+        assert!(!app.state.motion.borrow().list_moving(), "and arrives");
+        let t = crate::anim::now();
+        crate::anim::set_clock(false);
+        frame(&mut app, &mut want, None);
+        assert_same(&c, &want, "there, it is the settled list");
+        crate::anim::set_clock_at(t);
+        // At Off it is there at once.
+        crate::anim::set_level(Level::Off);
+        app.palette_act(PalAct::Kind(Kind::All));
+        app.invalidate();
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        assert!(!app.state.motion.borrow().list_moving(), "at once at Off");
         crate::anim::set_level(Level::Polished);
         crate::anim::set_clock(false);
     }
