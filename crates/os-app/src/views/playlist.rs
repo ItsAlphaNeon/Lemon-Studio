@@ -1400,10 +1400,15 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
         // At the Pop-ups scaling (spec: ui/ui-scaling.md §1).
         ui.scaled(super::popup_scale(ui.c.scale), |ui, k| {
             let (w, h) = ui.c.size();
-            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, false, p.scroll[0]);
+            // What the menu is: its entries, where it opened (spec: ui/animations.md §4.2).
+            let key = crate::motion::key((p.x.to_bits(), p.y.to_bits(), p.items.iter().map(|it| &*it.label).collect::<Vec<_>>()));
+            let fx = MenuFx { s, slot: crate::motion::Slot::Popup, key, anchor: (p.x / k, p.y / k), k };
+            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, fx, p.scroll[0]);
             if let Some(i) = p.sub {
                 if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
-                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true, p.scroll[1]);
+                    let key = crate::motion::key((key, i));
+                    let fx = MenuFx { s, slot: crate::motion::Slot::Sub, key, anchor: (rr.right(), rr.y), k };
+                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, fx, p.scroll[1]);
                 }
             }
         });
@@ -1458,11 +1463,54 @@ fn any_enabled(items: &[pl::PItem]) -> bool {
     items.iter().any(|c| !c.head && !c.sep && !c.col && c.enabled && (c.children.is_empty() || any_enabled(&c.children)))
 }
 
+/// Which menu a popup list is and how it moves (`crate::motion`): opened from `anchor`, painted at `k` times the
+/// window's scale.
+#[derive(Clone, Copy)]
+pub struct MenuFx<'a> {
+    pub s: &'a State,
+    pub slot: crate::motion::Slot,
+    pub key: u64,
+    pub anchor: (f32, f32),
+    pub k: f32,
+}
+
+impl MenuFx<'_> {
+    /// `r` (the canvas's px) in the window's px.
+    pub fn up(&self, r: Rect) -> Rect {
+        Rect::new(r.x * self.k, r.y * self.k, r.w * self.k, r.h * self.k)
+    }
+}
+
+/// A menu's panel. At Animations Off, menus take a plain look: square, with a 1 px grey border (spec:
+/// ui/animations.md §4.2).
+pub fn menu_panel(ui: &mut Ui, r: Rect, m: &os_ui::kit::menu::Metrics) {
+    let t = ui.t;
+    if crate::anim::level() == crate::anim::Level::Off {
+        ui.c.fill_rect(r, t.menu_pop);
+        ui.c.stroke_rrect(Rect::new(r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0), 0.0, 1.0, t.menu_pop_dim);
+    } else if super::lemon(ui) {
+        os_ui::kit::popup(ui.c, t, r);
+    } else {
+        ui.c.fill_rect(r, t.menu_pop);
+        ui.c.stroke_rrect(Rect::new(r.x + m.line, r.y + m.line, r.w - 2.0 * m.line, r.h - 2.0 * m.line), 0.0, m.border, t.menu_pop_border);
+    }
+}
+
+/// A menu row's highlight bar.
+pub fn menu_highlight(ui: &mut Ui, rr: Rect, lemon: bool) {
+    if lemon {
+        os_ui::kit::row_highlight(ui.c, ui.t, rr);
+    } else {
+        ui.c.fill_rect(rr, ui.t.menu_pop_hi);
+    }
+}
+
 /// Draw a popup list at (x, y) kept on screen; returns its rect and each item's row rect. Columns wider than the
 /// screen: the ones that fit from column `scroll` on, and a scroll bar under them (spec: ui/menus.md "Menus wider than
-/// the window").
+/// the window"). It appears and its highlight glides as `fx` says (spec: ui/animations.md §4.2).
 #[allow(clippy::too_many_arguments)]
-fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, sub: bool, scroll: usize) -> (Rect, Vec<Rect>) {
+fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, fx: MenuFx, scroll: usize) -> (Rect, Vec<Rect>) {
+    let sub = fx.slot == crate::motion::Slot::Sub;
     let t = ui.t;
     let font = Font::new(14);
     let mut lw: f32 = 80.0;
@@ -1494,20 +1542,28 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     let menu = if sub { crate::app::MENU_SUB } else { crate::app::MENU_POPUP };
     let mut rows = Vec::with_capacity(items.len());
     let lemon = super::lemon(ui);
-    if lemon {
-        os_ui::kit::popup(ui.c, t, r);
-    } else {
-        ui.c.fill_rect(r, t.menu_pop);
-        ui.c.stroke_rrect(Rect::new(r.x + m.line, r.y + m.line, r.w - 2.0 * m.line, r.h - 2.0 * m.line), 0.0, m.border, t.menu_pop_border);
-    }
+    let draw = fx.s.motion.borrow_mut().menu_begin(ui.c, fx.slot, fx.key, r, fx.anchor, fx.k);
+    menu_panel(ui, r, &m);
     ui.hit(r, Action::Swallow, "");
+    // A column out of view is placed beside the shown ones.
+    let at = |col: usize| r.x + m.border + (col as f32 - first as f32) * cw;
+    let row_rect = |i: usize| Rect::new(at(layout[i].0), r.y + m.border + layout[i].1, cw - 2.0 * m.border, item_h(&m, &items[i]));
+    let action_of = |i: usize| if sub { Action::PlPopupSub(i) } else { Action::PlPopup(i) };
+    let shows = |i: usize| layout[i].0 >= first && layout[i].0 < first + shown;
+    // The highlight bar goes to the row under the mouse, gliding there from Polished up.
+    let hot = (0..items.len()).find(|&i| {
+        let it = &items[i];
+        it.enabled && !it.head && !it.sep && !it.col && shows(i) && ui.hovers(row_rect(i), &action_of(i))
+    });
+    let bar = fx.s.motion.borrow_mut().glide(fx.slot, fx.key, hot.map(row_rect), fx.up(r));
+    if let Some(b) = bar {
+        menu_highlight(ui, b, lemon);
+    }
     for (i, it) in items.iter().enumerate() {
-        let (col, off) = layout[i];
-        // A column out of view is placed beside the shown ones.
-        let at = |col: usize| r.x + m.border + (col as f32 - first as f32) * cw;
-        let rr = Rect::new(at(col), r.y + m.border + off, cw - 2.0 * m.border, item_h(&m, it));
+        let (col, _) = layout[i];
+        let rr = row_rect(i);
         rows.push(rr);
-        let action = if sub { Action::PlPopupSub(i) } else { Action::PlPopup(i) };
+        let action = action_of(i);
         if col < first || col >= first + shown {
             // The wheel still steps to its rows: where the scroll that shows the column puts them.
             if it.enabled && !it.head && !it.sep && !it.col {
@@ -1539,12 +1595,11 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         // planned). Disabled entries never light up.
         let live = it.enabled && (it.children.is_empty() || any_enabled(&it.children));
         if it.enabled {
-            let lit = ui.hit(rr, action, it.label.to_string()) || open == Some(i);
+            ui.hit(rr, action, it.label.to_string());
             ui.menu_row(menu);
-            if lit && lemon {
-                os_ui::kit::row_highlight(ui.c, t, rr);
-            } else if lit {
-                ui.c.fill_rect(rr, t.menu_pop_hi);
+            // The row whose submenu is open stays lit (the bar is on the row under the mouse).
+            if open == Some(i) && hot != Some(i) {
+                menu_highlight(ui, rr, lemon);
             }
         } else if matches!(it.cmd, pl::Cmd::NotYet(_)) {
             ui.hit(rr, action, crate::app::off_text(&it.label));
@@ -1588,5 +1643,6 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         let target = if sub { crate::app::Scroll::PopupSub } else { crate::app::Scroll::Popup };
         super::scrollbar(ui, track, false, first as f32, shown as f32, cols as f32, target);
     }
+    crate::motion::Motion::menu_end(ui.c, draw);
     (r, rows)
 }

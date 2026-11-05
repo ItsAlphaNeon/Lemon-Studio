@@ -89,6 +89,7 @@ mod chord_tool;
 mod slicer;
 mod drums;
 mod monitor;
+mod motion;
 mod params;
 mod piano;
 mod piano_snap;

@@ -814,6 +814,11 @@ impl Ui<'_> {
         hovered
     }
 
+    /// Whether `ui.hit(rect, action, ..)` would say the mouse is over it (without registering it).
+    pub fn hovers(&self, rect: Rect, action: &Action) -> bool {
+        self.hover.as_ref() == Some(action) && rect.contains(self.mouse.0, self.mouse.1)
+    }
+
     /// Marks the hit just registered as a row of menu `menu` (1 or more) that the wheel steps to.
     pub fn menu_row(&mut self, menu: u8) {
         if let Some(h) = self.hits.last_mut() {
@@ -1081,6 +1086,9 @@ pub struct State {
     pub browser_dirs: std::cell::RefCell<std::collections::HashMap<PathBuf, std::rc::Rc<Vec<views::browser::Entry>>>>,
     /// The mixer's routing cables, hung by the mixer view as it paints and swung on the tick.
     pub cables: std::cell::RefCell<crate::cable::Cables>,
+    /// The interface's motions between frames (menus appearing, the drag tag, hover fades, flashes), moved as they
+    /// are painted (`crate::motion`).
+    pub motion: std::cell::RefCell<crate::motion::Motion>,
     pub browser_scroll: f32,
     pub browser_sel: Option<String>,
     pub browser_drag: Option<(String, f32, f32)>,
@@ -1526,6 +1534,7 @@ impl App {
                     c.animate(crate::anim::cables_swing(crate::anim::level()));
                     c
                 }),
+                motion: Default::default(),
                 browser_scroll: 0.0,
                 browser_sel: None,
                 browser_drag: None,
@@ -4050,6 +4059,7 @@ impl App {
             || self.state.tapper.flash_at.is_some()
             || self.song_info_fading()
             || self.state.cables.borrow().moving()
+            || self.state.motion.borrow().moving()
             || self.hold.is_some()
             || self.smooth.running()
             || self.midi_play.busy()
@@ -4103,6 +4113,37 @@ impl App {
     }
 
     /// The mixer's cables swing until still: step them and repaint where they were and are.
+    /// The interface's motions (`crate::motion`): what last paint drew moving is painted again, the drag tag swings
+    /// after the mouse, and closed menus open afresh next time.
+    fn motion_tick(&mut self) {
+        let s = &mut self.state;
+        let drag = s.browser_drag.as_ref().map(|(_, x, y)| (*x, *y));
+        let m = s.motion.get_mut();
+        if s.playlist.popup.is_none() {
+            m.menu_closed(crate::motion::Slot::Popup);
+            m.menu_closed(crate::motion::Slot::Sub);
+        } else if s.playlist.popup.as_ref().is_some_and(|p| p.sub.is_none()) {
+            m.menu_closed(crate::motion::Slot::Sub);
+        }
+        if s.menu_open.is_none() {
+            m.menu_closed(crate::motion::Slot::Dropdown);
+        }
+        let tag = m.tag_tick(drag);
+        let rects = m.damage().to_vec();
+        let any = !rects.is_empty() || tag.is_some();
+        for r in rects.into_iter().chain(tag) {
+            self.damage_rect(r);
+        }
+        // Menus and the drag tag in a detached window move there.
+        if any {
+            for w in [self.state.overlay_on, self.state.drag_on].into_iter().flatten() {
+                if self.state.is_detached(w) {
+                    self.mark_detached(Some(w));
+                }
+            }
+        }
+    }
+
     fn cables_tick(&mut self, now: std::time::Instant) {
         if !self.state.shown(Win::Mixer) {
             self.state.cables.get_mut().clear();
@@ -4155,6 +4196,7 @@ impl App {
         self.hold_tick(now);
         self.ease_tick(now);
         self.cables_tick(now);
+        self.motion_tick();
         self.marquee_tick(now);
         self.browser_index_tick();
         self.backup_tick(now);
@@ -4514,6 +4556,7 @@ impl App {
         }
         self.state.screen = canvas.size();
         self.state.ui_scale = canvas.scale;
+        self.state.motion.get_mut().begin_frame();
         // The main window or the workspace shrank: the windows keep their part in it (`win_clamp::keep_all`). Moved
         // during a partial paint, the next frame is painted whole.
         if crate::win_clamp::keep_all(&mut self.state) && damage.is_some() {
@@ -12572,6 +12615,83 @@ mod tests {
             dump(a, b);
         }
         assert_eq!(n, 0, "{what}: differing pixels in x {}..{} y {}..{}", bbox.0, bbox.2, bbox.1, bbox.3);
+    }
+
+    /// Popup menus appear over time and their highlight bar glides (spec: ui/animations.md §4.2). On its first frame
+    /// an opening menu isn't there yet; the shell ticks at animation rate while it appears, and each tick's partial
+    /// repaint matches a whole one; 120 ms on, the frame is the open menu, as painted with motions settled. The bar sets
+    /// off from its row toward the one the mouse went to, and gets there. At Off the menu is there at once.
+    #[test]
+    fn popup_menus_appear_by_time() {
+        use crate::playlist::{Cmd, PItem, Popup};
+        let size = (1280, 800);
+        let (Ok(mut c), Ok(mut whole), Ok(mut want)) = (Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0), Canvas::new(size.0, size.1, 1.0)) else { return };
+        let mut app = App::new(None);
+        let items = (0..8).map(|i| PItem::new(format!("Entry number {i}"), Cmd::Nothing)).collect::<Vec<_>>();
+        app.mouse_move(5.0, 790.0);
+        frame(&mut app, &mut c, None);
+        let before = c.pixmap.clone();
+        crate::anim::set_clock(true);
+        app.state.playlist.popup = Some(Popup { x: 400.0, y: 300.0, items, sub: None, scroll: [0; 2] });
+        app.invalidate();
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        let area = hit_rect(&app, &Action::PlPopup(0)).union(&hit_rect(&app, &Action::PlPopup(7)));
+        let px = |c: &Canvas, x: f32, y: f32| c.pixmap.pixel(x as u32, y as u32).map(|p| (p.red(), p.green(), p.blue()));
+        assert_eq!(px(&c, area.cx(), area.cy()), before.pixel(area.cx() as u32, area.cy() as u32).map(|p| (p.red(), p.green(), p.blue())), "not there at first");
+        assert!(app.animating(), "it appears frame by frame");
+        let mut frames = 0;
+        while app.animating() {
+            crate::anim::advance(16);
+            assert!(app.tick(), "each tick repaints it");
+            let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+            frame(&mut app, &mut whole, None);
+            assert_same(&c, &whole, "a partial repaint of a frame of it");
+            frames += 1;
+            assert!(frames < 20, "it settles");
+        }
+        assert!((7..=10).contains(&frames), "about 120 ms: {frames} frames");
+        let t = crate::anim::now();
+        crate::anim::set_clock(false);
+        frame(&mut app, &mut want, None);
+        assert_same(&c, &want, "open, it is the settled menu");
+        // The bar: the mouse goes from the first row to the last.
+        crate::anim::set_clock_at(t);
+        let (a, b) = (hit_rect(&app, &Action::PlPopup(0)), hit_rect(&app, &Action::PlPopup(7)));
+        app.mouse_move(a.cx(), a.cy());
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        crate::anim::advance(16);
+        app.mouse_move(b.cx(), b.cy());
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        assert!(app.animating(), "the bar glides");
+        // A row is lit when its right end (no text there) isn't as it is with the mouse away.
+        let open = want.pixmap.clone();
+        let rgb = |p: Option<tiny_skia::PremultipliedColorU8>| p.map(|p| (p.red(), p.green(), p.blue()));
+        let lit = |c: &Canvas, r: Rect| px(c, r.right() - 6.0, r.cy()) != rgb(open.pixel((r.right() - 6.0) as u32, r.cy() as u32));
+        assert!(lit(&c, a) && !lit(&c, b), "it sets off from the first row");
+        for _ in 0..12 {
+            crate::anim::advance(16);
+            app.tick();
+            let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        }
+        assert!(!app.animating() && lit(&c, b) && !lit(&c, a), "and gets to the last");
+        // At Off: there at once, in the plain look.
+        crate::anim::set_level(crate::anim::Level::Off);
+        app.state.playlist.popup = None;
+        app.tick();
+        app.state.playlist.popup = Some(Popup { x: 420.0, y: 320.0, items: (0..3).map(|i| PItem::new(format!("Other {i}"), Cmd::Nothing)).collect(), sub: None, scroll: [0; 2] });
+        app.invalidate();
+        let d = app.take_damage();
+        frame_damage(&mut app, &mut c, d);
+        assert!(!app.animating());
+        crate::anim::set_clock(false);
+        frame(&mut app, &mut want, None);
+        assert_same(&c, &want, "at Off");
+        crate::anim::set_level(crate::anim::Level::Playful);
     }
 
     /// The ends of the Playlist's and Piano roll's horizontal thumbs zoom (spec: ui/scroll-bars.md §4): the dragged end

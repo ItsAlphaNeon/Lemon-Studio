@@ -134,6 +134,53 @@ pub fn cables_swing(l: Level) -> bool {
     l >= Level::Polished
 }
 
+// Tests see motion only on a clock they run themselves (`set_clock`, `advance`); without one, every motion is at its
+// end at once, so a frame painted twice is the same frame.
+#[cfg(test)]
+thread_local! {
+    static CLOCK: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// The time the interface's motions read.
+pub fn now() -> Instant {
+    #[cfg(test)]
+    if let Some(t) = CLOCK.with(|c| c.get()) {
+        return t;
+    }
+    Instant::now()
+}
+
+/// Whether motions jump to their ends: at Off (feedback still shows, at once), and in tests that run no clock.
+pub fn instant() -> bool {
+    still() || level() == Level::Off
+}
+
+/// Tests that run no clock: nothing moves and nothing flashes, so painting the same state twice paints the same frame.
+pub fn still() -> bool {
+    #[cfg(test)]
+    return CLOCK.with(|c| c.get()).is_none();
+    #[cfg(not(test))]
+    false
+}
+
+/// Tests: starts this thread's clock at the present (`true`) or stops it (`false`: motions end at once again).
+#[cfg(test)]
+pub fn set_clock(on: bool) {
+    CLOCK.with(|c| c.set(on.then(Instant::now)));
+}
+
+/// Tests: runs this thread's clock from `t` (back on after `set_clock(false)`, where it was).
+#[cfg(test)]
+pub fn set_clock_at(t: Instant) {
+    CLOCK.with(|c| c.set(Some(t)));
+}
+
+/// Tests: moves this thread's clock on by `ms`.
+#[cfg(test)]
+pub fn advance(ms: u64) {
+    CLOCK.with(|c| c.set(Some(c.get().unwrap_or_else(Instant::now) + Duration::from_millis(ms))));
+}
+
 /// Ease-out cubic: fast at first, gentle at the end. `u` from 0 to 1.
 pub fn ease_out(u: f64) -> f64 {
     let v = 1.0 - u.clamp(0.0, 1.0);

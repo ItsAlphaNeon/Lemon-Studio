@@ -854,15 +854,18 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
     };
     let r = Rect::new((ax / k).min(s.screen.0 / k - width).max(0.0), ay / k, width, body_h + border * 2.0);
     let away = !r.contains(ui.mouse.0, ui.mouse.1);
+    // It drops from its title (spec: ui/animations.md §4.2).
+    use crate::motion::Slot;
+    let key = crate::motion::key((menu, ax.to_bits(), ay.to_bits()));
+    let draw = s.motion.borrow_mut().menu_begin(ui.c, Slot::Dropdown, key, r, (r.x, r.y), k);
     // Lemon (spec: ui/lemon-design.md §9): a rounded panel, rounded row highlights.
     let lemon = super::lemon(ui);
-    if lemon {
-        os_ui::kit::popup(ui.c, t, r);
-    } else {
-        ui.c.fill_rect(r, t.menu_pop);
-        ui.c.stroke_rrect(Rect::new(r.x + mt.line, r.y + mt.line, r.w - 2.0 * mt.line, r.h - 2.0 * mt.line), 0.0, border, t.menu_pop_border);
-    }
+    super::playlist::menu_panel(ui, r, &mt);
     ui.hit(r, Action::Swallow, "");
+    // From Polished up the highlight bar glides from row to row under the rows' text: they are painted into a layer
+    // first, which goes over the bar.
+    let mut lit = Lit { glide: crate::motion::glides(), hot: None };
+    let rows = lit.glide.then(|| ui.c.begin_layer(r, true));
 
     let font = Font::new(14);
     // Text sits where it does at 100 %, moved by half of what the row lost.
@@ -883,21 +886,23 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                 let rr = Rect::new(col.x, y, col.w, row);
                 let hov = ui.hit(rr, Action::MenuItem(menu, PATTERN_PICK + *n as usize), "Select pattern");
                 ui.menu_row(crate::app::MENU_DROPDOWN);
-                let lit = hov || (*n == s.pattern && away);
-                if lit && lemon {
+                let on = hov || (*n == s.pattern && away);
+                if hov && lit.glide {
+                    lit.hot = Some(rr);
+                } else if on && lemon {
                     os_ui::kit::row_highlight(ui.c, t, rr);
-                } else if lit {
+                } else if on {
                     ui.c.fill_rect(rr, ui.t.s(0x03080c));
                 }
                 let col = if *n == s.pattern { t.glyph } else { t.menu_pop_text };
-                let dx = if lit { 22.0 } else { 20.0 };
+                let dx = if on { 22.0 } else { 20.0 };
                 ui.c.text_clip(font, rr.x + dx, rr.y + 2.0 + dy, rr.w - dx - 4.0, col, name);
                 y += row;
             }
         }
         for (i, item) in items.iter().enumerate() {
             if recent_before(menu, items, i) {
-                y = paint_recent(ui, &recent, Rect::new(col.x, y, col.w, 0.0), open);
+                y = paint_recent(ui, &recent, Rect::new(col.x, y, col.w, 0.0), open, &mut lit);
             }
             if !in_menu(s, menu, item) {
                 flat += 1;
@@ -915,9 +920,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
                     if ok {
                         let hov = ui.hit(rr, item_action(menu, flat, item), item.label);
                         ui.menu_row(crate::app::MENU_DROPDOWN);
-                        if hov || open == Some(flat) {
-                            light(ui, rr);
-                        }
+                        lit.row(ui, rr, hov, open == Some(flat));
                     } else if !works(menu, item) {
                         ui.off(rr, item.label);
                     }
@@ -945,6 +948,34 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
             y += h;
         }
         cx += cw;
+    }
+    if let Some(l) = rows {
+        let up = Rect::new(r.x * k, r.y * k, r.w * k, r.h * k);
+        let text = ui.c.take_layer(l);
+        if let Some(b) = s.motion.borrow_mut().glide(Slot::Dropdown, key, lit.hot, up) {
+            light(ui, b);
+        }
+        if let Some(text) = text {
+            ui.c.sprite(&text, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0);
+        }
+    }
+    crate::motion::Motion::menu_end(ui.c, draw);
+}
+
+/// The dropdown's highlight: the row under the mouse goes to the gliding bar (`glide`), or is lit where it is.
+struct Lit {
+    glide: bool,
+    hot: Option<Rect>,
+}
+
+impl Lit {
+    /// Row `rr`, under the mouse (`hov`) or lit anyway (`stays`: its submenu is open).
+    fn row(&mut self, ui: &mut Ui, rr: Rect, hov: bool, stays: bool) {
+        if hov && self.glide {
+            self.hot = Some(rr);
+        } else if hov || stays {
+            light(ui, rr);
+        }
     }
 }
 
@@ -1000,7 +1031,7 @@ fn recent_text(r: &Recent) -> (String, &'static str, bool) {
 
 /// Paints FILE's Recent projects section from the top of `at` (its x and width) down; `open`: the dropdown's open
 /// submenu. Returns the y under it.
-fn paint_recent(ui: &mut Ui, rows: &[Recent], at: Rect, open: Option<usize>) -> f32 {
+fn paint_recent(ui: &mut Ui, rows: &[Recent], at: Rect, open: Option<usize>, lit: &mut Lit) -> f32 {
     let mt = os_ui::kit::menu::metrics(ui.c.scale);
     let mut y = at.y;
     for r in rows {
@@ -1017,9 +1048,7 @@ fn paint_recent(ui: &mut Ui, rows: &[Recent], at: Rect, open: Option<usize>) -> 
         let rr = Rect::new(at.x, y, at.w, mt.row);
         let hov = ui.hit(rr, act, hint);
         ui.menu_row(crate::app::MENU_DROPDOWN);
-        if hov || (sub && open == Some(RECENT_MORE)) {
-            light(ui, rr);
-        }
+        lit.row(ui, rr, hov, sub && open == Some(RECENT_MORE));
         row_text(ui, rr, &label, key, sub, true);
         y += mt.row;
     }
