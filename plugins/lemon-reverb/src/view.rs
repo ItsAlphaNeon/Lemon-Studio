@@ -78,7 +78,7 @@ impl Model for os_plugkit::vals::Vals {
 pub enum Target {
     /// Vertical drag / wheel; menu on right click.
     Knob(String),
-    /// A level fader: drag / wheel / click to jump; menu on right click.
+    /// A level fader: drag over its travel from where it stands (no jump to the click) / wheel; menu on right click.
     Fader(String),
     /// A switch (click toggles; menu on right click).
     Switch(String),

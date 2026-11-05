@@ -576,23 +576,43 @@ pub fn hint(st: &State, f: Field, dragging: bool) -> String {
     }
 }
 
-/// Parses a typed value (the value text's number, with or without its unit) back to a setting's value.
-pub fn parse(f: Field, s: &str) -> Option<i32> {
+/// The signed number a value text starts with (below 0 to the left); none for a name.
+fn reading(s: &str) -> Option<f64> {
+    let s = s.trim().to_ascii_lowercase();
+    let num: String = s.chars().take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
+    let x: f64 = num.parse().ok()?;
+    Some(if s.contains("left") { -x.abs() } else { x })
+}
+
+/// Parses a typed value back to a setting's value: the value text's number, with or without its unit ("left" for
+/// the left side), or a named value's text ("Off", a filter or EQ type, "Centered", "..."). When the current value
+/// `cur` shows the typed text it stays, else the default does when it shows it.
+pub fn parse(f: Field, s: &str, cur: i32) -> Option<i32> {
     let t = s.trim().to_ascii_lowercase();
-    let num: String = t.chars().take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
-    let x: f32 = num.parse().ok()?;
-    let left = t.contains("left");
-    let sign = if left { -1.0 } else { 1.0 };
+    let (lo, hi) = range(f);
+    let typed = reading(&t);
+    let shows = |v: i32| {
+        let s = text(f, v);
+        if typed.is_some() { reading(&s) == typed } else { s.eq_ignore_ascii_case(&t) }
+    };
+    if let Some(v) = [cur, default(f)].into_iter().find(|&v| (lo..=hi).contains(&v) && shows(v)) {
+        return Some(v);
+    }
+    // A named value: the value showing it (the settings with names have short ranges).
+    let Some(x) = typed else { return if hi - lo <= 4096 { (lo..=hi).find(|&v| shows(v)) } else { None } };
+    let x = x as f32;
     let v = match f {
         Field::Part(_, _, 1, 1) => x * 650.24 + 512.0,
-        _ if pct_of(f).is_some() => x * pct_of(f).unwrap() / 100.0 * sign,
-        Field::S(15) => x * 1.28 * sign,
+        _ if pct_of(f).is_some() => x * pct_of(f).unwrap() / 100.0,
+        Field::S(15) => x * 1.28,
         Field::Main(_) => x,
         Field::S(10) => x * 1.12 + 16.0,
         Field::S(24) => x - 1.0,
         Field::Op(_, 0) => x * 10000.0,
         Field::Op(_, 1) => x * 100.0,
         Field::Delay(_, 1) | Field::Reverb(2) => x * 0.384,
+        // The stereo offset's law inverted (`stereo_ms`): the side from "left" or the sign.
+        Field::Delay(_, 2) => (512.0 * (2.0 * x.abs() as f64 + 1.0).ln() / 1001f64.ln()) as f32 * if x < 0.0 { -1.0 } else { 1.0 },
         Field::Reverb(1 | 5 | 6) => x * 10.0,
         Field::S(30 | 31) => x.max(1.0).log2(),
         Field::Eq(_, 0) => x * 100.0,
@@ -609,7 +629,6 @@ pub fn parse(f: Field, s: &str) -> Option<i32> {
         Field::Eq(_, 2) => x * 65536.0,
         _ => x,
     };
-    let (lo, hi) = range(f);
     Some((v.round() as i32).clamp(lo, hi))
 }
 
@@ -646,10 +665,59 @@ mod tests {
         }
         set(&mut st, Field::Cell(0, COL_PAN), 41);
         assert_eq!(hint(&st, Field::Cell(0, COL_PAN), true), "16% right");
-        assert_eq!(parse(Field::Cell(0, COL_PAN), "16% left"), Some(-41));
-        assert_eq!(parse(Field::Main(0), "100%"), Some(128));
+        let p = |f, s| parse(f, s, default(f));
+        assert_eq!(p(Field::Cell(0, COL_PAN), "16% left"), Some(-41));
+        assert_eq!(p(Field::Main(0), "100%"), Some(128));
         let hz = os_dsp::mixer::eq_frequency(5777).round();
-        assert_eq!(text(Field::Eq(0, 1), parse(Field::Eq(0, 1), &format!("{hz}Hz")).unwrap()), format!("{hz}Hz"));
+        assert_eq!(text(Field::Eq(0, 1), p(Field::Eq(0, 1), &format!("{hz}Hz")).unwrap()), format!("{hz}Hz"));
+    }
+
+    /// The delay's stereo offset types in ms by its law, "left" to the left.
+    #[test]
+    fn stereo_offsets_type_back() {
+        for d in 0..3 {
+            let f = Field::Delay(d, 2);
+            assert_eq!(parse(f, "500.0ms left", 0), Some(-512));
+            assert_eq!(parse(f, "500.0ms right", 0), Some(512));
+            assert_eq!(parse(f, "-500", 0), Some(-512));
+            for v in [-400, -77, -10, 1, 3, 250, 511] {
+                let s = text(f, v);
+                assert_eq!(parse(f, &s, if v < 0 { 512 } else { -512 }).map(|v| text(f, v)), Some(s), "{v}");
+            }
+        }
+    }
+
+    /// Every named value types back to itself: the types, the modes, "Off", "Centered", "...", on and off.
+    #[test]
+    fn named_values_type_back() {
+        let filter = Field::Head(OPERATORS, 0);
+        for f in [Field::Filt(6, 3), Field::Eq(0, 3), Field::Eq(1, 3), Field::EqMode, filter, Field::Delay(0, 4), Field::Reverb(7), Field::Switch(0)] {
+            let (lo, hi) = range(f);
+            for v in lo..=hi {
+                for cur in [lo, hi] {
+                    assert_eq!(parse(f, &text(f, v), cur), Some(v), "{f:?} {}", text(f, v));
+                }
+            }
+        }
+        for (f, v) in [(Field::Reverb(0), 19), (Field::Reverb(1), 221), (Field::Reverb(6), 221), (Field::S(15), 0), (Field::S(24), -1), (Field::Cell(0, COL_PAN), 0)] {
+            let (lo, hi) = range(f);
+            assert_eq!(parse(f, &text(f, v), if v == lo { hi } else { lo }), Some(v), "{f:?}");
+        }
+        assert_eq!(parse(Field::Filt(6, 3), "cherry PHASER", 0), Some(12));
+        assert_eq!(parse(Field::Filt(6, 3), "Strawberry", 0), None);
+    }
+
+    /// When several values show the typed text, the current one stays, else the default.
+    #[test]
+    fn typed_ties_keep_the_current_value_then_the_default() {
+        let f = Field::Eq(0, 2);
+        assert_eq!(text(f, 17500), "0.27");
+        assert_eq!(parse(f, "0.27", 0), Some(17500));
+        assert_eq!(text(f, 17600), "0.27");
+        assert_eq!(parse(f, "0.27", 17600), Some(17600));
+        assert_eq!(parse(Field::Reverb(8), "20%", 0), Some(25));
+        let hz = text(Field::Eq(0, 1), 5777);
+        assert_eq!(parse(Field::Eq(0, 1), &hz, 0), Some(5777));
     }
 
     /// `s[32]`'s bytes and the ranges' ends.

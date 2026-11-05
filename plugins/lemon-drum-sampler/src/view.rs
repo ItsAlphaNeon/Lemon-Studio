@@ -178,6 +178,8 @@ pub struct Look<'a> {
     pub loaded: &'a [bool],
     /// Pads lit by a note just now.
     pub lit: &'a [bool],
+    /// Whether the chosen layer's sample opened.
+    pub layer_loaded: bool,
 }
 
 struct Ui<'a> {
@@ -233,21 +235,43 @@ pub fn file_name(path: &str) -> &str {
     path.rsplit(['\\', '/']).next().unwrap_or(path)
 }
 
-/// Paints the editor. `hint` (not hosted: the host shows it otherwise) goes along the grid's bottom.
+/// Paints the editor. `hint` (not hosted: the host shows it otherwise) goes in the head, right of the banks.
 pub fn paint(c: &mut Canvas, t: &Palette, st: &ViewState, look: &Look, hint: &str) -> Vec<Hit> {
     let mut ui = Ui { c, t, st, hits: Vec::new() };
     ui.c.begin_frame(None);
     ui.c.clear(plug::BG);
-    header(&mut ui);
-    grid(&mut ui, look, hint);
+    header(&mut ui, hint);
+    grid(&mut ui, look);
     let pads = look.state.pads();
     let pad = pads.get(st.pad);
     pad_card(&mut ui, pad, st.pad);
-    layer_card(&mut ui, pad, st.layer);
+    layer_card(&mut ui, pad, st.layer, look.layer_loaded);
     ui.hits
 }
 
-fn header(ui: &mut Ui) {
+/// The head's free room right of the banks, over the cards' column: where an unhosted editor shows its hint.
+pub const HINT: Rect = edges(COL.0 + 8.0, COL.1 - 8.0, HEAD.0, HEAD.1);
+
+/// A missing sample's ink (a pad's name, the layer's file).
+const MISSING: Color = Color::rgb(0xd06050);
+
+/// `s` as it fits in `max_w`: whole, or cut at its end with an ellipsis ("Kick_Hard_Ro…").
+pub fn elide(c: &mut Canvas, f: Font, s: &str, max_w: f32) -> String {
+    if c.text_width(f, s) <= max_w {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let cut = |k: usize| format!("{}…", chars[..k].iter().collect::<String>().trim_end());
+    // The longest start that fits with the ellipsis (widths grow with the length).
+    let (mut lo, mut hi) = (0, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if c.text_width(f, &cut(mid)) <= max_w { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
+}
+
+fn header(ui: &mut Ui, hint: &str) {
     // The emblem: the lemon mark and "DRUMS" on one line.
     let f = Font::condensed(18, 0).bold();
     let s: f32 = 6.0;
@@ -265,10 +289,17 @@ fn header(ui: &mut Ui) {
         ui.c.text_center(PILL, r, ink, label);
         ui.hit(r, t);
     }
+    if !hint.is_empty() {
+        let (left, right) = hint.split_once('\t').unwrap_or((hint, ""));
+        let s = if right.is_empty() { left.to_string() } else { format!("{left}  ({right})") };
+        let s = elide(ui.c, SMALL, &s, HINT.w);
+        let lh = ui.c.line_height(SMALL);
+        ui.c.text(SMALL, HINT.x, (HEAD_Y - lh / 2.0).round(), plug::DIM, &s);
+    }
 }
 
 /// The 16 pads of the bank shown: number and name, key, the pad's colour along its bottom; the chosen pad lit.
-fn grid(ui: &mut Ui, look: &Look, hint: &str) {
+fn grid(ui: &mut Ui, look: &Look) {
     lemon::plug_well(ui.c, GRID, 8.0);
     let pads = look.state.pads();
     for i in 0..16 {
@@ -295,18 +326,10 @@ fn grid(ui: &mut Ui, look: &Look, hint: &str) {
         } else {
             "empty".into()
         };
-        let col = if !has { plug::OFF } else if !loaded { Color::rgb(0xd06050) } else { ink };
-        ui.c.text_clip(SMALL, r.x + 6.0, r.cy() - 2.0, r.w - 12.0, col, &name);
+        let col = if !has { plug::OFF } else if !loaded { MISSING } else { ink };
+        let name = elide(ui.c, SMALL, &name, r.w - 12.0);
+        ui.c.text(SMALL, r.x + 6.0, r.cy() - 2.0, col, &name);
         ui.hit(r, t);
-    }
-    if !hint.is_empty() {
-        let (left, right) = hint.split_once('\t').unwrap_or((hint, ""));
-        let s = if right.is_empty() { left.to_string() } else { format!("{left}  ({right})") };
-        let lh = ui.c.line_height(SMALL);
-        let y = GRID.bottom() - lh - 3.0;
-        let tw = ui.c.text_width(SMALL, &s).min(GRID.w - 12.0);
-        ui.c.fill_rrect(Rect::new(GRID.x + 2.0, y - 2.0, tw + 10.0, lh + 4.0), 4.0, Color::rgb(0x1a1a1a).with_alpha(200));
-        ui.c.text_clip(SMALL, GRID.x + 7.0, y, GRID.w - 12.0, brand::TEXT, &s);
     }
 }
 
@@ -362,7 +385,7 @@ fn pad_card(ui: &mut Ui, pad: Option<&Pad>, n: usize) {
 }
 
 /// The chosen layer: which of the pad's layers, its sample and load button, its velocity range and its levels.
-fn layer_card(ui: &mut Ui, pad: Option<&Pad>, layer: usize) {
+fn layer_card(ui: &mut Ui, pad: Option<&Pad>, layer: usize, loaded: bool) {
     let n = pad.map_or(0, |p| p.layers.len());
     let layer = layer.min(n.saturating_sub(1));
     titled(ui, LAYER_CARD, &if n == 0 { "LAYER".to_string() } else { format!("LAYER {} OF {n}", layer + 1) });
@@ -380,7 +403,10 @@ fn layer_card(ui: &mut Ui, pad: Option<&Pad>, layer: usize) {
     let l = pad.and_then(|p| p.layers.get(layer));
     lemon::field(ui.c, SAMPLE, Kst { disabled: l.is_none(), ..Kst::NORMAL });
     let file = l.map(|l| file_name(&l.path).to_string()).filter(|s| !s.is_empty());
-    ui.c.text_clip(LABEL, SAMPLE.x + 6.0, SAMPLE.cy() - 7.0, SAMPLE.w - 12.0, if file.is_some() { brand::TEXT } else { plug::FAINT }, file.as_deref().unwrap_or("No sample: LOAD opens one"));
+    // A file that did not open is red, as on its pad.
+    let col = match &file { None => plug::FAINT, Some(_) if !loaded => MISSING, Some(_) => brand::TEXT };
+    let s = elide(ui.c, LABEL, file.as_deref().unwrap_or("No sample: LOAD opens one"), SAMPLE.w - 12.0);
+    ui.c.text(LABEL, SAMPLE.x + 6.0, SAMPLE.cy() - 7.0, col, &s);
     let kst = ui.state(LOAD, &Target::Load);
     let ink = lemon::plug_button(ui.c, LOAD, 6.0, kst);
     ui.c.text_center(PILL, LOAD, ink, "LOAD");
@@ -416,5 +442,18 @@ mod tests {
         assert_eq!(pad_rect(16), p1);
         assert_eq!((key_name(60), key_name(36)), ("C5".into(), "C3".into()));
         assert_eq!((Field::Cut.text(-1), Field::Cut.text(0)), ("--".into(), "1".into()));
+    }
+
+    /// Names too long for their room end in an ellipsis inside it; short ones stay whole.
+    #[test]
+    fn long_names_are_elided() {
+        let mut c = Canvas::new(W, H, 2.0).unwrap();
+        let long = "Kick_Hard_Room_Long_Tail_Version_Two.wav";
+        for (f, w) in [(SMALL, PAD - 12.0), (LABEL, SAMPLE.w - 12.0)] {
+            let s = elide(&mut c, f, long, w);
+            assert!(s.ends_with('…') && c.text_width(f, &s) <= w && s.chars().count() > 5, "{s:?}");
+            assert!(long.starts_with(s.trim_end_matches('…')));
+        }
+        assert_eq!(elide(&mut c, SMALL, "Kick", PAD - 12.0), "Kick");
     }
 }

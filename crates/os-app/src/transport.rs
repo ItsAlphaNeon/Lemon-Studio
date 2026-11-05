@@ -11,11 +11,12 @@
 //!   engine). Before the first block, the hosted instruments are reset, the hosted effects too with "Reset plugins
 //!   on transport"; with "Play truncated notes on transport" the notes under way at the start tick sound from there
 //!   (`Starts`; spec: ui/settings-choices.md "Transport: Play truncated notes and Reset plugins").
-//! - **Pause** holds the engine where it is (`Engine::pause`: the channels fade out over a few milliseconds, the
-//!   effects ring on); **Resume** fades back in from that exact place.
-//! - **Stop** fades the channels out, silences every hosted instrument (`Instrument::reset`: voices and tails die,
-//!   nothing resumes later) and rewinds to the start; the hosted effects' tails ring out (`Ringing`). It also ends live
-//!   notes and previews.
+//! - **Pause** holds the engine where it is (`Engine::pause`: the sampler channels fade out over a few milliseconds,
+//!   the hosted instruments are let go of their notes, and they and the effects ring on); **Resume** fades back in
+//!   from that exact place.
+//! - **Stop** holds the engine as Pause does and rewinds to the start; the hosted plugins' tails ring out
+//!   (`Ringing`), and every hosted plugin is reset once they are quiet (`Instrument::reset`: nothing frozen comes back
+//!   later). It also ends live notes and previews.
 //!
 //! The UI sets the state at once (so a double click behaves), then sends the matching command; commands are
 //! applied in order on the audio thread. `generation` counts play / stop requests: a song that finishes after a
@@ -806,9 +807,10 @@ impl Transport {
         (t != 0).then(|| (t - 1).min(u64::from(u32::MAX)) as u32)
     }
 
-    /// Stop everything: playback rewinds, hosted instruments fall silent, live notes and previews end; the hosted
-    /// effects' tails (reverb, delay) ring out, as in FL (spec: audio/transport.md "Stop"). Also works when already
-    /// stopped: it silences notes still ringing from the typing keyboard or a preview, and tails still ringing.
+    /// Stop everything: playback rewinds, hosted instruments are let go of their notes, live notes and previews end; the
+    /// hosted plugins' tails (releases, reverb, delay) ring out, as in FL (spec: audio/transport.md "Stop"). Also works
+    /// when already stopped: it silences notes still ringing from the typing keyboard or a preview, and tails still
+    /// ringing.
     pub fn stop(&self) {
         self.stop_with(true);
     }
@@ -1508,8 +1510,10 @@ fn reset_instruments(inst: &Instruments) {
 /// A start of playback (Play, a jump while playing) calls it with "Reset plugins on transport" (spec:
 /// ui/settings-choices.md "Transport: Play truncated notes and Reset plugins"): on, every hosted plugin is reset before
 /// the first block at the new place; off, the effects are left alone, so a delay's tail rings on through the start. The
-/// instruments are reset either way, as at Stop: the new engine does not know the notes the old one held at them (a
-/// Lemon Studio choice; what the reference does to an instrument's voices at a jump is unverified).
+/// instruments are reset either way at a jump: the new engine does not know the notes the old one held at them (a
+/// Lemon Studio choice; what the reference does to an instrument's voices at a jump is unverified). A Play while a
+/// Stop's tails ring leaves them alone too: the Stop let go of their notes, and their releases ring on into the new
+/// playback (spec: audio/transport.md "Tails after Pause and Stop").
 fn reset_hosts(inst: &Instruments, effects: bool) {
     reset_some(inst, RESET_INST | if effects { RESET_FX } else { 0 });
 }
@@ -1745,7 +1749,7 @@ impl Audio {
     }
 
     /// The live engine plays on the stream, built from `project` if another plays there (a paused playback is parked,
-    /// letting go of what it held at the instruments; tails still ringing after Stop are cut, as they fade out). False
+    /// letting go of what it held at the instruments; tails still ringing after Stop ring on there). False
     /// with no project to build it from or no device.
     fn go_live(&mut self, project: Option<&Project>) -> bool {
         if matches!(self.role, Role::Live) {
@@ -2014,16 +2018,18 @@ impl Audio {
         self.held = None;
         self.lost = None;
         // The engine before fades out from what it has queued while the new one starts: the playback, the live
-        // engine, tails ringing after Stop (with "Reset plugins on transport" off their hosted effects ring on through
+        // engine, tails ringing after Stop (with "Reset plugins on transport" off their hosted plugins ring on through
         // the start, `reset_hosts`). Typed notes go into the playing engine.
         self.keep_gate();
         self.parked = None;
-        self.role = Role::Idle;
+        let ringing = matches!(std::mem::replace(&mut self.role, Role::Idle), Role::Ringing(..));
         self.listen_retry = true;
         self.live_project = Some(project.clone());
         let at = At { tick: start, paused: false, truncated: starts.truncated, count_in: starts.count_in };
-        // The instruments are reset unless nothing has played them since they were (`reset_hosts`).
-        self.pend |= if self.dirty { RESET_INST } else { 0 } | if starts.reset { RESET_FX } else { 0 };
+        // The instruments are reset unless nothing has played them since they were, or they ring out what the Stop
+        // before let go of (`reset_hosts`).
+        let inst = self.dirty && !ringing;
+        self.pend |= if inst { RESET_INST } else { 0 } | if starts.reset { RESET_INST | RESET_FX } else { 0 };
         if let Err(e) = self.start(project, mode, generation, at) {
             self.report(e);
             let _ = self.shared.state.compare_exchange(PLAYING, STOPPED, Ordering::AcqRel, Ordering::Acquire);
@@ -2055,11 +2061,12 @@ impl Audio {
         }
     }
 
-    /// Stop: the playback's channels fade out and the instruments are reset. Its hosted effects ring out their tails
-    /// (reverb, delay) as in FL: its channels are held as at Pause (`Engine::pause`) while its mixer runs on, until the
-    /// tails are quiet (`Ringing`), and the effects are reset then, so no frozen tail comes back with the next engine.
-    /// Without `ring` (Stop sound), with no hosted effect, or at a Stop while tails ring, the effects are reset at
-    /// once. Previews and live notes end.
+    /// Stop: the playback's channels fade out. Its hosted plugins ring out their tails (an instrument's release and
+    /// its own effects, the mixer's reverb and delay) as in FL: its channels are held as at Pause (`Engine::pause`:
+    /// the instruments are let go of their notes and go on being processed) while its mixer runs on, until the tails
+    /// are quiet (`Ringing`), and the plugins are reset then, so no frozen tail comes back with the next engine.
+    /// Without `ring` (Stop sound), with no hosted plugin, or at a Stop while tails ring, they are reset at once.
+    /// Previews and live notes end.
     fn stop(&mut self, ring: bool) {
         self.keep_gate();
         if let Some(p) = &self.pre {
@@ -2069,16 +2076,14 @@ impl Audio {
         self.held = None;
         // Paused with the live engine processing its plugins: its effects rang there.
         let parked = self.parked.take().is_some();
-        let effects = self.inst.lock().is_ok_and(|l| !l.fx.is_empty());
+        let hosted = self.inst.lock().is_ok_and(|l| !l.fx.is_empty() || !l.inst.is_empty());
         match std::mem::replace(&mut self.role, Role::Idle) {
-            Role::Song(p) if ring && effects && !parked && self.main.is_some() => {
+            Role::Song(p) if ring && hosted && !parked && self.main.is_some() => {
                 let s = self.main.as_ref().expect("checked");
                 s.ctl.report.store(false, Ordering::Relaxed);
                 s.ctl.held.store(true, Ordering::Relaxed);
                 s.with(|e| e.pause());
                 self.role = Role::Ringing(p, Ringing::new(Instant::now()));
-                // The instruments once the channels have faded (`after`).
-                self.pend |= RESET_INST;
             }
             _ => self.hand(None, false, RESET_INST | RESET_FX, false),
         }
@@ -2284,8 +2289,8 @@ impl Audio {
         }
     }
 
-    /// Tails ringing after Stop: the instruments are reset once the playback's channels have faded out (they are no
-    /// longer processed; the voices it held go), the effects when the tails are over, as the engine goes.
+    /// Tails ringing after Stop: the sampler voices the playback held go once its channels have faded out (they never
+    /// sound again); the hosted plugins are reset when the tails are over, as the engine goes.
     fn ring(&mut self) {
         let Role::Ringing(_, r) = &mut self.role else { return };
         let Some(s) = &self.main else { return };
@@ -2293,16 +2298,15 @@ impl Audio {
         let rung = r.over(f32::from_bits(s.ctl.level.swap(0, Ordering::Relaxed)), Instant::now());
         if rung {
             self.role = Role::Idle;
-            self.hand(None, false, RESET_FX, false);
+            self.hand(None, false, RESET_INST | RESET_FX, false);
+            self.dirty = false;
             if self.shared.state.load(Ordering::Acquire) == STOPPED {
                 self.shared.rewind(0.0);
             }
             return;
         }
-        if self.pend & RESET_INST != 0 && since.elapsed() >= CLOSE_AFTER && s.with(|e| e.held().then(|| e.forget_voices()).is_some()).unwrap_or(false) {
-            self.pend &= !RESET_INST;
-            reset_some(&self.inst, RESET_INST);
-            self.dirty = false;
+        if !r.forgot && since.elapsed() >= CLOSE_AFTER && s.with(|e| e.held().then(|| e.forget_voices()).is_some()).unwrap_or(false) {
+            r.forgot = true;
             if self.shared.state.load(Ordering::Acquire) == STOPPED {
                 self.shared.rewind(0.0);
             }
@@ -2492,11 +2496,13 @@ struct Ringing {
     since: Instant,
     /// Since when its output has been quiet.
     quiet: Option<Instant>,
+    /// The sampler voices it held have gone (`Engine::forget_voices`).
+    forgot: bool,
 }
 
 impl Ringing {
     fn new(since: Instant) -> Ringing {
-        Ringing { since, quiet: None }
+        Ringing { since, quiet: None, forgot: false }
     }
 
     /// Its output's peak since the last call, at `now`: true once the tails are over (quiet for `RING_QUIET`, or
@@ -3816,48 +3822,77 @@ mod tests {
         assert_eq!(t.tap(&mut b), n2, "no more samples after stop");
     }
 
-    /// A hosted instrument that rings until reset: Stop must silence it, and nothing may resume on the next Play.
+    /// A hosted instrument with a release (and no effect behind it): Stop lets the note go and the release ring out, as
+    /// in FL (spec: audio/transport.md "Tails after Pause and Stop"); a Play while it rings carries it on; it is reset
+    /// once quiet, and nothing comes back with the next Play (on the simulated device).
     #[test]
-    #[ignore]
-    fn stop_silences_hosted_instruments() {
+    fn stop_lets_an_instruments_release_ring() {
+        let _sim = Sim::new();
+        use crate::prefs::{set_check, RESET_PLUGINS_ON_TRANSPORT};
         use os_engine::Instrument;
-        struct Ringer {
+        struct Releaser {
             level: f32,
+            on: bool,
+            calls: Arc<AtomicU32>,
             resets: Arc<AtomicU32>,
         }
-        impl Instrument for Ringer {
+        impl Instrument for Releaser {
             fn note_on(&mut self, _o: u32, _k: u8, _v: f32) {
-                self.level = 0.3;
+                (self.level, self.on) = (0.3, true);
             }
-            fn note_off(&mut self, _o: u32, _k: u8) {} // a long release: keeps ringing after the note
+            fn note_off(&mut self, _o: u32, _k: u8) {
+                self.on = false;
+            }
             fn process(&mut self, _r: u32, l: &mut [f32], r: &mut [f32]) {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                // Once let go of, it falls by half every 50 ms or so.
+                if !self.on {
+                    self.level *= 0.5f32.powf(l.len() as f32 / 2400.0);
+                }
                 l.fill(self.level);
                 r.fill(self.level);
             }
             fn active(&self) -> bool {
-                self.level > 0.0
+                self.level > 1e-6
             }
             fn reset(&mut self) {
-                self.level = 0.0;
+                (self.level, self.on) = (0.0, false);
                 self.resets.fetch_add(1, Ordering::Relaxed);
             }
         }
+        set_check(&RESET_PLUGINS_ON_TRANSPORT, false);
         let mut project = crate::app::test_project();
         let ch = project.channels[0].index;
         project.channels[0].kind = os_model::ChannelKind::Plugin;
-        project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
-        let resets = Arc::new(AtomicU32::new(0));
-        let inst: SharedInstrument = Arc::new(Mutex::new(Ringer { level: 0.0, resets: resets.clone() }));
+        project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 96 * 8, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
+        let (calls, resets) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let inst = Arc::new(Mutex::new(Releaser { level: 0.0, on: false, calls: calls.clone(), resets: resets.clone() }));
         let t = Transport::new(None);
-        t.set_instruments(vec![(0, inst.clone())]);
+        t.set_instruments(vec![(0, inst.clone() as SharedInstrument)]);
         t.play(&project, PlayMode::Pattern(1), 0.0);
         wait_for(|| t.peaks().0 > 0.05);
-        assert!(t.peaks().0 > 0.05, "the instrument is heard: {:?}", t.peaks());
+        assert!(inst.lock().unwrap().on, "the note is held");
+        let before = resets.load(Ordering::Relaxed);
         t.stop();
-        std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(t.peaks(), (0.0, 0.0), "silent after stop");
-        assert!(resets.load(Ordering::Relaxed) >= 1, "instrument was reset");
-        assert!(!inst.lock().unwrap().active(), "no tail left to resume");
+        std::thread::sleep(Duration::from_millis(40));
+        let (c0, ringing) = (calls.load(Ordering::Relaxed), inst.lock().unwrap().level);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!inst.lock().unwrap().on, "Stop let the note go");
+        assert!(calls.load(Ordering::Relaxed) > c0, "still processed after Stop");
+        assert!(ringing > 0.0 && inst.lock().unwrap().level < ringing, "the release falls: {ringing}");
+        assert_eq!(resets.load(Ordering::Relaxed), before, "not reset while it rings");
+        assert_eq!((t.state(), t.tick()), (State::Stopped, 0.0), "rewound");
+        // Play while it rings: not reset (the setting is off), the pattern's note starts it again.
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        wait_for(|| t.seconds() > 0.0);
+        assert_eq!(resets.load(Ordering::Relaxed), before, "Play while it rings");
+        t.stop();
+        let t0 = Instant::now();
+        while resets.load(Ordering::Relaxed) == before && t0.elapsed() < Duration::from_secs(8) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(resets.load(Ordering::Relaxed), before + 1, "reset once rung out");
+        assert!(!inst.lock().unwrap().active(), "no tail left to come back");
     }
 
     /// The CPU panel's voices while a pattern plays and after Stop (spec: audio/voices.md §4-§5): the engine's own

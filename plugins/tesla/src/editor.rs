@@ -1028,7 +1028,9 @@ impl Logic {
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
         match self.at(x, y) {
             Some(Target::Amp(c @ (AmpCtl::Pan | AmpCtl::Sep | AmpCtl::Left | AmpCtl::Volume | AmpCtl::Right | AmpCtl::Pitch | AmpCtl::Time | AmpCtl::Formant | AmpCtl::Slope | AmpCtl::Dry | AmpCtl::Wet | AmpCtl::Decay | AmpCtl::Mix | AmpCtl::Amount | AmpCtl::Offset | AmpCtl::Threshold | AmpCtl::Reduction | AmpCtl::ClipLevel | AmpCtl::Sensitivity | AmpCtl::EnvA | AmpCtl::EnvB | AmpCtl::VoiceMix | AmpCtl::DeverbMix))) => {
-                let v = self.amp_value(c) + notches * 0.02;
+                // A notch moves a knob or fader 1/32 of the way from its centre to an end (spec:
+                // plugins/edison/tools.md "Amp, measured").
+                let v = self.amp_value(c) + notches / 32.0;
                 self.set_amp_value(c, v.clamp(-1.0, 1.0));
                 self.hint = self.amp_hint(c);
                 self.amp_changed();
@@ -1937,7 +1939,8 @@ impl Logic {
             }
             Key::Char('O') if c => Cmd::Open,
             Key::Char('S') if c => Cmd::Save(Depth::Own),
-            Key::F2 if c || a => Cmd::AutoRename,
+            // Ctrl+F2 and Alt+F2 are Edison's Rename all... and Quick rename all..., not built yet: nothing.
+            Key::F2 if c || a => return vec![],
             Key::F2 => Cmd::Properties,
             Key::Char('Z') if c => Cmd::Undo,
             Key::Char('Y') if c => Cmd::Redo,
@@ -2220,7 +2223,7 @@ impl Logic {
                 m.add(item("Remove loop").enabled(d.sample.looped.is_some()), Cmd::ClearLoop);
                 m.add(item("Set first downbeat").enabled(has), Cmd::SetDownbeat);
                 m.add(item("Delete").shortcut("Shift+Ctrl+Del").enabled(d.cue_at(d.insert_at()).is_some()), Cmd::DeleteCueHere);
-                m.add(item("Auto rename all").shortcut("Ctrl+F2").enabled(!d.sample.cues.is_empty()), Cmd::AutoRename);
+                m.add(item("Auto rename all").enabled(!d.sample.cues.is_empty()), Cmd::AutoRename);
                 m.head("Detection", Cmd::None);
                 m.submenu("Auto-slice", Self::slice_menu(has), Cmd::None);
                 m.add(item("Detect beats").enabled(has), Cmd::Tool(ToolCmd::DetectBeats));
@@ -2593,7 +2596,7 @@ impl Logic {
     /// The host answered (true) or didn't take a sample sent to it.
     pub fn sent(&mut self, ok: bool, to: AudioTo) {
         self.hint = match (ok, to) {
-            (true, AudioTo::Playlist) => "Sent to the playlist".into(),
+            (true, AudioTo::Playlist) => "Sent to the arranger".into(),
             (true, AudioTo::Channel) => "Sent to the selected channel".into(),
             (true, AudioTo::Slicer) => "Sent to a new Lemon Slicer channel".into(),
             (false, _) => "Sending needs Lemon Studio".into(),
@@ -2681,12 +2684,14 @@ impl Logic {
         } else {
             None
         };
-        // FREE: what the For limit leaves of the recording, while armed.
-        let free = match crate::rec::Recorder::limit_frames(rec.max, take.rate.max(1)) {
+        // FREE: what the For limit leaves of the recording, while armed. Before the take has its rate (the first drain
+        // sets it), the host's rate it will take.
+        let rate = if take.rate > 0 { take.rate } else { sh.host_rate.load(Ordering::Relaxed).max(1) };
+        let free = match crate::rec::Recorder::limit_frames(rec.max, rate) {
             u64::MAX => "-".to_string(),
             _ if !rec.armed => "-".to_string(),
             limit => {
-                let s = limit.saturating_sub(take.l.len() as u64) / u64::from(take.rate.max(1));
+                let s = limit.saturating_sub(take.l.len() as u64) / u64::from(rate);
                 format!("{}:{:02}", s / 60, s % 60)
             }
         };
@@ -4397,6 +4402,204 @@ mod tests {
         assert!(!l.doc(|d| d.can_undo_mix(1)));
         l.pick(&MenuReq::Main(MenuId::Edit), Cmd::UndoMix(1), 0.0, 0.0);
         assert!(l.hint.ends_with("has another length; use Undo history"), "{}", l.hint);
+    }
+
+    /// The editor painted at `k`: its width in device pixels, and its XRGB pixels.
+    fn pixels(l: &mut Logic, k: f32) -> (usize, Vec<u32>) {
+        let (w, h) = l.size();
+        let (w, h) = ((w as f32 * k).round() as u32, (h as f32 * k).round() as u32);
+        let mut c = Canvas::new(w, h, k).unwrap();
+        l.paint(&mut c);
+        let mut px = vec![0; (w * h) as usize];
+        c.copy_to_xrgb(&mut px);
+        (w as usize, px)
+    }
+
+    /// The pixels of a paint at 1× inside `r`.
+    fn inside(p: &(usize, Vec<u32>), r: Rect) -> Vec<u32> {
+        p.1.iter().enumerate().filter(|(i, _)| r.contains((i % p.0) as f32 + 0.5, (i / p.0) as f32 + 0.5)).map(|(_, q)| *q).collect()
+    }
+
+    /// The tool grid is Edison's: 40 × 32 buttons side by side from x 364 to 723, rows at y 25 and 57. Kept at the
+    /// right, it stays clear of the For selector down to the smallest width.
+    #[test]
+    fn the_tool_grid_clears_the_for_selector() {
+        let mut l = logic();
+        let at = |l: &Logic, t: Target| l.hits.iter().find(|h| h.t == t).unwrap_or_else(|| panic!("no hit {t:?}")).r;
+        assert_eq!(at(&l, Target::Tool(0)), Rect::new(364.0, 25.0, 40.0, 32.0));
+        assert_eq!(at(&l, Target::Tool(17)), Rect::new(684.0, 57.0, 40.0, 32.0));
+        l.resize_to(10, 10);
+        paint(&mut l);
+        assert_eq!(l.size().0, view::MIN_W);
+        let max = at(&l, Target::Max);
+        for i in 0..view::TOOLS.len() {
+            assert!(at(&l, Target::Tool(i)).x >= max.right() + 6.0, "tool {i}");
+        }
+    }
+
+    /// A wheel notch moves a knob 1/32 of the way from its centre to an end.
+    #[test]
+    fn a_wheel_notch_moves_a_knob_a_32nd() {
+        let mut l = logic();
+        load(&mut l, sine(4410));
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Amp), 0.0, 0.0);
+        paint(&mut l);
+        let (x, y) = centre(&l, Target::Amp(AmpCtl::Pan));
+        l.wheel(x, y, 1.0, Mods::default());
+        assert_eq!(l.amp_value(AmpCtl::Pan), 1.0 / 32.0);
+        l.wheel(x, y, -2.0, Mods::default());
+        assert_eq!(l.amp_value(AmpCtl::Pan), -1.0 / 32.0);
+    }
+
+    /// Ctrl+F2 and Alt+F2 are Edison's Rename all... and Quick rename all...: not built yet, they do nothing, and
+    /// Auto rename all doesn't claim Ctrl+F2.
+    #[test]
+    fn ctrl_and_alt_f2_do_nothing() {
+        let mut l = logic();
+        load(&mut l, sine(44100));
+        l.typed(&Prompt::Marker, "kick");
+        for m in [Mods { ctrl: true, ..Mods::default() }, Mods { alt: true, ..Mods::default() }] {
+            assert!(l.key(Key::F2, m).is_empty());
+            assert_eq!(l.doc(|d| d.sample.cues[0].name.clone()), "kick");
+        }
+        let m = l.menu(&MenuReq::Main(MenuId::Regions));
+        assert!(m.items.iter().all(|i| !matches!(i, MenuItem::Item { shortcut, .. } if shortcut.contains("F2"))));
+    }
+
+    /// At 150 % the waveform's columns tile, in the lane and in the overview: a full-scale sample paints a row in one
+    /// colour wherever a silent one shows no grid line.
+    #[test]
+    fn the_waveform_has_no_stripes_at_150_percent() {
+        let k = 1.5;
+        let shot = |v: f32| {
+            let mut l = logic();
+            load(&mut l, Sample::from_channels(44100, vec![(0..44100).map(|i| if i % 2 == 0 { v } else { -v }).collect()], Format::Float32));
+            pixels(&mut l, k)
+        };
+        let (full, silent) = (shot(1.0), shot(0.0));
+        let lay = logic().layout();
+        let (lane, over) = (lay.lane(), lay.overview());
+        for (y, x0, x1) in [(lane.y + lane.h * 3.0 / 8.0, lane.x + 2.0, lane.right() - 2.0), (over.cy() - over.h / 4.0, over.x + 6.0, over.right() - 6.0)] {
+            let y = (y * k) as usize;
+            let row = |p: &(usize, Vec<u32>)| p.1[y * p.0 + (x0 * k) as usize..y * p.0 + (x1 * k) as usize].to_vec();
+            let (f, s) = (row(&full), row(&silent));
+            let plain = *s.iter().max_by_key(|p| s.iter().filter(|q| q == p).count()).unwrap();
+            let cols: Vec<u32> = f.iter().zip(&s).filter(|(_, q)| **q == plain).map(|(p, _)| *p).collect();
+            assert!(cols.len() > f.len() / 2, "row {y}");
+            assert!(cols.iter().all(|p| *p == cols[0]), "row {y}: {:?}", cols.iter().position(|p| *p != cols[0]));
+        }
+    }
+
+    /// "Click to load a sample" sits near the wave area's bottom, centred on y 421 at the default size as in Edison.
+    #[test]
+    fn the_load_prompt_sits_near_the_bottom() {
+        let mut l = logic();
+        let (w, px) = pixels(&mut l, 1.0);
+        let wr = l.layout().wave;
+        let (cx, bg) = (wr.cx() as usize, (wr.x + 20.0) as usize);
+        let ink: Vec<usize> = (wr.y as usize + 4..wr.bottom() as usize - 3).filter(|&y| (cx - 60..cx + 60).any(|x| px[y * w + x] != px[y * w + bg])).collect();
+        let mid = (ink[0] + ink[ink.len() - 1]) as f32 / 2.0;
+        assert!((mid - 421.0).abs() <= 3.0, "{ink:?}");
+    }
+
+    /// Blur's BEFORE and AFTER stay over the curve box, clear of the well's edges.
+    #[test]
+    fn blurs_labels_stay_in_the_well() {
+        let mut l = logic();
+        load(&mut l, sine(44100));
+        l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(ToolCmd::Blur), 0.0, 0.0);
+        let (w, px) = pixels(&mut l, 1.0);
+        let (p, bx, _) = view::spectral_parts(&l.layout(), &l.view.amp.expect("the Blur panel"));
+        // Between the well's edge and the curve's end points (their handles reach 4 px out).
+        for y in (bx.bottom() + 3.0) as usize..(bx.bottom() + 14.0) as usize {
+            for (x0, x1) in [(p.x + 10.0, bx.x - 5.0), (bx.right() + 5.0, p.right() - 10.0)] {
+                let row = &px[y * w + x0 as usize..y * w + x1 as usize];
+                assert!(row.iter().all(|&q| q == row[0]), "row {y}, {x0}..{x1}");
+            }
+        }
+    }
+
+    /// Over the spectrogram the ruler's times sit on a dark backing.
+    #[test]
+    fn the_spectrum_rulers_times_have_a_backing() {
+        let mut l = logic();
+        let mut r = tools::Rng::new(5);
+        load(&mut l, Sample::from_channels(44100, vec![(0..44100).map(|_| r.gauss() as f32 * 0.5).collect()], Format::Float32));
+        l.doc(|d| d.view.spectrum = true);
+        let (w, px) = pixels(&mut l, 1.0);
+        let lane = l.layout().lane();
+        let bright = |x: f32, y: f32| {
+            let p = px[y as usize * w + x as usize];
+            ((p >> 16) & 255).max((p >> 8) & 255).max(p & 255)
+        };
+        // The time at the lane's left: left of its text, on the backing; over it, the spectrogram.
+        assert!(bright(lane.x + 2.0, lane.bottom() - 9.0) <= 0x58, "{:x}", bright(lane.x + 2.0, lane.bottom() - 9.0));
+        assert!(bright(lane.x + 2.0, lane.bottom() - 20.0) > 0x58, "{:x}", bright(lane.x + 2.0, lane.bottom() - 20.0));
+    }
+
+    /// Sending names the arranger, in the tool's hint and in the answer.
+    #[test]
+    fn sending_names_the_arranger() {
+        let mut l = logic();
+        let (x, y) = centre(&l, Target::Tool(17));
+        let hint = l.hover_hint(x, y);
+        assert!(hint.contains("arranger") && !hint.contains("playlist"), "{hint}");
+        l.sent(true, AudioTo::Playlist);
+        assert_eq!(l.hint, "Sent to the arranger");
+    }
+
+    /// The Drum(loop) stretch and Deverb panels push each control's hit once.
+    #[test]
+    fn panels_push_each_hit_once() {
+        let mut l = logic();
+        load(&mut l, sine(44100));
+        for t in [ToolCmd::DrumStretch, ToolCmd::Deverb] {
+            l.view.amp = None;
+            l.pick(&MenuReq::Main(MenuId::Tools), Cmd::Tool(t), 0.0, 0.0);
+            paint(&mut l);
+            assert!(l.view.amp.is_some(), "{t:?} opens");
+            let amp: Vec<Target> = l.hits.iter().map(|h| h.t).filter(|t| matches!(t, Target::Amp(_))).collect();
+            for (i, a) in amp.iter().enumerate() {
+                assert!(!amp[i + 1..].contains(a), "{t:?}: {a:?} twice");
+            }
+        }
+    }
+
+    /// While armed, FREE is what the For limit leaves: before the take has its rate it reckons with the host's, and
+    /// a long one stays before TITLE.
+    #[test]
+    fn free_before_the_take_has_its_rate() {
+        let mut l = logic();
+        l.pick(&MenuReq::Max, Cmd::Max(11), 0.0, 0.0);
+        l.shared.armed.store(true, Ordering::Relaxed);
+        let shot = |l: &mut Logic, take: u32, host: u32| {
+            l.shared.take.lock().unwrap().rate = take;
+            l.shared.host_rate.store(host, Ordering::Relaxed);
+            pixels(l, 1.0)
+        };
+        let info = l.layout().info;
+        let (free, title) = (Rect::new(160.0, info.y, 33.0, info.h), Rect::new(194.0, info.y, 150.0, info.h));
+        let host = shot(&mut l, 0, 44100);
+        assert!(inside(&host, free) == inside(&shot(&mut l, 44100, 44100), free), "the host's rate until the take has one");
+        // At 1 kHz the 1GB limit leaves 2236:57: narrowed and cut, it stays out of TITLE's room.
+        assert!(inside(&shot(&mut l, 0, 1000), title) == inside(&host, title));
+    }
+
+    /// A long title ends in "…" inside its room: its last marks are the dots, on the baseline.
+    #[test]
+    fn a_long_title_ends_in_an_ellipsis() {
+        let mut l = logic();
+        l.doc(|d| d.load(sine(1000), "C:/x/An extremely long sample file name that keeps going and going.wav"));
+        let (w, px) = pixels(&mut l, 1.0);
+        let info = l.layout().info;
+        let rows = info.y as usize + 2..info.bottom() as usize - 2;
+        // Ink: unlike the info row's plain background left of the title.
+        let ink = |x: usize| rows.clone().filter(|&y| px[y * w + x] != px[y * w + 196]).collect::<Vec<_>>();
+        let last = (198..348).rev().find(|&x| !ink(x).is_empty()).unwrap();
+        for x in last - 1..=last {
+            let i = ink(x);
+            assert!(i[i.len() - 1] - i[0] <= 4, "column {x}: {i:?}");
+        }
     }
 
     #[test]

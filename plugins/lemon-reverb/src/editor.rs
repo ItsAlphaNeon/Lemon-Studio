@@ -173,6 +173,12 @@ pub fn ids() -> impl Iterator<Item = &'static str> {
     DEFS.iter().map(|d| d.id).chain([params::TEMPO_ID, params::MID_SIDE_ID])
 }
 
+/// Whether a value text shows the typed text (case and spaces aside).
+fn shows(text: &str, typed: &str) -> bool {
+    let key = |s: &str| s.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect::<String>();
+    key(text) == key(typed)
+}
+
 pub struct Logic {
     pub vals: Vals,
     pub params: Arc<ReverbParams>,
@@ -188,12 +194,27 @@ pub struct Logic {
     opened: Instant,
     /// A fixed turn angle instead of the clock (tests, screenshots).
     pub still: Option<f32>,
+    /// Wheel notches not yet a whole step (fine wheels and trackpads send fractions), and the control they are for.
+    notch: Option<(Target, f32)>,
 }
 
 impl Logic {
     pub fn new(params: Arc<ReverbParams>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         let vals = Vals::new(&*params, params.live.clone(), ctx);
-        let mut l = Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, opened: Instant::now(), still: None };
+        let mut l = Logic {
+            vals,
+            params,
+            shared,
+            view: ViewState::default(),
+            hits: Vec::new(),
+            drag: None,
+            hint: String::new(),
+            copied: None,
+            hosted: false,
+            opened: Instant::now(),
+            still: None,
+            notch: None,
+        };
         l.sync_tempo_text();
         l
     }
@@ -310,10 +331,16 @@ impl Logic {
         vec![Act::Repaint]
     }
 
-    /// Wheel: one step per notch (1/128 of the range for the knobs with many steps); a switch flips.
+    /// Wheel: one step per notch (1/128 of the range for the knobs with many steps), fractions of a notch adding up; a
+    /// switch flips.
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, _m: Mods) -> Vec<Act> {
         let Some((t, _)) = self.hit(x, y) else { return vec![] };
-        let d = notches.signum();
+        let acc = self.notch.take().filter(|(n, _)| *n == t).map_or(0.0, |(_, a)| a) + notches;
+        let d = acc.trunc();
+        self.notch = Some((t.clone(), acc - d));
+        if d == 0.0 {
+            return vec![];
+        }
         match &t {
             Target::Knob(id) | Target::Fader(id) => {
                 let (lo, hi) = Self::range(id);
@@ -381,9 +408,17 @@ impl Logic {
         self.vals.text(id)
     }
 
-    /// Applies a typed value.
+    /// Applies a typed value. When several stored values show the typed text, the current one stays if it is one of
+    /// them (so an unchanged box changes nothing), else the default if it is one of them; otherwise the nearest number
+    /// (`params::parse_text`).
     pub fn typed(&mut self, id: &str, text: &str) {
-        if let Some(n) = self.vals.parse(id, text) {
+        self.sync_tempo_text();
+        let typed_at = |l: &Self, n: f32| shows(&l.vals.text_of(id, n), text);
+        if typed_at(self, self.vals.norm(id)) {
+            return;
+        }
+        let d = self.vals.default_norm(id);
+        if let Some(n) = if typed_at(self, d) { Some(d) } else { self.vals.parse(id, text) } {
             self.vals.edit(id, n);
         }
     }
@@ -1027,6 +1062,57 @@ mod tests {
         assert_eq!(l.pick(&MenuReq::Param("tempo".into()), Cmd::Automate("tempo".into()), 0.0, 0.0), vec![Act::Automate(PARAMS)]);
         let (x, y) = centre(&l, &Target::Logo);
         assert!(matches!(l.down(x, y, Btn::Left, Mods::default(), false).last(), Some(Act::Menu(MenuReq::About, _, _))));
+    }
+
+    #[test]
+    fn the_wheel_moves_a_step_per_notch_and_adds_up_fractions() {
+        let mut l = logic();
+        let (x, y) = centre(&l, &Target::Knob("size".into()));
+        l.wheel(x, y, 2.0, Mods::default());
+        assert_eq!(l.vals.plain("size"), 52.0);
+        l.wheel(x, y, 0.5, Mods::default());
+        assert_eq!(l.vals.plain("size"), 52.0);
+        l.wheel(x, y, 0.5, Mods::default());
+        assert_eq!(l.vals.plain("size"), 53.0);
+        // 2048 steps: 16 a notch.
+        let (x, y) = centre(&l, &Target::Knob("speed".into()));
+        l.wheel(x, y, -3.0, Mods::default());
+        assert_eq!(l.vals.plain("speed"), 636.0);
+        // A switch flips once a whole notch has added up.
+        let (x, y) = centre(&l, &Target::Switch(params::MID_SIDE_ID.into()));
+        l.wheel(x, y, 0.4, Mods::default());
+        assert!(!l.params.mid_side());
+        l.wheel(x, y, 0.6, Mods::default());
+        assert!(l.params.mid_side());
+    }
+
+    #[test]
+    fn a_fader_click_does_not_jump() {
+        let mut l = logic();
+        l.vals.edit_plain("wet", 0.0);
+        paint(&mut l);
+        let h = l.hits.iter().find(|h| h.t == Target::Fader("wet".into())).unwrap().r;
+        l.down(h.cx(), h.y + 2.0, Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        assert_eq!(l.vals.plain("wet"), 0.0);
+    }
+
+    #[test]
+    fn typed_values_keep_the_current_or_default_value_that_shows_the_text() {
+        let mut l = logic();
+        // 16 and 17 of 128 both read 13 % (17 is the nearest).
+        l.vals.edit_plain("wet", 16.0);
+        l.typed("wet", "13%");
+        assert_eq!(l.vals.plain("wet"), 16.0);
+        l.typed("wet", "13 %");
+        assert_eq!(l.vals.plain("wet"), 16.0);
+        l.vals.edit_plain("wet", 0.0);
+        l.typed("wet", "13%");
+        assert_eq!(l.vals.plain("wet"), 17.0);
+        // The mod speed's default 684 reads 33 %, as 666..686 do (676 is the nearest).
+        l.vals.edit_plain("speed", 0.0);
+        l.typed("speed", "33%");
+        assert_eq!(l.vals.plain("speed"), 684.0);
     }
 
     /// `REVERB_PNG=<dir> cargo test -p lemon-reverb -- --ignored`: the editor at a few settings, as PNGs.

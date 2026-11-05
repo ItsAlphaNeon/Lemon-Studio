@@ -337,7 +337,7 @@ impl Plugin for CitrusPlugin {
     }
 
     fn reset(&mut self) {
-        self.engine.panic();
+        self.engine.reset();
         self.held.clear();
         self.ringing.clear();
         self.show_playing();

@@ -418,8 +418,9 @@ impl Logic {
                 (t, t * secs / 60.0)
             }
             (None, Some(b)) => {
-                let b = b.clamp(0.25, 512.0);
-                (b * 60.0 / secs, b)
+                // The length's own range, then the one that keeps the tempo it gives in the tempo's range.
+                let b = b.clamp(0.25, 512.0).clamp(10.0 * secs / 60.0, 522.0 * secs / 60.0);
+                ((b * 60.0 / secs).clamp(10.0, 522.0), b)
             }
             (None, None) => return,
         };
@@ -438,7 +439,7 @@ impl Logic {
                 m.add(MenuItem::item("Copy value"), Cmd::CopyValue(id.clone()));
                 m.add(MenuItem::item("Paste value").enabled(self.copied.is_some()), Cmd::PasteValue(id.clone()));
                 if [params::PITCH_ID, params::ATTACK_ID, params::DECAY_ID].contains(&id.as_str()) {
-                    m.add(MenuItem::item("Type in value..."), Cmd::TypeIn(id.clone()));
+                    m.add(MenuItem::item("Enter value..."), Cmd::TypeIn(id.clone()));
                 }
                 m.sep(Cmd::None);
                 m.add(MenuItem::item("Create automation clip").enabled(self.hosted), Cmd::Automate(id.clone()));
@@ -1312,6 +1313,36 @@ mod tests {
         l.typed(BPM_ID, "60 bpm");
         assert_eq!((l.state().beats(), l.state().bpm()), (2.0, 60.0));
         assert_eq!(l.value_text(BPM_ID), "60.000");
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// BEATS keeps the tempo it gives in BPM's range (10 to 522): the 2 s loop takes 1/3 to 17.4 beats.
+    #[test]
+    fn the_length_keeps_the_tempo_in_range() {
+        let (mut l, p) = loaded("beats_range");
+        l.typed(BEATS_ID, "0.25");
+        assert_eq!(l.state().bpm(), 10.0);
+        assert!((l.state().beats() - 1.0 / 3.0).abs() < 1e-6, "{}", l.state().beats());
+        l.typed(BEATS_ID, "9999");
+        assert_eq!(l.state().bpm(), 522.0);
+        assert!((l.state().beats() - 17.4).abs() < 1e-5, "{}", l.state().beats());
+        // The wheel too.
+        let (x, y) = centre(&l, &Target::Beats);
+        l.wheel(x, y, 1.0, Mods::default());
+        assert_eq!(l.state().bpm(), 522.0);
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// A file that can't be read: the hint names its path once, then why.
+    #[test]
+    fn a_bad_file_is_named_once() {
+        let p = std::env::temp_dir().join(format!("lemon-slicer-{}-bad.wav", std::process::id()));
+        std::fs::write(&p, b"not a wav").unwrap();
+        let path = p.to_string_lossy().into_owned();
+        let mut l = logic();
+        l.load(&path);
+        assert!(l.hint.starts_with(&format!("{path}: ")), "{}", l.hint);
+        assert_eq!(l.hint.matches(path.as_str()).count(), 1, "{}", l.hint);
         let _ = std::fs::remove_file(p);
     }
 

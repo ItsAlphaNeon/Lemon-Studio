@@ -173,6 +173,12 @@ pub fn ids() -> impl Iterator<Item = &'static str> {
     DEFS.iter().map(|d| d.id)
 }
 
+/// Whether a value text shows the typed text (case and spaces aside).
+fn shows(text: &str, typed: &str) -> bool {
+    let key = |s: &str| s.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect::<String>();
+    key(text) == key(typed)
+}
+
 pub struct Logic {
     pub vals: Vals,
     pub params: Arc<DelayParams>,
@@ -184,12 +190,14 @@ pub struct Logic {
     pub hint: String,
     copied: Option<f32>,
     pub hosted: bool,
+    /// Wheel notches not yet a whole step (fine wheels and trackpads send fractions), and the control they are for.
+    notch: Option<(Target, f32)>,
 }
 
 impl Logic {
     pub fn new(params: Arc<DelayParams>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         let vals = Vals::new(&*params, params.live.clone(), ctx);
-        let mut l = Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false };
+        let mut l = Logic { vals, params, shared, view: ViewState::default(), hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, notch: None };
         l.sync_shown();
         l
     }
@@ -310,18 +318,27 @@ impl Logic {
         vec![Act::Repaint]
     }
 
-    /// Wheel: one step per notch (1/128 of the range for the settings with many steps).
+    /// Wheel: one step per notch (1/128 of the range for the settings with many steps); fractions of a notch add up.
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, m: Mods) -> Vec<Act> {
         let Some((t, _)) = self.hit(x, y).filter(|(t, _)| *t != Target::Logo) else { return vec![] };
+        let acc = self.notch.take().filter(|(n, _)| *n == t).map_or(0.0, |(_, a)| a) + notches;
+        let n = acc.trunc();
+        self.notch = Some((t.clone(), acc - n));
+        if n == 0.0 {
+            return vec![];
+        }
         let id = t.id().to_string();
         let (lo, hi) = Self::range(&id);
         let steps = (hi - lo) as f32;
         let step = if steps > WHEEL_STEPS { (steps / WHEEL_STEPS).round() } else { 1.0 };
-        let cur = self.vals.plain(&id);
-        let mut plain = (cur + notches.signum() * step).clamp(lo as f32, hi as f32);
-        if let (Some(k), false) = (params::index(&id), m.shift) {
-            let sync = self.vals.plain("sync") > 0.5;
-            plain = params::snap_step(k, cur.round() as i32, plain.round() as i32, notches > 0.0, sync) as f32;
+        let sync = self.vals.plain("sync") > 0.5;
+        let mut plain = self.vals.plain(&id);
+        for _ in 0..n.abs() as u32 {
+            let next = (plain + n.signum() * step).clamp(lo as f32, hi as f32);
+            plain = match (params::index(&id), m.shift) {
+                (Some(k), false) => params::snap_step(k, plain.round() as i32, next.round() as i32, n > 0.0, sync) as f32,
+                _ => next,
+            };
         }
         self.vals.edit_plain(&id, plain);
         self.sync_shown();
@@ -378,10 +395,17 @@ impl Logic {
         self.vals.text(id)
     }
 
-    /// Applies a typed value.
+    /// Applies a typed value. When several stored values show the typed text, the current one stays if it is one of
+    /// them (so an unchanged box changes nothing), else the default if it is one of them; otherwise the nearest number
+    /// (`params::parse_text`).
     pub fn typed(&mut self, id: &str, text: &str) {
         self.sync_shown();
-        if let Some(n) = self.vals.parse(id, text) {
+        let typed_at = |l: &Self, n: f32| shows(&l.vals.text_of(id, n), text);
+        if typed_at(self, self.vals.norm(id)) {
+            return;
+        }
+        let d = self.vals.default_norm(id);
+        if let Some(n) = if typed_at(self, d) { Some(d) } else { self.vals.parse(id, text) } {
             self.edit(id, n);
         }
     }
@@ -1032,6 +1056,70 @@ mod tests {
         assert!(matches!(l.down(x, y, Btn::Left, Mods::default(), false).last(), Some(Act::Menu(MenuReq::About, _, _))));
         assert_eq!(l.hint, "Lemon Delay");
         assert!(l.wheel(x, y, 1.0, Mods::default()).is_empty());
+    }
+
+    #[test]
+    fn the_wheel_moves_a_step_per_notch_and_adds_up_fractions() {
+        let mut l = logic();
+        let (x, y) = centre(&l, &Target::Knob("fb".into()));
+        l.vals.edit_plain("fb", 3000.0);
+        // 6000 steps: 47 a notch.
+        l.wheel(x, y, 2.0, Mods::default());
+        assert_eq!(l.vals.plain("fb"), 3094.0);
+        l.wheel(x, y, 0.5, Mods::default());
+        assert_eq!(l.vals.plain("fb"), 3094.0);
+        l.wheel(x, y, 0.5, Mods::default());
+        assert_eq!(l.vals.plain("fb"), 3141.0);
+        l.wheel(x, y, -1.0, Mods { shift: true, ..Mods::default() });
+        assert_eq!(l.vals.plain("fb"), 3094.0);
+        // A half notch over another control starts afresh.
+        l.wheel(x, y, 0.5, Mods::default());
+        let (dx, dy) = centre(&l, &Target::Knob("dry".into()));
+        l.wheel(dx, dy, 0.5, Mods::default());
+        assert_eq!((l.vals.plain("fb"), l.vals.plain("dry")), (3094.0, 6000.0));
+        // Synced, two notches are two musical times (4:0 -> 4:12 -> 4:16).
+        let (tx, ty) = centre(&l, &Target::Knob("time".into()));
+        l.wheel(tx, ty, 2.0, Mods::default());
+        assert_eq!(l.vals.plain("time"), 208.0);
+    }
+
+    #[test]
+    fn typed_values_keep_the_current_or_default_value_that_shows_the_text() {
+        let mut l = logic();
+        // 50.0 % is shown by several stored values (2997..3002).
+        l.vals.edit_plain("spread", 2998.0);
+        assert_eq!(l.value_text("spread"), "50.0%");
+        l.typed("spread", "50.0%");
+        assert_eq!(l.vals.plain("spread"), 2998.0);
+        l.typed("spread", " 50.0 % ");
+        assert_eq!(l.vals.plain("spread"), 2998.0);
+        // Not shown by the current value: the default when it shows it (the modulation rate's 3000 reads 1.1 Hz, as
+        // its neighbours do, and is not the nearest to 1.1), else the nearest.
+        let k = params::index("mrate").unwrap();
+        assert_ne!(params::parse_text(k, "1.1Hz", true, 0), Some(3000));
+        l.vals.edit_plain("mrate", 0.0);
+        l.typed("mrate", "1.1Hz");
+        assert_eq!(l.vals.plain("mrate"), 3000.0);
+        l.typed("spread", "25%");
+        assert_eq!(l.vals.plain("spread"), 1500.0);
+    }
+
+    #[test]
+    fn heading_rules_are_hairlines_and_selector_rows_15_px() {
+        let mut l = logic();
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+        l.paint(&mut c, &os_plugkit::palette());
+        let mut px = vec![0u32; (view::W * view::H) as usize];
+        c.copy_to_xrgb(&mut px);
+        let at = |x: u32, y: u32| px[(y * view::W + x) as usize] & 0xffffff;
+        // DELAY TIME's rule: 12 px over its card (y 28), one pixel high.
+        assert_eq!(at(80, 16), 0x3c3c3c);
+        assert_ne!(at(80, 15), 0x3c3c3c);
+        assert_ne!(at(80, 17), 0x3c3c3c);
+        for i in 0..4 {
+            let r = l.hits.iter().find(|h| h.t == Target::Choice("type".into(), i)).unwrap().r;
+            assert_eq!((r.y, r.h), (40.0 + 16.0 * i as f32, 15.0));
+        }
     }
 
     /// `DELAY_PNG=<dir> cargo test -p lemon-delay -- --ignored`: the editor at a few settings, as PNGs.

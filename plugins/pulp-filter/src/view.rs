@@ -657,9 +657,6 @@ fn curve_view(ui: &mut Ui, r: Rect, c: &Curve, centred: bool, pos: Option<f32>, 
         let mid = k == 2 && centred;
         ui.c.fill_rect(Rect::new(r.x + 1.0, y, r.w - 2.0, 1.0), if mid { plug::TICK } else { plug::GRID });
     }
-    if let Some(l) = label {
-        ui.c.text(SMALL, r.x + 9.0, r.y + 6.0, FAINT, l);
-    }
     let span = ui.st.span.unwrap_or_else(|| curve_span(c));
     let ts = edit::times(c);
     let n = ts.len();
@@ -688,7 +685,16 @@ fn curve_view(ui: &mut Ui, r: Rect, c: &Curve, centred: bool, pos: Option<f32>, 
     area.push((line[0].0, base));
     ui.c.fill_polygon(&area, ink.with_alpha(36));
     ui.c.polyline(&line, 1.5, ink);
-    for (i, tag) in [(c.sustain, "E"), (c.loop_start, "L")] {
+    // The pattern's number in the top left corner, clear of the first point, on a patch of the well over the curve so
+    // it stays legible.
+    if let Some(l) = label {
+        let (w, lh) = (ui.c.text_width(SMALL, l), ui.c.line_height(SMALL));
+        ui.c.fill_rrect(Rect::new(r.x + 12.0, r.y + 4.0, w + 6.0, lh + 4.0), 3.0, WELL.with_alpha(220));
+        ui.c.text(SMALL, r.x + 15.0, r.y + 6.0, FAINT, l);
+    }
+    // The loop markers' tags: the sustain point (the loop's end) "S", as FL tags it, and the loop start "L"
+    // (spec plugins/image-line-curves.md: the sustain point).
+    for (i, tag) in [(c.sustain, "S"), (c.loop_start, "L")] {
         if let Some(&t) = usize::try_from(i).ok().and_then(|i| ts.get(i)) {
             let x = t_to_x(r, t, span).round();
             ui.c.fill_rect(Rect::new(x, r.y + 1.0, 1.0, r.h - 2.0), plug::TICK);
@@ -843,7 +849,10 @@ fn right_panel(ui: &mut Ui, hint: &str) {
     lemon::field(ui.c, OVERSAMPLING, st);
     let o = s.oversampling() as usize;
     let r = OVERSAMPLING;
-    ui.c.text_center(SMALL.bold(), Rect::new(r.x, r.y, r.w - 8.0, r.h), TEXT, OVERSAMPLING_LABELS[o]);
+    // A pixel between the letters, so that "16x" does not run together at 1x.
+    let (s, f) = (OVERSAMPLING_LABELS[o], SMALL.bold());
+    let (w, lh) = (lemon::spaced_width(ui.c, f, s, 1.0), ui.c.line_height(f));
+    lemon::spaced(ui.c, f, (r.x + (r.w - 8.0 - w) / 2.0).round(), (r.cy() - lh / 2.0).round(), TEXT, s, 1.0);
     ui.c.fill_polygon(&[(r.right() - 9.0, r.cy() - 1.5), (r.right() - 4.0, r.cy() - 1.5), (r.right() - 6.5, r.cy() + 1.5)], DIM);
     ui.hit(r, t);
     description(ui, hint);
@@ -875,7 +884,8 @@ fn description(ui: &mut Ui, hint: &str) {
     if hint.is_empty() {
         let text = plain_text(&ui.m.st.description_text());
         for (k, line) in text.lines().map(str::trim).filter(|l| !l.is_empty()).take(3).enumerate() {
-            ui.c.text_clip(LABEL, x, DESC.y + 5.0 + k as f32 * (lh + 1.0), w, if k == 0 { TEXT } else { DIM }, line);
+            let line = elide(ui.c, LABEL, line, w);
+            ui.c.text_clip(LABEL, x, DESC.y + 5.0 + k as f32 * (lh + 1.0), w, if k == 0 { TEXT } else { DIM }, &line);
         }
     } else {
         let (left, right) = hint.split_once('\t').unwrap_or((hint, ""));
@@ -885,6 +895,22 @@ fn description(ui: &mut Ui, hint: &str) {
         }
     }
     ui.hit(DESC, Target::Desc);
+}
+
+/// `s` cut to `max_w`, an ellipsis in place of what is cut from its end (whole when it fits).
+pub fn elide(c: &mut Canvas, f: Font, s: &str, max_w: f32) -> String {
+    if c.text_width(f, s) <= max_w {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let cut = |n: usize| format!("{}…", chars[..n].iter().collect::<String>().trim_end());
+    // The longest start that fits with its ellipsis.
+    let (mut lo, mut hi) = (0, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if c.text_width(f, &cut(mid)) <= max_w { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
 }
 
 /// A description's plain text: RTF (`{\rtf1 ...}`) without its control words and its font, colour and style tables,

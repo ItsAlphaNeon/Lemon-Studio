@@ -278,6 +278,23 @@ pub fn parse_value(vals: &Vals, id: &str, text: &str) -> Option<f32> {
     Some(v.clamp(0.0, 1.0))
 }
 
+/// Type-in ties: when the text typed reads as what several values show (`n` = the parser's nearest), the current
+/// value stays if it is one of them, else the default if it is; otherwise `n`. A text finer than the shown one
+/// ("31.4%" where the box shows whole percents) names `n` itself.
+pub fn type_in_tie(vals: &Vals, id: &str, typed: &str, n: f32) -> f32 {
+    let shown = vals.text_of(id, n);
+    if !reads_as(typed, &shown) {
+        return n;
+    }
+    [vals.norm(id), vals.default_norm(id)].into_iter().find(|&v| vals.text_of(id, v) == shown).unwrap_or(n)
+}
+
+/// Whether a typed text reads as `shown`: the same words, or their number without the unit ("31" for "31%").
+fn reads_as(typed: &str, shown: &str) -> bool {
+    let (t, s) = (typed.trim().to_lowercase(), shown.trim().to_lowercase());
+    !t.is_empty() && s.strip_prefix(t.as_str()).is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit() || c == '.'))
+}
+
 /// "C5" / "c#4" -> key (C5 = 60).
 pub fn note_from_text(t: &str) -> Option<i32> {
     let t = t.trim().to_ascii_uppercase();
@@ -644,16 +661,13 @@ impl Logic {
                 self.drag = Some(Drag::Knob { id });
                 return vec![Act::Lock, Act::Repaint];
             }
+            // A double click is two presses: it does not reset (spec §4; the middle button does).
             Target::Slider(id, track) => {
-                if double {
-                    self.reset(&id);
-                } else {
-                    self.begin(&id);
-                    self.set(&id, (x - track.x) / track.w);
-                    self.hint_for(&id);
-                    self.view.pressed = Some(Target::Slider(id.clone(), track));
-                    self.drag = Some(Drag::Slider { id, track });
-                }
+                self.begin(&id);
+                self.set(&id, (x - track.x) / track.w);
+                self.hint_for(&id);
+                self.view.pressed = Some(Target::Slider(id.clone(), track));
+                self.drag = Some(Drag::Slider { id, track });
             }
             Target::Toggle(id) => {
                 let v = self.vals.norm(&id);
@@ -1218,19 +1232,25 @@ impl Logic {
         ((secs * self.shared.tempo() / 60.0).round() as i32).clamp(1, (params::TIME_BARS * 4.0) as i32)
     }
 
-    /// A typed value for `id`.
+    /// A typed value for `id`. A box left as it opened changes nothing; a text several values show keeps the current
+    /// value or the default when it shows it (`type_in_tie`).
     pub fn typed(&mut self, id: &str, text: &str) {
+        if text.trim() == self.value_text(id).trim() {
+            return;
+        }
         let frames = self.params.frames.load(Ordering::Relaxed) as f32;
         let typed = if matches!(id, "loop_start" | "loop_end") {
             text.trim().split_whitespace().next().and_then(|n| n.parse::<f32>().ok()).map(|n| (n / frames.max(1.0)).clamp(0.0, 1.0))
         } else {
             parse_value(&self.vals, id, text)
         };
-        if let Some(v) = typed {
-            self.stretch_touch(id);
-            self.edit(id, v);
-            self.hint_for(id);
+        let Some(v) = typed.map(|n| type_in_tie(&self.vals, id, text, n)) else { return };
+        if v == self.vals.norm(id) {
+            return;
         }
+        self.stretch_touch(id);
+        self.edit(id, v);
+        self.hint_for(id);
     }
 
     /// The current value as text for the type-in box.
@@ -3188,6 +3208,108 @@ mod tests {
         let want = [46.5, 74.0, 99.0, 126.5];
         for (got, w) in eg.x[2..].iter().zip(want) {
             assert!((got - w).abs() < 1.2, "{:?}", eg.x);
+        }
+    }
+
+    // spec §4: double click does not reset; the fine-tune slider resets with a middle click.
+    #[test]
+    fn a_double_click_on_the_fine_slider_does_not_reset_it() {
+        let mut l = logic(1);
+        let (t, r) = l.hits.iter().find_map(|h| matches!(h.t, Target::Slider(..)).then(|| (h.t.clone(), h.r))).expect("fine slider");
+        let Target::Slider(_, track) = t else { unreachable!() };
+        let x = track.x + track.w * 0.75;
+        l.down(x, r.cy(), Btn::Left, Mods::default(), false);
+        l.up(Btn::Left);
+        l.down(x, r.cy(), Btn::Left, Mods::default(), true);
+        l.up(Btn::Left);
+        assert!((l.vals.norm("fine") - 0.75).abs() < 0.01, "{}", l.vals.norm("fine"));
+        l.down(x, r.cy(), Btn::Middle, Mods::default(), false);
+        assert_eq!(l.vals.norm("fine"), l.vals.default_norm("fine"));
+    }
+
+    /// A typed text several values show keeps the current value, else the default; finer texts and plain numbers
+    /// name their own value; a box left as it opened changes nothing.
+    #[test]
+    fn typed_values_keep_the_current_value_or_the_default_on_a_tie() {
+        let mut l = logic(1);
+        let id = "envvol_att";
+        let default = l.vals.default_norm(id);
+        assert_eq!(l.value_text(id), "31%");
+        l.edit(id, 0.3125);
+        l.typed(id, "31%");
+        assert_eq!(l.vals.norm(id), 0.3125, "the current value shows 31%");
+        l.edit(id, 0.5);
+        l.typed(id, "31");
+        assert_eq!(l.vals.norm(id), default, "the default shows 31%");
+        l.typed(id, "31.4%");
+        assert!((l.vals.norm(id) - 0.314).abs() < 1e-6, "{}", l.vals.norm(id));
+        l.typed(id, "40%");
+        assert!((l.vals.norm(id) - 0.4).abs() < 1e-6);
+        // Typing PITCH in Resample switches to Auto (spec §5.6), but the unchanged box is no edit at all.
+        let shown = l.value_text("ts_pitch");
+        l.typed("ts_pitch", &shown);
+        assert_eq!(l.vals.plain("ts_mode") as i32, 0);
+    }
+
+    #[test]
+    fn page_tabs_do_not_overlap() {
+        let l = logic(0);
+        let tab = |i| l.hits.iter().find(|h| h.t == Target::Tab(i)).map(|h| h.r).unwrap();
+        assert!(tab(0).right() <= tab(1).x, "{:?} {:?}", tab(0), tab(1));
+        assert!(tab(0).contains(25.0, 30.0) && tab(1).contains(70.0, 30.0));
+    }
+
+    /// Keys scrolled partly out of view are hit only where drawn: inside the keyboard, never past the editor.
+    #[test]
+    fn key_hits_stay_inside_the_keyboard() {
+        for hand in [false, true] {
+            let mut l = logic(1);
+            l.view.hand = hand;
+            paint(&mut l);
+            let keys: Vec<Rect> = l.hits.iter().filter(|h| matches!(h.t, Target::Key(_))).map(|h| h.r).collect();
+            assert!(keys.len() > 20, "hand {hand}");
+            for r in keys {
+                assert!(r.x >= view::KEYS_X && r.right() <= view::KEYS_X + view::KEYS_W, "hand {hand}: {r:?}");
+            }
+        }
+    }
+
+    /// The waveform readout never shows a negative zero.
+    #[test]
+    fn waveform_hint_has_no_negative_zero() {
+        let l = logic(0);
+        let s = os_engine::Sample { rate: 1000, left: vec![0.0; 1000], right: vec![0.0; 1000] };
+        let sv = SampleView { sample: Some(Wave::of(&s)), path: "x.wav", bits: 16, spectrum: None, tones: None };
+        let area = view::wave_area();
+        let t = Target::Wave(area);
+        for yy in [area.cy() + 0.01, area.cy() - 0.01, area.y + 0.001, area.bottom() - 0.001] {
+            let h = view::hint(&t, &l.vals, &l.view, &sv, area.cx(), yy);
+            assert!(!h.contains("-0.00"), "{h:?}");
+        }
+    }
+
+    /// A long file name ends in an ellipsis inside its room; a short one stays whole.
+    #[test]
+    fn long_names_are_elided() {
+        let mut c = os_ui::Canvas::new(view::W, view::H, 1.5).unwrap();
+        let f = os_ui::kit::inst::LABEL;
+        let long = "an-extremely-long-sample-file-name-that-goes-on-and-on";
+        let s = view::elide(&mut c, f, long, 120.0);
+        assert!(s.ends_with('…') && c.text_width(f, &s) <= 120.0 && s.len() > 10, "{s:?}");
+        assert!(long.starts_with(s.trim_end_matches('…')));
+        assert_eq!(view::elide(&mut c, f, "Kick.wav", 120.0), "Kick.wav");
+    }
+
+    // spec §2.2: the declicking list box (124..270) shows every mode whole, clear of its chevron, at every scale.
+    #[test]
+    fn declicking_modes_fit_their_box() {
+        let w = view::rr(124.0, 270.0, 199.0, 219.0).w;
+        for k in [1.0, 1.5, 2.0] {
+            let mut c = os_ui::Canvas::new(view::W, view::H, k).unwrap();
+            for s in params::DECLICK {
+                let f = view::list_font(&mut c, s, w);
+                assert!(c.text_width(f, s) <= view::list_room(w), "{s:?} at {k}x");
+            }
         }
     }
 }

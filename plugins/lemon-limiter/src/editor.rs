@@ -189,6 +189,14 @@ pub struct Logic {
     pub hint: String,
     copied: Option<f32>,
     pub hosted: bool,
+    /// Wheel notches not yet a whole step (fine wheels and trackpads send fractions), and the control they are for.
+    notch: Option<(Target, f32)>,
+}
+
+/// Whether a value text shows the typed text (case and spaces aside).
+fn shows(text: &str, typed: &str) -> bool {
+    let key = |s: &str| s.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect::<String>();
+    key(text) == key(typed)
 }
 
 /// Editor settings from the state image's editor bytes (Lemon Studio's use, spec §6).
@@ -216,7 +224,7 @@ impl Logic {
     pub fn new(params: Arc<LimiterParams>, shared: Arc<Shared>, ctx: Option<Arc<dyn GuiContext>>) -> Self {
         let vals = Vals::new(&*params, params.live.clone(), ctx);
         let view = view_from(&params.raw_copy());
-        let l = Logic { vals, params, shared, view, hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false };
+        let l = Logic { vals, params, shared, view, hits: Vec::new(), drag: None, hint: String::new(), copied: None, hosted: false, notch: None };
         l.apply_speed();
         l
     }
@@ -424,21 +432,25 @@ impl Logic {
         vec![Act::Repaint]
     }
 
-    /// Wheel: one step per notch (1/128 of the range for the knobs with many steps), spec §5.
+    /// Wheel: one step per notch (1/128 of the range for the knobs with many steps), spec §5; fractions of a notch add
+    /// up.
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, _m: Mods) -> Vec<Act> {
         let Some((t, _)) = self.hit(x, y) else { return vec![] };
-        let d = notches.signum();
+        let acc = self.notch.take().filter(|(n, _)| *n == t).map_or(0.0, |(_, a)| a) + notches;
+        let d = acc.trunc();
+        self.notch = Some((t.clone(), acc - d));
         match &t {
-            Target::Knob(id) | Target::Spin(id) => {
+            Target::Knob(id) | Target::Spin(id) if d != 0.0 => {
                 let (lo, hi) = Self::range(id);
                 let steps = (hi - lo) as f32;
                 let step = if steps > WHEEL_STEPS { (steps / WHEEL_STEPS).round() } else { 1.0 };
                 let plain = (self.vals.plain(id) + d * step).clamp(lo as f32, hi as f32);
                 self.vals.edit_plain(id, plain);
             }
-            Target::Sidechain => self.step(&t, d as i32),
+            Target::Sidechain if d != 0.0 => self.step(&t, d as i32),
+            // The fader has no steps: a fraction of a notch moves it part of a notch's way.
             Target::Speed => {
-                self.view.speed = (self.view.speed + d / 32.0).clamp(0.0, 1.0);
+                self.view.speed = (self.view.speed + notches / 32.0).clamp(0.0, 1.0);
                 self.save_view();
             }
             _ => return vec![],
@@ -502,9 +514,16 @@ impl Logic {
         self.vals.text(id)
     }
 
-    /// Applies a typed value.
+    /// Applies a typed value. When several stored values show the typed text, the current one stays if it is one of
+    /// them (so an unchanged box changes nothing), else the default if it is one of them; otherwise the nearest
+    /// (`params::parse_text`).
     pub fn typed(&mut self, id: &str, text: &str) {
-        if let Some(n) = self.vals.parse(id, text) {
+        let typed_at = |l: &Self, n: f32| shows(&l.vals.text_of(id, n), text);
+        if typed_at(self, self.vals.norm(id)) {
+            return;
+        }
+        let d = self.vals.default_norm(id);
+        if let Some(n) = if typed_at(self, d) { Some(d) } else { self.vals.parse(id, text) } {
             self.vals.edit(id, n);
         }
     }
@@ -1188,6 +1207,94 @@ mod tests {
         assert_eq!(params::spare(&l.params.raw_copy())[0], 300);
     }
 
+    #[test]
+    fn the_wheel_moves_a_step_per_notch_and_adds_up_fractions() {
+        let mut l = logic();
+        let (x, y) = centre(&l, &Target::Knob("att".into()));
+        // 10000 steps: 78 a notch.
+        l.wheel(x, y, 2.0, Mods::default());
+        assert_eq!(l.vals.plain("att"), 1271.0);
+        l.wheel(x, y, -0.5, Mods::default());
+        assert_eq!(l.vals.plain("att"), 1271.0);
+        l.wheel(x, y, -0.5, Mods::default());
+        assert_eq!(l.vals.plain("att"), 1193.0);
+        let (x, y) = centre(&l, &Target::Spin("rel_curve".into()));
+        l.wheel(x, y, 3.0, Mods::default());
+        assert_eq!(l.vals.plain("rel_curve"), 6.0);
+        // The speed fader has no steps: half a notch moves it half a notch's way.
+        let (x, y) = centre(&l, &Target::Speed);
+        l.wheel(x, y, 0.5, Mods::default());
+        assert_eq!(l.view.speed, 0.5 + 0.5 / 32.0);
+    }
+
+    #[test]
+    fn typed_values_keep_the_current_or_default_value_that_shows_the_text() {
+        let mut l = logic();
+        // −4..4 all read 0 %: the current one stays, else the default (0), not the first of them.
+        assert_eq!(params::value_text(params::Text::Knee, -4), "0%");
+        l.vals.edit_plain("c_knee", -3.0);
+        l.typed("c_knee", "0%");
+        assert_eq!(l.vals.plain("c_knee"), -3.0);
+        l.vals.edit_plain("c_knee", 500.0);
+        l.typed("c_knee", "0%");
+        assert_eq!(l.vals.plain("c_knee"), 0.0);
+        // The ceiling's top reads "12.0dB  4.00": its box unchanged keeps 2000; typed elsewhere, a value showing it.
+        l.vals.edit_plain("ceil", 2000.0);
+        let top = l.value_text("ceil");
+        assert_eq!(top, "12.0dB  4.00");
+        l.typed("ceil", &top);
+        assert_eq!(l.vals.plain("ceil"), 2000.0);
+        l.vals.edit_plain("ceil", 0.0);
+        l.typed("ceil", &top);
+        assert_eq!(l.value_text("ceil"), top);
+    }
+
+    #[test]
+    fn the_ceiling_marker_shows_at_the_top_and_the_page_tabs_take_their_cells() {
+        let mut l = logic();
+        l.vals.edit_plain("ceil", 2000.0);
+        let pixels = |l: &mut Logic| {
+            let mut c = os_ui::Canvas::new(view::W, view::H, 1.0).unwrap();
+            l.paint(&mut c, &os_plugkit::palette());
+            let mut px = vec![0u32; (view::W * view::H) as usize];
+            c.copy_to_xrgb(&mut px);
+            px
+        };
+        let with = pixels(&mut l);
+        l.view.layers[3] = false;
+        let without = pixels(&mut l);
+        let row = |px: &[u32], y: u32| px[(y * view::W) as usize + 300];
+        assert!((2..4).all(|y| row(&with, y) != row(&without, y)));
+        // LIMIT and COMP split the drawn group (x 118..196, y 274..292) at their cells.
+        let r = |l: &Logic, i: u8| l.hits.iter().find(|h| h.t == Target::Page(i)).unwrap().r;
+        assert_eq!(r(&l, 0), os_ui::Rect::span(118.0, 156.0, 274.0, 292.0));
+        assert_eq!(r(&l, 1), os_ui::Rect::span(157.0, 196.0, 274.0, 292.0));
+    }
+
+    /// The display's scale reads the measured hints (spec §3, FL window y − 28), and its bottom row is not −∞.
+    #[test]
+    fn the_display_scale_reads_the_measured_levels() {
+        let mut l = logic();
+        let db = |l: &mut Logic, y: f32| {
+            l.moved(300.0, y, Mods::default());
+            l.hint.split("dB").next().and_then(|s| s.parse::<f32>().ok()).unwrap()
+        };
+        // FL's hints, word for word, the bottom row's included (not −∞).
+        for (y, want) in [
+            (4.0, "11.4dB 3.73"),
+            (52.0, "4.5dB 1.69"),
+            (79.0, "0.1dB 1.01"),
+            (102.0, "-4.4dB 0.60"),
+            (122.0, "-9.5dB 0.34"),
+            (142.0, "-17.3dB 0.14"),
+            (158.0, "-39.7dB 0.01"),
+        ] {
+            l.moved(300.0, y, Mods::default());
+            assert_eq!(l.hint, want, "y {y}");
+        }
+        assert!(db(&mut l, 1.0) < 12.0);
+    }
+
     /// `LIMITER_PNG=<dir> cargo test -p lemon-limiter -- --ignored`: both pages with some display history, as PNGs.
     #[test]
     #[ignore]
@@ -1234,9 +1341,8 @@ mod tests {
         l.pick(&MenuReq::Display, Cmd::Safety, 0.0, 0.0);
         assert!(!l.safety());
         assert_eq!(params::byte(&l.params.raw_copy(), params::FLAGS_BYTE), 1);
-        // The display reads 0 dB at half height.
-        let mid = view::DISPLAY.bottom() - 1.0 - (view::DISPLAY.h - 1.0) / 2.0;
-        l.moved(300.0, mid, Mods::default());
+        // The display reads 0 dB at half height (of the scale, spec §3).
+        l.moved(300.0, 159.5 - 80.0, Mods::default());
         assert_eq!(l.hint, "0.0dB 1.00");
         for (t, want) in [
             (Target::Knob("gain".into()), "Gain: 0.0dB  1.00"),

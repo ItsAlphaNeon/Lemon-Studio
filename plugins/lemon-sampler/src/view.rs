@@ -302,6 +302,13 @@ impl Ui<'_> {
     fn on(&self, id: &str) -> bool {
         self.m.plain(id) > 0.5
     }
+    /// Key `k`'s hit, cut to the keyboard's `area`: a key scrolled partly out of view is only hit where it is drawn.
+    fn key_hit(&mut self, r: Rect, area: Rect, k: i32) {
+        let r = r.intersect(&area);
+        if !r.is_empty() {
+            self.hit(r, Target::Key(k));
+        }
+    }
     /// Hover / pressed look of a control occupying `r`; greyed-out controls (`works`) are disabled and never light up.
     fn state(&self, r: Rect, t: &Target) -> State {
         if !works(t) {
@@ -400,12 +407,48 @@ fn list(ui: &mut Ui, id: &str, x0: f32, x1: f32, y0: f32, y1: f32) {
     let target = Target::List(id.into());
     let st = ui.state(r, &target);
     let s = ui.m.text(id);
-    inst::list_box(ui.c, ui.t, r, &s, st);
+    let f = list_font(ui.c, &s, r.w);
+    if f == LABEL {
+        inst::list_box(ui.c, ui.t, r, &s, st);
+    } else {
+        // The declicking modes "… (tail continues)" are wider than the kit gives a list box's text (the box less 24
+        // px): they are drawn whole, condensed, in the box of the spec (§2.2), with the kit's inset and colours.
+        inst::list_box(ui.c, ui.t, r, "", st);
+        let lh = ui.c.line_height(f);
+        let col = if st.disabled { plug::FAINT } else if st.hover { Color::rgb(0xffffff) } else { brand::TEXT };
+        ui.c.text(f, r.x + 7.0, (r.cy() - lh / 2.0).round(), col, &s);
+    }
     ui.hit(r, target);
+}
+
+/// Width a list box of width `w` leaves its text: the text ends 7 px clear of the chevron.
+pub fn list_room(w: f32) -> f32 {
+    w - 28.0
+}
+
+/// The face of a list box's text `s`: the label face, condensed when `s` would reach the chevron.
+pub fn list_font(c: &mut Canvas, s: &str, w: f32) -> Font {
+    c.fit_font(LABEL, s, list_room(w))
 }
 
 fn label(ui: &mut Ui, x: f32, cy: f32, s: &str) -> f32 {
     inst::label(ui.c, ui.t, x, y(cy), s, false)
+}
+
+/// `s` as it fits in `max_w`: whole, or cut at its end with an ellipsis ("Kick_Hard_Ro…").
+pub fn elide(c: &mut Canvas, f: Font, s: &str, max_w: f32) -> String {
+    if c.text_width(f, s) <= max_w {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let cut = |k: usize| format!("{}…", chars[..k].iter().collect::<String>().trim_end());
+    // The longest start that fits with the ellipsis (widths grow with the length).
+    let (mut lo, mut hi) = (0, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if c.text_width(f, &cut(mid)) <= max_w { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
 }
 
 /// A Tabler icon centred on (`cx`, `cy`), `size` px square.
@@ -425,11 +468,15 @@ pub fn page_icon(c: &mut Canvas, page: u8, cx: f32, cy: f32, col: Color) {
 // Tab strip (only when no host draws it)
 
 fn tab_strip(ui: &mut Ui) {
-    let hover = (0..2u8).find(|&i| ui.state(rr(5.0 + 43.0 * f32::from(i), 49.0 + 43.0 * f32::from(i), 26.0, 71.0), &Target::Tab(i)).hover);
+    // One 43 px cell per tab, edge to edge (the cells must not overlap).
+    let cell = |i: u8| {
+        let x0 = 5.0 + 43.0 * f32::from(i);
+        rr(x0, x0 + 42.0, 26.0, 71.0)
+    };
+    let hover = (0..2u8).find(|&i| ui.state(cell(i), &Target::Tab(i)).hover);
     lemon::page_strip(ui.c, rr(4.0, 563.0, 25.0, 71.0), 2, ui.st.tab, hover, &|i| 5.0 + 43.0 * f32::from(i), &mut |c, i, x, yy, col| page_icon(c, i, x, yy, col));
     for i in 0..2u8 {
-        let x0 = 5.0 + 43.0 * f32::from(i);
-        ui.hit(rr(x0, x0 + 44.0, 26.0, 71.0), Target::Tab(i));
+        ui.hit(cell(i), Target::Tab(i));
     }
 }
 
@@ -448,9 +495,12 @@ fn sample_tab(ui: &mut Ui, sv: &SampleView) {
     };
     let lh = ui.c.line_height(LABEL);
     let ty = (y(96.0) - lh / 2.0).round();
-    let w = ui.c.text_width(LABEL, stem).min(150.0);
+    // A name longer than its 150 px ends in an ellipsis, the extension kept ("Kick_Hard_Ro….wav").
+    let ext_w = ui.c.text_width(LABEL, ext);
+    let (stem, ext) = if ext_w <= 50.0 { (elide(ui.c, LABEL, stem, 150.0 - ext_w), ext) } else { (elide(ui.c, LABEL, file, 150.0), "") };
+    let w = ui.c.text_width(LABEL, &stem).min(150.0);
     let (name_col, ext_col) = (brand::TEXT, Color::rgb(0x8c8c8c));
-    ui.c.text_clip(LABEL, 46.0, ty, 150.0, name_col, stem);
+    ui.c.text_clip(LABEL, 46.0, ty, 150.0, name_col, &stem);
     ui.c.text_clip(LABEL, 46.0 + w, ty, 150.0 - w, ext_col, ext);
     ui.hit(rr(44.0, 200.0, 85.0, 107.0), Target::FileName);
     // One rounded group with thin separators.
@@ -1297,7 +1347,7 @@ fn keyboard(ui: &mut Ui, root: i32, lo: i32, hi: i32, zone: bool) {
             // The root's column runs through the ruler.
             ui.c.fill_rect(Rect::new(r.x, lt, r.w, kt - lt), if out(k) { dim(accent(t, 0x77a9e6)) } else { accent(t, 0x77a9e6) });
         }
-        ui.hit(Rect::new(r.x, kt, r.w, kb - kt), Target::Key(k));
+        ui.key_hit(Rect::new(r.x, kt, r.w, kb - kt), area, k);
     }
     // Black keys over them.
     for k in 0..KEY_COUNT {
@@ -1324,7 +1374,7 @@ fn keyboard(ui: &mut Ui, root: i32, lo: i32, hi: i32, zone: bool) {
         ui.c.fill_rect(Rect::new(x + 1.0, kt + 1.0, 1.0, bb - kt - 4.0), d(t.s(0x404142)));
         ui.c.fill_rect(Rect::new(x + 1.0, kt + 36.0, w - 3.0, 1.0), d(t.s(0x575859)));
         ui.c.fill_rect(Rect::new(x, bb, w + 1.0, 1.0), d(t.tx(0xa2a5ab)));
-        ui.hit(r, Target::Key(k));
+        ui.key_hit(r, area, k);
     }
     // Ruler: dim outside the zone, octave labels, zone labels, root label.
     if zone {
@@ -1422,7 +1472,7 @@ fn hand_keyboard(ui: &mut Ui, root: i32) {
         ui.c.fill_rect_gradient(r, a, b, 0.0);
         let col = if k == root { accent(t, 0x235fc3) } else { t.s(0x6a6e74) };
         ui.c.text_center(f, Rect::new(r.x, kb - 20.0 - lh / 2.0 + 6.0, r.w, lh), col, &note_name(k));
-        ui.hit(r, Target::Key(k));
+        ui.key_hit(r, area, k);
     }
     for k in 0..KEY_COUNT {
         if !is_black(k) {
@@ -1444,7 +1494,7 @@ fn hand_keyboard(ui: &mut Ui, root: i32) {
         ui.c.fill_rect(r, edge);
         ui.c.fill_rect_gradient(Rect::new(r.x + 2.0, r.y, r.w - 4.0, r.h - 4.0), face.mix(Color::rgb(0x505152), 0.15), face, 0.0);
         ui.c.fill_rect(Rect::new(r.x + 2.0, r.bottom() - 4.0, r.w - 4.0, 1.0), t.s(0x3c3d3e));
-        ui.hit(r, Target::Key(k));
+        ui.key_hit(r, area, k);
     }
     ui.c.pop_clip();
 }
@@ -1537,6 +1587,12 @@ pub fn param_hint(m: &dyn Model, id: &str) -> String {
     m.text(id)
 }
 
+/// `v` with two decimals; a value that rounds to zero reads `0.00`, never `-0.00`.
+fn fixed2(v: f32) -> String {
+    let s = format!("{v:.2}");
+    if s == "-0.00" { "0.00".into() } else { s }
+}
+
 /// `0:421` = seconds : milliseconds.
 pub fn time_ms(frames: f64, rate: u32) -> String {
     let ms = (frames / f64::from(rate.max(1)) * 1000.0).round().max(0.0) as u64;
@@ -1586,7 +1642,7 @@ pub fn hint(t: &Target, m: &dyn Model, st: &ViewState, sv: &SampleView, x: f32, 
                 };
                 let lin = -(yy - cy) / amp;
                 let db = 20.0 * lin.abs().max(1e-6).log10();
-                format!("{}\t{:.2}dB {:.2}", time_ms(f.max(0.0), s.rate), db, lin)
+                format!("{}\t{}dB {}", time_ms(f.max(0.0), s.rate), fixed2(db), fixed2(lin))
             }
             None => String::new(),
         },

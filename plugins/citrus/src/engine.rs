@@ -273,6 +273,16 @@ impl Citrus {
         self.notes.clear();
     }
 
+    /// The host's reset (a Stop, a new start): no note, and the effects section built anew, so its delay lines and
+    /// reverb hold nothing of what played before. Without that, Citrus not being processed while stopped kept the tail
+    /// as it was and played it out with the next start.
+    pub fn reset(&mut self) {
+        self.panic();
+        if let Some(p) = &self.patch {
+            self.section = Some(Section::new(&p.st, self.host_rate, self.v, self.tempo as f32));
+        }
+    }
+
     /// The host's levels for a playing note (read at the next render call).
     pub fn set_levels(&mut self, id: u64, l: Levels) {
         for n in self.notes.iter_mut().filter(|n| n.id == id) {
@@ -452,6 +462,22 @@ mod tests {
         let (mut l, mut r) = (vec![0.0f32; 480], vec![0.0f32; 480]);
         c.render(&mut l, &mut r);
         [&l, &r].map(|x| x.iter().fold(0.0f32, |m, v| m.max(v.abs())))
+    }
+
+    /// A reset (the host's, as at Stop) leaves nothing to sound: no note, and nothing in the effects section either, so
+    /// a reverb's tail from before it does not come out with the next note or the next render.
+    #[test]
+    fn a_reset_empties_the_effects_too() {
+        let mut c = Citrus::new(48000);
+        let mut st = default_patch();
+        st.reverb.on = true;
+        c.set_state(st);
+        note(&mut c);
+        let playing = (0..100).map(|_| peak(&mut c)).fold(0.0f32, f32::max);
+        assert!(playing > 0.1, "the note sounds: {playing}");
+        c.reset();
+        let after = (0..20).map(|_| peak(&mut c)).fold(0.0f32, f32::max);
+        assert!(after < 1e-20, "nothing sounds after a reset: {after}");
     }
 
     /// The channel's volume and pan are part of the voice's final levels, a note's own pan too; sounding voices follow
