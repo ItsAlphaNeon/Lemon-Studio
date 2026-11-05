@@ -848,6 +848,7 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         };
         let col = if c.muted || !pl::track_on(s, c.track) { col.mix(t.grid, 0.6) } else { col };
         ui.c.fill_rrect(r, 1.5, col);
+        flash(ui, s, g, c, r, 1.5);
         return;
     }
     let kind = pl::source_kind(s, c.source);
@@ -963,6 +964,18 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         }
     }
     ui.c.pop_clip();
+    flash(ui, s, g, c, r, if lemon { lk::r_btn(t).min(r.w / 2.0).min(r.h / 2.0) } else { 0.0 });
+}
+
+/// A clip sharing the source of the clip just double-clicked flashes: a white tint up to 60 % and back over 400 ms,
+/// held still at Animations Off (spec: ui/animations.md §4.7).
+fn flash(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, r: Rect, radius: f32) {
+    let a = s.motion.borrow_mut().flash_of(pl::source_key(c.source), r);
+    if a > 0.0 {
+        ui.c.push_clip(r.intersect(&g.grid));
+        ui.c.fill_rrect(r, radius, ui.t.tx(0xffffff).with_alpha((a * 255.0).round() as u8));
+        ui.c.pop_clip();
+    }
 }
 
 /// A clip's body as drawn (`r`, its edges possibly pulled in by `PGeom::clip_draw_rect`) and its true left edge and

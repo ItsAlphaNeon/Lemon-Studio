@@ -1257,6 +1257,14 @@ pub fn source_color(s: &State, src: ClipSource) -> Option<Rgb> {
     }
 }
 
+/// What clips sharing source `src` are (`crate::motion::key`): they flash together (spec: ui/animations.md §4.7).
+pub fn source_key(src: ClipSource) -> u64 {
+    crate::motion::key(match src {
+        ClipSource::Pattern(n) => (0u8, n),
+        ClipSource::Channel(ch) => (1u8, ch),
+    })
+}
+
 /// The colour an audio or automation clip's title strip and waveform take: its channel's colour as the file stores
 /// it (custom or not), else a pastel picked from the channel's name (spec: ui/playlist.md §2, "Channel-colour rule").
 /// `None` for pattern clips (neutral titles).
@@ -3297,6 +3305,8 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
                 s.playlist.last_clip = (!double).then_some((ci, now));
                 let opens = audio.map(|_| crate::shortcuts::clip_double_click(alt));
                 if double && opens != Some(None) {
+                    // The clips sharing its source flash (spec: ui/animations.md §4.7).
+                    s.motion.get_mut().flash(source_key(c.source));
                     if let Some(row) = audio {
                         if opens == Some(Some(crate::shortcuts::ClipOpen::Channel)) {
                             s.rack.select_only(row);

@@ -18833,6 +18833,62 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// Double-clicking a clip flashes the clips sharing its source: up to a 60 % white tint and back over 400 ms,
+    /// held still at Animations Off; a clip of another source stays as it was (spec: ui/animations.md §4.7).
+    #[test]
+    fn double_clicked_clips_flash_their_twins() {
+        use os_model::{Clip, ClipSource};
+        let (Ok(mut c), Ok(mut whole)) = (Canvas::new(1920, 1080, 1.0), Canvas::new(1920, 1080, 1.0)) else { return };
+        let (mut app, _, g, bar) = ruler_app(&mut c);
+        let clips = &mut crate::playlist::arr_mut(&mut app.state).clips;
+        clips.push(Clip::new(0, bar, 3, ClipSource::Pattern(1)));
+        clips.push(Clip::new(bar, bar, 4, ClipSource::Pattern(1)));
+        clips.push(Clip::new(bar, bar, 5, ClipSource::Pattern(2)));
+        frame(&mut app, &mut c, None);
+        let spot = |track: u16| (g.x_of(bar as f32 * 1.5) as u32, (g.y_of(track) + 30.0) as u32);
+        let (twin, other) = (spot(4), spot(5));
+        let lum = |c: &Canvas, (x, y): (u32, u32)| c.pixmap.pixel(x, y).map_or(0, |p| u32::from(p.red()) + u32::from(p.green()) + u32::from(p.blue()));
+        let (twin0, other0) = (lum(&c, twin), lum(&c, other));
+        crate::anim::set_clock(true);
+        let mut flash = |app: &mut App, c: &mut Canvas| {
+            for _ in 0..2 {
+                app.mouse_move(g.x_of(10.0) + 10.0, g.y_of(3) + 30.0);
+                app.mouse_down();
+                app.mouse_up();
+            }
+            // The piano roll it opens is put away: the playlist shows.
+            app.state.z = vec![Win::Playlist];
+            frame(app, c, None);
+            let mut seen = vec![(lum(c, twin), lum(c, other))];
+            while app.animating() {
+                crate::anim::advance(16);
+                app.tick();
+                let d = app.take_damage();
+                frame_damage(app, c, d);
+                frame(app, &mut whole, None);
+                assert_same(c, &whole, "a frame of the flash");
+                seen.push((lum(c, twin), lum(c, other)));
+                assert!(seen.len() < 60, "it ends");
+            }
+            seen
+        };
+        let seen = flash(&mut app, &mut c);
+        let twins: Vec<u32> = seen.iter().map(|s| s.0).collect();
+        assert!((24..=28).contains(&seen.len()), "about 400 ms: {twins:?}");
+        let peak = twins.iter().position(|&v| v == *twins.iter().max().unwrap()).unwrap();
+        assert!(twins[peak] > twin0 + 150 && (5..=8).contains(&peak), "it lights quickly: {twins:?}");
+        assert!(twins[peak..].windows(2).all(|w| w[1] <= w[0]) && *twins.last().unwrap() == twin0, "and fades back: {twins:?}");
+        assert!(seen.iter().all(|s| s.1 == other0), "another pattern's clip does not flash");
+        // At Off it is a still tint for 400 ms.
+        crate::anim::set_level(crate::anim::Level::Off);
+        let seen = flash(&mut app, &mut c);
+        let twins: Vec<u32> = seen.iter().map(|s| s.0).collect();
+        assert!((24..=28).contains(&seen.len()) && twins[0] > twin0 + 150, "{twins:?}");
+        assert!(twins[..twins.len() - 1].iter().all(|&v| v == twins[0]) && *twins.last().unwrap() == twin0, "{twins:?}");
+        crate::anim::set_level(crate::anim::Level::Playful);
+        crate::anim::set_clock(false);
+    }
+
     /// A pattern picked in the pattern selector becomes the playlist's clip source even after a click on a clip made
     /// another pattern the source, so a new pattern is what Draw places (issue #94).
     #[test]
