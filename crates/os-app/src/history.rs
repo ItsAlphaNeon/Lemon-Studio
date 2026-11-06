@@ -1116,6 +1116,91 @@ mod tests {
         prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
     }
 
+    /// Press and release on fader `t` with Alt held, moving the mouse in between. Returns the hint bar's text right after
+    /// the press.
+    fn alt_click_fader(app: &mut App, t: u16) -> String {
+        app.alt = true;
+        app.mouse_move(100.0, 300.0);
+        app.act(Action::Fader(t));
+        let hint = app.hint.to_string();
+        app.mouse_move(100.0, 360.0);
+        app.mouse_up();
+        app.alt = false;
+        hint
+    }
+
+    /// Alt+click puts a fader back at unity, from below or above it, as a step of its own: Ctrl+Z brings back the value
+    /// before the click, a second one undoes the drag before that, and Ctrl+Alt+Z redoes them. No drag follows the press.
+    /// A fader already at unity makes no step, and with Undo knob tweaks off it resets without one (OS). Spec:
+    /// ui/mixer.md §4.
+    #[test]
+    fn mixer_fader_alt_click_is_one_step() {
+        const UNITY: Option<f64> = Some(0.8);
+        let mut app = App::new(None);
+        let vol = |app: &App, t| crate::mixer::track(&app.state, t).and_then(|m| m.volume);
+        let v0 = vol(&app, 1);
+        assert_eq!(v0, UNITY, "a new track is at unity");
+        fade(&mut app, 1, 40.0);
+        let v1 = vol(&app, 1);
+        assert_ne!(v1, UNITY, "the fader moved");
+        assert_eq!(alt_click_fader(&mut app, 1), "Volume: 100%  0.0dB  1.00");
+        assert_eq!(vol(&app, 1), UNITY, "at unity, and the mouse moving after the press did not move it");
+        assert!(app.state.mixer.sel.is_empty());
+        assert_eq!(app.state.selected_mixer, 1, "the strip is selected");
+        assert_eq!(names(&app.state), [LAST_RESET, MIXER_VOLUME, MIXER_VOLUME], "a step of its own");
+        assert_eq!(edit_menu(&app)[0], entry("Undo mixer track volume", "Ctrl+Z", true));
+        ctrl_z(&mut app);
+        assert_eq!(vol(&app, 1), v1, "the value before the click");
+        ctrl_z(&mut app);
+        assert_eq!(vol(&app, 1), v0, "the drag undone");
+        ctrl_alt_z(&mut app);
+        assert_eq!(vol(&app, 1), v1);
+        ctrl_alt_z(&mut app);
+        assert_eq!(vol(&app, 1), UNITY, "redone");
+        let steps = app.state.history.len();
+        alt_click_fader(&mut app, 1);
+        assert_eq!(app.state.history.len(), steps, "nothing changed");
+        fade(&mut app, 2, -30.0);
+        assert!(vol(&app, 2) > UNITY, "above unity");
+        alt_click_fader(&mut app, 2);
+        assert_eq!(vol(&app, 2), UNITY, "from above");
+        fade(&mut app, 0, 30.0);
+        assert_ne!(vol(&app, 0), UNITY, "the Master's fader moved");
+        alt_click_fader(&mut app, 0);
+        assert_eq!(vol(&app, 0), UNITY, "the Master's too");
+        fade(&mut app, 3, 40.0);
+        let steps = app.state.history.len();
+        prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, false);
+        alt_click_fader(&mut app, 3);
+        assert_eq!(vol(&app, 3), UNITY);
+        assert_eq!(app.state.history.len(), steps, "Undo knob tweaks off");
+        prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
+    }
+
+    /// With several tracks selected, Alt+click on the fader of a selected one resets nothing: the selection stays and
+    /// that track becomes current. On any other fader it resets that one, which becomes the only one selected. No undo
+    /// step where nothing moved (OS: the original adds one). Spec: ui/mixer.md §4.
+    #[test]
+    fn mixer_fader_alt_click_with_several_selected() {
+        let mut app = App::new(None);
+        for (t, v) in [(1, 0.2), (2, 0.3), (3, 0.4)] {
+            crate::mixer::track_mut(&mut app.state, t).unwrap().volume = Some(v);
+        }
+        let vols = |app: &App| [1, 2, 3].map(|t| crate::mixer::track(&app.state, t).and_then(|m| m.volume).unwrap());
+        app.state.selected_mixer = 1;
+        app.state.mixer.sel = vec![1, 2];
+        let steps = app.state.history.len();
+        alt_click_fader(&mut app, 2);
+        assert_eq!(vols(&app), [0.2, 0.3, 0.4], "nothing resets");
+        assert_eq!(app.state.history.len(), steps, "no step");
+        assert_eq!(app.state.selected_mixer, 2, "the pressed track is current");
+        assert_eq!(crate::mixer::selected(&app.state), [2, 1], "the selection stays");
+        alt_click_fader(&mut app, 3);
+        assert_eq!(vols(&app), [0.2, 0.3, 0.8], "only the one outside the selection");
+        assert_eq!(app.state.history.len(), steps + 1);
+        assert_eq!(crate::mixer::selected(&app.state), [3], "it alone is selected now");
+    }
+
     /// A generator added to the rack is one step, "Add channel" (`control::edit_app`): undone, the channel goes and its
     /// instance is kept; redone, the channel comes back with it (`control::host`).
     #[test]

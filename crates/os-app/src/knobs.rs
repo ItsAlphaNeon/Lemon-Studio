@@ -204,7 +204,7 @@ impl KnobId {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Control {
     Knob(KnobId),
-    /// A mixer track's volume fader (spec: ui/mixer.md §4).
+    /// A mixer track's volume fader, which Alt+click resets as well (spec: ui/mixer.md §4).
     Fader(u16),
     /// Channel row `.0`'s pitch knob in its plugin window (spec: ui/plugin-window.md).
     ChanPitch(usize),
@@ -477,7 +477,8 @@ impl State {
 }
 
 impl crate::app::App {
-    /// Control `c` back to its default (a middle click, or "Reset" in its menu); the hint bar shows the new value.
+    /// Control `c` back to its default (a middle click, "Reset" in its menu, Alt+click on a fader); the hint bar shows the
+    /// new value.
     pub(crate) fn reset_control(&mut self, c: Control) {
         use std::borrow::Cow;
         let s = &mut self.state;
