@@ -33,8 +33,8 @@ mod browser_index;
 mod burn_midi;
 mod cable;
 mod capture;
-#[cfg(target_os = "linux")]
 mod panic_log;
+#[cfg(target_os = "linux")]
 mod rt;
 mod one_click;
 mod track_rec;
