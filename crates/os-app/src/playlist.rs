@@ -1613,10 +1613,23 @@ pub fn place(s: &mut State, track: u16, tick: u32) -> usize {
     clips(s).len() - 1
 }
 
-/// Delete clips by index (selection indices are remapped).
+/// Delete clips by index (selection indices are remapped). They ripple away (spec: ui/animations.md §4.10).
 pub fn delete(s: &mut State, mut idx: Vec<usize>) {
     idx.sort_unstable();
     idx.dedup();
+    let arrangement = s.project.current_arrangement;
+    for &i in &idx {
+        if let Some(c) = clips(s).get(i).copied() {
+            let selected = s.playlist.sel.contains(&i);
+            s.motion.borrow_mut().ripple(c, selected, arrangement);
+        }
+    }
+    remove(s, idx);
+}
+
+/// Delete clips by index with no ripple, for edits that move what is around them too. `idx` is sorted, without
+/// duplicates.
+fn remove(s: &mut State, idx: Vec<usize>) {
     let a = arr_mut(s);
     for &i in idx.iter().rev() {
         if i < a.clips.len() {
@@ -1914,6 +1927,31 @@ pub fn resize_left(s: &mut State, i: usize, orig: &Clip, dt: i64) {
     s.piano.dirty = true;
 }
 
+/// What clip `i` of `count` is known by as it glides (`Motion::clip_glide`). Clips deleted or added change the count,
+/// so a glide doesn't pass to the clip that takes the index.
+pub fn glide_key(i: usize, count: usize) -> u64 {
+    crate::motion::key(("clip glide", i, count))
+}
+
+/// `c` as drawn with its edges `left` and `right` px from where they are, for a resize on its way
+/// (spec: ui/animations.md §4.10). The window goes with the edges, as in [`resize_left`] and [`resize_right`], so that
+/// the content stays put.
+pub fn with_edges(s: &State, g: &PGeom, c: &Clip, left: f32, right: f32) -> Clip {
+    let dl = f64::from(left / g.ppt).round() as i64;
+    let dr = f64::from(right / g.ppt).round() as i64;
+    let end = (i64::from(c.end()) + dr).max(1);
+    let pos = (i64::from(c.position) + dl).clamp(0, end - 1);
+    let mut drawn = *c;
+    drawn.position = pos as u32;
+    drawn.length = (end - pos) as u32;
+    if c.window.is_some() || dl != 0 {
+        let (w0, w1) = window(s, c);
+        let from = (w0 + to_src(s, c.source, (pos - i64::from(c.position)) as f64)).max(0.0);
+        drawn.window = Some((from, w1 + to_src(s, c.source, dr as f64)));
+    }
+    drawn
+}
+
 /// Ctrl+B: duplicate the selection (or all clips) right after itself, or by the time selection's length.
 pub fn duplicate(s: &mut State) {
     let idx = targets(s);
@@ -2004,7 +2042,7 @@ pub fn delete_space(s: &mut State) -> bool {
         }
     }
     let inside: Vec<usize> = clips(s).iter().enumerate().filter(|(_, c)| c.position >= r0 && c.end() <= r1).map(|(i, _)| i).collect();
-    delete(s, inside);
+    remove(s, inside);
     let arr = arr_mut(s);
     for c in &mut arr.clips {
         if c.position >= r1 {
@@ -2086,7 +2124,7 @@ pub fn insert_track(s: &mut State, t: u16) {
 /// Delete track `t` with its clips (the rest move up).
 pub fn delete_track(s: &mut State, t: u16) {
     let gone: Vec<usize> = clips(s).iter().enumerate().filter(|(_, c)| c.track == t).map(|(i, _)| i).collect();
-    delete(s, gone);
+    remove(s, gone);
     let arr = arr_mut(s);
     for c in &mut arr.clips {
         if c.track > t {
@@ -3607,6 +3645,13 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
     let shift = app.shift;
     let s = &mut app.state;
     let g = PGeom::new(s, grid);
+    // Where what the magnet may move was: it is drawn on its way from there (spec: ui/animations.md §4.10).
+    let glide_from: Vec<(usize, Rect)> = match &d {
+        PlDrag::Move { .. } | PlDrag::ResizeL { .. } | PlDrag::ResizeR { .. } => {
+            moved.iter().flatten().filter_map(|&i| clips(s).get(i).map(|c| (i, g.clip_rect(c)))).collect()
+        }
+        _ => Vec::new(),
+    };
     match d {
         PlDrag::Move { x0, y0, orig, .. } => {
             let skip: Vec<usize> = orig.iter().map(|&(i, _)| i).collect();
@@ -3812,9 +3857,11 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
             }
         }
     }
+    let glided = clips_jumped(&app.state, &g, grid, alt, glide_from);
     match (moved, before) {
         (Some(idx), Some(mut dirty)) => {
             dirty.extend(rects(&app.state, &idx));
+            dirty.extend(glided);
             if !handle {
                 dirty.push(crate::views::playlist::overview_rect(&app.state, grid).outset(1.0));
             }
@@ -3828,6 +3875,32 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
         _ if inside || stretching => app.damage_win(crate::app::Win::Playlist),
         _ => app.invalidate(),
     }
+}
+
+/// A drag moved the clips of `from` (each with where it was): those the magnet moved are drawn on their way. With no
+/// magnet (Alt, or a step too small to see) a clip stays with the mouse sideways; a track is always a step. Returns
+/// what to paint for their drawings.
+fn clips_jumped(s: &State, g: &PGeom, grid: Rect, alt: bool, from: Vec<(usize, Rect)>) -> Vec<Rect> {
+    /// A magnet's step this small (px) is no step.
+    const NO_STEP: f32 = 3.0;
+    let stepped = !alt && grid_snap(s).ticks(g.ppq, g.bar_w) as f32 * g.ppt >= NO_STEP;
+    let count = clips(s).len();
+    let mut dirty = Vec::new();
+    for (i, r0) in from {
+        let Some(c) = clips(s).get(i) else { continue };
+        let r1 = g.clip_rect(c);
+        let (left, right, down) = (r0.x - r1.x, r0.right() - r1.right(), r0.y - r1.y);
+        let (left, right) = if stepped { (left, right) } else { (0.0, 0.0) };
+        if left == 0.0 && right == 0.0 && down == 0.0 {
+            continue;
+        }
+        let far = s.motion.borrow_mut().clip_jumped(glide_key(i, count), left, right, down);
+        if let Some((l, r, d)) = far {
+            let drawn = Rect::span(r1.x + l, r1.right() + r, r1.y + d, r1.bottom() + d);
+            dirty.push(drawn.union(&r1).outset(6.0).intersect(&grid));
+        }
+    }
+    dirty
 }
 
 /// Button released.

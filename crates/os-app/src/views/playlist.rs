@@ -232,11 +232,17 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     // Clips reaching the painted part of the grid (a scrolled-in strip is a small part, see `App::playlist_scrolled`);
     // a clip draws inside its own rect.
+    let gliding = s.motion.borrow().clips_gliding();
+    let count = pl::clips(s).len();
     for (i, c) in pl::clips(s).iter().enumerate() {
-        if ui.c.visible(g.clip_rect(c).outset(2.0)) {
+        let glide = if gliding { s.motion.borrow_mut().clip_glide(pl::glide_key(i, count)) } else { None };
+        if let Some(at) = glide {
+            clip_gliding(ui, s, &g, i, c, at);
+        } else if ui.c.visible(g.clip_rect(c).outset(2.0)) {
             clip_paint(ui, s, &g, i, c);
         }
     }
+    ripples(ui, s, &g);
     // Performance mode: the part of the zone the MIDI channel's notes reach (spec: ui/performance-mode.md §3).
     if let Some((tr, n, a, b)) = crate::perform::grid_area(s) {
         let (y0, y1) = (g.y_of(tr), g.y_of(tr + n));
@@ -828,6 +834,66 @@ fn grid_lines(ui: &mut Ui, g: &PGeom, bar_w: f32, sb: i32) {
 fn offset(c: Color, d: i16) -> Color {
     let f = |v: u8| (i16::from(v) + d).clamp(0, 255) as u8;
     Color { r: f(c.r), g: f(c.g), b: f(c.b), a: c.a }
+}
+
+/// A clip on its way to where the magnet put it: its left edge, right edge and top are `at` px from their places
+/// (spec: ui/animations.md §4.10). Only the drawing moves: the clip is already there.
+fn clip_gliding(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, (left, right, down): (f32, f32, f32)) {
+    let r = g.clip_rect(c);
+    let drawn = Rect::span(r.x + left, r.right() + right, r.y + down, r.bottom() + down);
+    s.motion.borrow_mut().live(r.union(&drawn).outset(2.0).intersect(&g.grid));
+    if !ui.c.visible(drawn.outset(2.0)) {
+        return;
+    }
+    let mut at = g.clone();
+    at.scroll_y -= down;
+    if (left - right).abs() < 0.01 {
+        at.scroll_x -= left;
+        clip_paint(ui, s, &at, i, c);
+    } else {
+        clip_paint(ui, s, &at, i, &pl::with_edges(s, g, c, left, right));
+    }
+}
+
+/// Deleted clips rippling away (spec: ui/animations.md §4.10): a rounded shape in the clip's title colour, lifted
+/// toward white, whose fill fades quickly while its outline grows a little and fades slowly.
+fn ripples(ui: &mut Ui, s: &State, g: &PGeom) {
+    let list = s.motion.borrow_mut().ripples();
+    if list.is_empty() {
+        return;
+    }
+    let t = ui.t;
+    let corner = if super::lemon(ui) { lk::r_btn(t) } else { 3.0 };
+    for d in list {
+        if d.arrangement != s.project.current_arrangement {
+            continue;
+        }
+        let c = &d.clip;
+        let base = g.clip_draw_rect(c).0;
+        let reach = base.outset(crate::motion::RIPPLE_REACH).intersect(&g.grid);
+        s.motion.borrow_mut().live(reach);
+        if !ui.c.visible(reach) {
+            continue;
+        }
+        let top = if d.selected {
+            cc(t, SEL_TITLE)
+        } else if c.muted {
+            cc(t, MUTED_TITLE)
+        } else {
+            match (pl::source_kind(s, c.source), pl::clip_tint(s, c.source).map(rgb)) {
+                (PickKind::Audio | PickKind::Automation, Some(tint)) => offset(tint, -17),
+                _ => cc(t, TITLE_TOP),
+            }
+        };
+        let top = if pl::track_on(s, c.track) { top } else { top.mix(t.grid, 0.5) };
+        let col = top.mix(t.tx(0xffffff), 0.45);
+        let r = base.outset(d.grow);
+        let radius = (corner + d.grow).min(r.w / 2.0).min(r.h / 2.0);
+        if d.fill > 0.0 {
+            ui.c.fill_rrect(r, radius, col.with_alpha((d.fill * 255.0).round() as u8));
+        }
+        ui.c.stroke_rrect(r, radius, 2.0 - d.grow / 4.0, col.with_alpha((d.line * 255.0).round() as u8));
+    }
 }
 
 /// One clip (§2): a near-black outline with rounded top corners, the title strip (pattern clips neutral, audio and

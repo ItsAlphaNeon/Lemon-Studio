@@ -19852,6 +19852,439 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
     }
 
+    /// A playlist with nothing on it (`gone`) to put clips on, and repaint frame by frame, every partial repaint checked
+    /// against a whole one.
+    struct ClipBench {
+        app: App,
+        c: Canvas,
+        whole: Canvas,
+        gone: Canvas,
+        g: crate::playlist::PGeom,
+        bar: u32,
+    }
+
+    impl ClipBench {
+        fn new() -> Option<Self> {
+            let size = || Canvas::new(1920, 1080, 1.0);
+            let (Ok(mut c), Ok(whole), Ok(mut gone)) = (size(), size(), size()) else { return None };
+            let (mut app, _, g, bar) = ruler_app(&mut c);
+            frame(&mut app, &mut gone, None);
+            Some(Self { app, c, whole, gone, g, bar })
+        }
+
+        fn pattern_clip(&self) -> os_model::Clip {
+            os_model::Clip::new(self.bar, self.bar, 3, os_model::ClipSource::Pattern(1))
+        }
+
+        /// `clips` are what's in the playlist, painted with nothing moving, and the clock runs.
+        fn set(&mut self, clips: Vec<os_model::Clip>) {
+            crate::anim::set_clock(false);
+            self.app.state.motion.borrow_mut().ripples_over();
+            crate::playlist::arr_mut(&mut self.app.state).clips = clips;
+            self.app.state.playlist.sel.clear();
+            self.app.invalidate();
+            frame(&mut self.app, &mut self.c, None);
+            let _ = self.app.take_damage();
+            crate::anim::set_clock(true);
+        }
+
+        /// What changed is painted, and then every frame until nothing moves. `probe`'s view of each.
+        fn frames<T>(&mut self, what: &str, probe: impl Fn(&Self) -> T) -> Vec<T> {
+            let d = self.app.take_damage();
+            frame_damage(&mut self.app, &mut self.c, d);
+            frame(&mut self.app, &mut self.whole, None);
+            assert_same(&self.c, &self.whole, what);
+            let mut seen = vec![probe(self)];
+            while self.app.animating() {
+                self.step(what);
+                seen.push(probe(self));
+                assert!(seen.len() < 80, "{what} ends");
+            }
+            seen
+        }
+
+        /// A frame on, at 60 Hz.
+        fn step(&mut self, what: &str) {
+            crate::anim::advance(16);
+            self.app.tick();
+            let d = self.app.take_damage();
+            frame_damage(&mut self.app, &mut self.c, d);
+            frame(&mut self.app, &mut self.whole, None);
+            assert_same(&self.c, &self.whole, what);
+        }
+
+        /// How much a pixel differs from the empty playlist, over its channels.
+        fn shows(&self, x: f32, y: f32) -> u32 {
+            let px = |c: &Canvas| c.pixmap.pixel(x as u32, y as u32).expect("in the canvas");
+            let (a, b) = (px(&self.c), px(&self.gone));
+            u32::from(a.red().abs_diff(b.red())) + u32::from(a.green().abs_diff(b.green())) + u32::from(a.blue().abs_diff(b.blue()))
+        }
+
+        /// The playlist's grid as `c` shows it (the rest of the window tells of other things, such as what was edited).
+        fn grid_pixels(&self, c: &Canvas) -> Vec<[u8; 3]> {
+            let g = self.g.grid;
+            let row = |y| (g.x as u32..g.right() as u32).filter_map(move |x| c.pixmap.pixel(x, y));
+            (g.y as u32..g.bottom() as u32).flat_map(row).map(|p| [p.red(), p.green(), p.blue()]).collect()
+        }
+
+        /// The grid shows what the empty playlist showed.
+        fn assert_gone(&self, what: &str) {
+            assert!(self.grid_pixels(&self.c) == self.grid_pixels(&self.gone), "{what}");
+        }
+
+        /// The first column in `x0..x1` with something on the empty playlist, on row `y`.
+        fn left_of(&self, x0: f32, x1: f32, y: f32) -> f32 {
+            (x0 as u32..x1 as u32).find(|&x| self.shows(x as f32, y) > 0).expect("a clip on the row") as f32
+        }
+
+        /// The last such column, one past it.
+        fn right_of(&self, x0: f32, x1: f32, y: f32) -> f32 {
+            (x0 as u32..x1 as u32).rfind(|&x| self.shows(x as f32, y) > 0).expect("a clip on the row") as f32 + 1.0
+        }
+
+        /// The first row in `y0..y1` with something on the empty playlist, in column `x`.
+        fn top_of(&self, y0: f32, y1: f32, x: f32) -> f32 {
+            (y0 as u32..y1 as u32).find(|&y| self.shows(x, y as f32) > 0).expect("a clip in the column") as f32
+        }
+
+        /// A drag of clip 0 from (x, y) is under way.
+        fn drag_move(&mut self, x: f32, y: f32, alt: bool) {
+            let orig = vec![(0, crate::playlist::clips(&self.app.state)[0])];
+            self.app.mouse_move(x, y);
+            self.app.alt = alt;
+            self.app.drag = Some(Drag::Pl(crate::playlist::PlDrag::Move { x0: x, y0: y, orig, fresh: false }));
+        }
+    }
+
+    /// A deleted clip of any of the three kinds ripples away (spec: ui/animations.md §4.10): its fill shows at once under
+    /// a brighter outline and is gone in about 210 ms, the outline grows out to 4 px and no further, and after 700 ms
+    /// nothing is left of it.
+    #[test]
+    fn deleted_clips_ripple_away() {
+        use crate::playlist as pl;
+        use os_model::{ChannelKind, Clip, ClipSource};
+        let Some(mut b) = ClipBench::new() else { return };
+        b.app.add_clip_channel(ChannelKind::AudioClip);
+        b.app.add_clip_channel(ChannelKind::Automation);
+        b.app.state.z = vec![Win::Playlist];
+        let channel = |b: &ClipBench, kind| b.app.state.project.channels.iter().rfind(|c| c.kind == kind).expect("channel").index;
+        let sources = [
+            ClipSource::Pattern(1),
+            ClipSource::Channel(channel(&b, ChannelKind::AudioClip)),
+            ClipSource::Channel(channel(&b, ChannelKind::Automation)),
+        ];
+        for src in sources {
+            crate::anim::set_clock(false);
+            b.app.invalidate();
+            let clip = Clip::new(b.bar, b.bar, 3, src);
+            b.g = pl::PGeom::new(&b.app.state, b.app.pl_grid().expect("playlist grid"));
+            let r = b.g.clip_draw_rect(&clip).0;
+            let (x, y) = (r.cx(), r.cy());
+            b.app.mouse_move(x, y);
+            frame(&mut b.app, &mut b.gone, None);
+            b.set(vec![clip]);
+            assert!(b.shows(x, y) > 0, "{src:?} is there");
+            // The right button deletes what it is on.
+            b.app.mouse_down_right();
+            b.app.mouse_up();
+            assert!(pl::clips(&b.app.state).is_empty(), "{src:?} was deleted");
+            let seen = b.frames("the ripple", |b| [b.shows(x, y), b.shows(r.x, y), b.shows(r.x - 4.0, y), b.shows(r.x - 6.0, y)]);
+            let all = format!("{src:?}: {seen:?}");
+            assert!((43..=46).contains(&seen.len()), "about 700 ms: {all}");
+            assert!(seen[0][0] > 30 && seen[0][1] > seen[0][0], "a fill under a brighter outline at once: {all}");
+            assert!(seen.windows(2).all(|w| w[1][0] <= w[0][0]) && seen[14][0] == 0, "the fill goes in about 210 ms: {all}");
+            assert!(seen[0][2] == 0 && seen[18..30].iter().all(|f| f[2] > 0), "the outline grows out: {all}");
+            assert!(seen.iter().all(|f| f[3] == 0), "no further than 4 px or so: {all}");
+            b.assert_gone("nothing is left of the ripple");
+        }
+        crate::anim::set_clock(false);
+    }
+
+    /// A ripple shows from Polished up, as FL has none at its two lowest levels, and a selected clip's has its selected
+    /// look's colour (spec: ui/animations.md §4.10).
+    #[test]
+    fn a_ripple_shows_from_polished_up_in_the_clips_look() {
+        use crate::anim::{set_level, Level};
+        use crate::playlist as pl;
+        let Some(mut b) = ClipBench::new() else { return };
+        let clip = b.pattern_clip();
+        let r = b.g.clip_draw_rect(&clip).0;
+        let (x, y) = (r.cx(), r.cy());
+        let delete = |b: &mut ClipBench, level: Level, selected: bool| {
+            set_level(level);
+            b.set(vec![clip]);
+            b.app.state.playlist.sel = if selected { vec![0] } else { Vec::new() };
+            pl::delete(&mut b.app.state, vec![0]);
+            b.app.invalidate();
+            b.step("the ripple");
+        };
+        let lean = |c: &Canvas| {
+            let p = c.pixmap.pixel(x as u32, y as u32).expect("in the canvas");
+            i32::from(p.red()) - i32::from(p.blue())
+        };
+        for level in [Level::Playful, Level::Polished] {
+            delete(&mut b, level, false);
+            assert!(b.app.animating() && b.shows(x, y) > 30, "{level:?} ripples");
+        }
+        let plain = lean(&b.c);
+        delete(&mut b, Level::Playful, true);
+        assert!(lean(&b.c) > plain + 15, "a selected clip's ripple is redder: {} against {plain}", lean(&b.c));
+        for level in [Level::Subtle, Level::Off] {
+            delete(&mut b, level, false);
+            assert!(!b.app.animating(), "{level:?} has no ripple");
+            b.assert_gone("the clip just goes");
+        }
+        set_level(Level::Playful);
+        crate::anim::set_clock(false);
+    }
+
+    /// An undo brings the clip back with nothing over it, at once, as in FL (spec: ui/animations.md §2.2).
+    #[test]
+    fn an_undo_ends_the_ripple() {
+        use crate::playlist as pl;
+        let Some(mut b) = ClipBench::new() else { return };
+        let clip = b.pattern_clip();
+        b.set(vec![clip]);
+        let there = b.grid_pixels(&b.c);
+        pl::snapshot_as(&mut b.app.state, "Arranger delete clip");
+        pl::delete(&mut b.app.state, vec![0]);
+        b.app.invalidate();
+        b.step("the ripple");
+        assert!(b.app.animating());
+        assert!(crate::history::undo(&mut b.app.state).is_some());
+        assert_eq!(pl::clips(&b.app.state).len(), 1, "the clip is back");
+        b.app.invalidate();
+        b.step("the undo");
+        assert!(!b.app.animating(), "nothing is rippling over it");
+        assert!(b.grid_pixels(&b.c) == there, "the grid is as it was before the delete");
+        crate::anim::set_clock(false);
+    }
+
+    /// Deleting a track or a time selection's space moves what's around the clips: they just go.
+    #[test]
+    fn edits_that_move_the_rest_dont_ripple() {
+        use crate::playlist as pl;
+        let Some(mut b) = ClipBench::new() else { return };
+        let clip = b.pattern_clip();
+        b.set(vec![clip]);
+        pl::delete_track(&mut b.app.state, clip.track);
+        assert!(pl::clips(&b.app.state).is_empty());
+        b.app.invalidate();
+        b.step("the track's delete");
+        assert!(!b.app.animating(), "deleting a track has no ripple");
+        b.set(vec![clip]);
+        b.app.state.playlist.range = Some((b.bar, 2 * b.bar));
+        assert!(pl::delete_space(&mut b.app.state));
+        assert!(pl::clips(&b.app.state).is_empty());
+        b.app.state.playlist.range = None;
+        b.app.invalidate();
+        b.step("the space's delete");
+        assert!(!b.app.animating(), "deleting a time selection's space has no ripple");
+        crate::anim::set_clock(false);
+    }
+
+    /// A ripple shows over the arrangement its clip was in, not over the one shown next.
+    #[test]
+    fn a_ripple_stays_on_its_arrangement() {
+        use crate::playlist as pl;
+        let Some(mut b) = ClipBench::new() else { return };
+        let clip = b.pattern_clip();
+        b.set(vec![clip]);
+        pl::delete(&mut b.app.state, vec![0]);
+        b.app.invalidate();
+        b.step("the ripple");
+        assert!(b.app.animating());
+        pl::run(&mut b.app, pl::Cmd::ArrAdd);
+        pl::commit_edit(&mut b.app.state);
+        b.app.invalidate();
+        b.step("the other arrangement");
+        assert!(!b.app.animating(), "nothing ripples on another arrangement");
+        crate::anim::set_clock(false);
+    }
+
+    /// A scroll during a ripple or a clip's glide repaints: what they draw is no part of what the frame's pixels can
+    /// carry along. With neither, pixels move again.
+    #[test]
+    fn a_scroll_repaints_under_a_ripple_and_a_glide() {
+        use crate::playlist as pl;
+        let Some(mut b) = ClipBench::new() else { return };
+        let scrolled = |b: &mut ClipBench, what: &str| {
+            let before = b.app.state.playlist_scroll;
+            b.app.state.playlist_scroll.0 += 64.0;
+            b.app.playlist_scrolled(before);
+            crate::anim::advance(16);
+            b.app.tick();
+            let d = b.app.take_damage();
+            frame_damage(&mut b.app, &mut b.c, d);
+            let moved = !b.app.take_moved().is_empty();
+            frame(&mut b.app, &mut b.whole, None);
+            assert_same(&b.c, &b.whole, what);
+            moved
+        };
+        let clip = b.pattern_clip();
+        let other = os_model::Clip { position: 3 * b.bar, track: 5, ..clip };
+        b.set(vec![clip, other]);
+        pl::delete(&mut b.app.state, vec![0]);
+        b.app.invalidate();
+        b.step("the ripple");
+        assert!(!scrolled(&mut b, "a scroll during the ripple"), "a ripple's pixels aren't moved");
+        b.step("the ripple after the scroll");
+        while b.app.animating() {
+            b.step("the ripple after the scroll");
+        }
+        assert!(scrolled(&mut b, "a scroll after the ripple"), "with no ripple they are");
+        // The clip left is dragged a bar, and let go.
+        b.app.state.playlist_scroll = (0.0, 0.0);
+        b.set(vec![other]);
+        let r = b.g.clip_rect(&other);
+        b.drag_move(r.x + 10.0, r.y + 25.0, false);
+        b.app.mouse_move(r.x + 10.0 + b.g.bar_w, r.y + 25.0);
+        b.app.mouse_up();
+        b.step("the glide");
+        assert!(b.app.animating(), "it is on its way");
+        assert!(!scrolled(&mut b, "a scroll during the glide"), "a glide's pixels aren't moved");
+        while b.app.animating() {
+            b.step("the glide after the scroll");
+        }
+        crate::anim::set_clock(false);
+    }
+
+    /// A clip the magnet moved is there at once, and drawn on its way there, at every level but Off and with Smoothing
+    /// above 0 (spec: ui/animations.md §4.10; FL's jumps).
+    #[test]
+    fn snapped_clips_glide_to_their_place() {
+        use crate::anim::{set_level, Level};
+        use crate::playlist as pl;
+        use crate::prefs::{set_slider, SMOOTHING};
+        let Some(mut b) = ClipBench::new() else { return };
+        let start = b.pattern_clip();
+        let (r0, r1) = (b.g.clip_rect(&start), b.g.clip_rect(&os_model::Clip { position: 2 * b.bar, ..start }));
+        let y = r0.y + 25.0;
+        let run = |b: &mut ClipBench| {
+            b.set(vec![start]);
+            b.drag_move(r0.x + 10.0, y, false);
+            b.app.mouse_move(r0.x + 10.0 + b.g.bar_w, y);
+            assert_eq!(pl::clips(&b.app.state)[0].position, 2 * b.bar, "the clip is there at once");
+            let seen = b.frames("the glide", |b| b.left_of(r0.x - 2.0, r1.right(), y));
+            b.app.mouse_up();
+            seen
+        };
+        for level in [Level::Playful, Level::Polished, Level::Subtle] {
+            set_level(level);
+            let seen = run(&mut b);
+            assert!(seen[0] > r0.x && seen[0] < r1.x, "{level:?}: on its way on the first frame: {seen:?}");
+            assert!(seen.windows(2).all(|w| w[1] >= w[0]), "{level:?}: toward its place: {seen:?}");
+            assert_eq!(*seen.last().unwrap(), r1.x, "{level:?}: and there: {seen:?}");
+            assert!((5..=13).contains(&seen.len()), "{level:?}: quickly: {seen:?}");
+        }
+        set_level(Level::Off);
+        assert_eq!(run(&mut b), [r1.x], "at Off it jumps");
+        set_level(Level::Playful);
+        set_slider(&SMOOTHING, 0);
+        assert_eq!(run(&mut b), [r1.x], "at Smoothing 0 it jumps");
+        set_slider(&SMOOTHING, 128);
+        crate::anim::set_clock(false);
+    }
+
+    /// A clip that jumps further than it is wide passes over what the drag's own damage doesn't cover.
+    #[test]
+    fn a_long_snap_paints_the_way() {
+        let Some(mut b) = ClipBench::new() else { return };
+        let start = os_model::Clip::new(0, b.bar / 4, 3, os_model::ClipSource::Pattern(1));
+        let r0 = b.g.clip_rect(&start);
+        let y = r0.y + 25.0;
+        b.set(vec![start]);
+        b.drag_move(r0.x + 2.0, y, false);
+        b.app.mouse_move(r0.x + 2.0 + 3.0 * b.g.bar_w, y);
+        let to = b.g.clip_rect(&crate::playlist::clips(&b.app.state)[0]);
+        let seen = b.frames("the long glide", |b| b.left_of(r0.x, to.right() + 1.0, y));
+        b.app.mouse_up();
+        assert!(seen[0] > r0.right() && seen[0] < to.x - to.w, "the first frame is between the two: {seen:?} of {} to {}", r0.x, to.x);
+        crate::anim::set_clock(false);
+    }
+
+    /// With no magnet (Alt) a clip stays with the mouse sideways, with none of the delay a glide would give. A track is
+    /// always a step, so that still glides.
+    #[test]
+    fn a_clip_without_a_magnet_stays_with_the_mouse() {
+        use crate::playlist as pl;
+        let Some(mut b) = ClipBench::new() else { return };
+        let start = b.pattern_clip();
+        let r0 = b.g.clip_rect(&start);
+        let y = r0.y + 25.0;
+        b.set(vec![start]);
+        b.drag_move(r0.x + 10.0, y, true);
+        b.app.mouse_move(r0.x + 10.0 + 37.0, y);
+        let r1 = b.g.clip_rect(&pl::clips(&b.app.state)[0]);
+        assert!(r1.x > r0.x + 30.0, "it moved: {} to {}", r0.x, r1.x);
+        let seen = b.frames("the Alt drag", |b| b.left_of(r0.x - 2.0, r1.right(), y));
+        assert_eq!(seen, [r1.x.floor()], "it is under the mouse at once");
+        // Two tracks down.
+        let down = os_model::Clip { track: 5, ..pl::clips(&b.app.state)[0] };
+        let r2 = b.g.clip_rect(&down);
+        b.app.mouse_move(r0.x + 10.0 + 37.0, y + (r2.y - r1.y));
+        assert_eq!(pl::clips(&b.app.state)[0].track, 5, "it moved down");
+        let seen = b.frames("the Alt drag down", |b| b.top_of(r1.y - 2.0, r2.bottom(), r1.cx()));
+        b.app.mouse_up();
+        assert!(seen[0] > r1.y && seen[0] < r2.y, "on its way on the first frame: {seen:?} of {} to {}", r1.y, r2.y);
+        assert_eq!(*seen.last().unwrap(), r2.y, "and there: {seen:?}");
+        b.app.alt = false;
+        crate::anim::set_clock(false);
+    }
+
+    /// In a resize the edge the magnet moved is drawn on its way, and the other stays (spec: ui/animations.md §4.10).
+    #[test]
+    fn a_resized_clips_edge_glides() {
+        use crate::playlist::{self as pl, PlDrag};
+        let Some(mut b) = ClipBench::new() else { return };
+        let start = b.pattern_clip();
+        let r0 = b.g.clip_rect(&start);
+        let y = r0.y + 25.0;
+        let w = b.g.bar_w;
+        // The right edge a bar out.
+        b.set(vec![start]);
+        b.app.mouse_move(r0.right(), y);
+        b.app.drag = Some(Drag::Pl(PlDrag::ResizeR { x0: r0.right(), orig: vec![(0, start)] }));
+        b.app.mouse_move(r0.right() + w, y);
+        assert_eq!(pl::clips(&b.app.state)[0].length, 2 * b.bar, "the clip is that long at once");
+        let seen = b.frames("the right edge", |b| (b.left_of(r0.x - 2.0, r0.right() + w + 2.0, y), b.right_of(r0.x - 2.0, r0.right() + w + 2.0, y)));
+        b.app.mouse_up();
+        assert!(seen.iter().all(|e| e.0 == r0.x), "the left edge stays: {seen:?}");
+        assert!(seen[0].1 > r0.right() && seen[0].1 < r0.right() + w, "the right edge is on its way: {seen:?}");
+        assert_eq!(seen.last().unwrap().1, r0.right() + w, "and there: {seen:?}");
+        // The left edge half a bar in.
+        b.set(vec![start]);
+        b.app.mouse_move(r0.x, y);
+        b.app.drag = Some(Drag::Pl(PlDrag::ResizeL { x0: r0.x, orig: vec![(0, start)] }));
+        b.app.mouse_move(r0.x + w / 2.0, y);
+        assert_eq!(pl::clips(&b.app.state)[0].position, b.bar + b.bar / 2, "the clip starts there at once");
+        let seen = b.frames("the left edge", |b| (b.left_of(r0.x - 2.0, r0.right() + 2.0, y), b.right_of(r0.x - 2.0, r0.right() + 2.0, y)));
+        b.app.mouse_up();
+        assert!(seen.iter().all(|e| e.1 == r0.right()), "the right edge stays: {seen:?}");
+        assert!(seen[0].0 > r0.x && seen[0].0 < r0.x + w / 2.0, "the left edge is on its way: {seen:?}");
+        assert_eq!(seen.last().unwrap().0, r0.x + w / 2.0, "and there: {seen:?}");
+        crate::anim::set_clock(false);
+    }
+
+    /// A clip drawn with its edges elsewhere keeps its content where it is, as a resize does.
+    #[test]
+    fn a_clip_drawn_with_other_edges_keeps_its_content() {
+        use crate::playlist as pl;
+        use os_model::{Clip, ClipSource};
+        let Some(b) = ClipBench::new() else { return };
+        let s = &b.app.state;
+        let px = |ticks: f32| ticks * b.g.ppt;
+        let c = Clip { window: Some((192.0, 576.0)), ..Clip::new(b.bar, 384, 3, ClipSource::Pattern(1)) };
+        let drawn = pl::with_edges(s, &b.g, &c, px(-96.0), 0.0);
+        assert_eq!((drawn.position, drawn.length, drawn.window), (b.bar - 96, 480, Some((96.0, 576.0))), "the left edge out");
+        let drawn = pl::with_edges(s, &b.g, &c, px(96.0), 0.0);
+        assert_eq!((drawn.position, drawn.length, drawn.window), (b.bar + 96, 288, Some((288.0, 576.0))), "the left edge in");
+        let drawn = pl::with_edges(s, &b.g, &c, 0.0, px(96.0));
+        assert_eq!((drawn.position, drawn.length, drawn.window), (b.bar, 480, Some((192.0, 672.0))), "the right edge out");
+        let drawn = pl::with_edges(s, &b.g, &c, px(-384.0), 0.0);
+        assert_eq!((drawn.position, drawn.window.map(|w| w.0)), (b.bar - 384, Some(0.0)), "no further than the source's start");
+    }
+
     /// Double-clicking a clip flashes the clips sharing its source: up to a 60 % white tint and back over 400 ms,
     /// held still at Animations Off; a clip of another source stays as it was (spec: ui/animations.md §4.7).
     #[test]

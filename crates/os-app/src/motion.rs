@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
+use os_model::Clip;
 use os_ui::{Canvas, Layer, Rect, Sprite};
 
 use crate::anim::{self, Level, Pendulum, Spring, Tween};
@@ -108,6 +109,27 @@ pub const TAG_MAX_W: f32 = 220.0;
 /// A cancelled drag's tag falls 48 px and fades out over 400 ms (FL's: about 47 px and 400 ms).
 const FALL: Duration = Duration::from_millis(400);
 const FALL_DROP: f32 = 48.0;
+/// A deleted clip's ripple, FL's at Entertain me (spec: ui/animations.md §2.2, §4.10): the fill starts at 35 % of the
+/// ripple's colour and is gone in 210 ms; the outline starts at 65 %, fades with this time constant and grows 4 px; by
+/// 700 ms nothing shows.
+const RIPPLE_TIME: f64 = 0.700;
+const RIPPLE_FILL: f32 = 0.35;
+const RIPPLE_FILL_TIME: f64 = 0.210;
+const RIPPLE_LINE: f32 = 0.65;
+const RIPPLE_LINE_TAU: f64 = 0.190;
+const RIPPLE_GROW: f32 = 4.0;
+const RIPPLE_GROW_TAU: f64 = 0.145;
+/// How far outside its clip a ripple ever draws (px): how far it grows, and half its line and a pixel's rounding.
+pub const RIPPLE_REACH: f32 = RIPPLE_GROW + 2.0;
+/// Ripples at once, past which further deleted clips simply go (only a bound, for thousands deleted together).
+const RIPPLE_MAX: usize = 256;
+/// A clip the magnet moved is drawn on its way there with this time constant: the step is felt rather than seen
+/// (§4.10). Lemon Studio's own: FL's clip jumps. The one number to change if it should be more or less.
+const SNAP_TAU: f64 = 0.024;
+/// A clip this close to its place (px) is there.
+const SNAP_ARRIVED: f32 = 0.25;
+/// A clip's glide is forgotten after this long if no paint asked for it (the clip scrolled away or went).
+const SNAP_REST: f64 = 0.5;
 
 #[derive(Default)]
 pub struct Motion {
@@ -139,6 +161,36 @@ pub struct Motion {
     flash: Option<Flash>,
     /// When loading sweeps started (they all go in step).
     sweeps: Option<Instant>,
+    /// Deleted clips rippling away.
+    ripples: Vec<Ripple>,
+    /// Clips on their way to where the magnet put them, by what they are known by (a whole selection can be).
+    clip_glides: HashMap<u64, ClipGlide>,
+}
+
+/// A deleted clip rippling away. It is kept as a clip, so that it scrolls and zooms with the view.
+struct Ripple {
+    clip: Clip,
+    selected: bool,
+    arrangement: Option<u16>,
+    at: Instant,
+}
+
+/// One frame of a ripple: how far it has grown (px), and how strong its fill and outline are (0 to 1).
+pub struct RippleDraw {
+    pub clip: Clip,
+    pub selected: bool,
+    pub arrangement: Option<u16>,
+    pub grow: f32,
+    pub fill: f32,
+    pub line: f32,
+}
+
+/// A clip on its way to where the magnet put it: how far from there its edges and its top were at `at` (px).
+struct ClipGlide {
+    left: f32,
+    right: f32,
+    down: f32,
+    at: Instant,
 }
 
 /// The plugin palette's list as last painted, and how it goes to a new arrangement: what stays slides, what is new
@@ -347,6 +399,8 @@ impl Motion {
         // Of a window that was closed meanwhile.
         self.takes.retain(|t| since(now, t.noted) < 1.0);
         self.ghosts.retain(|g| since(now, g.at) < 1.0);
+        self.ripples.retain(|r| since(now, r.at) < RIPPLE_TIME);
+        self.clip_glides.retain(|_, g| since(now, g.at) < SNAP_REST);
     }
 
     /// Something drawn in `r` (of the window being painted) still moves: the next frame paints it again.
@@ -371,6 +425,8 @@ impl Motion {
             || self.ghosts.iter().any(|g| g.win == win)
             || self.fall.as_ref().is_some_and(|f| f.win == win)
             || (win.is_none() && !self.glows.is_empty())
+            || !self.ripples.is_empty()
+            || !self.clip_glides.is_empty()
     }
 
     /// Whether anything still moves: the shell keeps ticking at animation rate.
@@ -932,6 +988,79 @@ impl Motion {
         // Up quickly, down slowly.
         let a = if u < 0.25 { u / 0.25 } else { 1.0 - (u - 0.25) / 0.75 };
         FLASH_PEAK * anim::ease_out(a) as f32
+    }
+
+    // ------------------------------------------------------------------------------------------------ clips
+
+    /// `clip` was deleted from `arrangement`: it ripples away, from Polished up (spec: ui/animations.md §4.10).
+    /// `selected`: it showed as selected, which colours the ripple.
+    pub fn ripple(&mut self, clip: Clip, selected: bool, arrangement: Option<u16>) {
+        if glides() && self.ripples.len() < RIPPLE_MAX {
+            self.ripples.push(Ripple { clip, selected, arrangement, at: anim::now() });
+        }
+    }
+
+    /// Clips came back or changed (an undo or a redo): what was rippling away has no place over them.
+    pub fn ripples_over(&mut self) {
+        self.ripples.clear();
+    }
+
+    /// The ripples to draw this frame.
+    pub fn ripples(&mut self) -> Vec<RippleDraw> {
+        let now = anim::now();
+        self.ripples.retain(|r| since(now, r.at) < RIPPLE_TIME);
+        self.ripples
+            .iter()
+            .map(|r| {
+                let t = since(now, r.at);
+                RippleDraw {
+                    clip: r.clip,
+                    selected: r.selected,
+                    arrangement: r.arrangement,
+                    grow: RIPPLE_GROW * (1.0 - (-t / RIPPLE_GROW_TAU).exp()) as f32,
+                    fill: RIPPLE_FILL * (1.0 - t / RIPPLE_FILL_TIME).max(0.0) as f32,
+                    line: RIPPLE_LINE * (-t / RIPPLE_LINE_TAU).exp() as f32,
+                }
+            })
+            .collect()
+    }
+
+    /// The magnet moved a dragged clip: its left and right edges and its top were `left`, `right` and `down` px from
+    /// where they are now. It is drawn on its way there; the clip itself is already there, and sounds there (§4.10).
+    /// Not at Off or at Smoothing 0. A jump during a glide sets off from where the clip is drawn. Returns how far the
+    /// drawing now has to go, which is what to paint again; None if it just jumps.
+    pub fn clip_jumped(&mut self, key: u64, left: f32, right: f32, down: f32) -> Option<(f32, f32, f32)> {
+        if anim::instant() || crate::smooth::smoothing() <= 0.0 {
+            return None;
+        }
+        let now = anim::now();
+        // Counted from a frame ago: the jump already shows on the frame it happens.
+        let at = now.checked_sub(Duration::from_secs_f64(FIRST_STEP)).unwrap_or(now);
+        let Some(g) = self.clip_glides.get_mut(&key) else {
+            self.clip_glides.insert(key, ClipGlide { left, right, down, at });
+            return Some((left, right, down));
+        };
+        let k = (-since(now, g.at) / SNAP_TAU).exp() as f32;
+        (g.left, g.right, g.down, g.at) = (g.left * k + left, g.right * k + right, g.down * k + down, at);
+        Some((g.left, g.right, g.down))
+    }
+
+    /// Whether any clip is on its way, which spares asking for each.
+    pub fn clips_gliding(&self) -> bool {
+        !self.clip_glides.is_empty()
+    }
+
+    /// How far from its place the clip `key` is drawn this frame: its left edge, right edge and top (px). None once
+    /// it is there.
+    pub fn clip_glide(&mut self, key: u64) -> Option<(f32, f32, f32)> {
+        let g = self.clip_glides.get(&key)?;
+        let k = (-since(anim::now(), g.at) / SNAP_TAU).exp() as f32;
+        let at = (g.left * k, g.right * k, g.down * k);
+        if at.0.abs().max(at.1.abs()).max(at.2.abs()) < SNAP_ARRIVED {
+            self.clip_glides.remove(&key);
+            return None;
+        }
+        Some(at)
     }
 
     // ------------------------------------------------------------------------------------------------ status motion
