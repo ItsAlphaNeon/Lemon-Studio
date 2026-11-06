@@ -40,7 +40,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
     memory): the dropouts since the program started show in a quiet colour, and in a red pill for a few seconds after
     one cuts into sound, marked `!` when a plugin arrived late (the audio log says why each happened), and the audio load turns yellow, orange and red as it climbs;
   - the workspace and the browser as rounded cards over a darker backdrop; the browser's splitter is the gap between
-    them, and the mixer's routing cables hang over the gap below. With Animations on "Playful", the cables between
+    them, and the mixer's routing cables hang over the gap below. With Animations from "Polished" up, the cables between
     tracks at most three apart (bus 3 into the master, say) hang on in front of the split window below the mixer;
     longer ones stay behind it.
   - split views instead of floating ones: the arranger, the piano roll and the mixer are maximized or snapped into a
@@ -50,7 +50,7 @@ own content. Side branches are named `cutting-edge-<topic>`.
     goes into the split (one maximized gives way). The toolbar's window buttons are lit while their window is open.
     There is no minimize; the maximize button shows a full square, or two panes to go back to the split, and a window
     alone has only its close button. The instrument rack, plugin and tool
-    windows still float. With Animations on "Playful", windows glide to new places as Omarchy's Hyprland ones
+    windows still float. With Animations from "Polished" up, windows glide to new places as Omarchy's Hyprland ones
     do; a window opening is at its place at once, under them as they move away, and one closing leaves its
     last look there for them to move over, and maximizing is instant.
   - the browser docked left or right: its title bar drags it to the other side.

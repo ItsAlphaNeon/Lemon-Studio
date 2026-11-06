@@ -1405,9 +1405,9 @@ impl State {
     /// Where the mixer's routing cables hang in front of the split window below it (the tiling layout, the mixer
     /// snapped above another window): from the gap's end down to the status bar, as wide as the mixer. Painted after the
     /// split windows, under the floating ones (`views::paint_cables_over`).
-    /// Only with Animations on "Playful".
+    /// Only while the cables swing (Animations from Polished up).
     pub fn cable_reach(&self) -> Option<Rect> {
-        if !self.cables.borrow().animations() {
+        if !crate::anim::cables_swing(crate::anim::level()) {
             return None;
         }
         let h = self.mixer_hang()?;
@@ -4593,7 +4593,7 @@ impl App {
     }
 
     /// The tiling layout's windows changed places (shown, hidden, swapped, restored, another preset): the frame repaints
-    /// whole, and with "Playful" (General ▸ Display ▸ Animations) they move there as Hyprland's windows do
+    /// whole, and from "Polished" up (General ▸ Display ▸ Animations) they move there as Hyprland's windows do
     /// (`tiles::Anim`). A split dragged, the card resized, the first frame and a window maximized jump straight
     /// there.
     fn tiles_motion(&mut self) {
@@ -4616,7 +4616,7 @@ impl App {
             // Instant too: maximizing a window over the card.
             let full = self.state.docked().is_some();
             let direct = full || matches!(self.drag, Some(Drag::TileSplit { .. })) || self.tile_work != Some(work);
-            let motion = !cfg!(test) && !direct && self.state.cables.borrow().animations();
+            let motion = !cfg!(test) && !direct && crate::anim::level() >= crate::anim::Level::Polished;
             let from = self.state.tile_anim.as_ref().map_or_else(|| self.tile_targets.clone(), |a| a.shown(&self.tile_targets));
             self.state.tile_anim = motion.then(|| crate::tiles::Anim::new(&from, &targets)).flatten();
             self.tile_anim_at = Some(now);
@@ -4645,7 +4645,7 @@ impl App {
         let native = self.plugins.native_rows();
         #[cfg(not(target_os = "linux"))]
         let native: Vec<usize> = Vec::new();
-        let motion = !cfg!(test) && self.state.cables.borrow().animations();
+        let motion = !cfg!(test) && crate::anim::level() >= crate::anim::Level::Polished;
         let pressed = std::mem::take(&mut self.state.float_layer.pressed);
         let down = self.state.float_layer.is_down();
         let moved = if pressed && down || layer::wanted_back(&self.state, &native) {
@@ -4664,13 +4664,13 @@ impl App {
         }
     }
 
-    /// The split windows without the keyboard mute (`tiles::veil_target`): with "Playful", fading as Hyprland's
+    /// The split windows without the keyboard mute (`tiles::veil_target`): fading, from "Subtle" up, as Hyprland's
     /// borders do (`tiles::VEIL_FADE`).
     fn veils_tick(&mut self, now: std::time::Instant) {
         let want = crate::tiles::veil_target(&self.state);
         let to = self.veil_fade.map_or(self.state.veil, |f| f.2);
         if want != to {
-            let fade = !cfg!(test) && self.state.cables.borrow().animations();
+            let fade = !cfg!(test) && crate::anim::level() > crate::anim::Level::Off;
             if fade {
                 self.veil_fade = Some((now, self.state.veil, want));
             } else {
