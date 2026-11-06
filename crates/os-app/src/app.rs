@@ -926,7 +926,9 @@ pub enum Drag {
     RackResize { edges: u8, m0: (f32, f32), s0: (f32, f32) },
     /// Change a channel's mixer track (spec: ui/channel-rack.md §5).
     RackMixer { ch: usize, y0: f32, v0: u16 },
-    Fader { track: u16, y0: f32, v0: f64 },
+    /// A mixer fader: `track` follows the mouse from `v0`. `others` are the other selected tracks, which move with it, with
+    /// their kept levels, `level` being `track`'s (spec: ui/mixer.md §4).
+    Fader { track: u16, y0: f32, v0: f64, level: f64, others: Vec<(u16, f64)> },
     /// A press on a track's equaliser graph `g`: band `band` follows the cursor.
     EqGraph { track: u16, band: u8, g: Rect },
     /// The Limit dialog's keys held (either button): the key under the mouse becomes the green key; its name strip held:
@@ -6087,7 +6089,7 @@ impl App {
                         self.damage_win(Win::Mixer);
                     }
                 }
-                Drag::Fader { track, y0, v0 } => {
+                Drag::Fader { track, y0, v0, level, others } => {
                     let per_px = views::mixer::FADER_PER_PX / f64::from(views::mixer::scale(self.state.win_rect(Win::Mixer)));
                     let v = (v0 - f64::from(y - y0) * per_px).clamp(0.0, 1.0);
                     if let Some(t) = self.state.project.mixer.iter_mut().find(|t| t.index == track) {
@@ -6095,9 +6097,19 @@ impl App {
                         self.state.piano.dirty = true;
                     }
                     self.record_control(&Action::Fader(track));
+                    for &(t, other) in &others {
+                        if let Some(m) = crate::mixer::track_mut(&mut self.state, t) {
+                            m.volume = Some(crate::mixer::group_fader(other, level, v));
+                        }
+                        self.record_control(&Action::Fader(t));
+                    }
+                    if !others.is_empty() {
+                        self.state.mixer.faders.moved = Some((track, v));
+                    }
                     self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
                     let col = self.hits.iter().rev().find(|h| h.action == Action::Fader(track)).map(|h| h.rect);
                     match col {
+                        _ if !others.is_empty() => self.damage_win(Win::Mixer),
                         Some(r) => self.damage_rect(r.outset(10.0)),
                         None => self.invalidate(),
                     }
@@ -8859,21 +8871,28 @@ impl App {
             // Alt+click: back to the default as one undo step, and no drag follows. A fader of a strip in a
             // multi-selection doesn't reset: the selection stays and that strip becomes current (spec: ui/mixer.md §4).
             Action::Fader(t) if self.alt => {
-                let in_group = crate::mixer::selected(s).len() > 1 && crate::mixer::is_selected(s, t);
+                let in_group = crate::mixer::in_group(s, t);
                 crate::mixer::select(s, t, in_group);
                 if !in_group {
                     self.reset_control(crate::knobs::Control::Fader(t));
                 }
             }
+            // A press on the fader of a track in a multi-selection keeps the selection and makes that track current, and
+            // a drag moves them all (spec: ui/mixer.md §2, §4).
             Action::Fader(t) => {
-                crate::mixer::select(s, t, self.ctrl);
-                // One undo step for the drag (none when it doesn't move the fader, nor with Undo knob tweaks off: a
-                // fader is a knob here).
+                let in_group = crate::mixer::in_group(s, t);
+                crate::mixer::select(s, t, self.ctrl || in_group);
+                let v0 = crate::mixer::volume(s, t);
+                let mut others = if in_group { crate::mixer::group_levels(s) } else { Vec::new() };
+                let level = others.iter().find(|o| o.0 == t).map_or(v0, |o| o.1);
+                others.retain(|o| o.0 != t);
+                // One undo step for the drag, whatever it moves (none when it doesn't move a fader, nor with Undo knob
+                // tweaks off: a fader is a knob here).
                 if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) {
-                    crate::control::edit_press(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t));
+                    let tracks = std::iter::once(t).chain(others.iter().map(|o| o.0));
+                    crate::control::edit_press_all(s, crate::history::MIXER_VOLUME, tracks.map(crate::control::command::Region::Track));
                 }
-                let v0 = s.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.volume).unwrap_or(0.8);
-                self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0 });
+                self.drag = Some(Drag::Fader { track: t, y0: self.mouse.1, v0, level, others });
             }
             Action::ChannelSelect(_) | Action::RackSelect(_) => {}
             Action::RackRollView => s.rack_roll_view = !s.rack_roll_view,

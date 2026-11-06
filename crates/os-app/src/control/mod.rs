@@ -478,8 +478,14 @@ pub fn edit_run<R>(app: &mut crate::app::App, name: &'static str, region: comman
 /// A press that starts an edit of `region` (a fader drag): the step named `name` is recorded now, holding the region
 /// as it is, and goes again at the release when the drag changed nothing (`history::settle`).
 pub fn edit_press(s: &mut State, name: &'static str, region: command::Region) {
-    if let Some(before) = command::Taken::of(s, region) {
-        crate::history::record(s, name, crate::history::Snap::Commands(vec![Command::Put(Box::new(before))]));
+    edit_press_all(s, name, [region]);
+}
+
+/// `edit_press` for an edit of several regions (a drag on the fader of a selected track moves them all): one step.
+pub fn edit_press_all(s: &mut State, name: &'static str, regions: impl IntoIterator<Item = command::Region>) {
+    let before: Vec<Command> = regions.into_iter().filter_map(|r| command::Taken::of(s, r)).map(|t| Command::Put(Box::new(t))).collect();
+    if !before.is_empty() {
+        crate::history::record(s, name, crate::history::Snap::Commands(before));
     }
 }
 
