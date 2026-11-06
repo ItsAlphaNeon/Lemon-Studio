@@ -2130,11 +2130,17 @@ impl Engine {
         }
     }
 
-    /// A stopped playback that rings out its effects' tails (its channels held, `pause`): the voices it holds will
-    /// never sound again; they go, so they are not counted.
+    /// A stopped playback that rings out its effects' tails (its channels held, `pause`): the song's voices it holds
+    /// will never sound again; they go, so they are not counted.
     pub fn forget_voices(&mut self) {
-        self.voices.clear();
-        self.sounding.clear();
+        // What is played live plays on.
+        self.voices.retain(|v| v.live.is_some());
+        self.sounding.retain(|s| s.2 == u64::MAX);
+    }
+
+    /// A note played live is held: its key has not been let go of.
+    pub fn live_notes_held(&self) -> bool {
+        self.sounding.iter().any(|s| s.2 == u64::MAX) || self.voices.iter().any(|v| v.live.is_some() && v.release.is_none() && v.off.is_none())
     }
 
     /// Start a live note on channel `channel` (rack position) at the next tick; it rings until
@@ -2634,10 +2640,37 @@ impl Engine {
         // So does the tuning its notes were given: a changed channel pitch retunes them on the next tick.
         self.inst_tuning = old.inst_tuning.iter().enumerate().map(|(c, &t)| if same(c) { t } else { InstTuning::default() }).collect();
         self.missed = old.missed;
-        // The main volume glides from where it was.
-        self.main_glide = old.main_glide;
         self.exporting = old.exporting;
         self.multicore.keep_gate(&old.multicore);
+        self.take_mixer(old);
+    }
+
+    /// Carries on from `old` with the hosted plugins as it left them, for a stream that plays this engine's first
+    /// frame right after `old`'s last (a Play while a Stop's tails ring): the mixer goes on (its glides, pads and own
+    /// effects) and the instruments keep being processed while `old` would have, so what they ring goes on unbroken.
+    /// Its song position starts as any playback's; delay compensation skips no head of the stream (those frames are the
+    /// tails going on), so the song comes in that much later.
+    pub fn carry_on(&mut self, old: &mut Engine) {
+        if self.rate != old.rate {
+            return;
+        }
+        self.pdc.follows = true;
+        self.inst_tail = self.inst_tail.max(old.inst_tail);
+        self.take_mixer(old);
+    }
+
+    /// Its channels come in over the pause's fade from its first tick (as at `resume`): a playback started in the
+    /// middle of the song while tails ring, which come in with it unfaded (`carry_on`).
+    pub fn fade_in_channels(&mut self) {
+        self.fade_len = ((f64::from(self.rate) * PAUSE_FADE_SECONDS).round() as u32).max(1);
+        (self.fade_in, self.fade_out) = (self.fade_len, 0);
+    }
+
+    /// The mixer of `old` goes on in this engine: the main volume's glide, and with the same tracks their gains, pads,
+    /// send glides and own effects.
+    fn take_mixer(&mut self, old: &mut Engine) {
+        // The main volume glides from where it was.
+        self.main_glide = old.main_glide;
         self.multicore.keep_gains(&old.multicore);
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
@@ -3306,7 +3339,8 @@ impl Engine {
 
     /// A tick's worth of the hosted instruments and the mixer while paused (`pause`): the position, the sampler
     /// channels and the automation stay where they are; the instruments, let go of their notes, and the effects run on,
-    /// so their tails ring out. It is handed out at the held position: the tick and the frame the next tick starts on.
+    /// so their tails ring out, and what is played live sounds. It is handed out at the held position: the tick and the
+    /// frame the next tick starts on.
     fn render_held(&mut self) {
         let len = (self.clock.samples_per_tick().round() as usize).max(1);
         let mut song = self.transport_at(self.frame);
@@ -3317,6 +3351,15 @@ impl Engine {
         for b in &mut self.bus {
             b.clear();
             b.resize(len * 2, 0.0);
+        }
+        // Held, the engine still plays what is played live (typed notes, a controller's, a tap's click), so it stays the
+        // stream's engine through Pause and Stop: the song's own voices stay where they are.
+        let (channels, w) = (&self.channels, self.sinc_w);
+        let bus = &mut self.bus;
+        self.voices.retain_mut(|v| v.live.is_none() || render_voice(v, channels, bus, 0, 0, len, w));
+        if !self.exporting {
+            let click = self.click_track();
+            self.tap_clicks.mix(&mut self.bus[click][..len * 2]);
         }
         self.render_instruments(len, &song);
         self.mix(len, &song);
@@ -5945,6 +5988,39 @@ mod tests {
         let mut out = vec![0.0f32; 256];
         e.process(&mut out);
         assert!(e.inst_midi.is_empty(), "delivered");
+    }
+
+    /// Paused, the playback still plays what is played live: a typed note sounds and stops with its note off, and a
+    /// tap's click is heard, while the song's own voices stay where they were held. So the paused (or stopped and
+    /// ringing) playback stays the stream's engine, and no other has to take its plugins over.
+    #[test]
+    fn a_held_engine_plays_live_notes() {
+        let p = project(vec![long_note(0, 384 * 4, 0)], vec![]);
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let peaks = |e: &mut Engine, ticks: usize| -> Vec<f32> {
+            (0..ticks).filter_map(|_| e.next_tick().map(|(s, ..)| s.iter().fold(0.0f32, |m, x| m.max(x.abs())))).collect()
+        };
+        assert!(peaks(&mut e, 20).iter().any(|&v| v > 0.05), "the song sounds");
+        e.pause();
+        let held = peaks(&mut e, 20);
+        assert!(e.held() && held[10..].iter().all(|&v| v == 0.0), "held, silent: {held:?}");
+        let song: Vec<f64> = e.voices.iter().filter(|v| v.live.is_none()).map(|v| v.pos).collect();
+        e.note_on(0, 72, 100);
+        assert!(peaks(&mut e, 10).iter().all(|&v| v > 0.05), "the typed note sounds");
+        e.note_off(0, 72);
+        let after = peaks(&mut e, 200);
+        assert!(*after.last().unwrap() == 0.0, "and stops: {:?}", &after[..20]);
+        let still: Vec<f64> = e.voices.iter().filter(|v| v.live.is_none()).map(|v| v.pos).collect();
+        assert_eq!(song, still, "the song's voices stay where they were held");
+        e.tap_click(true, 0);
+        assert!(peaks(&mut e, 4).iter().any(|&v| v > 0.01), "a tap's click is heard");
+        // A key held through Resume plays on with the song (its channel comes back in over the fade).
+        e.note_on(0, 76, 100);
+        peaks(&mut e, 4);
+        e.resume();
+        peaks(&mut e, 4);
+        assert!(e.voices.iter().any(|v| v.live == Some(76)), "the held key still sounds after Resume");
     }
 
     #[test]

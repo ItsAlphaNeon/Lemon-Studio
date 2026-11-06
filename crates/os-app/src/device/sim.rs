@@ -131,6 +131,26 @@ pub fn record(probes: Vec<Probe>) {
 }
 
 /// Ends the recording and hands it over.
+/// The mix as played since the last `take_audio` (stereo, interleaved; at most ten minutes at 48 kHz).
+static AUDIO: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+const MAX_AUDIO: usize = 48_000 * 2 * 600;
+
+/// Whether the mix is kept (`capture_audio`).
+static CAPTURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Keeps the mix as played from now on (`on`), dropping what was kept, or stops keeping it.
+pub fn capture_audio(on: bool) {
+    CAPTURE.store(on, Ordering::Relaxed);
+    if let Ok(mut a) = AUDIO.lock() {
+        a.clear();
+    }
+}
+
+/// The mix played since the last call (stereo, interleaved).
+pub fn take_audio() -> Vec<f32> {
+    AUDIO.lock().map(|mut a| std::mem::take(&mut *a)).unwrap_or_default()
+}
+
 pub fn take() -> Recording {
     let Ok(mut r) = REC.lock() else { return Recording::default() };
     r.on = false;
@@ -209,6 +229,11 @@ pub(super) fn open(c: Config, xruns: &Arc<std::sync::atomic::AtomicU64>) -> Resu
                     }
                     let done = Instant::now();
                     let xrun = done > at + period;
+                    if CAPTURE.load(Ordering::Relaxed) && let Ok(mut a) = AUDIO.lock() {
+                        if a.len() < MAX_AUDIO {
+                            a.extend_from_slice(&out);
+                        }
+                    }
                     keep(at, Block { due: Duration::ZERO, late: woke - at, took: done - woke, peak, xrun, step });
                     if xrun {
                         errors.xrun();
