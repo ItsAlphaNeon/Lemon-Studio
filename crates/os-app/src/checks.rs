@@ -15,9 +15,11 @@
 //! it takes rtkit's path, as for a user outside the `realtime` group; `OS_CHECK_PLAY_MS` (1000) is how long each Play
 //! lasts.
 //!
-//! Both end with what every Play and Stop cost: the render time of the first blocks after Play and how soon it was
-//! heard, the largest step between two samples after each Stop against the largest while playing (a click), the
-//! real-time promotions (refused by rtkit, taken back by the safety cap) and the device's opens.
+//! `playlist_zoom` times the playlist's frames while Ctrl+wheel zooms it (no audio).
+//!
+//! Both playback checks end with what every Play and Stop cost: the render time of the first blocks after Play and how
+//! soon it was heard, the largest step between two samples after each Stop against the largest while playing (a
+//! click), the real-time promotions (refused by rtkit, taken back by the safety cap) and the device's opens.
 
 use std::time::{Duration, Instant};
 
@@ -358,5 +360,70 @@ fn space_with_an_instrument_open() {
     eprintln!("the transport counted: {} feeder late, {} plugin late, {} device; {} heard", d.feeder - d0.feeder, d.plugin - d0.plugin, d.device - d0.device, d.heard - d0.heard);
     eprintln!("{}", c0.since());
     app.transport.listen(false);
+    sim::set(None);
+}
+
+/// Ctrl+wheel zooms the playlist, maximized on a 1920×1080 frame: `OS_CHECK_ROUNDS` (6) notches out, back, as many
+/// in and back, each easing in 10 ms frames painted as the window's loop paints them. Reports what the frames cost.
+/// `OS_CHECK_OUT=1` zooms out and back twice instead (the whole song on screen); `OS_CHECK_FRAMES=1` prints each
+/// frame's cost with its zoom.
+#[test]
+#[ignore]
+fn playlist_zoom() {
+    let Some(path) = std::env::var_os("OS_CHECK_PROJECT") else {
+        eprintln!("set OS_CHECK_PROJECT to a project file");
+        return;
+    };
+    let notches: usize = var("OS_CHECK_ROUNDS", 6);
+    let mut app = open(std::path::Path::new(&path));
+    let mut c = os_ui::Canvas::new(1920, 1080, 1.0).unwrap();
+    let w = crate::app::Win::Playlist;
+    app.state.wins[w.slot().unwrap()].maxed = true;
+    app.state.wins[w.slot().unwrap()].mini = false;
+    app.state.z.retain(|z| *z != w);
+    app.state.z.push(w);
+    app.close_song_info();
+    app.invalidate();
+    app.paint(&mut c, None);
+    let _ = app.take_damage();
+    let g = app.pl_grid().expect("the playlist is shown");
+    app.mouse_move(g.x + g.w / 2.0, g.y + g.h / 2.0);
+    let mut times = Vec::new();
+    // `OS_CHECK_OUT=1`: out and back only, to the whole song and in again.
+    let dirs = if std::env::var_os("OS_CHECK_OUT").is_some() { [-1.0, 1.0, -1.0, 1.0] } else { [-1.0, 1.0, 1.0, -1.0] };
+    for dy in dirs {
+        for _ in 0..notches {
+            app.wheel(0.0, dy, false, true);
+            for _ in 0..200 {
+                let t0 = Instant::now();
+                app.ease_step(10.0);
+                let d = app.take_damage();
+                match d {
+                    Some(Some(rects)) => app.paint_region(&mut c, Some(&rects)),
+                    Some(None) => app.paint(&mut c, None),
+                    None => {}
+                }
+                times.push(t0.elapsed().as_secs_f64() * 1e3);
+                if std::env::var_os("OS_CHECK_FRAMES").is_some() {
+                    eprintln!("frame {:.1} px a bar: {:.2} ms", app.state.playlist_bar_w, times.last().unwrap());
+                }
+                if !app.smooth.running() {
+                    break;
+                }
+            }
+        }
+    }
+    times.sort_by(f64::total_cmp);
+    let at = |q: f64| times[((times.len() - 1) as f64 * q) as usize];
+    let autos = crate::playlist::clips(&app.state).iter().filter(|c| matches!(c.source, os_model::ClipSource::Channel(ch) if app.state.project.automation(ch).is_some())).count();
+    eprintln!(
+        "{} frames, {} automation clips: median {:.2} ms, 90% {:.2} ms, worst {:.2} ms, total {:.0} ms",
+        times.len(),
+        autos,
+        at(0.5),
+        at(0.9),
+        at(1.0),
+        times.iter().sum::<f64>()
+    );
     sim::set(None);
 }
