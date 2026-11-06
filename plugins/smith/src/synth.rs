@@ -231,6 +231,19 @@ fn droop_db(u: f64) -> f64 {
     table_at(&T, u)
 }
 
+/// The line that sounds at line `k`: above line `n`, from RICH 10 up, an image of the line as far below the table's
+/// middle. The middle itself is empty: line 0.
+fn mirror_line(r: i32, k: usize) -> usize {
+    let middle = 1usize << (r - 1);
+    if r < 10 || k < middle {
+        k
+    } else if k == middle {
+        0
+    } else {
+        (2 * middle).saturating_sub(k)
+    }
+}
+
 /// The droop's gain per line of RICH 16; line `k` of RICH `r` reads it at `k << (16 - r)`.
 fn droops() -> &'static [f32] {
     static T: OnceLock<Vec<f32>> = OnceLock::new();
@@ -673,8 +686,12 @@ impl Note {
         let cut = if lines_n as f64 * f0 > CUT_HZ { (CUT_HZ / f0) as usize } else { nyquist };
         let reach = if pitch_moves { cut.saturating_mul(4) } else { cut };
         let top = upper.min(reach).max(1);
-        // The level counts every line up to `n`, heard or not.
-        let calc = top.max(upper);
+        // The level counts every line up to `n`, heard or not. A flat impulse map with no comb leaves the spectrum as the
+        // seed stage made it. Any shape is normalised over half as many lines again, though those past `n` are not heard
+        // as themselves: it reads quieter.
+        let shaped = st.combs[M_IMPULSE] != 0 || st.finals[M_IMPULSE].points.windows(2).any(|p| p[0].level != p[1].level);
+        let counted = if shaped { (3usize << (r - 2)).min(MAX_LINE) } else { lines_n };
+        let calc = top.max(upper).max(counted);
 
         // The pattern: morphed, rotated and turned into a fall.
         let morph = (f64::from(st.ints[MORPH]) / 1000.0 * value(A_MORPH)).clamp(0.0, 1.0) as f32;
@@ -748,14 +765,7 @@ impl Note {
             }
         };
 
-        let comb = st.comb;
-        let gate = |k: usize| -> bool {
-            match comb {
-                1..=4 => k % (comb as usize + 1) != 0,
-                5..=7 => k % (comb as usize - 2) == 1,
-                _ => true,
-            }
-        };
+        let [comb_forced, comb_impulse, comb_decay, _] = st.combs;
         let forced_flat = st.finals[M_FORCED].points.iter().all(|p| p.level == 0.0);
         let weigh = st.natural_weight;
         let mut a = spare.lines.pop().unwrap_or_default();
@@ -771,7 +781,7 @@ impl Note {
         let mut seed_power = 0.0f64;
         for k in 1..=calc {
             let mut v = fall(g[k]);
-            if !forced_flat && gate(k) {
+            if !forced_flat && comb_gate(comb_forced, k) {
                 let l = f64::from(patch.final_at(M_FORCED, line_at(&patch, k)));
                 v += (1.0 - v) * forced_gain(l) as f32;
             }
@@ -781,19 +791,32 @@ impl Note {
             let w = if weigh { 1.0 / (k as f32).sqrt() } else { 1.0 };
             let x = line_at(&patch, k);
             if alt {
-                settle[k] = v * w * map_gain(gains, patch.final_at(M_DECAY, x));
+                let c = if comb_gate(comb_decay, k) { map_gain(gains, patch.final_at(M_DECAY, x)) } else { 1.0 };
+                settle[k] = v * w * c;
             }
-            a[k] = v * w * map_gain(gains, patch.final_at(M_IMPULSE, x));
+            // A comb on the impulse map silences the lines it leaves out.
+            a[k] = if comb_gate(comb_impulse, k) { v * w * map_gain(gains, patch.final_at(M_IMPULSE, x)) } else { 0.0 };
         }
-        let powers = |v: &[f32]| -> f64 { v.iter().take(lines_n + 1).skip(1).map(|&y| f64::from(y) * f64::from(y)).sum::<f64>() * 0.5 };
+        let powers = |v: &[f32], last: usize| -> f64 { v.iter().take(last + 1).skip(1).map(|&y| f64::from(y) * f64::from(y)).sum::<f64>() * 0.5 };
         let scale = if st.auto_loudness {
-            let p = powers(&a).max(if alt { powers(&settle) } else { 0.0 });
+            let p = powers(&a, counted).max(if alt { powers(&settle, counted) } else { 0.0 });
             if p > 0.0 { RMS / p.sqrt() } else { 1.0 }
         } else {
             let p = seed_power * 0.5;
             if p > 0.0 { 2.0 * RMS / p.sqrt() } else { 1.0 }
         };
-        // Past line `n` the lines droop; nothing is normalised after this.
+        // Past line `n` what sounds is an image of the lines below it, drooping.
+        for k in lines_n + 1..=calc {
+            let m = mirror_line(r, k);
+            a[k] = a.get(m).copied().unwrap_or(0.0);
+            g[k] = g.get(m).copied().unwrap_or(0.0);
+            if !time_g.is_empty() {
+                time_g[k] = time_g.get(m).copied().unwrap_or(0.0);
+            }
+            if alt {
+                settle[k] = settle.get(m).copied().unwrap_or(0.0);
+            }
+        }
         let droops = droops();
         let droop = |k: usize| -> f32 { if r < 10 { 1.0 } else { droops[(k << (16 - r)).min(MAX_TOP)] } };
         let mut power = 0.0f64;
@@ -954,19 +977,22 @@ impl Note {
         let eq_flat = self.patch.st.finals[which].points.iter().all(|p| p.level == 0.5);
         let nat = natural_x();
         let (natural, shift) = (self.patch.st.natural_scale, self.shift);
+        let comb = self.patch.st.combs[which];
         let mut rates = std::mem::take(&mut self.fac);
         let peak = self.a.iter().fold(0.0f32, |m, &v| m.max(v));
         let floor = peak * 1e-4;
         let mut low = f64::INFINITY;
         let gains = map_gains();
         for k in 1..=top {
-            let inv = if eq_flat {
+            // A comb on the decay or release map leaves the lines it skips on the plain time.
+            let j = mirror_line(self.r, k);
+            let inv = if eq_flat || !comb_gate(comb, j) {
                 1.0 / tau
             } else {
                 let x = if shift == 0.0 {
-                    if natural { nat[k] } else { (k as f64 / MAX_LINE as f64) as f32 }
+                    if natural { nat[j] } else { (j as f64 / MAX_LINE as f64) as f32 }
                 } else {
-                    self.patch.line_x(k as f64 - shift)
+                    self.patch.line_x(j as f64 - shift)
                 };
                 let c = f64::from(map_gain(gains, self.patch.final_at(which, x)));
                 let t = (tau * c + 0.005 * (1.0 - c).max(0.0)).max(1e-4);
@@ -1859,6 +1885,98 @@ mod tests {
         let f = 261.625;
         let ratio = |t| amp(t, f * 8.0) / amp(t, f);
         assert!(ratio(44100) < ratio(4410) * 0.7, "{} then {}", ratio(4410), ratio(44100));
+    }
+
+    /// The size of the partial at `f` in the 0.2 s from sample `t0`.
+    fn partial(x: &[f32], t0: usize, f: f64) -> f64 {
+        let n = 8820;
+        let (mut c, mut d) = (0.0, 0.0);
+        for j in 0..n {
+            let a = std::f64::consts::TAU * f * j as f64 / 44100.0;
+            c += f64::from(x[t0 + j]) * a.cos();
+            d += f64::from(x[t0 + j]) * a.sin();
+        }
+        2.0 * (c * c + d * d).sqrt() / n as f64
+    }
+
+    fn set_flat_map(st: &mut State, m: usize, level: f32) {
+        st.finals[m].points.iter_mut().for_each(|p| p.level = level);
+        st.finals[m].keep_sytrus();
+    }
+
+    #[test]
+    fn a_comb_on_the_impulse_map_silences_what_it_skips() {
+        for (comb, on) in [(1, [true, false, true, false]), (2, [true, true, false, true]), (5, [true, false, false, true])] {
+            let mut st = flat();
+            st.ints[RICH] = 6;
+            st.combs[M_IMPULSE] = comb;
+            let mut s = Smith::new(44100);
+            s.set_patch(Patch::new(st));
+            s.note_on(note(60, 0.78));
+            let (l, _) = render(&mut s, 22050);
+            for (i, &v) in on.iter().enumerate() {
+                let a = partial(&l, 2205, 523.25 * (i + 1) as f64);
+                assert_eq!(a > 1e-3, v, "comb {comb} line {} reads {a}", i + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn a_comb_on_a_time_map_leaves_what_it_skips_on_the_plain_time() {
+        for m in [M_DECAY, M_RELEASE] {
+            let mut st = flat();
+            st.ints[RICH] = 6;
+            st.ints[DEC] = if m == M_DECAY { 6000 } else { 9000 };
+            st.ints[REL] = 6000;
+            set_flat_map(&mut st, m, 0.125);
+            // "-2": the odd lines take the map.
+            st.combs[m] = 1;
+            let mut s = Smith::new(44100);
+            s.set_patch(Patch::new(st));
+            let id = s.note_on(note(60, 0.78));
+            if m == M_RELEASE {
+                s.note_off(id);
+            }
+            let (l, _) = render(&mut s, 44100);
+            let (one, two) = (partial(&l, 30870, 523.25), partial(&l, 30870, 1046.5));
+            assert!(two > one * 20.0, "map {m}: line 1 {one}, line 2 {two}");
+        }
+    }
+
+    #[test]
+    fn a_shaped_impulse_map_counts_half_as_many_lines_again() {
+        let level = |r: i32, shape: bool, comb: i32| -> f64 {
+            let mut st = flat();
+            st.ints[RICH] = r;
+            st.combs[M_IMPULSE] = comb;
+            if shape {
+                st.finals[M_IMPULSE].points[1].level = 0.5005;
+                st.finals[M_IMPULSE].keep_sytrus();
+            }
+            let mut s = Smith::new(44100);
+            s.set_patch(Patch::new(st));
+            s.note_on(note(60, 0.78));
+            rms(&render(&mut s, 4410).0)
+        };
+        for r in [8, 10, 12] {
+            let plain = level(r, false, 0);
+            for got in [level(r, true, 0), level(r, false, 1)] {
+                let db = 20.0 * (got / plain).log10();
+                assert!((db + 1.76).abs() < 0.3, "r{r}: {db}");
+            }
+        }
+        // At RICH 16 line 1.5 n is past the last line a map has.
+        let db = 20.0 * (level(16, true, 0) / level(16, false, 0)).log10();
+        assert!(db.abs() < 0.3, "r16: {db}");
+    }
+
+    #[test]
+    fn lines_past_n_are_images() {
+        assert_eq!(mirror_line(9, 400), 400);
+        assert_eq!(mirror_line(10, 511), 511);
+        assert_eq!(mirror_line(10, 512), 0);
+        assert_eq!(mirror_line(10, 513), 511);
+        assert_eq!(mirror_line(16, 61440), 4096);
     }
 
     #[test]

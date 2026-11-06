@@ -404,7 +404,7 @@ impl Logic {
             Some(Target::Pad) => format!("{} / {}", ctl::hint(&self.st, Field::Int(MOD_X)), ctl::text(Field::Int(MOD_Y), ctl::shown(&self.st, Field::Int(MOD_Y)))),
             Some(Target::TargetBox) => format!("Editor target: {}", view::TARGET_NAMES[self.view.target.min(view::TARGETS - 1)]),
             Some(Target::PartTab(p)) => view::PART_NAMES[*p].into(),
-            Some(Target::Comb) => ctl::hint(&self.st, Field::Comb),
+            Some(Target::Comb) => ctl::hint(&self.st, self.comb_field()),
             Some(Target::EqType(b)) => ctl::hint(&self.st, Field::EqType(*b)),
             Some(Target::Point(i)) => self.point_hint(*i),
             Some(Target::Tension(i)) => {
@@ -614,7 +614,10 @@ impl Logic {
             }
             Target::Steps(f) => self.set(*f, ctl::shown(&self.st, *f) + d),
             Target::Choice(f, _) => self.set(*f, ctl::shown(&self.st, *f) - d),
-            Target::Comb => self.set(Field::Comb, ctl::shown(&self.st, Field::Comb) - d),
+            Target::Comb => {
+                let f = self.comb_field();
+                self.set(f, ctl::shown(&self.st, f) - d);
+            }
             Target::EqType(b) => self.set(Field::EqType(*b), ctl::shown(&self.st, Field::EqType(*b)) - d),
             Target::TargetBox => self.view.target = (self.view.target as i32 - d).clamp(0, view::TARGETS as i32 - 1) as usize,
             Target::PartTab(_) => {
@@ -657,11 +660,19 @@ impl Logic {
                 }
                 m
             }
-            MenuReq::Comb => Self::radios(Field::Comb, &ctl::COMB_NAMES, self.st.comb),
+            MenuReq::Comb => {
+                let f = self.comb_field();
+                Self::radios(f, &ctl::COMB_NAMES, ctl::get(&self.st, f))
+            }
             MenuReq::EqType(b) => Self::radios(Field::EqType(*b), &ctl::EQ_TYPES, self.st.eq_types[*b]),
             MenuReq::Point(id, i) => self.point_menu(*id, *i),
             MenuReq::Curve(id) => self.curve_menu(*id),
         }
+    }
+
+    /// The comb of the final map the articulator editor shows.
+    fn comb_field(&self) -> Field {
+        Field::Comb(self.view.target.min(view::TARGETS - 1).saturating_sub(ARTS).min(FINALS - 1))
     }
 
     fn radios(f: Field, names: &[&str], on: i32) -> MenuDef<Cmd> {
@@ -1595,6 +1606,19 @@ mod tests {
         l.flush();
         assert_eq!(l.st.ints[CUT], 77);
         assert_eq!(saved(&l).ints[CUT], 77);
+    }
+
+    /// Each final map has its own comb, set from the box the editor shows on it.
+    #[test]
+    fn each_final_map_has_its_own_comb() {
+        let mut l = logic();
+        for m in 0..FINALS {
+            l.view.target = ARTS + m;
+            let f = l.comb_field();
+            assert_eq!(f, Field::Comb(m));
+            l.set(f, m as i32 + 1);
+        }
+        assert_eq!(l.st.combs, [1, 2, 3, 4]);
     }
 
     /// Every menu builds; the preset clipboard carries a preset; a typed value lands.

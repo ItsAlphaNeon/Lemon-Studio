@@ -74,6 +74,15 @@ pub const M_IMPULSE: usize = 1;
 pub const M_DECAY: usize = 2;
 pub const M_RELEASE: usize = 3;
 
+/// Whether comb setting `comb` lets line `k` take its map: 1..=4 are "-2".."-5", 5.. are "+3" on.
+pub fn comb_gate(comb: i32, k: usize) -> bool {
+    match comb {
+        1..=4 => k % (comb as usize + 1) != 0,
+        5.. => k % (comb as usize - 2) == 1,
+        _ => true,
+    }
+}
+
 pub const MAP_KEY: usize = 0;
 pub const MAP_VEL: usize = 1;
 pub const MAP_X: usize = 2;
@@ -165,9 +174,8 @@ pub struct State {
     pub porta_variable: bool,
     pub porta_limit: u8,
     pub natural_scale: bool,
-    pub comb: i32,
-    /// Three ints whose meaning was not found; kept.
-    pub unknown_236: [i32; 3],
+    /// The comb on each final map: forced, impulse, decay, release.
+    pub combs: [i32; FINALS],
     pub alt_decay: bool,
     pub auto_loudness: bool,
     pub natural_weight: bool,
@@ -201,8 +209,7 @@ impl Default for State {
             porta_variable: true,
             porta_limit: 0,
             natural_scale: true,
-            comb: 0,
-            unknown_236: [0, 0, 0],
+            combs: [0; FINALS],
             alt_decay: false,
             auto_loudness: true,
             natural_weight: false,
@@ -378,8 +385,7 @@ impl State {
         st.porta_limit = switch(10).unwrap_or(0);
         st.natural_scale = switch(11).map_or(def.natural_scale, |v| v != 0);
         if layout >= 9 {
-            st.comb = read_i32(d, 232)?;
-            st.unknown_236 = [read_i32(d, 236)?, read_i32(d, 240)?, read_i32(d, 244)?];
+            st.combs = [read_i32(d, 232)?, read_i32(d, 236)?, read_i32(d, 240)?, read_i32(d, 244)?];
         }
         st.alt_decay = layout >= 11 && *d.get(248)? != 0;
         st.auto_loudness = layout >= 12 && *d.get(249)? != 0;
@@ -469,8 +475,7 @@ impl State {
             self.porta_limit,
             u8::from(self.natural_scale),
         ]);
-        int(&mut w, self.comb);
-        for &v in &self.unknown_236 {
+        for &v in &self.combs {
             int(&mut w, v);
         }
         w.extend_from_slice(&[u8::from(self.alt_decay), u8::from(self.auto_loudness), u8::from(self.natural_weight), 0]);
@@ -532,10 +537,20 @@ mod tests {
     }
 
     #[test]
+    fn a_comb_follows_its_law() {
+        let on = |comb: i32| -> Vec<usize> { (1..=12).filter(|&k| comb_gate(comb, k)).collect() };
+        assert_eq!(on(0), (1..=12).collect::<Vec<_>>());
+        assert_eq!(on(1), [1, 3, 5, 7, 9, 11]);
+        assert_eq!(on(4), [1, 2, 3, 4, 6, 7, 8, 9, 11, 12]);
+        assert_eq!(on(5), [1, 4, 7, 10]);
+        assert_eq!(on(7), [1, 6, 11]);
+    }
+
+    #[test]
     fn a_state_comes_back_as_it_was_written() {
         let mut st = State::default();
         st.ints[RICH] = 9;
-        st.comb = 3;
+        st.combs = [3, 1, 5, 7];
         st.alt_decay = true;
         st.comment = "A\rB\rC\r".into();
         st.arts[A_CUT].env.enabled = true;
@@ -543,6 +558,7 @@ mod tests {
         assert_eq!(back.stream(), st.stream());
         assert_eq!(back.ints[RICH], 9);
         assert!(back.alt_decay && back.arts[A_CUT].env.enabled);
+        assert_eq!(back.combs, [3, 1, 5, 7]);
         assert_eq!(back.comment_lines(), ["A", "B", "C"]);
     }
 

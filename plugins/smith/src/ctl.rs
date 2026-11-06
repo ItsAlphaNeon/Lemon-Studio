@@ -42,7 +42,8 @@ pub enum Field {
     /// Articulator `a`'s envelope (0) or LFO (1), setting `k`: 0 on, 1..=4 the time scales or the LFO's settings, 5
     /// tempo-based, 6 shared.
     Part(usize, usize, usize),
-    Comb,
+    /// The comb on final map `m`.
+    Comb(usize),
     /// EQ band `b`'s type.
     EqType(usize),
     Quality,
@@ -110,7 +111,7 @@ pub fn get(st: &State, f: Field) -> i32 {
                 _ => i32::from(c.flags & GLOBAL != 0),
             }
         }
-        Field::Comb => st.comb,
+        Field::Comb(m) => st.combs[m],
         Field::EqType(b) => st.eq_types[b],
         Field::Quality => st.quality,
         Field::PortaLimit => i32::from(st.porta_limit),
@@ -139,7 +140,7 @@ pub fn set(st: &mut State, f: Field, v: i32) {
             // What the walks work out from the curve.
             c.prepare();
         }
-        Field::Comb => st.comb = v,
+        Field::Comb(m) => st.combs[m] = v,
         Field::EqType(b) => st.eq_types[b] = v,
         Field::Quality => st.quality = v,
         Field::PortaLimit => st.porta_limit = v as u8,
@@ -199,7 +200,7 @@ pub fn range(f: Field) -> (i32, i32) {
         Field::Part(_, 1, 2 | 3) => (-128, 128),
         Field::Part(_, 1, 4) => (-112, 112),
         Field::Part(..) => (0, 1),
-        Field::Comb => (0, 7),
+        Field::Comb(_) => (0, 7),
         Field::EqType(_) => (0, 2),
         Field::Quality => (0, 4),
         Field::PortaLimit => (0, 5),
@@ -326,7 +327,7 @@ pub fn name(f: Field) -> String {
             (0, _) => "Shared / retriggered envelope".into(),
             _ => "Shared / retriggered LFO".into(),
         },
-        Field::Comb => "Comb".into(),
+        Field::Comb(_) => "Comb".into(),
         Field::EqType(b) => format!("EQ band {} type", b + 1),
         Field::Quality => "Processing quality".into(),
         Field::PortaLimit => "Portamento limit".into(),
@@ -389,7 +390,7 @@ pub fn text(f: Field, v: i32) -> String {
         Field::Part(_, 1, 1) => pct(v - 512, (65536 - 512) as f32),
         Field::Part(_, 1, 4) => pct(v, 112.0),
         Field::Part(..) => pct(v, 128.0),
-        Field::Comb => COMB_NAMES[v.clamp(0, 7) as usize].into(),
+        Field::Comb(_) => COMB_NAMES[v.clamp(0, 7) as usize].into(),
         Field::EqType(_) => EQ_TYPES[v.clamp(0, 2) as usize].into(),
         Field::Quality => QUALITY_NAMES[v.clamp(0, 4) as usize].into(),
         Field::PortaLimit => PORTA_LIMITS[v.clamp(0, 5) as usize].into(),
@@ -506,7 +507,7 @@ mod tests {
         assert_eq!(text(Field::Int(REL), 10000), "20.00 s");
         assert_eq!(text(Field::Int(40), -300), "-3.0dB");
         assert_eq!(text(Field::Int(32), 221), "Off");
-        assert_eq!(text(Field::Comb, 5), "+3");
+        assert_eq!(text(Field::Comb(M_DECAY), 5), "+3");
     }
 
     #[test]

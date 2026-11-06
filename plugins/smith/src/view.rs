@@ -481,7 +481,7 @@ fn editor_card(ui: &mut Ui) {
     let (ax, ay) = (TARGET_BOX.right() - 10.0, TARGET_BOX.cy());
     ui.c.fill_polygon(&[(ax - 4.0, ay - 2.0), (ax + 4.0, ay - 2.0), (ax, ay + 3.0)], if st.hover { TEXT } else { DIM });
     ui.hit(TARGET_BOX, Target::TargetBox);
-    // Its parts, or the comb on the forced harmonics.
+    // Its parts, or a final map's comb.
     let parts = parts_of(t);
     let id = shown_curve(ui.st);
     let shown = if let CurveId::Part(_, p) = id { p } else { 0 };
@@ -489,9 +489,10 @@ fn editor_card(ui: &mut Ui) {
         let on = t < ARTS && p < 2 && ctl::part(ui.m.st, t, p).enabled;
         tab(ui, part_tab(i), Target::PartTab(p), PART_LABELS[p], p == shown, on);
     }
-    if t == ARTS + M_FORCED {
-        let v = ctl::shown(ui.m.st, Field::Comb);
-        value_box(ui, COMB_BOX, Target::Comb, &format!("COMB {}", ctl::text(Field::Comb, v).to_uppercase()));
+    if t >= ARTS {
+        let f = Field::Comb(t - ARTS);
+        let v = ctl::shown(ui.m.st, f);
+        value_box(ui, COMB_BOX, Target::Comb, &format!("COMB {}", ctl::text(f, v).to_uppercase()));
     }
     let c = curve_of(ui.m.st, id);
     curve_view(ui, c);
