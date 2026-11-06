@@ -33,6 +33,7 @@ mod browser_index;
 mod burn_midi;
 mod cable;
 mod capture;
+mod replace_file;
 #[cfg(target_os = "linux")]
 mod rt;
 mod one_click;
