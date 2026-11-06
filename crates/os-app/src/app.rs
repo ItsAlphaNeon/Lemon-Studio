@@ -15362,9 +15362,10 @@ mod tests {
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
-        // The all tab lists the roots with content, the preset store and the channel states, all closed.
+        // The all tab lists the roots with content, the preset store, the channel states and the user's projects, all
+        // closed.
         let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
-        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets", "Channel presets"]);
+        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets", "Channel presets", "My projects"]);
         // Project tab: Current project opened with its patterns (default like the screenshot), History above them.
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
         click(&mut app, &mut c, r0);
@@ -16617,7 +16618,7 @@ mod tests {
         // Esc clears the search and leaves the box.
         app.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(app.state.browser_search.is_empty() && !app.state.browser_search_focus);
-        assert_eq!(rows(&app.state).len(), 4);
+        assert_eq!(rows(&app.state).len(), 5);
         // Search box on top moves the list down.
         app.browser_cmd(crate::browser::BCmd::Toggle("top"));
         frame(&mut app, &mut c, None);
