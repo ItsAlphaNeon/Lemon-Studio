@@ -2448,7 +2448,16 @@ impl App {
     /// Closes floating window `w` as its × does.
     fn close_floating(&mut self, w: Win) {
         match w {
-            Win::Hosted(row) => self.plugins.close_window(row),
+            // All its tabs, as its × closes them.
+            Win::Hosted(row) => {
+                #[cfg(target_os = "linux")]
+                let rows = self.state.plugin_tabs.group_of(row).map_or(vec![row], |g| g.rows.clone());
+                #[cfg(not(target_os = "linux"))]
+                let rows = vec![row];
+                for r in rows {
+                    self.plugins.close_window(r);
+                }
+            }
             w => self.act(Action::CloseWin(w)),
         }
         self.invalidate();
@@ -7554,6 +7563,7 @@ impl App {
         // A tab's little x acts on the release, over it still.
         if let Some(r) = self.tab_close_press.take() {
             if self.top_hit(x, y).is_some_and(|h| h.action == Action::PluginTabClose(r)) {
+                self.state.plugin_tabs.closing(r);
                 self.plugins.close_window(r);
                 self.invalidate();
             }
@@ -13017,8 +13027,20 @@ mod tests {
         assert!(app.state.embeds.contains_key(&1) && app.state.embeds.contains_key(&2), "the others stay");
         assert_eq!(app.state.plugin_tabs.group_of(1).map(|g| (g.rows.len(), g.active)), Some((2, 2)));
         frame(&mut app, &mut c, None);
-        // The window's close, top right: every tab goes.
-        let e = app.state.embeds[&2].clone();
+        // The little x of the one showing: the other shows at once, while the plugin is still closing this one.
+        let strip = app.state.embeds[&2].tabs_rect();
+        let close = crate::plugin_tabs::row_shapes(strip, 2, 1, crate::prefs::check(&crate::prefs::PLUGIN_TABS_STACKED)).into_iter().find(|t| t.index == 1).and_then(|t| t.close()).unwrap();
+        app.mouse_move(close.cx(), close.cy());
+        assert_eq!(app.top_hit(close.cx(), close.cy()).map(|h| h.action.clone()), Some(Action::PluginTabClose(2)));
+        assert!(app.embed_down(os_plugkit::input::Button::Left));
+        assert!(app.embed_up());
+        assert!(app.state.plugin_tabs.group_of(1).is_none() && !app.state.plugin_tabs.hidden(1), "the other shows, alone");
+        app.plugin_tick();
+        assert!(app.state.z.contains(&Win::Hosted(1)), "in the stack");
+        assert!(!app.state.embeds.contains_key(&2) && app.state.embeds.contains_key(&1));
+        frame(&mut app, &mut c, None);
+        // A window's own close closes all its tabs; with one left, that one.
+        let e = app.state.embeds[&1].clone();
         let r = e.rect();
         let button = (0..r.w as i32).map(|d| (r.right() - d as f32, r.y + 15.0)).find(|&(x, y)| e.button_at(x, y) == Some(true)).expect("the close button");
         app.mouse_move(button.0, button.1);

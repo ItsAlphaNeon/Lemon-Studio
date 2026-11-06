@@ -204,15 +204,7 @@ impl Tabs {
         let mut joined = Vec::new();
         let is_open = |r: usize| open.iter().any(|o| o.0 == r);
         self.apart.retain(|&r| is_open(r));
-        for g in &mut self.groups {
-            if !is_open(g.active) {
-                let at = g.rows.iter().position(|&r| r == g.active).unwrap_or(0);
-                let next = g.rows.iter().skip(at + 1).chain(g.rows[..at].iter().rev()).find(|&&r| is_open(r));
-                g.active = next.copied().unwrap_or(g.active);
-            }
-            g.rows.retain(|&r| is_open(r));
-        }
-        self.groups.retain(|g| g.rows.len() > 1);
+        self.leave(|r| !is_open(r));
         if !on {
             self.groups.clear();
             self.apart.clear();
@@ -239,6 +231,26 @@ impl Tabs {
         }
         self.open = open.to_vec();
         joined
+    }
+
+    /// Window `row` is closing: it leaves its group now, and the next tab shows at once, while the plugin may take a
+    /// while to close it.
+    pub fn closing(&mut self, row: usize) {
+        self.leave(|r| r == row);
+    }
+
+    /// The windows `gone` says leave their groups: a group showing one of them shows the next tab (or the one before),
+    /// and a group left with one window is no group.
+    fn leave(&mut self, gone: impl Fn(usize) -> bool) {
+        for g in &mut self.groups {
+            if gone(g.active) {
+                let at = g.rows.iter().position(|&r| r == g.active).unwrap_or(0);
+                let next = g.rows.iter().skip(at + 1).chain(g.rows[..at].iter().rev()).find(|&&r| !gone(r));
+                g.active = next.copied().unwrap_or(g.active);
+            }
+            g.rows.retain(|&r| !gone(r));
+        }
+        self.groups.retain(|g| g.rows.len() > 1);
     }
 
     /// The group of window `row`.
