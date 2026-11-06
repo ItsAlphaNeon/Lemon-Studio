@@ -162,27 +162,10 @@ fn forced_gain(l: f64) -> f64 {
     table_at(&T, l)
 }
 
-/// The share of a cycle voice `j / O` of the unison starts later at PHS `x` (0..1, at most 1 with its map).
-fn phase_law(x: f64) -> f64 {
-    const T: [(f64, f64); 16] = [
-        (0.0, 0.0),
-        (0.125, 0.014),
-        (0.1875, 0.04),
-        (0.25, 0.108),
-        (0.3125, 0.211),
-        (0.375, 0.33),
-        (0.4375, 0.452),
-        (0.5, 0.566),
-        (0.5625, 0.668),
-        (0.625, 0.752),
-        (0.6875, 0.821),
-        (0.75, 0.876),
-        (0.8125, 0.92),
-        (0.875, 0.954),
-        (0.9375, 0.98),
-        (1.0, 1.0),
-    ];
-    table_at(&T, x)
+/// The share of a cycle that spreads the unison's voices at PHS `x` (0..1, at most 1 with its map) and RICH `r`.
+fn phase_law(x: f64, r: i32) -> f64 {
+    let h = (101.0 - 101f64.powf(1.0 - x)) / 100.0;
+    h.powi(r)
 }
 
 /// The share of a pattern below each value, in steps: the measured percentiles (the top, clipped by the measurement,
@@ -309,6 +292,12 @@ fn phasors() -> &'static [Cpx] {
     })
 }
 
+/// A harmonic's place on the linear EQ scale: the first line reads the map's left end.
+#[inline]
+fn linear_x(k: f64) -> f32 {
+    ((k - 1.0) / (MAX_LINE + 1) as f64).clamp(0.0, 1.0) as f32
+}
+
 /// A harmonic's place on the natural EQ scale.
 fn natural_x() -> &'static [f32] {
     static T: OnceLock<Vec<f32>> = OnceLock::new();
@@ -374,7 +363,7 @@ impl Patch {
         // One entry per harmonic on the linear scale or for a long map (a resynthesized one); else coarser.
         let finals = Arc::new(std::array::from_fn(|f| {
             let c = &st.finals[f];
-            let n = if !st.natural_scale || c.points.len() > 256 { MAX_LINE } else { 4095 };
+            let n = if !st.natural_scale || c.points.len() > 256 { MAX_LINE + 1 } else { 4095 };
             map_table(c, 0.0, 1.0 / n as f64, n)
         }));
         let mods = (0..ARTS)
@@ -416,11 +405,11 @@ impl Patch {
     #[inline]
     fn line_x(&self, k: f64) -> f32 {
         if k <= 1.0 {
-            if self.st.natural_scale { 0.0 } else { (1.0 / MAX_LINE as f64) as f32 }
+            0.0
         } else if self.st.natural_scale {
             (k.log2() / 15.0).min(1.0) as f32
         } else {
-            (k / MAX_LINE as f64).min(1.0) as f32
+            linear_x(k)
         }
     }
 }
@@ -554,8 +543,9 @@ fn unison(st: &State, table_len: f64, phase: f64) -> Vec<UniVoice> {
             sign = -sign;
         }
         u.shape = sign * DETUNE[j % 9];
-        let late = j as f64 / o as f64 * phase;
-        u.pos = (table_len - late * table_len).rem_euclid(table_len);
+        // The voices sit evenly about the one-voice phase, the first (the left one) behind and the last ahead.
+        let ahead = (j as f64 - (o - 1) as f64 / 2.0) / o as f64 * phase;
+        u.pos = (ahead * table_len).rem_euclid(table_len);
     }
     out
 }
@@ -759,7 +749,7 @@ impl Note {
         let nat = natural_x();
         let line_at = |patch: &Patch, k: usize| -> f32 {
             if shift == 0.0 {
-                if patch.st.natural_scale { nat[k] } else { (k as f64 / MAX_LINE as f64) as f32 }
+                if patch.st.natural_scale { nat[k] } else { linear_x(k as f64) }
             } else {
                 patch.line_x(k as f64 - shift)
             }
@@ -896,7 +886,7 @@ impl Note {
 
         // The unison.
         let phs = (f64::from(st.ints[U_PHS]) / 128.0 * value(A_U_PHASE)).clamp(0.0, 1.0);
-        let uni = unison(st, len as f64, phase_law(phs));
+        let uni = unison(st, len as f64, phase_law(phs, r));
         let declick_len = if st.declick { (0.002 * ctx.rate) as usize } else { 0 };
 
         let fac = spare.lines.pop().unwrap_or_default();
@@ -990,7 +980,7 @@ impl Note {
                 1.0 / tau
             } else {
                 let x = if shift == 0.0 {
-                    if natural { nat[j] } else { (j as f64 / MAX_LINE as f64) as f32 }
+                    if natural { nat[j] } else { linear_x(j as f64) }
                 } else {
                     self.patch.line_x(j as f64 - shift)
                 };
@@ -2004,6 +1994,21 @@ mod tests {
         s.note_on(note(60, 0.78));
         let (l, r) = render(&mut s, 44100);
         assert!((rms(&l[4410..]) - RMS).abs() < 0.004 && (rms(&r[4410..]) - RMS).abs() < 0.004);
+    }
+
+    #[test]
+    fn the_unison_spread_follows_phs_and_rich() {
+        assert_eq!(phase_law(0.0, 9), 0.0);
+        assert!((phase_law(1.0, 9) - 1.0).abs() < 1e-12);
+        // Read from Ogun: PHS 64 at r 9 and r 11.
+        assert!((phase_law(0.5, 9) - 0.42582).abs() < 1e-4);
+        assert!((phase_law(0.5, 11) - 0.35224).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_first_line_reads_the_left_end_of_the_linear_scale() {
+        assert_eq!(linear_x(1.0), 0.0);
+        assert!((linear_x(4.0) - 3.0 / 32768.0).abs() < 1e-9);
     }
 
     #[test]
