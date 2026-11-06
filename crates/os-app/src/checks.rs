@@ -7,7 +7,9 @@
 //! cut into sound, how soon after a key press, and which plugin took the most time in the worst blocks.
 //!
 //! `OS_CHECK_PROJECT=<project.flp> cargo test -p os-app --bin lemonstudio space_play_stop -- --ignored --nocapture`
-//! (`OS_CHECK_BLOCK=256`, `OS_CHECK_RATE=48000`: the device; `OS_CHECK_ROUNDS=20`; `OS_CHECK_RT=0` leaves the audio
+//! (`OS_CHECK_BLOCK=256`, `OS_CHECK_RATE=48000`: the device; `OS_CHECK_ROUNDS=20`; `OS_CHECK_PAUSE=1` pauses instead of
+//! stopping; `OS_CHECK_REPLACE=<plugin>=<plugin>` gives the channels of one plugin another; `OS_CHECK_WAV=<file>`
+//! keeps what was played, with the presses' times next to it; `OS_CHECK_RT=0` leaves the audio
 //! threads at normal priority; `OS_CHECK_UI_IDLE=1` stops the app's loop while the tails ring out after each Stop, to
 //! tell what the UI thread causes). Run it on an idle machine, on a hidden display: the timing is the machine's.
 //!
@@ -58,6 +60,21 @@ fn open(path: &std::path::Path) -> App {
         app.tick();
         std::thread::sleep(Duration::from_millis(5));
     }
+    // `OS_CHECK_REPLACE=<plugin>=<plugin>`: the channels of the first plugin get the second, as Replace ▸ gives it.
+    if let Some((from, to)) = std::env::var("OS_CHECK_REPLACE").ok().as_deref().and_then(|v| v.split_once('=')) {
+        let index = app.plugins.index_of(to).unwrap_or_else(|| panic!("no plugin {to}"));
+        let rows: Vec<usize> = (0..app.state.project.channels.len())
+            .filter(|&r| {
+                let ch = &app.state.project.channels[r];
+                ch.plugin.as_deref() == Some(from) || ch.name.as_deref() == Some(from)
+            })
+            .collect();
+        assert!(!rows.is_empty(), "no channel of {from}");
+        for r in rows {
+            crate::plugin_menu::replace_generator(&mut app, index, r);
+        }
+        run(&mut app, Duration::from_millis(1000));
+    }
     // Mixer effects are hosted a few ticks after loading.
     run(&mut app, Duration::from_millis(500));
     eprintln!("{}: loaded in {:.1} s, {} plugins hosted", path.display(), t0.elapsed().as_secs_f64(), app.plugins.hosted.len());
@@ -73,10 +90,45 @@ fn run(app: &mut App, d: Duration) {
     }
 }
 
+/// Space, as the user presses it; with `OS_CHECK_PAUSE=1` a playing transport is paused instead of stopped.
 fn space(app: &mut App, presses: &mut Vec<Press>, phase: &'static str) {
-    let play = !app.transport.playing();
-    presses.push(Press { at: Instant::now(), phase, play });
-    app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), false, false);
+    let playing = app.transport.state() == crate::transport::State::Playing;
+    presses.push(Press { at: Instant::now(), phase, play: !playing });
+    if playing && std::env::var_os("OS_CHECK_PAUSE").is_some() {
+        app.transport.pause();
+    } else {
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), false, false);
+    }
+}
+
+/// `OS_CHECK_WAV=<file>`: the mix as played, as a 32-bit float WAV, and next to it `<file>.presses` with each press's
+/// time in the file (seconds) and whether it was Play.
+fn save_audio(rec: &Recording, presses: &[Press]) {
+    let audio = sim::take_audio();
+    sim::capture_audio(false);
+    let (Some(path), Some(c), Some(started)) = (std::env::var_os("OS_CHECK_WAV"), rec.config, rec.started) else { return };
+    let bytes = (audio.len() * 4) as u32;
+    let mut w = Vec::with_capacity(44 + bytes as usize);
+    w.extend_from_slice(b"RIFF");
+    w.extend_from_slice(&(36 + bytes).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&16u32.to_le_bytes());
+    w.extend_from_slice(&3u16.to_le_bytes());
+    w.extend_from_slice(&2u16.to_le_bytes());
+    w.extend_from_slice(&c.rate.to_le_bytes());
+    w.extend_from_slice(&(c.rate * 8).to_le_bytes());
+    w.extend_from_slice(&8u16.to_le_bytes());
+    w.extend_from_slice(&32u16.to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&bytes.to_le_bytes());
+    for v in &audio {
+        w.extend_from_slice(&v.to_le_bytes());
+    }
+    let _ = std::fs::write(&path, w);
+    let marks: String = presses.iter().map(|p| format!("{:.4} {}\n", p.at.saturating_duration_since(started).as_secs_f64(), if p.play { "play" } else { "stop" })).collect();
+    let mut marks_path = std::path::PathBuf::from(&path).into_os_string();
+    marks_path.push(".presses");
+    let _ = std::fs::write(marks_path, marks);
 }
 
 /// Starts recording blocks with the transport's counters and every hosted plugin's processing time. The probes'
@@ -90,6 +142,7 @@ fn record(app: &App) -> usize {
         }
     }
     sim::record(probes);
+    sim::capture_audio(std::env::var_os("OS_CHECK_WAV").is_some());
     fixed
 }
 
@@ -314,6 +367,7 @@ fn space_play_stop() {
     }
     run(&mut app, Duration::from_millis(4500));
     let rec = sim::take();
+    save_audio(&rec, &presses);
     let d = app.transport.drops();
     eprintln!("\n{}", report(&rec, &presses, fixed));
     eprintln!(
