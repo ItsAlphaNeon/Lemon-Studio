@@ -50,14 +50,16 @@ own content. Side branches are named `cutting-edge-<topic>`.
     goes into the split (one maximized gives way). The toolbar's window buttons are lit while their window is open.
     There is no minimize; the maximize button shows a full square, or two panes to go back to the split, and a window
     alone has only its close button. The instrument rack, plugin and tool
-    windows still float. With Animations from "Polished" up, windows glide to new places as Omarchy's Hyprland ones
+    windows still float. In the Lemon skin the arranger, piano roll, mixer and browser have round buttons in their
+    title bars; every other window, floating ones and plugin windows too, has a plain ×. With Animations from "Polished" up, windows glide to new places as Omarchy's Hyprland ones
     do; a window opening is at its place at once, under them as they move away, and one closing leaves its
     last look there for them to move over, and maximizing is instant.
   - the browser docked left or right: its title bar drags it to the other side.
   - window keys: split windows other than the one last in front are muted a little, fading as Omarchy's borders do
     (floating windows change nothing). Ctrl+Alt+arrows move the keyboard to the split window that way (floating windows
     are no stops; while one is maximized, the one that way is maximized instead), Ctrl+Alt+Shift+arrows swap split
-    windows, and F maximizes the window under the mouse or brings the split back. Shift+F, or the status bar's button
+    windows, F maximizes the window under the mouse or brings the split back, and Ctrl+Shift+F closes the window under
+    the mouse (a plugin window with tabs: all of them). Shift+F, or the status bar's button
     next to the split button, slides the floating windows and plugin windows down out of sight and back up, together, as
     Omarchy's scratchpad does (Classic has the key). A floating window that opens meanwhile brings them back. The window manager's close shortcut
     closes the floating windows first, the one in front first (plugin windows, the instrument rack, the channel window,
@@ -72,8 +74,10 @@ own content. Side branches are named `cutting-edge-<topic>`.
   mode just started stays.
 - **The piano roll finds its notes.** When the channel has notes in the pattern but none is in view (octaves above
   or below, or further along), a round arrow at the note grid's edge points at the nearest one and names its key; a
-  click scrolls it into view. When notes also lie the opposite way, a second, smaller grey arrow points at the nearest
-  of those.
+  click scrolls it into view. When notes also lie past the opposite side of the grid (above and below, or left and
+  right), a second, smaller grey arrow points at the nearest of those, in a narrow grid too. Notes on one key at the
+  same time look stacked: a note lying over others gets a thin layer above it for each one under it, up to three, only
+  over the stretch they share.
 - **Plugin editors in the app's window (Linux).** The plugins compiled into Lemon Studio (the stock instruments and
   effects) draw their editors inside Lemon Studio's own window, as floating windows like the instrument rack: no X11
   window, no XWayland, no OpenGL. Their menus and value boxes are drawn above the app; knob drags hold the cursor as the
@@ -84,8 +88,9 @@ own content. Side branches are named `cutting-edge-<topic>`.
   `LEMONSTUDIO_PLUGIN_WINDOWS=1` gives the built-in ones their own windows again.
 - **Zest.** An analog-style synthesizer, compiled in on x86-64 (`plugins/zest`). It aims at the sound of u-he Diva and loads Diva's presets when they are installed. Its Space bank holds borrowed Diva presets for now; further banks go in `plugins/zest/banks/` or `~/.local/share/zest/banks/` as `.zest` files.
 - **Windows of one plugin as tabs (Linux).** A second window of a plugin drawn in the app's joins the first, with a row of
-  tabs under the title: square, divided by slanted edges, each with its own close button, while the window's close closes
-  them all. A tab dragged out of the row stands alone, to compare side by side. Held for a moment over another window of its plugin's title, or just below it, a dragged window shows in its own row of tabs the group it would make, its own tab outlined, and letting go there makes it where it was let go. General ▸ Miscellaneous "Show windows of
+  tabs on top of the window: each narrows upwards between slanted edges, the window keeps its size (no row is added
+  to it), and the row starts clear of its rounded corners. Each tab has its own close button, and the one left shows at
+  once; the window's close closes them all. A tab dragged out of the row stands alone, to compare side by side. Held for a moment over another window of its plugin's title, or just below it, a dragged window shows in its own row of tabs the group it would make, its own tab outlined, and letting go there makes it where it was let go. General ▸ Miscellaneous "Show windows of
   one plugin as tabs" turns it off, and "Stack plugin tabs" lays them partly over each other.
 - **Tiling desktops leave the window to the window manager.** On a tiling desktop (Hyprland, sway, i3, niri, river
   and the like, read from `XDG_CURRENT_DESKTOP`), the tiling layout's toolbar has no minimize, maximize and close
@@ -99,8 +104,8 @@ own content. Side branches are named `cutting-edge-<topic>`.
   outright with `LemonStudioSurfaces=#darker,#dark,#background,#lighter` (FL ignores the key).
 - **Stock plugins follow the theme.** With the Lemon skin, the editors of the plugins compiled into Lemon Studio
   (drawn in the app's window) take the applied theme's colours too: Lemon's greys become its surfaces, light greys its
-  text, the lemon yellows its selection; signal colours stay. Theme ▸ Options ▸ "Stock plugins follow the theme", on
-  by default.
+  text, the lemon yellows its selection; signal colours stay. The edges of shapes blend into the recoloured surfaces,
+  so a light theme leaves no dark fringes. Theme ▸ Options ▸ "Stock plugins follow the theme", on by default.
 - **Closing costs nothing: the session comes back.** General settings ▸ Miscellaneous ▸ Startup project is on "Last
   used project" by default, and a start puts back the windows that were open in it when the app closed (the arranger,
   mixer, piano roll, instrument rack, channel window, tool windows and plugin windows, back to front; each plugin's
