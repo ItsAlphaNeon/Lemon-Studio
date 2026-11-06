@@ -509,14 +509,43 @@ impl Retint {
     /// selection; other colours (signals, bands, meters) stay.
     pub fn recolor(&self, c: Color) -> Color {
         let chroma = f32::from(c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b)) / 255.0;
-        let (h, _, l) = c.hsl();
-        if chroma < 0.07 {
-            if l > 0.45 { self.text(c) } else { self.surface(c) }
-        } else if (30.0..=70.0).contains(&h) {
-            self.accent(c)
+        let h = c.hsl().0;
+        if chroma >= 2.0 / 255.0 && (30.0..=70.0).contains(&h) {
+            self.yellow(c, chroma < 0.07)
+        } else if chroma < 0.07 {
+            self.grey(c)
         } else {
             c
         }
+    }
+
+    fn grey(&self, c: Color) -> Color {
+        if c.hsl().2 > 0.45 { self.text(c) } else { self.surface(c) }
+    }
+
+    /// A lemon colour: Lemon's yellows are its key mixed with greys, so a pixel is read as the key over a grey. Over a
+    /// surface grey (an anti-aliased edge, a lemon-tinted well) each part is recoloured and the two mixed again, so the
+    /// edge follows the surface it sits on; over white (the highlights) or darker than black (the coloured darks) the
+    /// colour is rekeyed whole (a `faint` one, all but grey, recoloured as a grey). Between those the two blend, so
+    /// neighbouring shades never jump.
+    fn yellow(&self, c: Color, faint: bool) -> Color {
+        let whole = if faint { self.grey(c) } else { self.accent(c) };
+        let chroma = |c: Color| f32::from(c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b));
+        let t = chroma(c) / chroma(self.key).max(1.0);
+        if t >= 0.99 {
+            return whole;
+        }
+        let k = self.key;
+        let grey = [(c.r, k.r), (c.g, k.g), (c.b, k.b)].iter().map(|&(v, kv)| (f32::from(v) - t * f32::from(kv)) / (1.0 - t)).sum::<f32>() / 3.0;
+        // How surely `grey` is one of the skin's surfaces (#1f1f1f to #666666 and a little beyond).
+        let ramp = |v: f32, a: f32, b: f32| ((v - a) / (b - a)).clamp(0.0, 1.0);
+        let w = ramp(grey, 0.0, 24.0) * (1.0 - ramp(grey, 115.0, 204.0));
+        if w == 0.0 {
+            return whole;
+        }
+        let g = grey.round().clamp(0.0, 255.0) as u8;
+        let parts = self.surface(Color::rgb(u32::from(g) * 0x01_0101)).mix(self.accent(k), t).with_alpha(c.a);
+        whole.mix(parts, w)
     }
 
     pub fn text(&self, c: Color) -> Color {
@@ -603,6 +632,42 @@ mod tests {
         let sel = r.recolor(lemon::MAIN).hsl().0;
         assert!((sel - Color::rgb(0x7fbbb3).hsl().0).abs() < 2.0, "{sel}");
         assert_eq!(r.recolor(Color::rgb(0xe05050)), Color::rgb(0xe05050), "a signal colour stays");
+    }
+
+    /// Under a light theme an anti-aliased edge between a lemon yellow and a dark surface recolours to the edge
+    /// between the two recoloured colours: each step of the blend lands near the same step between the theme's
+    /// selection and its surface, so lit shapes keep smooth edges.
+    #[test]
+    fn lemon_edges_stay_smooth_under_a_light_theme() {
+        let th = FlTheme::parse(crate::presets::PRESETS.iter().find(|p| p.0 == "Cinnamon Light").expect("theme").1);
+        let r = Retint::lemon(&th);
+        for surface in [lemon::DARK, Color::rgb(0x262626), Color::rgb(0x474747)] {
+            let (a, b) = (r.recolor(surface), r.recolor(lemon::MAIN));
+            assert!(a.hsl().2 > 0.5, "a light theme lights the surface");
+            for i in 0..=16 {
+                let t = i as f32 / 16.0;
+                let got = r.recolor(surface.mix(lemon::MAIN, t));
+                let want = a.mix(b, t);
+                let d = [got.r.abs_diff(want.r), got.g.abs_diff(want.g), got.b.abs_diff(want.b)].into_iter().max().unwrap();
+                assert!(d <= 12, "{surface:?} at {t}: {got:?}, want about {want:?}");
+            }
+        }
+        // The whole colours keep their own mapping.
+        for c in [lemon::MAIN, lemon::HIGHLIGHT, lemon::DEEP, lemon::COLORED_DARK] {
+            assert_eq!(r.recolor(c), r.accent(c), "{c:?}");
+        }
+        // Lemon's own colours as a theme leave every step of the edges as drawn.
+        let own = Retint::lemon(&FlTheme::parse(&default_text(Design::Lemon)));
+        for surface in [lemon::DARK, Color::rgb(0x262626), lemon::DARK_HIGHLIGHT] {
+            for top in [lemon::MAIN, lemon::HIGHLIGHT] {
+                for i in 0..=16 {
+                    let c = surface.mix(top, i as f32 / 16.0);
+                    let got = own.recolor(c);
+                    let d = [got.r.abs_diff(c.r), got.g.abs_diff(c.g), got.b.abs_diff(c.b)].into_iter().max().unwrap();
+                    assert!(d <= 12, "{c:?}: {got:?}");
+                }
+            }
+        }
     }
 
     use super::*;
