@@ -8856,6 +8856,15 @@ impl App {
                     self.drag = Some(Drag::MixSelect);
                 }
             }
+            // Alt+click: back to the default as one undo step, and no drag follows. A fader of a strip in a
+            // multi-selection doesn't reset: the selection stays and that strip becomes current (spec: ui/mixer.md §4).
+            Action::Fader(t) if self.alt => {
+                let in_group = crate::mixer::selected(s).len() > 1 && crate::mixer::is_selected(s, t);
+                crate::mixer::select(s, t, in_group);
+                if !in_group {
+                    self.reset_control(crate::knobs::Control::Fader(t));
+                }
+            }
             Action::Fader(t) => {
                 crate::mixer::select(s, t, self.ctrl);
                 // One undo step for the drag (none when it doesn't move the fader, nor with Undo knob tweaks off: a
