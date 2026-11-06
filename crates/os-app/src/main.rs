@@ -1855,7 +1855,25 @@ fn attach_console() {
     }
 }
 
+/// Linux: the sound server lists Lemon Studio's audio streams by its name and icon, not as an "ALSA plug-in":
+/// PipeWire's ALSA plugin reads `PIPEWIRE_ALSA`, PulseAudio's `PULSE_PROP`. A value the user set is kept.
+#[cfg(target_os = "linux")]
+fn name_audio_streams() {
+    let names = [
+        ("PIPEWIRE_ALSA", "{ application.name = \"Lemon Studio\" node.description = \"Lemon Studio\" application.icon-name = \"lemonstudio\" }"),
+        ("PULSE_PROP", "application.name='Lemon Studio' application.icon_name=lemonstudio"),
+    ];
+    for (var, value) in names {
+        if std::env::var_os(var).is_none() {
+            // SAFETY: called first in `main`, before any other thread exists.
+            unsafe { std::env::set_var(var, value) };
+        }
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    name_audio_streams();
     #[cfg(windows)]
     attach_console();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
