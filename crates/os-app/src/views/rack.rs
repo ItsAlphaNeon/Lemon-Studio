@@ -337,9 +337,9 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         }
         // Pan and volume knobs (§11).
         ui.hit(Rect::new(x + 27.0, ry + 5.0, 15.0, 16.0), Action::Knob(KnobId::ChanPan(i)), s.knob_text(KnobId::ChanPan(i)));
-        row_knob(ui, x + 34.5, ry + 13.0, s.knob(KnobId::ChanPan(i)));
+        row_knob(ui, x + 34.5, ry + 13.0, s.knob_at(KnobId::ChanPan(i), x + 34.5, ry + 13.0, 8.5));
         ui.hit(Rect::new(x + 44.0, ry + 5.0, 15.0, 16.0), Action::Knob(KnobId::ChanVol(i)), s.knob_text(KnobId::ChanVol(i)));
-        row_knob(ui, x + 51.5, ry + 13.0, s.knob(KnobId::ChanVol(i)));
+        row_knob(ui, x + 51.5, ry + 13.0, s.knob_at(KnobId::ChanVol(i), x + 51.5, ry + 13.0, 8.5));
         // Mixer track box (§12).
         if s.rack.show_mixer {
             let mb = Rect::span(x + 66.0, x + 99.0, ry + 1.0, ry + 25.0);
@@ -586,7 +586,7 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     ui.c.pop_clip();
     // Swing knob with its halo (§7); a non-zero swing draws an orange arc.
     let kx = r - 149.5;
-    let swing = s.knob(KnobId::Swing);
+    let swing = s.knob_at(KnobId::Swing, kx, y + 14.5, 14.0);
     ui.hit(Rect::new(kx - 12.0, y + 3.0, 24.0, 24.0), Action::Knob(KnobId::Swing), s.knob_text(KnobId::Swing));
     ui.c.fill_circle(kx, y + 14.5, 12.0, ui.t.s(0x212225));
     if swing > 0.0 {

@@ -579,6 +579,7 @@ pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
 }
 
 fn swap(s: &mut State, i: usize) {
+    s.motion.borrow_mut().ripples_over();
     if let Snap::Commands(v) = &mut s.history.steps[i].snap {
         let v = std::mem::take(v);
         let other = crate::control::take_back(s, v);

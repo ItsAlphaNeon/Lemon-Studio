@@ -232,11 +232,17 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
     // Clips reaching the painted part of the grid (a scrolled-in strip is a small part, see `App::playlist_scrolled`);
     // a clip draws inside its own rect.
+    let gliding = s.motion.borrow().clips_gliding();
+    let count = pl::clips(s).len();
     for (i, c) in pl::clips(s).iter().enumerate() {
-        if ui.c.visible(g.clip_rect(c).outset(2.0)) {
+        let glide = if gliding { s.motion.borrow_mut().clip_glide(pl::glide_key(i, count)) } else { None };
+        if let Some(at) = glide {
+            clip_gliding(ui, s, &g, i, c, at);
+        } else if ui.c.visible(g.clip_rect(c).outset(2.0)) {
             clip_paint(ui, s, &g, i, c);
         }
     }
+    ripples(ui, s, &g);
     // Performance mode: the part of the zone the MIDI channel's notes reach (spec: ui/performance-mode.md §3).
     if let Some((tr, n, a, b)) = crate::perform::grid_area(s) {
         let (y0, y1) = (g.y_of(tr), g.y_of(tr + n));
@@ -830,6 +836,66 @@ fn offset(c: Color, d: i16) -> Color {
     Color { r: f(c.r), g: f(c.g), b: f(c.b), a: c.a }
 }
 
+/// A clip on its way to where the magnet put it: its left edge, right edge and top are `at` px from their places
+/// (spec: ui/animations.md §4.10). Only the drawing moves: the clip is already there.
+fn clip_gliding(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, (left, right, down): (f32, f32, f32)) {
+    let r = g.clip_rect(c);
+    let drawn = Rect::span(r.x + left, r.right() + right, r.y + down, r.bottom() + down);
+    s.motion.borrow_mut().live(r.union(&drawn).outset(2.0).intersect(&g.grid));
+    if !ui.c.visible(drawn.outset(2.0)) {
+        return;
+    }
+    let mut at = g.clone();
+    at.scroll_y -= down;
+    if (left - right).abs() < 0.01 {
+        at.scroll_x -= left;
+        clip_paint(ui, s, &at, i, c);
+    } else {
+        clip_paint(ui, s, &at, i, &pl::with_edges(s, g, c, left, right));
+    }
+}
+
+/// Deleted clips rippling away (spec: ui/animations.md §4.10): a rounded shape in the clip's title colour, lifted
+/// toward white, whose fill fades quickly while its outline grows a little and fades slowly.
+fn ripples(ui: &mut Ui, s: &State, g: &PGeom) {
+    let list = s.motion.borrow_mut().ripples();
+    if list.is_empty() {
+        return;
+    }
+    let t = ui.t;
+    let corner = if super::lemon(ui) { lk::r_btn(t) } else { 3.0 };
+    for d in list {
+        if d.arrangement != s.project.current_arrangement {
+            continue;
+        }
+        let c = &d.clip;
+        let base = g.clip_draw_rect(c).0;
+        let reach = base.outset(crate::motion::RIPPLE_REACH).intersect(&g.grid);
+        s.motion.borrow_mut().live(reach);
+        if !ui.c.visible(reach) {
+            continue;
+        }
+        let top = if d.selected {
+            cc(t, SEL_TITLE)
+        } else if c.muted {
+            cc(t, MUTED_TITLE)
+        } else {
+            match (pl::source_kind(s, c.source), pl::clip_tint(s, c.source).map(rgb)) {
+                (PickKind::Audio | PickKind::Automation, Some(tint)) => offset(tint, -17),
+                _ => cc(t, TITLE_TOP),
+            }
+        };
+        let top = if pl::track_on(s, c.track) { top } else { top.mix(t.grid, 0.5) };
+        let col = top.mix(t.tx(0xffffff), 0.45);
+        let r = base.outset(d.grow);
+        let radius = (corner + d.grow).min(r.w / 2.0).min(r.h / 2.0);
+        if d.fill > 0.0 {
+            ui.c.fill_rrect(r, radius, col.with_alpha((d.fill * 255.0).round() as u8));
+        }
+        ui.c.stroke_rrect(r, radius, 2.0 - d.grow / 4.0, col.with_alpha((d.line * 255.0).round() as u8));
+    }
+}
+
 /// One clip (§2): a near-black outline with rounded top corners, the title strip (pattern clips neutral, audio and
 /// automation clips in their channel's colour), the body in the track's colour, then the content.
 fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
@@ -848,6 +914,7 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         };
         let col = if c.muted || !pl::track_on(s, c.track) { col.mix(t.grid, 0.6) } else { col };
         ui.c.fill_rrect(r, 1.5, col);
+        flash(ui, s, g, c, r, 1.5);
         return;
     }
     let kind = pl::source_kind(s, c.source);
@@ -954,6 +1021,9 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
                 if !c.muted {
                     fades(ui, s, g, i, c, body_at, dim(wave));
                 }
+                if s.playlist.wave_wait {
+                    loading(ui, s, body_at.r);
+                }
             }
             (PickKind::Automation, ClipSource::Channel(ch)) => {
                 let col = if c.muted { content } else { dim(cc(t, CURVE)) };
@@ -963,6 +1033,40 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
         }
     }
     ui.c.pop_clip();
+    flash(ui, s, g, c, r, if lemon { lk::r_btn(t).min(r.w / 2.0).min(r.h / 2.0) } else { 0.0 });
+}
+
+/// An audio clip whose sample is still loading (spec: ui/project-loading.md): a soft highlight sweeps across its body
+/// every 1.2 s, hidden at Animations Off (spec: ui/animations.md §4.8).
+fn loading(ui: &mut Ui, s: &State, body: Rect) {
+    if body.w < 8.0 {
+        return;
+    }
+    let Some(u) = s.motion.borrow_mut().sweep(body) else { return };
+    let band = (body.w * 0.35).clamp(24.0, 140.0).round();
+    let x0 = (body.x - band + u * (body.w + band)).round();
+    let white = ui.t.tx(0xffffff);
+    // 2 px columns, brightest in the middle.
+    for k in 0..(band / 2.0) as usize {
+        let x = x0 + 2.0 * k as f32;
+        let col = Rect::new(x.max(body.x), body.y, (x + 2.0).min(body.right()) - x.max(body.x), body.h);
+        if col.w <= 0.0 {
+            continue;
+        }
+        let a = (std::f32::consts::PI * (k as f32 + 0.5) / (band / 2.0)).sin();
+        ui.c.fill_rect(col, white.with_alpha((a * a * 46.0).round() as u8));
+    }
+}
+
+/// A clip sharing the source of the clip just double-clicked flashes: a white tint up to 60 % and back over 400 ms,
+/// held still at Animations Off (spec: ui/animations.md §4.7).
+fn flash(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, r: Rect, radius: f32) {
+    let a = s.motion.borrow_mut().flash_of(pl::source_key(c.source), r);
+    if a > 0.0 {
+        ui.c.push_clip(r.intersect(&g.grid));
+        ui.c.fill_rrect(r, radius, ui.t.tx(0xffffff).with_alpha((a * 255.0).round() as u8));
+        ui.c.pop_clip();
+    }
 }
 
 /// A clip's body as drawn (`r`, its edges possibly pulled in by `PGeom::clip_draw_rect`) and its true left edge and
@@ -1162,11 +1266,26 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
         curve(ui, edges.x, f64::from(xf.x1), xf.t_in, false);
         curve(ui, edges.x, f64::from(xf.x1), xf.t_out, true);
     }
-    // Handles only while the mouse is over the clip (as FL): white, brighter on the one under the mouse.
-    if !hovered {
+    // Handles only while the mouse is over the clip (as FL): white, brighter on the one under the mouse. They fade in
+    // and out (spec: ui/animations.md §4.6).
+    let area = body.outset(8.0);
+    // Not lasting past a change in the list: the next clip would take this one's place, handles and all.
+    let shown = s.motion.borrow_mut().hover(crate::motion::key(("clip handles", i, crate::playlist::clips(s).len())), hovered, area);
+    if shown <= 0.0 {
         return;
     }
+    let fading = (shown < 1.0).then(|| ui.c.begin_layer(area, false));
+    handles(ui, s, g, c, body, xf, &lit, white);
+    if let Some(l) = fading {
+        ui.c.end_layer(l, shown);
+    }
     let _ = wave;
+}
+
+/// An audio clip's handles (`fades`): `lit` says which is under the mouse.
+#[allow(clippy::too_many_arguments)]
+fn handles(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, body: Rect, xf: Option<pl::Xfade>, lit: &dyn Fn(pl::Handle) -> bool, white: Color) {
+    let (fx_in, fx_out) = pl::fade_xs(s, g, c);
     let col = |h: pl::Handle| if lit(h) { white } else { white.with_alpha(215) };
     let k = 6.0;
     ui.c.fill_polygon(&[(fx_in, body.y), (fx_in + k, body.y), (fx_in, body.y + k)], col(pl::Handle::FadeIn));
@@ -1179,32 +1298,30 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
         (gx - r * a.cos(), gy - r * a.sin())
     }).collect();
     ui.c.fill_polygon(&half, col(pl::Handle::Gain));
-    if hovered {
-        // The crossfade's handle: a big filled circle at the later clip's gain in the middle, a small ring at the
-        // earlier clip's (§9a); where they meet the ring shows inside the circle.
-        if let Some(xf) = xf.filter(|xf| xf.x1 - xf.x0 > 10.0) {
-            let (hx, hy, ry) = pl::xfade_handle(g, c, &xf);
-            let on = lit(pl::Handle::Crossfade);
-            ui.c.fill_circle(hx, hy, if on { pl::XFADE_R + 1.0 } else { pl::XFADE_R }, col(pl::Handle::Crossfade));
-            ui.c.fill_circle(hx, ry, 2.5, ui.t.s(0x1c2328).with_alpha(200));
-            ui.c.stroke_circle(hx, ry, 2.5, 1.1, white);
+    // The crossfade's handle: a big filled circle at the later clip's gain in the middle, a small ring at the earlier
+    // clip's (§9a); where they meet the ring shows inside the circle.
+    if let Some(xf) = xf.filter(|xf| xf.x1 - xf.x0 > 10.0) {
+        let (hx, hy, ry) = pl::xfade_handle(g, c, &xf);
+        let on = lit(pl::Handle::Crossfade);
+        ui.c.fill_circle(hx, hy, if on { pl::XFADE_R + 1.0 } else { pl::XFADE_R }, col(pl::Handle::Crossfade));
+        ui.c.fill_circle(hx, ry, 2.5, ui.t.s(0x1c2328).with_alpha(200));
+        ui.c.stroke_circle(hx, ry, 2.5, 1.1, white);
+    }
+    for (h, on, xa, xb, out) in [
+        (pl::Handle::TensionIn, c.stored_fade_in().filter(|_| !pl::managed(s, c, false)), body.x, fx_in, false),
+        (pl::Handle::TensionOut, c.stored_fade_out().filter(|_| !pl::managed(s, c, true)), fx_out, body.right(), true),
+    ] {
+        let Some((_, t)) = on else { continue };
+        if xb - xa <= 10.0 {
+            continue;
         }
-        for (h, on, xa, xb, out) in [
-            (pl::Handle::TensionIn, c.stored_fade_in().filter(|_| !pl::managed(s, c, false)), body.x, fx_in, false),
-            (pl::Handle::TensionOut, c.stored_fade_out().filter(|_| !pl::managed(s, c, true)), fx_out, body.right(), true),
-        ] {
-            let Some((_, t)) = on else { continue };
-            if xb - xa <= 10.0 {
-                continue;
-            }
-            let (mx, my) = pl::fade_mid(body, xa, xb, t, out);
-            if lit(h) {
-                ui.c.fill_circle(mx, my, 5.5, white);
-            } else {
-                ui.c.fill_circle(mx, my, 4.0, ui.t.s(0x1c2328).with_alpha(200));
-                ui.c.stroke_circle(mx, my, 4.0, 1.3, white);
-                ui.c.line(mx - 2.2, my + 2.2, mx + 2.2, my - 2.2, 1.1, white);
-            }
+        let (mx, my) = pl::fade_mid(body, xa, xb, t, out);
+        if lit(h) {
+            ui.c.fill_circle(mx, my, 5.5, white);
+        } else {
+            ui.c.fill_circle(mx, my, 4.0, ui.t.s(0x1c2328).with_alpha(200));
+            ui.c.stroke_circle(mx, my, 4.0, 1.3, white);
+            ui.c.line(mx - 2.2, my + 2.2, mx + 2.2, my - 2.2, 1.1, white);
         }
     }
 }
@@ -1400,10 +1517,15 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
         // At the Pop-ups scaling (spec: ui/ui-scaling.md §1).
         ui.scaled(super::popup_scale(ui.c.scale), |ui, k| {
             let (w, h) = ui.c.size();
-            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, false, p.scroll[0]);
+            // What the menu is: its entries, where it opened (spec: ui/animations.md §4.2).
+            let key = crate::motion::key((p.x.to_bits(), p.y.to_bits(), p.items.iter().map(|it| &*it.label).collect::<Vec<_>>()));
+            let fx = MenuFx { s, slot: crate::motion::Slot::Popup, key, anchor: (p.x / k, p.y / k), k };
+            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, fx, p.scroll[0]);
             if let Some(i) = p.sub {
                 if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
-                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true, p.scroll[1]);
+                    let key = crate::motion::key((key, i));
+                    let fx = MenuFx { s, slot: crate::motion::Slot::Sub, key, anchor: (rr.right(), rr.y), k };
+                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, fx, p.scroll[1]);
                 }
             }
         });
@@ -1458,11 +1580,55 @@ fn any_enabled(items: &[pl::PItem]) -> bool {
     items.iter().any(|c| !c.head && !c.sep && !c.col && c.enabled && (c.children.is_empty() || any_enabled(&c.children)))
 }
 
+/// Which menu a popup list is and how it moves (`crate::motion`): opened from `anchor`, painted at `k` times the
+/// window's scale.
+#[derive(Clone, Copy)]
+pub struct MenuFx<'a> {
+    pub s: &'a State,
+    pub slot: crate::motion::Slot,
+    pub key: u64,
+    pub anchor: (f32, f32),
+    pub k: f32,
+}
+
+impl MenuFx<'_> {
+    /// `r` (the canvas's px) in the window's px.
+    pub fn up(&self, r: Rect) -> Rect {
+        Rect::new(r.x * self.k, r.y * self.k, r.w * self.k, r.h * self.k)
+    }
+}
+
+/// A menu's panel. At Animations Off, menus take a plain look: square, with a 1 px grey border (spec:
+/// ui/animations.md §4.2).
+pub fn menu_panel(ui: &mut Ui, r: Rect, m: &os_ui::kit::menu::Metrics) {
+    let t = ui.t;
+    if crate::anim::level() == crate::anim::Level::Off {
+        ui.c.fill_rect(r, t.menu_pop);
+        ui.c.stroke_rrect(Rect::new(r.x + 0.5, r.y + 0.5, r.w - 1.0, r.h - 1.0), 0.0, 1.0, t.menu_pop_dim);
+    } else if super::lemon(ui) {
+        os_ui::kit::popup(ui.c, t, r);
+    } else {
+        ui.c.fill_rect(r, t.menu_pop);
+        ui.c.stroke_rrect(Rect::new(r.x + m.line, r.y + m.line, r.w - 2.0 * m.line, r.h - 2.0 * m.line), 0.0, m.border, t.menu_pop_border);
+    }
+}
+
+/// A menu row's highlight bar.
+pub fn menu_highlight(ui: &mut Ui, rr: Rect, lemon: bool) {
+    // At Animations Off, menus are plain and square (`menu_panel`).
+    if lemon && crate::anim::level() != crate::anim::Level::Off {
+        os_ui::kit::row_highlight(ui.c, ui.t, rr);
+    } else {
+        ui.c.fill_rect(rr, ui.t.menu_pop_hi);
+    }
+}
+
 /// Draw a popup list at (x, y) kept on screen; returns its rect and each item's row rect. Columns wider than the
 /// screen: the ones that fit from column `scroll` on, and a scroll bar under them (spec: ui/menus.md "Menus wider than
-/// the window").
+/// the window"). It appears and its highlight glides as `fx` says (spec: ui/animations.md §4.2).
 #[allow(clippy::too_many_arguments)]
-fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, sub: bool, scroll: usize) -> (Rect, Vec<Rect>) {
+fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, fx: MenuFx, scroll: usize) -> (Rect, Vec<Rect>) {
+    let sub = fx.slot == crate::motion::Slot::Sub;
     let t = ui.t;
     let font = Font::new(14);
     let mut lw: f32 = 80.0;
@@ -1494,20 +1660,30 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     let menu = if sub { crate::app::MENU_SUB } else { crate::app::MENU_POPUP };
     let mut rows = Vec::with_capacity(items.len());
     let lemon = super::lemon(ui);
-    if lemon {
-        os_ui::kit::popup(ui.c, t, r);
-    } else {
-        ui.c.fill_rect(r, t.menu_pop);
-        ui.c.stroke_rrect(Rect::new(r.x + m.line, r.y + m.line, r.w - 2.0 * m.line, r.h - 2.0 * m.line), 0.0, m.border, t.menu_pop_border);
-    }
+    let mut draw = fx.s.motion.borrow_mut().menu_begin(ui.c, fx.slot, fx.key, r, fx.anchor, fx.k);
+    fx.s.motion.borrow_mut().menu_behind(ui.c, &mut draw, fx.slot, open.is_some(), r, fx.k);
+    fx.s.motion.borrow_mut().captions_live(fx.slot, r, fx.k);
+    menu_panel(ui, r, &m);
     ui.hit(r, Action::Swallow, "");
+    // A column out of view is placed beside the shown ones.
+    let at = |col: usize| r.x + m.border + (col as f32 - first as f32) * cw;
+    let row_rect = |i: usize| Rect::new(at(layout[i].0), r.y + m.border + layout[i].1, cw - 2.0 * m.border, item_h(&m, &items[i]));
+    let action_of = |i: usize| if sub { Action::PlPopupSub(i) } else { Action::PlPopup(i) };
+    let shows = |i: usize| layout[i].0 >= first && layout[i].0 < first + shown;
+    // The highlight bar goes to the row under the mouse, gliding there from Polished up.
+    let hot = (0..items.len()).find(|&i| {
+        let it = &items[i];
+        it.enabled && !it.head && !it.sep && !it.col && shows(i) && ui.hovers(row_rect(i), &action_of(i))
+    });
+    let bar = fx.s.motion.borrow_mut().glide(fx.slot, fx.key, hot.map(row_rect), fx.up(r));
+    if let Some(b) = bar {
+        menu_highlight(ui, b, lemon);
+    }
     for (i, it) in items.iter().enumerate() {
-        let (col, off) = layout[i];
-        // A column out of view is placed beside the shown ones.
-        let at = |col: usize| r.x + m.border + (col as f32 - first as f32) * cw;
-        let rr = Rect::new(at(col), r.y + m.border + off, cw - 2.0 * m.border, item_h(&m, it));
+        let (col, _) = layout[i];
+        let rr = row_rect(i);
         rows.push(rr);
-        let action = if sub { Action::PlPopupSub(i) } else { Action::PlPopup(i) };
+        let action = action_of(i);
         if col < first || col >= first + shown {
             // The wheel still steps to its rows: where the scroll that shows the column puts them.
             if it.enabled && !it.head && !it.sep && !it.col {
@@ -1539,12 +1715,11 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         // planned). Disabled entries never light up.
         let live = it.enabled && (it.children.is_empty() || any_enabled(&it.children));
         if it.enabled {
-            let lit = ui.hit(rr, action, it.label.to_string()) || open == Some(i);
+            ui.hit(rr, action, it.label.to_string());
             ui.menu_row(menu);
-            if lit && lemon {
-                os_ui::kit::row_highlight(ui.c, t, rr);
-            } else if lit {
-                ui.c.fill_rect(rr, t.menu_pop_hi);
+            // The row whose submenu is open stays lit (the bar is on the row under the mouse).
+            if open == Some(i) && hot != Some(i) {
+                menu_highlight(ui, rr, lemon);
             }
         } else if matches!(it.cmd, pl::Cmd::NotYet(_)) {
             ui.hit(rr, action, crate::app::off_text(&it.label));
@@ -1570,7 +1745,10 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
             Mark::Radio(false) => ui.c.stroke_circle(mx, my, 3.5, 1.0, t.menu_pop_dim),
             _ => {}
         }
-        ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, lw + 4.0, color, &it.label);
+        // At Playful the captions enter one after another; the rest of a row is there at once.
+        let (left, shows) = fx.s.motion.borrow().caption(fx.slot, i);
+        let color = color.with_alpha((f32::from(color.a) * shows) as u8);
+        ui.c.text_clip(font, rr.x + 20.0 - left, rr.y + 2.0 + dy, lw + 4.0, color, &it.label);
         let right = rr.right() - if it.children.is_empty() { 8.0 } else { 16.0 };
         if !it.key.is_empty() {
             let sc = if live { t.menu_pop_shortcut } else { t.menu_pop_dim.mix(t.menu_pop, 0.35) };
@@ -1588,5 +1766,6 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
         let target = if sub { crate::app::Scroll::PopupSub } else { crate::app::Scroll::Popup };
         super::scrollbar(ui, track, false, first as f32, shown as f32, cols as f32, target);
     }
+    crate::motion::Motion::menu_end(ui.c, draw);
     (r, rows)
 }

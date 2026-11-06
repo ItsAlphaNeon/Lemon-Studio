@@ -32,6 +32,8 @@ pub(crate) struct DetWin {
     cursor: app::Cursor,
     /// It was the app's top window (`State::z`) at the last sync: raised since (F9, VIEW), it comes to the front.
     top: bool,
+    /// How opaque it shows now (`set_opacity`).
+    opacity: f32,
 }
 
 /// The native window's title.
@@ -130,7 +132,7 @@ fn open(el: &ActiveEventLoop, main: &Window, app: &App, w: Win) -> Option<DetWin
     }
     let context = softbuffer::Context::new(window.clone()).ok()?;
     let surface = softbuffer::Surface::new(&context, window.clone()).ok()?;
-    Some(DetWin { win: w, window, surface, canvas: None, cursor: app::Cursor::Default, top: true })
+    Some(DetWin { win: w, window, surface, canvas: None, cursor: app::Cursor::Default, top: true, opacity: 1.0 })
 }
 
 impl Shell {
@@ -155,6 +157,11 @@ impl Shell {
                 d.window.focus_window();
             }
             d.top = top == Some(d.win);
+            let opacity = self.app.detached_opacity(d.win);
+            if opacity != d.opacity {
+                d.opacity = opacity;
+                set_opacity(&d.window, opacity);
+            }
             // The Channel rack's window follows its size (the graph editor opened below it, a column added).
             let k = ui_scale(&d.window);
             if let (Some((w, h)), size) = (self.app.state.detached_size(d.win), d.window.inner_size()) {
@@ -386,6 +393,30 @@ impl Shell {
         }
     }
 }
+
+/// Shows a native window at `opacity` over what is behind it (General ▸ Display ▸ Transparent windows). Windows only: on
+/// Linux and macOS a detached window stays opaque (spec: ui/animations.md §4.9).
+#[cfg(windows)]
+fn set_opacity(window: &Window, opacity: f32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE, LWA_ALPHA, WS_EX_LAYERED};
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(RawWindowHandle::Win32(h)) = window.window_handle().map(|h| h.as_raw()) else { return };
+    let hwnd = h.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+    let layered = WS_EX_LAYERED as isize;
+    // SAFETY: `hwnd` is this live window's handle, on the thread that owns it.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if opacity >= 1.0 {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !layered);
+        } else {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | layered);
+            SetLayeredWindowAttributes(hwnd, 0, (opacity * 255.0) as u8, LWA_ALPHA);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn set_opacity(_window: &Window, _opacity: f32) {}
 
 #[cfg(test)]
 mod tests {

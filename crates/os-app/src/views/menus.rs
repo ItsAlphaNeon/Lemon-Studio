@@ -854,97 +854,139 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize, k: f32) {
     };
     let r = Rect::new((ax / k).min(s.screen.0 / k - width).max(0.0), ay / k, width, body_h + border * 2.0);
     let away = !r.contains(ui.mouse.0, ui.mouse.1);
+    // It drops from its title (spec: ui/animations.md §4.2).
+    use crate::motion::Slot;
+    let key = crate::motion::key((menu, ax.to_bits(), ay.to_bits()));
+    let mut draw = s.motion.borrow_mut().menu_begin(ui.c, Slot::Dropdown, key, r, (r.x, r.y), k);
+    let behind = s.menu_sub.is_some() && s.playlist.popup.is_some();
+    s.motion.borrow_mut().menu_behind(ui.c, &mut draw, Slot::Dropdown, behind, r, k);
+    s.motion.borrow_mut().captions_live(Slot::Dropdown, r, k);
     // Lemon (spec: ui/lemon-design.md §9): a rounded panel, rounded row highlights.
     let lemon = super::lemon(ui);
-    if lemon {
-        os_ui::kit::popup(ui.c, t, r);
-    } else {
-        ui.c.fill_rect(r, t.menu_pop);
-        ui.c.stroke_rrect(Rect::new(r.x + mt.line, r.y + mt.line, r.w - 2.0 * mt.line, r.h - 2.0 * mt.line), 0.0, border, t.menu_pop_border);
-    }
+    super::playlist::menu_panel(ui, r, &mt);
     ui.hit(r, Action::Swallow, "");
-
     let font = Font::new(14);
     // Text sits where it does at 100 %, moved by half of what the row lost.
     let dy = (row - os_ui::kit::menu::ROW) / 2.0;
     // The ▸ entry whose submenu is open stays lit, as in the app's popups.
     let open = s.menu_sub.filter(|_| s.playlist.popup.is_some());
-    let mut cx = r.x + border;
-    let mut flat = 0usize;
-    for (ci, (_, items)) in m.cols.iter().enumerate() {
-        let cw = &col_ws[ci];
-        let col = Rect::new(cx, r.y + border, *cw, body_h);
-        if ci > 0 {
-            ui.c.fill_rect(Rect::new(cx - 1.0, col.y, 1.0, body_h), t.menu_pop_head);
-        }
-        let mut y = col.y;
-        if menu == PATTERNS && ci == 0 {
-            for (n, name) in &pats {
-                let rr = Rect::new(col.x, y, col.w, row);
-                let hov = ui.hit(rr, Action::MenuItem(menu, PATTERN_PICK + *n as usize), "Select pattern");
-                ui.menu_row(crate::app::MENU_DROPDOWN);
-                let lit = hov || (*n == s.pattern && away);
-                if lit && lemon {
-                    os_ui::kit::row_highlight(ui.c, t, rr);
-                } else if lit {
-                    ui.c.fill_rect(rr, ui.t.s(0x03080c));
-                }
-                let col = if *n == s.pattern { t.glyph } else { t.menu_pop_text };
-                let dx = if lit { 22.0 } else { 20.0 };
-                ui.c.text_clip(font, rr.x + dx, rr.y + 2.0 + dy, rr.w - dx - 4.0, col, name);
-                y += row;
+    let rows = |ui: &mut Ui, lit: &mut Lit| {
+        let mut cx = r.x + border;
+        let mut flat = 0usize;
+        for (ci, (_, items)) in m.cols.iter().enumerate() {
+            let cw = &col_ws[ci];
+            let col = Rect::new(cx, r.y + border, *cw, body_h);
+            if ci > 0 {
+                ui.c.fill_rect(Rect::new(cx - 1.0, col.y, 1.0, body_h), t.menu_pop_head);
             }
-        }
-        for (i, item) in items.iter().enumerate() {
-            if recent_before(menu, items, i) {
-                y = paint_recent(ui, &recent, Rect::new(col.x, y, col.w, 0.0), open);
-            }
-            if !in_menu(s, menu, item) {
-                flat += 1;
-                continue;
-            }
-            let h = row_h(&mt, item);
-            let rr = Rect::new(col.x, y, col.w, h);
-            match item.kind {
-                Kind::Sep => ui.c.fill_rect(Rect::new(col.x, y + mt.sep_line, col.w, mt.line), t.menu_pop_head),
-                Kind::Head => head_row(ui, rr, &label_now(s, menu, item)),
-                Kind::Item => {
-                    let ok = active(s, menu, item);
-                    // Greyed-out entries never light up; they only say they are not available yet (EDIT's without a
-                    // step to act on say nothing).
-                    if ok {
-                        let hov = ui.hit(rr, item_action(menu, flat, item), item.label);
-                        ui.menu_row(crate::app::MENU_DROPDOWN);
-                        if hov || open == Some(flat) {
-                            light(ui, rr);
-                        }
-                    } else if !works(menu, item) {
-                        ui.off(rr, item.label);
+            let mut y = col.y;
+            if menu == PATTERNS && ci == 0 {
+                for (n, name) in &pats {
+                    let rr = Rect::new(col.x, y, col.w, row);
+                    let hov = ui.hit(rr, Action::MenuItem(menu, PATTERN_PICK + *n as usize), "Select pattern");
+                    ui.menu_row(crate::app::MENU_DROPDOWN);
+                    let on = hov || (*n == s.pattern && away);
+                    if hov && lit.glide {
+                        lit.hot = Some(rr);
+                    } else if on && lemon {
+                        os_ui::kit::row_highlight(ui.c, t, rr);
+                    } else if on {
+                        ui.c.fill_rect(rr, ui.t.s(0x03080c));
                     }
-                    let mark = mark_of(s, menu, item);
-                    let (mx, my) = (rr.x + 10.0, rr.y + row / 2.0);
-                    match mark {
-                        Mark::Check(true) => {
-                            ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, t.menu_pop_text);
-                            ui.c.line(mx - 1.0, my + 3.0, mx + 4.0, my - 3.0, 1.5, t.menu_pop_text);
+                    let col = if *n == s.pattern { t.glyph } else { t.menu_pop_text };
+                    let dx = if on { 22.0 } else { 20.0 };
+                    ui.c.text_clip(font, rr.x + dx, rr.y + 2.0 + dy, rr.w - dx - 4.0, col, name);
+                    y += row;
+                }
+            }
+            for (i, item) in items.iter().enumerate() {
+                if recent_before(menu, items, i) {
+                    y = paint_recent(ui, s, &recent, Rect::new(col.x, y, col.w, 0.0), open, lit);
+                }
+                if !in_menu(s, menu, item) {
+                    flat += 1;
+                    continue;
+                }
+                let h = row_h(&mt, item);
+                let rr = Rect::new(col.x, y, col.w, h);
+                match item.kind {
+                    Kind::Sep => ui.c.fill_rect(Rect::new(col.x, y + mt.sep_line, col.w, mt.line), t.menu_pop_head),
+                    Kind::Head => head_row(ui, rr, &label_now(s, menu, item)),
+                    Kind::Item => {
+                        let ok = active(s, menu, item);
+                        // Greyed-out entries never light up; they only say they are not available yet (EDIT's without a
+                        // step to act on say nothing).
+                        if ok {
+                            let hov = ui.hit(rr, item_action(menu, flat, item), item.label);
+                            ui.menu_row(crate::app::MENU_DROPDOWN);
+                            lit.row(ui, rr, hov, open == Some(flat));
+                        } else if !works(menu, item) {
+                            ui.off(rr, item.label);
                         }
-                        Mark::Radio(on) => {
-                            if on {
-                                ui.c.fill_circle(mx, my, 3.0, t.menu_pop_text);
-                            } else {
-                                ui.c.stroke_circle(mx, my, 3.5, 1.0, t.menu_pop_dim);
+                        let mark = mark_of(s, menu, item);
+                        let (mx, my) = (rr.x + 10.0, rr.y + row / 2.0);
+                        match mark {
+                            Mark::Check(true) => {
+                                ui.c.line(mx - 4.0, my, mx - 1.0, my + 3.0, 1.5, t.menu_pop_text);
+                                ui.c.line(mx - 1.0, my + 3.0, mx + 4.0, my - 3.0, 1.5, t.menu_pop_text);
                             }
+                            Mark::Radio(on) => {
+                                if on {
+                                    ui.c.fill_circle(mx, my, 3.0, t.menu_pop_text);
+                                } else {
+                                    ui.c.stroke_circle(mx, my, 3.5, 1.0, t.menu_pop_dim);
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                        let key = if item.shortcut.is_empty() { "" } else { shortcut_now(item) };
+                        let caption = s.motion.borrow().caption(Slot::Dropdown, lit.next());
+                        row_text(ui, rr, &label_now(s, menu, item), key, item.sub, ok, caption);
                     }
-                    let key = if item.shortcut.is_empty() { "" } else { shortcut_now(item) };
-                    row_text(ui, rr, &label_now(s, menu, item), key, item.sub, ok);
                 }
+                flat += 1;
+                y += h;
             }
-            flat += 1;
-            y += h;
+            cx += cw;
         }
-        cx += cw;
+    };
+    // From Polished up the highlight bar glides from row to row under the rows' text, so it is painted before them. Text
+    // only blends over what is already there; going through the rows once without painting says where the bar goes.
+    let glide = crate::motion::glides();
+    if glide {
+        let mut dry = Lit { glide, hot: None, shown: 0 };
+        ui.dry(|ui| rows(ui, &mut dry));
+        let up = Rect::new(r.x * k, r.y * k, r.w * k, r.h * k);
+        if let Some(b) = s.motion.borrow_mut().glide(Slot::Dropdown, key, dry.hot, up) {
+            light(ui, b);
+        }
+    }
+    rows(ui, &mut Lit { glide, hot: None, shown: 0 });
+    crate::motion::Motion::menu_end(ui.c, draw);
+}
+
+/// The dropdown's highlight: the row under the mouse goes to the gliding bar (`glide`), or is lit where it is.
+struct Lit {
+    glide: bool,
+    hot: Option<Rect>,
+    /// The captions drawn so far, for their entrance (`Motion::caption`).
+    shown: usize,
+}
+
+impl Lit {
+    /// The next caption's place in the order.
+    fn next(&mut self) -> usize {
+        self.shown += 1;
+        self.shown - 1
+    }
+
+    /// Row `rr`, under the mouse (`hov`) or lit anyway (`stays`: its submenu is open).
+    fn row(&mut self, ui: &mut Ui, rr: Rect, hov: bool, stays: bool) {
+        if hov && self.glide {
+            self.hot = Some(rr);
+        } else if hov || stays {
+            light(ui, rr);
+        }
     }
 }
 
@@ -961,22 +1003,19 @@ fn head_row(ui: &mut Ui, rr: Rect, label: &str) {
 
 /// A row under the mouse, or the ▸ row whose submenu is open.
 fn light(ui: &mut Ui, rr: Rect) {
-    let t = ui.t;
-    if super::lemon(ui) {
-        os_ui::kit::row_highlight(ui.c, t, rr);
-    } else {
-        ui.c.fill_rect(rr, t.menu_pop_hi);
-    }
+    let lemon = super::lemon(ui);
+    super::playlist::menu_highlight(ui, rr, lemon);
 }
 
 /// A row's text: its label, its key (italic, at the right) and its ▸ (`sub`); dim when it cannot be chosen (`ok`).
-fn row_text(ui: &mut Ui, rr: Rect, label: &str, key: &str, sub: bool, ok: bool) {
+fn row_text(ui: &mut Ui, rr: Rect, label: &str, key: &str, sub: bool, ok: bool, caption: (f32, f32)) {
     let t = ui.t;
     let font = Font::new(14);
     // Text sits where it does at 100 %, moved by half of what the row lost.
     let (dy, my) = ((rr.h - os_ui::kit::menu::ROW) / 2.0, rr.cy());
     let color = if ok { t.menu_pop_text } else { t.menu_pop_dim };
-    ui.c.text_clip(font, rr.x + 20.0, rr.y + 2.0 + dy, rr.w - 24.0, color, label);
+    let color = color.with_alpha((f32::from(color.a) * caption.1) as u8);
+    ui.c.text_clip(font, rr.x + 20.0 - caption.0, rr.y + 2.0 + dy, rr.w - 24.0, color, label);
     let right = rr.right() - if sub { 16.0 } else { 8.0 };
     if !key.is_empty() {
         let sc = if ok { t.menu_pop_shortcut } else { t.menu_pop_dim.mix(t.menu_pop, 0.35) };
@@ -1000,7 +1039,7 @@ fn recent_text(r: &Recent) -> (String, &'static str, bool) {
 
 /// Paints FILE's Recent projects section from the top of `at` (its x and width) down; `open`: the dropdown's open
 /// submenu. Returns the y under it.
-fn paint_recent(ui: &mut Ui, rows: &[Recent], at: Rect, open: Option<usize>) -> f32 {
+fn paint_recent(ui: &mut Ui, s: &State, rows: &[Recent], at: Rect, open: Option<usize>, lit: &mut Lit) -> f32 {
     let mt = os_ui::kit::menu::metrics(ui.c.scale);
     let mut y = at.y;
     for r in rows {
@@ -1017,10 +1056,9 @@ fn paint_recent(ui: &mut Ui, rows: &[Recent], at: Rect, open: Option<usize>) -> 
         let rr = Rect::new(at.x, y, at.w, mt.row);
         let hov = ui.hit(rr, act, hint);
         ui.menu_row(crate::app::MENU_DROPDOWN);
-        if hov || (sub && open == Some(RECENT_MORE)) {
-            light(ui, rr);
-        }
-        row_text(ui, rr, &label, key, sub, true);
+        lit.row(ui, rr, hov, sub && open == Some(RECENT_MORE));
+        let caption = s.motion.borrow().caption(crate::motion::Slot::Dropdown, lit.next());
+        row_text(ui, rr, &label, key, sub, true, caption);
         y += mt.row;
     }
     y
