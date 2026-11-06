@@ -593,18 +593,8 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
             let Some(a) = s.project.automation(ch) else { return };
             // Over its points' span.
             let Some(end) = a.points.last().map(|p| p.beat).filter(|&b| b > 0.0) else { return };
-            let pts: Vec<(f32, f32)> = (0..=(r.w / 2.0).ceil() as usize)
-                .map(|k| {
-                    let x = (r.x + 2.0 * k as f32).min(r.right());
-                    let beat = f64::from((x - r.x) / r.w) * end;
-                    (x, pl::value_y(r, a.value_at(beat).unwrap_or(0.0)))
-                })
-                .collect();
-            let mut area = pts.clone();
-            area.push((r.right(), r.bottom()));
-            area.push((r.x, r.bottom()));
-            ui.c.fill_polygon(&area, face.shade(0.07));
-            ui.c.polyline(&pts, 1.5, cc(t, CURVE));
+            let mut range = column_range(a, r, |x| f64::from((x - r.x) / r.w) * end);
+            ui.c.curve_columns((r.x, r.right()), r.bottom(), &mut range, face.shade(0.07), 1.5, cc(t, CURVE));
         }
         _ => {}
     }
@@ -1326,41 +1316,38 @@ fn handles(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, body: Rect, xf: Option<p
     }
 }
 
+/// For `Canvas::curve_columns`: the y range of `a`'s curve drawn in `body` over a span of x, `beat` the beat under
+/// x. It takes the curve at both ends, every point inside (so a spike narrower than a pixel shows whole at any zoom)
+/// and, in a pulse or wave segment, which turns between its points, halfway too. The columns come left to right, so
+/// a column's left end is the last one's right end.
+fn column_range<'a>(a: &'a os_model::Automation, body: Rect, beat: impl Fn(f32) -> f64 + 'a) -> impl FnMut(f32, f32) -> (f32, f32) + 'a {
+    let y = move |b: f64| pl::value_y(body, a.value_at(b).unwrap_or(0.0));
+    let mut last: Option<(f64, f32)> = None;
+    move |xa, xb| {
+        let (ba, bb) = (beat(xa), beat(xb));
+        let ya = last.filter(|l| l.0 == ba).map_or_else(|| y(ba), |l| l.1);
+        let yb = y(bb);
+        last = Some((bb, yb));
+        let (i, j) = (a.points.partition_point(|p| p.beat <= ba), a.points.partition_point(|p| p.beat < bb));
+        let turns = a.points.get(i).is_some_and(|p| matches!(p.mode, AutoMode::Pulse | AutoMode::Wave | AutoMode::Other(_)));
+        let mid = turns.then(|| y((ba + bb) / 2.0));
+        let all = [ya, yb].into_iter().chain(mid).chain(a.points[i..j].iter().map(|p| pl::value_y(body, p.value)));
+        all.fold((f32::MAX, f32::MIN), |(t, b), v| (t.min(v), b.max(v)))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: Body, bg: Color, col: Color) {
     let Some(a) = s.project.automation(ch) else { return };
     if a.points.is_empty() {
         return;
     }
-    let Some(paint) = ui.c.paint_bounds() else { return };
     let body = edges.r;
-    // A point every 2 px from the body's left edge (so a repaint of a strip draws the points a whole repaint draws),
-    // over the painted part and a few points beyond it (the line's ends change the pixels next to them).
-    let (lo, hi) = (f64::from(paint.x) - 8.0, f64::from(paint.right()) + 8.0);
-    let k0 = ((lo - edges.x) / 2.0).floor().max(0.0);
-    let x1 = (edges.x + edges.w).min(edges.x + 2.0 * ((hi - edges.x) / 2.0).ceil());
-    let x0 = edges.x + 2.0 * k0;
-    if x0 > x1 {
-        return;
-    }
     // The beat under content x (measured from the clip's start, as `pl::beat_at`).
     let (w0, _) = pl::window(s, c);
     let clip_x = g.x64(f64::from(c.position));
-    let beat = |x: f64| w0 + (x - clip_x) / f64::from(g.ppt) / f64::from(g.ppq);
-    let point = |x: f64| (pl::snap(x), pl::value_y(body, a.value_at(beat(x)).unwrap_or(0.0)));
-    let mut pts = Vec::new();
-    let mut k = k0;
-    while edges.x + 2.0 * k <= x1 {
-        pts.push(point(edges.x + 2.0 * k));
-        k += 1.0;
-    }
-    pts.push(point(x1));
-    let (x0, x1) = (pl::snap(x0), pl::snap(x1));
-    let mut area = pts.clone();
-    area.push((x1, body.bottom()));
-    area.push((x0, body.bottom()));
-    ui.c.fill_polygon(&area, bg.shade(0.07));
-    ui.c.polyline(&pts, 1.5, col);
+    let mut range = column_range(a, body, |x| w0 + (f64::from(x) - clip_x) / f64::from(g.ppt) / f64::from(g.ppq));
+    ui.c.curve_columns((pl::snap(edges.x), pl::snap(edges.x + edges.w)), body.bottom(), &mut range, bg.shade(0.07), 1.5, col);
     // Points and tension handles while the mouse is over the clip (§8).
     if s.playlist.hover_clip == Some(i) {
         for (k, p) in a.points.iter().enumerate() {
@@ -1768,4 +1755,29 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     }
     crate::motion::Motion::menu_end(ui.c, draw);
     (r, rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use os_model::{AutoPoint, Automation};
+
+    /// A spike far narrower than a pixel reaches its top in some column at every zoom an eased zoom passes through,
+    /// and a jump's column spans both sides of it.
+    #[test]
+    fn narrow_automation_spikes_are_drawn_whole_at_any_zoom() {
+        let points = vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(1.0, 0.0), AutoPoint::new(1.001, 1.0), AutoPoint::new(1.002, 0.0), AutoPoint::new(2.0, 0.0), AutoPoint::new(2.0, 0.5), AutoPoint::new(4.0, 0.5)];
+        let a = Automation { channel: 0, targets: vec![], points, header: vec![], tail: vec![], lfo: Default::default() };
+        let body = Rect::new(0.0, 0.0, 100.0, 104.0);
+        let y = |v: f64| pl::value_y(body, v);
+        for step in 0..40 {
+            // From about 20 to 60 px a beat.
+            let px = 20.0 + step as f32 * 1.013;
+            let mut range = column_range(&a, body, |x| f64::from((x - 3.7) / px));
+            let cols: Vec<(f32, f32)> = (3..(4.0 + 4.0 * px) as i32).map(|d| range(d as f32, d as f32 + 1.0)).collect();
+            assert_eq!(cols.iter().map(|c| c.0).fold(f32::MAX, f32::min), y(1.0), "the spike's top at {px} px a beat");
+            let jump = range(3.7 + 2.0 * px - 0.5, 3.7 + 2.0 * px + 0.5);
+            assert_eq!(jump, (y(0.5), y(0.0)), "the jump's column at {px} px a beat");
+        }
+    }
 }

@@ -793,6 +793,71 @@ impl Canvas {
         }
     }
 
+    /// A curve that is a function of x over `[x0, x1)`, drawn a device-pixel column at a time without the path
+    /// rasterizer: `range(xa, xb)` gives the curve's highest and lowest y over that logical span (top first). Each
+    /// column is filled from the curve's top down to `bottom` in `fill`, then a `width` thick line in `line` spans
+    /// the curve's range in it. Partial pixels and the partial columns at the ends are blended by their coverage.
+    /// A column's pixels depend only on that column, so a repaint of a strip draws what a whole repaint does.
+    pub fn curve_columns(&mut self, (x0, x1): (f32, f32), bottom: f32, range: &mut dyn FnMut(f32, f32) -> (f32, f32), fill: Color, width: f32, line: Color) {
+        if x1 <= x0 {
+            return;
+        }
+        let k = self.scale;
+        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
+        let (d0, d1) = (((x0 * k).floor() as i32).max(cx0), ((x1 * k).ceil() as i32).min(cx1));
+        if d0 >= d1 || cy0 >= cy1 {
+            return;
+        }
+        let half = width * k / 2.0;
+        let bot = bottom * k;
+        // Each column's coverage `h` and, in device pixels, the curve's top, the line's span and the rows it touches.
+        let cols: Vec<(f32, f32, f32, f32, i32)> = (d0..d1)
+            .map(|d| {
+                let (xa, xb) = ((d as f32 / k).max(x0), ((d + 1) as f32 / k).min(x1));
+                let h = ((xb - xa) * k).max(0.0);
+                let (t, b) = range(xa, xb);
+                let (t, b) = (t * k, b * k);
+                (h, t, t - half, b + half, (t - half).floor() as i32)
+            })
+            .collect();
+        let ya = cols.iter().map(|c| c.4).min().unwrap_or(i32::MAX).max(cy0);
+        let yb = (bot.max(cols.iter().map(|c| c.3).fold(f32::MIN, f32::max)).ceil() as i32).min(cy1);
+        if ya >= yb {
+            return;
+        }
+        // The coverage (0..=255) of device row y by the span [a, b), times the column's own coverage `h`.
+        let cov = |y: i32, a: f32, b: f32, h: f32| ((b.min(y as f32 + 1.0) - a.max(y as f32)).clamp(0.0, 1.0) * h * 255.0 + 0.5) as u8;
+        let fill_px = fill.a == 255;
+        let solid = u32::from_ne_bytes([fill.r, fill.g, fill.b, 255]);
+        let pw = self.pixmap.width() as usize;
+        for i in 0..self.clip_count() {
+            let (ix0, iy0, ix1, iy1) = self.clip_at(i);
+            let (xa, xb) = (d0.max(ix0), d1.min(ix1));
+            if xa >= xb {
+                continue;
+            }
+            let data = self.pixmap.data_mut();
+            for y in ya.max(iy0)..yb.min(iy1) {
+                let row = &mut data[(y as usize * pw + xa as usize) * 4..][..(xb - xa) as usize * 4];
+                for (px, &(h, t, la, lb, top)) in row.as_chunks_mut::<4>().0.chunks_mut(1).zip(&cols[(xa - d0) as usize..]) {
+                    if y < top {
+                        continue;
+                    }
+                    let (f, l) = (cov(y, t, bot, h), cov(y, la, lb, h));
+                    if f == 255 && fill_px {
+                        px[0] = solid.to_ne_bytes();
+                    } else if f != 0 && fill.a != 0 {
+                        blend_cov_row(px, &[f], fill);
+                    }
+                    if l != 0 && line.a != 0 {
+                        blend_cov_row(px, &[l], line);
+                    }
+                }
+            }
+        }
+        self.mark(d0, ya, d1, yb);
+    }
+
     /// `polyline` coloured column by column, as `fill_polygon_columns`.
     pub fn polyline_columns(&mut self, pts: &[(f32, f32)], width: f32, color: &mut dyn FnMut(f32) -> Color) {
         if let Some(path) = poly_path(pts, false) {
@@ -1958,6 +2023,43 @@ mod tests {
                 assert_eq!(p, q, "pixel {x},{y} as without a cover");
             }
         }
+    }
+
+    #[test]
+    fn curve_columns_cover_each_column_by_itself() {
+        // A slope, a flat stretch at y 10.25 and a spike far narrower than a pixel, over [2.5, 37.5).
+        let mut range = |xa: f32, xb: f32| {
+            let f = |x: f32| if x < 12.0 { 4.0 + x } else { 10.25 };
+            let (t, b) = (f(xa).min(f(xb)), f(xa).max(f(xb)));
+            if xa <= 30.01 && xb > 30.01 { (2.0, b) } else { (t, b) }
+        };
+        let draw = |c: &mut Canvas, range: &mut dyn FnMut(f32, f32) -> (f32, f32)| {
+            c.curve_columns((2.5, 37.5), 28.0, range, Color::rgb(0x406080), 1.5, Color::rgb(0xffffff));
+        };
+        for scale in [1.0, 1.5] {
+            let (Ok(mut a), Ok(mut b)) = (Canvas::new(60, 45, scale), Canvas::new(60, 45, scale)) else { return };
+            for c in [&mut a, &mut b] {
+                c.fill_rect(Rect::new(0.0, 0.0, 40.0, 30.0), Color::rgb(0x101010));
+            }
+            draw(&mut a, &mut range);
+            // Two strips, each drawn alone, give the whole drawing.
+            for strip in [Rect::new(0.0, 0.0, 18.0, 30.0), Rect::new(18.0, 0.0, 22.0, 30.0)] {
+                b.begin_region(&[strip]);
+                draw(&mut b, &mut range);
+            }
+            assert!(a.pixmap.data() == b.pixmap.data(), "scale {scale}");
+        }
+        let Ok(mut c) = Canvas::new(40, 30, 1.0) else { return };
+        c.fill_rect(Rect::new(0.0, 0.0, 40.0, 30.0), Color::rgb(0x000000));
+        draw(&mut c, &mut range);
+        let px = |x: usize, y: usize| c.pixmap.pixels()[y * 40 + x];
+        // The flat line spans 9.5 to 11.0: row 9 half covered, row 10 whole; the fill below it, nothing above.
+        assert_eq!((px(20, 8).red(), px(20, 9).red(), px(20, 10).red()), (0, 128, 255));
+        assert_eq!((px(20, 11).red(), px(20, 11).blue(), px(20, 28).red()), (0x40, 0x80, 0));
+        // The ends: half of column 2 and of column 37, none of 1 or 38.
+        assert_eq!((px(1, 20).blue(), px(2, 20).blue(), px(37, 20).blue(), px(38, 20).blue()), (0, 0x40, 0x40, 0));
+        // The spike reaches its top in its column only.
+        assert_eq!((px(30, 2).red(), px(29, 2).red(), px(31, 2).red()), (255, 0, 0));
     }
 
     #[test]
