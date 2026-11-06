@@ -85,6 +85,7 @@ mod mixer;
 mod mixer_state;
 mod osc3;
 mod citrus;
+mod smith;
 mod chord_tool;
 mod slicer;
 mod drums;

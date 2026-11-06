@@ -168,10 +168,11 @@ fn factory_in(files: &[(&str, &[u8])], plugin: &str) -> Vec<Preset> {
     sorted(loose, nested)
 }
 
-/// The factory presets of `plugin`: Lemon Studio's, then (for Citrus) the `.fst` files of an installed copy.
+/// The factory presets of `plugin`: Lemon Studio's, then (for Citrus and Smith) the `.fst` files of an installed copy.
 pub fn factory(plugin: &str) -> Vec<Preset> {
     let mut v = factory_in(FACTORY, plugin);
     v.extend(crate::citrus::more_presets(plugin));
+    v.extend(crate::smith::more_presets(plugin));
     v
 }
 
@@ -613,8 +614,8 @@ fn side(app: &App, key: usize) -> Option<crate::control::command::PluginSide> {
 /// the step that made it).
 fn load_with(app: &mut App, key: usize, path: &Path, step: bool) -> Option<String> {
     let d = app.plugins.descriptor(key)?;
-    let first = match crate::citrus::fst_state(path) {
-        // An FL preset file (Citrus's list of an FL install's presets) holds the original's state.
+    let first = match crate::smith::fst_state(path, &d.name).or_else(|| crate::citrus::fst_state(path)) {
+        // An FL preset file (Citrus's and Smith's lists of an FL install's presets) holds the original's state.
         Some(state) => state.map(|s| (shown_name(path), Body::State(s))),
         None => read_any(path, &d).and_then(|v| v.into_iter().next().ok_or_else(|| format!("{} holds no preset", shown_name(path)))),
     };
