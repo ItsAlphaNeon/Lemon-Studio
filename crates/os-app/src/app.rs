@@ -3521,12 +3521,16 @@ impl App {
     #[cfg(plugin_windows)]
     fn clip_docked(&mut self) {
         let mut docked = self.plugins.docked();
-        // A hidden tab brought forward (from the rack, say) shows; the others stay out of the stack.
+        // A hidden tab brought forward (from the rack, say) shows; the others stay out of the stack. Then the groups
+        // take in the windows opened and closed since the last look: a window closed (its button in the rack clicked
+        // again) would otherwise still be the tab showing, and the one left would leave the stack until the next tick.
         #[cfg(target_os = "linux")]
         {
             if let Some(&Win::Hosted(r)) = self.state.z.last() {
                 self.state.plugin_tabs.activate(r);
             }
+            let frames = self.plugins.embeds();
+            self.sync_plugin_tabs(&frames);
             let tabs = &self.state.plugin_tabs;
             docked.retain(|&r| !tabs.hidden(r));
         }
@@ -12985,6 +12989,48 @@ mod tests {
         tabs_rejoin_as_the_shell_drives_it(&mut app, &mut c);
         app.plugins.close_window(0);
         app.plugins.close_window(1);
+    }
+
+    /// The tab showing closed from the instrument rack (its window button clicked again), over and over: the window
+    /// left is in the stack and painted at the very next tick, every time.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tab_closed_from_the_rack_leaves_the_other_showing() {
+        use crate::plugin_window::ChannelInfo;
+        use std::time::{Duration, Instant};
+        let Ok(mut c) = Canvas::new(1536, 864, 1.0) else { return };
+        let mut app = App::new(None);
+        app.plugins.available = crate::plugins::builtin();
+        app.plugins.scale = 1.0;
+        app.state.project.channels.push(Channel::default());
+        frame(&mut app, &mut c, None);
+        let index = app.plugins.index_of(crate::citrus::CITRUS).expect("built-in Citrus");
+        let info = |name: &str| ChannelInfo { icon: None, name: name.into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
+        let settle = |app: &mut App, rows: &[usize]| {
+            let t0 = Instant::now();
+            while !rows.iter().all(|r| app.state.embeds.get(r).is_some_and(|e| e.claimed())) && t0.elapsed() < Duration::from_secs(3) {
+                app.plugin_tick();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            app.plugin_tick();
+        };
+        app.plugins.create_with(0, index, None).unwrap();
+        app.plugins.open_window(0, info("Vangelis")).unwrap();
+        settle(&mut app, &[0]);
+        app.plugins.create_with(1, index, None).unwrap();
+        for round in 0..3 {
+            app.plugins.open_window(1, info("Hydronium")).unwrap();
+            settle(&mut app, &[0, 1]);
+            app.plugin_tick();
+            assert!(app.state.plugin_tabs.hidden(0) && app.state.z.contains(&Win::Hosted(1)), "round {round}: the new tab shows");
+            frame(&mut app, &mut c, None);
+            assert!(app.plugins.close_if_open(1));
+            app.plugin_tick();
+            assert!(app.state.z.contains(&Win::Hosted(0)), "round {round}: the one left is in the stack at once");
+            assert!(!app.state.plugin_tabs.hidden(0) && app.state.plugin_tabs.group_of(0).is_none());
+            frame(&mut app, &mut c, None);
+        }
+        app.plugins.close_window(0);
     }
 
     /// A tab's little x closes that tab; the window's close closes them all, in either layout.
