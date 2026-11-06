@@ -73,22 +73,104 @@ fn tint() -> Option<Retint> {
     os_theme::current().xf.retint
 }
 
-/// XRGB pixels recoloured by `r`: runs of one colour are mapped once.
-fn recolor(px: &[u32], r: &Retint) -> Vec<u32> {
+/// XRGB pixels, rows of `w`, recoloured by `r`: runs of one colour are mapped once. Then the edges of the colours
+/// `r` leaves as they are (`unmix`).
+fn recolor(px: &[u32], w: u32, r: &Retint) -> Vec<u32> {
     let mut seen: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let mut map = |p: u32| {
+        *seen.entry(p & 0xff_ffff).or_insert_with(|| {
+            let c = r.recolor(os_ui::Color::rgb(p & 0xff_ffff));
+            u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+        })
+    };
     let mut last = (u32::MAX, 0);
-    px.iter()
+    let mut out: Vec<u32> = px
+        .iter()
         .map(|&p| {
             if p != last.0 {
-                let q = *seen.entry(p).or_insert_with(|| {
-                    let c = r.recolor(os_ui::Color::rgb(p & 0xff_ffff));
-                    (p & 0xff00_0000) | u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
-                });
-                last = (p, q);
+                last = (p, (p & 0xff00_0000) | map(p));
             }
             last.1
         })
-        .collect()
+        .collect();
+    unmix(px, w as usize, &mut out, &mut map);
+    out
+}
+
+/// The anti-aliased edges of colours that keep their own colour under a theme (signals, bands, Zest's preset colours)
+/// over the greys the theme changes: an edge pixel lies between a grey and a stronger pixel of its hue nearby (two
+/// pixels at most), so it becomes the same mix of the two as recoloured. Mapped one by one, it would keep the dark of
+/// the grey it was drawn over while that grey turns light.
+fn unmix(px: &[u32], w: usize, out: &mut [u32], map: &mut impl FnMut(u32) -> u32) {
+    if w == 0 {
+        return;
+    }
+    let h = px.len() / w;
+    let rgb = |p: u32| [(p >> 16) as u8 as i32, (p >> 8) as u8 as i32, p as u8 as i32];
+    let chroma = |c: [i32; 3]| c.iter().max().unwrap() - c.iter().min().unwrap();
+    let hue = |p: u32| os_ui::Color::rgb(p & 0xff_ffff).hsl().0;
+    let near = |a: f32, b: f32| {
+        let d = (a - b).abs() % 360.0;
+        d.min(360.0 - d) <= 20.0
+    };
+    // What the edge pixels became, by the pixel and the two it lies between.
+    let mut done: std::collections::HashMap<(u32, u32, u32), u32> = std::collections::HashMap::new();
+    for y in 0..h {
+        for x in 0..w {
+            let p = px[y * w + x] & 0xff_ffff;
+            let c = rgb(p);
+            // A colour (not a grey, not one of the lemon yellows `Retint::recolor` reads itself) on an edge.
+            if chroma(c) < 18 || (30.0..=70.0).contains(&hue(p)) {
+                continue;
+            }
+            let at = |dx: i32, dy: i32| {
+                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                (nx >= 0 && ny >= 0 && (nx as usize) < w && (ny as usize) < h).then(|| px[ny as usize * w + nx as usize] & 0xff_ffff)
+            };
+            if [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().all(|&(dx, dy)| at(dx, dy).is_none_or(|n| n == p)) {
+                continue;
+            }
+            let (mut greys, mut tops): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+            for dy in -2..=2 {
+                for dx in -2..=2 {
+                    let Some(n) = at(dx, dy) else { continue };
+                    let nc = rgb(n);
+                    if chroma(nc) <= 6 {
+                        if !greys.contains(&n) {
+                            greys.push(n);
+                        }
+                    } else if chroma(nc) > chroma(c) + 4 && near(hue(n), hue(p)) && !tops.contains(&n) {
+                        tops.push(n);
+                    }
+                }
+            }
+            // The strongest colour it lies toward, then the closest fit.
+            let mut best: Option<((i32, i32), u32, u32, f32)> = None;
+            for &g in &greys {
+                for &k in &tops {
+                    let (gc, kc) = (rgb(g), rgb(k));
+                    let d: Vec<i32> = (0..3).map(|i| kc[i] - gc[i]).collect();
+                    let len = d.iter().map(|v| v * v).sum::<i32>();
+                    if len == 0 {
+                        continue;
+                    }
+                    let t = ((0..3).map(|i| (c[i] - gc[i]) * d[i]).sum::<i32>() as f32 / len as f32).clamp(0.0, 1.0);
+                    let miss = (0..3).map(|i| (c[i] as f32 - (gc[i] as f32 + t * d[i] as f32)).abs() as i32).max().unwrap();
+                    let rank = (-chroma(kc), miss);
+                    if miss <= 20 && best.is_none_or(|b| rank < b.0) {
+                        best = Some((rank, g, k, t));
+                    }
+                }
+            }
+            let Some((_, g, k, t)) = best else { continue };
+            let v = *done.entry((p, g, k)).or_insert_with(|| {
+                let (a, b) = (os_ui::Color::rgb(map(g)), os_ui::Color::rgb(map(k)));
+                let m = a.mix(b, t);
+                u32::from(m.r) << 16 | u32::from(m.g) << 8 | u32::from(m.b)
+            });
+            out[y * w + x] = (px[y * w + x] & 0xff00_0000) | v;
+        }
+    }
 }
 
 /// A plugin window in Lemon Studio's own window. Cheap to clone: the app's state holds one per open window to paint
@@ -516,7 +598,7 @@ impl EmbedFrame {
             if let Some(r) = tint() {
                 let fresh = i.tinted.as_ref().filter(|(from, at, _)| Arc::ptr_eq(from, &f.px) && *at == r).map(|t| t.2.clone());
                 let px = fresh.unwrap_or_else(|| {
-                    let px = Arc::new(recolor(&f.px, &r));
+                    let px = Arc::new(recolor(&f.px, f.w, &r));
                     i.tinted = Some((f.px.clone(), r, px.clone()));
                     px
                 });
@@ -542,7 +624,7 @@ impl EmbedFrame {
         let r = tint();
         for o in i.surface.view().overlays {
             match &r {
-                Some(r) => c.paint_xrgb(&recolor(&o.pixels.px, r), (o.pixels.w, o.pixels.h), (ex + o.x, ey + o.y)),
+                Some(r) => c.paint_xrgb(&recolor(&o.pixels.px, o.pixels.w, r), (o.pixels.w, o.pixels.h), (ex + o.x, ey + o.y)),
                 None => c.paint_xrgb(&o.pixels.px, (o.pixels.w, o.pixels.h), (ex + o.x, ey + o.y)),
             }
         }
@@ -735,5 +817,35 @@ impl EmbedFrame {
 impl Drop for Inner {
     fn drop(&mut self) {
         self.surface.withdraw();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use os_theme::design::lemon;
+    use os_ui::Color;
+
+    /// Under a light theme the edge of a colour the theme keeps (Zest's preset colours), drawn over a dark grey, turns
+    /// into the edge between that colour and the grey as recoloured: no dark fringe left from the grey it was drawn
+    /// over. The colour itself and the grey map as before.
+    #[test]
+    fn kept_colours_get_edges_over_the_new_grey() {
+        let text = os_theme::presets::PRESETS.iter().find(|p| p.0 == "Cinnamon Light").expect("theme").1;
+        let r = Retint::lemon(&os_theme::FlTheme::parse(text));
+        let px = |c: Color| u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b);
+        let rgb = |v: u32| Color::rgb(v & 0xff_ffff);
+        for top in [Color::rgb(0xe05050), Color::rgb(0x4a90e2), Color::rgb(0x50c878)] {
+            // An edge two pixels wide, as a fractional scale draws one.
+            let row: Vec<u32> = [0.0, 0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0, 1.0].iter().map(|&t| px(lemon::DARK.mix(top, t))).collect();
+            let out = recolor(&row, row.len() as u32, &r);
+            let (bg, fg) = (r.recolor(lemon::DARK), r.recolor(top));
+            assert_eq!((rgb(out[0]), rgb(out[5])), (bg, fg));
+            for (i, t) in [(2, 1.0 / 3.0), (3, 2.0 / 3.0)] {
+                let (got, want) = (rgb(out[i]), bg.mix(fg, t));
+                let d = [got.r.abs_diff(want.r), got.g.abs_diff(want.g), got.b.abs_diff(want.b)].into_iter().max().unwrap();
+                assert!(d <= 6, "{top:?} at {t}: {got:?}, want about {want:?}");
+            }
+        }
     }
 }
