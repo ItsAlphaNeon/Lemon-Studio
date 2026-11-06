@@ -601,6 +601,7 @@ fn preview(ui: &mut Ui, s: &State, src: ClipSource, r: Rect, tall: bool, face: C
                     (x, pl::value_y(r, a.value_at(beat).unwrap_or(0.0)))
                 })
                 .collect();
+            let pts = with_points(pts, a, (r.x, r.right()), |b| r.x + (b / end) as f32 * r.w, |v| pl::value_y(r, v));
             let mut area = pts.clone();
             area.push((r.right(), r.bottom()));
             area.push((r.x, r.bottom()));
@@ -1327,6 +1328,33 @@ fn handles(ui: &mut Ui, s: &State, g: &PGeom, c: &Clip, body: Rect, xf: Option<p
     }
 }
 
+/// An automation's line sampled every 2 px (`pts`, by x), with its own points between `x0` and `x1` put in where they
+/// fall (`x_of`: a point's beat to x; `y`: a value to y), both sides of a jump: a spike narrower than the samples is
+/// drawn whole, wherever the samples land. Sampled alone, it showed or not as they moved, and twitched while a zoom
+/// eased.
+fn with_points(mut pts: Vec<(f32, f32)>, a: &os_model::Automation, (x0, x1): (f32, f32), x_of: impl Fn(f64) -> f32, y: impl Fn(f64) -> f32) -> Vec<(f32, f32)> {
+    // (x, order at one x: the value before a point, the point's, then a sample), as `pts` takes them.
+    let mut knots: Vec<(f32, u8, f32)> = Vec::new();
+    for (k, p) in a.points.iter().enumerate() {
+        let x = x_of(p.beat);
+        if !(x0..=x1).contains(&x) {
+            continue;
+        }
+        if k > 0 && a.points[k - 1].beat < p.beat {
+            if let Some(v) = a.value_at(p.beat - 1e-9) {
+                knots.push((x, 0, y(v)));
+            }
+        }
+        knots.push((x, 1, y(p.value)));
+    }
+    if knots.is_empty() {
+        return pts;
+    }
+    let mut all: Vec<(f32, u8, f32)> = pts.drain(..).map(|(x, v)| (x, 2, v)).chain(knots).collect();
+    all.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    all.into_iter().map(|(x, _, v)| (x, v)).collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: Body, bg: Color, col: Color) {
     let Some(a) = s.project.automation(ch) else { return };
@@ -1356,6 +1384,7 @@ fn curve(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, ch: u16, edges: 
         k += 1.0;
     }
     pts.push(point(x1));
+    let pts = with_points(pts, a, (x0 as f32, x1 as f32), |b| pl::point_x(s, g, c, b), |v| pl::value_y(body, v));
     let (x0, x1) = (pl::snap(x0), pl::snap(x1));
     let mut area = pts.clone();
     area.push((x1, body.bottom()));
@@ -1769,4 +1798,36 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     }
     crate::motion::Motion::menu_end(ui.c, draw);
     (r, rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use os_model::{AutoPoint, Automation};
+
+    /// A spike narrower than the 2 px the line is sampled at is drawn whole at every zoom, and a jump stays upright:
+    /// sampled alone, the spike showed or not as the samples moved over it, so it twitched while a zoom eased.
+    #[test]
+    fn narrow_automation_spikes_are_drawn_whole_at_any_zoom() {
+        let points = vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(1.0, 0.0), AutoPoint::new(1.001, 1.0), AutoPoint::new(1.002, 0.0), AutoPoint::new(2.0, 0.0), AutoPoint::new(2.0, 0.5), AutoPoint::new(4.0, 0.5)];
+        let a = Automation { points, ..Automation::default() };
+        let y = |v: f64| 100.0 - 100.0 * v as f32;
+        for step in 0..40 {
+            // From about 20 to 60 px a beat, as an eased zoom passes through.
+            let px = 20.0 + step as f32 * 1.013;
+            let x_of = |b: f64| 3.7 + b as f32 * px;
+            let sampled: Vec<(f32, f32)> = (0..=(4.0 * px / 2.0) as usize)
+                .map(|k| {
+                    let x = 3.7 + 2.0 * k as f32;
+                    (x, y(a.value_at(f64::from((x - 3.7) / px)).unwrap_or(0.0)))
+                })
+                .collect();
+            let pts = with_points(sampled, &a, (x_of(0.0), x_of(4.0)), x_of, y);
+            let top = pts.iter().map(|p| p.1).fold(f32::MAX, f32::min);
+            assert_eq!(top, y(1.0), "the spike's top at {px} px a beat");
+            assert!(pts.windows(2).all(|w| w[0].0 <= w[1].0), "in x order");
+            let jump: Vec<f32> = pts.iter().filter(|p| p.0 == x_of(2.0)).map(|p| p.1).collect();
+            assert!(jump.contains(&y(0.0)) && jump.contains(&y(0.5)), "both sides of the jump at its x: {jump:?}");
+        }
+    }
 }
