@@ -124,6 +124,7 @@ fn default_lfo() -> Curve {
     let mut c = Curve::default_of(LFO);
     c.points = vec![point(0.0, 0.5, 0.0), point(1.0, 0.5, 0.0), point(0.25, 1.0, 0.0), point(1.0, 0.5, 0.0)];
     c.lfo = [40000, 0, 0, 0, 0];
+    c.sustain = 2;
     c.keep_sytrus();
     c
 }

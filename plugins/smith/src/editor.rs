@@ -10,7 +10,7 @@
 // spec: plugins/smith.md, plugins/ogun.md ("Controls and ranges"), plugins/host-link.md
 
 use std::any::Any;
-use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use citrus::edit;
@@ -29,6 +29,8 @@ pub struct SmithEditor {
     pub params: Arc<SmithParams>,
     /// DPI scale as f32 bits.
     pub scale: AtomicU32,
+    /// The keyboard is hidden: it sets the editor's size, also across a close and reopen.
+    pub no_keys: Arc<AtomicBool>,
     /// The open editor window (0 = closed).
     #[cfg_attr(not(windows), allow(dead_code))]
     hwnd: Arc<AtomicIsize>,
@@ -41,6 +43,7 @@ impl SmithEditor {
         SmithEditor {
             params,
             scale: AtomicU32::new(1f32.to_bits()),
+            no_keys: Arc::new(AtomicBool::new(false)),
             hwnd: Arc::new(AtomicIsize::new(0)),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             slot: Default::default(),
@@ -51,26 +54,26 @@ impl SmithEditor {
 impl Editor for SmithEditor {
     fn spawn(&self, parent: ParentWindowHandle, context: Arc<dyn GuiContext>) -> Box<dyn Any + Send> {
         let scale = f32::from_bits(self.scale.load(Ordering::Relaxed));
-        let params = self.params.clone();
+        let (params, keys) = (self.params.clone(), self.no_keys.clone());
         match parent {
             #[cfg(windows)]
-            ParentWindowHandle::Win32Hwnd(hwnd) => Box::new(win32::open(hwnd, scale, params, context, self.hwnd.clone())),
+            ParentWindowHandle::Win32Hwnd(hwnd) => Box::new(win32::open(hwnd, scale, params, keys, context, self.hwnd.clone())),
             #[cfg(target_os = "linux")]
-            ParentWindowHandle::X11Window(window) => Box::new(gui::open(window, scale, params, context, &self.slot)),
+            ParentWindowHandle::X11Window(window) => Box::new(gui::open(window, scale, params, keys, context, &self.slot)),
             #[cfg(target_os = "macos")]
             ParentWindowHandle::AppKitNsView(v) => {
                 let scale = os_plugkit::gui::backing_scale(v as usize);
-                Box::new(gui::open(v as usize, scale, params, context, &self.slot))
+                Box::new(gui::open(v as usize, scale, params, keys, context, &self.slot))
             }
             _ => {
-                let _ = (context, scale, params);
+                let _ = (context, scale, params, keys);
                 Box::new(())
             }
         }
     }
 
     fn size(&self) -> (u32, u32) {
-        (view::W, view::H)
+        (view::W, view::height(self.no_keys.load(Ordering::Relaxed)))
     }
 
     fn set_scale_factor(&self, factor: f32) -> bool {
@@ -134,6 +137,7 @@ pub enum Cmd {
     Set(Field, i32),
     Toggle(Field),
     Target(usize),
+    Part(usize),
     CopyPreset,
     PastePreset,
     Random,
@@ -174,6 +178,7 @@ pub enum MenuReq {
     Param(Field),
     Options,
     Target,
+    Part,
     Comb,
     EqType(usize),
     Point(CurveId, usize),
@@ -195,6 +200,8 @@ pub enum Act {
     TypeIn(TypeTarget, f32, f32),
     /// A key of the testing keyboard, down or up.
     Note(u8, bool),
+    /// The keyboard was shown or hidden: the editor changes size.
+    Resize,
 }
 
 /// What a type-in box sets.
@@ -252,15 +259,19 @@ pub struct Logic {
     /// The random preset last made.
     random: u32,
     pub hosted: bool,
+    /// The keyboard hidden, as the host asks for the editor's size.
+    no_keys: Arc<AtomicBool>,
 }
 
 impl Logic {
-    pub fn new(params: Arc<SmithParams>) -> Self {
+    pub fn new(params: Arc<SmithParams>, no_keys: Arc<AtomicBool>) -> Self {
+        // As Ogun opens: on the impulse EQ, with Slide on.
+        let view = ViewState { no_keys: no_keys.load(Ordering::Relaxed), target: ARTS + M_IMPULSE, tools: [false, false, false, true], ..ViewState::default() };
         let mut l = Logic {
             params,
             st: State::default(),
             version: 0,
-            view: ViewState::default(),
+            view,
             hits: Vec::new(),
             drag: None,
             pending: false,
@@ -270,6 +281,7 @@ impl Logic {
             curve_clip: None,
             random: 1,
             hosted: false,
+            no_keys,
         };
         l.reload();
         l
@@ -277,6 +289,11 @@ impl Logic {
 
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    /// The painted height, in logical px.
+    pub fn height(&self) -> u32 {
+        view::height(self.view.no_keys)
     }
 
     fn reload(&mut self) {
@@ -291,7 +308,7 @@ impl Logic {
     pub fn poll(&mut self) -> bool {
         self.flush();
         let playing = self.params.playing.each_ref().map(|a| a.load(Ordering::Relaxed));
-        let keys = std::mem::replace(&mut self.view.playing, playing) != playing;
+        let keys = std::mem::replace(&mut self.view.playing, playing) != playing && !self.view.no_keys;
         if self.params.state_version.load(Ordering::Acquire) != self.version {
             self.reload();
             return true;
@@ -403,7 +420,11 @@ impl Logic {
             Some(Target::Choice(f, v)) => format!("{}: {}", ctl::name(*f), ctl::text(*f, *v)),
             Some(Target::Pad) => format!("{} / {}", ctl::hint(&self.st, Field::Int(MOD_X)), ctl::text(Field::Int(MOD_Y), ctl::shown(&self.st, Field::Int(MOD_Y)))),
             Some(Target::TargetBox) => format!("Editor target: {}", view::TARGET_NAMES[self.view.target.min(view::TARGETS - 1)]),
-            Some(Target::PartTab(p)) => view::PART_NAMES[*p].into(),
+            Some(Target::PartBox) => {
+                let at = self.view.target.min(view::TARGETS - 1);
+                let p = if let CurveId::Part(_, p) = self.curve_id() { p } else { 0 };
+                format!("Editor part: {}", view::part_name(at, p))
+            }
             Some(Target::Comb) => ctl::hint(&self.st, self.comb_field()),
             Some(Target::EqType(b)) => ctl::hint(&self.st, Field::EqType(*b)),
             Some(Target::Point(i)) => self.point_hint(*i),
@@ -445,7 +466,12 @@ impl Logic {
         let id = self.curve_id();
         match (&t, btn) {
             (Target::Cover, _) => self.view.info = false,
-            (Target::Logo | Target::Header(2), Btn::Left) => self.view.info = true,
+            (Target::Logo, Btn::Left) => self.view.info = true,
+            (Target::Header(2), Btn::Left) => {
+                self.view.no_keys = !self.view.no_keys;
+                self.no_keys.store(self.view.no_keys, Ordering::Relaxed);
+                acts.push(Act::Resize);
+            }
             (Target::Header(0), Btn::Left) => self.random_preset(self.random.wrapping_add(1)),
             (Target::Header(1), Btn::Left) => acts.push(Act::Menu(MenuReq::Options, x, y)),
             (Target::Switch(f), Btn::Left) => self.set(*f, ctl::toggled(*f, ctl::get(&self.st, *f))),
@@ -457,7 +483,7 @@ impl Logic {
                 self.pad_to(x, y);
             }
             (Target::TargetBox, Btn::Left | Btn::Right) => acts.push(Act::Menu(MenuReq::Target, x, y)),
-            (Target::PartTab(p), Btn::Left | Btn::Right) => self.view.part[self.view.target.min(view::TARGETS - 1)] = *p,
+            (Target::PartBox, Btn::Left | Btn::Right) => acts.push(Act::Menu(MenuReq::Part, x, y)),
             (Target::Comb, Btn::Left | Btn::Right) => acts.push(Act::Menu(MenuReq::Comb, x, y)),
             (Target::EqType(b), Btn::Left) => self.set(Field::EqType(*b), (ctl::shown(&self.st, Field::EqType(*b)) + 1) % 3),
             (Target::EqType(b), Btn::Right) => acts.push(Act::Menu(MenuReq::EqType(*b), x, y)),
@@ -619,13 +645,14 @@ impl Logic {
                 self.set(f, ctl::shown(&self.st, f) - d);
             }
             Target::EqType(b) => self.set(Field::EqType(*b), ctl::shown(&self.st, Field::EqType(*b)) - d),
-            Target::TargetBox => self.view.target = (self.view.target as i32 - d).clamp(0, view::TARGETS as i32 - 1) as usize,
-            Target::PartTab(_) => {
+            // Both boxes wrap, the wheel going down steps to the next.
+            Target::TargetBox => self.view.target = (self.view.target as i32 - d).rem_euclid(view::TARGETS as i32) as usize,
+            Target::PartBox => {
                 let at = self.view.target.min(view::TARGETS - 1);
                 let parts = view::parts_of(at);
                 if let CurveId::Part(_, p) = self.curve_id() {
                     let i = parts.iter().position(|&q| q == p).unwrap_or(0) as i32;
-                    self.view.part[at] = parts[(i - d).clamp(0, parts.len() as i32 - 1) as usize];
+                    self.view.part[at] = parts[(i - d).rem_euclid(parts.len() as i32) as usize];
                 }
             }
             _ => return vec![],
@@ -657,6 +684,19 @@ impl Logic {
                         _ => {}
                     }
                     m.add(MenuItem::item(name).mark(Mark::Radio(self.view.target == i)), Cmd::Target(i));
+                }
+                m
+            }
+            MenuReq::Part => {
+                let at = self.view.target.min(view::TARGETS - 1);
+                let mut m = MenuDef::new(MenuStyle::Context);
+                let shown = if let CurveId::Part(_, p) = self.curve_id() { p } else { 0 };
+                let parts = view::parts_of(at);
+                if parts.is_empty() {
+                    m.add(MenuItem::item(view::part_name(at, 0)).mark(Mark::Radio(true)), Cmd::None);
+                }
+                for &p in parts {
+                    m.add(MenuItem::item(view::part_name(at, p)).mark(Mark::Radio(shown == p)), Cmd::Part(p));
                 }
                 m
             }
@@ -853,6 +893,7 @@ impl Logic {
             Cmd::Set(f, v) => self.set(f, v),
             Cmd::Toggle(f) => self.set(f, ctl::toggled(f, ctl::get(&self.st, f))),
             Cmd::Target(t) => self.view.target = t.min(view::TARGETS - 1),
+            Cmd::Part(p) => self.view.part[self.view.target.min(view::TARGETS - 1)] = p,
             Cmd::CopyPreset => {
                 if let Ok(mut c) = PRESET_CLIP.lock() {
                     *c = Some(self.st.to_bytes());
@@ -926,7 +967,7 @@ impl Logic {
 #[cfg(windows)]
 mod win32 {
     use std::ffi::c_void;
-    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
     use std::sync::Arc;
 
     use nih_plug::prelude::GuiContext;
@@ -955,6 +996,7 @@ mod win32 {
         size: (u32, u32),
         logic: Logic,
         palette: Palette,
+        ctx: Arc<dyn GuiContext>,
         last_hint: String,
         lock: CursorLock,
         tracking: bool,
@@ -979,11 +1021,11 @@ mod win32 {
         Mods { ctrl, shift, alt }
     }
 
-    pub fn open(parent: *mut c_void, scale: f32, params: Arc<SmithParams>, _ctx: Arc<dyn GuiContext>, slot: Arc<AtomicIsize>) -> Handle {
+    pub fn open(parent: *mut c_void, scale: f32, params: Arc<SmithParams>, no_keys: Arc<AtomicBool>, ctx: Arc<dyn GuiContext>, slot: Arc<AtomicIsize>) -> Handle {
         let scale = if scale > 0.0 { scale } else { 1.0 };
-        let logic = Logic::new(params);
+        let logic = Logic::new(params, no_keys);
         let px = |v: u32| (v as f32 * scale).round() as u32;
-        let size = (px(view::W), px(view::H));
+        let size = (px(view::W), px(logic.height()));
         unsafe {
             let class = pw::register("SmithView", Some(wndproc));
             let win = Box::new(Win {
@@ -994,6 +1036,7 @@ mod win32 {
                 size,
                 logic,
                 palette: os_plugkit::palette(),
+                ctx,
                 last_hint: String::new(),
                 lock: CursorLock::default(),
                 tracking: false,
@@ -1192,10 +1235,27 @@ mod win32 {
                             }
                         }
                     }
+                    Act::Resize => {
+                        self.resize();
+                        repaint = true;
+                    }
                 }
             }
             if repaint {
                 self.invalidate();
+            }
+        }
+
+        /// The keyboard was shown or hidden: the window, the canvas and the host follow.
+        fn resize(&mut self) {
+            let h = (self.logic.height() as f32 * self.scale).round() as u32;
+            self.size.1 = h;
+            self.canvas.resize(self.size.0, h, self.scale);
+            unsafe { SetWindowPos(self.hwnd, std::ptr::null_mut(), 0, 0, self.size.0 as i32, h as i32, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) };
+            if self.logic.hosted {
+                os_hostlink::to_host(self.hwnd as isize, os_hostlink::Cmd::Changed, 0);
+            } else {
+                self.ctx.request_resize();
             }
         }
 
@@ -1212,7 +1272,7 @@ mod win32 {
                 Cmd::PageCount => 1,
                 Cmd::PageIcon => PageIcon::Plugin as LRESULT,
                 Cmd::GetPage | Cmd::SetPage => 0,
-                Cmd::Metrics => os_hostlink::pack_size(view::W, view::H),
+                Cmd::Metrics => os_hostlink::pack_size(view::W, self.logic.height()),
                 Cmd::Hint => {
                     if lp != 0 {
                         // SAFETY: the host passes a `HintBuf` of its own process (spec: host-link.md).
@@ -1237,6 +1297,7 @@ mod win32 {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod gui {
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
     use nih_plug::prelude::GuiContext;
@@ -1258,6 +1319,7 @@ mod gui {
         size: (u32, u32),
         logic: Logic,
         palette: Palette,
+        ctx: Arc<dyn GuiContext>,
         last_hint: String,
         dirty: bool,
         /// The host link: the host finds the editor by the window it gave it (spec: plugins/host-link.md).
@@ -1273,16 +1335,17 @@ mod gui {
     /// Owns the editor thread; dropping it closes the editor.
     pub struct Handle(#[allow(dead_code)] Option<px::EditorThread>);
 
-    pub fn open(parent: px::Parent, scale: f32, params: Arc<SmithParams>, _ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Handle {
+    pub fn open(parent: px::Parent, scale: f32, params: Arc<SmithParams>, no_keys: Arc<AtomicBool>, ctx: Arc<dyn GuiContext>, slot: &px::Slot) -> Handle {
         let scale = if scale > 0.0 { scale } else { 1.0 };
-        let logic = Logic::new(params);
-        let size = ((view::W as f32 * scale).round() as u32, (view::H as f32 * scale).round() as u32);
+        let logic = Logic::new(params, no_keys);
+        let h = logic.height();
+        let size = ((view::W as f32 * scale).round() as u32, (h as f32 * scale).round() as u32);
         let wake = slot.clone();
-        let link = Peer::register(parent as u64, vec![PageIcon::Plugin], (view::W, view::H), move || px::notify(&wake));
+        let link = Peer::register(parent as u64, vec![PageIcon::Plugin], (view::W, h), move || px::notify(&wake));
         let peer = link.clone();
         let thread = px::spawn(parent, size, slot, move |win| {
             let Ok(canvas) = Canvas::new(size.0, size.1, scale) else { return };
-            let ed = Ed { win, canvas, buf: Vec::new(), scale, size, logic, palette: os_plugkit::palette(), last_hint: String::new(), dirty: true, link: peer };
+            let ed = Ed { win, canvas, buf: Vec::new(), scale, size, logic, palette: os_plugkit::palette(), ctx, last_hint: String::new(), dirty: true, link: peer };
             ed.run();
         });
         if thread.is_none() {
@@ -1393,6 +1456,14 @@ mod gui {
                             }
                         }
                     }
+                    Act::Resize => {
+                        let h = (self.logic.height() as f32 * self.scale).round() as u32;
+                        self.size.1 = h;
+                        self.canvas.resize(self.size.0, h, self.scale);
+                        self.win.resize(self.size.0, h);
+                        self.ctx.request_resize();
+                        self.dirty = true;
+                    }
                 }
             }
         }
@@ -1412,7 +1483,7 @@ mod tests {
     use super::*;
 
     fn logic() -> Logic {
-        let mut l = Logic::new(Arc::new(SmithParams::default()));
+        let mut l = Logic::new(Arc::new(SmithParams::default()), Arc::new(AtomicBool::new(false)));
         paint(&mut l);
         l
     }
@@ -1518,29 +1589,58 @@ mod tests {
     #[test]
     fn the_pad_sets_both_mods() {
         let mut l = logic();
-        let (x, y) = (view::PAD.x + view::PAD.w * 0.75, view::PAD.y + view::PAD.h * 0.25);
+        let (x, y) = view::pad_point(384, 384);
         l.down(x, y, Btn::Left, Mods::default(), false);
         l.moved(x, y, Mods::default());
         l.up(Btn::Left);
         assert_eq!((saved(&l).ints[MOD_X], saved(&l).ints[MOD_Y]), (384, 384));
     }
 
-    /// The parts follow the target: Volume stops at Velocity, a mapping target has the maps, a final map none.
+    /// The parts follow the target: an articulation target has all six, a mapping target the maps, a final map one
+    /// curve. The part box opens a menu of them and the wheel steps them, wrapping.
     #[test]
     fn parts_follow_the_target() {
         let mut l = logic();
-        assert_eq!(l.curve_id(), CurveId::Part(A_VOLUME, 0));
-        for (t, n) in [(A_VOLUME, 4), (A_CUT, 6), (A_U_PITCH, 6), (A_U_PHASE, 4), (A_SHIFT, 4), (ARTS + M_DECAY, 0)] {
+        assert_eq!(l.curve_id(), CurveId::Final(M_IMPULSE), "as Ogun opens");
+        for (t, n) in [(A_VOLUME, 6), (A_CUT, 6), (A_U_PITCH, 6), (A_U_PHASE, 4), (A_SHIFT, 4), (ARTS + M_DECAY, 0)] {
             l.pick(&MenuReq::Target, Cmd::Target(t), 0.0, 0.0);
-            paint(&mut l);
-            assert_eq!(l.hits.iter().filter(|h| matches!(h.t, Target::PartTab(_))).count(), n, "{t}");
+            assert_eq!(view::parts_of(t).len(), n, "{t}");
+            assert_eq!(l.menu(&MenuReq::Part).items.len(), n.max(1), "{t}");
         }
         assert_eq!(l.curve_id(), CurveId::Final(M_DECAY));
+        l.pick(&MenuReq::Target, Cmd::Target(A_VOLUME), 0.0, 0.0);
+        assert_eq!(l.curve_id(), CurveId::Part(A_VOLUME, 0));
         l.pick(&MenuReq::Target, Cmd::Target(A_PRE), 0.0, 0.0);
         assert_eq!(l.curve_id(), CurveId::Part(A_PRE, 2));
         paint(&mut l);
-        click(&mut l, &Target::PartTab(5));
+        assert!(click(&mut l, &Target::PartBox).contains(&Act::Menu(MenuReq::Part, view::PART_BOX.cx(), view::PART_BOX.cy())));
+        l.pick(&MenuReq::Part, Cmd::Part(5), 0.0, 0.0);
         assert_eq!(l.curve_id(), CurveId::Part(A_PRE, 5));
+        let (x, y) = (view::PART_BOX.cx(), view::PART_BOX.cy());
+        l.wheel(x, y, -1.0, Mods::default());
+        assert_eq!(l.curve_id(), CurveId::Part(A_PRE, 2), "the wheel wraps round to the first map");
+        l.wheel(x, y, 1.0, Mods::default());
+        assert_eq!(l.curve_id(), CurveId::Part(A_PRE, 5));
+        let (x, y) = (view::TARGET_BOX.cx(), view::TARGET_BOX.cy());
+        l.view.target = view::TARGETS - 1;
+        l.wheel(x, y, -1.0, Mods::default());
+        assert_eq!(l.view.target, 0, "the target box wraps too");
+    }
+
+    /// The third round button hides the keyboard, and the editor's size follows.
+    #[test]
+    fn the_keyboard_hides() {
+        let mut l = logic();
+        assert_eq!(l.height(), view::H);
+        assert!(click(&mut l, &Target::Header(2)).contains(&Act::Resize));
+        assert_eq!(l.height(), view::H_NO_KEYS);
+        assert!(l.no_keys.load(Ordering::Relaxed));
+        assert!(!l.hits.iter().any(|h| matches!(h.t, Target::Key(_))));
+        for h in &l.hits {
+            assert!(h.r.bottom() <= view::H_NO_KEYS as f32, "{:?}", h);
+        }
+        assert!(click(&mut l, &Target::Header(2)).contains(&Act::Resize));
+        assert_eq!(l.height(), view::H);
     }
 
     /// A curve's point moves by its drag, a right click adds one, the menu deletes it again.
@@ -1549,6 +1649,8 @@ mod tests {
         let mut l = logic();
         l.pick(&MenuReq::Target, Cmd::Target(ARTS + M_RELEASE), 0.0, 0.0);
         paint(&mut l);
+        // The point is dragged alone.
+        l.view.tools[3] = false;
         let id = l.curve_id();
         let n = l.curve(id).points.len();
         let r = view::curve_inner();
@@ -1625,7 +1727,7 @@ mod tests {
     #[test]
     fn menus_and_type_in() {
         let mut l = logic();
-        for req in [MenuReq::Options, MenuReq::Target, MenuReq::Comb, MenuReq::EqType(0), MenuReq::Param(Field::Int(LEVEL)), MenuReq::Curve(CurveId::Final(0)), MenuReq::Point(CurveId::Final(0), 0)] {
+        for req in [MenuReq::Options, MenuReq::Target, MenuReq::Part, MenuReq::Comb, MenuReq::EqType(0), MenuReq::Param(Field::Int(LEVEL)), MenuReq::Curve(CurveId::Final(0)), MenuReq::Point(CurveId::Final(0), 0)] {
             l.menu(&req);
         }
         l.st.ints[RICH] = 13;
@@ -1667,18 +1769,30 @@ mod tests {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
         let mut l = logic();
+        // 2x to look at, 1x to lay over the spec's form px.
         let shot = |l: &mut Logic, name: &str| {
-            let mut c = os_ui::Canvas::new(view::W * 2, view::H * 2, 2.0).unwrap();
-            l.paint(&mut c);
-            c.pixmap.save_png(dir.join(name)).unwrap();
+            for (k, s) in [(2, "2x"), (1, "1x")] {
+                let mut c = os_ui::Canvas::new(view::W * k, l.height() * k, k as f32).unwrap();
+                l.paint(&mut c);
+                c.pixmap.save_png(dir.join(format!("{name}-{s}.png"))).unwrap();
+            }
         };
-        shot(&mut l, "smith-default.png");
-        l.view.target = A_CUT;
-        l.view.part[A_CUT] = 1;
-        shot(&mut l, "smith-lfo.png");
+        shot(&mut l, "smith-default");
+        l.view.target = A_VOLUME;
+        l.view.part[A_VOLUME] = 0;
+        shot(&mut l, "smith-envelope");
+        l.view.part[A_VOLUME] = 1;
+        shot(&mut l, "smith-lfo");
+        for (p, name) in [(2, "keyboard"), (3, "velocity"), (4, "mod-x")] {
+            l.view.part[A_VOLUME] = p;
+            shot(&mut l, &format!("smith-{name}"));
+        }
         l.view.target = ARTS + M_DECAY;
-        shot(&mut l, "smith-map.png");
+        shot(&mut l, "smith-map");
+        l.view.no_keys = true;
+        shot(&mut l, "smith-no-keys");
+        l.view.no_keys = false;
         l.view.info = true;
-        shot(&mut l, "smith-about.png");
+        shot(&mut l, "smith-about");
     }
 }

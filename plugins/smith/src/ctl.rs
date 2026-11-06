@@ -228,7 +228,8 @@ pub fn shown(st: &State, f: Field) -> i32 {
 pub fn is_bipolar(f: Field) -> bool {
     match f {
         Field::Int(k) => matches!(k, COARSE | FINE | MOD_X | MOD_Y | FULL | 24 | 25 | 28 | 29 | 39 | 40..=42),
-        Field::Part(_, 0, 3) | Field::Part(_, 1, 2 | 3 | 4) => true,
+        // An envelope's attack, decay and release are scales: 1 stands in the middle of the knob.
+        Field::Part(_, 0, 1..=4) | Field::Part(_, 1, 2 | 3 | 4) => true,
         _ => false,
     }
 }

@@ -2484,11 +2484,11 @@ mod tests {
         // The default patch saves no state until it is edited.
         assert_eq!(pl.ogun_file_state(0), Some(Vec::new()));
         for _ in 0..3 {
-            let (sx, sy) = (er.left + 33, er.top + 78);
+            let (sx, sy) = (er.left + 21, er.top + 38);
             unsafe { SendMessageW(editor as HWND, WM_MOUSEWHEEL, (120usize) << 16, ((sx & 0xffff) | (sy << 16)) as isize) };
             pump(&mut pl, 60);
         }
-        let (cx, cy) = (357isize, 151isize);
+        let (cx, cy) = (541isize, 109isize);
         unsafe { SendMessageW(editor as HWND, WM_LBUTTONDOWN, 0, cx | (cy << 16)) };
         unsafe { SendMessageW(editor as HWND, WM_LBUTTONUP, 0, cx | (cy << 16)) };
         pump(&mut pl, 300);
