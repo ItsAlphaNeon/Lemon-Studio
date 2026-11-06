@@ -8764,6 +8764,11 @@ impl App {
                 s.set_knob(id, if s.knob(id) >= 0.5 { 0.0 } else { 1.0 });
                 self.hint = Cow::Owned(s.knob_text(id));
             }
+            // Alt+click on a mixer track's pan or stereo separation knob: back to the default as one undo step, and no drag
+            // follows. Only that knob resets, whatever is selected, and the selection stays (spec: ui/mixer.md §4).
+            Action::Knob(id @ (crate::knobs::KnobId::MixPan(_) | crate::knobs::KnobId::MixSep(_))) if self.alt => {
+                self.reset_control(crate::knobs::Control::Knob(id));
+            }
             Action::Knob(id) => {
                 crate::history::knob(s, id, false);
                 self.drag = Some(Drag::Knob { id, y0: self.mouse.1, v0: s.knob(id) });
@@ -11833,6 +11838,34 @@ mod tests {
             assert!((app.state.knob(id) - (before + id.notch()).min(1.0)).abs() < 1e-4, "wheel {id:?}");
         }
         assert!(app.state.project.mixer.iter().find(|m| m.index == 1).unwrap().pan.unwrap() > 0.0, "mixer pan written to the model");
+    }
+
+    /// Alt+click as a press on the knob drawn in the mixer (the tests in `history.rs` act on the knob directly): pan and
+    /// stereo separation go back to their defaults, and the cursor stays free as no drag follows (spec: ui/mixer.md §4).
+    #[test]
+    fn mixer_knob_alt_press_resets() {
+        use crate::knobs::KnobId;
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.wins.iter_mut().for_each(|w| w.maxed = false);
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut c, None);
+        for (id, text) in [(KnobId::MixPan(1), "Panning: Centered"), (KnobId::MixSep(1), "Stereo separation: Original")] {
+            app.state.set_knob(id, 0.25);
+            let r = hit_rect(&app, &Action::Knob(id));
+            app.mouse_move(r.cx(), r.cy());
+            frame(&mut app, &mut c, None);
+            app.alt = true;
+            app.mouse_down();
+            assert_eq!(app.state.knob(id), id.default_value(), "{id:?}");
+            assert_eq!(app.hint, text);
+            assert!(!app.cursor_locked(), "no drag follows {id:?}");
+            app.mouse_move(r.cx(), r.cy() - 60.0);
+            assert_eq!(app.state.knob(id), id.default_value(), "{id:?} after the mouse moved");
+            app.mouse_up();
+            app.alt = false;
+            frame(&mut app, &mut c, None);
+        }
     }
 
     /// The wheel over a mixer fader moves it instead of scrolling the mixer: three notches up from unity read

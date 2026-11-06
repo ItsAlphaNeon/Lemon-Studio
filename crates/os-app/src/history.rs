@@ -1201,6 +1201,100 @@ mod tests {
         assert_eq!(crate::mixer::selected(&app.state), [3], "it alone is selected now");
     }
 
+    /// Press and release on knob `id` with Alt held, moving the mouse in between. Returns the hint bar's text right after
+    /// the press.
+    fn alt_click_knob(app: &mut App, id: KnobId) -> String {
+        app.alt = true;
+        app.mouse_move(100.0, 300.0);
+        app.act(Action::Knob(id));
+        let hint = app.hint.to_string();
+        app.mouse_move(100.0, 360.0);
+        app.mouse_up();
+        app.alt = false;
+        hint
+    }
+
+    /// Alt+click puts a mixer track's pan or stereo separation knob back at its default, from either side, as a step of
+    /// its own: Ctrl+Z brings back the value before the click, a second one undoes the drag before that, and Ctrl+Alt+Z
+    /// redoes them. No drag follows the press. A knob already at its default makes no step, and with Undo knob tweaks off
+    /// it resets without one (OS). Spec: ui/mixer.md §4.
+    #[test]
+    fn mixer_knob_alt_click_is_one_step() {
+        let knobs: [(fn(u16) -> KnobId, &str, &str, &str); 2] = [
+            (KnobId::MixPan, "Mixer track panning", "Undo mixer track panning", "Panning: Centered"),
+            (KnobId::MixSep, "Mixer track stereo separation", "Undo mixer track stereo separation", "Stereo separation: Original"),
+        ];
+        for (knob, name, undo_entry, default) in knobs {
+            let mut app = App::new(None);
+            let text = |app: &App, id| app.state.knob_text(id);
+            let k = knob(1);
+            assert_eq!(text(&app, k), default, "a new track's");
+            turn(&mut app, k, 40.0);
+            let moved = text(&app, k);
+            assert_ne!(moved, default, "the knob moved");
+            assert_eq!(alt_click_knob(&mut app, k), default);
+            assert_eq!(app.state.knob(k), 0.5, "at its default, and the mouse moving after the press did not move it");
+            assert_eq!(names(&app.state), [LAST_RESET, name, name], "a step of its own");
+            assert_eq!(edit_menu(&app)[0], entry(undo_entry, "Ctrl+Z", true));
+            ctrl_z(&mut app);
+            assert_eq!(text(&app, k), moved, "the value before the click");
+            ctrl_z(&mut app);
+            assert_eq!(text(&app, k), default, "the drag undone");
+            ctrl_alt_z(&mut app);
+            assert_eq!(text(&app, k), moved);
+            ctrl_alt_z(&mut app);
+            assert_eq!(text(&app, k), default, "redone");
+            let steps = app.state.history.len();
+            alt_click_knob(&mut app, k);
+            assert_eq!(app.state.history.len(), steps, "nothing changed");
+            turn(&mut app, knob(2), -30.0);
+            assert_ne!(text(&app, knob(2)), default, "the other side");
+            alt_click_knob(&mut app, knob(2));
+            assert_eq!(app.state.knob(knob(2)), 0.5, "from the other side");
+            turn(&mut app, knob(0), 30.0);
+            assert_ne!(text(&app, knob(0)), default, "the Master's knob moved");
+            alt_click_knob(&mut app, knob(0));
+            assert_eq!(app.state.knob(knob(0)), 0.5, "the Master's too");
+            turn(&mut app, knob(3), 40.0);
+            let steps = app.state.history.len();
+            prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, false);
+            alt_click_knob(&mut app, knob(3));
+            assert_eq!(app.state.knob(knob(3)), 0.5);
+            assert_eq!(app.state.history.len(), steps, "Undo knob tweaks off");
+            prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
+        }
+    }
+
+    /// With several tracks selected, Alt+click on a pan or stereo separation knob resets only that knob, unlike a fader's,
+    /// and the selection stays, in it or outside it. The step undoes only that knob. Spec: ui/mixer.md §4.
+    #[test]
+    fn mixer_knob_alt_click_with_several_selected() {
+        const OFF: f32 = 0.25;
+        const DEFAULT: f32 = 0.5;
+        let mut app = App::new(None);
+        for t in 1..=4 {
+            app.state.set_knob(KnobId::MixPan(t), OFF);
+            app.state.set_knob(KnobId::MixSep(t), OFF);
+        }
+        let at = |app: &App| [1, 2, 3, 4].map(|t| [app.state.knob(KnobId::MixPan(t)), app.state.knob(KnobId::MixSep(t))]);
+        app.state.selected_mixer = 1;
+        app.state.mixer.sel = vec![1, 2, 3];
+        let steps = app.state.history.len();
+        assert_eq!(alt_click_knob(&mut app, KnobId::MixPan(2)), "Panning: Centered");
+        assert_eq!(at(&app), [[OFF, OFF], [DEFAULT, OFF], [OFF, OFF], [OFF, OFF]], "a selected track's pan, only that one");
+        assert_eq!(app.state.history.len(), steps + 1);
+        assert_eq!(crate::mixer::selected(&app.state), [1, 2, 3], "the selection stays");
+        assert_eq!(alt_click_knob(&mut app, KnobId::MixSep(1)), "Stereo separation: Original");
+        assert_eq!(at(&app), [[OFF, DEFAULT], [DEFAULT, OFF], [OFF, OFF], [OFF, OFF]], "the current track's separation, only that one");
+        assert_eq!(app.state.history.len(), steps + 2);
+        assert_eq!(crate::mixer::selected(&app.state), [1, 2, 3], "the selection stays");
+        alt_click_knob(&mut app, KnobId::MixPan(4));
+        assert_eq!(at(&app), [[OFF, DEFAULT], [DEFAULT, OFF], [OFF, OFF], [DEFAULT, OFF]], "a knob outside the selection");
+        assert_eq!(crate::mixer::selected(&app.state), [1, 2, 3], "the selection stays");
+        ctrl_z(&mut app);
+        assert_eq!(at(&app), [[OFF, DEFAULT], [DEFAULT, OFF], [OFF, OFF], [OFF, OFF]], "the step undoes that knob alone");
+    }
+
     /// A generator added to the rack is one step, "Add channel" (`control::edit_app`): undone, the channel goes and its
     /// instance is kept; redone, the channel comes back with it (`control::host`).
     #[test]
