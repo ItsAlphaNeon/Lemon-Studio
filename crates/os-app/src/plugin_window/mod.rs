@@ -37,7 +37,7 @@ mod hyprland;
 #[cfg(target_os = "linux")]
 pub use x11::{
     busy, default_position, exposed, focus_main, in_keymap, keys_down, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main,
-    set_transient, stack, take_exposed, take_lift_input, unpinned, FrameWindow, Unpinned,
+    set_transient, stack, take_exposed, take_keys, take_lift_input, unpinned, FrameWindow, Unpinned,
 };
 
 #[cfg(target_os = "macos")]
@@ -73,6 +73,22 @@ pub fn first_position(owner: isize, scale: f32, _with_main: bool) -> (i32, i32) 
 pub fn moved_to(p: (i32, i32), from: [i32; 4], to: [i32; 4], keep: (i32, i32)) -> (i32, i32) {
     let (x, y) = (to[0] + p.0 - from[0], to[1] + p.1 - from[1]);
     (x.min(to[2] - keep.0).max(to[0]), y.min(to[3] - keep.1).max(to[1]))
+}
+
+/// `keys` (X key code, pressed, server time, then anything) without X11's key repeats: a held key repeats as a release
+/// and a press at the same server time, which would end and start its typed note again (Linux, `x11::pump`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn unrepeated<T>(keys: Vec<(u8, bool, u32, T)>) -> Vec<(u8, bool, u32, T)> {
+    let mut out = Vec::with_capacity(keys.len());
+    let mut keys = keys.into_iter().peekable();
+    while let Some(k) = keys.next() {
+        if !k.1 && keys.peek().is_some_and(|n| n.1 && n.0 == k.0 && n.2 == k.2) {
+            keys.next();
+            continue;
+        }
+        out.push(k);
+    }
+    out
 }
 
 /// A message a Lemon plugin's editor sent to its frame (host link, plugin -> host).
@@ -1278,6 +1294,19 @@ mod tests {
         assert!(in_keymap(&map, KeyCode::KeyZ));
         assert!(!in_keymap(&map, KeyCode::KeyX));
         assert!(!in_keymap(&[0; 32], KeyCode::KeyZ));
+    }
+
+    /// X11 repeats a held key as a release and a press at the same server time: those pairs go, so the typed note
+    /// plays on; a real release and press, or another key between, stay.
+    #[test]
+    fn key_repeats_are_dropped() {
+        // Z (52) held from 100 to 400, repeating at 200 and 233; X (53) let go of and pressed again at 300.
+        let keys = vec![(52, true, 100, ()), (52, false, 200, ()), (52, true, 200, ()), (52, false, 233, ()), (52, true, 233, ()), (53, false, 290, ()), (53, true, 300, ()), (52, false, 400, ())];
+        assert_eq!(unrepeated(keys), [(52, true, 100, ()), (53, false, 290, ()), (53, true, 300, ()), (52, false, 400, ())]);
+        // A release and a press of other keys at one time are both kept.
+        assert_eq!(unrepeated(vec![(52, false, 5, ()), (53, true, 5, ())]).len(), 2);
+        // A press then a release at one time (no repeat) are both kept.
+        assert_eq!(unrepeated(vec![(52, true, 5, ()), (52, false, 5, ())]).len(), 2);
     }
 
     fn state(strip: bool, target: &str) -> State {

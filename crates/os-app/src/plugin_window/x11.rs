@@ -17,6 +17,13 @@
 //! (`pump`) and repaints what changed after handling them (`paint_dirty`). Frames answer the window manager's pings
 //! (`_NET_WM_PING`), so when the app stops responding the window manager can still close a frame by ending Lemon Studio.
 //!
+//! Keys a plugin's editor gets still play the typing keyboard (`take_keys`), as on Windows and macOS. X11 gives a key to
+//! the window under the pointer when that lies inside the focused window, so with the pointer over a docked editor its
+//! keys go to the editor, though the main window keeps the focus; they go there as well while the editor holds the
+//! focus. The app asks for each key event on the editor's windows that take it (`watch_keys`), so it gets a copy of each
+//! key the editor gets and of no other: a key the editor does not take goes on to the main window, as before, and only
+//! there.
+//!
 // spec: ui/plugin-window.md
 
 use std::cell::{Cell, RefCell};
@@ -97,6 +104,23 @@ thread_local! {
     static MODAL: Cell<u32> = const { Cell::new(0) };
     /// A docked frame moved, shrank or went: part of the main window was uncovered (`take_exposed`).
     static EXPOSED: Cell<bool> = const { Cell::new(false) };
+    /// Keys the plugins' editors got since the last `take_keys`.
+    static KEYS: RefCell<Vec<KeyMsg>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A key a plugin's editor got (the typing keyboard keeps playing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyMsg {
+    /// The evdev scancode, as winit's `PhysicalKeyExtScancode` expects it on Linux: the X key code less 8.
+    pub scancode: u32,
+    pub pressed: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+}
+
+/// Keys the plugins' editors got since the last call, while the main window is an X11 one (UI thread).
+pub fn take_keys() -> Vec<KeyMsg> {
+    KEYS.with(|k| std::mem::take(&mut *k.borrow_mut()))
 }
 
 /// Whether part of the main window was uncovered (a docked frame moved, was clipped or closed, or the X server exposed
@@ -176,6 +200,8 @@ struct Frame {
     plain: Cell<bool>,
     /// A title-bar drag Hyprland carries out (`hyprland::Drag`).
     hypr_drag: RefCell<Option<super::hyprland::Drag>>,
+    /// The editor's windows may have changed: `watch_keys` looks again after the events in hand.
+    rewatch: Cell<bool>,
 }
 
 /// A plugin window. Dropping it destroys the native window (close the plugin's editor first).
@@ -214,7 +240,8 @@ impl FrameWindow {
         let win = c.generate_id().map_err(|e| fail(&e))?;
         let area = c.generate_id().map_err(|e| fail(&e))?;
         let gc = c.generate_id().map_err(|e| fail(&e))?;
-        let events = EventMask::EXPOSURE | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION | EventMask::STRUCTURE_NOTIFY;
+        // Entering: the editor's windows are looked at again for the keys they take (`watch_keys`).
+        let events = EventMask::EXPOSURE | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION | EventMask::STRUCTURE_NOTIFY | EventMask::ENTER_WINDOW;
         let canvas = Canvas::new(u32::from(px(w, k)), u32::from(px(h, k)), k)?;
         let made = (|| -> Result<(), Box<dyn std::error::Error>> {
             // No background: every expose is painted from the canvas.
@@ -230,7 +257,8 @@ impl FrameWindow {
                 0,
                 WindowClass::INPUT_OUTPUT,
                 x11rb::COPY_FROM_PARENT,
-                &CreateWindowAux::new().background_pixel(pixel(c_body())),
+                // Its children coming and going: the editor's windows (`watch_keys`).
+                &CreateWindowAux::new().background_pixel(pixel(c_body())).event_mask(EventMask::SUBSTRUCTURE_NOTIFY),
             )?;
             c.create_gc(gc, win, &CreateGCAux::new().graphics_exposures(0))?;
             c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes())?;
@@ -289,6 +317,7 @@ impl FrameWindow {
             last_press: Cell::new(None),
             plain: Cell::new(false),
             hypr_drag: RefCell::new(None),
+            rewatch: Cell::new(false),
         });
         conn.frames.borrow_mut().insert(win, Rc::downgrade(&f));
         Ok(FrameWindow { f })
@@ -741,11 +770,50 @@ impl Frame {
         os_clap::wake();
     }
 
+    /// Asks for the key events the plugin's windows in the editor area take (another client asked for them there), on
+    /// those windows and no others, while the main window is an X11 one: a key stops at the first window from the one
+    /// it happened in up that some client takes it on, and goes to every client taking it there. So the app gets a copy
+    /// of each key the editor gets (`take_keys`), and a key the editor does not take goes on to the main window as
+    /// before. A window that takes keys only through XInput 2 does not show here: its keys stay the editor's alone.
+    fn watch_keys(&self) {
+        if self.conn.owner.get() == 0 {
+            return;
+        }
+        let c = &self.conn.c;
+        let keys = u32::from(EventMask::KEY_PRESS | EventMask::KEY_RELEASE);
+        // The editor area and every window inside it, a level at a time (each level's requests in one round trip).
+        let mut all = vec![self.area];
+        let mut level = vec![self.area];
+        for _ in 0..16 {
+            let trees: Vec<_> = level.iter().filter_map(|&w| c.query_tree(w).ok()).collect();
+            level = trees.into_iter().filter_map(|t| t.reply().ok()).flat_map(|t| t.children).collect();
+            if level.is_empty() {
+                break;
+            }
+            all.extend(&level);
+        }
+        let attrs: Vec<_> = all.iter().filter_map(|&w| Some((w, c.get_window_attributes(w).ok()?))).collect();
+        for (w, a) in attrs {
+            let Ok(a) = a.reply() else { continue };
+            let (ours, any) = (u32::from(a.your_event_mask), u32::from(a.all_event_masks));
+            if ours & keys != any & keys {
+                let _ = c.change_window_attributes(w, &xproto::ChangeWindowAttributesAux::new().event_mask(EventMask::from((ours & !keys) | (any & keys))));
+            }
+        }
+        let _ = c.flush();
+    }
+
     fn event(&self, e: Event) {
         let k = self.scale;
         let screen = |x: f32, y: f32| self.to_screen(x, y);
         match e {
             Event::Expose(_) => self.dirty.set(true),
+            // The editor's windows came, went or showed, or the pointer came in (an editor may take keys late): which
+            // of them take keys is looked at again (`watch_keys`).
+            Event::EnterNotify(e) if e.event == self.win => self.rewatch.set(true),
+            Event::CreateNotify(e) if e.parent == self.area => self.rewatch.set(true),
+            Event::ReparentNotify(e) if e.event == self.area => self.rewatch.set(true),
+            Event::MapNotify(e) if e.event == self.area => self.rewatch.set(true),
             // A click in the plugin's editor (the grab on the area; `pump` lets the editor have it).
             Event::ButtonPress(e) if e.event == self.area => self.clicked(),
             Event::ButtonPress(e) => {
@@ -1046,6 +1114,10 @@ fn window_of(e: &Event) -> Option<xproto::Window> {
         Event::ButtonRelease(e) => e.event,
         Event::MotionNotify(e) => e.event,
         Event::ClientMessage(e) => e.window,
+        Event::EnterNotify(e) => e.event,
+        Event::CreateNotify(e) => e.parent,
+        Event::ReparentNotify(e) => e.event,
+        Event::MapNotify(e) => e.event,
         _ => return None,
     })
 }
@@ -1053,7 +1125,14 @@ fn window_of(e: &Event) -> Option<xproto::Window> {
 /// UI tick: handles the frames' window events (input, close, expose) and follows the active window.
 pub fn pump() {
     let Some(conn) = CONN.with(|c| c.borrow().clone()) else { return };
+    // Keys the editors got (`watch_keys`), in order: X key code, pressed, server time, then Ctrl and Alt.
+    let mut keys = Vec::new();
     while let Ok(Some(e)) = conn.c.poll_for_event() {
+        if let Event::KeyPress(k) | Event::KeyRelease(k) = &e {
+            let held = |m: KeyButMask| u16::from(k.state) & u16::from(m) != 0;
+            keys.push((k.detail, matches!(e, Event::KeyPress(_)), k.time, (held(KeyButMask::CONTROL), held(KeyButMask::MOD1))));
+            continue;
+        }
         if let Event::PropertyNotify(p) = &e {
             if p.window == conn.root && p.atom == conn.atoms._NET_ACTIVE_WINDOW {
                 let active = conn.c.get_property(false, conn.root, conn.atoms._NET_ACTIVE_WINDOW, AtomEnum::WINDOW, 0, 1);
@@ -1090,6 +1169,14 @@ pub fn pump() {
             let _ = conn.c.allow_events(xproto::Allow::REPLAY_POINTER, t);
             let _ = conn.c.flush();
         }
+    }
+    if !keys.is_empty() {
+        let msgs = unrepeated(keys).into_iter().map(|(code, pressed, _, (ctrl, alt))| KeyMsg { scancode: u32::from(code).saturating_sub(8), pressed, ctrl, alt });
+        KEYS.with(|q| q.borrow_mut().extend(msgs));
+    }
+    let rewatch: Vec<Rc<Frame>> = conn.frames.borrow().values().filter_map(Weak::upgrade).filter(|f| f.rewatch.replace(false)).collect();
+    for f in rewatch {
+        f.watch_keys();
     }
 }
 
@@ -1230,4 +1317,105 @@ pub fn default_position(owner: isize, scale: f32) -> (i32, i32) {
     }
     let (x, y) = to_root(&conn, owner as xproto::Window, (0, 0));
     (x + (420.0 * scale).round() as i32, y + (160.0 * scale).round() as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A round trip: every event the server sent `c` before it is in hand.
+    fn sync(c: &RustConnection) {
+        let _ = c.get_input_focus().ok().and_then(|r| r.reply().ok());
+    }
+
+    /// A hidden 100 x 50 window in `parent`, taking `events`.
+    fn window(c: &RustConnection, parent: xproto::Window, events: EventMask) -> xproto::Window {
+        let w = c.generate_id().unwrap();
+        c.create_window(x11rb::COPY_DEPTH_FROM_PARENT, w, parent, 0, 0, 100, 50, 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT, &CreateWindowAux::new().event_mask(events)).unwrap();
+        w
+    }
+
+    /// Key `code` pressed or released in window `at`: it goes to the first window from `at` up that some client takes
+    /// it on, as a typed key does.
+    fn key(c: &RustConnection, root: xproto::Window, at: xproto::Window, code: u8, pressed: bool, time: u32) {
+        let kind = if pressed { xproto::KEY_PRESS_EVENT } else { xproto::KEY_RELEASE_EVENT };
+        let e = xproto::KeyPressEvent {
+            response_type: kind,
+            detail: code,
+            sequence: 0,
+            time,
+            root,
+            event: at,
+            child: x11rb::NONE,
+            root_x: 0,
+            root_y: 0,
+            event_x: 0,
+            event_y: 0,
+            state: KeyButMask::from(0u16),
+            same_screen: true,
+        };
+        c.send_event(true, at, if pressed { EventMask::KEY_PRESS } else { EventMask::KEY_RELEASE }, e).unwrap();
+    }
+
+    /// The key events `c` got.
+    fn keys_got(c: &RustConnection) -> usize {
+        sync(c);
+        std::iter::from_fn(|| c.poll_for_event().ok().flatten()).filter(|e| matches!(e, Event::KeyPress(_) | Event::KeyRelease(_))).count()
+    }
+
+    /// Keys reach Lemon Studio once each over a docked plugin editor: a copy of those the editor gets (`take_keys`), on
+    /// its window or a child of it, and none of those it does not take, which go on to the main window alone. A sent
+    /// event going up the windows stands in for the keyboard (nothing is shown or typed on the desktop). Skipped
+    /// without an X server.
+    #[test]
+    fn editor_keys_are_copied_once() {
+        let Ok((main, screen)) = RustConnection::connect(None) else { return };
+        let Ok(our) = conn() else { return };
+        let root = main.setup().roots[screen].root;
+        let keys = EventMask::KEY_PRESS | EventMask::KEY_RELEASE;
+        // The main window, as winit makes it: it takes keys.
+        let owner = window(&main, root, keys);
+        sync(&main);
+        let info = ChannelInfo { name: "Keys".into(), target: "Bus 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: None, icon: None };
+        let frame = FrameWindow::new(owner as isize, info, (200.0, 100.0), 1.0, (0, 0), false).unwrap();
+        let area = frame.area() as usize as xproto::Window;
+        // A plugin's editor on its own connection: a window taking keys, with a child that does not, and a window
+        // taking none.
+        let (plug, _) = RustConnection::connect(None).unwrap();
+        let editor = window(&plug, area, keys);
+        let inner = window(&plug, editor, EventMask::NO_EVENT);
+        let bare = window(&plug, area, EventMask::NO_EVENT);
+        sync(&plug);
+        // The frame hears of them and asks for the keys the editor takes.
+        sync(&our.c);
+        pump();
+        sync(&our.c);
+        let typed = |at: xproto::Window, presses: &[(bool, u32)]| {
+            for &(pressed, t) in presses {
+                key(&plug, root, at, 52, pressed, t);
+            }
+            sync(&plug);
+            sync(&our.c);
+            pump();
+            take_keys()
+        };
+        // Z (key code 52, evdev 44) typed over the editor's child: the editor and Lemon Studio get it, the main window
+        // does not.
+        let z = |pressed| KeyMsg { scancode: 44, pressed, ctrl: false, alt: false };
+        assert_eq!(typed(inner, &[(true, 10), (false, 20)]), [z(true), z(false)]);
+        assert_eq!(keys_got(&plug), 2);
+        assert_eq!(keys_got(&main), 0);
+        // Over the window taking no keys: on to the main window alone.
+        assert!(typed(bare, &[(true, 30), (false, 40)]).is_empty());
+        assert_eq!(keys_got(&main), 2);
+        assert_eq!(keys_got(&plug), 0);
+        // Held over the editor, Z repeats (a release and a press at one time): one press and one release.
+        assert_eq!(typed(editor, &[(true, 50), (false, 60), (true, 60), (false, 70)]), [z(true), z(false)]);
+        drop(frame);
+        let _ = plug.destroy_window(editor);
+        let _ = plug.destroy_window(bare);
+        sync(&plug);
+        let _ = main.destroy_window(owner);
+        sync(&main);
+    }
 }

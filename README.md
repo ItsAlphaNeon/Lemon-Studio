@@ -235,8 +235,9 @@ Windows (or detach, from their window menu). A few things differ from Windows fo
 - **Scaling:** under XWayland Lemon Studio follows the X11 scale (`Xft.dpi`). If it looks soft on a fractionally scaled
   Wayland desktop, let X11 applications scale themselves (KDE: Display Configuration > Legacy applications (X11) >
   Apply scaling themselves).
-- **Keys** pressed while a plugin's editor has the keyboard focus do not play the typing keyboard yet, and a sample
-  dragged from Lemon Studio's browser onto a plugin window does not reach the plugin yet.
+- **Keys** a plugin's editor takes play the typing keyboard too, as on Windows, but only with the main window on X11;
+  the editor still gets them with TOOLS > Set keyboard focus of all plugins to ▸ Disabled. A sample dragged from Lemon
+  Studio's browser onto a plugin window does not reach the plugin yet.
 - **Lemon Sampler** cannot copy or paste audio through the clipboard yet.
 - **Settings, themes and presets** live in `$XDG_CONFIG_HOME/Lemon Studio` (usually `~/.config/Lemon Studio`).
   `OPENSTUDIO_USER_DIR` overrides the folder.
