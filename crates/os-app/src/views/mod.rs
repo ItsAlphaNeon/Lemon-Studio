@@ -327,7 +327,19 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         let a = if moved.is_some() { r } else { paint_area(s, win) };
         let h0 = ui.hits_len();
         ui.c.push_clip(a);
+        // Transparent windows: one that isn't the active one shows what is behind it (spec: ui/animations.md §4.9). A
+        // maximized or split one has nothing behind it to show.
+        let inactive = s.z.last() != Some(&win)
+            && !s.is_max(win)
+            && !(s.tiled() && win.slot().is_some())
+            && crate::prefs::index(&crate::prefs::TRANSPARENT_WINDOWS) == 1;
+        let opacity = s.motion.borrow_mut().window_opacity(win, None, inactive, a);
+        let behind = (opacity < 1.0 && ui.c.visible(a)).then(|| ui.c.begin_layer(a, false));
         paint_window(ui, s, win, r, a, f);
+        browser::paint_drop_glows(ui, s, win);
+        if let Some(l) = behind {
+            ui.c.end_layer(l, opacity);
+        }
         ui.c.pop_clip();
         // A split or maximized window's clicks stay in its card (a track row cut by the card's edge would take the
         // window's below it).
@@ -585,6 +597,7 @@ fn paint_rest(ui: &mut Ui, s: &State, f: &FrameInfo, w: f32) -> usize {
     if s.drag_on.is_none_or(|w| !s.is_detached(w)) {
         browser::paint_ghost(ui, s);
     }
+    browser::paint_fall(ui, s, None);
     if s.monitor.debug {
         mondebug::paint(ui, s);
     }
@@ -602,6 +615,7 @@ fn paint_rest(ui: &mut Ui, s: &State, f: &FrameInfo, w: f32) -> usize {
     if over_dialog && here {
         playlist::paint_overlays(ui, s);
     }
+    s.motion.borrow_mut().paint_ghosts(ui.c);
     overlays
 }
 
@@ -664,6 +678,7 @@ pub fn paint_detached(ui: &mut Ui, s: &State, f: &FrameInfo, w: Win) -> usize {
         Win::ChannelRack => rack::paint(ui, s, f),
         _ => {}
     }
+    browser::paint_drop_glows(ui, s, w);
     ui.c.pop_clip();
     ui.win = None;
     let overlays = ui.hit_count();
@@ -676,6 +691,8 @@ pub fn paint_detached(ui: &mut Ui, s: &State, f: &FrameInfo, w: Win) -> usize {
     if s.drag_on == Some(w) {
         browser::paint_ghost(ui, s);
     }
+    browser::paint_fall(ui, s, Some(w));
+    s.motion.borrow_mut().paint_ghosts(ui.c);
     overlays
 }
 
@@ -1044,9 +1061,28 @@ pub fn tool_button(ui: &mut Ui, r: Rect, icon: Icon, on: bool, action: Action, h
     }
     let hov = ui.hit(r, action.clone(), hint);
     let down = ui.down(r, &action);
-    let look = if on { Look::On } else if down { Look::Hot } else if hov { Look::Hover } else { Look::Off };
+    let look = if on { Look::On } else if down { Look::Hot } else { Look::Off };
+    lit_button(ui, r, icon, look, Look::Hover, hov && !on && !down);
+}
+
+/// A toolbar button in `look`; from rest, the look `hover` comes and goes over that as `lit` says.
+pub fn lit_button(ui: &mut Ui, r: Rect, icon: Icon, look: Look, hover: Look, lit: bool) {
+    let place = Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0);
     let c = tool_face(ui, r, look);
-    icons::draw(ui.c, icon, Rect::new(r.x + 5.0, r.y + 6.5, 20.0, 20.0), c);
+    icons::draw(ui.c, icon, place, c);
+    let glow = button_glow(ui, r, lit);
+    if glow > 0.0 && matches!(look, Look::Off) {
+        let l = ui.c.begin_layer(r.outset(1.0), false);
+        let c = tool_face(ui, r, hover);
+        icons::draw(ui.c, icon, place, c);
+        ui.c.end_layer(l, glow);
+    }
+}
+
+/// How lit a toolbar button in `r` shows: its times and its curve are FL's, measured (spec: ui/animations.md §2.2, §4.6).
+pub fn button_glow(ui: &mut Ui, r: Rect, lit: bool) -> f32 {
+    let key = crate::motion::key((r.x.to_bits(), r.y.to_bits()));
+    ui.hover_linear(key, lit, r, crate::motion::BUTTON_HOVER).powf(1.5)
 }
 
 /// A sunken panel (hint bar, monitors): flat fill inside a 1 px dark border.
@@ -1056,14 +1092,30 @@ pub fn sunken(ui: &mut Ui, r: Rect, fill: Color) {
 
 /// A ring knob (toolbar style): arc from the minimum; bipolar knobs pass `center = true`.
 pub fn knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, value: f32, center: bool, _c: Color, _track: Color) {
-    let hov = ui.hovering(Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r));
-    kit::knob(ui.c, ui.t, cx, cy, r, value, center, kit::KnobLook::Ring, kit::State::hover(hov));
+    hover_look(ui, Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), |c, t, st| kit::knob(c, t, cx, cy, r, value, center, kit::KnobLook::Ring, st));
+}
+
+/// A control in `area` drawn as `draw` says, its hover look coming and going over its look at rest (spec:
+/// ui/animations.md §4.6).
+pub fn hover_look(ui: &mut Ui, area: Rect, draw: impl Fn(&mut os_ui::Canvas, &os_theme::Palette, kit::State)) {
+    let hov = ui.hovering(area);
+    let k = ui.k;
+    let up = Rect::new(area.x * k, area.y * k, area.w * k, area.h * k);
+    let lit = ui.motion.borrow_mut().hover_knob(crate::motion::key((area.x.to_bits(), area.y.to_bits())), hov, up);
+    if lit >= 1.0 {
+        return draw(ui.c, ui.t, kit::State::hover(true));
+    }
+    draw(ui.c, ui.t, kit::State::hover(false));
+    if lit > 0.0 {
+        let l = ui.c.begin_layer(area.outset(2.0), false);
+        draw(ui.c, ui.t, kit::State::hover(true));
+        ui.c.end_layer(l, lit);
+    }
 }
 
 /// A dark glossy ball knob (mixer, rack, slots) with a pointer.
 pub fn ball_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, value: f32) {
-    let hov = ui.hovering(Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r));
-    kit::knob(ui.c, ui.t, cx, cy, r, value, false, kit::KnobLook::Ball, kit::State::hover(hov));
+    hover_look(ui, Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), |c, t, st| kit::knob(c, t, cx, cy, r, value, false, kit::KnobLook::Ball, st));
 }
 
 /// A round LED (spec §7: grey ring, green ball with a bright core when lit).

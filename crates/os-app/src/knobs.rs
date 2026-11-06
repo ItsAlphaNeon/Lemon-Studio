@@ -6,6 +6,8 @@
 //!
 //! Values are normalised 0..1. Every knob reads and writes the project model.
 
+use os_ui::Rect;
+
 use crate::app::State;
 
 /// Normalised value change per logical pixel of vertical drag (1/1024: 512 px sweeps a bipolar knob's range).
@@ -204,7 +206,7 @@ impl KnobId {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Control {
     Knob(KnobId),
-    /// A mixer track's volume fader (spec: ui/mixer.md §4).
+    /// A mixer track's volume fader, which Alt+click resets as well (spec: ui/mixer.md §4).
     Fader(u16),
     /// Channel row `.0`'s pitch knob in its plugin window (spec: ui/plugin-window.md).
     ChanPitch(usize),
@@ -248,6 +250,17 @@ pub fn pan_text(p: f32) -> String {
 }
 
 impl State {
+    /// What knob `id`, reaching `r` around (`cx`, `cy`), draws this frame (`knob_in`).
+    pub fn knob_at(&self, id: KnobId, cx: f32, cy: f32, r: f32) -> f32 {
+        self.knob_in(id, Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r))
+    }
+
+    /// What control `id`, drawn within `area` (window px), draws this frame: its value, reached by a glide when it
+    /// jumps (spec: ui/animations.md §4.5). Only the picture eases: `knob` is the value and what plays.
+    pub fn knob_in(&self, id: KnobId, area: Rect) -> f32 {
+        self.motion.borrow_mut().value(crate::motion::key(id), self.knob(id), area)
+    }
+
     pub fn knob(&self, id: KnobId) -> f32 {
         match id {
             KnobId::MixPan(t) => {
@@ -477,7 +490,8 @@ impl State {
 }
 
 impl crate::app::App {
-    /// Control `c` back to its default (a middle click, or "Reset" in its menu); the hint bar shows the new value.
+    /// Control `c` back to its default (a middle click, "Reset" in its menu, Alt+click on a mixer fader, pan or stereo
+    /// separation knob); the hint bar shows the new value.
     pub(crate) fn reset_control(&mut self, c: Control) {
         use std::borrow::Cow;
         let s = &mut self.state;

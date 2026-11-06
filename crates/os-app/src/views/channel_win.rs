@@ -85,9 +85,9 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
     }
     let (vol, pan) = (KnobId::ChanVol(s.plugin_channel), KnobId::ChanPan(s.plugin_channel));
     ui.hit(Rect::new(body.right() - 68.0, body.y + 20.0, 28.0, 28.0), Action::Knob(vol), s.knob_text(vol));
-    ball_knob(ui, body.right() - 54.0, body.y + 34.0, 12.0, s.knob(vol));
+    ball_knob(ui, body.right() - 54.0, body.y + 34.0, 12.0, s.knob_at(vol, body.right() - 54.0, body.y + 34.0, 14.0));
     ui.hit(Rect::new(body.right() - 68.0, body.y + 70.0, 28.0, 28.0), Action::Knob(pan), s.knob_text(pan));
-    ball_knob(ui, body.right() - 54.0, body.y + 84.0, 12.0, s.knob(pan));
+    ball_knob(ui, body.right() - 54.0, body.y + 84.0, 12.0, s.knob_at(pan, body.right() - 54.0, body.y + 84.0, 14.0));
     ui.c.text_center(Font::new(13), Rect::new(body.right() - 84.0, body.y + 48.0, 60.0, 14.0), t.text_dim, "VOL");
     ui.c.text_center(Font::new(13), Rect::new(body.right() - 84.0, body.y + 98.0, 60.0, 14.0), t.text_dim, "PAN");
 }
@@ -96,7 +96,7 @@ pub fn paint(ui: &mut Ui, s: &State, _f: &FrameInfo) {
 fn knob(ui: &mut Ui, s: &State, id: KnobId, cx: f32, cy: f32, caption: &str) {
     let t = ui.t;
     ui.hit(Rect::new(cx - 14.0, cy - 14.0, 28.0, 28.0), Action::Knob(id), s.knob_text(id));
-    ball_knob(ui, cx, cy, 12.0, s.knob(id));
+    ball_knob(ui, cx, cy, 12.0, s.knob_at(id, cx, cy, 14.0));
     ui.c.text_center(Font::new(13), Rect::new(cx - 30.0, cy + 14.0, 60.0, 14.0), t.text_dim, caption);
 }
 

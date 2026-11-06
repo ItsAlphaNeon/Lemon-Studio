@@ -945,11 +945,12 @@ pub fn set_rows(s: &mut State, grid: Rect, y: f32, row: f32) {
     clamp_scroll(s, grid.h);
 }
 
-/// Time zoom by `notches` wheel notches around grid x `x` (§3a).
-pub fn zoom_time(s: &mut State, g: &Geom, x: f32, notches: f32) {
+/// Time zoom by `notches` wheel notches from zoom `from` (px a beat: the zoom drawn, or where an eased zoom is going,
+/// `crate::smooth`) around grid x `x`, which keeps the tick drawn there (§3a).
+pub fn zoom_time(s: &mut State, g: &Geom, x: f32, from: f32, notches: f32) {
     let tick = g.tick_at(x);
     let p = &mut s.piano;
-    p.px_per_beat = (p.px_per_beat * 1.25f32.powf(notches)).clamp(6.0, 1600.0);
+    p.px_per_beat = (from * 1.25f32.powf(notches)).clamp(6.0, 1600.0);
     let ppt = p.px_per_beat / f32::from(s.project.ppq.max(4));
     p.scroll_x = (tick - (x - g.grid.x) / ppt).max(0.0);
 }

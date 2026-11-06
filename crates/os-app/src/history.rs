@@ -592,6 +592,7 @@ pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
 }
 
 fn swap(s: &mut State, i: usize) {
+    s.motion.borrow_mut().ripples_over();
     if let Snap::Commands(v) = &mut s.history.steps[i].snap {
         let v = std::mem::take(v);
         let other = crate::control::take_back(s, v);
@@ -1127,6 +1128,417 @@ mod tests {
         assert_ne!(vol(&app), v1);
         assert_eq!(app.state.history.len(), 1, "Undo knob tweaks off");
         prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
+    }
+
+    /// The mixer's faders `ts`, as values.
+    fn volumes<const N: usize>(app: &App, ts: [u16; N]) -> [f64; N] {
+        ts.map(|t| crate::mixer::track(&app.state, t).and_then(|m| m.volume).unwrap())
+    }
+
+    /// Puts tracks 1, 2, 3 at 0.2, 0.5 and 0.7, with 4 left alone, and selects `sel` with `current` as the current one.
+    fn spread(app: &mut App, current: u16, sel: &[u16]) {
+        group(app, [0.2, 0.5, 0.7], current, sel);
+    }
+
+    /// Puts tracks 1, 2, 3 at `levels` and selects `sel` with `current` as the current one.
+    fn group(app: &mut App, levels: [f64; 3], current: u16, sel: &[u16]) {
+        for (t, v) in [1, 2, 3].into_iter().zip(levels) {
+            crate::mixer::track_mut(&mut app.state, t).unwrap().volume = Some(v);
+        }
+        app.state.selected_mixer = current;
+        app.state.mixer.sel = sel.to_vec();
+    }
+
+    /// A fader's value in dB.
+    fn db(v: f64) -> f64 {
+        20.0 * os_engine::laws::fader_gain(v).log10()
+    }
+
+    /// Tracks 1, 2 and 3 are `want` dB apart, each measured from track 2.
+    fn apart(app: &App, want: [f64; 3]) {
+        let [a, b, c] = volumes(app, [1, 2, 3]).map(db);
+        for (got, want) in [a - b, 0.0, c - b].into_iter().zip(want) {
+            assert!((got - want).abs() < 1e-6, "{got} dB apart, want {want} ({a}, {b}, {c})");
+        }
+    }
+
+    /// Each fader stops at the top on its own while the others go on, and when the pressed one reaches -INF they all do.
+    /// Back at the press point in the same drag, they are all exactly where they were. Spec: ui/mixer.md §4.
+    #[test]
+    fn mixer_group_fader_at_the_ends_of_the_range() {
+        let mut app = App::new(None);
+        let before = [0.712, 0.592, 0.48];
+        group(&mut app, before, 1, &[1, 2, 3]);
+        app.mouse_move(100.0, 300.0);
+        app.act(Action::Fader(2));
+        app.mouse_move(100.0, -700.0);
+        let [a, b, c] = volumes(&app, [1, 2, 3]);
+        assert_eq!((a, b), (1.0, 1.0), "at the top");
+        assert!((db(c) - db(before[2]) - (db(1.0) - db(before[1]))).abs() < 1e-6, "the lowest went on by the same dB: {c}");
+        app.mouse_move(100.0, 1300.0);
+        assert_eq!(volumes(&app, [1, 2, 3]), [0.0; 3], "the pressed one at -INF takes them all there");
+        app.mouse_move(100.0, 300.0);
+        assert_eq!(volumes(&app, [1, 2, 3]), before, "back at the press point");
+        app.mouse_up();
+    }
+
+    /// A fader at -INF stays there while the others move, and a press on it sends them to the top. Spec: ui/mixer.md §4.
+    #[test]
+    fn mixer_group_fader_at_minus_inf() {
+        let mut app = App::new(None);
+        let before = [0.6, 0.5, 0.0];
+        group(&mut app, before, 1, &[1, 2, 3]);
+        fade(&mut app, 2, 20.0);
+        let [a, b, c] = volumes(&app, [1, 2, 3]);
+        assert!(a < before[0] && b < before[1] && c == 0.0, "{a}, {b}, {c}");
+        fade(&mut app, 2, -40.0);
+        let [a, b, c] = volumes(&app, [1, 2, 3]);
+        assert!(a > before[0] && b > before[1] && c == 0.0, "{a}, {b}, {c}");
+        ctrl_z(&mut app);
+        ctrl_z(&mut app);
+        assert_eq!(volumes(&app, [1, 2, 3]), before);
+        fade(&mut app, 3, -40.0);
+        let [a, b, c] = volumes(&app, [1, 2, 3]);
+        assert_eq!((a, b), (1.0, 1.0), "the others at the top");
+        assert!(c > 0.0 && c < 0.2, "the pressed one follows the mouse: {c}");
+        ctrl_z(&mut app);
+        assert_eq!(volumes(&app, [1, 2, 3]), before, "one step");
+    }
+
+    /// A fader stopped at the top stays there through new drags until the others have come down far enough, then they are
+    /// as far apart as they were. A press on it brings the others back at once. Spec: ui/mixer.md §4.
+    #[test]
+    fn mixer_group_fader_keeps_the_differences_between_drags() {
+        let before = [0.712, 0.592, 0.48];
+        let want = [db(before[0]) - db(before[1]), 0.0, db(before[2]) - db(before[1])];
+        let mut app = App::new(None);
+        group(&mut app, before, 1, &[1, 2, 3]);
+        fade(&mut app, 2, -1000.0);
+        assert_eq!(volumes(&app, [1, 2])[..], [1.0, 1.0]);
+        let mut stopped = false;
+        while volumes(&app, [1])[0] == 1.0 {
+            fade(&mut app, 2, 10.0);
+            let [a, b, c] = volumes(&app, [1, 2, 3]);
+            assert!(b < 1.0);
+            assert!((db(c) - db(b) - want[2]).abs() < 1e-6, "the lowest stays as far from the pressed one");
+            stopped |= a == 1.0;
+        }
+        assert!(stopped, "it stayed at the top for a drag at least");
+        apart(&app, want);
+
+        group(&mut app, before, 1, &[1, 2, 3]);
+        app.state.mixer.faders = Default::default();
+        fade(&mut app, 2, -1000.0);
+        fade(&mut app, 1, 10.0);
+        let a = volumes(&app, [1])[0];
+        assert!(a < 1.0);
+        apart(&app, want);
+    }
+
+    /// A group taken to -INF and released comes back as it was on the next drag. Spec: ui/mixer.md §4.
+    #[test]
+    fn mixer_group_fader_comes_back_from_minus_inf() {
+        let before = [0.712, 0.592, 0.48];
+        let want = [db(before[0]) - db(before[1]), 0.0, db(before[2]) - db(before[1])];
+        let mut app = App::new(None);
+        group(&mut app, before, 1, &[1, 2, 3]);
+        fade(&mut app, 3, 1000.0);
+        assert_eq!(volumes(&app, [1, 2, 3]), [0.0; 3]);
+        fade(&mut app, 3, -60.0);
+        assert!(volumes(&app, [3])[0] > 0.0);
+        apart(&app, want);
+    }
+
+    /// Making the selection again starts from the faders as they are, even with the same tracks. So does anything else
+    /// that moved a fader since the last drag. Spec: ui/mixer.md §4.
+    #[test]
+    fn mixer_group_fader_forgets_the_differences() {
+        let before = [0.712, 0.592, 0.48];
+        let mut app = App::new(None);
+        group(&mut app, before, 1, &[1, 2, 3]);
+        fade(&mut app, 2, -1000.0);
+        crate::mixer::select(&mut app.state, 1, false);
+        for t in [2, 3] {
+            crate::mixer::select(&mut app.state, t, true);
+        }
+        let [_, _, c] = volumes(&app, [1, 2, 3]);
+        fade(&mut app, 2, 10.0);
+        let [a, b, c2] = volumes(&app, [1, 2, 3]);
+        assert!(b < 1.0);
+        assert!((a - b).abs() < 1e-9, "both were at the top, and that is what counts now: {a}, {b}");
+        assert!((db(c2) - db(b) - (db(c) - db(1.0))).abs() < 1e-6);
+
+        group(&mut app, before, 1, &[1, 2, 3]);
+        fade(&mut app, 2, -1000.0);
+        let c = volumes(&app, [3])[0];
+        crate::mixer::track_mut(&mut app.state, 3).unwrap().volume = Some(c / 2.0);
+        fade(&mut app, 2, 10.0);
+        let [a, b, c2] = volumes(&app, [1, 2, 3]);
+        assert!((a - b).abs() < 1e-9, "the fader moved by something else: they start from what they show: {a}, {b}");
+        assert!((db(c2) - db(b) - (db(c / 2.0) - db(1.0))).abs() < 1e-6);
+
+        group(&mut app, before, 1, &[1, 2, 3]);
+        app.state.mixer.faders = Default::default();
+        fade(&mut app, 2, -1000.0);
+        ctrl_z(&mut app);
+        assert_eq!(volumes(&app, [1, 2, 3]), before);
+        fade(&mut app, 2, 10.0);
+        apart(&app, [db(before[0]) - db(before[1]), 0.0, db(before[2]) - db(before[1])]);
+    }
+
+    /// The Master moves with the others when selected, and a press on its fader moves them all. Spec: ui/mixer.md §4.
+    #[test]
+    fn mixer_group_fader_with_the_master() {
+        let mut app = App::new(None);
+        spread(&mut app, 1, &[0, 1, 2]);
+        let before = volumes(&app, [0, 1, 2, 3]);
+        fade(&mut app, 1, 20.0);
+        let after = volumes(&app, [0, 1, 2, 3]);
+        assert!(after[0] < before[0] && after[2] < before[2], "{after:?}");
+        assert_eq!(after[3], before[3]);
+        fade(&mut app, 0, 20.0);
+        let again = volumes(&app, [0, 1, 2, 3]);
+        assert!(again[0] < after[0] && again[1] < after[1] && again[2] < after[2], "{again:?}");
+        assert_eq!(app.state.selected_mixer, 0);
+        assert_eq!(crate::mixer::selected(&app.state).len(), 3, "the selection stays");
+    }
+
+    /// A plain drag on the fader of a selected track moves every selected one by the same number of dB, and the others
+    /// stay. The press keeps the selection and makes that track current. All of it is one step: Ctrl+Z puts every
+    /// fader back exactly and Ctrl+Alt+Z redoes them. Spec: ui/mixer.md §2, §4.
+    #[test]
+    fn mixer_group_fader_drag_is_one_step() {
+        let mut app = App::new(None);
+        spread(&mut app, 1, &[1, 2, 3]);
+        let (before, steps) = (volumes(&app, [1, 2, 3, 4]), app.state.history.len());
+        fade(&mut app, 2, 40.0);
+        let after = volumes(&app, [1, 2, 3, 4]);
+        assert!(after[1] < before[1], "the pressed fader moved");
+        assert_eq!(after[3], before[3], "a track outside the selection stays");
+        let db = |v: f64| 20.0 * os_engine::laws::fader_gain(v).log10();
+        let moved = db(after[1]) - db(before[1]);
+        for i in [0, 2] {
+            assert!((db(after[i]) - db(before[i]) - moved).abs() < 1e-9, "fader {i} moved {moved} dB too");
+        }
+        assert_eq!(app.state.selected_mixer, 2, "the pressed track is current");
+        assert_eq!(crate::mixer::selected(&app.state), [2, 1, 3], "the selection stays");
+        assert_eq!(app.state.history.len(), steps + 1, "one step");
+        assert_eq!(edit_menu(&app)[0], entry("Undo mixer track volume", "Ctrl+Z", true));
+        ctrl_z(&mut app);
+        assert_eq!(volumes(&app, [1, 2, 3, 4]), before, "exactly back");
+        ctrl_alt_z(&mut app);
+        assert_eq!(volumes(&app, [1, 2, 3, 4]), after, "redone");
+    }
+
+    /// A click on the fader of a selected track moves nothing and makes no step, and the selection stays. A drag there
+    /// with Undo knob tweaks off moves them all without one (OS, as for one fader).
+    #[test]
+    fn mixer_group_fader_click_and_no_undo_knob_tweaks() {
+        let mut app = App::new(None);
+        spread(&mut app, 1, &[1, 2, 3]);
+        let (before, steps) = (volumes(&app, [1, 2, 3]), app.state.history.len());
+        fade(&mut app, 3, 0.0);
+        assert_eq!(volumes(&app, [1, 2, 3]), before, "nothing moved");
+        assert_eq!(app.state.history.len(), steps, "no step");
+        assert_eq!((app.state.selected_mixer, crate::mixer::selected(&app.state)), (3, vec![3, 1, 2]));
+        prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, false);
+        fade(&mut app, 3, 20.0);
+        prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
+        let after = volumes(&app, [1, 2, 3]);
+        assert!((0..3).all(|i| after[i] < before[i]), "all moved");
+        assert_eq!(app.state.history.len(), steps, "Undo knob tweaks off");
+    }
+
+    /// A drag on a fader outside the selection moves that one alone, and it alone is selected now.
+    #[test]
+    fn mixer_fader_drag_outside_the_selection_moves_one() {
+        let mut app = App::new(None);
+        spread(&mut app, 1, &[1, 2]);
+        let before = volumes(&app, [1, 2, 3]);
+        fade(&mut app, 3, 20.0);
+        let after = volumes(&app, [1, 2, 3]);
+        assert_eq!(after[..2], before[..2], "the selection's faders stay");
+        assert!(after[2] < before[2]);
+        assert_eq!(crate::mixer::selected(&app.state), [3], "it alone is selected now");
+    }
+
+    /// Press and release on fader `t` with Alt held, moving the mouse in between. Returns the hint bar's text right after
+    /// the press.
+    fn alt_click_fader(app: &mut App, t: u16) -> String {
+        app.alt = true;
+        app.mouse_move(100.0, 300.0);
+        app.act(Action::Fader(t));
+        let hint = app.hint.to_string();
+        app.mouse_move(100.0, 360.0);
+        app.mouse_up();
+        app.alt = false;
+        hint
+    }
+
+    /// Alt+click puts a fader back at unity, from below or above it, as a step of its own: Ctrl+Z brings back the value
+    /// before the click, a second one undoes the drag before that, and Ctrl+Alt+Z redoes them. No drag follows the press.
+    /// A fader already at unity makes no step, and with Undo knob tweaks off it resets without one (OS). Spec:
+    /// ui/mixer.md §4.
+    #[test]
+    fn mixer_fader_alt_click_is_one_step() {
+        const UNITY: Option<f64> = Some(0.8);
+        let mut app = App::new(None);
+        let vol = |app: &App, t| crate::mixer::track(&app.state, t).and_then(|m| m.volume);
+        let v0 = vol(&app, 1);
+        assert_eq!(v0, UNITY, "a new track is at unity");
+        fade(&mut app, 1, 40.0);
+        let v1 = vol(&app, 1);
+        assert_ne!(v1, UNITY, "the fader moved");
+        assert_eq!(alt_click_fader(&mut app, 1), "Volume: 100%  0.0dB  1.00");
+        assert_eq!(vol(&app, 1), UNITY, "at unity, and the mouse moving after the press did not move it");
+        assert!(app.state.mixer.sel.is_empty());
+        assert_eq!(app.state.selected_mixer, 1, "the strip is selected");
+        assert_eq!(names(&app.state), [LAST_RESET, MIXER_VOLUME, MIXER_VOLUME], "a step of its own");
+        assert_eq!(edit_menu(&app)[0], entry("Undo mixer track volume", "Ctrl+Z", true));
+        ctrl_z(&mut app);
+        assert_eq!(vol(&app, 1), v1, "the value before the click");
+        ctrl_z(&mut app);
+        assert_eq!(vol(&app, 1), v0, "the drag undone");
+        ctrl_alt_z(&mut app);
+        assert_eq!(vol(&app, 1), v1);
+        ctrl_alt_z(&mut app);
+        assert_eq!(vol(&app, 1), UNITY, "redone");
+        let steps = app.state.history.len();
+        alt_click_fader(&mut app, 1);
+        assert_eq!(app.state.history.len(), steps, "nothing changed");
+        fade(&mut app, 2, -30.0);
+        assert!(vol(&app, 2) > UNITY, "above unity");
+        alt_click_fader(&mut app, 2);
+        assert_eq!(vol(&app, 2), UNITY, "from above");
+        fade(&mut app, 0, 30.0);
+        assert_ne!(vol(&app, 0), UNITY, "the Master's fader moved");
+        alt_click_fader(&mut app, 0);
+        assert_eq!(vol(&app, 0), UNITY, "the Master's too");
+        fade(&mut app, 3, 40.0);
+        let steps = app.state.history.len();
+        prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, false);
+        alt_click_fader(&mut app, 3);
+        assert_eq!(vol(&app, 3), UNITY);
+        assert_eq!(app.state.history.len(), steps, "Undo knob tweaks off");
+        prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
+    }
+
+    /// With several tracks selected, Alt+click on the fader of a selected one resets nothing: the selection stays and
+    /// that track becomes current. On any other fader it resets that one, which becomes the only one selected. No undo
+    /// step where nothing moved (OS: the original adds one). Spec: ui/mixer.md §4.
+    #[test]
+    fn mixer_fader_alt_click_with_several_selected() {
+        let mut app = App::new(None);
+        for (t, v) in [(1, 0.2), (2, 0.3), (3, 0.4)] {
+            crate::mixer::track_mut(&mut app.state, t).unwrap().volume = Some(v);
+        }
+        let vols = |app: &App| [1, 2, 3].map(|t| crate::mixer::track(&app.state, t).and_then(|m| m.volume).unwrap());
+        app.state.selected_mixer = 1;
+        app.state.mixer.sel = vec![1, 2];
+        let steps = app.state.history.len();
+        alt_click_fader(&mut app, 2);
+        assert_eq!(vols(&app), [0.2, 0.3, 0.4], "nothing resets");
+        assert_eq!(app.state.history.len(), steps, "no step");
+        assert_eq!(app.state.selected_mixer, 2, "the pressed track is current");
+        assert_eq!(crate::mixer::selected(&app.state), [2, 1], "the selection stays");
+        alt_click_fader(&mut app, 3);
+        assert_eq!(vols(&app), [0.2, 0.3, 0.8], "only the one outside the selection");
+        assert_eq!(app.state.history.len(), steps + 1);
+        assert_eq!(crate::mixer::selected(&app.state), [3], "it alone is selected now");
+    }
+
+    /// Press and release on knob `id` with Alt held, moving the mouse in between. Returns the hint bar's text right after
+    /// the press.
+    fn alt_click_knob(app: &mut App, id: KnobId) -> String {
+        app.alt = true;
+        app.mouse_move(100.0, 300.0);
+        app.act(Action::Knob(id));
+        let hint = app.hint.to_string();
+        app.mouse_move(100.0, 360.0);
+        app.mouse_up();
+        app.alt = false;
+        hint
+    }
+
+    /// Alt+click puts a mixer track's pan or stereo separation knob back at its default, from either side, as a step of
+    /// its own: Ctrl+Z brings back the value before the click, a second one undoes the drag before that, and Ctrl+Alt+Z
+    /// redoes them. No drag follows the press. A knob already at its default makes no step, and with Undo knob tweaks off
+    /// it resets without one (OS). Spec: ui/mixer.md §4.
+    #[test]
+    fn mixer_knob_alt_click_is_one_step() {
+        let knobs: [(fn(u16) -> KnobId, &str, &str, &str); 2] = [
+            (KnobId::MixPan, "Mixer track panning", "Undo mixer track panning", "Panning: Centered"),
+            (KnobId::MixSep, "Mixer track stereo separation", "Undo mixer track stereo separation", "Stereo separation: Original"),
+        ];
+        for (knob, name, undo_entry, default) in knobs {
+            let mut app = App::new(None);
+            let text = |app: &App, id| app.state.knob_text(id);
+            let k = knob(1);
+            assert_eq!(text(&app, k), default, "a new track's");
+            turn(&mut app, k, 40.0);
+            let moved = text(&app, k);
+            assert_ne!(moved, default, "the knob moved");
+            assert_eq!(alt_click_knob(&mut app, k), default);
+            assert_eq!(app.state.knob(k), 0.5, "at its default, and the mouse moving after the press did not move it");
+            assert_eq!(names(&app.state), [LAST_RESET, name, name], "a step of its own");
+            assert_eq!(edit_menu(&app)[0], entry(undo_entry, "Ctrl+Z", true));
+            ctrl_z(&mut app);
+            assert_eq!(text(&app, k), moved, "the value before the click");
+            ctrl_z(&mut app);
+            assert_eq!(text(&app, k), default, "the drag undone");
+            ctrl_alt_z(&mut app);
+            assert_eq!(text(&app, k), moved);
+            ctrl_alt_z(&mut app);
+            assert_eq!(text(&app, k), default, "redone");
+            let steps = app.state.history.len();
+            alt_click_knob(&mut app, k);
+            assert_eq!(app.state.history.len(), steps, "nothing changed");
+            turn(&mut app, knob(2), -30.0);
+            assert_ne!(text(&app, knob(2)), default, "the other side");
+            alt_click_knob(&mut app, knob(2));
+            assert_eq!(app.state.knob(knob(2)), 0.5, "from the other side");
+            turn(&mut app, knob(0), 30.0);
+            assert_ne!(text(&app, knob(0)), default, "the Master's knob moved");
+            alt_click_knob(&mut app, knob(0));
+            assert_eq!(app.state.knob(knob(0)), 0.5, "the Master's too");
+            turn(&mut app, knob(3), 40.0);
+            let steps = app.state.history.len();
+            prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, false);
+            alt_click_knob(&mut app, knob(3));
+            assert_eq!(app.state.knob(knob(3)), 0.5);
+            assert_eq!(app.state.history.len(), steps, "Undo knob tweaks off");
+            prefs::set_check(&prefs::UNDO_KNOB_TWEAKS, true);
+        }
+    }
+
+    /// With several tracks selected, Alt+click on a pan or stereo separation knob resets only that knob, unlike a fader's,
+    /// and the selection stays, in it or outside it. The step undoes only that knob. Spec: ui/mixer.md §4.
+    #[test]
+    fn mixer_knob_alt_click_with_several_selected() {
+        const OFF: f32 = 0.25;
+        const DEFAULT: f32 = 0.5;
+        let mut app = App::new(None);
+        for t in 1..=4 {
+            app.state.set_knob(KnobId::MixPan(t), OFF);
+            app.state.set_knob(KnobId::MixSep(t), OFF);
+        }
+        let at = |app: &App| [1, 2, 3, 4].map(|t| [app.state.knob(KnobId::MixPan(t)), app.state.knob(KnobId::MixSep(t))]);
+        app.state.selected_mixer = 1;
+        app.state.mixer.sel = vec![1, 2, 3];
+        let steps = app.state.history.len();
+        assert_eq!(alt_click_knob(&mut app, KnobId::MixPan(2)), "Panning: Centered");
+        assert_eq!(at(&app), [[OFF, OFF], [DEFAULT, OFF], [OFF, OFF], [OFF, OFF]], "a selected track's pan, only that one");
+        assert_eq!(app.state.history.len(), steps + 1);
+        assert_eq!(crate::mixer::selected(&app.state), [1, 2, 3], "the selection stays");
+        assert_eq!(alt_click_knob(&mut app, KnobId::MixSep(1)), "Stereo separation: Original");
+        assert_eq!(at(&app), [[OFF, DEFAULT], [DEFAULT, OFF], [OFF, OFF], [OFF, OFF]], "the current track's separation, only that one");
+        assert_eq!(app.state.history.len(), steps + 2);
+        assert_eq!(crate::mixer::selected(&app.state), [1, 2, 3], "the selection stays");
+        alt_click_knob(&mut app, KnobId::MixPan(4));
+        assert_eq!(at(&app), [[OFF, DEFAULT], [DEFAULT, OFF], [OFF, OFF], [DEFAULT, OFF]], "a knob outside the selection");
+        assert_eq!(crate::mixer::selected(&app.state), [1, 2, 3], "the selection stays");
+        ctrl_z(&mut app);
+        assert_eq!(at(&app), [[OFF, DEFAULT], [DEFAULT, OFF], [OFF, OFF], [OFF, OFF]], "the step undoes that knob alone");
     }
 
     /// A generator added to the rack is one step, "Add channel" (`control::edit_app`): undone, the channel goes and its

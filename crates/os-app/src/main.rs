@@ -12,6 +12,7 @@
 // own. Started from a terminal it still writes there (`attach_console`).
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
+mod anim;
 mod app;
 mod arrange;
 mod audio_clipboard;
@@ -98,6 +99,7 @@ mod chord_tool;
 mod slicer;
 mod drums;
 mod monitor;
+mod motion;
 mod params;
 mod piano;
 mod piano_snap;

@@ -184,7 +184,8 @@ pub(crate) fn zoom_key(app: &mut App, notches: f32) -> bool {
     let Some(grid) = app.piano_grid else { return false };
     let g = piano::Geom::new(&app.state, grid);
     let x = if grid.contains(app.mouse.0, app.mouse.1) { app.mouse.0 } else { grid.x };
-    piano::zoom_time(&mut app.state, &g, x, notches);
+    let from = app.state.piano.px_per_beat;
+    piano::zoom_time(&mut app.state, &g, x, from, notches);
     app.invalidate();
     true
 }

@@ -295,7 +295,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         } else if hov {
             ui.c.stroke_rrect(pb, 3.0, 1.0, ui.t.h(0xf09a28));
         }
-        icons::draw(ui.c, Icon::Plus, pb.inset(3.0), if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0x9aa1a5) });
+        let ink = ui.hover_ink(hov, pb, ui.t.tx(0x9aa1a5), ui.t.tx(0xffffff));
+        icons::draw(ui.c, Icon::Plus, pb.inset(3.0), ink);
     }
     // The tracks a control surface's faders take (crate::surface::Marks).
     let marked = s.surface_marks.mixer();
@@ -383,7 +384,8 @@ fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
     let y = r.y + 11.5;
     let ob = Rect::new(r.x + 3.0, y - 9.0, 16.0, 18.0);
     let hov = ui.hit(ob, Action::Mix(MHit::Options), "Mixer options");
-    chevron(ui, r.x + 11.0, y, true, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
+    let ink = ui.hover_ink(hov, ob, ui.t.tx(0xc4ccd0), ui.t.tx(0xffffff));
+    chevron(ui, r.x + 11.0, y, true, ink);
     // View buttons (multi-touch, waveforms, extra properties, track inspector). Multi-touch and the inspector are not
     // available yet, greyed out (drawn in their colours faded into the title bar, like `Ui::veil`; a veil would show
     // over the bar's gradient). View waveforms and Extra volume / stereo properties are Options ▸ View ▸'s switches
@@ -397,9 +399,11 @@ fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
     let b = Rect::new(r.x + 61.0 - 9.0, y - 9.0, 18.0, 18.0);
     let hov = ui.hit(b, Action::Mix(MHit::Waveforms), "View waveforms (Alt+W)");
     let on = s.mixer.waveforms;
-    icons::draw(ui.c, Icon::Plug, b.inset(1.0), if on || hov { ui.t.tx(0xffffff) } else { dim(ui.t.tx(0xc4ccd0)).mix(ui.t.tx(0xc4ccd0), 0.5) });
+    let ink = if on { ui.t.tx(0xffffff) } else { ui.hover_ink(hov, b, dim(ui.t.tx(0xc4ccd0)).mix(ui.t.tx(0xc4ccd0), 0.5), ui.t.tx(0xffffff)) };
+    icons::draw(ui.c, Icon::Plug, b.inset(1.0), ink);
     let (ix, px) = if super::lemon(ui) { (10.0, 16.0) } else { (0.0, 0.0) };
-    let hov = ui.hit(Rect::new(r.x + 76.0, y - 9.0, 16.0, 18.0), Action::Mix(MHit::Extra), "View extra volume / stereo properties");
+    let extra = Rect::new(r.x + 76.0, y - 9.0, 16.0, 18.0);
+    let hov = ui.hit(extra, Action::Mix(MHit::Extra), "View extra volume / stereo properties");
     ui.off(Rect::new(r.x + 92.0 + ix, y - 9.0, 15.0, 18.0), "Track inspector");
     // Bow-tie (stereo) in blue, layout square in orange, then "+" and the view combo.
     let mut g = Glyph::new();
@@ -407,17 +411,20 @@ fn title_tools(ui: &mut Ui, s: &State, r: Rect) {
     g.polygon(&[(cx - 8.0, y - 6.0), (cx - 1.0, y), (cx - 8.0, y + 6.0)]).polygon(&[(cx + 8.0, y - 6.0), (cx + 1.0, y), (cx + 8.0, y + 6.0)]);
     g.rect(cx - 8.5, y - 6.0, 1.5, 12.0);
     let blue = Color::rgb(0x5fb6f0);
-    ui.c.glyph(if hov { ui.t.tx(0xffffff) } else if s.mixer.extra { blue } else { dim(blue) }, &g);
+    let ink = ui.hover_ink(hov, extra, if s.mixer.extra { blue } else { dim(blue) }, ui.t.tx(0xffffff));
+    ui.c.glyph(ink, &g);
     let mut g = Glyph::new();
     g.frame(Rect::new(r.x + 93.0 + ix, y - 6.0, 12.0, 12.0), 1.6);
     ui.c.glyph(dim(ui.t.h(0xf3b234)), &g);
     ui.c.fill_rect(Rect::new(r.x + 101.5 + ix, y - 4.5, 2.0, 9.0), dim(Color::rgb(0xd03a2a)));
     let pb = Rect::new(r.x + 109.0 + px, y - 8.0, 16.0, 16.0);
     let hov = ui.hit(pb, Action::Mix(MHit::AddAfter), "Add a new track after the selected track");
-    icons::draw(ui.c, Icon::Plus, Rect::new(r.x + 110.0 + px, y - 7.0, 14.0, 14.0), if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
+    let ink = ui.hover_ink(hov, pb, ui.t.tx(0xc4ccd0), ui.t.tx(0xffffff));
+    icons::draw(ui.c, Icon::Plus, Rect::new(r.x + 110.0 + px, y - 7.0, 14.0, 14.0), ink);
     let lb = Rect::new(r.x + 130.0 + px, r.y + 2.0, 50.0, 20.0);
     let hov = ui.hit(lb, Action::Mix(MHit::Layout), "Mixer layout");
-    ui.c.text(Font::new(17), r.x + 134.0 + px, r.y + 2.0, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xb8c4cb) }, "Wide");
+    let ink = ui.hover_ink(hov, lb, ui.t.tx(0xb8c4cb), ui.t.tx(0xffffff));
+    ui.c.text(Font::new(17), r.x + 134.0 + px, r.y + 2.0, ink, "Wide");
 }
 
 fn mix(a: Color, b: Color, t: f32) -> Color {
@@ -555,8 +562,16 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
             }
             ui.c.pop_clip();
         }
-        let c = if selected && lemon { lk::ink_on_lit(ui.t) } else if selected || hov { ui.t.tx(0x9aa1a5) } else { ui.t.s(0x6d7275) };
-        ui.c.text_center(Font::new(17), Rect::new(left, ly.y(HEAD_Y0), STRIP_W, 21.0), c, &n.to_string());
+        let number = Rect::new(left, ly.y(HEAD_Y0), STRIP_W, 21.0);
+        let c = if selected && lemon {
+            lk::ink_on_lit(ui.t)
+        } else if selected {
+            ui.t.tx(0x9aa1a5)
+        } else {
+            let lit = ui.hover_fade(crate::motion::key(("strip", n)), hov, number, crate::motion::SLOT_HOVER);
+            ui.t.s(0x6d7275).mix(ui.t.tx(0x9aa1a5), lit)
+        };
+        ui.c.text_center(Font::new(17), number, c, &n.to_string());
     }
 
     // Dark head panel (name, LED, pan) with a rounded bottom.
@@ -616,7 +631,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     led(ui, kx, ly.y(LED_Y), enabled);
     let pan = KnobId::MixPan(n);
     ui.hit(Rect::new(kx - 14.0, ly.y(PAN_Y) - 14.0, 28.0, 28.0), Action::Knob(pan), s.knob_text(pan));
-    mixer_knob(ui, kx, ly.y(PAN_Y), 10.5, 15.0, s.knob(pan), Some(true));
+    mixer_knob(ui, kx, ly.y(PAN_Y), 10.5, 15.0, s.knob_at(pan, kx, ly.y(PAN_Y), 16.0), Some(true));
 
     // Reverse polarity (⇕) and swap left / right (⇔) buttons, lit when on, then the separation knob (§4).
     // They keep their size and spacing below the fader's top at any mixer height (the reference's short mixer stacks them
@@ -641,7 +656,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
         ui.c.fill_rect(Rect::new(sx - 0.5, swap_y - 6.0, 1.0, 12.0), ui.t.s(0x5a6266));
         let sep = KnobId::MixSep(n);
         ui.hit(Rect::new(sx - 9.0, ring_y - 9.0, 18.0, 18.0), Action::Knob(sep), s.knob_text(sep));
-        mixer_knob(ui, sx, ring_y, 6.0, 9.5, s.knob(sep), Some(true));
+        mixer_knob(ui, sx, ring_y, 6.0, 9.5, s.knob_at(sep, sx, ring_y, 10.0), Some(true));
     }
 
     // Fader: track, gain marks, handle (green on the selected strip, with the track lit below it).
@@ -654,7 +669,10 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     fader_marks(ui, mx, track_y1, ly);
     let v = track.and_then(|m| m.volume).unwrap_or(0.8) as f32;
     // max/min, not clamp: a very short window gives track_y1 < ly.y(TRACK_Y0) (clamp would panic).
-    let hy = (ly.y(HANDLE_0DB + (0.8 - v) * 440.0)).min(track_y1 - 5.0).max(ly.y(TRACK_Y0) + 5.0);
+    // The handle glides to a new value (spec: ui/animations.md §4.5); it reaches 12 px around its place.
+    let travel = Rect::new(mx - 11.0, ly.y(TRACK_Y0) - 8.0, 22.0, track_y1 - ly.y(TRACK_Y0) + 16.0);
+    let drawn = s.motion.borrow_mut().value(crate::motion::key(("fader", n)), v, travel);
+    let hy = (ly.y(HANDLE_0DB + (0.8 - drawn) * 440.0)).min(track_y1 - 5.0).max(ly.y(TRACK_Y0) + 5.0);
     if selected {
         if lemon {
             ui.c.fill_rrect(Rect::new(mx - 1.5, hy, 3.0, track_y1 - hy), 1.5, t.accent);
@@ -683,18 +701,21 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     ui.veil(Rect::new(sx - 9.0, by - 149.0, 18.0, 20.0), body);
     // Orange on the master and on a track with a latency setting (spec: ui/mixer.md §4).
     let lat = track.map_or(0.0, |m| m.latency_out);
-    let hov = ui.hit(Rect::new(sx - 8.0, by - 125.0, 16.0, 16.0), Action::Mix(MHit::Latency(n)), format!("Track latency  {}", mx::latency_text(lat)));
-    let clk = if hov { ui.t.tx(0xffffff) } else if master || lat != 0.0 { ui.t.h(0xf09a28) } else { ui.t.tx(0xc4d4e0) };
+    let clock = Rect::new(sx - 8.0, by - 125.0, 16.0, 16.0);
+    let hov = ui.hit(clock, Action::Mix(MHit::Latency(n)), format!("Track latency  {}", mx::latency_text(lat)));
+    let clk = ui.hover_ink(hov, clock, if master || lat != 0.0 { ui.t.h(0xf09a28) } else { ui.t.tx(0xc4d4e0) }, ui.t.tx(0xffffff));
     let mut g = Glyph::new();
     g.ring(sx, by - 117.0, 6.0, 1.6).rect(sx - 0.7, by - 121.0, 1.4, 4.5).rect(sx - 0.7, by - 117.7, 3.5, 1.4);
     ui.c.glyph(clk, &g);
     let hint = if armed { format!("Record to: {}", crate::track_rec::armed_file(s, n)) } else { "Arm disk recording".into() };
-    let hov = ui.hit(Rect::new(sx - 7.0, by - 107.0, 14.0, 14.0), Action::Mix(MHit::Arm(n)), hint);
+    let arm = Rect::new(sx - 7.0, by - 107.0, 14.0, 14.0);
+    let hov = ui.hit(arm, Action::Mix(MHit::Arm(n)), hint);
     if armed {
         // An orange-red ring about 8 px across with a 3 px hole.
         ui.c.stroke_circle(sx, by - 100.0, 2.75, 2.5, ui.t.h(0xff633f));
     } else {
-        ui.c.fill_circle(sx, by - 100.0, 2.6, if hov { ui.t.tx(0xffffff) } else { ui.t.tx(0xd8e0e6) });
+        let ink = ui.hover_ink(hov, arm, ui.t.tx(0xd8e0e6), ui.t.tx(0xffffff));
+        ui.c.fill_circle(sx, by - 100.0, 2.6, ink);
     }
     routing(ui, s, n, kx, by, selected, master);
 }
@@ -717,13 +738,16 @@ fn routing(ui: &mut Ui, s: &State, n: u16, kx: f32, by: f32, selected: bool, mas
         send_knob(ui, s, n, kx, ky, level);
         let ur = Rect::new(kx - 6.0, by - 61.0, 12.0, 8.0);
         let hov = ui.hit(ur, Action::Mix(MHit::Unroute(n)), format!("Remove the send from {cur_name} to {}", mx::name(s, n)));
-        ui.c.fill_polygon(&[(kx - 4.0, by - 55.0), (kx, by - 59.0), (kx + 4.0, by - 55.0)], if hov { ui.t.tx(0xffffff) } else { t.accent });
+        let ink = ui.hover_ink(hov, ur, t.accent, ui.t.tx(0xffffff));
+        ui.c.fill_polygon(&[(kx - 4.0, by - 55.0), (kx, by - 59.0), (kx + 4.0, by - 55.0)], ink);
     } else if !(master && cur == 0) {
         let hint = format!("Enable send from {cur_name} to {}  Ctrl/Shift", mx::name(s, n));
-        let hov = ui.hit(Rect::new(kx - 8.0, ay - 8.0, 16.0, 14.0), Action::Mix(MHit::Route(n)), hint);
+        let route = Rect::new(kx - 8.0, ay - 8.0, 16.0, 14.0);
+        let hov = ui.hit(route, Action::Mix(MHit::Route(n)), hint);
         let mut g = Glyph::new();
         g.polygon(&[(kx - 6.5, ay + 3.0), (kx, ay - 3.5), (kx + 6.5, ay + 3.0)]);
-        ui.c.glyph(if hov { t.accent } else { ui.t.tx(0xd8e0e6) }, &g);
+        let ink = ui.hover_ink(hov, route, ui.t.tx(0xd8e0e6), t.accent);
+        ui.c.glyph(ink, &g);
         if !master && mx::receives(s, n) {
             ui.c.fill_polygon(&[(kx - 3.5, ay - 9.0), (kx, ay - 12.5), (kx + 3.5, ay - 9.0)], ui.t.h(0xf09a28));
         }
@@ -739,7 +763,7 @@ fn down_arrow(ui: &mut Ui, kx: f32, ay: f32) {
 /// The send knob from the current track into track `n`, with its level arc (none at zero).
 fn send_knob(ui: &mut Ui, s: &State, n: u16, kx: f32, ky: f32, level: f64) {
     let id = KnobId::Send(s.selected_mixer, n);
-    mixer_knob(ui, kx, ky, 10.0, 13.0, s.knob(id), None);
+    mixer_knob(ui, kx, ky, 10.0, 13.0, s.knob_at(id, kx, ky, 13.0), None);
     if level > 0.0 {
         // From the knob's zero to its pointer (the arc takes a sweep, not an end angle).
         let sweep = (level as f32).min(1.0) * 1.5 * PI;
@@ -750,9 +774,9 @@ fn send_knob(ui: &mut Ui, s: &State, n: u16, kx: f32, ky: f32, level: f64) {
 /// The dark round mixer knob: a shaded ball inside a darker halo.
 /// `arc`: Some(true) draws the red value arc from the top (pan style), Some(false) from the start.
 fn mixer_knob(ui: &mut Ui, cx: f32, cy: f32, r: f32, halo: f32, value: f32, arc: Option<bool>) {
-    let hov = ui.hovering(Rect::new(cx - halo, cy - halo, 2.0 * halo, 2.0 * halo));
+    let area = Rect::new(cx - halo, cy - halo, 2.0 * halo, 2.0 * halo);
     let look = os_ui::kit::KnobLook::Mixer { halo, arc: arc.is_some() };
-    os_ui::kit::knob(ui.c, ui.t, cx, cy, r, value, arc.unwrap_or(false), look, os_ui::kit::State::hover(hov));
+    super::hover_look(ui, area, |c, t, st| os_ui::kit::knob(c, t, cx, cy, r, value, arc.unwrap_or(false), look, st));
 }
 
 /// Gain marks beside a fader track (spec: ui/mixer.md §5): 6 px ticks on both sides at 0, −6, −12 and −18 dB (2 px
@@ -785,7 +809,18 @@ fn fader_value(db: f32) -> f32 {
 
 /// Fader handle centred on (cx, cy): 14 × 23.
 fn fader_handle(ui: &mut Ui, cx: f32, cy: f32, selected: bool, hov: bool) {
-    os_ui::kit::fader_handle(ui.c, ui.t, cx, cy, selected, os_ui::kit::State::hover(hov));
+    let area = Rect::new(cx - 9.0, cy - 14.0, 18.0, 28.0);
+    let key = crate::motion::key(("fader handle", cx.to_bits()));
+    let lit = ui.hover_fade(key, hov, area, crate::motion::SLOT_HOVER);
+    if lit >= 1.0 {
+        return os_ui::kit::fader_handle(ui.c, ui.t, cx, cy, selected, os_ui::kit::State::hover(true));
+    }
+    os_ui::kit::fader_handle(ui.c, ui.t, cx, cy, selected, os_ui::kit::State::hover(false));
+    if lit > 0.0 {
+        let l = ui.c.begin_layer(area.outset(2.0), false);
+        os_ui::kit::fader_handle(ui.c, ui.t, cx, cy, selected, os_ui::kit::State::hover(true));
+        ui.c.end_layer(l, lit);
+    }
 }
 
 fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
@@ -821,7 +856,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     let icon = Rect::new(r.x + 3.0, r.y + 28.0, 21.0, 23.0);
     let hov = ui.hit(icon, Action::Mix(MHit::RecSource), "Select what is included when recording audio");
     // Grey while no input is chosen, orange once one is.
-    let ink = if hov { ui.t.tx(0xffffff) } else if io.0 >= 0 { ui.t.h(0xf09a28) } else { ui.t.s(0x5a6266) };
+    let ink = ui.hover_ink(hov, icon, if io.0 >= 0 { ui.t.h(0xf09a28) } else { ui.t.s(0x5a6266) }, ui.t.tx(0xffffff));
     let mut g = Glyph::new();
     g.polygon(&[(r.x + 7.0, r.y + 32.0), (r.x + 13.0, r.y + 32.0), (r.x + 18.0, r.y + 37.5), (r.x + 13.0, r.y + 43.0), (r.x + 7.0, r.y + 43.0)]);
     ui.c.glyph(ink, &g);
@@ -842,7 +877,8 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     let hov = ui.hit(clock, Action::Mix(MHit::InLatency), format!("Input latency  {}", mx::latency_text(lat)));
     let mut g = Glyph::new();
     g.ring(r.x + 202.0, r.y + 39.5, 8.5, 1.8).rect(r.x + 201.2, r.y + 34.0, 1.6, 6.5).rect(r.x + 201.2, r.y + 38.9, 5.0, 1.6);
-    ui.c.glyph(if hov { ui.t.tx(0xffffff) } else if lat != 0.0 { ui.t.h(0xf09a28) } else { ui.t.tx(0xd4dade) }, &g);
+    let ink = ui.hover_ink(hov, clock, if lat != 0.0 { ui.t.h(0xf09a28) } else { ui.t.tx(0xd4dade) }, ui.t.tx(0xffffff));
+    ui.c.glyph(ink, &g);
 
     // Ten effect slots.
     for i in 0..10 {
@@ -854,18 +890,28 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         let ha = ui.hit(Rect::new(row.x, row.y, 19.0, row.h), Action::Mix(MHit::SlotArrow(k)), hint.clone());
         let hn = ui.hit(Rect::new(row.x + 19.0, row.y, row.w - 64.0, row.h), Action::Mix(MHit::SlotName(k)), hint);
         let hov = ha || hn;
+        // The row lights by fading and its arrow brightens; an empty slot's arrow turns to point down, a filled slot's
+        // name shifts a little from Polished up (spec: ui/animations.md §4.6).
+        let lit = ui.hover_fade(crate::motion::key(("slot", n, k)), hov, row, crate::motion::SLOT_HOVER);
+        let arrow = ui.hover_fade(crate::motion::key(("slot arrow", n, k)), ha, Rect::new(row.x, row.y, 19.0, row.h), crate::motion::SLOT_HOVER);
+        let turn = ui.hover_linear(crate::motion::key(("slot turn", n, k)), hov && plugin.is_none(), Rect::new(row.x, row.y, 19.0, row.h), crate::motion::BUTTON_HOVER);
+        let shift = if crate::anim::level() >= crate::anim::Level::Polished {
+            2.0 * ui.hover_fade(crate::motion::key(("slot name", n, k)), hov && plugin.is_some(), row, crate::motion::NAME_SHIFT)
+        } else {
+            0.0
+        };
+        let face = ui.t.s(0x2a2d2f).mix(ui.t.s(0x2f3335), lit);
         if super::lemon(ui) {
-            let face = if hov { ui.t.s(0x2f3335) } else { ui.t.s(0x2a2d2f) };
             lk::outlined(ui.c, Rect::new(row.x + 2.0, row.y, row.w - 4.0, row.h), lk::r_btn(t).min(row.h / 2.0), ui.t.s(0x1f2224), face);
         } else {
             ui.c.fill_rect(row, ui.t.s(0x1f2224));
-            ui.c.fill_rect(row.inset(1.0), if hov { ui.t.s(0x2f3335) } else { ui.t.s(0x2a2d2f) });
+            ui.c.fill_rect(row.inset(1.0), face);
         }
         // A coloured slot (Lemon Studio's design): a 3 px bar of its colour at the row's left edge.
         if let Some(c) = mx::slot_color(s, n, k) {
             ui.c.fill_rect(Rect::new(row.x + 3.0, row.y + 4.0 * kp, 3.0, row.h - 8.0 * kp), super::rgb(c));
         }
-        chevron(ui, row.x + 10.0, row.cy(), true, if ha { ui.t.tx(0xffffff) } else { ui.t.tx(0xc4ccd0) });
+        turned_chevron(ui, row.x + 10.0, row.cy(), turn * PI / 2.0, ui.t.tx(0xc4ccd0).mix(ui.t.tx(0xffffff), arrow));
         let (f, name, ink) = match &plugin {
             Some(p) => (Font::new(fs), p.to_string(), ui.t.tx(0xc9d0d4)),
             None => (Font::new(fs).italic(), format!("Slot {}", i + 1), ui.t.s(0x50575b)),
@@ -878,13 +924,13 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         let icon = crate::playlist::window_icon(&s.project, &s.playlist.icons, crate::plugins::fx_key(n, k));
         if let Some(ic) = icon {
             let sz = (12.0 * kp.max(0.62)).round();
-            icons::draw(ui.c, ic, Rect::new(row.x + 19.0, row.cy() - sz / 2.0, sz, sz), ink);
+            icons::draw(ui.c, ic, Rect::new(row.x + 19.0 + shift, row.cy() - sz / 2.0, sz, sz), ink);
         }
         let lead = if icon.is_some() { (16.0 * kp.max(0.62)).round() } else { 0.0 };
-        ui.c.text_clip(f, row.x + 19.0 + lead, ty, 140.0 - lead, ink, &name);
+        ui.c.text_clip(f, row.x + 19.0 + lead + shift, ty, 140.0 - lead, ink, &name);
         let mix = KnobId::SlotMix(n, k);
         ui.hit(Rect::new(row.right() - 46.0, row.y, 26.0, row.h), Action::Knob(mix), s.knob_text(mix));
-        mixer_knob(ui, row.right() - 33.0, row.cy(), 10.5 * q, 12.0 * q, s.knob(mix), Some(false));
+        mixer_knob(ui, row.right() - 33.0, row.cy(), 10.5 * q, 12.0 * q, s.knob_at(mix, row.right() - 33.0, row.cy(), 13.0 * q), Some(false));
         ui.c.stroke_circle(row.right() - 33.0, row.cy(), 11.8 * q, 1.5, ui.t.s(0x55595c));
         ui.hit(Rect::new(row.right() - 18.0, row.y, 18.0, row.h), Action::Mix(MHit::SlotLed(k)), "Mute / solo  (ctrl)0..9");
         led(ui, row.right() - 10.0, row.cy(), track.is_none_or(|m| m.slot_on[i]));
@@ -931,7 +977,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         let id = KnobId::Eq(n, k as u8, 0);
         let hov = ui.hit(Rect::new(fx - 9.0, eq.y, 18.0, eq.h), Action::Knob(id), s.knob_text(id));
         // The handle travels ±(half-height − 8) for ±18 dB.
-        let hy = eq.cy() - (s.knob(id) * 2.0 - 1.0) * (eq.h / 2.0 - 8.0);
+        let hy = eq.cy() - (s.knob_in(id, Rect::new(fx - 9.0, eq.y, 18.0, eq.h)) * 2.0 - 1.0) * (eq.h / 2.0 - 8.0);
         let h = Rect::new(fx - 6.0, hy - 6.0, 12.0, 13.0);
         let face = if hov { 0x585c5f } else { 0x4a4e51 };
         if super::lemon(ui) {
@@ -955,7 +1001,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
             let (kx, ky) = (r.x + 162.0 + 22.0 * k as f32, ly + 20.0 + 20.0 * row as f32);
             let id = KnobId::Eq(n, k as u8, 1 + row as u8);
             ui.hit(Rect::new(kx - 9.0, ky - 9.0, 18.0, 18.0), Action::Knob(id), s.knob_text(id));
-            mixer_knob(ui, kx, ky, 7.0, 8.0, s.knob(id), Some(false));
+            mixer_knob(ui, kx, ky, 7.0, 8.0, s.knob_at(id, kx, ky, 9.0), Some(false));
         }
     }
     let mut g = Glyph::new();
@@ -997,6 +1043,15 @@ fn off_combo(ui: &mut Ui, r: Rect, name: &'static str, text: &str, bg: Color) {
     let st = os_ui::kit::State::NORMAL.with_disabled(true);
     os_ui::kit::combo(ui.c, ui.t, r, text, Font::new(17), st);
     ui.veil(r, bg);
+}
+
+/// A chevron pointing right, turned clockwise by `angle` about (`x`, `y`).
+fn turned_chevron(ui: &mut Ui, x: f32, y: f32, angle: f32, c: Color) {
+    let (sin, cos) = angle.sin_cos();
+    let at = |dx: f32, dy: f32| (x + dx * cos - dy * sin, y + dx * sin + dy * cos);
+    let mut g = Glyph::new();
+    g.polygon(&[at(-2.5, -4.5), at(2.5, 0.0), at(-2.5, 4.5)]);
+    ui.c.glyph(c, &g);
 }
 
 /// Small solid chevron centred on (x, y), pointing right or left.

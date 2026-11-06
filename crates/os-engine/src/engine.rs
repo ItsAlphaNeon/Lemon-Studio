@@ -2128,6 +2128,8 @@ impl Engine {
     /// sound again when it plays on). For a paused playback while another stream processes the same instruments (live
     /// notes, an open editor): its held notes would ring there for as long as it is paused.
     pub fn release_instruments(&mut self) {
+        // A note an instrument missed while busy would start after its note off: it never starts.
+        self.inst_missed.retain(|m| !matches!(m.1, notes::Note::On { .. }));
         self.send_held_offs();
         self.relaunch_clips |= self.inst_offs.iter().any(|o| o.3.is_some());
         self.inst_offs.clear();
@@ -6762,6 +6764,89 @@ mod tests {
         assert!(plain[f * 2] > 0.1);
         assert!((f64::from(out[f * 2]) - f64::from(plain[f * 2]) * layer * pl / cl).abs() < 1e-5, "{} {}", out[f * 2], plain[f * 2]);
         assert!((f64::from(out[f * 2 + 1]) - f64::from(plain[f * 2 + 1]) * layer * pr / cr).abs() < 1e-5);
+    }
+
+    /// Every note a recorder got has ended: per key, as many note offs or chokes as note ons, and none started last.
+    fn all_ended(r: &Arc<std::sync::Mutex<Rec>>, what: &str) {
+        let log = r.lock().unwrap().log.clone();
+        for key in 0..=127u8 {
+            let of: Vec<&str> = log.iter().filter(|l| l.2 == key && l.1 != "tune").map(|l| l.1).collect();
+            let ons = of.iter().filter(|k| **k == "on").count();
+            assert!(of.len() - ons >= ons && of.last() != Some(&"on"), "{what}: key {key} left sounding: {log:?}");
+        }
+    }
+
+    /// Plays `p` to `tick`, pauses, and holds for a while: every note its plugin channels got has ended (spec:
+    /// audio/transport.md "Pause": the paused playback lets go of every note it holds at the instruments).
+    fn paused_at(p: &Project, tick: u64, what: &str) {
+        let (mut e, recs) = recorded(p);
+        while e.tick < tick {
+            e.next_tick();
+        }
+        assert!(recs.iter().any(|r| !r.lock().unwrap().held.is_empty()), "{what}: notes sound before the pause");
+        e.pause();
+        for _ in 0..10 {
+            e.next_tick();
+        }
+        assert!(e.held(), "{what}: held");
+        for r in &recs {
+            all_ended(r, what);
+        }
+    }
+
+    /// The note rules keep their own records of what is held (a mono channel's list, portamento, a slide, a layer's
+    /// children): a pause in the middle of each lets go of every note.
+    #[test]
+    fn a_pause_lets_go_of_every_note_whatever_the_note_rules() {
+        let on = |c: u16, position: u32, length: u32, key: u16| Note { channel: c, key, ..long_note(position, length, 0) };
+        // One plugin channel (1) behind an unused first channel, as `recorded` plays every channel but the first.
+        let plugin = |notes: Vec<Note>| {
+            let mut p = project(notes, vec![]);
+            p.channels.push(Channel { index: 1, kind: ChannelKind::Plugin, ..channel() });
+            p
+        };
+        let mut mono = plugin(vec![on(1, 0, 384, 60), on(1, 48, 384, 64), on(1, 96, 384, 67)]);
+        mono.channels[1].misc.mono = true;
+        paused_at(&mono, 120, "mono");
+        let mut porta = plugin(vec![on(1, 0, 384, 60), on(1, 48, 384, 64)]);
+        porta.channels[1].misc.porta = true;
+        paused_at(&porta, 120, "portamento");
+        let slide = Note { flags: 0x4000 | Note::SLIDE, ..on(1, 48, 24, 72) };
+        paused_at(&plugin(vec![on(1, 0, 384, 60), slide]), 60, "slide");
+        let kinds = [ChannelKind::Plugin, ChannelKind::Plugin];
+        paused_at(&layered(0, vec![long_note(0, 384, 0), long_note(48, 384, 0)], &kinds), 120, "layer");
+    }
+
+    /// An instrument busy (held by the UI) as a note is due misses it; the note waits for it. A pause letting go of the
+    /// notes then drops that waiting note on, or it would start after its note off and sound for as long as the
+    /// playback stays paused.
+    #[test]
+    fn a_note_an_instrument_missed_does_not_start_after_the_pause() {
+        let mut p = project(vec![long_note(1, 384, 0)], vec![]);
+        p.channels.push(Channel { index: 1, kind: ChannelKind::Plugin, ..channel() });
+        p.patterns[0].notes[0].channel = 1;
+        let (mut e, recs) = recorded(&p);
+        e.busy_wait = Duration::ZERO;
+        e.next_tick();
+        // Held elsewhere through the note's start and the end of the pause's fade.
+        let rec = recs[0].clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _g = rec.lock().unwrap();
+            tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        rx.recv().unwrap();
+        e.pause();
+        for _ in 0..4 {
+            e.next_tick();
+        }
+        assert!(e.held(), "held");
+        holder.join().unwrap();
+        for _ in 0..4 {
+            e.next_tick();
+        }
+        all_ended(&recs[0], "missed");
     }
 
     /// Flag 4: one child per note in turn, from the first; flag 1: one at random, drawn from the project's generator

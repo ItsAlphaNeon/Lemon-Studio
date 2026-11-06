@@ -2,23 +2,33 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Eased scrolling and the frame rate of animations: General ▸ Display ▸ Smoothing and Animation refresh rate.
+//! Eased scrolling and zooming and the frame rate of animations: General ▸ Display ▸ Smoothing and Animation refresh
+//! rate.
 //!
 //! A scroll by the mouse wheel or a scroll bar's arrow doesn't jump. `App::eased` runs the handler, puts the view
 //! back where it is drawn and leaves an `Ease` for each axis it moved; `App::tick` moves the eases on every frame, two
 //! chained stages, in whole pixels (the playlist in the whole steps its drawn pixels can move by, so that it moves
 //! them instead of repainting: 1 px at 100 %, 2 at 150 %).
 //!
-//! The state's scroll is always what is drawn: painting, hit-testing and every handler see the view as it is on
-//! screen, and only the target (where the wheel is taking the view) lives in the ease. Zooms, drags and jumps
-//! (following playback, a scroll bar drag) set the scroll directly: an ease whose axis moved under it ends. A press
-//! of any mouse button stops every ease where it is, but on a scroll bar's arrow, which steps on from the target.
+//! A time zoom by the wheel in the playlist or the piano roll eases the same way, unless Animations is Off: it leaves
+//! a `ZoomEase`, whose two stages move in log(zoom) so that a notch in and a notch out look alike; on every frame the
+//! scroll follows the zoom so that the time under the mouse stays under it, and the window repaints. A track or key
+//! row height (Alt+wheel) still changes at once.
+//!
+//! The state's scroll and zoom are always what is drawn: painting, hit-testing and every handler see the view as it
+//! is on screen, and only the target (where the wheel is taking the view) lives in the ease. Drags and jumps
+//! (following playback, a scroll bar drag, a zoom box) set the scroll or the zoom directly: an ease whose axis or
+//! zoom moved under it ends. A press of any mouse button stops every ease where it is, but on a scroll bar's arrow,
+//! which steps on from the target.
 // spec: ui/settings-choices.md "Display: Smoothing, Animation refresh rate, Transparent menus and windows (2026-10-16)"
+// spec: ui/animations.md §4.4
 
 use std::time::{Duration, Instant};
 
-use crate::app::{App, Scroll};
+use crate::anim::{self, Level};
+use crate::app::{App, Scroll, Win};
 use crate::prefs;
+use os_ui::Rect;
 
 /// General ▸ Display ▸ Smoothing (`prefs::SMOOTHING`), 0 (scrolls jump) to 512, 128 by default.
 pub fn smoothing() -> f32 {
@@ -96,20 +106,74 @@ impl Ease {
     }
 }
 
+/// A window whose time zoom eases: the playlist (px a bar) or the piano roll (px a beat).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeZoom {
+    Playlist,
+    Piano,
+}
+
+const TIME_ZOOMS: [TimeZoom; 2] = [TimeZoom::Playlist, TimeZoom::Piano];
+
+/// A time zoom on its way to `target`, the zoom and scroll the wheel left. On every frame the zoom moves on and the
+/// scroll follows it, so that the time under the mouse at the notch stays under it.
+// spec: ui/animations.md §4.4
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZoomEase {
+    pub win: TimeZoom,
+    /// The zoom and time scroll it ends on, as the state holds them (`App::time_view`): the handler's own.
+    pub target: (f32, f32),
+    /// The two chained stages, in log(zoom): the view shows the second.
+    first: f64,
+    second: f64,
+    /// The mouse's x from the grid's left at the notch, and the time under it (content px / zoom: bars in the
+    /// playlist, beats in the piano roll).
+    at: f64,
+    time: f64,
+    /// What it showed last: anything else moving the zoom or the scroll ends the ease.
+    shown: (f32, f32),
+}
+
+impl ZoomEase {
+    fn new(win: TimeZoom, from: (f32, f32), target: (f32, f32), at: f64, time: f64) -> ZoomEase {
+        let z = f64::from(from.0).ln();
+        ZoomEase { win, target, first: z, second: z, at, time, shown: from }
+    }
+
+    /// One frame of `dt_ms` at Smoothing `value`, as `Ease::step` but in log(zoom), on a grid `w` px wide. Returns the
+    /// zoom to draw, or None once the grid's far edge is within half a pixel of where the target draws it.
+    fn step(&mut self, dt_ms: f64, value: f64, w: f64) -> Option<f32> {
+        let end = f64::from(self.target.0).ln();
+        let k = share(dt_ms, value);
+        self.first += (end - self.first) * k;
+        self.second += (self.first - self.second) * k;
+        if (self.second - end).abs() * w < 0.5 {
+            return None;
+        }
+        Some(self.second.exp() as f32)
+    }
+
+    /// The scroll (content px) that keeps the anchored time under the mouse at zoom `z`.
+    fn scroll_at(&self, z: f32) -> f64 {
+        (self.time * f64::from(z) - self.at).max(0.0)
+    }
+}
+
 /// The eases running, and when they last moved (`App::smooth`).
 #[derive(Debug, Default)]
 pub struct Eases {
     list: Vec<Ease>,
+    zooms: Vec<ZoomEase>,
     at: Option<Instant>,
 }
 
 impl Eases {
-    /// Whether a view is easing: the shell ticks at animation rate.
+    /// Whether a view is easing (a scroll or a zoom): the shell ticks at animation rate.
     pub fn running(&self) -> bool {
-        !self.list.is_empty()
+        !self.list.is_empty() || !self.zooms.is_empty()
     }
 
-    /// A mouse button went down: every view stops where it is drawn.
+    /// A mouse button went down: every view stops where it is drawn, its zoom too.
     pub fn stop(&mut self) {
         *self = Eases::default();
     }
@@ -119,13 +183,22 @@ impl Eases {
     pub fn of(&self, a: Axis) -> Option<&Ease> {
         self.list.iter().find(|e| e.axis == a)
     }
+
+    /// The zoom ease of `w`, if its zoom is easing.
+    #[cfg(test)]
+    pub fn zoom(&self, w: TimeZoom) -> Option<&ZoomEase> {
+        self.zooms.iter().find(|e| e.win == w)
+    }
 }
 
-/// Which zoom (`zooms`) each axis follows: an axis isn't eased when its zoom changed.
+/// Which zoom (`zooms`) each axis follows: an axis isn't eased when its zoom changed (a time zoom eases on its own,
+/// `ZoomEase`).
 fn zoom_of(a: Axis) -> Option<usize> {
     match a {
-        Axis::Bar(Scroll::PlaylistX | Scroll::PlaylistY) => Some(0),
-        Axis::Bar(Scroll::PianoX | Scroll::PianoY | Scroll::PitchY) => Some(1),
+        Axis::Bar(Scroll::PlaylistX) => Some(0),
+        Axis::Bar(Scroll::PlaylistY) => Some(1),
+        Axis::Bar(Scroll::PianoX) => Some(2),
+        Axis::Bar(Scroll::PianoY | Scroll::PitchY) => Some(3),
         _ => None,
     }
 }
@@ -149,22 +222,115 @@ impl App {
         }
     }
 
-    /// The playlist's zoom and track height, the piano roll's: a change is a zoom.
-    fn zooms(&self) -> [(f32, f32); 2] {
+    /// The playlist's time zoom and track height, the piano roll's time zoom and key row height: a change is a zoom.
+    fn zooms(&self) -> [f32; 4] {
         let s = &self.state;
-        [(s.playlist_bar_w, s.playlist.row_h), (s.piano.px_per_beat, s.piano.row_h)]
+        [s.playlist_bar_w, s.playlist.row_h, s.piano.px_per_beat, s.piano.row_h]
+    }
+
+    /// The time zoom of `w` and its time scroll, as the state holds them: px a bar and content px (the playlist), px
+    /// a beat and ticks (the piano roll).
+    fn time_view(&self, w: TimeZoom) -> (f32, f32) {
+        let s = &self.state;
+        match w {
+            TimeZoom::Playlist => (s.playlist_bar_w, s.playlist_scroll.0),
+            TimeZoom::Piano => (s.piano.px_per_beat, s.piano.scroll_x),
+        }
+    }
+
+    fn set_time_view(&mut self, w: TimeZoom, (z, x): (f32, f32)) {
+        let s = &mut self.state;
+        match w {
+            TimeZoom::Playlist => (s.playlist_bar_w, s.playlist_scroll.0) = (z, x),
+            TimeZoom::Piano => (s.piano.px_per_beat, s.piano.scroll_x) = (z, x),
+        }
+    }
+
+    /// The time scroll `x` of `w` (as the state holds it) in content px at zoom `z`, and back.
+    fn scroll_px(&self, w: TimeZoom, z: f32, x: f32) -> f64 {
+        match w {
+            TimeZoom::Playlist => f64::from(x),
+            TimeZoom::Piano => f64::from(x) * f64::from(z) / self.ppq(),
+        }
+    }
+
+    fn scroll_of(&self, w: TimeZoom, z: f32, px: f64) -> f32 {
+        match w {
+            TimeZoom::Playlist => px as f32,
+            TimeZoom::Piano => (px * self.ppq() / f64::from(z)) as f32,
+        }
+    }
+
+    fn ppq(&self) -> f64 {
+        f64::from(self.state.project.ppq.max(4))
+    }
+
+    /// The grid `w`'s time is drawn in, at the last paint.
+    fn time_grid(&self, w: TimeZoom) -> Option<Rect> {
+        match w {
+            TimeZoom::Playlist => self.pl_grid(),
+            TimeZoom::Piano => self.piano_grid,
+        }
+    }
+
+    /// Where a time zoom of `w` by the wheel anchors: the mouse's x from the grid's left (as `wheel_act` takes it),
+    /// and the time under it as drawn.
+    fn zoom_anchor(&self, w: TimeZoom) -> (f64, f64) {
+        let (z, x) = self.time_view(w);
+        let left = self.time_grid(w).map_or(if w == TimeZoom::Playlist { 481.0 } else { 0.0 }, |g| g.x);
+        let at = f64::from(self.mouse.0 - left);
+        (at, (self.scroll_px(w, z, x) + at) / f64::from(z))
+    }
+
+    /// The zoom a notch of the wheel in `w` multiplies on from: where its zoom ease is going, else the zoom drawn.
+    pub(crate) fn zoom_from(&self, w: TimeZoom) -> f32 {
+        self.smooth.zooms.iter().find(|e| e.win == w).map_or(self.time_view(w).0, |e| e.target.0)
+    }
+
+    /// The zoom eases whose view something else moved since they showed it (a scroll bar drag, a zoom box, following
+    /// playback) end where that left it.
+    fn zooms_moved(&mut self) {
+        let now = TIME_ZOOMS.map(|w| self.time_view(w));
+        self.smooth.zooms.retain(|e| TIME_ZOOMS.iter().zip(now).any(|(&w, v)| w == e.win && v == e.shown));
     }
 
     /// Runs `f`, a scroll by the mouse wheel or a scroll bar's arrow. With Smoothing above 0, every axis `f` moved goes
     /// back to where it is drawn and eases to where `f` took it; a notch during an ease moves its target on as far,
-    /// and the ease goes on from where it is. A zoom (`f` changed a zoom or a track height) is not eased: those axes
-    /// keep `f`'s values and their eases end.
+    /// and the ease goes on from where it is.
+    ///
+    /// A time zoom (`f` changed the playlist's or the piano roll's px a bar or a beat) eases too unless Animations is
+    /// Off: the zoom and the scroll go back to where they are drawn and a `ZoomEase` takes them to where `f` left them,
+    /// keeping the time under the mouse under it. A notch during that ease zooms on from its target (`zoom_from`) and
+    /// anchors at the mouse again; a scroll of that time axis ends it where it is. A time zoom at once, or a track or
+    /// key row height (Alt+wheel: not eased), keeps `f`'s values for the axes it moves, and their eases end.
+    // spec: ui/animations.md §4.4
     pub(crate) fn eased<R>(&mut self, f: impl FnOnce(&mut App) -> R) -> R {
+        self.zooms_moved();
         let before = AXES.map(|a| self.axis_get(a));
         let zooms = self.zooms();
+        let views = TIME_ZOOMS.map(|w| (self.time_view(w), self.zoom_anchor(w)));
         let r = f(self);
         let zoomed = self.zooms().iter().zip(zooms).map(|(a, b)| *a != b).collect::<Vec<_>>();
         let value = smoothing();
+        // Continuous scrolling during playback sets the time scroll on every frame, which would end an ease at once:
+        // there the zoom jumps, as at Off.
+        let ease_zoom = value > 0.0 && anim::level() > Level::Off && !self.scrolls_with_playback();
+        for (w, (v0, (at, time))) in TIME_ZOOMS.into_iter().zip(views) {
+            let v1 = self.time_view(w);
+            let i = self.smooth.zooms.iter().position(|e| e.win == w);
+            if v1.0 != v0.0 && ease_zoom {
+                self.set_time_view(w, v0);
+                match i {
+                    Some(i) => {
+                        let e = &mut self.smooth.zooms[i];
+                        (e.target, e.at, e.time) = (v1, at, time);
+                    }
+                    None => self.smooth.zooms.push(ZoomEase::new(w, v0, v1, at, time)),
+                }
+            } else if let Some(i) = i.filter(|_| v1 != v0) {
+                self.smooth.zooms.remove(i);
+            }
+        }
         for (a, v0) in AXES.into_iter().zip(before) {
             let v1 = self.axis_get(a);
             if zoom_of(a).is_some_and(|z| zoomed[z]) || (value <= 0.0 && v1 != v0) {
@@ -199,7 +365,8 @@ impl App {
     }
 
     /// One frame of `dt_ms` for every ease, and the damage it leaves: the playlist moves its pixels
-    /// (`playlist_scrolled`, or is repainted where that can't be exact), the other windows repaint.
+    /// (`playlist_scrolled`, or is repainted where that can't be exact), the other windows repaint, and so does a
+    /// window whose zoom moved.
     pub(crate) fn ease_step(&mut self, dt_ms: f64) {
         let value = f64::from(smoothing());
         let pl = self.state.playlist_scroll;
@@ -222,6 +389,23 @@ impl App {
             !done
         });
         self.smooth.list = list;
+        // The zooms: each moves on and its scroll follows, keeping the time under the mouse there (spec:
+        // ui/animations.md §4.4).
+        self.zooms_moved();
+        let mut zooms = std::mem::take(&mut self.smooth.zooms);
+        let mut zoomed = Vec::new();
+        zooms.retain_mut(|e| {
+            let w = self.time_grid(e.win).map_or(2000.0, |g| f64::from(g.w));
+            let step = e.step(dt_ms, value, w);
+            let v = step.map_or(e.target, |z| (z, self.scroll_of(e.win, z, e.scroll_at(z))));
+            if v != e.shown {
+                self.set_time_view(e.win, v);
+                zoomed.push(e.win);
+            }
+            e.shown = v;
+            step.is_some()
+        });
+        self.smooth.zooms = zooms;
         if !self.smooth.running() {
             self.smooth.at = None;
         }
@@ -232,7 +416,14 @@ impl App {
                 Axis::Browser => self.invalidate(),
             }
         }
-        if self.state.playlist_scroll != pl {
+        // A zoom repaints its window: the playlist's pixels can't move.
+        for w in &zoomed {
+            self.damage_win(match w {
+                TimeZoom::Playlist => Win::Playlist,
+                TimeZoom::Piano => Win::PianoRoll,
+            });
+        }
+        if self.state.playlist_scroll != pl && !zoomed.contains(&TimeZoom::Playlist) {
             self.playlist_scrolled(pl);
         }
     }
@@ -372,27 +563,241 @@ mod tests {
         assert_eq!(app.state.playlist_scroll.1, two);
     }
 
-    /// A zoom (Ctrl+wheel) changes the zoom and the scroll at once; an ease running on that window ends there.
+    /// The piano roll alone, painted, the mouse over the middle of its grid.
+    fn piano_app(c: &mut Canvas) -> App {
+        let mut app = App::new(None);
+        app.state.z = vec![Win::PianoRoll];
+        app.paint(c, None);
+        let g = app.piano_geom().expect("piano roll shown").grid;
+        let (x, y) = (g.x + g.w / 2.0, g.y + g.h / 2.0);
+        assert!(app.top_hit(x, y).is_some_and(|h| matches!(h.action, Action::PianoGrid | Action::PianoNote(_))));
+        app.mouse_move(x, y);
+        app
+    }
+
+    /// The time under the mouse (bars in the playlist, ticks in the piano roll) and the pixels one of it is drawn.
+    fn under_mouse(app: &App, w: TimeZoom) -> (f64, f64) {
+        let x = app.mouse.0;
+        match w {
+            TimeZoom::Playlist => {
+                let (g, s) = (app.pl_grid().expect("playlist shown"), &app.state);
+                (f64::from((s.playlist_scroll.0 + x - g.x) / s.playlist_bar_w), f64::from(s.playlist_bar_w))
+            }
+            TimeZoom::Piano => {
+                let g = app.piano_geom().expect("piano roll shown");
+                (f64::from(g.tick_at(x)), f64::from(g.ppt))
+            }
+        }
+    }
+
+    /// Runs the zoom ease of `w` to its end in 10 ms frames: at every frame the time under the mouse stays under it
+    /// (within a pixel) and the zoom moves on toward the target, never back. Returns the frames it took.
+    fn zoom_eases(app: &mut App, w: TimeZoom) -> usize {
+        let (t0, _) = under_mouse(app, w);
+        let z0 = app.time_view(w).0;
+        let end = app.smooth.zoom(w).expect("the zoom eases").target.0;
+        let mut last = z0;
+        let mut frames = 0;
+        while app.smooth.running() {
+            app.ease_step(10.0);
+            frames += 1;
+            let (t, px) = under_mouse(app, w);
+            assert!((t - t0).abs() * px <= 1.0, "{w:?}, frame {frames}: the time under the mouse moved {} px", (t - t0).abs() * px);
+            let z = app.time_view(w).0;
+            assert!((z - last) * (end - z0) >= 0.0, "{w:?}, frame {frames}: the zoom goes on from {last} to {z}, toward {end}");
+            last = z;
+            assert!(frames < 200, "{w:?}: the zoom's ease ends");
+        }
+        frames
+    }
+
+    /// Ctrl+wheel in the playlist: at Smoothing 0 the zoom and the scroll jump; at 128 the view starts where it is and
+    /// eases, the time under the mouse staying under it at every frame, to exactly where 0 jumps. A notch out takes as
+    /// long as a notch in (the stages move in log(zoom)).
     #[test]
-    fn a_zoom_is_not_eased() {
+    fn a_time_zoom_eases() {
         let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let w = TimeZoom::Playlist;
+        let mut app = playlist_app(&mut c);
+        set_slider(&SMOOTHING, 0);
+        app.state.playlist_scroll.0 = 600.0;
+        let drawn = app.time_view(w);
+        app.wheel(0.0, 1.0, false, true);
+        let at_once = app.time_view(w);
+        assert!(at_once.0 > drawn.0 && at_once.1 != drawn.1, "Ctrl+wheel zooms in around the mouse: {at_once:?}");
+        assert!(!app.smooth.running(), "nothing eases at 0");
+
         let mut app = playlist_app(&mut c);
         set_slider(&SMOOTHING, 128);
         app.state.playlist_scroll.0 = 600.0;
-        app.paint(&mut c, None);
-        app.wheel(-1.0, 0.0, false, false);
-        for _ in 0..3 {
+        app.wheel(0.0, 1.0, false, true);
+        assert_eq!(app.time_view(w), drawn, "the view starts where it is");
+        assert!(app.animating(), "the zoom keeps the frames coming");
+        assert_eq!(app.smooth.zoom(w).expect("the zoom eases").target, at_once, "toward where 0 jumps");
+        let zoom_in = zoom_eases(&mut app, w);
+        assert!(zoom_in > 10, "eased over {zoom_in} frames");
+        assert_eq!(app.time_view(w), at_once, "and ends exactly there");
+        assert!(!app.animating());
+
+        app.wheel(0.0, -1.0, false, true);
+        assert_eq!(app.time_view(w), at_once);
+        let zoom_out = zoom_eases(&mut app, w);
+        assert!(app.time_view(w).0 < at_once.0, "a notch out");
+        assert!(zoom_in.abs_diff(zoom_out) <= 1, "in and out alike: {zoom_in} and {zoom_out} frames");
+    }
+
+    /// Animations Off: the zoom jumps whatever Smoothing says; a scroll still eases (Smoothing alone governs it).
+    #[test]
+    fn at_off_a_zoom_jumps() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        crate::anim::set_level(Level::Off);
+        let mut app = playlist_app(&mut c);
+        set_slider(&SMOOTHING, 128);
+        let z0 = app.state.playlist_bar_w;
+        app.wheel(0.0, 1.0, false, true);
+        assert!(app.state.playlist_bar_w > z0, "the zoom is there at once");
+        assert!(!app.smooth.running(), "nothing eases");
+        let mut piano = piano_app(&mut c);
+        let z0 = piano.state.piano.px_per_beat;
+        piano.wheel(0.0, 1.0, false, true);
+        assert!(piano.state.piano.px_per_beat > z0 && !piano.smooth.running(), "the piano roll's too");
+        app.wheel(0.0, -1.0, false, false);
+        assert!(app.smooth.of(Axis::Bar(Scroll::PlaylistY)).is_some(), "a scroll eases");
+        crate::anim::set_level(Level::Playful);
+    }
+
+    /// A notch during a zoom's ease zooms on from its target, anchored at the mouse: the view goes on from where it is
+    /// and ends where two notches at once end (the scroll within a pixel: anchored at the time drawn under the mouse).
+    #[test]
+    fn a_notch_during_a_zoom_retargets_it() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let w = TimeZoom::Playlist;
+        let mut app = playlist_app(&mut c);
+        set_slider(&SMOOTHING, 0);
+        app.wheel(0.0, 1.0, false, true);
+        app.wheel(0.0, 1.0, false, true);
+        let two = app.time_view(w);
+
+        let mut app = playlist_app(&mut c);
+        set_slider(&SMOOTHING, 128);
+        let z0 = app.state.playlist_bar_w;
+        app.wheel(0.0, 1.0, false, true);
+        let one = app.smooth.zoom(w).expect("the zoom eases").target;
+        for _ in 0..5 {
             app.ease_step(10.0);
         }
-        assert!(app.smooth.of(Axis::Bar(Scroll::PlaylistX)).is_some(), "a sideways notch eases");
-        let (bar_w, scroll) = (app.state.playlist_bar_w, app.state.playlist_scroll.0);
+        let mid = app.time_view(w);
+        assert!(mid.0 > z0 && mid.0 < one.0, "half way: {} of {z0} to {}", mid.0, one.0);
         app.wheel(0.0, 1.0, false, true);
-        assert!(app.state.playlist_bar_w > bar_w, "Ctrl+wheel zooms in");
-        assert_ne!(app.state.playlist_scroll.0, scroll, "the zoom keeps the time under the mouse");
-        assert!(!app.smooth.running(), "nothing eases after the zoom");
-        let zoomed = app.state.playlist_scroll;
+        assert_eq!(app.time_view(w), mid, "the notch doesn't move the view at once");
+        let target = app.smooth.zoom(w).expect("still easing").target;
+        assert_eq!(target.0, two.0, "a notch on from the target");
+        assert!((target.1 - two.1).abs() <= 1.0, "the time under the mouse stays: {target:?}, two at once {two:?}");
+        zoom_eases(&mut app, w);
+        assert_eq!(app.time_view(w), target);
+    }
+
+    /// A press stops a zoom's ease where it is drawn; so does anything else setting its zoom or its scroll (a jump, a
+    /// sideways notch, which eases on from there). An ease of the other axis goes on.
+    #[test]
+    fn a_press_or_a_jump_ends_a_zoom() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let w = TimeZoom::Playlist;
+        let mut app = playlist_app(&mut c);
+        set_slider(&SMOOTHING, 128);
+        let over_grid = app.mouse;
+        app.wheel(0.0, 1.0, false, true);
+        for _ in 0..5 {
+            app.ease_step(10.0);
+        }
+        let mid = app.time_view(w);
+        let head = app.hits.iter().find(|h| matches!(h.action, Action::PlHeader(_))).expect("track headers").rect;
+        app.mouse_move(head.x + 6.0, head.cy());
+        app.mouse_down();
+        app.mouse_up();
+        assert!(!app.smooth.running() && !app.animating(), "the press stops it");
+        assert_eq!(app.time_view(w), mid, "where it is drawn");
         app.ease_step(10.0);
-        assert_eq!(app.state.playlist_scroll, zoomed);
+        assert_eq!(app.time_view(w), mid);
+
+        // A jump (following playback, a scroll bar drag): the zoom stays where it was drawn, the scroll where it was put.
+        app.mouse_move(over_grid.0, over_grid.1);
+        app.wheel(0.0, 1.0, false, true);
+        app.ease_step(10.0);
+        let z = app.state.playlist_bar_w;
+        app.state.playlist_scroll.0 = 500.0;
+        app.ease_step(10.0);
+        assert!(!app.smooth.running());
+        assert_eq!(app.time_view(w), (z, 500.0));
+
+        // A sideways notch: the zoom stops where it is drawn and the scroll eases from there; a vertical notch
+        // leaves the zoom easing.
+        app.wheel(0.0, 1.0, false, true);
+        app.ease_step(10.0);
+        app.wheel(0.0, -1.0, false, false);
+        assert!(app.smooth.zoom(w).is_some() && app.smooth.of(Axis::Bar(Scroll::PlaylistY)).is_some(), "both ease");
+        app.ease_step(10.0);
+        let z = app.state.playlist_bar_w;
+        app.wheel(-1.0, 0.0, false, false);
+        assert!(app.smooth.zoom(w).is_none(), "the zoom ends");
+        assert!(app.smooth.of(Axis::Bar(Scroll::PlaylistX)).is_some(), "the scroll eases");
+        app.ease_to_end();
+        assert_eq!(app.state.playlist_bar_w, z, "at the zoom drawn");
+    }
+
+    /// The piano roll's time zoom eases the same way (Ctrl+wheel over the grid, Alt+wheel over the ruler): from where
+    /// it is, the tick under the mouse staying under it, to where Smoothing 0 jumps; a notch during it zooms on from
+    /// its target.
+    #[test]
+    fn the_piano_rolls_zoom_eases() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let w = TimeZoom::Piano;
+        let mut app = piano_app(&mut c);
+        set_slider(&SMOOTHING, 0);
+        app.state.piano.scroll_x = 384.0;
+        let drawn = app.time_view(w);
+        app.wheel(0.0, 1.0, false, true);
+        let at_once = app.time_view(w);
+        assert!(at_once.0 > drawn.0 && at_once.1 != drawn.1, "Ctrl+wheel zooms in around the mouse: {at_once:?}");
+        app.wheel(0.0, 1.0, false, true);
+        let two = app.time_view(w);
+
+        let mut app = piano_app(&mut c);
+        set_slider(&SMOOTHING, 128);
+        app.state.piano.scroll_x = 384.0;
+        app.wheel(0.0, 1.0, false, true);
+        assert_eq!(app.time_view(w), drawn, "the view starts where it is");
+        assert!(app.animating());
+        assert_eq!(app.smooth.zoom(w).expect("the zoom eases").target, at_once);
+        let frames = zoom_eases(&mut app, w);
+        assert!(frames > 10, "eased over {frames} frames");
+        assert_eq!(app.time_view(w), at_once, "ends where 0 jumps");
+
+        // A notch during the ease.
+        app.state.piano.scroll_x = 384.0;
+        app.state.piano.px_per_beat = drawn.0;
+        app.wheel(0.0, 1.0, false, true);
+        for _ in 0..5 {
+            app.ease_step(10.0);
+        }
+        let mid = app.time_view(w);
+        app.wheel(0.0, 1.0, false, true);
+        assert_eq!(app.time_view(w), mid);
+        let target = app.smooth.zoom(w).expect("still easing").target;
+        assert_eq!(target.0, two.0, "a notch on from the target");
+        let ppt = two.0 / f32::from(app.state.project.ppq.max(4));
+        assert!((target.1 - two.1).abs() * ppt <= 1.0, "the tick under the mouse stays: {target:?}, {two:?}");
+        zoom_eases(&mut app, w);
+        assert_eq!(app.time_view(w), target);
+
+        // Alt+wheel over the ruler zooms time too.
+        let ruler = app.hits.iter().find(|h| h.action == Action::PianoRuler).expect("the ruler").rect;
+        app.mouse_move(ruler.cx(), ruler.cy());
+        app.alt = true;
+        app.wheel(0.0, -1.0, false, false);
+        app.alt = false;
+        assert!(app.smooth.zoom(w).is_some_and(|e| e.target.0 < target.0), "the ruler's zoom eases");
+        zoom_eases(&mut app, w);
     }
 
     /// The state holds what is drawn: during an ease the track header under the mouse is the one drawn there, not

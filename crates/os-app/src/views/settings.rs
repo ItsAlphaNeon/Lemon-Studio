@@ -312,7 +312,7 @@ fn live(key: &str) -> bool {
 
 /// The combos that work (they open a menu of choices, `App::audio_menu`).
 pub const LIVE_COMBOS: [&str; 7] = [OUTPUT_DEVICE, INPUT_DEVICE, MODE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS, LAYOUT];
-/// General ▸ Display: "Playful" simulates the mixer's cables, "Off" hangs them still (crate::cable).
+/// General ▸ Display: the level of every animation (`crate::anim`): Playful, Polished, Subtle or Off.
 pub const ANIMATIONS: &str = "Animations";
 /// General ▸ Display ▸ Layout: Classic, or Lemon (a Lemon Studio addition: `toolbar::Bar::lemon`).
 pub const LAYOUT: &str = "Layout";
@@ -719,7 +719,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 combo("Main", 64.0, "Pop-ups scaling"),
                 combo("Main", 64.0, "Toolbars scaling"),
                 combo("Off", 64.0, "Transparent windows"),
-                combo(if s.cables.borrow().animations() { "Playful" } else { "Off" }, 126.0, ANIMATIONS),
+                combo(crate::anim::level().name(), 126.0, ANIMATIONS),
                 combo(if s.bar.tiling { "Tiling" } else { "Classic" }, 126.0, LAYOUT),
                 Slider("Smoothing", 0.2),
                 combo("Ultrasmooth", 126.0, "Animation refresh rate"),

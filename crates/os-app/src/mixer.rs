@@ -110,8 +110,9 @@ pub enum MCmd {
     Layout(u8),
     /// Options ▸ Cable physics: open / close the cables' debug panel (Lemon Studio's own).
     CablePhysics,
-    /// General settings ▸ Animations: simulate the cables (true) or hang them still; kept for the next start.
-    Animations(bool),
+    /// General settings ▸ Animations: the level every animation reads (`crate::anim`); the cables swing from Polished
+    /// up and hang still below. Kept for the next start.
+    Animations(crate::anim::Level),
     /// Open audio editor: Tesla on this track (Tesla's own, in Edison's place).
     AudioEditor(u16),
     /// Open audio editor and record: a Tesla on this track set up as an audio logger.
@@ -243,6 +244,33 @@ pub struct MixerUi {
     /// View ▸ Extra properties (Lemon Studio's design, saved in `.lemon` files, on by default): the strips show the reverse
     /// polarity and swap buttons and the stereo separation knob.
     pub extra: bool,
+    /// What drags on the selected faders keep while the selection lasts.
+    pub faders: FaderGroup,
+}
+
+/// What drags on selected faders keep while the selection lasts (spec: ui/mixer.md §4): each selected track's level at
+/// the press that started them, which is what every fader moves from, and the pressed fader's last move. So a fader
+/// stopped at the top stays there until the others have come down, and a group taken to -INF comes back as it was.
+#[derive(Default)]
+pub struct FaderGroup {
+    levels: Vec<(u16, f64)>,
+    pub moved: Option<(u16, f64)>,
+}
+
+impl FaderGroup {
+    /// Whether these are the levels of the tracks `sel` (sorted), with every fader where the last drag left it.
+    fn holds(&self, s: &State, sel: &[u16]) -> bool {
+        let level_of = |t: u16| self.levels.iter().find(|l| l.0 == t).map_or(0.0, |l| l.1);
+        self.levels.iter().map(|l| l.0).eq(sel.iter().copied())
+            && self.levels.iter().all(|&(t, level)| {
+                let left = match self.moved {
+                    Some((p, v)) if p == t => v,
+                    Some((p, v)) => group_fader(level, level_of(p), v),
+                    None => level,
+                };
+                volume(s, t) == left
+            })
+    }
 }
 
 /// How many meter readings a waveform keeps: more than the tallest meter has pixels.
@@ -251,7 +279,8 @@ pub const WAVE_LEN: usize = 600;
 impl Default for MixerUi {
     fn default() -> Self {
         MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), slot_colors: HashMap::new(), pending: Vec::new(), meters: Vec::new(),
-            meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None, waveforms: false, waves: Vec::new(), extra: true }
+            meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None, waveforms: false, waves: Vec::new(), extra: true,
+            faders: FaderGroup::default() }
     }
 }
 
@@ -291,6 +320,43 @@ pub fn selected(s: &State) -> Vec<u16> {
 
 pub fn is_selected(s: &State, n: u16) -> bool {
     s.selected_mixer == n || s.mixer.sel.contains(&n)
+}
+
+/// Whether track `n` is one of several selected: a press on its fader keeps the selection (spec: ui/mixer.md §2, §4).
+pub fn in_group(s: &State, n: u16) -> bool {
+    is_selected(s, n) && selected(s).len() > 1
+}
+
+/// A fader's value (unity when the track has none stored).
+pub fn volume(s: &State, t: u16) -> f64 {
+    track(s, t).and_then(|m| m.volume).unwrap_or(0.8)
+}
+
+/// The selected tracks' levels for a press on a selected fader: the ones kept since the selection was made, or the
+/// faders as they are when something else has moved one since the last drag (the wheel, Ctrl+Z, automation).
+pub fn group_levels(s: &mut State) -> Vec<(u16, f64)> {
+    let mut sel = selected(s);
+    sel.sort_unstable();
+    if !s.mixer.faders.holds(s, &sel) {
+        let levels = sel.iter().map(|&t| (t, volume(s, t))).collect();
+        s.mixer.faders = FaderGroup { levels, moved: None };
+    }
+    s.mixer.faders.levels.clone()
+}
+
+/// Where a selected fader goes in a group drag: from `other`, its kept level, by the same number of dB as the pressed
+/// fader is from its own kept level `level` at `v`, held to the fader's range. At `v` = `level` it is exactly `other`. A
+/// fader at -INF stays there. Moved up from a `level` of -INF, which is no number of dB, the others go to the top, as FL's
+/// do (spec: ui/mixer.md §4).
+pub fn group_fader(other: f64, level: f64, v: f64) -> f64 {
+    use os_engine::laws::{fader_gain, fader_of_gain};
+    if v == level || other <= 0.0 {
+        return other;
+    }
+    if level <= 0.0 {
+        return 1.0;
+    }
+    fader_of_gain(fader_gain(other) * fader_gain(v) / fader_gain(level))
 }
 
 /// Whether track `src` sends to `dst` (route present), and at what level (fader scale, 0.8 = unity).
@@ -548,6 +614,10 @@ pub(crate) fn switch_auto_bypass(s: &mut State) -> bool {
 
 /// Selects `n` as a click with these modifiers does (§2): plain = only it, Ctrl = add it.
 pub fn select(s: &mut State, n: u16, ctrl: bool) {
+    if !(ctrl && is_selected(s, n)) {
+        // A selection made again, even of the same tracks, starts from the faders as they are (spec: ui/mixer.md §4).
+        s.mixer.faders = FaderGroup::default();
+    }
     if ctrl {
         let cur = s.selected_mixer;
         if !s.mixer.sel.contains(&cur) {
@@ -2133,6 +2203,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::SelectSources(n) => select_linked(s, n, false),
         MCmd::SelectAll => {
             s.mixer.sel = s.project.mixer.iter().map(|m| m.index).filter(|&t| t <= inserts(s)).collect();
+            s.mixer.faders = FaderGroup::default();
             None
         }
         MCmd::Trim { non_empty } => {
@@ -2166,9 +2237,12 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             c.debug = !c.debug;
             None
         }
-        MCmd::Animations(on) => {
-            s.cables.get_mut().animate(on);
-            crate::app::save_animations(on);
+        MCmd::Animations(l) => {
+            crate::anim::set_level(l);
+            crate::anim::save(l);
+            s.cables.get_mut().animate(crate::anim::cables_swing(l));
+            // Everything restyles at once (menus' borders, what animates): the whole window repaints.
+            app.invalidate();
             None
         }
         MCmd::AddEffect(slot, index) => {
@@ -3768,5 +3842,33 @@ mod tests {
         assert_eq!(help, (true, Cmd::Mixer(MCmd::SlotHelp(0))));
         assert_eq!(run(&mut a, MCmd::SlotHelp(0)).as_deref(), Some("Test FX has no help page"));
         assert_eq!(run(&mut a, MCmd::SlotHelp(1)), Some(format!("Opening {}", crate::help_links::BUILTIN_PLUGINS_URL)));
+    }
+
+    /// FL's measured group drags, in the percentages its hint shows (spec: ui/mixer.md §4): `kept` levels, the pressed
+    /// one's kept level and where it went, and where the others landed. The hint's whole percents go in, so 1 % either
+    /// way is as near as they say.
+    #[test]
+    fn group_fader_lands_where_fl_does() {
+        for (kept, level, to, want) in [
+            // Same dB each: Inserts 3 to 7, 3 down 40 px.
+            (&[85.0, 70.0, 58.0, 40.0][..], 100.0, 94.0, &[79, 65, 53, 36][..]),
+            // Each stops at the top on its own.
+            (&[94.0, 65.0, 53.0, 36.0], 79.0, 125.0, &[125, 108, 94, 71]),
+            // Three more drags from the same kept levels: the one at the top stays until the others have come down.
+            (&[89.0, 60.0], 74.0, 125.0, &[125, 108]),
+            (&[89.0, 60.0], 74.0, 116.0, &[125, 100]),
+            (&[89.0, 60.0], 74.0, 108.0, &[123, 91]),
+            (&[89.0, 60.0], 74.0, 100.0, &[115, 84]),
+            // A group at -INF comes back from its kept levels.
+            (&[116.0, 116.0], 11.0, 9.0, &[107, 107]),
+            // Pressed at -INF and moved up: the others go to the top, and one at -INF stays.
+            (&[94.0, 79.0, 65.0, 0.0], 0.0, 14.0, &[125, 125, 125, 0]),
+        ] {
+            let got: Vec<i64> = kept.iter().map(|&k| (group_fader(k * 0.008, level * 0.008, to * 0.008) * 125.0).round() as i64).collect();
+            let near = got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1 && (*w > 0 || *g == 0));
+            assert!(near, "{kept:?} with the pressed one from {level} to {to}: {got:?}, FL {want:?}");
+        }
+        assert_eq!(group_fader(0.5, 0.6, 0.0), 0.0, "the pressed one at -INF takes them there");
+        assert_eq!(group_fader(0.5, 0.6, 0.6), 0.5, "back at the press point, exactly");
     }
 }
