@@ -252,7 +252,7 @@ impl SmithPlugin {
             for (note, on) in q.drain(..) {
                 if on {
                     let velocity = 100.0 / 128.0;
-                    let id = self.engine.note_on(NoteOn { levels: self.levels(note, velocity), velocity });
+                    let id = self.engine.note_on(NoteOn { levels: self.levels(note), velocity });
                     self.held.push(Held { note, channel: PREVIEW, voice_id: None, id, tune: 0.0 });
                 } else if let Some(i) = self.held.iter().position(|h| h.note == note && h.channel == PREVIEW) {
                     let h = self.held.remove(i);
@@ -272,7 +272,7 @@ impl SmithPlugin {
 
     /// A note's own levels. The host sends FL's velocity byte / 128; the engine applies the velocity's own law. The
     /// channel's volume and pan are the host's (Smith does not take them over).
-    fn levels(&self, note: u8, _velocity: f32) -> Levels {
+    fn levels(&self, note: u8) -> Levels {
         Levels {
             vol: 1.0,
             pan: 0.0,
@@ -348,7 +348,7 @@ impl Plugin for SmithPlugin {
             }
             match ev {
                 NoteEvent::NoteOn { timing, note, velocity, voice_id, channel } => {
-                    let mut levels = self.levels(note, velocity);
+                    let mut levels = self.levels(note);
                     if let Some(v) = voice_id {
                         let [x, y] = start_mods(&self.events[i + 1..], timing, v);
                         (levels.mod_x, levels.mod_y) = (levels.mod_x + x, levels.mod_y + y);

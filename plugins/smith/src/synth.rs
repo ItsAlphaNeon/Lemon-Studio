@@ -45,6 +45,37 @@ pub fn c3(x: f64) -> f64 {
     ((x * 3f64.ln()).exp() - 1.0) * 0.5
 }
 
+/// `ln x` of a positive `x`, within about 2e-4. A note start reads this and `fast_exp` for every harmonic.
+#[inline(always)]
+fn fast_ln(x: f32) -> f32 {
+    let bits = x.to_bits();
+    let m = f32::from_bits((bits & 0x007f_ffff) | 0x3f80_0000) - 1.0;
+    let e = (bits >> 23) as i32 - 127;
+    (e as f32 + m + m * (1.0 - m) * (0.439_987 + m * (-0.241_704 + m * 0.082_316))) * std::f32::consts::LN_2
+}
+
+/// `e^x`, within about 2e-4.
+#[inline(always)]
+fn fast_exp(x: f32) -> f32 {
+    let y = (x * std::f32::consts::LOG2_E).clamp(-126.0, 127.0);
+    let i = y.floor();
+    let f = y - i;
+    (1.0 + f + f * (1.0 - f) * (-0.304_661 - f * 0.079_252)) * f32::from_bits(((i as i32 + 127) as u32) << 23)
+}
+
+/// `C(2 l)` by table: what a map's level does to a harmonic's gain or time.
+fn map_gains() -> &'static [f32; 1025] {
+    static T: OnceLock<[f32; 1025]> = OnceLock::new();
+    T.get_or_init(|| std::array::from_fn(|i| c3(2.0 * i as f64 / 1024.0) as f32))
+}
+
+#[inline(always)]
+fn map_gain(t: &[f32; 1025], l: f32) -> f32 {
+    let p = l.clamp(0.0, 1.0) * 1024.0;
+    let i = (p as usize).min(1023);
+    t[i] + (t[i + 1] - t[i]) * (p - i as f32)
+}
+
 /// Linear interpolation in a table of `(x, y)`, flat outside it.
 fn table_at(t: &[(f64, f64)], x: f64) -> f64 {
     if x <= t[0].0 {
@@ -200,6 +231,19 @@ fn droop_db(u: f64) -> f64 {
     table_at(&T, u)
 }
 
+/// The droop's gain per line of RICH 16; line `k` of RICH `r` reads it at `k << (16 - r)`.
+fn droops() -> &'static [f32] {
+    static T: OnceLock<Vec<f32>> = OnceLock::new();
+    T.get_or_init(|| {
+        (0..=MAX_TOP)
+            .map(|i| {
+                let u = i as f64 / 1024.0;
+                if u < 10.0 { 1.0 } else { (droop_db(u) * std::f64::consts::LN_10 * 0.05).exp() as f32 }
+            })
+            .collect()
+    })
+}
+
 /// A small generator (SplitMix64) for the patterns and the phases.
 #[derive(Debug, Clone, Copy)]
 pub struct Mix(pub u64);
@@ -226,6 +270,16 @@ pub fn pattern(seed: u64, top: usize, out: &mut Vec<f32>) {
     for _ in 1..=top {
         out.push(q[(r.next() >> 52) as usize]);
     }
+}
+
+/// What "a new random seed per note" reads: one long pattern, each note from an offset of its own.
+fn random_pool() -> &'static [f32] {
+    static T: OnceLock<Vec<f32>> = OnceLock::new();
+    T.get_or_init(|| {
+        let mut g = Vec::new();
+        pattern(0x5EED_CAFE, 2 * MAX_TOP + 1, &mut g);
+        g
+    })
 }
 
 /// Every harmonic's phase, the same for all notes.
@@ -342,7 +396,7 @@ impl Patch {
     #[inline]
     fn final_at(&self, f: usize, x: f32) -> f32 {
         let t = &self.finals[f];
-        t[((x * (t.len() - 1) as f32).round() as usize).min(t.len() - 1)]
+        t[((x * (t.len() - 1) as f32 + 0.5) as usize).min(t.len() - 1)]
     }
 
     /// Where a harmonic reads the final maps.
@@ -597,7 +651,7 @@ struct Note {
 
 impl Note {
     #[allow(clippy::too_many_arguments)]
-    fn new(ctx: &Ctx, n: NoteOn, id: u64, previous: Option<f32>, knob_mods: [f64; 2], plans: &mut PlanCache, salt: u64, spare: &mut Vec<Vec<f32>>) -> Note {
+    fn new(ctx: &Ctx, n: NoteOn, id: u64, previous: Option<f32>, knob_mods: [f64; 2], salt: u64, spare: &mut Spare) -> Note {
         let patch = ctx.patch.clone();
         let st = &patch.st;
         let key = round(f64::from(n.levels.pitch) * 0.01) as i32 + 60;
@@ -629,22 +683,20 @@ impl Note {
         let full = (f64::from(st.ints[FULL]) + 2000.0 * value(A_FULL)).clamp(-1000.0, 1000.0);
         let b_full = full_factor(full);
         let pre = (f64::from(st.ints[PRE]) * value(A_PRE)).max(0.0);
-        let mut g = spare.pop().unwrap_or_default();
+        let mut g = spare.lines.pop().unwrap_or_default();
         g.clear();
         g.resize(calc + 1, 0.0);
         // What the lines fall by while they play: the two patterns, mixed in log.
         let mut time_g = Vec::new();
         if seed_on {
             let t = morph;
-            let mut own = Vec::new();
             let g2: &[f32] = match &patch.seeds[1] {
                 Some(g2) => g2,
-                None => {
-                    if t > 0.0 {
-                        pattern(salt.wrapping_add(id).wrapping_mul(0x2545_F491_4F6C_DD1D), calc, &mut own);
-                    }
-                    &own
+                None if t > 0.0 => {
+                    let mut r = Mix(salt.wrapping_add(id).wrapping_mul(0x2545_F491_4F6C_DD1D));
+                    &random_pool()[(r.next() % (MAX_TOP as u64 + 1)) as usize..]
                 }
+                None => &[],
             };
             let shift = round(f64::from(value(A_ROT)) * (lines_n + 1) as f64);
             let wrap = (lines_n + 1).min(MAX_TOP) as i64;
@@ -662,29 +714,27 @@ impl Note {
                         if time_g.is_empty() {
                             time_g.resize(calc + 1, 0.0f32);
                         }
-                        time_g[k] = g1[at].powf(1.0 - t) * g2v.powf(t);
+                        time_g[k] = fast_exp((1.0 - t) * fast_ln(g1[at]) + t * fast_ln(g2v));
                     }
                 }
             }
         }
         // The fall at note-on, read through a table of the static part.
-        let mut lut = [0.0f32; 513];
+        let mut lut = [1.0f32; 513];
         if seed_on {
             for (i, v) in lut.iter_mut().enumerate() {
                 let lg = -11.0 + 9.0 * i as f64 / 512.0;
                 let gv = lg.exp();
-                *v = (static_part(gv, full) + gv * b_full * pre) as f32;
+                *v = (-(static_part(gv, full) + gv * b_full * pre)).exp() as f32;
             }
         }
         let fall = |gv: f32| -> f32 {
             if gv <= 0.0 {
                 return 1.0;
             }
-            let p = (gv.ln() + 11.0) * (512.0 / 9.0);
-            let p = p.clamp(0.0, 511.999);
+            let p = ((fast_ln(gv) + 11.0) * (512.0 / 9.0)).clamp(0.0, 511.999);
             let i = p as usize;
-            let f = p - i as f32;
-            (-(lut[i] + (lut[i + 1] - lut[i]) * f)).exp()
+            lut[i] + (lut[i + 1] - lut[i]) * (p - i as f32)
         };
 
         // Where each line reads the maps.
@@ -708,7 +758,7 @@ impl Note {
         };
         let forced_flat = st.finals[M_FORCED].points.iter().all(|p| p.level == 0.0);
         let weigh = st.natural_weight;
-        let mut a = spare.pop().unwrap_or_default();
+        let mut a = spare.lines.pop().unwrap_or_default();
         a.clear();
         a.resize(calc + 1, 0.0);
         let mut settle = Vec::new();
@@ -716,6 +766,7 @@ impl Note {
         if alt {
             settle.resize(calc + 1, 0.0);
         }
+        let gains = map_gains();
         // The seed stage alone, for the level without auto loudness.
         let mut seed_power = 0.0f64;
         for k in 1..=calc {
@@ -730,9 +781,9 @@ impl Note {
             let w = if weigh { 1.0 / (k as f32).sqrt() } else { 1.0 };
             let x = line_at(&patch, k);
             if alt {
-                settle[k] = v * w * c3(2.0 * f64::from(patch.final_at(M_DECAY, x))) as f32;
+                settle[k] = v * w * map_gain(gains, patch.final_at(M_DECAY, x));
             }
-            a[k] = v * w * c3(2.0 * f64::from(patch.final_at(M_IMPULSE, x))) as f32;
+            a[k] = v * w * map_gain(gains, patch.final_at(M_IMPULSE, x));
         }
         let powers = |v: &[f32]| -> f64 { v.iter().take(lines_n + 1).skip(1).map(|&y| f64::from(y) * f64::from(y)).sum::<f64>() * 0.5 };
         let scale = if st.auto_loudness {
@@ -743,14 +794,8 @@ impl Note {
             if p > 0.0 { 2.0 * RMS / p.sqrt() } else { 1.0 }
         };
         // Past line `n` the lines droop; nothing is normalised after this.
-        let u_of = f64::from(6 - r).exp2();
-        let droop = |k: usize| -> f32 {
-            if r < 10 {
-                return 1.0;
-            }
-            let u = k as f64 * u_of;
-            if u < 10.0 { 1.0 } else { (droop_db(u) * std::f64::consts::LN_10 * 0.05).exp() as f32 }
-        };
+        let droops = droops();
+        let droop = |k: usize| -> f32 { if r < 10 { 1.0 } else { droops[(k << (16 - r)).min(MAX_TOP)] } };
         let mut power = 0.0f64;
         for k in 1..=top {
             let d = droop(k) * scale as f32;
@@ -812,13 +857,18 @@ impl Note {
         // The first table.
         let quality = if ctx.offline { 4 } else { st.quality };
         let len = table_len(top, quality);
-        let plan = plans.get(len);
-        let mut ifft = Ifft::new(plan.clone());
-        let mut spec = vec![[0.0f32; 2]; top + 1];
+        let plan = plan_for(len);
+        let mut ifft = match spare.iffts.iter().position(|f| f.len() == len) {
+            Some(i) => spare.iffts.swap_remove(i),
+            None => Ifft::new(plan.clone()),
+        };
+        let mut spec = spare.specs.pop().unwrap_or_default();
+        spec.clear();
+        spec.resize(top + 1, [0.0f32; 2]);
         let top_now = fill_spec(&mut spec, &a, top, nyquist);
         ifft.load(&spec[..=top_now]);
         ifft.finish();
-        let mut ta = Vec::new();
+        let mut ta = spare.tables.pop().unwrap_or_default();
         guarded(&ifft, &mut ta);
 
         // The unison.
@@ -826,7 +876,7 @@ impl Note {
         let uni = unison(st, len as f64, phase_law(phs));
         let declick_len = if st.declick { (0.002 * ctx.rate) as usize } else { 0 };
 
-        let fac = spare.pop().unwrap_or_default();
+        let fac = spare.lines.pop().unwrap_or_default();
         let mut note = Note {
             id,
             key,
@@ -857,7 +907,10 @@ impl Note {
             ifft: Some(ifft),
             spec,
             ta,
-            tb: Vec::new(),
+            tb: spare.tables.pop().map(|mut t| {
+                t.clear();
+                t
+            }).unwrap_or_default(),
             steps_next: 2,
             hold: true,
             frame_blocks: 1,
@@ -905,6 +958,7 @@ impl Note {
         let peak = self.a.iter().fold(0.0f32, |m, &v| m.max(v));
         let floor = peak * 1e-4;
         let mut low = f64::INFINITY;
+        let gains = map_gains();
         for k in 1..=top {
             let inv = if eq_flat {
                 1.0 / tau
@@ -914,7 +968,7 @@ impl Note {
                 } else {
                     self.patch.line_x(k as f64 - shift)
                 };
-                let c = c3(2.0 * f64::from(self.patch.final_at(which, x)));
+                let c = f64::from(map_gain(gains, self.patch.final_at(which, x)));
                 let t = (tau * c + 0.005 * (1.0 - c).max(0.0)).max(1e-4);
                 1.0 / t
             };
@@ -1275,21 +1329,53 @@ fn mod_index(knobs: [f64; 2], l: Levels) -> [usize; 2] {
     ]
 }
 
-/// The FFT plans made so far.
-#[derive(Default)]
-struct PlanCache {
-    plans: Vec<Arc<Plan>>,
+/// The FFT plan of a table length (`table_len`'s 2^12 to 2^18), all made when the first instance is: a note starts on
+/// the audio thread.
+fn plan_for(len: usize) -> Arc<Plan> {
+    static T: OnceLock<Vec<Arc<Plan>>> = OnceLock::new();
+    let plans = T.get_or_init(|| (12..=18).map(|b| Plan::new(1 << b)).collect());
+    plans[(len.trailing_zeros() as usize).clamp(12, 18) - 12].clone()
 }
 
-impl PlanCache {
-    fn get(&mut self, len: usize) -> Arc<Plan> {
-        if let Some(p) = self.plans.iter().find(|p| p.len == len) {
-            return p.clone();
-        }
-        let p = Plan::new(len);
-        self.plans.push(p.clone());
-        p
+/// What finished notes leave for the next ones, so a note start rarely asks the system for memory.
+#[derive(Default)]
+struct Spare {
+    lines: Vec<Vec<f32>>,
+    tables: Vec<Vec<f32>>,
+    specs: Vec<Vec<Cpx>>,
+    iffts: Vec<Ifft>,
+}
+
+impl Spare {
+    fn keep(&mut self, note: Note) {
+        self.lines.extend([note.a, note.fac, note.gb]);
+        self.lines.truncate(12);
+        self.tables.extend([note.ta, note.tb]);
+        self.tables.truncate(8);
+        self.specs.push(note.spec);
+        self.specs.truncate(4);
+        self.iffts.extend(note.ifft);
+        self.iffts.truncate(4);
     }
+}
+
+/// A note-on waiting for its turn to start.
+struct Waiting {
+    n: NoteOn,
+    id: u64,
+    released: bool,
+}
+
+/// How many lines the audio thread takes on starting per second: half its time, at about 40 ns per line. A note always
+/// fits when none has started for a while; the others of a big chord at high RICH wait a block or so rather than miss
+/// the block's deadline.
+const START_LINES_PER_SECOND: f64 = 12.5e6;
+
+/// What starting a note of RICH `r` takes, in lines at most.
+fn start_cost(r: i32) -> f64 {
+    let r = r.clamp(6, 16);
+    let lines = if r <= 9 { (1usize << (r - 1)) - 1 } else { ((TOP_U * f64::from(r - 6).exp2()) as usize).min(MAX_TOP) };
+    lines.max(1024) as f64
 }
 
 /// The synthesizer as a host sees it: a patch, notes in and out, and render calls of stereo.
@@ -1309,8 +1395,9 @@ pub struct Smith {
     next_id: u64,
     previous: Option<f32>,
     salt: u64,
-    plans: PlanCache,
-    spare: Vec<Vec<f32>>,
+    spare: Spare,
+    waiting: Vec<Waiting>,
+    start_credit: f64,
     dry: Bus,
     fx: Bus,
     nl: Vec<f32>,
@@ -1344,14 +1431,15 @@ impl Smith {
             next_id: 1,
             previous: None,
             salt: 0x5EED,
-            plans: PlanCache::default(),
-            spare: Vec::new(),
+            spare: Spare::default(),
+            waiting: Vec::new(),
+            start_credit: MAX_TOP as f64,
             dry: [vec![0.0; HOST_BLOCK], vec![0.0; HOST_BLOCK]],
             fx: [vec![0.0; HOST_BLOCK], vec![0.0; HOST_BLOCK]],
             nl: vec![0.0; HOST_BLOCK],
             nr: vec![0.0; HOST_BLOCK],
         };
-        let _ = (phasors(), natural_x(), quantile_table());
+        let _ = (phasors(), natural_x(), quantile_table(), plan_for(1 << 12), map_gains(), droops(), random_pool());
         s.setup_rate();
         s
     }
@@ -1385,6 +1473,7 @@ impl Smith {
     /// Plays `p` from now on; stops what plays.
     pub fn set_patch(&mut self, p: Patch) {
         self.notes.clear();
+        self.waiting.clear();
         self.patch = Arc::new(p);
         self.fx_used = fx_used(&self.patch.fx);
         self.section = Section::new(&self.patch.fx, self.rate as u32, 0, self.tempo as f32);
@@ -1406,6 +1495,7 @@ impl Smith {
         if rate != self.rate {
             self.rate = rate;
             self.notes.clear();
+            self.waiting.clear();
             self.setup_rate();
         }
     }
@@ -1429,13 +1519,48 @@ impl Smith {
         Ctx { patch, rate, big_b, seconds, tempo, offline, kf, ramp_a, svf }
     }
 
-    /// Starts a note; returns its id.
+    /// Starts a note, now or when the audio thread has the time; returns its id.
     pub fn note_on(&mut self, n: NoteOn) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
+        if self.waiting.is_empty() && self.can_start() {
+            self.start_note(n, id);
+        } else {
+            self.waiting.push(Waiting { n, id, released: false });
+        }
+        id
+    }
+
+    /// Whether a note may start now; takes its cost if so.
+    fn can_start(&mut self) -> bool {
+        if self.offline {
+            return true;
+        }
+        let cost = start_cost(self.patch.st.ints[RICH]);
+        let can = self.start_credit >= cost;
+        if can {
+            self.start_credit -= cost;
+        }
+        can
+    }
+
+    /// Before a render: the time of `n` samples for starting notes, and the notes it covers.
+    fn start_waiting(&mut self, n: usize) {
+        let lines = n as f64 * START_LINES_PER_SECOND / self.rate;
+        self.start_credit = (self.start_credit + lines).min(lines.max(MAX_TOP as f64));
+        while !self.waiting.is_empty() && self.can_start() {
+            let w = self.waiting.remove(0);
+            self.start_note(w.n, w.id);
+            if w.released {
+                self.note_off(w.id);
+            }
+        }
+    }
+
+    fn start_note(&mut self, n: NoteOn, id: u64) {
         let ctx = Self::ctx(&self.patch, &self.svf, self.rate, self.big_b, self.seconds, self.tempo, self.offline, self.kf, self.ramp_a);
         let knobs = [f64::from(self.patch.st.ints[MOD_X]), f64::from(self.patch.st.ints[MOD_Y])];
-        let note = Note::new(&ctx, n, id, self.previous, knobs, &mut self.plans, self.salt, &mut self.spare);
+        let note = Note::new(&ctx, n, id, self.previous, knobs, self.salt, &mut self.spare);
         if self.patch.st.one_voice {
             for other in self.notes.iter_mut().filter(|o| o.key == note.key && !o.released) {
                 other.release(&ctx);
@@ -1447,10 +1572,12 @@ impl Smith {
         if self.notes.len() > MAX_NOTES {
             self.notes.remove(0);
         }
-        id
     }
 
     pub fn note_off(&mut self, id: u64) {
+        for w in self.waiting.iter_mut().filter(|w| w.id == id) {
+            w.released = true;
+        }
         let ctx = Self::ctx(&self.patch, &self.svf, self.rate, self.big_b, self.seconds, self.tempo, self.offline, self.kf, self.ramp_a);
         for n in self.notes.iter_mut().filter(|n| n.id == id) {
             n.release(&ctx);
@@ -1458,6 +1585,7 @@ impl Smith {
     }
 
     pub fn all_off(&mut self) {
+        self.waiting.iter_mut().for_each(|w| w.released = true);
         let ctx = Self::ctx(&self.patch, &self.svf, self.rate, self.big_b, self.seconds, self.tempo, self.offline, self.kf, self.ramp_a);
         for n in self.notes.iter_mut() {
             n.release(&ctx);
@@ -1467,16 +1595,21 @@ impl Smith {
     /// Stops everything at once.
     pub fn panic(&mut self) {
         self.notes.clear();
+        self.waiting.clear();
     }
 
     /// Stops everything, tails included.
     pub fn reset(&mut self) {
         self.notes.clear();
+        self.waiting.clear();
         self.previous = None;
         self.section = Section::new(&self.patch.fx, self.rate as u32, 0, self.tempo as f32);
     }
 
     pub fn note_pan(&mut self, id: u64, pan: f32) {
+        for w in self.waiting.iter_mut().filter(|w| w.id == id) {
+            w.n.levels.pan = pan;
+        }
         for n in self.notes.iter_mut().filter(|n| n.id == id) {
             n.levels.pan = pan;
         }
@@ -1484,6 +1617,13 @@ impl Smith {
 
     /// A note's mod X (`k` 0) or mod Y (1), -1..1.
     pub fn note_mod(&mut self, id: u64, k: usize, value: f32) {
+        for w in self.waiting.iter_mut().filter(|w| w.id == id) {
+            if k == 0 {
+                w.n.levels.mod_x = value;
+            } else {
+                w.n.levels.mod_y = value;
+            }
+        }
         for n in self.notes.iter_mut().filter(|n| n.id == id) {
             if k == 0 {
                 n.levels.mod_x = value;
@@ -1495,18 +1635,22 @@ impl Smith {
 
     /// A note's pitch in cents from key 60.
     pub fn bend(&mut self, id: u64, pitch: f32) {
+        for w in self.waiting.iter_mut().filter(|w| w.id == id) {
+            w.n.levels.pitch = pitch;
+        }
         for n in self.notes.iter_mut().filter(|n| n.id == id) {
             n.levels.pitch = pitch;
         }
     }
 
     pub fn voices(&self) -> usize {
-        self.notes.len()
+        self.notes.len() + self.waiting.len()
     }
 
     /// Renders into `left` and `right` (overwritten).
     pub fn render(&mut self, left: &mut [f32], right: &mut [f32]) {
         let n = left.len().min(right.len());
+        self.start_waiting(n);
         let mut at = 0;
         while at < n {
             let m = (n - at).min(HOST_BLOCK);
@@ -1562,8 +1706,7 @@ impl Smith {
         for i in (0..self.notes.len()).rev() {
             if self.notes[i].finished {
                 let note = self.notes.remove(i);
-                self.spare.extend([note.a, note.fac, note.gb]);
-                self.spare.truncate(12);
+                self.spare.keep(note);
             }
         }
         if self.fx_used {
@@ -1594,6 +1737,34 @@ mod tests {
 
     fn note(key: i32, velocity: f32) -> NoteOn {
         NoteOn { levels: Levels { vol: 1.0, pan: 0.0, pitch: (key - 60) as f32 * 100.0, mod_x: 0.0, mod_y: 0.0 }, velocity }
+    }
+
+    /// A chord that would not fit in a block at RICH 16 starts over blocks, a note let go while it waits still sounds
+    /// and ends, and offline every note starts at once.
+    #[test]
+    fn a_big_chord_starts_over_blocks() {
+        let mut st = State::default();
+        st.ints[RICH] = 16;
+        let mut s = Smith::new(48000);
+        s.set_patch(Patch::new(st.clone()));
+        let ids: Vec<u64> = (0..3).map(|k| s.note_on(note(60 + k, 0.8))).collect();
+        assert_eq!((s.notes.len(), s.voices()), (1, 3));
+        s.note_off(ids[2]);
+        let (mut l, mut r) = (vec![0.0f32; 256], vec![0.0f32; 256]);
+        s.render(&mut l, &mut r);
+        assert_eq!(s.notes.len(), 2);
+        s.render(&mut l, &mut r);
+        assert_eq!((s.notes.len(), s.voices()), (3, 3));
+        assert_eq!(s.notes.iter().map(|n| n.released).collect::<Vec<_>>(), [false, false, true]);
+        assert!(s.notes.iter().map(|n| n.id).eq(ids.iter().copied()));
+
+        let mut s = Smith::new(48000);
+        s.set_offline(true);
+        s.set_patch(Patch::new(st));
+        for k in 0..3 {
+            s.note_on(note(60 + k, 0.8));
+        }
+        assert_eq!(s.notes.len(), 3);
     }
 
     fn rms(x: &[f32]) -> f64 {
