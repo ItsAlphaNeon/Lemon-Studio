@@ -1810,7 +1810,7 @@ mod tests {
     #[test]
     fn narrow_automation_spikes_are_drawn_whole_at_any_zoom() {
         let points = vec![AutoPoint::new(0.0, 0.0), AutoPoint::new(1.0, 0.0), AutoPoint::new(1.001, 1.0), AutoPoint::new(1.002, 0.0), AutoPoint::new(2.0, 0.0), AutoPoint::new(2.0, 0.5), AutoPoint::new(4.0, 0.5)];
-        let a = Automation { points, ..Automation::default() };
+        let a = Automation { channel: 0, targets: vec![], points, header: vec![], tail: vec![], lfo: Default::default() };
         let y = |v: f64| 100.0 - 100.0 * v as f32;
         for step in 0..40 {
             // From about 20 to 60 px a beat, as an eased zoom passes through.

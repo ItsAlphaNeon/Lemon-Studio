@@ -175,6 +175,9 @@ pub(super) struct Pdc {
     pub first: bool,
     /// ... and a new head of the stream is skipped (not when an engine takes over playback).
     pub fresh: bool,
+    /// The engine follows another one's tails on the stream (`Engine::carry_on`): its head is not skipped, as it is
+    /// those tails going on; its song comes in that much later, the position heard as ever (`lag`).
+    pub follows: bool,
     /// A slot was switched: an insert whose slots all went off, or one came on, works the pads out again.
     pub switched: bool,
     /// The first tick's slot values have reached the slots already.
@@ -240,7 +243,7 @@ impl Pdc {
         }
         self.waiting.clear();
         self.marks.clear();
-        (self.first, self.fresh, self.due) = (true, true, false);
+        (self.first, self.fresh, self.due, self.follows) = (true, true, false, false);
         (self.lag, self.head, self.flush, self.stream) = (0, 0, None, 0);
     }
 
@@ -410,7 +413,7 @@ impl Engine {
         if self.pdc.fresh {
             // The head of the stream: the export starts this many samples in; so does live playback. Each track's output
             // for Split mixer tracks skips its own lateness, so it lines up with the song (a Lemon Studio choice).
-            (self.pdc.lag, self.pdc.head) = (l.start, l.start);
+            (self.pdc.lag, self.pdc.head) = (l.start, if self.pdc.follows { 0 } else { l.start });
             self.pdc.cap_skip = l.leaving.iter().map(|&v| (v.max(0) as u64).min(l.start)).collect();
         }
         self.pdc.leaving = l.leaving;
@@ -842,6 +845,27 @@ mod tests {
         e.seek_tick(96);
         let (n, tick) = e.next_tick().map(|(s, t, ..)| (s.len() / 2, t)).unwrap();
         assert_eq!((n, tick), (TICK - 100, 96.0));
+    }
+
+    /// A playback that follows a Stop's tails on the stream (`Engine::carry_on`) skips no head: those frames are the
+    /// tails going on. Its song comes in that much later, and the playhead follows what is heard as ever.
+    #[test]
+    fn a_playback_that_follows_tails_skips_no_head_and_the_playhead_follows_what_is_heard() {
+        let p = project(&[1, 2], 3);
+        let mut old = engine(&p, vec![(1, 0, Late::new(100))], false);
+        old.next_tick();
+        let mut e = engine(&p, vec![(1, 0, Late::new(100))], false);
+        e.carry_on(&mut old);
+        let mut blocks = Vec::new();
+        for _ in 0..3 {
+            let (s, tick, frame, held, len) = e.next_tick().unwrap();
+            blocks.push((s.len() / 2, tick, frame, held, len));
+        }
+        assert_eq!(blocks[0], (TICK, 0.0, 0, false, TICK as u64), "every frame of the first tick");
+        assert_eq!(blocks[1], (TICK, (TICK - 100) as f64 / TICK as f64, (TICK - 100) as u64, false, TICK as u64));
+        // A seek skips the head again, as any playback's.
+        e.seek_tick(96);
+        assert_eq!(e.next_tick().map(|(s, t, ..)| (s.len() / 2, t)), Some((TICK - 100, 96.0)));
     }
 
     #[test]
