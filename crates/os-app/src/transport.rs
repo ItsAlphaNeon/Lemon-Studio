@@ -1763,16 +1763,30 @@ impl Audio {
                 return false;
             }
         };
-        let e = self.build(project, PlayMode::Pattern(1), Kind::Live, At::default(), rate, pairs);
+        let mut e = self.build(project, PlayMode::Pattern(1), Kind::Live, At::default(), rate, pairs);
         if let Some((p, _)) = self.parked.as_mut() {
             p.release_instruments();
         }
+        // From a paused playback or tails ringing after Stop, the live engine carries on with the plugins as they are:
+        // what they ring goes on unbroken.
         match std::mem::replace(&mut self.role, Role::Live) {
             Role::Song(p) => {
                 let s = self.main.as_ref().expect("opened");
-                s.with(|e| e.release_instruments());
-                let old = s.swap(Some(e), false, std::mem::take(&mut self.pend), false);
+                s.with(|old| {
+                    old.release_instruments();
+                    e.carry_on(old);
+                });
+                let old = s.follow(e, std::mem::take(&mut self.pend));
                 self.parked = old.map(|e| (e, p));
+            }
+            Role::Ringing(..) if self.main.is_some() => {
+                let reset = std::mem::take(&mut self.pend);
+                let s = self.main.as_ref().expect("checked");
+                s.with(|old| e.carry_on(old));
+                drop(s.follow(e, reset));
+                if reset & RESET_INST != 0 {
+                    self.dirty = false;
+                }
             }
             _ => self.hand(Some(e), false, 0, false),
         }
@@ -2487,6 +2501,9 @@ struct Ctl {
     level: AtomicU32,
     /// The engine handed in last (`Slot::epoch`): the callback fades out what it plays and goes on with it.
     want: AtomicU64,
+    /// An engine handed in that carries on from the one before (`Stream::follow`): the callback plays that one's
+    /// queue to its end, unfaded, and this one's from the next frame.
+    follow: AtomicU64,
     /// The engine the callback played to its end, + 1 (0: none): everything it rendered has been heard.
     done: AtomicU64,
 }
@@ -2596,6 +2613,23 @@ impl Stream {
         old.flatten()
     }
 
+    /// `swap` to `engine`, which carries on with the hosted plugins where the one before left them (the live engine
+    /// taking over from tails ringing after Stop, or from a paused playback): the callback plays what that one queued
+    /// to its end, unfaded, and this one's first frame right after it. The plugins' output goes on unbroken; a fade
+    /// and the gap after it would cut a ringing tail and bring it back at once, a click.
+    fn follow(&self, engine: Engine, reset: u8) -> Option<Engine> {
+        let old = self.slot.lock().ok().map(|mut s| {
+            s.epoch += 1;
+            (s.fade_in, s.reset) = (false, s.reset | reset);
+            self.ctl.report.store(false, Ordering::Relaxed);
+            self.ctl.follow.store(s.epoch, Ordering::Release);
+            self.ctl.want.store(s.epoch, Ordering::Release);
+            std::mem::replace(&mut s.engine, Some(engine))
+        });
+        self.feed.wake();
+        old.flatten()
+    }
+
     /// `swap` to nothing, at once: once it returns, the feeder processes no hosted plugin and resets none (an export).
     fn quiet(&self) -> Option<Engine> {
         let old = self.slot.lock().ok().and_then(|mut s| {
@@ -2693,7 +2727,9 @@ impl Renderer {
             f.fill(0);
         }
         let want = self.ctl.want.load(Ordering::Acquire);
-        if want != self.epoch && self.gain == 0.0 && !self.take_epoch(want, stereo.len()) {
+        // The engine handed in carries on from this one (`Stream::follow`): no fade, the queue read on into it.
+        let follow = want != self.epoch && self.ctl.follow.load(Ordering::Acquire) == want;
+        if want != self.epoch && !follow && self.gain == 0.0 && !self.take_epoch(want, stereo.len()) {
             stereo.fill(0.0);
             self.peak = 0.0;
             if let Some(t) = &self.wake {
@@ -2702,7 +2738,7 @@ impl Renderer {
             return false;
         }
         let switching = want != self.epoch;
-        let target = if switching { 0.0 } else { 1.0 };
+        let target = if switching && !follow { 0.0 } else { 1.0 };
         if self.tap {
             self.shared.block.store((stereo.len() / w) as u32, Ordering::Relaxed);
         }
@@ -2715,14 +2751,18 @@ impl Renderer {
         // Where the block starts (the playback's position moves from here to its end while the device plays it).
         let from = self.queue.heard();
         let read = self.queue.read.load(Ordering::Relaxed) / w as u64;
-        // Fading out, it stops where the next engine's ticks start.
-        let until = if switching { self.queue.start_of(want) } else { None };
+        // Fading out, it stops where the next engine's ticks start; carried on, it reads on into them.
+        let until = if switching && !follow { self.queue.start_of(want) } else { None };
         let got = self.queue.pop(stereo, until);
+        if follow && self.queue.start_of(want).is_some_and(|at| self.queue.read.load(Ordering::Acquire) >= at) {
+            self.queue.playing.store(want, Ordering::Release);
+            self.epoch = want;
+        }
         let ended = self.queue.ended.load(Ordering::Acquire);
         let peak = stereo[..got].iter().fold(0.0f32, |m, x| m.max(x.abs()));
         if got < stereo.len() {
             stereo[got..].fill(0.0);
-            if switching {
+            if switching && !follow {
                 self.gain = 0.0;
             } else if !ended {
                 self.shared.underruns.fetch_add(1, Ordering::Relaxed);
@@ -2846,6 +2886,16 @@ mod tests {
         let mut s = slot.lock().unwrap();
         s.epoch += 1;
         (s.fade_in, s.reset, s.engine) = (fade_in, s.reset | reset, e);
+        r.ctl.want.store(s.epoch, Ordering::Release);
+    }
+
+    /// `Stream::follow` on a test renderer's slot.
+    fn hand_on(r: &Renderer, e: Engine) {
+        let slot = r.inline.as_ref().unwrap().slot.clone();
+        let mut s = slot.lock().unwrap();
+        s.epoch += 1;
+        (s.fade_in, s.engine) = (false, Some(e));
+        r.ctl.follow.store(s.epoch, Ordering::Release);
         r.ctl.want.store(s.epoch, Ordering::Release);
     }
 
@@ -3199,6 +3249,40 @@ mod tests {
             r.render(&mut block);
         }
         assert_eq!(r.gain, 1.0, "faded in");
+    }
+
+    /// An engine that carries on from the one before (the live engine after Stop, while tails ring): everything the
+    /// one before queued plays as it was, unfaded, and the new one's first frame comes right after its last, with no
+    /// silence between (a fade and a gap there cut a ringing tail and bring it back: a click).
+    #[test]
+    fn an_engine_carried_on_plays_right_after_the_one_before() {
+        let (e, _) = looping_engine();
+        let (mut r, _, shared) = renderer(e);
+        let (twin, _) = looping_engine();
+        let (mut before, _, _) = renderer(twin);
+        let (fresh, _) = looping_engine();
+        let (mut alone, _, _) = renderer(fresh);
+        let mut block = vec![0.0f32; 512 * 2];
+        for _ in 0..20 {
+            r.render(&mut block);
+            before.render(&mut block);
+        }
+        let (next, _) = looping_engine();
+        hand_on(&r, next);
+        let (mut got, mut old, mut want) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..12 {
+            r.render(&mut block);
+            got.extend_from_slice(&block);
+            before.render(&mut block);
+            old.extend_from_slice(&block);
+            alone.render(&mut block);
+            want.extend_from_slice(&block);
+        }
+        // Where the new engine starts: the frames before are the old one's as it would have played them.
+        let at = (2..got.len() / 2).step_by(2).find(|&k| got[..k] == old[..k] && got[k..] == want[..got.len() - k]).expect("the old engine's frames, then the new one's");
+        assert!(old[..at].iter().any(|v| v.abs() > 0.0), "what was queued plays out");
+        assert_eq!(r.gain, 1.0, "never faded");
+        assert_eq!(shared.underruns.load(Ordering::Relaxed), 0, "no dropout");
     }
 
     /// A stream that has just opened (silent, nothing played yet) starts its first engine at a device block longer

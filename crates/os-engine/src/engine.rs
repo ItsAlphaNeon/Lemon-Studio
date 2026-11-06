@@ -2644,10 +2644,29 @@ impl Engine {
         // So does the tuning its notes were given: a changed channel pitch retunes them on the next tick.
         self.inst_tuning = old.inst_tuning.iter().enumerate().map(|(c, &t)| if same(c) { t } else { InstTuning::default() }).collect();
         self.missed = old.missed;
-        // The main volume glides from where it was.
-        self.main_glide = old.main_glide;
         self.exporting = old.exporting;
         self.multicore.keep_gate(&old.multicore);
+        self.take_mixer(old);
+    }
+
+    /// Carries on from `old` with the hosted plugins as it left them, for a stream that plays this engine's first
+    /// frame right after `old`'s last (the live engine taking over from a paused playback, or from tails ringing after
+    /// Stop): the mixer goes on (its glides, pads and own effects), delay compensation skips no new head, and the
+    /// instruments keep being processed while `old` would have. What the plugins ring goes on unbroken.
+    pub fn carry_on(&mut self, old: &mut Engine) {
+        if self.rate != old.rate {
+            return;
+        }
+        self.pdc.take_over(&mut old.pdc);
+        self.inst_tail = self.inst_tail.max(old.inst_tail);
+        self.take_mixer(old);
+    }
+
+    /// The mixer of `old` goes on in this engine: the main volume's glide, and with the same tracks their gains, pads,
+    /// send glides and own effects.
+    fn take_mixer(&mut self, old: &mut Engine) {
+        // The main volume glides from where it was.
+        self.main_glide = old.main_glide;
         self.multicore.keep_gains(&old.multicore);
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
