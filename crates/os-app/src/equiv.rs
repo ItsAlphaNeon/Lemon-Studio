@@ -294,6 +294,9 @@ impl Rig {
         for _ in 0..20 {
             rig.tick();
         }
+        // The engine is handed the project as opened, as playing it would: from here an edit that doesn't reach the
+        // engine leaves it behind, where with nothing sent yet it would look the same as one that does.
+        rig.app.transport.update(&crate::rack::play_project(&rig.app.state));
         rig.paint();
         rig
     }
