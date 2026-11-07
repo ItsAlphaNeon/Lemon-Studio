@@ -2968,6 +2968,18 @@ pub fn from_model(s: &mut State) {
     rack.loop_mode = !loops.is_empty() && off.is_none();
 }
 
+/// What a pattern's loops say, as `from_model` reads them: the lengths by channel, the loop type, loop mode on.
+fn loop_state(loops: &[(u16, u32)], off: Option<u32>) -> (BTreeSet<(u16, u32)>, u8, bool) {
+    let lengths = loops.iter().filter(|&&(_, l)| l != 0 && l != os_model::Pattern::LOOP_FOLLOW).copied().collect();
+    let all = loops.iter().any(|&(_, l)| l == os_model::Pattern::LOOP_FOLLOW);
+    let kind = match off {
+        Some(2) => 1,
+        Some(_) => 0,
+        None => u8::from(all),
+    };
+    (lengths, kind, !loops.is_empty() && off.is_none())
+}
+
 /// Writes the rack state into the project before a save (the inverse of [`from_model`]).
 pub fn to_model(s: &mut State) {
     // Advanced looping's loop points are saved as the lengths they give in the current pattern (Lemon Studio's choice:
@@ -3001,16 +3013,19 @@ pub fn to_model(s: &mut State) {
     }
     // Loop lengths belong to the current pattern.
     let mut loops: Vec<(u16, u32)> = lens.iter().filter_map(|(&r, &l)| p.channels.get(r).map(|c| (c.index, l))).collect();
-    if rack.loop_type == 1 && !loops.is_empty() {
+    // Loop mode on with every channel following the pattern and none of its own length: FL's file says so with a
+    // follow entry for each channel (and no loop_off), which is what `from_model` reads back as loop mode on.
+    let all_follow = rack.loop_mode && rack.loop_type == 1 && loops.is_empty();
+    if rack.loop_type == 1 && (!loops.is_empty() || all_follow) {
         let set: BTreeSet<u16> = loops.iter().map(|l| l.0).collect();
         loops.extend(p.channels.iter().filter(|c| !set.contains(&c.index)).map(|c| (c.index, os_model::Pattern::LOOP_FOLLOW)));
     }
     loops.sort_by_key(|l| l.0);
     let loop_off = (!rack.loop_mode && !loops.is_empty()).then(|| LOOP_TYPE_CODES[usize::from(rack.loop_type.min(2))]);
     let n = s.pattern;
-    // Pairs with no length (0) carry nothing: a file that has them is unchanged.
-    let set = |l: &[(u16, u32)]| l.iter().filter(|x| x.1 != 0).copied().collect::<BTreeSet<_>>();
-    let changed = p.pattern(n).map_or(!loops.is_empty(), |pat| set(&pat.loops) != set(&loops) || pat.loop_off != loop_off);
+    // A pattern whose loops already say what the rack holds is left as the file has it (pairs of no length, or a
+    // follow entry for only some channels, say the same).
+    let changed = p.pattern(n).map_or(!loops.is_empty(), |pat| loop_state(&pat.loops, pat.loop_off) != loop_state(&loops, loop_off));
     if changed {
         let pat = crate::patterns::pat_mut(s, n);
         pat.loops = loops;
@@ -3021,6 +3036,30 @@ pub fn to_model(s: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Loop mode on with every channel following the pattern (follow entries, no lengths) is still on after a save.
+    #[test]
+    fn loop_mode_with_every_channel_following_survives_a_save() {
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.pattern = 1;
+        let ch = a.state.project.channels[0].index;
+        let follow = os_model::Pattern::LOOP_FOLLOW;
+        let pat = crate::patterns::pat_mut(&mut a.state, 1);
+        (pat.loops, pat.loop_off) = (vec![(ch, follow)], None);
+        from_model(&mut a.state);
+        assert!(a.state.rack.loop_mode);
+        to_model(&mut a.state);
+        let p = a.state.project.pattern(1).expect("pattern 1");
+        assert_eq!((p.loops.clone(), p.loop_off), (vec![(ch, follow)], None), "the file's form is kept");
+        // Switched on in a pattern that had none: written so that it reads back on.
+        let pat = crate::patterns::pat_mut(&mut a.state, 1);
+        (pat.loops, pat.loop_off) = (Vec::new(), None);
+        (a.state.rack.loop_mode, a.state.rack.loop_type) = (true, 1);
+        to_model(&mut a.state);
+        from_model(&mut a.state);
+        assert!(a.state.rack.loop_mode && a.state.rack.loop_type == 1);
+    }
 
     /// A project opens on the pattern it was saved on, with the loop lengths saved into that pattern.
     #[test]
