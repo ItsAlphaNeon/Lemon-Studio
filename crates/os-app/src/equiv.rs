@@ -701,6 +701,48 @@ fn replay(root: &Path, t: &Trace) -> Option<String> {
     (inv != t.invariants).then(|| format!("invariants: recorded {:?}, now {:?}", t.invariants, inv))
 }
 
+/// What the invariants report on purpose (`equiv_accepted.txt`): (normalized prefix, why).
+fn accepted() -> Vec<(&'static str, &'static str)> {
+    include_str!("equiv_accepted.txt").lines().filter(|l| !l.starts_with('#') && !l.is_empty()).filter_map(|l| l.split_once('\t')).collect()
+}
+
+/// A finding as the accepted list names it: list indices as `[]`, the undo count after the kind left out.
+fn normalized(finding: &str) -> String {
+    let mut out = String::new();
+    let mut chars = finding.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == '[' && chars.peek().is_some_and(char::is_ascii_digit) {
+            while chars.peek().is_some_and(char::is_ascii_digit) {
+                chars.next();
+            }
+        }
+        if c == '(' && out.starts_with("undo-to-start(") && out.len() == "undo-to-start(".len() {
+            let rest: String = chars.clone().collect();
+            if let Some((n, _)) = rest.split_once(':').filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit())) {
+                for _ in 0..=n.len() {
+                    chars.next();
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The findings of `inv` not on the accepted list.
+fn unaccepted(inv: &[String]) -> Vec<&String> {
+    let list = accepted();
+    inv.iter().filter(|i| !list.iter().any(|(p, _)| normalized(i).starts_with(p))).collect()
+}
+
+#[test]
+fn findings_are_matched_against_the_accepted_list() {
+    assert_eq!(normalized("undo-to-start(25:mixer[6].enabled:true->false(+1))"), "undo-to-start(mixer[].enabled:true->false(+1))");
+    assert_eq!(normalized("roundtrip(mixer[0].slots[4][0].name:x)"), "roundtrip(mixer[].slots[][].name:x)");
+    let inv = ["undo-to-start(3:mixer[2].enabled:true->false(+0))".to_string(), "resave(tempo[0]:1->2(+0))".to_string()];
+    assert_eq!(unaccepted(&inv), [&inv[1]]);
+}
+
 #[test]
 #[ignore = "the equivalence harness: records traces (see the module's doc)"]
 fn equiv_record() {
@@ -713,7 +755,8 @@ fn equiv_record() {
             let t0 = Instant::now();
             let t = record(&root, p, seed, steps);
             std::fs::write(dir.join(format!("{}.trace", trace_name(p, seed))), t.write()).expect("write trace");
-            eprintln!("{p} seed {seed}: {} steps in {:.1} s, invariants {:?}", t.steps.len(), t0.elapsed().as_secs_f64(), t.invariants);
+            let new = unaccepted(&t.invariants);
+            eprintln!("{p} seed {seed}: {} steps in {:.1} s, findings {new:?} ({} accepted)", t.steps.len(), t0.elapsed().as_secs_f64(), t.invariants.len() - new.len());
         }
     }
 }
