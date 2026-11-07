@@ -35,6 +35,7 @@ mod browser_index;
 mod burn_midi;
 mod cable;
 mod capture;
+mod replace_file;
 mod panic_log;
 #[cfg(target_os = "linux")]
 mod rt;
