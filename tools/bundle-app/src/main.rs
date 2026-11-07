@@ -11,6 +11,9 @@
 //! bundle is signed ad hoc, as Apple silicon requires of any program it runs. `--install` copies it to
 //! `~/Applications`.
 //!
+//! The release workflow builds with `LEMON_VERSION` set (a nightly's `YEAR.MONTH.DAY.N`, or a release's semantic
+//! version), which the bundle's version follows; otherwise it is the workspace's.
+//!
 //! The macOS counterpart of Linux's desktop entry (`crates/os-app/assets/lemonstudio.desktop`).
 
 use std::path::PathBuf;
@@ -72,8 +75,16 @@ fn run(cmd: &mut Command, what: &str) {
     assert!(cmd.status().unwrap_or_else(|e| panic!("{what}: {e}")).success(), "{what} failed");
 }
 
+/// The bundle's (short version, build version): `CFBundleShortVersionString` takes three numbers at most, so a
+/// nightly's `2026.11.7.1` is `2026.11.7` there and whole as `CFBundleVersion`.
+fn versions() -> (String, String) {
+    let full = std::env::var("LEMON_VERSION").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| env!("CARGO_PKG_VERSION").into());
+    let short = full.split(['-', '+']).next().unwrap_or("").split('.').take(3).collect::<Vec<_>>().join(".");
+    (short, full)
+}
+
 fn info_plist() -> String {
-    let version = env!("CARGO_PKG_VERSION");
+    let (short, version) = versions();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -94,7 +105,7 @@ fn info_plist() -> String {
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>{version}</string>
+	<string>{short}</string>
 	<key>CFBundleVersion</key>
 	<string>{version}</string>
 	<key>CFBundleInfoDictionaryVersion</key>

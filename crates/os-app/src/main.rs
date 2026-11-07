@@ -134,6 +134,8 @@ mod save_form;
 mod scroll_speed;
 mod search_folders;
 mod settings_file;
+mod update;
+mod version;
 mod shortcuts;
 mod smooth;
 mod snap;
@@ -832,6 +834,8 @@ impl ApplicationHandler for Shell {
     /// (`macos::answer_quit`) ends the process from AppKit, after this: the plugin windows close and the instances go as
     /// they do when `run_app` returns.
     fn exiting(&mut self, _el: &ActiveEventLoop) {
+        // An update to install: the updater waits for this process to end (`update`).
+        self.app.updates.on_exit();
         if let Some(window) = self.window.clone() {
             self.follow_frame(&window);
         }
@@ -1979,6 +1983,8 @@ fn main() {
     }
     // The windows where the last run left them.
     layout::restore(&mut app.state);
+    // How the last update went, and the check for a newer build (release builds; `update`).
+    app.update_startup();
     // MIDI devices (spec: ui/midi-settings.md §2): the enabled inputs play the selected channel; master sync goes out.
     splash::step(&splash, splash::MIDI, "Opening MIDI devices");
     app.midi = midi_in::MidiIn::open(wake_ui);

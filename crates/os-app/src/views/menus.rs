@@ -70,6 +70,8 @@ pub enum MenuCmd {
     SaveAudioClip,
     /// HELP > Diagnostics (`crate::diagnostics`).
     Diagnostics,
+    /// HELP > Check for updates (`crate::update`).
+    CheckUpdates,
     /// HELP's entries that open a page in the web browser (`crate::help_links`).
     Web(&'static str),
     /// The menu bar's ways into the browser.
@@ -223,7 +225,7 @@ pub const OPTIONS_MENU: usize = 5;
 pub const OPT_INFO: usize = 9;
 /// HELP > About (the toolbar logo).
 pub const HELP_MENU: usize = 7;
-pub const HELP_ABOUT: usize = 6;
+pub const HELP_ABOUT: usize = 7;
 /// Index of the ADD and TOOLS menus.
 pub const ADD_MENU: usize = 2;
 pub const TOOLS_MENU: usize = 6;
@@ -434,6 +436,7 @@ const HELP: &[Item] = &[
     head("Support"),
     it("Diagnostics", "").on().cmd(MenuCmd::Diagnostics),
     it("What's new", "").on().cmd(MenuCmd::Web(crate::help_links::WHATS_NEW_URL)),
+    it("Check for updates", "").on().cmd(MenuCmd::CheckUpdates),
     SEP,
     it("About...", "").on(),
 ];
