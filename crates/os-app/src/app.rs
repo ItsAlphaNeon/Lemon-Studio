@@ -19391,6 +19391,34 @@ mod tests {
         (app, ruler, g, bar)
     }
 
+    /// Alt + the right button plays a clip, it doesn't delete it; the plain right button still does (#305).
+    #[test]
+    fn alt_right_on_a_clip_keeps_it() {
+        let mut c = Canvas::new(1920, 1080, 1.0).unwrap();
+        let (mut app, _, g, bar) = ruler_app(&mut c);
+        app.state.playlist.tool = crate::playlist::PlTool::Draw;
+        app.mouse_move(g.x_of(bar as f32) + 10.0, g.y_of(1) + 30.0);
+        app.mouse_down();
+        app.mouse_up();
+        frame(&mut app, &mut c, None);
+        let n = crate::playlist::clips(&app.state).len();
+        assert!(n > 0, "a clip was drawn");
+        let clip = crate::playlist::clips(&app.state)[0];
+        let body = g.body(&clip);
+        let (x, y) = (body.x + body.w / 2.0, body.y + body.h / 2.0);
+        app.mouse_move(x, y);
+        app.alt = true;
+        app.mouse_down_right();
+        app.mouse_up();
+        app.alt = false;
+        assert_eq!(crate::playlist::clips(&app.state).len(), n, "Alt+right kept the clip");
+        frame(&mut app, &mut c, None);
+        app.mouse_move(x, y);
+        app.mouse_down_right();
+        app.mouse_up();
+        assert_eq!(crate::playlist::clips(&app.state).len(), n - 1, "the plain right button deletes it");
+    }
+
     fn ruler_press(app: &mut App, c: &mut Canvas, x0: f32, x1: f32, y: f32, right: bool) {
         app.mouse_move(x0, y);
         if right { app.mouse_down_right() } else { app.mouse_down() }
