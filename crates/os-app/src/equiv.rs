@@ -248,6 +248,19 @@ struct Rig {
     canvas: os_ui::Canvas,
     /// Steps run so far, for `OS_EQUIV_DUMP`.
     step: usize,
+    /// How often the generator aimed at each kind of control: it favours the kinds it has used least.
+    used: std::collections::BTreeMap<String, u32>,
+}
+
+/// A control's kind for the generator's novelty: its action's variant, and the variant inside it.
+fn kind(a: &Action) -> String {
+    let d = format!("{a:?}");
+    let mut parts = d.split(['(', ' ', '{', ',']).filter(|p| p.chars().next().is_some_and(char::is_uppercase));
+    match (parts.next(), parts.next()) {
+        (Some(a), Some(b)) => format!("{a}.{b}"),
+        (Some(a), None) => a.to_string(),
+        _ => d,
+    }
 }
 
 /// Where the clock starts: the same instant for every rig of this run, so motions and holds see the same times.
@@ -269,7 +282,7 @@ impl Rig {
         app.plugins.available = crate::plugins::builtin();
         app.plugins.effects = crate::plugins::builtin_effects();
         app.open(copy);
-        let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas"), step: 0 };
+        let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas"), step: 0, used: std::collections::BTreeMap::new() };
         rig.settle();
         // Mixer effects are hosted a few ticks after loading.
         for _ in 0..20 {
@@ -330,27 +343,46 @@ impl Rig {
             let _ = std::fs::write(dir.join(format!("{n}.txt")), format!("{:#?}\n{}", self.app.state.project, side(&self.app)));
         }
         self.step += 1;
-        Fp::of(&self.app)
+        let fp = Fp::of(&self.app);
+        // Each step's "unsaved" says whether that step made a change to save, not whether any step before it did.
+        self.app.mark_saved();
+        fp
     }
 
     /// Where the generator may aim: the centres of the hits the last frame registered, on the frame.
-    fn targets(&self) -> Vec<(f32, f32)> {
+    fn targets(&self) -> Vec<(f32, f32, String)> {
         let (w, h) = (FRAME.0 as f32, FRAME.1 as f32);
         self.app
             .hits
             .iter()
             .filter(|h| h.rect.w >= 1.0 && h.rect.h >= 1.0)
-            .map(|h| (h.rect.x + h.rect.w / 2.0, h.rect.y + h.rect.h / 2.0))
-            .filter(|&(x, y)| (0.0..w).contains(&x) && (0.0..h).contains(&y))
+            .map(|h| (h.rect.x + h.rect.w / 2.0, h.rect.y + h.rect.h / 2.0, kind(&h.action)))
+            .filter(|&(x, y, _)| (0.0..w).contains(&x) && (0.0..h).contains(&y))
             .collect()
     }
 
     /// The next step's inputs, aimed at what the frame shows.
-    fn generate(&self, rng: &mut Rng) -> Vec<Input> {
+    fn generate(&mut self, rng: &mut Rng) -> Vec<Input> {
         let targets = self.targets();
-        let Some(&(x, y)) = (!targets.is_empty()).then(|| &targets[rng.below(targets.len())]) else {
+        // Weighted by novelty: a kind of control aimed at n times weighs 1/(n+1), so the many step buttons or grid
+        // cells of one kind don't crowd out the few knobs, boxes and menus.
+        let weight = |k: &str| 1_000_000 / (1 + u64::from(self.used.get(k).copied().unwrap_or(0)));
+        let total: u64 = targets.iter().map(|t| weight(&t.2)).sum();
+        if total == 0 {
+            return vec![Input::Key("Escape".into(), false, false)];
+        }
+        let mut at = rng.next() % total;
+        let Some((x, y, k)) = targets.iter().find(|t| {
+            let w = weight(&t.2);
+            if at < w {
+                return true;
+            }
+            at -= w;
+            false
+        }).cloned() else {
             return vec![Input::Key("Escape".into(), false, false)];
         };
+        *self.used.entry(k).or_default() += 1;
         let (shift, ctrl, alt) = (rng.chance(12), rng.chance(12), rng.chance(5));
         let mods = Input::Mods(shift, ctrl, alt);
         let none = Input::Mods(false, false, false);
