@@ -2032,6 +2032,9 @@ impl App {
         let s = &mut self.state;
         s.project.tempo = Some(s.tempo);
         s.project.song_mode = Some(s.song_mode);
+        // The pattern shown is saved, so the project opens on it again with the loops the rack stores into it (event
+        // 67, spec: flp/engine-events.md).
+        s.project.current_pattern = Some(s.pattern);
         // Lock, zip, filter groups and loop lengths live in the rack UI (spec: ui/channel-rack.md, Saving).
         crate::rack::to_model(s);
         // The playlist's track height, zoom and scroll (event 242, spec: flp/events/playlist.md).

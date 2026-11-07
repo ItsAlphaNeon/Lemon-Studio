@@ -3022,6 +3022,25 @@ pub fn to_model(s: &mut State) {
 mod tests {
     use super::*;
 
+    /// A project opens on the pattern it was saved on, with the loop lengths saved into that pattern.
+    #[test]
+    fn the_current_pattern_and_its_loops_reopen() {
+        let file = std::env::temp_dir().join(format!("openstudio-current-pattern-{}.flp", std::process::id()));
+        let mut a = crate::app::App::new(None);
+        a.state.project = crate::app::test_project();
+        a.state.file = None;
+        a.state.path = None;
+        crate::patterns::pat_mut(&mut a.state, 2);
+        a.state.pattern = 2;
+        a.state.rack.loop_len.insert(0, 8);
+        a.save_to(file.clone());
+        let mut b = crate::app::App::new(None);
+        b.open(file.clone());
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(b.state.pattern, 2);
+        assert_eq!(b.state.rack.loop_len.get(&0), Some(&8));
+    }
+
     /// A knob's Edit automation clip... is greyed until a clip drives the control, then shows that clip (§19, as on a
     /// plugin parameter).
     #[test]
