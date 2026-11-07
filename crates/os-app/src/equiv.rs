@@ -161,6 +161,11 @@ impl Input {
         match self {
             Input::Move(x, y) => {
                 app.mouse_move(*x, *y);
+                // `OS_EQUIV_SHOW=1`: what each move lands on, to read a shrunk trace.
+                if std::env::var("OS_EQUIV_SHOW").is_ok() {
+                    let on = app.hits.iter().rev().find(|h| h.rect.contains(*x, *y)).map(|h| format!("{:?} ({})", h.action, h.hint));
+                    eprintln!("  at {x} {y}: {}", on.unwrap_or_else(|| "nothing".into()));
+                }
             }
             Input::Down => app.mouse_down(),
             Input::Up => app.mouse_up(),
@@ -739,5 +744,27 @@ fn equiv_shrink() {
     for s in &steps {
         let line: Vec<String> = s.iter().map(ToString::to_string).collect();
         eprintln!("  {}", line.join("; "));
+    }
+}
+
+/// Runs `OS_EQUIV_TRACE`'s steps and says after each what it landed on (`OS_EQUIV_SHOW`), the newest undo step, the
+/// status message and the project's parts that changed, to read a shrunk trace.
+#[test]
+#[ignore = "the equivalence harness: shows what a trace's steps do (see the module's doc)"]
+fn equiv_show() {
+    let (root, _) = corpus();
+    let path = std::env::var("OS_EQUIV_TRACE").expect("OS_EQUIV_TRACE: a trace file");
+    let t = Trace::read(&std::fs::read_to_string(&path).expect("read")).expect("a trace");
+    let mut rig = Rig::open(&root.join(&t.project), &work_dir("show"));
+    for (i, (inputs, _)) in t.steps.iter().enumerate() {
+        let line: Vec<String> = inputs.iter().map(ToString::to_string).collect();
+        eprintln!("step {i}: {}", line.join("; "));
+        let before = rig.app.state.project.clone();
+        rig.run(inputs);
+        let s = &rig.app.state;
+        eprintln!("  undo: {:?} ({} steps), message: {:?}", s.history.newest_done(), s.history.done(), s.message);
+        if let Some(d) = difference(&before, &s.project, false) {
+            eprintln!("  changed: {d}");
+        }
     }
 }
