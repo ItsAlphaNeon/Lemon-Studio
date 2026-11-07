@@ -439,7 +439,7 @@ impl Rig {
         }
         let last = self.app.state.project.clone();
         let last_side = side(&self.app);
-        // Undo back to the start, then redo to the end.
+        // Undo back to the start, then redo to where the trace ended.
         let mut undone = 0;
         while crate::history::undo(&mut self.app.state).is_some() && undone < 10_000 {
             undone += 1;
@@ -449,7 +449,11 @@ impl Rig {
         if let Some(d) = difference(opened, &self.app.state.project, false) {
             bad.push(format!("undo-to-start({undone}:{d})"));
         }
-        while crate::history::redo(&mut self.app.state).is_some() {
+        // Redo as many steps as were done at the end: steps the trace itself undid stay undone.
+        for _ in 0..undone {
+            if crate::history::redo(&mut self.app.state).is_none() {
+                break;
+            }
             self.tick();
         }
         self.after_step();
