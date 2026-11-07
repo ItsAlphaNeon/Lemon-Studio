@@ -33,6 +33,7 @@ mod browser_index;
 mod burn_midi;
 mod cable;
 mod capture;
+mod panic_log;
 #[cfg(target_os = "linux")]
 mod rt;
 mod one_click;
@@ -1879,6 +1880,8 @@ fn main() {
         std::process::exit(plugins::window_check::run(&args[1..]));
     }
     app::move_old_settings();
+    // From here on a panic is kept in the user folder's Logs (`panic_log`).
+    panic_log::install();
     // The mixing threads every engine renders on, from here on (spec: audio/multicore.md).
     mix_threads::start();
     // A render without a window (FILE > Export audio from the command line, `render`).
