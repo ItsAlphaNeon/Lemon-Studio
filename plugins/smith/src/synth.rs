@@ -15,7 +15,7 @@ use citrus::filter::{FilterRun, Inputs, SvfTables};
 use citrus::fx::{Bus, Section, HOST_BLOCK};
 use citrus::state as cs;
 use citrus::voice::Levels;
-use os_dsp::curve::{map_at, map_table, Lfo, Walk, SYNCED};
+use os_dsp::curve::{map_at, map_table, Curve, Lfo, Walk, SYNCED};
 use os_dsp::num::round;
 
 use crate::fft::{Cpx, Ifft, Plan};
@@ -275,27 +275,50 @@ fn phasors() -> &'static [Cpx] {
 /// A harmonic's place on the linear EQ scale: the first line reads the map's left end.
 #[inline]
 fn linear_x(k: f64) -> f32 {
-    ((k - 1.0) / (MAX_LINE + 1) as f64).clamp(0.0, 1.0) as f32
+    ((k - 1.0) / MAX_LINE as f64).clamp(0.0, 1.0) as f32
 }
 
-/// A harmonic's place on the natural EQ scale.
-fn natural_x() -> &'static [f32] {
-    static T: OnceLock<Vec<f32>> = OnceLock::new();
-    T.get_or_init(|| {
-        let mut v = vec![0.0f32; MAX_TOP + 1];
-        for (k, x) in v.iter_mut().enumerate().skip(1) {
-            *x = ((k as f64).log2() / 15.0).min(1.0) as f32;
+/// The first line past both EQ scales' right end: from here on a line reads the map's end.
+const LINE_END: usize = MAX_LINE + 2;
+
+/// A final map's level at each line, read exactly at the line's place on the EQ scale (a flat map: one entry).
+fn line_table(c: &Curve, natural: bool) -> Vec<f32> {
+    if c.is_flat() {
+        return vec![map_at(c, 0.0, 0.0)];
+    }
+    let last = c.points.len() - 1;
+    let level = |i: usize| c.level(i, 0.0, 0.0, true) as f32;
+    // The segment ending on point `i`, from `start` to `end`.
+    let (mut i, mut start, mut end) = (0usize, 0.0f64, f64::from(c.points[0].dist));
+    let mut t = Vec::with_capacity(LINE_END + 1);
+    t.push(level(0));
+    for k in 1..=LINE_END {
+        let k = k as f64;
+        let x = if natural { (k.log2() / 15.0).min(1.0) } else { ((k - 1.0) / MAX_LINE as f64).min(1.0) };
+        // Compared in single: a line on a step takes the step's upper side.
+        while i < last && end as f32 <= x as f32 {
+            i += 1;
+            start = end;
+            end += f64::from(c.points[i].dist);
         }
-        v
-    })
+        t.push(if i == 0 || end as f32 <= x as f32 {
+            level(i)
+        } else {
+            let from = level(i - 1);
+            from + c.progress(i, ((x - start) / (end - start)).clamp(0.0, 1.0)) * (level(i) - from)
+        });
+    }
+    t
 }
 
 /// A state made ready to play: its maps as tables, its seeds' patterns, its effect settings.
 #[derive(Debug, Clone)]
 pub struct Patch {
     pub st: State,
-    /// The final maps along their axis, levels as stored: a table's last entry is at the axis's end.
+    /// The final maps along their axis, levels as stored, for lines an EQ shift puts between two lines.
     finals: Arc<[Vec<f32>; FINALS]>,
+    /// The final maps at each line, read exactly.
+    lines: Arc<[Vec<f32>; FINALS]>,
     /// Mod X and Y tables per articulator (513 entries), `None` when a map is at its default.
     mods: Arc<Vec<[Option<Vec<f32>>; 2]>>,
     /// The seeds' values per line (`None` for "none").
@@ -340,12 +363,11 @@ fn fx_state(st: &State) -> cs::State {
 
 impl Patch {
     pub fn new(st: State) -> Patch {
-        // One entry per harmonic on the linear scale or for a long map (a resynthesized one); else coarser.
         let finals = Arc::new(std::array::from_fn(|f| {
             let c = &st.finals[f];
-            let n = if !st.natural_scale || c.points.len() > 256 { MAX_LINE + 1 } else { 4095 };
-            map_table(c, 0.0, 1.0 / n as f64, n)
+            if c.is_flat() { vec![map_at(c, 0.0, 0.0)] } else { map_table(c, 0.0, 1.0 / (MAX_LINE + 1) as f64, MAX_LINE + 1) }
         }));
+        let lines = Arc::new(std::array::from_fn(|f| line_table(&st.finals[f], st.natural_scale)));
         let mods = (0..ARTS)
             .map(|a| {
                 let centre = if bipolar(a) { 0.5 } else { 0.0 };
@@ -366,7 +388,7 @@ impl Patch {
             })
         });
         let fx = Arc::new(fx_state(&st));
-        Patch { st, finals, mods: Arc::new(mods), seeds, fx }
+        Patch { st, finals, lines, mods: Arc::new(mods), seeds, fx }
     }
 
     /// The default patch, as a new instance plays it.
@@ -374,14 +396,19 @@ impl Patch {
         Patch::new(State::default())
     }
 
-    /// A final map's level at `x` (0..1).
+    /// A final map's level at line `k`, the map moved along by `shift` lines.
     #[inline]
-    fn final_at(&self, f: usize, x: f32) -> f32 {
+    fn final_line(&self, f: usize, k: usize, shift: f64) -> f32 {
+        if shift == 0.0 {
+            let t = &self.lines[f];
+            return t[k.min(t.len() - 1)];
+        }
         let t = &self.finals[f];
+        let x = self.line_x(k as f64 - shift);
         t[((x * (t.len() - 1) as f32 + 0.5) as usize).min(t.len() - 1)]
     }
 
-    /// Where a harmonic reads the final maps.
+    /// Where a harmonic between two lines reads the final maps.
     #[inline]
     fn line_x(&self, k: f64) -> f32 {
         if k <= 1.0 {
@@ -399,14 +426,7 @@ impl Patch {
         if !comb_gate(self.st.combs[which], k) {
             return 1.0;
         }
-        let x = if shift != 0.0 {
-            self.line_x(k as f64 - shift)
-        } else if self.st.natural_scale {
-            natural_x()[k]
-        } else {
-            linear_x(k as f64)
-        };
-        f64::from(map_gain(map_gains(), self.final_at(which, x)))
+        f64::from(map_gain(map_gains(), self.final_line(which, k, shift)))
     }
 }
 
@@ -715,14 +735,6 @@ impl Note {
 
         // Where each line reads the maps.
         let shift = f64::from(value(A_SHIFT)) * (lines_n + 1) as f64;
-        let nat = natural_x();
-        let line_at = |patch: &Patch, k: usize| -> f32 {
-            if shift == 0.0 {
-                if patch.st.natural_scale { nat[k] } else { linear_x(k as f64) }
-            } else {
-                patch.line_x(k as f64 - shift)
-            }
-        };
 
         let [comb_forced, comb_impulse, comb_decay, _] = st.combs;
         let forced_flat = st.finals[M_FORCED].points.iter().all(|p| p.level == 0.0);
@@ -740,7 +752,7 @@ impl Note {
         let mut seed_power = 0.0f64;
         for k in 1..=calc {
             if !forced_flat && comb_gate(comb_forced, k) {
-                let l = patch.final_at(M_FORCED, line_at(&patch, k));
+                let l = patch.final_line(M_FORCED, k, shift);
                 g[k] += (1.0 - g[k]) * l;
             }
             let u = f64::from(g[k]);
@@ -749,13 +761,12 @@ impl Note {
                 seed_power += f64::from(v) * f64::from(v);
             }
             let w = if weigh { 1.0 / (k as f32).sqrt() } else { 1.0 };
-            let x = line_at(&patch, k);
             if alt {
-                let c = if comb_gate(comb_decay, k) { map_gain(gains, patch.final_at(M_DECAY, x)) } else { 1.0 };
+                let c = if comb_gate(comb_decay, k) { map_gain(gains, patch.final_line(M_DECAY, k, shift)) } else { 1.0 };
                 settle[k] = v * w * c;
             }
             // A comb on the impulse map silences the lines it leaves out.
-            a[k] = if comb_gate(comb_impulse, k) { v * w * map_gain(gains, patch.final_at(M_IMPULSE, x)) } else { 0.0 };
+            a[k] = if comb_gate(comb_impulse, k) { v * w * map_gain(gains, patch.final_line(M_IMPULSE, k, shift)) } else { 0.0 };
         }
         let powers = |v: &[f32], last: usize| -> f64 { v.iter().take(last + 1).skip(1).map(|&y| f64::from(y) * f64::from(y)).sum::<f64>() * 0.5 };
         let scale = if st.auto_loudness {
@@ -838,7 +849,7 @@ impl Note {
                 if st.porta_variable {
                     run.env.scales[0] *= (d.abs() * (1.0 / 1200.0)) as f32;
                 }
-                run.env.reset(c, (d / 2400.0) as f32);
+                run.env.reset(c, (d / 1200.0) as f32);
             }
         }
 
@@ -1105,8 +1116,10 @@ impl Note {
             self.timbre_released = true;
             self.release_wait = ((RELEASE_LATE * ctx.rate / ctx.big_b as f64).round() as usize).max(1);
         }
-        // Pitch.
-        let cents = f64::from(self.levels.pitch) + 100.0 * f64::from(live.ints[COARSE]) + f64::from(live.ints[FINE]) + f64::from(values[A_PITCH]) * 4800.0;
+        // Pitch. The key and velocity maps move it four times as far as the X and Y maps, the envelope and the LFO.
+        let fixed = f64::from(self.arts[A_PITCH].fixed);
+        let moving = f64::from(values[A_PITCH]) - fixed;
+        let cents = f64::from(self.levels.pitch) + 100.0 * f64::from(live.ints[COARSE]) + f64::from(live.ints[FINE]) + fixed * 4800.0 + moving * 1200.0;
         let f0 = 523.25 * (cents / 1200.0).exp2() * f64::from(6 - self.r).exp2();
         self.f0 = f0;
         let len = self.plan.len as f64;
@@ -1457,7 +1470,7 @@ impl Smith {
             nl: vec![0.0; HOST_BLOCK],
             nr: vec![0.0; HOST_BLOCK],
         };
-        let _ = (phasors(), natural_x(), plan_for(1 << 12), map_gains(), droops());
+        let _ = (phasors(), plan_for(1 << 12), map_gains(), droops());
         s.setup_rate();
         s
     }
@@ -2014,7 +2027,7 @@ mod tests {
     #[test]
     fn the_first_line_reads_the_left_end_of_the_linear_scale() {
         assert_eq!(linear_x(1.0), 0.0);
-        assert!((linear_x(4.0) - 3.0 / 32768.0).abs() < 1e-9);
+        assert!((linear_x(4.0) - 3.0 / 32767.0).abs() < 1e-9);
     }
 
     #[test]
