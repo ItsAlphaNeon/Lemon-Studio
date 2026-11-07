@@ -19,6 +19,7 @@ use os_dsp::curve::{map_at, map_table, Lfo, Walk, SYNCED};
 use os_dsp::num::round;
 
 use crate::fft::{Cpx, Ifft, Plan};
+use crate::seed_words::SEED_WORDS;
 use crate::state::*;
 
 /// The harmonic at the end of the linear EQ scale.
@@ -35,6 +36,14 @@ const TOP_U: f64 = 60.0;
 const CUT_HZ: f64 = 19920.0;
 /// How long after a note's end its lines take up the release's rates, in seconds.
 const RELEASE_LATE: f64 = 0.05;
+/// Key 60's frequency, which RICH 6 has as its fundamental.
+const F60: f64 = 523.251_130_6;
+/// The shortest time a line can take to fall by 40 dB, whatever its value and map.
+const TIME_FLOOR: f64 = 0.025;
+/// The smallest value PRE 1000 reads a line at.
+const PRE_FLOOR: f64 = 1.0 / 600.0;
+/// How far into its decay the table is that a note looks for its start on, in seconds.
+const START_LOOK: f64 = 0.05;
 /// A note below this level has ended.
 const SILENCE: f64 = 1e-5;
 const LN100: f64 = 4.605_170_185_988_09;
@@ -45,22 +54,16 @@ pub fn c3(x: f64) -> f64 {
     ((x * 3f64.ln()).exp() - 1.0) * 0.5
 }
 
-/// `ln x` of a positive `x`, within about 2e-4. A note start reads this and `fast_exp` for every harmonic.
+/// `e^x` for a note's values and levels, within about 1e-9: where a note starts hangs on small differences between them.
 #[inline(always)]
-fn fast_ln(x: f32) -> f32 {
-    let bits = x.to_bits();
-    let m = f32::from_bits((bits & 0x007f_ffff) | 0x3f80_0000) - 1.0;
-    let e = (bits >> 23) as i32 - 127;
-    (e as f32 + m + m * (1.0 - m) * (0.439_987 + m * (-0.241_704 + m * 0.082_316))) * std::f32::consts::LN_2
-}
-
-/// `e^x`, within about 2e-4.
-#[inline(always)]
-fn fast_exp(x: f32) -> f32 {
-    let y = (x * std::f32::consts::LOG2_E).clamp(-126.0, 127.0);
-    let i = y.floor();
-    let f = y - i;
-    (1.0 + f + f * (1.0 - f) * (-0.304_661 - f * 0.079_252)) * f32::from_bits(((i as i32 + 127) as u32) << 23)
+fn exact_exp(x: f64) -> f64 {
+    if x < -700.0 {
+        return 0.0;
+    }
+    let i = (x * std::f64::consts::LOG2_E + 0.5).floor();
+    let f = x - i * std::f64::consts::LN_2;
+    let p = 1.0 + f * (1.0 + f * (1.0 / 2.0 + f * (1.0 / 6.0 + f * (1.0 / 24.0 + f * (1.0 / 120.0 + f * (1.0 / 720.0 + f * (1.0 / 5040.0 + f / 40320.0)))))));
+    p * f64::from_bits(((i as i64 + 1023) as u64) << 52)
 }
 
 /// `C(2 l)` by table: what a map's level does to a harmonic's gain or time.
@@ -91,94 +94,45 @@ fn table_at(t: &[(f64, f64)], x: f64) -> f64 {
 
 /// The time in seconds a decay or release of `x` (0..1) takes to fall by 40 dB.
 pub fn time_of(x: f64) -> f64 {
-    const SLOPE: [(f64, f64); 9] =
-        [(0.0, 2.7), (0.1, 3.44), (0.2, 4.18), (0.4, 5.935), (0.6, 8.567), (0.8, 12.937), (0.9, 15.944), (0.99, 19.444), (1.0, 19.95)];
-    0.05 + x * table_at(&SLOPE, x)
+    0.05 + 0.9975 * (21f64.powf(x) - 1.0)
 }
 
-/// The factor a harmonic's pattern value takes at fullness `full`.
-fn full_factor(full: f64) -> f64 {
-    const T: [(f64, f64); 21] = [
-        (-1000.0, 19.9),
-        (-900.0, 15.6),
-        (-800.0, 11.9),
-        (-700.0, 8.78),
-        (-600.0, 6.13),
-        (-500.0, 3.99),
-        (-400.0, 2.39),
-        (-300.0, 1.47),
-        (-200.0, 1.12),
-        (-100.0, 1.04),
-        (0.0, 1.0),
-        (100.0, 0.934),
-        (200.0, 0.908),
-        (300.0, 0.662),
-        (400.0, 0.353),
-        (500.0, 0.152),
-        (600.0, 0.059),
-        (700.0, 0.021),
-        (800.0, 0.0077),
-        (900.0, 0.0025),
-        (1000.0, 0.001),
-    ];
-    let logs = T.map(|(x, y)| (x, y.ln()));
-    table_at(&logs, full).exp()
+/// A line's own time to fall by 40 dB, from the plain time, its map's factor and its value.
+#[inline(always)]
+fn line_time(time: f64, factor: f64, value: f32) -> f64 {
+    TIME_FLOOR + (time - TIME_FLOOR) * factor * f64::from(value)
 }
 
-/// The part of a harmonic's fall that low fullness adds with PRE at 0, at pattern value `g`.
-fn static_part(g: f64, full: f64) -> f64 {
-    const G: [f64; 6] = [0.00264, 0.00459, 0.00816, 0.0103, 0.02368, 0.03529];
-    const ROWS: [(f64, [f64; 6]); 4] = [
-        (-1000.0, [0.308, 1.456, 7.307, 14.9, 179.0, 592.0]),
-        (-800.0, [0.092, 0.291, 0.972, 1.537, 6.383, 10.6]),
-        (-600.0, [0.026, 0.059, 0.143, 0.188, 0.58, 0.925]),
-        (-400.0, [0.007, 0.013, 0.03, 0.035, 0.089, 0.121]),
-    ];
-    if g <= 0.0 {
-        return 0.0;
+/// What FULL does to a seed's values.
+#[derive(Debug, Clone, Copy)]
+struct FullCurve {
+    c: f64,
+    h: f64,
+    up: bool,
+}
+
+impl FullCurve {
+    fn new(full: f64) -> FullCurve {
+        let h = (10f64.powf(0.007 * full.abs()) - 1.0) * 0.01;
+        FullCurve { c: (1.0 + h).ln(), h, up: full > 0.0 }
     }
-    let lg = g.ln();
-    let row = |r: &[f64; 6]| -> f64 {
-        let i = G.iter().position(|&x| g < x).unwrap_or(G.len()).clamp(1, G.len() - 1);
-        let (x0, x1) = (G[i - 1].ln(), G[i].ln());
-        let (y0, y1) = (r[i - 1].ln(), r[i].ln());
-        y0 + (y1 - y0) * (lg - x0) / (x1 - x0)
-    };
-    let full = full.clamp(-1000.0, 1000.0);
-    if full >= -400.0 {
-        // About 1 / 1.56 per 50 above the last row.
-        return (row(&ROWS[3].1) - (full + 400.0) / 50.0 * 1.56f64.ln()).exp();
-    }
-    let i = ROWS.iter().position(|r| full <= r.0).unwrap_or(1).max(1);
-    let (a, b) = (&ROWS[i - 1], &ROWS[i]);
-    let t = (full - a.0) / (b.0 - a.0);
-    (row(&a.1) * (1.0 - t) + row(&b.1) * t).exp()
-}
 
-/// How far a forced harmonic rises at map level `l`, relative to a full one.
-fn forced_gain(l: f64) -> f64 {
-    const T: [(f64, f64); 10] =
-        [(0.0, 0.0), (0.002, 0.15), (0.005, 0.55), (0.01, 0.79), (0.02, 0.906), (0.03, 0.943), (0.05, 0.969), (0.07, 0.98), (0.1, 0.99), (1.0, 1.0)];
-    table_at(&T, l)
+    #[inline(always)]
+    fn at(&self, v: f64) -> f64 {
+        if self.h <= 0.0 {
+            v
+        } else if self.up {
+            1.0 - (exact_exp(self.c * (1.0 - v)) - 1.0) / self.h
+        } else {
+            (exact_exp(self.c * v) - 1.0) / self.h
+        }
+    }
 }
 
 /// The share of a cycle that spreads the unison's voices at PHS `x` (0..1, at most 1 with its map) and RICH `r`.
 fn phase_law(x: f64, r: i32) -> f64 {
     let h = (101.0 - 101f64.powf(1.0 - x)) / 100.0;
     h.powi(r)
-}
-
-/// The share of a pattern below each value, in steps: the measured percentiles (the top, clipped by the measurement,
-/// is Lemon Studio's choice).
-fn quantile(u: f64) -> f64 {
-    const T: [(f64, f64); 9] = [(0.0, 0.00002), (0.05, 0.0003), (0.1, 0.0006), (0.25, 0.0016), (0.5, 0.0052), (0.75, 0.0147), (0.9, 0.0359), (0.99, 0.08), (1.0, 0.12)];
-    let logs = T.map(|(x, y)| (x, y.ln()));
-    table_at(&logs, u).exp()
-}
-
-fn quantile_table() -> &'static [f32; 4096] {
-    static T: OnceLock<Box<[f32; 4096]>> = OnceLock::new();
-    T.get_or_init(|| Box::new(std::array::from_fn(|i| quantile((i as f64 + 0.5) / 4096.0) as f32)))
 }
 
 /// How far the lines of RICH 10 and up droop, in dB, at `u` times the key's frequency.
@@ -240,55 +194,81 @@ fn droops() -> &'static [f32] {
     })
 }
 
-/// A small generator (SplitMix64) for the patterns and the phases.
+/// The stream behind the line phases and the seed patterns: Marsaglia and Zaman's combined generator (1994), with its
+/// wrap read from the top bit of the difference.
 #[derive(Debug, Clone, Copy)]
-pub struct Mix(pub u64);
+struct Stream {
+    x: u32,
+    y: u32,
+    z: u32,
+    c: u32,
+    m: u32,
+}
 
-impl Mix {
+impl Stream {
+    const A: u32 = 69069;
+    const B: u32 = 1_013_904_243;
+
+    fn new(word: u32) -> Stream {
+        let y = word.wrapping_mul(Self::A).wrapping_add(Self::B);
+        let x = y.wrapping_mul(Self::A).wrapping_add(Self::B);
+        Stream { x, y, z: word, c: 1, m: 1_131_199_209 }
+    }
+
+    /// The next value, 0..1.
     #[inline]
-    pub fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+    fn next_value(&mut self) -> f64 {
+        let mut s = self.y.wrapping_sub(self.x).wrapping_sub(self.c);
+        if s >> 31 != 0 {
+            s = s.wrapping_sub(18);
+            self.c = 1;
+        } else {
+            self.c = 0;
+        }
+        self.x = self.y;
+        self.y = self.z;
+        self.z = s;
+        self.m = self.m.wrapping_mul(Self::A).wrapping_add(Self::B);
+        f64::from(s.wrapping_add(self.m) ^ 0x8000_0000) / 4_294_967_296.0
     }
 }
 
-/// A seed's pattern: per harmonic `k` (index `k`; 0 unused), a value relative to the strongest. The first lines stay
-/// the same whatever the length.
-pub fn pattern(seed: u64, top: usize, out: &mut Vec<f32>) {
-    let q = quantile_table();
-    let mut r = Mix(seed.wrapping_mul(0xD134_2543_DE82_EF95).wrapping_add(0x1234_5678));
+/// The start word of a seed number (1 to 9999).
+fn seed_word(seed: i32) -> u32 {
+    SEED_WORDS[(seed.clamp(1, SEED_WORDS.len() as i32) - 1) as usize]
+}
+
+/// The start word of the pattern a note makes for itself when seed 2 is "none".
+fn note_word(salt: u64, id: u64) -> u32 {
+    let mut z = salt.wrapping_add(id).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    ((z ^ (z >> 31)) >> 33) as u32
+}
+
+/// A seed's pattern from its start word: per harmonic `k` (index `k`; 0 unused), its value, 0..1. The first lines stay the
+/// same whatever the length.
+pub fn pattern(word: u32, top: usize, out: &mut Vec<f32>) {
+    let mut s = Stream::new(word);
     out.clear();
     out.reserve(top + 1);
     out.push(0.0);
     for _ in 1..=top {
-        out.push(q[(r.next() >> 52) as usize]);
+        out.push(s.next_value() as f32);
     }
 }
 
-/// What "a new random seed per note" reads: one long pattern, each note from an offset of its own.
-fn random_pool() -> &'static [f32] {
-    static T: OnceLock<Vec<f32>> = OnceLock::new();
-    T.get_or_init(|| {
-        let mut g = Vec::new();
-        pattern(0x5EED_CAFE, 2 * MAX_TOP + 1, &mut g);
-        g
-    })
-}
-
-/// Every harmonic's phase, the same for all notes.
+/// Every line's phase up to line `n` of RICH 16, the same for all notes.
 fn phasors() -> &'static [Cpx] {
     static T: OnceLock<Vec<Cpx>> = OnceLock::new();
     T.get_or_init(|| {
-        let mut r = Mix(0x0123_4567_89AB_CDEF);
-        (0..=MAX_TOP)
-            .map(|_| {
-                let a = (r.next() >> 11) as f64 / (1u64 << 53) as f64 * std::f64::consts::TAU;
-                [a.cos() as f32, a.sin() as f32]
-            })
-            .collect()
+        let mut s = Stream::new(3);
+        let mut v = vec![[1.0f32, 0.0f32]; MAX_LINE + 1];
+        for h in v.iter_mut().skip(1) {
+            let a = s.next_value() * std::f64::consts::TAU;
+            *h = [a.cos() as f32, a.sin() as f32];
+        }
+        v
     })
 }
 
@@ -318,7 +298,7 @@ pub struct Patch {
     finals: Arc<[Vec<f32>; FINALS]>,
     /// Mod X and Y tables per articulator (513 entries), `None` when a map is at its default.
     mods: Arc<Vec<[Option<Vec<f32>>; 2]>>,
-    /// The seeds' patterns (`None` for "none").
+    /// The seeds' values per line (`None` for "none").
     seeds: [Option<Arc<Vec<f32>>>; 2],
     fx: Arc<cs::State>,
 }
@@ -381,7 +361,7 @@ impl Patch {
             let seed = st.ints[f];
             (seed != 0).then(|| {
                 let mut g = Vec::new();
-                pattern(seed as u64, MAX_TOP, &mut g);
+                pattern(seed_word(seed), MAX_TOP, &mut g);
                 Arc::new(g)
             })
         });
@@ -411,6 +391,22 @@ impl Patch {
         } else {
             linear_x(k)
         }
+    }
+
+    /// What the decay or release map makes of line `k`'s time, 1 on a line its comb skips. `shift` is the EQ shift in lines.
+    #[inline]
+    fn time_factor(&self, which: usize, k: usize, shift: f64) -> f64 {
+        if !comb_gate(self.st.combs[which], k) {
+            return 1.0;
+        }
+        let x = if shift != 0.0 {
+            self.line_x(k as f64 - shift)
+        } else if self.st.natural_scale {
+            natural_x()[k]
+        } else {
+            linear_x(k as f64)
+        };
+        f64::from(map_gain(map_gains(), self.final_at(which, x)))
     }
 }
 
@@ -607,8 +603,8 @@ struct Note {
     // Spectrum.
     r: i32,
     top: usize,
-    /// Amplitude per line, with the common decay kept out, this frame's factor per line, the pattern value times the
-    /// fullness factor, and (alt decay) what the line settles at.
+    /// Amplitude per line, with the common decay kept out, this frame's factor per line, the line's value (1 with no seed),
+    /// and (alt decay) what the line settles at.
     a: Vec<f32>,
     fac: Vec<f32>,
     gb: Vec<f32>,
@@ -666,7 +662,7 @@ impl Note {
         let r = st.ints[RICH].clamp(6, 16);
         let lines_n = (1usize << (r - 1)) - 1;
         let cents = f64::from(n.levels.pitch) + 100.0 * f64::from(st.ints[COARSE]) + f64::from(st.ints[FINE]);
-        let f_key = 523.25 * (cents / 1200.0).exp2();
+        let f_key = F60 * (cents / 1200.0).exp2();
         let f0 = f_key * f64::from(6 - r).exp2();
 
         // The top line: at Nyquist of the note's pitch, further if an articulator can lower it.
@@ -683,66 +679,39 @@ impl Note {
         let counted = if shaped { (3usize << (r - 2)).min(MAX_LINE) } else { lines_n };
         let calc = top.max(upper).max(counted);
 
-        // The pattern: morphed, rotated and turned into a fall.
-        let morph = (f64::from(st.ints[MORPH]) / 1000.0 * value(A_MORPH)).clamp(0.0, 1.0) as f32;
-        // With no seed 1, morphing brings in the second pattern alone.
+        // The lines' values: each seed's through FULL, mixed by morphing, an empty first seed counting as 1.
+        let morph = (f64::from(st.ints[MORPH]) / 1000.0 * value(A_MORPH)).clamp(0.0, 1.0);
         let seed_on = patch.seeds[0].is_some() || morph > 0.0;
         let full = (f64::from(st.ints[FULL]) + 2000.0 * value(A_FULL)).clamp(-1000.0, 1000.0);
-        let b_full = full_factor(full);
-        let pre = (f64::from(st.ints[PRE]) * value(A_PRE)).max(0.0);
+        let curve = FullCurve::new(full);
         let mut g = spare.lines.pop().unwrap_or_default();
         g.clear();
-        g.resize(calc + 1, 0.0);
-        // What the lines fall by while they play: the two patterns, mixed in log.
-        let mut time_g = Vec::new();
+        g.resize(calc + 1, 1.0);
         if seed_on {
-            let t = morph;
-            let g2: &[f32] = match &patch.seeds[1] {
-                Some(g2) => g2,
-                None if t > 0.0 => {
-                    let mut r = Mix(salt.wrapping_add(id).wrapping_mul(0x2545_F491_4F6C_DD1D));
-                    &random_pool()[(r.next() % (MAX_TOP as u64 + 1)) as usize..]
-                }
-                None => &[],
-            };
-            let shift = round(f64::from(value(A_ROT)) * (lines_n + 1) as f64);
+            let rotation = round(value(A_ROT) * (lines_n + 1) as f64);
             let wrap = (lines_n + 1).min(MAX_TOP) as i64;
-            for k in 1..=calc {
-                let at = if shift == 0 { k } else { ((k as i64 - 1 - shift).rem_euclid(wrap) + 1) as usize };
-                let g2v = g2.get(at).copied().unwrap_or(0.0);
-                g[k] = match &patch.seeds[0] {
-                    None => t * g2v,
-                    Some(g1) if t <= 0.0 => g1[at],
-                    Some(_) if t >= 1.0 => g2v,
-                    Some(g1) => 1.0 / ((1.0 - t) / g1[at] + t / g2v),
-                };
-                if t > 0.0 && t < 1.0 {
-                    if let Some(g1) = &patch.seeds[0] {
-                        if time_g.is_empty() {
-                            time_g.resize(calc + 1, 0.0f32);
-                        }
-                        time_g[k] = fast_exp((1.0 - t) * fast_ln(g1[at]) + t * fast_ln(g2v));
-                    }
+            // A second seed of "none" is a new pattern for each note.
+            let mut fresh = spare.lines.pop().unwrap_or_default();
+            if patch.seeds[1].is_none() && morph > 0.0 {
+                pattern(note_word(salt, id), calc.max(lines_n + 1), &mut fresh);
+            }
+            {
+                let second: &[f32] = patch.seeds[1].as_deref().map_or(&fresh[..], |v| &v[..]);
+                for k in 1..=calc {
+                    let at = if rotation == 0 { k } else { ((k as i64 - 1 - rotation).rem_euclid(wrap) + 1) as usize };
+                    let first = match &patch.seeds[0] {
+                        Some(v) if morph < 1.0 => curve.at(f64::from(v[at])),
+                        _ => 1.0,
+                    };
+                    let other = if morph > 0.0 { curve.at(f64::from(second[at])) } else { 0.0 };
+                    g[k] = ((1.0 - morph) * first + morph * other) as f32;
                 }
             }
+            spare.lines.push(fresh);
         }
-        // The fall at note-on, read through a table of the static part.
-        let mut lut = [1.0f32; 513];
-        if seed_on {
-            for (i, v) in lut.iter_mut().enumerate() {
-                let lg = -11.0 + 9.0 * i as f64 / 512.0;
-                let gv = lg.exp();
-                *v = (-(static_part(gv, full) + gv * b_full * pre)).exp() as f32;
-            }
-        }
-        let fall = |gv: f32| -> f32 {
-            if gv <= 0.0 {
-                return 1.0;
-            }
-            let p = ((fast_ln(gv) + 11.0) * (512.0 / 9.0)).clamp(0.0, 511.999);
-            let i = p as usize;
-            lut[i] + (lut[i + 1] - lut[i]) * (p - i as f32)
-        };
+        // PRE below 1 plays as 1.
+        let pre = (f64::from(st.ints[PRE]) * value(A_PRE)).max(1.0) / 1000.0;
+        let pre_floor = PRE_FLOOR * pre;
 
         // Where each line reads the maps.
         let shift = f64::from(value(A_SHIFT)) * (lines_n + 1) as f64;
@@ -770,11 +739,12 @@ impl Note {
         // The seed stage alone, for the level without auto loudness.
         let mut seed_power = 0.0f64;
         for k in 1..=calc {
-            let mut v = fall(g[k]);
             if !forced_flat && comb_gate(comb_forced, k) {
-                let l = f64::from(patch.final_at(M_FORCED, line_at(&patch, k)));
-                v += (1.0 - v) * forced_gain(l) as f32;
+                let l = patch.final_at(M_FORCED, line_at(&patch, k));
+                g[k] += (1.0 - g[k]) * l;
             }
+            let u = f64::from(g[k]);
+            let v = if u >= 1.0 { 1.0 } else { exact_exp(-LN100 * pre * (1.0 / (pre_floor + (1.0 - pre_floor) * u) - 1.0)) as f32 };
             if k <= lines_n {
                 seed_power += f64::from(v) * f64::from(v);
             }
@@ -799,14 +769,38 @@ impl Note {
         for k in lines_n + 1..=calc {
             let m = mirror_line(r, k);
             a[k] = a.get(m).copied().unwrap_or(0.0);
-            g[k] = g.get(m).copied().unwrap_or(0.0);
-            if !time_g.is_empty() {
-                time_g[k] = time_g.get(m).copied().unwrap_or(0.0);
-            }
+            g[k] = g.get(m).copied().unwrap_or(1.0);
             if alt {
                 settle[k] = settle.get(m).copied().unwrap_or(0.0);
             }
         }
+        // Decay and release times, with their maps.
+        let time = |field: usize, art: usize| -> f64 {
+            let x = (f64::from(st.ints[field]) / 10000.0).clamp(0.0, 1.0);
+            let t0 = time_of(x);
+            0.05 + (t0 - 0.05) * value(art).max(0.0)
+        };
+        let tau_dec = if st.ints[DEC] >= 10000 { f64::INFINITY } else { time(DEC, A_DEC) / LN100 };
+        let tau_rel = time(REL, A_REL) / LN100;
+
+        // Where the note starts in its wave: the search reads the lines up to `n` as they will be a little into the decay.
+        let start = {
+            let (plain, fade) = (tau_dec * LN100, (-START_LOOK / tau_dec).exp());
+            let lines = if lines_n as f64 * f0 > CUT_HZ { (CUT_HZ / f0) as usize } else { lines_n };
+            let look = |k: usize| -> f64 {
+                let level = f64::from(a[k]);
+                if alt {
+                    let s = f64::from(settle[k]);
+                    s + (level - s) * fade
+                } else if tau_dec.is_finite() {
+                    level * exact_exp(-LN100 * START_LOOK / line_time(plain, patch.time_factor(M_DECAY, k, shift), g[k]))
+                } else {
+                    level
+                }
+            };
+            start_place(r, lines.clamp(1, lines_n), look, spare)
+        };
+
         let droops = droops();
         let droop = |k: usize| -> f32 { if r < 10 { 1.0 } else { droops[(k << (16 - r)).min(MAX_TOP)] } };
         let mut power = 0.0f64;
@@ -821,25 +815,6 @@ impl Note {
         a.truncate(top + 1);
         g.truncate(top + 1);
         settle.truncate(top + 1);
-        // Keep the fall's rate term.
-        if !time_g.is_empty() {
-            g.copy_from_slice(&time_g[..=top]);
-        }
-        for v in g.iter_mut() {
-            *v *= b_full as f32;
-        }
-        if !seed_on {
-            g.iter_mut().for_each(|v| *v = 0.0);
-        }
-
-        // Decay and release times, with their maps.
-        let time = |field: usize, art: usize| -> f64 {
-            let x = (f64::from(st.ints[field]) / 10000.0).clamp(0.0, 1.0);
-            let t0 = time_of(x);
-            0.05 + (t0 - 0.05) * value(art).max(0.0)
-        };
-        let tau_dec = if st.ints[DEC] >= 10000 { f64::INFINITY } else { time(DEC, A_DEC) / LN100 };
-        let tau_rel = time(REL, A_REL) / LN100;
 
         // The live articulators.
         let mut arts: Vec<ArtRun> = (0..=A_U_PITCH).map(|i| ArtRun::new(ctx, &patch, i, kmap, vel)).collect();
@@ -878,7 +853,7 @@ impl Note {
         let mut spec = spare.specs.pop().unwrap_or_default();
         spec.clear();
         spec.resize(top + 1, [0.0f32; 2]);
-        let top_now = fill_spec(&mut spec, &a, top, nyquist);
+        let top_now = fill_spec(&mut spec, &a, top, nyquist, r);
         ifft.load(&spec[..=top_now]);
         ifft.finish();
         let mut ta = spare.tables.pop().unwrap_or_default();
@@ -886,7 +861,10 @@ impl Note {
 
         // The unison.
         let phs = (f64::from(st.ints[U_PHS]) / 128.0 * value(A_U_PHASE)).clamp(0.0, 1.0);
-        let uni = unison(st, len as f64, phase_law(phs, r));
+        let mut uni = unison(st, len as f64, phase_law(phs, r));
+        for u in &mut uni {
+            u.pos = (u.pos + start * len as f64).rem_euclid(len as f64);
+        }
         let declick_len = if st.declick { (0.002 * ctx.rate) as usize } else { 0 };
 
         let fac = spare.lines.pop().unwrap_or_default();
@@ -963,32 +941,15 @@ impl Note {
         let top = self.top;
         self.fac.clear();
         self.fac.resize(top + 1, 1.0);
-        let rtime = 200.0 / tau;
+        let plain = tau * LN100;
         let eq_flat = self.patch.st.finals[which].points.iter().all(|p| p.level == 0.5);
-        let nat = natural_x();
-        let (natural, shift) = (self.patch.st.natural_scale, self.shift);
-        let comb = self.patch.st.combs[which];
         let mut rates = std::mem::take(&mut self.fac);
         let peak = self.a.iter().fold(0.0f32, |m, &v| m.max(v));
         let floor = peak * 1e-4;
         let mut low = f64::INFINITY;
-        let gains = map_gains();
         for k in 1..=top {
-            // A comb on the decay or release map leaves the lines it skips on the plain time.
-            let j = mirror_line(self.r, k);
-            let inv = if eq_flat || !comb_gate(comb, j) {
-                1.0 / tau
-            } else {
-                let x = if shift == 0.0 {
-                    if natural { nat[j] } else { linear_x(j as f64) }
-                } else {
-                    self.patch.line_x(j as f64 - shift)
-                };
-                let c = f64::from(map_gain(gains, self.patch.final_at(which, x)));
-                let t = (tau * c + 0.005 * (1.0 - c).max(0.0)).max(1e-4);
-                1.0 / t
-            };
-            let v = inv + f64::from(self.gb[k]) * rtime;
+            let c = if eq_flat { 1.0 } else { self.patch.time_factor(which, mirror_line(self.r, k), self.shift) };
+            let v = LN100 / line_time(plain, c, self.gb[k]);
             rates[k] = v as f32;
             if self.a[k] >= floor {
                 low = low.min(v);
@@ -1065,7 +1026,7 @@ impl Note {
             self.step_lines(steps);
             let nyquist = (0.5 * ctx.rate / (self.f0 * self.widest())) as usize;
             let top = self.top;
-            self.top_now = fill_spec(&mut self.spec, &self.a, top, nyquist);
+            self.top_now = fill_spec(&mut self.spec, &self.a, top, nyquist, self.r);
             let ifft = self.ifft.get_or_insert_with(|| Ifft::new(self.plan.clone()));
             ifft.load(&self.spec[..=self.top_now]);
             self.loaded = true;
@@ -1326,15 +1287,56 @@ impl Note {
     }
 }
 
-/// Fills `spec` from the amplitudes, zero above `nyquist`; returns the top line in use.
-fn fill_spec(spec: &mut [Cpx], a: &[f32], top: usize, nyquist: usize) -> usize {
+/// Fills `spec` from the amplitudes, zero above `nyquist`; returns the top line in use. A line past `n` is an image of the
+/// line as far below the table's middle, with its phase turned back.
+fn fill_spec(spec: &mut [Cpx], a: &[f32], top: usize, nyquist: usize, r: i32) -> usize {
     let h = phasors();
     let used = top.min(nyquist).max(1);
-    for k in 1..=used {
+    let n = (1usize << (r - 1)) - 1;
+    for k in 1..=used.min(n) {
         let v = 0.5 * a[k];
         spec[k] = [v * h[k][0], v * h[k][1]];
     }
+    for k in n + 1..=used {
+        let v = 0.5 * a[k];
+        let p = h[mirror_line(r, k)];
+        spec[k] = [v * p[0], -v * p[1]];
+    }
     used
+}
+
+/// Where a note of RICH `r` starts in its wave, in cycles: the sample nearest zero of one period of its lines `1..=lines` at
+/// the levels `level(k)`, with no images, on a coarse grid.
+fn start_place(r: i32, lines: usize, level: impl Fn(usize) -> f64, spare: &mut Spare) -> f64 {
+    let size = 1usize << if r <= 9 { r + 1 } else { r };
+    let h = phasors();
+    let mut spec = spare.specs.pop().unwrap_or_default();
+    spec.clear();
+    spec.resize(lines + 1, [0.0f32; 2]);
+    for k in 1..=lines {
+        let v = (0.5 * level(k)) as f32;
+        spec[k] = [v * h[k][0], v * h[k][1]];
+    }
+    let mut ifft = match spare.iffts.iter().position(|f| f.len() == size) {
+        Some(i) => spare.iffts.swap_remove(i),
+        None => Ifft::new(plan_for(size)),
+    };
+    ifft.load(&spec);
+    ifft.finish();
+    let mut wave = spare.tables.pop().unwrap_or_default();
+    wave.clear();
+    wave.resize(size, 0.0);
+    ifft.take(&mut wave);
+    let mut best = (f32::INFINITY, 0usize);
+    for (i, v) in wave.iter().enumerate() {
+        if v.abs() < best.0 {
+            best = (v.abs(), i);
+        }
+    }
+    spare.tables.push(wave);
+    spare.specs.push(spec);
+    spare.iffts.push(ifft);
+    best.1 as f64 / size as f64
 }
 
 /// The mod tables' index for a note.
@@ -1345,12 +1347,12 @@ fn mod_index(knobs: [f64; 2], l: Levels) -> [usize; 2] {
     ]
 }
 
-/// The FFT plan of a table length (`table_len`'s 2^12 to 2^18), all made when the first instance is: a note starts on
-/// the audio thread.
+/// The FFT plan of a length (the start search's from 2^7, `table_len`'s 2^12 to 2^18), all made when the first instance is:
+/// a note starts on the audio thread.
 fn plan_for(len: usize) -> Arc<Plan> {
     static T: OnceLock<Vec<Arc<Plan>>> = OnceLock::new();
-    let plans = T.get_or_init(|| (12..=18).map(|b| Plan::new(1 << b)).collect());
-    plans[(len.trailing_zeros() as usize).clamp(12, 18) - 12].clone()
+    let plans = T.get_or_init(|| (7..=18).map(|b| Plan::new(1 << b)).collect());
+    plans[(len.trailing_zeros() as usize).clamp(7, 18) - 7].clone()
 }
 
 /// What finished notes leave for the next ones, so a note start rarely asks the system for memory.
@@ -1382,10 +1384,10 @@ struct Waiting {
     released: bool,
 }
 
-/// How many lines the audio thread takes on starting per second: half its time, at about 40 ns per line. A note always
+/// How many lines the audio thread takes on starting per second: half its time, at about 80 ns per line. A note always
 /// fits when none has started for a while; the others of a big chord at high RICH wait a block or so rather than miss
 /// the block's deadline.
-const START_LINES_PER_SECOND: f64 = 12.5e6;
+const START_LINES_PER_SECOND: f64 = 6.25e6;
 
 /// What starting a note of RICH `r` takes, in lines at most.
 fn start_cost(r: i32) -> f64 {
@@ -1455,7 +1457,7 @@ impl Smith {
             nl: vec![0.0; HOST_BLOCK],
             nr: vec![0.0; HOST_BLOCK],
         };
-        let _ = (phasors(), natural_x(), quantile_table(), plan_for(1 << 12), map_gains(), droops(), random_pool());
+        let _ = (phasors(), natural_x(), plan_for(1 << 12), map_gains(), droops());
         s.setup_rate();
         s
     }
@@ -1768,6 +1770,10 @@ mod tests {
         s.note_off(ids[2]);
         let (mut l, mut r) = (vec![0.0f32; 256], vec![0.0f32; 256]);
         s.render(&mut l, &mut r);
+        assert_eq!(s.notes.len(), 1);
+        s.render(&mut l, &mut r);
+        assert_eq!(s.notes.len(), 2);
+        s.render(&mut l, &mut r);
         assert_eq!(s.notes.len(), 2);
         s.render(&mut l, &mut r);
         assert_eq!((s.notes.len(), s.voices()), (3, 3));
@@ -1832,8 +1838,8 @@ mod tests {
 
     #[test]
     fn times_match_the_table() {
-        for (x, t) in [(0.0, 0.05), (0.1, 0.394), (0.2, 0.886), (0.4, 2.424), (0.6, 5.19), (0.8, 10.4), (0.9, 14.4), (0.99, 19.3), (1.0, 20.0)] {
-            assert!((time_of(x) - t).abs() < 0.01, "{x}: {} vs {t}", time_of(x));
+        for (x, t) in [(0.0, 0.05), (0.1, 0.405), (0.2, 0.886), (0.4, 2.424), (0.6, 5.25), (0.8, 10.45), (0.9, 14.51), (0.99, 19.4), (1.0, 20.0)] {
+            assert!((time_of(x) - t).abs() < 0.03, "{x}: {} vs {t}", time_of(x));
         }
     }
 
@@ -2014,20 +2020,53 @@ mod tests {
     #[test]
     fn a_seed_keeps_its_first_lines() {
         let (mut a, mut b) = (Vec::new(), Vec::new());
-        pattern(7, 100, &mut a);
-        pattern(7, 2000, &mut b);
+        pattern(seed_word(7), 100, &mut a);
+        pattern(seed_word(7), 2000, &mut b);
         assert_eq!(a[1..=100], b[1..=100]);
     }
 
+    /// The first line phases and a few seed words, as read from Ogun.
     #[test]
-    fn a_seeds_values_have_the_measured_spread() {
-        let mut g = Vec::new();
-        pattern(3, MAX_LINE, &mut g);
-        let mut v = g[1..].to_vec();
-        v.sort_by(f32::total_cmp);
-        let q = |p: f64| f64::from(v[(p * v.len() as f64) as usize]);
-        assert!((q(0.5) / 0.0052 - 1.0).abs() < 0.1, "{}", q(0.5));
-        assert!((q(0.9) / 0.0359 - 1.0).abs() < 0.1, "{}", q(0.9));
+    fn the_stream_gives_the_read_values() {
+        let mut s = Stream::new(3);
+        for want in [0.66883002, 0.13011109, 0.87958005, 0.73525399] {
+            assert!((s.next_value() - want).abs() < 1e-7);
+        }
+        assert_eq!(seed_word(1), 0x74c3_fff3);
+        assert_eq!(seed_word(8), 0x3446_9ff6);
+        assert_eq!(seed_word(8506), 457_089_444);
+        assert_eq!(seed_word(816), 1_178_541_116);
+    }
+
+    #[test]
+    fn fullness_bends_the_values_and_keeps_their_ends() {
+        for full in [-1000.0, -400.0, 400.0, 1000.0] {
+            let c = FullCurve::new(full);
+            assert!(c.at(0.0).abs() < 1e-7 && (c.at(1.0) - 1.0).abs() < 1e-7, "{full}");
+            assert_eq!(c.at(0.5) < 0.5, full < 0.0, "{full}");
+        }
+        assert_eq!(FullCurve::new(0.0).at(0.3), 0.3);
+    }
+
+    #[test]
+    fn exact_exp_is_close() {
+        for x in [-300.0, -20.0, -1.5, -0.25, 0.0, 0.25, 1.0, 11.5] {
+            assert!((exact_exp(x) / f64::exp(x) - 1.0).abs() < 1e-9, "{x}");
+        }
+    }
+
+    /// Start samples as read from Ogun at RICH 9: a flat spectrum, and two seeds at PRE 30.
+    #[test]
+    fn a_note_starts_where_ogun_starts_it() {
+        let mut spare = Spare::default();
+        assert_eq!(start_place(9, 255, |_| 1.0, &mut spare), 938 as f64 / 1024.0);
+        for (seed, want) in [(7, 37), (1000, 486), (8506, 993)] {
+            let mut g = Vec::new();
+            pattern(seed_word(seed), 255, &mut g);
+            let e = PRE_FLOOR * 0.03;
+            let level = |k: usize| exact_exp(-LN100 * 0.03 * (1.0 / (e + (1.0 - e) * f64::from(g[k])) - 1.0));
+            assert_eq!(start_place(9, 255, level, &mut spare), want as f64 / 1024.0, "seed {seed}");
+        }
     }
 
     /// Below line `n`, every default-patch note plays, stops and leaves nothing behind.

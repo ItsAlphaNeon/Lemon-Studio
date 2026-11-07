@@ -11,6 +11,7 @@
 pub mod ctl;
 pub mod editor;
 pub mod fft;
+pub mod seed_words;
 pub mod state;
 pub mod synth;
 pub mod view;
