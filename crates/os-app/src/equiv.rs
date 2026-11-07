@@ -5,8 +5,8 @@
 //! The equivalence harness (specs: roadmap/control-plane.md part 2, "Method"). It drives the app without a window the
 //! way a user does (clicks, double clicks, right clicks, drags, the wheel and keys, on what the frame shows) and after
 //! every step writes down a fingerprint of what the step may change: the project, the project state the interface
-//! holds, what `.lemon` would store, the undo history, what the engine was last given, and whether the project is
-//! unsaved. A trace (a project, its inputs and the fingerprints) recorded on one build is replayed on another: the
+//! holds, what `.lemon` would store, the undo history, whether the engine holds the project as it is, and whether the
+//! step left something to save. A trace (a project, its inputs and the fingerprints) recorded on one build is replayed on another: the
 //! first step whose fingerprint differs names the input that behaves differently.
 //!
 //! At the end of each trace it also checks what needs no other build: undo back to the start gives the opened project,
@@ -83,7 +83,13 @@ impl Fp {
             ("side", side),
             ("lemon", hash(&crate::lemon_state::saved_form(s, &app.plugins))),
             ("history", history),
-            ("engine", hash(&app.transport.sent_for_tests())),
+            // Whether the engine holds the project as it is: 0 nothing sent yet, 1 in step, 2 behind. Not the copy
+            // itself: what it was last handed while playing starts or pauses follows the audio thread's timing.
+            ("engine", match app.transport.sent_for_tests() {
+                None => 0,
+                Some(p) if p == crate::rack::play_project(s) => 1,
+                Some(_) => 2,
+            }),
             ("unsaved", u64::from(app.unsaved())),
         ])
     }
