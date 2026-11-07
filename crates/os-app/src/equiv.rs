@@ -644,7 +644,8 @@ fn record(root: &Path, project: &str, seed: u64, steps: usize) -> Trace {
 
 /// Replays `t`: None when every fingerprint matches, else a report of the first difference.
 fn replay(root: &Path, t: &Trace) -> Option<String> {
-    let work = work_dir(&format!("{}-replay", trace_name(&t.project, t.seed)));
+    // The folder the recording used: paths the project stores (a render, a save as) must be the same.
+    let work = work_dir(&trace_name(&t.project, t.seed));
     let mut rig = Rig::open(&root.join(&t.project), &work);
     let mut opened_project = rig.app.state.project.clone();
     let fp = Fp::of(&rig.app);
