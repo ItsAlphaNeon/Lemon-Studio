@@ -666,6 +666,8 @@ struct Note {
     /// The pitch of the fundamental last set.
     f0: f64,
     top_now: usize,
+    /// Lines past Nyquist stay in, and fold back.
+    folds: bool,
 }
 
 impl Note {
@@ -685,11 +687,13 @@ impl Note {
         let f_key = F60 * (cents / 1200.0).exp2();
         let f0 = f_key * f64::from(6 - r).exp2();
 
-        // The top line: at Nyquist of the note's pitch, further if an articulator can lower it.
+        // The top line. A note whose line `n` lies above the cut stops at the cut, further if an articulator can lower it; any
+        // other runs on, and what lies past Nyquist folds back.
         let pitch_moves = st.arts[A_PITCH].env.enabled || st.arts[A_PITCH].lfo.enabled;
         let upper = if r <= 9 { lines_n } else { ((TOP_U * f64::from(r - 6).exp2()) as usize).min(MAX_TOP) };
-        let nyquist = (0.5 * ctx.rate / f0) as usize;
-        let cut = if lines_n as f64 * f0 > CUT_HZ { (CUT_HZ / f0) as usize } else { nyquist };
+        let folds = lines_n as f64 * f0 <= CUT_HZ;
+        let nyquist = if folds { usize::MAX } else { (0.5 * ctx.rate / f0) as usize };
+        let cut = if folds { upper } else { (CUT_HZ / f0) as usize };
         let reach = if pitch_moves { cut.saturating_mul(4) } else { cut };
         let top = upper.min(reach).max(1);
         // The level counts every line up to `n`, heard or not. A flat impulse map with no comb leaves the spectrum as the
@@ -935,6 +939,7 @@ impl Note {
             inputs: Inputs::default(),
             f0,
             top_now,
+            folds,
             patch,
         };
         note.set_rates(ctx, false);
@@ -1016,7 +1021,7 @@ impl Note {
     /// One step of the lines, loaded for making into a table.
     fn make_lines(&mut self, ctx: &Ctx) {
         self.step_lines(1);
-        let nyquist = (0.5 * ctx.rate / (self.f0 * self.widest())) as usize;
+        let nyquist = if self.folds { usize::MAX } else { (0.5 * ctx.rate / (self.f0 * self.widest())) as usize };
         let top = self.top;
         self.top_now = fill_spec(&mut self.spec, &self.a, top, nyquist, self.r);
         let ifft = self.ifft.get_or_insert_with(|| Ifft::new(self.plan.clone()));
