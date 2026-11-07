@@ -321,13 +321,20 @@ impl Rig {
 
     /// After a step: a few frames, playback stopped (its position would follow the machine's clock), requests to the
     /// window dropped (there is none), loading waited for, and a full frame painted so the hits are current.
-    fn after_step(&mut self) {
+    fn after_step(&mut self, generation: u64) {
         for _ in 0..4 {
             self.tick();
         }
         if self.app.transport.playing() {
             self.app.act(Action::Stop);
             self.tick();
+        }
+        // A step that started or stopped playback: with no device the audio thread may stop it on its own before the
+        // Stop above, which leaves the engine's copy otherwise. Either way it is stopped and handed the project as it
+        // is now, so the fingerprint doesn't follow that race.
+        if self.app.transport.generation_for_tests() != generation {
+            self.app.transport.stop();
+            self.app.transport.update(&crate::rack::play_project(&self.app.state));
         }
         self.app.want_close = false;
         self.settle();
@@ -336,10 +343,11 @@ impl Rig {
     }
 
     fn run(&mut self, inputs: &[Input]) -> Fp {
+        let generation = self.app.transport.generation_for_tests();
         for i in inputs {
             i.apply(&mut self.app);
         }
-        self.after_step();
+        self.after_step(generation);
         // `OS_EQUIV_DUMP=<step>`: the project and the interface's part of it after that step, numbered per run, to
         // compare two runs that differ there.
         if std::env::var("OS_EQUIV_DUMP").ok().and_then(|v| v.parse().ok()) == Some(self.step) {
@@ -445,7 +453,7 @@ impl Rig {
             undone += 1;
             self.tick();
         }
-        self.after_step();
+        self.after_step(self.app.transport.generation_for_tests());
         if let Some(d) = difference(opened, &self.app.state.project, false) {
             bad.push(format!("undo-to-start({undone}:{d})"));
         }
@@ -456,7 +464,7 @@ impl Rig {
             }
             self.tick();
         }
-        self.after_step();
+        self.after_step(self.app.transport.generation_for_tests());
         if let Some(d) = difference(&last, &self.app.state.project, false) {
             bad.push(format!("redo-to-end({d})"));
         }

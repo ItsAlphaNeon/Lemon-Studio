@@ -700,6 +700,12 @@ impl Transport {
         }
     }
 
+    /// Tests: how many times playback was started or stopped (the equivalence harness).
+    #[cfg(test)]
+    pub fn generation_for_tests(&self) -> u64 {
+        self.shared.generation.load(Ordering::Acquire)
+    }
+
     /// Tests: the project the engine was last given whole, with the live edits since (the equivalence harness).
     #[cfg(test)]
     pub fn sent_for_tests(&self) -> Option<Project> {
