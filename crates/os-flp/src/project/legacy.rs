@@ -38,6 +38,10 @@ const DOT_SHIFT: u8 = 92;
 /// A channel's colour in the older files when it was not chosen (the 0x6A655C of FL 26's resaves with colour flag 0).
 const OLD_CHANNEL_COLOR: u32 = 0x006A_655C;
 
+/// A channel's name in files up to FL 11; the event 203 that comes before it in a block is not its name (spec:
+/// flp/events/channels.md "Version scope").
+const CH_NAME_OLD: u8 = 192;
+
 /// The channel's mixer track before FL 24.2, a signed byte (spec: flp/engine-events.md "A channel").
 const CH_TARGET_OLD: u8 = 22;
 
@@ -170,8 +174,15 @@ fn channel_blocks(ev: &mut Vec<Event>, version: (u32, u32)) -> Dots {
         let split = block.iter().position(|x| x.id == id::PAT_START || x.id == id::CH_END).unwrap_or(block.len());
         let has_target = block[..split].iter().any(|x| x.id == id::CH_TARGET);
         let has_flag = block[..split].iter().any(|x| x.id == id::CH_COLOR_FLAG);
-        for x in &block[..split] {
+        let old_name = if version.0 <= 11 { block[..split].iter().position(|x| x.id == CH_NAME_OLD) } else { None };
+        for (k, x) in block[..split].iter().enumerate() {
             match x.id {
+                CH_NAME_OLD if old_name.is_some() => {
+                    if let Some(d) = x.data().filter(|d| !decode_text(d, TextEnc::Utf16).is_empty()) {
+                        out.push(Event::new(id::DISPLAY_NAME, Value::var(d.to_vec())));
+                    }
+                }
+                id::DISPLAY_NAME if old_name.is_some_and(|at| k < at) => {}
                 // The colour flag (41) after the colour: set, except on the older files' default colour, which becomes
                 // the current default (as FL 26's resaves of the older files have it).
                 id::COLOR if !has_flag => {
@@ -678,6 +689,35 @@ mod tests {
 
     fn ids(ev: &[Event]) -> Vec<u8> {
         ev.iter().map(|e| e.id).collect()
+    }
+
+    /// Up to FL 11 a channel's name is its event 192, not the 203 before it or the mixer slot's 203 after it in the last
+    /// block; a later file's 192 is left alone.
+    #[test]
+    fn old_channel_names_come_from_event_192() {
+        let names = |version: &str| {
+            let mut ev = vec![
+                Event::new(id::VERSION, ansi(version)),
+                Event::new(id::CH_START, Value::U16(0)),
+                Event::new(id::DISPLAY_NAME, ansi("Getta")),
+                Event::new(CH_NAME_OLD, ansi("Bass")),
+                Event::new(id::CH_START, Value::U16(1)),
+                Event::new(CH_NAME_OLD, ansi("Lead")),
+                Event::new(id::PLUGIN_STATE, Value::var(vec![0])),
+                Event::new(id::DISPLAY_NAME, ansi("Love Philter")),
+            ];
+            let v = saved_by(&ev);
+            if v.0 <= 11 {
+                text_to_utf16(&mut ev);
+            }
+            let _ = channel_blocks(&mut ev, v);
+            let enc = TextEnc::Utf16;
+            let starts: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::CH_START).map(|(k, _)| k).collect();
+            let ends: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| e.id == id::CH_END).map(|(k, _)| k).collect();
+            starts.iter().zip(&ends).map(|(&a, &b)| scan_channel(&ev, a, b).name.and_then(|i| ev[i].data().map(|d| decode_text(d, enc)))).collect::<Vec<_>>()
+        };
+        assert_eq!(names("11.0.3"), [Some("Bass".to_string()), Some("Lead".to_string())]);
+        assert_eq!(names("12.0.0")[0].is_none(), false, "a later file keeps its 203");
     }
 
     /// A clip record of the FL 20 form (32 bytes): position, the 0x5000 base, the item, length 96, the track.
