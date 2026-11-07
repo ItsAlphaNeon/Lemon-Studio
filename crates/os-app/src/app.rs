@@ -1350,6 +1350,12 @@ pub struct App {
     pub plugins: crate::plugins::Plugins,
     pub theme: Theme,
     pub transport: Transport,
+    /// The dropout log's watch (`crate::dropout_log`), and whether the transport played at the last tick: a start is
+    /// logged.
+    #[cfg(target_os = "linux")]
+    audio_watch: crate::dropout_log::Watch,
+    #[cfg(target_os = "linux")]
+    audio_playing: bool,
     pub hits: Vec<Hit>,
     keep: Keep,
     /// Live regions from the last paint.
@@ -1528,6 +1534,10 @@ impl App {
         #[cfg(not(test))]
         let project = default_project();
         let mut app = App {
+            #[cfg(target_os = "linux")]
+            audio_watch: Default::default(),
+            #[cfg(target_os = "linux")]
+            audio_playing: false,
             plugins: crate::plugins::Plugins::default(),
             state: State {
                 project,
@@ -1743,6 +1753,25 @@ impl App {
             app.open(p);
         }
         app
+    }
+
+    /// The dropout log (`crate::dropout_log`): a playback starting, and dropouts with what the audio threads were then.
+    #[cfg(target_os = "linux")]
+    fn audio_log_tick(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let playing = self.transport.playing();
+        let context = |a: &App| format!("{} ({})", a.title(), crate::audio_cfg::AudioCfg::current().text().replace('\n', " ").trim());
+        if playing && !self.audio_playing {
+            crate::dropout_log::write(&format!("play: {}", context(self)));
+        }
+        self.audio_playing = playing;
+        let (_, demoted) = crate::rt::counts();
+        let drops = self.transport.drops().into();
+        if let Some(line) = self.audio_watch.check(drops, demoted, crate::rt::roles(), "") {
+            crate::dropout_log::write(&format!("{line}{}", context(self)));
+        }
     }
 
     pub fn title(&self) -> String {
@@ -4268,6 +4297,8 @@ impl App {
         self.work_tick(now);
         self.song_info_tick(now);
         self.auto_close_tick(now);
+        #[cfg(target_os = "linux")]
+        self.audio_log_tick();
         // Audio ▸ CPU ▸ Auto-bypass when silent, for every slot whose own switch is on (spec: audio/auto-bypass.md).
         os_engine::engine::auto_bypass::set_enabled(crate::prefs::check(&crate::prefs::SMART_DISABLE));
         self.follow_settings();

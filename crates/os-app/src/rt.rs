@@ -66,6 +66,30 @@ pub fn enable_in_tests() {
     TEST_ON.store(true, Ordering::Release);
 }
 
+/// The audio threads by what they do, for the audio log (`crate::dropout_log`).
+#[derive(Clone, Copy)]
+pub enum Role {
+    Feeder,
+    Callback,
+}
+
+static ROLES: [AtomicI32; 2] = [const { AtomicI32::new(0) }; 2];
+
+/// Thread `tid` is now the one doing `role`.
+pub fn set_role(role: Role, tid: i32) {
+    ROLES[role as usize].store(tid, Ordering::Release);
+}
+
+/// Whether the feeder and the device callback run at real-time priority (`None`: none running).
+pub fn roles() -> (Option<bool>, Option<bool>) {
+    let state = |r: Role| match ROLES[r as usize].load(Ordering::Acquire) {
+        0 => None,
+        t if ended(t) => None,
+        t => Some(is_realtime(t)),
+    };
+    (state(Role::Feeder), state(Role::Callback))
+}
+
 /// The calling thread's kernel id.
 pub fn tid() -> i32 {
     // SAFETY: gettid has no preconditions.
@@ -244,7 +268,7 @@ fn watch() {
                 (w.rt, w.calm_since, w.refused) = (true, None, false);
                 if run >= WATCH_LIMIT_NS {
                     demote(t, &normal);
-                    eprintln!("Audio: a real-time thread ran {} ms without waiting: normal priority", run / 1_000_000);
+                    crate::dropout_log::write(&format!("a real-time thread ran {} ms without waiting: normal priority", run / 1_000_000));
                     (w.rt, w.calm_since) = (false, Some(now));
                 }
                 continue;
@@ -263,11 +287,11 @@ fn watch() {
             } else if now.duration_since(since) >= w.calm_for {
                 match promote(t) {
                     Ok(()) if w.refused => {
-                        eprintln!("Audio: a thread rtkit refused: real-time priority now");
+                        crate::dropout_log::write("a thread rtkit refused: real-time priority now");
                         (w.rt, w.calm_since, w.refused) = (true, None, false);
                     }
                     Ok(()) => {
-                        eprintln!("Audio: a real-time thread calm for {} s: real-time priority again", w.calm_for.as_secs());
+                        crate::dropout_log::write(&format!("a real-time thread calm for {} s: real-time priority again", w.calm_for.as_secs()));
                         (w.rt, w.calm_since, w.calm_for) = (true, None, (w.calm_for * 2).min(CALM_MAX));
                     }
                     Err(e) => (w.calm_since, w.calm_for) = (Some(now), after_refusal(w.calm_for, &e)),

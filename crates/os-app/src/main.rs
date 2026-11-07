@@ -24,6 +24,8 @@ mod autoscroll;
 mod backup;
 #[cfg(test)]
 mod audio_bench;
+#[cfg(target_os = "linux")]
+mod dropout_log;
 #[cfg(test)]
 mod checks;
 #[cfg(test)]

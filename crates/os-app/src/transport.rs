@@ -951,7 +951,6 @@ impl Transport {
     }
 
     /// The dropouts by kind since the program started (the playback checks read them: `crate::checks`).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn drops(&self) -> Drops {
         let s = &self.shared;
         let n = |a: &AtomicU64| a.load(Ordering::Relaxed);
@@ -1343,7 +1342,7 @@ impl FeedThread {
             .spawn({
                 let stop = stop.clone();
                 move || {
-                    raise_priority();
+                    raise_feeder_priority();
                     while !stop.load(Ordering::Acquire) {
                         feeder.fill(0);
                         std::thread::park_timeout(Duration::from_millis(5));
@@ -1399,12 +1398,31 @@ pub(crate) fn raise_priority() {
 #[cfg(target_os = "linux")]
 pub(crate) fn raise_priority() {
     if let Err(e) = crate::rt::promote(crate::rt::tid()) {
-        eprintln!("Audio: a rendering thread runs at normal priority ({e})");
+        crate::dropout_log::write(&format!("mixing thread: normal priority ({e})"));
     }
 }
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub(crate) fn raise_priority() {}
+
+/// The feeder's priority; on Linux it is also named the feeder for the dropout log (`crate::rt::Role`).
+#[cfg(target_os = "linux")]
+fn raise_feeder_priority() {
+    let tid = crate::rt::tid();
+    crate::rt::set_role(crate::rt::Role::Feeder, tid);
+    match crate::rt::promote(tid) {
+        Ok(()) => crate::dropout_log::write("feeder: real-time priority"),
+        Err(e) => {
+            eprintln!("Audio: the feeder runs at normal priority ({e})");
+            crate::dropout_log::write(&format!("feeder: normal priority ({e})"));
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn raise_feeder_priority() {
+    raise_priority();
+}
 
 /// The sample library for engines whose sampler channels Lemon Sampler instances play. They stretch for themselves
 /// (spec: audio/time-stretch.md), and of a sample one of them plays the engine keeps only the length and rate Lemon

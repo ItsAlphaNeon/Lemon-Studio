@@ -494,6 +494,8 @@ impl App {
             if let Some(m) = &h.meter {
                 m.note_hold(t0.elapsed());
             }
+            #[cfg(target_os = "linux")]
+            crate::dropout_log::held(&p.desc().name, "reading its parameters", t0.elapsed());
         }
         // An edit in a plugin's window is an undo step (by the owner's id, so it follows moves): a gesture's from its
         // begin to its end, values sent without one joined while they come in a row.

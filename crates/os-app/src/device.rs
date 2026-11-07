@@ -874,8 +874,13 @@ where
                 match seen.load(std::sync::atomic::Ordering::Acquire) {
                     0 => std::thread::sleep(std::time::Duration::from_millis(5)),
                     t => {
-                        if let Err(e) = crate::rt::promote(t) {
-                            eprintln!("Audio: the device callback runs at normal priority ({e})");
+                        crate::rt::set_role(crate::rt::Role::Callback, t);
+                        match crate::rt::promote(t) {
+                            Ok(()) => crate::dropout_log::write("device callback: real-time priority"),
+                            Err(e) => {
+                                eprintln!("Audio: the device callback runs at normal priority ({e})");
+                                crate::dropout_log::write(&format!("device callback: normal priority ({e})"));
+                            }
                         }
                         return;
                     }

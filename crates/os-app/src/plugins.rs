@@ -1359,6 +1359,8 @@ impl Plugins {
                 if let Some(m) = &h.meter {
                     m.note_hold(t0.elapsed());
                 }
+                #[cfg(target_os = "linux")]
+                crate::dropout_log::held(&p.desc().name, "the UI's tick", t0.elapsed());
             }
             #[cfg(plugin_windows)]
             if let Some(w) = &h.window {
