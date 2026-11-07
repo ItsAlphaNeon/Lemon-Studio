@@ -265,6 +265,10 @@ pub trait Plugin: Instrument + HostedEffect + Send {
         false
     }
 
+    /// Automation of index `.0` of each pair reaches parameter `.1`: a project file's indexes for the plugin this one
+    /// stands in for (UI thread). Ignored where the format has no such list.
+    fn use_param_aliases(&mut self, _aliases: &'static [(u32, u32)]) {}
+
     /// Tells the instance whether it renders offline (an export: no deadline, the plugin's best quality) or for live
     /// playback (UI thread, with no stream processing the instance). Formats without such a switch ignore it.
     fn set_offline(&mut self, offline: bool) {

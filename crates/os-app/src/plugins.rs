@@ -610,6 +610,9 @@ impl Plugins {
             if [LEMON_SAMPLER, crate::osc3::LEMON_TRIO, crate::citrus::CITRUS].contains(&a.desc.name.as_str()) {
                 p.use_channel_levels();
             }
+            if a.desc.name == crate::citrus::CITRUS {
+                p.use_param_aliases(crate::citrus::SYTRUS_PARAMS);
+            }
         }
         drop(p);
         Ok((plugin, a.desc.name))
