@@ -435,6 +435,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
   and CLAP bundles for other hosts
 - Citrus, a six-operator synthesizer (a recreation of Sytrus) with its editor: it plays every Sytrus channel of a
   project and Sytrus patches, keeping their state byte for byte; also a VST3 and CLAP plugin
+- Smith, an additive synthesizer (a recreation of Ogun) with a Pith editor: it plays every Ogun channel of a project
+  and Ogun patches, keeping their state byte for byte; also a VST3 and CLAP plugin. Its timbre seeds make their own
+  random patterns rather than Ogun's, so a patch built on a few surviving harmonics can sound different
 - Lemon Slicer (Fruity Slicer) as a VST3 and CLAP plugin with a Pith editor: it loads a loop and slices it by the
   file's markers, by beats or by transients, plays slice n on C5 + n (pitch, attack, decay, declick, reverse, play to
   end), and dumps the slices to the piano roll as notes. A project's Fruity Slicer channels play and open in it and
