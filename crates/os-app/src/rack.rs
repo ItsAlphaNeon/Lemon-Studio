@@ -881,7 +881,7 @@ pub fn clone_name(s: &State, r: usize) -> String {
 }
 
 fn seed() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
+    crate::clip_colors::clock()
 }
 
 pub fn random_color(s: &mut State, r: usize, salt: u64) {

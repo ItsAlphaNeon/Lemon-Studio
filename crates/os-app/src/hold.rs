@@ -92,7 +92,7 @@ impl NoteType {
 impl App {
     /// A press just started a drag of `kind`'s sort: with the check on, it is held from now.
     pub(crate) fn hold_start(&mut self, kind: Kind) {
-        self.hold = prefs::check(&prefs::CLICK_AND_HOLD).then(|| Hold { at: Instant::now(), from: self.mouse, kind, periods: 0 });
+        self.hold = prefs::check(&prefs::CLICK_AND_HOLD).then(|| Hold { at: crate::anim::now(), from: self.mouse, kind, periods: 0 });
     }
 
     /// The mouse moved to (`x`, `y`): further than [`SLOP`] from the press, the hold ends and the drag goes on as one.

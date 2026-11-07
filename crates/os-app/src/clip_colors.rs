@@ -64,7 +64,9 @@ impl ClipColors {
     }
 }
 
-fn clock() -> u64 {
+/// The seed of every random colour and the piano roll's randomizer: the time, and a fixed one in tests so a test
+/// (and the equivalence harness) gets the same colours on every run.
+pub(crate) fn clock() -> u64 {
     if cfg!(test) {
         return 0x5eed;
     }

@@ -241,6 +241,8 @@ const FRAME: (u32, u32) = (1920, 1080);
 struct Rig {
     app: App,
     canvas: os_ui::Canvas,
+    /// Steps run so far, for `OS_EQUIV_DUMP`.
+    step: usize,
 }
 
 /// Where the clock starts: the same instant for every rig of this run, so motions and holds see the same times.
@@ -262,7 +264,7 @@ impl Rig {
         app.plugins.available = crate::plugins::builtin();
         app.plugins.effects = crate::plugins::builtin_effects();
         app.open(copy);
-        let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas") };
+        let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas"), step: 0 };
         rig.settle();
         // Mixer effects are hosted a few ticks after loading.
         for _ in 0..20 {
@@ -314,6 +316,15 @@ impl Rig {
             i.apply(&mut self.app);
         }
         self.after_step();
+        // `OS_EQUIV_DUMP=<step>`: the project and the interface's part of it after that step, numbered per run, to
+        // compare two runs that differ there.
+        if std::env::var("OS_EQUIV_DUMP").ok().and_then(|v| v.parse().ok()) == Some(self.step) {
+            let dir = traces_dir().join("dumps");
+            let _ = std::fs::create_dir_all(&dir);
+            let n = std::fs::read_dir(&dir).map_or(0, |d| d.count());
+            let _ = std::fs::write(dir.join(format!("{n}.txt")), format!("{:#?}\n{}", self.app.state.project, side(&self.app)));
+        }
+        self.step += 1;
         Fp::of(&self.app)
     }
 
@@ -667,4 +678,66 @@ fn equiv_twice() {
         }
     }
     assert_eq!(failed, 0);
+}
+
+/// Whether running `steps` on `project` breaks an invariant whose name starts with `kind`.
+fn fails(root: &Path, project: &str, steps: &[Vec<Input>], kind: &str) -> Option<String> {
+    let work = work_dir("shrink");
+    let mut rig = Rig::open(&root.join(project), &work);
+    let mut start = rig.app.state.project.clone();
+    for s in steps {
+        rig.run(s);
+        rig.undo_start(&mut start);
+    }
+    rig.invariants(&start, &work).into_iter().find(|i| i.starts_with(kind))
+}
+
+/// Cuts `OS_EQUIV_TRACE` down to the steps that still break invariant `OS_EQUIV_KIND` (delta debugging: drop
+/// chunks of steps, halving their size, while it still fails), and prints what is left as a trace.
+#[test]
+#[ignore = "the equivalence harness: shrinks a trace to what breaks an invariant (see the module's doc)"]
+fn equiv_shrink() {
+    let (root, _) = corpus();
+    let path = std::env::var("OS_EQUIV_TRACE").expect("OS_EQUIV_TRACE: a trace file");
+    let kind = std::env::var("OS_EQUIV_KIND").expect("OS_EQUIV_KIND: the invariant's name, e.g. undo-to-start");
+    let t = Trace::read(&std::fs::read_to_string(&path).expect("read")).expect("a trace");
+    let mut steps: Vec<Vec<Input>> = t.steps.into_iter().map(|(i, _)| i).collect();
+    // The shortest failing prefix first: the steps after it play no part.
+    let (mut lo, mut hi) = (0, steps.len());
+    let Some(mut why) = fails(&root, &t.project, &steps, &kind) else { panic!("the whole trace does not break {kind}") };
+    while lo + 1 < hi {
+        let mid = (lo + hi) / 2;
+        match fails(&root, &t.project, &steps[..mid], &kind) {
+            Some(w) => {
+                hi = mid;
+                why = w;
+            }
+            None => lo = mid,
+        }
+    }
+    steps.truncate(hi);
+    let mut chunk = steps.len().div_ceil(2);
+    while chunk >= 1 {
+        let mut i = 0;
+        while i < steps.len() && steps.len() > 1 {
+            let mut less = steps.clone();
+            less.drain(i..(i + chunk).min(steps.len()));
+            match fails(&root, &t.project, &less, &kind) {
+                Some(w) => {
+                    steps = less;
+                    why = w;
+                }
+                None => i += chunk,
+            }
+        }
+        if chunk == 1 {
+            break;
+        }
+        chunk = chunk.div_ceil(2);
+    }
+    eprintln!("{} steps of {} break it: {why}", steps.len(), t.project);
+    for s in &steps {
+        let line: Vec<String> = s.iter().map(ToString::to_string).collect();
+        eprintln!("  {}", line.join("; "));
+    }
 }
