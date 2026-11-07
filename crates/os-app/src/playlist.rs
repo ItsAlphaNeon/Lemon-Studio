@@ -3425,6 +3425,13 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
 
     if right {
         match tool {
+            // Alt+right plays the clip as its menu's Preview does, in any tool that deletes with this button.
+            _ if alt && hit.is_some() && !matches!(tool, PlTool::Select | PlTool::Zoom) => {
+                if let Some(c) = hit.and_then(|ci| clips(s).get(ci).copied()) {
+                    app.preview_clip(&c);
+                }
+                return;
+            }
             PlTool::Select => {}
             PlTool::Zoom => {
                 zoom_toggle(app);
