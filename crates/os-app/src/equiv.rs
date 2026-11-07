@@ -1,0 +1,670 @@
+// Copyright (C) 2026 ItsAlphaNeon
+// SPDX-License-Identifier: GPL-3.0-or-later
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+
+//! The equivalence harness (specs: roadmap/control-plane.md part 2, "Method"). It drives the app without a window the
+//! way a user does (clicks, double clicks, right clicks, drags, the wheel and keys, on what the frame shows) and after
+//! every step writes down a fingerprint of what the step may change: the project, the project state the interface
+//! holds, what `.lemon` would store, the undo history, what the engine was last given, and whether the project is
+//! unsaved. A trace (a project, its inputs and the fingerprints) recorded on one build is replayed on another: the
+//! first step whose fingerprint differs names the input that behaves differently.
+//!
+//! At the end of each trace it also checks what needs no other build: undo back to the start gives the opened project,
+//! redo gives the last one back, the engine holds what the project says, and a saved copy opens as the same project.
+//!
+//! Run with a home folder of its own (the app saves projects, backups and settings), outside the sandbox and on the
+//! hidden display (`hidden-tests`):
+//! ```text
+//! HOME=<scratch home> OS_EQUIV_DIR=<traces> OS_EQUIV_CORPUS=<folder of .flp> \
+//!   cargo test -p os-app --bin lemonstudio equiv_record -- --ignored --nocapture
+//! ```
+//! `equiv_replay` replays every trace in `OS_EQUIV_DIR`; `equiv_twice` records and replays on the same build (what
+//! isn't deterministic yet). `OS_EQUIV_SEEDS` (2) traces per project, `OS_EQUIV_STEPS` (150) steps each,
+//! `OS_EQUIV_ONLY=<name part>` limits the projects, `OS_EQUIV_FIRST=<n>` takes the first n of the corpus.
+
+use std::fmt::{self, Write as _};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use winit::keyboard::{Key, NamedKey};
+
+use crate::app::{Action, App};
+
+fn var<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// FNV-1a, 64 bits: the same on every build and toolchain, unlike the standard library's hasher.
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Fnv {
+        Fnv(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn bytes(&mut self, b: &[u8]) {
+        for &x in b {
+            self.0 = (self.0 ^ u64::from(x)).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+}
+
+impl fmt::Write for Fnv {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.bytes(s.as_bytes());
+        Ok(())
+    }
+}
+
+fn hash(v: &impl fmt::Debug) -> u64 {
+    let mut h = Fnv::new();
+    let _ = write!(h, "{v:?}");
+    h.0
+}
+
+/// Project state the interface holds until save (specs: control-plane.md part 2, "Where main is"), as one value.
+fn side(app: &App) -> String {
+    let (s, r) = (&app.state, &app.state.rack);
+    let v = (s.tempo.to_bits(), s.pattern, s.song_mode, &r.filter, &r.groups, &r.zipped, &r.locked, r.loop_mode, &r.loop_len, &r.loop_unit, r.loop_type, r.unsorted_at);
+    format!("{v:#?}")
+}
+
+/// What a step may change, each part hashed. Parts are named so a difference says where it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Fp(Vec<(&'static str, u64)>);
+
+impl Fp {
+    fn of(app: &App) -> Fp {
+        let s = &app.state;
+        let side = hash(&side(app));
+        let history = hash(&(s.history.entries(), s.history.at()));
+        Fp(vec![
+            ("project", hash(&s.project)),
+            ("side", side),
+            ("lemon", hash(&crate::lemon_state::saved_form(s, &app.plugins))),
+            ("history", history),
+            ("engine", hash(&app.transport.sent_for_tests())),
+            ("unsaved", u64::from(app.unsaved())),
+        ])
+    }
+
+    fn parse(t: &str) -> Option<Fp> {
+        let mut v = Vec::new();
+        for part in t.split_whitespace() {
+            let (k, h) = part.split_once('=')?;
+            let k = ["project", "side", "lemon", "history", "engine", "unsaved"].into_iter().find(|n| *n == k)?;
+            v.push((k, u64::from_str_radix(h, 16).ok()?));
+        }
+        Some(Fp(v))
+    }
+
+    /// The names of the parts that differ from `o`.
+    fn differs(&self, o: &Fp) -> Vec<&'static str> {
+        self.0.iter().zip(&o.0).filter(|(a, b)| a != b).map(|(a, _)| a.0).collect()
+    }
+}
+
+impl fmt::Display for Fp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, (k, h)) in self.0.iter().enumerate() {
+            write!(f, "{}{k}={h:x}", if i > 0 { " " } else { "" })?;
+        }
+        Ok(())
+    }
+}
+
+/// One input, as a trace writes it.
+#[derive(Debug, Clone, PartialEq)]
+enum Input {
+    Move(f32, f32),
+    Down,
+    Up,
+    Right,
+    Wheel(f32, bool, bool),
+    Key(String, bool, bool),
+    Mods(bool, bool, bool),
+}
+
+impl fmt::Display for Input {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let b = |v: bool| u8::from(v);
+        match self {
+            Input::Move(x, y) => write!(f, "move {x} {y}"),
+            Input::Down => write!(f, "down"),
+            Input::Up => write!(f, "up"),
+            Input::Right => write!(f, "right"),
+            Input::Wheel(dy, shift, ctrl) => write!(f, "wheel {dy} {} {}", b(*shift), b(*ctrl)),
+            Input::Key(k, ctrl, alt) => write!(f, "key {k} {} {}", b(*ctrl), b(*alt)),
+            Input::Mods(shift, ctrl, alt) => write!(f, "mods {} {} {}", b(*shift), b(*ctrl), b(*alt)),
+        }
+    }
+}
+
+impl Input {
+    fn parse(t: &str) -> Option<Input> {
+        let w: Vec<&str> = t.split_whitespace().collect();
+        let n = |i: usize| w.get(i).and_then(|v| v.parse::<f32>().ok());
+        let b = |i: usize| w.get(i).map(|v| *v == "1");
+        Some(match *w.first()? {
+            "move" => Input::Move(n(1)?, n(2)?),
+            "down" => Input::Down,
+            "up" => Input::Up,
+            "right" => Input::Right,
+            "wheel" => Input::Wheel(n(1)?, b(2)?, b(3)?),
+            "key" => Input::Key(w.get(1)?.to_string(), b(2)?, b(3)?),
+            "mods" => Input::Mods(b(1)?, b(2)?, b(3)?),
+            _ => return None,
+        })
+    }
+
+    fn apply(&self, app: &mut App) {
+        match self {
+            Input::Move(x, y) => {
+                app.mouse_move(*x, *y);
+            }
+            Input::Down => app.mouse_down(),
+            Input::Up => app.mouse_up(),
+            Input::Right => app.mouse_down_right(),
+            Input::Wheel(dy, shift, ctrl) => app.wheel(0.0, *dy, *shift, *ctrl),
+            Input::Key(k, ctrl, alt) => {
+                if let Some(key) = key_of(k) {
+                    app.key(&key, *ctrl, *alt);
+                }
+            }
+            Input::Mods(shift, ctrl, alt) => {
+                app.shift = *shift;
+                app.ctrl = *ctrl;
+                app.alt = *alt;
+            }
+        }
+    }
+}
+
+/// The keys the generator presses: letters, digits and the named keys the shortcuts use.
+const NAMED: [(&str, NamedKey); 18] = [
+    ("Delete", NamedKey::Delete),
+    ("Backspace", NamedKey::Backspace),
+    ("Escape", NamedKey::Escape),
+    ("Enter", NamedKey::Enter),
+    ("Tab", NamedKey::Tab),
+    ("Space", NamedKey::Space),
+    ("Up", NamedKey::ArrowUp),
+    ("Down", NamedKey::ArrowDown),
+    ("Left", NamedKey::ArrowLeft),
+    ("Right", NamedKey::ArrowRight),
+    ("Home", NamedKey::Home),
+    ("End", NamedKey::End),
+    ("PageUp", NamedKey::PageUp),
+    ("PageDown", NamedKey::PageDown),
+    ("Insert", NamedKey::Insert),
+    ("F6", NamedKey::F6),
+    ("F7", NamedKey::F7),
+    ("F9", NamedKey::F9),
+];
+const CHARS: &str = "abcdefghijklmnopqrstuvwxyz0123456789+-";
+
+fn key_of(name: &str) -> Option<Key> {
+    if let Some((_, k)) = NAMED.iter().find(|(n, _)| *n == name) {
+        return Some(Key::Named(*k));
+    }
+    name.strip_prefix("c:").map(|c| Key::Character(c.into()))
+}
+
+/// xorshift64*: a seed makes the same trace on every build.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+
+    fn chance(&mut self, percent: u64) -> bool {
+        self.next() % 100 < percent
+    }
+
+    fn signed(&mut self, max: f32) -> f32 {
+        ((self.next() % 2001) as f32 / 1000.0 - 1.0) * max
+    }
+}
+
+/// The frame the app paints into: one size for every build.
+const FRAME: (u32, u32) = (1920, 1080);
+
+/// The app, the frame it paints and the clock its motions read.
+struct Rig {
+    app: App,
+    canvas: os_ui::Canvas,
+}
+
+/// Where the clock starts: the same instant for every rig of this run, so motions and holds see the same times.
+fn epoch() -> Instant {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+impl Rig {
+    /// Opens a copy of `project` in `work` (the app may save over what it opened).
+    fn open(project: &Path, work: &Path) -> Rig {
+        crate::transport::headless();
+        crate::anim::set_clock_at(epoch());
+        let _ = std::fs::create_dir_all(work);
+        let copy = work.join(project.file_name().expect("a file"));
+        std::fs::copy(project, &copy).expect("copy the project");
+        let mut app = App::new(None);
+        app.plugins = crate::plugins::Plugins::default();
+        app.plugins.available = crate::plugins::builtin();
+        app.plugins.effects = crate::plugins::builtin_effects();
+        app.open(copy);
+        let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas") };
+        rig.settle();
+        // Mixer effects are hosted a few ticks after loading.
+        for _ in 0..20 {
+            rig.tick();
+        }
+        rig.paint();
+        rig
+    }
+
+    /// One frame of the app's loop: 10 ms on the motions' clock.
+    fn tick(&mut self) {
+        crate::anim::advance(10);
+        self.app.tick();
+    }
+
+    /// Until loading, hosting and recording are done: loading has no clock of ours (its budget is the machine's), so
+    /// it is waited for, not counted.
+    fn settle(&mut self) {
+        let t0 = Instant::now();
+        while self.app.loading() && t0.elapsed() < Duration::from_secs(180) {
+            self.app.tick();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn paint(&mut self) {
+        self.app.invalidate();
+        self.app.paint(&mut self.canvas, None);
+    }
+
+    /// After a step: a few frames, playback stopped (its position would follow the machine's clock), requests to the
+    /// window dropped (there is none), loading waited for, and a full frame painted so the hits are current.
+    fn after_step(&mut self) {
+        for _ in 0..4 {
+            self.tick();
+        }
+        if self.app.transport.playing() {
+            self.app.act(Action::Stop);
+            self.tick();
+        }
+        self.app.want_close = false;
+        self.settle();
+        self.tick();
+        self.paint();
+    }
+
+    fn run(&mut self, inputs: &[Input]) -> Fp {
+        for i in inputs {
+            i.apply(&mut self.app);
+        }
+        self.after_step();
+        Fp::of(&self.app)
+    }
+
+    /// Where the generator may aim: the centres of the hits the last frame registered, on the frame.
+    fn targets(&self) -> Vec<(f32, f32)> {
+        let (w, h) = (FRAME.0 as f32, FRAME.1 as f32);
+        self.app
+            .hits
+            .iter()
+            .filter(|h| h.rect.w >= 1.0 && h.rect.h >= 1.0)
+            .map(|h| (h.rect.x + h.rect.w / 2.0, h.rect.y + h.rect.h / 2.0))
+            .filter(|&(x, y)| (0.0..w).contains(&x) && (0.0..h).contains(&y))
+            .collect()
+    }
+
+    /// The next step's inputs, aimed at what the frame shows.
+    fn generate(&self, rng: &mut Rng) -> Vec<Input> {
+        let targets = self.targets();
+        let Some(&(x, y)) = (!targets.is_empty()).then(|| &targets[rng.below(targets.len())]) else {
+            return vec![Input::Key("Escape".into(), false, false)];
+        };
+        let (shift, ctrl, alt) = (rng.chance(12), rng.chance(12), rng.chance(5));
+        let mods = Input::Mods(shift, ctrl, alt);
+        let none = Input::Mods(false, false, false);
+        let roll = rng.below(100);
+        match roll {
+            0..40 => vec![mods, Input::Move(x, y), Input::Down, Input::Up, none],
+            40..48 => vec![Input::Move(x, y), Input::Down, Input::Up, Input::Down, Input::Up],
+            48..58 => vec![Input::Move(x, y), Input::Right, Input::Up],
+            58..73 => {
+                let mut v = vec![mods, Input::Move(x, y), Input::Down];
+                let (mut px, mut py) = (x, y);
+                for _ in 0..1 + rng.below(5) {
+                    px += rng.signed(80.0);
+                    py += rng.signed(80.0);
+                    v.push(Input::Move(px.round(), py.round()));
+                }
+                v.extend([Input::Up, none]);
+                v
+            }
+            73..85 => vec![Input::Move(x, y), Input::Wheel(if rng.chance(50) { 1.0 } else { -1.0 }, rng.chance(20), rng.chance(30))],
+            _ => {
+                let k = if rng.chance(40) {
+                    NAMED[rng.below(NAMED.len())].0.to_string()
+                } else {
+                    let c = CHARS.as_bytes()[rng.below(CHARS.len())] as char;
+                    format!("c:{c}")
+                };
+                vec![Input::Key(k, rng.chance(25), rng.chance(8))]
+            }
+        }
+    }
+
+    /// With no steps in the history (just opened, or a project opened or made by a step), undo starts from here.
+    fn undo_start(&self, start: &mut os_model::Project) {
+        if self.app.state.history.entries().len() <= 1 {
+            start.clone_from(&self.app.state.project);
+        }
+    }
+
+    /// The checks that need no other build, at the end of a trace: each a name when it fails.
+    fn invariants(&mut self, opened: &os_model::Project, work: &Path) -> Vec<String> {
+        let mut bad = Vec::new();
+        // The engine holds what the project says (an edit that never reached it shows here).
+        if let Some(sent) = self.app.transport.sent_for_tests() {
+            if sent != crate::rack::play_project(&self.app.state) {
+                bad.push("engine-behind".into());
+            }
+        }
+        let last = self.app.state.project.clone();
+        let last_side = side(&self.app);
+        // Undo back to the start, then redo to the end.
+        let mut undone = 0;
+        while crate::history::undo(&mut self.app.state).is_some() && undone < 10_000 {
+            undone += 1;
+            self.tick();
+        }
+        self.after_step();
+        if let Some(d) = difference(opened, &self.app.state.project, false) {
+            bad.push(format!("undo-to-start({undone}:{d})"));
+        }
+        while crate::history::redo(&mut self.app.state).is_some() {
+            self.tick();
+        }
+        self.after_step();
+        if let Some(d) = difference(&last, &self.app.state.project, false) {
+            bad.push(format!("redo-to-end({d})"));
+        }
+        let now_side = side(&self.app);
+        if now_side != last_side {
+            let (a, b) = (leaves(&last_side), leaves(&now_side));
+            let d = a.iter().zip(&b).find(|(x, y)| x != y).map_or("length".into(), |(x, y)| format!("{}:{}->{}", x.0, short(&x.1), short(&y.1)));
+            bad.push(format!("redo-to-end(side:{d})"));
+        }
+        // A saved copy opens as the same project.
+        let copy = work.join("roundtrip.flp");
+        match self.app.save_copy_with(copy.clone(), &mut |_| {}) {
+            Some(Ok(())) => {
+                let mut again = App::new(None);
+                again.plugins = crate::plugins::Plugins::default();
+                again.plugins.available = crate::plugins::builtin();
+                again.plugins.effects = crate::plugins::builtin_effects();
+                again.open(copy);
+                let t0 = Instant::now();
+                while again.loading() && t0.elapsed() < Duration::from_secs(180) {
+                    again.tick();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                if let Some(d) = difference(&self.app.state.project, &again.state.project, true) {
+                    bad.push(format!("roundtrip({d})"));
+                }
+            }
+            other => bad.push(format!("save-failed({other:?})")),
+        }
+        // One word each: a trace keeps them on one line.
+        bad.into_iter().map(|b| b.split_whitespace().collect::<Vec<_>>().join("_")).collect()
+    }
+}
+
+/// The leaves of a value's pretty debug form, each with its path (`channels[3].volume`).
+fn leaves(text: &str) -> Vec<(String, String)> {
+    // A frame: its path, and the next item's index when it is a list.
+    let mut stack: Vec<(String, Option<usize>)> = vec![(String::new(), None)];
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let l = line.trim().trim_end_matches(',');
+        if l.starts_with(['}', ']', ')']) {
+            stack.pop();
+            if let Some((_, Some(i))) = stack.last_mut() {
+                *i += 1;
+            }
+            continue;
+        }
+        let (parent, index) = stack.last().cloned().unwrap_or_default();
+        let (key, rest) = match index {
+            Some(i) => (format!("{parent}[{i}]"), l),
+            None => match l.split_once(": ") {
+                Some((k, r)) if !k.contains(' ') || k.starts_with('"') => (if parent.is_empty() { k.to_string() } else { format!("{parent}.{k}") }, r),
+                _ => (parent.clone(), l),
+            },
+        };
+        if rest.ends_with(['{', '[', '(']) {
+            // Lists and tuples number their items.
+            stack.push((key, (!rest.ends_with('{')).then_some(0)));
+        } else {
+            out.push((key, rest.to_string()));
+            if let Some((_, Some(i))) = stack.last_mut() {
+                *i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Where two values differ: the first differing path with both sides, and how many paths differ, or None. Ids are
+/// left out (they are not saved yet and are handed out again after an undo: specs control-plane.md part 2, step 12);
+/// `rounding` takes numbers within 1e-4 as equal (what the file format keeps of them).
+fn difference(a: &impl fmt::Debug, b: &impl fmt::Debug, rounding: bool) -> Option<String> {
+    let kept = |l: Vec<(String, String)>| -> Vec<(String, String)> { l.into_iter().filter(|(k, _)| !(k.ends_with(".id") || k.contains(".id["))).collect() };
+    let (a, b) = (kept(leaves(&format!("{a:#?}"))), kept(leaves(&format!("{b:#?}"))));
+    let same = |x: &str, y: &str| {
+        x == y || (rounding && matches!((x.parse::<f64>(), y.parse::<f64>()), (Ok(p), Ok(q)) if (p - q).abs() <= 1e-4))
+    };
+    let bm: std::collections::BTreeMap<&str, &str> = b.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let am: std::collections::BTreeMap<&str, &str> = a.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut diff: Vec<String> = a
+        .iter()
+        .filter(|(k, v)| !bm.get(k.as_str()).is_some_and(|w| same(v, w)))
+        .map(|(k, v)| format!("{k}:{}->{}", short(v), bm.get(k.as_str()).map_or("absent".into(), |w| short(w))))
+        .collect();
+    diff.extend(b.iter().filter(|(k, _)| !am.contains_key(k.as_str())).map(|(k, v)| format!("{k}:absent->{}", short(v))));
+    diff.first().map(|d| format!("{d}(+{})", diff.len() - 1))
+}
+
+fn short(v: &str) -> String {
+    v.chars().filter(|c| !c.is_whitespace()).take(40).collect()
+}
+
+/// A trace: the project it opens, the seed that made it, and each step's inputs with the fingerprint after it.
+struct Trace {
+    project: String,
+    seed: u64,
+    opened: Fp,
+    steps: Vec<(Vec<Input>, Fp)>,
+    invariants: Vec<String>,
+}
+
+impl Trace {
+    fn write(&self) -> String {
+        let mut t = format!("project {}\nseed {}\nopened {}\n", self.project, self.seed, self.opened);
+        for (inputs, fp) in &self.steps {
+            let line: Vec<String> = inputs.iter().map(ToString::to_string).collect();
+            let _ = writeln!(t, "{}\t{fp}", line.join("; "));
+        }
+        let _ = writeln!(t, "invariants {}", if self.invariants.is_empty() { "ok".into() } else { self.invariants.join(" ") });
+        t
+    }
+
+    fn read(t: &str) -> Option<Trace> {
+        let mut lines = t.lines();
+        let project = lines.next()?.strip_prefix("project ")?.to_string();
+        let seed = lines.next()?.strip_prefix("seed ")?.parse().ok()?;
+        let opened = Fp::parse(lines.next()?.strip_prefix("opened ")?)?;
+        let mut steps = Vec::new();
+        let mut invariants = Vec::new();
+        for l in lines {
+            if let Some(rest) = l.strip_prefix("invariants ") {
+                invariants = rest.split_whitespace().filter(|w| *w != "ok").map(String::from).collect();
+                continue;
+            }
+            let (inputs, fp) = l.split_once('\t')?;
+            let inputs = inputs.split("; ").map(Input::parse).collect::<Option<Vec<_>>>()?;
+            steps.push((inputs, Fp::parse(fp)?));
+        }
+        Some(Trace { project, seed, opened, steps, invariants })
+    }
+}
+
+/// The projects of the corpus, sorted, as paths relative to it.
+fn corpus() -> (PathBuf, Vec<String>) {
+    let root = PathBuf::from(std::env::var("OS_EQUIV_CORPUS").expect("OS_EQUIV_CORPUS: a folder of projects"));
+    let mut v = Vec::new();
+    let mut dirs = vec![root.clone()];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("flp")) {
+                v.push(p.strip_prefix(&root).expect("inside").to_string_lossy().into_owned());
+            }
+        }
+    }
+    v.sort();
+    if let Ok(only) = std::env::var("OS_EQUIV_ONLY") {
+        v.retain(|p| p.contains(&only));
+    }
+    v.truncate(var("OS_EQUIV_FIRST", usize::MAX));
+    (root, v)
+}
+
+fn traces_dir() -> PathBuf {
+    PathBuf::from(std::env::var("OS_EQUIV_DIR").expect("OS_EQUIV_DIR: where traces live"))
+}
+
+/// A scratch folder for one trace's copies (under the traces' folder, emptied first).
+fn work_dir(name: &str) -> PathBuf {
+    let d = traces_dir().join("work").join(name);
+    let _ = std::fs::remove_dir_all(&d);
+    d
+}
+
+fn trace_name(project: &str, seed: u64) -> String {
+    let stem: String = project.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+    format!("{stem}-{seed}")
+}
+
+fn record(root: &Path, project: &str, seed: u64, steps: usize) -> Trace {
+    let work = work_dir(&trace_name(project, seed));
+    let mut rig = Rig::open(&root.join(project), &work);
+    let opened = Fp::of(&rig.app);
+    let mut opened_project = rig.app.state.project.clone();
+    let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+    let mut out = Vec::new();
+    for _ in 0..steps {
+        let inputs = rig.generate(&mut rng);
+        let fp = rig.run(&inputs);
+        rig.undo_start(&mut opened_project);
+        out.push((inputs, fp));
+    }
+    let invariants = rig.invariants(&opened_project, &work);
+    Trace { project: project.into(), seed, opened, steps: out, invariants }
+}
+
+/// Replays `t`: None when every fingerprint matches, else a report of the first difference.
+fn replay(root: &Path, t: &Trace) -> Option<String> {
+    let work = work_dir(&format!("{}-replay", trace_name(&t.project, t.seed)));
+    let mut rig = Rig::open(&root.join(&t.project), &work);
+    let mut opened_project = rig.app.state.project.clone();
+    let fp = Fp::of(&rig.app);
+    if fp != t.opened {
+        return Some(format!("opening differs in {:?}", fp.differs(&t.opened)));
+    }
+    for (i, (inputs, want)) in t.steps.iter().enumerate() {
+        let got = rig.run(inputs);
+        rig.undo_start(&mut opened_project);
+        if &got != want {
+            let line: Vec<String> = inputs.iter().map(ToString::to_string).collect();
+            return Some(format!("step {i} ({}) differs in {:?}", line.join("; "), got.differs(want)));
+        }
+    }
+    let inv = rig.invariants(&opened_project, &work);
+    (inv != t.invariants).then(|| format!("invariants: recorded {:?}, now {:?}", t.invariants, inv))
+}
+
+#[test]
+#[ignore = "the equivalence harness: records traces (see the module's doc)"]
+fn equiv_record() {
+    let (root, projects) = corpus();
+    let dir = traces_dir();
+    std::fs::create_dir_all(&dir).expect("traces folder");
+    let (seeds, steps) = (var("OS_EQUIV_SEEDS", 2u64), var("OS_EQUIV_STEPS", 150usize));
+    for p in &projects {
+        for seed in 1..=seeds {
+            let t0 = Instant::now();
+            let t = record(&root, p, seed, steps);
+            std::fs::write(dir.join(format!("{}.trace", trace_name(p, seed))), t.write()).expect("write trace");
+            eprintln!("{p} seed {seed}: {} steps in {:.1} s, invariants {:?}", t.steps.len(), t0.elapsed().as_secs_f64(), t.invariants);
+        }
+    }
+}
+
+#[test]
+#[ignore = "the equivalence harness: replays recorded traces (see the module's doc)"]
+fn equiv_replay() {
+    let (root, _) = corpus();
+    let mut names: Vec<PathBuf> = std::fs::read_dir(traces_dir()).expect("traces").flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "trace")).collect();
+    names.sort();
+    let mut failed = 0;
+    for n in &names {
+        let t = Trace::read(&std::fs::read_to_string(n).expect("read")).expect("a trace");
+        match replay(&root, &t) {
+            None => eprintln!("same: {}", n.display()),
+            Some(r) => {
+                failed += 1;
+                eprintln!("DIFFERENT: {}: {r}", n.display());
+            }
+        }
+    }
+    assert_eq!(failed, 0, "{failed} of {} traces differ", names.len());
+}
+
+#[test]
+#[ignore = "the equivalence harness: what is not deterministic on one build (see the module's doc)"]
+fn equiv_twice() {
+    let (root, projects) = corpus();
+    eprintln!("corpus {}: {} projects", root.display(), projects.len());
+    let (seeds, steps) = (var("OS_EQUIV_SEEDS", 2u64), var("OS_EQUIV_STEPS", 150usize));
+    let mut failed = 0;
+    for p in &projects {
+        for seed in 1..=seeds {
+            let t = record(&root, p, seed, steps);
+            let again = Trace::read(&t.write()).expect("reads back");
+            assert_eq!(again.write(), t.write(), "the trace format round-trips");
+            if let Some(r) = replay(&root, &again) {
+                failed += 1;
+                eprintln!("NOT DETERMINISTIC: {p} seed {seed}: {r}");
+            } else {
+                eprintln!("deterministic: {p} seed {seed}, invariants {:?}", t.invariants);
+            }
+        }
+    }
+    assert_eq!(failed, 0);
+}

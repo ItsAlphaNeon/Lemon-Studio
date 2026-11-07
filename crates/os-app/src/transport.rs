@@ -700,6 +700,12 @@ impl Transport {
         }
     }
 
+    /// Tests: the project the engine was last given whole, with the live edits since (the equivalence harness).
+    #[cfg(test)]
+    pub fn sent_for_tests(&self) -> Option<Project> {
+        self.sent.lock().ok().and_then(|s| s.clone())
+    }
+
     pub fn update(&self, project: &Project) {
         // Levels alone reach the playing engines in place: a new engine at every move of a knob takes milliseconds of
         // building each time (up to some 70 in a large project). What was last sent says what changed.
