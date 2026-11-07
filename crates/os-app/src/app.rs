@@ -2476,6 +2476,7 @@ impl App {
         }
         crate::osc3::store(&mut self.state.project, &self.plugins);
         crate::citrus::store(&mut self.state.project, &self.plugins);
+        crate::smith::store(&mut self.state.project, &self.plugins);
         crate::slicer::store(&mut self.state.project, &self.plugins);
         crate::drums::store(&mut self.state.project, &self.plugins);
     }
@@ -2568,6 +2569,7 @@ impl App {
         self.sync_wrapped();
         self.sync_osc3();
         self.sync_citrus();
+        self.sync_smith();
         self.sync_slicer();
         self.sync_drums();
         self.sync_native();
@@ -2710,6 +2712,7 @@ impl App {
             self.sync_osc3();
             self.follow_osc3_samples();
             self.sync_citrus();
+            self.sync_smith();
             self.sync_slicer();
             self.sync_drums();
             self.sync_native();
@@ -9949,7 +9952,7 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
     let row = add_channel(p);
     let ch = &mut p.channels[row];
     ch.kind = ChannelKind::Plugin;
-    // The built-in Lemon Trio is stored as the file's own 3x Osc, Citrus as its Sytrus.
+    // The built-in Lemon Trio is stored as the file's own 3x Osc, Citrus as its Sytrus, Smith as its Ogun.
     ch.plugin = Some(crate::osc3::file_name(name).to_string());
     ch.name = Some(name.to_string());
     row

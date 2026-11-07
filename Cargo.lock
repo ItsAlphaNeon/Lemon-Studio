@@ -3013,6 +3013,7 @@ dependencies = [
  "pulseaudio",
  "serde",
  "serde_json",
+ "smith",
  "softbuffer",
  "tesla",
  "tiny-skia",
@@ -3847,6 +3848,25 @@ name = "smallvec"
 version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
+
+[[package]]
+name = "smith"
+version = "0.0.1"
+dependencies = [
+ "citrus",
+ "miniz_oxide 0.8.9",
+ "nih_plug",
+ "os-dsp",
+ "os-engine",
+ "os-hostlink",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+ "serde",
+ "serde_json",
+ "tiny-skia",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "smithay-client-toolkit"
