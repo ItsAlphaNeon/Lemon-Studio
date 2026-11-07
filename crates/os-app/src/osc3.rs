@@ -43,6 +43,7 @@ pub fn file_name(name: &str) -> &str {
     match name {
         LEMON_TRIO => FILE_NAME,
         crate::citrus::CITRUS => crate::citrus::FILE_NAME,
+        crate::smith::SMITH => crate::smith::FILE_NAME,
         crate::slicer::LEMON_SLICER => crate::slicer::FILE_NAME,
         crate::drums::LEMON_DRUMS => crate::drums::FILE_NAME,
         _ => name,
@@ -54,6 +55,7 @@ pub fn label(name: &str) -> &str {
     match name {
         FILE_NAME => LEMON_TRIO,
         crate::citrus::FILE_NAME => crate::citrus::CITRUS,
+        crate::smith::FILE_NAME => crate::smith::SMITH,
         n if crate::slicer::is_file_name(n) => crate::slicer::LEMON_SLICER,
         crate::drums::FILE_NAME => crate::drums::LEMON_DRUMS,
         n if n.eq_ignore_ascii_case(crate::lemon_midi_out::FILE_NAME) => "Lemon MIDI Out",

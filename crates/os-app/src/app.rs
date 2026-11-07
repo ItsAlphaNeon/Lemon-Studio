@@ -1350,6 +1350,12 @@ pub struct App {
     pub plugins: crate::plugins::Plugins,
     pub theme: Theme,
     pub transport: Transport,
+    /// The dropout log's watch (`crate::dropout_log`), and whether the transport played at the last tick: a start is
+    /// logged.
+    #[cfg(target_os = "linux")]
+    audio_watch: crate::dropout_log::Watch,
+    #[cfg(target_os = "linux")]
+    audio_playing: bool,
     pub hits: Vec<Hit>,
     keep: Keep,
     /// Live regions from the last paint.
@@ -1528,6 +1534,10 @@ impl App {
         #[cfg(not(test))]
         let project = default_project();
         let mut app = App {
+            #[cfg(target_os = "linux")]
+            audio_watch: Default::default(),
+            #[cfg(target_os = "linux")]
+            audio_playing: false,
             plugins: crate::plugins::Plugins::default(),
             state: State {
                 project,
@@ -1745,6 +1755,25 @@ impl App {
         app
     }
 
+    /// The dropout log (`crate::dropout_log`): a playback starting, and dropouts with what the audio threads were then.
+    #[cfg(target_os = "linux")]
+    fn audio_log_tick(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let playing = self.transport.playing();
+        let context = |a: &App| format!("{} ({})", a.title(), crate::audio_cfg::AudioCfg::current().text().replace('\n', " ").trim());
+        if playing && !self.audio_playing {
+            crate::dropout_log::write(&format!("play: {}", context(self)));
+        }
+        self.audio_playing = playing;
+        let (_, demoted) = crate::rt::counts();
+        let drops = self.transport.drops().into();
+        if let Some(line) = self.audio_watch.check(drops, demoted, crate::rt::roles(), "") {
+            crate::dropout_log::write(&format!("{line}{}", context(self)));
+        }
+    }
+
     pub fn title(&self) -> String {
         let s = &self.state;
         let name = s.project.info.title.clone().filter(|t| !t.is_empty()).or_else(|| {
@@ -1835,6 +1864,11 @@ impl App {
                 self.state.control.settle(&mut self.state.project);
                 if let Some(f) = self.state.file.take() {
                     crate::lemon_state::apply(&mut self.state, &mut self.plugins, &f);
+                    // Saved by a version that has features this one does not: those parts do not play.
+                    let unknown = crate::lemon_state::unknown_features(&f);
+                    if !unknown.is_empty() {
+                        self.state.message = Some(format!("{}. This version doesn't play: {}", self.state.message.take().unwrap_or_default(), unknown.join(", ")));
+                    }
                     self.state.file = Some(f);
                 }
                 // The original's Patcher slots that are a plain serial chain open as containers (README.md slice 5).
@@ -2476,6 +2510,7 @@ impl App {
         }
         crate::osc3::store(&mut self.state.project, &self.plugins);
         crate::citrus::store(&mut self.state.project, &self.plugins);
+        crate::smith::store(&mut self.state.project, &self.plugins);
         crate::slicer::store(&mut self.state.project, &self.plugins);
         crate::drums::store(&mut self.state.project, &self.plugins);
     }
@@ -2568,6 +2603,7 @@ impl App {
         self.sync_wrapped();
         self.sync_osc3();
         self.sync_citrus();
+        self.sync_smith();
         self.sync_slicer();
         self.sync_drums();
         self.sync_native();
@@ -2710,6 +2746,7 @@ impl App {
             self.sync_osc3();
             self.follow_osc3_samples();
             self.sync_citrus();
+            self.sync_smith();
             self.sync_slicer();
             self.sync_drums();
             self.sync_native();
@@ -4260,6 +4297,8 @@ impl App {
         self.work_tick(now);
         self.song_info_tick(now);
         self.auto_close_tick(now);
+        #[cfg(target_os = "linux")]
+        self.audio_log_tick();
         // Audio ▸ CPU ▸ Auto-bypass when silent, for every slot whose own switch is on (spec: audio/auto-bypass.md).
         os_engine::engine::auto_bypass::set_enabled(crate::prefs::check(&crate::prefs::SMART_DISABLE));
         self.follow_settings();
@@ -9949,7 +9988,7 @@ pub(crate) fn add_plugin_channel(p: &mut Project, name: &str) -> usize {
     let row = add_channel(p);
     let ch = &mut p.channels[row];
     ch.kind = ChannelKind::Plugin;
-    // The built-in Lemon Trio is stored as the file's own 3x Osc, Citrus as its Sytrus.
+    // The built-in Lemon Trio is stored as the file's own 3x Osc, Citrus as its Sytrus, Smith as its Ogun.
     ch.plugin = Some(crate::osc3::file_name(name).to_string());
     ch.name = Some(name.to_string());
     row
@@ -15362,9 +15401,10 @@ mod tests {
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
-        // The all tab lists the roots with content, the preset store and the channel states, all closed.
+        // The all tab lists the roots with content, the preset store, the channel states and the user's projects, all
+        // closed.
         let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
-        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets", "Channel presets"]);
+        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets", "Channel presets", "My projects"]);
         // Project tab: Current project opened with its patterns (default like the screenshot), History above them.
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
         click(&mut app, &mut c, r0);
@@ -16617,7 +16657,7 @@ mod tests {
         // Esc clears the search and leaves the box.
         app.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(app.state.browser_search.is_empty() && !app.state.browser_search_focus);
-        assert_eq!(rows(&app.state).len(), 4);
+        assert_eq!(rows(&app.state).len(), 5);
         // Search box on top moves the list down.
         app.browser_cmd(crate::browser::BCmd::Toggle("top"));
         frame(&mut app, &mut c, None);
