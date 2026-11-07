@@ -1379,9 +1379,12 @@ pub fn wheel_move(app: &mut App, r: usize, notches: i32) {
         _ => r,
     };
     app.state.rack.select_only(r);
-    for _ in 0..notches.unsigned_abs() {
-        move_selected(app, -notches.signum());
-    }
+    // A "Move channel" step, as the menu's and Alt+Up / Down's moves are.
+    crate::control::edit_app(app, "Move channel", crate::control::command::Region::Project, |app| {
+        for _ in 0..notches.unsigned_abs() {
+            move_selected(app, -notches.signum());
+        }
+    });
     let now = app.state.rack.sel.first().copied().unwrap_or(r);
     app.state.rack.wheel_grab = Some((now, at));
 }

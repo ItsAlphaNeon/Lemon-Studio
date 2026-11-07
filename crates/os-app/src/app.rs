@@ -16845,6 +16845,10 @@ mod tests {
         app.wheel(0.0, 1.0, true, false);
         assert_eq!(order(&app)[..5], rows([0, 2, 1, 3, 4]), "the same channel, two rows up");
         assert_eq!(app.state.rack.sel, std::collections::BTreeSet::from([1]));
+        // Each move is a "Move channel" step, as the menu's: undo puts them back.
+        assert_eq!(app.state.history.newest_done(), Some("Move channel"));
+        while crate::history::undo(&mut app.state).is_some() {}
+        assert_eq!(order(&app), b, "undone back to the start");
         frame(&mut app, &mut c, None);
         let moved = order(&app);
         let name = hit_rect(&app, &Action::ChannelSelect(4));
