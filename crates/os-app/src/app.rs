@@ -1835,6 +1835,11 @@ impl App {
                 self.state.control.settle(&mut self.state.project);
                 if let Some(f) = self.state.file.take() {
                     crate::lemon_state::apply(&mut self.state, &mut self.plugins, &f);
+                    // Saved by a version that has features this one does not: those parts do not play.
+                    let unknown = crate::lemon_state::unknown_features(&f);
+                    if !unknown.is_empty() {
+                        self.state.message = Some(format!("{}. This version doesn't play: {}", self.state.message.take().unwrap_or_default(), unknown.join(", ")));
+                    }
                     self.state.file = Some(f);
                 }
                 // The original's Patcher slots that are a plain serial chain open as containers (README.md slice 5).

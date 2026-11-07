@@ -6,7 +6,9 @@
 //! design, spec: flp/lemon-format.md "LMex"): the icons chosen with Change icon..., the effect slots' names and colours,
 //! Performance mode's settings, the mixer's Plugin delay compensation ▸ Automatic and View ▸ checks, the plugin windows'
 //! Scaling ▸, the channels' Show waveform preview and MIDI channel through checks, Set keyboard focus of all plugins
-//! to ▸, the playlist tracks' locks to their clips and the Receive notes from ▸ locks. Each kind is one event; its
+//! to ▸, the playlist tracks' locks to their clips, the Receive notes from ▸ locks, and the features the project uses
+//! that a version without them cannot play (`FEATURES`: a version opening a file that names one it does not know
+//! says which parts it does not play). Each kind is one event; its
 //! payload starts with a layout version (1), and numbers are little-endian. Save writes them all (empty ones too, so a
 //! file saved again holds no stale state); an FLP target drops them with the rest of `LMex`. Open reads them back from
 //! a `.lemon` file only; an FLP's icons come from its icon numbers instead.
@@ -43,6 +45,48 @@ const MIDI_THROUGH: u8 = 2;
 const PATTERN: u8 = 0;
 const CLIP_CHANNEL: u8 = 1;
 
+/// The features a project can use that a Lemon Studio without them cannot play: one is named here when it is added,
+/// and [`used`] names it for a project that uses it. A build that opens a file naming one it does not know says so
+/// (`unknown_features`). None yet.
+pub const FEATURES: &[&str] = &[];
+
+/// The features of [`FEATURES`] that `s` uses.
+fn used(_s: &State) -> Vec<&'static str> {
+    Vec::new()
+}
+
+/// The features `file` names that this version does not know: the parts of the project it does not play.
+pub fn unknown_features(file: &os_flp::FlpFile) -> Vec<String> {
+    let Some(d) = lemon::data(file, lemon::FEATURES).filter(|d| d.first() == Some(&LAYOUT)) else { return Vec::new() };
+    let mut r = Reader(&d[1..]);
+    let mut out = Vec::new();
+    for _ in 0..r.u32().unwrap_or(0) {
+        let Some(len) = r.u16() else { break };
+        let Some(name) = r.take(usize::from(len)) else { break };
+        let name = String::from_utf8_lossy(name).into_owned();
+        if !FEATURES.contains(&name.as_str()) && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// [`lemon::FEATURES`]: a u32 count, then each name (u16 length, UTF-8). The features `s` uses, and those its file
+/// names that this version does not know: their parts are kept through a save, so the names stay too.
+fn features(s: &State) -> Event {
+    let mut names: Vec<String> = used(s).into_iter().map(String::from).collect();
+    if let Some(f) = &s.file {
+        names.extend(unknown_features(f));
+    }
+    let mut b = start(names.len());
+    for name in &names {
+        let name = &name.as_bytes()[..name.len().min(usize::from(u16::MAX))];
+        b.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        b.extend_from_slice(name);
+    }
+    Event::new(lemon::FEATURES, Value::var(b))
+}
+
 /// The `LMex` events holding the Lemon Studio state of `s` and `plugins`, in ID order. Set keyboard focus of all
 /// plugins to ▸ is written only where it works (Windows and macOS); elsewhere the file's own event is kept.
 pub fn events(s: &State, plugins: &Plugins) -> Vec<Event> {
@@ -51,6 +95,7 @@ pub fn events(s: &State, plugins: &Plugins) -> Vec<Event> {
     v.push(Event::new(lemon::KEY_FOCUS, Value::var([LAYOUT, u8::from(editor_keys())])));
     v.push(track_locks(s));
     v.push(note_locks(s));
+    v.push(features(s));
     v
 }
 
@@ -452,7 +497,7 @@ mod tests {
         want.extend([lemon::SCALING, lemon::CHANNEL_CHECKS]);
         #[cfg(any(windows, target_os = "macos"))]
         want.push(lemon::KEY_FOCUS);
-        want.extend([lemon::TRACK_LOCKS, lemon::NOTE_LOCKS]);
+        want.extend([lemon::TRACK_LOCKS, lemon::NOTE_LOCKS, lemon::FEATURES]);
         assert_eq!(ids, want);
         let mut back = App::new(None);
         back.open(path.clone());
@@ -655,6 +700,34 @@ mod tests {
         assert!(s.playlist.icons.is_empty() && s.mixer.slot_names.is_empty() && s.mixer.slot_colors.is_empty());
         let fresh = crate::playlist::PlaylistState::default();
         assert_eq!((s.playlist.perf_clip_progress, s.playlist.perf_velocity_subclips), (fresh.perf_clip_progress, fresh.perf_velocity_subclips));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A file naming a feature this version does not know opens saying that part does not play here; saved again,
+    /// it still names it (its part is kept, as unknown events are). A file of this version names none.
+    #[test]
+    fn features_this_version_does_not_know() {
+        let d = dir("features");
+        let path = d.join("Newer.lemon");
+        let mut app = with_state();
+        app.save_to(path.clone());
+        let file = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(lemon::data(&file, lemon::FEATURES), Some(vec![LAYOUT, 0, 0, 0, 0]), "none used");
+        let mut file = file;
+        let mut names = start(2);
+        for n in ["Tempo curves", "Clip stretching"] {
+            names.extend_from_slice(&(n.len() as u16).to_le_bytes());
+            names.extend_from_slice(n.as_bytes());
+        }
+        lemon::to_lemon(&mut file, &[Event::new(lemon::FEATURES, Value::var(names))]).unwrap();
+        std::fs::write(&path, file.to_bytes().unwrap()).unwrap();
+        let mut back = App::new(None);
+        back.open(path.clone());
+        let message = back.state.message.clone().unwrap_or_default();
+        assert!(message.ends_with("This version doesn't play: Tempo curves, Clip stretching"), "{message}");
+        back.save_to(path.clone());
+        let file = os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(unknown_features(&file), ["Tempo curves", "Clip stretching"], "kept through a save");
         let _ = std::fs::remove_dir_all(&d);
     }
 
