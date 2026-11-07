@@ -339,8 +339,10 @@ fn fx_state(st: &State) -> cs::State {
     for k in 0..7 {
         f.s[16 + k] = i[CHORUS + k];
     }
-    // Smith's chorus crossfades: its volume sets the wet path by the law the dry path reads backwards.
-    f.s[22] = round(128.0 * chorus_law(1.0 - f64::from(i[CHORUS + 6]) / 128.0)) as i32;
+    // Smith's chorus crossfades: its volume sets the wet path by the law the dry path reads backwards. Below 0 the wet
+    // path flips and the crossfade is that of the same volume above 0.
+    let volume = f64::from(i[CHORUS + 6]) / 128.0;
+    f.s[22] = round(128.0 * volume.signum() * chorus_law(1.0 - volume.abs())) as i32;
     f.s[24] = 0;
     f.delays[0] = cs::Delay {
         feedback: i[DELAY],
@@ -1746,7 +1748,7 @@ impl Smith {
                 dry[ch].clear();
                 fx[ch].clear();
             }
-            let keep = if self.patch.st.ints[CHORUS] > 0 { chorus_law(f64::from(self.patch.st.ints[CHORUS + 6]) / 128.0) as f32 } else { 1.0 };
+            let keep = if self.patch.st.ints[CHORUS] > 0 { chorus_law(f64::from(self.patch.st.ints[CHORUS + 6].abs()) / 128.0) as f32 } else { 1.0 };
             dry[0].extend(left.iter().map(|v| v * keep));
             dry[1].extend(right.iter().map(|v| v * keep));
             fx[0].extend_from_slice(left);
@@ -1768,6 +1770,19 @@ mod tests {
 
     fn note(key: i32, velocity: f32) -> NoteOn {
         NoteOn { levels: Levels { vol: 1.0, pan: 0.0, pitch: (key - 60) as f32 * 100.0, mod_x: 0.0, mod_y: 0.0 }, velocity }
+    }
+
+    /// A chorus volume below 0 is the same crossfade as above 0, with the wet path flipped.
+    #[test]
+    fn chorus_volume_below_zero_flips_the_wet_path() {
+        let wet = |v: i32| {
+            let mut st = State::default();
+            st.ints[CHORUS + 6] = v;
+            fx_state(&st).s[22]
+        };
+        assert_eq!(wet(-64), -wet(64));
+        assert_eq!(wet(64), 88);
+        assert_eq!(wet(0), 0);
     }
 
     /// A chord that would not fit in a block at RICH 16 starts over blocks, a note let go while it waits still sounds
