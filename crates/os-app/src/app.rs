@@ -5001,7 +5001,7 @@ impl App {
         let start = s.playlist.pos;
         let secs = s.playlist.wave(&path).map_or(0.0, |w| w.secs());
         let p = &s.project;
-        let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
+        let tempo = p.tick_tempo(s.tempo.max(1.0));
         let len = (secs * tempo / 60.0 * f64::from(p.ppq.max(1))).ceil() as u32;
         let track = crate::playlist::free_track(s, 0, start, start + len.max(1));
         let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

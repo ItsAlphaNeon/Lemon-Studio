@@ -66,7 +66,7 @@ impl LatUnit {
         match self {
             LatUnit::Ms => 1.0,
             LatUnit::Samples => 1000.0 / f64::from(crate::device::rate().unwrap_or(44100).max(1)),
-            LatUnit::Beats => 60000.0 / s.project.tempo.unwrap_or(140.0).max(1.0),
+            LatUnit::Beats => 60000.0 / s.tempo.max(1.0),
         }
     }
 }

@@ -411,7 +411,7 @@ impl App {
         self.start_playback_counted(bars);
         if bars > 0 && self.transport.playing() {
             let p = &self.state.project;
-            let tempo = p.tick_tempo(p.tempo.unwrap_or(140.0).max(1.0));
+            let tempo = p.tick_tempo(self.state.tempo.max(1.0));
             let beat = f64::from(p.beat_ticks()) / f64::from(p.ppq.max(1)) * 60.0 / tempo;
             let beats = bars * u32::from(p.bar().0.max(1));
             self.state.rec.count = Some(CountIn { from: std::time::Instant::now(), beat, beats });
@@ -1377,6 +1377,17 @@ mod tests {
     /// A mixer track's fader and pan, the tempo and a plugin's parameter record into the current pattern as control
     /// points on their targets, each in its setting's own unit (the plugin's parameter: its plain value in a whole
     /// range), in the take's one undo step; a dialog's knob records nothing (spec §2 Taking automation).
+    /// What is timed in beats follows the tempo playing, not the tempo the project was last opened or saved with.
+    #[test]
+    fn timing_follows_the_tempo_playing() {
+        let mut app = app();
+        app.state.project.tempo = Some(140.0);
+        app.state.tempo = 70.0;
+        let p = &app.state.project;
+        let at_70 = f64::from(p.ppq) * p.tick_tempo(70.0) / 60.0;
+        assert!((crate::score_log::ticks_per_second(&app.state) - at_70).abs() < 1e-9);
+    }
+
     #[test]
     fn records_mixer_controls_the_tempo_and_plugin_parameters() {
         use os_model::target;
