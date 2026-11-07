@@ -32,8 +32,9 @@ pub const MAX_NOTES: usize = 64;
 const RMS: f64 = 0.2114;
 /// The harmonics above line `n` go on to this many times the key's frequency.
 const TOP_U: f64 = 60.0;
-/// A note whose line `n` lies above this has no lines above it.
-const CUT_HZ: f64 = 19920.0;
+/// A note whose key lies above this has lines only up to its line `n` times this over its key. Line `n + 1` of any RICH is 32
+/// times the key, so that is 20 kHz.
+const CUT_KEY: f64 = 625.0;
 /// Key 60's frequency, which RICH 6 has as its fundamental.
 const F60: f64 = 523.251_130_6;
 /// The shortest time a line can take to fall by 40 dB, whatever its value and map.
@@ -285,23 +286,23 @@ fn line_table(c: &Curve, natural: bool) -> Vec<f32> {
     let last = c.points.len() - 1;
     let level = |i: usize| c.level(i, 0.0, 0.0, true) as f32;
     // The segment ending on point `i`, from `start` to `end`.
-    let (mut i, mut start, mut end) = (0usize, 0.0f64, f64::from(c.points[0].dist));
+    let (mut i, mut start, mut end) = (0usize, 0.0f32, c.points[0].dist as f32);
     let mut t = Vec::with_capacity(LINE_END + 1);
     t.push(level(0));
     for k in 1..=LINE_END {
         let k = k as f64;
         let x = if natural { (k.log2() / 15.0).min(1.0) } else { ((k - 1.0) / MAX_LINE as f64).min(1.0) };
-        // Compared in single: a line on a step takes the step's upper side.
-        while i < last && end as f32 <= x as f32 {
+        // The places add up in single, and compare in single: a line on a step takes the step's upper side.
+        while i < last && end <= x as f32 {
             i += 1;
             start = end;
-            end += f64::from(c.points[i].dist);
+            end += c.points[i].dist as f32;
         }
-        t.push(if i == 0 || end as f32 <= x as f32 {
+        t.push(if i == 0 || end <= x as f32 {
             level(i)
         } else {
             let from = level(i - 1);
-            from + c.progress(i, ((x - start) / (end - start)).clamp(0.0, 1.0)) * (level(i) - from)
+            from + c.progress(i, ((x - f64::from(start)) / f64::from(end - start)).clamp(0.0, 1.0)) * (level(i) - from)
         });
     }
     t
@@ -691,9 +692,10 @@ impl Note {
         // other runs on, and what lies past Nyquist folds back.
         let pitch_moves = st.arts[A_PITCH].env.enabled || st.arts[A_PITCH].lfo.enabled;
         let upper = if r <= 9 { lines_n } else { ((TOP_U * f64::from(r - 6).exp2()) as usize).min(MAX_TOP) };
-        let folds = lines_n as f64 * f0 <= CUT_HZ;
+        let folds = f_key <= CUT_KEY;
         let nyquist = if folds { usize::MAX } else { (0.5 * ctx.rate / f0) as usize };
-        let cut = if folds { upper } else { (CUT_HZ / f0) as usize };
+        let below_cut = ((lines_n as f64 * (CUT_KEY / f_key)) as usize).clamp(1, lines_n);
+        let cut = if folds { upper } else { below_cut };
         let reach = if pitch_moves { cut.saturating_mul(4) } else { cut };
         let top = upper.min(reach).max(1);
         // The level counts every line up to `n`, heard or not. A flat impulse map with no comb leaves the spectrum as the
@@ -804,7 +806,6 @@ impl Note {
         // Where the note starts in its wave: the search reads the lines up to `n` as they are at the end of the first frame.
         let start = {
             let (plain, fade) = (tau_dec * LN100, (-span / tau_dec).exp());
-            let lines = if lines_n as f64 * f0 > CUT_HZ { (CUT_HZ / f0) as usize } else { lines_n };
             let look = |k: usize| -> f64 {
                 let level = f64::from(a[k]);
                 if alt {
@@ -816,7 +817,7 @@ impl Note {
                     level
                 }
             };
-            start_place(r, lines.clamp(1, lines_n), look, spare)
+            start_place(r, below_cut, look, spare)
         };
 
         let droops = droops();
@@ -1633,6 +1634,10 @@ impl Smith {
         let ctx = Self::ctx(&self.patch, &self.svf, self.rate, self.big_b, self.seconds, self.tempo, self.offline, self.kf, self.ramp_a);
         let knobs = [f64::from(self.patch.st.ints[MOD_X]), f64::from(self.patch.st.ints[MOD_Y])];
         let note = Note::new(&ctx, n, id, self.previous, knobs, self.salt, &mut self.spare);
+        // A note whose lines fall apart made two tables, the second on the credit of the blocks to come.
+        if note.two && !self.offline {
+            self.start_credit -= start_cost(self.patch.st.ints[RICH]);
+        }
         if self.patch.st.one_voice {
             for other in self.notes.iter_mut().filter(|o| o.key == note.key && !o.released) {
                 other.release(&ctx, &mut self.start_credit);
@@ -1837,12 +1842,46 @@ mod tests {
         assert_eq!(wet(0), 0);
     }
 
+    /// A note whose lines fall apart makes two tables at its start, and pays for both.
+    #[test]
+    fn a_note_with_two_tables_costs_two() {
+        let mut st = flat();
+        st.ints[RICH] = 12;
+        st.ints[DEC] = 3000;
+        st.finals[M_DECAY].points[0].level = 1.0;
+        let mut s = Smith::new(48000);
+        s.set_patch(Patch::new(st));
+        s.start_credit = 100_000.0;
+        s.note_on(note(60, 0.8));
+        assert!(s.notes[0].two);
+        assert_eq!(s.start_credit, 100_000.0 - 2.0 * start_cost(12));
+    }
+
+    /// At or below 625 Hz a note's lines run on to their top, past Nyquist; above it they stop at `n * 625 / key`. The last
+    /// three are the lines Ogun's start reads at RICH 12.
+    #[test]
+    fn the_lines_stop_at_a_cut_on_the_key() {
+        let top = |key: i32| {
+            let mut st = flat();
+            st.ints[RICH] = 12;
+            let mut s = Smith::new(44100);
+            s.set_patch(Patch::new(st));
+            s.note_on(note(key, 0.8));
+            s.notes[0].top
+        };
+        assert_eq!(top(62), 3840);
+        assert_eq!(top(67), 1631);
+        assert_eq!(top(70), 1372);
+        assert_eq!(top(74), 1089);
+    }
+
     /// A chord that would not fit in a block at RICH 16 starts over blocks, a note let go while it waits still sounds
     /// and ends, and offline every note starts at once.
     #[test]
     fn a_big_chord_starts_over_blocks() {
         let mut st = State::default();
         st.ints[RICH] = 16;
+        st.ints[DEC] = 10000;
         let mut s = Smith::new(48000);
         s.set_patch(Patch::new(st.clone()));
         let ids: Vec<u64> = (0..3).map(|k| s.note_on(note(60 + k, 0.8))).collect();
