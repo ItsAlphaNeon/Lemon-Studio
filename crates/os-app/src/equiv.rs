@@ -462,22 +462,40 @@ impl Rig {
             let d = a.iter().zip(&b).find(|(x, y)| x != y).map_or("length".into(), |(x, y)| format!("{}:{}->{}", x.0, short(&x.1), short(&y.1)));
             bad.push(format!("redo-to-end(side:{d})"));
         }
-        // A saved copy opens as the same project.
+        // A saved copy opens as the same project: the project as save writes it (the tempo, song mode and rack state
+        // the interface holds go in at save) against the one opened again, and the interface's part of it too.
         let copy = work.join("roundtrip.flp");
         match self.app.save_copy_with(copy.clone(), &mut |_| {}) {
             Some(Ok(())) => {
-                let mut again = App::new(None);
-                again.plugins = crate::plugins::Plugins::default();
-                again.plugins.available = crate::plugins::builtin();
-                again.plugins.effects = crate::plugins::builtin_effects();
-                again.open(copy);
-                let t0 = Instant::now();
-                while again.loading() && t0.elapsed() < Duration::from_secs(180) {
-                    again.tick();
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                if let Some(d) = difference(&self.app.state.project, &again.state.project, true) {
+                let mut again = open_app(&copy);
+                let mut written = self.app.state.project.clone();
+                let s = &self.app.state;
+                written.tempo = Some(s.tempo);
+                written.song_mode = Some(s.song_mode);
+                if let Some(d) = difference(&written, &again.state.project, true) {
                     bad.push(format!("roundtrip({d})"));
+                }
+                let (a, b) = (side(&self.app), side(&again));
+                if a != b {
+                    let (a, b) = (leaves(&a), leaves(&b));
+                    let d = a.iter().zip(&b).find(|(x, y)| x != y).map_or("length".into(), |(x, y)| format!("{}:{}->{}", x.0, short(&x.1), short(&y.1)));
+                    bad.push(format!("roundtrip(side:{d})"));
+                }
+                // Saving what was opened again writes the same project: nothing drifts from save to save.
+                let second = work.join("roundtrip2.flp");
+                match again.save_copy_with(second.clone(), &mut |_| {}) {
+                    Some(Ok(())) => {
+                        let model = |p: &Path| std::fs::read(p).ok().and_then(|b| os_flp::FlpFile::parse(&b).ok()).and_then(|f| os_flp::project::load(&f).ok());
+                        match (model(&copy), model(&second)) {
+                            (Some(x), Some(y)) => {
+                                if let Some(d) = difference(&x, &y, false) {
+                                    bad.push(format!("resave({d})"));
+                                }
+                            }
+                            _ => bad.push("resave(unreadable)".into()),
+                        }
+                    }
+                    other => bad.push(format!("resave-failed({other:?})")),
                 }
             }
             other => bad.push(format!("save-failed({other:?})")),
@@ -485,6 +503,21 @@ impl Rig {
         // One word each: a trace keeps them on one line.
         bad.into_iter().map(|b| b.split_whitespace().collect::<Vec<_>>().join("_")).collect()
     }
+}
+
+/// A second app with `path` opened, as the rig opens (builtin plugins only), loading waited for.
+fn open_app(path: &Path) -> App {
+    let mut a = App::new(None);
+    a.plugins = crate::plugins::Plugins::default();
+    a.plugins.available = crate::plugins::builtin();
+    a.plugins.effects = crate::plugins::builtin_effects();
+    a.open(path.to_path_buf());
+    let t0 = Instant::now();
+    while a.loading() && t0.elapsed() < Duration::from_secs(180) {
+        a.tick();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    a
 }
 
 /// The leaves of a value's pretty debug form, each with its path (`channels[3].volume`).
