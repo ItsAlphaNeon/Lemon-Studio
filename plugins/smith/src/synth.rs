@@ -34,16 +34,12 @@ const RMS: f64 = 0.2114;
 const TOP_U: f64 = 60.0;
 /// A note whose line `n` lies above this has no lines above it.
 const CUT_HZ: f64 = 19920.0;
-/// How long after a note's end its lines take up the release's rates, in seconds.
-const RELEASE_LATE: f64 = 0.05;
 /// Key 60's frequency, which RICH 6 has as its fundamental.
 const F60: f64 = 523.251_130_6;
 /// The shortest time a line can take to fall by 40 dB, whatever its value and map.
 const TIME_FLOOR: f64 = 0.025;
 /// The smallest value PRE 1000 reads a line at.
 const PRE_FLOOR: f64 = 1.0 / 600.0;
-/// How far into its decay the table is that a note looks for its start on, in seconds.
-const START_LOOK: f64 = 0.05;
 /// A note below this level has ended.
 const SILENCE: f64 = 1e-5;
 const LN100: f64 = 4.605_170_185_988_09;
@@ -590,14 +586,10 @@ fn hermite(t: &[f32], i: usize, f: f32) -> f32 {
     ((a * f - b) * f + c) * f + w[1]
 }
 
-/// The frames' base length at RICH `r`, at 44.1 kHz.
-fn frame_base(r: i32, quality: i32) -> f64 {
-    let base = match r {
-        ..=12 => 1024.0,
-        13 => 2048.0,
-        _ => 4096.0,
-    };
-    base * [2.0, 1.0, 0.5, 0.25, 0.125][quality.clamp(0, 4) as usize]
+/// A frame's length in samples: a note's level goes in a straight line from one frame's end to the next.
+fn frame_len(quality: i32, rate: f64) -> usize {
+    let seconds = if quality >= 3 { 0.025 } else { 0.05 };
+    (seconds * rate).round().max(1.0) as usize
 }
 
 /// A note's table length for `top` lines.
@@ -618,15 +610,15 @@ struct Note {
     finished: bool,
     first: bool,
     block_left: usize,
-    /// Control blocks until the release's rates take over; 0 when none is due.
-    release_wait: usize,
+    /// The note's end waits for the frame's end: the audio thread had no time to finish its next table.
+    release_due: bool,
     arts: Vec<ArtRun>,
     mod_now: [f64; 2],
     // Spectrum.
     r: i32,
     top: usize,
-    /// Amplitude per line, with the common decay kept out, this frame's factor per line, the line's value (1 with no seed),
-    /// and (alt decay) what the line settles at.
+    /// The lines of the table being made, with the fall they share kept out; each frame's factor per line; the line's value
+    /// (1 with no seed); and (alt decay) what the line settles at.
     a: Vec<f32>,
     fac: Vec<f32>,
     gb: Vec<f32>,
@@ -636,32 +628,38 @@ struct Note {
     tau_rel: f64,
     shift: f64,
     // Decay.
-    common_rate: f64,
-    common: f64,
-    is_static: bool,
     alt_on: bool,
+    /// What the lines' shared fall does to the level in a frame.
+    step: f64,
+    /// The lines fall at rates of their own, so each frame needs a table.
+    shaped: bool,
+    /// The level moves, so frames run.
+    running: bool,
     // Tables.
     plan: Arc<Plan>,
     ifft: Option<Ifft>,
     spec: Vec<Cpx>,
     ta: Vec<f32>,
     tb: Vec<f32>,
-    /// The next table's first step applies the frame's factor this many times.
-    steps_next: u32,
-    /// The first frame reads only `ta`.
-    hold: bool,
-    frame_blocks: usize,
-    frame_left: usize,
+    /// Scales of `ta`, of `tb`, and of the table being made. A frame fades from `ta * sa` to `tb * sb`, or from `ta * sa`
+    /// to `ta * sb` when `two` is false.
+    sa: f64,
+    sb: f64,
+    sn: f64,
+    two: bool,
+    /// `ifft` is making the table after `tb`.
+    building: bool,
     passes_done: usize,
-    loaded: bool,
-    w: f32,
-    dw: f32,
+    frame: usize,
+    frame_at: usize,
     // Output.
     uni: Vec<UniVoice>,
     gain: f64,
     dgain: f64,
+    /// Declick: samples into its opening, how long that takes, and what the filter holds per channel.
     declick: usize,
     declick_len: usize,
+    declick_held: [f32; 2],
     filters: Option<[FilterRun; 2]>,
     f_key: (i32, i32, bool),
     inputs: Inputs,
@@ -796,9 +794,12 @@ impl Note {
         let tau_dec = if st.ints[DEC] >= 10000 { f64::INFINITY } else { time(DEC, A_DEC) / LN100 };
         let tau_rel = time(REL, A_REL) / LN100;
 
-        // Where the note starts in its wave: the search reads the lines up to `n` as they will be a little into the decay.
+        let quality = if ctx.offline { 4 } else { st.quality };
+        let frame = frame_len(quality, ctx.rate);
+        let span = frame as f64 / ctx.rate;
+        // Where the note starts in its wave: the search reads the lines up to `n` as they are at the end of the first frame.
         let start = {
-            let (plain, fade) = (tau_dec * LN100, (-START_LOOK / tau_dec).exp());
+            let (plain, fade) = (tau_dec * LN100, (-span / tau_dec).exp());
             let lines = if lines_n as f64 * f0 > CUT_HZ { (CUT_HZ / f0) as usize } else { lines_n };
             let look = |k: usize| -> f64 {
                 let level = f64::from(a[k]);
@@ -806,7 +807,7 @@ impl Note {
                     let s = f64::from(settle[k]);
                     s + (level - s) * fade
                 } else if tau_dec.is_finite() {
-                    level * exact_exp(-LN100 * START_LOOK / line_time(plain, patch.time_factor(M_DECAY, k, shift), g[k]))
+                    level * exact_exp(-LN100 * span / line_time(plain, patch.time_factor(M_DECAY, k, shift), g[k]))
                 } else {
                     level
                 }
@@ -856,7 +857,6 @@ impl Note {
         }
 
         // The first table.
-        let quality = if ctx.offline { 4 } else { st.quality };
         let len = table_len(top, quality);
         let plan = plan_for(len);
         let mut ifft = match spare.iffts.iter().position(|f| f.len() == len) {
@@ -878,7 +878,8 @@ impl Note {
         for u in &mut uni {
             u.pos = (u.pos + start * len as f64).rem_euclid(len as f64);
         }
-        let declick_len = if st.declick { (0.002 * ctx.rate) as usize } else { 0 };
+        // The filter opens over a time that grows with the square of the rate, as measured from 22.05 to 192 kHz.
+        let declick_len = if st.declick { (96.0 * (ctx.rate / 44100.0).powi(2)).round() as usize } else { 0 };
 
         let fac = spare.lines.pop().unwrap_or_default();
         let mut note = Note {
@@ -890,7 +891,7 @@ impl Note {
             finished: false,
             first: true,
             block_left: 0,
-            release_wait: 0,
+            release_due: false,
             arts,
             mod_now: knob_mods,
             r,
@@ -903,10 +904,10 @@ impl Note {
             tau_dec,
             tau_rel,
             shift,
-            common_rate: 0.0,
-            common: 1.0,
-            is_static: true,
             alt_on: alt,
+            step: 1.0,
+            shaped: false,
+            running: false,
             plan,
             ifft: Some(ifft),
             spec,
@@ -915,19 +916,20 @@ impl Note {
                 t.clear();
                 t
             }).unwrap_or_default(),
-            steps_next: 2,
-            hold: true,
-            frame_blocks: 1,
-            frame_left: 0,
+            sa: 1.0,
+            sb: 1.0,
+            sn: 1.0,
+            two: false,
+            building: false,
             passes_done: 0,
-            loaded: false,
-            w: 0.0,
-            dw: 0.0,
+            frame,
+            frame_at: 0,
             uni,
             gain: 0.0,
             dgain: 0.0,
             declick: 0,
             declick_len,
+            declick_held: [0.0; 2],
             filters: None,
             f_key: (-1, -1, false),
             inputs: Inputs::default(),
@@ -936,21 +938,23 @@ impl Note {
             patch,
         };
         note.set_rates(ctx, false);
+        note.first_frame(ctx);
         note
     }
 
-    /// Works out the rates of the phase: what is common goes to the gain, the rest to the per-line factors.
+    /// Works out what a frame does in this phase: what the lines share goes to the table's scale, the rest to the per-line
+    /// factors.
     fn set_rates(&mut self, ctx: &Ctx, release: bool) {
         let tau = if release { self.tau_rel } else { self.tau_dec };
         let which = if release { M_RELEASE } else { M_DECAY };
         self.alt_on = !release && self.patch.st.alt_decay;
-        let quality = if ctx.offline { 4 } else { self.patch.st.quality };
-        let base = (frame_base(self.r, quality) * ctx.rate / 44100.0).max(256.0);
+        self.step = 1.0;
+        self.shaped = false;
         if !tau.is_finite() {
-            self.common_rate = 0.0;
-            self.is_static = true;
             return;
         }
+        self.running = true;
+        let span = self.frame as f64 / ctx.rate;
         let top = self.top;
         self.fac.clear();
         self.fac.resize(top + 1, 1.0);
@@ -971,84 +975,135 @@ impl Note {
         if !low.is_finite() {
             low = 1.0 / tau;
         }
-        self.common_rate = if self.alt_on { 0.0 } else { low };
-        // The energy-weighted extra rate sets the frame.
-        let (mut sum_e, mut sum_p) = (0.0f64, 0.0f64);
         let mut any = self.alt_on;
         for k in 1..=top {
             let e = (f64::from(rates[k]) - low).max(0.0);
             rates[k] = e as f32;
-            let p = f64::from(self.a[k]) * f64::from(self.a[k]);
-            sum_e += p * e;
-            sum_p += p;
-            if e * base / ctx.rate > 1e-5 && self.a[k] >= floor {
+            if e * span > 1e-5 && self.a[k] >= floor {
                 any = true;
             }
         }
-        let mean = if sum_p > 0.0 { sum_e / sum_p } else { 0.0 };
-        let mut frame = base;
-        if mean > 0.0 {
-            frame = frame.min(0.5 * ctx.rate / mean);
-        }
-        let pitch_moves = self.patch.st.arts[A_PITCH].env.enabled || self.patch.st.arts[A_PITCH].lfo.enabled;
-        if pitch_moves {
-            frame = frame.min(1024.0 * ctx.rate / 44100.0);
-        }
-        if self.alt_on {
-            frame = frame.min((tau * 0.25 * ctx.rate).max(256.0));
-        }
-        let frame = frame.max(256.0);
-        let blocks = ((frame / ctx.big_b as f64).round() as usize).max(1);
-        let span = (blocks * ctx.big_b) as f64 / ctx.rate;
         if self.alt_on {
             let f = (-span / tau).exp() as f32;
             rates.iter_mut().for_each(|v| *v = f);
         } else {
+            self.step = (-low * span).exp();
             for v in rates.iter_mut() {
                 *v = (-f64::from(*v) * span).exp() as f32;
             }
         }
         self.fac = rates;
-        let was_static = self.is_static;
-        // Once fading, a note keeps fading (the fade in progress must end).
-        self.is_static = !any && was_static;
-        self.frame_blocks = blocks;
-        if self.is_static {
+        self.shaped = any;
+    }
+
+    /// The frames from the note's start: the first fades to the lines at its end, which a note needs to play at all.
+    fn first_frame(&mut self, ctx: &Ctx) {
+        if !self.running {
             return;
         }
-        if was_static || self.tb.is_empty() {
-            // Starts moving: this frame holds the table in use, the next one reaches for two frames on.
-            self.hold = true;
-            self.steps_next = 2;
-            self.frame_left = blocks;
-            self.loaded = false;
-            self.passes_done = 0;
-        } else if self.frame_left > blocks {
-            self.frame_left = blocks;
+        self.sb = self.step;
+        if self.shaped {
+            self.make_lines(ctx);
+            let ifft = self.ifft.as_mut().expect("a note's first table has been made");
+            ifft.finish();
+            guarded(ifft, &mut self.tb);
+            self.two = true;
+            self.building = false;
+        }
+        self.next_table(ctx);
+    }
+
+    /// One step of the lines, loaded for making into a table.
+    fn make_lines(&mut self, ctx: &Ctx) {
+        self.step_lines(1);
+        let nyquist = (0.5 * ctx.rate / (self.f0 * self.widest())) as usize;
+        let top = self.top;
+        self.top_now = fill_spec(&mut self.spec, &self.a, top, nyquist, self.r);
+        let ifft = self.ifft.get_or_insert_with(|| Ifft::new(self.plan.clone()));
+        ifft.load(&self.spec[..=self.top_now]);
+        self.building = true;
+        self.passes_done = 0;
+    }
+
+    /// Starts the table for after `tb`, if the lines need one.
+    fn next_table(&mut self, ctx: &Ctx) {
+        self.sn = self.sb * self.step;
+        if self.shaped {
+            self.make_lines(ctx);
         }
     }
 
-    /// Runs a share of the next table's work, finishing the table at the frame's end.
-    fn table_work(&mut self, ctx: &Ctx) {
-        if self.is_static {
+    /// `tb` takes the table that has been made, if one has.
+    fn take_table(&mut self) {
+        if self.building {
+            if let Some(ifft) = &mut self.ifft {
+                ifft.finish();
+                guarded(ifft, &mut self.tb);
+                self.two = true;
+            }
+            self.building = false;
+        }
+        self.sb = self.sn;
+    }
+
+    /// A frame ends: the next fades from where this one ended.
+    fn knot(&mut self, ctx: &Ctx) {
+        if self.two {
+            std::mem::swap(&mut self.ta, &mut self.tb);
+            self.two = false;
+        }
+        self.sa = self.sb;
+        self.take_table();
+        self.frame_at = 0;
+        if self.release_due {
+            self.release_due = false;
+            self.set_rates(ctx, true);
+        }
+        self.next_table(ctx);
+    }
+
+    /// What finishing the table in the making takes, in lines.
+    fn table_cost(&self) -> f64 {
+        match (&self.ifft, self.building) {
+            (Some(ifft), true) => self.top as f64 * (1.0 - self.passes_done as f64 / ifft.passes().max(1) as f64),
+            _ => 0.0,
+        }
+    }
+
+    /// The lines take up the release's rates. A new frame starts now from where the level is, and fades to the table made
+    /// next under the old rates: only after it do the new rates sound. With no time for the table, the note takes them up
+    /// at the frame's end.
+    fn take_release(&mut self, ctx: &Ctx, credit: &mut f64) {
+        let cost = self.table_cost();
+        if *credit < cost {
+            self.release_due = true;
             return;
         }
-        if !self.loaded {
-            let steps = self.steps_next;
-            self.steps_next = 1;
-            self.step_lines(steps);
-            let nyquist = (0.5 * ctx.rate / (self.f0 * self.widest())) as usize;
-            let top = self.top;
-            self.top_now = fill_spec(&mut self.spec, &self.a, top, nyquist, self.r);
-            let ifft = self.ifft.get_or_insert_with(|| Ifft::new(self.plan.clone()));
-            ifft.load(&self.spec[..=self.top_now]);
-            self.loaded = true;
-            self.passes_done = 0;
+        *credit -= cost;
+        let w = self.frame_at as f64 / self.frame as f64;
+        if self.two {
+            let (ca, cb) = ((self.sa * (1.0 - w)) as f32, (self.sb * w) as f32);
+            for (x, &y) in self.ta.iter_mut().zip(&self.tb) {
+                *x = *x * ca + y * cb;
+            }
+            self.sa = 1.0;
+        } else {
+            self.sa += (self.sb - self.sa) * w;
+        }
+        self.take_table();
+        self.frame_at = 0;
+        self.set_rates(ctx, true);
+        self.next_table(ctx);
+    }
+
+    /// Runs a share of the next table's work, finishing the table by the frame's end.
+    fn table_work(&mut self, ctx: &Ctx) {
+        if !self.building {
+            return;
         }
         let Some(ifft) = &mut self.ifft else { return };
         let total = ifft.passes();
-        let share = self.frame_blocks.saturating_sub(self.frame_left) + 1;
-        let due = (total * share).div_ceil(self.frame_blocks).min(total);
+        let due = (total * (self.frame_at + ctx.big_b)).div_ceil(self.frame).min(total);
         while self.passes_done < due && !ifft.done() {
             ifft.pass();
             self.passes_done += 1;
@@ -1088,7 +1143,7 @@ impl Note {
     }
 
     /// The control block's work.
-    fn control(&mut self, ctx: &Ctx) {
+    fn control(&mut self, ctx: &Ctx, credit: &mut f64) {
         let live = &ctx.patch.st;
         let dt = if self.first { 0.0 } else { 1.0 };
         // Mod X and Y.
@@ -1107,22 +1162,16 @@ impl Note {
         for (a, run) in self.arts.iter_mut().enumerate() {
             values[a] = run.advance(&patch, a, dt, idx);
         }
-        if self.release_wait > 0 {
-            self.release_wait -= 1;
-            if self.release_wait == 0 {
-                self.set_rates(ctx, true);
-            }
-        }
         // Link timbre release to volume decay.
         if live.link_release && !self.timbre_released && self.arts[A_VOLUME].env_on && self.arts[A_VOLUME].env.passed_decay {
             self.timbre_released = true;
-            self.release_wait = ((RELEASE_LATE * ctx.rate / ctx.big_b as f64).round() as usize).max(1);
+            self.take_release(ctx, credit);
         }
         // Pitch. The key and velocity maps move it four times as far as the X and Y maps, the envelope and the LFO.
         let fixed = f64::from(self.arts[A_PITCH].fixed);
         let moving = f64::from(values[A_PITCH]) - fixed;
         let cents = f64::from(self.levels.pitch) + 100.0 * f64::from(live.ints[COARSE]) + f64::from(live.ints[FINE]) + fixed * 4800.0 + moving * 1200.0;
-        let f0 = 523.25 * (cents / 1200.0).exp2() * f64::from(6 - self.r).exp2();
+        let f0 = F60 * (cents / 1200.0).exp2() * f64::from(6 - self.r).exp2();
         self.f0 = f0;
         let len = self.plan.len as f64;
         let base = f0 * len / ctx.rate;
@@ -1139,9 +1188,8 @@ impl Note {
             }
         }
         // The gain.
-        self.common *= (-self.common_rate * ctx.seconds).exp();
         let level = c3(f64::from(live.ints[LEVEL]) / 128.0);
-        let target = level * f64::from(self.levels.vol) * f64::from(values[A_VOLUME]).max(0.0) * self.common;
+        let target = level * f64::from(self.levels.vol) * f64::from(values[A_VOLUME]).max(0.0);
         if self.first {
             self.gain = target;
             self.dgain = 0.0;
@@ -1156,7 +1204,7 @@ impl Note {
                 let mut h = [0i32; 10];
                 h[0] = fk.1;
                 let kind = [3u8, 4, 5, 6][fk.0 as usize];
-                let make = || FilterRun::new(h, kind, false, fk.2, ctx.rate as u32, 1.0);
+                let make = || FilterRun::new(h, kind, true, fk.2, ctx.rate as u32, 1.0);
                 [make(), make()]
             });
         }
@@ -1167,64 +1215,44 @@ impl Note {
             ..Inputs::default()
         };
         // The tables.
-        if !self.is_static {
-            if self.frame_left == 0 {
-                self.frame_left = self.frame_blocks;
-                self.next_frame();
-            }
-            self.table_work(ctx);
-            self.dw = if self.hold { 0.0 } else { (1.0 - self.w) / (self.frame_left * ctx.big_b) as f32 };
-            self.frame_left -= 1;
-        } else {
-            self.dw = 0.0;
-        }
+        self.table_work(ctx);
         // The end: the volume envelope after the release, or silence.
         let vol_done = self.arts[A_VOLUME].env_on && self.arts[A_VOLUME].env.finished();
-        let quiet = target.abs() * self.power.sqrt() < SILENCE && !self.first;
-        if (self.released && vol_done) || (quiet && (self.released || self.common < 1e-3 || self.power < 1e-12)) {
+        let quiet = target.abs() * self.sb.max(self.sa) * self.power.sqrt() < SILENCE && !self.first;
+        if (self.released && vol_done) || (quiet && (self.released || self.sb < 1e-3 || self.power < 1e-12)) {
             self.finished = true;
         }
         self.first = false;
-    }
-
-    /// A frame ends: the wave being built becomes the fade's target.
-    fn next_frame(&mut self) {
-        // Reach this only at a frame's end, with the fade done.
-        let Some(ifft) = &mut self.ifft else { return };
-        ifft.finish();
-        if self.hold {
-            // The held table stays the source; the new one is the first target.
-            guarded(ifft, &mut self.tb);
-            self.hold = false;
-        } else {
-            std::mem::swap(&mut self.ta, &mut self.tb);
-            guarded(ifft, &mut self.tb);
-        }
-        self.w = 0.0;
-        self.loaded = false;
-        self.passes_done = 0;
     }
 
     /// Sums `m` frames into `l` and `r` (which hold 0s), gain and filter applied.
     fn mix(&mut self, ctx: &Ctx, l: &mut [f32], r: &mut [f32]) {
         let m = l.len();
         let len = self.plan.len as f64;
-        let fade = !self.hold && !self.tb.is_empty() && !self.is_static;
+        let fade = self.two;
         let single = self.uni.len() == 1;
-        let (w0, dw) = (self.w, self.dw);
+        // Where the frame is: the level goes in a straight line.
+        let dw = 1.0 / self.frame as f64;
+        let w0 = self.frame_at as f64 * dw;
+        let (ca, dca, cb, dcb) = (
+            (self.sa * (1.0 - w0)) as f32,
+            (-self.sa * dw) as f32,
+            (self.sb * w0) as f32,
+            (self.sb * dw) as f32,
+        );
         let (ta, tb) = (&self.ta[..], &self.tb[..]);
         for u in self.uni.iter_mut() {
             let (mut pos, mut inc) = (u.pos, u.inc);
             let dinc = u.dinc;
             let (gl, gr) = (u.gl, u.gr);
-            let mut w = w0;
             if fade {
                 for j in 0..m {
                     let i = pos as usize;
                     let f = (pos - i as f64) as f32;
                     let a = hermite(ta, i, f);
                     let b = hermite(tb, i, f);
-                    let v = a + (b - a) * w;
+                    let at = j as f32;
+                    let v = a * (ca + dca * at) + b * (cb + dcb * at);
                     l[j] += v * gl;
                     r[j] += v * gr;
                     pos += inc;
@@ -1232,7 +1260,6 @@ impl Note {
                         pos -= len;
                     }
                     inc += dinc;
-                    w += dw;
                 }
             } else if single {
                 for x in l.iter_mut() {
@@ -1263,17 +1290,25 @@ impl Note {
             u.pos = pos;
             u.inc = inc;
         }
-        self.w += dw * m as f32;
-        // The gain, with the fade-in.
+        if self.running {
+            self.frame_at += m;
+        }
+        // The gain. One table takes its frame's line here. Declick: a one-pole filter that opens from shut.
+        let (c0, dc) = if fade { (1.0, 0.0) } else { (ca + cb, dca + dcb) };
         let (mut g, dg) = (self.gain, self.dgain);
         for j in 0..m {
-            let mut v = g as f32;
-            if self.declick < self.declick_len {
-                v *= self.declick as f32 / self.declick_len as f32;
-                self.declick += 1;
-            }
+            let v = g as f32 * (c0 + dc * j as f32);
             l[j] *= v;
             r[j] *= v;
+            if self.declick < self.declick_len {
+                let open = self.declick as f32 / self.declick_len as f32;
+                let [hl, hr] = &mut self.declick_held;
+                *hl += open * (l[j] - *hl);
+                *hr += open * (r[j] - *hr);
+                l[j] = *hl;
+                r[j] = *hr;
+                self.declick += 1;
+            }
             g += dg;
         }
         self.gain = g;
@@ -1284,7 +1319,7 @@ impl Note {
         }
     }
 
-    fn release(&mut self, ctx: &Ctx) {
+    fn release(&mut self, ctx: &Ctx, credit: &mut f64) {
         if self.released {
             return;
         }
@@ -1294,10 +1329,9 @@ impl Note {
             run.env.release(&art.env);
             run.lfo.walk.release(&art.lfo);
         }
-        // The lines keep their rates a moment after the note ends.
         if !self.timbre_released {
             self.timbre_released = true;
-            self.release_wait = ((RELEASE_LATE * ctx.rate / ctx.big_b as f64).round() as usize).max(1);
+            self.take_release(ctx, credit);
         }
     }
 }
@@ -1596,7 +1630,7 @@ impl Smith {
         let note = Note::new(&ctx, n, id, self.previous, knobs, self.salt, &mut self.spare);
         if self.patch.st.one_voice {
             for other in self.notes.iter_mut().filter(|o| o.key == note.key && !o.released) {
-                other.release(&ctx);
+                other.release(&ctx, &mut self.start_credit);
             }
         }
         self.previous = Some(n.levels.pitch);
@@ -1612,16 +1646,20 @@ impl Smith {
             w.released = true;
         }
         let ctx = Self::ctx(&self.patch, &self.svf, self.rate, self.big_b, self.seconds, self.tempo, self.offline, self.kf, self.ramp_a);
+        let mut none = f64::INFINITY;
+        let credit = if self.offline { &mut none } else { &mut self.start_credit };
         for n in self.notes.iter_mut().filter(|n| n.id == id) {
-            n.release(&ctx);
+            n.release(&ctx, credit);
         }
     }
 
     pub fn all_off(&mut self) {
         self.waiting.iter_mut().for_each(|w| w.released = true);
         let ctx = Self::ctx(&self.patch, &self.svf, self.rate, self.big_b, self.seconds, self.tempo, self.offline, self.kf, self.ramp_a);
+        let mut none = f64::INFINITY;
+        let credit = if self.offline { &mut none } else { &mut self.start_credit };
         for n in self.notes.iter_mut() {
-            n.release(&ctx);
+            n.release(&ctx, credit);
         }
     }
 
@@ -1701,19 +1739,27 @@ impl Smith {
         let mut nr = std::mem::take(&mut self.nr);
         {
             let ctx = Self::ctx(&self.patch, &self.svf, self.rate, self.big_b, self.seconds, self.tempo, self.offline, self.kf, self.ramp_a);
+            let mut none = f64::INFINITY;
+            let credit = if self.offline { &mut none } else { &mut self.start_credit };
             for note in self.notes.iter_mut() {
                 let mut done = 0;
                 nl[..n].fill(0.0);
                 nr[..n].fill(0.0);
                 while done < n && !note.finished {
                     if note.block_left == 0 {
-                        note.control(&ctx);
+                        note.control(&ctx, credit);
                         note.block_left = ctx.big_b;
                         if note.finished {
                             break;
                         }
                     }
-                    let m = note.block_left.min(n - done);
+                    if note.running && note.frame_at >= note.frame {
+                        note.knot(&ctx);
+                    }
+                    let mut m = note.block_left.min(n - done);
+                    if note.running {
+                        m = m.min(note.frame - note.frame_at);
+                    }
                     note.mix(&ctx, &mut nl[done..done + m], &mut nr[done..done + m]);
                     note.block_left -= m;
                     done += m;
@@ -1753,6 +1799,7 @@ impl Smith {
             dry[1].extend(right.iter().map(|v| v * keep));
             fx[0].extend_from_slice(left);
             fx[1].extend_from_slice(right);
+            self.section.fx_keep = keep;
             self.section.process(dry, fx, n, alive);
             left.copy_from_slice(&dry[0][..n]);
             right.copy_from_slice(&dry[1][..n]);
@@ -2001,6 +2048,115 @@ mod tests {
         assert_eq!(mirror_line(10, 512), 0);
         assert_eq!(mirror_line(10, 513), 511);
         assert_eq!(mirror_line(16, 61440), 4096);
+    }
+
+    /// A plain note against the same note under `edit`: how far the level has come at a few samples.
+    fn levels_against_held(edit: impl Fn(&mut State), off: Option<usize>, at: &[usize]) -> Vec<f64> {
+        let play = |st: State, off: Option<usize>| {
+            let mut s = Smith::new(44100);
+            s.set_patch(Patch::new(st));
+            let id = s.note_on(note(60, 0.78));
+            let first = off.unwrap_or(0);
+            let (mut l, _) = render(&mut s, first);
+            if off.is_some() {
+                s.note_off(id);
+            }
+            l.extend(render(&mut s, 22050 - first).0);
+            l
+        };
+        let mut st = flat();
+        st.ints[RICH] = 6;
+        let plain = play(st.clone(), None);
+        edit(&mut st);
+        let moved = play(st, off);
+        at.iter()
+            .map(|&i| {
+                let (mut c, mut d) = (0.0, 0.0);
+                for j in i - 10..i + 10 {
+                    c += f64::from(moved[j]) * f64::from(plain[j]);
+                    d += f64::from(plain[j]) * f64::from(plain[j]);
+                }
+                c / d
+            })
+            .collect()
+    }
+
+    /// A note's level goes in a straight line from one frame's end to the next, not smoothly down.
+    #[test]
+    fn a_note_falls_in_straight_lines_between_frames() {
+        let v = levels_against_held(|st| st.ints[DEC] = 0, None, &[551, 1102, 1653, 2205, 3307]);
+        // 40 dB in the 50 ms of a frame.
+        for (got, want) in v.iter().zip([0.7525, 0.505, 0.2575, 0.01, 0.00505]) {
+            assert!((got - want).abs() < 0.003, "{v:?}");
+        }
+    }
+
+    /// At a note's end a frame starts: the release's rates sound only after it.
+    #[test]
+    fn a_note_holds_for_a_frame_after_its_end() {
+        let v = levels_against_held(|st| st.ints[REL] = 0, Some(3000), &[3100, 5100, 5205 + 1102, 5205 + 2205]);
+        assert!((v[0] - 1.0).abs() < 1e-3 && (v[1] - 1.0).abs() < 1e-3, "{v:?}");
+        assert!((v[2] - 0.505).abs() < 0.003 && (v[3] - 0.01).abs() < 0.003, "{v:?}");
+    }
+
+    /// With a decay running, a note's end fades from where the level is to the table already made.
+    #[test]
+    fn a_note_ending_mid_frame_fades_from_where_it_is() {
+        // A frame is 40 dB here. At 3000, 795 / 2205 into the second frame, the level is .01 * (1 - .361) + .0001 * .361.
+        let v = levels_against_held(
+            |st| {
+                st.ints[DEC] = 0;
+                st.ints[REL] = 10000;
+            },
+            Some(3000),
+            &[2990, 3010, 4102, 5195],
+        );
+        let (start, end) = (0.01 * (1.0 - 795.0 / 2205.0) + 0.0001 * 795.0 / 2205.0, 1e-6);
+        for (got, want) in v.iter().zip([0.01 + (0.0001 - 0.01) * 785.0 / 2205.0, start + (end - start) * 10.0 / 2205.0, start + (end - start) * 0.5, end]) {
+            assert!((got - want).abs() < 1e-4, "{v:?} {want}");
+        }
+    }
+
+    /// A chord let go with no time left to finish its tables takes up the release at the frame's end.
+    #[test]
+    fn a_note_with_no_time_for_its_table_ends_at_the_frame_end() {
+        let mut st = flat();
+        st.ints[DEC] = 4000;
+        st.ints[RICH] = 12;
+        st.finals[M_DECAY].points[1].level = 0.0;
+        st.finals[M_DECAY].keep_sytrus();
+        let mut s = Smith::new(44100);
+        s.set_patch(Patch::new(st));
+        let id = s.note_on(note(60, 0.78));
+        render(&mut s, 256);
+        assert!(s.notes[0].building);
+        s.start_credit = 0.0;
+        s.note_off(id);
+        assert!(s.notes[0].release_due);
+        s.start_credit = f64::INFINITY;
+        render(&mut s, 2205);
+        assert!(!s.notes[0].release_due);
+    }
+
+    /// Declick is a one-pole filter opening from shut to open, over 96 samples at 44.1 kHz.
+    #[test]
+    fn declick_opens_a_filter_over_the_first_block() {
+        let play = |on: bool| {
+            let mut st = flat();
+            st.ints[RICH] = 6;
+            st.declick = on;
+            let mut s = Smith::new(44100);
+            s.set_patch(Patch::new(st));
+            s.note_on(note(62, 0.78));
+            render(&mut s, 400).0
+        };
+        let (with, without) = (play(true), play(false));
+        let mut y = 0.0f32;
+        for i in 0..96 {
+            y += i as f32 / 96.0 * (without[i] - y);
+            assert!((with[i] - y).abs() < 1e-5, "{i}: {} {y}", with[i]);
+        }
+        assert_eq!(with[96..], without[96..]);
     }
 
     #[test]
