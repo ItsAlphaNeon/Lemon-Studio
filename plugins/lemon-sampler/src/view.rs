@@ -1120,6 +1120,12 @@ pub fn env_levels(g: Rect) -> (f32, f32) {
     (g.y + 1.8, g.bottom() - 2.2)
 }
 
+/// Cycles the LFO graph shows at speed knob `norm`, 1 ..= 16. The knob is a time knob holding the period, so turning it up
+/// slows the LFO and the graph shows fewer cycles (spec: audio/envelopes-and-lfos.md, field 12).
+fn lfo_cycles(norm: f32) -> f32 {
+    2f32.powf((1.0 - norm) * 4.0)
+}
+
 /// The LFO of the current target: silent for the delay, fading in over the attack, its speed setting the cycles shown.
 fn lfo_graph(ui: &mut Ui, g: Rect, p: &str, col: Color) {
     let n = |s: &str| ui.m.norm(&format!("{p}_{s}"));
@@ -1128,8 +1134,7 @@ fn lfo_graph(ui: &mut Ui, g: Rect, p: &str, col: Color) {
     let (dl, at, sp) = (n("lfo_delay"), n("lfo_att"), n("lfo_speed"));
     let cy = g.y + ((g.h - 1.0) / 2.0).floor() + 0.5;
     let a = amt * (g.h / 2.0 - 3.0);
-    // Cycles across the graph: 1 .. 16 on an exponential speed knob.
-    let cycles = 2f32.powf(sp * 4.0);
+    let cycles = lfo_cycles(sp);
     let xd = dl * g.w * 0.35;
     let xa = at * g.w * 0.35;
     let pts: Vec<(f32, f32)> = (0..=g.w as usize)
@@ -1657,5 +1662,17 @@ pub fn hint(t: &Target, m: &dyn Model, st: &ViewState, sv: &SampleView, x: f32, 
             }
             None => String::new(),
         },
+    }
+}
+
+#[cfg(test)]
+mod lfo_graph_tests {
+    use super::*;
+
+    /// A higher Speed knob is a longer period, heard slower: the graph shows fewer cycles (issue #353).
+    #[test]
+    fn the_graph_shows_fewer_cycles_as_the_period_grows() {
+        assert_eq!((lfo_cycles(0.0), lfo_cycles(1.0)), (16.0, 1.0));
+        assert!(lfo_cycles(0.25) > lfo_cycles(0.5) && lfo_cycles(0.5) > lfo_cycles(0.75));
     }
 }
