@@ -20,7 +20,7 @@
 //! ```
 //! `equiv_replay` replays every trace in `OS_EQUIV_DIR`; `equiv_twice` records and replays on the same build (what
 //! isn't deterministic yet). `OS_EQUIV_SEEDS` (2) traces per project, `OS_EQUIV_STEPS` (150) steps each,
-//! `OS_EQUIV_ONLY=<name part>` limits the projects, `OS_EQUIV_FIRST=<n>` takes the first n of the corpus.
+//! `OS_EQUIV_ONLY=<name part>` limits the projects, `OS_EQUIV_SEED_FROM` (1) the first seed, `OS_EQUIV_FIRST=<n>` takes the first n of the corpus.
 
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -628,7 +628,7 @@ fn equiv_record() {
     std::fs::create_dir_all(&dir).expect("traces folder");
     let (seeds, steps) = (var("OS_EQUIV_SEEDS", 2u64), var("OS_EQUIV_STEPS", 150usize));
     for p in &projects {
-        for seed in 1..=seeds {
+        for seed in var("OS_EQUIV_SEED_FROM", 1u64)..=seeds {
             let t0 = Instant::now();
             let t = record(&root, p, seed, steps);
             std::fs::write(dir.join(format!("{}.trace", trace_name(p, seed))), t.write()).expect("write trace");
@@ -665,7 +665,7 @@ fn equiv_twice() {
     let (seeds, steps) = (var("OS_EQUIV_SEEDS", 2u64), var("OS_EQUIV_STEPS", 150usize));
     let mut failed = 0;
     for p in &projects {
-        for seed in 1..=seeds {
+        for seed in var("OS_EQUIV_SEED_FROM", 1u64)..=seeds {
             let t = record(&root, p, seed, steps);
             let again = Trace::read(&t.write()).expect("reads back");
             assert_eq!(again.write(), t.write(), "the trace format round-trips");
