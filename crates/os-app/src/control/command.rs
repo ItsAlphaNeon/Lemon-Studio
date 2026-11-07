@@ -365,7 +365,8 @@ impl Settings {
     }
 }
 
-/// The whole project with the rack's own state of it: the tempo, groups, filter, zipped and locked rows and loops.
+/// The whole project with the state of it the interface holds: the tempo, the rack's groups, filter, zipped and locked
+/// rows and loops, and the mixer's slot names, colours and icons.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Side {
     pub project: Project,
@@ -379,6 +380,11 @@ pub struct Side {
     pub loop_len: std::collections::BTreeMap<usize, u32>,
     /// The mixer's slot names typed in this session (they follow tracks and slots as they move).
     pub slot_names: std::collections::HashMap<(u16, u8), String>,
+    /// The slots' colours and the channels', slots' and tracks' icons, which follow them the same way.
+    pub slot_colors: std::collections::HashMap<(u16, u8), os_model::Rgb>,
+    pub icons: std::collections::HashMap<crate::playlist::IconOwner, crate::icons::Icon>,
+    /// Advanced looping's loop points by row, beside the loop lengths.
+    pub loop_unit: std::collections::BTreeMap<usize, crate::rack::LoopUnit>,
 }
 
 impl Side {
@@ -395,6 +401,9 @@ impl Side {
             locked: r.locked.clone(),
             loop_len: r.loop_len.clone(),
             slot_names: s.mixer.slot_names.clone(),
+            slot_colors: s.mixer.slot_colors.clone(),
+            icons: s.playlist.icons.clone(),
+            loop_unit: r.loop_unit.clone(),
         }
     }
 }
@@ -1212,8 +1221,8 @@ fn restore(s: &mut State, side: Side) {
     let sel_clips = selected_clips(s);
     let new_row: std::collections::HashMap<u32, usize> = side.project.channels.iter().enumerate().map(|(r, c)| (c.id.0, r)).collect();
     let map: Vec<Option<usize>> = old.iter().map(|id| new_row.get(id).copied()).collect();
-    let Side { project, tempo, pattern, groups, unsorted_at, filter, zipped, locked, loop_len, slot_names } = side;
-    s.mixer.slot_names = slot_names;
+    let Side { project, tempo, pattern, groups, unsorted_at, filter, zipped, locked, loop_len, slot_names, slot_colors, icons, loop_unit } = side;
+    (s.mixer.slot_names, s.mixer.slot_colors, s.playlist.icons) = (slot_names, slot_colors, icons);
     let mutes = Mutes::of(&s.project);
     s.project = project;
     mutes.keep(&mut s.project);
@@ -1221,7 +1230,7 @@ fn restore(s: &mut State, side: Side) {
     s.pattern = pattern;
     crate::rack::remap_ui(s, &map);
     let r = &mut s.rack;
-    (r.groups, r.unsorted_at, r.filter, r.zipped, r.locked, r.loop_len) = (groups, unsorted_at, filter, zipped, locked, loop_len);
+    (r.groups, r.unsorted_at, r.filter, r.zipped, r.locked, r.loop_len, r.loop_unit) = (groups, unsorted_at, filter, zipped, locked, loop_len, loop_unit);
     let tracks = crate::mixer::inserts(s);
     s.selected_mixer = s.selected_mixer.min(tracks);
     s.mixer.sel.retain(|&t| t <= tracks);

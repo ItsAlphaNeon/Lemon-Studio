@@ -3105,6 +3105,22 @@ mod tests {
     }
 
     #[test]
+    fn undoing_a_track_delete_puts_back_its_slots_colours_and_icons() {
+        use crate::playlist::IconOwner;
+        let mut a = app();
+        let red = Rgb { r: 200, g: 0, b: 0 };
+        a.state.mixer.slot_colors.insert((3, 0), red);
+        a.state.playlist.icons.insert(IconOwner::Track(3), crate::icons::Icon::Play);
+        run(&mut a, MCmd::Delete(2));
+        assert_eq!(a.state.mixer.slot_colors.get(&(2, 0)), Some(&red), "the colour follows its track left");
+        crate::history::undo(&mut a.state);
+        assert_eq!(a.state.mixer.slot_colors.get(&(3, 0)), Some(&red));
+        assert_eq!(a.state.mixer.slot_colors.get(&(2, 0)), None);
+        assert_eq!(a.state.playlist.icons.get(&IconOwner::Track(3)), Some(&crate::icons::Icon::Play));
+        assert_eq!(a.state.playlist.icons.get(&IconOwner::Track(2)), None);
+    }
+
+    #[test]
     fn add_move_delete_tracks() {
         let mut a = app();
         let len = a.state.project.mixer.len();
