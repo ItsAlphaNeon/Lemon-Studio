@@ -311,11 +311,11 @@ pub const SOURCE_CODE: &str = "Source code";
 /// About: which build this is and how it is kept up to date (`crate::update`).
 fn update_lines() -> Vec<Row> {
     let how = match (crate::version::CHANNEL, crate::update::enabled()) {
-        (Some("nightly"), true) => "A nightly build of main. It updates itself from the nightly releases.",
-        (Some(_), true) => "It updates itself from the stable releases.",
-        _ => "Built from its source code: it doesn't update itself (git pull, then build it again).",
+        (Some("nightly"), true) => "A nightly build of main. It updates itself from the nightly releases.".to_string(),
+        (Some(_), true) => format!("It updates itself from the {} releases.", crate::version::releases()),
+        _ => "Built from its source code: it doesn't update itself (git pull, then build it again).".to_string(),
     };
-    vec![txt(how), Row::Buttons(vec![(CHECK_UPDATES, 130.0)])]
+    vec![txt(&how), Row::Buttons(vec![(CHECK_UPDATES, 130.0)])]
 }
 
 /// MIDI: lists the devices again (`App::midi_refresh`); Update MIDI scripts stays greyed with its reason.
@@ -965,7 +965,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             g("", [
                 vec![
                     Gap(20.0),
-                    Big(format!("Lemon Studio {} (pre-alpha)", crate::version::text())),
+                    Big(format!("Lemon Studio {}", crate::version::staged())),
                     txt("A digital audio workstation written in Rust."),
                     txt("Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors."),
                     Buttons(vec![(WEBSITE, 80.0), (WIKI, 64.0), (SOURCE_CODE, 100.0)]),
@@ -1071,7 +1071,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
     }
     ui.c.icon(&os_ui::tabler::SETTINGS, Rect::new(r.x + 7.0, r.y + 7.0, 16.0, 16.0), t.text_dim);
     let (_, title, _) = TABS[st.tab.min(TABS.len() - 1)];
-    ui.c.text(Font::new(13), r.x + 28.0, r.y + 7.0, t.text, &format!("Settings - {title}"));
+    ui.c.text_mid(Font::new(13), r.x + 28.0, r.y + 15.0, t.text, &format!("Settings - {title}"));
     let x = Rect::new(r.right() - 26.0, r.y + 5.0, 20.0, 20.0);
     let hov = super::close_button(ui, x, x, Action::Settings(SAct::Close), "Close");
     ui.c.icon(&os_ui::tabler::X, x.inset(3.0), if hov { t.tx(0xffffff) } else { t.text });

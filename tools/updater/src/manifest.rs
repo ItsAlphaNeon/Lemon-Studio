@@ -14,7 +14,8 @@
 //! ```
 //!
 //! Versions: a nightly is dated, `YEAR.MONTH.DAY.N` (UTC, no zero padding; `N` counts that day's nightlies from 1); a
-//! stable release is semantic, `MAJOR.MINOR.PATCH`. The two are never compared with each other.
+//! tagged release (`stable`: an alpha while its major version is 0) is semantic, `MAJOR.MINOR.PATCH`. The two are never
+//! compared with each other.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -135,6 +136,9 @@ mod tests {
         assert!(newer(STABLE, "1.10.0", "1.9.0").unwrap());
         assert!(newer(STABLE, "v1.0.1", "1.0.0").unwrap(), "a tag's v is allowed");
         assert!(newer(STABLE, "1.0.0", "1.0.0-rc.1").unwrap());
+        assert!(newer(STABLE, "0.1.1", "0.1.0").unwrap(), "from alpha to alpha");
+        assert!(newer(STABLE, "1.0.0", "0.12.3").unwrap(), "from an alpha on to the first stable release");
+        assert!(!newer(STABLE, "0.1.0", "0.1.1").unwrap(), "never back");
         assert!(!newer(STABLE, "1.0.0", "1.0.0").unwrap());
         assert!(compare(STABLE, "2026.11.7.1", "1.0.0").is_err());
     }

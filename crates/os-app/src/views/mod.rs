@@ -184,7 +184,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if docked.is_none() && !crate::wallpaper::paint(ui, work) {
         let wm = ui.t.watermark;
         icons::logo(ui.c, work.cx(), work.cy() + 40.0, 170.0, wm);
-        let version = format!("Lemon Studio v{} - pre-alpha", crate::version::text());
+        let version = format!("Lemon Studio v{}", crate::version::staged());
         let vc = ui.t.version_text;
         let vw = ui.c.text_width(crate::views::fnt(16.0), &version);
         ui.c.text(crate::views::fnt(16.0), work.cx() - vw / 2.0, h - 22.0, vc, &version);

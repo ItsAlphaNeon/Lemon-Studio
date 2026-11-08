@@ -393,7 +393,7 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
         };
         icons::draw(ui.c, icon, b, c);
     }
-    icons::draw(ui.c, Icon::Speaker, Rect::new(ox + 547.0, r.y + 4.0, 15.0, 15.0), t.text);
+    icons::draw(ui.c, Icon::Speaker, Rect::new(ox + 547.0, r.y + 3.0, 15.0, 15.0), t.text);
 }
 
 fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Option<u16>) {

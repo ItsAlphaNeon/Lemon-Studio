@@ -3,9 +3,13 @@
 # - Nightly: every night from main (or by hand, Run workflow), unless main has not moved since the last nightly. Its
 #   version is dated, YEAR.MONTH.DAY.N (UTC; N counts that day's nightlies from 1), its release the pre-release
 #   nightly-<version>. The pre-release "nightly" only holds nightly.json, which points the updater at the newest one;
-#   the oldest nightlies beyond KEEP_NIGHTLIES are deleted.
-# - Stable: a pushed tag vMAJOR.MINOR.PATCH, which must match the workspace's version in Cargo.toml. Its release holds
-#   stable.json; GitHub's "latest" release is the newest stable one.
+#   the oldest nightlies beyond KEEP_NIGHTLIES are deleted. The schedule only runs with the repository variable
+#   NIGHTLIES set to "on".
+# - Tagged: a pushed tag vMAJOR.MINOR.PATCH, on main and matching the workspace's version in Cargo.toml. Its release
+#   holds stable.json; GitHub's "latest" release is the newest one. A 0.x version is an alpha.
+#
+# Run workflow with "dry run" builds and packages everything and signs the manifest, then keeps the lot as the run's
+# artifacts instead of publishing it.
 #
 # Each release has Lemon Studio for Windows (.exe), Linux (.AppImage) and macOS (Apple silicon .app, zipped), each
 # carrying its updater, and Lemon Studio's plugins for other DAWs (VST3 and CLAP, a zip per platform). The manifest
@@ -24,6 +28,14 @@ on:
         description: Build a nightly even if main has not changed since the last one
         type: boolean
         default: false
+      dry_run:
+        description: "Dry run: build, package and sign, but publish nothing (the files are the run's artifacts)"
+        type: boolean
+        default: false
+      rehearse_tag:
+        description: "With dry run: rehearse this release tag (e.g. v0.1.0) instead of a nightly"
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -39,6 +51,8 @@ env:
 jobs:
   plan:
     name: Plan
+    # The schedule stays off until nightlies are turned on (docs/releasing.md), so merging this workflow publishes nothing.
+    if: github.event_name != 'schedule' || vars.NIGHTLIES == 'on'
     runs-on: ubuntu-latest
     outputs:
       channel: ${{ steps.plan.outputs.channel }}
@@ -66,45 +80,9 @@ jobs:
         id: plan
         env:
           FORCE: ${{ inputs.force }}
-        run: |
-          set -euo pipefail
-          sha=$(git rev-parse HEAD)
-          skip=false
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            channel=stable
-            tag=$GITHUB_REF_NAME
-            version=${tag#v}
-            workspace=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
-            if [ "$version" != "$workspace" ]; then
-              echo "::error::The tag $tag does not match the workspace version $workspace in Cargo.toml"
-              exit 1
-            fi
-            previous=$( (git tag -l 'v*.*.*' --sort=-v:refname | grep -vx "$tag" || true) | head -n1)
-          else
-            if [ "$GITHUB_REF" != refs/heads/main ]; then
-              echo "::error::Nightlies are built from main (this run is on $GITHUB_REF)"
-              exit 1
-            fi
-            channel=nightly
-            day=$(date -u +%Y.%-m.%-d)
-            n=$(( $(git tag -l "nightly-$day.*" | wc -l) + 1 ))
-            version=$day.$n
-            tag=nightly-$version
-            previous=$(git tag -l 'nightly-*.*.*.*' --sort=-v:refname | head -n1)
-            if [ -n "$previous" ] && [ "$(git rev-list -n1 "$previous")" = "$sha" ] && [ "$FORCE" != true ]; then
-              echo "main has not changed since $previous: no nightly"
-              skip=true
-            fi
-          fi
-          echo "$channel $version ($tag at $sha), after ${previous:-nothing}"
-          {
-            echo "channel=$channel"
-            echo "version=$version"
-            echo "tag=$tag"
-            echo "previous=$previous"
-            echo "sha=$sha"
-            echo "skip=$skip"
-          } >>"$GITHUB_OUTPUT"
+          DRY_RUN: ${{ inputs.dry_run }}
+          REHEARSE_TAG: ${{ inputs.rehearse_tag }}
+        run: bash tools/package/plan.sh
 
   build:
     name: ${{ matrix.name }}
@@ -176,8 +154,10 @@ jobs:
               cp target/release/lemonstudio.exe "dist/LemonStudio-$v-$PLATFORM.exe"
               ;;
             Linux)
+              # A fixed version with its checksum: this goes into a release that installed copies trust.
               curl -fsSL -o "$RUNNER_TEMP/appimagetool" \
-                https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+                https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+              echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  $RUNNER_TEMP/appimagetool" | sha256sum -c -
               chmod +x "$RUNNER_TEMP/appimagetool"
               APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$RUNNER_TEMP/appimagetool" \
                 bash tools/package/appimage.sh target/release/lemonstudio "$v" "dist/LemonStudio-$v-$PLATFORM.AppImage"
@@ -228,14 +208,18 @@ jobs:
       - name: Release notes
         run: |
           set -euo pipefail
-          args=(-f "tag_name=$TAG" -f "target_commitish=$SHA")
-          [ -n "$PREVIOUS" ] && args+=(-f "previous_tag_name=$PREVIOUS")
-          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${args[@]}" --jq .body >"$RUNNER_TEMP/changes.md"
-          if [ "$CHANNEL" = nightly ]; then
-            intro="A nightly build of main at ${SHA:0:8}: the newest changes, and the least tested. Lemon Studio is in its pre-alpha."
+          # The first build on a channel has nothing to compare with: GitHub would list every pull request there has been.
+          if [ -n "$PREVIOUS" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f "tag_name=$TAG" -f "target_commitish=$SHA" \
+              -f "previous_tag_name=$PREVIOUS" --jq .body >"$RUNNER_TEMP/changes.md"
           else
-            intro="Lemon Studio $VERSION."
+            echo "The first build on this channel." >"$RUNNER_TEMP/changes.md"
           fi
+          case "$CHANNEL:$VERSION" in
+            nightly:*) intro="A nightly build of main at ${SHA:0:8}: the newest changes, and the least tested." ;;
+            stable:0.*) intro="Lemon Studio $VERSION, an alpha." ;;
+            *) intro="Lemon Studio $VERSION." ;;
+          esac
           python3 - "$RUNNER_TEMP/changes.md" "$intro" >"$RUNNER_TEMP/notes.md" <<'PY'
           import os, sys
           changes = open(sys.argv[1], encoding="utf-8").read().strip()
@@ -263,11 +247,24 @@ jobs:
           minisign -V -P "$public" -m "dist/$CHANNEL.json"
           cat "dist/$CHANNEL.json"
 
+      - name: Keep the dry run's files
+        if: inputs.dry_run
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-${{ needs.plan.outputs.version }}
+          path: |
+            dist/*
+            ${{ runner.temp }}/notes.md
+
       - name: Publish the release
+        if: ${{ !inputs.dry_run }}
         run: |
           set -euo pipefail
           if [ "$CHANNEL" = stable ]; then
-            gh release create "$TAG" dist/* --verify-tag --title "Lemon Studio $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+            title="Lemon Studio $VERSION"
+            case "$VERSION" in 0.*) title="$title (alpha)" ;; esac
+            # Not a GitHub pre-release, alpha or not: the updater finds it as GitHub's "latest" release.
+            gh release create "$TAG" dist/* --verify-tag --latest --title "$title" --notes-file "$RUNNER_TEMP/notes.md"
           else
             gh release create "$TAG" dist/* --target "$SHA" --prerelease --latest=false \
               --title "Lemon Studio nightly $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
@@ -280,7 +277,7 @@ jobs:
           fi
 
       - name: Delete old nightlies
-        if: needs.plan.outputs.channel == 'nightly'
+        if: needs.plan.outputs.channel == 'nightly' && !inputs.dry_run
         run: |
           set -euo pipefail
           gh release list --limit 1000 --json tagName --jq '.[].tagName' \
