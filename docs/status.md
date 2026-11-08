@@ -328,10 +328,13 @@ the workspace with the Piano roll and Mixer side by side under it; Save custom l
 Custom brings it back. The Tablet layouts are greyed (they need the toolbar at the bottom). VIEW > Background > Set
 image wallpaper... makes a PNG or JPEG picture the theme's workspace wallpaper; the HTML document and the background
 colour are greyed. VIEW > Align all channel editors (Shift+F12) puts the channel window back right of the Channel
-rack and cascades the docked plugin windows of rack channels from there, each title showing. HELP > Help index and
-What's new open the project's README and its merged pull requests in the web browser, and Tutorials ▸ the README's
-how-to sections; HELP > Diagnostics writes a plain-text report (build, system, audio settings, plugins found, open
-project) to Diagnostics.txt in the user folder and opens it. TOOLS > Save MIDI clipboard to browser writes the piano
+rack and cascades the docked plugin windows of rack channels from there, each title showing. HELP > Help index,
+Tutorials ▸, Keyboard shortcuts, Troubleshooting and Lemon Studio website open the website's pages in the web browser,
+as does the toolbar's Help button; What's new and Report a bug open the GitHub releases and the bug report form, and
+a built-in plugin's Help opens its page in the wiki. HELP > Diagnostics writes a plain-text report (build, system,
+audio settings, plugins found, open project) to Diagnostics.txt in the user folder and opens it. HELP > About..., the
+toolbar's logo and a right click on its Help button open the About page of the settings. TOOLS > Save MIDI clipboard
+to browser writes the piano
 roll's copied notes to a numbered MIDI file in the user folder's Clipboard files, which the browser then shows; Save
 audio clipboard to browser does the same with the audio on the clipboard (what Tesla copies; Windows and macOS).
 VIEW > Remote control opens the browser's Remote control section, one row per controller link.

@@ -544,9 +544,9 @@ fn changed(s: &mut State) {
 }
 
 /// The help page of the plugin in slot `slot` of the current track (spec: ui/plugin-window.md "Help", Lemon Studio's
-/// design): a hosted plugin's own page (`os_host::Plugin::help_url`); for Lemon Studio's own effects, and the effects
-/// the engine plays itself, the feature status page's section on them. `None`: an empty slot, or a hosted plugin that
-/// names no page.
+/// design): a hosted plugin's own page (`os_host::Plugin::help_url`); for Lemon Studio's own plugins, the effects the
+/// engine plays itself and a container, its page in the wiki. `None`: an empty slot, or a hosted plugin that names no
+/// page.
 pub(crate) fn slot_help(app: &App, slot: u8) -> Option<String> {
     let s = &app.state;
     let t = s.selected_mixer;
@@ -555,9 +555,12 @@ pub(crate) fn slot_help(app: &App, slot: u8) -> Option<String> {
         Some(h) => {
             let p = h.plugin.lock().ok()?;
             let own = crate::plugins::builtin_effects().iter().chain(&crate::plugins::builtin()).any(|a| a.desc.id == p.desc().id);
-            p.help_url().or_else(|| own.then(|| crate::help_links::BUILTIN_PLUGINS_URL.to_owned()))
+            p.help_url().or_else(|| own.then(|| crate::help_links::plugin_page(&p.desc().name)))
         }
-        None => os_engine::effects::from_slot(&p.name, &p.state, 44100).map(|_| crate::help_links::BUILTIN_PLUGINS_URL.to_owned()),
+        None => {
+            let own = p.name == crate::container::CONTAINER || os_engine::effects::from_slot(&p.name, &p.state, 44100).is_some();
+            own.then(|| crate::help_links::plugin_page(crate::plugins::slot_label(&p.name)))
+        }
     }
 }
 
@@ -3828,8 +3831,8 @@ mod tests {
         assert!(!a.state.mixer.waveforms && a.state.mixer.waves.is_empty());
     }
 
-    /// The slot menu's Help (Lemon Studio's design): an effect the engine plays itself opens the page on Lemon Studio's
-    /// own effects; a plugin naming no page says so.
+    /// The slot menu's Help (Lemon Studio's design): an effect the engine plays itself opens its page in the wiki, under
+    /// its Lemon Studio name, and so does a container; a plugin naming no page says so.
     #[test]
     fn slot_help_opens_the_plugins_page() {
         let mut a = app();
@@ -3840,7 +3843,9 @@ mod tests {
         let help = slot_menu(&a, 0, 0.0, 0.0).items.iter().find(|i| i.label == "Help").map(|i| (i.enabled, i.cmd.clone())).unwrap();
         assert_eq!(help, (true, Cmd::Mixer(MCmd::SlotHelp(0))));
         assert_eq!(run(&mut a, MCmd::SlotHelp(0)).as_deref(), Some("Test FX has no help page"));
-        assert_eq!(run(&mut a, MCmd::SlotHelp(1)), Some(format!("Opening {}", crate::help_links::BUILTIN_PLUGINS_URL)));
+        assert_eq!(run(&mut a, MCmd::SlotHelp(1)), Some(format!("Opening {}", crate::help_links::plugin_page("Lemon Balance"))));
+        track_mut(&mut a.state, 2).unwrap().slots[1] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: crate::container::CONTAINER.into(), state: crate::container::encode(&[]) });
+        assert_eq!(run(&mut a, MCmd::SlotHelp(1)), Some(format!("Opening {}", crate::help_links::plugin_page(crate::container::CONTAINER))));
     }
 
     /// FL's measured group drags, in the percentages its hint shows (spec: ui/mixer.md §4): `kept` levels, the pressed
