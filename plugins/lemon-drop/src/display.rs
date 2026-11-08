@@ -61,13 +61,15 @@ pub fn box_rect(st: &State, area: Rect) -> Rect {
     Rect::new((area.x + (area.w - w) / 2.0).round(), area.y, w.round(), h.round())
 }
 
-/// The mode shown: the state's, or with auto visual mode, by the stored window's shape: tall and narrow (1.5 times
-/// as tall as wide), the meter; short and wide (1.5 times as wide), the oscilloscope; otherwise the state's mode.
+/// The mode shown: the state's, or with auto visual mode, between the oscilloscope and the meter by the stored
+/// window's shape: tall and narrow (1.5 times as tall as wide), the meter; short and wide (1.5 times as wide), the
+/// oscilloscope. A spectrum or a vectorscope stays (the original's tall spectrum and square vectorscope presets do).
 pub fn shown_mode(st: &State, _b: Rect) -> Mode {
     let a = window_aspect(st);
-    if st.auto_mode && a < 1.0 / 1.5 {
+    let auto = st.auto_mode && matches!(st.mode, Mode::Oscilloscope | Mode::Meter);
+    if auto && a < 1.0 / 1.5 {
         Mode::Meter
-    } else if st.auto_mode && a > 1.5 {
+    } else if auto && a > 1.5 {
         Mode::Oscilloscope
     } else {
         st.mode
@@ -728,8 +730,9 @@ mod tests {
     fn auto_mode_follows_the_stored_window() {
         let area = Rect::new(0.0, 0.0, 600.0, 200.0);
         let st = |window, mode| State { auto_mode: true, window, mode, ..State::new_default() };
-        assert_eq!(shown_mode(&st([0, 0, 40, 700], Mode::Spectrum), area), Mode::Meter);
-        assert_eq!(shown_mode(&st([0, 0, 300, 120], Mode::Spectrum), area), Mode::Oscilloscope);
+        assert_eq!(shown_mode(&st([0, 0, 40, 700], Mode::Oscilloscope), area), Mode::Meter);
+        assert_eq!(shown_mode(&st([0, 0, 300, 120], Mode::Meter), area), Mode::Oscilloscope);
+        assert_eq!(shown_mode(&st([0, 0, 40, 700], Mode::Spectrum), area), Mode::Spectrum);
         assert_eq!(shown_mode(&st([0, 0, 195, 195], Mode::Vectorscope), area), Mode::Vectorscope);
         // The box keeps the window's shape inside the area, centred.
         let b = box_rect(&st([0, 0, 200, 400], Mode::Meter), area);
