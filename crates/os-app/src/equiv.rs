@@ -859,13 +859,26 @@ fn isolated(name: &str, job: &str) -> String {
     let home = traces_dir().join("homes").join(name);
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::create_dir_all(&home);
+    let bin = no_programs(&home);
     let out = std::process::Command::new(std::env::current_exe().expect("the test binary"))
         .args(["equiv::equiv_one", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
         .env("OS_EQUIV_ONE", job)
         .env("HOME", &home)
         // No audio device at all: a null device keeps no time, so its stream would spin a core for the whole trace.
         .env("ALSA_CONFIG_PATH", home.join("no-alsa.conf"))
+        // Generated clicks reach Open folder, help links, the bell and plugin rebuilds: nothing the app starts may
+        // reach the user's desktop (a file manager opened through D-Bus on 2026-11-08) or run a build.
+        .env("PATH", &bin)
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("CARGO")
         .output();
+    if let Ok(started) = std::fs::read_to_string(home.join("started")) {
+        for l in started.lines() {
+            eprintln!("STARTED {name}: {l}");
+        }
+    }
     let _ = std::fs::remove_dir_all(&home);
     let Ok(out) = out else { return "did not start".into() };
     let err = String::from_utf8_lossy(&out.stderr);
@@ -873,6 +886,25 @@ fn isolated(name: &str, job: &str) -> String {
         || format!("no result ({})", err.lines().filter(|l| l.contains("panicked") || l.contains("error")).take(2).collect::<Vec<_>>().join(" / ")),
         String::from,
     )
+}
+
+/// The only programs a trace's process can start: stand-ins that note the call in `<home>/started` and do nothing.
+/// Anything else the app tries to start is not found. What it returns is the trace's whole `PATH`.
+fn no_programs(home: &std::path::Path) -> std::path::PathBuf {
+    let bin = home.join("bin");
+    let _ = std::fs::create_dir_all(&bin);
+    let _ = std::fs::create_dir_all(home.join("run"));
+    let log = home.join("started");
+    for p in ["xdg-open", "open", "explorer", "pw-play", "cargo", "gio", "notify-send"] {
+        let f = bin.join(p);
+        let _ = std::fs::write(&f, format!("#!/bin/sh\necho \"{p} $*\" >> '{}'\n", log.display()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    bin
 }
 
 /// The child of `isolated`: one recording (written to the traces folder) or one replay.
