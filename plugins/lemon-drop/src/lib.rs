@@ -13,11 +13,13 @@
 pub mod analysis;
 pub mod display;
 pub mod editor;
+#[cfg(windows)]
+pub mod float;
 pub mod state;
 pub mod view;
 
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use nih_plug::prelude::*;
@@ -107,8 +109,10 @@ impl Scope {
 pub struct Shared {
     pub scope: Mutex<Scope>,
     pub rate: AtomicU32,
-    /// Set while an editor is open: the audio thread feeds the scope only then.
-    pub editor_open: AtomicBool,
+    /// Displays open (the editor, the floating window): the audio thread feeds the scope only while there are.
+    pub viewers: AtomicUsize,
+    /// The floating display window (Win32 HWND; 0 = none).
+    pub float: AtomicIsize,
 }
 
 impl Default for Shared {
@@ -116,7 +120,8 @@ impl Default for Shared {
         Shared {
             scope: Mutex::new(Scope { l: vec![0.0; SCOPE_LEN], r: vec![0.0; SCOPE_LEN], pos: 0, written: 0 }),
             rate: AtomicU32::new(44100),
-            editor_open: AtomicBool::new(false),
+            viewers: AtomicUsize::new(0),
+            float: AtomicIsize::new(0),
         }
     }
 }
@@ -128,6 +133,8 @@ pub struct DropParams {
     pub state: Arc<RwLock<StateBytes>>,
     /// Bumped whenever `state` is replaced from outside (not when the editor edits it).
     pub state_version: AtomicU64,
+    /// Bumped by every edit, so each display (the editor, the floating window) reads the other's edits.
+    pub edits: AtomicU64,
     /// The original's one automatable parameter: freezes the display.
     #[id = "hold"]
     pub hold: BoolParam,
@@ -138,6 +145,7 @@ impl Default for DropParams {
         DropParams {
             state: Arc::new(RwLock::new(StateBytes::default())),
             state_version: AtomicU64::new(1),
+            edits: AtomicU64::new(0),
             hold: BoolParam::new("Hold visualization", false),
         }
     }
@@ -162,6 +170,7 @@ impl DropParams {
             return false;
         }
         *s = StateBytes(st.to_bytes());
+        self.edits.fetch_add(1, Ordering::AcqRel);
         true
     }
 
@@ -191,6 +200,14 @@ impl LemonDrop {
             }
             s.written += l.len() as u64;
         }
+    }
+}
+
+impl Drop for LemonDrop {
+    fn drop(&mut self) {
+        // The floating display outlives the editor, not the plugin.
+        #[cfg(windows)]
+        float::close(&self.shared);
     }
 }
 
@@ -226,7 +243,7 @@ impl Plugin for LemonDrop {
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, _ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
         let len = buffer.samples();
         let out = buffer.as_slice();
-        if out.len() >= 2 && self.shared.editor_open.load(Ordering::Relaxed) && !self.params.hold.value() {
+        if out.len() >= 2 && self.shared.viewers.load(Ordering::Relaxed) > 0 && !self.params.hold.value() {
             self.feed(&out[0][..len], &out[1][..len]);
         }
         ProcessStatus::Normal

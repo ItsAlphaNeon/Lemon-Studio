@@ -374,6 +374,16 @@ fn spectrum(c: &mut Canvas, st: &State, a: &Analyzer, r: Rect, fade: f32) {
         .collect();
     let bg = color(st, BACKGROUND, 1.0);
     let back = Color::rgb(0x2b2b2b).mix(Color::rgb(0x000000), bg.a as f32 / 255.0);
+    // The gradient over the brightness, in LUT steps: every pixel looks its colour up instead of mixing it.
+    const LUT: usize = 256;
+    let lut: Vec<u32> = (0..LUT)
+        .map(|i| {
+            let g = gradient(st, SPECTRUM, i as f32 / (LUT - 1) as f32);
+            let g = g.with_alpha((g.a as f32 * fade) as u8);
+            let o = back.mix(g.with_alpha(255), g.a as f32 / 255.0);
+            (u32::from(o.r) << 16) | (u32::from(o.g) << 8) | u32::from(o.b)
+        })
+        .collect();
     for (x, col) in a.columns.iter().skip(a.columns.len() - have).enumerate() {
         for (y, &(f0, f1)) in bins.iter().enumerate() {
             let k0 = (f0 / col.hz_per_bin) as usize;
@@ -382,10 +392,8 @@ fn spectrum(c: &mut Canvas, st: &State, a: &Analyzer, r: Rect, fade: f32) {
             for k in k0.min(col.db.len().saturating_sub(1))..k1 {
                 d = d.max(col.db[k]);
             }
-            let g = gradient(st, SPECTRUM, 1.0 + d / range);
-            let g = g.with_alpha((g.a as f32 * fade) as u8);
-            let o = back.mix(g.with_alpha(255), g.a as f32 / 255.0);
-            px[y * have + x] = (u32::from(o.r) << 16) | (u32::from(o.g) << 8) | u32::from(o.b);
+            let t = (1.0 + d / range).clamp(0.0, 1.0);
+            px[y * have + x] = lut[(t * (LUT - 1) as f32).round() as usize];
         }
     }
     let w = have as f32;

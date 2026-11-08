@@ -94,6 +94,9 @@ const FINE: f32 = 1.0 / 20.0;
 const WHEEL_PART: f32 = 1.0 / 32.0;
 /// The editor's tick, seconds.
 pub const TICK: f32 = 0.03;
+/// The windows' timer, ms (Windows rounds it to its 15.6 ms clock).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const TIMER_MS: u32 = 15;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuReq {
@@ -114,7 +117,10 @@ pub enum Cmd {
     /// None: auto visual mode.
     Mode(Option<Mode>),
     Visible,
+    Mini,
     Background,
+    KeepInFront,
+    OnDesktop,
     Hold,
 }
 
@@ -158,6 +164,8 @@ pub struct Logic {
     params: Arc<DropParams>,
     shared: Arc<Shared>,
     version: u64,
+    /// The edits count as of the state in hand.
+    edits: u64,
     pub st: State,
     pub an: Analyzer,
     /// Samples taken from the audio thread so far.
@@ -178,20 +186,22 @@ pub struct Logic {
 
 impl Drop for Logic {
     fn drop(&mut self) {
-        self.shared.editor_open.store(false, Ordering::Relaxed);
+        self.shared.viewers.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
 impl Logic {
     pub fn new(params: Arc<DropParams>, shared: Arc<Shared>) -> Self {
+        let edits = params.edits.load(Ordering::Acquire);
         let (version, st) = params.current();
         let rate = shared.rate.load(Ordering::Relaxed) as f32;
         let seen = shared.scope.lock().map(|s| s.written).unwrap_or(0);
-        shared.editor_open.store(true, Ordering::Relaxed);
+        shared.viewers.fetch_add(1, Ordering::Relaxed);
         Logic {
             params,
             shared,
             version,
+            edits,
             st,
             an: Analyzer::new(rate),
             seen,
@@ -213,13 +223,24 @@ impl Logic {
     }
 
     fn reload(&mut self) {
+        self.edits = self.params.edits.load(Ordering::Acquire);
         let (v, st) = self.params.current();
         self.version = v;
         self.st = st;
     }
 
+    /// Before an edit: the state as it stands, when another display edited it or it was replaced since.
+    fn sync(&mut self) {
+        let stale = self.params.edits.load(Ordering::Acquire) != self.edits || self.params.state_version.load(Ordering::Acquire) != self.version;
+        if stale && self.drag.is_none() {
+            self.reload();
+        }
+    }
+
     fn commit(&mut self) {
-        if !self.params.edited(self.version, &self.st) {
+        if self.params.edited(self.version, &self.st) {
+            self.edits = self.params.edits.load(Ordering::Acquire);
+        } else {
             self.reload();
         }
     }
@@ -230,7 +251,13 @@ impl Logic {
 
     /// The tick: a state replaced from outside, the new samples into the analysis. True: repaint.
     pub fn poll(&mut self) -> bool {
-        if self.params.state_version.load(Ordering::Acquire) != self.version && self.drag.is_none() {
+        self.tick(TICK)
+    }
+
+    /// `poll` with the time since the last tick (`dt` seconds).
+    pub fn tick(&mut self, dt: f32) -> bool {
+        let edited = self.params.edits.load(Ordering::Acquire) != self.edits;
+        if (self.params.state_version.load(Ordering::Acquire) != self.version || edited) && self.drag.is_none() {
             self.reload();
         }
         self.an.set_rate(self.shared.rate.load(Ordering::Relaxed) as f32);
@@ -242,7 +269,7 @@ impl Logic {
         }
         if !self.held() {
             let (l, r) = (std::mem::take(&mut self.l), std::mem::take(&mut self.r));
-            self.an.push(&self.st, &l[..new.min(l.len())], &r[..new.min(r.len())], TICK);
+            self.an.push(&self.st, &l[..new.min(l.len())], &r[..new.min(r.len())], dt.clamp(0.001, 0.25));
             (self.l, self.r) = (l, r);
         }
         true
@@ -257,6 +284,7 @@ impl Logic {
     }
 
     pub fn down(&mut self, x: f32, y: f32, btn: Btn, m: Mods, dbl: bool) -> Vec<Act> {
+        self.sync();
         let Some(c) = view::hit(&self.st, x, y) else {
             return vec![];
         };
@@ -346,6 +374,7 @@ impl Logic {
     }
 
     pub fn wheel(&mut self, x: f32, y: f32, notches: f32, _m: Mods) -> Vec<Act> {
+        self.sync();
         let Some(c) = view::hit(&self.st, x, y) else {
             return vec![];
         };
@@ -418,7 +447,10 @@ impl Logic {
                 let mut m = MenuDef::new(MenuStyle::Context);
                 m.head("Window", Cmd::None);
                 m.add(MenuItem::item("Visible").mark(Mark::Check(self.st.visible)), Cmd::Visible);
+                m.add(MenuItem::item("Mini view").mark(Mark::Check(self.st.mini)), Cmd::Mini);
                 m.add(MenuItem::item("Background").mark(Mark::Check(self.st.background)), Cmd::Background);
+                m.add(MenuItem::item("Keep in front").mark(Mark::Check(self.st.keep_in_front)), Cmd::KeepInFront);
+                m.add(MenuItem::item("On desktop").mark(Mark::Check(self.st.on_desktop)), Cmd::OnDesktop);
                 m.add(MenuItem::item("Hold").shortcut("Middle click").mark(Mark::Check(self.held)), Cmd::Hold);
                 m.head("Mode", Cmd::None);
                 m.add(MenuItem::item("Auto").mark(Mark::Radio(self.st.auto_mode)), Cmd::Mode(None));
@@ -431,6 +463,7 @@ impl Logic {
     }
 
     pub fn pick(&mut self, _req: &MenuReq, cmd: Cmd, _x: f32, _y: f32) -> Vec<Act> {
+        self.sync();
         match cmd {
             Cmd::None => return vec![],
             Cmd::Target(k) => {
@@ -451,6 +484,12 @@ impl Logic {
             }
             Cmd::Visible => self.st.visible = !self.st.visible,
             Cmd::Background => self.st.background = !self.st.background,
+            Cmd::Mini => self.st.mini = !self.st.mini,
+            Cmd::KeepInFront => self.st.keep_in_front = !self.st.keep_in_front,
+            Cmd::OnDesktop => {
+                self.st.on_desktop = !self.st.on_desktop;
+                self.st.desktop_flag = self.st.on_desktop;
+            }
         }
         self.commit();
         vec![Act::Repaint]
@@ -464,6 +503,7 @@ impl Logic {
     }
 
     pub fn typed(&mut self, t: &TypeTarget, text: &str) {
+        self.sync();
         match t {
             TypeTarget::Title => {
                 // Single-byte text, as the original stores it.
@@ -481,6 +521,43 @@ impl Logic {
             }
         }
         self.commit();
+    }
+
+    // ---- The floating display window
+
+    /// The pointer over the floating display (logical px in it), for the reading under it.
+    pub fn point(&mut self, at: Option<(f32, f32)>) {
+        self.ptr = at;
+    }
+
+    /// A middle click: freezes or frees the display.
+    pub fn toggle_hold(&mut self) {
+        self.held = !self.held;
+    }
+
+    /// The floating window's rectangle as stored (the mini view's while it is on), logical screen px.
+    pub fn window_rect(&self) -> Rect4 {
+        if self.st.mini { self.st.mini_window } else { self.st.window }
+    }
+
+    /// The floating window was moved or resized to `r` (logical screen px): kept in the state.
+    pub fn set_window_rect(&mut self, r: Rect4) {
+        self.sync();
+        if self.window_rect() == r {
+            return;
+        }
+        if self.st.mini {
+            self.st.mini_window = r;
+        } else {
+            self.st.window = r;
+        }
+        self.commit();
+    }
+
+    /// The floating window's picture: the display filling `area` over transparency.
+    pub fn paint_float(&mut self, c: &mut os_ui::Canvas, area: os_ui::Rect) {
+        let held = self.held();
+        display::paint(c, &self.st, &self.an, area, Pointer { at: self.ptr, held });
     }
 
     pub fn paint(&mut self, c: &mut os_ui::Canvas) {
@@ -531,6 +608,8 @@ mod win32 {
         lock: CursorLock,
         tracking: bool,
         slot: Arc<AtomicIsize>,
+        /// When the last tick ran.
+        last: std::time::Instant,
     }
 
     /// Owns the window; dropping it closes the editor.
@@ -577,6 +656,7 @@ mod win32 {
                 lock: CursorLock::default(),
                 tracking: false,
                 slot: slot.clone(),
+                last: std::time::Instant::now(),
             });
             let title = pw::wide(crate::NAME);
             let hwnd = CreateWindowExW(
@@ -594,7 +674,7 @@ mod win32 {
                 Box::into_raw(win) as *const c_void,
             );
             slot.store(hwnd as isize, Ordering::Release);
-            SetTimer(hwnd, TIMER, 30, None);
+            SetTimer(hwnd, TIMER, super::TIMER_MS, None);
             Handle(hwnd as isize, slot)
         }
     }
@@ -730,10 +810,16 @@ mod win32 {
             unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
         }
 
+        /// The tick: the analysis and one repaint (input only changes the state; the tick draws it, so a moving mouse
+        /// never starves the animation). The floating display opens when it should be visible.
         fn poll(&mut self) {
-            if self.logic.poll() {
+            let now = std::time::Instant::now();
+            let dt = now.duration_since(self.last).as_secs_f32();
+            self.last = now;
+            if self.logic.tick(dt) {
                 self.invalidate();
             }
+            crate::float::ensure(&self.logic.params, &self.logic.shared, self.scale, self.hwnd);
             if self.logic.hint != self.last_hint {
                 self.last_hint = self.logic.hint.clone();
                 if self.logic.hosted {
@@ -742,11 +828,11 @@ mod win32 {
             }
         }
 
+        /// Carries out what the logic asked for; repaints wait for the tick.
         fn run(&mut self, acts: Vec<Act>) {
-            let mut repaint = false;
             for a in acts {
                 match a {
-                    Act::Repaint => repaint = true,
+                    Act::Repaint => {}
                     Act::Lock => self.lock.lock(self.hwnd),
                     Act::Capture => unsafe {
                         SetCapture(self.hwnd);
@@ -758,7 +844,6 @@ mod win32 {
                             let acts = self.logic.pick(&req, cmd, x, y);
                             self.run(acts);
                         }
-                        repaint = true;
                     }
                     Act::TypeIn(f, x, y) => {
                         let (sx, sy) = self.screen(x, y);
@@ -766,12 +851,8 @@ mod win32 {
                         if let Some(t) = pw::type_in(self.hwnd, sx, sy, &cur, self.scale) {
                             self.logic.typed(&f, &t);
                         }
-                        repaint = true;
                     }
                 }
-            }
-            if repaint {
-                self.invalidate();
             }
         }
 
@@ -1055,6 +1136,24 @@ mod tests {
     }
 
     #[test]
+    fn two_displays_keep_each_others_edits() {
+        // The editor and the floating window: one's edit is seen by the other, and neither undoes it.
+        let mut ed = logic();
+        let mut fl = Logic::new(ed.params.clone(), ed.shared.clone());
+        assert_eq!(ed.shared.viewers.load(Ordering::Relaxed), 2);
+        ed.pick(&MenuReq::Display, Cmd::Background, 0.0, 0.0);
+        assert!(!saved(&ed).background);
+        fl.set_window_rect([10, 20, 310, 145]);
+        let st = saved(&ed);
+        assert!(!st.background, "the window move kept the editor's edit");
+        assert_eq!(st.window, [10, 20, 310, 145]);
+        fl.poll();
+        ed.poll();
+        assert!(!fl.st.background);
+        assert_eq!(ed.st.window, [10, 20, 310, 145]);
+    }
+
+    #[test]
     fn a_state_replaced_from_outside_is_read_again() {
         let mut l = logic();
         let mut st = State::new_default();
@@ -1078,8 +1177,10 @@ mod tests {
         }
         l.poll();
         assert!((l.an.meter[0] + 6.02).abs() < 0.1, "{}", l.an.meter[0]);
-        assert!(l.shared.editor_open.load(Ordering::Relaxed));
+        let shared = l.shared.clone();
+        assert_eq!(shared.viewers.load(Ordering::Relaxed), 1);
         drop(l);
+        assert_eq!(shared.viewers.load(Ordering::Relaxed), 0);
     }
 
     fn render(l: &mut Logic, path: &std::path::Path) {
