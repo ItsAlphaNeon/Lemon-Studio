@@ -22,7 +22,7 @@ pub const EXT: &str = ".flp";
 pub const LEMON_EXT: &str = ".lemon";
 /// The type's description and the open verb's name (spec).
 const DESCRIPTION: &str = "Lemon Studio project";
-const FRIENDLY_NAME: &str = "Lemon Studio";
+const FRIENDLY_NAME: &str = crate::version::NAME;
 /// The per-user classes, where every write goes (`Root::Classes`).
 const CLASSES: &str = r"Software\Classes";
 /// Windows' "Open with ▸ Always" choice for `.flp` (`Root::User`), value `ProgId`.

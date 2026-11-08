@@ -72,11 +72,11 @@ pub fn target() -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
     let target = {
         let Some(app) = exe.ancestors().find(|p| p.extension().is_some_and(|x| x == "app")).map(std::path::Path::to_path_buf) else {
-            return Err("This copy of Lemon Studio is not inside its Lemon Studio.app, so it can't update itself.".into());
+            return Err(format!("This copy of Lemon Studio is not inside its {}.app, so it can't update itself.", crate::version::NAME));
         };
         // An app opened from where it was downloaded (still quarantined) runs from a read-only copy macOS made.
         if app.to_string_lossy().contains("/AppTranslocation/") {
-            return Err("Move Lemon Studio.app to your Applications folder and open it from there: macOS runs it from a read-only copy where it is now, so it can't update itself.".into());
+            return Err(format!("Move {}.app to your Applications folder and open it from there: macOS runs it from a read-only copy where it is now, so it can't update itself.", crate::version::NAME));
         }
         app
     };

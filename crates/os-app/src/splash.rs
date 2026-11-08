@@ -8,7 +8,8 @@
 //! round the record's grooves, and a status line under the disc names the step. Once the main window shows and the
 //! opened project has loaded (and the splash has shown for a moment, however quick that was), the lemon tops up, the
 //! light fades, the mark pops and the splash fades away. With the check off there is none. A program setting, read
-//! once at start (`main`); `--screenshot`, the helper processes and tests never open it.
+//! once at start (`main`); `--screenshot`, the helper processes and tests never open it. A nightly build shows the
+//! Nightly logo.
 //!
 //! The window has no background of its own: only the disc, its soft (Gaussian) shadow and the status line show, over
 //! whatever is behind, and clicks go through it. It is animated on a thread of its own (on macOS in a process of its
@@ -56,14 +57,51 @@ pub const LOADED: f32 = 0.96;
 // concentric).
 const C: (f32, f32) = (490.4, 488.1);
 const R: f32 = 476.5;
-// The full-colour logo's fills (`assets/logo/logo-colored-lemon.svg`): the label and the rind, the slices from the
-// lower right round to the upper left, the record's edge and its gradient (lower right to upper left).
+// The logo's fills: the rind and the slices from the lower right round to the upper left, and the line of the record's
+// gradient (lower right to upper left), the same in every logo.
 const LEMON: u32 = 0xffe066;
 const SLICE_FILLS: [u32; 4] = [0xffe066, 0xffe88a, 0xffeda3, 0xfff1b8];
-const RECORD_EDGE: u32 = 0x2d2d2d;
 const RECORD_FROM: (f32, f32) = (857.748, 789.317);
 const RECORD_TO: (f32, f32) = (147.545, 158.696);
-const RECORD_STOPS: [(f32, u32); 3] = [(0.0, 0x2d2d2d), (0.387, 0x171717), (0.8914, 0x000000)];
+
+/// The record half of a logo, the part that differs between them.
+struct Face {
+    /// The label's fill.
+    label: u32,
+    /// Over the label, under the record (path data and fill).
+    under: (&'static str, u32),
+    /// The record's shape, its edge and its gradient.
+    record: &'static str,
+    edge: u32,
+    stops: [(f32, u32); 3],
+    /// Over the record (path data and fill).
+    over: Option<(&'static str, u32)>,
+    /// The spindle hole's fill.
+    center: u32,
+}
+
+/// `assets/logo/logo-colored-lemon.svg`: the shimmer seen through the record's two windows.
+const FACE: Face = Face {
+    label: LEMON,
+    under: (logo::SHIMMER, 0xffffff),
+    record: logo::RECORD,
+    edge: 0x2d2d2d,
+    stops: [(0.0, 0x2d2d2d), (0.387, 0x171717), (0.8914, 0x000000)],
+    over: None,
+    center: 0x000000,
+};
+
+/// `assets/logo/logo-colored-lemon-nightly.svg`: a moon with its craters rising over the wedge's edge, a night sky for
+/// the record and stars on it.
+const NIGHTLY_FACE: Face = Face {
+    label: 0xf6f2df,
+    under: (logo::NIGHTLY_CRATERS, 0xd9d4ba),
+    record: logo::NIGHTLY_RECORD,
+    edge: 0x2f3a8a,
+    stops: [(0.0, 0x2f3a8a), (0.387, 0x1a2056), (0.8914, 0x0c0f2e)],
+    over: Some((logo::NIGHTLY_STARS, 0xfff4c2)),
+    center: 0x0c0f2e,
+};
 /// The empty part of the gauge: each fill this far toward the workspace grey.
 const EMPTY: (u32, f32) = (0x262626, 0.8);
 /// The pie sector the gauge fills, clockwise from the rind's lower end (degrees clockwise from +x).
@@ -313,8 +351,9 @@ fn device(scale: f32) -> (u32, u32) {
 /// a frame only fills.
 struct Parts {
     label: Path,
-    shimmer: Path,
+    under: Path,
     record: Path,
+    over: Option<Path>,
     record_edge: Path,
     center: Path,
     rind: Path,
@@ -323,17 +362,22 @@ struct Parts {
 }
 
 impl Parts {
-    fn new() -> Option<Parts> {
+    fn new(face: &Face) -> Option<Parts> {
         let p = |d: &str| os_ui::path_data(d, 0.0, 0.0, 1.0);
         // Outlines `w` logo units wide, flattened finely enough for the largest splash.
         let outline = |path: &Path, w: f32| path.stroke(&Stroke { width: w, ..Stroke::default() }, 2.0);
         let [s1, s2, s3, s4] = logo::SLICES;
-        let (record, rind) = (p(logo::RECORD)?, p(logo::RIND)?);
+        let (record, rind) = (p(face.record)?, p(logo::RIND)?);
+        let over = match face.over {
+            Some((d, _)) => Some(p(d)?),
+            None => None,
+        };
         Some(Parts {
             label: p(logo::LABEL)?,
-            shimmer: p(logo::SHIMMER)?,
+            under: p(face.under.0)?,
             record_edge: outline(&record, 1.0)?,
             record,
+            over,
             center: p(logo::CENTER)?,
             rind_edge: outline(&rind, 1.0)?,
             rind,
@@ -403,10 +447,16 @@ struct Painter {
     record_mask: Mask,
     record_scale: f32,
     parts: Parts,
+    face: &'static Face,
 }
 
 impl Painter {
+    /// The painter of this build's logo.
     fn new(scale: f32) -> Option<Painter> {
+        Painter::with_face(scale, if crate::version::NIGHTLY { &NIGHTLY_FACE } else { &FACE })
+    }
+
+    fn with_face(scale: f32, face: &'static Face) -> Option<Painter> {
         let (w, h) = device(scale);
         let caption = Canvas::new((DISC.2 * scale).round() as u32, (CAPTION_H * scale).round() as u32, scale).ok()?;
         Some(Painter {
@@ -418,7 +468,8 @@ impl Painter {
             mask: Mask::new(w, h)?,
             record_mask: Mask::new(w, h)?,
             record_scale: f32::NAN,
-            parts: Parts::new()?,
+            parts: Parts::new(face)?,
+            face,
         })
     }
 
@@ -441,12 +492,17 @@ impl Painter {
         let k = DISC.2 * s * look.scale / (2.0 * R);
         let t = Transform::from_translate(cx, cy).pre_scale(k, k).pre_translate(-C.0, -C.1);
         let fill = |px: &mut Pixmap, path: &Path, c: u32, mask: Option<&Mask>| px.fill_path(path, &solid(c), FillRule::Winding, t, mask);
-        // The record half: the label and the shimmer seen through its cut-outs, the record, the spindle.
-        fill(px, &p.label, LEMON, None);
-        fill(px, &p.shimmer, 0xffffff, None);
-        px.fill_path(&p.record, &record_paint(), FillRule::Winding, t, None);
-        fill(px, &p.record_edge, RECORD_EDGE, None);
-        fill(px, &p.center, 0x000000, None);
+        // The record half: the label and what is on it seen through its cut-outs, the record, what is on that, the
+        // spindle.
+        let face = self.face;
+        fill(px, &p.label, face.label, None);
+        fill(px, &p.under, face.under.1, None);
+        px.fill_path(&p.record, &record_paint(face), FillRule::Winding, t, None);
+        if let (Some(over), Some((_, c))) = (&p.over, face.over) {
+            fill(px, over, c, None);
+        }
+        fill(px, &p.record_edge, face.edge, None);
+        fill(px, &p.center, face.center, None);
         // The groove light: its two wedges and the grooves inside them, on the record only, brightest along the
         // wedges' middle.
         if look.light > 0.001 {
@@ -566,8 +622,8 @@ fn mix(a: u32, b: u32, k: f32) -> u32 {
 }
 
 /// The record's gradient fill.
-fn record_paint() -> Paint<'static> {
-    let stops = RECORD_STOPS.iter().map(|&(at, c)| GradientStop::new(at, sk(c, 1.0))).collect();
+fn record_paint(face: &Face) -> Paint<'static> {
+    let stops = face.stops.iter().map(|&(at, c)| GradientStop::new(at, sk(c, 1.0))).collect();
     let mut p = Paint::default();
     if let Some(shader) = LinearGradient::new(Point::from_xy(RECORD_FROM.0, RECORD_FROM.1), Point::from_xy(RECORD_TO.0, RECORD_TO.1), stops, SpreadMode::Pad, Transform::identity()) {
         p.shader = shader;
@@ -718,7 +774,7 @@ mod win {
             wc.hInstance = inst;
             wc.lpszClassName = class.as_ptr();
             RegisterClassW(&wc);
-            let title = wide("Lemon Studio");
+            let title = wide(crate::version::NAME);
             // Layered (per-pixel alpha) and transparent to the mouse; above every window that is not topmost too; a
             // tool window takes no taskbar button; never activated, so the main window gets the focus as before.
             let hwnd = CreateWindowExW(
@@ -912,7 +968,7 @@ mod x11 {
         if let (Some(ty), Some(splash)) = (atom(b"_NET_WM_WINDOW_TYPE"), atom(b"_NET_WM_WINDOW_TYPE_SPLASH")) {
             let _ = c.change_property32(PropMode::REPLACE, win, ty, AtomEnum::ATOM, &[splash]);
         }
-        let _ = c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, b"Lemon Studio");
+        let _ = c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, crate::version::NAME.as_bytes());
         let _ = c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_CLASS, AtomEnum::STRING, b"lemonstudio\0LemonStudio\0");
         // No input region: clicks go through to what is behind.
         let _ = c.shape_rectangles(shape::SO::SET, shape::SK::INPUT, ClipOrdering::UNSORTED, win, 0, 0, &[]);
@@ -1149,6 +1205,34 @@ mod mac {
 mod tests {
     use super::*;
     use crate::prefs::{check, find_check, set_check, SHOW_SPLASH, SILENT_STARTUP};
+
+    /// The colour at a point of the logo (its own units), the whole logo showing.
+    fn logo_pixel(p: &mut Painter, at: (f32, f32)) -> (u8, u8, u8) {
+        let look = Look { alpha: 1.0, scale: 1.0, progress: 1.0, light: 0.0, angle: 0.0, caption: String::new() };
+        let k = DISC.2 / (2.0 * R);
+        let (x, y) = ((DISC.0 + (at.0 - C.0) * k) as u32, (DISC.1 + (at.1 - C.1) * k) as u32);
+        let frame = p.paint(&look);
+        let c = frame.pixel(x, y).unwrap().demultiply();
+        (c.red(), c.green(), c.blue())
+    }
+
+    /// A nightly's splash is the Nightly logo: a night sky and a moon on the record half, the same lemon.
+    #[test]
+    fn the_nightly_splash_is_the_nightly_logo() {
+        let mut lemon = Painter::with_face(1.0, &FACE).unwrap();
+        let mut night = Painter::with_face(1.0, &NIGHTLY_FACE).unwrap();
+        // The record, away from the stars: black to grey on one, indigo on the other.
+        let at = (700.0, 300.0);
+        let (r, g, b) = logo_pixel(&mut lemon, at);
+        assert!(r == g && g == b, "{r} {g} {b}");
+        let (r, g, b) = logo_pixel(&mut night, at);
+        assert!(b > r + 20 && b > g + 20, "{r} {g} {b}");
+        // The moon, on the label.
+        assert_eq!(logo_pixel(&mut night, (560.0, 470.0)), (0xf6, 0xf2, 0xdf));
+        // A slice of the lemon: the same in both.
+        let at = (450.0, 700.0);
+        assert_eq!(logo_pixel(&mut night, at), logo_pixel(&mut lemon, at));
+    }
 
     /// "Show startup splash screen" (spec: ui/settings-choices.md "Miscellaneous: naming, detached plugins and
     /// startup"): on as found, a program setting; with it off the start opens no splash.

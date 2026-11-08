@@ -2,17 +2,18 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-"""Generate the Lemon Studio logo data from crates/os-app/assets/logo/*-lemon.svg.
+"""Generate the Lemon Studio logo data from crates/os-app/assets/logo/logo-*-lemon*.svg.
 
     python tools/logo/gen.py            (run from the repository root)
     python tools/logo/gen.py --rs       (logo.rs only: no Pillow needed)
 
 Writes:
-  crates/os-app/src/logo.rs        the full-colour logo's parts (the startup splash) and the greyscale mark (drawn in
-                                   one tint), as absolute M/L/Q/C/Z path data
+  crates/os-app/src/logo.rs        the full-colour logo's parts (the startup splash), those the Nightly logo has
+                                   instead, and the greyscale mark (drawn in one tint), as absolute M/L/Q/C/Z path data
   crates/os-app/assets/lemonstudio.ico  app icon, 16..256 px (exe, window, taskbar), from the owner's
                                         bitmap assets/logo/icon-lemon.png (edited in icon-lemon.pdn, Paint.NET)
   crates/os-app/assets/lemonstudio.png  the same icon at 256 px (Linux: window icon and desktop entry)
+  crates/os-app/assets/lemonstudio-nightly.{ico,png}  the same for nightly builds, from assets/logo/icon-lemon-nightly.png
 """
 import importlib.util
 import os
@@ -29,6 +30,9 @@ spec.loader.exec_module(tg)
 # The full-colour logo's parts, back to front: constant name and the id of the path (or of its group) in the SVG.
 PARTS = [("LABEL", "Label"), ("SHIMMER", "Shimmer"), ("RECORD", "Record"), ("CENTER", "Record_Center"), ("RIND", "Rind")]
 SLICES = ["Slice_1", "Slice_2", "Slice_3", "Slice_4"]
+# The parts only the Nightly logo has, or has differently; the rest it shares with the full-colour logo.
+NIGHTLY_PARTS = [("NIGHTLY_CRATERS", "Craters"), ("NIGHTLY_RECORD", "Record"), ("NIGHTLY_STARS", "Stars")]
+NIGHTLY_SHARED = ["Label", "Record_Center", "Rind"] + SLICES
 
 
 def layers(svg):
@@ -68,6 +72,9 @@ def write_rs():
     # The greyscale mark is the coloured one's shapes without the label and the shimmer.
     shared = [d["RECORD"], d["CENTER"], d["RIND"]] + slices
     assert [d_string(cmds) for _, cmds in grey] == shared, "the greyscale and full-colour logos differ in shape"
+    nightly = parts_by_id(os.path.join(ASSETS, "logo", "logo-colored-lemon-nightly.svg"))
+    for sid in NIGHTLY_SHARED:
+        assert nightly[sid] == colour[sid], "the Nightly and full-colour logos differ in " + sid
     lines = tg.HEADER + [
         "//! Lemon Studio logo, generated from `assets/logo/logo-colored-lemon.svg` and `logo-greyscale-lemon.svg` by",
         "//! `tools/logo/gen.py`: do not edit. Absolute M/L/Q/C/Z path data in viewBox units.",
@@ -84,6 +91,12 @@ def write_rs():
     lines += [
         "];",
         "",
+        "// The Nightly logo's own parts (`logo-colored-lemon-nightly.svg`): the moon's craters on the label, the record",
+        "// without its two windows, and the stars on it. The rest it shares with the full-colour logo.",
+    ]
+    lines += ['pub const %s: &str = "%s";' % (name, d_string(tg.convert(nightly[sid]))) for name, sid in NIGHTLY_PARTS]
+    lines += [
+        "",
         "/// The greyscale mark, drawn in one tint (`icons::logo`).",
         "pub const PATHS: &[&str] = &[RECORD, CENTER, RIND, SLICES[0], SLICES[1], SLICES[2], SLICES[3]];",
     ]
@@ -91,25 +104,26 @@ def write_rs():
         f.write("\n".join(lines) + "\n")
 
 
-def write_icons():
+def write_icons(bitmap, name):
     from PIL import Image
 
-    src = Image.open(os.path.join(ASSETS, "logo", "icon-lemon.png")).convert("RGBA")
+    src = Image.open(os.path.join(ASSETS, "logo", bitmap)).convert("RGBA")
     src = src.crop(src.getchannel("A").getbbox())  # no transparent margin: fill the whole icon cell
     side = max(src.size)
     sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
     sq.paste(src, ((side - src.width) // 2, (side - src.height) // 2))
     sizes = (256, 128, 64, 48, 40, 32, 24, 20, 16)
     imgs = [sq.resize((s, s), Image.LANCZOS) for s in sizes]
-    imgs[0].save(os.path.join(ASSETS, "lemonstudio.ico"), sizes=[(s, s) for s in sizes], append_images=imgs[1:])
-    # Linux: the freedesktop icon named after the app id (Wayland compositors show it through lemonstudio.desktop).
-    imgs[0].save(os.path.join(ASSETS, "lemonstudio.png"))
+    imgs[0].save(os.path.join(ASSETS, name + ".ico"), sizes=[(s, s) for s in sizes], append_images=imgs[1:])
+    # Linux: the freedesktop icon named after the app id (Wayland compositors show it through the desktop entry).
+    imgs[0].save(os.path.join(ASSETS, name + ".png"))
 
 
 def main():
     write_rs()
     if "--rs" not in sys.argv[1:]:
-        write_icons()
+        write_icons("icon-lemon.png", "lemonstudio")
+        write_icons("icon-lemon-nightly.png", "lemonstudio-nightly")
 
 
 if __name__ == "__main__":

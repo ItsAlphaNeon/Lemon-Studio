@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Embeds `assets/lemonstudio.ico` as icon resource 1 and the version (`LEMON_VERSION`, else the workspace's) as the
-//! version resource (Windows). Uses the Windows SDK's `rc.exe` (or `$RC`); without it the build goes on and the exe just
-//! has no icon. Also sets `cfg(plugin_windows)` where plugin windows exist, and `cfg(lemon_updater)` when
-//! `LEMON_UPDATER` names the updater to carry (release builds, `crate::update`).
+//! Embeds `assets/lemonstudio.ico` (a nightly's: `lemonstudio-nightly.ico`) as icon resource 1 and the version
+//! (`LEMON_VERSION`, else the workspace's) as the version resource (Windows). Uses the Windows SDK's `rc.exe` (or `$RC`);
+//! without it the build goes on and the exe just has no icon. Also sets `cfg(plugin_windows)` where plugin windows exist,
+//! `cfg(lemon_updater)` when `LEMON_UPDATER` names the updater to carry (release builds, `crate::update`), and
+//! `cfg(lemon_nightly)` when `LEMON_CHANNEL` is `nightly` (`crate::version`).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -77,9 +78,20 @@ fn version() -> String {
     std::env::var("LEMON_VERSION").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap())
 }
 
+/// Whether this is a nightly build (`crate::version::NIGHTLY`).
+fn nightly() -> bool {
+    println!("cargo::rustc-check-cfg=cfg(lemon_nightly)");
+    println!("cargo:rerun-if-env-changed=LEMON_CHANNEL");
+    let nightly = std::env::var("LEMON_CHANNEL").is_ok_and(|c| c == "nightly");
+    if nightly {
+        println!("cargo::rustc-cfg=lemon_nightly");
+    }
+    nightly
+}
+
 /// Windows: the resource script, the icon and the version resource (four numbers: a nightly's `YEAR.MONTH.DAY.N`
-/// fits as it is, a semantic version gets a 0 at the end).
-fn resource_script(ico: &std::path::Path, version: &str) -> String {
+/// fits as it is, a semantic version gets a 0 at the end). `name` is the program's (`crate::version::NAME`).
+fn resource_script(ico: &std::path::Path, version: &str, name: &str) -> String {
     let mut n: Vec<u16> = version.split(['-', '+']).next().unwrap_or("").split('.').map(|p| p.parse().unwrap_or(0)).collect();
     n.resize(4, 0);
     let nums = format!("{},{},{},{}", n[0], n[1], n[2], n[3]);
@@ -99,12 +111,12 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "CompanyName", "The Lemon Studio contributors"
-      VALUE "FileDescription", "Lemon Studio"
+      VALUE "FileDescription", "{name}"
       VALUE "FileVersion", "{text}"
       VALUE "InternalName", "lemonstudio"
       VALUE "LegalCopyright", "Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors. GPL-3.0-or-later."
       VALUE "OriginalFilename", "lemonstudio.exe"
-      VALUE "ProductName", "Lemon Studio"
+      VALUE "ProductName", "{name}"
       VALUE "ProductVersion", "{text}"
     END
   END
@@ -121,6 +133,7 @@ fn main() {
     factory_presets();
     updater();
     let version = version();
+    let nightly = nightly();
     // `plugin_windows`: plugin editors open in Lemon Studio's frame windows (Win32 on Windows, X11 on Linux, AppKit on
     // macOS).
     println!("cargo::rustc-check-cfg=cfg(plugin_windows)");
@@ -129,6 +142,7 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=assets/lemonstudio.rc");
     println!("cargo:rerun-if-changed=assets/lemonstudio.ico");
+    println!("cargo:rerun-if-changed=assets/lemonstudio-nightly.ico");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
         || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
     {
@@ -140,9 +154,10 @@ fn main() {
     };
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let out = out_dir.join("lemonstudio.res");
-    let ico = std::path::absolute("assets/lemonstudio.ico").expect("icon path");
+    let (ico, name) = if nightly { ("assets/lemonstudio-nightly.ico", "Lemon Studio Nightly") } else { ("assets/lemonstudio.ico", "Lemon Studio") };
+    let ico = std::path::absolute(ico).expect("icon path");
     let script = out_dir.join("lemonstudio.rc");
-    std::fs::write(&script, resource_script(&ico, &version)).expect("resource script");
+    std::fs::write(&script, resource_script(&ico, &version, name)).expect("resource script");
     let ok = Command::new(&rc)
         .args(["/nologo", "/fo"])
         .arg(&out)
