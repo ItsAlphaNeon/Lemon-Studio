@@ -12,12 +12,14 @@
 //! At the end of each trace it also checks what needs no other build: undo back to the start gives the opened project,
 //! redo gives the last one back, the engine holds what the project says, and a saved copy opens as the same project.
 //!
-//! Run with a home folder of its own (the app saves projects, backups and settings), outside the sandbox and on the
+//! Each recording and replay runs in a process of its own with a home folder of its own under `OS_EQUIV_DIR` (the
+//! app saves projects, backups and settings there, and no trace sees another's). Run outside the sandbox and on the
 //! hidden display (`hidden-tests`):
 //! ```text
-//! HOME=<scratch home> OS_EQUIV_DIR=<traces> OS_EQUIV_CORPUS=<folder of .flp> \
+//! OS_EQUIV_DIR=<traces> OS_EQUIV_CORPUS=<folder of .flp> \
 //!   cargo test -p os-app --bin lemonstudio equiv_record -- --ignored --nocapture
 //! ```
+//! `equiv_shrink` and `equiv_show` run in the test's own process: give them `HOME=<OS_EQUIV_DIR>/home`.
 //! `equiv_replay` replays every trace in `OS_EQUIV_DIR`; `equiv_twice` records and replays on the same build (what
 //! isn't deterministic yet). `OS_EQUIV_SEEDS` (2) traces per project, `OS_EQUIV_STEPS` (150) steps each,
 //! `OS_EQUIV_ONLY=<name part>` limits the projects, `OS_EQUIV_SEED_FROM` (1) the first seed, `OS_EQUIV_FIRST=<n>` takes the first n of the corpus.
@@ -278,6 +280,9 @@ fn epoch() -> Instant {
 impl Rig {
     /// Opens a copy of `project` in `work` (the app may save over what it opened).
     fn open(project: &Path, work: &Path) -> Rig {
+        // The app writes settings, backups and recent files under the home folder: never the user's own.
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert!(Path::new(&home).starts_with(traces_dir()) || std::env::var("OS_EQUIV_HOME_OK").is_ok(), "HOME must be a folder under OS_EQUIV_DIR, not {home}");
         crate::transport::headless();
         crate::anim::set_clock_at(epoch());
         let _ = std::fs::create_dir_all(work);
@@ -477,17 +482,20 @@ impl Rig {
             let d = a.iter().zip(&b).find(|(x, y)| x != y).map_or("length".into(), |(x, y)| format!("{}:{}->{}", x.0, short(&x.1), short(&y.1)));
             bad.push(format!("redo-to-end(side:{d})"));
         }
-        // A saved copy opens as the same project: the project as save writes it (the tempo, song mode and rack state
-        // the interface holds go in at save) against the one opened again, and the interface's part of it too.
+        // A saved copy opens as the same project, and the interface's part of it (tempo, current pattern, rack state)
+        // as the interface held it.
         let copy = work.join("roundtrip.flp");
         match self.app.save_copy_with(copy.clone(), &mut |_| {}) {
             Some(Ok(())) => {
                 let mut again = open_app(&copy);
+                // The tempo, song mode and current pattern the project holds are what was opened or last saved: the
+                // interface holds them meanwhile, and its part is compared below.
                 let mut written = self.app.state.project.clone();
-                let s = &self.app.state;
-                written.tempo = Some(s.tempo);
-                written.song_mode = Some(s.song_mode);
-                if let Some(d) = difference(&written, &again.state.project, true) {
+                let mut back = again.state.project.clone();
+                for p in [&mut written, &mut back] {
+                    (p.tempo, p.song_mode, p.current_pattern) = (None, None, None);
+                }
+                if let Some(d) = difference(&written, &back, true) {
                     bad.push(format!("roundtrip({d})"));
                 }
                 let (a, b) = (side(&self.app), side(&again));
@@ -761,13 +769,12 @@ fn equiv_record() {
     let dir = traces_dir();
     std::fs::create_dir_all(&dir).expect("traces folder");
     let (seeds, steps) = (var("OS_EQUIV_SEEDS", 2u64), var("OS_EQUIV_STEPS", 150usize));
+    let _ = root;
     for p in &projects {
         for seed in var("OS_EQUIV_SEED_FROM", 1u64)..=seeds {
             let t0 = Instant::now();
-            let t = record(&root, p, seed, steps);
-            std::fs::write(dir.join(format!("{}.trace", trace_name(p, seed))), t.write()).expect("write trace");
-            let new = unaccepted(&t.invariants);
-            eprintln!("{p} seed {seed}: {} steps in {:.1} s, findings {new:?} ({} accepted)", t.steps.len(), t0.elapsed().as_secs_f64(), t.invariants.len() - new.len());
+            let r = isolated(&trace_name(p, seed), &format!("record\t{p}\t{seed}\t{steps}"));
+            eprintln!("{p} seed {seed}: {r} in {:.1} s", t0.elapsed().as_secs_f64());
         }
     }
 }
@@ -779,11 +786,12 @@ fn equiv_replay() {
     let mut names: Vec<PathBuf> = std::fs::read_dir(traces_dir()).expect("traces").flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "trace")).collect();
     names.sort();
     let mut failed = 0;
+    let _ = root;
     for n in &names {
-        let t = Trace::read(&std::fs::read_to_string(n).expect("read")).expect("a trace");
-        match replay(&root, &t) {
-            None => eprintln!("same: {}", n.display()),
-            Some(r) => {
+        let name = n.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        match isolated(&name, &format!("replay\t{}", n.display())).as_str() {
+            "same" => eprintln!("same: {}", n.display()),
+            r => {
                 failed += 1;
                 eprintln!("DIFFERENT: {}: {r}", n.display());
             }
@@ -801,18 +809,66 @@ fn equiv_twice() {
     let mut failed = 0;
     for p in &projects {
         for seed in var("OS_EQUIV_SEED_FROM", 1u64)..=seeds {
-            let t = record(&root, p, seed, steps);
-            let again = Trace::read(&t.write()).expect("reads back");
-            assert_eq!(again.write(), t.write(), "the trace format round-trips");
-            if let Some(r) = replay(&root, &again) {
-                failed += 1;
-                eprintln!("NOT DETERMINISTIC: {p} seed {seed}: {r}");
-            } else {
-                eprintln!("deterministic: {p} seed {seed}, invariants {:?}", t.invariants);
+            let name = trace_name(p, seed);
+            let recorded = isolated(&name, &format!("record\t{p}\t{seed}\t{steps}"));
+            let path = traces_dir().join(format!("{name}.trace"));
+            let t = Trace::read(&std::fs::read_to_string(&path).expect("recorded")).expect("a trace");
+            assert_eq!(Trace::read(&t.write()).map(|a| a.write()), Some(t.write()), "the trace format round-trips");
+            match isolated(&name, &format!("replay\t{}", path.display())).as_str() {
+                "same" => eprintln!("deterministic: {p} seed {seed}, {recorded}"),
+                r => {
+                    failed += 1;
+                    eprintln!("NOT DETERMINISTIC: {p} seed {seed}: {r}");
+                }
             }
         }
     }
     assert_eq!(failed, 0);
+}
+
+/// Runs one recording or replay (`job`: "record\t<project>\t<seed>\t<steps>" or "replay\t<trace>") in a process of
+/// its own with a home folder of its own, so no trace sees what another left behind (settings, clipboards, the
+/// process-wide switches): what it reports.
+fn isolated(name: &str, job: &str) -> String {
+    let home = traces_dir().join("homes").join(name);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::create_dir_all(&home);
+    let out = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .args(["equiv::equiv_one", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+        .env("OS_EQUIV_ONE", job)
+        .env("HOME", &home)
+        .output();
+    let _ = std::fs::remove_dir_all(&home);
+    let Ok(out) = out else { return "did not start".into() };
+    let err = String::from_utf8_lossy(&out.stderr);
+    err.lines().find_map(|l| l.strip_prefix("EQUIV-RESULT ")).map_or_else(
+        || format!("no result ({})", err.lines().filter(|l| l.contains("panicked") || l.contains("error")).take(2).collect::<Vec<_>>().join(" / ")),
+        String::from,
+    )
+}
+
+/// The child of `isolated`: one recording (written to the traces folder) or one replay.
+#[test]
+#[ignore = "the equivalence harness: one job of equiv_record or equiv_replay, in a process of its own"]
+fn equiv_one() {
+    let Ok(job) = std::env::var("OS_EQUIV_ONE") else { return };
+    let (root, _) = corpus();
+    let parts: Vec<&str> = job.split('\t').collect();
+    let result = match parts.as_slice() {
+        ["record", project, seed, steps] => {
+            let (seed, steps) = (seed.parse().expect("seed"), steps.parse().expect("steps"));
+            let t = record(&root, project, seed, steps);
+            std::fs::write(traces_dir().join(format!("{}.trace", trace_name(project, seed))), t.write()).expect("write trace");
+            let new = unaccepted(&t.invariants);
+            format!("{} steps, findings {new:?} ({} accepted)", t.steps.len(), t.invariants.len() - new.len())
+        }
+        ["replay", path] => {
+            let t = Trace::read(&std::fs::read_to_string(path).expect("read")).expect("a trace");
+            replay(&root, &t).unwrap_or_else(|| "same".into())
+        }
+        _ => format!("unknown job {job:?}"),
+    };
+    eprintln!("EQUIV-RESULT {}", result.replace('\n', " "));
 }
 
 /// Whether running `steps` on `project` breaks an invariant whose name starts with `kind`.
