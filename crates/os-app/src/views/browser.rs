@@ -828,7 +828,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         }
         icons::draw(ui.c, icon, Rect::new(r.x + 1.0, 87.0 + dy, 12.0, 14.0), if hov { t.glyph } else { t.text_dim });
     }
-    ui.c.text(os_ui::Font::new(14), 52.0, 85.0 + dy, t.text_dim, "Browser");
+    // Level with the arrows before it (their middle is y 94).
+    ui.c.text_mid(os_ui::Font::new(14), 52.0, 94.0 + dy, t.text_dim, "Browser");
     // Tabs (spec ui/browser.md §1): FL's five without Online content, sharing the strip.
     ui.c.fill_rect(Rect::span(0.0, bw - 1.0, 106.0 + dy, 141.0 + dy), t.browser_tabs);
     const TIPS: [&str; 4] = ["All", "Current project", "Plugin library", "Favorites"];
@@ -906,6 +907,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             icons::draw(ui.c, Icon::Star, Rect::new(bw - 19.0, y + 5.0, 13.0, 13.0), sc);
         }
         let (f, w) = (os_ui::Font::new(17), bw - 1.0 - x - 27.0 - if fav { 16.0 } else { 0.0 });
+        // The label level with the icon (both are centred on the row).
+        let ty = y + ROW_H / 2.0 - ui.c.cap_mid(f);
         let over = ui.c.text_width(f, &row.label) - w;
         // Hovered, a label that does not fit scrolls (§9) rather than being cut.
         if hov && over > 0.0 {
@@ -914,13 +917,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             let off = marquee_offset(now.duration_since(since).as_secs_f32(), over);
             let lr = Rect::new(x + 25.0, y, w, ROW_H);
             ui.c.push_clip(lr);
-            ui.c.text(f, lr.x - off, y, c, &row.label);
+            ui.c.text(f, lr.x - off, ty, c, &row.label);
             ui.c.pop_clip();
             marquee = Some(Marquee { key: row.key.clone(), since, rect: lr, over, off });
             continue;
         }
         let label = if row.path.is_some() { middle_cut(ui, f, &row.label, w) } else { row.label.clone() };
-        ui.c.text_clip(f, x + 25.0, y, w, c, &label);
+        ui.c.text_clip(f, x + 25.0, ty, w, c, &label);
     }
     *s.browser_marquee.borrow_mut() = marquee;
     let indexing = opt(s, OPT_INDEX) && s.browser_index.building();
