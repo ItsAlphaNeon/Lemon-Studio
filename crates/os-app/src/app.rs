@@ -3119,7 +3119,6 @@ impl App {
                     self.state.hosted_rows.push(row);
                     self.transport.set_instruments(self.plugins.instruments());
                     self.state.piano.dirty = true;
-                    let format = self.plugins.descriptor(row).map_or("", |d| crate::plugins::format_name(d.format));
                     self.state.message = Some(format!("Added {name}"));
                     self.state.pending_open = Some(row);
                 }
