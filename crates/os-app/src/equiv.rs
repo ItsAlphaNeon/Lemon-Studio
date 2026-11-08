@@ -258,6 +258,11 @@ struct Rig {
     step: usize,
     /// How often the generator aimed at each kind of control: it favours the kinds it has used least.
     used: std::collections::BTreeMap<String, u32>,
+    /// The kinds of control whose step changed the project, the interface's part of it or Lemon Studio's own state:
+    /// these weigh more, so the controls that edit are tried in more ways than those that only show something.
+    edits: std::collections::BTreeSet<String>,
+    /// The kind the last generated step aimed at.
+    aimed: Option<String>,
 }
 
 /// A control's kind for the generator's novelty: its action's variant, and the variant inside it.
@@ -293,7 +298,7 @@ impl Rig {
         app.plugins.available = crate::plugins::builtin();
         app.plugins.effects = crate::plugins::builtin_effects();
         app.open(copy);
-        let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas"), step: 0, used: std::collections::BTreeMap::new() };
+        let mut rig = Rig { app, canvas: os_ui::Canvas::new(FRAME.0, FRAME.1, 1.0).expect("a canvas"), step: 0, used: Default::default(), edits: Default::default(), aimed: None };
         rig.settle();
         // Mixer effects are hosted a few ticks after loading.
         for _ in 0..20 {
@@ -387,10 +392,15 @@ impl Rig {
     fn generate(&mut self, rng: &mut Rng) -> Vec<Input> {
         let targets = self.targets();
         // Weighted by novelty: a kind of control aimed at n times weighs 1/(n+1), so the many step buttons or grid
-        // cells of one kind don't crowd out the few knobs, boxes and menus.
-        let weight = |k: &str| 1_000_000 / (1 + u64::from(self.used.get(k).copied().unwrap_or(0)));
+        // cells of one kind don't crowd out the few knobs, boxes and menus. A kind that has edited weighs four times
+        // as much: its drags, wheels and modifiers are where edits go wrong.
+        let weight = |k: &str| {
+            let edit = if self.edits.contains(k) { 4 } else { 1 };
+            edit * 1_000_000 / (1 + u64::from(self.used.get(k).copied().unwrap_or(0)))
+        };
         let total: u64 = targets.iter().map(|t| weight(&t.2)).sum();
         if total == 0 {
+            self.aimed = None;
             return vec![Input::Key("Escape".into(), false, false)];
         }
         let mut at = rng.next() % total;
@@ -402,9 +412,11 @@ impl Rig {
             at -= w;
             false
         }).cloned() else {
+            self.aimed = None;
             return vec![Input::Key("Escape".into(), false, false)];
         };
-        *self.used.entry(k).or_default() += 1;
+        *self.used.entry(k.clone()).or_default() += 1;
+        self.aimed = Some(k);
         let (shift, ctrl, alt) = (rng.chance(12), rng.chance(12), rng.chance(5));
         let mods = Input::Mods(shift, ctrl, alt);
         let none = Input::Mods(false, false, false);
@@ -688,10 +700,17 @@ fn record(root: &Path, project: &str, seed: u64, steps: usize) -> Trace {
     let mut opened_project = rig.app.state.project.clone();
     let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
     let mut out = Vec::new();
+    let mut before = opened.clone();
     for _ in 0..steps {
         let inputs = rig.generate(&mut rng);
         let fp = rig.run(&inputs);
         rig.undo_start(&mut opened_project);
+        if fp.differs(&before).iter().any(|p| ["project", "side", "lemon"].contains(p)) {
+            if let Some(k) = rig.aimed.clone() {
+                rig.edits.insert(k);
+            }
+        }
+        before = fp.clone();
         out.push((inputs, fp));
     }
     let invariants = rig.invariants(&opened_project, &work);
