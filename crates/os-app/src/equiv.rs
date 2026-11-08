@@ -558,7 +558,8 @@ impl Rig {
 
 /// A project as the checks compare it: what its lists' order and empty patterns say is left out. The file holds the
 /// clips in position order and the patterns by number, so their order in the lists means nothing; a pattern with
-/// nothing in it (no notes, name, colour, length, loops or markers) has nothing to write and reads back as absent.
+/// nothing in it (no notes, name, colour, length, loops or markers) has nothing to write and reads back as absent;
+/// a send level at unity is the same as none.
 fn canonical(p: &os_model::Project) -> os_model::Project {
     let mut p = p.clone();
     for a in &mut p.arrangements {
@@ -571,6 +572,10 @@ fn canonical(p: &os_model::Project) -> os_model::Project {
             || !q.markers.is_empty()
     });
     p.patterns.sort_by_key(|q| q.number);
+    // A route with no level record plays at unity (0.8 on the fader scale), as one with a record at 0.8 does.
+    for m in &mut p.mixer {
+        m.send_levels.retain(|&(_, l)| (l - 0.8).abs() > 1e-9);
+    }
     p
 }
 
