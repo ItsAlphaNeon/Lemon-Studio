@@ -18,6 +18,9 @@ pub mod float;
 #[cfg(target_os = "macos")]
 #[path = "float_mac.rs"]
 pub mod float;
+#[cfg(target_os = "linux")]
+#[path = "float_x11.rs"]
+pub mod float;
 pub mod state;
 pub mod view;
 
@@ -114,10 +117,10 @@ pub struct Shared {
     pub rate: AtomicU32,
     /// Displays open (the editor, the floating window): the audio thread feeds the scope only while there are.
     pub viewers: AtomicUsize,
-    /// The floating display window (Win32 HWND; 0 = none).
+    /// The floating display window (Win32: its HWND; macOS: see `float_mac`; X11: 1 while its thread runs, -1 when it could not open; 0 = none).
     pub float: AtomicIsize,
-    /// The floating display's GUI thread; dropping it closes the window (macOS).
-    #[cfg(target_os = "macos")]
+    /// The floating display's GUI thread; dropping it closes the window (macOS, X11).
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub float_thread: Mutex<Option<os_plugkit::gui::EditorThread>>,
 }
 
@@ -128,7 +131,7 @@ impl Default for Shared {
             rate: AtomicU32::new(44100),
             viewers: AtomicUsize::new(0),
             float: AtomicIsize::new(0),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             float_thread: Mutex::new(None),
         }
     }
@@ -214,7 +217,7 @@ impl LemonDrop {
 impl Drop for LemonDrop {
     fn drop(&mut self) {
         // The floating display outlives the editor, not the plugin.
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         float::close(&self.shared);
     }
 }

@@ -1070,6 +1070,8 @@ mod gui {
             // The floating display opens when it should be visible.
             #[cfg(target_os = "macos")]
             crate::float::ensure(&self.logic.params, &self.logic.shared, &self.win);
+            #[cfg(target_os = "linux")]
+            crate::float::ensure(&self.logic.params, &self.logic.shared, self.scale, self.win.win);
             if self.logic.hint != self.last_hint {
                 self.last_hint.clone_from(&self.logic.hint);
                 self.link.set_hint(&self.logic.hint);
