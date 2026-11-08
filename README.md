@@ -57,8 +57,7 @@ young, so read the warning below before trying it on real work.
 >
 > - **Greyed-out controls are not implemented yet.** Many menus and buttons are already laid out but do
 >   nothing so far; they are drawn dim and say "not available yet".
-> - **No prebuilt binaries** will be published until Lemon Studio reaches a usable state. Until then it
->   can only be built from source.
+> - **Builds are not signed.** Your system may stop them the first time; the release notes say how to open them.
 > - **Projects saved by FL Studio 10 or later open** (25 and 26 included). Projects older than 24.2 are
 >   converted to the current layout as they open and are saved in it, so the version that wrote them may not
 >   read the saved copy.
@@ -118,12 +117,12 @@ Per-area details are in [docs/status.md](docs/status.md). The full, item-by-item
 
 ## Getting started
 
-**Nightly builds** for Windows, Linux (AppImage) and macOS (Apple silicon) are on the
-[releases page](https://github.com/ItsAlphaNeon/Lemon-Studio/releases): the newest changes on main, built every night,
-with Lemon Studio's plugins for other DAWs as a separate zip. They are pre-alpha and not signed: the release notes say
-how to open them on each system (on macOS, past Gatekeeper). Once installed, a nightly checks for a newer nightly when
-it starts and installs it when you agree (Settings ▸ General ▸ Updates); stable releases will do the same with stable
-releases. How releases are made: [docs/releasing.md](docs/releasing.md).
+**Builds** for Windows, Linux (AppImage) and macOS (Apple silicon) are on the
+[releases page](https://github.com/ItsAlphaNeon/Lemon-Studio/releases), with Lemon Studio's plugins for other DAWs as a
+separate zip: **alphas**, the tagged `0.x` releases, and **nightlies**, the newest changes on main, built every night.
+They are not signed: the release notes say how to open them on each system (on macOS, past Gatekeeper). Once installed,
+a build checks for a newer one of its own kind when it starts and installs it when you agree (Settings ▸ General ▸
+Updates). How releases are made: [docs/releasing.md](docs/releasing.md).
 
 Or build Lemon Studio from source, which never updates itself. Each platform below goes from a fresh
 machine to Lemon Studio installed with its icon, and Lemon Studio's own plugins installed for any DAW. All three need
