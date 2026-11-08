@@ -18,3 +18,6 @@ roundtrip(channels[].rack.locked	The rack's groups, locks and zips live in the i
 roundtrip(channels[].rack.zipped	The rack's groups, locks and zips live in the interface until a save writes them, and a copy saved for the check leaves the project as it was (control-plane step 5 moves them into the project).
 roundtrip(groups	The rack's groups, locks and zips live in the interface until a save writes them, and a copy saved for the check leaves the project as it was (control-plane step 5 moves them into the project).
 roundtrip(current_group	The rack's groups, locks and zips live in the interface until a save writes them, and a copy saved for the check leaves the project as it was (control-plane step 5 moves them into the project).
+roundtrip(channels[].rack.origin	A channel's origin is the file block it was read from: a channel made in Lemon Studio has none until it is saved and opened, and blocks are numbered anew in each file.
+roundtrip(channels[].rack.stored_color:None->	A channel made in Lemon Studio has no stored colour event until it is saved and opened (display only: saving writes Channel::color).
+roundtrip(channels[].plugin_state:None->	A channel made in Lemon Studio holds no plugin state until it is saved, when its plugin's state is written; it opens with it.

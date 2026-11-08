@@ -490,7 +490,7 @@ impl Rig {
             self.tick();
         }
         self.after_step(self.app.transport.generation_for_tests());
-        if let Some(d) = difference(opened, &self.app.state.project, false) {
+        if let Some(d) = difference(&canonical(opened), &canonical(&self.app.state.project), false) {
             bad.push(format!("undo-to-start({undone}:{d})"));
         }
         // Redo as many steps as were done at the end: steps the trace itself undid stay undone.
@@ -501,7 +501,7 @@ impl Rig {
             self.tick();
         }
         self.after_step(self.app.transport.generation_for_tests());
-        if let Some(d) = difference(&last, &self.app.state.project, false) {
+        if let Some(d) = difference(&canonical(&last), &canonical(&self.app.state.project), false) {
             bad.push(format!("redo-to-end({d})"));
         }
         let now_side = side(&self.app);
@@ -522,20 +522,8 @@ impl Rig {
                 let mut back = again.state.project.clone();
                 for p in [&mut written, &mut back] {
                     (p.tempo, p.song_mode, p.current_pattern) = (None, None, None);
-                    // The file holds the clips in position order; their order in the list means nothing.
-                    for a in &mut p.arrangements {
-                        a.clips.sort_by_cached_key(|c| format!("{:012}:{:06}:{c:?}", c.position, c.track));
-                    }
-                    // A pattern with nothing in it (no notes, name, colour, length, loops or markers) has nothing to
-                    // write: the file holds it as an absent one.
-                    p.patterns.retain(|q| {
-                        !(q.notes.is_empty() && q.controls.is_empty() && q.name.is_none() && q.color.is_none() && q.length.is_none())
-                            || !q.loops.is_empty()
-                            || q.loop_off.is_some()
-                            || !q.markers.is_empty()
-                    });
                 }
-                if let Some(d) = difference(&written, &back, true) {
+                if let Some(d) = difference(&canonical(&written), &canonical(&back), true) {
                     bad.push(format!("roundtrip({d})"));
                 }
                 let (a, b) = (side(&self.app), side(&again));
@@ -566,6 +554,24 @@ impl Rig {
         // One word each: a trace keeps them on one line.
         bad.into_iter().map(|b| b.split_whitespace().collect::<Vec<_>>().join("_")).collect()
     }
+}
+
+/// A project as the checks compare it: what its lists' order and empty patterns say is left out. The file holds the
+/// clips in position order and the patterns by number, so their order in the lists means nothing; a pattern with
+/// nothing in it (no notes, name, colour, length, loops or markers) has nothing to write and reads back as absent.
+fn canonical(p: &os_model::Project) -> os_model::Project {
+    let mut p = p.clone();
+    for a in &mut p.arrangements {
+        a.clips.sort_by_cached_key(|c| format!("{:012}:{:06}:{c:?}", c.position, c.track));
+    }
+    p.patterns.retain(|q| {
+        !(q.notes.is_empty() && q.controls.is_empty() && q.name.is_none() && q.color.is_none() && q.length.is_none())
+            || !q.loops.is_empty()
+            || q.loop_off.is_some()
+            || !q.markers.is_empty()
+    });
+    p.patterns.sort_by_key(|q| q.number);
+    p
 }
 
 /// A second app with `path` opened, as the rig opens (builtin plugins only), loading waited for.
