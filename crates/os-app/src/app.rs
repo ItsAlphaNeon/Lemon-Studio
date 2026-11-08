@@ -10454,6 +10454,38 @@ mod tests {
         assert_eq!(saved.mixer[4].slots[0], Some(shaper));
     }
 
+    /// A project's Wave Candy slot opens as Lemon Drop with its state, shows the Lemon name, and a save keeps Wave
+    /// Candy with the same bytes.
+    // spec: plugins/lemon-drop.md "Projects"
+    #[test]
+    fn wave_candy_slots_open_as_lemon_drop() {
+        use crate::plugins::fx_key;
+        let mut st = lemon_drop::state::State::new_default();
+        st.title = b"Lemon".to_vec();
+        st.gain = 25;
+        st.mode = lemon_drop::state::Mode::Spectrum;
+        let fl = st.to_bytes();
+        let mut a = App::new(None);
+        a.state.project = test_project();
+        a.state.file = None;
+        a.state.path = None;
+        a.reset_hosted();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        a.state.project.mixer[2].slots[3] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Wave Candy".into(), state: fl.clone() });
+        a.sync_effects();
+        let key = fx_key(2, 3);
+        assert_eq!(a.plugins.descriptor(key).map(|d| d.name), Some(crate::plugins::LEMON_DROP.to_string()));
+        assert_eq!(crate::mixer::slot_name(&a.state, 2, 3).as_deref(), Some(crate::plugins::LEMON_DROP));
+        assert_eq!(a.plugins.recreation_file_state(key, "Wave Candy").as_ref(), Some(&fl));
+        let path = std::env::temp_dir().join(format!("lemon-wave-candy-{}.flp", std::process::id()));
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let slot = saved.mixer[2].slots[3].clone().unwrap();
+        assert_eq!((slot.name.as_str(), &slot.state), ("Wave Candy", &fl));
+    }
+
     /// A project's Fruity Flanger and Fruity Phaser slots open as Lemon Flanger and Lemon Phaser with their state, show
     /// the Lemon names, and a save keeps the FL effects with the state the Lemon effects write back.
     // spec: plugins/lemon-small-effects.md "Opened projects' slots", plugins/lemon-flanger.md §5, plugins/lemon-phaser.md §5

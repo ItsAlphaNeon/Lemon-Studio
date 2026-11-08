@@ -323,6 +323,9 @@ pub struct Plugins {
     /// The file and stamp each found plugin was listed from (uid -> path, size, time): an unchanged file keeps its
     /// library (and a library loaded for use stays loaded).
     stamps: HashMap<String, (String, u64, u64)>,
+    /// The rate new instances start at; 0 until the first one asks the output device. An instance handed a block at any
+    /// other rate stays silent until the UI moves it, and the device's rate depends on the machine: a test that
+    /// processes at a literal rate pins it first (`set_rate`).
     rate: u32,
     /// Verdicts of the one-time child-process check a native plugin passes before its first load here (spec:
     /// plugins/fruity-abi.md "Crash containment"). `None`: no check (tests, where this program is the test harness).
@@ -393,6 +396,7 @@ pub fn builtin_effects() -> Vec<Available> {
         &lemon_peak_controller::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_formula_controller::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_vocoder::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_drop::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
     ];
     let names = FILE_MAPPED.into_iter().chain(LINKED_EFFECTS);
     LIBS.iter().zip(entries).zip(names).flat_map(|((lib, entry), name)| linked(lib, entry, name)).collect()
@@ -1528,7 +1532,7 @@ pub const LEMON_EQ: &str = "Lemon Parametric EQ";
 /// Lemon Studio's effects compiled in besides the EQ (`builtin_effects`, in this order). They have no file plugin of
 /// their own to be stored as, so a project stores them wrapped, as it stored their plugin files
 /// (`project_plugins::is_wrapped`).
-pub const LINKED_EFFECTS: [&str; 17] = [
+pub const LINKED_EFFECTS: [&str; 18] = [
     "Lemon Limiter",
     "Lemon Reverb",
     "Lemon Delay",
@@ -1546,6 +1550,7 @@ pub const LINKED_EFFECTS: [&str; 17] = [
     LEMON_PEAK_CONTROLLER,
     LEMON_FORMULA_CONTROLLER,
     LEMON_VOCODER,
+    LEMON_DROP,
 ];
 /// Lemon Studio's effects compiled in that a project stores under the FL plugin they recreate, with that plugin's
 /// state (`new_slot`, `store_builtin_states`), so they are never saved wrapped.
@@ -1561,6 +1566,11 @@ pub const LEMON_VOCODER: &str = "Lemon Vocoder";
 /// The plugin name a project file stores for Vocodex (file-format identifier, kept for interop): slots with it are
 /// played and edited by Lemon Vocoder (spec: plugins/lemon-vocoder.md §6).
 pub const VOCODEX_FILE_NAME: &str = "Vocodex";
+/// Name of Lemon Drop, Lemon Studio's audio visualizer (spec: plugins/lemon-drop.md).
+pub const LEMON_DROP: &str = lemon_drop::NAME;
+/// The plugin name a project file stores for Wave Candy (file-format identifier, kept for interop): slots with it are
+/// shown by Lemon Drop (spec: plugins/lemon-drop.md "Projects").
+pub const WAVE_CANDY_FILE_NAME: &str = "Wave Candy";
 /// Name of Tesla, Lemon Studio's audio editor and recorder (spec: plugins/tesla/README.md).
 pub const TESLA: &str = "Tesla";
 /// Name of Pulp Filter, Lemon Studio's pattern-controlled multi-filter (spec: plugins/lemon-pulp-filter.md).
@@ -1596,7 +1606,7 @@ pub const OLD_NAMES: [(&str, &str); 5] = [
 /// (`App::sync_effects`, `App::store_builtin_states`; spec: plugins/lemon-small-effects.md "Opened projects' slots").
 /// Not Lemon Stereo Shaper: the difference output is the mixer slot's alone (spec: plugins/lemon-stereo-shaper.md §5),
 /// so the engine's own Stereo Shaper keeps playing those slots.
-pub const FL_RECREATIONS: [(&str, &str); 15] = [
+pub const FL_RECREATIONS: [(&str, &str); 16] = [
     ("Fruity Limiter", "Lemon Limiter"),
     ("Fruity Reeverb 2", "Lemon Reverb"),
     ("Fruity Delay 3", "Lemon Delay"),
@@ -1612,6 +1622,7 @@ pub const FL_RECREATIONS: [(&str, &str); 15] = [
     ("Fruity Peak Controller", LEMON_PEAK_CONTROLLER),
     ("Fruity Formula Controller", LEMON_FORMULA_CONTROLLER),
     (VOCODEX_FILE_NAME, LEMON_VOCODER),
+    (WAVE_CANDY_FILE_NAME, LEMON_DROP),
 ];
 
 /// The Lemon effect of `FL_RECREATIONS` that plays slots stored as `file` (any case: files may spell the id
@@ -1639,6 +1650,7 @@ pub fn recreation_state_from_fl(lemon: &str, fl: &[u8]) -> Option<Vec<u8>> {
         LEMON_PEAK_CONTROLLER => small(lemon_small_fx::peak_controller::SPEC, fl),
         LEMON_FORMULA_CONTROLLER => small(lemon_small_fx::formula_controller::SPEC, fl),
         LEMON_VOCODER => small(lemon_small_fx::vocoder::SPEC, fl),
+        LEMON_DROP => lemon_drop::plugin_state_from_fl(fl),
         _ => return None,
     })
 }
@@ -1663,6 +1675,7 @@ pub fn fl_from_recreation_state(lemon: &str, blob: &[u8]) -> Option<Vec<u8>> {
         LEMON_PEAK_CONTROLLER => small(lemon_small_fx::peak_controller::SPEC, blob),
         LEMON_FORMULA_CONTROLLER => small(lemon_small_fx::formula_controller::SPEC, blob),
         LEMON_VOCODER => small(lemon_small_fx::vocoder::SPEC, blob),
+        LEMON_DROP => lemon_drop::fl_from_plugin_state(blob),
         _ => None,
     }
 }
