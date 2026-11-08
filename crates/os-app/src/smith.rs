@@ -141,6 +141,7 @@ mod tests {
     fn builtin_smith_takes_and_gives_the_file_state() {
         let mut pl = Plugins::default();
         pl.available = crate::plugins::builtin();
+        pl.set_rate(48000);
         let index = pl.index_of(SMITH).expect("built-in Smith");
         assert!(crate::project_plugins::is_builtin(&pl.available[index].desc));
         let fl = patch();

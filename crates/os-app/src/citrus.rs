@@ -165,13 +165,14 @@ mod tests {
     fn builtin_citrus_takes_and_gives_the_file_state() {
         let mut pl = Plugins::default();
         pl.available = crate::plugins::builtin();
+        pl.set_rate(48000);
         let index = pl.index_of(CITRUS).expect("built-in Citrus");
         assert!(crate::project_plugins::is_builtin(&pl.available[index].desc));
         let fl = saw_state();
         pl.create_with(2, index, Some(&citrus::plugin_state_from_fl(&fl))).unwrap();
         assert_eq!(pl.sytrus_file_state(2), Some(fl.clone()));
         // It sounds: key 69 at 440 Hz (key 60 plays C5 at 523.25 Hz in Sytrus's pitch, so 69 is 880 Hz), counted at
-        // the device rate the instance runs at.
+        // 48 kHz.
         let inst = pl.hosted[&2].plugin.clone() as SharedInstrument;
         let mut i = inst.lock().unwrap();
         i.note_on(0, 69, 100.0 / 128.0);
